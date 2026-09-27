@@ -1,0 +1,18 @@
+{
+  "regional-first.exe": {
+    "sha256": "2fa25f3e5abc82eb5f418b2d6c9f4948f7f6291fb11bfe33dc848cf65d03a1e6",
+    "bytes": 14315008
+  },
+  "regional-control.exe": {
+    "sha256": "fc77cecace5d52f8161e998e702b7b5660087d2da71588eac1346bf1c94200cb",
+    "bytes": 14286848
+  },
+  "regional-specialized.exe": {
+    "sha256": "7658e5b12bcc27162a0161e20fb7c103665b52ce3d63cf7bfafe671957a400b7",
+    "bytes": 14316544
+  },
+  "regional-canonical.exe": {
+    "sha256": "0e630ba7e4cbd55d08a173fe9bf67c62664fcaedb066c445d9b256526c454647",
+    "bytes": 14329856
+  }
+}

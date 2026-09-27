@@ -1,5 +1,5 @@
 //! A view-selected tree of stored voxel bricks. Selection runs off the render
-//! thread; a complete new tree is published only after its GPU bricks are ready.
+//! thread; publication retains complete coverage while GPU bricks are generated.
 use crate::{
     landforms::RegionClass,
     world::{Edit, World},
@@ -12,10 +12,17 @@ use std::{
 };
 #[cfg(test)]
 mod tests;
+#[cfg(feature = "regional-publication-experiment")]
+mod regional;
 
 pub const BRICK_WORDS: usize = 2048; // 32^3 exact materials, or 9^3 densities + 8^3 pairs of bounds.
 pub const BRICK_CAPACITY: usize = 65_536;
 pub const NODE_CAPACITY: usize = 262_144;
+pub const PUBLICATION_NODE_CAPACITY: usize = if cfg!(feature = "regional-publication-experiment") {
+    NODE_CAPACITY * 2
+} else {
+    NODE_CAPACITY
+};
 pub const GENERATION_BATCH: usize = 256;
 pub const AIR: u32 = 0xffff_ffff;
 pub const SOLID: u32 = 0xffff_fffe;
@@ -40,7 +47,7 @@ impl Key {
     }
 }
 // CPU selection nodes; only the child links and root bounds are uploaded.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Node {
     pub low: [i32; 3],
     pub level: u32,
@@ -298,6 +305,21 @@ struct Pending {
     plan: Plan,
     jobs: Vec<Job>,
     cursor: usize,
+    #[cfg(feature = "regional-publication-experiment")]
+    readiness: regional::Readiness,
+}
+impl Pending {
+    fn new(plan: Plan, jobs: Vec<Job>, job_nodes: Vec<usize>) -> Self {
+        #[cfg(not(feature = "regional-publication-experiment"))]
+        let _ = job_nodes;
+        Self {
+            #[cfg(feature = "regional-publication-experiment")]
+            readiness: regional::Readiness::new(&plan.nodes, job_nodes),
+            plan,
+            jobs,
+            cursor: 0,
+        }
+    }
 }
 #[derive(Clone, Copy, Default, serde::Serialize)]
 pub struct Stats {
@@ -305,12 +327,18 @@ pub struct Stats {
     /// Published terrain exists, but the requested view or world is newer.
     pub refining: bool,
     pub nodes: usize,
+    /// Leaf count of the last complete cut; a partial cut can reference both cuts.
     pub bricks: usize,
     pub pending: usize,
     pub generated: u64,
     pub reused: u64,
+    /// Selection tolerance of the last complete cut, not an arrival-fidelity guarantee.
     pub pixel_budget: f64,
     pub planning: bool,
+    /// Partial, revision-coherent publications; excludes complete-cut swaps.
+    pub regional_publications: u64,
+    /// Regions referencing a larger ancestor payload in the currently visible cut.
+    pub fallback_regions: usize,
 }
 
 pub struct Residency {
@@ -323,6 +351,8 @@ pub struct Residency {
     pending: Option<Pending>,
     active_world: Option<Arc<World>>,
     active_view: Option<View>,
+    #[cfg(feature = "regional-publication-experiment")]
+    complete_nodes: Vec<Node>,
     requested: bool,
     clock: u64,
     pub stats: Stats,
@@ -372,6 +402,8 @@ impl Residency {
             pending: None,
             active_world: None,
             active_view: None,
+            #[cfg(feature = "regional-publication-experiment")]
+            complete_nodes: Vec::new(),
             requested: false,
             clock: 0,
             stats: Stats::default(),
@@ -420,6 +452,10 @@ impl Residency {
                     }
                 }
                 let mut jobs = Vec::new();
+                #[cfg(feature = "regional-publication-experiment")]
+                let mut job_nodes = Vec::new();
+                #[cfg(not(feature = "regional-publication-experiment"))]
+                let job_nodes = Vec::new();
                 for &(index, key) in &plan.leaves {
                     let valid = self.entries.get(&key).is_some_and(|e| {
                         e.voxel_step == plan.world.voxel_step()
@@ -462,16 +498,29 @@ impl Residency {
                             slot: slot as u32,
                             pad: [0, 0, plan.world.voxel_step()],
                         });
+                        #[cfg(feature = "regional-publication-experiment")]
+                        job_nodes.push(index);
                         slot
                     };
                     plan.nodes[index].child = BRICK | slot as u32;
                 }
                 self.stats.pending = jobs.len();
-                self.pending = Some(Pending {
-                    plan,
-                    jobs,
-                    cursor: 0,
-                });
+                #[cfg(feature = "regional-publication-experiment")]
+                {
+                    // Generate nearby detail first so partial publication
+                    // helps arrival before distant refinements finish.
+                    let mut order: Vec<_> = jobs.into_iter().zip(job_nodes).collect();
+                    order.sort_by(|(a, _), (b, _)| {
+                        let distance = |j: &Job| {
+                            let low = DVec3::from_array(j.low.map(|v| f64::from(v) * 0.1));
+                            let high = low + DVec3::splat(f64::from(32u32 << j.level) * 0.1);
+                            plan.view.eye.distance_squared(plan.view.eye.clamp(low, high))
+                        };
+                        distance(a).total_cmp(&distance(b))
+                    });
+                    (jobs, job_nodes) = order.into_iter().unzip();
+                }
+                self.pending = Some(Pending::new(plan, jobs, job_nodes));
             }
         }
         let view = View::new(params);
@@ -531,6 +580,8 @@ impl Residency {
             references.extend(edits.into_iter().map(|i| i as u32));
             batch.push(job);
             samples += cost;
+            #[cfg(feature = "regional-publication-experiment")]
+            p.readiness.generated(p.cursor);
             p.cursor += 1;
         }
         self.stats.generated += batch.len() as u64;
@@ -543,6 +594,29 @@ impl Residency {
             .as_ref()
             .is_some_and(|p| p.cursor == p.jobs.len())
         {
+            #[cfg(feature = "regional-publication-experiment")]
+            if let Some(pending) = self.pending.as_mut() {
+                // Mixing source revisions or authored grids would expose stale
+                // edits. This first candidate publishes regions only within one
+                // immutable world; source changes retain atomic whole-cut swaps.
+                let compatible = self.active_world.as_ref()
+                    .is_some_and(|world| Arc::ptr_eq(world, &pending.plan.world))
+                    && self.complete_nodes.first().zip(pending.plan.nodes.first())
+                        .is_some_and(|(a, b)| a.low == b.low && a.level == b.level);
+                if compatible && pending.readiness.changed {
+                    pending.readiness.changed = false;
+                    let nodes = regional::compose(
+                        &self.complete_nodes, &pending.plan.nodes, &pending.readiness,
+                    );
+                    assert!(nodes.len() <= PUBLICATION_NODE_CAPACITY);
+                    self.stats.regional_publications += 1;
+                    self.stats.nodes = nodes.len();
+                    self.stats.fallback_regions = nodes.iter()
+                        .filter(|n| n.child & BRICK != 0 && n.child < SOLID && n.child & 0x001f_0000 != 0)
+                        .count();
+                    return Some(nodes);
+                }
+            }
             return None;
         }
         let pending = self.pending.take().unwrap();
@@ -555,11 +629,14 @@ impl Residency {
             }
         }
         self.stats.ready = true;
+        self.stats.fallback_regions = 0;
         self.stats.nodes = pending.plan.nodes.len();
         self.stats.bricks = pending.plan.leaves.len();
         self.stats.pixel_budget = pending.plan.pixels;
         self.active_world = Some(pending.plan.world);
         self.active_view = Some(pending.plan.view);
+        #[cfg(feature = "regional-publication-experiment")]
+        self.complete_nodes.clone_from(&pending.plan.nodes);
         Some(pending.plan.nodes)
     }
 }

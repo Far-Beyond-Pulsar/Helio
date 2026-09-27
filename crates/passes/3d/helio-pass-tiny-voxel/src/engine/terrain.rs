@@ -40,8 +40,12 @@ pub struct StoredTerrain {
     generate: wgpu::ComputePipeline,
     bounds: wgpu::ComputePipeline,
     trace: wgpu::ComputePipeline,
+    #[cfg(feature = "regional-publication-experiment")]
+    regional_trace: wgpu::ComputePipeline,
+    #[cfg(feature = "regional-publication-experiment")]
+    regional_visibility: wgpu::ComputePipeline,
     trace_shader: wgpu::ShaderModule,
-    diagnostic_trace: [std::sync::OnceLock<wgpu::ComputePipeline>; 4],
+    diagnostic_trace: [std::sync::OnceLock<wgpu::ComputePipeline>; 8],
     visibility: wgpu::ComputePipeline,
     surface: wgpu::RenderPipeline,
     sun: wgpu::Texture,
@@ -140,6 +144,20 @@ impl StoredTerrain {
                 cache: None,
             })
         };
+        #[cfg(feature = "regional-publication-experiment")]
+        let regional_compute = |entry: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: None,
+                module: &shader,
+                entry_point: Some(entry),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[("STORED_REGIONAL", 1.0)],
+                    ..Default::default()
+                },
+                cache: None,
+            })
+        };
         let surface = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("stored voxel GBuffer"),
             layout: None,
@@ -230,7 +248,7 @@ impl StoredTerrain {
             nodes: buffer(
                 device,
                 "resident voxel tree",
-                (residency::NODE_CAPACITY as u64 + 4) * 4,
+                (residency::PUBLICATION_NODE_CAPACITY as u64 + 4) * 4,
             ),
             materials: buffer(
                 device,
@@ -259,6 +277,10 @@ impl StoredTerrain {
             generate: compute("generate_bricks"),
             bounds: compute("bound_bricks"),
             trace: compute("stored_primary"),
+            #[cfg(feature = "regional-publication-experiment")]
+            regional_trace: regional_compute("stored_primary"),
+            #[cfg(feature = "regional-publication-experiment")]
+            regional_visibility: regional_compute("stored_visibility"),
             trace_shader: shader.clone(),
             diagnostic_trace: std::array::from_fn(|_| std::sync::OnceLock::new()),
             visibility: compute("stored_visibility"),
@@ -355,7 +377,8 @@ impl StoredTerrain {
         accelerated: bool,
         sunlight: bool,
     ) -> wgpu::Buffer {
-        let index = usize::from(accelerated) + 2 * usize::from(sunlight);
+        let regional = self.residency.stats.fallback_regions > 0;
+        let index = usize::from(accelerated) + 2 * usize::from(sunlight) + 4 * usize::from(regional);
         let pipeline = self.diagnostic_trace[index].get_or_init(|| {
             self.device
                 .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -367,6 +390,7 @@ impl StoredTerrain {
                         constants: &[
                             ("STORED_TRACE_WORK", 1.0),
                             ("STORED_WORK_SUN", f64::from(sunlight)),
+                            ("STORED_REGIONAL", f64::from(regional)),
                             ("STORED_SKIP_EMPTY", if accelerated { 1.0 } else { 0.0 }),
                         ],
                         ..Default::default()
@@ -579,8 +603,18 @@ impl StoredTerrain {
         p.settings[2] = if self.residency.stats.ready { 1.0 } else { 0.0 };
         self.queue
             .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&p));
+        // Completed cuts use the original specialization. Decode ancestor
+        // coordinates only when this particular cut actually references them.
+        let trace = &self.trace;
+        let visibility = &self.visibility;
+        #[cfg(feature = "regional-publication-experiment")]
+        let (trace, visibility) = if self.residency.stats.fallback_regions > 0 {
+            (&self.regional_trace, &self.regional_visibility)
+        } else {
+            (trace, visibility)
+        };
         let group = self.trace_group(
-            &self.trace.get_bind_group_layout(0),
+            &trace.get_bind_group_layout(0),
             &[
                 (0, &self.uniform),
                 (9, &self.hits),
@@ -589,13 +623,13 @@ impl StoredTerrain {
                 (28, &self.exact_occupied),
             ],
         );
-        let cameras = self.group(&self.trace.get_bind_group_layout(1), &[(0, camera)]);
+        let cameras = self.group(&trace.get_bind_group_layout(1), &[(0, camera)]);
         if let Some(p) = &mut self.profiler {
             p.begin_pass(encoder, "voxel_primary");
         }
         self.compute(
             encoder,
-            &self.trace,
+            trace,
             &[group, cameras],
             [self.size[0].div_ceil(8), self.size[1].div_ceil(8), 1],
         );
@@ -650,7 +684,7 @@ impl StoredTerrain {
         }
         if sunlight {
             let group = self.trace_group(
-                &self.visibility.get_bind_group_layout(0),
+                &visibility.get_bind_group_layout(0),
                 &[
                     (0, &self.uniform),
                     (9, &self.hits),
@@ -662,7 +696,7 @@ impl StoredTerrain {
             let direction = self.direction.create_view(&Default::default());
             let outputs = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("stored sunlight outputs"),
-                layout: &self.visibility.get_bind_group_layout(1),
+                layout: &visibility.get_bind_group_layout(1),
                 entries: &[(1, targets.colors[4]), (2, &self.sun_view), (3, &direction)].map(
                     |(binding, v)| wgpu::BindGroupEntry {
                         binding,
@@ -675,7 +709,7 @@ impl StoredTerrain {
             }
             self.compute(
                 encoder,
-                &self.visibility,
+                visibility,
                 &[group, outputs],
                 [self.size[0].div_ceil(8), self.size[1].div_ceil(8), 1],
             );
@@ -685,6 +719,10 @@ impl StoredTerrain {
         }
     }
 }
+
+#[cfg(all(test, feature = "regional-publication-experiment"))]
+#[path = "regional_gpu_tests.rs"]
+mod regional_gpu_tests;
 
 #[cfg(test)]
 mod tests {

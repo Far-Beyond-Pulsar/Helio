@@ -142,7 +142,7 @@ impl Flight {
         renderer.set_fallback_sky_enabled(true);
         let target = Self::target(&device, size);
         let mut csv = fs::File::create(output.join("frames.csv")).unwrap();
-        writeln!(csv, "frame,stage,x,y,z,sync_frame_ms,ready,refining,planning,pending,generated,reused,bricks,pixel_budget,cpu_submit_ms,gpu_wait_ms,start_unix_ns").unwrap();
+        writeln!(csv, "frame,stage,x,y,z,sync_frame_ms,ready,refining,planning,pending,generated,reused,bricks,pixel_budget,cpu_submit_ms,gpu_wait_ms,start_unix_ns,regional_publications,nodes,fallback_regions").unwrap();
         Self {
             device,
             queue,
@@ -244,7 +244,7 @@ impl Flight {
         }
         writeln!(
             self.csv,
-            "{},{},{:.6},{:.6},{:.6},{:.4},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{}",
+            "{},{},{:.6},{:.6},{:.6},{:.4},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{}",
             self.frame,
             stage,
             eye.x,
@@ -261,7 +261,10 @@ impl Flight {
             stats.pixel_budget,
             cpu_submit_ms,
             ms - cpu_submit_ms,
-            start_unix_ns
+            start_unix_ns,
+            stats.regional_publications,
+            stats.nodes,
+            stats.fallback_regions
         )
         .unwrap();
         if let Some(profiler) = &mut self.profiler {

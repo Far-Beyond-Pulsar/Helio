@@ -9,6 +9,7 @@ override STORED_TRACE_WORK:bool=false;
 override STORED_WORK_SUN:bool=false;
 // Experimental until repeated full-flight tail-time gates pass.
 override STORED_SKIP_EMPTY:bool=false;
+override STORED_REGIONAL:bool=false;
 var<private> stored_work:vec3<u32>;
 // Four-word root header (low.xyz, level), followed by one child link per
 // node. Bounds and levels are implicit in the complete octree topology.
@@ -136,7 +137,7 @@ fn stored_material(slot:u32,q:vec3<i32>)->u32 {
 // Cache one interpolation cell in registers while walking its 10 cm voxels.
 struct DensityGrid { low:vec4<f32>, high:vec4<f32>, gradient:vec3<f32>, rate:f32, q:vec3<i32> }
 fn stored_density_grid(n:StoredNode,q:vec3<i32>,rd:vec3<f32>)->DensityGrid {
-    let offset=(n.child&0x7fffffffu)*2048u+u32(q.x+q.y*9+q.z*81);
+    let offset=(n.child&0x0000ffffu)*2048u+u32(q.x+q.y*9+q.z*81);
     let a=vec4<u32>(stored_materials[offset],stored_materials[offset+1u],stored_materials[offset+9u],stored_materials[offset+10u]);
     let b=vec4<u32>(stored_materials[offset+81u],stored_materials[offset+82u],stored_materials[offset+90u],stored_materials[offset+91u]);
     let v0=bitcast<vec4<f32>>(a&vec4<u32>(0xfffffffcu));
@@ -189,7 +190,7 @@ fn stored_density_hit(n:StoredNode,ro:vec3<f32>,rd:vec3<f32>,start:f32,end:f32)-
             let grid_low=n.low+q*(stride*4);
             let grid_lo=(vec3<f32>(grid_low-anchor)-fraction)*0.1;
             let grid_size=f32(stride*4)*0.1;
-            let metadata=(n.child&0x7fffffffu)*2048u+729u+u32(q.x+q.y*8+q.z*64);
+            let metadata=(n.child&0x0000ffffu)*2048u+729u+u32(q.x+q.y*8+q.z*64);
             // Trilinear weights are nonnegative: eight negative corners certify
             // every 10 cm sample inside this interpolation cell as empty.
             if bitcast<f32>(stored_materials[metadata])<0.0 {
@@ -209,7 +210,7 @@ fn stored_density_hit(n:StoredNode,ro:vec3<f32>,rd:vec3<f32>,start:f32,end:f32)-
         let value=stored_density_value(grid,f);
         if value>=0.0 {
             let material_q=q+vec3<i32>(f>=vec3<f32>(0.5));
-            let material=stored_materials[(n.child&0x7fffffffu)*2048u+u32(material_q.x+material_q.y*9+material_q.z*81)]&3u;
+            let material=stored_materials[(n.child&0x0000ffffu)*2048u+u32(material_q.x+material_q.y*9+material_q.z*81)]&3u;
             // Enter a real 10 cm cube, even when its occupancy comes from the
             // distant density approximation. Coarse sample spacing is never a
             // rendered cube size.
@@ -250,10 +251,20 @@ fn stored_density_hit(n:StoredNode,ro:vec3<f32>,rd:vec3<f32>,start:f32,end:f32)-
     }
     return Hit(cell,2u|(n.level<<2u),rd,start+t);
 }
+fn stored_payload(n:StoredNode)->StoredNode {
+    if !STORED_REGIONAL || n.child>=0xfffffffeu {return n;}
+    let delta=(n.child>>16u)&31u;
+    if delta==0u {return n;}
+    let level=n.level+delta;
+    let root_low=vec3<i32>(bitcast<i32>(stored_nodes[0]),bitcast<i32>(stored_nodes[1]),bitcast<i32>(stored_nodes[2]));
+    let shift=vec3<u32>(level+5u);
+    let low=root_low+vec3<i32>((vec3<u32>(n.low-root_low)>>shift)<<shift);
+    return StoredNode(low,level,n.child&0x8000ffffu);
+}
 fn stored_far_hit(n:StoredNode,ro:vec3<f32>,rd:vec3<f32>,start:f32,end:f32)->Hit {
     // The recipe's conservative bounds may select an empty brick.
     // Once generated, its corner maximum certifies this interpolated field.
-    if bitcast<f32>(stored_materials[(n.child&0x7fffffffu)*2048u+1241u])>=0.0 {
+    if bitcast<f32>(stored_materials[(n.child&0x0000ffffu)*2048u+1241u])>=0.0 {
         return stored_density_hit(n,ro,rd,start,end);
     }
     return Hit(vec3<i32>(0),0u,rd,end);
@@ -294,11 +305,12 @@ fn stored_trace(ro:vec3<f32>,rd:vec3<f32>,maximum:f32)->Hit {
         if n.child==0xfffffffeu {
             return Hit(cell,0x80000101u|(stored_face(normal)<<28u),rd,t);
         }
-        if n.child!=0xffffffffu && n.level>0u {
-            let hit=stored_far_hit(n,ro,rd,t,min(box.far,limit));
+        let payload=stored_payload(n);
+        if n.child!=0xffffffffu && payload.level>0u {
+            let hit=stored_far_hit(payload,ro,rd,t,min(box.far,limit));
             if (hit.status&3u)!=0u {return hit;}
             t=box.far;
-        } else if n.child!=0xffffffffu && (!STORED_SKIP_EMPTY || exact_occupied[n.child&0x7fffffffu]!=0u) {
+        } else if n.child!=0xffffffffu && (!STORED_SKIP_EMPTY || exact_occupied[n.child&0x0000ffffu]!=0u) {
             var q=clamp(vec3<i32>(floor((rd*(t+epsilon)-lo)/voxel)),vec3<i32>(0),vec3<i32>(31));
             let step=select(vec3<i32>(-1),vec3<i32>(1),rd>=vec3<f32>(0.0));
             let inverse=1.0/select(vec3<f32>(1e-30),rd,abs(rd)>vec3<f32>(1e-30));
@@ -306,7 +318,7 @@ fn stored_trace(ro:vec3<f32>,rd:vec3<f32>,maximum:f32)->Hit {
             let stride=voxel*abs(inverse);
             for(var crossing=0u;crossing<97u;crossing++) {
                 if STORED_TRACE_WORK {stored_work.y+=1u;}
-                let material=stored_material(n.child&0x7fffffffu,q);
+                let material=stored_material(n.child&0x0000ffffu,q);
                 if material!=0u {
                     let hit_cell=voxel_sample(n.low+q*i32(1u<<n.level),i32(max(p.settings.w,1.0)));
                     return Hit(hit_cell,0x80000001u|(n.level<<2u)|(material<<8u)|(stored_face(normal)<<28u),rd,t);

@@ -39,3 +39,7 @@ Do not combine nested GPU stage sums with their parent graph timings. Keep synch
 5. Extend shared component adapters, simulation/query integration, persistence and stress coverage. Validate the complete engine/editor workflow before declaring the goal achieved.
 
 Keep PRs drafts while these gates remain open. Do not merge without explicit user authorization.
+
+## Regional publication checkpoint
+
+The opt-in experiment in `REGIONAL_PUBLICATION_2026_09_26.md` publishes ready regions with clipped ancestor payloads and passes focused ownership/revision tests. Its retained recorded 720p flight had no exhausted/loading rays, but visual inspection exposed representation seams, full arrival refinement still took 3.38 seconds, and far fidelity remains incorrect. It is rejected for default adoption. The next scheduling candidate is a bounded resident hierarchy with local publication transactions and cancellation of obsolete demand; it also needs surface data that agrees across refinement boundaries. The existing global plan lifetime and inaccurate sampled far field are both replaceable; no acceptance target has been relaxed.

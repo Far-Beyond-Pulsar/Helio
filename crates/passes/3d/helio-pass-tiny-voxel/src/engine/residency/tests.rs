@@ -6,31 +6,60 @@ fn generation_budget_counts_evaluations_without_exceeding_dispatch_capacity() {
     for (level, ready, expected) in [(0, true, 64), (4, true, 256), (0, false, 256)] {
         let mut residency = Residency::new(BRICK_CAPACITY);
         residency.stats.ready = ready;
-        residency.pending = Some(Pending {
-            plan: Plan {
-                nodes: vec![],
-                leaves: vec![],
+        let mut nodes = vec![Node {
+            low: [0; 3],
+            level: level + 3,
+            child: 0,
+        }];
+        let mut leaves = Vec::new();
+        let mut jobs = Vec::new();
+        let mut job_nodes = Vec::new();
+        let mut index = 0;
+        while index < nodes.len() {
+            let n = nodes[index];
+            if n.level == level {
+                let slot = jobs.len() as u32;
+                nodes[index].child = BRICK | slot;
+                leaves.push((index, Key { low: n.low, level }));
+                jobs.push(Job {
+                    low: n.low,
+                    level,
+                    slot,
+                    pad: [0; 3],
+                });
+                job_nodes.push(index);
+            } else {
+                nodes[index].child = nodes.len() as u32;
+                for octant in 0..8 {
+                    nodes.push(Node {
+                        low: std::array::from_fn(|a| {
+                            n.low[a] + ((octant >> a) & 1) * (16 << n.level)
+                        }),
+                        level: n.level - 1,
+                        child: 0,
+                    });
+                }
+            }
+            index += 1;
+        }
+        residency.pending = Some(Pending::new(
+            Plan {
+                nodes,
+                leaves,
                 world: world.clone(),
                 view: view(DVec3::ZERO),
                 pixels: 1.0,
             },
-            jobs: (0..512)
-                .map(|slot| Job {
-                    low: [0; 3],
-                    level,
-                    slot,
-                    pad: [0; 3],
-                })
-                .collect(),
-            cursor: 0,
-        });
+            jobs,
+            job_nodes,
+        ));
         let (batch, _, _) = residency.next_batch().unwrap();
         assert_eq!(batch.len(), expected);
         assert_eq!(residency.stats.pending, 512 - expected);
     }
 }
 
-fn view(eye: DVec3) -> View {
+pub(super) fn view(eye: DVec3) -> View {
     let forward = DVec3::new(0.0, -0.15, -1.0).normalize();
     let right = forward.cross(DVec3::Y).normalize();
     View {
