@@ -32,6 +32,9 @@
 //! registers up front (billboards, decals, water volumes and hitboxes), so
 //! their buffers exist while empty, as they do in the editor.
 //!
+//! `--movability static|movable|mixed` re-tags objects so shadow casters land
+//! in the static atlas (default), the dynamic one, or both.
+//!
 //! `--billboards` places a billboard (editor light icon) over every point light.
 //!
 //! `--scale` is the renderer's internal render scale (the editor uses the
@@ -91,6 +94,7 @@ struct Args {
     no_ray_query: bool,
     pulsar_columns: bool,
     billboards: bool,
+    movability: String,
 }
 
 fn parse_args() -> Args {
@@ -108,6 +112,7 @@ fn parse_args() -> Args {
         no_ray_query: false,
         pulsar_columns: false,
         billboards: false,
+        movability: "static".into(),
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -142,6 +147,7 @@ fn parse_args() -> Args {
                     })
                     .collect()
             }
+            "--movability" => args.movability = value,
             "--frames" => args.frames = value.parse().expect("--frames takes an integer"),
             "--warmup" => args.warmup = value.parse().expect("--warmup takes an integer"),
             "--scale" => args.scale = value.parse().expect("--scale takes a float"),
@@ -273,6 +279,27 @@ fn sky(world: &mut World, aspect: f32) -> Camera {
     )
 }
 
+/// Re-tags every object: `static` (as authored), `movable`, or `mixed`
+/// (every other object movable), so shadow casters land in the dynamic
+/// atlas, the static one, or both.
+fn apply_movability(world: &mut World, mode: &str) {
+    let every = match mode {
+        "static" => return,
+        "movable" => 1,
+        "mixed" => 2,
+        other => panic!("unknown movability {other}; use static, movable or mixed"),
+    };
+    let objects: Vec<_> = world
+        .query::<(&StaticObjectComponent,)>()
+        .map(|(entity, _)| entity)
+        .collect();
+    for (i, entity) in objects.into_iter().enumerate() {
+        if i % every == 0 {
+            set_object_movability(world, entity, helio::Movability::Movable).unwrap();
+        }
+    }
+}
+
 /// An editor-style icon over every point light, as `BillboardComponent` rows.
 fn spawn_light_billboards(world: &mut World) {
     let positions: Vec<[f32; 4]> = world
@@ -381,6 +408,7 @@ fn run(
     if args.billboards {
         spawn_light_billboards(&mut scene_db.world);
     }
+    apply_movability(&mut scene_db.world, &args.movability);
     let mut config = RendererConfig::new(width, height, FORMAT).with_render_scale(args.scale);
     if args.tsr {
         config = config.with_tsr_quality(helio_pass_tsr::TsrQuality::Quality).with_render_scale(args.scale);
