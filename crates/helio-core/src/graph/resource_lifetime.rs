@@ -180,10 +180,10 @@ impl RenderGraph {
             let compatible = |group: &AliasGroup| {
                 group.chain_local == resource.chain_local
                     && group.format == resource.format
-                    && group.width >= resource.width
-                    && group.height >= resource.height
-                    && group.depth_or_array_layers >= resource.depth_or_array_layers
-                    && group.mip_level_count >= resource.mip_level_count
+                    && group.width == resource.width
+                    && group.height == resource.height
+                    && group.depth_or_array_layers == resource.depth_or_array_layers
+                    && group.mip_level_count == resource.mip_level_count
                     && group.extra_usage.contains(resource.extra_usage)
                     && group.last_read_pass < resource.first_write_pass
             };
