@@ -1,9 +1,0 @@
-{
-  "canonical-far-initial": "Uncompensated entry: 25 incorrect orbital cells. Memory CSV omits 2 MiB plus 32 bytes.",
-  "canonical-far-compensated": "Inline compensation: sampled first cells agree. Expensive.",
-  "canonical-far-sun-640": "Inline compensation at 640x360 with sunlight and movement recording.",
-  "canonical-far-final": "REJECTED despite historical name: reordered helper arithmetic caused 21 incorrect orbital cells.",
-  "canonical-far-helper-order": "Original addition order restores orbital cells; local-origin position test exceeds its 2 micrometre bound.",
-  "canonical-retained": "Camera fraction before compensated local-origin terms; final candidate.",
-  "canonical-far-default": "Feature disabled; existing sampled-density behavior and fidelity limitations remain."
-}

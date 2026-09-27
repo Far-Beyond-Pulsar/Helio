@@ -1,5 +1,7 @@
 # Canonical far-tracing experiment
 
+Generated captures, logs, CSVs, manifests and archives are local-only in the ignored `validation/` directory. They are not included in the branch; paths below identify local artifacts.
+
 The opt-in `canonical-far-experiment` feature evaluates authored cells directly inside far leaves. It is a fidelity diagnostic and architecture experiment. Its measured cost disqualifies it as the normal terrain renderer. The default renderer retains the existing sampled-density representation and its known far-field errors.
 
 ## Source and publication
@@ -49,6 +51,6 @@ cargo +1.98 run --release -p helio-default-graphs --features helio-pass-tiny-vox
 
 Start small because the path is expensive. Omit the feature to exercise the default renderer. Record movement separately with `HELIO_VOXEL_FLIGHT_RECORD=1`; playback rate is illustrative.
 
-[Raw evidence](validation/2026-09-26-reference/flight-evidence.zip), [entry hashes](validation/2026-09-26-reference/manifest.json), [binary hashes](validation/2026-09-26-reference/binary-hashes.json), [run dispositions](validation/2026-09-26-reference/dispositions.json), and [movement hashes](validation/2026-09-26-reference/movement-frame-hashes.json) preserve successful and rejected runs. Executables and the full movement viewer remain under local `target/voxel-goal`. The historical run named `canonical-far-final` was rejected.
+Raw evidence (local `validation/2026-09-26-reference/flight-evidence.zip`), entry hashes (local `validation/2026-09-26-reference/manifest.json`), binary hashes (local `validation/2026-09-26-reference/binary-hashes.json`), run dispositions (local `validation/2026-09-26-reference/dispositions.json`), and movement hashes (local `validation/2026-09-26-reference/movement-frame-hashes.json`) preserve successful and rejected runs. Executables and the full movement viewer remain under local `target/voxel-goal`. The historical run named `canonical-far-final` was rejected.
 
 The broader goal remains open: canonical filtered far rendering, regional publication and arrival latency, bounded edit/streaming cost, physical memory measurements, 1080p/720p frame-time targets, populated-engine integration and the intended visual style.

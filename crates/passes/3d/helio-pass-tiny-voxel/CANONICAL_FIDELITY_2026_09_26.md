@@ -1,5 +1,7 @@
 # Canonical ray audit and brick-entry correction
 
+Generated captures, logs, CSVs, manifests and archives are local-only in the ignored `validation/` directory. They are not included in the branch; paths below identify local artifacts.
+
 This checkpoint fixes a ray displacement and measures the remaining difference between the stored far field and the editable voxel volume. It does not qualify the current far representation, visual quality or performance.
 
 ## Defect and correction
@@ -29,7 +31,7 @@ Only 65 rays match between the two 1 km captures, and none match in the ground/e
 
 ## Validation and provenance
 
-Parent: Helio `24e522966c164bf0f82e8fbbe35d6b9e21f7d0b0`. Platform: Windows, Vulkan on RTX 3060, Ryzen 5 3400G, Rust 1.98.1. The baseline adds only the optional oracle and hit-buffer extent accessor to that parent. The corrected executable adds the entry fix and GPU regression. Binary hashes and raw CSV/log evidence are in [validation/2026-09-26-canonical](validation/2026-09-26-canonical).
+Parent: Helio `24e522966c164bf0f82e8fbbe35d6b9e21f7d0b0`. Platform: Windows, Vulkan on RTX 3060, Ryzen 5 3400G, Rust 1.98.1. The baseline adds only the optional oracle and hit-buffer extent accessor to that parent. The corrected executable adds the entry fix and GPU regression. Binary hashes and raw CSV/log evidence are in validation/2026-09-26-canonical (local `validation/2026-09-26-canonical`).
 
 - Deliberate pre-fix regression: failed by 5 cm. The first command used an incorrect test filter and ran zero tests; that log is retained and is **not** regression evidence. The corrected filter is `far_traversal_matches`.
 - Corrected release terrain suite: **25 passed, 1 ignored**.

@@ -1,5 +1,7 @@
 # Canonical region bounds and corner traversal
 
+Generated captures, logs, CSVs, manifests and archives are local-only in the ignored `validation/` directory. They are not included in the branch; paths below identify local artifacts.
+
 This checkpoint reduces unnecessary brick selection without changing the authored voxel field, and fixes a secondary-ray boundary cycle found by recording movement. It does not qualify frame time, arrival latency, far-field fidelity or the requested visual style.
 
 ## Conservative bounds
@@ -32,7 +34,7 @@ The regression fails before the fix and passes after it, including 63 nearby flo
 
 ## Validation
 
-Parent: Helio `0faa86ff`. Windows, Rust 1.98.1, Vulkan/RTX 3060 driver 616.64, Ryzen 5 3400G. Evidence and executable hashes are in [validation/2026-09-26-bounds](validation/2026-09-26-bounds).
+Parent: Helio `0faa86ff`. Windows, Rust 1.98.1, Vulkan/RTX 3060 driver 616.64, Ryzen 5 3400G. Evidence and executable hashes are in validation/2026-09-26-bounds (local `validation/2026-09-26-bounds`).
 
 - Terrain library: **27 passed, one CPU benchmark ignored**. The benchmark was separately run in six alternating comparisons.
 - Noise intervals: **904,932 exact samples**, including 5,822 single-cell and 1,090 crossing boxes, plus explicit lattice-boundary and extreme-coordinate checks.

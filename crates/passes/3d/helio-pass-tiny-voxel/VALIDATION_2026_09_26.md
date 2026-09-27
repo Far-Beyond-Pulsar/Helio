@@ -1,5 +1,7 @@
 # Validation after upstream synchronization — 26 September 2026
 
+Generated captures, logs, CSVs, manifests and archives are local-only in the ignored `validation/` directory. They are not included in the branch; paths below identify local artifacts.
+
 The integrated renderer passes the checks below, but **does not meet the requested AAA visual quality, faithful distant destruction or seamless exact-detail arrival**. The larger generation-batch experiment was rejected because it worsened descent frame times. The retained implementation still uses a 256-job dispatch cap.
 
 Retained Helio runtime: `fcfb4d850542696c3d8adc71f270d33bda6f7398`, including upstream main `1d4a5e9e`. Pulsar runtime: `89860371084b634e3ce7c93862948a241cb362e7`, including upstream main `c93f2f7da`; `0ef469994aa9d8d71f332df6b5396455241b3cb9` subsequently fixes two upstream test expectations without changing runtime code. Later documentation, evidence and submodule-pointer commits do not change this tested runtime.
@@ -40,7 +42,7 @@ Percentiles use the nearest-rank method. Walking and descent include all their f
 
 The candidate increased the maximum generation dispatch from 256 to 1,024 jobs while retaining the existing evaluation budget of 64 exact bricks when warm and 256 when cold, plus the 262,144 edit-reference limit. A coarse job evaluates 729 density samples instead of 32,768 exact samples, so the old dispatch cap leaves evaluation capacity unused.
 
-The [protocol](validation/2026-09-26/batch-trial-protocol.md) was recorded before comparison. Retention required matching settled brick counts/pixel budgets, all correctness assertions, improved arrival at both resolutions, walking/descent p95 within 15% of control, and maximum frames within 2× control. No further parameter search was performed after rejection.
+The protocol (local `validation/2026-09-26/batch-trial-protocol.md`) was recorded before comparison. Retention required matching settled brick counts/pixel budgets, all correctness assertions, improved arrival at both resolutions, walking/descent p95 within 15% of control, and maximum frames within 2× control. No further parameter search was performed after rejection.
 
 | Observation | 720p control → candidate | 1080p control → candidate |
 | --- | ---: | ---: |
@@ -50,7 +52,7 @@ The [protocol](validation/2026-09-26/batch-trial-protocol.md) was recorded befor
 | Worst descent frame | 58.00 → 69.50 ms | 51.50 → 64.25 ms |
 | Resize frame | 283 → 277 ms | 301 → 612 ms |
 
-The candidate passed 26 terrain tests (one benchmark ignored), all flight assertions and 40 capture audits, with identical final cuts at every compared settled stage. It still failed the descent p95 gate at both resolutions: **+96% and +45%**. Its code was reverted, with the exact [patch](validation/2026-09-26/batch-candidate.patch), binaries' hashes, raw data and [computed gate results](validation/2026-09-26/batch-trial-comparison.json) preserved.
+The candidate passed 26 terrain tests (one benchmark ignored), all flight assertions and 40 capture audits, with identical final cuts at every compared settled stage. It still failed the descent p95 gate at both resolutions: **+96% and +45%**. Its code was reverted, with the exact patch (local `validation/2026-09-26/batch-candidate.patch`), binaries' hashes, raw data and computed gate results (local `validation/2026-09-26/batch-trial-comparison.json`) preserved.
 
 This compares complete flights, not isolated generation kernels. Faster publication changes which terrain cut is visible during movement, even when settled cuts match. A sample-count budget alone does not establish a predictable frame-time budget. Future scheduling work must measure both visible refinement progress and GPU time instead of judging only settlement latency.
 
@@ -58,9 +60,9 @@ This compares complete flights, not isolated generation kernels. Faster publicat
 
 The retained renderer shows the authored 10 cm cubes and an orbital edit's local crater, but strong contour bands/noise and unresolved arrival regions remain. The candidate did not eliminate those defects. The result does not match the [Lay of the Land visual reference](https://store.steampowered.com/app/2776090/Lay_of_the_Land/).
 
-![Retained renderer: 10 cm crater edited from 300 km](validation/2026-09-26/trial-control-1080p-quality/orbital-edit.png)
+Retained renderer: 10 cm crater edited from 300 km (local `validation/2026-09-26/trial-control-1080p-quality/orbital-edit.png`)
 
-![Retained renderer: unresolved arrival in the final movement recording](validation/2026-09-26/final-movement-idle/descent-239.png)
+Retained renderer: unresolved arrival in the final movement recording (local `validation/2026-09-26/final-movement-idle/descent-239.png`)
 
 Exact CPU editing at arbitrary ray distance does not prove faithful distant GPU visibility of small edits. The far representation still reconstructs independently sampled density instead of deriving coverage from exact edited leaves. No smooth terrain replacement or enlarged visual LOD was added. Increasing the authored base grid to 1 m intentionally changes the actual voxel size.
 
@@ -94,6 +96,6 @@ cargo +1.98 test -j 2 -p engine_fs --no-default-features --test workspace_featur
 
 Retained flight executable SHA-256: `51A4BD308D5725EEA426469E6715BFA72185E1BE77E01C4E3A47DF6568E87E0F`. Rejected candidate: `5FE396E3C1665CD3F940927F8B43DB03F9E747045DAB1A850F0C89CB5CA71AE5`. The candidate is reproducible from the runtime revision plus the retained patch; the trial runner expects both separately built executables in `target/voxel-flight` and `target/release/examples` as recorded in its arguments.
 
-The [evidence directory](validation/2026-09-26) contains raw CSVs, aggregated capture audits, logs, unmodified representative images, comparison scripts and a checksummed manifest. `summarize.py` accepts the retained run directory names and recomputes their statistics. Full movement frames remain local in `target/voxel-flight/final-movement-idle`; open `movement.html` there. Its fixed 30 Hz playback is illustrative, not game FPS; readback changes scheduling, so its refinement timings are excluded from the performance comparison.
+The evidence directory (local `validation/2026-09-26`) contains raw CSVs, aggregated capture audits, logs, unmodified representative images, comparison scripts and a checksummed manifest. `summarize.py` accepts the retained run directory names and recomputes their statistics. Full movement frames remain local in `target/voxel-flight/final-movement-idle`; open `movement.html` there. Its fixed 30 Hz playback is illustrative, not game FPS; readback changes scheduling, so its refinement timings are excluded from the performance comparison.
 
 Both integration PRs remain drafts. The next architecture gate is exact-derived far coverage, faithful edit propagation and incremental refinement without unresolved arrival surfaces, followed by populated-scene performance and interactive editor validation.

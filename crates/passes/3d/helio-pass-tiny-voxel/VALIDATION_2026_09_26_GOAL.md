@@ -1,5 +1,7 @@
 # Planet terrain profiling checkpoint — 26 September 2026
 
+Generated captures, logs, CSVs, manifests and archives are local-only in the ignored `validation/` directory. They are not included in the branch; paths below identify local artifacts.
+
 This checkpoint adds engine-native measurement and traversal correctness evidence. It does **not** qualify a faster renderer or AAA terrain. Empty-brick skipping is disabled by default, and the parent-link experiment was reverted after repeatability failures. Both integration PRs remain drafts.
 
 ## Retained changes
@@ -13,7 +15,7 @@ This checkpoint adds engine-native measurement and traversal correctness evidenc
 
 ## Evidence and limits
 
-Platform: Ryzen 5 3400G, RTX 3060 12 GB, 16 GiB RAM, Windows Vulkan driver 616.64. Release builds used Rust 1.98.1. Parent integration revision was Helio `156f6a7b28e3ef224facbd950d9b6f9753c327cc`. See [binary hashes](validation/2026-09-26-goal/binary-hashes.json), [raw evidence archive](validation/2026-09-26-goal/flight-evidence.zip) and its [per-entry manifest](validation/2026-09-26-goal/manifest.json). The archive includes failed trials, profiling data, compiler/test logs and the rejected parent-link source. Large executable/Nsight artifacts remain under the local `target/voxel-goal` directory.
+Platform: Ryzen 5 3400G, RTX 3060 12 GB, 16 GiB RAM, Windows Vulkan driver 616.64. Release builds used Rust 1.98.1. Parent integration revision was Helio `156f6a7b28e3ef224facbd950d9b6f9753c327cc`. See binary hashes (local `validation/2026-09-26-goal/binary-hashes.json`), raw evidence archive (local `validation/2026-09-26-goal/flight-evidence.zip`) and its per-entry manifest (local `validation/2026-09-26-goal/manifest.json`). The archive includes failed trials, profiling data, compiler/test logs and the rejected parent-link source. Large executable/Nsight artifacts remain under the local `target/voxel-goal` directory.
 
 The original profiling diagnostic attributed walking primary traversal p50/p95 to 13.452/14.478 ms, GBuffer p50/p95 to 1.128/1.544 ms, and whole-graph p50/p95 to 16.252/17.219 ms. Those stage measurements identify where time went in that flight; they are not presented-frame performance or populated-engine acceptance.
 
@@ -39,7 +41,7 @@ Auditing the actual slow walking frame found no increased traversal work or chan
 - Final 1920×1080 Quality flight with sunlight, profiling and exact primary replay: **1,180 frames completed**. All **21 captures** had zero exhausted/invalid sunlight rays. Complete primary hit equivalence, terrain coverage, graph composition, graph rebuild, orbital edit and the 1 m grid checks passed. Timings from this heavily instrumented run are **not acceptance measurements**.
 - The final source's returned-ground sunlight readback contained 1,062,857 visible and 103,543 occluded pixels, with zero exhaustion/invalid output. This checks output validity, not correct shadow appearance or far canonical geometry.
 
-Inspected [ground](validation/2026-09-26-goal/returned-ground.png) and [orbital edit](validation/2026-09-26-goal/orbital-edit.png) captures still show strong dark contour bands, aliasing and limited material/content composition. They fail the requested visual direction. This checkpoint does not supply a new accepted movement sequence. The preceding recorded movement evidence and its failures remain applicable; broad movement, arrival, far-fidelity, collision and populated-editor gates in [the active goal](PLANET_TERRAIN_GOAL.md) remain open.
+Inspected ground (local `validation/2026-09-26-goal/returned-ground.png`) and orbital edit (local `validation/2026-09-26-goal/orbital-edit.png`) captures still show strong dark contour bands, aliasing and limited material/content composition. They fail the requested visual direction. This checkpoint does not supply a new accepted movement sequence. The preceding recorded movement evidence and its failures remain applicable; broad movement, arrival, far-fidelity, collision and populated-editor gates in [the active goal](PLANET_TERRAIN_GOAL.md) remain open.
 
 ## Engine profiler integration
 

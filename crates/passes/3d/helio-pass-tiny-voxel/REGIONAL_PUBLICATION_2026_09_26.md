@@ -1,5 +1,7 @@
 # Regional publication experiment
 
+Generated captures, logs, CSVs, manifests and archives are local-only in the ignored `validation/` directory. They are not included in the branch; paths below identify local artifacts.
+
 This opt-in experiment publishes generated regions before a replacement view cut finishes. It demonstrates revision-coherent partial publication, but is rejected for default adoption: mixed sparse-density representations expose visible patch boundaries, and arrival, fidelity and performance gates remain unmet. `regional-publication-experiment` is disabled by default. The implementation builds on `66100ff8`; the archived source snapshot and executable hashes identify the tested candidate.
 
 ## Representation and safety
@@ -67,4 +69,4 @@ cargo +1.98 run --release -p helio-default-graphs --features helio-pass-tiny-vox
 
 Omit the feature for the ordinary whole-cut control. Remove recording and audit flags for timing experiments, and explicitly establish machine contention and independent repeats before acceptance measurements. The full local movement viewer is under `target/voxel-goal/regional-specialized-720/movement.html`.
 
-[Raw evidence](validation/2026-09-26-regional/evidence.zip), [entry hashes](validation/2026-09-26-regional/manifest.json), [binary hashes](validation/2026-09-26-regional/binary-hashes.json), and [movement hashes](validation/2026-09-26-regional/movement-frame-hashes.json) preserve the experiment. All goal gates remain as written in `PLANET_TERRAIN_GOAL.md`; this candidate is not enabled in the engine by default.
+Raw evidence (local `validation/2026-09-26-regional/evidence.zip`), entry hashes (local `validation/2026-09-26-regional/manifest.json`), binary hashes (local `validation/2026-09-26-regional/binary-hashes.json`), and movement hashes (local `validation/2026-09-26-regional/movement-frame-hashes.json`) preserve the experiment. All goal gates remain as written in `PLANET_TERRAIN_GOAL.md`; this candidate is not enabled in the engine by default.
