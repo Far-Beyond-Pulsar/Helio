@@ -675,7 +675,9 @@ impl RenderPass for DofPass {
     }
 
     /// The composite clears `ctx.target` and covers it with a full-screen
-    /// triangle, so a host clear before the frame is never visible.
+    /// triangle, so a host clear before the frame is never visible. When DOF
+    /// cannot be active this frame the pass does nothing, and PostProcessPass
+    /// renders the full-screen uber pass straight into the target instead.
     fn initializes_target(&self) -> bool {
         true
     }
@@ -774,6 +776,12 @@ impl RenderPass for DofPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        // Published by PostProcessVolumeBlendPass: false only when no settings
+        // source can enable DOF. PostProcessPass then renders the target
+        // itself, and the composite would be a full-resolution copy.
+        if ctx.registry.get::<bool>(helio_core::ResourceKey::new("dof_maybe_active")) == Some(false) {
+            return Ok(());
+        }
         let src_view = match ctx.registry.get(helio_core::ResourceKey::new("pre_dof")) {
             Some(v) => v,
             None => match ctx.registry.get(helio_core::ResourceKey::new("pre_aa")) {

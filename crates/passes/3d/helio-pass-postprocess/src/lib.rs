@@ -29,7 +29,7 @@ pub use components::{CameraPostProcessComponent, PostProcessVolumeComponent};
 pub use gpu_types::*;
 
 mod volume_blend;
-pub use volume_blend::PostProcessVolumeBlendPass;
+pub use volume_blend::{PostProcessVolumeBlendPass, DOF_MAYBE_ACTIVE};
 
 mod fog_composite;
 pub use fog_composite::{FogCompositePass, FOGGED_HDR, FOGGED_HDR_FORMAT};
@@ -1425,8 +1425,14 @@ impl PostProcessPass {
             }
         }
 
-        // 3. Uber render pass (optionally to pre_dof texture when DofPass follows)
-        let target = if self.output_to_pre_dof {
+        // 3. Uber render pass (optionally to pre_dof texture when DofPass follows).
+        // When no settings source can enable DOF this frame, DofPass would
+        // only copy pre_dof to the target, so render the target directly.
+        let dof_maybe_active = ctx
+            .registry
+            .get::<bool>(helio_core::ResourceKey::new(DOF_MAYBE_ACTIVE))
+            .unwrap_or(true);
+        let target = if self.output_to_pre_dof && dof_maybe_active {
             self.pre_dof_view.as_ref().unwrap_or(ctx.target)
         } else {
             ctx.target
