@@ -440,6 +440,10 @@ pub struct WaterSimPass {
     /// surface, underwater tint) would only copy `pre_aa` unchanged, so they
     /// are skipped and downstream passes keep reading the original `pre_aa`.
     pub(crate) screen_active: bool,
+    /// Whether last frame simulated (some volume row was, or may have been,
+    /// live). The simulation pauses while every row is empty and restarts
+    /// from the zeroed startup state when water appears.
+    pub(crate) sim_live: bool,
 
     pub(crate) caustics_bg_key: Option<(usize, usize)>,
     pub(crate) caustics_bg: Option<wgpu::BindGroup>,
@@ -493,6 +497,29 @@ impl WaterSimPass {
                 strength,
             });
         }
+    }
+
+    /// Clears every simulation layer back to the zeroed startup state.
+    fn reset_simulation(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        for view in self.sim_layer_views_a.iter().chain(&self.sim_layer_views_b) {
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("WaterSim Reset"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        self.front_per_layer.iter_mut().for_each(|front| *front = true);
     }
 
     pub fn resize_internal(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -682,11 +709,19 @@ impl RenderPass for WaterSimPass {
             .scene_buffers
             .get(BufferKey::of("water_hitboxes"))
             .map(|handle| &handle.buffer);
-        let volume_count = if water_volumes_buf.is_some() {
-            MAX_SIM_VOLUMES
-        } else {
-            0
-        };
+        // Empty rows are inert everywhere (no surface, no caustics, no tint),
+        // so while every row is known to be empty the simulation and caustics
+        // are skipped too. Their state would only matter once water exists,
+        // and a volume that appears later starts from the startup state.
+        let sim_live = ctx
+            .scene_buffers
+            .get(BufferKey::of("water_volumes"))
+            .is_some_and(|handle| self.volume_liveness.maybe_live(handle));
+        if sim_live && !self.sim_live {
+            self.reset_simulation(unsafe { &mut *ctx.encoder_ptr });
+        }
+        self.sim_live = sim_live;
+        let volume_count = if sim_live { MAX_SIM_VOLUMES } else { 0 };
         let hitbox_count = if water_hitboxes_buf.is_some() {
             MAX_WATER_HITBOXES
         } else {
