@@ -12,6 +12,8 @@ canonical-far-experiment = ["engine"]
 surface-reference = ["canonical-far-experiment"]
 # Candidate regional publication; retain complete-cut default until qualified.
 regional-publication-experiment = ["engine"]
+# Derived exact local bricks; not yet connected to planetary GPU residency.
+surface-cache-experiment = []
 
 [dependencies]
 wgpu = "30.0.1"

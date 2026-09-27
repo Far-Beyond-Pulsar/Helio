@@ -310,6 +310,30 @@ impl World {
             high.map(|v| v.saturating_add(margin)),
         )
     }
+    /// Evaluate one authored cell using a certified region class and ordered
+    /// edit candidates. Shared by derived block builders; this bypasses the
+    /// fixed-decimetre gameplay cache without changing canonical semantics.
+    pub(crate) fn material_in_region(
+        &self,
+        cell: [i32; 3],
+        class: crate::landforms::RegionClass,
+        edits: &[usize],
+    ) -> u32 {
+        use crate::landforms::RegionClass;
+        let cell = self.sample_cell(cell);
+        edits
+            .iter()
+            .rev()
+            .find_map(|&i| {
+                let edit = self.edits[i];
+                edit.contains(cell).then_some(edit.material)
+            })
+            .unwrap_or_else(|| match class {
+                RegionClass::AllAir => 0,
+                RegionClass::AllSolid => 1,
+                RegionClass::Mixed => base_material(cell),
+            })
+    }
     pub fn cast(&self, origin: DVec3, dir: DVec3, max: f64) -> Option<([i32; 3], [i32; 3])> {
         self.cast_hit(origin, dir, max)
             .map(|(cell, last, _)| (cell, last))

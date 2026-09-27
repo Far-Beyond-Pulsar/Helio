@@ -105,19 +105,9 @@ impl Chunk {
             let x = i % 32;
             let y = (i / 32) % 32;
             let z = i / 1024;
-            let cell = world.sample_cell([low[0] + x as i32, low[1] + y as i32, low[2] + z as i32]);
-            *value = edits
-                .iter()
-                .rev()
-                .find_map(|&i| {
-                    let e = world.edits[i];
-                    e.contains(cell).then_some(e.material)
-                })
-                .unwrap_or_else(|| match classes[x / 8 + (y / 8) * 4 + (z / 8) * 16] {
-                    RegionClass::AllAir => 0,
-                    RegionClass::AllSolid => 1,
-                    RegionClass::Mixed => crate::world::base_material(cell),
-                });
+            let cell = [low[0] + x as i32, low[1] + y as i32, low[2] + z as i32];
+            *value =
+                world.material_in_region(cell, classes[x / 8 + (y / 8) * 4 + (z / 8) * 16], &edits);
         }
         if values.iter().all(|&v| v == values[0]) {
             return Self {

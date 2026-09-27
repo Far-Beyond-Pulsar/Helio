@@ -74,6 +74,8 @@ See the [26 September validation report](VALIDATION_2026_09_26.md) for current s
 
 The active [planet terrain goal](PLANET_TERRAIN_GOAL.md) records required behavior and acceptance targets. The [empty-brick experiment](EMPTY_BRICK_EXPERIMENT.md) records the current optimization protocol and its correctness findings.
 
+The optional `surface-cache-experiment` exposes [exact local surface bricks](SURFACE_CACHE_2026_09_27.md), with authored-grid sampling, halo-aware edits and GPU traversal checks. It is not yet connected to planetary residency or filtered engine lighting. Face-area summaries alone failed the occlusion reference and must not be used as distant opacity.
+
 The [region-bounds and corner-traversal checkpoint](BOUNDS_AND_TRAVERSAL_2026_09_26.md) records tighter canonical certificates, fewer requested bricks, the sunlight boundary-cycle regression, and full-flight validation. Far fidelity and performance remain unqualified.
 
 `HELIO_VOXEL_FLIGHT_SUN=1` enables directional terrain visibility and rejects exhausted/invalid sunlight values in each capture. `HELIO_VOXEL_FLIGHT_AUDIT_WALK=N` audits one chosen walking frame; `HELIO_VOXEL_FLIGHT_HOLD_WALK=1` holds the last pose for a diagnostic repeat. These options perturb the workload and must be reported with measurements. Empty-brick skipping remains experimental and disabled by default; see the [profiling checkpoint](VALIDATION_2026_09_26_GOAL.md) for failed optimization trials and the retained boundary correction.

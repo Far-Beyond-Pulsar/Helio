@@ -66,3 +66,14 @@ samples reduces slope stippling while resolved shell edges remain visible.
 Sampling error still warrants measurement; no compact surface cache has yet
 been tested against these references. Implement and measure that local
 representation next, before returning to global residency scheduling.
+
+The [exact local cache experiment](SURFACE_CACHE_2026_09_27.md) now supplies
+compact authored-cell bricks, halo-aware edit invalidation, bounded logical
+residency and a GPU decoder/traverser. It passes 294,912 material checks and
+42,696 local ray comparisons. Direct authored sampling removes severe repeated
+storage-grid construction at 1 m. Small warm GPU probes favor empty-microbrick
+skipping, but do not qualify frame performance. An overlapping-wall fixture
+rejects unoccluded face-area mixtures as a filtered appearance solution.
+The cache is experimental and not wired into the planetary graph; compare an
+integrated patch renderer against the retained lit references next. Visibility,
+global scheduling, motion, physical memory and full-engine gates remain open.
