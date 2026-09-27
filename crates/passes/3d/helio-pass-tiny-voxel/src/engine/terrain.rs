@@ -365,10 +365,13 @@ impl StoredTerrain {
         let buffers_bytes = buffers_bytes
             + self.patch.settings.size()
             + self.patch.directory.size()
-            + self.patch.words.size();
+            + self.patch.words.size() + self.patch.mesh_memory().0;
+        let textures_bytes = u64::from(self.size[0]) * u64::from(self.size[1]) * 8 + 16;
+        #[cfg(feature = "surface-cache-experiment")]
+        let textures_bytes = textures_bytes + self.patch.mesh_memory().1;
         TerrainMemoryStats {
             buffers_bytes,
-            textures_bytes: u64::from(self.size[0]) * u64::from(self.size[1]) * 8 + 16,
+            textures_bytes,
             material_capacity_bytes: self.materials.size(),
             primary_hits_bytes: self.hits.size(),
         }
@@ -666,7 +669,7 @@ impl StoredTerrain {
                 [self.size[0].div_ceil(8), self.size[1].div_ceil(8), 1]);
         }
         #[cfg(feature = "surface-cache-experiment")]
-        self.patch.encode_primary(&self.device, &self.uniform, &self.hits, encoder, self.size, self.profiler.as_mut());
+        self.patch.encode_primary(&self.device, &self.uniform, camera, &self.hits, encoder, self.size, self.profiler.as_mut());
         self.compute(
             encoder,
             trace,

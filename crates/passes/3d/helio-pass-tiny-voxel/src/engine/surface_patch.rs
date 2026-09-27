@@ -16,6 +16,7 @@ const TILES: usize = SIDE as usize * SIDE as usize * SIDE as usize;
 // Worst possible dictionary payload: header + descriptors + 512 mixed blocks.
 const WORDS: usize = 1 + 512 + 512 * 4;
 const UPLOADS: usize = 8;
+mod mesh;
 
 #[cfg(test)]
 mod tests;
@@ -24,6 +25,10 @@ mod tests;
 pub struct Stats {
     pub enabled: bool,
     pub skip_empty: bool,
+    pub mesh_enabled: bool,
+    pub mesh_ready: usize,
+    pub mesh_rejected: usize,
+    pub mesh_uploaded_bytes: u64,
     pub revision: u64,
     pub low: [i32; 3],
     pub ready: usize,
@@ -46,10 +51,12 @@ struct Completed {
     revision: u64,
     brick: Arc<Brick>,
     milliseconds: f64,
+    mesh: Option<mesh::Prepared>,
 }
 
 pub(super) struct Patch {
     primary: wgpu::ComputePipeline,
+    mesh: Option<mesh::RasterPatch>,
     skip_empty: bool,
     pub settings: wgpu::Buffer,
     pub directory: wgpu::Buffer,
@@ -76,6 +83,18 @@ fn shader_source() -> String {
 
 impl Patch {
     pub fn new(device: &wgpu::Device) -> Self {
+        Self::with_mesh(
+            device,
+            std::env::var_os("HELIO_VOXEL_SURFACE_MESH").is_some(),
+        )
+    }
+    fn with_mesh(device: &wgpu::Device, mesh_enabled: bool) -> Self {
+        // Ordinary raster coverage can omit a thin nearer interval. Unsupported
+        // devices retain the precise cache path rather than accepting that risk.
+        let mesh_enabled = mesh_enabled
+            && device
+                .features()
+                .contains(wgpu::Features::CONSERVATIVE_RASTERIZATION);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bounded exact surface patch primary"),
             source: wgpu::ShaderSource::Wgsl(shader_source().into()),
@@ -115,7 +134,7 @@ impl Patch {
                         }
                         state.request.take().unwrap()
                     };
-                    cache.set_world(request.world);
+                    cache.set_world(request.world.clone());
                     let mut keys: Vec<_> = (0..TILES)
                         .map(|i| {
                             Key([
@@ -138,6 +157,13 @@ impl Patch {
                         let brick = cache
                             .get(key)
                             .expect("one brick fits the declared cache budget");
+                        let mesh = mesh_enabled.then(|| {
+                            mesh::Prepared::new(crate::surface_mesh::Mesh::from_world(
+                                &request.world,
+                                key,
+                                &brick,
+                            ))
+                        });
                         let milliseconds = start.elapsed().as_secs_f64() * 1000.0;
                         if requested.load(Ordering::Acquire) != request.revision {
                             break;
@@ -150,6 +176,7 @@ impl Patch {
                                 revision: request.revision,
                                 brick,
                                 milliseconds,
+                                mesh,
                             })
                             .is_err()
                         {
@@ -161,6 +188,7 @@ impl Patch {
             .unwrap();
         Self {
             primary,
+            mesh: mesh_enabled.then(|| mesh::RasterPatch::new(device)),
             skip_empty: std::env::var_os("HELIO_VOXEL_SURFACE_CACHE_SKIP_OFF").is_none(),
             settings: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("surface patch domain"),
@@ -192,13 +220,25 @@ impl Patch {
     }
 
     pub fn stats(&self) -> Stats {
-        self.stats
+        let mut stats = self.stats;
+        if let Some(mesh) = &self.mesh {
+            stats.mesh_enabled = true;
+            stats.mesh_ready = mesh.accepted;
+            stats.mesh_rejected = mesh.rejected;
+            stats.mesh_uploaded_bytes = mesh.uploaded_bytes;
+        }
+        stats
+    }
+
+    pub fn mesh_memory(&self) -> (u64, u64) {
+        self.mesh.as_ref().map_or((0, 0), |mesh| mesh.memory())
     }
 
     pub fn encode_primary(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         params: &wgpu::Buffer,
+        camera: &wgpu::Buffer,
         hits: &wgpu::Buffer,
         encoder: &mut wgpu::CommandEncoder,
         size: [u32; 2],
@@ -206,6 +246,25 @@ impl Patch {
     ) {
         if !self.stats.enabled {
             return;
+        }
+        if let Some(mesh) = &mut self.mesh {
+            if let Some(p) = profiler.as_deref_mut() {
+                p.begin_pass(encoder, "voxel_cache_raster");
+            }
+            mesh.encode(
+                device,
+                params,
+                camera,
+                hits,
+                &self.settings,
+                &self.directory,
+                &self.words,
+                encoder,
+                size,
+            );
+            if let Some(p) = profiler.as_deref_mut() {
+                p.end_pass(encoder, "voxel_cache_raster");
+            }
         }
         let buffers = [
             (0, params),
@@ -270,6 +329,9 @@ impl Patch {
         });
         if !same_world || !inside {
             let revision = self.serial.fetch_add(1, Ordering::AcqRel) + 1;
+            if let Some(mesh) = &mut self.mesh {
+                mesh.reset(queue);
+            }
             self.low = Key(center.0.map(|v| v - SIDE / 2));
             self.world = Some(world.clone());
             self.stats = Stats {
@@ -329,6 +391,9 @@ impl Patch {
                 bytemuck::cast_slice(words),
             );
             queue.write_buffer(&self.directory, slot as u64 * 4, bytemuck::bytes_of(&base));
+            if let (Some(mesh), Some(prepared)) = (&mut self.mesh, result.mesh) {
+                mesh.upload(queue, slot, prepared);
+            }
             self.stats.ready += 1;
             self.stats.uploaded_bytes += (words.len() * 4 + 4) as u64;
             self.stats.construction_ms += result.milliseconds;

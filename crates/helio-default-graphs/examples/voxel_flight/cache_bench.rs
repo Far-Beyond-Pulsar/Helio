@@ -16,6 +16,8 @@ pub(super) fn run(flight: &mut Flight, output: &Path, selected: &str) {
             .find(|(name, _, _, _)| *name == selected)
             .expect("unknown cache benchmark fixture")
     };
+    let fixed_jitter = std::env::var_os("HELIO_VOXEL_CACHE_FIXED_JITTER").is_some();
+    if fixed_jitter { flight.renderer.set_jitter_enabled(false); flight.renderer.set_camera_jitter_override(Some([0.0, 0.0])); }
     let record = std::env::var_os("HELIO_VOXEL_FLIGHT_RECORD").is_some();
     flight.world = Arc::new(world);
     flight.raytraced_sun = true;
@@ -41,6 +43,8 @@ pub(super) fn run(flight: &mut Flight, output: &Path, selected: &str) {
             "recording": record, "raytraced_sun": true,
             "warm_frames": 32, "frames_per_stage": 180,
             "motion": "one cycle: 0.5 m sideways, 0.1 m vertically, 0.04 rad yaw",
+            "fixed_jitter": fixed_jitter,
+            "mesh_enabled": std::env::var_os("HELIO_VOXEL_SURFACE_MESH").is_some(),
             "cache_feature": cfg!(feature="voxel-surface-cache"),
             "cache_off": std::env::var_os("HELIO_VOXEL_SURFACE_CACHE_OFF").is_some(),
             "skip_off": std::env::var_os("HELIO_VOXEL_SURFACE_CACHE_SKIP_OFF").is_some(),

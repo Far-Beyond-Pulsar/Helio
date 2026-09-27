@@ -127,7 +127,7 @@ fn predicate_probe() {
             // f32 products are equal; the exact predicate must retain order.
             assert_eq!(result[0] as i32, 1);
         }
-        let mut patch = Patch::new(&device);
+        let mut patch = Patch::with_mesh(&device, false);
         patch.stats.enabled = true;
         let brick = Brick::from_samples(material);
         queue.write_buffer(&patch.words, 0, bytemuck::cast_slice(brick.words()));
@@ -237,6 +237,7 @@ fn predicate_probe() {
                     patch.encode_primary(
                         &device,
                         &uniform,
+                        &uniform, // No raster path in this arbitrary-ray audit.
                         &hits,
                         &mut encoder,
                         [rays.len() as u32, 1],

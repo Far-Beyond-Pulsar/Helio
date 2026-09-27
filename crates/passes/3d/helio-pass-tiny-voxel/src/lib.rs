@@ -10,6 +10,9 @@ pub mod world;
 /// Experimental derived surface data; it never replaces the canonical World.
 #[cfg(any(test, feature = "surface-cache-experiment"))]
 pub mod surface_cache;
+
+#[cfg(any(test, feature = "surface-cache-experiment"))]
+pub mod surface_mesh;
 use bytemuck::{Pod, Zeroable};
 pub use world::World;
 pub const SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/planet.wgsl"));

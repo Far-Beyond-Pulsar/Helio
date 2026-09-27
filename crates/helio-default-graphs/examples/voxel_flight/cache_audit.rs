@@ -151,3 +151,76 @@ pub fn run(control: &Path, candidate: &Path, output: &Path) {
         total[0], total[1], total[2], total[3]
     );
 }
+
+/// Independently replay every geometry disagreement in a recorded ground walk.
+/// Reconstruct the exact benchmark eye expression; rays come from the GPU.
+pub fn run_mesh_motion(control: &Path, candidate: &Path, output: &Path) {
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(control.join("benchmark.json")).unwrap()).unwrap();
+    assert_eq!(metadata["fixture"], "ground-close");
+    assert_eq!(metadata["recording"], true);
+    assert_eq!(metadata["fixed_jitter"], true);
+    let other: serde_json::Value =
+        serde_json::from_slice(&fs::read(candidate.join("benchmark.json")).unwrap()).unwrap();
+    for key in [
+        "fixture",
+        "recording",
+        "fixed_jitter",
+        "size",
+        "voxel_size_m",
+        "frames_per_stage",
+    ] {
+        assert_eq!(metadata[key], other[key]);
+    }
+    let mut world = World::default();
+    world
+        .set_voxel_size(metadata["voxel_size_m"].as_f64().unwrap())
+        .unwrap();
+    let eye = world.ground_spawn(0.0, 0.0, 3.0);
+    let forward = Vec3::new(0.0, -0.8, -1.0).normalize();
+    let right = forward.cross(Vec3::Y).normalize();
+    let mut report = std::io::BufWriter::new(fs::File::create(output).unwrap());
+    let mut total = [0usize; 4];
+    for frame in 0..180 {
+        let phase = frame as f64 / 179.0 * std::f64::consts::TAU;
+        let offset =
+            right.as_dvec3() * (phase.sin() * 0.5) + DVec3::Y * ((phase * 2.0).sin() * 0.1);
+        let position = eye + offset;
+        let anchor = render_origin(position);
+        let fraction =
+            std::array::from_fn(|a| f64::from((position[a] / 0.1 - f64::from(anchor[a])) as f32));
+        let name = format!("motion-{frame:03}.hits.bin");
+        let a = fs::read(control.join(&name)).unwrap();
+        let b = fs::read(candidate.join(&name)).unwrap();
+        assert_eq!(a.len(), b.len());
+        for (pixel, (ha, hb)) in a.chunks_exact(32).zip(b.chunks_exact(32)).enumerate() {
+            assert_eq!(&ha[16..28], &hb[16..28], "ray bits differ");
+            let (ga, gb) = (geometry(ha), geometry(hb));
+            if ga == gb {
+                continue;
+            }
+            let ray = std::array::from_fn(|i| f64::from(f32::from_bits(word(ha, i + 4))));
+            let distance =
+                f64::from(f32::from_bits(word(ha, 7))).max(f64::from(f32::from_bits(word(hb, 7))));
+            assert!(distance.is_finite() && distance < 300.0);
+            let reference = oracle(
+                &world,
+                anchor,
+                fraction,
+                ray,
+                distance + 2.0 * world.voxel_size(),
+            );
+            let wrong_a = ga != reference;
+            let wrong_b = gb != reference;
+            total[0] += 1;
+            total[1] += usize::from(wrong_a);
+            total[2] += usize::from(wrong_b);
+            total[3] += usize::from(wrong_a && wrong_b);
+            writeln!(report, "frame={frame} pixel={pixel} anchor={anchor:?} fraction={fraction:?} ray={ray:?} control={ga:?} candidate={gb:?} oracle={reference:?} control_wrong={wrong_a} candidate_wrong={wrong_b}").unwrap();
+        }
+    }
+    eprintln!(
+        "VOXEL_MESH_MOTION_ORACLE diagnosed={} control_wrong={} candidate_wrong={} both_wrong={}",
+        total[0], total[1], total[2], total[3]
+    );
+}

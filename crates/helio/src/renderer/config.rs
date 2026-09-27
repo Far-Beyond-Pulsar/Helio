@@ -62,6 +62,7 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
     let required = wgpu::Features::INDIRECT_FIRST_INSTANCE;
     let mut optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
         wgpu::Features::TIMESTAMP_QUERY | // GPU profiling timestamp queries
+        wgpu::Features::CONSERVATIVE_RASTERIZATION | // optional exact-face visibility accelerator
         wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS | // GPU profiling timestamps via encoder
         wgpu::Features::VERTEX_WRITABLE_STORAGE | wgpu::Features::RG11B10UFLOAT_RENDERABLE |
         wgpu::Features::PIPELINE_CACHE; // persistent driver-validated pipeline cache
@@ -132,6 +133,13 @@ mod tests {
         let requested = required_wgpu_features(wgpu::Features::empty());
         assert!(!requested.contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT));
         assert!(!requested.contains(wgpu::Features::TIMESTAMP_QUERY));
+        assert!(!requested.contains(wgpu::Features::CONSERVATIVE_RASTERIZATION));
+    }
+
+    #[test]
+    fn conservative_rasterization_is_requested_only_when_available() {
+        assert!(required_wgpu_features(wgpu::Features::CONSERVATIVE_RASTERIZATION)
+            .contains(wgpu::Features::CONSERVATIVE_RASTERIZATION));
     }
 
     #[test]

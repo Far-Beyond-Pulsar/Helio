@@ -5,6 +5,7 @@
 fn surface_patch_primary(@builtin(global_invocation_id) id:vec3<u32>) {
     if any(id.xy>=vec2<u32>(p.screen.xy)) || p.settings.z<=0.0 {return;}
     let index=id.x+id.y*u32(p.screen.x);
+    if (primary_hits[index].status&0x08000000u)!=0u {return;}
     let step=i32(patch_settings.step);
     if step<=0 {return;}
     let rd=primary_hits[index].normal;

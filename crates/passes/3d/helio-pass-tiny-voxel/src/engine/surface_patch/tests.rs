@@ -11,8 +11,14 @@ fn queued_revisions_teleports_undo_and_grid_changes_never_publish_foreign_materi
             .request_adapter(&Default::default())
             .await
             .expect("GPU required");
-        let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
-        let mut patch = Patch::new(&device);
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                required_features: adapter.features() & wgpu::Features::CONSERVATIVE_RASTERIZATION,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut patch = Patch::with_mesh(&device, true);
         patch.stats.enabled = true;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("actual surface patch lookup publication audit"),
@@ -93,6 +99,15 @@ fn audit(@builtin(global_invocation_id) id:vec3<u32>) {
                 let before = patch.stats();
                 patch.update(&queue, &world, &params);
                 let stats = patch.stats();
+                assert_eq!(
+                    stats.mesh_enabled,
+                    device
+                        .features()
+                        .contains(wgpu::Features::CONSERVATIVE_RASTERIZATION)
+                );
+                if stats.mesh_enabled {
+                    assert_eq!(stats.mesh_ready + stats.mesh_rejected, stats.ready);
+                }
                 if before.revision == stats.revision {
                     assert!(stats.ready - before.ready <= UPLOADS);
                     assert!(

@@ -27,6 +27,11 @@
 //! HELIO_VOXEL_CACHE_BENCH=cave-close benchmarks a settled reference fixture
 //! through the ordinary graph at the requested resolution. RECORD captures the
 //! motion sequence in a separate visual run; keep it unset for timings.
+//! HELIO_VOXEL_SURFACE_MESH=1 opts into exact face raster visibility (requires
+//! voxel-surface-cache); dense or unavailable pages keep exact traversal.
+//! HELIO_VOXEL_CACHE_FIXED_JITTER=1 fixes camera rays for matched cache captures.
+//! HELIO_VOXEL_FLIGHT_SAVE_HITS=1 saves raw 32-byte primary records per capture.
+//! SAVE_HITS plus RECORD can generate substantial local evidence; never commit it.
 #[path = "voxel_flight/profiling.rs"]
 mod profiling;
 #[path = "voxel_flight/canonical.rs"]
@@ -480,6 +485,9 @@ impl Flight {
             .unwrap();
         rx.recv().unwrap().unwrap();
         let hit_data = hit_buffer.slice(..).get_mapped_range().unwrap();
+        if std::env::var_os("HELIO_VOXEL_FLIGHT_SAVE_HITS").is_some() {
+            fs::write(path.with_extension("hits.bin"), &hit_data).unwrap();
+        }
         if canonical::requested(path) {
             let pass = self.renderer.find_pass::<LazyEngineVoxelPass>().unwrap();
             assert!(!pass.needs_frame(), "canonical audit requires settled residency");
@@ -546,6 +554,11 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("--audit-cache") {
         assert_eq!(args.len(), 5, "--audit-cache CONTROL CANDIDATE OUTPUT");
         cache_audit::run(Path::new(&args[2]), Path::new(&args[3]), Path::new(&args[4]));
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("--audit-mesh-motion") {
+        assert_eq!(args.len(), 5, "--audit-mesh-motion CONTROL CANDIDATE OUTPUT");
+        cache_audit::run_mesh_motion(Path::new(&args[2]), Path::new(&args[3]), Path::new(&args[4]));
         return;
     }
     let output = Path::new(args.get(1).expect("OUTPUT directory required"));
