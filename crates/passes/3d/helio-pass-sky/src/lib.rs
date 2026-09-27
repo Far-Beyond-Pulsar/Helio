@@ -2351,7 +2351,7 @@ impl RenderPass for SkyPass {
                     store: wgpu::StoreOp::Store,
                 },
             })];
-            let depth_attachment = self.depth_tested.then(|| wgpu::RenderPassDepthStencilAttachment {
+            let depth_attachment = self.depth_tested.then_some(wgpu::RenderPassDepthStencilAttachment {
                 view: ctx.depth,
                 depth_ops: None,
                 stencil_ops: None,

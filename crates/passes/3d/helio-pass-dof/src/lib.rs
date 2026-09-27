@@ -758,8 +758,8 @@ impl RenderPass for DofPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let half_w = (self.width + 1) / 2;
-        let half_h = (self.height + 1) / 2;
+        let half_w = self.width.div_ceil(2);
+        let half_h = self.height.div_ceil(2);
         let groups = [
             half_w.div_ceil(WG_COC),
             half_h.div_ceil(WG_COC),

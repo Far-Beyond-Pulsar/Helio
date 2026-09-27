@@ -76,7 +76,7 @@ impl SceneBufferLiveness {
             return;
         }
 
-        if self.staging.as_ref().map_or(true, |staging| staging.size() != size) {
+        if self.staging.as_ref().is_none_or(|staging| staging.size() != size) {
             self.staging = Some(device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("SceneDB Liveness Readback"),
                 size,

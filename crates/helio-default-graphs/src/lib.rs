@@ -151,8 +151,6 @@ fn add_sky_pass(
     device: &Arc<wgpu::Device>,
     camera_buf: &wgpu::Buffer,
     config: &RendererConfig,
-    w: u32,
-    h: u32,
     scene_db: &helio::SceneDbHandle,
     depth_tested: bool,
 ) {
@@ -160,8 +158,8 @@ fn add_sky_pass(
         device,
         camera_buf,
         config.surface_format,
-        w,
-        h,
+        config.internal_width(),
+        config.internal_height(),
         Some(scene_db.clone()),
     )
     .with_depth_test(depth_tested);
@@ -259,7 +257,7 @@ fn add_common_early_passes(
     )));
 
     if sky == SkyPlacement::BeforeGeometry {
-        add_sky_pass(graph, device, camera_buf, config, w, h, &scene_db, false);
+        add_sky_pass(graph, device, camera_buf, config, &scene_db, false);
     }
 
     graph.add_pass(Box::new(IndirectDispatchPass::new(
@@ -825,7 +823,7 @@ fn build_default_graph_internal(
     }
 
     if sky_placement == SkyPlacement::Deferred {
-        add_sky_pass(&mut graph, device, camera_buf, &lighting_config, iw, ih, &scene_db, true);
+        add_sky_pass(&mut graph, device, camera_buf, &lighting_config, &scene_db, true);
     }
 
     let mut deferred_light_pass =
@@ -1071,7 +1069,7 @@ fn build_fxaa_graph_internal(
     }
 
     if sky_placement == SkyPlacement::Deferred {
-        add_sky_pass(&mut graph, device, camera_buf, &lighting_config, iw, ih, &scene_db, true);
+        add_sky_pass(&mut graph, device, camera_buf, &lighting_config, &scene_db, true);
     }
 
     let mut deferred_light_pass =
