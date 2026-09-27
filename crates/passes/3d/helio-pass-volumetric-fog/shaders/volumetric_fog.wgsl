@@ -89,8 +89,9 @@ struct FogGlobals {
     /// slower to react to lights and shadows moving.
     temporal_blend: f32,
     time: f32,
-    _pad0: f32,
-    _pad1: f32,
+    /// Last frame's camera jitter (NDC), to reproject into its unjittered grid.
+    prev_jitter_x: f32,
+    prev_jitter_y: f32,
     _pad2: f32,
     grid: vec3<u32>,
     enabled: u32,
@@ -231,7 +232,7 @@ fn cs_resolve(@builtin(local_invocation_index) lid: u32) {
     var range = select(1000.0, config.fog_max_distance, config.fog_max_distance > HELIO_FROXEL_NEAR);
     media_list.render_enabled = fog_globals.enabled;
     media_list.temporal_blend = finite_clamp(fog_globals.temporal_blend, 0.01, 1.0);
-    media_list.history_rejection = 0.25;
+    media_list.history_rejection = 0.8;
     media_list.light_max_distance = range;
     media_list.light_samples = 4u;
     if selected != 0xffffffffu {
@@ -288,15 +289,25 @@ var<workgroup> wg_local_count: atomic<u32>;
 var<workgroup> wg_light_count: atomic<u32>;
 var<workgroup> wg_light_hash: atomic<u32>;
 
+// Structural identity only: which rows participate, their type and shadow slot.
+// Continuous changes (flicker, colour, gains, a moving or rotating light) must
+// not discard history: every froxel would then show its raw jittered sample,
+// i.e. per-frame noise. The exponential blend follows them within a few
+// frames, as it does for drifting smoke.
 fn light_hash_of(i: u32, light: GpuLight) -> u32 {
     var h = hash_word(2166136261u, i);
-    h = hash_vector(h, light.position_range);
-    h = hash_vector(h, light.direction_outer);
-    h = hash_vector(h, light.color_intensity);
     h = hash_word(h, light.shadow_index);
-    h = hash_word(h, light.light_type);
-    h = hash_word(h, bitcast<u32>(light.inner_angle));
-    return hash_vector(h, vec4<f32>(light.god_rays_density, light.god_rays_weight, light.god_rays_decay, light.god_rays_exposure));
+    return hash_word(h, light.light_type);
+}
+
+// Authored media, by value: an edit (density, colour, emission, bounds) is a
+// discrete change that must show this frame, not fade in over the blend.
+// Animated smoke is time-driven and leaves the rows, so this hash, unchanged.
+fn medium_hash_of(seed: u32, m: WorldMedium) -> u32 {
+    var h = hash_word(hash_word(seed, m.enabled), m.mode);
+    h = hash_vector(h, vec4<f32>(m.extinction, m.height_falloff, m.height, m.anisotropy));
+    h = hash_vector(h, vec4<f32>(m.albedo, 0.0));
+    return hash_vector(h, vec4<f32>(m.emission, 0.0));
 }
 
 // Parallel compaction of live rows, then a rank sort so the compact lists are
@@ -320,12 +331,16 @@ fn cs_classify(@builtin(local_invocation_index) lid: u32) {
     }
     for (var i = lid; i < arrayLength(&global_media); i += SCAN_THREADS) {
         if global_media[i].enabled != 0u && world_medium_active(global_media[i]) {
+            atomicAdd(&wg_light_hash, medium_hash_of(hash_word(0x9e3779b9u, i), global_media[i]));
             let slot = atomicAdd(&wg_global_count, 1u);
             if slot < 64u { wg_global_rows[slot] = i; }
         }
     }
     for (var i = lid; i < arrayLength(&local_media); i += SCAN_THREADS) {
         if local_media[i].medium.enabled != 0u && local_medium_active(local_media[i]) {
+            let bounds = hash_vector(hash_vector(hash_word(0x85ebca6bu, i), local_media[i].bounds_min),
+                local_media[i].bounds_max);
+            atomicAdd(&wg_light_hash, medium_hash_of(hash_word(bounds, bitcast<u32>(local_media[i].edge_fade)), local_media[i].medium));
             let slot = atomicAdd(&wg_local_count, 1u);
             if slot < 64u { wg_local_rows[slot] = i; }
         }
@@ -374,6 +389,7 @@ fn cs_classify(@builtin(local_invocation_index) lid: u32) {
     media_list.global_count = global_total;
     media_list.local_count = local_total;
     media_list.light_count = light_total;
+    // Lights (structural) and media (by value) share one commutative hash.
     let light_hash = atomicLoad(&wg_light_hash) ^ light_total;
     if media_list.previous_light_hash != light_hash { media_list.history_compatible = 0u; }
     media_list.previous_light_hash = light_hash;
@@ -662,7 +678,13 @@ fn medium_transmittance(p: vec3<f32>, dir: vec3<f32>, distance: f32) -> f32 {
 /// `slice_norm` maps through the prelude's exponential distribution, so this is
 /// the exact inverse of what the composite does to find a slice from a depth.
 fn froxel_world_pos(uv: vec2<f32>, slice_norm: f32) -> vec3<f32> {
-    let ndc = helio_uv_to_ndc(uv);
+    // The grid is anchored to the UNJITTERED frustum. With TSR the camera
+    // matrices carry a sub-pixel jitter that changes every frame; a grid that
+    // moves with it is resampled at the jitter delta each frame, and steep
+    // gradients (a lamp's glow, shaft edges) then oscillate: shimmer that grows
+    // with resolution. Adding the jitter back unprojects through the jittered
+    // inverse to the unjittered ray.
+    let ndc = helio_uv_to_ndc(uv) + cameras[0].jitter_frame.xy;
 
     // Ray through this pixel: unproject the near and far plane points. Cheaper
     // schemes exist, but this one cannot disagree with the depth reconstruction
@@ -742,6 +764,33 @@ fn shaft_visibility(light_idx: u32, p: vec3<f32>) -> vec3<f32> {
 /// `god_rays_decay` is the migrated volumetric geometric-shadow strength.
 /// Editor-native lights use weight as their single artistic gain, density and
 /// exposure equal to one, and enabled as their participation flag.
+/// The froxel one injected sample stands for: its view ray segment [t0, t1]
+/// (radial distances from the camera) and lateral half-width. Unset (t1 <= t0)
+/// outside cs_inject, e.g. for point probes, which then evaluate at `p`.
+var<private> sample_t0: f32 = 0.0;
+var<private> sample_t1: f32 = 0.0;
+var<private> sample_lateral: f32 = 0.0;
+/// The froxel's centre ray (unjittered), along which local lights are evaluated.
+var<private> sample_center_dir: vec3<f32> = vec3<f32>(0.0);
+
+/// Mean of 1/r^2 from a point light over the froxel's ray segment, in closed
+/// form: with h the light's distance from the ray and tc its projection,
+/// int dt / (h^2 + (t - tc)^2) = atan((t - tc) / h) / h. Point-sampling the
+/// jittered depth instead gave samples near a lamp wildly different radiance
+/// (a froxel column is metres deep), which history cannot average out in
+/// time: visible shimmer around every lamp in the medium. The lateral extent
+/// softens h (mean of 1/r^2 over a disc), so the lamp centre stays finite.
+fn segment_inverse_square(light_pos: vec3<f32>) -> f32 {
+    let ray_dir = sample_center_dir;
+    let origin = cameras[0].position_near.xyz;
+    let to_light = light_pos - origin;
+    let tc = dot(to_light, ray_dir);
+    let h2 = max(dot(to_light, to_light) - tc * tc, 0.0) + sample_lateral * sample_lateral / 3.0;
+    let h = sqrt(max(h2, 1e-8));
+    let span = max(sample_t1 - sample_t0, 1e-6);
+    return (atan((sample_t1 - tc) / h) - atan((sample_t0 - tc) / h)) / (h * span);
+}
+
 fn inscatter_from_light(light_idx: u32, p: vec3<f32>, ray_dir: vec3<f32>, anisotropy: f32) -> vec3<f32> {
     let light = lights[light_idx];
 
@@ -751,22 +800,43 @@ fn inscatter_from_light(light_idx: u32, p: vec3<f32>, ray_dir: vec3<f32>, anisot
     var to_light: vec3<f32>;
     var atten = 1.0;
     var shadow_distance = media_list.light_max_distance;
+    var view_dir = ray_dir;
 
     if light.light_type == LIGHT_DIRECTIONAL {
         if dot(light.direction_outer.xyz, light.direction_outer.xyz) < 1e-12 { return vec3<f32>(0); }
         to_light = normalize(-light.direction_outer.xyz);
     } else {
-        let delta = light.position_range.xyz - p;
+        // Local lights are evaluated deterministically on the froxel's centre
+        // ray: 1/r^2 is integrated over the segment in closed form, and the
+        // direction (phase, cone, range window) is taken at the segment point
+        // nearest the light, which dominates that integral. Near a lamp the
+        // direction to it swings through large angles inside one froxel, so a
+        // jittered point made the forward-peaked phase differ tenfold between
+        // frames: shimmer in every lamp's glow. Shadow visibility still uses
+        // the jittered p, which antialiases shadow edges over time.
+        var q = p;
+        if sample_t1 > sample_t0 {
+            let origin = cameras[0].position_near.xyz;
+            let t = clamp(dot(light.position_range.xyz - origin, sample_center_dir), sample_t0, sample_t1);
+            q = origin + sample_center_dir * t;
+            view_dir = sample_center_dir;
+        }
+        let delta = light.position_range.xyz - q;
         let dist = length(delta);
-        shadow_distance = dist;
+        shadow_distance = length(light.position_range.xyz - p);
         let range = max(light.position_range.w, 1e-4);
         if dist > range { return vec3<f32>(0.0); }
         to_light = delta / max(dist, 1e-6);
 
         // Inverse-square with a windowed cutoff, so the contribution reaches zero
-        // exactly at the range boundary instead of popping.
+        // exactly at the range boundary instead of popping. Inside cs_inject the
+        // froxel stores the segment mean of 1/r^2 (see segment_inverse_square).
         let window = clamp(1.0 - pow(dist / range, 4.0), 0.0, 1.0);
-        atten = (window * window) / max(dist * dist, 1e-4);
+        var inverse_square = 1.0 / max(dist * dist, 1e-4);
+        if sample_t1 > sample_t0 {
+            inverse_square = segment_inverse_square(light.position_range.xyz);
+        }
+        atten = window * window * inverse_square;
 
         if light.light_type == LIGHT_SPOT {
             if dot(light.direction_outer.xyz, light.direction_outer.xyz) < 1e-12 { return vec3<f32>(0); }
@@ -779,7 +849,7 @@ fn inscatter_from_light(light_idx: u32, p: vec3<f32>, ray_dir: vec3<f32>, anisot
     }
 
     // cos = 1 looking straight at the light, so g > 0 peaks into the sun.
-    let phase = helio_hg_phase(dot(ray_dir, to_light), clamp(anisotropy, -0.95, 0.95));
+    let phase = helio_hg_phase(dot(view_dir, to_light), clamp(anisotropy, -0.95, 0.95));
     // ABI adapter: decay was unused; it now controls geometric fog-shadow
     // strength. Medium absorption remains physical even with geometry opt-out.
     let shadow_strength = finite_clamp(light.god_rays_decay, 0.0, 1.0);
@@ -806,8 +876,10 @@ fn sample_history(p: vec3<f32>) -> vec4<f32> {
     // For the engine's perspective matrix, clip.w is the positive view depth.
     if prev_clip.w <= HELIO_FROXEL_NEAR { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
 
+    // prev_view_proj is last frame's jittered matrix: remove its jitter to land
+    // in last frame's (unjittered) grid.
     let prev_ndc = prev_clip.xyz / prev_clip.w;
-    let prev_uv = helio_ndc_to_uv(prev_ndc.xy);
+    let prev_uv = helio_ndc_to_uv(prev_ndc.xy - vec2<f32>(fog_globals.prev_jitter_x, fog_globals.prev_jitter_y));
     if any(prev_uv < vec2<f32>(0.0)) || any(prev_uv > vec2<f32>(1.0)) {
         return vec4<f32>(0.0, 0.0, 0.0, -1.0);
     }
@@ -829,13 +901,12 @@ fn scatter_coordinates(uvw: vec3<f32>, physical: vec3<u32>) -> vec3<f32> {
 fn temporal_result(current: vec4<f32>, history: vec4<f32>, blend: f32, rejection: f32) -> vec4<f32> {
     // Never resurrect removed media, vanished lights, or residual emission.
     if all(current == vec4<f32>(0)) || all(current.rgb == vec3<f32>(0)) { return current; }
+    // Only a medium appearing or vanishing rejects history. Lighting is never
+    // compared: each sample is jittered inside its froxel, so across a shaft
+    // edge successive samples legitimately differ by 100%, and rejecting on
+    // that is exactly what left the raw per-frame noise on screen.
     let density_change = abs(history.a - current.a) / max(max(history.a, current.a), 1e-8);
-    let difference = abs(history.rgb - current.rgb);
-    let scale = max(max(history.rgb, current.rgb), vec3<f32>(1e-8));
-    let relative = difference / scale;
-    let light_change = max(relative.x, max(relative.y, relative.z));
-    let change = max(density_change, light_change);
-    let weight = max(blend, smoothstep(rejection * 0.5, rejection, change));
+    let weight = max(blend, smoothstep(rejection, min(rejection + 0.15, 1.0), density_change));
     return mix(history, current, clamp(weight, 0.0, 1.0));
 }
 
@@ -861,10 +932,19 @@ fn cs_inject(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Jitter within the froxel, varying per frame — the temporal blend then
-    // averages many positions and the fixed slice boundaries stop being visible.
+    // Jitter within the froxel in all three axes, varying per frame: the
+    // temporal blend then integrates the whole cell (shadow edges, lancet
+    // patterns, smoke detail) instead of point-sampling its centre, which
+    // aliases and crawls whenever the camera moves. Depth uses IGN; X/Y use
+    // the R2 sequence with an independent per-cell (Cranley-Patterson) offset.
+    // A shared offset moves every cell in lockstep, so the residual error forms
+    // a coherent pattern that crawls across the medium each frame (shimmer);
+    // decorrelated, it is fine grain the reconstruction and TSR filter away.
     let j = ign(vec2<f32>(gid.xy), fog_globals.frame);
-    let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims.xy);
+    let cell = hash_word(hash_word(hash_word(2166136261u, gid.x), gid.y), gid.z);
+    let rotation = vec2<f32>(f32(cell & 0xffffu), f32(cell >> 16u)) / 65536.0;
+    let jxy = fract(vec2<f32>(0.7548776662, 0.5698402910) * f32(fog_globals.frame % 4096u) + rotation);
+    let uv = (vec2<f32>(gid.xy) + jxy) / vec2<f32>(dims.xy);
     let slice_norm = (f32(gid.z) + j) / f32(dims.z);
 
     let p = froxel_world_pos(uv, slice_norm);
@@ -872,6 +952,13 @@ fn cs_inject(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let view_depth = helio_froxel_view_depth_from_slice(slice_norm, fog.fog_max_distance);
     let medium = medium_at(p, view_depth);
+    // This froxel's ray segment (radial = view depth / cos) and half-width.
+    let radial_scale = distance(p, cameras[0].position_near.xyz) / max(view_depth, 1e-6);
+    sample_t0 = helio_froxel_view_depth_from_slice(f32(gid.z) / f32(dims.z), fog.fog_max_distance) * radial_scale;
+    sample_t1 = helio_froxel_view_depth_from_slice(f32(gid.z + 1u) / f32(dims.z), fog.fog_max_distance) * radial_scale;
+    sample_lateral = 0.5 * distance(froxel_world_pos(uv + vec2<f32>(1.0 / f32(dims.x), 0.0), slice_norm), p);
+    sample_center_dir = normalize(froxel_world_pos((vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims.xy), slice_norm)
+        - cameras[0].position_near.xyz);
     let density = medium.extinction;
     // Integrate the complete medium. The full-resolution composite stops at
     // each pixel's surface depth; coarse depth rejection leaks at silhouettes.
@@ -935,7 +1022,7 @@ fn cs_integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Slice planes are constant view depth, so a ray at the screen edge travels
     // further between two slices than one down the centre. Without this the fog
     // thins toward the corners.
-    let ndc = helio_uv_to_ndc(uv);
+    let ndc = helio_uv_to_ndc(uv) + cameras[0].jitter_frame.xy;
     let p_near = cameras[0].view_proj_inv * vec4<f32>(ndc, 0.0, 1.0);
     let p_far  = cameras[0].view_proj_inv * vec4<f32>(ndc, 1.0, 1.0);
     let dir = normalize(p_far.xyz / p_far.w - p_near.xyz / p_near.w);

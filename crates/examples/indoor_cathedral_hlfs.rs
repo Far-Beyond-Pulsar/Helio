@@ -2,9 +2,12 @@
 //!
 //! A Gothic interior with ribbed vaults, clustered limestone piers, marble
 //! paving, carved oak pews, bronze chandeliers and leaded stained glass.
-//! Panes use alpha blending, with explicit thin-sheet RGB shadow transmission
-//! in RT mode. Refraction and caustics are not simulated.
-//! RT defaults to one daylight sun plus interior lights. Set
+//! Panes use alpha blending and cast coloured shadows: the raster path through
+//! the shadow transmittance layer, RT through thin-sheet RGB transmission.
+//! Refraction and caustics are not simulated.
+//! Both sizes default to one shadowed daylight sun plus interior lights, with an
+//! incense medium filling the nave so the sun forms coloured shafts through the
+//! windows (`HLFS_NO_FOG`, `HLFS_FOG_DENSITY`, `HLFS_FOG_MODE`, `HLFS_SUN` adjust it). Set
 //! `HLFS_LEGACY_CATHEDRAL_LIGHTS=1` for the multi-window transmission stress setup.
 //!
 //! HLFS uses hierarchical light culling, visibility-guided sampling and
@@ -96,7 +99,13 @@ fn main() {
         .filter(|a| a == "--capture")
         .and_then(|_| std::env::args().nth(2))
     {
-        hlfs_capture::run(&directory, populate_cathedral);
+        capture(&directory, "cathedral", false, populate_cathedral, |t, aspect| {
+            Camera::perspective_look_at(
+                glam::Vec3::new(2.0 * t, 2.0, 24.0 - 18.0 * t),
+                glam::Vec3::new(0.0, 5.0, -20.0), glam::Vec3::Y,
+                std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0,
+            )
+        });
         return;
     }
     if let Some(directory) = std::env::args()
@@ -104,8 +113,7 @@ fn main() {
         .filter(|a| a == "--capture-large")
         .and_then(|_| std::env::args().nth(2))
     {
-        hlfs_capture::run_scene(&directory, "cathedral_large", populate_large_cathedral,
-            large_cathedral_camera);
+        capture(&directory, "cathedral_large", true, populate_large_cathedral, large_cathedral_camera);
         return;
     }
     let event_loop = EventLoop::new().expect("event loop");
@@ -600,36 +608,8 @@ impl AppState {
             }
         }
 
-        // Chandeliers flicker slightly
-        let flicker = 1.0 + (time * 9.1).sin() * 0.03 + (time * 5.7).cos() * 0.02;
-        // Candle flicker — more pronounced
-        let cflicker = 1.0 + (time * 14.3).sin() * 0.07 + (time * 8.9).cos() * 0.05;
-
-        let with_shadows = |mut light: helio::GpuLight| {
-            light.set_ray_traced_shadows(self.acceleration.is_some());
-            light
-        };
-        // Update flickering chandelier intensities
-        let chandelier_z = if self.large { LARGE_CHANDELIER_Z } else { CHANDELIER_Z };
-        let candles = if self.large { LARGE_CANDLES } else { CANDLES };
-        for (i, &id) in self.chandelier_light_ids.iter().enumerate() {
-            let z = chandelier_z[i];
-            update_light(
-                &mut self.scene_db.world,
-                id,
-                with_shadows(point_light([0.0_f32, if self.large { 31.0 } else { 15.0 }, z],
-                    [1.0, 0.92, 0.78], 160.0 * flicker, 22.0)),
-            );
-        }
-        // Update flickering candle intensities
-        for (i, &id) in self.candle_light_ids.iter().enumerate() {
-            let (x, y, z) = candles[i];
-            update_light(
-                &mut self.scene_db.world,
-                id,
-                with_shadows(point_light([x, y, z], [1.0, 0.6, 0.15], 8.0 * cflicker, 4.0)),
-            );
-        }
+        flicker_lights(&mut self.scene_db.world, &self.chandelier_light_ids, &self.candle_light_ids,
+            self.large, time, self.acceleration.is_some());
 
         // Scene state is persistent — no per-frame setup needed.
 
@@ -657,21 +637,59 @@ impl AppState {
 }
 
 fn populate_cathedral(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
+    configure_cathedral_fog(world, false);
     spawn_indoor_cathedral_sky(world);
     cathedral_detail::populate(world);
     populate_cathedral_lights(world, false)
 }
 
+/// Afternoon sun, travelling +x (in through the left windows), down and toward the
+/// entrance, so the view up the nave looks into the light where forward-
+/// scattering smoke is brightest. 46° elevation lands the lancet patterns on the nave floor in both
+/// sizes: the small nave's 5–11 m lancets and the large one's clerestory.
+const SUN_DIRECTION: [f32; 3] = [0.58, -0.72, 0.38];
+
+/// Lets an interior light glow in the incense. These lights have no shadow
+/// maps, so their scattering is unshadowed (decay 0): a soft halo, no shafts.
+fn haze_light(mut light: helio::GpuLight) -> helio::GpuLight {
+    if std::env::var_os("HLFS_NO_HAZE_LIGHTS").is_some() { return light; }
+    light.god_rays_enabled = 1;
+    light.god_rays_density = 1.0;
+    light.god_rays_weight = 1.0;
+    light.god_rays_exposure = 1.0;
+    light.god_rays_decay = 0.0;
+    light
+}
+
+/// Incense haze filling the interior: a local medium bounded by the walls,
+/// lit by the sun through the stained glass. Physical fog only scatters light
+/// that reaches it, so the shafts take the panes' colours and outlines.
+/// `HLFS_NO_FOG=1` removes it; `HLFS_FOG_DENSITY=<m⁻¹>` overrides extinction.
 fn configure_cathedral_fog(world: &mut World, large: bool) {
-    if !large || std::env::var_os("HLFS_NO_FOG").is_some() { return; }
-    let mut settings = helio_pass_postprocess::PostProcessSettings::default();
-    settings.fog_enabled = true;
-    settings.fog_density = 0.004;
-    settings.fog_color = [0.57, 0.55, 0.51];
-    settings.fog_scattering_anisotropy = 0.65;
-    settings.fog_max_distance = 180.0;
-    settings.fog_start_distance = 1.5;
-    v3_demo_common::set_camera_postprocess(world, 0, &settings);
+    if std::env::var_os("HLFS_NO_FOG").is_some() { return; }
+    let (half_x, height, half_z, extinction, range) =
+        if large { (22.0, 46.0, 71.5, 0.018, 170.0) } else { (10.7, 21.0, 27.8, 0.03, 70.0) };
+    let extinction = std::env::var("HLFS_FOG_DENSITY").ok()
+        .and_then(|v| v.parse().ok()).unwrap_or(extinction);
+    v3_demo_common::spawn_local_fog(
+        world,
+        [-half_x, 0.0, -half_z],
+        [half_x, height, half_z],
+        v3_demo_common::GlobalFogComponent {
+            // Drifting smoke under a height envelope: incense, not a flat haze.
+            mode: std::env::var("HLFS_FOG_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(2),
+            extinction,
+            albedo: [0.92, 0.90, 0.86],
+            // Forward-peaked, as smoke is: shafts brighten looking toward the sun.
+            anisotropy: 0.6,
+            // Denser low down, thinning toward the vault.
+            height: 0.0,
+            height_falloff: if large { 0.03 } else { 0.06 },
+            ..Default::default()
+        },
+        1.0,
+    );
+    v3_demo_common::set_volumetric_quality(world, 1, range);
 }
 
 fn large_cathedral_camera(t: f32, aspect: f32) -> Camera {
@@ -699,17 +717,21 @@ fn populate_cathedral_lights(world: &mut World, large: bool) -> (Vec<Entity>, Ve
     for &z in chandelier_z {
         chandelier_light_ids.push(spawn_light(
             world,
-            point_light([0.0_f32, if large { 31.0 } else { 15.0 }, z],
-                [1.0, 0.92, 0.78], 160.0, 22.0),
+            haze_light(point_light([0.0_f32, if large { 31.0 } else { 15.0 }, z],
+                [1.0, 0.92, 0.78], 160.0, 22.0)),
         ));
     }
-    // A single exterior sun supplies a coherent daylight direction. Keep the
-    // older multi-window emitter setup as an explicit transmission stress case.
-    if std::env::var_os("HLFS_RT").is_some()
-        && std::env::var_os("HLFS_LEGACY_CATHEDRAL_LIGHTS").is_none()
-    {
-        spawn_light(world, v3_demo_common::directional_light(
-            [0.80, -0.48, -0.30], [1.0, 0.94, 0.84], 4.0,
+    // A single exterior sun supplies a coherent daylight direction. It owns the
+    // first shadow slot and participates in the medium, so the glass colours
+    // both the floor pattern and the shafts (raster: the shadow transmittance
+    // layer; RT: thin-sheet transmission). Keep the older multi-window
+    // emitter setup as an explicit transmission stress case.
+    if std::env::var_os("HLFS_LEGACY_CATHEDRAL_LIGHTS").is_none() {
+        let intensity = std::env::var("HLFS_SUN").ok()
+            .and_then(|v| v.parse().ok()).unwrap_or(20.0);
+        spawn_light(world, v3_demo_common::volumetric_light(
+            v3_demo_common::directional_light(SUN_DIRECTION, [1.0, 0.94, 0.84], intensity),
+            v3_demo_common::SHADOW_BASES[0],
         ));
     } else {
         // Stained glass shafts — static, no need to store ids
@@ -733,9 +755,56 @@ fn populate_cathedral_lights(world: &mut World, large: bool) -> (Vec<Entity>, Ve
     for &(x, y, z) in candles {
         candle_light_ids.push(spawn_light(
             world,
-            point_light([x, y, z], [1.0, 0.6, 0.15], 8.0, 4.0),
+            haze_light(point_light([x, y, z], [1.0, 0.6, 0.15], 8.0, 4.0)),
         ));
     }
 
     (chandelier_light_ids, candle_light_ids)
+}
+
+/// Chandeliers flicker slightly and candles more. Shared by the window and by
+/// `HLFS_CAPTURE_FLICKER=1` captures, so stability measurements see the same
+/// per-frame light updates the interactive demo makes.
+fn flicker_lights(
+    world: &mut World,
+    chandeliers: &[Entity],
+    candles: &[Entity],
+    large: bool,
+    time: f32,
+    ray_traced: bool,
+) {
+    let flicker = 1.0 + (time * 9.1).sin() * 0.03 + (time * 5.7).cos() * 0.02;
+    let cflicker = 1.0 + (time * 14.3).sin() * 0.07 + (time * 8.9).cos() * 0.05;
+    let with_shadows = |mut light: helio::GpuLight| {
+        light.set_ray_traced_shadows(ray_traced);
+        light
+    };
+    let chandelier_z = if large { LARGE_CHANDELIER_Z } else { CHANDELIER_Z };
+    let candle_positions = if large { LARGE_CANDLES } else { CANDLES };
+    for (&id, &z) in chandeliers.iter().zip(chandelier_z) {
+        update_light(world, id, with_shadows(haze_light(point_light(
+            [0.0_f32, if large { 31.0 } else { 15.0 }, z], [1.0, 0.92, 0.78], 160.0 * flicker, 22.0))));
+    }
+    for (&id, &(x, y, z)) in candles.iter().zip(candle_positions) {
+        update_light(world, id, with_shadows(haze_light(point_light(
+            [x, y, z], [1.0, 0.6, 0.15], 8.0 * cflicker, 4.0))));
+    }
+}
+
+/// Offscreen capture, optionally with the window's per-frame light flicker.
+fn capture(directory: &str, name: &str, large: bool,
+    populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity>), camera: fn(f32, f32) -> Camera) {
+    if std::env::var_os("HLFS_CAPTURE_FLICKER").is_none() {
+        return hlfs_capture::run_scene(directory, name, populate, camera);
+    }
+    let ids = std::rc::Rc::new(std::cell::RefCell::new((Vec::new(), Vec::new())));
+    let stored = ids.clone();
+    let ray_traced = std::env::var_os("HLFS_RT").is_some();
+    hlfs_capture::run_scene_animated(directory, name,
+        move |world| { let result = populate(world); *stored.borrow_mut() = result.clone(); result },
+        camera,
+        move |world, time| {
+            let ids = ids.borrow();
+            flicker_lights(world, &ids.0, &ids.1, large, time, ray_traced);
+        });
 }

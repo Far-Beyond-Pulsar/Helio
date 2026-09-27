@@ -125,6 +125,9 @@ pub struct VolumetricFogSettingsComponent {
     #[gpu]
     pub temporal_blend: f32,
     #[gpu]
+    /// Relative density change at which history starts to be discarded (a
+    /// medium appearing or vanishing). Lighting changes never reject: samples
+    /// are jittered, so they differ by design and the blend integrates them.
     pub history_rejection: f32,
     #[gpu]
     pub light_samples: u32,
@@ -143,8 +146,8 @@ impl Default for VolumetricFogSettingsComponent {
             enabled: 1,
             max_distance: 1000.0,
             light_max_distance: 1000.0,
-            temporal_blend: 0.1,
-            history_rejection: 0.25,
+            temporal_blend: 0.05,
+            history_rejection: 0.8,
             light_samples: 0,
             history_epoch: 0,
             _pad: [0.0; 2],

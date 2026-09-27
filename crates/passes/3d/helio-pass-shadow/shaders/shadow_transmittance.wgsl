@@ -93,10 +93,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if in.pos.z > opaque {
         discard;
     }
-    // The raster display model of a pane is coverage `a` of colour `c` over
-    // the background; the light filter consistent with it is mix(1, c, a).
+    // Beer-Lambert through tinted glass: base colour is the transmittance of a
+    // reference sheet, alpha its optical thickness (a = 0.5 transmits c, a = 0
+    // is clear). Matches the depth of colour of RT thin-sheet transmission far
+    // better than the display blend mix(1, c, a), which reads as pastel.
     let m = materials[in.material];
-    let c = clamp(m.base_color.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    let c = clamp(m.base_color.rgb, vec3<f32>(0.02), vec3<f32>(1.0));
     let a = clamp(m.base_color.a, 0.0, 1.0);
-    return vec4<f32>(a * (1.0 - c), 1.0 - in.pos.z);
+    return vec4<f32>(1.0 - pow(c, vec3<f32>(2.0 * a)), 1.0 - in.pos.z);
 }

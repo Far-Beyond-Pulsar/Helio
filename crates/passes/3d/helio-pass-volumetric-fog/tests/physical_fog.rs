@@ -163,11 +163,11 @@ fn gpu_numerics_thin_limit_dense_limit_history_and_cube_faces() {
         &[0.0, 0.0, 0.0, 1.0],
         "lights off must remain black"
     );
-    assert_eq!(
-        &values[56..60],
-        &[2.0, 2.0, 2.0, 1.0],
-        "lighting changes reject stale history"
-    );
+    // Lighting changes blend rather than reject: jittered samples differ by
+    // design (across shaft edges by 100%), and rejecting them showed raw noise.
+    for (value, expected) in values[56..60].iter().zip([1.05, 1.05, 1.05, 1.0]) {
+        near(*value, expected, 1e-6);
+    }
     near(values[60], 1.0005, 1e-6);
     for (i, face) in [0., 1., 2., 3., 4., 5., 0., 3.].iter().enumerate() {
         assert_eq!(values[64 + i * 4], *face);
@@ -492,12 +492,12 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
             "{}\n{}",
             helio_pass_volumetric_fog::shader_source(),
             r#"
-@group(0) @binding(20) var<storage, read_write> probes: array<vec4<f32>, 6>;
+@group(0) @binding(30) var<storage, read_write> probes: array<vec4<f32>, 6>;
 @compute @workgroup_size(1) fn probe_point_shadow() {
     let points = array<vec3<f32>,6>(vec3<f32>(2,0,0),vec3<f32>(-2,0,0),vec3<f32>(0,2,0),vec3<f32>(0,-2,0),vec3<f32>(0,0,2),vec3<f32>(0,0,-2));
     for (var i = 0u; i < 6u; i++) {
         let p = points[i];
-        probes[i] = vec4<f32>(shaft_visibility(0u,p),inscatter_from_light(0u,p,normalize(p),0.0).x,
+        probes[i] = vec4<f32>(shaft_visibility(0u,p).x,inscatter_from_light(0u,p,normalize(p),0.0).x,
             inscatter_from_light(1u,p,normalize(p),0.0).x,inscatter_from_light(2u,p,normalize(p),0.0).x);
     }
 }
@@ -548,7 +548,7 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
         (12, &indices),
         (14, &global),
         (15, &local),
-        (20, &output),
+        (30, &output),
     ]
     .iter()
     .map(|(binding, b)| wgpu::BindGroupEntry {
@@ -564,6 +564,26 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
         binding: 6,
         resource: wgpu::BindingResource::Sampler(&sampler),
     });
+    // The same atlas stands in for the static casters (min of equal maps), and a
+    // zeroed transmittance layer means no glass.
+    let glass = device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let glass_view = glass.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    let linear = device.create_sampler(&Default::default());
+    entries.push(wgpu::BindGroupEntry { binding: 20, resource: wgpu::BindingResource::TextureView(&view) });
+    entries.push(wgpu::BindGroupEntry { binding: 21, resource: wgpu::BindingResource::TextureView(&glass_view) });
+    entries.push(wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&linear) });
     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &probe.get_bind_group_layout(0),
@@ -896,10 +916,8 @@ fn production_graph_native_fog_black_without_lights_emission_and_disable_clear_h
         "current blocker must shadow the fog"
     );
     graph.find_pass_mut::<ShadowProducer>().unwrap().clear_depth = 1.0;
-    assert!(
-        sample(&world, &mut scene, &mut graph)[0] > 0.0,
-        "removing a blocker must light fog this frame"
-    );
+    let unblocked = sample(&world, &mut scene, &mut graph);
+    assert!(unblocked[0] > 0.0, "removing a blocker must light fog this frame: {unblocked:?}");
     graph.find_pass_mut::<ShadowProducer>().unwrap().clear_depth = 0.0;
     assert_eq!(
         sample(&world, &mut scene, &mut graph)[0],

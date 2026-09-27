@@ -255,7 +255,8 @@ pub fn run_scene_animated(
                 });
         }
         if name.starts_with("cathedral") {
-            let camera = camera_path(fixed_camera.unwrap_or(0.0), width as f32 / height as f32);
+            let camera = view_override(width as f32 / height as f32)
+                .unwrap_or_else(|| camera_path(fixed_camera.unwrap_or(0.0), width as f32 / height as f32));
             warm_up_cathedral(&scene_db, &mut renderer,
                 ray_traced.then_some(&acceleration), &device, &queue, &camera, &view);
         }
@@ -395,7 +396,8 @@ pub fn run_scene_animated(
                 if frame+1==capture_frames { eprintln!("Diagnostic texture uploads: {}",store.upload_count()); }
             }
             let t = fixed_camera.unwrap_or((frame as f32 / 99.0).clamp(0.0, 1.0));
-            let camera = camera_path(t, width as f32 / height as f32);
+            let camera = view_override(width as f32 / height as f32)
+                .unwrap_or_else(|| camera_path(t, width as f32 / height as f32));
             update(&mut scene_db.world, frame as f32 / 60.0);
             let start = std::time::Instant::now();
             crate::v3_demo_common::flush_scene_db(&scene_db, &queue);
@@ -749,4 +751,17 @@ fn register_checker(device: &wgpu::Device, queue: &wgpu::Queue,
         usage:wgpu::TextureUsages::TEXTURE_BINDING|wgpu::TextureUsages::COPY_DST,
         view_formats:&[],
     },&texels).unwrap()
+}
+
+/// `HLFS_CAPTURE_VIEW=ex,ey,ez,tx,ty,tz`: a fixed eye and target replacing the
+/// scene's camera path, for stability measurements from arbitrary viewpoints.
+fn view_override(aspect: f32) -> Option<Camera> {
+    let value = std::env::var("HLFS_CAPTURE_VIEW").ok()?;
+    let v: Vec<f32> = value.split(',').map(|x| x.trim().parse().expect("HLFS_CAPTURE_VIEW: six numbers")).collect();
+    assert_eq!(v.len(), 6, "HLFS_CAPTURE_VIEW: eye x,y,z then target x,y,z");
+    let eye = glam::Vec3::new(v[0], v[1], v[2]);
+    let target = glam::Vec3::new(v[3], v[4], v[5]);
+    // Straight down needs a different up vector.
+    let up = if (target - eye).normalize().abs().y > 0.99 { glam::Vec3::Z } else { glam::Vec3::Y };
+    Some(Camera::perspective_look_at(eye, target, up, std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0))
 }

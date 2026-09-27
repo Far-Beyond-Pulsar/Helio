@@ -58,7 +58,7 @@ const WG_Y: u32 = 8;
 /// Weight of the current frame in the temporal blend.
 ///
 /// Lighting edits and discontinuities override this weight and reject history.
-const TEMPORAL_BLEND: f32 = 0.1;
+const TEMPORAL_BLEND: f32 = 0.05;
 
 const FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 // FogVolume's WGSL opaque prefix/suffix must agree with the PP row ABI.
@@ -93,7 +93,9 @@ struct FogGlobals {
     history_valid: u32,
     temporal_blend: f32,
     time: f32,
-    _pad: [f32; 3],
+    /// Last frame's camera jitter (NDC): history lives in its unjittered grid.
+    prev_jitter: [f32; 2],
+    _pad: f32,
     grid: [u32; 3],
     enabled: u32,
 }
@@ -138,6 +140,9 @@ pub struct VolumetricFogPass {
     fallback_volumes: wgpu::Buffer,
     fallback_lights: wgpu::Buffer,
     fallback_shadow: wgpu::TextureView,
+    /// Cleared to the far plane on first use: a zeroed depth reads as fully
+    /// shadowed, which blacked out every fog light in graphs without atlases.
+    fallback_shadow_cleared: bool,
     /// Zeroed (the layer stores 1 - T): nothing translucent filters the light.
     fallback_transmittance: wgpu::TextureView,
 
@@ -533,7 +538,7 @@ impl VolumetricFogPass {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Depth32Float,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor {
@@ -560,6 +565,7 @@ impl VolumetricFogPass {
             fallback_volumes,
             fallback_lights,
             fallback_shadow,
+            fallback_shadow_cleared: false,
             fallback_transmittance: clear_transmittance(device),
             inject_pipeline,
             integrate_pipeline,
@@ -708,6 +714,11 @@ impl RenderPass for VolumetricFogPass {
                 self.history_valid = false;
             }
         }
+        let prev_jitter = self
+            .previous_camera
+            .map_or([ctx.camera_data.jitter_frame[0], ctx.camera_data.jitter_frame[1]], |c| {
+                [c.jitter_frame[0], c.jitter_frame[1]]
+            });
         self.previous_camera = Some(*ctx.camera_data);
 
         let globals = FogGlobals {
@@ -717,7 +728,8 @@ impl RenderPass for VolumetricFogPass {
             history_valid: self.history_valid as u32,
             temporal_blend: self.temporal_blend,
             time: self.time,
-            _pad: [0.0; 3],
+            prev_jitter,
+            _pad: 0.0,
             grid: self.grid,
             enabled: self.active as u32,
         };
@@ -727,6 +739,24 @@ impl RenderPass for VolumetricFogPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        if !self.fallback_shadow_cleared {
+            let _clear = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Fog Empty Shadow Atlas clear"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.fallback_shadow,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.fallback_shadow_cleared = true;
+        }
         let postprocess_buf = ctx
             .registry
             .get(helio_core::ResourceKey::new("postprocess_uniforms"));

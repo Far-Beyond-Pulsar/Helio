@@ -14,7 +14,8 @@ fn apply_medium(surface: vec4<f32>, p: vec3<f32>) -> vec4<f32> {
     let far = medium_parameters.distances.y;
     if far <= 0.5 { return surface; }
     let clip = cameras[0].view_proj * vec4<f32>(p, 1.0);
-    let uv = clip.xy / clip.w * vec2<f32>(0.5, -0.5) + 0.5;
+    // view_proj is jittered; the froxel grid is not.
+    let uv = (clip.xy / clip.w - cameras[0].jitter_frame.xy) * vec2<f32>(0.5, -0.5) + 0.5;
     let depth = dot(p - cameras[0].position_near.xyz, normalize(cameras[0].forward_far.xyz));
     if depth <= 0.5 { return surface; }
     let slice = clamp(log(max(depth, 0.5) / 0.5) / log(max(far, 1.0) / 0.5)

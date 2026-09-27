@@ -52,6 +52,30 @@ fn vs_fullscreen(@builtin(vertex_index) vi: u32) -> VOut {
     return out;
 }
 
+// Cubic B-spline across the screen axes of the froxel grid, as four trilinear
+// taps. Froxels span many pixels at high resolutions; linear reconstruction
+// then shows the grid as diamonds and creases along shafts. Depth stays
+// linear: a wider depth kernel would pull fog from behind the surface forward.
+fn sample_medium(uv: vec2<f32>, slice: f32) -> vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(integrated_medium).xy);
+    let t = uv * dims - 0.5;
+    let base = floor(t);
+    let f = t - base;
+    let f2 = f * f;
+    let f3 = f2 * f;
+    let w0 = (1.0 - f) * (1.0 - f) * (1.0 - f) / 6.0;
+    let w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+    let w3 = f3 / 6.0;
+    let g0 = w0 + w1;
+    let g1 = 1.0 - g0;
+    let c0 = (base - 1.0 + w1 / g0 + 0.5) / dims;
+    let c1 = (base + 1.0 + w3 / max(g1, vec2<f32>(1e-6)) + 0.5) / dims;
+    return g0.y * (g0.x * textureSampleLevel(integrated_medium, medium_sampler, vec3<f32>(c0.x, c0.y, slice), 0.0)
+                 + g1.x * textureSampleLevel(integrated_medium, medium_sampler, vec3<f32>(c1.x, c0.y, slice), 0.0))
+         + g1.y * (g0.x * textureSampleLevel(integrated_medium, medium_sampler, vec3<f32>(c0.x, c1.y, slice), 0.0)
+                 + g1.x * textureSampleLevel(integrated_medium, medium_sampler, vec3<f32>(c1.x, c1.y, slice), 0.0));
+}
+
 @fragment
 fn fs_composite(in: VOut) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(in.pos.xy);
@@ -75,7 +99,9 @@ fn fs_composite(in: VOut) -> @location(0) vec4<f32> {
         0.0,
         1.0,
     );
-    let medium = textureSampleLevel(integrated_medium, medium_sampler, vec3<f32>(in.uv, slice), 0.0);
+    // The froxel grid is unjittered; this pixel's ray is the jittered one.
+    let grid_uv = in.uv - cameras[0].jitter_frame.xy * vec2<f32>(0.5, -0.5);
+    let medium = sample_medium(grid_uv, slice);
     // Beer-Lambert attenuation of the surface plus scattered radiance. HDR is
     // preserved; exposure and tone mapping happen once, later.
     return vec4<f32>(color * clamp(medium.a, 0.0, 1.0) + max(medium.rgb, vec3<f32>(0.0)), 1.0);
