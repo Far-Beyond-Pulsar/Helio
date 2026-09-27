@@ -801,6 +801,8 @@ fn inscatter_from_light(light_idx: u32, p: vec3<f32>, ray_dir: vec3<f32>, anisot
     var atten = 1.0;
     var shadow_distance = media_list.light_max_distance;
     var view_dir = ray_dir;
+    // Where the medium's transmittance toward the light is evaluated.
+    var eval_pos = p;
 
     if light.light_type == LIGHT_DIRECTIONAL {
         if dot(light.direction_outer.xyz, light.direction_outer.xyz) < 1e-12 { return vec3<f32>(0); }
@@ -823,7 +825,11 @@ fn inscatter_from_light(light_idx: u32, p: vec3<f32>, ray_dir: vec3<f32>, anisot
         }
         let delta = light.position_range.xyz - q;
         let dist = length(delta);
-        shadow_distance = length(light.position_range.xyz - p);
+        // Transmittance toward the lamp is taken from the same deterministic
+        // point: from the jittered p, exp(-sigma * distance) alone varied by a
+        // few percent per frame in dense haze.
+        eval_pos = q;
+        shadow_distance = dist;
         let range = max(light.position_range.w, 1e-4);
         if dist > range { return vec3<f32>(0.0); }
         to_light = delta / max(dist, 1e-6);
@@ -856,7 +862,7 @@ fn inscatter_from_light(light_idx: u32, p: vec3<f32>, ray_dir: vec3<f32>, anisot
     var vis = vec3<f32>(1.0);
     if shadow_strength > 0.0 { vis = mix(vec3<f32>(1.0), shaft_visibility(light_idx, p), shadow_strength); }
     if all(vis <= vec3<f32>(0.0)) || atten <= 0.0 { return vec3<f32>(0); }
-    vis *= medium_transmittance(p, to_light, shadow_distance);
+    vis *= medium_transmittance(eval_pos, to_light, shadow_distance);
 
     let radiance = light.color_intensity.rgb * light.color_intensity.w;
     return radiance * atten * phase * vis
@@ -984,7 +990,12 @@ fn cs_inject(@builtin(global_invocation_id) gid: vec3<u32>) {
     var result = vec4<f32>(scattering, density);
 
     if fog_globals.history_valid != 0u && media_list.history_compatible != 0u {
-        let history_pos = froxel_world_pos(uv, (f32(gid.z) + 0.5) / f32(dims.z));
+        // History stores the cell average: read it at the cell centre. Reading
+        // it at this frame's jittered position resampled the history at a
+        // random sub-froxel offset every frame, which blurred it and kept it
+        // changing even in a static scene.
+        let history_pos = froxel_world_pos((vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims.xy),
+            (f32(gid.z) + 0.5) / f32(dims.z));
         let hist = sample_history(history_pos);
         if hist.w >= 0.0 {
             // Reject history at moving smoke edges and after density changes.

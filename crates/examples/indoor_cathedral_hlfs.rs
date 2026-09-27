@@ -689,7 +689,13 @@ fn configure_cathedral_fog(world: &mut World, large: bool) {
         },
         1.0,
     );
-    v3_demo_common::set_volumetric_quality(world, 1, range);
+    let settings = v3_demo_common::set_volumetric_quality(world, 1, range);
+    if let Some(blend) = std::env::var("HLFS_FOG_BLEND").ok().and_then(|v| v.parse().ok()) {
+        world.insert(settings, v3_demo_common::VolumetricFogSettingsComponent {
+            quality: 1, max_distance: range, light_max_distance: range, temporal_blend: blend,
+            ..Default::default()
+        });
+    }
 }
 
 fn large_cathedral_camera(t: f32, aspect: f32) -> Camera {
