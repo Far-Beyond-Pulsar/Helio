@@ -138,6 +138,8 @@ struct CpuReference {
     live_count: u32,
     movable_count: u32,
     static_count: u32,
+    /// Static transparent-only rows: the coloured transmittance casters.
+    transmissive_count: u32,
 }
 
 fn cpu_reference(rows: &[StaticObjectComponent], materials: &[TestMaterial]) -> CpuReference {
@@ -147,16 +149,21 @@ fn cpu_reference(rows: &[StaticObjectComponent], materials: &[TestMaterial]) -> 
     let mut live_count = 0u32;
     let mut movable_count = 0u32;
     let mut static_count = 0u32;
+    let mut transmissive_count = 0u32;
 
     for row in rows {
         if row.mesh_generation == 0 {
             continue;
         }
         live_count += 1;
-        if (row.flags & INSTANCE_FLAG_MOVABLE) != 0 {
-            movable_count += 1;
-        } else {
-            static_count += 1;
+        let transparent =
+            (materials[row.material_slot as usize].flags & FLAG_TRANSPARENT_ONLY) != 0;
+        let movable = (row.flags & INSTANCE_FLAG_MOVABLE) != 0;
+        match (transparent, movable) {
+            (true, false) => transmissive_count += 1,
+            (true, true) => {} // moving glass casts no shadow
+            (false, true) => movable_count += 1,
+            (false, false) => static_count += 1,
         }
         let key = (row.mesh_slot, row.material_slot);
         *groups.entry(key).or_insert(0) += 1;
@@ -181,6 +188,7 @@ fn cpu_reference(rows: &[StaticObjectComponent], materials: &[TestMaterial]) -> 
         live_count,
         movable_count,
         static_count,
+        transmissive_count,
     }
 }
 
@@ -194,6 +202,7 @@ struct GpuResult {
     forward: Vec<(u32, u64, u32, u32)>,
     shadow_static_count: u32,
     shadow_movable_count: u32,
+    shadow_transmissive_count: u32,
     group_count: u32,
 }
 
@@ -288,7 +297,8 @@ async fn run_gpu(rows: &[StaticObjectComponent], materials: &[TestMaterial]) -> 
 
     let shadow_bytes = read_buf(pass.shadow_counts_buffer(), "counts readback (shadow)");
     let shadow_counts: &[u32] = bytemuck::cast_slice(&shadow_bytes);
-    let (shadow_static_count, shadow_movable_count) = (shadow_counts[0], shadow_counts[1]);
+    let (shadow_static_count, shadow_movable_count, shadow_transmissive_count) =
+        (shadow_counts[0], shadow_counts[1], shadow_counts[2]);
 
     let instances_bytes = read_buf(pass.instances_buffer(), "instances readback");
     // GpuInstanceDataOut: model(64)+normal_mat(48)+bounds(16)+prev_model(64)=192 bytes before mesh_id/material_id/flags/lightmap_index.
@@ -390,6 +400,7 @@ async fn run_gpu(rows: &[StaticObjectComponent], materials: &[TestMaterial]) -> 
         forward,
         shadow_static_count,
         shadow_movable_count,
+        shadow_transmissive_count,
         group_count,
     })
 }
@@ -626,8 +637,8 @@ fn gpu_object_batch_matches_cpu_reference() {
         "shadow movable-partition count mismatch"
     );
     assert_eq!(
-        gpu.shadow_static_count + gpu.shadow_movable_count,
-        expected.live_count
+        gpu.shadow_transmissive_count, expected.transmissive_count,
+        "shadow transmissive-partition count mismatch"
     );
 }
 

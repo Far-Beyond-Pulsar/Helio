@@ -853,6 +853,11 @@ fn cs_range_write(
 }
 
 // ── Stage 8: cs_shadow_partition ─────────────────────────────────────────────
+//
+// Opaque casters split by mobility into the static/movable depth atlases.
+// Transmissive (transparent-only) static casters go to their own list: the
+// shadow pass renders them into the coloured transmittance layer instead of
+// the depth atlas, so light passes through glass tinted rather than blocked.
 
 const INSTANCE_FLAG_MOVABLE: u32 = 1u << 3u; // mirrors libhelio::INSTANCE_FLAG_MOVABLE
 
@@ -861,7 +866,9 @@ const INSTANCE_FLAG_MOVABLE: u32 = 1u << 3u; // mirrors libhelio::INSTANCE_FLAG_
 @group(0) @binding(2) var<storage, read> static_objects_sp: array<StaticObjectRow>;
 @group(0) @binding(3) var<storage, read_write> shadow_static_indirect: array<DrawIndexedIndirectArgsOut>;
 @group(0) @binding(4) var<storage, read_write> shadow_movable_indirect: array<DrawIndexedIndirectArgsOut>;
-@group(0) @binding(5) var<storage, read_write> shadow_counts: array<atomic<u32>>; // [static, movable]
+@group(0) @binding(5) var<storage, read_write> shadow_counts: array<atomic<u32>>; // [static, movable, transmissive]
+@group(0) @binding(6) var<storage, read> materials_sp: array<GpuMaterial>;
+@group(0) @binding(7) var<storage, read_write> shadow_transmissive_indirect: array<DrawIndexedIndirectArgsOut>;
 
 @compute @workgroup_size(WG)
 fn cs_shadow_partition(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -877,7 +884,15 @@ fn cs_shadow_partition(@builtin(global_invocation_id) gid: vec3<u32>) {
         row.vertex_offset,
         i,
     );
-    if (row.flags & INSTANCE_FLAG_MOVABLE) != 0u {
+    let transmissive = (materials_sp[row.material_slot].flags & MATERIAL_FLAG_TRANSPARENT_ONLY) != 0u;
+    if transmissive {
+        // Moving glass casts no coloured shadow (the transmittance layer is
+        // cached with the static atlas); it never casts an opaque one.
+        if (row.flags & INSTANCE_FLAG_MOVABLE) == 0u {
+            let slot = atomicAdd(&shadow_counts[2], 1u);
+            shadow_transmissive_indirect[slot] = entry;
+        }
+    } else if (row.flags & INSTANCE_FLAG_MOVABLE) != 0u {
         let slot = atomicAdd(&shadow_counts[1], 1u);
         shadow_movable_indirect[slot] = entry;
     } else {

@@ -260,6 +260,9 @@ struct ScratchBuffers {
     range_bucket_counts: wgpu::Buffer,
     shadow_static_indirect: wgpu::Buffer,
     shadow_movable_indirect: wgpu::Buffer,
+    /// Static transparent-only casters, drawn into the coloured
+    /// transmittance layer rather than the depth atlas.
+    shadow_transmissive_indirect: wgpu::Buffer,
     shadow_counts: wgpu::Buffer,
     /// Per `static_objects` row: last drawn transform + identity, for
     /// per-frame motion vectors (see `object_batch.wgsl`'s `PrevRow`).
@@ -321,6 +324,11 @@ impl ScratchBuffers {
             shadow_movable_indirect: create_indirect_buffer(
                 device,
                 "ObjBatch ShadowMovableIndirect",
+                n * INDIRECT_ARGS_BYTES,
+            ),
+            shadow_transmissive_indirect: create_indirect_buffer(
+                device,
+                "ObjBatch ShadowTransmissiveIndirect",
                 n * INDIRECT_ARGS_BYTES,
             ),
             shadow_counts: create_storage_buffer(device, "ObjBatch ShadowCounts", 16),
@@ -556,6 +564,8 @@ impl ObjectBatchPass {
                     bgl_entry_storage(3, cs, false),
                     bgl_entry_storage(4, cs, false),
                     bgl_entry_storage(5, cs, false),
+                    bgl_entry_storage(6, cs, true),
+                    bgl_entry_storage(7, cs, false),
                 ],
             }),
         };
@@ -977,6 +987,8 @@ impl ObjectBatchPass {
                 bg_entry(3, &s.shadow_static_indirect),
                 bg_entry(4, &s.shadow_movable_indirect),
                 bg_entry(5, &s.shadow_counts),
+                bg_entry(6, materials),
+                bg_entry(7, &s.shadow_transmissive_indirect),
             ],
         }));
     }
@@ -1325,6 +1337,8 @@ impl RenderPass for ObjectBatchPass {
                 shadow_static_draw_count,
                 shadow_movable_indirect: &self.scratch.shadow_movable_indirect,
                 shadow_movable_draw_count,
+                shadow_transmissive_indirect: &self.scratch.shadow_transmissive_indirect,
+                shadow_transmissive_draw_count: self.readback.shadow_transmissive(),
                 shadow_static_generation: self.shadow_static_generation(),
             })
         };

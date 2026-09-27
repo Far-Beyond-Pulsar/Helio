@@ -642,7 +642,7 @@ impl RenderPass for HlfsPass {
         "HLFS"
     }
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "pre_aa", "render_environment", "ray_transmission"]
+        &["gbuffer", "pre_aa", "render_environment", "ray_transmission", "static_shadow_atlas", "shadow_transmittance"]
     }
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         let output: &'a wgpu::TextureView =
@@ -806,6 +806,12 @@ impl RenderPass for HlfsPass {
             )
             .map(|s| s.shadow_matrices)
             .unwrap_or(&f.empty_shadow_matrices);
+        // Published only while translucent shadow casters exist; RGB
+        // visibility (the transmission pipelines) is paid for only then.
+        let glass = ctx
+            .registry
+            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("shadow_transmittance"));
+        let screen_space_glass = self.config.mode == HlfsMode::ScreenSpace && glass.is_some();
         let inputs = Inputs {
             camera: ctx.camera,
             lights: lights_buf,
@@ -815,6 +821,12 @@ impl RenderPass for HlfsPass {
                 .registry
                 .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("shadow_atlas"))
                 .unwrap_or(&f.shadow_view),
+            static_shadow_atlas: ctx
+                .registry
+                .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("static_shadow_atlas"))
+                .unwrap_or(&f.shadow_view),
+            shadow_transmittance: glass.unwrap_or(&f.black_array_view),
+            linear_sampler: &f.linear_sampler,
             shadow_sampler: ctx
                 .registry
                 .get::<&wgpu::Sampler>(helio_core::ResourceKey::new("shadow_sampler"))
@@ -849,7 +861,9 @@ impl RenderPass for HlfsPass {
             &self.shadows,
             &inputs,
         );
-        self.external.transmission = self.config.mode == HlfsMode::RayTraced && ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission")).is_some();
+        self.external.transmission = screen_space_glass
+            || (self.config.mode == HlfsMode::RayTraced
+                && ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission")).is_some());
         if self.config.mode == HlfsMode::RayTraced {
             let tlas = ctx
                 .registry

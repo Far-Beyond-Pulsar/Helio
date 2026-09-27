@@ -110,6 +110,8 @@ const NO_SHADOW: u32 = 4294967295u;
 @group(0) @binding(5) var                shadow_atlas:    texture_depth_2d_array;
 @group(0) @binding(6) var                shadow_samp:     sampler_comparison;
 @group(0) @binding(20) var               static_shadow_atlas: texture_depth_2d_array;
+/// Translucent casters (stained glass): rgb = 1 - T, a = 1 - nearest pane depth.
+@group(0) @binding(21) var               shadow_transmittance: texture_2d_array<f32>;
 /// Previous frame's scattering grid, for temporal reprojection.
 @group(0) @binding(7) var                scatter_history: texture_3d<f32>;
 @group(0) @binding(8) var                linear_samp:     sampler;
@@ -698,10 +700,10 @@ fn point_light_face(dir: vec3<f32>) -> u32 {
 /// One comparison tap, not the PCF/PCSS kernel deferred lighting uses. That is
 /// affordable because it runs once per froxel rather than once per pixel per
 /// step, and the temporal blend averages the result across frames.
-fn shaft_visibility(light_idx: u32, p: vec3<f32>) -> f32 {
-    if textureDimensions(shadow_atlas).x <= 1u { return 1.0; }
+fn shaft_visibility(light_idx: u32, p: vec3<f32>) -> vec3<f32> {
+    if textureDimensions(shadow_atlas).x <= 1u { return vec3<f32>(1.0); }
     let light = lights[light_idx];
-    if light.shadow_index == NO_SHADOW { return 1.0; }
+    if light.shadow_index == NO_SHADOW { return vec3<f32>(1.0); }
 
     var layer = light.shadow_index;
 
@@ -713,15 +715,21 @@ fn shaft_visibility(light_idx: u32, p: vec3<f32>) -> f32 {
         layer = light.shadow_index + point_light_face(p - light.position_range.xyz);
     }
 
-    if layer >= arrayLength(&shadow_matrices) || layer >= textureNumLayers(shadow_atlas) { return 1.0; }
+    if layer >= arrayLength(&shadow_matrices) || layer >= textureNumLayers(shadow_atlas) { return vec3<f32>(1.0); }
     let proj = helio_shadow_project(shadow_matrices[layer].mat, p);
     // Outside the map or behind the light: lit, not shadowed. Returning 0.0 would
     // ring the fog with a black shell wherever the cascade ends.
-    if !proj.valid { return 1.0; }
+    if !proj.valid { return vec3<f32>(1.0); }
 
     // Dynamic (movable) and cached static casters, as deferred lighting does.
-    return min(textureSampleCompareLevel(shadow_atlas, shadow_samp, proj.uv, layer, proj.depth),
-               textureSampleCompareLevel(static_shadow_atlas, shadow_samp, proj.uv, layer, proj.depth));
+    let lit = min(textureSampleCompareLevel(shadow_atlas, shadow_samp, proj.uv, layer, proj.depth),
+                  textureSampleCompareLevel(static_shadow_atlas, shadow_samp, proj.uv, layer, proj.depth));
+    if lit <= 0.0 || layer >= textureNumLayers(shadow_transmittance) { return vec3<f32>(lit); }
+    // Light that crossed stained glass arrives coloured: the shafts take the
+    // panes' tint, not just their outline.
+    let glass = textureSampleLevel(shadow_transmittance, linear_samp, proj.uv, layer, 0.0);
+    let tint = select(vec3<f32>(1.0), 1.0 - glass.rgb, 1.0 - proj.depth < glass.a);
+    return lit * tint;
 }
 
 // ── Light evaluation ────────────────────────────────────────────────────────
@@ -775,9 +783,9 @@ fn inscatter_from_light(light_idx: u32, p: vec3<f32>, ray_dir: vec3<f32>, anisot
     // ABI adapter: decay was unused; it now controls geometric fog-shadow
     // strength. Medium absorption remains physical even with geometry opt-out.
     let shadow_strength = finite_clamp(light.god_rays_decay, 0.0, 1.0);
-    var vis = 1.0;
-    if shadow_strength > 0.0 { vis = mix(1.0, shaft_visibility(light_idx, p), shadow_strength); }
-    if vis <= 0.0 || atten <= 0.0 { return vec3<f32>(0); }
+    var vis = vec3<f32>(1.0);
+    if shadow_strength > 0.0 { vis = mix(vec3<f32>(1.0), shaft_visibility(light_idx, p), shadow_strength); }
+    if all(vis <= vec3<f32>(0.0)) || atten <= 0.0 { return vec3<f32>(0); }
     vis *= medium_transmittance(p, to_light, shadow_distance);
 
     let radiance = light.color_intensity.rgb * light.color_intensity.w;

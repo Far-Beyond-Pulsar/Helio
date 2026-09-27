@@ -179,7 +179,7 @@ impl VisibilityPipelines {
                 let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("HLFS ScreenSpace visibility"),
                     source: wgpu::ShaderSource::Wgsl(
-                        shader_source_for_sampler("screen_space", presampled).into(),
+                        shader_source_for_transmission("screen_space", presampled, transmission).into(),
                     ),
                 });
                 let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -296,8 +296,8 @@ impl Pipelines {
             self.rt_bgl.as_ref(),
             false,
         );
-        self.transmission_visibility = (mode == HlfsMode::RayTraced).then(|| VisibilityPipelines::new(device, mode, presampled, &self.common_bgl, &self.gbuffer_bgl, &self.sample_bgl, self.rt_bgl.as_ref(), true));
-        self.transmission_composite = (mode == HlfsMode::RayTraced).then(|| composite_pipeline(device, self.output_format, mode, presampled, &self.common_bgl, &self.gbuffer_bgl, &self.composite_bgl, self.rt_bgl.as_ref(), true));
+        self.transmission_visibility = Some(VisibilityPipelines::new(device, mode, presampled, &self.common_bgl, &self.gbuffer_bgl, &self.sample_bgl, self.rt_bgl.as_ref(), true));
+        self.transmission_composite = Some(composite_pipeline(device, self.output_format, mode, presampled, &self.common_bgl, &self.gbuffer_bgl, &self.composite_bgl, self.rt_bgl.as_ref(), true));
     }
 
     pub fn new(
@@ -364,6 +364,19 @@ impl Pipelines {
                 ),
                 entry(6, storage(true), all),
                 entry(7, texture(D::D2Array, false), all),
+                // Static-caster atlas: lighting takes the min with the dynamic one.
+                entry(8, texture(D::D2Array, true), all),
+                // Coloured glass transmittance (1 - T), and its filtering sampler.
+                entry(
+                    9,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: D::D2Array,
+                        multisampled: false,
+                    },
+                    all,
+                ),
+                entry(10, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), all),
             ],
         );
         let mut gbuffer_entries: Vec<_> = (0..10)
@@ -537,8 +550,8 @@ impl Pipelines {
         Self {
             compact_bgl,
             compact,
-            transmission_visibility: (mode == HlfsMode::RayTraced).then(|| VisibilityPipelines::new(device, mode, presampled, &common_bgl, &gbuffer_bgl, &sample_bgl, rt_bgl.as_ref(), true)),
-            transmission_composite: (mode == HlfsMode::RayTraced).then(|| composite_pipeline(device, output_format, mode, presampled, &common_bgl, &gbuffer_bgl, &composite_bgl, rt_bgl.as_ref(), true)),
+            transmission_visibility: Some(VisibilityPipelines::new(device, mode, presampled, &common_bgl, &gbuffer_bgl, &sample_bgl, rt_bgl.as_ref(), true)),
+            transmission_composite: Some(composite_pipeline(device, output_format, mode, presampled, &common_bgl, &gbuffer_bgl, &composite_bgl, rt_bgl.as_ref(), true)),
             common_bgl,
             gbuffer_bgl,
             depth_bgl,

@@ -50,6 +50,9 @@ use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{BufferKey, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::Arc;
 
+mod transmittance;
+pub use transmittance::{TRANSMITTANCE_FORMAT, TRANSMITTANCE_KEY};
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// Maximum shadow atlas faces (42 point lights × 6 cube-faces = 252; 4 CSM cascades; ceiling = 256).
@@ -95,6 +98,13 @@ pub struct ShadowPass {
     static_face_views: Box<[wgpu::TextureView]>,
     /// Last `static_objects_generation` rendered.  `None` = never rendered.
     static_atlas_cache_gen: Option<u64>,
+    /// Whole-array view of the static atlas, for the transmittance depth test.
+    static_array_view: Option<wgpu::TextureView>,
+    /// Coloured transmittance of translucent static casters.
+    transmittance: transmittance::Transmittance,
+    /// Translucent casters were drawn: the layer is published only then, so
+    /// receivers skip RGB visibility entirely in scenes without glass.
+    has_glass: bool,
 
     pub compare_sampler: wgpu::Sampler,
 
@@ -196,7 +206,7 @@ impl ShadowPass {
                 // binding 2: face index — 16-byte uniform, dynamic offset selects face
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
@@ -374,9 +384,15 @@ impl ShadowPass {
             ..Default::default()
         });
 
+        let transmittance =
+            transmittance::Transmittance::new(device, queue, &bgl_0, atlas_size, atlas_layers);
+
         Self {
             pipeline,
             depth_clear_pipeline,
+            static_array_view: None,
+            transmittance,
+            has_glass: false,
             bgl_0,
             bg_0: None,
             bg_0_key: None,
@@ -443,6 +459,9 @@ impl RenderPass for ShadowPass {
         builder.write_color_raw("static_shadow_atlas", wgpu::TextureFormat::Depth32Float, sz);
         builder.with_layers(self.atlas_layers);
         builder.read("object_batch");
+        // Pass-owned (it caches with the static atlas): declared for ordering,
+        // routed in `publish`.
+        builder.write_buffer(TRANSMITTANCE_KEY);
     }
 
     fn name(&self) -> &'static str {
@@ -450,10 +469,14 @@ impl RenderPass for ShadowPass {
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &["shadow_atlas", "shadow_sampler", "static_shadow_atlas"]
+        &["shadow_atlas", "shadow_sampler", "static_shadow_atlas", TRANSMITTANCE_KEY]
     }
 
-    fn publish<'a>(&self, _frame: &mut helio_core::ResourceRegistry<'a>) {}
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        if self.has_glass {
+            frame.route_named_texture(TRANSMITTANCE_KEY, &self.transmittance.view, self.name());
+        }
+    }
 
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
         Ok(())
@@ -473,6 +496,7 @@ impl RenderPass for ShadowPass {
             .min(self.atlas_layers as usize)
             .min(MAX_SHADOW_FACES);
         let static_draw_count = batch.shadow_static_draw_count;
+        self.has_glass = batch.shadow_transmissive_draw_count > 0;
         let movable_draw_count = batch.shadow_movable_draw_count;
 
         // ── Lazily initialize per-face views from graph-owned textures ─────────
@@ -486,6 +510,16 @@ impl RenderPass for ShadowPass {
             if let Some(tex) = ctx.resource_pool.get_texture("static_shadow_atlas") {
                 self.static_face_views =
                     Self::create_face_views(tex, "Shadow/StaticFace", self.atlas_layers);
+            }
+        }
+        if self.static_array_view.is_none() {
+            if let Some(tex) = ctx.resource_pool.get_texture("static_shadow_atlas") {
+                self.static_array_view = Some(tex.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("Shadow/StaticArray"),
+                    format: Some(wgpu::TextureFormat::Depth32Float),
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    ..Default::default()
+                }));
             }
         }
 
@@ -640,6 +674,32 @@ impl RenderPass for ShadowPass {
                             occlusion_query_set: None,
                             multiview_mask: None,
                         },
+                    );
+                }
+            }
+            // Translucent casters, filtered by the static depth just rendered.
+            if let Some(static_depth) = self.static_array_view.as_ref() {
+                let materials = ctx
+                    .scene_buffers
+                    .get(BufferKey::of("materials"))
+                    .map(|handle| handle.buffer.clone());
+                for face in 0..face_count {
+                    let caster_slot = face / 6;
+                    if !need_static && (caster_slot >= 42 || !dirty_casters[caster_slot]) {
+                        continue;
+                    }
+                    self.transmittance.render_face(
+                        ctx.device,
+                        unsafe { &mut *ctx.encoder_ptr },
+                        materials.as_ref(),
+                        bg,
+                        face,
+                        (face as u64 * FACE_BUF_STRIDE) as u32,
+                        static_depth,
+                        batch.shadow_transmissive_indirect,
+                        batch.shadow_transmissive_draw_count,
+                        &vertices.buffer,
+                        &indices.buffer,
                     );
                 }
             }

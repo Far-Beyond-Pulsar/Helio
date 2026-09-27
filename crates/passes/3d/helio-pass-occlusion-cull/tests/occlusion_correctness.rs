@@ -126,6 +126,8 @@ impl RenderPass for SceneInjectorPass {
                 shadow_static_draw_count: 0,
                 shadow_movable_indirect: indirect,
                 shadow_movable_draw_count: 0,
+                shadow_transmissive_indirect: indirect,
+                shadow_transmissive_draw_count: 0,
                 shadow_static_generation: 0,
             },
             "SceneInjector",

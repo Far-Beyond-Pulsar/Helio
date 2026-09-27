@@ -143,6 +143,10 @@ pub(crate) struct Inputs<'a> {
     pub compact_lights: &'a wgpu::Buffer,
     pub shadow_matrices: &'a wgpu::Buffer,
     pub shadow_atlas: &'a wgpu::TextureView,
+    pub static_shadow_atlas: &'a wgpu::TextureView,
+    /// Coloured glass transmittance, stored as 1 - T (zero is unfiltered).
+    pub shadow_transmittance: &'a wgpu::TextureView,
+    pub linear_sampler: &'a wgpu::Sampler,
     pub shadow_sampler: &'a wgpu::Sampler,
     /// albedo, normal, ORM, emissive, depth, lightmap UV, lightmap, pre-AA, velocity
     pub textures: [&'a wgpu::TextureView; 9],
@@ -150,7 +154,7 @@ pub(crate) struct Inputs<'a> {
 }
 struct CommonKey {
     buffers: [wgpu::Buffer; 3],
-    shadow: wgpu::TextureView,
+    shadow: [wgpu::TextureView; 3],
     sampler: wgpu::Sampler,
 }
 impl CommonKey {
@@ -158,7 +162,9 @@ impl CommonKey {
         &self.buffers[0] == i.camera
             && &self.buffers[1] == i.compact_lights
             && &self.buffers[2] == i.shadow_matrices
-            && &self.shadow == i.shadow_atlas
+            && &self.shadow[0] == i.shadow_atlas
+            && &self.shadow[1] == i.static_shadow_atlas
+            && &self.shadow[2] == i.shadow_transmittance
             && &self.sampler == i.shadow_sampler
     }
 }
@@ -250,6 +256,9 @@ impl ExternalBindings {
                     wgpu::BindingResource::Sampler(i.shadow_sampler),
                     i.shadow_matrices.as_entire_binding(),
                     view(&f.noise_view),
+                    view(i.static_shadow_atlas),
+                    view(i.shadow_transmittance),
+                    wgpu::BindingResource::Sampler(i.linear_sampler),
                 ],
             ));
             self.common_key = Some(CommonKey {
@@ -258,7 +267,11 @@ impl ExternalBindings {
                     i.compact_lights.clone(),
                     i.shadow_matrices.clone(),
                 ],
-                shadow: i.shadow_atlas.clone(),
+                shadow: [
+                    i.shadow_atlas.clone(),
+                    i.static_shadow_atlas.clone(),
+                    i.shadow_transmittance.clone(),
+                ],
                 sampler: i.shadow_sampler.clone(),
             });
         }

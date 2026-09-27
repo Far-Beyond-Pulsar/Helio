@@ -99,8 +99,8 @@ impl Generation {
             })
         };
         Self {
-            // [group_count, bucket_opaque, bucket_transparent, bucket_forward, shadow_static, shadow_movable, instance_count] -- 7 u32s.
-            counts_staging: make("ObjBatch Counts Staging", 7 * 4),
+            // [group_count, bucket_opaque, bucket_transparent, bucket_forward, shadow_static, shadow_movable, instance_count, shadow_transmissive] -- 8 u32s.
+            counts_staging: make("ObjBatch Counts Staging", 8 * 4),
             opaque_staging: make("ObjBatch Opaque Staging", range_bytes),
             transparent_staging: make("ObjBatch Transparent Staging", range_bytes),
             forward_staging: make("ObjBatch Forward Staging", range_bytes),
@@ -134,6 +134,7 @@ pub struct RangeReadback {
     draw_count: u32,
     shadow_static: u32,
     shadow_movable: u32,
+    shadow_transmissive: u32,
     instance_count: u32,
     /// Bumped whenever a freshly-harvested generation's `shadow_static`
     /// count differs from the previous one -- `helio-pass-shadow`'s static-
@@ -160,6 +161,7 @@ impl RangeReadback {
             draw_count: 0,
             shadow_static: 0,
             shadow_movable: 0,
+            shadow_transmissive: 0,
             instance_count: 0,
             shadow_static_generation: 0,
         }
@@ -176,6 +178,10 @@ impl RangeReadback {
     }
     pub fn counts(&self) -> (u32, u32, u32) {
         (self.draw_count, self.shadow_static, self.shadow_movable)
+    }
+    /// Static transparent-only shadow casters (the transmittance layer).
+    pub fn shadow_transmissive(&self) -> u32 {
+        self.shadow_transmissive
     }
     /// Live instance count -- same value as `instances_buffer()`'s valid
     /// prefix length.
@@ -258,7 +264,7 @@ impl RangeReadback {
                     gen.pending = None;
                     continue;
                 }
-                let prev_shadow_static = self.shadow_static;
+                let prev_shadow_static = (self.shadow_static, self.shadow_transmissive);
                 read_generation_into(
                     gen,
                     &mut self.opaque,
@@ -267,9 +273,10 @@ impl RangeReadback {
                     &mut self.draw_count,
                     &mut self.shadow_static,
                     &mut self.shadow_movable,
+                    &mut self.shadow_transmissive,
                     &mut self.instance_count,
                 );
-                if self.shadow_static != prev_shadow_static {
+                if (self.shadow_static, self.shadow_transmissive) != prev_shadow_static {
                     self.shadow_static_generation = self.shadow_static_generation.wrapping_add(1);
                 }
                 gen.counts_staging.unmap();
@@ -308,6 +315,7 @@ impl RangeReadback {
             // `frame_uniform`'s first u32 is `count` -- the gather's live
             // instance count (see `FrameUniformGpu`'s doc in `src/lib.rs`).
             encoder.copy_buffer_to_buffer(&scratch.frame_uniform, 0, &gen.counts_staging, 24, 4);
+            encoder.copy_buffer_to_buffer(&scratch.shadow_counts, 8, &gen.counts_staging, 28, 4);
             let range_bytes = gen.range_capacity_bytes();
             encoder.copy_buffer_to_buffer(
                 &scratch.opaque_ranges,
@@ -403,6 +411,7 @@ fn read_generation_into(
     draw_count: &mut u32,
     shadow_static: &mut u32,
     shadow_movable: &mut u32,
+    shadow_transmissive: &mut u32,
     instance_count: &mut u32,
 ) {
     let counts_view = gen
@@ -418,11 +427,13 @@ fn read_generation_into(
     let n_shadow_static = counts[4];
     let n_shadow_movable = counts[5];
     let live_instance_count = counts[6];
+    let n_shadow_transmissive = counts[7];
     drop(counts_view);
 
     *draw_count = group_count;
     *shadow_static = n_shadow_static;
     *shadow_movable = n_shadow_movable;
+    *shadow_transmissive = n_shadow_transmissive;
     *instance_count = live_instance_count;
 
     *opaque = read_ranges(&gen.opaque_staging, n_opaque);

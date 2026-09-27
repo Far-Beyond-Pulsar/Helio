@@ -138,6 +138,8 @@ pub struct VolumetricFogPass {
     fallback_volumes: wgpu::Buffer,
     fallback_lights: wgpu::Buffer,
     fallback_shadow: wgpu::TextureView,
+    /// Zeroed (the layer stores 1 - T): nothing translucent filters the light.
+    fallback_transmittance: wgpu::TextureView,
 
     /// Ping-ponged scattering grids: one is read as history while the other is
     /// written. Sampling and storing to one texture in a single dispatch is a
@@ -152,7 +154,7 @@ pub struct VolumetricFogPass {
 
     inject_bg: [Option<wgpu::BindGroup>; 2],
     inject_bg_key: Option<[wgpu::Buffer; 8]>,
-    inject_shadow: Option<(wgpu::TextureView, wgpu::TextureView)>,
+    inject_shadow: Option<(wgpu::TextureView, wgpu::TextureView, wgpu::TextureView)>,
     integrate_g0_bg: Option<wgpu::BindGroup>,
     integrate_bg: [Option<wgpu::BindGroup>; 2],
 
@@ -290,6 +292,17 @@ impl VolumetricFogPass {
                     visibility: cv,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Coloured transmittance of translucent casters (stained glass).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 21,
+                    visibility: cv,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2Array,
                         multisampled: false,
                     },
@@ -547,6 +560,7 @@ impl VolumetricFogPass {
             fallback_volumes,
             fallback_lights,
             fallback_shadow,
+            fallback_transmittance: clear_transmittance(device),
             inject_pipeline,
             integrate_pipeline,
             inject_bgl,
@@ -627,7 +641,7 @@ impl RenderPass for VolumetricFogPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["shadow_atlas", "static_shadow_atlas", "shadow_matrices", "postprocess_uniforms"]
+        &["shadow_atlas", "static_shadow_atlas", "shadow_transmittance", "shadow_matrices", "postprocess_uniforms"]
     }
 
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
@@ -724,6 +738,10 @@ impl RenderPass for VolumetricFogPass {
             .registry
             .get(helio_core::ResourceKey::new("static_shadow_atlas"))
             .unwrap_or(&self.fallback_shadow);
+        let transmittance = ctx
+            .registry
+            .get(helio_core::ResourceKey::new("shadow_transmittance"))
+            .unwrap_or(&self.fallback_transmittance);
 
         let camera_buf = ctx.camera;
         let lights_buf = ctx
@@ -770,13 +788,15 @@ impl RenderPass for VolumetricFogPass {
             legacy_buf.clone(),
         ];
         if self.inject_bg_key.as_ref() != Some(&key)
-            || self.inject_shadow.as_ref().map(|(d, s)| (d, s)) != Some((shadow_atlas, static_shadow_atlas))
+            || self.inject_shadow.as_ref().map(|(d, s, t)| (d, s, t))
+                != Some((shadow_atlas, static_shadow_atlas, transmittance))
         {
             // Both sides are rebuilt together: each pins a fixed history/write
             // pair, so a stale one would read the grid it is also writing.
             self.inject_bg = [None, None];
             self.inject_bg_key = Some(key);
-            self.inject_shadow = Some((shadow_atlas.clone(), static_shadow_atlas.clone()));
+            self.inject_shadow =
+                Some((shadow_atlas.clone(), static_shadow_atlas.clone(), transmittance.clone()));
             self.integrate_g0_bg = None;
             self.resolve_bg = None;
             self.classify_bg = None;
@@ -879,6 +899,10 @@ impl RenderPass for VolumetricFogPass {
                         wgpu::BindGroupEntry {
                             binding: 20,
                             resource: wgpu::BindingResource::TextureView(static_shadow_atlas),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 21,
+                            resource: wgpu::BindingResource::TextureView(transmittance),
                         },
                         wgpu::BindGroupEntry {
                             binding: 6,
@@ -1053,4 +1077,24 @@ impl RenderPass for VolumetricFogPass {
 
         Ok(())
     }
+}
+
+/// 1×1 zeroed transmittance array. The shadow pass stores 1 - T, so zero
+/// filters nothing when no shadow pass publishes a layer.
+fn clear_transmittance(device: &wgpu::Device) -> wgpu::TextureView {
+    device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("Fog Fallback Transmittance"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        })
 }
