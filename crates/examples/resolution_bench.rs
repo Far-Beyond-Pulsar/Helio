@@ -28,6 +28,10 @@
 //!                  --frames 6 --warmup 6 --scale 0.75 --out bench_out --tag before
 //! ```
 //!
+//! `--pulsar-columns` registers the SceneDB columns Pulsar-Native's editor
+//! registers up front (billboards, decals, water volumes and hitboxes), so
+//! their buffers exist while empty, as they do in the editor.
+//!
 //! `--scale` is the renderer's internal render scale (the editor uses the
 //! `RendererConfig` default, 0.75). `--editor` renders in editor mode (light
 //! billboards, grid). `--tsr` switches FXAA for TSR. `--no-capture` skips PNGs.
@@ -83,6 +87,7 @@ struct Args {
     tsr: bool,
     capture: bool,
     no_ray_query: bool,
+    pulsar_columns: bool,
 }
 
 fn parse_args() -> Args {
@@ -98,6 +103,7 @@ fn parse_args() -> Args {
         tsr: false,
         capture: true,
         no_ray_query: false,
+        pulsar_columns: false,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -107,6 +113,7 @@ fn parse_args() -> Args {
             "--editor" => Some(&mut args.editor),
             "--tsr" => Some(&mut args.tsr),
             "--no-ray-query" => Some(&mut args.no_ray_query),
+            "--pulsar-columns" => Some(&mut args.pulsar_columns),
             _ => None,
         };
         if let Some(switch) = switch {
@@ -322,7 +329,17 @@ fn run(
     (width, height): (u32, u32),
 ) -> RunResult {
     let build_start = Instant::now();
-    let mut scene_db: SceneDb = new_scene_db_with_gpu_mirror(device, queue);
+    // Pulsar-Native's editor registers these columns up front (see
+    // engine_backend's helio_bridge), so their buffers exist while empty.
+    let pulsar_columns = args.pulsar_columns;
+    let mut scene_db: SceneDb = new_scene_db_with_gpu_mirror_and(device, queue, |store| {
+        if pulsar_columns {
+            helio_pass_billboard::BillboardComponent::register_gpu_columns_growable(store, 1024, device);
+            helio_pass_decal::DecalComponent::register_gpu_columns_growable(store, 256, device);
+            helio_pass_water_sim::WaterVolumeComponent::register_gpu_columns_growable(store, 64, device);
+            helio_pass_water_sim::WaterHitboxComponent::register_gpu_columns_growable(store, 256, device);
+        }
+    });
     let aspect = width as f32 / height as f32;
     let camera = match scene_name {
         "fog_hall" => fog_hall(&mut scene_db.world, aspect),

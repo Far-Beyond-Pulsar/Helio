@@ -23,6 +23,16 @@ pub fn new_scene_db_with_gpu_mirror(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
 ) -> pulsar_scenedb::SceneDb {
+    new_scene_db_with_gpu_mirror_and(device, queue, |_| {})
+}
+
+/// [`new_scene_db_with_gpu_mirror`] plus extra column registrations made
+/// before the mirror is attached (registration needs the store mutably).
+pub fn new_scene_db_with_gpu_mirror_and(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    register_extra: impl FnOnce(&mut pulsar_scenedb::gpu::SceneGpuStore),
+) -> pulsar_scenedb::SceneDb {
     let mut scene_db = pulsar_scenedb::SceneDb::new();
     let ctx = pulsar_scenedb::gpu::EngineGpuContext::new(device.clone(), queue.clone());
     let gpu_cfg = pulsar_scenedb::gpu::SceneGpuConfig {
@@ -69,6 +79,7 @@ pub fn new_scene_db_with_gpu_mirror(
     helio_pass_volumetric_fog::GlobalFogComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
     helio_pass_volumetric_fog::LocalFogVolumeComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
     helio_pass_volumetric_fog::VolumetricFogSettingsComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    register_extra(&mut gpu_store);
     let gpu_store = Arc::new(gpu_store);
     let mirror = pulsar_scenedb::gpu::GpuMirrorHandle::new(gpu_store, queue.clone());
     scene_db.world.attach_gpu_mirror(mirror);
