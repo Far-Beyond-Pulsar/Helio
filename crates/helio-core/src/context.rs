@@ -448,11 +448,16 @@ impl<'a> PassContext<'a> {
         unsafe { (*self.encoder_ptr).begin_render_pass(desc) }
     }
 
-    /// Begins a compute pass with automatic GPU profiling.
+    /// Begins a compute pass on the separate, pre-graphics command stream.
+    /// This stream is submitted before all graphics in the serial executor,
+    /// regardless of this pass's position in the graph. Use
+    /// [`Self::begin_graphics_compute_pass`] when reading current-frame render
+    /// attachments (lighting, depth, GBuffer, or postprocessing).
     ///
     /// This is a wrapper around `encoder.begin_compute_pass()` that automatically
     /// injects GPU timestamp queries for profiling. **Always use this instead of
-    /// calling `encoder.begin_compute_pass()` directly.**
+    /// calling `encoder.begin_compute_pass()` directly, choosing the stream that
+    /// matches the dependencies.**
     ///
     /// # Profiling
     ///
@@ -493,6 +498,21 @@ impl<'a> PassContext<'a> {
         // Uses the separate compute encoder so compute work never conflicts with
         // an active render pass on the render encoder (migrated path).
         unsafe { (*self.compute_encoder_ptr).begin_compute_pass(desc) }
+    }
+
+    /// Records compute in graph order on the graphics command stream.
+    /// The caller must have no render-pass descriptor and must not opt into
+    /// `chain_transparent`. The executor includes this work in pass timings.
+    pub fn begin_graphics_compute_pass<'b>(
+        &'b mut self,
+        desc: &'b wgpu::ComputePassDescriptor<'b>,
+    ) -> wgpu::ComputePass<'b> {
+        assert!(self.active_render_pass.is_none(),
+            "graphics-stream compute cannot run inside a render pass");
+        #[cfg(debug_assertions)]
+        assert!(!self.chain_transparent,
+            "chain-transparent passes cannot use graphics-stream compute");
+        unsafe { (*self.encoder_ptr).begin_compute_pass(desc) }
     }
 }
 

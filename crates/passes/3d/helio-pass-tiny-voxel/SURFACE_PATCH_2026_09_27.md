@@ -1,5 +1,12 @@
 # Bounded surface patch integration: correctness baseline, rejected speed claim
 
+> Correction: these historical captures used a compute stream submitted before
+> graphics. Their lighting/albedo capture was therefore not paired with the
+> current primary hits. Do not use their appearance errors or joint
+> lighting/geometry checks as acceptance evidence. Primary hit-only checks and
+> standalone traversal timings retain their stated scope. See
+> [the corrected appearance experiment](APPEARANCE_2026_09_27.md).
+
 This records the published `b935dee1` baseline. The later
 [exact skipping checkpoint](SURFACE_SKIP_2026_09_27.md) removes redundant
 predicate work and measures a revised single-pass traversal. Keep the negative

@@ -14,6 +14,8 @@ surface-reference = ["canonical-far-experiment"]
 regional-publication-experiment = ["engine"]
 # Opt-in bounded local patch accelerator; whole-planet performance unqualified.
 surface-cache-experiment = ["surface-reference"]
+# Spatial reconstruction of visible lit samples; no geometry/streaming claim.
+appearance-filter-experiment = ["engine"]
 
 [dependencies]
 wgpu = "30.0.1"

@@ -58,14 +58,12 @@ Use a bounded resident hierarchy with local publication transactions. Keep valid
 
 The first decisive experiment is a set of canonical patches: slope, silhouette ridge, cave opening, thin wall and destructive edit. Capture spatially supersampled linear-light references with coverage, depth, material, face contribution and sunlight outputs. Move the camera across pixel and region boundaries and rotate the sunlight. Disable temporal history during the initial comparison. Compare cached exact bricks, derived surface records and transitions; measure construction cost, steady rendering, memory and local edit propagation. Reject a candidate that smooths resolvable features, exposes parent cubes, repeatedly evaluates the full source for every ray, or only looks stable after temporal accumulation. Passing this experiment is a prerequisite for returning to the complete planetary flight and engine gates, not a replacement for them.
 
-The [surface reference checkpoint](SURFACE_REFERENCE_2026_09_27.md) supplies
-32 patch/light/translation cases at 16, 64 and 256 spatial samples per pixel.
-The sampled CPU audits pass, and center rays/lighting match between sampling
-runs after separating reference ray preparation. Filtering separately lit
-samples reduces slope stippling while resolved shell edges remain visible.
-Sampling error still warrants measurement. The subsequent local cache and
-integrated patch experiments below use these references before returning to
-global residency scheduling.
+The historical [surface reference checkpoint](SURFACE_REFERENCE_2026_09_27.md)
+contains 32 patch/light/translation cases, but its capture dispatch ran before
+current-frame graphics. Its joint appearance measurements are superseded.
+The [corrected appearance experiment](APPEARANCE_2026_09_27.md) adds an explicit
+graphics-stream compute API and changing-frame GPU regression. Rebuild the
+spatial lighting reference before using it to judge a rendering approach.
 
 The [exact local cache experiment](SURFACE_CACHE_2026_09_27.md) now supplies
 compact authored-cell bricks, halo-aware edit invalidation, bounded logical
@@ -84,10 +82,20 @@ without changing hit ownership. A split traversal/repair queue was slower than
 the improved single precise pass and has been removed. Repeated 720p cave
 controls and a 720p natural-ground control still favor the canonical renderer
 over the cache; the improved cache remains an opt-in correctness baseline.
-All 4.64 million three-grid reference samples match the published precise
-captures, and a 180-frame local motion recording passes hit/sunlight validity
+All 4.64 million three-grid primary samples match the published precise
+captures (the lighting-capture correction above limits joint color claims), and a 180-frame local motion recording passes hit/sunlight validity
 checks. Distant face stippling remains visible. The next architecture step
 must address visible appearance and duplicated traversal/residency costs,
 rather than infer planetary performance from a faster cache dispatch.
 Visibility-aware far data, global scheduling, continuous motion, physical
 memory and full-engine gates remain open. The planetary goal is still active.
+
+The [current-frame appearance experiment](APPEARANCE_2026_09_27.md) now includes
+fresh schema-2 captures. Its opt-in nine-sample resolve lowers whole-image error
+in 28 of 32 small reference cases and preserves resolved pre-AA pixels, but it
+leaves a silhouette regression and produces no change in the tested 720p slope.
+The 720p 0.12 ms stage measurement is its copy/guard path. Strong foreshortened
+face bands remain. This rules out treating distance-only screen reconstruction
+as the far appearance solution; projected face visibility/coverage and coherent
+world-space data remain the next decisive architecture work. The source stays
+experimental and disabled by default.

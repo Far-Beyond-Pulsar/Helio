@@ -1,5 +1,12 @@
 # Exact empty-space skipping in the local surface cache
 
+> Correction: these historical captures used a compute stream submitted before
+> graphics. Their lighting/albedo capture was therefore not paired with the
+> current primary hits. Do not use their appearance errors or joint
+> lighting/geometry checks as acceptance evidence. Primary hit-only checks and
+> standalone traversal timings retain their stated scope. See
+> [the corrected appearance experiment](APPEARANCE_2026_09_27.md).
+
 The opt-in bounded surface cache now traverses certified empty 4-cubed
 microbricks and 32-cubed tiles in one step. Occupied regions still resolve to
 authored cells. No larger cube is rendered, and unavailable data still falls

@@ -4,7 +4,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::{build_default_graph_external_with_passes, GraphPassFactory, VoxelPassFactory};
+use helio_default_graphs::{build_default_graph_external_with_lighting_passes, GraphPassFactory, VoxelPassFactory};
 use helio_pass_tiny_voxel::{
     engine::{EngineVoxelFrame, LazyEngineVoxelPass, SharedVoxelFrame},
     world::render_origin,
@@ -31,6 +31,14 @@ impl helio_core::RenderPass for FinalResourceConsumer {
 
 #[test]
 fn optional_voxel_pass_builds_and_renders_in_the_deferred_graph() {
+    render_optional_voxel_graph(false);
+}
+#[cfg(feature = "voxel-appearance")]
+#[test]
+fn appearance_pass_survives_source_removal_and_resize() {
+    render_optional_voxel_graph(true);
+}
+fn render_optional_voxel_graph(_appearance_enabled: bool) {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let Ok(adapter) = instance.request_adapter(&Default::default()).await else {
@@ -83,8 +91,16 @@ fn optional_voxel_pass_builds_and_renders_in_the_deferred_graph() {
         let mirror = GpuMirrorHandle::new(Arc::new(gpu_store), Arc::clone(&queue));
         let frame: SharedVoxelFrame = Arc::new(Mutex::new(None));
         let pass_source = Arc::clone(&frame);
+        #[cfg(feature = "voxel-appearance")]
+        let appearance = _appearance_enabled.then(helio_pass_tiny_voxel::engine::appearance::Source::default);
+        #[cfg(feature = "voxel-appearance")]
+        let pass_appearance = appearance.clone();
         let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| {
-            Box::new(LazyEngineVoxelPass::new(Arc::clone(&pass_source)))
+            #[allow(unused_mut)]
+            let mut pass = LazyEngineVoxelPass::new(Arc::clone(&pass_source));
+            #[cfg(feature = "voxel-appearance")]
+            if let Some(source) = &pass_appearance { pass.set_appearance_source(source.clone()); }
+            Box::new(pass)
         });
         let mut config = RendererConfig::new(640, 360, wgpu::TextureFormat::Rgba8Unorm);
         config.enable_foliage = false;
@@ -93,11 +109,20 @@ fn optional_voxel_pass_builds_and_renders_in_the_deferred_graph() {
         let final_factory: GraphPassFactory = Arc::new(move |_, _, width, height| {
             Box::new(FinalResourceConsumer { expected: [width, height], observed: captured.clone() })
         });
+        #[allow(unused_mut)]
+        let mut lighting: Vec<GraphPassFactory> = Vec::new();
+        #[cfg(feature = "voxel-appearance")]
+        if let Some(source) = appearance {
+            lighting.push(Arc::new(move |device, _, width, height| {
+                Box::new(helio_pass_tiny_voxel::engine::appearance::AppearancePass::new(
+                    device, source.clone(), [width, height], config.surface_format))
+            }));
+        }
         let mut renderer = RendererBuilder::new(config, mirror)
             .with_ambient([0.5, 0.5, 0.6], 1.0)
             .with_external_device()
             .with_pass_build_context(Box::new(move |ctx| {
-                build_default_graph_external_with_passes(ctx, vec![factory], vec![final_factory])
+                build_default_graph_external_with_lighting_passes(ctx, vec![factory], lighting, vec![final_factory])
             }))
             .build(
                 Arc::clone(&device),

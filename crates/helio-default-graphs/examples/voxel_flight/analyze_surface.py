@@ -73,6 +73,11 @@ def read_case(directory, pose):
 def compare(low, high):
     # README is written only after all fixtures and repeated-frame checks finish.
     assert (low / "README.txt").is_file() and (high / "README.txt").is_file()
+    for directory in (low, high):
+        capture = json.loads((directory / "capture.json").read_text())
+        assert capture["schema"] == 2 and capture["lighting_stream"] == "graphics-current-frame"
+        assert not capture["appearance_filter"], "a filtered mean is not an unfiltered reference"
+
     low_poses = {p["name"]: p for p in rows(low / "poses.csv")}
     high_poses = {p["name"]: p for p in rows(high / "poses.csv")}
     assert low_poses.keys() == high_poses.keys()

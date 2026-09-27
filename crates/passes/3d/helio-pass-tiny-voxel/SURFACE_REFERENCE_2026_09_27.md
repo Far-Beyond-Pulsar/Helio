@@ -1,5 +1,12 @@
 # Canonical surface appearance reference
 
+> Correction: these historical captures used a compute stream submitted before
+> graphics. Their lighting/albedo capture was therefore not paired with the
+> current primary hits. Do not use their appearance errors or joint
+> lighting/geometry checks as acceptance evidence. Primary hit-only checks and
+> standalone traversal timings retain their stated scope. See
+> [the corrected appearance experiment](APPEARANCE_2026_09_27.md).
+
 The research audit's next step is implemented as an opt-in, offline reference.
 It integrates separately lit canonical voxel samples in linear HDR through
 Helio's deferred graph. It does not introduce a production surface cache or

@@ -529,6 +529,7 @@ pub fn build_default_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGrap
         ctx.scene_db.clone(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -553,8 +554,20 @@ pub fn build_default_graph_external_with_voxel_passes(
 /// Final passes must declare all resource reads/writes. Their factories are
 /// retained by graph rebuilds and receive the current internal render size.
 pub fn build_default_graph_external_with_passes(
+    ctx: PassBuildContext<'_>,
+    voxel_passes: Vec<VoxelPassFactory>,
+    final_passes: Vec<GraphPassFactory>,
+) -> RenderGraph {
+    build_default_graph_external_with_lighting_passes(ctx, voxel_passes, Vec::new(), final_passes)
+}
+
+/// Backend-owned resolves after opaque lighting and before fog, transparency
+/// and antialiasing. Factories survive graph rebuilds at the new internal size.
+/// A resolve must declare its resource accesses and preserve unrelated pixels.
+pub fn build_default_graph_external_with_lighting_passes(
     mut ctx: PassBuildContext<'_>,
     voxel_passes: Vec<VoxelPassFactory>,
+    lighting_passes: Vec<GraphPassFactory>,
     final_passes: Vec<GraphPassFactory>,
 ) -> RenderGraph {
     ctx.owns_device = false;
@@ -572,6 +585,7 @@ pub fn build_default_graph_external_with_passes(
         ctx.scene_db,
         voxel_passes,
         final_passes,
+        lighting_passes,
     )
 }
 
@@ -592,6 +606,7 @@ pub fn build_default_graph_with_user_effects_with_context(
         None,
         Some(user_effects),
         ctx.scene_db.clone(),
+        Vec::new(),
         Vec::new(),
         Vec::new(),
     )
@@ -620,6 +635,7 @@ pub fn build_default_graph(
         debug_overlay,
         None,
         scene_db,
+        Vec::new(),
         Vec::new(),
         Vec::new(),
     )
@@ -651,6 +667,7 @@ pub fn build_default_graph_with_user_effects(
         scene_db,
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -679,6 +696,7 @@ pub fn build_default_graph_external(
         scene_db,
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -696,6 +714,7 @@ fn build_default_graph_internal(
     scene_db: helio::SceneDbHandle,
     voxel_passes: Vec<VoxelPassFactory>,
     final_passes: Vec<GraphPassFactory>,
+    lighting_passes: Vec<GraphPassFactory>,
 ) -> RenderGraph {
     let iw = config.internal_width();
     let ih = config.internal_height();
@@ -773,6 +792,9 @@ fn build_default_graph_internal(
     deferred_light_pass.debug_mode = config.debug_mode;
     deferred_light_pass.set_env_reflections(config.enable_environment_reflections);
     graph.add_pass(Box::new(deferred_light_pass));
+    for factory in &lighting_passes {
+        graph.add_pass(factory(device, queue, iw, ih));
+    }
     graph.add_pass(Box::new(PerfOverlayCostAnalyzerPass::new(perf.clone())));
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(perf.clone())));
 
@@ -891,6 +913,7 @@ fn build_default_graph_internal(
                 scene_db.clone(),
                 voxel_passes.clone(),
                 final_passes.clone(),
+                lighting_passes.clone(),
             )
         },
     );

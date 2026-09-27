@@ -18,6 +18,8 @@
 //! HELIO_VOXEL_FLIGHT_SUN_WORK=1 separately replays sunlight rays and saves
 //! exhausted rays plus traversal maxima; use with SUN=1 outside timing runs.
 //! HELIO_VOXEL_FLIGHT_BASE_METRES overrides the initial authored grid (0.1..1).
+//! HELIO_VOXEL_APPEARANCE_FILTER=1 enables the opt-in post-lighting experiment
+//! (requires --features voxel-appearance); geometry and source data stay exact.
 //! HELIO_VOXEL_CACHE_BENCH=cave-close benchmarks a settled reference fixture
 //! through the ordinary graph at the requested resolution. RECORD captures the
 //! motion sequence in a separate visual run; keep it unset for timings.
@@ -36,7 +38,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
     RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::{build_default_graph_external_with_passes, GraphPassFactory, VoxelPassFactory};
+use helio_default_graphs::{build_default_graph_external_with_lighting_passes, GraphPassFactory, VoxelPassFactory};
 use helio_pass_tiny_voxel::{
     engine::{EngineVoxelFrame, LazyEngineVoxelPass, SharedVoxelFrame},
     world::render_origin,
@@ -135,12 +137,30 @@ impl Flight {
         let source: SharedVoxelFrame = Arc::new(Mutex::new(None));
         let pass_source = source.clone();
         let profile = std::env::var_os("HELIO_VOXEL_FLIGHT_PROFILE").is_some();
+        let appearance_requested = std::env::var_os("HELIO_VOXEL_APPEARANCE_FILTER").is_some();
+        assert!(!appearance_requested || cfg!(feature = "voxel-appearance"),
+            "appearance filtering requires --features voxel-appearance");
+        #[cfg(feature = "voxel-appearance")]
+        let appearance = appearance_requested.then(helio_pass_tiny_voxel::engine::appearance::Source::default);
+        #[cfg(feature = "voxel-appearance")]
+        let pass_appearance = appearance.clone();
         let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| {
             let mut pass = LazyEngineVoxelPass::new(pass_source.clone());
             pass.set_stage_profiling(profile);
+            #[cfg(feature = "voxel-appearance")]
+            if let Some(source) = &pass_appearance { pass.set_appearance_source(source.clone()); }
             Box::new(pass)
         });
         let format = if reference { wgpu::TextureFormat::Rgba16Float } else { wgpu::TextureFormat::Rgba8Unorm };
+        #[allow(unused_mut)]
+        let mut lighting_passes: Vec<GraphPassFactory> = Vec::new();
+        #[cfg(feature = "voxel-appearance")]
+        if let Some(source) = appearance {
+            lighting_passes.push(Arc::new(move |device, _, width, height| {
+                Box::new(helio_pass_tiny_voxel::engine::appearance::AppearancePass::new(
+                    device, source.clone(), [width, height], format))
+            }));
+        }
         let mut config = RendererConfig::new(size[0], size[1], format)
             .with_tsr_quality(quality);
         config.enable_foliage = false;
@@ -159,7 +179,7 @@ impl Flight {
             .with_ambient([0.5, 0.5, 0.6], 1.0)
             .with_external_device()
             .with_pass_build_context(Box::new(move |ctx| {
-                build_default_graph_external_with_passes(ctx, vec![factory], final_passes)
+                build_default_graph_external_with_lighting_passes(ctx, vec![factory], lighting_passes, final_passes)
             }))
             .build(
                 device.clone(),

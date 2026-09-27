@@ -8,6 +8,8 @@ mod residency;
 #[cfg(feature = "surface-cache-experiment")]
 mod surface_patch;
 mod terrain;
+#[cfg(feature = "appearance-filter-experiment")]
+pub mod appearance;
 pub use terrain::TerrainMemoryStats;
 #[cfg(feature = "surface-cache-experiment")]
 pub use surface_patch::Stats as SurfacePatchStats;
@@ -45,6 +47,8 @@ pub struct LazyEngineVoxelPass {
     source: SharedVoxelFrame,
     active: Option<EngineVoxelPass>,
     stage_profiling: bool,
+    #[cfg(feature = "appearance-filter-experiment")]
+    appearance: Option<appearance::Source>,
 }
 
 impl LazyEngineVoxelPass {
@@ -53,11 +57,18 @@ impl LazyEngineVoxelPass {
             source,
             active: None,
             stage_profiling: false,
+            #[cfg(feature = "appearance-filter-experiment")]
+            appearance: None,
         }
     }
 
     pub fn ready(&self) -> bool {
         self.active.as_ref().is_some_and(EngineVoxelPass::ready)
+    }
+
+    #[cfg(feature = "appearance-filter-experiment")]
+    pub fn set_appearance_source(&mut self, source: appearance::Source) {
+        self.appearance = Some(source);
     }
 
     pub fn chunk_jobs_pending(&self) -> usize {
@@ -215,10 +226,20 @@ impl RenderPass for LazyEngineVoxelPass {
         Ok(())
     }
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        match &mut self.active {
+        let result = match &mut self.active {
             Some(pass) => pass.execute(ctx),
             None => Ok(()),
+        };
+        #[cfg(feature = "appearance-filter-experiment")]
+        if let Some(source) = &self.appearance {
+            source.publish(self.active.as_ref().map(|pass| appearance::Inputs {
+                frame: ctx.frame_num,
+                size: pass.terrain.size,
+                hits: pass.terrain.hits.clone(),
+                params: pass.terrain.uniform.clone(),
+            }));
         }
+        result
     }
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
         if let Some(pass) = &self.active {

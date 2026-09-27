@@ -124,7 +124,7 @@ impl helio_core::RenderPass for ReferencePass {
             entries: &entries,
         });
         let descriptor = wgpu::ComputePassDescriptor::default();
-        let mut pass = ctx.begin_compute_pass(&descriptor);
+        let mut pass = ctx.begin_graphics_compute_pass(&descriptor);
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &group, &[]);
         pass.dispatch_workgroups(self.size[0].div_ceil(8), self.size[1].div_ceil(8), 1);
@@ -597,6 +597,13 @@ pub fn run(flight: &mut Flight, output: &Path, grid: u32) {
         }
     }
     poses.flush().unwrap();
+    fs::write(output.join("capture.json"), serde_json::to_vec_pretty(&serde_json::json!({
+        "schema": 2,
+        "lighting_stream": "graphics-current-frame",
+        "appearance_filter": std::env::var_os("HELIO_VOXEL_APPEARANCE_FILTER").is_some(),
+        "size": flight.size,
+        "samples_per_pixel": grid * grid,
+    })).unwrap()).unwrap();
     fs::write(output.join("README.txt"),format!(
         "Canonical surface reference; {}x{} pixels; {}x{} regular spatial samples per pixel.\nCaptured linear Rgba16Float lighting before AA/postprocess; SSR/environment/planar reflections disabled. Exact repeated-frame comparison rejects history dependence.\nRaw *.samples.bin: samples in y-major subpixel order; each has width*height records of 12 little-endian f32 values (lighting RGBA, albedo RGBA, sunlight RGBA), followed by width*height 32-byte Hit records (cell i32x3,status u32,ray f32x3,distance f32).\n*.linear.f32 is interleaved RGB mean before tone mapping. Preview uses x/(1+x), then gamma 1/2.2.\nDepth minima/maxima and coverage are sampled estimates, not conservative bounds. {} samples per pixel are not a convergence proof. Face IDs0..5 are +X,-X,+Y,-Y,+Z,-Z.\nNo production cache or performance qualification is claimed.\n",flight.size[0],flight.size[1],grid,grid,grid*grid)).unwrap();
     flight.csv.flush().unwrap();
