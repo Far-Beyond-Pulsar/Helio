@@ -658,6 +658,13 @@ impl RenderGraph {
     /// need the same narrowly-scoped lifetime extension used by the executor's
     /// output publication path. The graph remains the sole owner of this
     /// bridge; callers only receive the typed registry view.
+    /// Whether a pass overwrites every pixel of the frame target before
+    /// anything reads it (see [`RenderPass::initializes_target`]), so the
+    /// host need not clear the target first.
+    pub fn initializes_target(&self) -> bool {
+        self.passes.iter().any(|pass| pass.initializes_target())
+    }
+
     pub fn publish_frame_inputs<'a>(&self, registry: &mut crate::ResourceRegistry<'a>) {
         let frame_ptr = registry as *mut crate::ResourceRegistry<'a>;
         for pass in &self.passes {

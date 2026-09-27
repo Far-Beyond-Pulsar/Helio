@@ -674,6 +674,12 @@ impl RenderPass for DofPass {
         None
     }
 
+    /// The composite clears `ctx.target` and covers it with a full-screen
+    /// triangle, so a host clear before the frame is never visible.
+    fn initializes_target(&self) -> bool {
+        true
+    }
+
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("pre_dof");
         builder.read("depth");
