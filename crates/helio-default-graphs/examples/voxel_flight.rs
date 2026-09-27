@@ -22,12 +22,14 @@
 mod profiling;
 #[path = "voxel_flight/canonical.rs"]
 mod canonical;
+#[path = "voxel_flight/surface_reference.rs"]
+mod surface_reference;
 use glam::{DVec3, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
     RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
+use helio_default_graphs::{build_default_graph_external_with_passes, GraphPassFactory, VoxelPassFactory};
 use helio_pass_tiny_voxel::{
     engine::{EngineVoxelFrame, LazyEngineVoxelPass, SharedVoxelFrame},
     world::render_origin,
@@ -54,9 +56,16 @@ struct Flight {
     csv: fs::File,
     profiler: Option<profiling::FlightProfiler>,
     raytraced_sun: bool,
+    sunlight: Vec3,
+    update_sun: Box<dyn FnMut(Vec3)>,
 }
 impl Flight {
     async fn new(output: &Path, size: [u32; 2], quality: helio_pass_tsr::TsrQuality) -> Self {
+        let reference = std::env::var_os("HELIO_VOXEL_SURFACE_REFERENCE").is_some();
+        if reference {
+            assert!(cfg!(feature = "voxel-reference"), "reference mode requires --features voxel-reference");
+            assert_eq!(quality, helio_pass_tsr::TsrQuality::Native);
+        }
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = instance
             .request_adapter(&Default::default())
@@ -124,14 +133,26 @@ impl Flight {
             pass.set_stage_profiling(profile);
             Box::new(pass)
         });
-        let mut config = RendererConfig::new(size[0], size[1], wgpu::TextureFormat::Rgba8Unorm)
+        let format = if reference { wgpu::TextureFormat::Rgba16Float } else { wgpu::TextureFormat::Rgba8Unorm };
+        let mut config = RendererConfig::new(size[0], size[1], format)
             .with_tsr_quality(quality);
         config.enable_foliage = false;
+        if reference {
+            config.tsr_quality = None;
+            config.enable_ssr = false;
+            config.enable_environment_reflections = false;
+            config.enable_planar_reflections = false;
+        }
+        let final_passes: Vec<GraphPassFactory> = if reference {
+            vec![Arc::new(|device, _, width, height| {
+                Box::new(surface_reference::ReferencePass::new(device, [width, height]))
+            })]
+        } else { Vec::new() };
         let mut renderer = RendererBuilder::new(config, mirror)
             .with_ambient([0.5, 0.5, 0.6], 1.0)
             .with_external_device()
             .with_pass_build_context(Box::new(move |ctx| {
-                build_default_graph_external_with_voxel_passes(ctx, vec![factory])
+                build_default_graph_external_with_passes(ctx, vec![factory], final_passes)
             }))
             .build(
                 device.clone(),
@@ -141,7 +162,21 @@ impl Flight {
                 config.surface_format,
             );
         renderer.set_fallback_sky_enabled(true);
-        let target = Self::target(&device, size);
+        let target = if reference {
+            surface_reference::target(&device, size)
+        } else { Self::target(&device, size) };
+        let light_queue = queue.clone();
+        let update_sun = Box::new(move |direction: Vec3| {
+            scene.world.insert(sun, helio_pass_forward_lit::LightComponent::from(helio::GpuLight {
+                position_range: [0.0, 0.0, 0.0, f32::MAX],
+                direction_outer: [-direction.x, -direction.y, -direction.z, 0.0],
+                color_intensity: [1.0, 0.96, 0.88, 3.0],
+                shadow_index: u32::MAX,
+                light_type: helio::LightType::Directional as u32,
+                ..Default::default()
+            }));
+            scene.world.flush_gpu_mirror(&light_queue);
+        });
         let mut world = World::default();
         if let Ok(size) = std::env::var("HELIO_VOXEL_FLIGHT_BASE_METRES") {
             world.set_voxel_size(size.parse().expect("authored voxel size in metres"))
@@ -160,7 +195,9 @@ impl Flight {
             frame: 0,
             csv,
             profiler: profile.then(|| profiling::FlightProfiler::new(output)),
-            raytraced_sun: std::env::var_os("HELIO_VOXEL_FLIGHT_SUN").is_some(),
+            raytraced_sun: reference || std::env::var_os("HELIO_VOXEL_FLIGHT_SUN").is_some(),
+            sunlight: Vec3::new(0.4, 0.8, 0.3),
+            update_sun,
         }
     }
     fn target(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
@@ -207,7 +244,7 @@ impl Flight {
                 up: [up.x, up.y, up.z, 0.41421356],
                 forward: [forward.x, forward.y, forward.z, 0.0],
                 screen: [self.size[0] as f32, self.size[1] as f32, 0.0, 0.0],
-                lighting: [0.4, 0.8, 0.3, 0.0],
+                lighting: [self.sunlight.x, self.sunlight.y, self.sunlight.z, 0.0],
                 settings: [30_000_000.0, 0.0, 1.0, 0.0],
             },
             world: self.world.clone(),
@@ -476,6 +513,10 @@ fn main() {
         _ => panic!("quality must be native or quality"),
     };
     let mut flight = pollster::block_on(Flight::new(output, size, quality));
+    if let Ok(samples) = std::env::var("HELIO_VOXEL_SURFACE_REFERENCE") {
+        surface_reference::run(&mut flight, output, samples.parse().expect("reference sample grid"));
+        return;
+    }
     let record = std::env::var_os("HELIO_VOXEL_FLIGHT_RECORD").is_some();
     let audit_walk = std::env::var("HELIO_VOXEL_FLIGHT_AUDIT_WALK")
         .ok()

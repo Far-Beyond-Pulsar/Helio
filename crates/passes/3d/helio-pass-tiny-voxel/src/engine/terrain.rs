@@ -40,6 +40,8 @@ pub struct StoredTerrain {
     generate: wgpu::ComputePipeline,
     bounds: wgpu::ComputePipeline,
     trace: wgpu::ComputePipeline,
+    #[cfg(feature = "surface-reference")]
+    prepare_rays: wgpu::ComputePipeline,
     #[cfg(feature = "regional-publication-experiment")]
     regional_trace: wgpu::ComputePipeline,
     #[cfg(feature = "regional-publication-experiment")]
@@ -114,11 +116,14 @@ impl StoredTerrain {
             "var<storage,read_write> exact_occupied",
             "var<storage,read> exact_occupied",
         );
+        #[cfg(feature = "surface-reference")]
+        { source = source.replace("override STORED_REFERENCE_RAYS:bool=false;", "override STORED_REFERENCE_RAYS:bool=true;"); }
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("stored voxel terrain"),
             source: wgpu::ShaderSource::Wgsl({
                 #[cfg(feature = "canonical-far-experiment")]
                 {
+                    source = source.replace("override STORED_CANONICAL:bool=false;", "override STORED_CANONICAL:bool=true;");
                     let begin = source.find("fn stored_far_hit(").unwrap();
                     let end = source[begin..].find("// Camera-relative origin").unwrap() + begin;
                     source.replace_range(begin..end, &format!(
@@ -277,6 +282,8 @@ impl StoredTerrain {
             generate: compute("generate_bricks"),
             bounds: compute("bound_bricks"),
             trace: compute("stored_primary"),
+            #[cfg(feature = "surface-reference")]
+            prepare_rays: compute("stored_prepare_rays"),
             #[cfg(feature = "regional-publication-experiment")]
             regional_trace: regional_compute("stored_primary"),
             #[cfg(feature = "regional-publication-experiment")]
@@ -626,6 +633,16 @@ impl StoredTerrain {
         let cameras = self.group(&trace.get_bind_group_layout(1), &[(0, camera)]);
         if let Some(p) = &mut self.profiler {
             p.begin_pass(encoder, "voxel_primary");
+        }
+        #[cfg(feature = "surface-reference")]
+        {
+            // Force one materialized ray value for every traversal return path.
+            // This is an offline reference cost, not a production optimization.
+            let group = self.group(&self.prepare_rays.get_bind_group_layout(0),
+                &[(0, &self.uniform), (9, &self.hits)]);
+            let cameras = self.group(&self.prepare_rays.get_bind_group_layout(1), &[(0, camera)]);
+            self.compute(encoder, &self.prepare_rays, &[group, cameras],
+                [self.size[0].div_ceil(8), self.size[1].div_ceil(8), 1]);
         }
         self.compute(
             encoder,

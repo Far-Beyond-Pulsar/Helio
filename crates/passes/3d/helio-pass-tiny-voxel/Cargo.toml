@@ -8,6 +8,8 @@ description = "Window-independent 10 cm voxel planet compute pass"
 engine = ["dep:helio-core", "dep:rustc-hash"]
 # Opt-in architecture trial; linear edit scans and traversal cost are unqualified.
 canonical-far-experiment = ["engine"]
+# Offline spatial reference: materialize camera rays before canonical traversal.
+surface-reference = ["canonical-far-experiment"]
 # Candidate regional publication; retain complete-cut default until qualified.
 regional-publication-experiment = ["engine"]
 

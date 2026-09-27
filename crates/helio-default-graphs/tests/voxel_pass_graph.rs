@@ -4,13 +4,30 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     RendererBuilder, RendererConfig,
 };
-use helio_default_graphs::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
+use helio_default_graphs::{build_default_graph_external_with_passes, GraphPassFactory, VoxelPassFactory};
 use helio_pass_tiny_voxel::{
     engine::{EngineVoxelFrame, LazyEngineVoxelPass, SharedVoxelFrame},
     world::render_origin,
     Params, World,
 };
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
+
+struct FinalResourceConsumer {
+    expected: [u32; 2],
+    observed: Arc<Mutex<Vec<[u32; 2]>>>,
+}
+impl helio_core::RenderPass for FinalResourceConsumer {
+    fn name(&self) -> &'static str { "FinalResourceConsumer" }
+    fn reads(&self) -> &'static [&'static str] { &["pre_aa"] }
+    fn execute(&mut self, ctx: &mut helio_core::PassContext) -> helio_core::Result<()> {
+        let texture = ctx.resource_pool.get_texture("pre_aa").unwrap();
+        let extent = [texture.width(), texture.height()];
+        assert_eq!(extent, self.expected);
+        assert!(ctx.registry.texture_view(helio_core::ResourceKey::new("pre_aa")).is_some());
+        self.observed.lock().unwrap().push(extent);
+        Ok(())
+    }
+}
 
 #[test]
 fn optional_voxel_pass_builds_and_renders_in_the_deferred_graph() {
@@ -71,11 +88,16 @@ fn optional_voxel_pass_builds_and_renders_in_the_deferred_graph() {
         });
         let mut config = RendererConfig::new(640, 360, wgpu::TextureFormat::Rgba8Unorm);
         config.enable_foliage = false;
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let captured = observed.clone();
+        let final_factory: GraphPassFactory = Arc::new(move |_, _, width, height| {
+            Box::new(FinalResourceConsumer { expected: [width, height], observed: captured.clone() })
+        });
         let mut renderer = RendererBuilder::new(config, mirror)
             .with_ambient([0.5, 0.5, 0.6], 1.0)
             .with_external_device()
             .with_pass_build_context(Box::new(move |ctx| {
-                build_default_graph_external_with_voxel_passes(ctx, vec![factory])
+                build_default_graph_external_with_passes(ctx, vec![factory], vec![final_factory])
             }))
             .build(
                 Arc::clone(&device),
@@ -269,5 +291,21 @@ fn optional_voxel_pass_builds_and_renders_in_the_deferred_graph() {
         let pass = renderer.find_pass::<LazyEngineVoxelPass>().unwrap();
         assert!(!pass.ready());
         assert!(!pass.needs_frame());
+        assert!(observed.lock().unwrap().contains(&[config.internal_width(), config.internal_height()]));
+        renderer.set_render_size(320, 180);
+        let resized = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("final consumer resize"),
+            size: wgpu::Extent3d { width: 320, height: 180, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: config.surface_format, usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        renderer.render(&camera, &resized.create_view(&Default::default())).unwrap();
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        assert!(validation.pop().await.is_none());
+        let resized_config = RendererConfig { width: 320, height: 180, ..config };
+        assert_eq!(observed.lock().unwrap().last(),
+            Some(&[resized_config.internal_width(), resized_config.internal_height()]));
     });
 }

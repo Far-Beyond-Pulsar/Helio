@@ -57,3 +57,12 @@ The existing GBuffer's single normal is insufficient for a general mixture of di
 Use a bounded resident hierarchy with local publication transactions. Keep valid predecessor coverage until a replacement region and its dependent summaries are ready; prioritize current visible error, edits and predicted arrival, and cancel obsolete region/revision requests. Spatially index GPU edits. The generic component should expose reusable canonical query/edit capabilities to simulation as well as rendering. [Aokana](https://arxiv.org/html/2505.02017v1) provides relevant shallow hierarchy, occupancy-mask and visibility-scheduling ideas, but its parent-voxel LOD and lack of runtime modification do not meet this contract.
 
 The first decisive experiment is a set of canonical patches: slope, silhouette ridge, cave opening, thin wall and destructive edit. Capture spatially supersampled linear-light references with coverage, depth, material, face contribution and sunlight outputs. Move the camera across pixel and region boundaries and rotate the sunlight. Disable temporal history during the initial comparison. Compare cached exact bricks, derived surface records and transitions; measure construction cost, steady rendering, memory and local edit propagation. Reject a candidate that smooths resolvable features, exposes parent cubes, repeatedly evaluates the full source for every ray, or only looks stable after temporal accumulation. Passing this experiment is a prerequisite for returning to the complete planetary flight and engine gates, not a replacement for them.
+
+The [surface reference checkpoint](SURFACE_REFERENCE_2026_09_27.md) supplies
+32 patch/light/translation cases at 16, 64 and 256 spatial samples per pixel.
+The sampled CPU audits pass, and center rays/lighting match between sampling
+runs after separating reference ray preparation. Filtering separately lit
+samples reduces slope stippling while resolved shell edges remain visible.
+Sampling error still warrants measurement; no compact surface cache has yet
+been tested against these references. Implement and measure that local
+representation next, before returning to global residency scheduling.

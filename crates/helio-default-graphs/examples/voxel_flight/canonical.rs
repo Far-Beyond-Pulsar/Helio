@@ -14,7 +14,8 @@ pub(super) fn requested(path: &Path) -> bool {
         )
 }
 
-pub(super) fn save(hits: &[u8], size: [u32; 2], frame: &EngineVoxelFrame, path: &Path) {
+/// Returns whether sampled coverage, first-cell and material all agree.
+pub(super) fn save(hits: &[u8], size: [u32; 2], frame: &EngineVoxelFrame, path: &Path) -> bool {
     assert_eq!(hits.len(), size[0] as usize * size[1] as usize * 32);
     let start = Instant::now();
     let p = &frame.params;
@@ -27,6 +28,7 @@ pub(super) fn save(hits: &[u8], size: [u32; 2], frame: &EngineVoxelFrame, path: 
     writeln!(csv, "x,y,width,height,voxel_size,origin_x,origin_y,origin_z,ray_x,ray_y,ray_z,gpu_status,gpu_level,gpu_x,gpu_y,gpu_z,gpu_material,canonical_at_gpu,gpu_distance,cpu_hit,cpu_x,cpu_y,cpu_z,cpu_material,cpu_distance,depth_error_m,pixel_footprint_m,depth_error_footprints,oracle_ms").unwrap();
     let mut mismatched_coverage = 0;
     let mut wrong_cell = 0;
+    let mut wrong_material = 0;
     let mut far_surface_in_air = 0;
     eprintln!("VOXEL_CANONICAL_BEGIN capture={} rays=144", path.display());
     for gy in 0..9 {
@@ -66,6 +68,7 @@ pub(super) fn save(hits: &[u8], size: [u32; 2], frame: &EngineVoxelFrame, path: 
             let footprint = cpu_distance * 2.0 * f64::from(p.up[3]) / f64::from(size[1]);
             mismatched_coverage += usize::from((status == 1) != reference.is_some());
             wrong_cell += usize::from(status == 1 && reference.is_some() && cell != cpu_cell);
+            wrong_material += usize::from(status == 1 && reference.is_some() && material != cpu_material);
             far_surface_in_air += usize::from(status == 1 && level > 0 && canonical_at_gpu == 0);
             writeln!(csv, "{x},{y},{},{},{},{:.12},{:.12},{:.12},{:.12},{:.12},{:.12},{status},{level},{},{},{},{material},{canonical_at_gpu},{gpu_distance:.9},{},{},{},{},{cpu_material},{cpu_distance:.9},{depth_error:.9},{footprint:.9},{:.9},{oracle_ms:.6}",
                 size[0], size[1], frame.world.voxel_size(), origin.x, origin.y, origin.z,
@@ -74,5 +77,6 @@ pub(super) fn save(hits: &[u8], size: [u32; 2], frame: &EngineVoxelFrame, path: 
         }
         csv.flush().unwrap();
     }
-    eprintln!("VOXEL_CANONICAL_END capture={} rays=144 coverage_mismatch={mismatched_coverage} different_first_cell={wrong_cell} far_surface_in_canonical_air={far_surface_in_air} elapsed_ms={:.2}", path.display(), start.elapsed().as_secs_f64() * 1000.0);
+    eprintln!("VOXEL_CANONICAL_END capture={} rays=144 coverage_mismatch={mismatched_coverage} different_first_cell={wrong_cell} material_mismatch={wrong_material} far_surface_in_canonical_air={far_surface_in_air} elapsed_ms={:.2}", path.display(), start.elapsed().as_secs_f64() * 1000.0);
+    mismatched_coverage == 0 && wrong_cell == 0 && wrong_material == 0 && far_surface_in_air == 0
 }

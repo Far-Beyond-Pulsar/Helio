@@ -35,6 +35,37 @@ Set `HELIO_VOXEL_FLIGHT_RECORD=1` for a separate visual run. Open its `movement.
 
 The opt-in `canonical-far-experiment` feature evaluates canonical occupancy inside far leaves. The [reference experiment](CANONICAL_REFERENCE_2026_09_26.md) records precision regressions, source-snapshot isolation and successful sampled comparisons. Direct recipe evaluation is much too expensive for normal rendering; the feature stays disabled by default and does not qualify a replacement far representation.
 
+The `helio-default-graphs/voxel-reference` feature and
+`HELIO_VOXEL_SURFACE_REFERENCE=N` run spatial reference patches through the
+engine's linear HDR lighting. N is a power of two from 2 through 16, giving
+N*N samples per pixel. Use native resolution, at most 65,536 pixels. This mode
+enables canonical far occupancy, materializes camera rays before traversal,
+disables temporal AA, automatic jitter and reflections, and captures lighting before
+AA/postprocessing. It retains separate face/material coverage and lit face
+contributions. It is an offline reference for the current material and lighting
+model, not a fast terrain path.
+
+```powershell
+cargo +1.98 build --release -p helio-default-graphs --features voxel-reference --example voxel_flight
+$env:HELIO_VOXEL_SURFACE_REFERENCE = '4'
+.\target\release\examples\voxel_flight.exe target/voxel-goal/surface-4 96 54 native
+$env:HELIO_VOXEL_SURFACE_REFERENCE = '8'
+.\target\release\examples\voxel_flight.exe target/voxel-goal/surface-8 96 54 native
+python crates/helio-default-graphs/examples/voxel_flight/analyze_surface.py target/voxel-goal/surface-4 target/voxel-goal/surface-8
+Remove-Item Env:HELIO_VOXEL_SURFACE_REFERENCE
+```
+
+The default 32 cases cover slopes, a horizon, carved openings, thin shells and
+destroyed shells, including close views, two sun directions and 2.5 cm camera
+translations. `HELIO_VOXEL_REFERENCE_CASES` can select comma-separated fixture
+names, for example `slope,ridge`. Repeated frames must match, the GPU camera
+must equal the CPU camera, and sampled center rays must agree with the CPU
+source. The comparison script requires identical center rays/lighting across
+the two sampling runs. CSV depth ranges are sampled estimates, not conservative
+bounds. Finite sampling, unregistered image differences during translation and
+small diagnostic crops do not establish convergence, motion quality or speed.
+All output stays local under ignored `target/`; do not commit it.
+
 `HELIO_VOXEL_FLIGHT_SUN_WORK=1` separately replays sunlight rays from primary terrain hits. Use with `HELIO_VOXEL_FLIGHT_SUN=1` outside timing runs. It saves traversal maxima and the ray origin/direction for exhausted traces; it does not establish shadow fidelity or account for later mesh coverage.
 
 The current far representation is not a filtered reduction of exact edited leaves. That fidelity gap, refinement latency and visual aliasing must be measured independently of the exact CPU query and generation tests. This backend is not yet qualified for AAA quality or seamless exact-detail arrival.

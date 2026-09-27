@@ -10,6 +10,8 @@ override STORED_WORK_SUN:bool=false;
 // Experimental until repeated full-flight tail-time gates pass.
 override STORED_SKIP_EMPTY:bool=false;
 override STORED_REGIONAL:bool=false;
+override STORED_CANONICAL:bool=false;
+override STORED_REFERENCE_RAYS:bool=false;
 var<private> stored_work:vec3<u32>;
 // Four-word root header (low.xyz, level), followed by one child link per
 // node. Bounds and levels are implicit in the complete octree topology.
@@ -361,11 +363,19 @@ fn stored_trace(ro:vec3<f32>,rd:vec3<f32>,maximum:f32)->Hit {
     return Hit(vec3<i32>(0),2u,rd,t);
 }
 @compute @workgroup_size(8,8)
+fn stored_prepare_rays(@builtin(global_invocation_id) id:vec3<u32>) {
+    if any(id.xy>=vec2<u32>(p.screen.xy)) {return;}
+    primary_hits[id.x+id.y*u32(p.screen.x)]=Hit(vec3<i32>(0),3u,stored_ray(id.xy),0.0);
+}
+@compute @workgroup_size(8,8)
 fn stored_primary(@builtin(global_invocation_id) id:vec3<u32>) {
     if any(id.xy>=vec2<u32>(p.screen.xy)) {return;}
-    let rd=stored_ray(id.xy);var hit=Hit(vec3<i32>(0),3u,rd,0.0);
-    if p.settings.z>0.0 {hit=stored_trace(vec3<f32>(0.0),rd,p.settings.x);}
     let index=id.x+id.y*u32(p.screen.x);
+    var rd=vec3<f32>(0.0);
+    if STORED_REFERENCE_RAYS {rd=primary_hits[index].normal;}
+    else {rd=stored_ray(id.xy);}
+    var hit=Hit(vec3<i32>(0),3u,rd,0.0);
+    if p.settings.z>0.0 {hit=stored_trace(vec3<f32>(0.0),rd,p.settings.x);}
     primary_hits[index]=hit;
 }
 @compute @workgroup_size(8,8)
@@ -378,7 +388,7 @@ fn stored_primary_work(@builtin(global_invocation_id) id:vec3<u32>) {
         let normal=stored_normal(source.status);
         let level=(source.status>>2u)&31u;
         let footprint=source.distance*p.up.w*2.0/p.screen.y;
-        let offset=select(0.0,footprint*0.25,level>0u);
+        let offset=select(0.0,footprint*0.25,!STORED_CANONICAL && level>0u);
         let origin=source.normal*source.distance+normal*max(0.0001,source.distance*0.00000012)+sun*offset;
         var blocker=Hit(vec3<i32>(0),0u,sun,0.0);
         if (source.status&3u)==1u && dot(normal,sun)>0.0 {
@@ -429,7 +439,7 @@ override STORED_REVERSE_DEPTH:bool=false;
     let center=(vec3<f32>(hit.cell-p.origin.xyz)+0.5-p.fraction.xyz)*0.1;
     // A distant reconstructed surface has its own zero depth; using the
     // canonical height here would turn interpolation error into soil bands.
-    let depth_in_material=select(surface_depth(hit.cell,center),0.0,level>0u && material==1u);
+    let depth_in_material=select(surface_depth(hit.cell,center),0.0,!STORED_CANONICAL && level>0u && material==1u);
     let albedo=face_albedo(normal,radial,depth_in_material,altitude,pigment);
     let previous=camera.prev_view_proj*vec4<f32>(camera.position_near.xyz+position,1.0);
     var velocity=vec2<f32>(0.0);
@@ -452,7 +462,7 @@ fn stored_visibility(@builtin(global_invocation_id) id:vec3<u32>) {
             // orbit; the offset is along the queried ray, never a larger cube.
             let level=(hit.status>>2u)&31u;
             let footprint=hit.distance*p.up.w*2.0/p.screen.y;
-            let offset=select(0.0,footprint*0.25,level>0u);
+            let offset=select(0.0,footprint*0.25,!STORED_CANONICAL && level>0u);
             let origin=hit.normal*hit.distance+normal*max(0.0001,hit.distance*0.00000012)+sun*offset;
             let blocker=stored_trace(origin,sun,p.settings.x);
             visibility=select(0.0,1.0,(blocker.status&3u)==0u);

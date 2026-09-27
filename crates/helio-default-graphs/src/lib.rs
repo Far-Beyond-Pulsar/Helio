@@ -45,14 +45,16 @@ use helio_pass_water_sim::WaterSimPass;
 
 use helio_core::RenderGraph;
 
-/// An application-provided voxel renderer inserted after opaque geometry and
-/// before decals and deferred lighting. The factory is reused on graph resize.
-/// Scene data and backend selection remain with the application.
-pub type VoxelPassFactory = Arc<
+/// An application-provided pass factory reused on graph resize. The builder
+/// chooses its stage; scene data and backend selection remain with the caller.
+pub type GraphPassFactory = Arc<
     dyn Fn(&wgpu::Device, &wgpu::Queue, u32, u32) -> Box<dyn helio_core::RenderPass>
         + Send
         + Sync,
 >;
+
+/// Factory for format-independent voxel passes in the GBuffer stage.
+pub type VoxelPassFactory = GraphPassFactory;
 
 /// Spotlight icon embedded at compile time — used as the editor billboard sprite.
 static SPOTLIGHT_PNG: &[u8] = include_bytes!("../../../spotlight.png");
@@ -526,6 +528,7 @@ pub fn build_default_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGrap
         None,
         ctx.scene_db.clone(),
         Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -540,8 +543,19 @@ pub fn build_default_graph_external_with_context(ctx: PassBuildContext<'_>) -> R
 /// The pass factory is intentionally independent of any voxel format or
 /// generation implementation.
 pub fn build_default_graph_external_with_voxel_passes(
+    ctx: PassBuildContext<'_>,
+    voxel_passes: Vec<VoxelPassFactory>,
+) -> RenderGraph {
+    build_default_graph_external_with_passes(ctx, voxel_passes, Vec::new())
+}
+
+/// Add GBuffer voxel passes and final resource consumers before graph locking.
+/// Final passes must declare all resource reads/writes. Their factories are
+/// retained by graph rebuilds and receive the current internal render size.
+pub fn build_default_graph_external_with_passes(
     mut ctx: PassBuildContext<'_>,
     voxel_passes: Vec<VoxelPassFactory>,
+    final_passes: Vec<GraphPassFactory>,
 ) -> RenderGraph {
     ctx.owns_device = false;
     build_default_graph_internal(
@@ -557,6 +571,7 @@ pub fn build_default_graph_external_with_voxel_passes(
         None,
         ctx.scene_db,
         voxel_passes,
+        final_passes,
     )
 }
 
@@ -577,6 +592,7 @@ pub fn build_default_graph_with_user_effects_with_context(
         None,
         Some(user_effects),
         ctx.scene_db.clone(),
+        Vec::new(),
         Vec::new(),
     )
 }
@@ -604,6 +620,7 @@ pub fn build_default_graph(
         debug_overlay,
         None,
         scene_db,
+        Vec::new(),
         Vec::new(),
     )
 }
@@ -633,6 +650,7 @@ pub fn build_default_graph_with_user_effects(
         Some(user_effects),
         scene_db,
         Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -660,6 +678,7 @@ pub fn build_default_graph_external(
         None,
         scene_db,
         Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -676,6 +695,7 @@ fn build_default_graph_internal(
     user_effects: Option<&'static str>,
     scene_db: helio::SceneDbHandle,
     voxel_passes: Vec<VoxelPassFactory>,
+    final_passes: Vec<GraphPassFactory>,
 ) -> RenderGraph {
     let iw = config.internal_width();
     let ih = config.internal_height();
@@ -848,6 +868,9 @@ fn build_default_graph_internal(
         debug_overlay,
     );
 
+    for factory in &final_passes {
+        graph.add_pass(factory(device, queue, iw, ih));
+    }
     graph.lock(iw, ih);
 
     let overlay_owned = debug_overlay.map(Arc::clone);
@@ -867,6 +890,7 @@ fn build_default_graph_internal(
                 effect_snippet,
                 scene_db.clone(),
                 voxel_passes.clone(),
+                final_passes.clone(),
             )
         },
     );
