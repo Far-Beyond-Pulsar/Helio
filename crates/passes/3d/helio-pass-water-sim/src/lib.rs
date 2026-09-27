@@ -1,6 +1,5 @@
 pub mod pipeline;
 pub mod simulation;
-mod liveness;
 
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
@@ -435,7 +434,7 @@ pub struct WaterSimPass {
 
     pub(crate) water_output_view: Option<wgpu::TextureView>,
     /// Whether any `"water_volumes"` row is live, from an async readback.
-    pub(crate) volume_liveness: liveness::VolumeLiveness,
+    pub(crate) volume_liveness: helio_core::SceneBufferLiveness,
     /// This frame produced `water_output` and republished it as `pre_aa`.
     /// False when no volume is live: the screen-space passes (scene blit,
     /// surface, underwater tint) would only copy `pre_aa` unchanged, so they

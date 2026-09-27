@@ -53,6 +53,10 @@ pub struct DecalPass {
     /// inserted -- SceneDB is the only decal source this pass reads.
     /// `decal_count` is 0 whenever this is bound, so it's never dereferenced.
     fallback_decals: wgpu::Buffer,
+    /// Whether any `"decals"` row is live. Hosts register the column up
+    /// front, so the buffer's presence alone would run both full-screen
+    /// passes over empty rows, which only copy the G-buffer unchanged.
+    decal_liveness: helio_core::SceneBufferLiveness,
 }
 
 impl DecalPass {
@@ -207,6 +211,7 @@ impl DecalPass {
             last_h: 0,
             decal_count: 0,
             fallback_decals,
+            decal_liveness: Default::default(),
         }
     }
 
@@ -371,8 +376,12 @@ impl RenderPass for DecalPass {
         // SceneDB is the only decal source: `"decals"` is a fixed-capacity
         // buffer (`MAX_DECALS`), resolved fresh from the mirror by key every
         // frame. 0 when no `DecalComponent` has ever been inserted; there is
-        // no Helio-owned decal buffer to fall back to.
-        self.decal_count = if ctx.scene_buffers.contains(BufferKey::of("decals")) {
+        // no Helio-owned decal buffer to fall back to. Also 0 once every row
+        // is known to be empty (all-zero), since the passes would then only
+        // copy the G-buffer through the temporaries unchanged.
+        let decals = ctx.scene_buffers.get(BufferKey::of("decals"));
+        self.decal_liveness.update(ctx.device, ctx.queue, decals);
+        self.decal_count = if decals.is_some_and(|handle| self.decal_liveness.maybe_live(handle)) {
             MAX_DECALS
         } else {
             0
