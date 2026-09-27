@@ -35,6 +35,8 @@
 //! `--movability static|movable|mixed` re-tags objects so shadow casters land
 //! in the static atlas (default), the dynamic one, or both.
 //!
+//! `--dof` enables depth of field through the camera's post-process settings.
+//!
 //! `--billboards` places a billboard (editor light icon) over every point light.
 //!
 //! `--scale` is the renderer's internal render scale (the editor uses the
@@ -95,6 +97,7 @@ struct Args {
     pulsar_columns: bool,
     billboards: bool,
     movability: String,
+    dof: bool,
 }
 
 fn parse_args() -> Args {
@@ -113,6 +116,7 @@ fn parse_args() -> Args {
         pulsar_columns: false,
         billboards: false,
         movability: "static".into(),
+        dof: false,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -124,6 +128,7 @@ fn parse_args() -> Args {
             "--no-ray-query" => Some(&mut args.no_ray_query),
             "--pulsar-columns" => Some(&mut args.pulsar_columns),
             "--billboards" => Some(&mut args.billboards),
+            "--dof" => Some(&mut args.dof),
             _ => None,
         };
         if let Some(switch) = switch {
@@ -409,6 +414,15 @@ fn run(
         spawn_light_billboards(&mut scene_db.world);
     }
     apply_movability(&mut scene_db.world, &args.movability);
+    if args.dof {
+        // Camera-baseline post-process settings with depth of field on,
+        // focused a few metres out so near and far both blur.
+        let mut settings = helio_pass_postprocess::PostProcessSettings::default();
+        settings.dof_enabled = true;
+        settings.dof_focal_distance = 6.0;
+        settings.dof_focal_region = 1.5;
+        set_camera_postprocess(&mut scene_db.world, 0, &settings);
+    }
     let mut config = RendererConfig::new(width, height, FORMAT).with_render_scale(args.scale);
     if args.tsr {
         config = config.with_tsr_quality(helio_pass_tsr::TsrQuality::Quality).with_render_scale(args.scale);
