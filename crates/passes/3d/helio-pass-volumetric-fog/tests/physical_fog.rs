@@ -329,7 +329,7 @@ fn native_media_world_space_overlap_transmittance_quality_edits_and_tombstones()
     );
     let legacy = buffer(&device, &[0; 64], storage);
     let indices = buffer(&device, &[0; 1920], storage);
-    let indirect = buffer(&device, &[0; 36], storage);
+    let indirect = buffer(&device, &[0; 40], storage);
     let resolved = buffer(&device, &[0; 64], storage);
     let output = buffer(&device, &[0; 64], storage);
     let sample = |world: &pulsar_scenedb::World| {
@@ -404,8 +404,9 @@ fn native_media_world_space_overlap_transmittance_quality_edits_and_tombstones()
     assert_eq!(&v[9..12], &[96., 54., 64.]);
     assert_eq!(
         bytemuck::cast_slice::<u8, u32>(&dispatch),
-        // inject, cull, then integrate over the allocated 192x108 columns.
-        &[12, 7, 64, 12, 7, 16, 24, 14, 1]
+        // inject, cull, then integrate over the allocated 192x108 columns,
+        // then the resolved range (40 m) published for compositing.
+        &[12, 7, 64, 12, 7, 16, 24, 14, 1, 40f32.to_bits()]
     );
     assert_eq!(sample(&world).0[13], 1.0, "unchanged history is reusable");
     settings_value.quality = 1;
@@ -432,6 +433,13 @@ fn native_media_world_space_overlap_transmittance_quality_edits_and_tombstones()
         0,
         "empty scenes skip injection"
     );
+    // The medium was live on the previous sample, so that one still integrated
+    // back to neutral. Now the grid is neutral: nothing integrates and the
+    // range published to compositing is zero, so consumers pass through.
+    let dispatch = sample(&world).1;
+    let dispatch = bytemuck::cast_slice::<u8, u32>(&dispatch);
+    assert_eq!(dispatch[6], 0, "a neutral grid needs no integration");
+    assert_eq!(f32::from_bits(dispatch[9]), 0.0, "a neutral grid publishes no range");
     world.remove::<VolumetricFogSettingsComponent>(settings);
     assert_eq!(
         sample(&world).0[9],
