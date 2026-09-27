@@ -6,14 +6,14 @@ use crate::{
     Params,
 };
 use glam::DVec3;
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{mpsc, Arc, Mutex},
-};
-#[cfg(test)]
-mod tests;
+// Keys and slots are internal bounded integers, not untrusted input strings.
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::sync::Arc;
 #[cfg(feature = "regional-publication-experiment")]
 mod regional;
+mod selection;
+#[cfg(test)]
+mod tests;
 
 pub const BRICK_WORDS: usize = 2048; // 32^3 exact materials, or 9^3 densities + 8^3 pairs of bounds.
 pub const BRICK_CAPACITY: usize = 65_536;
@@ -179,7 +179,11 @@ struct SelectionCache {
     voxel_step: u32,
 }
 impl SelectionCache {
+    #[cfg(test)]
     fn reconcile(&mut self, world: &World) {
+        assert!(self.reconcile_cancellable(world, &|| false));
+    }
+    fn reconcile_cancellable(&mut self, world: &World, cancelled: &impl Fn() -> bool) -> bool {
         if self.voxel_step != world.voxel_step() {
             self.regions.clear();
             self.voxel_step = world.voxel_step();
@@ -198,15 +202,35 @@ impl SelectionCache {
                 .chain(&world.edits[common..])
                 .copied()
                 .collect();
-            self.regions
-                .retain(|key, _| !changes.iter().any(|edit| key.overlaps(*edit)));
+            let mut interrupted = false;
+            self.regions.retain(|key, _| {
+                if interrupted {
+                    return true;
+                }
+                for (i, edit) in changes.iter().enumerate() {
+                    if i % 64 == 0 && cancelled() {
+                        interrupted = true;
+                        return true;
+                    }
+                    if key.overlaps(*edit) {
+                        return false;
+                    }
+                }
+                true
+            });
+            // Partial invalidation is harmless, but must retain the old edit
+            // identity so a later request rechecks every remaining old entry.
+            if interrupted {
+                return false;
+            }
             self.edits.clone_from(&world.edits);
         }
         // Bound CPU memory independently of travel distance. A cold cache
         // affects selection cost only; never occupancy or published geometry.
-        if self.regions.len() > NODE_CAPACITY * 2 {
+        if self.regions.len() >= NODE_CAPACITY * 2 {
             self.regions.retain(|key, _| key.level >= 10);
         }
+        true
     }
     fn classify(&mut self, world: &World, key: Key) -> u32 {
         if let Some(&kind) = self.regions.get(&key) {
@@ -214,14 +238,36 @@ impl SelectionCache {
             return kind;
         }
         let kind = classify(world, key);
-        self.regions.insert(key, kind);
+        // A single selection can retry at multiple pixel budgets. Bound the
+        // cache during those retries, not only between requests.
+        if self.regions.len() < NODE_CAPACITY * 2 {
+            self.regions.insert(key, kind);
+        }
         self.classified += 1;
         kind
     }
 }
 
+#[cfg(test)]
 fn build(world: Arc<World>, view: View, max_leaves: usize, cache: &mut SelectionCache) -> Plan {
-    cache.reconcile(&world);
+    build_cancellable(world, view, max_leaves, cache, || false).unwrap()
+}
+fn build_cancellable(
+    world: Arc<World>,
+    view: View,
+    max_leaves: usize,
+    cache: &mut SelectionCache,
+    cancelled: impl Fn() -> bool,
+) -> Option<Plan> {
+    if cancelled() {
+        return None;
+    }
+    if !cache.reconcile_cancellable(&world, &cancelled) {
+        return None;
+    }
+    if cancelled() {
+        return None;
+    }
     // Retry selection at a coarser pixel budget if a pathological surface would
     // exceed physical storage. Report that budget; never silently omit leaves.
     let mut level = 22;
@@ -253,6 +299,11 @@ fn build(world: Arc<World>, view: View, max_leaves: usize, cache: &mut Selection
         });
         let mut pending = vec![0usize];
         while let Some(index) = pending.pop() {
+            // Check before each classification: a single region is the largest
+            // non-preemptible source operation, not an entire planetary plan.
+            if cancelled() {
+                return None;
+            }
             let n = plan.nodes[index];
             let key = Key {
                 low: n.low,
@@ -289,7 +340,7 @@ fn build(world: Arc<World>, view: View, max_leaves: usize, cache: &mut Selection
             && plan.leaves.len() <= max_leaves
             && plan.nodes.len() + 8 <= NODE_CAPACITY
         {
-            return plan;
+            return Some(plan);
         }
         pixels *= 1.25;
     }
@@ -303,20 +354,24 @@ struct Entry {
 }
 struct Pending {
     plan: Plan,
+    edits: Arc<Vec<Edit>>,
+    // Ungenerated jobs have no slot. Allocate only when admitting a GPU batch.
     jobs: Vec<Job>,
+    job_nodes: Vec<usize>,
     cursor: usize,
     #[cfg(feature = "regional-publication-experiment")]
     readiness: regional::Readiness,
 }
 impl Pending {
-    fn new(plan: Plan, jobs: Vec<Job>, job_nodes: Vec<usize>) -> Self {
-        #[cfg(not(feature = "regional-publication-experiment"))]
-        let _ = job_nodes;
+    fn new(plan: Plan, jobs: Vec<Job>, job_nodes: Vec<usize>, edits: Arc<Vec<Edit>>) -> Self {
+        assert_eq!(jobs.len(), job_nodes.len());
         Self {
             #[cfg(feature = "regional-publication-experiment")]
-            readiness: regional::Readiness::new(&plan.nodes, job_nodes),
+            readiness: regional::Readiness::new(&plan.nodes, job_nodes.clone()),
+            edits,
             plan,
             jobs,
+            job_nodes,
             cursor: 0,
         }
     }
@@ -339,15 +394,29 @@ pub struct Stats {
     pub regional_publications: u64,
     /// Regions referencing a larger ancestor payload in the currently visible cut.
     pub fallback_regions: usize,
+    /// Worker plans abandoned after a newer demand or shutdown.
+    pub cancelled_plans: u64,
+    /// Queued GPU jobs discarded before allocation/generation; not unique bricks.
+    pub cancelled_jobs: u64,
+    /// Current frame's render-thread demand admission time; excludes generation.
+    pub update_cpu_ms: f64,
 }
 
 pub struct Residency {
-    requests: mpsc::SyncSender<(Arc<World>, View)>,
-    results: Mutex<mpsc::Receiver<Plan>>,
+    selector: selection::Worker,
+    retargeting: bool,
+    wanted: Option<(u64, Arc<World>, View)>,
+    // Camera demand does not change the source. Reuse its edit identity so
+    // ordinary travel needs neither full-cache reconciliation nor per-leaf
+    // atomic retagging. Actual source changes still compare ordered edits.
+    source_edits: Option<(Arc<World>, Arc<Vec<Edit>>)>,
     entries: HashMap<Key, Entry>,
     occupied: Vec<Option<Key>>,
     free: Vec<usize>,
-    active: HashSet<Key>,
+    active_slots: HashSet<usize>,
+    // Superseded versions still pinned by the last visible cut. Unlike cache
+    // entries, these become free at the next complete publication.
+    retired_slots: Vec<usize>,
     pending: Option<Pending>,
     active_world: Option<Arc<World>>,
     active_view: Option<View>,
@@ -368,37 +437,19 @@ impl Residency {
             .map_or(1, |world| world.voxel_step())
     }
     pub fn new(capacity: usize) -> Self {
-        let (tx, rx) = mpsc::sync_channel::<(Arc<World>, View)>(1);
-        let (done, result) = mpsc::sync_channel(1);
-        std::thread::Builder::new()
-            .name("voxel-selection".into())
-            .spawn(move || {
-                let mut cache = SelectionCache::default();
-                while let Ok((world, view)) = rx.recv() {
-                    let start = std::time::Instant::now();
-                    let plan = build(world, view, capacity / 2 - 1024, &mut cache);
-                    eprintln!(
-                        "VOXEL_PLAN nodes={} bricks={} pixel_budget={:.3} selection_ms={:.2} classified={} cached={}",
-                        plan.nodes.len(),
-                        plan.leaves.len(),
-                        plan.pixels,
-                        start.elapsed().as_secs_f64() * 1000.0,
-                        cache.classified,
-                        cache.reused,
-                    );
-                    if done.send(plan).is_err() {
-                        break;
-                    }
-                }
-            })
-            .expect("voxel selection worker");
         Self {
-            requests: tx,
-            results: Mutex::new(result),
-            entries: HashMap::new(),
+            selector: selection::Worker::new(capacity / 2 - 1024),
+            // Whole-plan retargeting reduces arrival delay but still costs too
+            // much render-thread admission work in flight. Keep it opt-in until
+            // admission/publication become bounded region transactions.
+            retargeting: std::env::var_os("HELIO_VOXEL_RETARGETING").is_some(),
+            wanted: None,
+            source_edits: None,
+            entries: HashMap::default(),
             occupied: vec![None; capacity],
             free: (0..capacity).rev().collect(),
-            active: HashSet::new(),
+            active_slots: HashSet::default(),
+            retired_slots: Vec::new(),
             pending: None,
             active_world: None,
             active_view: None,
@@ -410,120 +461,148 @@ impl Residency {
         }
     }
     pub fn update(&mut self, world: &Arc<World>, params: &Params) {
+        let start = std::time::Instant::now();
         self.clock += 1;
+        let view = View::new(params);
+        // Admit a completed snapshot before publishing the next camera demand.
+        // Otherwise a camera moving every frame discards every completed plan
+        // before it can generate even one brick. Source revisions cannot mix.
+        let interruptible = self.retargeting && !cfg!(feature = "regional-publication-experiment");
+        let mut available = if self.pending.is_none() || interruptible {
+            self.selector.take()
+        } else {
+            None
+        };
+        if self.retargeting
+            && available
+                .as_ref()
+                .is_some_and(|(_, p)| !Arc::ptr_eq(&p.world, world))
+        {
+            available = None;
+        }
+        // Bootstrap one complete cut while the camera moves; thereafter target
+        // the current demand without waiting for obsolete generation to finish.
+        let changed_demand = self.wanted.as_ref().is_none_or(|(_, w, v)| {
+            !Arc::ptr_eq(w, world) || (self.stats.ready && v.changed(view))
+        });
+        if changed_demand && (self.retargeting || (self.pending.is_none() && !self.requested)) {
+            // The older regional experiment can pin a union of both cuts. It
+            // still finishes that bounded transaction before accepting another;
+            // cancelling it requires a resident-region/coarsening contract.
+            #[cfg(not(feature = "regional-publication-experiment"))]
+            if self
+                .pending
+                .as_ref()
+                .is_some_and(|p| !Arc::ptr_eq(&p.plan.world, world))
+            {
+                self.cancel_pending();
+            }
+            let serial = self.selector.submit(world.clone(), view);
+            self.wanted = Some((serial, world.clone(), view));
+            self.requested = true;
+        }
+        #[cfg(not(feature = "regional-publication-experiment"))]
+        if available.is_some() && interruptible {
+            self.cancel_pending();
+        }
         if self.pending.is_none() {
-            if let Ok(mut plan) = self.results.get_mut().unwrap().try_recv() {
-                self.requested = false;
-                let edits = Arc::new(plan.world.edits.clone());
-                let keys: HashSet<_> = plan.leaves.iter().map(|(_, k)| *k).collect();
-                let mut changes = HashMap::<usize, Vec<Edit>>::new();
-                for entry in self.entries.values() {
-                    changes
-                        .entry(Arc::as_ptr(&entry.edits) as usize)
-                        .or_insert_with(|| {
-                            let common = entry
-                                .edits
-                                .iter()
-                                .zip(edits.iter())
-                                .take_while(|(a, b)| a == b)
-                                .count();
-                            entry.edits[common..]
-                                .iter()
-                                .chain(edits[common..].iter())
-                                .copied()
-                                .collect()
-                        });
+            if let Some((serial, mut plan)) = available {
+                if Some(serial) == self.wanted.as_ref().map(|(serial, _, _)| *serial) {
+                    self.requested = false;
                 }
-                // Reserve enough free slots once, before installing the cut.
-                // Repeatedly searching a 65k-slot pool per brick is quadratic.
-                let needed = keys.len().saturating_sub(self.free.len());
+                if self
+                    .source_edits
+                    .as_ref()
+                    .is_none_or(|(w, _)| !Arc::ptr_eq(w, &plan.world))
+                {
+                    self.source_edits =
+                        Some((plan.world.clone(), Arc::new(plan.world.edits.clone())));
+                }
+                let edits = self.source_edits.as_ref().unwrap().1.clone();
+                let keys: HashSet<_> = plan.leaves.iter().map(|(_, k)| *k).collect();
+                let mut changes = HashMap::<usize, Vec<Edit>>::default();
+                let mut jobs = Vec::new();
+                let mut job_nodes = Vec::new();
+                for &(index, key) in &plan.leaves {
+                    let valid = self.entries.get(&key).is_some_and(|e| {
+                        e.voxel_step == plan.world.voxel_step()
+                            && (Arc::ptr_eq(&e.edits, &edits)
+                                || changes
+                                    .entry(Arc::as_ptr(&e.edits) as usize)
+                                    .or_insert_with(|| {
+                                        let common = e
+                                            .edits
+                                            .iter()
+                                            .zip(edits.iter())
+                                            .take_while(|(a, b)| a == b)
+                                            .count();
+                                        e.edits[common..]
+                                            .iter()
+                                            .chain(edits[common..].iter())
+                                            .copied()
+                                            .collect()
+                                    })
+                                    .iter()
+                                    .all(|e| !key.overlaps(*e)))
+                    });
+                    if valid {
+                        let e = self.entries.get_mut(&key).unwrap();
+                        e.touched = self.clock;
+                        if !Arc::ptr_eq(&e.edits, &edits) {
+                            e.edits = edits.clone();
+                        }
+                        self.stats.reused += 1;
+                        plan.nodes[index].child = BRICK | e.slot as u32;
+                    } else {
+                        // Discard an invalid cached version unless it is still
+                        // visible. Do not reserve replacement slots speculatively.
+                        if self
+                            .entries
+                            .get(&key)
+                            .is_some_and(|e| !self.active_slots.contains(&e.slot))
+                        {
+                            let old = self.entries.remove(&key).unwrap();
+                            self.occupied[old.slot] = None;
+                            self.free.push(old.slot);
+                        }
+                        jobs.push(Job {
+                            low: key.low,
+                            level: key.level,
+                            slot: u32::MAX,
+                            pad: [0, 0, plan.world.voxel_step()],
+                        });
+                        // Structural leaf marker only. Readiness excludes this
+                        // node from publication until next_batch assigns a slot.
+                        plan.nodes[index].child = BRICK;
+                        job_nodes.push(index);
+                    }
+                }
+                // Make room for only missing payloads. Reused target entries
+                // and the complete visible cut remain pinned throughout this
+                // transaction. Allocation itself stays bounded by next_batch.
+                let needed = jobs.len().saturating_sub(self.free.len());
                 if needed > 0 {
                     let mut victims: Vec<_> = self
                         .entries
                         .iter()
-                        .filter(|(k, _)| !self.active.contains(k) && !keys.contains(k))
+                        .filter(|(k, e)| !self.active_slots.contains(&e.slot) && !keys.contains(k))
                         .map(|(k, e)| (*k, e.slot, e.touched))
                         .collect();
                     victims.sort_unstable_by_key(|(_, _, t)| *t);
+                    assert!(
+                        victims.len() >= needed,
+                        "two bounded voxel cuts fit the pool"
+                    );
                     for (key, slot, _) in victims.into_iter().take(needed) {
                         self.entries.remove(&key);
                         self.occupied[slot] = None;
                         self.free.push(slot);
                     }
                 }
-                let mut jobs = Vec::new();
-                #[cfg(feature = "regional-publication-experiment")]
-                let mut job_nodes = Vec::new();
-                #[cfg(not(feature = "regional-publication-experiment"))]
-                let job_nodes = Vec::new();
-                for &(index, key) in &plan.leaves {
-                    let valid = self.entries.get(&key).is_some_and(|e| {
-                        e.voxel_step == plan.world.voxel_step()
-                            && changes[&(Arc::as_ptr(&e.edits) as usize)]
-                                .iter()
-                                .all(|e| !key.overlaps(*e))
-                    });
-                    let slot = if valid {
-                        let e = self.entries.get_mut(&key).unwrap();
-                        e.touched = self.clock;
-                        e.edits = edits.clone();
-                        self.stats.reused += 1;
-                        e.slot
-                    } else {
-                        // A replacement never overwrites payloads still used by
-                        // the active tree. Publication switches the complete cut.
-                        let slot = self
-                            .free
-                            .pop()
-                            .expect("two bounded voxel cuts fit the pool");
-                        if let Some(old) = self.entries.insert(
-                            key,
-                            Entry {
-                                slot,
-                                edits: edits.clone(),
-                                touched: self.clock,
-                                voxel_step: plan.world.voxel_step(),
-                            },
-                        ) {
-                            // The old slot stays pinned until tree publication.
-                            if !self.active.contains(&key) {
-                                self.occupied[old.slot] = None;
-                                self.free.push(old.slot);
-                            }
-                        }
-                        self.occupied[slot] = Some(key);
-                        jobs.push(Job {
-                            low: key.low,
-                            level: key.level,
-                            slot: slot as u32,
-                            pad: [0, 0, plan.world.voxel_step()],
-                        });
-                        #[cfg(feature = "regional-publication-experiment")]
-                        job_nodes.push(index);
-                        slot
-                    };
-                    plan.nodes[index].child = BRICK | slot as u32;
-                }
                 self.stats.pending = jobs.len();
-                #[cfg(feature = "regional-publication-experiment")]
-                {
-                    // Generate nearby detail first so partial publication
-                    // helps arrival before distant refinements finish.
-                    let mut order: Vec<_> = jobs.into_iter().zip(job_nodes).collect();
-                    order.sort_by(|(a, _), (b, _)| {
-                        let distance = |j: &Job| {
-                            let low = DVec3::from_array(j.low.map(|v| f64::from(v) * 0.1));
-                            let high = low + DVec3::splat(f64::from(32u32 << j.level) * 0.1);
-                            plan.view.eye.distance_squared(plan.view.eye.clamp(low, high))
-                        };
-                        distance(a).total_cmp(&distance(b))
-                    });
-                    (jobs, job_nodes) = order.into_iter().unzip();
-                }
-                self.pending = Some(Pending::new(plan, jobs, job_nodes));
+                self.pending = Some(Pending::new(plan, jobs, job_nodes, edits));
             }
         }
-        let view = View::new(params);
         // Every published cut covers the complete world, including outside the
         // selected frustum. Keep rendering it during flight and teleports while
         // the replacement refines the arrival. Hiding it on each >128 m step
@@ -536,10 +615,19 @@ impl Residency {
             .is_none_or(|w| !Arc::ptr_eq(w, world))
             || self.active_view.is_none_or(|v| v.changed(view));
         self.stats.refining = changed;
-        if self.pending.is_none() && !self.requested && changed {
-            self.requested = self.requests.try_send((world.clone(), view)).is_ok();
-        }
         self.stats.planning = self.requested;
+        self.stats.cancelled_plans = self.selector.cancelled();
+        self.stats.update_cpu_ms = start.elapsed().as_secs_f64() * 1000.0;
+    }
+    #[cfg(not(feature = "regional-publication-experiment"))]
+    fn cancel_pending(&mut self) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        self.stats.cancelled_jobs += (pending.jobs.len() - pending.cursor) as u64;
+        // The unfinished suffix owns no slots. Generated entries survive as
+        // reusable cache data; visible versions remain pinned independently.
+        self.stats.pending = 0;
     }
     pub fn next_batch(&mut self) -> Option<(Vec<Job>, Vec<u32>, Arc<World>)> {
         let p = self.pending.as_mut()?;
@@ -578,6 +666,31 @@ impl Residency {
             job.pad[0] = references.len() as u32;
             job.pad[1] = edits.len() as u32;
             references.extend(edits.into_iter().map(|i| i as u32));
+            let key = Key {
+                low: job.low,
+                level: job.level,
+            };
+            let slot = self.free.pop().expect("admitted voxel cut fits the pool");
+            if let Some(old) = self.entries.insert(
+                key,
+                Entry {
+                    slot,
+                    edits: p.edits.clone(),
+                    touched: self.clock,
+                    voxel_step: p.plan.world.voxel_step(),
+                },
+            ) {
+                if self.active_slots.contains(&old.slot) {
+                    self.retired_slots.push(old.slot);
+                } else {
+                    self.occupied[old.slot] = None;
+                    self.free.push(old.slot);
+                }
+            }
+            self.occupied[slot] = Some(key);
+            job.slot = slot as u32;
+            p.jobs[p.cursor].slot = job.slot;
+            p.plan.nodes[p.job_nodes[p.cursor]].child = BRICK | job.slot;
             batch.push(job);
             samples += cost;
             #[cfg(feature = "regional-publication-experiment")]
@@ -599,20 +712,30 @@ impl Residency {
                 // Mixing source revisions or authored grids would expose stale
                 // edits. This first candidate publishes regions only within one
                 // immutable world; source changes retain atomic whole-cut swaps.
-                let compatible = self.active_world.as_ref()
+                let compatible = self
+                    .active_world
+                    .as_ref()
                     .is_some_and(|world| Arc::ptr_eq(world, &pending.plan.world))
-                    && self.complete_nodes.first().zip(pending.plan.nodes.first())
+                    && self
+                        .complete_nodes
+                        .first()
+                        .zip(pending.plan.nodes.first())
                         .is_some_and(|(a, b)| a.low == b.low && a.level == b.level);
                 if compatible && pending.readiness.changed {
                     pending.readiness.changed = false;
                     let nodes = regional::compose(
-                        &self.complete_nodes, &pending.plan.nodes, &pending.readiness,
+                        &self.complete_nodes,
+                        &pending.plan.nodes,
+                        &pending.readiness,
                     );
                     assert!(nodes.len() <= PUBLICATION_NODE_CAPACITY);
                     self.stats.regional_publications += 1;
                     self.stats.nodes = nodes.len();
-                    self.stats.fallback_regions = nodes.iter()
-                        .filter(|n| n.child & BRICK != 0 && n.child < SOLID && n.child & 0x001f_0000 != 0)
+                    self.stats.fallback_regions = nodes
+                        .iter()
+                        .filter(|n| {
+                            n.child & BRICK != 0 && n.child < SOLID && n.child & 0x001f_0000 != 0
+                        })
                         .count();
                     return Some(nodes);
                 }
@@ -620,13 +743,24 @@ impl Residency {
             return None;
         }
         let pending = self.pending.take().unwrap();
-        self.active = pending.plan.leaves.iter().map(|(_, k)| *k).collect();
+        self.active_slots = pending
+            .plan
+            .nodes
+            .iter()
+            .filter(|n| n.child & BRICK != 0 && n.child < SOLID)
+            .map(|n| (n.child & 0xffff) as usize)
+            .collect();
         // Release superseded versions of a key now that no active node owns them.
-        for (slot, key) in self.occupied.iter_mut().enumerate() {
-            if key.is_some_and(|k| self.entries.get(&k).is_none_or(|e| e.slot != slot)) {
-                *key = None;
-                self.free.push(slot);
-            }
+        for slot in self.retired_slots.drain(..) {
+            assert!(
+                !self.active_slots.contains(&slot),
+                "superseded version reused"
+            );
+            let key = self.occupied[slot]
+                .take()
+                .expect("retired slot freed twice");
+            assert!(self.entries.get(&key).is_none_or(|e| e.slot != slot));
+            self.free.push(slot);
         }
         self.stats.ready = true;
         self.stats.fallback_regions = 0;

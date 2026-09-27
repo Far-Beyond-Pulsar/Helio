@@ -17,6 +17,8 @@
 //! rays on the authored grid. This is a fidelity diagnostic, not a timing run.
 //! HELIO_VOXEL_FLIGHT_SUN_WORK=1 separately replays sunlight rays and saves
 //! exhausted rays plus traversal maxima; use with SUN=1 outside timing runs.
+//! HELIO_VOXEL_RETARGETING=1 enables experimental whole-plan demand cancellation.
+//! Leave it unset for the deferred-demand control in the same executable.
 //! HELIO_VOXEL_FLIGHT_BASE_METRES overrides the initial authored grid (0.1..1).
 //! HELIO_VOXEL_APPEARANCE_FILTER=1 enables the opt-in post-lighting experiment
 //! (requires --features voxel-appearance); geometry and source data stay exact.
@@ -210,7 +212,7 @@ impl Flight {
                 .expect("supported authored voxel size");
         }
         let mut csv = fs::File::create(output.join("frames.csv")).unwrap();
-        writeln!(csv, "frame,stage,x,y,z,sync_frame_ms,ready,refining,planning,pending,generated,reused,bricks,pixel_budget,cpu_submit_ms,gpu_wait_ms,start_unix_ns,regional_publications,nodes,fallback_regions").unwrap();
+        writeln!(csv, "frame,stage,x,y,z,sync_frame_ms,ready,refining,planning,pending,generated,reused,bricks,pixel_budget,cpu_submit_ms,gpu_wait_ms,start_unix_ns,regional_publications,nodes,fallback_regions,cancelled_plans,cancelled_jobs,residency_update_cpu_ms").unwrap();
         Self {
             device,
             queue,
@@ -314,7 +316,7 @@ impl Flight {
         }
         writeln!(
             self.csv,
-            "{},{},{:.6},{:.6},{:.6},{:.4},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{}",
+            "{},{},{:.6},{:.6},{:.6},{:.4},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{},{},{:.4}",
             self.frame,
             stage,
             eye.x,
@@ -334,7 +336,10 @@ impl Flight {
             start_unix_ns,
             stats.regional_publications,
             stats.nodes,
-            stats.fallback_regions
+            stats.fallback_regions,
+            stats.cancelled_plans,
+            stats.cancelled_jobs,
+            stats.update_cpu_ms
         )
         .unwrap();
         if let Some(profiler) = &mut self.profiler {

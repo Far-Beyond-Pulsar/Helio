@@ -35,7 +35,8 @@ def summarize(path):
         warm = (frame["ready"] == "true" and frame["refining"] == "false"
                 and frame["planning"] == "false" and int(frame["pending"]) == 0)
         for phase in ["all"] + (["warm"] if warm else []):
-            for metric in ["sync_frame_ms", "cpu_submit_ms", "gpu_wait_ms"]:
+            for metric in ["sync_frame_ms", "cpu_submit_ms", "gpu_wait_ms",
+                           "residency_update_cpu_ms"]:
                 if metric in frame:
                     groups[frame["stage"], phase, metric].append(float(frame[metric]))
     seen = set()
@@ -73,6 +74,9 @@ def summarize(path):
             diagnostics[name][field] += count
     report = {"frame_count": len(frames), "gpu_readbacks": dict(diagnostics),
               "memory": read_csv(path / "memory.csv")}
+    report["residency"] = {name: int(source_frames[-1][name])
+                           for name in ["generated", "reused", "cancelled_plans", "cancelled_jobs"]
+                           if name in source_frames[-1]}
     (path / "analysis.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report
 

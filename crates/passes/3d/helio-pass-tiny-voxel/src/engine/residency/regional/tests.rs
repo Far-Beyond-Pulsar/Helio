@@ -150,7 +150,12 @@ fn source_grid_and_root_changes_wait_for_an_atomic_complete_cut() {
                 pad: [0; 3],
             })
             .collect();
-        let mut pending = Pending::new(plan, jobs, (1..9).collect());
+        let mut pending = Pending::new(
+            plan,
+            jobs,
+            (1..9).collect(),
+            Arc::new(next_world.edits.clone()),
+        );
         pending.readiness.generated(0);
         pending.cursor = 1;
         residency.pending = Some(pending);

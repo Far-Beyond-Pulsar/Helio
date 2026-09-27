@@ -40,6 +40,17 @@ Do not combine nested GPU stage sums with their parent graph timings. Keep synch
 
 Keep PRs drafts while these gates remain open. Do not merge without explicit user authorization.
 
+## Demand scheduling checkpoint
+
+The [demand/residency experiment](DEMAND_RESIDENCY_2026_09_27.md) now allocates
+physical bricks only when their bounded GPU batch is admitted, pins visible
+versions by slot, and reuses edit identities across camera movement. Queued work
+is cancellable and worker classifications remain reusable. Whole-plan retargeting
+reduces arrival delay but regresses CPU frame time, so `HELIO_VOXEL_RETARGETING`
+remains opt-in. Next move admission into a bounded ordered worker pipeline, then
+replace complete-plan swaps with independent region transactions. Arrival,
+movement fidelity and the rest of the original gates remain open.
+
 ## Regional publication checkpoint
 
 The opt-in experiment in `REGIONAL_PUBLICATION_2026_09_26.md` publishes ready regions with clipped ancestor payloads and passes focused ownership/revision tests. Its retained recorded 720p flight had no exhausted/loading rays, but visual inspection exposed representation seams, full arrival refinement still took 3.38 seconds, and far fidelity remains incorrect. It is rejected for default adoption. The next scheduling candidate is a bounded resident hierarchy with local publication transactions and cancellation of obsolete demand; it also needs surface data that agrees across refinement boundaries. The existing global plan lifetime and inaccurate sampled far field are both replaceable; no acceptance target has been relaxed.
