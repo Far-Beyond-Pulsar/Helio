@@ -2,6 +2,8 @@
 use crate::{Params, World};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "canonical-far-experiment")]
+mod canonical;
 mod residency;
 mod terrain;
 pub use terrain::TerrainMemoryStats;

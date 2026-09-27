@@ -6,6 +6,8 @@ description = "Window-independent 10 cm voxel planet compute pass"
 
 [features]
 engine = ["dep:helio-core", "dep:rustc-hash"]
+# Opt-in architecture trial; linear edit scans and traversal cost are unqualified.
+canonical-far-experiment = ["engine"]
 
 [dependencies]
 wgpu = "30.0.1"

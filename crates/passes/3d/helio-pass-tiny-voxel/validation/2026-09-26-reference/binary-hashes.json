@@ -1,0 +1,26 @@
+{
+  "canonical-far-initial.exe": {
+    "sha256": "8089b13384f46098f7aa32a6d18ccd4189135abbffe1a7272485be5db983d2ff",
+    "bytes": 14298624
+  },
+  "canonical-far-compensated.exe": {
+    "sha256": "874fd078cfbcba03a54d2bb624346edb43fb3736fdec613fc7b211602a5f5be8",
+    "bytes": 14299136
+  },
+  "canonical-far-helper-rejected.exe": {
+    "sha256": "707fb3c9a683a6d64dff985a62e564386883d27c8afd70500b39be41a293deb7",
+    "bytes": 14299648
+  },
+  "canonical-far-helper-order.exe": {
+    "sha256": "44879830fbc498dd276043f964c2e04eef73e7ee6ead930e94470b141352e2b5",
+    "bytes": 14299136
+  },
+  "canonical-retained.exe": {
+    "sha256": "37bc61f0d0dbf61bdbcf3590cd6639811f54d77ea0a600b17c219854c24d5fd2",
+    "bytes": 14299648
+  },
+  "canonical-far-default.exe": {
+    "sha256": "a0fc934a328e834a92ae8bb156eda000da552f741c21073d4f40c5d9f2ca0852",
+    "bytes": 14285824
+  }
+}

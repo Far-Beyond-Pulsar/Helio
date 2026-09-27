@@ -19,6 +19,8 @@ pub struct TerrainMemoryStats {
 
 /// The sole engine terrain backend: budgeted brick production and stored rays.
 pub struct StoredTerrain {
+    #[cfg(feature = "canonical-far-experiment")]
+    canonical: super::canonical::Source,
     pub(crate) device: wgpu::Device,
     queue: wgpu::Queue,
     pub size: [u32; 2],
@@ -47,7 +49,7 @@ pub struct StoredTerrain {
     direction: wgpu::Texture,
     pub(crate) profiler: Option<helio_core::profiling::GpuProfiler>,
 }
-fn buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {
+pub(super) fn buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size,
@@ -110,7 +112,19 @@ impl StoredTerrain {
         );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("stored voxel terrain"),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
+            source: wgpu::ShaderSource::Wgsl({
+                #[cfg(feature = "canonical-far-experiment")]
+                {
+                    let begin = source.find("fn stored_far_hit(").unwrap();
+                    let end = source[begin..].find("// Camera-relative origin").unwrap() + begin;
+                    source.replace_range(begin..end, &format!(
+                        "{}\n{}",
+                        include_str!("canonical_position.wgsl"),
+                        include_str!("canonical_far.wgsl"),
+                    ));
+                }
+                source.into()
+            }),
         });
         let compute = |entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -205,6 +219,8 @@ impl StoredTerrain {
             .min(residency::BRICK_CAPACITY);
         Self {
             device: device.clone(),
+            #[cfg(feature = "canonical-far-experiment")]
+            canonical: super::canonical::Source::new(device),
             queue: queue.clone(),
             size,
             world: Arc::new(World::default()),
@@ -300,7 +316,10 @@ impl StoredTerrain {
         ]
         .iter()
         .map(|buffer| buffer.size())
-        .sum();
+        .sum::<u64>();
+        #[cfg(feature = "canonical-far-experiment")]
+        let buffers_bytes =
+            buffers_bytes + self.canonical.edits.size() + self.canonical.settings.size();
         TerrainMemoryStats {
             buffers_bytes,
             textures_bytes: u64::from(self.size[0]) * u64::from(self.size[1]) * 8 + 16,
@@ -360,7 +379,7 @@ impl StoredTerrain {
             "voxel work diagnostic output",
             self.hits.size() * 2,
         );
-        let inputs = self.group(
+        let inputs = self.trace_group(
             &pipeline.get_bind_group_layout(0),
             &[
                 (0, &self.uniform),
@@ -420,6 +439,25 @@ impl StoredTerrain {
             layout,
             entries: &entries,
         })
+    }
+    fn trace_group(
+        &self,
+        layout: &wgpu::BindGroupLayout,
+        bindings: &[(u32, &wgpu::Buffer)],
+    ) -> wgpu::BindGroup {
+        #[cfg(feature = "canonical-far-experiment")]
+        {
+            let mut bindings = bindings.to_vec();
+            bindings.extend([
+                (1, &self.canonical.edits),
+                (20, &self.field_settings),
+                (21, &self.heights),
+                (30, &self.canonical.settings),
+            ]);
+            self.group(layout, &bindings)
+        }
+        #[cfg(not(feature = "canonical-far-experiment"))]
+        self.group(layout, bindings)
     }
     fn compute(
         &self,
@@ -533,11 +571,15 @@ impl StoredTerrain {
             }
         }
         let mut p = *params;
+        #[cfg(feature = "canonical-far-experiment")]
+        if let Some(world) = self.residency.active_world() {
+            self.canonical.publish(&self.queue, world);
+        }
         p.settings[3] = self.residency.active_voxel_step() as f32;
         p.settings[2] = if self.residency.stats.ready { 1.0 } else { 0.0 };
         self.queue
             .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&p));
-        let group = self.group(
+        let group = self.trace_group(
             &self.trace.get_bind_group_layout(0),
             &[
                 (0, &self.uniform),
@@ -607,7 +649,7 @@ impl StoredTerrain {
             p.end_pass(encoder, "voxel_gbuffer");
         }
         if sunlight {
-            let group = self.group(
+            let group = self.trace_group(
                 &self.visibility.get_bind_group_layout(0),
                 &[
                     (0, &self.uniform),

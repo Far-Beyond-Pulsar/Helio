@@ -31,6 +31,8 @@ Set `HELIO_VOXEL_FLIGHT_RECORD=1` for a separate visual run. Open its `movement.
 
 `HELIO_VOXEL_FLIGHT_CANONICAL=1` compares 144 actual primary rays with the exact editable volume at each of six settled flight poses. The [canonical fidelity audit](CANONICAL_FIDELITY_2026_09_26.md) records the brick-entry correction and the remaining far-field differences. Sparse ray agreement does not establish pixel coverage or silhouette fidelity.
 
+The opt-in `canonical-far-experiment` feature evaluates canonical occupancy inside far leaves. The [reference experiment](CANONICAL_REFERENCE_2026_09_26.md) records precision regressions, source-snapshot isolation and successful sampled comparisons. Direct recipe evaluation is much too expensive for normal rendering; the feature stays disabled by default and does not qualify a replacement far representation.
+
 `HELIO_VOXEL_FLIGHT_SUN_WORK=1` separately replays sunlight rays from primary terrain hits. Use with `HELIO_VOXEL_FLIGHT_SUN=1` outside timing runs. It saves traversal maxima and the ray origin/direction for exhausted traces; it does not establish shadow fidelity or account for later mesh coverage.
 
 The current far representation is not a filtered reduction of exact edited leaves. That fidelity gap, refinement latency and visual aliasing must be measured independently of the exact CPU query and generation tests. This backend is not yet qualified for AAA quality or seamless exact-detail arrival.

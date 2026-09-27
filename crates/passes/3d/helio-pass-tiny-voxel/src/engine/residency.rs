@@ -328,6 +328,10 @@ pub struct Residency {
     pub stats: Stats,
 }
 impl Residency {
+    #[cfg(feature = "canonical-far-experiment")]
+    pub(super) fn active_world(&self) -> Option<&Arc<World>> {
+        self.active_world.as_ref()
+    }
     pub fn active_voxel_step(&self) -> u32 {
         self.active_world
             .as_ref()

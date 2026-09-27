@@ -250,6 +250,14 @@ fn stored_density_hit(n:StoredNode,ro:vec3<f32>,rd:vec3<f32>,start:f32,end:f32)-
     }
     return Hit(cell,2u|(n.level<<2u),rd,start+t);
 }
+fn stored_far_hit(n:StoredNode,ro:vec3<f32>,rd:vec3<f32>,start:f32,end:f32)->Hit {
+    // The recipe's conservative bounds may select an empty brick.
+    // Once generated, its corner maximum certifies this interpolated field.
+    if bitcast<f32>(stored_materials[(n.child&0x7fffffffu)*2048u+1241u])>=0.0 {
+        return stored_density_hit(n,ro,rd,start,end);
+    }
+    return Hit(vec3<i32>(0),0u,rd,end);
+}
 // Camera-relative origin is in metres, keeping exact nearby addresses out of
 // Earth-sized floats. Coarse distant cells have a bounded projected size.
 fn stored_trace(ro:vec3<f32>,rd:vec3<f32>,maximum:f32)->Hit {
@@ -287,12 +295,8 @@ fn stored_trace(ro:vec3<f32>,rd:vec3<f32>,maximum:f32)->Hit {
             return Hit(cell,0x80000101u|(stored_face(normal)<<28u),rd,t);
         }
         if n.child!=0xffffffffu && n.level>0u {
-            // The recipe's conservative bounds may select an empty brick.
-            // Once generated, its corner maximum certifies the whole field.
-            if bitcast<f32>(stored_materials[(n.child&0x7fffffffu)*2048u+1241u])>=0.0 {
-                let hit=stored_density_hit(n,ro,rd,t,min(box.far,limit));
-                if (hit.status&3u)!=0u {return hit;}
-            }
+            let hit=stored_far_hit(n,ro,rd,t,min(box.far,limit));
+            if (hit.status&3u)!=0u {return hit;}
             t=box.far;
         } else if n.child!=0xffffffffu && (!STORED_SKIP_EMPTY || exact_occupied[n.child&0x7fffffffu]!=0u) {
             var q=clamp(vec3<i32>(floor((rd*(t+epsilon)-lo)/voxel)),vec3<i32>(0),vec3<i32>(31));
