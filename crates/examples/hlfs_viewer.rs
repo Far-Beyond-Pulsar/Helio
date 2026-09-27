@@ -8,7 +8,9 @@ use winit::{application::ApplicationHandler,event::{ElementState,WindowEvent},ev
 
 pub struct Scene {
     pub name: &'static str,
-    pub populate: fn(&mut World)->(Vec<Entity>,Vec<Entity>),
+    pub populate: Box<dyn FnMut(&mut World)->(Vec<Entity>,Vec<Entity>)>,
+    pub update: Option<Box<dyn FnMut(&mut World, f32)>>,
+    pub key: Option<Box<dyn FnMut(&mut World, KeyCode)>>,
     pub camera: fn(f32,f32)->Camera,
     pub orbit_target: Vec3,
 }
@@ -21,13 +23,13 @@ struct State {
     window:Arc<Window>,surface:wgpu::Surface<'static>,config:wgpu::SurfaceConfiguration,
     device:Arc<wgpu::Device>,queue:Arc<wgpu::Queue>,renderer:Renderer,scene_db:SceneDb,
     acceleration:Option<helio_pass_hlfs::SceneDbRayTracing>,keys:HashSet<KeyCode>,last:Instant,
-    angle:f32,distance:f32,height:f32,
+    angle:f32,distance:f32,height:f32,elapsed:f32,
 }
 impl ApplicationHandler for App {
     fn resumed(&mut self,event_loop:&ActiveEventLoop) {
         if self.state.is_some() { return; }
         let window=Arc::new(event_loop.create_window(Window::default_attributes()
-            .with_title(format!("Helio - {} | A/D orbit, W/S zoom, Q/E height",self.scene.name))
+            .with_title(format!("Helio - {} | A/D orbit, W/S zoom, Q/E height | F fog, G quality, L lens, O occluder, M motion, P profile",self.scene.name))
             .with_inner_size(winit::dpi::LogicalSize::new(1280u32,720u32))).expect("window"));
         let instance=wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let surface=instance.create_surface(window.clone()).expect("surface");
@@ -68,7 +70,7 @@ impl ApplicationHandler for App {
         }else{None};
         let offset=(self.scene.camera)(0.0,config.width as f32/config.height as f32).position-self.scene.orbit_target;
         self.state=Some(State{window,surface,config,device,queue,renderer,scene_db,acceleration,keys:HashSet::new(),last:Instant::now(),
-            angle:offset.x.atan2(offset.z),distance:offset.x.hypot(offset.z),height:offset.y});
+            angle:offset.x.atan2(offset.z),distance:offset.x.hypot(offset.z),height:offset.y,elapsed:0.0});
     }
     fn window_event(&mut self,event_loop:&ActiveEventLoop,_:WindowId,event:WindowEvent) {
         let Some(s)=&mut self.state else{return};
@@ -77,7 +79,9 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(false)=>s.keys.clear(),
             WindowEvent::KeyboardInput{event,..}=>if let PhysicalKey::Code(key)=event.physical_key {
                 if key==KeyCode::Escape {event_loop.exit();}
-                if event.state==ElementState::Pressed {s.keys.insert(key);}else{s.keys.remove(&key);}
+                if event.state==ElementState::Pressed {
+                    if !event.repeat { if let Some(handler)=&mut self.scene.key {handler(&mut s.scene_db.world,key);} }
+                    s.keys.insert(key);}else{s.keys.remove(&key);}
             },
             WindowEvent::Resized(size)=>if size.width>0&&size.height>0 {
                 s.config.width=size.width;s.config.height=size.height;
@@ -89,10 +93,12 @@ impl ApplicationHandler for App {
                 s.angle+=axis(KeyCode::KeyD,KeyCode::KeyA)*dt*0.6;
                 s.distance=(s.distance+axis(KeyCode::KeyS,KeyCode::KeyW)*dt*30.0).clamp(3.0,250.0);
                 s.height=(s.height+axis(KeyCode::KeyE,KeyCode::KeyQ)*dt*20.0).clamp(-self.scene.orbit_target.y+0.5,150.0);
+                s.elapsed+=dt;
+                if let Some(update)=&mut self.scene.update {update(&mut s.scene_db.world,s.elapsed);}
                 let eye=self.scene.orbit_target+Vec3::new(s.angle.sin()*s.distance,s.height,s.angle.cos()*s.distance);
                 let aspect = s.config.width as f32 / s.config.height as f32;
                 let mut camera=Camera::perspective_look_at(eye,self.scene.orbit_target,Vec3::Y,0.85,aspect,0.1,500.0);
-                camera.postprocess_settings = (self.scene.camera)(0.0, aspect).postprocess_settings;
+                camera.view_id = (self.scene.camera)(0.0, aspect).view_id;
                 if s.window.inner_size().width==0||s.window.inner_size().height==0 {return;}
                 let frame=match s.surface.get_current_texture(){wgpu::CurrentSurfaceTexture::Success(v)|wgpu::CurrentSurfaceTexture::Suboptimal(v)=>v,_=>{s.surface.configure(&s.device,&s.config);return;}};
                 flush_scene_db(&s.scene_db,&s.queue);

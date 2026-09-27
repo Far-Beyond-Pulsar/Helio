@@ -11,6 +11,7 @@ use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, RenderPass, Result as HelioResult};
 
 pub struct FxaaPass {
+    color_input: &'static str,
     intermediate_format: Option<wgpu::TextureFormat>,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -21,6 +22,10 @@ pub struct FxaaPass {
 }
 
 impl FxaaPass {
+    pub fn with_color_input(mut self, key: &'static str) -> Self {
+        self.color_input = key;
+        self
+    }
     /// Create the FXAA pass.
     ///
     /// `target_format` — the format of `ctx.target` (e.g. `Bgra8UnormSrgb`).
@@ -100,6 +105,7 @@ impl FxaaPass {
         });
 
         Self {
+            color_input: "pre_aa",
             intermediate_format: None,
             pipeline,
             bind_group_layout,
@@ -123,7 +129,7 @@ impl RenderPass for FxaaPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.read("pre_aa");
+        builder.read(self.color_input);
         if let Some(format) = self.intermediate_format {
             builder.write_color_raw("fxaa_color", format, helio_core::graph::ResourceSize::MatchSurface);
         }
@@ -160,7 +166,7 @@ impl RenderPass for FxaaPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let input_view = ctx.registry.read(helio_core::ResourceKey::new("pre_aa"), "FXAA").ok_or_else(|| {
+        let input_view = ctx.registry.read(helio_core::ResourceKey::new(self.color_input), "FXAA").ok_or_else(|| {
             helio_core::Error::InvalidPassConfig("FXAA requires published pre_aa input".to_string())
         })?;
         if self.bind_group_key.as_ref() != Some(input_view) {

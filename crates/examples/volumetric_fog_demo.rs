@@ -12,8 +12,10 @@
 //!     lighting disagree about cascade selection.
 //!   - Henyey-Greenstein anisotropy (3/4) — face the sun and the halo should
 //!     brighten at positive g, flatten at 0.
-//!   - Post-process volume fog blending: the camera carries thin haze, and a
-//!     dense pocket sits mid-hall between z = -6 and z = 6. Walk in and out.
+//!   - World media: haze fills the hall (a LocalFogVolumeComponent; clear air
+//!     outside, so sunlight arrives unattenuated) and a dense
+//!     pocket sits mid-hall, z = -6..6 (LocalFogVolumeComponent), visible from
+//!     inside and out. Everything is SceneDB components; no camera fog.
 //!
 //! Controls:
 //!   WASD        — move, Space/Shift up/down, mouse drag to look (click to grab)
@@ -31,11 +33,12 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     Renderer, RendererConfig,
 };
-use helio_pass_postprocess::{FogMode, PostProcessSettings, PostProcessVolumeDescriptor};
+use helio_pass_postprocess::FogMode;
 use v3_demo_common::{
     build_default_renderer, box_mesh, directional_light, make_material,
-    new_scene_db_with_gpu_mirror, plane_mesh, spawn_light, spawn_material,
-    spawn_mesh, spawn_object, update_light,
+    new_scene_db_with_gpu_mirror, plane_mesh, set_volumetric_quality,
+    spawn_light, spawn_local_fog, spawn_material, spawn_mesh, spawn_object, update_light,
+    volumetric_light, GlobalFogComponent, SHADOW_BASES,
 };
 use pulsar_scenedb::SceneDb;
 
@@ -59,6 +62,9 @@ const PILLAR_HALF_W: f32 = 0.7;
 
 fn main() {
     env_logger::init();
+    if std::env::args().any(|a| a == "--probe") {
+        return probe();
+    }
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("Event loop error");
@@ -87,8 +93,10 @@ struct AppState {
 
     sun_angle: f32,
     sun_light_id: pulsar_scenedb::Entity,
+    /// The hall's ambient medium: a GlobalFogComponent row, edited in place.
+    haze: pulsar_scenedb::Entity,
 
-    // Fog state, pushed onto the camera every frame.
+    // Medium state, written to the haze component every frame.
     fog_enabled: bool,
     shafts_enabled: bool,
     fog_mode: FogMode,
@@ -184,92 +192,7 @@ impl ApplicationHandler for App {
         // be honest.
         let config =
             RendererConfig::new(size.width, size.height, surface_format).with_render_scale(1.0);
-        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
-        let mut renderer = build_default_renderer(&scene_db, device.clone(), queue.clone(), config);
-
-        let stone = spawn_material(&mut scene_db.world, make_material(
-            [0.62, 0.60, 0.58, 1.0],
-            0.85,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-
-        // Floor
-        let floor = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 40.0));
-        let _ = spawn_object(&mut scene_db.world, floor, stone, glam::Mat4::IDENTITY, 40.0);
-
-        // Roof — without it the sun lights everything and there is nothing to
-        // slice the light into shafts.
-        let roof = spawn_mesh(&mut scene_db.world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [HALL_HALF_X + 1.0, 0.3, HALL_HALF_Z],
-        ));
-        let _ = spawn_object(
-            &mut scene_db.world,
-            roof,
-            stone,
-            glam::Mat4::from_translation(glam::Vec3::new(0.0, ROOF_Y, 0.0)),
-            HALL_HALF_Z,
-        );
-
-        // Two rows of pillars. The gaps between them are what the sun cuts through.
-        let pillar = spawn_mesh(&mut scene_db.world, box_mesh(
-            [0.0, 0.0, 0.0],
-            [PILLAR_HALF_W, ROOF_Y * 0.5, PILLAR_HALF_W],
-        ));
-
-        let count = (HALL_HALF_Z * 2.0 / PILLAR_SPACING) as i32;
-        for i in 0..=count {
-            let z = -HALL_HALF_Z + i as f32 * PILLAR_SPACING;
-            for side in [-1.0_f32, 1.0] {
-                let _ = spawn_object(
-                    &mut scene_db.world,
-                    pillar,
-                    stone,
-                    glam::Mat4::from_translation(glam::Vec3::new(
-                        side * HALL_HALF_X,
-                        ROOF_Y * 0.5,
-                        z,
-                    )),
-                    ROOF_Y * 0.5,
-                );
-            }
-        }
-
-        // Sun. god_rays_enabled is what opts a light into fog in-scattering —
-        // lights without it still light surfaces but cost the fog pass nothing.
-        let mut sun = directional_light(sun_light_dir(1.0), [1.0, 0.9, 0.75], 4.0);
-        sun.god_rays_enabled = 1;
-        let sun_light_id = spawn_light(&mut scene_db.world, sun);
-
-        // A denser pocket of fog mid-hall.
-        //
-        // The camera carries thin haze and this only raises the density, rather
-        // than switching fog on from off. That is deliberate: the blender applies
-        // bool fields via `select(base, vol, t > 0.5)`, and a lone volume at
-        // blend_weight 1.0 lands on exactly t = 0.5, so it cannot flip an enable
-        // flag. Floats blend fine, which is what this volume varies.
-        let fog_volume = PostProcessVolumeDescriptor {
-                    bounds_min: [-HALL_HALF_X, 0.0, -6.0],
-                    bounds_max: [HALL_HALF_X, ROOF_Y, 6.0],
-                    priority: 10.0,
-                    blend_radius: 4.0,
-                    blend_weight: 1.0,
-                    unbound: false,
-                    settings: PostProcessSettings {
-                        fog_enabled: true,
-                        fog_density: 0.08,
-                        fog_color: [0.75, 0.80, 0.95],
-                        fog_scattering_anisotropy: 0.7,
-                        ..Default::default()
-                    },
-                };
-        let fog_entity = scene_db.world.spawn();
-        scene_db.world.insert(
-            fog_entity,
-            helio_pass_postprocess::PostProcessVolumeComponent::from(fog_volume.to_gpu()),
-        );
+        let (scene_db, renderer, sun_light_id, haze) = build_scene(device.clone(), queue.clone(), config);
 
         print_help();
 
@@ -290,11 +213,12 @@ impl ApplicationHandler for App {
             mouse_delta: (0.0, 0.0),
             sun_angle: 0.35,
             sun_light_id,
+            haze,
             fog_enabled: true,
             shafts_enabled: true,
             fog_mode: FogMode::Uniform,
-            fog_density: 0.015,
-            fog_anisotropy: 0.6,
+            fog_density: 0.04,
+            fog_anisotropy: 0.35,
         });
     }
 
@@ -520,7 +444,7 @@ impl AppState {
         let size = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
 
-        let mut camera = Camera::perspective_look_at(
+        let camera = Camera::perspective_look_at(
             self.cam_pos,
             self.cam_pos + forward,
             glam::Vec3::Y,
@@ -530,17 +454,17 @@ impl AppState {
             500.0,
         );
 
-        // Base fog. The mid-hall volume blends against these.
-        camera.postprocess_settings.fog_enabled = self.fog_enabled;
-        camera.postprocess_settings.fog_mode = self.fog_mode;
-        camera.postprocess_settings.fog_density = self.fog_density;
-        camera.postprocess_settings.fog_color = [0.62, 0.70, 0.85];
-        camera.postprocess_settings.fog_scattering_anisotropy = self.fog_anisotropy;
-        camera.postprocess_settings.fog_max_distance = 200.0;
-        // Height fog sits at floor level and thins upward.
-        camera.postprocess_settings.fog_start_distance = 1.5;
-        camera.postprocess_settings.fog_height = 0.0;
-        camera.postprocess_settings.fog_height_falloff = 0.25;
+        // The hall haze. Height mode sits at floor level and thins upward.
+        self.scene_db.world.insert(self.haze, hall_haze(GlobalFogComponent {
+            enabled: self.fog_enabled as u32,
+            mode: self.fog_mode as u32,
+            extinction: self.fog_density,
+            albedo: [0.62, 0.70, 0.85],
+            anisotropy: self.fog_anisotropy,
+            height: 0.0,
+            height_falloff: 0.25,
+            ..Default::default()
+        }));
 
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
@@ -554,14 +478,185 @@ impl AppState {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut sun = directional_light(sun_light_dir(self.sun_angle), [1.0, 0.9, 0.75], 4.0);
+        let mut sun = volumetric_light(
+            directional_light(sun_light_dir(self.sun_angle), [1.0, 0.9, 0.75], 4.0),
+            SHADOW_BASES[0],
+        );
+        // G: the sun still lights surfaces but stops scattering in the medium.
         sun.god_rays_enabled = self.shafts_enabled as u32;
         update_light(&mut self.scene_db.world, self.sun_light_id, sun);
 
+        v3_demo_common::flush_scene_db(&self.scene_db, self.renderer.queue());
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);
         }
 
         self.renderer.queue().present(output);
     }
+}
+
+/// The colonnade, its lights and media, shared by the window and `--probe`.
+fn build_scene(
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+    config: RendererConfig,
+) -> (SceneDb, Renderer, pulsar_scenedb::Entity, pulsar_scenedb::Entity) {
+    let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+    let mut renderer = build_default_renderer(&scene_db, device.clone(), queue.clone(), config);
+
+    let stone = spawn_material(&mut scene_db.world, make_material(
+        [0.62, 0.60, 0.58, 1.0],
+        0.85,
+        0.0,
+        [0.0, 0.0, 0.0],
+        0.0,
+    ));
+
+    // Floor
+    let floor = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 40.0));
+    let _ = spawn_object(&mut scene_db.world, floor, stone, glam::Mat4::IDENTITY, 40.0);
+
+    // Roof — without it the sun lights everything and there is nothing to
+    // slice the light into shafts.
+    let roof = spawn_mesh(&mut scene_db.world, box_mesh(
+        [0.0, 0.0, 0.0],
+        [HALL_HALF_X + 1.0, 0.3, HALL_HALF_Z],
+    ));
+    let _ = spawn_object(
+        &mut scene_db.world,
+        roof,
+        stone,
+        glam::Mat4::from_translation(glam::Vec3::new(0.0, ROOF_Y, 0.0)),
+        HALL_HALF_Z,
+    );
+
+    // Two rows of pillars. The gaps between them are what the sun cuts through.
+    let pillar = spawn_mesh(&mut scene_db.world, box_mesh(
+        [0.0, 0.0, 0.0],
+        [PILLAR_HALF_W, ROOF_Y * 0.5, PILLAR_HALF_W],
+    ));
+
+    let count = (HALL_HALF_Z * 2.0 / PILLAR_SPACING) as i32;
+    for i in 0..=count {
+        let z = -HALL_HALF_Z + i as f32 * PILLAR_SPACING;
+        for side in [-1.0_f32, 1.0] {
+            let _ = spawn_object(
+                &mut scene_db.world,
+                pillar,
+                stone,
+                glam::Mat4::from_translation(glam::Vec3::new(
+                    side * HALL_HALF_X,
+                    ROOF_Y * 0.5,
+                    z,
+                )),
+                ROOF_Y * 0.5,
+            );
+        }
+    }
+
+    // Sun. Shafts are the shadowed part of lit medium, so it needs both:
+    // participation in the medium and a shadow map (the CSM cascades) for
+    // the pillars and roof to carve the light into slices.
+    let sun = volumetric_light(
+        directional_light(sun_light_dir(1.0), [1.0, 0.9, 0.75], 4.0),
+        SHADOW_BASES[0],
+    );
+    let sun_light_id = spawn_light(&mut scene_db.world, sun);
+
+    // Media are world components in physical units (extinction in m^-1).
+    // The hall is filled with haze and the outside is clear air, so sunlight
+    // arrives at full strength and scatters only inside, where the pillars and
+    // roof carve it into shafts. (A global uniform medium would also attenuate
+    // the sunlight along its whole path: 120 m at 0.08/m leaves e^-9.6.)
+    let haze = scene_db.world.spawn();
+    scene_db.world.insert(haze, hall_haze(GlobalFogComponent::default()));
+
+    // A denser pocket mid-hall. It is a local medium, so it is visible
+    // from anywhere, not only while the camera is inside it, and overlaps
+    // add to the haze. Its 4 m edge fade keeps the boundary soft.
+    spawn_local_fog(
+        &mut scene_db.world,
+        [-HALL_HALF_X, 0.0, -6.0],
+        [HALL_HALF_X, ROOF_Y, 6.0],
+        GlobalFogComponent {
+            extinction: 0.08,
+            albedo: [0.75, 0.80, 0.95],
+            anisotropy: 0.7,
+            ..Default::default()
+        },
+        4.0,
+    );
+    // High-quality tier, integrating just past the far end of the hall.
+    let fog_settings = set_volumetric_quality(&mut scene_db.world, 1, 120.0);
+    // Probe-only overrides for measuring reconstruction loss.
+    if let Some(blend) = std::env::var("PROBE_FOG_BLEND").ok().and_then(|v| v.parse().ok()) {
+        let quality = std::env::var("PROBE_FOG_QUALITY").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+        scene_db.world.insert(fog_settings, v3_demo_common::VolumetricFogSettingsComponent {
+            quality, max_distance: 120.0, light_max_distance: 120.0, temporal_blend: blend,
+            ..Default::default()
+        });
+    }
+    (scene_db, renderer, sun_light_id, haze)
+}
+
+/// Headless: `cargo run --bin volumetric_fog_demo -- --probe` writes
+/// volumetric_fog_probe.png from the default viewpoint and sun angle.
+fn probe() {
+    let (device, queue) = v3_demo_common::headless_gpu();
+    let (width, height) = (1280, 720);
+    let mut config = RendererConfig::new(width, height, wgpu::TextureFormat::Rgba8UnormSrgb).with_render_scale(1.0);
+    if let Some(mode) = std::env::var("PROBE_DEBUG_MODE").ok().and_then(|v| v.parse().ok()) { config.debug_mode = mode; }
+    let (mut scene_db, mut renderer, sun_light_id, haze) = build_scene(device.clone(), queue.clone(), config);
+    let sun_intensity = std::env::var("PROBE_SUN").ok().and_then(|v| v.parse().ok()).unwrap_or(4.0);
+    let sun = volumetric_light(directional_light(sun_light_dir(0.35), [1.0, 0.9, 0.75], sun_intensity), SHADOW_BASES[0]);
+    let mut sun = sun;
+    if std::env::var_os("PROBE_NOSHADOW").is_some() { sun.shadow_index = u32::MAX; }
+    update_light(&mut scene_db.world, sun_light_id, sun);
+    scene_db.world.insert(haze, hall_haze(GlobalFogComponent {
+        extinction: std::env::var("PROBE_EXT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.04),
+        emission: if std::env::var_os("PROBE_DENSE").is_some() { [0.3, 0.1, 0.1] } else { [0.0; 3] },
+        albedo: [0.62, 0.70, 0.85], anisotropy: 0.35, height_falloff: 0.25, ..Default::default()
+    }));
+    // `PROBE_TOWARD_SUN`: look across the hall into the sun through the pillar
+    // gaps, where forward scattering makes shafts brightest.
+    let (eye, look) = if std::env::var_os("PROBE_TOWARD_SUN").is_some() {
+        (glam::Vec3::new(-4.0, 2.0, 4.0), glam::Vec3::new(1.0, 0.25, -0.35))
+    } else {
+        (glam::Vec3::new(0.0, 2.0, 16.0), glam::Vec3::new(0.0, -0.05, -1.0))
+    };
+    let camera = Camera::perspective_look_at(eye, eye + look, glam::Vec3::Y,
+        std::f32::consts::FRAC_PI_4, width as f32 / height as f32, 0.1, 500.0);
+    let mean = v3_demo_common::capture_png(&scene_db, &mut renderer, &device, &queue, &camera,
+        (width, height), 30, "volumetric_fog_probe.png");
+    println!("[probe] mean {mean:.2}/255 -> volumetric_fog_probe.png");
+    if std::env::var_os("PROBE_SHADOW_DEBUG").is_some() {
+        if let Some(batch) = renderer.find_pass::<helio_pass_object_batch::ObjectBatchPass>() {
+            println!("[probe] batch counts (draws, shadow static, shadow movable) = {:?}", batch.counts());
+        }
+        if let Some(matrix_pass) = renderer.find_pass::<helio_pass_shadow_matrix::ShadowMatrixPass>() {
+            let src = matrix_pass.matrices();
+            let dump = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None, size: src.size(), usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false,
+            });
+            let mut e = device.create_command_encoder(&Default::default());
+            e.copy_buffer_to_buffer(src, 0, &dump, 0, src.size());
+            queue.submit([e.finish()]);
+            dump.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let m: Vec<f32> = bytemuck::cast_slice(&dump.slice(..).get_mapped_range().unwrap()).to_vec();
+            println!("[probe] matrix 0 = {:?}", &m[..16]);
+        }
+    }
+}
+
+/// The colonnade's haze: a local medium just larger than the hall, with a
+/// soft edge, so light outside travels through clear air.
+fn hall_haze(medium: GlobalFogComponent) -> v3_demo_common::LocalFogVolumeComponent {
+    let mut volume = v3_demo_common::LocalFogVolumeComponent::new(
+        [-HALL_HALF_X - 2.0, 0.0, -HALL_HALF_Z - 2.0],
+        [HALL_HALF_X + 2.0, ROOF_Y + 1.0, HALL_HALF_Z + 2.0],
+        medium,
+    );
+    volume.edge_fade = 1.5;
+    volume
 }

@@ -460,7 +460,8 @@ impl ApplicationHandler for App {
                 let aspect = state.window.inner_size().width as f32
                     / state.window.inner_size().height.max(1) as f32;
 
-                let mut camera = Camera::perspective_look_at(
+                let mut settings = helio_pass_postprocess::PostProcessSettings::default();
+        let camera = Camera::perspective_look_at(
                     state.cam_pos,
                     state.cam_pos + forward,
                     glam::Vec3::Y,
@@ -469,38 +470,41 @@ impl ApplicationHandler for App {
                     0.1,
                     200.0,
                 );
-                camera.postprocess_settings.tonemap_operator = TonemapOperator::Aces;
+                settings.tonemap_operator = TonemapOperator::Aces;
 
                 // Apply grading mode
                 match state.grading_mode {
                     0 => {
                         // Simple: contrast + saturation boost
-                        camera.postprocess_settings.lut_platform = 0;
-                        camera.postprocess_settings.color_contrast = [1.2, 1.2, 1.2];
-                        camera.postprocess_settings.color_saturation = [1.3, 1.3, 1.3];
+                        settings.lut_platform = 0;
+                        settings.color_contrast = [1.2, 1.2, 1.2];
+                        settings.color_saturation = [1.3, 1.3, 1.3];
                     }
                     1 => {
                         // Lift/Gamma/Gain
-                        camera.postprocess_settings.lut_platform = 0;
-                        camera.postprocess_settings.lift_color = [0.02, 0.01, 0.04]; // slight purple shadows
-                        camera.postprocess_settings.gamma_color = [0.95, 1.0, 1.05];
-                        camera.postprocess_settings.gain_color = [1.1, 1.0, 0.95]; // warm highlights
-                        camera.postprocess_settings.hue_shift = state.hue_shift;
+                        settings.lut_platform = 0;
+                        settings.lift_color = [0.02, 0.01, 0.04]; // slight purple shadows
+                        settings.gamma_color = [0.95, 1.0, 1.05];
+                        settings.gain_color = [1.1, 1.0, 0.95]; // warm highlights
+                        settings.hue_shift = state.hue_shift;
                     }
                     _ => {
                         // 3D LUT
-                        camera.postprocess_settings.lut_platform = 1;
-                        camera.postprocess_settings.lut_intensity = state.lut_intensity;
-                        camera.postprocess_settings.hue_shift = state.hue_shift;
+                        settings.lut_platform = 1;
+                        settings.lut_intensity = state.lut_intensity;
+                        settings.hue_shift = state.hue_shift;
                     }
                 }
 
+                // Clone the pass-owned buffer handle before borrowing the renderer again.
+                let resolved = state.renderer.find_pass_mut::<helio_pass_postprocess::PostProcessVolumeBlendPass>()
+                    .expect("postprocess blend pass").resolved_uniforms().clone();
                 // Build LUT if needed
                 if let Some(ref mut builder) = state.lut_builder {
                     let rebuilt = builder.build_if_needed(
                         &state.device,
                         &state.queue,
-                        state.renderer.postprocess_buffer(),
+                        &resolved,
                         state.lut_generation,
                     );
                     // If rebuilt, update the renderer's LUT view
@@ -519,7 +523,9 @@ impl ApplicationHandler for App {
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
 
-                if let Err(e) = state.renderer.render(&camera, &view) {
+                v3_demo_common::set_camera_postprocess(&mut state.scene_db.world, camera.view_id, &settings);
+        v3_demo_common::flush_scene_db(&state.scene_db, &state.queue);
+        if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("Render error: {:?}", e);
                 }
                 state.queue.present(output);

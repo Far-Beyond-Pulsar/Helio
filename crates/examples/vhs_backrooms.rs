@@ -1302,6 +1302,7 @@ impl ApplicationHandler for App {
                     // no-op — the VHS shader owns the entire post-process look.
                     ..PostProcessSettings::default()
                 },
+                ..Default::default()
             },
         );
 

@@ -1,4 +1,7 @@
 mod foliage_component;
+mod camera_post_process_component;
+mod fog_component;
+mod lens_flare_props;
 mod light_component;
 mod lod_component;
 mod material_override;
@@ -11,6 +14,9 @@ mod voxel_component_runtime;
 mod water_volume_component;
 
 pub use foliage_component::*;
+pub use camera_post_process_component::*;
+pub use fog_component::*;
+pub use lens_flare_props::*;
 pub use light_component::*;
 pub use lod_component::*;
 pub use material_override::*;

@@ -148,6 +148,7 @@ struct TsrUniform {
 /// publishes the upsampled, temporally accumulated image as `tsr_color`.
 /// By default it also blits to `ctx.target`.
 pub struct TsrPass {
+    color_input: &'static str,
     intermediate_output: bool,
     timing_query: Option<wgpu::QuerySet>,
     // ── Main TSR pipeline (resolve) ───────────────────────────────────────────
@@ -199,6 +200,11 @@ pub struct TsrPass {
 }
 
 impl TsrPass {
+    /// Select the scene-linear image reconstructed by this pass.
+    pub fn with_color_input(mut self, key: &'static str) -> Self {
+        self.color_input = key;
+        self
+    }
     /// Publish the HDR resolve for post-processing without a redundant surface blit.
     pub fn with_intermediate_output(mut self) -> Self {
         self.intermediate_output = true;
@@ -379,6 +385,7 @@ impl TsrPass {
         });
 
         Self {
+            color_input: "pre_aa",
             intermediate_output: false,
             timing_query: None,
             pipeline,
@@ -610,7 +617,7 @@ impl RenderPass for TsrPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.read("pre_aa");
+        builder.read(self.color_input);
         if self.transparency_reactivity { builder.read("transparency_reactivity"); }
     }
 
@@ -677,7 +684,7 @@ impl RenderPass for TsrPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // ── 1. Lazy bind group ─────────────────────────────────────────────────
-        let pre_aa_view: &wgpu::TextureView = ctx.registry.read(helio_core::ResourceKey::new("pre_aa"), "TSR").ok_or_else(|| {
+        let pre_aa_view: &wgpu::TextureView = ctx.registry.read(helio_core::ResourceKey::new(self.color_input), "TSR").ok_or_else(|| {
             helio_core::Error::InvalidPassConfig(
                 "TsrPass requires frame.pre_aa (published by DeferredLightPass)".into(),
             )

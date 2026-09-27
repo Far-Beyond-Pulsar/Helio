@@ -1,226 +1,101 @@
-//! Post-process volume blending, as a standalone pass.
-//!
-//! Runs `cs_volume_blend` (in `postprocess.wgsl`) to blend the active post-process
-//! volumes against the camera defaults, then copies the result over the shared
-//! post-process uniform buffer.
-//!
-//! # Why this is not inside PostProcessPass
-//!
-//! It used to be. But the blended uniforms are the frame's post-process config, and
-//! `PostProcessPass` runs near the end of the graph — so anything *else* that reads
-//! the config runs before the blend and sees the unblended camera defaults instead.
-//! `VolumetricFogPass` is exactly that: it reads the fog block early, at internal
-//! resolution, so with the blend still buried in `PostProcessPass` fog would ignore
-//! every post-process volume in the scene, silently.
-//!
-//! Scheduling this ahead of the first consumer gives every reader the same values.
-
+//! Pass-owned SceneDB settings resolution, including empty scenes.
 use helio_core::graph::ResourceBuilder;
-use helio_core::{PassContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, RenderPass, ResourceKey, Result as HelioResult};
 use pulsar_scenedb::gpu::BufferKey;
+use wgpu::util::DeviceExt;
 
 pub struct PostProcessVolumeBlendPass {
     pipeline: wgpu::ComputePipeline,
     bgl: wgpu::BindGroupLayout,
-    /// cs_volume_blend writes here; execute() then copies it over the uniform buffer.
+    defaults: wgpu::Buffer,
     blend_output_buf: wgpu::Buffer,
-    /// Bound in place of `"post_process_volumes"` when no
-    /// `PostProcessVolumeComponent` has ever been inserted -- SceneDB is the
-    /// only post-process-volume source this pass reads. The early return in
-    /// `execute()` below means this is never actually dispatched against.
+    resolved: wgpu::Buffer,
     fallback_pp_volumes: wgpu::Buffer,
+    fallback_cameras: wgpu::Buffer,
     bind_group: Option<wgpu::BindGroup>,
     bind_group_key: Option<[wgpu::Buffer; 3]>,
 }
-
 impl PostProcessVolumeBlendPass {
     pub fn new(device: &wgpu::Device) -> Self {
-        // Same source as PostProcessPass, and it now opts into the prelude, so it
-        // has to be resolved the same way or the shared symbols are missing.
-        let shader = helio_core::shader::module(
-            device,
-            "PostProcess Volume Blend Shader",
-            include_str!("../shaders/postprocess.wgsl"),
-        );
-
-        let cv = wgpu::ShaderStages::COMPUTE;
-        let uniform_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: cv,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
+        Self::with_defaults(device, &crate::PostProcessSettings::default())
+    }
+    pub fn with_defaults(device: &wgpu::Device, settings: &crate::PostProcessSettings) -> Self {
+        let shader = helio_core::shader::module(device, "PostProcess Resolver", include_str!("../shaders/postprocess.wgsl"));
+        let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
+            binding, visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None }, count: None,
         };
-        let storage_entry = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: cv,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        };
-
-        // Matches PostProcessPass's blend_bgl: postprocess (b0), camera (b1),
-        // pp_volumes (b15), blend_output (b16).
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("PostProcess Volume Blend BGL"),
+            label: Some("PostProcess Resolver BGL"),
             entries: &[
-                uniform_entry(0),
-                // camera (b1)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: cv,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                storage_entry(15, true),
-                storage_entry(16, false),
+                entry(0, wgpu::BufferBindingType::Uniform),
+                entry(1, wgpu::BufferBindingType::Storage { read_only: true }),
+                entry(15, wgpu::BufferBindingType::Storage { read_only: true }),
+                entry(16, wgpu::BufferBindingType::Storage { read_only: false }),
+                entry(20, wgpu::BufferBindingType::Storage { read_only: true }),
             ],
         });
-
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("PostProcess Volume Blend PL"),
-            bind_group_layouts: &[Some(&bgl)],
-            immediate_size: 0,
+            label: Some("PostProcess Resolver PL"), bind_group_layouts: &[Some(&bgl)], immediate_size: 0,
         });
-
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("PostProcess Volume Blend"),
-            layout: Some(&layout),
-            module: &shader,
-            entry_point: Some("cs_volume_blend"),
-            compilation_options: Default::default(),
-            cache: None,
+            label: Some("PostProcess Resolver"), layout: Some(&layout), module: &shader,
+            entry_point: Some("cs_volume_blend"), compilation_options: Default::default(), cache: None,
         });
-
-        let blend_output_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("PostProcess Blend Output"),
-            size: std::mem::size_of::<crate::GpuPostProcessUniforms>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
+        let defaults = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("PostProcess Defaults"), contents: bytemuck::bytes_of(&settings.to_gpu()), usage: wgpu::BufferUsages::UNIFORM,
         });
-        let fallback_pp_volumes = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("PostProcess Fallback Volumes"),
-            size: std::mem::size_of::<crate::GpuPostProcessVolume>() as u64,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
+        let buffer = |label, size, usage| device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label), size, usage, mapped_at_creation: false,
         });
-
+        let size = std::mem::size_of::<crate::GpuPostProcessUniforms>() as u64;
         Self {
-            pipeline,
-            bgl,
-            blend_output_buf,
-            fallback_pp_volumes,
-            bind_group: None,
-            bind_group_key: None,
+            pipeline, bgl, defaults,
+            blend_output_buf: buffer("PostProcess Resolve Storage", size, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC),
+            resolved: buffer("PostProcess Resolved Uniforms", size, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC),
+            fallback_pp_volumes: buffer("PostProcess Empty Volumes", std::mem::size_of::<crate::GpuPostProcessVolume>() as u64, wgpu::BufferUsages::STORAGE),
+            fallback_cameras: buffer("PostProcess Empty Cameras", std::mem::size_of::<crate::CameraPostProcessComponent>() as u64, wgpu::BufferUsages::STORAGE),
+            bind_group: None, bind_group_key: None,
         }
     }
+    /// GPU-derived settings, valid after the resolver dispatch and copy.
+    pub fn resolved_uniforms(&self) -> &wgpu::Buffer { &self.resolved }
 }
-
 impl RenderPass for PostProcessVolumeBlendPass {
-    fn name(&self) -> &'static str {
-        "PostProcessVolumeBlendPass"
-    }
-
-    fn declare_resources(&self, _builder: &mut ResourceBuilder) {}
-
-    fn render_pass_descriptor<'a>(
-        &'a self,
-        _target: &'a wgpu::TextureView,
-        _depth: &'a wgpu::TextureView,
-        _resources: &'a helio_core::ResourceRegistry<'a>,
-    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        None
-    }
-
-    fn chain_transparent(&self) -> bool {
-        // execute() only touches ctx.compute_encoder_ptr.
-        true
-    }
-
+    fn name(&self) -> &'static str { "PostProcessVolumeBlendPass" }
+    fn declare_resources(&self, builder: &mut ResourceBuilder) { builder.write_buffer("postprocess_uniforms"); }
+    fn writes(&self) -> &'static [&'static str] { &["postprocess_uniforms"] }
+    fn render_pass_descriptor<'a>(&'a self, _: &'a wgpu::TextureView, _: &'a wgpu::TextureView, _: &'a helio_core::ResourceRegistry<'a>) -> Option<wgpu::RenderPassDescriptor<'a>> { None }
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        // No volumes: the camera defaults the renderer already uploaded are the
-        // final config, so there is nothing to blend and nothing to copy.
-        // SceneDB is the only post-process-volume source -- no Renderer
-        // method, no CPU-tracked count, resolved fresh by key every frame.
-        if !ctx
-            .scene_buffers
-            .contains(BufferKey::of("post_process_volumes"))
-        {
-            return Ok(());
-        }
-
-        let Some(postprocess_buf): Option<&wgpu::Buffer> = ctx.registry.get(helio_core::ResourceKey::new("postprocess_uniforms")) else {
-            return Ok(());
-        };
-        let pp_volumes_buf = ctx
-            .scene_buffers
-            .get(BufferKey::of("post_process_volumes"))
-            .map(|handle| &handle.buffer)
-            .unwrap_or(&self.fallback_pp_volumes);
-        let camera_buf = ctx.camera;
-
-        // Buffer identities, not addresses of frame-local handle wrappers:
-        // SceneDB may replace a buffer when sparse entity indices make it grow.
-        let key = [postprocess_buf.clone(), camera_buf.clone(), pp_volumes_buf.clone()];
+        let volumes = ctx.scene_buffers.get(BufferKey::of("post_process_volumes")).map(|h| &h.buffer).unwrap_or(&self.fallback_pp_volumes);
+        let cameras = ctx.scene_buffers.get(BufferKey::of("camera_postprocess")).map(|h| &h.buffer).unwrap_or(&self.fallback_cameras);
+        let key = [ctx.camera.clone(), volumes.clone(), cameras.clone()];
         if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("PostProcess Volume Blend BG"),
-                layout: &self.bgl,
+                label: Some("PostProcess Resolver BG"), layout: &self.bgl,
                 entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: postprocess_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: camera_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 15,
-                        resource: pp_volumes_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 16,
-                        resource: self.blend_output_buf.as_entire_binding(),
-                    },
+                    wgpu::BindGroupEntry { binding: 0, resource: self.defaults.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: ctx.camera.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 15, resource: volumes.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 16, resource: self.blend_output_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 20, resource: cameras.as_entire_binding() },
                 ],
             }));
             self.bind_group_key = Some(key);
         }
-
-        let Some(bind_group) = self.bind_group.as_ref() else {
-            return Ok(());
-        };
-
-        let ce = ctx.compute_encoder_ptr;
+        // Record with the fog consumers to preserve producer/copy/consumer order.
+        let encoder = unsafe { &mut *ctx.encoder_ptr };
         {
-            let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("PostProcess Volume Blend"),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&self.pipeline);
-            cpass.set_bind_group(0, bind_group, &[]);
-            cpass.dispatch_workgroups(1, 1, 1);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("PostProcess Resolve"), timestamp_writes: None });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
+            pass.dispatch_workgroups(1, 1, 1);
         }
-
-        unsafe { &mut *ce }.copy_buffer_to_buffer(
-            &self.blend_output_buf,
-            0,
-            postprocess_buf,
-            0,
-            std::mem::size_of::<crate::GpuPostProcessUniforms>() as u64,
-        );
-
+        encoder.copy_buffer_to_buffer(&self.blend_output_buf, 0, &self.resolved, 0, std::mem::size_of::<crate::GpuPostProcessUniforms>() as u64);
         Ok(())
+    }
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        let buffer: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.resolved) };
+        frame.write(ResourceKey::new("postprocess_uniforms"), buffer, self.name());
     }
 }

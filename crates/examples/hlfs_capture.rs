@@ -44,6 +44,17 @@ pub fn run_scene(
     populate: fn(&mut World) -> (Vec<Entity>, Vec<Entity>),
     camera_path: fn(f32, f32) -> Camera,
 ) {
+    run_scene_animated(directory, name, populate, camera_path, |_, _| {});
+}
+
+/// Scene updates run at an exact 60 Hz, independently of GPU/readback time.
+pub fn run_scene_animated(
+    directory: &str,
+    name: &str,
+    mut populate: impl FnMut(&mut World) -> (Vec<Entity>, Vec<Entity>),
+    camera_path: fn(f32, f32) -> Camera,
+    mut update: impl FnMut(&mut World, f32),
+) {
     let capture_frames = std::env::var("HLFS_CAPTURE_FRAMES")
         .map(|value| {
             value
@@ -144,6 +155,7 @@ pub fn run_scene(
         let internal_size = (config.internal_width(), config.internal_height());
         let mut scene_db = crate::v3_demo_common::new_scene_db_with_gpu_mirror(&device, &queue);
         let (chandelier_light_ids, candle_light_ids) = populate(&mut scene_db.world);
+        update(&mut scene_db.world, 0.0);
         if ray_traced {
             enable_ray_shadows(&mut scene_db.world);
         }
@@ -384,10 +396,12 @@ pub fn run_scene(
             }
             let t = fixed_camera.unwrap_or((frame as f32 / 99.0).clamp(0.0, 1.0));
             let camera = camera_path(t, width as f32 / height as f32);
+            update(&mut scene_db.world, frame as f32 / 60.0);
             let start = std::time::Instant::now();
             crate::v3_demo_common::flush_scene_db(&scene_db, &queue);
             let after_flush = std::time::Instant::now();
             if ray_traced {
+                acceleration.prepare(&scene_db.world).expect("animated capture geometry");
                 renderer.set_ray_tracing_frame_with_transmission(acceleration.tlas(), acceleration.transmission());
             }
             let after_rt = std::time::Instant::now();

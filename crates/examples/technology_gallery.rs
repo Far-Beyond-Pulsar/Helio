@@ -5,16 +5,18 @@ use helio::{Camera, MeshUpload};
 use pulsar_scenedb::{Entity, World};
 
 pub fn camera(t: f32, aspect: f32) -> Camera {
-    let mut camera = Camera::perspective_look_at(
+    let camera = Camera::perspective_look_at(
         Vec3::new(2.0*t, 3.0, 25.0-12.0*t), Vec3::new(0.0,3.0,-18.0),
         Vec3::Y, 0.95, aspect, 0.1, 180.0);
-    camera.postprocess_settings.fog_enabled = std::env::var_os("HLFS_NO_FOG").is_none();
-    camera.postprocess_settings.fog_density = 0.0005;
-    camera.postprocess_settings.fog_max_distance = 120.0;
     camera
 }
 
 pub fn populate(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
+    let mut settings = helio_pass_postprocess::PostProcessSettings::default();
+    settings.fog_enabled = std::env::var_os("HLFS_NO_FOG").is_none();
+    settings.fog_density = 0.0005;
+    settings.fog_max_distance = 120.0;
+    set_camera_postprocess(world, 0, &settings);
     let mut meshes: Vec<Mesh> = (0..8).map(|_|Mesh::default()).collect();
     // Dark polished floor, architectural shell, and segmented ceiling.
     meshes[0].block([0.0,-0.15,0.0],[24.0,0.15,34.0]);

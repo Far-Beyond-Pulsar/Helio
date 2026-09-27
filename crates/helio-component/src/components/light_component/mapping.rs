@@ -46,15 +46,58 @@ impl super::LightComponentGpuMirror {
                 self.color.color.0[0],
                 self.color.color.0[1],
                 self.color.color.0[2],
-                self.intensity.intensity.0,
+                physical_intensity(
+                    self.intensity.intensity.0,
+                    self.intensity.intensity_units.0,
+                    self.general.light_type.0,
+                    self.attenuation.outer_cone_angle.0,
+                ),
             ],
             shadow_index: self.shadows.cast_shadows.0,
             light_type: self.general.light_type.0,
             inner_angle: self.attenuation.inner_cone_angle.0,
             _pad: 0,
+            god_rays_enabled: self.volumetrics.affects_volumetric_fog.0,
+            // Density belongs to the medium. Preserve the legacy inscattering
+            // gain by multiplying it into the new per-light scattering gain.
+            god_rays_density: 1.0,
+            god_rays_weight: nonnegative(self.volumetrics.volumetric_scattering_intensity.0)
+                * nonnegative(self.volumetrics.fog_inscattering_intensity.0),
+            // Agreed fog-pass contract: geometric visibility strength, no
+            // longer a per-step decay. Absorption is still medium-owned.
+            god_rays_decay: self.shadows.cast_volumetric_shadow.0,
+            god_rays_exposure: 1.0,
             ..Default::default()
         }
     }
+}
+
+fn nonnegative(value: f32) -> f32 {
+    if value.is_finite() { value.max(0.0) } else { 0.0 }
+}
+
+/// Point/spot shaders consume candela; directional shaders consume lux.
+/// Lumens use an isotropic sphere for points and a uniform outer cone for
+/// spots: cd = lm / (2*pi*(1-cos(theta))). The shader's inner-cone falloff is
+/// artistic shaping after that normalization, so it does not preserve flux.
+/// Directional values are always interpreted as lux, including legacy scenes
+/// whose unit selector remained at its default (lumens). Unitless/candela are
+/// passed through; local lux/nits remain legacy numeric values because a
+/// distance/emitter area would be needed to convert those physically.
+fn physical_intensity(value: f32, units: u32, kind: u32, outer_cos: f32) -> f32 {
+    let value = nonnegative(value);
+    if units != super::IntensityUnits::Lumens as u32
+        || kind == helio::LightType::Directional as u32
+    {
+        return value;
+    }
+    let solid_angle = if kind == helio::LightType::Spot as u32 {
+        // Bound a degenerate cone so imported zero-angle lights stay finite.
+        2.0 * std::f32::consts::PI * (1.0 - outer_cos.clamp(-1.0, 1.0)).max(1e-6)
+    } else {
+        4.0 * std::f32::consts::PI
+    };
+    (value / solid_angle).min(f32::MAX)
 }
 
 impl LightComponent {

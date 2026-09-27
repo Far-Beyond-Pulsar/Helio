@@ -53,6 +53,7 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    scene_db: pulsar_scenedb::SceneDb,
     last_frame: std::time::Instant,
     start_time: std::time::Instant,
 
@@ -230,6 +231,7 @@ impl ApplicationHandler for App {
             surface,
             device,
             queue,
+            scene_db,
             surface_format,
             renderer,
             last_frame: std::time::Instant::now(),
@@ -379,7 +381,8 @@ impl ApplicationHandler for App {
                 let aspect = state.window.inner_size().width as f32
                     / state.window.inner_size().height.max(1) as f32;
 
-                let mut camera = Camera::perspective_look_at(
+                let mut settings = helio_pass_postprocess::PostProcessSettings::default();
+                let camera = Camera::perspective_look_at(
                     state.cam_pos,
                     state.cam_pos + forward,
                     glam::Vec3::Y,
@@ -390,20 +393,20 @@ impl ApplicationHandler for App {
                 );
                 match state.hdr_mode {
                     0 => {
-                        camera.postprocess_settings.hdr_output_mode = HdrOutputMode::Ldr;
-                        camera.postprocess_settings.tonemap_operator = helio::TonemapOperator::Aces;
+                        settings.hdr_output_mode = HdrOutputMode::Ldr;
+                        settings.tonemap_operator = helio::TonemapOperator::Aces;
                     }
                     1 => {
-                        camera.postprocess_settings.hdr_output_mode = HdrOutputMode::Hdr10;
-                        camera.postprocess_settings.tonemap_operator = helio::TonemapOperator::None;
+                        settings.hdr_output_mode = HdrOutputMode::Hdr10;
+                        settings.tonemap_operator = helio::TonemapOperator::None;
                     }
                     2 => {
-                        camera.postprocess_settings.hdr_output_mode = HdrOutputMode::ScRgb;
-                        camera.postprocess_settings.tonemap_operator = helio::TonemapOperator::None;
+                        settings.hdr_output_mode = HdrOutputMode::ScRgb;
+                        settings.tonemap_operator = helio::TonemapOperator::None;
                     }
                     _ => {
-                        camera.postprocess_settings.hdr_output_mode = HdrOutputMode::Passthrough;
-                        camera.postprocess_settings.tonemap_operator = helio::TonemapOperator::None;
+                        settings.hdr_output_mode = HdrOutputMode::Passthrough;
+                        settings.tonemap_operator = helio::TonemapOperator::None;
                     }
                 }
 
@@ -416,6 +419,8 @@ impl ApplicationHandler for App {
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
 
+                v3_demo_common::set_camera_postprocess(&mut state.scene_db.world, camera.view_id, &settings);
+                v3_demo_common::flush_scene_db(&state.scene_db, &state.queue);
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("Render error: {:?}", e);
                 }

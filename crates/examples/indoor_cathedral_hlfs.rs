@@ -581,7 +581,6 @@ impl AppState {
             0.1,
             200.0,
         );
-        configure_cathedral_fog(&mut camera, self.large);
         if self.large && std::env::var_os("HLFS_LIVE_MOTION_TEST").is_some() {
             // Travel the same path as --capture-large, then reverse smoothly.
             // This exercises the real swapchain and resize path while moving.
@@ -663,15 +662,16 @@ fn populate_cathedral(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
     populate_cathedral_lights(world, false)
 }
 
-fn configure_cathedral_fog(camera: &mut Camera, large: bool) {
+fn configure_cathedral_fog(world: &mut World, large: bool) {
     if !large || std::env::var_os("HLFS_NO_FOG").is_some() { return; }
-    let settings = &mut camera.postprocess_settings;
+    let mut settings = helio_pass_postprocess::PostProcessSettings::default();
     settings.fog_enabled = true;
     settings.fog_density = 0.004;
     settings.fog_color = [0.57, 0.55, 0.51];
     settings.fog_scattering_anisotropy = 0.65;
     settings.fog_max_distance = 180.0;
     settings.fog_start_distance = 1.5;
+    v3_demo_common::set_camera_postprocess(world, 0, &settings);
 }
 
 fn large_cathedral_camera(t: f32, aspect: f32) -> Camera {
@@ -680,11 +680,11 @@ fn large_cathedral_camera(t: f32, aspect: f32) -> Camera {
         glam::Vec3::new(0.0, 10.0, -68.0), glam::Vec3::Y,
         std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0,
     );
-    configure_cathedral_fog(&mut camera, true);
     camera
 }
 
 fn populate_large_cathedral(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
+    configure_cathedral_fog(world, true);
     spawn_indoor_cathedral_sky(world);
     cathedral_large::populate(world);
     populate_cathedral_lights(world, true)

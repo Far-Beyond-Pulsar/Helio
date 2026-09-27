@@ -1,774 +1,657 @@
-//! Lens flare / glare pass for Helio.
-//!
-//! GPU pipeline (both stages run in a single `execute()` call):
-//!   1. **Flare Query** (compute) — projects each flare-enabled light to screen
-//!      space, checks occlusion against the depth buffer, writes a compacted
-//!      list of visible flares.
-//!   2. **Flare Render** (fullscreen tri) — reads the compacted flare list and
-//!      renders ghost reflections + halation over the scene with additive
-//!      blending.
-//!
-//! The pass is a no-op when no lights have `flare_enabled != 0`.
+//! Scene-linear lens response: image-based scattering of everything bright in
+//! the frame plus analytic lens sources from scene lights. See README.md for
+//! the optical model and the `postprocess_uniforms` -> `lens_output` contract.
 
 use helio_core::graph::ResourceBuilder;
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, RenderPass, ResourceKey, Result as HelioResult};
 
 pub mod gpu_types;
 pub use gpu_types::*;
 
-const MAX_FLARES: u32 = 64;
-const WG: u32 = 64;
+const SHADER: &str = include_str!("../shaders/lens_response.wgsl");
+pub const OUTPUT_KEY: &str = "lens_output";
+/// Optional graph texture replacing the built-in procedural lens dirt.
+pub const DIRT_KEY: &str = "lens_dirt";
+pub const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// Matches FlareUniforms in both shaders (16 bytes).
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct FlareUniforms {
-    light_count: u32,
-    max_flares: u32,
-    screen_width: f32,
-    screen_height: f32,
+/// Mip levels of the extracted-light pyramid; must equal `LEVELS` in the WGSL.
+const LEVELS: u32 = 5;
+const DIRT_SIZE: u32 = 512;
+
+struct Image {
+    texture: wgpu::Texture,
+    /// All mip levels, for sampling.
+    view: wgpu::TextureView,
+    /// One single-level view per mip, for storage writes and downsampling.
+    levels: Vec<wgpu::TextureView>,
 }
 
+impl Image {
+    fn new(device: &wgpu::Device, width: u32, height: u32, label: &str) -> Self {
+        Self::with_levels(device, width, height, 1, label)
+    }
+
+    fn with_levels(device: &wgpu::Device, width: u32, height: u32, mips: u32, label: &str) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: mips,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: OUTPUT_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let levels = (0..mips)
+            .map(|level| texture.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: level,
+                mip_level_count: Some(1),
+                ..Default::default()
+            }))
+            .collect();
+        Self { texture, view, levels }
+    }
+}
+
+/// Scene inputs for analytic lens sources. Every field is optional: missing
+/// producers fall back to neutral stand-ins (no lights, no occluders).
+#[derive(Default, Clone, Copy)]
+pub struct OpticsInputs<'a> {
+    pub camera: Option<&'a wgpu::Buffer>,
+    pub lights: Option<&'a wgpu::Buffer>,
+    pub depth: Option<&'a wgpu::TextureView>,
+    pub shadow_matrices: Option<&'a wgpu::Buffer>,
+    pub shadow_atlas: Option<&'a wgpu::TextureView>,
+    pub dirt: Option<&'a wgpu::TextureView>,
+}
+
+type BindingKey = [Option<wgpu::TextureView>; 5];
+
+/// All persistent state is derived GPU machinery; no CPU copy of settings or lights.
 pub struct LensFlarePass {
-    query_pipeline: wgpu::ComputePipeline,
-    render_pipeline: wgpu::RenderPipeline,
-
-    query_bgl: wgpu::BindGroupLayout,
-    render_bgl: wgpu::BindGroupLayout,
-
-    flare_query_buf: wgpu::Buffer,
-    flare_count_buf: wgpu::Buffer,
-    uniform_buf: wgpu::Buffer,
-
-    // Procedural flare atlas
-    _flare_tex: wgpu::Texture,
-    flare_view: wgpu::TextureView,
-    flare_sampler: wgpu::Sampler,
-
-    // Bind groups
-    query_bg: Option<wgpu::BindGroup>,
-    render_bg: Option<wgpu::BindGroup>,
-    bg_key: Option<(usize, usize, usize, usize)>,
-
-    width: u32,
-    height: u32,
-    format: wgpu::TextureFormat,
-
-    active_flare_count: u32,
+    input_key: &'static str,
+    control: wgpu::ComputePipeline,
+    extract: wgpu::ComputePipeline,
+    downsample: wgpu::ComputePipeline,
+    sources_pipeline: wgpu::ComputePipeline,
+    response: wgpu::ComputePipeline,
+    temporal: wgpu::ComputePipeline,
+    control_layout: wgpu::BindGroupLayout,
+    image_layout: wgpu::BindGroupLayout,
+    optics_layout: wgpu::BindGroupLayout,
+    temporal_layout: wgpu::BindGroupLayout,
+    dispatch: wgpu::Buffer,
+    sources: wgpu::Buffer,
+    bright: Image,
+    output: Image,
+    /// This frame's response before temporal filtering.
+    raw: Image,
+    /// Last frame's filtered output (copied after the temporal pass).
+    history: wgpu::Texture,
+    history_view: wgpu::TextureView,
+    /// dt seconds and history validity, written in prepare().
+    temporal_params: wgpu::Buffer,
+    dirt: wgpu::TextureView,
+    dirt_texture: wgpu::Texture,
+    /// Procedural dirt pixels, uploaded by the first recorded frame (the
+    /// constructor has no queue).
+    dirt_upload: Option<wgpu::Buffer>,
+    dirt_sampler: wgpu::Sampler,
+    shadow_sampler: wgpu::Sampler,
+    fallback_camera: wgpu::Buffer,
+    fallback_lights: wgpu::Buffer,
+    fallback_matrices: wgpu::Buffer,
+    fallback_depth: wgpu::TextureView,
+    fallback_shadow: wgpu::TextureView,
+    bindings: Option<((BindingKey, [Option<wgpu::Buffer>; 4]), wgpu::BindGroup, Vec<wgpu::BindGroup>, wgpu::BindGroup, wgpu::BindGroup)>,
 }
 
 impl LensFlarePass {
+    /// Compatibility constructor: lights, queue and display format are unused.
     pub fn new(
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        lights_buf: &wgpu::Buffer,
+        _queue: &wgpu::Queue,
+        _lights_buf: &wgpu::Buffer,
         width: u32,
         height: u32,
-        surface_format: wgpu::TextureFormat,
+        _surface_format: wgpu::TextureFormat,
     ) -> Self {
-        let query_src = include_str!("../shaders/flare_query.wgsl");
-        let render_src = include_str!("../shaders/flare_render.wgsl");
-        let query_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("LensFlare Query"),
-            source: wgpu::ShaderSource::Wgsl(query_src.into()),
-        });
-        let render_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("LensFlare Render"),
-            source: wgpu::ShaderSource::Wgsl(render_src.into()),
-        });
-
-        // ── Buffers ──
-
-        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("LensFlare Uniforms"),
-            size: std::mem::size_of::<FlareUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let flare_query_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("LensFlare Query Buffer"),
-            size: MAX_FLARES as u64 * std::mem::size_of::<crate::GpuFlareQuery>() as u64,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-
-        let flare_count_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("LensFlare Count Buffer"),
-            size: 4,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // ── Procedural flare atlas (4×4 grid, 128×128) ──
-
-        let atlas_size = 128u32;
-        let atlas_cells = 4u32;
-        let tex_data = Self::make_atlas(atlas_size, atlas_cells);
-        let flare_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("LensFlare Atlas"),
-            size: wgpu::Extent3d {
-                width: atlas_size,
-                height: atlas_size,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &flare_tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &tex_data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(atlas_size * 4),
-                rows_per_image: Some(atlas_size),
-            },
-            wgpu::Extent3d {
-                width: atlas_size,
-                height: atlas_size,
-                depth_or_array_layers: 1,
-            },
-        );
-        let flare_view = flare_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let flare_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("LensFlare Sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            ..Default::default()
-        });
-
-        // ── BGLs ──
-
-        let query_bgl = Self::create_query_bgl(device);
-        let render_bgl = Self::create_render_bgl(device);
-
-        // ── Pipelines ──
-
-        let query_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("LensFlare Query PL"),
-            bind_group_layouts: &[Some(&query_bgl)],
-            immediate_size: 0,
-        });
-        let render_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("LensFlare Render PL"),
-            bind_group_layouts: &[Some(&render_bgl)],
-            immediate_size: 0,
-        });
-
-        let query_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("LensFlare Query"),
-            layout: Some(&query_pl),
-            module: &query_shader,
-            entry_point: Some("cs_flare_query"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("LensFlare Render"),
-            layout: Some(&render_pl),
-            vertex: wgpu::VertexState {
-                module: &render_shader,
-                entry_point: Some("vs_fullscreen"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &render_shader,
-                entry_point: Some("fs_flare"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let bg_key = (lights_buf as *const _ as usize, 0, 0, 0);
-        Self {
-            query_pipeline,
-            render_pipeline,
-            query_bgl,
-            render_bgl,
-            flare_query_buf,
-            flare_count_buf,
-            uniform_buf,
-            _flare_tex: flare_tex,
-            flare_view,
-            flare_sampler,
-            query_bg: None,
-            render_bg: None,
-            bg_key: Some(bg_key),
-            width,
-            height,
-            format: surface_format,
-            active_flare_count: 0,
-        }
+        Self::new_hdr(device, width, height)
     }
 
-    // ── BGL helpers ──
-
-    fn uniform_entry(binding: u32, vis: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
-        wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: vis,
+    pub fn new_hdr(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        let compute = wgpu::ShaderStages::COMPUTE;
+        let uniform = wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: compute,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
-                min_binding_size: None,
+                min_binding_size: wgpu::BufferSize::new(POSTPROCESS_BINDING_SIZE),
             },
             count: None,
-        }
-    }
-
-    fn storage_entry(
-        binding: u32,
-        vis: wgpu::ShaderStages,
-        ro: bool,
-    ) -> wgpu::BindGroupLayoutEntry {
-        wgpu::BindGroupLayoutEntry {
+        };
+        let sampled = wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: compute,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let image_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Lens image layout"),
+            entries: &[uniform, sampled, wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: compute,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: OUTPUT_FORMAT,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            }],
+        });
+        let control_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Lens dispatch layout"),
+            entries: &[uniform, sampled, wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: compute,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(12 * LEVELS as u64),
+                },
+                count: None,
+            }],
+        });
+        let storage = |binding, read_only| wgpu::BindGroupLayoutEntry {
             binding,
-            visibility: vis,
+            visibility: compute,
             ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: ro },
+                ty: wgpu::BufferBindingType::Storage { read_only },
                 has_dynamic_offset: false,
                 min_binding_size: None,
             },
             count: None,
-        }
-    }
-
-    fn create_query_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-        use wgpu::ShaderStages as SS;
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("LensFlare Query BGL"),
+        };
+        let texture = |binding, sample_type, view_dimension| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: compute,
+            ty: wgpu::BindingType::Texture { sample_type, view_dimension, multisampled: false },
+            count: None,
+        };
+        let optics_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Lens optics layout"),
             entries: &[
-                Self::storage_entry(0, SS::COMPUTE, true),  // lights
-                Self::storage_entry(1, SS::COMPUTE, false), // flare_queries
-                Self::storage_entry(2, SS::COMPUTE, false), // flare_count
-                Self::storage_entry(3, SS::COMPUTE, true),  // camera
+                storage(0, true),
+                storage(1, true),
+                texture(2, wgpu::TextureSampleType::Depth, wgpu::TextureViewDimension::D2),
+                storage(3, true),
+                texture(4, wgpu::TextureSampleType::Depth, wgpu::TextureViewDimension::D2Array),
                 wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: SS::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
+                    binding: 5,
+                    visibility: compute,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
-                Self::uniform_entry(5, SS::COMPUTE), // flare_uniforms
-            ],
-        })
-    }
-
-    fn create_render_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-        use wgpu::ShaderStages as SS;
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("LensFlare Render BGL"),
-            entries: &[
-                Self::storage_entry(0, SS::FRAGMENT, true), // flare_queries
-                Self::storage_entry(1, SS::FRAGMENT, true), // flare_count
+                storage(6, false),
+                texture(7, wgpu::TextureSampleType::Float { filterable: true }, wgpu::TextureViewDimension::D2),
                 wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: SS::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: SS::FRAGMENT,
+                    binding: 8,
+                    visibility: compute,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-                Self::uniform_entry(4, SS::FRAGMENT), // flare_uniforms
             ],
-        })
-    }
-
-    fn build_query_bg(
-        device: &wgpu::Device,
-        bgl: &wgpu::BindGroupLayout,
-        lights: &wgpu::Buffer,
-        queries: &wgpu::Buffer,
-        count: &wgpu::Buffer,
-        camera: &wgpu::Buffer,
-        depth: &wgpu::TextureView,
-        uniforms: &wgpu::Buffer,
-    ) -> wgpu::BindGroup {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("LensFlare Query BG"),
-            layout: bgl,
+        });
+        let temporal_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Lens temporal layout"),
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: lights.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: queries.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
+                uniform,
+                sampled,
+                wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    resource: count.as_entire_binding(),
+                    visibility: compute,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: OUTPUT_FORMAT,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
                 },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: camera.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(depth),
-                },
-                wgpu::BindGroupEntry {
+                texture(4, wgpu::TextureSampleType::Float { filterable: false }, wgpu::TextureViewDimension::D2),
+                wgpu::BindGroupLayoutEntry {
                     binding: 5,
-                    resource: uniforms.as_entire_binding(),
+                    visibility: compute,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
             ],
-        })
+        });
+        let shader = helio_core::shader::module(device, "Physical lens response", SHADER);
+        let pipeline = |entry, layouts: &[Option<&wgpu::BindGroupLayout>]| {
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(entry), bind_group_layouts: layouts, immediate_size: 0,
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry), layout: Some(&layout), module: &shader,
+                entry_point: Some(entry), compilation_options: Default::default(), cache: None,
+            })
+        };
+        let buffer = |label, size, usage| device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label), size, usage, mapped_at_creation: false,
+        });
+        let depth_texture = |label, layers: bool| device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(if layers { wgpu::TextureViewDimension::D2Array } else { wgpu::TextureViewDimension::D2 }),
+                ..Default::default()
+            });
+        let (dirt_texture, dirt_upload) = procedural_dirt(device);
+        let (w, h) = reduced_size(width, height);
+        let history = history_texture(device, w, h);
+        Self {
+            input_key: "fogged_hdr",
+            control: pipeline("cs_control", &[Some(&control_layout)]),
+            extract: pipeline("cs_extract", &[Some(&image_layout)]),
+            downsample: pipeline("cs_downsample", &[Some(&image_layout)]),
+            sources_pipeline: pipeline("cs_sources", &[Some(&image_layout), Some(&optics_layout)]),
+            response: pipeline("cs_response", &[Some(&image_layout), Some(&optics_layout)]),
+            temporal: pipeline("cs_temporal", &[Some(&temporal_layout), Some(&optics_layout)]),
+            control_layout,
+            image_layout,
+            optics_layout,
+            temporal_layout,
+            dispatch: buffer("Lens indirect dispatch", 12 * LEVELS as u64,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_SRC),
+            sources: buffer("Lens analytic sources", LENS_SOURCES_SIZE,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC),
+            bright: Image::with_levels(device, w, h, LEVELS, "Lens reduced radiance"),
+            output: Image::new(device, w, h, "Lens response HDR"),
+            raw: Image::new(device, w, h, "Lens response raw"),
+            history: history.0,
+            history_view: history.1,
+            temporal_params: buffer("Lens temporal params", 16,
+                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
+            dirt: dirt_texture.create_view(&Default::default()),
+            dirt_texture,
+            dirt_upload: Some(dirt_upload),
+            dirt_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("Lens dirt sampler"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }),
+            shadow_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("Lens shadow sampler"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                compare: Some(wgpu::CompareFunction::LessEqual),
+                ..Default::default()
+            }),
+            // Zero cameras/lights: the source scan finds no light and exits.
+            fallback_camera: buffer(
+                "Lens neutral camera",
+                2 * std::mem::size_of::<helio_core::GpuCameraUniforms>() as u64,
+                wgpu::BufferUsages::STORAGE,
+            ),
+            fallback_lights: buffer("Lens no lights", 128, wgpu::BufferUsages::STORAGE),
+            fallback_matrices: buffer("Lens no shadow matrices", 64, wgpu::BufferUsages::STORAGE),
+            fallback_depth: depth_texture("Lens neutral depth", false),
+            fallback_shadow: depth_texture("Lens empty shadow atlas", true),
+            bindings: None,
+        }
     }
 
-    fn build_render_bg(
+    /// Select a resolved HDR texture, e.g. the TSR output. Configure before graph
+    /// construction. Only the default fogged_hdr path falls back to pre_aa.
+    pub fn with_color_input(mut self, key: &'static str) -> Self {
+        self.input_key = key;
+        self
+    }
+
+    pub fn output_view(&self) -> &wgpu::TextureView { &self.output.view }
+
+    fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        let (w, h) = reduced_size(width, height);
+        if (self.output.texture.width(), self.output.texture.height()) != (w, h) {
+            self.bright = Image::with_levels(device, w, h, LEVELS, "Lens reduced radiance");
+            self.output = Image::new(device, w, h, "Lens response HDR");
+            self.raw = Image::new(device, w, h, "Lens response raw");
+            (self.history, self.history_view) = history_texture(device, w, h);
+            self.bindings = None;
+        }
+    }
+
+    /// This frame's filtered source image (pyramid level 0) becomes next
+    /// frame's reprojected history.
+    fn store_history(&self, encoder: &mut wgpu::CommandEncoder) {
+        encoder.copy_texture_to_texture(
+            self.bright.texture.as_image_copy(),
+            self.history.as_image_copy(),
+            self.history.size(),
+        );
+    }
+
+    fn clear(&self, encoder: &mut wgpu::CommandEncoder) {
+        let attachments = [Some(wgpu::RenderPassColorAttachment {
+            view: &self.output.view, resolve_target: None, depth_slice: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+        })];
+        // Fast clear guarantees no stale response when disabled or resources vanish.
+        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Lens clear"), color_attachments: &attachments,
+            depth_stencil_attachment: None, timestamp_writes: None,
+            occlusion_query_set: None, multiview_mask: None,
+        });
+    }
+
+    fn record(
+        &mut self,
         device: &wgpu::Device,
-        bgl: &wgpu::BindGroupLayout,
-        queries: &wgpu::Buffer,
-        count: &wgpu::Buffer,
-        atlas_view: &wgpu::TextureView,
-        atlas_sampler: &wgpu::Sampler,
-        uniforms: &wgpu::Buffer,
-    ) -> wgpu::BindGroup {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("LensFlare Render BG"),
-            layout: bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: queries.as_entire_binding(),
+        encoder: &mut wgpu::CommandEncoder,
+        input: Option<&wgpu::TextureView>,
+        pp: Option<&wgpu::Buffer>,
+        optics: OpticsInputs<'_>,
+    ) {
+        if let Some(upload) = self.dirt_upload.take() {
+            encoder.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &upload,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0, bytes_per_row: Some(DIRT_SIZE * 4), rows_per_image: Some(DIRT_SIZE),
+                    },
                 },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: count.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(atlas_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: uniforms.as_entire_binding(),
-                },
-            ],
-        })
-    }
-
-    // ── Procedural atlas generation ──
-    // 4×4 grid of flare sprites:
-    //   Row 0: Soft blobs (ghost sprites)
-    //   Row 1: Ghosts with ring falloff
-    //   Row 2: Streaks (anamorphic-style)
-    //   Row 3: Halos / rings
-
-    fn make_atlas(atlas_size: u32, cells: u32) -> Vec<u8> {
-        let cell = atlas_size / cells;
-        let half = cell as f32 * 0.5;
-        let mut data = vec![0u8; (atlas_size * atlas_size * 4) as usize];
-
-        // Per-cell tint colours (warm → cool variation)
-        let tints: [[f32; 3]; 16] = [
-            [1.0, 0.95, 0.90],
-            [0.95, 0.92, 1.0],
-            [1.0, 0.85, 0.80],
-            [0.85, 0.90, 1.0],
-            [1.0, 1.0, 0.95],
-            [0.90, 0.85, 1.0],
-            [1.0, 0.80, 0.85],
-            [0.80, 0.95, 1.0],
-            [1.0, 0.90, 0.85],
-            [0.85, 0.95, 1.0],
-            [1.0, 0.85, 0.75],
-            [0.80, 0.85, 1.0],
-            [0.95, 0.95, 1.0],
-            [1.0, 0.90, 0.95],
-            [1.0, 1.0, 1.0],
-            [0.90, 0.85, 0.95],
-        ];
-
-        for sprite in 0..16u32 {
-            let col = sprite % cells;
-            let row = sprite / cells;
-            let ox = col * cell;
-            let oy = row * cell;
-            let (_tr, _tg, _tb) = (
-                tints[sprite as usize][0],
-                tints[sprite as usize][1],
-                tints[sprite as usize][2],
+                self.dirt_texture.as_image_copy(),
+                wgpu::Extent3d { width: DIRT_SIZE, height: DIRT_SIZE, depth_or_array_layers: 1 },
             );
+        }
+        if let Some(input) = input {
+            self.resize(device, input.texture().width(), input.texture().height());
+        }
+        self.clear(encoder);
+        // Old PP buffers fail closed without an out-of-bounds uniform binding.
+        let (Some(input), Some(pp)) = (input, pp.filter(|b| {
+            b.size() >= POSTPROCESS_BINDING_SIZE && b.usage().contains(wgpu::BufferUsages::UNIFORM)
+        })) else { return; };
+        let camera = optics.camera.unwrap_or(&self.fallback_camera);
+        let lights = optics.lights.unwrap_or(&self.fallback_lights);
+        let matrices = optics.shadow_matrices.unwrap_or(&self.fallback_matrices);
+        let depth = optics.depth.unwrap_or(&self.fallback_depth);
+        let shadow = optics.shadow_atlas.unwrap_or(&self.fallback_shadow);
+        let dirt = optics.dirt.unwrap_or(&self.dirt);
+        // Bind groups are cached per GPU handle; comparing handles, not
+        // pointers, is safe across TSR's rotating outputs and resize.
+        let key = (
+            [Some(input.clone()), Some(self.output.view.clone()), Some(depth.clone()), Some(shadow.clone()), Some(dirt.clone())],
+            [Some(pp.clone()), Some(camera.clone()), Some(lights.clone()), Some(matrices.clone())],
+        );
+        if self.bindings.as_ref().map(|(k, ..)| k) != Some(&key) {
+            let uniform = || wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: pp, offset: 0, size: wgpu::BufferSize::new(POSTPROCESS_BINDING_SIZE),
+            });
+            let control = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Lens control bindings"), layout: &self.control_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: uniform() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.bright.view) },
+                    wgpu::BindGroupEntry { binding: 3, resource: self.dispatch.as_entire_binding() },
+                ],
+            });
+            let images = |src, dst| device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Lens image bindings"), layout: &self.image_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: uniform() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(dst) },
+                ],
+            });
+            // Extract, blend with reprojected history into level 0, build the
+            // pyramid, then respond from it.
+            let mut steps = vec![images(input, &self.raw.view)];
+            for level in 1..LEVELS as usize {
+                steps.push(images(&self.bright.levels[level - 1], &self.bright.levels[level]));
+            }
+            steps.push(images(&self.bright.view, &self.output.view));
+            let optics_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Lens optics bindings"), layout: &self.optics_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: camera.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: lights.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(depth) },
+                    wgpu::BindGroupEntry { binding: 3, resource: matrices.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(shadow) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.shadow_sampler) },
+                    wgpu::BindGroupEntry { binding: 6, resource: self.sources.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(dirt) },
+                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.dirt_sampler) },
+                ],
+            });
+            let temporal_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Lens temporal bindings"), layout: &self.temporal_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: uniform() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.raw.view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.bright.levels[0]) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.history_view) },
+                    wgpu::BindGroupEntry { binding: 5, resource: self.temporal_params.as_entire_binding() },
+                ],
+            });
+            self.bindings = Some((key, control, steps, optics_group, temporal_group));
+        }
+        let (_, control, steps, optics_group, temporal_group) = self.bindings.as_ref().unwrap();
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Lens enable dispatch"), timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.control);
+            pass.set_bind_group(0, control, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        let response_step = steps.len() - 1;
+        {
+            // Classify scene lights into analytic lens sources. One workgroup;
+            // it writes an empty list when the lens or light sources are off.
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Lens light sources"), timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.sources_pipeline);
+            pass.set_bind_group(0, &steps[response_step], &[]);
+            pass.set_bind_group(1, optics_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        // Every dispatch is GPU-sized: zero groups when the lens is off.
+        for (step, bindings) in steps.iter().enumerate() {
+            let (pipeline, offset, label) = if step == 0 {
+                (&self.extract, 0, "Lens HDR extraction")
+            } else if step < response_step {
+                (&self.downsample, 12 * step as u64, "Lens pyramid")
+            } else {
+                (&self.response, 0, "Lens optical response")
+            };
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(label), timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bindings, &[]);
+            if step == response_step {
+                pass.set_bind_group(1, optics_group, &[]);
+            }
+            pass.dispatch_workgroups_indirect(&self.dispatch, offset);
+            drop(pass);
+            if step == 0 {
+                // Blend this frame's extracted light with the reprojected
+                // history into pyramid level 0, then keep it as next history.
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Lens temporal source"), timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.temporal);
+                pass.set_bind_group(0, temporal_group, &[]);
+                pass.set_bind_group(1, optics_group, &[]);
+                pass.dispatch_workgroups_indirect(&self.dispatch, 0);
+                drop(pass);
+                self.store_history(encoder);
+            }
+        }
+    }
+}
 
-            for py in 0..cell {
-                for px in 0..cell {
-                    let dx = (px as f32 + 0.5 - half) / half;
-                    let dy = (py as f32 + 0.5 - half) / half;
-                    let r = (dx * dx + dy * dy).sqrt().min(1.0);
-                    let _a = r.max(0.001);
+/// Zero-initialised, so the first frame fades in from black.
+fn history_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Lens response history"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: OUTPUT_FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    (texture, view)
+}
 
-                    let (red, green, blue, mut alpha) = match (row, col) {
-                        // Row 0: Gaussian blobs with varying softness
-                        (0, 0) => {
-                            let s = 2.0; // sigma
-                            let g = (-r * r * s).exp();
-                            (g, g * 0.97, g * 0.93, g)
-                        }
-                        (0, 1) => {
-                            let s = 4.0;
-                            let g = (-r * r * s).exp();
-                            (g * 0.95, g, g * 0.98, g)
-                        }
-                        (0, 2) => {
-                            let s = 10.0;
-                            let g = (-r * r * s).exp();
-                            (g, g * 0.92, g * 0.85, g)
-                        }
-                        (0, 3) => {
-                            let s = 1.5;
-                            let g = (-r * r * s).exp();
-                            (g * 0.9, g * 0.95, g, g)
-                        }
+fn reduced_size(width: u32, height: u32) -> (u32, u32) {
+    (width.max(1).div_ceil(4), height.max(1).div_ceil(4))
+}
 
-                        // Row 1: Rings and interference patterns
-                        (1, 0) => {
-                            let rings = ((r * 20.0).sin() * 0.5 + 0.5) * (1.0 - r).max(0.0);
-                            let core = (-r * r * 6.0).exp();
-                            (
-                                core + rings * 0.4,
-                                core * 0.9 + rings * 0.3,
-                                core * 0.85 + rings * 0.2,
-                                (core + rings * 0.4).min(1.0),
-                            )
-                        }
-                        (1, 1) => {
-                            let rings =
-                                ((r * 12.0 - 1.5).sin() * 0.5 + 0.5) * (1.0 - r * r).max(0.0);
-                            let a = rings * 0.8;
-                            (a, a * 0.9, a * 0.7, a)
-                        }
-                        (1, 2) => {
-                            let ring1 = ((r * 15.0).sin().abs()) * (1.0 - r).max(0.0);
-                            let ring2 = ((r * 25.0).cos().abs() * 0.3) * (1.0 - r).max(0.0);
-                            let sum = (ring1 + ring2).min(1.0);
-                            (sum * 0.9, sum, sum * 0.95, sum)
-                        }
-                        (1, 3) => {
-                            let inner = 0.1;
-                            let outer = 0.6;
-                            let ring = 1.0
-                                - ((r - (inner + outer) * 0.5).abs() / ((outer - inner) * 0.5))
-                                    .clamp(0.0, 1.0);
-                            let glow = (-r * r * 3.0).exp() * 0.5;
-                            let v = (ring * ring + glow).min(1.0);
-                            (v, v * 0.85, v * 0.7, v)
-                        }
-
-                        // Row 2: Aperture/bokeh shapes (hexagonal and polygonal)
-                        (2, 0) => {
-                            // Hexagonal aperture
-                            let sides = 6.0;
-                            let angle = dy.atan2(dx);
-                            let closest = (angle % (6.2832 / sides) - 3.1416 / sides).abs();
-                            let hex_r = r / (0.9 / (closest * sides * 0.5).cos().max(0.01));
-                            let falloff = 1.0 - hex_r;
-                            let v = falloff.clamp(0.0, 1.0);
-                            let glow = (-r * r * 8.0).exp() * 0.3;
-                            (
-                                (v + glow).min(1.0),
-                                (v * 0.85 + glow).min(1.0),
-                                (v * 0.8 + glow).min(1.0),
-                                (v + glow).min(1.0),
-                            )
-                        }
-                        (2, 1) => {
-                            // Octagonal aperture with bright edges
-                            let sides = 8.0;
-                            let angle = dy.atan2(dx);
-                            let closest = (angle % (6.2832 / sides) - 3.1416 / sides).abs();
-                            let oct_r = r / (0.92 / (closest * sides * 0.5).cos().max(0.01));
-                            let falloff = 1.0 - oct_r;
-                            let v = falloff.clamp(0.0, 1.0);
-                            let bright_edge = (1.0 - (r - 0.7).abs() / 0.15).clamp(0.0, 1.0) * 0.5;
-                            (
-                                (v + bright_edge).min(1.0),
-                                (v * 0.9).min(1.0),
-                                (v * 0.85).min(1.0),
-                                (v + bright_edge).min(1.0),
-                            )
-                        }
-                        (2, 2) => {
-                            // Hexagonal with soft glow
-                            let sides = 6.0;
-                            let angle = dy.atan2(dx);
-                            let closest = (angle % (6.2832 / sides) - 3.1416 / sides).abs();
-                            let hex_r = r / (0.85 / (closest * sides * 0.5).cos().max(0.01));
-                            let soft = 1.0 / (1.0 + hex_r * hex_r * 4.0);
-                            (soft, soft * 0.92, soft * 0.88, soft)
-                        }
-                        (2, 3) => {
-                            // Soft circular bokeh
-                            let soft = 1.0 / (1.0 + r * r * 6.0);
-                            let rim = (1.0 - (r - 0.4).abs() / 0.3).clamp(0.0, 1.0) * 0.2;
-                            (
-                                (soft + rim).min(1.0),
-                                soft * 0.95,
-                                soft * 0.9,
-                                (soft + rim).min(1.0),
-                            )
-                        }
-
-                        // Row 3: Streaks and star patterns
-                        (3, 0) => {
-                            // Horizontal streak
-                            let sx = dx.abs() * 0.15;
-                            let sy = dy * dy * 6.0;
-                            let s = (-sx - sy).exp() * 0.8;
-                            (s, s * 0.95, s * 0.9, s)
-                        }
-                        (3, 1) => {
-                            // Vertical streak
-                            let sx = dx * dx * 6.0;
-                            let sy = dy.abs() * 0.15;
-                            let s = (-sx - sy).exp() * 0.8;
-                            (s * 0.9, s * 0.95, s, s)
-                        }
-                        (3, 2) => {
-                            // 4-point star cross
-                            let cross = (-dx * dx * 20.0).exp() * (-dy * dy * 20.0).exp();
-                            let sc = (-r * r * 2.0).exp();
-                            (
-                                cross + sc * 0.3,
-                                cross * 0.9 + sc * 0.25,
-                                cross * 0.85 + sc * 0.2,
-                                (cross + sc * 0.3).min(1.0),
-                            )
-                        }
-                        (3, 3) => {
-                            // 6-point star / diffraction spikes
-                            let angle = dy.atan2(dx);
-                            let spike = (0..6).fold(0.0, |acc, i| {
-                                let a = i as f32 * 1.0472;
-                                let d = (angle - a).abs();
-                                let w = d.min(3.1416 - d);
-                                acc + (-w * w * 200.0).exp() * (-r * 8.0).exp()
-                            });
-                            let core = (-r * r * 4.0).exp();
-                            let v = (spike + core).min(1.0);
-                            (v, v * 0.92, v * 0.88, v)
-                        }
-                        _ => (0.0, 0.0, 0.0, 0.0),
-                    };
-
-                    alpha = alpha.clamp(0.0, 1.0);
-                    let base = ((oy + py) * atlas_size + ox + px) as usize * 4;
-                    data[base] = (red.clamp(0.0, 1.0) * 255.0) as u8;
-                    data[base + 1] = (green.clamp(0.0, 1.0) * 255.0) as u8;
-                    data[base + 2] = (blue.clamp(0.0, 1.0) * 255.0) as u8;
-                    data[base + 3] = (alpha * 255.0) as u8;
+/// Deterministic procedural front-element dirt: soft smudges and fine specks
+/// on a faint haze, luminance roughly 0..1. Replace with `DIRT_KEY`.
+fn procedural_dirt(device: &wgpu::Device) -> (wgpu::Texture, wgpu::Buffer) {
+    let size = DIRT_SIZE as usize;
+    let mut value = vec![0.04f32; size * size];
+    let mut state: u64 = 0x5eed_1e45_c0ff_ee01;
+    let mut random = move || {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((state >> 33) as f32) / (1u64 << 31) as f32
+    };
+    // (count, min radius, max radius, strength): smudges, then specks.
+    for (count, r_min, r_max, strength) in [(28, 18.0, 70.0, 0.35), (140, 1.5, 5.0, 0.6)] {
+        for _ in 0..count {
+            let (cx, cy) = (random() * size as f32, random() * size as f32);
+            let radius = r_min + (r_max - r_min) * random();
+            let amount = strength * (0.4 + 0.6 * random());
+            let r = radius.ceil() as i32 + 1;
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    let d = ((dx * dx + dy * dy) as f32).sqrt() / radius;
+                    if d >= 1.0 { continue; }
+                    let x = (cx as i32 + dx).rem_euclid(size as i32) as usize;
+                    let y = (cy as i32 + dy).rem_euclid(size as i32) as usize;
+                    let falloff = (1.0 - d * d).powi(2);
+                    value[y * size + x] += amount * falloff;
                 }
             }
         }
-        data
     }
+    let texels: Vec<u8> = value
+        .iter()
+        .flat_map(|v| {
+            let c = (v.min(1.0) * 255.0) as u8;
+            [c, c, c, 255]
+        })
+        .collect();
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Lens procedural dirt"),
+        size: wgpu::Extent3d { width: DIRT_SIZE, height: DIRT_SIZE, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let upload = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Lens dirt upload"),
+        size: texels.len() as u64,
+        usage: wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: true,
+    });
+    upload.slice(..).get_mapped_range_mut().expect("mapped at creation").copy_from_slice(&texels);
+    upload.unmap();
+    (texture, upload)
 }
 
 impl RenderPass for LensFlarePass {
-    fn name(&self) -> &'static str {
-        "LensFlare"
-    }
-
-    fn writes(&self) -> &'static [&'static str] {
-        &["pre_aa"]
-    }
-
+    fn name(&self) -> &'static str { "LensFlare" }
+    fn writes(&self) -> &'static [&'static str] { &[OUTPUT_KEY] }
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.read("depth");
+        builder.read("postprocess_uniforms");
+        builder.read(self.input_key);
+        if self.input_key == "fogged_hdr" { builder.read("pre_aa"); }
+        // Analytic light sources: current-frame shadows for lens visibility.
+        builder.read("shadow_atlas");
+        builder.read("shadow_matrices");
+        builder.read(DIRT_KEY);
+        // A manually owned resource: this declaration tracks its dependency,
+        // while publish routes the actual sampled view without a second texture.
+        builder.write_buffer(OUTPUT_KEY);
     }
-
-    fn on_resize(&mut self, _device: &wgpu::Device, width: u32, height: u32) {
-        self.width = width;
-        self.height = height;
-    }
-
-    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let light_count = ctx
-            .scene_buffers
-            .get(helio_core::BufferKey::of("scene_lights"))
-            .map_or(0, |lights| lights.row_capacity());
-        self.active_flare_count = light_count;
-
-        let uniforms = FlareUniforms {
-            light_count,
-            max_flares: MAX_FLARES,
-            screen_width: self.width as f32,
-            screen_height: self.height as f32,
-        };
-        ctx.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
-
-        // Reset atomic flare count to 0
-        ctx.write_buffer(&self.flare_count_buf, 0, &[0u8; 4]);
-
+    fn prepare(&mut self, ctx: &helio_core::PrepareContext) -> HelioResult<()> {
+        // History starts black and stays valid, so the lens fades in rather
+        // than popping on the first frame or after being enabled.
+        let params = [ctx.delta_time.max(0.0), 1.0, 0.0, 0.0];
+        ctx.queue.write_buffer(&self.temporal_params, 0, bytemuck::cast_slice(&params));
         Ok(())
     }
-
-    fn render_pass_descriptor_with_storage<'a>(
-        &'a self,
-        target: &'a wgpu::TextureView,
-        _depth: &'a wgpu::TextureView,
-        resources: &'a helio_core::ResourceRegistry<'a>,
-        storage: &'a mut helio_core::RenderFrameStorage,
-    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        if self.active_flare_count == 0 {
-            return None;
-        }
-        let target_view = resources.get(helio_core::ResourceKey::new("pre_aa")).unwrap_or(target);
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
-                view: target_view,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })]));
-        Some(wgpu::RenderPassDescriptor {
-            label: Some("LensFlare"),
-            color_attachments,
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        })
+    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        self.resize(device, width, height);
     }
-
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        frame.route_named_texture(OUTPUT_KEY, &self.output.view, self.name());
+    }
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        if self.active_flare_count == 0 {
-            return Ok(());
-        }
-
-        // Sampling passes bind a single-layer D2 depth view; in multiview (XR)
-        // mode `ctx.depth` is a D2Array view that cannot be bound to the D2
-        // BGL entry. `depth_sampler_view` carries a layer-0 D2 view.
-        let depth_view = ctx.registry.get(helio_core::ResourceKey::new("depth_sampler_view")).unwrap_or(ctx.depth);
-
-        // Rebuild bind groups when buffer/depth pointers change
-        let lights_handle = ctx
-            .scene_buffers
-            .get(helio_core::BufferKey::of("scene_lights"));
-        let lights_buf = lights_handle
-            .map(|handle| &handle.buffer)
-            .unwrap_or(ctx.camera);
-        // SceneDB epoch, not this frame's handle address: a reallocated
-        // lights buffer can land at the same address.
-        let lights_ptr = lights_handle.map_or(usize::MAX, |handle| handle.epoch as usize);
-        let camera_ptr = ctx.camera as *const _ as usize;
-        let depth_ptr = depth_view as *const _ as usize;
-        let uniform_ptr = &self.uniform_buf as *const _ as usize;
-        let key = (lights_ptr, camera_ptr, depth_ptr, uniform_ptr);
-
-        if self.bg_key != Some(key) {
-            self.query_bg = None;
-            self.render_bg = None;
-        }
-
-        if self.query_bg.is_none() {
-            let qbg = Self::build_query_bg(
-                ctx.device,
-                &self.query_bgl,
-                lights_buf,
-                &self.flare_query_buf,
-                &self.flare_count_buf,
-                ctx.camera,
-                depth_view,
-                &self.uniform_buf,
-            );
-            let rbg = Self::build_render_bg(
-                ctx.device,
-                &self.render_bgl,
-                &self.flare_query_buf,
-                &self.flare_count_buf,
-                &self.flare_view,
-                &self.flare_sampler,
-                &self.uniform_buf,
-            );
-            self.query_bg = Some(qbg);
-            self.render_bg = Some(rbg);
-            self.bg_key = Some(key);
-        }
-
-        let qbg = self.query_bg.as_ref().unwrap();
-        let rbg = self.render_bg.as_ref().unwrap();
-
-        // Pass 1: Flare query compute
-        {
-            let mut cpass = unsafe { &mut *ctx.compute_encoder_ptr }.begin_compute_pass(
-                &wgpu::ComputePassDescriptor {
-                    label: Some("LensFlare Query"),
-                    timestamp_writes: None,
-                },
-            );
-            cpass.set_pipeline(&self.query_pipeline);
-            cpass.set_bind_group(0, qbg, &[]);
-            let wg_count = (self.active_flare_count + WG - 1) / WG;
-            cpass.dispatch_workgroups(wg_count.max(1), 1, 1);
-        }
-
-        // Pass 2: Flare render — draws into the active render pass
-        if let Some(rp_ptr) = ctx.active_render_pass_ptr() {
-            let rp = unsafe { &mut *rp_ptr };
-            rp.set_pipeline(&self.render_pipeline);
-            rp.set_bind_group(0, rbg, &[]);
-            rp.draw(0..3, 0..1);
-        }
-
+        let input = ctx.registry.get(ResourceKey::new(self.input_key)).or_else(|| {
+            (self.input_key == "fogged_hdr")
+                .then(|| ctx.registry.get(ResourceKey::new("pre_aa"))).flatten()
+        });
+        let pp = ctx.registry.get(ResourceKey::new("postprocess_uniforms"));
+        let optics = OpticsInputs {
+            camera: Some(ctx.camera),
+            lights: ctx
+                .scene_buffers
+                .get(helio_core::BufferKey::of("scene_lights"))
+                .map(|handle| &handle.buffer),
+            depth: Some(ctx.depth),
+            shadow_matrices: ctx
+                .registry
+                .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
+                    helio_core::resource_keys::shadow_matrices(),
+                )
+                .map(|s| s.shadow_matrices),
+            shadow_atlas: ctx.registry.get::<&wgpu::TextureView>(ResourceKey::new("shadow_atlas")),
+            dirt: ctx.registry.get::<&wgpu::TextureView>(ResourceKey::new(DIRT_KEY)),
+        };
+        // Must follow fog/TSR on the graphics encoder. The separate compute
+        // encoder is submitted BEFORE graphics and would sample stale HDR.
+        self.record(ctx.device, unsafe { &mut *ctx.encoder_ptr }, input, pp, optics);
         Ok(())
     }
 }
 
-
+#[cfg(test)]
+mod tests;

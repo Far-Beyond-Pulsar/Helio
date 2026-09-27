@@ -13,6 +13,10 @@ const LOOK_SENS: f32 = 0.0024;
 const FLY_SPEED: f32 = 5.0;
 
 pub struct Demo {
+    // This host's update callback has no World argument. Retain the authored
+    // database here so interactive controls can update its persistent rows.
+    scene_db: SceneDb,
+    settings_entity: Entity,
     cam_pos: Vec3,
     cam_yaw: f32,
     cam_pitch: f32,
@@ -114,7 +118,14 @@ impl HelioWasmApp for Demo {
 
         let lut_builder = LutBuilder::new(&device, 16);
 
+        helio_pass_postprocess::CameraPostProcessComponent::register_gpu_columns_growable(
+            scene_db.world.gpu_mirror().expect("GPU mirror").store(), 4096, renderer.device());
+        let settings_entity = scene_db.world.spawn();
+        scene_db.world.insert(settings_entity, helio_pass_postprocess::CameraPostProcessComponent::new(
+            0, &helio_pass_postprocess::PostProcessSettings::default()));
         Self {
+            settings_entity,
+            scene_db: std::mem::take(scene_db),
             cam_pos: Vec3::new(0.0, 3.0, 6.0),
             cam_yaw: 0.0,
             cam_pitch: -0.3,
@@ -184,7 +195,8 @@ impl HelioWasmApp for Demo {
             self.lut_intensity = (self.lut_intensity + 0.1).clamp(0.0, 1.0);
         }
 
-        let mut camera = Camera::perspective_look_at(
+        let mut settings = helio_pass_postprocess::PostProcessSettings::default();
+        let camera = Camera::perspective_look_at(
             self.cam_pos,
             self.cam_pos + fwd,
             Vec3::Y,
@@ -193,33 +205,35 @@ impl HelioWasmApp for Demo {
             0.1,
             200.0,
         );
-        camera.postprocess_settings.tonemap_operator = TonemapOperator::Aces;
+        settings.tonemap_operator = TonemapOperator::Aces;
 
         match self.grading_mode {
             0 => {
-                camera.postprocess_settings.lut_platform = 0;
-                camera.postprocess_settings.color_contrast = [1.2, 1.2, 1.2];
-                camera.postprocess_settings.color_saturation = [1.3, 1.3, 1.3];
+                settings.lut_platform = 0;
+                settings.color_contrast = [1.2, 1.2, 1.2];
+                settings.color_saturation = [1.3, 1.3, 1.3];
             }
             1 => {
-                camera.postprocess_settings.lut_platform = 0;
-                camera.postprocess_settings.lift_color = [0.02, 0.01, 0.04];
-                camera.postprocess_settings.gamma_color = [0.95, 1.0, 1.05];
-                camera.postprocess_settings.gain_color = [1.1, 1.0, 0.95];
-                camera.postprocess_settings.hue_shift = self.hue_shift;
+                settings.lut_platform = 0;
+                settings.lift_color = [0.02, 0.01, 0.04];
+                settings.gamma_color = [0.95, 1.0, 1.05];
+                settings.gain_color = [1.1, 1.0, 0.95];
+                settings.hue_shift = self.hue_shift;
             }
             _ => {
-                camera.postprocess_settings.lut_platform = 1;
-                camera.postprocess_settings.lut_intensity = self.lut_intensity;
-                camera.postprocess_settings.hue_shift = self.hue_shift;
+                settings.lut_platform = 1;
+                settings.lut_intensity = self.lut_intensity;
+                settings.hue_shift = self.hue_shift;
             }
         }
 
+        let resolved = renderer.find_pass_mut::<helio_pass_postprocess::PostProcessVolumeBlendPass>()
+            .expect("postprocess blend pass").resolved_uniforms().clone();
         if let Some(ref mut builder) = self.lut_builder {
             let rebuilt = builder.build_if_needed(
                 renderer.device(),
                 renderer.queue(),
-                renderer.postprocess_buffer(),
+                &resolved,
                 self.lut_generation,
             );
             if rebuilt || renderer.color_grading_lut().is_none() {
@@ -228,6 +242,9 @@ impl HelioWasmApp for Demo {
             }
         }
 
+        self.scene_db.world.insert(self.settings_entity,
+            helio_pass_postprocess::CameraPostProcessComponent::new(camera.view_id, &settings));
+        self.scene_db.world.flush_gpu_mirror(renderer.queue());
         camera
     }
 }

@@ -12,6 +12,10 @@ const LOOK_SENS: f32 = 0.0024;
 const FLY_SPEED: f32 = 5.0;
 
 pub struct Demo {
+    // This host's update callback has no World argument. Retain the authored
+    // database here so interactive controls can update its persistent rows.
+    scene_db: SceneDb,
+    settings_entity: Entity,
     cam_pos: Vec3,
     cam_yaw: f32,
     cam_pitch: f32,
@@ -123,7 +127,14 @@ impl HelioWasmApp for Demo {
             point_light([3.0, 4.0, -3.0], [1.0, 0.9, 0.7], 20.0, 15.0),
         );
 
+        helio_pass_postprocess::CameraPostProcessComponent::register_gpu_columns_growable(
+            scene_db.world.gpu_mirror().expect("GPU mirror").store(), 4096, renderer.device());
+        let settings_entity = scene_db.world.spawn();
+        scene_db.world.insert(settings_entity, helio_pass_postprocess::CameraPostProcessComponent::new(
+            0, &helio_pass_postprocess::PostProcessSettings::default()));
         Self {
+            settings_entity,
+            scene_db: std::mem::take(scene_db),
             cam_pos: Vec3::new(0.0, 3.0, 6.0),
             cam_yaw: 0.0,
             cam_pitch: -0.3,
@@ -175,7 +186,8 @@ impl HelioWasmApp for Demo {
             log::info!("[HDR Demo] Switched to {}", name);
         }
 
-        let mut camera = Camera::perspective_look_at(
+        let mut settings = helio_pass_postprocess::PostProcessSettings::default();
+        let camera = Camera::perspective_look_at(
             self.cam_pos,
             self.cam_pos + fwd,
             Vec3::Y,
@@ -186,22 +198,25 @@ impl HelioWasmApp for Demo {
         );
         match self.hdr_mode {
             0 => {
-                camera.postprocess_settings.hdr_output_mode = helio::HdrOutputMode::Ldr;
-                camera.postprocess_settings.tonemap_operator = helio::TonemapOperator::Aces;
+                settings.hdr_output_mode = helio::HdrOutputMode::Ldr;
+                settings.tonemap_operator = helio::TonemapOperator::Aces;
             }
             1 => {
-                camera.postprocess_settings.hdr_output_mode = helio::HdrOutputMode::Hdr10;
-                camera.postprocess_settings.tonemap_operator = helio::TonemapOperator::None;
+                settings.hdr_output_mode = helio::HdrOutputMode::Hdr10;
+                settings.tonemap_operator = helio::TonemapOperator::None;
             }
             2 => {
-                camera.postprocess_settings.hdr_output_mode = helio::HdrOutputMode::ScRgb;
-                camera.postprocess_settings.tonemap_operator = helio::TonemapOperator::None;
+                settings.hdr_output_mode = helio::HdrOutputMode::ScRgb;
+                settings.tonemap_operator = helio::TonemapOperator::None;
             }
             _ => {
-                camera.postprocess_settings.hdr_output_mode = helio::HdrOutputMode::Passthrough;
-                camera.postprocess_settings.tonemap_operator = helio::TonemapOperator::None;
+                settings.hdr_output_mode = helio::HdrOutputMode::Passthrough;
+                settings.tonemap_operator = helio::TonemapOperator::None;
             }
         }
+        self.scene_db.world.insert(self.settings_entity,
+            helio_pass_postprocess::CameraPostProcessComponent::new(camera.view_id, &settings));
+        self.scene_db.world.flush_gpu_mirror(renderer.queue());
         camera
     }
 }

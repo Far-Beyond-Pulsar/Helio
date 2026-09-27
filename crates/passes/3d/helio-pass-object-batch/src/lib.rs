@@ -95,6 +95,20 @@ fn create_storage_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu:
     })
 }
 
+/// Storage buffer written by a compute kernel and consumed as indirect draw
+/// arguments (the shadow pass's multi-draw-indirect source).
+fn create_indirect_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: size.max(4),
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::INDIRECT
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    })
+}
+
 /// Same as [`create_storage_buffer`] but also usable as a `<uniform>`
 /// binding (the `FrameUniform`/`dispatch_args`-style "write as storage in
 /// one kernel, read as uniform in another" dual-bind trick already used by
@@ -299,12 +313,12 @@ impl ScratchBuffers {
                 n * RANGE_BYTES,
             ),
             range_bucket_counts: create_storage_buffer(device, "ObjBatch RangeBucketCounts", 16),
-            shadow_static_indirect: create_storage_buffer(
+            shadow_static_indirect: create_indirect_buffer(
                 device,
                 "ObjBatch ShadowStaticIndirect",
                 n * INDIRECT_ARGS_BYTES,
             ),
-            shadow_movable_indirect: create_storage_buffer(
+            shadow_movable_indirect: create_indirect_buffer(
                 device,
                 "ObjBatch ShadowMovableIndirect",
                 n * INDIRECT_ARGS_BYTES,

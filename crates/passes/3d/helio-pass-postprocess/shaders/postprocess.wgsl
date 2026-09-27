@@ -61,9 +61,9 @@ struct GpuPostProcessUniforms {
     bloom_tint:             vec3<f32>,
     bloom_enabled:          u32,
     color_saturation:       vec3<f32>,
-    _pad4:                  f32,
+    exposure_speed_up:                  f32,
     color_contrast:         vec3<f32>,
-    _pad5:                  f32,
+    exposure_speed_down:                  f32,
     color_gamma:            vec3<f32>,
     _pad6:                  f32,
     color_gain:             vec3<f32>,
@@ -147,7 +147,36 @@ struct GpuPostProcessUniforms {
     lut_generation:            u32,   // 448
     lut_intensity:             f32,   // 452
     lut_platform:              u32,   // 456
-    _pad_grading_end:          f32,   // 460 → struct ends at 464
+    _pad_grading_end:          f32,   // 460
+    lens_enabled: u32, // 464
+    lens_quality: u32, // 468
+    lens_profile: u32, // 472
+    lens_ghost_count: u32, // 476
+    lens_intensity: f32, // 480
+    lens_threshold: f32, // 484
+    lens_soft_knee: f32, // 488
+    lens_ghost_intensity: f32, // 492
+    lens_halo_intensity: f32, // 496
+    lens_glare_intensity: f32, // 500
+    lens_streak_intensity: f32, // 504
+    lens_dispersion: f32, // 508
+    lens_aperture_f_number: f32, // 512
+    lens_focal_length_mm: f32, // 516
+    lens_sensor_width_mm: f32, // 520
+    lens_vignette: f32, // 524
+    lens_starburst_intensity: f32, // 528
+    lens_starburst_length: f32,    // 532
+    lens_aperture_blades: u32,     // 536
+    lens_aperture_rotation: f32,   // 540
+    lens_coating_strength: f32,    // 544
+    lens_ghost_rim: f32,           // 548
+    lens_dirt_intensity: f32,      // 552
+    lens_light_sources: u32,       // 556
+    lens_light_intensity: f32,     // 560
+    lens_field_margin: f32,        // 564
+    lens_response_time: f32,       // 568
+    _pad_lens_ext0: f32,           // 572
+    _pad_lens_ext1: vec4<f32>,     // 576 → struct ends at 592
 }
 
 struct CameraUniforms {
@@ -174,9 +203,17 @@ struct GpuPostProcessVolume {
     // 64 regardless. Spelling the pad out to 64 keeps this struct honest about
     // where settings actually starts — the CPU side has to pad to match, and a
     // vec2 here silently hid an 8-byte hole that #[repr(C)] did not reproduce.
-    _pad_vol:       vec4<f32>,   // 48..64
+    override_mask:  vec4<u32>,   // 48..64
     settings:       GpuPostProcessUniforms,  // 64
 }
+
+struct CameraPostProcessComponent {
+    view_id: u32,
+    enabled: u32,
+    _pad: vec2<u32>,
+    settings: GpuPostProcessUniforms,
+}
+@group(0) @binding(20) var<storage, read> camera_postprocess: array<CameraPostProcessComponent>;
 
 // ── Group 0: main bindings ─────────────────────────────────────────────────────
 
@@ -191,6 +228,9 @@ struct GpuPostProcessVolume {
 @group(0) @binding(8)  var                     bloom_2:      texture_2d<f32>;
 @group(0) @binding(9)  var                     bloom_3:      texture_2d<f32>;
 @group(0) @binding(10) var                     bloom_4:      texture_2d<f32>;
+// [0] this frame's mean log2 luminance (cs_exposure_reduce)
+// [1] adapted mean log2 luminance (cs_exposure_adapt; read by fs_uber)
+// [2] frame delta seconds, [3] 1 when [1] holds valid history (CPU-written)
 @group(0) @binding(11) var<storage, read_write> avg_luminance: array<f32>;
 @group(0) @binding(15) var<storage, read_write> exposure_partials: array<vec2<f32>>;
 @group(0) @binding(12) var                     noise_tex:    texture_2d<f32>;
@@ -198,11 +238,11 @@ struct GpuPostProcessVolume {
 @group(0) @binding(14) var<storage, read>      pp_custom:    array<vec4<f32>>;
 @group(0) @binding(15) var<storage, read>      pp_volumes:   array<GpuPostProcessVolume>;
 @group(0) @binding(16) var<storage, read_write> blend_output: GpuPostProcessUniforms;
-// Volumetric fog froxel grid (fs_uber only) — a view-space 3D texture, not a
-// screen-space buffer. rgb = accumulated in-scattering, a = transmittance, both
-// integrated from the camera to that froxel's depth. Bound to a 1x1x1 (0,0,0,1)
-// fallback when no fog pass is in the graph, which composites to a no-op.
-@group(0) @binding(17) var                     fog_input:    texture_3d<f32>;
+// Scene-linear lens response (fs_uber only), published by LensFlarePass at
+// reduced resolution from the same pre-exposure image. Participating media are
+// already composited into hdr_input by FogCompositePass. Bound to a 1x1 black
+// fallback when no lens pass is in the graph.
+@group(0) @binding(17) var                     lens_input:   texture_2d<f32>;
 @group(0) @binding(18) var                     velocity_tex: texture_2d<f32>;
 @group(0) @binding(19) var                     lut_tex:      texture_3d<f32>;
 
@@ -238,209 +278,220 @@ fn luminance(c: vec3<f32>) -> f32 {
 // Single workgroup (1 thread) that reads all active volumes and blends them
 // with camera defaults, writing the result to blend_output.
 
-var<workgroup> vol_weights: array<f32, 256>;
-var<workgroup> vol_indices: array<u32, 256>;
-
-fn lerpf(a: f32, b: f32, t: f32) -> f32 { return a + (b - a) * t; }
-fn lerp3v(a: vec3<f32>, b: vec3<f32>, t: f32) -> vec3<f32> { return a + (b - a) * t; }
-
-fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: f32) -> GpuPostProcessUniforms {
-    var r: GpuPostProcessUniforms;
-    r.exposure_mode          = select(base.exposure_mode, vol.exposure_mode, t >= 0.5);
-    r.exposure_compensation  = lerpf(base.exposure_compensation, vol.exposure_compensation, t);
-    r.exposure_min           = lerpf(base.exposure_min, vol.exposure_min, t);
-    r.exposure_max           = lerpf(base.exposure_max, vol.exposure_max, t);
-    r.bloom_intensity        = lerpf(base.bloom_intensity, vol.bloom_intensity, t);
-    r.bloom_threshold        = lerpf(base.bloom_threshold, vol.bloom_threshold, t);
-    r.bloom_knee             = lerpf(base.bloom_knee, vol.bloom_knee, t);
-    r.bloom_radius           = lerpf(base.bloom_radius, vol.bloom_radius, t);
-    r.bloom_tint             = lerp3v(base.bloom_tint, vol.bloom_tint, t);
-    r.bloom_enabled          = select(base.bloom_enabled, vol.bloom_enabled, t >= 0.5);
-    r.color_saturation       = lerp3v(base.color_saturation, vol.color_saturation, t);
-    r.color_contrast         = lerp3v(base.color_contrast, vol.color_contrast, t);
-    r.color_gamma            = lerp3v(base.color_gamma, vol.color_gamma, t);
-    r.color_gain             = lerp3v(base.color_gain, vol.color_gain, t);
-    r.color_offset           = lerp3v(base.color_offset, vol.color_offset, t);
-    r.white_temp             = lerpf(base.white_temp, vol.white_temp, t);
-    r.white_tint             = lerpf(base.white_tint, vol.white_tint, t);
-    r.white_balance_enabled  = select(base.white_balance_enabled, vol.white_balance_enabled, t >= 0.5);
-    r.tonemap_operator       = select(base.tonemap_operator, vol.tonemap_operator, t >= 0.5);
-    r.tonemap_exposure       = lerpf(base.tonemap_exposure, vol.tonemap_exposure, t);
-    r.tonemap_white_point    = lerpf(base.tonemap_white_point, vol.tonemap_white_point, t);
-    r.vignette_intensity     = lerpf(base.vignette_intensity, vol.vignette_intensity, t);
-    r.vignette_smoothness    = lerpf(base.vignette_smoothness, vol.vignette_smoothness, t);
-    r.vignette_roundness     = lerpf(base.vignette_roundness, vol.vignette_roundness, t);
-    r.vignette_color         = lerp3v(base.vignette_color, vol.vignette_color, t);
-    r.vignette_enabled       = select(base.vignette_enabled, vol.vignette_enabled, t >= 0.5);
-    r.ca_intensity           = lerpf(base.ca_intensity, vol.ca_intensity, t);
-    r.ca_start_offset        = lerpf(base.ca_start_offset, vol.ca_start_offset, t);
-    r.ca_enabled             = select(base.ca_enabled, vol.ca_enabled, t >= 0.5);
-    r.grain_intensity        = lerpf(base.grain_intensity, vol.grain_intensity, t);
-    r.grain_response         = lerpf(base.grain_response, vol.grain_response, t);
-    r.grain_size             = lerpf(base.grain_size, vol.grain_size, t);
-    r.grain_enabled          = select(base.grain_enabled, vol.grain_enabled, t >= 0.5);
-    r.dof_focal_distance     = lerpf(base.dof_focal_distance, vol.dof_focal_distance, t);
-    r.dof_focal_region       = lerpf(base.dof_focal_region, vol.dof_focal_region, t);
-    r.dof_aperture_shape     = lerpf(base.dof_aperture_shape, vol.dof_aperture_shape, t);
-    r.dof_aperture_rotation  = lerpf(base.dof_aperture_rotation, vol.dof_aperture_rotation, t);
-    r.dof_near_transition    = lerpf(base.dof_near_transition, vol.dof_near_transition, t);
-    r.dof_far_transition     = lerpf(base.dof_far_transition, vol.dof_far_transition, t);
-    r.dof_max_bokeh_size     = lerpf(base.dof_max_bokeh_size, vol.dof_max_bokeh_size, t);
-    r.dof_sensor_diagonal    = lerpf(base.dof_sensor_diagonal, vol.dof_sensor_diagonal, t);
-    r.motion_blur_amount     = lerpf(base.motion_blur_amount, vol.motion_blur_amount, t);
-    r.motion_blur_max        = lerpf(base.motion_blur_max, vol.motion_blur_max, t);
-    r.motion_blur_enabled    = select(base.motion_blur_enabled, vol.motion_blur_enabled, t >= 0.5);
-    r.blend_weight_bloom        = lerpf(base.blend_weight_bloom, vol.blend_weight_bloom, t);
-    r.blend_weight_dof          = lerpf(base.blend_weight_dof, vol.blend_weight_dof, t);
-    r.blend_weight_motion_blur  = lerpf(base.blend_weight_motion_blur, vol.blend_weight_motion_blur, t);
-    r.blend_weight_vignette     = lerpf(base.blend_weight_vignette, vol.blend_weight_vignette, t);
-    r.blend_weight_ca           = lerpf(base.blend_weight_ca, vol.blend_weight_ca, t);
-    r.blend_weight_grain        = lerpf(base.blend_weight_grain, vol.blend_weight_grain, t);
-    r.blend_weight_exposure     = lerpf(base.blend_weight_exposure, vol.blend_weight_exposure, t);
-    // Fog. Every field must be assigned: `r` is declared uninitialized, so a field
-    // left unwritten here is indeterminate — and the caller copies this whole struct
-    // over the post-process uniform buffer, so a miss would corrupt fog config for
-    // every frame in which any post-process volume is active.
-    r.fog_enabled               = select(base.fog_enabled, vol.fog_enabled, t >= 0.5);
-    r.fog_mode                  = select(base.fog_mode, vol.fog_mode, t >= 0.5);
-    r.fog_density               = lerpf(base.fog_density, vol.fog_density, t);
-    r.fog_height_falloff        = lerpf(base.fog_height_falloff, vol.fog_height_falloff, t);
-    r.fog_start_distance        = lerpf(base.fog_start_distance, vol.fog_start_distance, t);
-    r.fog_max_distance          = lerpf(base.fog_max_distance, vol.fog_max_distance, t);
-    r.fog_height                = lerpf(base.fog_height, vol.fog_height, t);
-    r.fog_scattering_anisotropy = lerpf(base.fog_scattering_anisotropy, vol.fog_scattering_anisotropy, t);
-    r.fog_color                 = lerp3v(base.fog_color, vol.fog_color, t);
-    r.fog_emissive              = lerp3v(base.fog_emissive, vol.fog_emissive, t);
-    r.hdr_output_mode           = select(base.hdr_output_mode, vol.hdr_output_mode, t >= 0.5);
-    r.hdr_max_nits              = lerpf(base.hdr_max_nits, vol.hdr_max_nits, t);
-    r.hdr_ui_brightness         = lerpf(base.hdr_ui_brightness, vol.hdr_ui_brightness, t);
-    r.lift_color                = lerp3v(base.lift_color, vol.lift_color, t);
-    r.gamma_color               = lerp3v(base.gamma_color, vol.gamma_color, t);
-    r.gain_color                = lerp3v(base.gain_color, vol.gain_color, t);
-    r.shadows_max               = lerpf(base.shadows_max, vol.shadows_max, t);
-    r.highlights_min            = lerpf(base.highlights_min, vol.highlights_min, t);
-    r.shadow_highlight_balance  = lerpf(base.shadow_highlight_balance, vol.shadow_highlight_balance, t);
-    r.hue_shift                 = lerpf(base.hue_shift, vol.hue_shift, t);
-    r.lut_generation            = select(base.lut_generation, vol.lut_generation, t >= 0.5);
-    r.lut_intensity             = lerpf(base.lut_intensity, vol.lut_intensity, t);
-    r.lut_platform              = select(base.lut_platform, vol.lut_platform, t >= 0.5);
-    // Padding fields are implicitly copied via the field-by-field assignment above.
-    // The struct is fully written by this function; uninitialized fields get default values.
-    r._pad4 = 0.0; r._pad5 = 0.0; r._pad6 = 0.0; r._pad7 = 0.0; r._pad8 = 0.0;
-    r._pad9 = 0.0; r._pad10 = 0.0; r._pad_vignette = 0.0; r._pad11 = 0.0;
-    r._pad13 = 0.0; r._pad14 = 0.0;
-    r._pad_fog_color = 0.0; r._pad_fog_emissive = 0.0; r._pad_hdr_end = 0.0;
-    r._pad_lift = 0.0; r._pad_gamma = 0.0; r._pad_gain = 0.0; r._pad_grading_end = 0.0;
+// The four mask words use the indices exported by PostProcessProperty.
+fn overridden(mask: vec4<u32>, property: u32) -> bool {
+    return (mask[property / 32u] & (1u << (property % 32u))) != 0u;
+}
+fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: f32, mask: vec4<u32>) -> GpuPostProcessUniforms {
+    var r = base;
+    if overridden(mask, 0u) { r.exposure_mode = select(base.exposure_mode, vol.exposure_mode, t >= 0.5); }
+    if overridden(mask, 1u) { r.exposure_compensation = base.exposure_compensation + (vol.exposure_compensation - base.exposure_compensation) * t; }
+    if overridden(mask, 2u) { r.exposure_min = base.exposure_min + (vol.exposure_min - base.exposure_min) * t; }
+    if overridden(mask, 3u) { r.exposure_max = base.exposure_max + (vol.exposure_max - base.exposure_max) * t; }
+    if overridden(mask, 4u) { r.bloom_intensity = base.bloom_intensity + (vol.bloom_intensity - base.bloom_intensity) * t; }
+    if overridden(mask, 5u) { r.bloom_threshold = base.bloom_threshold + (vol.bloom_threshold - base.bloom_threshold) * t; }
+    if overridden(mask, 6u) { r.bloom_knee = base.bloom_knee + (vol.bloom_knee - base.bloom_knee) * t; }
+    if overridden(mask, 7u) { r.bloom_radius = base.bloom_radius + (vol.bloom_radius - base.bloom_radius) * t; }
+    if overridden(mask, 8u) { r.bloom_tint = base.bloom_tint + (vol.bloom_tint - base.bloom_tint) * t; }
+    if overridden(mask, 9u) { r.bloom_enabled = select(base.bloom_enabled, vol.bloom_enabled, t >= 0.5); }
+    if overridden(mask, 10u) { r.color_saturation = base.color_saturation + (vol.color_saturation - base.color_saturation) * t; }
+    if overridden(mask, 11u) { r.exposure_speed_up = base.exposure_speed_up + (vol.exposure_speed_up - base.exposure_speed_up) * t; }
+    if overridden(mask, 12u) { r.color_contrast = base.color_contrast + (vol.color_contrast - base.color_contrast) * t; }
+    if overridden(mask, 13u) { r.exposure_speed_down = base.exposure_speed_down + (vol.exposure_speed_down - base.exposure_speed_down) * t; }
+    if overridden(mask, 14u) { r.color_gamma = base.color_gamma + (vol.color_gamma - base.color_gamma) * t; }
+    if overridden(mask, 15u) { r.color_gain = base.color_gain + (vol.color_gain - base.color_gain) * t; }
+    if overridden(mask, 16u) { r.color_offset = base.color_offset + (vol.color_offset - base.color_offset) * t; }
+    if overridden(mask, 17u) { r.white_temp = base.white_temp + (vol.white_temp - base.white_temp) * t; }
+    if overridden(mask, 18u) { r.white_tint = base.white_tint + (vol.white_tint - base.white_tint) * t; }
+    if overridden(mask, 19u) { r.white_balance_enabled = select(base.white_balance_enabled, vol.white_balance_enabled, t >= 0.5); }
+    if overridden(mask, 20u) { r.tonemap_operator = select(base.tonemap_operator, vol.tonemap_operator, t >= 0.5); }
+    if overridden(mask, 21u) { r.tonemap_exposure = base.tonemap_exposure + (vol.tonemap_exposure - base.tonemap_exposure) * t; }
+    if overridden(mask, 22u) { r.tonemap_white_point = base.tonemap_white_point + (vol.tonemap_white_point - base.tonemap_white_point) * t; }
+    if overridden(mask, 23u) { r.vignette_intensity = base.vignette_intensity + (vol.vignette_intensity - base.vignette_intensity) * t; }
+    if overridden(mask, 24u) { r.vignette_smoothness = base.vignette_smoothness + (vol.vignette_smoothness - base.vignette_smoothness) * t; }
+    if overridden(mask, 25u) { r.vignette_roundness = base.vignette_roundness + (vol.vignette_roundness - base.vignette_roundness) * t; }
+    if overridden(mask, 26u) { r.vignette_color = base.vignette_color + (vol.vignette_color - base.vignette_color) * t; }
+    if overridden(mask, 27u) { r.vignette_enabled = select(base.vignette_enabled, vol.vignette_enabled, t >= 0.5); }
+    if overridden(mask, 28u) { r.ca_intensity = base.ca_intensity + (vol.ca_intensity - base.ca_intensity) * t; }
+    if overridden(mask, 29u) { r.ca_start_offset = base.ca_start_offset + (vol.ca_start_offset - base.ca_start_offset) * t; }
+    if overridden(mask, 30u) { r.ca_enabled = select(base.ca_enabled, vol.ca_enabled, t >= 0.5); }
+    if overridden(mask, 31u) { r.grain_intensity = base.grain_intensity + (vol.grain_intensity - base.grain_intensity) * t; }
+    if overridden(mask, 32u) { r.grain_response = base.grain_response + (vol.grain_response - base.grain_response) * t; }
+    if overridden(mask, 33u) { r.grain_size = base.grain_size + (vol.grain_size - base.grain_size) * t; }
+    if overridden(mask, 34u) { r.grain_enabled = select(base.grain_enabled, vol.grain_enabled, t >= 0.5); }
+    if overridden(mask, 35u) { r.dof_focal_distance = base.dof_focal_distance + (vol.dof_focal_distance - base.dof_focal_distance) * t; }
+    if overridden(mask, 36u) { r.dof_focal_region = base.dof_focal_region + (vol.dof_focal_region - base.dof_focal_region) * t; }
+    if overridden(mask, 37u) { r.dof_aperture_shape = select(base.dof_aperture_shape, vol.dof_aperture_shape, t >= 0.5); }
+    if overridden(mask, 38u) { r.dof_aperture_rotation = base.dof_aperture_rotation + (vol.dof_aperture_rotation - base.dof_aperture_rotation) * t; }
+    if overridden(mask, 39u) { r.dof_near_transition = base.dof_near_transition + (vol.dof_near_transition - base.dof_near_transition) * t; }
+    if overridden(mask, 40u) { r.dof_far_transition = base.dof_far_transition + (vol.dof_far_transition - base.dof_far_transition) * t; }
+    if overridden(mask, 41u) { r.dof_max_bokeh_size = base.dof_max_bokeh_size + (vol.dof_max_bokeh_size - base.dof_max_bokeh_size) * t; }
+    if overridden(mask, 42u) { r.dof_sensor_diagonal = base.dof_sensor_diagonal + (vol.dof_sensor_diagonal - base.dof_sensor_diagonal) * t; }
+    if overridden(mask, 43u) { r.motion_blur_amount = base.motion_blur_amount + (vol.motion_blur_amount - base.motion_blur_amount) * t; }
+    if overridden(mask, 44u) { r.motion_blur_max = base.motion_blur_max + (vol.motion_blur_max - base.motion_blur_max) * t; }
+    if overridden(mask, 45u) { r.motion_blur_enabled = select(base.motion_blur_enabled, vol.motion_blur_enabled, t >= 0.5); }
+    if overridden(mask, 46u) { r.blend_weight_bloom = base.blend_weight_bloom + (vol.blend_weight_bloom - base.blend_weight_bloom) * t; }
+    if overridden(mask, 47u) { r.blend_weight_dof = base.blend_weight_dof + (vol.blend_weight_dof - base.blend_weight_dof) * t; }
+    if overridden(mask, 48u) { r.blend_weight_motion_blur = base.blend_weight_motion_blur + (vol.blend_weight_motion_blur - base.blend_weight_motion_blur) * t; }
+    if overridden(mask, 49u) { r.blend_weight_vignette = base.blend_weight_vignette + (vol.blend_weight_vignette - base.blend_weight_vignette) * t; }
+    if overridden(mask, 50u) { r.blend_weight_ca = base.blend_weight_ca + (vol.blend_weight_ca - base.blend_weight_ca) * t; }
+    if overridden(mask, 51u) { r.blend_weight_grain = base.blend_weight_grain + (vol.blend_weight_grain - base.blend_weight_grain) * t; }
+    if overridden(mask, 52u) { r.blend_weight_exposure = base.blend_weight_exposure + (vol.blend_weight_exposure - base.blend_weight_exposure) * t; }
+    if overridden(mask, 53u) { r.fog_enabled = select(base.fog_enabled, vol.fog_enabled, t >= 0.5); }
+    if overridden(mask, 54u) { r.fog_mode = select(base.fog_mode, vol.fog_mode, t >= 0.5); }
+    if overridden(mask, 55u) { r.fog_density = base.fog_density + (vol.fog_density - base.fog_density) * t; }
+    if overridden(mask, 56u) { r.fog_height_falloff = base.fog_height_falloff + (vol.fog_height_falloff - base.fog_height_falloff) * t; }
+    if overridden(mask, 57u) { r.fog_start_distance = base.fog_start_distance + (vol.fog_start_distance - base.fog_start_distance) * t; }
+    if overridden(mask, 58u) { r.fog_max_distance = base.fog_max_distance + (vol.fog_max_distance - base.fog_max_distance) * t; }
+    if overridden(mask, 59u) { r.fog_height = base.fog_height + (vol.fog_height - base.fog_height) * t; }
+    if overridden(mask, 60u) { r.fog_scattering_anisotropy = base.fog_scattering_anisotropy + (vol.fog_scattering_anisotropy - base.fog_scattering_anisotropy) * t; }
+    if overridden(mask, 61u) { r.fog_color = base.fog_color + (vol.fog_color - base.fog_color) * t; }
+    if overridden(mask, 62u) { r.fog_emissive = base.fog_emissive + (vol.fog_emissive - base.fog_emissive) * t; }
+    if overridden(mask, 63u) { r.hdr_output_mode = select(base.hdr_output_mode, vol.hdr_output_mode, t >= 0.5); }
+    if overridden(mask, 64u) { r.hdr_max_nits = base.hdr_max_nits + (vol.hdr_max_nits - base.hdr_max_nits) * t; }
+    if overridden(mask, 65u) { r.hdr_ui_brightness = base.hdr_ui_brightness + (vol.hdr_ui_brightness - base.hdr_ui_brightness) * t; }
+    if overridden(mask, 66u) { r.lift_color = base.lift_color + (vol.lift_color - base.lift_color) * t; }
+    if overridden(mask, 67u) { r.gamma_color = base.gamma_color + (vol.gamma_color - base.gamma_color) * t; }
+    if overridden(mask, 68u) { r.gain_color = base.gain_color + (vol.gain_color - base.gain_color) * t; }
+    if overridden(mask, 69u) { r.shadows_max = base.shadows_max + (vol.shadows_max - base.shadows_max) * t; }
+    if overridden(mask, 70u) { r.highlights_min = base.highlights_min + (vol.highlights_min - base.highlights_min) * t; }
+    if overridden(mask, 71u) { r.shadow_highlight_balance = base.shadow_highlight_balance + (vol.shadow_highlight_balance - base.shadow_highlight_balance) * t; }
+    if overridden(mask, 72u) { r.hue_shift = base.hue_shift + (vol.hue_shift - base.hue_shift) * t; }
+    if overridden(mask, 73u) { r.lut_generation = select(base.lut_generation, vol.lut_generation, t >= 0.5); }
+    if overridden(mask, 74u) { r.lut_intensity = base.lut_intensity + (vol.lut_intensity - base.lut_intensity) * t; }
+    if overridden(mask, 75u) { r.lut_platform = select(base.lut_platform, vol.lut_platform, t >= 0.5); }
+    if overridden(mask, 76u) { r.lens_enabled = select(base.lens_enabled, vol.lens_enabled, t >= 0.5); }
+    if overridden(mask, 77u) { r.lens_quality = select(base.lens_quality, vol.lens_quality, t >= 0.5); }
+    if overridden(mask, 78u) { r.lens_profile = select(base.lens_profile, vol.lens_profile, t >= 0.5); }
+    if overridden(mask, 79u) { r.lens_ghost_count = select(base.lens_ghost_count, vol.lens_ghost_count, t >= 0.5); }
+    if overridden(mask, 80u) { r.lens_intensity = base.lens_intensity + (vol.lens_intensity - base.lens_intensity) * t; }
+    if overridden(mask, 81u) { r.lens_threshold = base.lens_threshold + (vol.lens_threshold - base.lens_threshold) * t; }
+    if overridden(mask, 82u) { r.lens_soft_knee = base.lens_soft_knee + (vol.lens_soft_knee - base.lens_soft_knee) * t; }
+    if overridden(mask, 83u) { r.lens_ghost_intensity = base.lens_ghost_intensity + (vol.lens_ghost_intensity - base.lens_ghost_intensity) * t; }
+    if overridden(mask, 84u) { r.lens_halo_intensity = base.lens_halo_intensity + (vol.lens_halo_intensity - base.lens_halo_intensity) * t; }
+    if overridden(mask, 85u) { r.lens_glare_intensity = base.lens_glare_intensity + (vol.lens_glare_intensity - base.lens_glare_intensity) * t; }
+    if overridden(mask, 86u) { r.lens_streak_intensity = base.lens_streak_intensity + (vol.lens_streak_intensity - base.lens_streak_intensity) * t; }
+    if overridden(mask, 87u) { r.lens_dispersion = base.lens_dispersion + (vol.lens_dispersion - base.lens_dispersion) * t; }
+    if overridden(mask, 88u) { r.lens_aperture_f_number = base.lens_aperture_f_number + (vol.lens_aperture_f_number - base.lens_aperture_f_number) * t; }
+    if overridden(mask, 89u) { r.lens_focal_length_mm = base.lens_focal_length_mm + (vol.lens_focal_length_mm - base.lens_focal_length_mm) * t; }
+    if overridden(mask, 90u) { r.lens_sensor_width_mm = base.lens_sensor_width_mm + (vol.lens_sensor_width_mm - base.lens_sensor_width_mm) * t; }
+    if overridden(mask, 91u) { r.lens_vignette = base.lens_vignette + (vol.lens_vignette - base.lens_vignette) * t; }
+    if overridden(mask, 92u) { r.lens_starburst_intensity = base.lens_starburst_intensity + (vol.lens_starburst_intensity - base.lens_starburst_intensity) * t; }
+    if overridden(mask, 93u) { r.lens_starburst_length = base.lens_starburst_length + (vol.lens_starburst_length - base.lens_starburst_length) * t; }
+    if overridden(mask, 94u) { r.lens_aperture_blades = select(base.lens_aperture_blades, vol.lens_aperture_blades, t >= 0.5); }
+    if overridden(mask, 95u) { r.lens_aperture_rotation = base.lens_aperture_rotation + (vol.lens_aperture_rotation - base.lens_aperture_rotation) * t; }
+    if overridden(mask, 96u) { r.lens_coating_strength = base.lens_coating_strength + (vol.lens_coating_strength - base.lens_coating_strength) * t; }
+    if overridden(mask, 97u) { r.lens_ghost_rim = base.lens_ghost_rim + (vol.lens_ghost_rim - base.lens_ghost_rim) * t; }
+    if overridden(mask, 98u) { r.lens_dirt_intensity = base.lens_dirt_intensity + (vol.lens_dirt_intensity - base.lens_dirt_intensity) * t; }
+    if overridden(mask, 99u) { r.lens_light_sources = select(base.lens_light_sources, vol.lens_light_sources, t >= 0.5); }
+    if overridden(mask, 100u) { r.lens_light_intensity = base.lens_light_intensity + (vol.lens_light_intensity - base.lens_light_intensity) * t; }
+    if overridden(mask, 101u) { r.lens_field_margin = base.lens_field_margin + (vol.lens_field_margin - base.lens_field_margin) * t; }
+    if overridden(mask, 102u) { r.lens_response_time = base.lens_response_time + (vol.lens_response_time - base.lens_response_time) * t; }
     return r;
 }
+fn volume_weight(pos: vec3<f32>, v: GpuPostProcessVolume) -> f32 {
+    let weight = clamp(v.blend_weight, 0.0, 1.0);
+    if v.unbound != 0u { return weight; }
+    if !all(pos >= v.bounds_min.xyz) || !all(pos <= v.bounds_max.xyz) { return 0.0; }
+    let d = min(pos - v.bounds_min.xyz, v.bounds_max.xyz - pos);
+    let boundary = min(d.x, min(d.y, d.z));
+    if v.blend_radius > 0.0 { return weight * clamp(boundary / v.blend_radius, 0.0, 1.0); }
+    return weight;
+}
 
-@compute @workgroup_size(1, 1, 1)
+// SceneDB rows are indexed by entity, so these arrays span the whole entity
+// range and are mostly empty. 256 threads compact the live rows reading only
+// their small header fields; one thread then blends just the active volumes.
+const RESOLVE_THREADS: u32 = 256u;
+/// Active volumes blended per frame; further rows are ignored (lowest rows win).
+const MAX_ACTIVE_VOLUMES: u32 = 256u;
+var<workgroup> active_rows: array<u32, 256>;
+var<workgroup> active_count: atomic<u32>;
+var<workgroup> camera_row: atomic<u32>;
+
+fn finite_f32(x: f32) -> bool {
+    return (bitcast<u32>(x) & 0x7f800000u) != 0x7f800000u;
+}
+
+@compute @workgroup_size(256)
 fn cs_volume_blend(@builtin(local_invocation_index) lid: u32) {
-    let cam_pos = cameras[0].position_near.xyz;
-    var vol_count: u32 = 0u;
-
-    // Phase 1: evaluate all active volumes, store weight + index
-    for (var i = 0u; i < arrayLength(&pp_volumes); i++) {
-        let v = pp_volumes[i];
-        if v.blend_weight <= 0.0 { continue; }
-
-        if v.unbound == 0u {
-            // Bounded volume — camera must be inside AABB
-            let inside = cam_pos.x >= v.bounds_min.x && cam_pos.x <= v.bounds_max.x
-                      && cam_pos.y >= v.bounds_min.y && cam_pos.y <= v.bounds_max.y
-                      && cam_pos.z >= v.bounds_min.z && cam_pos.z <= v.bounds_max.z;
-            if !inside { continue; }
-
-            let clamped = vec3<f32>(
-                clamp(cam_pos.x, v.bounds_min.x, v.bounds_max.x),
-                clamp(cam_pos.y, v.bounds_min.y, v.bounds_max.y),
-                clamp(cam_pos.z, v.bounds_min.z, v.bounds_max.z),
-            );
-            let dx = cam_pos.x - clamped.x;
-            let dy = cam_pos.y - clamped.y;
-            let dz = cam_pos.z - clamped.z;
-            let dist = sqrt(dx * dx + dy * dy + dz * dz);
-            let blend_dist = max(v.blend_radius, 0.001);
-            let inside_weight = 1.0 - clamp(dist / blend_dist, 0.0, 1.0);
-            if inside_weight <= 0.0 { continue; }
-
-            vol_weights[vol_count] = inside_weight * v.blend_weight;
-        } else {
-            // Unbound volume — always applies at full blend_weight
-            vol_weights[vol_count] = v.blend_weight;
-        }
-        vol_indices[vol_count] = i;
-        vol_count++;
-        if vol_count == MAX_PP_VOLUMES { break; }
+    if lid == 0u {
+        atomicStore(&active_count, 0u);
+        atomicStore(&camera_row, 0xffffffffu);
     }
-
-    if vol_count == 0u {
-        blend_output = spatial_fog_settings(postprocess, 0u);
-        return;
-    }
-
-    // Phase 2: sort active volumes by priority descending (insertion sort)
-    for (var si = 0u; si < vol_count; si++) {
-        for (var sj = si + 1u; sj < vol_count; sj++) {
-            let pri_i = pp_volumes[vol_indices[si]].priority;
-            let pri_j = pp_volumes[vol_indices[sj]].priority;
-            if (pri_j > pri_i) {
-                let tmp_w = vol_weights[si];
-                let tmp_i = vol_indices[si];
-                vol_weights[si] = vol_weights[sj];
-                vol_indices[si] = vol_indices[sj];
-                vol_weights[sj] = tmp_w;
-                vol_indices[sj] = tmp_i;
-            }
+    workgroupBarrier();
+    let view_id = bitcast<u32>(cameras[0].jitter_frame.w);
+    let camera_rows = arrayLength(&camera_postprocess);
+    for (var i = lid; i < camera_rows; i += RESOLVE_THREADS) {
+        if camera_postprocess[i].enabled != 0u && camera_postprocess[i].view_id == view_id {
+            atomicMin(&camera_row, i);
         }
     }
+    let volume_rows = arrayLength(&pp_volumes);
+    for (var i = lid; i < volume_rows; i += RESOLVE_THREADS) {
+        let w = pp_volumes[i].blend_weight;
+        if w > 0.0 && finite_f32(w) && finite_f32(pp_volumes[i].priority) {
+            let slot = atomicAdd(&active_count, 1u);
+            if slot < MAX_ACTIVE_VOLUMES { active_rows[slot] = i; }
+        }
+    }
+    workgroupBarrier();
+    if lid != 0u { return; }
 
-    // Phase 3: hierarchical blend from camera defaults toward each volume
-    var result: GpuPostProcessUniforms = postprocess;
-    var total_weight = 1.0;
-
-    for (var vi = 0u; vi < vol_count; vi++) {
-        let w = vol_weights[vi];
-        let t = clamp(w / (total_weight + w), 0.0, 1.0);
-        result = blend_settings(result, pp_volumes[vol_indices[vi]].settings, t);
-        total_weight += w;
+    var baseline = postprocess;
+    let camera = atomicLoad(&camera_row);
+    if camera != 0xffffffffu { baseline = camera_postprocess[camera].settings; }
+    let count = min(atomicLoad(&active_count), MAX_ACTIVE_VOLUMES);
+    // Stable ascending (priority, row): insertion sort of the compact list.
+    for (var i = 1u; i < count; i++) {
+        let row = active_rows[i];
+        let priority = pp_volumes[row].priority;
+        var j = i;
+        loop {
+            if j == 0u { break; }
+            let other = active_rows[j - 1u];
+            let other_priority = pp_volumes[other].priority;
+            if other_priority < priority || (other_priority == priority && other < row) { break; }
+            active_rows[j] = other;
+            j--;
+        }
+        active_rows[j] = row;
     }
 
-    blend_output = spatial_fog_settings(result, vol_count);
-}
-
-// Screen effects are selected at the camera. Media are evaluated in world
-// space by the fog pass, including volumes seen from outside their bounds.
-fn spatial_fog_settings(screen: GpuPostProcessUniforms, count: u32) -> GpuPostProcessUniforms {
-    var r = screen;
-    var medium = postprocess;
-    // Only unbounded media participate in the global fog settings. Apply in
-    // ascending priority so the highest priority is the final override.
-    for (var n = count; n > 0u; n--) {
-        let v = pp_volumes[vol_indices[n - 1u]];
+    var result = baseline;
+    var medium = baseline;
+    var bounded_range = 0.0;
+    var bounded_fog = false;
+    let position = cameras[0].position_near.xyz;
+    for (var n = 0u; n < count; n++) {
+        let v = pp_volumes[active_rows[n]];
+        let weight = volume_weight(position, v);
+        if weight > 0.0 { result = blend_settings(result, v.settings, weight, v.override_mask); }
         if v.unbound != 0u {
-            medium = blend_settings(medium, v.settings, clamp(v.blend_weight, 0.0, 1.0));
+            medium = blend_settings(medium, v.settings, clamp(v.blend_weight, 0.0, 1.0), v.override_mask);
+        } else if overridden(v.override_mask, 53u) && v.settings.fog_enabled != 0u && v.settings.fog_density > 0.0 {
+            // Bounded media are evaluated in world space by the fog pass, not
+            // at the camera; they only extend the integration range here.
+            bounded_fog = true;
+            bounded_range = max(bounded_range, v.settings.fog_max_distance);
         }
     }
-    r.fog_enabled = medium.fog_enabled;
-    r.fog_density = select(0.0, medium.fog_density, medium.fog_enabled != 0u);
-    r.fog_mode = medium.fog_mode;
-    r.fog_height_falloff = medium.fog_height_falloff;
-    r.fog_start_distance = medium.fog_start_distance;
-    r.fog_height = medium.fog_height;
-    r.fog_scattering_anisotropy = medium.fog_scattering_anisotropy;
-    r.fog_color = medium.fog_color;
-    r.fog_emissive = medium.fog_emissive;
+    result.fog_enabled = medium.fog_enabled;
+    result.fog_mode = medium.fog_mode;
+    result.fog_height_falloff = medium.fog_height_falloff;
+    result.fog_start_distance = medium.fog_start_distance;
+    result.fog_height = medium.fog_height;
+    result.fog_scattering_anisotropy = medium.fog_scattering_anisotropy;
+    result.fog_color = medium.fog_color;
+    result.fog_emissive = medium.fog_emissive;
+    result.fog_density = select(0.0, medium.fog_density, medium.fog_enabled != 0u);
     var range = select(0.0, medium.fog_max_distance, medium.fog_enabled != 0u);
-    for (var i = 0u; i < arrayLength(&pp_volumes); i++) {
-        let v = pp_volumes[i];
-        if v.blend_weight > 0.0 && v.unbound == 0u && v.settings.fog_enabled != 0u && v.settings.fog_density > 0.0 {
-            r.fog_enabled = 1u;
-            range = max(range, v.settings.fog_max_distance);
-        }
+    if bounded_fog {
+        result.fog_enabled = 1u;
+        range = max(range, bounded_range);
     }
-    r.fog_max_distance = max(range, 1.0);
-    return r;
+    result.fog_max_distance = max(range, 1.0);
+    blend_output = result;
 }
 
 // ── cs_exposure: unique workgroup partials, then one final reduction ──────────
@@ -516,6 +567,39 @@ fn cs_exposure_reduce(@builtin(local_invocation_index) lid: u32) {
     }
 }
 
+// ── cs_exposure_adapt: exponential eye adaptation in log2 luminance ──────────
+//
+// Frame-rate independent: the blend toward the metered value uses
+// 1 - exp(-dt / tau), with tau = exposure_speed_up while the scene brightens
+// and exposure_speed_down while it darkens. First valid frame snaps.
+
+@compute @workgroup_size(1)
+fn cs_exposure_adapt() {
+    let measured = avg_luminance[0];
+    if avg_luminance[3] < 0.5 || !(abs(avg_luminance[1]) < 64.0) {
+        avg_luminance[1] = measured;
+        return;
+    }
+    let current = avg_luminance[1];
+    let tau = select(postprocess.exposure_speed_down, postprocess.exposure_speed_up, measured > current);
+    let dt = clamp(avg_luminance[2], 0.0, 1.0);
+    let t = select(1.0 - exp(-dt / tau), 1.0, !(tau > 1e-4));
+    avg_luminance[1] = current + (measured - current) * t;
+}
+
+// Scene-linear exposure multiplier, shared by the image, bloom and lens so a
+// single exposure is applied once. Auto mode targets middle grey (0.18) from
+// the adapted log2 mean, limited to [exposure_min, exposure_max] EV.
+fn exposure_scale() -> f32 {
+    var ev = postprocess.exposure_compensation;
+    if postprocess.exposure_mode == 1u {
+        let auto_ev = clamp(log2(0.18) - avg_luminance[1],
+            postprocess.exposure_min, postprocess.exposure_max);
+        ev += auto_ev * clamp(postprocess.blend_weight_exposure, 0.0, 1.0);
+    }
+    return exp2(ev);
+}
+
 // ── cs_bloom_down_extract: extract brights from HDR → mip 0 ───────────────────
 
 @compute @workgroup_size(8, 8)
@@ -563,25 +647,28 @@ fn cs_bloom_down_extract(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(8, 8)
 fn cs_bloom_down(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dst_dims = textureDimensions(bloom_dst);
-    let ix = i32(gid.x);
-    let iy = i32(gid.y);
-    if ix >= i32(dst_dims.x) || iy >= i32(dst_dims.y) { return; }
-
-    let src_dims = textureDimensions(bloom_src);
-    let sw = i32(src_dims.x);
-    let sh = i32(src_dims.y);
-
-    var color = vec3<f32>(0.0);
-    for (var dy = 0i; dy < 2; dy++) {
-        for (var dx = 0i; dx < 2; dx++) {
-            let sx = ix * 2 + dx;
-            let sy = iy * 2 + dy;
-            if sx < sw && sy < sh {
-                color += textureLoad(bloom_src, vec2<i32>(sx, sy), 0).rgb;
-            }
-        }
-    }
-    textureStore(bloom_dst, vec2<i32>(ix, iy), vec4<f32>(color * 0.25, 0.0));
+    if any(gid.xy >= dst_dims) { return; }
+    // 13-tap downsample (Jimenez, "Next Generation Post Processing in Call of
+    // Duty", SIGGRAPH 2014): overlapping 4x4 box footprints weighted toward the
+    // centre. A plain 2x2 box keeps the source texel grid, so very bright
+    // sources bloom into visible squares at the coarse mips.
+    let texel = 1.0 / vec2<f32>(textureDimensions(bloom_src));
+    let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dst_dims);
+    let a = textureSampleLevel(bloom_src, linear_samp, uv + texel * vec2(-2.0, -2.0), 0.0).rgb;
+    let b = textureSampleLevel(bloom_src, linear_samp, uv + texel * vec2( 0.0, -2.0), 0.0).rgb;
+    let c = textureSampleLevel(bloom_src, linear_samp, uv + texel * vec2( 2.0, -2.0), 0.0).rgb;
+    let d = textureSampleLevel(bloom_src, linear_samp, uv + texel * vec2(-1.0, -1.0), 0.0).rgb;
+    let e = textureSampleLevel(bloom_src, linear_samp, uv + texel * vec2( 1.0, -1.0), 0.0).rgb;
+    let f = textureSampleLevel(bloom_src, linear_samp, uv + texel * vec2(-2.0,  0.0), 0.0).rgb;
+    let g = textureSampleLevel(bloom_src, linear_samp, uv, 0.0).rgb;
+    let h = textureSampleLevel(bloom_src, linear_samp, uv + texel * vec2( 2.0,  0.0), 0.0).rgb;
+    let i = textureSampleLevel(bloom_src, linear_samp, uv + texel * vec2(-1.0,  1.0), 0.0).rgb;
+    let j = textureSampleLevel(bloom_src, linear_samp, uv + texel * vec2( 1.0,  1.0), 0.0).rgb;
+    let k = textureSampleLevel(bloom_src, linear_samp, uv + texel * vec2(-2.0,  2.0), 0.0).rgb;
+    let l = textureSampleLevel(bloom_src, linear_samp, uv + texel * vec2( 0.0,  2.0), 0.0).rgb;
+    let m = textureSampleLevel(bloom_src, linear_samp, uv + texel * vec2( 2.0,  2.0), 0.0).rgb;
+    let color = g * 0.125 + (a + c + k + m) * 0.03125 + (b + f + h + l) * 0.0625 + (d + e + i + j) * 0.125;
+    textureStore(bloom_dst, vec2<i32>(gid.xy), vec4<f32>(color, 0.0));
 }
 
 // ── Tonemapping operators ──────────────────────────────────────────────────────
@@ -827,6 +914,32 @@ fn apply_motion_blur(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f
     return blurred / f32(samples + 1);
 }
 
+// Cubic B-spline reconstruction of a reduced-resolution image in 4 bilinear
+// taps (each tap resolves a 2x2 weighted footprint). Bilinear magnification
+// of bloom mips and the quarter-res lens response shows each source texel
+// as a hard block around very bright sources; the B-spline is C2-smooth and
+// radially near-isotropic, so glows stay round at any upscale factor.
+fn sample_bspline(tex: texture_2d<f32>, uv: vec2<f32>) -> vec3<f32> {
+    let size = vec2<f32>(textureDimensions(tex));
+    let p = uv * size - 0.5;
+    let base = floor(p);
+    let f = p - base;
+    let f2 = f * f;
+    let f3 = f2 * f;
+    let w0 = (1.0 - f) * (1.0 - f) * (1.0 - f) / 6.0;
+    let w1 = (4.0 - 6.0 * f2 + 3.0 * f3) / 6.0;
+    let w2 = (1.0 + 3.0 * f + 3.0 * f2 - 3.0 * f3) / 6.0;
+    let w3 = f3 / 6.0;
+    let s0 = w0 + w1;
+    let s1 = w2 + w3;
+    let t0 = (base - 1.0 + w1 / s0 + 0.5) / size;
+    let t1 = (base + 1.0 + w3 / s1 + 0.5) / size;
+    return textureSampleLevel(tex, linear_samp, vec2(t0.x, t0.y), 0.0).rgb * s0.x * s0.y
+         + textureSampleLevel(tex, linear_samp, vec2(t1.x, t0.y), 0.0).rgb * s1.x * s0.y
+         + textureSampleLevel(tex, linear_samp, vec2(t0.x, t1.y), 0.0).rgb * s0.x * s1.y
+         + textureSampleLevel(tex, linear_samp, vec2(t1.x, t1.y), 0.0).rgb * s1.x * s1.y;
+}
+
 // ── fs_uber ────────────────────────────────────────────────────────────────────
 
 @fragment
@@ -834,55 +947,38 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     let dims = vec2<f32>(textureDimensions(hdr_input));
     let uv = in.uv;
 
+    // hdr_input is scene-linear and already contains participating media:
+    // FogCompositePass applied transmittance and in-scattering at each
+    // surface's depth before transparency and AA, so metering, bloom and lens
+    // extraction below all see scattered light.
     var color = textureSampleLevel(hdr_input, linear_samp, uv, 0.0).rgb;
-
-    // 0. Volumetric fog composite.
-    //
-    // Before exposure and tonemapping, not after: in-scattering is scene-linear
-    // radiance like anything else in hdr_input, so it has to go through the same
-    // exposure and tonemap curve. Composited after the tonemapper it would sit in
-    // display-referred space — unresponsive to exposure, washed out, and invisible
-    // to bloom, so bright shafts could never bloom.
-    //
-    // One trilinear fetch into the froxel grid at this pixel's depth. The filter
-    // runs across x, y *and* depth, which is what makes a 160x90x64 grid resolve
-    // smoothly at any screen resolution — there is no upsample step to alias.
-    //
-    // fog.rgb is already premultiplied by the transmittance in front of it, so this
-    // is a straight over: attenuate the scene, add what scattered in.
-    // Preserve HDR radiance and Beer-Lambert extinction; exposure and tonemapping
-    // below handle bright scattering. Dense smoke may fully obscure the scene.
-    if postprocess.fog_enabled != 0u {
-        let fog_d = textureLoad(depth_input, vec2<i32>(i32(uv.x * dims.x), i32(uv.y * dims.y)), 0);
-        // Slices are planes of constant view depth, so convert the buffer value
-        // rather than using radial distance.
-        let view_depth = helio_view_depth(fog_d, cameras[0].position_near.w, cameras[0].forward_far.w);
-        let slice = clamp(
-            // Integration stores the cumulative value at each slice's far
-            // face, not its centre. Account for texture texel-centre sampling.
-            helio_froxel_slice_from_view_depth(view_depth, postprocess.fog_max_distance)
-                - 0.5 / f32(textureDimensions(fog_input).z),
-            0.0,
-            1.0,
-        );
-        let fog = textureSampleLevel(fog_input, linear_samp, vec3<f32>(uv, slice), 0.0);
-        color = color * clamp(fog.a, 0.0, 1.0) + max(fog.rgb, vec3<f32>(0.0));
-    }
 
     //%P0
 
-    // 1. Exposure
-    color *= exp2(postprocess.exposure_compensation);
+    // 1. Exposure — one scene-linear multiplier for image, bloom and lens.
+    let exposure = exposure_scale();
+    color *= exposure;
 
-    // 2. Bloom composite
+    // 2. Bloom composite. Bloom was extracted from pre-exposure radiance, so it
+    // takes the same exposure as the image it came from.
     if postprocess.bloom_enabled != 0u && postprocess.bloom_intensity > 0.0 {
         var bloom = vec3<f32>(0.0);
-        bloom += textureSampleLevel(bloom_0, linear_samp, uv, 0.0).rgb;
-        bloom += textureSampleLevel(bloom_1, linear_samp, uv, 0.0).rgb;
-        bloom += textureSampleLevel(bloom_2, linear_samp, uv, 0.0).rgb;
-        bloom += textureSampleLevel(bloom_3, linear_samp, uv, 0.0).rgb;
-        bloom += textureSampleLevel(bloom_4, linear_samp, uv, 0.0).rgb;
-        color += bloom;
+        bloom += sample_bspline(bloom_0, uv);
+        bloom += sample_bspline(bloom_1, uv);
+        bloom += sample_bspline(bloom_2, uv);
+        bloom += sample_bspline(bloom_3, uv);
+        bloom += sample_bspline(bloom_4, uv);
+        // Mean over the chain: every mip carries the same extracted energy, so
+        // bloom_intensity is the fraction of it scattered, not five times that.
+        color += bloom * (exposure / 5.0);
+    }
+
+    // 2b. Lens response: optical ghosts/halo/glare/streaks are light the lens
+    // scattered, in the same scene-linear units, so they are exposed like the
+    // image and tone mapped once with it. B-spline upsampled from quarter
+    // resolution so compact glare around small sources stays round.
+    if postprocess.lens_enabled != 0u {
+        color += max(sample_bspline(lens_input, uv), vec3<f32>(0.0)) * exposure;
     }
 
     // 3. Color grading

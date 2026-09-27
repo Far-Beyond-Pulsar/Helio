@@ -35,9 +35,13 @@ fn voussoirs(meshes: &mut [Mesh], radius: f32, spring: f32, front: f32, back: f3
 pub fn camera(t: f32, aspect: f32) -> Camera {
     let angle=0.30+t*0.28;
     let distance=66.0-12.0*t;
-    let mut camera = Camera::perspective_look_at(Vec3::new(angle.sin()*distance,14.0+3.0*t,angle.cos()*distance),
+    let camera = Camera::perspective_look_at(Vec3::new(angle.sin()*distance,14.0+3.0*t,angle.cos()*distance),
         Vec3::new(0.0,24.0,0.0),Vec3::Y,0.85,aspect,0.1,350.0);
-    let settings = &mut camera.postprocess_settings;
+    camera
+}
+
+pub fn populate(world: &mut World) -> (Vec<Entity>,Vec<Entity>) {
+    let mut settings = helio_pass_postprocess::PostProcessSettings::default();
     // The smoke is a SceneDB volume, visible even with global camera fog off.
     settings.fog_enabled = false;
     settings.fog_density = 0.0;
@@ -46,10 +50,7 @@ pub fn camera(t: f32, aspect: f32) -> Camera {
     settings.fog_max_distance = 350.0;
     settings.fog_color = [0.7, 0.8, 1.0];
     settings.fog_scattering_anisotropy = 0.3;
-    camera
-}
-
-pub fn populate(world: &mut World) -> (Vec<Entity>,Vec<Entity>) {
+    set_camera_postprocess(world, 0, &settings);
     let environment = world.spawn();
     let mut atmosphere = helio_pass_sky::SkyComponent::default();
     atmosphere.sun_direction = Vec3::new(0.5, 0.75, 0.4).normalize().to_array();
@@ -197,6 +198,7 @@ pub fn populate(world: &mut World) -> (Vec<Entity>,Vec<Entity>) {
                     fog_color: [0.09, 0.095, 0.11],
                     ..PostProcessSettings::default()
                 },
+                ..Default::default()
             }
             .to_gpu(),
         ),

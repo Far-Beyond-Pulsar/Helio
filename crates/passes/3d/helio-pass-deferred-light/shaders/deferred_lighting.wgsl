@@ -451,12 +451,15 @@ fn sample_cascade_shadow_pcss(
 
 fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord: vec2<f32>, frame: u32) -> f32 {
     if !ENABLE_SHADOWS { return 1.0; }
-    if light_idx >= MAX_SHADOW_LIGHTS { return 1.0; }
+    // MAX_SHADOW_LIGHTS bounds the atlas caster slot (shadow_index / 6), not
+    // the light's row. SceneDB rows are entity indices, so a row bound silently
+    // dropped shadows for every light spawned after the 42nd entity.
 
     let light = lights[light_idx];
 
     // Check if this light actually casts shadows (shadow_index != u32::MAX)
     if light.shadow_index == 4294967295u { return 1.0; }
+    if light.shadow_index / 6u >= MAX_SHADOW_LIGHTS { return 1.0; }
 
     // Normal-offset: shift the world-space query point along the surface normal
     // toward the light before projecting.  This eliminates self-shadowing caused
