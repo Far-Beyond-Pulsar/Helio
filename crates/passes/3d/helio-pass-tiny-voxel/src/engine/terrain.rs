@@ -665,7 +665,7 @@ impl StoredTerrain {
                 [self.size[0].div_ceil(8), self.size[1].div_ceil(8), 1]);
         }
         #[cfg(feature = "surface-cache-experiment")]
-        self.patch.encode_primary(&self.device, &self.uniform, &self.hits, encoder, self.size);
+        self.patch.encode_primary(&self.device, &self.uniform, &self.hits, encoder, self.size, self.profiler.as_mut());
         self.compute(
             encoder,
             trace,

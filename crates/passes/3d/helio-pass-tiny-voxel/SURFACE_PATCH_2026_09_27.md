@@ -1,5 +1,10 @@
 # Bounded surface patch integration: correctness baseline, rejected speed claim
 
+This records the published `b935dee1` baseline. The later
+[exact skipping checkpoint](SURFACE_SKIP_2026_09_27.md) removes redundant
+predicate work and measures a revised single-pass traversal. Keep the negative
+measurements below as the baseline; they do not describe that later variant.
+
 The exact cache now runs through the actual terrain/GBuffer/lighting graph,
 behind `voxel-surface-cache` in the flight example and
 `surface-cache-experiment` in the backend. Normal engine configuration remains

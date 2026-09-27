@@ -1692,6 +1692,7 @@ dependencies = [
  "image",
  "pollster 0.4.0",
  "pulsar_scenedb",
+ "serde_json",
  "wgpu",
 ]
 

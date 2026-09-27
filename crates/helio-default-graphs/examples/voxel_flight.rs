@@ -18,6 +18,9 @@
 //! HELIO_VOXEL_FLIGHT_SUN_WORK=1 separately replays sunlight rays and saves
 //! exhausted rays plus traversal maxima; use with SUN=1 outside timing runs.
 //! HELIO_VOXEL_FLIGHT_BASE_METRES overrides the initial authored grid (0.1..1).
+//! HELIO_VOXEL_CACHE_BENCH=cave-close benchmarks a settled reference fixture
+//! through the ordinary graph at the requested resolution. RECORD captures the
+//! motion sequence in a separate visual run; keep it unset for timings.
 #[path = "voxel_flight/profiling.rs"]
 mod profiling;
 #[path = "voxel_flight/canonical.rs"]
@@ -26,6 +29,8 @@ mod canonical;
 mod surface_reference;
 #[path = "voxel_flight/cache_audit.rs"]
 mod cache_audit;
+#[path = "voxel_flight/cache_bench.rs"]
+mod cache_bench;
 use glam::{DVec3, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
@@ -460,9 +465,13 @@ impl Flight {
             visibility.save(&self.device, path);
         }
         let mut counts = [0usize; 4];
+        let mut cached = 0usize;
         for hit in hit_data.chunks_exact(32) {
-            counts[(u32::from_le_bytes(hit[12..16].try_into().unwrap()) & 3) as usize] += 1;
+            let status = u32::from_le_bytes(hit[12..16].try_into().unwrap());
+            counts[(status & 3) as usize] += 1;
+            cached += usize::from(status & 0x08000003 == 0x08000001);
         }
+        eprintln!("VOXEL_FLIGHT_PRIMARY capture={} cached={cached} samples={}", path.display(), hit_data.len()/32);
         fs::write(
             path.with_extension("hits.csv"),
             format!(
@@ -522,6 +531,10 @@ fn main() {
     let mut flight = pollster::block_on(Flight::new(output, size, quality));
     if let Ok(samples) = std::env::var("HELIO_VOXEL_SURFACE_REFERENCE") {
         surface_reference::run(&mut flight, output, samples.parse().expect("reference sample grid"));
+        return;
+    }
+    if let Ok(case) = std::env::var("HELIO_VOXEL_CACHE_BENCH") {
+        cache_bench::run(&mut flight, output, &case);
         return;
     }
     let record = std::env::var_os("HELIO_VOXEL_FLIGHT_RECORD").is_some();

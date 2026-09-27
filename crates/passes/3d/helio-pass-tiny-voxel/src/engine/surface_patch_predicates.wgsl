@@ -88,6 +88,7 @@ fn patch_compare(a:vec2<f32>,da:f32,b:vec2<f32>,db:f32)->i32 {
     let ba=bitcast<u32>(da)&0x7fffffffu;let bb=bitcast<u32>(db)&0x7fffffffu;
     if ba==0u {return select(1,0,bb==0u);}
     if bb==0u {return -1;}
+    if ba==bb && all(bitcast<vec2<u32>>(a)==bitcast<vec2<u32>>(b)) {return 0;}
     // A generous band encloses rounding of the two sums and products. Very
     // small/subnormal directions go straight to the integer predicate.
     if da>1e-18 && db>1e-18 {

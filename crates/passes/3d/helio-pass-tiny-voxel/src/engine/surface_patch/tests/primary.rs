@@ -24,7 +24,7 @@ fn oracle(
         if ray[a] == 0.0 {
             continue;
         }
-        for plane in 0..=32 {
+        for plane in 0..=64 {
             let t =
                 (f64::from(plane * step - origin[a]) - f64::from(fraction[a])) / f64::from(ray[a]);
             if t >= 0.0 {
@@ -132,9 +132,26 @@ fn predicate_probe() {
         let brick = Brick::from_samples(material);
         queue.write_buffer(&patch.words, 0, bytemuck::cast_slice(brick.words()));
         queue.write_buffer(&patch.directory, 0, bytemuck::bytes_of(&0u32));
+        // The next Z page is certified entirely empty. Start in either page
+        // so the same independent oracle covers both 4-cell and 32-cell skips.
+        let empty_base = brick.words().len() as u32;
+        queue.write_buffer(
+            &patch.words,
+            u64::from(empty_base) * 4,
+            bytemuck::bytes_of(&0u32),
+        );
+        queue.write_buffer(
+            &patch.directory,
+            (SIDE * SIDE * 4) as u64,
+            bytemuck::bytes_of(&empty_base),
+        );
         let mut checked = 0;
         let mut hits_checked = 0;
-        for step in [1i32, 3, 10] {
+        for (disable_skip, step, start_z) in [0u32, 1].into_iter().flat_map(|skip| {
+            [1i32, 3, 10]
+                .into_iter()
+                .flat_map(move |step| [28, 60].map(|z| (skip, step, z)))
+        }) {
             for key in [Key([-3, 1_991_171, -7]), Key([3, -1_991_171, 7])] {
                 let low = key.low(step as u32);
                 queue.write_buffer(
@@ -147,12 +164,12 @@ fn predicate_probe() {
                         8u32,
                         step as u32,
                         0,
-                        0,
+                        disable_skip,
                         0,
                     ]),
                 );
                 for fraction in [[0.0; 3], [0.25, 0.999990, 0.0], [0.5, 0.125, 0.99999994]] {
-                    let origin = [16 * step, 14 * step, 28 * step];
+                    let origin = [16 * step, 14 * step, start_z * step];
                     let mut rays = Vec::<[f32; 3]>::new();
                     for y in (0..=32).step_by(4) {
                         for x in (0..=32).step_by(4) {
@@ -223,6 +240,7 @@ fn predicate_probe() {
                         &hits,
                         &mut encoder,
                         [rays.len() as u32, 1],
+                        None,
                     );
                     encoder.copy_buffer_to_buffer(&hits, 0, &read, 0, hits.size());
                     queue.submit([encoder.finish()]);

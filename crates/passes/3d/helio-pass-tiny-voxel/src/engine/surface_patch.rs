@@ -23,6 +23,7 @@ mod tests;
 #[derive(Clone, Copy, Default, Debug, serde::Serialize)]
 pub struct Stats {
     pub enabled: bool,
+    pub skip_empty: bool,
     pub revision: u64,
     pub low: [i32; 3],
     pub ready: usize,
@@ -49,6 +50,7 @@ struct Completed {
 
 pub(super) struct Patch {
     primary: wgpu::ComputePipeline,
+    skip_empty: bool,
     pub settings: wgpu::Buffer,
     pub directory: wgpu::Buffer,
     pub words: wgpu::Buffer,
@@ -159,6 +161,7 @@ impl Patch {
             .unwrap();
         Self {
             primary,
+            skip_empty: std::env::var_os("HELIO_VOXEL_SURFACE_CACHE_SKIP_OFF").is_none(),
             settings: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("surface patch domain"),
                 contents: bytemuck::cast_slice(&[0u32; 8]),
@@ -182,6 +185,7 @@ impl Patch {
             low: Key([0; 3]),
             stats: Stats {
                 enabled: std::env::var_os("HELIO_VOXEL_SURFACE_CACHE_OFF").is_none(),
+                skip_empty: std::env::var_os("HELIO_VOXEL_SURFACE_CACHE_SKIP_OFF").is_none(),
                 ..Default::default()
             },
         }
@@ -198,6 +202,7 @@ impl Patch {
         hits: &wgpu::Buffer,
         encoder: &mut wgpu::CommandEncoder,
         size: [u32; 2],
+        mut profiler: Option<&mut helio_core::profiling::GpuProfiler>,
     ) {
         if !self.stats.enabled {
             return;
@@ -217,10 +222,17 @@ impl Patch {
                 resource: b.as_entire_binding(),
             }),
         });
+        if let Some(profiler) = profiler.as_deref_mut() {
+            profiler.begin_pass(encoder, "voxel_cache_precise");
+        }
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&self.primary);
         pass.set_bind_group(0, &group, &[]);
         pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
+        drop(pass);
+        if let Some(profiler) = profiler {
+            profiler.end_pass(encoder, "voxel_cache_precise");
+        }
     }
 
     pub fn update(&mut self, queue: &wgpu::Queue, world: &Arc<World>, params: &Params) {
@@ -262,6 +274,7 @@ impl Patch {
             self.world = Some(world.clone());
             self.stats = Stats {
                 enabled: true,
+                skip_empty: self.skip_empty,
                 revision,
                 low: self.low.0,
                 requested: TILES,
@@ -277,7 +290,7 @@ impl Patch {
                 SIDE as u32,
                 world.voxel_step(),
                 0,
-                0,
+                u32::from(!self.skip_empty),
                 0,
             ];
             queue.write_buffer(&self.settings, 0, bytemuck::cast_slice(&settings));

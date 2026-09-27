@@ -77,8 +77,17 @@ rejects unoccluded face-area mixtures as a filtered appearance solution.
 The [bounded patch integration](SURFACE_PATCH_2026_09_27.md) now runs through the
 actual GBuffer and lighting graph, with bounded revision-safe uploads. The
 three-grid captures and adversarial ray tests expose and correct near-edge
-precision errors. The precise path is slower in the decisive 10/30 cm cases,
-so it remains an opt-in correctness baseline, not an adopted optimization.
-Separate compact traversal from rare precise repair and measure its cost next.
+precision errors. That published precise path is slower in the decisive
+10/30 cm cases. The [exact skipping checkpoint](SURFACE_SKIP_2026_09_27.md)
+removes redundant precision work and crosses certified empty microbricks/tiles
+without changing hit ownership. A split traversal/repair queue was slower than
+the improved single precise pass and has been removed. Repeated 720p cave
+controls and a 720p natural-ground control still favor the canonical renderer
+over the cache; the improved cache remains an opt-in correctness baseline.
+All 4.64 million three-grid reference samples match the published precise
+captures, and a 180-frame local motion recording passes hit/sunlight validity
+checks. Distant face stippling remains visible. The next architecture step
+must address visible appearance and duplicated traversal/residency costs,
+rather than infer planetary performance from a faster cache dispatch.
 Visibility-aware far data, global scheduling, continuous motion, physical
 memory and full-engine gates remain open. The planetary goal is still active.

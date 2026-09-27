@@ -1,4 +1,4 @@
-struct PatchSettings { low:vec3<i32>, side:u32, step:u32, pad0:u32,pad1:u32,pad2:u32 }
+struct PatchSettings { low:vec3<i32>, side:u32, step:u32, pad0:u32,disable_skip:u32,pad2:u32 }
 @group(0) @binding(31) var<uniform> patch_settings:PatchSettings;
 @group(0) @binding(32) var<storage,read> patch_directory:array<u32>;
 @group(0) @binding(33) var<storage,read> surface_words:array<u32>;
