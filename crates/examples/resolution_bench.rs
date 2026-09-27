@@ -35,6 +35,8 @@
 //! `--movability static|movable|mixed` re-tags objects so shadow casters land
 //! in the static atlas (default), the dynamic one, or both.
 //!
+//! `--water` adds a water pool (surface, simulation and caustics).
+//!
 //! `--dof` enables depth of field through the camera's post-process settings.
 //!
 //! `--billboards` places a billboard (editor light icon) over every point light.
@@ -98,6 +100,7 @@ struct Args {
     billboards: bool,
     movability: String,
     dof: bool,
+    water: bool,
 }
 
 fn parse_args() -> Args {
@@ -117,6 +120,7 @@ fn parse_args() -> Args {
         billboards: false,
         movability: "static".into(),
         dof: false,
+        water: false,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -129,6 +133,7 @@ fn parse_args() -> Args {
             "--pulsar-columns" => Some(&mut args.pulsar_columns),
             "--billboards" => Some(&mut args.billboards),
             "--dof" => Some(&mut args.dof),
+            "--water" => Some(&mut args.water),
             _ => None,
         };
         if let Some(switch) = switch {
@@ -391,8 +396,12 @@ fn run(
     let build_start = Instant::now();
     // Pulsar-Native's editor registers these columns up front (see
     // engine_backend's helio_bridge), so their buffers exist while empty.
-    let (pulsar_columns, billboards) = (args.pulsar_columns, args.billboards);
+    let (pulsar_columns, billboards, water) = (args.pulsar_columns, args.billboards, args.water);
     let mut scene_db: SceneDb = new_scene_db_with_gpu_mirror_and(device, queue, |store| {
+        if water && !pulsar_columns {
+            helio_pass_water_sim::WaterVolumeComponent::register_gpu_columns_growable(store, 64, device);
+            helio_pass_water_sim::WaterHitboxComponent::register_gpu_columns_growable(store, 256, device);
+        }
         if billboards && !pulsar_columns {
             helio_pass_billboard::BillboardComponent::register_gpu_columns_growable(store, 1024, device);
         }
@@ -414,6 +423,20 @@ fn run(
         spawn_light_billboards(&mut scene_db.world);
     }
     apply_movability(&mut scene_db.world, &args.movability);
+    if args.water {
+        // A pool in front of the camera, surface just above the floor, with
+        // caustics, so the simulation, surface and caustics all contribute.
+        spawn_water_volume(
+            &mut scene_db.world,
+            WaterVolumeDescriptor {
+                bounds_min: [-6.0, -1.0, -8.0],
+                bounds_max: [6.0, 0.3, 6.0],
+                surface_height: 0.3,
+                caustics_enabled: true,
+                ..Default::default()
+            },
+        );
+    }
     if args.dof {
         // Camera-baseline post-process settings with depth of field on,
         // focused a few metres out so near and far both blur.
