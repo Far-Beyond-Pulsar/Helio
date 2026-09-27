@@ -17,6 +17,7 @@
 //! rays on the authored grid. This is a fidelity diagnostic, not a timing run.
 //! HELIO_VOXEL_FLIGHT_SUN_WORK=1 separately replays sunlight rays and saves
 //! exhausted rays plus traversal maxima; use with SUN=1 outside timing runs.
+//! HELIO_VOXEL_FLIGHT_BASE_METRES overrides the initial authored grid (0.1..1).
 #[path = "voxel_flight/profiling.rs"]
 mod profiling;
 #[path = "voxel_flight/canonical.rs"]
@@ -141,6 +142,11 @@ impl Flight {
             );
         renderer.set_fallback_sky_enabled(true);
         let target = Self::target(&device, size);
+        let mut world = World::default();
+        if let Ok(size) = std::env::var("HELIO_VOXEL_FLIGHT_BASE_METRES") {
+            world.set_voxel_size(size.parse().expect("authored voxel size in metres"))
+                .expect("supported authored voxel size");
+        }
         let mut csv = fs::File::create(output.join("frames.csv")).unwrap();
         writeln!(csv, "frame,stage,x,y,z,sync_frame_ms,ready,refining,planning,pending,generated,reused,bricks,pixel_budget,cpu_submit_ms,gpu_wait_ms,start_unix_ns,regional_publications,nodes,fallback_regions").unwrap();
         Self {
@@ -148,7 +154,7 @@ impl Flight {
             queue,
             renderer,
             source,
-            world: Arc::new(World::default()),
+            world: Arc::new(world),
             target,
             size,
             frame: 0,
