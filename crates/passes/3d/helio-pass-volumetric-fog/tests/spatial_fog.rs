@@ -133,7 +133,7 @@ fn scenedb_local_fog_is_visible_from_outside_and_tracks_edits_and_removal() {
         let no_camera_rows = buffer(&device, &[0; 608], wgpu::BufferUsages::STORAGE);
         let lights = buffer(&device, &[0; 128], wgpu::BufferUsages::STORAGE);
         let indices = buffer(&device, &[0; 1920], wgpu::BufferUsages::STORAGE);
-        let indirect = buffer(&device, &[0; 36], wgpu::BufferUsages::STORAGE);
+        let indirect = buffer(&device, &[0; 40], wgpu::BufferUsages::STORAGE);
         let global_media = buffer(&device, &[0; 64], wgpu::BufferUsages::STORAGE);
         let local_media = buffer(&device, &[0; 112], wgpu::BufferUsages::STORAGE);
         let output = buffer(
