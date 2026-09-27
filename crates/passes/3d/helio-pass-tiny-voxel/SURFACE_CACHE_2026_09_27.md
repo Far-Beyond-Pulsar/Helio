@@ -5,6 +5,11 @@ renderer. `surface-cache-experiment` exposes it for experiments; normal engine
 configuration does not use it. The canonical `World`, generic component,
 registered backend and source revision contracts remain authoritative.
 
+This document records the initial storage experiment. The later
+[bounded patch integration](SURFACE_PATCH_2026_09_27.md) connects it to rendering,
+tests revision-safe GPU publication and reports a **negative** overall speed
+result. Its precise traversal is an opt-in correctness baseline.
+
 ## Representation and source construction
 
 A tile contains 32 cubed **authored** cells: 3.2 m at the default 10 cm grid,

@@ -19,6 +19,8 @@ pub struct TerrainMemoryStats {
 
 /// The sole engine terrain backend: budgeted brick production and stored rays.
 pub struct StoredTerrain {
+    #[cfg(feature = "surface-cache-experiment")]
+    pub(super) patch: super::surface_patch::Patch,
     #[cfg(feature = "canonical-far-experiment")]
     canonical: super::canonical::Source,
     pub(crate) device: wgpu::Device,
@@ -132,6 +134,15 @@ impl StoredTerrain {
                         include_str!("canonical_far.wgsl"),
                     ));
                 }
+                #[cfg(feature = "surface-cache-experiment")]
+                {
+                    // The compact cache pass completes known hits first. The
+                    // canonical shader handles unresolved rays without cache
+                    // lookups or extra traversal state in its inner loops.
+                    const HOOK: &str = "let index=id.x+id.y*u32(p.screen.x);\n    var rd=";
+                    assert_eq!(source.matches(HOOK).count(), 1, "cache primary hook drifted");
+                    source = source.replace(HOOK, "let index=id.x+id.y*u32(p.screen.x);\n    if (primary_hits[index].status&0x08000000u)!=0u {return;}\n    var rd=");
+                }
                 source.into()
             }),
         });
@@ -241,6 +252,8 @@ impl StoredTerrain {
             / (residency::BRICK_WORDS * 4))
             .min(residency::BRICK_CAPACITY);
         Self {
+            #[cfg(feature = "surface-cache-experiment")]
+            patch: super::surface_patch::Patch::new(device),
             device: device.clone(),
             #[cfg(feature = "canonical-far-experiment")]
             canonical: super::canonical::Source::new(device),
@@ -349,6 +362,11 @@ impl StoredTerrain {
         #[cfg(feature = "canonical-far-experiment")]
         let buffers_bytes =
             buffers_bytes + self.canonical.edits.size() + self.canonical.settings.size();
+        #[cfg(feature = "surface-cache-experiment")]
+        let buffers_bytes = buffers_bytes
+            + self.patch.settings.size()
+            + self.patch.directory.size()
+            + self.patch.words.size();
         TerrainMemoryStats {
             buffers_bytes,
             textures_bytes: u64::from(self.size[0]) * u64::from(self.size[1]) * 8 + 16,
@@ -605,6 +623,8 @@ impl StoredTerrain {
         #[cfg(feature = "canonical-far-experiment")]
         if let Some(world) = self.residency.active_world() {
             self.canonical.publish(&self.queue, world);
+            #[cfg(feature = "surface-cache-experiment")]
+            self.patch.update(&self.queue, world, params);
         }
         p.settings[3] = self.residency.active_voxel_step() as f32;
         p.settings[2] = if self.residency.stats.ready { 1.0 } else { 0.0 };
@@ -644,6 +664,8 @@ impl StoredTerrain {
             self.compute(encoder, &self.prepare_rays, &[group, cameras],
                 [self.size[0].div_ceil(8), self.size[1].div_ceil(8), 1]);
         }
+        #[cfg(feature = "surface-cache-experiment")]
+        self.patch.encode_primary(&self.device, &self.uniform, &self.hits, encoder, self.size);
         self.compute(
             encoder,
             trace,

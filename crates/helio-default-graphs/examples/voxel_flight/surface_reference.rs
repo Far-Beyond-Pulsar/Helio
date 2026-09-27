@@ -236,6 +236,7 @@ struct Pixel {
     face_rgb: [[f64; 3]; 6],
     materials: [u32; 24],
     solid: u32,
+    cached: u32,
     depth: [f64; 2],
     sun: f64,
 }
@@ -249,6 +250,7 @@ impl Default for Pixel {
             face_rgb: [[0.0; 3]; 6],
             materials: [0; 24],
             solid: 0,
+            cached: 0,
             depth: [f64::INFINITY, f64::NEG_INFINITY],
             sun: 0.0,
         }
@@ -261,6 +263,7 @@ fn accumulate(pixels: &mut [Pixel], frame: &Frame) {
         let lit = &frame.lighting[i * 48..(i + 1) * 48];
         let hit = &frame.hits[i * 32..(i + 1) * 32];
         let status = word(hit, 3);
+        p.cached += u32::from(status & 0x08000000 != 0);
         assert!(
             (status & 3) <= 1,
             "invalid primary reference hit at pixel {i}: {status}"
@@ -405,6 +408,7 @@ fn save(output: &Path, name: &str, pixels: &[Pixel], center: &Frame, size: [u32;
     preview(&output.join(format!("{name}.mean.png")), &mean, size);
     preview(&output.join(format!("{name}.center.png")), &central, size);
     eprintln!("VOXEL_SURFACE_REFERENCE name={name} samples={samples} mixed_face_pixels={mixed} partial_coverage_pixels={partial} center_vs_mean_linear_rmse={:.9}",(mse/(pixels.len()*3) as f64).sqrt());
+    eprintln!("VOXEL_SURFACE_CACHE_USE name={name} cached_primary_samples={} total_primary_samples={}",pixels.iter().map(|p|u64::from(p.cached)).sum::<u64>(),pixels.len() as u64*u64::from(samples));
 }
 
 fn edited(world: &World, edits: &[(DVec3, f32, u32)]) -> World {
@@ -421,17 +425,8 @@ fn edited(world: &World, edits: &[(DVec3, f32, u32)]) -> World {
     result
 }
 
-pub fn run(flight: &mut Flight, output: &Path, grid: u32) {
-    assert!(grid.is_power_of_two() && (2..=16).contains(&grid));
-    assert!(
-        u64::from(flight.size[0]) * u64::from(flight.size[1]) <= 65536,
-        "use reference crops, at most 65536 pixels"
-    );
-    flight.renderer.set_jitter_enabled(false);
-    flight.renderer.set_camera_jitter_override(Some([0.0, 0.0]));
-    flight.renderer.set_frame_delta_override(Some(1.0 / 60.0));
-    let ground = flight.world.ground_spawn(0.0, 0.0, 3.0);
-    let initial = (*flight.world).clone();
+pub(super) fn cases(initial: World) -> [(&'static str, World, DVec3, Vec3); 8] {
+    let ground = initial.ground_spawn(0.0, 0.0, 3.0);
     let cave = ground + DVec3::new(0.0, 0.0, -12.0);
     let cave_world = edited(
         &initial,
@@ -446,7 +441,7 @@ pub fn run(flight: &mut Flight, output: &Path, grid: u32) {
         ],
     );
     let destroyed = edited(&thin, &[(shell + DVec3::Z * 2.8, 1.2, 0)]);
-    let cases = [
+    [
         (
             "slope",
             initial.clone(),
@@ -480,7 +475,19 @@ pub fn run(flight: &mut Flight, output: &Path, grid: u32) {
             shell + DVec3::Z * 5.0,
             -Vec3::Z,
         ),
-    ];
+    ]
+}
+
+pub fn run(flight: &mut Flight, output: &Path, grid: u32) {
+    assert!(grid.is_power_of_two() && (2..=16).contains(&grid));
+    assert!(
+        u64::from(flight.size[0]) * u64::from(flight.size[1]) <= 65536,
+        "use reference crops, at most 65536 pixels"
+    );
+    flight.renderer.set_jitter_enabled(false);
+    flight.renderer.set_camera_jitter_override(Some([0.0, 0.0]));
+    flight.renderer.set_frame_delta_override(Some(1.0 / 60.0));
+    let cases = cases((*flight.world).clone());
     let selected = std::env::var("HELIO_VOXEL_REFERENCE_CASES").ok();
     let cases: Vec<_> = cases
         .into_iter()
@@ -507,6 +514,13 @@ pub fn run(flight: &mut Flight, output: &Path, grid: u32) {
                 let name = format!("{case}-light{light}-move{movement}");
                 flight.renderer.set_camera_jitter_override(Some([0.0, 0.0]));
                 flight.settle("ground_load", eye, forward);
+                #[cfg(feature = "voxel-surface-cache")]
+                {
+                    let stats=flight.renderer.find_pass::<LazyEngineVoxelPass>().unwrap().surface_patch_stats().unwrap();
+                    eprintln!("VOXEL_SURFACE_PATCH name={name} stats={stats:?}");
+                    assert_eq!(stats.ready,stats.requested);
+                    assert_eq!(stats.ready>0,stats.enabled);
+                }
                 flight.draw("reference", eye, forward);
                 let center = capture(flight);
                 flight.draw("reference", eye, forward);

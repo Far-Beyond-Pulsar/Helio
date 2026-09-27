@@ -63,9 +63,9 @@ The [surface reference checkpoint](SURFACE_REFERENCE_2026_09_27.md) supplies
 The sampled CPU audits pass, and center rays/lighting match between sampling
 runs after separating reference ray preparation. Filtering separately lit
 samples reduces slope stippling while resolved shell edges remain visible.
-Sampling error still warrants measurement; no compact surface cache has yet
-been tested against these references. Implement and measure that local
-representation next, before returning to global residency scheduling.
+Sampling error still warrants measurement. The subsequent local cache and
+integrated patch experiments below use these references before returning to
+global residency scheduling.
 
 The [exact local cache experiment](SURFACE_CACHE_2026_09_27.md) now supplies
 compact authored-cell bricks, halo-aware edit invalidation, bounded logical
@@ -74,6 +74,11 @@ residency and a GPU decoder/traverser. It passes 294,912 material checks and
 storage-grid construction at 1 m. Small warm GPU probes favor empty-microbrick
 skipping, but do not qualify frame performance. An overlapping-wall fixture
 rejects unoccluded face-area mixtures as a filtered appearance solution.
-The cache is experimental and not wired into the planetary graph; compare an
-integrated patch renderer against the retained lit references next. Visibility,
-global scheduling, motion, physical memory and full-engine gates remain open.
+The [bounded patch integration](SURFACE_PATCH_2026_09_27.md) now runs through the
+actual GBuffer and lighting graph, with bounded revision-safe uploads. The
+three-grid captures and adversarial ray tests expose and correct near-edge
+precision errors. The precise path is slower in the decisive 10/30 cm cases,
+so it remains an opt-in correctness baseline, not an adopted optimization.
+Separate compact traversal from rare precise repair and measure its cost next.
+Visibility-aware far data, global scheduling, continuous motion, physical
+memory and full-engine gates remain open. The planetary goal is still active.

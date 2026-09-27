@@ -24,6 +24,8 @@ mod profiling;
 mod canonical;
 #[path = "voxel_flight/surface_reference.rs"]
 mod surface_reference;
+#[path = "voxel_flight/cache_audit.rs"]
+mod cache_audit;
 use glam::{DVec3, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
@@ -501,6 +503,11 @@ impl Flight {
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--audit-cache") {
+        assert_eq!(args.len(), 5, "--audit-cache CONTROL CANDIDATE OUTPUT");
+        cache_audit::run(Path::new(&args[2]), Path::new(&args[3]), Path::new(&args[4]));
+        return;
+    }
     let output = Path::new(args.get(1).expect("OUTPUT directory required"));
     fs::create_dir_all(output).unwrap();
     let size = [

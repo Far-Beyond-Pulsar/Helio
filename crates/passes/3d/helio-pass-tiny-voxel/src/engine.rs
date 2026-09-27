@@ -5,8 +5,12 @@ use std::sync::{Arc, Mutex};
 #[cfg(feature = "canonical-far-experiment")]
 mod canonical;
 mod residency;
+#[cfg(feature = "surface-cache-experiment")]
+mod surface_patch;
 mod terrain;
 pub use terrain::TerrainMemoryStats;
+#[cfg(feature = "surface-cache-experiment")]
+pub use surface_patch::Stats as SurfacePatchStats;
 
 pub const GBUFFER_FORMATS: [wgpu::TextureFormat; 8] = [
     wgpu::TextureFormat::Rgba8Unorm,
@@ -93,6 +97,11 @@ impl LazyEngineVoxelPass {
 
     pub fn memory_stats(&self) -> Option<TerrainMemoryStats> {
         Some(self.active.as_ref()?.terrain.memory_stats())
+    }
+
+    #[cfg(feature = "surface-cache-experiment")]
+    pub fn surface_patch_stats(&self) -> Option<SurfacePatchStats> {
+        Some(self.active.as_ref()?.terrain.patch.stats())
     }
 
     /// Optional capture-time diagnostic; never writes visible terrain hits.
@@ -273,7 +282,11 @@ impl EngineVoxelPass {
 
     pub fn needs_frame(&self) -> bool {
         let stats = self.terrain.stats();
-        !stats.ready || stats.refining || stats.planning || stats.pending > 0
+        let pending = !stats.ready || stats.refining || stats.planning || stats.pending > 0;
+        #[cfg(feature = "surface-cache-experiment")]
+        { let patch=self.terrain.patch.stats(); return pending || patch.ready<patch.requested; }
+        #[cfg(not(feature = "surface-cache-experiment"))]
+        pending
     }
     pub fn set_stage_profiling(&mut self, enabled: bool) {
         self.terrain.set_stage_profiling(enabled);

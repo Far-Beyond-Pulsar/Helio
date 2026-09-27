@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 [features]
 # Offline image references must trace the canonical authored occupancy.
 voxel-reference = ["helio-pass-tiny-voxel/surface-reference"]
+voxel-surface-cache = ["voxel-reference", "helio-pass-tiny-voxel/surface-cache-experiment"]
 
 [dependencies]
 helio = { path = "../helio" }
