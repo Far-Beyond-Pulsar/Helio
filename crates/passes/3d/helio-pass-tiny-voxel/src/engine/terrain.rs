@@ -1,5 +1,5 @@
 use super::{
-    residency::{self, Residency},
+    residency::{self, pipeline::Pipeline},
     DepthConvention, GBufferTargets, GBUFFER_FORMATS,
 };
 use crate::{GpuEdit, Params, World, SHADER};
@@ -28,7 +28,7 @@ pub struct StoredTerrain {
     pub size: [u32; 2],
     world: Arc<World>,
     generation_world: Option<Arc<World>>,
-    residency: Residency,
+    residency: Pipeline,
     nodes: wgpu::Buffer,
     materials: wgpu::Buffer,
     exact_occupied: wgpu::Buffer,
@@ -262,7 +262,7 @@ impl StoredTerrain {
             world: Arc::new(World::default()),
             generation_world: None,
             exact_occupied: buffer(device, "exact voxel brick occupancy", capacity as u64 * 4),
-            residency: Residency::new(capacity),
+            residency: Pipeline::new(capacity),
             nodes: buffer(
                 device,
                 "resident voxel tree",
@@ -316,14 +316,13 @@ impl StoredTerrain {
             profiler: None,
         }
     }
-    fn upload_nodes(&self, nodes: &[residency::Node]) {
-        let root = &nodes[0];
-        let mut links = Vec::with_capacity(nodes.len() + 4);
-        links.extend(root.low.map(|v| v as u32));
-        links.push(root.level);
-        links.extend(nodes.iter().map(|n| n.child));
+    fn upload_links(&self, links: &[u32]) {
         self.queue
-            .write_buffer(&self.nodes, 0, bytemuck::cast_slice(&links));
+            .write_buffer(&self.nodes, 0, bytemuck::cast_slice(links));
+    }
+    #[cfg(test)]
+    fn upload_nodes(&self, nodes: &[residency::Node]) {
+        self.upload_links(&residency::pipeline::pack(nodes));
     }
     pub fn upload_edits(&mut self, world: &World) {
         self.world = Arc::new(world.clone());
@@ -534,90 +533,92 @@ impl StoredTerrain {
         sunlight: bool,
     ) {
         self.resize(params.screen[0] as u32, params.screen[1] as u32);
-        self.residency.update(&self.world, params);
-        if let Some((jobs, references, world)) = self.residency.next_batch() {
-            if !jobs.is_empty() {
-                if self
-                    .generation_world
-                    .as_ref()
-                    .is_none_or(|w| !Arc::ptr_eq(w, &world))
-                {
-                    let common = self.generation_world.as_ref().map_or(0, |old| {
-                        old.edits
+        if let Some(mut prepared) = self.residency.prepare(&self.world, params) {
+            if let Some((jobs, references, world)) = prepared.batch.take() {
+                if !jobs.is_empty() {
+                    if self
+                        .generation_world
+                        .as_ref()
+                        .is_none_or(|w| !Arc::ptr_eq(w, &world))
+                    {
+                        let common = self.generation_world.as_ref().map_or(0, |old| {
+                            old.edits
+                                .iter()
+                                .zip(&world.edits)
+                                .take_while(|(a, b)| a == b)
+                                .count()
+                        });
+                        let edits: Vec<_> = world.edits[common..]
                             .iter()
-                            .zip(&world.edits)
-                            .take_while(|(a, b)| a == b)
-                            .count()
-                    });
-                    let edits: Vec<_> = world.edits[common..]
-                        .iter()
-                        .map(|e| GpuEdit {
-                            cell: e.cell,
-                            material: e.material,
-                            radius: e.radius,
-                            radius_units: e.radius_units(),
-                            pad: [0.0; 2],
-                        })
-                        .collect();
-                    if !edits.is_empty() {
+                            .map(|e| GpuEdit {
+                                cell: e.cell,
+                                material: e.material,
+                                radius: e.radius,
+                                radius_units: e.radius_units(),
+                                pad: [0.0; 2],
+                            })
+                            .collect();
+                        if !edits.is_empty() {
+                            self.queue.write_buffer(
+                                &self.edits,
+                                common as u64 * 32,
+                                bytemuck::cast_slice(&edits),
+                            );
+                        }
+                        self.generation_world = Some(world.clone());
+                    }
+                    self.queue
+                        .write_buffer(&self.jobs, 0, bytemuck::cast_slice(&jobs));
+                    if !references.is_empty() {
                         self.queue.write_buffer(
-                            &self.edits,
-                            common as u64 * 32,
-                            bytemuck::cast_slice(&edits),
+                            &self.edit_references,
+                            0,
+                            bytemuck::cast_slice(&references),
                         );
                     }
-                    self.generation_world = Some(world.clone());
-                }
-                self.queue
-                    .write_buffer(&self.jobs, 0, bytemuck::cast_slice(&jobs));
-                if !references.is_empty() {
-                    self.queue.write_buffer(
-                        &self.edit_references,
-                        0,
-                        bytemuck::cast_slice(&references),
+                    let group = self.group(
+                        &self.generate.get_bind_group_layout(0),
+                        &[
+                            (1, &self.edits),
+                            (20, &self.field_settings),
+                            (21, &self.heights),
+                            (25, &self.materials),
+                            (26, &self.jobs),
+                            (27, &self.edit_references),
+                        ],
                     );
-                }
-                let group = self.group(
-                    &self.generate.get_bind_group_layout(0),
-                    &[
-                        (1, &self.edits),
-                        (20, &self.field_settings),
-                        (21, &self.heights),
-                        (25, &self.materials),
-                        (26, &self.jobs),
-                        (27, &self.edit_references),
-                    ],
-                );
-                if let Some(p) = &mut self.profiler {
-                    p.begin_pass(encoder, "voxel_generation");
-                }
-                self.compute(
-                    encoder,
-                    &self.generate,
-                    &[group],
-                    [32, jobs.len() as u32, 1],
-                );
-                let bounds_group = self.group(
-                    &self.bounds.get_bind_group_layout(0),
-                    &[
-                        (25, &self.materials),
-                        (26, &self.jobs),
-                        (28, &self.exact_occupied),
-                    ],
-                );
-                self.compute(
-                    encoder,
-                    &self.bounds,
-                    &[bounds_group],
-                    [8, jobs.len() as u32, 1],
-                );
-                if let Some(p) = &mut self.profiler {
-                    p.end_pass(encoder, "voxel_generation");
+                    if let Some(p) = &mut self.profiler {
+                        p.begin_pass(encoder, "voxel_generation");
+                    }
+                    self.compute(
+                        encoder,
+                        &self.generate,
+                        &[group],
+                        [32, jobs.len() as u32, 1],
+                    );
+                    let bounds_group = self.group(
+                        &self.bounds.get_bind_group_layout(0),
+                        &[
+                            (25, &self.materials),
+                            (26, &self.jobs),
+                            (28, &self.exact_occupied),
+                        ],
+                    );
+                    self.compute(
+                        encoder,
+                        &self.bounds,
+                        &[bounds_group],
+                        [8, jobs.len() as u32, 1],
+                    );
+                    if let Some(p) = &mut self.profiler {
+                        p.end_pass(encoder, "voxel_generation");
+                    }
                 }
             }
-            if let Some(nodes) = self.residency.publish() {
-                self.upload_nodes(&nodes);
+            if let Some(links) = prepared.publication.take() {
+                self.upload_links(&links);
             }
+            self.residency.accept_after_encode(prepared);
         }
         let mut p = *params;
         #[cfg(feature = "canonical-far-experiment")]
@@ -756,6 +757,9 @@ impl StoredTerrain {
                 p.end_pass(encoder, "voxel_sun");
             }
         }
+        // Prepared metadata may now advance, but all future GPU work stays in
+        // a later frame on this same queue, after this frame's traversal.
+        self.residency.finish_frame();
     }
 }
 

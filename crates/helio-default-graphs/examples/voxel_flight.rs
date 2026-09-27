@@ -19,6 +19,8 @@
 //! exhausted rays plus traversal maxima; use with SUN=1 outside timing runs.
 //! HELIO_VOXEL_RETARGETING=1 enables experimental whole-plan demand cancellation.
 //! Leave it unset for the deferred-demand control in the same executable.
+//! Admission runs on a bounded worker; HELIO_VOXEL_INLINE_ADMISSION=1 selects
+//! the render-thread control in the same executable.
 //! HELIO_VOXEL_FLIGHT_BASE_METRES overrides the initial authored grid (0.1..1).
 //! HELIO_VOXEL_APPEARANCE_FILTER=1 enables the opt-in post-lighting experiment
 //! (requires --features voxel-appearance); geometry and source data stay exact.
@@ -212,7 +214,7 @@ impl Flight {
                 .expect("supported authored voxel size");
         }
         let mut csv = fs::File::create(output.join("frames.csv")).unwrap();
-        writeln!(csv, "frame,stage,x,y,z,sync_frame_ms,ready,refining,planning,pending,generated,reused,bricks,pixel_budget,cpu_submit_ms,gpu_wait_ms,start_unix_ns,regional_publications,nodes,fallback_regions,cancelled_plans,cancelled_jobs,residency_update_cpu_ms").unwrap();
+        writeln!(csv, "frame,stage,x,y,z,sync_frame_ms,ready,refining,planning,pending,generated,reused,bricks,pixel_budget,cpu_submit_ms,gpu_wait_ms,start_unix_ns,regional_publications,nodes,fallback_regions,cancelled_plans,cancelled_jobs,residency_update_cpu_ms,residency_prepare_cpu_ms,residency_worker_cpu_ms,async_admission,pipeline_misses").unwrap();
         Self {
             device,
             queue,
@@ -316,7 +318,7 @@ impl Flight {
         }
         writeln!(
             self.csv,
-            "{},{},{:.6},{:.6},{:.6},{:.4},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{},{},{:.4}",
+            "{},{},{:.6},{:.6},{:.6},{:.4},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{}",
             self.frame,
             stage,
             eye.x,
@@ -339,7 +341,11 @@ impl Flight {
             stats.fallback_regions,
             stats.cancelled_plans,
             stats.cancelled_jobs,
-            stats.update_cpu_ms
+            stats.update_cpu_ms,
+            stats.prepare_cpu_ms,
+            stats.worker_cpu_ms,
+            stats.async_admission,
+            stats.pipeline_misses
         )
         .unwrap();
         if let Some(profiler) = &mut self.profiler {

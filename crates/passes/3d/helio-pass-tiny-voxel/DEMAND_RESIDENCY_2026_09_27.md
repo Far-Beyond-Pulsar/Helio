@@ -147,6 +147,10 @@ The shaders and sparse far representation have not been improved by scheduling.
 
 ## Next architectural boundary
 
+The following admission step is now implemented and measured in the
+[ordered worker checkpoint](WORKER_RESIDENCY_2026_09_27.md). This report retains
+the earlier inline measurements; use the new report for current defaults.
+
 Move demand admission off the render thread behind a bounded ordered pipeline.
 Prepared generation/publication bundles must carry immutable source identities
 and slot ownership. A bundle accepted for rendering cannot be silently dropped;

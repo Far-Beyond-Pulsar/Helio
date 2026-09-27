@@ -36,7 +36,8 @@ def summarize(path):
                 and frame["planning"] == "false" and int(frame["pending"]) == 0)
         for phase in ["all"] + (["warm"] if warm else []):
             for metric in ["sync_frame_ms", "cpu_submit_ms", "gpu_wait_ms",
-                           "residency_update_cpu_ms"]:
+                           "residency_update_cpu_ms", "residency_prepare_cpu_ms",
+                           "residency_worker_cpu_ms"]:
                 if metric in frame:
                     groups[frame["stage"], phase, metric].append(float(frame[metric]))
     seen = set()

@@ -47,9 +47,14 @@ physical bricks only when their bounded GPU batch is admitted, pins visible
 versions by slot, and reuses edit identities across camera movement. Queued work
 is cancellable and worker classifications remain reusable. Whole-plan retargeting
 reduces arrival delay but regresses CPU frame time, so `HELIO_VOXEL_RETARGETING`
-remains opt-in. Next move admission into a bounded ordered worker pipeline, then
-replace complete-plan swaps with independent region transactions. Arrival,
-movement fidelity and the rest of the original gates remain open.
+remains opt-in. The [ordered admission worker](WORKER_RESIDENCY_2026_09_27.md)
+is now the default after repeated same-binary comparisons. It removes measured
+render-thread admission tails without changing GPU generation or far geometry.
+Final 720p/1080p checks still miss frame and arrival targets; a separate recording
+retains banding. A paired whole-process memory diagnostic supplies OS residency
+and commitment counters, while long-duration physical-memory stress remains open.
+Next replace complete-plan swaps with independent region transactions and
+compatible visibility-aware surface data. The original gates remain unchanged.
 
 ## Regional publication checkpoint
 

@@ -9,6 +9,7 @@ use glam::DVec3;
 // Keys and slots are internal bounded integers, not untrusted input strings.
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::sync::Arc;
+pub(super) mod pipeline;
 #[cfg(feature = "regional-publication-experiment")]
 mod regional;
 mod selection;
@@ -398,8 +399,16 @@ pub struct Stats {
     pub cancelled_plans: u64,
     /// Queued GPU jobs discarded before allocation/generation; not unique bricks.
     pub cancelled_jobs: u64,
-    /// Current frame's render-thread demand admission time; excludes generation.
+    /// Producer's demand admission CPU time; excludes generation/publication.
+    /// This runs on a worker when async_admission is true.
     pub update_cpu_ms: f64,
+    /// Current render frame's nonblocking preparation/polling CPU time.
+    pub prepare_cpu_ms: f64,
+    /// Last accepted bundle's worker service time, excluding queue waits.
+    pub worker_cpu_ms: f64,
+    pub async_admission: bool,
+    /// Frames that had no completed worker bundle to consume.
+    pub pipeline_misses: u64,
 }
 
 pub struct Residency {
@@ -427,10 +436,7 @@ pub struct Residency {
     pub stats: Stats,
 }
 impl Residency {
-    #[cfg(feature = "canonical-far-experiment")]
-    pub(super) fn active_world(&self) -> Option<&Arc<World>> {
-        self.active_world.as_ref()
-    }
+    #[cfg(all(test, feature = "regional-publication-experiment"))]
     pub fn active_voxel_step(&self) -> u32 {
         self.active_world
             .as_ref()
