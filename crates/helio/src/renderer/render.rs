@@ -605,7 +605,10 @@ impl Renderer {
         self.graph
             .profiler_mut()
             .begin_gpu_pass(&mut clear_encoder, "__renderer_target_clear");
-        {
+        // Skipped when a pass overwrites the whole target before anything
+        // reads it (DofPass in the default graphs): the clear would be a
+        // full output-resolution write that nothing ever observes.
+        if !self.graph.initializes_target() {
             let _pass = clear_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Renderer Target Clear Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {

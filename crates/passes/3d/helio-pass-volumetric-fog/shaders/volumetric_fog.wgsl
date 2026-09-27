@@ -177,8 +177,9 @@ struct ActiveMedia {
 @group(0) @binding(12) var<storage, read_write> media_list: ActiveMedia;
 // Distinct layout for classification: this buffer is never bound while used
 // as an indirect-dispatch argument (STORAGE_WRITE and INDIRECT conflict).
-// [0..3] inject, [3..6] cull, [6..9] integrate (columns of the allocated grid).
-@group(0) @binding(13) var<storage, read_write> dispatch: array<u32, 9>;
+// [0..3] inject, [3..6] cull, [6..9] integrate (columns of the allocated grid),
+// [9] the range published to compositing (f32 bits; see cs_classify).
+@group(0) @binding(13) var<storage, read_write> dispatch: array<u32, 10>;
 @group(0) @binding(14) var<storage, read> global_media: array<WorldMedium>;
 @group(0) @binding(15) var<storage, read> local_media: array<LocalMedium>;
 @group(0) @binding(16) var<storage, read> render_settings: array<RenderSettings>;
@@ -411,6 +412,11 @@ fn cs_classify(@builtin(local_invocation_index) lid: u32) {
     dispatch[6] = ((fog_globals.grid.x + 7u) / 8u) * integrate;
     dispatch[7] = (fog_globals.grid.y + 7u) / 8u;
     dispatch[8] = 1u;
+    // Published as fog_parameters.max_distance. A grid that needs no
+    // integration is uniformly neutral (0,0,0,1), so compositing it is the
+    // identity: a zero range tells consumers to pass the image through
+    // instead of sampling the grid for every pixel.
+    dispatch[9] = bitcast<u32>(select(0.0, fog.fog_max_distance, integrate != 0u));
 }
 
 // An overflow scans all rows instead of silently losing light or extinction.

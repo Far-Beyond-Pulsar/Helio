@@ -510,8 +510,10 @@ impl VolumetricFogPass {
         });
         let indirect_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Fog Active Dispatch"),
-            size: 36,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+            size: 40,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         let fallback_volumes = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1054,6 +1056,12 @@ impl RenderPass for VolumetricFogPass {
             cpass.set_bind_group(0, self.classify_bg.as_ref().unwrap(), &[]);
             cpass.dispatch_workgroups(1, 1, 1);
         }
+        // Classification zeroes the published range (max_distance, byte 20)
+        // while the grid is neutral, so FogComposite and transparency pass
+        // the image through rather than sampling an identity grid per pixel.
+        // Inject and integrate are dispatched with zero groups in that case,
+        // so nothing below reads the zeroed range.
+        unsafe { &mut *ce }.copy_buffer_to_buffer(&self.indirect_buf, 36, &self.fog_uniform_buf, 20, 4);
         {
             let mut pass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Fog Cluster Lights"),

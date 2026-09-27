@@ -116,6 +116,56 @@ fn declare_common_external_inputs(graph: &mut RenderGraph) {
     graph.declare_external_input("corona_emitters");
 }
 
+/// Where a graph composites the sky into `pre_aa`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SkyPlacement {
+    /// With the early passes, shading every pixel before any geometry
+    /// exists. Forward graphs need this: their geometry draws over the sky.
+    BeforeGeometry,
+    /// The caller adds it with [`add_sky_pass`] after every opaque depth
+    /// writer, depth tested so only uncovered pixels are shaded.
+    Deferred,
+}
+
+/// Picks the sky placement for a deferred graph. Deferred lighting
+/// overwrites every covered pixel, so the sky only needs the pixels no
+/// geometry reached; drawing it after the G-buffer with a depth test skips
+/// the covered ones instead of shading and then discarding them.
+///
+/// SSR and planar reflections sample `pre_aa` between the G-buffer and
+/// lighting and would see black instead of sky there, and the XR multiview
+/// depth target cannot back this pass's single-view attachment, so those
+/// configurations keep the original order.
+fn deferred_sky_placement(config: &RendererConfig) -> SkyPlacement {
+    let reflections = helio_core::REFLECTIONS_SUPPORTED
+        && (config.enable_ssr || config.enable_planar_reflections);
+    if reflections || config.enable_xr {
+        SkyPlacement::BeforeGeometry
+    } else {
+        SkyPlacement::Deferred
+    }
+}
+
+fn add_sky_pass(
+    graph: &mut RenderGraph,
+    device: &Arc<wgpu::Device>,
+    camera_buf: &wgpu::Buffer,
+    config: &RendererConfig,
+    scene_db: &helio::SceneDbHandle,
+    depth_tested: bool,
+) {
+    let sky_pass = SkyPass::new_with_camera_and_size_and_scene_db(
+        device,
+        camera_buf,
+        config.surface_format,
+        config.internal_width(),
+        config.internal_height(),
+        Some(scene_db.clone()),
+    )
+    .with_depth_test(depth_tested);
+    graph.add_pass(Box::new(sky_pass));
+}
+
 fn add_common_early_passes(
     graph: &mut RenderGraph,
     device: &Arc<wgpu::Device>,
@@ -126,6 +176,7 @@ fn add_common_early_passes(
     w: u32,
     h: u32,
     scene_db: helio::SceneDbHandle,
+    sky: SkyPlacement,
 ) -> Arc<std::sync::Mutex<PerfOverlayShared>> {
     let lights_buf = scene_buffer_or_dummy(
         &scene_db,
@@ -205,16 +256,8 @@ fn add_common_early_passes(
         config.shadow_face_capacity,
     )));
 
-    {
-        let mut sky_pass = SkyPass::new_with_camera_and_size_and_scene_db(
-            device,
-            camera_buf,
-            config.surface_format,
-            w,
-            h,
-            Some(scene_db.clone()),
-        );
-        graph.add_pass(Box::new(sky_pass));
+    if sky == SkyPlacement::BeforeGeometry {
+        add_sky_pass(graph, device, camera_buf, config, &scene_db, false);
     }
 
     graph.add_pass(Box::new(IndirectDispatchPass::new(
@@ -717,6 +760,7 @@ fn build_default_graph_internal(
     // PostProcessPass tone maps once; a display-format target would clamp
     // emitters at 1.0 so nothing could bloom or flare.
     let lighting_config = RendererConfig { surface_format: FOGGED_HDR_FORMAT, ..config };
+    let sky_placement = deferred_sky_placement(&config);
     let perf = add_common_early_passes(
         &mut graph,
         device,
@@ -727,6 +771,7 @@ fn build_default_graph_internal(
         iw,
         ih,
         scene_db.clone(),
+        sky_placement,
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
@@ -775,6 +820,10 @@ fn build_default_graph_internal(
             camera_buf,
             config.surface_format,
         )));
+    }
+
+    if sky_placement == SkyPlacement::Deferred {
+        add_sky_pass(&mut graph, device, camera_buf, &lighting_config, &scene_db, true);
     }
 
     let mut deferred_light_pass =
@@ -974,6 +1023,7 @@ fn build_fxaa_graph_internal(
     // PostProcessPass tone maps once; a display-format target would clamp
     // emitters at 1.0 so nothing could bloom or flare.
     let lighting_config = RendererConfig { surface_format: FOGGED_HDR_FORMAT, ..config };
+    let sky_placement = deferred_sky_placement(&config);
     let perf = add_common_early_passes(
         &mut graph,
         device,
@@ -984,6 +1034,7 @@ fn build_fxaa_graph_internal(
         iw,
         ih,
         scene_db.clone(),
+        sky_placement,
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
@@ -1015,6 +1066,10 @@ fn build_fxaa_graph_internal(
             camera_buf,
             config.surface_format,
         )));
+    }
+
+    if sky_placement == SkyPlacement::Deferred {
+        add_sky_pass(&mut graph, device, camera_buf, &lighting_config, &scene_db, true);
     }
 
     let mut deferred_light_pass =
@@ -1133,6 +1188,7 @@ fn build_hlfs_graph_internal(
         iw,
         ih,
         scene_db.clone(),
+        SkyPlacement::BeforeGeometry,
     );
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
@@ -1375,6 +1431,7 @@ fn build_fxaa_hlfs_graph_internal(
         w,
         h,
         scene_db.clone(),
+        SkyPlacement::BeforeGeometry,
     );
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
@@ -1658,6 +1715,7 @@ fn build_forward_graph_internal(
         iw,
         ih,
         scene_db.clone(),
+        SkyPlacement::BeforeGeometry,
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));

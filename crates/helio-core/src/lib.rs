@@ -403,6 +403,7 @@ pub mod registry;
 pub mod render_environment;
 pub mod resource_keys;
 pub mod scene_input;
+pub mod scene_liveness;
 pub mod shader;
 pub mod temporal;
 pub mod traits;
@@ -473,6 +474,7 @@ pub use profiling::{
     RenderPassTiming, RenderTimingSnapshot,
 };
 pub use scene_input::{BufferHandle, BufferKey, SceneBufferProjection, SceneInput};
+pub use scene_liveness::SceneBufferLiveness;
 pub use shader::{populate_bind_group_entries, ReflectedShader};
 pub use traits::{AsAny, DebugViewDescriptor, MaybeSend, MaybeSync, RenderPass};
 pub use frame_inputs::{CoordinateSpacesFrameData, RenderFrameInputs};
