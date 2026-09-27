@@ -32,6 +32,8 @@
 //! registers up front (billboards, decals, water volumes and hitboxes), so
 //! their buffers exist while empty, as they do in the editor.
 //!
+//! `--billboards` places a billboard (editor light icon) over every point light.
+//!
 //! `--scale` is the renderer's internal render scale (the editor uses the
 //! `RendererConfig` default, 0.75). `--editor` renders in editor mode (light
 //! billboards, grid). `--tsr` switches FXAA for TSR. `--no-capture` skips PNGs.
@@ -88,6 +90,7 @@ struct Args {
     capture: bool,
     no_ray_query: bool,
     pulsar_columns: bool,
+    billboards: bool,
 }
 
 fn parse_args() -> Args {
@@ -104,6 +107,7 @@ fn parse_args() -> Args {
         capture: true,
         no_ray_query: false,
         pulsar_columns: false,
+        billboards: false,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -114,6 +118,7 @@ fn parse_args() -> Args {
             "--tsr" => Some(&mut args.tsr),
             "--no-ray-query" => Some(&mut args.no_ray_query),
             "--pulsar-columns" => Some(&mut args.pulsar_columns),
+            "--billboards" => Some(&mut args.billboards),
             _ => None,
         };
         if let Some(switch) = switch {
@@ -268,6 +273,29 @@ fn sky(world: &mut World, aspect: f32) -> Camera {
     )
 }
 
+/// An editor-style icon over every point light, as `BillboardComponent` rows.
+fn spawn_light_billboards(world: &mut World) {
+    let positions: Vec<[f32; 4]> = world
+        .query::<(&helio_pass_forward_lit::LightComponent,)>()
+        .map(|(_, (light,))| {
+            let gpu: helio_pass_forward_lit::GpuLight = (*light).into();
+            gpu.position_range
+        })
+        .filter(|p| p[3] < f32::MAX)
+        .collect();
+    for p in positions {
+        let entity = world.spawn();
+        world.insert(
+            entity,
+            helio_pass_billboard::BillboardComponent {
+                world_pos: [p[0], p[1], p[2], 0.0],
+                scale_flags: [0.6, 0.6, 0.0, 0.0],
+                color: [1.0, 0.9, 0.6, 1.0],
+            },
+        );
+    }
+}
+
 // ── Measurement ───────────────────────────────────────────────────────────────
 
 async fn device(no_ray_query: bool) -> (Arc<wgpu::Device>, Arc<wgpu::Queue>, wgpu::AdapterInfo) {
@@ -331,8 +359,11 @@ fn run(
     let build_start = Instant::now();
     // Pulsar-Native's editor registers these columns up front (see
     // engine_backend's helio_bridge), so their buffers exist while empty.
-    let pulsar_columns = args.pulsar_columns;
+    let (pulsar_columns, billboards) = (args.pulsar_columns, args.billboards);
     let mut scene_db: SceneDb = new_scene_db_with_gpu_mirror_and(device, queue, |store| {
+        if billboards && !pulsar_columns {
+            helio_pass_billboard::BillboardComponent::register_gpu_columns_growable(store, 1024, device);
+        }
         if pulsar_columns {
             helio_pass_billboard::BillboardComponent::register_gpu_columns_growable(store, 1024, device);
             helio_pass_decal::DecalComponent::register_gpu_columns_growable(store, 256, device);
@@ -347,6 +378,9 @@ fn run(
         "sky" => sky(&mut scene_db.world, aspect),
         other => panic!("unknown scene {other}"),
     };
+    if args.billboards {
+        spawn_light_billboards(&mut scene_db.world);
+    }
     let mut config = RendererConfig::new(width, height, FORMAT).with_render_scale(args.scale);
     if args.tsr {
         config = config.with_tsr_quality(helio_pass_tsr::TsrQuality::Quality).with_render_scale(args.scale);
