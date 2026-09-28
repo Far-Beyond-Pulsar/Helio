@@ -613,30 +613,65 @@ The sky scene and bloom-off frames are identical.
   a single kind of caster. In the mixed benchmark every cascade holds both,
   so there is nothing to measure it against.
 
+### Round 3 cumulative result
+
+`main` after round 2 (c28431c) against this branch: median frame GPU wait on
+lavapipe. With DOF and bloom off (the defaults), every frame is bit-identical
+(18 runs). With `--bloom`, the only differences are §19's.
+
+**Demo column setup**
+
+| scene | 1080p | 1440p | 4K |
+|---|---:|---:|---:|
+| fog_hall | 344 → 323 ms (-6%) | 476 → 442 ms (-7%) | 870 → 802 ms (-8%) |
+| cathedral_large | 267 → 240 ms (-10%) | 381 → 350 ms (-8%) | 692 → 644 ms (-7%) |
+| sky | 117 → 101 ms (-14%) | 187 → 158 ms (-16%) | 382 → 319 ms (-16%) |
+
+**Editor column setup (`--pulsar-columns`, two runs in opposite order pooled)**
+
+| scene | 1080p | 1440p | 4K |
+|---|---:|---:|---:|
+| fog_hall | 416 → 323 ms (-22%) | 475 → 464 ms (-2%) | 829 → 807 ms (-3%) |
+| cathedral_large | 274 → 275 ms (+0%) | 380 → 386 ms (+2%) | 712 → 659 ms (-7%) |
+| sky | 120 → 101 ms (-16%) | 181 → 158 ms (-12%) | 379 → 331 ms (-13%) |
+
+**Bloom on (`--bloom`)**
+
+| scene | 1080p | 1440p | 4K |
+|---|---:|---:|---:|
+| fog_hall | 538 → 409 ms (-24%) | 745 → 521 ms (-30%) | 1053 → 896 ms (-15%) |
+| sky | 180 → 137 ms (-24%) | 270 → 212 ms (-22%) | 576 → 452 ms (-21%) |
+
+Whole-frame totals move with passes this round did not touch. For example,
+the cathedral's GBuffer read +59 ms and the fog hall's volumetric fog read
+−68 ms between two runs of unchanged code. The editor-column cathedral totals
+are within that noise, even though the changed passes save about 30 ms there
+(FogComposite −10 to −24 ms, PostProcess −7 to −23 ms). Per-pass numbers in
+§16–§19 are the reliable signal.
+
 ## Remaining bottlenecks and follow-ups
 
-Ranked by measured 4K cost after both rounds (lavapipe).
+Ranked by measured 4K cost after three rounds (lavapipe, default settings).
 
-- **Bloom on still costs ≈4× bloom off (≈280 ms PostProcess at 4K).** That
-  is the 8 composite taps per output pixel plus the bloom compute; the split
-  has not been measured. A progressive upsample chain would bring the
-  composite down to one B-spline sample, at the price of a larger visual
-  change.
-- **DeferredLight (100–315 ms at 4K).** Scenes with both static and movable
-  casters still sample both atlases. Per-light or per-tile occupancy would
-  extend #293's skip.
-- **FXAA (40–54 ms at 4K).** This is expected work for the AA path.
-- **FogComposite (≈23 ms at 4K) without fog.** It remains a pure copy, kept
-  for the pool-aliasing reason in §10.
-- **Render-pass fusion.** It is disabled while profiling is compiled in (the
-  default), but the default graph forms no chains anyway: PortalMask sits
-  between the G-buffer and PortalInstance, and VirtualGeometry binds a
-  different attachment set. Decoupling fusion from profiling alone would not
-  change the default graph (#298).
+- **DeferredLight (≈100–300 ms at 4K).** The remaining per-pixel cost is
+  shadow PCF for lit, front-facing pixels, plus the reflection draw. Tile
+  light culling has no depth bounds, which matters most for the cathedral's
+  many lights.
+- **GBuffer (≈70–300 ms at 4K).** This is geometry rasterization (416k
+  triangles in the cathedral), and it runs on lavapipe's software
+  rasterizer. It is not a per-pixel shading cost that the changes above can
+  touch.
+- **VolumetricFog (≈135 ms, fog hall only).** A fixed-size froxel grid, so it
+  does not scale with output resolution.
+- **FXAA (≈40–57 ms at 4K).** This is expected work for the AA path.
+  Exactly fusing it into the uber pass is not possible (§"Measured and not
+  kept").
+- **Render-pass fusion.** It is disabled while profiling is compiled in, but
+  the default graph forms no chains anyway (#298).
 - **Stochastic texture filtering** (Pharr et al., arXiv 2305.05810) was
-  reviewed. It trades filtering for noise that TAA/DLSS then resolves. Helio's
-  textures are hardware-filterable, the default AA is FXAA, and the noise
-  would break frame equivalence, so it does not apply here.
+  reviewed. It relies on TAA/DLSS to resolve its noise, while Helio uses
+  hardware filtering and FXAA and aims for frame equivalence, so it does not
+  apply.
 
 ## Tests
 
@@ -646,6 +681,9 @@ Tests were run on lavapipe.
   rewritten contents.
 - Extended: `helio-pass-volumetric-fog`'s `physical_fog` now checks the
   published range both with media and after the media are removed.
+- Round 3: `activity_tests` also cover auto exposure and fog rows. `helio-pass-postprocess`,
+  `helio-pass-deferred-light`, `helio-pass-fxaa`, `helio-pass-tsr`,
+  `helio-pass-transparent`, `helio-pass-volumetric-fog` and `helio` pass.
 - Round 2: `helio-pass-postprocess`'s `volume_blend::activity_tests` cover
   the camera and volume row predicates behind `dof_maybe_active` and
   `bloom_maybe_active`. `helio-core`, `helio-pass-hiz`, `helio-pass-ssr`,
