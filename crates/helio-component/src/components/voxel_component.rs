@@ -8,7 +8,7 @@
 use engine_class_derive::engine_class;
 use helio_voxel_data::{
     VoxelBrushEdit,
-    VoxelStoredPayload, VOXEL_BUILTIN_GENERATOR_VERSION, VOXEL_FLAT_GENERATOR,
+    VoxelStoredPayload, VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION,
 };
 pub use helio_voxel_data::{VoxelPayloadKey, VoxelPayloadStore};
 use pulsar_scene_model::components::Transform;
@@ -336,15 +336,15 @@ impl Default for VoxelTerrainComponent {
             bounds_max_x: 0.0,
             bounds_max_y: 0.0,
             bounds_max_z: 0.0,
-            voxel_size: 1.0,
+            voxel_size: 0.1,
             chunk_edge_voxels: default_chunk_edge_voxels(),
             max_chunk_lod: default_max_chunk_lod(),
             lod_scale: default_lod_scale(),
             renderer_id: String::new(),
-            generator_id: VOXEL_FLAT_GENERATOR.into(),
-            generator_version: VOXEL_BUILTIN_GENERATOR_VERSION,
+            generator_id: VOXEL_TERRAIN_GENERATOR.into(),
+            generator_version: VOXEL_TERRAIN_GENERATOR_VERSION,
             seed: 0,
-            generator_parameters: r#"{"planet_radius":8.0,"base_height":0.0,"amplitude":0.0,"wavelength":16.0,"material_slot":1}"#.into(),
+            generator_parameters: String::new(),
             material_ids: vec![0],
             editable: true,
             source_revision: 0,
@@ -354,6 +354,21 @@ impl Default for VoxelTerrainComponent {
 }
 
 impl VoxelTerrainComponent {
+    /// A planet of `radius` metres with Helio's terrain generator and 0.1 m
+    /// voxels. Add a [`VoxelLandformComponent`] to shape its continents and
+    /// mountains.
+    pub fn planet(radius: f64) -> Self {
+        Self { shape: VoxelWorldShape::Sphere, planet_radius: radius, ..Self::default() }
+    }
+    /// A square plane of `size` metres with Helio's terrain generator.
+    pub fn plane(size: f64) -> Self {
+        Self { shape: VoxelWorldShape::Plane, plane_size: size, ..Self::default() }
+    }
+    /// A plane without edges within reach, with Helio's terrain generator.
+    pub fn infinite_plane() -> Self {
+        Self { shape: VoxelWorldShape::InfinitePlane, ..Self::default() }
+    }
+
     /// Low-level live SceneDB data capability. Normal
     /// producers should mutate through `VoxelSourceWriter` so validation and
     /// revision checks are preserved; scripts should export via data snapshots.

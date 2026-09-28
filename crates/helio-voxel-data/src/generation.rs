@@ -5,6 +5,14 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{VoxelChunkKey, VoxelDomain, VoxelStoredPayload, VOXEL_CHUNK_SAMPLES};
 
+/// Helio's streamed voxel terrain (planets, planes and infinite planes with
+/// continents, mountains and destructible exact voxels), rendered by the
+/// `helio.voxel-planet` backend. Its settings component is
+/// `VoxelLandformComponent`.
+pub const VOXEL_TERRAIN_GENERATOR: &str = "helio.voxel-planet.default";
+pub const VOXEL_TERRAIN_GENERATOR_VERSION: u32 = 1;
+/// Renderer of [`VOXEL_TERRAIN_GENERATOR`].
+pub const VOXEL_TERRAIN_RENDERER: &str = "helio.voxel-planet";
 pub const VOXEL_FLAT_GENERATOR: &str = "helio.flat";
 pub const VOXEL_PLANET_GENERATOR: &str = "helio.planet";
 pub const VOXEL_BUILTIN_GENERATOR_VERSION: u32 = 1;
