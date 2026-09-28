@@ -29,7 +29,7 @@ pub use components::{CameraPostProcessComponent, PostProcessVolumeComponent};
 pub use gpu_types::*;
 
 mod volume_blend;
-pub use volume_blend::{PostProcessVolumeBlendPass, DOF_MAYBE_ACTIVE};
+pub use volume_blend::{PostProcessVolumeBlendPass, BLOOM_MAYBE_ACTIVE, DOF_MAYBE_ACTIVE};
 
 mod fog_composite;
 pub use fog_composite::{FogCompositePass, FOGGED_HDR, FOGGED_HDR_FORMAT};
@@ -1386,8 +1386,16 @@ impl PostProcessPass {
             unsafe { &mut *ce }.write_timestamp(query, 1);
         }
 
-        // 2. Bloom (only when active)
-        if self.bloom_active {
+        // 2. Bloom, unless no settings source can enable it this frame: then
+        // fs_uber never samples the mips, and they are rebuilt from scratch
+        // on the first frame bloom may be on. User effects may sample the
+        // mips themselves, so they always keep them.
+        let bloom_maybe_active = !self.user_effect_entries.is_empty()
+            || ctx
+                .registry
+                .get::<bool>(helio_core::ResourceKey::new(BLOOM_MAYBE_ACTIVE))
+                .unwrap_or(true);
+        if self.bloom_active && bloom_maybe_active {
             // 2a. Bloom extract: HDR → mip 0
             {
                 let mut cpass =

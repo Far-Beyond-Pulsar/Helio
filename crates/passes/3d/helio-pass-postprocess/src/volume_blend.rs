@@ -22,6 +22,14 @@ pub struct PostProcessVolumeBlendPass {
     volume_dof: helio_core::SceneBufferLiveness,
     /// Published as `"dof_maybe_active"`; see [`DOF_MAYBE_ACTIVE`].
     dof_maybe_active: bool,
+    /// Whether the resolver's defaults enable bloom.
+    defaults_enable_bloom: bool,
+    /// Whether any enabled camera row enables bloom.
+    camera_bloom: helio_core::SceneBufferLiveness,
+    /// Whether any weighted volume row overrides bloom on.
+    volume_bloom: helio_core::SceneBufferLiveness,
+    /// Published as `"bloom_maybe_active"`; see [`BLOOM_MAYBE_ACTIVE`].
+    bloom_maybe_active: bool,
 }
 
 /// `bool` registry key: false only when no source the resolver blends from
@@ -30,6 +38,12 @@ pub struct PostProcessVolumeBlendPass {
 /// register these columns up front, so the check reads the rows back when
 /// they change (`SceneBufferLiveness`) and is true until they have been read.
 pub const DOF_MAYBE_ACTIVE: &str = "dof_maybe_active";
+
+/// `bool` registry key: false only when no source the resolver blends from
+/// can enable bloom, so the resolved `bloom_enabled` is certainly 0 this
+/// frame and nothing samples the bloom mips. Tracked like
+/// [`DOF_MAYBE_ACTIVE`].
+pub const BLOOM_MAYBE_ACTIVE: &str = "bloom_maybe_active";
 
 /// The resolver treats any shape that is not negative (including NaN) as DOF.
 fn shape_enables_dof(shape: f32) -> bool {
@@ -45,6 +59,7 @@ fn read_u32(row: &[u8], offset: usize) -> Option<u32> {
 }
 
 const DOF_SHAPE: usize = std::mem::offset_of!(crate::GpuPostProcessUniforms, dof_aperture_shape);
+const BLOOM_ENABLED: usize = std::mem::offset_of!(crate::GpuPostProcessUniforms, bloom_enabled);
 
 /// An enabled camera row whose settings enable DOF. The resolver also
 /// matches `view_id`; ignoring it here only errs toward "maybe".
@@ -73,6 +88,35 @@ fn volume_row_enables_dof(row: &[u8]) -> bool {
         _ => true,
     }
 }
+/// An enabled camera row whose settings enable bloom. Like
+/// [`camera_row_enables_dof`], ignoring `view_id` errs toward "maybe".
+fn camera_row_enables_bloom(row: &[u8]) -> bool {
+    use crate::CameraPostProcessComponent as C;
+    let enabled = read_u32(row, std::mem::offset_of!(C, enabled));
+    let bloom = read_u32(row, std::mem::offset_of!(C, settings) + BLOOM_ENABLED);
+    match (enabled, bloom) {
+        (Some(enabled), Some(bloom)) => enabled != 0 && bloom != 0,
+        _ => true,
+    }
+}
+
+/// A weighted volume row that overrides property 9 (`bloom_enabled`) on. A
+/// volume can only select between its own value and the baseline's, so one
+/// that overrides bloom off never enables it.
+fn volume_row_enables_bloom(row: &[u8]) -> bool {
+    use crate::GpuPostProcessVolume as V;
+    const PROPERTY: usize = 9;
+    let weight = read_f32(row, std::mem::offset_of!(V, blend_weight));
+    let mask = read_u32(row, std::mem::offset_of!(V, override_mask) + PROPERTY / 32 * 4);
+    let bloom = read_u32(row, std::mem::offset_of!(V, settings) + BLOOM_ENABLED);
+    match (weight, mask, bloom) {
+        (Some(weight), Some(mask), Some(bloom)) => {
+            !(weight <= 0.0) && mask & (1 << (PROPERTY % 32)) != 0 && bloom != 0
+        }
+        _ => true,
+    }
+}
+
 impl PostProcessVolumeBlendPass {
     pub fn new(device: &wgpu::Device) -> Self {
         Self::with_defaults(device, &crate::PostProcessSettings::default())
@@ -118,6 +162,10 @@ impl PostProcessVolumeBlendPass {
             camera_dof: helio_core::SceneBufferLiveness::with_row_predicate(camera_row_enables_dof),
             volume_dof: helio_core::SceneBufferLiveness::with_row_predicate(volume_row_enables_dof),
             dof_maybe_active: true,
+            defaults_enable_bloom: settings.to_gpu().bloom_enabled != 0,
+            camera_bloom: helio_core::SceneBufferLiveness::with_row_predicate(camera_row_enables_bloom),
+            volume_bloom: helio_core::SceneBufferLiveness::with_row_predicate(volume_row_enables_bloom),
+            bloom_maybe_active: true,
         }
     }
     /// GPU-derived settings, valid after the resolver dispatch and copy.
@@ -136,6 +184,11 @@ impl RenderPass for PostProcessVolumeBlendPass {
         self.dof_maybe_active = self.defaults_enable_dof
             || cameras.is_some_and(|handle| self.camera_dof.maybe_live(handle))
             || volumes.is_some_and(|handle| self.volume_dof.maybe_live(handle));
+        self.camera_bloom.update(ctx.device, ctx.queue, cameras);
+        self.volume_bloom.update(ctx.device, ctx.queue, volumes);
+        self.bloom_maybe_active = self.defaults_enable_bloom
+            || cameras.is_some_and(|handle| self.camera_bloom.maybe_live(handle))
+            || volumes.is_some_and(|handle| self.volume_bloom.maybe_live(handle));
         Ok(())
     }
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
@@ -170,11 +223,12 @@ impl RenderPass for PostProcessVolumeBlendPass {
         let buffer: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.resolved) };
         frame.write(ResourceKey::new("postprocess_uniforms"), buffer, self.name());
         frame.write(ResourceKey::new(DOF_MAYBE_ACTIVE), self.dof_maybe_active, self.name());
+        frame.write(ResourceKey::new(BLOOM_MAYBE_ACTIVE), self.bloom_maybe_active, self.name());
     }
 }
 
 #[cfg(test)]
-mod dof_activity_tests {
+mod activity_tests {
     use super::*;
     use crate::{CameraPostProcessComponent, GpuPostProcessVolume, PostProcessSettings};
 
@@ -214,6 +268,47 @@ mod dof_activity_tests {
         assert!(!volume_row_enables_dof(bytemuck::bytes_of(&row(true, 0.0, true))), "zero weight is inactive");
         assert!(!volume_row_enables_dof(bytemuck::bytes_of(&row(false, 1.0, true))), "overrides DOF off");
         assert!(!volume_row_enables_dof(&[0u8; std::mem::size_of::<GpuPostProcessVolume>()]), "empty row");
+    }
+
+    #[test]
+    fn bloom_camera_rows() {
+        let row = |bloom, enabled| {
+            let mut settings = PostProcessSettings::default();
+            settings.bloom_enabled = bloom;
+            let mut row = CameraPostProcessComponent::new(0, &settings);
+            row.enabled = enabled;
+            row
+        };
+        assert!(camera_row_enables_bloom(bytemuck::bytes_of(&row(true, 1))));
+        assert!(!camera_row_enables_bloom(bytemuck::bytes_of(&row(false, 1))));
+        assert!(!camera_row_enables_bloom(bytemuck::bytes_of(&row(true, 0))), "disabled rows are not blended");
+        assert!(!camera_row_enables_bloom(&[0u8; std::mem::size_of::<CameraPostProcessComponent>()]), "empty row");
+        assert!(camera_row_enables_bloom(&[0u8; 8]), "a short row errs toward maybe");
+    }
+
+    #[test]
+    fn bloom_volume_rows() {
+        let row = |bloom, weight, overrides| {
+            let mut settings = PostProcessSettings::default();
+            settings.bloom_enabled = bloom;
+            let mut volume: GpuPostProcessVolume = bytemuck::Zeroable::zeroed();
+            volume.settings = settings.to_gpu();
+            volume.blend_weight = weight;
+            if overrides {
+                volume.override_mask[0] |= 1 << 9;
+            }
+            volume
+        };
+        assert!(volume_row_enables_bloom(bytemuck::bytes_of(&row(true, 1.0, true))));
+        assert!(!volume_row_enables_bloom(bytemuck::bytes_of(&row(true, 1.0, false))), "does not override bloom");
+        assert!(!volume_row_enables_bloom(bytemuck::bytes_of(&row(true, 0.0, true))), "zero weight is inactive");
+        assert!(!volume_row_enables_bloom(bytemuck::bytes_of(&row(false, 1.0, true))), "overrides bloom off");
+        assert!(!volume_row_enables_bloom(&[0u8; std::mem::size_of::<GpuPostProcessVolume>()]), "empty row");
+    }
+
+    #[test]
+    fn default_settings_leave_bloom_off() {
+        assert_eq!(PostProcessSettings::default().to_gpu().bloom_enabled, 0);
     }
 
     #[test]
