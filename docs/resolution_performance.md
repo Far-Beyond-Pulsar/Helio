@@ -3,7 +3,7 @@
 Measured optimizations to the default deferred graph, focused on how cost
 scales from 1080p to 4K. Every change was compared frame by frame against the
 build before it. Nearly all are bit-identical; the few that change pixels are
-called out in their sections (§3, §14 and §15).
+called out in their sections (§3, §14, §15 and §19).
 
 ## How to reproduce
 
@@ -496,6 +496,122 @@ WaterSim's ≈90 ms simulation, was a fixed cost at every resolution. Render CPU
 times are single runs and move by about ±1 ms with process order on lavapipe
 (see the measurement caveats), so only the editor-column drop, which comes
 from WaterSim no longer recording its simulation, is clearly real.
+
+## Round 3
+
+Same method, measured against the round-2 head (`main` after #301). New
+harness switches: `--auto-exposure`, `--global-fog` and `--pp-fog`.
+
+| change | measured | 1080p | 1440p | 4K | frame diff |
+|---|---|---:|---:|---:|---|
+| 16. Exposure metered only while auto exposure may be on; depth fetched only for DOF | PostProcess GPU ms | 18.7–21.9 → 12.7–13.5 | 33.7–36.4 → 21.5–22.7 | 72.6–75.9 → 48.9–50.7 | bit-identical |
+| 17. DeferredLight skips shadow lookups for lights behind the surface, fog hall | DeferredLight GPU ms | 80.6 → 76.0 | 147.5 → 134.7 | 318.4 → 298.0 | bit-identical |
+| 18. FogComposite forwards `pre_aa` while no fog is possible (#296) | FogComposite GPU ms | 6.08–6.94 → 0.15–0.17 | 10.9–12.0 → 0.16–0.17 | 23.5–25.3 → 0.15–0.18 | bit-identical |
+| 19. Progressive bloom upsample chain, `--bloom` | PostProcess GPU ms | 71.7–76.9 → 41.1–47.5 | 113.9–125.3 → 81.5–83.1 | 256.9–282.4 → 166.4–167.5 | max 3/255, PSNR ≥ 65.9 dB, needs sign-off |
+
+### 16. PostProcess: meter exposure only when auto exposure may be on
+
+Exposure is manual by default, yet the three metering dispatches (sampled
+log luminance, reduction, adaptation) ran every frame, and only auto exposure
+reads their result. PostProcessVolumeBlendPass publishes
+`auto_exposure_maybe_active` the same way as the DOF and bloom flags (the three
+now share one `SettingActivity` helper), and PostProcess skips metering while it
+is false and no user effects are compiled in. `fs_uber` also loaded depth for
+every pixel before `apply_dof` checked whether DOF is on; the load now sits
+behind that check.
+
+Bit-identical with defaults, `--auto-exposure` and `--dof`. One behaviour
+changes: after a stretch of manual exposure, the first auto frame snaps to the
+metered value, where it used to adapt from a value that kept being tracked
+while unused. Frames that stay manual or stay auto are unchanged.
+
+| scene | 1080p | 1440p | 4K |
+|---|---:|---:|---:|
+| fog_hall | 18.7 → 13.5 (-28%) | 34.6 → 22.7 (-35%) | 75.9 → 49.6 (-35%) |
+| cathedral_large | 21.9 → 13.4 (-39%) | 36.4 → 21.5 (-41%) | 73.6 → 50.7 (-31%) |
+| sky | 19.5 → 12.7 (-35%) | 33.7 → 21.5 (-36%) | 72.6 → 48.9 (-33%) |
+
+### 17. DeferredLight: skip shadow lookups for lights a surface faces away from
+
+`pbr_direct_light` returns exactly zero whenever N·L ≤ 0, but the light loop
+sampled that light's shadow (up to 16 PCF taps) and transmittance before
+calling it. The loop now builds L the way `pbr_direct_light` does and skips the
+light when N·L < −1e-4. The margin keeps the skip strictly inside the
+zero-contribution case even if the two dot products round differently.
+
+Bit-identical in all default and `--movability mixed` runs. Seven-frame runs
+of this pass are noisy (fog hall 1080p read +19% once), so the 1080p figure
+above comes from three 15-frame runs in alternating order, which agreed at
+−5.5% (80.1–81.5 → 75.5–77.2 ms). A second 4K pair read −10%.
+
+Mixed static and movable casters, where both atlases are sampled:
+
+| scene | 1080p | 1440p | 4K |
+|---|---:|---:|---:|
+| fog_hall | 99.8 → 84.6 (-15%) | 169.5 → 156.0 (-8%) | 394.9 → 340.7 (-14%) |
+| cathedral_large | 42.9 → 44.7 (+4%) | 73.8 → 73.4 (-1%) | 164.6 → 160.0 (-3%) |
+
+Scenes without shadowed lights (sky) are unchanged.
+
+### 18. FogComposite: forward `pre_aa` while no fog medium is possible
+
+With no participating medium, the fog composite is a full-resolution copy of
+`pre_aa` into `fogged_hdr`. Only the GPU (`cs_classify`) decided whether a
+medium exists, so the copy always ran. FogCompositePass now mirrors that
+classification conservatively on the CPU. `fog_settings_maybe_active` from
+PostProcessVolumeBlendPass covers the post-process fog block, and
+VolumetricFogPass also reads weighted volume rows as bounded media. The global,
+local and legacy media rows are read back through `SceneBufferLiveness`.
+
+When none of these sources can hold a medium, this frame or the last (the grid
+is integrated once more after a medium disappears), the pass draws nothing and
+routes `pre_aa`'s view as `fogged_hdr`. It does so only if the view matches the
+pooled target (format, size, sample count, renderable). Readers of
+`fogged_hdr` (TransparentPass, FXAA, TSR, PostProcess) now also declare a read
+of `pre_aa`, so the pool cannot reuse its memory while they may still see it.
+The old pass-through wrote alpha 1; no reader of `fogged_hdr` uses alpha.
+
+Bit-identical with demo and editor columns, FXAA and TSR, editor mode, and in
+scenes that do have fog (the fog hall's local medium, `--global-fog`,
+`--pp-fog`), which keep compositing at unchanged cost.
+
+| scene | 1080p | 1440p | 4K |
+|---|---:|---:|---:|
+| fog_hall | 22.4 → 23.7 (+6%) | 38.6 → 39.9 (+3%) | 88.9 → 83.7 (-6%) |
+| cathedral_large | 6.94 → 0.15 (-98%) | 10.9 → 0.17 (-98%) | 25.3 → 0.15 (-99%) |
+| sky | 6.08 → 0.17 (-97%) | 12.0 → 0.16 (-99%) | 23.5 → 0.18 (-99%) |
+
+### 19. Bloom: progressive upsample chain
+
+Section 15 cut bloom-on frames from 20 to 8 taps per output pixel, plus 16 per
+mip-0 texel to build the sum. The sum is now built coarse to fine: sum *i* is
+mip *i* plus the B-spline upsample of sum *i+1*, 4 taps per texel at each
+level, and `fs_uber` B-spline samples sum 0 once, 4 taps.
+
+Mips 0 and 1 are filtered exactly as before. Mips 2–4 get one extra
+reconstruction step per level, a slight smoothing of glows that are at least
+four mip-0 texels wide. Like §15, this needs a visual sign-off. Fog hall with
+`--bloom`: 1.6–3.1% of pixels differ, max 3/255, mean 0.011–0.016/255, PSNR
+65.9–66.9 dB. The difference is a smooth ±1–3/255 offset across the glow.
+The sky scene and bloom-off frames are identical.
+
+| scene | 1080p | 1440p | 4K |
+|---|---:|---:|---:|
+| fog_hall | 71.7 → 41.1 (-43%) | 113.9 → 83.1 (-27%) | 282.4 → 167.5 (-41%) |
+| sky | 76.9 → 47.5 (-38%) | 125.3 → 81.5 (-35%) | 256.9 → 166.4 (-35%) |
+
+### Measured and not kept
+
+- **Transmittance lookup skipped when there are no translucent casters.**
+  Exact, but no measurable gain in two alternating-order runs.
+- **FXAA fused into the uber pass.** Not exact: exposure and bloom read
+  `fxaa_color` at internal resolution, and the uber pass samples it bilinearly
+  at output resolution. Running FXAA inline at every sample would cost more.
+- **DeferredLight's reflection draw merged into the lighting draw.** It would
+  round the f16 target once instead of twice, so it is not bit-identical.
+- **Per-layer shadow caster occupancy.** It would only help cascades that hold
+  a single kind of caster. In the mixed benchmark every cascade holds both,
+  so there is nothing to measure it against.
 
 ## Remaining bottlenecks and follow-ups
 
