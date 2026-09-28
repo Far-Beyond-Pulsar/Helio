@@ -214,13 +214,8 @@ impl Planet {
                 let top = field::top_cells(&self.field, h, 0);
                 // Slope is measured inside the cell's 8x8 column block, which
                 // is exactly what the GPU shading pass has resident.
-                let mut slope = 0;
-                let (bx, by) = (cell.i & 7, cell.j & 7);
-                for (di, dj) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    if (0..8).contains(&(bx + di)) && (0..8).contains(&(by + dj)) {
-                        slope = slope.max((self.column_top(cell.face, cell.i + di, cell.j + dj, 0) - top).abs());
-                    }
-                }
+                let (bi, bj) = (cell.i & !7, cell.j & !7);
+                let slope = field::block_slope(|x, y| self.column_top(cell.face, bi + x, bj + y, 0), cell.i & 7, cell.j & 7);
                 let p = self.grid.domain_point(cell.face, cell.i, cell.j, 0);
                 let _ = h;
                 field::ground_material(&self.field, p, top * self.field.header[2], top - 1 - cell.k, slope, cell.k)

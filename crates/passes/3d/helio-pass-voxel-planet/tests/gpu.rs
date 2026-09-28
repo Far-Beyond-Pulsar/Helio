@@ -335,10 +335,12 @@ fn sky_bound_is_conservative_while_moving() {
         target.render(&gpu, &mut r, &f, forward, 6000 + step * 3 + 2);
         let bounded = hits(&gpu, &r);
         r.settings_mut().freeze_residency = false;
+        let voxel = planet.grid().voxel_size() as f32;
+        let camera = target.camera(forward, up.as_vec3());
         for (index, (a, b)) in reference.iter().zip(&bounded).enumerate() {
             compared += 1;
-            let both_miss = a.status == 0 && b.status == 0;
-            if !both_miss && (a.status, a.i, a.j, a.k, a.face, a.level) != (b.status, b.i, b.j, b.k, b.face, b.level) {
+            let rise = pixel_dir(&target, &camera, index as u32 % 320, index as u32 / 320).dot(up).abs() as f32;
+            if !skipped_nothing(a, b, rise, voxel) {
                 bad += 1;
                 if bad < 6 {
                     eprintln!("step {step} pixel {} {}: reference {a:?} bounded {b:?}", index % 320, index / 320);

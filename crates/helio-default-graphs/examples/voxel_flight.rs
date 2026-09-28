@@ -560,6 +560,56 @@ fn land_near(planet: &Planet, face: u8, fi: f64, fj: f64, min_height_m: f64) -> 
     panic!("no land");
 }
 
+/// Highest terrain within `span` (face fraction) of face coordinates
+/// (fi, fj), sampled on a coarse level: (direction, height above datum m).
+fn highest_near(planet: &Planet, face: u8, fi: f64, fj: f64, span: f64) -> (DVec3, f64) {
+    let grid = planet.grid();
+    let level = 10u32;
+    let n = f64::from(grid.cells() >> level);
+    let size = f64::from(1u32 << level);
+    let mut best = (DVec3::ZERO, f64::MIN);
+    for a in 0..96 {
+        for b in 0..96 {
+            let u = (fi + span * (f64::from(a) / 95.0 * 2.0 - 1.0)).clamp(0.0, 0.999);
+            let v = (fj + span * (f64::from(b) / 95.0 * 2.0 - 1.0)).clamp(0.0, 0.999);
+            let (i, j) = ((u * n) as i32, (v * n) as i32);
+            let h = f64::from(planet.column_top(face, i, j, level)) * grid.voxel_size() * size;
+            if h > best.1 {
+                best = (grid.direction(face, (f64::from(i) + 0.5) * size, (f64::from(j) + 0.5) * size), h);
+            }
+        }
+    }
+    best
+}
+
+/// The highest summit near the spawn and two views of it: 300 m above the
+/// ground 12 km away, and on its slope 1.5 km below the summit.
+struct Mountain {
+    peak: DVec3,
+    views: Vec<(&'static str, DVec3, Vec3)>,
+}
+
+fn mountain(planet: &Planet, heading: f64) -> Mountain {
+    let (peak_dir, height) = highest_near(planet, 2, 0.47, 0.53, 0.15);
+    eprintln!("VOXEL_FLIGHT mountain summit {height:.0} m");
+    let peak = planet.surface_point(peak_dir, 0.0);
+    let away = tangent(peak, heading + std::f64::consts::PI).as_dvec3();
+    let air = planet.surface_point(peak + away * 12_000.0, 300.0);
+    let slope = planet.surface_point(peak + away * 1_500.0, 1.7);
+    let views = [("mountain_air", air), ("mountain_slope", slope)]
+        .into_iter()
+        .map(|(name, eye)| (name, eye, (peak - eye).normalize().as_vec3()))
+        .collect();
+    Mountain { peak, views }
+}
+
+/// Horizontal direction from `eye` toward the summit.
+fn level_toward(range: &Mountain, eye: DVec3) -> DVec3 {
+    let toward = (range.peak - eye).normalize();
+    let up = eye.normalize();
+    (toward - up * toward.dot(up)).normalize()
+}
+
 fn record_frame(flight: &Flight, stage: &str, index: usize) {
     if (flight.record && index % 2 == 0) || index % 150 == 0 {
         flight.capture(&format!("{stage}-{index:04}"));
@@ -667,6 +717,14 @@ fn main() {
             flight.capture(name);
             audits.push(flight.audit(name, e, f));
         }
+        for (name, e, f) in mountain(&flight.planet, heading).views {
+            flight.settle(name, e, f);
+            for _ in 0..30 {
+                flight.draw(name, e, f);
+            }
+            flight.capture(name);
+            audits.push(flight.audit(name, e, f));
+        }
         let orbit = ground.normalize() * (ground.length() + 300_000.0);
         let orbit_look = look(orbit, heading, -65.0);
         flight.settle("orbit_settle", orbit, orbit_look);
@@ -712,6 +770,8 @@ fn main() {
         }
         eprintln!("QUICK graph total {:?}", flight.renderer.gpu_frame_ms());
         flight.write_csv();
+        let error = pollster::block_on(validation.pop());
+        assert!(error.is_none(), "GPU validation: {error:?}");
         return;
     }
     // Walking, running and vehicle speed over terrain, following the surface.
@@ -815,6 +875,32 @@ fn main() {
     report.insert("teleport".into(), serde_json::json!({"frames_to_settle": frames, "sync_ms_to_settle": ms}));
     flight.capture("teleport");
     audits.push(flight.audit("teleport", far, far_look));
+
+    // Mountains: fly toward the highest summit near the spawn at 150 m/s,
+    // 300 m above the ground, then run up its slope.
+    let range = mountain(&flight.planet, heading);
+    let (_, air, air_look) = range.views[0];
+    flight.settle("mountain_settle", air, air_look);
+    flight.capture("mountain");
+    audits.push(flight.audit("mountain", air, air_look));
+    let mut eye = air;
+    for i in 0..360 {
+        let level = level_toward(&range, eye);
+        eye = flight.planet.surface_point(eye + level * 150.0 * DT, 300.0);
+        flight.draw("mountain_flight", eye, (range.peak - eye).normalize().as_vec3());
+        record_frame(&flight, "mountain_flight", i);
+    }
+    let (_, slope, slope_look) = range.views[1];
+    flight.settle("mountain_settle", slope, slope_look);
+    let mut eye = slope;
+    for i in 0..240 {
+        let level = level_toward(&range, eye);
+        eye = flight.planet.surface_point(eye + level * 6.0 * DT, 1.7);
+        let f = (level + eye.normalize() * 0.1).normalize().as_vec3();
+        flight.draw("mountain_walk", eye, f);
+        record_frame(&flight, "mountain_walk", i);
+    }
+    audits.push(flight.audit("mountain_walk", eye, (level_toward(&range, eye) + eye.normalize() * 0.1).normalize().as_vec3()));
 
     // Destruction: one brush per frame at the aim point. Latency is measured
     // until the GPU centre hit matches the canonical CPU ray cast.
@@ -981,7 +1067,7 @@ fn main() {
             .collect()
     };
     let warm = gather(&["ground_warm", "orbit", "arrival_settled"], false);
-    let movement_names = ["walk", "run", "vehicle", "rotate", "ascent", "descent", "reversal"];
+    let movement_names = ["walk", "run", "vehicle", "rotate", "ascent", "descent", "reversal", "mountain_flight", "mountain_walk"];
     let moving = gather(&movement_names, false);
     let mut terrain_names = movement_names.to_vec();
     terrain_names.extend(["ground_warm", "orbit"]);

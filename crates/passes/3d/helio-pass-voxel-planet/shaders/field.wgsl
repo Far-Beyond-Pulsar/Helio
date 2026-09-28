@@ -207,6 +207,12 @@ fn rem_floor(a: i32, b: i32) -> i32 {
     return select(r, r + b, r < 0);
 }
 
+// Ground slope in the 8x8 column block, eighths of a cell per cell
+// (`block_slope` in field.rs).
+fn block_slope_of(t_x0: i32, t_x7: i32, t_y0: i32, t_y7: i32) -> i32 {
+    return max(abs(t_x7 - t_x0), abs(t_y7 - t_y0)) * 8 / 7;
+}
+
 fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
     let dirt = field.header.w;
     let steep = slope >= field.misc.z;
@@ -229,20 +235,42 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
         return M_STONE;
     }
     let snowline = field.levels.z + scale_q12(wet - Q12 / 2, field.levels.z / 4);
-    if top_height > snowline && depth < dirt && !steep { return M_SNOW; }
+    // Alpine weight: 0 below the rockline, Q12 at the snowline.
+    let rockline = snowline - field.levels.z / 3;
+    let band = max(snowline - rockline, 256);
+    let alpine = (clamp(top_height - rockline, 0, band) / 256) * Q12 / (band / 256);
+    // Rock patches (~50 m and ~6 m octaves), also breaking up snow edges.
+    // Noise is clamped to +-Q12, so below the rockline on gentler slopes no
+    // outcrop can reach the rock fringe: skip it (same result).
+    let seed = bitcast<u32>(field.misc.w);
+    var outcrop = -Q12;
+    if alpine > 0 || slope >= 5 {
+        outcrop = noise(p, 10u, seed ^ 0x1B56C4E9u) + noise(p, 7u, seed ^ 0x6A09E667u) / 3;
+    }
+    // Snow does not hold on faces steeper than ~37 degrees: rock streaks the snowfields.
+    if top_height > snowline && depth < dirt && slope + outcrop / 8192 < 6 { return M_SNOW; }
     if wet < Q12 * 3 / 10 {
         if depth < dirt && !steep { return M_SAND; }
         let band = rem_floor(div_floor(altitude, 2100), 5);
         return select(M_SANDSTONE, M_CLAY, band == 1 || band == 3);
     }
-    if steep {
+    // Rock shows through the turf in the outcrop patches, which grow up the
+    // alpine band below the snowline and on hillsides over ~32 degrees; scree and
+    // bare soil fringe them. Deeper cells keep the strata.
+    var exposed = outcrop + 2 * alpine - Q12;
+    if slope >= 5 { exposed += Q12 / 2; }
+    if steep || (exposed > 0 && depth < dirt) {
         if depth < 1 && (h & 7u) == 0u { return M_DIRT; }
-        return select(M_DARK_STONE, M_STONE, (div_floor(altitude, 900) & 1) == 0);
+        return select(M_DARK_STONE, M_STONE, (div_floor(altitude, 4500) & 1) == 0);
     }
-    if depth == 0 { return M_GRASS; }
+    if depth == 0 {
+        if exposed > -Q12 / 16 { return M_GRAVEL; }
+        if exposed > -Q12 / 8 { return M_DIRT; }
+        return M_GRASS;
+    }
     if depth < dirt { return M_DIRT; }
     if depth < dirt * 3 && (h & 3u) == 0u { return M_GRAVEL; }
-    return select(M_DARK_STONE, M_STONE, (div_floor(altitude, 1300) & 1) == 0);
+    return select(M_DARK_STONE, M_STONE, (div_floor(altitude, 12000) & 1) == 0);
 }
 
 fn bound_margin(level: u32) -> i32 {

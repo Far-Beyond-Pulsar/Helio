@@ -43,6 +43,19 @@ fn palette(m: u32) -> vec3<f32> {
     }
 }
 
+// Grass colour from dry through meadow to lush green by world-space
+// patches (continuous across levels). The patch octave fades out where it is
+// finer than a cell, so distant terrain shows its average.
+fn grass_albedo(p: vec3<i32>, level: u32) -> vec3<f32> {
+    let broad = f32(noise(p, 13u, 0x3c6ef372u)) / f32(Q12);
+    let patches = f32(noise(p, 9u, 0xa54ff53au)) / f32(Q12) * clamp(f32(8 - i32(level)) * 0.5, 0.0, 1.0);
+    let t = clamp(0.58 + 0.6 * broad + 0.14 * patches, 0.0, 1.0);
+    let dry = srgb(vec3<f32>(146.0, 148.0, 82.0));
+    let meadow = srgb(vec3<f32>(106.0, 144.0, 58.0));
+    let lush = srgb(vec3<f32>(64.0, 112.0, 46.0));
+    return select(mix(meadow, lush, t * 2.0 - 1.0), mix(dry, meadow, t * 2.0), t < 0.5);
+}
+
 fn plane_normal(face: u32, axis: u32, plane: i32) -> vec3<f32> {
     let f = frame.faces[face];
     var m = f.m_a.xyz;
@@ -135,10 +148,11 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let p = domain_point(face, h.i, h.j, level);
     if !edited {
         var lowest = top;
-        if x > 0u { let t = column_top(c, x - 1u, y); slope = max(slope, abs(t - top)); lowest = min(lowest, t); }
-        if x < 7u { let t = column_top(c, x + 1u, y); slope = max(slope, abs(t - top)); lowest = min(lowest, t); }
-        if y > 0u { let t = column_top(c, x, y - 1u); slope = max(slope, abs(t - top)); lowest = min(lowest, t); }
-        if y < 7u { let t = column_top(c, x, y + 1u); slope = max(slope, abs(t - top)); lowest = min(lowest, t); }
+        if x > 0u { lowest = min(lowest, column_top(c, x - 1u, y)); }
+        if x < 7u { lowest = min(lowest, column_top(c, x + 1u, y)); }
+        if y > 0u { lowest = min(lowest, column_top(c, x, y - 1u)); }
+        if y < 7u { lowest = min(lowest, column_top(c, x, y + 1u)); }
+        slope = block_slope_of(column_top(c, 0u, y), column_top(c, 7u, y), column_top(c, x, 0u), column_top(c, x, 7u));
         // Canonical materials use the column top cell, which is resident.
         // Depth counts from the lowest neighbouring top: an exposed riser
         // above it is surface, not subsoil (coarse levels step in large
@@ -156,6 +170,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let pixel = h.t * 2.0 / (camera.proj[1][1] * frame.screen.y);
     let size = frame.layer.y * f32(1 << level);
     let smooth_w = clamp((2.5 - size / pixel) / 1.5, 0.0, 1.0);
+    var lift = 0u;
     if smooth_w > 0.0 {
         let x0 = select(x - 1u, 0u, x == 0u);
         let x1 = min(x + 1u, 7u);
@@ -168,6 +183,9 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         normal = normalize(mix(normal, macro_normal, smooth_w));
         if code < 4u && smooth_w > 0.5 && !edited {
             material = ground_material(p, (top << level) * field.header.z, 0, slope, (top - 1) << level);
+            // Sunlight treats the riser as part of the slope: traced from
+            // the column's top surface, not into the step above it.
+            lift = u32(clamp(top - h.k, 0, 255));
         }
     }
     // Neighbourhood occlusion around the air cell in front of the face.
@@ -220,20 +238,29 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         let fade = clamp((size / pixel - 3.0) / 6.0, 0.0, 1.0);
         ao *= 1.0 - 0.14 * fade * (1.0 - smoothstep(0.0, 0.12, edge));
     }
-    // Per-voxel pigment variation and gentle patches (Lay of the Land look).
+    // Per-voxel pigment variation (averaged out once a cell is about a
+    // pixel) over world-space grass patches (Lay of the Land look).
     let hv = hash3(h.i, h.j, h.k + i32(face) * 7919 + i32(level) * 104729, 0x68bc21ebu);
-    let jitter = f32(hv & 255u) / 255.0;
-    let tint = f32(hash3(h.i >> 3u, h.j >> 3u, i32(face), 0x1b873593u) & 255u) / 255.0;
-    var albedo = palette(select(material, M_DIRT, soil_side)) * (0.86 + 0.24 * jitter);
-    if material == M_GRASS && !soil_side {
-        albedo *= mix(vec3<f32>(1.08, 1.0, 0.72), vec3<f32>(0.82, 1.02, 0.95), tint);
-        if code == 4u { albedo *= 1.06; } else { albedo *= 0.9; }
+    let jitter = mix(f32(hv & 255u) / 255.0, 0.5, smooth_w);
+    let pigment = 0.86 + 0.24 * jitter;
+    var albedo = palette(select(material, M_DIRT, soil_side)) * pigment;
+    if (material == M_GRASS && !soil_side) || smooth_w > 0.0 {
+        var grass = grass_albedo(p, level) * pigment;
+        if code != 4u { grass *= 0.9; }
+        if material == M_GRASS && !soil_side {
+            albedo = grass;
+        } else if code == 4u && !edited && (material == M_DIRT || material == M_SAND)
+            && (top << level) * field.header.z < field.levels.w {
+            // Single-voxel mud and sand specks of basin meadows.
+            albedo = mix(albedo, grass, smooth_w);
+        }
     }
     out.t = h.t;
     let a8 = vec4<u32>(vec4<f32>(clamp(pow(albedo, vec3<f32>(1.0 / 2.2)), vec3<f32>(0.0), vec3<f32>(1.0)), ao) * 255.0 + 0.5);
     out.albedo_ao = a8.x | (a8.y << 8u) | (a8.z << 16u) | (a8.w << 24u);
     out.normal = oct_encode(normal);
-    out.flags = ST_HIT | (material << 8u) | (level << 16u);
+    let filtered = u32(round(smooth_w * 7.0));
+    out.flags = ST_HIT | (material << 8u) | (level << 16u) | (filtered << 21u) | (lift << 24u);
     surfaces[index] = out;
 }
 
@@ -247,6 +274,8 @@ struct SunSample {
     footprint: f32,
     // Level of the terrain hit (-1: a mesh surface).
     level: i32,
+    // Filtered-appearance weight of the hit cell (see `shade`).
+    filtered: f32,
 }
 
 // Surface point that receives sunlight at pixel `p`: the terrain hit, or the
@@ -255,6 +284,7 @@ fn sun_sample(p: vec2<u32>) -> SunSample {
     var out: SunSample;
     out.valid = false;
     out.level = -1;
+    out.filtered = 0.0;
     let sun = normalize(frame.sun.xyz);
     let s = surfaces[pixel_index(p)];
     let d = pixel_ray(vec2<f32>(p) + 0.5);
@@ -265,18 +295,25 @@ fn sun_sample(p: vec2<u32>) -> SunSample {
         out.normal = oct_decode(s.normal);
         out.valid = true;
         out.level = i32((s.flags >> 16u) & 31u);
+        out.filtered = f32((s.flags >> 21u) & 7u) / 7.0;
         let clip = camera.view_proj * vec4<f32>(out.position, 1.0);
         if clip.w > 0.0 && clip.z / clip.w > depth + 1e-6 && depth > 0.0 && depth < 1.0 {
             let world = camera.inv_view_proj * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
             out.position = world.xyz / world.w;
             out.normal = sun;
             out.level = -1;
+            out.filtered = 0.0;
         }
     } else if depth > 0.0 && depth < 1.0 {
         let world = camera.inv_view_proj * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
         out.position = world.xyz / world.w;
         out.normal = sun;
         out.valid = true;
+    }
+    if out.level >= 0 {
+        // Filtered risers receive the light of their column's top surface.
+        let lift = f32(s.flags >> 24u) * frame.layer.y * f32(1 << u32(out.level));
+        out.position += hit_up(s.t, d) * lift;
     }
     out.footprint = length(out.position - camera.position_near.xyz) * 2.0 / (camera.proj[1][1] * frame.screen.y);
     return out;
@@ -297,8 +334,13 @@ fn sun_visibility(s: SunSample) -> f32 {
         let lo = select(0.0, frame.lod.x * exp2(f32(s.level) - 1.0) * 1.001, s.level > 0);
         offset = clamp(dist, lo, frame.lod.x * exp2(f32(s.level)) * 0.999);
     }
-    let eps = frame.layer.y * f32(1 << level) * 0.02 + dist * 2e-6;
-    let blocker = trace(make_ray(s.position + s.normal * eps, sun), 0.0, frame.lod.w, offset, 1.0, 0.0);
+    let cell = frame.layer.y * f32(1 << level);
+    let eps = cell * 0.02 + dist * 2e-6;
+    // A filtered cell stands for a smooth slope of many small steps, which
+    // casts no step shadows: skip occluders up to two cells high.
+    let up = normalize(frame.eye.xyz + s.position / frame.eye.w);
+    let skip = s.filtered * 2.0 * cell / max(dot(up, sun), 0.15);
+    let blocker = trace(make_ray(s.position + s.normal * eps, sun), skip, frame.lod.w, offset, 1.0, 0.0);
     return select(0.0, 1.0, (blocker.info & 3u) == ST_MISS);
 }
 

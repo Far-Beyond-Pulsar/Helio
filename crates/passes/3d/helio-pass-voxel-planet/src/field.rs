@@ -64,13 +64,13 @@ impl Default for Landform {
             continent_km: 3_000.0,
             ocean_depth_m: 2_400.0,
             lowland_m: 180.0,
-            mountain_m: 2_600.0,
-            mountain_km: 90.0,
+            mountain_m: 2_400.0,
+            mountain_km: 20.0,
             hill_m: 140.0,
             hill_km: 9.0,
             roughness: 0.035,
             warp_km: 40.0,
-            snowline_m: 2_300.0,
+            snowline_m: 3_000.0,
         }
     }
 }
@@ -202,7 +202,7 @@ impl FieldConstants {
                 units(land.snowline_m),
                 units(-8.0),
             ],
-            misc: [0, ONE / 5, 2, land.seed as i32],
+            misc: [0, ONE / 20, 16, land.seed as i32],
             scale: [grid.domain_scale() as i32, grid.level_offset() as i32, grid.cells(), 0],
             bounds: [[0; 4]; 6],
             octaves: table,
@@ -436,10 +436,19 @@ pub fn moisture(k: &FieldConstants, p: IVec3) -> i32 {
     (noise(p, o, (k.misc[3] as u32) ^ 0x51ED_270B) + ONE) / 2
 }
 
+/// Ground slope of a cell in its 8x8 column block, in eighths of a cell per
+/// cell: the larger top difference across the block along either axis.
+/// Smooth and level-invariant, unlike neighbour steps of stepped terrain.
+pub fn block_slope(top: impl Fn(i32, i32) -> i32, x: i32, y: i32) -> i32 {
+    let si = (top(7, y) - top(0, y)).abs();
+    let sj = (top(x, 7) - top(x, 0)).abs();
+    si.max(sj) * 8 / 7
+}
+
 /// Material of a solid ground cell. `top_height` is the column height (mm),
 /// `depth` cells below the column top (0 = exposed top cell), `slope` the
-/// largest top difference (cells) to a neighbour inside the same 8x8 column
-/// block, `layer` the base layer index of the cell.
+/// ground slope across the cell's 8x8 column block in eighths of a cell per
+/// cell (see [`block_slope`]), `layer` the base layer index of the cell.
 pub fn ground_material(
     c: &FieldConstants,
     p: IVec3,
@@ -476,7 +485,21 @@ pub fn ground_material(
         };
     }
     let snowline = c.levels[2] + scale(wet - ONE / 2, c.levels[2] / 4);
-    if top_height > snowline && depth < dirt && !steep {
+    // Alpine weight: 0 below the rockline, ONE at the snowline.
+    let rockline = snowline - c.levels[2] / 3;
+    let band = (snowline - rockline).max(256);
+    let alpine = ((top_height - rockline).clamp(0, band) / 256) * ONE / (band / 256);
+    // Rock patches (~50 m and ~6 m octaves), also breaking up snow edges.
+    // Noise is clamped to +-ONE, so below the rockline on gentler slopes no
+    // outcrop can reach the rock fringe: skip it (same result).
+    let seed = c.misc[3] as u32;
+    let outcrop = if alpine > 0 || slope >= 5 {
+        noise(p, 10, seed ^ 0x1B56_C4E9) + noise(p, 7, seed ^ 0x6A09_E667) / 3
+    } else {
+        -ONE
+    };
+    // Snow does not hold on faces steeper than ~37 degrees: rock streaks the snowfields.
+    if top_height > snowline && depth < dirt && slope + outcrop / 8192 < 6 {
         return SNOW;
     }
     if wet < ONE * 3 / 10 {
@@ -487,22 +510,35 @@ pub fn ground_material(
         let band = altitude.div_euclid(2_100).rem_euclid(5);
         return if band == 1 || band == 3 { CLAY } else { SANDSTONE };
     }
-    if steep {
+    // Rock shows through the turf in the outcrop patches, which grow up the
+    // alpine band below the snowline and on hillsides over ~32 degrees; scree and
+    // bare soil fringe them. Deeper cells keep the strata.
+    let mut exposed = outcrop + 2 * alpine - ONE;
+    if slope >= 5 {
+        exposed += ONE / 2;
+    }
+    if steep || (exposed > 0 && depth < dirt) {
         return if depth < 1 && h & 7 == 0 {
             DIRT
-        } else if altitude.div_euclid(900) & 1 == 0 {
+        } else if altitude.div_euclid(4_500) & 1 == 0 {
             STONE
         } else {
             DARK_STONE
         };
     }
     if depth == 0 {
-        GRASS
+        if exposed > -ONE / 16 {
+            GRAVEL
+        } else if exposed > -ONE / 8 {
+            DIRT
+        } else {
+            GRASS
+        }
     } else if depth < dirt {
         DIRT
     } else if depth < dirt * 3 && h & 3 == 0 {
         GRAVEL
-    } else if altitude.div_euclid(1_300) & 1 == 0 {
+    } else if altitude.div_euclid(12_000) & 1 == 0 {
         STONE
     } else {
         DARK_STONE
