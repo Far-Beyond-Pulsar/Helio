@@ -130,6 +130,9 @@ impl RenderPass for FxaaPass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read(self.color_input);
+        // FogCompositePass may publish pre_aa's view as fogged_hdr (no fog
+        // possible); reading pre_aa keeps the pool from reusing it before us.
+        if self.color_input == "fogged_hdr" { builder.read("pre_aa"); }
         if let Some(format) = self.intermediate_format {
             builder.write_color_raw("fxaa_color", format, helio_core::graph::ResourceSize::MatchSurface);
         }

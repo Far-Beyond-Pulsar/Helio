@@ -33,6 +33,7 @@ pub use gpu_types::*;
 mod volume_blend;
 pub use volume_blend::{
     PostProcessVolumeBlendPass, AUTO_EXPOSURE_MAYBE_ACTIVE, BLOOM_MAYBE_ACTIVE, DOF_MAYBE_ACTIVE,
+    FOG_SETTINGS_MAYBE_ACTIVE,
 };
 
 mod fog_composite;
@@ -1218,6 +1219,9 @@ impl RenderPass for PostProcessPass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read(self.color_input);
+        // FogCompositePass may publish pre_aa's view as fogged_hdr (no fog
+        // possible); reading pre_aa keeps the pool from reusing it before us.
+        if self.color_input == crate::FOGGED_HDR { builder.read("pre_aa"); }
         // Resolved camera + volume settings from PostProcessVolumeBlendPass.
         builder.read("postprocess_uniforms");
         // Optional: graphs without a LensFlarePass never publish this, and the

@@ -21,6 +21,9 @@ pub struct PostProcessVolumeBlendPass {
     /// Published as `"auto_exposure_maybe_active"`; see
     /// [`AUTO_EXPOSURE_MAYBE_ACTIVE`].
     auto_exposure: SettingActivity,
+    /// Published as `"fog_settings_maybe_active"`; see
+    /// [`FOG_SETTINGS_MAYBE_ACTIVE`].
+    fog: SettingActivity,
 }
 
 /// Whether any source the resolver blends from can turn one setting on this
@@ -78,6 +81,12 @@ pub const BLOOM_MAYBE_ACTIVE: &str = "bloom_maybe_active";
 /// [`DOF_MAYBE_ACTIVE`].
 pub const AUTO_EXPOSURE_MAYBE_ACTIVE: &str = "auto_exposure_maybe_active";
 
+/// `bool` registry key: false only when no source the resolver blends from
+/// can enable the post-process fog block, and no volume row carries an
+/// enabled fog medium (VolumetricFogPass also reads volume rows as bounded
+/// media). Tracked like [`DOF_MAYBE_ACTIVE`].
+pub const FOG_SETTINGS_MAYBE_ACTIVE: &str = "fog_settings_maybe_active";
+
 /// The resolver treats any shape that is not negative (including NaN) as DOF.
 fn shape_enables_dof(shape: f32) -> bool {
     !(shape < 0.0)
@@ -94,6 +103,7 @@ fn read_u32(row: &[u8], offset: usize) -> Option<u32> {
 const DOF_SHAPE: usize = std::mem::offset_of!(crate::GpuPostProcessUniforms, dof_aperture_shape);
 const BLOOM_ENABLED: usize = std::mem::offset_of!(crate::GpuPostProcessUniforms, bloom_enabled);
 const EXPOSURE_MODE: usize = std::mem::offset_of!(crate::GpuPostProcessUniforms, exposure_mode);
+const FOG_ENABLED: usize = std::mem::offset_of!(crate::GpuPostProcessUniforms, fog_enabled);
 
 /// An enabled camera row whose settings enable DOF. The resolver also
 /// matches `view_id`; ignoring it here only errs toward "maybe".
@@ -180,6 +190,30 @@ fn volume_row_enables_auto_exposure(row: &[u8]) -> bool {
     }
 }
 
+/// An enabled camera row whose fog block is enabled.
+fn camera_row_enables_fog(row: &[u8]) -> bool {
+    use crate::CameraPostProcessComponent as C;
+    let enabled = read_u32(row, std::mem::offset_of!(C, enabled));
+    let fog = read_u32(row, std::mem::offset_of!(C, settings) + FOG_ENABLED);
+    match (enabled, fog) {
+        (Some(enabled), Some(fog)) => enabled != 0 && fog != 0,
+        _ => true,
+    }
+}
+
+/// A weighted volume row whose fog block is enabled. The override mask is
+/// not consulted: VolumetricFogPass also treats such rows as bounded media
+/// regardless of it (`legacy_volume_active`).
+fn volume_row_enables_fog(row: &[u8]) -> bool {
+    use crate::GpuPostProcessVolume as V;
+    let weight = read_f32(row, std::mem::offset_of!(V, blend_weight));
+    let fog = read_u32(row, std::mem::offset_of!(V, settings) + FOG_ENABLED);
+    match (weight, fog) {
+        (Some(weight), Some(fog)) => !(weight <= 0.0) && fog != 0,
+        _ => true,
+    }
+}
+
 impl PostProcessVolumeBlendPass {
     pub fn new(device: &wgpu::Device) -> Self {
         Self::with_defaults(device, &crate::PostProcessSettings::default())
@@ -236,6 +270,11 @@ impl PostProcessVolumeBlendPass {
                 camera_row_enables_auto_exposure,
                 volume_row_enables_auto_exposure,
             ),
+            fog: SettingActivity::new(
+                settings.to_gpu().fog_enabled != 0,
+                camera_row_enables_fog,
+                volume_row_enables_fog,
+            ),
         }
     }
     /// GPU-derived settings, valid after the resolver dispatch and copy.
@@ -252,6 +291,7 @@ impl RenderPass for PostProcessVolumeBlendPass {
         self.dof.update(ctx, cameras, volumes);
         self.bloom.update(ctx, cameras, volumes);
         self.auto_exposure.update(ctx, cameras, volumes);
+        self.fog.update(ctx, cameras, volumes);
         Ok(())
     }
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
@@ -292,6 +332,7 @@ impl RenderPass for PostProcessVolumeBlendPass {
             self.auto_exposure.maybe_active,
             self.name(),
         );
+        frame.write(ResourceKey::new(FOG_SETTINGS_MAYBE_ACTIVE), self.fog.maybe_active, self.name());
     }
 }
 
@@ -408,6 +449,33 @@ mod activity_tests {
         assert!(!volume_row_enables_auto_exposure(bytemuck::bytes_of(&volume(true, 0.0, true))));
         assert!(!volume_row_enables_auto_exposure(bytemuck::bytes_of(&volume(false, 1.0, true))));
         assert_eq!(PostProcessSettings::default().to_gpu().exposure_mode, 0, "manual by default");
+    }
+
+    #[test]
+    fn fog_rows() {
+        let settings = |fog| {
+            let mut settings = PostProcessSettings::default();
+            settings.fog_enabled = fog;
+            settings
+        };
+        let camera = |fog, enabled| {
+            let mut row = CameraPostProcessComponent::new(0, &settings(fog));
+            row.enabled = enabled;
+            row
+        };
+        assert!(camera_row_enables_fog(bytemuck::bytes_of(&camera(true, 1))));
+        assert!(!camera_row_enables_fog(bytemuck::bytes_of(&camera(false, 1))));
+        assert!(!camera_row_enables_fog(bytemuck::bytes_of(&camera(true, 0))));
+        let volume = |fog, weight| {
+            let mut volume: GpuPostProcessVolume = bytemuck::Zeroable::zeroed();
+            volume.settings = settings(fog).to_gpu();
+            volume.blend_weight = weight;
+            volume
+        };
+        assert!(volume_row_enables_fog(bytemuck::bytes_of(&volume(true, 1.0))), "no override bit needed");
+        assert!(!volume_row_enables_fog(bytemuck::bytes_of(&volume(true, 0.0))));
+        assert!(!volume_row_enables_fog(bytemuck::bytes_of(&volume(false, 1.0))));
+        assert_eq!(PostProcessSettings::default().to_gpu().fog_enabled, 0, "fog off by default");
     }
 
     #[test]
