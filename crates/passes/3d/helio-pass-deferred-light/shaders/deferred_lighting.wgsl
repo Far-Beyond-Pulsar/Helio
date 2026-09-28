@@ -1191,6 +1191,20 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 let dist = length(light.position_range.xyz - world_pos);
                 if dist > light.position_range.w { continue; }
             }
+            // A surface facing away from the light receives nothing from it:
+            // pbr_direct_light returns exactly zero whenever N·L <= 0, so its
+            // shadow and transmittance lookups cannot change Lo. L is built
+            // the way pbr_direct_light builds it; the margin keeps the skip
+            // strictly inside that case even if the two dot products round
+            // differently.
+            var to_light_dir: vec3<f32>;
+            if light.light_type == 0u {
+                to_light_dir = normalize(-light.direction_outer.xyz);
+            } else {
+                let to_light = light.position_range.xyz - world_pos;
+                to_light_dir = to_light / length(to_light);
+            }
+            if dot(N, to_light_dir) < -1e-4 { continue; }
             // VG geometry does not render into shadow maps, so shadow_factor
             // would incorrectly occlude VG pixels with unrelated regular geometry.
             // Skip shadow evaluation for VG surfaces. Must be a real `if`, not
