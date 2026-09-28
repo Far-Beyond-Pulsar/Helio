@@ -3,20 +3,33 @@
 // Every point of a ray from the eye lies in one plane through the planet
 // centre, so seen from the eye it keeps a single azimuth, and its angular
 // distance from the eye grows monotonically. Each frame the resident
-// summary blocks are binned by azimuth sector and by the farthest angular
-// distance they reach; a suffix maximum over distance then bounds every
-// terrain cell such a ray can still meet. A rising ray above that bound
-// leaves the planet without another hit.
+// summary blocks are binned by azimuth sector and by the range of angular
+// distances they cover. Per bucket, that bounds every terrain cell a ray
+// can meet there. A ray's height at any angular distance grows with its
+// elevation, so each bucket stores the lowest elevation that clears it; a
+// primary ray ends after the farthest bucket it does not clear
+// (`sky_escape`). Beams use the suffix maximum over distance
+// (`horizon_layer`).
 
 const SECTORS: u32 = 256u;
 const BUCKETS: u32 = 32u;
+// Coarse sector groups: blocks spanning many sectors write whole groups.
+const GROUPS: u32 = 16u;
+const GROUP_SECTORS: i32 = 16;
 const HORIZON_NONE: i32 = -0x3fffffff;
 const TAU: f32 = 6.283185307;
 
-// Accumulated maxima: [bucket][sector], then one all-sector row per bucket.
+// Accumulated maxima: [bucket][sector], then [bucket][group].
 @group(0) @binding(17) var<storage, read_write> horizon_acc: array<atomic<i32>>;
-// Suffix maxima over distance, dilated by one sector, same layout.
+// Dilated by one sector: suffix maxima [bucket][sector], per-bucket
+// clearing elevations [bucket][sector] (f32 bits), then the all-sector
+// suffix and clearing-elevation rows.
 @group(0) @binding(18) var<storage, read_write> horizon: array<i32>;
+// Live tier-1 summary block slots (maintained by the CPU residency).
+@group(0) @binding(19) var<storage, read> live_blocks: array<u32>;
+const H_PER: u32 = SECTORS * BUCKETS;
+const H_ALL_SUFFIX: u32 = 2u * SECTORS * BUCKETS;
+const H_ALL_PER: u32 = 2u * SECTORS * BUCKETS + BUCKETS;
 
 const FACE_N: array<vec3<f32>, 6> = array<vec3<f32>, 6>(
     vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0),
@@ -43,10 +56,19 @@ fn angle_between(a: vec3<f32>, b: vec3<f32>) -> f32 {
     return atan2(length(cross(a, b)), dot(a, b));
 }
 
+fn phi0() -> f32 {
+    return frame.lod.x / frame.eye.w * 0.5;
+}
+
+// Bucket 0 is [0, phi0); bucket b > 0 is [phi0 2^(b-1), phi0 2^b).
 fn phi_bucket(phi: f32) -> u32 {
-    let phi0 = frame.lod.x / frame.eye.w * 0.5;
-    if phi < phi0 { return 0u; }
-    return min(u32(floor(log2(phi / phi0))) + 1u, BUCKETS - 1u);
+    if phi < phi0() { return 0u; }
+    return min(u32(floor(log2(phi / phi0()))) + 1u, BUCKETS - 1u);
+}
+
+fn bucket_start(b: u32) -> f32 {
+    if b == 0u { return 0.0; }
+    return phi0() * exp2(f32(b - 1u));
 }
 
 fn face_dir(face: u32, i: f32, j: f32) -> vec3<f32> {
@@ -57,21 +79,22 @@ fn face_dir(face: u32, i: f32, j: f32) -> vec3<f32> {
 
 @compute @workgroup_size(64)
 fn horizon_clear(@builtin(global_invocation_id) id: vec3<u32>) {
-    if id.x < (SECTORS + 1u) * BUCKETS {
+    if id.x < (SECTORS + GROUPS) * BUCKETS {
         atomicStore(&horizon_acc[id.x], HORIZON_NONE);
     }
 }
 
-// One thread per tier-1 summary block (4 x 4 columns) of every level and
-// face: small enough that the coarse blocks around the eye fall inside their
-// level's ring and drop out.
+// One thread per live tier-1 summary block (4 x 4 columns): small enough
+// that the coarse blocks around the eye fall inside their level's ring and
+// drop out.
 @compute @workgroup_size(64)
 fn horizon_blocks(@builtin(global_invocation_id) id: vec3<u32>) {
-    let levels = u32(frame.layer_i.z);
-    if id.x >= (1u << 14u) || id.y >= levels * 6u { return; }
-    let level = id.y / 6u;
-    let face = id.y % 6u;
-    let slot = ((level * 6u + face) * frame.extra.y + id.x) * 4u;
+    if id.x >= frame.extra.w { return; }
+    let entry = live_blocks[id.x];
+    let region = entry / frame.extra.y;
+    let level = region / 6u;
+    let face = region % 6u;
+    let slot = entry * 4u;
     if block_state[slot + 3u] <= 0 { return; }
     let bi = block_state[slot];
     let bj = block_state[slot + 1u];
@@ -91,10 +114,11 @@ fn horizon_blocks(@builtin(global_invocation_id) id: vec3<u32>) {
     let theta = angle_between(u, c);
     let reach = (theta + rho) * 1.001 + 1e-6;
     // Rays can only use this level beyond its ring: nearer blocks never
-    // serve a sky-bounded ray.
-    if reach < frame.ring[level >> 2u][level & 3u] { return; }
-    let bucket = phi_bucket(reach);
-    atomicMax(&horizon_acc[SECTORS * BUCKETS + bucket], top);
+    // serve a sky-bounded ray, and nearer parts of a block neither.
+    let ring = frame.ring[level >> 2u][level & 3u];
+    if reach < ring { return; }
+    let b_lo = phi_bucket(max(theta - rho, ring) * 0.999 - 1e-6);
+    let b_hi = phi_bucket(reach);
     var lo = 0;
     var count = i32(SECTORS);
     if theta > rho + 2e-5 && theta + rho < 3.1 {
@@ -109,29 +133,85 @@ fn horizon_blocks(@builtin(global_invocation_id) id: vec3<u32>) {
             count = min(2 * w + 1, i32(SECTORS));
         }
     }
+    // Narrow spans write sectors, wide ones the groups that cover them.
+    var base = 0u;
+    var stride = SECTORS;
+    var modulus = i32(SECTORS);
+    if count > 2 * GROUP_SECTORS {
+        let first = (lo + i32(SECTORS) * 2) / GROUP_SECTORS;
+        let last = (lo + count - 1 + i32(SECTORS) * 2) / GROUP_SECTORS;
+        lo = first;
+        count = min(last - first + 1, i32(GROUPS));
+        base = SECTORS * BUCKETS;
+        stride = GROUPS;
+        modulus = i32(GROUPS);
+    }
     for (var s = 0; s < count; s++) {
-        let sector = u32((lo + s + i32(SECTORS) * 2) % i32(SECTORS));
-        atomicMax(&horizon_acc[bucket * SECTORS + sector], top);
+        let cell = u32((lo + s + modulus * 4) % modulus);
+        for (var b = b_lo; b <= b_hi; b++) {
+            let at = base + b * stride + cell;
+            // Most cells already hold a higher top: skip the contended write.
+            if atomicLoad(&horizon_acc[at]) < top {
+                atomicMax(&horizon_acc[at], top);
+            }
+        }
     }
 }
 
-// Suffix maximum over distance buckets, dilated by one sector per side.
-@compute @workgroup_size(64)
-fn horizon_suffix(@builtin(global_invocation_id) id: vec3<u32>) {
-    if id.x > SECTORS { return; }
+// Lowest eye-ray elevation whose every point in angular distances [pa, pb]
+// is higher than `top` (and the cut height). Passing above height H at
+// angle phi needs tan e > (k cos phi - 1) / (k sin phi), k = 1 + H / rho;
+// that bound falls with phi once cos phi < k, so the maximum over the
+// bucket is at pa, or at acos k when the top is below the eye.
+fn clearing_elevation(top: i32, b: u32) -> f32 {
+    let h = max(layer_height(top), frame.lod.z);
+    let rho = frame.eye.w;
+    let k = 1.0 + h / rho;
+    let pa = bucket_start(b);
+    var pb = 3.14159265;
+    if b + 1u < BUCKETS { pb = bucket_start(b + 1u); }
+    var phi = pa;
+    if h < 0.0 { phi = clamp(2.0 * asin(sqrt(-h / (2.0 * rho))), pa, pb); }
+    if phi <= 0.0 { return 1.5707964; }
+    let s = sin(phi * 0.5);
+    return atan2(h / rho - 2.0 * k * s * s, k * sin(phi)) + 2e-6;
+}
+
+var<workgroup> all_sectors: array<atomic<i32>, 32>;
+
+// Clearing elevations and suffix maxima over distance buckets, dilated by
+// one sector per side; one workgroup, one thread per sector. The all-sector
+// rows reduce through workgroup memory.
+@compute @workgroup_size(256)
+fn horizon_suffix(@builtin(local_invocation_index) s: u32) {
+    if s < BUCKETS { atomicStore(&all_sectors[s], HORIZON_NONE); }
+    workgroupBarrier();
     var running = HORIZON_NONE;
+    let prev = (s + SECTORS - 1u) % SECTORS;
+    let next = (s + 1u) % SECTORS;
+    let g = s / u32(GROUP_SECTORS);
+    let g_prev = prev / u32(GROUP_SECTORS);
+    let g_next = next / u32(GROUP_SECTORS);
     for (var b = i32(BUCKETS) - 1; b >= 0; b--) {
         let row = u32(b) * SECTORS;
-        if id.x == SECTORS {
-            running = max(running, atomicLoad(&horizon_acc[SECTORS * BUCKETS + u32(b)]));
-            horizon[SECTORS * BUCKETS + u32(b)] = running;
-        } else {
-            let s = id.x;
-            let prev = (s + SECTORS - 1u) % SECTORS;
-            let next = (s + 1u) % SECTORS;
-            running = max(running, max(atomicLoad(&horizon_acc[row + s]),
-                max(atomicLoad(&horizon_acc[row + prev]), atomicLoad(&horizon_acc[row + next]))));
-            horizon[row + s] = running;
+        let groups = SECTORS * BUCKETS + u32(b) * GROUPS;
+        let own = max(atomicLoad(&horizon_acc[row + s]), atomicLoad(&horizon_acc[groups + g]));
+        atomicMax(&all_sectors[b], own);
+        let v = max(own, max(
+            max(atomicLoad(&horizon_acc[row + prev]), atomicLoad(&horizon_acc[groups + g_prev])),
+            max(atomicLoad(&horizon_acc[row + next]), atomicLoad(&horizon_acc[groups + g_next]))));
+        running = max(running, v);
+        horizon[H_PER + row + s] = bitcast<i32>(clearing_elevation(v, u32(b)));
+        horizon[row + s] = running;
+    }
+    workgroupBarrier();
+    if s == 0u {
+        var all = HORIZON_NONE;
+        for (var b = i32(BUCKETS) - 1; b >= 0; b--) {
+            let v = atomicLoad(&all_sectors[b]);
+            all = max(all, v);
+            horizon[H_ALL_PER + u32(b)] = bitcast<i32>(clearing_elevation(v, u32(b)));
+            horizon[H_ALL_SUFFIX + u32(b)] = all;
         }
     }
 }
@@ -175,8 +255,30 @@ fn eye_sky(l: vec3<f32>, spread: f32) -> SkyRay {
 // occupy along this ray's azimuth.
 fn horizon_layer(s: SkyRay, phi: f32) -> i32 {
     let b = phi_bucket(phi * 0.999);
-    if s.sector < 0 { return horizon[SECTORS * BUCKETS + b]; }
+    if s.sector < 0 { return horizon[H_ALL_SUFFIX + b]; }
     return horizon[b * SECTORS + u32(s.sector)];
+}
+
+// Ray distance after which an eye ray meets no resident terrain (3e38 if
+// the table cannot tell): the far end of the farthest bucket whose
+// clearing elevation the ray does not exceed.
+fn sky_escape(s: SkyRay) -> f32 {
+    if s.sector < -1 { return 3.0e38; }
+    let e = atan2(s.lu, s.lt);
+    var row = H_ALL_PER;
+    var stride = 1u;
+    if s.sector >= 0 {
+        row = H_PER + u32(s.sector);
+        stride = SECTORS;
+    }
+    var b = i32(BUCKETS) - 1;
+    while b >= 0 && e > bitcast<f32>(horizon[row + u32(b) * stride]) { b -= 1; }
+    if b < 0 { return 0.0; }
+    if b + 1 >= i32(BUCKETS) { return 3.0e38; }
+    let phi = bucket_start(u32(b + 1));
+    let c = cos(e + phi);
+    if c <= 1e-6 { return 3.0e38; }
+    return frame.eye.w * sin(phi) / c * 1.0001 + 1e-3;
 }
 
 // Angular distance from the eye of the eye-ray point at `t`.

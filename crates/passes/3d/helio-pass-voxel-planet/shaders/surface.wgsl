@@ -15,7 +15,9 @@ fn primary(@builtin(global_invocation_id) id: vec3<u32>) {
     let r = make_ray(camera.position_near.xyz, d);
     let tiles = (u32(frame.screen.x) + BEAM - 1u) / BEAM;
     let start = select(0.0, beams[id.x / BEAM + (id.y / BEAM) * tiles], (u32(frame.screen.w) & 1u) != 0u);
-    hits[pixel_index(id.xy)] = trace(r, start, frame.lod.w, 0.0, 1.0, frame.lod.y, eye_sky(d, 0.0));
+    let sky = eye_sky(d, 0.0);
+    let end = min(frame.lod.w, sky_escape(sky));
+    hits[pixel_index(id.xy)] = trace(r, start, end, 0.0, 1.0, frame.lod.y, sky);
 }
 
 fn srgb(c: vec3<f32>) -> vec3<f32> {

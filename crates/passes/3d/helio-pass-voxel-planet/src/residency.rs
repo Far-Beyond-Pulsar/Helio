@@ -199,6 +199,11 @@ pub struct Residency {
     residents: FxHashMap<u64, Resident>,
     blocks: FxHashMap<(u32, u8, u32, i32, i32), Block>,
     block_owner: FxHashMap<u32, (u32, u8, u32, i32, i32)>,
+    /// Dense list of live tier-1 block slots (GPU horizon build input) and
+    /// each slot's position in it; `live_dirty` marks a pending upload.
+    live_tier1: Vec<u32>,
+    live_index: FxHashMap<u32, usize>,
+    live_dirty: bool,
     table: Vec<u32>,
     used_slots: u32,
     tombstones: u32,
@@ -241,6 +246,9 @@ impl Residency {
             residents: FxHashMap::default(),
             blocks: FxHashMap::default(),
             block_owner: FxHashMap::default(),
+            live_tier1: Vec::new(),
+            live_index: FxHashMap::default(),
+            live_dirty: false,
             table: vec![NONE; 1 << capacity.table_bits],
             used_slots: 0,
             tombstones: 0,
@@ -406,6 +414,11 @@ impl Residency {
             self.block_owner.insert(slot, bkey);
             work.block_inits.push((slot, bi, bj));
             self.blocks.insert(bkey, Block { slot, refs: 1 });
+            if tier == 1 {
+                self.live_index.insert(slot, self.live_tier1.len());
+                self.live_tier1.push(slot);
+                self.live_dirty = true;
+            }
         }
         true
     }
@@ -420,6 +433,15 @@ impl Residency {
                 let b = self.blocks.remove(&bkey).unwrap();
                 self.block_owner.remove(&b.slot);
                 work.block_inits.push((b.slot, -1, -1));
+                if tier == 1 {
+                    if let Some(at) = self.live_index.remove(&b.slot) {
+                        self.live_tier1.swap_remove(at);
+                        if let Some(&moved) = self.live_tier1.get(at) {
+                            self.live_index.insert(moved, at);
+                        }
+                        self.live_dirty = true;
+                    }
+                }
             }
         }
     }
@@ -655,6 +677,14 @@ impl Residency {
     }
 
     /// Every pending window column has been issued.
+    /// Live tier-1 summary block slots, when they changed since the last call.
+    pub fn take_live_blocks(&mut self) -> Option<&[u32]> {
+        std::mem::take(&mut self.live_dirty).then_some(self.live_tier1.as_slice())
+    }
+    pub fn live_block_count(&self) -> usize {
+        self.live_tier1.len()
+    }
+
     /// Per level: the current window is planned and every wanted column has
     /// been issued (inactive levels are incomplete: rays fall back past them).
     pub fn complete_levels(&self) -> Vec<bool> {

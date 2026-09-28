@@ -498,9 +498,9 @@ fn main() {
             let terrain: Vec<f64> = list.iter().map(|s| s.terrain_gpu_ms).collect();
             let stage = |k: &str| percentile(&list.iter().map(|s| s.stages.get(k).copied().unwrap_or(0.0)).collect::<Vec<_>>(), 0.5);
             eprintln!(
-                "QUICK {name:16} n={:4} sync p50 {:7.2} p95 {:7.2} terrain p50 {:6.2} p95 {:6.2} | primary {:6.2} shade {:5.2} sun {:6.2} residency {:5.2}",
+                "QUICK {name:16} n={:4} sync p50 {:7.2} p95 {:7.2} terrain p50 {:6.2} p95 {:6.2} | primary {:6.2} shade {:5.2} sun {:6.2} residency {:5.2} horizon {:5.3}",
                 list.len(), percentile(&sync, 0.5), percentile(&sync, 0.95), percentile(&terrain, 0.5), percentile(&terrain, 0.95),
-                stage("planet_primary"), stage("planet_shade"), stage("planet_sunlight"), stage("planet_residency")
+                stage("planet_primary"), stage("planet_shade"), stage("planet_sunlight"), stage("planet_residency"), stage("planet_horizon")
             );
         }
         for a in &audits {

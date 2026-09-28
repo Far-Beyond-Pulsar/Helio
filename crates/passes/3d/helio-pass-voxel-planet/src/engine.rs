@@ -223,6 +223,7 @@ impl Pipelines {
             storage(16, false),
             storage(17, false),
             storage(18, false),
+            storage(19, true),
         ];
         trace_entries.push(wgpu::BindGroupLayoutEntry {
             binding: 9,
@@ -380,6 +381,8 @@ struct Buffers {
     /// Directional sky bound: accumulated and suffix tables.
     horizon_acc: wgpu::Buffer,
     horizon: wgpu::Buffer,
+    /// Live tier-1 block slots (grows).
+    live_blocks: wgpu::Buffer,
     brush_capacity: u32,
     bytes: u64,
 }
@@ -388,6 +391,7 @@ const JOB_OUT_BYTES: u64 = 96;
 /// Must match `SECTORS` and `BUCKETS` in horizon.wgsl.
 const HORIZON_SECTORS: u32 = 256;
 const HORIZON_BUCKETS: u32 = 32;
+const HORIZON_GROUPS: u32 = 16;
 
 impl Buffers {
     fn new(device: &wgpu::Device, cap: &Capacity, field: &FieldConstants) -> Self {
@@ -417,9 +421,13 @@ impl Buffers {
             st,
         );
         let evictions = make("planet evictions", (u64::from(cap.max_evictions) * 3 + u64::from(cap.max_jobs) * 2) * 4, st);
-        let horizon_bytes = u64::from((HORIZON_SECTORS + 1) * HORIZON_BUCKETS) * 4;
-        let horizon_acc = make("planet horizon accumulation", horizon_bytes, st);
-        let horizon = make("planet horizon bound", horizon_bytes, st | wgpu::BufferUsages::COPY_SRC);
+        let horizon_acc = make("planet horizon accumulation", u64::from((HORIZON_SECTORS + HORIZON_GROUPS) * HORIZON_BUCKETS) * 4, st);
+        let horizon = make(
+            "planet horizon bound",
+            u64::from(2 * (HORIZON_SECTORS + 1) * HORIZON_BUCKETS) * 4,
+            st | wgpu::BufferUsages::COPY_SRC,
+        );
+        let live_blocks = make("planet live summary blocks", 65_536 * 4, st);
         let brush_capacity = 65_536;
         let brushes = make("planet brushes", u64::from(brush_capacity) * 32, st | wgpu::BufferUsages::COPY_SRC);
         let table_init = vec![NONE; 1 << cap.table_bits];
@@ -472,6 +480,7 @@ impl Buffers {
             block_state,
             horizon_acc,
             horizon,
+            live_blocks,
             brush_capacity,
             bytes,
         }
@@ -878,6 +887,21 @@ impl PlanetRenderer {
         self.stats.plan_cpu_ms = started.elapsed().as_secs_f64() * 1000.0;
         let uploading = std::time::Instant::now();
         let (patches, block_patches) = self.upload(&work);
+        if let Some(live) = self.residency.take_live_blocks() {
+            let bytes = (live.len() * 4) as u64;
+            if bytes > self.buffers.live_blocks.size() {
+                self.buffers.live_blocks = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("planet live summary blocks"),
+                    size: bytes.next_power_of_two(),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            if !live.is_empty() {
+                self.queue.write_buffer(&self.buffers.live_blocks, 0, bytemuck::cast_slice(live));
+            }
+        }
+        let live_blocks = self.residency.live_block_count() as u32;
         self.stats.upload_cpu_ms = uploading.elapsed().as_secs_f64() * 1000.0;
         let encoding = std::time::Instant::now();
         let jobs = work.jobs.len() as u32;
@@ -886,6 +910,7 @@ impl PlanetRenderer {
         uniform.extra[0] = patches;
         uniform.extra[1] = crate::residency::block_region();
         uniform.extra[2] = block_patches;
+        uniform.extra[3] = live_blocks;
         self.queue.write_buffer(&self.buffers.frame, 0, bytemuck::bytes_of(&uniform));
         let camera_key = camera as *const _ as usize;
         if self.camera_group.as_ref().is_none_or(|(k, _)| *k != camera_key) {
@@ -916,6 +941,7 @@ impl PlanetRenderer {
                 wgpu::BindGroupEntry { binding: 16, resource: self.screen.beams.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 17, resource: self.buffers.horizon_acc.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 18, resource: self.buffers.horizon.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 19, resource: self.buffers.live_blocks.as_entire_binding() },
             ],
         });
         let render_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -974,17 +1000,25 @@ impl PlanetRenderer {
         }
         let groups = [size[0].div_ceil(8), size[1].div_ceil(8), 1];
         if let Some(p) = &mut self.profiler {
+            p.begin_pass(encoder, "planet_horizon");
+        }
+        {
+            // Directional sky bound from this frame's summary blocks.
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_bind_group(0, &trace_group, &[]);
+            pass.set_bind_group(1, camera_group, &[]);
+            Self::dispatch(&mut pass, &self.pipelines.horizon_clear, [((HORIZON_SECTORS + HORIZON_GROUPS) * HORIZON_BUCKETS).div_ceil(64), 1, 1]);
+            Self::dispatch(&mut pass, &self.pipelines.horizon_blocks, [live_blocks.div_ceil(64), 1, 1]);
+            Self::dispatch(&mut pass, &self.pipelines.horizon_suffix, [1, 1, 1]);
+        }
+        if let Some(p) = &mut self.profiler {
+            p.end_pass(encoder, "planet_horizon");
             p.begin_pass(encoder, "planet_primary");
         }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_bind_group(0, &trace_group, &[]);
             pass.set_bind_group(1, camera_group, &[]);
-            // Directional sky bound from this frame's summary blocks.
-            let levels = self.planet.grid().levels();
-            Self::dispatch(&mut pass, &self.pipelines.horizon_clear, [((HORIZON_SECTORS + 1) * HORIZON_BUCKETS).div_ceil(64), 1, 1]);
-            Self::dispatch(&mut pass, &self.pipelines.horizon_blocks, [(1 << 14) / 64, levels * 6, 1]);
-            Self::dispatch(&mut pass, &self.pipelines.horizon_suffix, [(HORIZON_SECTORS + 1).div_ceil(64), 1, 1]);
             Self::dispatch(&mut pass, &self.pipelines.beam, [size[0].div_ceil(32), size[1].div_ceil(32), 1]);
             Self::dispatch(&mut pass, &self.pipelines.primary, groups);
         }
