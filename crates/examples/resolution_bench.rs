@@ -41,8 +41,11 @@
 //!
 //! `--water` adds a water pool (surface, simulation and caustics).
 //!
+//! `--global-fog` adds a uniform global fog medium, and `--pp-fog` enables
+//! the camera post-process fog block; both give every scene a medium.
+//!
 //! `--dof` enables depth of field through the camera's post-process settings,
-//! `--bloom` bloom (both can be combined).
+//! `--bloom` bloom and `--auto-exposure` auto exposure (they can be combined).
 //!
 //! `--billboards` places a billboard (editor light icon) over every point light.
 //!
@@ -106,6 +109,9 @@ struct Args {
     movability: String,
     dof: bool,
     bloom: bool,
+    auto_exposure: bool,
+    global_fog: bool,
+    pp_fog: bool,
     water: bool,
     ssr: bool,
     orbit: bool,
@@ -129,6 +135,9 @@ fn parse_args() -> Args {
         movability: "static".into(),
         dof: false,
         bloom: false,
+        auto_exposure: false,
+        global_fog: false,
+        pp_fog: false,
         water: false,
         ssr: false,
         orbit: false,
@@ -145,6 +154,9 @@ fn parse_args() -> Args {
             "--billboards" => Some(&mut args.billboards),
             "--dof" => Some(&mut args.dof),
             "--bloom" => Some(&mut args.bloom),
+            "--auto-exposure" => Some(&mut args.auto_exposure),
+            "--global-fog" => Some(&mut args.global_fog),
+            "--pp-fog" => Some(&mut args.pp_fog),
             "--water" => Some(&mut args.water),
             "--ssr" => Some(&mut args.ssr),
             "--orbit" => Some(&mut args.orbit),
@@ -451,7 +463,10 @@ fn run(
             },
         );
     }
-    if args.dof || args.bloom {
+    if args.global_fog {
+        spawn_global_fog(&mut scene_db.world, GlobalFogComponent::default());
+    }
+    if args.dof || args.bloom || args.auto_exposure || args.pp_fog {
         // Camera-baseline post-process settings. Depth of field is focused a
         // few metres out so near and far both blur.
         let mut settings = helio_pass_postprocess::PostProcessSettings::default();
@@ -461,6 +476,10 @@ fn run(
             settings.dof_focal_region = 1.5;
         }
         settings.bloom_enabled = args.bloom;
+        if args.auto_exposure {
+            settings.exposure_mode = helio_pass_postprocess::ExposureMode::Auto;
+        }
+        settings.fog_enabled = args.pp_fog;
         set_camera_postprocess(&mut scene_db.world, 0, &settings);
     }
     let mut config = RendererConfig::new(width, height, FORMAT).with_render_scale(args.scale);
