@@ -1343,6 +1343,12 @@ impl RenderPass for ObjectBatchPass {
             })
         };
         frame.write(helio_core::ResourceKey::new("object_batch"), data, "ObjectBatch");
+        // `[static, movable, transmissive]` shadow-caster counts, written on
+        // the GPU this frame (unlike the `*_draw_count` fields above, which
+        // trail by the readback latency). Lets shadow consumers skip an atlas
+        // that holds no casters.
+        let counts: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.scratch.shadow_counts) };
+        frame.write_buffer(helio_core::ResourceKey::new("shadow_caster_counts"), counts, "ObjectBatch");
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {

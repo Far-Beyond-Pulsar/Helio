@@ -21,23 +21,43 @@ use crate::BufferHandle;
 
 type MapSlot = Arc<Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>;
 
-/// Buffers larger than this are not read back and are treated as live.
-const MAX_READBACK_BYTES: u64 = 1 << 20;
+/// Buffers larger than this are not read back and are treated as live. The
+/// copy only happens when SceneDB reports new contents, so a few MiB (e.g. a
+/// 4096-row camera settings column at ~2.4 MiB) is a rare, bounded cost.
+const MAX_READBACK_BYTES: u64 = 16 << 20;
 
 /// `(epoch, content_generation)` of the buffer contents a result describes.
 type ContentKey = (u64, u64);
 
-#[derive(Default)]
 pub struct SceneBufferLiveness {
     staging: Option<wgpu::Buffer>,
     slot: MapSlot,
-    /// Contents copied into `staging` and waiting on `map_async`.
-    in_flight: Option<ContentKey>,
+    /// Contents copied into `staging` and waiting on `map_async`, with the
+    /// row stride they were copied with.
+    in_flight: Option<(ContentKey, u64)>,
     /// Latest harvested answer: whether those contents hold a live row.
     known: Option<(ContentKey, bool)>,
+    /// Whether one row counts as live.
+    row_is_live: fn(&[u8]) -> bool,
+}
+
+impl Default for SceneBufferLiveness {
+    /// A row is live when any of its bytes is non-zero.
+    fn default() -> Self {
+        Self::with_row_predicate(|row| row.iter().any(|&byte| byte != 0))
+    }
 }
 
 impl SceneBufferLiveness {
+    /// Uses `row_is_live` instead of "any non-zero byte" to decide whether a
+    /// row counts, so a pass can ask a narrower question of its rows (for
+    /// example, whether any row enables a particular effect). Rows are
+    /// `BufferHandle::row_bytes` long; a buffer without a row stride is
+    /// passed as one slice.
+    pub fn with_row_predicate(row_is_live: fn(&[u8]) -> bool) -> Self {
+        Self { staging: None, slot: MapSlot::default(), in_flight: None, known: None, row_is_live }
+    }
+
     /// Harvests a finished readback and starts one for new contents. Never
     /// waits on the GPU; the host's regular device polling completes maps.
     /// Call once per frame (from `prepare`) with the buffer's current handle.
@@ -47,7 +67,7 @@ impl SceneBufferLiveness {
         queue: &wgpu::Queue,
         handle: Option<&BufferHandle>,
     ) {
-        if let Some(copied) = self.in_flight {
+        if let Some((copied, row_bytes)) = self.in_flight {
             let result = self.slot.lock().expect("scene liveness slot poisoned").take();
             if let Some(result) = result {
                 self.in_flight = None;
@@ -55,7 +75,11 @@ impl SceneBufferLiveness {
                     let staging = self.staging.as_ref().expect("in-flight readback has staging");
                     let live = {
                         let bytes = staging.slice(..).get_mapped_range().expect("mapped staging");
-                        bytes.iter().any(|&byte| byte != 0)
+                        if row_bytes == 0 {
+                            (self.row_is_live)(&bytes)
+                        } else {
+                            bytes.chunks(row_bytes as usize).any(self.row_is_live)
+                        }
                     };
                     staging.unmap();
                     self.known = Some((copied, live));
@@ -94,10 +118,11 @@ impl SceneBufferLiveness {
         staging.slice(..).map_async(wgpu::MapMode::Read, move |result| {
             *slot.lock().expect("scene liveness slot poisoned") = Some(result);
         });
-        self.in_flight = Some(key);
+        self.in_flight = Some((key, handle.row_bytes));
     }
 
-    /// False only when the current contents are known to hold no live row.
+    /// False only when the current contents are known to hold no live row
+    /// (per the row predicate).
     pub fn maybe_live(&self, handle: &BufferHandle) -> bool {
         let key = (handle.epoch, handle.content_generation);
         match self.known {

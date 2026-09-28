@@ -394,6 +394,7 @@ pub mod camera;
 pub mod context;
 pub mod entity;
 pub mod error;
+pub mod frame_demands;
 pub mod frame_storage;
 pub mod graph;
 mod frame_inputs;
@@ -475,6 +476,7 @@ pub use profiling::{
 };
 pub use scene_input::{BufferHandle, BufferKey, SceneBufferProjection, SceneInput};
 pub use scene_liveness::SceneBufferLiveness;
+pub use frame_demands::{is_demanded, FrameDemands, FRAME_DEMANDS};
 pub use shader::{populate_bind_group_entries, ReflectedShader};
 pub use traits::{AsAny, DebugViewDescriptor, MaybeSend, MaybeSync, RenderPass};
 pub use frame_inputs::{CoordinateSpacesFrameData, RenderFrameInputs};
