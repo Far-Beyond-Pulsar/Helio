@@ -42,13 +42,13 @@ pub struct Settings {
     pub lod_dither: f32,
     /// Column jobs per frame.
     pub job_budget: usize,
-    /// Start primary rays at the conservative per-tile beam distance.
-    pub beam: bool,
     /// End rising eye rays at the directional sky bound.
     pub horizon: bool,
     /// Diagnostics: skip residency planning (no jobs, windows or evictions)
     /// so several renders see identical GPU state.
     pub freeze_residency: bool,
+    /// Diagnostics: fixed frame index for the dither and sunlight patterns.
+    pub frame_override: Option<u32>,
     pub capacity: Capacity,
 }
 
@@ -58,9 +58,9 @@ impl Default for Settings {
             lod_pixels: 1.0,
             lod_dither: std::env::var("HELIO_VOXEL_LOD_DITHER").ok().and_then(|v| v.parse().ok()).unwrap_or(0.25),
             job_budget: 12_288,
-            beam: std::env::var_os("HELIO_VOXEL_NO_BEAM").is_none(),
             horizon: std::env::var_os("HELIO_VOXEL_NO_HORIZON").is_none(),
             freeze_residency: false,
+            frame_override: None,
             capacity: Capacity::default(),
         }
     }
@@ -178,7 +178,6 @@ struct Pipelines {
     publish: wgpu::ComputePipeline,
     level_suffix: wgpu::ComputePipeline,
     primary: wgpu::ComputePipeline,
-    beam: wgpu::ComputePipeline,
     horizon_clear: wgpu::ComputePipeline,
     horizon_blocks: wgpu::ComputePipeline,
     horizon_suffix: wgpu::ComputePipeline,
@@ -224,7 +223,6 @@ impl Pipelines {
             storage(8, false),
             storage(14, false),
             storage(15, false),
-            storage(16, false),
             storage(17, false),
             storage(18, false),
             storage(19, true),
@@ -272,7 +270,6 @@ impl Pipelines {
             include_str!("../shaders/view.wgsl"),
             include_str!("../shaders/horizon.wgsl"),
             include_str!("../shaders/trace.wgsl"),
-            include_str!("../shaders/beam.wgsl"),
             include_str!("../shaders/surface.wgsl"),
         ];
         let trace_module = module("planet trace", source("read_write", &trace_src));
@@ -350,7 +347,6 @@ impl Pipelines {
             publish: compute(&gen_pl, &gen_module, "publish"),
             level_suffix: compute(&gen_pl, &gen_module, "level_suffix"),
             primary: compute(&trace_pl, &trace_module, "primary"),
-            beam: compute(&trace_pl, &trace_module, "beam"),
             horizon_clear: compute(&trace_pl, &trace_module, "horizon_clear"),
             horizon_blocks: compute(&trace_pl, &trace_module, "horizon_blocks"),
             horizon_suffix: compute(&trace_pl, &trace_module, "horizon_suffix"),
@@ -412,8 +408,8 @@ impl Buffers {
         let st = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
         let pages = cap.pool_units / 512;
         let frame = make("planet frame", std::mem::size_of::<FrameGpu>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
-        let records = make("planet records", u64::from(cap.records) * 32, st);
-        let pool = make("planet pool", u64::from(cap.pool_units) * 64, st);
+        let records = make("planet records", u64::from(cap.records) * 32, st | wgpu::BufferUsages::COPY_SRC);
+        let pool = make("planet pool", u64::from(cap.pool_units) * 64, st | wgpu::BufferUsages::COPY_SRC);
         let edit_refs = make("planet edit refs", u64::from(cap.edit_words) * 4, st);
         let jobs = make("planet jobs", u64::from(cap.max_jobs) * 32, st);
         let job_out = make("planet job results", u64::from(cap.max_jobs) * JOB_OUT_BYTES, st | wgpu::BufferUsages::COPY_SRC);
@@ -422,7 +418,7 @@ impl Buffers {
         let block_state = make(
             "planet block summaries",
             u64::from(crate::residency::block_region()) * 6 * 24 * 16,
-            st,
+            st | wgpu::BufferUsages::COPY_SRC,
         );
         let evictions = make("planet evictions", (u64::from(cap.max_evictions) * 3 + u64::from(cap.max_jobs) * 2) * 4, st);
         let horizon_acc = make("planet horizon accumulation", u64::from((HORIZON_SECTORS + HORIZON_GROUPS) * HORIZON_BUCKETS) * 4, st);
@@ -495,7 +491,6 @@ struct Screen {
     size: [u32; 2],
     hits: wgpu::Buffer,
     surfaces: wgpu::Buffer,
-    beams: wgpu::Buffer,
     sun: wgpu::Texture,
     sun_view: wgpu::TextureView,
 }
@@ -513,13 +508,6 @@ impl Screen {
             label: Some("planet surfaces"),
             size: pixels * 16,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let tiles = u64::from(size[0].div_ceil(4)) * u64::from(size[1].div_ceil(4));
-        let beams = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("planet beam distances"),
-            size: tiles * 4,
-            usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
         let sun = device.create_texture(&wgpu::TextureDescriptor {
@@ -541,7 +529,6 @@ impl Screen {
             size,
             hits,
             surfaces,
-            beams,
             sun,
             sun_view,
         }
@@ -644,6 +631,10 @@ impl PlanetRenderer {
     pub fn hit_buffer(&self) -> &wgpu::Buffer {
         &self.screen.hits
     }
+    /// Column records, brick pool and summary blocks (diagnostics).
+    pub fn residency_buffers(&self) -> [&wgpu::Buffer; 3] {
+        [&self.buffers.records, &self.buffers.pool, &self.buffers.block_state]
+    }
     /// Directional sky bound table (diagnostics): `[bucket][sector]` suffix
     /// maxima in base layers, then one all-sector row per bucket.
     pub fn horizon_buffer(&self) -> &wgpu::Buffer {
@@ -737,8 +728,9 @@ impl PlanetRenderer {
         for (level, phi) in rings.iter().enumerate().take(32) {
             frame.ring[level / 4][level % 4] = *phi as f32;
         }
-        let flags = u32::from(self.settings.beam) | (u32::from(self.settings.horizon) << 1);
-        frame.screen = [size[0] as f32, size[1] as f32, (self.frame_index % 1024) as f32, flags as f32];
+        let flags = u32::from(self.settings.horizon) << 1;
+        let index = self.settings.frame_override.unwrap_or(self.frame_index % 1024);
+        frame.screen = [size[0] as f32, size[1] as f32, index as f32, flags as f32];
         let sun = sun.normalize_or_zero();
         frame.sun = [sun.x, sun.y, sun.z, if shadows { 1.0 } else { 0.0 }];
         frame.counts = [jobs, evictions, (1u32 << self.settings.capacity.table_bits) - 1, self.settings.capacity.pool_units];
@@ -956,7 +948,6 @@ impl PlanetRenderer {
                 wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(depth) },
                 wgpu::BindGroupEntry { binding: 14, resource: self.buffers.level_tops.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 15, resource: self.buffers.block_state.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 16, resource: self.screen.beams.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 17, resource: self.buffers.horizon_acc.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 18, resource: self.buffers.horizon.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 19, resource: self.buffers.live_blocks.as_entire_binding() },
@@ -1037,7 +1028,6 @@ impl PlanetRenderer {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_bind_group(0, &trace_group, &[]);
             pass.set_bind_group(1, camera_group, &[]);
-            Self::dispatch(&mut pass, &self.pipelines.beam, [size[0].div_ceil(32), size[1].div_ceil(32), 1]);
             Self::dispatch(&mut pass, &self.pipelines.primary, groups);
         }
         if let Some(p) = &mut self.profiler {
@@ -1126,10 +1116,10 @@ impl PlanetRenderer {
 
 /// Per level, the angular distance from the eye within which every point at
 /// radius `[r_lo, r_hi]` is nearer than the first ray distance the level can
-/// serve. Level L serves distances from its dithered ring start, or where a
-/// finer level may be missing (rays fall back to coarser columns there):
-/// from that level's ring start or its fallback distance, whichever is
-/// farther.
+/// serve. Level L serves distances from its dithered ring start, or through
+/// fallback: a missing column moves a ray one level coarser, so L is reached
+/// that way only where L - 1 is in use and may be missing (beyond both
+/// L - 1's first use and its fallback distance).
 fn sky_rings(lod0: f64, dither: f64, rho: f64, r_lo: f64, r_hi: f64, fallback: &[f64]) -> Vec<f64> {
     let start = |level: usize| {
         if level == 0 { 0.0 } else { lod0 * f64::from(1u32 << (level - 1).min(30)) / (1.0 + dither * 0.5) * 0.999 }
@@ -1140,13 +1130,16 @@ fn sky_rings(lod0: f64, dither: f64, rho: f64, r_lo: f64, r_hi: f64, fallback: &
         let q = (t * t - (rho - r) * (rho - r)) / (4.0 * rho * r);
         if q <= 0.0 { 0.0 } else { 2.0 * q.sqrt().min(1.0).asin() }
     };
-    let mut earliest = f64::INFINITY;
+    let mut finer: Option<(f64, f64)> = None;
     fallback
         .iter()
         .enumerate()
         .map(|(level, from)| {
-            let t = start(level).min(earliest);
-            earliest = earliest.min(start(level).max(*from));
+            let t = match finer {
+                None => 0.0,
+                Some((used, missing)) => start(level).min(used.max(missing)),
+            };
+            finer = Some((t, *from));
             let mut p = phi(t, r_lo).min(phi(t, r_hi));
             let r_star = (rho * rho - t * t).max(0.0).sqrt();
             if r_star > r_lo && r_star < r_hi {

@@ -353,7 +353,8 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
             // Above the band: sky exit, then the largest complete summary
             // block whose maximum is below the cursor layer.
             if r.b + t > 0.0 {
-                var bound = layer_height(sky_layer(min(lv, level_for((t + lod_offset) * lod_scale))));
+                // Later columns may dither to a finer level than this one.
+                var bound = layer_height(sky_layer(min(lv, level_for((t + lod_offset) * lod_scale * (1.0 - 0.5 * dither)))));
                 let h = height_rel(r, t);
                 if sky.sector > -2 && h > frame.lod.z {
                     bound = min(bound, layer_height(horizon_layer(sky, eye_phi(sky, t))));

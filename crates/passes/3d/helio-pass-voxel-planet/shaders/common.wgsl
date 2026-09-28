@@ -15,7 +15,7 @@ struct Frame {
     layer: vec4<f32>,      // eye layer fraction, voxel size, angular cell, outer radius - |eye|
     layer_i: vec4<i32>,    // eye base layer, cells per face, level count, eye face
     lod: vec4<f32>,        // level-0 distance, dither, sky bound cut height, max distance
-    screen: vec4<f32>,     // width, height, frame, flags (1 beam, 2 sky bound)
+    screen: vec4<f32>,     // width, height, frame, flags (2: sky bound)
     sun: vec4<f32>,        // direction to sun, enabled
     counts: vec4<u32>,     // jobs, evictions, table mask, pool units
     neighbours: array<vec4<u32>, 6>, // face across -a, +a, -b, +b

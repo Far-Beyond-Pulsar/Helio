@@ -8,8 +8,8 @@
 // can meet there. A ray's height at any angular distance grows with its
 // elevation, so each bucket stores the lowest elevation that clears it; a
 // primary ray ends after the farthest bucket it does not clear
-// (`sky_escape`). Beams use the suffix maximum over distance
-// (`horizon_layer`).
+// (`sky_escape`); traversal steps also test the suffix maximum over
+// distance (`horizon_layer`).
 
 const SECTORS: u32 = 256u;
 const BUCKETS: u32 = 32u;

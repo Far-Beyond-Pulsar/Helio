@@ -498,7 +498,6 @@ impl Residency {
     /// Plan one frame. `lod0` is the level-0 distance, `budget` the maximum
     /// number of column jobs.
     pub fn plan(&mut self, planet: &Planet, eye: DVec3, lod0: f64, budget: usize) -> FrameWork {
-        let started = std::time::Instant::now();
         self.frame = self.frame.wrapping_add(1);
         let mut work = FrameWork::default();
         // Records evicted last frame are safe to reuse now.

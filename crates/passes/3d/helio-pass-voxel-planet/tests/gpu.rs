@@ -243,42 +243,6 @@ fn orbital_view_has_complete_coverage() {
     assert!(counts[1] > h.len() / 2);
 }
 
-#[test]
-fn beam_start_is_conservative() {
-    let Some(gpu) = gpu() else { return };
-    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
-    for (face, fi, fj, pitch) in [(4u8, 0.37, 0.61, -0.35), (2, 0.47, 0.53, -0.1), (1, 0.52, 0.48, 0.05)] {
-        let dir = land(&planet, face, fi, fj);
-        let eye = planet.surface_point(dir, 1.7);
-        let up = eye.normalize();
-        let forward = (up.any_orthonormal_vector() + up * pitch).normalize().as_vec3();
-        let size = [320, 180];
-        let target = Target::new(&gpu, size);
-        let mut r = renderer(&gpu, planet.clone(), size);
-        let f = frame(&planet, eye);
-        settle(&gpu, &target, &mut r, &f, forward);
-        r.settings_mut().lod_dither = 0.0;
-        r.settings_mut().beam = false;
-        target.render(&gpu, &mut r, &f, forward, 5000);
-        let reference = hits(&gpu, &r);
-        r.settings_mut().beam = true;
-        target.render(&gpu, &mut r, &f, forward, 5000);
-        let beamed = hits(&gpu, &r);
-        let mut bad = 0;
-        for (index, (a, b)) in reference.iter().zip(&beamed).enumerate() {
-            let both_miss = a.status == 0 && b.status == 0;
-            if !both_miss && (a.status, a.i, a.j, a.k, a.face, a.level) != (b.status, b.i, b.j, b.k, b.face, b.level) {
-                bad += 1;
-                if bad < 6 {
-                    eprintln!("pixel {} {}: no beam {a:?} beam {b:?}", index % 320, index / 320);
-                }
-            }
-        }
-        eprintln!("face {face}: {bad} beam differences");
-        assert_eq!(bad, 0);
-    }
-}
-
 /// The directional sky bound only ends rays that provably miss: every pixel
 /// matches a render without it, including views up at distant terrain.
 #[test]
@@ -307,8 +271,7 @@ fn sky_bound_is_conservative() {
                     (*row.iter().min().unwrap() as i64 - eye_layer) as f64 * planet.grid().voxel_size(), (*row.iter().max().unwrap() as i64 - eye_layer) as f64 * planet.grid().voxel_size());
             }
         }
-        for beam in [false, true] {
-            r.settings_mut().beam = beam;
+        {
             r.settings_mut().horizon = false;
             target.render(&gpu, &mut r, &f, forward, 5000);
             let reference = hits(&gpu, &r);
@@ -327,7 +290,7 @@ fn sky_bound_is_conservative() {
                     }
                 }
             }
-            eprintln!("face {face} pitch {pitch} beam {beam}: {bad} differences, {hits_seen} hits, {saved} steps saved");
+            eprintln!("face {face} pitch {pitch}: {bad} differences, {hits_seen} hits, {saved} steps saved");
             assert_eq!(bad, 0);
         }
     }
@@ -388,5 +351,141 @@ fn sky_bound_is_conservative_while_moving() {
         }
     }
     eprintln!("{bad} differences in {compared} pixels");
+    assert_eq!(bad, 0);
+}
+
+/// Published column tops bound every occupied cell of the column, and a
+/// complete summary block's maximum bounds its columns' tops.
+#[test]
+fn published_tops_bound_occupancy() {
+    let Some(gpu) = gpu() else { return };
+    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+    let dir = land(&planet, 2, 0.47, 0.53);
+    let eye = planet.surface_point(dir, 1.7);
+    let up = eye.normalize();
+    let forward = (up.any_orthonormal_vector() - up * 0.2).normalize().as_vec3();
+    let size = [320, 180];
+    let target = Target::new(&gpu, size);
+    let mut r = renderer(&gpu, planet.clone(), size);
+    settle(&gpu, &target, &mut r, &frame(&planet, eye), forward);
+    let [records, pool, _blocks] = r.residency_buffers();
+    let words = |b: &wgpu::Buffer| -> Vec<u32> {
+        read_buffer(&gpu, b, b.size()).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
+    };
+    let rec = words(records);
+    let pool = words(pool);
+    let (mut columns, mut bad) = (0usize, 0usize);
+    for c in rec.chunks_exact(8) {
+        let info = c[3];
+        if info & 0xc000_0000 != 0x8000_0000 {
+            continue;
+        }
+        columns += 1;
+        let k_lo = c[2] as i32;
+        let n_band = (info & 511) as i32;
+        let gap = ((info >> 22) & 7) as i32;
+        let run = c[4];
+        let ext = info & 0x2000_0000 != 0;
+        let header = if ext { 2 } else { 1 };
+        let published = (k_lo + n_band) * 8 - gap;
+        // Highest occupied cell from the brick masks.
+        let mut highest = i32::MIN;
+        for b in (0..n_band).rev() {
+            let (mixed, solid, rank) = if b < 32 {
+                let bit = b as u32;
+                ((c[5] >> bit) & 1 != 0, (c[6] >> bit) & 1 != 0, (c[5] & ((1u32 << bit) - 1)).count_ones())
+            } else {
+                let e = ((run + 1) * 16) as usize;
+                let (w, bit) = ((b >> 5) as usize, (b & 31) as u32);
+                let mut rank = 0;
+                for q in 0..w {
+                    rank += pool[e + q].count_ones();
+                }
+                rank += (pool[e + w] & ((1u32 << bit) - 1)).count_ones();
+                ((pool[e + w] >> bit) & 1 != 0, (pool[e + 8 + w] >> bit) & 1 != 0, rank)
+            };
+            if solid {
+                highest = (k_lo + b) * 8 + 7;
+                break;
+            }
+            if mixed {
+                let unit = ((run + header + rank) * 16) as usize;
+                let z = (0..8).rev().find(|z| pool[unit + 2 * z] | pool[unit + 2 * z + 1] != 0).unwrap_or(0) as i32;
+                highest = (k_lo + b) * 8 + z;
+                break;
+            }
+        }
+        if highest >= published {
+            bad += 1;
+            if bad < 6 {
+                eprintln!("column key {:08x} {:08x}: highest occupied {highest} published top {published} (k_lo {k_lo} band {n_band} gap {gap})", c[0], c[1]);
+            }
+        }
+    }
+    eprintln!("{columns} columns, {bad} with occupied cells above the published top");
+    assert!(columns > 1000);
+    assert_eq!(bad, 0);
+}
+
+/// Sky bound with the default LOD dither, settled and moving: frozen renders
+/// with a fixed dither pattern must match the plain traversal.
+#[test]
+fn sky_bound_is_conservative_with_dither() {
+    let Some(gpu) = gpu() else { return };
+    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+    let dir = land(&planet, 2, 0.47, 0.53);
+    let mut eye = planet.surface_point(dir, 1.7);
+    let east = eye.normalize().any_orthonormal_vector();
+    let size = [320, 180];
+    let target = Target::new(&gpu, size);
+    let mut r = renderer(&gpu, planet.clone(), size);
+    r.settings_mut().lod_dither = 0.25;
+    settle(&gpu, &target, &mut r, &frame(&planet, eye), east.as_vec3());
+    let mut bad = 0;
+    for step in 0..60u64 {
+        if step >= 20 {
+            eye = planet.surface_point(eye + east * 8.0, 1.7 + (step % 7) as f64 * 5.0);
+        }
+        let f = frame(&planet, eye);
+        let up = eye.normalize();
+        let forward = (east + up * (-0.3 + 0.05 * (step % 9) as f64)).normalize().as_vec3();
+        target.render(&gpu, &mut r, &f, forward, 7000 + step * 3);
+        r.settings_mut().freeze_residency = true;
+        r.settings_mut().frame_override = Some(step as u32 * 37 % 1024);
+        r.settings_mut().horizon = false;
+        target.render(&gpu, &mut r, &f, forward, 7000 + step * 3 + 1);
+        let reference = hits(&gpu, &r);
+        r.settings_mut().horizon = true;
+        target.render(&gpu, &mut r, &f, forward, 7000 + step * 3 + 2);
+        let fast = hits(&gpu, &r);
+        r.settings_mut().freeze_residency = false;
+        r.settings_mut().frame_override = None;
+        let voxel = planet.grid().voxel_size() as f32;
+        for (index, (a, b)) in reference.iter().zip(&fast).enumerate() {
+            // A different start can pick a different dithered level for the
+            // same surface; the geometry must still agree.
+            // Skipped geometry shows as a farther hit or a wrong miss; a
+            // nearer hit on another level is the dither's LOD choice.
+            let differs = if a.status != b.status {
+                true
+            } else if a.status != 1 {
+                false
+            } else if a.level == b.level {
+                // Rays grazing a voxel edge within float precision may
+                // resolve to a neighbour at the same distance.
+                (a.i, a.j, a.k, a.face) != (b.i, b.j, b.k, b.face)
+                    && (a.t - b.t).abs() > 0.25 * voxel * (1u32 << a.level) as f32
+            } else {
+                b.t > a.t + 2.0 * voxel * (1u32 << a.level.max(b.level)) as f32
+            };
+            if differs {
+                bad += 1;
+                if bad < 8 {
+                    eprintln!("step {step} pixel {} {}: plain {a:?} accelerated {b:?}", index % 320, index / 320);
+                }
+            }
+        }
+    }
+    eprintln!("{bad} differences");
     assert_eq!(bad, 0);
 }

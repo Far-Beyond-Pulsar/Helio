@@ -300,6 +300,7 @@ impl Flight {
         let tan = (std::f32::consts::FRAC_PI_4 * 0.5).tan();
         let aspect = size[0] as f32 / size[1] as f32;
         let (mut compared, mut mismatched) = (0usize, 0usize);
+        let mut samples = Vec::new();
         let mut stuck = Vec::new();
         for (index, hit) in hits.chunks_exact(32).take((size[0] * size[1]) as usize).enumerate() {
             let w = |i: usize| u32::from_le_bytes(hit[i * 4..i * 4 + 4].try_into().unwrap());
@@ -328,6 +329,13 @@ impl Flight {
                 // TAA jitter moves the GPU sample by up to half a pixel.
                 if !same && (t - cpu.distance).abs() > self.planet.grid().voxel_size() * 3.0 {
                     mismatched += 1;
+                    if samples.len() < 4 {
+                        samples.push(format!(
+                            "px {x},{y} gpu f{} ({},{},{}) t {t:.3} cpu f{} ({},{},{}) t {:.3}",
+                            (info >> 2) & 7, w(1) as i32, w(2) as i32, w(3) as i32,
+                            cpu.cell.face, cpu.cell.i, cpu.cell.j, cpu.cell.k, cpu.distance
+                        ));
+                    }
                 }
             }
         }
@@ -362,7 +370,7 @@ impl Flight {
             let mean = work.iter().map(|w| f64::from(w[index])).sum::<f64>() / work.len() as f64;
             stats.insert((*name).into(), serde_json::json!({"mean": mean, "p50": q(0.5), "p95": q(0.95), "max": q(1.0)}));
         }
-        serde_json::json!({"name": name, "stuck": stuck, "work": stats, "miss": counts[0], "hit": counts[1], "exhausted": counts[2], "loading": counts[3], "compared": compared, "mismatched": mismatched})
+        serde_json::json!({"name": name, "mismatch_samples": samples, "stuck": stuck, "work": stats, "miss": counts[0], "hit": counts[1], "exhausted": counts[2], "loading": counts[3], "compared": compared, "mismatched": mismatched})
     }
 }
 
@@ -682,6 +690,8 @@ fn main() {
         }
     }
     flight.renderer.set_jitter_enabled(true);
+    // Let regeneration around the last edits finish before auditing.
+    flight.settle("dig_settle", base, aim);
     flight.capture("dig");
     audits.push(flight.audit("dig", base, aim));
     let unmatched = latencies.iter().filter(|l| !l.2).count();
