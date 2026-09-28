@@ -279,41 +279,172 @@ come only from optimization 3; every other step was bit-identical.
 
 4K ÷ 1080p frame-time ratio (2.25× the internal pixels): fog_hall 3.01× → 2.24×, cathedral_large 3.13× → 2.16×, sky 3.26× → 2.26×
 
+## Round 2
+
+The follow-ups from round 1, measured the same way against the round-1 head
+(`main`). Each change was compared frame by frame against the build before
+it. New harness switches select the setups these changes need: `--movability
+static|movable|mixed` (which shadow atlas casters land in), `--dof`,
+`--bloom`, `--water` (a pool with caustics), `--ssr` and `--orbit` (the
+camera sways sideways every frame, so camera-keyed caches are rebuilt).
+
+| change | measured | 1080p | 1440p | 4K | frame diff |
+|---|---|---:|---:|---:|---|
+| 8. RadianceCascades removed from the default graphs (#300) | RadianceCascades GPU ms | 0.14–0.19 → 0 | 0.14–0.19 → 0 | 0.14–0.19 → 0 | bit-identical |
+| 9. DeferredLight skips shadow atlases with no casters (#293), fog hall | DeferredLight GPU ms | 93.0–97.0 → 75.9–80.0 | 158.9–166.8 → 134.5–138.1 | 355.4–358.3 → 307.2–313.6 | bit-identical |
+| 10. DoF composite skipped while no source enables DOF (#296) | DofPass GPU ms | 8.34–8.76 → 0.14–0.19 | 14.4–15.1 → 0.16–0.20 | 32.4–33.1 → 0.15–0.18 | bit-identical |
+| 11. WaterSim simulation paused while no volume is live (#297), editor columns | WaterSim GPU ms | 89.3–95.2 → 0.15–0.17 | 82.4–90.4 → 0.14–0.16 | 88.1–96.2 → 0.15–0.19 | bit-identical |
+| 12. HiZ min pyramid built only on demand (#295) | HiZBuild GPU ms | 11.2–12.0 → 5.73–6.31 | 16.1–17.0 → 8.26–10.7 | 31.3–37.9 → 17.7–21.0 | bit-identical |
+| 13. Bloom compute skipped while no source enables bloom (#294) | PostProcess GPU ms | 26.7–38.2 → 18.0–20.1 | 40.5–47.1 → 30.9–32.5 | 89.0–104.1 → 66.2–72.1 | bit-identical |
+| 14. DoF CoC/gather read this frame's image (#299) | correctness | – | – | – | intended change with DOF on |
+
+### 8. Remove RadianceCascadesPass from the default graphs
+
+Round 1 found that nothing in the default graphs consumes the pass's output:
+no pass publishes `rc_view`, so `has_rc_gi` is always 0. The pass is gone from
+the default, FXAA and forward graphs (and its dependency from
+`helio-default-graphs`). Bit-identical in all 9 runs.
+
+### 9. DeferredLight: skip shadow atlases with no casters
+
+Every PCF, PCSS blocker-search and PCSS filter tap sampled both the static and
+the movable shadow atlas and kept the nearer occluder. ObjectBatch already
+counts casters per atlas on the GPU (`shadow_counts`), and now publishes that
+buffer as `shadow_caster_counts`. The lighting shader reads it and samples
+only atlases that have casters. An atlas with none is cleared to 1.0, which
+never wins the comparison, so skipping it is exact. Graphs without
+ObjectBatch bind a fallback that says both atlases may have casters.
+
+Fog hall, lavapipe, DeferredLight GPU ms. Bit-identical with static, movable
+and mixed casters. The mixed case keeps both atlases and its cost.
+
+| casters | 1080p | 1440p | 4K |
+|---|---:|---:|---:|
+| static | 93.0 → 75.9 (-18%) | 166.8 → 138.1 (-17%) | 358.3 → 313.6 (-12%) |
+| movable | 97.0 → 80.0 (-18%) | 158.9 → 134.5 (-15%) | 355.4 → 307.2 (-14%) |
+
+The cathedral and sky scenes stay within noise (their lights cast few
+shadows).
+
+### 10. DoF: render the target directly while DOF cannot be on
+
+With DOF off, PostProcess rendered into `pre_dof` and DofPass copied it to the
+target at full output resolution. `SceneBufferLiveness` gained a per-row
+predicate, and PostProcessVolumeBlendPass now publishes `dof_maybe_active`:
+false only when the defaults, every enabled camera row and every weighted
+volume row that overrides the aperture shape leave DOF off. PostProcess then
+renders the target directly and DofPass does nothing. The camera column is
+2.4 MiB, so the readback cap was raised to 16 MiB.
+
+Bit-identical with DOF off and on (`--dof`).
+
+| scene | 1080p | 1440p | 4K |
+|---|---:|---:|---:|
+| fog_hall | 8.34 → 0.17 (-98%) | 15.1 → 0.16 (-99%) | 32.9 → 0.18 (-99%) |
+| cathedral_large | 8.63 → 0.19 (-98%) | 14.6 → 0.16 (-99%) | 32.4 → 0.17 (-99%) |
+| sky | 8.76 → 0.14 (-98%) | 14.4 → 0.20 (-99%) | 33.1 → 0.15 (-100%) |
+
+FogComposite's pass-through copy was left in place: it is `pre_aa`'s last
+declared reader, and eliding it would let the pool alias `pre_aa` while a
+later pass still reads it.
+
+### 11. WaterSim: pause the simulation while every volume is empty
+
+Round 1 skipped the screen-space water work but kept simulating 8 volumes × 3
+cascades. The simulation now stops while `SceneBufferLiveness` reports every
+volume row empty, and both simulation textures are cleared when it resumes,
+which is the state a newly created pass starts from. New water therefore
+starts from the same state as before. Bit-identical with editor columns and
+with a live pool (`--water`).
+
+Editor columns, WaterSim GPU ms:
+
+| scene | 1080p | 1440p | 4K |
+|---|---:|---:|---:|
+| fog_hall | 90.9 → 0.15 | 90.4 → 0.14 | 92.0 → 0.15 |
+| cathedral_large | 95.2 → 0.17 | 82.4 → 0.16 | 88.1 → 0.19 |
+| sky | 89.3 → 0.15 | 87.6 → 0.16 | 96.2 → 0.16 |
+
+### 12. HiZ: build the min pyramid only when a pass needs it
+
+HiZBuild copied depth and built both a max pyramid (occlusion culling) and a
+min pyramid every frame. Only SSR and WaterSim's reflections read the min
+pyramid. Consumers run after HiZ, so a new pre-frame hook,
+`RenderPass::declare_frame_demands`, lets every pass declare optional
+resources before any pass executes. SSR always demands `hiz_min`; WaterSim
+does while a volume row may be live. HiZBuild skips the min copy and
+reduction when nothing demanded it. Graphs or hosts that publish no demands
+get the old behaviour.
+
+Bit-identical in the default, editor-column, `--water`, `--ssr`, `--orbit` and
+`--orbit --water` runs. With SSR or live water the min pyramid is still built,
+at the old cost.
+
+| scene | 1080p | 1440p | 4K |
+|---|---:|---:|---:|
+| fog_hall | 11.2 → 5.73 (-49%) | 16.9 → 8.26 (-51%) | 31.3 → 19.5 (-38%) |
+| cathedral_large | 12.0 → 6.01 (-50%) | 16.1 → 10.0 (-38%) | 37.9 → 17.7 (-53%) |
+| sky | 11.8 → 6.31 (-46%) | 17.0 → 10.7 (-37%) | 33.5 → 21.0 (-38%) |
+
+The harness bumps the camera generation every frame, so the max pyramid is
+rebuilt in every run. With a camera that really holds still and no min-pyramid
+consumer, HiZBuild also skips the depth copy.
+
+### 13. PostProcess: skip bloom compute while bloom cannot be on
+
+Bloom is off by default and only turned on by post-process settings, yet the
+bloom extract and four downsample dispatches ran every frame, because nothing
+called `set_bloom_active`. PostProcessVolumeBlendPass publishes
+`bloom_maybe_active` like `dof_maybe_active`, and PostProcess skips the bloom
+compute when it is false. User effects keep it running, because they may
+sample the bloom mips.
+
+Bit-identical with bloom off, with bloom on (`--bloom`), and with editor
+columns.
+
+| scene | 1080p | 1440p | 4K |
+|---|---:|---:|---:|
+| fog_hall | 26.7 → 18.0 (-32%) | 40.5 → 30.9 (-24%) | 89.0 → 72.1 (-19%) |
+| cathedral_large | 38.2 → 18.5 (-51%) | 47.1 → 32.5 (-31%) | 101.1 → 69.5 (-31%) |
+| sky | 28.3 → 20.1 (-29%) | 43.6 → 31.0 (-29%) | 104.1 → 66.2 (-36%) |
+
+### 14. DoF: CoC and gather read this frame's image
+
+The graph submits its compute encoder before its graphics encoder. DofPass
+recorded CoC and gather on the compute encoder, so they read the previous
+frame's `pre_dof` and DOF settings, and the composite blurred this frame's
+image with last frame's circle of confusion and blur. They are now recorded on
+the graphics encoder after PostProcess, as PostProcess's own exposure and
+bloom dispatches already were.
+
+This is an intended change and only affects DOF-on frames. In the static fog
+hall with `--dof`, 0.17% of pixels change, by at most 1/255. With `--dof
+--orbit`, 1.9% change (max 39/255), exactly where the old frames showed a
+doubled edge of the previous frame's blur.
+
 ## Remaining bottlenecks and follow-ups
 
-Ranked by measured 4K cost after the changes above.
+Ranked by measured 4K cost after both rounds (lavapipe).
 
-- **DeferredLight (110–400 ms at 4K, lavapipe).** Every PCF tap samples both
-  the dynamic and the static shadow atlas and takes the minimum. When one of
-  them has no casters for a layer, that sample is always 1 and could be
-  skipped exactly. This needs per-layer occupancy on the GPU, because the CPU
-  shadow counts lag a frame behind. Also, sky pixels could be rejected by a
-  depth test instead of `discard`.
-- **PostProcess (90–112 ms at 4K).** Bloom composites five mips through
-  4-tap B-spline upsamples at output resolution, 20 bilinear taps per pixel.
-  A progressive upsample pyramid would cut this to about 4 taps, but it
-  changes pixels slightly, so it needs a visual sign-off.
+- **Bloom composite while bloom is on (≈430 ms PostProcess at 4K, vs ≈70 ms
+  off).** `fs_uber` B-spline samples five mips at output resolution, 20
+  bilinear taps per pixel. Summing mips 1–4 once at mip-0 resolution would
+  cut that to 8 taps, but changes pixels slightly and needs a visual sign-off.
+- **DeferredLight (100–315 ms at 4K).** Scenes with both static and movable
+  casters still sample both atlases. Per-light or per-tile occupancy would
+  extend #293's skip.
 - **FXAA (40–54 ms at 4K).** This is expected work for the AA path.
-- **HiZ min pyramid (~17 ms of HiZ's ~35 ms at 4K).** It is rebuilt every frame
-  but only read by SSR (off by default) and WaterSim's screen path (only with
-  live water). Building it on demand needs the consumers' demand before HiZ
-  runs, which no pre-frame hook currently provides.
-- **DoF composite (≈33 ms at 4K) and FogComposite (≈23 ms at 4K) when their
-  effects are off.** Each is now a pure full-resolution copy. Removing the
-  copies needs CPU knowledge of GPU-resolved post-process settings and fog
-  state.
-- **Editor columns: WaterSim simulation (80–110 ms, fixed size).** It still
-  simulates 8 volumes × 3 cascades while every volume is empty. Skipping that
-  would freeze the simulation state until water appears, which is a visible
-  difference on the first frames of new water, so it was left as is.
-- **Render-pass fusion is disabled whenever profiling is compiled in**, and
-  it is compiled in by default (`helio-core` `profiling` feature), so shipped
-  builds never fuse G-buffer, foliage and portal passes. This matters most on
-  tile-based GPUs.
-- **One-frame-late compute.** The compute encoder is submitted before the
-  graphics encoder. DofPass's CoC/gather and PostProcess's exposure/bloom
-  therefore read the previous frame's images and settings. This is a
-  pre-existing latency behaviour, recorded here but not changed.
+- **FogComposite (≈23 ms at 4K) without fog.** It remains a pure copy, kept
+  for the pool-aliasing reason in §10.
+- **Render-pass fusion.** It is disabled while profiling is compiled in (the
+  default), but the default graph forms no chains anyway: PortalMask sits
+  between the G-buffer and PortalInstance, and VirtualGeometry binds a
+  different attachment set. Decoupling fusion from profiling alone would not
+  change the default graph (#298).
+- **Stochastic texture filtering** (Pharr et al., arXiv 2305.05810) was
+  reviewed. It trades filtering for noise that TAA/DLSS then resolves. Helio's
+  textures are hardware-filterable, the default AA is FXAA, and the noise
+  would break frame equivalence, so it does not apply here.
 
 ## Tests
 
@@ -323,6 +454,11 @@ Tests were run on lavapipe.
   rewritten contents.
 - Extended: `helio-pass-volumetric-fog`'s `physical_fog` now checks the
   published range both with media and after the media are removed.
+- Round 2: `helio-pass-postprocess`'s `volume_blend::activity_tests` cover
+  the camera and volume row predicates behind `dof_maybe_active` and
+  `bloom_maybe_active`. `helio-core`, `helio-pass-hiz`, `helio-pass-ssr`,
+  `helio-pass-dof`, `helio-pass-postprocess`, `helio-pass-deferred-light`
+  and `helio-pass-water-sim`'s unit tests pass.
 - Passing: `helio-pass-volumetric-fog`, `helio-pass-transparent`,
   `helio-pass-postprocess`, `helio-pass-dof`, `helio-pass-sky`,
   `helio-pass-decal` and `helio`.
