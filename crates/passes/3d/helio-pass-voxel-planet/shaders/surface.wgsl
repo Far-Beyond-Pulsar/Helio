@@ -344,20 +344,55 @@ fn sun_visibility(s: SunSample) -> f32 {
     return select(0.0, 1.0, (blocker.info & 3u) == ST_MISS);
 }
 
+// Representative samples of the workgroup's 2x2 blocks: visibility,
+// position with footprint (w < 0: no surface) and normal.
+var<workgroup> rep_vis: array<f32, 64>;
+var<workgroup> rep_pos: array<vec4<f32>, 64>;
+var<workgroup> rep_nrm: array<vec3<f32>, 64>;
+
+// Whether pixel sample `q` lies on the surface of representative `slot`, so
+// it can take that ray's visibility: same validity and, for surfaces, a
+// similar normal, the same plane and a nearby point. Voxel faces meet at
+// right angles, so the loose normal test still separates them while the
+// smooth macro normals of distant cells pass. A filtered cell stands for a
+// smooth slope of small steps (see `shade`), so its plane tolerance grows to
+// two cells.
+fn on_rep_surface(slot: u32, q: SunSample) -> bool {
+    let pos = rep_pos[slot];
+    if q.valid != (pos.w >= 0.0) { return false; }
+    if !q.valid { return true; }
+    let fp = max(q.footprint, pos.w);
+    let d = q.position - pos.xyz;
+    let cell = frame.layer.y * f32(1u << u32(max(q.level, 0)));
+    let plane = 0.5 * fp + 2.0 * cell * q.filtered;
+    return dot(q.normal, rep_nrm[slot]) > 0.9 && abs(dot(d, q.normal)) < plane && dot(d, d) < 16.0 * fp * fp;
+}
+
 // One sunlight ray per 2x2 block at a representative pixel that rotates each
-// frame (TAA resolves the pattern). Pixels on a different surface than the
-// representative trace their own ray, so silhouettes stay exact. Voxel faces
-// meet at right angles, so a loose normal test still separates them while
-// the smoothly varying macro normals of distant cells share a ray.
+// frame (TAA resolves the pattern). Every other pixel takes the visibility
+// of a representative on its own surface: its own block's or, across a face
+// edge, one of the three neighbouring blocks on its side. Only a pixel with
+// no matching representative traces its own ray, so silhouettes stay exact.
 @compute @workgroup_size(8, 8)
-fn sunlight(@builtin(global_invocation_id) id: vec3<u32>) {
+fn sunlight(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
     let screen = vec2<u32>(frame.screen.xy);
     let origin = id.xy * 2u;
-    if any(origin >= screen) { return; }
+    let inside = all(origin < screen);
     let f = u32(frame.screen.z);
-    let rep = min(origin + vec2<u32>(f & 1u, (f >> 1u) & 1u), screen - 1u);
-    let rs = sun_sample(rep);
-    let rv = sun_visibility(rs);
+    let own = lid.x + lid.y * 8u;
+    let rep = min(origin + vec2<u32>(f & 1u, (f >> 1u) & 1u), max(screen, vec2<u32>(1u)) - 1u);
+    var rv = 1.0;
+    var rs: SunSample;
+    rs.valid = false;
+    if inside {
+        rs = sun_sample(rep);
+        rv = sun_visibility(rs);
+    }
+    rep_vis[own] = rv;
+    rep_pos[own] = vec4<f32>(rs.position, select(-1.0, rs.footprint, rs.valid));
+    rep_nrm[own] = rs.normal;
+    workgroupBarrier();
+    if !inside { return; }
     let sun = normalize(frame.sun.xyz);
     for (var q = 0u; q < 4u; q++) {
         let p = origin + vec2<u32>(q & 1u, q >> 1u);
@@ -365,9 +400,21 @@ fn sunlight(@builtin(global_invocation_id) id: vec3<u32>) {
         var v = rv;
         if any(p != rep) {
             let qs = sun_sample(p);
-            let same = qs.valid == rs.valid && (!qs.valid
-                || (dot(qs.normal, rs.normal) > 0.9 && distance(qs.position, rs.position) < 2.5 * max(qs.footprint, rs.footprint)));
-            if !same { v = sun_visibility(qs); }
+            // Own block first, then the side, vertical and diagonal
+            // neighbours towards this pixel's corner.
+            let side = vec2<i32>(select(-1, 1, (q & 1u) != 0u), select(-1, 1, (q >> 1u) != 0u));
+            var found = false;
+            for (var c = 0u; c < 4u; c++) {
+                let n = vec2<i32>(lid.xy) + vec2<i32>(select(0, side.x, (c & 1u) != 0u), select(0, side.y, (c & 2u) != 0u));
+                if any(n < vec2<i32>(0)) || any(n > vec2<i32>(7)) { continue; }
+                let slot = u32(n.x) + u32(n.y) * 8u;
+                if on_rep_surface(slot, qs) {
+                    v = rep_vis[slot];
+                    found = true;
+                    break;
+                }
+            }
+            if !found { v = sun_visibility(qs); }
         }
         textureStore(sun_out, vec2<i32>(p), vec4<f32>(v, sun));
     }
