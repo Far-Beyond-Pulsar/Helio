@@ -33,10 +33,9 @@ pub use edit_worker::{
 };
 pub use edits::{VoxelEditError, VoxelSampleEdit};
 pub use generation::{
-    VoxelBuiltinGeneratorConfig, VoxelChunkGenerator, VoxelGeneratorDescriptor,
-    VoxelGeneratorRegistry, MAX_VOXEL_GENERATOR_ID_BYTES, MAX_VOXEL_GENERATOR_PARAMETERS_BYTES,
-    VOXEL_BUILTIN_GENERATOR_VERSION, VOXEL_FLAT_GENERATOR, VOXEL_PLANET_GENERATOR,
-    VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION, VOXEL_TERRAIN_RENDERER,
+    VoxelChunkGenerator, VoxelGeneratorDescriptor, VoxelGeneratorRegistry,
+    MAX_VOXEL_GENERATOR_ID_BYTES, MAX_VOXEL_GENERATOR_PARAMETERS_BYTES, VOXEL_TERRAIN_GENERATOR,
+    VOXEL_TERRAIN_GENERATOR_VERSION, VOXEL_TERRAIN_RENDERER,
 };
 pub use generation_worker::{
     VoxelGenerationAdmissionError, VoxelGenerationClose, VoxelGenerationJob, VoxelGenerationLimits,

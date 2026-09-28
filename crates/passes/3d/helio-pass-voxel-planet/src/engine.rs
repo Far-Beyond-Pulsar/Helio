@@ -1,10 +1,10 @@
 //! Helio integration: GPU residency, exact traversal and GBuffer output.
-use crate::field::FieldConstants;
 use crate::grid::Cell;
 use crate::planet::Planet;
 use crate::residency::{Capacity, FrameWork, Residency, NONE};
+use crate::terrain::TerrainProgram;
 use bytemuck::{Pod, Zeroable};
-use glam::{DVec3, Vec3};
+use glam::{DVec3, IVec4, Vec3};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -156,8 +156,42 @@ fn uniform(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn source(access: &str, parts: &[&str], plane: bool) -> String {
-    let mut s = String::from(include_str!("../shaders/field.wgsl"));
+/// `World` of world.wgsl: the grid mapping and coarse-level bounds.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct WorldGpu {
+    /// reference cells, layer thickness (mm), grid cells, level offset.
+    grid: [i32; 4],
+    /// domain scale (Q24), pad.
+    scale: [u32; 4],
+    bounds: [[i32; 4]; 6],
+}
+
+impl WorldGpu {
+    fn new(planet: &Planet) -> Self {
+        let g = planet.grid();
+        let m = planet.field().bound_margins();
+        Self {
+            grid: [g.reference_cells(), g.layer_mm() as i32, g.cells(), g.level_offset() as i32],
+            scale: [g.domain_scale(), 0, 0, 0],
+            bounds: std::array::from_fn(|i| std::array::from_fn(|j| m[i * 4 + j])),
+        }
+    }
+}
+
+/// Terrain constants padded to a whole uniform (16-byte multiple).
+fn terrain_bytes(program: &TerrainProgram) -> Vec<u8> {
+    let mut bytes = program.constants.clone();
+    bytes.resize(bytes.len().max(16).next_multiple_of(16), 0);
+    bytes
+}
+
+/// Shader source: the noise library, world helpers and the terrain program,
+/// then the engine parts.
+fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -> String {
+    let mut s = String::from(include_str!("../shaders/noise.wgsl"));
+    s.push_str(include_str!("../shaders/world.wgsl"));
+    s.push_str(&program.wgsl);
     // Generation updates the summaries atomically; traversal reads plain values.
     // Traversal reads a summary block entry as one vector load.
     let generation = parts.iter().any(|p| p.contains("fn level_suffix"));
@@ -176,6 +210,8 @@ fn source(access: &str, parts: &[&str], plane: bool) -> String {
 }
 
 struct Pipelines {
+    plane: bool,
+    program: String,
     gen_layout: wgpu::BindGroupLayout,
     trace_layout: wgpu::BindGroupLayout,
     render_layout: wgpu::BindGroupLayout,
@@ -200,7 +236,12 @@ struct Pipelines {
 }
 
 impl Pipelines {
-    fn new(device: &wgpu::Device, plane: bool) -> Self {
+    /// Whether these pipelines serve a world of this shape and program.
+    fn serve(&self, plane: bool, program: &TerrainProgram) -> bool {
+        self.plane == plane && self.program == program.key
+    }
+
+    fn new(device: &wgpu::Device, plane: bool, program: &TerrainProgram) -> Self {
         let gen_entries: Vec<_> = [
             uniform(0),
             uniform(1),
@@ -218,6 +259,7 @@ impl Pipelines {
             storage(13, true),
             storage(14, false),
             storage(15, false),
+            uniform(16),
         ]
         .into();
         let gen_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -236,6 +278,7 @@ impl Pipelines {
             storage(8, false),
             storage(14, false),
             storage(15, false),
+            uniform(16),
             storage(17, false),
             storage(18, false),
             storage(19, true),
@@ -278,17 +321,17 @@ impl Pipelines {
                 source: wgpu::ShaderSource::Wgsl(src.into()),
             })
         };
-        let gen_module = module("planet generation", source("read_write", &[include_str!("../shaders/generate.wgsl")], plane));
+        let gen_module = module("planet generation", source("read_write", &[include_str!("../shaders/generate.wgsl")], plane, program));
         let trace_src = [
             include_str!("../shaders/view.wgsl"),
             include_str!("../shaders/horizon.wgsl"),
             include_str!("../shaders/trace.wgsl"),
             include_str!("../shaders/surface.wgsl"),
         ];
-        let trace_module = module("planet trace", source("read_write", &trace_src, plane));
+        let trace_module = module("planet trace", source("read_write", &trace_src, plane, program));
         let render_module = module(
             "planet gbuffer",
-            source("read", &[include_str!("../shaders/view.wgsl"), include_str!("../shaders/gbuffer.wgsl")], plane),
+            source("read", &[include_str!("../shaders/view.wgsl"), include_str!("../shaders/gbuffer.wgsl")], plane, program),
         );
         let gen_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("planet generation"),
@@ -349,6 +392,8 @@ impl Pipelines {
             cache: None,
         });
         Self {
+            plane,
+            program: program.key.to_string(),
             patch: compute(&gen_pl, &gen_module, "patch_table"),
             patch_blocks: compute(&gen_pl, &gen_module, "patch_blocks"),
             evict: compute(&gen_pl, &gen_module, "evict"),
@@ -376,7 +421,8 @@ impl Pipelines {
 
 struct Buffers {
     frame: wgpu::Buffer,
-    field: wgpu::Buffer,
+    world: wgpu::Buffer,
+    terrain: wgpu::Buffer,
     table: wgpu::Buffer,
     records: wgpu::Buffer,
     pool: wgpu::Buffer,
@@ -407,7 +453,7 @@ const HORIZON_BUCKETS: u32 = 32;
 const HORIZON_GROUPS: u32 = 16;
 
 impl Buffers {
-    fn new(device: &wgpu::Device, cap: &Capacity, field: &FieldConstants) -> Self {
+    fn new(device: &wgpu::Device, cap: &Capacity, planet: &Planet) -> Self {
         let mut bytes = 0u64;
         let mut make = |label: &str, size: u64, usage: wgpu::BufferUsages| {
             bytes += size;
@@ -469,14 +515,20 @@ impl Buffers {
             contents: bytemuck::cast_slice(&[i32::MIN / 2; 64]),
             usage: st,
         });
-        let field = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("planet field"),
-            contents: bytemuck::bytes_of(field),
+        let world = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("planet world"),
+            contents: bytemuck::bytes_of(&WorldGpu::new(planet)),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let terrain = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("planet terrain constants"),
+            contents: &terrain_bytes(&planet.field().program()),
             usage: wgpu::BufferUsages::UNIFORM,
         });
         Self {
             frame,
-            field,
+            world,
+            terrain,
             table,
             records,
             pool,
@@ -552,7 +604,7 @@ impl Screen {
 pub struct PlanetRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    pipelines: Pipelines,
+    pipelines: Arc<Pipelines>,
     buffers: Buffers,
     screen: Screen,
     residency: Residency,
@@ -575,8 +627,28 @@ pub struct PlanetRenderer {
 
 impl PlanetRenderer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, planet: Arc<Planet>, settings: Settings, size: [u32; 2]) -> Self {
-        let pipelines = Pipelines::new(device, planet.grid().is_plane());
-        let buffers = Buffers::new(device, &settings.capacity, planet.field());
+        Self::replacing(None, device, queue, planet, settings, size)
+    }
+
+    /// A renderer for `planet` that takes over `previous`'s compiled
+    /// pipelines when they serve the same shape and terrain program, so a
+    /// world rebuilt with new generator settings compiles no shaders.
+    pub fn replacing(
+        previous: Option<&PlanetRenderer>,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        planet: Arc<Planet>,
+        settings: Settings,
+        size: [u32; 2],
+    ) -> Self {
+        let plane = planet.grid().is_plane();
+        let program = planet.field().program();
+        let pipelines = previous
+            .map(|r| &r.pipelines)
+            .filter(|p| p.serve(plane, &program))
+            .cloned()
+            .unwrap_or_else(|| Arc::new(Pipelines::new(device, plane, &program)));
+        let buffers = Buffers::new(device, &settings.capacity, &planet);
         let gen_group = Self::gen_group(device, &pipelines, &buffers);
         let readbacks = (0..4)
             .map(|_| Readback {
@@ -617,8 +689,8 @@ impl PlanetRenderer {
 
     fn gen_group(device: &wgpu::Device, p: &Pipelines, b: &Buffers) -> wgpu::BindGroup {
         let entries: Vec<wgpu::BindGroupEntry> = [
-            &b.frame, &b.field, &b.table, &b.records, &b.pool, &b.brushes, &b.edit_refs, &b.jobs, &b.job_out,
-            &b.scratch, &b.alloc, &b.free_runs, &b.free_pages, &b.evictions, &b.level_tops, &b.block_state,
+            &b.frame, &b.world, &b.table, &b.records, &b.pool, &b.brushes, &b.edit_refs, &b.jobs, &b.job_out,
+            &b.scratch, &b.alloc, &b.free_runs, &b.free_pages, &b.evictions, &b.level_tops, &b.block_state, &b.terrain,
         ]
         .iter()
         .enumerate()
@@ -992,7 +1064,7 @@ impl PlanetRenderer {
             layout: &self.pipelines.trace_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: self.buffers.frame.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: self.buffers.field.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: self.buffers.world.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: self.buffers.table.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: self.buffers.records.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: self.buffers.pool.as_entire_binding() },
@@ -1004,6 +1076,7 @@ impl PlanetRenderer {
                 wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(depth) },
                 wgpu::BindGroupEntry { binding: 14, resource: self.buffers.level_tops.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 15, resource: self.buffers.block_state.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 16, resource: self.buffers.terrain.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 17, resource: self.buffers.horizon_acc.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 18, resource: self.buffers.horizon.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 19, resource: self.buffers.live_blocks.as_entire_binding() },
@@ -1320,7 +1393,14 @@ impl RenderPass for PlanetPass {
                         || (r.planet().recipe() == frame.planet.recipe())
                 });
                 if !same {
-                    let mut renderer = PlanetRenderer::new(ctx.device, ctx.queue, frame.planet.clone(), self.settings, [ctx.width, ctx.height]);
+                    let mut renderer = PlanetRenderer::replacing(
+                        self.active.as_ref(),
+                        ctx.device,
+                        ctx.queue,
+                        frame.planet.clone(),
+                        self.settings,
+                        [ctx.width, ctx.height],
+                    );
                     renderer.set_profiling(self.profiling);
                     self.active = Some(renderer);
                 } else if let Some(r) = &mut self.active {
@@ -1374,4 +1454,121 @@ impl RenderPass for PlanetPass {
             frame.write_texture_binding("directional_visibility", view, self.name());
         }
     }
+}
+
+/// Compare a world's terrain program on the GPU with its CPU field at
+/// `samples` pseudo-random columns (every level, face edges included) and
+/// ground-material inputs. Generator authors run this in their tests; it
+/// returns the first disagreement.
+pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet, samples: u32) -> Result<(), String> {
+    let grid = *planet.grid();
+    let field = planet.field();
+    let program = field.program();
+    let mut rng = 0x1234_5678u64;
+    let mut next = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    let (lo, hi) = field.height_range();
+    let span = (i64::from(hi) - i64::from(lo) + 1).max(1) as u64;
+    let mut inputs = Vec::new();
+    let mut extra = Vec::new();
+    for s in 0..samples {
+        let level = (next() % u64::from(grid.levels())) as u32;
+        let cells = (grid.cells() >> level).max(1) as u64;
+        let face = if grid.is_plane() { i32::from(crate::grid::PLANE_FACE) } else { (next() % 6) as i32 };
+        let (i, j) = if s % 4 == 0 {
+            ((next() % 2) as i32 * (cells as i32 - 1), (next() % cells) as i32)
+        } else {
+            ((next() % cells) as i32, (next() % cells) as i32)
+        };
+        inputs.push(IVec4::new(face, i, j, level as i32));
+        extra.push(IVec4::new(
+            (i64::from(lo) + (next() % span) as i64) as i32,
+            (next() % 40) as i32,
+            (next() % 40) as i32,
+            (next() % 200_000) as i32 - 100_000,
+        ));
+    }
+    let kernel = "
+@group(0) @binding(20) var<storage, read> verify_in: array<vec4<i32>>;
+@group(0) @binding(21) var<storage, read> verify_extra: array<vec4<i32>>;
+@group(0) @binding(22) var<storage, read_write> verify_out: array<vec2<i32>>;
+@compute @workgroup_size(64) fn verify(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= arrayLength(&verify_in) { return; }
+    let a = verify_in[id.x];
+    let e = verify_extra[id.x];
+    let p = domain_point(u32(a.x), a.y, a.z, u32(a.w));
+    verify_out[id.x] = vec2<i32>(field_height(u32(a.x), a.y, a.z, u32(a.w)), i32(ground_material(p, e.x, e.y, e.z, e.w)));
+}
+";
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("terrain verification"),
+        source: wgpu::ShaderSource::Wgsl(source("read", &[kernel], grid.is_plane(), &program).into()),
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("terrain verification"),
+        layout: None,
+        module: &module,
+        entry_point: Some("verify"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let init = |label, contents: &[u8], usage| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage });
+    let world = init("verify world", bytemuck::bytes_of(&WorldGpu::new(planet)), wgpu::BufferUsages::UNIFORM);
+    let terrain = init("verify terrain", &terrain_bytes(&program), wgpu::BufferUsages::UNIFORM);
+    let ins = init("verify inputs", bytemuck::cast_slice(&inputs), wgpu::BufferUsages::STORAGE);
+    let ext = init("verify extra", bytemuck::cast_slice(&extra), wgpu::BufferUsages::STORAGE);
+    let bytes = u64::from(samples) * 8;
+    let out = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("verify out"),
+        size: bytes.max(8),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let read = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("verify readback"),
+        size: bytes.max(8),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("terrain verification"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 1, resource: world.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 16, resource: terrain.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 20, resource: ins.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 21, resource: ext.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 22, resource: out.as_entire_binding() },
+        ],
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(samples.div_ceil(64), 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&out, 0, &read, 0, bytes.max(8));
+    queue.submit([encoder.finish()]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    read.slice(..).map_async(wgpu::MapMode::Read, move |r| drop(tx.send(r)));
+    device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| e.to_string())?;
+    rx.recv().map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    let data = read.slice(..).get_mapped_range().map_err(|e| e.to_string())?;
+    let gpu: &[[i32; 2]] = bytemuck::cast_slice(&data[..bytes as usize]);
+    for ((a, e), g) in inputs.iter().zip(&extra).zip(gpu) {
+        let p = grid.domain_point(a.x as u8, a.y, a.z, a.w as u32);
+        let cpu = [
+            field.height(p, a.w as u32 + grid.level_offset()),
+            field.ground_material(p, e.x, e.y, e.z, e.w) as i32,
+        ];
+        if *g != cpu {
+            return Err(format!("column {a} with inputs {e}: GPU {g:?}, CPU {cpu:?}"));
+        }
+    }
+    Ok(())
 }

@@ -70,7 +70,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let y = i32(li >> 3u);
     let i = ci * 8 + x;
     let j = cj * 8 + y;
-    let top = top_cells(terrain_height(domain_point(face, i, j, level), level), level);
+    let top = top_cells(field_height(face, i, j, level), level);
     if li == 0u {
         atomicStore(&g_band[0], 0x7fffffff);
         atomicStore(&g_band[1], -0x7fffffff);

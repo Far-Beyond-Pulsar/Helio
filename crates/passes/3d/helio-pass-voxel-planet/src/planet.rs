@@ -1,16 +1,17 @@
 //! Canonical editable voxel world (a planet or a plane): recipe, exact cell
 //! queries and ray casts.
 use crate::edits::{apply, center_half, Brush, EditLog, FaceBrush};
-use crate::field::{self, FieldConstants, Landform, HEIGHT_ONE};
 use crate::grid::{face_axes, Cell, Grid, Shape};
+use crate::terrain::{self, material, TerrainField, TerrainSource, HEIGHT_ONE};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-pub const RECIPE_VERSION: u32 = 1;
+pub const RECIPE_VERSION: u32 = 2;
 pub const EARTH_RADIUS: f64 = 6_371_000.0;
 
-/// Serialized authoring recipe. Edits are stored separately (see `journal`).
+/// Serialized authoring recipe: the world's form and its terrain generator.
+/// Edits are stored separately (see `journal`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlanetRecipe {
@@ -22,7 +23,7 @@ pub struct PlanetRecipe {
     /// Edge length of a finite plane, centred on the origin.
     pub plane_size_m: f64,
     pub voxel_size_m: f64,
-    pub landform: Landform,
+    pub terrain: TerrainSource,
 }
 
 impl Default for PlanetRecipe {
@@ -33,7 +34,7 @@ impl Default for PlanetRecipe {
             radius_m: EARTH_RADIUS,
             plane_size_m: 4_096.0,
             voxel_size_m: 0.1,
-            landform: Landform::default(),
+            terrain: TerrainSource::default(),
         }
     }
 }
@@ -68,7 +69,7 @@ pub struct RayHit {
 pub struct Planet {
     recipe: PlanetRecipe,
     grid: Grid,
-    field: FieldConstants,
+    field: Arc<dyn TerrainField>,
     edits: EditLog,
     revision: u64,
     /// Highest radius any add brush reaches.
@@ -83,7 +84,7 @@ impl Clone for Planet {
         Self {
             recipe: self.recipe.clone(),
             grid: self.grid,
-            field: self.field,
+            field: Arc::clone(&self.field),
             edits: self.edits.clone(),
             revision: self.revision,
             edit_top: self.edit_top,
@@ -99,7 +100,7 @@ impl Planet {
             Shape::Sphere => Grid::new(recipe.radius_m, recipe.voxel_size_m)?,
             shape => Grid::plane(shape, recipe.plane_size_m, recipe.voxel_size_m)?,
         };
-        let field = FieldConstants::new(&grid, &recipe.landform);
+        let field = terrain::build(&recipe.terrain, &grid)?;
         Ok(Self {
             recipe,
             grid,
@@ -117,8 +118,9 @@ impl Planet {
     pub fn grid(&self) -> &Grid {
         &self.grid
     }
-    pub fn field(&self) -> &FieldConstants {
-        &self.field
+    /// The terrain generator's field for this world's grid.
+    pub fn field(&self) -> &dyn TerrainField {
+        &*self.field
     }
     pub fn edits(&self) -> &EditLog {
         &self.edits
@@ -147,17 +149,10 @@ impl Planet {
     }
     /// Conservative bound on terrain surface height above the datum (m).
     pub fn max_terrain_height(&self) -> f64 {
-        let k = &self.field;
-        let mut sum = f64::from(k.levels[1].abs());
-        for o in &k.octaves[crate::field::WARP_OCTAVES..k.header[1] as usize] {
-            if o.kind >= 2 {
-                sum += f64::from(o.amplitude.abs());
-            }
-        }
-        sum / f64::from(HEIGHT_ONE) + 10.0
+        f64::from(self.field.height_range().1) / f64::from(HEIGHT_ONE)
     }
     pub fn min_terrain_height(&self) -> f64 {
-        -self.max_terrain_height() - f64::from(self.field.levels[0].abs()) / f64::from(HEIGHT_ONE)
+        f64::from(self.field.height_range().0) / f64::from(HEIGHT_ONE)
     }
     /// Radius below which every cell is solid (terrain and removals).
     pub fn inner_radius(&self) -> f64 {
@@ -176,7 +171,7 @@ impl Planet {
             }
         }
         let p = self.grid.domain_point(face, i, j, level);
-        let h = field::height(&self.field, p, level);
+        let h = self.field.height(p, level + self.grid.level_offset());
         if let Ok(mut cache) = self.heights.lock() {
             if cache.len() > 1 << 20 {
                 cache.clear();
@@ -187,7 +182,7 @@ impl Planet {
     }
     /// First air layer above the column (level cells).
     pub fn column_top(&self, face: u8, i: i32, j: i32, level: u32) -> i32 {
-        field::top_cells(&self.field, self.column_height(face, i, j, level), level)
+        terrain::top_cells(&self.grid, self.column_height(face, i, j, level), level)
     }
     fn face_brushes(&self, face: u8, i: i32, j: i32, level: u32) -> Vec<FaceBrush> {
         let lo_i = i64::from(i) << level;
@@ -203,7 +198,7 @@ impl Planet {
     /// Material 0 on a solid cell means "terrain rule".
     pub fn sample_kind(&self, level: u32, face: u8, i: i32, j: i32, k: i32) -> (u32, u32) {
         let top = self.column_top(face, i, j, level);
-        let kind = field::terrain_kind(top, k);
+        let kind = terrain::terrain_kind(top, k);
         let center = [center_half(i, level), center_half(j, level), center_half(k, level)];
         apply(self.face_brushes(face, i, j, level).into_iter(), center, kind, 0)
     }
@@ -218,18 +213,17 @@ impl Planet {
     pub fn material(&self, cell: Cell) -> u32 {
         let (kind, material) = self.sample_kind(0, cell.face, cell.i, cell.j, cell.k);
         match kind {
-            0 => field::material::AIR,
+            0 => material::AIR,
             _ if material != 0 => material,
             _ => {
-                let h = self.column_height(cell.face, cell.i, cell.j, 0);
-                let top = field::top_cells(&self.field, h, 0);
+                let top = self.column_top(cell.face, cell.i, cell.j, 0);
                 // Slope is measured inside the cell's 8x8 column block, which
                 // is exactly what the GPU shading pass has resident.
                 let (bi, bj) = (cell.i & !7, cell.j & !7);
-                let slope = field::block_slope(|x, y| self.column_top(cell.face, bi + x, bj + y, 0), cell.i & 7, cell.j & 7);
+                let slope = terrain::block_slope(|x, y| self.column_top(cell.face, bi + x, bj + y, 0), cell.i & 7, cell.j & 7);
                 let p = self.grid.domain_point(cell.face, cell.i, cell.j, 0);
-                let _ = h;
-                field::ground_material(&self.field, p, top * self.field.header[2], top - 1 - cell.k, slope, cell.k)
+                let top_height = top * self.grid.layer_mm() as i32;
+                self.field.ground_material(p, top_height, top - 1 - cell.k, slope, cell.k) & material::ID
             }
         }
     }
@@ -453,38 +447,12 @@ mod tests {
     }
 
     #[test]
-    fn bound_margins_hold_for_sampled_cells() {
-        for voxel in [0.1, 0.3, 1.0] {
-            let p = Planet::new(PlanetRecipe { voxel_size_m: voxel, ..Default::default() }).unwrap();
-            let g = *p.grid();
-            let margins = p.field().bound_margins(&g);
-            let mut rng = 0x2545_F491_4F6C_DD1Du64;
-            let mut next = || {
-                rng ^= rng << 13;
-                rng ^= rng >> 7;
-                rng ^= rng << 17;
-                rng
-            };
-            let mut worst = vec![i32::MIN; g.levels() as usize];
-            for _ in 0..6_000 {
-                let level = 1 + (next() % u64::from(g.levels() - 1)) as u32;
-                let cells = g.cells() >> level;
-                let face = (next() % 6) as u8;
-                let (i, j) = ((next() % cells as u64) as i32, (next() % cells as u64) as i32);
-                let top = p.column_top(face, i, j, level);
-                for _ in 0..6 {
-                    let finer = (next() % u64::from(level)) as u32;
-                    let shift = level - finer;
-                    let fi = (i << shift) + (next() % (1u64 << shift)) as i32;
-                    let fj = (j << shift) + (next() % (1u64 << shift)) as i32;
-                    let fine = p.column_top(face, fi, fj, finer);
-                    let excess = (((fine - 1) >> shift) + 1) - top;
-                    worst[level as usize] = worst[level as usize].max(excess);
-                    assert!(excess <= margins[level as usize], "voxel {voxel} level {level}: excess {excess} > {}", margins[level as usize]);
-                }
-            }
-            eprintln!("voxel {voxel}: margins {:?}
-worst {:?}", &margins[..g.levels() as usize], worst);
+    fn terrain_bounds_hold_for_sampled_cells() {
+        let flat = TerrainSource { generator: crate::landform::FLAT_ID.into(), settings: r#"{"height_m": 3.3}"#.into(), ..Default::default() };
+        for (terrain, voxel) in [(TerrainSource::default(), 0.1), (TerrainSource::default(), 0.3), (TerrainSource::default(), 1.0), (flat, 0.1)] {
+            let p = Planet::new(PlanetRecipe { voxel_size_m: voxel, terrain: terrain.clone(), ..Default::default() }).unwrap();
+            let worst = terrain::check_field(&p, 6_000).unwrap_or_else(|e| panic!("{} at {voxel} m: {e}", terrain.generator));
+            eprintln!("{} {voxel}: margins {:?}\nworst {worst:?}", terrain.generator, &p.field().bound_margins()[..p.grid().levels() as usize]);
         }
     }
 
@@ -550,9 +518,9 @@ worst {:?}", &margins[..g.levels() as usize], worst);
         assert!(!p.solid(Cell::new(face, i, j, top - 1)));
         assert!(!p.solid(Cell::new(face, i, j, top - 9)));
         assert!(p.solid(Cell::new(face, i, j, top - 12)));
-        p.apply(Brush { center: centre.to_array(), radius: 0.25, shape: BrushShape::Cube, op: BrushOp::Add, material: field::material::BRICK }).unwrap();
+        p.apply(Brush { center: centre.to_array(), radius: 0.25, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK }).unwrap();
         assert!(p.solid(Cell::new(face, i, j, top - 1)));
-        assert_eq!(p.material(Cell::new(face, i, j, top - 1)), field::material::BRICK);
+        assert_eq!(p.material(Cell::new(face, i, j, top - 1)), material::BRICK);
         assert!(p.undo().is_some());
         assert!(!p.solid(Cell::new(face, i, j, top - 1)));
     }

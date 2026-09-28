@@ -47,8 +47,8 @@ fn palette(m: u32) -> vec3<f32> {
 // patches (continuous across levels). The patch octave fades out where it is
 // finer than a cell, so distant terrain shows its average.
 fn grass_albedo(p: vec3<i32>, level: u32) -> vec3<f32> {
-    let broad = f32(noise(p, 13u, 0x3c6ef372u)) / f32(Q12);
-    let patches = f32(noise(p, 9u, 0xa54ff53au)) / f32(Q12) * clamp(f32(8 - i32(level)) * 0.5, 0.0, 1.0);
+    let broad = f32(noise(p, 13u, 0x3c6ef372u)) / f32(NOISE_ONE);
+    let patches = f32(noise(p, 9u, 0xa54ff53au)) / f32(NOISE_ONE) * clamp(f32(8 - i32(level)) * 0.5, 0.0, 1.0);
     let t = clamp(0.58 + 0.6 * broad + 0.14 * patches, 0.0, 1.0);
     let dry = srgb(vec3<f32>(146.0, 148.0, 82.0));
     let meadow = srgb(vec3<f32>(106.0, 144.0, 58.0));
@@ -146,6 +146,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         material = km.y;
     }
     let edited = material != 0u;
+    var speck = false;
     var slope = 0;
     let p = domain_point(face, h.i, h.j, level);
     if !edited {
@@ -160,7 +161,9 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         // above it is surface, not subsoil (coarse levels step in large
         // cells where the fine terrain is a continuous slope).
         let depth = max(min(top, lowest) - 1 - h.k, 0) << level;
-        material = ground_material(p, (top << level) * field.header.z, depth, slope, h.k << level);
+        material = ground_material(p, (top << level) * world.grid.y, depth, slope, h.k << level);
+        speck = (material & M_SPECK) != 0u;
+        material &= M_ID;
     }
     var normal = hit_normal(h, d);
     // Filtered appearance (after "Filtered appearance for voxels", HPG
@@ -184,7 +187,9 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         let macro_normal = normalize(up - gi * plane_normal(face, 0u, h.i << level) - gj * plane_normal(face, 1u, h.j << level));
         normal = normalize(mix(normal, macro_normal, smooth_w));
         if code < 4u && smooth_w > 0.5 && !edited {
-            material = ground_material(p, (top << level) * field.header.z, 0, slope, (top - 1) << level);
+            material = ground_material(p, (top << level) * world.grid.y, 0, slope, (top - 1) << level);
+            speck = (material & M_SPECK) != 0u;
+            material &= M_ID;
             // Sunlight treats the riser as part of the slope: traced from
             // the column's top surface, not into the step above it.
             lift = u32(clamp(top - h.k, 0, 255));
@@ -251,9 +256,8 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         if code != 4u { grass *= 0.9; }
         if material == M_GRASS && !soil_side {
             albedo = grass;
-        } else if code == 4u && !edited && (material == M_DIRT || material == M_SAND)
-            && (top << level) * field.header.z < field.levels.w {
-            // Single-voxel mud and sand specks of basin meadows.
+        } else if code == 4u && speck {
+            // Single-voxel flecks (mud and sand in meadows) blend into grass.
             albedo = mix(albedo, grass, smooth_w);
         }
     }

@@ -412,11 +412,10 @@ impl Clone for VoxelTerrainComponent {
     }
 }
 
-/// Landform settings of the built-in planet generator
-/// (`helio.voxel-planet.default`): the scale and height of continents,
-/// mountains and hills, surface roughness and the snowline. It configures
-/// the [`VoxelTerrainComponent`] on the same entity; the base component's
-/// seed varies the landform.
+/// Settings of the landform generator (`helio.landform`): the scale and
+/// height of continents, mountains and hills, surface roughness and the
+/// snowline. It configures the [`VoxelTerrainComponent`] on the same
+/// entity; the base component's seed varies the landform.
 #[engine_class(category = "Voxel/Terrain", clone, debug, serialize, deserialize)]
 #[category("Continents", category_color = "#6FA86F")]
 #[category("Mountains", category_color = "#9A8F84")]
@@ -469,6 +468,62 @@ impl Default for VoxelLandformComponent {
             hill_km: 9.0,
             roughness: 0.035,
             warp_km: 40.0,
+        }
+    }
+}
+
+/// A solid terrain material.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, pulsar_reflection::Reflectable)]
+pub enum VoxelTerrainMaterial {
+    #[default]
+    Grass,
+    Dirt,
+    Stone,
+    Sand,
+    Snow,
+    Water,
+    Gravel,
+    Sandstone,
+    DarkStone,
+    Wood,
+    Leaves,
+    Clay,
+    Brick,
+    Planks,
+    Cobble,
+}
+
+/// Settings of the flat generator (`helio.flat`): level ground at `height`
+/// with a surface layer over soil over rock. It configures the
+/// [`VoxelTerrainComponent`] on the same entity.
+#[engine_class(category = "Voxel/Terrain", clone, debug, serialize, deserialize)]
+#[category("Ground", category_color = "#6FA86F")]
+#[serde(default)]
+pub struct VoxelFlatTerrainComponent {
+    /// Ground height above the entity origin, in metres.
+    #[serde(rename = "height_m")]
+    #[property(min = -10000.0, max = 10000.0, step = 0.1, category = "Ground")]
+    pub height: f64,
+    /// Depth of the soil under the surface layer, in metres.
+    #[serde(rename = "soil_depth_m")]
+    #[property(min = 0.0, max = 1000.0, step = 0.1, category = "Ground")]
+    pub soil_depth: f64,
+    #[property(category = "Ground")]
+    pub surface: VoxelTerrainMaterial,
+    #[property(category = "Ground")]
+    pub soil: VoxelTerrainMaterial,
+    #[property(category = "Ground")]
+    pub rock: VoxelTerrainMaterial,
+}
+
+impl Default for VoxelFlatTerrainComponent {
+    fn default() -> Self {
+        Self {
+            height: 0.0,
+            soil_depth: 1.0,
+            surface: VoxelTerrainMaterial::Grass,
+            soil: VoxelTerrainMaterial::Dirt,
+            rock: VoxelTerrainMaterial::Stone,
         }
     }
 }

@@ -61,7 +61,7 @@ pub fn key0(face: u8, level: u32, ci: i32) -> u32 {
 }
 
 pub fn slot_hash(key0: u32, key1: u32) -> u32 {
-    crate::field::hash3(key0 as i32, key1 as i32, 0x2f6b_1d3a, 0x9e37_79b9)
+    crate::noise::hash3(key0 as i32, key1 as i32, 0x2f6b_1d3a, 0x9e37_79b9)
 }
 
 fn pack(k0: u32, k1: u32) -> u64 {

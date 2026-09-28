@@ -1,5 +1,5 @@
 //! Writes an equirectangular height/material preview (PPM) of the default planet.
-use helio_pass_voxel_planet::{field, grid::face_of, Planet, PlanetRecipe};
+use helio_pass_voxel_planet::{grid::face_of, terrain, Planet, PlanetRecipe};
 use glam::DVec3;
 fn main() {
     let out = std::env::args().nth(1).unwrap_or("planet_map.ppm".into());
@@ -22,9 +22,9 @@ fn main() {
             lo = lo.min(m); hi = hi.max(m);
             let rgb = if m < 0.0 { land += 0; let t = (1.0 + m / 3000.0).clamp(0.0, 1.0); [(20.0 + 40.0 * t) as u8, (50.0 + 80.0 * t) as u8, (110.0 + 90.0 * t) as u8] } else {
                 land += 1;
-                let top = field::top_cells(planet.field(), hh, level);
+                let top = terrain::top_cells(&g, hh, level);
                 let p = g.domain_point(face, i >> level, j >> level, level);
-                let mat = field::ground_material(planet.field(), p, hh, 0, 0, top - 1);
+                let mat = planet.field().ground_material(p, hh, 0, 0, top - 1) & terrain::material::ID;
                 let base = match mat { 1 => [80, 130, 50], 4 => [210, 190, 130], 5 => [240, 240, 245], 8 | 12 => [190, 110, 70], 3 | 9 => [120, 120, 120], _ => [140, 100, 70] };
                 let shade = (0.6 + m / 6000.0).clamp(0.4, 1.3);
                 base.map(|v: i32| (f64::from(v) * shade).min(255.0) as u8)

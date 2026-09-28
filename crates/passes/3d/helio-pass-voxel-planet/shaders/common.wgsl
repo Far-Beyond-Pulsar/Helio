@@ -60,7 +60,8 @@ const UNIT_WORDS: u32 = 16u;
 const MAX_PROBES: u32 = 64u;
 
 @group(0) @binding(0) var<uniform> frame: Frame;
-@group(0) @binding(1) var<uniform> field: FieldConstants;
+@group(0) @binding(1) var<uniform> world: World;
+@group(0) @binding(16) var<uniform> terrain: TerrainConstants;
 @group(0) @binding(2) var<storage, ACCESS> table: array<u32>;
 @group(0) @binding(3) var<storage, ACCESS> records: array<Column>;
 @group(0) @binding(4) var<storage, ACCESS> pool: array<u32>;

@@ -1,47 +1,31 @@
-//! Deterministic integer terrain field shared bit-for-bit with `field.wgsl`.
+//! The built-in landform generator (`helio.landform`): continents, ocean
+//! basins, ridged mountain ranges, hills and metre-scale roughness, with
+//! meadows, dry lands, rock outcrops, strata and snow. Also the flat
+//! generator (`helio.flat`). `landform.wgsl` and `flat.wgsl` mirror them.
 //!
-//! Heights are fixed point (1/256 base cell). Every operation is wrapping
-//! two's-complement integer arithmetic, so CPU queries, collision and GPU
-//! generation agree exactly. Additive octaves finer than a level's cells are
-//! omitted at that level: coarse levels are band-limited point samples of the
-//! same field rather than an independent smooth replacement.
+//! Every operation is wrapping two's-complement integer arithmetic, so CPU
+//! and GPU agree to the bit. Additive octaves finer than a column footprint
+//! are omitted: coarse levels are band-limited point samples of the same
+//! field rather than an independent smooth replacement.
 use crate::grid::Grid;
+use crate::noise::{noise, scale, hash3, ONE};
+use crate::terrain::{material, GeneratorInfo, TerrainField, TerrainGenerator, TerrainProgram, HEIGHT_ONE};
 use bytemuck::{Pod, Zeroable};
 use glam::IVec3;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::sync::Arc;
 
-/// Heights are integer millimetres above the datum (sea level).
-pub const HEIGHT_ONE: i32 = 1000;
-/// Noise output scale (Q16).
-const ONE: i32 = 65_536;
+pub const ID: &str = "helio.landform";
+pub const VERSION: u32 = 1;
+pub const FLAT_ID: &str = "helio.flat";
+pub const FLAT_VERSION: u32 = 1;
 
-pub mod material {
-    pub const AIR: u32 = 0;
-    pub const GRASS: u32 = 1;
-    pub const DIRT: u32 = 2;
-    pub const STONE: u32 = 3;
-    pub const SAND: u32 = 4;
-    pub const SNOW: u32 = 5;
-    pub const WATER: u32 = 6;
-    pub const GRAVEL: u32 = 7;
-    pub const SANDSTONE: u32 = 8;
-    pub const DARK_STONE: u32 = 9;
-    pub const WOOD: u32 = 10;
-    pub const LEAVES: u32 = 11;
-    pub const CLAY: u32 = 12;
-    pub const BRICK: u32 = 13;
-    pub const PLANKS: u32 = 14;
-    pub const COBBLE: u32 = 15;
-    pub const COUNT: u32 = 16;
-}
-
-/// Authored landform parameters in metres. Converted per grid into
-/// [`FieldConstants`]; the same recipe produces a similar planet at every
-/// supported voxel size.
+/// Landform settings in metres (the generator's settings JSON). The same
+/// settings produce a similar world at every supported voxel size.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Landform {
-    pub seed: u32,
     /// Wavelength of continents.
     pub continent_km: f64,
     /// Ocean floor depth and typical lowland height.
@@ -60,7 +44,6 @@ pub struct Landform {
 impl Default for Landform {
     fn default() -> Self {
         Self {
-            seed: 7,
             continent_km: 3_000.0,
             ocean_depth_m: 2_400.0,
             lowland_m: 180.0,
@@ -89,35 +72,30 @@ pub struct Octave {
     pub kind: u32,
 }
 
-/// GPU-mirrored constants (std430/uniform compatible, 16-byte aligned).
+/// `TerrainConstants` of `landform.wgsl` (uniform layout).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
-pub struct FieldConstants {
-    /// reference cells, octave count, layer thickness (mm), dirt depth (cells).
+pub struct LandformConstants {
+    /// octave count, layer thickness (mm), dirt depth (cells), seed.
     pub header: [i32; 4],
     /// basin floor, lowland, snowline, basin threshold (mm).
     pub levels: [i32; 4],
-    /// warp amplitude (domain units), mountain mask bias, steep slope (cells/cell), seed.
-    pub misc: [i32; 4],
-    /// domain scale (Q24), level offset, grid cells, pad.
-    pub scale: [i32; 4],
-    /// Per-level conservative excess (level cells) of any equal-or-finer
-    /// level's surface inside a level cell over that cell's own top.
-    pub bounds: [[i32; 4]; 6],
+    /// mountain mask bias, steep slope (cells/cell), pad, pad.
+    pub shape: [i32; 4],
     pub octaves: [Octave; OCTAVES],
 }
 
-impl FieldConstants {
-    pub fn new(grid: &Grid, land: &Landform) -> Self {
+impl LandformConstants {
+    pub fn new(grid: &Grid, land: &Landform, seed: u32) -> Self {
         let units = |metres: f64| (metres * f64::from(HEIGHT_ONE)).round() as i32;
         // Lattice spacing for a wavelength, in reference half cells.
         let half = crate::grid::REFERENCE_VOXEL * 0.5;
         let shift = |metres: f64| ((metres / half).log2().round().clamp(1.0, 29.0)) as u32;
         let mut octaves = Vec::new();
-        let mut seed = land.seed.wrapping_mul(0x9E37_79B9);
+        let mut state = seed.wrapping_mul(0x9E37_79B9);
         let mut next_seed = || {
-            seed = seed.wrapping_add(0x6D2B_79F5);
-            seed
+            state = state.wrapping_add(0x6D2B_79F5);
+            state
         };
         // Domain warp: two octaves per axis, amplitude in domain units, always
         // evaluated with 16-bit noise so the displacement is continuous.
@@ -189,12 +167,12 @@ impl FieldConstants {
         let count = octaves.len() as i32;
         let mut table = [Octave::default(); OCTAVES];
         table[..octaves.len()].copy_from_slice(&octaves);
-        let mut constants = Self {
+        Self {
             header: [
-                grid.reference_cells(),
                 count,
                 grid.layer_mm() as i32,
                 ((0.7 / grid.voxel_size()).round() as i32).max(1),
+                seed as i32,
             ],
             levels: [
                 units(-land.ocean_depth_m),
@@ -202,29 +180,22 @@ impl FieldConstants {
                 units(land.snowline_m),
                 units(-8.0),
             ],
-            misc: [0, ONE / 20, 16, land.seed as i32],
-            scale: [grid.domain_scale() as i32, grid.level_offset() as i32, grid.cells(), 0],
-            bounds: [[0; 4]; 6],
+            shape: [ONE / 20, 16, 0, 0],
             octaves: table,
-        };
-        let margins = constants.bound_margins(grid);
-        for (level, m) in margins.iter().enumerate() {
-            constants.bounds[level / 4][level % 4] = *m;
         }
-        constants
     }
 
-    /// Conservative per-level surface excess, in level cells (see `bounds`).
+    /// Conservative per-level surface excess, in level cells (see
+    /// [`TerrainField::bound_margins`]).
     ///
     /// A finer level adds octaves that this level omits (each bounded by its
     /// amplitude) and the resolved field varies inside the cell by at most its
     /// Lipschitz constant times the half diagonal. The noise gradient bound
     /// `G` is 1.5x the measured maximum of the fixed-point gradient noise
-    /// (5.3 per lattice spacing); `bound_margins_hold_for_sampled_cells`
-    /// checks the result against exhaustive samples.
+    /// (5.3 per lattice spacing); `check_field` samples the result.
     pub fn bound_margins(&self, grid: &Grid) -> [i32; 24] {
         const G: f64 = 8.0;
-        let count = self.header[1] as usize;
+        let count = self.header[0] as usize;
         let ridged_sum: f64 = self.octaves[..count].iter().filter(|o| o.kind == 2).map(|o| f64::from(o.amplitude.abs())).sum();
         let detail_sum: f64 = self.octaves[..count].iter().filter(|o| o.kind == 3 || o.kind == 7).map(|o| f64::from(o.amplitude.abs())).sum();
         // Domain warp Lipschitz constant (dimensionless).
@@ -236,7 +207,7 @@ impl FieldConstants {
         let ratio = f64::from(grid.reference_cells()) / f64::from(grid.cells());
         let mut out = [0i32; 24];
         for level in 0..24u32 {
-            let effective = level + self.scale[1] as u32;
+            let effective = level + grid.level_offset();
             let mut dropped = 0.0;
             let mut lipschitz = 0.0;
             let mut unwarped = 0.0;
@@ -258,116 +229,37 @@ impl FieldConstants {
             // Half diagonal of a level cell in reference half cells.
             let half_diagonal = 2f64.powi(level as i32 + 1) * ratio * std::f64::consts::SQRT_2 * 0.5;
             let excess_mm = dropped + (lipschitz * (1.0 + warp) + unwarped) * half_diagonal;
-            let cell_mm = f64::from(self.header[2]) * 2f64.powi(level as i32);
+            let cell_mm = f64::from(self.header[1]) * 2f64.powi(level as i32);
             out[level as usize] = ((excess_mm / cell_mm).ceil() as i64 + 2).clamp(2, 1 << 20) as i32;
         }
         out
     }
-}
 
-#[inline]
-pub fn hash3(x: i32, y: i32, z: i32, seed: u32) -> u32 {
-    let mut v = (x as u32).wrapping_mul(0x8da6_b343)
-        ^ (y as u32).wrapping_mul(0xd816_3841)
-        ^ (z as u32).wrapping_mul(0xcb1a_b31f)
-        ^ seed;
-    v ^= v >> 16;
-    v = v.wrapping_mul(0x7feb_352d);
-    v ^= v >> 15;
-    v = v.wrapping_mul(0x846c_a68b);
-    v ^ (v >> 16)
-}
-
-#[inline]
-fn grad(hash: u32, x: i32, y: i32, z: i32) -> i32 {
-    let h = hash & 15;
-    let u = if h < 8 { x } else { y };
-    let v = if h < 4 {
-        y
-    } else if h == 12 || h == 14 {
-        x
-    } else {
-        z
-    };
-    (if h & 1 == 0 { u } else { u.wrapping_neg() }).wrapping_add(if h & 2 == 0 {
-        v
-    } else {
-        v.wrapping_neg()
-    })
-}
-
-/// `a * w >> 16` for `|a| < 2^19`, `0 <= w <= 65536` with 32-bit intermediates.
-#[inline]
-fn mul16(a: i32, w: i32) -> i32 {
-    a.wrapping_mul(w >> 8)
-        .wrapping_add(a.wrapping_mul(w & 255) >> 8)
-        >> 8
-}
-
-#[inline]
-fn fade(t: i32) -> i32 {
-    // 6t^5 - 15t^4 + 10t^3 in Q16.
-    let tu = t as u32;
-    let t2 = tu.wrapping_mul(tu) >> 16;
-    let t3 = t2.wrapping_mul(tu) >> 16;
-    let inner = (6 * t2 as i32).wrapping_sub(15 * t).wrapping_add(10 * ONE);
-    mul16(t3 as i32, inner)
-}
-
-#[inline]
-fn lerp(a: i32, b: i32, w: i32) -> i32 {
-    a.wrapping_add(mul16(b.wrapping_sub(a), w))
-}
-
-/// Gradient noise on a lattice of spacing `2^shift` domain units, with
-/// 16-bit fractions and output in about [-65536, 65536].
-pub fn noise(p: IVec3, shift: u32, seed: u32) -> i32 {
-    let mask = (1i32 << shift) - 1;
-    let c = [p.x >> shift, p.y >> shift, p.z >> shift];
-    let f = [p.x & mask, p.y & mask, p.z & mask].map(|v| {
-        if shift >= 16 {
-            v >> (shift - 16)
-        } else {
-            v << (16 - shift)
+    /// Conservative lowest and highest surface height (height units).
+    pub fn height_range(&self) -> (i32, i32) {
+        let mut sum = i64::from(self.levels[1].abs());
+        for o in &self.octaves[WARP_OCTAVES..self.header[0] as usize] {
+            if o.kind >= 2 {
+                sum += i64::from(o.amplitude.abs());
+            }
         }
-    });
-    let w = f.map(fade);
-    let corner = |dx: i32, dy: i32, dz: i32| {
-        grad(
-            hash3(c[0].wrapping_add(dx), c[1].wrapping_add(dy), c[2].wrapping_add(dz), seed),
-            f[0] - dx * ONE,
-            f[1] - dy * ONE,
-            f[2] - dz * ONE,
-        )
-    };
-    let x00 = lerp(corner(0, 0, 0), corner(1, 0, 0), w[0]);
-    let x10 = lerp(corner(0, 1, 0), corner(1, 1, 0), w[0]);
-    let x01 = lerp(corner(0, 0, 1), corner(1, 0, 1), w[0]);
-    let x11 = lerp(corner(0, 1, 1), corner(1, 1, 1), w[0]);
-    let y0 = lerp(x00, x10, w[1]);
-    let y1 = lerp(x01, x11, w[1]);
-    lerp(y0, y1, w[2]).clamp(-ONE, ONE)
-}
-
-/// `n * amplitude / 65536` without overflow (`|n| <= 2^17`, `|amplitude| < 2^27`).
-#[inline]
-pub fn scale(n: i32, amplitude: i32) -> i32 {
-    n.wrapping_mul(amplitude >> 16)
-        .wrapping_add(n.wrapping_mul((amplitude & 0xffff) >> 4) >> 12)
+        let hi = sum + 10 * i64::from(HEIGHT_ONE);
+        let lo = -hi - i64::from(self.levels[0].abs());
+        (lo.max(i64::from(i32::MIN / 2)) as i32, hi.min(i64::from(i32::MAX / 2)) as i32)
+    }
 }
 
 /// Additive detail finer than about four level cells is omitted at `level`
-/// (`level` already includes the grid's reference offset).
+/// (`level` counts reference cells).
 #[inline]
 fn resolved(o: &Octave, level: u32) -> bool {
     o.kind <= 1 || o.shift >= level + 3
 }
 
-/// Terrain surface height (height units above the datum) of a level cell
-/// column whose centre is at domain point `p`.
-pub fn height(k: &FieldConstants, p: IVec3, level: u32) -> i32 {
-    let count = k.header[1] as usize;
-    let level = level + k.scale[1] as u32;
+/// Surface height (height units above the datum) of the column centred at
+/// domain point `p` with a `2^level` reference cell footprint.
+pub fn height(k: &LandformConstants, p: IVec3, level: u32) -> i32 {
+    let count = k.header[0] as usize;
     // The first six octaves are the domain warp (two per axis). The warp is a
     // coordinate transform, so every level evaluates it.
     let mut warp = [0i32; 3];
@@ -411,65 +303,44 @@ pub fn height(k: &FieldConstants, p: IVec3, level: u32) -> i32 {
     };
     // Mountains rise only on land, inside the mountain-region mask.
     let land = (c * 3).clamp(0, ONE);
-    let region = (mask.wrapping_sub(k.misc[1]) * 3).clamp(0, ONE);
+    let region = (mask.wrapping_sub(k.shape[0]) * 3).clamp(0, ONE);
     let mountains = scale(land, scale(region, ridged));
     // Land detail fades out under deep water.
     let wet = (ONE + c * 2).clamp(ONE / 8, ONE);
     base.wrapping_add(mountains).wrapping_add(scale(wet, detail))
 }
 
-/// Cell layer index of the first air cell above the column surface.
-#[inline]
-pub fn top_cells(k: &FieldConstants, height: i32, level: u32) -> i32 {
-    height.div_euclid(k.header[2]) >> level
-}
-
-/// Canonical terrain kind at a level cell before edits: 0 air, 1 solid.
-#[inline]
-pub fn terrain_kind(top: i32, k: i32) -> u32 {
-    u32::from(k < top)
-}
-
-/// Moisture in Q12 [0, 4096] from very low-frequency noise at `p`.
-pub fn moisture(k: &FieldConstants, p: IVec3) -> i32 {
+/// Moisture in Q16 [0, ONE] from very low-frequency noise at `p`.
+pub fn moisture(k: &LandformConstants, p: IVec3) -> i32 {
     let o = k.octaves[6].shift.saturating_sub(1).max(1);
-    (noise(p, o, (k.misc[3] as u32) ^ 0x51ED_270B) + ONE) / 2
+    (noise(p, o, (k.header[3] as u32) ^ 0x51ED_270B) + ONE) / 2
 }
 
 /// Strata altitude (mm): layers undulate +-8 m over ~100 m, so cuts
 /// through them never show flat rings.
-fn strata(c: &FieldConstants, p: IVec3, altitude: i32) -> i32 {
-    altitude + scale(noise(p, 11, (c.misc[3] as u32) ^ 0x9B05_688C), 8_000)
-}
-
-/// Ground slope of a cell in its 8x8 column block, in eighths of a cell per
-/// cell: the larger top difference across the block along either axis.
-/// Smooth and level-invariant, unlike neighbour steps of stepped terrain.
-pub fn block_slope(top: impl Fn(i32, i32) -> i32, x: i32, y: i32) -> i32 {
-    let si = (top(7, y) - top(0, y)).abs();
-    let sj = (top(x, 7) - top(x, 0)).abs();
-    si.max(sj) * 8 / 7
+fn strata(c: &LandformConstants, p: IVec3, altitude: i32) -> i32 {
+    altitude + scale(noise(p, 11, (c.header[3] as u32) ^ 0x9B05_688C), 8_000)
 }
 
 /// Material of a solid ground cell. `top_height` is the column height (mm),
 /// `depth` cells below the column top (0 = exposed top cell), `slope` the
 /// ground slope across the cell's 8x8 column block in eighths of a cell per
-/// cell (see [`block_slope`]), `layer` the base layer index of the cell.
+/// cell, `layer` the base layer index of the cell.
 pub fn ground_material(
-    c: &FieldConstants,
+    c: &LandformConstants,
     p: IVec3,
     top_height: i32,
     depth: i32,
     slope: i32,
     layer: i32,
 ) -> u32 {
-    use material::*;
-    let dirt = c.header[3];
-    let steep = slope >= c.misc[2];
+    use crate::terrain::material::*;
+    let dirt = c.header[2];
+    let steep = slope >= c.shape[1];
     let wet = moisture(c, p);
     // Hash every domain axis: on a face one of them is nearly constant.
     let h = hash3(p.x, p.y, p.z ^ layer.wrapping_mul(0x9e37), 0x2545_F491);
-    let altitude = layer.wrapping_mul(c.header[2]);
+    let altitude = layer.wrapping_mul(c.header[1]);
     if top_height < c.levels[3] {
         // Low basins: meadow with mud and sand patches over silt, gravel
         // and stone. Surface variation hashes position only, so it never
@@ -477,9 +348,9 @@ pub fn ground_material(
         if depth == 0 {
             let s = hash3(p.x, p.y, p.z, 0x5f35_6495);
             return if s & 15 == 0 {
-                DIRT
+                DIRT | SPECK
             } else if (s >> 4) & 31 == 0 {
-                SAND
+                SAND | SPECK
             } else {
                 GRASS
             };
@@ -498,7 +369,7 @@ pub fn ground_material(
     // Rock patches (~50 m and ~6 m octaves), also breaking up snow edges.
     // Noise is clamped to +-ONE, so below the rockline on gentler slopes no
     // outcrop can reach the rock fringe: skip it (same result).
-    let seed = c.misc[3] as u32;
+    let seed = c.header[3] as u32;
     let outcrop = if alpine > 0 || slope >= 5 {
         noise(p, 10, seed ^ 0x1B56_C4E9) + noise(p, 7, seed ^ 0x6A09_E667) / 3
     } else {
@@ -551,37 +422,171 @@ pub fn ground_material(
     }
 }
 
+/// Builds [`LandformField`]s from [`Landform`] settings.
+pub struct LandformGenerator;
+
+impl TerrainGenerator for LandformGenerator {
+    fn info(&self) -> GeneratorInfo {
+        GeneratorInfo {
+            id: ID.into(),
+            version: VERSION,
+            name: "Landform".into(),
+            description: "Continents, ocean basins, mountain ranges and hills with meadows, dry lands, rock, strata and snow.".into(),
+            settings_component: Some("VoxelLandformComponent".into()),
+        }
+    }
+    fn build(&self, grid: &Grid, seed: u64, settings: &str) -> Result<Arc<dyn TerrainField>, String> {
+        let land: Landform = if settings.trim().is_empty() {
+            Landform::default()
+        } else {
+            serde_json::from_str(settings).map_err(|e| format!("invalid landform settings: {e}"))?
+        };
+        let positive = [land.continent_km, land.mountain_km, land.hill_km];
+        let finite = [land.ocean_depth_m, land.lowland_m, land.mountain_m, land.hill_m, land.roughness, land.warp_km, land.snowline_m];
+        if positive.iter().any(|v| !v.is_finite() || *v <= 0.0) || finite.iter().any(|v| !v.is_finite()) {
+            return Err("landform settings must be finite, with positive wavelengths".into());
+        }
+        Ok(Arc::new(LandformField::new(grid, &land, (seed ^ (seed >> 32)) as u32)))
+    }
+}
+
+/// A [`Landform`] on one grid.
+pub struct LandformField {
+    constants: LandformConstants,
+    bounds: [i32; 24],
+}
+
+impl LandformField {
+    pub fn new(grid: &Grid, land: &Landform, seed: u32) -> Self {
+        let constants = LandformConstants::new(grid, land, seed);
+        Self { bounds: constants.bound_margins(grid), constants }
+    }
+    pub fn constants(&self) -> &LandformConstants {
+        &self.constants
+    }
+}
+
+impl TerrainField for LandformField {
+    fn height(&self, p: IVec3, level: u32) -> i32 {
+        height(&self.constants, p, level)
+    }
+    fn ground_material(&self, p: IVec3, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
+        ground_material(&self.constants, p, top_height, depth, slope, layer)
+    }
+    fn height_range(&self) -> (i32, i32) {
+        self.constants.height_range()
+    }
+    fn bound_margins(&self) -> [i32; 24] {
+        self.bounds
+    }
+    fn program(&self) -> TerrainProgram {
+        TerrainProgram {
+            key: Cow::Borrowed("helio.landform/1"),
+            wgsl: Cow::Borrowed(include_str!("../shaders/landform.wgsl")),
+            constants: bytemuck::bytes_of(&self.constants).to_vec(),
+        }
+    }
+}
+
+/// Settings of the flat generator: level ground at `height_m` with a
+/// surface layer over soil over rock.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Flat {
+    pub height_m: f64,
+    pub soil_depth_m: f64,
+    /// Material names (see [`material::NAMES`]).
+    pub surface: String,
+    pub soil: String,
+    pub rock: String,
+}
+
+impl Default for Flat {
+    fn default() -> Self {
+        Self { height_m: 0.0, soil_depth_m: 1.0, surface: "Grass".into(), soil: "Dirt".into(), rock: "Stone".into() }
+    }
+}
+
+/// Builds [`FlatField`]s from [`Flat`] settings.
+pub struct FlatGenerator;
+
+impl TerrainGenerator for FlatGenerator {
+    fn info(&self) -> GeneratorInfo {
+        GeneratorInfo {
+            id: FLAT_ID.into(),
+            version: FLAT_VERSION,
+            name: "Flat".into(),
+            description: "Level ground: a surface layer over soil over rock.".into(),
+            settings_component: Some("VoxelFlatTerrainComponent".into()),
+        }
+    }
+    fn build(&self, grid: &Grid, _seed: u64, settings: &str) -> Result<Arc<dyn TerrainField>, String> {
+        let flat: Flat = if settings.trim().is_empty() {
+            Flat::default()
+        } else {
+            serde_json::from_str(settings).map_err(|e| format!("invalid flat terrain settings: {e}"))?
+        };
+        if !flat.height_m.is_finite() || flat.height_m.abs() > 1.0e6 || !flat.soil_depth_m.is_finite() || flat.soil_depth_m < 0.0 {
+            return Err("flat terrain height and soil depth must be finite (height within 1000 km)".into());
+        }
+        let id = |name: &str| material::from_name(name).ok_or_else(|| format!("unknown flat terrain material {name:?}"));
+        let (surface, soil, rock) = (id(&flat.surface)?, id(&flat.soil)?, id(&flat.rock)?);
+        let layer = grid.layer_mm() as i32;
+        // Whole layers, so the surface is exactly one cell boundary.
+        let height = ((flat.height_m * f64::from(HEIGHT_ONE)).round() as i32).div_euclid(layer) * layer;
+        let depth = (flat.soil_depth_m / grid.voxel_size()).round() as i32;
+        Ok(Arc::new(FlatField { constants: [height, surface as i32, soil as i32, depth, rock as i32, 0, 0, 0] }))
+    }
+}
+
+/// `TerrainConstants` of `flat.wgsl`: height, surface, soil, soil depth
+/// (cells), rock.
+pub struct FlatField {
+    constants: [i32; 8],
+}
+
+impl TerrainField for FlatField {
+    fn height(&self, _p: IVec3, _level: u32) -> i32 {
+        self.constants[0]
+    }
+    fn ground_material(&self, _p: IVec3, _top_height: i32, depth: i32, _slope: i32, _layer: i32) -> u32 {
+        let c = &self.constants;
+        (if depth == 0 { c[1] } else if depth <= c[3] { c[2] } else { c[4] }) as u32
+    }
+    fn height_range(&self) -> (i32, i32) {
+        (self.constants[0], self.constants[0])
+    }
+    fn bound_margins(&self) -> [i32; 24] {
+        [2; 24]
+    }
+    fn program(&self) -> TerrainProgram {
+        TerrainProgram {
+            key: Cow::Borrowed("helio.flat/1"),
+            wgsl: Cow::Borrowed(include_str!("../shaders/flat.wgsl")),
+            constants: bytemuck::cast_slice(&self.constants).to_vec(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn noise_is_bounded_and_continuous_at_lattice_points() {
-        let mut max = 0;
-        for x in -300..300 {
-            let p = IVec3::new(x * 37, x * -11 + 5, x * 3);
-            let v = noise(p, 6, 99);
-            max = max.max(v.abs());
-            let a = noise(IVec3::new(64 * x, 0, 0), 6, 5);
-            let b = noise(IVec3::new(64 * x + 1, 0, 0), 6, 5);
-            assert!((a - b).abs() < 6400, "{a} {b}");
-        }
-        assert!(max > 16000 && max <= 65536, "{max}");
-    }
-
-    #[test]
     fn height_range_is_planetary_and_levels_agree_on_large_scale() {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let k = FieldConstants::new(&grid, &Landform::default());
+        let k = LandformConstants::new(&grid, &Landform::default(), 7);
+        let (range_lo, range_hi) = k.height_range();
         let mut lo = i32::MAX;
         let mut hi = i32::MIN;
         let n = grid.cells();
+        let offset = grid.level_offset();
         for s in 0..400 {
             let i = (s * 7919 % 400) * (n / 400);
             let j = (s * 104_729 % 400) * (n / 400);
             let p = grid.domain_point((s % 6) as u8, i, j, 0);
-            let h0 = height(&k, p, 0);
-            let h12 = height(&k, p, 12);
+            let h0 = height(&k, p, offset);
+            let h12 = height(&k, p, 12 + offset);
             lo = lo.min(h0);
             hi = hi.max(h0);
             // Band limiting only removes octaves shorter than the level.
@@ -591,27 +596,18 @@ mod tests {
         let lo_m = f64::from(lo) / 1000.0;
         let hi_m = f64::from(hi) / 1000.0;
         assert!(lo_m < -200.0 && hi_m > 100.0 && hi_m < 6_000.0, "{lo_m} {hi_m}");
+        assert!(range_lo <= lo && hi <= range_hi);
     }
-}
 
-
-
-#[cfg(test)]
-mod continuity {
-    use super::*;
     #[test]
-    fn noise_is_continuous_at_fine_steps() {
-        for shift in [8u32, 12, 16, 19, 20, 24] {
-            let mut worst = 0;
-            for x in -600_000..-300_000 {
-                let p = IVec3::new(x * 3 + 7, 99_614_720, -5_975_683);
-                let d = (noise(p, shift, 12345) - noise(p + IVec3::X * 2, shift, 12345)).abs();
-                worst = worst.max(d);
-            }
-            // Two domain units at the measured gradient bound (5.3 per lattice
-            // spacing) plus rounding.
-            let bound = (2.0 * 5.3 * 65536.0 / f64::from(1u32 << shift)).ceil() as i32 + 8;
-            assert!(worst <= bound, "shift {shift}: {worst} > {bound}");
-        }
+    fn flat_ground_is_one_whole_layer_with_its_materials() {
+        let grid = Grid::plane(crate::grid::Shape::Plane, 1024.0, 0.1).unwrap();
+        let settings = r#"{"height_m": 2.34, "soil_depth_m": 0.5, "surface": "Sand", "rock": "dark_stone"}"#;
+        let field = FlatGenerator.build(&grid, 0, settings).unwrap();
+        assert_eq!(field.height(IVec3::ZERO, 0), 2_300);
+        assert_eq!(field.ground_material(IVec3::ZERO, 2_300, 0, 0, 22), material::SAND);
+        assert_eq!(field.ground_material(IVec3::ZERO, 2_300, 5, 0, 17), material::DIRT);
+        assert_eq!(field.ground_material(IVec3::ZERO, 2_300, 6, 0, 16), material::DARK_STONE);
+        assert!(FlatGenerator.build(&grid, 0, r#"{"rock": "Air"}"#).is_err());
     }
 }

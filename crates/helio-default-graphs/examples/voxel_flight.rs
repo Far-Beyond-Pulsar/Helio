@@ -33,7 +33,7 @@ use helio::{
 };
 use helio_default_graphs::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
 use helio_pass_voxel_planet::engine::{PlanetFrame, PlanetPass, SharedPlanetFrame};
-use helio_pass_voxel_planet::{field, grid::Shape, Brush, BrushOp, BrushShape, Planet, PlanetRecipe};
+use helio_pass_voxel_planet::{grid::Shape, terrain::material, Brush, BrushOp, BrushShape, Planet, PlanetRecipe};
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -1034,7 +1034,7 @@ fn main() {
             radius: 0.4 + 0.1 * f64::from(n % 7),
             shape: if n % 3 == 0 { BrushShape::Cube } else { BrushShape::Sphere },
             op: if add { BrushOp::Add } else { BrushOp::Remove },
-            material: if add { field::material::COBBLE } else { 0 },
+            material: if add { material::COBBLE } else { 0 },
         };
         let mut planet = (*flight.planet).clone();
         planet.apply(brush).unwrap();
