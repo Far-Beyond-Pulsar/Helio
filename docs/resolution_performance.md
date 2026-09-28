@@ -297,6 +297,7 @@ camera sways sideways every frame, so camera-keyed caches are rebuilt).
 | 12. HiZ min pyramid built only on demand (#295) | HiZBuild GPU ms | 11.2–12.0 → 5.73–6.31 | 16.1–17.0 → 8.26–10.7 | 31.3–37.9 → 17.7–21.0 | bit-identical |
 | 13. Bloom compute skipped while no source enables bloom (#294) | PostProcess GPU ms | 26.7–38.2 → 18.0–20.1 | 40.5–47.1 → 30.9–32.5 | 89.0–104.1 → 66.2–72.1 | bit-identical |
 | 14. DoF CoC/gather read this frame's image (#299) | correctness | – | – | – | intended change with DOF on |
+| 15. Bloom mips 1–4 summed once at mip-0 resolution (#294), `--bloom` | PostProcess GPU ms | 115.1–119.0 → 73.3–74.9 | 186.9–189.8 → 124.0–131.1 | 433.7–457.7 → 272.0–281.7 | max 3/255, PSNR ≥ 75.6 dB, needs sign-off |
 
 ### 8. Remove RadianceCascadesPass from the default graphs
 
@@ -422,14 +423,41 @@ hall with `--dof`, 0.17% of pixels change, by at most 1/255. With `--dof
 --orbit`, 1.9% change (max 39/255), exactly where the old frames showed a
 doubled edge of the previous frame's blur.
 
+### 15. Bloom: sum mips 1–4 once at mip-0 resolution
+
+With bloom on, PostProcess was the most expensive pass at 4K (≈430 ms against
+≈70 ms with bloom off). `fs_uber` sampled five bloom mips through 4-tap cubic
+B-spline upsamples at output resolution, 20 bilinear taps per output pixel. A
+new `cs_bloom_combine` dispatch evaluates the B-spline reconstruction of mips
+1–4 at mip-0 texel centres and sums them into one mip-0-sized texture.
+`fs_uber` then samples mip 0 and that sum, 8 taps per pixel. `bloom_1` to
+`bloom_4` stay bound, because user effects sample them.
+
+This is the one change in round 2 that is not exact without motion. The
+coarse mips pass through one more B-spline reconstruction at mip-0 spacing, a
+slight extra smoothing of glows that are already at least twice as wide. It
+needs a visual sign-off before merging. Fog hall with `--bloom`: 0.17–0.38% of
+pixels differ, by at most 3/255, mean error 0.0017/255, PSNR 75.6–79.2 dB.
+The difference is ±1 rounding noise plus faint arcs under the lamps. The sky
+scene has nothing above the bloom threshold and is identical. With bloom off
+nothing changes, because the compute is skipped (§13).
+
+`--bloom`, PostProcess GPU ms:
+
+| scene | 1080p | 1440p | 4K |
+|---|---:|---:|---:|
+| fog_hall | 119.0 → 73.3 (-38%) | 186.9 → 124.0 (-34%) | 433.7 → 281.7 (-35%) |
+| sky | 115.1 → 74.9 (-35%) | 189.8 → 131.1 (-31%) | 457.7 → 272.0 (-41%) |
+
 ## Remaining bottlenecks and follow-ups
 
 Ranked by measured 4K cost after both rounds (lavapipe).
 
-- **Bloom composite while bloom is on (≈430 ms PostProcess at 4K, vs ≈70 ms
-  off).** `fs_uber` B-spline samples five mips at output resolution, 20
-  bilinear taps per pixel. Summing mips 1–4 once at mip-0 resolution would
-  cut that to 8 taps, but changes pixels slightly and needs a visual sign-off.
+- **Bloom on still costs ≈4× bloom off (≈280 ms PostProcess at 4K).** That
+  is the 8 composite taps per output pixel plus the bloom compute; the split
+  has not been measured. A progressive upsample chain would bring the
+  composite down to one B-spline sample, at the price of a larger visual
+  change.
 - **DeferredLight (100–315 ms at 4K).** Scenes with both static and movable
   casters still sample both atlases. Per-light or per-tile occupancy would
   extend #293's skip.
