@@ -182,6 +182,8 @@ pub(crate) struct Fallbacks {
     pub empty_lights: wgpu::Buffer,
     pub empty_shadow_matrices: wgpu::Buffer,
     pub black: Image,
+    /// `black` as a one-layer array: the zero (unfiltered) glass transmittance.
+    pub black_array_view: wgpu::TextureView,
     pub lightmap_uv: Image,
     pub _shadow: Image,
     pub shadow_view: wgpu::TextureView,
@@ -200,6 +202,10 @@ impl Fallbacks {
             wgpu::TextureFormat::Rgba16Float,
             false,
         );
+        let black_array_view = black.texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
         let lightmap_uv = Image::new(
             device,
             "HLFS missing lightmap UV",
@@ -308,6 +314,7 @@ impl Fallbacks {
                 mapped_at_creation: false,
             }),
             black,
+            black_array_view,
             lightmap_uv,
             _shadow: shadow,
             shadow_view,

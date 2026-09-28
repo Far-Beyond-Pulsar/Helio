@@ -11,6 +11,7 @@ pub struct IntensityLightProps {
     #[gpu]
     pub intensity: f32,
     #[property(category = "Intensity")]
+    #[gpu(as = u32, with = intensity_units_to_gpu)]
     pub intensity_units: IntensityUnits,
     #[property(min = -10.0, max = 10.0, step = 0.1, category = "Intensity")]
     pub exposure_compensation: f32,
@@ -22,6 +23,10 @@ pub struct IntensityLightProps {
     pub max_draw_distance: f32,
     #[property(min = 0.0, max = 10000.0, step = 10.0, category = "Intensity")]
     pub max_distance_fade_range: f32,
+}
+
+pub fn intensity_units_to_gpu(units: IntensityUnits) -> u32 {
+    units as u32
 }
 
 impl Default for IntensityLightProps {

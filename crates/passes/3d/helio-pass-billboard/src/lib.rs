@@ -44,6 +44,9 @@ pub struct BillboardPass {
     /// changed epoch means the SceneDB buffer reallocated (grew) and bind
     /// group 0 must be rebuilt to point at the new one.
     scene_binding_epoch: Option<u64>,
+    /// Whether any `"billboard_instances"` row is live. Hosts register the
+    /// column up front, so its presence alone would draw every capacity row.
+    liveness: helio_core::SceneBufferLiveness,
     quad_vertex_buf: wgpu::Buffer,
     pub instance_count: u32,
     occluded_by_geometry: bool,
@@ -347,6 +350,7 @@ impl BillboardPass {
             globals_buf,
             instance_buf,
             scene_binding_epoch: None,
+            liveness: Default::default(),
             quad_vertex_buf,
             instance_count: 0,
             occluded_by_geometry: true,
@@ -470,11 +474,18 @@ impl RenderPass for BillboardPass {
         // ever inserted anywhere in the frontend's World.
         match ctx.scene_buffers.get(BufferKey::of("billboard_instances")) {
             Some(handle) => {
-                // Fixed capacity, not a live count: unused rows are
-                // `Zeroable` (`scale_flags` all zero), a zero-area billboard
-                // that contributes nothing, so iterating the full capacity
-                // every frame needs no per-frame CPU query at all.
-                self.instance_count = MAX_BILLBOARDS;
+                // Capacity, not a live count: unused rows are `Zeroable`
+                // (`scale_flags` all zero), a zero-area billboard that
+                // contributes nothing, so drawing every row needs no
+                // per-frame CPU query. Draw the rows the buffer actually has
+                // (instances past its end would read out of bounds), and none
+                // once every row is known to be empty.
+                self.liveness.update(ctx.device, ctx.queue, Some(handle));
+                let rows = match handle.row_capacity() {
+                    0 => MAX_BILLBOARDS,
+                    rows => rows.min(MAX_BILLBOARDS),
+                };
+                self.instance_count = if self.liveness.maybe_live(handle) { rows } else { 0 };
                 if self.scene_binding_epoch != Some(handle.epoch) {
                     self.bind_group_0 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("Billboard SceneDB BG0"),

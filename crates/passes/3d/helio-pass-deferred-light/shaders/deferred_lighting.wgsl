@@ -183,6 +183,11 @@ struct ShadowConfig {
 // IES light profile textures (R8Unorm, 256×256 per slice, C type angular distribution)
 @group(2) @binding(18) var ies_textures: texture_2d_array<f32>;
 @group(2) @binding(19) var ies_sampler: sampler;
+// Coloured transmittance of translucent shadow casters (stained glass), stored
+// as complements: rgb = 1 - T, a = 1 - light-space depth of the nearest pane.
+// Zero is unfiltered. See helio-pass-shadow.
+@group(2) @binding(20) var shadow_transmittance: texture_2d_array<f32>;
+@group(2) @binding(21) var transmittance_sampler: sampler;
 
 // Reflection captures, uploaded sorted by influence volume, largest first.
 // The blend below runs front-to-back and saturates, so ordering is what lets a
@@ -450,14 +455,60 @@ fn sample_cascade_shadow_pcss(
     return lit_sum / f32(shadow_config.pcss_filter_samples);
 }
 
+// Colour a light by the translucent casters between it and the receiver.
+// Uses the same face and normal offset as `shadow_factor`; directional lights
+// take the nearest cascade (the tint is low-frequency, so no cascade blend).
+fn light_transmittance(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
+    if !ENABLE_SHADOWS { return vec3<f32>(1.0); }
+    let light = lights[light_idx];
+    if light.shadow_index == 4294967295u { return vec3<f32>(1.0); }
+    if light.shadow_index / 6u >= MAX_SHADOW_LIGHTS { return vec3<f32>(1.0); }
+
+    var light_dir: vec3<f32>;
+    if light.light_type == 0u {
+        light_dir = normalize(-light.direction_outer.xyz);
+    } else {
+        light_dir = normalize(light.position_range.xyz - world_pos);
+    }
+    let NdotL      = max(dot(N, light_dir), 0.0);
+    let biased_pos = world_pos + N * NORMAL_OFFSET_SCALE * (1.0 - NdotL);
+
+    var layer = light.shadow_index;
+    if light.light_type == 1u {
+        layer = light.shadow_index + point_light_face(biased_pos - light.position_range.xyz);
+    } else if light.light_type == 0u {
+        let dist   = length(world_pos - cameras[0].position_near.xyz);
+        let splits = globals.csm_splits;
+        var cascade = 3u;
+        if dist < splits.x { cascade = 0u; }
+        else if dist < splits.y { cascade = 1u; }
+        else if dist < splits.z { cascade = 2u; }
+        layer = light.shadow_index + cascade;
+    }
+
+    let light_clip = shadow_matrices[layer].mat * vec4<f32>(biased_pos, 1.0);
+    if light_clip.w <= 0.0 { return vec3<f32>(1.0); }
+    let ndc = light_clip.xyz / light_clip.w;
+    let uv  = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
+    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || ndc.z < 0.0 || ndc.z > 1.0 {
+        return vec3<f32>(1.0);
+    }
+    let t = textureSampleLevel(shadow_transmittance, transmittance_sampler, uv, i32(layer), 0.0);
+    // Only receivers behind the nearest pane are filtered.
+    return select(vec3<f32>(1.0), 1.0 - t.rgb, 1.0 - ndc.z < t.a);
+}
+
 fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord: vec2<f32>, frame: u32) -> f32 {
     if !ENABLE_SHADOWS { return 1.0; }
-    if light_idx >= MAX_SHADOW_LIGHTS { return 1.0; }
+    // MAX_SHADOW_LIGHTS bounds the atlas caster slot (shadow_index / 6), not
+    // the light's row. SceneDB rows are entity indices, so a row bound silently
+    // dropped shadows for every light spawned after the 42nd entity.
 
     let light = lights[light_idx];
 
     // Check if this light actually casts shadows (shadow_index != u32::MAX)
     if light.shadow_index == 4294967295u { return 1.0; }
+    if light.shadow_index / 6u >= MAX_SHADOW_LIGHTS { return 1.0; }
 
     // Normal-offset: shift the world-space query point along the surface normal
     // toward the light before projecting.  This eliminates self-shadowing caused
@@ -1146,8 +1197,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             // (dozens of shadow-atlas taps, per light) on every VG-covered pixel
             // only to throw the result away every time.
             var sf = 1.0;
+            var transmit = vec3<f32>(1.0);
             if !is_vg {
                 sf = shadow_factor(light_idx, world_pos, N, in.clip_pos.xy, globals.frame);
+                if sf > 0.0 {
+                    transmit = light_transmittance(light_idx, world_pos, N);
+                }
             }
             if light.light_type == 0u && dot(voxel_visibility.yzw, voxel_visibility.yzw) > 0.5 {
                 let light_direction = -normalize(light.direction_outer.xyz);
@@ -1157,7 +1212,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 }
             }
             let sss_color = sss_r.rgb;
-            Lo += pbr_direct_light(light, world_pos, N, V, F0, albedo, roughness, metallic, sf, is_anisotropic, aniso_T, aniso_ax, aniso_ay, has_subsurface, sss_color);
+            Lo += transmit * pbr_direct_light(light, world_pos, N, V, F0, albedo, roughness, metallic, sf, is_anisotropic, aniso_T, aniso_ax, aniso_ay, has_subsurface, sss_color);
         }
     }
 

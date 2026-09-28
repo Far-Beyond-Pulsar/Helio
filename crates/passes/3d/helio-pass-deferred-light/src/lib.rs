@@ -77,7 +77,7 @@ pub struct DeferredLightPass {
     reflection_bind_group_1: Option<wgpu::BindGroup>,
     reflection_bind_group_2: Option<wgpu::BindGroup>,
     bind_group_1_key: Option<[usize; 10]>,
-    bind_group_2_key: Option<[usize; 14]>,
+    bind_group_2_key: Option<[usize; 15]>,
     bind_group_3_key: Option<(usize, usize)>,
     reflection_bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize)>,
     reflection_bind_group_2_key: Option<(usize, usize, usize, usize, usize, usize)>,
@@ -86,6 +86,8 @@ pub struct DeferredLightPass {
     pre_aa_format: wgpu::TextureFormat,
     fallback_shadow_view: wgpu::TextureView,
     fallback_static_shadow_view: wgpu::TextureView,
+    /// Zeroed: no translucent casters filter any light.
+    fallback_transmittance_view: wgpu::TextureView,
     fallback_shadow_sampler: wgpu::Sampler,
     shadow_depth_sampler: wgpu::Sampler,
     fallback_env_view: wgpu::TextureView,
@@ -322,6 +324,23 @@ impl DeferredLightPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // Coloured shadow transmittance (binding 20) + its sampler (21)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 20,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 21,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
 
@@ -524,6 +543,7 @@ impl DeferredLightPass {
         let (_fallback_shadow_tex, fallback_shadow_view) = fallback_shadow_texture(device);
         let (_fallback_static_shadow_tex, fallback_static_shadow_view) =
             fallback_shadow_texture(device);
+        let fallback_transmittance_view = clear_transmittance_texture(device);
         let fallback_shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Deferred Fallback Shadow Sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -810,6 +830,7 @@ impl DeferredLightPass {
             pre_aa_format,
             fallback_shadow_view,
             fallback_static_shadow_view,
+            fallback_transmittance_view,
             fallback_shadow_sampler,
             shadow_depth_sampler,
             fallback_env_view,
@@ -869,6 +890,7 @@ impl RenderPass for DeferredLightPass {
             "shadow_atlas",
             "static_shadow_atlas",
             "shadow_sampler",
+            "shadow_transmittance",
             "ssao",
             "sky_lut",
             "tile_light_lists",
@@ -1097,6 +1119,9 @@ impl RenderPass for DeferredLightPass {
         let static_shadow_view = ctx
             .registry.get(helio_core::ResourceKey::new("static_shadow_atlas"))
             .unwrap_or(&self.fallback_static_shadow_view);
+        let transmittance_view = ctx
+            .registry.get(helio_core::ResourceKey::new("shadow_transmittance"))
+            .unwrap_or(&self.fallback_transmittance_view);
         let shadow_sampler = ctx
             .registry.get(helio_core::ResourceKey::new("shadow_sampler"))
             .unwrap_or(&self.fallback_shadow_sampler);
@@ -1177,6 +1202,7 @@ impl RenderPass for DeferredLightPass {
             lightmap_sampler as *const _ as usize,
             ies_view as *const _ as usize,
             &self.ies_sampler as *const _ as usize,
+            transmittance_view as *const _ as usize,
         ];
         if self.bind_group_2_key != Some(scene_key) {
             self.bind_group_2 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1234,6 +1260,11 @@ impl RenderPass for DeferredLightPass {
                     wgpu::BindGroupEntry {
                         binding: 19,
                         resource: wgpu::BindingResource::Sampler(&self.ies_sampler),
+                    },
+                    texture_view_entry(20, transmittance_view),
+                    wgpu::BindGroupEntry {
+                        binding: 21,
+                        resource: wgpu::BindingResource::Sampler(&self.fallback_env_sampler),
                     },
                 ],
             }));
@@ -1498,4 +1529,21 @@ fn black_cube_texture(
     (texture, view)
 }
 
-
+/// 1×1 zeroed `Rgba16Float` array: the transmittance layer stores 1 - T, so
+/// zero filters nothing when no shadow pass publishes a layer.
+fn clear_transmittance_texture(device: &wgpu::Device) -> wgpu::TextureView {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Deferred Fallback Transmittance"),
+        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    })
+}

@@ -11,6 +11,6 @@ fn main() {
         let directory=args.next().expect("capture output directory");
         hlfs_capture::run_scene(&directory,"technology",technology_gallery::populate,technology_gallery::camera);
     } else {
-        hlfs_viewer::run(hlfs_viewer::Scene{name:"Technology light gallery",populate:technology_gallery::populate,camera:technology_gallery::camera,orbit_target:glam::Vec3::new(0.0,3.0,-18.0)});
+        hlfs_viewer::run(hlfs_viewer::Scene{name:"Technology light gallery",populate:Box::new(technology_gallery::populate),update:None,key:None,camera:technology_gallery::camera,orbit_target:glam::Vec3::new(0.0,3.0,-18.0)});
     }
 }

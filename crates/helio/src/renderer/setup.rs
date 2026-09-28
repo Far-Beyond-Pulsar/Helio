@@ -153,19 +153,6 @@ impl Renderer {
         #[cfg(target_arch = "wasm32")]
         let (xr_depth_texture, xr_depth_view, xr_depth_view_layer0) = (None, None, None);
 
-        let postprocess_buf_size =
-            std::mem::size_of::<helio_pass_postprocess::GpuPostProcessUniforms>() as u64;
-        let postprocess_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("PostProcess Uniforms Buffer"),
-            size: postprocess_buf_size,
-            // COPY_SRC: VolumetricFogPass copies the fog block out of this buffer
-            // rather than mirroring the whole 368-byte struct in its shader.
-            usage: wgpu::BufferUsages::UNIFORM
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
         let cull_stats_staging = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("CullStats Staging"),
             size: 32,
@@ -260,7 +247,6 @@ impl Renderer {
             debug_mode: config.debug_mode,
             editor_mode: false,
             debug_state,
-            postprocess_buffer,
             last_render_time: Instant::now(),
             delta_time: 0.0,
             color_grading_lut_view: None,

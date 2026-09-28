@@ -1053,6 +1053,7 @@ dependencies = [
  "helio-pass-portal-cull",
  "helio-pass-postprocess",
  "helio-pass-radiance-cascades-2d",
+ "helio-pass-shadow-matrix",
  "helio-pass-sky",
  "helio-pass-sprite-batch",
  "helio-pass-sprite-cull",
@@ -1756,7 +1757,11 @@ name = "helio-pass-flare"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.33.5",
  "helio-core",
+ "helio-pass-postprocess",
+ "helio-pass-shadow-matrix",
+ "pollster 0.4.0",
  "wgpu",
 ]
 

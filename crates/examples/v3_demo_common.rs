@@ -23,6 +23,16 @@ pub fn new_scene_db_with_gpu_mirror(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
 ) -> pulsar_scenedb::SceneDb {
+    new_scene_db_with_gpu_mirror_and(device, queue, |_| {})
+}
+
+/// [`new_scene_db_with_gpu_mirror`] plus extra column registrations made
+/// before the mirror is attached (registration needs the store mutably).
+pub fn new_scene_db_with_gpu_mirror_and(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    register_extra: impl FnOnce(&mut pulsar_scenedb::gpu::SceneGpuStore),
+) -> pulsar_scenedb::SceneDb {
     let mut scene_db = pulsar_scenedb::SceneDb::new();
     let ctx = pulsar_scenedb::gpu::EngineGpuContext::new(device.clone(), queue.clone());
     let gpu_cfg = pulsar_scenedb::gpu::SceneGpuConfig {
@@ -65,6 +75,11 @@ pub fn new_scene_db_with_gpu_mirror(
         helio_pass_forward_lit::MAX_LIGHTS,
         device,
     );
+    helio_pass_postprocess::CameraPostProcessComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    helio_pass_volumetric_fog::GlobalFogComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    helio_pass_volumetric_fog::LocalFogVolumeComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    helio_pass_volumetric_fog::VolumetricFogSettingsComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    register_extra(&mut gpu_store);
     let gpu_store = Arc::new(gpu_store);
     let mirror = pulsar_scenedb::gpu::GpuMirrorHandle::new(gpu_store, queue.clone());
     scene_db.world.attach_gpu_mirror(mirror);
@@ -889,4 +904,158 @@ pub fn update_point_light(
         entity,
         point_light(position.to_array(), color, intensity, range),
     );
+}
+
+/// Author one persistent camera-settings row per view. Interactive examples call
+/// this after editing their controls, before flushing the world's GPU mirror.
+pub fn set_camera_postprocess(world: &mut World, view_id: u32, settings: &helio_pass_postprocess::PostProcessSettings) {
+    use helio_pass_postprocess::CameraPostProcessComponent;
+    let existing = world.query::<&CameraPostProcessComponent>()
+        .find(|(_, row)| row.view_id == view_id)
+        .map(|(entity, _)| entity);
+    let entity = existing.unwrap_or_else(|| world.spawn());
+    world.insert(entity, CameraPostProcessComponent::new(view_id, settings));
+}
+
+// ── Participating media and light shafts (component API) ─────────────────────
+//
+// Fog is world data: global and local media are SceneDB components owned by
+// the volumetric fog pass, in physical units (one world unit = one metre,
+// extinction in m^-1). Shafts are not a separate effect: they are the shadowed
+// part of lit medium, so a light only forms them when it (a) participates in
+// the medium and (b) has a shadow map to be occluded by.
+
+pub use helio_pass_volumetric_fog::{
+    GlobalFogComponent, LocalFogVolumeComponent, VolumetricFogSettingsComponent,
+};
+
+/// Shadow-map base layers for demo lights. The GPU shadow-matrix pass writes a
+/// caster's layers at `[base, base + 6)` (a directional light uses 4 cascades,
+/// a point light 6 cube faces) and tracks it as caster slot `base / 6`, so
+/// bases are multiples of 6. The default 32-layer atlas fits five casters.
+pub const SHADOW_BASES: [u32; 5] = [0, 6, 12, 18, 24];
+
+/// Opt a light into the medium with a real shadow map, so it forms shafts
+/// wherever geometry blocks it. Scattering gain 1, full volumetric shadow.
+pub fn volumetric_light(mut light: GpuLight, shadow_base: u32) -> GpuLight {
+    debug_assert!(shadow_base % 6 == 0, "shadow bases are caster slots of 6 layers");
+    light.shadow_index = shadow_base;
+    light.god_rays_enabled = 1;
+    light.god_rays_density = 1.0;
+    light.god_rays_weight = 1.0;
+    light.god_rays_exposure = 1.0;
+    light.god_rays_decay = 1.0;
+    light
+}
+
+/// A medium filling the whole world (haze, atmosphere, a smoky interior).
+pub fn spawn_global_fog(world: &mut World, medium: GlobalFogComponent) -> Entity {
+    let entity = world.spawn();
+    world.insert(entity, medium);
+    entity
+}
+
+/// A medium confined to a world AABB, visible from outside it, with an inward
+/// edge fade in metres.
+pub fn spawn_local_fog(
+    world: &mut World,
+    bounds_min: [f32; 3],
+    bounds_max: [f32; 3],
+    medium: GlobalFogComponent,
+    edge_fade: f32,
+) -> Entity {
+    let mut volume = LocalFogVolumeComponent::new(bounds_min, bounds_max, medium);
+    volume.edge_fade = edge_fade;
+    let entity = world.spawn();
+    world.insert(entity, volume);
+    entity
+}
+
+/// Volumetric render settings for every view: quality 0 economical, 1 high,
+/// and the integration range in metres (keep it tight around the media).
+pub fn set_volumetric_quality(world: &mut World, quality: u32, max_distance: f32) -> Entity {
+    let entity = world.spawn();
+    world.insert(entity, VolumetricFogSettingsComponent {
+        quality,
+        max_distance,
+        light_max_distance: max_distance,
+        ..Default::default()
+    });
+    entity
+}
+
+// ── Headless capture (`--probe` modes) ──────────────────────────────────────
+
+/// A GPU device with the renderer's required features and no window.
+pub fn headless_gpu() -> (Arc<wgpu::Device>, Arc<wgpu::Queue>) {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default()
+    }))
+    .expect("GPU adapter");
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("Headless probe"),
+        required_features: helio::required_wgpu_features(adapter.features()),
+        required_limits: helio::required_wgpu_limits(adapter.limits()),
+        experimental_features: helio::required_experimental_features(adapter.features()),
+        ..Default::default()
+    }))
+    .expect("GPU device");
+    device.on_uncaptured_error(Arc::new(|e: wgpu::Error| panic!("[GPU UNCAPTURED ERROR] {e:?}")));
+    (Arc::new(device), Arc::new(queue))
+}
+
+/// Render `frames` frames of `camera` offscreen (temporal effects settle) and
+/// save the last as `path`. Returns the mean sRGB value of the image, 0..255.
+pub fn capture_png(
+    scene_db: &pulsar_scenedb::SceneDb,
+    renderer: &mut Renderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    camera: &helio::Camera,
+    size: (u32, u32),
+    frames: u32,
+    path: &str,
+) -> f64 {
+    let (width, height) = size;
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Probe target"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    for _ in 0..frames {
+        flush_scene_db(scene_db, queue);
+        renderer.render(camera, &view).expect("probe frame");
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    }
+    let row = width * 4;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Probe readback"),
+        size: u64::from(row * height),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        target.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(height) },
+        },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+    );
+    queue.submit([encoder.finish()]);
+    readback.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let pixels = readback.slice(..).get_mapped_range().unwrap().to_vec();
+    image::save_buffer(path, &pixels, width, height, image::ColorType::Rgba8).unwrap();
+    pixels.chunks_exact(4).map(|p| (p[0] as f64 + p[1] as f64 + p[2] as f64) / 3.0).sum::<f64>()
+        / (width * height) as f64
 }

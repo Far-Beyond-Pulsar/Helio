@@ -45,6 +45,13 @@ struct TransparentGlobals {
 }
 
 pub struct TransparentPass {
+    fogged_target: bool,
+    fog_layout: wgpu::BindGroupLayout,
+    fog_group: Option<wgpu::BindGroup>,
+    fog_key: Option<(wgpu::TextureView, wgpu::Buffer)>,
+    fog_fallback: wgpu::TextureView,
+    fog_fallback_parameters: wgpu::Buffer,
+    fog_sampler: wgpu::Sampler,
     pipelines: HashMap<RadiantShaderKey, wgpu::RenderPipeline>,
     shader_cache: RadiantShaderCache,
     /// This pass's own class-0 override (the transparent base — never
@@ -189,9 +196,35 @@ impl TransparentPass {
             ],
         });
 
+        let fog_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Transparent medium BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D3, multisampled: false }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            ],
+        });
+        let fog_fallback = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Transparent neutral medium"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba16Float, usage: wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[],
+        }).create_view(&Default::default());
+        let fog_fallback_parameters = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Transparent neutral medium parameters"), size: 64,
+            usage: wgpu::BufferUsages::UNIFORM, mapped_at_creation: false,
+        });
+        let fog_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Transparent medium sampler"),
+            mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Transparent PL"),
-            bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1)],
+            bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1), Some(&fog_layout)],
             immediate_size: 0,
         });
 
@@ -206,7 +239,9 @@ impl TransparentPass {
                     String::with_capacity(base_src.len() + helio_mats::PBR_EVAL.len());
                 resolved.push_str(helio_mats::PBR_EVAL);
                 resolved.push('\n');
-                resolved.push_str(base_src);
+                resolved.push_str(&base_src.replace("// HELIO_VIEW_SURFACE_EFFECT",
+                    "surface = apply_medium(surface, input.world_position);"));
+                resolved.push_str(include_str!("../shaders/medium.wgsl"));
                 resolved
             }).as_str()
         } else {
@@ -218,6 +253,9 @@ impl TransparentPass {
         };
 
         Self {
+            fogged_target: false,
+            fog_layout, fog_group: None, fog_key: None,
+            fog_fallback, fog_fallback_parameters, fog_sampler,
             pipelines: HashMap::new(),
             shader_cache: RadiantShaderCache::new(),
             local_class0,
@@ -242,6 +280,13 @@ impl TransparentPass {
     /// `surface_format` supplied to `new` must match that lighting target.
     pub fn with_pre_aa_target(mut self) -> Self {
         self.pre_aa_target = true;
+        self
+    }
+
+    /// Composite each fragment at its own depth over already fogged opaque HDR.
+    pub fn with_fogged_target(mut self) -> Self {
+        self.pre_aa_target = true;
+        self.fogged_target = true;
         self
     }
 
@@ -276,6 +321,9 @@ impl RenderPass for TransparentPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
+        if self.fogged_target {
+            return &["fogged_hdr", "fog_accum", "fog_parameters", "depth", "cluster_light_grid", "object_batch", "culled_batch"];
+        }
         if self.pre_aa_target {
             return &["pre_aa", "depth", "cluster_light_grid", "object_batch", "culled_batch"];
         }
@@ -288,6 +336,9 @@ impl RenderPass for TransparentPass {
     }
 
     fn writes(&self) -> &'static [&'static str] {
+        if self.fogged_target {
+            return if self.reactive_mask { &["fogged_hdr", "transparency_reactivity"] } else { &["fogged_hdr"] };
+        }
         if self.reactive_mask {
             return if self.pre_aa_target { &["pre_aa", "transparency_reactivity"] }
                 else { &["transparency_reactivity"] };
@@ -300,7 +351,8 @@ impl RenderPass for TransparentPass {
             builder.write_color_raw("transparency_reactivity", wgpu::TextureFormat::R8Unorm,
                 helio_core::graph::ResourceSize::MatchSurface);
         }
-        if self.pre_aa_target { builder.read("pre_aa"); }
+        if self.pre_aa_target { builder.read(if self.fogged_target { "fogged_hdr" } else { "pre_aa" }); }
+        if self.fogged_target { builder.read("fog_accum"); builder.read("fog_parameters"); }
         builder.read("depth");
         builder.read("cluster_light_grid");
         builder.read("object_batch");
@@ -351,7 +403,7 @@ impl RenderPass for TransparentPass {
         storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let pre_aa = if self.pre_aa_target {
-            resources.get(helio_core::ResourceKey::new("pre_aa"))
+            resources.get(helio_core::ResourceKey::new(if self.fogged_target { "fogged_hdr" } else { "pre_aa" }))
         } else { None };
         let target = pre_aa.unwrap_or(target);
         let mut attachments = vec![Some(wgpu::RenderPassColorAttachment {
@@ -531,10 +583,29 @@ impl RenderPass for TransparentPass {
             self.bind_group_key = Some(bg0_key);
         }
 
+        // Fog data belongs to its producer; retain only borrowed GPU handles in
+        // this derived binding cache. Missing producers use a zero-range bypass.
+        let fog_view = ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("fog_accum"))
+            .unwrap_or(&self.fog_fallback);
+        let fog_parameters = ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("fog_parameters"))
+            .unwrap_or(&self.fog_fallback_parameters);
+        let fog_key = (fog_view.clone(), fog_parameters.clone());
+        if self.fog_key.as_ref() != Some(&fog_key) {
+            self.fog_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Transparent medium"), layout: &self.fog_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(fog_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.fog_sampler) },
+                    wgpu::BindGroupEntry { binding: 2, resource: fog_parameters.as_entire_binding() },
+                ],
+            }));
+            self.fog_key = Some(fog_key);
+        }
         let indirect = culled.indirect;
         let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
+        rp.set_bind_group(2, self.fog_group.as_ref().unwrap(), &[]);
         rp.set_vertex_buffer(0, vertices.slice(..));
         rp.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
 

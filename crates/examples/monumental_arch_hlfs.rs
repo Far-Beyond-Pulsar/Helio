@@ -12,6 +12,6 @@ pub(crate) fn main() {
         let directory=args.next().expect("capture output directory");
         hlfs_capture::run_scene(&directory,"monument",monumental_arch::populate,monumental_arch::camera);
     } else {
-        hlfs_viewer::run(hlfs_viewer::Scene{name:"Monumental Arch – Volumetric Fog",populate:monumental_arch::populate,camera:monumental_arch::camera,orbit_target:glam::Vec3::new(0.0,24.0,0.0)});
+        hlfs_viewer::run(hlfs_viewer::Scene{name:"Monumental Arch – Volumetric Fog",populate:Box::new(monumental_arch::populate),update:None,key:None,camera:monumental_arch::camera,orbit_target:glam::Vec3::new(0.0,24.0,0.0)});
     }
 }

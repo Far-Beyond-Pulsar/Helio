@@ -555,6 +555,7 @@ impl ApplicationHandler for App {
                     color_offset: [0.05, 0.02, 0.0],
                     ..PostProcessSettings::default()
                 },
+                ..Default::default()
             },
         );
 
@@ -582,6 +583,7 @@ impl ApplicationHandler for App {
                     fog_color: [0.58, 0.68, 0.86],
                     ..PostProcessSettings::default()
                 },
+                ..Default::default()
             },
         );
 
@@ -604,6 +606,7 @@ impl ApplicationHandler for App {
                     bloom_enabled: true,
                     ..PostProcessSettings::default()
                 },
+                ..Default::default()
             },
         );
 
@@ -625,6 +628,7 @@ impl ApplicationHandler for App {
                     bloom_tint: [1.0, 0.85, 0.6],
                     ..PostProcessSettings::default()
                 },
+                ..Default::default()
             },
         );
 

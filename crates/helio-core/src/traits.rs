@@ -423,6 +423,16 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// state, just as it does for ordinary `publish` calls.
     fn publish_frame_inputs<'a>(&self, _frame: &mut ResourceRegistry<'a>) {}
 
+    /// Whether `execute` writes every pixel of `ctx.target` without reading
+    /// what was there, and no earlier pass in the graph reads the target.
+    ///
+    /// When any pass in a graph returns `true`, the host does not clear the
+    /// target before the frame: that full-resolution clear would be
+    /// overwritten before anything could observe it. Default `false`.
+    fn initializes_target(&self) -> bool {
+        false
+    }
+
     /// Publishes a declared [`ResourceBuilder::write_group`] bundle into this
     /// pass's own compound `ResourceRegistry` field.
     ///

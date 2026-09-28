@@ -262,52 +262,6 @@ impl Renderer {
         #[cfg(target_arch = "wasm32")]
         let depth: &wgpu::TextureView = &self.depth_view;
 
-        // Water volumes/hitboxes are authored as `helio_pass_water_sim`'s
-        // `WaterVolumeComponent`/`WaterHitboxComponent` SceneDB rows and
-        // resolved by that pass (and `DeferredLightPass`) directly from
-        // Post-process volumes are authored as `helio_pass_postprocess::
-        // PostProcessVolumeComponent` SceneDB rows and resolved by
-        // `PostProcessVolumeBlendPass` directly from `ctx.scene_buffers` --
-        // no Renderer-owned arena, no CPU dirty-range upload here at all.
-        let has_pp_volumes = self
-            .scene_db
-            .store()
-            .resolve_buffer_handle(pulsar_scenedb::gpu::BufferKey::of("post_process_volumes"))
-            .is_some();
-
-        {
-            helio_core::cpu_scope!("Helio: upload postprocess settings");
-            // Upload camera defaults as base; GPU volume blending (in PostProcessPass)
-            // will blend toward active volumes if any are present.
-            // The camera's postprocess_settings.hdr_output_mode controls HDR output.
-            let pp = camera.postprocess_settings.to_gpu();
-            self.queue
-                .write_buffer(&self.postprocess_buffer, 0, bytemuck::bytes_of(&pp));
-
-            // Gate bloom: conservative when volumes exist since a volume may enable it.
-            let bloom_visible = if has_pp_volumes {
-                true
-            } else {
-                pp.bloom_intensity > 0.001 && pp.bloom_enabled != 0
-            };
-            if let Some(pp_pass) = self
-                .graph
-                .find_pass_mut::<helio_pass_postprocess::PostProcessPass>()
-            {
-                pp_pass.set_bloom_active(bloom_visible);
-            }
-            if let Some(fog_pass) = self
-                .graph
-                .find_pass_mut::<helio_pass_volumetric_fog::VolumetricFogPass>()
-            {
-                // A graph contains the fog pass for stable resource wiring, but
-                // an empty scene does not need its ~2.65M-froxel compute work.
-                // A volume may enable fog even when the camera defaults do not,
-                // so keep the pass active whenever SceneDB has PP volumes.
-                fog_pass.set_active(has_pp_volumes || camera.postprocess_settings.fog_enabled);
-            }
-        }
-
         // Keep every pass's `RenderPass::set_editor_mode` in sync every
         // frame — not just once at graph construction — because a resize
         // (even the very first one most windowing backends fire right after
@@ -514,11 +468,6 @@ impl Renderer {
         // Geometry, materials, lights, shadows, and transforms are SceneDB
         // component buffers. Passes resolve them by BufferKey from the
         // read-only SceneInput projection; Renderer owns none of those rows.
-        resource_registry.write(
-            helio_core::ResourceKey::new("postprocess_uniforms"),
-            &self.postprocess_buffer,
-            "Renderer",
-        );
         if let Some(ref lut) = self.color_grading_lut_view {
             resource_registry.write(
                 helio_core::ResourceKey::new("color_grading_lut"),
@@ -656,7 +605,10 @@ impl Renderer {
         self.graph
             .profiler_mut()
             .begin_gpu_pass(&mut clear_encoder, "__renderer_target_clear");
-        {
+        // Skipped when a pass overwrites the whole target before anything
+        // reads it (DofPass in the default graphs): the clear would be a
+        // full output-resolution write that nothing ever observes.
+        if !self.graph.initializes_target() {
             let _pass = clear_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Renderer Target Clear Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {

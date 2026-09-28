@@ -266,5 +266,6 @@ fn fs_main(input: VertexOutput) -> TransparentOutput {
     }
 
     surface = vec4<f32>(surface.rgb + Lo, surface.a);
+    // HELIO_VIEW_SURFACE_EFFECT
     return TransparentOutput(surface, vec4<f32>(clamp(surface.a, 0.0, 1.0)));
 }

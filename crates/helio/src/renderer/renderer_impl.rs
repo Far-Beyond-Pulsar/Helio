@@ -117,7 +117,6 @@ pub struct Renderer {
     pub(crate) debug_mode: u32,
     pub(crate) editor_mode: bool,
     pub(crate) debug_state: Arc<Mutex<DebugDrawState>>,
-    pub(crate) postprocess_buffer: wgpu::Buffer,
     pub(crate) last_render_time: Instant,
     pub(crate) delta_time: f32,
     /// Optional 3D LUT texture view for colour grading, set by the application.
@@ -202,7 +201,7 @@ pub struct Renderer {
     pub(crate) xr_idle_skips: u64,
     #[cfg(not(target_arch = "wasm32"))]
     /// Application-provided camera template for XR frames: supplies
-    /// `postprocess_settings`, near/far and the representative position used
+    /// `view_id`, near/far and the representative position used
     /// for RC bounds and the debug state. The per-eye view/proj are overridden
     /// by the headset each frame.
     pub(crate) xr_camera: Option<Camera>,
@@ -274,7 +273,7 @@ impl Renderer {
             self.frame_count as u32,
             camera.jitter,
             previous_projection,
-        );
+        ).with_view_id(camera.view_id);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniforms));
         self.prev_view_proj = glam::Mat4::from_cols_array(&uniforms.view_proj);
@@ -709,11 +708,6 @@ impl Renderer {
     /// Whether the renderer was built with the OpenXR multiview path enabled.
     pub fn xr_enabled(&self) -> bool {
         self.enable_xr
-    }
-
-    /// Returns a reference to the post-process uniform buffer.
-    pub fn postprocess_buffer(&self) -> &wgpu::Buffer {
-        &self.postprocess_buffer
     }
 
     /// Set or clear the 3D colour grading LUT texture.

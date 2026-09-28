@@ -5,10 +5,10 @@
 //! `VolumetricFogPass`) see the blended values rather than the camera defaults.
 //!
 //! Sub-stages (execution order in `execute()`):
-//!   1. `cs_exposure`/`cs_exposure_reduce` — sampled log luminance reduction (compute)
+//!   1. `cs_exposure`/`cs_exposure_reduce`/`cs_exposure_adapt` — metered log luminance and eye adaptation (compute)
 //!   2. `cs_bloom_down_extract` — extract brights from HDR → bloom mip 0 (compute)
 //!   3. `cs_bloom_down`         — 2x downsample mip chain, 4 passes (compute)
-//!   4. `fs_uber`               — tonemap, color grade, vignette, CA, grain (render)
+//!   4. `fs_uber`               — exposure, bloom + lens composite, grade, tonemap, vignette, CA, grain (render)
 //!
 //! Bind groups:
 //!   Main BGLs (group 0): uniforms, samplers, hdr/depth, bloom, noise, custom, volumes, blend output
@@ -25,11 +25,14 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 
 mod components;
 pub mod gpu_types;
-pub use components::PostProcessVolumeComponent;
+pub use components::{CameraPostProcessComponent, PostProcessVolumeComponent};
 pub use gpu_types::*;
 
 mod volume_blend;
 pub use volume_blend::PostProcessVolumeBlendPass;
+
+mod fog_composite;
+pub use fog_composite::{FogCompositePass, FOGGED_HDR, FOGGED_HDR_FORMAT};
 
 mod lut_builder;
 pub use lut_builder::LutBuilder;
@@ -92,6 +95,7 @@ pub struct PostProcessPass {
 
     exposure_pipeline: wgpu::ComputePipeline,
     exposure_reduce_pipeline: wgpu::ComputePipeline,
+    exposure_adapt_pipeline: wgpu::ComputePipeline,
     bloom_extract_pipeline: wgpu::ComputePipeline,
     bloom_down_pipeline: wgpu::ComputePipeline,
     uber_pipeline: wgpu::RenderPipeline,
@@ -117,10 +121,14 @@ pub struct PostProcessPass {
     point_sampler: wgpu::Sampler,
 
     width: u32,
+    /// Size of the analysed input, which bloom mips and exposure partials follow.
+    analysis_size: (u32, u32),
     height: u32,
     format: wgpu::TextureFormat,
 
-    first_frame: bool,
+    /// Adapted exposure in `avg_luminance_buf[1]` is valid history. Cleared on
+    /// construction and resize so the first metered frame snaps.
+    exposure_history: bool,
 
     // ── Bloom gating ───────────────────────────────────────────────────────
     bloom_active: bool,
@@ -129,8 +137,8 @@ pub struct PostProcessPass {
     noise_texture: wgpu::Texture,
     noise_view: wgpu::TextureView,
     noise_sampler: wgpu::Sampler,
-    /// 1x1 (0,0,0,1) stand-in bound at b17 when the graph has no fog pass.
-    fallback_fog_view: wgpu::TextureView,
+    /// 1x1 black stand-in bound at b17 when the graph has no lens pass.
+    fallback_lens_view: wgpu::TextureView,
     /// 1x1 (0,0) stand-in bound at b18 when the graph has no velocity pass.
     fallback_velocity_view: wgpu::TextureView,
     /// 1x1x1 identity LUT bound at b19 when no LUT is loaded.
@@ -158,6 +166,11 @@ pub struct PostProcessPass {
 }
 
 impl PostProcessPass {
+    /// Select the linear HDR input published by the preceding graph pass.
+    pub fn with_color_input(mut self, key: &'static str) -> Self {
+        self.color_input = key;
+        self
+    }
     /// Consume the linear HDR intermediate published by FXAA.
     pub fn with_fxaa_input(mut self) -> Self {
         self.color_input = "fxaa_color";
@@ -245,7 +258,8 @@ impl PostProcessPass {
 
         let avg_luminance_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PostProcess Avg Luminance"),
-            size: 4,
+            // measured log2, adapted log2, delta seconds, history valid.
+            size: 16,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -372,17 +386,8 @@ impl PostProcessPass {
                 sampled_tex_entry(12, fv, false),
                 sampler_entry(13, fv, false),
                 storage_ro_entry(14, fv),
-                // Fog is a froxel grid, not a screen-space buffer.
-                wgpu::BindGroupLayoutEntry {
-                    binding: 17,
-                    visibility: fv,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D3,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
+                // Reduced-resolution scene-linear lens response.
+                sampled_tex_entry(17, fv, false),
                 // Velocity buffer (Rg16Float) for per-pixel motion blur
                 wgpu::BindGroupLayoutEntry {
                     binding: 18,
@@ -416,7 +421,7 @@ impl PostProcessPass {
                     binding: 0,
                     visibility: cv,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -473,6 +478,7 @@ impl PostProcessPass {
 
         let exposure_pipeline = mk_compute("PostProcess Exposure", "cs_exposure", &exposure_pl);
         let exposure_reduce_pipeline = mk_compute("PostProcess Exposure Reduce", "cs_exposure_reduce", &exposure_pl);
+        let exposure_adapt_pipeline = mk_compute("PostProcess Exposure Adapt", "cs_exposure_adapt", &exposure_pl);
         let bloom_extract_pipeline = mk_compute(
             "PostProcess Bloom Extract",
             "cs_bloom_down_extract",
@@ -565,48 +571,24 @@ impl PostProcessPass {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
-        // Stand-in for the fog grid when no VolumetricFogPass is in the graph. The
-        // composite is `color * fog.a + fog.rgb`, so (0,0,0,1) is exactly the
-        // identity — the uber shader needs no branch for the fog-less case.
-        // 1x1x1 D3 to match the real grid's binding type.
-        // Rgba16Float texels are halfs: 0.0 = 0x0000, 1.0 = 0x3C00, little-endian.
-        let fallback_fog_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("PostProcess Fog Fallback"),
-            size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D3,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &fallback_fog_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3C],
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(8),
-                rows_per_image: Some(1),
-            },
-            wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-        );
-        let fallback_fog_view = fallback_fog_texture.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D3),
-            ..Default::default()
-        });
+        // Stand-in for the lens response when no LensFlarePass is in the graph.
+        // Textures are zero-initialised, and black adds nothing.
+        let fallback_lens_view = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("PostProcess Lens Fallback"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         // 1x1 zero-velocity fallback for when the graph has no GBuffer pass.
         let fallback_velocity_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -707,6 +689,7 @@ impl PostProcessPass {
             exposure_partials_buf,
             exposure_pipeline,
             exposure_reduce_pipeline,
+            exposure_adapt_pipeline,
             bloom_extract_pipeline,
             bloom_down_pipeline,
             uber_pipeline,
@@ -724,14 +707,15 @@ impl PostProcessPass {
             linear_sampler,
             point_sampler,
             width,
+            analysis_size: (width, height),
             height,
             format,
-            first_frame: true,
+            exposure_history: false,
             bloom_active: true,
             noise_texture,
             noise_view,
             noise_sampler,
-            fallback_fog_view,
+            fallback_lens_view,
             fallback_velocity_view,
             fallback_lut_view,
             custom_params_buf,
@@ -989,11 +973,11 @@ impl PostProcessPass {
         pre_aa_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         camera_buf: &wgpu::Buffer,
-        fog_view: Option<&wgpu::TextureView>,
+        lens_view: Option<&wgpu::TextureView>,
         velocity_view: Option<&wgpu::TextureView>,
         lut_view: Option<&wgpu::TextureView>,
     ) {
-        let fog_view = fog_view.unwrap_or(&self.fallback_fog_view);
+        let lens_view = lens_view.unwrap_or(&self.fallback_lens_view);
         self.compute_main_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("PostProcess Compute Main BG"),
             layout: &self.compute_main_bgl,
@@ -1114,7 +1098,7 @@ impl PostProcessPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 17,
-                    resource: wgpu::BindingResource::TextureView(fog_view),
+                    resource: wgpu::BindingResource::TextureView(lens_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 18,
@@ -1130,8 +1114,8 @@ impl PostProcessPass {
 
     fn mip_dims(&self, mip: u32) -> (u32, u32) {
         (
-            (self.width >> (mip + 1)).max(1),
-            (self.height >> (mip + 1)).max(1),
+            (self.analysis_size.0 >> (mip + 1)).max(1),
+            (self.analysis_size.1 >> (mip + 1)).max(1),
         )
     }
 
@@ -1161,9 +1145,10 @@ impl RenderPass for PostProcessPass {
 
     fn reads(&self) -> &'static [&'static str] {
         match self.color_input {
-            "fxaa_color" => &["fxaa_color", "fog_accum", "color_grading_lut"],
-            "tsr_color" => &["tsr_color", "fog_accum", "color_grading_lut"],
-            _ => &["pre_aa", "fog_accum", "color_grading_lut"],
+            "fxaa_color" => &["fxaa_color", "postprocess_uniforms", "lens_output", "color_grading_lut"],
+            "tsr_color" => &["tsr_color", "postprocess_uniforms", "lens_output", "color_grading_lut"],
+            "fogged_hdr" => &["fogged_hdr", "postprocess_uniforms", "lens_output", "color_grading_lut"],
+            _ => &["pre_aa", "postprocess_uniforms", "lens_output", "color_grading_lut"],
         }
     }
 
@@ -1178,9 +1163,11 @@ impl RenderPass for PostProcessPass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read(self.color_input);
-        // Optional: graphs without a VolumetricFogPass never publish this, and the
-        // uber shader falls back to a 1x1 no-op texture.
-        builder.read("fog_accum");
+        // Resolved camera + volume settings from PostProcessVolumeBlendPass.
+        builder.read("postprocess_uniforms");
+        // Optional: graphs without a LensFlarePass never publish this, and the
+        // uber shader binds a 1x1 black fallback.
+        builder.read("lens_output");
         // Optional: graphs without a GBuffer pass or velocity pass fall back to
         // a 1x1 zero-velocity texture (no per-object motion blur).
         builder.read("gbuffer_velocity");
@@ -1191,6 +1178,36 @@ impl RenderPass for PostProcessPass {
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.width = width;
         self.height = height;
+        self.resize_analysis(device, width, height);
+        self.exposure_history = false;
+
+        // Recreated at the new size by the next prepare().
+        self.pre_dof_tex = None;
+        self.pre_dof_view = None;
+    }
+
+    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        self.prepare_frame(ctx)
+    }
+
+    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        self.execute_frame(ctx)
+    }
+
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        if let Some(view) = &self.pre_dof_view {
+            let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(view) };
+            frame.write(helio_core::ResourceKey::new("pre_dof"), view, "PostProcess");
+        }
+    }
+}
+
+impl PostProcessPass {
+    /// Size bloom mips and exposure partials from the image they analyse. The
+    /// input can differ from the output size (internal-resolution FXAA input,
+    /// dynamic resolution); a mismatch scales bloom about the image corner.
+    fn resize_analysis(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        self.analysis_size = (width, height);
         self.exposure_partials_buf = exposure_partial_buffer(device, width, height);
         let (textures, sampled_views, storage_views) =
             Self::create_bloom_mips(device, width, height);
@@ -1207,24 +1224,41 @@ impl RenderPass for PostProcessPass {
         self.render_main_bg = None;
         self.main_bg_key = None;
         self.bloom_extract_bg = None;
-        self.first_frame = true;
-
-        self.pre_dof_tex = None;
-        self.pre_dof_view = None;
-        self.ensure_pre_dof_target(device);
     }
 
-    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // Enabling the output after construction does not imply a resize.
-        // Allocate before the first frame, otherwise DOF falls back to pre_aa
-        // and overwrites both postprocessing and temporal reconstruction.
-        self.ensure_pre_dof_target(ctx.device);
-        if self.first_frame {
-            self.first_frame = false;
-            let initial: f32 = 0.18;
-            ctx.queue
-                .write_buffer(&self.avg_luminance_buf, 0, bytemuck::bytes_of(&initial));
+    fn prepare_frame(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // The pre_dof target must exist from the first frame, not only after a
+        // resize: without it the uber pass draws to the surface and DofPass
+        // falls back to raw pre_aa, overwriting the whole post-processed image.
+        if self.output_to_pre_dof && self.pre_dof_view.is_none() {
+            let tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("PostProcess Pre-DOF"),
+                size: wgpu::Extent3d {
+                    width: self.width.max(1),
+                    height: self.height.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            self.pre_dof_view = Some(tex.create_view(&wgpu::TextureViewDescriptor::default()));
+            self.pre_dof_tex = Some(tex);
+        } else if !self.output_to_pre_dof {
+            self.pre_dof_tex = None;
+            self.pre_dof_view = None;
         }
+
+        // Adaptation inputs for cs_exposure_adapt: frame time and whether the
+        // adapted value is valid history (otherwise the first meter snaps).
+        let adaptation = [ctx.delta_time.max(0.0), if self.exposure_history { 1.0 } else { 0.0 }];
+        ctx.queue
+            .write_buffer(&self.avg_luminance_buf, 8, bytemuck::cast_slice(&adaptation));
+        self.exposure_history = true;
 
         // Deferred shader rebuild: if a snippet was queued, apply it now.
         if self.pending_shader_snippet.is_some() {
@@ -1256,12 +1290,16 @@ impl RenderPass for PostProcessPass {
         Ok(())
     }
 
-    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+    fn execute_frame(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let input_key = self.color_input;
-        let pre_aa_view = match ctx.registry.get(helio_core::ResourceKey::new(input_key)) {
+        let pre_aa_view = match ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new(input_key)) {
             Some(v) => v,
             None => return Ok(()),
         };
+        let input_size = (pre_aa_view.texture().width(), pre_aa_view.texture().height());
+        if input_size != self.analysis_size {
+            self.resize_analysis(ctx.device, input_size.0, input_size.1);
+        }
         let postprocess_buf = match ctx.registry.get(helio_core::ResourceKey::new("postprocess_uniforms")) {
             Some(v) => v,
             None => return Ok(()),
@@ -1269,11 +1307,11 @@ impl RenderPass for PostProcessPass {
 
         let camera_buf = ctx.camera;
 
-        // None when no VolumetricFogPass is in the graph; rebuild_bind_groups then
-        // binds the 1x1 no-op fallback. Part of the key so that a fog pass being
-        // added, removed, or resized rebuilds the group instead of leaving b17
-        // pointing at a stale view.
-        let fog_view = ctx.registry.get(helio_core::ResourceKey::new("fog_accum"));
+        // None when no LensFlarePass is in the graph; rebuild_bind_groups then
+        // binds the 1x1 black fallback. Part of the key so that a lens pass
+        // being added, removed, or resized rebuilds the group instead of
+        // leaving b17 pointing at a stale view.
+        let lens_view = ctx.registry.get(helio_core::ResourceKey::new("lens_output"));
         let velocity_view = ctx.registry.get(helio_core::ResourceKey::new("gbuffer_velocity"));
         let lut_view = ctx.registry.get(helio_core::ResourceKey::new("color_grading_lut"));
 
@@ -1282,7 +1320,7 @@ impl RenderPass for PostProcessPass {
             ctx.depth as *const _ as usize,
             camera_buf as *const _ as usize,
             postprocess_buf as *const _ as usize,
-            fog_view.map_or(0, |v| v as *const _ as usize),
+            lens_view.map_or(0, |v| v as *const _ as usize),
             velocity_view.map_or(0, |v| v as *const _ as usize),
             lut_view.map_or(0, |v| v as *const _ as usize),
         );
@@ -1293,7 +1331,7 @@ impl RenderPass for PostProcessPass {
                 pre_aa_view,
                 ctx.depth,
                 camera_buf,
-                fog_view,
+                lens_view,
                 velocity_view,
                 lut_view,
             );
@@ -1345,7 +1383,7 @@ impl RenderPass for PostProcessPass {
             });
             cpass.set_pipeline(&self.exposure_pipeline);
             cpass.set_bind_group(0, compute_bg, &[]);
-            let (gx, gy) = exposure_groups(self.width, self.height);
+            let (gx, gy) = exposure_groups(self.analysis_size.0, self.analysis_size.1);
             cpass.dispatch_workgroups(gx, gy, 1);
         }
         {
@@ -1354,6 +1392,15 @@ impl RenderPass for PostProcessPass {
                 timestamp_writes: None,
             });
             cpass.set_pipeline(&self.exposure_reduce_pipeline);
+            cpass.set_bind_group(0, compute_bg, &[]);
+            cpass.dispatch_workgroups(1, 1, 1);
+        }
+        {
+            let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("PostProcess Exposure Adapt"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.exposure_adapt_pipeline);
             cpass.set_bind_group(0, compute_bg, &[]);
             cpass.dispatch_workgroups(1, 1, 1);
         }
@@ -1439,13 +1486,6 @@ impl RenderPass for PostProcessPass {
         }
 
         Ok(())
-    }
-
-    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
-        if let Some(view) = &self.pre_dof_view {
-            let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(view) };
-            frame.write(helio_core::ResourceKey::new("pre_dof"), view, "PostProcess");
-        }
     }
 }
 

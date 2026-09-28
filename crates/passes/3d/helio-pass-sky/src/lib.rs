@@ -337,6 +337,12 @@ pub struct SkyPass {
     /// `scene_sky_buf` for why this can't be resolved once at construction.
     sky_lut_bg1_key: Option<usize>,
     sky_pipeline: wgpu::RenderPipeline,
+    /// `sky_pipeline` with a read-only `LessEqual` test against the scene
+    /// depth: the far-plane triangle only shades pixels no geometry covered.
+    sky_pipeline_depth_tested: wgpu::RenderPipeline,
+    /// Composite the sky with `sky_pipeline_depth_tested`. Only valid when
+    /// this pass runs after every opaque depth writer (see `with_depth_test`).
+    depth_tested: bool,
     sky_bgl0: wgpu::BindGroupLayout,
     sky_bgl1: wgpu::BindGroupLayout,
     sky_bg0: wgpu::BindGroup,
@@ -904,6 +910,43 @@ impl SkyPass {
                 ..Default::default()
             },
             depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let sky_pipeline_depth_tested = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Sky Composite Pipeline (Depth Tested)"),
+            layout: Some(&sky_layout),
+            vertex: wgpu::VertexState {
+                module: &sky_module,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &sky_module,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            // The triangle sits at z = 1 and depth clears to 1, so LessEqual
+            // passes exactly where nothing was drawn.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -1633,6 +1676,8 @@ impl SkyPass {
             sky_lut_bg1: None,
             sky_lut_bg1_key: None,
             sky_pipeline,
+            sky_pipeline_depth_tested,
+            depth_tested: false,
             sky_bgl0,
             sky_bgl1,
             sky_bg0,
@@ -1673,6 +1718,19 @@ impl SkyPass {
     pub fn set_debug_mode(&mut self, mode: CloudDebugMode) {
         self.config.debug = mode;
     }
+    /// Composite the sky only where the scene depth is still at the far
+    /// plane, instead of shading every pixel and letting lighting overwrite
+    /// the covered ones.
+    ///
+    /// Requires the pass to run after every pass that writes opaque depth
+    /// (G-buffer, foliage, virtual geometry, portals) and before lighting,
+    /// which must leave far-plane pixels untouched, as `DeferredLightPass`
+    /// does. Covered pixels are left cleared to black for lighting to fill.
+    pub fn with_depth_test(mut self, enabled: bool) -> Self {
+        self.depth_tested = enabled;
+        self
+    }
+
     pub fn set_high_perf_enabled(&mut self, enabled: bool) {
         self.use_high_perf = enabled;
         if !enabled {
@@ -1812,6 +1870,9 @@ impl RenderPass for SkyPass {
         // Velocity is read from gbuffer_velocity (published by GBufferPass)
         builder.read("gbuffer_velocity");
         // Depth is accessed via ctx.depth / depth_texture from ResourceRegistry
+        if self.depth_tested {
+            builder.read("depth");
+        }
         builder.read("pre_aa"); // for final composite read
     }
 
@@ -2340,33 +2401,66 @@ impl RenderPass for SkyPass {
                     store: wgpu::StoreOp::Store,
                 },
             })];
+            let depth_attachment = self.depth_tested.then_some(wgpu::RenderPassDepthStencilAttachment {
+                view: ctx.depth,
+                depth_ops: None,
+                stencil_ops: None,
+            });
             let mut pass = unsafe {
                 (&mut *ctx.encoder_ptr).begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Sky + Clouds Composite (Unified Fallback)"),
                     color_attachments: &attachments,
-                    depth_stencil_attachment: None,
+                    depth_stencil_attachment: depth_attachment,
                     timestamp_writes: None,
                     occlusion_query_set: None,
                     multiview_mask: None,
                 })
             };
             if has_sky {
-                pass.set_pipeline(&self.sky_pipeline);
+                pass.set_pipeline(if self.depth_tested {
+                    &self.sky_pipeline_depth_tested
+                } else {
+                    &self.sky_pipeline
+                });
                 pass.set_bind_group(0, &self.sky_bg0, &[]);
                 if let Some(ref bg) = self.sky_bg1 {
                     pass.set_bind_group(1, bg, &[]);
                 }
                 pass.draw(0..3, 0..1);
             }
+            let legacy_clouds = self.config.enabled
+                && !procedural_clouds
+                && self.config.mode == CloudRenderMode::Layer2D;
+            if self.depth_tested && (volume_clouds_enabled || legacy_clouds) {
+                // The cloud pipelines carry no depth state: finish them in a
+                // second pass over the same target.
+                drop(pass);
+                let attachments = [Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })];
+                pass = unsafe {
+                    (&mut *ctx.encoder_ptr).begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Sky Clouds Composite"),
+                        color_attachments: &attachments,
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    })
+                };
+            }
             if volume_clouds_enabled {
                 pass.set_pipeline(&self.volume_composite_pipeline);
                 pass.set_bind_group(0, self.volume_composite_bg.as_ref().unwrap(), &[]);
                 pass.draw(0..3, 0..1);
             }
-            if self.config.enabled
-                && !procedural_clouds
-                && self.config.mode == CloudRenderMode::Layer2D
-            {
+            if legacy_clouds {
                 self.render(&mut pass);
             }
         }

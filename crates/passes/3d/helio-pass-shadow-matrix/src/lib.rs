@@ -36,6 +36,17 @@ pub struct ShadowMatrixPass {
     /// The lights buffer `bind_group` currently binds.
     bound_lights: wgpu::Buffer,
     shadow_atlas_size: u32,
+    /// Faces the matrices buffer holds (its size / 64 bytes).
+    face_capacity: u32,
+    /// Bumped when light rows are uploaded or the camera moves: every caster's
+    /// cached (static) faces are then re-rendered. Directional cascades follow
+    /// the camera; SceneDB's content generation reports light edits.
+    caster_generation: u64,
+    last_lights_generation: Option<u64>,
+    last_view_proj: [f32; 16],
+    /// Advances every frame so ShadowPass runs its GPU-gated per-face path,
+    /// which consumes the matrix pass's per-caster dirty flags and movement.
+    frame_generation: u64,
 }
 
 impl ShadowMatrixPass {
@@ -159,8 +170,18 @@ impl ShadowMatrixPass {
             shadow_hashes_buf: shadow_hashes_buf.clone(),
             bound_lights: lights_buf.clone(),
             shadow_atlas_size: shadow_atlas_size.max(1),
+            face_capacity: (shadow_matrix_buf.size() / std::mem::size_of::<GpuShadowMatrix>() as u64) as u32,
+            caster_generation: 1,
+            last_lights_generation: None,
+            last_view_proj: [0.0; 16],
+            frame_generation: 0,
         }
     }
+    /// The matrices this pass computes (one per atlas face).
+    pub fn matrices(&self) -> &wgpu::Buffer {
+        &self.shadow_matrix_buf
+    }
+
 
     fn bind(
         device: &wgpu::Device,
@@ -186,6 +207,27 @@ impl ShadowMatrixPass {
 impl RenderPass for ShadowMatrixPass {
     fn name(&self) -> &'static str {
         "ShadowMatrix"
+    }
+
+    fn writes(&self) -> &'static [&'static str] {
+        &["shadow_matrices"]
+    }
+
+    /// Publish this frame's matrices for the shadow, lighting, fog and lens
+    /// passes. The Renderer published this before the SceneDB migration;
+    /// without it every consumer skipped shadows entirely.
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        let matrices: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.shadow_matrix_buf) };
+        frame.write(
+            helio_core::resource_keys::shadow_matrices(),
+            ShadowMatricesFrameData {
+                shadow_matrices: matrices,
+                shadow_count: self.face_capacity,
+                per_caster_dirty_gen: [self.caster_generation; 42],
+                movable_objects_generation: self.frame_generation,
+            },
+            self.name(),
+        );
     }
 
     fn render_pass_descriptor<'a>(
@@ -223,6 +265,15 @@ impl RenderPass for ShadowMatrixPass {
         };
         ctx.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+        let lights_generation = lights.map(|lights| lights.content_generation);
+        if lights_generation != self.last_lights_generation
+            || ctx.camera_data.view_proj != self.last_view_proj
+        {
+            self.caster_generation += 1;
+            self.last_lights_generation = lights_generation;
+            self.last_view_proj = ctx.camera_data.view_proj;
+        }
+        self.frame_generation += 1;
         Ok(())
     }
 

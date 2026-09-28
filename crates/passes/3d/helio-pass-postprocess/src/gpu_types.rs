@@ -61,9 +61,9 @@ pub struct GpuPostProcessUniforms {
 
     // ── Color Grading (12 x 4 = 48 bytes) ──
     pub color_saturation: [f32; 3],
-    pub pad_col_sat: f32,
+    pub exposure_speed_up: f32,
     pub color_contrast: [f32; 3],
-    pub pad_col_con: f32,
+    pub exposure_speed_down: f32,
     pub color_gamma: [f32; 3],
     pub pad_col_gam: f32,
     pub color_gain: [f32; 3],
@@ -177,15 +177,48 @@ pub struct GpuPostProcessUniforms {
     pub lut_intensity: f32,            // 452 — blend 0-1 between graded and ungraded
     pub lut_platform: u32,             // 456 — 0=none, 1=16x16x16, 2=32x32x32
     pub pad_grading_end: f32,          // 460
+
+    // Lens flare: appended 64-byte block; shared with the optics pass.
+    pub lens_enabled: u32, // 464
+    pub lens_quality: u32, // 468
+    pub lens_profile: u32, // 472
+    pub lens_ghost_count: u32, // 476
+    pub lens_intensity: f32, // 480
+    pub lens_threshold: f32, // 484
+    pub lens_soft_knee: f32, // 488
+    pub lens_ghost_intensity: f32, // 492
+    pub lens_halo_intensity: f32, // 496
+    pub lens_glare_intensity: f32, // 500
+    pub lens_streak_intensity: f32, // 504
+    pub lens_dispersion: f32, // 508
+    pub lens_aperture_f_number: f32, // 512
+    pub lens_focal_length_mm: f32, // 516
+    pub lens_sensor_width_mm: f32, // 520
+    pub lens_vignette: f32, // 524
+
+    // Lens extension (64 bytes). Iris shape, diffraction, coatings, dirt and
+    // analytic light sources. Shared with the optics pass like the block above.
+    pub lens_starburst_intensity: f32, // 528
+    pub lens_starburst_length: f32,    // 532
+    pub lens_aperture_blades: u32,     // 536
+    pub lens_aperture_rotation: f32,   // 540
+    pub lens_coating_strength: f32,    // 544
+    pub lens_ghost_rim: f32,           // 548
+    pub lens_dirt_intensity: f32,      // 552
+    pub lens_light_sources: u32,       // 556
+    pub lens_light_intensity: f32,     // 560
+    pub lens_field_margin: f32,        // 564
+    /// Temporal response time constant in seconds (0 = instantaneous).
+    pub lens_response_time: f32,       // 568
+    pub pad_lens_ext: [f32; 5],        // 572..592
 }
 
-// Total: 16 + 32 + 80 + 16 + 16 + 32 + 16 + 16 + 32 + 16 + 32 + 64 + 16 + 48 = 464 bytes
-// WGSL uniform buffer rule: must be multiple of 16 → 464 / 16 = 29 slots. ✓
+// Total: 592 bytes (37 uniform slots). Fog remains at 304; lens starts at 464.
 //
 // This struct is mirrored by hand in helio-pass-postprocess/shaders/postprocess.wgsl
 // and is embedded in GpuPostProcessVolume, which cs_volume_blend reads as a storage
 // array. A field added here without updating that mirror misreads the buffer silently.
-const _: () = assert!(std::mem::size_of::<GpuPostProcessUniforms>() == 464);
+const _: () = assert!(std::mem::size_of::<GpuPostProcessUniforms>() == 592);
 const _: () = assert!(std::mem::size_of::<GpuPostProcessUniforms>() % 16 == 0);
 
 // ── GpuFogUniforms ─────────────────────────────────────────────────────────────
@@ -272,9 +305,9 @@ impl Default for GpuPostProcessUniforms {
             bloom_enabled: 0,
 
             color_saturation: [1.0, 1.0, 1.0],
-            pad_col_sat: 0.0,
+            exposure_speed_up: 0.5,
             color_contrast: [1.0, 1.0, 1.0],
-            pad_col_con: 0.0,
+            exposure_speed_down: 1.0,
             color_gamma: [1.0, 1.0, 1.0],
             pad_col_gam: 0.0,
             color_gain: [1.0, 1.0, 1.0],
@@ -364,6 +397,34 @@ impl Default for GpuPostProcessUniforms {
             lut_intensity: 1.0,
             lut_platform: 0,
             pad_grading_end: 0.0,
+            lens_enabled: 0,
+            lens_quality: 0,
+            lens_profile: 0,
+            lens_ghost_count: 4,
+            lens_intensity: 0.3,
+            lens_threshold: 2.0,
+            lens_soft_knee: 1.0,
+            lens_ghost_intensity: 1.0,
+            lens_halo_intensity: 0.5,
+            lens_glare_intensity: 0.3,
+            lens_streak_intensity: 0.5,
+            lens_dispersion: 0.01,
+            lens_aperture_f_number: 2.8,
+            lens_focal_length_mm: 50.0,
+            lens_sensor_width_mm: 36.0,
+            lens_vignette: 1.0,
+            lens_starburst_intensity: 0.3,
+            lens_starburst_length: 0.25,
+            lens_aperture_blades: 6,
+            lens_aperture_rotation: 0.0,
+            lens_coating_strength: 0.8,
+            lens_ghost_rim: 0.5,
+            lens_dirt_intensity: 0.0,
+            lens_light_sources: 1,
+            lens_light_intensity: 1.0,
+            lens_field_margin: 0.35,
+            lens_response_time: 0.06,
+            pad_lens_ext: [0.0; 5],
         }
     }
 }
@@ -375,6 +436,7 @@ impl Default for GpuPostProcessUniforms {
 
 #[derive(Clone, Debug)]
 pub struct PostProcessSettings {
+    pub lens_flare: LensFlareSettings,
     // Exposure
     pub exposure_mode: ExposureMode,
     pub exposure_compensation: f32,
@@ -503,9 +565,9 @@ impl PostProcessSettings {
             bloom_enabled: self.bloom_enabled as u32,
 
             color_saturation: self.color_saturation,
-            pad_col_sat: 0.0,
+            exposure_speed_up: self.exposure_speed_up,
             color_contrast: self.color_contrast,
-            pad_col_con: 0.0,
+            exposure_speed_down: self.exposure_speed_down,
             color_gamma: self.color_gamma,
             pad_col_gam: 0.0,
             color_gain: self.color_gain,
@@ -600,6 +662,34 @@ impl PostProcessSettings {
             lut_intensity: self.lut_intensity,
             lut_platform: self.lut_platform,
             pad_grading_end: 0.0,
+            lens_enabled: self.lens_flare.enabled as u32,
+            lens_quality: self.lens_flare.quality,
+            lens_profile: self.lens_flare.profile,
+            lens_ghost_count: self.lens_flare.ghost_count,
+            lens_intensity: self.lens_flare.intensity,
+            lens_threshold: self.lens_flare.threshold,
+            lens_soft_knee: self.lens_flare.soft_knee,
+            lens_ghost_intensity: self.lens_flare.ghost_intensity,
+            lens_halo_intensity: self.lens_flare.halo_intensity,
+            lens_glare_intensity: self.lens_flare.glare_intensity,
+            lens_streak_intensity: self.lens_flare.streak_intensity,
+            lens_dispersion: self.lens_flare.dispersion,
+            lens_aperture_f_number: self.lens_flare.aperture_f_number,
+            lens_focal_length_mm: self.lens_flare.focal_length_mm,
+            lens_sensor_width_mm: self.lens_flare.sensor_width_mm,
+            lens_vignette: self.lens_flare.vignette,
+            lens_starburst_intensity: self.lens_flare.starburst_intensity,
+            lens_starburst_length: self.lens_flare.starburst_length,
+            lens_aperture_blades: self.lens_flare.aperture_blades,
+            lens_aperture_rotation: self.lens_flare.aperture_rotation,
+            lens_coating_strength: self.lens_flare.coating_strength,
+            lens_ghost_rim: self.lens_flare.ghost_rim,
+            lens_dirt_intensity: self.lens_flare.dirt_intensity,
+            lens_light_sources: self.lens_flare.light_sources as u32,
+            lens_light_intensity: self.lens_flare.light_intensity,
+            lens_field_margin: self.lens_flare.field_margin,
+            lens_response_time: self.lens_flare.response_time,
+            pad_lens_ext: [0.0; 5],
         }
     }
 }
@@ -607,6 +697,7 @@ impl PostProcessSettings {
 impl Default for PostProcessSettings {
     fn default() -> Self {
         Self {
+            lens_flare: LensFlareSettings::default(),
             exposure_mode: ExposureMode::Manual,
             exposure_compensation: 0.0,
             exposure_min: -4.0,
@@ -722,15 +813,15 @@ pub struct GpuPostProcessVolume {
     // volume's settings shifted (and stride 424 against WGSL's 432, so each
     // successive volume drifted further). Padding to 64 here makes both sides
     // agree; the asserts below keep them that way.
-    pub _pad: [f32; 4],
+    pub override_mask: [u32; 4],
     pub settings: GpuPostProcessUniforms,
 }
 
 // WGSL places `settings` at 64 because GpuPostProcessUniforms aligns to 16.
 const _: () = assert!(std::mem::offset_of!(GpuPostProcessVolume, settings) == 64);
 // Storage-buffer array stride must match WGSL's, which rounds to the 16-byte alignment.
-// 64 (header) + 464 (settings) = 528.
-const _: () = assert!(std::mem::size_of::<GpuPostProcessVolume>() == 528);
+// 64 (header) + 592 (settings) = 656.
+const _: () = assert!(std::mem::size_of::<GpuPostProcessVolume>() == 656);
 const _: () = assert!(std::mem::size_of::<GpuPostProcessVolume>() % 16 == 0);
 
 // ── PostProcessVolume descriptor (CPU-side) ────────────────────────────────────
@@ -743,6 +834,7 @@ pub struct PostProcessVolumeDescriptor {
     pub blend_radius: f32,
     pub blend_weight: f32,
     pub unbound: bool, // infinite volume (camera always inside)
+    pub override_mask: [u32; 4],
     pub settings: PostProcessSettings,
 }
 
@@ -755,6 +847,7 @@ impl Default for PostProcessVolumeDescriptor {
             blend_radius: 200.0,
             blend_weight: 1.0,
             unbound: false,
+            override_mask: PostProcessProperty::ALL,
             settings: PostProcessSettings::default(),
         }
     }
@@ -779,377 +872,382 @@ impl PostProcessVolumeDescriptor {
             blend_radius: self.blend_radius,
             blend_weight: self.blend_weight,
             unbound: self.unbound as u32,
-            _pad: [0.0; 4],
+            override_mask: self.override_mask,
             settings: self.settings.to_gpu(),
         }
     }
 }
 
-// ── PostProcessBlender ─────────────────────────────────────────────────────────
-//
-// CPU-side blender that evaluates active volumes and produces final uniforms.
 
+/// Shared lens authoring settings. Quality: 0 cheap, 1 high; profile: 0 spherical, 1 anamorphic.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LensFlareSettings {
+    pub enabled: bool,
+    pub quality: u32,
+    pub profile: u32,
+    pub ghost_count: u32,
+    pub intensity: f32,
+    pub threshold: f32,
+    pub soft_knee: f32,
+    pub ghost_intensity: f32,
+    pub halo_intensity: f32,
+    pub glare_intensity: f32,
+    pub streak_intensity: f32,
+    pub dispersion: f32,
+    pub aperture_f_number: f32,
+    pub focal_length_mm: f32,
+    pub sensor_width_mm: f32,
+    pub vignette: f32,
+    /// Diffraction spikes from the iris blades. Gain and length (fraction of width).
+    pub starburst_intensity: f32,
+    pub starburst_length: f32,
+    /// Iris blade count (0 = circular) and rotation in radians. Shapes the pupil,
+    /// ghost disks and the starburst (n spikes for even n, 2n for odd n).
+    pub aperture_blades: u32,
+    pub aperture_rotation: f32,
+    /// 0 = neutral grey ghosts; 1 = full anti-reflection coating tints.
+    pub coating_strength: f32,
+    /// Brighter, chromatically fringed ghost edges (0 = flat disks).
+    pub ghost_rim: f32,
+    /// Lens dirt modulating light scattered off the front element.
+    pub dirt_intensity: f32,
+    /// Analytic lens sources from scene lights: flares persist and fade
+    /// physically when a light leaves the frame, with shadow-map visibility.
+    pub light_sources: bool,
+    pub light_intensity: f32,
+    /// How far past the frame edge (fraction of the half-frame) light still
+    /// reaches the front element before the lens barrel blocks it.
+    pub field_margin: f32,
+    /// Seconds for the lens response to settle after a change (occlusion,
+    /// entering the frame, enabling). Fades instead of popping; 0 = instant.
+    pub response_time: f32,
+}
+impl Default for LensFlareSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            quality: 0,
+            profile: 0,
+            ghost_count: 4,
+            intensity: 0.3,
+            // Full soft knee: a smooth ramp from 0 to 2x threshold, so sources
+            // never switch at a cutoff, while dim extended areas (a lit floor)
+            // do not form recognisable ghost images. 0/0 is fully linear.
+            threshold: 2.0,
+            soft_knee: 1.0,
+            ghost_intensity: 1.0,
+            halo_intensity: 0.5,
+            glare_intensity: 0.3,
+            streak_intensity: 0.5,
+            dispersion: 0.01,
+            aperture_f_number: 2.8,
+            focal_length_mm: 50.0,
+            sensor_width_mm: 36.0,
+            vignette: 1.0,
+            starburst_intensity: 0.3,
+            starburst_length: 0.25,
+            aperture_blades: 6,
+            aperture_rotation: 0.0,
+            coating_strength: 0.8,
+            ghost_rim: 0.5,
+            dirt_intensity: 0.0,
+            light_sources: true,
+            light_intensity: 1.0,
+            field_margin: 0.35,
+            response_time: 0.06,
+        }
+    }
+}
+
+impl GpuPostProcessUniforms {
+    pub const LENS_BLOCK_OFFSET: u64 = 464;
+    pub const LENS_BLOCK_SIZE: u64 = 128;
+}
+const _: () = assert!(GpuPostProcessUniforms::FOG_BLOCK_OFFSET == 304);
+const _: () = assert!(std::mem::offset_of!(GpuPostProcessUniforms, lens_enabled) == 464);
+
+/// Override bit indices, in non-padding GPU declaration order. Vector colors use one bit.
+/// ALL is the default for authored volumes; a zero mask overrides nothing.
+pub struct PostProcessProperty;
+#[allow(non_upper_case_globals)]
+impl PostProcessProperty {
+    pub const ALL: [u32; 4] = [u32::MAX; 4];
+    pub const NONE: [u32; 4] = [0; 4];
+    pub const EXPOSURE_MODE: usize = 0;
+    pub const EXPOSURE_COMPENSATION: usize = 1;
+    pub const EXPOSURE_MIN: usize = 2;
+    pub const EXPOSURE_MAX: usize = 3;
+    pub const BLOOM_INTENSITY: usize = 4;
+    pub const BLOOM_THRESHOLD: usize = 5;
+    pub const BLOOM_KNEE: usize = 6;
+    pub const BLOOM_RADIUS: usize = 7;
+    pub const BLOOM_TINT: usize = 8;
+    pub const BLOOM_ENABLED: usize = 9;
+    pub const COLOR_SATURATION: usize = 10;
+    pub const EXPOSURE_SPEED_UP: usize = 11;
+    pub const COLOR_CONTRAST: usize = 12;
+    pub const EXPOSURE_SPEED_DOWN: usize = 13;
+    pub const COLOR_GAMMA: usize = 14;
+    pub const COLOR_GAIN: usize = 15;
+    pub const COLOR_OFFSET: usize = 16;
+    pub const WHITE_TEMP: usize = 17;
+    pub const WHITE_TINT: usize = 18;
+    pub const WHITE_BALANCE_ENABLED: usize = 19;
+    pub const TONEMAP_OPERATOR: usize = 20;
+    pub const TONEMAP_EXPOSURE: usize = 21;
+    pub const TONEMAP_WHITE_POINT: usize = 22;
+    pub const VIGNETTE_INTENSITY: usize = 23;
+    pub const VIGNETTE_SMOOTHNESS: usize = 24;
+    pub const VIGNETTE_ROUNDNESS: usize = 25;
+    pub const VIGNETTE_COLOR: usize = 26;
+    pub const VIGNETTE_ENABLED: usize = 27;
+    pub const CA_INTENSITY: usize = 28;
+    pub const CA_START_OFFSET: usize = 29;
+    pub const CA_ENABLED: usize = 30;
+    pub const GRAIN_INTENSITY: usize = 31;
+    pub const GRAIN_RESPONSE: usize = 32;
+    pub const GRAIN_SIZE: usize = 33;
+    pub const GRAIN_ENABLED: usize = 34;
+    pub const DOF_FOCAL_DISTANCE: usize = 35;
+    pub const DOF_FOCAL_REGION: usize = 36;
+    pub const DOF_APERTURE_SHAPE: usize = 37;
+    pub const DOF_APERTURE_ROTATION: usize = 38;
+    pub const DOF_NEAR_TRANSITION: usize = 39;
+    pub const DOF_FAR_TRANSITION: usize = 40;
+    pub const DOF_MAX_BOKEH_SIZE: usize = 41;
+    pub const DOF_SENSOR_DIAGONAL: usize = 42;
+    pub const MOTION_BLUR_AMOUNT: usize = 43;
+    pub const MOTION_BLUR_MAX: usize = 44;
+    pub const MOTION_BLUR_ENABLED: usize = 45;
+    pub const BLEND_WEIGHT_BLOOM: usize = 46;
+    pub const BLEND_WEIGHT_DOF: usize = 47;
+    pub const BLEND_WEIGHT_MOTION_BLUR: usize = 48;
+    pub const BLEND_WEIGHT_VIGNETTE: usize = 49;
+    pub const BLEND_WEIGHT_CA: usize = 50;
+    pub const BLEND_WEIGHT_GRAIN: usize = 51;
+    pub const BLEND_WEIGHT_EXPOSURE: usize = 52;
+    pub const FOG_ENABLED: usize = 53;
+    pub const FOG_MODE: usize = 54;
+    pub const FOG_DENSITY: usize = 55;
+    pub const FOG_HEIGHT_FALLOFF: usize = 56;
+    pub const FOG_START_DISTANCE: usize = 57;
+    pub const FOG_MAX_DISTANCE: usize = 58;
+    pub const FOG_HEIGHT: usize = 59;
+    pub const FOG_SCATTERING_ANISOTROPY: usize = 60;
+    pub const FOG_COLOR: usize = 61;
+    pub const FOG_EMISSIVE: usize = 62;
+    pub const HDR_OUTPUT_MODE: usize = 63;
+    pub const HDR_MAX_NITS: usize = 64;
+    pub const HDR_UI_BRIGHTNESS: usize = 65;
+    pub const LIFT_COLOR: usize = 66;
+    pub const GAMMA_COLOR: usize = 67;
+    pub const GAIN_COLOR: usize = 68;
+    pub const SHADOWS_MAX: usize = 69;
+    pub const HIGHLIGHTS_MIN: usize = 70;
+    pub const SHADOW_HIGHLIGHT_BALANCE: usize = 71;
+    pub const HUE_SHIFT: usize = 72;
+    pub const LUT_GENERATION: usize = 73;
+    pub const LUT_INTENSITY: usize = 74;
+    pub const LUT_PLATFORM: usize = 75;
+    pub const LENS_ENABLED: usize = 76;
+    pub const LENS_QUALITY: usize = 77;
+    pub const LENS_PROFILE: usize = 78;
+    pub const LENS_GHOST_COUNT: usize = 79;
+    pub const LENS_INTENSITY: usize = 80;
+    pub const LENS_THRESHOLD: usize = 81;
+    pub const LENS_SOFT_KNEE: usize = 82;
+    pub const LENS_GHOST_INTENSITY: usize = 83;
+    pub const LENS_HALO_INTENSITY: usize = 84;
+    pub const LENS_GLARE_INTENSITY: usize = 85;
+    pub const LENS_STREAK_INTENSITY: usize = 86;
+    pub const LENS_DISPERSION: usize = 87;
+    pub const LENS_APERTURE_F_NUMBER: usize = 88;
+    pub const LENS_FOCAL_LENGTH_MM: usize = 89;
+    pub const LENS_SENSOR_WIDTH_MM: usize = 90;
+    pub const LENS_VIGNETTE: usize = 91;
+    pub const LENS_STARBURST_INTENSITY: usize = 92;
+    pub const LENS_STARBURST_LENGTH: usize = 93;
+    pub const LENS_APERTURE_BLADES: usize = 94;
+    pub const LENS_APERTURE_ROTATION: usize = 95;
+    pub const LENS_COATING_STRENGTH: usize = 96;
+    pub const LENS_GHOST_RIM: usize = 97;
+    pub const LENS_DIRT_INTENSITY: usize = 98;
+    pub const LENS_LIGHT_SOURCES: usize = 99;
+    pub const LENS_LIGHT_INTENSITY: usize = 100;
+    pub const LENS_FIELD_MARGIN: usize = 101;
+    pub const LENS_RESPONSE_TIME: usize = 102;
+    /// One past the last property index.
+    pub const COUNT: usize = 103;
+    pub fn set(mask: &mut [u32; 4], property: usize, enabled: bool) {
+        assert!(property < Self::COUNT);
+        let bit = 1 << (property % 32);
+        if enabled { mask[property / 32] |= bit; } else { mask[property / 32] &= !bit; }
+    }
+    pub fn contains(mask: &[u32; 4], property: usize) -> bool {
+        property < Self::COUNT && mask[property / 32] & (1 << (property % 32)) != 0
+    }
+}
+
+/// CPU reference for the production GPU resolver. Equal priorities retain input row order.
 pub struct PostProcessBlender;
-
 impl PostProcessBlender {
-    /// Blend camera settings with all active volumes at `camera_pos`.
-    ///
-    /// Returns the final GPU uniforms ready for upload.
-    pub fn blend(
-        camera_pos: [f32; 3],
-        volumes: &[GpuPostProcessVolume],
-        camera_settings: &PostProcessSettings,
-    ) -> GpuPostProcessUniforms {
-        if volumes.is_empty() {
-            return camera_settings.to_gpu();
-        }
+    pub fn blend(camera_pos: [f32; 3], volumes: &[GpuPostProcessVolume], camera_settings: &PostProcessSettings) -> GpuPostProcessUniforms {
+        Self::blend_gpu(camera_pos, volumes, camera_settings.to_gpu())
+    }
 
-        // Collect weighted contributions
-        let mut active: Vec<(f32, &GpuPostProcessVolume)> = Vec::with_capacity(volumes.len());
-
-        for v in volumes {
-            if v.blend_weight <= 0.0 {
-                continue;
+    pub fn blend_gpu(camera_pos: [f32; 3], volumes: &[GpuPostProcessVolume], baseline: GpuPostProcessUniforms) -> GpuPostProcessUniforms {
+        let mut ordered: Vec<_> = volumes.iter().filter(|v| v.priority.is_finite() && v.blend_weight.is_finite() && v.blend_weight > 0.0).collect();
+        ordered.sort_by(|a,b| a.priority.partial_cmp(&b.priority).unwrap());
+        let mut result = baseline;
+        let mut medium = baseline;
+        for v in ordered {
+            let weight = volume_weight(camera_pos, v);
+            if weight > 0.0 { result = blend_properties(result, &v.settings, weight, &v.override_mask); }
+            if v.unbound != 0 {
+                medium = blend_properties(medium, &v.settings, v.blend_weight.clamp(0.0, 1.0), &v.override_mask);
             }
-
-            let weight = if v.priority >= 1e10 {
-                // Unbound / infinite priority volume
-                v.blend_weight
-            } else {
-                let pos = [
-                    camera_pos[0].clamp(v.bounds_min[0], v.bounds_max[0]),
-                    camera_pos[1].clamp(v.bounds_min[1], v.bounds_max[1]),
-                    camera_pos[2].clamp(v.bounds_min[2], v.bounds_max[2]),
-                ];
-                let dx = camera_pos[0] - pos[0];
-                let dy = camera_pos[1] - pos[1];
-                let dz = camera_pos[2] - pos[2];
-                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-
-                let blend_dist = v.blend_radius.max(0.001);
-                let inside_weight = 1.0 - (dist / blend_dist).clamp(0.0, 1.0);
-                if inside_weight <= 0.0 {
-                    continue;
-                }
-                inside_weight * v.blend_weight
-            };
-
-            active.push((weight, v));
         }
-
-        if active.is_empty() {
-            return camera_settings.to_gpu();
+        // Bounded media are evaluated by the fog pass in world space, not at the camera.
+        result.fog_enabled = medium.fog_enabled;
+        result.fog_mode = medium.fog_mode;
+        result.fog_density = medium.fog_density;
+        result.fog_height_falloff = medium.fog_height_falloff;
+        result.fog_start_distance = medium.fog_start_distance;
+        result.fog_max_distance = medium.fog_max_distance;
+        result.fog_height = medium.fog_height;
+        result.fog_scattering_anisotropy = medium.fog_scattering_anisotropy;
+        result.fog_color = medium.fog_color;
+        result.fog_emissive = medium.fog_emissive;
+        result.fog_density = if medium.fog_enabled != 0 { medium.fog_density } else { 0.0 };
+        let mut range = if medium.fog_enabled != 0 { medium.fog_max_distance } else { 0.0 };
+        for v in volumes {
+            if v.unbound == 0 && v.blend_weight > 0.0
+                && PostProcessProperty::contains(&v.override_mask, PostProcessProperty::FOG_ENABLED)
+                && v.settings.fog_enabled != 0 && v.settings.fog_density > 0.0 {
+                result.fog_enabled = 1;
+                range = range.max(v.settings.fog_max_distance);
+            }
         }
-
-        // Sort by priority descending
-        active.sort_by(|a, b| b.1.priority.partial_cmp(&a.1.priority).unwrap());
-
-        // Blend: higher-priority volumes override lower-priority ones.
-        // We accumulate with a cumulative weight that gives priority to
-        // higher-priority volumes for overlapping regions.
-        let mut result = camera_settings.clone();
-        let mut total_weight = 1.0_f32; // camera settings have implicit weight 1.0
-
-        for (weight, volume) in &active {
-            let vol_settings = unpack_settings(&volume.settings);
-            let w = *weight;
-            // Blend: lerp from current result toward volume settings
-            let t = (w / (total_weight + w)).clamp(0.0, 1.0);
-            result = Self::lerp_settings(&result, &vol_settings, t);
-            total_weight += w;
-        }
-
-        result.to_gpu()
-    }
-
-    /// Linearly interpolate between two PostProcessSettings.
-    fn lerp_settings(
-        a: &PostProcessSettings,
-        b: &PostProcessSettings,
-        t: f32,
-    ) -> PostProcessSettings {
-        PostProcessSettings {
-            exposure_mode: if t >= 0.5 {
-                b.exposure_mode
-            } else {
-                a.exposure_mode
-            },
-            exposure_compensation: lerp(a.exposure_compensation, b.exposure_compensation, t),
-            exposure_min: lerp(a.exposure_min, b.exposure_min, t),
-            exposure_max: lerp(a.exposure_max, b.exposure_max, t),
-            exposure_speed_up: lerp(a.exposure_speed_up, b.exposure_speed_up, t),
-            exposure_speed_down: lerp(a.exposure_speed_down, b.exposure_speed_down, t),
-
-            bloom_intensity: lerp(a.bloom_intensity, b.bloom_intensity, t),
-            bloom_threshold: lerp(a.bloom_threshold, b.bloom_threshold, t),
-            bloom_knee: lerp(a.bloom_knee, b.bloom_knee, t),
-            bloom_radius: lerp(a.bloom_radius, b.bloom_radius, t),
-            bloom_tint: lerp3(a.bloom_tint, b.bloom_tint, t),
-            bloom_enabled: if t >= 0.5 {
-                b.bloom_enabled
-            } else {
-                a.bloom_enabled
-            },
-
-            color_saturation: lerp3(a.color_saturation, b.color_saturation, t),
-            color_contrast: lerp3(a.color_contrast, b.color_contrast, t),
-            color_gamma: lerp3(a.color_gamma, b.color_gamma, t),
-            color_gain: lerp3(a.color_gain, b.color_gain, t),
-            color_offset: lerp3(a.color_offset, b.color_offset, t),
-
-            white_temp: lerp(a.white_temp, b.white_temp, t),
-            white_tint: lerp(a.white_tint, b.white_tint, t),
-            white_balance_enabled: if t >= 0.5 {
-                b.white_balance_enabled
-            } else {
-                a.white_balance_enabled
-            },
-
-            tonemap_operator: if t >= 0.5 {
-                b.tonemap_operator
-            } else {
-                a.tonemap_operator
-            },
-            tonemap_exposure: lerp(a.tonemap_exposure, b.tonemap_exposure, t),
-            tonemap_white_point: lerp(a.tonemap_white_point, b.tonemap_white_point, t),
-
-            vignette_intensity: lerp(a.vignette_intensity, b.vignette_intensity, t),
-            vignette_smoothness: lerp(a.vignette_smoothness, b.vignette_smoothness, t),
-            vignette_roundness: lerp(a.vignette_roundness, b.vignette_roundness, t),
-            vignette_color: lerp3(a.vignette_color, b.vignette_color, t),
-            vignette_enabled: if t >= 0.5 {
-                b.vignette_enabled
-            } else {
-                a.vignette_enabled
-            },
-
-            ca_intensity: lerp(a.ca_intensity, b.ca_intensity, t),
-            ca_start_offset: lerp(a.ca_start_offset, b.ca_start_offset, t),
-            ca_enabled: if t >= 0.5 { b.ca_enabled } else { a.ca_enabled },
-
-            grain_intensity: lerp(a.grain_intensity, b.grain_intensity, t),
-            grain_response: lerp(a.grain_response, b.grain_response, t),
-            grain_size: lerp(a.grain_size, b.grain_size, t),
-            grain_enabled: if t >= 0.5 {
-                b.grain_enabled
-            } else {
-                a.grain_enabled
-            },
-
-            dof_focal_distance: lerp(a.dof_focal_distance, b.dof_focal_distance, t),
-            dof_focal_region: lerp(a.dof_focal_region, b.dof_focal_region, t),
-            dof_near_transition: lerp(a.dof_near_transition, b.dof_near_transition, t),
-            dof_far_transition: lerp(a.dof_far_transition, b.dof_far_transition, t),
-            dof_scale: lerp(a.dof_scale, b.dof_scale, t),
-            dof_max_bokeh_size: lerp(a.dof_max_bokeh_size, b.dof_max_bokeh_size, t),
-            dof_aperture_blades: if t >= 0.5 {
-                b.dof_aperture_blades
-            } else {
-                a.dof_aperture_blades
-            },
-            dof_aperture_rotation: lerp(a.dof_aperture_rotation, b.dof_aperture_rotation, t),
-            dof_sensor_diagonal: lerp(a.dof_sensor_diagonal, b.dof_sensor_diagonal, t),
-            dof_enabled: if t >= 0.5 {
-                b.dof_enabled
-            } else {
-                a.dof_enabled
-            },
-
-            motion_blur_amount: lerp(a.motion_blur_amount, b.motion_blur_amount, t),
-            motion_blur_max: lerp(a.motion_blur_max, b.motion_blur_max, t),
-            motion_blur_enabled: if t >= 0.5 {
-                b.motion_blur_enabled
-            } else {
-                a.motion_blur_enabled
-            },
-
-            blend_weight_bloom: lerp(a.blend_weight_bloom, b.blend_weight_bloom, t),
-            blend_weight_dof: lerp(a.blend_weight_dof, b.blend_weight_dof, t),
-            blend_weight_motion_blur: lerp(
-                a.blend_weight_motion_blur,
-                b.blend_weight_motion_blur,
-                t,
-            ),
-            blend_weight_vignette: lerp(a.blend_weight_vignette, b.blend_weight_vignette, t),
-            blend_weight_ca: lerp(a.blend_weight_ca, b.blend_weight_ca, t),
-            blend_weight_grain: lerp(a.blend_weight_grain, b.blend_weight_grain, t),
-            blend_weight_exposure: lerp(a.blend_weight_exposure, b.blend_weight_exposure, t),
-
-            hdr_output_mode: if t >= 0.5 {
-                b.hdr_output_mode
-            } else {
-                a.hdr_output_mode
-            },
-            hdr_max_nits: lerp(a.hdr_max_nits, b.hdr_max_nits, t),
-            hdr_ui_brightness: lerp(a.hdr_ui_brightness, b.hdr_ui_brightness, t),
-
-            fog_enabled: if t >= 0.5 {
-                b.fog_enabled
-            } else {
-                a.fog_enabled
-            },
-            fog_mode: if t >= 0.5 { b.fog_mode } else { a.fog_mode },
-            fog_density: lerp(a.fog_density, b.fog_density, t),
-            fog_height_falloff: lerp(a.fog_height_falloff, b.fog_height_falloff, t),
-            fog_start_distance: lerp(a.fog_start_distance, b.fog_start_distance, t),
-            fog_max_distance: lerp(a.fog_max_distance, b.fog_max_distance, t),
-            fog_height: lerp(a.fog_height, b.fog_height, t),
-            fog_scattering_anisotropy: lerp(
-                a.fog_scattering_anisotropy,
-                b.fog_scattering_anisotropy,
-                t,
-            ),
-            fog_color: lerp3(a.fog_color, b.fog_color, t),
-            fog_emissive: lerp3(a.fog_emissive, b.fog_emissive, t),
-
-            lift_color: lerp3(a.lift_color, b.lift_color, t),
-            gamma_color: lerp3(a.gamma_color, b.gamma_color, t),
-            gain_color: lerp3(a.gain_color, b.gain_color, t),
-            shadows_max: lerp(a.shadows_max, b.shadows_max, t),
-            highlights_min: lerp(a.highlights_min, b.highlights_min, t),
-            shadow_highlight_balance: lerp(
-                a.shadow_highlight_balance,
-                b.shadow_highlight_balance,
-                t,
-            ),
-            hue_shift: lerp(a.hue_shift, b.hue_shift, t),
-            lut_generation: if t >= 0.5 {
-                b.lut_generation
-            } else {
-                a.lut_generation
-            },
-            lut_intensity: lerp(a.lut_intensity, b.lut_intensity, t),
-            lut_platform: if t >= 0.5 {
-                b.lut_platform
-            } else {
-                a.lut_platform
-            },
-        }
+        result.fog_max_distance = range.max(1.0);
+        result
     }
 }
 
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
-}
-fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
-    [
-        lerp(a[0], b[0], t),
-        lerp(a[1], b[1], t),
-        lerp(a[2], b[2], t),
-    ]
-}
-
-fn unpack_settings(gpu: &GpuPostProcessUniforms) -> PostProcessSettings {
-    PostProcessSettings {
-        hdr_output_mode: match gpu.hdr_output_mode {
-            1 => HdrOutputMode::Hdr10,
-            2 => HdrOutputMode::ScRgb,
-            3 => HdrOutputMode::Passthrough,
-            _ => HdrOutputMode::Ldr,
-        },
-        hdr_max_nits: gpu.hdr_max_nits,
-        hdr_ui_brightness: gpu.hdr_ui_brightness,
-        exposure_mode: if gpu.exposure_mode == 0 {
-            ExposureMode::Manual
-        } else {
-            ExposureMode::Auto
-        },
-        exposure_compensation: gpu.exposure_compensation,
-        exposure_min: gpu.exposure_min,
-        exposure_max: gpu.exposure_max,
-        exposure_speed_up: 0.5,
-        exposure_speed_down: 1.0,
-
-        bloom_intensity: gpu.bloom_intensity,
-        bloom_threshold: gpu.bloom_threshold,
-        bloom_knee: gpu.bloom_knee,
-        bloom_radius: gpu.bloom_radius,
-        bloom_tint: gpu.bloom_tint,
-        bloom_enabled: gpu.bloom_enabled != 0,
-
-        color_saturation: gpu.color_saturation,
-        color_contrast: gpu.color_contrast,
-        color_gamma: gpu.color_gamma,
-        color_gain: gpu.color_gain,
-        color_offset: gpu.color_offset,
-
-        white_temp: gpu.white_temp,
-        white_tint: gpu.white_tint,
-        white_balance_enabled: gpu.white_balance_enabled != 0,
-
-        tonemap_operator: match gpu.tonemap_operator {
-            0 => TonemapOperator::Aces,
-            1 => TonemapOperator::Filmic,
-            2 => TonemapOperator::Reinhard,
-            3 => TonemapOperator::Uncharted2,
-            4 => TonemapOperator::Lottes,
-            _ => TonemapOperator::None,
-        },
-        tonemap_exposure: gpu.tonemap_exposure,
-        tonemap_white_point: gpu.tonemap_white_point,
-
-        vignette_intensity: gpu.vignette_intensity,
-        vignette_smoothness: gpu.vignette_smoothness,
-        vignette_roundness: gpu.vignette_roundness,
-        vignette_color: gpu.vignette_color,
-        vignette_enabled: gpu.vignette_enabled != 0,
-
-        ca_intensity: gpu.ca_intensity,
-        ca_start_offset: gpu.ca_start_offset,
-        ca_enabled: gpu.ca_enabled != 0,
-
-        grain_intensity: gpu.grain_intensity,
-        grain_response: gpu.grain_response,
-        grain_size: gpu.grain_size,
-        grain_enabled: gpu.grain_enabled != 0,
-
-        dof_focal_distance: gpu.dof_focal_distance,
-        dof_focal_region: gpu.dof_focal_region,
-        dof_near_transition: gpu.dof_near_transition,
-        dof_far_transition: gpu.dof_far_transition,
-        dof_scale: 1.0,
-        dof_max_bokeh_size: gpu.dof_max_bokeh_size,
-        dof_aperture_blades: gpu.dof_aperture_shape.max(0.0) as u32,
-        dof_aperture_rotation: gpu.dof_aperture_rotation,
-        dof_sensor_diagonal: gpu.dof_sensor_diagonal,
-        dof_enabled: gpu.dof_aperture_shape >= 0.0,
-
-        motion_blur_amount: gpu.motion_blur_amount,
-        motion_blur_max: gpu.motion_blur_max,
-        motion_blur_enabled: gpu.motion_blur_enabled != 0,
-
-        blend_weight_bloom: gpu.blend_weight_bloom,
-        blend_weight_dof: gpu.blend_weight_dof,
-        blend_weight_motion_blur: gpu.blend_weight_motion_blur,
-        blend_weight_vignette: gpu.blend_weight_vignette,
-        blend_weight_ca: gpu.blend_weight_ca,
-        blend_weight_grain: gpu.blend_weight_grain,
-        blend_weight_exposure: gpu.blend_weight_exposure,
-
-        fog_enabled: gpu.fog_enabled != 0,
-        fog_mode: match gpu.fog_mode {
-            1 => FogMode::HeightBased,
-            2 => FogMode::Smoke,
-            _ => FogMode::Uniform,
-        },
-        fog_density: gpu.fog_density,
-        fog_height_falloff: gpu.fog_height_falloff,
-        fog_start_distance: gpu.fog_start_distance,
-        fog_max_distance: gpu.fog_max_distance,
-        fog_height: gpu.fog_height,
-        fog_scattering_anisotropy: gpu.fog_scattering_anisotropy,
-        fog_color: gpu.fog_color,
-        fog_emissive: gpu.fog_emissive,
-
-        lift_color: gpu.lift_color,
-        gamma_color: gpu.gamma_color,
-        gain_color: gpu.gain_color,
-        shadows_max: gpu.shadows_max,
-        highlights_min: gpu.highlights_min,
-        shadow_highlight_balance: gpu.shadow_highlight_balance,
-        hue_shift: gpu.hue_shift,
-        lut_generation: gpu.lut_generation,
-        lut_intensity: gpu.lut_intensity,
-        lut_platform: gpu.lut_platform,
+pub fn volume_weight(pos: [f32; 3], v: &GpuPostProcessVolume) -> f32 {
+    if !v.blend_weight.is_finite() || v.blend_weight <= 0.0 { return 0.0; }
+    let weight = v.blend_weight.clamp(0.0, 1.0);
+    if v.unbound != 0 { return weight; }
+    let mut boundary = f32::INFINITY;
+    for axis in 0..3 {
+        if !(pos[axis] >= v.bounds_min[axis] && pos[axis] <= v.bounds_max[axis]) { return 0.0; }
+        boundary = boundary.min(pos[axis] - v.bounds_min[axis]).min(v.bounds_max[axis] - pos[axis]);
     }
+    if v.blend_radius > 0.0 { weight * (boundary / v.blend_radius).clamp(0.0, 1.0) } else { weight }
+}
+
+fn blend_properties(mut a: GpuPostProcessUniforms, b: &GpuPostProcessUniforms, t: f32, mask: &[u32; 4]) -> GpuPostProcessUniforms {
+    if PostProcessProperty::contains(mask, 0) { if t >= 0.5 { a.exposure_mode = b.exposure_mode; } }
+    if PostProcessProperty::contains(mask, 1) { a.exposure_compensation += (b.exposure_compensation - a.exposure_compensation) * t; }
+    if PostProcessProperty::contains(mask, 2) { a.exposure_min += (b.exposure_min - a.exposure_min) * t; }
+    if PostProcessProperty::contains(mask, 3) { a.exposure_max += (b.exposure_max - a.exposure_max) * t; }
+    if PostProcessProperty::contains(mask, 4) { a.bloom_intensity += (b.bloom_intensity - a.bloom_intensity) * t; }
+    if PostProcessProperty::contains(mask, 5) { a.bloom_threshold += (b.bloom_threshold - a.bloom_threshold) * t; }
+    if PostProcessProperty::contains(mask, 6) { a.bloom_knee += (b.bloom_knee - a.bloom_knee) * t; }
+    if PostProcessProperty::contains(mask, 7) { a.bloom_radius += (b.bloom_radius - a.bloom_radius) * t; }
+    if PostProcessProperty::contains(mask, 8) { for c in 0..3 { a.bloom_tint[c] += (b.bloom_tint[c] - a.bloom_tint[c]) * t; } }
+    if PostProcessProperty::contains(mask, 9) { if t >= 0.5 { a.bloom_enabled = b.bloom_enabled; } }
+    if PostProcessProperty::contains(mask, 10) { for c in 0..3 { a.color_saturation[c] += (b.color_saturation[c] - a.color_saturation[c]) * t; } }
+    if PostProcessProperty::contains(mask, 11) { a.exposure_speed_up += (b.exposure_speed_up - a.exposure_speed_up) * t; }
+    if PostProcessProperty::contains(mask, 12) { for c in 0..3 { a.color_contrast[c] += (b.color_contrast[c] - a.color_contrast[c]) * t; } }
+    if PostProcessProperty::contains(mask, 13) { a.exposure_speed_down += (b.exposure_speed_down - a.exposure_speed_down) * t; }
+    if PostProcessProperty::contains(mask, 14) { for c in 0..3 { a.color_gamma[c] += (b.color_gamma[c] - a.color_gamma[c]) * t; } }
+    if PostProcessProperty::contains(mask, 15) { for c in 0..3 { a.color_gain[c] += (b.color_gain[c] - a.color_gain[c]) * t; } }
+    if PostProcessProperty::contains(mask, 16) { for c in 0..3 { a.color_offset[c] += (b.color_offset[c] - a.color_offset[c]) * t; } }
+    if PostProcessProperty::contains(mask, 17) { a.white_temp += (b.white_temp - a.white_temp) * t; }
+    if PostProcessProperty::contains(mask, 18) { a.white_tint += (b.white_tint - a.white_tint) * t; }
+    if PostProcessProperty::contains(mask, 19) { if t >= 0.5 { a.white_balance_enabled = b.white_balance_enabled; } }
+    if PostProcessProperty::contains(mask, 20) { if t >= 0.5 { a.tonemap_operator = b.tonemap_operator; } }
+    if PostProcessProperty::contains(mask, 21) { a.tonemap_exposure += (b.tonemap_exposure - a.tonemap_exposure) * t; }
+    if PostProcessProperty::contains(mask, 22) { a.tonemap_white_point += (b.tonemap_white_point - a.tonemap_white_point) * t; }
+    if PostProcessProperty::contains(mask, 23) { a.vignette_intensity += (b.vignette_intensity - a.vignette_intensity) * t; }
+    if PostProcessProperty::contains(mask, 24) { a.vignette_smoothness += (b.vignette_smoothness - a.vignette_smoothness) * t; }
+    if PostProcessProperty::contains(mask, 25) { a.vignette_roundness += (b.vignette_roundness - a.vignette_roundness) * t; }
+    if PostProcessProperty::contains(mask, 26) { for c in 0..3 { a.vignette_color[c] += (b.vignette_color[c] - a.vignette_color[c]) * t; } }
+    if PostProcessProperty::contains(mask, 27) { if t >= 0.5 { a.vignette_enabled = b.vignette_enabled; } }
+    if PostProcessProperty::contains(mask, 28) { a.ca_intensity += (b.ca_intensity - a.ca_intensity) * t; }
+    if PostProcessProperty::contains(mask, 29) { a.ca_start_offset += (b.ca_start_offset - a.ca_start_offset) * t; }
+    if PostProcessProperty::contains(mask, 30) { if t >= 0.5 { a.ca_enabled = b.ca_enabled; } }
+    if PostProcessProperty::contains(mask, 31) { a.grain_intensity += (b.grain_intensity - a.grain_intensity) * t; }
+    if PostProcessProperty::contains(mask, 32) { a.grain_response += (b.grain_response - a.grain_response) * t; }
+    if PostProcessProperty::contains(mask, 33) { a.grain_size += (b.grain_size - a.grain_size) * t; }
+    if PostProcessProperty::contains(mask, 34) { if t >= 0.5 { a.grain_enabled = b.grain_enabled; } }
+    if PostProcessProperty::contains(mask, 35) { a.dof_focal_distance += (b.dof_focal_distance - a.dof_focal_distance) * t; }
+    if PostProcessProperty::contains(mask, 36) { a.dof_focal_region += (b.dof_focal_region - a.dof_focal_region) * t; }
+    if PostProcessProperty::contains(mask, 37) { if t >= 0.5 { a.dof_aperture_shape = b.dof_aperture_shape; } }
+    if PostProcessProperty::contains(mask, 38) { a.dof_aperture_rotation += (b.dof_aperture_rotation - a.dof_aperture_rotation) * t; }
+    if PostProcessProperty::contains(mask, 39) { a.dof_near_transition += (b.dof_near_transition - a.dof_near_transition) * t; }
+    if PostProcessProperty::contains(mask, 40) { a.dof_far_transition += (b.dof_far_transition - a.dof_far_transition) * t; }
+    if PostProcessProperty::contains(mask, 41) { a.dof_max_bokeh_size += (b.dof_max_bokeh_size - a.dof_max_bokeh_size) * t; }
+    if PostProcessProperty::contains(mask, 42) { a.dof_sensor_diagonal += (b.dof_sensor_diagonal - a.dof_sensor_diagonal) * t; }
+    if PostProcessProperty::contains(mask, 43) { a.motion_blur_amount += (b.motion_blur_amount - a.motion_blur_amount) * t; }
+    if PostProcessProperty::contains(mask, 44) { a.motion_blur_max += (b.motion_blur_max - a.motion_blur_max) * t; }
+    if PostProcessProperty::contains(mask, 45) { if t >= 0.5 { a.motion_blur_enabled = b.motion_blur_enabled; } }
+    if PostProcessProperty::contains(mask, 46) { a.blend_weight_bloom += (b.blend_weight_bloom - a.blend_weight_bloom) * t; }
+    if PostProcessProperty::contains(mask, 47) { a.blend_weight_dof += (b.blend_weight_dof - a.blend_weight_dof) * t; }
+    if PostProcessProperty::contains(mask, 48) { a.blend_weight_motion_blur += (b.blend_weight_motion_blur - a.blend_weight_motion_blur) * t; }
+    if PostProcessProperty::contains(mask, 49) { a.blend_weight_vignette += (b.blend_weight_vignette - a.blend_weight_vignette) * t; }
+    if PostProcessProperty::contains(mask, 50) { a.blend_weight_ca += (b.blend_weight_ca - a.blend_weight_ca) * t; }
+    if PostProcessProperty::contains(mask, 51) { a.blend_weight_grain += (b.blend_weight_grain - a.blend_weight_grain) * t; }
+    if PostProcessProperty::contains(mask, 52) { a.blend_weight_exposure += (b.blend_weight_exposure - a.blend_weight_exposure) * t; }
+    if PostProcessProperty::contains(mask, 53) { if t >= 0.5 { a.fog_enabled = b.fog_enabled; } }
+    if PostProcessProperty::contains(mask, 54) { if t >= 0.5 { a.fog_mode = b.fog_mode; } }
+    if PostProcessProperty::contains(mask, 55) { a.fog_density += (b.fog_density - a.fog_density) * t; }
+    if PostProcessProperty::contains(mask, 56) { a.fog_height_falloff += (b.fog_height_falloff - a.fog_height_falloff) * t; }
+    if PostProcessProperty::contains(mask, 57) { a.fog_start_distance += (b.fog_start_distance - a.fog_start_distance) * t; }
+    if PostProcessProperty::contains(mask, 58) { a.fog_max_distance += (b.fog_max_distance - a.fog_max_distance) * t; }
+    if PostProcessProperty::contains(mask, 59) { a.fog_height += (b.fog_height - a.fog_height) * t; }
+    if PostProcessProperty::contains(mask, 60) { a.fog_scattering_anisotropy += (b.fog_scattering_anisotropy - a.fog_scattering_anisotropy) * t; }
+    if PostProcessProperty::contains(mask, 61) { for c in 0..3 { a.fog_color[c] += (b.fog_color[c] - a.fog_color[c]) * t; } }
+    if PostProcessProperty::contains(mask, 62) { for c in 0..3 { a.fog_emissive[c] += (b.fog_emissive[c] - a.fog_emissive[c]) * t; } }
+    if PostProcessProperty::contains(mask, 63) { if t >= 0.5 { a.hdr_output_mode = b.hdr_output_mode; } }
+    if PostProcessProperty::contains(mask, 64) { a.hdr_max_nits += (b.hdr_max_nits - a.hdr_max_nits) * t; }
+    if PostProcessProperty::contains(mask, 65) { a.hdr_ui_brightness += (b.hdr_ui_brightness - a.hdr_ui_brightness) * t; }
+    if PostProcessProperty::contains(mask, 66) { for c in 0..3 { a.lift_color[c] += (b.lift_color[c] - a.lift_color[c]) * t; } }
+    if PostProcessProperty::contains(mask, 67) { for c in 0..3 { a.gamma_color[c] += (b.gamma_color[c] - a.gamma_color[c]) * t; } }
+    if PostProcessProperty::contains(mask, 68) { for c in 0..3 { a.gain_color[c] += (b.gain_color[c] - a.gain_color[c]) * t; } }
+    if PostProcessProperty::contains(mask, 69) { a.shadows_max += (b.shadows_max - a.shadows_max) * t; }
+    if PostProcessProperty::contains(mask, 70) { a.highlights_min += (b.highlights_min - a.highlights_min) * t; }
+    if PostProcessProperty::contains(mask, 71) { a.shadow_highlight_balance += (b.shadow_highlight_balance - a.shadow_highlight_balance) * t; }
+    if PostProcessProperty::contains(mask, 72) { a.hue_shift += (b.hue_shift - a.hue_shift) * t; }
+    if PostProcessProperty::contains(mask, 73) { if t >= 0.5 { a.lut_generation = b.lut_generation; } }
+    if PostProcessProperty::contains(mask, 74) { a.lut_intensity += (b.lut_intensity - a.lut_intensity) * t; }
+    if PostProcessProperty::contains(mask, 75) { if t >= 0.5 { a.lut_platform = b.lut_platform; } }
+    if PostProcessProperty::contains(mask, 76) { if t >= 0.5 { a.lens_enabled = b.lens_enabled; } }
+    if PostProcessProperty::contains(mask, 77) { if t >= 0.5 { a.lens_quality = b.lens_quality; } }
+    if PostProcessProperty::contains(mask, 78) { if t >= 0.5 { a.lens_profile = b.lens_profile; } }
+    if PostProcessProperty::contains(mask, 79) { if t >= 0.5 { a.lens_ghost_count = b.lens_ghost_count; } }
+    if PostProcessProperty::contains(mask, 80) { a.lens_intensity += (b.lens_intensity - a.lens_intensity) * t; }
+    if PostProcessProperty::contains(mask, 81) { a.lens_threshold += (b.lens_threshold - a.lens_threshold) * t; }
+    if PostProcessProperty::contains(mask, 82) { a.lens_soft_knee += (b.lens_soft_knee - a.lens_soft_knee) * t; }
+    if PostProcessProperty::contains(mask, 83) { a.lens_ghost_intensity += (b.lens_ghost_intensity - a.lens_ghost_intensity) * t; }
+    if PostProcessProperty::contains(mask, 84) { a.lens_halo_intensity += (b.lens_halo_intensity - a.lens_halo_intensity) * t; }
+    if PostProcessProperty::contains(mask, 85) { a.lens_glare_intensity += (b.lens_glare_intensity - a.lens_glare_intensity) * t; }
+    if PostProcessProperty::contains(mask, 86) { a.lens_streak_intensity += (b.lens_streak_intensity - a.lens_streak_intensity) * t; }
+    if PostProcessProperty::contains(mask, 87) { a.lens_dispersion += (b.lens_dispersion - a.lens_dispersion) * t; }
+    if PostProcessProperty::contains(mask, 88) { a.lens_aperture_f_number += (b.lens_aperture_f_number - a.lens_aperture_f_number) * t; }
+    if PostProcessProperty::contains(mask, 89) { a.lens_focal_length_mm += (b.lens_focal_length_mm - a.lens_focal_length_mm) * t; }
+    if PostProcessProperty::contains(mask, 90) { a.lens_sensor_width_mm += (b.lens_sensor_width_mm - a.lens_sensor_width_mm) * t; }
+    if PostProcessProperty::contains(mask, 91) { a.lens_vignette += (b.lens_vignette - a.lens_vignette) * t; }
+    if PostProcessProperty::contains(mask, 92) { a.lens_starburst_intensity += (b.lens_starburst_intensity - a.lens_starburst_intensity) * t; }
+    if PostProcessProperty::contains(mask, 93) { a.lens_starburst_length += (b.lens_starburst_length - a.lens_starburst_length) * t; }
+    if PostProcessProperty::contains(mask, 94) { if t >= 0.5 { a.lens_aperture_blades = b.lens_aperture_blades; } }
+    if PostProcessProperty::contains(mask, 95) { a.lens_aperture_rotation += (b.lens_aperture_rotation - a.lens_aperture_rotation) * t; }
+    if PostProcessProperty::contains(mask, 96) { a.lens_coating_strength += (b.lens_coating_strength - a.lens_coating_strength) * t; }
+    if PostProcessProperty::contains(mask, 97) { a.lens_ghost_rim += (b.lens_ghost_rim - a.lens_ghost_rim) * t; }
+    if PostProcessProperty::contains(mask, 98) { a.lens_dirt_intensity += (b.lens_dirt_intensity - a.lens_dirt_intensity) * t; }
+    if PostProcessProperty::contains(mask, 99) { if t >= 0.5 { a.lens_light_sources = b.lens_light_sources; } }
+    if PostProcessProperty::contains(mask, 100) { a.lens_light_intensity += (b.lens_light_intensity - a.lens_light_intensity) * t; }
+    if PostProcessProperty::contains(mask, 101) { a.lens_field_margin += (b.lens_field_margin - a.lens_field_margin) * t; }
+    if PostProcessProperty::contains(mask, 102) { a.lens_response_time += (b.lens_response_time - a.lens_response_time) * t; }
+    a
 }

@@ -22,6 +22,7 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 const COC_SHADER_SRC: &str = include_str!("../shaders/dof_coc.wgsl");
 const GATHER_SHADER_SRC: &str = include_str!("../shaders/dof_gather.wgsl");
 const COMPOSITE_SHADER_SRC: &str = include_str!("../shaders/dof_composite.wgsl");
+const ARGS_SHADER_SRC: &str = include_str!("../shaders/dof_args.wgsl");
 
 const WG_COC: u32 = 16;
 const WG_GATHER: u32 = 8;
@@ -74,6 +75,16 @@ pub struct DofPass {
     // Tiny uniform buffer holding a copy of the DOF block from the shared
     // postprocess_uniforms buffer. Contents are refreshed via GPU copy in execute().
     dof_block_buf: wgpu::Buffer,
+
+    // Indirect CoC/gather arguments, zeroed on the GPU while DOF is disabled
+    // (`dof_aperture_shape < 0`), so a disabled DOF costs one 1-thread
+    // dispatch instead of two half-resolution passes.
+    args_pipeline: wgpu::ComputePipeline,
+    args_bg: wgpu::BindGroup,
+    args_buf: wgpu::Buffer,
+    /// Full workgroup counts `(coc.x, coc.y, gather.x, gather.y)`.
+    groups_buf: wgpu::Buffer,
+    groups_written: Option<[u32; 4]>,
 
     width: u32,
     height: u32,
@@ -151,6 +162,19 @@ impl DofPass {
         let dof_block_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("DOF Block Uniforms"),
             size: DOF_BLOCK_SIZE,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let args_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("DOF Dispatch Args"),
+            size: 6 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+            mapped_at_creation: false,
+        });
+        let groups_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("DOF Dispatch Groups"),
+            size: 16,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -439,6 +463,54 @@ impl DofPass {
             cache: None,
         });
 
+        let args_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("DOF Args Shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                helio_core::shader::resolve(ARGS_SHADER_SRC)
+                    .into_owned()
+                    .into(),
+            ),
+        });
+        let args_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("DOF Args BGL"),
+            entries: &[
+                uniform_entry(0, wgpu::BufferSize::new(DOF_BLOCK_SIZE)),
+                uniform_entry(1, wgpu::BufferSize::new(16)),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(6 * 4),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let args_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("DOF Args BG"),
+            layout: &args_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: dof_block_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: groups_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: args_buf.as_entire_binding() },
+            ],
+        });
+        let args_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("DOF Args PL"),
+            bind_group_layouts: &[Some(&args_bgl)],
+            immediate_size: 0,
+        });
+        let args_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("DOF Args Pipeline"),
+            layout: Some(&args_pl),
+            module: &args_shader,
+            entry_point: Some("cs_args"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         Self {
             coc_pipeline,
             gather_pipeline,
@@ -464,6 +536,11 @@ impl DofPass {
             bg_key_gather: None,
             bg_key_composite: None,
             dof_block_buf,
+            args_pipeline,
+            args_bg,
+            args_buf,
+            groups_buf,
+            groups_written: None,
             width,
             height,
             format,
@@ -597,6 +674,12 @@ impl RenderPass for DofPass {
         None
     }
 
+    /// The composite clears `ctx.target` and covers it with a full-screen
+    /// triangle, so a host clear before the frame is never visible.
+    fn initializes_target(&self) -> bool {
+        true
+    }
+
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("pre_dof");
         builder.read("depth");
@@ -674,7 +757,19 @@ impl RenderPass for DofPass {
         self.bg_key_composite = None;
     }
 
-    fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
+    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        let half_w = self.width.div_ceil(2);
+        let half_h = self.height.div_ceil(2);
+        let groups = [
+            half_w.div_ceil(WG_COC),
+            half_h.div_ceil(WG_COC),
+            half_w.div_ceil(WG_GATHER),
+            half_h.div_ceil(WG_GATHER),
+        ];
+        if self.groups_written != Some(groups) {
+            ctx.queue.write_buffer(&self.groups_buf, 0, bytemuck::cast_slice(&groups));
+            self.groups_written = Some(groups);
+        }
         Ok(())
     }
 
@@ -691,9 +786,6 @@ impl RenderPass for DofPass {
         };
         let depth_view = ctx.depth;
         let camera_buf = ctx.camera;
-
-        let half_w = (self.width + 1) / 2;
-        let half_h = (self.height + 1) / 2;
 
         // ── Lazy rebuild bind groups ────────────────────────────────────
         let coc_key = (
@@ -738,6 +830,18 @@ impl RenderPass for DofPass {
             );
         }
 
+        // ── Indirect arguments: zero workgroups while DOF is disabled ───
+        {
+            let ce = ctx.compute_encoder_ptr;
+            let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("DOF Args"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.args_pipeline);
+            cpass.set_bind_group(0, &self.args_bg, &[]);
+            cpass.dispatch_workgroups(1, 1, 1);
+        }
+
         // ── Pass 1: CoC pre-pass ────────────────────────────────────────
         {
             let ce = ctx.encoder_ptr;
@@ -747,9 +851,7 @@ impl RenderPass for DofPass {
             });
             cpass.set_pipeline(&self.coc_pipeline);
             cpass.set_bind_group(0, self.coc_bg.as_ref().unwrap(), &[]);
-            let gx = (half_w + WG_COC - 1) / WG_COC;
-            let gy = (half_h + WG_COC - 1) / WG_COC;
-            cpass.dispatch_workgroups(gx, gy, 1);
+            cpass.dispatch_workgroups_indirect(&self.args_buf, 0);
         }
 
         // ── Pass 2: Gather ─────────────────────────────────────────────
@@ -761,9 +863,7 @@ impl RenderPass for DofPass {
             });
             cpass.set_pipeline(&self.gather_pipeline);
             cpass.set_bind_group(0, self.gather_bg.as_ref().unwrap(), &[]);
-            let gx = (half_w + WG_GATHER - 1) / WG_GATHER;
-            let gy = (half_h + WG_GATHER - 1) / WG_GATHER;
-            cpass.dispatch_workgroups(gx, gy, 1);
+            cpass.dispatch_workgroups_indirect(&self.args_buf, 12);
         }
 
         // ── Pass 3: Composite ──────────────────────────────────────────

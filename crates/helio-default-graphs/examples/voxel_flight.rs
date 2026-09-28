@@ -428,6 +428,8 @@ fn main() {
         for a in &audits {
             eprintln!("GROUND audit {a}");
         }
+        let error = pollster::block_on(validation.pop());
+        assert!(error.is_none(), "GPU validation: {error:?}");
         return;
     }
     if std::env::var_os("HELIO_VOXEL_FLIGHT_QUICK").is_some() {

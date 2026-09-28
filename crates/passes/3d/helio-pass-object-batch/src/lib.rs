@@ -95,6 +95,20 @@ fn create_storage_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu:
     })
 }
 
+/// Storage buffer written by a compute kernel and consumed as indirect draw
+/// arguments (the shadow pass's multi-draw-indirect source).
+fn create_indirect_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: size.max(4),
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::INDIRECT
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    })
+}
+
 /// Same as [`create_storage_buffer`] but also usable as a `<uniform>`
 /// binding (the `FrameUniform`/`dispatch_args`-style "write as storage in
 /// one kernel, read as uniform in another" dual-bind trick already used by
@@ -246,6 +260,9 @@ struct ScratchBuffers {
     range_bucket_counts: wgpu::Buffer,
     shadow_static_indirect: wgpu::Buffer,
     shadow_movable_indirect: wgpu::Buffer,
+    /// Static transparent-only casters, drawn into the coloured
+    /// transmittance layer rather than the depth atlas.
+    shadow_transmissive_indirect: wgpu::Buffer,
     shadow_counts: wgpu::Buffer,
     /// Per `static_objects` row: last drawn transform + identity, for
     /// per-frame motion vectors (see `object_batch.wgsl`'s `PrevRow`).
@@ -299,14 +316,19 @@ impl ScratchBuffers {
                 n * RANGE_BYTES,
             ),
             range_bucket_counts: create_storage_buffer(device, "ObjBatch RangeBucketCounts", 16),
-            shadow_static_indirect: create_storage_buffer(
+            shadow_static_indirect: create_indirect_buffer(
                 device,
                 "ObjBatch ShadowStaticIndirect",
                 n * INDIRECT_ARGS_BYTES,
             ),
-            shadow_movable_indirect: create_storage_buffer(
+            shadow_movable_indirect: create_indirect_buffer(
                 device,
                 "ObjBatch ShadowMovableIndirect",
+                n * INDIRECT_ARGS_BYTES,
+            ),
+            shadow_transmissive_indirect: create_indirect_buffer(
+                device,
+                "ObjBatch ShadowTransmissiveIndirect",
                 n * INDIRECT_ARGS_BYTES,
             ),
             shadow_counts: create_storage_buffer(device, "ObjBatch ShadowCounts", 16),
@@ -542,6 +564,8 @@ impl ObjectBatchPass {
                     bgl_entry_storage(3, cs, false),
                     bgl_entry_storage(4, cs, false),
                     bgl_entry_storage(5, cs, false),
+                    bgl_entry_storage(6, cs, true),
+                    bgl_entry_storage(7, cs, false),
                 ],
             }),
         };
@@ -963,6 +987,8 @@ impl ObjectBatchPass {
                 bg_entry(3, &s.shadow_static_indirect),
                 bg_entry(4, &s.shadow_movable_indirect),
                 bg_entry(5, &s.shadow_counts),
+                bg_entry(6, materials),
+                bg_entry(7, &s.shadow_transmissive_indirect),
             ],
         }));
     }
@@ -1311,6 +1337,8 @@ impl RenderPass for ObjectBatchPass {
                 shadow_static_draw_count,
                 shadow_movable_indirect: &self.scratch.shadow_movable_indirect,
                 shadow_movable_draw_count,
+                shadow_transmissive_indirect: &self.scratch.shadow_transmissive_indirect,
+                shadow_transmissive_draw_count: self.readback.shadow_transmissive(),
                 shadow_static_generation: self.shadow_static_generation(),
             })
         };

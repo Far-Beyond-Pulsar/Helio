@@ -183,7 +183,9 @@ pub fn populate(world: &mut World) {
     let mut panes: Vec<Mesh> = (0..colours.len()).map(|_| Mesh::default()).collect();
     for side in [-1.0_f32, 1.0] {
         for bay in -8_i32..=8 {
-            let z = bay as f32 * BAY;
+            // Dividers are at integer BAY positions. Both rows of glazing,
+            // mullions and pointed surrounds belong halfway between them.
+            let z = (bay as f32 + 0.5) * BAY;
             for (x, y0, y1) in [(side * 22.08, 8.0, 19.0),
                 (side * 9.12, 29.0, 39.0)] {
                 let left = z - 2.8;

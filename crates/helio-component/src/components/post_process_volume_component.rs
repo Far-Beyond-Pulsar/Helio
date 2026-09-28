@@ -1,32 +1,11 @@
-//! Post-process volume component (Phase D, Pulsar-Native#558) — the
-//! largest of the "no purpose-built component exists yet" primitives:
-//! exposure, bloom, color grading, white balance, tonemapping, vignette,
-//! chromatic aberration, film grain, depth of field, motion blur, HDR
-//! output, and volumetric fog, all blended per-volume by Helio's own
-//! `PostProcessBlender`.
-//!
-//! Helio already has full native support for this
-//! (`Scene::insert_post_process_volume`/`update_post_process_volume`/
-//! `remove_post_process_volume`, `PostProcessVolumeDescriptor`,
-//! `PostProcessSettings`) — same shape as `ReflectionCaptureComponent`/
-//! `WaterVolumeComponent`, the gap this closes is purely the author-facing
-//! `#[engine_class]` wrapper.
-//!
-//! Like `WaterVolumeComponent`, `bounds_min`/`bounds_max` are derived from
-//! the owning object's position + an authored `size` rather than exposed as
-//! raw absolute coordinates, so moving the object moves the volume.
-//!
-//! Two `PostProcessSettings` fields are deliberately not exposed:
-//! `lut_generation`/`lut_platform`. Unlike every other field here, these
-//! have no backing Rust enum and default to a bare `0` with no author-facing
-//! meaning documented anywhere in `helio_pass_postprocess` — internal
-//! bookkeeping, not something a level designer tunes. Always written as `0`
-//! when building the descriptor. `lut_intensity` (how strongly a baked LUT
-//! applies) is kept — that one is genuinely author-tunable.
+//! Reflected camera/volume post-process authoring. Runtime writes the pass's
+//! SceneDB component through PendingWorldWrites. Spatial volume bounds use the
+//! owner's position; camera settings reuse PostProcessSettingsProps.
 
 use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
 use crate::subsystems::PendingWorldWrites;
-use helio::{HdrOutputMode as HelioHdrOutputMode, TonemapOperator as HelioTonemapOperator};
+use helio_pass_postprocess::{HdrOutputMode as HelioHdrOutputMode, TonemapOperator as HelioTonemapOperator};
+use super::lens_flare_props::LensFlareProps;
 use helio_pass_postprocess::{
     ExposureMode as HelioExposureMode, FogMode as HelioFogMode, PostProcessSettings,
     PostProcessVolumeDescriptor,
@@ -116,6 +95,8 @@ impl Default for HdrOutputMode {
 #[category("HDR Output", category_color = "#D18F6F")]
 #[category("Volumetric Fog", category_color = "#D18F6F")]
 #[category("Advanced Color Grading", category_color = "#2FA88A")]
+#[category("Lens Flare", category_color = "#E0B040")]
+#[category("Overrides", category_color = "#8F8F8F")]
 pub struct PostProcessVolumeComponent {
     #[property]
     pub enabled: bool,
@@ -139,6 +120,180 @@ pub struct PostProcessVolumeComponent {
     #[property(category = "Volume")]
     pub unbound: bool,
 
+    /// Which setting groups this volume overrides; the rest pass through
+    /// from the camera baseline and lower-priority volumes untouched.
+    #[sub_props]
+    #[serde(flatten)]
+    pub overrides: PostProcessOverrides,
+
+    #[sub_props]
+    #[serde(flatten)]
+    pub settings: PostProcessSettingsProps,
+
+}
+
+impl Default for PostProcessVolumeComponent {
+    /// Mirrors `PostProcessSettings::default()`'s values, plus this
+    /// component's own `size`/`priority`/`blend_radius`/`blend_weight`/
+    /// `unbound` (mirroring `PostProcessVolumeDescriptor::default()`).
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            size: [2000.0, 2000.0, 2000.0],
+            priority: 0.0,
+            blend_radius: 200.0,
+            blend_weight: 1.0,
+            unbound: false,
+            overrides: PostProcessOverrides::default(),
+            settings: PostProcessSettingsProps::default(),
+        }
+    }
+}
+
+/// Per-group override switches, packed into `PostProcessProperty` bits.
+///
+/// Groups that predate override masks default on, so existing volumes keep
+/// replacing them exactly as before. Lens flare defaults off: a volume placed
+/// for grading or fog must not silently switch off the camera's lens.
+#[engine_class(no_register, clone, debug, serialize, deserialize)]
+#[serde(default)]
+#[category("Overrides", category_color = "#8F8F8F")]
+pub struct PostProcessOverrides {
+    #[property(category = "Overrides")]
+    pub override_exposure: bool,
+    #[property(category = "Overrides")]
+    pub override_bloom: bool,
+    /// Color grading, white balance and advanced grading.
+    #[property(category = "Overrides")]
+    pub override_color_grading: bool,
+    #[property(category = "Overrides")]
+    pub override_tonemap: bool,
+    #[property(category = "Overrides")]
+    pub override_vignette: bool,
+    #[property(category = "Overrides")]
+    pub override_chromatic_aberration: bool,
+    #[property(category = "Overrides")]
+    pub override_film_grain: bool,
+    #[property(category = "Overrides")]
+    pub override_depth_of_field: bool,
+    #[property(category = "Overrides")]
+    pub override_motion_blur: bool,
+    #[property(category = "Overrides")]
+    pub override_hdr_output: bool,
+    /// Legacy PP fog. Prefer Global/Local fog components for world media.
+    #[property(category = "Overrides")]
+    pub override_volumetric_fog: bool,
+    #[property(category = "Overrides")]
+    pub override_lens_flare: bool,
+}
+
+impl Default for PostProcessOverrides {
+    fn default() -> Self {
+        Self {
+            override_exposure: true,
+            override_bloom: true,
+            override_color_grading: true,
+            override_tonemap: true,
+            override_vignette: true,
+            override_chromatic_aberration: true,
+            override_film_grain: true,
+            override_depth_of_field: true,
+            override_motion_blur: true,
+            override_hdr_output: true,
+            override_volumetric_fog: true,
+            override_lens_flare: false,
+        }
+    }
+}
+
+impl PostProcessOverrides {
+    pub fn mask(&self) -> [u32; 4] {
+        use helio_pass_postprocess::PostProcessProperty as P;
+        let groups: [(bool, &[usize]); 12] = [
+            (self.override_exposure, &[
+                P::EXPOSURE_MODE, P::EXPOSURE_COMPENSATION, P::EXPOSURE_MIN, P::EXPOSURE_MAX,
+                P::EXPOSURE_SPEED_UP, P::EXPOSURE_SPEED_DOWN, P::BLEND_WEIGHT_EXPOSURE,
+            ]),
+            (self.override_bloom, &[
+                P::BLOOM_INTENSITY, P::BLOOM_THRESHOLD, P::BLOOM_KNEE, P::BLOOM_RADIUS,
+                P::BLOOM_TINT, P::BLOOM_ENABLED, P::BLEND_WEIGHT_BLOOM,
+            ]),
+            (self.override_color_grading, &[
+                P::COLOR_SATURATION, P::COLOR_CONTRAST, P::COLOR_GAMMA, P::COLOR_GAIN,
+                P::COLOR_OFFSET, P::WHITE_TEMP, P::WHITE_TINT, P::WHITE_BALANCE_ENABLED,
+                P::LIFT_COLOR, P::GAMMA_COLOR, P::GAIN_COLOR, P::SHADOWS_MAX,
+                P::HIGHLIGHTS_MIN, P::SHADOW_HIGHLIGHT_BALANCE, P::HUE_SHIFT,
+                P::LUT_GENERATION, P::LUT_INTENSITY, P::LUT_PLATFORM,
+            ]),
+            (self.override_tonemap, &[P::TONEMAP_OPERATOR, P::TONEMAP_EXPOSURE, P::TONEMAP_WHITE_POINT]),
+            (self.override_vignette, &[
+                P::VIGNETTE_INTENSITY, P::VIGNETTE_SMOOTHNESS, P::VIGNETTE_ROUNDNESS,
+                P::VIGNETTE_COLOR, P::VIGNETTE_ENABLED, P::BLEND_WEIGHT_VIGNETTE,
+            ]),
+            (self.override_chromatic_aberration, &[
+                P::CA_INTENSITY, P::CA_START_OFFSET, P::CA_ENABLED, P::BLEND_WEIGHT_CA,
+            ]),
+            (self.override_film_grain, &[
+                P::GRAIN_INTENSITY, P::GRAIN_RESPONSE, P::GRAIN_SIZE, P::GRAIN_ENABLED,
+                P::BLEND_WEIGHT_GRAIN,
+            ]),
+            (self.override_depth_of_field, &[
+                P::DOF_FOCAL_DISTANCE, P::DOF_FOCAL_REGION, P::DOF_APERTURE_SHAPE,
+                P::DOF_APERTURE_ROTATION, P::DOF_NEAR_TRANSITION, P::DOF_FAR_TRANSITION,
+                P::DOF_MAX_BOKEH_SIZE, P::DOF_SENSOR_DIAGONAL, P::BLEND_WEIGHT_DOF,
+            ]),
+            (self.override_motion_blur, &[
+                P::MOTION_BLUR_AMOUNT, P::MOTION_BLUR_MAX, P::MOTION_BLUR_ENABLED,
+                P::BLEND_WEIGHT_MOTION_BLUR,
+            ]),
+            (self.override_hdr_output, &[P::HDR_OUTPUT_MODE, P::HDR_MAX_NITS, P::HDR_UI_BRIGHTNESS]),
+            (self.override_volumetric_fog, &[
+                P::FOG_ENABLED, P::FOG_MODE, P::FOG_DENSITY, P::FOG_HEIGHT_FALLOFF,
+                P::FOG_START_DISTANCE, P::FOG_MAX_DISTANCE, P::FOG_HEIGHT,
+                P::FOG_SCATTERING_ANISOTROPY, P::FOG_COLOR, P::FOG_EMISSIVE,
+            ]),
+            (self.override_lens_flare, &[
+                P::LENS_ENABLED, P::LENS_QUALITY, P::LENS_PROFILE, P::LENS_GHOST_COUNT,
+                P::LENS_INTENSITY, P::LENS_THRESHOLD, P::LENS_SOFT_KNEE, P::LENS_GHOST_INTENSITY,
+                P::LENS_HALO_INTENSITY, P::LENS_GLARE_INTENSITY, P::LENS_STREAK_INTENSITY,
+                P::LENS_DISPERSION, P::LENS_APERTURE_F_NUMBER, P::LENS_FOCAL_LENGTH_MM,
+                P::LENS_SENSOR_WIDTH_MM, P::LENS_VIGNETTE, P::LENS_STARBURST_INTENSITY,
+                P::LENS_STARBURST_LENGTH, P::LENS_APERTURE_BLADES, P::LENS_APERTURE_ROTATION,
+                P::LENS_COATING_STRENGTH, P::LENS_GHOST_RIM, P::LENS_DIRT_INTENSITY,
+                P::LENS_LIGHT_SOURCES, P::LENS_LIGHT_INTENSITY, P::LENS_FIELD_MARGIN,
+                P::LENS_RESPONSE_TIME,
+            ]),
+        ];
+        let mut mask = P::NONE;
+        for (enabled, properties) in groups {
+            for &property in properties {
+                P::set(&mut mask, property, enabled);
+            }
+        }
+        mask
+    }
+}
+
+/// Reflected controls shared by camera baselines and spatial PP volumes.
+/// Flattened serialization preserves the existing volume scene format.
+#[engine_class(no_register, clone, debug, serialize, deserialize)]
+#[serde(default)]
+#[category("Exposure", category_color = "#D1A73F")]
+#[category("Bloom", category_color = "#D1A73F")]
+#[category("Color Grading", category_color = "#2FA88A")]
+#[category("White Balance", category_color = "#2FA88A")]
+#[category("Tonemap", category_color = "#2FA88A")]
+#[category("Vignette", category_color = "#7C6FD1")]
+#[category("Chromatic Aberration", category_color = "#7C6FD1")]
+#[category("Film Grain", category_color = "#7C6FD1")]
+#[category("Depth of Field", category_color = "#3AA0FF")]
+#[category("Motion Blur", category_color = "#3AA0FF")]
+#[category("Blend Weights", category_color = "#8F8F8F")]
+#[category("HDR Output", category_color = "#D18F6F")]
+#[category("Volumetric Fog", category_color = "#D18F6F")]
+#[category("Advanced Color Grading", category_color = "#2FA88A")]
+#[category("Lens Flare", category_color = "#E0B040")]
+pub struct PostProcessSettingsProps {
     // ── Exposure ────────────────────────────────────────────────────────
     #[property(category = "Exposure")]
     pub exposure_mode: ExposureMode,
@@ -330,20 +485,14 @@ pub struct PostProcessVolumeComponent {
     pub hue_shift: f32,
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Advanced Color Grading")]
     pub lut_intensity: f32,
+    /// Camera optics, evaluated after medium compositing and exposure.
+    #[property(category = "Lens Flare")]
+    pub lens_flare: LensFlareProps,
 }
 
-impl Default for PostProcessVolumeComponent {
-    /// Mirrors `PostProcessSettings::default()`'s values, plus this
-    /// component's own `size`/`priority`/`blend_radius`/`blend_weight`/
-    /// `unbound` (mirroring `PostProcessVolumeDescriptor::default()`).
+impl Default for PostProcessSettingsProps {
     fn default() -> Self {
         Self {
-            enabled: true,
-            size: [2000.0, 2000.0, 2000.0],
-            priority: 0.0,
-            blend_radius: 200.0,
-            blend_weight: 1.0,
-            unbound: false,
             exposure_mode: ExposureMode::Manual,
             exposure_compensation: 0.0,
             exposure_min: -4.0,
@@ -420,15 +569,14 @@ impl Default for PostProcessVolumeComponent {
             shadow_highlight_balance: 0.5,
             hue_shift: 0.0,
             lut_intensity: 1.0,
+            lens_flare: LensFlareProps::default(),
         }
     }
 }
 
-impl PostProcessVolumeComponent {
-    fn to_descriptor(&self, owner: &RuntimeComponentOwner) -> PostProcessVolumeDescriptor {
-        let [cx, cy, cz] = owner.position;
-        let [sx, sy, sz] = self.size;
-        let settings = PostProcessSettings {
+impl PostProcessSettingsProps {
+    pub fn to_settings(&self) -> PostProcessSettings {
+        PostProcessSettings {
             exposure_mode: match self.exposure_mode {
                 ExposureMode::Manual => HelioExposureMode::Manual,
                 ExposureMode::Auto => HelioExposureMode::Auto,
@@ -528,7 +676,16 @@ impl PostProcessVolumeComponent {
             lut_generation: 0,
             lut_intensity: self.lut_intensity,
             lut_platform: 0,
-        };
+            lens_flare: self.lens_flare.to_settings(),
+        }
+    }
+}
+
+impl PostProcessVolumeComponent {
+    fn to_descriptor(&self, owner: &RuntimeComponentOwner) -> PostProcessVolumeDescriptor {
+        let [cx, cy, cz] = owner.position;
+        let [sx, sy, sz] = self.size;
+        let settings = self.settings.to_settings();
 
         PostProcessVolumeDescriptor {
             bounds_min: [cx - sx * 0.5, cy - sy * 0.5, cz - sz * 0.5],
@@ -537,6 +694,7 @@ impl PostProcessVolumeComponent {
             blend_radius: self.blend_radius,
             blend_weight: self.blend_weight,
             unbound: self.unbound,
+            override_mask: self.overrides.mask(),
             settings,
         }
     }
@@ -633,9 +791,12 @@ mod tests {
     fn to_descriptor_centers_bounds_on_owner_position_and_maps_settings() {
         let component = PostProcessVolumeComponent {
             size: [10.0, 20.0, 10.0],
-            bloom_enabled: true,
-            bloom_intensity: 0.75,
-            tonemap_operator: TonemapOperator::Aces,
+            settings: PostProcessSettingsProps {
+                bloom_enabled: true,
+                bloom_intensity: 0.75,
+                tonemap_operator: TonemapOperator::Aces,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let props = HashMap::new();

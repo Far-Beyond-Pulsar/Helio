@@ -26,7 +26,8 @@ pub struct GpuCameraUniforms {
     pub position_near: [f32; 4],
     /// Camera forward direction (xyz) + far plane (w)
     pub forward_far: [f32; 4],
-    /// Projection translation in NDC (xy), frame index (z), padding (w).
+    /// Projection translation in NDC (xy), frame index (z), view identity (w,
+    /// stored as u32 bits rather than numerically converted to float).
     /// Ray tracers convert xy with `temporal::ray_jitter_from_ndc`.
     pub jitter_frame: [f32; 4],
     /// Previous frame view-projection (for TAA motion vectors)
@@ -34,6 +35,12 @@ pub struct GpuCameraUniforms {
 }
 
 impl GpuCameraUniforms {
+    /// Attach a generic view identity without changing the shared camera ABI.
+    pub fn with_view_id(mut self, view_id: u32) -> Self {
+        self.jitter_frame[3] = f32::from_bits(view_id);
+        self
+    }
+
     /// Creates a new camera uniform from decomposed matrices.
     pub fn new(
         view: Mat4,

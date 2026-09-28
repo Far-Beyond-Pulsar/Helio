@@ -21,6 +21,11 @@ struct ShadowConfig {
 @group(0) @binding(4) var shadow_atlas: texture_depth_2d_array;
 @group(0) @binding(5) var shadow_sampler: sampler_comparison;
 @group(0) @binding(6) var <storage, read> shadow_matrices: array<LightMatrix>;
+// Static casters are cached in their own atlas; visibility is the min of both.
+@group(0) @binding(8) var static_shadow_atlas: texture_depth_2d_array;
+// Translucent casters (stained glass): rgb = 1 - T, a = 1 - nearest pane depth.
+@group(0) @binding(9) var shadow_transmittance: texture_2d_array<f32>;
+@group(0) @binding(10) var transmittance_sampler: sampler;
 
 // Vogel disk sampling - blue-noise-like spiral pattern for high-quality PCF
 fn vogel_disk_sample(sample_idx: u32, sample_count: u32, theta: f32) -> vec2<f32> {
@@ -68,7 +73,8 @@ fn pcss_blocker_search(
             continue;
         }
 
-        let occluder_depth = textureLoad(shadow_atlas, pixel_coord, i32(layer), 0);
+        let occluder_depth = min(textureLoad(shadow_atlas, pixel_coord, i32(layer), 0),
+                                 textureLoad(static_shadow_atlas, pixel_coord, i32(layer), 0));
         if occluder_depth < receiver_depth - 0.0001 {
             blocker_sum += occluder_depth;
             blocker_count += 1.0;
@@ -112,7 +118,8 @@ fn sample_cascade_shadow(layer: u32, cascade_idx: u32, cascade_scale: f32, world
     var lit_sum = 0.0;
     for (var i = 0u; i < pcf_count; i++) {
         let offset = vogel_disk_sample(i, pcf_count, theta) * (cascade_scale / f32(textureDimensions(shadow_atlas).x));
-        lit_sum += textureSampleCompareLevel(shadow_atlas, shadow_sampler, shadow_uv + offset, i32(layer), ndc.z);
+        lit_sum += min(textureSampleCompareLevel(shadow_atlas, shadow_sampler, shadow_uv + offset, i32(layer), ndc.z),
+                       textureSampleCompareLevel(static_shadow_atlas, shadow_sampler, shadow_uv + offset, i32(layer), ndc.z));
     }
 
     return lit_sum / f32(pcf_count);
@@ -149,7 +156,8 @@ fn sample_cascade_shadow_pcss(layer: u32, cascade_idx: u32, world_pos: vec3<f32>
 
     for (var i = 0u; i < shadow_config.pcss_filter_samples; i++) {
         let offset = vogel_disk_sample(i, shadow_config.pcss_filter_samples, theta) * filter_radius;
-        lit_sum += textureSampleCompareLevel(shadow_atlas, shadow_sampler, shadow_uv + offset, i32(layer), receiver_depth);
+        lit_sum += min(textureSampleCompareLevel(shadow_atlas, shadow_sampler, shadow_uv + offset, i32(layer), receiver_depth),
+                       textureSampleCompareLevel(static_shadow_atlas, shadow_sampler, shadow_uv + offset, i32(layer), receiver_depth));
     }
 
     return lit_sum / f32(shadow_config.pcss_filter_samples);
@@ -301,8 +309,43 @@ fn scalar_shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag
     }
 }
 
+// Tint of the translucent casters between a light and a receiver, sampled on
+// the same face as the depth shadow (nearest cascade for directional lights).
+fn glass_transmittance(id: u32, position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let light = lights[id];
+    if light.shadow_index == 4294967295u { return vec3<f32>(1.0); }
+    var light_dir = normalize(-light.direction_outer.xyz);
+    if light.light_type != 0u { light_dir = normalize(light.position_range.xyz - position); }
+    let biased = position + normal * NORMAL_OFFSET_SCALE * (1.0 - max(dot(normal, light_dir), 0.0));
+    var layer = light.shadow_index;
+    if light.light_type == 1u {
+        layer += point_light_face(biased - light.position_range.xyz);
+    } else if light.light_type == 0u {
+        let dist = length(position - cameras[0].position_near.xyz);
+        let splits = globals.csm_splits;
+        layer += select(select(select(3u, 2u, dist < splits.z), 1u, dist < splits.y), 0u, dist < splits.x);
+    }
+    if layer >= arrayLength(&shadow_matrices) || layer >= textureNumLayers(shadow_transmittance) {
+        return vec3<f32>(1.0);
+    }
+    let clip = shadow_matrices[layer].mat * vec4<f32>(biased, 1.0);
+    if clip.w <= 0.0 { return vec3<f32>(1.0); }
+    let ndc = clip.xyz / clip.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
+    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || ndc.z < 0.0 || ndc.z > 1.0 {
+        return vec3<f32>(1.0);
+    }
+    let glass = textureSampleLevel(shadow_transmittance, transmittance_sampler, uv, i32(layer), 0.0);
+    return select(vec3<f32>(1.0), 1.0 - glass.rgb, 1.0 - ndc.z < glass.a);
+}
+
 fn shadow_factor(id: u32, position: vec3<f32>, normal: vec3<f32>, pixel: vec2<f32>, frame: u32) -> Visibility {
-    return Visibility(scalar_shadow_factor(id,position,normal,pixel,frame));
+    let lit = scalar_shadow_factor(id,position,normal,pixel,frame);
+    // The RGB-visibility pipelines run only while glass casters exist.
+    if USE_RAY_TRANSMISSION && lit > 0.0 {
+        return visibility_from_rgb(lit * glass_transmittance(id,position,normal));
+    }
+    return Visibility(lit);
 }
 
 fn shadow_receiver(position: vec3<f32>, normal: vec3<f32>, pixel: vec2<f32>) -> vec3<f32> {

@@ -29,7 +29,9 @@ use helio_pass_perf_overlay::{
 use helio_pass_planar_reflection::PlanarReflectionPass;
 use helio_pass_portal_cull::PortalCullPass;
 use helio_pass_portal_instances::{PortalEditorOverlayPass, PortalInstancePass, PortalMaskPass};
-use helio_pass_postprocess::{PostProcessPass, PostProcessVolumeBlendPass};
+use helio_pass_postprocess::{
+    FogCompositePass, PostProcessPass, PostProcessVolumeBlendPass, FOGGED_HDR, FOGGED_HDR_FORMAT,
+};
 use helio_pass_radiance_cascades::RadianceCascadesPass;
 use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_cull::ShadowCullPass;
@@ -125,6 +127,56 @@ fn declare_common_external_inputs(graph: &mut RenderGraph) {
     graph.declare_external_input("corona_emitters");
 }
 
+/// Where a graph composites the sky into `pre_aa`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SkyPlacement {
+    /// With the early passes, shading every pixel before any geometry
+    /// exists. Forward graphs need this: their geometry draws over the sky.
+    BeforeGeometry,
+    /// The caller adds it with [`add_sky_pass`] after every opaque depth
+    /// writer, depth tested so only uncovered pixels are shaded.
+    Deferred,
+}
+
+/// Picks the sky placement for a deferred graph. Deferred lighting
+/// overwrites every covered pixel, so the sky only needs the pixels no
+/// geometry reached; drawing it after the G-buffer with a depth test skips
+/// the covered ones instead of shading and then discarding them.
+///
+/// SSR and planar reflections sample `pre_aa` between the G-buffer and
+/// lighting and would see black instead of sky there, and the XR multiview
+/// depth target cannot back this pass's single-view attachment, so those
+/// configurations keep the original order.
+fn deferred_sky_placement(config: &RendererConfig) -> SkyPlacement {
+    let reflections = helio_core::REFLECTIONS_SUPPORTED
+        && (config.enable_ssr || config.enable_planar_reflections);
+    if reflections || config.enable_xr {
+        SkyPlacement::BeforeGeometry
+    } else {
+        SkyPlacement::Deferred
+    }
+}
+
+fn add_sky_pass(
+    graph: &mut RenderGraph,
+    device: &Arc<wgpu::Device>,
+    camera_buf: &wgpu::Buffer,
+    config: &RendererConfig,
+    scene_db: &helio::SceneDbHandle,
+    depth_tested: bool,
+) {
+    let sky_pass = SkyPass::new_with_camera_and_size_and_scene_db(
+        device,
+        camera_buf,
+        config.surface_format,
+        config.internal_width(),
+        config.internal_height(),
+        Some(scene_db.clone()),
+    )
+    .with_depth_test(depth_tested);
+    graph.add_pass(Box::new(sky_pass));
+}
+
 fn add_common_early_passes(
     graph: &mut RenderGraph,
     device: &Arc<wgpu::Device>,
@@ -135,6 +187,7 @@ fn add_common_early_passes(
     w: u32,
     h: u32,
     scene_db: helio::SceneDbHandle,
+    sky: SkyPlacement,
 ) -> Arc<std::sync::Mutex<PerfOverlayShared>> {
     let lights_buf = scene_buffer_or_dummy(
         &scene_db,
@@ -143,13 +196,18 @@ fn add_common_early_passes(
         "SceneDB Lights",
         96,
     );
-    let shadow_matrices_buf = scene_buffer_or_dummy(
-        &scene_db,
-        device,
-        pulsar_scenedb::gpu::BufferKey::of("shadow_matrices"),
-        "SceneDB Shadow Matrices",
-        64,
-    );
+    // Owned by the shadow-matrix pass, which computes and publishes it. One
+    // matrix per atlas face, rounded up to whole 6-face caster slots. (This was
+    // a SceneDB lookup of a key nothing registers: a 64-byte dummy that held
+    // one matrix, with nothing publishing it, so no raster shadow rendered.)
+    let shadow_face_slots = config.shadow_face_capacity.max(6).div_ceil(6) * 6;
+    let shadow_matrices_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Shadow Matrices"),
+        size: u64::from(shadow_face_slots)
+            * std::mem::size_of::<helio_pass_shadow_matrix::GpuShadowMatrix>() as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
 
     // Must run before every pass below — they all read `object_batch`
     // (instances/draw_calls/indirect/shadow partitions) published by this
@@ -181,7 +239,7 @@ fn add_common_early_passes(
     graph.add_pass(Box::new(ShadowMatrixPass::new(
         device,
         &lights_buf.buffer,
-        &shadow_matrices_buf.buffer,
+        &shadow_matrices_buf,
         camera_buf,
         &shadow_dirty_buf,
         &shadow_hashes_buf,
@@ -209,16 +267,8 @@ fn add_common_early_passes(
         config.shadow_face_capacity,
     )));
 
-    {
-        let mut sky_pass = SkyPass::new_with_camera_and_size_and_scene_db(
-            device,
-            camera_buf,
-            config.surface_format,
-            w,
-            h,
-            Some(scene_db.clone()),
-        );
-        graph.add_pass(Box::new(sky_pass));
+    if sky == SkyPlacement::BeforeGeometry {
+        add_sky_pass(graph, device, camera_buf, config, &scene_db, false);
     }
 
     graph.add_pass(Box::new(IndirectDispatchPass::new(
@@ -700,6 +750,68 @@ pub fn build_default_graph_external(
     )
 }
 
+/// Anti-aliasing stage of [`add_scene_linear_chain`].
+enum SceneAa {
+    /// Temporal reconstruction; its HDR resolve is published as `tsr_color`.
+    Tsr(TsrPass),
+    /// FXAA into a linear intermediate of the chain's format (`fxaa_color`).
+    Fxaa,
+    None,
+}
+
+/// Participating media, transparency, anti-aliasing and lens optics, in the
+/// one order every graph shares. Returns the key `PostProcessPass` consumes.
+///
+/// ```text
+/// PP settings (camera baseline + volumes) -> medium integration
+///   -> medium composite at each opaque surface's depth (fogged_hdr)
+///   -> transparency, each fragment fogged at its own depth
+///   -> AA -> lens response from the reconstructed image
+///   -> PostProcessPass: meter, bloom, lens, exposure, grade, tone map once
+/// ```
+///
+/// Shafts exist only where a medium scatters light, so they reach exposure,
+/// bloom and lens extraction as ordinary radiance. The lens reads the AA
+/// output so reprojection never sees screen-space optics, and PP applies it
+/// after metering so flare cannot feed back into exposure.
+fn add_scene_linear_chain(
+    graph: &mut RenderGraph,
+    device: &Arc<wgpu::Device>,
+    hdr_format: wgpu::TextureFormat,
+    transparent: Option<helio_pass_transparent::TransparentPass>,
+    aa: SceneAa,
+    width: u32,
+    height: u32,
+) -> &'static str {
+    graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
+    graph.add_pass(Box::new(VolumetricFogPass::new(device)));
+    graph.add_pass(Box::new(FogCompositePass::with_format(device, hdr_format)));
+    if let Some(transparent) = transparent {
+        graph.add_pass(Box::new(transparent.with_fogged_target()));
+    }
+    let resolved = match aa {
+        SceneAa::Tsr(tsr) => {
+            graph.add_pass(Box::new(
+                tsr.with_color_input(FOGGED_HDR).with_intermediate_output(),
+            ));
+            "tsr_color"
+        }
+        SceneAa::Fxaa => {
+            graph.add_pass(Box::new(
+                FxaaPass::new(device, hdr_format)
+                    .with_color_input(FOGGED_HDR)
+                    .with_intermediate_target(hdr_format),
+            ));
+            "fxaa_color"
+        }
+        SceneAa::None => FOGGED_HDR,
+    };
+    graph.add_pass(Box::new(
+        LensFlarePass::new_hdr(device, width, height).with_color_input(resolved),
+    ));
+    resolved
+}
+
 fn build_default_graph_internal(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
@@ -722,16 +834,22 @@ fn build_default_graph_internal(
     let mut graph = new_graph(device, queue, owns_device, &config);
     declare_common_external_inputs(&mut graph);
 
+    // Lighting and everything drawn into it stay scene-linear FP16 until
+    // PostProcessPass tone maps once; a display-format target would clamp
+    // emitters at 1.0 so nothing could bloom or flare.
+    let lighting_config = RendererConfig { surface_format: FOGGED_HDR_FORMAT, ..config };
+    let sky_placement = deferred_sky_placement(&config);
     let perf = add_common_early_passes(
         &mut graph,
         device,
         queue,
         camera_buf,
-        &config,
+        &lighting_config,
         cull_stats_buf,
         iw,
         ih,
         scene_db.clone(),
+        sky_placement,
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
@@ -786,8 +904,12 @@ fn build_default_graph_internal(
         )));
     }
 
+    if sky_placement == SkyPlacement::Deferred {
+        add_sky_pass(&mut graph, device, camera_buf, &lighting_config, &scene_db, true);
+    }
+
     let mut deferred_light_pass =
-        DeferredLightPass::new(device, queue, camera_buf, config.surface_format);
+        DeferredLightPass::new(device, queue, camera_buf, lighting_config.surface_format);
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
     deferred_light_pass.debug_mode = config.debug_mode;
     deferred_light_pass.set_env_reflections(config.enable_environment_reflections);
@@ -803,7 +925,7 @@ fn build_default_graph_internal(
         device,
         queue,
         camera_buf,
-        &config,
+        &lighting_config,
         &perf,
         debug_state.clone(),
         debug_camera_buf,
@@ -812,33 +934,15 @@ fn build_default_graph_internal(
         scene_db.clone(),
     );
 
-    // Before AA, at internal resolution: fog accumulates against internal-res
-    // depth, and the AA pass then resolves it with the rest of the frame.
-    graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
-    graph.add_pass(Box::new(VolumetricFogPass::new(device)));
-
-    // Transparent pass — alpha-blended geometry (simple fixed shader).
-    // Its bind group is rebuilt per-frame from `object_batch`/SceneDB
-    // resources at execute time, so no buffers are passed in here.
-    graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(
-        device,
-        config.surface_format,
-    )));
-
-    graph.add_pass(Box::new(LensFlarePass::new(
-        device,
-        queue,
-        &lights_buf.buffer,
-        iw,
-        ih,
-        config.surface_format,
-    )));
-
+    // Media, transparency, AA and lens in scene-linear FP16, at internal
+    // resolution until TSR upscales. The composite lifts the lighting target
+    // into FP16 so nothing downstream clamps radiance.
+    //
     // When TSR is active it provides superior temporal anti-aliasing, so FXAA
     // would only add blur on top of an already-sharp image.  Gate FXAA behind
     // the TSR flag so the two don't compete.
-    if let Some(quality) = config.tsr_quality {
-        graph.add_pass(Box::new(TsrPass::new(
+    let aa = match config.tsr_quality {
+        Some(quality) => SceneAa::Tsr(TsrPass::new(
             device,
             iw,
             ih,
@@ -846,10 +950,15 @@ fn build_default_graph_internal(
             config.height,
             config.surface_format,
             quality,
-        ).with_intermediate_output()));
-    } else {
-        graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
-    }
+        )),
+        None => SceneAa::Fxaa,
+    };
+    // Transparent pass — alpha-blended geometry (simple fixed shader).
+    // Its bind group is rebuilt per-frame from `object_batch`/SceneDB
+    // resources at execute time, so no buffers are passed in here.
+    let transparent = helio_pass_transparent::TransparentPass::new(device, FOGGED_HDR_FORMAT);
+    let resolved =
+        add_scene_linear_chain(&mut graph, device, FOGGED_HDR_FORMAT, Some(transparent), aa, iw, ih);
 
     let mut pp = PostProcessPass::new_with_user_effects(
         device,
@@ -858,13 +967,8 @@ fn build_default_graph_internal(
         config.height,
         config.surface_format,
         user_effects,
-    );
-    // Postprocess/DOF own the final target. Resolve into an HDR intermediate
-    // and consume it here; otherwise postprocess overwrites TSR with pre_aa,
-    // discarding temporal accumulation while retaining camera jitter.
-    if config.tsr_quality.is_some() {
-        pp = pp.with_tsr_input();
-    }
+    )
+    .with_color_input(resolved);
     // Enable pre_dof output so the DofPass can read the post-processed image.
     pp.set_output_to_pre_dof(true);
     graph.add_pass(Box::new(pp));
@@ -1006,16 +1110,22 @@ fn build_fxaa_graph_internal(
     let mut graph = new_graph(device, queue, owns_device, &config);
     declare_common_external_inputs(&mut graph);
 
+    // Lighting and everything drawn into it stay scene-linear FP16 until
+    // PostProcessPass tone maps once; a display-format target would clamp
+    // emitters at 1.0 so nothing could bloom or flare.
+    let lighting_config = RendererConfig { surface_format: FOGGED_HDR_FORMAT, ..config };
+    let sky_placement = deferred_sky_placement(&config);
     let perf = add_common_early_passes(
         &mut graph,
         device,
         queue,
         camera_buf,
-        &config,
+        &lighting_config,
         cull_stats_buf,
         iw,
         ih,
         scene_db.clone(),
+        sky_placement,
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
@@ -1049,8 +1159,12 @@ fn build_fxaa_graph_internal(
         )));
     }
 
+    if sky_placement == SkyPlacement::Deferred {
+        add_sky_pass(&mut graph, device, camera_buf, &lighting_config, &scene_db, true);
+    }
+
     let mut deferred_light_pass =
-        DeferredLightPass::new(device, queue, camera_buf, config.surface_format);
+        DeferredLightPass::new(device, queue, camera_buf, lighting_config.surface_format);
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
     deferred_light_pass.debug_mode = config.debug_mode;
     deferred_light_pass.set_env_reflections(config.enable_environment_reflections);
@@ -1065,7 +1179,7 @@ fn build_fxaa_graph_internal(
         device,
         queue,
         camera_buf,
-        &config,
+        &lighting_config,
         &perf,
         debug_state.clone(),
         debug_camera_buf,
@@ -1074,15 +1188,10 @@ fn build_fxaa_graph_internal(
         scene_db.clone(),
     );
 
-    // Before TAA/TSR, at internal resolution. Fog accumulates in the same space as the
-    // depth it reads, and the AA/upscale pass then resolves it along with everything else.
-    graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
-    graph.add_pass(Box::new(VolumetricFogPass::new(device)));
-
     // TSR provides temporal super-resolution upscaling with its own temporal AA.
     // When TSR is not configured, skip temporal accumulation (render at native res).
-    if let Some(quality) = config.tsr_quality {
-        graph.add_pass(Box::new(TsrPass::new(
+    let aa = match config.tsr_quality {
+        Some(quality) => SceneAa::Tsr(TsrPass::new(
             device,
             iw,
             ih,
@@ -1090,17 +1199,22 @@ fn build_fxaa_graph_internal(
             config.height,
             config.surface_format,
             quality,
-        )));
-    }
+        )),
+        None => SceneAa::None,
+    };
+    let resolved = add_scene_linear_chain(&mut graph, device, FOGGED_HDR_FORMAT, None, aa, iw, ih);
 
-    graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
-        device,
-        queue,
-        config.width,
-        config.height,
-        config.surface_format,
-        None,
-    )));
+    graph.add_pass(Box::new(
+        PostProcessPass::new_with_user_effects(
+            device,
+            queue,
+            config.width,
+            config.height,
+            config.surface_format,
+            None,
+        )
+        .with_color_input(resolved),
+    ));
 
     add_final_passes(
         &mut graph,
@@ -1165,6 +1279,7 @@ fn build_hlfs_graph_internal(
         iw,
         ih,
         scene_db.clone(),
+        SkyPlacement::BeforeGeometry,
     );
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
@@ -1201,22 +1316,15 @@ fn build_hlfs_graph_internal(
         scene_db.clone(),
     );
 
-    // Before TAA/TSR, at internal resolution. Fog accumulates in the same space as the
-    // depth it reads, and the AA/upscale pass then resolves it along with everything else.
-    graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
-    graph.add_pass(Box::new(VolumetricFogPass::new(device)));
-
-    // Blend transparent surfaces in the same linear HDR target as HLFS.
-    let mut transparent = helio_pass_transparent::TransparentPass::new(
-        device, lighting_format,
-    ).with_pre_aa_target();
+    // Blend transparent surfaces in the same linear HDR format as HLFS, over
+    // the fogged opaque image.
+    let mut transparent = helio_pass_transparent::TransparentPass::new(device, lighting_format);
     if config.tsr_quality.is_some() { transparent = transparent.with_reactive_mask(); }
-    graph.add_pass(Box::new(transparent));
 
     // TSR provides temporal super-resolution upscaling with its own temporal AA.
     // When TSR is not configured, skip temporal accumulation (render at native res).
-    if let Some(quality) = config.tsr_quality {
-        graph.add_pass(Box::new(TsrPass::new(
+    let aa = match config.tsr_quality {
+        Some(quality) => SceneAa::Tsr(TsrPass::new(
             device,
             iw,
             ih,
@@ -1224,20 +1332,23 @@ fn build_hlfs_graph_internal(
             config.height,
             config.surface_format,
             quality,
-        ).with_intermediate_output().with_transparency_reactivity()));
-    }
+        ).with_transparency_reactivity()),
+        None => SceneAa::None,
+    };
+    let resolved =
+        add_scene_linear_chain(&mut graph, device, lighting_format, Some(transparent), aa, iw, ih);
 
-    let postprocess = PostProcessPass::new_with_user_effects(
-        device,
-        queue,
-        config.width,
-        config.height,
-        config.surface_format,
-        None,
-    );
-    graph.add_pass(Box::new(if config.tsr_quality.is_some() {
-        postprocess.with_tsr_input()
-    } else { postprocess }));
+    graph.add_pass(Box::new(
+        PostProcessPass::new_with_user_effects(
+            device,
+            queue,
+            config.width,
+            config.height,
+            config.surface_format,
+            None,
+        )
+        .with_color_input(resolved),
+    ));
 
     add_final_passes(
         &mut graph,
@@ -1411,6 +1522,7 @@ fn build_fxaa_hlfs_graph_internal(
         w,
         h,
         scene_db.clone(),
+        SkyPlacement::BeforeGeometry,
     );
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
@@ -1447,18 +1559,12 @@ fn build_fxaa_hlfs_graph_internal(
         scene_db.clone(),
     );
 
-    // Before AA, at internal resolution: fog accumulates against internal-res
-    // depth, and the AA pass then resolves it with the rest of the frame.
-    graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
-    graph.add_pass(Box::new(VolumetricFogPass::new(device)));
-
     // Match the native HLFS graph: transparent glass belongs in linear HDR
     // before anti-aliasing and tonemapping, alongside the opaque lighting.
-    graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(
-        device, lighting_format,
-    ).with_pre_aa_target()));
-
-    graph.add_pass(Box::new(FxaaPass::new(device, lighting_format).with_intermediate_target(lighting_format)));
+    let transparent = helio_pass_transparent::TransparentPass::new(device, lighting_format);
+    let resolved = add_scene_linear_chain(
+        &mut graph, device, lighting_format, Some(transparent), SceneAa::Fxaa, w, h,
+    );
 
     graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
         device,
@@ -1467,7 +1573,7 @@ fn build_fxaa_hlfs_graph_internal(
         config.height,
         config.surface_format,
         None,
-    ).with_fxaa_input()));
+    ).with_color_input(resolved)));
 
     add_final_passes(
         &mut graph,
@@ -1686,16 +1792,21 @@ fn build_forward_graph_internal(
     let mut graph = new_graph(device, queue, owns_device, &config);
     declare_common_external_inputs(&mut graph);
 
+    // Lighting and everything drawn into it stay scene-linear FP16 until
+    // PostProcessPass tone maps once; a display-format target would clamp
+    // emitters at 1.0 so nothing could bloom or flare.
+    let lighting_config = RendererConfig { surface_format: FOGGED_HDR_FORMAT, ..config };
     let perf = add_common_early_passes(
         &mut graph,
         device,
         queue,
         camera_buf,
-        &config,
+        &lighting_config,
         cull_stats_buf,
         iw,
         ih,
         scene_db.clone(),
+        SkyPlacement::BeforeGeometry,
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
@@ -1710,14 +1821,14 @@ fn build_forward_graph_internal(
     graph.add_pass(Box::new(RadianceCascadesPass::new(device, &lights_buf.buffer)));
 
     // Forward geometry pass replaces G-buffer + decal + deferred light + SSR + planar reflections
-    add_forward_geometry_passes(&mut graph, device, camera_buf, &config, &perf, true);
+    add_forward_geometry_passes(&mut graph, device, camera_buf, &lighting_config, &perf, true);
 
     add_late_passes(
         &mut graph,
         device,
         queue,
         camera_buf,
-        &config,
+        &lighting_config,
         &perf,
         debug_state.clone(),
         debug_camera_buf,
@@ -1726,29 +1837,13 @@ fn build_forward_graph_internal(
         scene_db.clone(),
     );
 
-    // Before AA, at internal resolution: fog accumulates against internal-res
-    // depth, and the AA pass then resolves it with the rest of the frame.
-    graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
-    graph.add_pass(Box::new(VolumetricFogPass::new(device)));
-
     // Transparent pass — alpha-blended geometry (simple fixed shader).
     // Its bind group is rebuilt per-frame from `object_batch`/SceneDB
     // resources at execute time, so no buffers are passed in here.
-    graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(
-        device,
-        config.surface_format,
-    )));
-
-    graph.add_pass(Box::new(LensFlarePass::new(
-        device,
-        queue,
-        &lights_buf.buffer,
-        iw,
-        ih,
-        config.surface_format,
-    )));
-
-    graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
+    let transparent = helio_pass_transparent::TransparentPass::new(device, FOGGED_HDR_FORMAT);
+    let resolved = add_scene_linear_chain(
+        &mut graph, device, FOGGED_HDR_FORMAT, Some(transparent), SceneAa::Fxaa, iw, ih,
+    );
 
     graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
         device,
@@ -1757,7 +1852,7 @@ fn build_forward_graph_internal(
         config.height,
         config.surface_format,
         None,
-    )));
+    ).with_color_input(resolved)));
 
     add_final_passes(
         &mut graph,

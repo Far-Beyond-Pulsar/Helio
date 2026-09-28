@@ -6,15 +6,22 @@ use std::collections::HashMap;
 #[category("Volumetrics", category_color = "#7EE787", default_collapsed = true)]
 pub struct VolumetricLightProps {
     #[property(category = "Volumetrics")]
+    #[gpu(as = u32, with = volumetric_enabled_to_gpu)]
     pub affects_volumetric_fog: bool,
     #[property(min = 0.0, max = 8.0, step = 0.05, category = "Volumetrics")]
+    #[gpu]
     pub volumetric_scattering_intensity: f32,
     #[property(min = 0.0, max = 8.0, step = 0.05, category = "Volumetrics")]
     pub volumetric_shadow_intensity: f32,
     #[property(min = 0.0, max = 8.0, step = 0.05, category = "Volumetrics")]
+    #[gpu]
     pub fog_inscattering_intensity: f32,
     #[property(min = 0.0, max = 50.0, step = 0.1, category = "Volumetrics")]
     pub contact_shadow_length: f32,
+}
+
+pub fn volumetric_enabled_to_gpu(enabled: bool) -> u32 {
+    u32::from(enabled)
 }
 
 impl Default for VolumetricLightProps {

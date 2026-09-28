@@ -1,7 +1,6 @@
 //! Universal camera input for renderer frames.
 
 use glam::{Mat4, Vec3};
-use helio_pass_postprocess::PostProcessSettings;
 
 /// Camera parameters supplied for a render frame.
 #[derive(Debug, Clone)]
@@ -12,7 +11,9 @@ pub struct Camera {
     pub near: f32,
     pub far: f32,
     pub jitter: [f32; 2],
-    pub postprocess_settings: PostProcessSettings,
+    /// Stable view identity. Pass-owned SceneDB components use this to select
+    /// their settings without teaching the camera about any rendering effect.
+    pub view_id: u32,
 }
 
 impl Camera {
@@ -24,7 +25,7 @@ impl Camera {
             near,
             far,
             jitter: [0.0, 0.0],
-            postprocess_settings: PostProcessSettings::default(),
+            view_id: 0,
         }
     }
 

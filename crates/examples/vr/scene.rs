@@ -306,6 +306,7 @@ fn bay_flare_fog(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats) {
                 fog_scattering_anisotropy: 0.6,
                 ..PostProcessSettings::default()
             },
+            ..Default::default()
         },
     );
 
@@ -632,6 +633,7 @@ fn bay_colour_grade(world: &mut World, z: f32, meshes: &Meshes) {
                 bloom_tint: [1.0, 0.9, 0.7],
                 ..PostProcessSettings::default()
             },
+            ..Default::default()
         },
     );
 

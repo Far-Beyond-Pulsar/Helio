@@ -33,6 +33,7 @@ pub struct ShadowLightProps {
     #[property(category = "Shadows")]
     pub cast_dynamic_shadows: bool,
     #[property(category = "Shadows")]
+    #[gpu(as = f32, with = volumetric_shadow_strength)]
     pub cast_volumetric_shadow: bool,
     #[property(category = "Shadows")]
     pub cast_contact_shadows: bool,
@@ -50,6 +51,10 @@ pub struct ShadowLightProps {
     pub shadow_resolution_scale: f32,
     #[property(min = 0.0, max = 5.0, step = 0.01, category = "Shadows")]
     pub contact_shadow_non_shadow_casting_intensity: f32,
+}
+
+pub fn volumetric_shadow_strength(enabled: bool) -> f32 {
+    if enabled { 1.0 } else { 0.0 }
 }
 
 impl Default for ShadowLightProps {

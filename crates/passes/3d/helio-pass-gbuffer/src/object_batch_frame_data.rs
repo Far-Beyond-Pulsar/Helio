@@ -59,6 +59,10 @@ pub struct ObjectBatchFrameData<'a> {
     /// Same, for movable objects (the dynamic shadow atlas).
     pub shadow_movable_indirect: &'a wgpu::Buffer,
     pub shadow_movable_draw_count: u32,
+    /// Static transparent-only objects: the shadow pass renders these into
+    /// the coloured transmittance layer instead of the depth atlas.
+    pub shadow_transmissive_indirect: &'a wgpu::Buffer,
+    pub shadow_transmissive_draw_count: u32,
     /// Bumps whenever the static object set's size last changed -- see
     /// `ObjectBatchPass::shadow_static_generation`'s doc. `helio-pass-
     /// shadow`'s static-atlas cache invalidation signal.

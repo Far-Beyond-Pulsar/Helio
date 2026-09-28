@@ -542,7 +542,8 @@ impl AppState {
         let size = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
 
-        let mut camera = Camera::perspective_look_at(
+        let mut settings = helio_pass_postprocess::PostProcessSettings::default();
+        let camera = Camera::perspective_look_at(
             self.cam_pos,
             self.cam_pos + forward,
             glam::Vec3::Y,
@@ -552,13 +553,13 @@ impl AppState {
             500.0,
         );
 
-        camera.postprocess_settings.dof_enabled = self.dof_enabled;
-        camera.postprocess_settings.dof_focal_distance = self.dof_focal_distance;
-        camera.postprocess_settings.dof_focal_region = self.dof_focal_region;
-        camera.postprocess_settings.dof_aperture_blades = self.dof_aperture_blades;
-        camera.postprocess_settings.dof_max_bokeh_size = self.dof_max_bokeh_size;
-        camera.postprocess_settings.dof_aperture_rotation = self.dof_aperture_rotation;
-        camera.postprocess_settings.dof_sensor_diagonal = self.dof_sensor_diagonal;
+        settings.dof_enabled = self.dof_enabled;
+        settings.dof_focal_distance = self.dof_focal_distance;
+        settings.dof_focal_region = self.dof_focal_region;
+        settings.dof_aperture_blades = self.dof_aperture_blades;
+        settings.dof_max_bokeh_size = self.dof_max_bokeh_size;
+        settings.dof_aperture_rotation = self.dof_aperture_rotation;
+        settings.dof_sensor_diagonal = self.dof_sensor_diagonal;
 
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
@@ -572,6 +573,8 @@ impl AppState {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        v3_demo_common::set_camera_postprocess(&mut self.scene_db.world, camera.view_id, &settings);
+        v3_demo_common::flush_scene_db(&self.scene_db, self.renderer.queue());
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);
         }

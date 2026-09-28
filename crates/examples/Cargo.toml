@@ -100,6 +100,10 @@ name = "churn_benchmark"
 path = "churn_benchmark.rs"
 
 [[bin]]
+name = "resolution_bench"
+path = "resolution_bench.rs"
+
+[[bin]]
 name = "move_benchmark"
 path = "move_benchmark.rs"
 
@@ -252,6 +256,7 @@ helio = { workspace = true, features = ["bake"] }
 helio-core = { workspace = true }
 helio-mats = { workspace = true }
 helio-pass-object-batch = { workspace = true }
+helio-pass-shadow-matrix = { workspace = true }
 helio-pass-sprite-batch = { workspace = true }
 helio-pass-sprite-cull = { workspace = true }
 helio-pass-sprite-simulate = { workspace = true }

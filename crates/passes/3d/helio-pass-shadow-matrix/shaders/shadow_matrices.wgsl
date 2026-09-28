@@ -109,7 +109,10 @@ fn mat4_orthographic_rh(left: f32, right: f32, bottom: f32, top: f32, near: f32,
     return mat4x4f(
         vec4f(2.0 * rml, 0.0, 0.0, 0.0),
         vec4f(0.0, 2.0 * tmb, 0.0, 0.0),
-        vec4f(0.0, 0.0, fmn, 0.0),
+        // RH view space looks down -z: depth = (-z - near) / (far - near), so
+        // the z scale is 1 / (near - far). A positive scale put every point
+        // at depth ~ -0.5, outside [0,1], and no directional shadow rendered.
+        vec4f(0.0, 0.0, -fmn, 0.0),
         vec4f(-(right + left) * rml, -(top + bottom) * tmb, -near * fmn, 1.0),
     );
 }
