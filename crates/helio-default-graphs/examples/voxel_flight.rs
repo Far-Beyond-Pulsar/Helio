@@ -394,15 +394,20 @@ impl Flight {
     }
 
     fn read(&self, buffer: &wgpu::Buffer) -> Vec<u8> {
+        self.read_range(buffer, 0, buffer.size())
+    }
+
+    /// Read `size` bytes at `offset` (both multiples of 4).
+    fn read_range(&self, buffer: &wgpu::Buffer, offset: u64, size: u64) -> Vec<u8> {
         self.last_frame_end.set(None);
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: buffer.size(),
+            size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, buffer.size());
+        encoder.copy_buffer_to_buffer(buffer, offset, &staging, 0, size);
         self.queue.submit([encoder.finish()]);
         staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
         self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
@@ -651,6 +656,17 @@ fn main() {
         let h = heading + (119.0f64 * 0.01).sin() * 0.6;
         audits.push(flight.audit("walk_view", eye, look(eye, h, -8.0)));
         flight.capture("walk_view");
+        // Steady low-altitude views (the ascent's heaviest bands).
+        for (name, alt, pitch) in [("hover_330", 330.0, -41.0), ("hover_3k", 3000.0, -30.0), ("hover_55k", 55_000.0, -30.0)] {
+            let e = ground.normalize() * (ground.length() + alt);
+            let f = look(e, heading, pitch);
+            flight.settle(name, e, f);
+            for _ in 0..30 {
+                flight.draw(name, e, f);
+            }
+            flight.capture(name);
+            audits.push(flight.audit(name, e, f));
+        }
         let orbit = ground.normalize() * (ground.length() + 300_000.0);
         let orbit_look = look(orbit, heading, -65.0);
         flight.settle("orbit_settle", orbit, orbit_look);
@@ -845,8 +861,9 @@ fn main() {
             let hit = {
                 let r = flight.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap();
                 let size = r.screen_size();
-                let at = (size[1] / 2 * size[0] + size[0] / 2) as usize * 32;
-                flight.read(r.hit_buffer())[at..at + 32].to_vec()
+                // Only the centre hit: a whole-buffer readback would dominate the latency.
+                let at = u64::from(size[1] / 2 * size[0] + size[0] / 2) * 32;
+                flight.read_range(r.hit_buffer(), at, 32)
             };
             let w = |i: usize| u32::from_le_bytes(hit[i * 4..i * 4 + 4].try_into().unwrap());
             let got = (w(1) as i32, w(2) as i32, w(3) as i32);

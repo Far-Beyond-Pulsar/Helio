@@ -194,6 +194,25 @@ pub fn hits(gpu: &Gpu, renderer: &PlanetRenderer) -> Vec<Hit> {
 }
 
 /// World direction of pixel centre (x, y) for the test camera.
+/// Whether accelerated hit `b` skipped no geometry that plain hit `a`
+/// met (`rise`: vertical component of the pixel ray). A later start can
+/// only skip geometry: a wrong miss, or a hit farther on. Level choice
+/// depends on the path, though: the LOD dither hashes the column the ray is
+/// in, a missing finer column leaves a ray on the coarser level it came
+/// from, and a large empty box of a coarse level can pass over a finer
+/// level's terrain, while a ray starting there locates on the finer level.
+/// So `b` may meet the same surface a level or two apart, up to two cells
+/// of the next coarser level away in height, or meet terrain `a` passed
+/// over.
+pub fn skipped_nothing(a: &Hit, b: &Hit, rise: f32, voxel: f32) -> bool {
+    match (a.status, b.status) {
+        (x, y) if x == y && x != 1 => true,
+        (0, 1) => true,
+        (1, 1) => b.t - a.t <= 0.0 || (b.t - a.t) * rise.max(1e-3) <= 2.0 * voxel * (2u32 << a.level.max(b.level)) as f32,
+        _ => false,
+    }
+}
+
 pub fn pixel_dir(target: &Target, camera: &helio_core::GpuCameraUniforms, x: u32, y: u32) -> DVec3 {
     let inv = Mat4::from_cols_array(&camera.inv_view_proj);
     let ndc = glam::Vec4::new(

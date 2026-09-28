@@ -734,15 +734,20 @@ impl PlanetRenderer {
         frame.eye = [dir.x as f32, dir.y as f32, dir.z as f32, rho as f32];
         frame.layer = [(layer - k) as f32, s as f32, grid.delta() as f32, (planet.outer_radius() - rho) as f32];
         frame.layer_i = [k.clamp(i32::MIN as f64, i32::MAX as f64) as i32, grid.cells(), grid.levels() as i32, i32::from(crate::grid::face_of(eye))];
-        // Directional sky bound cut height (relative to the eye radius): the
-        // bound applies to rising rays above it, so later hits lie in
-        // [cut, outer]. See `horizon.wgsl`.
+        // Directional sky bound cut depth below the eye radius: the bound
+        // covers points above it (see `horizon.wgsl`), and each level's ring
+        // is where no such point can use the level. Any depth is exact. A
+        // shallow cut keeps coarse blocks near the eye out of the table (their
+        // rounded-up tops would block low rays on the ground); in the air it
+        // deepens with the clearance, so rays aimed down start near the
+        // terrain instead of crossing every level's ring through air.
         const SKY_CUT_M: f64 = 100.0;
-        frame.lod = [lod0 as f32, self.settings.lod_dither, -SKY_CUT_M as f32, (rho + grid.radius() * 3.0) as f32];
+        let cut = SKY_CUT_M.max(0.75 * planet.air_clearance(eye));
+        frame.lod = [lod0 as f32, self.settings.lod_dither, -cut as f32, (rho + grid.radius() * 3.0) as f32];
         // Nearest ray distance at which each level may fall back to coarser
         // data: chord bound for points past its fallback angle at radius
         // >= the cut radius.
-        let r_lo = rho - SKY_CUT_M;
+        let r_lo = rho - cut;
         let fallback: Vec<f64> = self
             .residency
             .fallback_angles(dir)

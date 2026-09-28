@@ -463,27 +463,8 @@ fn sky_bound_is_conservative_with_dither() {
         let voxel = planet.grid().voxel_size() as f32;
         let camera = target.camera(forward, up.as_vec3());
         for (index, (a, b)) in reference.iter().zip(&fast).enumerate() {
-            // Vertical component of the pixel ray: a height difference of
-            // one cell moves a grazing hit far along the ray.
-            let rise = pixel_dir(&target, &camera, index as u32 % 320, index as u32 / 320).dot(up).abs().max(1e-3) as f32;
-            // A different start can pick a different dithered level for the
-            // same surface; the geometry must still agree.
-            // Skipped geometry shows as a farther hit or a wrong miss. A ray
-            // that starts later may choose another level for the same surface
-            // (the dither, or a partial block falling back): its hit may then
-            // differ by up to a coarse cell in height.
-            let differs = if a.status != b.status {
-                true
-            } else if a.status != 1 {
-                false
-            } else if a.level == b.level {
-                // Rays grazing a voxel edge within float precision may
-                // resolve to a neighbour at the same distance.
-                (a.i, a.j, a.k, a.face) != (b.i, b.j, b.k, b.face)
-                    && (a.t - b.t).abs() > 0.25 * voxel * (1u32 << a.level) as f32
-            } else {
-                (b.t - a.t) * rise > 2.0 * voxel * (1u32 << a.level.max(b.level)) as f32
-            };
+            let rise = pixel_dir(&target, &camera, index as u32 % 320, index as u32 / 320).dot(up).abs() as f32;
+            let differs = !skipped_nothing(a, b, rise, voxel);
             if differs {
                 bad += 1;
                 if bad < 8 {
@@ -498,9 +479,8 @@ fn sky_bound_is_conservative_with_dither() {
 
 /// The sky span stays conservative while columns stream in during fast
 /// climbs and descents (partial summary blocks fall back to coarser levels,
-/// which the per-level fallback distances must account for): hits match a
-/// render without it. (Distances may differ in the last bits where a ray
-/// starts later, so cells are compared.)
+/// which the per-level fallback distances must account for): no hit of a
+/// render without it is skipped.
 #[test]
 fn accelerations_change_nothing_while_streaming() {
     let Some(gpu) = gpu() else { return };
@@ -532,11 +512,16 @@ fn accelerations_change_nothing_while_streaming() {
         let hinted = hits(&gpu, &r);
         r.settings_mut().freeze_residency = false;
         r.settings_mut().frame_override = None;
-        for (a, b) in reference.iter().zip(&hinted) {
+        let voxel = planet.grid().voxel_size() as f32;
+        let camera = target.camera(forward, up.as_vec3());
+        for (index, (a, b)) in reference.iter().zip(&hinted).enumerate() {
             compared += 1;
-            let both_miss = a.status == 0 && b.status == 0;
-            if !both_miss && (a.status, a.i, a.j, a.k, a.face, a.level) != (b.status, b.i, b.j, b.k, b.face, b.level) {
+            let rise = pixel_dir(&target, &camera, index as u32 % 320, index as u32 / 320).dot(up).abs() as f32;
+            if !skipped_nothing(a, b, rise, voxel) {
                 bad += 1;
+                if bad < 8 {
+                    eprintln!("step {step} pixel {} {}: plain {a:?} accelerated {b:?}", index % 320, index / 320);
+                }
             }
         }
         if step % 8 == 0 {
