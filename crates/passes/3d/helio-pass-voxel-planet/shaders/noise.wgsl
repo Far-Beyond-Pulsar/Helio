@@ -75,3 +75,56 @@ fn rem_floor(a: i32, b: i32) -> i32 {
     let r = a % b;
     return select(r, r + b, r < 0);
 }
+
+// Fine noise (Q24); mirror of `noise_fine` in src/noise.rs.
+const FINE_ONE: i32 = 16777216;
+
+// a * b / 2^24 rounded toward zero, |a| < 2^28, |b| <= 2^24 (12-bit limbs).
+fn mul_fine(a: i32, b: i32) -> i32 {
+    let negative = (a < 0) != (b < 0);
+    let ua = u32(abs(a));
+    let ub = u32(abs(b));
+    let ah = ua >> 12u;
+    let al = ua & 0xfffu;
+    let bh = ub >> 12u;
+    let bl = ub & 0xfffu;
+    let m = i32(ah * bh + ((ah * bl + al * bh + ((al * bl) >> 12u)) >> 12u));
+    return select(m, -m, negative);
+}
+
+fn fade_q24(t: i32) -> i32 {
+    let t2 = mul_fine(t, t);
+    let t3 = mul_fine(t2, t);
+    return mul_fine(6 * t2 - 15 * t + 10 * FINE_ONE, t3);
+}
+
+fn fine_fraction(v: i32, shift: u32) -> i32 {
+    if shift >= 24u { return v >> (shift - 24u); }
+    return v << (24u - shift);
+}
+
+fn lerp_q24(a: i32, b: i32, w: i32) -> i32 {
+    return a + mul_fine(b - a, w);
+}
+
+fn noise_fine(p: vec3<i32>, shift: u32, seed: u32) -> i32 {
+    let mask = (1 << shift) - 1;
+    let c = p >> vec3<u32>(shift);
+    let f = vec3<i32>(fine_fraction(p.x & mask, shift), fine_fraction(p.y & mask, shift), fine_fraction(p.z & mask, shift));
+    let w = vec3<i32>(fade_q24(f.x), fade_q24(f.y), fade_q24(f.z));
+    let g000 = grad(hash3(c.x, c.y, c.z, seed), f.x, f.y, f.z);
+    let g100 = grad(hash3(c.x + 1, c.y, c.z, seed), f.x - FINE_ONE, f.y, f.z);
+    let g010 = grad(hash3(c.x, c.y + 1, c.z, seed), f.x, f.y - FINE_ONE, f.z);
+    let g110 = grad(hash3(c.x + 1, c.y + 1, c.z, seed), f.x - FINE_ONE, f.y - FINE_ONE, f.z);
+    let g001 = grad(hash3(c.x, c.y, c.z + 1, seed), f.x, f.y, f.z - FINE_ONE);
+    let g101 = grad(hash3(c.x + 1, c.y, c.z + 1, seed), f.x - FINE_ONE, f.y, f.z - FINE_ONE);
+    let g011 = grad(hash3(c.x, c.y + 1, c.z + 1, seed), f.x, f.y - FINE_ONE, f.z - FINE_ONE);
+    let g111 = grad(hash3(c.x + 1, c.y + 1, c.z + 1, seed), f.x - FINE_ONE, f.y - FINE_ONE, f.z - FINE_ONE);
+    let x00 = lerp_q24(g000, g100, w.x);
+    let x10 = lerp_q24(g010, g110, w.x);
+    let x01 = lerp_q24(g001, g101, w.x);
+    let x11 = lerp_q24(g011, g111, w.x);
+    let y0 = lerp_q24(x00, x10, w.y);
+    let y1 = lerp_q24(x01, x11, w.y);
+    return clamp(lerp_q24(y0, y1, w.z), -FINE_ONE, FINE_ONE);
+}

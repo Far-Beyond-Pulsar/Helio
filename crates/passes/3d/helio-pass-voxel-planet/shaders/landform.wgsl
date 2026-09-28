@@ -18,7 +18,7 @@ fn terrain_height(p: vec3<i32>, level: u32) -> i32 {
     var warp = vec3<i32>(0);
     for (var index = 0u; index < LANDFORM_WARP; index++) {
         let o = terrain.octaves[index];
-        let n = scale_q16(noise(p, o.shift, o.seed), o.amplitude);
+        let n = mul_fine(o.amplitude, noise_fine(p, o.shift, o.seed));
         let axis = o.kind - 4u;
         if axis == 0u { warp.x += n; } else if axis == 1u { warp.y += n; } else { warp.z += n; }
     }
@@ -26,45 +26,44 @@ fn terrain_height(p: vec3<i32>, level: u32) -> i32 {
     var continent = 0;
     var mask = 0;
     var ridged = 0;
-    var ridge_weight = NOISE_ONE - 1;
+    var ridge_weight = FINE_ONE - 1;
     var detail = 0;
     for (var index = LANDFORM_WARP; index < count; index++) {
         let o = terrain.octaves[index];
         if !landform_resolved(o, level) { continue; }
-        let n = noise(select(q, p, o.kind == 7u), o.shift, o.seed);
         if o.kind == 0u {
-            continent += scale_q16(n, o.amplitude);
+            continent += mul_fine(noise_fine(q, o.shift, o.seed), o.amplitude << 8u);
         } else if o.kind == 1u {
-            mask += scale_q16(n, o.amplitude);
+            mask += mul_fine(noise_fine(q, o.shift, o.seed), o.amplitude << 8u);
         } else if o.kind == 2u {
-            let r = u32(clamp(NOISE_ONE - abs(n), 0, NOISE_ONE - 1));
-            let r2 = (r * r) >> 16u;
-            let v = i32((r2 * u32(ridge_weight)) >> 16u);
-            ridge_weight = clamp(v * 2, NOISE_ONE / 4, NOISE_ONE - 1);
-            ridged += scale_q16(v, o.amplitude);
+            let n = noise_fine(q, o.shift, o.seed);
+            let r = clamp(FINE_ONE - abs(n), 0, FINE_ONE - 1);
+            let v = mul_fine(mul_fine(r, r), ridge_weight);
+            ridge_weight = clamp(v * 2, FINE_ONE / 4, FINE_ONE - 1);
+            ridged += mul_fine(o.amplitude, v);
         } else {
-            detail += scale_q16(n, o.amplitude);
+            detail += scale_q16(noise(select(q, p, o.kind == 7u), o.shift, o.seed), o.amplitude);
         }
     }
     let c = continent;
     var base: i32;
     if c < 0 {
-        let t = min(-c, NOISE_ONE);
-        base = scale_q16(t, terrain.levels.x) + scale_q16(NOISE_ONE - t, terrain.levels.y / 8);
+        let t = min(-c, FINE_ONE);
+        base = mul_fine(terrain.levels.x, t) + mul_fine(terrain.levels.y / 8, FINE_ONE - t);
     } else {
-        let t = min(c * 2, NOISE_ONE);
-        base = scale_q16(t, terrain.levels.y);
+        let t = min(c * 2, FINE_ONE);
+        base = mul_fine(terrain.levels.y, t);
     }
-    let land = clamp(c * 3, 0, NOISE_ONE);
-    let region = clamp((mask - terrain.shape.x) * 3, 0, NOISE_ONE);
-    let mountains = scale_q16(land, scale_q16(region, ridged));
-    let wet = clamp(NOISE_ONE + c * 2, NOISE_ONE / 8, NOISE_ONE);
-    return base + mountains + scale_q16(wet, detail);
+    let land = clamp(c * 3, 0, FINE_ONE);
+    let region = clamp((mask - (terrain.shape.x << 8u)) * 3, 0, FINE_ONE);
+    let mountains = mul_fine(mul_fine(ridged, region), land);
+    let wet = clamp(FINE_ONE + c * 2, FINE_ONE / 8, FINE_ONE);
+    return base + mountains + mul_fine(detail, wet);
 }
 
 fn landform_moisture(p: vec3<i32>) -> i32 {
     let o = max(terrain.octaves[6].shift, 2u) - 1u;
-    return (noise(p, o, bitcast<u32>(terrain.header.w) ^ 0x51ED270Bu) + NOISE_ONE) / 2;
+    return (noise_fine(p, o, bitcast<u32>(terrain.header.w) ^ 0x51ED270Bu) + FINE_ONE) / 2;
 }
 
 // Strata altitude (mm): layers undulate +-8 m over ~100 m, so cuts through
@@ -94,7 +93,7 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
         }
         return M_STONE;
     }
-    let snowline = terrain.levels.z + scale_q16(wet - NOISE_ONE / 2, terrain.levels.z / 4);
+    let snowline = terrain.levels.z + mul_fine(terrain.levels.z / 4, wet - FINE_ONE / 2);
     // Alpine weight: 0 below the rockline, NOISE_ONE at the snowline.
     let rockline = snowline - terrain.levels.z / 3;
     let band = max(snowline - rockline, 256);
@@ -109,7 +108,7 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
     }
     // Snow does not hold on faces steeper than ~37 degrees: rock streaks the snowfields.
     if top_height > snowline && depth < dirt && slope + outcrop / 8192 < 6 { return M_SNOW; }
-    if wet < NOISE_ONE * 3 / 10 {
+    if wet < FINE_ONE / 10 * 3 {
         if depth < dirt && !steep { return M_SAND; }
         let band = rem_floor(div_floor(landform_strata(p, altitude), 2100), 5);
         return select(M_SANDSTONE, M_CLAY, band == 1 || band == 3);

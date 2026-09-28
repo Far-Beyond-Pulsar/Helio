@@ -105,6 +105,62 @@ pub fn scale(n: i32, amplitude: i32) -> i32 {
         .wrapping_add(n.wrapping_mul((amplitude & 0xffff) >> 4) >> 12)
 }
 
+/// Unit of the fine noise (Q24, `FINE_ONE` in WGSL).
+pub const FINE_ONE: i32 = 1 << 24;
+
+/// `a * b / 2^24` rounded toward zero, for `|a| < 2^28` and `|b| <= 2^24`,
+/// in 32-bit arithmetic (12-bit limbs; within two units of exact).
+#[inline]
+pub fn mul_fine(a: i32, b: i32) -> i32 {
+    let negative = (a < 0) != (b < 0);
+    let (a, b) = (a.unsigned_abs(), b.unsigned_abs());
+    let (ah, al) = (a >> 12, a & 0xfff);
+    let (bh, bl) = (b >> 12, b & 0xfff);
+    let m = (ah * bh + ((ah * bl + al * bh + ((al * bl) >> 12)) >> 12)) as i32;
+    if negative { -m } else { m }
+}
+
+#[inline]
+fn fade_q24(t: i32) -> i32 {
+    let t2 = mul_fine(t, t);
+    let t3 = mul_fine(t2, t);
+    mul_fine(6 * t2 - 15 * t + 10 * FINE_ONE, t3)
+}
+
+/// [`noise`] with 24-bit fractions and output in about `[-FINE_ONE,
+/// FINE_ONE]` (about 256 times [`noise`]). Low-frequency octaves whose
+/// value scales large quantities (continents, mountain regions, domain
+/// warp) use it: with 16-bit fractions they would be constant over tens of
+/// metres and step between neighbouring cells.
+pub fn noise_fine(p: IVec3, shift: u32, seed: u32) -> i32 {
+    let mask = (1i32 << shift) - 1;
+    let c = [p.x >> shift, p.y >> shift, p.z >> shift];
+    let f = [p.x & mask, p.y & mask, p.z & mask].map(|v| {
+        if shift >= 24 {
+            v >> (shift - 24)
+        } else {
+            v << (24 - shift)
+        }
+    });
+    let w = f.map(fade_q24);
+    let corner = |dx: i32, dy: i32, dz: i32| {
+        grad(
+            hash3(c[0].wrapping_add(dx), c[1].wrapping_add(dy), c[2].wrapping_add(dz), seed),
+            f[0] - dx * FINE_ONE,
+            f[1] - dy * FINE_ONE,
+            f[2] - dz * FINE_ONE,
+        )
+    };
+    let lerp = |a: i32, b: i32, w: i32| a + mul_fine(b - a, w);
+    let x00 = lerp(corner(0, 0, 0), corner(1, 0, 0), w[0]);
+    let x10 = lerp(corner(0, 1, 0), corner(1, 1, 0), w[0]);
+    let x01 = lerp(corner(0, 0, 1), corner(1, 0, 1), w[0]);
+    let x11 = lerp(corner(0, 1, 1), corner(1, 1, 1), w[0]);
+    let y0 = lerp(x00, x10, w[1]);
+    let y1 = lerp(x01, x11, w[1]);
+    lerp(y0, y1, w[2]).clamp(-FINE_ONE, FINE_ONE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +177,27 @@ mod tests {
             assert!((a - b).abs() < 6400, "{a} {b}");
         }
         assert!(max > 16000 && max <= 65536, "{max}");
+    }
+
+    #[test]
+    fn fine_noise_matches_noise_and_never_steps() {
+        for shift in [8u32, 16, 22, 26, 29] {
+            // Two domain units at the gradient bound (5.3 per lattice spacing)
+            // plus rounding: the 16-bit noise steps far beyond this.
+            let bound = (2.0 * 5.3 * f64::from(FINE_ONE) / f64::from(1u32 << shift)).ceil() as i32 + 8;
+            for x in -2000..2000 {
+                // Mid-cell: at a lattice point the noise may be flat along x.
+                let p = IVec3::new((1 << (shift - 1)) + x * 2 + 1, 99_614_720, (1 << (shift - 2)) - 81);
+                let fine = noise_fine(p, shift, 7);
+                let coarse = noise(p, shift, 7) * 256;
+                // Agrees with the 16-bit noise to within its truncation error.
+                assert!((fine - coarse).abs() <= 16 * 256, "shift {shift} x {x}: fine {fine} coarse {coarse}");
+                let step = (noise_fine(p + IVec3::X * 2, shift, 7) - fine).abs();
+                assert!(step <= bound, "shift {shift} x {x}: step {step} > {bound}");
+            }
+        }
+        assert_eq!(mul_fine(-(1 << 27), 1 << 23), -(1 << 26));
+        assert_eq!(mul_fine(12_345_678, FINE_ONE), 12_345_678);
     }
 
     #[test]

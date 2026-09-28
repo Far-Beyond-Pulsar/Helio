@@ -542,3 +542,30 @@ mod tests {
         assert!(g.cell_center(hit.cell).distance(eye + (centre - eye).normalize() * hit.distance) < n * 1.8);
     }
 }
+
+#[cfg(test)]
+mod scaling {
+    use super::*;
+    use crate::edits::{BrushOp, BrushShape};
+
+    /// Cost of copying a world with many edits (what a shared world pays per
+    /// appended edit). Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn clone_cost_with_many_edits() {
+        let mut planet = Planet::new(PlanetRecipe { shape: Shape::Plane, plane_size_m: 4096.0, ..Default::default() }).unwrap();
+        for n in [1_000usize, 10_000, 50_000] {
+            while planet.edits().len() < n {
+                let k = planet.edits().len() as f64;
+                let p = DVec3::new((k * 7.31) % 900.0 - 450.0, 2.0, (k * 3.17) % 900.0 - 450.0);
+                planet.apply(Brush { center: p.to_array(), radius: 0.05, shape: BrushShape::Cube, op: BrushOp::Add, material: 13 }).unwrap();
+            }
+            let t = std::time::Instant::now();
+            let copies = 20;
+            for _ in 0..copies {
+                std::hint::black_box(planet.clone());
+            }
+            eprintln!("{n} edits: clone {:.3} ms", t.elapsed().as_secs_f64() * 1000.0 / copies as f64);
+        }
+    }
+}

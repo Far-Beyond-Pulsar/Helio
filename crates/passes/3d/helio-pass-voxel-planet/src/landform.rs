@@ -8,7 +8,7 @@
 //! are omitted: coarse levels are band-limited point samples of the same
 //! field rather than an independent smooth replacement.
 use crate::grid::Grid;
-use crate::noise::{noise, scale, hash3, ONE};
+use crate::noise::{hash3, mul_fine, noise, noise_fine, scale, FINE_ONE, ONE};
 use crate::terrain::{material, GeneratorInfo, TerrainField, TerrainGenerator, TerrainProgram, HEIGHT_ONE};
 use bytemuck::{Pod, Zeroable};
 use glam::IVec3;
@@ -260,60 +260,65 @@ fn resolved(o: &Octave, level: u32) -> bool {
 /// domain point `p` with a `2^level` reference cell footprint.
 pub fn height(k: &LandformConstants, p: IVec3, level: u32) -> i32 {
     let count = k.header[0] as usize;
+    // The warp, continents, mountain regions and ridges scale up to
+    // kilometres, so they use the fine (Q24) noise: 16-bit noise is constant
+    // over metres at these wavelengths and its steps, multiplied by the
+    // mountains, would cut terraces between neighbouring columns.
+    //
     // The first six octaves are the domain warp (two per axis). The warp is a
     // coordinate transform, so every level evaluates it.
     let mut warp = [0i32; 3];
     for o in &k.octaves[..WARP_OCTAVES] {
         let axis = (o.kind - 4) as usize;
-        warp[axis] = warp[axis].wrapping_add(scale(noise(p, o.shift, o.seed), o.amplitude));
+        warp[axis] = warp[axis].wrapping_add(mul_fine(o.amplitude, noise_fine(p, o.shift, o.seed)));
     }
     let q = p + IVec3::from_array(warp);
     let mut continent = 0i32;
     let mut mask = 0i32;
     let mut ridged = 0i32;
-    let mut ridge_weight = ONE - 1;
+    let mut ridge_weight = FINE_ONE - 1;
     let mut detail = 0i32;
     for o in &k.octaves[WARP_OCTAVES..count] {
         if !resolved(o, level) {
             continue;
         }
-        let n = noise(if o.kind == 7 { p } else { q }, o.shift, o.seed);
         match o.kind {
-            0 => continent = continent.wrapping_add(scale(n, o.amplitude)),
-            1 => mask = mask.wrapping_add(scale(n, o.amplitude)),
+            0 => continent = continent.wrapping_add(mul_fine(noise_fine(q, o.shift, o.seed), o.amplitude << 8)),
+            1 => mask = mask.wrapping_add(mul_fine(noise_fine(q, o.shift, o.seed), o.amplitude << 8)),
             2 => {
-                let r = (ONE - n.abs()).clamp(0, ONE - 1) as u32;
-                let r2 = r.wrapping_mul(r) >> 16;
-                let v = (r2.wrapping_mul(ridge_weight as u32) >> 16) as i32;
-                ridge_weight = v.wrapping_mul(2).clamp(ONE / 4, ONE - 1);
-                ridged = ridged.wrapping_add(scale(v, o.amplitude));
+                let n = noise_fine(q, o.shift, o.seed);
+                let r = (FINE_ONE - n.abs()).clamp(0, FINE_ONE - 1);
+                let v = mul_fine(mul_fine(r, r), ridge_weight);
+                ridge_weight = (v * 2).clamp(FINE_ONE / 4, FINE_ONE - 1);
+                ridged = ridged.wrapping_add(mul_fine(o.amplitude, v));
             }
-            _ => detail = detail.wrapping_add(scale(n, o.amplitude)),
+            _ => detail = detail.wrapping_add(scale(noise(if o.kind == 7 { p } else { q }, o.shift, o.seed), o.amplitude)),
         }
     }
-    // Continents: c in about [-1.9, 1.9] (Q16); shape basin/lowland transition.
+    // Continents: c in about [-1.9, 1.9] (Q24); shape basin/lowland transition.
     let c = continent;
     let base = if c < 0 {
         // Continental shelf then deep ocean.
-        let t = (-c).min(ONE);
-        scale(t, k.levels[0]).wrapping_add(scale(ONE - t, k.levels[1] / 8))
+        let t = (-c).min(FINE_ONE);
+        mul_fine(k.levels[0], t).wrapping_add(mul_fine(k.levels[1] / 8, FINE_ONE - t))
     } else {
-        let t = (c * 2).min(ONE);
-        scale(t, k.levels[1])
+        let t = (c * 2).min(FINE_ONE);
+        mul_fine(k.levels[1], t)
     };
     // Mountains rise only on land, inside the mountain-region mask.
-    let land = (c * 3).clamp(0, ONE);
-    let region = (mask.wrapping_sub(k.shape[0]) * 3).clamp(0, ONE);
-    let mountains = scale(land, scale(region, ridged));
+    let land = (c * 3).clamp(0, FINE_ONE);
+    let region = ((mask - (k.shape[0] << 8)) * 3).clamp(0, FINE_ONE);
+    let mountains = mul_fine(mul_fine(ridged, region), land);
     // Land detail fades out under deep water.
-    let wet = (ONE + c * 2).clamp(ONE / 8, ONE);
-    base.wrapping_add(mountains).wrapping_add(scale(wet, detail))
+    let wet = (FINE_ONE + c * 2).clamp(FINE_ONE / 8, FINE_ONE);
+    base.wrapping_add(mountains).wrapping_add(mul_fine(detail, wet))
 }
 
-/// Moisture in Q16 [0, ONE] from very low-frequency noise at `p`.
+/// Moisture in Q24 [0, FINE_ONE] from very low-frequency noise at `p`
+/// (fine, so dry-land edges follow smooth curves).
 pub fn moisture(k: &LandformConstants, p: IVec3) -> i32 {
     let o = k.octaves[6].shift.saturating_sub(1).max(1);
-    (noise(p, o, (k.header[3] as u32) ^ 0x51ED_270B) + ONE) / 2
+    (noise_fine(p, o, (k.header[3] as u32) ^ 0x51ED_270B) + FINE_ONE) / 2
 }
 
 /// Strata altitude (mm): layers undulate +-8 m over ~100 m, so cuts
@@ -361,7 +366,7 @@ pub fn ground_material(
             STONE
         };
     }
-    let snowline = c.levels[2] + scale(wet - ONE / 2, c.levels[2] / 4);
+    let snowline = c.levels[2] + mul_fine(c.levels[2] / 4, wet - FINE_ONE / 2);
     // Alpine weight: 0 below the rockline, ONE at the snowline.
     let rockline = snowline - c.levels[2] / 3;
     let band = (snowline - rockline).max(256);
@@ -379,7 +384,7 @@ pub fn ground_material(
     if top_height > snowline && depth < dirt && slope + outcrop / 8192 < 6 {
         return SNOW;
     }
-    if wet < ONE * 3 / 10 {
+    if wet < FINE_ONE / 10 * 3 {
         // Dry lands: sand over banded sandstone and clay.
         if depth < dirt && !steep {
             return SAND;
@@ -597,6 +602,41 @@ mod tests {
         let hi_m = f64::from(hi) / 1000.0;
         assert!(lo_m < -200.0 && hi_m > 100.0 && hi_m < 6_000.0, "{lo_m} {hi_m}");
         assert!(range_lo <= lo && hi <= range_hi);
+    }
+
+    /// Neighbouring columns never step by a voxel layer: the second
+    /// difference of heights across three adjacent 0.1 m columns stays below
+    /// 100 mm. Low-frequency weights multiply kilometres of relief, so with
+    /// 16-bit noise their quantization cut straight terraces up to a metre
+    /// high across the land (1791 of these samples). What remains is the
+    /// integer domain warp moving a steep slope by one extra domain unit
+    /// (0.05 m), under 80 mm.
+    #[test]
+    fn the_field_has_no_steps_between_neighbouring_columns() {
+        let grid = Grid::new(6_371_000.0, 0.1).unwrap();
+        let k = LandformConstants::new(&grid, &Landform::default(), 7);
+        let n = grid.cells() as u64;
+        let mut rng = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let offset = grid.level_offset();
+        let (mut worst, mut steps) = (0, 0);
+        for s in 0..20_000 {
+            let face = (s % 6) as u8;
+            let (i, j) = ((next() % (n - 4)) as i32, (next() % (n - 4)) as i32);
+            // Along i and along j.
+            for d in [(1, 0), (0, 1)] {
+                let h = |t: i32| height(&k, grid.domain_point(face, i + d.0 * t, j + d.1 * t, 0), offset);
+                let second = (h(0) - 2 * h(1) + h(2)).abs();
+                worst = worst.max(second);
+                steps += usize::from(second >= 100);
+            }
+        }
+        assert!(steps == 0, "{steps} steps, worst second difference {worst} mm");
     }
 
     #[test]
