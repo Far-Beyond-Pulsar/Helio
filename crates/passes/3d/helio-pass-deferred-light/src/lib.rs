@@ -84,10 +84,13 @@ pub struct DeferredLightPass {
     bind_group_3: Option<wgpu::BindGroup>,
     reflection_bind_group_1: Option<wgpu::BindGroup>,
     reflection_bind_group_2: Option<wgpu::BindGroup>,
-    bind_group_1_key: Option<[usize; 10]>,
+    /// Views bound in `bind_group_1`, compared by resource identity: an
+    /// address key can match a new view allocated where a freed one was
+    /// (a recreated voxel renderer's sun texture read stale shadows).
+    bind_group_1_key: Option<Vec<wgpu::TextureView>>,
     bind_group_2_key: Option<[usize; 15]>,
     bind_group_3_key: Option<(usize, usize)>,
-    reflection_bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize)>,
+    reflection_bind_group_1_key: Option<Vec<wgpu::TextureView>>,
     reflection_bind_group_2_key: Option<(usize, usize, usize, usize, usize, usize)>,
     fallback_tile_lists: wgpu::Buffer,
     fallback_tile_counts: wgpu::Buffer,
@@ -1082,19 +1085,22 @@ impl RenderPass for DeferredLightPass {
             .texture_binding("directional_visibility")
             .unwrap_or(&self.fallback_ssr_view);
 
-        let gbuffer_key = [
-            gbuffer.views[0] as *const _ as usize,
-            gbuffer.views[1] as *const _ as usize,
-            gbuffer.views[2] as *const _ as usize,
-            gbuffer.views[3] as *const _ as usize,
-            ctx.depth as *const _ as usize,
-            ao_view as *const _ as usize,
-            lightmap_uv_view as *const _ as usize,
-            sss_view as *const _ as usize,
-            extra_view as *const _ as usize,
-            directional_visibility_view as *const _ as usize,
-        ];
-        if self.bind_group_1_key != Some(gbuffer_key) {
+        let gbuffer_key: Vec<wgpu::TextureView> = [
+            gbuffer.views[0],
+            gbuffer.views[1],
+            gbuffer.views[2],
+            gbuffer.views[3],
+            ctx.depth,
+            ao_view,
+            lightmap_uv_view,
+            sss_view,
+            extra_view,
+            directional_visibility_view,
+        ]
+        .into_iter()
+        .cloned()
+        .collect();
+        if self.bind_group_1_key.as_ref() != Some(&gbuffer_key) {
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("DeferredLight BG1"),
                 layout: &self.bgl_1,
@@ -1125,15 +1131,12 @@ impl RenderPass for DeferredLightPass {
             self.bind_group_1_key = Some(gbuffer_key);
         }
 
-        let reflection_gbuffer_key = (
-            gbuffer.views[1] as *const _ as usize,
-            gbuffer.views[2] as *const _ as usize,
-            gbuffer.views[3] as *const _ as usize,
-            ctx.depth as *const _ as usize,
-            ao_view as *const _ as usize,
-            lightmap_uv_view as *const _ as usize,
-        );
-        if self.reflection_bind_group_1_key != Some(reflection_gbuffer_key) {
+        let reflection_gbuffer_key: Vec<wgpu::TextureView> =
+            [gbuffer.views[1], gbuffer.views[2], gbuffer.views[3], ctx.depth, ao_view, lightmap_uv_view]
+                .into_iter()
+                .cloned()
+                .collect();
+        if self.reflection_bind_group_1_key.as_ref() != Some(&reflection_gbuffer_key) {
             self.reflection_bind_group_1 =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("DeferredReflection BG1"),

@@ -33,7 +33,7 @@ use helio::{
 };
 use helio_default_graphs::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
 use helio_pass_voxel_planet::engine::{PlanetFrame, PlanetPass, SharedPlanetFrame};
-use helio_pass_voxel_planet::{field, Brush, BrushOp, BrushShape, Planet, PlanetRecipe};
+use helio_pass_voxel_planet::{field, grid::Shape, Brush, BrushOp, BrushShape, Planet, PlanetRecipe};
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -134,13 +134,20 @@ impl Drop for GpuClocks {
     }
 }
 
+/// Set while the flight renders a plane world (up is +Y there).
+static PLANE_WORLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn up_for(eye: DVec3) -> Vec3 {
-    eye.normalize().as_vec3()
+    if PLANE_WORLD.load(std::sync::atomic::Ordering::Relaxed) {
+        Vec3::Y
+    } else {
+        eye.normalize().as_vec3()
+    }
 }
 
 /// Horizontal heading at `eye` (0 = local east).
 fn tangent(eye: DVec3, heading: f64) -> Vec3 {
-    let up = eye.normalize();
+    let up = up_for(eye).as_dvec3();
     let east = DVec3::Y.cross(up).try_normalize().unwrap_or(DVec3::X);
     let north = up.cross(east);
     (east * heading.cos() + north * heading.sin()).as_vec3()
@@ -313,7 +320,7 @@ impl Flight {
             clocks.0,
             clocks.1
         );
-        let altitude = eye.length() - self.planet.grid().radius();
+        let altitude = self.planet.grid().height(eye);
         self.samples.push(Sample {
             stage: stage.to_string(),
             sync_ms: sync,
@@ -415,6 +422,48 @@ impl Flight {
         data
     }
 
+    /// Sun visibility per pixel (the planet pass's directional visibility).
+    fn read_sun(&self) -> Vec<f32> {
+        self.last_frame_end.set(None);
+        let r = self.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap();
+        let texture = r.sun_texture();
+        let (w, h) = (texture.width(), texture.height());
+        let row = (w * 8).div_ceil(256) * 256;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: u64::from(row) * u64::from(h),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([encoder.finish()]);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+        let f16 = |bits: u16| -> f32 {
+            let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
+            let exp = i32::from((bits >> 10) & 0x1f);
+            let frac = f32::from(bits & 0x3ff);
+            sign * if exp == 0 { frac * 2f32.powi(-24) } else { (1.0 + frac / 1024.0) * 2f32.powi(exp - 15) }
+        };
+        let mut out = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let at = (y * row + x * 8) as usize;
+                out.push(f16(u16::from_le_bytes([data[at], data[at + 1]])));
+            }
+        }
+        out
+    }
+
     fn capture(&self, name: &str) -> Vec<u8> {
         self.last_frame_end.set(None);
         let row = (self.size[0] * 4).div_ceil(256) * 256;
@@ -453,6 +502,7 @@ impl Flight {
             let r = self.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap();
             (self.read(r.hit_buffer()), r.screen_size(), r.stats().lod0_distance)
         };
+        let sun_vis = self.read_sun();
         let mut counts = [0usize; 4];
         let up0 = up_for(eye);
         let forward = forward.normalize();
@@ -462,6 +512,8 @@ impl Flight {
         let tan = (std::f32::consts::FRAC_PI_4 * 0.5).tan();
         let aspect = size[0] as f32 / size[1] as f32;
         let (mut compared, mut mismatched) = (0usize, 0usize);
+        let (mut sun_compared, mut sun_mismatched) = (0usize, 0usize);
+        let mut sun_samples = Vec::new();
         let mut samples = Vec::new();
         let mut stuck = Vec::new();
         for (index, hit) in hits.chunks_exact(32).take((size[0] * size[1]) as usize).enumerate() {
@@ -483,6 +535,24 @@ impl Flight {
             let dir = (forward + right * ndc[0] * tan * aspect + cam_up * ndc[1] * tan).normalize().as_dvec3();
             if let Some(cpu) = self.planet.raycast(eye, dir, lod0 * 0.6) {
                 compared += 1;
+                // Sunlight: an exact CPU shadow ray from the same surface point
+                // (sunlit faces only; the GPU marks back faces unlit).
+                if self.shadows && cpu.normal.dot(self.sun.as_dvec3()) > 0.05 {
+                    let point = eye + dir * cpu.distance + cpu.normal * (self.planet.grid().voxel_size() * 0.02);
+                    // Occluders within 200 m (near field; farther shadows are not audited).
+                    let lit = self.planet.raycast(point, self.sun.as_dvec3(), 200.0).is_none();
+                    let gpu = sun_vis[index];
+                    // TAA-rotated 2x2 sharing can legitimately borrow a neighbour's ray.
+                    if gpu >= 0.0 {
+                        sun_compared += 1;
+                        if lit != (gpu > 0.5) {
+                            sun_mismatched += 1;
+                            if sun_samples.len() < 6 {
+                                sun_samples.push(format!("px {x},{y} cell {:?} cpu lit {lit} gpu {gpu}", cpu.cell));
+                            }
+                        }
+                    }
+                }
                 let t = f64::from(f32::from_bits(w(0)));
                 let same = (info >> 2) & 7 == u32::from(cpu.cell.face)
                     && w(1) as i32 == cpu.cell.i
@@ -532,7 +602,7 @@ impl Flight {
             let mean = work.iter().map(|w| f64::from(w[index])).sum::<f64>() / work.len() as f64;
             stats.insert((*name).into(), serde_json::json!({"mean": mean, "p50": q(0.5), "p95": q(0.95), "max": q(1.0)}));
         }
-        serde_json::json!({"name": name, "mismatch_samples": samples, "stuck": stuck, "work": stats, "miss": counts[0], "hit": counts[1], "exhausted": counts[2], "loading": counts[3], "compared": compared, "mismatched": mismatched})
+        serde_json::json!({"name": name, "mismatch_samples": samples, "stuck": stuck, "work": stats, "miss": counts[0], "hit": counts[1], "exhausted": counts[2], "loading": counts[3], "compared": compared, "mismatched": mismatched, "sun_compared": sun_compared, "sun_mismatched": sun_mismatched, "sun_samples": sun_samples})
     }
 }
 
@@ -769,6 +839,52 @@ fn main() {
             eprintln!("QUICK pass {name:32} {ms:7.3} ms");
         }
         eprintln!("QUICK graph total {:?}", flight.renderer.gpu_frame_ms());
+        // Plane worlds: a finite 4 km plane and an infinite plane.
+        PLANE_WORLD.store(true, std::sync::atomic::Ordering::Relaxed);
+        for (tag, shape) in [("plane", Shape::Plane), ("infinite", Shape::InfinitePlane)] {
+            flight.planet = Arc::new(Planet::new(PlanetRecipe { shape, plane_size_m: 4_096.0, ..Default::default() }).unwrap());
+            let ground = flight.planet.surface_point(DVec3::new(300.0, 0.0, -200.0), 1.7);
+            for (view, height, pitch) in [("ground", 0.0, -12.0), ("air", 300.0, -30.0)] {
+                let name: &'static str = Box::leak(format!("{tag}_{view}").into_boxed_str());
+                let e = ground + DVec3::Y * height;
+                let f = look(e, heading, pitch);
+                flight.settle(name, e, f);
+                for _ in 0..30 {
+                    flight.draw(name, e, f);
+                }
+                flight.capture(name);
+                if std::env::var_os("HELIO_VOXEL_FLIGHT_SUN_FRAMES").is_some() {
+                    // Raw sun visibility of consecutive frames (diagnostics).
+                    for n in 0..4 {
+                        flight.draw(name, e, f);
+                        let sun = flight.read_sun();
+                        let (w, h) = (flight.size[0], flight.size[1]);
+                        let img: Vec<u8> = sun.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0) as u8).collect();
+                        image::save_buffer(flight.output.join(format!("{name}-sun{n}.png")), &img, w, h, image::ColorType::L8).unwrap();
+                    }
+                }
+                audits.push(flight.audit(name, e, f));
+            }
+        }
+        PLANE_WORLD.store(false, std::sync::atomic::Ordering::Relaxed);
+        let mut groups: BTreeMap<String, Vec<&Sample>> = BTreeMap::new();
+        for s in &flight.samples {
+            if s.stage.starts_with("plane") || s.stage.starts_with("infinite") {
+                groups.entry(s.stage.clone()).or_default().push(s);
+            }
+        }
+        for (name, list) in &groups {
+            let terrain: Vec<f64> = list.iter().map(|s| s.terrain_gpu_ms).filter(|v| !v.is_nan()).collect();
+            let stage = |k: &str| percentile(&list.iter().filter(|s| !s.terrain_gpu_ms.is_nan()).map(|s| s.stages.get(k).copied().unwrap_or(0.0)).collect::<Vec<_>>(), 0.5);
+            eprintln!(
+                "QUICK {name:16} n={:4} terrain p50 {:6.2} p95 {:6.2} | primary {:6.2} shade {:5.2} sun {:6.2}",
+                list.len(), percentile(&terrain, 0.5), percentile(&terrain, 0.95),
+                stage("planet_primary"), stage("planet_shade"), stage("planet_sunlight")
+            );
+        }
+        for a in audits.iter().filter(|a| a["name"].as_str().is_some_and(|n| n.starts_with("plane") || n.starts_with("infinite"))) {
+            eprintln!("QUICK audit {a}");
+        }
         flight.write_csv();
         let error = pollster::block_on(validation.pop());
         assert!(error.is_none(), "GPU validation: {error:?}");
