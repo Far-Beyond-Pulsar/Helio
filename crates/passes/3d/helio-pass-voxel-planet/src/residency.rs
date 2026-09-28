@@ -125,6 +125,9 @@ impl Ord for Pending {
 #[derive(Default)]
 struct Level {
     active: bool,
+    /// Window centre and angular radius of the last applied diff.
+    center: DVec3,
+    radius_angle: f64,
     /// Wanted but not yet issued columns, and their priority heap (lazy).
     pending: rustc_hash::FxHashSet<u64>,
     heap: BinaryHeap<Reverse<Pending>>,
@@ -470,6 +473,8 @@ impl Residency {
         for diff in update.levels {
             let level = diff.level as usize;
             self.levels[level].active = diff.active;
+            self.levels[level].center = diff.center;
+            self.levels[level].radius_angle = diff.radius_angle;
             for key in diff.removes {
                 self.levels[level].pending.remove(&key);
                 if self.residents.contains_key(&key) {
@@ -685,11 +690,35 @@ impl Residency {
         self.live_tier1.len()
     }
 
-    /// Per level: the current window is planned and every wanted column has
-    /// been issued (inactive levels are incomplete: rays fall back past them).
-    pub fn complete_levels(&self) -> Vec<bool> {
-        let settled = self.urgent.is_empty() && self.applied == self.requested;
-        self.levels.iter().map(|l| settled && l.active && l.pending.is_empty()).collect()
+    /// Per level, the angular distance from `eye_dir` within which every
+    /// column the traversal can want is resident, so rays nearer than that
+    /// never fall back to a coarser level: bounded by the (possibly lagging)
+    /// window and by the nearest pending column. Inactive levels give 0.
+    pub fn fallback_angles(&self, eye_dir: DVec3) -> Vec<f64> {
+        let grid = self.grid;
+        let urgent: rustc_hash::FxHashSet<u32> = self.urgent.iter().map(|k| unpack(*k).1).collect();
+        self.levels
+            .iter()
+            .enumerate()
+            .map(|(level, l)| {
+                if !l.active || urgent.contains(&(level as u32)) {
+                    return 0.0;
+                }
+                // Index-angle span of a column bounds its true angular size.
+                let col = grid.delta() * f64::from(BRICK << level);
+                let mut angle = l.radius_angle - col * 1.5 - l.center.angle_between(eye_dir);
+                if l.pending.len() > 4096 {
+                    return 0.0;
+                }
+                for key in &l.pending {
+                    let (face, lv, ci, cj) = unpack(*key);
+                    let size = f64::from(BRICK << lv);
+                    let dir = grid.direction(face, (f64::from(ci) + 0.5) * size, (f64::from(cj) + 0.5) * size);
+                    angle = angle.min(dir.angle_between(eye_dir) - col);
+                }
+                angle.max(0.0)
+            })
+            .collect()
     }
 
     pub fn idle(&self) -> bool {

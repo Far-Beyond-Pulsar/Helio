@@ -332,3 +332,61 @@ fn sky_bound_is_conservative() {
         }
     }
 }
+
+/// The sky bound stays conservative while the eye moves and residency is
+/// incomplete (pending columns, lagging windows): after every unsettled step,
+/// two frozen renders with and without the bound must agree per pixel.
+#[test]
+fn sky_bound_is_conservative_while_moving() {
+    let Some(gpu) = gpu() else { return };
+    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+    let dir = land(&planet, 2, 0.47, 0.53);
+    let mut eye = planet.surface_point(dir, 1.7);
+    let up = eye.normalize();
+    let east = up.any_orthonormal_vector();
+    let size = [320, 180];
+    let target = Target::new(&gpu, size);
+    let mut r = renderer(&gpu, planet.clone(), size);
+    r.settings_mut().lod_dither = 0.0;
+    settle(&gpu, &target, &mut r, &frame(&planet, eye), (east + up * 0.05).normalize().as_vec3());
+    let (mut bad, mut compared) = (0, 0);
+    for step in 0..80u64 {
+        // Walking pace (few pending columns, exact nearest-pending bound),
+        // then vehicle speed with a climb (windows lag, many pending).
+        eye = if step < 20 {
+            planet.surface_point(eye + east * 1.5, 1.7)
+        } else if step < 40 {
+            planet.surface_point(eye + east * 15.0, 1.7)
+        } else {
+            planet.surface_point(eye + east * 60.0, 1.7 + (step - 40) as f64 * 3.0)
+        };
+        let f = frame(&planet, eye);
+        let up = eye.normalize();
+        let forward = (east + up * (0.02 + 0.01 * (step % 5) as f64)).normalize().as_vec3();
+        target.render(&gpu, &mut r, &f, forward, 6000 + step * 3);
+        r.settings_mut().freeze_residency = true;
+        r.settings_mut().horizon = false;
+        target.render(&gpu, &mut r, &f, forward, 6000 + step * 3 + 1);
+        let reference = hits(&gpu, &r);
+        r.settings_mut().horizon = true;
+        target.render(&gpu, &mut r, &f, forward, 6000 + step * 3 + 2);
+        let bounded = hits(&gpu, &r);
+        r.settings_mut().freeze_residency = false;
+        for (index, (a, b)) in reference.iter().zip(&bounded).enumerate() {
+            compared += 1;
+            let both_miss = a.status == 0 && b.status == 0;
+            if !both_miss && (a.status, a.i, a.j, a.k, a.face, a.level) != (b.status, b.i, b.j, b.k, b.face, b.level) {
+                bad += 1;
+                if bad < 6 {
+                    eprintln!("step {step} pixel {} {}: reference {a:?} bounded {b:?}", index % 320, index / 320);
+                }
+            }
+        }
+        let stats = r.stats();
+        if step % 5 == 0 {
+            eprintln!("step {step}: pending {} resident {}", stats.pending_columns, stats.resident_columns);
+        }
+    }
+    eprintln!("{bad} differences in {compared} pixels");
+    assert_eq!(bad, 0);
+}

@@ -46,6 +46,9 @@ pub struct Settings {
     pub beam: bool,
     /// End rising eye rays at the directional sky bound.
     pub horizon: bool,
+    /// Diagnostics: skip residency planning (no jobs, windows or evictions)
+    /// so several renders see identical GPU state.
+    pub freeze_residency: bool,
     pub capacity: Capacity,
 }
 
@@ -57,6 +60,7 @@ impl Default for Settings {
             job_budget: 12_288,
             beam: std::env::var_os("HELIO_VOXEL_NO_BEAM").is_none(),
             horizon: std::env::var_os("HELIO_VOXEL_NO_HORIZON").is_none(),
+            freeze_residency: false,
             capacity: Capacity::default(),
         }
     }
@@ -719,7 +723,17 @@ impl PlanetRenderer {
         // [cut, outer]. See `horizon.wgsl`.
         const SKY_CUT_M: f64 = 100.0;
         frame.lod = [lod0 as f32, self.settings.lod_dither, -SKY_CUT_M as f32, (rho + grid.radius() * 3.0) as f32];
-        let rings = sky_rings(lod0, f64::from(self.settings.lod_dither), rho, rho - SKY_CUT_M, planet.outer_radius(), &self.residency.complete_levels());
+        // Nearest ray distance at which each level may fall back to coarser
+        // data: chord bound for points past its fallback angle at radius
+        // >= the cut radius.
+        let r_lo = rho - SKY_CUT_M;
+        let fallback: Vec<f64> = self
+            .residency
+            .fallback_angles(dir)
+            .iter()
+            .map(|a| if *a >= std::f64::consts::PI { f64::INFINITY } else { 2.0 * (rho * r_lo).sqrt() * (a * 0.5).sin() })
+            .collect();
+        let rings = sky_rings(lod0, f64::from(self.settings.lod_dither), rho, r_lo, planet.outer_radius(), &fallback);
         for (level, phi) in rings.iter().enumerate().take(32) {
             frame.ring[level / 4][level % 4] = *phi as f32;
         }
@@ -882,7 +896,11 @@ impl PlanetRenderer {
         let target_ms = if moving { 1.5 } else { 6.0 };
         let budget = ((target_ms / self.ms_per_job.max(1e-5)) as usize)
             .clamp(256, self.settings.job_budget.min(self.settings.capacity.max_jobs as usize));
-        let work = self.residency.plan(&self.planet, frame.eye, lod0, budget);
+        let work = if self.settings.freeze_residency {
+            FrameWork::default()
+        } else {
+            self.residency.plan(&self.planet, frame.eye, lod0, budget)
+        };
         self.last_jobs = work.jobs.len();
         self.stats.plan_cpu_ms = started.elapsed().as_secs_f64() * 1000.0;
         let uploading = std::time::Instant::now();
@@ -1108,10 +1126,11 @@ impl PlanetRenderer {
 
 /// Per level, the angular distance from the eye within which every point at
 /// radius `[r_lo, r_hi]` is nearer than the first ray distance the level can
-/// serve. Level L serves distances from its dithered ring start, or from the
-/// ring start of any finer level that is incomplete (rays fall back to
-/// coarser columns there).
-fn sky_rings(lod0: f64, dither: f64, rho: f64, r_lo: f64, r_hi: f64, complete: &[bool]) -> Vec<f64> {
+/// serve. Level L serves distances from its dithered ring start, or where a
+/// finer level may be missing (rays fall back to coarser columns there):
+/// from that level's ring start or its fallback distance, whichever is
+/// farther.
+fn sky_rings(lod0: f64, dither: f64, rho: f64, r_lo: f64, r_hi: f64, fallback: &[f64]) -> Vec<f64> {
     let start = |level: usize| {
         if level == 0 { 0.0 } else { lod0 * f64::from(1u32 << (level - 1).min(30)) / (1.0 + dither * 0.5) * 0.999 }
     };
@@ -1121,15 +1140,13 @@ fn sky_rings(lod0: f64, dither: f64, rho: f64, r_lo: f64, r_hi: f64, complete: &
         let q = (t * t - (rho - r) * (rho - r)) / (4.0 * rho * r);
         if q <= 0.0 { 0.0 } else { 2.0 * q.sqrt().min(1.0).asin() }
     };
-    let mut fallback = f64::INFINITY;
-    complete
+    let mut earliest = f64::INFINITY;
+    fallback
         .iter()
         .enumerate()
-        .map(|(level, done)| {
-            let t = start(level).min(fallback);
-            if !done {
-                fallback = fallback.min(start(level));
-            }
+        .map(|(level, from)| {
+            let t = start(level).min(earliest);
+            earliest = earliest.min(start(level).max(*from));
             let mut p = phi(t, r_lo).min(phi(t, r_hi));
             let r_star = (rho * rho - t * t).max(0.0).sqrt();
             if r_star > r_lo && r_star < r_hi {

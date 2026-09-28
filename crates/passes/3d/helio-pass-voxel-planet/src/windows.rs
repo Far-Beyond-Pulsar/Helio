@@ -23,6 +23,10 @@ pub struct WindowRequest {
 pub struct LevelDiff {
     pub level: u32,
     pub active: bool,
+    /// Window centre (unit direction) and angular radius: every column whose
+    /// centre lies within the radius is wanted.
+    pub center: DVec3,
+    pub radius_angle: f64,
     /// Newly wanted columns with their normalized distance (lower is sooner).
     pub adds: Vec<(f32, u64)>,
     pub removes: Vec<u64>,
@@ -139,6 +143,8 @@ impl WindowPlanner {
                     update.levels.push(LevelDiff {
                         level,
                         active: false,
+                        center: dir,
+                        radius_angle: 0.0,
                         adds: Vec::new(),
                         removes: state.wanted.drain().collect(),
                     });
@@ -176,6 +182,8 @@ impl WindowPlanner {
             update.levels.push(LevelDiff {
                 level,
                 active: true,
+                center: dir,
+                radius_angle: (radius / r0).min(std::f64::consts::PI),
                 adds,
                 removes,
             });
