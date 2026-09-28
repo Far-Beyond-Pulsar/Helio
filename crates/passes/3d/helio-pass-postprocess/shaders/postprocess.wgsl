@@ -1033,9 +1033,12 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
 
     //%P2
 
-    // 9. Depth of Field (Gaussian fallback when no DofPass is in the graph)
-    let raw_depth = textureLoad(depth_input, vec2<i32>(i32(uv.x * dims.x), i32(uv.y * dims.y)), 0);
-    color = apply_dof(color, uv, raw_depth, dims);
+    // 9. Depth of Field (Gaussian fallback when no DofPass is in the graph).
+    // The depth fetch is only needed when DOF is on (shape >= 0).
+    if !(postprocess.dof_aperture_shape < 0.0) {
+        let raw_depth = textureLoad(depth_input, vec2<i32>(i32(uv.x * dims.x), i32(uv.y * dims.y)), 0);
+        color = apply_dof(color, uv, raw_depth, dims);
+    }
 
     // 10. Motion blur
     color = apply_motion_blur(color, uv, dims);

@@ -31,7 +31,9 @@ pub use components::{CameraPostProcessComponent, PostProcessVolumeComponent};
 pub use gpu_types::*;
 
 mod volume_blend;
-pub use volume_blend::{PostProcessVolumeBlendPass, BLOOM_MAYBE_ACTIVE, DOF_MAYBE_ACTIVE};
+pub use volume_blend::{
+    PostProcessVolumeBlendPass, AUTO_EXPOSURE_MAYBE_ACTIVE, BLOOM_MAYBE_ACTIVE, DOF_MAYBE_ACTIVE,
+};
 
 mod fog_composite;
 pub use fog_composite::{FogCompositePass, FOGGED_HDR, FOGGED_HDR_FORMAT};
@@ -1432,11 +1434,22 @@ impl PostProcessPass {
         //    and would silently get the unblended camera defaults instead.
 
         // 1. Sampled log luminance: one sample per 4x4 block, then one final
-        // workgroup reduction. Each partial has a unique writer.
+        // workgroup reduction. Each partial has a unique writer. Only auto
+        // exposure reads the result, so metering is skipped while no settings
+        // source can select it (user effects may read it themselves). The
+        // adapted value then goes stale, so the next metered frame snaps.
+        let metering = !self.user_effect_entries.is_empty()
+            || ctx
+                .registry
+                .get::<bool>(helio_core::ResourceKey::new(AUTO_EXPOSURE_MAYBE_ACTIVE))
+                .unwrap_or(true);
+        if !metering {
+            self.exposure_history = false;
+        }
         if let Some(query) = &self.compute_timing_query {
             unsafe { &mut *ce }.write_timestamp(query, 0);
         }
-        {
+        if metering {
             let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("PostProcess Exposure"),
                 timestamp_writes: None,
@@ -1446,7 +1459,7 @@ impl PostProcessPass {
             let (gx, gy) = exposure_groups(self.analysis_size.0, self.analysis_size.1);
             cpass.dispatch_workgroups(gx, gy, 1);
         }
-        {
+        if metering {
             let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("PostProcess Exposure Reduce"),
                 timestamp_writes: None,
@@ -1455,7 +1468,7 @@ impl PostProcessPass {
             cpass.set_bind_group(0, compute_bg, &[]);
             cpass.dispatch_workgroups(1, 1, 1);
         }
-        {
+        if metering {
             let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("PostProcess Exposure Adapt"),
                 timestamp_writes: None,
