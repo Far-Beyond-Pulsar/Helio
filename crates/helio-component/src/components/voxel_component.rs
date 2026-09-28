@@ -34,6 +34,50 @@ fn default_voxel_generator_version() -> u32 {
     1
 }
 
+/// The registered terrain generator that fills a world: its id and output
+/// version. Serialized flat into the terrain component (`generator_id`,
+/// `generator_version`); the editor shows it as a searchable picker of the
+/// registered generators.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct VoxelGeneratorRef {
+    /// Stable generator id; empty means externally supplied data only.
+    #[serde(rename = "generator_id", default)]
+    pub id: String,
+    /// Output version; a new version may generate different terrain.
+    #[serde(rename = "generator_version", default = "default_voxel_generator_version")]
+    pub version: u32,
+}
+
+impl VoxelGeneratorRef {
+    pub fn new(id: impl Into<String>, version: u32) -> Self {
+        Self { id: id.into(), version }
+    }
+}
+
+impl Default for VoxelGeneratorRef {
+    /// The landform generator.
+    fn default() -> Self {
+        Self::new(VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION)
+    }
+}
+
+fn serialize_generator_ref_json(value: &VoxelGeneratorRef) -> pulsar_reflection::ReflectResult<serde_json::Value> {
+    serde_json::to_value(value).map_err(|e| pulsar_reflection::ReflectError::SerializationFailed(e.to_string()))
+}
+
+fn deserialize_generator_ref_json(value: serde_json::Value) -> pulsar_reflection::ReflectResult<VoxelGeneratorRef> {
+    serde_json::from_value(value).map_err(|e| pulsar_reflection::ReflectError::DeserializationFailed(e.to_string()))
+}
+
+/// Registered for reflection; the picker editor is registered by the host
+/// that knows the generator registry.
+#[pulsar_reflection::pulsar_type(
+    serialize_json_with = serialize_generator_ref_json,
+    deserialize_json_with = deserialize_generator_ref_json
+)]
+#[allow(dead_code)]
+type RegisteredVoxelGeneratorRef = VoxelGeneratorRef;
+
 fn default_chunk_edge_voxels() -> u32 {
     8
 }
@@ -223,10 +267,7 @@ fn default_plane_size() -> f64 {
 /// describes the chunk-key domain of live sample data.
 #[engine_class(category = "Voxel/Terrain", debug, serialize, deserialize)]
 #[category("World", category_color = "#6FA86F")]
-#[category("Domain", category_color = "#8F8F8F")]
 #[category("Generation", category_color = "#D1A73F")]
-#[category("Rendering", category_color = "#7C9DC9")]
-#[category("Materials", category_color = "#D1A73F")]
 #[category("Editing", category_color = "#D18F6F")]
 pub struct VoxelTerrainComponent {
     /// Runtime-only live payloads and data revision. Not an inspector
@@ -243,69 +284,58 @@ pub struct VoxelTerrainComponent {
     pub shape: VoxelWorldShape,
     /// Planet radius in metres (sphere worlds).
     #[serde(default = "default_planet_radius")]
-    #[property(min = 1000.0, max = 50000000.0, step = 1000.0, category = "World")]
+    #[property(min = 1000.0, max = 50000000.0, step = 1000.0, category = "World", label = "Planet radius (m)")]
     pub planet_radius: f64,
     /// Edge length of a finite plane in metres.
     #[serde(default = "default_plane_size")]
-    #[property(min = 16.0, max = 13000000.0, step = 16.0, category = "World")]
+    #[property(min = 16.0, max = 13000000.0, step = 16.0, category = "World", label = "Plane size (m)")]
     pub plane_size: f64,
+    /// Edge length of a base-resolution voxel in metres (0.1 to 1 for
+    /// streamed terrain).
+    #[property(min = 0.1, max = 1.0, step = 0.05, category = "World", label = "Voxel size (m)")]
+    pub voxel_size: f64,
+    /// The registered terrain generator that fills the world. Its settings
+    /// live in its settings component on the same entity.
+    #[serde(flatten)]
+    #[property(category = "Generation")]
+    pub generator: VoxelGeneratorRef,
+    /// Seed supplied to the generator.
+    #[property(category = "Generation")]
+    pub seed: u64,
+    /// Settings (JSON) for a generator without a settings component; a
+    /// settings component on the entity replaces them.
+    #[serde(default)]
+    pub generator_parameters: String,
+
+    // The fields below describe the chunk domain of live sample data
+    // (`payload_store`). Streamed terrain derives its own layout and LOD, so
+    // they are serialized but not shown in the inspector.
     /// Domain discriminant: 0 bounded, 1 unbounded.
-    #[property(category = "Domain")]
     pub domain_mode: u32,
     /// Finite-domain minimum and maximum on each axis. Ignored for unbounded domains.
-    #[property(category = "Domain")]
     pub bounds_min_x: f64,
-    #[property(category = "Domain")]
     pub bounds_min_y: f64,
-    #[property(category = "Domain")]
     pub bounds_min_z: f64,
-    #[property(category = "Domain")]
     pub bounds_max_x: f64,
-    #[property(category = "Domain")]
     pub bounds_max_y: f64,
-    #[property(category = "Domain")]
     pub bounds_max_z: f64,
-    /// Edge length of a base-resolution voxel in world units.
-    #[property(min = 0.0001, max = 10000.0, step = 0.01, category = "World")]
-    pub voxel_size: f64,
     /// Number of base-resolution voxels covered by one chunk key on each
     /// axis at LOD zero. The payload format can encode that region as samples,
     /// a hierarchy, a compressed field, or another registered representation.
     #[serde(default = "default_chunk_edge_voxels")]
-    #[property(category = "Generation")]
     pub chunk_edge_voxels: u32,
     /// Highest chunk LOD accepted for this terrain source.
     #[serde(default = "default_max_chunk_lod")]
-    #[property(category = "Generation")]
     pub max_chunk_lod: u32,
     /// Spatial scale between adjacent chunk LODs. Two means each coarser
     /// chunk covers twice the width of a finer chunk along each axis.
     #[serde(default = "default_lod_scale")]
-    #[property(category = "Generation")]
     pub lod_scale: u32,
-    /// Stable renderer backend identifier. Empty lets the host select a
-    /// compatible backend from the payload formats; procedural backends may
-    /// be selected explicitly even before any chunks have been generated.
+    /// Stable renderer backend identifier. Empty selects the unique backend
+    /// that supports the generator.
     #[serde(default)]
-    #[property(category = "Rendering")]
     pub renderer_id: String,
-    /// Stable registered generator/source identifier. Empty means externally
-    /// supplied data only; generator implementation is not stored here.
-    #[property(category = "Generation")]
-    pub generator_id: String,
-    /// Stable implementation version. Changing it invalidates generated
-    /// output without serializing executable generator code.
-    #[serde(default = "default_voxel_generator_version")]
-    #[property(category = "Generation")]
-    pub generator_version: u32,
-    /// Seed supplied to the registered generator.
-    #[property(category = "Generation")]
-    pub seed: u64,
-    /// Opaque serialized parameters consumed by the registered generator.
-    #[property(category = "Generation")]
-    pub generator_parameters: String,
     /// Palette of IDs into Helio's existing SceneDB material records.
-    #[property(category = "Materials")]
     pub material_ids: Vec<u32>,
     /// Whether external callers may submit canonical live edit/data batches.
     #[property(category = "Editing")]
@@ -341,8 +371,7 @@ impl Default for VoxelTerrainComponent {
             max_chunk_lod: default_max_chunk_lod(),
             lod_scale: default_lod_scale(),
             renderer_id: String::new(),
-            generator_id: VOXEL_TERRAIN_GENERATOR.into(),
-            generator_version: VOXEL_TERRAIN_GENERATOR_VERSION,
+            generator: VoxelGeneratorRef::default(),
             seed: 0,
             generator_parameters: String::new(),
             material_ids: vec![0],
@@ -400,8 +429,7 @@ impl Clone for VoxelTerrainComponent {
             max_chunk_lod: self.max_chunk_lod,
             lod_scale: self.lod_scale,
             renderer_id: self.renderer_id.clone(),
-            generator_id: self.generator_id.clone(),
-            generator_version: self.generator_version,
+            generator: self.generator.clone(),
             seed: self.seed,
             generator_parameters: self.generator_parameters.clone(),
             material_ids: self.material_ids.clone(),
@@ -423,34 +451,34 @@ impl Clone for VoxelTerrainComponent {
 #[serde(default)]
 pub struct VoxelLandformComponent {
     /// Typical continent width in kilometres.
-    #[property(min = 10.0, max = 20000.0, step = 10.0, category = "Continents")]
+    #[property(min = 10.0, max = 20000.0, step = 10.0, category = "Continents", label = "Continent width (km)")]
     pub continent_km: f64,
     /// Depth of the low basins below the datum, in metres.
-    #[property(min = 0.0, max = 10000.0, step = 10.0, category = "Continents")]
+    #[property(min = 0.0, max = 10000.0, step = 10.0, category = "Continents", label = "Ocean depth (m)")]
     pub ocean_depth_m: f64,
     /// Typical lowland height above the datum, in metres.
-    #[property(min = 0.0, max = 5000.0, step = 10.0, category = "Continents")]
+    #[property(min = 0.0, max = 5000.0, step = 10.0, category = "Continents", label = "Lowland height (m)")]
     pub lowland_m: f64,
     /// Height of mountain ranges, in metres.
-    #[property(min = 0.0, max = 9000.0, step = 10.0, category = "Mountains")]
+    #[property(min = 0.0, max = 9000.0, step = 10.0, category = "Mountains", label = "Mountain height (m)")]
     pub mountain_m: f64,
     /// Spacing of mountain ridges, in kilometres.
-    #[property(min = 1.0, max = 500.0, step = 1.0, category = "Mountains")]
+    #[property(min = 1.0, max = 500.0, step = 1.0, category = "Mountains", label = "Ridge spacing (km)")]
     pub mountain_km: f64,
     /// Height above which flat ground is snow, in metres.
-    #[property(min = 0.0, max = 10000.0, step = 10.0, category = "Mountains")]
+    #[property(min = 0.0, max = 10000.0, step = 10.0, category = "Mountains", label = "Snowline (m)")]
     pub snowline_m: f64,
     /// Height of rolling hills, in metres.
-    #[property(min = 0.0, max = 2000.0, step = 1.0, category = "Detail")]
+    #[property(min = 0.0, max = 2000.0, step = 1.0, category = "Detail", label = "Hill height (m)")]
     pub hill_m: f64,
     /// Spacing of hills, in kilometres.
-    #[property(min = 0.1, max = 100.0, step = 0.1, category = "Detail")]
+    #[property(min = 0.1, max = 100.0, step = 0.1, category = "Detail", label = "Hill spacing (km)")]
     pub hill_km: f64,
     /// Metre-scale roughness as a fraction of each detail wavelength.
     #[property(min = 0.0, max = 0.2, step = 0.005, category = "Detail")]
     pub roughness: f64,
     /// Scale of the domain warp that bends coasts and ridges, in kilometres.
-    #[property(min = 0.0, max = 500.0, step = 1.0, category = "Detail")]
+    #[property(min = 0.0, max = 500.0, step = 1.0, category = "Detail", label = "Coastline warp (km)")]
     pub warp_km: f64,
 }
 
@@ -502,11 +530,11 @@ pub enum VoxelTerrainMaterial {
 pub struct VoxelFlatTerrainComponent {
     /// Ground height above the entity origin, in metres.
     #[serde(rename = "height_m")]
-    #[property(min = -10000.0, max = 10000.0, step = 0.1, category = "Ground")]
+    #[property(min = -10000.0, max = 10000.0, step = 0.1, category = "Ground", label = "Height (m)")]
     pub height: f64,
     /// Depth of the soil under the surface layer, in metres.
     #[serde(rename = "soil_depth_m")]
-    #[property(min = 0.0, max = 1000.0, step = 0.1, category = "Ground")]
+    #[property(min = 0.0, max = 1000.0, step = 0.1, category = "Ground", label = "Soil depth (m)")]
     pub soil_depth: f64,
     #[property(category = "Ground")]
     pub surface: VoxelTerrainMaterial,
@@ -697,6 +725,21 @@ fn edit_terrain_samples(
         .ok_or_else(|| "voxel terrain component is absent".to_string())?;
     if !component.enabled || !component.editable {
         return Err("voxel terrain is disabled or not editable".into());
+    }
+    if super::voxel_world::is_generated(component) {
+        // Generated terrain keeps its edits in the journal: sample (x, y, z)
+        // is the block at ((x, y, z) + 0.5) voxels from the origin, and the
+        // slot is a terrain material id.
+        let planet = super::voxel_world::terrain_world(world, entity)?;
+        let voxel = planet.grid().voxel_size();
+        let edits = samples
+            .iter()
+            .map(|s| {
+                let p = glam::DVec3::new(s[0] as f64 + 0.5, s[1] as f64 + 0.5, s[2] as f64 + 0.5) * voxel;
+                super::voxel_world::block_edit(&planet, p, u32::from(material_slot))
+            })
+            .collect();
+        return super::voxel_world::append_edits(world, entity, edits);
     }
     if component.chunk_edge_voxels != 8 {
         return Err("sample edits require the built-in 8-voxel chunk layout".into());
@@ -895,7 +938,7 @@ mod tests {
         value.as_object_mut().unwrap().remove("max_chunk_lod");
         value.as_object_mut().unwrap().remove("lod_scale");
         let restored: VoxelTerrainComponent = serde_json::from_value(value).unwrap();
-        assert_eq!(restored.generator_version, 1);
+        assert_eq!(restored.generator.version, 1);
         assert_eq!(restored.chunk_edge_voxels, 8);
         assert_eq!(restored.max_chunk_lod, 16);
         assert_eq!(restored.lod_scale, 2);
