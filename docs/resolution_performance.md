@@ -544,3 +544,5 @@ Tests were run on lavapipe.
     `__PP_TAIL_VEC4__` placeholder in `volumetric_fog.wgsl`.
   - `helio-pass-water-sim`'s integration tests, which no longer compile
     against current APIs.
+  - `helio-default-graphs`' `limited_native` test, which also no longer
+    compiles against current APIs.
