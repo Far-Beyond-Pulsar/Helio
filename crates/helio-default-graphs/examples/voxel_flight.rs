@@ -428,6 +428,32 @@ fn main() {
     for _ in 0..60 {
         flight.draw("ground_warm", ground, forward);
     }
+    if std::env::var_os("HELIO_VOXEL_FLIGHT_CPU_PROBE").is_some() {
+        // CPU cost of Renderer::render per pass over a steady view.
+        let mut totals: BTreeMap<&'static str, (f64, u32)> = BTreeMap::new();
+        let mut frame_cpu = Vec::new();
+        for _ in 0..240 {
+            flight.draw("cpu_probe", ground, forward);
+            let snap = flight.renderer.timing_snapshot();
+            if let Some(t) = snap.total_cpu_ms {
+                frame_cpu.push(f64::from(t));
+            }
+            for pass in &snap.passes {
+                if let Some(ms) = pass.cpu_ms {
+                    let e = totals.entry(pass.name).or_insert((0.0, 0));
+                    e.0 += f64::from(ms);
+                    e.1 += 1;
+                }
+            }
+        }
+        let mut list: Vec<_> = totals.into_iter().map(|(n, (ms, c))| (ms / f64::from(c), n)).collect();
+        list.sort_by(|a, b| b.0.total_cmp(&a.0));
+        eprintln!("CPU total_cpu_ms p50 {:.3}", percentile(&frame_cpu, 0.5));
+        for (ms, name) in &list {
+            eprintln!("CPU pass {name:36} {ms:8.4} ms");
+        }
+        return;
+    }
     flight.capture("ground");
     audits.push(flight.audit("ground", ground, forward));
     for (name, pitch, h) in [("ground_horizon", 0.0, heading + 1.3), ("ground_down", -45.0, heading + 2.5), ("ground_up", 15.0, heading - 1.0)] {
