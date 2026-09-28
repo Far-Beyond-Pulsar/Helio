@@ -6,8 +6,11 @@
 //! runtime data fields.
 
 use engine_class_derive::engine_class;
-use helio_voxel_data::VoxelStoredPayload;
+use helio_voxel_data::{
+    VoxelStoredPayload, VOXEL_BUILTIN_GENERATOR_VERSION, VOXEL_FLAT_GENERATOR,
+};
 pub use helio_voxel_data::{VoxelPayloadKey, VoxelPayloadStore};
+use pulsar_scene_model::components::Transform;
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
@@ -274,10 +277,10 @@ impl Default for VoxelTerrainComponent {
             chunk_edge_voxels: default_chunk_edge_voxels(),
             max_chunk_lod: default_max_chunk_lod(),
             lod_scale: default_lod_scale(),
-            generator_id: String::new(),
-            generator_version: 1,
+            generator_id: VOXEL_FLAT_GENERATOR.into(),
+            generator_version: VOXEL_BUILTIN_GENERATOR_VERSION,
             seed: 0,
-            generator_parameters: String::new(),
+            generator_parameters: r#"{"planet_radius":8.0,"base_height":0.0,"amplitude":0.0,"wavelength":16.0,"material_slot":1}"#.into(),
             material_ids: vec![0],
             editable: true,
             source_revision: 0,
@@ -324,6 +327,303 @@ impl Clone for VoxelTerrainComponent {
     }
 }
 
+// SceneDB component methods are the stable scripting/registry surface for
+// individual edits and bounded brush batches. The editor uses
+// `VoxelSourceSession` for asynchronous, generation-checked brush strokes.
+#[pulsar_scenedb::component_methods]
+impl VoxelComponent {
+    #[world_method]
+    fn paint_sample(
+        world: &mut pulsar_scenedb::World,
+        entity: pulsar_scenedb::Entity,
+        x: i64,
+        y: i64,
+        z: i64,
+        material_slot: u8,
+    ) -> Result<(), String> {
+        validate_paint_slot(material_slot)?;
+        edit_object_sample(world, entity, [x, y, z], material_slot)
+    }
+
+    #[world_method]
+    fn paint_samples(
+        world: &mut pulsar_scenedb::World,
+        entity: pulsar_scenedb::Entity,
+        samples: Vec<[i64; 3]>,
+        material_slot: u8,
+    ) -> Result<(), String> {
+        validate_paint_slot(material_slot)?;
+        edit_object_samples(world, entity, &samples, material_slot)
+    }
+
+    #[world_method]
+    fn erase_sample(
+        world: &mut pulsar_scenedb::World,
+        entity: pulsar_scenedb::Entity,
+        x: i64,
+        y: i64,
+        z: i64,
+    ) -> Result<(), String> {
+        edit_object_sample(world, entity, [x, y, z], 0)
+    }
+
+    #[world_method]
+    fn erase_samples(
+        world: &mut pulsar_scenedb::World,
+        entity: pulsar_scenedb::Entity,
+        samples: Vec<[i64; 3]>,
+    ) -> Result<(), String> {
+        edit_object_samples(world, entity, &samples, 0)
+    }
+}
+
+#[pulsar_scenedb::component_methods]
+impl VoxelTerrainComponent {
+    #[world_method]
+    fn paint_sample(
+        world: &mut pulsar_scenedb::World,
+        entity: pulsar_scenedb::Entity,
+        x: i64,
+        y: i64,
+        z: i64,
+        material_slot: u8,
+    ) -> Result<(), String> {
+        validate_paint_slot(material_slot)?;
+        edit_terrain_sample(world, entity, [x, y, z], material_slot)
+    }
+
+    #[world_method]
+    fn paint_samples(
+        world: &mut pulsar_scenedb::World,
+        entity: pulsar_scenedb::Entity,
+        samples: Vec<[i64; 3]>,
+        material_slot: u8,
+    ) -> Result<(), String> {
+        validate_paint_slot(material_slot)?;
+        edit_terrain_samples(world, entity, &samples, material_slot)
+    }
+
+    #[world_method]
+    fn erase_sample(
+        world: &mut pulsar_scenedb::World,
+        entity: pulsar_scenedb::Entity,
+        x: i64,
+        y: i64,
+        z: i64,
+    ) -> Result<(), String> {
+        edit_terrain_sample(world, entity, [x, y, z], 0)
+    }
+
+    #[world_method]
+    fn erase_samples(
+        world: &mut pulsar_scenedb::World,
+        entity: pulsar_scenedb::Entity,
+        samples: Vec<[i64; 3]>,
+    ) -> Result<(), String> {
+        edit_terrain_samples(world, entity, &samples, 0)
+    }
+}
+
+fn edit_object_sample(
+    world: &mut pulsar_scenedb::World,
+    entity: pulsar_scenedb::Entity,
+    xyz: [i64; 3],
+    material_slot: u8,
+) -> Result<(), String> {
+    edit_object_samples(world, entity, &[xyz], material_slot)
+}
+
+fn edit_object_samples(
+    world: &mut pulsar_scenedb::World,
+    entity: pulsar_scenedb::Entity,
+    samples: &[[i64; 3]],
+    material_slot: u8,
+) -> Result<(), String> {
+    let component = world
+        .get::<VoxelComponent>(entity)
+        .ok_or_else(|| "voxel object component is absent".to_string())?;
+    if !component.enabled || !component.editable {
+        return Err("voxel object is disabled or not editable".into());
+    }
+    if component
+        .dimensions
+        .iter()
+        .any(|&size| size == 0 || size > 256)
+    {
+        return Err("voxel object dimensions must be between 1 and 256 samples".into());
+    }
+    if samples.iter().any(|sample| {
+        sample
+            .iter()
+            .enumerate()
+            .any(|(axis, &coord)| coord < 0 || coord >= i64::from(component.dimensions[axis]))
+    }) {
+        return Err("voxel sample is outside the object dimensions".into());
+    }
+    publish_samples(
+        component.payload_store(),
+        helio_voxel_data::VoxelTerrainId(u128::from(entity.bits())),
+        samples,
+        material_slot,
+        &component.material_ids,
+        helio_voxel_data::VoxelDomain::Bounded {
+            min: [0; 3],
+            max: component
+                .dimensions
+                .map(|size| i64::from(size.div_ceil(8) - 1)),
+            max_lod: 0,
+        },
+    )
+}
+
+fn edit_terrain_sample(
+    world: &mut pulsar_scenedb::World,
+    entity: pulsar_scenedb::Entity,
+    xyz: [i64; 3],
+    material_slot: u8,
+) -> Result<(), String> {
+    edit_terrain_samples(world, entity, &[xyz], material_slot)
+}
+
+fn edit_terrain_samples(
+    world: &mut pulsar_scenedb::World,
+    entity: pulsar_scenedb::Entity,
+    samples: &[[i64; 3]],
+    material_slot: u8,
+) -> Result<(), String> {
+    let component = world
+        .get::<VoxelTerrainComponent>(entity)
+        .ok_or_else(|| "voxel terrain component is absent".to_string())?;
+    if !component.enabled || !component.editable {
+        return Err("voxel terrain is disabled or not editable".into());
+    }
+    if component.chunk_edge_voxels != 8 {
+        return Err("sample edits require the built-in 8-voxel chunk layout".into());
+    }
+    if component.domain_mode != 0 && component.domain_mode != 1 {
+        return Err("voxel terrain domain_mode must be bounded (0) or unbounded (1)".into());
+    }
+    if !component.voxel_size.is_finite() || component.voxel_size <= 0.0 || component.lod_scale == 0
+    {
+        return Err("voxel terrain requires a positive finite voxel size and LOD scale".into());
+    }
+    if component.material_ids.len() > usize::from(u8::MAX) {
+        return Err("voxel terrain material palette exceeds 255 IDs".into());
+    }
+    let transform = world.get::<Transform>(entity).copied().unwrap_or_default();
+    let [sx, sy, sz] = transform.scale;
+    if transform
+        .rotation
+        .iter()
+        .any(|value| !value.is_finite() || value.abs() > 1.0e-5)
+        || !sx.is_finite()
+        || sx <= 0.0
+        || !sy.is_finite()
+        || !sz.is_finite()
+        || (sx - sy).abs() > 1.0e-5
+        || (sx - sz).abs() > 1.0e-5
+        || transform.position.iter().any(|value| !value.is_finite())
+    {
+        return Err("voxel terrain edits require an unrotated transform with finite positive uniform scale".into());
+    }
+    let max_lod = u8::try_from(component.max_chunk_lod)
+        .map_err(|_| "max_chunk_lod must fit in a chunk key".to_string())?;
+    let domain = if component.domain_mode == 1 {
+        helio_voxel_data::VoxelDomain::Unbounded { max_lod }
+    } else {
+        let min = [
+            component.bounds_min_x,
+            component.bounds_min_y,
+            component.bounds_min_z,
+        ];
+        let max = [
+            component.bounds_max_x,
+            component.bounds_max_y,
+            component.bounds_max_z,
+        ];
+        if (0..3)
+            .any(|axis| !min[axis].is_finite() || !max[axis].is_finite() || min[axis] >= max[axis])
+        {
+            return Err("bounded terrain requires finite increasing bounds".into());
+        }
+        let chunk_size = component.voxel_size * f64::from(sx) * 8.0;
+        if !chunk_size.is_finite() || chunk_size <= 0.0 {
+            return Err("voxel_size must be finite and positive".into());
+        }
+        let chunk_min = std::array::from_fn(|axis| {
+            ((min[axis] - f64::from(transform.position[axis])) / chunk_size).floor() as i64
+        });
+        let chunk_max = std::array::from_fn(|axis| {
+            (((max[axis] - f64::from(transform.position[axis])) / chunk_size).ceil() as i64)
+                .saturating_sub(1)
+        });
+        helio_voxel_data::VoxelDomain::BoundedBase {
+            min: chunk_min,
+            max: chunk_max,
+            max_lod,
+            lod_scale: component.lod_scale,
+        }
+    };
+    publish_samples(
+        component.payload_store(),
+        helio_voxel_data::VoxelTerrainId(u128::from(entity.bits())),
+        samples,
+        material_slot,
+        &component.material_ids,
+        domain,
+    )
+}
+
+fn publish_samples(
+    store: VoxelPayloadStore,
+    terrain: helio_voxel_data::VoxelTerrainId,
+    samples: &[[i64; 3]],
+    material_slot: u8,
+    material_ids: &[u32],
+    domain: helio_voxel_data::VoxelDomain,
+) -> Result<(), String> {
+    if samples.is_empty() {
+        return Ok(());
+    }
+    if samples.len() > helio_voxel_data::VOXEL_EDIT_MAX_SAMPLES_PER_JOB {
+        return Err(format!(
+            "voxel sample batch exceeds the {} sample limit",
+            helio_voxel_data::VOXEL_EDIT_MAX_SAMPLES_PER_JOB
+        ));
+    }
+    if usize::from(material_slot) > material_ids.len() {
+        return Err(format!(
+            "material slot {material_slot} is outside the palette"
+        ));
+    }
+    let writer = helio_voxel_data::VoxelSourceWriter::new(
+        terrain,
+        helio_voxel_data::VoxelSourceId(0),
+        store,
+    );
+    let edits: Vec<_> = samples
+        .iter()
+        .copied()
+        .map(|xyz| helio_voxel_data::VoxelSampleEdit {
+            xyz,
+            lod: 0,
+            material_slot,
+        })
+        .collect();
+    writer
+        .publish_sample_edits(&edits, domain, material_ids)
+        .map(|_| ())
+        .map_err(|error| format!("voxel sample edit failed: {error:?}"))
+}
+
+fn validate_paint_slot(material_slot: u8) -> Result<(), String> {
+    if material_slot == 0 {
+        Err("material slot 0 is reserved for erase operations".into())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,21 +648,17 @@ mod tests {
         let store = component.payload_store();
         let state = store.read().unwrap();
         assert_eq!(state.1.len(), 8);
-        assert!(
-            state
-                .1
-                .values()
-                .all(|bytes| bytes.len() == 512 && bytes.iter().all(|&slot| slot == 1))
-        );
+        assert!(state
+            .1
+            .values()
+            .all(|bytes| bytes.len() == 512 && bytes.iter().all(|&slot| slot == 1)));
         drop(state);
         let serialized = serde_json::to_value(&component).unwrap();
         assert!(serialized.get("payloads").is_none());
-        assert!(
-            !component
-                .get_properties()
-                .iter()
-                .any(|property| property.name == "payloads")
-        );
+        assert!(!component
+            .get_properties()
+            .iter()
+            .any(|property| property.name == "payloads"));
     }
 
     #[test]
@@ -384,12 +680,10 @@ mod tests {
     fn terrain_component_runtime_payloads_are_empty_hidden_and_not_serialized() {
         let component = VoxelTerrainComponent::default();
         assert_runtime_storage(&component, &component.payloads);
-        assert!(
-            !component
-                .get_properties()
-                .iter()
-                .any(|property| property.name == "payloads")
-        );
+        assert!(!component
+            .get_properties()
+            .iter()
+            .any(|property| property.name == "payloads"));
     }
 
     #[test]
