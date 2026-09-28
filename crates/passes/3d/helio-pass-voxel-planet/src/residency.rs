@@ -52,7 +52,11 @@ pub struct Job {
     pub pad: [u32; 3],
 }
 
+/// First key word of a level column: its (never negative) column index in
+/// 24 bits, the face and the level. 2^24 columns cover a 0.1 m Earth face
+/// (1.25e7 columns) and an infinite plane (2^24).
 pub fn key0(face: u8, level: u32, ci: i32) -> u32 {
+    debug_assert!((0..1 << 24).contains(&ci), "column index {ci} outside 24 bits");
     (ci as u32 & 0xff_ffff) | (u32::from(face) << 24) | (level << 27)
 }
 
@@ -67,7 +71,7 @@ fn pack(k0: u32, k1: u32) -> u64 {
 fn unpack(key: u64) -> (u8, u32, i32, i32) {
     let k0 = key as u32;
     let k1 = (key >> 32) as u32;
-    (((k0 >> 24) & 7) as u8, k0 >> 27, ((k0 << 8) as i32) >> 8, k1 as i32)
+    (((k0 >> 24) & 7) as u8, k0 >> 27, (k0 & 0xff_ffff) as i32, k1 as i32)
 }
 
 /// Direct-mapped summary blocks: per (level, face) a toroidal table for each
@@ -129,7 +133,8 @@ struct Level {
     active: bool,
     /// Window centre and angular radius of the last applied diff.
     center: DVec3,
-    radius_angle: f64,
+    /// Ground radius of the applied window (metres).
+    radius: f64,
     /// Wanted but not yet issued columns, and their priority heap (lazy).
     pending: rustc_hash::FxHashSet<u64>,
     heap: BinaryHeap<Reverse<Pending>>,
@@ -487,7 +492,7 @@ impl Residency {
             let level = diff.level as usize;
             self.levels[level].active = diff.active;
             self.levels[level].center = diff.center;
-            self.levels[level].radius_angle = diff.radius_angle;
+            self.levels[level].radius = diff.radius;
             for key in diff.removes {
                 self.levels[level].pending.remove(&key);
                 if self.residents.contains_key(&key) {
@@ -707,12 +712,13 @@ impl Residency {
         self.live_tier1.len()
     }
 
-    /// Per level, the angular distance from `eye_dir` within which every
+    /// Per level, the ground distance (metres) from `eye` within which every
     /// column the traversal can want is resident, so rays nearer than that
     /// never fall back to a coarser level: bounded by the (possibly lagging)
     /// window and by the nearest pending column. Inactive levels give 0.
-    pub fn fallback_angles(&self, eye_dir: DVec3) -> Vec<f64> {
+    pub fn fallback_distances(&self, eye: DVec3) -> Vec<f64> {
         let grid = self.grid;
+        let ground = |p: DVec3| if grid.is_plane() { DVec3::new(p.x, 0.0, p.z) } else { p.normalize() };
         let urgent: rustc_hash::FxHashSet<u32> = self.urgent.iter().map(|k| unpack(*k).1).collect();
         self.levels
             .iter()
@@ -721,22 +727,23 @@ impl Residency {
                 if !l.active || urgent.contains(&(level as u32)) {
                     return 0.0;
                 }
-                // Index-angle span of a column bounds its true angular size.
-                let col = grid.delta() * f64::from(BRICK << level);
-                let mut angle = l.radius_angle - col * 1.5 - l.center.angle_between(eye_dir);
+                // A column's ground width (the index-angle span on a sphere
+                // bounds its true size).
+                let col = grid.delta() * f64::from(BRICK << level) * if grid.is_plane() { 1.0 } else { grid.radius() };
+                let mut distance = l.radius - col * 1.5 - grid.ground_distance(l.center, ground(eye));
                 if l.pending.len() > 4096 {
                     return 0.0;
                 }
                 for key in &l.pending {
                     let (face, lv, ci, cj) = unpack(*key);
                     let size = f64::from(BRICK << lv);
-                    let dir = grid.direction(face, (f64::from(ci) + 0.5) * size, (f64::from(cj) + 0.5) * size);
+                    let p = grid.ground_point(face, (f64::from(ci) + 0.5) * size, (f64::from(cj) + 0.5) * size);
                     // Traversal uses only complete 4x4-column blocks while a
                     // level streams in: a pending column makes its whole
                     // block (within its diagonal, 5.7 columns) fall back.
-                    angle = angle.min(dir.angle_between(eye_dir) - col * 6.0);
+                    distance = distance.min(grid.ground_distance(p, eye) - col * 6.0);
                 }
-                angle.max(0.0)
+                distance.max(0.0)
             })
             .collect()
     }

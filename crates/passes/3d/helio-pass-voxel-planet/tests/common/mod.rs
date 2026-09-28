@@ -127,7 +127,7 @@ impl Target {
 
     /// Render one frame and wait for completion.
     pub fn render(&self, gpu: &Gpu, renderer: &mut PlanetRenderer, frame: &PlanetFrame, forward: Vec3, frame_num: u64) {
-        let up = frame.eye.normalize().as_vec3();
+        let up = frame.planet.grid().up(frame.eye).as_vec3();
         let camera = self.camera(forward, if forward.normalize().dot(up).abs() > 0.99 { up.any_orthonormal_vector() } else { up });
         gpu.queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&camera));
         let mut encoder = gpu.device.create_command_encoder(&Default::default());

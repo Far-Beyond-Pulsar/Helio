@@ -8,9 +8,9 @@ use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Cell, Planet, PlanetRe
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
-fn field_kernel(gpu: &Gpu, consts: &FieldConstants, inputs: &[IVec4], extra: &[IVec4]) -> Vec<[i32; 4]> {
+fn field_kernel(gpu: &Gpu, consts: &FieldConstants, plane: bool, inputs: &[IVec4], extra: &[IVec4]) -> Vec<[i32; 4]> {
     let src = format!(
-        "{}\n@group(0) @binding(1) var<uniform> field: FieldConstants;
+        "const SHAPE: u32 = {}u;\nfn is_plane() -> bool {{ return SHAPE == 1u; }}\n{}\n@group(0) @binding(1) var<uniform> field: FieldConstants;
 @group(0) @binding(2) var<storage, read> inputs: array<vec4<i32>>;
 @group(0) @binding(3) var<storage, read> extra: array<vec4<i32>>;
 @group(0) @binding(4) var<storage, read_write> outputs: array<vec4<i32>>;
@@ -23,6 +23,7 @@ fn field_kernel(gpu: &Gpu, consts: &FieldConstants, inputs: &[IVec4], extra: &[I
     let m = ground_material(p, e.x, e.y, e.z, e.w);
     outputs[id.x] = vec4<i32>(h, i32(m), p.x ^ p.y ^ p.z, noise(p, 7u, 99u) ^ noise(p, 19u + (u32(a.w) & 7u), 5u));
 }}",
+        u32::from(plane),
         include_str!("../shaders/field.wgsl")
     );
     let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -83,8 +84,9 @@ fn field_kernel(gpu: &Gpu, consts: &FieldConstants, inputs: &[IVec4], extra: &[I
 #[test]
 fn wgsl_field_is_bit_identical_to_cpu() {
     let Some(gpu) = gpu() else { return };
-    for size in [0.1, 0.3, 1.0] {
-        let planet = Planet::new(PlanetRecipe { voxel_size_m: size, ..Default::default() }).unwrap();
+    use helio_pass_voxel_planet::grid::Shape;
+    for (shape, size) in [(Shape::Sphere, 0.1), (Shape::Sphere, 0.3), (Shape::Sphere, 1.0), (Shape::Plane, 0.1), (Shape::InfinitePlane, 0.1), (Shape::InfinitePlane, 1.0)] {
+        let planet = Planet::new(PlanetRecipe { shape, voxel_size_m: size, plane_size_m: 5_000.0, ..Default::default() }).unwrap();
         let grid = *planet.grid();
         let n = grid.cells();
         let mut inputs = Vec::new();
@@ -99,7 +101,7 @@ fn wgsl_field_is_bit_identical_to_cpu() {
         for s in 0..20_000 {
             let level = (next() % u64::from(grid.levels())) as u32;
             let cells = n >> level;
-            let face = (next() % 6) as i32;
+            let face = if grid.is_plane() { 2 } else { (next() % 6) as i32 };
             let (i, j) = if s % 4 == 0 {
                 // Face edges and corners.
                 ((next() % 2) as i32 * (cells - 1), (next() % u64::from(cells as u32)) as i32)
@@ -114,7 +116,7 @@ fn wgsl_field_is_bit_identical_to_cpu() {
                 (next() % 200_000) as i32 - 100_000,
             ));
         }
-        let out = field_kernel(&gpu, planet.field(), &inputs, &extra);
+        let out = field_kernel(&gpu, planet.field(), grid.is_plane(), &inputs, &extra);
         for ((input, e), gpu_out) in inputs.iter().zip(&extra).zip(out) {
             let p = grid.domain_point(input.x as u8, input.y, input.z, input.w as u32);
             let h = field::height(planet.field(), p, input.w as u32);
@@ -148,7 +150,7 @@ fn compare_near(gpu: &Gpu, planet: &Arc<Planet>, eye: DVec3, forward: Vec3, size
     eprintln!("settled after {frames} frames: {stats:?}");
     assert_eq!(stats.failed_jobs, 0);
     let hits = hits(gpu, &renderer);
-    let up = eye.normalize().as_vec3();
+    let up = planet.grid().up(eye).as_vec3();
     let camera = target.camera(forward, if forward.normalize().dot(up).abs() > 0.99 { up.any_orthonormal_vector() } else { up });
     let lod0 = stats.lod0_distance;
     let (mut compared, mut mismatched) = (0, 0);
@@ -194,6 +196,41 @@ fn ground_view_matches_canonical_cpu_ray_casts() {
     eprintln!("compared {compared}, mismatched {mismatched}");
     assert!(compared > 1000);
     assert!(mismatched * 1000 <= compared, "{mismatched}/{compared}");
+}
+
+/// Level-0 column indices past 2^23 (the far third of a 0.1 m Earth face)
+/// decode unsigned from their 24-bit keys.
+#[test]
+fn ground_view_near_a_far_face_edge_matches_cpu_ray_casts() {
+    let Some(gpu) = gpu() else { return };
+    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+    let dir = land(&planet, 4, 0.86, 0.9);
+    let cell = planet.grid().locate(dir * planet.grid().radius()).0;
+    assert!(cell.i >> 3 >= 1 << 23 && cell.j >> 3 >= 1 << 23, "{cell:?}");
+    let eye = planet.surface_point(dir, 1.7);
+    let up = eye.normalize();
+    let forward = (up.any_orthonormal_vector() - up * 0.35).normalize().as_vec3();
+    let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [320, 180]);
+    assert!(compared > 1000);
+    assert!(mismatched * 1000 <= compared, "{mismatched}/{compared}");
+}
+
+/// Finite and infinite planes: ground and elevated views match exact CPU
+/// ray casts and settle without exhausted or loading rays.
+#[test]
+fn plane_views_match_canonical_cpu_ray_casts() {
+    let Some(gpu) = gpu() else { return };
+    for shape in [helio_pass_voxel_planet::grid::Shape::Plane, helio_pass_voxel_planet::grid::Shape::InfinitePlane] {
+        let planet = Arc::new(Planet::new(PlanetRecipe { shape, plane_size_m: 3_000.0, ..Default::default() }).unwrap());
+        for (x, z, height, pitch) in [(12.3, -45.6, 1.7, -0.35), (-300.0, 250.0, 8.0, -1.2)] {
+            let eye = planet.surface_point(DVec3::new(x, 0.0, z), height);
+            let forward = Vec3::new(0.8, pitch, 0.6).normalize();
+            let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [320, 180]);
+            eprintln!("{shape:?} at {height} m: compared {compared}, mismatched {mismatched}");
+            assert!(compared > 1000);
+            assert!(mismatched * 1000 <= compared, "{mismatched}/{compared}");
+        }
+    }
 }
 
 #[test]

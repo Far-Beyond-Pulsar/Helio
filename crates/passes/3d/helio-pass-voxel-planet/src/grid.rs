@@ -1,10 +1,12 @@
-//! Equal-angle cube-sphere voxel grid.
+//! Voxel world grids: an equal-angle cube sphere (planets) or a flat plane,
+//! finite or effectively infinite.
 //!
-//! Every cell is bounded by two planes through the planet centre per
-//! horizontal axis and by two concentric spheres. Radial layers are always
+//! On a sphere every cell is bounded by two planes through the planet centre
+//! per horizontal axis and by two concentric spheres. Radial layers are always
 //! aligned with gravity, so flat ground stays flat everywhere on the planet.
-//! A straight ray crosses each boundary family in closed form, which lets the
-//! GPU traverse the exact canonical grid without a curved-space approximation.
+//! A plane uses the +Y face basis with axis-aligned cells and horizontal
+//! layers. Either way a straight ray crosses each boundary family in closed
+//! form, which lets the GPU traverse the exact canonical grid.
 use glam::{DVec3, IVec3};
 use serde::{Deserialize, Serialize};
 use std::f64::consts::FRAC_PI_4;
@@ -50,8 +52,29 @@ pub fn face_of(p: DVec3) -> u8 {
     }
 }
 
+/// World shape of a voxel grid.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Shape {
+    /// A planet: an equal-angle cube sphere.
+    #[default]
+    Sphere,
+    /// A square plane of a given edge length, centred on the origin.
+    Plane,
+    /// A plane without edges within reach: 2^27 reference cells (about
+    /// 13 400 km) across, centred on the origin.
+    InfinitePlane,
+}
+
+/// The one face of a plane grid (the +Y face basis: `i` along +X, `j`
+/// along -Z, layers along +Y).
+pub const PLANE_FACE: u8 = 2;
+/// Width of an infinite plane in reference cells (keeps every domain
+/// coordinate in 31 bits).
+const INFINITE_PLANE_REFERENCE_CELLS: i64 = 1 << 27;
+
 /// Base-resolution cell address. `k` is the signed radial layer; layer zero
-/// starts at the datum (sea level).
+/// starts at the datum (sea level). A plane grid uses face [`PLANE_FACE`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct Cell {
     pub face: u8,
@@ -72,6 +95,8 @@ impl Cell {
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Grid {
+    shape: Shape,
+    /// Planet radius (0 for planes).
     radius: f64,
     cells: i32,
     levels: u32,
@@ -90,7 +115,12 @@ pub struct Grid {
 pub const REFERENCE_VOXEL: f64 = 0.1;
 
 fn face_cells(radius: f64, voxel_size: f64) -> (i64, u32) {
-    let arc = radius * std::f64::consts::FRAC_PI_2;
+    edge_cells(radius * std::f64::consts::FRAC_PI_2, voxel_size)
+}
+
+/// Cells along a face edge of length `arc`, a multiple of every level's
+/// column width, and the level count.
+fn edge_cells(arc: f64, voxel_size: f64) -> (i64, u32) {
     // The coarsest level keeps roughly 1024 cells across a face.
     let mut levels = 1u32;
     while levels < 24 && arc / (voxel_size * f64::from(1u32 << (levels - 1))) > 1024.0 {
@@ -125,6 +155,7 @@ impl Grid {
             return Err("voxel size is too coarse for the reference terrain domain".into());
         }
         Ok(Self {
+            shape: Shape::Sphere,
             radius,
             cells: cells as i32,
             levels,
@@ -134,8 +165,116 @@ impl Grid {
             level_offset: ratio.log2().round().max(0.0) as u32,
         })
     }
+    /// A plane grid: `size` is the edge length for [`Shape::Plane`]
+    /// (ignored for [`Shape::InfinitePlane`]). The layer thickness is exactly
+    /// `voxel_size`, and so is the cell width up to the rounding of the edge.
+    pub fn plane(shape: Shape, size: f64, voxel_size: f64) -> Result<Self, String> {
+        if !(voxel_size.is_finite() && voxel_size >= 0.01 && voxel_size <= 64.0) {
+            return Err(format!("voxel size {voxel_size} m is outside 0.01..64 m"));
+        }
+        let layer_mm = (voxel_size * 1000.0).round();
+        if (layer_mm / 1000.0 - voxel_size).abs() > 1e-9 {
+            return Err("voxel size must be a whole number of millimetres".into());
+        }
+        let reference_edge = INFINITE_PLANE_REFERENCE_CELLS as f64 * REFERENCE_VOXEL;
+        let edge = match shape {
+            Shape::Sphere => return Err("a sphere needs Grid::new".into()),
+            Shape::Plane => {
+                if !(size.is_finite() && size >= voxel_size * 64.0 && size <= reference_edge) {
+                    return Err(format!("plane size {size} m is outside {:.1} m..{reference_edge:.0} m", voxel_size * 64.0));
+                }
+                size
+            }
+            Shape::InfinitePlane => reference_edge,
+        };
+        let (mut cells, mut levels) = edge_cells(edge, voxel_size);
+        // Round the infinite plane down so its reference domain stays within 2^27 cells.
+        while shape == Shape::InfinitePlane && (cells as f64 * voxel_size / REFERENCE_VOXEL) > INFINITE_PLANE_REFERENCE_CELLS as f64 {
+            let unit = 1i64 << (levels - 1 + COLUMN_LEVEL_BITS);
+            cells -= unit;
+            if cells <= 0 {
+                levels -= 1;
+                cells = 1i64 << (levels - 1 + COLUMN_LEVEL_BITS);
+            }
+        }
+        let ratio = voxel_size / REFERENCE_VOXEL;
+        if ratio > 15.0 {
+            return Err("voxel size is too coarse for the reference terrain domain".into());
+        }
+        Ok(Self {
+            shape,
+            radius: 0.0,
+            cells: cells as i32,
+            levels,
+            layer_mm: layer_mm as u32,
+            reference_cells: (cells as f64 * ratio).round() as i32,
+            domain_scale: (ratio * 16_777_216.0).round() as u32,
+            level_offset: ratio.log2().round().max(0.0) as u32,
+        })
+    }
+    pub fn shape(&self) -> Shape {
+        self.shape
+    }
+    pub fn is_plane(&self) -> bool {
+        self.shape != Shape::Sphere
+    }
+    /// Faces holding cells: all six on a sphere, [`PLANE_FACE`] on a plane.
+    pub fn faces(&self) -> &'static [u8] {
+        if self.is_plane() {
+            &[PLANE_FACE]
+        } else {
+            &[0, 1, 2, 3, 4, 5]
+        }
+    }
+    /// Planet radius (0 for planes).
     pub fn radius(&self) -> f64 {
         self.radius
+    }
+    /// Plane cell index of the world origin on each horizontal axis (0 on a sphere).
+    pub fn origin_index(&self) -> i32 {
+        if self.is_plane() {
+            self.cells / 2
+        } else {
+            0
+        }
+    }
+    /// Radial coordinate of `p`: distance from the planet centre, or height
+    /// above the plane. Layer `k` starts at radial `layer_radius(k)`.
+    pub fn radial(&self, p: DVec3) -> f64 {
+        if self.is_plane() {
+            p.y
+        } else {
+            p.length()
+        }
+    }
+    /// Height of `p` above the datum.
+    pub fn height(&self, p: DVec3) -> f64 {
+        self.radial(p) - self.radius
+    }
+    /// Local up at `p`.
+    pub fn up(&self, p: DVec3) -> DVec3 {
+        if self.is_plane() {
+            DVec3::Y
+        } else {
+            p.normalize_or(DVec3::Y)
+        }
+    }
+    /// `p` moved to radial coordinate `radial` along the local vertical.
+    pub fn at_radial(&self, p: DVec3, radial: f64) -> DVec3 {
+        if self.is_plane() {
+            DVec3::new(p.x, radial, p.z)
+        } else {
+            p.normalize_or(DVec3::Y) * radial
+        }
+    }
+    /// Distance along the datum between the ground points below `a` and
+    /// `b`: great-circle distance on a sphere, horizontal on a plane.
+    pub fn ground_distance(&self, a: DVec3, b: DVec3) -> f64 {
+        if self.is_plane() {
+            DVec3::new(a.x - b.x, 0.0, a.z - b.z).length()
+        } else {
+            a.angle_between(b) * self.radius
+        }
     }
     /// Base cells along one face edge.
     pub fn cells(&self) -> i32 {
@@ -146,9 +285,13 @@ impl Grid {
     pub fn levels(&self) -> u32 {
         self.levels
     }
-    /// Angular width of one base cell.
+    /// Angular width of one base cell on a sphere; the cell width on a plane.
     pub fn delta(&self) -> f64 {
-        std::f64::consts::FRAC_PI_2 / f64::from(self.cells)
+        if self.is_plane() {
+            self.voxel_size()
+        } else {
+            std::f64::consts::FRAC_PI_2 / f64::from(self.cells)
+        }
     }
     /// Radial layer thickness (the authored voxel size). The tangential cell
     /// width at the datum face centre differs by well under 1 %.
@@ -183,14 +326,26 @@ impl Grid {
     pub fn layer_radius(&self, k: f64) -> f64 {
         self.radius + k * self.voxel_size()
     }
-    /// Unit direction for continuous `(i, j)` index coordinates on `face`.
+    /// Unit direction for continuous `(i, j)` index coordinates on `face`
+    /// (the planet sphere only).
     pub fn direction(&self, face: u8, i: f64, j: f64) -> DVec3 {
         let [n, a, b] = face_axes(face);
         (n + a * self.angle(i).tan() + b * self.angle(j).tan()).normalize()
     }
-    /// Planet-centred position of continuous index coordinates.
+    /// World position of continuous index coordinates (planet-centred on a
+    /// sphere, origin-centred on a plane).
     pub fn position(&self, face: u8, index: [f64; 3]) -> DVec3 {
+        if self.is_plane() {
+            let [n, a, b] = face_axes(face);
+            let c = f64::from(self.origin_index());
+            let s = self.voxel_size();
+            return a * ((index[0] - c) * s) + b * ((index[1] - c) * s) + n * (index[2] * s);
+        }
         self.direction(face, index[0], index[1]) * self.layer_radius(index[2])
+    }
+    /// Point on the datum below continuous index coordinates `(i, j)`.
+    pub fn ground_point(&self, face: u8, i: f64, j: f64) -> DVec3 {
+        self.position(face, [i, j, 0.0])
     }
     pub fn cell_center(&self, cell: Cell) -> DVec3 {
         self.position(
@@ -206,6 +361,14 @@ impl Grid {
     /// `face`. `None` when `p` is not in that face's hemisphere.
     pub fn face_coords(&self, face: u8, p: DVec3) -> Option<[f64; 3]> {
         let [n, a, b] = face_axes(face);
+        if self.is_plane() {
+            if face != PLANE_FACE {
+                return None;
+            }
+            let c = f64::from(self.origin_index());
+            let s = self.voxel_size();
+            return Some([p.dot(a) / s + c, p.dot(b) / s + c, p.dot(n) / s]);
+        }
         let pn = p.dot(n);
         if pn <= 0.0 {
             return None;
@@ -217,7 +380,7 @@ impl Grid {
     }
     /// Canonical cell containing `p` and its continuous coordinates.
     pub fn locate(&self, p: DVec3) -> (Cell, [f64; 3]) {
-        let face = face_of(p);
+        let face = if self.is_plane() { PLANE_FACE } else { face_of(p) };
         let c = self.face_coords(face, p).expect("point is in its face hemisphere");
         let last = self.cells - 1;
         let cell = Cell::new(
@@ -238,7 +401,9 @@ impl Grid {
             1 => next.j += step,
             _ => next.k += step,
         }
-        if (0..self.cells).contains(&next.i) && (0..self.cells).contains(&next.j) {
+        if self.is_plane() || ((0..self.cells).contains(&next.i) && (0..self.cells).contains(&next.j)) {
+            // A plane has no neighbouring face: indices past its edge are
+            // outside the world.
             return next;
         }
         let centre = self.position(
@@ -255,6 +420,9 @@ impl Grid {
     /// base cells. Adjacent faces share their edge points, so procedural
     /// fields are continuous across cube edges.
     pub fn domain_point(&self, face: u8, i: i32, j: i32, level: u32) -> IVec3 {
+        if self.is_plane() {
+            return plane_domain_point(self.origin_index(), self.domain_scale, i, j, level);
+        }
         domain_point(self.reference_cells, self.domain_scale, face, i, j, level)
     }
 }
@@ -281,6 +449,19 @@ pub fn domain_point(reference: i32, scale: u32, face: u8, i: i32, j: i32, level:
     n * reference + a * u + b * v
 }
 
+/// Domain point of a plane level cell centre, in half reference cells
+/// relative to the world origin: `(u, 0, -v)` in the +Y face basis. The
+/// scaling rounds by magnitude, so it is symmetric about the origin.
+pub fn plane_domain_point(origin: i32, scale: u32, i: i32, j: i32, level: u32) -> IVec3 {
+    let half = 1i32 << level;
+    let scaled = |x: i32| {
+        let x = x.wrapping_shl(level + 1).wrapping_add(half).wrapping_sub(origin << 1);
+        let m = mul_q24(x.unsigned_abs(), scale) as i32;
+        if x < 0 { -m } else { m }
+    };
+    IVec3::new(scaled(i), 0, -scaled(j))
+}
+
 /// Camera-relative description of one face's boundary families, computed in
 /// `f64` and consumed in `f32` by the GPU and by precision tests.
 ///
@@ -304,6 +485,20 @@ impl Grid {
     pub fn face_frame(&self, face: u8, eye: DVec3) -> FaceFrame {
         let [n, a, b] = face_axes(face);
         let mut frame = FaceFrame::default();
+        if self.is_plane() {
+            // Cell planes are parallel: `m` is their normal and the camera
+            // index and fraction come straight from its coordinates.
+            let c = self.face_coords(PLANE_FACE, eye).unwrap_or([0.0; 3]);
+            for (axis, u) in [a, b].into_iter().enumerate() {
+                frame.m[axis] = u;
+                frame.q[axis] = n;
+                let whole = c[axis].floor();
+                frame.index[axis] = whole as i64;
+                frame.fraction[axis] = c[axis] - whole;
+            }
+            frame.valid = face == PLANE_FACE;
+            return frame;
+        }
         for (axis, u) in [a, b].into_iter().enumerate() {
             // Angle of the eye around axis `w`, measured in the (u, n) plane.
             let pu = eye.dot(u);
@@ -399,6 +594,58 @@ mod tests {
         let edge = grid.neighbour(Cell::new(4, n - 1, n / 2, 0), 0, 1);
         let b = grid.domain_point(edge.face, edge.i, edge.j, 0);
         assert!((a - b).abs().max_element() <= 2, "{a} {b}");
+    }
+
+    #[test]
+    fn plane_grids_locate_cell_centres_and_keep_exact_layers() {
+        for (shape, size, voxel) in [(Shape::Plane, 4_000.0, 0.1), (Shape::Plane, 900.0, 0.7), (Shape::InfinitePlane, 0.0, 0.1), (Shape::InfinitePlane, 0.0, 1.0)] {
+            let grid = Grid::plane(shape, size, voxel).unwrap();
+            assert_eq!(grid.faces(), &[PLANE_FACE]);
+            assert!((grid.voxel_size() - voxel).abs() < 1e-12);
+            assert_eq!(grid.cells() % (1 << (grid.levels() + 2)), 0);
+            if shape == Shape::InfinitePlane {
+                assert!(f64::from(grid.cells()) * voxel > 10_000_000.0, "{}", grid.cells());
+                assert!(grid.reference_cells() <= 1 << 27);
+            } else {
+                assert!((f64::from(grid.cells()) * voxel - size).abs() <= voxel * f64::from(8u32 << grid.levels()));
+            }
+            let n = grid.cells();
+            for &(i, j) in &[(0, 0), (n - 1, n - 1), (n / 2, n / 2 - 1), (7, n - 8)] {
+                for &k in &[-3_000, -1, 0, 1, 40_000] {
+                    let cell = Cell::new(PLANE_FACE, i, j, k);
+                    assert_eq!(grid.locate(grid.cell_center(cell)).0, cell);
+                    assert!((grid.height(grid.cell_center(cell)) - (f64::from(k) + 0.5) * voxel).abs() < 1e-6);
+                }
+            }
+            // The origin sits on a cell corner; the domain is symmetric.
+            let c = grid.origin_index();
+            assert_eq!(grid.locate(DVec3::new(0.01, 0.01, -0.01)).0, Cell::new(PLANE_FACE, c, c, 0));
+            let a = grid.domain_point(PLANE_FACE, c, c, 0);
+            let b = grid.domain_point(PLANE_FACE, c - 1, c - 1, 0);
+            assert_eq!(a, -b);
+        }
+    }
+
+    #[test]
+    fn plane_domain_matches_across_voxel_sizes() {
+        let fine = Grid::plane(Shape::Plane, 5_000.0, 0.1).unwrap();
+        let coarse = Grid::plane(Shape::Plane, 5_000.0, 0.4).unwrap();
+        let p = DVec3::new(123.4, 0.0, -777.7);
+        let a = fine.locate(p).0;
+        let b = coarse.locate(p).0;
+        let d = fine.domain_point(a.face, a.i, a.j, 0) - coarse.domain_point(b.face, b.i, b.j, 0);
+        assert!(d.abs().max_element() <= 8, "{d}");
+    }
+
+    #[test]
+    fn plane_face_frame_reproduces_camera_indices() {
+        let grid = Grid::plane(Shape::InfinitePlane, 0.0, 0.1).unwrap();
+        let eye = grid.position(PLANE_FACE, [12_345.25, 67_890.75, 18.5]);
+        let frame = grid.face_frame(PLANE_FACE, eye);
+        assert_eq!(frame.index, [12_345, 67_890]);
+        assert!((frame.fraction[0] - 0.25).abs() < 1e-3);
+        assert!((frame.fraction[1] - 0.75).abs() < 1e-3);
+        assert!(frame.valid);
     }
 
     #[test]

@@ -110,7 +110,19 @@ fn mul_q24(a: u32, r: u32) -> u32 {
 }
 
 // Level cell centre in half cells of the reference grid (grid independent).
+// Plane domain point in half reference cells relative to the world origin
+// (`grid::plane_domain_point`): scaled by magnitude, symmetric about it.
+fn plane_scaled(x: i32, level: u32) -> i32 {
+    let origin = field.scale.z / 2;
+    let v = (x << (level + 1u)) + (1 << level) - (origin << 1u);
+    let m = i32(mul_q24(u32(abs(v)), bitcast<u32>(field.scale.x)));
+    return select(m, -m, v < 0);
+}
+
 fn domain_point(face: u32, i: i32, j: i32, level: u32) -> vec3<i32> {
+    if is_plane() {
+        return vec3<i32>(plane_scaled(i, level), 0, -plane_scaled(j, level));
+    }
     let reference = field.header.x;
     let scale = bitcast<u32>(field.scale.x);
     let half = 1u << level;

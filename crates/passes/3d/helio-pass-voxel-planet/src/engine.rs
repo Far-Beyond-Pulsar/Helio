@@ -156,7 +156,7 @@ fn uniform(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn source(access: &str, parts: &[&str]) -> String {
+fn source(access: &str, parts: &[&str], plane: bool) -> String {
     let mut s = String::from(include_str!("../shaders/field.wgsl"));
     // Generation updates the summaries atomically; traversal reads plain values.
     // Traversal reads a summary block entry as one vector load.
@@ -166,7 +166,8 @@ fn source(access: &str, parts: &[&str]) -> String {
         &include_str!("../shaders/common.wgsl")
             .replace("ACCESS", access)
             .replace("LEVEL_TOP", level_top)
-            .replace("BLOCK_ENTRY", block_entry),
+            .replace("BLOCK_ENTRY", block_entry)
+            .replace("SHAPE_ID", if plane { "1u" } else { "0u" }),
     );
     for part in parts {
         s.push_str(&part.replace("ACCESS", access));
@@ -199,7 +200,7 @@ struct Pipelines {
 }
 
 impl Pipelines {
-    fn new(device: &wgpu::Device) -> Self {
+    fn new(device: &wgpu::Device, plane: bool) -> Self {
         let gen_entries: Vec<_> = [
             uniform(0),
             uniform(1),
@@ -277,17 +278,17 @@ impl Pipelines {
                 source: wgpu::ShaderSource::Wgsl(src.into()),
             })
         };
-        let gen_module = module("planet generation", source("read_write", &[include_str!("../shaders/generate.wgsl")]));
+        let gen_module = module("planet generation", source("read_write", &[include_str!("../shaders/generate.wgsl")], plane));
         let trace_src = [
             include_str!("../shaders/view.wgsl"),
             include_str!("../shaders/horizon.wgsl"),
             include_str!("../shaders/trace.wgsl"),
             include_str!("../shaders/surface.wgsl"),
         ];
-        let trace_module = module("planet trace", source("read_write", &trace_src));
+        let trace_module = module("planet trace", source("read_write", &trace_src, plane));
         let render_module = module(
             "planet gbuffer",
-            source("read", &[include_str!("../shaders/view.wgsl"), include_str!("../shaders/gbuffer.wgsl")]),
+            source("read", &[include_str!("../shaders/view.wgsl"), include_str!("../shaders/gbuffer.wgsl")], plane),
         );
         let gen_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("planet generation"),
@@ -574,7 +575,7 @@ pub struct PlanetRenderer {
 
 impl PlanetRenderer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, planet: Arc<Planet>, settings: Settings, size: [u32; 2]) -> Self {
-        let pipelines = Pipelines::new(device);
+        let pipelines = Pipelines::new(device, planet.grid().is_plane());
         let buffers = Buffers::new(device, &settings.capacity, planet.field());
         let gen_group = Self::gen_group(device, &pipelines, &buffers);
         let readbacks = (0..4)
@@ -701,6 +702,7 @@ impl PlanetRenderer {
         let grid = planet.grid();
         let mut frame = FrameGpu::default();
         for face in 0..6u8 {
+            // A plane has one face; the others keep default frames.
             let f = grid.face_frame(face, eye);
             let v = |d: DVec3, w: f64| [d.x as f32, d.y as f32, d.z as f32, w as f32];
             frame.faces[face as usize] = FaceGpu {
@@ -723,17 +725,17 @@ impl PlanetRenderer {
                 Cell::new(face, n / 2, n - 1, 0),
             ];
             for (e, (cell, (axis, step))) in edges.iter().zip([(0, -1), (0, 1), (1, -1), (1, 1)]).enumerate() {
-                frame.neighbours[face as usize][e] = u32::from(grid.neighbour(*cell, axis, step).face);
+                frame.neighbours[face as usize][e] = if grid.is_plane() { u32::from(face) } else { u32::from(grid.neighbour(*cell, axis, step).face) };
             }
         }
-        let rho = eye.length();
-        let dir = eye / rho;
+        let rho = grid.radial(eye);
+        let dir = grid.up(eye);
         let s = grid.voxel_size();
         let layer = (rho - grid.radius()) / s;
         let k = layer.floor();
         frame.eye = [dir.x as f32, dir.y as f32, dir.z as f32, rho as f32];
         frame.layer = [(layer - k) as f32, s as f32, grid.delta() as f32, (planet.outer_radius() - rho) as f32];
-        frame.layer_i = [k.clamp(i32::MIN as f64, i32::MAX as f64) as i32, grid.cells(), grid.levels() as i32, i32::from(crate::grid::face_of(eye))];
+        frame.layer_i = [k.clamp(i32::MIN as f64, i32::MAX as f64) as i32, grid.cells(), grid.levels() as i32, i32::from(if grid.is_plane() { crate::grid::PLANE_FACE } else { crate::grid::face_of(eye) })];
         // Directional sky bound cut depth below the eye radius: the bound
         // covers points above it (see `horizon.wgsl`), and each level's ring
         // is where no such point can use the level. Any depth is exact. A
@@ -743,22 +745,28 @@ impl PlanetRenderer {
         // terrain instead of crossing every level's ring through air.
         const SKY_CUT_M: f64 = 100.0;
         let cut = SKY_CUT_M.max(0.75 * planet.air_clearance(eye));
-        frame.lod = [lod0 as f32, self.settings.lod_dither, -cut as f32, (rho + grid.radius() * 3.0) as f32];
+        // Farthest ray distance: past the far side of a planet, or across a plane.
+        let far = if grid.is_plane() { f64::from(grid.cells()) * s * 2.0 + rho.abs() } else { rho + grid.radius() * 3.0 };
+        frame.lod = [lod0 as f32, self.settings.lod_dither, -cut as f32, far as f32];
         // Nearest ray distance at which each level may fall back to coarser
         // data: chord bound for points past its fallback angle at radius
         // >= the cut radius.
         let r_lo = rho - cut;
         let fallback: Vec<f64> = self
             .residency
-            .fallback_angles(dir)
+            .fallback_distances(eye)
             .iter()
-            .map(|a| if *a >= std::f64::consts::PI { f64::INFINITY } else { 2.0 * (rho * r_lo).sqrt() * (a * 0.5).sin() })
+            .map(|distance| {
+                let a = distance / grid.radius();
+                if a >= std::f64::consts::PI { f64::INFINITY } else { 2.0 * (rho * r_lo).sqrt() * (a * 0.5).sin() }
+            })
             .collect();
-        let rings = sky_rings(lod0, f64::from(self.settings.lod_dither), rho, r_lo, planet.outer_radius(), &fallback);
+        // The directional sky bound is built for planets (see `horizon.wgsl`).
+        let rings = if grid.is_plane() { Vec::new() } else { sky_rings(lod0, f64::from(self.settings.lod_dither), rho, r_lo, planet.outer_radius(), &fallback) };
         for (level, phi) in rings.iter().enumerate().take(32) {
             frame.ring[level / 4][level % 4] = *phi as f32;
         }
-        let flags = u32::from(self.settings.horizon) << 1;
+        let flags = u32::from(self.settings.horizon && !grid.is_plane()) << 1;
         let index = self.settings.frame_override.unwrap_or(self.frame_index % 1024);
         frame.screen = [size[0] as f32, size[1] as f32, index as f32, flags as f32];
         let sun = sun.normalize_or_zero();
@@ -1055,9 +1063,11 @@ impl PlanetRenderer {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_bind_group(0, &trace_group, &[]);
             pass.set_bind_group(1, camera_group, &[]);
-            Self::dispatch(&mut pass, &self.pipelines.horizon_clear, [((HORIZON_SECTORS + HORIZON_GROUPS) * HORIZON_BUCKETS).div_ceil(64), 1, 1]);
-            Self::dispatch(&mut pass, &self.pipelines.horizon_blocks, [live_blocks.div_ceil(64), 1, 1]);
-            Self::dispatch(&mut pass, &self.pipelines.horizon_suffix, [1, 1, 1]);
+            if !self.planet.grid().is_plane() {
+                Self::dispatch(&mut pass, &self.pipelines.horizon_clear, [((HORIZON_SECTORS + HORIZON_GROUPS) * HORIZON_BUCKETS).div_ceil(64), 1, 1]);
+                Self::dispatch(&mut pass, &self.pipelines.horizon_blocks, [live_blocks.div_ceil(64), 1, 1]);
+                Self::dispatch(&mut pass, &self.pipelines.horizon_suffix, [1, 1, 1]);
+            }
         }
         if let Some(p) = &mut self.profiler {
             p.end_pass(encoder, "planet_horizon");

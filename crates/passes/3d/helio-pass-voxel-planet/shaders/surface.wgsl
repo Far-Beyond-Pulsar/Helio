@@ -58,6 +58,7 @@ fn grass_albedo(p: vec3<i32>, level: u32) -> vec3<f32> {
 
 fn plane_normal(face: u32, axis: u32, plane: i32) -> vec3<f32> {
     let f = frame.faces[face];
+    if is_plane() { return select(f.m_b.xyz, f.m_a.xyz, axis == 0u); }
     var m = f.m_a.xyz;
     var q = f.q_a.xyz;
     var idx = f.index.x;
@@ -74,6 +75,7 @@ fn plane_normal(face: u32, axis: u32, plane: i32) -> vec3<f32> {
 }
 
 fn hit_up(t: f32, d: vec3<f32>) -> vec3<f32> {
+    if is_plane() { return frame.eye.xyz; }
     return normalize(frame.eye.xyz + (camera.position_near.xyz + t * d) / frame.eye.w);
 }
 
@@ -338,7 +340,8 @@ fn sun_visibility(s: SunSample) -> f32 {
     let eps = cell * 0.02 + dist * 2e-6;
     // A filtered cell stands for a smooth slope of many small steps, which
     // casts no step shadows: skip occluders up to two cells high.
-    let up = normalize(frame.eye.xyz + s.position / frame.eye.w);
+    var up = frame.eye.xyz;
+    if !is_plane() { up = normalize(frame.eye.xyz + s.position / frame.eye.w); }
     let skip = s.filtered * 2.0 * cell / max(dot(up, sun), 0.15);
     let blocker = trace(make_ray(s.position + s.normal * eps, sun), skip, frame.lod.w, offset, 1.0, 0.0);
     return select(0.0, 1.0, (blocker.info & 3u) == ST_MISS);

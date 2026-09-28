@@ -64,7 +64,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let job = jobs[index];
     let face = (job.key0 >> 24u) & 7u;
     let level = job.key0 >> 27u;
-    let ci = i32((job.key0 & 0xffffffu) << 8u) >> 8u;
+    let ci = i32(job.key0 & 0xffffffu);
     let cj = bitcast<i32>(job.key1);
     let x = i32(li & 7u);
     let y = i32(li >> 3u);
@@ -257,7 +257,7 @@ fn evict(@builtin(global_invocation_id) id: vec3<u32>) {
     let c = records[r];
     if (c.info & INFO_VALID) != 0u {
         free_run(c);
-        let ci = i32((c.key0 & 0xffffffu) << 8u) >> 8u;
+        let ci = i32(c.key0 & 0xffffffu);
         let cj = bitcast<i32>(c.key1);
         for (var tier = 1u; tier <= 3u; tier++) {
             let bi = ci >> (2u * tier);
@@ -356,7 +356,7 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         }
         let gap = u32(clamp(band_top - exact, 0, 7));
         let top_cell = band_top - i32(gap);
-        let ci = i32((job.key0 & 0xffffffu) << 8u) >> 8u;
+        let ci = i32(job.key0 & 0xffffffu);
         let cj = bitcast<i32>(job.key1);
         for (var tier = 1u; tier <= 3u; tier++) {
             let bi = ci >> (2u * tier);

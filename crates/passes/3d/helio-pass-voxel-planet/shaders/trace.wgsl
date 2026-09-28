@@ -60,6 +60,15 @@ fn face_ray(face: u32, r: Ray) -> FaceRay {
     let f = frame.faces[face];
     var o: FaceRay;
     o.face = face;
+    if is_plane() {
+        // Parallel cell planes with normals m: coordinates are linear in t.
+        o.em = vec2<f32>(dot(r.e, f.m_a.xyz), dot(r.e, f.m_b.xyz));
+        o.lm = vec2<f32>(dot(r.l, f.m_a.xyz), dot(r.l, f.m_b.xyz));
+        o.idx = f.index.xy;
+        o.frac = vec2<f32>(f.q_a.w, f.q_b.w);
+        o.dir = vec2<i32>(sign(o.lm));
+        return o;
+    }
     o.rho = vec2<f32>(f.m_a.w + dot(r.e, f.q_a.xyz), f.m_b.w + dot(r.e, f.q_b.xyz));
     o.em = vec2<f32>(dot(r.e, f.m_a.xyz), dot(r.e, f.m_b.xyz));
     o.lm = vec2<f32>(dot(r.l, f.m_a.xyz), dot(r.l, f.m_b.xyz));
@@ -95,6 +104,12 @@ fn atan_small(y: f32, x: f32) -> f32 {
 // Components are chosen with `select` so no vector is indexed dynamically.
 fn plane_t(fr: FaceRay, axis: u32, plane: i32) -> f32 {
     let b = axis == 1u;
+    if is_plane() {
+        let lm = select(fr.lm.x, fr.lm.y, b);
+        if lm * f32(select(fr.dir.x, fr.dir.y, b)) <= 0.0 { return 3.0e38; }
+        let d = (f32(plane - select(fr.idx.x, fr.idx.y, b)) - select(fr.frac.x, fr.frac.y, b)) * frame.layer.z;
+        return (d - select(fr.em.x, fr.em.y, b)) / lm;
+    }
     let delta = (f32(plane - select(fr.idx.x, fr.idx.y, b)) - select(fr.frac.x, fr.frac.y, b)) * frame.layer.z;
     let sc = sincos_small(delta);
     let num = select(fr.rho.x, fr.rho.y, b) * sc.x - select(fr.em.x, fr.em.y, b) * sc.y;
@@ -106,6 +121,9 @@ fn plane_t(fr: FaceRay, axis: u32, plane: i32) -> f32 {
 // Continuous base index (relative to the eye's index) at distance t.
 fn face_coord(fr: FaceRay, axis: u32, t: f32) -> f32 {
     let b = axis == 1u;
+    if is_plane() {
+        return select(fr.frac.x, fr.frac.y, b) + (select(fr.em.x, fr.em.y, b) + t * select(fr.lm.x, fr.lm.y, b)) / frame.layer.z;
+    }
     let y = select(fr.em.x, fr.em.y, b) + t * select(fr.lm.x, fr.lm.y, b);
     let x = select(fr.rho.x, fr.rho.y, b) + t * select(fr.lq.x, fr.lq.y, b);
     return select(fr.frac.x, fr.frac.y, b) + atan_small(y, x) / frame.layer.z;
@@ -113,6 +131,7 @@ fn face_coord(fr: FaceRay, axis: u32, t: f32) -> f32 {
 
 // Height of the ray point above the eye's radius.
 fn height_rel(r: Ray, t: f32) -> f32 {
+    if is_plane() { return r.eo + t * r.ol; }
     let rho = frame.eye.w;
     let ow = r.eo + t * r.ol;
     let ww = r.ee + 2.0 * t * r.el + t * t;
@@ -132,6 +151,12 @@ fn radial_c(r: Ray, layer: i32) -> f32 {
 
 // Next crossing of the shell [lower, upper) after t: (t, direction).
 fn radial_exit(r: Ray, lower: i32, upper: i32, t: f32) -> vec2<f32> {
+    if is_plane() {
+        // Horizontal layer planes.
+        if r.ol < 0.0 { return vec2<f32>(max((layer_height(lower) - r.eo) / r.ol, t), -1.0); }
+        if r.ol > 0.0 { return vec2<f32>(max((layer_height(upper) - r.eo) / r.ol, t), 1.0); }
+        return vec2<f32>(3.0e38, 1.0);
+    }
     let b = r.b;
     if t < -b {
         let c = radial_c(r, lower);
@@ -162,6 +187,7 @@ fn cells_at(level: u32) -> i32 {
 // Face containing the ray point at t (approximate direction, refined by
 // the caller's index checks).
 fn face_at(r: Ray, t: f32) -> u32 {
+    if is_plane() { return PLANE_FACE; }
     let p = frame.eye.xyz + (r.e + t * r.l) / frame.eye.w;
     let a = abs(p);
     if a.x >= a.y && a.x >= a.z { return select(1u, 0u, p.x >= 0.0); }
@@ -227,6 +253,32 @@ fn layer_height(layer: i32) -> f32 {
     return (f32(layer - frame.layer_i.x) - frame.layer.x) * frame.layer.y;
 }
 
+// The ray moves away from the ground (outwards on a planet, up on a plane).
+fn rising(r: Ray, t: f32) -> bool {
+    if is_plane() { return r.ol > 0.0; }
+    return r.b + t > 0.0;
+}
+
+// Ray interval inside a plane's footprint (index box [0, n) on both axes):
+// (enter, exit), enter > exit when it misses.
+fn plane_footprint(fr: FaceRay) -> vec2<f32> {
+    let n = f32(frame.layer_i.y);
+    var span = vec2<f32>(0.0, 3.0e38);
+    for (var axis = 0u; axis < 2u; axis++) {
+        let b = axis == 1u;
+        let x0 = f32(select(fr.idx.x, fr.idx.y, b)) + select(fr.frac.x, fr.frac.y, b) + select(fr.em.x, fr.em.y, b) / frame.layer.z;
+        let v = select(fr.lm.x, fr.lm.y, b) / frame.layer.z;
+        if v == 0.0 {
+            if x0 < 0.0 || x0 >= n { return vec2<f32>(1.0, 0.0); }
+            continue;
+        }
+        let ta = (0.0 - x0) / v;
+        let tb = (n - x0) / v;
+        span = vec2<f32>(max(span.x, min(ta, tb)), min(span.y, max(ta, tb)));
+    }
+    return span;
+}
+
 // Highest occupied layer (base cells) of any resident column at `level` or
 // coarser. Stale values are only ever too high, which is conservative.
 fn sky_layer(level: u32) -> i32 {
@@ -290,7 +342,16 @@ fn column_hint(level: u32, face: u32, ci: i32, cj: i32) -> u32 {
 fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dither: f32) -> Hit {
     var t = t_start;
     let outer = frame.layer.w;
-    if height_rel(r, t) > outer {
+    if is_plane() {
+        // Enter the terrain slab from above and the plane's footprint.
+        if height_rel(r, t) > outer {
+            if r.ol >= 0.0 { return make_hit(ST_MISS, 0.0, Cursor(), 0u, NONE); }
+            t = max(t, (outer - r.eo) / r.ol);
+        }
+        let span = plane_footprint(face_ray(PLANE_FACE, r));
+        if span.x > span.y || span.y < t { return make_hit(ST_MISS, 0.0, Cursor(), 0u, NONE); }
+        t = max(t, span.x * (1.0 + 1e-6));
+    } else if height_rel(r, t) > outer {
         let c = 2.0 * frame.eye.w * (outer - r.eo) + (outer * outer - r.ee);
         let d = r.b * r.b + c;
         if r.b >= 0.0 || d < 0.0 { return make_hit(ST_MISS, 0.0, Cursor(), 0u, NONE); }
@@ -328,6 +389,8 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
         last_t = t;
         let n_l = cells_at(cur.level);
         if cur.i < 0 || cur.j < 0 || cur.i >= n_l || cur.j >= n_l {
+            // A plane ends at its edges.
+            if is_plane() { return make_hit(ST_MISS, t, cur, normal, NONE); }
             cur = cross_face(r, cur, t);
             fr = face_ray(cur.face, r);
             continue;
@@ -403,7 +466,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
         if above {
             // Above every occupied cell here: sky exit (later columns may
             // dither to a finer level than this one), then the summary block.
-            if r.b + t > 0.0 && height_rel(r, t) > layer_height(sky_layer(min(lv, level_for((t + lod_offset) * lod_scale * (1.0 - 0.5 * dither))))) {
+            if rising(r, t) && height_rel(r, t) > layer_height(sky_layer(min(lv, level_for((t + lod_offset) * lod_scale * (1.0 - 0.5 * dither))))) {
                 return make_hit(ST_MISS, t, cur, normal, NONE);
             }
             if skip.x > 0 {

@@ -3,7 +3,7 @@
 //! Computing a window scans every candidate column of a level (hundreds of
 //! thousands on a planet), so the planner runs on a background thread and
 //! reports incremental add/remove diffs. The render thread only applies them.
-use crate::grid::{face_axes, Grid, BRICK};
+use crate::grid::{face_axes, Grid, BRICK, PLANE_FACE};
 use crate::residency::{key0, max_window_columns};
 use glam::DVec3;
 use rustc_hash::FxHashSet;
@@ -23,10 +23,10 @@ pub struct WindowRequest {
 pub struct LevelDiff {
     pub level: u32,
     pub active: bool,
-    /// Window centre (unit direction) and angular radius: every column whose
-    /// centre lies within the radius is wanted.
+    /// Window centre (the eye's ground point) and ground radius in metres:
+    /// every column whose centre lies within the radius is wanted.
     pub center: DVec3,
-    pub radius_angle: f64,
+    pub radius: f64,
     /// Newly wanted columns with their normalized distance (lower is sooner).
     pub adds: Vec<(f32, u64)>,
     pub removes: Vec<u64>,
@@ -64,8 +64,37 @@ impl WindowPlanner {
         }
     }
 
+    /// Columns of a plane level within `radius` of ground point `center`.
+    fn scan_plane(&self, level: u32, center: DVec3, radius: f64) -> Vec<(f32, u64)> {
+        let grid = self.grid;
+        let col_cells = BRICK << level;
+        let cols = grid.cells() / col_cells;
+        let col = grid.level_size(level) * f64::from(BRICK);
+        let c = grid.face_coords(PLANE_FACE, center).unwrap_or([0.0; 3]);
+        let (ci, cj) = (c[0] / f64::from(col_cells), c[1] / f64::from(col_cells));
+        let reach = (radius / col + 1.0).min(f64::from(cols));
+        let lo_i = ((ci - reach).floor() as i32).max(0);
+        let hi_i = ((ci + reach).ceil() as i32).min(cols - 1);
+        let lo_j = ((cj - reach).floor() as i32).max(0);
+        let hi_j = ((cj + reach).ceil() as i32).min(cols - 1);
+        let limit = radius / col + 0.75;
+        let mut out = Vec::new();
+        for y in lo_j..=hi_j {
+            for x in lo_i..=hi_i {
+                let d = (f64::from(x) + 0.5 - ci).hypot(f64::from(y) + 0.5 - cj);
+                if d <= limit {
+                    out.push(((d / limit.max(1e-12)) as f32, pack(key0(PLANE_FACE, level, x), y as u32)));
+                }
+            }
+        }
+        out
+    }
+
     fn scan(&self, level: u32, dir: DVec3, radius: f64) -> Vec<(f32, u64)> {
         let grid = self.grid;
+        if grid.is_plane() {
+            return self.scan_plane(level, dir, radius);
+        }
         let r0 = grid.radius();
         let col_cells = BRICK << level;
         let cols = grid.cells() / col_cells;
@@ -122,12 +151,17 @@ impl WindowPlanner {
         let grid = self.grid;
         let r0 = grid.radius();
         let eye = request.eye;
-        let dir = eye.normalize();
-        let altitude = eye.length() - request.outer_radius;
-        let height = (eye.length() - r0).max(0.0);
+        // Window centre: the eye direction on a sphere, its ground point on a plane.
+        let dir = if grid.is_plane() { DVec3::new(eye.x, 0.0, eye.z) } else { eye.normalize() };
+        let altitude = grid.radial(eye) - request.outer_radius;
+        let height = (grid.radial(eye) - r0).max(0.0);
         let peak = request.outer_radius - r0;
-        // Farthest terrain that can rise above the horizon.
-        let horizon = (2.0 * r0 * height + height * height).sqrt() + (2.0 * r0 * peak + peak * peak).sqrt();
+        // Farthest terrain that can rise above the horizon (none on a plane).
+        let horizon = if grid.is_plane() {
+            f64::INFINITY
+        } else {
+            (2.0 * r0 * height + height * height).sqrt() + (2.0 * r0 * peak + peak * peak).sqrt()
+        };
         let top_level = grid.levels() - 1;
         let mut update = WindowUpdate {
             serial: request.serial,
@@ -144,7 +178,7 @@ impl WindowPlanner {
                         level,
                         active: false,
                         center: dir,
-                        radius_angle: 0.0,
+                        radius: 0.0,
                         adds: Vec::new(),
                         removes: state.wanted.drain().collect(),
                     });
@@ -156,11 +190,12 @@ impl WindowPlanner {
             // The direct-mapped summary tables bound the window diameter.
             let cap = col * f64::from(max_window_columns() / 2 - 2) * 0.8;
             let radius = if level == top_level {
-                r0 * 4.0
+                // The coarsest level covers the whole world.
+                if grid.is_plane() { f64::from(grid.cells()) * grid.voxel_size() * 1.5 } else { r0 * 4.0 }
             } else {
                 ((reach * reach - altitude.max(0.0).powi(2)).max(0.0).sqrt().min(horizon) + col * 2.0).min(cap)
             };
-            let moved = state.center.distance(dir) * r0;
+            let moved = if grid.is_plane() { state.center.distance(dir) } else { state.center.distance(dir) * r0 };
             if state.active && moved <= col * 3.0 && (radius - state.radius).abs() <= state.radius * 0.08 + col {
                 continue;
             }
@@ -183,7 +218,7 @@ impl WindowPlanner {
                 level,
                 active: true,
                 center: dir,
-                radius_angle: (radius / r0).min(std::f64::consts::PI),
+                radius,
                 adds,
                 removes,
             });

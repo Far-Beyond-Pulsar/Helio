@@ -43,6 +43,14 @@ struct FaceBrush {
     center: vec4<i32>,
 }
 
+// World shape, substituted when the pipelines are built: 0 sphere, 1 plane.
+const SHAPE: u32 = SHAPE_ID;
+const PLANE_FACE: u32 = 2u;
+
+fn is_plane() -> bool {
+    return SHAPE == 1u;
+}
+
 const NONE: u32 = 0xffffffffu;
 const TOMBSTONE: u32 = 0xfffffffeu;
 const INFO_VALID: u32 = 0x80000000u;

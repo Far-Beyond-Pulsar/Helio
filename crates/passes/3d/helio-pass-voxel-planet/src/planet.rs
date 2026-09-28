@@ -1,7 +1,8 @@
-//! Canonical editable planet: recipe, exact cell queries and ray casts.
+//! Canonical editable voxel world (a planet or a plane): recipe, exact cell
+//! queries and ray casts.
 use crate::edits::{apply, center_half, Brush, EditLog, FaceBrush};
 use crate::field::{self, FieldConstants, Landform, HEIGHT_ONE};
-use crate::grid::{face_axes, Cell, Grid};
+use crate::grid::{face_axes, Cell, Grid, Shape};
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -14,7 +15,12 @@ pub const EARTH_RADIUS: f64 = 6_371_000.0;
 #[serde(default)]
 pub struct PlanetRecipe {
     pub version: u32,
+    /// Sphere (planet), finite plane or infinite plane.
+    pub shape: Shape,
+    /// Planet radius (spheres).
     pub radius_m: f64,
+    /// Edge length of a finite plane, centred on the origin.
+    pub plane_size_m: f64,
     pub voxel_size_m: f64,
     pub landform: Landform,
 }
@@ -23,7 +29,9 @@ impl Default for PlanetRecipe {
     fn default() -> Self {
         Self {
             version: RECIPE_VERSION,
+            shape: Shape::Sphere,
             radius_m: EARTH_RADIUS,
+            plane_size_m: 4_096.0,
             voxel_size_m: 0.1,
             landform: Landform::default(),
         }
@@ -87,7 +95,10 @@ impl Clone for Planet {
 
 impl Planet {
     pub fn new(recipe: PlanetRecipe) -> Result<Self, String> {
-        let grid = Grid::new(recipe.radius_m, recipe.voxel_size_m)?;
+        let grid = match recipe.shape {
+            Shape::Sphere => Grid::new(recipe.radius_m, recipe.voxel_size_m)?,
+            shape => Grid::plane(shape, recipe.plane_size_m, recipe.voxel_size_m)?,
+        };
         let field = FieldConstants::new(&grid, &recipe.landform);
         Ok(Self {
             recipe,
@@ -120,7 +131,7 @@ impl Planet {
         let id = self.edits.push(&self.grid, brush)?;
         // A cube brush reaches sqrt(3) radii from its centre.
         let reach = brush.radius * 1.7321 + self.grid.voxel_size();
-        let centre = DVec3::from_array(brush.center).length();
+        let centre = self.grid.radial(DVec3::from_array(brush.center));
         match brush.op {
             crate::edits::BrushOp::Add => self.edit_top = self.edit_top.max(centre + reach),
             crate::edits::BrushOp::Remove => self.edit_bottom = self.edit_bottom.min(centre - reach),
@@ -224,7 +235,7 @@ impl Planet {
     }
     /// Exact base-grid ray cast. Stops at the first cell for which `stop`
     /// returns true given its kind. `max_distance` may be infinite; the ray
-    /// is clipped to the planet shell.
+    /// is clipped to the world's shell (or slab and edges on a plane).
     pub fn raycast_with(
         &self,
         origin: DVec3,
@@ -232,6 +243,9 @@ impl Planet {
         max_distance: f64,
         stop: impl Fn(u32) -> bool,
     ) -> Option<RayHit> {
+        if self.grid.is_plane() {
+            return self.raycast_plane(origin, direction, max_distance, stop);
+        }
         let d = direction.normalize();
         let grid = &self.grid;
         let outer = self.outer_radius();
@@ -330,22 +344,95 @@ impl Planet {
         }
         None
     }
+    /// Cartesian cell walk on a plane grid, clipped to the slab between the
+    /// lowest and highest solid layers and to the plane's edges.
+    fn raycast_plane(&self, origin: DVec3, direction: DVec3, max_distance: f64, stop: impl Fn(u32) -> bool) -> Option<RayHit> {
+        let grid = &self.grid;
+        let d = direction.normalize();
+        let [n_axis, a_axis, b_axis] = face_axes(crate::grid::PLANE_FACE);
+        let o = grid.face_coords(crate::grid::PLANE_FACE, origin)?;
+        let s = grid.voxel_size();
+        let v = [d.dot(a_axis) / s, d.dot(b_axis) / s, d.dot(n_axis) / s];
+        let n = f64::from(grid.cells());
+        let lo = [0.0, 0.0, (self.inner_radius() / s).floor()];
+        let hi = [n, n, (self.outer_radius() / s).ceil()];
+        // Slab clipping in index space (t in metres).
+        let (mut t0, mut t1) = (0.0f64, max_distance);
+        for axis in 0..3 {
+            if v[axis] == 0.0 {
+                if o[axis] < lo[axis] || o[axis] >= hi[axis] {
+                    return None;
+                }
+                continue;
+            }
+            let a = (lo[axis] - o[axis]) / v[axis];
+            let b = (hi[axis] - o[axis]) / v[axis];
+            t0 = t0.max(a.min(b));
+            t1 = t1.min(a.max(b));
+        }
+        if t0 > t1 {
+            return None;
+        }
+        let eps = 1e-9;
+        let at = |t: f64| [o[0] + v[0] * t, o[1] + v[1] * t, o[2] + v[2] * t];
+        let start = at(t0 + eps);
+        let mut idx = [0i64; 3];
+        for axis in 0..3 {
+            idx[axis] = (start[axis].floor() as i64).clamp(lo[axis] as i64, hi[axis] as i64 - 1);
+        }
+        let step: [i64; 3] = std::array::from_fn(|axis| if v[axis] > 0.0 { 1 } else if v[axis] < 0.0 { -1 } else { 0 });
+        let mut next: [f64; 3] = std::array::from_fn(|axis| {
+            if step[axis] == 0 {
+                f64::INFINITY
+            } else {
+                let boundary = idx[axis] as f64 + if step[axis] > 0 { 1.0 } else { 0.0 };
+                (boundary - o[axis]) / v[axis]
+            }
+        });
+        let delta: [f64; 3] = std::array::from_fn(|axis| if step[axis] == 0 { f64::INFINITY } else { 1.0 / v[axis].abs() });
+        let axes = [a_axis, b_axis, n_axis];
+        let cell_of = |idx: [i64; 3]| Cell::new(crate::grid::PLANE_FACE, idx[0] as i32, idx[1] as i32, idx[2] as i32);
+        let mut t = t0;
+        let mut previous = cell_of(idx);
+        let mut normal = -d;
+        for _ in 0..4_000_000 {
+            if t > t1 {
+                return None;
+            }
+            let cell = cell_of(idx);
+            if stop(self.kind(cell)) {
+                return Some(RayHit { cell, previous, distance: t, normal });
+            }
+            let axis = if next[0] <= next[1] && next[0] <= next[2] { 0 } else if next[1] <= next[2] { 1 } else { 2 };
+            previous = cell;
+            t = next[axis];
+            next[axis] += delta[axis];
+            idx[axis] += step[axis];
+            normal = -axes[axis] * step[axis] as f64;
+            if idx[axis] < lo[axis] as i64 || idx[axis] >= hi[axis] as i64 {
+                return None;
+            }
+        }
+        None
+    }
     /// Ray cast that stops at solid cells (terrain and additions).
     pub fn raycast(&self, origin: DVec3, direction: DVec3, max_distance: f64) -> Option<RayHit> {
         self.raycast_with(origin, direction, max_distance, |kind| kind == 1)
     }
-    /// A point `clearance` metres above the solid surface along `direction`.
-    pub fn surface_point(&self, direction: DVec3, clearance: f64) -> DVec3 {
-        let dir = direction.normalize();
-        let top = dir * (self.outer_radius() + 1.0);
-        match self.raycast(top, -dir, f64::INFINITY) {
-            Some(hit) => top - dir * (hit.distance - clearance),
-            None => dir * (self.grid.radius() + clearance),
+    /// A point `clearance` metres above the solid surface over `p` (a
+    /// direction or any point above the ground point on a planet; any point
+    /// on a plane).
+    pub fn surface_point(&self, p: DVec3, clearance: f64) -> DVec3 {
+        let up = self.grid.up(p);
+        let top = self.grid.at_radial(p, self.outer_radius() + 1.0);
+        match self.raycast(top, -up, f64::INFINITY) {
+            Some(hit) => top - up * (hit.distance - clearance),
+            None => self.grid.at_radial(p, self.grid.radius() + clearance),
         }
     }
     /// Distance from `eye` to the nearest possible solid cell, conservative.
     pub fn air_clearance(&self, eye: DVec3) -> f64 {
-        let r = eye.length();
+        let r = self.grid.radial(eye);
         let above_outer = r - self.outer_radius();
         if above_outer > 0.0 {
             return above_outer;
@@ -398,6 +485,41 @@ mod tests {
             }
             eprintln!("voxel {voxel}: margins {:?}
 worst {:?}", &margins[..g.levels() as usize], worst);
+        }
+    }
+
+    fn plane(shape: Shape) -> Planet {
+        Planet::new(PlanetRecipe { shape, plane_size_m: 3_000.0, ..Default::default() }).unwrap()
+    }
+
+    #[test]
+    fn plane_raycast_down_hits_the_column_top_and_matches_edits() {
+        for shape in [Shape::Plane, Shape::InfinitePlane] {
+            let mut p = plane(shape);
+            let g = *p.grid();
+            let face = crate::grid::PLANE_FACE;
+            for &(dx, dz) in &[(0.0, 0.0), (731.3, -412.9), (-1_100.0, 1_200.5)] {
+                let ground = p.surface_point(DVec3::new(dx, 0.0, dz), 0.0);
+                let (cell, _) = g.locate(ground + DVec3::Y * 0.01);
+                let top = p.column_top(face, cell.i, cell.j, 0);
+                assert_eq!(cell.k, top, "surface point sits on the first air layer");
+                let eye = ground + DVec3::Y * 20.0;
+                let hit = p.raycast(eye, -DVec3::Y, 1000.0).expect("hit");
+                assert_eq!(hit.cell, Cell::new(face, cell.i, cell.j, top - 1));
+                assert!((hit.distance - 20.0).abs() < g.voxel_size() * 1.01);
+                assert_eq!(hit.normal, DVec3::Y);
+            }
+            // Oblique rays agree with a cell walk through a carved hole.
+            let centre = p.surface_point(DVec3::new(50.0, 0.0, 60.0), -0.45);
+            p.apply(Brush { center: centre.to_array(), radius: 0.45, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+            let eye = centre + DVec3::new(0.3, 30.0, 0.0);
+            let hit = p.raycast(eye, centre - eye, 100.0).expect("hit");
+            assert!(p.solid(hit.cell));
+            assert!(!p.solid(hit.previous));
+            // Nothing past the edge of a finite plane.
+            if shape == Shape::Plane {
+                assert!(p.raycast(DVec3::new(5_000.0, 10.0, 0.0), -DVec3::Y, 1000.0).is_none());
+            }
         }
     }
 

@@ -118,11 +118,11 @@ impl Brush {
             BrushShape::Cube => 1,
         };
         let mut out = Vec::new();
-        for face in 0..6u8 {
+        for &face in grid.faces() {
             let [nrm, _, _] = face_axes(face);
-            // Only faces whose hemisphere clearly contains the brush centre;
-            // extended coordinates degrade far from the face.
-            if center.dot(nrm) <= 0.5 * center.length() {
+            // On a sphere, only faces whose hemisphere clearly contains the
+            // brush centre; extended coordinates degrade far from the face.
+            if !grid.is_plane() && center.dot(nrm) <= 0.5 * center.length() {
                 continue;
             }
             let Some(c) = grid.face_coords(face, center) else {
@@ -143,7 +143,7 @@ impl Brush {
             });
         }
         if out.is_empty() {
-            return Err("brush does not intersect the planet grid".into());
+            return Err("brush does not intersect the voxel grid".into());
         }
         Ok(out)
     }
