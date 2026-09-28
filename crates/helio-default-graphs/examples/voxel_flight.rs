@@ -490,6 +490,9 @@ fn main() {
             eye = flight.planet.surface_point(eye + tangent(eye, h).as_dvec3() * 0.05, 1.7);
             flight.draw("walk", eye, look(eye, h, -8.0));
         }
+        let h = heading + (119.0f64 * 0.01).sin() * 0.6;
+        audits.push(flight.audit("walk_view", eye, look(eye, h, -8.0)));
+        flight.capture("walk_view");
         let orbit = ground.normalize() * (ground.length() + 300_000.0);
         let orbit_look = look(orbit, heading, -65.0);
         flight.settle("orbit_settle", orbit, orbit_look);

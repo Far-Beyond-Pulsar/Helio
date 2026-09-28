@@ -8,8 +8,7 @@
 // can meet there. A ray's height at any angular distance grows with its
 // elevation, so each bucket stores the lowest elevation that clears it; a
 // primary ray ends after the farthest bucket it does not clear
-// (`sky_escape`); traversal steps also test the suffix maximum over
-// distance (`horizon_layer`).
+// (`sky_escape`).
 
 const SECTORS: u32 = 256u;
 const BUCKETS: u32 = 32u;
@@ -21,15 +20,12 @@ const TAU: f32 = 6.283185307;
 
 // Accumulated maxima: [bucket][sector], then [bucket][group].
 @group(0) @binding(17) var<storage, read_write> horizon_acc: array<atomic<i32>>;
-// Dilated by one sector: suffix maxima [bucket][sector], per-bucket
-// clearing elevations [bucket][sector] (f32 bits), then the all-sector
-// suffix and clearing-elevation rows.
-@group(0) @binding(18) var<storage, read_write> horizon: array<i32>;
+// Clearing elevations (f32 bits), dilated by one sector: [bucket][sector],
+// then one all-sector row.
+@group(0) @binding(18) var<storage, read_write> horizon: array<f32>;
 // Live tier-1 summary block slots (maintained by the CPU residency).
 @group(0) @binding(19) var<storage, read> live_blocks: array<u32>;
-const H_PER: u32 = SECTORS * BUCKETS;
-const H_ALL_SUFFIX: u32 = 2u * SECTORS * BUCKETS;
-const H_ALL_PER: u32 = 2u * SECTORS * BUCKETS + BUCKETS;
+const H_ALL: u32 = SECTORS * BUCKETS;
 
 const FACE_N: array<vec3<f32>, 6> = array<vec3<f32>, 6>(
     vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0),
@@ -179,14 +175,13 @@ fn clearing_elevation(top: i32, b: u32) -> f32 {
 
 var<workgroup> all_sectors: array<atomic<i32>, 32>;
 
-// Clearing elevations and suffix maxima over distance buckets, dilated by
-// one sector per side; one workgroup, one thread per sector. The all-sector
-// rows reduce through workgroup memory.
+// Clearing elevations per distance bucket, dilated by one sector per side;
+// one workgroup, one thread per sector. The all-sector row reduces through
+// workgroup memory.
 @compute @workgroup_size(256)
 fn horizon_suffix(@builtin(local_invocation_index) s: u32) {
     if s < BUCKETS { atomicStore(&all_sectors[s], HORIZON_NONE); }
     workgroupBarrier();
-    var running = HORIZON_NONE;
     let prev = (s + SECTORS - 1u) % SECTORS;
     let next = (s + 1u) % SECTORS;
     let g = s / u32(GROUP_SECTORS);
@@ -200,19 +195,11 @@ fn horizon_suffix(@builtin(local_invocation_index) s: u32) {
         let v = max(own, max(
             max(atomicLoad(&horizon_acc[row + prev]), atomicLoad(&horizon_acc[groups + g_prev])),
             max(atomicLoad(&horizon_acc[row + next]), atomicLoad(&horizon_acc[groups + g_next]))));
-        running = max(running, v);
-        horizon[H_PER + row + s] = bitcast<i32>(clearing_elevation(v, u32(b)));
-        horizon[row + s] = running;
+        horizon[row + s] = clearing_elevation(v, u32(b));
     }
     workgroupBarrier();
-    if s == 0u {
-        var all = HORIZON_NONE;
-        for (var b = i32(BUCKETS) - 1; b >= 0; b--) {
-            let v = atomicLoad(&all_sectors[b]);
-            all = max(all, v);
-            horizon[H_ALL_PER + u32(b)] = bitcast<i32>(clearing_elevation(v, u32(b)));
-            horizon[H_ALL_SUFFIX + u32(b)] = all;
-        }
+    if s < BUCKETS {
+        horizon[H_ALL + s] = clearing_elevation(atomicLoad(&all_sectors[s]), s);
     }
 }
 
@@ -244,19 +231,10 @@ fn no_sky() -> SkyRay {
     s.sector = -2;
     return s;
 }
-
 // Sky bound for a camera ray; the camera must sit at the eye (world origin).
 fn eye_sky(l: vec3<f32>, spread: f32) -> SkyRay {
     if (u32(frame.screen.w) & 2u) == 0u || dot(camera.position_near.xyz, camera.position_near.xyz) > 1e-6 { return no_sky(); }
     return sky_ray(l, spread);
-}
-
-// Highest base layer any terrain reachable after angular distance `phi` can
-// occupy along this ray's azimuth.
-fn horizon_layer(s: SkyRay, phi: f32) -> i32 {
-    let b = phi_bucket(phi * 0.999);
-    if s.sector < 0 { return horizon[H_ALL_SUFFIX + b]; }
-    return horizon[b * SECTORS + u32(s.sector)];
 }
 
 // Ray distance after which an eye ray meets no resident terrain (3e38 if
@@ -265,23 +243,18 @@ fn horizon_layer(s: SkyRay, phi: f32) -> i32 {
 fn sky_escape(s: SkyRay) -> f32 {
     if s.sector < -1 { return 3.0e38; }
     let e = atan2(s.lu, s.lt);
-    var row = H_ALL_PER;
+    var row = H_ALL;
     var stride = 1u;
     if s.sector >= 0 {
-        row = H_PER + u32(s.sector);
+        row = u32(s.sector);
         stride = SECTORS;
     }
     var b = i32(BUCKETS) - 1;
-    while b >= 0 && e > bitcast<f32>(horizon[row + u32(b) * stride]) { b -= 1; }
+    while b >= 0 && e > horizon[row + u32(b) * stride] { b -= 1; }
     if b < 0 { return 0.0; }
     if b + 1 >= i32(BUCKETS) { return 3.0e38; }
     let phi = bucket_start(u32(b + 1));
     let c = cos(e + phi);
     if c <= 1e-6 { return 3.0e38; }
     return frame.eye.w * sin(phi) / c * 1.0001 + 1e-3;
-}
-
-// Angular distance from the eye of the eye-ray point at `t`.
-fn eye_phi(s: SkyRay, t: f32) -> f32 {
-    return atan2(t * s.lt, frame.eye.w + t * s.lu);
 }

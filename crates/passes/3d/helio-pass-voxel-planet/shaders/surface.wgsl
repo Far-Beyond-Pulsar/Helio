@@ -15,7 +15,7 @@ fn primary(@builtin(global_invocation_id) id: vec3<u32>) {
     let r = make_ray(camera.position_near.xyz, d);
     let sky = eye_sky(d, 0.0);
     let end = min(frame.lod.w, sky_escape(sky));
-    hits[pixel_index(id.xy)] = trace(r, 0.0, end, 0.0, 1.0, frame.lod.y, sky);
+    hits[pixel_index(id.xy)] = trace(r, 0.0, end, 0.0, 1.0, frame.lod.y);
 }
 
 fn srgb(c: vec3<f32>) -> vec3<f32> {
@@ -261,7 +261,7 @@ fn sun_visibility(s: SunSample) -> f32 {
     let dist = length(s.position);
     let level = level_for(dist);
     let eps = frame.layer.y * f32(1 << level) * 0.02 + dist * 2e-6;
-    let blocker = trace(make_ray(s.position + s.normal * eps, sun), 0.0, frame.lod.w, dist, 1.0, 0.0, no_sky());
+    let blocker = trace(make_ray(s.position + s.normal * eps, sun), 0.0, frame.lod.w, dist, 1.0, 0.0);
     return select(0.0, 1.0, (blocker.info & 3u) == ST_MISS);
 }
 

@@ -424,7 +424,7 @@ impl Buffers {
         let horizon_acc = make("planet horizon accumulation", u64::from((HORIZON_SECTORS + HORIZON_GROUPS) * HORIZON_BUCKETS) * 4, st);
         let horizon = make(
             "planet horizon bound",
-            u64::from(2 * (HORIZON_SECTORS + 1) * HORIZON_BUCKETS) * 4,
+            u64::from((HORIZON_SECTORS + 1) * HORIZON_BUCKETS) * 4,
             st | wgpu::BufferUsages::COPY_SRC,
         );
         let live_blocks = make("planet live summary blocks", 65_536 * 4, st);
@@ -635,8 +635,8 @@ impl PlanetRenderer {
     pub fn residency_buffers(&self) -> [&wgpu::Buffer; 3] {
         [&self.buffers.records, &self.buffers.pool, &self.buffers.block_state]
     }
-    /// Directional sky bound table (diagnostics): `[bucket][sector]` suffix
-    /// maxima in base layers, then one all-sector row per bucket.
+    /// Directional sky bound table (diagnostics): `[bucket][sector]` lowest
+    /// clearing elevations (radians), then one all-sector row.
     pub fn horizon_buffer(&self) -> &wgpu::Buffer {
         &self.buffers.horizon
     }

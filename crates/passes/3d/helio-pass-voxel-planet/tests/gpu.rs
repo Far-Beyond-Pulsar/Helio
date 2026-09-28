@@ -263,12 +263,12 @@ fn sky_bound_is_conservative() {
         if std::env::var_os("SKY_DUMP").is_some() {
             target.render(&gpu, &mut r, &f, forward, 5000);
             let table = read_buffer(&gpu, r.horizon_buffer(), 257 * 32 * 4);
-            let v: Vec<i32> = table.chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect();
-            let eye_layer = ((eye.length() - planet.grid().radius()) / planet.grid().voxel_size()) as i64;
+            let v: Vec<f32> = table.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
             for b in 0..32 {
                 let row = &v[b * 256..b * 256 + 256];
-                eprintln!("bucket {b:2}: min {:9} max {:9} all {:9} (rel eye m: {:.0} {:.0})", row.iter().min().unwrap(), row.iter().max().unwrap(), v[256 * 32 + b],
-                    (*row.iter().min().unwrap() as i64 - eye_layer) as f64 * planet.grid().voxel_size(), (*row.iter().max().unwrap() as i64 - eye_layer) as f64 * planet.grid().voxel_size());
+                let lo = row.iter().copied().fold(f32::INFINITY, f32::min).to_degrees();
+                let hi = row.iter().copied().fold(f32::NEG_INFINITY, f32::max).to_degrees();
+                eprintln!("bucket {b:2}: clearing elevation {lo:7.3}..{hi:7.3} deg, all {:7.3}", v[256 * 32 + b].to_degrees());
             }
         }
         {
