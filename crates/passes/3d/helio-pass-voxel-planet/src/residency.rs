@@ -731,7 +731,10 @@ impl Residency {
                     let (face, lv, ci, cj) = unpack(*key);
                     let size = f64::from(BRICK << lv);
                     let dir = grid.direction(face, (f64::from(ci) + 0.5) * size, (f64::from(cj) + 0.5) * size);
-                    angle = angle.min(dir.angle_between(eye_dir) - col);
+                    // Traversal uses only complete 4x4-column blocks while a
+                    // level streams in: a pending column makes its whole
+                    // block (within its diagonal, 5.7 columns) fall back.
+                    angle = angle.min(dir.angle_between(eye_dir) - col * 6.0);
                 }
                 angle.max(0.0)
             })

@@ -130,8 +130,10 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         kind = km.x;
         material = km.y;
     }
-    if material == 0u {
-        var slope = 0;
+    let edited = material != 0u;
+    var slope = 0;
+    let p = domain_point(face, h.i, h.j, level);
+    if !edited {
         var lowest = top;
         if x > 0u { let t = column_top(c, x - 1u, y); slope = max(slope, abs(t - top)); lowest = min(lowest, t); }
         if x < 7u { let t = column_top(c, x + 1u, y); slope = max(slope, abs(t - top)); lowest = min(lowest, t); }
@@ -141,18 +143,41 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         // Depth counts from the lowest neighbouring top: an exposed riser
         // above it is surface, not subsoil (coarse levels step in large
         // cells where the fine terrain is a continuous slope).
-        let p = domain_point(face, h.i, h.j, level);
         let depth = max(min(top, lowest) - 1 - h.k, 0) << level;
         material = ground_material(p, (top << level) * field.header.z, depth, slope, h.k << level);
     }
-    let normal = hit_normal(h, d);
+    var normal = hit_normal(h, d);
+    // Filtered appearance (after "Filtered appearance for voxels", HPG
+    // 2023): a cell covering about a pixel stands for a smooth slope of many
+    // finer steps, so it is lit with the macro normal of the column's height
+    // field and shows surface material on its risers. Cells several pixels
+    // wide keep crisp faces; the blend follows the pixel footprint, so level
+    // changes show no seam.
+    let pixel = h.t * 2.0 / (camera.proj[1][1] * frame.screen.y);
+    let size = frame.layer.y * f32(1 << level);
+    let smooth_w = clamp((2.5 - size / pixel) / 1.5, 0.0, 1.0);
+    if smooth_w > 0.0 {
+        let x0 = select(x - 1u, 0u, x == 0u);
+        let x1 = min(x + 1u, 7u);
+        let y0 = select(y - 1u, 0u, y == 0u);
+        let y1 = min(y + 1u, 7u);
+        let gi = f32(column_top(c, x1, y) - column_top(c, x0, y)) / f32(x1 - x0);
+        let gj = f32(column_top(c, x, y1) - column_top(c, x, y0)) / f32(y1 - y0);
+        let up = hit_up(h.t, d);
+        let macro_normal = normalize(up - gi * plane_normal(face, 0u, h.i << level) - gj * plane_normal(face, 1u, h.j << level));
+        normal = normalize(mix(normal, macro_normal, smooth_w));
+        if code < 4u && smooth_w > 0.5 && !edited {
+            material = ground_material(p, (top << level) * field.header.z, 0, slope, (top - 1) << level);
+        }
+    }
     // Neighbourhood occlusion around the air cell in front of the face.
     var ao = 1.0;
     // Side faces of grass voxels show soil below a ragged grass lip. The lip
     // covers more of the face with distance, where one coarse cell stands for
     // a grassy slope of many fine steps.
     var soil_side = false;
-    if code < 6u {
+    // Fully filtered cells use neither voxel AO nor face detail.
+    if code < 6u && smooth_w < 1.0 {
         let axis = code >> 1u;
         let back = select(1, -1, (code & 1u) == 1u);
         var f = vec3<i32>(h.i, h.j, h.k);
@@ -182,17 +207,15 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         );
         let uv = clamp(vec2<f32>(cell[u_axis] - f32(select(select(h.i, h.j, u_axis == 1u), h.k, u_axis == 2u)),
                                  cell[v_axis] - f32(select(select(h.i, h.j, v_axis == 1u), h.k, v_axis == 2u))), vec2<f32>(0.0), vec2<f32>(1.0));
-        if axis < 2u && material == M_GRASS {
+        if axis < 2u && material == M_GRASS && smooth_w <= 0.5 {
             let tooth = f32(hash3(h.i, h.j, h.k * 4 + i32(floor(uv.x * 4.0)), 0x5bd1e995u) & 7u) / 7.0;
             // Continuous in distance (not level), so level changes show no band.
             let lip = 0.22 + 0.1 * tooth + 0.68 * (1.0 - 1.0 / max(h.t / frame.lod.x, 1.0));
             soil_side = uv.y < 1.0 - lip;
         }
         let a = mix(mix(c00, c10, uv.x), mix(c01, c11, uv.x), uv.y) / 3.0;
-        ao = mix(0.42, 1.0, a);
+        ao = mix(mix(0.42, 1.0, a), 1.0, smooth_w);
         // Crisp voxel edges while a cell covers several pixels.
-        let pixel = h.t * 2.0 / (camera.proj[1][1] * frame.screen.y);
-        let size = frame.layer.y * f32(1 << level);
         let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
         let fade = clamp((size / pixel - 3.0) / 6.0, 0.0, 1.0);
         ao *= 1.0 - 0.14 * fade * (1.0 - smoothstep(0.0, 0.12, edge));
@@ -222,6 +245,8 @@ struct SunSample {
     position: vec3<f32>,
     normal: vec3<f32>,
     footprint: f32,
+    // Level of the terrain hit (-1: a mesh surface).
+    level: i32,
 }
 
 // Surface point that receives sunlight at pixel `p`: the terrain hit, or the
@@ -229,6 +254,7 @@ struct SunSample {
 fn sun_sample(p: vec2<u32>) -> SunSample {
     var out: SunSample;
     out.valid = false;
+    out.level = -1;
     let sun = normalize(frame.sun.xyz);
     let s = surfaces[pixel_index(p)];
     let d = pixel_ray(vec2<f32>(p) + 0.5);
@@ -238,11 +264,13 @@ fn sun_sample(p: vec2<u32>) -> SunSample {
         out.position = camera.position_near.xyz + s.t * d;
         out.normal = oct_decode(s.normal);
         out.valid = true;
+        out.level = i32((s.flags >> 16u) & 31u);
         let clip = camera.view_proj * vec4<f32>(out.position, 1.0);
         if clip.w > 0.0 && clip.z / clip.w > depth + 1e-6 && depth > 0.0 && depth < 1.0 {
             let world = camera.inv_view_proj * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
             out.position = world.xyz / world.w;
             out.normal = sun;
+            out.level = -1;
         }
     } else if depth > 0.0 && depth < 1.0 {
         let world = camera.inv_view_proj * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
@@ -259,15 +287,26 @@ fn sun_visibility(s: SunSample) -> f32 {
     let sun = normalize(frame.sun.xyz);
     if dot(s.normal, sun) <= 0.0 { return 0.0; }
     let dist = length(s.position);
-    let level = level_for(dist);
+    var level = level_for(dist);
+    // Sun rays choose levels by `t + offset`. Start at the level the primary
+    // ray hit (its dither may differ from the distance's level): a coarser
+    // start could lie inside the coarser surface and shadow itself.
+    var offset = dist;
+    if s.level >= 0 {
+        level = u32(s.level);
+        let lo = select(0.0, frame.lod.x * exp2(f32(s.level) - 1.0) * 1.001, s.level > 0);
+        offset = clamp(dist, lo, frame.lod.x * exp2(f32(s.level)) * 0.999);
+    }
     let eps = frame.layer.y * f32(1 << level) * 0.02 + dist * 2e-6;
-    let blocker = trace(make_ray(s.position + s.normal * eps, sun), 0.0, frame.lod.w, dist, 1.0, 0.0);
+    let blocker = trace(make_ray(s.position + s.normal * eps, sun), 0.0, frame.lod.w, offset, 1.0, 0.0);
     return select(0.0, 1.0, (blocker.info & 3u) == ST_MISS);
 }
 
 // One sunlight ray per 2x2 block at a representative pixel that rotates each
 // frame (TAA resolves the pattern). Pixels on a different surface than the
-// representative trace their own ray, so silhouettes stay exact.
+// representative trace their own ray, so silhouettes stay exact. Voxel faces
+// meet at right angles, so a loose normal test still separates them while
+// the smoothly varying macro normals of distant cells share a ray.
 @compute @workgroup_size(8, 8)
 fn sunlight(@builtin(global_invocation_id) id: vec3<u32>) {
     let screen = vec2<u32>(frame.screen.xy);
@@ -285,7 +324,7 @@ fn sunlight(@builtin(global_invocation_id) id: vec3<u32>) {
         if any(p != rep) {
             let qs = sun_sample(p);
             let same = qs.valid == rs.valid && (!qs.valid
-                || (dot(qs.normal, rs.normal) > 0.999 && distance(qs.position, rs.position) < 2.5 * max(qs.footprint, rs.footprint)));
+                || (dot(qs.normal, rs.normal) > 0.9 && distance(qs.position, rs.position) < 2.5 * max(qs.footprint, rs.footprint)));
             if !same { v = sun_visibility(qs); }
         }
         textureStore(sun_out, vec2<i32>(p), vec4<f32>(v, sun));

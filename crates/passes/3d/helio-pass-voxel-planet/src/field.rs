@@ -452,10 +452,23 @@ pub fn ground_material(
     let dirt = c.header[3];
     let steep = slope >= c.misc[2];
     let wet = moisture(c, p);
-    let h = hash3(p.x, p.y, layer, 0x2545_F491);
+    // Hash every domain axis: on a face one of them is nearly constant.
+    let h = hash3(p.x, p.y, p.z ^ layer.wrapping_mul(0x9e37), 0x2545_F491);
     let altitude = layer.wrapping_mul(c.header[2]);
     if top_height < c.levels[3] {
-        // Low basins: silt and gravel over stone.
+        // Low basins: meadow with mud and sand patches over silt, gravel
+        // and stone. Surface variation hashes position only, so it never
+        // lines up with height contours.
+        if depth == 0 {
+            let s = hash3(p.x, p.y, p.z, 0x5f35_6495);
+            return if s & 15 == 0 {
+                DIRT
+            } else if (s >> 4) & 31 == 0 {
+                SAND
+            } else {
+                GRASS
+            };
+        }
         return if depth < dirt * 2 {
             if h & 3 == 0 { GRAVEL } else { CLAY }
         } else {

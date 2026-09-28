@@ -211,9 +211,18 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
     let dirt = field.header.w;
     let steep = slope >= field.misc.z;
     let wet = moisture(p);
-    let h = hash3(p.x, p.y, layer, 0x2545F491u);
+    // Hash every domain axis: on a face one of them is nearly constant.
+    let h = hash3(p.x, p.y, p.z ^ (layer * 0x9e37), 0x2545F491u);
     let altitude = layer * field.header.z;
     if top_height < field.levels.w {
+        // Low basins: meadow with mud and sand patches (position hash only,
+        // never aligned with height contours) over silt, gravel and stone.
+        if depth == 0 {
+            let s = hash3(p.x, p.y, p.z, 0x5f356495u);
+            if (s & 15u) == 0u { return M_DIRT; }
+            if ((s >> 4u) & 31u) == 0u { return M_SAND; }
+            return M_GRASS;
+        }
         if depth < dirt * 2 {
             return select(M_CLAY, M_GRAVEL, (h & 3u) == 0u);
         }

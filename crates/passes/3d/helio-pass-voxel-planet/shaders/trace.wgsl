@@ -261,14 +261,19 @@ fn summary_block(level: u32, face: u32, ci: i32, cj: i32, k: i32) -> vec4<i32> {
     return vec4<i32>(0);
 }
 
-// Residency of a level column from its tier-1 summary block, without a hash
-// lookup: 0 absent, 1 present, 2 unknown (look it up).
+// Whether traversal may use a level column, from its tier-1 summary block
+// and without a hash lookup: 0 no, 1 yes, 2 look it up. While a level
+// streams in, only complete 4x4-column blocks are used (partial ones fall
+// back to the coarser level), so rays keep large empty-space skips instead
+// of crawling column by column through patchy data. The top level always
+// looks up, so coverage never has holes.
 fn column_hint(level: u32, face: u32, ci: i32, cj: i32) -> u32 {
     if frame.hints.x == 0u { return 2u; }
     let b = vec2<i32>(ci >> 2u, cj >> 2u);
     let e = block_state[block_slot(level, face, 1u, b.x, b.y)];
-    if any(e.xy != b) || e.w == 0 { return 0u; }
-    return select(2u, 1u, e.w == 16);
+    if e.w == 16 && all(e.xy == b) { return 1u; }
+    if level + 1u >= u32(frame.layer_i.z) { return 2u; }
+    return 0u;
 }
 
 // Walk the ray from t_start to t_end. Level selection uses
@@ -356,7 +361,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
         }
         if skip.x == 0 && any(vec4<i32>(cur.i >> 3u, cur.j >> 3u, i32(cur.face), i32(cur.level)) != loaded) {
             loop {
-                // Known-absent columns skip the hash probe.
+                // Unusable columns skip the hash probe.
                 if column_hint(cur.level, cur.face, cur.i >> 3u, cur.j >> 3u) != 0u {
                     work_lookups += 1u;
                     record = find_column(column_key0(cur.face, cur.level, cur.i >> 3u), bitcast<u32>(cur.j >> 3u));
