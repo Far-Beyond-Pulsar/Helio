@@ -6,12 +6,6 @@ workspace = "../../"
 description = "Default render graph builders for Helio — depends on all pass crates"
 license = "MIT OR Apache-2.0"
 
-[features]
-# Offline image references must trace the canonical authored occupancy.
-voxel-reference = ["helio-pass-tiny-voxel/surface-reference"]
-voxel-surface-cache = ["voxel-reference", "helio-pass-tiny-voxel/surface-cache-experiment"]
-voxel-appearance = ["helio-pass-tiny-voxel/appearance-filter-experiment"]
-
 [dependencies]
 helio = { path = "../helio" }
 helio-core = { workspace = true }
@@ -59,4 +53,4 @@ helio-pass-dof = { path = "../passes/3d/helio-pass-dof" }
 pollster = { workspace = true }
 glam = { workspace = true }
 serde_json = { workspace = true }
-helio-pass-tiny-voxel = { path = "../passes/3d/helio-pass-tiny-voxel", features = ["engine"] }
+helio-pass-voxel-planet = { path = "../passes/3d/helio-pass-voxel-planet" }
