@@ -9,14 +9,14 @@
 //   @group(0) — main: uniforms, samplers, hdr/depth inputs, bloom sampled, avg_lum,
 //               noise, custom params, volume data, blend output
 //   @group(1) — bloom compute: per-dispatch src (sampled) + dst (storage write)
-//   @group(2) — bloom combine: mips 1-4 (sampled) + mip-0-sized sum (storage write)
+//   @group(2) — bloom upsample: mip i + coarser sum (sampled) + sum i (storage write)
 //
 // Entry points:
 //   cs_exposure/reduce       — compute: sampled log-luminance reduction
 //   cs_volume_blend          — compute: blend active post-process volumes → output
 //   cs_bloom_down_extract    — compute: extract brights from HDR → bloom mip 0
 //   cs_bloom_down            — compute: 2x downsample from bloom_src → bloom_dst
-//   cs_bloom_combine         — compute: sum mips 1-4 at mip-0 resolution
+//   cs_bloom_upsample        — compute: progressive upsample-and-add, mip 3 → mip 0
 //   vs_fullscreen            — vertex: fullscreen triangle
 //   fs_uber                  — fragment: effects chain (see INJECTION_POINT markers)
 //
@@ -230,10 +230,10 @@ struct CameraPostProcessComponent {
 @group(0) @binding(8)  var                     bloom_2:      texture_2d<f32>;
 @group(0) @binding(9)  var                     bloom_3:      texture_2d<f32>;
 @group(0) @binding(10) var                     bloom_4:      texture_2d<f32>;
-// Mips 1-4 already reconstructed and summed at mip-0 resolution
-// (cs_bloom_combine), so fs_uber upsamples two textures instead of five.
-// bloom_1..bloom_4 stay bound for user effects.
-@group(0) @binding(21) var                     bloom_coarse: texture_2d<f32>;
+// Every mip, summed coarse to fine at mip-0 resolution (cs_bloom_upsample),
+// so fs_uber upsamples one texture instead of five. bloom_0..bloom_4 stay
+// bound for user effects.
+@group(0) @binding(21) var                     bloom_sum: texture_2d<f32>;
 // [0] this frame's mean log2 luminance (cs_exposure_reduce)
 // [1] adapted mean log2 luminance (cs_exposure_adapt; read by fs_uber)
 // [2] frame delta seconds, [3] 1 when [1] holds valid history (CPU-written)
@@ -257,13 +257,11 @@ struct CameraPostProcessComponent {
 @group(1) @binding(0) var bloom_src: texture_2d<f32>;
 @group(1) @binding(1) var bloom_dst: texture_storage_2d<rgba16float, write>;
 
-// ── Group 2: bloom combine (mips 1-4 → mip-0-sized sum) ────────────────────────
+// ── Group 2: bloom upsample (mip i + coarser sum → sum i) ──────────────────────
 
-@group(2) @binding(0) var bloom_combine_1: texture_2d<f32>;
-@group(2) @binding(1) var bloom_combine_2: texture_2d<f32>;
-@group(2) @binding(2) var bloom_combine_3: texture_2d<f32>;
-@group(2) @binding(3) var bloom_combine_4: texture_2d<f32>;
-@group(2) @binding(4) var bloom_combine_dst: texture_storage_2d<rgba16float, write>;
+@group(2) @binding(0) var bloom_up_mip: texture_2d<f32>;
+@group(2) @binding(1) var bloom_up_coarser: texture_2d<f32>;
+@group(2) @binding(2) var bloom_up_dst: texture_storage_2d<rgba16float, write>;
 
 // ── Fullscreen vertex ──────────────────────────────────────────────────────────
 
@@ -685,23 +683,21 @@ fn cs_bloom_down(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(bloom_dst, vec2<i32>(gid.xy), vec4<f32>(color, 0.0));
 }
 
-// ── cs_bloom_combine: mips 1-4 → one mip-0-sized texture ──────────────────────
-// Evaluates the B-spline reconstruction of each coarse mip at mip-0 texel
-// centres and sums them. fs_uber then B-spline upsamples this sum once instead
-// of upsampling each coarse mip at output resolution (16 taps per output pixel
-// → 4 taps per output pixel plus 16 per mip-0 texel). The coarse mips are at
-// least 2x coarser than mip 0, so the extra reconstruction step barely changes
-// their already-wide glow.
+// ── cs_bloom_upsample: sum i = mip i + upsampled sum i+1 ──────────────────────
+// Dispatched coarse to fine. Each coarser sum is reconstructed with the same
+// cubic B-spline fs_uber uses, at this mip's texel centres, and this mip is
+// added unfiltered; fs_uber then B-spline upsamples sum 0 once. Mips 0 and 1
+// see exactly the filtering of sampling each mip at output resolution; mips
+// 2-4 get one extra reconstruction step per level, a slight smoothing of glows
+// that are already four or more mip-0 texels wide.
 @compute @workgroup_size(8, 8, 1)
-fn cs_bloom_combine(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let dst_dims = textureDimensions(bloom_combine_dst);
+fn cs_bloom_upsample(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dst_dims = textureDimensions(bloom_up_dst);
     if gid.x >= dst_dims.x || gid.y >= dst_dims.y { return; }
     let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dst_dims);
-    let sum = sample_bspline(bloom_combine_1, uv)
-            + sample_bspline(bloom_combine_2, uv)
-            + sample_bspline(bloom_combine_3, uv)
-            + sample_bspline(bloom_combine_4, uv);
-    textureStore(bloom_combine_dst, vec2<i32>(gid.xy), vec4<f32>(sum, 0.0));
+    let sum = textureLoad(bloom_up_mip, vec2<i32>(gid.xy), 0).rgb
+            + sample_bspline(bloom_up_coarser, uv);
+    textureStore(bloom_up_dst, vec2<i32>(gid.xy), vec4<f32>(sum, 0.0));
 }
 
 // ── Tonemapping operators ──────────────────────────────────────────────────────
@@ -996,8 +992,7 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     // takes the same exposure as the image it came from.
     if postprocess.bloom_enabled != 0u && postprocess.bloom_intensity > 0.0 {
         var bloom = vec3<f32>(0.0);
-        bloom += sample_bspline(bloom_0, uv);
-        bloom += sample_bspline(bloom_coarse, uv);
+        bloom += sample_bspline(bloom_sum, uv);
         // Mean over the chain: every mip carries the same extracted energy, so
         // bloom_intensity is the fraction of it scattered, not five times that.
         color += bloom * (exposure / 5.0);
