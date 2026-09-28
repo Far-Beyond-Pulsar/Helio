@@ -64,6 +64,9 @@ struct Globals {
     enable_env_reflections: u32,
     _pad_0: u32,
     _pad_1: u32,
+    // Hemisphere ambient axis (xyz) and ground-bounce colour (rgb).
+    ambient_up:        vec4<f32>,
+    ambient_ground:    vec4<f32>,
 }
 
 /// GpuLight (64 bytes, matches libhelio::GpuLight)
@@ -1276,8 +1279,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // based global illumination.  When inactive the hemisphere ambient is used.
 
     let sky_color      = globals.ambient_color.rgb * globals.ambient_intensity;
-    let ground_color   = sky_color * 0.15;
-    let hemi_t         = N.y * 0.5 + 0.5;
+    let ground_color   = globals.ambient_ground.rgb * globals.ambient_intensity;
+    let hemi_t         = dot(N, globals.ambient_up.xyz) * 0.5 + 0.5;
     let hemi           = mix(ground_color, sky_color, hemi_t) * albedo;
 
     // RC weight: 0 = no RC data, 1 = full RC coverage

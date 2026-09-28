@@ -167,6 +167,8 @@ pub struct Hit {
     pub face: u8,
     pub level: u32,
     pub normal: u32,
+    /// Traversal loop steps (diagnostic counter).
+    pub steps: u32,
 }
 
 pub fn hits(gpu: &Gpu, renderer: &PlanetRenderer) -> Vec<Hit> {
@@ -185,6 +187,7 @@ pub fn hits(gpu: &Gpu, renderer: &PlanetRenderer) -> Vec<Hit> {
                 face: ((info >> 2) & 7) as u8,
                 level: (info >> 5) & 31,
                 normal: (info >> 10) & 7,
+                steps: w(6) & 0xffff,
             }
         })
         .collect()

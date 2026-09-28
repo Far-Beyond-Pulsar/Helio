@@ -231,6 +231,8 @@ impl Renderer {
             debug_camera_buffer,
             ambient_color: [0.05, 0.05, 0.08],
             ambient_intensity: 1.0,
+            ambient_up: [0.0, 1.0, 0.0],
+            ambient_ground: None,
             clear_color: [0.02, 0.02, 0.03, 1.0],
             gi_config: config.gi_config,
             shadow_quality: config.shadow_quality,

@@ -14,8 +14,8 @@ fn primary(@builtin(global_invocation_id) id: vec3<u32>) {
     let d = pixel_ray(vec2<f32>(id.xy) + 0.5);
     let r = make_ray(camera.position_near.xyz, d);
     let tiles = (u32(frame.screen.x) + BEAM - 1u) / BEAM;
-    let start = select(0.0, beams[id.x / BEAM + (id.y / BEAM) * tiles], frame.screen.w > 0.5);
-    hits[pixel_index(id.xy)] = trace(r, start, frame.lod.w, 0.0, 1.0, frame.lod.y);
+    let start = select(0.0, beams[id.x / BEAM + (id.y / BEAM) * tiles], (u32(frame.screen.w) & 1u) != 0u);
+    hits[pixel_index(id.xy)] = trace(r, start, frame.lod.w, 0.0, 1.0, frame.lod.y, eye_sky(d, 0.0));
 }
 
 fn srgb(c: vec3<f32>) -> vec3<f32> {
@@ -24,18 +24,18 @@ fn srgb(c: vec3<f32>) -> vec3<f32> {
 
 fn palette(m: u32) -> vec3<f32> {
     switch m {
-        case 1u: { return srgb(vec3<f32>(92.0, 138.0, 44.0)); }
-        case 2u: { return srgb(vec3<f32>(122.0, 86.0, 54.0)); }
-        case 3u: { return srgb(vec3<f32>(128.0, 125.0, 118.0)); }
+        case 1u: { return srgb(vec3<f32>(104.0, 150.0, 54.0)); }
+        case 2u: { return srgb(vec3<f32>(132.0, 96.0, 64.0)); }
+        case 3u: { return srgb(vec3<f32>(138.0, 135.0, 128.0)); }
         case 4u: { return srgb(vec3<f32>(216.0, 198.0, 142.0)); }
         case 5u: { return srgb(vec3<f32>(236.0, 241.0, 246.0)); }
         case 6u: { return srgb(vec3<f32>(28.0, 72.0, 92.0)); }
         case 7u: { return srgb(vec3<f32>(112.0, 107.0, 101.0)); }
-        case 8u: { return srgb(vec3<f32>(198.0, 128.0, 82.0)); }
+        case 8u: { return srgb(vec3<f32>(200.0, 152.0, 104.0)); }
         case 9u: { return srgb(vec3<f32>(90.0, 88.0, 86.0)); }
         case 10u: { return srgb(vec3<f32>(112.0, 80.0, 50.0)); }
         case 11u: { return srgb(vec3<f32>(62.0, 112.0, 40.0)); }
-        case 12u: { return srgb(vec3<f32>(172.0, 97.0, 70.0)); }
+        case 12u: { return srgb(vec3<f32>(166.0, 118.0, 88.0)); }
         case 13u: { return srgb(vec3<f32>(152.0, 72.0, 56.0)); }
         case 14u: { return srgb(vec3<f32>(164.0, 122.0, 76.0)); }
         case 15u: { return srgb(vec3<f32>(122.0, 122.0, 120.0)); }
@@ -132,17 +132,26 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     if material == 0u {
         var slope = 0;
-        if x > 0u { slope = max(slope, abs(column_top(c, x - 1u, y) - top)); }
-        if x < 7u { slope = max(slope, abs(column_top(c, x + 1u, y) - top)); }
-        if y > 0u { slope = max(slope, abs(column_top(c, x, y - 1u) - top)); }
-        if y < 7u { slope = max(slope, abs(column_top(c, x, y + 1u) - top)); }
+        var lowest = top;
+        if x > 0u { let t = column_top(c, x - 1u, y); slope = max(slope, abs(t - top)); lowest = min(lowest, t); }
+        if x < 7u { let t = column_top(c, x + 1u, y); slope = max(slope, abs(t - top)); lowest = min(lowest, t); }
+        if y > 0u { let t = column_top(c, x, y - 1u); slope = max(slope, abs(t - top)); lowest = min(lowest, t); }
+        if y < 7u { let t = column_top(c, x, y + 1u); slope = max(slope, abs(t - top)); lowest = min(lowest, t); }
         // Canonical materials use the column top cell, which is resident.
+        // Depth counts from the lowest neighbouring top: an exposed riser
+        // above it is surface, not subsoil (coarse levels step in large
+        // cells where the fine terrain is a continuous slope).
         let p = domain_point(face, h.i, h.j, level);
-        material = ground_material(p, (top << level) * field.header.z, (top - 1 - h.k) << level, slope, h.k << level);
+        let depth = max(min(top, lowest) - 1 - h.k, 0) << level;
+        material = ground_material(p, (top << level) * field.header.z, depth, slope, h.k << level);
     }
     let normal = hit_normal(h, d);
     // Neighbourhood occlusion around the air cell in front of the face.
     var ao = 1.0;
+    // Side faces of grass voxels show soil below a ragged grass lip. The lip
+    // covers more of the face with distance, where one coarse cell stands for
+    // a grassy slope of many fine steps.
+    var soil_side = false;
     if code < 6u {
         let axis = code >> 1u;
         let back = select(1, -1, (code & 1u) == 1u);
@@ -173,6 +182,12 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         );
         let uv = clamp(vec2<f32>(cell[u_axis] - f32(select(select(h.i, h.j, u_axis == 1u), h.k, u_axis == 2u)),
                                  cell[v_axis] - f32(select(select(h.i, h.j, v_axis == 1u), h.k, v_axis == 2u))), vec2<f32>(0.0), vec2<f32>(1.0));
+        if axis < 2u && material == M_GRASS {
+            let tooth = f32(hash3(h.i, h.j, h.k * 4 + i32(floor(uv.x * 4.0)), 0x5bd1e995u) & 7u) / 7.0;
+            // Continuous in distance (not level), so level changes show no band.
+            let lip = 0.22 + 0.1 * tooth + 0.68 * (1.0 - 1.0 / max(h.t / frame.lod.x, 1.0));
+            soil_side = uv.y < 1.0 - lip;
+        }
         let a = mix(mix(c00, c10, uv.x), mix(c01, c11, uv.x), uv.y) / 3.0;
         ao = mix(0.42, 1.0, a);
         // Crisp voxel edges while a cell covers several pixels.
@@ -186,8 +201,8 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let hv = hash3(h.i, h.j, h.k + i32(face) * 7919 + i32(level) * 104729, 0x68bc21ebu);
     let jitter = f32(hv & 255u) / 255.0;
     let tint = f32(hash3(h.i >> 3u, h.j >> 3u, i32(face), 0x1b873593u) & 255u) / 255.0;
-    var albedo = palette(material) * (0.86 + 0.24 * jitter);
-    if material == M_GRASS {
+    var albedo = palette(select(material, M_DIRT, soil_side)) * (0.86 + 0.24 * jitter);
+    if material == M_GRASS && !soil_side {
         albedo *= mix(vec3<f32>(1.08, 1.0, 0.72), vec3<f32>(0.82, 1.02, 0.95), tint);
         if code == 4u { albedo *= 1.06; } else { albedo *= 0.9; }
     }
@@ -246,7 +261,7 @@ fn sun_visibility(s: SunSample) -> f32 {
     let dist = length(s.position);
     let level = level_for(dist);
     let eps = frame.layer.y * f32(1 << level) * 0.02 + dist * 2e-6;
-    let blocker = trace(make_ray(s.position + s.normal * eps, sun), 0.0, frame.lod.w, dist, 1.0, 0.0);
+    let blocker = trace(make_ray(s.position + s.normal * eps, sun), 0.0, frame.lod.w, dist, 1.0, 0.0, no_sky());
     return select(0.0, 1.0, (blocker.info & 3u) == ST_MISS);
 }
 

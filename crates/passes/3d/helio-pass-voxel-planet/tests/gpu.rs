@@ -278,3 +278,57 @@ fn beam_start_is_conservative() {
         assert_eq!(bad, 0);
     }
 }
+
+/// The directional sky bound only ends rays that provably miss: every pixel
+/// matches a render without it, including views up at distant terrain.
+#[test]
+fn sky_bound_is_conservative() {
+    let Some(gpu) = gpu() else { return };
+    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+    for (face, fi, fj, pitch) in [(2u8, 0.47, 0.53, 0.02), (2, 0.47, 0.53, 0.3), (4, 0.37, 0.61, 0.08), (1, 0.52, 0.48, 0.6), (0, 0.3, 0.7, 0.0)] {
+        let dir = land(&planet, face, fi, fj);
+        let eye = planet.surface_point(dir, 1.7);
+        let up = eye.normalize();
+        let forward = (up.any_orthonormal_vector() + up * pitch).normalize().as_vec3();
+        let size = [320, 180];
+        let target = Target::new(&gpu, size);
+        let mut r = renderer(&gpu, planet.clone(), size);
+        let f = frame(&planet, eye);
+        settle(&gpu, &target, &mut r, &f, forward);
+        r.settings_mut().lod_dither = 0.0;
+        if std::env::var_os("SKY_DUMP").is_some() {
+            target.render(&gpu, &mut r, &f, forward, 5000);
+            let table = read_buffer(&gpu, r.horizon_buffer(), 257 * 32 * 4);
+            let v: Vec<i32> = table.chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect();
+            let eye_layer = ((eye.length() - planet.grid().radius()) / planet.grid().voxel_size()) as i64;
+            for b in 0..32 {
+                let row = &v[b * 256..b * 256 + 256];
+                eprintln!("bucket {b:2}: min {:9} max {:9} all {:9} (rel eye m: {:.0} {:.0})", row.iter().min().unwrap(), row.iter().max().unwrap(), v[256 * 32 + b],
+                    (*row.iter().min().unwrap() as i64 - eye_layer) as f64 * planet.grid().voxel_size(), (*row.iter().max().unwrap() as i64 - eye_layer) as f64 * planet.grid().voxel_size());
+            }
+        }
+        for beam in [false, true] {
+            r.settings_mut().beam = beam;
+            r.settings_mut().horizon = false;
+            target.render(&gpu, &mut r, &f, forward, 5000);
+            let reference = hits(&gpu, &r);
+            r.settings_mut().horizon = true;
+            target.render(&gpu, &mut r, &f, forward, 5000);
+            let bounded = hits(&gpu, &r);
+            let (mut bad, mut hits_seen, mut saved) = (0, 0, 0i64);
+            for (index, (a, b)) in reference.iter().zip(&bounded).enumerate() {
+                hits_seen += usize::from(a.status == 1);
+                saved += i64::from(a.steps) - i64::from(b.steps);
+                let both_miss = a.status == 0 && b.status == 0;
+                if !both_miss && (a.status, a.i, a.j, a.k, a.face, a.level) != (b.status, b.i, b.j, b.k, b.face, b.level) {
+                    bad += 1;
+                    if bad < 6 {
+                        eprintln!("pixel {} {}: reference {a:?} bounded {b:?}", index % 320, index / 320);
+                    }
+                }
+            }
+            eprintln!("face {face} pitch {pitch} beam {beam}: {bad} differences, {hits_seen} hits, {saved} steps saved");
+            assert_eq!(bad, 0);
+        }
+    }
+}

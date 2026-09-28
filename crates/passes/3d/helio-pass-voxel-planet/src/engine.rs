@@ -44,6 +44,8 @@ pub struct Settings {
     pub job_budget: usize,
     /// Start primary rays at the conservative per-tile beam distance.
     pub beam: bool,
+    /// End rising eye rays at the directional sky bound.
+    pub horizon: bool,
     pub capacity: Capacity,
 }
 
@@ -54,6 +56,7 @@ impl Default for Settings {
             lod_dither: std::env::var("HELIO_VOXEL_LOD_DITHER").ok().and_then(|v| v.parse().ok()).unwrap_or(0.25),
             job_budget: 12_288,
             beam: std::env::var_os("HELIO_VOXEL_NO_BEAM").is_none(),
+            horizon: std::env::var_os("HELIO_VOXEL_NO_HORIZON").is_none(),
             capacity: Capacity::default(),
         }
     }
@@ -82,6 +85,9 @@ struct FrameGpu {
     counts: [u32; 4],
     neighbours: [[u32; 4]; 6],
     extra: [u32; 4],
+    /// Per level: angular distance from the eye within which the level's
+    /// summary blocks cannot be reached by eye rays above `lod.z`.
+    ring: [[f32; 4]; 8],
 }
 
 /// Public per-frame statistics.
@@ -169,6 +175,9 @@ struct Pipelines {
     level_suffix: wgpu::ComputePipeline,
     primary: wgpu::ComputePipeline,
     beam: wgpu::ComputePipeline,
+    horizon_clear: wgpu::ComputePipeline,
+    horizon_blocks: wgpu::ComputePipeline,
+    horizon_suffix: wgpu::ComputePipeline,
     shade: wgpu::ComputePipeline,
     sunlight: wgpu::ComputePipeline,
     gbuffer: wgpu::RenderPipeline,
@@ -212,6 +221,8 @@ impl Pipelines {
             storage(14, false),
             storage(15, false),
             storage(16, false),
+            storage(17, false),
+            storage(18, false),
         ];
         trace_entries.push(wgpu::BindGroupLayoutEntry {
             binding: 9,
@@ -254,6 +265,7 @@ impl Pipelines {
         let gen_module = module("planet generation", source("read_write", &[include_str!("../shaders/generate.wgsl")]));
         let trace_src = [
             include_str!("../shaders/view.wgsl"),
+            include_str!("../shaders/horizon.wgsl"),
             include_str!("../shaders/trace.wgsl"),
             include_str!("../shaders/beam.wgsl"),
             include_str!("../shaders/surface.wgsl"),
@@ -334,6 +346,9 @@ impl Pipelines {
             level_suffix: compute(&gen_pl, &gen_module, "level_suffix"),
             primary: compute(&trace_pl, &trace_module, "primary"),
             beam: compute(&trace_pl, &trace_module, "beam"),
+            horizon_clear: compute(&trace_pl, &trace_module, "horizon_clear"),
+            horizon_blocks: compute(&trace_pl, &trace_module, "horizon_blocks"),
+            horizon_suffix: compute(&trace_pl, &trace_module, "horizon_suffix"),
             shade: compute(&trace_pl, &trace_module, "shade"),
             sunlight: compute(&trace_pl, &trace_module, "sunlight"),
             gbuffer,
@@ -362,11 +377,17 @@ struct Buffers {
     evictions: wgpu::Buffer,
     level_tops: wgpu::Buffer,
     block_state: wgpu::Buffer,
+    /// Directional sky bound: accumulated and suffix tables.
+    horizon_acc: wgpu::Buffer,
+    horizon: wgpu::Buffer,
     brush_capacity: u32,
     bytes: u64,
 }
 
 const JOB_OUT_BYTES: u64 = 96;
+/// Must match `SECTORS` and `BUCKETS` in horizon.wgsl.
+const HORIZON_SECTORS: u32 = 256;
+const HORIZON_BUCKETS: u32 = 32;
 
 impl Buffers {
     fn new(device: &wgpu::Device, cap: &Capacity, field: &FieldConstants) -> Self {
@@ -396,6 +417,9 @@ impl Buffers {
             st,
         );
         let evictions = make("planet evictions", (u64::from(cap.max_evictions) * 3 + u64::from(cap.max_jobs) * 2) * 4, st);
+        let horizon_bytes = u64::from((HORIZON_SECTORS + 1) * HORIZON_BUCKETS) * 4;
+        let horizon_acc = make("planet horizon accumulation", horizon_bytes, st);
+        let horizon = make("planet horizon bound", horizon_bytes, st | wgpu::BufferUsages::COPY_SRC);
         let brush_capacity = 65_536;
         let brushes = make("planet brushes", u64::from(brush_capacity) * 32, st | wgpu::BufferUsages::COPY_SRC);
         let table_init = vec![NONE; 1 << cap.table_bits];
@@ -446,6 +470,8 @@ impl Buffers {
             evictions,
             level_tops,
             block_state,
+            horizon_acc,
+            horizon,
             brush_capacity,
             bytes,
         }
@@ -605,6 +631,11 @@ impl PlanetRenderer {
     pub fn hit_buffer(&self) -> &wgpu::Buffer {
         &self.screen.hits
     }
+    /// Directional sky bound table (diagnostics): `[bucket][sector]` suffix
+    /// maxima in base layers, then one all-sector row per bucket.
+    pub fn horizon_buffer(&self) -> &wgpu::Buffer {
+        &self.buffers.horizon
+    }
     pub fn surface_buffer(&self) -> &wgpu::Buffer {
         &self.screen.surfaces
     }
@@ -674,9 +705,17 @@ impl PlanetRenderer {
         frame.eye = [dir.x as f32, dir.y as f32, dir.z as f32, rho as f32];
         frame.layer = [(layer - k) as f32, s as f32, grid.delta() as f32, (planet.outer_radius() - rho) as f32];
         frame.layer_i = [k.clamp(i32::MIN as f64, i32::MAX as f64) as i32, grid.cells(), grid.levels() as i32, i32::from(crate::grid::face_of(eye))];
-        let inner = grid.radius() + planet.min_terrain_height() - rho;
-        frame.lod = [lod0 as f32, self.settings.lod_dither, inner as f32, (rho + grid.radius() * 3.0) as f32];
-        frame.screen = [size[0] as f32, size[1] as f32, (self.frame_index % 1024) as f32, if self.settings.beam { 1.0 } else { 0.0 }];
+        // Directional sky bound cut height (relative to the eye radius): the
+        // bound applies to rising rays above it, so later hits lie in
+        // [cut, outer]. See `horizon.wgsl`.
+        const SKY_CUT_M: f64 = 100.0;
+        frame.lod = [lod0 as f32, self.settings.lod_dither, -SKY_CUT_M as f32, (rho + grid.radius() * 3.0) as f32];
+        let rings = sky_rings(lod0, f64::from(self.settings.lod_dither), rho, rho - SKY_CUT_M, planet.outer_radius(), &self.residency.complete_levels());
+        for (level, phi) in rings.iter().enumerate().take(32) {
+            frame.ring[level / 4][level % 4] = *phi as f32;
+        }
+        let flags = u32::from(self.settings.beam) | (u32::from(self.settings.horizon) << 1);
+        frame.screen = [size[0] as f32, size[1] as f32, (self.frame_index % 1024) as f32, flags as f32];
         let sun = sun.normalize_or_zero();
         frame.sun = [sun.x, sun.y, sun.z, if shadows { 1.0 } else { 0.0 }];
         frame.counts = [jobs, evictions, (1u32 << self.settings.capacity.table_bits) - 1, self.settings.capacity.pool_units];
@@ -875,6 +914,8 @@ impl PlanetRenderer {
                 wgpu::BindGroupEntry { binding: 14, resource: self.buffers.level_tops.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 15, resource: self.buffers.block_state.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 16, resource: self.screen.beams.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 17, resource: self.buffers.horizon_acc.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 18, resource: self.buffers.horizon.as_entire_binding() },
             ],
         });
         let render_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -939,6 +980,11 @@ impl PlanetRenderer {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_bind_group(0, &trace_group, &[]);
             pass.set_bind_group(1, camera_group, &[]);
+            // Directional sky bound from this frame's summary blocks.
+            let levels = self.planet.grid().levels();
+            Self::dispatch(&mut pass, &self.pipelines.horizon_clear, [((HORIZON_SECTORS + 1) * HORIZON_BUCKETS).div_ceil(64), 1, 1]);
+            Self::dispatch(&mut pass, &self.pipelines.horizon_blocks, [(1 << 14) / 64, levels * 6, 1]);
+            Self::dispatch(&mut pass, &self.pipelines.horizon_suffix, [(HORIZON_SECTORS + 1).div_ceil(64), 1, 1]);
             Self::dispatch(&mut pass, &self.pipelines.beam, [size[0].div_ceil(32), size[1].div_ceil(32), 1]);
             Self::dispatch(&mut pass, &self.pipelines.primary, groups);
         }
@@ -1024,6 +1070,40 @@ impl PlanetRenderer {
     pub fn sun_view(&self) -> Option<&wgpu::TextureView> {
         self.sun_active.then_some(&self.screen.sun_view)
     }
+}
+
+/// Per level, the angular distance from the eye within which every point at
+/// radius `[r_lo, r_hi]` is nearer than the first ray distance the level can
+/// serve. Level L serves distances from its dithered ring start, or from the
+/// ring start of any finer level that is incomplete (rays fall back to
+/// coarser columns there).
+fn sky_rings(lod0: f64, dither: f64, rho: f64, r_lo: f64, r_hi: f64, complete: &[bool]) -> Vec<f64> {
+    let start = |level: usize| {
+        if level == 0 { 0.0 } else { lod0 * f64::from(1u32 << (level - 1).min(30)) / (1.0 + dither * 0.5) * 0.999 }
+    };
+    // Angular distance where a point at radius r is exactly t away (0 when a
+    // point straight above or below the eye already is).
+    let phi = |t: f64, r: f64| {
+        let q = (t * t - (rho - r) * (rho - r)) / (4.0 * rho * r);
+        if q <= 0.0 { 0.0 } else { 2.0 * q.sqrt().min(1.0).asin() }
+    };
+    let mut fallback = f64::INFINITY;
+    complete
+        .iter()
+        .enumerate()
+        .map(|(level, done)| {
+            let t = start(level).min(fallback);
+            if !done {
+                fallback = fallback.min(start(level));
+            }
+            let mut p = phi(t, r_lo).min(phi(t, r_hi));
+            let r_star = (rho * rho - t * t).max(0.0).sqrt();
+            if r_star > r_lo && r_star < r_hi {
+                p = p.min(phi(t, r_star));
+            }
+            p * 0.999
+        })
+        .collect()
 }
 
 /// Graph entry that allocates GPU residency once a planet frame is published.

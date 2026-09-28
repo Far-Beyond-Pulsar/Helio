@@ -65,6 +65,8 @@ pub struct Planet {
     revision: u64,
     /// Highest radius any add brush reaches.
     edit_top: f64,
+    /// Lowest radius any remove brush reaches.
+    edit_bottom: f64,
     heights: Mutex<rustc_hash::FxHashMap<(u8, i32, i32, u32), i32>>,
 }
 
@@ -77,6 +79,7 @@ impl Clone for Planet {
             edits: self.edits.clone(),
             revision: self.revision,
             edit_top: self.edit_top,
+            edit_bottom: self.edit_bottom,
             heights: Mutex::new(Default::default()),
         }
     }
@@ -93,6 +96,7 @@ impl Planet {
             edits: EditLog::default(),
             revision: 0,
             edit_top: 0.0,
+            edit_bottom: f64::INFINITY,
             heights: Mutex::new(Default::default()),
         })
     }
@@ -114,9 +118,13 @@ impl Planet {
     }
     pub fn apply(&mut self, brush: Brush) -> Result<u32, String> {
         let id = self.edits.push(&self.grid, brush)?;
-        if brush.op == crate::edits::BrushOp::Add {
-            let top = DVec3::from_array(brush.center).length() + brush.radius;
-            self.edit_top = self.edit_top.max(top);
+        // A cube brush reaches sqrt(3) radii from its centre.
+        let reach = brush.radius * 1.7321 + self.grid.voxel_size();
+        let centre = DVec3::from_array(brush.center).length();
+        match brush.op {
+            crate::edits::BrushOp::Add => self.edit_top = self.edit_top.max(centre + reach),
+            crate::edits::BrushOp::Remove => self.edit_bottom = self.edit_bottom.min(centre - reach),
+            _ => {}
         }
         self.revision += 1;
         Ok(id)
@@ -139,6 +147,10 @@ impl Planet {
     }
     pub fn min_terrain_height(&self) -> f64 {
         -self.max_terrain_height() - f64::from(self.field.levels[0].abs()) / f64::from(HEIGHT_ONE)
+    }
+    /// Radius below which every cell is solid (terrain and removals).
+    pub fn inner_radius(&self) -> f64 {
+        (self.grid.radius() + self.min_terrain_height() - self.grid.voxel_size() * 4.0).min(self.edit_bottom)
     }
     /// Outer radius that bounds every solid cell (terrain and additions).
     pub fn outer_radius(&self) -> f64 {

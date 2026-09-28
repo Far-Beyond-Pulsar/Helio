@@ -655,6 +655,13 @@ impl Residency {
     }
 
     /// Every pending window column has been issued.
+    /// Per level: the current window is planned and every wanted column has
+    /// been issued (inactive levels are incomplete: rays fall back past them).
+    pub fn complete_levels(&self) -> Vec<bool> {
+        let settled = self.urgent.is_empty() && self.applied == self.requested;
+        self.levels.iter().map(|l| settled && l.active && l.pending.is_empty()).collect()
+    }
+
     pub fn idle(&self) -> bool {
         self.urgent.is_empty() && self.applied == self.requested && self.levels.iter().all(|l| l.pending.is_empty())
     }

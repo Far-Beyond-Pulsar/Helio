@@ -51,7 +51,7 @@ fn beam_box(face: u32, level_in: u32, bi: i32, bj: i32, bk: i32) -> BeamBox {
     let k = bk >> level;
     let ci = i >> 3u;
     let cj = j >> 3u;
-    let top = (col.k_lo + i32(band_count(col))) * 8;
+    let top = column_top_cell(col);
     if k < col.k_lo * 8 { return beam_fail(); }
     var b: BeamBox;
     b.ok = true;
@@ -109,7 +109,7 @@ fn sphere_tf(r: Ray, layer: i32, offset: f32, t: f32, descending: bool) -> f32 {
     return select(-r.b + root, c / (r.b + root), r.b > 0.0);
 }
 
-fn beam_trace(r: Ray, tan_a: f32, lo_scale: f32, hi_scale: f32) -> f32 {
+fn beam_trace(r: Ray, tan_a: f32, lo_scale: f32, hi_scale: f32, sky: SkyRay) -> f32 {
     var t = 0.0;
     let outer = frame.layer.w;
     if height_rel(r, t) > outer {
@@ -133,8 +133,17 @@ fn beam_trace(r: Ray, tan_a: f32, lo_scale: f32, hi_scale: f32) -> f32 {
         let bk = frame.layer_i.x + i32(floor(rk));
         if bi < 0 || bj < 0 || bi >= n || bj >= n { return touch; }
         let w = t * tan_a + 0.001;
-        if r.b + t > 0.0 && height_rel(r, t) - w > layer_height(sky_layer(level_for(t * lo_scale))) {
-            return frame.lod.w;
+        // Every ray of the cone must be rising: its elevation differs from
+        // the centre ray's by at most the cone half angle.
+        if r.b + t > frame.eye.w * tan_a * 1.01 + 0.01 {
+            var bound = layer_height(sky_layer(level_for(t * lo_scale)));
+            if sky.sector > -2 && height_rel(r, t) - w > frame.lod.z {
+                // Disc points are at most w (arc w / radius) nearer the eye.
+                bound = min(bound, layer_height(horizon_layer(sky, eye_phi(sky, t) - w / (frame.eye.w * 0.99))));
+            }
+            if height_rel(r, t) - w > bound {
+                return frame.lod.w;
+            }
         }
         // Boxes for both LOD levels a dithered primary ray may use here,
         // intersected in the finer level's cells.
@@ -243,5 +252,5 @@ fn beam(@builtin(global_invocation_id) id: vec3<u32>) {
     let tan_a = sqrt(max(1.0 - cos_min * cos_min, 0.0)) / max(cos_min, 1e-4) * 1.02 + 1e-5;
     let d = frame.lod.y;
     let r = make_ray(camera.position_near.xyz, centre);
-    beams[id.x + id.y * tiles.x] = beam_trace(r, tan_a, (1.0 - 0.5 * d) * 0.97, 1.0 + 0.5 * d);
+    beams[id.x + id.y * tiles.x] = beam_trace(r, tan_a, (1.0 - 0.5 * d) * 0.97, 1.0 + 0.5 * d, eye_sky(centre, tan_a));
 }

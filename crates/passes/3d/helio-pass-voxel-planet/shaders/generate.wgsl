@@ -335,7 +335,27 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         if (job.flags & 1u) != 0u && (previous.info & INFO_VALID) != 0u {
             free_run(previous);
         }
-        let top_cell = (o.k_lo + i32(o.n_band)) * 8;
+        // Exact top: the highest occupied layer of the highest non-air band
+        // brick (mixed bricks are scanned by z layer, two words each).
+        let band_top = (o.k_lo + i32(o.n_band)) * 8;
+        var exact = o.k_lo * 8;
+        for (var b = i32(o.n_band) - 1; b >= 0; b--) {
+            let word = u32(b) >> 5u;
+            let bit = u32(b) & 31u;
+            if ((o.solid[word] >> bit) & 1u) != 0u {
+                exact = (o.k_lo + b + 1) * 8;
+                break;
+            }
+            if ((o.mixed[word] >> bit) & 1u) != 0u {
+                let base = (o.scratch + 1u + u32(b)) * UNIT_WORDS;
+                var z = 7;
+                while z > 0 && (scratch[base + 2u * u32(z)] | scratch[base + 2u * u32(z) + 1u]) == 0u { z -= 1; }
+                exact = (o.k_lo + b) * 8 + z + 1;
+                break;
+            }
+        }
+        let gap = u32(clamp(band_top - exact, 0, 7));
+        let top_cell = band_top - i32(gap);
         let ci = i32((job.key0 & 0xffffffu) << 8u) >> 8u;
         let cj = bitcast<i32>(job.key1);
         for (var tier = 1u; tier <= 3u; tier++) {
@@ -351,14 +371,14 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         c.key0 = job.key0;
         c.key1 = job.key1;
         c.k_lo = o.k_lo;
-        c.info = o.n_band | (o.n_mixed << 9u) | (o.size_class << 18u) | select(0u, INFO_EXT, ext) | INFO_VALID;
+        c.info = o.n_band | (o.n_mixed << 9u) | (o.size_class << 18u) | (gap << 22u) | select(0u, INFO_EXT, ext) | INFO_VALID;
         c.run = o.run;
         c.mixed = o.mixed[0];
         c.solid = o.solid[0];
         c.edits = job.edits;
         records[job.record] = c;
         let level = job.key0 >> 27u;
-        atomicMax(&level_tops[level], ((o.k_lo + i32(o.n_band)) * 8) << level);
+        atomicMax(&level_tops[level], top_cell << level);
     }
 }
 

@@ -246,14 +246,15 @@ fn cross_face(r: Ray, cur_in: Cursor, t: f32) -> Cursor {
 
 // Walk the ray from t_start to t_end. Level selection uses
 // `(t + lod_offset) * lod_scale` (dither for primary rays, eye distance for
-// secondary rays).
+// secondary rays). `sky` enables the directional sky bound for rays that
+// start at the eye (sector -2 disables it).
 //
 // Every outer step classifies the cursor into the largest provably empty
 // box in index space (a complete 64/16/4-column summary block or a column
 // above its band, or an air brick) and exits it with one generic boundary
 // computation. This keeps the SIMD lanes of a warp on the same code path.
 // Only mixed bricks run an exact inner cell DDA.
-fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dither: f32) -> Hit {
+fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dither: f32, sky: SkyRay) -> Hit {
     var t = t_start;
     let outer = frame.layer.w;
     if height_rel(r, t) > outer {
@@ -337,7 +338,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
         let lv = cur.level;
         let ci = cur.i >> 3u;
         let cj = cur.j >> 3u;
-        let top_cell = (col.k_lo + i32(band_count(col))) * 8;
+        let top_cell = column_top_cell(col);
         let bottom_cell = col.k_lo * 8;
         if cur.k < bottom_cell {
             return make_hit(ST_HIT, t, cur, normal, record);
@@ -351,8 +352,15 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
         if cur.k >= top_cell {
             // Above the band: sky exit, then the largest complete summary
             // block whose maximum is below the cursor layer.
-            if r.b + t > 0.0 && height_rel(r, t) > layer_height(sky_layer(min(lv, level_for((t + lod_offset) * lod_scale)))) {
-                return make_hit(ST_MISS, t, cur, normal, NONE);
+            if r.b + t > 0.0 {
+                var bound = layer_height(sky_layer(min(lv, level_for((t + lod_offset) * lod_scale))));
+                let h = height_rel(r, t);
+                if sky.sector > -2 && h > frame.lod.z {
+                    bound = min(bound, layer_height(horizon_layer(sky, eye_phi(sky, t))));
+                }
+                if h > bound {
+                    return make_hit(ST_MISS, t, cur, normal, NONE);
+                }
             }
             for (var tier = 3u; tier >= 1u; tier--) {
                 let bi = ci >> (2u * tier);

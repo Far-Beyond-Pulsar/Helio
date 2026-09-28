@@ -57,6 +57,10 @@ struct DeferredGlobals {
     enable_env_reflections: u32,
     /// Pads the struct to a 16-byte multiple, as WGSL requires of a uniform.
     _pad: [u32; 2],
+    /// Hemisphere ambient axis (xyz, unit).
+    ambient_up: [f32; 4],
+    /// Hemisphere ground-bounce colour (rgb, unscaled).
+    ambient_ground: [f32; 4],
 }
 
 pub struct DeferredLightPass {
@@ -955,10 +959,11 @@ impl RenderPass for DeferredLightPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let environment = ctx.registry.get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment());
-        let (ambient_color, ambient_intensity) = if let Some(environment) = environment {
-            (environment.ambient_color, environment.ambient_intensity)
+        let (ambient_color, ambient_intensity, ambient_up, ambient_ground) = if let Some(environment) = environment {
+            (environment.ambient_color, environment.ambient_intensity, environment.ambient_up, environment.ambient_ground)
         } else {
-            ([0.5, 0.5, 0.6], 1.0) // Brighter fallback ambient: sky-blue tint
+            // Brighter fallback ambient: sky-blue tint
+            ([0.5, 0.5, 0.6], 1.0, [0.0, 1.0, 0.0], [0.075, 0.075, 0.09])
         };
         // Get RC bounds from frame resources (dual-tier GI: RC near, ambient far)
         let (rc_min, rc_max) = if let Some(volume) = ctx
@@ -1008,6 +1013,8 @@ impl RenderPass for DeferredLightPass {
             enable_reflections: helio_core::REFLECTIONS_SUPPORTED as u32,
             enable_env_reflections: self.enable_env_reflections as u32,
             _pad: [0; 2],
+            ambient_up: [ambient_up[0], ambient_up[1], ambient_up[2], 0.0],
+            ambient_ground: [ambient_ground[0], ambient_ground[1], ambient_ground[2], 0.0],
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())

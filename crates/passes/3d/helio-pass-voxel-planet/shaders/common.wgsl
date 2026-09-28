@@ -14,19 +14,20 @@ struct Frame {
     eye: vec4<f32>,        // unit eye direction from the planet centre (xyz), |eye| (w)
     layer: vec4<f32>,      // eye layer fraction, voxel size, angular cell, outer radius - |eye|
     layer_i: vec4<i32>,    // eye base layer, cells per face, level count, eye face
-    lod: vec4<f32>,        // level-0 distance, dither, inner radius - |eye|, max distance
-    screen: vec4<f32>,     // width, height, frame, flags
+    lod: vec4<f32>,        // level-0 distance, dither, sky bound cut height, max distance
+    screen: vec4<f32>,     // width, height, frame, flags (1 beam, 2 sky bound)
     sun: vec4<f32>,        // direction to sun, enabled
     counts: vec4<u32>,     // jobs, evictions, table mask, pool units
     neighbours: array<vec4<u32>, 6>, // face across -a, +a, -b, +b
     extra: vec4<u32>,      // table patches
+    ring: array<vec4<f32>, 8>, // per level: sky bound block exclusion angle
 }
 
 struct Column {
     key0: u32,   // column i | face << 24 | level << 27
     key1: u32,   // column j
     k_lo: i32,   // lowest band brick layer (level bricks)
-    info: u32,   // n_band 0..9 | n_mixed 9..18 | class 18..22 | ext 29 | overflow 30 | valid 31
+    info: u32,   // n_band 0..9 | n_mixed 9..18 | class 18..22 | top gap 22..25 | ext 29 | overflow 30 | valid 31
     run: u32,    // first pool unit
     mixed: u32,  // band bricks 0..32 that store an occupancy mask
     solid: u32,  // band bricks 0..32 that are completely occupied
@@ -99,6 +100,12 @@ fn column_valid(c: Column) -> bool {
 }
 
 fn band_count(c: Column) -> u32 { return c.info & 511u; }
+
+// First empty layer above every occupied cell (level cells): the band top
+// less the empty layers of its top brick.
+fn column_top_cell(c: Column) -> i32 {
+    return (c.k_lo + i32(band_count(c))) * 8 - i32((c.info >> 22u) & 7u);
+}
 
 fn header_units(c: Column) -> u32 { return select(1u, 2u, (c.info & INFO_EXT) != 0u); }
 
