@@ -41,7 +41,8 @@
 //!
 //! `--water` adds a water pool (surface, simulation and caustics).
 //!
-//! `--dof` enables depth of field through the camera's post-process settings.
+//! `--dof` enables depth of field through the camera's post-process settings,
+//! `--bloom` bloom (both can be combined).
 //!
 //! `--billboards` places a billboard (editor light icon) over every point light.
 //!
@@ -104,6 +105,7 @@ struct Args {
     billboards: bool,
     movability: String,
     dof: bool,
+    bloom: bool,
     water: bool,
     ssr: bool,
     orbit: bool,
@@ -126,6 +128,7 @@ fn parse_args() -> Args {
         billboards: false,
         movability: "static".into(),
         dof: false,
+        bloom: false,
         water: false,
         ssr: false,
         orbit: false,
@@ -141,6 +144,7 @@ fn parse_args() -> Args {
             "--pulsar-columns" => Some(&mut args.pulsar_columns),
             "--billboards" => Some(&mut args.billboards),
             "--dof" => Some(&mut args.dof),
+            "--bloom" => Some(&mut args.bloom),
             "--water" => Some(&mut args.water),
             "--ssr" => Some(&mut args.ssr),
             "--orbit" => Some(&mut args.orbit),
@@ -447,13 +451,16 @@ fn run(
             },
         );
     }
-    if args.dof {
-        // Camera-baseline post-process settings with depth of field on,
-        // focused a few metres out so near and far both blur.
+    if args.dof || args.bloom {
+        // Camera-baseline post-process settings. Depth of field is focused a
+        // few metres out so near and far both blur.
         let mut settings = helio_pass_postprocess::PostProcessSettings::default();
-        settings.dof_enabled = true;
-        settings.dof_focal_distance = 6.0;
-        settings.dof_focal_region = 1.5;
+        if args.dof {
+            settings.dof_enabled = true;
+            settings.dof_focal_distance = 6.0;
+            settings.dof_focal_region = 1.5;
+        }
+        settings.bloom_enabled = args.bloom;
         set_camera_postprocess(&mut scene_db.world, 0, &settings);
     }
     let mut config = RendererConfig::new(width, height, FORMAT).with_render_scale(args.scale);
