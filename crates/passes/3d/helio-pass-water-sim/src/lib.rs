@@ -645,6 +645,16 @@ impl RenderPass for WaterSimPass {
         }
     }
 
+    /// Surface reflections march the min-depth pyramid, but only on frames
+    /// where the screen-space water path runs (some volume row may be live).
+    fn declare_frame_demands(&mut self, ctx: &PrepareContext, demands: &mut helio_core::FrameDemands) {
+        let volumes = ctx.scene_buffers.get(BufferKey::of("water_volumes"));
+        self.volume_liveness.update(ctx.device, ctx.queue, volumes);
+        if volumes.is_some_and(|handle| self.volume_liveness.maybe_live(handle)) {
+            demands.demand("hiz_min");
+        }
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.volume_liveness.update(
             ctx.device,

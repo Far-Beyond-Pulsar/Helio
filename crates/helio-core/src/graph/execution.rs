@@ -362,6 +362,9 @@ pub struct RenderGraph {
     pub(crate) xr_active: bool,
     pass_cache: Vec<Option<CachedPass>>,
     frame_count: u64,
+    /// Optional resources passes declared for the current frame; see
+    /// [`crate::FrameDemands`].
+    frame_demands: crate::FrameDemands,
     /// Set by [`set_render_size`](Self::set_render_size) and consumed only
     /// after the first successful frame at the new size. Passes use this
     /// one-frame pulse through [`PrepareContext::resize`] to rebuild resources
@@ -452,6 +455,7 @@ impl RenderGraph {
             xr_active: false,
             pass_cache: Vec::new(),
             frame_count: 0,
+            frame_demands: crate::FrameDemands::default(),
             resize_pending: false,
             graph_data: None,
             external_inputs: std::collections::HashSet::new(),
@@ -1326,6 +1330,37 @@ impl RenderGraph {
             .begin_gpu_pass(&mut encoder, "__graph_graphics");
 
         if !use_parallel_recording {
+            // Every pass declares the optional resources it will read before
+            // any pass executes, so producers earlier in the graph can skip
+            // outputs nobody needs this frame.
+            self.frame_demands.clear();
+            for pass in self.passes.iter_mut() {
+                let plan_ctx = PrepareContext {
+                    device: scene.device(),
+                    queue: scene.queue(),
+                    frame_num: scene.frame_count(),
+                    camera: scene.camera(),
+                    camera_data: scene.camera_data(),
+                    camera_generation: scene.camera_generation(),
+                    scene_buffers: scene.scene_buffers(),
+                    registry: &*registry,
+                    resize: resized_this_frame,
+                    width: self.internal_w,
+                    height: self.internal_h,
+                    delta_time: self.delta_time,
+                };
+                pass.declare_frame_demands(&plan_ctx, &mut self.frame_demands);
+            }
+            // SAFETY: `frame_demands` is graph-owned and not modified again
+            // until the next frame's `execute_with_registry`; the registry
+            // entry is frame-scoped (same lifetime bridge as `publish`).
+            let demands: &crate::FrameDemands =
+                unsafe { &*std::ptr::addr_of!(self.frame_demands) };
+            registry.write(
+                crate::ResourceKey::new(crate::FRAME_DEMANDS),
+                demands,
+                "RenderGraph",
+            );
             // Raw pointer, not a borrow: `self.passes.iter_mut()` below holds
             // `self.passes` mutably for the loop body, and `pre_pass_actions`
             // is graph-owned and immutable for the duration of execution (see

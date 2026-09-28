@@ -414,6 +414,12 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// state, just as it does for ordinary `publish` calls.
     fn publish_frame_inputs<'a>(&self, _frame: &mut ResourceRegistry<'a>) {}
 
+    /// Declares optional resources this pass will read this frame, before any
+    /// pass of the frame executes (see [`crate::FrameDemands`]). Producers of
+    /// optional outputs check [`crate::is_demanded`] and skip work nobody
+    /// asked for. `ctx.registry` holds only the frame inputs at this point.
+    fn declare_frame_demands(&mut self, _ctx: &PrepareContext, _demands: &mut crate::FrameDemands) {}
+
     /// Whether `execute` writes every pixel of `ctx.target` without reading
     /// what was there, and no earlier pass in the graph reads the target.
     ///
