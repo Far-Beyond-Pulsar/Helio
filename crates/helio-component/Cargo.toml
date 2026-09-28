@@ -58,6 +58,7 @@ pulsar_reflection = { workspace = true, features = ["prims-gpui"] }
 pulsar_scenedb = { workspace = true }
 pulsar_scenedb_derive = { workspace = true }
 pulsar_world_registry = { workspace = true }
+pulsar_scene_model = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
