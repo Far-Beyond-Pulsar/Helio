@@ -223,6 +223,7 @@ impl Renderer {
             camera_buffer,
             camera_data: helio_core::GpuCameraUniforms::zeroed(),
             camera_generation: 0,
+            camera_identity: None,
             frame_count: 0,
             ray_frame: Default::default(),
             prev_view_proj: glam::Mat4::IDENTITY,

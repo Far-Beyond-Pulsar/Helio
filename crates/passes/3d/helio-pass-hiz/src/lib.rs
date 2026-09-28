@@ -101,8 +101,11 @@ pub struct HiZBuildPass {
     width: u32,
     height: u32,
 
-    // Camera tracking for HiZ reuse optimization (skip rebuild if camera static)
-    prev_camera_generation: u64,
+    // What the max pyramid was last built for: `(camera_generation, SceneDB
+    // content signature)`. Reused only while both hold -- a still camera over
+    // a changing scene (an object moving out from behind an occluder) must
+    // rebuild, or occlusion culling keeps hiding what is now visible.
+    prev_view_key: (u64, u64),
     /// Whether this is the first frame (forces a full rebuild regardless of generation).
     first_frame: bool,
 
@@ -276,7 +279,7 @@ impl HiZBuildPass {
             mip_views: Vec::new(),
             width,
             height,
-            prev_camera_generation: 0,
+            prev_view_key: (0, 0),
             first_frame: true,
             static_hiz_texture: None,
             static_hiz_view: None,
@@ -727,7 +730,8 @@ impl RenderPass for HiZBuildPass {
         // copy feeds both pyramids, so it is needed only when one of them is
         // rebuilt this frame.
         let min_wanted = helio_core::is_demanded(ctx.registry, "hiz_min");
-        let max_rebuild = self.first_frame || ctx.camera_generation != self.prev_camera_generation;
+        let view_key = (ctx.camera_generation, ctx.scene_buffers.content_signature());
+        let max_rebuild = self.first_frame || view_key != self.prev_view_key;
 
         if self.depth_copy_supported && (min_wanted || max_rebuild) {
             let depth_texture = ctx
@@ -806,15 +810,13 @@ impl RenderPass for HiZBuildPass {
             self.build_min_pyramid(ctx);
         }
 
-        // ── HiZ Reuse optimization: skip rebuild if camera static ─────────────
-        let camera_gen = ctx.camera_generation;
-
+        // ── HiZ reuse: skip the rebuild while camera and scene are unchanged ──
         if !max_rebuild {
             return Ok(());
         }
 
         self.first_frame = false;
-        self.prev_camera_generation = camera_gen;
+        self.prev_view_key = view_key;
 
         if self.depth_copy_supported {
             encoder.copy_buffer_to_texture(

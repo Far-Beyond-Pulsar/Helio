@@ -64,7 +64,11 @@ pub struct Renderer {
     pub(crate) graph: RenderGraph,
     pub(crate) camera_buffer: wgpu::Buffer,
     pub(crate) camera_data: helio_core::GpuCameraUniforms,
+    /// Bumped only when [`CameraIdentity`] changes -- see
+    /// [`Renderer::note_camera`].
     pub(crate) camera_generation: u64,
+    /// The camera `camera_generation` currently describes.
+    pub(crate) camera_identity: Option<CameraIdentity>,
     pub(crate) frame_count: u64,
     pub(crate) ray_frame: helio_core::FrameAcceleration,
     pub(crate) prev_view_proj: glam::Mat4,
@@ -263,7 +267,23 @@ impl Renderer {
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniforms));
         self.prev_view_proj = glam::Mat4::from_cols_array(&uniforms.view_proj);
         self.camera_data = uniforms;
-        self.camera_generation = self.camera_generation.wrapping_add(1);
+    }
+
+    /// Advance `camera_generation` if `camera` (unjittered) differs from the
+    /// one it last described. Call with the camera as supplied, before any
+    /// per-frame jitter.
+    ///
+    /// The generation promises "the view or projection changed"; passes cache
+    /// camera-dependent work on it (light-cull tile lists, the Hi-Z max
+    /// pyramid). It used to advance on every upload, so those caches never
+    /// hit (Pulsar-Native#834). TAA/TSR jitter and the frame counter change
+    /// the uploaded uniforms every frame by design and are not part of it.
+    pub(crate) fn note_camera(&mut self, camera: &crate::Camera) {
+        let identity = CameraIdentity::of(camera);
+        if self.camera_identity != Some(identity) {
+            self.camera_identity = Some(identity);
+            self.camera_generation = self.camera_generation.wrapping_add(1);
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -279,6 +299,9 @@ impl Renderer {
         );
         self.camera_data = *left;
         self.prev_view_proj = glam::Mat4::from_cols_array(&left.view_proj);
+        // A tracked headset moves every frame; treat each stereo upload as a
+        // new view, and make the next mono frame compare afresh.
+        self.camera_identity = None;
         self.camera_generation = self.camera_generation.wrapping_add(1);
     }
 
@@ -747,5 +770,59 @@ impl Renderer {
     /// Set the IES texture array view directly (for multi-layer arrays).
     pub fn set_ies_texture_view(&mut self, view: wgpu::TextureView) {
         self.ies_texture_view = Some(view);
+    }
+}
+
+/// The camera as the scene sees it: what `camera_generation` tracks. Excludes
+/// the per-frame jitter and frame counter, which change every frame by design.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct CameraIdentity {
+    view: glam::Mat4,
+    proj: glam::Mat4,
+    position: glam::Vec3,
+    near: f32,
+    far: f32,
+    view_id: u32,
+}
+
+impl CameraIdentity {
+    pub(crate) fn of(camera: &crate::Camera) -> Self {
+        Self {
+            view: camera.view,
+            proj: camera.proj,
+            position: camera.position,
+            near: camera.near,
+            far: camera.far,
+            view_id: camera.view_id,
+        }
+    }
+}
+
+#[cfg(test)]
+mod camera_identity_tests {
+    use super::CameraIdentity;
+    use glam::{Mat4, Vec3};
+
+    fn camera() -> crate::Camera {
+        crate::Camera::perspective_look_at(Vec3::new(0.0, 2.0, 5.0), Vec3::ZERO, Vec3::Y, 1.0, 16.0 / 9.0, 0.1, 100.0)
+    }
+
+    #[test]
+    fn jitter_is_not_a_camera_change() {
+        let still = camera();
+        let mut jittered = still.clone();
+        jittered.jitter = [0.3, -0.2];
+        assert!(CameraIdentity::of(&still) == CameraIdentity::of(&jittered));
+    }
+
+    #[test]
+    fn moving_or_reprojecting_is() {
+        let still = camera();
+        let mut moved = still.clone();
+        moved.view = Mat4::from_translation(Vec3::X) * moved.view;
+        let mut zoomed = still.clone();
+        zoomed.proj = Mat4::perspective_rh(0.5, 16.0 / 9.0, 0.1, 100.0);
+        assert!(CameraIdentity::of(&still) != CameraIdentity::of(&moved));
+        assert!(CameraIdentity::of(&still) != CameraIdentity::of(&zoomed));
     }
 }

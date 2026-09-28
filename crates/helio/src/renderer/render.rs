@@ -213,6 +213,9 @@ impl Renderer {
                 bytemuck::bytes_of(&debug_camera_uniform),
             );
 
+            // Generation first, from the camera as supplied: jitter moves
+            // the uploaded projection every frame and is not a camera change.
+            self.note_camera(camera);
             let mut jittered_camera = camera.clone();
             jittered_camera.proj = jitter_mat * camera.proj;
             jittered_camera.jitter = [jx, jy];
