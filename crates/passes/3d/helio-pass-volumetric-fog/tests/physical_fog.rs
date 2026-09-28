@@ -588,10 +588,9 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
     });
-    let linear = device.create_sampler(&Default::default());
+    // The glass lookup loads texels, so the probe binds no sampler for it.
     entries.push(wgpu::BindGroupEntry { binding: 20, resource: wgpu::BindingResource::TextureView(&view) });
     entries.push(wgpu::BindGroupEntry { binding: 21, resource: wgpu::BindingResource::TextureView(&glass_view) });
-    entries.push(wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&linear) });
     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout: &probe.get_bind_group_layout(0),
