@@ -190,11 +190,33 @@ impl Clone for VoxelComponent {
     }
 }
 
+/// Overall form of a voxel world.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, pulsar_reflection::Reflectable)]
+pub enum VoxelWorldShape {
+    /// A planet centred on the entity origin (`planet_radius`).
+    Sphere,
+    /// A square plane of `plane_size` metres centred on the entity origin.
+    #[default]
+    Plane,
+    /// A plane without edges within reach (about 13 400 km across).
+    InfinitePlane,
+}
+
+fn default_planet_radius() -> f64 {
+    6_371_000.0
+}
+
+fn default_plane_size() -> f64 {
+    4_096.0
+}
+
 /// General-purpose voxel terrain authoring configuration.
 ///
-/// `domain_mode` describes the chunk-key domain. Generation behavior is
-/// identified by an opaque source ID and parameters, not by a built-in shape.
+/// The world's shape and size are authored here for every generator.
+/// `domain_mode` describes the chunk-key domain of live sample data.
+/// Generation behavior is identified by an opaque source ID and parameters.
 #[engine_class(category = "Voxel/Terrain", debug, serialize, deserialize)]
+#[category("World", category_color = "#6FA86F")]
 #[category("Domain", category_color = "#8F8F8F")]
 #[category("Generation", category_color = "#D1A73F")]
 #[category("Rendering", category_color = "#7C9DC9")]
@@ -209,6 +231,18 @@ pub struct VoxelTerrainComponent {
     /// Whether this terrain source participates in rendering and queries.
     #[property]
     pub enabled: bool,
+    /// Planet, finite plane or infinite plane.
+    #[serde(default)]
+    #[property(category = "World")]
+    pub shape: VoxelWorldShape,
+    /// Planet radius in metres (sphere worlds).
+    #[serde(default = "default_planet_radius")]
+    #[property(min = 1000.0, max = 50000000.0, step = 1000.0, category = "World")]
+    pub planet_radius: f64,
+    /// Edge length of a finite plane in metres.
+    #[serde(default = "default_plane_size")]
+    #[property(min = 16.0, max = 13000000.0, step = 16.0, category = "World")]
+    pub plane_size: f64,
     /// Domain discriminant: 0 bounded, 1 unbounded.
     #[property(category = "Domain")]
     pub domain_mode: u32,
@@ -281,6 +315,9 @@ impl Default for VoxelTerrainComponent {
         Self {
             payloads: empty_payload_store(),
             enabled: true,
+            shape: VoxelWorldShape::default(),
+            planet_radius: default_planet_radius(),
+            plane_size: default_plane_size(),
             domain_mode: 1,
             bounds_min_x: 0.0,
             bounds_min_y: 0.0,
@@ -321,6 +358,9 @@ impl Clone for VoxelTerrainComponent {
         Self {
             payloads: clone_payload_store(&self.payloads),
             enabled: self.enabled,
+            shape: self.shape,
+            planet_radius: self.planet_radius,
+            plane_size: self.plane_size,
             domain_mode: self.domain_mode,
             bounds_min_x: self.bounds_min_x,
             bounds_min_y: self.bounds_min_y,
