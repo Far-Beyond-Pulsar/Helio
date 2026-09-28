@@ -110,7 +110,7 @@ fn wgsl_field_is_bit_identical_to_cpu() {
             extra.push(IVec4::new(
                 (next() % 8_000_000) as i32 - 3_000_000,
                 (next() % 40) as i32,
-                (next() % 4) as i32,
+                (next() % 40) as i32, // slope, eighths of a cell per cell
                 (next() % 200_000) as i32 - 100_000,
             ));
         }

@@ -1,15 +1,15 @@
+//! The voxel planet pass inside the default deferred graph: pipeline and
+//! attachment compatibility, residency settling, source removal and resize.
 use std::sync::{Arc, Mutex};
 
+use glam::Vec3;
 use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    RendererBuilder, RendererConfig,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, RendererBuilder,
+    RendererConfig,
 };
 use helio_default_graphs::{build_default_graph_external_with_lighting_passes, GraphPassFactory, VoxelPassFactory};
-use helio_pass_tiny_voxel::{
-    engine::{EngineVoxelFrame, LazyEngineVoxelPass, SharedVoxelFrame},
-    world::render_origin,
-    Params, World,
-};
+use helio_pass_voxel_planet::engine::{PlanetFrame, PlanetPass, SharedPlanetFrame};
+use helio_pass_voxel_planet::{Planet, PlanetRecipe};
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 
 struct FinalResourceConsumer {
@@ -17,8 +17,12 @@ struct FinalResourceConsumer {
     observed: Arc<Mutex<Vec<[u32; 2]>>>,
 }
 impl helio_core::RenderPass for FinalResourceConsumer {
-    fn name(&self) -> &'static str { "FinalResourceConsumer" }
-    fn reads(&self) -> &'static [&'static str] { &["pre_aa"] }
+    fn name(&self) -> &'static str {
+        "FinalResourceConsumer"
+    }
+    fn reads(&self) -> &'static [&'static str] {
+        &["pre_aa"]
+    }
     fn execute(&mut self, ctx: &mut helio_core::PassContext) -> helio_core::Result<()> {
         let texture = ctx.resource_pool.get_texture("pre_aa").unwrap();
         let extent = [texture.width(), texture.height()];
@@ -30,27 +34,17 @@ impl helio_core::RenderPass for FinalResourceConsumer {
 }
 
 #[test]
-fn optional_voxel_pass_builds_and_renders_in_the_deferred_graph() {
-    render_optional_voxel_graph(false);
-}
-#[cfg(feature = "voxel-appearance")]
-#[test]
-fn appearance_pass_survives_source_removal_and_resize() {
-    render_optional_voxel_graph(true);
-}
-fn render_optional_voxel_graph(_appearance_enabled: bool) {
+fn planet_pass_builds_settles_and_resizes_in_the_deferred_graph() {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let Ok(adapter) = instance.request_adapter(&Default::default()).await else {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: voxel default graph");
             return;
         };
-        let features = required_wgpu_features(adapter.features());
-        let limits = required_wgpu_limits(adapter.limits());
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                required_features: features,
-                required_limits: limits,
+                required_features: required_wgpu_features(adapter.features()),
+                required_limits: required_wgpu_limits(adapter.limits()),
                 experimental_features: required_experimental_features(adapter.features()),
                 ..Default::default()
             })
@@ -59,49 +53,18 @@ fn render_optional_voxel_graph(_appearance_enabled: bool) {
         let device = Arc::new(device);
         let queue = Arc::new(queue);
         let gpu_context = EngineGpuContext::new(Arc::clone(&device), Arc::clone(&queue));
-        let mut gpu_store = SceneGpuStore::new(
-            &gpu_context,
-            SceneGpuConfig {
-                classes: Vec::new(),
-                tombstone_headroom: 0,
-                max_cells_metadata: 0,
-            },
-        );
+        let mut gpu_store =
+            SceneGpuStore::new(&gpu_context, SceneGpuConfig { classes: Vec::new(), tombstone_headroom: 0, max_cells_metadata: 0 });
         helio_pass_sky::SkyComponent::register_gpu_columns_growable(&mut gpu_store, 4, &device);
-        helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(
-            &mut gpu_store,
-            16,
-            &device,
-        );
-        helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(
-            &mut gpu_store,
-            16,
-            &device,
-        );
-        helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(
-            &mut gpu_store,
-            16,
-            &device,
-        );
-        helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
-            &mut gpu_store,
-            16,
-            &device,
-        );
+        helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
+        helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
+        helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
+        helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
         let mirror = GpuMirrorHandle::new(Arc::new(gpu_store), Arc::clone(&queue));
-        let frame: SharedVoxelFrame = Arc::new(Mutex::new(None));
-        let pass_source = Arc::clone(&frame);
-        #[cfg(feature = "voxel-appearance")]
-        let appearance = _appearance_enabled.then(helio_pass_tiny_voxel::engine::appearance::Source::default);
-        #[cfg(feature = "voxel-appearance")]
-        let pass_appearance = appearance.clone();
-        let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| {
-            #[allow(unused_mut)]
-            let mut pass = LazyEngineVoxelPass::new(Arc::clone(&pass_source));
-            #[cfg(feature = "voxel-appearance")]
-            if let Some(source) = &pass_appearance { pass.set_appearance_source(source.clone()); }
-            Box::new(pass)
-        });
+
+        let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
+        let pass_source = Arc::clone(&source);
+        let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| Box::new(PlanetPass::new(Arc::clone(&pass_source))));
         let mut config = RendererConfig::new(640, 360, wgpu::TextureFormat::Rgba8Unorm);
         config.enable_foliage = false;
         let observed = Arc::new(Mutex::new(Vec::new()));
@@ -109,35 +72,16 @@ fn render_optional_voxel_graph(_appearance_enabled: bool) {
         let final_factory: GraphPassFactory = Arc::new(move |_, _, width, height| {
             Box::new(FinalResourceConsumer { expected: [width, height], observed: captured.clone() })
         });
-        #[allow(unused_mut)]
-        let mut lighting: Vec<GraphPassFactory> = Vec::new();
-        #[cfg(feature = "voxel-appearance")]
-        if let Some(source) = appearance {
-            lighting.push(Arc::new(move |device, _, width, height| {
-                Box::new(helio_pass_tiny_voxel::engine::appearance::AppearancePass::new(
-                    device, source.clone(), [width, height], config.surface_format))
-            }));
-        }
         let mut renderer = RendererBuilder::new(config, mirror)
             .with_ambient([0.5, 0.5, 0.6], 1.0)
             .with_external_device()
             .with_pass_build_context(Box::new(move |ctx| {
-                build_default_graph_external_with_lighting_passes(ctx, vec![factory], lighting, vec![final_factory])
+                build_default_graph_external_with_lighting_passes(ctx, vec![factory], Vec::new(), vec![final_factory])
             }))
-            .build(
-                Arc::clone(&device),
-                Arc::clone(&queue),
-                640,
-                360,
-                config.surface_format,
-            );
+            .build(Arc::clone(&device), Arc::clone(&queue), 640, 360, config.surface_format);
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Voxel graph smoke target"),
-            size: wgpu::Extent3d {
-                width: 640,
-                height: 360,
-                depth_or_array_layers: 1,
-            },
+            size: wgpu::Extent3d { width: 640, height: 360, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -146,183 +90,66 @@ fn render_optional_voxel_graph(_appearance_enabled: bool) {
             view_formats: &[],
         });
         let view = target.create_view(&Default::default());
-        let eye = glam::Vec3::new(0.0, 6_371_003.0, 0.0);
-        let camera = Camera::perspective_look_at(
-            eye,
-            eye - glam::Vec3::Y,
-            glam::Vec3::Z,
-            std::f32::consts::FRAC_PI_4,
-            640.0 / 360.0,
-            0.1,
-            10_000.0,
-        );
-        let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+        // The camera sits at the world origin, which the renderer places at
+        // the planet eye.
+        let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+        let eye = planet.surface_point(glam::DVec3::new(0.2, 1.0, 0.3), 1.7);
+        let up = eye.normalize().as_vec3();
+        let forward = (up.any_orthonormal_vector() - up * 0.2).normalize();
+        let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, std::f32::consts::FRAC_PI_4, 640.0 / 360.0, 0.05, 40_000_000.0);
+        renderer.set_world_origin(Some(eye));
+
+        // Without a planet frame the pass is inert.
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         renderer.render(&camera, &view).unwrap();
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let validation_error = validation_scope.pop().await;
-        assert!(
-            validation_error.is_none(),
-            "empty graph GPU validation: {validation_error:?}"
-        );
+        let error = validation.pop().await;
+        assert!(error.is_none(), "empty graph GPU validation: {error:?}");
+        assert!(renderer.find_pass::<PlanetPass>().unwrap().renderer().is_none());
 
-        // Activate the pass on the next frame. Traversal is disabled here so
-        // this checks pipeline and attachment compatibility independently of
-        // residency warmup; the crate's GPU tests exercise brick generation.
-        *frame.lock().unwrap() = Some(EngineVoxelFrame {
-            params: Params {
-                origin: [0, 63_710_030, 0, 0],
-                fraction: [0.0; 4],
-                radial: [0.0, 1.0, 0.0, 0.0],
-                right: [1.0, 0.0, 0.0, 640.0 / 360.0],
-                up: [0.0, 0.0, -1.0, 0.41421357],
-                forward: [0.0, -1.0, 0.0, 0.0],
-                screen: [640.0, 360.0, 0.0, 0.0],
-                lighting: [0.0, 1.0, 0.0, 0.0],
-                settings: [10_000.0, 0.0, 0.0, 0.0],
-            },
-            world: Arc::new(World::default()),
-            raytraced_sun: true,
-        });
-        let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        renderer.render(&camera, &view).unwrap();
-        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let validation_error = validation_scope.pop().await;
-        assert!(
-            validation_error.is_none(),
-            "active graph GPU validation: {validation_error:?}"
-        );
-        assert!(renderer
-            .find_pass::<LazyEngineVoxelPass>()
-            .unwrap()
-            .needs_frame());
-
-        if let Ok(path) = std::env::var("HELIO_VOXEL_CAPTURE") {
-            let world = Arc::new(World::default());
-            let eye64 = world.ground_spawn(0.0, 0.0, 3.0);
-            eprintln!("VOXEL_CAPTURE_EYE={eye64:?}");
-            let eye = eye64.as_vec3();
-            let forward = glam::Vec3::new(0.0, -0.15, -1.0).normalize();
-            let right = forward.cross(glam::Vec3::Y).normalize();
-            let up = right.cross(forward).normalize();
-            let camera = Camera::perspective_look_at(
-                eye,
-                eye + forward,
-                glam::Vec3::Y,
-                std::f32::consts::FRAC_PI_4,
-                640.0 / 360.0,
-                0.1,
-                10_000.0,
-            );
-            let origin = render_origin(eye64);
-            let fraction = [
-                (eye64.x / 0.1 - f64::from(origin[0])) as f32,
-                (eye64.y / 0.1 - f64::from(origin[1])) as f32,
-                (eye64.z / 0.1 - f64::from(origin[2])) as f32,
-                0.0,
-            ];
-            *frame.lock().unwrap() = Some(EngineVoxelFrame {
-                params: Params {
-                    origin: [origin[0], origin[1], origin[2], 0],
-                    fraction,
-                    radial: [0.0, 1.0, 0.0, 0.0],
-                    right: [right.x, right.y, right.z, 640.0 / 360.0],
-                    up: [up.x, up.y, up.z, 0.41421357],
-                    forward: [forward.x, forward.y, forward.z, 0.0],
-                    screen: [640.0, 360.0, 0.0, 0.0],
-                    lighting: [0.4, 0.8, 0.3, 0.0],
-                    settings: [10_000.0, 0.0, 1.0, 0.0],
-                },
-                world,
-                raytraced_sun: false,
-            });
-            let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-            for _ in 0..240 {
-                renderer.render(&camera, &view).unwrap();
-                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-                if renderer
-                    .find_pass::<LazyEngineVoxelPass>()
-                    .is_some_and(|pass| pass.ready() && !pass.needs_frame())
-                {
-                    break;
-                }
-            }
-            assert!(
-                !renderer
-                    .find_pass::<LazyEngineVoxelPass>()
-                    .unwrap()
-                    .needs_frame(),
-                "voxel cut still planning or loading after 240 frames; {} jobs pending",
-                renderer
-                    .find_pass::<LazyEngineVoxelPass>()
-                    .unwrap()
-                    .chunk_jobs_pending()
-            );
-            let mut steady_ms = Vec::with_capacity(32);
-            for _ in 0..32 {
-                let start = std::time::Instant::now();
-                renderer.render(&camera, &view).unwrap();
-                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-                steady_ms.push(start.elapsed().as_secs_f64() * 1_000.0);
-            }
-            steady_ms.sort_by(f64::total_cmp);
-            eprintln!(
-                "VOXEL_GRAPH_STEADY_CPU_P50_MS={:.2} P95_MS={:.2} MAX_MS={:.2} RESOLUTION=640x360 FRAMES=32",
-                steady_ms[16], steady_ms[30], steady_ms[31]
-            );
-            let validation_error = validation_scope.pop().await;
-            assert!(
-                validation_error.is_none(),
-                "capture GPU validation: {validation_error:?}"
-            );
-            let readback = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Voxel graph capture"),
-                size: 640 * 360 * 4,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-            let mut encoder = device.create_command_encoder(&Default::default());
-            encoder.copy_texture_to_buffer(
-                target.as_image_copy(),
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &readback,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(640 * 4),
-                        rows_per_image: Some(360),
-                    },
-                },
-                wgpu::Extent3d {
-                    width: 640,
-                    height: 360,
-                    depth_or_array_layers: 1,
-                },
-            );
-            queue.submit([encoder.finish()]);
-            let slice = readback.slice(..);
-            let (tx, rx) = std::sync::mpsc::channel();
-            slice.map_async(wgpu::MapMode::Read, move |result| {
-                let _ = tx.send(result);
-            });
+        // With a frame it streams the planet around the eye until settled.
+        *source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun: up, shadows: true });
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut frames = 0;
+        loop {
+            renderer.render(&camera, &view).unwrap();
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            rx.recv().unwrap().unwrap();
-            let bytes = slice.get_mapped_range().unwrap().to_vec();
-            image::save_buffer(path, &bytes, 640, 360, image::ColorType::Rgba8).unwrap();
+            frames += 1;
+            if !renderer.find_pass::<PlanetPass>().unwrap().needs_frame() || frames >= 600 {
+                break;
+            }
         }
-        *frame.lock().unwrap() = None;
-        let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let error = validation.pop().await;
+        assert!(error.is_none(), "active graph GPU validation: {error:?}");
+        let stats = renderer.find_pass::<PlanetPass>().unwrap().stats().unwrap();
+        assert!(frames < 600, "residency still streaming after {frames} frames: {stats:?}");
+        assert!(stats.resident_columns > 1000, "{stats:?}");
+        assert_eq!(stats.pending_columns, 0);
+        eprintln!("VOXEL_GRAPH_SETTLED frames={frames} resident={}", stats.resident_columns);
+
+        // Removing the source drops the planet renderer.
+        *source.lock().unwrap() = None;
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         renderer.render(&camera, &view).unwrap();
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        assert!(validation_scope.pop().await.is_none());
-        let pass = renderer.find_pass::<LazyEngineVoxelPass>().unwrap();
-        assert!(!pass.ready());
+        assert!(validation.pop().await.is_none());
+        let pass = renderer.find_pass::<PlanetPass>().unwrap();
+        assert!(pass.renderer().is_none());
         assert!(!pass.needs_frame());
         assert!(observed.lock().unwrap().contains(&[config.internal_width(), config.internal_height()]));
+
+        // A resize rebuilds the graph; downstream passes see the new size.
+        *source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun: up, shadows: true });
         renderer.set_render_size(320, 180);
         let resized = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("final consumer resize"),
             size: wgpu::Extent3d { width: 320, height: 180, depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
-            format: config.surface_format, usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: config.surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -330,7 +157,10 @@ fn render_optional_voxel_graph(_appearance_enabled: bool) {
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         assert!(validation.pop().await.is_none());
         let resized_config = RendererConfig { width: 320, height: 180, ..config };
-        assert_eq!(observed.lock().unwrap().last(),
-            Some(&[resized_config.internal_width(), resized_config.internal_height()]));
+        assert_eq!(
+            observed.lock().unwrap().last(),
+            Some(&[resized_config.internal_width(), resized_config.internal_height()])
+        );
+        assert!(renderer.find_pass::<PlanetPass>().unwrap().renderer().is_some());
     });
 }

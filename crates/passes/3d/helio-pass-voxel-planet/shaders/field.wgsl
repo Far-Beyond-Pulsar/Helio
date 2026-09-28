@@ -207,6 +207,12 @@ fn rem_floor(a: i32, b: i32) -> i32 {
     return select(r, r + b, r < 0);
 }
 
+// Strata altitude (mm): layers undulate +-8 m over ~100 m, so cuts through
+// them never show flat rings (`strata` in field.rs).
+fn strata(p: vec3<i32>, altitude: i32) -> i32 {
+    return altitude + scale_q12(noise(p, 11u, bitcast<u32>(field.misc.w) ^ 0x9B05688Cu), 8000);
+}
+
 // Ground slope in the 8x8 column block, eighths of a cell per cell
 // (`block_slope` in field.rs).
 fn block_slope_of(t_x0: i32, t_x7: i32, t_y0: i32, t_y7: i32) -> i32 {
@@ -251,7 +257,7 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
     if top_height > snowline && depth < dirt && slope + outcrop / 8192 < 6 { return M_SNOW; }
     if wet < Q12 * 3 / 10 {
         if depth < dirt && !steep { return M_SAND; }
-        let band = rem_floor(div_floor(altitude, 2100), 5);
+        let band = rem_floor(div_floor(strata(p, altitude), 2100), 5);
         return select(M_SANDSTONE, M_CLAY, band == 1 || band == 3);
     }
     // Rock shows through the turf in the outcrop patches, which grow up the
@@ -261,7 +267,7 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
     if slope >= 5 { exposed += Q12 / 2; }
     if steep || (exposed > 0 && depth < dirt) {
         if depth < 1 && (h & 7u) == 0u { return M_DIRT; }
-        return select(M_DARK_STONE, M_STONE, (div_floor(altitude, 4500) & 1) == 0);
+        return select(M_DARK_STONE, M_STONE, (div_floor(altitude + scale_q12(outcrop, 3000), 4500) & 1) == 0);
     }
     if depth == 0 {
         if exposed > -Q12 / 16 { return M_GRAVEL; }
@@ -270,7 +276,7 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
     }
     if depth < dirt { return M_DIRT; }
     if depth < dirt * 3 && (h & 3u) == 0u { return M_GRAVEL; }
-    return select(M_DARK_STONE, M_STONE, (div_floor(altitude, 12000) & 1) == 0);
+    return select(M_DARK_STONE, M_STONE, (div_floor(strata(p, altitude), 12000) & 1) == 0);
 }
 
 fn bound_margin(level: u32) -> i32 {

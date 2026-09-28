@@ -436,6 +436,12 @@ pub fn moisture(k: &FieldConstants, p: IVec3) -> i32 {
     (noise(p, o, (k.misc[3] as u32) ^ 0x51ED_270B) + ONE) / 2
 }
 
+/// Strata altitude (mm): layers undulate +-8 m over ~100 m, so cuts
+/// through them never show flat rings.
+fn strata(c: &FieldConstants, p: IVec3, altitude: i32) -> i32 {
+    altitude + scale(noise(p, 11, (c.misc[3] as u32) ^ 0x9B05_688C), 8_000)
+}
+
 /// Ground slope of a cell in its 8x8 column block, in eighths of a cell per
 /// cell: the larger top difference across the block along either axis.
 /// Smooth and level-invariant, unlike neighbour steps of stepped terrain.
@@ -507,7 +513,7 @@ pub fn ground_material(
         if depth < dirt && !steep {
             return SAND;
         }
-        let band = altitude.div_euclid(2_100).rem_euclid(5);
+        let band = strata(c, p, altitude).div_euclid(2_100).rem_euclid(5);
         return if band == 1 || band == 3 { CLAY } else { SANDSTONE };
     }
     // Rock shows through the turf in the outcrop patches, which grow up the
@@ -520,7 +526,7 @@ pub fn ground_material(
     if steep || (exposed > 0 && depth < dirt) {
         return if depth < 1 && h & 7 == 0 {
             DIRT
-        } else if altitude.div_euclid(4_500) & 1 == 0 {
+        } else if (altitude + scale(outcrop, 3_000)).div_euclid(4_500) & 1 == 0 {
             STONE
         } else {
             DARK_STONE
@@ -538,7 +544,7 @@ pub fn ground_material(
         DIRT
     } else if depth < dirt * 3 && h & 3 == 0 {
         GRAVEL
-    } else if altitude.div_euclid(12_000) & 1 == 0 {
+    } else if strata(c, p, altitude).div_euclid(12_000) & 1 == 0 {
         STONE
     } else {
         DARK_STONE
