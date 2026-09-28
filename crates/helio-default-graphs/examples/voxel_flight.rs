@@ -1,17 +1,30 @@
-//! Full-engine voxel planet flight: movement sequences, synchronized frame
-//! timings, terrain GPU stages, residency/memory, arrival and edit latency,
-//! canonical CPU/GPU agreement audits and acceptance gates.
+//! Full-engine voxel planet flight: movement sequences, frame timings,
+//! terrain GPU stages, residency/memory, arrival and edit latency, canonical
+//! CPU/GPU agreement audits and acceptance gates.
 //!
 //! cargo run -p helio-default-graphs --release --example voxel_flight -- OUTPUT [WIDTH HEIGHT [native|quality]]
 //!
+//! Frames are pipelined like a game loop (at most `FRAMES_IN_FLIGHT` ahead of
+//! the GPU); a frame's time is the interval between frame completions, and
+//! harness-only work (captures, readbacks, audits) is excluded from it. GPU
+//! stage timestamps arrive a frame or two later and are attached to the frame
+//! that produced them. Waiting for every frame instead lets the GPU idle and
+//! the driver lower its clocks, which inflates every GPU timing; `frames.csv`
+//! records the graphics and memory clocks per frame (via `nvidia-smi`).
+//!
 //! Environment:
+//! * `HELIO_VOXEL_FLIGHT_SYNC=1` waits for every frame (old behaviour).
 //! * `HELIO_VOXEL_FLIGHT_RECORD=1` saves every other movement frame (visual
 //!   review run; capture readback perturbs timings, so do not use it for gates).
 //! * `HELIO_VOXEL_FLIGHT_VOXEL=0.3` authored base voxel size (0.1..1.0).
 //! * `HELIO_VOXEL_FLIGHT_NO_SUN=1` disables traced terrain sunlight.
+//! * `HELIO_VOXEL_FLIGHT_QUICK=1` short timing probe with stage summaries.
+//! * `HELIO_VOXEL_FLIGHT_GROUND_ONLY=1` ground views and audits only.
+//! * `HELIO_VOXEL_FLIGHT_HEAT=1` saves traversal step heatmaps with audits.
+//! * `HELIO_VOXEL_FLIGHT_CPU_PROBE=1` per-pass CPU cost of a steady view.
+//! * `HELIO_VOXEL_FLIGHT_REVERSAL_AUDIT=1` audits two frames of the fast descent.
+//! * `HELIO_VOXEL_FLIGHT_DEBUG=<mode>` Helio debug view.
 //!
-//! `frames.csv` separates CPU submission from the synchronized GPU wait. Terrain
-//! stage timestamps are read back for the frame that produced them.
 //! `gates.json` / `gates.md` evaluate the declared acceptance targets.
 use glam::{DVec3, Vec3};
 use helio::{
@@ -33,10 +46,21 @@ const DT: f64 = 1.0 / 60.0;
 #[derive(Clone, Debug, Default)]
 struct Sample {
     stage: String,
+    /// Frame time: the interval between consecutive frame completions when
+    /// pipelined, the synchronized render time otherwise.
     sync_ms: f64,
+    submit_ms: f64,
+    /// NaN until the frame's GPU timestamps arrive.
     terrain_gpu_ms: f64,
     stages: BTreeMap<&'static str, f64>,
+    frame_num: u64,
+    /// Pre-formatted CSV columns after the timing columns.
+    row: String,
+    altitude: f64,
 }
+
+/// Frames the CPU may run ahead of the GPU in pipelined mode.
+const FRAMES_IN_FLIGHT: usize = 2;
 
 struct Flight {
     device: Arc<wgpu::Device>,
@@ -53,6 +77,61 @@ struct Flight {
     record: bool,
     output: PathBuf,
     samples: Vec<Sample>,
+    clocks: GpuClocks,
+    /// Pipelined frames not yet known complete.
+    in_flight: std::collections::VecDeque<Arc<std::sync::atomic::AtomicBool>>,
+    /// End of the last frame; cleared by harness-only work (captures,
+    /// readbacks, audits) so it never counts toward the next frame time.
+    last_frame_end: std::cell::Cell<Option<Instant>>,
+    /// Wait for every frame (HELIO_VOXEL_FLIGHT_SYNC): lets the GPU idle and
+    /// downclock between frames, unlike a game's continuous submission.
+    sync_frames: bool,
+}
+
+/// Latest GPU graphics and memory clocks (MHz) from a streaming
+/// `nvidia-smi` query; zero when unavailable. Drivers lower clocks while the
+/// GPU idles between synchronized frames, which scales every GPU timing, so
+/// frames record the clock they ran at.
+struct GpuClocks {
+    latest: Arc<std::sync::atomic::AtomicU64>,
+    _child: Option<std::process::Child>,
+}
+
+impl GpuClocks {
+    fn start() -> Self {
+        use std::io::BufRead;
+        let latest = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let child = std::process::Command::new("nvidia-smi")
+            .args(["--query-gpu=clocks.gr,clocks.mem", "--format=csv,noheader,nounits", "-lms", "20"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok();
+        let mut child = child;
+        if let Some(stdout) = child.as_mut().and_then(|c| c.stdout.take()) {
+            let latest = latest.clone();
+            std::thread::spawn(move || {
+                for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+                    let mut parts = line.split(',').map(|p| p.trim().parse::<u64>().unwrap_or(0));
+                    let (gr, mem) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+                    latest.store(gr | (mem << 32), std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        }
+        Self { latest, _child: child }
+    }
+    fn read(&self) -> (u64, u64) {
+        let v = self.latest.load(std::sync::atomic::Ordering::Relaxed);
+        (v & 0xffff_ffff, v >> 32)
+    }
+}
+
+impl Drop for GpuClocks {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self._child {
+            let _ = child.kill();
+        }
+    }
 }
 
 fn up_for(eye: DVec3) -> Vec3 {
@@ -137,7 +216,6 @@ impl Flight {
         }
         let target = Self::make_target(&device, size);
         let mut csv = std::fs::File::create(output.join("frames.csv")).unwrap();
-        writeln!(csv, "frame,stage,altitude_m,sync_ms,cpu_submit_ms,gpu_wait_ms,terrain_gpu_ms,residency_ms,primary_ms,shade_ms,gbuffer_ms,sunlight_ms,resident,pending,jobs,evictions,failed,active_levels,finest_level,plan_cpu_ms,upload_cpu_ms,encode_cpu_ms,logical_mib").unwrap();
         Self {
             device,
             queue,
@@ -153,6 +231,10 @@ impl Flight {
             record: std::env::var_os("HELIO_VOXEL_FLIGHT_RECORD").is_some(),
             output: output.to_path_buf(),
             samples: Vec::new(),
+            clocks: GpuClocks::start(),
+            in_flight: Default::default(),
+            last_frame_end: std::cell::Cell::new(None),
+            sync_frames: std::env::var_os("HELIO_VOXEL_FLIGHT_SYNC").is_some(),
         }
     }
 
@@ -187,27 +269,36 @@ impl Flight {
         let start = Instant::now();
         self.renderer.render(&camera, &self.target.create_view(&Default::default())).unwrap();
         let submit = start.elapsed().as_secs_f64() * 1000.0;
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let sync = start.elapsed().as_secs_f64() * 1000.0;
-        let timings = self.pass().renderer_mut().map(|r| r.stage_timings_blocking()).unwrap_or_default();
-        let stats = self.pass().stats().unwrap_or_default();
-        let mut stages = BTreeMap::new();
-        for (name, ms) in timings {
-            *stages.entry(name).or_insert(0.0) += ms;
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = done.clone();
+        self.queue.on_submitted_work_done(move || flag.store(true, std::sync::atomic::Ordering::Release));
+        self.in_flight.push_back(done);
+        if self.sync_frames {
+            self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            self.in_flight.clear();
+        } else {
+            // Keep the GPU fed like a game loop: block only on the frame
+            // FRAMES_IN_FLIGHT behind this one.
+            while self.in_flight.len() > FRAMES_IN_FLIGHT {
+                let oldest = self.in_flight.pop_front().unwrap();
+                while !oldest.load(std::sync::atomic::Ordering::Acquire) {
+                    let _ = self.device.poll(wgpu::PollType::Poll);
+                    std::thread::sleep(std::time::Duration::from_micros(50));
+                }
+            }
         }
-        let terrain: f64 = stages.values().sum();
-        let get = |n: &str| stages.get(n).copied().unwrap_or(0.0);
-        let altitude = eye.length() - self.planet.grid().radius();
-        writeln!(
-            self.csv,
-            "{},{stage},{altitude:.3},{sync:.4},{submit:.4},{:.4},{terrain:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.1}",
-            self.frame,
-            sync - submit,
-            get("planet_residency"),
-            get("planet_primary"),
-            get("planet_shade"),
-            get("planet_gbuffer"),
-            get("planet_sunlight"),
+        let now = Instant::now();
+        let sync = if self.sync_frames {
+            (now - start).as_secs_f64() * 1000.0
+        } else {
+            (now - self.last_frame_end.get().unwrap_or(start).min(start)).as_secs_f64() * 1000.0
+        };
+        self.last_frame_end.set(Some(now));
+        let frame_num = self.pass().renderer().map_or(0, |r| r.frame_number());
+        let stats = self.pass().stats().unwrap_or_default();
+        let clocks = self.clocks.read();
+        let row = format!(
+            "{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.1},{},{}",
             stats.resident_columns,
             stats.pending_columns,
             stats.jobs,
@@ -218,12 +309,76 @@ impl Flight {
             stats.plan_cpu_ms,
             stats.upload_cpu_ms,
             stats.encode_cpu_ms,
-            stats.logical_bytes as f64 / 1048576.0
-        )
-        .unwrap();
-        self.samples.push(Sample { stage: stage.to_string(), sync_ms: sync, terrain_gpu_ms: terrain, stages });
+            stats.logical_bytes as f64 / 1048576.0,
+            clocks.0,
+            clocks.1
+        );
+        let altitude = eye.length() - self.planet.grid().radius();
+        self.samples.push(Sample {
+            stage: stage.to_string(),
+            sync_ms: sync,
+            submit_ms: submit,
+            terrain_gpu_ms: f64::NAN,
+            stages: BTreeMap::new(),
+            frame_num,
+            row,
+            altitude,
+        });
+        self.collect_timings(self.sync_frames);
         self.frame += 1;
         sync
+    }
+
+    /// Attach completed GPU stage timings to their frame's sample.
+    fn collect_timings(&mut self, blocking: bool) {
+        let result = self.pass().renderer_mut().and_then(|r| {
+            if blocking {
+                let timings = r.stage_timings_blocking();
+                Some((r.frame_number(), timings))
+            } else {
+                r.stage_timings_deferred()
+            }
+        });
+        let Some((frame, timings)) = result else { return };
+        if let Some(sample) = self.samples.iter_mut().rev().take(16).find(|s| s.frame_num == frame) {
+            if sample.terrain_gpu_ms.is_nan() {
+                let mut stages = BTreeMap::new();
+                for (name, ms) in timings {
+                    *stages.entry(name).or_insert(0.0) += ms;
+                }
+                sample.terrain_gpu_ms = stages.values().sum();
+                sample.stages = stages;
+            }
+        }
+    }
+
+    /// Write frames.csv (after the flight: GPU timings arrive late).
+    fn write_csv(&mut self) {
+        writeln!(self.csv, "frame,stage,altitude_m,sync_ms,cpu_submit_ms,gpu_wait_ms,terrain_gpu_ms,residency_ms,primary_ms,shade_ms,gbuffer_ms,sunlight_ms,resident,pending,jobs,evictions,failed,active_levels,finest_level,plan_cpu_ms,upload_cpu_ms,encode_cpu_ms,logical_mib,gpu_clock_mhz,mem_clock_mhz").unwrap();
+        for (index, s) in self.samples.iter().enumerate() {
+            if s.terrain_gpu_ms.is_nan() {
+                continue;
+            }
+            let get = |n: &str| s.stages.get(n).copied().unwrap_or(0.0);
+            writeln!(
+                self.csv,
+                "{index},{},{:.3},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{}",
+                s.stage,
+                s.altitude,
+                s.sync_ms,
+                s.submit_ms,
+                s.sync_ms - s.submit_ms,
+                s.terrain_gpu_ms,
+                get("planet_residency"),
+                get("planet_primary"),
+                get("planet_shade"),
+                get("planet_gbuffer"),
+                get("planet_sunlight"),
+                s.row
+            )
+            .unwrap();
+        }
+        self.csv.flush().unwrap();
     }
 
     /// Draw until residency is complete; returns (frames, synchronized ms).
@@ -239,6 +394,7 @@ impl Flight {
     }
 
     fn read(&self, buffer: &wgpu::Buffer) -> Vec<u8> {
+        self.last_frame_end.set(None);
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: buffer.size(),
@@ -255,6 +411,7 @@ impl Flight {
     }
 
     fn capture(&self, name: &str) -> Vec<u8> {
+        self.last_frame_end.set(None);
         let row = (self.size[0] * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -478,6 +635,7 @@ fn main() {
         for a in &audits {
             eprintln!("GROUND audit {a}");
         }
+        flight.write_csv();
         let error = pollster::block_on(validation.pop());
         assert!(error.is_none(), "GPU validation: {error:?}");
         return;
@@ -506,8 +664,8 @@ fn main() {
         }
         for (name, list) in &groups {
             let sync: Vec<f64> = list.iter().map(|s| s.sync_ms).collect();
-            let terrain: Vec<f64> = list.iter().map(|s| s.terrain_gpu_ms).collect();
-            let stage = |k: &str| percentile(&list.iter().map(|s| s.stages.get(k).copied().unwrap_or(0.0)).collect::<Vec<_>>(), 0.5);
+            let terrain: Vec<f64> = list.iter().map(|s| s.terrain_gpu_ms).filter(|v| !v.is_nan()).collect();
+            let stage = |k: &str| percentile(&list.iter().filter(|s| !s.terrain_gpu_ms.is_nan()).map(|s| s.stages.get(k).copied().unwrap_or(0.0)).collect::<Vec<_>>(), 0.5);
             eprintln!(
                 "QUICK {name:16} n={:4} sync p50 {:7.2} p95 {:7.2} terrain p50 {:6.2} p95 {:6.2} | primary {:6.2} shade {:5.2} sun {:6.2} residency {:5.2} horizon {:5.3}",
                 list.len(), percentile(&sync, 0.5), percentile(&sync, 0.95), percentile(&terrain, 0.5), percentile(&terrain, 0.95),
@@ -537,6 +695,7 @@ fn main() {
             eprintln!("QUICK pass {name:32} {ms:7.3} ms");
         }
         eprintln!("QUICK graph total {:?}", flight.renderer.gpu_frame_ms());
+        flight.write_csv();
         return;
     }
     // Walking, running and vehicle speed over terrain, following the surface.
@@ -626,6 +785,10 @@ fn main() {
             let e = base.normalize() * (base.length() + alt - 1.7);
             flight.draw("reversal", e, look(e, heading + t, -30.0));
             record_frame(&flight, "reversal", index);
+            if std::env::var_os("HELIO_VOXEL_FLIGHT_REVERSAL_AUDIT").is_some() && (index == 336 || index == 350) {
+                let a = flight.audit(&format!("reversal_{index}"), e, look(e, heading + t, -30.0));
+                eprintln!("REVERSAL audit alt {alt:.0} {a}");
+            }
             index += 1;
         }
     }
@@ -673,9 +836,11 @@ fn main() {
             let dir = (aim + right * ndc[0] * tan * aspect + cam_up * ndc[1] * tan).normalize().as_dvec3();
             flight.planet.raycast(base, dir, 200.0).map(|h| h.cell)
         };
-        let (mut frames, mut ms) = (0, 0.0);
+        // Wall time from the edit to the first frame that shows it.
+        let edited = Instant::now();
+        let mut frames = 0;
         loop {
-            ms += flight.draw("dig", base, aim);
+            flight.draw("dig", base, aim);
             frames += 1;
             let hit = {
                 let r = flight.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap();
@@ -687,7 +852,7 @@ fn main() {
             let got = (w(1) as i32, w(2) as i32, w(3) as i32);
             let matched = expected.is_some_and(|c| (c.i, c.j, c.k) == got);
             if matched || frames >= 30 {
-                latencies.push((frames, ms, matched));
+                latencies.push((frames, edited.elapsed().as_secs_f64() * 1000.0, matched));
                 break;
             }
         }
@@ -767,16 +932,18 @@ fn main() {
     let mut stages = serde_json::Map::new();
     for (name, list) in &groups {
         let sync: Vec<f64> = list.iter().map(|s| s.sync_ms).collect();
-        let terrain: Vec<f64> = list.iter().map(|s| s.terrain_gpu_ms).collect();
+        let timed: Vec<&&Sample> = list.iter().filter(|s| !s.terrain_gpu_ms.is_nan()).collect();
+        let terrain: Vec<f64> = timed.iter().map(|s| s.terrain_gpu_ms).collect();
         let mut stage_p95 = serde_json::Map::new();
         for key in ["planet_residency", "planet_primary", "planet_shade", "planet_gbuffer", "planet_sunlight"] {
-            let v: Vec<f64> = list.iter().map(|s| s.stages.get(key).copied().unwrap_or(0.0)).collect();
+            let v: Vec<f64> = timed.iter().map(|s| s.stages.get(key).copied().unwrap_or(0.0)).collect();
             stage_p95.insert(key.into(), serde_json::json!(percentile(&v, 0.95)));
         }
         stages.insert(
             name.clone(),
             serde_json::json!({
                 "frames": list.len(),
+                "timed_frames": timed.len(),
                 "sync_p50": percentile(&sync, 0.5), "sync_p95": percentile(&sync, 0.95), "sync_p99": percentile(&sync, 0.99), "sync_max": percentile(&sync, 1.0),
                 "terrain_gpu_p50": percentile(&terrain, 0.5), "terrain_gpu_p95": percentile(&terrain, 0.95), "terrain_gpu_max": percentile(&terrain, 1.0),
                 "terrain_stage_p95": stage_p95,
@@ -793,6 +960,7 @@ fn main() {
         names
             .iter()
             .flat_map(|s| groups.get(*s).into_iter().flatten().map(|x| if terrain { x.terrain_gpu_ms } else { x.sync_ms }))
+            .filter(|v| !v.is_nan())
             .collect()
     };
     let warm = gather(&["ground_warm", "orbit", "arrival_settled"], false);
@@ -830,6 +998,6 @@ fn main() {
     }
     std::fs::write(output.join("gates.md"), &md).unwrap();
     eprintln!("{md}");
-    flight.csv.flush().unwrap();
+    flight.write_csv();
     eprintln!("VOXEL_FLIGHT_COMPLETE frames={}", flight.frame);
 }

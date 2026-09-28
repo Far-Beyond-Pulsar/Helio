@@ -489,3 +489,55 @@ fn sky_bound_is_conservative_with_dither() {
     eprintln!("{bad} differences");
     assert_eq!(bad, 0);
 }
+
+/// Residency hints and the sky span only skip lookups that would miss and
+/// empty space: while columns stream in during fast climbs and descents,
+/// hits match a render without either. (Hit distances may differ in the last
+/// bits where a ray starts later, so cells are compared.)
+#[test]
+fn accelerations_change_nothing_while_streaming() {
+    let Some(gpu) = gpu() else { return };
+    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+    let dir = land(&planet, 2, 0.47, 0.53);
+    let ground = planet.surface_point(dir, 1.7);
+    let east = ground.normalize().any_orthonormal_vector();
+    let size = [320, 180];
+    let target = Target::new(&gpu, size);
+    let mut r = renderer(&gpu, planet.clone(), size);
+    r.settings_mut().lod_dither = 0.25;
+    settle(&gpu, &target, &mut r, &frame(&planet, ground), east.as_vec3());
+    let (mut bad, mut compared) = (0usize, 0usize);
+    for step in 0..48u64 {
+        // Climb to 20 km and back down while residency lags behind.
+        let altitude = 1.7 * (20_000.0f64 / 1.7).powf(1.0 - ((step as f64 / 24.0) - 1.0).abs());
+        let eye = ground.normalize() * (ground.length() + altitude) + east * step as f64 * 40.0;
+        let up = eye.normalize();
+        let forward = (east - up * 0.3).normalize().as_vec3();
+        let f = frame(&planet, eye);
+        target.render(&gpu, &mut r, &f, forward, 10_000 + step * 3);
+        r.settings_mut().freeze_residency = true;
+        r.settings_mut().frame_override = Some(step as u32 * 7 % 1024);
+        r.settings_mut().residency_hints = false;
+        r.settings_mut().horizon = false;
+        target.render(&gpu, &mut r, &f, forward, 10_000 + step * 3 + 1);
+        let reference = hits(&gpu, &r);
+        r.settings_mut().residency_hints = true;
+        r.settings_mut().horizon = true;
+        target.render(&gpu, &mut r, &f, forward, 10_000 + step * 3 + 2);
+        let hinted = hits(&gpu, &r);
+        r.settings_mut().freeze_residency = false;
+        r.settings_mut().frame_override = None;
+        for (a, b) in reference.iter().zip(&hinted) {
+            compared += 1;
+            let both_miss = a.status == 0 && b.status == 0;
+            if !both_miss && (a.status, a.i, a.j, a.k, a.face, a.level) != (b.status, b.i, b.j, b.k, b.face, b.level) {
+                bad += 1;
+            }
+        }
+        if step % 8 == 0 {
+            eprintln!("step {step}: altitude {altitude:.0} m pending {}", r.stats().pending_columns);
+        }
+    }
+    eprintln!("{bad} differences in {compared} pixels");
+    assert_eq!(bad, 0);
+}

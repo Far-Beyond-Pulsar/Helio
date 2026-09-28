@@ -7,8 +7,8 @@
 // distances they cover. Per bucket, that bounds every terrain cell a ray
 // can meet there. A ray's height at any angular distance grows with its
 // elevation, so each bucket stores the lowest elevation that clears it; a
-// primary ray ends after the farthest bucket it does not clear
-// (`sky_escape`).
+// primary ray starts at the nearest bucket it does not clear and ends after
+// the farthest one (`sky_span`).
 
 const SECTORS: u32 = 256u;
 const BUCKETS: u32 = 32u;
@@ -237,11 +237,21 @@ fn eye_sky(l: vec3<f32>, spread: f32) -> SkyRay {
     return sky_ray(l, spread);
 }
 
-// Ray distance after which an eye ray meets no resident terrain (3e38 if
-// the table cannot tell): the far end of the farthest bucket whose
-// clearing elevation the ray does not exceed.
-fn sky_escape(s: SkyRay) -> f32 {
-    if s.sector < -1 { return 3.0e38; }
+// Distance along an eye ray of elevation e to angular distance phi (3e38
+// beyond the ray's reach).
+fn eye_ray_distance(e: f32, phi: f32) -> f32 {
+    let c = cos(e + phi);
+    if c <= 1e-6 { return 3.0e38; }
+    return frame.eye.w * sin(phi) / c;
+}
+
+// Ray distances between which an eye ray can meet resident terrain: from
+// the start of the nearest distance bucket whose clearing elevation the ray
+// does not exceed to the end of the farthest one. Everything outside is
+// provably empty. (0, 0) when the ray clears every bucket; (0, 3e38) when
+// the table cannot tell.
+fn sky_span(s: SkyRay) -> vec2<f32> {
+    if s.sector < -1 { return vec2<f32>(0.0, 3.0e38); }
     let e = atan2(s.lu, s.lt);
     var row = H_ALL;
     var stride = 1u;
@@ -249,12 +259,19 @@ fn sky_escape(s: SkyRay) -> f32 {
         row = u32(s.sector);
         stride = SECTORS;
     }
-    var b = i32(BUCKETS) - 1;
-    while b >= 0 && e > horizon[row + u32(b) * stride] { b -= 1; }
-    if b < 0 { return 0.0; }
-    if b + 1 >= i32(BUCKETS) { return 3.0e38; }
-    let phi = bucket_start(u32(b + 1));
-    let c = cos(e + phi);
-    if c <= 1e-6 { return 3.0e38; }
-    return frame.eye.w * sin(phi) / c * 1.0001 + 1e-3;
+    var last = i32(BUCKETS) - 1;
+    while last >= 0 && e > horizon[row + u32(last) * stride] { last -= 1; }
+    if last < 0 { return vec2<f32>(0.0); }
+    var first = 0;
+    while first < last && e > horizon[row + u32(first) * stride] { first += 1; }
+    var span = vec2<f32>(0.0, 3.0e38);
+    if first > 0 {
+        let t = eye_ray_distance(e, bucket_start(u32(first)));
+        if t < 3.0e38 { span.x = max(t * 0.9999 - 1e-3, 0.0); }
+    }
+    if last + 1 < i32(BUCKETS) {
+        let t = eye_ray_distance(e, bucket_start(u32(last + 1)));
+        if t < 3.0e38 { span.y = t * 1.0001 + 1e-3; }
+    }
+    return span;
 }

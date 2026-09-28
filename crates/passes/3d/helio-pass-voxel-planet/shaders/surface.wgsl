@@ -14,8 +14,8 @@ fn primary(@builtin(global_invocation_id) id: vec3<u32>) {
     let d = pixel_ray(vec2<f32>(id.xy) + 0.5);
     let r = make_ray(camera.position_near.xyz, d);
     let sky = eye_sky(d, 0.0);
-    let end = min(frame.lod.w, sky_escape(sky));
-    hits[pixel_index(id.xy)] = trace(r, 0.0, end, 0.0, 1.0, frame.lod.y);
+    let span = sky_span(sky);
+    hits[pixel_index(id.xy)] = trace(r, span.x, min(frame.lod.w, span.y), 0.0, 1.0, frame.lod.y);
 }
 
 fn srgb(c: vec3<f32>) -> vec3<f32> {

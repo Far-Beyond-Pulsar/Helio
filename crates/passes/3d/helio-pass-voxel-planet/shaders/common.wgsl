@@ -21,6 +21,7 @@ struct Frame {
     neighbours: array<vec4<u32>, 6>, // face across -a, +a, -b, +b
     extra: vec4<u32>,      // table patches, block region, block patches, live tier-1 blocks
     ring: array<vec4<f32>, 8>, // per level: sky bound block exclusion angle
+    hints: vec4<u32>,      // x: tier-1 summary blocks prove column absence
 }
 
 struct Column {

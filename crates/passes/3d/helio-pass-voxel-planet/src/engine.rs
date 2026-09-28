@@ -44,6 +44,8 @@ pub struct Settings {
     pub job_budget: usize,
     /// End rising eye rays at the directional sky bound.
     pub horizon: bool,
+    /// Skip hash lookups of columns the summary blocks prove absent.
+    pub residency_hints: bool,
     /// Diagnostics: skip residency planning (no jobs, windows or evictions)
     /// so several renders see identical GPU state.
     pub freeze_residency: bool,
@@ -59,6 +61,7 @@ impl Default for Settings {
             lod_dither: std::env::var("HELIO_VOXEL_LOD_DITHER").ok().and_then(|v| v.parse().ok()).unwrap_or(0.25),
             job_budget: 12_288,
             horizon: std::env::var_os("HELIO_VOXEL_NO_HORIZON").is_none(),
+            residency_hints: true,
             freeze_residency: false,
             frame_override: None,
             capacity: Capacity::default(),
@@ -92,6 +95,8 @@ struct FrameGpu {
     /// Per level: angular distance from the eye within which the level's
     /// summary blocks cannot be reached by eye rays above `lod.z`.
     ring: [[f32; 4]; 8],
+    /// x: tier-1 summary blocks prove column absence (`blocks_exact`).
+    hints: [u32; 4],
 }
 
 /// Public per-frame statistics.
@@ -564,6 +569,7 @@ pub struct PlanetRenderer {
     ms_per_job: f64,
     last_jobs: usize,
     last_eye: Option<DVec3>,
+    last_frame_num: u64,
 }
 
 impl PlanetRenderer {
@@ -602,6 +608,7 @@ impl PlanetRenderer {
             ms_per_job: 0.0013,
             last_jobs: 0,
             last_eye: None,
+            last_frame_num: 0,
             pipelines,
             buffers,
         }
@@ -672,6 +679,17 @@ impl PlanetRenderer {
                 .map(|t| (t.name, t.duration_ns as f64 / 1.0e6))
                 .collect()
         })
+    }
+    /// Most recently completed stage timings with the frame number they
+    /// belong to (non-blocking; results trail submission by a frame or two).
+    pub fn stage_timings_deferred(&mut self) -> Option<(u64, Vec<(&'static str, f64)>)> {
+        let p = self.profiler.as_mut()?;
+        let timings = p.read_timestamps_deferred().iter().map(|t| (t.name, t.duration_ns as f64 / 1.0e6)).collect();
+        p.last_completed_frame().map(|frame| (frame, timings))
+    }
+    /// Frame number of the last encoded frame (as passed to `encode`).
+    pub fn frame_number(&self) -> u64 {
+        self.last_frame_num
     }
     /// Residency has issued and completed every window column.
     pub fn settled(&self) -> bool {
@@ -772,7 +790,14 @@ impl PlanetRenderer {
                 words.push(*value);
             }
         }
-        for (slot, bi, bj) in &work.block_inits {
+        // A slot released and re-acquired in one frame must end in its last
+        // state; the GPU patches entries in parallel.
+        let mut last = rustc_hash::FxHashMap::default();
+        for (index, (slot, _, _)) in work.block_inits.iter().enumerate() {
+            last.insert(*slot, index);
+        }
+        let block_inits: Vec<_> = work.block_inits.iter().enumerate().filter(|(i, (slot, _, _))| last[slot] == *i).map(|(_, b)| *b).collect();
+        for (slot, bi, bj) in &block_inits {
             words.extend([*slot, *bi as u32, *bj as u32]);
         }
         if !words.is_empty() {
@@ -788,7 +813,7 @@ impl PlanetRenderer {
             }
             self.queue.write_buffer(&self.buffers.evictions, 0, bytemuck::cast_slice(&words));
         }
-        (patches, work.block_inits.len() as u32)
+        (patches, block_inits.len() as u32)
     }
 
     fn grow_brushes(&mut self, needed: u32) {
@@ -881,6 +906,7 @@ impl PlanetRenderer {
             }
         }
         self.frame_index = self.frame_index.wrapping_add(1);
+        self.last_frame_num = frame_num;
         if self.screen.size != size {
             self.screen = Screen::new(&self.device, size);
         }
@@ -928,6 +954,7 @@ impl PlanetRenderer {
         uniform.extra[1] = crate::residency::block_region();
         uniform.extra[2] = block_patches;
         uniform.extra[3] = live_blocks;
+        uniform.hints[0] = u32::from(self.settings.residency_hints && self.residency.blocks_exact());
         self.queue.write_buffer(&self.buffers.frame, 0, bytemuck::bytes_of(&uniform));
         let camera_key = camera as *const _ as usize;
         if self.camera_group.as_ref().is_none_or(|(k, _)| *k != camera_key) {

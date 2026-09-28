@@ -261,6 +261,16 @@ fn summary_block(level: u32, face: u32, ci: i32, cj: i32, k: i32) -> vec4<i32> {
     return vec4<i32>(0);
 }
 
+// Residency of a level column from its tier-1 summary block, without a hash
+// lookup: 0 absent, 1 present, 2 unknown (look it up).
+fn column_hint(level: u32, face: u32, ci: i32, cj: i32) -> u32 {
+    if frame.hints.x == 0u { return 2u; }
+    let b = vec2<i32>(ci >> 2u, cj >> 2u);
+    let e = block_state[block_slot(level, face, 1u, b.x, b.y)];
+    if any(e.xy != b) || e.w == 0 { return 0u; }
+    return select(2u, 1u, e.w == 16);
+}
+
 // Walk the ray from t_start to t_end. Level selection uses
 // `(t + lod_offset) * lod_scale` (dither for primary rays, eye distance for
 // secondary rays).
@@ -332,12 +342,10 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 cur.level = want;
             } else if want < cur.level {
                 let finer = locate(r, fr, t, want);
-                // A complete tier-1 block proves the finer column resident.
-                let fb = vec2<i32>(finer.i >> 5u, finer.j >> 5u);
-                let fe = block_state[block_slot(want, finer.face, 1u, fb.x, fb.y)];
-                if all(fe.xy == fb) && fe.w == 16 {
+                let hint = column_hint(want, finer.face, finer.i >> 3u, finer.j >> 3u);
+                if hint == 1u {
                     cur = finer;
-                } else {
+                } else if hint == 2u {
                     let found = find_column(column_key0(finer.face, want, finer.i >> 3u), bitcast<u32>(finer.j >> 3u));
                     if found != NONE && column_valid(records[found]) {
                         cur = finer;
@@ -348,11 +356,14 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
         }
         if skip.x == 0 && any(vec4<i32>(cur.i >> 3u, cur.j >> 3u, i32(cur.face), i32(cur.level)) != loaded) {
             loop {
-                work_lookups += 1u;
-                record = find_column(column_key0(cur.face, cur.level, cur.i >> 3u), bitcast<u32>(cur.j >> 3u));
-                if record != NONE {
-                    col = records[record];
-                    if column_valid(col) { break; }
+                // Known-absent columns skip the hash probe.
+                if column_hint(cur.level, cur.face, cur.i >> 3u, cur.j >> 3u) != 0u {
+                    work_lookups += 1u;
+                    record = find_column(column_key0(cur.face, cur.level, cur.i >> 3u), bitcast<u32>(cur.j >> 3u));
+                    if record != NONE {
+                        col = records[record];
+                        if column_valid(col) { break; }
+                    }
                 }
                 if cur.level + 1u >= u32(frame.layer_i.z) {
                     return make_hit(ST_LOADING, t, cur, normal, NONE);

@@ -105,6 +105,8 @@ struct Resident {
     record: u32,
     slot: u32,
     edit_block: Option<(u32, u32)>,
+    /// Holds references on its summary blocks (false: a slot conflict).
+    blocks: bool,
 }
 
 /// Priority-ordered pending key (lower priority value is issued first).
@@ -207,6 +209,8 @@ pub struct Residency {
     live_tier1: Vec<u32>,
     live_index: FxHashMap<u32, usize>,
     live_dirty: bool,
+    /// Resident columns without summary blocks (slot conflicts).
+    block_conflicts: usize,
     table: Vec<u32>,
     used_slots: u32,
     tombstones: u32,
@@ -252,6 +256,7 @@ impl Residency {
             live_tier1: Vec::new(),
             live_index: FxHashMap::default(),
             live_dirty: false,
+            block_conflicts: 0,
             table: vec![NONE; 1 << capacity.table_bits],
             used_slots: 0,
             tombstones: 0,
@@ -400,8 +405,18 @@ impl Residency {
         Ok(Some(block))
     }
 
+    /// Reference every summary block of a column, or none when any tier's
+    /// table slot belongs to another block (a window larger than the table).
     fn acquire_blocks(&mut self, key: u64, work: &mut FrameWork) -> bool {
         let (face, level, ci, cj) = unpack(key);
+        let conflict = (1..=BLOCK_TIERS).any(|tier| {
+            let bkey = (level, face, tier, ci >> (2 * tier), cj >> (2 * tier));
+            !self.blocks.contains_key(&bkey)
+                && self.block_owner.get(&block_slot(level, face, tier, bkey.3, bkey.4)).is_some_and(|owner| *owner != bkey)
+        });
+        if conflict {
+            return false;
+        }
         for tier in 1..=BLOCK_TIERS {
             let (bi, bj) = (ci >> (2 * tier), cj >> (2 * tier));
             let bkey = (level, face, tier, bi, bj);
@@ -410,10 +425,6 @@ impl Residency {
                 continue;
             }
             let slot = block_slot(level, face, tier, bi, bj);
-            if self.block_owner.get(&slot).is_some_and(|owner| *owner != bkey) {
-                // Window larger than the table: this block never becomes complete.
-                continue;
-            }
             self.block_owner.insert(slot, bkey);
             work.block_inits.push((slot, bi, bj));
             self.blocks.insert(bkey, Block { slot, refs: 1 });
@@ -450,8 +461,10 @@ impl Residency {
     }
 
     fn evict(&mut self, key: u64, work: &mut FrameWork) {
-        if self.residents.contains_key(&key) {
-            self.release_blocks(key, work);
+        match self.residents.get(&key).map(|r| r.blocks) {
+            Some(true) => self.release_blocks(key, work),
+            Some(false) => self.block_conflicts -= 1,
+            None => {}
         }
         if let Some(res) = self.residents.remove(&key) {
             self.table[res.slot as usize] = TOMBSTONE;
@@ -620,13 +633,11 @@ impl Residency {
                 requeue(self);
                 break;
             };
-            if !self.acquire_blocks(key, &mut work) {
-                self.free_records.push(record);
-                if let Some(b) = block {
-                    self.edits.release(b);
-                }
-                requeue(self);
-                break;
+            // Columns always become resident; one whose summary blocks alias
+            // another block's table slots simply has no summaries.
+            let blocks = self.acquire_blocks(key, &mut work);
+            if !blocks {
+                self.block_conflicts += 1;
             }
             let slot = self.insert_slot(key as u32, (key >> 32) as u32, record);
             work.table_writes.push((slot, record));
@@ -636,6 +647,7 @@ impl Residency {
                     record,
                     slot,
                     edit_block: block,
+                    blocks,
                 },
             );
             self.levels[index].keys.insert(key);
@@ -684,6 +696,12 @@ impl Residency {
     /// Live tier-1 summary block slots, when they changed since the last call.
     pub fn take_live_blocks(&mut self) -> Option<&[u32]> {
         std::mem::take(&mut self.live_dirty).then_some(self.live_tier1.as_slice())
+    }
+    /// Every resident column owns its summary blocks, so a tier-1 block
+    /// whose key does not match (or that has no published column) proves
+    /// its columns absent.
+    pub fn blocks_exact(&self) -> bool {
+        self.block_conflicts == 0
     }
     pub fn live_block_count(&self) -> usize {
         self.live_tier1.len()
