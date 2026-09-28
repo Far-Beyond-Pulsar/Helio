@@ -18,6 +18,10 @@ pub(crate) struct Transmittance {
     params: wgpu::Buffer,
     pub(crate) view: wgpu::TextureView,
     face_views: Box<[wgpu::TextureView]>,
+    /// Whether each face may hold a pane from its last render. A face that
+    /// does not is all zero (textures start zeroed, and emptied faces are
+    /// cleared once), so re-rendering it with no translucent caster is skipped.
+    face_has_content: Box<[bool]>,
     bg_1: Option<wgpu::BindGroup>,
     bg_1_key: Option<(wgpu::Buffer, usize)>,
 }
@@ -48,6 +52,7 @@ impl Transmittance {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
         });
+        let face_has_content = vec![false; layers as usize].into_boxed_slice();
         let face_views = (0..layers)
             .map(|layer| {
                 texture.create_view(&wgpu::TextureViewDescriptor {
@@ -176,6 +181,7 @@ impl Transmittance {
             params,
             view,
             face_views,
+            face_has_content,
             bg_1: None,
             bg_1_key: None,
         }
@@ -224,9 +230,15 @@ impl Transmittance {
             return;
         }
         let (Some(materials), true) = (materials, draw_count > 0) else {
-            let _pass = Self::clear_face(&self.face_views[face], encoder);
+            // Nothing to draw. Every frame re-renders the camera-following
+            // cascade faces, so clear only a face that last held a pane:
+            // an empty face is already zero ("unfiltered").
+            if std::mem::take(&mut self.face_has_content[face]) {
+                let _pass = Self::clear_face(&self.face_views[face], encoder);
+            }
             return;
         };
+        self.face_has_content[face] = true;
         let key = (materials.clone(), static_depth as *const _ as usize);
         if self.bg_1_key.as_ref() != Some(&key) {
             self.bg_1 = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {

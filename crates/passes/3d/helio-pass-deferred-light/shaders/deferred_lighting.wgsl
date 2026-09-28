@@ -472,6 +472,27 @@ fn sample_cascade_shadow_pcss(
 // Colour a light by the translucent casters between it and the receiver.
 // Uses the same face and normal offset as `shadow_factor`; directional lights
 // take the nearest cascade (the tint is low-frequency, so no cascade blend).
+// Tint of the stained-glass panes a receiver lies behind. Each of the four
+// nearest texels is depth-tested on its own, then the results are weighted
+// bilinearly. Bilinearly filtering the pane depth (alpha) first and testing
+// once failed the test along every pane edge wherever a neighbouring texel
+// held no pane: an untinted rim and stair-stepped edges, most visible in the
+// coarse cascades, where a half-resolution texel covers several centimetres.
+fn glass_tint(uv: vec2<f32>, layer: i32, receiver: f32) -> vec3<f32> {
+    let dims = vec2<i32>(textureDimensions(shadow_transmittance));
+    let p = uv * vec2<f32>(dims) - 0.5;
+    let base = vec2<i32>(floor(p));
+    let f = p - floor(p);
+    var tint = vec3<f32>(0.0);
+    for (var i = 0; i < 4; i++) {
+        let o = vec2<i32>(i & 1, i >> 1);
+        let t = textureLoad(shadow_transmittance, clamp(base + o, vec2<i32>(0), dims - 1), layer, 0);
+        let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
+        tint += w * select(vec3<f32>(1.0), 1.0 - t.rgb, receiver < t.a);
+    }
+    return tint;
+}
+
 fn light_transmittance(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
     if !ENABLE_SHADOWS { return vec3<f32>(1.0); }
     let light = lights[light_idx];
@@ -507,9 +528,8 @@ fn light_transmittance(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>) -> ve
     if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || ndc.z < 0.0 || ndc.z > 1.0 {
         return vec3<f32>(1.0);
     }
-    let t = textureSampleLevel(shadow_transmittance, transmittance_sampler, uv, i32(layer), 0.0);
     // Only receivers behind the nearest pane are filtered.
-    return select(vec3<f32>(1.0), 1.0 - t.rgb, 1.0 - ndc.z < t.a);
+    return glass_tint(uv, i32(layer), 1.0 - ndc.z);
 }
 
 fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord: vec2<f32>, frame: u32) -> f32 {
@@ -1203,6 +1223,20 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 let dist = length(light.position_range.xyz - world_pos);
                 if dist > light.position_range.w { continue; }
             }
+            // A surface facing away from the light receives nothing from it:
+            // pbr_direct_light returns exactly zero whenever N·L <= 0, so its
+            // shadow and transmittance lookups cannot change Lo. L is built
+            // the way pbr_direct_light builds it; the margin keeps the skip
+            // strictly inside that case even if the two dot products round
+            // differently.
+            var to_light_dir: vec3<f32>;
+            if light.light_type == 0u {
+                to_light_dir = normalize(-light.direction_outer.xyz);
+            } else {
+                let to_light = light.position_range.xyz - world_pos;
+                to_light_dir = to_light / length(to_light);
+            }
+            if dot(N, to_light_dir) < -1e-4 { continue; }
             // VG geometry does not render into shadow maps, so shadow_factor
             // would incorrectly occlude VG pixels with unrelated regular geometry.
             // Skip shadow evaluation for VG surfaces. Must be a real `if`, not

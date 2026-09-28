@@ -16,9 +16,16 @@
 //! metering, bloom and lens extraction see scattered light: bright shafts
 //! bloom and flare because they are real radiance in the image they read.
 //! Missing producers bind a zero-range fallback and the pass is a copy.
+//!
+//! When no source can put a medium in the grid (checked on the CPU, below),
+//! the composite would be exactly that copy, so the pass draws nothing and
+//! publishes its input's view as `fogged_hdr` instead. Readers of
+//! `fogged_hdr` also declare a read of `pre_aa`, so the pool never reuses
+//! the input's memory while they may still see it.
 
 use helio_core::graph::{ResourceBuilder, ResourceSize};
-use helio_core::{PassContext, RenderPass, ResourceKey, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderPass, ResourceKey, Result as HelioResult};
+use pulsar_scenedb::gpu::BufferKey;
 
 /// Graph key of the fogged scene-linear image.
 pub const FOGGED_HDR: &str = "fogged_hdr";
@@ -36,6 +43,17 @@ pub struct FogCompositePass {
     fallback_parameters: wgpu::Buffer,
     bind_group: Option<wgpu::BindGroup>,
     bind_group_key: Option<(wgpu::TextureView, wgpu::TextureView, wgpu::TextureView, wgpu::Buffer, wgpu::Buffer)>,
+    /// SceneDB media rows VolumetricFogPass classifies; any non-zero row
+    /// counts as a possible medium.
+    global_media: helio_core::SceneBufferLiveness,
+    local_media: helio_core::SceneBufferLiveness,
+    legacy_media: helio_core::SceneBufferLiveness,
+    /// Some source may have held a medium last frame.
+    medium_last_frame: bool,
+    /// No source can have held a medium this frame or last, so the grid is
+    /// neutral and compositing is the identity. VolumetricFogPass still
+    /// integrates the frame after a medium disappears, hence both frames.
+    fog_quiet: bool,
 }
 
 impl FogCompositePass {
@@ -144,6 +162,11 @@ impl FogCompositePass {
             fallback_parameters,
             bind_group: None,
             bind_group_key: None,
+            global_media: helio_core::SceneBufferLiveness::default(),
+            local_media: helio_core::SceneBufferLiveness::default(),
+            legacy_media: helio_core::SceneBufferLiveness::default(),
+            medium_last_frame: true,
+            fog_quiet: false,
         }
     }
 
@@ -155,6 +178,28 @@ impl FogCompositePass {
 
     pub fn format(&self) -> wgpu::TextureFormat {
         self.format
+    }
+
+    /// The input view to publish as `fogged_hdr` instead of compositing, when
+    /// the grid is certainly neutral and the input can stand in for the pooled
+    /// target (same format, size and sample count, and renderable, since
+    /// TransparentPass draws into `fogged_hdr`).
+    fn pass_through_view<'a>(
+        &self,
+        resources: &helio_core::ResourceRegistry<'a>,
+    ) -> Option<&'a wgpu::TextureView> {
+        // Readers of fogged_hdr extend pre_aa's lifetime, not other inputs'.
+        if !self.fog_quiet || self.input != "pre_aa" {
+            return None;
+        }
+        let input = resources.get::<&wgpu::TextureView>(ResourceKey::new(self.input))?;
+        let target = resources.get::<&wgpu::TextureView>(ResourceKey::new(FOGGED_HDR))?;
+        let (i, t) = (input.texture(), target.texture());
+        let compatible = i.format() == t.format()
+            && i.size() == t.size()
+            && i.sample_count() == t.sample_count()
+            && i.usage().contains(wgpu::TextureUsages::RENDER_ATTACHMENT);
+        compatible.then_some(input)
     }
 }
 
@@ -171,6 +216,28 @@ impl RenderPass for FogCompositePass {
         &[FOGGED_HDR]
     }
 
+    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // Mirrors VolumetricFogPass's classification (`cs_classify`): a medium
+        // comes from the resolved post-process fog block, weighted volume rows,
+        // or global/local media rows. Unknown row contents count as a medium.
+        let mut medium = ctx
+            .registry
+            .get::<bool>(ResourceKey::new(crate::FOG_SETTINGS_MAYBE_ACTIVE))
+            .unwrap_or(true);
+        for (liveness, key) in [
+            (&mut self.global_media, "global_fog_media"),
+            (&mut self.local_media, "local_fog_media"),
+            (&mut self.legacy_media, "fog_components"),
+        ] {
+            let rows = ctx.scene_buffers.get(BufferKey::of(key));
+            liveness.update(ctx.device, ctx.queue, rows);
+            medium |= rows.is_some_and(|handle| liveness.maybe_live(handle));
+        }
+        self.fog_quiet = !medium && !self.medium_last_frame;
+        self.medium_last_frame = medium;
+        Ok(())
+    }
+
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read(self.input);
         builder.read("fog_accum");
@@ -185,6 +252,9 @@ impl RenderPass for FogCompositePass {
         resources: &'a helio_core::ResourceRegistry<'a>,
         storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        if self.pass_through_view(resources).is_some() {
+            return None;
+        }
         let target = resources.get(ResourceKey::new(FOGGED_HDR))?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
@@ -208,6 +278,9 @@ impl RenderPass for FogCompositePass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        if self.pass_through_view(ctx.registry).is_some() {
+            return Ok(());
+        }
         let input: &wgpu::TextureView = ctx
             .registry
             .read(ResourceKey::new(self.input), "FogComposite")
@@ -252,6 +325,12 @@ impl RenderPass for FogCompositePass {
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.draw(0..3, 0..1);
         Ok(())
+    }
+
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        if let Some(input) = self.pass_through_view(frame) {
+            frame.route_named_texture(FOGGED_HDR, input, "FogComposite");
+        }
     }
 
     fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {

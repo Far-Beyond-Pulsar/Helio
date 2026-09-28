@@ -755,9 +755,28 @@ fn shaft_visibility(light_idx: u32, p: vec3<f32>) -> vec3<f32> {
     if lit <= 0.0 || layer >= textureNumLayers(shadow_transmittance) { return vec3<f32>(lit); }
     // Light that crossed stained glass arrives coloured: the shafts take the
     // panes' tint, not just their outline.
-    let glass = textureSampleLevel(shadow_transmittance, linear_samp, proj.uv, layer, 0.0);
-    let tint = select(vec3<f32>(1.0), 1.0 - glass.rgb, 1.0 - proj.depth < glass.a);
-    return lit * tint;
+    return lit * glass_tint(proj.uv, i32(layer), 1.0 - proj.depth);
+}
+
+// Tint of the stained-glass panes a receiver lies behind. Each of the four
+// nearest texels is depth-tested on its own, then the results are weighted
+// bilinearly. Bilinearly filtering the pane depth (alpha) first and testing
+// once failed the test along every pane edge wherever a neighbouring texel
+// held no pane: an untinted rim and stair-stepped edges, most visible in the
+// coarse cascades, where a half-resolution texel covers several centimetres.
+fn glass_tint(uv: vec2<f32>, layer: i32, receiver: f32) -> vec3<f32> {
+    let dims = vec2<i32>(textureDimensions(shadow_transmittance));
+    let p = uv * vec2<f32>(dims) - 0.5;
+    let base = vec2<i32>(floor(p));
+    let f = p - floor(p);
+    var tint = vec3<f32>(0.0);
+    for (var i = 0; i < 4; i++) {
+        let o = vec2<i32>(i & 1, i >> 1);
+        let t = textureLoad(shadow_transmittance, clamp(base + o, vec2<i32>(0), dims - 1), layer, 0);
+        let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
+        tint += w * select(vec3<f32>(1.0), 1.0 - t.rgb, receiver < t.a);
+    }
+    return tint;
 }
 
 // ── Light evaluation ────────────────────────────────────────────────────────

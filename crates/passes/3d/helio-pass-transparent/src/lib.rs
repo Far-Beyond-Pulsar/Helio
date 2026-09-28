@@ -352,6 +352,9 @@ impl RenderPass for TransparentPass {
                 helio_core::graph::ResourceSize::MatchSurface);
         }
         if self.pre_aa_target { builder.read(if self.fogged_target { "fogged_hdr" } else { "pre_aa" }); }
+        // FogCompositePass may publish pre_aa's view as fogged_hdr (no fog
+        // possible), so this pass may draw into pre_aa; keep it alive.
+        if self.pre_aa_target && self.fogged_target { builder.read("pre_aa"); }
         if self.fogged_target { builder.read("fog_accum"); builder.read("fog_parameters"); }
         builder.read("depth");
         builder.read("cluster_light_grid");

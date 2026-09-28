@@ -618,6 +618,9 @@ impl RenderPass for TsrPass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read(self.color_input);
+        // FogCompositePass may publish pre_aa's view as fogged_hdr (no fog
+        // possible); reading pre_aa keeps the pool from reusing it before us.
+        if self.color_input == "fogged_hdr" { builder.read("pre_aa"); }
         if self.transparency_reactivity { builder.read("transparency_reactivity"); }
     }
 
