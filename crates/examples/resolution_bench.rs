@@ -32,6 +32,18 @@
 //! registers up front (billboards, decals, water volumes and hitboxes), so
 //! their buffers exist while empty, as they do in the editor.
 //!
+//! `--movability static|movable|mixed` re-tags objects so shadow casters land
+//! in the static atlas (default), the dynamic one, or both.
+//!
+//! `--ssr` enables screen-space reflections. `--orbit` sways the camera
+//! sideways every frame (deterministically), so camera-dependent caches are
+//! rebuilt each frame instead of being reused.
+//!
+//! `--water` adds a water pool (surface, simulation and caustics).
+//!
+//! `--dof` enables depth of field through the camera's post-process settings,
+//! `--bloom` bloom (both can be combined).
+//!
 //! `--billboards` places a billboard (editor light icon) over every point light.
 //!
 //! `--scale` is the renderer's internal render scale (the editor uses the
@@ -91,6 +103,12 @@ struct Args {
     no_ray_query: bool,
     pulsar_columns: bool,
     billboards: bool,
+    movability: String,
+    dof: bool,
+    bloom: bool,
+    water: bool,
+    ssr: bool,
+    orbit: bool,
 }
 
 fn parse_args() -> Args {
@@ -108,6 +126,12 @@ fn parse_args() -> Args {
         no_ray_query: false,
         pulsar_columns: false,
         billboards: false,
+        movability: "static".into(),
+        dof: false,
+        bloom: false,
+        water: false,
+        ssr: false,
+        orbit: false,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -119,6 +143,11 @@ fn parse_args() -> Args {
             "--no-ray-query" => Some(&mut args.no_ray_query),
             "--pulsar-columns" => Some(&mut args.pulsar_columns),
             "--billboards" => Some(&mut args.billboards),
+            "--dof" => Some(&mut args.dof),
+            "--bloom" => Some(&mut args.bloom),
+            "--water" => Some(&mut args.water),
+            "--ssr" => Some(&mut args.ssr),
+            "--orbit" => Some(&mut args.orbit),
             _ => None,
         };
         if let Some(switch) = switch {
@@ -142,6 +171,7 @@ fn parse_args() -> Args {
                     })
                     .collect()
             }
+            "--movability" => args.movability = value,
             "--frames" => args.frames = value.parse().expect("--frames takes an integer"),
             "--warmup" => args.warmup = value.parse().expect("--warmup takes an integer"),
             "--scale" => args.scale = value.parse().expect("--scale takes a float"),
@@ -273,6 +303,27 @@ fn sky(world: &mut World, aspect: f32) -> Camera {
     )
 }
 
+/// Re-tags every object: `static` (as authored), `movable`, or `mixed`
+/// (every other object movable), so shadow casters land in the dynamic
+/// atlas, the static one, or both.
+fn apply_movability(world: &mut World, mode: &str) {
+    let every = match mode {
+        "static" => return,
+        "movable" => 1,
+        "mixed" => 2,
+        other => panic!("unknown movability {other}; use static, movable or mixed"),
+    };
+    let objects: Vec<_> = world
+        .query::<(&StaticObjectComponent,)>()
+        .map(|(entity, _)| entity)
+        .collect();
+    for (i, entity) in objects.into_iter().enumerate() {
+        if i % every == 0 {
+            set_object_movability(world, entity, helio::Movability::Movable).unwrap();
+        }
+    }
+}
+
 /// An editor-style icon over every point light, as `BillboardComponent` rows.
 fn spawn_light_billboards(world: &mut World) {
     let positions: Vec<[f32; 4]> = world
@@ -359,8 +410,12 @@ fn run(
     let build_start = Instant::now();
     // Pulsar-Native's editor registers these columns up front (see
     // engine_backend's helio_bridge), so their buffers exist while empty.
-    let (pulsar_columns, billboards) = (args.pulsar_columns, args.billboards);
+    let (pulsar_columns, billboards, water) = (args.pulsar_columns, args.billboards, args.water);
     let mut scene_db: SceneDb = new_scene_db_with_gpu_mirror_and(device, queue, |store| {
+        if water && !pulsar_columns {
+            helio_pass_water_sim::WaterVolumeComponent::register_gpu_columns_growable(store, 64, device);
+            helio_pass_water_sim::WaterHitboxComponent::register_gpu_columns_growable(store, 256, device);
+        }
         if billboards && !pulsar_columns {
             helio_pass_billboard::BillboardComponent::register_gpu_columns_growable(store, 1024, device);
         }
@@ -381,9 +436,39 @@ fn run(
     if args.billboards {
         spawn_light_billboards(&mut scene_db.world);
     }
+    apply_movability(&mut scene_db.world, &args.movability);
+    if args.water {
+        // A pool in front of the camera, surface just above the floor, with
+        // caustics, so the simulation, surface and caustics all contribute.
+        spawn_water_volume(
+            &mut scene_db.world,
+            WaterVolumeDescriptor {
+                bounds_min: [-6.0, -1.0, -8.0],
+                bounds_max: [6.0, 0.3, 6.0],
+                surface_height: 0.3,
+                caustics_enabled: true,
+                ..Default::default()
+            },
+        );
+    }
+    if args.dof || args.bloom {
+        // Camera-baseline post-process settings. Depth of field is focused a
+        // few metres out so near and far both blur.
+        let mut settings = helio_pass_postprocess::PostProcessSettings::default();
+        if args.dof {
+            settings.dof_enabled = true;
+            settings.dof_focal_distance = 6.0;
+            settings.dof_focal_region = 1.5;
+        }
+        settings.bloom_enabled = args.bloom;
+        set_camera_postprocess(&mut scene_db.world, 0, &settings);
+    }
     let mut config = RendererConfig::new(width, height, FORMAT).with_render_scale(args.scale);
     if args.tsr {
         config = config.with_tsr_quality(helio_pass_tsr::TsrQuality::Quality).with_render_scale(args.scale);
+    }
+    if args.ssr {
+        config = config.with_ssr(true);
     }
     let internal = (config.internal_width(), config.internal_height());
     let mut renderer: Renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
@@ -421,7 +506,18 @@ fn run(
     for frame in 0..args.warmup + args.frames {
         flush_scene_db(&scene_db, queue);
         let t = Instant::now();
-        renderer.render(&camera, &view).expect("render");
+        let frame_camera = if args.orbit {
+            // Sway sideways by a fixed per-frame amount: deterministic, and
+            // the camera moves every frame (camera-dependent caches rebuild).
+            let offset = Vec3::new((frame as f32 * 0.25).sin() * 0.4, 0.0, 0.0);
+            let mut moved = camera.clone();
+            moved.view = camera.view * Mat4::from_translation(-offset);
+            moved.position = camera.position + offset;
+            moved
+        } else {
+            camera.clone()
+        };
+        renderer.render(&frame_camera, &view).expect("render");
         let cpu = t.elapsed().as_secs_f64() * 1e3;
         let t = Instant::now();
         device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");

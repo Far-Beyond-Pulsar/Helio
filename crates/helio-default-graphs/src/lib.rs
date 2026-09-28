@@ -32,7 +32,6 @@ use helio_pass_portal_instances::{PortalEditorOverlayPass, PortalInstancePass, P
 use helio_pass_postprocess::{
     FogCompositePass, PostProcessPass, PostProcessVolumeBlendPass, FOGGED_HDR, FOGGED_HDR_FORMAT,
 };
-use helio_pass_radiance_cascades::RadianceCascadesPass;
 use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_cull::ShadowCullPass;
 use helio_pass_shadow_dirty::ShadowDirtyPass;
@@ -854,17 +853,9 @@ fn build_default_graph_internal(
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
 
-    let lights_buf = scene_buffer_or_dummy(
-        &scene_db,
-        device,
-        pulsar_scenedb::gpu::BufferKey::of("scene_lights"),
-        "SceneDB Lights",
-        96,
-    );
-    graph.add_pass(Box::new(RadianceCascadesPass::new(
-        device,
-        &lights_buf.buffer,
-    )));
+    // No RadianceCascadesPass: nothing in this graph publishes `rc_view`,
+    // so DeferredLight's `has_rc_gi` (and SSR's RC fallback) never read its
+    // output, and it only cost a probe-atlas trace every frame.
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
 
@@ -1130,14 +1121,9 @@ fn build_fxaa_graph_internal(
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
 
-    let lights_buf = scene_buffer_or_dummy(
-        &scene_db,
-        device,
-        pulsar_scenedb::gpu::BufferKey::of("scene_lights"),
-        "SceneDB Lights",
-        96,
-    );
-    graph.add_pass(Box::new(RadianceCascadesPass::new(device, &lights_buf.buffer)));
+    // No RadianceCascadesPass: nothing in this graph publishes `rc_view`,
+    // so DeferredLight's `has_rc_gi` (and SSR's RC fallback) never read its
+    // output, and it only cost a probe-atlas trace every frame.
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
 
@@ -1811,14 +1797,9 @@ fn build_forward_graph_internal(
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
 
-    let lights_buf = scene_buffer_or_dummy(
-        &scene_db,
-        device,
-        pulsar_scenedb::gpu::BufferKey::of("scene_lights"),
-        "SceneDB Lights",
-        96,
-    );
-    graph.add_pass(Box::new(RadianceCascadesPass::new(device, &lights_buf.buffer)));
+    // No RadianceCascadesPass: nothing in this graph publishes `rc_view`,
+    // so DeferredLight's `has_rc_gi` (and SSR's RC fallback) never read its
+    // output, and it only cost a probe-atlas trace every frame.
 
     // Forward geometry pass replaces G-buffer + decal + deferred light + SSR + planar reflections
     add_forward_geometry_passes(&mut graph, device, camera_buf, &lighting_config, &perf, true);

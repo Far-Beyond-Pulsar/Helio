@@ -8,11 +8,13 @@
 //!   1. `cs_exposure`/`cs_exposure_reduce`/`cs_exposure_adapt` — metered log luminance and eye adaptation (compute)
 //!   2. `cs_bloom_down_extract` — extract brights from HDR → bloom mip 0 (compute)
 //!   3. `cs_bloom_down`         — 2x downsample mip chain, 4 passes (compute)
+//!   3b. `cs_bloom_combine`     — sum mips 1-4 at mip-0 resolution (compute)
 //!   4. `fs_uber`               — exposure, bloom + lens composite, grade, tonemap, vignette, CA, grain (render)
 //!
 //! Bind groups:
 //!   Main BGLs (group 0): uniforms, samplers, hdr/depth, bloom, noise, custom, volumes, blend output
 //!   Bloom BGL (group 1): per-dispatch bloom src (sampled) + dst (storage write)
+//!   Bloom combine BGL (group 2): bloom mips 1-4 (sampled) + mip-0-sized sum (storage write)
 //!   Blend BGL (group 0, separate layout): postprocess, camera, pp_volumes, blend_output
 //!
 //! See also `postprocess.wgsl` for shader-level injection points:
@@ -29,7 +31,7 @@ pub use components::{CameraPostProcessComponent, PostProcessVolumeComponent};
 pub use gpu_types::*;
 
 mod volume_blend;
-pub use volume_blend::PostProcessVolumeBlendPass;
+pub use volume_blend::{PostProcessVolumeBlendPass, BLOOM_MAYBE_ACTIVE, DOF_MAYBE_ACTIVE};
 
 mod fog_composite;
 pub use fog_composite::{FogCompositePass, FOGGED_HDR, FOGGED_HDR_FORMAT};
@@ -98,12 +100,14 @@ pub struct PostProcessPass {
     exposure_adapt_pipeline: wgpu::ComputePipeline,
     bloom_extract_pipeline: wgpu::ComputePipeline,
     bloom_down_pipeline: wgpu::ComputePipeline,
+    bloom_combine_pipeline: wgpu::ComputePipeline,
     uber_pipeline: wgpu::RenderPipeline,
 
     // Separate BGLs for compute vs render
     compute_main_bgl: wgpu::BindGroupLayout,
     render_main_bgl: wgpu::BindGroupLayout,
     bloom_compute_bgl: wgpu::BindGroupLayout,
+    bloom_combine_bgl: wgpu::BindGroupLayout,
 
     compute_main_bg: Option<wgpu::BindGroup>,
     render_main_bg: Option<wgpu::BindGroup>,
@@ -112,10 +116,13 @@ pub struct PostProcessPass {
     // Bloom BGs
     bloom_extract_bg: Option<(usize, wgpu::BindGroup)>,
     bloom_down_bgs: Vec<wgpu::BindGroup>,
+    bloom_combine_bg: wgpu::BindGroup,
 
     bloom_textures: Vec<wgpu::Texture>,
     bloom_sampled_views: Vec<wgpu::TextureView>,
     bloom_storage_views: Vec<wgpu::TextureView>,
+    /// Mips 1-4 summed at mip-0 resolution; fs_uber's second bloom input.
+    bloom_coarse: BloomCoarse,
 
     linear_sampler: wgpu::Sampler,
     point_sampler: wgpu::Sampler,
@@ -284,6 +291,7 @@ impl PostProcessPass {
 
         let (bloom_textures, bloom_sampled_views, bloom_storage_views) =
             Self::create_bloom_mips(device, width, height);
+        let bloom_coarse = BloomCoarse::new(device, width, height);
 
         // ── Shared BGL entry helpers ────────────────────────────────────────
 
@@ -367,7 +375,7 @@ impl PostProcessPass {
             ],
         });
 
-        // ── render_main_bgl: b0-b14 (bloom sampled at b6-b10) ──────────────
+        // ── render_main_bgl: b0-b14 (bloom sampled at b6-b10, mips 1-4 summed at b21) ─
         let render_main_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PostProcess Render Main BGL"),
             entries: &[
@@ -382,6 +390,7 @@ impl PostProcessPass {
                 sampled_tex_entry(8, fv, false),
                 sampled_tex_entry(9, fv, false),
                 sampled_tex_entry(10, fv, false),
+                sampled_tex_entry(21, fv, false),
                 storage_buf_entry(11, fv),
                 sampled_tex_entry(12, fv, false),
                 sampler_entry(13, fv, false),
@@ -440,6 +449,33 @@ impl PostProcessPass {
             ],
         });
 
+        // ── bloom_combine_bgl: mips 1-4 sampled + mip-0-sized dst ─────────
+        let bloom_combine_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("PostProcess Bloom Combine BGL"),
+            entries: &[
+                sampled_tex_entry(0, cv, false),
+                sampled_tex_entry(1, cv, false),
+                sampled_tex_entry(2, cv, false),
+                sampled_tex_entry(3, cv, false),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: cv,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let bloom_combine_bg = Self::make_bloom_combine_bg(
+            device,
+            &bloom_combine_bgl,
+            &bloom_sampled_views,
+            &bloom_coarse,
+        );
+
         // Precompute bloom_down BGs
         let bloom_down_bgs = Self::make_bloom_down_bgs(
             device,
@@ -457,6 +493,13 @@ impl PostProcessPass {
         let bloom_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("PostProcess Bloom PL"),
             bind_group_layouts: &[Some(&compute_main_bgl), Some(&bloom_compute_bgl)],
+            immediate_size: 0,
+        });
+        // Group 0 for the shared linear sampler; group 1 (per-dispatch
+        // down-sample src/dst) is unused by cs_bloom_combine.
+        let bloom_combine_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("PostProcess Bloom Combine PL"),
+            bind_group_layouts: &[Some(&compute_main_bgl), None, Some(&bloom_combine_bgl)],
             immediate_size: 0,
         });
         let render_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -485,6 +528,8 @@ impl PostProcessPass {
             &bloom_pl,
         );
         let bloom_down_pipeline = mk_compute("PostProcess Bloom Down", "cs_bloom_down", &bloom_pl);
+        let bloom_combine_pipeline =
+            mk_compute("PostProcess Bloom Combine", "cs_bloom_combine", &bloom_combine_pl);
 
         let uber_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("PostProcess Uber Pipeline"),
@@ -692,18 +737,22 @@ impl PostProcessPass {
             exposure_adapt_pipeline,
             bloom_extract_pipeline,
             bloom_down_pipeline,
+            bloom_combine_pipeline,
             uber_pipeline,
             compute_main_bgl,
             render_main_bgl,
             bloom_compute_bgl,
+            bloom_combine_bgl,
             compute_main_bg: None,
             render_main_bg: None,
             main_bg_key: None,
             bloom_extract_bg: None,
             bloom_down_bgs,
+            bloom_combine_bg,
             bloom_textures,
             bloom_sampled_views,
             bloom_storage_views,
+            bloom_coarse,
             linear_sampler,
             point_sampler,
             width,
@@ -966,6 +1015,28 @@ impl PostProcessPass {
             .collect()
     }
 
+    fn make_bloom_combine_bg(
+        device: &wgpu::Device,
+        bloom_combine_bgl: &wgpu::BindGroupLayout,
+        bloom_sampled_views: &[wgpu::TextureView],
+        coarse: &BloomCoarse,
+    ) -> wgpu::BindGroup {
+        fn sampled(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
+            wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::TextureView(view) }
+        }
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("PostProcess Bloom Combine BG"),
+            layout: bloom_combine_bgl,
+            entries: &[
+                sampled(0, &bloom_sampled_views[1]),
+                sampled(1, &bloom_sampled_views[2]),
+                sampled(2, &bloom_sampled_views[3]),
+                sampled(3, &bloom_sampled_views[4]),
+                sampled(4, &coarse.storage_view),
+            ],
+        })
+    }
+
     fn rebuild_bind_groups(
         &mut self,
         device: &wgpu::Device,
@@ -1079,6 +1150,10 @@ impl PostProcessPass {
                 wgpu::BindGroupEntry {
                     binding: 10,
                     resource: wgpu::BindingResource::TextureView(&self.bloom_sampled_views[4]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 21,
+                    resource: wgpu::BindingResource::TextureView(&self.bloom_coarse.sampled_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
@@ -1219,6 +1294,13 @@ impl PostProcessPass {
             &self.bloom_compute_bgl,
             &self.bloom_sampled_views,
             &self.bloom_storage_views,
+        );
+        self.bloom_coarse = BloomCoarse::new(device, width, height);
+        self.bloom_combine_bg = Self::make_bloom_combine_bg(
+            device,
+            &self.bloom_combine_bgl,
+            &self.bloom_sampled_views,
+            &self.bloom_coarse,
         );
         self.compute_main_bg = None;
         self.render_main_bg = None;
@@ -1408,8 +1490,16 @@ impl PostProcessPass {
             unsafe { &mut *ce }.write_timestamp(query, 1);
         }
 
-        // 2. Bloom (only when active)
-        if self.bloom_active {
+        // 2. Bloom, unless no settings source can enable it this frame: then
+        // fs_uber never samples the mips, and they are rebuilt from scratch
+        // on the first frame bloom may be on. User effects may sample the
+        // mips themselves, so they always keep them.
+        let bloom_maybe_active = !self.user_effect_entries.is_empty()
+            || ctx
+                .registry
+                .get::<bool>(helio_core::ResourceKey::new(BLOOM_MAYBE_ACTIVE))
+                .unwrap_or(true);
+        if self.bloom_active && bloom_maybe_active {
             // 2a. Bloom extract: HDR → mip 0
             {
                 let mut cpass =
@@ -1445,10 +1535,30 @@ impl PostProcessPass {
                     1,
                 );
             }
+
+            // 2c. Sum mips 1-4 at mip-0 resolution for the uber pass.
+            {
+                let (mw, mh) = self.mip_dims(0);
+                let mut cpass =
+                    unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("PostProcess Bloom Combine"),
+                        timestamp_writes: None,
+                    });
+                cpass.set_pipeline(&self.bloom_combine_pipeline);
+                cpass.set_bind_group(0, compute_bg, &[]);
+                cpass.set_bind_group(2, &self.bloom_combine_bg, &[]);
+                cpass.dispatch_workgroups(mw.div_ceil(WG_BLOOM), mh.div_ceil(WG_BLOOM), 1);
+            }
         }
 
-        // 3. Uber render pass (optionally to pre_dof texture when DofPass follows)
-        let target = if self.output_to_pre_dof {
+        // 3. Uber render pass (optionally to pre_dof texture when DofPass follows).
+        // When no settings source can enable DOF this frame, DofPass would
+        // only copy pre_dof to the target, so render the target directly.
+        let dof_maybe_active = ctx
+            .registry
+            .get::<bool>(helio_core::ResourceKey::new(DOF_MAYBE_ACTIVE))
+            .unwrap_or(true);
+        let target = if self.output_to_pre_dof && dof_maybe_active {
             self.pre_dof_view.as_ref().unwrap_or(ctx.target)
         } else {
             ctx.target
@@ -1489,4 +1599,32 @@ impl PostProcessPass {
     }
 }
 
+/// Mip-0-sized sum of bloom mips 1-4, written by `cs_bloom_combine`.
+struct BloomCoarse {
+    // Kept alive for the views below.
+    _texture: wgpu::Texture,
+    sampled_view: wgpu::TextureView,
+    storage_view: wgpu::TextureView,
+}
 
+impl BloomCoarse {
+    fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Bloom Coarse Sum"),
+            size: wgpu::Extent3d {
+                width: (width >> 1).max(1),
+                height: (height >> 1).max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let sampled_view = texture.create_view(&Default::default());
+        let storage_view = texture.create_view(&Default::default());
+        Self { _texture: texture, sampled_view, storage_view }
+    }
+}

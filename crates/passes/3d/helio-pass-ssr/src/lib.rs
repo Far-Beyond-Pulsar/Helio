@@ -227,6 +227,15 @@ impl SsrPass {
 }
 
 impl RenderPass for SsrPass {
+    /// The trace marches the min-depth pyramid every frame.
+    fn declare_frame_demands(
+        &mut self,
+        _ctx: &helio_core::PrepareContext,
+        demands: &mut helio_core::FrameDemands,
+    ) {
+        demands.demand("hiz_min");
+    }
+
     fn name(&self) -> &'static str {
         "SsrPass"
     }

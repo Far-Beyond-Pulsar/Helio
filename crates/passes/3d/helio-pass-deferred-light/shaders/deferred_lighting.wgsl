@@ -138,6 +138,43 @@ struct ShadowConfig {
 @group(0) @binding(1) var <uniform> globals:       Globals;
 @group(0) @binding(7) var <uniform> shadow_config: ShadowConfig;
 
+// Shadow-caster counts per atlas, written by ObjectBatch on the GPU this
+// frame. An atlas with no casters holds only the cleared far plane (1.0), so
+// every LessEqual comparison against it is 1 and every depth read is 1.0:
+// skipping it cannot change min(dynamic, static). Scenes whose casters are
+// all static (or all movable) then take one atlas sample per tap, not two.
+struct ShadowCasterCounts {
+    static_casters:       u32,
+    movable_casters:      u32,
+    transmissive_casters: u32,
+    _pad:                 u32,
+}
+@group(0) @binding(8) var<storage, read> shadow_caster_counts: ShadowCasterCounts;
+
+// min(dynamic, static) shadow comparison, skipping an atlas with no casters.
+fn compare_shadow_atlases(uv: vec2<f32>, layer: u32, depth_ref: f32) -> f32 {
+    var lit = 1.0;
+    if shadow_caster_counts.movable_casters != 0u {
+        lit = textureSampleCompareLevel(shadow_atlas, shadow_sampler, uv, i32(layer), depth_ref);
+    }
+    if shadow_caster_counts.static_casters != 0u {
+        lit = min(lit, textureSampleCompareLevel(static_shadow_atlas, shadow_sampler, uv, i32(layer), depth_ref));
+    }
+    return lit;
+}
+
+// min(dynamic, static) occluder depth, skipping an atlas with no casters.
+fn load_shadow_occluder_depth(pixel: vec2<i32>, layer: u32) -> f32 {
+    var depth = 1.0;
+    if shadow_caster_counts.movable_casters != 0u {
+        depth = textureLoad(shadow_atlas, pixel, i32(layer), 0);
+    }
+    if shadow_caster_counts.static_casters != 0u {
+        depth = min(depth, textureLoad(static_shadow_atlas, pixel, i32(layer), 0));
+    }
+    return depth;
+}
+
 // Group 1 – G-buffer inputs (read-only, textureLoad)
 @group(1) @binding(0) var gbuf_albedo:   texture_2d<f32>;       // Rgba8Unorm   albedo.rgb + alpha
 @group(1) @binding(1) var gbuf_normal:   texture_2d<f32>;       // Rgba16Float  world-space normal
@@ -315,21 +352,9 @@ fn sample_cascade_shadow(
     var lit_sum = 0.0;
     for (var i = 0u; i < pcf_count; i++) {
         let offset = vogel_disk_sample(i, pcf_count, theta) * filter_radius;
-        // Sample both atlases and take the minimum — pixel is lit only if neither occludes it.
+        // Minimum of both atlases — pixel is lit only if neither occludes it.
         // This is the Unreal-style static/dynamic shadow combine for mixed mobility scenes.
-        let dyn_lit = textureSampleCompareLevel(
-            shadow_atlas, shadow_sampler,
-            shadow_uv + offset,
-            i32(layer),
-            ndc.z,
-        );
-        let sta_lit = textureSampleCompareLevel(
-            static_shadow_atlas, shadow_sampler,
-            shadow_uv + offset,
-            i32(layer),
-            ndc.z,
-        );
-        lit_sum += min(dyn_lit, sta_lit);
+        lit_sum += compare_shadow_atlases(shadow_uv + offset, layer, ndc.z);
     }
 
     return lit_sum / f32(pcf_count);
@@ -363,9 +388,7 @@ fn pcss_blocker_search(
 
         // Sample actual depth value (not comparison) for blocker detection.
         // Use min of dynamic and static atlases — the closer occluder is the true blocker.
-        let dyn_depth = textureLoad(shadow_atlas, pixel_coord, i32(layer), 0);
-        let sta_depth = textureLoad(static_shadow_atlas, pixel_coord, i32(layer), 0);
-        let occluder_depth = min(dyn_depth, sta_depth);
+        let occluder_depth = load_shadow_occluder_depth(pixel_coord, layer);
 
         if occluder_depth < receiver_depth - 0.0001 {  // Is blocker
             blocker_sum += occluder_depth;
@@ -437,19 +460,7 @@ fn sample_cascade_shadow_pcss(
     for (var i = 0u; i < shadow_config.pcss_filter_samples; i++) {
         let offset = vogel_disk_sample(i, shadow_config.pcss_filter_samples, theta) * filter_radius;
         // Combine dynamic and static atlases: shadowed by either
-        let dyn_lit = textureSampleCompareLevel(
-            shadow_atlas, shadow_sampler,
-            shadow_uv + offset,
-            i32(layer),
-            receiver_depth
-        );
-        let sta_lit = textureSampleCompareLevel(
-            static_shadow_atlas, shadow_sampler,
-            shadow_uv + offset,
-            i32(layer),
-            receiver_depth
-        );
-        lit_sum += min(dyn_lit, sta_lit);
+        lit_sum += compare_shadow_atlases(shadow_uv + offset, layer, receiver_depth);
     }
 
     return lit_sum / f32(shadow_config.pcss_filter_samples);

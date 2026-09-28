@@ -857,6 +857,7 @@ impl WaterSimPass {
             water_output_view: None,
             volume_liveness: Default::default(),
             screen_active: false,
+            sim_live: true,
             caustics_bg_key: None,
             caustics_bg: None,
             render_bg: None,

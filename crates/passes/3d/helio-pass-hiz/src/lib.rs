@@ -722,7 +722,14 @@ impl RenderPass for HiZBuildPass {
         };
         let encoder = unsafe { &mut *ctx.encoder_ptr };
 
-        if self.depth_copy_supported {
+        // The min pyramid is optional: only SSR and WaterSim's reflections
+        // read it, and they declare that before the frame executes. The depth
+        // copy feeds both pyramids, so it is needed only when one of them is
+        // rebuilt this frame.
+        let min_wanted = helio_core::is_demanded(ctx.registry, "hiz_min");
+        let max_rebuild = self.first_frame || ctx.camera_generation != self.prev_camera_generation;
+
+        if self.depth_copy_supported && (min_wanted || max_rebuild) {
             let depth_texture = ctx
                 .registry
                 .get::<&wgpu::Texture>(helio_core::ResourceKey::new("depth_texture"))
@@ -740,20 +747,22 @@ impl RenderPass for HiZBuildPass {
                 },
                 copy_extent,
             );
-            encoder.copy_buffer_to_texture(
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &self.depth_copy_buffer,
-                    layout: copy_layout,
-                },
-                wgpu::TexelCopyTextureInfo {
-                    texture: hiz_min_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                copy_extent,
-            );
-        } else {
+            if min_wanted {
+                encoder.copy_buffer_to_texture(
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &self.depth_copy_buffer,
+                        layout: copy_layout,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: hiz_min_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    copy_extent,
+                );
+            }
+        } else if !self.depth_copy_supported {
             if self.fallback_bind_group.is_none() {
                 self.fallback_bind_group =
                     Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -793,13 +802,14 @@ impl RenderPass for HiZBuildPass {
         // reflects the *current* frame, and a static camera does not imply static
         // depth — anything that moves while the camera holds still would otherwise
         // reflect a frozen pyramid.
-        self.build_min_pyramid(ctx);
+        if min_wanted {
+            self.build_min_pyramid(ctx);
+        }
 
         // ── HiZ Reuse optimization: skip rebuild if camera static ─────────────
         let camera_gen = ctx.camera_generation;
-        let resolution_changed = false;
 
-        if !self.first_frame && camera_gen == self.prev_camera_generation && !resolution_changed {
+        if !max_rebuild {
             return Ok(());
         }
 

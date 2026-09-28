@@ -65,6 +65,10 @@ pub struct DeferredLightPass {
     reflection_debug_pipeline: wgpu::RenderPipeline,
     globals_buf: wgpu::Buffer,
     shadow_config_buf: wgpu::Buffer,
+    bgl_0: wgpu::BindGroupLayout,
+    fallback_shadow_caster_counts: wgpu::Buffer,
+    /// `(camera, shadow caster counts)` `bind_group_0` was built against.
+    bind_group_0_key: Option<(wgpu::Buffer, wgpu::Buffer)>,
     bgl_1: wgpu::BindGroupLayout,
     bgl_2: wgpu::BindGroupLayout,
     bgl_3: wgpu::BindGroupLayout,
@@ -210,8 +214,33 @@ impl DeferredLightPass {
                     },
                     count: None,
                 },
+                // Per-atlas shadow-caster counts (see `shadow_caster_counts`).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(16),
+                    },
+                    count: None,
+                },
             ],
         });
+        // Bound until ObjectBatch publishes its counts: claims casters in
+        // both atlases, so both are sampled, as before the counts existed.
+        let fallback_shadow_caster_counts = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("DeferredLight Shadow Caster Counts Fallback"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: true,
+        });
+        fallback_shadow_caster_counts
+            .slice(..)
+            .get_mapped_range_mut()
+            .expect("mapped at creation")
+            .copy_from_slice(bytemuck::cast_slice(&[1u32, 1, 1, 0]));
+        fallback_shadow_caster_counts.unmap();
         let bgl_1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("DeferredLight BGL1"),
             entries: &[
@@ -424,6 +453,10 @@ impl DeferredLightPass {
                 wgpu::BindGroupEntry {
                     binding: 7,
                     resource: shadow_config_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: fallback_shadow_caster_counts.as_entire_binding(),
                 },
             ],
         });
@@ -809,6 +842,9 @@ impl DeferredLightPass {
             reflection_debug_pipeline,
             globals_buf,
             shadow_config_buf,
+            bgl_0,
+            fallback_shadow_caster_counts,
+            bind_group_0_key: None,
             bgl_1,
             bgl_2,
             bgl_3,
@@ -891,6 +927,7 @@ impl RenderPass for DeferredLightPass {
             "static_shadow_atlas",
             "shadow_sampler",
             "shadow_transmittance",
+            "shadow_caster_counts",
             "ssao",
             "sky_lut",
             "tile_light_lists",
@@ -1329,6 +1366,26 @@ impl RenderPass for DeferredLightPass {
                 ],
             }));
             self.bind_group_3_key = Some(tile_key);
+        }
+
+        // ── Bind group 0: camera, globals, shadow config, caster counts ──────
+        let caster_counts = ctx
+            .registry
+            .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("shadow_caster_counts"))
+            .unwrap_or(&self.fallback_shadow_caster_counts);
+        let key_0 = (ctx.camera.clone(), caster_counts.clone());
+        if self.bind_group_0_key.as_ref() != Some(&key_0) {
+            self.bind_group_0 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("DeferredLight BG0"),
+                layout: &self.bgl_0,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: ctx.camera.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.globals_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 7, resource: self.shadow_config_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 8, resource: caster_counts.as_entire_binding() },
+                ],
+            });
+            self.bind_group_0_key = Some(key_0);
         }
 
         let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
