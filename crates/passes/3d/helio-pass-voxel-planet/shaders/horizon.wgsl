@@ -1,5 +1,8 @@
 // Directional sky bound for rays that start at the eye.
 //
+// On a plane the same construction uses horizontal distance from the eye in
+// place of angular distance (metres instead of radians).
+//
 // Every point of a ray from the eye lies in one plane through the planet
 // centre, so seen from the eye it keeps a single azimuth, and its angular
 // distance from the eye grows monotonically. Each frame the resident
@@ -53,6 +56,7 @@ fn angle_between(a: vec3<f32>, b: vec3<f32>) -> f32 {
 }
 
 fn phi0() -> f32 {
+    if is_plane() { return frame.lod.x * 0.5; }
     return frame.lod.x / frame.eye.w * 0.5;
 }
 
@@ -95,6 +99,10 @@ fn horizon_blocks(@builtin(global_invocation_id) id: vec3<u32>) {
     let bi = e.x;
     let bj = e.y;
     let top = e.z << level;
+    if is_plane() {
+        plane_block(e, level);
+        return;
+    }
     // Base index footprint of the block (32 level cells per side).
     let span = f32(32 << level);
     let i0 = f32(bi) * span;
@@ -154,6 +162,64 @@ fn horizon_blocks(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 }
 
+// Record a plane summary block: horizontal distance range and azimuth span
+// of its footprint around the eye.
+fn plane_block(e: vec4<i32>, level: u32) {
+    let f = frame.faces[PLANE_FACE];
+    let span = f32(32 << level);
+    // Block centre relative to the eye, in metres along the face axes.
+    let du = (f32(e.x * (32 << level) - f.index.x) - f.q_a.w + span * 0.5) * frame.layer.z;
+    let dv = (f32(e.y * (32 << level) - f.index.y) - f.q_b.w + span * 0.5) * frame.layer.z;
+    let w = f.m_a.xyz * du + f.m_b.xyz * dv;
+    let theta = length(vec2<f32>(du, dv));
+    let rho = span * frame.layer.z * 0.7072 + 1e-3;
+    let reach = theta + rho;
+    let ring = frame.ring[level >> 2u][level & 3u];
+    if reach < ring { return; }
+    let b_lo = phi_bucket(max(theta - rho, ring) * 0.999 - 1e-3);
+    let b_hi = phi_bucket(reach * 1.001);
+    var lo = 0;
+    var count = i32(SECTORS);
+    if theta > rho * 1.0001 {
+        let half = asin(min(rho / theta, 1.0));
+        if half < 1.2 {
+            let t1 = eye_t1();
+            let t2 = cross(frame.eye.xyz, t1);
+            let wdth = i32(ceil(half * f32(SECTORS) / TAU)) + 1;
+            lo = sector_of(atan2(dot(w, t2), dot(w, t1))) - wdth;
+            count = min(2 * wdth + 1, i32(SECTORS));
+        }
+    }
+    record_block(e.z << level, lo, count, b_lo, b_hi);
+}
+
+// Accumulate a block's top into its sectors (or sector groups) and buckets.
+fn record_block(top: i32, lo_in: i32, count_in: i32, b_lo: u32, b_hi: u32) {
+    var lo = lo_in;
+    var count = count_in;
+    var base = 0u;
+    var stride = SECTORS;
+    var modulus = i32(SECTORS);
+    if count > 2 * GROUP_SECTORS {
+        let first = (lo + i32(SECTORS) * 2) / GROUP_SECTORS;
+        let last = (lo + count - 1 + i32(SECTORS) * 2) / GROUP_SECTORS;
+        lo = first;
+        count = min(last - first + 1, i32(GROUPS));
+        base = SECTORS * BUCKETS;
+        stride = GROUPS;
+        modulus = i32(GROUPS);
+    }
+    for (var s = 0; s < count; s++) {
+        let cell = u32((lo + s + modulus * 4) % modulus);
+        for (var b = b_lo; b <= b_hi; b++) {
+            let at = base + b * stride + cell;
+            if atomicLoad(&horizon_acc[at]) < top {
+                atomicMax(&horizon_acc[at], top);
+            }
+        }
+    }
+}
+
 // Lowest eye-ray elevation whose every point in angular distances [pa, pb]
 // is higher than `top` (and the cut height). Passing above height H at
 // angle phi needs tan e > (k cos phi - 1) / (k sin phi), k = 1 + H / rho;
@@ -161,6 +227,18 @@ fn horizon_blocks(@builtin(global_invocation_id) id: vec3<u32>) {
 // bucket is at pa, or at acos k when the top is below the eye.
 fn clearing_elevation(top: i32, b: u32) -> f32 {
     let h = max(layer_height(top), frame.lod.z);
+    if is_plane() {
+        // A ray at elevation e is tan(e) d above the eye at distance d: it
+        // must clear h at the bucket's near edge (h above the eye) or its
+        // far edge (h below).
+        let pa = bucket_start(b);
+        if h >= 0.0 {
+            if pa <= 0.0 { return 1.5707964; }
+            return atan2(h, pa) + 2e-6;
+        }
+        if b + 1u >= BUCKETS { return 2e-6; }
+        return atan2(h, bucket_start(b + 1u)) + 2e-6;
+    }
     let rho = frame.eye.w;
     let k = 1.0 + h / rho;
     let pa = bucket_start(b);
@@ -240,6 +318,11 @@ fn eye_sky(l: vec3<f32>, spread: f32) -> SkyRay {
 // Distance along an eye ray of elevation e to angular distance phi (3e38
 // beyond the ray's reach).
 fn eye_ray_distance(e: f32, phi: f32) -> f32 {
+    if is_plane() {
+        let c = cos(e);
+        if c <= 1e-6 { return 3.0e38; }
+        return phi / c;
+    }
     let c = cos(e + phi);
     if c <= 1e-6 { return 3.0e38; }
     return frame.eye.w * sin(phi) / c;

@@ -757,16 +757,25 @@ impl PlanetRenderer {
             .fallback_distances(eye)
             .iter()
             .map(|distance| {
+                if grid.is_plane() {
+                    // A point that far away horizontally is at least that far.
+                    return *distance;
+                }
                 let a = distance / grid.radius();
                 if a >= std::f64::consts::PI { f64::INFINITY } else { 2.0 * (rho * r_lo).sqrt() * (a * 0.5).sin() }
             })
             .collect();
-        // The directional sky bound is built for planets (see `horizon.wgsl`).
-        let rings = if grid.is_plane() { Vec::new() } else { sky_rings(lod0, f64::from(self.settings.lod_dither), rho, r_lo, planet.outer_radius(), &fallback) };
+        let rings = if grid.is_plane() {
+            // Points in [eye - cut, outer] differ in height by at most dz.
+            let dz = cut.max(planet.outer_radius() - rho);
+            plane_sky_rings(lod0, f64::from(self.settings.lod_dither), dz, &fallback)
+        } else {
+            sky_rings(lod0, f64::from(self.settings.lod_dither), rho, r_lo, planet.outer_radius(), &fallback)
+        };
         for (level, phi) in rings.iter().enumerate().take(32) {
             frame.ring[level / 4][level % 4] = *phi as f32;
         }
-        let flags = u32::from(self.settings.horizon && !grid.is_plane()) << 1;
+        let flags = u32::from(self.settings.horizon) << 1;
         let index = self.settings.frame_override.unwrap_or(self.frame_index % 1024);
         frame.screen = [size[0] as f32, size[1] as f32, index as f32, flags as f32];
         let sun = sun.normalize_or_zero();
@@ -1063,11 +1072,9 @@ impl PlanetRenderer {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_bind_group(0, &trace_group, &[]);
             pass.set_bind_group(1, camera_group, &[]);
-            if !self.planet.grid().is_plane() {
-                Self::dispatch(&mut pass, &self.pipelines.horizon_clear, [((HORIZON_SECTORS + HORIZON_GROUPS) * HORIZON_BUCKETS).div_ceil(64), 1, 1]);
-                Self::dispatch(&mut pass, &self.pipelines.horizon_blocks, [live_blocks.div_ceil(64), 1, 1]);
-                Self::dispatch(&mut pass, &self.pipelines.horizon_suffix, [1, 1, 1]);
-            }
+            Self::dispatch(&mut pass, &self.pipelines.horizon_clear, [((HORIZON_SECTORS + HORIZON_GROUPS) * HORIZON_BUCKETS).div_ceil(64), 1, 1]);
+            Self::dispatch(&mut pass, &self.pipelines.horizon_blocks, [live_blocks.div_ceil(64), 1, 1]);
+            Self::dispatch(&mut pass, &self.pipelines.horizon_suffix, [1, 1, 1]);
         }
         if let Some(p) = &mut self.profiler {
             p.end_pass(encoder, "planet_horizon");
@@ -1170,14 +1177,34 @@ impl PlanetRenderer {
 /// that way only where L - 1 is in use and may be missing (beyond both
 /// L - 1's first use and its fallback distance).
 fn sky_rings(lod0: f64, dither: f64, rho: f64, r_lo: f64, r_hi: f64, fallback: &[f64]) -> Vec<f64> {
-    let start = |level: usize| {
-        if level == 0 { 0.0 } else { lod0 * f64::from(1u32 << (level - 1).min(30)) / (1.0 + dither * 0.5) * 0.999 }
-    };
     // Angular distance where a point at radius r is exactly t away (0 when a
     // point straight above or below the eye already is).
     let phi = |t: f64, r: f64| {
         let q = (t * t - (rho - r) * (rho - r)) / (4.0 * rho * r);
         if q <= 0.0 { 0.0 } else { 2.0 * q.sqrt().min(1.0).asin() }
+    };
+    rings(lod0, dither, fallback, |t| {
+        let mut p = phi(t, r_lo).min(phi(t, r_hi));
+        let r_star = (rho * rho - t * t).max(0.0).sqrt();
+        if r_star > r_lo && r_star < r_hi {
+            p = p.min(phi(t, r_star));
+        }
+        p
+    })
+}
+
+/// [`sky_rings`] on a plane: horizontal distances (metres) for points whose
+/// height differs from the eye's by at most `dz`.
+fn plane_sky_rings(lod0: f64, dither: f64, dz: f64, fallback: &[f64]) -> Vec<f64> {
+    rings(lod0, dither, fallback, |t| (t * t - dz * dz).max(0.0).sqrt())
+}
+
+/// Per level: the nearest ray distance `t` the level can serve (its dithered
+/// ring start, or where the finer level may fall back), mapped by `ground`
+/// to the ground distance within which no point can be that far away.
+fn rings(lod0: f64, dither: f64, fallback: &[f64], ground: impl Fn(f64) -> f64) -> Vec<f64> {
+    let start = |level: usize| {
+        if level == 0 { 0.0 } else { lod0 * f64::from(1u32 << (level - 1).min(30)) / (1.0 + dither * 0.5) * 0.999 }
     };
     let mut finer: Option<(f64, f64)> = None;
     fallback
@@ -1189,12 +1216,7 @@ fn sky_rings(lod0: f64, dither: f64, rho: f64, r_lo: f64, r_hi: f64, fallback: &
                 Some((used, missing)) => start(level).min(used.max(missing)),
             };
             finer = Some((t, *from));
-            let mut p = phi(t, r_lo).min(phi(t, r_hi));
-            let r_star = (rho * rho - t * t).max(0.0).sqrt();
-            if r_star > r_lo && r_star < r_hi {
-                p = p.min(phi(t, r_star));
-            }
-            p * 0.999
+            ground(t) * 0.999
         })
         .collect()
 }

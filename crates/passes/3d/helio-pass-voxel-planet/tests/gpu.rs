@@ -215,6 +215,51 @@ fn ground_view_near_a_far_face_edge_matches_cpu_ray_casts() {
     assert!(mismatched * 1000 <= compared, "{mismatched}/{compared}");
 }
 
+/// The plane sky bound (horizontal distances) only ends rays that provably
+/// miss: renders with and without it show the same surfaces, from the
+/// ground, low flight and altitude, looking level, up and down.
+#[test]
+fn plane_sky_bound_is_conservative() {
+    let Some(gpu) = gpu() else { return };
+    for shape in [helio_pass_voxel_planet::grid::Shape::Plane, helio_pass_voxel_planet::grid::Shape::InfinitePlane] {
+        let planet = Arc::new(Planet::new(PlanetRecipe { shape, plane_size_m: 3_000.0, ..Default::default() }).unwrap());
+        let mut saved_total = 0i64;
+        for (x, z, height, pitch) in [(12.3, -45.6, 1.7, 0.02), (200.0, 100.0, 1.7, 0.3), (-400.0, 300.0, 40.0, -0.1), (100.0, -700.0, 600.0, -0.4), (0.0, 0.0, 3_000.0, -0.2)] {
+            let eye = planet.surface_point(DVec3::new(x, 0.0, z), height);
+            let forward = Vec3::new(0.6, pitch, -0.8).normalize();
+            let size = [320, 180];
+            let target = Target::new(&gpu, size);
+            let mut r = renderer(&gpu, planet.clone(), size);
+            let f = frame(&planet, eye);
+            settle(&gpu, &target, &mut r, &f, forward);
+            r.settings_mut().lod_dither = 0.0;
+            r.settings_mut().freeze_residency = true;
+            r.settings_mut().horizon = false;
+            target.render(&gpu, &mut r, &f, forward, 5000);
+            let reference = hits(&gpu, &r);
+            r.settings_mut().horizon = true;
+            target.render(&gpu, &mut r, &f, forward, 5000);
+            let bounded = hits(&gpu, &r);
+            let voxel = planet.grid().voxel_size() as f32;
+            let camera = target.camera(forward, Vec3::Y);
+            let mut bad = 0;
+            for (index, (a, b)) in reference.iter().zip(&bounded).enumerate() {
+                saved_total += i64::from(a.steps) - i64::from(b.steps);
+                let rise = pixel_dir(&target, &camera, index as u32 % 320, index as u32 / 320).y.abs() as f32;
+                if !skipped_nothing(a, b, rise, voxel) {
+                    bad += 1;
+                    if bad < 6 {
+                        eprintln!("{shape:?} height {height} pixel {} {}: plain {a:?} bounded {b:?}", index % 320, index / 320);
+                    }
+                }
+            }
+            assert_eq!(bad, 0, "{shape:?} at {height} m");
+        }
+        eprintln!("{shape:?}: sky bound saved {saved_total} steps");
+        assert!(saved_total > 0);
+    }
+}
+
 /// Finite and infinite planes: ground and elevated views match exact CPU
 /// ray casts and settle without exhausted or loading rays.
 #[test]
