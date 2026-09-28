@@ -90,11 +90,11 @@ fn horizon_blocks(@builtin(global_invocation_id) id: vec3<u32>) {
     let region = entry / frame.extra.y;
     let level = region / 6u;
     let face = region % 6u;
-    let slot = entry * 4u;
-    if block_state[slot + 3u] <= 0 { return; }
-    let bi = block_state[slot];
-    let bj = block_state[slot + 1u];
-    let top = block_state[slot + 2u] << level;
+    let e = block_state[entry];
+    if e.w <= 0 { return; }
+    let bi = e.x;
+    let bj = e.y;
+    let top = e.z << level;
     // Base index footprint of the block (32 level cells per side).
     let span = f32(32 << level);
     let i0 = f32(bi) * span;

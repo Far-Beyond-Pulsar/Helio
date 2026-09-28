@@ -60,7 +60,7 @@ const MAX_PROBES: u32 = 64u;
 @group(0) @binding(14) var<storage, ACCESS> level_tops: array<LEVEL_TOP>;
 // Direct-mapped summary blocks, 4 words per entry: [bi, bj, max occupied top
 // (level cells), published columns].
-@group(0) @binding(15) var<storage, ACCESS> block_state: array<LEVEL_TOP>;
+@group(0) @binding(15) var<storage, ACCESS> block_state: array<BLOCK_ENTRY>;
 
 fn column_key0(face: u32, level: u32, ci: i32) -> u32 {
     return (bitcast<u32>(ci) & 0xffffffu) | (face << 24u) | (level << 27u);

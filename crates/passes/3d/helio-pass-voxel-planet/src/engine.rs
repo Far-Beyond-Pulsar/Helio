@@ -154,8 +154,15 @@ fn uniform(binding: u32) -> wgpu::BindGroupLayoutEntry {
 fn source(access: &str, parts: &[&str]) -> String {
     let mut s = String::from(include_str!("../shaders/field.wgsl"));
     // Generation updates the summaries atomically; traversal reads plain values.
-    let level_top = if parts.iter().any(|p| p.contains("fn level_suffix")) { "atomic<i32>" } else { "i32" };
-    s.push_str(&include_str!("../shaders/common.wgsl").replace("ACCESS", access).replace("LEVEL_TOP", level_top));
+    // Traversal reads a summary block entry as one vector load.
+    let generation = parts.iter().any(|p| p.contains("fn level_suffix"));
+    let (level_top, block_entry) = if generation { ("atomic<i32>", "atomic<i32>") } else { ("i32", "vec4<i32>") };
+    s.push_str(
+        &include_str!("../shaders/common.wgsl")
+            .replace("ACCESS", access)
+            .replace("LEVEL_TOP", level_top)
+            .replace("BLOCK_ENTRY", block_entry),
+    );
     for part in parts {
         s.push_str(&part.replace("ACCESS", access));
     }

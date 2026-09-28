@@ -244,6 +244,23 @@ fn cross_face(r: Ray, cur_in: Cursor, t: f32) -> Cursor {
     return c;
 }
 
+// Largest complete summary block (64/16/4 columns) containing level column
+// (ci, cj) whose maximum top lies at or below layer k: (tier, block i,
+// block j, top), tier 0 if none. All three loads issue before any test. A
+// complete block is fully resident and empty above its top.
+fn summary_block(level: u32, face: u32, ci: i32, cj: i32, k: i32) -> vec4<i32> {
+    let b3 = vec2<i32>(ci >> 6u, cj >> 6u);
+    let b2 = vec2<i32>(ci >> 4u, cj >> 4u);
+    let b1 = vec2<i32>(ci >> 2u, cj >> 2u);
+    let e3 = block_state[block_slot(level, face, 3u, b3.x, b3.y)];
+    let e2 = block_state[block_slot(level, face, 2u, b2.x, b2.y)];
+    let e1 = block_state[block_slot(level, face, 1u, b1.x, b1.y)];
+    if all(e3.xy == b3) && e3.w == 4096 && k >= e3.z { return vec4<i32>(3, b3, e3.z); }
+    if all(e2.xy == b2) && e2.w == 256 && k >= e2.z { return vec4<i32>(2, b2, e2.z); }
+    if all(e1.xy == b1) && e1.w == 16 && k >= e1.z { return vec4<i32>(1, b1, e1.z); }
+    return vec4<i32>(0);
+}
+
 // Walk the ray from t_start to t_end. Level selection uses
 // `(t + lod_offset) * lod_scale` (dither for primary rays, eye distance for
 // secondary rays).
@@ -252,7 +269,9 @@ fn cross_face(r: Ray, cur_in: Cursor, t: f32) -> Cursor {
 // box in index space (a complete 64/16/4-column summary block or a column
 // above its band, or an air brick) and exits it with one generic boundary
 // computation. This keeps the SIMD lanes of a warp on the same code path.
-// Only mixed bricks run an exact inner cell DDA.
+// Only mixed bricks run an exact inner cell DDA. Entering a new column, the
+// directly addressed summary blocks are tested before the column record is
+// looked up: a skip needs no hash lookup at all.
 fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dither: f32) -> Hit {
     var t = t_start;
     let outer = frame.layer.w;
@@ -299,6 +318,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
             continue;
         }
         let key = vec4<i32>(cur.i >> 3u, cur.j >> 3u, i32(cur.face), i32(cur.level));
+        var skip = vec4<i32>(0);
         if any(key != loaded) {
             // Column-coherent stochastic LOD transition (TAA resolves it);
             // neighbouring rays in one column agree, so warps stay coherent.
@@ -312,11 +332,21 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 cur.level = want;
             } else if want < cur.level {
                 let finer = locate(r, fr, t, want);
-                let found = find_column(column_key0(finer.face, want, finer.i >> 3u), bitcast<u32>(finer.j >> 3u));
-                if found != NONE && column_valid(records[found]) {
+                // A complete tier-1 block proves the finer column resident.
+                let fb = vec2<i32>(finer.i >> 5u, finer.j >> 5u);
+                let fe = block_state[block_slot(want, finer.face, 1u, fb.x, fb.y)];
+                if all(fe.xy == fb) && fe.w == 16 {
                     cur = finer;
+                } else {
+                    let found = find_column(column_key0(finer.face, want, finer.i >> 3u), bitcast<u32>(finer.j >> 3u));
+                    if found != NONE && column_valid(records[found]) {
+                        cur = finer;
+                    }
                 }
             }
+            skip = summary_block(cur.level, cur.face, cur.i >> 3u, cur.j >> 3u, cur.k);
+        }
+        if skip.x == 0 && any(vec4<i32>(cur.i >> 3u, cur.j >> 3u, i32(cur.face), i32(cur.level)) != loaded) {
             loop {
                 work_lookups += 1u;
                 record = find_column(column_key0(cur.face, cur.level, cur.i >> 3u), bitcast<u32>(cur.j >> 3u));
@@ -337,37 +367,35 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
         let lv = cur.level;
         let ci = cur.i >> 3u;
         let cj = cur.j >> 3u;
-        let top_cell = column_top_cell(col);
-        let bottom_cell = col.k_lo * 8;
-        if cur.k < bottom_cell {
-            return make_hit(ST_HIT, t, cur, normal, record);
-        }
         // Empty box around the cursor: [i0, i1) x [j0, j1) x [k0, k1).
         var i0 = ci * 8;
         var j0 = cj * 8;
         var span = 8;
-        var k0 = top_cell;
+        var k0 = 0;
         var k1 = 0x3fffffff >> lv;
-        if cur.k >= top_cell {
-            // Above the band: sky exit, then the largest complete summary
-            // block whose maximum is below the cursor layer.
-            // Later columns may dither to a finer level than this one.
+        var above = skip.x > 0;
+        if !above {
+            k0 = column_top_cell(col);
+            if cur.k < col.k_lo * 8 {
+                return make_hit(ST_HIT, t, cur, normal, record);
+            }
+            above = cur.k >= k0;
+            if above {
+                skip = summary_block(lv, cur.face, ci, cj, cur.k);
+            }
+        }
+        if above {
+            // Above every occupied cell here: sky exit (later columns may
+            // dither to a finer level than this one), then the summary block.
             if r.b + t > 0.0 && height_rel(r, t) > layer_height(sky_layer(min(lv, level_for((t + lod_offset) * lod_scale * (1.0 - 0.5 * dither))))) {
                 return make_hit(ST_MISS, t, cur, normal, NONE);
             }
-            for (var tier = 3u; tier >= 1u; tier--) {
-                let bi = ci >> (2u * tier);
-                let bj = cj >> (2u * tier);
-                let slot = block_slot(lv, cur.face, tier, bi, bj) * 4u;
-                if block_state[slot] == bi && block_state[slot + 1u] == bj
-                    && block_state[slot + 3u] == (1 << (4u * tier)) && cur.k >= block_state[slot + 2u] {
-                    span = 8 << (2u * tier);
-                    i0 = bi * span;
-                    j0 = bj * span;
-                    k0 = block_state[slot + 2u];
-                    work_skips += 1u;
-                    break;
-                }
+            if skip.x > 0 {
+                span = 8 << (2u * u32(skip.x));
+                i0 = skip.y * span;
+                j0 = skip.z * span;
+                k0 = skip.w;
+                work_skips += 1u;
             }
         } else {
             let kb = (cur.k >> 3u) - col.k_lo;
