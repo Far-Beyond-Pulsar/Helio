@@ -2,8 +2,8 @@
 
 Measured optimizations to the default deferred graph, focused on how cost
 scales from 1080p to 4K. Every change was compared frame by frame against the
-build before it; all but one are bit-identical, and the one that is not is
-explained below.
+build before it. Nearly all are bit-identical; the few that change pixels are
+called out in their sections (§3, §14 and §15).
 
 ## How to reproduce
 
@@ -55,6 +55,10 @@ one the editor actually runs.
 - Frame totals on lavapipe vary by about ±10% between runs, so per-pass
   timings are the reliable signal for a single change. Timings are medians of
   5–7 measured frames after 10 warm-up frames.
+- `render()` CPU time depends on process order: the second of two
+  back-to-back runs measured up to ≈1 ms slower regardless of build, and
+  swapping the order removed the difference. Check a CPU change by running
+  both orders.
 - Profiling is compiled in by default (helio-core's `profiling` feature), and
   it disables render-pass chain fusion. Both builds measured here have it on,
   so the comparison is like for like.
@@ -448,6 +452,50 @@ nothing changes, because the compute is skipped (§13).
 |---|---:|---:|---:|
 | fog_hall | 119.0 → 73.3 (-38%) | 186.9 → 124.0 (-34%) | 433.7 → 281.7 (-35%) |
 | sky | 115.1 → 74.9 (-35%) | 189.8 → 131.1 (-31%) | 457.7 → 272.0 (-41%) |
+
+### Round 2 cumulative result
+
+`main` (round 1, f67bb2e) against this branch, with DOF and bloom off (the
+defaults), so the round-2 changes that alter pixels are not exercised. Medians
+of 7 frames after 10 warm-up frames. Frame diff: bit-identical in all 18 runs.
+
+**Demo column setup**
+
+| scene | output | GPU before | GPU after | Δ | CPU before | CPU after | Δ |
+|---|---|---:|---:|---:|---:|---:|---:|
+| fog_hall | 1080p | 401 ms | 343 ms | -15% | 3.16 ms | 2.74 ms | -13% |
+| fog_hall | 1440p | 520 ms | 468 ms | -10% | 3.21 ms | 2.69 ms | -16% |
+| fog_hall | 4K | 956 ms | 817 ms | -15% | 2.95 ms | 3.00 ms | +2% |
+| cathedral_large | 1080p | 289 ms | 260 ms | -10% | 3.82 ms | 3.61 ms | -5% |
+| cathedral_large | 1440p | 390 ms | 367 ms | -6% | 2.54 ms | 2.38 ms | -6% |
+| cathedral_large | 4K | 769 ms | 679 ms | -12% | 2.77 ms | 3.91 ms | +41% |
+| sky | 1080p | 135 ms | 113 ms | -16% | 2.98 ms | 2.92 ms | -2% |
+| sky | 1440p | 211 ms | 186 ms | -12% | 2.96 ms | 3.09 ms | +5% |
+| sky | 4K | 453 ms | 365 ms | -19% | 3.64 ms | 3.42 ms | -6% |
+
+4K ÷ 1080p frame-time ratio: fog_hall 2.38× → 2.38×, cathedral_large 2.66× → 2.61×, sky 3.36× → 3.22×
+
+**Editor column setup (`--pulsar-columns`)**
+
+| scene | output | GPU before | GPU after | Δ | CPU before | CPU after | Δ |
+|---|---|---:|---:|---:|---:|---:|---:|
+| fog_hall | 1080p | 469 ms | 355 ms | -24% | 5.48 ms | 2.14 ms | -61% |
+| fog_hall | 1440p | 606 ms | 468 ms | -23% | 5.36 ms | 2.89 ms | -46% |
+| fog_hall | 4K | 1043 ms | 859 ms | -18% | 5.64 ms | 2.82 ms | -50% |
+| cathedral_large | 1080p | 366 ms | 249 ms | -32% | 5.20 ms | 2.85 ms | -45% |
+| cathedral_large | 1440p | 526 ms | 366 ms | -30% | 5.53 ms | 3.49 ms | -37% |
+| cathedral_large | 4K | 840 ms | 734 ms | -13% | 4.57 ms | 3.26 ms | -29% |
+| sky | 1080p | 238 ms | 113 ms | -52% | 4.84 ms | 3.00 ms | -38% |
+| sky | 1440p | 302 ms | 176 ms | -42% | 5.16 ms | 3.22 ms | -38% |
+| sky | 4K | 551 ms | 369 ms | -33% | 5.34 ms | 3.36 ms | -37% |
+
+4K ÷ 1080p frame-time ratio: fog_hall 2.22× → 2.42×, cathedral_large 2.29× → 2.95×, sky 2.32× → 3.25×
+
+The editor setup's 4K ÷ 1080p ratio rises because the largest saving there,
+WaterSim's ≈90 ms simulation, was a fixed cost at every resolution. Render CPU
+times are single runs and move by about ±1 ms with process order on lavapipe
+(see the measurement caveats), so only the editor-column drop, which comes
+from WaterSim no longer recording its simulation, is clearly real.
 
 ## Remaining bottlenecks and follow-ups
 
