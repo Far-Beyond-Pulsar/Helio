@@ -4,6 +4,7 @@
 //! snapshots of that store, but no GPU resource or render pass is owned here.
 
 mod bounded_inbox;
+mod brush;
 mod chunk_codec;
 mod data_api;
 mod edit_worker;
@@ -19,6 +20,7 @@ pub use bounded_inbox::{
     VoxelPublicationStatus, VoxelPublicationTicket, VoxelPublicationTicketState,
     VoxelPublicationWorker,
 };
+pub use brush::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape};
 pub use chunk_codec::{VoxelChunkCodecError, VoxelMaterialChunk};
 pub use data_api::{
     VoxelBatchReceipt, VoxelPayloadKey, VoxelPayloadStore, VoxelSourceWriter, VoxelStoredPayload,

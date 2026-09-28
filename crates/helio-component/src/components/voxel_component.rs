@@ -7,6 +7,7 @@
 
 use engine_class_derive::engine_class;
 use helio_voxel_data::{
+    VoxelBrushEdit,
     VoxelStoredPayload, VOXEL_BUILTIN_GENERATOR_VERSION, VOXEL_FLAT_GENERATOR,
 };
 pub use helio_voxel_data::{VoxelPayloadKey, VoxelPayloadStore};
@@ -210,11 +211,16 @@ fn default_plane_size() -> f64 {
     4_096.0
 }
 
-/// General-purpose voxel terrain authoring configuration.
+/// The base component of every voxel world, whatever generates it.
 ///
-/// The world's shape and size are authored here for every generator.
-/// `domain_mode` describes the chunk-key domain of live sample data.
-/// Generation behavior is identified by an opaque source ID and parameters.
+/// It owns what all terrains share: the world's shape and size, the voxel
+/// size, which registered generator fills it (with a seed), the material
+/// palette, editability, and the world's edits (an ordered brush journal
+/// plus per-sample payload chunks). A generator's own settings live in its
+/// settings component on the same entity (for example
+/// [`VoxelLandformComponent`] for the built-in planet generator), or in the
+/// opaque `generator_parameters` for generators without one. `domain_mode`
+/// describes the chunk-key domain of live sample data.
 #[engine_class(category = "Voxel/Terrain", debug, serialize, deserialize)]
 #[category("World", category_color = "#6FA86F")]
 #[category("Domain", category_color = "#8F8F8F")]
@@ -260,7 +266,7 @@ pub struct VoxelTerrainComponent {
     #[property(category = "Domain")]
     pub bounds_max_z: f64,
     /// Edge length of a base-resolution voxel in world units.
-    #[property(min = 0.0001, max = 10000.0, step = 0.01, category = "Generation")]
+    #[property(min = 0.0001, max = 10000.0, step = 0.01, category = "World")]
     pub voxel_size: f64,
     /// Number of base-resolution voxels covered by one chunk key on each
     /// axis at LOD zero. The payload format can encode that region as samples,
@@ -308,6 +314,11 @@ pub struct VoxelTerrainComponent {
     /// revision held with `payloads`. It is serialized with authored config
     /// but omitted from the property editor.
     pub source_revision: u64,
+    /// Ordered shape edits (destruction and construction), saved with the
+    /// level. Append through the sculpt tool or the scripting methods, which
+    /// also advance `source_revision`.
+    #[serde(default)]
+    pub edits: Vec<VoxelBrushEdit>,
 }
 
 impl Default for VoxelTerrainComponent {
@@ -337,6 +348,7 @@ impl Default for VoxelTerrainComponent {
             material_ids: vec![0],
             editable: true,
             source_revision: 0,
+            edits: Vec::new(),
         }
     }
 }
@@ -380,6 +392,68 @@ impl Clone for VoxelTerrainComponent {
             material_ids: self.material_ids.clone(),
             editable: self.editable,
             source_revision: self.source_revision,
+            edits: self.edits.clone(),
+        }
+    }
+}
+
+/// Landform settings of the built-in planet generator
+/// (`helio.voxel-planet.default`): the scale and height of continents,
+/// mountains and hills, surface roughness and the snowline. It configures
+/// the [`VoxelTerrainComponent`] on the same entity; the base component's
+/// seed varies the landform.
+#[engine_class(category = "Voxel/Terrain", clone, debug, serialize, deserialize)]
+#[category("Continents", category_color = "#6FA86F")]
+#[category("Mountains", category_color = "#9A8F84")]
+#[category("Detail", category_color = "#D1A73F")]
+#[serde(default)]
+pub struct VoxelLandformComponent {
+    /// Typical continent width in kilometres.
+    #[property(min = 10.0, max = 20000.0, step = 10.0, category = "Continents")]
+    pub continent_km: f64,
+    /// Depth of the low basins below the datum, in metres.
+    #[property(min = 0.0, max = 10000.0, step = 10.0, category = "Continents")]
+    pub ocean_depth_m: f64,
+    /// Typical lowland height above the datum, in metres.
+    #[property(min = 0.0, max = 5000.0, step = 10.0, category = "Continents")]
+    pub lowland_m: f64,
+    /// Height of mountain ranges, in metres.
+    #[property(min = 0.0, max = 9000.0, step = 10.0, category = "Mountains")]
+    pub mountain_m: f64,
+    /// Spacing of mountain ridges, in kilometres.
+    #[property(min = 1.0, max = 500.0, step = 1.0, category = "Mountains")]
+    pub mountain_km: f64,
+    /// Height above which flat ground is snow, in metres.
+    #[property(min = 0.0, max = 10000.0, step = 10.0, category = "Mountains")]
+    pub snowline_m: f64,
+    /// Height of rolling hills, in metres.
+    #[property(min = 0.0, max = 2000.0, step = 1.0, category = "Detail")]
+    pub hill_m: f64,
+    /// Spacing of hills, in kilometres.
+    #[property(min = 0.1, max = 100.0, step = 0.1, category = "Detail")]
+    pub hill_km: f64,
+    /// Metre-scale roughness as a fraction of each detail wavelength.
+    #[property(min = 0.0, max = 0.2, step = 0.005, category = "Detail")]
+    pub roughness: f64,
+    /// Scale of the domain warp that bends coasts and ridges, in kilometres.
+    #[property(min = 0.0, max = 500.0, step = 1.0, category = "Detail")]
+    pub warp_km: f64,
+}
+
+impl Default for VoxelLandformComponent {
+    /// The planet generator's own defaults (Earth-like).
+    fn default() -> Self {
+        Self {
+            continent_km: 3_000.0,
+            ocean_depth_m: 2_400.0,
+            lowland_m: 180.0,
+            mountain_m: 2_400.0,
+            mountain_km: 20.0,
+            snowline_m: 3_000.0,
+            hill_m: 140.0,
+            hill_km: 9.0,
+            roughness: 0.035,
+            warp_km: 40.0,
         }
     }
 }
