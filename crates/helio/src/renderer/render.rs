@@ -245,6 +245,7 @@ impl Renderer {
         multiview: bool,
     ) -> HelioResult<()> {
         helio_core::cpu_scope!("Helio::Renderer::submit_frame");
+        self.last_submission = None;
         #[cfg(not(target_arch = "wasm32"))]
         let depth: &wgpu::TextureView = if multiview {
             self.xr_depth_view.as_ref().ok_or_else(|| {
@@ -534,8 +535,12 @@ impl Renderer {
         };
         {
             helio_core::cpu_scope!("Helio: RenderGraph execute");
-            self.graph
-                .execute_with_registry(&scene_input, target, depth, &mut resource_registry)?;
+            self.last_submission = Some(self.graph.execute_with_registry(
+                &scene_input,
+                target,
+                depth,
+                &mut resource_registry,
+            )?);
         }
         drop(resource_registry);
         self.graph_time_ms = _graph_start.elapsed().as_secs_f64() as f32 * 1000.0;

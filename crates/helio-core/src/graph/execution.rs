@@ -1683,12 +1683,17 @@ impl RenderGraph {
             // `'a` (tied to `registry`) rather than the shorter, unrelated
             // lifetime a plain `self.pre_pass_actions.get(..)` borrow would carry.
             let pre_pass_actions_ptr: *const Vec<Vec<PrePassAction>> = &self.pre_pass_actions;
+            let pass_count = self.passes.len();
             for (pass_index, pass) in self.passes.iter_mut().enumerate() {
                 // A chain's passes share one render pass on the encoder, so
-                // they stay in one segment until it closes.
+                // they stay in one segment until it closes. The final pass
+                // always starts a segment of its own: the render thread
+                // finishes the last segment itself, so keep it small.
                 if chain_rp.is_none()
                     && (finish_breakdown
-                        || (pipelined && segment_recording >= finish_segment_budget))
+                        || (pipelined
+                            && (segment_recording >= finish_segment_budget
+                                || pass_index + 1 == pass_count)))
                 {
                     cut_segment!();
                 }
