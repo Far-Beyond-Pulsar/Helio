@@ -618,6 +618,8 @@ impl ApplicationHandler for App {
                         t.texture
                             .create_view(&wgpu::TextureViewDescriptor::default())
                     });
+                    // Upload this frame's SceneDB writes to the GPU mirror (Helio#266).
+                    v3_demo_common::flush_scene_db(&state.scene_db, state.renderer.queue());
                     if let Err(e) = state.renderer.render_xr(mirror_view.as_ref()) {
                         log::error!("[XR] render_xr error: {e:?}");
                     }
@@ -654,6 +656,8 @@ impl ApplicationHandler for App {
                 let view = output
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
+                // Upload this frame's SceneDB writes to the GPU mirror (Helio#266).
+                v3_demo_common::flush_scene_db(&state.scene_db, state.renderer.queue());
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("Render error: {e:?}");
                 }

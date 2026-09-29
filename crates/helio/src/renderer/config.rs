@@ -1,5 +1,6 @@
 use crate::material::MAX_TEXTURES;
 use helio_mats::BINDLESS_MATERIAL_FEATURES;
+pub use helio_pass_radiance_cascades::GiConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
@@ -174,43 +175,6 @@ pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
         // MiB — so lowering it costs nothing real.
         max_buffer_size: adapter_limits.max_buffer_size.min(u32::MAX as u64),
         ..adapter_limits
-    }
-}
-
-/// Global Illumination configuration (dual-tier: RC near, ambient far).
-#[derive(Debug, Clone, Copy)]
-pub struct GiConfig {
-    /// Radiance Cascades volume radius around camera (world units).
-    /// GI within this radius uses RC, outside uses cheap ambient fallback.
-    /// Default: 80.0 (near-field quality like Unreal Lumen).
-    pub rc_radius: f32,
-    /// Fade margin for smooth RC→ambient transition (world units).
-    /// Default: 20.0 (soft blend zone).
-    pub rc_fade_margin: f32,
-}
-
-impl Default for GiConfig {
-    fn default() -> Self {
-        Self {
-            rc_radius: 80.0,
-            rc_fade_margin: 20.0,
-        }
-    }
-}
-
-impl GiConfig {
-    pub fn ambient_only() -> Self {
-        Self {
-            rc_radius: 0.0,
-            rc_fade_margin: 0.0,
-        }
-    }
-
-    pub fn large_radius(radius: f32) -> Self {
-        Self {
-            rc_radius: radius,
-            rc_fade_margin: radius * 0.25,
-        }
     }
 }
 

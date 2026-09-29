@@ -618,6 +618,26 @@ impl RenderGraph {
         self.gpu_render_bundles.push(None);
     }
 
+    /// Append a pass to a graph that may already be locked, for passes that
+    /// only exist once something has happened at runtime (a finished bake).
+    /// A locked graph is relocked like [`Self::replace_pass_at`] does, so
+    /// the schedule and resource declarations include the new pass.
+    pub fn add_pass_live(&mut self, pass: Box<dyn RenderPass>) {
+        if !self.locked {
+            self.add_pass(pass);
+            return;
+        }
+        self.locked = false;
+        self.add_pass(pass);
+        self.gpu_render_bundles.clear();
+        self.pass_cache.clear();
+        if let Some(pass) = self.passes.last_mut() {
+            pass.on_resize(&self.device, self.output_w, self.output_h);
+        }
+        self.lock(self.output_w, self.output_h);
+        self.resize_pending = true;
+    }
+
     pub fn find_pass_mut<T: RenderPass + 'static>(&mut self) -> Option<&mut T> {
         let idx = *self.pass_index_map.get(&TypeId::of::<T>())?;
         self.passes[idx].as_any_mut().downcast_mut::<T>()

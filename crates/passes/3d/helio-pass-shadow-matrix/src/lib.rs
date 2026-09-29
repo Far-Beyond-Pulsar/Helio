@@ -260,6 +260,16 @@ impl ShadowMatrixPass {
         }
     }
 
+    /// Atlas faces this pass computes matrices for (its matrix buffer's size).
+    pub fn face_capacity(&self) -> u32 {
+        self.face_capacity
+    }
+
+    /// Resolution of one atlas face.
+    pub fn atlas_size(&self) -> u32 {
+        self.shadow_atlas_size
+    }
+
     /// Casters the atlas holds: six faces each, capped at what the lighting
     /// shaders address.
     pub fn caster_capacity(&self) -> u32 {

@@ -264,18 +264,12 @@ fn add_common_early_passes(
         cull_stats_buf.clone(),
     )));
     graph.add_pass(Box::new(hiz_pass));
-    let mut occlusion_cull =
+    let occlusion_cull =
         OcclusionCullPass::new(device, hiz_sampler, w, h, cull_stats_buf.clone());
-    if let Some(meta) = graph
-        .find_pass::<HiZBuildPass>()
-        .and_then(|p| p.static_hiz_metadata())
-    {
-        occlusion_cull.set_static_hiz_metadata(
-            meta.world_bounds_min,
-            meta.world_bounds_max,
-            meta.grid_resolution,
-        );
-    }
+    // NOTE: `HiZBuildPass` currently only builds the per-frame screen-space
+    // depth pyramid; it has no baked/static voxel-grid metadata to feed into
+    // `OcclusionCullPass::set_static_hiz_metadata`. Wire that up here once a
+    // static HiZ bake pass exists.
     graph.add_pass(Box::new(occlusion_cull));
 
     // Same phase as the frustum/occlusion cull above, not interleaved with

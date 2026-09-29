@@ -104,16 +104,12 @@ impl Renderer {
             helio_core::cpu_scope!("Helio: device.poll");
             let _ = self.device.poll(wgpu::PollType::Poll);
         }
-        // Browser WebGPU buffer mapping is asynchronous. Consume the previous
-        // frame's completed readback before recording a new copy.
-        {
-            helio_core::cpu_scope!("Helio: rebuild_graph_if_sky_changed");
-            self.rebuild_graph_if_sky_changed();
-        }
         {
             helio_core::cpu_scope!("Helio: apply_coordinate_spaces");
             self.apply_coordinate_spaces();
         }
+        // Browser WebGPU buffer mapping is asynchronous. Consume the previous
+        // frame's completed readback before recording a new copy.
         {
             helio_core::cpu_scope!("Helio: poll_cull_stats_readback");
             self.poll_cull_stats_readback();
@@ -159,11 +155,9 @@ impl Renderer {
                 }
             );
 
-            self.baked_data = Some(baked.clone());
-
-            // The baked atlas is injected as a frame resource. Persistent
-            // lightmap/component state remains owned by SceneDB.
-            let _ = baked.lightmap_atlas_regions();
+            // The graph owns the result (Helio#256): BakeInjectPass publishes
+            // the baked resources as frame inputs and survives graph rebuilds.
+            self.install_baked_data(baked);
         }
 
         let now = Instant::now();
@@ -277,66 +271,6 @@ impl Renderer {
         if let Ok(mut state) = self.debug_state.lock() {
             state.camera_position = camera.position;
         }
-        let rc_radius = self.gi_config.rc_radius;
-        let rc_min = [
-            camera.position.x - rc_radius,
-            camera.position.y - rc_radius,
-            camera.position.z - rc_radius,
-        ];
-        let rc_max = [
-            camera.position.x + rc_radius,
-            camera.position.y + rc_radius,
-            camera.position.z + rc_radius,
-        ];
-
-        #[cfg(feature = "bake")]
-        let baked_ao = self.baked_data.as_deref().and_then(|d| d.ao_view_ref());
-        #[cfg(not(feature = "bake"))]
-        let baked_ao: Option<&wgpu::TextureView> = None;
-        #[cfg(feature = "bake")]
-        let baked_ao_sampler = self.baked_data.as_deref().and_then(|d| d.ao_sampler_ref());
-        #[cfg(not(feature = "bake"))]
-        let baked_ao_sampler: Option<&wgpu::Sampler> = None;
-        #[cfg(feature = "bake")]
-        let baked_lightmap = self
-            .baked_data
-            .as_deref()
-            .and_then(|d| d.lightmap_view_ref());
-        #[cfg(not(feature = "bake"))]
-        let baked_lightmap: Option<&wgpu::TextureView> = None;
-        #[cfg(feature = "bake")]
-        let baked_lightmap_sampler = self
-            .baked_data
-            .as_deref()
-            .and_then(|d| d.lightmap_sampler_ref());
-        #[cfg(not(feature = "bake"))]
-        let baked_lightmap_sampler: Option<&wgpu::Sampler> = None;
-        #[cfg(feature = "bake")]
-        let baked_reflection = self
-            .baked_data
-            .as_deref()
-            .and_then(|d| d.reflection_view_ref());
-        #[cfg(not(feature = "bake"))]
-        let baked_reflection: Option<&wgpu::TextureView> = None;
-        #[cfg(feature = "bake")]
-        let baked_reflection_sampler = self
-            .baked_data
-            .as_deref()
-            .and_then(|d| d.reflection_sampler_ref());
-        #[cfg(not(feature = "bake"))]
-        let baked_reflection_sampler: Option<&wgpu::Sampler> = None;
-        #[cfg(feature = "bake")]
-        let baked_irradiance_sh = self
-            .baked_data
-            .as_deref()
-            .and_then(|d| d.irradiance_sh_buf_ref());
-        #[cfg(not(feature = "bake"))]
-        let baked_irradiance_sh: Option<&wgpu::Buffer> = None;
-        #[cfg(feature = "bake")]
-        let baked_pvs = self.baked_data.as_deref().and_then(|d| d.pvs_ref());
-        #[cfg(not(feature = "bake"))]
-        let baked_pvs: Option<helio_bake_types::BakedPvsRef<'_>> = None;
-
         // SceneDB owns texture residency. Retain descriptor views by GPU handle
         // identity, including slot replacement/removal; no duplicate uploads.
         let texture_store = self.scene_db.texture_store();
@@ -541,54 +475,6 @@ impl Renderer {
                 "Renderer",
             );
         }
-        if let Some(ao) = baked_ao {
-            resource_registry.write(helio_core::ResourceKey::new("baked_ao"), ao, "Renderer");
-        }
-        if let Some(ao_sampler) = baked_ao_sampler {
-            resource_registry.write(
-                helio_core::ResourceKey::new("baked_ao_sampler"),
-                ao_sampler,
-                "Renderer",
-            );
-        }
-        if let Some(lightmap) = baked_lightmap {
-            resource_registry.write(
-                helio_core::resource_keys::baked_lightmap(),
-                lightmap,
-                "Renderer",
-            );
-        }
-        if let Some(lightmap_sampler) = baked_lightmap_sampler {
-            resource_registry.write(
-                helio_core::ResourceKey::new("baked_lightmap_sampler"),
-                lightmap_sampler,
-                "Renderer",
-            );
-        }
-        if let Some(reflection) = baked_reflection {
-            resource_registry.write(
-                helio_core::ResourceKey::new("baked_reflection"),
-                reflection,
-                "Renderer",
-            );
-        }
-        if let Some(reflection_sampler) = baked_reflection_sampler {
-            resource_registry.write(
-                helio_core::ResourceKey::new("baked_reflection_sampler"),
-                reflection_sampler,
-                "Renderer",
-            );
-        }
-        if let Some(irradiance_sh) = baked_irradiance_sh {
-            resource_registry.write(
-                helio_core::ResourceKey::new("baked_irradiance_sh"),
-                irradiance_sh,
-                "Renderer",
-            );
-        }
-        if let Some(pvs) = baked_pvs {
-            resource_registry.write(helio_core::ResourceKey::new("baked_pvs"), pvs, "Renderer");
-        }
 
         // Target clear + cull-stats clear are batched into a single command
         // buffer/submit. Each `queue.submit()` is a real driver sync point
@@ -725,7 +611,6 @@ impl Renderer {
                 "HLFS RT stereo support is not implemented".into(),
             ));
         }
-        self.rebuild_graph_if_sky_changed();
         self.poll_cull_stats_readback();
 
         let now = Instant::now();

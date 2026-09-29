@@ -4,6 +4,30 @@ use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
+/// Radiance Cascades volume settings. The pass owns these because both the
+/// traced volume and its bounds are specific to this GI technique.
+#[derive(Debug, Clone, Copy)]
+pub struct GiConfig {
+    /// Half extent of the camera-centered volume in world units.
+    pub rc_radius: f32,
+    /// Fade margin used by consumers when blending to ambient GI.
+    pub rc_fade_margin: f32,
+}
+
+impl Default for GiConfig {
+    fn default() -> Self {
+        Self { rc_radius: 80.0, rc_fade_margin: 20.0 }
+    }
+}
+
+impl GiConfig {
+    pub fn ambient_only() -> Self { Self { rc_radius: 0.0, rc_fade_margin: 0.0 } }
+
+    pub fn large_radius(radius: f32) -> Self {
+        Self { rc_radius: radius, rc_fade_margin: radius * 0.25 }
+    }
+}
+
 /// Radiance-cascades GI volume extent (dual-tier GI: RC near, ambient far).
 ///
 /// Published by the `Renderer` under the well-known `"radiance_cascades_volume"`
@@ -56,6 +80,7 @@ struct RCStatic {
 }
 
 pub struct RadianceCascadesPass {
+    gi_config: GiConfig,
     /// Fallback pipeline (no RT).
     fb_pipeline: wgpu::ComputePipeline,
     /// RT pipeline (real rc_trace.wgsl).
@@ -423,6 +448,7 @@ impl RadianceCascadesPass {
         };
 
         Self {
+            gi_config: GiConfig::default(),
             fb_pipeline,
             rt_pipeline,
             fb_bgl,
@@ -433,6 +459,11 @@ impl RadianceCascadesPass {
             static_buf,
             use_rt,
         }
+    }
+
+    /// Configure the camera-centered RC volume.
+    pub fn set_gi_config(&mut self, config: GiConfig) {
+        self.gi_config = config;
     }
 }
 
@@ -488,9 +519,11 @@ impl RenderPass for RadianceCascadesPass {
             .get::<helio_pass_sky::SkyContext>(helio_core::ResourceKey::new("sky"))
             .map(|sky| sky.sky_color)
             .unwrap_or([0.0, 0.0, 0.0]);
+        let radius = self.gi_config.rc_radius.max(0.0);
+        let camera = ctx.camera_data.position_near;
         let dyn_data = RCDynamic {
-            world_min: [-10.0, -1.0, -10.0, 0.0],
-            world_max: [10.0, 10.0, 10.0, 0.0],
+            world_min: [camera[0] - radius, camera[1] - radius, camera[2] - radius, 0.0],
+            world_max: [camera[0] + radius, camera[1] + radius, camera[2] + radius, 0.0],
             frame: ctx.frame_num as u32,
             light_count,
             _pad0: 0,

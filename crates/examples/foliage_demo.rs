@@ -471,9 +471,8 @@ impl ApplicationHandler for App {
         #[cfg(target_arch = "wasm32")]
         let xr_active = false;
 
-        // Indoors, but the sky still drives ambient — and `SkyPass` is what establishes the
-        // colour target each frame, so its absence is what made geometry smear over itself.
-        // See `Renderer::rebuild_graph_if_sky_changed`.
+        // Indoors, but the sky still drives ambient. `SkyPass` is in every graph and reads
+        // this row from SceneDB each frame, so it can be spawned at any time.
         spawn_sky(&mut scene_db.world, [0.05, 0.07, 0.11]);
 
         // ── Ground ───────────────────────────────────────────────────────────
@@ -881,6 +880,9 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
+        // Upload this frame's SceneDB writes to the GPU mirror; without it they
+        // are never visible to the renderer (Helio#266).
+        v3_demo_common::flush_scene_db(&self.scene_db, self.renderer.queue());
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }
