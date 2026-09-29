@@ -458,3 +458,73 @@ fn source_history_follows_the_camera_instead_of_trailing() {
     // blend would sit between 8 and 12.
     assert!((mean[0] - 8.0).abs() < 0.6, "response trailed: centroid {mean:?}");
 }
+
+/// Sky-only depth (the far plane) of any size.
+fn far_depth(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("lens test far depth"),
+        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: None,
+        color_attachments: &[],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &view,
+            depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    queue.submit([encoder.finish()]);
+    view
+}
+
+#[test]
+fn sky_history_survives_a_far_plane_at_f32_infinity() {
+    // A planetary camera near the ground: near 5 cm, far 40 000 km. The ratio
+    // rounds far/(near - far) to -1, so the far plane unprojects to w = 0.
+    // Sky texels must still reproject as directions (not NaN, which the
+    // streaks then smear across whole rows).
+    let (device, queue, _serial) = gpu();
+    let depth = far_depth(&device, &queue);
+    let lens = uniforms(&device, LensFlareSettings { response_time: 0.06, ..isolated("glare") });
+    let input = image(&device, &queue, &[(64, 64, 2000.0)]);
+    let settle = |near: f32, far: f32| {
+        let projection = glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, 1.0, near, far);
+        // Off the origin, so a direction built from the wrong eye would show.
+        let eye = glam::Vec3::new(3.0, 4.0, 5.0);
+        let view = glam::Mat4::from_translation(-eye);
+        let data = helio_core::GpuCameraUniforms::new(
+            view, projection, eye, near, far, 0, [0.0; 2], projection * view,
+        );
+        let bytes = [bytemuck::bytes_of(&data), bytemuck::bytes_of(&data)].concat();
+        let camera = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None, contents: &bytes, usage: wgpu::BufferUsages::STORAGE,
+        });
+        let mut pass = LensFlarePass::new_hdr(&device, SIZE, SIZE);
+        queue.write_buffer(&pass.temporal_params, 0, bytemuck::cast_slice(&[1.0f32 / 60.0, 1.0, 0.0, 0.0]));
+        let mut response = Vec::new();
+        for _ in 0..30 {
+            let optics = OpticsInputs { camera: Some(&camera), depth: Some(&depth), ..Default::default() };
+            response = run_with(&device, &queue, &mut pass, Some(&input), Some(&lens), optics);
+        }
+        response
+    };
+    let projection = glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, 1.0, 0.05, 4.0e7);
+    assert_eq!(projection.z_axis.z, -1.0, "test camera no longer puts the far plane at f32 infinity");
+    let extreme = settle(0.05, 4.0e7);
+    assert!(extreme.iter().flatten().all(|v| v.is_finite()), "non-finite lens response");
+    let reference = settle(0.1, 100.0);
+    let (a, b) = (total(&extreme), total(&reference));
+    assert!(b > 0.0 && (a / b - 1.0).abs() < 0.01, "settled sky response {a} vs {b}");
+}
