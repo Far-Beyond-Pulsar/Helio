@@ -435,6 +435,15 @@ impl Planet {
         let top = self.column_top(cell.face, cell.i, cell.j, 0);
         (f64::from(cell.k - top) * self.grid.voxel_size()).max(0.0)
     }
+    /// Height of `eye` above the generated ground directly below it (its
+    /// column's top along the local vertical; edits are not considered).
+    /// Unlike [`Self::air_clearance`] this is not a bound on the distance to
+    /// all terrain: it is the altitude a camera or vehicle moves by.
+    pub fn ground_height(&self, eye: DVec3) -> f64 {
+        let (cell, _) = self.grid.locate(eye);
+        let top = self.column_top(cell.face, cell.i, cell.j, 0);
+        self.grid.height(eye) - f64::from(top) * self.grid.voxel_size()
+    }
 }
 
 #[cfg(test)]
@@ -444,6 +453,20 @@ mod tests {
 
     fn planet() -> Planet {
         Planet::new(PlanetRecipe::default()).unwrap()
+    }
+
+    #[test]
+    fn ground_height_is_altitude_above_the_column_below() {
+        let p = planet();
+        for dir in [DVec3::new(0.1, 1.0, 0.2), DVec3::new(0.9, 0.4, -0.3), DVec3::new(-0.2, -0.7, 0.8)] {
+            for h in [0.5, 12.0, 3000.0] {
+                let eye = p.surface_point(dir, h);
+                let measured = p.ground_height(eye);
+                assert!((measured - h).abs() <= p.grid().voxel_size() * 1.01, "{dir} {h}: {measured}");
+                // A conservative clearance never exceeds it.
+                assert!(p.air_clearance(eye) <= measured + p.grid().voxel_size());
+            }
+        }
     }
 
     #[test]

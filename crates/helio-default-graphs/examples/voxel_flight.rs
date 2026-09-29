@@ -756,6 +756,57 @@ fn main() {
         audits.push(flight.audit(name, ground, f));
     }
 
+    if std::env::var_os("HELIO_VOXEL_FLIGHT_EDITOR_PATH").is_some() {
+        // An editor-style descent: 10 m/s scaled by height/20 m, from 300 km
+        // down to 300 m and then a level cruise, looking 25 degrees down.
+        // HELIO_VOXEL_FLIGHT_EDITOR_PATH=<deg> starts that far from the pole.
+        // Logs residency progress and captures views.
+        let out_deg: f64 = std::env::var("HELIO_VOXEL_FLIGHT_EDITOR_PATH").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let start = DVec3::new(out_deg.to_radians().sin(), out_deg.to_radians().cos(), 0.0);
+        let mut eye = start * (flight.planet.grid().radius() + 300_000.0);
+        let dt = 1.0 / 120.0;
+        let forward = DVec3::X;
+        let mut t = 0.0;
+        let mut frame = 0usize;
+        while t < 45.0 {
+            // Height above the ground directly below (what the editor's
+            // speed should follow; air_clearance is only a conservative
+            // bound, ~0 anywhere below the highest possible terrain).
+            let clearance = eye.length() - flight.planet.surface_point(eye, 0.0).length();
+            let speed = 10.0 * (clearance / 20.0).clamp(1.0, 1.0e6);
+            let low = clearance < 300.0;
+            let up = eye.normalize();
+            let ahead = (forward - up * forward.dot(up)).normalize();
+            let dir = if low { ahead } else { (ahead - up).normalize() };
+            eye += dir * speed * dt;
+            let (cell, _) = flight.planet.grid().locate(eye);
+            if flight.planet.solid(cell) {
+                eye = flight.planet.surface_point(eye, 0.5);
+            }
+            let up = eye.normalize();
+            let look = ((forward - up * forward.dot(up)).normalize() - up * 0.47).normalize().as_vec3();
+            flight.draw("editor_path", eye, look);
+            if frame % 60 == 0 {
+                let stats = flight.pass().stats().unwrap_or_default();
+                let up = eye.normalize();
+                let from_pole = up.y.acos().to_degrees();
+                eprintln!(
+                    "PATH t {t:5.1}s height {:9.1} m from_pole {from_pole:5.2} deg speed {speed:8.1} m/s resident {} pending {} jobs {} finest {}",
+                    flight.planet.grid().height(eye),
+                    stats.resident_columns,
+                    stats.pending_columns,
+                    stats.jobs,
+                    stats.finest_level
+                );
+                if frame % 240 == 0 {
+                    flight.capture(&format!("path_{:03}", (t * 10.0) as u32));
+                }
+            }
+            t += dt;
+            frame += 1;
+        }
+        return;
+    }
     if std::env::var_os("HELIO_VOXEL_FLIGHT_SKIM").is_some() {
         // An editor camera held forward and down against the ground: it
         // moves 10 m/s forward and 10 m/s down each 120 Hz frame and is
