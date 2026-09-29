@@ -1,12 +1,12 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use glam::Vec3;
 use helio::{
-    required_wgpu_limits, Camera, DebugCameraUniform, DebugDrawState, MaterialBindingMode,
-    Renderer, RendererConfig, Scene, BINDLESS_MATERIAL_FEATURES, EXPANDED_MATERIAL_TEXTURE_RESERVE,
+    required_wgpu_limits, Camera, MaterialBindingConfig, MaterialBindingMode, RendererBuilder,
+    RendererConfig, BINDLESS_MATERIAL_FEATURES, EXPANDED_MATERIAL_TEXTURE_RESERVE,
     MAX_MATERIAL_TEXTURES,
 };
-use helio_default_graphs::build_default_graph_external;
+use helio_default_graphs::build_default_graph_external_with_context;
 
 const PORTABLE_SAMPLED_TEXTURE_LIMIT: u32 = 16;
 
@@ -95,55 +95,28 @@ async fn run_default_graph(
     let queue = Arc::new(queue);
     let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
-    let scene = Scene::new(Arc::clone(&device), Arc::clone(&queue));
-    assert_eq!(scene.material_binding_config().mode, expected_mode);
-    assert_eq!(
-        scene.material_binding_config().max_textures,
-        expected_max_textures
-    );
+    // The material binding tier is chosen from the device, as the renderer
+    // does at construction.
+    let binding = MaterialBindingConfig::for_device(&device);
+    assert_eq!(binding.mode, expected_mode);
+    assert_eq!(binding.max_textures, expected_max_textures);
 
+    let scene_db = scene_db_with_gpu_mirror(&device, &queue);
     let config = RendererConfig::new(32, 32, wgpu::TextureFormat::Rgba8Unorm);
-    let debug_state = Arc::new(Mutex::new(DebugDrawState::default()));
-    let debug_camera = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Limited Native Debug Camera"),
-        size: core::mem::size_of::<DebugCameraUniform>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let cull_stats = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Limited Native Cull Stats"),
-        size: 32,
-        usage: wgpu::BufferUsages::STORAGE
-            | wgpu::BufferUsages::COPY_SRC
-            | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let graph = build_default_graph_external(
-        &device,
-        &queue,
-        &scene,
+    let mut renderer = RendererBuilder::new(
         config,
-        Arc::clone(&debug_state),
-        &debug_camera,
-        &cull_stats,
-        None,
-    );
-
-    #[allow(deprecated)]
-    let mut renderer = Renderer::new_with_external_device(
+        scene_db.world.gpu_mirror().cloned().expect("mirror attached above"),
+    )
+    .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+    .with_external_device()
+    .build(
         Arc::clone(&device),
         Arc::clone(&queue),
-        config.surface_format,
         config.width,
         config.height,
-        config.render_scale,
-        config,
-        scene,
-        graph,
-        debug_state,
-        debug_camera,
-        cull_stats,
+        config.surface_format,
     );
+    scene_db.world.flush_gpu_mirror(&queue);
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Limited Native Render Target"),
         size: wgpu::Extent3d {
@@ -197,6 +170,35 @@ async fn run_default_graph(
         validation_error.is_none(),
         "selected-tier default graph validation failed: {validation_error:?}"
     );
+}
+
+/// An empty SceneDB with a GPU mirror and the columns the default graph
+/// reads, the way every frontend now hands scene data to the renderer.
+fn scene_db_with_gpu_mirror(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+) -> pulsar_scenedb::SceneDb {
+    let mut scene_db = pulsar_scenedb::SceneDb::new();
+    let ctx = pulsar_scenedb::gpu::EngineGpuContext::new(device.clone(), queue.clone());
+    let mut store = pulsar_scenedb::gpu::SceneGpuStore::new(
+        &ctx,
+        pulsar_scenedb::gpu::SceneGpuConfig {
+            classes: Vec::new(),
+            tombstone_headroom: 0,
+            max_cells_metadata: 0,
+        },
+    );
+    helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut store, 64, device);
+    helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut store, 64, device);
+    helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(&mut store, 64, device);
+    helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
+        &mut store,
+        helio_pass_forward_lit::MAX_LIGHTS,
+        device,
+    );
+    let mirror = pulsar_scenedb::gpu::GpuMirrorHandle::new(Arc::new(store), queue.clone());
+    scene_db.world.attach_gpu_mirror(mirror);
+    scene_db
 }
 
 async fn request_test_adapter(instance: &wgpu::Instance) -> Option<wgpu::Adapter> {

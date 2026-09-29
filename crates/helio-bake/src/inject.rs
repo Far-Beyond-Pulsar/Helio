@@ -8,11 +8,13 @@ use crate::data::BakedData;
 /// A render pass that publishes pre-baked GPU resources into `ResourceRegistry` each frame.
 ///
 /// This pass does **zero GPU work** — it purely stores `Arc`-wrapped references and
-/// writes them into the frame resource bus in `publish()`.  
-/// It is added to the render graph by the `Renderer` after a successful bake.
+/// writes them into the frame resource bus.
+/// The `Renderer` adds it to the graph after a successful bake and carries it
+/// across graph rebuilds; it is the only owner of the baked data (Helio#256).
 ///
-/// **Ordering**: insert this pass before `SsaoPass` and `DeferredLightPass` so that
-/// those passes see the baked data in their `execute()` context.
+/// **Ordering**: none needed. Resources are published as frame inputs, before
+/// any pass of the frame executes, so every consumer sees them wherever this
+/// pass sits in the graph.
 pub struct BakeInjectPass {
     data: Arc<BakedData>,
 }
@@ -56,7 +58,11 @@ impl RenderPass for BakeInjectPass {
         None
     }
 
-    fn publish<'a>(&self, frame: &mut ResourceRegistry<'a>) {
+    fn publish_frame_inputs<'a>(
+        &self,
+        _camera: &helio_core::GpuCameraUniforms,
+        frame: &mut ResourceRegistry<'a>,
+    ) {
         // SAFETY: every borrow below is extended per `extend_lifetime`'s doc —
         // out of `self.data: Arc<BakedData>`, which outlives any single frame.
         // AO — replaces SSAO slot so downstream passes (DeferredLight) see baked AO

@@ -3,7 +3,7 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use super::config::{PerfOverlayMode, RendererConfig};
+use super::config::RendererConfig;
 use super::renderer_impl::Renderer;
 
 impl Renderer {
@@ -60,28 +60,14 @@ impl Renderer {
 
         self.clear_target_next_frame = true;
 
-        if let Some(rebuilder) = &self.graph_rebuilder {
+        if let Some(rebuilder) = self.graph_rebuilder.clone() {
+            // Same recipe the current graph was built from, at the new size:
+            // one stored config, not a field per pass-specific flag, so no
+            // setting can be dropped by a rebuild (Helio#254/#255).
             let config = RendererConfig {
                 width,
                 height,
-                surface_format: self.surface_format,
-                gi_config: self.gi_config,
-                shadow_quality: self.shadow_quality,
-                debug_mode: self.debug_mode,
-                render_scale: self.render_scale,
-                perf_overlay_mode: PerfOverlayMode::Disabled,
-                shadow_atlas_size: self.shadow_atlas_size,
-                shadow_face_capacity: self.shadow_face_capacity,
-                enable_ssr: self.enable_ssr,
-                enable_planar_reflections: self.enable_planar_reflections,
-                enable_environment_reflections: self.enable_environment_reflections,
-                tsr_quality: self.tsr_quality,
-                hdr_output_mode: helio_pass_postprocess::HdrOutputMode::Ldr,
-                render_mode: self.render_mode,
-                enable_xr: self.enable_xr,
-                enable_foliage: self.enable_foliage,
-                foliage_blades_per_m2: self.foliage_blades_per_m2,
-                enable_portals: self.enable_portals,
+                ..self.renderer_config()
             };
             let mut replacement = rebuilder(
                 &self.device,
@@ -92,8 +78,10 @@ impl Renderer {
                 &self.debug_camera_buffer,
                 &self.cull_stats_buffer,
             );
+            // Passes carry persistent state (voxel residency, histories)
+            // into the rebuilt graph; replace_graph restores GI and bakes.
             replacement.inherit_persistent_state(&mut self.graph);
-            self.graph = replacement;
+            self.replace_graph(replacement);
             if let Some(hook) = &self.graph_rebuild_hook {
                 hook(&mut self.graph, &self.device);
             }
@@ -131,26 +119,6 @@ impl Renderer {
     pub fn render_scale(&self) -> f32 {
         self.render_scale
     }
-}
-
-impl Renderer {
-    /// Rebuild the graph when the scene gains or loses its sky.
-    ///
-    /// `SkyLutPass` and `SkyPass` are added conditionally on
-    /// `Scene::sky_context().has_sky` when the graph is *built*, but the natural
-    /// construction order is to hand `Renderer::new` a graph and an empty scene and then
-    /// populate the scene. A sky added after that point never gets its passes.
-    ///
-    /// The symptom is worse than a missing sky: `SkyPass` is what establishes `pre_aa`
-    /// each frame, and every later colour pass loads that target rather than clearing it.
-    /// With no sky pass nothing initialises it, so the image accumulates frame over frame
-    /// and — in the dual-pass XR path, where both eyes share the graph's internal
-    /// targets — eye over eye. It reads as geometry smearing over itself.
-    ///
-    /// Desktop hid this because the first window resize rebuilds the graph after the
-    /// scene exists. The XR path renders into the runtime's swapchain and never resizes,
-    /// so it kept the empty-scene graph forever.
-    pub(crate) fn rebuild_graph_if_sky_changed(&mut self) {}
 }
 
 impl Renderer {

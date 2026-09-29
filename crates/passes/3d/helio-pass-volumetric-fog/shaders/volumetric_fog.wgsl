@@ -169,9 +169,11 @@ struct ActiveMedia {
     last_active: u32,
     _reserved: array<u32, 12>,
     volumes: array<u32, 64>,
-    lights: array<u32, 256>,
     globals: array<u32, 64>,
     locals: array<u32, 64>,
+    // Every active light row, in row order; the buffer holds one slot per
+    // SceneDB light row, so the list never overflows (Pulsar-Native#838).
+    lights: array<u32>,
 }
 @group(0) @binding(11) var<storage, read> volumes: array<FogVolume>;
 @group(0) @binding(12) var<storage, read_write> media_list: ActiveMedia;
@@ -283,7 +285,7 @@ fn hash_vector(h: u32, v: vec4<f32>) -> u32 {
 var<workgroup> wg_volume_rows: array<u32, 64>;
 var<workgroup> wg_global_rows: array<u32, 64>;
 var<workgroup> wg_local_rows: array<u32, 64>;
-var<workgroup> wg_light_rows: array<u32, 256>;
+var<workgroup> wg_light_offsets: array<u32, 256>;
 var<workgroup> wg_volume_count: atomic<u32>;
 var<workgroup> wg_global_count: atomic<u32>;
 var<workgroup> wg_local_count: atomic<u32>;
@@ -312,8 +314,9 @@ fn medium_hash_of(seed: u32, m: WorldMedium) -> u32 {
 }
 
 // Parallel compaction of live rows, then a rank sort so the compact lists are
-// in row order regardless of atomic ordering. Counts past a list's capacity
-// are still counted; consumers then scan every row instead of losing any.
+// in row order regardless of atomic ordering. Media counts past a list's
+// capacity are still counted; consumers then scan every row instead of losing
+// any. The light list is sized to every row and never overflows.
 @compute @workgroup_size(256)
 fn cs_classify(@builtin(local_invocation_index) lid: u32) {
     if lid == 0u {
@@ -346,12 +349,39 @@ fn cs_classify(@builtin(local_invocation_index) lid: u32) {
             if slot < 64u { wg_local_rows[slot] = i; }
         }
     }
-    for (var i = lid; i < arrayLength(&lights); i += SCAN_THREADS) {
+    // Lights: each thread scans one contiguous chunk of rows, so a prefix sum
+    // of the chunk counts places every active row in row order. The list is
+    // complete however many lights are active, and later stages loop over it
+    // instead of every allocated row (Pulsar-Native#838).
+    let light_rows = min(arrayLength(&lights), arrayLength(&media_list.lights));
+    let light_chunk = (light_rows + SCAN_THREADS - 1u) / SCAN_THREADS;
+    let light_begin = min(lid * light_chunk, light_rows);
+    let light_end = min(light_begin + light_chunk, light_rows);
+    var chunk_lights = 0u;
+    for (var i = light_begin; i < light_end; i++) {
         if lights[i].god_rays_enabled != 0u && light_active(lights[i]) {
             // Commutative combination: independent of scan order.
             atomicAdd(&wg_light_hash, light_hash_of(i, lights[i]));
-            let slot = atomicAdd(&wg_light_count, 1u);
-            if slot < 256u { wg_light_rows[slot] = i; }
+            chunk_lights++;
+        }
+    }
+    wg_light_offsets[lid] = chunk_lights;
+    workgroupBarrier();
+    if lid == 0u {
+        var total = 0u;
+        for (var j = 0u; j < SCAN_THREADS; j++) {
+            let c = wg_light_offsets[j];
+            wg_light_offsets[j] = total;
+            total += c;
+        }
+        atomicStore(&wg_light_count, total);
+    }
+    workgroupBarrier();
+    var light_slot = wg_light_offsets[lid];
+    for (var i = light_begin; i < light_end; i++) {
+        if lights[i].god_rays_enabled != 0u && light_active(lights[i]) {
+            media_list.lights[light_slot] = i;
+            light_slot++;
         }
     }
     workgroupBarrier();
@@ -377,12 +407,6 @@ fn cs_classify(@builtin(local_invocation_index) lid: u32) {
         var rank = 0u;
         for (var j = 0u; j < min(local_total, 64u); j++) { rank += select(0u, 1u, wg_local_rows[j] < row); }
         media_list.locals[rank] = row;
-    }
-    if lid < min(light_total, 256u) {
-        let row = wg_light_rows[lid];
-        var rank = 0u;
-        for (var j = 0u; j < min(light_total, 256u); j++) { rank += select(0u, 1u, wg_light_rows[j] < row); }
-        media_list.lights[rank] = row;
     }
     if lid != 0u { return; }
 
@@ -423,11 +447,11 @@ fn cs_classify(@builtin(local_invocation_index) lid: u32) {
 fn volume_count() -> u32 { return select(media_list.volume_count, arrayLength(&volumes), media_list.volume_count > 64u); }
 fn global_count() -> u32 { return select(media_list.global_count, arrayLength(&global_media), media_list.global_count > 64u); }
 fn local_count() -> u32 { return select(media_list.local_count, arrayLength(&local_media), media_list.local_count > 64u); }
-fn light_count() -> u32 { return select(media_list.light_count, arrayLength(&lights), media_list.light_count > 256u); }
+fn light_count() -> u32 { return media_list.light_count; }
 fn volume_index(i: u32) -> u32 { if media_list.volume_count > 64u { return i; } return media_list.volumes[i]; }
 fn global_index(i: u32) -> u32 { if media_list.global_count > 64u { return i; } return media_list.globals[i]; }
 fn local_index(i: u32) -> u32 { if media_list.local_count > 64u { return i; } return media_list.locals[i]; }
-fn light_index(i: u32) -> u32 { if media_list.light_count > 256u { return i; } return media_list.lights[i]; }
+fn light_index(i: u32) -> u32 { return media_list.lights[i]; }
 
 fn cluster_index(tile: vec3<u32>) -> u32 {
     let tiles = (media_list.grid.xy + vec2<u32>(7)) / 8u;

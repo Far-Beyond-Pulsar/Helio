@@ -9,7 +9,7 @@ use helio_core::{RenderFrameInputs, RenderGraph, RenderPass};
 use helio_pass_sky::{CloudQuality, CloudRenderMode, CloudResolution, SkyPass};
 
 use super::builder::SceneDbHandle;
-use super::config::{PerfOverlayMode, RenderMode, RendererConfig};
+use super::config::{RenderMode, RendererConfig};
 
 /// Closure that rebuilds the render graph on resize.
 pub type GraphRebuilder = Arc<
@@ -64,7 +64,11 @@ pub struct Renderer {
     pub(crate) graph: RenderGraph,
     pub(crate) camera_buffer: wgpu::Buffer,
     pub(crate) camera_data: helio_core::GpuCameraUniforms,
+    /// Bumped only when [`CameraIdentity`] changes -- see
+    /// [`Renderer::note_camera`].
     pub(crate) camera_generation: u64,
+    /// The camera `camera_generation` currently describes.
+    pub(crate) camera_identity: Option<CameraIdentity>,
     pub(crate) frame_count: u64,
     pub(crate) ray_frame: helio_core::FrameAcceleration,
     pub(crate) prev_view_proj: glam::Mat4,
@@ -87,23 +91,16 @@ pub struct Renderer {
     pub(crate) ambient_up: [f32; 3],
     pub(crate) ambient_ground: Option<[f32; 3]>,
     pub(crate) clear_color: [f32; 4],
-    pub(crate) gi_config: GiConfig,
-    pub(crate) shadow_quality: helio_pass_shadow_matrix::ShadowQuality,
-    pub(crate) shadow_atlas_size: u32,
-    pub(crate) shadow_face_capacity: u32,
-    /// Preserved across graph rebuilds (resize) so an opt-in is not silently lost.
-    pub(crate) enable_ssr: bool,
-    /// Persisted so the resize rebuild reconstructs the same graph. Every flag the
-    /// rebuilder needs has to live here — a literal in `resize.rs` silently produces a
-    /// *different* pipeline after the first resize, which is exactly what happened when
-    /// this field was first added.
-    pub(crate) enable_foliage: bool,
-    pub(crate) foliage_blades_per_m2: Option<f32>,
-    pub(crate) enable_planar_reflections: bool,
-    pub(crate) enable_environment_reflections: bool,
-    /// Mirrors `RendererConfig::enable_portals` — same "persist for resize
-    /// rebuild" reasoning as `enable_foliage` above.
-    pub(crate) enable_portals: bool,
+    /// The configuration the current graph was built from: the recipe a
+    /// rebuild (resize, a config change) hands the graph builder, so the new
+    /// graph has the same passes and pass settings (Helio#254/#255).
+    ///
+    /// Opaque to the renderer: it never interprets pass-specific fields
+    /// (shadow atlas, SSR, foliage, portals, TSR, reflections), it only
+    /// stores what the graph was built with. The size, scale, surface format,
+    /// debug mode, render mode and XR flag have live fields of their own;
+    /// [`Renderer::renderer_config`] overlays those onto this.
+    pub(crate) graph_config: RendererConfig,
     /// Coordinate-space transforms supplied by the frontend for portal and
     /// sublevel instances. Kept on Renderer so graph rebuilds cannot reset
     /// the G-buffer's table back to identity.
@@ -121,10 +118,18 @@ pub struct Renderer {
     pub(crate) debug_state: Arc<Mutex<DebugDrawState>>,
     pub(crate) last_render_time: Instant,
     pub(crate) delta_time: f32,
-    /// Optional 3D LUT texture view for colour grading, set by the application.
+    /// Application-authored textures handed to the graph (Helio#257).
+    ///
+    /// Same accepted exception as `template_registry`: the application
+    /// creates these once and passes them in, and the renderer only forwards
+    /// them into the frame registry (`"color_grading_lut"` for PostProcessPass,
+    /// `"ies_textures"` for DeferredLightPass). The renderer never creates,
+    /// sizes or formats them, so it holds no pass-internal state here.
     pub(crate) color_grading_lut_view: Option<wgpu::TextureView>,
     pub(crate) ies_texture_view: Option<wgpu::TextureView>,
     pub(crate) graph_time_ms: f32,
+    /// The last frame's graph submission. See [`Self::last_submission`].
+    pub(crate) last_submission: Option<wgpu::SubmissionIndex>,
     pub(crate) cull_stats_staging: wgpu::Buffer,
     pub(crate) cull_stats_readback_state: CullStatsReadbackState,
     pub(crate) cull_stats: [u32; 8],
@@ -136,12 +141,10 @@ pub struct Renderer {
     pub(crate) enable_jitter: bool,
     pub(crate) camera_jitter_override: Option<[f32; 2]>,
     pub(crate) frame_delta_override: Option<f32>,
-    pub(crate) gizmo_camera: Option<Camera>,
-    pub(crate) gizmo_viewport_height: f32,
+    /// A bake to run before the next frame. Its result is owned by the
+    /// graph's `BakeInjectPass`, never by the renderer (Helio#256).
     #[cfg(feature = "bake")]
     pub(crate) bake_pending: Option<helio_bake::BakeRequest>,
-    #[cfg(feature = "bake")]
-    pub(crate) baked_data: Option<std::sync::Arc<helio_bake::BakedData>>,
     /// Optional CPU bake projection supplied by the SceneDB/frontend owner.
     /// The renderer may execute it, but never traverses or synthesizes scene
     /// entities to build it.
@@ -281,7 +284,23 @@ impl Renderer {
         self.prev_view_proj = glam::Mat4::from_cols_array(&uniforms.view_proj);
         self.previous_world_origin = self.world_origin;
         self.camera_data = uniforms;
-        self.camera_generation = self.camera_generation.wrapping_add(1);
+    }
+
+    /// Advance `camera_generation` if `camera` (unjittered) differs from the
+    /// one it last described. Call with the camera as supplied, before any
+    /// per-frame jitter.
+    ///
+    /// The generation promises "the view or projection changed"; passes cache
+    /// camera-dependent work on it (light-cull tile lists, the Hi-Z max
+    /// pyramid). It used to advance on every upload, so those caches never
+    /// hit (Pulsar-Native#834). TAA/TSR jitter and the frame counter change
+    /// the uploaded uniforms every frame by design and are not part of it.
+    pub(crate) fn note_camera(&mut self, camera: &crate::Camera) {
+        let identity = CameraIdentity::of(camera);
+        if self.camera_identity != Some(identity) {
+            self.camera_identity = Some(identity);
+            self.camera_generation = self.camera_generation.wrapping_add(1);
+        }
     }
 
     /// Set the double-precision world origin for camera-relative frames.
@@ -303,19 +322,40 @@ impl Renderer {
         );
         self.camera_data = *left;
         self.prev_view_proj = glam::Mat4::from_cols_array(&left.view_proj);
+        // A tracked headset moves every frame; treat each stereo upload as a
+        // new view, and make the next mono frame compare afresh.
+        self.camera_identity = None;
         self.camera_generation = self.camera_generation.wrapping_add(1);
     }
 
     pub fn set_gi_config(&mut self, gi_config: GiConfig) {
-        self.gi_config = gi_config;
+        self.graph_config.gi_config = gi_config;
+        if let Some(pass) = self
+            .graph
+            .find_pass_mut::<helio_pass_radiance_cascades::RadianceCascadesPass>()
+        {
+            pass.set_gi_config(gi_config);
+        }
     }
 
     pub fn gi_config(&self) -> GiConfig {
-        self.gi_config
+        self.graph_config.gi_config
     }
 
+    /// Change the shadow quality. The passes that use it are configured at
+    /// graph build, so this rebuilds the graph before the next frame; it
+    /// used to only take effect at the next window resize.
     pub fn set_shadow_quality(&mut self, quality: helio_pass_shadow_matrix::ShadowQuality) {
-        self.shadow_quality = quality;
+        if self.graph_config.shadow_quality != quality {
+            self.graph_config.shadow_quality = quality;
+            self.request_graph_rebuild();
+        }
+    }
+
+    /// Rebuild the graph from [`Self::renderer_config`] before the next frame.
+    /// No-op for graphs installed without a rebuilder.
+    pub fn request_graph_rebuild(&mut self) {
+        self.pending_resize = Some((self.output_width, self.output_height));
     }
 
     /// Overrides the graph-derived per-frame camera-jitter setting.
@@ -366,7 +406,7 @@ impl Renderer {
     }
 
     pub fn shadow_quality(&self) -> helio_pass_shadow_matrix::ShadowQuality {
-        self.shadow_quality
+        self.graph_config.shadow_quality
     }
 
     /// Return the frontend-owned SceneDB GPU projection.
@@ -423,6 +463,21 @@ impl Renderer {
     /// can safely be copied across the renderer/UI boundary.
     pub fn graph_timeline(&self) -> helio_core::GraphTimelineData {
         self.graph.collect_graph_timeline()
+    }
+
+    /// The queue submission carrying the last rendered frame's graph, for a
+    /// host that must wait on or hand off the frame (a compositor sampling
+    /// the target). Saves the host an extra empty `queue.submit` just to
+    /// obtain an index.
+    pub fn last_submission(&self) -> Option<wgpu::SubmissionIndex> {
+        self.last_submission.clone()
+    }
+
+    /// Per-pass `CommandEncoder::finish` cost for the last frame; see
+    /// [`helio_core::RenderGraph::set_finish_breakdown`]. Enable it with the
+    /// `HELIO_FINISH_BREAKDOWN` environment variable so rebuilt graphs keep it.
+    pub fn finish_breakdown(&self) -> &[helio_core::FinishSegment] {
+        self.graph.finish_breakdown()
     }
 
     pub fn add_pass(&mut self, pass: Box<dyn helio_core::RenderPass>) {
@@ -579,11 +634,11 @@ impl Renderer {
     pub fn set_graph(&mut self, mut graph: RenderGraph) {
         // Extract rebuilder stored in the graph by the builder function
         self.graph_rebuilder = graph.take_graph_data::<GraphRebuilder>();
-        self.graph = graph;
+        self.replace_graph(graph);
     }
 
     pub fn set_graph_with_builder(&mut self, graph: RenderGraph, rebuilder: GraphRebuilder) {
-        self.graph = graph;
+        self.replace_graph(graph);
         self.graph_rebuilder = Some(rebuilder);
     }
 
@@ -603,27 +658,58 @@ impl Renderer {
         self.bake_scene = Some(scene);
     }
 
+    /// Bake the scene last given to [`Self::set_bake_scene`] before the next
+    /// frame. Build it with [`crate::bake_scene_from_world`]. Returns whether a
+    /// bake was queued, so a missing scene is not a silent no-op (Helio#256).
     #[cfg(feature = "bake")]
-    pub fn auto_bake(&mut self, config: helio_bake::BakeConfig) {
+    pub fn auto_bake(&mut self, config: helio_bake::BakeConfig) -> bool {
         let Some(scene) = self.bake_scene.clone() else {
             log::error!(
-                "Renderer::auto_bake requires set_bake_scene(SceneGeometry) from the SceneDB owner"
+                "Renderer::auto_bake requires set_bake_scene(helio::bake_scene_from_world(..)) first; nothing was baked"
             );
-            return;
+            return false;
         };
         self.configure_bake(helio_bake::BakeRequest { scene, config });
+        true
     }
 
-    pub fn set_gizmo_camera(&mut self, camera: &Camera, viewport_height: f32) {
-        self.gizmo_camera = Some(camera.clone());
-        self.gizmo_viewport_height = viewport_height;
+    /// Hand a finished bake to the graph. `BakeInjectPass` owns it from here
+    /// and publishes it every frame; a re-bake replaces the previous one.
+    #[cfg(feature = "bake")]
+    pub(crate) fn install_baked_data(&mut self, baked: std::sync::Arc<helio_bake::BakedData>) {
+        let pass = Box::new(helio_bake::BakeInjectPass::new(baked));
+        match self.graph.pass_index_of::<helio_bake::BakeInjectPass>() {
+            Some(index) => self.graph.replace_pass_at(index, pass),
+            None => self.graph.add_pass_live(pass),
+        }
     }
 
-    pub fn gizmo_camera_info(&self) -> Option<(&Camera, f32)> {
-        self.gizmo_camera
-            .as_ref()
-            .map(|c| (c, self.gizmo_viewport_height))
+    /// The baked data the current graph publishes, for carrying it into a
+    /// rebuilt graph.
+    #[cfg(feature = "bake")]
+    pub(crate) fn installed_baked_data(&self) -> Option<std::sync::Arc<helio_bake::BakedData>> {
+        self.graph
+            .find_pass::<helio_bake::BakeInjectPass>()
+            .map(|pass| pass.baked_data().clone())
     }
+
+    /// Replace the graph, keeping what the old one owned that a freshly
+    /// built graph cannot know about (a finished bake).
+    pub(crate) fn replace_graph(&mut self, mut graph: RenderGraph) {
+        if let Some(pass) = graph
+            .find_pass_mut::<helio_pass_radiance_cascades::RadianceCascadesPass>()
+        {
+            pass.set_gi_config(self.graph_config.gi_config);
+        }
+        #[cfg(feature = "bake")]
+        let baked = self.installed_baked_data();
+        self.graph = graph;
+        #[cfg(feature = "bake")]
+        if let Some(baked) = baked {
+            self.install_baked_data(baked);
+        }
+    }
+
 
     pub fn output_width(&self) -> u32 {
         self.output_width
@@ -643,28 +729,18 @@ impl Renderer {
         &self.device
     }
 
+    /// The config a rebuilt graph is built from: what the current graph was
+    /// built with, at the current size, scale and modes.
     pub fn renderer_config(&self) -> RendererConfig {
         RendererConfig {
             width: self.output_width,
             height: self.output_height,
             surface_format: self.surface_format,
-            gi_config: self.gi_config,
-            shadow_quality: self.shadow_quality,
             debug_mode: self.debug_mode,
             render_scale: self.render_scale,
-            perf_overlay_mode: PerfOverlayMode::Disabled,
-            shadow_atlas_size: self.shadow_atlas_size,
-            shadow_face_capacity: self.shadow_face_capacity,
-            enable_ssr: self.enable_ssr,
-            enable_planar_reflections: self.enable_planar_reflections,
-            enable_environment_reflections: self.enable_environment_reflections,
-            tsr_quality: self.tsr_quality,
-            hdr_output_mode: helio_pass_postprocess::HdrOutputMode::Ldr,
             render_mode: self.render_mode,
             enable_xr: self.enable_xr,
-            enable_foliage: self.enable_foliage,
-            foliage_blades_per_m2: self.foliage_blades_per_m2,
-            enable_portals: self.enable_portals,
+            ..self.graph_config
         }
     }
 
@@ -734,66 +810,69 @@ impl Renderer {
         self.color_grading_lut_view.as_ref()
     }
 
-    /// Upload an IES profile texture to the scene's IES texture array.
-    ///
-    /// The texture should be a single R8Unorm 256×256 layer containing the
-    /// IES angular intensity distribution. Returns the layer index to use
-    /// as `ies_profile_index` / `light_function_index` on GpuLight.
-    ///
-    /// Currently creates a new array texture each call (single-profile).
-    /// Multi-profile support can be added by growing the array.
-    pub fn upload_ies_texture(&mut self, data: &[u8], width: u32, height: u32) -> Option<u32> {
-        if data.len() < (width * height) as usize {
-            return None;
-        }
-        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("IES Texture Array"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        let view = tex.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
-        });
-        self.ies_texture_view = Some(view);
-        Some(0) // always layer 0 for now
-    }
-
     /// Returns the current IES texture array view, if any.
     pub fn ies_texture_view(&self) -> Option<&wgpu::TextureView> {
         self.ies_texture_view.as_ref()
     }
 
-    /// Set the IES texture array view directly (for multi-layer arrays).
+    /// Set the IES profile texture array view (`R8Unorm`, `D2Array`, one
+    /// layer per profile; a light's `ies_profile_index` selects the layer).
+    /// The application creates the texture; see `examples/ies_demo.rs`.
     pub fn set_ies_texture_view(&mut self, view: wgpu::TextureView) {
         self.ies_texture_view = Some(view);
+    }
+}
+
+/// The camera as the scene sees it: what `camera_generation` tracks. Excludes
+/// the per-frame jitter and frame counter, which change every frame by design.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct CameraIdentity {
+    view: glam::Mat4,
+    proj: glam::Mat4,
+    position: glam::Vec3,
+    near: f32,
+    far: f32,
+    view_id: u32,
+}
+
+impl CameraIdentity {
+    pub(crate) fn of(camera: &crate::Camera) -> Self {
+        Self {
+            view: camera.view,
+            proj: camera.proj,
+            position: camera.position,
+            near: camera.near,
+            far: camera.far,
+            view_id: camera.view_id,
+        }
+    }
+}
+
+#[cfg(test)]
+mod camera_identity_tests {
+    use super::CameraIdentity;
+    use glam::{Mat4, Vec3};
+
+    fn camera() -> crate::Camera {
+        crate::Camera::perspective_look_at(Vec3::new(0.0, 2.0, 5.0), Vec3::ZERO, Vec3::Y, 1.0, 16.0 / 9.0, 0.1, 100.0)
+    }
+
+    #[test]
+    fn jitter_is_not_a_camera_change() {
+        let still = camera();
+        let mut jittered = still.clone();
+        jittered.jitter = [0.3, -0.2];
+        assert!(CameraIdentity::of(&still) == CameraIdentity::of(&jittered));
+    }
+
+    #[test]
+    fn moving_or_reprojecting_is() {
+        let still = camera();
+        let mut moved = still.clone();
+        moved.view = Mat4::from_translation(Vec3::X) * moved.view;
+        let mut zoomed = still.clone();
+        zoomed.proj = Mat4::perspective_rh(0.5, 16.0 / 9.0, 0.1, 100.0);
+        assert!(CameraIdentity::of(&still) != CameraIdentity::of(&moved));
+        assert!(CameraIdentity::of(&still) != CameraIdentity::of(&zoomed));
     }
 }

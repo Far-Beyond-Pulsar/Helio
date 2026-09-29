@@ -706,6 +706,7 @@ impl helio_core::RenderPass for ShadowProducer {
                 shadow_count: 6,
                 per_caster_dirty_gen: [0; 42],
                 movable_objects_generation: 0,
+                caster_layout: None,
             },
             "FogTestShadowProducer",
         );

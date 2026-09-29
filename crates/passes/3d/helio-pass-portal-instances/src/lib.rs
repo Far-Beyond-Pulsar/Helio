@@ -632,8 +632,16 @@ impl RenderPass for PortalInstancePass {
         // as the plain non-portal G-buffer pass — every chain's surviving
         // instances for a given group are already merged into that group's
         // single indirect command by PortalCullPass's `finalize` step.
+        // The GPU count is the batch's `draw_count`; the `_count` draw
+        // clamps it to this maximum, matching the capacity clamp here.
         let indirect_draw_count = self.draw_count.min(PORTAL_DRAW_CAPACITY);
-        pass.multi_draw_indexed_indirect(&self.portal_indirect_buf, 0, indirect_draw_count);
+        helio_pass_gbuffer::multi_draw_indexed_indirect(
+            pass,
+            &self.portal_indirect_buf,
+            0,
+            indirect_draw_count,
+            batch.all_draws_count_slot(),
+        );
         Ok(())
     }
 }

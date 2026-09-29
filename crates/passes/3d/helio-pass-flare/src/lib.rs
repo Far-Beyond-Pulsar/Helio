@@ -535,8 +535,15 @@ fn history_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Tex
     (texture, view)
 }
 
+/// Quarter resolution, but never below what the `LEVELS`-deep radiance
+/// pyramid needs (16 px per side): tiny targets otherwise request more mips
+/// than the texture can hold, which is a validation error.
 fn reduced_size(width: u32, height: u32) -> (u32, u32) {
-    (width.max(1).div_ceil(4), height.max(1).div_ceil(4))
+    let min_side = 1 << (LEVELS - 1);
+    (
+        width.max(1).div_ceil(4).max(min_side),
+        height.max(1).div_ceil(4).max(min_side),
+    )
 }
 
 /// Deterministic procedural front-element dirt: soft smudges and fine specks

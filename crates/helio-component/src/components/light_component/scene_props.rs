@@ -14,6 +14,7 @@ impl ScenePropsProjector for LightComponent {
             "enabled",
             "affects_world",
             "light_type",
+            "movability",
             "light_channels",
             "lighting_channel_0",
             "lighting_channel_1",

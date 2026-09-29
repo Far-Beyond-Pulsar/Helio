@@ -740,7 +740,6 @@ impl HelioWasmApp for Demo {
 
         // ── Gizmo overlay ──────────────────────────────────────────────────
         renderer.debug_clear();
-        renderer.set_gizmo_camera(&camera, self.height as f32);
         self.editor.draw_gizmos(renderer);
 
         // ── Store keys for next frame ──────────────────────────────────────

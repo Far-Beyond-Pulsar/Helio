@@ -229,6 +229,13 @@ pub struct HlfsPass {
     internal: InternalBindings,
     external: ExternalBindings,
     compact_lights: wgpu::Buffer,
+    /// Live light rows, `[count, row...]` (Pulsar-Native#838). Rebuilt only
+    /// when the light rows change: `live_key` is the `scene_lights` buffer's
+    /// `(epoch, content_generation, row_capacity)` it was built from.
+    live_lights: wgpu::Buffer,
+    live_key: Option<(u64, u64, u32)>,
+    /// Set by `prepare` when `live_key` is stale; `record` rebuilds the list.
+    live_rebuild: Option<(u64, u64, u32)>,
     globals: wgpu::Buffer,
     shadows: wgpu::Buffer,
     config: HlfsConfig,
@@ -330,6 +337,15 @@ impl HlfsPass {
                 usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             }),
+            // Zero-initialised: a count of zero until the first list is built.
+            live_lights: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("HLFS live light rows"),
+                size: 16,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
+            live_key: None,
+            live_rebuild: None,
             globals,
             shadows,
             config,
@@ -468,6 +484,7 @@ impl HlfsPass {
                 .sum::<u64>()
             + output
             + self.compact_lights.size()
+            + self.live_lights.size()
             + t.coarse.size()
             + t.grid.size()
             + t.proposals.size()
@@ -523,6 +540,22 @@ impl HlfsPass {
                 &[],
             );
             pass.dispatch_workgroups(self.current_light_count.div_ceil(256), 1, 1);
+        }
+        if let Some(key) = self.live_rebuild.take() {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("HLFS live light list"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&p.list_live);
+            pass.set_bind_group(
+                0,
+                self.external.compact.as_ref().expect("HLFS light copy bound"),
+                &[],
+            );
+            // One workgroup: an ordered scan keeps the list deterministic.
+            pass.dispatch_workgroups(1, 1, 1);
+            drop(pass);
+            self.live_key = Some(key);
         }
         if self.config.tile_presampling {
             dispatch(encoder, "HLFS dominant light", &p.select_key, &self.internal.grid, 1, 1, None);
@@ -693,6 +726,21 @@ impl RenderPass for HlfsPass {
                 mapped_at_creation: false,
             });
         }
+        // Live row list: rebuilt when the rows change, not every frame, so a
+        // mostly-despawned scene pays for its live lights only (#838).
+        let live_size = (u64::from(light_count) + 1) * 4;
+        if self.live_lights.size() < live_size {
+            self.live_lights = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("HLFS live light rows"),
+                size: live_size.next_power_of_two().max(16),
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            });
+            self.live_key = None;
+        }
+        let live_key =
+            scene_lights.map_or((0, 0, 0), |l| (l.epoch, l.content_generation, light_count));
+        self.live_rebuild = (self.live_key != Some(live_key)).then_some(live_key);
 
         let continuity = self
             .previous_frame
@@ -816,6 +864,7 @@ impl RenderPass for HlfsPass {
             camera: ctx.camera,
             lights: lights_buf,
             compact_lights: &self.compact_lights,
+            live_lights: &self.live_lights,
             shadow_matrices: shadow_matrices_buf,
             shadow_atlas: ctx
                 .registry

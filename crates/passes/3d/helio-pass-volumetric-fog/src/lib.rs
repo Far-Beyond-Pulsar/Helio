@@ -61,6 +61,12 @@ const WG_Y: u32 = 8;
 const TEMPORAL_BLEND: f32 = 0.05;
 
 const FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// `ActiveMedia` up to its trailing `lights` array: 32 header words plus the
+/// volume, global and local lists of 64 each (volumetric_fog.wgsl).
+const ACTIVE_MEDIA_HEADER_BYTES: u64 = (32 + 64 * 3) * 4;
+/// Stride of a `"scene_lights"` row (the shader's full 128-byte `GpuLight`).
+const LIGHT_ROW_BYTES: u64 = 128;
 // FogVolume's WGSL opaque prefix/suffix must agree with the PP row ABI.
 const _: () = assert!(helio_pass_postprocess::GpuPostProcessUniforms::FOG_BLOCK_OFFSET == 304);
 
@@ -486,7 +492,7 @@ impl VolumetricFogPass {
 
         let active_media_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Fog Active Volume and Light Indices"),
-            size: (32 + 64 * 3 + 256) * 4,
+            size: ACTIVE_MEDIA_HEADER_BYTES + 256 * 4,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -715,6 +721,29 @@ impl RenderPass for VolumetricFogPass {
             {
                 self.history_valid = false;
             }
+        }
+        // One light-list slot per SceneDB light row (Pulsar-Native#838): the
+        // classify pass lists every active row, so per-froxel loops never
+        // fall back to sweeping all rows, dead ones included.
+        let light_rows = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map_or(0, |lights| lights.buffer.size() / LIGHT_ROW_BYTES);
+        let required = ACTIVE_MEDIA_HEADER_BYTES + light_rows.max(256) * 4;
+        if self.active_media_buf.size() < required {
+            self.active_media_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Fog Active Volume and Light Indices"),
+                size: required.next_power_of_two(),
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            });
+            // Every group binding the old buffer, and its persistent history
+            // state, starts over.
+            self.inject_bg = [None, None];
+            self.integrate_g0_bg = None;
+            self.resolve_bg = None;
+            self.classify_bg = None;
+            self.history_valid = false;
         }
         let prev_jitter = self
             .previous_camera

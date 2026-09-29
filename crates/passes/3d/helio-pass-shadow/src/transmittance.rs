@@ -223,6 +223,7 @@ impl Transmittance {
         static_depth: &wgpu::TextureView,
         indirect: &wgpu::Buffer,
         draw_count: u32,
+        gpu_count: Option<helio_pass_gbuffer::GpuDrawCount<'_>>,
         vertices: &wgpu::Buffer,
         indices: &wgpu::Buffer,
     ) {
@@ -261,11 +262,12 @@ impl Transmittance {
         pass.set_bind_group(1, self.bg_1.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-        #[cfg(not(target_arch = "wasm32"))]
-        pass.multi_draw_indexed_indirect(indirect, 0, draw_count);
-        #[cfg(target_arch = "wasm32")]
-        for i in 0..draw_count {
-            pass.draw_indexed_indirect(indirect, i as u64 * 20);
-        }
+        helio_pass_gbuffer::multi_draw_indexed_indirect(
+            &mut pass,
+            indirect,
+            0,
+            draw_count,
+            gpu_count,
+        );
     }
 }

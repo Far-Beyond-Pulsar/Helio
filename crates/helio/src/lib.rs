@@ -29,8 +29,10 @@ pub use helio_core::{MeshUpload, PackedVertex, SectionedMeshUpload};
 pub use material::{TextureSamplerDesc, TextureTransform, TextureUpload, MAX_TEXTURES};
 pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridge};
 pub use renderer::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits,
-    BillboardInstance, DebugCameraUniform, DebugDrawPass, DebugDrawState, GiConfig, GraphRebuilder,
+    recommended_instance_flags, required_experimental_features, required_wgpu_features,
+    required_wgpu_limits,
+    BillboardInstance, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex, GiConfig,
+    GraphRebuilder,
     PassBuildContext, PassGraphBuilderFn, PerfOverlayMode, RenderMode, Renderer,
     RendererBuilder, RendererConfig, SceneDbHandle,
 };
@@ -45,11 +47,86 @@ pub use helio_core::{
     RenderGraph, RenderPass, RenderPassTiming, RenderTimingSnapshot, Result,
 };
 pub use helio_pass_forward_lit::{GpuLight, LightType};
-pub use helio_pass_object_batch::{DrawIndexedIndirectArgs, GpuDrawCall, GpuInstanceAabb, GpuInstanceData};
+pub use helio_pass_object_batch::{
+    DrawIndexedIndirectArgs, GpuDrawCall, GpuInstanceAabb, GpuInstanceData, INSTANCE_FLAG_MOVABLE,
+};
 pub use helio_mats::GpuMaterial;
 pub use helio_pass_postprocess::{HdrOutputMode, TonemapOperator};
 pub use helio_pass_shadow_matrix::ShadowQuality;
 pub use helio_pass_sky::{SkyActor, VolumetricClouds};
+
+/// Project a SceneDB world into the [`SceneGeometry`] a bake reads
+/// (Helio#256): every drawn object (`StaticObjectComponent` and the
+/// `MeshComponent` it references, in world space) and every live light
+/// (`LightComponent`). This is the explicit CPU projection
+/// [`Renderer::set_bake_scene`] takes; the renderer itself never traverses
+/// scene entities.
+///
+/// Call it after the scene is populated and before
+/// [`Renderer::auto_bake`]. Objects whose mesh row is gone (a stale
+/// generation) are skipped.
+#[cfg(feature = "bake")]
+pub fn bake_scene_from_world(world: &pulsar_scenedb::World) -> SceneGeometry {
+    use helio_pass_forward_lit::LightComponent;
+    use helio_pass_gbuffer::{MeshComponent, StaticObjectComponent};
+
+    let meshes: std::collections::HashMap<u32, (u32, &MeshComponent)> = world
+        .query::<&MeshComponent>()
+        .map(|(entity, mesh)| (entity.index(), (entity.generation(), mesh)))
+        .collect();
+    let mut scene = SceneGeometry::new();
+    for (_, object) in world.query::<&StaticObjectComponent>() {
+        let Some(&(generation, mesh)) = meshes.get(&object.mesh_slot) else {
+            continue;
+        };
+        // Object rows store `generation + 1` so zero means "never written".
+        if generation.wrapping_add(1) != object.mesh_generation {
+            continue;
+        }
+        let upload = MeshUpload {
+            vertices: mesh.vertices.clone(),
+            indices: mesh.indices.clone(),
+        };
+        let transform = glam::Mat4::from_cols_array_2d(&object.transform);
+        scene.add_mesh(mesh_upload_to_bake(&upload, transform, Some(object.mesh_slot)));
+    }
+    for (_, light) in world.query::<&LightComponent>() {
+        let light = GpuLight::from(*light);
+        if light.color_intensity[3] <= 0.0 {
+            continue;
+        }
+        let [x, y, z, range] = light.position_range;
+        let direction = [
+            light.direction_outer[0],
+            light.direction_outer[1],
+            light.direction_outer[2],
+        ];
+        let kind = match light.light_type {
+            t if t == LightType::Directional as u32 => LightSourceKind::Directional { direction },
+            // GpuLight stores cosines; Nebula takes radians.
+            t if t == LightType::Spot as u32 => LightSourceKind::Spot {
+                position: [x, y, z],
+                direction,
+                range,
+                inner_angle: light.inner_angle.clamp(-1.0, 1.0).acos(),
+                outer_angle: light.direction_outer[3].clamp(-1.0, 1.0).acos(),
+            },
+            _ => LightSourceKind::Point { position: [x, y, z], range },
+        };
+        scene.add_light(LightSource {
+            kind,
+            color: [
+                light.color_intensity[0],
+                light.color_intensity[1],
+                light.color_intensity[2],
+            ],
+            intensity: light.color_intensity[3],
+            bake_enabled: true,
+            casts_shadows: light.shadow_index != u32::MAX,
+        });
+    }
+    scene
+}
 
 /// Convert a [`MeshUpload`] with a world-space transform into a [`BakeMesh`] for use
 /// in a [`BakeRequest`].
@@ -151,5 +228,70 @@ pub fn mesh_upload_to_bake(
         indices: upload.indices.clone(),
         material_ids: vec![0u32; upload.indices.len() / 3],
         world_transform: Default::default(),
+    }
+}
+
+#[cfg(all(test, feature = "bake"))]
+mod bake_scene_tests {
+    use super::*;
+    use helio_pass_forward_lit::LightComponent;
+    use helio_pass_gbuffer::{MeshComponent, StaticObjectComponent};
+
+    fn vertex(position: [f32; 3]) -> PackedVertex {
+        PackedVertex { position, ..Default::default() }
+    }
+
+    /// Helio#256: the bake input comes from SceneDB rows, in world space,
+    /// and skips what is not really there.
+    #[test]
+    fn projects_objects_and_live_lights_from_the_world() {
+        let mut world = pulsar_scenedb::World::new();
+        let mesh = world.spawn();
+        world.insert(
+            mesh,
+            MeshComponent {
+                vertices: vec![vertex([0.0, 0.0, 0.0]), vertex([1.0, 0.0, 0.0]), vertex([0.0, 1.0, 0.0])],
+                indices: vec![0, 1, 2],
+            },
+        );
+        let object = |mesh_generation: u32, offset: f32| {
+            StaticObjectComponent::new(
+                mesh.index(),
+                mesh_generation,
+                0,
+                1,
+                glam::Mat4::from_translation(glam::Vec3::new(offset, 0.0, 0.0)),
+                [offset, 0.0, 0.0, 1.0],
+                3,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+        };
+        let live = world.spawn();
+        world.insert(live, object(mesh.generation().wrapping_add(1), 10.0));
+        // A row pointing at a mesh generation that no longer exists.
+        let stale = world.spawn();
+        world.insert(stale, object(mesh.generation().wrapping_add(2), 20.0));
+
+        let mut sun = GpuLight::default();
+        sun.light_type = LightType::Directional as u32;
+        sun.direction_outer = [0.0, -1.0, 0.0, 0.0];
+        sun.color_intensity = [1.0, 0.9, 0.8, 3.0];
+        let sun_entity = world.spawn();
+        world.insert(sun_entity, LightComponent::from(sun));
+        let vacant = world.spawn();
+        world.insert(vacant, LightComponent::from(GpuLight { color_intensity: [0.0; 4], ..GpuLight::default() }));
+
+        let scene = bake_scene_from_world(&world);
+        assert_eq!(scene.meshes.len(), 1, "stale object rows are skipped");
+        assert_eq!(scene.meshes[0].positions[1], [11.0, 0.0, 0.0], "positions are world space");
+        assert_eq!(scene.meshes[0].indices, vec![0, 1, 2]);
+        assert_eq!(scene.lights.len(), 1, "dark rows are not lights");
+        assert!(matches!(scene.lights[0].kind, LightSourceKind::Directional { direction } if direction == [0.0, -1.0, 0.0]));
+        assert_eq!(scene.lights[0].intensity, 3.0);
+        assert!(!scene.lights[0].casts_shadows, "GpuLight::default() requests no shadow");
     }
 }

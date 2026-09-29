@@ -33,6 +33,7 @@ use wgpu::util::DeviceExt;
 pub mod components;
 mod coordinate_spaces_frame_data;
 mod culled_batch_frame_data;
+mod indirect_draw;
 mod object_batch_frame_data;
 #[allow(deprecated)]
 pub use components::{
@@ -43,6 +44,7 @@ pub use components::{
 };
 pub use coordinate_spaces_frame_data::CoordinateSpacesFrameData;
 pub use culled_batch_frame_data::CulledBatchFrameData;
+pub use indirect_draw::{multi_draw_indexed_indirect, GpuDrawCount, DRAW_INDEXED_INDIRECT_STRIDE};
 pub use object_batch_frame_data::ObjectBatchFrameData;
 use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey};
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
@@ -363,7 +365,11 @@ impl RenderPass for GBufferPass {
         self.pending_coordinate_spaces = Some(inputs.coordinate_spaces.to_vec());
     }
 
-    fn publish_frame_inputs<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+    fn publish_frame_inputs<'a>(
+        &self,
+        _camera: &helio_core::GpuCameraUniforms,
+        frame: &mut helio_core::ResourceRegistry<'a>,
+    ) {
         // SAFETY: these buffers are owned by the GBuffer pass, which is owned
         // by the RenderGraph for longer than the current frame registry.
         let coordinate_spaces: &'a wgpu::Buffer = unsafe {
@@ -785,14 +791,9 @@ impl RenderPass for GBufferPass {
             };
             let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
             pass.set_pipeline(pipeline);
-            #[cfg(not(target_arch = "wasm32"))]
-            pass.multi_draw_indexed_indirect(indirect, 0, draw_count);
-            #[cfg(target_arch = "wasm32")]
-            for i in 0..draw_count {
-                pass.draw_indexed_indirect(indirect, i as u64 * 20);
-            }
+            multi_draw_indexed_indirect(pass, indirect, 0, draw_count, batch.all_draws_count_slot());
         } else {
-            for &(class, graph_hash, start, count) in ranges {
+            for (range, &(class, graph_hash, start, count)) in ranges.iter().enumerate() {
                 if count == 0 {
                     continue;
                 }
@@ -803,13 +804,13 @@ impl RenderPass for GBufferPass {
                 };
                 let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
                 pass.set_pipeline(pipeline);
-                // DrawIndexedIndirectArgs = 5 × u32 = 20 bytes per entry
-                #[cfg(not(target_arch = "wasm32"))]
-                pass.multi_draw_indexed_indirect(indirect, start as u64 * 20, count);
-                #[cfg(target_arch = "wasm32")]
-                for i in start..start + count {
-                    pass.draw_indexed_indirect(indirect, i as u64 * 20);
-                }
+                multi_draw_indexed_indirect(
+                    pass,
+                    indirect,
+                    start,
+                    count,
+                    batch.opaque_range_count_slot(range),
+                );
             }
         }
         Ok(())

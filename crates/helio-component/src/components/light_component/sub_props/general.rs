@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use super::super::{light_type_to_gpu_u32, LightType};
+use crate::components::ObjectMovability;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("General", category_color = "#F4C542")]
@@ -16,6 +17,11 @@ pub struct GeneralLightProps {
     #[property(category = "General")]
     #[gpu(as = u32, with = light_type_to_gpu_u32)]
     pub light_type: LightType,
+    /// See [`ObjectMovability`] (Pulsar-Native#837); projected into SceneDB's
+    /// `helio::Movability` on the light entity.
+    #[property(category = "General")]
+    #[serde(default)]
+    pub movability: ObjectMovability,
     #[property(min = 0.0, max = 255.0, step = 1.0, category = "General")]
     pub light_channels: u64,
     #[property(category = "General")]
@@ -32,6 +38,7 @@ impl Default for GeneralLightProps {
             enabled: true,
             affects_world: true,
             light_type: LightType::Point,
+            movability: ObjectMovability::Static,
             light_channels: 0xFF,
             lighting_channel_0: true,
             lighting_channel_1: false,
@@ -57,6 +64,12 @@ impl GeneralLightProps {
                 _ => self.light_type,
             };
         }
+        if let Some(v) = obj
+            .get("movability")
+            .and_then(|v| serde_json::from_value::<ObjectMovability>(v.clone()).ok())
+        {
+            self.movability = v;
+        }
         if let Some(v) = obj.get("light_channels").and_then(|v| v.as_u64()) {
             self.light_channels = v;
         }
@@ -77,6 +90,10 @@ impl GeneralLightProps {
         out.insert(
             "light_type".to_string(),
             Value::from(self.light_type as u64),
+        );
+        out.insert(
+            "movability".to_string(),
+            Value::from(self.movability.name()),
         );
         out.insert(
             "light_channels".to_string(),

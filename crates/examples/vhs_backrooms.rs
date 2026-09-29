@@ -1639,6 +1639,9 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
+        // Upload this frame's SceneDB writes to the GPU mirror; without it they
+        // are never visible to the renderer (Helio#266).
+        v3_demo_common::flush_scene_db(&self.scene_db, renderer.queue());
         if let Err(e) = renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }

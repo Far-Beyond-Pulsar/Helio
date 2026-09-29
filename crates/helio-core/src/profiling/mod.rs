@@ -165,8 +165,9 @@ impl Profiler {
     /// # Performance
     ///
     /// - **O(1)**: Initializes CPU profiler and GPU query set
-    /// - **Zero cost when disabled**: If `profiling` feature is off, GPU query set is still created
-    ///   but never used (minimal memory overhead)
+    /// - **Zero cost when disabled**: GPU timing starts on only with the `profiling`
+    ///   feature and can be switched at runtime ([`Self::set_enabled`]); while off, the
+    ///   query set exists but is never written (minimal memory overhead)
     ///
     /// # Parameters
     ///
@@ -325,8 +326,20 @@ impl Profiler {
         self.gpu.supported()
     }
 
-    pub(crate) const fn is_enabled(&self) -> bool {
+    /// Whether GPU timestamps are being written.
+    pub const fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// Turn GPU timing on or off at runtime; takes effect from the next pass
+    /// recorded. Defaults to on when built with the `profiling` feature.
+    ///
+    /// Timing no longer changes how the graph executes: a fused pass chain
+    /// is timed as one span (labelled with its members' names) instead of
+    /// being split apart to time each pass (Helio#298). Turn it off to skip
+    /// the timestamp writes and readback entirely.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
     }
 
     /// Updates the reusable host-facing snapshot after a frame has submitted.

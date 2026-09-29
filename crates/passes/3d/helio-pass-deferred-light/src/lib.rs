@@ -977,10 +977,10 @@ impl RenderPass for DeferredLightPass {
         } else {
             ([0.0; 3], [0.0; 3]) // Fallback: RC disabled
         };
-        // rc_world_min/max are always a non-degenerate camera-centred volume
-        // (set unconditionally by the renderer's GiConfig default), regardless
-        // of whether this pipeline actually runs HLFS. Only the presence of a
-        // real rc_view texture tells us whether there's anything to sample.
+        // The volume's presence only says a radiance-cascades pass is in the
+        // graph (it publishes it from its GiConfig before any pass prepares),
+        // not that this pipeline runs HLFS. Only the presence of a real
+        // rc_view texture tells us whether there's anything to sample.
         let has_rc_gi = ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("rc_view")).is_some();
 
         let globals = DeferredGlobals {

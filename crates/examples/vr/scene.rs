@@ -815,9 +815,8 @@ pub fn build(world: &mut World, renderer: &mut Renderer) -> Animated {
         point_light([0.0, HALL_HEIGHT - 0.6, 1.5], [0.6, 0.7, 1.0], 6.0, 8.0),
     );
 
-    // Indoors, but the sky still drives ambient — and `SkyPass` is what establishes the
-    // colour target each frame, so its absence is what made geometry smear over itself.
-    // See `Renderer::rebuild_graph_if_sky_changed`.
+    // Indoors, but the sky still drives ambient. `SkyPass` is in every graph and reads
+    // this row from SceneDB each frame, so it can be spawned at any time.
     spawn_sky(world, [0.05, 0.07, 0.11]);
 
     anim

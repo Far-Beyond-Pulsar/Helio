@@ -71,8 +71,10 @@ fn discovery_proposal(pixel: vec2<u32>, tile: u32, population: u32, overflow: bo
     // shadow-ray budget. A tiny random candidate set otherwise adds avoidable
     // variance even when only a few lights can contribute to this surface.
     if USE_TILE_PRESAMPLING && population<=32u {
-        var id=candidate;
-        if !overflow { id=(grid[tile].indices[candidate/2u]>>(16u*(candidate&1u)))&65535u; }
+        // An overflowing tile's population is the global live list.
+        var id=INVALID_LIGHT;
+        if overflow { id=live_light(candidate); }
+        else { id=(grid[tile].indices[candidate/2u]>>(16u*(candidate&1u)))&65535u; }
         if id==tile_proposals[0].key_light { return sampled_proposal(INVALID_LIGHT,0.0); }
         return sampled_proposal(id,f32(population));
     }
@@ -83,15 +85,20 @@ fn discovery_proposal(pixel: vec2<u32>, tile: u32, population: u32, overflow: bo
         let roll=(f32(candidate)+random(rng))/f32(candidate_count);
         // Reserve a uniform component so floating-point proposal tables cannot
         // remove support for dim lights or a poorly represented receiver.
+        // Uniform over live lights, not allocated rows: vacant rows carry no
+        // light, so the estimator is unchanged and no sample is wasted on them.
+        let live_count=live_light_count();
+        if live_count==0u { return sampled_proposal(INVALID_LIGHT,0.0); }
         let uniform_fraction=0.0625;
-        let uniform_pdf=uniform_fraction/f32(globals.light_count);
+        let uniform_pdf=uniform_fraction/f32(live_count);
         if roll<uniform_fraction {
-            let id=min(u32(roll/uniform_fraction*f32(globals.light_count)),globals.light_count-1u);
+            let k=min(u32(roll/uniform_fraction*f32(live_count)),live_count-1u);
+            let id=live_light(k);
             if id==tile_proposals[coarse*256u].key_light { return sampled_proposal(INVALID_LIGHT,0.0); }
             let total=tile_proposals[coarse*256u].total_weight;
             var weight=0.0;
-            if globals.light_count<=1024u {
-                weight=tile_proposals[coarse*256u+id%256u].weights[id/256u];
+            if live_count<=1024u {
+                weight=tile_proposals[coarse*256u+k%256u].weights[k/256u];
             } else {
                 let center=min((pixel/COARSE_TILE_SIZE)*COARSE_TILE_SIZE+vec2<u32>(COARSE_TILE_SIZE/2u),globals.screen_size-1u);
                 let center_position=world_position(vec2<f32>(center)+0.5,textureLoad(gbuf_depth,vec2<i32>(center),0));
@@ -105,7 +112,7 @@ fn discovery_proposal(pixel: vec2<u32>, tile: u32, population: u32, overflow: bo
         let entry=tile_proposals[coarse*256u+slot];
         let index=select(slot,entry.alias_index,fract(scaled)>=entry.alias_probability);
         let proposal=tile_proposals[coarse*256u+index];
-        if globals.light_count<=1024u {
+        if live_count<=1024u {
             let weights=proposal.weights;
             let group_weight=weights[0]+weights[1]+weights[2]+weights[3];
             if group_weight<=0.0 { return sampled_proposal(INVALID_LIGHT,0.0); }
@@ -114,8 +121,10 @@ fn discovery_proposal(pixel: vec2<u32>, tile: u32, population: u32, overflow: bo
             if roll_in_group>=weights[0] { member=1u; }
             if roll_in_group>=weights[0]+weights[1] { member=2u; }
             if roll_in_group>=weights[0]+weights[1]+weights[2] { member=3u; }
-            let id=index+256u*member;
-            if id>=globals.light_count || id==proposal.key_light { return sampled_proposal(INVALID_LIGHT,0.0); }
+            let k=index+256u*member;
+            if k>=live_count { return sampled_proposal(INVALID_LIGHT,0.0); }
+            let id=live_light(k);
+            if id==proposal.key_light { return sampled_proposal(INVALID_LIGHT,0.0); }
             let pdf=(1.0-uniform_fraction)*weights[member]/max(proposal.total_weight,1e-20)+uniform_pdf;
             return sampled_proposal(id,1.0/pdf);
         }
@@ -124,8 +133,9 @@ fn discovery_proposal(pixel: vec2<u32>, tile: u32, population: u32, overflow: bo
         return sampled_proposal(proposal.id,1.0/pdf);
     }
     let pick=min(u32((f32(candidate)+random(rng))*(f32(population)/f32(candidate_count))),population-1u);
-    var id=pick;
-    if !overflow { id=(grid[tile].indices[pick/2u]>>(16u*(pick&1u)))&65535u; }
+    var id=INVALID_LIGHT;
+    if overflow { id=live_light(pick); }
+    else { id=(grid[tile].indices[pick/2u]>>(16u*(pick&1u)))&65535u; }
     if USE_TILE_PRESAMPLING && globals.light_count<=65535u {
         if id==tile_proposals[0].key_light { id=INVALID_LIGHT; }
     }
@@ -155,17 +165,18 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
             let tile=(pixel.y/TILE_SIZE)*div_ceil(globals.screen_size,TILE_SIZE).x+pixel.x/TILE_SIZE;
             let grid_count=grid[tile].count;
             let overflow=grid_count>GRID_CAPACITY;
-            let population=select(grid_count,globals.light_count,overflow);
+            let population=select(grid_count,live_light_count(),overflow);
             if population<=pixel_sample_count || (USE_RAY_TRANSMISSION && population<=32u) || globals.debug_mode==1u {
                 // Exact path for small sets, and an uncapped oracle for GPU regression tests.
                 // Transmitting sheets create sharp chromatic visibility changes;
                 // use exact local sets up to 32 lights at the shading resolution.
                 // This is a separate quality/cost tier from the opaque two-ray path.
-                let n=select(population,globals.light_count,globals.debug_mode==1u);
+                let n=select(population,live_light_count(),globals.debug_mode==1u);
                 let origin=shadow_receiver(s.position,s.normal,vec2<f32>(pixel)+0.5);
                 for(var i=0u;i<n;i++) {
-                    var id=i;
-                    if !overflow && globals.debug_mode!=1u { id=((grid[tile].indices[i/2u]>>(16u*(i&1u)))&65535u); }
+                    var id=INVALID_LIGHT;
+                    if overflow || globals.debug_mode==1u { id=live_light(i); }
+                    else { id=((grid[tile].indices[i/2u]>>(16u*(i&1u)))&65535u); }
                     if USE_TILE_PRESAMPLING && globals.light_count<=65535u && id==tile_proposals[0].key_light { continue; }
                     if USE_RAY_TRANSMISSION {
                         if !can_illuminate(id,s) { continue; }
@@ -456,7 +467,8 @@ fn sample_small(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgrou
     var result=Lighting(vec3<f32>(0.0),vec3<f32>(0.0));
     if textureLoad(gbuf_depth,vec2<i32>(pixel),0)<1.0 {
         let s=surface_at(pixel);
-        for(var id=0u;id<globals.light_count;id++) {
+        for(var k=0u;k<live_light_count();k++) {
+            let id=live_light(k);
             if USE_TILE_PRESAMPLING && id==tile_proposals[0].key_light { continue; }
             if importance(id,s)<=0.0 { continue; }
             let light=evaluate_light(id,s,trace_visibility(id,s,pixel));

@@ -13,17 +13,17 @@
 
 enable wgpu_ray_query;
 
-// GpuLight (matches Rust GpuLight in lighting.rs, 48 bytes)
+// A SceneDB `"scene_lights"` row: helio_pass_forward_lit::GpuLight, 128 bytes.
+// Only the leading fields are read; the tail keeps the row stride.
 struct GpuLight {
-    position:    vec3<f32>,
-    light_type:  f32,   // 0=directional, 1=point, 2=spot
-    direction:   vec3<f32>,
-    range:       f32,
-    color:       vec3<f32>,
-    intensity:   f32,
-    cos_inner:   f32,   // cos(inner_angle), precomputed on CPU
-    cos_outer:   f32,   // cos(outer_angle), precomputed on CPU
-    _pad:        vec2<f32>,
+    position_range:  vec4<f32>,  // xyz = position, w = range
+    direction_outer: vec4<f32>,  // xyz = direction, w = cos(outer angle)
+    color_intensity: vec4<f32>,  // rgb = colour, w = intensity
+    shadow_index:    u32,
+    light_type:      u32,        // 0 = directional, 1 = point, 2 = spot
+    inner_angle:     f32,        // cos(inner angle)
+    _pad:            u32,
+    _tail:           array<vec4<f32>, 4>,
 }
 
 struct RCDynamic {
@@ -56,6 +56,9 @@ struct CascadeStatic {
 @group(0) @binding(5) var<storage, read> lights: array<GpuLight>;
 @group(0) @binding(6) var cascade_history:        texture_2d<f32>;
 @group(0) @binding(7) var cascade_history_write:  texture_storage_2d<rgba16float, write>;
+// Live light rows (`RC_COMPACT_WGSL`): [0] = count, [1 + k] = row. Hits sum
+// over these only, never over vacant SceneDB rows (Helio/Pulsar-Native#838).
+@group(0) @binding(8) var<storage, read> live_lights: array<u32>;
 
 // Y-up octahedral decode (Y is the pole — uv center = +Y)
 fn oct_decode(uv: vec2<f32>) -> vec3<f32> {
@@ -94,23 +97,23 @@ fn eval_light(li: u32, hit_pos: vec3<f32>, hit_normal: vec3<f32>) -> vec3<f32> {
     var dist:     f32;
     var atten:    f32;
 
-    if light.light_type == 0.0f {
+    if light.light_type == 0u {
         // Directional
-        to_light = -light.direction;
+        to_light = -light.direction_outer.xyz;
         dist     = 1000.0;
         atten    = 1.0;
     } else {
         // Point / Spot
-        let diff = light.position - hit_pos;
+        let diff = light.position_range.xyz - hit_pos;
         dist     = length(diff);
-        if dist >= light.range { return vec3<f32>(0.0); }
+        if dist >= light.position_range.w { return vec3<f32>(0.0); }
         to_light = diff / dist;
-        atten    = clamp(1.0 - (dist / light.range), 0.0, 1.0);
+        atten    = clamp(1.0 - (dist / light.position_range.w), 0.0, 1.0);
         atten    = atten * atten;
-        if light.light_type > 1.5f {
-            let cos_angle  = dot(-to_light, light.direction);
-            let cos_outer  = light.cos_outer;
-            let cos_inner  = light.cos_inner;
+        if light.light_type == 2u {
+            let cos_angle  = dot(-to_light, light.direction_outer.xyz);
+            let cos_outer  = light.direction_outer.w;
+            let cos_inner  = light.inner_angle;
             let spot_atten = clamp((cos_angle - cos_outer) / (cos_inner - cos_outer + 0.001), 0.0, 1.0);
             atten *= spot_atten;
         }
@@ -126,7 +129,7 @@ fn eval_light(li: u32, hit_pos: vec3<f32>, hit_normal: vec3<f32>) -> vec3<f32> {
     let origin = hit_pos + hit_normal * 0.004;
     var vis = 0.0;
 
-    if light.light_type == 0.0f {
+    if light.light_type == 0u {
         // Directional — single ray toward the sun, t_max = effectively infinite
         var sq: ray_query;
         rayQueryInitialize(&sq, acc_struct,
@@ -150,7 +153,7 @@ fn eval_light(li: u32, hit_pos: vec3<f32>, hit_normal: vec3<f32>) -> vec3<f32> {
 
         for (var si: u32 = 0u; si < 4u; si++) {
             let off         = offsets[si] * light_radius;
-            let light_point = light.position + perp * off.x + perp2 * off.y;
+            let light_point = light.position_range.xyz + perp * off.x + perp2 * off.y;
             let ray_dir     = normalize(light_point - hit_pos);
             let ray_dist    = length(light_point - hit_pos);
             var sq: ray_query;
@@ -163,7 +166,7 @@ fn eval_light(li: u32, hit_pos: vec3<f32>, hit_normal: vec3<f32>) -> vec3<f32> {
         }
     }
 
-    return light.color * light.intensity * atten * ndotl * vis;
+    return light.color_intensity.rgb * light.color_intensity.w * atten * ndotl * vis;
 }
 
 @compute @workgroup_size(8, 8)
@@ -211,8 +214,9 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // Accumulate all scene lights at hit point
         var light_contrib = vec3<f32>(0.0);
-        for (var li: u32 = 0u; li < rc_dyn.light_count; li++) {
-            light_contrib += eval_light(li, hit_pos, hit_normal);
+        let live_count = min(live_lights[0], arrayLength(&live_lights) - 1u);
+        for (var k: u32 = 0u; k < live_count; k++) {
+            light_contrib += eval_light(live_lights[k + 1u], hit_pos, hit_normal);
         }
 
         radiance   = light_contrib;
@@ -258,8 +262,8 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     textureStore(cascade_out,           vec2<i32>(i32(gid.x), i32(gid.y)),
         vec4<f32>(radiance, throughput));
-    // Write the same value into the history ping-pong buffer so the next
-    // frame can read it without a copy_texture_to_texture blit pass.
+    // Write the same value into the other history texture (RtTargets' ping-pong)
+    // so the next frame reads it without a copy and never aliases (Helio#304).
     textureStore(cascade_history_write, vec2<i32>(i32(gid.x), i32(gid.y)),
         vec4<f32>(radiance, throughput));
-}
+}
