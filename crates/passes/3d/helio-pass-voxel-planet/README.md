@@ -268,9 +268,9 @@ in `frames.csv`); compare interleaved A/B runs, not runs minutes apart; other
 desktop applications share the GPU.
 
 Latest editor trip (30 deg from the pole, 1080p Quality, RTX 3060, sun
-overhead): terrain GPU p50 / p95 settle 4.0 / 8.8 ms (while loading), climb
-3.2 / 4.5, orbit 2.7 / 3.1, descend 3.3 / 3.8, low flight 3.6 / 4.0; worst
-residency CPU per frame 5.1 ms.
+overhead): terrain GPU p50 / p95 settle 4.3 / 9.2 ms (while loading), climb
+3.3 / 3.9, orbit 2.9 / 3.3, descend 3.5 / 4.0, low flight 3.8 / 4.2; worst
+residency CPU per frame 6.2 ms; no holes on any frame (probe).
 
 ## Tests
 
