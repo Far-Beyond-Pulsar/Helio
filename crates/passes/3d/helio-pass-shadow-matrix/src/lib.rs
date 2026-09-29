@@ -38,10 +38,9 @@ pub struct ShadowMatrixPass {
     shadow_atlas_size: u32,
     /// Faces the matrices buffer holds (its size / 64 bytes).
     face_capacity: u32,
-    /// Bumped when light rows are uploaded or the camera moves: every caster's
-    /// cached (static) faces are then re-rendered. Directional cascades follow
-    /// the camera; SceneDB's content generation reports light edits.
-    caster_generation: u64,
+    /// What `per_caster_generation` was last bumped for: SceneDB's content
+    /// generation reports light edits, and directional cascades follow the
+    /// camera.
     last_lights_generation: Option<u64>,
     last_view_proj: [f32; 16],
     /// Advances every frame so ShadowPass runs its GPU-gated per-face path,
@@ -59,6 +58,37 @@ pub struct ShadowMatrixPass {
     caster_key: Option<(u64, u64, u32, u32)>,
     /// Set by `prepare` when `caster_key` is stale; `execute` reallocates.
     caster_rebuild: Option<(u64, u64, u32, u32)>,
+    /// `[caster count, light_type per slot]`, written by the allocation.
+    caster_table: wgpu::Buffer,
+    /// CPU-mappable copy of `caster_table`.
+    caster_table_staging: wgpu::Buffer,
+    caster_readback: CasterReadback,
+    /// An allocation whose table still has to be copied out. The copy waits
+    /// while the staging buffer is being mapped; the table persists on the
+    /// GPU until the next allocation, so a later frame's copy is as good.
+    caster_copy_wanted: Option<(CasterKey, u32)>,
+    /// Bumped per allocation and echoed by the kernel into `caster_table`.
+    caster_nonce: u32,
+    /// The allocation's layout, with the `caster_key` it was read for.
+    caster_layout: Option<(CasterKey, CasterLayout)>,
+    /// Per-slot dirty generations (what `ShadowPass` compares). Light edits
+    /// dirty every slot; camera movement only the camera-fitted ones.
+    per_caster_generation: [u64; 42],
+}
+
+type CasterKey = (u64, u64, u32, u32);
+
+/// Bytes of `caster_table`: the count plus one light type per slot.
+const CASTER_TABLE_BYTES: u64 = 4 * (2 + MAX_SHADOW_CASTERS as u64);
+
+/// Reading `caster_table` back after an allocation. Mapping has to wait for
+/// the copy's submission, so the copy and the map request are a frame apart.
+enum CasterReadback {
+    Idle,
+    /// The copy for this key is recorded; map it next frame.
+    Copied((CasterKey, u32)),
+    /// Map requested; the callback stores whether it succeeded.
+    Mapping((CasterKey, u32), std::sync::Arc<std::sync::Mutex<Option<bool>>>),
 }
 
 /// Uniforms of `shadow_casters.wgsl`.
@@ -67,7 +97,10 @@ pub struct ShadowMatrixPass {
 struct CasterParams {
     row_count: u32,
     caster_capacity: u32,
-    _pad: [u32; 2],
+    /// Echoed into `caster_table`, so a readback proves it holds this
+    /// allocation rather than an older one.
+    nonce: u32,
+    _pad: u32,
 }
 
 /// Most casters any consumer addresses (`MAX_SHADOW_LIGHTS` in the lighting
@@ -211,6 +244,16 @@ impl ShadowMatrixPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let caster_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -219,8 +262,25 @@ impl ShadowMatrixPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let caster_bind_group =
-            Self::bind_casters(device, &caster_bind_group_layout, lights_buf, &caster_params_buf);
+        let caster_table = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Shadow caster table"),
+            size: CASTER_TABLE_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let caster_table_staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Shadow caster table readback"),
+            size: CASTER_TABLE_BYTES,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let caster_bind_group = Self::bind_casters(
+            device,
+            &caster_bind_group_layout,
+            lights_buf,
+            &caster_params_buf,
+            &caster_table,
+        );
         let caster_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow caster allocation PL"),
             bind_group_layouts: &[Some(&caster_bind_group_layout)],
@@ -247,7 +307,6 @@ impl ShadowMatrixPass {
             bound_lights: lights_buf.clone(),
             shadow_atlas_size: shadow_atlas_size.max(1),
             face_capacity: (shadow_matrix_buf.size() / std::mem::size_of::<GpuShadowMatrix>() as u64) as u32,
-            caster_generation: 1,
             last_lights_generation: None,
             last_view_proj: [0.0; 16],
             frame_generation: 0,
@@ -257,6 +316,13 @@ impl ShadowMatrixPass {
             caster_params_buf,
             caster_key: None,
             caster_rebuild: None,
+            caster_table,
+            caster_table_staging,
+            caster_readback: CasterReadback::Idle,
+            caster_copy_wanted: None,
+            caster_nonce: 0,
+            caster_layout: None,
+            per_caster_generation: [1; 42],
         }
     }
 
@@ -281,6 +347,7 @@ impl ShadowMatrixPass {
         layout: &wgpu::BindGroupLayout,
         lights: &wgpu::Buffer,
         params: &wgpu::Buffer,
+        caster_table: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shadow caster allocation BG"),
@@ -288,8 +355,72 @@ impl ShadowMatrixPass {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: lights.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: caster_table.as_entire_binding() },
             ],
         })
+    }
+
+    /// The caster layout, only while it describes the current allocation.
+    fn current_layout(&self) -> Option<CasterLayout> {
+        match (&self.caster_layout, self.caster_key, &self.caster_rebuild) {
+            (Some((key, layout)), Some(current), None) if *key == current => Some(*layout),
+            _ => None,
+        }
+    }
+
+    /// Advance the caster-table readback: request the map a frame after the
+    /// copy was submitted, and take the result once the host's device poll
+    /// has delivered it. Never blocks.
+    fn poll_caster_readback(&mut self) {
+        match &self.caster_readback {
+            CasterReadback::Idle => {}
+            CasterReadback::Copied(key) => {
+                let key = *key;
+                let done = std::sync::Arc::new(std::sync::Mutex::new(None));
+                let callback_done = std::sync::Arc::clone(&done);
+                self.caster_table_staging
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| {
+                        if let Ok(mut done) = callback_done.lock() {
+                            *done = Some(result.is_ok());
+                        }
+                    });
+                self.caster_readback = CasterReadback::Mapping(key, done);
+            }
+            CasterReadback::Mapping(allocation, done) => {
+                let (key, nonce) = *allocation;
+                let Some(mapped) = done.lock().ok().and_then(|done| *done) else {
+                    return;
+                };
+                let layout = mapped.then(|| {
+                    let layout = {
+                        let bytes = self.caster_table_staging.slice(..).get_mapped_range();
+                        let words: &[u32] = bytemuck::cast_slice(&bytes);
+                        // A copy lost with a failed frame leaves an older
+                        // table (or zeros) behind; the nonce tells them apart.
+                        (words[1 + MAX_SHADOW_CASTERS as usize] == nonce).then(|| {
+                            let mut light_types = [0u32; 42];
+                            light_types.copy_from_slice(&words[1..43]);
+                            CasterLayout {
+                                caster_count: words[0].min(MAX_SHADOW_CASTERS),
+                                light_types,
+                            }
+                        })
+                    };
+                    self.caster_table_staging.unmap();
+                    layout
+                });
+                match layout.flatten() {
+                    Some(layout) => self.caster_layout = Some((key, layout)),
+                    // Unreadable or stale: copy again while it is current.
+                    None if self.caster_key == Some(key) => {
+                        self.caster_copy_wanted = Some((key, nonce));
+                    }
+                    None => {}
+                }
+                self.caster_readback = CasterReadback::Idle;
+            }
+        }
     }
 
     /// Record the caster allocation: one workgroup over every light row.
@@ -348,8 +479,9 @@ impl RenderPass for ShadowMatrixPass {
             ShadowMatricesFrameData {
                 shadow_matrices: matrices,
                 shadow_count: self.face_capacity,
-                per_caster_dirty_gen: [self.caster_generation; 42],
+                per_caster_dirty_gen: self.per_caster_generation,
                 movable_objects_generation: self.frame_generation,
+                caster_layout: self.current_layout(),
             },
             self.name(),
         );
@@ -365,6 +497,7 @@ impl RenderPass for ShadowMatrixPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        self.poll_caster_readback();
         let lights = ctx.scene_buffers.get(helio_core::BufferKey::of("scene_lights"));
         // SceneDB grows the lights buffer with the scene: follow the
         // reallocation instead of reading the buffer bound at construction.
@@ -387,6 +520,7 @@ impl RenderPass for ShadowMatrixPass {
                 &self.caster_bind_group_layout,
                 &self.bound_lights,
                 &self.caster_params_buf,
+                &self.caster_table,
             );
             self.caster_key = None;
         }
@@ -397,7 +531,8 @@ impl RenderPass for ShadowMatrixPass {
         });
         self.caster_rebuild = caster_key.filter(|key| self.caster_key != Some(*key));
         if let Some((_, _, row_count, caster_capacity)) = self.caster_rebuild {
-            let params = CasterParams { row_count, caster_capacity, _pad: [0; 2] };
+            self.caster_nonce = self.caster_nonce.wrapping_add(1);
+            let params = CasterParams { row_count, caster_capacity, nonce: self.caster_nonce, _pad: 0 };
             ctx.queue.write_buffer(&self.caster_params_buf, 0, bytemuck::bytes_of(&params));
         }
         let u = ShadowMatrixUniforms {
@@ -408,10 +543,18 @@ impl RenderPass for ShadowMatrixPass {
         ctx.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
         let lights_generation = lights.map(|lights| lights.content_generation);
-        if lights_generation != self.last_lights_generation
-            || ctx.camera_data.view_proj != self.last_view_proj
-        {
-            self.caster_generation += 1;
+        let lights_changed = lights_generation != self.last_lights_generation;
+        let camera_moved = ctx.camera_data.view_proj != self.last_view_proj;
+        if lights_changed || camera_moved {
+            // A light edit can change any caster. Camera movement only moves
+            // the cascades fitted to the view, so once the layout is known,
+            // point and spot casters keep their cached faces.
+            let layout = self.current_layout();
+            for (slot, generation) in self.per_caster_generation.iter_mut().enumerate() {
+                if lights_changed || layout.map_or(true, |layout| layout.follows_camera(slot)) {
+                    *generation += 1;
+                }
+            }
             self.last_lights_generation = lights_generation;
             self.last_view_proj = ctx.camera_data.view_proj;
         }
@@ -432,6 +575,21 @@ impl RenderPass for ShadowMatrixPass {
         if let Some(key) = self.caster_rebuild.take() {
             self.record_caster_allocation(unsafe { &mut *ctx.encoder_ptr });
             self.caster_key = Some(key);
+            self.caster_copy_wanted = Some((key, self.caster_nonce));
+        }
+        // Copy the table out for the CPU once the staging buffer is free
+        // (a buffer with a map pending cannot be written by a submission).
+        if matches!(self.caster_readback, CasterReadback::Idle) {
+            if let Some(key) = self.caster_copy_wanted.take() {
+                unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
+                    &self.caster_table,
+                    0,
+                    &self.caster_table_staging,
+                    0,
+                    CASTER_TABLE_BYTES,
+                );
+                self.caster_readback = CasterReadback::Copied(key);
+            }
         }
         let wg = count.div_ceil(WORKGROUP_SIZE);
         let mut pass =

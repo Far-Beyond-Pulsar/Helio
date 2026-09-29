@@ -534,6 +534,15 @@ impl RenderPass for ShadowPass {
         let static_gen = batch.shadow_static_generation;
         let shadow_count = shadow_data.shadow_count;
         let caster_count = (face_count / 6).min(42);
+        // Faces worth a render pass: each allocated caster's used faces
+        // (directional 4, spot 1, point 6). Every caster reserves six and the
+        // atlas holds capacity for 42, so without this every frame opened a
+        // pass per reserved face whether or not a light owned it. Until the
+        // allocation has been read back, every face is treated as in use.
+        let active_faces: Vec<usize> = match shadow_data.caster_layout {
+            Some(layout) => layout.active_faces(face_count).collect(),
+            None => (0..face_count).collect(),
+        };
 
         let need_static = self.static_atlas_cache_gen != Some(static_gen)
             || shadow_count != self.last_rendered_shadow_count;
@@ -616,7 +625,7 @@ impl RenderPass for ShadowPass {
         if need_static || any_dirty_caster {
             let static_indirect = batch.shadow_static_indirect;
             if static_draw_count > 0 {
-                for face in 0..face_count {
+                for &face in &active_faces {
                     let caster_slot = face / 6;
                     if !need_static && (caster_slot >= 42 || !dirty_casters[caster_slot]) {
                         continue;
@@ -646,15 +655,16 @@ impl RenderPass for ShadowPass {
                     pass.set_bind_group(0, bg, &[dyn_offset]);
                     pass.set_vertex_buffer(0, vertices.buffer.slice(..));
                     pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    #[cfg(not(target_arch = "wasm32"))]
-                    pass.multi_draw_indexed_indirect(static_indirect, 0, static_draw_count);
-                    #[cfg(target_arch = "wasm32")]
-                    for i in 0..static_draw_count {
-                        pass.draw_indexed_indirect(static_indirect, i as u64 * 20);
-                    }
+                    helio_pass_gbuffer::multi_draw_indexed_indirect(
+                        &mut pass,
+                        static_indirect,
+                        0,
+                        static_draw_count,
+                        batch.shadow_static_count_slot(),
+                    );
                 }
             } else if need_static {
-                for face in 0..face_count {
+                for &face in &active_faces {
                     let face_view = &self.static_face_views[face];
                     let _pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
                         &wgpu::RenderPassDescriptor {
@@ -683,7 +693,7 @@ impl RenderPass for ShadowPass {
                     .scene_buffers
                     .get(BufferKey::of("materials"))
                     .map(|handle| handle.buffer.clone());
-                for face in 0..face_count {
+                for &face in &active_faces {
                     let caster_slot = face / 6;
                     if !need_static && (caster_slot >= 42 || !dirty_casters[caster_slot]) {
                         continue;
@@ -698,6 +708,7 @@ impl RenderPass for ShadowPass {
                         static_depth,
                         batch.shadow_transmissive_indirect,
                         batch.shadow_transmissive_draw_count,
+                        batch.shadow_transmissive_count_slot(),
                         &vertices.buffer,
                         &indices.buffer,
                     );
@@ -730,7 +741,7 @@ impl RenderPass for ShadowPass {
         //     clean faces.  The loop runs for all active faces but clean faces produce
         //     a near-zero-cost render pass (LoadOp::Load with 0 GPU draws).
         if any_dirty_caster || objects_moved {
-            for face in 0..face_count {
+            for &face in &active_faces {
                 let caster_slot = face / 6;
                 let light_dirty = caster_slot < 42 && dirty_casters[caster_slot];
                 let face_view = &self.face_views[face];

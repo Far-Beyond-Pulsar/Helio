@@ -647,14 +647,15 @@ impl RenderPass for ForwardLitPass {
             let pipeline =
                 self.get_or_create_pipeline(&ctx.device, key, "", self.render_all_opaque);
             pass.set_pipeline(pipeline);
-            #[cfg(not(target_arch = "wasm32"))]
-            pass.multi_draw_indexed_indirect(indirect, 0, draw_count);
-            #[cfg(target_arch = "wasm32")]
-            for i in 0..draw_count {
-                pass.draw_indexed_indirect(indirect, i as u64 * 20);
-            }
+            helio_pass_gbuffer::multi_draw_indexed_indirect(
+                pass,
+                indirect,
+                0,
+                draw_count,
+                batch.all_draws_count_slot(),
+            );
         } else {
-            for &(class, graph_hash, start, count) in ranges {
+            for (range, &(class, graph_hash, start, count)) in ranges.iter().enumerate() {
                 if count == 0 {
                     continue;
                 }
@@ -673,12 +674,14 @@ impl RenderPass for ForwardLitPass {
                     self.render_all_opaque,
                 );
                 pass.set_pipeline(pipeline);
-                #[cfg(not(target_arch = "wasm32"))]
-                pass.multi_draw_indexed_indirect(indirect, start as u64 * 20, count);
-                #[cfg(target_arch = "wasm32")]
-                for i in start..start + count {
-                    pass.draw_indexed_indirect(indirect, i as u64 * 20);
-                }
+                let gpu_count = if self.render_all_opaque {
+                    batch.opaque_range_count_slot(range)
+                } else {
+                    batch.forward_range_count_slot(range)
+                };
+                helio_pass_gbuffer::multi_draw_indexed_indirect(
+                    pass, indirect, start, count, gpu_count,
+                );
             }
         }
         Ok(())

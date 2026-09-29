@@ -304,6 +304,95 @@ pub fn create_reflected_bind_groups_with_layouts<'a>(
         .collect()
 }
 
+/// What one bind-group entry binds, by resource identity: equal keys mean
+/// an existing bind group binds exactly the same resources.
+#[derive(Clone, PartialEq, Eq)]
+enum BindingIdentity {
+    Buffer(wgpu::Buffer, wgpu::BufferAddress, Option<wgpu::BufferSize>),
+    Buffers(Vec<(wgpu::Buffer, wgpu::BufferAddress, Option<wgpu::BufferSize>)>),
+    Sampler(wgpu::Sampler),
+    Samplers(Vec<wgpu::Sampler>),
+    TextureView(wgpu::TextureView),
+    TextureViews(Vec<wgpu::TextureView>),
+}
+
+/// `None` for a resource kind without a known identity; such a group is
+/// rebuilt every time, as all of them used to be.
+fn binding_identity(entry: &wgpu::BindGroupEntry<'_>) -> Option<(u32, BindingIdentity)> {
+    let buffer = |b: &wgpu::BufferBinding<'_>| (b.buffer.clone(), b.offset, b.size);
+    let identity = match &entry.resource {
+        wgpu::BindingResource::Buffer(binding) => {
+            let (buffer, offset, size) = buffer(binding);
+            BindingIdentity::Buffer(buffer, offset, size)
+        }
+        wgpu::BindingResource::BufferArray(bindings) => {
+            BindingIdentity::Buffers(bindings.iter().map(buffer).collect())
+        }
+        wgpu::BindingResource::Sampler(sampler) => BindingIdentity::Sampler((*sampler).clone()),
+        wgpu::BindingResource::SamplerArray(samplers) => {
+            BindingIdentity::Samplers(samplers.iter().map(|s| (*s).clone()).collect())
+        }
+        wgpu::BindingResource::TextureView(view) => BindingIdentity::TextureView((*view).clone()),
+        wgpu::BindingResource::TextureViewArray(views) => {
+            BindingIdentity::TextureViews(views.iter().map(|v| (*v).clone()).collect())
+        }
+        _ => return None,
+    };
+    Some((entry.binding, identity))
+}
+
+/// A reflected bind group kept across frames, with what it was built from.
+pub struct CachedReflectedGroup {
+    layout: wgpu::BindGroupLayout,
+    key: Vec<(u32, BindingIdentity)>,
+    group: wgpu::BindGroup,
+}
+
+/// [`create_reflected_bind_groups_with_layouts`], reusing each group from
+/// `cache` while its layout and bound resources are unchanged (Helio#307).
+///
+/// Resolving the entries each frame is a few registry lookups; creating a
+/// bind group is wgpu-side validation and a descriptor allocation, and the
+/// graph used to do that for every reflected group of every pass on every
+/// frame. `cache` holds one slot per group and is resized to fit.
+pub fn reuse_or_create_reflected_bind_groups<'a>(
+    label: &str,
+    bindings: &[ReflectedBinding],
+    layouts: &[wgpu::BindGroupLayout],
+    overrides: &crate::graph::BindingOverrideBuilder,
+    resources: &crate::ResourceRegistry<'a>,
+    device: &wgpu::Device,
+    cache: &mut Vec<Option<CachedReflectedGroup>>,
+) -> Result<Vec<wgpu::BindGroup>, ReflectionError> {
+    cache.truncate(layouts.len());
+    cache.resize_with(layouts.len(), || None);
+    layouts
+        .iter()
+        .enumerate()
+        .map(|(group, layout)| {
+            let entries =
+                populate_bind_group_entries(bindings, group as u32, overrides, resources)?;
+            let key: Option<Vec<_>> = entries.iter().map(binding_identity).collect();
+            if let (Some(key), Some(cached)) = (key.as_ref(), cache[group].as_ref()) {
+                if cached.layout == *layout && cached.key == *key {
+                    return Ok(cached.group.clone());
+                }
+            }
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("{label} Group {group}")),
+                layout,
+                entries: &entries,
+            });
+            cache[group] = key.map(|key| CachedReflectedGroup {
+                layout: layout.clone(),
+                key,
+                group: bind_group.clone(),
+            });
+            Ok(bind_group)
+        })
+        .collect()
+}
+
 /// Creates all bind groups for a reflected shader from the generic resource
 /// projection. Layouts and groups are returned together so callers can keep
 /// the layouts alive for pipelines and reuse the groups until their resource

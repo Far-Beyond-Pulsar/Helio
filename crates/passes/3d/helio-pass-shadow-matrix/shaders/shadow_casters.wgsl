@@ -48,12 +48,16 @@ struct GpuLight {
 struct CasterParams {
     row_count: u32,
     caster_capacity: u32,
-    _pad0: u32,
+    nonce: u32,
     _pad1: u32,
 }
 
 @group(0) @binding(0) var<storage, read_write> lights: array<GpuLight>;
 @group(0) @binding(1) var<uniform> params: CasterParams;
+/// The allocation for the CPU: `[0]` = casters assigned, `[1 + slot]` =
+/// that slot's `light_type`, last word = `params.nonce`. Read back by ShadowMatrixPass so ShadowPass
+/// renders only the faces each caster uses.
+@group(0) @binding(2) var<storage, read_write> caster_table: array<u32>;
 
 const THREADS: u32 = 256u;
 const NO_SHADOW: u32 = 0xFFFFFFFFu;
@@ -220,9 +224,18 @@ fn assign_shadow_casters(@builtin(local_invocation_index) lid: u32) {
         lights[i]._pad = pad;
         if wins {
             lights[i].shadow_index = slot * FACES_PER_CASTER;
+            if 1u + slot < arrayLength(&caster_table) - 1u {
+                caster_table[1u + slot] = light.light_type;
+            }
             slot++;
         } else {
             lights[i].shadow_index = NO_SHADOW;
         }
+    }
+    // Slots are handed out in thread order, so the last thread ends on the
+    // total.
+    if lid == THREADS - 1u {
+        caster_table[0] = slot;
+        caster_table[arrayLength(&caster_table) - 1u] = params.nonce;
     }
 }

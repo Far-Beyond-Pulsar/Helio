@@ -67,4 +67,47 @@ pub struct ObjectBatchFrameData<'a> {
     /// `ObjectBatchPass::shadow_static_generation`'s doc. `helio-pass-
     /// shadow`'s static-atlas cache invalidation signal.
     pub shadow_static_generation: u64,
+    /// The draw counts above as a GPU `u32` array, for
+    /// `multi_draw_indexed_indirect_count` (Helio#306); `None` when the
+    /// device lacks `MULTI_DRAW_INDIRECT_COUNT`. Layout: `draw_count`,
+    /// `shadow_static_draw_count`, `shadow_movable_draw_count`,
+    /// `shadow_transmissive_draw_count`, then one count per entry of
+    /// `opaque_ranges`, `transparent_ranges` and `forward_ranges` in that
+    /// order. Read it through the `*_count_slot` methods.
+    pub draw_counts: Option<&'a wgpu::Buffer>,
+}
+
+impl<'a> ObjectBatchFrameData<'a> {
+    fn draw_count_slot(&self, index: usize) -> Option<crate::GpuDrawCount<'a>> {
+        self.draw_counts.map(|buffer| crate::GpuDrawCount {
+            buffer,
+            offset: index as u64 * 4,
+        })
+    }
+
+    /// GPU count for drawing all `draw_count` groups of `indirect`.
+    pub fn all_draws_count_slot(&self) -> Option<crate::GpuDrawCount<'a>> {
+        self.draw_count_slot(0)
+    }
+    pub fn shadow_static_count_slot(&self) -> Option<crate::GpuDrawCount<'a>> {
+        self.draw_count_slot(1)
+    }
+    pub fn shadow_movable_count_slot(&self) -> Option<crate::GpuDrawCount<'a>> {
+        self.draw_count_slot(2)
+    }
+    pub fn shadow_transmissive_count_slot(&self) -> Option<crate::GpuDrawCount<'a>> {
+        self.draw_count_slot(3)
+    }
+    /// GPU count for `opaque_ranges[range]`.
+    pub fn opaque_range_count_slot(&self, range: usize) -> Option<crate::GpuDrawCount<'a>> {
+        self.draw_count_slot(4 + range)
+    }
+    /// GPU count for `transparent_ranges[range]`.
+    pub fn transparent_range_count_slot(&self, range: usize) -> Option<crate::GpuDrawCount<'a>> {
+        self.draw_count_slot(4 + self.opaque_ranges.len() + range)
+    }
+    /// GPU count for `forward_ranges[range]`.
+    pub fn forward_range_count_slot(&self, range: usize) -> Option<crate::GpuDrawCount<'a>> {
+        self.draw_count_slot(4 + self.opaque_ranges.len() + self.transparent_ranges.len() + range)
+    }
 }

@@ -491,6 +491,10 @@ pub struct RenderGraph {
     /// Recording time after which the graphics encoder is cut into a new
     /// segment for the finish pool.
     finish_segment_budget: std::time::Duration,
+    /// Per pass, its reflected bind groups from the last frame and what they
+    /// bind, so an unchanged group is reused instead of recreated. A group's
+    /// key includes its layout, so a rebuilt pipeline invalidates it.
+    reflected_group_cache: Vec<Vec<Option<crate::shader::CachedReflectedGroup>>>,
     /// Whether to split the encoders at every pass boundary and time each
     /// segment's finish on the render thread instead. Diagnostic only: many
     /// small command buffers cost more in total than a few large ones.
@@ -542,7 +546,7 @@ impl RenderGraph {
     }
 
     fn create_reflected_groups(
-        &self,
+        &mut self,
         pass_index: usize,
         registry: &crate::ResourceRegistry<'_>,
     ) -> Result<Vec<wgpu::BindGroup>> {
@@ -553,13 +557,18 @@ impl RenderGraph {
         else {
             return Ok(Vec::new());
         };
-        crate::shader::create_reflected_bind_groups_with_layouts(
+        if self.reflected_group_cache.len() < self.passes.len() {
+            self.reflected_group_cache
+                .resize_with(self.passes.len(), Vec::new);
+        }
+        crate::shader::reuse_or_create_reflected_bind_groups(
             self.passes[pass_index].name(),
             &pipeline.bindings,
             &pipeline.layouts,
             &pipeline.overrides,
             registry,
             &self.device,
+            &mut self.reflected_group_cache[pass_index],
         )
         .map(|groups| groups)
         .map_err(|error| {
@@ -596,6 +605,7 @@ impl RenderGraph {
             #[cfg(not(target_arch = "wasm32"))]
             encoder_finish_pool: OnceLock::new(),
             finish_segment_budget: DEFAULT_FINISH_SEGMENT_BUDGET,
+            reflected_group_cache: Vec::new(),
             finish_breakdown_enabled: std::env::var_os(FINISH_BREAKDOWN_ENV)
                 .is_some_and(|value| value != "0"),
             finish_breakdown: Vec::new(),
@@ -742,6 +752,8 @@ impl RenderGraph {
             }
         } else {
             self.pool.clear();
+            // Cached reflected groups may bind the textures just dropped.
+            self.reflected_group_cache.clear();
             self.collect_declarations();
             let (writes, reads, _) = self.chain_read_write_sets();
             self.parallel_layers = compute_parallel_layers(&writes, &reads);
@@ -762,6 +774,8 @@ impl RenderGraph {
         self.output_w = width;
         self.output_h = height;
         self.pool.clear();
+        // Cached reflected groups may bind the textures just dropped.
+        self.reflected_group_cache.clear();
         self.collect_declarations();
         let (writes, reads, _) = self.chain_read_write_sets();
         self.parallel_layers = compute_parallel_layers(&writes, &reads);
@@ -1490,14 +1504,13 @@ impl RenderGraph {
         self.profiler
             .begin_gpu_pass(&mut compute_encoder, "__graph_compute");
         registry.reset_tracking("RenderGraph");
-        // Builds bind groups for every pass every frame.
+        // Resolves every pass's reflected bind groups, reusing last frame's
+        // where they bind the same resources.
         let reflected_groups: Vec<Vec<wgpu::BindGroup>> = {
             #[cfg(not(target_arch = "wasm32"))]
             profiling::profile_scope!("RenderGraph: create_reflected_groups");
-            self.passes
-                .iter()
-                .enumerate()
-                .map(|(pass_index, _)| self.create_reflected_groups(pass_index, registry))
+            (0..self.passes.len())
+                .map(|pass_index| self.create_reflected_groups(pass_index, registry))
                 .collect::<Result<Vec<_>>>()?
         };
         let resized_this_frame = self.resize_pending;
@@ -2218,6 +2231,8 @@ impl RenderGraph {
         self.output_w = width;
         self.output_h = height;
         self.pool.clear();
+        // Cached reflected groups may bind the textures just dropped.
+        self.reflected_group_cache.clear();
         self.collect_declarations();
         let (writes, reads, _) = self.chain_read_write_sets();
         self.parallel_layers = compute_parallel_layers(&writes, &reads);
@@ -2367,6 +2382,8 @@ impl RenderGraph {
 
         // Phase 4: re-allocate textures with chain-aware alias groups.
         self.pool.clear();
+        // Cached reflected groups may bind the textures just dropped.
+        self.reflected_group_cache.clear();
         self.allocate_textures();
         self.resources_allocated = true;
 
