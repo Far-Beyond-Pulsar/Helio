@@ -222,6 +222,8 @@ impl Default for DebugDrawState {
             user_tris_generation: 0,
             editor_volume_lines: Vec::new(),
             editor_volume_generation: 0,
+            editor_line_layers: std::collections::BTreeMap::new(),
+            editor_layers_generation: 0,
             color_blind_mode: 0,
         }
     }
@@ -762,7 +764,9 @@ pub struct DebugDrawPass {
     editor_volume_cache: Vec<DebugVertex>,
     editor_marker_lines: [DebugVertex; 6],
     editor_last_cam: Option<[f32; 3]>,
-    editor_last_volume_gen: Option<u64>,
+    /// `(editor_volume_generation, editor_layers_generation)` the cache was
+    /// last built from.
+    editor_last_volume_gen: Option<(u64, u64)>,
 }
 
 impl DebugDrawPass {
@@ -1001,9 +1005,13 @@ impl RenderPass for DebugDrawPass {
             // Camera movement only updates the procedural grid uniform and
             // the camera marker. No CPU grid is rebuilt or uploaded.
             let mut volume_rebuilt = false;
-            if self.editor_last_volume_gen != Some(volume_gen) {
+            let layers_gen = state.editor_layers_generation;
+            if self.editor_last_volume_gen != Some((volume_gen, layers_gen)) {
                 self.rebuild_editor_volume_cache(&state.editor_volume_lines);
-                self.editor_last_volume_gen = Some(volume_gen);
+                for layer in state.editor_line_layers.values() {
+                    self.editor_volume_cache.extend_from_slice(layer);
+                }
+                self.editor_last_volume_gen = Some((volume_gen, layers_gen));
                 volume_rebuilt = true;
             }
             drop(state);
