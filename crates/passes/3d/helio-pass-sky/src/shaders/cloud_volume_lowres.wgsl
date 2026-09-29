@@ -116,7 +116,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let camera = cameras[0];
     let world = camera.view_proj_inv * clip;
     let ro = camera.position_near.xyz;
-    let rd = normalize(world.xyz / world.w - ro);
+    // Homogeneous far point minus the eye: exact for any w, including w = 0
+    // when a tiny near/far ratio puts the far plane at f32 infinity.
+    let rd = normalize(world.xyz - world.w * ro);
     let hit = intersect_slab(ro, rd);
     if (hit.y <= hit.x) {
         textureStore(output, vec2<i32>(gid.xy), vec4<f32>(0.0));

@@ -323,10 +323,18 @@ fn apply_cas(rgb: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
 fn reproject_history(raster_uv: vec2<f32>, depth: f32) -> vec4<f32> {
     let ndc = raster_uv * vec2<f32>(2.0,-2.0) + vec2<f32>(-1.0,1.0);
     let world_h = cameras[0].inv_view_proj * vec4<f32>(ndc,depth,1.0);
-    let prev_clip = cameras[0].prev_view_proj * vec4<f32>(world_h.xyz/world_h.w,1.0);
+    // Far-plane texels (sky) reproject as directions: the homogeneous point
+    // minus the eye, exact for any w including w = 0 (a far plane at f32
+    // infinity). Dividing by w there gave NaN, and its derivatives made the
+    // depth tolerance of every pixel next to the sky NaN (history rejected
+    // along silhouettes). Sky has no history depth.
+    let sky = depth >= 1.0;
+    let point = select(vec4<f32>(world_h.xyz/world_h.w,1.0),
+        vec4<f32>(world_h.xyz - world_h.w*cameras[0].position_near.xyz,0.0), sky);
+    let prev_clip = cameras[0].prev_view_proj * point;
     let uv = prev_clip.xy/prev_clip.w * vec2<f32>(0.5,-0.5)+0.5;
-    let previous_position = tsr.previous_view * vec4<f32>(world_h.xyz/world_h.w,1.0);
-    return vec4<f32>(uv-tsr.previous_jitter_uv,prev_clip.w,-previous_position.z);
+    let previous_position = tsr.previous_view * point;
+    return vec4<f32>(uv-tsr.previous_jitter_uv,prev_clip.w,select(-previous_position.z,0.0,sky));
 }
 
 struct TsrOutput {

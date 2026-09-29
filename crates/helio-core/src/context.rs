@@ -660,6 +660,11 @@ pub struct PrepareContext<'a> {
     /// than hard-coding `0.016`.  Returns `0.0` if the host has not yet
     /// called `set_delta_time()`.
     pub delta_time: f32,
+
+    /// World position of the frame's coordinate origin for camera-relative
+    /// frames (`SceneInput::world_origin`). Passes that consume world-space
+    /// data (SceneDB rows in world coordinates) subtract it.
+    pub world_origin: Option<glam::DVec3>,
 }
 
 impl<'a> PrepareContext<'a> {

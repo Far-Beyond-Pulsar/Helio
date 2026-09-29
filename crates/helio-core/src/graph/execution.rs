@@ -1068,6 +1068,7 @@ impl RenderGraph {
                         width: internal_w,
                         height: internal_h,
                         delta_time,
+                        world_origin: scene.world_origin(),
                     };
                     // Name formatted only while recording; `prepare` often does
                     // the pass's buffer uploads, so it must be visible per pass.
@@ -1367,6 +1368,7 @@ impl RenderGraph {
                     width: self.internal_w,
                     height: self.internal_h,
                     delta_time: self.delta_time,
+                    world_origin: scene.world_origin(),
                 };
                 pass.declare_frame_demands(&plan_ctx, &mut self.frame_demands);
             }
@@ -1465,6 +1467,7 @@ impl RenderGraph {
                         width: self.internal_w,
                         height: self.internal_h,
                         delta_time: self.delta_time,
+                        world_origin: scene.world_origin(),
                     };
                     #[cfg(not(target_arch = "wasm32"))]
                     let _prepare_scope = profiling::is_profiling_enabled().then(|| {

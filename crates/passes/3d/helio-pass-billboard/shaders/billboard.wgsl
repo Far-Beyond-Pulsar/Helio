@@ -21,6 +21,9 @@ struct Globals {
     delta_time: f32,
     ambient_intensity: f32,
     _padding: f32,
+    // World position of the frame origin: camera-relative frames place the
+    // camera near it, while instance positions stay in world space.
+    world_origin: vec4<f32>,
 }
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform> globals: Globals;
@@ -64,7 +67,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) in
     let quad_position = quad_positions[vertex_index];
     let quad_uv = quad_uvs[vertex_index];
     let inst = instances[instance_index];
-    let world_pos    = inst.world_pos_pad.xyz;
+    let world_pos    = inst.world_pos_pad.xyz - globals.world_origin.xyz;
     let scale        = inst.scale_flags.xy;
     let screen_scale = inst.scale_flags.z > 0.5;
 
@@ -96,6 +99,12 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) in
 
     var out: VertexOut;
     out.clip_pos = cameras[0].view_proj * vec4<f32>(final_pos, 1.0); // view_proj at offset 128
+    // An instance at the eye has no facing direction (normalize(0) is NaN):
+    // collapse it outside the clip volume instead of emitting NaN vertices.
+    let rel = cam_pos - world_pos;
+    if !(dot(rel, rel) > 1e-8) {
+        out.clip_pos = vec4<f32>(0.0, 0.0, -1.0, 1.0);
+    }
     out.uv       = quad_uv;
     out.color    = inst.color;
     return out;

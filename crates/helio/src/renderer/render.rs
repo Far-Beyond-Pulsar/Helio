@@ -273,6 +273,7 @@ impl Renderer {
 
         if let Ok(mut state) = self.debug_state.lock() {
             state.camera_position = camera.position;
+            state.world_origin = self.world_origin;
         }
         let rc_radius = self.gi_config.rc_radius;
         let rc_min = [
@@ -650,6 +651,7 @@ impl Renderer {
                 &self.camera_data,
                 self.camera_generation,
                 self.frame_count,
+                self.world_origin,
             )
         };
         {

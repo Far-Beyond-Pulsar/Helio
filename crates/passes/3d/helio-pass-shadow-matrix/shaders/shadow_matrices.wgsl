@@ -185,10 +185,23 @@ fn compute_directional_cascades(light_idx: u32, direction: vec3f) {
         vec4f(-1.0,  1.0, 1.0, 1.0), vec4f(1.0,  1.0, 1.0, 1.0),
     );
 
+    // Near corners are finite. Far corners are only needed out to the last
+    // split: walk each corner ray (the homogeneous far point minus the eye,
+    // exact for any w) to that distance. Dividing by w gave inf/NaN when a
+    // tiny near/far ratio put the far plane at f32 infinity. Slices are the
+    // same as before whenever the far plane is finite and beyond the splits.
+    let eye = cameras[0].position_near.xyz;
     var world: array<vec3f, 8>;
     for (var i = 0u; i < 8u; i++) {
         let v = cameras[0].inv_view_proj * ndc[i];
-        world[i] = v.xyz / v.w;
+        if i < 4u {
+            world[i] = v.xyz / v.w;
+        } else {
+            let far_point = v.xyz / v.w;
+            let capped = eye + normalize(v.xyz - v.w * eye) * CSM_SPLITS.w;
+            let finite_far = v.w > 0.0 && length(far_point - eye) < CSM_SPLITS.w;
+            world[i] = select(capped, far_point, finite_far);
+        }
     }
 
     // Compute camera distances for near/far planes

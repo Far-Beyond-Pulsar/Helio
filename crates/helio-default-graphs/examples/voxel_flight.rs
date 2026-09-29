@@ -756,6 +756,38 @@ fn main() {
         audits.push(flight.audit(name, ground, f));
     }
 
+    if std::env::var_os("HELIO_VOXEL_FLIGHT_SKIM").is_some() {
+        // An editor camera held forward and down against the ground: it
+        // moves 10 m/s forward and 10 m/s down each 120 Hz frame and is
+        // lifted 0.5 m above the surface whenever it enters solid terrain.
+        // Editor mode draws the editor overlays (grid) like Pulsar's viewport.
+        flight.renderer.set_editor_mode(true);
+        let mut eye = ground;
+        let mut bad = 0;
+        for frame in 0..900 {
+            let up = up_for(eye).as_dvec3();
+            let ahead = tangent(eye, heading).as_dvec3();
+            eye += (ahead - up) * (10.0 / 120.0);
+            let (cell, _) = flight.planet.grid().locate(eye);
+            if flight.planet.solid(cell) {
+                eye = flight.planet.surface_point(eye, 0.5);
+            }
+            flight.draw("skim", eye, tangent(eye, heading));
+            if frame % 30 == 29 {
+                let pixels = flight.capture(&format!("skim_{frame:03}"));
+                let pink = pixels
+                    .chunks(4)
+                    .filter(|p| i32::from(p[0]) > i32::from(p[1]) + 40 && i32::from(p[0]) > i32::from(p[2]) + 30)
+                    .count() as f64
+                    / (pixels.len() / 4) as f64;
+                let clearance = flight.planet.air_clearance(eye);
+                eprintln!("SKIM frame {frame} clearance {clearance:.3} m pink {:.1}%", pink * 100.0);
+                bad += usize::from(pink > 0.01);
+            }
+        }
+        eprintln!("SKIM bad captures {bad}");
+        return;
+    }
     if std::env::var_os("HELIO_VOXEL_FLIGHT_GROUND_ONLY").is_some() {
         for a in &audits {
             eprintln!("GROUND audit {a}");
