@@ -31,7 +31,8 @@ pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridg
 pub use renderer::{
     recommended_instance_flags, required_experimental_features, required_wgpu_features,
     required_wgpu_limits,
-    BillboardInstance, DebugCameraUniform, DebugDrawPass, DebugDrawState, GiConfig, GraphRebuilder,
+    BillboardInstance, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex, GiConfig,
+    GraphRebuilder,
     PassBuildContext, PassGraphBuilderFn, PerfOverlayMode, RenderMode, Renderer,
     RendererBuilder, RendererConfig, SceneDbHandle,
 };

@@ -392,24 +392,30 @@ impl ShadowMatrixPass {
                 let Some(mapped) = done.lock().ok().and_then(|done| *done) else {
                     return;
                 };
-                let layout = mapped.then(|| {
-                    let layout = {
-                        let bytes = self.caster_table_staging.slice(..).get_mapped_range();
-                        let words: &[u32] = bytemuck::cast_slice(&bytes);
-                        // A copy lost with a failed frame leaves an older
-                        // table (or zeros) behind; the nonce tells them apart.
-                        (words[1 + MAX_SHADOW_CASTERS as usize] == nonce).then(|| {
-                            let mut light_types = [0u32; 42];
-                            light_types.copy_from_slice(&words[1..43]);
-                            CasterLayout {
-                                caster_count: words[0].min(MAX_SHADOW_CASTERS),
-                                light_types,
-                            }
-                        })
-                    };
+                let layout = if mapped {
+                    let layout = self
+                        .caster_table_staging
+                        .slice(..)
+                        .get_mapped_range()
+                        .ok()
+                        .and_then(|bytes| {
+                            let words: &[u32] = bytemuck::cast_slice(&bytes);
+                            // A copy lost with a failed frame leaves an older
+                            // table (or zeros) behind; the nonce tells them apart.
+                            (words[1 + MAX_SHADOW_CASTERS as usize] == nonce).then(|| {
+                                let mut light_types = [0u32; 42];
+                                light_types.copy_from_slice(&words[1..43]);
+                                CasterLayout {
+                                    caster_count: words[0].min(MAX_SHADOW_CASTERS),
+                                    light_types,
+                                }
+                            })
+                        });
                     self.caster_table_staging.unmap();
                     layout
-                });
+                } else {
+                    None
+                };
                 match layout.flatten() {
                     Some(layout) => self.caster_layout = Some((key, layout)),
                     // Unreadable or stale: copy again while it is current.
