@@ -150,9 +150,11 @@ impl Brush {
     }
 }
 
-/// Index tile edge at bucket `g`, in base cells.
+/// Index tile edge at bucket `g`, in base cells. The finest tiles are one
+/// column wide, so a query among thousands of single-block edits only sees
+/// the blocks of nearby columns.
 fn tile(g: u32) -> i64 {
-    64i64 << g
+    8i64 << g
 }
 
 /// Bucket whose tiles are at least one brush diameter wide.

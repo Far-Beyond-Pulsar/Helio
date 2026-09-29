@@ -203,6 +203,61 @@ fn edits_propagate_to_gpu_generation() {
     assert!(mismatched * 1000 <= compared, "{mismatched}/{compared}");
 }
 
+/// Destruction and construction at scale: a building of single 0.1 m
+/// blocks and a field of single-block holes (about 18 000 block edits)
+/// render exactly as the CPU world has them, with no failed generation and
+/// no loading rays once settled.
+#[test]
+fn thousands_of_block_edits_render_exactly() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 1, 0.52, 0.48);
+    let grid = *planet.grid();
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    let ground = planet.surface_point(dir, 0.0);
+    let block = |p: DVec3, op: BrushOp| {
+        let (cell, _) = grid.locate(p);
+        Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material: if op == BrushOp::Add { material::BRICK } else { 0 } }
+    };
+    let at = |x: i32, y: i32, z: i32| ground + side * (f64::from(x) * 0.1) + fwd * (f64::from(z) * 0.1 + 6.0) + up * (f64::from(y) * 0.1 + 0.55);
+    let started = std::time::Instant::now();
+    let mut count = 0;
+    for y in 0..60 {
+        for x in -20..20 {
+            for z in -20..20 {
+                let wall = x == -20 || x == 19 || z == -20 || z == 19;
+                if y % 10 == 0 || (wall && (x + z + y) % 7 != 0) {
+                    planet.apply(block(at(x, y, z), BrushOp::Add)).unwrap();
+                    count += 1;
+                }
+            }
+        }
+    }
+    for x in -40..40 {
+        for z in -30..-10 {
+            if (x * 3 + z) % 2 == 0 {
+                planet.apply(block(ground + side * (f64::from(x) * 0.1) + fwd * (f64::from(z) * 0.1) - up * 0.05, BrushOp::Remove)).unwrap();
+                count += 1;
+            }
+        }
+    }
+    eprintln!("{count} block edits applied in {:?}", started.elapsed());
+    assert!(count > 12_000, "{count}");
+    let planet = Arc::new(planet);
+    let eye = ground - fwd * 6.0 + up * 14.0 - side * 3.0;
+    let forward = ((ground + fwd * 6.0) - eye).normalize().as_vec3();
+    let started = std::time::Instant::now();
+    let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [320, 180]);
+    let elapsed = started.elapsed();
+    eprintln!("settled and compared in {elapsed:?}: {mismatched}/{compared} mismatched");
+    assert!(compared > 500);
+    // CPU ray casts through the dense edits stay fast (they query edits per cell).
+    assert!(elapsed.as_secs() < 20, "{elapsed:?}");
+    assert_eq!(mismatched, 0);
+}
+
 #[test]
 fn orbital_view_has_complete_coverage() {
     let Some(gpu) = gpu() else { return };
