@@ -416,7 +416,7 @@ impl ShadowMatrixPass {
                 } else {
                     None
                 };
-                match layout.flatten() {
+                match layout {
                     Some(layout) => self.caster_layout = Some((key, layout)),
                     // Unreadable or stale: copy again while it is current.
                     None if self.caster_key == Some(key) => {
