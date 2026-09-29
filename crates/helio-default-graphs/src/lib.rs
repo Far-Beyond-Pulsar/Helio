@@ -266,10 +266,8 @@ fn add_common_early_passes(
     graph.add_pass(Box::new(hiz_pass));
     let occlusion_cull =
         OcclusionCullPass::new(device, hiz_sampler, w, h, cull_stats_buf.clone());
-    // NOTE: `HiZBuildPass` currently only builds the per-frame screen-space
-    // depth pyramid; it has no baked/static voxel-grid metadata to feed into
-    // `OcclusionCullPass::set_static_hiz_metadata`. Wire that up here once a
-    // static HiZ bake pass exists.
+    // Static occlusion needs no wiring here: after a bake with a PVS,
+    // BakeInjectPass publishes `baked_pvs` and the cull uploads it itself.
     graph.add_pass(Box::new(occlusion_cull));
 
     // Same phase as the frustum/occlusion cull above, not interleaved with

@@ -34,6 +34,7 @@
 //!                --modes ss,rt --frames 40 --warmup 8 --out bench_out
 //! move_benchmark --scene cathedral_large --modes ss,rt
 //! move_benchmark --mesh-movability static     # tag every mesh entity (none|static|stationary|movable|dynamic)
+//! move_benchmark --lights 10000 --despawn-lights 9000   # sparse light rows (#838)
 //! move_benchmark --graph default --editor   # Pulsar-Native editor viewport graph
 //!                                            # (add --no-ray-query on lavapipe)
 //! ```
@@ -116,6 +117,9 @@ struct Args {
     scene: String,
     sizes: Vec<usize>,
     lights: usize,
+    /// Lights despawned after the first flush, spread evenly (#838: a
+    /// mostly-despawned light buffer must shade like its live lights).
+    despawn_lights: usize,
     unique_meshes: usize,
     sphere_segments: u32,
     modes: Vec<Mode>,
@@ -134,6 +138,7 @@ fn parse_args() -> Args {
         scene: "grid".into(),
         sizes: vec![1_000, 4_000, 16_000],
         lights: 64,
+        despawn_lights: 0,
         unique_meshes: 64,
         sphere_segments: 12,
         modes: vec![Mode::ScreenSpace, Mode::RayTraced],
@@ -159,6 +164,9 @@ fn parse_args() -> Args {
                     .collect()
             }
             "--lights" => args.lights = value.parse().expect("--lights takes an integer"),
+            "--despawn-lights" => {
+                args.despawn_lights = value.parse().expect("--despawn-lights takes an integer")
+            }
             "--unique-meshes" => {
                 args.unique_meshes = value.parse().expect("--unique-meshes takes an integer")
             }
@@ -608,6 +616,23 @@ fn build_bench(
         "cathedral_large" => populate_cathedral_large(&mut scene_db.world),
         other => panic!("unknown scene {other}; use grid or cathedral_large"),
     };
+    if args.despawn_lights > 0 {
+        // Upload every light row first, so the despawns leave holes in an
+        // allocated buffer rather than never growing it.
+        scene_db.world.flush_gpu_mirror(queue);
+        let lights: Vec<Entity> = scene_db
+            .world
+            .query::<(&helio_pass_forward_lit::LightComponent,)>()
+            .map(|(entity, _)| entity)
+            .collect();
+        let total = lights.len();
+        let despawn = args.despawn_lights.min(total);
+        for (i, entity) in lights.into_iter().enumerate() {
+            if (i + 1) * despawn / total != i * despawn / total {
+                scene_db.world.despawn(entity);
+            }
+        }
+    }
     if let Some(movability) = args.mesh_movability {
         let meshes: Vec<Entity> = scene_db
             .world

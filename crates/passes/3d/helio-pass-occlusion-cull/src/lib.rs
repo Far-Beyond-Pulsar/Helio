@@ -28,16 +28,25 @@ struct CullParams {
     screen_height: u32,
     draw_count: u32,
     hiz_mip_count: u32,
-    static_hiz_available: u32,
-    grid_resolution_x: u32,
-    grid_resolution_y: u32,
-    grid_resolution_z: u32,
-    world_bounds_min_x: f32,
-    world_bounds_min_y: f32,
-    world_bounds_min_z: f32,
-    world_bounds_max_x: f32,
-    world_bounds_max_y: f32,
-    world_bounds_max_z: f32,
+    /// Baked PVS grid (`occlusion_cull.wgsl` documents the layout); 0 = none.
+    pvs_available: u32,
+    pvs_grid: [u32; 3],
+    pvs_min: [f32; 3],
+    pvs_cell_size: f32,
+    /// u32 words per source cell: the baker's u64 words × 2.
+    pvs_words_per_cell: u32,
+    _pad: [u32; 3],
+}
+
+/// The baked PVS grid shape last uploaded, and the bitfield it came from.
+#[derive(Clone, Copy, PartialEq)]
+struct PvsGrid {
+    grid: [u32; 3],
+    min: [f32; 3],
+    cell_size: f32,
+    words_per_cell: u32,
+    /// Identity of the baked bitfield (address, length): re-upload on change.
+    source: (usize, usize),
 }
 
 /// Below this many instances, `compacted_indices_2_buf` still allocates at
@@ -57,14 +66,11 @@ pub struct OcclusionCullPass {
     compacted_indices_2_buf: wgpu::Buffer,
     instance_capacity: u32,
 
-    /// Placeholder 3D texture used when no static HiZ is loaded.
-    placeholder_static_hiz_view: wgpu::TextureView,
-    placeholder_static_hiz_sampler: wgpu::Sampler,
-
-    /// Metadata for the static HiZ voxel grid (set from HiZBuildPass).
-    static_hiz_bounds_min: [f32; 3],
-    static_hiz_bounds_max: [f32; 3],
-    static_hiz_grid_resolution: [u32; 3],
+    /// The baked PVS bitfield on the GPU (Helio#256), uploaded once per bake
+    /// from the `baked_pvs` frame input. Four zero bytes when none is baked
+    /// (`pvs_available = 0` then keeps the shader from reading it).
+    pvs_buf: wgpu::Buffer,
+    pvs_grid: Option<PvsGrid>,
 
     /// Cached bind group, invalidated when buffer pointers change.
     bind_group: Option<wgpu::BindGroup>,
@@ -91,11 +97,9 @@ pub struct OcclusionCullPass {
     /// `draw_count > 0`, guaranteeing real geometry lands in depth before
     /// Hi-Z testing ever reads from it.
     hiz_warmed_up: bool,
-    /// (camera, instances, draw_calls, indirect, hiz_view, static_hiz_view,
-    /// static_hiz_sampler, cull_stats_buf, compacted_indices, compacted_indices_2,
-    /// coordinate_spaces)
+    /// (camera, instances, draw_calls, indirect, hiz_view, pvs_buf,
+    /// cull_stats_buf, compacted_indices, compacted_indices_2, coordinate_spaces)
     bind_group_key: Option<(
-        usize,
         usize,
         usize,
         usize,
@@ -135,37 +139,7 @@ impl OcclusionCullPass {
             mapped_at_creation: false,
         });
 
-        // Placeholder 3D texture for static HiZ when none is loaded.
-        let placeholder_static_hiz = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("OcclusionCull Placeholder Static HiZ"),
-            size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D3,
-            format: wgpu::TextureFormat::R32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let placeholder_static_hiz_view =
-            placeholder_static_hiz.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("OcclusionCull Placeholder Static HiZ View"),
-                dimension: Some(wgpu::TextureViewDimension::D3),
-                ..Default::default()
-            });
-        let placeholder_static_hiz_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("OcclusionCull Placeholder Static HiZ Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
+        let pvs_buf = create_pvs_buf(device, 4);
 
         // Bind group layout must match occlusion_cull.wgsl binding declarations.
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -244,22 +218,15 @@ impl OcclusionCullPass {
                     },
                     count: None,
                 },
-                // 7: Static HiZ 3D voxel texture (pre-baked PVS, R32Float, non-filterable)
+                // 7: Baked PVS bitfield (read-only storage)
                 wgpu::BindGroupLayoutEntry {
                     binding: 7,
                     visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D3,
-                        multisampled: false,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    count: None,
-                },
-                // 8: Static HiZ sampler (nearest, non-filtering — R32Float is non-filterable)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 8,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
                 // 9: Culling stats (read_write, atomic counters)
@@ -334,11 +301,8 @@ impl OcclusionCullPass {
             cull_stats_buf,
             compacted_indices_2_buf,
             instance_capacity: MIN_CAPACITY,
-            placeholder_static_hiz_view,
-            placeholder_static_hiz_sampler,
-            static_hiz_bounds_min: [0.0; 3],
-            static_hiz_bounds_max: [0.0; 3],
-            static_hiz_grid_resolution: [0; 3],
+            pvs_buf,
+            pvs_grid: None,
             bind_group: None,
             hiz_warmed_up: false,
             bind_group_key: None,
@@ -374,17 +338,49 @@ impl OcclusionCullPass {
         (self.screen_width, self.screen_height)
     }
 
-    /// Set the static HiZ voxel grid metadata (called when pre-baked data is loaded).
-    pub fn set_static_hiz_metadata(
-        &mut self,
-        bounds_min: [f32; 3],
-        bounds_max: [f32; 3],
-        resolution: [u32; 3],
-    ) {
-        self.static_hiz_bounds_min = bounds_min;
-        self.static_hiz_bounds_max = bounds_max;
-        self.static_hiz_grid_resolution = resolution;
+    /// Whether a baked PVS is currently uploaded and used by the cull.
+    pub fn pvs_active(&self) -> bool {
+        self.pvs_grid.is_some()
     }
+
+    /// Follow the `baked_pvs` frame input: upload its bitfield when a bake
+    /// arrives or changes, drop it when it goes away.
+    fn sync_pvs(&mut self, ctx: &PrepareContext) {
+        let baked = ctx
+            .registry
+            .get::<helio_bake_types::BakedPvsRef<'_>>(helio_core::ResourceKey::new("baked_pvs"));
+        let Some(pvs) = baked.filter(|pvs| {
+            pvs.cell_size > 0.0 && pvs.words_per_cell > 0 && !pvs.bits.is_empty()
+        }) else {
+            self.pvs_grid = None;
+            return;
+        };
+        let grid = PvsGrid {
+            grid: pvs.grid_dims,
+            min: pvs.world_min,
+            cell_size: pvs.cell_size,
+            words_per_cell: pvs.words_per_cell * 2,
+            source: (pvs.bits.as_ptr() as usize, pvs.bits.len()),
+        };
+        if self.pvs_grid == Some(grid) {
+            return;
+        }
+        let bytes: &[u8] = bytemuck::cast_slice(pvs.bits);
+        if self.pvs_buf.size() < bytes.len() as u64 {
+            self.pvs_buf = create_pvs_buf(ctx.device, bytes.len() as u64);
+        }
+        ctx.queue.write_buffer(&self.pvs_buf, 0, bytes);
+        self.pvs_grid = Some(grid);
+    }
+}
+
+fn create_pvs_buf(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("OcclusionCull Baked PVS"),
+        size: size.max(4).next_multiple_of(4),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 fn create_compacted_indices_2_buf(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
@@ -404,8 +400,6 @@ impl RenderPass for OcclusionCullPass {
     fn reads(&self) -> &'static [&'static str] {
         &[
             "hiz",
-            "static_hiz",
-            "static_hiz_sampler",
             "object_batch",
             "indirect_dispatch",
         ]
@@ -470,28 +464,21 @@ impl RenderPass for OcclusionCullPass {
         let draw_count = batch.map(|b| b.draw_count).unwrap_or(0);
         self.ensure_capacity(ctx.device, batch.map(|b| b.instance_count).unwrap_or(0));
 
-        // Plain (non-panicking) lookup: "static_hiz" is legitimately optional
-        // (only present once real baked data is loaded via `load_static_hiz`)
-        // -- `read_texture_view` falls through to a debug-only panic on a
-        // missing key, which fires before this `.is_some()` ever sees it.
-        let static_hiz_available = ctx.registry.get(helio_core::ResourceKey::new("static_hiz"))
-            .or_else(|| ctx.registry.texture_binding("static_hiz"))
-            .is_some();
+        // `baked_pvs` is optional: published by helio-bake's BakeInjectPass
+        // only after a bake that included a PVS (`BakeConfig::with_pvs`).
+        self.sync_pvs(ctx);
+        let pvs = self.pvs_grid;
         let p = CullParams {
             screen_width: self.screen_width,
             screen_height: self.screen_height,
             draw_count,
             hiz_mip_count: mip_levels(self.screen_width, self.screen_height),
-            static_hiz_available: if static_hiz_available { 1 } else { 0 },
-            grid_resolution_x: self.static_hiz_grid_resolution[0],
-            grid_resolution_y: self.static_hiz_grid_resolution[1],
-            grid_resolution_z: self.static_hiz_grid_resolution[2],
-            world_bounds_min_x: self.static_hiz_bounds_min[0],
-            world_bounds_min_y: self.static_hiz_bounds_min[1],
-            world_bounds_min_z: self.static_hiz_bounds_min[2],
-            world_bounds_max_x: self.static_hiz_bounds_max[0],
-            world_bounds_max_y: self.static_hiz_bounds_max[1],
-            world_bounds_max_z: self.static_hiz_bounds_max[2],
+            pvs_available: pvs.is_some() as u32,
+            pvs_grid: pvs.map_or([0; 3], |p| p.grid),
+            pvs_min: pvs.map_or([0.0; 3], |p| p.min),
+            pvs_cell_size: pvs.map_or(1.0, |p| p.cell_size),
+            pvs_words_per_cell: pvs.map_or(0, |p| p.words_per_cell),
+            _pad: [0; 3],
         };
         ctx.write_buffer(&self.cull_params_buf, 0, bytemuck::bytes_of(&p));
         Ok(())
@@ -551,25 +538,13 @@ impl RenderPass for OcclusionCullPass {
                 "OcclusionCull: 'hiz' view not routed by graph — is HiZBuildPass declared?",
             );
 
-        // Resolve static HiZ resources (use placeholder when no pre-baked data is
-        // loaded). Plain (non-panicking) lookups, same reasoning as `prepare`'s
-        // `static_hiz_available` above -- `read_texture_view`/`read_sampler` fall
-        // through to a debug-only panic on a missing key, which would fire before
-        // `unwrap_or` ever sees it, even though this resource is legitimately optional.
-        let static_hiz_view = ctx.registry.get(helio_core::ResourceKey::new("static_hiz"))
-            .or_else(|| ctx.registry.texture_binding("static_hiz"))
-            .unwrap_or(&self.placeholder_static_hiz_view);
-        let static_hiz_sampler = ctx.registry.get(helio_core::ResourceKey::new("static_hiz_sampler"))
-            .unwrap_or(&self.placeholder_static_hiz_sampler);
-
         let key = (
             ctx.camera as *const _ as usize,
             batch.instances as *const _ as usize,
             batch.draw_calls as *const _ as usize,
             indirect_dispatch.indirect as *const _ as usize,
             hiz_view as *const _ as usize,
-            static_hiz_view as *const _ as usize,
-            static_hiz_sampler as *const _ as usize,
+            &self.pvs_buf as *const _ as usize,
             &self.cull_stats_buf as *const _ as usize,
             indirect_dispatch.compacted_indices as *const _ as usize,
             &self.compacted_indices_2_buf as *const _ as usize,
@@ -610,11 +585,7 @@ impl RenderPass for OcclusionCullPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
-                        resource: wgpu::BindingResource::TextureView(static_hiz_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 8,
-                        resource: wgpu::BindingResource::Sampler(static_hiz_sampler),
+                        resource: self.pvs_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 9,

@@ -33,6 +33,7 @@ use std::sync::Arc;
 #[cfg(test)]
 mod scene_light_tests {
     use super::*;
+    use pulsar_scenedb::World;
 
     #[test]
     fn projection_reads_current_scene_db_positions() {

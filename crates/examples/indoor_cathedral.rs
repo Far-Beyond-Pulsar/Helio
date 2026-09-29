@@ -583,7 +583,7 @@ impl ApplicationHandler for App {
         // The renderer never walks the scene: hand it SceneDB's projection
         // first, or auto_bake has nothing to bake (Helio#256).
         renderer.set_bake_scene(helio::bake_scene_from_world(&scene_db.world));
-        renderer.auto_bake(BakeConfig::fast("indoor_cathedral"));
+        renderer.auto_bake(BakeConfig::fast("indoor_cathedral").with_pvs());
 
         let renderer = Arc::new(Mutex::new(renderer));
         let (bridge, action_rx) = HelioCommandBridge::new();

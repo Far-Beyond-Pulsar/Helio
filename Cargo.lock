@@ -1907,6 +1907,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.33.5",
+ "helio-bake-types",
  "helio-core",
  "helio-pass-gbuffer",
  "helio-pass-hiz",
