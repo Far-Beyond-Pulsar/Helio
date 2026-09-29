@@ -34,6 +34,12 @@ pub struct DebugDrawState {
     /// Bumped whenever `editor_volume_lines` changes, so the pass can keep
     /// caching its uploads instead of re-sending the set every frame.
     pub editor_volume_generation: u64,
+    /// Named sets of world-space editor lines, each owned by one producer
+    /// (e.g. `"splines"` from SceneDB spline components). Drawn with the
+    /// volume bounds, so they sit in the scene and follow the camera.
+    pub editor_line_layers: std::collections::BTreeMap<String, Vec<DebugVertex>>,
+    /// Bumped whenever any of `editor_line_layers` changes.
+    pub editor_layers_generation: u64,
     /// Color-blind mode for axis/gizmo colors:
     /// 0=None, 1=Protanopia, 2=Deuteranopia, 3=Tritanopia, 4=Achromatopsia
     pub color_blind_mode: u8,
@@ -1130,6 +1136,26 @@ impl Renderer {
                 state.editor_volume_lines = lines;
                 state.editor_volume_generation = state.editor_volume_generation.wrapping_add(1);
             }
+        }
+    }
+
+    /// Replace the editor line layer `layer` with `lines` (world space, as
+    /// pairs). An empty set removes the layer. Consumed by `DebugDrawPass`
+    /// in editor mode only, and re-uploaded only when a layer changes.
+    pub fn debug_set_editor_lines(&mut self, layer: &str, lines: Vec<DebugVertex>) {
+        let Ok(mut state) = self.debug_state.lock() else {
+            return;
+        };
+        let changed = if lines.is_empty() {
+            state.editor_line_layers.remove(layer).is_some()
+        } else if state.editor_line_layers.get(layer) != Some(&lines) {
+            state.editor_line_layers.insert(layer.to_string(), lines);
+            true
+        } else {
+            false
+        };
+        if changed {
+            state.editor_layers_generation = state.editor_layers_generation.wrapping_add(1);
         }
     }
 
