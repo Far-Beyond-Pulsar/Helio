@@ -45,7 +45,9 @@ pub use helio_core::{
     RenderGraph, RenderPass, RenderPassTiming, RenderTimingSnapshot, Result,
 };
 pub use helio_pass_forward_lit::{GpuLight, LightType};
-pub use helio_pass_object_batch::{DrawIndexedIndirectArgs, GpuDrawCall, GpuInstanceAabb, GpuInstanceData};
+pub use helio_pass_object_batch::{
+    DrawIndexedIndirectArgs, GpuDrawCall, GpuInstanceAabb, GpuInstanceData, INSTANCE_FLAG_MOVABLE,
+};
 pub use helio_mats::GpuMaterial;
 pub use helio_pass_postprocess::{HdrOutputMode, TonemapOperator};
 pub use helio_pass_shadow_matrix::ShadowQuality;

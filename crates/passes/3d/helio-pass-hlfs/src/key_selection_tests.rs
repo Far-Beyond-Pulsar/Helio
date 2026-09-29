@@ -36,6 +36,20 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
             compilation_options: Default::default(),
             cache: None,
         });
+        let live_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("production live light list"),
+            layout: None,
+            module: &compact_shader,
+            entry_point: Some("list_live"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let live_read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 4,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let proposals = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: resources::PROPOSAL_BYTES,
@@ -135,6 +149,30 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
                         },
                     ],
                 });
+                let live = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("live light rows for key selection"),
+                    size: ((capacity + 1) * 4) as u64,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                });
+                let live_input = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &live_pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: lights.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: live.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: uniform.as_entire_binding(),
+                        },
+                    ],
+                });
                 let input = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: None,
                     layout: &pipeline.get_bind_group_layout(0),
@@ -147,6 +185,10 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
                             binding: 2,
                             resource: compact.as_entire_binding(),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 11,
+                            resource: live.as_entire_binding(),
+                        },
                     ],
                 });
                 let mut encoder = device.create_command_encoder(&Default::default());
@@ -158,6 +200,12 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
                 }
                 {
                     let mut pass = encoder.begin_compute_pass(&Default::default());
+                    pass.set_pipeline(&live_pipeline);
+                    pass.set_bind_group(0, &live_input, &[]);
+                    pass.dispatch_workgroups(1, 1, 1);
+                }
+                {
+                    let mut pass = encoder.begin_compute_pass(&Default::default());
                     pass.set_pipeline(&pipeline);
                     pass.set_bind_group(0, &input, &[]);
                     pass.set_bind_group(1, &empty, &[]);
@@ -165,12 +213,28 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
                     pass.dispatch_workgroups(1, 1, 1);
                 }
                 encoder.copy_buffer_to_buffer(&proposals, 0, &read, 0, 24);
+                encoder.copy_buffer_to_buffer(&live, 0, &live_read, 0, 4);
                 queue.submit([encoder.finish()]);
                 let (tx, rx) = std::sync::mpsc::channel();
+                let live_tx = tx.clone();
                 read.slice(..)
                     .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+                live_read
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |r| live_tx.send(r).unwrap());
                 device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
                 rx.recv().unwrap().unwrap();
+                rx.recv().unwrap().unwrap();
+                let live_count =
+                    bytemuck::cast_slice::<u8, u32>(&live_read.slice(..).get_mapped_range().unwrap())[0];
+                live_read.unmap();
+                // Pulsar-Native#838: the list holds live rows only, however
+                // sparse the allocation.
+                assert_eq!(
+                    live_count as usize,
+                    count - usize::from(sun && invalid_sun),
+                    "live list must hold exactly the lit rows: count={count} capacity={capacity}"
+                );
                 let bytes = read.slice(..).get_mapped_range().unwrap();
                 let words = bytemuck::cast_slice::<u8, u32>(&bytes);
                 let key = words[5];

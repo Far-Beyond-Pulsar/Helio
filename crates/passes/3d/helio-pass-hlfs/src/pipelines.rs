@@ -260,6 +260,8 @@ pub(crate) struct Pipelines {
     pub spatial_bgl: wgpu::BindGroupLayout,
     pub composite_bgl: wgpu::BindGroupLayout,
     pub compact: wgpu::ComputePipeline,
+    /// Builds the live light row list (`compact_lights.wgsl` `list_live`).
+    pub list_live: wgpu::ComputePipeline,
     pub depth_reduce: wgpu::ComputePipeline,
     pub coarse: wgpu::ComputePipeline,
     pub select_key: wgpu::ComputePipeline,
@@ -314,6 +316,9 @@ impl Pipelines {
             &[
                 entry(0, storage(true), S::COMPUTE),
                 entry(1, storage(false), S::COMPUTE),
+                // Live row list and the globals it reads the row count from.
+                entry(2, storage(false), S::COMPUTE),
+                entry(3, uniform(), S::COMPUTE),
             ],
         );
         let compact_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -330,6 +335,13 @@ impl Pipelines {
             "HLFS light compaction",
             &compact_shader,
             "compact",
+            &compact_layout,
+        );
+        let list_live = compute(
+            device,
+            "HLFS live light list",
+            &compact_shader,
+            "list_live",
             &compact_layout,
         );
         let rt_bgl = device
@@ -377,6 +389,8 @@ impl Pipelines {
                     all,
                 ),
                 entry(10, wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), all),
+                // Live light rows (Pulsar-Native#838), see common.wgsl.
+                entry(11, storage(true), all),
             ],
         );
         let mut gbuffer_entries: Vec<_> = (0..10)
@@ -550,6 +564,7 @@ impl Pipelines {
         Self {
             compact_bgl,
             compact,
+            list_live,
             transmission_visibility: Some(VisibilityPipelines::new(device, mode, presampled, &common_bgl, &gbuffer_bgl, &sample_bgl, rt_bgl.as_ref(), true)),
             transmission_composite: Some(composite_pipeline(device, output_format, mode, presampled, &common_bgl, &gbuffer_bgl, &composite_bgl, rt_bgl.as_ref(), true)),
             common_bgl,

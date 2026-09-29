@@ -24,6 +24,13 @@ struct Globals {
 @group(0) @binding(1) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(2) var<storage, read> lights: array<GpuLight>;
 @group(0) @binding(7) var blue_noise: texture_2d_array<f32>;
+// Live light rows in row order (compact_lights.wgsl `list_live`): [0] is the
+// count, [1+k] the row of the k-th live light. `globals.light_count` stays
+// the allocated row count and bounds light IDs; loops over the population
+// and uniform light picks use this list (Pulsar-Native#838).
+@group(0) @binding(11) var<storage, read> live_lights: array<u32>;
+fn live_light_count() -> u32 { return live_lights[0]; }
+fn live_light(k: u32) -> u32 { return live_lights[k+1u]; }
 
 @group(1) @binding(0) var gbuf_albedo: texture_2d<f32>;
 @group(1) @binding(1) var gbuf_normal: texture_2d<f32>;

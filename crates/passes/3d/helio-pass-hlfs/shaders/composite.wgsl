@@ -109,11 +109,13 @@ fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
                 let light=evaluate_light(id,s,shadow_factor_from_receiver(id,origin,s.position,s.normal,fragment.xy,globals.frame));
                 diffuse+=light.diffuse; specular+=light.specular;
             }
-        } else {
+        } else if live_light_count()>0u {
+            // Uniform over live lights; vacant SceneDB rows carry no light.
+            let live_count=live_light_count();
             for(var sample=0u;sample<globals.sample_count;sample++) {
                 var selected=INVALID_LIGHT; var selected_target=0.0; var total=0.0;
                 for(var candidate=0u;candidate<globals.candidate_count;candidate++) {
-                    let id=min(u32(random(&rng)*f32(globals.light_count)),globals.light_count-1u);
+                    let id=live_light(min(u32(random(&rng)*f32(live_count)),live_count-1u));
                     if id==key { continue; }
                     let proxy=importance(id,s); total+=proxy;
                     if proxy>0.0 && random(&rng)*total<proxy { selected=id; selected_target=proxy; }
@@ -121,7 +123,7 @@ fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
                 if selected!=INVALID_LIGHT {
                     let visibility=shadow_factor(selected,s.position,s.normal,fragment.xy,globals.frame);
                     let light=evaluate_light(selected,s,visibility);
-                    let normalization=total*f32(globals.light_count)/(selected_target*f32(globals.candidate_count*globals.sample_count));
+                    let normalization=total*f32(live_count)/(selected_target*f32(globals.candidate_count*globals.sample_count));
                     diffuse+=light.diffuse*normalization; specular+=light.specular*normalization;
                 }
             }
