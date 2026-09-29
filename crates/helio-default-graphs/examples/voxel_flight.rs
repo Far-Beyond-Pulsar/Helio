@@ -187,7 +187,15 @@ impl Flight {
         let mirror = GpuMirrorHandle::new(Arc::new(store), queue.clone());
         let mut scene = pulsar_scenedb::SceneDb::new();
         scene.world.attach_gpu_mirror(mirror.clone());
-        let sun_dir = Vec3::new(0.35, 0.75, 0.45).normalize();
+        // HELIO_VOXEL_FLIGHT_SUN="x,y,z": direction towards the sun.
+        let sun_dir = std::env::var("HELIO_VOXEL_FLIGHT_SUN")
+            .ok()
+            .and_then(|v| {
+                let c: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                (c.len() == 3).then(|| Vec3::new(c[0], c[1], c[2]))
+            })
+            .unwrap_or(Vec3::new(0.35, 0.75, 0.45))
+            .normalize();
         let light = scene.world.spawn();
         scene.world.insert(
             light,
@@ -756,6 +764,10 @@ fn main() {
         audits.push(flight.audit(name, ground, f));
     }
 
+    if let Some(deg) = std::env::var("HELIO_VOXEL_FLIGHT_TRIP").ok().and_then(|v| v.parse::<f64>().ok()) {
+        editor_trip(&mut flight, deg);
+        return;
+    }
     if std::env::var_os("HELIO_VOXEL_FLIGHT_EDITOR_PATH").is_some() {
         // An editor-style descent: 10 m/s scaled by height/20 m, from 300 km
         // down to 300 m and then a level cruise, looking 25 degrees down.
@@ -1302,4 +1314,143 @@ fn main() {
     eprintln!("{md}");
     flight.write_csv();
     eprintln!("VOXEL_FLIGHT_COMPLETE frames={}", flight.frame);
+}
+
+/// Ray statuses of the last frame: (miss rays that must hit the planet,
+/// loading, exhausted, all rays). A miss is certain to be a hole when the
+/// ray passes below the deepest possible terrain.
+fn holes(flight: &Flight, eye: DVec3, forward: Vec3) -> (usize, usize, usize, usize) {
+    let (hits, size) = {
+        let r = flight.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap();
+        (flight.read(r.hit_buffer()), r.screen_size())
+    };
+    let up0 = up_for(eye);
+    let forward = forward.normalize();
+    let up = if forward.dot(up0).abs() > 0.999 { up0.any_orthonormal_vector() } else { up0 };
+    let right = forward.cross(up).normalize();
+    let cam_up = right.cross(forward);
+    let tan = (std::f32::consts::FRAC_PI_4 * 0.5).tan();
+    let aspect = size[0] as f32 / size[1] as f32;
+    let floor = flight.planet.grid().radius() - 12_000.0;
+    let (mut miss, mut loading, mut exhausted, mut total) = (0, 0, 0, 0);
+    for (index, hit) in hits.chunks_exact(32).take((size[0] * size[1]) as usize).enumerate() {
+        let info = u32::from_le_bytes(hit[16..20].try_into().unwrap());
+        total += 1;
+        match info & 3 {
+            2 => exhausted += 1,
+            3 => loading += 1,
+            0 => {
+                let (x, y) = (index as u32 % size[0], index as u32 / size[0]);
+                let ndc = [(x as f32 + 0.5) / size[0] as f32 * 2.0 - 1.0, 1.0 - (y as f32 + 0.5) / size[1] as f32 * 2.0];
+                let d = (forward + right * ndc[0] * tan * aspect + cam_up * ndc[1] * tan).normalize().as_dvec3();
+                // Closest approach of the ray to the planet centre.
+                let t = (-eye.dot(d)).max(0.0);
+                if (eye + d * t).length() < floor {
+                    miss += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    (miss, loading, exhausted, total)
+}
+
+/// The editor trip of the user's recordings, at `deg` from the pole: climb
+/// from the ground to orbit, fly across in orbit, descend, cruise low.
+/// Editor speed is 10 m/s x height/20 m. HELIO_VOXEL_FLIGHT_PROBE=1 reads
+/// every frame's rays back and reports holes (slows the frames).
+fn editor_trip(flight: &mut Flight, deg: f64) {
+    let probe = std::env::var_os("HELIO_VOXEL_FLIGHT_PROBE").is_some();
+    let audit_at: Vec<f64> = std::env::var("HELIO_VOXEL_FLIGHT_AUDIT_AT")
+        .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .unwrap_or_default();
+    let start = DVec3::new(deg.to_radians().sin(), deg.to_radians().cos(), 0.0);
+    let mut eye = flight.planet.surface_point(start, 1.7);
+    let dt = 1.0 / 120.0;
+    let mut t = 0.0;
+    let mut frame = 0usize;
+    let (mut worst, mut worst_at) = (0.0f64, String::new());
+    // HELIO_VOXEL_FLIGHT_TRIP_CLIMB: climb seconds (14: ~9 km, 30: ~5000 km;
+    // height grows e^(t/2) at the editor's speed).
+    let climb: f64 = std::env::var("HELIO_VOXEL_FLIGHT_TRIP_CLIMB").ok().and_then(|v| v.parse().ok()).unwrap_or(14.0);
+    let phases: [(&str, f64); 5] = [("settle", 2.0), ("climb", climb), ("orbit", 10.0), ("descend", climb), ("low", 20.0)];
+    let mut phase_end = 0.0;
+    for (name, duration) in phases {
+        phase_end += duration;
+        while t < phase_end {
+            let up = eye.normalize();
+            let ahead = (DVec3::X - up * DVec3::X.dot(up)).try_normalize().unwrap_or(DVec3::Z);
+            let height = eye.length() - flight.planet.surface_point(eye, 0.0).length();
+            let speed = 10.0 * (height / 20.0).clamp(1.0, 1.0e6);
+            let (dir, look) = match name {
+                "settle" => (DVec3::ZERO, (ahead - up * 0.2).normalize()),
+                "climb" => (up, (ahead - up * 0.6).normalize()),
+                "orbit" => (ahead, (ahead - up * 1.2).normalize()),
+                "descend" => (-up, (ahead - up * 0.6).normalize()),
+                _ => {
+                    // Low flight: hold ~30 m over the ground at the editor's speed.
+                    let hold = (30.0 - height) * 0.5;
+                    ((ahead * speed + up * hold) / speed.max(1.0), (ahead - up * 0.25).normalize())
+                }
+            };
+            eye += dir * speed * dt;
+            let (cell, _) = flight.planet.grid().locate(eye);
+            if flight.planet.solid(cell) {
+                eye = flight.planet.surface_point(eye, 0.5);
+            }
+            let look = look.as_vec3();
+            flight.draw(name, eye, look);
+            let submit = flight.samples.last().map_or(0.0, |s| s.submit_ms);
+            if submit > 25.0 {
+                // Where a slow frame's CPU time went.
+                let stats = flight.pass().stats().unwrap_or_default();
+                let snap = flight.renderer.timing_snapshot();
+                let mut passes: Vec<(f32, &str)> = snap.passes.iter().filter_map(|p| p.cpu_ms.map(|ms| (ms, p.name))).collect();
+                passes.sort_by(|a, b| b.0.total_cmp(&a.0));
+                eprintln!(
+                    "SLOW {name} t {t:.2} submit {submit:.1} total_cpu {:?} plan {:.2} upload {:.2} encode {:.2} top {:?}",
+                    snap.total_cpu_ms, stats.plan_cpu_ms, stats.upload_cpu_ms, stats.encode_cpu_ms, &passes[..passes.len().min(4)]
+                );
+            }
+            // HELIO_VOXEL_FLIGHT_AUDIT_AT="t1,t2,..": audit traversal work at
+            // those trip times (HELIO_VOXEL_FLIGHT_HEAT saves step heatmaps).
+            if audit_at.iter().any(|a| (t - a).abs() < dt * 0.5) {
+                flight.capture(&format!("audit_{name}_{:05}", (t * 100.0) as u32));
+                eprintln!("AUDIT t {t:.2} h {height:.0} {}", flight.audit(&format!("audit_{name}_{:05}", (t * 100.0) as u32), eye, look));
+            }
+            if probe {
+                let (miss, loading, exhausted, total) = holes(flight, eye, look);
+                let bad = (miss + loading + exhausted) as f64 / total as f64;
+                if bad > worst {
+                    worst = bad;
+                    worst_at = format!("{name} t {t:.2} h {height:.0}");
+                }
+                if bad > 0.002 {
+                    let stats = flight.pass().stats().unwrap_or_default();
+                    eprintln!(
+                        "HOLES {name} t {t:6.2} h {height:9.0} miss {miss} loading {loading} exhausted {exhausted} ({:.2}%) resident {} pending {} levels {} finest {}",
+                        bad * 100.0, stats.resident_columns, stats.pending_columns, stats.active_levels, stats.finest_level
+                    );
+                    if bad > 0.01 && frame % 4 == 0 {
+                        flight.capture(&format!("hole_{name}_{:05}", (t * 100.0) as u32));
+                    }
+                }
+            } else if frame % 30 == 0 {
+                let stats = flight.pass().stats().unwrap_or_default();
+                eprintln!(
+                    "TRIP {name} t {t:6.2} h {height:9.0} speed {speed:9.0} resident {} pending {} jobs {} levels {} finest {} plan {:.2} upload {:.2}",
+                    stats.resident_columns, stats.pending_columns, stats.jobs, stats.active_levels, stats.finest_level, stats.plan_cpu_ms, stats.upload_cpu_ms
+                );
+            }
+            if frame % 120 == 0 {
+                flight.capture(&format!("trip_{name}_{:05}", (t * 100.0) as u32));
+            }
+            t += dt;
+            frame += 1;
+        }
+    }
+    if probe {
+        eprintln!("HOLES worst {:.2}% at {worst_at}", worst * 100.0);
+    }
+    flight.write_csv();
 }

@@ -83,8 +83,13 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     }
     workgroupBarrier();
     // Everything below the band is solid ground, everything above is air.
+    // The band follows the terrain wherever it is: clamping its top to the
+    // datum (a sea-level leftover) made every column below datum claim the
+    // air up to height 0 as occupied (column tops, summary blocks and level
+    // tops), so rays stepped cell by cell through it (5-20x primary cost in
+    // lowland below datum) and each column stored the empty bricks.
     atomicMin(&g_band[0], top - 1);
-    atomicMax(&g_band[1], max(top, 0));
+    atomicMax(&g_band[1], top);
     if job.edits != 0u {
         let count = edit_refs[job.edits - 1u];
         for (var e = li; e < count; e += 64u) {

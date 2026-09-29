@@ -1013,6 +1013,10 @@ impl PlanetRenderer {
         let moving = self.last_eye.is_none_or(|e| e.distance(frame.eye) > 0.01);
         self.last_eye = Some(frame.eye);
         let target_ms = if moving { 1.5 } else { 6.0 };
+        // CPU for applying window diffs and admitting columns: small while
+        // moving (a big diff spreads over frames instead of freezing one).
+        self.residency
+            .set_cpu_budget(Some(std::time::Duration::from_secs_f64(if moving { 1.5e-3 } else { 4.0e-3 })));
         let budget = ((target_ms / self.ms_per_job.max(1e-5)) as usize)
             .clamp(256, self.settings.job_budget.min(self.settings.capacity.max_jobs as usize));
         let work = if self.settings.freeze_residency {

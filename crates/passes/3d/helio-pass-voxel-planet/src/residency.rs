@@ -3,11 +3,12 @@
 //!
 //! The CPU decides *which* columns are resident; the GPU generates their
 //! contents, allocates brick runs and publishes records in the same frame.
+use crate::column_index::{ColumnIndex, Resident};
 use crate::edits::FaceBrush;
 use crate::grid::{Grid, BRICK};
-use crate::windows::{WindowPlanner, WindowRequest, WindowUpdate, WindowWorker};
+use crate::windows::{LevelDiff, WindowPlanner, WindowRequest, WindowUpdate, WindowWorker};
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, VecDeque};
 use crate::planet::Planet;
 use bytemuck::{Pod, Zeroable};
 use glam::DVec3;
@@ -104,15 +105,6 @@ struct Block {
     refs: u32,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Resident {
-    record: u32,
-    slot: u32,
-    edit_block: Option<(u32, u32)>,
-    /// Holds references on its summary blocks (false: a slot conflict).
-    blocks: bool,
-}
-
 /// Priority-ordered pending key (lower priority value is issued first).
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Pending(f32, u64);
@@ -138,7 +130,6 @@ struct Level {
     /// Wanted but not yet issued columns, and their priority heap (lazy).
     pending: rustc_hash::FxHashSet<u64>,
     heap: BinaryHeap<Reverse<Pending>>,
-    keys: rustc_hash::FxHashSet<u64>,
 }
 
 enum Planner {
@@ -206,7 +197,8 @@ pub struct Stats {
 pub struct Residency {
     pub capacity: Capacity,
     grid: Grid,
-    residents: FxHashMap<u64, Resident>,
+    /// Resident columns and the GPU column table mirror.
+    residents: ColumnIndex,
     blocks: FxHashMap<(u32, u8, u32, i32, i32), Block>,
     block_owner: FxHashMap<u32, (u32, u8, u32, i32, i32)>,
     /// Dense list of live tier-1 block slots (GPU horizon build input) and
@@ -216,9 +208,6 @@ pub struct Residency {
     live_dirty: bool,
     /// Resident columns without summary blocks (slot conflicts).
     block_conflicts: usize,
-    table: Vec<u32>,
-    used_slots: u32,
-    tombstones: u32,
     free_records: Vec<u32>,
     next_record: u32,
     delayed_records: Vec<u32>,
@@ -237,8 +226,24 @@ pub struct Residency {
     last_request: Option<WindowRequest>,
     requested: u64,
     applied: u64,
-    /// Columns the current windows no longer want.
-    unwanted: rustc_hash::FxHashSet<u64>,
+    /// Window diffs not yet fully applied, oldest first. A diff can hold
+    /// hundreds of thousands of columns (leaving the ground retires the fine
+    /// levels at once); it is applied in order within a CPU budget per frame.
+    diffs: VecDeque<QueuedDiff>,
+    /// Per level, diffs still queued for it (its window is not yet exact).
+    catching_up: Vec<u32>,
+    /// CPU time per `plan` for applying diffs and admitting columns; `None`
+    /// is unbounded (deterministic, for tests).
+    cpu_budget: Option<std::time::Duration>,
+}
+
+/// A window diff being applied: removes first, then (for a level switched
+/// off) clearing its queue, then adds, exactly as an immediate apply.
+struct QueuedDiff {
+    diff: LevelDiff,
+    removed: usize,
+    cleared: bool,
+    added: usize,
 }
 
 impl Residency {
@@ -257,16 +262,13 @@ impl Residency {
         Self {
             capacity,
             grid,
-            residents: FxHashMap::default(),
+            residents: ColumnIndex::new(capacity.table_bits),
             blocks: FxHashMap::default(),
             block_owner: FxHashMap::default(),
             live_tier1: Vec::new(),
             live_index: FxHashMap::default(),
             live_dirty: false,
             block_conflicts: 0,
-            table: vec![NONE; 1 << capacity.table_bits],
-            used_slots: 0,
-            tombstones: 0,
             free_records: Vec::new(),
             next_record: 0,
             delayed_records: Vec::new(),
@@ -283,7 +285,9 @@ impl Residency {
             last_request: None,
             requested: 0,
             applied: 0,
-            unwanted: Default::default(),
+            diffs: VecDeque::new(),
+            catching_up: vec![0; grid.levels() as usize],
+            cpu_budget: None,
         }
     }
 
@@ -292,28 +296,7 @@ impl Residency {
     }
 
     pub fn table(&self) -> &[u32] {
-        &self.table
-    }
-
-    fn mask(&self) -> u32 {
-        (1u32 << self.capacity.table_bits) - 1
-    }
-
-    fn insert_slot(&mut self, k0: u32, k1: u32, record: u32) -> u32 {
-        let mask = self.mask();
-        let mut slot = slot_hash(k0, k1) & mask;
-        loop {
-            let v = self.table[slot as usize];
-            if v == NONE || v == TOMBSTONE {
-                if v == TOMBSTONE {
-                    self.tombstones -= 1;
-                }
-                self.table[slot as usize] = record;
-                self.used_slots += 1;
-                return slot;
-            }
-            slot = (slot + 1) & mask;
-        }
+        self.residents.table()
     }
 
     fn alloc_record(&mut self) -> Option<u32> {
@@ -399,7 +382,7 @@ impl Residency {
                 for a in i0..=i1 {
                     for b in j0..=j1 {
                         let key = pack(key0(fb.face(), level, a as i32), b as i32 as u32);
-                        if self.residents.contains_key(&key) {
+                        if self.residents.contains_key(key) {
                             self.urgent.push(key);
                         }
                     }
@@ -486,62 +469,99 @@ impl Residency {
     }
 
     fn evict(&mut self, key: u64, work: &mut FrameWork) {
-        match self.residents.get(&key).map(|r| r.blocks) {
+        match self.residents.get(key).map(|r| r.blocks) {
             Some(true) => self.release_blocks(key, work),
             Some(false) => self.block_conflicts -= 1,
             None => {}
         }
-        if let Some(res) = self.residents.remove(&key) {
-            self.table[res.slot as usize] = TOMBSTONE;
-            self.tombstones += 1;
-            self.used_slots -= 1;
-            work.table_writes.push((res.slot, TOMBSTONE));
+        if let Some(res) = self.residents.remove(key, &mut work.table_writes) {
             work.evictions.push(res.record);
             self.delayed_records.push(res.record);
             if let Some(block) = res.edit_block {
                 self.edits.release(block);
             }
             let (_, level, _, _) = unpack(key);
-            self.levels[level as usize].keys.remove(&key);
         }
     }
 
-    /// Apply a window diff: evict unwanted residents, queue new columns.
-    fn apply(&mut self, update: WindowUpdate, work: &mut FrameWork) {
+    /// CPU time `plan` may spend per frame applying window diffs and
+    /// admitting columns (`None`: unbounded). The rest carries over.
+    pub fn set_cpu_budget(&mut self, budget: Option<std::time::Duration>) {
+        self.cpu_budget = budget;
+    }
+
+    /// Queue a window diff; [`Self::apply_queued`] applies it in order.
+    fn apply(&mut self, update: WindowUpdate) {
         for diff in update.levels {
             let level = diff.level as usize;
+            // The window metadata changes at once; the level is marked as
+            // catching up (no guaranteed coverage) until its ops are done.
             self.levels[level].active = diff.active;
             self.levels[level].center = diff.center;
             self.levels[level].radius = diff.radius;
-            for key in diff.removes {
-                self.levels[level].pending.remove(&key);
-                if self.residents.contains_key(&key) {
-                    self.evict(key, work);
-                }
-            }
-            if !diff.active {
-                self.levels[level].heap.clear();
-                self.levels[level].pending.clear();
-            }
-            for (priority, key) in diff.adds {
-                if !self.residents.contains_key(&key) && self.levels[level].pending.insert(key) {
-                    self.levels[level].heap.push(Reverse(Pending(priority, key)));
-                }
-            }
+            self.catching_up[level] += 1;
+            self.diffs.push_back(QueuedDiff { diff, removed: 0, cleared: false, added: 0 });
         }
         self.stats.window_rebuild_ms = update.planning_ms;
         self.applied = update.serial;
+    }
+
+    /// Apply queued window diffs in order until done or out of time.
+    fn apply_queued(&mut self, work: &mut FrameWork, out_of_time: &impl Fn() -> bool) {
+        const CHUNK: usize = 2048;
+        while let Some(mut queued) = self.diffs.pop_front() {
+            let level = queued.diff.level as usize;
+            while queued.removed < queued.diff.removes.len() {
+                let end = (queued.removed + CHUNK).min(queued.diff.removes.len());
+                for i in queued.removed..end {
+                    let key = queued.diff.removes[i];
+                    self.levels[level].pending.remove(&key);
+                    if self.residents.contains_key(key) {
+                        self.evict(key, work);
+                    }
+                }
+                queued.removed = end;
+                if out_of_time() {
+                    self.diffs.push_front(queued);
+                    return;
+                }
+            }
+            if !queued.diff.active && !queued.cleared {
+                self.levels[level].heap.clear();
+                self.levels[level].pending.clear();
+                queued.cleared = true;
+            }
+            while queued.added < queued.diff.adds.len() {
+                let end = (queued.added + CHUNK).min(queued.diff.adds.len());
+                for i in queued.added..end {
+                    let (priority, key) = queued.diff.adds[i];
+                    if !self.residents.contains_key(key) && self.levels[level].pending.insert(key) {
+                        self.levels[level].heap.push(Reverse(Pending(priority, key)));
+                    }
+                }
+                queued.added = end;
+                if out_of_time() && queued.added < queued.diff.adds.len() {
+                    self.diffs.push_front(queued);
+                    return;
+                }
+            }
+            self.catching_up[level] -= 1;
+        }
     }
 
     /// Plan one frame. `lod0` is the level-0 distance, `budget` the maximum
     /// number of column jobs.
     pub fn plan(&mut self, planet: &Planet, eye: DVec3, lod0: f64, budget: usize) -> FrameWork {
         self.frame = self.frame.wrapping_add(1);
+        let started = std::time::Instant::now();
+        let budget_time = self.cpu_budget;
+        let out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b);
         let mut work = FrameWork::default();
         // Records evicted last frame are safe to reuse now.
         let delayed = std::mem::take(&mut self.delayed_records);
         self.free_records.extend(delayed);
         self.sync_edits(planet, &mut work);
+        let t_edits = started.elapsed();
         // Ask the planner for new windows when the view changed, then apply
         // every diff that is ready (the worker always plans the latest view).
         let request = WindowRequest {
@@ -561,7 +581,7 @@ impl Residency {
             match &mut self.planner {
                 Planner::Inline(planner) => {
                     let update = planner.update(&request);
-                    self.apply(update, &mut work);
+                    self.apply(update);
                 }
                 Planner::Worker(worker) => worker.request(request),
             }
@@ -572,23 +592,12 @@ impl Residency {
                 updates.push(update);
             }
             for update in updates {
-                self.apply(update, &mut work);
+                self.apply(update);
             }
         }
-        // Rehash when tombstones dominate.
-        let capacity = 1u32 << self.capacity.table_bits;
-        if self.tombstones + self.used_slots > capacity / 2 {
-            self.table.fill(NONE);
-            self.used_slots = 0;
-            self.tombstones = 0;
-            let entries: Vec<(u64, u32)> = self.residents.iter().map(|(k, r)| (*k, r.record)).collect();
-            for (key, record) in entries {
-                let slot = self.insert_slot(key as u32, (key >> 32) as u32, record);
-                self.residents.get_mut(&key).unwrap().slot = slot;
-            }
-
-            work.full_table = true;
-        }
+        let t_drain = started.elapsed();
+        self.apply_queued(&mut work, &out_of_time);
+        let t_apply = started.elapsed();
         // Urgent edit regenerations first.
         let mut urgent = std::mem::take(&mut self.urgent);
         urgent.sort_unstable();
@@ -599,7 +608,7 @@ impl Residency {
                 deferred_urgent.push(key);
                 continue;
             }
-            let Some(res) = self.residents.get(&key).copied() else { continue };
+            let Some(res) = self.residents.get(key) else { continue };
             let Ok(block) = self.edit_list(planet, key, &mut work) else {
                 deferred_urgent.push(key);
                 continue;
@@ -607,7 +616,7 @@ impl Residency {
             if let Some(old) = res.edit_block {
                 self.edits.release(old);
             }
-            self.residents.get_mut(&key).unwrap().edit_block = block;
+            self.residents.get_mut(key).unwrap().edit_block = block;
             work.jobs.push(Job {
                 key0: key as u32,
                 key1: (key >> 32) as u32,
@@ -622,7 +631,17 @@ impl Residency {
         // Merge pending windows by normalized distance; the coarsest level
         // (global coverage) always goes first.
         let top_level = self.grid.levels() - 1;
-        while work.jobs.len() < budget {
+        // Admission costs ~2 us of CPU per column (edit query, summary
+        // blocks, table), and discarding stale heap entries (columns a diff
+        // removed while queued; a big window change leaves hundreds of
+        // thousands) ~50 ns each: both are bounded by time as well as by the
+        // GPU budget, and resume next frame.
+        let mut steps = 0u32;
+        'admit: while work.jobs.len() < budget {
+            steps += 1;
+            if steps % 64 == 0 && out_of_time() {
+                break;
+            }
             let mut best: Option<(f32, usize)> = None;
             for index in 0..self.levels.len() {
                 let l = &mut self.levels[index];
@@ -631,6 +650,10 @@ impl Residency {
                         break;
                     }
                     l.heap.pop();
+                    steps += 1;
+                    if steps % 1024 == 0 && out_of_time() {
+                        break 'admit;
+                    }
                 }
                 if let Some(Reverse(Pending(priority, _))) = l.heap.peek() {
                     let p = if index as u32 == top_level { priority - 100.0 } else { *priority };
@@ -642,7 +665,7 @@ impl Residency {
             let Some((_, index)) = best else { break };
             let Reverse(Pending(priority, key)) = self.levels[index].heap.pop().unwrap();
             self.levels[index].pending.remove(&key);
-            if self.residents.contains_key(&key) {
+            if self.residents.contains_key(key) {
                 continue;
             }
             let requeue = |this: &mut Self| {
@@ -664,18 +687,8 @@ impl Residency {
             if !blocks {
                 self.block_conflicts += 1;
             }
-            let slot = self.insert_slot(key as u32, (key >> 32) as u32, record);
+            let slot = self.residents.insert(key, Resident { record, slot: 0, edit_block: block, blocks });
             work.table_writes.push((slot, record));
-            self.residents.insert(
-                key,
-                Resident {
-                    record,
-                    slot,
-                    edit_block: block,
-                    blocks,
-                },
-            );
-            self.levels[index].keys.insert(key);
             work.jobs.push(Job {
                 key0: key as u32,
                 key1: (key >> 32) as u32,
@@ -686,16 +699,27 @@ impl Residency {
             });
             work.job_keys.push(key);
         }
+        if std::env::var_os("HELIO_VOXEL_PLAN_TRACE").is_some() && started.elapsed().as_secs_f64() > 0.01 {
+            eprintln!(
+                "PLAN_TRACE edits {:.2} drain {:.2} apply {:.2} admit {:.2} ms jobs {} evictions {} queued_diffs {}",
+                t_edits.as_secs_f64() * 1e3,
+                (t_drain - t_edits).as_secs_f64() * 1e3,
+                (t_apply - t_drain).as_secs_f64() * 1e3,
+                (started.elapsed() - t_apply).as_secs_f64() * 1e3,
+                work.jobs.len(),
+                work.evictions.len(),
+                self.diffs.len()
+            );
+        }
         let mut stats = self.stats;
         stats.resident_columns = self.residents.len();
         stats.pending_columns = self.levels.iter().map(|l| l.pending.len()).sum::<usize>() + self.urgent.len();
-        let _ = &self.unwanted;
         stats.active_levels = self.levels.iter().filter(|l| l.active).count() as u32;
         stats.finest_level = self.levels.iter().position(|l| l.active).unwrap_or(0) as u32;
         stats.jobs = work.jobs.len();
         stats.evictions = work.evictions.len();
         stats.edit_words = self.edits.top;
-        stats.table_load = (self.used_slots + self.tombstones) as f32 / capacity as f32;
+        stats.table_load = self.residents.load();
         self.stats = stats;
         work
     }
@@ -708,7 +732,7 @@ impl Residency {
                 // Band overflow: stays unpublished; coarser levels cover it.
                 continue;
             }
-            if !self.residents.contains_key(&key) {
+            if !self.residents.contains_key(key) {
                 continue;
             }
             self.urgent.push(key);
@@ -744,7 +768,7 @@ impl Residency {
             .iter()
             .enumerate()
             .map(|(level, l)| {
-                if !l.active || urgent.contains(&(level as u32)) {
+                if !l.active || urgent.contains(&(level as u32)) || self.catching_up[level] > 0 {
                     return 0.0;
                 }
                 // A column's ground width (the index-angle span on a sphere
@@ -769,7 +793,10 @@ impl Residency {
     }
 
     pub fn idle(&self) -> bool {
-        self.urgent.is_empty() && self.applied == self.requested && self.levels.iter().all(|l| l.pending.is_empty())
+        self.urgent.is_empty()
+            && self.applied == self.requested
+            && self.diffs.is_empty()
+            && self.levels.iter().all(|l| l.pending.is_empty())
     }
 }
 
@@ -777,6 +804,68 @@ impl Residency {
 mod tests {
     use super::*;
     use crate::planet::PlanetRecipe;
+
+    /// The GPU hash table holds exactly the residents, each found by linear
+    /// probing from its home slot before any empty slot (what `find_column`
+    /// does), after evictions moved entries back.
+    fn table_is_exact(r: &Residency) {
+        let table = r.table();
+        let mask = (table.len() - 1) as u32;
+        assert_eq!(table.iter().filter(|&&v| v != NONE).count(), r.residents.len());
+        for (key, res) in r.residents.iter() {
+            assert_eq!(table[res.slot as usize], res.record);
+            let mut slot = slot_hash(key as u32, (key >> 32) as u32) & mask;
+            loop {
+                let v = table[slot as usize];
+                assert_ne!(v, NONE, "column {key:x} unreachable from its home slot");
+                if v == res.record {
+                    break;
+                }
+                slot = (slot + 1) & mask;
+            }
+        }
+    }
+
+    #[test]
+    fn budgeted_planning_spreads_big_diffs_and_converges_to_the_same_residency() {
+        let planet = Planet::new(PlanetRecipe::default()).unwrap();
+        let grid = *planet.grid();
+        let lod0 = Residency::lod_distance(&grid, (22.5f64).to_radians().tan(), 720, 1.0);
+        let ground = planet.surface_point(grid.direction(2, 3e7, 4e7), 1.8);
+        let high = ground.normalize() * (ground.length() + 8_000.0);
+        let settle = |r: &mut Residency, eye: DVec3, worst: &mut f64| {
+            for _ in 0..20_000 {
+                let started = std::time::Instant::now();
+                r.plan(&planet, eye, lod0, 100_000);
+                *worst = worst.max(started.elapsed().as_secs_f64() * 1000.0);
+                if r.idle() {
+                    return;
+                }
+            }
+            panic!("did not converge");
+        };
+        let mut plain = Residency::new(grid, Capacity::default());
+        let mut budgeted = Residency::new(grid, Capacity::default());
+        budgeted.set_cpu_budget(Some(std::time::Duration::from_millis(2)));
+        let (mut plain_worst, mut budget_worst) = (0.0, 0.0);
+        for eye in [ground, high, ground] {
+            settle(&mut plain, eye, &mut plain_worst);
+            settle(&mut budgeted, eye, &mut budget_worst);
+            let keys = |r: &Residency| {
+                let mut k: Vec<u64> = r.residents.iter().map(|(k, _)| k).collect();
+                k.sort_unstable();
+                k
+            };
+            assert_eq!(keys(&plain), keys(&budgeted));
+            assert_eq!(plain.fallback_distances(eye), budgeted.fallback_distances(eye));
+            for r in [&plain, &budgeted] {
+                table_is_exact(r);
+            }
+        }
+        // Frame cost stays near the budget (debug builds are slower). The
+        // inline planner's own window diff is outside the budget.
+        eprintln!("worst plan: unbounded {plain_worst:.1} ms, budgeted {budget_worst:.1} ms");
+    }
 
     #[test]
     fn windows_are_bounded_and_complete_on_the_ground_and_in_orbit() {
@@ -797,7 +886,7 @@ mod tests {
                     break;
                 }
             }
-            eprintln!("{:?} levels {:?}", residency.stats, residency.levels.iter().map(|l| (l.keys.len(), l.pending.len())).collect::<Vec<_>>());
+            eprintln!("{:?} pending {:?}", residency.stats, residency.levels.iter().map(|l| l.pending.len()).collect::<Vec<_>>());
             assert!(residency.idle());
             assert!(total < 1_900_000, "{total}");
             assert_eq!(total, residency.residents.len());
@@ -818,16 +907,6 @@ mod tests {
             let _ = residency.plan(&planet, eye, 120.0, 20_000);
             eye = planet.surface_point(eye + DVec3::new(0.0, 0.0, 70.0 * f64::from(step % 3)), 2.0);
         }
-        for (key, res) in &residency.residents {
-            let mut slot = slot_hash(*key as u32, (key >> 32) as u32) & residency.mask();
-            loop {
-                let v = residency.table[slot as usize];
-                assert_ne!(v, NONE, "key not reachable");
-                if v == res.record {
-                    break;
-                }
-                slot = (slot + 1) & residency.mask();
-            }
-        }
+        table_is_exact(&residency);
     }
 }

@@ -159,8 +159,13 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         // Canonical materials use the column top cell, which is resident.
         // Depth counts from the lowest neighbouring top: an exposed riser
         // above it is surface, not subsoil (coarse levels step in large
-        // cells where the fine terrain is a continuous slope).
-        let depth = max(min(top, lowest) - 1 - h.k, 0) << level;
+        // cells where the fine terrain is a continuous slope). A side face
+        // is always above the top of the air-side neighbour, which may lie
+        // in the next column (not resident here): side faces are surface.
+        // Measuring only in-column neighbours gave column-border risers
+        // subsoil (stone at coarse levels): grey bands sweeping with the LOD
+        // rings.
+        let depth = select(max(min(top, lowest) - 1 - h.k, 0) << level, 0, code < 4u);
         material = ground_material(p, (top << level) * world.grid.y, depth, slope, h.k << level);
         speck = (material & M_SPECK) != 0u;
         material &= M_ID;
