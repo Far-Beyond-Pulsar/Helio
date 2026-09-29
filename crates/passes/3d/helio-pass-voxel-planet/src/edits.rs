@@ -9,6 +9,7 @@ use crate::grid::{face_axes, Grid};
 use bytemuck::{Pod, Zeroable};
 use glam::DVec3;
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 /// Largest brush radius in half cells; keeps the squared test within u32.
@@ -168,28 +169,125 @@ fn bucket_of(radius_half: u32) -> u32 {
 pub struct Resolved {
     pub brush: Brush,
     pub faces: Vec<FaceBrush>,
+    /// Hash of the log up to and including this brush: equal prefix hashes
+    /// mean equal logs up to here.
+    pub prefix: u64,
+}
+
+/// Brushes per shared chunk.
+const CHUNK: usize = 1024;
+/// Index entries added before the recent tiles are sealed.
+const SEAL: usize = 1024;
+
+type TileKey = (u32, u8, i64, i64);
+
+/// Brush ids per index tile: a sealed map shared between copies of the log
+/// and the entries added since it was sealed. Copying is O(recent); sealing
+/// merges into a fresh map every [`SEAL`] entries.
+#[derive(Clone, Default)]
+struct TileIndex {
+    sealed: Arc<FxHashMap<TileKey, Arc<[u32]>>>,
+    recent: FxHashMap<TileKey, Vec<u32>>,
+    recent_ids: usize,
+}
+
+impl TileIndex {
+    fn add(&mut self, key: TileKey, id: u32) {
+        self.recent.entry(key).or_default().push(id);
+        self.recent_ids += 1;
+        if self.recent_ids >= SEAL {
+            let sealed = Arc::make_mut(&mut self.sealed);
+            for (key, ids) in self.recent.drain() {
+                let merged: Arc<[u32]> = match sealed.get(&key) {
+                    Some(old) => old.iter().copied().chain(ids).collect(),
+                    None => ids.into(),
+                };
+                sealed.insert(key, merged);
+            }
+            self.recent_ids = 0;
+        }
+    }
+
+    fn remove(&mut self, key: TileKey, id: u32) {
+        if let Some(list) = self.recent.get_mut(&key) {
+            let before = list.len();
+            list.retain(|&b| b != id);
+            self.recent_ids -= before - list.len();
+            if list.is_empty() {
+                self.recent.remove(&key);
+            }
+        }
+        if self.sealed.get(&key).is_some_and(|list| list.contains(&id)) {
+            let sealed = Arc::make_mut(&mut self.sealed);
+            let kept: Arc<[u32]> = sealed[&key].iter().copied().filter(|&b| b != id).collect();
+            if kept.is_empty() {
+                sealed.remove(&key);
+            } else {
+                sealed.insert(key, kept);
+            }
+        }
+    }
+
+    fn get(&self, key: &TileKey) -> impl Iterator<Item = u32> + '_ {
+        let sealed = self.sealed.get(key).into_iter().flat_map(|list| list.iter().copied());
+        sealed.chain(self.recent.get(key).into_iter().flat_map(|list| list.iter().copied()))
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&TileKey, &[u32])> {
+        let sealed = self.sealed.iter().map(|(key, list)| (key, &list[..]));
+        sealed.chain(self.recent.iter().map(|(key, list)| (key, &list[..])))
+    }
 }
 
 /// Ordered edit log plus a hierarchical tile index.
+///
+/// Copies share structure: brushes live in shared chunks of [`CHUNK`] and
+/// the tile index keeps a sealed shared map, so copying a log with tens of
+/// thousands of edits (what a renderer does to extend a published world)
+/// costs about as much as copying a few thousand.
 #[derive(Clone, Default)]
 pub struct EditLog {
-    brushes: Vec<Resolved>,
-    tiles: FxHashMap<(u32, u8, i64, i64), Vec<u32>>,
+    chunks: Vec<Arc<Vec<Resolved>>>,
+    len: usize,
+    tiles: TileIndex,
     buckets: u32,
+}
+
+/// FNV-1a over a brush, continuing `seed`.
+fn brush_hash(seed: u64, brush: &Brush) -> u64 {
+    let mut h = seed ^ 0xcbf2_9ce4_8422_2325;
+    let mut eat = |v: u64| {
+        for byte in v.to_le_bytes() {
+            h = (h ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
+        }
+    };
+    for c in brush.center {
+        eat(c.to_bits());
+    }
+    eat(brush.radius.to_bits());
+    eat(brush.shape as u64);
+    eat(brush.op as u64);
+    eat(u64::from(brush.material));
+    h
 }
 
 impl EditLog {
     pub fn len(&self) -> usize {
-        self.brushes.len()
+        self.len
     }
     pub fn is_empty(&self) -> bool {
-        self.brushes.is_empty()
+        self.len == 0
     }
     pub fn brushes(&self) -> impl Iterator<Item = &Brush> {
-        self.brushes.iter().map(|r| &r.brush)
+        self.chunks.iter().flat_map(|chunk| chunk.iter()).map(|r| &r.brush)
     }
     pub fn resolved(&self, id: u32) -> &Resolved {
-        &self.brushes[id as usize]
+        let id = id as usize;
+        &self.chunks[id / CHUNK][id % CHUNK]
+    }
+    /// Hash of the first `id + 1` brushes (see [`Resolved::prefix`]).
+    pub fn prefix_hash(&self, id: u32) -> u64 {
+        self.resolved(id).prefix
     }
     fn tiles_of(face_brush: &FaceBrush) -> (u32, i64, i64, i64, i64) {
         let g = bucket_of(face_brush.radius_half);
@@ -207,33 +305,39 @@ impl EditLog {
     }
     pub fn push(&mut self, grid: &Grid, brush: Brush) -> Result<u32, String> {
         let faces = brush.resolve(grid)?;
-        let id = self.brushes.len() as u32;
+        let id = self.len as u32;
         for fb in &faces {
             let (g, i0, i1, j0, j1) = Self::tiles_of(fb);
             self.buckets = self.buckets.max(g + 1);
             for ti in i0..=i1 {
                 for tj in j0..=j1 {
-                    self.tiles.entry((g, fb.face(), ti, tj)).or_default().push(id);
+                    self.tiles.add((g, fb.face(), ti, tj), id);
                 }
             }
         }
-        self.brushes.push(Resolved { brush, faces });
+        let prefix = brush_hash(if id == 0 { 0 } else { self.prefix_hash(id - 1) }, &brush);
+        if self.len % CHUNK == 0 {
+            self.chunks.push(Arc::new(Vec::with_capacity(CHUNK)));
+        }
+        // Copies only this chunk when another log still shares it.
+        Arc::make_mut(self.chunks.last_mut().expect("pushed above")).push(Resolved { brush, faces, prefix });
+        self.len += 1;
         Ok(id)
     }
     /// Remove the most recent brush (undo).
     pub fn pop(&mut self) -> Option<Brush> {
-        let last = self.brushes.pop()?;
-        let id = self.brushes.len() as u32;
+        let chunk = self.chunks.last_mut()?;
+        let last = Arc::make_mut(chunk).pop()?;
+        if chunk.is_empty() {
+            self.chunks.pop();
+        }
+        self.len -= 1;
+        let id = self.len as u32;
         for fb in &last.faces {
             let (g, i0, i1, j0, j1) = Self::tiles_of(fb);
             for ti in i0..=i1 {
                 for tj in j0..=j1 {
-                    if let Some(list) = self.tiles.get_mut(&(g, fb.face(), ti, tj)) {
-                        list.retain(|&b| b != id);
-                        if list.is_empty() {
-                            self.tiles.remove(&(g, fb.face(), ti, tj));
-                        }
-                    }
+                    self.tiles.remove((g, fb.face(), ti, tj), id);
                 }
             }
         }
@@ -243,7 +347,7 @@ impl EditLog {
     /// `[i0, i1] × [j0, j1]` of `face` at LOD `level`. Returned as
     /// `(brush id, index into that brush's faces)`.
     pub fn query(&self, face: u8, i0: i64, i1: i64, j0: i64, j1: i64, level: u32) -> Vec<(u32, u8)> {
-        if self.brushes.is_empty() {
+        if self.len == 0 {
             return Vec::new();
         }
         let mut ids: Vec<u32> = Vec::new();
@@ -257,7 +361,7 @@ impl EditLog {
             let (a0, a1, b0, b1) = (i0.div_euclid(t), i1.div_euclid(t), j0.div_euclid(t), j1.div_euclid(t));
             if (a1 - a0 + 1) * (b1 - b0 + 1) > 4096 {
                 // A huge region at a fine bucket: scan the bucket instead.
-                for ((bg, bf, ti, tj), list) in &self.tiles {
+                for ((bg, bf, ti, tj), list) in self.tiles.iter() {
                     if *bg == g && *bf == face && (a0..=a1).contains(ti) && (b0..=b1).contains(tj) {
                         ids.extend_from_slice(list);
                     }
@@ -266,9 +370,7 @@ impl EditLog {
             }
             for ti in a0..=a1 {
                 for tj in b0..=b1 {
-                    if let Some(list) = self.tiles.get(&(g, face, ti, tj)) {
-                        ids.extend_from_slice(list);
-                    }
+                    ids.extend(self.tiles.get(&(g, face, ti, tj)));
                 }
             }
         }
@@ -276,7 +378,7 @@ impl EditLog {
         ids.dedup();
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
-            for (index, fb) in self.brushes[id as usize].faces.iter().enumerate() {
+            for (index, fb) in self.resolved(id).faces.iter().enumerate() {
                 if fb.face() != face || !fb.active(level) {
                     continue;
                 }
@@ -317,4 +419,66 @@ pub fn apply(brushes: impl Iterator<Item = FaceBrush>, center: [i32; 3], mut kin
         }
     }
     (kind, material)
+}
+
+#[cfg(test)]
+mod shared_log {
+    use super::*;
+    use crate::grid::Shape;
+
+    fn brute(log: &EditLog, face: u8, i0: i64, i1: i64, j0: i64, j1: i64, level: u32) -> Vec<(u32, u8)> {
+        let mut out = Vec::new();
+        for id in 0..log.len() as u32 {
+            for (index, fb) in log.resolved(id).faces.iter().enumerate() {
+                let r = i64::from(fb.radius_half) / 2 + 1;
+                let (ci, cj) = (i64::from(fb.center[0]) / 2, i64::from(fb.center[1]) / 2);
+                if fb.face() == face && fb.active(level) && ci + r >= i0 && ci - r <= i1 && cj + r >= j0 && cj - r <= j1 {
+                    out.push((id, index as u8));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn copies_share_structure_and_queries_match_brute_force() {
+        let grid = Grid::plane(Shape::Plane, 512.0, 0.1).unwrap();
+        let brush = |k: usize| Brush {
+            center: [((k * 37) % 400) as f64 - 200.0, 1.0, ((k * 91) % 400) as f64 - 200.0],
+            radius: if k % 97 == 0 { 6.0 } else { 0.3 },
+            shape: if k % 3 == 0 { BrushShape::Cube } else { BrushShape::Sphere },
+            op: if k % 2 == 0 { BrushOp::Add } else { BrushOp::Remove },
+            material: 13,
+        };
+        let mut a = EditLog::default();
+        for k in 0..9_000 {
+            a.push(&grid, brush(k)).unwrap();
+        }
+        let snapshot = a.clone();
+        let mut b = a.clone();
+        for k in 9_000..9_500 {
+            b.push(&grid, brush(k)).unwrap();
+        }
+        for _ in 0..700 {
+            b.pop().unwrap();
+        }
+        assert_eq!((snapshot.len(), a.len(), b.len()), (9_000, 9_000, 8_800));
+        // Prefix hashes agree where the logs agree and differ after.
+        assert_eq!(a.prefix_hash(8_799), b.prefix_hash(8_799));
+        let face = crate::grid::PLANE_FACE;
+        let c = grid.cells() as i64 / 2;
+        for (log, name) in [(&snapshot, "snapshot"), (&a, "a"), (&b, "b")] {
+            for &(lo, hi, level) in &[(c - 2000, c + 2000, 0u32), (c - 300, c - 100, 0), (0, grid.cells() as i64, 5)] {
+                let mut got = log.query(face, lo, hi, lo, hi, level);
+                got.sort_unstable();
+                assert_eq!(got, brute(log, face, lo, hi, lo, hi, level), "{name} {lo}..{hi} level {level}");
+            }
+        }
+        // Copying a large log is cheap: shared chunks, bounded recent tiles.
+        let t = std::time::Instant::now();
+        for _ in 0..100 {
+            std::hint::black_box(a.clone());
+        }
+        assert!(t.elapsed().as_millis() < 200, "{:?} for 100 copies", t.elapsed());
+    }
 }

@@ -227,6 +227,8 @@ pub struct Residency {
     /// GPU face-brush index for each (brush id, face entry).
     brush_gpu: Vec<Vec<u32>>,
     synced: Vec<crate::edits::Brush>,
+    /// Prefix hashes of `synced` (see `EditLog::prefix_hash`).
+    synced_hash: Vec<u64>,
     next_brush: u32,
     urgent: Vec<u64>,
     pub stats: Stats,
@@ -272,6 +274,7 @@ impl Residency {
             edits: EditHeap::default(),
             brush_gpu: Vec::new(),
             synced: Vec::new(),
+            synced_hash: Vec::new(),
             next_brush: 0,
             urgent: Vec::new(),
             stats: Stats::default(),
@@ -334,13 +337,27 @@ impl Residency {
     /// of resident columns touched by new or undone brushes.
     fn sync_edits(&mut self, planet: &Planet, work: &mut FrameWork) {
         let log = planet.edits();
-        let current: Vec<_> = log.brushes().copied().collect();
-        let common = self
-            .synced
-            .iter()
-            .zip(&current)
-            .take_while(|(a, b)| a == b)
-            .count();
+        // Longest common prefix of the synced and current logs, found by
+        // prefix hash in O(log n); an unchanged log costs O(1) per frame.
+        let n = self.synced.len().min(log.len());
+        let same = |k: usize| k == 0 || self.synced_hash[k - 1] == log.prefix_hash((k - 1) as u32);
+        if n == self.synced.len() && n == log.len() && same(n) {
+            return;
+        }
+        let common = if same(n) {
+            n
+        } else {
+            let (mut lo, mut hi) = (0, n);
+            while lo < hi {
+                let mid = (lo + hi + 1) / 2;
+                if same(mid) {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            lo
+        };
         let mut touched = Vec::new();
         for id in common..self.synced.len() {
             // Undone brushes: their old footprint must be regenerated.
@@ -349,7 +366,9 @@ impl Residency {
             }
         }
         self.brush_gpu.truncate(common);
-        for id in common..current.len() {
+        self.synced.truncate(common);
+        self.synced_hash.truncate(common);
+        for id in common..log.len() {
             let resolved = log.resolved(id as u32);
             let mut indices = Vec::new();
             for fb in &resolved.faces {
@@ -360,8 +379,9 @@ impl Residency {
                 touched.push(*fb);
             }
             self.brush_gpu.push(indices);
+            self.synced.push(resolved.brush);
+            self.synced_hash.push(resolved.prefix);
         }
-        self.synced = current;
         for fb in touched {
             let r_cells = i64::from(fb.radius_half) / 2 + 1;
             let ci = i64::from(fb.center[0]) / 2;
