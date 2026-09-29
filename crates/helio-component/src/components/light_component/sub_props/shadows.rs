@@ -7,13 +7,12 @@ use std::collections::HashMap;
 /// shadow_index`'s own request/disabled sentinel (`0` = requests shadows,
 /// `u32::MAX` = explicitly disabled), computed once at mirror-build time.
 ///
-/// Not the FINAL shadow atlas slot: `Scene::flush()`'s importance-scoring
-/// pass overwrites this to the light's real assigned slot (or leaves it at
-/// `u32::MAX` if the light loses the budget) every frame, by design -- that
-/// value depends on every OTHER currently-live light's own score, so it
-/// structurally cannot be computed per-entity, at upload time, no matter
-/// how the byte layout is chosen. This function only ever encodes the
-/// request bit; see `Scene::flush`'s own doc for the rest.
+/// Not the FINAL shadow atlas slot: `helio-pass-shadow-matrix`'s GPU caster
+/// allocation (`shadow_casters.wgsl`, Helio#246) overwrites it in the light's
+/// GPU row with the real assigned slot, or `u32::MAX` if the light loses the
+/// budget, whenever the light rows change. That value depends on every other
+/// live light's score, so it cannot be computed per entity at upload time.
+/// This function only encodes the request.
 pub fn cast_shadows_to_shadow_request(cast_shadows: bool) -> u32 {
     if cast_shadows {
         0
