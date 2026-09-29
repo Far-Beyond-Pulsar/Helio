@@ -139,6 +139,26 @@ impl Drop for ParallelRenderPool {
     }
 }
 
+/// How long `CommandEncoder::finish` took for one run of passes, recorded
+/// when [`RenderGraph::set_finish_breakdown`] is on.
+///
+/// wgpu does its validation and encoding in `finish`, so its cost follows the
+/// number of commands recorded; passes draw on raw `wgpu` passes the graph
+/// cannot count, so this measures that cost per pass directly instead
+/// (Pulsar-Native#813). Passes fused into one render-pass chain cannot be
+/// split, so they share a segment.
+#[derive(Clone, Debug)]
+pub struct FinishSegment {
+    /// The passes recorded into this segment, in graph order.
+    pub passes: Vec<&'static str>,
+    pub compute: std::time::Duration,
+    pub graphics: std::time::Duration,
+}
+
+/// Environment variable that turns [`FinishSegment`] recording on for every
+/// graph built, including ones rebuilt after a resize or settings change.
+const FINISH_BREAKDOWN_ENV: &str = "HELIO_FINISH_BREAKDOWN";
+
 /// A resident thread that finishes the graph's compute encoder while the
 /// render thread finishes the graphics encoder.
 ///
@@ -447,6 +467,12 @@ pub struct RenderGraph {
     /// first frame. See [`EncoderFinisher`].
     #[cfg(not(target_arch = "wasm32"))]
     encoder_finisher: OnceLock<EncoderFinisher>,
+    /// Whether to split the encoders at pass boundaries and time each
+    /// segment's finish. Diagnostic only: many small command buffers cost
+    /// more in total than two large ones.
+    finish_breakdown_enabled: bool,
+    /// The last frame's segments while `finish_breakdown_enabled`.
+    finish_breakdown: Vec<FinishSegment>,
     chain_membership: Vec<bool>,
     /// Previous frame's chain membership, used to detect which passes changed
     /// so only their bundles (and everything after) need rebuilding.
@@ -545,6 +571,9 @@ impl RenderGraph {
             parallel_pool: OnceLock::new(),
             #[cfg(not(target_arch = "wasm32"))]
             encoder_finisher: OnceLock::new(),
+            finish_breakdown_enabled: std::env::var_os(FINISH_BREAKDOWN_ENV)
+                .is_some_and(|value| value != "0"),
+            finish_breakdown: Vec::new(),
             chain_membership: Vec::new(),
             prev_chain_membership: Vec::new(),
             chain_generation: 0,
@@ -573,6 +602,24 @@ impl RenderGraph {
 
     pub fn set_delta_time(&mut self, dt: f32) {
         self.delta_time = dt;
+    }
+
+    /// Record how long encoder finishing takes per pass, readable afterwards
+    /// from [`Self::finish_breakdown`] and shown in the flamegraph as
+    /// `encoder.finish: <passes>` scopes. Also enabled by setting the
+    /// `HELIO_FINISH_BREAKDOWN` environment variable. Adds overhead; leave it
+    /// off outside profiling.
+    pub fn set_finish_breakdown(&mut self, enabled: bool) {
+        self.finish_breakdown_enabled = enabled;
+        if !enabled {
+            self.finish_breakdown.clear();
+        }
+    }
+
+    /// The last frame's per-pass finish cost; empty unless
+    /// [`Self::set_finish_breakdown`] is on.
+    pub fn finish_breakdown(&self) -> &[FinishSegment] {
+        &self.finish_breakdown
     }
 
     /// Enables the driver-validated persistent pipeline cache. Must be called
@@ -1466,6 +1513,53 @@ impl RenderGraph {
             };
         }
         let mut chain_patch: Vec<Option<wgpu::RenderPassColorAttachment<'static>>> = Vec::new();
+
+        // Finish breakdown: segments already finished, submitted all compute
+        // then all graphics, the same order as the two whole encoders.
+        let finish_breakdown = self.finish_breakdown_enabled;
+        self.finish_breakdown.clear();
+        let mut compute_segments: Vec<wgpu::CommandBuffer> = Vec::new();
+        let mut graphics_segments: Vec<wgpu::CommandBuffer> = Vec::new();
+        let mut segment_passes: Vec<&'static str> = Vec::new();
+        // Finish what the encoders hold so far as one timed segment and carry
+        // on in fresh ones. Only valid while no chain render pass is open.
+        macro_rules! split_encoders {
+            () => {
+                if !segment_passes.is_empty() {
+                    let new_encoder = |label: &'static str| {
+                        scene
+                            .device()
+                            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some(label),
+                            })
+                    };
+                    let done_compute =
+                        std::mem::replace(&mut compute_encoder, new_encoder("Compute Graph"));
+                    let done_graphics =
+                        std::mem::replace(&mut encoder, new_encoder("Render Graph"));
+                    let passes = std::mem::take(&mut segment_passes);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let _finish_scope = profiling::is_profiling_enabled().then(|| {
+                        profiling::ProfileScope::new(format!(
+                            "encoder.finish: {}",
+                            passes.join(" + ")
+                        ))
+                    });
+                    let start = std::time::Instant::now();
+                    compute_segments.push(done_compute.finish());
+                    let compute = start.elapsed();
+                    let start = std::time::Instant::now();
+                    graphics_segments.push(done_graphics.finish());
+                    let graphics = start.elapsed();
+                    self.finish_breakdown.push(FinishSegment {
+                        passes,
+                        compute,
+                        graphics,
+                    });
+                }
+            };
+        }
+
         self.profiler
             .begin_gpu_pass(&mut encoder, "__graph_graphics");
 
@@ -1511,6 +1605,14 @@ impl RenderGraph {
             // lifetime a plain `self.pre_pass_actions.get(..)` borrow would carry.
             let pre_pass_actions_ptr: *const Vec<Vec<PrePassAction>> = &self.pre_pass_actions;
             for (pass_index, pass) in self.passes.iter_mut().enumerate() {
+                if finish_breakdown {
+                    // A chain's passes share one render pass on the encoder,
+                    // so they stay in one segment until it closes.
+                    if chain_rp.is_none() {
+                        split_encoders!();
+                    }
+                    segment_passes.push(pass.name());
+                }
                 if let Some(bundle) = &self.gpu_render_bundles[pass_index] {
                     let pass_name = pass.name();
                     let execute_start = std::time::Instant::now();
@@ -1872,7 +1974,10 @@ impl RenderGraph {
         // Resolve after the final graphics timestamp, not before graphics runs.
         self.profiler
             .resolve_gpu_queries(&mut encoder, self.frame_count);
-        let mut command_buffers = {
+        // The last segment carries the graph's closing timestamps and query
+        // resolve along with its passes.
+        split_encoders!();
+        let finished = {
             // Finishing the encoders runs wgpu's full command validation; the
             // two are independent, so they finish on two threads.
             #[cfg(not(target_arch = "wasm32"))]
@@ -1887,6 +1992,13 @@ impl RenderGraph {
             let finished = vec![compute_encoder.finish(), encoder.finish()];
             finished
         };
+        // Without the breakdown both segment lists are empty and this is just
+        // [compute, graphics].
+        let mut finished = finished.into_iter();
+        compute_segments.extend(finished.next());
+        graphics_segments.extend(finished.next());
+        let mut command_buffers = compute_segments;
+        command_buffers.append(&mut graphics_segments);
         command_buffers.extend(parallel_command_buffers);
         let submission_index = {
             #[cfg(not(target_arch = "wasm32"))]

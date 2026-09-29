@@ -431,6 +431,13 @@ impl Renderer {
         self.graph.collect_graph_timeline()
     }
 
+    /// Per-pass `CommandEncoder::finish` cost for the last frame; see
+    /// [`helio_core::RenderGraph::set_finish_breakdown`]. Enable it with the
+    /// `HELIO_FINISH_BREAKDOWN` environment variable so rebuilt graphs keep it.
+    pub fn finish_breakdown(&self) -> &[helio_core::FinishSegment] {
+        self.graph.finish_breakdown()
+    }
+
     pub fn add_pass(&mut self, pass: Box<dyn helio_core::RenderPass>) {
         self.graph.add_pass(pass);
     }

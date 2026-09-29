@@ -466,9 +466,9 @@ pub use entity::Entity;
 pub use error::{Error, Result};
 pub use frame_storage::RenderFrameStorage;
 pub use graph::{
-    BindingOverrideBuilder, DebugPassInfo, DebugResourceInfo, FrameDebugData, GraphTimelineData,
-    GraphTimelinePass, PipelineFormatCache, PipelineFormatKey, PipelineFormatSet, PipelineHandle,
-    PipelineRecipeBuilder, PipelineRegistry, RenderGraph,
+    BindingOverrideBuilder, DebugPassInfo, DebugResourceInfo, FinishSegment, FrameDebugData,
+    GraphTimelineData, GraphTimelinePass, PipelineFormatCache, PipelineFormatKey,
+    PipelineFormatSet, PipelineHandle, PipelineRecipeBuilder, PipelineRegistry, RenderGraph,
 };
 pub use profiling::{
     FocusedTiming, FocusedTimingGroup, FocusedTimingReport, GpuTimingAvailability, Profiler,

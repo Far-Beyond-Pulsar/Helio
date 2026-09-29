@@ -12,8 +12,8 @@ pub use attachments::{
     DepthAttachmentIntent,
 };
 pub use executor::{
-    DebugPassInfo, DebugResourceInfo, FrameDebugData, GraphTimelineData, GraphTimelinePass,
-    RenderGraph,
+    DebugPassInfo, DebugResourceInfo, FinishSegment, FrameDebugData, GraphTimelineData,
+    GraphTimelinePass, RenderGraph,
 };
 pub use pipeline_cache::{
     BindingOverrideBuilder, PipelineFormatCache, PipelineFormatKey, PipelineFormatSet,

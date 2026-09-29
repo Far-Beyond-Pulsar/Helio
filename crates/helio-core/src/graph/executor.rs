@@ -106,4 +106,4 @@ pub(crate) fn format_name(fmt: wgpu::TextureFormat) -> &'static str {
 }
 
 // Re-exports for the public API surface of the graph module.
-pub use super::execution::RenderGraph;
+pub use super::execution::{FinishSegment, RenderGraph};
