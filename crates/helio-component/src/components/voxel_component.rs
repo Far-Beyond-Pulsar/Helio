@@ -7,7 +7,7 @@
 
 use engine_class_derive::engine_class;
 use helio_voxel_data::{
-    VoxelBrushEdit,
+    VoxelEditJournal,
     VoxelStoredPayload, VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION,
 };
 pub use helio_voxel_data::{VoxelPayloadKey, VoxelPayloadStore};
@@ -348,7 +348,7 @@ pub struct VoxelTerrainComponent {
     /// level. Append through the sculpt tool or the scripting methods, which
     /// also advance `source_revision`.
     #[serde(default)]
-    pub edits: Vec<VoxelBrushEdit>,
+    pub edits: VoxelEditJournal,
 }
 
 impl Default for VoxelTerrainComponent {
@@ -377,7 +377,7 @@ impl Default for VoxelTerrainComponent {
             material_ids: vec![0],
             editable: true,
             source_revision: 0,
-            edits: Vec::new(),
+            edits: VoxelEditJournal::default(),
         }
     }
 }

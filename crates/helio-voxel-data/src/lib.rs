@@ -20,7 +20,7 @@ pub use bounded_inbox::{
     VoxelPublicationStatus, VoxelPublicationTicket, VoxelPublicationTicketState,
     VoxelPublicationWorker,
 };
-pub use brush::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape};
+pub use brush::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditJournal};
 pub use chunk_codec::{VoxelChunkCodecError, VoxelMaterialChunk};
 pub use data_api::{
     VoxelBatchReceipt, VoxelPayloadKey, VoxelPayloadStore, VoxelSourceWriter, VoxelStoredPayload,

@@ -23,7 +23,7 @@ use helio_pass_voxel_planet::{
 };
 /// Terrain material ids (`material::GRASS`, ...) and their names.
 pub use helio_pass_voxel_planet::terrain::material;
-use helio_voxel_data::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape};
+use helio_voxel_data::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditJournal};
 use pulsar_scene_model::components::Transform;
 use pulsar_scenedb::{Entity, World};
 
@@ -106,7 +106,7 @@ fn entity_recipe(world: &World, entity: Entity, component: &VoxelTerrainComponen
 
 struct CachedWorld {
     recipe: PlanetRecipe,
-    edits: Vec<VoxelBrushEdit>,
+    edits: VoxelEditJournal,
     planet: Arc<Planet>,
 }
 
@@ -130,24 +130,24 @@ pub fn terrain_world(world: &World, entity: Entity) -> Result<Arc<Planet>, Strin
     let key = entity.bits();
     if let Some(cached) = worlds.get_mut(&key) {
         if cached.recipe == recipe && component.edits.starts_with(&cached.edits) {
-            let new = &component.edits[cached.edits.len()..];
-            if !new.is_empty() {
+            let start = cached.edits.len();
+            if component.edits.len() > start {
                 // Scripts append edit after edit: extend the world in place
                 // while no caller still holds it, else a copy.
                 if Arc::get_mut(&mut cached.planet).is_none() {
                     cached.planet = Arc::new((*cached.planet).clone());
                 }
                 let planet = Arc::get_mut(&mut cached.planet).expect("uniquely owned");
-                for edit in new {
+                for edit in component.edits.iter_from(start) {
                     planet.apply(planet_brush(edit))?;
                 }
-                cached.edits.extend_from_slice(new);
+                cached.edits = component.edits.clone();
             }
             return Ok(Arc::clone(&cached.planet));
         }
     }
     let mut planet = Planet::new(recipe.clone())?;
-    for edit in &component.edits {
+    for edit in component.edits.iter() {
         planet.apply(planet_brush(edit))?;
     }
     let planet = Arc::new(planet);
