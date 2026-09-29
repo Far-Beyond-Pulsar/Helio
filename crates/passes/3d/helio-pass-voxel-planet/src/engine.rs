@@ -820,6 +820,31 @@ impl PlanetRenderer {
         // Farthest ray distance: past the far side of a planet, or across a plane.
         let far = if grid.is_plane() { f64::from(grid.cells()) * s * 2.0 + rho.abs() } else { rho + grid.radius() * 3.0 };
         frame.lod = [lod0 as f32, self.settings.lod_dither, -cut as f32, far as f32];
+        let (_, rings) = self.sky_rings(eye, lod0, cut);
+        for (level, phi) in rings.iter().enumerate().take(32) {
+            frame.ring[level / 4][level % 4] = *phi as f32;
+        }
+        // Bit 1: directional sky bound; bit 2: sky-bound fail-safe disabled
+        // (HELIO_VOXEL_NO_FAILSAFE, for A/B timing).
+        let flags = (u32::from(self.settings.horizon) << 1) | (u32::from(std::env::var_os("HELIO_VOXEL_NO_FAILSAFE").is_some()) << 2);
+        let index = self.settings.frame_override.unwrap_or(self.frame_index % 1024);
+        frame.screen = [size[0] as f32, size[1] as f32, index as f32, flags as f32];
+        let sun = sun.normalize_or_zero();
+        frame.sun = [sun.x, sun.y, sun.z, if shadows { 1.0 } else { 0.0 }];
+        frame.counts = [jobs, evictions, (1u32 << self.settings.capacity.table_bits) - 1, self.settings.capacity.pool_units];
+        frame
+    }
+
+    /// Per level, the sky-bound fallback distance (ray distance at which the
+    /// level may fall back to coarser data) and ring (angular distance, or
+    /// metres on a plane, where the level's blocks start to serve rays), for
+    /// an eye and cut depth. `frame_uniform` uses these; diagnostics may call
+    /// it after a frame (the residency state is the frame's until the next
+    /// plan).
+    pub fn sky_rings(&self, eye: DVec3, lod0: f64, cut: f64) -> (Vec<f64>, Vec<f64>) {
+        let planet = &self.planet;
+        let grid = planet.grid();
+        let rho = grid.radial(eye);
         // Nearest ray distance at which each level may fall back to coarser
         // data: chord bound for points past its fallback angle at radius
         // >= the cut radius.
@@ -844,16 +869,7 @@ impl PlanetRenderer {
         } else {
             sky_rings(lod0, f64::from(self.settings.lod_dither), rho, r_lo, planet.outer_radius(), &fallback)
         };
-        for (level, phi) in rings.iter().enumerate().take(32) {
-            frame.ring[level / 4][level % 4] = *phi as f32;
-        }
-        let flags = u32::from(self.settings.horizon) << 1;
-        let index = self.settings.frame_override.unwrap_or(self.frame_index % 1024);
-        frame.screen = [size[0] as f32, size[1] as f32, index as f32, flags as f32];
-        let sun = sun.normalize_or_zero();
-        frame.sun = [sun.x, sun.y, sun.z, if shadows { 1.0 } else { 0.0 }];
-        frame.counts = [jobs, evictions, (1u32 << self.settings.capacity.table_bits) - 1, self.settings.capacity.pool_units];
-        frame
+        (fallback, rings)
     }
 
     /// Upload this frame's residency changes. Returns (table patches,

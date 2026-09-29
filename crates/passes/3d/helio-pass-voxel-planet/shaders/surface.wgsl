@@ -15,7 +15,35 @@ fn primary(@builtin(global_invocation_id) id: vec3<u32>) {
     let r = make_ray(camera.position_near.xyz, d);
     let sky = eye_sky(d, 0.0);
     let span = sky_span(sky);
-    hits[pixel_index(id.xy)] = trace(r, span.x, min(frame.lod.w, span.y), 0.0, 1.0, frame.lod.y);
+    // Fail-safe for the sky bound: a ray the bound ended that is still
+    // descending there and will pass inside the terrain shell cannot be sky,
+    // so it continues without the bound. In a consistent frame no ray meets
+    // this; it closes rare single-frame holes at the planet's limb seen
+    // during very fast altitude changes (a ring of sky around the planet
+    // from orbit). One `trace` call site keeps the shader's register use.
+    var t0 = span.x;
+    var t1 = min(frame.lod.w, span.y);
+    var hit: Hit;
+    for (var attempt = 0u; attempt < 2u; attempt++) {
+        hit = trace(r, t0, t1, 0.0, 1.0, frame.lod.y);
+        if (hit.info & 3u) != ST_MISS || t1 >= frame.lod.w || (u32(frame.screen.w) & 4u) != 0u || !bound_cut_terrain_ray(r, t1) { break; }
+        t0 = t1;
+        t1 = frame.lod.w;
+    }
+    hits[pixel_index(id.xy)] = hit;
+}
+
+// Whether an eye ray, past ray distance `t`, still descends and will pass
+// inside the terrain shell (below the world's outer radius).
+fn bound_cut_terrain_ray(r: Ray, t: f32) -> bool {
+    if r.ol >= 0.0 { return false; }
+    if is_plane() { return true; }
+    // Closest approach to the planet centre at t_c = -rho * ol, radius
+    // rho * sqrt(1 - ol^2); the shell's outer radius is rho + layer.w.
+    let rho = frame.eye.w;
+    if -rho * r.ol <= t { return false; }
+    let k = 1.0 + frame.layer.w / rho;
+    return 1.0 - r.ol * r.ol < k * k;
 }
 
 fn srgb(c: vec3<f32>) -> vec3<f32> {
@@ -44,11 +72,14 @@ fn palette(m: u32) -> vec3<f32> {
 }
 
 // Grass colour from dry through meadow to lush green by world-space
-// patches (continuous across levels). The patch octave fades out where it is
-// finer than a cell, so distant terrain shows its average.
-fn grass_albedo(p: vec3<i32>, level: u32) -> vec3<f32> {
+// patches (continuous across levels). The patch octave (25.6 m wavelength)
+// fades out as a pixel's footprint approaches it, so distant terrain shows
+// its average. The fade follows the footprint, not the level: fading by
+// level stepped the patch contrast at every level boundary, which showed as
+// rings sweeping outward while ascending.
+fn grass_albedo(p: vec3<i32>, pixel: f32) -> vec3<f32> {
     let broad = f32(noise(p, 13u, 0x3c6ef372u)) / f32(NOISE_ONE);
-    let patches = f32(noise(p, 9u, 0xa54ff53au)) / f32(NOISE_ONE) * clamp(f32(8 - i32(level)) * 0.5, 0.0, 1.0);
+    let patches = f32(noise(p, 9u, 0xa54ff53au)) / f32(NOISE_ONE) * clamp((12.8 - pixel) / 6.4, 0.0, 1.0);
     let t = clamp(0.58 + 0.6 * broad + 0.14 * patches, 0.0, 1.0);
     let dry = srgb(vec3<f32>(146.0, 148.0, 82.0));
     let meadow = srgb(vec3<f32>(106.0, 144.0, 58.0));
@@ -250,14 +281,18 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         let fade = clamp((size / pixel - 3.0) / 6.0, 0.0, 1.0);
         ao *= 1.0 - 0.14 * fade * (1.0 - smoothstep(0.0, 0.12, edge));
     }
-    // Per-voxel pigment variation (averaged out once a cell is about a
-    // pixel) over world-space grass patches (Lay of the Land look).
+    // Per-voxel pigment variation over world-space grass patches (Lay of
+    // the Land look), averaged out as *base* voxels shrink below a pixel. A
+    // coarse cell stands for many base voxels, so its pigment is their mean;
+    // fading by the level cell's footprint instead jumped 2x at every level
+    // boundary (a sawtooth of speckle contrast: rings while ascending).
     let hv = hash3(h.i, h.j, h.k + i32(face) * 7919 + i32(level) * 104729, 0x68bc21ebu);
-    let jitter = mix(f32(hv & 255u) / 255.0, 0.5, smooth_w);
+    let base_w = clamp((2.5 - frame.layer.y / pixel) / 1.5, 0.0, 1.0);
+    let jitter = mix(f32(hv & 255u) / 255.0, 0.5, base_w);
     let pigment = 0.86 + 0.24 * jitter;
     var albedo = palette(select(material, M_DIRT, soil_side)) * pigment;
     if (material == M_GRASS && !soil_side) || smooth_w > 0.0 {
-        var grass = grass_albedo(p, level) * pigment;
+        var grass = grass_albedo(p, pixel) * pigment;
         if code != 4u { grass *= 0.9; }
         if material == M_GRASS && !soil_side {
             albedo = grass;

@@ -1319,7 +1319,7 @@ fn main() {
 /// Ray statuses of the last frame: (miss rays that must hit the planet,
 /// loading, exhausted, all rays). A miss is certain to be a hole when the
 /// ray passes below the deepest possible terrain.
-fn holes(flight: &Flight, eye: DVec3, forward: Vec3) -> (usize, usize, usize, usize) {
+fn holes(flight: &Flight, eye: DVec3, forward: Vec3, mask: Option<&str>) -> (usize, usize, usize, usize) {
     let (hits, size) = {
         let r = flight.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap();
         (flight.read(r.hit_buffer()), r.screen_size())
@@ -1333,7 +1333,16 @@ fn holes(flight: &Flight, eye: DVec3, forward: Vec3) -> (usize, usize, usize, us
     let aspect = size[0] as f32 / size[1] as f32;
     let floor = flight.planet.grid().radius() - 12_000.0;
     let (mut miss, mut loading, mut exhausted, mut total) = (0, 0, 0, 0);
+    // Hole mask: red misses, yellow loading, magenta exhausted, grey hits.
+    let mut image = vec![0u8; (size[0] * size[1] * 4) as usize];
     for (index, hit) in hits.chunks_exact(32).take((size[0] * size[1]) as usize).enumerate() {
+        let status = u32::from_le_bytes(hit[16..20].try_into().unwrap()) & 3;
+        image[index * 4..index * 4 + 4].copy_from_slice(match status {
+            1 => &[90, 90, 90, 255],
+            2 => &[255, 0, 255, 255],
+            3 => &[255, 255, 0, 255],
+            _ => &[0, 0, 0, 255],
+        });
         let info = u32::from_le_bytes(hit[16..20].try_into().unwrap());
         total += 1;
         match info & 3 {
@@ -1347,10 +1356,14 @@ fn holes(flight: &Flight, eye: DVec3, forward: Vec3) -> (usize, usize, usize, us
                 let t = (-eye.dot(d)).max(0.0);
                 if (eye + d * t).length() < floor {
                     miss += 1;
+                    image[index * 4..index * 4 + 4].copy_from_slice(&[255, 0, 0, 255]);
                 }
             }
             _ => {}
         }
+    }
+    if let Some(name) = mask {
+        image::save_buffer(flight.output.join(format!("{name}.png")), &image, size[0], size[1], image::ColorType::Rgba8).unwrap();
     }
     (miss, loading, exhausted, total)
 }
@@ -1361,6 +1374,8 @@ fn holes(flight: &Flight, eye: DVec3, forward: Vec3) -> (usize, usize, usize, us
 /// every frame's rays back and reports holes (slows the frames).
 fn editor_trip(flight: &mut Flight, deg: f64) {
     let probe = std::env::var_os("HELIO_VOXEL_FLIGHT_PROBE").is_some();
+    let no_horizon = std::env::var_os("HELIO_VOXEL_FLIGHT_NO_HORIZON").is_some();
+    let low_height: f64 = std::env::var("HELIO_VOXEL_FLIGHT_TRIP_LOW").ok().and_then(|v| v.parse().ok()).unwrap_or(30.0);
     let audit_at: Vec<f64> = std::env::var("HELIO_VOXEL_FLIGHT_AUDIT_AT")
         .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
         .unwrap_or_default();
@@ -1375,9 +1390,11 @@ fn editor_trip(flight: &mut Flight, deg: f64) {
     let climb: f64 = std::env::var("HELIO_VOXEL_FLIGHT_TRIP_CLIMB").ok().and_then(|v| v.parse().ok()).unwrap_or(14.0);
     let phases: [(&str, f64); 5] = [("settle", 2.0), ("climb", climb), ("orbit", 10.0), ("descend", climb), ("low", 20.0)];
     let mut phase_end = 0.0;
+    let mut previous_rings = String::new();
+    let trip_end: f64 = std::env::var("HELIO_VOXEL_FLIGHT_TRIP_END").ok().and_then(|v| v.parse().ok()).unwrap_or(f64::INFINITY);
     for (name, duration) in phases {
         phase_end += duration;
-        while t < phase_end {
+        while t < phase_end && t < trip_end {
             let up = eye.normalize();
             let ahead = (DVec3::X - up * DVec3::X.dot(up)).try_normalize().unwrap_or(DVec3::Z);
             let height = eye.length() - flight.planet.surface_point(eye, 0.0).length();
@@ -1388,8 +1405,9 @@ fn editor_trip(flight: &mut Flight, deg: f64) {
                 "orbit" => (ahead, (ahead - up * 1.2).normalize()),
                 "descend" => (-up, (ahead - up * 0.6).normalize()),
                 _ => {
-                    // Low flight: hold ~30 m over the ground at the editor's speed.
-                    let hold = (30.0 - height) * 0.5;
+                    // Low flight: hold HELIO_VOXEL_FLIGHT_TRIP_LOW metres (30)
+                    // over the ground at the editor's speed.
+                    let hold = (low_height - height) * 0.5;
                     ((ahead * speed + up * hold) / speed.max(1.0), (ahead - up * 0.25).normalize())
                 }
             };
@@ -1399,6 +1417,11 @@ fn editor_trip(flight: &mut Flight, deg: f64) {
                 eye = flight.planet.surface_point(eye, 0.5);
             }
             let look = look.as_vec3();
+            if no_horizon {
+                if let Some(r) = flight.pass().renderer_mut() {
+                    r.settings_mut().horizon = false;
+                }
+            }
             flight.draw(name, eye, look);
             let submit = flight.samples.last().map_or(0.0, |s| s.submit_ms);
             if submit > 25.0 {
@@ -1419,7 +1442,25 @@ fn editor_trip(flight: &mut Flight, deg: f64) {
                 eprintln!("AUDIT t {t:.2} h {height:.0} {}", flight.audit(&format!("audit_{name}_{:05}", (t * 100.0) as u32), eye, look));
             }
             if probe {
-                let (miss, loading, exhausted, total) = holes(flight, eye, look);
+                let rings = {
+                    let planet = flight.planet.clone();
+                    let pass = flight.pass();
+                    let lod0 = pass.stats().map_or(0.0, |s| s.lod0_distance);
+                    pass.renderer().map(|r| {
+                        let cut = 100.0f64.max(0.75 * planet.air_clearance(eye));
+                        let (fallback, rings) = r.sky_rings(eye, lod0, cut);
+                        fallback
+                            .iter()
+                            .zip(&rings)
+                            .enumerate()
+                            .filter(|(_, (f, _))| **f > 0.0)
+                            .map(|(l, (f, r))| format!("L{l}:fb {f:.0} ring {r:.5}"))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                };
+                let rings = rings.unwrap_or_default();
+                let (miss, loading, exhausted, total) = holes(flight, eye, look, None);
                 let bad = (miss + loading + exhausted) as f64 / total as f64;
                 if bad > worst {
                     worst = bad;
@@ -1431,10 +1472,14 @@ fn editor_trip(flight: &mut Flight, deg: f64) {
                         "HOLES {name} t {t:6.2} h {height:9.0} miss {miss} loading {loading} exhausted {exhausted} ({:.2}%) resident {} pending {} levels {} finest {}",
                         bad * 100.0, stats.resident_columns, stats.pending_columns, stats.active_levels, stats.finest_level
                     );
-                    if bad > 0.01 && frame % 4 == 0 {
+                    eprintln!("  rings now  {rings}
+  rings prev {previous_rings}");
+                    if bad > 0.001 {
+                        holes(flight, eye, look, Some(&format!("mask_{name}_{:05}", (t * 100.0) as u32)));
                         flight.capture(&format!("hole_{name}_{:05}", (t * 100.0) as u32));
                     }
                 }
+                previous_rings = rings;
             } else if frame % 30 == 0 {
                 let stats = flight.pass().stats().unwrap_or_default();
                 eprintln!(
