@@ -49,7 +49,7 @@ pub struct Settings {
     /// Diagnostics: skip residency planning (no jobs, windows or evictions)
     /// so several renders see identical GPU state.
     pub freeze_residency: bool,
-    /// Diagnostics: fixed frame index for the dither and sunlight patterns.
+    /// Diagnostics: fixed frame index for the sunlight representative pattern.
     pub frame_override: Option<u32>,
     pub capacity: Capacity,
 }

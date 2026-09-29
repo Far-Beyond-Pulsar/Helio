@@ -398,9 +398,13 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
         let key = vec4<i32>(cur.i >> 3u, cur.j >> 3u, i32(cur.face), i32(cur.level));
         var skip = vec4<i32>(0);
         if any(key != loaded) {
-            // Column-coherent stochastic LOD transition (TAA resolves it);
-            // neighbouring rays in one column agree, so warps stay coherent.
-            let hd = f32(hash3(key.x, key.y, key.z | (key.w << 3u), u32(frame.screen.z)) & 1023u) / 1023.0;
+            // Column-coherent stochastic LOD transition: each column switches
+            // level at its own distance within the dither band. The threshold
+            // is fixed per column (not per frame), so a moving camera sees
+            // each column change level once instead of flickering between
+            // two levels every frame while temporal history is rejected.
+            // Neighbouring rays in one column agree, so warps stay coherent.
+            let hd = f32(hash3(key.x, key.y, key.z | (key.w << 3u), 0x2545f491u) & 1023u) / 1023.0;
             let want = level_for((t + lod_offset) * lod_scale * (1.0 + dither * (hd - 0.5)));
             if want > cur.level {
                 let d = want - cur.level;
