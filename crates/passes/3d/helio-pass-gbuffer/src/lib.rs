@@ -363,7 +363,11 @@ impl RenderPass for GBufferPass {
         self.pending_coordinate_spaces = Some(inputs.coordinate_spaces.to_vec());
     }
 
-    fn publish_frame_inputs<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+    fn publish_frame_inputs<'a>(
+        &self,
+        _camera: &helio_core::GpuCameraUniforms,
+        frame: &mut helio_core::ResourceRegistry<'a>,
+    ) {
         // SAFETY: these buffers are owned by the GBuffer pass, which is owned
         // by the RenderGraph for longer than the current frame registry.
         let coordinate_spaces: &'a wgpu::Buffer = unsafe {

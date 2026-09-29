@@ -139,6 +139,98 @@ impl Drop for ParallelRenderPool {
     }
 }
 
+/// A resident thread that finishes the graph's compute encoder while the
+/// render thread finishes the graphics encoder.
+///
+/// `CommandEncoder::finish` is where wgpu validates and encodes the whole
+/// recorded stream, and the two encoders are independent, so finishing them
+/// one after the other made the render thread pay for both (Pulsar-Native#813).
+/// One persistent thread rather than a per-frame spawn, for the same reason
+/// as [`ParallelRenderPool`].
+#[cfg(not(target_arch = "wasm32"))]
+struct EncoderFinisher {
+    requests: Option<mpsc::Sender<wgpu::CommandEncoder>>,
+    results: Mutex<mpsc::Receiver<std::thread::Result<wgpu::CommandBuffer>>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl EncoderFinisher {
+    fn new() -> Self {
+        let (request_tx, request_rx) = mpsc::channel::<wgpu::CommandEncoder>();
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("helio-encoder-finish".to_string())
+            .spawn(move || {
+                while let Ok(encoder) = request_rx.recv() {
+                    // A validation error panics through wgpu's default error
+                    // handler; carry it back so it surfaces on the render
+                    // thread exactly as it did when finish ran there.
+                    let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        profiling::profile_scope!("RenderGraph: compute encoder.finish");
+                        encoder.finish()
+                    }));
+                    if result_tx.send(finished).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("failed to spawn helio encoder-finish thread");
+        Self {
+            requests: Some(request_tx),
+            results: Mutex::new(result_rx),
+            worker: Some(worker),
+        }
+    }
+
+    /// Finish `compute` on the resident thread and `graphics` on the caller's,
+    /// returning them in submission order (compute first).
+    fn finish_pair(
+        &self,
+        compute: wgpu::CommandEncoder,
+        graphics: wgpu::CommandEncoder,
+    ) -> [wgpu::CommandBuffer; 2] {
+        let results = self.results.lock().unwrap_or_else(|e| e.into_inner());
+        let sent = match self.requests.as_ref() {
+            Some(requests) => requests.send(compute).map_err(|e| e.0),
+            None => Err(compute),
+        };
+        let compute = match sent {
+            Ok(()) => None,
+            // The thread is gone; finish here rather than lose the frame.
+            Err(compute) => Some(compute.finish()),
+        };
+        // Catch a graphics-side panic until the compute result is drained,
+        // so a stale buffer is never handed to the next frame.
+        let graphics = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            profiling::profile_scope!("RenderGraph: graphics encoder.finish");
+            graphics.finish()
+        }));
+        let compute = match compute {
+            Some(buffer) => buffer,
+            None => match results.recv() {
+                Ok(Ok(buffer)) => buffer,
+                Ok(Err(payload)) => std::panic::resume_unwind(payload),
+                Err(_) => panic!("helio encoder-finish thread exited mid-frame"),
+            },
+        };
+        match graphics {
+            Ok(graphics) => [compute, graphics],
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for EncoderFinisher {
+    fn drop(&mut self) {
+        self.requests = None;
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 fn parallel_worker_loop(
     id: usize,
     rx: mpsc::Receiver<ParallelWorkerMsg>,
@@ -351,6 +443,10 @@ pub struct RenderGraph {
     /// Persistent render workers, built lazily on the first parallel frame.
     /// See [`ParallelRenderPool`].
     parallel_pool: OnceLock<Arc<ParallelRenderPool>>,
+    /// Finishes the compute encoder beside the graphics one, built on the
+    /// first frame. See [`EncoderFinisher`].
+    #[cfg(not(target_arch = "wasm32"))]
+    encoder_finisher: OnceLock<EncoderFinisher>,
     chain_membership: Vec<bool>,
     /// Previous frame's chain membership, used to detect which passes changed
     /// so only their bundles (and everything after) need rebuilding.
@@ -447,6 +543,8 @@ impl RenderGraph {
             subpass_chains: Vec::new(),
             parallel_layers: Vec::new(),
             parallel_pool: OnceLock::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            encoder_finisher: OnceLock::new(),
             chain_membership: Vec::new(),
             prev_chain_membership: Vec::new(),
             chain_generation: 0,
@@ -689,11 +787,15 @@ impl RenderGraph {
         self.passes.iter().any(|pass| pass.initializes_target())
     }
 
-    pub fn publish_frame_inputs<'a>(&self, registry: &mut crate::ResourceRegistry<'a>) {
+    pub fn publish_frame_inputs<'a>(
+        &self,
+        camera: &crate::GpuCameraUniforms,
+        registry: &mut crate::ResourceRegistry<'a>,
+    ) {
         let frame_ptr = registry as *mut crate::ResourceRegistry<'a>;
         for pass in &self.passes {
             unsafe {
-                pass.publish_frame_inputs(&mut *frame_ptr);
+                pass.publish_frame_inputs(camera, &mut *frame_ptr);
             }
         }
     }
@@ -1771,10 +1873,19 @@ impl RenderGraph {
         self.profiler
             .resolve_gpu_queries(&mut encoder, self.frame_count);
         let mut command_buffers = {
-            // Finishing the encoders runs wgpu's full command validation.
+            // Finishing the encoders runs wgpu's full command validation; the
+            // two are independent, so they finish on two threads.
             #[cfg(not(target_arch = "wasm32"))]
             profiling::profile_scope!("RenderGraph: encoder.finish");
-            vec![compute_encoder.finish(), encoder.finish()]
+            #[cfg(not(target_arch = "wasm32"))]
+            let finished = Vec::from(
+                self.encoder_finisher
+                    .get_or_init(EncoderFinisher::new)
+                    .finish_pair(compute_encoder, encoder),
+            );
+            #[cfg(target_arch = "wasm32")]
+            let finished = vec![compute_encoder.finish(), encoder.finish()];
+            finished
         };
         command_buffers.extend(parallel_command_buffers);
         let submission_index = {
