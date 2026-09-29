@@ -618,6 +618,26 @@ impl RenderGraph {
         self.gpu_render_bundles.push(None);
     }
 
+    /// Append a pass to a graph that may already be locked, for passes that
+    /// only exist once something has happened at runtime (a finished bake).
+    /// A locked graph is relocked like [`Self::replace_pass_at`] does, so
+    /// the schedule and resource declarations include the new pass.
+    pub fn add_pass_live(&mut self, pass: Box<dyn RenderPass>) {
+        if !self.locked {
+            self.add_pass(pass);
+            return;
+        }
+        self.locked = false;
+        self.add_pass(pass);
+        self.gpu_render_bundles.clear();
+        self.pass_cache.clear();
+        if let Some(pass) = self.passes.last_mut() {
+            pass.on_resize(&self.device, self.output_w, self.output_h);
+        }
+        self.lock(self.output_w, self.output_h);
+        self.resize_pending = true;
+    }
+
     pub fn find_pass_mut<T: RenderPass + 'static>(&mut self) -> Option<&mut T> {
         let idx = *self.pass_index_map.get(&TypeId::of::<T>())?;
         self.passes[idx].as_any_mut().downcast_mut::<T>()
@@ -1325,6 +1345,24 @@ impl RenderGraph {
         }
 
         let mut chain_rp: Option<std::mem::ManuallyDrop<wgpu::RenderPass<'_>>> = None;
+        // Label of the GPU timing span around the open chain, if any; closed
+        // wherever `chain_rp` is dropped (see `CachedPass::chain_label`).
+        let mut chain_span: Option<&'static str> = None;
+        // End the open chain's render pass, then its timing span. The span's
+        // end timestamp must come after the pass closes: the encoder accepts
+        // no other commands while a render pass is open.
+        macro_rules! close_chain {
+            () => {
+                if let Some(mut rp) = chain_rp.take() {
+                    unsafe {
+                        std::mem::ManuallyDrop::drop(&mut rp);
+                    }
+                }
+                if let Some(label) = chain_span.take() {
+                    self.profiler.end_gpu_pass(&mut encoder, label);
+                }
+            };
+        }
         let mut chain_patch: Vec<Option<wgpu::RenderPassColorAttachment<'static>>> = Vec::new();
         self.profiler
             .begin_gpu_pass(&mut encoder, "__graph_graphics");
@@ -1489,16 +1527,29 @@ impl RenderGraph {
                     &self.pool,
                     &mut self.frame_storage,
                 );
+                // Which encoders get this pass's own begin/end timestamps.
+                let mut timed_main = false;
+                let mut timed_compute = false;
                 if let Some(desc) = desc {
-                    self.profiler.begin_gpu_pass(&mut encoder, pass_name);
-                    self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
                     let cache = self.pass_cache.get(pass_index).and_then(|c| c.as_ref());
-                    let is_chained = !self.profiler.is_enabled()
-                        && cache.map_or(false, |c| !c.chain_range.is_empty());
+                    // Chains fuse whether or not GPU timing is on (Helio#298):
+                    // a chain is timed as one span around its single hardware
+                    // pass, since nothing can be written into the encoder
+                    // while that pass is open. Its members keep CPU timings.
+                    let is_chained = cache.map_or(false, |c| !c.chain_range.is_empty());
+                    if !is_chained {
+                        close_chain!();
+                        self.profiler.begin_gpu_pass(&mut encoder, pass_name);
+                        self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
+                        timed_main = true;
+                        timed_compute = true;
+                    }
 
                     if is_chained {
                         let c = cache.unwrap();
                         if pass_index == c.chain_range.start {
+                            self.profiler.begin_gpu_pass(&mut encoder, c.chain_label);
+                            chain_span = Some(c.chain_label);
                             chain_patch.clear();
                             chain_patch.extend(desc.color_attachments.iter().enumerate().map(
                                 |(i, opt)| {
@@ -1571,19 +1622,9 @@ impl RenderGraph {
                         pass.execute(&mut ctx)?;
 
                         if pass_index + 1 >= c.chain_range.end {
-                            if let Some(mut rp) = chain_rp.take() {
-                                unsafe {
-                                    std::mem::ManuallyDrop::drop(&mut rp);
-                                }
-                            }
+                            close_chain!();
                         }
                     } else {
-                        if let Some(mut rp) = chain_rp.take() {
-                            unsafe {
-                                std::mem::ManuallyDrop::drop(&mut rp);
-                            }
-                        }
-
                         let standalone_atts: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> =
                             desc.color_attachments
                                 .iter()
@@ -1653,20 +1694,24 @@ impl RenderGraph {
                         }
                     }
                 } else {
-                    self.profiler.begin_gpu_pass(&mut encoder, pass_name);
-                    self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
                     let bridged = self
                         .chain_membership
                         .get(pass_index)
                         .copied()
                         .unwrap_or(false)
                         && pass.chain_transparent();
-                    if !bridged {
-                        if let Some(mut rp) = chain_rp.take() {
-                            unsafe {
-                                std::mem::ManuallyDrop::drop(&mut rp);
-                            }
-                        }
+                    if bridged {
+                        // Inside an open chain: the main encoder is locked by
+                        // the chain's render pass, and a chain-transparent
+                        // pass only records on the compute encoder anyway.
+                        self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
+                        timed_compute = true;
+                    } else {
+                        close_chain!();
+                        self.profiler.begin_gpu_pass(&mut encoder, pass_name);
+                        self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
+                        timed_main = true;
+                        timed_compute = true;
                     }
 
                     let mut ctx = PassContext {
@@ -1706,19 +1751,19 @@ impl RenderGraph {
                 // execute() may record raw commands on either encoder even
                 // without a render-pass descriptor. Close the nested scopes
                 // in reverse order; the profiler sums both stream durations.
-                self.profiler.end_gpu_pass(&mut compute_encoder, pass_name);
-                self.profiler.end_gpu_pass(&mut encoder, pass_name);
+                if timed_compute {
+                    self.profiler.end_gpu_pass(&mut compute_encoder, pass_name);
+                }
+                if timed_main {
+                    self.profiler.end_gpu_pass(&mut encoder, pass_name);
+                }
 
                 pass.publish(registry);
                 self.profiler.record_external_cpu_timing(pass_name, execute_start.elapsed());
             }
         }
 
-        if let Some(mut rp) = chain_rp.take() {
-            unsafe {
-                std::mem::ManuallyDrop::drop(&mut rp);
-            }
-        }
+        close_chain!();
         self.profiler.end_gpu_pass(&mut encoder, "__graph_graphics");
         self.profiler
             .end_gpu_pass(&mut compute_encoder, "__graph_compute");
@@ -2001,11 +2046,20 @@ impl RenderGraph {
                 let subpass_index = chain.map_or(0, |c| (pi - c.start) as u32);
                 let subpass_count = chain.map_or(0, |c| c.len() as u32);
                 let store_ops: Vec<Option<wgpu::StoreOp>> = vec![None; color_len];
+                let chain_label = match chain {
+                    Some(c) => {
+                        let names: Vec<&'static str> =
+                            self.passes[c.clone()].iter().map(|pass| pass.name()).collect();
+                        super::scheduling::chain_label(&names)
+                    }
+                    None => "",
+                };
                 Some(CachedPass {
                     store_ops,
                     subpass_index,
                     subpass_count,
                     chain_range,
+                    chain_label,
                 })
             })
             .collect();

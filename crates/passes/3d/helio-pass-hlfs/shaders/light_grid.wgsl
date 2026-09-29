@@ -56,7 +56,8 @@ fn select_key(@builtin(local_invocation_index) lane: u32) {
     if presample && globals.debug_mode!=1u && globals.light_count<=65535u {
         var power_sum=0.0; var maximum=0.0; var best=INVALID_LIGHT;
         var active_count=0u; var sun_power=0.0; var sun=INVALID_LIGHT;
-        for(var i=lane;i<globals.light_count;i+=256u) {
+        for(var k=lane;k<live_light_count();k+=256u) {
+            let i=live_light(k);
             let light=lights[i];
             if light.color_intensity.w<=0.0 || all(light.color_intensity.rgb<=vec3<f32>(0.0)) { continue; }
             if light.light_type!=0u && light.position_range.w<=0.0 { continue; }
@@ -102,7 +103,10 @@ fn select_key(@builtin(local_invocation_index) lane: u32) {
     // itself is always freshly traced, so moving casters do not require a reset.
     var stamp0=0u; var stamp1=0u;
     if (globals.surface_flags&8u)!=0u {
-        for(var i=lane;i<globals.light_count;i+=256u) {
+        // Vacant rows are zeroed and never sampled; only live rows can change
+        // what a stored reservoir means.
+        for(var k=lane;k<live_light_count();k+=256u) {
+            let i=live_light(k);
             let light=lights[i];
             var a=hash_u32(i); var b=hash_u32(i^0x85ebca6bu);
             for(var component=0u;component<4u;component++) {
@@ -118,7 +122,7 @@ fn select_key(@builtin(local_invocation_index) lane: u32) {
         packed[lane]=stamp0; small_aliases[lane]=stamp1;
         workgroupBarrier();
         if lane==0u {
-            stamp0=hash_u32(key_light); stamp1=hash_u32(globals.light_count);
+            stamp0=hash_u32(key_light); stamp1=hash_u32(globals.light_count)^hash_u32(live_light_count()+0x68e31da4u);
             for(var i=0u;i<256u;i++) { stamp0^=packed[i]; stamp1+=small_aliases[i]; }
         }
     }
@@ -158,12 +162,16 @@ fn coarse(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_ind
     var selected=INVALID_LIGHT; var selected_weight=0.0; var weight_sum=0.0;
     var stratum_weights=array<f32,4>(0.0,0.0,0.0,0.0);
     var rng=hash_u32(proposal_index*256u+lane+globals.frame*0x9e3779b9u);
-    for (var i=lane; i<globals.light_count; i+=256u) {
+    // Strata are positions in the live list (k), matching sample.wgsl's
+    // conditional draw; the stored and packed IDs are rows (i).
+    let live_count=live_light_count();
+    for (var k=lane; k<live_count; k+=256u) {
+        let i=live_light(k);
         if sphere_in_tile(lights[i],lo,lo+COARSE_TILE_SIZE,0.0,1.0) {
             if build_proposals && i!=key_light {
                 let weight=proposal_weight(lights[i],center_position);
                 if weight>0.0 {
-                    if globals.light_count<=1024u { stratum_weights[(i-lane)/256u]=weight; }
+                    if live_count<=1024u { stratum_weights[(k-lane)/256u]=weight; }
                     weight_sum+=weight;
                     if random(&rng)*weight_sum<weight { selected=i; selected_weight=weight; }
                 }

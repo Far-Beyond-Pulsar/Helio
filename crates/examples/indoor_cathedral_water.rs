@@ -729,6 +729,9 @@ impl ApplicationHandler for App {
         // ── Configure baking ──────────────────────────────────────────────
         // Helio automatically extracts all static objects and lights for baking.
         // No need to manually duplicate scene geometry - just specify the config.
+        // The renderer never walks the scene: hand it SceneDB's projection
+        // first, or auto_bake has nothing to bake (Helio#256).
+        renderer.set_bake_scene(helio::bake_scene_from_world(&scene_db.world));
         renderer.auto_bake(BakeConfig::fast("indoor_cathedral_water"));
 
         let renderer = Arc::new(Mutex::new(renderer));
@@ -1163,6 +1166,9 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
+        // Upload this frame's SceneDB writes to the GPU mirror; without it they
+        // are never visible to the renderer (Helio#266).
+        v3_demo_common::flush_scene_db(&self.scene_db, renderer.queue());
         if let Err(e) = renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }

@@ -48,6 +48,22 @@ impl SceneBufferProjection {
     pub fn contains(&self, key: BufferKey) -> bool {
         self.get(key).is_some()
     }
+
+    /// Changes whenever SceneDB reports new contents (`content_generation`)
+    /// or a reallocation (`epoch`) in any buffer here -- "did anything in the
+    /// scene change" with no GPU readback. Independent of entry order.
+    ///
+    /// Passes that reuse camera-dependent results while the camera holds
+    /// still pair this with `camera_generation`: a still camera does not mean
+    /// a still scene.
+    pub fn content_signature(&self) -> u64 {
+        self.entries.iter().fold(0u64, |sum, (_, handle)| {
+            let mut h = handle.epoch.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            h ^= handle.content_generation.rotate_left(29);
+            h = h.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            sum.wrapping_add(h ^ (h >> 31))
+        })
+    }
 }
 
 /// Borrowed GPU scene input consumed by [`crate::RenderGraph`].

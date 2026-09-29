@@ -4,6 +4,30 @@ use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
+/// Radiance Cascades volume settings. The pass owns these because both the
+/// traced volume and its bounds are specific to this GI technique.
+#[derive(Debug, Clone, Copy)]
+pub struct GiConfig {
+    /// Half extent of the camera-centered volume in world units.
+    pub rc_radius: f32,
+    /// Fade margin used by consumers when blending to ambient GI.
+    pub rc_fade_margin: f32,
+}
+
+impl Default for GiConfig {
+    fn default() -> Self {
+        Self { rc_radius: 80.0, rc_fade_margin: 20.0 }
+    }
+}
+
+impl GiConfig {
+    pub fn ambient_only() -> Self { Self { rc_radius: 0.0, rc_fade_margin: 0.0 } }
+
+    pub fn large_radius(radius: f32) -> Self {
+        Self { rc_radius: radius, rc_fade_margin: radius * 0.25 }
+    }
+}
+
 /// Radiance-cascades GI volume extent (dual-tier GI: RC near, ambient far).
 ///
 /// Published by the `Renderer` under the well-known `"radiance_cascades_volume"`
@@ -56,6 +80,7 @@ struct RCStatic {
 }
 
 pub struct RadianceCascadesPass {
+    gi_config: GiConfig,
     /// Fallback pipeline (no RT).
     fb_pipeline: wgpu::ComputePipeline,
     /// RT pipeline (real rc_trace.wgsl).
@@ -67,7 +92,92 @@ pub struct RadianceCascadesPass {
     uniform_buf: wgpu::Buffer,
     static_buf: Option<wgpu::Buffer>,
     use_rt: bool,
+    /// Live light list for the RT trace (`RC_COMPACT_WGSL`). RT only.
+    compact: Option<LiveLightCompaction>,
+    /// RT only: textures the trace reads that must not alias what it writes
+    /// in the same dispatch (Helio#304).
+    rt_targets: Option<RtTargets>,
 }
+
+/// History ping-pong and the parent-cascade input for the RT trace. Reading
+/// and storing one texture in a single dispatch is a usage conflict wgpu
+/// rejects, so each frame reads last frame's history and writes the other.
+struct RtTargets {
+    history: [wgpu::TextureView; 2],
+    /// Index of the history texture read this frame; the other is written.
+    read: usize,
+    /// Input for the parent-cascade merge. Only cascade 0 is dispatched
+    /// (`parent_dir_dim = 0`, so the shader never reads it); a real merge
+    /// binds the coarser cascade's output here.
+    parent_placeholder: wgpu::TextureView,
+}
+
+impl RtTargets {
+    fn new(device: &wgpu::Device) -> Self {
+        let texture = |label, width, height, usage| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default())
+        };
+        let history_usage =
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING;
+        Self {
+            history: [
+                texture("RC History A", ATLAS_W, ATLAS_H, history_usage),
+                texture("RC History B", ATLAS_W, ATLAS_H, history_usage),
+            ],
+            read: 0,
+            parent_placeholder: texture("RC Parent Placeholder", 1, 1, wgpu::TextureUsages::TEXTURE_BINDING),
+        }
+    }
+}
+
+/// Builds `[count, row...]` of live `"scene_lights"` rows so each ray hit
+/// sums the lights that exist, not every allocated row (#838). Rebuilt only
+/// when the rows change.
+struct LiveLightCompaction {
+    pipeline: wgpu::ComputePipeline,
+    bgl: wgpu::BindGroupLayout,
+    params_buf: wgpu::Buffer,
+    live_buf: wgpu::Buffer,
+    /// `(epoch, content_generation, row_capacity)` the list was built from.
+    key: Option<(u64, u64, u32)>,
+    /// Set by `prepare` when `key` is stale.
+    pending: Option<(u64, u64, u32)>,
+}
+
+/// Unordered compaction is fine: the trace only sums over the list.
+const RC_COMPACT_WGSL: &str = r#"
+struct GpuLight {
+    position_range:  vec4<f32>,
+    direction_outer: vec4<f32>,
+    color_intensity: vec4<f32>,
+    _rest:           array<vec4<f32>, 5>,
+}
+struct Params { row_count: u32, _p0: u32, _p1: u32, _p2: u32, }
+@group(0) @binding(0) var<storage, read> lights: array<GpuLight>;
+@group(0) @binding(1) var<storage, read_write> live: array<atomic<u32>>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(256)
+fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if i >= min(params.row_count, arrayLength(&lights)) { return; }
+    let c = lights[i].color_intensity;
+    if c.w <= 0.0 || all(c.rgb <= vec3<f32>(0.0)) { return; }
+    let slot = atomicAdd(&live[0], 1u);
+    if slot + 1u < arrayLength(&live) { atomicStore(&live[slot + 1u], i); }
+}
+"#;
 
 const FALLBACK_WGSL: &str = r#"
 struct RCDynamic {
@@ -208,6 +318,121 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         vec4<f32>(radiance, 0.0));
 }
 "#;
+
+impl LiveLightCompaction {
+    fn new(device: &wgpu::Device) -> Self {
+        let storage = |binding, read_only| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("RC Live Lights BGL"),
+            entries: &[
+                storage(0, true),
+                storage(1, false),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("RC Live Lights"),
+            source: wgpu::ShaderSource::Wgsl(RC_COMPACT_WGSL.into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("RC Live Lights PL"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("RC Live Lights"),
+            layout: Some(&layout),
+            module: &shader,
+            entry_point: Some("compact"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("RC Live Lights Params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            pipeline,
+            bgl,
+            params_buf,
+            live_buf: Self::live_buffer(device, 1),
+            key: None,
+            pending: None,
+        }
+    }
+
+    fn live_buffer(device: &wgpu::Device, rows: u32) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("RC Live Lights"),
+            size: (u64::from(rows) + 1) * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Rebuild the list if the light rows changed since it was built.
+    /// Queue a rebuild if the light rows changed since the list was built:
+    /// grows the list and uploads the row count, so `record` only dispatches.
+    fn prepare(&mut self, ctx: &PrepareContext) {
+        let key = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"))
+            .map_or((0, 0, 0), |l| (l.epoch, l.content_generation, l.row_capacity()));
+        self.pending = (self.key != Some(key)).then_some(key);
+        let Some((_, _, rows)) = self.pending else { return };
+        if self.live_buf.size() < (u64::from(rows) + 1) * 4 {
+            self.live_buf = Self::live_buffer(ctx.device, rows.next_power_of_two());
+        }
+        ctx.queue.write_buffer(&self.params_buf, 0, bytemuck::cast_slice(&[rows, 0u32, 0, 0]));
+    }
+
+    /// Rebuild the list if `prepare` found it stale.
+    fn record(&mut self, ctx: &mut PassContext, lights_buf: &wgpu::Buffer) {
+        let Some(key) = self.pending.take() else { return };
+        let rows = key.2;
+        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        encoder.clear_buffer(&self.live_buf, 0, Some(4));
+        if rows > 0 {
+            let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("RC Live Lights BG"),
+                layout: &self.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: lights_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.live_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: self.params_buf.as_entire_binding() },
+                ],
+            });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("RC Live Lights"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(rows.div_ceil(256), 1, 1);
+        }
+        self.key = Some(key);
+    }
+}
 
 impl RadianceCascadesPass {
     pub fn new(device: &wgpu::Device, lights_buf: &wgpu::Buffer) -> Self {
@@ -394,6 +619,16 @@ impl RadianceCascadesPass {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -421,8 +656,11 @@ impl RadianceCascadesPass {
         } else {
             (None, None)
         };
+        let compact = use_rt.then(|| LiveLightCompaction::new(device));
+        let rt_targets = use_rt.then(|| RtTargets::new(device));
 
         Self {
+            gi_config: GiConfig::default(),
             fb_pipeline,
             rt_pipeline,
             fb_bgl,
@@ -432,7 +670,56 @@ impl RadianceCascadesPass {
             uniform_buf,
             static_buf,
             use_rt,
+            compact,
+            rt_targets,
         }
+    }
+
+    /// Configure the camera-centered RC volume.
+    pub fn set_gi_config(&mut self, config: GiConfig) {
+        self.gi_config = config;
+    }
+
+    /// The RT trace's bind group (binding order matches the BGL). It stores
+    /// into `cascade_out` and this frame's history texture, and reads the
+    /// other history texture and the parent placeholder, so no texture is
+    /// both read and stored in the dispatch (Helio#304).
+    fn trace_bind_group(
+        &self,
+        device: &wgpu::Device,
+        cascade_out: &wgpu::TextureView,
+        tlas: &wgpu::Tlas,
+        lights: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        let targets = self.rt_targets.as_ref().expect("RT path always has its targets");
+        let view = |view| wgpu::BindingResource::TextureView(view);
+        let entries = [
+            wgpu::BindGroupEntry { binding: 0, resource: view(cascade_out) },
+            wgpu::BindGroupEntry { binding: 1, resource: view(&targets.parent_placeholder) },
+            wgpu::BindGroupEntry { binding: 2, resource: self.uniform_buf.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: self.static_buf.as_ref().expect("RT static uniforms").as_entire_binding(),
+            },
+            wgpu::BindGroupEntry { binding: 4, resource: tlas.as_binding() },
+            wgpu::BindGroupEntry { binding: 5, resource: lights.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 6, resource: view(&targets.history[targets.read]) },
+            wgpu::BindGroupEntry { binding: 7, resource: view(&targets.history[1 - targets.read]) },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: self
+                    .compact
+                    .as_ref()
+                    .expect("RT path always has a live-light list")
+                    .live_buf
+                    .as_entire_binding(),
+            },
+        ];
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("RC Trace BG"),
+            layout: self.rt_bgl.as_ref().expect("RT layout"),
+            entries: &entries,
+        })
     }
 }
 
@@ -455,18 +742,8 @@ impl RenderPass for RadianceCascadesPass {
             },
         );
         builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
-
-        if self.use_rt {
-            builder.write_color_raw(
-                "rc_history",
-                wgpu::TextureFormat::Rgba16Float,
-                ResourceSize::Absolute {
-                    width: ATLAS_W,
-                    height: ATLAS_H,
-                },
-            );
-            builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
-        }
+        // RT history lives in `RtTargets` (a pass-owned ping-pong pair):
+        // one pool texture cannot be read and written in the same dispatch.
     }
 
     fn render_pass_descriptor<'a>(
@@ -488,9 +765,11 @@ impl RenderPass for RadianceCascadesPass {
             .get::<helio_pass_sky::SkyContext>(helio_core::ResourceKey::new("sky"))
             .map(|sky| sky.sky_color)
             .unwrap_or([0.0, 0.0, 0.0]);
+        let radius = self.gi_config.rc_radius.max(0.0);
+        let camera = ctx.camera_data.position_near;
         let dyn_data = RCDynamic {
-            world_min: [-10.0, -1.0, -10.0, 0.0],
-            world_max: [10.0, 10.0, 10.0, 0.0],
+            world_min: [camera[0] - radius, camera[1] - radius, camera[2] - radius, 0.0],
+            world_max: [camera[0] + radius, camera[1] + radius, camera[2] + radius, 0.0],
             frame: ctx.frame_num as u32,
             light_count,
             _pad0: 0,
@@ -511,6 +790,9 @@ impl RenderPass for RadianceCascadesPass {
                 _pad1: 0,
             };
             ctx.write_buffer(static_buf, 0, bytemuck::bytes_of(&static_data));
+        }
+        if let Some(compact) = self.compact.as_mut() {
+            compact.prepare(ctx);
         }
 
         Ok(())
@@ -612,18 +894,14 @@ impl RadianceCascadesPass {
             })?;
         let cascade_out_view = cascade_out.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let history = ctx.resource_pool.get_texture("rc_history").ok_or_else(|| {
-            helio_core::Error::InvalidPassConfig(
-                "RadianceCascades: missing rc_history texture".into(),
-            )
-        })?;
-        let history_view = history.create_view(&wgpu::TextureViewDescriptor::default());
-
         let lights_buf = ctx
             .scene_buffers
             .get(helio_core::BufferKey::of("scene_lights"))
-            .map(|handle| &handle.buffer)
-            .unwrap_or(ctx.camera);
+            .map_or_else(|| ctx.camera.clone(), |handle| handle.buffer.clone());
+        let lights_buf = &lights_buf;
+        if let Some(compact) = self.compact.as_mut() {
+            compact.record(ctx, lights_buf);
+        }
 
         // Get TLAS from frame resources (set by the renderer from GpuScene)
         let environment = ctx.registry.read::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment(), "RadianceCascades");
@@ -634,47 +912,7 @@ impl RadianceCascadesPass {
             return self.execute_fallback(ctx);
         };
 
-        // NB: entries must be in binding order to match BGL.
-        let entries = [
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&cascade_out_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(&cascade_out_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: self.uniform_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: self.static_buf.as_ref().unwrap().as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: tlas.as_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: lights_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 6,
-                resource: wgpu::BindingResource::TextureView(&history_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 7,
-                resource: wgpu::BindingResource::TextureView(&history_view),
-            },
-        ];
-
-        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("RC Trace BG"),
-            layout: rt_bgl,
-            entries: &entries,
-        });
+        let bind_group = self.trace_bind_group(ctx.device, &cascade_out_view, tlas, lights_buf);
 
         let wg_x = ATLAS_W.div_ceil(WORKGROUP_SIZE_X);
         let wg_y = ATLAS_H.div_ceil(WORKGROUP_SIZE_Y);
@@ -687,6 +925,11 @@ impl RadianceCascadesPass {
         pass.set_pipeline(rt_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(wg_x, wg_y, 1);
+        drop(pass);
+        // This frame's output is next frame's history.
+        if let Some(targets) = self.rt_targets.as_mut() {
+            targets.read = 1 - targets.read;
+        }
         Ok(())
     }
 }
@@ -697,6 +940,110 @@ mod tests {
 
     use super::{RadianceCascadesPass, FALLBACK_WGSL};
     use naga::back::glsl;
+
+    /// Helio#304: the RT trace must never read a texture it also stores to.
+    /// Two frames through the real bind group (history ping-ponged between
+    /// them) must raise no validation error. Needs a ray-query adapter.
+    #[test]
+    fn rt_trace_binds_no_texture_it_also_writes() {
+        pollster::block_on(async {
+            let instance =
+                wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+            let Ok(adapter) = instance.request_adapter(&Default::default()).await else {
+                eprintln!("skipping: no GPU adapter");
+                return;
+            };
+            if !adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+                eprintln!("skipping: adapter has no ray query");
+                return;
+            }
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY,
+                    required_limits: adapter.limits(),
+                    // Explicit GPU test: acknowledges the experimental ray API.
+                    experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let lights = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("rc test lights"),
+                size: 128 * 2,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let mut pass = RadianceCascadesPass::new(&device, &lights);
+            assert!(pass.use_rt, "ray-query device must take the RT path");
+            let cascade_out = device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("rc test cascades"),
+                    size: wgpu::Extent3d {
+                        width: super::ATLAS_W,
+                        height: super::ATLAS_H,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default());
+            let tlas = device.create_tlas(&wgpu::CreateTlasDescriptor {
+                label: Some("rc test tlas"),
+                max_instances: 1,
+                flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
+                update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+            });
+            let mut encoder = device.create_command_encoder(&Default::default());
+            encoder.build_acceleration_structures(
+                std::iter::empty::<&wgpu::BlasBuildEntry>(),
+                std::iter::once(&tlas),
+            );
+            for _frame in 0..2 {
+                let bind_group = pass.trace_bind_group(&device, &cascade_out, &tlas, &lights);
+                {
+                    let mut compute = encoder.begin_compute_pass(&Default::default());
+                    compute.set_pipeline(pass.rt_pipeline.as_ref().unwrap());
+                    compute.set_bind_group(0, &bind_group, &[]);
+                    compute.dispatch_workgroups(
+                        super::ATLAS_W.div_ceil(super::WORKGROUP_SIZE_X),
+                        super::ATLAS_H.div_ceil(super::WORKGROUP_SIZE_Y),
+                        1,
+                    );
+                }
+                let targets = pass.rt_targets.as_mut().unwrap();
+                targets.read = 1 - targets.read;
+            }
+            queue.submit([encoder.finish()]);
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            let error = scope.pop().await;
+            assert!(error.is_none(), "RT trace validation failed: {error:?}");
+        });
+    }
+
+    /// The ray-query trace and the live-light compaction must parse and
+    /// validate: the trace is only compiled on RT hardware otherwise.
+    #[test]
+    fn trace_and_live_light_shaders_validate() {
+        for (name, source) in [
+            ("rc_trace", super::_RC_TRACE_WGSL),
+            ("live lights", super::RC_COMPACT_WGSL),
+        ] {
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|e| panic!("{name} must parse: {}", e.emit_to_string(source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{name} must validate: {e:?}"));
+        }
+    }
 
     #[test]
     fn fallback_shader_translates_to_gles() {

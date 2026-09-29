@@ -74,7 +74,7 @@ fn importance(id: u32, s: Surface) -> f32 {
         let bound=evaluate_light(id,s,Visibility(1.0));
         let color=bound.diffuse*s.albedo+bound.specular*s.specular_factor;
         let budget=0.00001*min(globals.exposure,1.0);
-        if max(color.r,max(color.g,color.b))*f32(globals.light_count)<budget { return 0.0; }
+        if max(color.r,max(color.g,color.b))*f32(live_light_count())<budget { return 0.0; }
     }
     return proxy;
 }

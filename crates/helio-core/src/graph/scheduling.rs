@@ -9,6 +9,27 @@ pub(crate) struct CachedPass {
     /// once wgpu exposes subpass support.
     pub(crate) subpass_count: u32,
     pub(crate) chain_range: std::ops::Range<usize>,
+    /// GPU-timing label for the whole chain (`"GBufferPass+PortalInstancePass"`),
+    /// `""` when not in a chain. A fused chain is one hardware render pass, so
+    /// it is timed as one span: timestamps can't be written into the encoder
+    /// while its render pass is open (Helio#298).
+    pub(crate) chain_label: &'static str,
+}
+
+/// A process-lifetime label for a chain of pass names. Interned so rebuilding
+/// the graph reuses the same string instead of leaking a new one each time.
+pub(crate) fn chain_label(names: &[&'static str]) -> &'static str {
+    static LABELS: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, &'static str>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let joined = names.join("+");
+    let mut labels = LABELS.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(label) = labels.get(&joined) {
+        return label;
+    }
+    let label: &'static str = Box::leak(joined.clone().into_boxed_str());
+    labels.insert(joined, label);
+    label
 }
 
 /// An action to perform on the transient resource registry before a pass executes.
@@ -382,5 +403,15 @@ mod chain_tests {
         let layers = compute_parallel_layers(&writes, &reads);
         assert_eq!(layers, vec![vec![0, 2], vec![1]]);
         assert!(layers.iter().any(|layer| layer.len() > 1));
+    }
+
+    #[test]
+    fn chain_labels_join_names_and_are_interned() {
+        let a = super::chain_label(&["GBufferPass", "PortalInstancePass"]);
+        assert_eq!(a, "GBufferPass+PortalInstancePass");
+        // Rebuilding the graph asks again: same string, nothing new leaked.
+        let b = super::chain_label(&["GBufferPass", "PortalInstancePass"]);
+        assert!(std::ptr::eq(a, b));
+        assert_ne!(super::chain_label(&["GBufferPass"]), a);
     }
 }

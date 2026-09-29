@@ -17,13 +17,13 @@
 //! (`color_intensity` all zero), so iterating the full capacity every frame
 //! contributes nothing extra.
 //!
-//! What this does NOT yet cover: `Scene::flush()`'s CPU-side shadow-atlas
-//! importance scoring (`self.lights`/`self.gpu_scene.lights.0`) is a
-//! separate, pre-existing, unconditionally-per-frame CPU loop that predates
-//! SceneDB integration entirely and is out of scope here — tracked as a
-//! Helio issue. Lights sourced through this buffer do not participate in
-//! dynamic shadow-caster selection; author them with `shadow_index =
-//! u32::MAX` until that system is made SceneDB-aware.
+//! Shadows: `shadow_index` is authored as a request, `u32::MAX` for none and
+//! anything else (0 by convention) for a shadow map. `ShadowMatrixPass`
+//! allocates atlas slots on the GPU (`shadow_casters.wgsl`, Helio#246): the
+//! most important requesting lights (directional first, then
+//! `intensity × range²`) get `shadow_index = 6 × slot` written into their GPU
+//! rows, the rest `u32::MAX`. It re-runs only when these rows change, so
+//! there is no per-frame CPU work and nothing to do while lights are idle.
 
 use pulsar_scenedb_derive::SceneStore;
 

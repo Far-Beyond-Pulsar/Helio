@@ -580,7 +580,10 @@ impl ApplicationHandler for App {
         // Bake static/stationary lights so they're excluded from the real-time
         // deferred-light loop. Without this, all 9 glass window lights + environment
         // run full tiled PCF every frame even though they're fixed.
-        renderer.auto_bake(BakeConfig::fast("indoor_cathedral"));
+        // The renderer never walks the scene: hand it SceneDB's projection
+        // first, or auto_bake has nothing to bake (Helio#256).
+        renderer.set_bake_scene(helio::bake_scene_from_world(&scene_db.world));
+        renderer.auto_bake(BakeConfig::fast("indoor_cathedral").with_pvs());
 
         let renderer = Arc::new(Mutex::new(renderer));
         let (bridge, action_rx) = HelioCommandBridge::new();

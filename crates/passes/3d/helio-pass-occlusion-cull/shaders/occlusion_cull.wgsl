@@ -27,20 +27,24 @@ struct Camera {
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 
 struct CullParams {
-    screen_width:         u32,
-    screen_height:        u32,
-    draw_count:           u32,
-    hiz_mip_count:        u32,
-    static_hiz_available: u32,
-    grid_resolution_x:    u32,
-    grid_resolution_y:    u32,
-    grid_resolution_z:    u32,
-    world_bounds_min_x:   f32,
-    world_bounds_min_y:   f32,
-    world_bounds_min_z:   f32,
-    world_bounds_max_x:   f32,
-    world_bounds_max_y:   f32,
-    world_bounds_max_z:   f32,
+    screen_width:       u32,
+    screen_height:      u32,
+    draw_count:         u32,
+    hiz_mip_count:      u32,
+    // Baked PVS grid (helio-bake, published as `baked_pvs`); 0 = none.
+    pvs_available:      u32,
+    pvs_grid_x:         u32,
+    pvs_grid_y:         u32,
+    pvs_grid_z:         u32,
+    pvs_min_x:          f32,
+    pvs_min_y:          f32,
+    pvs_min_z:          f32,
+    pvs_cell_size:      f32,
+    /// u32 words per source cell (the baker's u64 words × 2).
+    pvs_words_per_cell: u32,
+    _pad0:              u32,
+    _pad1:              u32,
+    _pad2:              u32,
 }
 @group(0) @binding(1) var<uniform> params: CullParams;
 
@@ -78,8 +82,10 @@ struct GpuDrawCall {
 @group(0) @binding(4) var hiz_tex:  texture_2d<f32>;
 @group(0) @binding(5) var hiz_samp: sampler;
 
-@group(0) @binding(7) var static_hiz_tex:  texture_3d<f32>;
-@group(0) @binding(8) var static_hiz_samp: sampler;
+// Baked potentially-visible-set bitfield, the baker's u64 words as u32 pairs:
+// bit `to` of source cell `from` is word `from * pvs_words_per_cell + to / 32`,
+// bit `to % 32`. Set means "cell `to` may be visible from cell `from`".
+@group(0) @binding(7) var<storage, read> pvs_bits: array<u32>;
 
 // Indirect draw buffer as raw u32 array.
 // DrawIndexedIndirect stride = 20 bytes = 5 × u32:
@@ -210,36 +216,75 @@ fn instance_hiz_occluded(inst: GpuInstanceData, center: vec3<f32>) -> bool {
     return near_z > hiz_depth + depth_bias;
 }
 
-/// Test a single instance against the static pre-baked PVS. `center` is the
-/// bounds center already mapped through the instance's coordinate space.
-fn instance_pvs_occluded(inst: GpuInstanceData, center: vec3<f32>, cam_pos: vec3<f32>) -> bool {
-    let cam_to_obj = center - cam_pos;
-    let cam_dist = length(cam_to_obj);
-    if cam_dist <= 0.001 {
-        return false;
-    }
-    let view_dir = cam_to_obj / cam_dist;
-    let abs_dir = abs(view_dir);
-    var layer: u32 = 0u;
-    if abs_dir.x >= abs_dir.y && abs_dir.x >= abs_dir.z {
-        layer = select(0u, 1u, view_dir.x < 0.0);
-    } else if abs_dir.y >= abs_dir.z {
-        layer = select(2u, 3u, view_dir.y < 0.0);
-    } else {
-        layer = select(4u, 5u, view_dir.z < 0.0);
-    }
-    let grid_min = vec3<f32>(f32(params.world_bounds_min_x), f32(params.world_bounds_min_y), f32(params.world_bounds_min_z));
-    let grid_max = vec3<f32>(f32(params.world_bounds_max_x), f32(params.world_bounds_max_y), f32(params.world_bounds_max_z));
-    let grid_size = grid_max - grid_min;
-    let uvw = (center - grid_min) / grid_size;
-    let clamped_uvw = clamp(uvw, vec3<f32>(0.0), vec3<f32>(1.0));
-    let w = (clamped_uvw.z + f32(layer)) / 6.0;
-    let occlusion_dist = textureSampleLevel(static_hiz_tex, static_hiz_samp, vec3<f32>(clamped_uvw.x, clamped_uvw.y, w), 0.0).r;
-    return cam_dist > occlusion_dist + 0.1;
+/// Largest cell block an instance's bounds may cover before the PVS test is
+/// skipped (the instance is then kept, never culled on a guess).
+const PVS_MAX_CELLS: i32 = 64;
+
+/// Cell coordinates of `p` in the PVS grid (may be outside it).
+fn pvs_cell_coords(p: vec3<f32>) -> vec3<i32> {
+    let origin = vec3<f32>(params.pvs_min_x, params.pvs_min_y, params.pvs_min_z);
+    return vec3<i32>(floor((p - origin) / params.pvs_cell_size));
 }
 
-/// Returns true when an instance is occluded by either Hi-Z or static PVS.
-/// Matches original logic: occluded if (HiZ occluded) OR (PVS occluded when available).
+fn pvs_grid() -> vec3<i32> {
+    return vec3<i32>(i32(params.pvs_grid_x), i32(params.pvs_grid_y), i32(params.pvs_grid_z));
+}
+
+fn pvs_inside(c: vec3<i32>) -> bool {
+    return all(c >= vec3<i32>(0)) && all(c < pvs_grid());
+}
+
+fn pvs_cell_index(c: vec3<i32>) -> u32 {
+    let g = pvs_grid();
+    return u32(c.x + c.y * g.x + c.z * g.x * g.y);
+}
+
+/// Whether cell `dst_cell` may be visible from cell `src_cell`. Out-of-range words
+/// count as visible, matching `BakedPvsRef::is_visible`.
+fn pvs_visible(src_cell: u32, dst_cell: u32) -> bool {
+    let word = src_cell * params.pvs_words_per_cell + dst_cell / 32u;
+    if word >= arrayLength(&pvs_bits) {
+        return true;
+    }
+    return ((pvs_bits[word] >> (dst_cell % 32u)) & 1u) != 0u;
+}
+
+/// Test a single instance against the baked PVS (Helio#256). `center` is the
+/// bounds center already mapped through the instance's coordinate space.
+///
+/// Occluded only when no cell the bounding sphere touches is potentially
+/// visible from the camera's cell. Anything the grid cannot answer exactly
+/// (camera or bounds outside it, bounds spanning too many cells) is visible.
+fn instance_pvs_occluded(inst: GpuInstanceData, center: vec3<f32>, cam_pos: vec3<f32>) -> bool {
+    let cam_cell = pvs_cell_coords(cam_pos);
+    if !pvs_inside(cam_cell) {
+        return false;
+    }
+    let src_cell = pvs_cell_index(cam_cell);
+    let radius = max(inst.bounds.w, 0.0);
+    let lo = pvs_cell_coords(center - vec3<f32>(radius));
+    let hi = pvs_cell_coords(center + vec3<f32>(radius));
+    if !pvs_inside(lo) || !pvs_inside(hi) {
+        return false;
+    }
+    let span = hi - lo + vec3<i32>(1);
+    if span.x * span.y * span.z > PVS_MAX_CELLS {
+        return false;
+    }
+    for (var z = lo.z; z <= hi.z; z++) {
+        for (var y = lo.y; y <= hi.y; y++) {
+            for (var x = lo.x; x <= hi.x; x++) {
+                if pvs_visible(src_cell, pvs_cell_index(vec3<i32>(x, y, z))) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+/// Returns true when an instance is occluded by the Hi-Z pyramid or, when a
+/// bake provided one, the static PVS.
 /// Mirrors `libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE`.
 const INSTANCE_FLAG_ALWAYS_VISIBLE: u32 = 4u;
 
@@ -252,7 +297,7 @@ fn instance_is_occluded(inst: GpuInstanceData, center: vec3<f32>, cam_pos: vec3<
     if instance_hiz_occluded(inst, center) {
         return true;
     }
-    if params.static_hiz_available != 0u {
+    if params.pvs_available != 0u {
         if instance_pvs_occluded(inst, center, cam_pos) {
             return true;
         }

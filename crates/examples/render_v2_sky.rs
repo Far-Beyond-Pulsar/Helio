@@ -448,6 +448,9 @@ impl AppState {
             self.sun_light_id,
             directional_light(light_dir, sun_color, (sun_lux * 0.35).max(0.01)),
         );
+        // Upload this frame's SceneDB writes to the GPU mirror; without it they
+        // are never visible to the renderer (Helio#266).
+        v3_demo_common::flush_scene_db(&self.scene_db, self.renderer.queue());
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);
         }

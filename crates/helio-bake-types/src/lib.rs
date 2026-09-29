@@ -2,13 +2,12 @@
 //!
 //! Split out of `helio-bake` because that crate has a hard (non-optional)
 //! dependency on `nebula`, Helio's heavyweight offline baker, and is itself
-//! only pulled into `helio` behind the optional `"bake"` feature. The host
-//! `Renderer` still needs to publish a `baked_pvs` resource-registry slot of
-//! a *consistent type* whether or not baking is compiled in (an
-//! `Option<BakedPvsRef<'_>>` that is always `None` when `"bake"` is off) — so
-//! this crate holds only the plain data shape, no baking logic and no
-//! dependency on `nebula`, and is always available regardless of the
-//! `"bake"` feature.
+//! only pulled into `helio` behind the optional `"bake"` feature. The
+//! `baked_pvs` frame resource (published by `helio-bake`'s `BakeInjectPass`)
+//! is read by `helio-pass-occlusion-cull`, which must compile whether or not
+//! baking is — so this crate holds only the plain data shape, no baking
+//! logic and no dependency on `nebula`, and is always available regardless
+//! of the `"bake"` feature.
 
 /// Owned CPU-side PVS data stored in `helio_bake::BakedData`.
 ///

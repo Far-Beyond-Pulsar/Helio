@@ -71,7 +71,10 @@ pub struct GpuLight {
     pub direction_outer: [f32; 4],
     /// Linear RGB color (xyz) + intensity (w, in candela for point/spot, lux for directional)
     pub color_intensity: [f32; 4],
-    /// Shadow map slice index (-1u32 = no shadow)
+    /// As authored: `u32::MAX` for no shadow map, anything else (0 by
+    /// convention) to request one. On the GPU, `ShadowMatrixPass`'s caster
+    /// allocation replaces it with the assigned first atlas face (`6 × slot`)
+    /// or `u32::MAX` if the light lost the budget (Helio#246).
     pub shadow_index: u32,
     /// LightType discriminant
     pub light_type: u32,
@@ -80,6 +83,9 @@ pub struct GpuLight {
     /// Shadow-intent flags (name retained for source/ABI compatibility).
     /// Bit 0 marks explicit RT intent; bit 1 enables RT shadows. When bit 0 is
     /// clear, legacy lights derive intent from shadow_index before atlas admission.
+    /// Bits 2-3 belong to the GPU caster allocation: bit 3 marks a row it has
+    /// rewritten, bit 2 the shadow-map request it replaced. Authors leave
+    /// them clear; a SceneDB re-upload of the row clears them.
     pub _pad: u32,
 
     // ── Light shafts / god rays (volumetric fog pass) ──

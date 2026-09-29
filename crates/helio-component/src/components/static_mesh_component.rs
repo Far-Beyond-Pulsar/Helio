@@ -338,6 +338,14 @@ pub struct StaticMeshComponent {
     #[property]
     pub mesh_asset: MeshAssetPath,
 
+    /// What may change about this mesh at runtime (Pulsar-Native#837). The
+    /// scene bridge projects it into SceneDB's `helio::Movability` and the
+    /// object row's movable flag; levels saved before it load as Static,
+    /// which is how their rows were already flagged.
+    #[property]
+    #[serde(default)]
+    pub movability: super::ObjectMovability,
+
     /// The mesh's actual vertex/index data -- not an indirect handle into a
     /// separate asset registry, the payload itself (per the governing rule:
     /// "it doesn't hold an int32 that points to the mesh, it holds the

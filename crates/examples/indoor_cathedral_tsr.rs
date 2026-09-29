@@ -569,6 +569,9 @@ impl ApplicationHandler for App {
         // Bake static/stationary lights so they're excluded from the real-time
         // deferred-light loop. Without this, all 9 glass window lights + environment
         // run full tiled PCF every frame even though they're fixed.
+        // The renderer never walks the scene: hand it SceneDB's projection
+        // first, or auto_bake has nothing to bake (Helio#256).
+        renderer.set_bake_scene(helio::bake_scene_from_world(&scene_db.world));
         renderer.auto_bake(BakeConfig::fast("indoor_cathedral"));
 
         let renderer = Arc::new(Mutex::new(renderer));
@@ -897,6 +900,9 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
+        // Upload this frame's SceneDB writes to the GPU mirror; without it they
+        // are never visible to the renderer (Helio#266).
+        v3_demo_common::flush_scene_db(&self.scene_db, renderer.queue());
         if let Err(e) = renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }

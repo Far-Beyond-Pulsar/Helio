@@ -48,6 +48,8 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
+    /// Kept so its rows keep reaching the GPU mirror (Helio#266).
+    scene_db: pulsar_scenedb::SceneDb,
     last_frame: std::time::Instant,
 
     cam_pos: glam::Vec3,
@@ -297,6 +299,7 @@ impl ApplicationHandler for App {
             queue,
             surface_format: format,
             renderer,
+            scene_db,
             last_frame: std::time::Instant::now(),
             cam_pos: glam::Vec3::new(0.0, 3.0, 12.0),
             cam_yaw: std::f32::consts::PI,
@@ -460,6 +463,9 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
+        // Upload this frame's SceneDB writes to the GPU mirror; without it they
+        // are never visible to the renderer (Helio#266).
+        v3_demo_common::flush_scene_db(&self.scene_db, self.renderer.queue());
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }
