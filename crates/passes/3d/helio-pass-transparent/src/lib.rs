@@ -613,7 +613,7 @@ impl RenderPass for TransparentPass {
         rp.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
 
         let ranges = batch.transparent_ranges;
-        for &(class, graph_hash, start, count) in ranges {
+        for (range, &(class, graph_hash, start, count)) in ranges.iter().enumerate() {
             if count == 0 {
                 continue;
             }
@@ -624,12 +624,13 @@ impl RenderPass for TransparentPass {
             };
             let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
             rp.set_pipeline(pipeline);
-            #[cfg(not(target_arch = "wasm32"))]
-            rp.multi_draw_indexed_indirect(indirect, start as u64 * 20, count);
-            #[cfg(target_arch = "wasm32")]
-            for i in start..start + count {
-                rp.draw_indexed_indirect(indirect, i as u64 * 20);
-            }
+            helio_pass_gbuffer::multi_draw_indexed_indirect(
+                rp,
+                indirect,
+                start,
+                count,
+                batch.transparent_range_count_slot(range),
+            );
         }
         Ok(())
     }

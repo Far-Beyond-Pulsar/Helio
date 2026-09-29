@@ -84,6 +84,19 @@ const RANGE_BYTES: u64 = 20;
 /// bytes, same shape as `helio_pass_object_batch::DrawIndexedIndirectArgs`.
 const INDIRECT_ARGS_BYTES: u64 = 20;
 
+/// Initial `draw_counts` capacity in `u32` slots (four fixed counts plus
+/// room for a typical number of material ranges).
+const MIN_DRAW_COUNT_SLOTS: usize = 64;
+
+fn create_draw_counts_buffer(device: &wgpu::Device, slots: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("ObjBatch DrawCounts"),
+        size: (slots * 4) as u64,
+        usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
 fn create_storage_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
@@ -391,6 +404,15 @@ pub struct ObjectBatchPass {
     /// -- `capacity`/dispatch counts are all 0 whenever this is bound, so it
     /// is never actually dereferenced).
     fallback_buf: wgpu::Buffer,
+
+    /// GPU copy of every draw count consumers pass to
+    /// `multi_draw_indexed_indirect_count` (Helio#306); `None` when the
+    /// device lacks `MULTI_DRAW_INDIRECT_COUNT`. Layout documented on
+    /// [`helio_pass_gbuffer::ObjectBatchFrameData::draw_counts`].
+    draw_counts: Option<wgpu::Buffer>,
+    /// What `draw_counts` holds, so it is rewritten only when a readback
+    /// changes it.
+    draw_counts_cpu: Vec<u32>,
 }
 
 impl ObjectBatchPass {
@@ -742,7 +764,47 @@ impl ObjectBatchPass {
             settled: false,
             skip_this_frame: false,
             fallback_buf,
+            draw_counts: device
+                .features()
+                .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT)
+                .then(|| create_draw_counts_buffer(device, MIN_DRAW_COUNT_SLOTS)),
+            draw_counts_cpu: Vec::new(),
         }
+    }
+
+    /// Mirror the counts the last readback produced into `draw_counts`.
+    /// Called after every readback poll, so the published ranges and the
+    /// counts consumers draw with always come from the same readback.
+    fn sync_draw_counts(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let Some(buffer) = self.draw_counts.as_ref() else {
+            return;
+        };
+        let (draw_count, shadow_static, shadow_movable) = self.readback.counts();
+        let mut counts = Vec::with_capacity(self.draw_counts_cpu.len().max(4));
+        counts.extend([
+            draw_count,
+            shadow_static,
+            shadow_movable,
+            self.readback.shadow_transmissive(),
+        ]);
+        for ranges in [
+            self.readback.opaque(),
+            self.readback.transparent(),
+            self.readback.forward(),
+        ] {
+            counts.extend(ranges.iter().map(|&(_, _, _, count)| count));
+        }
+        if counts == self.draw_counts_cpu {
+            return;
+        }
+        let needed = (counts.len() * 4) as u64;
+        if buffer.size() < needed {
+            let slots = counts.len().next_power_of_two().max(MIN_DRAW_COUNT_SLOTS);
+            self.draw_counts = Some(create_draw_counts_buffer(device, slots));
+        }
+        let buffer = self.draw_counts.as_ref().expect("checked above");
+        helio_core::upload::write_buffer(queue, buffer, 0, bytemuck::cast_slice(&counts));
+        self.draw_counts_cpu = counts;
     }
 
     /// Grows every scratch buffer to at least `needed` rows, next-power-of-
@@ -1291,6 +1353,7 @@ impl ObjectBatchPass {
     /// `RenderGraph` (pair with [`Self::run_once_for_testing`]).
     pub fn poll_readback_for_testing(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         self.readback.poll_and_kick_off(device, queue, &self.scratch);
+        self.sync_draw_counts(device, queue);
     }
 }
 
@@ -1340,6 +1403,7 @@ impl RenderPass for ObjectBatchPass {
                 shadow_transmissive_indirect: &self.scratch.shadow_transmissive_indirect,
                 shadow_transmissive_draw_count: self.readback.shadow_transmissive(),
                 shadow_static_generation: self.shadow_static_generation(),
+                draw_counts: self.draw_counts.as_ref(),
             })
         };
         frame.write(helio_core::ResourceKey::new("object_batch"), data, "ObjectBatch");
@@ -1431,6 +1495,7 @@ impl RenderPass for ObjectBatchPass {
 
         self.readback
             .poll_and_kick_off(ctx.device, ctx.queue, &self.scratch);
+        self.sync_draw_counts(ctx.device, ctx.queue);
         Ok(())
     }
 

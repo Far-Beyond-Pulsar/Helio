@@ -238,12 +238,13 @@ impl RenderPass for DepthPrepassPass {
             indices.buffer.slice(..),
             wgpu::IndexFormat::Uint32,
         );
-        #[cfg(not(target_arch = "wasm32"))]
-        pass.multi_draw_indexed_indirect(indirect, 0, draw_count);
-        #[cfg(target_arch = "wasm32")]
-        for i in 0..draw_count {
-            pass.draw_indexed_indirect(indirect, i as u64 * 20);
-        }
+        helio_pass_gbuffer::multi_draw_indexed_indirect(
+            pass,
+            indirect,
+            0,
+            draw_count,
+            batch.all_draws_count_slot(),
+        );
         Ok(())
     }
 }

@@ -58,7 +58,11 @@ impl RenderPass for BakeInjectPass {
         None
     }
 
-    fn publish_frame_inputs<'a>(&self, frame: &mut ResourceRegistry<'a>) {
+    fn publish_frame_inputs<'a>(
+        &self,
+        _camera: &helio_core::GpuCameraUniforms,
+        frame: &mut ResourceRegistry<'a>,
+    ) {
         // SAFETY: every borrow below is extended per `extend_lifetime`'s doc —
         // out of `self.data: Arc<BakedData>`, which outlives any single frame.
         // AO — replaces SSAO slot so downstream passes (DeferredLight) see baked AO

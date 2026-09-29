@@ -119,6 +119,8 @@ pub struct Renderer {
     pub(crate) color_grading_lut_view: Option<wgpu::TextureView>,
     pub(crate) ies_texture_view: Option<wgpu::TextureView>,
     pub(crate) graph_time_ms: f32,
+    /// The last frame's graph submission. See [`Self::last_submission`].
+    pub(crate) last_submission: Option<wgpu::SubmissionIndex>,
     pub(crate) cull_stats_staging: wgpu::Buffer,
     pub(crate) cull_stats_readback_state: CullStatsReadbackState,
     pub(crate) cull_stats: [u32; 8],
@@ -429,6 +431,21 @@ impl Renderer {
     /// can safely be copied across the renderer/UI boundary.
     pub fn graph_timeline(&self) -> helio_core::GraphTimelineData {
         self.graph.collect_graph_timeline()
+    }
+
+    /// The queue submission carrying the last rendered frame's graph, for a
+    /// host that must wait on or hand off the frame (a compositor sampling
+    /// the target). Saves the host an extra empty `queue.submit` just to
+    /// obtain an index.
+    pub fn last_submission(&self) -> Option<wgpu::SubmissionIndex> {
+        self.last_submission.clone()
+    }
+
+    /// Per-pass `CommandEncoder::finish` cost for the last frame; see
+    /// [`helio_core::RenderGraph::set_finish_breakdown`]. Enable it with the
+    /// `HELIO_FINISH_BREAKDOWN` environment variable so rebuilt graphs keep it.
+    pub fn finish_breakdown(&self) -> &[helio_core::FinishSegment] {
+        self.graph.finish_breakdown()
     }
 
     pub fn add_pass(&mut self, pass: Box<dyn helio_core::RenderPass>) {

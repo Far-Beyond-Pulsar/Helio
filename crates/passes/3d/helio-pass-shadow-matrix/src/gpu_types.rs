@@ -256,4 +256,48 @@ pub struct ShadowMatricesFrameData<'a> {
     /// Increments whenever any movable object moves -- the O(1) CPU gate
     /// `ShadowPass` checks before doing any per-face work.
     pub movable_objects_generation: u64,
+    /// Which atlas faces are actually in use, read back from the GPU caster
+    /// allocation. `None` until the readback for the current allocation
+    /// lands (at startup, and briefly after a light edit); consumers then
+    /// treat every face as in use.
+    pub caster_layout: Option<CasterLayout>,
+}
+
+/// The GPU caster allocation as the CPU sees it: how many casters hold
+/// atlas slots and each one's light type. Every caster reserves six faces
+/// (`shadow_index = 6 * slot`) but only uses some of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CasterLayout {
+    pub caster_count: u32,
+    /// `light_type` per slot (0 directional, 1 point, 2 spot); only the
+    /// first `caster_count` entries are meaningful.
+    pub light_types: [u32; 42],
+}
+
+impl CasterLayout {
+    /// Faces of its six a caster renders and the lighting shaders sample:
+    /// four cascades for a directional light, one for a spot light, six
+    /// cube faces for a point light. Unknown types keep all six.
+    pub fn faces_used(&self, slot: usize) -> usize {
+        match self.light_types.get(slot).copied() {
+            Some(0) => 4,
+            Some(2) => 1,
+            _ => 6,
+        }
+    }
+
+    /// Whether the caster's matrices follow the camera (directional
+    /// cascades are fitted to the view; point and spot matrices are not).
+    pub fn follows_camera(&self, slot: usize) -> bool {
+        self.light_types.get(slot).copied() == Some(0)
+    }
+
+    /// Atlas face indices in use, in ascending order.
+    pub fn active_faces(&self, face_count: usize) -> impl Iterator<Item = usize> + '_ {
+        (0..(self.caster_count as usize).min(42)).flat_map(move |slot| {
+            (0..self.faces_used(slot))
+                .map(move |face| slot * 6 + face)
+                .filter(move |&face| face < face_count)
+        })
+    }
 }

@@ -411,8 +411,14 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// [`publish`](Self::publish), which publishes outputs after execution.
     ///
     /// The graph owns the lifetime bridge for resources borrowed from pass
-    /// state, just as it does for ordinary `publish` calls.
-    fn publish_frame_inputs<'a>(&self, _frame: &mut ResourceRegistry<'a>) {}
+    /// state, just as it does for ordinary `publish` calls. `camera` is this
+    /// frame's camera, for inputs derived from where the view is.
+    fn publish_frame_inputs<'a>(
+        &self,
+        _camera: &crate::GpuCameraUniforms,
+        _frame: &mut ResourceRegistry<'a>,
+    ) {
+    }
 
     /// Declares optional resources this pass will read this frame, before any
     /// pass of the frame executes (see [`crate::FrameDemands`]). Producers of

@@ -245,6 +245,7 @@ impl Renderer {
         multiview: bool,
     ) -> HelioResult<()> {
         helio_core::cpu_scope!("Helio::Renderer::submit_frame");
+        self.last_submission = None;
         #[cfg(not(target_arch = "wasm32"))]
         let depth: &wgpu::TextureView = if multiview {
             self.xr_depth_view.as_ref().ok_or_else(|| {
@@ -344,7 +345,8 @@ impl Renderer {
         // Pass-owned buffers are published through the graph before any pass
         // executes. The renderer only consumes the generic contracts and no
         // longer downcasts into GBufferPass to discover its storage.
-        self.graph.publish_frame_inputs(&mut resource_registry);
+        self.graph
+            .publish_frame_inputs(&self.camera_data, &mut resource_registry);
         let material_textures_buf = resource_registry
             .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("material_texture_fallback"))
             .unwrap_or(&self.camera_buffer);
@@ -392,14 +394,6 @@ impl Renderer {
         resource_registry.write(
             helio_core::resource_keys::coordinate_spaces(),
             coordinate_spaces,
-            "Renderer",
-        );
-        resource_registry.write(
-            helio_pass_radiance_cascades::RADIANCE_CASCADES_VOLUME,
-            helio_pass_radiance_cascades::RadianceCascadesVolume {
-                world_min: [-100.0; 3],
-                world_max: [100.0; 3],
-            },
             "Renderer",
         );
         // Geometry, materials, lights, shadows, and transforms are SceneDB
@@ -541,8 +535,12 @@ impl Renderer {
         };
         {
             helio_core::cpu_scope!("Helio: RenderGraph execute");
-            self.graph
-                .execute_with_registry(&scene_input, target, depth, &mut resource_registry)?;
+            self.last_submission = Some(self.graph.execute_with_registry(
+                &scene_input,
+                target,
+                depth,
+                &mut resource_registry,
+            )?);
         }
         drop(resource_registry);
         self.graph_time_ms = _graph_start.elapsed().as_secs_f64() as f32 * 1000.0;

@@ -246,6 +246,7 @@ impl Renderer {
             cull_stats_readback_state: CullStatsReadbackState::Idle,
             cull_stats: [0; 8],
             graph_time_ms: 0.0,
+            last_submission: None,
             frame_times: vec![0.0; 200],
             frame_times_cursor: 0,
             enable_jitter,

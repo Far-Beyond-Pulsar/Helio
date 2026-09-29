@@ -59,6 +59,24 @@ pub fn select_hdr_surface_format(
     preferred.unwrap_or(caps.formats[0])
 }
 
+/// Instance flags Helio recommends for the host's `wgpu::Instance`
+/// (Helio#308).
+///
+/// Release builds turn off wgpu's optional validation. Its default keeps
+/// `VALIDATION_INDIRECT_CALL` on in release, which validates every indirect
+/// draw on the CPU inside `CommandEncoder::finish`; Helio's indirect args
+/// all come from its own culling passes. Debug builds keep full validation.
+/// `WGPU_*` environment variables override either
+/// (`WGPU_VALIDATION_INDIRECT_CALL=1` re-enables indirect validation).
+pub fn recommended_instance_flags() -> wgpu::InstanceFlags {
+    if cfg!(debug_assertions) {
+        wgpu::InstanceFlags::debugging()
+    } else {
+        wgpu::InstanceFlags::empty()
+    }
+    .with_env()
+}
+
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
     let required = wgpu::Features::INDIRECT_FIRST_INSTANCE;
     let mut optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer

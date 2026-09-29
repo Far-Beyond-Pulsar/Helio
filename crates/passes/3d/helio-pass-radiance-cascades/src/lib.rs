@@ -30,8 +30,9 @@ impl GiConfig {
 
 /// Radiance-cascades GI volume extent (dual-tier GI: RC near, ambient far).
 ///
-/// Published by the `Renderer` under the well-known `"radiance_cascades_volume"`
-/// [`helio_core::ResourceKey`], separate from the generic `RenderEnvironment`
+/// Published by [`RadianceCascadesPass`] from its [`GiConfig`] and the frame's
+/// camera, before any pass prepares, under the well-known
+/// `"radiance_cascades_volume"` [`helio_core::ResourceKey`], separate from the generic `RenderEnvironment`
 /// resource (clear color, ambient fallback, TLAS): this bounds volume is
 /// specific to the radiance-cascades GI technique, not a property every
 /// shading pass's environment has, so it is this pass's own resource, not a
@@ -680,6 +681,17 @@ impl RadianceCascadesPass {
         self.gi_config = config;
     }
 
+    /// The camera-centred volume this pass traces, and the one it publishes
+    /// for consumers, so the two can never disagree.
+    fn volume(&self, camera_position: [f32; 4]) -> RadianceCascadesVolume {
+        let radius = self.gi_config.rc_radius.max(0.0);
+        let [x, y, z, _] = camera_position;
+        RadianceCascadesVolume {
+            world_min: [x - radius, y - radius, z - radius],
+            world_max: [x + radius, y + radius, z + radius],
+        }
+    }
+
     /// The RT trace's bind group (binding order matches the BGL). It stores
     /// into `cascade_out` and this frame's history texture, and reads the
     /// other history texture and the parent placeholder, so no texture is
@@ -755,6 +767,20 @@ impl RenderPass for RadianceCascadesPass {
         None
     }
 
+    fn publish_frame_inputs<'a>(
+        &self,
+        camera: &helio_core::GpuCameraUniforms,
+        frame: &mut helio_core::ResourceRegistry<'a>,
+    ) {
+        // Before any pass prepares: GBuffer and deferred lighting read the
+        // volume ahead of this pass in graph order.
+        frame.write(
+            RADIANCE_CASCADES_VOLUME,
+            self.volume(camera.position_near),
+            "RadianceCascades",
+        );
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let light_count = ctx
             .scene_buffers
@@ -765,11 +791,10 @@ impl RenderPass for RadianceCascadesPass {
             .get::<helio_pass_sky::SkyContext>(helio_core::ResourceKey::new("sky"))
             .map(|sky| sky.sky_color)
             .unwrap_or([0.0, 0.0, 0.0]);
-        let radius = self.gi_config.rc_radius.max(0.0);
-        let camera = ctx.camera_data.position_near;
+        let volume = self.volume(ctx.camera_data.position_near);
         let dyn_data = RCDynamic {
-            world_min: [camera[0] - radius, camera[1] - radius, camera[2] - radius, 0.0],
-            world_max: [camera[0] + radius, camera[1] + radius, camera[2] + radius, 0.0],
+            world_min: [volume.world_min[0], volume.world_min[1], volume.world_min[2], 0.0],
+            world_max: [volume.world_max[0], volume.world_max[1], volume.world_max[2], 0.0],
             frame: ctx.frame_num as u32,
             light_count,
             _pad0: 0,
