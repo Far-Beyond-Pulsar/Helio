@@ -51,3 +51,5 @@ helio-pass-dof = { path = "../passes/3d/helio-pass-dof" }
 [dev-dependencies]
 pollster = { workspace = true }
 glam = { workspace = true }
+serde_json = { workspace = true }
+helio-pass-voxel-planet = { path = "../passes/3d/helio-pass-voxel-planet" }

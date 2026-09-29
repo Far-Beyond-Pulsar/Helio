@@ -46,6 +46,17 @@ use helio_pass_water_sim::WaterSimPass;
 
 use helio_core::RenderGraph;
 
+/// An application-provided pass factory reused on graph resize. The builder
+/// chooses its stage; scene data and backend selection remain with the caller.
+pub type GraphPassFactory = Arc<
+    dyn Fn(&wgpu::Device, &wgpu::Queue, u32, u32) -> Box<dyn helio_core::RenderPass>
+        + Send
+        + Sync,
+>;
+
+/// Factory for format-independent voxel passes in the GBuffer stage.
+pub type VoxelPassFactory = GraphPassFactory;
+
 /// Spotlight icon embedded at compile time — used as the editor billboard sprite.
 static SPOTLIGHT_PNG: &[u8] = include_bytes!("../../../spotlight.png");
 
@@ -557,6 +568,9 @@ pub fn build_default_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGrap
         None,
         None,
         ctx.scene_db.clone(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -565,6 +579,55 @@ pub fn build_default_graph_external_with_context(ctx: PassBuildContext<'_>) -> R
     let mut ctx = ctx;
     ctx.owns_device = false;
     build_default_graph_with_context(ctx)
+}
+
+/// Build the default deferred graph with an application-selected voxel pass.
+/// The pass factory is intentionally independent of any voxel format or
+/// generation implementation.
+pub fn build_default_graph_external_with_voxel_passes(
+    ctx: PassBuildContext<'_>,
+    voxel_passes: Vec<VoxelPassFactory>,
+) -> RenderGraph {
+    build_default_graph_external_with_passes(ctx, voxel_passes, Vec::new())
+}
+
+/// Add GBuffer voxel passes and final resource consumers before graph locking.
+/// Final passes must declare all resource reads/writes. Their factories are
+/// retained by graph rebuilds and receive the current internal render size.
+pub fn build_default_graph_external_with_passes(
+    ctx: PassBuildContext<'_>,
+    voxel_passes: Vec<VoxelPassFactory>,
+    final_passes: Vec<GraphPassFactory>,
+) -> RenderGraph {
+    build_default_graph_external_with_lighting_passes(ctx, voxel_passes, Vec::new(), final_passes)
+}
+
+/// Backend-owned resolves after opaque lighting and before fog, transparency
+/// and antialiasing. Factories survive graph rebuilds at the new internal size.
+/// A resolve must declare its resource accesses and preserve unrelated pixels.
+pub fn build_default_graph_external_with_lighting_passes(
+    mut ctx: PassBuildContext<'_>,
+    voxel_passes: Vec<VoxelPassFactory>,
+    lighting_passes: Vec<GraphPassFactory>,
+    final_passes: Vec<GraphPassFactory>,
+) -> RenderGraph {
+    ctx.owns_device = false;
+    build_default_graph_internal(
+        ctx.device,
+        ctx.queue,
+        ctx.camera_buffer,
+        ctx.config,
+        ctx.debug_state,
+        ctx.camera_buffer,
+        ctx.cull_stats_buffer,
+        false,
+        None,
+        None,
+        ctx.scene_db,
+        voxel_passes,
+        final_passes,
+        lighting_passes,
+    )
 }
 
 /// Build the deferred graph with user post-process effects from the shared ABI.
@@ -584,6 +647,9 @@ pub fn build_default_graph_with_user_effects_with_context(
         None,
         Some(user_effects),
         ctx.scene_db.clone(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -610,6 +676,9 @@ pub fn build_default_graph(
         debug_overlay,
         None,
         scene_db,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -637,6 +706,9 @@ pub fn build_default_graph_with_user_effects(
         debug_overlay,
         Some(user_effects),
         scene_db,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -663,6 +735,9 @@ pub fn build_default_graph_external(
         debug_overlay,
         None,
         scene_db,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -740,6 +815,9 @@ fn build_default_graph_internal(
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
     user_effects: Option<&'static str>,
     scene_db: helio::SceneDbHandle,
+    voxel_passes: Vec<VoxelPassFactory>,
+    final_passes: Vec<GraphPassFactory>,
+    lighting_passes: Vec<GraphPassFactory>,
 ) -> RenderGraph {
     let iw = config.internal_width();
     let ih = config.internal_height();
@@ -772,6 +850,10 @@ fn build_default_graph_internal(
     // output, and it only cost a probe-atlas trace every frame.
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
+
+    for factory in &voxel_passes {
+        graph.add_pass(factory(device, queue, iw, ih));
+    }
 
     // Decal pass — projects decals into the G-buffer after it's been written.
     // Runs as a compute pass between GBuffer and deferred lighting. Reads
@@ -815,6 +897,9 @@ fn build_default_graph_internal(
     deferred_light_pass.debug_mode = config.debug_mode;
     deferred_light_pass.set_env_reflections(config.enable_environment_reflections);
     graph.add_pass(Box::new(deferred_light_pass));
+    for factory in &lighting_passes {
+        graph.add_pass(factory(device, queue, iw, ih));
+    }
     graph.add_pass(Box::new(PerfOverlayCostAnalyzerPass::new(perf.clone())));
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(perf.clone())));
 
@@ -892,6 +977,9 @@ fn build_default_graph_internal(
         debug_overlay,
     );
 
+    for factory in &final_passes {
+        graph.add_pass(factory(device, queue, iw, ih));
+    }
     graph.lock(iw, ih);
 
     let overlay_owned = debug_overlay.map(Arc::clone);
@@ -910,6 +998,9 @@ fn build_default_graph_internal(
                 overlay_owned.as_ref(),
                 effect_snippet,
                 scene_db.clone(),
+                voxel_passes.clone(),
+                final_passes.clone(),
+                lighting_passes.clone(),
             )
         },
     );

@@ -840,6 +840,25 @@ impl RenderGraph {
         self.passes[idx].as_any().downcast_ref::<T>()
     }
 
+    /// Preserve opt-in streaming state when rebuilding a graph on this device.
+    /// New pass configuration and graph resources remain authoritative.
+    pub fn inherit_persistent_state(&mut self, previous: &mut RenderGraph) {
+        let mut used = std::collections::HashSet::new();
+        for pass in &mut self.passes {
+            for (index, old) in previous.passes.iter_mut().enumerate() {
+                if !used.contains(&index)
+                    && pass.name() == old.name()
+                    && pass.as_any().type_id() == old.as_any().type_id()
+                    && pass.inherit_persistent_state(old.as_mut())
+                {
+                    used.insert(index);
+                    pass.on_resize(&self.device, self.internal_w, self.internal_h);
+                    break;
+                }
+            }
+        }
+    }
+
     /// Find the index of the first pass matching type `T`.
     pub fn pass_index_of<T: RenderPass + 'static>(&self) -> Option<usize> {
         self.passes
@@ -1265,6 +1284,7 @@ impl RenderGraph {
                         width: internal_w,
                         height: internal_h,
                         delta_time,
+                        world_origin: scene.world_origin(),
                     };
                     // Name formatted only while recording; `prepare` often does
                     // the pass's buffer uploads, so it must be visible per pass.
@@ -1674,6 +1694,7 @@ impl RenderGraph {
                     width: self.internal_w,
                     height: self.internal_h,
                     delta_time: self.delta_time,
+                    world_origin: scene.world_origin(),
                 };
                 pass.declare_frame_demands(&plan_ctx, &mut self.frame_demands);
             }
@@ -1788,6 +1809,7 @@ impl RenderGraph {
                         width: self.internal_w,
                         height: self.internal_h,
                         delta_time: self.delta_time,
+                        world_origin: scene.world_origin(),
                     };
                     #[cfg(not(target_arch = "wasm32"))]
                     let _prepare_scope = profiling::is_profiling_enabled().then(|| {
@@ -2599,4 +2621,3 @@ impl RenderGraph {
             .resize(self.passes.len(), self.chain_generation);
     }
 }
-

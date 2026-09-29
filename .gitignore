@@ -37,3 +37,10 @@ two_million_exact_after_batch.sqlite-shm
 two_million_exact_after_batch.sqlite-wal
 two_million_verified.sqlite-shm
 two_million_verified.sqlite-wal
+
+# Local terrain validation outputs and evidence archives.
+/crates/passes/3d/helio-pass-tiny-voxel/validation/
+
+# Python analysis helpers.
+__pycache__/
+*.pyc

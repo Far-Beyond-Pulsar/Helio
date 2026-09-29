@@ -151,6 +151,7 @@ pub use gpu::{GpuProfiler, GpuTimestamp};
 /// # }
 /// ```
 pub struct Profiler {
+    instance_id: u64,
     cpu: CpuProfiler,
     gpu: GpuProfiler,
     enabled: bool,
@@ -173,7 +174,10 @@ impl Profiler {
     /// - `device`: GPU device for creating query sets
     /// - `queue`: GPU queue (unused currently, reserved for async readback)
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        static NEXT_INSTANCE_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
         Self {
+            instance_id: NEXT_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             cpu: CpuProfiler::new(),
             gpu: GpuProfiler::new(device, queue),
             enabled: cfg!(feature = "profiling"),
@@ -446,6 +450,12 @@ impl Profiler {
         };
     }
 
+    /// Process-local identity of this profiler. Pair it with GPU frame indices
+    /// when exporting results: rebuilding a graph restarts its frame counter.
+    pub const fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
+
     /// Returns the latest snapshot without allocation or synchronization.
     pub const fn timing_snapshot(&self) -> &RenderTimingSnapshot {
         &self.snapshot
@@ -647,6 +657,10 @@ mod tests {
                 required_limits: adapter.limits(), ..Default::default()
             }).await.unwrap();
             let mut profiler = Profiler::new(&device, &queue);
+            let profiler_id = profiler.instance_id();
+            assert_ne!(profiler_id, 0);
+            let replacement = Profiler::new(&device, &queue);
+            assert_ne!(profiler_id, replacement.instance_id());
             let mut graphics = device.create_command_encoder(&Default::default());
             let mut compute = device.create_command_encoder(&Default::default());
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -681,6 +695,7 @@ mod tests {
             assert_eq!(snapshot.total_gpu_ms, Some(span));
             assert_eq!(profiler.gpu_frame_ms(), Some(span));
             assert_eq!(profiler.export_timings().2, span);
+            assert_eq!(profiler.instance_id(), profiler_id);
         });
     }
 }

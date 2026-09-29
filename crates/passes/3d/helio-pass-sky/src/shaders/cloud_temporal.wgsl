@@ -25,7 +25,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let clip = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0, 1.0);
     let far_world = camera.view_proj_inv * clip;
     let ro = camera.position_near.xyz;
-    let rd = normalize(far_world.xyz / far_world.w - ro);
+    // Homogeneous far point minus the eye: exact for any w (see
+    // cloud_volume_lowres.wgsl).
+    let rd = normalize(far_world.xyz - far_world.w * ro);
     let depth = textureSampleLevel(current_data, layer_sampler, uv, 0.0);
     let layer_y = (params.cloud_base + params.cloud_top) * 0.5;
     var t = depth.r * 6000.0;

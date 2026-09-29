@@ -396,7 +396,6 @@ mod tests {
     use super::*;
     use crate::{
         VoxelDomain, VoxelFormatDescriptor, VoxelFormatRegistry, VoxelStoredPayload,
-        VOXEL_FLAT_GENERATOR,
     };
     use std::{collections::HashMap, sync::RwLock};
 
@@ -500,12 +499,26 @@ mod tests {
 
     #[test]
     fn worker_publishes_complete_generated_batch_and_reports_stale_failure() {
+        /// Solid below `y = 0`.
+        struct Ground;
+        impl crate::VoxelChunkGenerator for Ground {
+            fn generate(
+                &self,
+                _descriptor: &VoxelGeneratorDescriptor,
+                key: VoxelChunkKey,
+            ) -> Result<Option<VoxelStoredPayload>, String> {
+                Ok((key.y < 0).then(|| {
+                    VoxelStoredPayload::raw_material([1; crate::VOXEL_CHUNK_SAMPLES])
+                }))
+            }
+        }
+        let mut registry = VoxelGeneratorRegistry::default();
+        registry.register("test.ground", 1, Arc::new(Ground)).unwrap();
         let store = Arc::new(RwLock::new((0, HashMap::new())));
         let writer = VoxelSourceWriter::new(VoxelTerrainId(9), VoxelSourceId(2), store.clone());
-        let worker =
-            VoxelGenerationWorker::start(writer, VoxelGeneratorRegistry::default()).unwrap();
+        let worker = VoxelGenerationWorker::start(writer, registry).unwrap();
         let descriptor = VoxelGeneratorDescriptor {
-            id: VOXEL_FLAT_GENERATOR.into(),
+            id: "test.ground".into(),
             version: 1,
             seed: 7,
             domain: VoxelDomain::Unbounded { max_lod: 0 },

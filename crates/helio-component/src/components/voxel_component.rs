@@ -7,7 +7,8 @@
 
 use engine_class_derive::engine_class;
 use helio_voxel_data::{
-    VoxelStoredPayload, VOXEL_BUILTIN_GENERATOR_VERSION, VOXEL_FLAT_GENERATOR,
+    VoxelEditJournal,
+    VoxelStoredPayload, VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION,
 };
 pub use helio_voxel_data::{VoxelPayloadKey, VoxelPayloadStore};
 use pulsar_scene_model::components::Transform;
@@ -32,6 +33,50 @@ fn empty_payload_store() -> VoxelPayloadStore {
 fn default_voxel_generator_version() -> u32 {
     1
 }
+
+/// The registered terrain generator that fills a world: its id and output
+/// version. Serialized flat into the terrain component (`generator_id`,
+/// `generator_version`); the editor shows it as a searchable picker of the
+/// registered generators.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct VoxelGeneratorRef {
+    /// Stable generator id; empty means externally supplied data only.
+    #[serde(rename = "generator_id", default)]
+    pub id: String,
+    /// Output version; a new version may generate different terrain.
+    #[serde(rename = "generator_version", default = "default_voxel_generator_version")]
+    pub version: u32,
+}
+
+impl VoxelGeneratorRef {
+    pub fn new(id: impl Into<String>, version: u32) -> Self {
+        Self { id: id.into(), version }
+    }
+}
+
+impl Default for VoxelGeneratorRef {
+    /// The landform generator.
+    fn default() -> Self {
+        Self::new(VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION)
+    }
+}
+
+fn serialize_generator_ref_json(value: &VoxelGeneratorRef) -> pulsar_reflection::ReflectResult<serde_json::Value> {
+    serde_json::to_value(value).map_err(|e| pulsar_reflection::ReflectError::SerializationFailed(e.to_string()))
+}
+
+fn deserialize_generator_ref_json(value: serde_json::Value) -> pulsar_reflection::ReflectResult<VoxelGeneratorRef> {
+    serde_json::from_value(value).map_err(|e| pulsar_reflection::ReflectError::DeserializationFailed(e.to_string()))
+}
+
+/// Registered for reflection; the picker editor is registered by the host
+/// that knows the generator registry.
+#[pulsar_reflection::pulsar_type(
+    serialize_json_with = serialize_generator_ref_json,
+    deserialize_json_with = deserialize_generator_ref_json
+)]
+#[allow(dead_code)]
+type RegisteredVoxelGeneratorRef = VoxelGeneratorRef;
 
 fn default_chunk_edge_voxels() -> u32 {
     8
@@ -90,6 +135,7 @@ fn clone_payload_store(store: &VoxelPayloadStore) -> VoxelPayloadStore {
 /// this component stores configuration and the SceneDB material-ID palette.
 #[engine_class(category = "Voxel", debug, serialize, deserialize)]
 #[category("Volume", category_color = "#8F8F8F")]
+#[category("Rendering", category_color = "#7C9DC9")]
 #[category("Materials", category_color = "#D1A73F")]
 #[category("Editing", category_color = "#D18F6F")]
 pub struct VoxelComponent {
@@ -107,6 +153,10 @@ pub struct VoxelComponent {
     /// Initial cubic grid dimensions. The default is 16 × 16 × 16.
     #[property(category = "Volume")]
     pub dimensions: [u32; 3],
+    /// Stable renderer backend identifier. Empty leaves selection to the host.
+    #[serde(default)]
+    #[property(category = "Rendering")]
+    pub renderer_id: String,
     /// Palette of IDs into Helio's existing SceneDB material records.
     #[property(category = "Materials")]
     pub material_ids: Vec<u32>,
@@ -125,6 +175,7 @@ impl Default for VoxelComponent {
             enabled: true,
             voxel_size: 1.0,
             dimensions: [16; 3],
+            renderer_id: String::new(),
             material_ids: vec![0],
             default_material_slot: 1,
             editable: true,
@@ -151,6 +202,7 @@ impl VoxelComponent {
             enabled: true,
             voxel_size: 1.0,
             dimensions,
+            renderer_id: String::new(),
             material_ids,
             default_material_slot: u32::from(slot),
             editable: true,
@@ -175,6 +227,7 @@ impl Clone for VoxelComponent {
             enabled: self.enabled,
             voxel_size: self.voxel_size,
             dimensions: self.dimensions,
+            renderer_id: self.renderer_id.clone(),
             material_ids: self.material_ids.clone(),
             default_material_slot: self.default_material_slot,
             editable: self.editable,
@@ -182,14 +235,39 @@ impl Clone for VoxelComponent {
     }
 }
 
-/// General-purpose voxel terrain authoring configuration.
+/// Overall form of a voxel world.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, pulsar_reflection::Reflectable)]
+pub enum VoxelWorldShape {
+    /// A planet centred on the entity origin (`planet_radius`).
+    Sphere,
+    /// A square plane of `plane_size` metres centred on the entity origin.
+    #[default]
+    Plane,
+    /// A plane without edges within reach (about 13 400 km across).
+    InfinitePlane,
+}
+
+fn default_planet_radius() -> f64 {
+    6_371_000.0
+}
+
+fn default_plane_size() -> f64 {
+    4_096.0
+}
+
+/// The base component of every voxel world, whatever generates it.
 ///
-/// `domain_mode` describes the chunk-key domain. Generation behavior is
-/// identified by an opaque source ID and parameters, not by a built-in shape.
+/// It owns what all terrains share: the world's shape and size, the voxel
+/// size, which registered generator fills it (with a seed), the material
+/// palette, editability, and the world's edits (an ordered brush journal
+/// plus per-sample payload chunks). A generator's own settings live in its
+/// settings component on the same entity (for example
+/// [`VoxelLandformComponent`] for the built-in planet generator), or in the
+/// opaque `generator_parameters` for generators without one. `domain_mode`
+/// describes the chunk-key domain of live sample data.
 #[engine_class(category = "Voxel/Terrain", debug, serialize, deserialize)]
-#[category("Domain", category_color = "#8F8F8F")]
+#[category("World", category_color = "#6FA86F")]
 #[category("Generation", category_color = "#D1A73F")]
-#[category("Materials", category_color = "#D1A73F")]
 #[category("Editing", category_color = "#D18F6F")]
 pub struct VoxelTerrainComponent {
     /// Runtime-only live payloads and data revision. Not an inspector
@@ -200,57 +278,64 @@ pub struct VoxelTerrainComponent {
     /// Whether this terrain source participates in rendering and queries.
     #[property]
     pub enabled: bool,
+    /// Planet, finite plane or infinite plane.
+    #[serde(default)]
+    #[property(category = "World")]
+    pub shape: VoxelWorldShape,
+    /// Planet radius in metres (sphere worlds).
+    #[serde(default = "default_planet_radius")]
+    #[property(min = 1000.0, max = 50000000.0, step = 1000.0, category = "World", label = "Planet radius (m)")]
+    pub planet_radius: f64,
+    /// Edge length of a finite plane in metres.
+    #[serde(default = "default_plane_size")]
+    #[property(min = 16.0, max = 13000000.0, step = 16.0, category = "World", label = "Plane size (m)")]
+    pub plane_size: f64,
+    /// Edge length of a base-resolution voxel in metres (0.1 to 1 for
+    /// streamed terrain).
+    #[property(min = 0.1, max = 1.0, step = 0.05, category = "World", label = "Voxel size (m)")]
+    pub voxel_size: f64,
+    /// The registered terrain generator that fills the world. Its settings
+    /// live in its settings component on the same entity.
+    #[serde(flatten)]
+    #[property(category = "Generation")]
+    pub generator: VoxelGeneratorRef,
+    /// Seed supplied to the generator.
+    #[property(category = "Generation")]
+    pub seed: u64,
+    /// Settings (JSON) for a generator without a settings component; a
+    /// settings component on the entity replaces them.
+    #[serde(default)]
+    pub generator_parameters: String,
+
+    // The fields below describe the chunk domain of live sample data
+    // (`payload_store`). Streamed terrain derives its own layout and LOD, so
+    // they are serialized but not shown in the inspector.
     /// Domain discriminant: 0 bounded, 1 unbounded.
-    #[property(category = "Domain")]
     pub domain_mode: u32,
     /// Finite-domain minimum and maximum on each axis. Ignored for unbounded domains.
-    #[property(category = "Domain")]
     pub bounds_min_x: f64,
-    #[property(category = "Domain")]
     pub bounds_min_y: f64,
-    #[property(category = "Domain")]
     pub bounds_min_z: f64,
-    #[property(category = "Domain")]
     pub bounds_max_x: f64,
-    #[property(category = "Domain")]
     pub bounds_max_y: f64,
-    #[property(category = "Domain")]
     pub bounds_max_z: f64,
-    /// Edge length of a base-resolution voxel in world units.
-    #[property(min = 0.0001, max = 10000.0, step = 0.01, category = "Generation")]
-    pub voxel_size: f64,
     /// Number of base-resolution voxels covered by one chunk key on each
     /// axis at LOD zero. The payload format can encode that region as samples,
     /// a hierarchy, a compressed field, or another registered representation.
     #[serde(default = "default_chunk_edge_voxels")]
-    #[property(category = "Generation")]
     pub chunk_edge_voxels: u32,
     /// Highest chunk LOD accepted for this terrain source.
     #[serde(default = "default_max_chunk_lod")]
-    #[property(category = "Generation")]
     pub max_chunk_lod: u32,
     /// Spatial scale between adjacent chunk LODs. Two means each coarser
     /// chunk covers twice the width of a finer chunk along each axis.
     #[serde(default = "default_lod_scale")]
-    #[property(category = "Generation")]
     pub lod_scale: u32,
-    /// Stable registered generator/source identifier. Empty means externally
-    /// supplied data only; generator implementation is not stored here.
-    #[property(category = "Generation")]
-    pub generator_id: String,
-    /// Stable implementation version. Changing it invalidates generated
-    /// output without serializing executable generator code.
-    #[serde(default = "default_voxel_generator_version")]
-    #[property(category = "Generation")]
-    pub generator_version: u32,
-    /// Seed supplied to the registered generator.
-    #[property(category = "Generation")]
-    pub seed: u64,
-    /// Opaque serialized parameters consumed by the registered generator.
-    #[property(category = "Generation")]
-    pub generator_parameters: String,
+    /// Stable renderer backend identifier. Empty selects the unique backend
+    /// that supports the generator.
+    #[serde(default)]
+    pub renderer_id: String,
     /// Palette of IDs into Helio's existing SceneDB material records.
-    #[property(category = "Materials")]
     pub material_ids: Vec<u32>,
     /// Whether external callers may submit canonical live edit/data batches.
     #[property(category = "Editing")]
@@ -259,6 +344,11 @@ pub struct VoxelTerrainComponent {
     /// revision held with `payloads`. It is serialized with authored config
     /// but omitted from the property editor.
     pub source_revision: u64,
+    /// Ordered shape edits (destruction and construction), saved with the
+    /// level. Append through the sculpt tool or the scripting methods, which
+    /// also advance `source_revision`.
+    #[serde(default)]
+    pub edits: VoxelEditJournal,
 }
 
 impl Default for VoxelTerrainComponent {
@@ -266,6 +356,9 @@ impl Default for VoxelTerrainComponent {
         Self {
             payloads: empty_payload_store(),
             enabled: true,
+            shape: VoxelWorldShape::default(),
+            planet_radius: default_planet_radius(),
+            plane_size: default_plane_size(),
             domain_mode: 1,
             bounds_min_x: 0.0,
             bounds_min_y: 0.0,
@@ -273,22 +366,38 @@ impl Default for VoxelTerrainComponent {
             bounds_max_x: 0.0,
             bounds_max_y: 0.0,
             bounds_max_z: 0.0,
-            voxel_size: 1.0,
+            voxel_size: 0.1,
             chunk_edge_voxels: default_chunk_edge_voxels(),
             max_chunk_lod: default_max_chunk_lod(),
             lod_scale: default_lod_scale(),
-            generator_id: VOXEL_FLAT_GENERATOR.into(),
-            generator_version: VOXEL_BUILTIN_GENERATOR_VERSION,
+            renderer_id: String::new(),
+            generator: VoxelGeneratorRef::default(),
             seed: 0,
-            generator_parameters: r#"{"planet_radius":8.0,"base_height":0.0,"amplitude":0.0,"wavelength":16.0,"material_slot":1}"#.into(),
+            generator_parameters: String::new(),
             material_ids: vec![0],
             editable: true,
             source_revision: 0,
+            edits: VoxelEditJournal::default(),
         }
     }
 }
 
 impl VoxelTerrainComponent {
+    /// A planet of `radius` metres with Helio's terrain generator and 0.1 m
+    /// voxels. Add a [`VoxelLandformComponent`] to shape its continents and
+    /// mountains.
+    pub fn planet(radius: f64) -> Self {
+        Self { shape: VoxelWorldShape::Sphere, planet_radius: radius, ..Self::default() }
+    }
+    /// A square plane of `size` metres with Helio's terrain generator.
+    pub fn plane(size: f64) -> Self {
+        Self { shape: VoxelWorldShape::Plane, plane_size: size, ..Self::default() }
+    }
+    /// A plane without edges within reach, with Helio's terrain generator.
+    pub fn infinite_plane() -> Self {
+        Self { shape: VoxelWorldShape::InfinitePlane, ..Self::default() }
+    }
+
     /// Low-level live SceneDB data capability. Normal
     /// producers should mutate through `VoxelSourceWriter` so validation and
     /// revision checks are preserved; scripts should export via data snapshots.
@@ -305,6 +414,9 @@ impl Clone for VoxelTerrainComponent {
         Self {
             payloads: clone_payload_store(&self.payloads),
             enabled: self.enabled,
+            shape: self.shape,
+            planet_radius: self.planet_radius,
+            plane_size: self.plane_size,
             domain_mode: self.domain_mode,
             bounds_min_x: self.bounds_min_x,
             bounds_min_y: self.bounds_min_y,
@@ -316,13 +428,130 @@ impl Clone for VoxelTerrainComponent {
             chunk_edge_voxels: self.chunk_edge_voxels,
             max_chunk_lod: self.max_chunk_lod,
             lod_scale: self.lod_scale,
-            generator_id: self.generator_id.clone(),
-            generator_version: self.generator_version,
+            renderer_id: self.renderer_id.clone(),
+            generator: self.generator.clone(),
             seed: self.seed,
             generator_parameters: self.generator_parameters.clone(),
             material_ids: self.material_ids.clone(),
             editable: self.editable,
             source_revision: self.source_revision,
+            edits: self.edits.clone(),
+        }
+    }
+}
+
+/// Settings of the landform generator (`helio.landform`): the scale and
+/// height of continents, mountains and hills, surface roughness and the
+/// snowline. It configures the [`VoxelTerrainComponent`] on the same
+/// entity; the base component's seed varies the landform.
+#[engine_class(category = "Voxel/Terrain", clone, debug, serialize, deserialize)]
+#[category("Continents", category_color = "#6FA86F")]
+#[category("Mountains", category_color = "#9A8F84")]
+#[category("Detail", category_color = "#D1A73F")]
+#[serde(default)]
+pub struct VoxelLandformComponent {
+    /// Typical continent width in kilometres.
+    #[property(min = 10.0, max = 20000.0, step = 10.0, category = "Continents", label = "Continent width (km)")]
+    pub continent_km: f64,
+    /// Depth of the low basins below the datum, in metres.
+    #[property(min = 0.0, max = 10000.0, step = 10.0, category = "Continents", label = "Ocean depth (m)")]
+    pub ocean_depth_m: f64,
+    /// Typical lowland height above the datum, in metres.
+    #[property(min = 0.0, max = 5000.0, step = 10.0, category = "Continents", label = "Lowland height (m)")]
+    pub lowland_m: f64,
+    /// Height of mountain ranges, in metres.
+    #[property(min = 0.0, max = 9000.0, step = 10.0, category = "Mountains", label = "Mountain height (m)")]
+    pub mountain_m: f64,
+    /// Spacing of mountain ridges, in kilometres.
+    #[property(min = 1.0, max = 500.0, step = 1.0, category = "Mountains", label = "Ridge spacing (km)")]
+    pub mountain_km: f64,
+    /// Height above which flat ground is snow, in metres.
+    #[property(min = 0.0, max = 10000.0, step = 10.0, category = "Mountains", label = "Snowline (m)")]
+    pub snowline_m: f64,
+    /// Height of rolling hills, in metres.
+    #[property(min = 0.0, max = 2000.0, step = 1.0, category = "Detail", label = "Hill height (m)")]
+    pub hill_m: f64,
+    /// Spacing of hills, in kilometres.
+    #[property(min = 0.1, max = 100.0, step = 0.1, category = "Detail", label = "Hill spacing (km)")]
+    pub hill_km: f64,
+    /// Metre-scale roughness as a fraction of each detail wavelength.
+    #[property(min = 0.0, max = 0.2, step = 0.005, category = "Detail")]
+    pub roughness: f64,
+    /// Scale of the domain warp that bends coasts and ridges, in kilometres.
+    #[property(min = 0.0, max = 500.0, step = 1.0, category = "Detail", label = "Coastline warp (km)")]
+    pub warp_km: f64,
+}
+
+impl Default for VoxelLandformComponent {
+    /// The planet generator's own defaults (Earth-like).
+    fn default() -> Self {
+        Self {
+            continent_km: 3_000.0,
+            ocean_depth_m: 2_400.0,
+            lowland_m: 180.0,
+            mountain_m: 2_400.0,
+            mountain_km: 20.0,
+            snowline_m: 3_000.0,
+            hill_m: 140.0,
+            hill_km: 9.0,
+            roughness: 0.035,
+            warp_km: 40.0,
+        }
+    }
+}
+
+/// A solid terrain material.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, pulsar_reflection::Reflectable)]
+pub enum VoxelTerrainMaterial {
+    #[default]
+    Grass,
+    Dirt,
+    Stone,
+    Sand,
+    Snow,
+    Water,
+    Gravel,
+    Sandstone,
+    DarkStone,
+    Wood,
+    Leaves,
+    Clay,
+    Brick,
+    Planks,
+    Cobble,
+}
+
+/// Settings of the flat generator (`helio.flat`): level ground at `height`
+/// with a surface layer over soil over rock. It configures the
+/// [`VoxelTerrainComponent`] on the same entity.
+#[engine_class(category = "Voxel/Terrain", clone, debug, serialize, deserialize)]
+#[category("Ground", category_color = "#6FA86F")]
+#[serde(default)]
+pub struct VoxelFlatTerrainComponent {
+    /// Ground height above the entity origin, in metres.
+    #[serde(rename = "height_m")]
+    #[property(min = -10000.0, max = 10000.0, step = 0.1, category = "Ground", label = "Height (m)")]
+    pub height: f64,
+    /// Depth of the soil under the surface layer, in metres.
+    #[serde(rename = "soil_depth_m")]
+    #[property(min = 0.0, max = 1000.0, step = 0.1, category = "Ground", label = "Soil depth (m)")]
+    pub soil_depth: f64,
+    #[property(category = "Ground")]
+    pub surface: VoxelTerrainMaterial,
+    #[property(category = "Ground")]
+    pub soil: VoxelTerrainMaterial,
+    #[property(category = "Ground")]
+    pub rock: VoxelTerrainMaterial,
+}
+
+impl Default for VoxelFlatTerrainComponent {
+    fn default() -> Self {
+        Self {
+            height: 0.0,
+            soil_depth: 1.0,
+            surface: VoxelTerrainMaterial::Grass,
+            soil: VoxelTerrainMaterial::Dirt,
+            rock: VoxelTerrainMaterial::Stone,
         }
     }
 }
@@ -496,6 +725,21 @@ fn edit_terrain_samples(
         .ok_or_else(|| "voxel terrain component is absent".to_string())?;
     if !component.enabled || !component.editable {
         return Err("voxel terrain is disabled or not editable".into());
+    }
+    if super::voxel_world::is_generated(component) {
+        // Generated terrain keeps its edits in the journal: sample (x, y, z)
+        // is the block at ((x, y, z) + 0.5) voxels from the origin, and the
+        // slot is a terrain material id.
+        let planet = super::voxel_world::terrain_world(world, entity)?;
+        let voxel = planet.grid().voxel_size();
+        let edits = samples
+            .iter()
+            .map(|s| {
+                let p = glam::DVec3::new(s[0] as f64 + 0.5, s[1] as f64 + 0.5, s[2] as f64 + 0.5) * voxel;
+                super::voxel_world::block_edit(&planet, p, u32::from(material_slot))
+            })
+            .collect();
+        return super::voxel_world::append_edits(world, entity, edits);
     }
     if component.chunk_edge_voxels != 8 {
         return Err("sample edits require the built-in 8-voxel chunk layout".into());
@@ -694,7 +938,7 @@ mod tests {
         value.as_object_mut().unwrap().remove("max_chunk_lod");
         value.as_object_mut().unwrap().remove("lod_scale");
         let restored: VoxelTerrainComponent = serde_json::from_value(value).unwrap();
-        assert_eq!(restored.generator_version, 1);
+        assert_eq!(restored.generator.version, 1);
         assert_eq!(restored.chunk_edge_voxels, 8);
         assert_eq!(restored.max_chunk_lod, 16);
         assert_eq!(restored.lod_scale, 2);

@@ -25,6 +25,9 @@ struct BillboardGlobals {
     delta_time: f32,
     ambient_intensity: f32,
     _pad: f32,
+    /// World position of the frame origin (camera-relative frames); instance
+    /// positions are world-space and are rebased by it.
+    world_origin: [f32; 4],
 }
 
 pub struct BillboardPass {
@@ -517,6 +520,7 @@ impl RenderPass for BillboardPass {
             delta_time: 0.0,
             ambient_intensity: 1.0,
             _pad: 0.0,
+            world_origin: ctx.world_origin.map_or([0.0; 4], |o| [o.x as f32, o.y as f32, o.z as f32, 0.0]),
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())

@@ -1639,10 +1639,12 @@ dependencies = [
  "helio-pass-tsr",
  "helio-pass-virtual-geometry",
  "helio-pass-volumetric-fog",
+ "helio-pass-voxel-planet",
  "helio-pass-water-sim",
  "image",
  "pollster 0.4.0",
  "pulsar_scenedb",
+ "serde_json",
  "wgpu",
 ]
 
@@ -2209,6 +2211,20 @@ dependencies = [
  "pulsar_reflection",
  "pulsar_scenedb",
  "pulsar_scenedb_derive",
+ "wgpu",
+]
+
+[[package]]
+name = "helio-pass-voxel-planet"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.33.5",
+ "helio-core",
+ "pollster 0.4.0",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
  "wgpu",
 ]
 

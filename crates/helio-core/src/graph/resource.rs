@@ -352,14 +352,17 @@ impl GraphTexturePool {
                 if let Some(source_index) = self.textures.iter().position(|candidate| {
                     candidate.desc.alias_group.as_deref() == Some(group)
                         && candidate.desc.format == desc.format
-                        && candidate.desc.width >= desc.width.max(1)
-                        && candidate.desc.height >= desc.height.max(1)
+                        // A texture view cannot crop a larger base mip. Reusing
+                        // it changes sampling dimensions and invalidates MRT/depth
+                        // attachment sizes, even when byte capacity is sufficient.
+                        && candidate.desc.width.max(1) == desc.width.max(1)
+                        && candidate.desc.height.max(1) == desc.height.max(1)
                         && candidate.desc.depth_or_array_layers.max(if self.xr_active {
                             2
                         } else {
                             1
-                        }) >= array_layers
-                        && candidate.desc.mip_level_count >= desc.mip_level_count.max(1)
+                        }) == array_layers
+                        && candidate.desc.mip_level_count.max(1) == desc.mip_level_count.max(1)
                         && candidate.desc.sample_count == desc.sample_count.max(1)
                         && candidate.desc.usage.contains(desc.usage)
                 }) {

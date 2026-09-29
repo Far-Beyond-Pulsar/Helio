@@ -106,6 +106,7 @@ fn prepare_uploads_the_actual_camera_sample_and_supplied_frame_time() {
             frame_num: frame,
             resize: false,
             delta_time: time,
+            world_origin: None,
         })
         .unwrap();
         let mut encoder = device.create_command_encoder(&Default::default());

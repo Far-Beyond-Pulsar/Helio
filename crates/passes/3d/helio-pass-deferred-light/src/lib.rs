@@ -57,6 +57,10 @@ struct DeferredGlobals {
     enable_env_reflections: u32,
     /// Pads the struct to a 16-byte multiple, as WGSL requires of a uniform.
     _pad: [u32; 2],
+    /// Hemisphere ambient axis (xyz, unit).
+    ambient_up: [f32; 4],
+    /// Hemisphere ground-bounce colour (rgb, unscaled).
+    ambient_ground: [f32; 4],
 }
 
 pub struct DeferredLightPass {
@@ -80,10 +84,13 @@ pub struct DeferredLightPass {
     bind_group_3: Option<wgpu::BindGroup>,
     reflection_bind_group_1: Option<wgpu::BindGroup>,
     reflection_bind_group_2: Option<wgpu::BindGroup>,
-    bind_group_1_key: Option<[usize; 9]>,
+    /// Views bound in `bind_group_1`, compared by resource identity: an
+    /// address key can match a new view allocated where a freed one was
+    /// (a recreated voxel renderer's sun texture read stale shadows).
+    bind_group_1_key: Option<Vec<wgpu::TextureView>>,
     bind_group_2_key: Option<[usize; 15]>,
     bind_group_3_key: Option<(usize, usize)>,
-    reflection_bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize)>,
+    reflection_bind_group_1_key: Option<Vec<wgpu::TextureView>>,
     reflection_bind_group_2_key: Option<(usize, usize, usize, usize, usize, usize)>,
     fallback_tile_lists: wgpu::Buffer,
     fallback_tile_counts: wgpu::Buffer,
@@ -273,6 +280,7 @@ impl DeferredLightPass {
                 texture_entry(8, wgpu::TextureSampleType::Float { filterable: false }),
                 // Extra surface data: roughness_aniso_x, roughness_aniso_y, aniso_rotation, bitcast<f32>(flags) (Rgba16Float)
                 texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
+                texture_entry(10, wgpu::TextureSampleType::Float { filterable: false }),
             ],
         });
         let bgl_2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -954,10 +962,11 @@ impl RenderPass for DeferredLightPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let environment = ctx.registry.get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment());
-        let (ambient_color, ambient_intensity) = if let Some(environment) = environment {
-            (environment.ambient_color, environment.ambient_intensity)
+        let (ambient_color, ambient_intensity, ambient_up, ambient_ground) = if let Some(environment) = environment {
+            (environment.ambient_color, environment.ambient_intensity, environment.ambient_up, environment.ambient_ground)
         } else {
-            ([0.5, 0.5, 0.6], 1.0) // Brighter fallback ambient: sky-blue tint
+            // Brighter fallback ambient: sky-blue tint
+            ([0.5, 0.5, 0.6], 1.0, [0.0, 1.0, 0.0], [0.075, 0.075, 0.09])
         };
         // Get RC bounds from frame resources (dual-tier GI: RC near, ambient far)
         let (rc_min, rc_max) = if let Some(volume) = ctx
@@ -1007,6 +1016,8 @@ impl RenderPass for DeferredLightPass {
             enable_reflections: helio_core::REFLECTIONS_SUPPORTED as u32,
             enable_env_reflections: self.enable_env_reflections as u32,
             _pad: [0; 2],
+            ambient_up: [ambient_up[0], ambient_up[1], ambient_up[2], 0.0],
+            ambient_ground: [ambient_ground[0], ambient_ground[1], ambient_ground[2], 0.0],
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())
@@ -1069,19 +1080,27 @@ impl RenderPass for DeferredLightPass {
         let extra_view = ctx
             .registry.get(helio_core::ResourceKey::new("gbuffer_extra"))
             .unwrap_or(&self.fallback_lightmap_uv_view);
+        let directional_visibility_view = ctx
+            .registry
+            .texture_binding("directional_visibility")
+            .unwrap_or(&self.fallback_ssr_view);
 
-        let gbuffer_key = [
-            gbuffer.views[0] as *const _ as usize,
-            gbuffer.views[1] as *const _ as usize,
-            gbuffer.views[2] as *const _ as usize,
-            gbuffer.views[3] as *const _ as usize,
-            ctx.depth as *const _ as usize,
-            ao_view as *const _ as usize,
-            lightmap_uv_view as *const _ as usize,
-            sss_view as *const _ as usize,
-            extra_view as *const _ as usize,
-        ];
-        if self.bind_group_1_key != Some(gbuffer_key) {
+        let gbuffer_key: Vec<wgpu::TextureView> = [
+            gbuffer.views[0],
+            gbuffer.views[1],
+            gbuffer.views[2],
+            gbuffer.views[3],
+            ctx.depth,
+            ao_view,
+            lightmap_uv_view,
+            sss_view,
+            extra_view,
+            directional_visibility_view,
+        ]
+        .into_iter()
+        .cloned()
+        .collect();
+        if self.bind_group_1_key.as_ref() != Some(&gbuffer_key) {
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("DeferredLight BG1"),
                 layout: &self.bgl_1,
@@ -1106,20 +1125,18 @@ impl RenderPass for DeferredLightPass {
                     texture_view_entry(8, sss_view),
                     // Extra surface data (binding 9)
                     texture_view_entry(9, extra_view),
+                    texture_view_entry(10, directional_visibility_view),
                 ],
             }));
             self.bind_group_1_key = Some(gbuffer_key);
         }
 
-        let reflection_gbuffer_key = (
-            gbuffer.views[1] as *const _ as usize,
-            gbuffer.views[2] as *const _ as usize,
-            gbuffer.views[3] as *const _ as usize,
-            ctx.depth as *const _ as usize,
-            ao_view as *const _ as usize,
-            lightmap_uv_view as *const _ as usize,
-        );
-        if self.reflection_bind_group_1_key != Some(reflection_gbuffer_key) {
+        let reflection_gbuffer_key: Vec<wgpu::TextureView> =
+            [gbuffer.views[1], gbuffer.views[2], gbuffer.views[3], ctx.depth, ao_view, lightmap_uv_view]
+                .into_iter()
+                .cloned()
+                .collect();
+        if self.reflection_bind_group_1_key.as_ref() != Some(&reflection_gbuffer_key) {
             self.reflection_bind_group_1 =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("DeferredReflection BG1"),

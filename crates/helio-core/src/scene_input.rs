@@ -90,4 +90,10 @@ pub trait SceneInput {
     /// keys. This keeps the graph on one SceneDB input path rather than
     /// retaining a legacy/no-SceneDB branch.
     fn scene_buffers(&self) -> &SceneBufferProjection;
+    /// Double-precision world position of this frame's coordinate origin
+    /// when the frame is camera-relative (camera and geometry expressed
+    /// relative to it), `None` when frame coordinates are world coordinates.
+    fn world_origin(&self) -> Option<glam::DVec3> {
+        None
+    }
 }

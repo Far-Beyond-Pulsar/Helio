@@ -104,8 +104,14 @@ impl RenderGraph {
             let aliases = &builders[w.pass_index].published_aliases;
             for (j, builder) in builders.iter().enumerate() {
                 for d in builder.declarations() {
+                    // Reading a `write_group` name (e.g. "gbuffer") reads
+                    // every member texture of that group.
+                    let reads_group = self
+                        .resource_groups
+                        .iter()
+                        .any(|(_, group, members)| *group == d.name && members.iter().any(|m| *m == w.name));
                     if d.access == crate::graph::ResourceAccess::Read
-                        && (d.name == w.name || aliases.iter().any(|(allocation, published)|
+                        && (d.name == w.name || reads_group || aliases.iter().any(|(allocation, published)|
                             *allocation == w.name && *published == d.name))
                         && j > last_read
                     {
@@ -180,10 +186,10 @@ impl RenderGraph {
             let compatible = |group: &AliasGroup| {
                 group.chain_local == resource.chain_local
                     && group.format == resource.format
-                    && group.width >= resource.width
-                    && group.height >= resource.height
-                    && group.depth_or_array_layers >= resource.depth_or_array_layers
-                    && group.mip_level_count >= resource.mip_level_count
+                    && group.width == resource.width
+                    && group.height == resource.height
+                    && group.depth_or_array_layers == resource.depth_or_array_layers
+                    && group.mip_level_count == resource.mip_level_count
                     && group.extra_usage.contains(resource.extra_usage)
                     && group.last_read_pass < resource.first_write_pass
             };

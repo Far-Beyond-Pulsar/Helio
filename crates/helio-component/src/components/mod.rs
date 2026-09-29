@@ -13,6 +13,8 @@ mod spline_component;
 mod static_mesh_component;
 mod voxel_component;
 mod voxel_component_runtime;
+pub mod voxel_generator_editor;
+pub mod voxel_world;
 mod water_volume_component;
 
 pub use foliage_component::*;

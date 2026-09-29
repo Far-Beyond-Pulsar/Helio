@@ -69,6 +69,9 @@ helio-asset-compat = { workspace = true }
 helio-pass-postprocess = { workspace = true }
 helio-pass-volumetric-fog = { workspace = true }
 helio-pass-water-sim = { workspace = true }
+# CPU voxel worlds (generators, exact cells, ray casts) for the terrain
+# component's scripting methods and generator picker.
+helio-pass-voxel-planet = { workspace = true }
 helio-pass-foliage-place = { workspace = true }
 helio-pass-portal-cull = { workspace = true }
 helio-pass-deferred-light = { workspace = true }

@@ -23,6 +23,11 @@ pub struct DebugVertex {
 pub struct DebugDrawState {
     pub editor_enabled: bool,
     pub camera_position: glam::Vec3,
+    /// Double-precision world position of the frame's coordinate origin for
+    /// camera-relative frames (see `Renderer::set_world_origin`). Editor
+    /// overlays defined in world space (the grid plane at world y = 0) are
+    /// placed relative to it.
+    pub world_origin: Option<glam::DVec3>,
     pub user_lines: Vec<DebugVertex>,
     pub user_lines_generation: u64,
     pub user_tris: Vec<DebugVertex>,
@@ -222,6 +227,7 @@ impl Default for DebugDrawState {
         Self {
             editor_enabled: false,
             camera_position: glam::Vec3::ZERO,
+            world_origin: None,
             user_lines: Vec::new(),
             user_lines_generation: 0,
             user_tris: Vec::new(),
@@ -888,13 +894,25 @@ impl DebugDrawPass {
         }
     }
 
-    fn update_infinite_grid(&self, ctx: &PrepareContext) {
+    fn update_infinite_grid(&self, ctx: &PrepareContext, world_origin: Option<glam::DVec3>) {
         let camera = ctx.camera_data;
+        // Frame coordinates are relative to `world_origin`; the grid lies on
+        // world y = 0. Line positions only need the origin modulo the largest
+        // grid period, which keeps them exact in f32 far from the origin.
+        let origin = world_origin.unwrap_or(glam::DVec3::ZERO);
+        let period = 1.0e7;
         let uniform = InfiniteGridUniform {
             inv_view_proj: camera.inv_view_proj,
             view_proj: camera.view_proj,
             camera_position: camera.position_near,
             viewport: [ctx.width as f32, ctx.height as f32, 0.0, 0.0],
+            origin: [
+                origin.x.rem_euclid(period) as f32,
+                (-origin.y) as f32,
+                origin.z.rem_euclid(period) as f32,
+                0.0,
+            ],
+            axes: [(-origin.x) as f32, (-origin.z) as f32, 0.0, 0.0],
         };
         ctx.write_buffer(&self.grid_uniform, 0, bytemuck::bytes_of(&uniform));
     }
@@ -1006,7 +1024,7 @@ impl RenderPass for DebugDrawPass {
             // The grid itself is procedural and is drawn as a single
             // fullscreen triangle. Only bounds and the camera marker remain
             // in the transient debug line buffer.
-            self.update_infinite_grid(ctx);
+            self.update_infinite_grid(ctx, state.world_origin);
 
             // Camera movement only updates the procedural grid uniform and
             // the camera marker. No CPU grid is rebuilt or uploaded.
@@ -1099,6 +1117,11 @@ struct InfiniteGridUniform {
     view_proj: [f32; 16],
     camera_position: [f32; 4],
     viewport: [f32; 4],
+    /// x, z: world origin modulo the grid period; y: frame-local height of
+    /// the world y = 0 plane.
+    origin: [f32; 4],
+    /// x, z: frame-local position of the world x = 0 and z = 0 axes.
+    axes: [f32; 4],
 }
 
 impl Renderer {

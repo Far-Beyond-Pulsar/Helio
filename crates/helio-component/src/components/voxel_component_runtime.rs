@@ -7,7 +7,7 @@
 use engine_class_derive::{register_runtime_behavior, register_world_component};
 use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
 
-use super::{VoxelComponent, VoxelTerrainComponent};
+use super::{VoxelComponent, VoxelFlatTerrainComponent, VoxelLandformComponent, VoxelTerrainComponent};
 
 #[register_world_component]
 #[register_runtime_behavior]
@@ -37,5 +37,35 @@ impl ComponentRuntimeBehavior for VoxelTerrainComponent {
     ) {
         // A future voxel backend will consume terrain configuration and
         // external revisioned data batches independently of scene hydration.
+    }
+}
+
+#[register_world_component]
+#[register_runtime_behavior]
+impl ComponentRuntimeBehavior for VoxelLandformComponent {
+    const CLASS_NAME: &'static str = "VoxelLandformComponent";
+
+    fn sync_component(
+        _owner: &RuntimeComponentOwner,
+        _component_index: usize,
+        _component: &Self,
+        _context: &mut dyn ComponentRuntimeContext,
+    ) {
+        // Settings of the terrain on the same entity, read when it is projected.
+    }
+}
+
+#[register_world_component]
+#[register_runtime_behavior]
+impl ComponentRuntimeBehavior for VoxelFlatTerrainComponent {
+    const CLASS_NAME: &'static str = "VoxelFlatTerrainComponent";
+
+    fn sync_component(
+        _owner: &RuntimeComponentOwner,
+        _component_index: usize,
+        _component: &Self,
+        _context: &mut dyn ComponentRuntimeContext,
+    ) {
+        // Settings of the terrain on the same entity, read when it is projected.
     }
 }

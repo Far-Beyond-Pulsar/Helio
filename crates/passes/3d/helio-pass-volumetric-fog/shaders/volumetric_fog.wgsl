@@ -703,6 +703,15 @@ fn medium_transmittance(p: vec3<f32>, dir: vec3<f32>, distance: f32) -> f32 {
 
 // ── Froxel <-> world ────────────────────────────────────────────────────────
 
+/// World-space ray through an NDC point: the unprojected far-plane point
+/// minus the eye, in homogeneous form. Unlike dividing by w, this stays exact
+/// when the far plane is at f32 infinity (w == 0, a tiny near/far ratio) and
+/// cannot disagree with the depth reconstruction the rest of the engine does.
+fn pixel_ray(ndc: vec2<f32>) -> vec3<f32> {
+    let p_far = cameras[0].view_proj_inv * vec4<f32>(ndc, 1.0, 1.0);
+    return normalize(p_far.xyz - p_far.w * cameras[0].position_near.xyz);
+}
+
 /// World position at the centre of a froxel, given normalized grid coords.
 ///
 /// `slice_norm` maps through the prelude's exponential distribution, so this is
@@ -716,14 +725,7 @@ fn froxel_world_pos(uv: vec2<f32>, slice_norm: f32) -> vec3<f32> {
     // inverse to the unjittered ray.
     let ndc = helio_uv_to_ndc(uv) + cameras[0].jitter_frame.xy;
 
-    // Ray through this pixel: unproject the near and far plane points. Cheaper
-    // schemes exist, but this one cannot disagree with the depth reconstruction
-    // the rest of the engine does.
-    let p_near = cameras[0].view_proj_inv * vec4<f32>(ndc, 0.0, 1.0);
-    let p_far  = cameras[0].view_proj_inv * vec4<f32>(ndc, 1.0, 1.0);
-    let wn = p_near.xyz / p_near.w;
-    let wf = p_far.xyz / p_far.w;
-    let dir = normalize(wf - wn);
+    let dir = pixel_ray(ndc);
 
     let view_depth = helio_froxel_view_depth_from_slice(slice_norm, fog.fog_max_distance);
 
@@ -1083,9 +1085,7 @@ fn cs_integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
     // further between two slices than one down the centre. Without this the fog
     // thins toward the corners.
     let ndc = helio_uv_to_ndc(uv) + cameras[0].jitter_frame.xy;
-    let p_near = cameras[0].view_proj_inv * vec4<f32>(ndc, 0.0, 1.0);
-    let p_far  = cameras[0].view_proj_inv * vec4<f32>(ndc, 1.0, 1.0);
-    let dir = normalize(p_far.xyz / p_far.w - p_near.xyz / p_near.w);
+    let dir = pixel_ray(ndc);
     let cos_a = max(dot(dir, normalize(cameras[0].forward_far.xyz)), 1e-4);
 
     var accum = vec3<f32>(0.0);

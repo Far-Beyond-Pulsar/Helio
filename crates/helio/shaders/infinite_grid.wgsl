@@ -3,6 +3,11 @@ struct GridUniform {
     view_proj: mat4x4<f32>,
     camera_position: vec4<f32>,
     viewport: vec4<f32>,
+    // x, z: world origin modulo the grid period; y: frame-local height of
+    // the world y = 0 plane (frames may be camera-relative).
+    origin: vec4<f32>,
+    // x, z: frame-local position of the world x = 0 and z = 0 axes.
+    axes: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> grid: GridUniform;
@@ -56,18 +61,30 @@ fn fs_main(input: VertexOut) -> FragmentOut {
     let near_clip = grid.inv_view_proj * vec4<f32>(input.ndc, 0.0, 1.0);
     let far_clip = grid.inv_view_proj * vec4<f32>(input.ndc, 1.0, 1.0);
     let near_world = near_clip.xyz / near_clip.w;
-    let far_world = far_clip.xyz / far_clip.w;
-    let ray = far_world - near_world;
+    // The far point in homogeneous form minus the eye is the view ray for
+    // any w, including w = 0 when a tiny near/far ratio puts the far plane
+    // at f32 infinity (dividing by w there gives NaN).
+    let ray = normalize(far_clip.xyz - far_clip.w * grid.camera_position.xyz);
 
-    // Ground plane is y=0. Discard rays that miss it or point away from it.
+    // Ground plane is world y = 0. Discard rays that miss it or point away.
+    let plane_y = grid.origin.y;
     if abs(ray.y) < 0.00001 {
         discard;
     }
-    let hit_distance = -near_world.y / ray.y;
+    let hit_distance = (plane_y - near_world.y) / ray.y;
     if hit_distance < 0.0 {
         discard;
     }
     let hit = near_world + ray * hit_distance;
+    // Grid lines are world-space; `lines` is the hit in world x/z modulo the
+    // grid period.
+    let lines = vec3<f32>(hit.x + grid.origin.x, 0.0, hit.z + grid.origin.z);
+    // A construction plane far from the camera (e.g. the world y = 0 plane
+    // at the centre of a planet) is not drawn.
+    let plane_fade = 1.0 - smoothstep(2.0e4, 1.0e5, abs(plane_y - grid.camera_position.y));
+    if plane_fade <= 0.0 {
+        discard;
+    }
 
     // Logarithmic LOD keeps the line frequency stable as the camera moves.
     // Do not floor this value. A hard floor makes a circular ring where the
@@ -82,8 +99,8 @@ fn fs_main(input: VertexOut) -> FragmentOut {
     let lod_blend = smoothstep(0.0, 1.0, fract(lod));
     let minor_scale = pow(10.0, lod_base);
     let next_minor_scale = minor_scale * 10.0;
-    let minor_now = grid_level(hit, minor_scale, 0.002);
-    let minor_next = grid_level(hit, next_minor_scale, 0.0035);
+    let minor_now = grid_level(lines, minor_scale, 0.002);
+    let minor_next = grid_level(lines, next_minor_scale, 0.0035);
     let minor = minor_now * (1.0 - lod_blend) + minor_next * lod_blend;
 
     // Major lines are one decade above the active minor level. Cross-fading
@@ -91,24 +108,23 @@ fn fs_main(input: VertexOut) -> FragmentOut {
     // band of major lines at each LOD boundary.
     let major_scale = minor_scale * 10.0;
     let next_major_scale = major_scale * 10.0;
-    let major_now = grid_level(hit, major_scale, 0.0035);
-    let major_next = grid_level(hit, next_major_scale, 0.005);
+    let major_now = grid_level(lines, major_scale, 0.0035);
+    let major_next = grid_level(lines, next_major_scale, 0.005);
     let major = major_now * (1.0 - lod_blend) + major_next * lod_blend;
 
     // At a grazing angle a tiny world-space line covers a large screen area.
     // Fade detail there instead of allowing the perspective derivative to
     // turn the horizon into a visible ring/band.
-    let ray_length = max(length(ray), 0.0001);
-    let view_plane_alignment = abs(ray.y) / ray_length;
+    let view_plane_alignment = abs(ray.y);
     let horizon_fade = smoothstep(0.015, 0.12, view_plane_alignment);
 
     // World axes remain stable and readable at every camera position.
     // The axes are world-space lines too, but their derivative must not grow
     // without bound at the horizon or they become giant colored wedges.
     let axis_width = clamp(max(fwidth(hit.x), fwidth(hit.z)) * 2.5, 0.035, 0.18);
-    let x_axis = 1.0 - smoothstep(axis_width, axis_width * 2.0, abs(hit.x));
-    let z_axis = 1.0 - smoothstep(axis_width, axis_width * 2.0, abs(hit.z));
-    let alpha = max(max(minor * 0.22, major * 0.38) * horizon_fade, max(x_axis, z_axis) * 0.8);
+    let x_axis = 1.0 - smoothstep(axis_width, axis_width * 2.0, abs(hit.x - grid.axes.x));
+    let z_axis = 1.0 - smoothstep(axis_width, axis_width * 2.0, abs(hit.z - grid.axes.y));
+    let alpha = max(max(minor * 0.22, major * 0.38) * horizon_fade, max(x_axis, z_axis) * 0.8) * plane_fade;
     if alpha <= 0.001 {
         discard;
     }

@@ -4,6 +4,7 @@
 //! snapshots of that store, but no GPU resource or render pass is owned here.
 
 mod bounded_inbox;
+mod brush;
 mod chunk_codec;
 mod data_api;
 mod edit_worker;
@@ -19,6 +20,7 @@ pub use bounded_inbox::{
     VoxelPublicationStatus, VoxelPublicationTicket, VoxelPublicationTicketState,
     VoxelPublicationWorker,
 };
+pub use brush::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditJournal};
 pub use chunk_codec::{VoxelChunkCodecError, VoxelMaterialChunk};
 pub use data_api::{
     VoxelBatchReceipt, VoxelPayloadKey, VoxelPayloadStore, VoxelSourceWriter, VoxelStoredPayload,
@@ -31,9 +33,9 @@ pub use edit_worker::{
 };
 pub use edits::{VoxelEditError, VoxelSampleEdit};
 pub use generation::{
-    VoxelBuiltinGeneratorConfig, VoxelChunkGenerator, VoxelGeneratorDescriptor,
-    VoxelGeneratorRegistry, MAX_VOXEL_GENERATOR_ID_BYTES, MAX_VOXEL_GENERATOR_PARAMETERS_BYTES,
-    VOXEL_BUILTIN_GENERATOR_VERSION, VOXEL_FLAT_GENERATOR, VOXEL_PLANET_GENERATOR,
+    VoxelChunkGenerator, VoxelGeneratorDescriptor, VoxelGeneratorRegistry,
+    MAX_VOXEL_GENERATOR_ID_BYTES, MAX_VOXEL_GENERATOR_PARAMETERS_BYTES, VOXEL_TERRAIN_GENERATOR,
+    VOXEL_TERRAIN_GENERATOR_VERSION, VOXEL_TERRAIN_RENDERER,
 };
 pub use generation_worker::{
     VoxelGenerationAdmissionError, VoxelGenerationClose, VoxelGenerationJob, VoxelGenerationLimits,

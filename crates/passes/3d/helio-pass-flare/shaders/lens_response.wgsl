@@ -709,7 +709,9 @@ fn cs_temporal(@builtin(global_invocation_id) id: vec3<u32>) {
         // Sky and other far-plane texels reproject as directions.
         let world = camera.view_proj_inv * vec4(helio_uv_to_ndc(uv), min(depth, 1.0), 1.0);
         var point = vec4(world.xyz / world.w, 1.0);
-        if depth >= 1.0 { point = vec4(normalize(world.xyz / world.w - camera.position_near.xyz), 0.0); }
+        // Homogeneous difference: exact as w -> 0 (a far plane at f32
+        // infinity when near/far is tiny), where dividing by w gives NaN.
+        if depth >= 1.0 { point = vec4(normalize(world.xyz - world.w * camera.position_near.xyz), 0.0); }
         let prev = camera.prev_view_proj * point;
         let prev_uv = helio_ndc_to_uv(prev.xy / prev.w);
         if prev.w > 1e-6 && all(prev_uv >= vec2(0.0)) && all(prev_uv <= vec2(1.0)) {

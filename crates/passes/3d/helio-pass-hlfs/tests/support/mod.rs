@@ -269,6 +269,8 @@ impl Fixture {
                 clear_color: [0.0; 4],
                 ambient_color: self.ambient,
                 ambient_intensity: 1.0,
+                ambient_up: [0.0, 1.0, 0.0],
+                ambient_ground: self.ambient.map(|c| c * 0.15),
                 tlas: self.ray_frame.tlas(self.scene.frame_count),
             },
             "Fixture",
