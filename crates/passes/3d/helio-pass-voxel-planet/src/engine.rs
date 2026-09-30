@@ -179,6 +179,11 @@ impl WorldGpu {
     }
 }
 
+/// Timestamps written from command encoders (what the stage profiler uses).
+fn timestamps_supported(device: &wgpu::Device) -> bool {
+    device.features().contains(wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS)
+}
+
 /// Terrain constants padded to a whole uniform (16-byte multiple).
 fn terrain_bytes(program: &TerrainProgram) -> Vec<u8> {
     let mut bytes = program.constants.clone();
@@ -676,7 +681,11 @@ impl PlanetRenderer {
             frame_index: 0,
             stats: PlanetStats::default(),
             sun_active: false,
-            profiler: None,
+            // Stage timestamps are not only diagnostics: the generation
+            // budget divides a time target by the measured cost per column.
+            // Without them it stays at the conservative default (the editor
+            // streamed 3x slower than the harness, which enabled profiling).
+            profiler: timestamps_supported(device).then(|| helio_core::profiling::GpuProfiler::new(device, queue)),
             initial_complete: false,
             ms_per_job: 0.0013,
             last_jobs: 0,
@@ -740,8 +749,13 @@ impl PlanetRenderer {
     pub fn sun_texture(&self) -> &wgpu::Texture {
         &self.screen.sun
     }
+    /// Stage timestamps are always recorded where the device supports them
+    /// (they size the generation budget); this only creates the profiler if
+    /// it is missing. Disabling is a no-op.
     pub fn set_profiling(&mut self, enabled: bool) {
-        self.profiler = enabled.then(|| helio_core::profiling::GpuProfiler::new(&self.device, &self.queue));
+        if enabled && self.profiler.is_none() {
+            self.profiler = Some(helio_core::profiling::GpuProfiler::new(&self.device, &self.queue));
+        }
     }
     pub fn profiler(&self) -> Option<&helio_core::profiling::GpuProfiler> {
         self.profiler.as_ref()

@@ -772,6 +772,10 @@ fn main() {
         cruise(&mut flight, height);
         return;
     }
+    if let Some(km) = std::env::var("HELIO_VOXEL_FLIGHT_LODCMP").ok().and_then(|v| v.parse::<f64>().ok()) {
+        lod_compare(&mut flight, km);
+        return;
+    }
     if let Ok(log) = std::env::var("HELIO_VOXEL_FLIGHT_REPLAY") {
         replay(&mut flight, Path::new(&log));
         return;
@@ -1382,14 +1386,28 @@ fn holes(flight: &Flight, eye: DVec3, forward: Vec3, mask: Option<&str>) -> (usi
 /// every frame's rays back and reports holes (slows the frames).
 fn editor_trip(flight: &mut Flight, deg: f64) {
     let probe = std::env::var_os("HELIO_VOXEL_FLIGHT_PROBE").is_some();
+    // HELIO_VOXEL_FLIGHT_BLOCKY=1: log enlarged-block coverage (readbacks).
+    let measure_blocks = std::env::var_os("HELIO_VOXEL_FLIGHT_BLOCKY").is_some();
+    let capture_every: usize = std::env::var("HELIO_VOXEL_FLIGHT_TRIP_EVERY").ok().and_then(|v| v.parse().ok()).unwrap_or(120);
     let no_horizon = std::env::var_os("HELIO_VOXEL_FLIGHT_NO_HORIZON").is_some();
     let low_height: f64 = std::env::var("HELIO_VOXEL_FLIGHT_TRIP_LOW").ok().and_then(|v| v.parse().ok()).unwrap_or(30.0);
     let audit_at: Vec<f64> = std::env::var("HELIO_VOXEL_FLIGHT_AUDIT_AT")
         .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
         .unwrap_or_default();
-    let start = DVec3::new(deg.to_radians().sin(), deg.to_radians().cos(), 0.0);
+    // HELIO_VOXEL_FLIGHT_TRIP_FROM=<km>: start on the flank of the nearest
+    // high summit, that far from it (rock, scree and snow instead of meadow).
+    let start = match std::env::var("HELIO_VOXEL_FLIGHT_TRIP_FROM").ok().and_then(|v| v.parse::<f64>().ok()) {
+        Some(km) => {
+            let range = mountain(&flight.planet, 0.0);
+            let away = tangent(range.peak, std::f64::consts::PI).as_dvec3();
+            (range.peak + away * km * 1000.0).normalize()
+        }
+        None => DVec3::new(deg.to_radians().sin(), deg.to_radians().cos(), 0.0),
+    };
     let mut eye = flight.planet.surface_point(start, 1.7);
-    let dt = 1.0 / 120.0;
+    // HELIO_VOXEL_FLIGHT_TRIP_FPS: frames per second of flight (120; the
+    // editor runs near 60, which halves the streaming budget per metre).
+    let dt = 1.0 / std::env::var("HELIO_VOXEL_FLIGHT_TRIP_FPS").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(120.0);
     let mut t = 0.0;
     let mut frame = 0usize;
     let (mut worst, mut worst_at) = (0.0f64, String::new());
@@ -1490,12 +1508,19 @@ fn editor_trip(flight: &mut Flight, deg: f64) {
                 previous_rings = rings;
             } else if frame % 30 == 0 {
                 let stats = flight.pass().stats().unwrap_or_default();
+                let blocks = if measure_blocks {
+                    let (a, b, w) = blocky(flight);
+                    format!(" blocky>2px {:.2}% >4px {:.2}% widest {w:.1}", a * 100.0, b * 100.0)
+                } else {
+                    String::new()
+                };
                 eprintln!(
-                    "TRIP {name} t {t:6.2} h {height:9.0} speed {speed:9.0} resident {} pending {} jobs {} levels {} finest {} plan {:.2} upload {:.2}",
+                    "TRIP {name} t {t:6.2} h {height:9.0} speed {speed:9.0} resident {} pending {} jobs {} levels {} finest {} plan {:.2} upload {:.2}{blocks}",
                     stats.resident_columns, stats.pending_columns, stats.jobs, stats.active_levels, stats.finest_level, stats.plan_cpu_ms, stats.upload_cpu_ms
                 );
             }
-            if frame % 120 == 0 {
+            // HELIO_VOXEL_FLIGHT_TRIP_EVERY=<frames>: capture cadence (120).
+            if frame % capture_every == 0 {
                 flight.capture(&format!("trip_{name}_{:05}", (t * 100.0) as u32));
             }
             t += dt;
@@ -1553,9 +1578,10 @@ fn replay(flight: &mut Flight, log: &Path) {
         flight.draw("replay", eye, forward);
         if frame % 30 == 0 {
             let stats = flight.pass().stats().unwrap_or_default();
+            let (a, b, w) = blocky(flight);
             eprintln!(
-                "REPLAY t {t:9.2} h {:9.1} resident {} pending {} jobs {} levels {} finest {} plan {:.2} upload {:.2}",
-                altitude_at(t), stats.resident_columns, stats.pending_columns, stats.jobs, stats.active_levels, stats.finest_level, stats.plan_cpu_ms, stats.upload_cpu_ms
+                "REPLAY t {t:9.2} h {:9.1} resident {} pending {} jobs {} levels {} finest {} plan {:.2} upload {:.2} blocky>2px {:.2}% >4px {:.2}% widest {w:.1}",
+                altitude_at(t), stats.resident_columns, stats.pending_columns, stats.jobs, stats.active_levels, stats.finest_level, stats.plan_cpu_ms, stats.upload_cpu_ms, a * 100.0, b * 100.0
             );
         }
         if frame % 300 == 0 {
@@ -1604,9 +1630,10 @@ fn cruise(flight: &mut Flight, height: f64) {
             converged = Some(t - secs);
         }
         if frame % 30 == 0 {
+            let (a, b, w) = blocky(flight);
             eprintln!(
-                "CRUISE {stage} t {t:6.2} speed {speed:6.0} resident {} pending {} jobs {} plan {:.2} upload {:.2}",
-                stats.resident_columns, stats.pending_columns, stats.jobs, stats.plan_cpu_ms, stats.upload_cpu_ms
+                "CRUISE {stage} t {t:6.2} speed {speed:6.0} resident {} pending {} jobs {} plan {:.2} upload {:.2} blocky>2px {:.2}% >4px {:.2}% widest {w:.1}",
+                stats.resident_columns, stats.pending_columns, stats.jobs, stats.plan_cpu_ms, stats.upload_cpu_ms, a * 100.0, b * 100.0
             );
         }
         if frame % 300 == 0 {
@@ -1620,4 +1647,79 @@ fn cruise(flight: &mut Flight, height: f64) {
     }
     flight.capture("cruise_end");
     eprintln!("CRUISE converged {converged:?} s after stopping");
+}
+
+/// Enlarged blocks on screen: the share of terrain pixels of the last frame
+/// drawn by a coarser-than-base level whose cell is wider than 2 and 4
+/// pixels (by design such cells are at most ~2 px; wider ones mean a finer
+/// level was not resident yet), and the widest.
+fn blocky(flight: &mut Flight) -> (f64, f64, f64) {
+    let (hits, size, voxel) = {
+        let r = flight.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap();
+        (flight.read(r.hit_buffer()), r.screen_size(), flight.planet.grid().voxel_size())
+    };
+    let angle = 2.0 * (std::f64::consts::FRAC_PI_4 * 0.5).tan() / f64::from(size[1]);
+    let (mut terrain, mut over2, mut over4, mut widest) = (0usize, 0usize, 0usize, 0.0f64);
+    for hit in hits.chunks_exact(32).take((size[0] * size[1]) as usize) {
+        let w = |i: usize| u32::from_le_bytes(hit[i * 4..i * 4 + 4].try_into().unwrap());
+        let info = w(4);
+        if info & 3 != 1 {
+            continue;
+        }
+        let t = f64::from(f32::from_bits(w(0))).max(0.05);
+        let level = (info >> 5) & 31;
+        terrain += 1;
+        // Base cells are never enlarged (near the eye they are simply close).
+        if level == 0 {
+            continue;
+        }
+        let px = voxel * f64::from(1u32 << level) / (t * angle);
+        over2 += usize::from(px > 2.0);
+        over4 += usize::from(px > 4.0);
+        widest = widest.max(px);
+    }
+    let n = terrain.max(1) as f64;
+    (over2 as f64 / n, over4 as f64 / n, widest)
+}
+
+/// One fixed view over a mountain flank (`km` from the nearest summit),
+/// rendered with finer levels switched off progressively (`lod_pixels`
+/// 1, 2, 4, 8, 16: each doubling moves every level one step coarser):
+/// surface colours must not depend on the level that draws them.
+fn lod_compare(flight: &mut Flight, km: f64) {
+    let range = mountain(&flight.planet, 0.0);
+    let away = tangent(range.peak, std::f64::consts::PI).as_dvec3();
+    let ground = (range.peak + away * km * 1000.0).normalize();
+    for height in [300.0, 1500.0] {
+        let eye = flight.planet.surface_point(ground, height);
+        let up = eye.normalize();
+        let ahead = (DVec3::X - up * DVec3::X.dot(up)).normalize();
+        let forward = (ahead - up * 1.2).normalize().as_vec3();
+        for lod in [1.0f32, 0.5, 0.25, 0.125, 0.0625] {
+            if let Some(r) = flight.pass().renderer_mut() {
+                r.settings_mut().lod_pixels = lod;
+            }
+            let name = format!("lodcmp_{}m_{}", height as u32, (lod * 1000.0) as u32);
+            flight.settle(&name, eye, forward);
+            for _ in 0..20 {
+                flight.draw(&name, eye, forward);
+            }
+            let pixels = flight.capture(&name);
+            let (mut grey, mut green, mut n) = (0usize, 0usize, 0usize);
+            for p in pixels.chunks(4) {
+                let (r, g, b) = (i32::from(p[0]), i32::from(p[1]), i32::from(p[2]));
+                n += 1;
+                if g > r + 25 && g > b + 25 {
+                    green += 1;
+                } else if (r - g).abs() < 20 && (g - b).abs() < 20 && r < 230 {
+                    grey += 1;
+                }
+            }
+            let (a, b, w) = blocky(flight);
+            eprintln!(
+                "LODCMP h {height} lod_pixels {lod}: green {:.1}% grey {:.1}% | cells >2px {:.1}% >4px {:.1}% widest {w:.1}",
+                green as f64 * 100.0 / n as f64, grey as f64 * 100.0 / n as f64, a * 100.0, b * 100.0
+            );
+        }
+    }
 }

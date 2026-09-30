@@ -531,6 +531,74 @@ mod tests {
         Planet::new(PlanetRecipe::default()).unwrap()
     }
 
+    /// Diagnostic: surface material shares of a mountain flank as each
+    /// level draws it (shading's coarse-cell rule), against level 0.
+    #[test]
+    #[ignore]
+    fn material_shares_by_level() {
+        use crate::terrain::{block_slope, material};
+        let p = planet();
+        let g = *p.grid();
+        // Highest level-10 column near the harness spawn.
+        let n = g.cells() >> 10;
+        let mut best = (0, 0, i32::MIN);
+        for a in 0..96 {
+            for b in 0..96 {
+                let u = (0.47 + 0.15 * (f64::from(a) / 95.0 * 2.0 - 1.0)).clamp(0.0, 0.999);
+                let v = (0.53 + 0.15 * (f64::from(b) / 95.0 * 2.0 - 1.0)).clamp(0.0, 0.999);
+                let (i, j) = ((u * f64::from(n)) as i32, (v * f64::from(n)) as i32);
+                let h = p.column_top(2, i, j, 10);
+                if h > best.2 {
+                    best = (i, j, h);
+                }
+            }
+        }
+        let (ci, cj) = ((best.0 << 10) + 512, (best.1 << 10) + 512);
+        let mut state = 0x1234_5678u64;
+        let mut rand = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let class = |m: u32| match m & material::ID {
+            material::STONE | material::DARK_STONE => 0,
+            material::GRASS => 1,
+            material::SNOW => 2,
+            _ => 3,
+        };
+        let top_material = |level: u32, a: i32, b: i32, slope_at: Option<(i32, i32)>, point: Option<(i32, i32)>| {
+            let top = p.column_top(2, a, b, level);
+            let slope = match slope_at {
+                Some((i, j)) => block_slope(|x, y| p.column_top(2, (i & !7) + x, (j & !7) + y, 0), i & 7, j & 7),
+                None => block_slope(|x, y| p.column_top(2, (a & !7) + x, (b & !7) + y, level), a & 7, b & 7),
+            };
+            let q = match point {
+                Some((i, j)) => g.domain_point(2, i, j, 0),
+                None => g.domain_point(2, a, b, level),
+            };
+            p.field().ground_material(q, (top << level) * g.layer_mm() as i32, 0, slope, (top - 1) << level)
+        };
+        let samples = 6000;
+        let span = 40_000.0 / (g.delta() * g.radius());
+        let points: Vec<(i32, i32)> = (0..samples)
+            .map(|_| (ci + ((rand() - 0.5) * span) as i32, cj + ((rand() - 0.5) * span) as i32))
+            .collect();
+        eprintln!("rock grass snow other (fractions) over a 40 km square around the summit");
+        for level in 0..10u32 {
+            let mut shares = [[0usize; 4]; 4];
+            for &(i, j) in &points {
+                let (a, b) = (i >> level, j >> level);
+                shares[0][class(top_material(level, a, b, None, None))] += 1;
+                shares[1][class(top_material(level, a, b, Some((i, j)), None))] += 1;
+                shares[2][class(top_material(level, a, b, None, Some((i, j))))] += 1;
+                shares[3][class(top_material(level, a, b, Some((i, j)), Some((i, j))))] += 1;
+            }
+            let f = |s: [usize; 4]| format!("{:.3} {:.3} {:.3} {:.3}", s[0] as f64 / samples as f64, s[1] as f64 / samples as f64, s[2] as f64 / samples as f64, s[3] as f64 / samples as f64);
+            eprintln!("L{level}: as-is {} | fine slope {} | fine point {} | both {}", f(shares[0]), f(shares[1]), f(shares[2]), f(shares[3]));
+        }
+    }
+
     /// The local terrain bound holds for every base column sampled in the
     /// region, and is far below the planet's peak over lowland.
     #[test]
