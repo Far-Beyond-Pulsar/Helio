@@ -768,6 +768,14 @@ fn main() {
         editor_trip(&mut flight, deg);
         return;
     }
+    if let Some(height) = std::env::var("HELIO_VOXEL_FLIGHT_CRUISE").ok().and_then(|v| v.parse::<f64>().ok()) {
+        cruise(&mut flight, height);
+        return;
+    }
+    if let Ok(log) = std::env::var("HELIO_VOXEL_FLIGHT_REPLAY") {
+        replay(&mut flight, Path::new(&log));
+        return;
+    }
     if std::env::var_os("HELIO_VOXEL_FLIGHT_EDITOR_PATH").is_some() {
         // An editor-style descent: 10 m/s scaled by height/20 m, from 300 km
         // down to 300 m and then a level cruise, looking 25 degrees down.
@@ -1498,4 +1506,118 @@ fn editor_trip(flight: &mut Flight, deg: f64) {
         eprintln!("HOLES worst {:.2}% at {worst_at}", worst * 100.0);
     }
     flight.write_csv();
+}
+
+/// Replays the altitude timeline of a Pulsar editor session
+/// (`PULSAR_VOXEL_STATS=1` engine log) at 60 frames per second of log time,
+/// over one ground point (HELIO_VOXEL_FLIGHT_REPLAY_DEG from the pole, 30),
+/// looking 30 degrees down. HELIO_VOXEL_FLIGHT_REPLAY_FROM / _TO limit it
+/// to log times (seconds of the day, UTC).
+fn replay(flight: &mut Flight, log: &Path) {
+    let text = std::fs::read_to_string(log).expect("replay log");
+    let mut points: Vec<(f64, f64)> = Vec::new();
+    for line in text.lines().filter(|l| l.contains("VOXEL_STATS")) {
+        let Some(time) = line.get(11..26) else { continue };
+        let parts: Vec<f64> = time.split(':').filter_map(|v| v.parse().ok()).collect();
+        let Some(alt) = line.split("altitude=").nth(1).and_then(|v| v.split(' ').next()).and_then(|v| v.parse().ok()) else { continue };
+        if parts.len() != 3 {
+            continue;
+        }
+        let mut t = parts[0] * 3600.0 + parts[1] * 60.0 + parts[2];
+        if let Some(&(last, _)) = points.last() {
+            if t < last - 43_200.0 {
+                t += 86_400.0;
+            }
+        }
+        points.push((t, alt));
+    }
+    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok());
+    let from = env("HELIO_VOXEL_FLIGHT_REPLAY_FROM").unwrap_or(points[0].0);
+    let to = env("HELIO_VOXEL_FLIGHT_REPLAY_TO").unwrap_or(points.last().unwrap().0);
+    let deg = env("HELIO_VOXEL_FLIGHT_REPLAY_DEG").unwrap_or(30.0);
+    let start = DVec3::new(deg.to_radians().sin(), deg.to_radians().cos(), 0.0);
+    let ground = flight.planet.surface_point(start, 0.0);
+    let up = ground.normalize();
+    let ahead = (DVec3::X - up * DVec3::X.dot(up)).normalize();
+    let forward = (ahead - up * 0.6).normalize().as_vec3();
+    let altitude_at = |t: f64| {
+        let i = points.partition_point(|p| p.0 <= t).clamp(1, points.len() - 1);
+        let (a, b) = (points[i - 1], points[i]);
+        let f = ((t - a.0) / (b.0 - a.0).max(1e-6)).clamp(0.0, 1.0);
+        a.1 + (b.1 - a.1) * f
+    };
+    let mut t = from;
+    let mut frame = 0usize;
+    while t < to {
+        let eye = ground + up * altitude_at(t).max(1.7);
+        flight.draw("replay", eye, forward);
+        if frame % 30 == 0 {
+            let stats = flight.pass().stats().unwrap_or_default();
+            eprintln!(
+                "REPLAY t {t:9.2} h {:9.1} resident {} pending {} jobs {} levels {} finest {} plan {:.2} upload {:.2}",
+                altitude_at(t), stats.resident_columns, stats.pending_columns, stats.jobs, stats.active_levels, stats.finest_level, stats.plan_cpu_ms, stats.upload_cpu_ms
+            );
+        }
+        if frame % 300 == 0 {
+            flight.capture(&format!("replay_{:07}", (t * 10.0) as u64));
+        }
+        t += 1.0 / 60.0;
+        frame += 1;
+    }
+    flight.capture("replay_end");
+}
+
+/// Level flight at `height` metres over the ground at the editor's speed
+/// (10 m/s x height / 20 m) for HELIO_VOXEL_FLIGHT_CRUISE_SECS (20), then a
+/// stop: logs how far residency lags while moving and how long it takes to
+/// converge afterwards.
+fn cruise(flight: &mut Flight, height: f64) {
+    let secs: f64 = std::env::var("HELIO_VOXEL_FLIGHT_CRUISE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(20.0);
+    let deg: f64 = std::env::var("HELIO_VOXEL_FLIGHT_REPLAY_DEG").ok().and_then(|v| v.parse().ok()).unwrap_or(30.0);
+    let start = DVec3::new(deg.to_radians().sin(), deg.to_radians().cos(), 0.0);
+    let r = flight.planet.surface_point(start, 0.0).length();
+    let mut eye = start * (r + height);
+    let speed = 10.0 * (height / 20.0).max(1.0);
+    let dt = 1.0 / 60.0;
+    let view = |eye: DVec3| {
+        let up = eye.normalize();
+        let ahead = (DVec3::X - up * DVec3::X.dot(up)).try_normalize().unwrap_or(DVec3::Z);
+        (up, ahead, (ahead - up * 0.6).normalize().as_vec3())
+    };
+    let (_, _, f) = view(eye);
+    flight.settle("cruise_settle", eye, f);
+    let mut t = 0.0;
+    let mut frame = 0usize;
+    let mut converged = None;
+    while t < secs + 30.0 {
+        let (_, ahead, f) = view(eye);
+        let moving = t < secs;
+        if moving {
+            eye += ahead * speed * dt;
+            let ground = flight.planet.surface_point(eye, 0.0).length();
+            eye = eye.normalize() * (ground + height);
+        }
+        let stage = if moving { "cruise" } else { "cruise_stop" };
+        flight.draw(stage, eye, f);
+        let stats = flight.pass().stats().unwrap_or_default();
+        if !moving && converged.is_none() && stats.pending_columns == 0 {
+            converged = Some(t - secs);
+        }
+        if frame % 30 == 0 {
+            eprintln!(
+                "CRUISE {stage} t {t:6.2} speed {speed:6.0} resident {} pending {} jobs {} plan {:.2} upload {:.2}",
+                stats.resident_columns, stats.pending_columns, stats.jobs, stats.plan_cpu_ms, stats.upload_cpu_ms
+            );
+        }
+        if frame % 300 == 0 {
+            flight.capture(&format!("cruise_{:05}", (t * 100.0) as u32));
+        }
+        if converged.is_some() && t > secs + 2.0 {
+            break;
+        }
+        t += dt;
+        frame += 1;
+    }
+    flight.capture("cruise_end");
+    eprintln!("CRUISE converged {converged:?} s after stopping");
 }

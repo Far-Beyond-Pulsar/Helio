@@ -9,13 +9,15 @@ use glam::DVec3;
 use rustc_hash::FxHashSet;
 use std::sync::{mpsc, Mutex};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct WindowRequest {
     pub eye: DVec3,
     /// Level-0 range (metres).
     pub lod0: f64,
     /// Radius bounding every solid cell.
     pub outer_radius: f64,
+    /// The world, for local terrain bounds (none: the global bound only).
+    pub planet: Option<std::sync::Arc<crate::planet::Planet>>,
     pub serial: u64,
 }
 
@@ -45,6 +47,9 @@ struct LevelState {
     center: DVec3,
     radius: f64,
     wanted: FxHashSet<u64>,
+    /// Last local terrain bound: where, over what ground radius, the bound,
+    /// and the world's outer radius then (edits change it).
+    bound: Option<(DVec3, f64, f64, f64)>,
 }
 
 pub struct WindowPlanner {
@@ -144,6 +149,36 @@ impl WindowPlanner {
         out
     }
 
+    /// Radial bound of the terrain within a level's reach of the eye's
+    /// ground point (see [`crate::planet::Planet::local_outer_radius`]).
+    /// Computed only where it can matter: a level far above the highest
+    /// terrain is off anyway, and one reaching far beyond the eye's height
+    /// over the lowest terrain gets nearly the same window from the global
+    /// bound. A bound over a 20 % larger region stays valid while the eye
+    /// moves 20 % of the reach.
+    fn local_outer(&mut self, request: &WindowRequest, level: u32, reach: f64) -> f64 {
+        let grid = self.grid;
+        let Some(planet) = &request.planet else { return request.outer_radius };
+        let reach = reach + grid.level_size(level) * f64::from(BRICK) * 3.0;
+        let height = grid.height(request.eye);
+        if height - reach > planet.max_terrain_height()
+            || reach > 4.0 * (height - planet.min_terrain_height()).max(0.0)
+            || (!grid.is_plane() && reach > grid.radius() * 0.25)
+        {
+            return request.outer_radius;
+        }
+        let eye = request.eye;
+        let state = &mut self.levels[level as usize];
+        let stale = state.bound.is_none_or(|(at, radius, _, outer)| {
+            grid.ground_distance(at, eye) > radius - reach || outer != request.outer_radius
+        });
+        if stale {
+            let radius = reach * 1.2;
+            state.bound = Some((eye, radius, planet.local_outer_radius(eye, radius), request.outer_radius));
+        }
+        state.bound.unwrap().2.min(request.outer_radius)
+    }
+
     /// Diff every level against the request. Levels whose window has not
     /// moved enough are left untouched (hysteresis of three columns).
     pub fn update(&mut self, request: &WindowRequest) -> WindowUpdate {
@@ -153,7 +188,6 @@ impl WindowPlanner {
         let eye = request.eye;
         // Window centre: the eye direction on a sphere, its ground point on a plane.
         let dir = if grid.is_plane() { DVec3::new(eye.x, 0.0, eye.z) } else { eye.normalize() };
-        let altitude = grid.radial(eye) - request.outer_radius;
         let height = (grid.radial(eye) - r0).max(0.0);
         let peak = request.outer_radius - r0;
         // Farthest terrain that can rise above the horizon (none on a plane).
@@ -170,6 +204,9 @@ impl WindowPlanner {
         for level in 0..grid.levels() {
             let reach = request.lod0 * f64::from(1u32 << level) * 1.05;
             let inner = if level == 0 { 0.0 } else { request.lod0 * f64::from(1u32 << (level - 1)) };
+            // Height over the highest terrain the level's window can hold:
+            // over a meadow far below, fine levels are not needed at all.
+            let altitude = grid.radial(eye) - self.local_outer(request, level, reach);
             let needed = level == top_level || (altitude < reach && inner < horizon);
             let state = &mut self.levels[level as usize];
             if !needed {

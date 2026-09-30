@@ -494,7 +494,7 @@ impl Buffers {
         let table = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("planet column table"),
             contents: bytemuck::cast_slice(&table_init),
-            usage: st,
+            usage: st | wgpu::BufferUsages::COPY_SRC,
         });
         let pages_init: Vec<u32> = (0..pages).collect();
         bytes += u64::from(pages) * 4;
@@ -718,6 +718,10 @@ impl PlanetRenderer {
     pub fn hit_buffer(&self) -> &wgpu::Buffer {
         &self.screen.hits
     }
+    /// GPU column hash table and the CPU table it must equal (diagnostics).
+    pub fn column_table(&self) -> (&wgpu::Buffer, &[u32]) {
+        (&self.buffers.table, self.residency.table())
+    }
     /// Column records, brick pool and summary blocks (diagnostics).
     pub fn residency_buffers(&self) -> [&wgpu::Buffer; 3] {
         [&self.buffers.records, &self.buffers.pool, &self.buffers.block_state]
@@ -891,13 +895,22 @@ impl PlanetRenderer {
         if !work.jobs.is_empty() {
             self.queue.write_buffer(&self.buffers.jobs, 0, bytemuck::cast_slice(&work.jobs));
         }
-        // Evictions followed by table patches (slot, value) pairs.
+        // Evictions followed by table patches (slot, value) pairs. The GPU
+        // applies patches in parallel, and backward-shift deletion writes a
+        // slot several times in a frame: each slot is sent once, with its
+        // final value (an earlier value winning left an empty slot inside a
+        // probe run, hiding every column past it).
         let mut words: Vec<u32> = work.evictions.clone();
-        let patches = if work.full_table { 0 } else { work.table_writes.len() as u32 };
+        let mut patches = 0;
         if !work.full_table {
-            for (slot, value) in &work.table_writes {
-                words.push(*slot);
-                words.push(*value);
+            let table = self.residency.table();
+            let mut sent = rustc_hash::FxHashSet::default();
+            for (slot, _) in &work.table_writes {
+                if sent.insert(*slot) {
+                    words.push(*slot);
+                    words.push(table[*slot as usize]);
+                    patches += 1;
+                }
             }
         }
         // A slot released and re-acquired in one frame must end in its last
