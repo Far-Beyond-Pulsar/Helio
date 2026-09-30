@@ -1632,8 +1632,8 @@ fn cruise(flight: &mut Flight, height: f64) {
         if frame % 30 == 0 {
             let (a, b, w) = blocky(flight);
             eprintln!(
-                "CRUISE {stage} t {t:6.2} speed {speed:6.0} resident {} pending {} jobs {} plan {:.2} upload {:.2} blocky>2px {:.2}% >4px {:.2}% widest {w:.1}",
-                stats.resident_columns, stats.pending_columns, stats.jobs, stats.plan_cpu_ms, stats.upload_cpu_ms, a * 100.0, b * 100.0
+                "CRUISE {stage} t {t:6.2} speed {speed:6.0} resident {} pending {} jobs {} budget {} us/job {:.3} plan {:.2} upload {:.2} blocky>2px {:.2}% >4px {:.2}% widest {w:.1}",
+                stats.resident_columns, stats.pending_columns, stats.jobs, stats.job_budget, stats.us_per_job, stats.plan_cpu_ms, stats.upload_cpu_ms, a * 100.0, b * 100.0
             );
         }
         if frame % 300 == 0 {

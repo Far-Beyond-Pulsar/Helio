@@ -160,7 +160,7 @@ so all GPU positions are small.
    (`Planet::local_outer_radius`), so over a meadow 1 km below the fine
    levels are off instead of streaming columns under a tenth of a pixel.
 3. **Diff application.** Diffs are queued and applied in order within the
-   frame's CPU budget (1.5 ms moving, 4 ms still): removes evict residents,
+   frame's CPU budget (1.5-3 ms moving by backlog, 4 ms still): removes evict residents,
    a switched-off level clears its queue, adds become pending in a priority
    bucket. Diffs get at most 60 % of the budget while columns wait. A level
    with unapplied diffs is *catching up*: its `fallback_distances` entry is 0
@@ -226,6 +226,19 @@ so all GPU positions are small.
   patches (the editor at 8 m). `gpu_column_table_matches_cpu_while_moving`
   compares the GPU table with the CPU table every frame. Any other buffer
   patched in parallel (summary blocks too) needs the same rule.
+- **The generation budget is measured, always.** Jobs per frame = a GPU time
+  target (1.5 ms moving, 6 ms still) / the measured cost per column, from
+  stage timestamps. The stage profiler exists whenever the device supports
+  encoder timestamps; it is not a diagnostic toggle. When it was, the editor
+  (profiling off) kept the conservative default and streamed 3x slower than
+  every harness run (profiling on): enlarged blocks while descending into
+  new terrain and level transitions visibly catching up. Timestamps arrive
+  frames late and repeat until a newer sample completes, so each sample is
+  used once with the job count of the frame it measured (dividing by the
+  last frame's jobs overestimated the cost 2-7x). Measured: ~0.22 us per
+  column on an RTX 3060, ~6500 jobs per moving frame. The CPU budget for
+  diffs and admission grows from 1.5 to 3 ms while moving as the backlog
+  reaches 20k columns.
 - **Pending queues are exact.** Each level's pending columns sit in
   priority buckets with a position index, so a window moving at speed
   removes columns in O(1). A lazy heap kept millions of stale entries and
@@ -281,6 +294,9 @@ times come from timestamps.
 | `HELIO_VOXEL_FLIGHT_AUDIT_AT=t1,t2` | Traversal audit (steps, lookups, block skips, CPU/GPU agreement) at trip times; with `HELIO_VOXEL_FLIGHT_HEAT=1` also a step heatmap. |
 | `HELIO_VOXEL_FLIGHT_SKIM=1` | An editor camera pressed against the ground with editor overlays on (camera-relative overlay regressions). |
 | `HELIO_VOXEL_FLIGHT_EDITOR_PATH=<deg>` | Descent from 300 km then cruise, with residency logs. |
+| `HELIO_VOXEL_FLIGHT_BLOCKY=1` | Logs the share of terrain pixels drawn by a coarser-than-base level with cells wider than 2 and 4 px (by design at most ~2.2 px; wider means a finer level is still loading). Cruise and replay always log it. |
+| `HELIO_VOXEL_FLIGHT_TRIP_FROM=<km>`, `_TRIP_FPS=<n>`, `_TRIP_EVERY=<frames>` | Trip start on the flank of the nearest summit (rock, scree, snow); flight frames per second (120; the editor runs near 60); capture cadence. |
+| `HELIO_VOXEL_FLIGHT_LODCMP=<km>` | One view over a flank rendered with levels forced progressively coarser: surface colour shares must not change (they stay within 3 %). |
 | `HELIO_VOXEL_FLIGHT_CRUISE=<m>`, `_CRUISE_SECS=<s>` | Level flight at that height at the editor's speed for 20 s, then a stop: residency lag while moving and time to converge. |
 | `HELIO_VOXEL_FLIGHT_REPLAY=<engine.log>`, `_REPLAY_FROM/_TO=<s of day>`, `_REPLAY_DEG` | Replays the altitude timeline of a Pulsar editor session logged with `PULSAR_VOXEL_STATS=1`. |
 | `HELIO_VOXEL_FLIGHT_SUN=x,y,z` | Sun direction (the editor's default Sun is straight up). |
