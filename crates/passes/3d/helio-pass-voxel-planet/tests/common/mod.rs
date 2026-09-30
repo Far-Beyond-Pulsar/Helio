@@ -135,7 +135,6 @@ impl Target {
         let v: Vec<&wgpu::TextureView> = self.views.iter().collect();
         renderer.encode(
             &mut encoder,
-            &self.camera,
             &camera,
             frame,
             self.size,

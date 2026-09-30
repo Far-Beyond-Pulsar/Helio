@@ -4,7 +4,7 @@ use crate::planet::Planet;
 use crate::residency::{Capacity, FrameWork, Residency, NONE};
 use crate::terrain::TerrainProgram;
 use bytemuck::{Pod, Zeroable};
-use glam::{DVec3, IVec4, Vec3};
+use glam::{DVec3, IVec4, Mat4, Vec3, Vec4};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,7 +22,8 @@ pub const GBUFFER_FORMATS: [wgpu::TextureFormat; 8] = [
 ];
 
 /// One published view of the planet. `eye` is the planet-centred camera
-/// position; the host renders Helio with its world origin at `eye`.
+/// position. The pass traces relative to this precise eye internally; the
+/// host's shared camera and scene geometry can remain in world space.
 #[derive(Clone)]
 pub struct PlanetFrame {
     pub eye: DVec3,
@@ -620,7 +621,10 @@ pub struct PlanetRenderer {
     planet: Arc<Planet>,
     settings: Settings,
     gen_group: wgpu::BindGroup,
-    camera_group: Option<(usize, wgpu::BindGroup)>,
+    camera_buffer: wgpu::Buffer,
+    camera_group: wgpu::BindGroup,
+    /// Last local projection and precise eye, for motion in the shared GBuffer.
+    camera_history: Option<(u64, u32, DVec3, Mat4)>,
     readbacks: Vec<Readback>,
     frame_index: u32,
     stats: PlanetStats,
@@ -663,6 +667,20 @@ impl PlanetRenderer {
             .unwrap_or_else(|| Arc::new(Pipelines::new(device, plane, &program)));
         let buffers = Buffers::new(device, &settings.capacity, &planet);
         let gen_group = Self::gen_group(device, &pipelines, &buffers);
+        let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("planet local camera"),
+            size: std::mem::size_of::<helio_core::GpuCameraUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let camera_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("planet local camera"),
+            layout: &pipelines.camera_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+        });
         let readbacks = (0..4)
             .map(|_| Readback {
                 buffer: device.create_buffer(&wgpu::BufferDescriptor {
@@ -684,7 +702,9 @@ impl PlanetRenderer {
             planet,
             settings,
             gen_group,
-            camera_group: None,
+            camera_buffer,
+            camera_group,
+            camera_history: None,
             readbacks,
             frame_index: 0,
             stats: PlanetStats::default(),
@@ -1028,11 +1048,12 @@ impl PlanetRenderer {
     }
 
     /// Encode one frame: residency, primary visibility, shading and GBuffer.
+    /// The shared camera supplies orientation, projection and jitter. Its
+    /// translation is replaced only in this pass's private camera buffer.
     #[allow(clippy::too_many_arguments)]
     pub fn encode(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        camera: &wgpu::Buffer,
         camera_data: &helio_core::GpuCameraUniforms,
         frame: &PlanetFrame,
         size: [u32; 2],
@@ -1125,15 +1146,30 @@ impl PlanetRenderer {
         uniform.extra[3] = live_blocks;
         uniform.hints[0] = u32::from(self.settings.residency_hints && self.residency.blocks_exact());
         self.queue.write_buffer(&self.buffers.frame, 0, bytemuck::bytes_of(&uniform));
-        let camera_key = camera as *const _ as usize;
-        if self.camera_group.as_ref().is_none_or(|(k, _)| *k != camera_key) {
-            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("planet camera"),
-                layout: &self.pipelines.camera_layout,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: camera.as_entire_binding() }],
-            });
-            self.camera_group = Some((camera_key, group));
-        }
+        // All terrain rays (including sunlight rays reconstructed from mesh
+        // depth) are offsets from PlanetFrame::eye. Using the scene's world
+        // position here would apply that translation twice. A local view has
+        // the same clip/depth coordinates as the shared world-space view.
+        let mut local_camera = *camera_data;
+        let mut view = Mat4::from_cols_array(&camera_data.view);
+        view.w_axis = Vec4::W;
+        let view_proj = Mat4::from_cols_array(&camera_data.proj) * view;
+        let view_id = camera_data.jitter_frame[3].to_bits();
+        let previous = match self.camera_history {
+            Some((number, id, eye, projection))
+                if number.wrapping_add(1) == frame_num && id == view_id =>
+            {
+                helio_core::temporal::rebase_previous_projection(projection, frame.eye - eye)
+            }
+            _ => view_proj,
+        };
+        local_camera.view = view.to_cols_array();
+        local_camera.view_proj = view_proj.to_cols_array();
+        local_camera.inv_view_proj = view_proj.inverse().to_cols_array();
+        local_camera.position_near[..3].fill(0.0);
+        local_camera.prev_view_proj = previous.to_cols_array();
+        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&local_camera));
+        self.camera_history = Some((frame_num, view_id, frame.eye, view_proj));
         let trace_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("planet trace"),
             layout: &self.pipelines.trace_layout,
@@ -1165,7 +1201,7 @@ impl PlanetRenderer {
                 wgpu::BindGroupEntry { binding: 8, resource: self.screen.surfaces.as_entire_binding() },
             ],
         });
-        let camera_group = &self.camera_group.as_ref().unwrap().1;
+        let camera_group = &self.camera_group;
         if let Some(p) = &mut self.profiler {
             p.begin_pass(encoder, "planet_residency");
         }
@@ -1514,7 +1550,6 @@ impl RenderPass for PlanetPass {
         let encoder = unsafe { &mut *ctx.encoder_ptr };
         renderer.encode(
             encoder,
-            ctx.camera,
             ctx.camera_data,
             &frame,
             [ctx.width, ctx.height],

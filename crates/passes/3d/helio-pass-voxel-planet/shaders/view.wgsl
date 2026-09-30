@@ -19,6 +19,9 @@ struct Surface {
     flags: u32,
 }
 
+// Private camera with its eye at zero; the precise eye lives in `frame`.
+// Orientation, projection and jitter match the shared scene camera, so depth
+// and screen-space velocity can be published directly into its GBuffer.
 @group(1) @binding(0) var<uniform> camera: Camera;
 
 fn pixel_index(p: vec2<u32>) -> u32 {
