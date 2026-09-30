@@ -119,6 +119,10 @@ pub struct PlanetStats {
     pub window_rebuild_ms: f64,
     pub lod0_distance: f64,
     pub logical_bytes: u64,
+    /// Measured GPU generation cost per column job (microseconds) and this
+    /// frame's job budget.
+    pub us_per_job: f64,
+    pub job_budget: usize,
 }
 
 struct Readback {
@@ -177,6 +181,11 @@ impl WorldGpu {
             bounds: std::array::from_fn(|i| std::array::from_fn(|j| m[i * 4 + j])),
         }
     }
+}
+
+/// Timestamps written from command encoders (what the stage profiler uses).
+fn timestamps_supported(device: &wgpu::Device) -> bool {
+    device.features().contains(wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS)
 }
 
 /// Terrain constants padded to a whole uniform (16-byte multiple).
@@ -494,7 +503,7 @@ impl Buffers {
         let table = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("planet column table"),
             contents: bytemuck::cast_slice(&table_init),
-            usage: st,
+            usage: st | wgpu::BufferUsages::COPY_SRC,
         });
         let pages_init: Vec<u32> = (0..pages).collect();
         bytes += u64::from(pages) * 4;
@@ -621,6 +630,10 @@ pub struct PlanetRenderer {
     /// Measured GPU generation cost per column job (EMA) and last job count.
     ms_per_job: f64,
     last_jobs: usize,
+    /// Jobs issued per recent frame number, and the frame whose timestamps
+    /// last updated `ms_per_job`.
+    frame_jobs: std::collections::VecDeque<(u64, usize)>,
+    costed_frame: Option<u64>,
     last_eye: Option<DVec3>,
     last_frame_num: u64,
 }
@@ -676,9 +689,15 @@ impl PlanetRenderer {
             frame_index: 0,
             stats: PlanetStats::default(),
             sun_active: false,
-            profiler: None,
+            // Stage timestamps are not only diagnostics: the generation
+            // budget divides a time target by the measured cost per column.
+            // Without them it stays at the conservative default (the editor
+            // streamed 3x slower than the harness, which enabled profiling).
+            profiler: timestamps_supported(device).then(|| helio_core::profiling::GpuProfiler::new(device, queue)),
             initial_complete: false,
             ms_per_job: 0.0013,
+            frame_jobs: std::collections::VecDeque::new(),
+            costed_frame: None,
             last_jobs: 0,
             last_eye: None,
             last_frame_num: 0,
@@ -718,6 +737,10 @@ impl PlanetRenderer {
     pub fn hit_buffer(&self) -> &wgpu::Buffer {
         &self.screen.hits
     }
+    /// GPU column hash table and the CPU table it must equal (diagnostics).
+    pub fn column_table(&self) -> (&wgpu::Buffer, &[u32]) {
+        (&self.buffers.table, self.residency.table())
+    }
     /// Column records, brick pool and summary blocks (diagnostics).
     pub fn residency_buffers(&self) -> [&wgpu::Buffer; 3] {
         [&self.buffers.records, &self.buffers.pool, &self.buffers.block_state]
@@ -736,8 +759,13 @@ impl PlanetRenderer {
     pub fn sun_texture(&self) -> &wgpu::Texture {
         &self.screen.sun
     }
+    /// Stage timestamps are always recorded where the device supports them
+    /// (they size the generation budget); this only creates the profiler if
+    /// it is missing. Disabling is a no-op.
     pub fn set_profiling(&mut self, enabled: bool) {
-        self.profiler = enabled.then(|| helio_core::profiling::GpuProfiler::new(&self.device, &self.queue));
+        if enabled && self.profiler.is_none() {
+            self.profiler = Some(helio_core::profiling::GpuProfiler::new(&self.device, &self.queue));
+        }
     }
     pub fn profiler(&self) -> Option<&helio_core::profiling::GpuProfiler> {
         self.profiler.as_ref()
@@ -891,13 +919,22 @@ impl PlanetRenderer {
         if !work.jobs.is_empty() {
             self.queue.write_buffer(&self.buffers.jobs, 0, bytemuck::cast_slice(&work.jobs));
         }
-        // Evictions followed by table patches (slot, value) pairs.
+        // Evictions followed by table patches (slot, value) pairs. The GPU
+        // applies patches in parallel, and backward-shift deletion writes a
+        // slot several times in a frame: each slot is sent once, with its
+        // final value (an earlier value winning left an empty slot inside a
+        // probe run, hiding every column past it).
         let mut words: Vec<u32> = work.evictions.clone();
-        let patches = if work.full_table { 0 } else { work.table_writes.len() as u32 };
+        let mut patches = 0;
         if !work.full_table {
-            for (slot, value) in &work.table_writes {
-                words.push(*slot);
-                words.push(*value);
+            let table = self.residency.table();
+            let mut sent = rustc_hash::FxHashSet::default();
+            for (slot, _) in &work.table_writes {
+                if sent.insert(*slot) {
+                    words.push(*slot);
+                    words.push(table[*slot as usize]);
+                    patches += 1;
+                }
             }
         }
         // A slot released and re-acquired in one frame must end in its last
@@ -1004,15 +1041,24 @@ impl PlanetRenderer {
         frame_num: u64,
     ) {
         if let Some(p) = &mut self.profiler {
+            // Timestamps arrive frames late and the same sample is returned
+            // until a newer one completes: each sample is used once, with the
+            // job count of the frame it measured. (Dividing by the last
+            // frame's jobs overestimated the cost 2-7x, most in the editor.)
             let residency: f64 = p
                 .read_timestamps_deferred()
                 .iter()
                 .filter(|t| t.name == "planet_residency")
                 .map(|t| t.duration_ns as f64 / 1.0e6)
                 .sum();
-            if self.last_jobs >= 256 && residency > 0.0 {
-                let sample = residency / self.last_jobs as f64;
-                self.ms_per_job = self.ms_per_job * 0.7 + sample * 0.3;
+            let completed = p.last_completed_frame();
+            if completed.is_some() && completed != self.costed_frame {
+                self.costed_frame = completed;
+                let jobs = self.frame_jobs.iter().find(|(f, _)| Some(*f) == completed).map_or(0, |(_, j)| *j);
+                if jobs >= 256 && residency > 0.0 {
+                    let sample = residency / jobs as f64;
+                    self.ms_per_job = self.ms_per_job * 0.7 + sample * 0.3;
+                }
             }
         }
         self.frame_index = self.frame_index.wrapping_add(1);
@@ -1030,9 +1076,12 @@ impl PlanetRenderer {
         self.last_eye = Some(frame.eye);
         let target_ms = if moving { 1.5 } else { 6.0 };
         // CPU for applying window diffs and admitting columns: small while
-        // moving (a big diff spreads over frames instead of freezing one).
-        self.residency
-            .set_cpu_budget(Some(std::time::Duration::from_secs_f64(if moving { 1.5e-3 } else { 4.0e-3 })));
+        // moving (a big diff spreads over frames instead of freezing one),
+        // growing to 3 ms with the backlog (a new region streams in ~2x
+        // faster; admission costs ~0.3 us per column, diffs about as much).
+        let backlog = (self.residency.stats.pending_columns as f64 / 20_000.0).min(1.0);
+        let cpu_ms = if moving { 1.5 + 1.5 * backlog } else { 4.0 };
+        self.residency.set_cpu_budget(Some(std::time::Duration::from_secs_f64(cpu_ms * 1.0e-3)));
         let budget = ((target_ms / self.ms_per_job.max(1e-5)) as usize)
             .clamp(256, self.settings.job_budget.min(self.settings.capacity.max_jobs as usize));
         let work = if self.settings.freeze_residency {
@@ -1041,6 +1090,12 @@ impl PlanetRenderer {
             self.residency.plan(&self.planet, frame.eye, lod0, budget)
         };
         self.last_jobs = work.jobs.len();
+        self.stats.us_per_job = self.ms_per_job * 1000.0;
+        self.stats.job_budget = budget;
+        if self.frame_jobs.len() == 16 {
+            self.frame_jobs.pop_front();
+        }
+        self.frame_jobs.push_back((frame_num, work.jobs.len()));
         self.stats.plan_cpu_ms = started.elapsed().as_secs_f64() * 1000.0;
         let uploading = std::time::Instant::now();
         let (patches, block_patches) = self.upload(&work);

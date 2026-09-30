@@ -571,3 +571,35 @@ fn accelerations_change_nothing_while_streaming() {
     eprintln!("{bad} differences in {compared} pixels");
     assert_eq!(bad, 0);
 }
+
+/// The GPU column table equals the CPU table after every frame while the
+/// eye moves fast enough that each frame evicts and admits many columns
+/// (backward-shift deletion rewrites slots several times per frame; the GPU
+/// applies patches in parallel).
+#[test]
+fn gpu_column_table_matches_cpu_while_moving() {
+    let Some(gpu) = gpu() else { return };
+    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+    let dir = land(&planet, 2, 0.47, 0.53);
+    let ground = planet.surface_point(dir, 30.0);
+    let east = ground.normalize().any_orthonormal_vector();
+    let size = [320, 180];
+    let target = Target::new(&gpu, size);
+    let mut r = renderer(&gpu, planet.clone(), size);
+    settle(&gpu, &target, &mut r, &frame(&planet, ground), east.as_vec3());
+    let mut worst = 0usize;
+    for step in 0..40u64 {
+        let eye = planet.surface_point(ground + east * step as f64 * 25.0, 30.0);
+        let forward = (east - eye.normalize() * 0.4).normalize().as_vec3();
+        target.render(&gpu, &mut r, &frame(&planet, eye), forward, 5_000 + step);
+        let (buffer, cpu) = r.column_table();
+        let bytes = read_buffer(&gpu, buffer, (cpu.len() * 4) as u64);
+        let gpu_table: &[u32] = bytemuck::cast_slice(&bytes);
+        let differ = gpu_table.iter().zip(cpu).filter(|(a, b)| a != b).count();
+        worst = worst.max(differ);
+        if differ > 0 {
+            eprintln!("step {step}: {differ} table slots differ (resident {})", r.stats().resident_columns);
+        }
+    }
+    assert_eq!(worst, 0);
+}

@@ -7,8 +7,7 @@ use crate::column_index::{ColumnIndex, Resident};
 use crate::edits::FaceBrush;
 use crate::grid::{Grid, BRICK};
 use crate::windows::{LevelDiff, WindowPlanner, WindowRequest, WindowUpdate, WindowWorker};
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::VecDeque;
 use crate::planet::Planet;
 use bytemuck::{Pod, Zeroable};
 use glam::DVec3;
@@ -105,18 +104,76 @@ struct Block {
     refs: u32,
 }
 
-/// Priority-ordered pending key (lower priority value is issued first).
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Pending(f32, u64);
-impl Eq for Pending {}
-impl PartialOrd for Pending {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
+/// Priority buckets of the pending queue (normalized window distance).
+const BUCKETS: usize = 64;
+
+/// Wanted but not yet issued columns of one level, by priority bucket.
+/// Removal is exact (swap-remove with a position index): a window moving
+/// at speed retires most columns before they are issued, and a lazy heap
+/// kept millions of stale entries that every admission had to pop.
+#[derive(Default)]
+struct PendingQueue {
+    buckets: Vec<Vec<u64>>,
+    at: FxHashMap<u64, (u8, u32)>,
+    /// Lowest bucket that may be non-empty.
+    lowest: usize,
 }
-impl Ord for Pending {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.total_cmp(&other.0).then(self.1.cmp(&other.1))
+
+impl PendingQueue {
+    fn bucket(priority: f32) -> usize {
+        ((priority.max(0.0) * BUCKETS as f32) as usize).min(BUCKETS - 1)
+    }
+    fn len(&self) -> usize {
+        self.at.len()
+    }
+    fn is_empty(&self) -> bool {
+        self.at.is_empty()
+    }
+    fn keys(&self) -> impl Iterator<Item = &u64> {
+        self.at.keys()
+    }
+    /// Queue `key` in `bucket`; false if already queued.
+    fn insert(&mut self, key: u64, bucket: usize) -> bool {
+        if self.at.contains_key(&key) {
+            return false;
+        }
+        if self.buckets.is_empty() {
+            self.buckets.resize(BUCKETS, Vec::new());
+            self.lowest = BUCKETS;
+        }
+        let list = &mut self.buckets[bucket];
+        self.at.insert(key, (bucket as u8, list.len() as u32));
+        list.push(key);
+        self.lowest = self.lowest.min(bucket);
+        true
+    }
+    fn remove(&mut self, key: u64) -> bool {
+        let Some((bucket, index)) = self.at.remove(&key) else { return false };
+        let list = &mut self.buckets[bucket as usize];
+        list.swap_remove(index as usize);
+        if let Some(&moved) = list.get(index as usize) {
+            self.at.get_mut(&moved).unwrap().1 = index;
+        }
+        true
+    }
+    /// Lowest non-empty bucket.
+    fn best(&mut self) -> Option<usize> {
+        while self.lowest < self.buckets.len() && self.buckets[self.lowest].is_empty() {
+            self.lowest += 1;
+        }
+        (self.lowest < self.buckets.len()).then_some(self.lowest)
+    }
+    /// Take a column of the lowest bucket (the newest one queued there).
+    fn pop(&mut self) -> Option<(u64, usize)> {
+        let bucket = self.best()?;
+        let key = self.buckets[bucket].pop()?;
+        self.at.remove(&key);
+        Some((key, bucket))
+    }
+    fn clear(&mut self) {
+        self.buckets.iter_mut().for_each(Vec::clear);
+        self.at.clear();
+        self.lowest = self.buckets.len();
     }
 }
 
@@ -127,9 +184,8 @@ struct Level {
     center: DVec3,
     /// Ground radius of the applied window (metres).
     radius: f64,
-    /// Wanted but not yet issued columns, and their priority heap (lazy).
-    pending: rustc_hash::FxHashSet<u64>,
-    heap: BinaryHeap<Reverse<Pending>>,
+    /// Wanted but not yet issued columns.
+    pending: PendingQueue,
 }
 
 enum Planner {
@@ -480,7 +536,6 @@ impl Residency {
             if let Some(block) = res.edit_block {
                 self.edits.release(block);
             }
-            let (_, level, _, _) = unpack(key);
         }
     }
 
@@ -508,14 +563,14 @@ impl Residency {
 
     /// Apply queued window diffs in order until done or out of time.
     fn apply_queued(&mut self, work: &mut FrameWork, out_of_time: &impl Fn() -> bool) {
-        const CHUNK: usize = 2048;
+        const CHUNK: usize = 256;
         while let Some(mut queued) = self.diffs.pop_front() {
             let level = queued.diff.level as usize;
             while queued.removed < queued.diff.removes.len() {
                 let end = (queued.removed + CHUNK).min(queued.diff.removes.len());
                 for i in queued.removed..end {
                     let key = queued.diff.removes[i];
-                    self.levels[level].pending.remove(&key);
+                    self.levels[level].pending.remove(key);
                     if self.residents.contains_key(key) {
                         self.evict(key, work);
                     }
@@ -527,7 +582,6 @@ impl Residency {
                 }
             }
             if !queued.diff.active && !queued.cleared {
-                self.levels[level].heap.clear();
                 self.levels[level].pending.clear();
                 queued.cleared = true;
             }
@@ -535,8 +589,8 @@ impl Residency {
                 let end = (queued.added + CHUNK).min(queued.diff.adds.len());
                 for i in queued.added..end {
                     let (priority, key) = queued.diff.adds[i];
-                    if !self.residents.contains_key(key) && self.levels[level].pending.insert(key) {
-                        self.levels[level].heap.push(Reverse(Pending(priority, key)));
+                    if !self.residents.contains_key(key) {
+                        self.levels[level].pending.insert(key, PendingQueue::bucket(priority));
                     }
                 }
                 queued.added = end;
@@ -551,7 +605,7 @@ impl Residency {
 
     /// Plan one frame. `lod0` is the level-0 distance, `budget` the maximum
     /// number of column jobs.
-    pub fn plan(&mut self, planet: &Planet, eye: DVec3, lod0: f64, budget: usize) -> FrameWork {
+    pub fn plan(&mut self, planet: &std::sync::Arc<Planet>, eye: DVec3, lod0: f64, budget: usize) -> FrameWork {
         self.frame = self.frame.wrapping_add(1);
         let started = std::time::Instant::now();
         let budget_time = self.cpu_budget;
@@ -568,16 +622,17 @@ impl Residency {
             eye,
             lod0,
             outer_radius: planet.outer_radius(),
+            planet: Some(planet.clone()),
             serial: self.requested + 1,
         };
-        let changed = self.last_request.is_none_or(|last| {
+        let changed = self.last_request.as_ref().is_none_or(|last| {
             last.eye.distance(eye) > self.grid.voxel_size() * 2.0
                 || (last.lod0 - lod0).abs() > lod0 * 0.01
                 || last.outer_radius != request.outer_radius
         });
         if changed {
             self.requested = request.serial;
-            self.last_request = Some(request);
+            self.last_request = Some(request.clone());
             match &mut self.planner {
                 Planner::Inline(planner) => {
                     let update = planner.update(&request);
@@ -596,7 +651,11 @@ impl Residency {
             }
         }
         let t_drain = started.elapsed();
-        self.apply_queued(&mut work, &out_of_time);
+        // Diffs take at most 60 % of the time while columns wait, so a
+        // window moving at speed cannot starve generation.
+        let share = if self.levels.iter().all(|l| l.pending.is_empty()) { 1.0 } else { 0.6 };
+        let apply_out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b.mul_f64(share));
+        self.apply_queued(&mut work, &apply_out_of_time);
         let t_apply = started.elapsed();
         // Urgent edit regenerations first.
         let mut urgent = std::mem::take(&mut self.urgent);
@@ -632,45 +691,31 @@ impl Residency {
         // (global coverage) always goes first.
         let top_level = self.grid.levels() - 1;
         // Admission costs ~2 us of CPU per column (edit query, summary
-        // blocks, table), and discarding stale heap entries (columns a diff
-        // removed while queued; a big window change leaves hundreds of
-        // thousands) ~50 ns each: both are bounded by time as well as by the
-        // GPU budget, and resume next frame.
+        // blocks, table): bounded by time as well as by the GPU budget, and
+        // resumes next frame.
         let mut steps = 0u32;
-        'admit: while work.jobs.len() < budget {
+        while work.jobs.len() < budget {
             steps += 1;
             if steps % 64 == 0 && out_of_time() {
                 break;
             }
-            let mut best: Option<(f32, usize)> = None;
+            let mut best: Option<(usize, usize)> = None;
             for index in 0..self.levels.len() {
-                let l = &mut self.levels[index];
-                while let Some(Reverse(Pending(_, key))) = l.heap.peek() {
-                    if l.pending.contains(key) {
-                        break;
-                    }
-                    l.heap.pop();
-                    steps += 1;
-                    if steps % 1024 == 0 && out_of_time() {
-                        break 'admit;
-                    }
-                }
-                if let Some(Reverse(Pending(priority, _))) = l.heap.peek() {
-                    let p = if index as u32 == top_level { priority - 100.0 } else { *priority };
+                if let Some(bucket) = self.levels[index].pending.best() {
+                    // Normalized distance, the global level before any other.
+                    let p = if index as u32 == top_level { 0 } else { bucket + 1 };
                     if best.is_none_or(|b| p < b.0) {
                         best = Some((p, index));
                     }
                 }
             }
             let Some((_, index)) = best else { break };
-            let Reverse(Pending(priority, key)) = self.levels[index].heap.pop().unwrap();
-            self.levels[index].pending.remove(&key);
+            let (key, bucket) = self.levels[index].pending.pop().unwrap();
             if self.residents.contains_key(key) {
                 continue;
             }
             let requeue = |this: &mut Self| {
-                this.levels[index].pending.insert(key);
-                this.levels[index].heap.push(Reverse(Pending(priority, key)));
+                this.levels[index].pending.insert(key, bucket);
             };
             let Some(record) = self.alloc_record() else {
                 requeue(self);
@@ -699,9 +744,10 @@ impl Residency {
             });
             work.job_keys.push(key);
         }
-        if std::env::var_os("HELIO_VOXEL_PLAN_TRACE").is_some() && started.elapsed().as_secs_f64() > 0.01 {
+        let trace_ms: Option<f64> = std::env::var("HELIO_VOXEL_PLAN_TRACE").ok().map(|v| v.parse().unwrap_or(10.0));
+        if trace_ms.is_some_and(|ms| started.elapsed().as_secs_f64() * 1e3 > ms) {
             eprintln!(
-                "PLAN_TRACE edits {:.2} drain {:.2} apply {:.2} admit {:.2} ms jobs {} evictions {} queued_diffs {}",
+                "PLAN_TRACE edits {:.2} drain {:.2} apply {:.2} admit {:.2} ms jobs {} evictions {} queued_diffs {} steps {steps}",
                 t_edits.as_secs_f64() * 1e3,
                 (t_drain - t_edits).as_secs_f64() * 1e3,
                 (t_apply - t_drain).as_secs_f64() * 1e3,
@@ -778,7 +824,7 @@ impl Residency {
                 if l.pending.len() > 4096 {
                     return 0.0;
                 }
-                for key in &l.pending {
+                for key in l.pending.keys() {
                     let (face, lv, ci, cj) = unpack(*key);
                     let size = f64::from(BRICK << lv);
                     let p = grid.ground_point(face, (f64::from(ci) + 0.5) * size, (f64::from(cj) + 0.5) * size);
@@ -828,7 +874,7 @@ mod tests {
 
     #[test]
     fn budgeted_planning_spreads_big_diffs_and_converges_to_the_same_residency() {
-        let planet = Planet::new(PlanetRecipe::default()).unwrap();
+        let planet = std::sync::Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
         let grid = *planet.grid();
         let lod0 = Residency::lod_distance(&grid, (22.5f64).to_radians().tan(), 720, 1.0);
         let ground = planet.surface_point(grid.direction(2, 3e7, 4e7), 1.8);
@@ -869,7 +915,7 @@ mod tests {
 
     #[test]
     fn windows_are_bounded_and_complete_on_the_ground_and_in_orbit() {
-        let planet = Planet::new(PlanetRecipe::default()).unwrap();
+        let planet = std::sync::Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
         let grid = *planet.grid();
         let lod0 = Residency::lod_distance(&grid, (22.5f64).to_radians().tan(), 1080, 1.0);
         assert!(lod0 > 100.0 && lod0 < 200.0, "{lod0}");
@@ -899,7 +945,7 @@ mod tests {
 
     #[test]
     fn table_lookup_matches_residents_after_moves() {
-        let planet = Planet::new(PlanetRecipe::default()).unwrap();
+        let planet = std::sync::Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
         let grid = *planet.grid();
         let mut residency = Residency::new(grid, Capacity { table_bits: 20, ..Default::default() });
         let mut eye = planet.surface_point(grid.direction(0, 3e7, 4e7), 2.0);
