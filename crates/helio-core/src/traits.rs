@@ -351,6 +351,14 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         false
     }
 
+    /// Whether this pass's recorded commands may be reused across frames.
+    /// Passes that coordinate commands with asynchronous GPU buffer mapping
+    /// must opt out because replaying an old copy command can target a buffer
+    /// that is mapped for CPU access.
+    fn supports_recording_cache(&self) -> bool {
+        true
+    }
+
     /// Resources this pass reads. Checked at graph construction time.
     /// Override to declare dependencies on prior-pass outputs.
     /// Return graph resource name strings (for example, `"color_output"`).

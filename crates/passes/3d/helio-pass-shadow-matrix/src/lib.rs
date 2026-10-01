@@ -496,6 +496,12 @@ impl RenderPass for ShadowMatrixPass {
         "ShadowMatrix"
     }
 
+    fn supports_recording_cache(&self) -> bool {
+        // This pass copies its caster table into a MAP_READ staging buffer and
+        // maps it asynchronously. Replaying a cached copy can race the map.
+        false
+    }
+
     fn writes(&self) -> &'static [&'static str] {
         &["shadow_matrices"]
     }

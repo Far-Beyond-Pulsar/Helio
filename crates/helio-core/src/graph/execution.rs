@@ -2099,6 +2099,13 @@ impl RenderGraph {
             let (done_tx, done_rx) = mpsc::channel::<usize>();
             let mut finished = vec![false; units];
             for (pos, range) in layer.iter().enumerate() {
+                if cache
+                    && range.clone().any(|index| !passes[index].supports_recording_cache())
+                {
+                    let slot = &mut self.unit_caches[range.start];
+                    slot.variants.clear();
+                    slot.uncacheable = Some("pass uses asynchronous buffer mapping");
+                }
                 let job = ParallelUnitJob {
                     scope_context: scope_context.clone(),
                     env: Arc::clone(&env),
