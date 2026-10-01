@@ -141,6 +141,16 @@ fn climate_at(h: Hit, xy: vec2<u32>) -> i32 {
     let face = (h.info >> 2u) & 7u;
     let ray = make_ray(camera.position_near.xyz, dir);
     let cell = locate(ray, face_ray(face, ray), h.t, 0u);
+    let level = (h.info >> 5u) & 31u;
+    if frame.hints.y != 0u && (cell.i >> level) == h.i && (cell.j >> level) == h.j {
+        let c = records[h.record];
+        let top = column_top(c, u32(h.i & 7), u32(h.j & 7));
+        // Tall edited/steep bands can truncate their byte-packed column
+        // tops; those columns retain the full canonical query.
+        if band_count(c) <= 32u && climate_height_reusable(top, level) {
+            return i32(f32(top) * f32(world.grid.y) * f32(1u << level));
+        }
+    }
     return terrain_height(domain_point(face, cell.i, cell.j, 0u), u32(world.grid.w));
 }
 

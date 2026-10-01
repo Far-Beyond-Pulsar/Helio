@@ -76,6 +76,9 @@ pub struct Settings {
     pub horizon: bool,
     /// Skip hash lookups of columns the summary blocks prove absent.
     pub residency_hints: bool,
+    /// Reuse a coarse climate height only when Landform bounds prove that
+    /// every canonical height gives the same material. Disable for audits.
+    pub climate_height_reuse: bool,
     /// Diagnostics: skip residency planning (no jobs, windows or evictions)
     /// so several renders see identical GPU state.
     pub freeze_residency: bool,
@@ -93,6 +96,7 @@ impl Default for Settings {
             job_budget: 12_288,
             horizon: std::env::var_os("HELIO_VOXEL_NO_HORIZON").is_none(),
             residency_hints: true,
+            climate_height_reuse: true,
             freeze_residency: false,
             frame_override: None,
             capacity: Capacity::default(),
@@ -247,6 +251,13 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -
             .replace("BLOCK_ENTRY", block_entry)
             .replace("SHAPE_ID", if plane { "1u" } else { "0u" }),
     );
+    if program.key == "helio.landform/1" {
+        s.push_str(include_str!("../shaders/landform_climate.wgsl"));
+    } else {
+        // Custom generators keep their full query; only Landform's material
+        // classification and symmetric bounds justify the shortcut.
+        s.push_str("fn climate_height_reusable(top: i32, level: u32) -> bool { return false; }\n");
+    }
     for part in parts {
         s.push_str(&part.replace("ACCESS", access));
     }
@@ -873,6 +884,7 @@ impl PlanetRenderer {
         frame.palette = self.settings.appearance.palette.map(linear);
         frame.grass = self.settings.appearance.grass.map(linear);
         frame.detail = self.settings.appearance.detail.map(clean);
+        frame.hints[1] = u32::from(self.settings.climate_height_reuse);
         for face in 0..6u8 {
             // A plane has one face; the others keep default frames.
             let f = grid.face_frame(face, eye);

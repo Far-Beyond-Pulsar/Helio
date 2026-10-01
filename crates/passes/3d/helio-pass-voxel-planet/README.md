@@ -39,6 +39,16 @@ terrain generator's register pressure does not affect fine material/AO work.
 The screen cache stores one height per pixel (4 bytes); fine hits do not read
 it. At 1440x810 this adds 3.34 MiB relative to the former 2x2-only cache.
 
+Landform can reuse the resident coarse height when its symmetric height bound
+lies entirely in a material region where height has no effect: below the basin
+threshold, between that threshold and every possible rockline, or above every
+possible snowline. The canonical footprint must be inside the hit column and
+its packed tops must not be truncated. All other cases and custom generators
+keep the full query. `Settings::climate_height_reuse = false` disables the
+shortcut for audits. A GPU regression compares every surface byte with it on
+and off across lowland/alpine views at 330 m through 1,000 km; CPU checks cover
+both signs of the height bound at 0.1/0.3/1 m base sizes.
+
 Motion forecasts prefetch up to 350 ms ahead, bounded by ground clearance and
 the window capacity. Moving generation/admission budgets grow with backlog.
 The offscreen flight is still not a substitute for a quiet native fast-flight
