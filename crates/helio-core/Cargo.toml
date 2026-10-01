@@ -30,8 +30,10 @@ helio-pass-hiz = { workspace = true }
 helio-pass-foliage-place = { workspace = true }
 
 [features]
-default = ["profiling"]
+default = ["profiling", "shader-hot-reload"]
 profiling = ["dep:profiling"]
-# Recompile `.wgsl` files edited while the app runs (see `shader::hot`). Off by
-# default; compiled out on wasm32 even when enabled.
+# Recompile `.wgsl` files edited while the app runs (see `shader::hot`). On by
+# default: steady state costs one atomic load per frame, and a binary with no
+# source tree on disk (or `HELIO_SHADER_HOT_RELOAD=0`) never starts the watcher.
+# Compiled out on wasm32.
 shader-hot-reload = ["dep:notify", "dep:log"]

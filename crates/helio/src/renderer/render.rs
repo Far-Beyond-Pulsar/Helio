@@ -118,10 +118,7 @@ impl Renderer {
         // Before the resize drain: a pending resize rebuilds from the latest
         // shader sources anyway, so a reload on the same frame costs nothing.
         #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
-        {
-            helio_core::cpu_scope!("Helio: poll_shader_reload");
-            self.poll_shader_reload();
-        }
+        self.poll_shader_reload();
 
         if let Some((w, h)) = self.pending_resize.take() {
             helio_core::cpu_scope!("Helio: apply_resize_now");

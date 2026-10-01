@@ -20,7 +20,7 @@ pub use config::{
 };
 pub use debug::{DebugBatch, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex};
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
-pub use shader_reload::ShaderReloadStatus;
+pub use shader_reload::{ReloadMode, ShaderReloadStatus};
 pub use renderer_impl::{
     BillboardInstance, GraphRebuilder, Renderer,
 };

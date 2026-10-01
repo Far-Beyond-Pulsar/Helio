@@ -21,9 +21,15 @@
 //!   the old source is kept. If it passes, the override is stored, the
 //!   [`generation`] is bumped and the dirty flag is set.
 //! * The host polls [`take_dirty`] at a frame boundary and rebuilds whatever
-//!   owns pipelines (Helio's `Renderer::poll_shader_reload` rebuilds the whole
-//!   graph). Phase 1 has no dependency graph: any accepted change rebuilds
-//!   everything.
+//!   owns pipelines. Every accepted change is also recorded in a *pending*
+//!   set, which the host drains with [`begin_reload`]; [`attribute_changes`]
+//!   maps those paths to the crates (and so the passes) that own the shaders
+//!   they affect, so the host can replace only those. Helio's
+//!   `Renderer::poll_shader_reload` does, falling back to rebuilding the
+//!   whole graph for anything it cannot attribute.
+//! * If the host then rejects the rebuild (the GPU refused the shader),
+//!   [`reject_reload`] puts the override table back the way it was before the
+//!   batch, so the rejected text does not keep failing later reloads.
 //!
 //! # Locating files
 //!
@@ -108,6 +114,66 @@ struct ShaderEntry {
     /// sources a pass rewrites in Rust before compiling (see
     /// [`source_text`](super::source_text)), which only the GPU can judge.
     validate: bool,
+    /// The crate that embedded the file (see [`crate_name_of`]), `None` if its
+    /// manifest dir has no usable final component.
+    crate_name: Option<String>,
+}
+
+/// The crate that owns a shader embedded from `manifest_dir`: the final path
+/// component, with `-` written as `_` as it appears in type paths
+/// (`.../helio-pass-fxaa` -> `helio_pass_fxaa`).
+///
+/// Assumes a crate's directory is named after its package, which holds for the
+/// Helio workspace.
+pub fn crate_name_of(manifest_dir: &str) -> Option<String> {
+    let name = Path::new(manifest_dir).file_name()?.to_str()?;
+    if name.is_empty() {
+        return None;
+    }
+    Some(name.replace('-', "_"))
+}
+
+/// A shader the changed files affect, and the crate whose pass builds it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ShaderOwner {
+    /// Owning crate, as written in a type path (`helio_pass_fxaa`).
+    pub crate_name: String,
+    /// The label the shader was registered under.
+    pub label: String,
+}
+
+/// Which shaders a set of changed files affects.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Attribution {
+    /// Every affected shader with a known owner, sorted, without repeats.
+    pub owners: Vec<ShaderOwner>,
+    /// Reasons some change could not be attributed. Non-empty means the host
+    /// must not assume `owners` is the full set of affected passes.
+    pub unattributed: Vec<String>,
+}
+
+impl Attribution {
+    /// Whether `owners` is known to cover every pass the change affects.
+    pub fn is_complete(&self) -> bool {
+        self.unattributed.is_empty() && !self.owners.is_empty()
+    }
+
+    /// The distinct owning crates, sorted.
+    pub fn crates(&self) -> Vec<String> {
+        let mut crates: Vec<String> = self.owners.iter().map(|o| o.crate_name.clone()).collect();
+        crates.dedup(); // `owners` is sorted by crate first
+        crates
+    }
+}
+
+/// The files accepted since the previous reload, taken by [`begin_reload`].
+#[derive(Debug, Default)]
+pub struct ReloadBatch {
+    /// The changed files, sorted.
+    pub paths: Vec<PathBuf>,
+    /// Each file's override as of the last applied reload (`None`: it had
+    /// none), restored by [`reject_reload`].
+    baseline: HashMap<PathBuf, Option<String>>,
 }
 
 type PathKey = (&'static str, &'static str, &'static str);
@@ -129,7 +195,27 @@ struct State {
     snippet_files: HashMap<PathBuf, &'static str>,
     /// Last rejected edit per file, cleared when a later edit is accepted.
     diagnostics: HashMap<PathBuf, ShaderDiagnostic>,
+    /// Lookups that found a file / failed to. A binary running away from its
+    /// source tree fails every lookup, each one a walk over every base
+    /// directory; after `GIVE_UP_AFTER` failures with no success the rest are
+    /// skipped so startup does not pay for that walk per shader.
+    located: u32,
+    failed: u32,
+    /// Files accepted since the host last drained them with [`begin_reload`].
+    pending: HashSet<PathBuf>,
+    /// For each pending file, its override when it first became pending
+    /// (`None`: no override), i.e. as of the last applied reload.
+    baseline: HashMap<PathBuf, Option<String>>,
+    /// Whether some shader that opts into the prelude was compiled without
+    /// being registered (a plain `&str` source, or a file that could not be
+    /// located), so a prelude change cannot be traced to all its users.
+    untracked_prelude: bool,
+    /// Likewise for each snippet file.
+    untracked_snippets: HashSet<PathBuf>,
 }
+
+/// Failed lookups, with none succeeding, before assuming there is no source tree.
+const GIVE_UP_AFTER: u32 = 4;
 
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
 static GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -152,14 +238,29 @@ impl State {
         if let Some(found) = self.paths.get(&path_key(file)) {
             return found.clone();
         }
+        if self.located == 0 && self.failed >= GIVE_UP_AFTER {
+            self.paths.insert(path_key(file), None);
+            return None;
+        }
         let found = locate(file);
-        if found.is_none() {
-            log::warn!(
-                "[helio-shader] cannot locate `{}` (from {}); it will not be hot reloaded. \
-                 Set HELIO_SHADER_ROOT to the directory the source tree is under.",
-                file.rel,
-                file.file,
-            );
+        if found.is_some() {
+            self.located += 1;
+        } else {
+            self.failed += 1;
+            if self.located == 0 && self.failed >= GIVE_UP_AFTER {
+                log::info!(
+                    "[helio-shader] no shader source tree found next to this binary; shader hot \
+                     reload is inactive. Set HELIO_SHADER_ROOT to the directory the source tree \
+                     is under to enable it."
+                );
+            } else {
+                log::warn!(
+                    "[helio-shader] cannot locate `{}` (from {}); it will not be hot reloaded. \
+                     Set HELIO_SHADER_ROOT to the directory the source tree is under.",
+                    file.rel,
+                    file.file,
+                );
+            }
         }
         self.paths.insert(path_key(file), found.clone());
         found
@@ -181,6 +282,7 @@ impl State {
                 embedded: file.embedded,
                 snippets: snippets.to_vec(),
                 validate,
+                crate_name: crate_name_of(file.manifest_dir),
             });
         }
         let mut changed = is_new_path;
@@ -222,6 +324,171 @@ impl State {
         Snapshot {
             overrides: self.overrides.clone(),
             paths: self.paths.clone(),
+        }
+    }
+
+    /// Records a shader/snippet used without being registered, so changes to
+    /// the prelude or snippet files it opts into are known to reach passes
+    /// this registry cannot name.
+    fn note_untracked(&mut self, text: &str, snippets: &[ShaderSnippet]) {
+        if super::uses_prelude(text) {
+            self.untracked_prelude = true;
+        }
+        for snippet in snippets {
+            if !snippet.used_by(text) {
+                continue;
+            }
+            if let Some(file) = snippet.file {
+                if let Some(path) = self.path_of(&file) {
+                    self.untracked_snippets.insert(path);
+                }
+            }
+        }
+    }
+
+    /// Installs `text` as the accepted source of `path` and records it as a
+    /// change the host has yet to apply. The first change to a path since the
+    /// last applied reload remembers the override it replaces.
+    fn accept(&mut self, path: PathBuf, text: String) {
+        let previous = self.overrides.get(&path).cloned();
+        self.baseline.entry(path.clone()).or_insert(previous);
+        self.overrides.insert(path.clone(), text);
+        self.pending.insert(path);
+    }
+
+    /// Hands every pending change to the host as one batch.
+    fn drain_pending(&mut self) -> ReloadBatch {
+        let mut paths: Vec<PathBuf> = self.pending.drain().collect();
+        paths.sort();
+        let baseline = paths
+            .iter()
+            .filter_map(|path| Some((path.clone(), self.baseline.remove(path)?)))
+            .collect();
+        ReloadBatch { paths, baseline }
+    }
+
+    /// Undoes `batch` after the host could not apply it: each file goes back
+    /// to the override it had before the batch, and `message` is recorded
+    /// against it. A file edited again since the batch was taken keeps that
+    /// newer edit (which is then judged on its own); only the baseline it
+    /// would fall back to is corrected.
+    fn reject(&mut self, batch: &ReloadBatch, message: &str) {
+        for path in &batch.paths {
+            if let Some(previous) = batch.baseline.get(path) {
+                if self.pending.contains(path) {
+                    self.baseline.insert(path.clone(), previous.clone());
+                } else {
+                    match previous {
+                        Some(text) => {
+                            self.overrides.insert(path.clone(), text.clone());
+                        }
+                        None => {
+                            self.overrides.remove(path);
+                        }
+                    }
+                }
+            }
+            self.diagnostics.insert(
+                path.clone(),
+                ShaderDiagnostic {
+                    path: path.clone(),
+                    line: None,
+                    message: message.to_owned(),
+                },
+            );
+        }
+    }
+
+    /// The shaders affected by changes to `changed`.
+    ///
+    /// A shader file maps to the shaders registered from it. The prelude and
+    /// snippet files map to every registered shader that opts into them (by its
+    /// current text), and are reported unattributed when no registered shader
+    /// does or when an unregistered one is known to.
+    fn attribute(&self, changed: &[PathBuf]) -> Attribution {
+        let mut out = Attribution::default();
+        if changed.is_empty() {
+            out.unattributed
+                .push("no changed file was recorded".to_owned());
+            return out;
+        }
+        let prelude_path = self
+            .paths
+            .get(&path_key(&PRELUDE_FILE))
+            .and_then(|path| path.as_ref());
+
+        for path in changed {
+            let mut known = false;
+            if let Some(entries) = self.shaders.get(path) {
+                known = true;
+                for entry in entries {
+                    out.add_owner(path, entry);
+                }
+            }
+            if self.snippet_files.contains_key(path) {
+                known = true;
+                let is_prelude = prelude_path == Some(path);
+                if is_prelude && self.untracked_prelude {
+                    out.unattributed.push(format!(
+                        "{} (prelude) is also used by shaders that are not hot-reloadable",
+                        path.display()
+                    ));
+                }
+                if self.untracked_snippets.contains(path) {
+                    out.unattributed.push(format!(
+                        "{} is also used by shaders that are not hot-reloadable",
+                        path.display()
+                    ));
+                }
+                let mut dependents = 0;
+                for (shader_path, entries) in &self.shaders {
+                    let source = self.current_text(shader_path).unwrap_or("");
+                    for entry in entries {
+                        let uses_snippet = entry.snippets.iter().any(|snippet| {
+                            snippet.used_by(source)
+                                && snippet
+                                    .file
+                                    .as_ref()
+                                    .and_then(|file| self.paths.get(&path_key(file)))
+                                    .and_then(|found| found.as_ref())
+                                    == Some(path)
+                        });
+                        if (is_prelude && super::uses_prelude(source)) || uses_snippet {
+                            dependents += 1;
+                            out.add_owner(shader_path, entry);
+                        }
+                    }
+                }
+                if dependents == 0 {
+                    out.unattributed.push(format!(
+                        "{} is not used by any registered shader",
+                        path.display()
+                    ));
+                }
+            }
+            if !known {
+                out.unattributed
+                    .push(format!("{} is not a registered shader", path.display()));
+            }
+        }
+        out.owners.sort();
+        out.owners.dedup();
+        out
+    }
+}
+
+impl Attribution {
+    fn add_owner(&mut self, path: &Path, entry: &ShaderEntry) {
+        match &entry.crate_name {
+            Some(crate_name) => self.owners.push(ShaderOwner {
+                crate_name: crate_name.clone(),
+                label: entry.label.clone(),
+            }),
+            None => self.unattributed.push(format!(
+                "shader `{}` ({}) has no owning crate",
+                entry.label,
+                path.display()
+            )),
         }
     }
 }
@@ -278,6 +545,9 @@ impl TextSource for Live {
 }
 
 fn live_text(file: &ShaderFile) -> Cow<'static, str> {
+    if !enabled() {
+        return Cow::Borrowed(file.embedded);
+    }
     let mut state = state();
     let override_text = state
         .path_of(file)
@@ -299,17 +569,31 @@ pub(super) fn current_source<'a>(
     snippets: &[ShaderSnippet],
     validate: bool,
 ) -> Cow<'a, str> {
+    if !enabled() {
+        return Cow::Borrowed(source.text);
+    }
     let Some(file) = source.file else {
+        // Not reloadable, but it may still pull in the prelude or a snippet.
+        note_untracked_use(source.text, snippets);
         return Cow::Borrowed(source.text);
     };
     let mut state = state();
     let Some(path) = state.path_of(&file) else {
+        state.note_untracked(source.text, snippets);
         return Cow::Borrowed(source.text);
     };
     state.register_shader(path.clone(), &file, label, snippets, validate);
     match state.overrides.get(&path) {
         Some(text) => Cow::Owned(text.clone()),
         None => Cow::Borrowed(source.text),
+    }
+}
+
+/// Notes that a non-reloadable shader opts into the prelude or a snippet, if
+/// it does (one cheap scan; the registry lock is only taken when it does).
+fn note_untracked_use(text: &str, snippets: &[ShaderSnippet]) {
+    if super::uses_prelude(text) || snippets.iter().any(|snippet| snippet.used_by(text)) {
+        state().note_untracked(text, snippets);
     }
 }
 
@@ -502,7 +786,7 @@ fn handle_change(path: &Path) {
 
     {
         let mut state = state();
-        state.overrides.insert(path.to_path_buf(), text);
+        state.accept(path.to_path_buf(), text);
         state.diagnostics.remove(path);
         for item in &affected {
             state.diagnostics.remove(&item.path);
@@ -541,6 +825,23 @@ fn depends_on(
     })
 }
 
+/// Whether hot reload is active. On unless `HELIO_SHADER_HOT_RELOAD` is `0`,
+/// `false` or `off`; read once.
+pub fn enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !std::env::var("HELIO_SHADER_HOT_RELOAD").is_ok_and(|value| {
+            matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off")
+        })
+    })
+}
+
+/// Whether any shader has registered as hot-reloadable. One relaxed load, so
+/// the renderer can ask every frame without touching the registry lock.
+pub fn has_registered() -> bool {
+    REGISTRY_EPOCH.load(Ordering::Relaxed) > 0
+}
+
 /// Monotonic count of accepted shader changes.
 pub fn generation() -> u64 {
     GENERATION.load(Ordering::Acquire)
@@ -567,11 +868,37 @@ pub fn registered_shader_count() -> usize {
 
 /// Installs `text` as the accepted source of `path` without going through the
 /// watcher or validation, bumping the generation and setting the dirty flag.
-/// For tools and tests that drive reloads themselves.
+/// For tools and tests that drive reloads themselves. The path joins the
+/// pending set like a watcher-accepted edit.
 pub fn set_override(path: impl Into<PathBuf>, text: impl Into<String>) {
-    state().overrides.insert(path.into(), text.into());
+    state().accept(path.into(), text.into());
     GENERATION.fetch_add(1, Ordering::AcqRel);
     DIRTY.store(true, Ordering::Release);
+}
+
+/// Takes every change accepted since the previous call, as the batch the host
+/// is about to apply. Call it right after [`take_dirty`] returned `true`.
+///
+/// Dropping the batch commits it (the override table already holds the new
+/// text); [`reject_reload`] rolls it back instead. Changes accepted after this
+/// call belong to the next batch.
+pub fn begin_reload() -> ReloadBatch {
+    state().drain_pending()
+}
+
+/// Rolls the override table back for `batch` because the host could not apply
+/// it (the GPU rejected a pipeline, a constructor panicked): each file returns
+/// to the text it had before the batch, so one rejected edit does not keep
+/// failing every later reload, and `message` is recorded against the files in
+/// [`last_errors`]. Does not set the dirty flag, so nothing is rebuilt again.
+pub fn reject_reload(batch: &ReloadBatch, message: &str) {
+    state().reject(batch, message);
+}
+
+/// Which shaders (and so which crates' passes) the `changed` files affect.
+/// See [`Attribution`].
+pub fn attribute_changes(changed: &[PathBuf]) -> Attribution {
+    state().attribute(changed)
 }
 
 /// Starts the file watcher thread. Idempotent; returns `true` if this call
@@ -581,7 +908,7 @@ pub fn set_override(path: impl Into<PathBuf>, text: impl Into<String>) {
 /// more are registered) and, recursively, each of `extra_roots`. Only `*.wgsl`
 /// events matter.
 pub fn start_watcher(extra_roots: Vec<PathBuf>) -> bool {
-    if WATCHER_STARTED.swap(true, Ordering::AcqRel) {
+    if !enabled() || WATCHER_STARTED.swap(true, Ordering::AcqRel) {
         return false;
     }
     let spawned = std::thread::Builder::new()
@@ -795,5 +1122,247 @@ mod tests {
     fn fragments_without_entry_points_are_not_validated_standalone() {
         assert!(!has_entry_point("fn helper() -> f32 { return unknown_binding; }"));
         assert!(has_entry_point("@fragment fn fs() {}"));
+    }
+
+    // ── Phase 2: attribution, pending changes, rejection ────────────────
+
+    const PRELUDE_ON_DISK: &str = "/core/prelude.wgsl";
+    const SNIPPET_FILE: ShaderFile = ShaderFile {
+        embedded: "// snippet",
+        manifest_dir: "/w/helio-pass-hiz",
+        file: "src/lib.rs",
+        rel: "hiz.wgsl",
+    };
+    const SNIPPET_ON_DISK: &str = "/w/helio-pass-hiz/shaders/hiz.wgsl";
+
+    fn snippet() -> ShaderSnippet {
+        ShaderSnippet::from_file("//!use hiz", SNIPPET_FILE)
+    }
+
+    /// A registry that knows the prelude and the Hi-Z style snippet file.
+    fn registry() -> State {
+        let mut state = State::default();
+        state
+            .paths
+            .insert(path_key(&PRELUDE_FILE), Some(PathBuf::from(PRELUDE_ON_DISK)));
+        state
+            .snippet_files
+            .insert(PathBuf::from(PRELUDE_ON_DISK), PRELUDE);
+        state
+            .paths
+            .insert(path_key(&SNIPPET_FILE), Some(PathBuf::from(SNIPPET_ON_DISK)));
+        state
+            .snippet_files
+            .insert(PathBuf::from(SNIPPET_ON_DISK), "// snippet");
+        state
+    }
+
+    fn add_shader(
+        state: &mut State,
+        path: &str,
+        manifest: &str,
+        label: &str,
+        embedded: &'static str,
+        snippets: &[ShaderSnippet],
+    ) {
+        state
+            .shaders
+            .entry(PathBuf::from(path))
+            .or_default()
+            .push(ShaderEntry {
+                label: label.to_owned(),
+                embedded,
+                snippets: snippets.to_vec(),
+                validate: true,
+                crate_name: crate_name_of(manifest),
+            });
+    }
+
+    fn owner(crate_name: &str, label: &str) -> ShaderOwner {
+        ShaderOwner {
+            crate_name: crate_name.to_owned(),
+            label: label.to_owned(),
+        }
+    }
+
+    #[test]
+    fn owning_crate_is_the_manifest_dirs_last_component() {
+        assert_eq!(
+            crate_name_of("C:/work/crates/passes/3d/helio-pass-fxaa").as_deref(),
+            Some("helio_pass_fxaa")
+        );
+        assert_eq!(crate_name_of("/a/helio-core/").as_deref(), Some("helio_core"));
+        assert_eq!(crate_name_of(""), None);
+    }
+
+    #[test]
+    fn a_shader_edit_is_attributed_to_the_crate_that_embedded_it() {
+        let mut state = registry();
+        add_shader(&mut state, "/w/fxaa/a.wgsl", "/w/helio-pass-fxaa", "FXAA", "// a", &[]);
+        add_shader(&mut state, "/w/ssr/b.wgsl", "/w/helio-pass-ssr", "SSR", "// b", &[]);
+
+        let attribution = state.attribute(&[PathBuf::from("/w/fxaa/a.wgsl")]);
+        assert_eq!(attribution.owners, vec![owner("helio_pass_fxaa", "FXAA")]);
+        assert!(attribution.is_complete());
+        assert_eq!(attribution.crates(), vec!["helio_pass_fxaa".to_owned()]);
+    }
+
+    #[test]
+    fn two_labels_in_one_file_are_both_attributed() {
+        let mut state = registry();
+        add_shader(&mut state, "/w/x/a.wgsl", "/w/helio-pass-x", "X vertex", "// a", &[]);
+        add_shader(&mut state, "/w/x/a.wgsl", "/w/helio-pass-x", "X pipeline", "// a", &[]);
+        let attribution = state.attribute(&[PathBuf::from("/w/x/a.wgsl")]);
+        assert_eq!(attribution.owners.len(), 2);
+        assert_eq!(attribution.crates().len(), 1);
+    }
+
+    #[test]
+    fn a_prelude_edit_fans_out_to_every_shader_that_opts_in() {
+        let mut state = registry();
+        add_shader(&mut state, "/w/a.wgsl", "/w/helio-pass-a", "A", "//!use helio_prelude\n// a", &[]);
+        add_shader(&mut state, "/w/b.wgsl", "/w/helio-pass-b", "B", "//!use helio_prelude\n// b", &[]);
+        add_shader(&mut state, "/w/c.wgsl", "/w/helio-pass-c", "C", "// c, no prelude", &[]);
+
+        let attribution = state.attribute(&[PathBuf::from(PRELUDE_ON_DISK)]);
+        assert_eq!(
+            attribution.owners,
+            vec![owner("helio_pass_a", "A"), owner("helio_pass_b", "B")]
+        );
+        assert!(attribution.is_complete());
+    }
+
+    #[test]
+    fn a_prelude_edit_is_unattributed_when_unregistered_shaders_use_it() {
+        let mut state = registry();
+        add_shader(&mut state, "/w/a.wgsl", "/w/helio-pass-a", "A", "//!use helio_prelude", &[]);
+        // A pass compiled prelude-using text from a plain `&str`.
+        state.note_untracked("//!use helio_prelude\nfn f() {}", &[]);
+
+        let attribution = state.attribute(&[PathBuf::from(PRELUDE_ON_DISK)]);
+        assert!(!attribution.is_complete());
+        assert!(!attribution.unattributed.is_empty());
+    }
+
+    #[test]
+    fn a_snippet_edit_fans_out_to_the_shaders_that_use_its_marker() {
+        let mut state = registry();
+        add_shader(&mut state, "/w/occ.wgsl", "/w/helio-pass-occ", "Occlusion", "//!use hiz\n// x", &[snippet()]);
+        add_shader(&mut state, "/w/ssr.wgsl", "/w/helio-pass-ssr", "SSR", "//!use hiz\n// y", &[snippet()]);
+        // Declares the snippet but does not opt into it.
+        add_shader(&mut state, "/w/sky.wgsl", "/w/helio-pass-sky", "Sky", "// z", &[snippet()]);
+
+        let attribution = state.attribute(&[PathBuf::from(SNIPPET_ON_DISK)]);
+        assert_eq!(
+            attribution.owners,
+            vec![owner("helio_pass_occ", "Occlusion"), owner("helio_pass_ssr", "SSR")]
+        );
+        assert!(attribution.is_complete());
+    }
+
+    #[test]
+    fn unattributable_changes_are_reported_not_dropped() {
+        let mut state = registry();
+        add_shader(&mut state, "/w/a.wgsl", "/w/helio-pass-a", "A", "// a", &[]);
+        add_shader(&mut state, "/w/orphan.wgsl", "", "Orphan", "// o", &[]);
+
+        // Nothing recorded.
+        assert!(!state.attribute(&[]).is_complete());
+        // A file the registry has never heard of.
+        assert!(!state.attribute(&[PathBuf::from("/w/unknown.wgsl")]).is_complete());
+        // A shader without an owning crate.
+        assert!(!state.attribute(&[PathBuf::from("/w/orphan.wgsl")]).is_complete());
+        // A snippet nothing registered uses.
+        let none = state.attribute(&[PathBuf::from(SNIPPET_ON_DISK)]);
+        assert!(!none.is_complete() && none.owners.is_empty());
+        // One unattributable file taints an otherwise attributable batch.
+        let mixed = state.attribute(&[PathBuf::from("/w/a.wgsl"), PathBuf::from("/w/unknown.wgsl")]);
+        assert_eq!(mixed.owners, vec![owner("helio_pass_a", "A")]);
+        assert!(!mixed.is_complete());
+    }
+
+    #[test]
+    fn pending_changes_drain_once_and_in_order() {
+        let mut state = State::default();
+        state.accept(PathBuf::from("/w/b.wgsl"), "b1".into());
+        state.accept(PathBuf::from("/w/a.wgsl"), "a1".into());
+        state.accept(PathBuf::from("/w/a.wgsl"), "a2".into());
+
+        let batch = state.drain_pending();
+        assert_eq!(batch.paths, vec![PathBuf::from("/w/a.wgsl"), PathBuf::from("/w/b.wgsl")]);
+        assert!(state.pending.is_empty() && state.baseline.is_empty());
+        // The override table holds the latest text either way.
+        assert_eq!(state.overrides[&PathBuf::from("/w/a.wgsl")], "a2");
+        assert!(state.drain_pending().paths.is_empty());
+    }
+
+    #[test]
+    fn rejecting_a_batch_removes_overrides_that_did_not_exist_before() {
+        let mut state = State::default();
+        let path = PathBuf::from("/w/a.wgsl");
+        state.accept(path.clone(), "bad".into());
+        let batch = state.drain_pending();
+
+        state.reject(&batch, "GPU rejected it");
+        assert!(!state.overrides.contains_key(&path));
+        assert!(state.pending.is_empty(), "a restore must not queue another reload");
+        assert!(state.diagnostics[&path].message.contains("GPU rejected"));
+    }
+
+    #[test]
+    fn rejecting_a_batch_restores_the_previously_accepted_text() {
+        let mut state = State::default();
+        let path = PathBuf::from("/w/a.wgsl");
+        state.accept(path.clone(), "good".into());
+        drop(state.drain_pending()); // applied
+
+        // Two edits before the next reload: the oldest baseline wins.
+        state.accept(path.clone(), "bad 1".into());
+        state.accept(path.clone(), "bad 2".into());
+        let batch = state.drain_pending();
+        state.reject(&batch, "nope");
+        assert_eq!(state.overrides[&path], "good");
+        assert!(state.pending.is_empty());
+    }
+
+    #[test]
+    fn rejection_restores_only_the_files_of_that_batch() {
+        let mut state = State::default();
+        let a = PathBuf::from("/w/a.wgsl");
+        let b = PathBuf::from("/w/b.wgsl");
+        state.accept(a.clone(), "a good".into());
+        drop(state.drain_pending());
+
+        state.accept(a.clone(), "a bad".into());
+        let batch = state.drain_pending();
+        // `b` is accepted after the batch was taken, so it is not part of it.
+        state.accept(b.clone(), "b new".into());
+        state.reject(&batch, "nope");
+
+        assert_eq!(state.overrides[&a], "a good");
+        assert_eq!(state.overrides[&b], "b new");
+        assert!(state.pending.contains(&b));
+    }
+
+    #[test]
+    fn an_edit_made_during_a_rejected_reload_survives_and_falls_back_correctly() {
+        let mut state = State::default();
+        let path = PathBuf::from("/w/a.wgsl");
+        state.accept(path.clone(), "good".into());
+        drop(state.drain_pending());
+
+        state.accept(path.clone(), "bad".into());
+        let batch = state.drain_pending();
+        // The author fixes the file while the host is still rejecting the bad one.
+        state.accept(path.clone(), "newer".into());
+        state.reject(&batch, "nope");
+        assert_eq!(state.overrides[&path], "newer");
+        assert!(state.pending.contains(&path));
+
+        // If that newer edit is rejected too, it falls back to the last applied
+        // text, not to the rejected one.
+        let second = state.drain_pending();
+        state.reject(&second, "nope again");
+        assert_eq!(state.overrides[&path], "good");
     }
 }

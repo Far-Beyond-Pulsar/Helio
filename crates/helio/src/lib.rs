@@ -38,7 +38,7 @@ pub use renderer::{
 };
 pub use camera::Camera;
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
-pub use renderer::ShaderReloadStatus;
+pub use renderer::{ReloadMode, ShaderReloadStatus};
 #[cfg(feature = "bake")]
 pub use helio_bake::{
     AoConfig, BakeConfig, BakeMesh, BakeRequest, BakedData, LightSource, LightSourceKind,
