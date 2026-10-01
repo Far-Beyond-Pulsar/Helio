@@ -53,6 +53,8 @@ struct GpuLight {
 /// Must match GpuShadowMatrix in uniforms.rs (64 bytes)
 struct GpuShadowMatrix {
     mat: mat4x4f,
+    atlas: vec4f,
+    policy: vec4u,
 }
 
 /// Camera data for CSM cascade computation.

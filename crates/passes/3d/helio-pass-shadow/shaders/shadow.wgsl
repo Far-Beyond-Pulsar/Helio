@@ -1,3 +1,4 @@
+struct ShadowFace { mat:mat4x4f, atlas:vec4f, policy:vec4u }
 // Shadow caster pass — depth-only, GPU-driven.
 //
 // Vertex shader projects world-space geometry into each light's clip space using
@@ -36,7 +37,7 @@ struct FaceIndex {
 // ── Bindings ──────────────────────────────────────────────────────────────────
 
 // Pre-computed light-space view-projection matrices; one per shadow atlas face.
-@group(0) @binding(0) var<storage, read> shadow_matrices: array<mat4x4<f32>>;
+@group(0) @binding(0) var<storage, read> shadow_matrices: array<ShadowFace>;
 // Per-instance world transforms for the entire scene.
 @group(0) @binding(1) var<storage, read> instances:       array<GpuInstanceData>;
 // Current face selection, updated each pass via dynamic offset into a pre-written buffer.
@@ -47,6 +48,8 @@ struct FaceIndex {
 // going through this, no separate shadow path required.
 @group(0) @binding(3) var<storage, read> coordinate_spaces: array<mat4x4<f32>>;
 
+@group(0) @binding(4) var<storage, read> face_dirty: array<u32>;
+
 // ── Vertex stage ──────────────────────────────────────────────────────────────
 
 @vertex
@@ -54,10 +57,11 @@ fn vs_main(
     @location(0)             position: vec3<f32>,
     @builtin(instance_index) slot:     u32,
 ) -> @builtin(position) vec4<f32> {
+    if face._pad0 != 0u && face_dirty[face.value] == 0u { return vec4f(2,2,2,1); }
     let inst  = instances[slot];
     let space = coordinate_spaces[(inst.flags >> 8u) & 0xFFu];
     let world = space * (inst.transform * vec4<f32>(position, 1.0));
-    return shadow_matrices[face.value] * world;
+    return shadow_matrices[face.value].mat * world;
 }
 
 // No fragment stage: the GPU writes depth automatically for the depth-only pipeline.

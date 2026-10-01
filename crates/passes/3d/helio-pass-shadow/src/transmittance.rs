@@ -14,6 +14,7 @@ pub const TRANSMITTANCE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba1
 
 pub(crate) struct Transmittance {
     pipeline: wgpu::RenderPipeline,
+    clear_pipeline: wgpu::RenderPipeline,
     bgl_1: wgpu::BindGroupLayout,
     params: wgpu::Buffer,
     pub(crate) view: wgpu::TextureView,
@@ -175,8 +176,19 @@ impl Transmittance {
             cache: None,
         });
 
+        let clear_source = format!("{}\n@fragment fn fs_clear() -> @location(0) vec4f {{ return vec4f(0); }}", include_str!("../shaders/depth_clear.wgsl"));
+        let clear_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("Clear transmission tile"), source: wgpu::ShaderSource::Wgsl(clear_source.into()) });
+        let clear_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {label:None,bind_group_layouts:&[Some(bgl_0)],immediate_size:0});
+        let clear_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label:Some("Clear transmission tile"),layout:Some(&clear_layout),
+            vertex:wgpu::VertexState {module:&clear_shader,entry_point:Some("vs_main"),compilation_options:Default::default(),buffers:&[]},
+            fragment:Some(wgpu::FragmentState {module:&clear_shader,entry_point:Some("fs_clear"),compilation_options:Default::default(),targets:&[Some(wgpu::ColorTargetState {format:TRANSMITTANCE_FORMAT,blend:None,write_mask:wgpu::ColorWrites::ALL})]}),
+            primitive:Default::default(),depth_stencil:None,multisample:Default::default(),multiview_mask:None,cache:None,
+        });
+
         Self {
             pipeline,
+            clear_pipeline,
             bgl_1,
             params,
             view,
@@ -198,7 +210,7 @@ impl Transmittance {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -226,20 +238,21 @@ impl Transmittance {
         gpu_count: Option<helio_pass_gbuffer::GpuDrawCount<'_>>,
         vertices: &wgpu::Buffer,
         indices: &wgpu::Buffer,
+        tile: Option<[u32;3]>,
     ) {
         if face >= self.face_views.len() {
             return;
         }
-        let (Some(materials), true) = (materials, draw_count > 0) else {
-            // Nothing to draw. Every frame re-renders the camera-following
-            // cascade faces, so clear only a face that last held a pane:
-            // an empty face is already zero ("unfiltered").
-            if std::mem::take(&mut self.face_has_content[face]) {
-                let _pass = Self::clear_face(&self.face_views[face], encoder);
+        // Clear only this tile; other cached transmissions share the layer.
+        {
+            let mut pass=Self::clear_face(&self.face_views[face],encoder);
+            if let Some([x,y,size])=tile {
+                pass.set_viewport((x/2) as f32,(y/2) as f32,(size/2) as f32,(size/2) as f32,0.0,1.0);
+                pass.set_scissor_rect(x/2,y/2,(size/2).max(1),(size/2).max(1));
             }
-            return;
-        };
-        self.face_has_content[face] = true;
+            pass.set_pipeline(&self.clear_pipeline);pass.set_bind_group(0,bg_0,&[dyn_offset]);pass.draw(0..3,0..1);
+        }
+        let (Some(materials),true)=(materials,draw_count>0) else {return;};
         let key = (materials.clone(), static_depth as *const _ as usize);
         if self.bg_1_key.as_ref() != Some(&key) {
             self.bg_1 = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -257,6 +270,10 @@ impl Transmittance {
             self.bg_1_key = Some(key);
         }
         let mut pass = Self::clear_face(&self.face_views[face], encoder);
+        if let Some([x,y,size])=tile {
+            pass.set_viewport((x/2) as f32,(y/2) as f32,(size/2) as f32,(size/2) as f32,0.0,1.0);
+            pass.set_scissor_rect(x/2,y/2,(size/2).max(1),(size/2).max(1));
+        }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bg_0, &[dyn_offset]);
         pass.set_bind_group(1, self.bg_1.as_ref().unwrap(), &[]);

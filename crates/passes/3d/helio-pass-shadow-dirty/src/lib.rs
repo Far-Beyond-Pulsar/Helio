@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 /// Maximum shadow atlas faces.  Must match `MAX_FACES` in the WGSL shader and
 /// `MAX_SHADOW_FACES` in `helio-pass-shadow`.
-const MAX_SHADOW_FACES: usize = 256;
+const MAX_SHADOW_FACES: usize = helio_pass_shadow_matrix::MAX_SHADOW_FACES as usize;
 
 const WORKGROUP_SIZE: u32 = 64;
 
@@ -332,7 +332,7 @@ impl RenderPass for ShadowDirtyPass {
         // ── Lazy bind group rebuild on GrowableBuffer reallocation ─────────────
         let inst_ptr = batch.instances as *const _ as usize;
         let mov_ptr = batch.shadow_movable_indirect as *const _ as usize;
-        let sm_ptr = shadow_data.shadow_matrices as *const _ as usize;
+        let sm_ptr = shadow_data.desired_matrices.unwrap_or(shadow_data.shadow_matrices) as *const _ as usize;
         let ld_ptr = &*self.light_dirty_buf as *const _ as usize;
         let key = (inst_ptr, mov_ptr, sm_ptr, ld_ptr);
 
@@ -355,7 +355,7 @@ impl RenderPass for ShadowDirtyPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: shadow_data.shadow_matrices.as_entire_binding(),
+                        resource: shadow_data.desired_matrices.unwrap_or(shadow_data.shadow_matrices).as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
@@ -384,8 +384,7 @@ impl RenderPass for ShadowDirtyPass {
         // encoder commands avoids the cross-workgroup race that occurs when
         // invocation zero clears storage while other workgroups write it.
         let encoder = unsafe { &mut *ctx.encoder_ptr };
-        encoder.clear_buffer(&self.face_dirty_buf, 0, None);
-        encoder.clear_buffer(&self.face_geom_count_buf, 0, None);
+        // Pending dirty bits survive until ShadowPass services their tile.
 
         // Dispatch enough threads to cover all movable draw calls.
         // Dispatch at least one thread so topology changes with an empty

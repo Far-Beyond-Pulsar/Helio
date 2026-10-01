@@ -1,3 +1,4 @@
+struct ShadowFace { mat:mat4x4f, atlas:vec4f, policy:vec4u }
 // Coloured shadow transmittance — translucent casters (stained glass).
 //
 // Each atlas face gets an Rgba16Float layer storing the complement, so that
@@ -57,7 +58,7 @@ struct TransmitParams {
     _pad2: f32,
 }
 
-@group(0) @binding(0) var<storage, read> shadow_matrices:   array<mat4x4<f32>>;
+@group(0) @binding(0) var<storage, read> shadow_matrices:   array<ShadowFace>;
 @group(0) @binding(1) var<storage, read> instances:         array<GpuInstanceData>;
 @group(0) @binding(2) var<uniform>       face:              FaceIndex;
 @group(0) @binding(3) var<storage, read> coordinate_spaces: array<mat4x4<f32>>;
@@ -65,6 +66,8 @@ struct TransmitParams {
 @group(1) @binding(0) var<storage, read> materials:     array<GpuMaterial>;
 @group(1) @binding(1) var static_depth:                 texture_depth_2d_array;
 @group(1) @binding(2) var<uniform>       params:        TransmitParams;
+
+@group(0) @binding(4) var<storage,read> dirty:array<u32>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -80,7 +83,8 @@ fn vs_main(
     let space = coordinate_spaces[(inst.flags >> 8u) & 0xFFu];
     let world = space * (inst.transform * vec4<f32>(position, 1.0));
     var out: VsOut;
-    out.pos = shadow_matrices[face.value] * world;
+    out.pos = shadow_matrices[face.value].mat * world;
+    if face._pad0 != 0u && dirty[face.value]==0u {out.pos=vec4f(2,2,2,1);}
     out.material = inst.material_id;
     return out;
 }
@@ -89,7 +93,7 @@ fn vs_main(
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dims  = vec2<i32>(textureDimensions(static_depth));
     let texel = clamp(vec2<i32>(in.pos.xy * params.depth_scale), vec2<i32>(0), dims - 1);
-    let opaque = textureLoad(static_depth, texel, i32(face.value), 0);
+    let opaque = textureLoad(static_depth, texel, 0, 0);
     if in.pos.z > opaque {
         discard;
     }

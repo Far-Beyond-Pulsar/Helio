@@ -21,7 +21,7 @@
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const MAX_FACES: u32 = 256u;
+const MAX_FACES: u32 = 1536u;
 
 /// Minimum world-space displacement (metres) that counts as a "move".
 /// Set to ~0.1 mm — below floating point noise threshold at scene scale.
@@ -56,6 +56,8 @@ struct DrawIndexedIndirect {
 /// Must match GpuShadowMatrix in shadow_matrices.wgsl / libhelio (64 bytes).
 struct GpuShadowMatrix {
     mat: mat4x4f,
+    atlas: vec4f,
+    policy: vec4u,
 }
 
 struct ShadowDirtyUniforms {

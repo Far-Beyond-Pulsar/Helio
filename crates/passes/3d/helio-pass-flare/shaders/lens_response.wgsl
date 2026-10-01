@@ -84,7 +84,9 @@ struct GpuLight {
     flare:           array<u32, 7>,
     ies:             vec4<f32>,
 }
-struct LightMatrix { mat: mat4x4<f32> }
+struct LightMatrix { mat: mat4x4<f32>,
+    atlas: vec4f,
+    policy: vec4u, }
 
 /// One analytic lens source, in the image path's units.
 struct LensSource {

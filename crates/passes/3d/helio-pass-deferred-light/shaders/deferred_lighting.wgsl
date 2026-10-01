@@ -98,7 +98,9 @@ struct GpuLight {
     ies_angle_offset:     f32,
 }
 
-struct LightMatrix { mat: mat4x4<f32> }
+struct LightMatrix { mat: mat4x4<f32>,
+    atlas: vec4f,
+    policy: vec4u, }
 
 // Water volume descriptor (simplified, matches libhelio::GpuWaterVolume layout)
 struct GpuWaterVolume {

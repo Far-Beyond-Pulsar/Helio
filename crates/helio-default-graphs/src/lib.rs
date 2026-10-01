@@ -199,7 +199,9 @@ fn add_common_early_passes(
     // matrix per atlas face, rounded up to whole 6-face caster slots. (This was
     // a SceneDB lookup of a key nothing registers: a 64-byte dummy that held
     // one matrix, with nothing publishing it, so no raster shadow rendered.)
-    let shadow_face_slots = config.shadow_face_capacity.max(6).div_ceil(6) * 6;
+    let shadow_face_slots = helio_pass_shadow_matrix::MAX_SHADOW_FACES as u32;
+    let shadow_budget = config.shadow_budget.validate().map_err(|message| helio_core::Error::InvalidPassConfig(message.into()))?;
+    let shadow_atlas_size = shadow_budget.atlas_size(device.limits().max_texture_dimension_2d);
     let shadow_matrices_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Shadow Matrices"),
         size: u64::from(shadow_face_slots)
@@ -222,7 +224,7 @@ fn add_common_early_passes(
 
     let shadow_dirty_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Shadow Dirty Flags"),
-        size: 42 * 4,
+        size: helio_pass_shadow_matrix::MAX_SHADOW_CASTERS as u64 * 4,
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
             | wgpu::BufferUsages::COPY_DST,
@@ -230,7 +232,7 @@ fn add_common_early_passes(
     }));
     let shadow_hashes_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Shadow Hashes"),
-        size: 42 * 4,
+        size: helio_pass_shadow_matrix::MAX_SHADOW_CASTERS as u64 * 4,
         usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
@@ -242,18 +244,22 @@ fn add_common_early_passes(
         camera_buf,
         &shadow_dirty_buf,
         &shadow_hashes_buf,
-        config.shadow_atlas_size,
-    )));
+        shadow_atlas_size,
+    ).with_budget(shadow_budget, h)));
 
     let shadow_dirty_pass = ShadowDirtyPass::new(device, Arc::clone(&shadow_dirty_buf));
     let face_dirty_buf = Arc::clone(&shadow_dirty_pass.face_dirty_buf);
     let face_geom_count_buf = Arc::clone(&shadow_dirty_pass.face_geom_count_buf);
     graph.add_pass(Box::new(shadow_dirty_pass));
 
-    let shadow_cull_pass = ShadowCullPass::new(device, Arc::clone(&face_dirty_buf));
-    let face_cull_indirect = Arc::clone(&shadow_cull_pass.face_indirect_buf);
-    let face_cull_counts = Arc::clone(&shadow_cull_pass.face_counts_buf);
-    graph.add_pass(Box::new(shadow_cull_pass));
+    // Tile draws use the batch's existing indirect partitions. The per-face
+    // cull arena is unnecessary; its memory used to grow by 80 KiB per face.
+    let unused_cull = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Unused legacy shadow cull"), size: 16,
+        usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false,
+    }));
+    let face_cull_indirect = unused_cull.clone();
+    let face_cull_counts = unused_cull;
 
     graph.add_pass(Box::new(ShadowPass::new(
         device,
@@ -262,8 +268,8 @@ fn add_common_early_passes(
         face_geom_count_buf,
         face_cull_indirect,
         face_cull_counts,
-        config.shadow_atlas_size,
-        config.shadow_face_capacity,
+        shadow_atlas_size,
+        1,
     )));
 
     if sky == SkyPlacement::BeforeGeometry {

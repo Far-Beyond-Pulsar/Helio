@@ -221,6 +221,8 @@ pub struct RendererConfig {
     /// reserves six consecutive faces. A capacity of 32 supports five lights
     /// while keeping the two 1024px browser atlases to 256 MiB total.
     pub shadow_face_capacity: u32,
+    /// GPU tile residency, atlas memory, and per-frame rendering limits.
+    pub shadow_budget: helio_pass_shadow_matrix::ShadowBudget,
     /// Enable the screen-space reflection pass. Default `false`.
     ///
     /// SSR traces the Hi-Z buffer per pixel and is one of the most expensive
@@ -321,6 +323,7 @@ impl RendererConfig {
             perf_overlay_mode: PerfOverlayMode::Disabled,
             shadow_atlas_size: 1024,
             shadow_face_capacity: 32,
+            shadow_budget: helio_pass_shadow_matrix::ShadowBudget::default(),
             enable_ssr: false,
             enable_foliage: true,
             foliage_blades_per_m2: None,
@@ -391,6 +394,11 @@ impl RendererConfig {
 
     pub fn with_hdr_output_mode(mut self, mode: helio_pass_postprocess::HdrOutputMode) -> Self {
         self.hdr_output_mode = mode;
+        self
+    }
+
+    pub fn with_shadow_budget(mut self, budget: helio_pass_shadow_matrix::ShadowBudget) -> Self {
+        self.shadow_budget = budget;
         self
     }
 

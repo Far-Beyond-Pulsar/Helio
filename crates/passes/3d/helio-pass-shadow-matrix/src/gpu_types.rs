@@ -18,6 +18,10 @@ use bytemuck::{Pod, Zeroable};
 pub struct GpuShadowMatrix {
     /// Light-space view-projection matrix (64 bytes, matches `LightMatrix { mat: mat4x4<f32> }`)
     pub light_view_proj: [f32; 16],
+    /// Atlas offset, scale and faded visibility strength.
+    pub atlas: [f32; 4],
+    /// Physical layer, author flags, tile resolution, mode (0 legacy, 1 invalid, 2 resident).
+    pub policy: [u32; 4],
 }
 
 /// Cascade far-plane distances (metres) shared by all passes that read or
@@ -247,12 +251,15 @@ impl ShadowConfig {
 #[derive(Clone, Copy)]
 pub struct ShadowMatricesFrameData<'a> {
     pub shadow_matrices: &'a wgpu::Buffer,
+    pub desired_matrices: Option<&'a wgpu::Buffer>,
+    pub residency: Option<&'a crate::ResidencyTable>,
+    pub budget: crate::ShadowBudget,
     /// Live shadow-face count this frame.
     pub shadow_count: u32,
     /// Per-caster (42 max) dirty generation counters -- `ShadowPass`
     /// compares against its own last-rendered gen to decide which faces to
     /// re-render.
-    pub per_caster_dirty_gen: [u64; 42],
+    pub per_caster_dirty_gen: [u64; crate::MAX_SHADOW_CASTERS],
     /// Increments whenever any movable object moves -- the O(1) CPU gate
     /// `ShadowPass` checks before doing any per-face work.
     pub movable_objects_generation: u64,
@@ -271,7 +278,7 @@ pub struct CasterLayout {
     pub caster_count: u32,
     /// `light_type` per slot (0 directional, 1 point, 2 spot); only the
     /// first `caster_count` entries are meaningful.
-    pub light_types: [u32; 42],
+    pub light_types: [u32; crate::MAX_SHADOW_CASTERS],
 }
 
 impl CasterLayout {
@@ -294,7 +301,7 @@ impl CasterLayout {
 
     /// Atlas face indices in use, in ascending order.
     pub fn active_faces(&self, face_count: usize) -> impl Iterator<Item = usize> + '_ {
-        (0..(self.caster_count as usize).min(42)).flat_map(move |slot| {
+        (0..(self.caster_count as usize).min(crate::MAX_SHADOW_CASTERS)).flat_map(move |slot| {
             (0..self.faces_used(slot))
                 .map(move |face| slot * 6 + face)
                 .filter(move |&face| face < face_count)

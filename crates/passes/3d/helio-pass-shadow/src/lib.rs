@@ -56,7 +56,7 @@ pub use transmittance::{TRANSMITTANCE_FORMAT, TRANSMITTANCE_KEY};
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// Maximum shadow atlas faces (42 point lights × 6 cube-faces = 252; 4 CSM cascades; ceiling = 256).
-const MAX_SHADOW_FACES: usize = 256;
+const MAX_SHADOW_FACES: usize = helio_pass_shadow_matrix::MAX_SHADOW_FACES;
 
 /// Byte stride between consecutive face-index entries in `face_idx_buf`.
 ///
@@ -73,6 +73,11 @@ const MAX_DRAWS_PER_FACE: u32 = 4096;
 pub struct ShadowPass {
     /// Shadow geometry pipeline (depth-only, front-face culled, depth-bias = 2.0).
     pipeline: wgpu::RenderPipeline,
+    face_static_gen: Vec<u64>,
+    face_light_gen: Vec<u64>,
+    face_last_update: Vec<u64>,
+    face_strength: Vec<f32>,
+    schedule_frame: u64,
 
     /// Depth-clear pipeline — renders a full-screen triangle at z=1.0 with
     /// `DepthCompare::Always` to GPU-clear individual atlas faces before geometry.
@@ -136,7 +141,7 @@ pub struct ShadowPass {
     // ── Per-caster CPU dirty tracking (light movement only) ──────────────────
     /// Per-caster last-rendered generation, compared against `per_caster_dirty_gen`.
     /// Only updated when a light moves (object movement is now detected GPU-side).
-    per_caster_last_gen: [u64; 42],
+    per_caster_last_gen: [u64; helio_pass_shadow_matrix::MAX_SHADOW_CASTERS],
 
     /// Total shadow count at last render.  Detects caster topology changes.
     last_rendered_shadow_count: u32,
@@ -165,7 +170,8 @@ impl ShadowPass {
         atlas_size: u32,
         atlas_layers: u32,
     ) -> Self {
-        let atlas_layers = atlas_layers.clamp(1, MAX_SHADOW_FACES as u32);
+        let _ = atlas_layers;
+        let atlas_layers = 1;
         // ── Shader ────────────────────────────────────────────────────────────
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shadow"),
@@ -226,6 +232,10 @@ impl ShadowPass {
                         min_binding_size: None,
                     },
                     count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4, visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None,
                 },
             ],
         });
@@ -297,7 +307,7 @@ impl ShadowPass {
         let depth_clear_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Shadow/DepthClear PL"),
-                bind_group_layouts: &[],
+                bind_group_layouts: &[Some(&bgl_0)],
                 immediate_size: 0,
             });
 
@@ -354,14 +364,15 @@ impl ShadowPass {
         );
         // One u32 per face at FACE_BUF_STRIDE byte intervals.
         // The CPU never touches this buffer after construction.
-        let mut face_idx_data = vec![0u8; MAX_SHADOW_FACES * FACE_BUF_STRIDE as usize];
-        for i in 0..MAX_SHADOW_FACES {
+        let mut face_idx_data = vec![0u8; 2 * MAX_SHADOW_FACES * FACE_BUF_STRIDE as usize];
+        for i in 0..2 * MAX_SHADOW_FACES {
             let offset = i * FACE_BUF_STRIDE as usize;
-            face_idx_data[offset..offset + 4].copy_from_slice(&(i as u32).to_ne_bytes());
+            face_idx_data[offset..offset + 4].copy_from_slice(&((i % MAX_SHADOW_FACES) as u32).to_ne_bytes());
+            face_idx_data[offset+4..offset+8].copy_from_slice(&u32::from(i >= MAX_SHADOW_FACES).to_ne_bytes());
         }
         let face_idx_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Shadow/FaceIdx"),
-            size: MAX_SHADOW_FACES as u64 * FACE_BUF_STRIDE,
+            size: 2 * MAX_SHADOW_FACES as u64 * FACE_BUF_STRIDE,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -389,7 +400,11 @@ impl ShadowPass {
 
         Self {
             pipeline,
-            depth_clear_pipeline,
+            face_static_gen: vec![u64::MAX; MAX_SHADOW_FACES],
+            face_light_gen: vec![u64::MAX; MAX_SHADOW_FACES],
+            face_last_update: vec![0; MAX_SHADOW_FACES],
+            face_strength: vec![0.0; MAX_SHADOW_FACES],
+            schedule_frame: 0,            depth_clear_pipeline,
             static_array_view: None,
             transmittance,
             has_glass: false,
@@ -406,7 +421,7 @@ impl ShadowPass {
             face_geom_count_buf,
             face_cull_indirect,
             face_cull_counts,
-            per_caster_last_gen: [0u64; 42],
+            per_caster_last_gen: [0u64; helio_pass_shadow_matrix::MAX_SHADOW_CASTERS],
             last_rendered_shadow_count: 0,
             last_movable_objects_gen: u64::MAX,
             supports_multi_draw_count: device
@@ -483,415 +498,98 @@ impl RenderPass for ShadowPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
-            return Ok(());
-        };
-        let Some(shadow_data) = ctx.registry.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::resource_keys::shadow_matrices()) else {
-            return Ok(());
-        };
-        let Some(coord_data) = ctx.registry.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces()) else {
-            return Ok(());
-        };
-        let face_count = (shadow_data.shadow_count as usize)
-            .min(self.atlas_layers as usize)
-            .min(MAX_SHADOW_FACES);
-        let static_draw_count = batch.shadow_static_draw_count;
-        self.has_glass = batch.shadow_transmissive_draw_count > 0;
-        let movable_draw_count = batch.shadow_movable_draw_count;
-
-        // ── Lazily initialize per-face views from graph-owned textures ─────────
+        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {return Ok(());};
+        let Some(data) = ctx.registry.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::resource_keys::shadow_matrices()) else {return Ok(());};
+        let Some(residency)=data.residency else {return Ok(());};
+        let Some(coords)=ctx.registry.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces()) else {return Ok(());};
+        let Some(vertices)=ctx.scene_buffers.get(BufferKey::of("builtin_mesh_vertex")) else {return Ok(());};
+        let Some(indices)=ctx.scene_buffers.get(BufferKey::of("builtin_mesh_index")) else {return Ok(());};
         if self.face_views.is_empty() {
-            if let Some(tex) = ctx.resource_pool.get_texture("shadow_atlas") {
-                self.face_views =
-                    Self::create_face_views(tex, "Shadow/DynamicFace", self.atlas_layers);
+            if let Some(tex)=ctx.resource_pool.get_texture("shadow_atlas") {self.face_views=Self::create_face_views(tex,"Shadow tiles",1);}
+            if let Some(tex)=ctx.resource_pool.get_texture("static_shadow_atlas") {
+                self.static_face_views=Self::create_face_views(tex,"Static shadow tiles",1);
+                self.static_array_view=Some(tex.create_view(&wgpu::TextureViewDescriptor {dimension:Some(wgpu::TextureViewDimension::D2Array),..Default::default()}));
             }
         }
-        if self.static_face_views.is_empty() {
-            if let Some(tex) = ctx.resource_pool.get_texture("static_shadow_atlas") {
-                self.static_face_views =
-                    Self::create_face_views(tex, "Shadow/StaticFace", self.atlas_layers);
+        if self.face_views.is_empty() || self.static_face_views.is_empty(){return Ok(());}
+        let desired=data.desired_matrices.unwrap_or(data.shadow_matrices);
+        let key=(desired as *const _ as usize,batch.instances as *const _ as usize,coords.coordinate_spaces as *const _ as usize);
+        if self.bg_0_key!=Some(key) {
+            self.bg_0=Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {label:Some("Shadow tiles"),layout:&self.bgl_0,entries:&[
+                wgpu::BindGroupEntry {binding:0,resource:desired.as_entire_binding()},
+                wgpu::BindGroupEntry {binding:1,resource:batch.instances.as_entire_binding()},
+                wgpu::BindGroupEntry {binding:2,resource:wgpu::BindingResource::Buffer(wgpu::BufferBinding {buffer:&self.face_idx_buf,offset:0,size:std::num::NonZeroU64::new(16)})},
+                wgpu::BindGroupEntry {binding:3,resource:coords.coordinate_spaces.as_entire_binding()},
+                wgpu::BindGroupEntry {binding:4,resource:self.face_dirty_buf.as_entire_binding()},
+            ]}));self.bg_0_key=Some(key);
+        }
+        self.schedule_frame+=1;
+        self.has_glass=batch.shadow_transmissive_draw_count>0;
+        let mut candidates=Vec::with_capacity(MAX_SHADOW_FACES);
+        let fade_step=1.0/data.budget.fade_frames.max(1) as f32;
+        for (slot,r) in residency.residents.iter().enumerate() {
+            for (f,t) in r.tiles.iter().enumerate() {
+                let face=slot*6+f;
+                if r.owner==0 || t.size==0 {self.face_strength[face]=0.0;continue;}
+                let changed=self.face_light_gen[face]!=data.per_caster_dirty_gen[slot];
+                if changed {self.face_strength[face]=0.0;}
+                let target=if self.face_last_update[face]==0 || changed {0.0}else{r.strength};
+                self.face_strength[face]+=(target-self.face_strength[face]).clamp(-fade_step,fade_step);
+                ctx.queue.write_buffer(data.shadow_matrices,face as u64*96+76,bytemuck::bytes_of(&self.face_strength[face]));
+                let static_dirty=changed || self.face_static_gen[face]!=batch.shadow_static_generation;
+                // Aging guarantees low-priority pending faces are eventually serviced.
+                let age=self.schedule_frame.saturating_sub(self.face_last_update[face]) as f32;
+                let urgency=if changed {1.0e6}else{r.score+age*0.01};
+                candidates.push((face,static_dirty,urgency));
             }
         }
-        if self.static_array_view.is_none() {
-            if let Some(tex) = ctx.resource_pool.get_texture("static_shadow_atlas") {
-                self.static_array_view = Some(tex.create_view(&wgpu::TextureViewDescriptor {
-                    label: Some("Shadow/StaticArray"),
-                    format: Some(wgpu::TextureFormat::Depth32Float),
-                    dimension: Some(wgpu::TextureViewDimension::D2Array),
-                    ..Default::default()
-                }));
-            }
-        }
-
-        if face_count == 0 {
-            self.per_caster_last_gen = [0u64; 42];
-            self.last_rendered_shadow_count = 0;
-            self.static_atlas_cache_gen = None;
-            self.last_movable_objects_gen = u64::MAX;
-            return Ok(());
-        }
-
-        let static_gen = batch.shadow_static_generation;
-        let shadow_count = shadow_data.shadow_count;
-        let caster_count = (face_count / 6).min(42);
-        // Faces worth a render pass: each allocated caster's used faces
-        // (directional 4, spot 1, point 6). Every caster reserves six and the
-        // atlas holds capacity for 42, so without this every frame opened a
-        // pass per reserved face whether or not a light owned it. Until the
-        // allocation has been read back, every face is treated as in use.
-        let active_faces: Vec<usize> = match shadow_data.caster_layout {
-            Some(layout) => layout.active_faces(face_count).collect(),
-            None => (0..face_count).collect(),
-        };
-
-        let need_static = self.static_atlas_cache_gen != Some(static_gen)
-            || shadow_count != self.last_rendered_shadow_count;
-
-        // Per-caster dirty check for LIGHT movement only.
-        // Object-movement dirtiness is handled GPU-side via face_geom_count_buf.
-        let mut dirty_casters = [false; 42];
-        let mut any_dirty_caster = false;
-        for slot in 0..caster_count {
-            if shadow_data.per_caster_dirty_gen[slot] != self.per_caster_last_gen[slot] {
-                dirty_casters[slot] = true;
-                any_dirty_caster = true;
-            }
-        }
-
-        // O(1) CPU gate: did any movable object move this frame?
-        let objects_moved = shadow_data.movable_objects_generation != self.last_movable_objects_gen;
-
-        if !need_static && !any_dirty_caster && !objects_moved {
-            return Ok(());
-        }
-
-        let vertices = ctx
-            .scene_buffers
-            .get(BufferKey::of("builtin_mesh_vertex"))
-            .ok_or_else(|| {
-                helio_core::Error::InvalidPassConfig(
-                    "ShadowPass requires builtin_mesh_vertex".into(),
-                )
-            })?;
-        let indices = ctx
-            .scene_buffers
-            .get(BufferKey::of("builtin_mesh_index"))
-            .ok_or_else(|| {
-                helio_core::Error::InvalidPassConfig(
-                    "ShadowPass requires builtin_mesh_index".into(),
-                )
-            })?;
-
-        // ── Shared bind group (shadow_matrices + instances + face_idx) ──────────
-        // Rebuilt only on GrowableBuffer reallocation (O(1) amortised).
-        let sm_ptr = shadow_data.shadow_matrices as *const _ as usize;
-        let inst_ptr = batch.instances as *const _ as usize;
-        let cs_ptr = coord_data.coordinate_spaces as *const _ as usize;
-        let key = (sm_ptr, inst_ptr, cs_ptr);
-        if self.bg_0_key != Some(key) {
-            self.bg_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Shadow BG 0"),
-                layout: &self.bgl_0,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: shadow_data.shadow_matrices.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: batch.instances.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &self.face_idx_buf,
-                            offset: 0,
-                            size: std::num::NonZeroU64::new(16),
-                        }),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: coord_data.coordinate_spaces.as_entire_binding(),
-                    },
-                ],
-            }));
-            self.bg_0_key = Some(key);
-        }
-        let bg = self.bg_0.as_ref().unwrap();
-
-        let pipeline = &self.pipeline;
-
-        // ── Static atlas render ────────────────────────────────────────────────
-        if need_static || any_dirty_caster {
-            let static_indirect = batch.shadow_static_indirect;
-            if static_draw_count > 0 {
-                for &face in &active_faces {
-                    let caster_slot = face / 6;
-                    if !need_static && (caster_slot >= 42 || !dirty_casters[caster_slot]) {
-                        continue;
-                    }
-                    let face_view = &self.static_face_views[face];
-                    let dyn_offset = (face as u64 * FACE_BUF_STRIDE) as u32;
-                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
-                        &wgpu::RenderPassDescriptor {
-                            label: Some("Shadow/Static"),
-                            color_attachments: &[],
-                            depth_stencil_attachment: Some(
-                                wgpu::RenderPassDepthStencilAttachment {
-                                    view: face_view,
-                                    depth_ops: Some(wgpu::Operations {
-                                        load: wgpu::LoadOp::Clear(1.0),
-                                        store: wgpu::StoreOp::Store,
-                                    }),
-                                    stencil_ops: None,
-                                },
-                            ),
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                            multiview_mask: None,
-                        },
-                    );
-                    pass.set_pipeline(pipeline);
-                    pass.set_bind_group(0, bg, &[dyn_offset]);
-                    pass.set_vertex_buffer(0, vertices.buffer.slice(..));
-                    pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    helio_pass_gbuffer::multi_draw_indexed_indirect(
-                        &mut pass,
-                        static_indirect,
-                        0,
-                        static_draw_count,
-                        batch.shadow_static_count_slot(),
-                    );
-                }
-            } else if need_static {
-                for &face in &active_faces {
-                    let face_view = &self.static_face_views[face];
-                    let _pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
-                        &wgpu::RenderPassDescriptor {
-                            label: Some("Shadow/StaticClear"),
-                            color_attachments: &[],
-                            depth_stencil_attachment: Some(
-                                wgpu::RenderPassDepthStencilAttachment {
-                                    view: face_view,
-                                    depth_ops: Some(wgpu::Operations {
-                                        load: wgpu::LoadOp::Clear(1.0),
-                                        store: wgpu::StoreOp::Store,
-                                    }),
-                                    stencil_ops: None,
-                                },
-                            ),
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                            multiview_mask: None,
-                        },
-                    );
-                }
-            }
-            // Translucent casters, filtered by the static depth just rendered.
-            if let Some(static_depth) = self.static_array_view.as_ref() {
-                let materials = ctx
-                    .scene_buffers
-                    .get(BufferKey::of("materials"))
-                    .map(|handle| handle.buffer.clone());
-                for &face in &active_faces {
-                    let caster_slot = face / 6;
-                    if !need_static && (caster_slot >= 42 || !dirty_casters[caster_slot]) {
-                        continue;
-                    }
-                    self.transmittance.render_face(
-                        ctx.device,
-                        unsafe { &mut *ctx.encoder_ptr },
-                        materials.as_ref(),
-                        bg,
-                        face,
-                        (face as u64 * FACE_BUF_STRIDE) as u32,
-                        static_depth,
-                        batch.shadow_transmissive_indirect,
-                        batch.shadow_transmissive_draw_count,
-                        batch.shadow_transmissive_count_slot(),
-                        &vertices.buffer,
-                        &indices.buffer,
-                    );
-                }
-            }
-            if need_static {
-                self.static_atlas_cache_gen = Some(static_gen);
-                self.last_rendered_shadow_count = shadow_count;
-                log::debug!(
-                    "Shadow: re-rendered static atlas ({} draws, {} faces)",
-                    static_draw_count,
-                    face_count
-                );
-            }
-        }
-
-        // ── Dynamic atlas render — GPU-driven per-face dirty ──────────────────
-        //
-        // Two dirty sources with different handling:
-        //
-        //   Light movement (any_dirty_caster = true):
-        //     Full clear + all movable draws, CPU-driven.  Light movement is rare
-        //     (typically < 5 lights) so this path is O(6) render passes per light.
-        //
-        //   Object movement (objects_moved = true):
-        //     LoadOp::Load (preserve cached atlas) + GPU-clear triangle (only for dirty
-        //     faces) + GPU-driven geometry draws.  ShadowDirtyPass has written
-        //     face_dirty_buf[face] ∈ {0,1} and face_geom_count_buf[face] ∈ {0, N}
-        //     so multi_draw_{indirect,indexed_indirect}_count suppresses all work on
-        //     clean faces.  The loop runs for all active faces but clean faces produce
-        //     a near-zero-cost render pass (LoadOp::Load with 0 GPU draws).
-        if any_dirty_caster || objects_moved {
-            for &face in &active_faces {
-                let caster_slot = face / 6;
-                let light_dirty = caster_slot < 42 && dirty_casters[caster_slot];
-                let face_view = &self.face_views[face];
-                let dyn_offset = (face as u64 * FACE_BUF_STRIDE) as u32;
-
-                if light_dirty {
-                    // ── Light moved: full clear + culled draws ─────────────────
-                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
-                        &wgpu::RenderPassDescriptor {
-                            label: Some("Shadow/Dynamic/LightDirty"),
-                            color_attachments: &[],
-                            depth_stencil_attachment: Some(
-                                wgpu::RenderPassDepthStencilAttachment {
-                                    view: face_view,
-                                    depth_ops: Some(wgpu::Operations {
-                                        load: wgpu::LoadOp::Clear(1.0),
-                                        store: wgpu::StoreOp::Store,
-                                    }),
-                                    stencil_ops: None,
-                                },
-                            ),
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                            multiview_mask: None,
-                        },
-                    );
-                    if movable_draw_count > 0 {
-                        pass.set_pipeline(pipeline);
-                        pass.set_bind_group(0, bg, &[dyn_offset]);
-                        pass.set_vertex_buffer(0, vertices.buffer.slice(..));
-                        pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
-                        let gpu_count = self.supports_multi_draw_count.then_some(
-                            helio_pass_gbuffer::GpuDrawCount {
-                                buffer: &self.face_cull_counts,
-                                offset: face as u64 * 4,
-                            },
-                        );
-                        helio_pass_gbuffer::multi_draw_indexed_indirect(
-                            &mut pass,
-                            &self.face_cull_indirect,
-                            face as u32 * MAX_DRAWS_PER_FACE,
-                            MAX_DRAWS_PER_FACE,
-                            gpu_count,
-                        );
-                    }
-                } else if objects_moved {
-                    // ── Objects moved: GPU-driven clear + geometry ─────────────
-                    // When MULTI_DRAW_INDIRECT_COUNT is available (Vulkan 1.2+, DX12):
-                    //   LoadOp::Load preserves cached shadow data for clean faces.
-                    //   The GPU-clear triangle (driven by face_dirty_buf count) clears
-                    //   only faces that ShadowDirtyPass marked dirty.
-                    // When the feature is unavailable (macOS Metal, older hardware):
-                    //   Fall back to a full clear + draw all movable geometry,
-                    //   equivalent to the LightDirty path but without per-face culling.
-                    if self.supports_multi_draw_count {
-                        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
-                            &wgpu::RenderPassDescriptor {
-                                label: Some("Shadow/Dynamic/ObjectDirty"),
-                                color_attachments: &[],
-                                depth_stencil_attachment: Some(
-                                    wgpu::RenderPassDepthStencilAttachment {
-                                        view: face_view,
-                                        depth_ops: Some(wgpu::Operations {
-                                            load: wgpu::LoadOp::Load,
-                                            store: wgpu::StoreOp::Store,
-                                        }),
-                                        stencil_ops: None,
-                                    },
-                                ),
-                                timestamp_writes: None,
-                                occlusion_query_set: None,
-                                multiview_mask: None,
-                            },
-                        );
-
-                        if movable_draw_count > 0 {
-                            // 1. Depth-clear triangle (GPU count 0 or 1 from face_dirty_buf).
-                            pass.set_pipeline(&self.depth_clear_pipeline);
-                            pass.multi_draw_indirect_count(
-                                &self.clear_indirect_buf,
-                                face as u64 * 16,
-                                &self.face_dirty_buf,
-                                face as u64 * 4,
-                                1,
-                            );
-
-                            // 2. Shadow geometry (GPU count 0 or movable_draw_count from face_geom_count_buf).
-                            pass.set_pipeline(pipeline);
-                            pass.set_bind_group(0, bg, &[dyn_offset]);
-                            pass.set_vertex_buffer(0, vertices.buffer.slice(..));
-                            pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
-                            helio_pass_gbuffer::multi_draw_indexed_indirect(
-                                &mut pass,
-                                &self.face_cull_indirect,
-                                face as u32 * MAX_DRAWS_PER_FACE,
-                                MAX_DRAWS_PER_FACE,
-                                Some(helio_pass_gbuffer::GpuDrawCount {
-                                    buffer: &self.face_cull_counts,
-                                    offset: face as u64 * 4,
-                                }),
-                            );
-                        }
-                    } else {
-                        // Fallback: full clear + draw all movable geometry (no per-face GPU culling).
-                        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
-                            &wgpu::RenderPassDescriptor {
-                                label: Some("Shadow/Dynamic/ObjectDirty/Fallback"),
-                                color_attachments: &[],
-                                depth_stencil_attachment: Some(
-                                    wgpu::RenderPassDepthStencilAttachment {
-                                        view: face_view,
-                                        depth_ops: Some(wgpu::Operations {
-                                            load: wgpu::LoadOp::Clear(1.0),
-                                            store: wgpu::StoreOp::Store,
-                                        }),
-                                        stencil_ops: None,
-                                    },
-                                ),
-                                timestamp_writes: None,
-                                occlusion_query_set: None,
-                                multiview_mask: None,
-                            },
-                        );
-                        if movable_draw_count > 0 {
-                            pass.set_pipeline(pipeline);
-                            pass.set_bind_group(0, bg, &[dyn_offset]);
-                            pass.set_vertex_buffer(0, vertices.buffer.slice(..));
-                            pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
-                            helio_pass_gbuffer::multi_draw_indexed_indirect(
-                                &mut pass,
-                                &self.face_cull_indirect,
-                                face as u32 * MAX_DRAWS_PER_FACE,
-                                MAX_DRAWS_PER_FACE,
-                                None,
-                            );
-                        }
+        candidates.sort_by(|a,b|b.2.total_cmp(&a.2).then(a.0.cmp(&b.0)));
+        let mut updates=0u32;let mut texels=0u32;
+        let bg=self.bg_0.as_ref().unwrap();
+        for (face,static_dirty,_) in candidates {
+            let r=&residency.residents[face/6];let tile=r.tiles[face%6];
+            let layers=2+u32::from(self.has_glass);
+            let cost=tile.size*tile.size*layers;
+            if updates+layers>data.budget.updates_per_frame || texels+cost>data.budget.update_texels_per_frame {continue;}
+            updates+=layers;texels+=cost;
+            for is_static in [true,false] {
+                let dynamic_offset=((face+if static_dirty {0}else{MAX_SHADOW_FACES}) as u64*FACE_BUF_STRIDE) as u32;
+                let view=if is_static {&self.static_face_views[0]}else{&self.face_views[0]};
+                let mut pass=unsafe {&mut *ctx.encoder_ptr}.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label:Some("Budgeted shadow tile"),color_attachments:&[],depth_stencil_attachment:Some(wgpu::RenderPassDepthStencilAttachment {view,depth_ops:Some(wgpu::Operations {load:wgpu::LoadOp::Load,store:wgpu::StoreOp::Store}),stencil_ops:None}),timestamp_writes:None,occlusion_query_set:None,multiview_mask:None,
+                });
+                pass.set_viewport(tile.x as f32,tile.y as f32,tile.size as f32,tile.size as f32,0.0,1.0);
+                pass.set_scissor_rect(tile.x,tile.y,tile.size,tile.size);
+                pass.set_pipeline(&self.depth_clear_pipeline);pass.set_bind_group(0,bg,&[dynamic_offset]);
+                pass.draw(0..3,0..1);
+                let disabled=r.flags & if is_static {16}else{32} !=0;
+                if !disabled {
+                    pass.set_pipeline(&self.pipeline);pass.set_bind_group(0,bg,&[dynamic_offset]);
+                    pass.set_vertex_buffer(0,vertices.buffer.slice(..));pass.set_index_buffer(indices.buffer.slice(..),wgpu::IndexFormat::Uint32);
+                    if is_static {
+                        helio_pass_gbuffer::multi_draw_indexed_indirect(&mut pass,batch.shadow_static_indirect,0,batch.shadow_static_draw_count,batch.shadow_static_count_slot());
+                    }else{
+                        let count=if self.supports_multi_draw_count && !static_dirty {Some(helio_pass_gbuffer::GpuDrawCount {buffer:&self.face_geom_count_buf,offset:face as u64*4})}else{batch.shadow_movable_count_slot()};
+                        helio_pass_gbuffer::multi_draw_indexed_indirect(&mut pass,batch.shadow_movable_indirect,0,batch.shadow_movable_draw_count,count);
                     }
                 }
             }
-
-            // Update per-caster gen tracking (light movement only).
-            for slot in 0..caster_count {
-                if dirty_casters[slot] {
-                    self.per_caster_last_gen[slot] = shadow_data.per_caster_dirty_gen[slot];
+            {
+                if let Some(depth)=self.static_array_view.as_ref() {
+                    let materials=ctx.scene_buffers.get(BufferKey::of("materials"));
+                    self.transmittance.render_face(ctx.device,unsafe {&mut *ctx.encoder_ptr},materials.map(|m|&m.buffer),bg,0,((face+if static_dirty {0}else{MAX_SHADOW_FACES}) as u64*FACE_BUF_STRIDE) as u32,depth,batch.shadow_transmissive_indirect,if r.flags&16==0 {batch.shadow_transmissive_draw_count}else{0},batch.shadow_transmissive_count_slot(),&vertices.buffer,&indices.buffer,Some([tile.x,tile.y,tile.size]));
                 }
             }
-
-            self.last_movable_objects_gen = shadow_data.movable_objects_generation;
+            // Activate the matrix only after its matching depth has been rendered.
+            let encoder=unsafe {&mut *ctx.encoder_ptr};
+            encoder.copy_buffer_to_buffer(desired,face as u64*96,data.shadow_matrices,face as u64*96,64);
+            ctx.queue.write_buffer(data.shadow_matrices,face as u64*96+92,bytemuck::bytes_of(&2u32));
+            encoder.clear_buffer(&self.face_dirty_buf,face as u64*4,Some(4));
+            encoder.clear_buffer(&self.face_geom_count_buf,face as u64*4,Some(4));
+            self.face_static_gen[face]=batch.shadow_static_generation;
+            self.face_light_gen[face]=data.per_caster_dirty_gen[face/6];
+            self.face_last_update[face]=self.schedule_frame;
         }
-
         Ok(())
     }
 }

@@ -54,15 +54,19 @@ variant on that path, falls back to ordinary multi-draw when unavailable, and
 uses individual indirect draws on WebGPU. The object-batch geometry passes,
 shadow paths, and virtual-geometry pass route through this helper.
 
-This makes command validation cost constant on adapters with indirect-count
-support, but it does not yet compact visible draw groups. Occlusion culling
-currently sets an invisible group's instance count to zero while retaining
-its slot. Per-material range counts also still arrive through Object Batch's
-async readback and are copied to the indirect-count buffer from the CPU. The
-remaining work for #306 is to generate compacted per-range draw lists and
-their counts on the GPU; that depends on replacing #307's CPU-visible range
-dispatch contract. The existing helper and feature fallback are useful
-infrastructure, but they do not by themselves complete either issue.
+Occlusion culling compacts surviving indirect draw records inside each
+material range on the GPU and writes the survivor count into the per-range
+draw-count table. Range counts and dispatch dimensions are GPU-generated;
+the CPU records a fixed three indirect compute dispatches. The count-capable
+path skips culled draw slots. The no-count fallback receives packed records
+with zeroed tails, and WebGPU continues to use individual indirect calls.
+
+The CPU still reads material-range metadata asynchronously to select the
+matching material pipeline. Removing that readback requires a stable
+material-class catalog or an uber-shader dispatch model across GBuffer,
+ForwardLit, Transparent, and Shadow. Until that dispatch contract is in
+place, a current-frame GPU range table cannot safely replace the one-frame
+delayed pipeline metadata.
 
 Object Batch now assigns range-table slots with a GPU prefix scan instead of
 atomic allocation. Opaque, transparent, and forward ranges are packed in

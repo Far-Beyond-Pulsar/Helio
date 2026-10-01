@@ -790,8 +790,13 @@ fn cs_range_block_scan() {
         }
         range_count_out[bucket] = running;
         let dispatch_args = 4u + bucket * 3u;
-        range_count_out[dispatch_args] = running;
-        range_count_out[dispatch_args + 1u] = 1u;
+        // Keep each indirect dispatch dimension within WebGPU's 65535
+        // workgroup limit. The consumer reconstructs the flattened slot.
+        range_count_out[dispatch_args] = min(running, 65535u);
+        range_count_out[dispatch_args + 1u] = max(
+            1u,
+            running / 65535u + select(0u, 1u, running % 65535u != 0u),
+        );
         range_count_out[dispatch_args + 2u] = 1u;
         total_ranges += running;
     }
