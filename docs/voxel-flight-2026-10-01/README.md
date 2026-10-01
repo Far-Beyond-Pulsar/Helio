@@ -1,5 +1,8 @@
 # Voxel flight corrections — draft evidence, 2026-10-01
 
+Historical pre-performance-correction report. Current paired measurements and
+remaining gates are in [the performance correction report](../voxel-performance-2026-10-01/README.md).
+
 Windows, RTX 3060, 1920x1080 quality mode (1440x810 internal), 0.1 m recipe.
 Companion: [Pulsar-Native #994](https://github.com/Far-Beyond-Pulsar/Pulsar-Native/pull/994).
 
