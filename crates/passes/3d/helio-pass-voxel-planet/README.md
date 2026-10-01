@@ -22,9 +22,10 @@ hit used to retain an unrelated top-face normal and shade grass as subsoil.
 `tests/grey_patch.rs` checks radial surface entries at 1/4/16/64 km and snow
 visibility at 64/300/1,000 km.
 
-Climate and filtered grass appearance use the ray's base-grid footprint and
-unrounded canonical height. Distant 2x2 pixel footprints share a height query;
-base-level hits and face/depth discontinuities use their own query. This
+Climate and filtered grass appearance use the ray's base-grid footprint.
+Fine hits reuse the resident canonical column top at base-cell precision;
+distant 2x2 pixel footprints share an unrounded canonical height query,
+with individual queries at distant face/depth discontinuities. This
 prevents high-altitude cells rounding snowy
 mountains to sea-level grass. This is appearance filtering; the existing
 band-limited distance geometry remains a separate, unfinished fidelity gate.
@@ -46,6 +47,8 @@ same settings in `VoxelTerrainComponent.appearance_parameters` (JSON, empty
 means defaults). For example `{"detail":[0.6,0.12,0.04,0.0]}` reduces grass
 patch contrast, per-voxel pigment and edge occlusion; omitted fields retain
 defaults. RGB and detail values are clamped to [0,1] before GPU upload.
+RGB values are converted to linear colour on the CPU once per frame upload;
+roughness stays linear. Shading does not repeat palette gamma conversion.
 
 Hosts without an authored sky can call `Renderer::set_planetary_sky` with
 `PlanetarySky::earth_like(eye_m, radius_m, sun_direction)`. It shares the

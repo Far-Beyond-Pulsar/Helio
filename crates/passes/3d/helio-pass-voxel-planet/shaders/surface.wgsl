@@ -51,7 +51,7 @@ fn srgb(c: vec3<f32>) -> vec3<f32> {
 }
 
 fn palette(m: u32) -> vec3<f32> {
-    return pow(frame.palette[min(m, 15u)].rgb, vec3<f32>(2.2));
+    return frame.palette[min(m, 15u)].rgb;
 }
 
 // Grass colour from dry through meadow to lush green by world-space
@@ -64,9 +64,9 @@ fn grass_albedo(p: vec3<i32>, pixel: f32) -> vec3<f32> {
     let broad = f32(noise(p, 13u, 0x3c6ef372u)) / f32(NOISE_ONE);
     let patches = f32(noise(p, 9u, 0xa54ff53au)) / f32(NOISE_ONE) * clamp((12.8 - pixel) / 6.4, 0.0, 1.0);
     let t = clamp(0.58 + frame.detail.x * (0.6 * broad + 0.14 * patches), 0.0, 1.0);
-    let dry = pow(frame.grass[0].rgb, vec3<f32>(2.2));
-    let meadow = pow(frame.grass[1].rgb, vec3<f32>(2.2));
-    let lush = pow(frame.grass[2].rgb, vec3<f32>(2.2));
+    let dry = frame.grass[0].rgb;
+    let meadow = frame.grass[1].rgb;
+    let lush = frame.grass[2].rgb;
     return select(mix(meadow, lush, t * 2.0 - 1.0), mix(dry, meadow, t * 2.0), t < 0.5);
 }
 
@@ -132,8 +132,8 @@ fn corner_ao(side1: bool, side2: bool, corner: bool) -> f32 {
 }
 
 // Climate changes over metres to kilometres, so distant 2x2 footprints share
-// a canonical height evaluation. Base-level hits and depth discontinuities
-// retain their own exact query. Nothing here changes occupancy or trace hits.
+// a canonical height evaluation. Base-level hits use their resident top;
+// distant depth discontinuities retain their own query. Occupancy is unchanged.
 @group(0) @binding(20) var<storage, read_write> climate_height_cache: array<i32>;
 
 fn climate_index(xy: vec2<u32>) -> u32 {
@@ -191,14 +191,21 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     var slope = 0;
     // Appearance is sampled at the ray's base-grid footprint, not the
     // centre of an increasingly large level cell. Climate uses the canonical
-    // unrounded height: a 3 km snowfield must not become sea-level grass when
-    // the radial level size exceeds its elevation.
-    let appearance_cell = locate(make_ray(camera.position_near.xyz, d), face_ray(face, make_ray(camera.position_near.xyz, d)), h.t, 0u);
-    let p = domain_point(face, select(appearance_cell.i, h.i, level == 0u), select(appearance_cell.j, h.j, level == 0u), 0u);
-    var climate_height = climate_height_cache[climate_index(id.xy)];
-    if level == 0u || ((anchor.info >> 5u) & 31u) == 0u || (anchor.info & 3u) != ST_HIT
-        || ((anchor.info >> 2u) & 7u) != face || abs(h.t - anchor.t) > max(1.0, h.t * 0.01) {
-        climate_height = terrain_height(p, u32(world.grid.w));
+    // unrounded height at coarse levels: a 3 km snowfield must not become
+    // sea-level grass when the radial level size exceeds its elevation.
+    // Fine columns already have the canonical top at base-cell precision;
+    // avoid rerunning the generator and ray-to-grid mapping for each pixel.
+    var p = domain_point(face, h.i, h.j, 0u);
+    var climate_height = top * world.grid.y;
+    if level > 0u {
+        let ray = make_ray(camera.position_near.xyz, d);
+        let appearance_cell = locate(ray, face_ray(face, ray), h.t, 0u);
+        p = domain_point(face, appearance_cell.i, appearance_cell.j, 0u);
+        climate_height = climate_height_cache[climate_index(id.xy)];
+        if ((anchor.info >> 5u) & 31u) == 0u || (anchor.info & 3u) != ST_HIT
+            || ((anchor.info >> 2u) & 7u) != face || abs(h.t - anchor.t) > max(1.0, h.t * 0.01) {
+            climate_height = terrain_height(p, u32(world.grid.w));
+        }
     }
     if !edited {
         var lowest = top;

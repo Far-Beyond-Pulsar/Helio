@@ -867,8 +867,11 @@ impl PlanetRenderer {
         let grid = planet.grid();
         let mut frame = FrameGpu::default();
         let clean = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
-        frame.palette = self.settings.appearance.palette.map(|row| row.map(clean));
-        frame.grass = self.settings.appearance.grass.map(|row| row.map(clean));
+        // Public appearance values stay sRGB; convert the three colour
+        // channels once on upload instead of evaluating pow per shaded pixel.
+        let linear = |row: [f32; 4]| [clean(row[0]).powf(2.2), clean(row[1]).powf(2.2), clean(row[2]).powf(2.2), clean(row[3])];
+        frame.palette = self.settings.appearance.palette.map(linear);
+        frame.grass = self.settings.appearance.grass.map(linear);
         frame.detail = self.settings.appearance.detail.map(clean);
         for face in 0..6u8 {
             // A plane has one face; the others keep default frames.
