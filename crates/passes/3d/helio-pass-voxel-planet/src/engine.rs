@@ -1413,7 +1413,9 @@ impl PlanetRenderer {
         self.stats.window_rebuild_ms = rs.window_rebuild_ms;
         self.stats.lod0_distance = lod0;
         self.stats.pool_pages = self.settings.capacity.pool_units / 512;
-        self.stats.logical_bytes = self.buffers.bytes + u64::from(size[0]) * u64::from(size[1]) * (32 + 16 + 8);
+        self.stats.logical_bytes = self.buffers.bytes
+            + u64::from(size[0]) * u64::from(size[1]) * (32 + 16 + 8)
+            + self.screen.climate.size();
         if self.residency.idle() {
             self.initial_complete = true;
         }
