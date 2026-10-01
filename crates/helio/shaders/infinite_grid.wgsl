@@ -46,7 +46,11 @@ fn grid_line(distance: f32, scale: f32, pixel_width: f32) -> f32 {
     // otherwise continuous major lines to break into horizon-facing dashes.
     let derivative = clamp(fwidth(coordinate), 0.00001, 0.01);
     let line_distance = abs(fract(coordinate - 0.5) - 0.5);
-    return 1.0 - smoothstep(pixel_width, pixel_width + derivative, line_distance);
+    let line = 1.0 - smoothstep(pixel_width, pixel_width + derivative, line_distance);
+    // The world axes are rendered separately with their own colors. Suppress
+    // the coincident grid line so it cannot tint or thicken an axis.
+    let is_axis_line = floor(coordinate + 0.5) == 0.0;
+    return select(line, 0.0, is_axis_line);
 }
 
 fn grid_level(position: vec3<f32>, scale: f32, pixel_width: f32) -> f32 {
@@ -118,12 +122,13 @@ fn fs_main(input: VertexOut) -> FragmentOut {
     let view_plane_alignment = abs(ray.y);
     let horizon_fade = smoothstep(0.015, 0.12, view_plane_alignment);
 
-    // World axes remain stable and readable at every camera position.
-    // The axes are world-space lines too, but their derivative must not grow
-    // without bound at the horizon or they become giant colored wedges.
-    let axis_width = clamp(max(fwidth(hit.x), fwidth(hit.z)) * 2.5, 0.035, 0.18);
-    let x_axis = 1.0 - smoothstep(axis_width, axis_width * 2.0, abs(hit.x - grid.axes.x));
-    let z_axis = 1.0 - smoothstep(axis_width, axis_width * 2.0, abs(hit.z - grid.axes.y));
+    // World axes stay a constant number of pixels wide, with their widths
+    // derived independently for each world-space direction.
+    let px_x = max(length(vec2<f32>(dpdx(hit.x), dpdy(hit.x))), 0.000001);
+    let px_z = max(length(vec2<f32>(dpdx(hit.z), dpdy(hit.z))), 0.000001);
+    let axis_fade = smoothstep(0.004, 0.05, view_plane_alignment);
+    let x_axis = (1.0 - smoothstep(px_x * 0.5, px_x * 1.5, abs(hit.x - grid.axes.x))) * axis_fade;
+    let z_axis = (1.0 - smoothstep(px_z * 0.5, px_z * 1.5, abs(hit.z - grid.axes.y))) * axis_fade;
     let alpha = max(max(minor * 0.22, major * 0.38) * horizon_fade, max(x_axis, z_axis) * 0.8) * plane_fade;
     if alpha <= 0.001 {
         discard;
