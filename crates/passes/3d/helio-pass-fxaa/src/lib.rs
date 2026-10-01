@@ -30,10 +30,7 @@ impl FxaaPass {
     ///
     /// `target_format` — the format of `ctx.target` (e.g. `Bgra8UnormSrgb`).
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("FXAA Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/fxaa.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "FXAA Shader", helio_core::include_wgsl!("../shaders/fxaa.wgsl"));
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("FXAA Sampler"),

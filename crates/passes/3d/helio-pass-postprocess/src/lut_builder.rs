@@ -12,14 +12,11 @@ pub struct LutBuilder {
 
 impl LutBuilder {
     pub fn new(device: &wgpu::Device, size: u32) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("LUT Build Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                helio_core::shader::resolve(include_str!("../shaders/lut_build.wgsl"))
-                    .into_owned()
-                    .into(),
-            ),
-        });
+        let shader = helio_core::shader::module(
+            device,
+            "LUT Build Shader",
+            helio_core::include_wgsl!("../shaders/lut_build.wgsl"),
+        );
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("LUT Build BGL"),

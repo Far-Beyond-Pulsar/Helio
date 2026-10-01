@@ -325,12 +325,9 @@ impl Pipelines {
             label: Some("planet camera"),
             entries: &[uniform(0)],
         });
-        let module = |label, src: String| {
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(label),
-                source: wgpu::ShaderSource::Wgsl(src.into()),
-            })
-        };
+        // Composed from several files plus the terrain program in Rust, so it
+        // goes through `module` as plain text (not hot reloadable).
+        let module = |label: &str, src: String| helio_core::shader::module(device, label, &src);
         let gen_module = module("planet generation", source("read_write", &[include_str!("../shaders/generate.wgsl")], plane, program));
         let trace_src = [
             include_str!("../shaders/view.wgsl"),
@@ -1614,10 +1611,11 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
     verify_out[id.x] = vec2<i32>(field_height(u32(a.x), a.y, a.z, u32(a.w)), i32(ground_material(p, e.x, e.y, e.z, e.w)));
 }
 ";
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("terrain verification"),
-        source: wgpu::ShaderSource::Wgsl(source("read", &[kernel], grid.is_plane(), &program).into()),
-    });
+    let module = helio_core::shader::module(
+        device,
+        "terrain verification",
+        &source("read", &[kernel], grid.is_plane(), &program),
+    );
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("terrain verification"),
         layout: None,

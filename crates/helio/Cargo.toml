@@ -71,6 +71,9 @@ pulsar_scenedb = { workspace = true }
 default = ["profiling"]
 profiling = ["helio-core/profiling"]
 bake = ["helio-bake", "uuid"]
+# Edit a `.wgsl` file while the app runs and the render graph is rebuilt with
+# the new source. Off by default; compiled out on wasm32 even when enabled.
+shader-hot-reload = ["helio-core/shader-hot-reload"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1"

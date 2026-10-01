@@ -349,10 +349,7 @@ impl LiveLightCompaction {
                 },
             ],
         });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("RC Live Lights"),
-            source: wgpu::ShaderSource::Wgsl(RC_COMPACT_WGSL.into()),
-        });
+        let shader = helio_core::shader::module(device, "RC Live Lights", RC_COMPACT_WGSL);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("RC Live Lights PL"),
             bind_group_layouts: &[Some(&bgl)],
@@ -517,10 +514,7 @@ impl RadianceCascadesPass {
             ],
         });
 
-        let fb_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("RC Fallback Shader"),
-            source: wgpu::ShaderSource::Wgsl(FALLBACK_WGSL.into()),
-        });
+        let fb_shader = helio_core::shader::module(device, "RC Fallback Shader", FALLBACK_WGSL);
 
         let fb_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("RC Fallback PL"),
@@ -633,10 +627,7 @@ impl RadianceCascadesPass {
                 ],
             });
 
-            let rt_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("RC Trace Shader"),
-                source: wgpu::ShaderSource::Wgsl(_RC_TRACE_WGSL.into()),
-            });
+            let rt_shader = helio_core::shader::module(device, "RC Trace Shader", helio_core::include_wgsl!("../shaders/rc_trace.wgsl"));
 
             let rt_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("RC Trace PL"),

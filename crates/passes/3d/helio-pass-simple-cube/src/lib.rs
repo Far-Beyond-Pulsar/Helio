@@ -96,10 +96,7 @@ pub struct SimpleCubePass {
 
 impl SimpleCubePass {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("SimpleCube Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/simple_cube.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "SimpleCube Shader", helio_core::include_wgsl!("../shaders/simple_cube.wgsl"));
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("SimpleCube BGL"),

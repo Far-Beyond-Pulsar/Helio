@@ -33,10 +33,7 @@ pub struct PortalMaskPass {
 
 impl PortalMaskPass {
     pub fn new(device: &wgpu::Device) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("PortalMask Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/portal_mask.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "PortalMask Shader", helio_core::include_wgsl!("../shaders/portal_mask.wgsl"));
 
         // ── Stamp pipeline: draw each portal's real opening quad, testing
         // (read-only) against real depth, writing portal_index+1 to the mask.

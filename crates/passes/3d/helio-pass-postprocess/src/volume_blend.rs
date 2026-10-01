@@ -219,7 +219,7 @@ impl PostProcessVolumeBlendPass {
         Self::with_defaults(device, &crate::PostProcessSettings::default())
     }
     pub fn with_defaults(device: &wgpu::Device, settings: &crate::PostProcessSettings) -> Self {
-        let shader = helio_core::shader::module(device, "PostProcess Resolver", include_str!("../shaders/postprocess.wgsl"));
+        let shader = helio_core::shader::module(device, "PostProcess Resolver", helio_core::include_wgsl!("../shaders/postprocess.wgsl"));
         let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
             binding, visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None }, count: None,

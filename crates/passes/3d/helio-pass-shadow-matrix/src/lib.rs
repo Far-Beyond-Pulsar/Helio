@@ -117,12 +117,7 @@ impl ShadowMatrixPass {
         shadow_hashes_buf: &wgpu::Buffer,
         shadow_atlas_size: u32,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("ShadowMatrix Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/shadow_matrices.wgsl").into(),
-            ),
-        });
+        let shader = helio_core::shader::module(device, "ShadowMatrix Shader", helio_core::include_wgsl!("../shaders/shadow_matrices.wgsl"));
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ShadowMatrix Uniforms"),
@@ -217,10 +212,7 @@ impl ShadowMatrixPass {
             cache: None,
         });
 
-        let caster_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shadow caster allocation"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shadow_casters.wgsl").into()),
-        });
+        let caster_shader = helio_core::shader::module(device, "Shadow caster allocation", helio_core::include_wgsl!("../shaders/shadow_casters.wgsl"));
         let caster_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Shadow caster allocation BGL"),
             entries: &[

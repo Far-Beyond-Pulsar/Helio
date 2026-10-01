@@ -53,6 +53,9 @@ egui-wgpu = { version = "0.36.1", default-features = false }
 egui-winit = { version = "0.36.1", default-features = false }
 env_logger = "0.11"
 log = "0.4"
+# Shader hot reload file watcher (helio-core `shader-hot-reload`). Same version
+# as Pulsar-Native's root workspace so the two resolve to one copy.
+notify = "8.2.0"
 # Required as a *direct* dependency (not just transitively via
 # pulsar_reflection) by any crate using #[derive(Reflectable)] -- its
 # generated code writes `::serde_json::Value`, and `::crate_name` paths

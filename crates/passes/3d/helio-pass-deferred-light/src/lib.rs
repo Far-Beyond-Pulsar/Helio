@@ -4,7 +4,6 @@ use helio_core::{
     DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
 use pulsar_scenedb::gpu::BufferKey;
-use std::borrow::Cow;
 
 mod components;
 pub mod gpu_types;
@@ -151,21 +150,14 @@ impl DeferredLightPass {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
-        let raw_src = include_str!("../shaders/deferred_lighting.wgsl");
-        let src = if raw_src.contains("//!use pbr_eval") {
-            let mut resolved =
-                String::with_capacity(raw_src.len() + helio_mats::PBR_EVAL.len());
-            resolved.push_str(helio_mats::PBR_EVAL);
-            resolved.push('\n');
-            resolved.push_str(raw_src);
-            Cow::Owned(resolved)
-        } else {
-            Cow::Borrowed(raw_src)
-        };
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Deferred Lighting Shader"),
-            source: wgpu::ShaderSource::Wgsl(src),
-        });
+        // `//!use pbr_eval` pulls helio-mats' PBR evaluation library in ahead
+        // of the shader, exactly what the hand-rolled concatenation used to do.
+        let shader = helio_core::shader::module_with(
+            device,
+            "Deferred Lighting Shader",
+            helio_core::include_wgsl!("../shaders/deferred_lighting.wgsl"),
+            &[helio_mats::PBR_EVAL_SNIPPET],
+        );
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Deferred Globals"),

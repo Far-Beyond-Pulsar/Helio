@@ -92,7 +92,7 @@ pub const WIND: &str = include_str!("../shaders/foliage_wind.wgsl");
 /// `helio_core::shader::resolve_with`/`module_with` by any shader opting in
 /// via [`WIND_MARKER`] — `helio-core` itself never names this snippet.
 pub const WIND_SNIPPET: helio_core::shader::ShaderSnippet =
-    helio_core::shader::ShaderSnippet::new(WIND_MARKER, WIND);
+    helio_core::wgsl_snippet!(WIND_MARKER, "../shaders/foliage_wind.wgsl");
 
 /// Vertices emitted per instance for each foliage LOD, from the plan's §6.3 ladder:
 /// a 5-segment blade, a 3-segment blade, a card and a clump card.

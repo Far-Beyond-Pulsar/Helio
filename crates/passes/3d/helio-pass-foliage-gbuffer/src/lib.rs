@@ -727,7 +727,7 @@ impl FoliageGBufferPass {
         let shader = helio_core::shader::module_with(
             device,
             "FoliageGBuffer Shader",
-            include_str!("../shaders/foliage_gbuffer.wgsl"),
+            helio_core::include_wgsl!("../shaders/foliage_gbuffer.wgsl"),
             &[helio_pass_foliage_place::WIND_SNIPPET],
         );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

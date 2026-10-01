@@ -1,0 +1,9 @@
+# Every shader goes through `helio_core::shader::module`/`module_with` so it
+# is registered for hot reload (feature `shader-hot-reload`) and expands the
+# shared prelude. A direct `create_shader_module` silently opts out of both.
+#
+# Sites that legitimately bypass it (runtime-generated WGSL, test fixtures)
+# carry `#[allow(clippy::disallowed_methods)]` with the reason beside it.
+disallowed-methods = [
+    { path = "wgpu::Device::create_shader_module", reason = "use helio_core::shader::module so the shader is hot-reloadable" },
+]

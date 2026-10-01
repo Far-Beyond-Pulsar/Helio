@@ -3,6 +3,8 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
+use helio_core::RenderGraph;
+
 use super::config::RendererConfig;
 use super::renderer_impl::Renderer;
 
@@ -60,34 +62,16 @@ impl Renderer {
 
         self.clear_target_next_frame = true;
 
-        if let Some(rebuilder) = self.graph_rebuilder.clone() {
-            // Same recipe the current graph was built from, at the new size:
-            // one stored config, not a field per pass-specific flag, so no
-            // setting can be dropped by a rebuild (Helio#254/#255).
-            let config = RendererConfig {
-                width,
-                height,
-                ..self.renderer_config()
-            };
-            let mut replacement = rebuilder(
-                &self.device,
-                &self.queue,
-                config,
-                self.debug_state.clone(),
-                &self.camera_buffer,
-                &self.debug_camera_buffer,
-                &self.cull_stats_buffer,
-            );
-            // Passes carry persistent state (voxel residency, histories)
-            // into the rebuilt graph; replace_graph restores GI and bakes.
-            replacement.inherit_persistent_state(&mut self.graph);
-            self.replace_graph(replacement);
-            if let Some(hook) = &self.graph_rebuild_hook {
-                hook(&mut self.graph, &self.device);
-            }
-            if let Some(sky) = self.graph.find_pass_mut::<helio_pass_sky::SkyPass>() {
-                sky.set_fallback_sky_enabled(self.fallback_sky_enabled);
-            }
+        // Same recipe the current graph was built from, at the new size:
+        // one stored config, not a field per pass-specific flag, so no
+        // setting can be dropped by a rebuild (Helio#254/#255).
+        let config = RendererConfig {
+            width,
+            height,
+            ..self.renderer_config()
+        };
+        if let Some(replacement) = self.build_replacement_graph(config) {
+            self.install_replacement_graph(replacement);
         } else {
             self.graph.set_render_size(internal_w, internal_h);
         }
@@ -96,6 +80,37 @@ impl Renderer {
             "apply_resize_now: total resize {}ms",
             resize_start.elapsed().as_secs_f64() * 1000.0
         );
+    }
+
+    /// Builds a fresh graph from `config` with the stored rebuilder, or `None`
+    /// if the renderer has none. Shared by resize and shader hot reload; it
+    /// does not touch the current graph.
+    pub(crate) fn build_replacement_graph(&self, config: RendererConfig) -> Option<RenderGraph> {
+        let rebuilder = self.graph_rebuilder.clone()?;
+        Some(rebuilder(
+            &self.device,
+            &self.queue,
+            config,
+            self.debug_state.clone(),
+            &self.camera_buffer,
+            &self.debug_camera_buffer,
+            &self.cull_stats_buffer,
+        ))
+    }
+
+    /// Swaps `replacement` in for the current graph, carrying over what a
+    /// rebuild must not lose and reapplying application-owned settings.
+    pub(crate) fn install_replacement_graph(&mut self, mut replacement: RenderGraph) {
+        // Passes carry persistent state (voxel residency, histories)
+        // into the rebuilt graph; replace_graph restores GI and bakes.
+        replacement.inherit_persistent_state(&mut self.graph);
+        self.replace_graph(replacement);
+        if let Some(hook) = &self.graph_rebuild_hook {
+            hook(&mut self.graph, &self.device);
+        }
+        if let Some(sky) = self.graph.find_pass_mut::<helio_pass_sky::SkyPass>() {
+            sky.set_fallback_sky_enabled(self.fallback_sky_enabled);
+        }
     }
 
     pub fn set_render_scale(&mut self, scale: f32) {

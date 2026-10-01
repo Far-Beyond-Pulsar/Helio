@@ -14,28 +14,11 @@ impl WaterSimPass {
         internal_height: u32,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
-        let vert = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("WaterSim VS"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/fullscreen.vert.wgsl").into(),
-            ),
-        });
-        let drop_frag = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("WaterSim Drop FS"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/drop.frag.wgsl").into()),
-        });
-        let update_frag = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("WaterSim Update FS"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/update.frag.wgsl").into()),
-        });
-        let normal_frag = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("WaterSim Normal FS"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/normal.frag.wgsl").into()),
-        });
-        let hitbox_frag = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("WaterSim Hitbox FS"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/hitbox.frag.wgsl").into()),
-        });
+        let vert = helio_core::shader::module(device, "WaterSim VS", helio_core::include_wgsl!("../shaders/fullscreen.vert.wgsl"));
+        let drop_frag = helio_core::shader::module(device, "WaterSim Drop FS", helio_core::include_wgsl!("../shaders/drop.frag.wgsl"));
+        let update_frag = helio_core::shader::module(device, "WaterSim Update FS", helio_core::include_wgsl!("../shaders/update.frag.wgsl"));
+        let normal_frag = helio_core::shader::module(device, "WaterSim Normal FS", helio_core::include_wgsl!("../shaders/normal.frag.wgsl"));
+        let hitbox_frag = helio_core::shader::module(device, "WaterSim Hitbox FS", helio_core::include_wgsl!("../shaders/hitbox.frag.wgsl"));
 
         let sim_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("WaterSim BGL"),
@@ -493,10 +476,7 @@ impl WaterSimPass {
                 },
             ],
         });
-        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Water Blit Shader"),
-            source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
-        });
+        let blit_shader = helio_core::shader::module(device, "Water Blit Shader", BLIT_WGSL);
         let blit_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Water Blit PL"),
             bind_group_layouts: &[Some(&blit_bgl)],
@@ -641,7 +621,7 @@ impl WaterSimPass {
         let underwater_tint_shader = helio_core::shader::module(
             device,
             "Water Underwater Tint Shader",
-            include_str!("../shaders/underwater_fog.wgsl"),
+            helio_core::include_wgsl!("../shaders/underwater_fog.wgsl"),
         );
         let underwater_tint_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Water Underwater Tint PL"),
@@ -692,7 +672,7 @@ impl WaterSimPass {
         let caustics_shader = helio_core::shader::module(
             device,
             "Water Caustics Shader",
-            include_str!("../shaders/caustics.wgsl"),
+            helio_core::include_wgsl!("../shaders/caustics.wgsl"),
         );
         // One module, two fragment entry points: `fs_above` and `fs_under` share
         // the vertex stage and every helper, so the surface can only be shaded
@@ -701,7 +681,7 @@ impl WaterSimPass {
         let surface_shader = helio_core::shader::module_with(
             device,
             "Water Surface Shader",
-            include_str!("../shaders/surface.wgsl"),
+            helio_core::include_wgsl!("../shaders/surface.wgsl"),
             &[helio_pass_hiz::HIZ_SNIPPET],
         );
 

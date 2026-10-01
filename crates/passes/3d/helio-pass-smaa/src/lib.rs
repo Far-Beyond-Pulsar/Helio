@@ -57,18 +57,9 @@ impl SmaaPass {
         height: u32,
         target_format: wgpu::TextureFormat,
     ) -> Self {
-        let edge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("SMAA Edge Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/smaa_edge.wgsl").into()),
-        });
-        let blend_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("SMAA Blend Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/smaa_blend.wgsl").into()),
-        });
-        let neighbor_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("SMAA Neighbor Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/smaa_neighbor.wgsl").into()),
-        });
+        let edge_shader = helio_core::shader::module(device, "SMAA Edge Shader", helio_core::include_wgsl!("../shaders/smaa_edge.wgsl"));
+        let blend_shader = helio_core::shader::module(device, "SMAA Blend Shader", helio_core::include_wgsl!("../shaders/smaa_blend.wgsl"));
+        let neighbor_shader = helio_core::shader::module(device, "SMAA Neighbor Shader", helio_core::include_wgsl!("../shaders/smaa_neighbor.wgsl"));
 
         let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("SMAA Linear Sampler"),

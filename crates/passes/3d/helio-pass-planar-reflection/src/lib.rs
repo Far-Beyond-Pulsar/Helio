@@ -46,7 +46,7 @@ impl PlanarReflectionPass {
         let shader = helio_core::shader::module(
             device,
             "Planar Trace Shader",
-            include_str!("../shaders/planar_trace.wgsl"),
+            helio_core::include_wgsl!("../shaders/planar_trace.wgsl"),
         );
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {

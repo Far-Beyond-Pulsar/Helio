@@ -466,14 +466,8 @@ impl SkyPass {
         height: u32,
         _scene_db: Option<GpuMirrorHandle>,
     ) -> Self {
-        let sim_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Cloud Volume Simulation"),
-            source: wgpu::ShaderSource::Wgsl(SIM_SHADER.into()),
-        });
-        let render_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Cloud Volume Raymarch"),
-            source: wgpu::ShaderSource::Wgsl(RENDER_SHADER.into()),
-        });
+        let sim_shader = helio_core::shader::module(device, "Cloud Volume Simulation", helio_core::include_wgsl!("shaders/simulate.wgsl"));
+        let render_shader = helio_core::shader::module(device, "Cloud Volume Raymarch", helio_core::include_wgsl!("shaders/render.wgsl"));
         let sim_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Cloud Volume Simulation BGL"),
             entries: &[
@@ -750,14 +744,8 @@ impl SkyPass {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
-        let sky_lut_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Sky LUT Shader (Unified)"),
-            source: wgpu::ShaderSource::Wgsl(SKY_LUT_SHADER.into()),
-        });
-        let sky_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Sky Composite Shader (Unified)"),
-            source: wgpu::ShaderSource::Wgsl(SKY_SHADER.into()),
-        });
+        let sky_lut_module = helio_core::shader::module(device, "Sky LUT Shader (Unified)", helio_core::include_wgsl!("shaders/sky_lut.wgsl"));
+        let sky_module = helio_core::shader::module(device, "Sky Composite Shader (Unified)", helio_core::include_wgsl!("shaders/sky.wgsl"));
         // Sky LUT BGLs: camera storage + sky uniforms
         let sky_lut_bgl0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sky LUT BGL0 (Unified)"),
@@ -1037,18 +1025,9 @@ impl SkyPass {
         );
 
         // Create pipelines for new stages (compute)
-        let raymarch_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Cloud Quarter Raymarch"),
-            source: wgpu::ShaderSource::Wgsl(CLOUD_RAYMARCH_SHADER.into()),
-        });
-        let reproject_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Cloud Temporal Reproject"),
-            source: wgpu::ShaderSource::Wgsl(CLOUD_REPROJECT_SHADER.into()),
-        });
-        let upsample_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Cloud Bilateral Upsample"),
-            source: wgpu::ShaderSource::Wgsl(CLOUD_UPSAMPLE_SHADER.into()),
-        });
+        let raymarch_shader = helio_core::shader::module(device, "Cloud Quarter Raymarch", helio_core::include_wgsl!("shaders/cloud_raymarch.wgsl"));
+        let reproject_shader = helio_core::shader::module(device, "Cloud Temporal Reproject", helio_core::include_wgsl!("shaders/cloud_reproject.wgsl"));
+        let upsample_shader = helio_core::shader::module(device, "Cloud Bilateral Upsample", helio_core::include_wgsl!("shaders/cloud_upsample.wgsl"));
 
         // Raymarch BGL: uniform, volume 3d, samplers, weather 2d, depth, noise 3d x2, storage out x2
         let raymarch_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1369,10 +1348,7 @@ impl SkyPass {
             cache: None,
         });
 
-        let volume_lowres_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Finite Cloud Volume Low Resolution"),
-            source: wgpu::ShaderSource::Wgsl(CLOUD_VOLUME_LOWRES_SHADER.into()),
-        });
+        let volume_lowres_shader = helio_core::shader::module(device, "Finite Cloud Volume Low Resolution", helio_core::include_wgsl!("shaders/cloud_volume_lowres.wgsl"));
         let volume_lowres_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Finite Cloud Volume Low Resolution BGL"),
             entries: &[
@@ -1433,10 +1409,7 @@ impl SkyPass {
                 cache: None,
             });
 
-        let volume_composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Finite Cloud Volume Composite"),
-            source: wgpu::ShaderSource::Wgsl(CLOUD_VOLUME_COMPOSITE_SHADER.into()),
-        });
+        let volume_composite_shader = helio_core::shader::module(device, "Finite Cloud Volume Composite", helio_core::include_wgsl!("shaders/cloud_volume_composite.wgsl"));
         let volume_composite_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Finite Cloud Volume Composite BGL"),
@@ -1514,10 +1487,7 @@ impl SkyPass {
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
         });
-        let temporal_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Finite Cloud Temporal Accumulation"),
-            source: wgpu::ShaderSource::Wgsl(CLOUD_TEMPORAL_SHADER.into()),
-        });
+        let temporal_shader = helio_core::shader::module(device, "Finite Cloud Temporal Accumulation", helio_core::include_wgsl!("shaders/cloud_temporal.wgsl"));
         let temporal_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Finite Cloud Temporal Accumulation BGL"),
             entries: &[

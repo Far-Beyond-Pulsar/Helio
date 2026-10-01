@@ -1,8 +1,24 @@
 use crate::HlfsMode;
 
-pub(crate) const COMMON: &str = include_str!("../shaders/common.wgsl");
-const LIGHTING: &str = include_str!("../shaders/lighting.wgsl");
-const SHADOWS: &str = include_str!("../shaders/shadows.wgsl");
+/// The text of one HLFS shader file. These are concatenated in Rust (shared
+/// `common`/`lighting`/`shadows` plus a per-stage file), so each is fetched as
+/// text rather than handed to the module builder whole: with hot reload on,
+/// an edit to any part is picked up when the stage is next assembled.
+/// Evaluates to a `&str` borrowed from a temporary, so use it inside one
+/// expression (the concatenation).
+macro_rules! wgsl {
+    ($path:literal) => {
+        &*wgsl_text!($path)
+    };
+}
+
+/// [`wgsl!`] as an owned handle, for use across a block boundary.
+macro_rules! wgsl_text {
+    ($path:literal) => {
+        helio_core::shader::source_text($path, helio_core::include_wgsl!($path))
+    };
+}
+
 pub(crate) fn shader_source(stage: &str) -> String {
     shader_source_for_sampler(stage, false)
 }
@@ -30,44 +46,58 @@ fn shader_source_for_transmission(stage: &str, presampled: bool, transmission: b
         fn visibility_from_rgb(v: vec3<f32>) -> Visibility { return v.x; }
         "#
     };
-    let common = format!("const USE_RAY_TRANSMISSION: bool = {transmission};\nconst USE_TILE_PRESAMPLING: bool = {presampled};\n{visibility}\n{COMMON}");
+    let common = format!(
+        "const USE_RAY_TRANSMISSION: bool = {transmission};\nconst USE_TILE_PRESAMPLING: bool = {presampled};\n{visibility}\n{}",
+        wgsl!("../shaders/common.wgsl")
+    );
     let common = common.as_str();
     match stage {
-        "depth" => include_str!("../shaders/depth_pyramid.wgsl").into(),
-        "grid" => [common, include_str!("../shaders/light_grid.wgsl")].concat(),
+        "depth" => wgsl!("../shaders/depth_pyramid.wgsl").into(),
+        "grid" => [common, wgsl!("../shaders/light_grid.wgsl")].concat(),
         "screen_space" => [
             common,
-            LIGHTING,
-            SHADOWS,
-            include_str!("../shaders/sample.wgsl"),
+            wgsl!("../shaders/lighting.wgsl"),
+            wgsl!("../shaders/shadows.wgsl"),
+            wgsl!("../shaders/sample.wgsl"),
         ]
         .concat(),
-        "spatial" => [common, LIGHTING, include_str!("../shaders/spatial.wgsl")].concat(),
-        "temporal" => [common, include_str!("../shaders/temporal.wgsl")].concat(),
+        "spatial" => [
+            common,
+            wgsl!("../shaders/lighting.wgsl"),
+            wgsl!("../shaders/spatial.wgsl"),
+        ]
+        .concat(),
+        "temporal" => [common, wgsl!("../shaders/temporal.wgsl")].concat(),
         "composite" => [
             common,
-            LIGHTING,
-            SHADOWS,
-            include_str!("../shaders/composite.wgsl"),
+            wgsl!("../shaders/lighting.wgsl"),
+            wgsl!("../shaders/shadows.wgsl"),
+            wgsl!("../shaders/composite.wgsl"),
         ]
         .concat(),
-        "ray_traced" | "ray_traced_composite" => [
-            "enable wgpu_ray_query;\n",
-            common,
-            LIGHTING,
-            include_str!("../shaders/ray_receiver.wgsl"),
-            if transmission {
-                include_str!("../shaders/ray_shadow.wgsl")
+        "ray_traced" | "ray_traced_composite" => {
+            // Owned handles: a `&str` borrowed from a temporary would not
+            // outlive the `if` branch that created it.
+            let shadow = if transmission {
+                wgsl_text!("../shaders/ray_shadow.wgsl")
             } else {
-                include_str!("../shaders/ray_shadow_opaque.wgsl")
-            },
-            if stage == "ray_traced" {
-                include_str!("../shaders/sample.wgsl")
+                wgsl_text!("../shaders/ray_shadow_opaque.wgsl")
+            };
+            let tail = if stage == "ray_traced" {
+                wgsl_text!("../shaders/sample.wgsl")
             } else {
-                include_str!("../shaders/composite.wgsl")
-            },
-        ]
-        .concat(),
+                wgsl_text!("../shaders/composite.wgsl")
+            };
+            [
+                "enable wgpu_ray_query;\n",
+                common,
+                wgsl!("../shaders/lighting.wgsl"),
+                wgsl!("../shaders/ray_receiver.wgsl"),
+                &*shadow,
+                &*tail,
+            ]
+            .concat()
+        }
         _ => panic!("unknown HLFS shader stage"),
     }
 }
@@ -176,12 +206,11 @@ impl VisibilityPipelines {
     ) -> Self {
         match mode {
             HlfsMode::ScreenSpace => {
-                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("HLFS ScreenSpace visibility"),
-                    source: wgpu::ShaderSource::Wgsl(
-                        shader_source_for_transmission("screen_space", presampled, transmission).into(),
-                    ),
-                });
+                let shader = helio_core::shader::module(
+                    device,
+                    "HLFS ScreenSpace visibility",
+                    &shader_source_for_transmission("screen_space", presampled, transmission),
+                );
                 let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("HLFS ScreenSpace visibility"),
                     bind_group_layouts: &[Some(common), Some(gbuffer), Some(reservoirs)],
@@ -205,12 +234,11 @@ impl VisibilityPipelines {
                 }
             }
             HlfsMode::RayTraced => {
-                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("HLFS RayTraced visibility"),
-                    source: wgpu::ShaderSource::Wgsl(
-                        shader_source_for_transmission("ray_traced", presampled, transmission).into(),
-                    ),
-                });
+                let shader = helio_core::shader::module(
+                    device,
+                    "HLFS RayTraced visibility",
+                    &shader_source_for_transmission("ray_traced", presampled, transmission),
+                );
                 let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("HLFS RayTraced visibility"),
                     bind_group_layouts: &[Some(common), Some(gbuffer), Some(reservoirs), rt],
@@ -321,10 +349,7 @@ impl Pipelines {
                 entry(3, uniform(), S::COMPUTE),
             ],
         );
-        let compact_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("HLFS light compaction"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/compact_lights.wgsl").into()),
-        });
+        let compact_shader = helio_core::shader::module(device, "HLFS light compaction", helio_core::include_wgsl!("../shaders/compact_lights.wgsl"));
         let compact_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("HLFS light compaction"),
             bind_group_layouts: &[Some(&compact_bgl)],
@@ -477,12 +502,7 @@ impl Pipelines {
                 })
                 .collect::<Vec<_>>(),
         );
-        let module = |name| {
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(name),
-                source: wgpu::ShaderSource::Wgsl(shader_source(name).into()),
-            })
-        };
+        let module = |name| helio_core::shader::module(device, name, &shader_source(name));
         let grid_shader = module("grid");
         let temporal_shader = module("temporal");
         let layout =
@@ -605,10 +625,11 @@ fn composite_pipeline(
     } else {
         "composite"
     };
-    let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(stage),
-        source: wgpu::ShaderSource::Wgsl(shader_source_for_transmission(stage, presampled, transmission).into()),
-    });
+    let composite_shader = helio_core::shader::module(
+        device,
+        stage,
+        &shader_source_for_transmission(stage, presampled, transmission),
+    );
     let mut layouts = vec![Some(common), Some(gbuffer), Some(composite)];
     if mode == HlfsMode::RayTraced {
         layouts.push(rt);

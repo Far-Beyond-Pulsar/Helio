@@ -41,7 +41,7 @@ impl SsrCompositePass {
         let shader = helio_core::shader::module(
             device,
             "SSR composition",
-            include_str!("../shaders/ssr_compose.wgsl"),
+            helio_core::include_wgsl!("../shaders/ssr_compose.wgsl"),
         );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("SSR composition"),
