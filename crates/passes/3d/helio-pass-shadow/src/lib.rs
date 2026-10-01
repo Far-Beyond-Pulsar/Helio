@@ -46,7 +46,7 @@
 //! Light movement is still detected CPU-side via `per_caster_dirty_gen` (O(N_lights),
 //! negligible).  Light-dirty faces use `LoadOp::Clear` + full movable geometry draws.
 
-use helio_core::graph::{ResourceBuilder, ResourceSize};
+use helio_core::graph::ResourceBuilder;
 use helio_core::{BufferKey, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::Arc;
 
@@ -79,6 +79,7 @@ pub struct ShadowPass {
     face_strength: Vec<f32>,
     face_ownership: Vec<(u32,helio_pass_shadow_matrix::ShadowTile)>,
     schedule_frame: u64,
+    last_work: (u32,u32),
 
     /// Depth-clear pipeline — renders a full-screen triangle at z=1.0 with
     /// `DepthCompare::Always` to GPU-clear individual atlas faces before geometry.
@@ -106,6 +107,7 @@ pub struct ShadowPass {
     static_atlas_cache_gen: Option<u64>,
     /// Whole-array view of the static atlas, for the transmittance depth test.
     static_array_view: Option<wgpu::TextureView>,
+    dynamic_array_view: wgpu::TextureView,
     /// Coloured transmittance of translucent static casters.
     transmittance: transmittance::Transmittance,
     /// Translucent casters were drawn: the layer is published only then, so
@@ -157,6 +159,9 @@ pub struct ShadowPass {
 }
 
 impl ShadowPass {
+    /// Reserved atlas operations and texels in the last frame; GPU dirty gates may reduce actual work.
+    pub fn last_update_work(&self)->(u32,u32) {self.last_work}
+
     /// Allocate all GPU resources.  Called once; zero allocations after this.
     ///
     /// `face_dirty_buf` and `face_geom_count_buf` are shared with `ShadowDirtyPass`
@@ -380,8 +385,8 @@ impl ShadowPass {
         queue.write_buffer(&face_idx_buf, 0, &face_idx_data);
 
         // ── Face views (lazily initialized from graph-owned textures) ──────────
-        let face_views = Box::default();
-        let static_face_views = Box::default();
+
+
 
         // Comparison sampler for PCF shadow lookups in the lighting pass.
         let compare_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -399,7 +404,18 @@ impl ShadowPass {
         let transmittance =
             transmittance::Transmittance::new(device, queue, &bgl_0, atlas_size, atlas_layers);
 
+        let make_atlas=|label| device.create_texture(&wgpu::TextureDescriptor {
+            label:Some(label),size:wgpu::Extent3d {width:atlas_size,height:atlas_size,depth_or_array_layers:1},
+            mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,format:wgpu::TextureFormat::Depth32Float,
+            usage:wgpu::TextureUsages::RENDER_ATTACHMENT|wgpu::TextureUsages::TEXTURE_BINDING,view_formats:&[],
+        });
+        let dynamic_atlas=make_atlas("Dynamic shadow atlas");let static_atlas=make_atlas("Static shadow atlas");
+        let array_view=|tex:&wgpu::Texture| tex.create_view(&wgpu::TextureViewDescriptor {dimension:Some(wgpu::TextureViewDimension::D2Array),..Default::default()});
+        let face_views=Self::create_face_views(&dynamic_atlas,"Dynamic tiles",1);
+        let static_face_views=Self::create_face_views(&static_atlas,"Static tiles",1);
         Self {
+            last_work:(0,0),
+            dynamic_array_view:array_view(&dynamic_atlas),
             face_ownership: vec![(0,Default::default());MAX_SHADOW_FACES],
             pipeline,
             face_static_gen: vec![u64::MAX; MAX_SHADOW_FACES],
@@ -407,7 +423,7 @@ impl ShadowPass {
             face_last_update: vec![0; MAX_SHADOW_FACES],
             face_strength: vec![0.0; MAX_SHADOW_FACES],
             schedule_frame: 0,            depth_clear_pipeline,
-            static_array_view: None,
+            static_array_view: Some(array_view(&static_atlas)),
             transmittance,
             has_glass: false,
             bgl_0,
@@ -467,14 +483,9 @@ impl RenderPass for ShadowPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        let sz = ResourceSize::Absolute {
-            width: self.atlas_size,
-            height: self.atlas_size,
-        };
-        builder.write_color_raw("shadow_atlas", wgpu::TextureFormat::Depth32Float, sz);
-        builder.with_layers(self.atlas_layers);
-        builder.write_color_raw("static_shadow_atlas", wgpu::TextureFormat::Depth32Float, sz);
-        builder.with_layers(self.atlas_layers);
+        // Pass-owned one-layer array views, preserving the sampling ABI at one physical layer.
+        builder.write_buffer("shadow_atlas");
+        builder.write_buffer("static_shadow_atlas");
         builder.read("object_batch");
         builder.read("shadow_matrices");
         builder.read("shadow_dirty");
@@ -492,6 +503,8 @@ impl RenderPass for ShadowPass {
     }
 
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        frame.route_named_texture("shadow_atlas", &self.dynamic_array_view, self.name());
+        if let Some(view)=self.static_array_view.as_ref() {frame.route_named_texture("static_shadow_atlas",view,self.name());}
         if self.has_glass {
             frame.route_named_texture(TRANSMITTANCE_KEY, &self.transmittance.view, self.name());
         }
@@ -502,20 +515,13 @@ impl RenderPass for ShadowPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        self.last_work=(0,0);
         let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {return Ok(());};
         let Some(data) = ctx.registry.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::resource_keys::shadow_matrices()) else {return Ok(());};
         let Some(residency)=data.residency else {return Ok(());};
         let Some(coords)=ctx.registry.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces()) else {return Ok(());};
         let Some(vertices)=ctx.scene_buffers.get(BufferKey::of("builtin_mesh_vertex")) else {return Ok(());};
         let Some(indices)=ctx.scene_buffers.get(BufferKey::of("builtin_mesh_index")) else {return Ok(());};
-        if self.face_views.is_empty() {
-            if let Some(tex)=ctx.resource_pool.get_texture("shadow_atlas") {self.face_views=Self::create_face_views(tex,"Shadow tiles",1);}
-            if let Some(tex)=ctx.resource_pool.get_texture("static_shadow_atlas") {
-                self.static_face_views=Self::create_face_views(tex,"Static shadow tiles",1);
-                self.static_array_view=Some(tex.create_view(&wgpu::TextureViewDescriptor {dimension:Some(wgpu::TextureViewDimension::D2Array),..Default::default()}));
-            }
-        }
-        if self.face_views.is_empty() || self.static_face_views.is_empty(){return Ok(());}
         let desired=data.desired_matrices.unwrap_or(data.shadow_matrices);
         let key=(desired as *const _ as usize,batch.instances as *const _ as usize,coords.coordinate_spaces as *const _ as usize);
         if self.bg_0_key!=Some(key) {
@@ -595,6 +601,7 @@ impl RenderPass for ShadowPass {
             self.face_light_gen[face]=data.per_caster_dirty_gen[face/6];
             self.face_last_update[face]=self.schedule_frame;
         }
+        self.last_work=(updates,texels);
         Ok(())
     }
 }

@@ -100,6 +100,8 @@ impl ShadowMatrixPass {
     pub fn face_capacity(&self)->u32 {self.face_capacity}
     pub fn caster_capacity(&self)->u32 {(self.face_capacity/6).min(MAX_SHADOW_CASTERS as u32)}
     pub fn atlas_size(&self)->u32 {self.shadow_atlas_size}
+    /// Last asynchronously committed, bounded residency snapshot.
+    pub fn residency(&self)->&ResidencyTable {&self.residency}
     pub fn matrices(&self)->&wgpu::Buffer {&self.shadow_matrix_buf}
     fn poll(&mut self,queue:&wgpu::Queue) {
         match &self.readback {

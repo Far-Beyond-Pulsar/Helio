@@ -205,8 +205,10 @@ fn pack_tiles() {
         selected[j]=owner;
     }
     var empty:Resident;
+    for(var s=params.capacity;s<256u;s++){proposed.slots[s]=empty;}
     for(var s=0u;s<params.capacity;s++) {
         var r=committed.slots[s];var keep=false;
+        if r.owner!=0u && r.fade_target==0u && r.strength<=0.0 {r=empty;}
         for(var i=0u;i<count;i++){if r.owner!=0u&&selected[i]==r.owner {keep=true;}}
         r.fade_target=0u;
         if r.owner>0u&&r.owner<=params.rows&&keep {
@@ -239,6 +241,17 @@ fn pack_tiles() {
         for(var f=0u;f<6u;f++) {
             if (c.mask&(1u<<f))!=0u && proposed.slots[slot].tiles[f].z==0u {
                 proposed.slots[slot].tiles[f]=allocate_tile(proposed.slots[slot].resolution);
+                if proposed.slots[slot].tiles[f].z==0u {
+                    // Physical memory pressure can happen before the logical pool fills.
+                    // Retire a lower-priority tile owner, retaining its map during fade.
+                    var victim=NONE;var worst=bitcast<f32>(c.key);
+                    for(var v=0u;v<params.capacity;v++) {
+                        let r=proposed.slots[v];var has_tile=false;
+                        for(var k=0u;k<6u;k++){has_tile=has_tile||r.tiles[k].z!=0u;}
+                        if r.owner!=0u && r.fade_target!=0u && has_tile && r.score<worst {victim=v;worst=r.score;}
+                    }
+                    if victim!=NONE {proposed.slots[victim].fade_target=0u;}
+                }
             }
         }
     }

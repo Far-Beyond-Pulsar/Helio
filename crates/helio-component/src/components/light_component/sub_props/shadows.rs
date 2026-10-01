@@ -28,16 +28,16 @@ pub struct ShadowLightProps {
     #[gpu(as = u32, with = cast_shadows_to_shadow_request)]
     pub cast_shadows: bool,
     #[property(category = "Shadows")]
-    #[gpu(as = u32)]
+    #[gpu(as = u32, with = shadow_bool)]
     pub cast_static_shadows: bool,
     #[property(category = "Shadows")]
-    #[gpu(as = u32)]
+    #[gpu(as = u32, with = shadow_bool)]
     pub cast_dynamic_shadows: bool,
     #[property(category = "Shadows")]
     #[gpu(as = f32, with = volumetric_shadow_strength)]
     pub cast_volumetric_shadow: bool,
     #[property(category = "Shadows")]
-    #[gpu(as = u32)]
+    #[gpu(as = u32, with = shadow_bool)]
     pub cast_contact_shadows: bool,
     #[property(min = 0.0, max = 10.0, step = 0.01, category = "Shadows")]
     pub shadow_bias: f32,
@@ -178,3 +178,5 @@ impl ShadowLightProps {
         );
     }
 }
+
+pub fn shadow_bool(value: bool) -> u32 { u32::from(value) }

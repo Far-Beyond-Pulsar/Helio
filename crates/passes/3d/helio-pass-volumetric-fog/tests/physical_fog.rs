@@ -486,7 +486,7 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
         bytemuck::cast_slice(&[point_light(1.), point_light(0.), point_light(0.5)]),
         storage,
     );
-    let matrices = buffer(&device, &[0; 384], storage);
+    let matrices = buffer(&device, &[0; 576], storage);
     // Use the real shadow producer's math, including its handedness and face order.
     let producer = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("real point shadow matrices"),
         source: wgpu::ShaderSource::Wgsl(format!("{}\n{}",include_str!("../../helio-pass-shadow-matrix/shaders/shadow_matrices.wgsl"),
@@ -666,7 +666,7 @@ impl ShadowProducer {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
         });
-        let matrices = buffer(device, &[0; 384], wgpu::BufferUsages::STORAGE);
+        let matrices = buffer(device, &[0; 576], wgpu::BufferUsages::STORAGE);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None, source: wgpu::ShaderSource::Wgsl(format!("{}\n{}",
                 include_str!("../../helio-pass-shadow-matrix/shaders/shadow_matrices.wgsl"),

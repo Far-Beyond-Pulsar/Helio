@@ -18,7 +18,7 @@ fn production_shadow_shaders_validate() {
     ] {
         let mut source=std::fs::read_to_string(root.join(path)).unwrap().replace("__PP_TAIL_VEC4__","64");
         if source.contains("//!use pbr_eval") {source=format!("{}\n{}",std::fs::read_to_string(root.join("../../helio-mats/shaders/pbr_eval.wgsl")).unwrap(),source);}
-        validate(path, &source);
+        validate(path, &helio_core::shader::resolve(&source));
     }
     let prefix = "const USE_RAY_TRANSMISSION:bool=false; const USE_TILE_PRESAMPLING:bool=false; alias Visibility=f32; alias VisibilityCache=vec4f; fn visibility_nonzero(v:f32)->bool{return v>0.0;} fn visibility_missing(v:f32)->bool{return v<0.0;} fn visibility_from_rgb(v:vec3f)->f32{return v.x;}";
     let mut source=prefix.to_string();
@@ -124,3 +124,50 @@ fn gpu_ranking_tiers_hysteresis_fades_faces_and_fallback() {
     let disabled=gpu.run(&rows,&ResidencyTable::default());assert_eq!(disabled.header[0],0);let flags=gpu.commit(&disabled);assert_eq!(flags[15]&3,1);
 }
 
+#[test]
+fn gpu_tile_sampling_fades_and_honors_author_policy() {
+    let gpu=Gpu::new(1,1);
+    let texture=gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label:Some("shadow test depth"),size:wgpu::Extent3d{width:128,height:128,depth_or_array_layers:1},
+        mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,format:wgpu::TextureFormat::Depth32Float,
+        usage:wgpu::TextureUsages::RENDER_ATTACHMENT|wgpu::TextureUsages::TEXTURE_BINDING,view_formats:&[],
+    });
+    let attachment=texture.create_view(&Default::default());
+    let sampled=texture.create_view(&wgpu::TextureViewDescriptor{dimension:Some(wgpu::TextureViewDimension::D2Array),..Default::default()});
+    let sampler=gpu.device.create_sampler(&wgpu::SamplerDescriptor{compare:Some(wgpu::CompareFunction::LessEqual),..Default::default()});
+    let mut e=gpu.device.create_command_encoder(&Default::default());
+    { let _pass=e.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label:None,color_attachments:&[],depth_stencil_attachment:Some(wgpu::RenderPassDepthStencilAttachment {view:&attachment,depth_ops:Some(wgpu::Operations{load:wgpu::LoadOp::Clear(0.25),store:wgpu::StoreOp::Store}),stencil_ops:None}),timestamp_writes:None,occlusion_query_set:None,multiview_mask:None,
+    }); }
+    gpu.queue.submit([e.finish()]);
+    let mut faces=[GpuShadowMatrix{light_view_proj:[0.;16],atlas:[0.,0.,1.,1.],policy:[0,0,128,2]};6];
+    faces[1].atlas[3]=0.5;faces[2].policy[3]=1;faces[3].policy[1]=16;faces[4].policy[1]=32;faces[5].atlas[2]=0.;
+    let matrices=buffer(&gpu.device,"sampling matrices",6*96,wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_DST);
+    gpu.queue.write_buffer(&matrices,0,bytemuck::cast_slice(&faces));
+    let output=buffer(&gpu.device,"sampling result",6*8,wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC);
+    let production=include_str!("../../helio-pass-deferred-light/shaders/deferred_lighting.wgsl");
+    let helpers=production.split("// Logical face metadata").nth(1).unwrap().split("// Bounded screen-space fallback").next().unwrap();
+    let helpers=&helpers[helpers.find("fn budget_resolution").unwrap()..];
+    let source=format!("{}\n{}\n{}",r#"
+        struct LightMatrix { mat:mat4x4f,atlas:vec4f,policy:vec4u }
+        @group(0) @binding(0) var<storage,read> shadow_matrices:array<LightMatrix>;
+        @group(0) @binding(1) var shadow_atlas:texture_depth_2d_array;
+        @group(0) @binding(2) var static_shadow_atlas:texture_depth_2d_array;
+        @group(0) @binding(3) var shadow_sampler:sampler_comparison;
+        @group(0) @binding(4) var<storage,read_write> result:array<vec2f>;
+    "#,helpers,r#"
+        @compute @workgroup_size(1) fn main() {
+            for(var i=0u;i<6u;i++) {result[i]=vec2f(budget_compare_dynamic(vec2f(0.5),i,0.5),budget_compare_static(vec2f(0.5),i,0.5));}
+        }
+    "#);
+    let shader=gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {label:None,source:wgpu::ShaderSource::Wgsl(source.into())});
+    let pipeline=gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {label:None,layout:None,module:&shader,entry_point:Some("main"),compilation_options:Default::default(),cache:None});
+    let bg=gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {label:None,layout:&pipeline.get_bind_group_layout(0),entries:&[
+        wgpu::BindGroupEntry {binding:0,resource:matrices.as_entire_binding()},wgpu::BindGroupEntry {binding:1,resource:wgpu::BindingResource::TextureView(&sampled)},wgpu::BindGroupEntry {binding:2,resource:wgpu::BindingResource::TextureView(&sampled)},wgpu::BindGroupEntry {binding:3,resource:wgpu::BindingResource::Sampler(&sampler)},wgpu::BindGroupEntry {binding:4,resource:output.as_entire_binding()},
+    ]});
+    let mut e=gpu.device.create_command_encoder(&Default::default());
+    {let mut p=e.begin_compute_pass(&Default::default());p.set_pipeline(&pipeline);p.set_bind_group(0,&bg,&[]);p.dispatch_workgroups(1,1,1);}
+    gpu.queue.submit([e.finish()]);
+    let values=gpu.read(&output);let values:&[f32]=bytemuck::cast_slice(&values);
+    assert_eq!(values,&[0.,0., 0.5,0.5, 1.,1., 0.,1., 1.,0., 1.,1.]);
+}

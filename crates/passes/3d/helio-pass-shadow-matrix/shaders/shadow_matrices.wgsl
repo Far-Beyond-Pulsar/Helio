@@ -244,7 +244,7 @@ fn compute_directional_cascades(light_idx: u32, direction: vec3f) {
         }
 
         // Snap radius to texel boundaries
-        let texel_size = (2.0 * radius) / f32(max(params.shadow_atlas_size, 1u));
+        let texel_size = (2.0 * radius) / f32(max(shadow_mats[base + cascade_idx].policy.z, 128u));
         let radius_snap = ceil(radius / texel_size) * texel_size;
 
         // Texel-snapped light view

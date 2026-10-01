@@ -434,6 +434,7 @@ pub struct TlasManager {
     populated_slots: usize,
     rt_available: bool,
     last_instances: Vec<TlasInstanceInput>,
+    last_masks: Vec<u8>,
     last_blas_revision: Option<u64>,
 }
 
@@ -453,6 +454,7 @@ impl TlasManager {
             populated_slots: 0,
             rt_available,
             last_instances: Vec::new(),
+            last_masks: Vec::new(),
             last_blas_revision: None,
         }
     }
@@ -484,6 +486,14 @@ impl TlasManager {
         encoder: &mut wgpu::CommandEncoder,
         instances: &[TlasInstanceInput],
         blas_manager: &BlasManager,
+    ) -> Result<(), AccelerationError> {
+        self.build_masked(encoder, instances, blas_manager, &[])
+    }
+
+    /// Optional per-instance visibility masks. Missing entries retain all bits.
+    pub fn build_masked(
+        &mut self, encoder: &mut wgpu::CommandEncoder, instances: &[TlasInstanceInput],
+        blas_manager: &BlasManager, masks: &[u8],
     ) -> Result<(), AccelerationError> {
         if !self.rt_available {
             return Err(AccelerationError::Unsupported);
@@ -533,6 +543,7 @@ impl TlasManager {
         if self.tlas.is_some()
             && self.last_blas_revision == Some(blas_manager.revision())
             && self.last_instances == instances
+            && self.last_masks == masks
         {
             return Ok(());
         }
@@ -549,7 +560,7 @@ impl TlasManager {
         for i in 0..count as usize {
             let input = &instances[i];
             if let Some(blas) = blas_manager.get_blas(input.mesh_id) {
-                tlas[i] = Some(wgpu::TlasInstance::new(blas, input.transform, 0, 0xFF));
+                tlas[i] = Some(wgpu::TlasInstance::new(blas, input.transform, 0, masks.get(i).copied().unwrap_or(0xFF)));
             }
         }
         for i in count as usize..self.populated_slots {
@@ -564,6 +575,8 @@ impl TlasManager {
         );
         self.last_instances.clear();
         self.last_instances.extend_from_slice(instances);
+        self.last_masks.clear();
+        self.last_masks.extend_from_slice(masks);
         self.last_blas_revision = Some(blas_manager.revision());
         Ok(())
     }
