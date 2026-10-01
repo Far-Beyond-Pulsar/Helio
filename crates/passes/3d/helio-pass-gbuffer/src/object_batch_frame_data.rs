@@ -52,6 +52,15 @@ pub struct ObjectBatchFrameData<'a> {
     pub opaque_ranges: &'a [(u32, u64, u32, u32)],
     pub transparent_ranges: &'a [(u32, u64, u32, u32)],
     pub forward_ranges: &'a [(u32, u64, u32, u32)],
+    /// Current-frame GPU range tables, packed in deterministic sorted order.
+    pub opaque_ranges_gpu: &'a wgpu::Buffer,
+    pub transparent_ranges_gpu: &'a wgpu::Buffer,
+    pub forward_ranges_gpu: &'a wgpu::Buffer,
+    /// Counts at words 0..3 and three indirect dispatch argument blocks after
+    /// them. Used by GPU range compaction; no CPU range-count upload needed.
+    pub range_counts_gpu: &'a wgpu::Buffer,
+    /// GPU-writable counts, including the per-range count regions.
+    pub draw_counts_gpu: &'a wgpu::Buffer,
     /// One-instance indirect draw args per static (non-movable) object,
     /// for the static shadow atlas.
     pub shadow_static_indirect: &'a wgpu::Buffer,
@@ -73,8 +82,11 @@ pub struct ObjectBatchFrameData<'a> {
     /// `shadow_static_draw_count`, `shadow_movable_draw_count`,
     /// `shadow_transmissive_draw_count`, then one count per entry of
     /// `opaque_ranges`, `transparent_ranges` and `forward_ranges` in that
-    /// order. Read it through the `*_count_slot` methods.
+    /// order. Range counts use three fixed-capacity regions; read them through
+    /// the `*_count_slot` methods.
     pub draw_counts: Option<&'a wgpu::Buffer>,
+    /// Capacity of one shading bucket's range-count region.
+    pub range_slot_capacity: u32,
 }
 
 impl<'a> ObjectBatchFrameData<'a> {
@@ -104,10 +116,10 @@ impl<'a> ObjectBatchFrameData<'a> {
     }
     /// GPU count for `transparent_ranges[range]`.
     pub fn transparent_range_count_slot(&self, range: usize) -> Option<crate::GpuDrawCount<'a>> {
-        self.draw_count_slot(4 + self.opaque_ranges.len() + range)
+        self.draw_count_slot(4 + self.range_slot_capacity as usize + range)
     }
     /// GPU count for `forward_ranges[range]`.
     pub fn forward_range_count_slot(&self, range: usize) -> Option<crate::GpuDrawCount<'a>> {
-        self.draw_count_slot(4 + self.opaque_ranges.len() + self.transparent_ranges.len() + range)
+        self.draw_count_slot(4 + self.range_slot_capacity as usize * 2 + range)
     }
 }

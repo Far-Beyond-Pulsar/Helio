@@ -214,13 +214,12 @@ pub struct RendererConfig {
     pub debug_mode: u32,
     pub render_scale: f32,
     pub perf_overlay_mode: PerfOverlayMode,
-    /// Resolution of each shadow atlas face (width × height). Default 1024.
-    /// Higher values improve shadow quality at the cost of VRAM (N² scaling).
+    /// Legacy custom-graph setting. Default graphs use `shadow_budget.max_resolution`.
     pub shadow_atlas_size: u32,
-    /// Maximum number of allocated shadow-map array layers. Each realtime light
-    /// reserves six consecutive faces. A capacity of 32 supports five lights
-    /// while keeping the two 1024px browser atlases to 256 MiB total.
+    /// Legacy custom-graph setting. Default graphs use packed residency and `shadow_budget`.
     pub shadow_face_capacity: u32,
+    /// GPU tile residency, atlas memory, and per-frame rendering limits.
+    pub shadow_budget: helio_pass_shadow_matrix::ShadowBudget,
     /// Enable the screen-space reflection pass. Default `false`.
     ///
     /// SSR traces the Hi-Z buffer per pixel and is one of the most expensive
@@ -321,6 +320,7 @@ impl RendererConfig {
             perf_overlay_mode: PerfOverlayMode::Disabled,
             shadow_atlas_size: 1024,
             shadow_face_capacity: 32,
+            shadow_budget: helio_pass_shadow_matrix::ShadowBudget::default(),
             enable_ssr: false,
             enable_foliage: true,
             foliage_blades_per_m2: None,
@@ -394,6 +394,12 @@ impl RendererConfig {
         self
     }
 
+    pub fn with_shadow_budget(mut self, budget: helio_pass_shadow_matrix::ShadowBudget) -> Self {
+        self.shadow_budget = budget;
+        self
+    }
+
+    /// Legacy custom-graph setting; use `with_shadow_budget` for default graphs.
     pub fn with_shadow_face_capacity(mut self, capacity: u32) -> Self {
         self.shadow_face_capacity = capacity.clamp(1, 256);
         self

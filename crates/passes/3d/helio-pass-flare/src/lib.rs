@@ -316,7 +316,7 @@ impl LensFlarePass {
                 wgpu::BufferUsages::STORAGE,
             ),
             fallback_lights: buffer("Lens no lights", 128, wgpu::BufferUsages::STORAGE),
-            fallback_matrices: buffer("Lens no shadow matrices", 64, wgpu::BufferUsages::STORAGE),
+            fallback_matrices: buffer("Lens no shadow matrices", 96, wgpu::BufferUsages::STORAGE),
             fallback_depth: depth_texture("Lens neutral depth", false),
             fallback_shadow: depth_texture("Lens empty shadow atlas", true),
             bindings: None,

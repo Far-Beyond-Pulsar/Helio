@@ -10,3 +10,6 @@ bytemuck = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 pollster = { workspace = true }
+
+naga = { version = "30", features = ["wgsl-in"] }
+glam = { workspace = true }

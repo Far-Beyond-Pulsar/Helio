@@ -316,8 +316,12 @@ pub struct SkyPass {
     use_high_perf: bool,
     volume_lowres_pipeline: wgpu::ComputePipeline,
     volume_lowres_bgl: wgpu::BindGroupLayout,
+    volume_lowres_bg: Option<wgpu::BindGroup>,
+    volume_lowres_bg_key: Option<(usize, usize, usize, usize)>,
     temporal_pipeline: wgpu::ComputePipeline,
     temporal_bgl: wgpu::BindGroupLayout,
+    temporal_bgs: [Option<wgpu::BindGroup>; 2],
+    temporal_bg_keys: [Option<(usize, usize, usize, usize)>; 2],
     temporal_params: wgpu::Buffer,
     volume_composite_pipeline: wgpu::RenderPipeline,
     volume_composite_bgl: wgpu::BindGroupLayout,
@@ -1640,8 +1644,12 @@ impl SkyPass {
             upsample_bgl,
             volume_lowres_pipeline,
             volume_lowres_bgl,
+            volume_lowres_bg: None,
+            volume_lowres_bg_key: None,
             temporal_pipeline,
             temporal_bgl,
+            temporal_bgs: [None, None],
+            temporal_bg_keys: [None, None],
             temporal_params,
             volume_composite_pipeline,
             volume_composite_bgl,
@@ -2202,38 +2210,33 @@ impl RenderPass for SkyPass {
         // long streaks and ghost silhouettes this pass used to exhibit.
         let use_cloud_temporal = volume_clouds_enabled && self.config.divisor == 1;
         if volume_clouds_enabled {
-            let compute_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Finite Cloud Volume Low Resolution BG"),
-                layout: &self.volume_lowres_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.camera_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: scene_sky_buf.map_or_else(
-                            || self.sky_uniform_buf.as_entire_binding(),
-                            |b| b.as_entire_binding(),
-                        ),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&self.quarter_color_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&self.quarter_data_view),
-                    },
-                ],
-            });
+            let sky_buffer = scene_sky_buf.unwrap_or(&self.sky_uniform_buf);
+            let key = (
+                &self.camera_buf as *const _ as usize,
+                sky_buffer as *const _ as usize,
+                &self.quarter_color_view as *const _ as usize,
+                &self.quarter_data_view as *const _ as usize,
+            );
+            if self.volume_lowres_bg_key != Some(key) {
+                self.volume_lowres_bg = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Finite Cloud Volume Low Resolution BG"),
+                    layout: &self.volume_lowres_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: sky_buffer.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.quarter_color_view) },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.quarter_data_view) },
+                    ],
+                }));
+                self.volume_lowres_bg_key = Some(key);
+            }
             let ce = unsafe { &mut *ctx.compute_encoder_ptr };
             let mut cpass = ce.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Finite Cloud Volume Low Resolution"),
                 timestamp_writes: None,
             });
             cpass.set_pipeline(&self.volume_lowres_pipeline);
-            cpass.set_bind_group(0, &compute_bg, &[]);
+            cpass.set_bind_group(0, self.volume_lowres_bg.as_ref().unwrap(), &[]);
             let qw = (self.width / self.config.divisor).max(1);
             let qh = (self.height / self.config.divisor).max(1);
             cpass.dispatch_workgroups(qw.div_ceil(8), qh.div_ceil(8), 1);
@@ -2245,10 +2248,17 @@ impl RenderPass for SkyPass {
         let history_write = 1 - self.history_ping;
 
         if use_cloud_temporal {
-            let temporal_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Finite Cloud Temporal Accumulation BG"),
-                layout: &self.temporal_bgl,
-                entries: &[
+            let temporal_key = (
+                &self.quarter_color_view as *const _ as usize,
+                &self.history_views[history_read] as *const _ as usize,
+                &self.history_views[history_write] as *const _ as usize,
+                &self.quarter_data_view as *const _ as usize,
+            );
+            if self.temporal_bg_keys[history_read] != Some(temporal_key) {
+                self.temporal_bgs[history_read] = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Finite Cloud Temporal Accumulation BG"),
+                    layout: &self.temporal_bgl,
+                    entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
                         resource: wgpu::BindingResource::TextureView(&self.quarter_color_view),
@@ -2285,15 +2295,17 @@ impl RenderPass for SkyPass {
                         binding: 7,
                         resource: wgpu::BindingResource::TextureView(&self.quarter_data_view),
                     },
-                ],
-            });
+                    ],
+                }));
+                self.temporal_bg_keys[history_read] = Some(temporal_key);
+            }
             let ce = unsafe { &mut *ctx.compute_encoder_ptr };
             let mut cpass = ce.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Finite Cloud Temporal Accumulation"),
                 timestamp_writes: None,
             });
             cpass.set_pipeline(&self.temporal_pipeline);
-            cpass.set_bind_group(0, &temporal_bg, &[]);
+            cpass.set_bind_group(0, self.temporal_bgs[history_read].as_ref().unwrap(), &[]);
             let qw = (self.width / self.config.divisor).max(1);
             let qh = (self.height / self.config.divisor).max(1);
             cpass.dispatch_workgroups(qw.div_ceil(8), qh.div_ceil(8), 1);

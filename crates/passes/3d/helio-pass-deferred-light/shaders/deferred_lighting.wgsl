@@ -98,7 +98,9 @@ struct GpuLight {
     ies_angle_offset:     f32,
 }
 
-struct LightMatrix { mat: mat4x4<f32> }
+struct LightMatrix { mat: mat4x4<f32>,
+    atlas: vec4f,
+    policy: vec4u, }
 
 // Water volume descriptor (simplified, matches libhelio::GpuWaterVolume layout)
 struct GpuWaterVolume {
@@ -158,10 +160,10 @@ struct ShadowCasterCounts {
 fn compare_shadow_atlases(uv: vec2<f32>, layer: u32, depth_ref: f32) -> f32 {
     var lit = 1.0;
     if shadow_caster_counts.movable_casters != 0u {
-        lit = textureSampleCompareLevel(shadow_atlas, shadow_sampler, uv, i32(layer), depth_ref);
+        lit = budget_compare_dynamic(uv, u32(i32(layer)), depth_ref);
     }
     if shadow_caster_counts.static_casters != 0u {
-        lit = min(lit, textureSampleCompareLevel(static_shadow_atlas, shadow_sampler, uv, i32(layer), depth_ref));
+        lit = min(lit, budget_compare_static(uv, u32(i32(layer)), depth_ref));
     }
     return lit;
 }
@@ -170,10 +172,10 @@ fn compare_shadow_atlases(uv: vec2<f32>, layer: u32, depth_ref: f32) -> f32 {
 fn load_shadow_occluder_depth(pixel: vec2<i32>, layer: u32) -> f32 {
     var depth = 1.0;
     if shadow_caster_counts.movable_casters != 0u {
-        depth = textureLoad(shadow_atlas, pixel, i32(layer), 0);
+        depth = budget_depth_dynamic(pixel, u32(i32(layer)));
     }
     if shadow_caster_counts.static_casters != 0u {
-        depth = min(depth, textureLoad(static_shadow_atlas, pixel, i32(layer), 0));
+        depth = min(depth, budget_depth_static(pixel, u32(i32(layer))));
     }
     return depth;
 }
@@ -335,7 +337,7 @@ fn sample_cascade_shadow(
         return 1.0;
     }
 
-    let filter_radius = (2.0 / ATLAS_SIZE) * cascade_scale;
+    let filter_radius = (2.0 / budget_resolution(layer)) * cascade_scale;
 
     // Per-pixel rotation to break up banding (stable hash — no frame counter)
     let theta = hash22(frag_coord) * 6.28318530718;
@@ -382,10 +384,10 @@ fn pcss_blocker_search(
         let sample_uv = shadow_uv + offset;
 
         // Convert UV to pixel coordinates for textureLoad (no filtering needed for blocker search)
-        let pixel_coord = vec2<i32>(sample_uv * ATLAS_SIZE);
+        let pixel_coord = vec2<i32>(sample_uv * budget_resolution(layer));
 
         // Bounds check to prevent out-of-range access
-        if any(pixel_coord < vec2<i32>(0)) || any(pixel_coord >= vec2<i32>(i32(ATLAS_SIZE))) {
+        if any(pixel_coord < vec2<i32>(0)) || any(pixel_coord >= vec2<i32>(i32(budget_resolution(layer)))) {
             continue;
         }
 
@@ -444,7 +446,7 @@ fn sample_cascade_shadow_pcss(
 
     // Step 1: Blocker search (average occluder depth)
     // Uses unbiased depth so nearby occluders are correctly identified.
-    let search_radius = config.pcss_light_size / ATLAS_SIZE;
+    let search_radius = config.pcss_light_size / budget_resolution(layer);
     let blocker = pcss_blocker_search(layer, shadow_uv, receiver_depth, search_radius,
                                        shadow_config.pcss_blocker_samples, theta);
 
@@ -454,9 +456,9 @@ fn sample_cascade_shadow_pcss(
 
     // Step 2: Compute penumbra size (distance-based filter width)
     let penumbra = pcss_penumbra_size(receiver_depth, blocker.x, config.pcss_light_size);
-    let filter_radius = clamp(penumbra / ATLAS_SIZE,
-                                config.filter_radius / ATLAS_SIZE,
-                                config.filter_radius * 3.0 / ATLAS_SIZE);
+    let filter_radius = clamp(penumbra / budget_resolution(layer),
+                                config.filter_radius / budget_resolution(layer),
+                                config.filter_radius * 3.0 / budget_resolution(layer));
 
     // Step 3: Variable-kernel PCF (filter size scales with penumbra)
     var lit_sum = 0.0;
@@ -478,26 +480,32 @@ fn sample_cascade_shadow_pcss(
 // once failed the test along every pane edge wherever a neighbouring texel
 // held no pane: an untinted rim and stair-stepped edges, most visible in the
 // coarse cascades, where a half-resolution texel covers several centimetres.
-fn glass_tint(uv: vec2<f32>, layer: i32, receiver: f32) -> vec3<f32> {
-    let dims = vec2<i32>(textureDimensions(shadow_transmittance));
-    let p = uv * vec2<f32>(dims) - 0.5;
-    let base = vec2<i32>(floor(p));
-    let f = p - floor(p);
-    var tint = vec3<f32>(0.0);
-    for (var i = 0; i < 4; i++) {
-        let o = vec2<i32>(i & 1, i >> 1);
-        let t = textureLoad(shadow_transmittance, clamp(base + o, vec2<i32>(0), dims - 1), layer, 0);
-        let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
-        tint += w * select(vec3<f32>(1.0), 1.0 - t.rgb, receiver < t.a);
+fn glass_tint(uv:vec2f, layer:i32, receiver:f32)->vec3f {
+    let face=u32(layer);
+    if !budget_valid(face,16u) {return vec3f(1);}
+    let physical=i32(budget_layer(face));
+    if physical>=i32(textureNumLayers(shadow_transmittance)) {return vec3f(1);}
+    let dims=vec2f(textureDimensions(shadow_transmittance));
+    let p=budget_uv(uv,face,dims)*dims-0.5;
+    let base=floor(p);let f=fract(p);var tint=vec3f(0);
+    let m=shadow_matrices[face];
+    let offset=select(m.atlas.xy,vec2f(0),m.policy.w==0u);
+    let size=select(m.atlas.z,1.0,m.policy.w==0u);
+    for(var i=0;i<4;i++) {
+        let o=vec2i(i&1,i>>1);
+        let pixel=clamp(vec2i(base)+o,vec2i(offset*dims),vec2i((offset+vec2f(size))*dims)-1);
+        let t=textureLoad(shadow_transmittance,pixel,physical,0);
+        let w=select(1.0-f.x,f.x,o.x==1)*select(1.0-f.y,f.y,o.y==1);
+        tint+=w*select(vec3f(1),1.0-t.rgb,receiver<t.a);
     }
-    return tint;
+    return mix(vec3f(1),tint,budget_strength(face));
 }
 
 fn light_transmittance(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
     if !ENABLE_SHADOWS { return vec3<f32>(1.0); }
     let light = lights[light_idx];
     if light.shadow_index == 4294967295u { return vec3<f32>(1.0); }
-    if light.shadow_index / 6u >= MAX_SHADOW_LIGHTS { return vec3<f32>(1.0); }
+    if light.shadow_index >= arrayLength(&shadow_matrices) { return vec3<f32>(1.0); }
 
     var light_dir: vec3<f32>;
     if light.light_type == 0u {
@@ -532,7 +540,7 @@ fn light_transmittance(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>) -> ve
     return glass_tint(uv, i32(layer), 1.0 - ndc.z);
 }
 
-fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord: vec2<f32>, frame: u32) -> f32 {
+fn raster_shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord: vec2<f32>, frame: u32) -> f32 {
     if !ENABLE_SHADOWS { return 1.0; }
     // MAX_SHADOW_LIGHTS bounds the atlas caster slot (shadow_index / 6), not
     // the light's row. SceneDB rows are entity indices, so a row bound silently
@@ -542,7 +550,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord:
 
     // Check if this light actually casts shadows (shadow_index != u32::MAX)
     if light.shadow_index == 4294967295u { return 1.0; }
-    if light.shadow_index / 6u >= MAX_SHADOW_LIGHTS { return 1.0; }
+    if light.shadow_index >= arrayLength(&shadow_matrices) { return 1.0; }
 
     // Normal-offset: shift the world-space query point along the surface normal
     // toward the light before projecting.  This eliminates self-shadowing caused
@@ -1457,4 +1465,91 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
 
     let contribution = select(spec_ind * ao_combined, spec_ind, has_lightmap);
     return vec4<f32>(contribution, 0.0);
+}
+
+// Logical face metadata maps all filtering into a guarded physical tile.
+fn budget_resolution(layer:u32)->f32 {
+    if layer>=arrayLength(&shadow_matrices) {return 128.0;}
+    let m=shadow_matrices[layer];
+    return select(max(f32(m.policy.z),128.0),1024.0,m.policy.w==0u);
+}
+fn budget_layer(layer:u32)->u32 {
+    return select(shadow_matrices[layer].policy.x,layer,shadow_matrices[layer].policy.w==0u);
+}
+fn budget_uv(uv:vec2f,layer:u32,dims:vec2f)->vec2f {
+    let m=shadow_matrices[layer];
+    let offset=select(m.atlas.xy,vec2f(0),m.policy.w==0u);
+    let size=select(m.atlas.z,1.0,m.policy.w==0u);
+    let half_texel=0.5/dims;
+    return clamp(offset+uv*size,offset+half_texel,offset+vec2f(size)-half_texel);
+}
+fn budget_valid(layer:u32,disabled:u32)->bool {
+    if layer>=arrayLength(&shadow_matrices) {return false;}
+    let m=shadow_matrices[layer];
+    return m.policy.w==0u || (m.policy.w==2u && m.atlas.z>0.0 && (m.policy.y&disabled)==0u);
+}
+fn budget_strength(layer:u32)->f32 {
+    let m=shadow_matrices[layer];return select(m.atlas.w,1.0,m.policy.w==0u);
+}
+
+fn budget_compare_dynamic(uv:vec2f,layer:u32,depth:f32)->f32 {
+    if !budget_valid(layer,32u) {return 1.0;}
+    if budget_layer(layer)>=textureNumLayers(shadow_atlas) {return 1.0;}
+    let value=textureSampleCompareLevel(shadow_atlas,shadow_sampler,budget_uv(uv,layer,vec2f(textureDimensions(shadow_atlas))),i32(budget_layer(layer)),depth);
+    return mix(1.0,value,budget_strength(layer));
+}
+fn budget_depth_dynamic(pixel:vec2i,layer:u32)->f32 {
+    if !budget_valid(layer,32u) {return 1.0;}
+    if budget_layer(layer)>=textureNumLayers(shadow_atlas) {return 1.0;}
+    let dims=vec2f(textureDimensions(shadow_atlas));
+    let uv=(vec2f(pixel)+0.5)/budget_resolution(layer);
+    return textureLoad(shadow_atlas,vec2i(budget_uv(uv,layer,dims)*dims),i32(budget_layer(layer)),0);
+}
+
+fn budget_compare_static(uv:vec2f,layer:u32,depth:f32)->f32 {
+    if !budget_valid(layer,16u) {return 1.0;}
+    if budget_layer(layer)>=textureNumLayers(static_shadow_atlas) {return 1.0;}
+    let value=textureSampleCompareLevel(static_shadow_atlas,shadow_sampler,budget_uv(uv,layer,vec2f(textureDimensions(static_shadow_atlas))),i32(budget_layer(layer)),depth);
+    return mix(1.0,value,budget_strength(layer));
+}
+fn budget_depth_static(pixel:vec2i,layer:u32)->f32 {
+    if !budget_valid(layer,16u) {return 1.0;}
+    if budget_layer(layer)>=textureNumLayers(static_shadow_atlas) {return 1.0;}
+    let dims=vec2f(textureDimensions(static_shadow_atlas));
+    let uv=(vec2f(pixel)+0.5)/budget_resolution(layer);
+    return textureLoad(static_shadow_atlas,vec2i(budget_uv(uv,layer,dims)*dims),i32(budget_layer(layer)),0);
+}
+
+// Bounded screen-space fallback, shared by resident and nonresident lights so
+// transitions across the atlas budget do not toggle contact visibility.
+fn contact_visibility(light:GpuLight,position:vec3f,normal:vec3f)->f32 {
+    if (light._pad&64u)!=0u {return 1.0;}
+    let direction=select(normalize(light.position_range.xyz-position),normalize(-light.direction_outer.xyz),light.light_type==0u);
+    let origin=position+normal*0.02;
+    let reach=select(min(length(light.position_range.xyz-origin),0.5),0.5,light.light_type==0u);
+    let dims=vec2i(textureDimensions(gbuf_depth));
+    for(var i=1u;i<=16u;i++) {
+        let p=origin+direction*(reach*f32(i)/16.0);
+        let clip=cameras[0].view_proj*vec4f(p,1);
+        if clip.w<=0.0 {break;}
+        let ndc=clip.xyz/clip.w;let uv=vec2f(ndc.x*0.5+0.5,0.5-ndc.y*0.5);
+        if any(uv<=vec2f(0)) || any(uv>=vec2f(1)) {break;}
+        let depth=textureLoad(gbuf_depth,vec2i(uv*vec2f(dims)),0);
+        if depth>=1.0 {continue;}
+        let h=cameras[0].view_proj_inv*vec4f(ndc.xy,depth,1);
+        let hit=h.xyz/h.w;
+        let delta=length(p-cameras[0].position_near.xyz)-length(hit-cameras[0].position_near.xyz);
+        if delta>0.015 && delta<0.08 {
+            let edge=min(min(uv.x,1.0-uv.x),min(uv.y,1.0-uv.y));
+            return 1.0-smoothstep(0.0,0.05,edge)*(1.0-f32(i)/17.0);
+        }
+    }
+    return 1.0;
+}
+fn shadow_factor(light_idx:u32,position:vec3f,normal:vec3f,pixel:vec2f,frame:u32)->f32 {
+    if !ENABLE_SHADOWS {return 1.0;}
+    let light=lights[light_idx];
+    let requested=select(light.shadow_index!=0xffffffffu,(light._pad&4u)!=0u,(light._pad&8u)!=0u);
+    if !requested || (light._pad&48u)==48u {return 1.0;}
+    return min(raster_shadow_factor(light_idx,position,normal,pixel,frame),contact_visibility(light,position,normal));
 }

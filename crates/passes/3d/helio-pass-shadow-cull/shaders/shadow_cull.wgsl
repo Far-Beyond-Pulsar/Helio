@@ -6,6 +6,8 @@ const MAX_FACES: u32 = 256u;
 
 struct GpuShadowMatrix {
     mat: mat4x4<f32>,
+    atlas: vec4f,
+    policy: vec4u,
 }
 
 struct GpuInstance {
