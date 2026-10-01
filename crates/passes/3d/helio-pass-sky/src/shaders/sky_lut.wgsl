@@ -4,7 +4,7 @@
 // texture.  The main SkyPass samples this LUT instead of running the atmosphere
 // ray-march per screen-pixel, giving ~46× cost reduction at 1280×720.
 //
-// Panoramic layout:
+// Authored-sky panoramic layout (planetary fallback uses planetary_lut.wgsl):
 //   u = azimuth / (2π) + 0.5            ∈ [0, 1]   (wraps)
 //   v = sin(elevation) * 0.5 + 0.5      ∈ [0, 1]   (sin-mapping, better horizon res)
 
@@ -74,8 +74,8 @@ const DEPTH_STEPS: u32 = 4u;
 
 fn ray_sphere(ro: vec3<f32>, rd: vec3<f32>, r: f32) -> vec2<f32> {
     let b    = dot(ro, rd);
-    let c    = dot(ro, ro) - r * r;
-    let disc = b * b - c;
+    let perpendicular = cross(ro, rd);
+    let disc = r * r - dot(perpendicular, perpendicular);
     if disc < 0.0 { return vec2<f32>(-1.0, -1.0); }
     let s = sqrt(disc);
     return vec2<f32>(-b - s, -b + s);
@@ -172,11 +172,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let azimuth   = (uv.x - 0.5) * 2.0 * PI;
     let sin_elev  = uv.y * 2.0 - 1.0;        // [-1, 1]
     let cos_elev  = sqrt(max(1.0 - sin_elev * sin_elev, 0.0));
-    let ray_dir   = vec3<f32>(
+    var ray_dir   = vec3<f32>(
         cos_elev * cos(azimuth),
         sin_elev,
         cos_elev * sin(azimuth),
     );
+    if planetary_eye.w > 0.0 { ray_dir = planet_sky_direction(uv); }
 
     let cam_atm = select(vec3<f32>(0.0, sky.earth_radius + 0.001, 0.0), planetary_eye.xyz, planetary_eye.w > 0.0);
 

@@ -351,6 +351,73 @@ fn planetary_sky_follows_the_world_eye_and_sun_through_resize() {
     }
 }
 
+/// The thin orbital limb must remain circular at arbitrary world orientations.
+/// A fixed world-Y panorama used to leak bright angular wedges outside the
+/// shell and miss whole sectors of the limb. No terrain is needed to expose it.
+#[test]
+fn orbital_atmosphere_has_no_wedges_outside_the_shell() {
+    const SIZE: u32 = 513;
+    let Some(mut editor) = editor(SIZE, SIZE) else { return };
+    editor.renderer.set_editor_mode(false);
+    editor.renderer.set_tsr_quality(None);
+    editor.renderer.set_jitter_enabled(false);
+    let radius = 6_371_000.0f64;
+    for (case, distance_scale, up) in [
+        ("north", 1.5, Vec3::Y),
+        ("equator", 1.5, Vec3::X),
+        ("tilted", 3.0, Vec3::new(0.3, 0.7, -0.4).normalize()),
+        ("distant", 16.0, Vec3::new(-0.4, 0.2, 0.8).normalize()),
+    ] {
+        let distance = radius * distance_scale;
+        let eye = up.as_dvec3() * distance;
+        let outer_angle = ((radius + 60_000.0) / distance).asin();
+        let half_fov_tan = outer_angle.tan() * 1.25;
+        editor.renderer.set_planetary_sky(Some(helio_pass_sky::PlanetarySky::earth_like(eye.to_array(), radius, up.to_array())));
+        let camera = Camera::perspective_look_at(Vec3::ZERO, -up, up.any_orthonormal_vector(),
+            (2.0 * half_fov_tan.atan()) as f32, 1.0, 0.05, 400_000_000.0);
+        editor.renderer.find_pass_mut::<helio_pass_tsr::TsrPass>().map(|p| p.reset_history());
+        for _ in 0..12 { editor.render(&camera); }
+        let pixels = editor.rgba();
+        if let Ok(output) = std::env::var("HELIO_ATMOSPHERE_CAPTURE") {
+            std::fs::create_dir_all(&output).unwrap();
+            let bytes: Vec<_> = pixels.iter().flat_map(|p| p.iter().copied()).collect();
+            image::save_buffer(std::path::Path::new(&output).join(format!("{case}.png")),
+                &bytes, SIZE, SIZE, image::ColorType::Rgba8).unwrap();
+        }
+        let mut outside = 0;
+        let mut outside_bright = 0;
+        let mut sectors = [[0usize; 2]; 24];
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let nx = 2.0 * (f64::from(x) + 0.5) / f64::from(SIZE) - 1.0;
+                let ny = 2.0 * (f64::from(y) + 0.5) / f64::from(SIZE) - 1.0;
+                let tan_theta = nx.hypot(ny) * half_fov_tan;
+                let impact = distance * tan_theta / (1.0 + tan_theta * tan_theta).sqrt();
+                let pixel = pixels[(y * SIZE + x) as usize];
+                // Final graph FXAA may cover two neighbouring pixels. Test
+                // outside that footprint, not against a hard pre-AA boundary.
+                if nx.hypot(ny) > outer_angle.tan() / half_fov_tan + 4.0 / f64::from(SIZE) {
+                    outside += 1;
+                    outside_bright += usize::from(pixel[2] > 4);
+                }
+                if impact > radius + 3_000.0 && impact < radius + 18_000.0 {
+                    let azimuth = (ny.atan2(nx) + std::f64::consts::PI) / std::f64::consts::TAU;
+                    let sector = ((azimuth * 24.0) as usize).min(23);
+                    sectors[sector][0] += 1;
+                    sectors[sector][1] += usize::from(pixel[2] > 20);
+                }
+            }
+        }
+        eprintln!("ORBITAL_ATMOSPHERE {case}: outside={outside_bright}/{outside}, limb sectors={sectors:?}");
+        assert!(outside > 10_000);
+        assert_eq!(outside_bright, 0, "{case}: light leaks outside the atmosphere");
+        for (sector, [count, bright]) in sectors.into_iter().enumerate() {
+            assert!(count > 3 && bright * 10 >= count * 9,
+                "{case}: dark limb sector {sector}: {bright}/{count}");
+        }
+    }
+}
+
 /// Inspector edits get only one rendered frame before an idle viewport.
 /// Discarding colour history must show that edit without rebuilding columns.
 #[test]

@@ -61,8 +61,8 @@ pub const CLOUD_VOLUME_COMPOSITE_SHADER: &str = include_str!("shaders/cloud_volu
 pub const CLOUD_TEMPORAL_SHADER: &str = include_str!("shaders/cloud_temporal.wgsl");
 
 // ── Atmospheric Sky LUT Shader (Hillaire 2020) ──────────────────────────────
-pub const SKY_LUT_SHADER: &str = include_str!("shaders/sky_lut.wgsl");
-pub const SKY_SHADER: &str = include_str!("shaders/sky.wgsl");
+pub const SKY_LUT_SHADER: &str = concat!(include_str!("shaders/planetary_lut.wgsl"), include_str!("shaders/sky_lut.wgsl"));
+pub const SKY_SHADER: &str = concat!(include_str!("shaders/planetary_lut.wgsl"), include_str!("shaders/sky.wgsl"));
 
 pub const LUT_WIDTH: u32 = 192;
 pub const LUT_HEIGHT: u32 = 108;
