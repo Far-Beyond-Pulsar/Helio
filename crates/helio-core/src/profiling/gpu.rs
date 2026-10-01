@@ -225,6 +225,24 @@ impl GpuProfiler {
         }
     }
 
+    /// A profiler that never records and owns no GPU objects. Used for worker
+    /// recordings made while timing is off, which would otherwise allocate a
+    /// query set and readback buffers per recorded pass per frame.
+    pub fn new_inert() -> Self {
+        Self {
+            query_set: None,
+            query_buffer: None,
+            readback_slots: Vec::new(),
+            pending_queries: VecDeque::new(),
+            next_index: 0,
+            last_timings: Vec::new(),
+            last_completed_frame: None,
+            dropped_readbacks: 0,
+            query_overflows: 0,
+            timestamp_period: 1.0,
+        }
+    }
+
     /// Writes a start timestamp for a pass.
     ///
     /// This is called internally by `PassContext::begin_render_pass()`.

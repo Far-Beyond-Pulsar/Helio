@@ -176,17 +176,70 @@ pub(crate) fn compute_parallel_layers(
     result
 }
 
+/// Groups passes into recording units and layers the units.
+///
+/// A unit is one pass, or one whole fused chain: a chain shares a single open
+/// `wgpu::RenderPass`, so it must be recorded by one thread. A unit's reads and
+/// writes are the union of its members', and units in one layer have no
+/// declared dependency between them. Each layer lists its units' pass ranges in
+/// ascending order, and the units themselves are ordered by first pass index,
+/// which is a valid topological order and matches serial recording.
+pub(crate) fn compute_unit_layers(
+    writes: &[Vec<&str>],
+    reads: &[Vec<&str>],
+    chains: &[std::ops::Range<usize>],
+) -> Vec<Vec<std::ops::Range<usize>>> {
+    assert_eq!(writes.len(), reads.len());
+    let mut units: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut index = 0;
+    while index < writes.len() {
+        let range = chains
+            .iter()
+            .find(|chain| chain.start == index && chain.end <= writes.len())
+            .cloned()
+            .unwrap_or(index..index + 1);
+        index = range.end;
+        units.push(range);
+    }
+    let unit_writes: Vec<Vec<&str>> = units
+        .iter()
+        .map(|range| range.clone().flat_map(|i| writes[i].iter().copied()).collect())
+        .collect();
+    let unit_reads: Vec<Vec<&str>> = units
+        .iter()
+        .map(|range| range.clone().flat_map(|i| reads[i].iter().copied()).collect())
+        .collect();
+    compute_parallel_layers(&unit_writes, &unit_reads)
+        .into_iter()
+        .map(|layer| layer.into_iter().map(|unit| units[unit].clone()).collect())
+        .collect()
+}
+
 impl RenderGraph {
-    /// Fused render passes and worker recording are deliberately exclusive
-    /// scheduling modes. A fused chain keeps one encoder/render pass alive;
-    /// trying to interleave an unrelated worker encoder around that lifetime
-    /// is invalid wgpu usage. When the dependency graph has real independent
-    /// work, prefer valid parallel command buffers and record the would-be
-    /// chain members as ordinary standalone passes.
-    pub(crate) fn prefer_parallel_recording_over_fusion(&mut self) {
-        if self.parallel_layers.iter().any(|layer| layer.len() > 1) {
+    /// Whether the graph records independent units on worker threads: enabled,
+    /// every pass allows it, and at least one layer has units to overlap.
+    pub(crate) fn parallel_recording_active(&self) -> bool {
+        self.parallel_recording
+            && !cfg!(target_arch = "wasm32")
+            && self.parallel_units.iter().any(|layer| layer.len() > 1)
+            && self.passes.iter().all(|pass| pass.supports_parallel_recording())
+    }
+
+    /// Recomputes the recording units and their layers from the current
+    /// chains. A fused chain is recorded as one unit, so chains and worker
+    /// recording coexist. With worker recording switched off, the serial
+    /// executor keeps its historical behaviour of recording would-be chain
+    /// members as ordinary standalone passes whenever the graph has
+    /// independent work.
+    pub(crate) fn finish_chain_detection(&mut self) {
+        if !self.parallel_recording && self.parallel_layers.iter().any(|layer| layer.len() > 1) {
             self.subpass_chains.clear();
         }
+        let units = {
+            let (writes, reads, _) = self.chain_read_write_sets();
+            compute_unit_layers(&writes, &reads, &self.subpass_chains)
+        };
+        self.parallel_units = units;
     }
 
     /// Detect chains of adjacent passes where each writes a resource the next
@@ -199,7 +252,7 @@ impl RenderGraph {
         let dummy_signature: Vec<Option<Vec<usize>>> = vec![Some(vec![0]); len];
         self.subpass_chains =
             compute_chains(&writes_set, &reads_set, &no_transparent, &dummy_signature);
-        self.prefer_parallel_recording_over_fusion();
+        self.finish_chain_detection();
     }
 
     /// Same as `detect_subpass_chains`, but `attachments[i]` gives the exact set
@@ -208,7 +261,7 @@ impl RenderGraph {
     pub(crate) fn detect_subpass_chains_probed(&mut self, attachments: &[Option<Vec<usize>>]) {
         let (writes_set, reads_set, transparent) = self.chain_read_write_sets();
         self.subpass_chains = compute_chains(&writes_set, &reads_set, &transparent, attachments);
-        self.prefer_parallel_recording_over_fusion();
+        self.finish_chain_detection();
     }
 
     pub(crate) fn chain_read_write_sets(&self) -> (Vec<Vec<&str>>, Vec<Vec<&str>>, Vec<bool>) {
@@ -244,7 +297,7 @@ impl RenderGraph {
 
 #[cfg(test)]
 mod chain_tests {
-    use super::{compute_chains, compute_parallel_layers};
+    use super::{compute_chains, compute_parallel_layers, compute_unit_layers};
 
     fn sig(ids: &[usize]) -> Option<Vec<usize>> {
         Some(ids.to_vec())
@@ -413,5 +466,22 @@ mod chain_tests {
         let b = super::chain_label(&["GBufferPass", "PortalInstancePass"]);
         assert!(std::ptr::eq(a, b));
         assert_ne!(super::chain_label(&["GBufferPass"]), a);
+    }
+
+    #[test]
+    fn a_fused_chain_is_one_unit_in_one_layer() {
+        // 0 -> 1 chained; 2 is independent of both; 3 reads what 1 wrote.
+        let writes = vec![vec!["a"], vec!["b"], vec!["c"], vec![]];
+        let reads = vec![vec![], vec!["a"], vec![], vec!["b"]];
+        let layers = compute_unit_layers(&writes, &reads, &[0..2]);
+        assert_eq!(layers, vec![vec![0..2, 2..3], vec![3..4]]);
+    }
+
+    #[test]
+    fn without_chains_units_match_passes() {
+        let writes = vec![vec!["a"], vec!["b"], vec!["c"]];
+        let reads = vec![vec![], vec!["a"], vec![]];
+        let layers = compute_unit_layers(&writes, &reads, &[]);
+        assert_eq!(layers, vec![vec![0..1, 2..3], vec![1..2]]);
     }
 }

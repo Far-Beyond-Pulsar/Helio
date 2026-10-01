@@ -595,6 +595,21 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         false
     }
 
+    /// Whether this pass may be recorded on a worker thread, concurrently with
+    /// passes that have no declared read/write dependency on it.
+    ///
+    /// A parallel layer runs every member's `prepare()` first, then records
+    /// all `execute()` calls at once, then runs every `publish()`. A pass whose
+    /// `execute()` reads registry data published by another pass without
+    /// declaring the matching resource, or that touches state shared with
+    /// another pass outside the registry, must return `false`: the graph then
+    /// records the whole frame serially.
+    ///
+    /// Default `true`.
+    fn supports_parallel_recording(&self) -> bool {
+        true
+    }
+
     /// Optionally prepares per-frame data before GPU execution.
     ///
     /// Called once per frame **before** `execute()`. Use this to upload per-frame uniforms

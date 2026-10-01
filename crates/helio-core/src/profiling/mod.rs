@@ -160,6 +160,12 @@ pub struct Profiler {
 }
 
 impl Profiler {
+    fn next_instance_id() -> u64 {
+        static NEXT_INSTANCE_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        NEXT_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Creates a new profiler.
     ///
     /// # Performance
@@ -174,13 +180,28 @@ impl Profiler {
     /// - `device`: GPU device for creating query sets
     /// - `queue`: GPU queue (unused currently, reserved for async readback)
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-        static NEXT_INSTANCE_ID: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(1);
         Self {
-            instance_id: NEXT_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            instance_id: Self::next_instance_id(),
             cpu: CpuProfiler::new(),
             gpu: GpuProfiler::new(device, queue),
             enabled: cfg!(feature = "profiling"),
+            snapshot: RenderTimingSnapshot::default(),
+            gpu_frame_ms: None,
+        }
+    }
+
+    /// Creates the profiler for one worker recording. With `timed` off it is
+    /// inert (no query set, no readback buffers, nothing written), which keeps
+    /// per-frame worker recordings free of GPU allocations.
+    pub(crate) fn new_worker(device: &wgpu::Device, queue: &wgpu::Queue, timed: bool) -> Self {
+        if timed {
+            return Self::new(device, queue);
+        }
+        Self {
+            instance_id: Self::next_instance_id(),
+            cpu: CpuProfiler::new(),
+            gpu: GpuProfiler::new_inert(),
+            enabled: false,
             snapshot: RenderTimingSnapshot::default(),
             gpu_frame_ms: None,
         }
