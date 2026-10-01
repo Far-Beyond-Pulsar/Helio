@@ -328,6 +328,20 @@ fn column_hint(level: u32, face: u32, ci: i32, cj: i32) -> u32 {
     return 0u;
 }
 
+// Changing resolution is not a ray/solid boundary. A different level can
+// already be solid at the cursor, although the ray has only visited air at
+// its current level. Keep walking the current field in that overlap instead
+// of publishing an interior hit with the last (unrelated) face normal.
+fn level_contains_solid(c: Cursor, record: u32) -> bool {
+    let col = records[record];
+    if c.k < col.k_lo * 8 { return true; }
+    let band = (c.k >> 3u) - col.k_lo;
+    if band >= i32(band_count(col)) { return false; }
+    let s = brick_state(col, u32(band));
+    if s.x == 2u { return brick_bit(s.y, u32(c.i & 7), u32(c.j & 7), u32(c.k & 7)); }
+    return s.x == 1u;
+}
+
 // Walk the ray from t_start to t_end. Level selection uses
 // `(t + lod_offset) * lod_scale` (dither for primary rays, eye distance for
 // secondary rays).
@@ -408,18 +422,21 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
             let want = level_for((t + lod_offset) * lod_scale * (1.0 + dither * (hd - 0.5)));
             if want > cur.level {
                 let d = want - cur.level;
-                cur.i >>= d;
-                cur.j >>= d;
-                cur.k >>= d;
-                cur.level = want;
+                var coarser = cur;
+                coarser.i >>= d;
+                coarser.j >>= d;
+                coarser.k >>= d;
+                coarser.level = want;
+                let found = find_column(column_key0(cur.face, want, coarser.i >> 3u), bitcast<u32>(coarser.j >> 3u));
+                if found == NONE || !column_valid(records[found]) || !level_contains_solid(coarser, found) {
+                    cur = coarser;
+                }
             } else if want < cur.level {
                 let finer = locate(r, fr, t, want);
                 let hint = column_hint(want, finer.face, finer.i >> 3u, finer.j >> 3u);
-                if hint == 1u {
-                    cur = finer;
-                } else if hint == 2u {
+                if hint != 0u {
                     let found = find_column(column_key0(finer.face, want, finer.i >> 3u), bitcast<u32>(finer.j >> 3u));
-                    if found != NONE && column_valid(records[found]) {
+                    if found != NONE && column_valid(records[found]) && !level_contains_solid(finer, found) {
                         cur = finer;
                     }
                 }

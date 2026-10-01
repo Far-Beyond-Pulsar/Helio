@@ -12,6 +12,8 @@ use std::sync::{mpsc, Mutex};
 #[derive(Clone)]
 pub struct WindowRequest {
     pub eye: DVec3,
+    /// A bounded motion forecast. Coverage metadata remains centred on eye.
+    pub prefetch_eye: Option<DVec3>,
     /// Level-0 range (metres).
     pub lod0: f64,
     /// Radius bounding every solid cell.
@@ -207,7 +209,9 @@ impl WindowPlanner {
             // Height over the highest terrain the level's window can hold:
             // over a meadow far below, fine levels are not needed at all.
             let altitude = grid.radial(eye) - self.local_outer(request, level, reach);
-            let needed = level == top_level || (altitude < reach && inner < horizon);
+            let future = request.prefetch_eye.unwrap_or(eye);
+            let future_altitude = grid.radial(future) - self.local_outer(request, level, reach);
+            let needed = level == top_level || (altitude.min(future_altitude) < reach && inner < horizon);
             let state = &mut self.levels[level as usize];
             if !needed {
                 if state.active {
@@ -230,7 +234,10 @@ impl WindowPlanner {
                 // The coarsest level covers the whole world.
                 if grid.is_plane() { f64::from(grid.cells()) * grid.voxel_size() * 1.5 } else { r0 * 4.0 }
             } else {
-                ((reach * reach - altitude.max(0.0).powi(2)).max(0.0).sqrt().min(horizon) + col * 2.0).min(cap)
+                let future_reach = (reach * reach - future_altitude.max(0.0).powi(2)).max(0.0).sqrt();
+                let motion = grid.ground_distance(eye, future);
+                ((reach * reach - altitude.max(0.0).powi(2)).max(0.0).sqrt()
+                    .max(future_reach + motion.min(reach * 0.5)).min(horizon) + col * 2.0).min(cap)
             };
             let moved = if grid.is_plane() { state.center.distance(dir) } else { state.center.distance(dir) * r0 };
             if state.active && moved <= col * 3.0 && (radius - state.radius).abs() <= state.radius * 0.08 + col {
@@ -312,5 +319,40 @@ impl Drop for WindowWorker {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Planet, PlanetRecipe, TerrainSource};
+
+    #[test]
+    fn descending_forecast_admits_fine_windows_before_arrival_and_releases_them_at_stop() {
+        let planet = std::sync::Arc::new(Planet::new(PlanetRecipe {
+            shape: crate::grid::Shape::Plane,
+            plane_size_m: 1000.0,
+            terrain: TerrainSource { generator: crate::landform::FLAT_ID.into(), ..Default::default() },
+            ..Default::default()
+        }).unwrap());
+        let mut planner = WindowPlanner::new(*planet.grid());
+        let mut request = WindowRequest {
+            eye: DVec3::Y * 1000.0,
+            prefetch_eye: None,
+            lod0: 100.0,
+            outer_radius: planet.outer_radius(),
+            planet: Some(planet), serial: 1,
+        };
+        assert!(!planner.update(&request).levels.iter().any(|l| l.level == 0 && l.active));
+        request.prefetch_eye = Some(DVec3::Y * 40.0);
+        request.serial += 1;
+        let update = planner.update(&request);
+        let fine = update.levels.iter().find(|l| l.level == 0).unwrap();
+        assert!(fine.active && !fine.adds.is_empty());
+        request.prefetch_eye = None;
+        request.serial += 1;
+        let update = planner.update(&request);
+        let fine = update.levels.iter().find(|l| l.level == 0).unwrap();
+        assert!(!fine.active && !fine.removes.is_empty());
     }
 }

@@ -67,6 +67,8 @@ struct Globals {
     // Hemisphere ambient axis (xyz) and ground-bounce colour (rgb).
     ambient_up:        vec4<f32>,
     ambient_ground:    vec4<f32>,
+    atmosphere_eye_radius: vec4<f32>,
+    atmosphere_sun: vec4<f32>,
 }
 
 /// GpuLight (64 bytes, matches libhelio::GpuLight)
@@ -1373,8 +1375,44 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         }
     }
 
+    // Aerial perspective is applied after lighting, never baked into albedo.
+    // This preserves material/debug buffers and edits, and uses the same
+    // planetary radius and eye as the atmosphere's sky view.
+    if globals.atmosphere_eye_radius.w > 0.0 {
+        let transmission = planetary_transmission(world_pos);
+        let sun = normalize(globals.atmosphere_sun.xyz);
+        let daylight = clamp(dot(normalize(globals.atmosphere_eye_radius.xyz), sun) * 2.0 + 0.15, 0.02, 1.0);
+        let toward = max(dot(normalize(world_pos - cameras[0].position_near.xyz), sun), 0.0);
+        let haze = mix(vec3<f32>(0.28, 0.47, 0.78), vec3<f32>(0.85, 0.73, 0.54), pow(toward, 16.0)) * daylight;
+        color = color * transmission + haze * (vec3<f32>(1.0) - transmission);
+    }
     // Tonemapping & bloom handled by PostProcessPass — write raw HDR linear.
     return vec4<f32>(color, alpha);
+}
+
+// Four samples through the atmospheric part of the eye/surface segment.
+// This is a bounded single-scatter approximation, not volumetric cloud GI.
+fn planetary_transmission(position: vec3<f32>) -> vec3<f32> {
+    let eye = globals.atmosphere_eye_radius.xyz;
+    let radius = globals.atmosphere_eye_radius.w;
+    if radius <= 0.0 { return vec3<f32>(1.0); }
+    let delta = (position - cameras[0].position_near.xyz) * 0.001;
+    let distance = length(delta);
+    if distance < 0.00001 { return vec3<f32>(1.0); }
+    let ray = delta / distance;
+    let b = dot(eye, ray);
+    let c = dot(eye, eye) - (radius + 60.0) * (radius + 60.0);
+    let disc = b*b - c;
+    if disc <= 0.0 { return vec3<f32>(1.0); }
+    let start = max(0.0, -b - sqrt(disc));
+    let end = min(distance, -b + sqrt(disc));
+    let ds = max(end - start, 0.0) / 4.0;
+    var optical = 0.0;
+    for (var i = 0u; i < 4u; i++) {
+        let p = eye + ray * (start + (f32(i) + 0.5) * ds);
+        optical += exp(-max(length(p) - radius, 0.0) / 8.0) * ds;
+    }
+    return exp(-vec3<f32>(0.0058, 0.0135, 0.0331) * optical);
 }
 
 // Reflection composition is deliberately isolated from base lighting so neither
@@ -1456,5 +1494,5 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
     }
 
     let contribution = select(spec_ind * ao_combined, spec_ind, has_lightmap);
-    return vec4<f32>(contribution, 0.0);
+    return vec4<f32>(contribution * planetary_transmission(world_pos), 0.0);
 }

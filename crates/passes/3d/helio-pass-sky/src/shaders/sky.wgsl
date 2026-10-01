@@ -54,6 +54,7 @@ struct SkyUniforms {
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(1) @binding(0) var<storage, read> sky_rows: array<SkyUniforms>;
 var<private> sky: SkyUniforms;
+@group(0) @binding(1) var<uniform> planetary_eye: vec4<f32>;
 @group(1) @binding(1) var          sky_lut:     texture_2d<f32>;
 @group(1) @binding(2) var          sky_sampler: sampler;
 
@@ -374,7 +375,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Below horizon: preserve sunset colors with gradual darkening to night.
-    if ray_dir.y < 0.0 {
+    if ray_dir.y < 0.0 && planetary_eye.w == 0.0 {
         let t = clamp(-ray_dir.y, 0.0, 1.0); // 0 at horizon, 1 at straight down
         let dark = vec3<f32>(0.02, 0.01, 0.005);
         let descent = pow(t, 1.8); // smooth non-linear falloff
@@ -390,7 +391,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Sun disc — rendered per-pixel so it stays sharp at any resolution
     let cos_a = dot(ray_dir, sky.sun_direction);
-    if cos_a > sky.sun_disk_cos {
+    let eye = planetary_eye.xyz;
+    let planet_occludes_sun = planetary_eye.w > 0.0 && ray_sphere(eye, ray_dir, sky.earth_radius).x > 0.0;
+    if cos_a > sky.sun_disk_cos && !planet_occludes_sun {
         let t = smoothstep(sky.sun_disk_cos, sky.sun_disk_cos + 0.0002, cos_a);
         sky_col += t * vec3<f32>(1.5, 1.3, 0.9) * sky.sun_intensity * 0.08;
     }
@@ -400,6 +403,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         sky_col = trace_clouds(cameras[0].position_near.xyz, ray_dir, sky_col);
     }
 
-    let final_col = aces_approx(sky_col * sky.exposure);
+    let final_col = select(aces_approx(sky_col * sky.exposure), sky_col * sky.exposure, planetary_eye.w > 0.0);
     return vec4<f32>(final_col, 1.0);
 }

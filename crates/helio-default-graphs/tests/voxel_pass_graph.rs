@@ -231,7 +231,7 @@ impl Editor {
 
     /// Fractions of pixels in the grid's axis colours (red x axis, green z
     /// axis) and in its neutral grey line colour.
-    fn overlay_fractions(&self) -> (f64, f64) {
+    fn rgba(&self) -> Vec<[u8; 4]> {
         let size = self.target.size();
         let row = (size.width * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -253,20 +253,21 @@ impl Editor {
         buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
         self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let data = buffer.slice(..).get_mapped_range().unwrap();
-        let (mut axis, mut grey, mut total) = (0usize, 0usize, 0usize);
-        for y in 0..size.height as usize {
-            for px in data[y * row as usize..][..size.width as usize * 4].chunks(4) {
-                let [r, g, b] = [i32::from(px[0]), i32::from(px[1]), i32::from(px[2])];
-                if (r > g + 40 && r > b + 30) || (g > r + 60 && g > b + 60) {
-                    axis += 1;
-                }
-                if (r - g).abs() < 12 && (g - b).abs() < 16 && r < 170 {
-                    grey += 1;
-                }
-                total += 1;
-            }
+        (0..size.height as usize).flat_map(|y| {
+            data[y * row as usize..][..size.width as usize * 4].chunks_exact(4)
+                .map(|px| <[u8; 4]>::try_from(px).unwrap()).collect::<Vec<_>>()
+        }).collect()
+    }
+
+    fn overlay_fractions(&self) -> (f64, f64) {
+        let pixels = self.rgba();
+        let (mut axis, mut grey) = (0usize, 0usize);
+        for px in &pixels {
+            let [r,g,b] = [i32::from(px[0]), i32::from(px[1]), i32::from(px[2])];
+            axis += usize::from((r > g + 40 && r > b + 30) || (g > r + 60 && g > b + 60));
+            grey += usize::from((r - g).abs() < 12 && (g - b).abs() < 16 && r < 170);
         }
-        (axis as f64 / total as f64, grey as f64 / total as f64)
+        (axis as f64 / pixels.len() as f64, grey as f64 / pixels.len() as f64)
     }
 }
 
@@ -310,4 +311,42 @@ fn editor_overlays_stay_in_world_space_in_camera_relative_frames() {
     }
     let (axis, grey) = editor.overlay_fractions();
     assert!(axis > 0.001 && grey > 0.01, "grid missing: axis {axis:.4}, lines {grey:.4}");
+}
+
+/// The same local camera and sun at two poles must see the same atmosphere.
+/// The previous fixed +Y fallback produced a brown lower-hemisphere sky at X.
+#[test]
+fn planetary_sky_follows_the_world_eye_and_sun_through_resize() {
+    let Some(mut editor) = editor(256, 144) else { return };
+    editor.renderer.set_editor_mode(false);
+    let cases = [
+        ([0.0, 6_374_000.0, 0.0], Vec3::new(0.6, 0.8, 0.0), Vec3::Y, [0.4, 0.8, 0.2]),
+        ([6_374_000.0, 0.0, 0.0], Vec3::new(0.8, -0.6, 0.0), Vec3::X, [0.8, -0.4, 0.2]),
+    ];
+    let mut means = Vec::new();
+    for (eye, forward, up, sun) in cases {
+        editor.renderer.set_planetary_sky(Some(helio_pass_sky::PlanetarySky::earth_like(eye, 6_371_000.0, sun)));
+        let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 40_000_000.0);
+        for _ in 0..8 { editor.render(&camera); }
+        let pixels = editor.rgba();
+        let mean: [f64;3] = std::array::from_fn(|c| pixels.iter().map(|p| f64::from(p[c])).sum::<f64>() / pixels.len() as f64);
+        eprintln!("planetary sky mean {mean:?}");
+        means.push(mean);
+    }
+    assert!(means[0][2] > means[0][0] + 10.0, "day sky must be blue");
+    for c in 0..3 { assert!((means[0][c] - means[1][c]).abs() < 12.0, "rotated sky mismatch: {means:?}"); }
+    editor.renderer.set_render_size(320, 180);
+    editor.target = editor.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("resized planetary sky"), size: wgpu::Extent3d { width: 320, height: 180, depth_or_array_layers: 1 },
+        mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC, view_formats: &[],
+    });
+    let camera = Camera::perspective_look_at(Vec3::ZERO, Vec3::new(0.8,-0.6,0.0), Vec3::X, std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 40_000_000.0);
+    for _ in 0..8 { editor.render(&camera); }
+    let pixels = editor.rgba();
+    for c in 0..3 {
+        let mean = pixels.iter().map(|p| f64::from(p[c])).sum::<f64>() / pixels.len() as f64;
+        assert!((mean - means[1][c]).abs() < 12.0, "sky reset during resize");
+    }
 }

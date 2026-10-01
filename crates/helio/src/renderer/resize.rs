@@ -87,6 +87,10 @@ impl Renderer {
             }
             if let Some(sky) = self.graph.find_pass_mut::<helio_pass_sky::SkyPass>() {
                 sky.set_fallback_sky_enabled(self.fallback_sky_enabled);
+                sky.set_planetary_sky(self.planetary_sky);
+            }
+            if let Some(light) = self.graph.find_pass_mut::<helio_pass_deferred_light::DeferredLightPass>() {
+                light.set_planetary_atmosphere(self.planetary_sky.map(|s| (s.eye_m, s.radius_m, s.sun_direction)));
             }
         } else {
             self.graph.set_render_size(internal_w, internal_h);

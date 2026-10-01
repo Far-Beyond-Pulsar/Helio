@@ -13,6 +13,46 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
 
 ## Contents
 
+### Flight and appearance corrections (draft)
+
+Level selection now defers a switch when the destination cell is already
+solid. Switching resolution is not a surface crossing: returning an interior
+hit used to retain an unrelated top-face normal and shade grass as subsoil.
+`tests/grey_patch.rs` checks radial surface entries at 1/4/16/64 km and snow
+visibility at 64/300/1,000 km.
+
+Climate and filtered grass appearance use the ray's base-grid footprint and
+unrounded canonical height. This prevents high-altitude cells rounding snowy
+mountains to sea-level grass. This is appearance filtering; the existing
+band-limited distance geometry remains a separate, unfinished fidelity gate.
+Small brushes are still omitted by coarse levels. Exact filtered canonical
+geometry and edit coverage at every distance are **not qualified** by this
+change, nor by the near-field CPU/GPU tests.
+
+Motion forecasts prefetch up to 350 ms ahead, bounded by ground clearance and
+the window capacity. Moving generation/admission budgets grow with backlog.
+The offscreen flight is still not a substitute for a quiet native fast-flight
+test. New Pulsar logs include eye/forward/up/viewport; replay preserves those
+poses when available, and identifies legacy altitude-only logs explicitly.
+
+`Settings::appearance` / `PlanetPass::set_appearance` control the sRGB palette,
+per-material roughness, three grass colours and detail contrast without
+rebuilding residency or changing recipes/edits. Defaults use muted meadow
+greens, cool rock, warmer soil and less reflective snow. Pulsar persists the
+same settings in `VoxelTerrainComponent.appearance_parameters` (JSON, empty
+means defaults). For example `{"detail":[0.6,0.12,0.04,0.0]}` reduces grass
+patch contrast, per-voxel pigment and edge occlusion; omitted fields retain
+defaults. RGB and detail values are clamped to [0,1] before GPU upload.
+
+Hosts without an authored sky can call `Renderer::set_planetary_sky` with
+`PlanetarySky::earth_like(eye_m, radius_m, sun_direction)`. It shares the
+planet-centred eye and sun with the sky LUT and a bounded aerial-perspective
+approximation after deferred lighting. Authored skies retain precedence.
+Planetary sky is HDR and passes through the graph's normal tone mapping.
+Atmosphere settings survive graph resize; the graph regression checks the
+same local sky at two rotated poles. This is single scattering, not a claim
+of volumetric weather, vegetation, water or a completed AAA art pipeline.
+
 1. [Goals and non-goals](#goals-and-non-goals)
 2. [Crate map](#crate-map)
 3. [Data model](#data-model)

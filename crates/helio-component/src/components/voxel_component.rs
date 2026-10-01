@@ -307,6 +307,11 @@ pub struct VoxelTerrainComponent {
     #[serde(default)]
     pub generator_parameters: String,
 
+    /// Renderer appearance JSON, independent of generator data and edits.
+    #[serde(default)]
+    #[property(category = "Editing", label = "Terrain appearance (JSON)")]
+    pub appearance_parameters: String,
+
     // The fields below describe the chunk domain of live sample data
     // (`payload_store`). Streamed terrain derives its own layout and LOD, so
     // they are serialized but not shown in the inspector.
@@ -374,6 +379,7 @@ impl Default for VoxelTerrainComponent {
             generator: VoxelGeneratorRef::default(),
             seed: 0,
             generator_parameters: String::new(),
+            appearance_parameters: String::new(),
             material_ids: vec![0],
             editable: true,
             source_revision: 0,
@@ -432,6 +438,7 @@ impl Clone for VoxelTerrainComponent {
             generator: self.generator.clone(),
             seed: self.seed,
             generator_parameters: self.generator_parameters.clone(),
+            appearance_parameters: self.appearance_parameters.clone(),
             material_ids: self.material_ids.clone(),
             editable: self.editable,
             source_revision: self.source_revision,

@@ -25,6 +25,7 @@ helio-pass-billboard = { workspace = true }
 helio-pass-corona = { workspace = true }
 helio-mats = { workspace = true }
 helio-pass-forward-lit = { workspace = true }
+helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
 helio-pass-object-batch = { workspace = true }
 helio-pass-gbuffer = { workspace = true }
 helio-pass-shadow-matrix = { workspace = true }

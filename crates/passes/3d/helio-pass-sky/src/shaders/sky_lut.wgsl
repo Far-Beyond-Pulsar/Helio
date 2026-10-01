@@ -43,6 +43,7 @@ struct SkyUniforms {
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(1) @binding(0) var<storage, read> sky_rows: array<SkyUniforms>;
 var<private> sky: SkyUniforms;
+@group(0) @binding(1) var<uniform> planetary_eye: vec4<f32>;
 
 // ── Vertex: full-screen triangle ─────────────────────────────────────────────
 
@@ -111,7 +112,11 @@ fn atmosphere(ro: vec3<f32>, rd: vec3<f32>) -> vec3<f32> {
     if atm_hit.y < 0.0 { return vec3<f32>(0.0); }
 
     let t_start   = max(atm_hit.x, 0.0);
-    let seg_len   = atm_hit.y - t_start;
+    var t_end = atm_hit.y;
+    let ground = ray_sphere(ro, rd, sky.earth_radius);
+    if ground.x >= t_start { t_end = min(t_end, ground.x); }
+    if length(ro) <= sky.earth_radius && dot(ro, rd) < 0.0 { t_end = t_start; }
+    let seg_len = max(t_end - t_start, 0.0);
     let ds        = seg_len / f32(ATMO_STEPS);
     let cos_theta = dot(rd, sky.sun_direction);
     let pr        = phase_rayleigh(cos_theta);
@@ -131,7 +136,7 @@ fn atmosphere(ro: vec3<f32>, rd: vec3<f32>) -> vec3<f32> {
 
         let earth_hit = ray_sphere(p, sky.sun_direction, sky.earth_radius);
         if earth_hit.x < 0.0 || earth_hit.y < 0.0 {
-            let depth_cam = optical_depth(ro, rd, t);
+            let depth_cam = optical_depth(ro + rd * t_start, rd, t - t_start);
             let sun_atm   = ray_sphere(p, sky.sun_direction, sky.atm_radius);
             let depth_sun = optical_depth(p, sky.sun_direction, max(sun_atm.y, 0.0));
             let tau_r     = sky.rayleigh_scatter * (depth_cam.x + depth_sun.x);
@@ -173,12 +178,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         cos_elev * sin(azimuth),
     );
 
-    let cam_atm = vec3<f32>(0.0, sky.earth_radius + 0.001, 0.0);
+    let cam_atm = select(vec3<f32>(0.0, sky.earth_radius + 0.001, 0.0), planetary_eye.xyz, planetary_eye.w > 0.0);
 
     // Below horizon: keep colour from horizon moving smoothly to night.
     // This ensures the whole lower hemisphere keeps sunset gradation.
     var out_col = atmosphere(cam_atm, ray_dir);
-    if sin_elev < 0.0 {
+    if sin_elev < 0.0 && planetary_eye.w == 0.0 {
         let horizon_dir = vec3<f32>(cos(azimuth), 0.0, sin(azimuth));
         let horizon_col = atmosphere(cam_atm, horizon_dir);
         let falloff = clamp(-sin_elev, 0.0, 1.0);

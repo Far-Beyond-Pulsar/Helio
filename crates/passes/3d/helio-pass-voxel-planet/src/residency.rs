@@ -291,6 +291,7 @@ pub struct Residency {
     /// CPU time per `plan` for applying diffs and admitting columns; `None`
     /// is unbounded (deterministic, for tests).
     cpu_budget: Option<std::time::Duration>,
+    prefetch_eye: Option<DVec3>,
 }
 
 /// A window diff being applied: removes first, then (for a level switched
@@ -344,6 +345,7 @@ impl Residency {
             diffs: VecDeque::new(),
             catching_up: vec![0; grid.levels() as usize],
             cpu_budget: None,
+            prefetch_eye: None,
         }
     }
 
@@ -545,6 +547,10 @@ impl Residency {
         self.cpu_budget = budget;
     }
 
+    pub fn set_prefetch_eye(&mut self, eye: Option<DVec3>) {
+        self.prefetch_eye = eye.filter(|eye| eye.is_finite());
+    }
+
     /// Queue a window diff; [`Self::apply_queued`] applies it in order.
     fn apply(&mut self, update: WindowUpdate) {
         for diff in update.levels {
@@ -620,6 +626,7 @@ impl Residency {
         // every diff that is ready (the worker always plans the latest view).
         let request = WindowRequest {
             eye,
+            prefetch_eye: self.prefetch_eye,
             lod0,
             outer_radius: planet.outer_radius(),
             planet: Some(planet.clone()),
@@ -629,6 +636,7 @@ impl Residency {
             last.eye.distance(eye) > self.grid.voxel_size() * 2.0
                 || (last.lod0 - lod0).abs() > lod0 * 0.01
                 || last.outer_radius != request.outer_radius
+                || last.prefetch_eye != request.prefetch_eye
         });
         if changed {
             self.requested = request.serial;

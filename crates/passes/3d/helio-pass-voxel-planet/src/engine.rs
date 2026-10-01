@@ -35,6 +35,35 @@ pub struct PlanetFrame {
 
 pub type SharedPlanetFrame = Arc<Mutex<Option<PlanetFrame>>>;
 
+/// Art controls, independent of occupancy, terrain recipes and edit journals.
+/// Palette RGB is sRGB in [0,1]; W is perceptual roughness.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct TerrainAppearance {
+    pub palette: [[f32; 4]; 16],
+    /// Dry, meadow and lush grass colours (sRGB).
+    pub grass: [[f32; 4]; 3],
+    /// Grass patch contrast, voxel pigment contrast, edge occlusion strength.
+    pub detail: [f32; 4],
+}
+
+impl Default for TerrainAppearance {
+    fn default() -> Self {
+        let colours = [
+            [200,0,200], [91,125,65], [120,87,61], [133,139,142],
+            [203,188,151], [217,228,236], [28,72,92], [116,111,102],
+            [185,142,104], [82,88,95], [101,75,53], [59,102,52],
+            [155,113,89], [148,77,63], [158,119,79], [121,126,130],
+        ];
+        let roughness = [0.9,0.94,0.96,0.84,0.93,0.78,0.35,0.9,0.88,0.82,0.97,0.94,0.92,0.86,0.86,0.85];
+        Self {
+            palette: std::array::from_fn(|i| [colours[i][0] as f32 / 255.0, colours[i][1] as f32 / 255.0, colours[i][2] as f32 / 255.0, roughness[i]]),
+            grass: [[137.0/255.0,143.0/255.0,91.0/255.0,0.0], [91.0/255.0,125.0/255.0,65.0/255.0,0.0], [55.0/255.0,99.0/255.0,58.0/255.0,0.0]],
+            detail: [0.75,0.18,0.08,0.0],
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
     /// Level cells project to this many pixels where their range starts.
@@ -53,6 +82,7 @@ pub struct Settings {
     /// Diagnostics: fixed frame index for the sunlight representative pattern.
     pub frame_override: Option<u32>,
     pub capacity: Capacity,
+    pub appearance: TerrainAppearance,
 }
 
 impl Default for Settings {
@@ -66,6 +96,7 @@ impl Default for Settings {
             freeze_residency: false,
             frame_override: None,
             capacity: Capacity::default(),
+            appearance: TerrainAppearance::default(),
         }
     }
 }
@@ -98,6 +129,9 @@ struct FrameGpu {
     ring: [[f32; 4]; 8],
     /// x: tier-1 summary blocks prove column absence (`blocks_exact`).
     hints: [u32; 4],
+    palette: [[f32; 4]; 16],
+    grass: [[f32; 4]; 3],
+    detail: [f32; 4],
 }
 
 /// Public per-frame statistics.
@@ -638,7 +672,7 @@ pub struct PlanetRenderer {
     /// last updated `ms_per_job`.
     frame_jobs: std::collections::VecDeque<(u64, usize)>,
     costed_frame: Option<u64>,
-    last_eye: Option<DVec3>,
+    last_eye: Option<(DVec3, std::time::Instant)>,
     last_frame_num: u64,
 }
 
@@ -821,6 +855,10 @@ impl PlanetRenderer {
         let planet = &self.planet;
         let grid = planet.grid();
         let mut frame = FrameGpu::default();
+        let clean = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+        frame.palette = self.settings.appearance.palette.map(|row| row.map(clean));
+        frame.grass = self.settings.appearance.grass.map(|row| row.map(clean));
+        frame.detail = self.settings.appearance.detail.map(clean);
         for face in 0..6u8 {
             // A plane has one face; the others keep default frames.
             let f = grid.face_frame(face, eye);
@@ -1093,15 +1131,29 @@ impl PlanetRenderer {
         let started = std::time::Instant::now();
         // Generation budget: small while the view moves (frame pacing), large
         // when it is still (fast convergence), from the measured job cost.
-        let moving = self.last_eye.is_none_or(|e| e.distance(frame.eye) > 0.01);
-        self.last_eye = Some(frame.eye);
-        let target_ms = if moving { 1.5 } else { 6.0 };
+        let now = std::time::Instant::now();
+        let moving = self.last_eye.is_none_or(|(eye, _)| eye.distance(frame.eye) > 0.01);
+        let predicted = self.last_eye.and_then(|(eye, when)| {
+            let dt = now.duration_since(when).as_secs_f64();
+            let step = frame.eye - eye;
+            if !moving || dt > 0.25 { return None; }
+            // Forecast 350 ms, bounded by terrain clearance and horizontal
+            // window limits. A teleport does not enqueue an entire flight path.
+            let forecast = step * (0.35 / dt.max(0.001)).min(24.0);
+            let limit = self.planet.ground_height(frame.eye).max(20.0) * 0.7;
+            Some(frame.eye + forecast.clamp_length_max(limit))
+        });
+        self.residency.set_prefetch_eye(predicted);
+        self.last_eye = Some((frame.eye, now));
+        // Spend additional generation time when visible detail is catching up,
+        // rather than withholding it until the camera stops moving.
+        let backlog = (self.residency.stats.pending_columns as f64 / 80_000.0).min(1.0);
+        let target_ms = if moving { 1.5 + 1.5 * backlog } else { 6.0 };
         // CPU for applying window diffs and admitting columns: small while
         // moving (a big diff spreads over frames instead of freezing one),
         // growing to 3 ms with the backlog (a new region streams in ~2x
         // faster; admission costs ~0.3 us per column, diffs about as much).
-        let backlog = (self.residency.stats.pending_columns as f64 / 20_000.0).min(1.0);
-        let cpu_ms = if moving { 1.5 + 1.5 * backlog } else { 4.0 };
+        let cpu_ms = if moving { 1.5 + 2.5 * backlog } else { 4.0 };
         self.residency.set_cpu_budget(Some(std::time::Duration::from_secs_f64(cpu_ms * 1.0e-3)));
         let budget = ((target_ms / self.ms_per_job.max(1e-5)) as usize)
             .clamp(256, self.settings.job_budget.min(self.settings.capacity.max_jobs as usize));
@@ -1428,6 +1480,11 @@ impl PlanetPass {
     pub fn renderer(&self) -> Option<&PlanetRenderer> {
         self.active.as_ref()
     }
+    /// Changes art without recreating residency or altering the canonical world.
+    pub fn set_appearance(&mut self, appearance: TerrainAppearance) {
+        self.settings.appearance = appearance;
+        if let Some(renderer) = &mut self.active { renderer.settings.appearance = appearance; }
+    }
     pub fn renderer_mut(&mut self) -> Option<&mut PlanetRenderer> {
         self.active.as_mut()
     }
@@ -1469,6 +1526,7 @@ impl RenderPass for PlanetPass {
             return false;
         }
         self.active = previous.active.take();
+        self.settings.appearance = previous.settings.appearance;
         self.active.is_some()
     }
     fn reads(&self) -> &'static [&'static str] {

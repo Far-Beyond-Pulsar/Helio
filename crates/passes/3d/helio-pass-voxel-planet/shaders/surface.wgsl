@@ -51,24 +51,7 @@ fn srgb(c: vec3<f32>) -> vec3<f32> {
 }
 
 fn palette(m: u32) -> vec3<f32> {
-    switch m {
-        case 1u: { return srgb(vec3<f32>(104.0, 150.0, 54.0)); }
-        case 2u: { return srgb(vec3<f32>(132.0, 96.0, 64.0)); }
-        case 3u: { return srgb(vec3<f32>(138.0, 135.0, 128.0)); }
-        case 4u: { return srgb(vec3<f32>(216.0, 198.0, 142.0)); }
-        case 5u: { return srgb(vec3<f32>(236.0, 241.0, 246.0)); }
-        case 6u: { return srgb(vec3<f32>(28.0, 72.0, 92.0)); }
-        case 7u: { return srgb(vec3<f32>(112.0, 107.0, 101.0)); }
-        case 8u: { return srgb(vec3<f32>(200.0, 152.0, 104.0)); }
-        case 9u: { return srgb(vec3<f32>(90.0, 88.0, 86.0)); }
-        case 10u: { return srgb(vec3<f32>(112.0, 80.0, 50.0)); }
-        case 11u: { return srgb(vec3<f32>(62.0, 112.0, 40.0)); }
-        case 12u: { return srgb(vec3<f32>(166.0, 118.0, 88.0)); }
-        case 13u: { return srgb(vec3<f32>(152.0, 72.0, 56.0)); }
-        case 14u: { return srgb(vec3<f32>(164.0, 122.0, 76.0)); }
-        case 15u: { return srgb(vec3<f32>(122.0, 122.0, 120.0)); }
-        default: { return srgb(vec3<f32>(200.0, 0.0, 200.0)); }
-    }
+    return pow(frame.palette[min(m, 15u)].rgb, vec3<f32>(2.2));
 }
 
 // Grass colour from dry through meadow to lush green by world-space
@@ -80,10 +63,10 @@ fn palette(m: u32) -> vec3<f32> {
 fn grass_albedo(p: vec3<i32>, pixel: f32) -> vec3<f32> {
     let broad = f32(noise(p, 13u, 0x3c6ef372u)) / f32(NOISE_ONE);
     let patches = f32(noise(p, 9u, 0xa54ff53au)) / f32(NOISE_ONE) * clamp((12.8 - pixel) / 6.4, 0.0, 1.0);
-    let t = clamp(0.58 + 0.6 * broad + 0.14 * patches, 0.0, 1.0);
-    let dry = srgb(vec3<f32>(146.0, 148.0, 82.0));
-    let meadow = srgb(vec3<f32>(106.0, 144.0, 58.0));
-    let lush = srgb(vec3<f32>(64.0, 112.0, 46.0));
+    let t = clamp(0.58 + frame.detail.x * (0.6 * broad + 0.14 * patches), 0.0, 1.0);
+    let dry = pow(frame.grass[0].rgb, vec3<f32>(2.2));
+    let meadow = pow(frame.grass[1].rgb, vec3<f32>(2.2));
+    let lush = pow(frame.grass[2].rgb, vec3<f32>(2.2));
     return select(mix(meadow, lush, t * 2.0 - 1.0), mix(dry, meadow, t * 2.0), t < 0.5);
 }
 
@@ -179,7 +162,13 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let edited = material != 0u;
     var speck = false;
     var slope = 0;
-    let p = domain_point(face, h.i, h.j, level);
+    // Appearance is sampled at the ray's base-grid footprint, not the
+    // centre of an increasingly large level cell. Climate uses the canonical
+    // unrounded height: a 3 km snowfield must not become sea-level grass when
+    // the radial level size exceeds its elevation.
+    let appearance_cell = locate(make_ray(camera.position_near.xyz, d), face_ray(face, make_ray(camera.position_near.xyz, d)), h.t, 0u);
+    let p = domain_point(face, select(appearance_cell.i, h.i, level == 0u), select(appearance_cell.j, h.j, level == 0u), 0u);
+    let climate_height = terrain_height(p, u32(world.grid.w));
     if !edited {
         var lowest = top;
         if x > 0u { lowest = min(lowest, column_top(c, x - 1u, y)); }
@@ -197,7 +186,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         // subsoil (stone at coarse levels): grey bands sweeping with the LOD
         // rings.
         let depth = select(max(min(top, lowest) - 1 - h.k, 0) << level, 0, code < 4u);
-        material = ground_material(p, (top << level) * world.grid.y, depth, slope, h.k << level);
+        material = ground_material(p, climate_height, depth, slope, h.k << level);
         speck = (material & M_SPECK) != 0u;
         material &= M_ID;
     }
@@ -223,7 +212,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         let macro_normal = normalize(up - gi * plane_normal(face, 0u, h.i << level) - gj * plane_normal(face, 1u, h.j << level));
         normal = normalize(mix(normal, macro_normal, smooth_w));
         if code < 4u && smooth_w > 0.5 && !edited {
-            material = ground_material(p, (top << level) * world.grid.y, 0, slope, (top - 1) << level);
+            material = ground_material(p, climate_height, 0, slope, (top - 1) << level);
             speck = (material & M_SPECK) != 0u;
             material &= M_ID;
             // Sunlight treats the riser as part of the slope: traced from
@@ -279,7 +268,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         // Crisp voxel edges while a cell covers several pixels.
         let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
         let fade = clamp((size / pixel - 3.0) / 6.0, 0.0, 1.0);
-        ao *= 1.0 - 0.14 * fade * (1.0 - smoothstep(0.0, 0.12, edge));
+        ao *= 1.0 - frame.detail.z * fade * (1.0 - smoothstep(0.0, 0.12, edge));
     }
     // Per-voxel pigment variation over world-space grass patches (Lay of
     // the Land look), averaged out as *base* voxels shrink below a pixel. A
@@ -289,7 +278,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let hv = hash3(h.i, h.j, h.k + i32(face) * 7919 + i32(level) * 104729, 0x68bc21ebu);
     let base_w = clamp((2.5 - frame.layer.y / pixel) / 1.5, 0.0, 1.0);
     let jitter = mix(f32(hv & 255u) / 255.0, 0.5, base_w);
-    let pigment = 0.86 + 0.24 * jitter;
+    let pigment = 1.0 + frame.detail.y * (jitter - 0.5);
     var albedo = palette(select(material, M_DIRT, soil_side)) * pigment;
     if (material == M_GRASS && !soil_side) || smooth_w > 0.0 {
         var grass = grass_albedo(p, pixel) * pigment;
