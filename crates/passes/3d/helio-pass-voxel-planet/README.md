@@ -146,6 +146,10 @@ publishes a `PlanetFrame` (eye in f64 world metres, planet, sun) into a shared
 mailbox; frames are camera-relative (the renderer's world origin is the eye),
 so all GPU positions are small.
 
+Helio's sky pass accepts a `PlanetarySky` with the f64 eye, planet radius
+and sun direction. Its lookup follows the radial horizon, including from
+orbit; an authored scene sky takes precedence.
+
 ### CPU: `Residency::plan` (render thread)
 
 1. **Edit sync.** New or undone brushes since the last frame are found by
@@ -349,8 +353,13 @@ settings rebuilds the world without recompiling shaders; pipelines are keyed
 by program.
 
 **A material.** Add the id to `terrain::material` and `world.wgsl`, its
-colour to `palette` in `surface.wgsl`, and to editor-facing enums (Pulsar's
-`VoxelTerrainMaterial`).
+default colour and roughness to `TerrainAppearance` in `engine.rs`, and to
+editor-facing enums (Pulsar's `VoxelTerrainMaterial`).
+
+**Appearance.** `PlanetPass::set_appearance` updates palette, grass colours
+and detail without rebuilding terrain. RGB is sRGB; roughness is linear.
+When it returns `true`, reset temporal colour history to show the change in
+an idle viewport.
 
 **A brush shape.** Extend `BrushShape`, its per-face resolution in
 `edits.rs`, the containment test in both `edits.rs` and `generate.wgsl`
@@ -367,9 +376,6 @@ and inside the budgeted loop in `Residency::plan`.
   no holes), but the table inconsistency behind it is not yet understood.
   Rings and fallback distances are identical in the bad frame and the one
   before; suspect block publication vs. the live-block list.
-- The fallback sky (Helio's sky pass) assumes world +Y up and a fixed sun;
-  away from the pole and from orbit the sky is wrong. Planned: atmosphere
-  around the planet from engine sky systems.
 - Dense construction stores edit references per column (4M-word pool);
   sparse block-override bricks would scale building further.
 - Edit ids (`next_brush`) grow monotonically after undo.
