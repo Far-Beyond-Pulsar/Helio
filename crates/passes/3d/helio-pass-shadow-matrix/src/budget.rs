@@ -95,5 +95,7 @@ pub struct ResidencyTable {
     pub residents: [ShadowResident; MAX_SHADOW_CASTERS],
 }
 impl Default for ResidencyTable {
-    fn default() -> Self { Self::zeroed() }
+    fn default() -> Self {
+        Self::zeroed()
+    }
 }

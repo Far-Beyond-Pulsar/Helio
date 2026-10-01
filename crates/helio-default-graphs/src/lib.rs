@@ -252,24 +252,8 @@ fn add_common_early_passes(
     let face_geom_count_buf = Arc::clone(&shadow_dirty_pass.face_geom_count_buf);
     graph.add_pass(Box::new(shadow_dirty_pass));
 
-    // Tile draws use the batch's existing indirect partitions. The per-face
-    // cull arena is unnecessary; its memory used to grow by 80 KiB per face.
-    let unused_cull = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Unused legacy shadow cull"), size: 16,
-        usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false,
-    }));
-    let face_cull_indirect = unused_cull.clone();
-    let face_cull_counts = unused_cull;
-
-    graph.add_pass(Box::new(ShadowPass::new(
-        device,
-        queue,
-        face_dirty_buf,
-        face_geom_count_buf,
-        face_cull_indirect,
-        face_cull_counts,
-        shadow_atlas_size,
-        1,
+    graph.add_pass(Box::new(ShadowPass::new_tiled(
+        device, queue, face_dirty_buf, face_geom_count_buf, shadow_atlas_size,
     )));
 
     if sky == SkyPlacement::BeforeGeometry {

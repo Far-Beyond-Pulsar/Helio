@@ -22,7 +22,6 @@ pub(crate) struct Transmittance {
     /// Whether each face may hold a pane from its last render. A face that
     /// does not is all zero (textures start zeroed, and emptied faces are
     /// cleared once), so re-rendering it with no translucent caster is skipped.
-    face_has_content: Box<[bool]>,
     bg_1: Option<wgpu::BindGroup>,
     bg_1_key: Option<(wgpu::Buffer, usize)>,
 }
@@ -40,7 +39,11 @@ impl Transmittance {
         let size = (atlas_size / 2).max(1);
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Shadow/Transmittance"),
-            size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: layers },
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: layers,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -53,7 +56,6 @@ impl Transmittance {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
         });
-        let face_has_content = vec![false; layers as usize].into_boxed_slice();
         let face_views = (0..layers)
             .map(|layer| {
                 texture.create_view(&wgpu::TextureViewDescriptor {
@@ -73,7 +75,11 @@ impl Transmittance {
             mapped_at_creation: false,
         });
         let depth_scale = atlas_size as f32 / size as f32;
-        queue.write_buffer(&params, 0, bytemuck::cast_slice(&[depth_scale, 0.0, 0.0, 0.0]));
+        queue.write_buffer(
+            &params,
+            0,
+            bytemuck::cast_slice(&[depth_scale, 0.0, 0.0, 0.0]),
+        );
 
         let fs = wgpu::ShaderStages::FRAGMENT;
         let bgl_1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -176,14 +182,43 @@ impl Transmittance {
             cache: None,
         });
 
-        let clear_source = format!("{}\n@fragment fn fs_clear() -> @location(0) vec4f {{ return vec4f(0); }}", include_str!("../shaders/depth_clear.wgsl"));
-        let clear_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("Clear transmission tile"), source: wgpu::ShaderSource::Wgsl(clear_source.into()) });
-        let clear_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {label:None,bind_group_layouts:&[Some(bgl_0)],immediate_size:0});
+        let clear_source = format!(
+            "{}\n@fragment fn fs_clear() -> @location(0) vec4f {{ return vec4f(0); }}",
+            include_str!("../shaders/depth_clear.wgsl")
+        );
+        let clear_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Clear transmission tile"),
+            source: wgpu::ShaderSource::Wgsl(clear_source.into()),
+        });
+        let clear_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[Some(bgl_0)],
+            immediate_size: 0,
+        });
         let clear_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label:Some("Clear transmission tile"),layout:Some(&clear_layout),
-            vertex:wgpu::VertexState {module:&clear_shader,entry_point:Some("vs_main"),compilation_options:Default::default(),buffers:&[]},
-            fragment:Some(wgpu::FragmentState {module:&clear_shader,entry_point:Some("fs_clear"),compilation_options:Default::default(),targets:&[Some(wgpu::ColorTargetState {format:TRANSMITTANCE_FORMAT,blend:None,write_mask:wgpu::ColorWrites::ALL})]}),
-            primitive:Default::default(),depth_stencil:None,multisample:Default::default(),multiview_mask:None,cache:None,
+            label: Some("Clear transmission tile"),
+            layout: Some(&clear_layout),
+            vertex: wgpu::VertexState {
+                module: &clear_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &clear_shader,
+                entry_point: Some("fs_clear"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: TRANSMITTANCE_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
         });
 
         Self {
@@ -193,7 +228,6 @@ impl Transmittance {
             params,
             view,
             face_views,
-            face_has_content,
             bg_1: None,
             bg_1_key: None,
         }
@@ -238,41 +272,65 @@ impl Transmittance {
         gpu_count: Option<helio_pass_gbuffer::GpuDrawCount<'_>>,
         vertices: &wgpu::Buffer,
         indices: &wgpu::Buffer,
-        tile: Option<[u32;3]>,
+        tile: Option<[u32; 3]>,
     ) {
         if face >= self.face_views.len() {
             return;
         }
         // Clear only this tile; other cached transmissions share the layer.
         {
-            let mut pass=Self::clear_face(&self.face_views[face],encoder);
-            if let Some([x,y,size])=tile {
-                pass.set_viewport((x/2) as f32,(y/2) as f32,(size/2) as f32,(size/2) as f32,0.0,1.0);
-                pass.set_scissor_rect(x/2,y/2,(size/2).max(1),(size/2).max(1));
+            let mut pass = Self::clear_face(&self.face_views[face], encoder);
+            if let Some([x, y, size]) = tile {
+                pass.set_viewport(
+                    (x / 2) as f32,
+                    (y / 2) as f32,
+                    (size / 2) as f32,
+                    (size / 2) as f32,
+                    0.0,
+                    1.0,
+                );
+                pass.set_scissor_rect(x / 2, y / 2, (size / 2).max(1), (size / 2).max(1));
             }
-            pass.set_pipeline(&self.clear_pipeline);pass.set_bind_group(0,bg_0,&[dyn_offset]);pass.draw(0..3,0..1);
+            pass.set_pipeline(&self.clear_pipeline);
+            pass.set_bind_group(0, bg_0, &[dyn_offset]);
+            pass.draw(0..3, 0..1);
         }
-        let (Some(materials),true)=(materials,draw_count>0) else {return;};
+        let (Some(materials), true) = (materials, draw_count > 0) else {
+            return;
+        };
         let key = (materials.clone(), static_depth as *const _ as usize);
         if self.bg_1_key.as_ref() != Some(&key) {
             self.bg_1 = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Shadow/Transmittance BG 1"),
                 layout: &self.bgl_1,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: materials.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: materials.as_entire_binding(),
+                    },
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: wgpu::BindingResource::TextureView(static_depth),
                     },
-                    wgpu::BindGroupEntry { binding: 2, resource: self.params.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.params.as_entire_binding(),
+                    },
                 ],
             }));
             self.bg_1_key = Some(key);
         }
         let mut pass = Self::clear_face(&self.face_views[face], encoder);
-        if let Some([x,y,size])=tile {
-            pass.set_viewport((x/2) as f32,(y/2) as f32,(size/2) as f32,(size/2) as f32,0.0,1.0);
-            pass.set_scissor_rect(x/2,y/2,(size/2).max(1),(size/2).max(1));
+        if let Some([x, y, size]) = tile {
+            pass.set_viewport(
+                (x / 2) as f32,
+                (y / 2) as f32,
+                (size / 2) as f32,
+                (size / 2) as f32,
+                0.0,
+                1.0,
+            );
+            pass.set_scissor_rect(x / 2, y / 2, (size / 2).max(1), (size / 2).max(1));
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bg_0, &[dyn_offset]);
@@ -280,11 +338,7 @@ impl Transmittance {
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
         helio_pass_gbuffer::multi_draw_indexed_indirect(
-            &mut pass,
-            indirect,
-            0,
-            draw_count,
-            gpu_count,
+            &mut pass, indirect, 0, draw_count, gpu_count,
         );
     }
 }

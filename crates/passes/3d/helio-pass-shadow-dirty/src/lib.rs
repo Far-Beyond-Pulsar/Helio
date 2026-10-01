@@ -1,38 +1,6 @@
-//! GPU-driven per-face shadow dirty detection.
-//!
-//! Runs as a compute pass immediately after `ShadowMatrixPass`.  For each movable
-//! shadow-caster draw call, it compares the object's current world-space position
-//! with the stored previous-frame position.  If the object moved, it sphere-tests
-//! the object's bounding sphere against every active shadow-face frustum (planes
-//! extracted from the VP matrix via Gribb-Hartmann).  Any intersecting face is
-//! marked dirty in a GPU buffer that `ShadowPass` reads directly via
-//! `multi_draw_indexed_indirect_count` — no CPU readback and no O(N·M) CPU loop.
-//!
-//! # Architecture
-//!
-//! ```text
-//! ShadowMatrixPass  ─writes─►  shadow_mats (VP per face)
-//!                   ─writes─►  light_dirty (per-caster matrix changes)
-//!        ↓
-//! ShadowDirtyPass   ─reads──►  instances, movable_draws, prev_positions, shadow_mats
-//!                   ─writes─►  face_dirty[256]     (0/1, is this face dirty?)
-//!                              face_geom_count[256] (0 or movable_draw_count)
-//!        ↓
-//! ShadowPass        ─reads──►  face_dirty (as clear-draw indirect count)
-//!                              face_geom_count (as geometry indirect count)
-//! ```
-//!
-//! # Granularity
-//!
-//! The dirty check is **per shadow face**, not per caster.  A spinning object on the
-//! +X side of a point light does NOT re-render the -X, ±Y, ±Z cube faces.
-//!
-//! # Topology changes
-//!
-//! When `shadow_movable_draw_count` changes between frames (objects added/removed),
-//! the pass sets `force_dirty_all = 1` in its uniform buffer, causing the shader to
-//! dirty every active face and update all prev_positions to the current frame.
-//! Subsequent frames return to normal per-object dirty detection.
+//! GPU invalidation of cached shadow faces. Hashes all instances in each draw,
+//! including transforms and coordinate spaces, and tests both old and new bounds.
+//! Dirty bits remain set until the bounded shadow scheduler renders their tile.
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
@@ -74,11 +42,11 @@ pub struct ShadowDirtyPass {
     /// entries are valid.
     prev_positions_buf: wgpu::Buffer,
 
-    /// Per-face dirty flag: 0 = clean, 1 = dirty (atomic u32 array, 256 entries).
+    /// Per-face dirty flag: 0 = clean, 1 = dirty (atomic u32 array, MAX_SHADOW_FACES entries).
     /// Shared with `ShadowPass` — published via `Arc` so the shadow pass can bind it.
     pub face_dirty_buf: Arc<wgpu::Buffer>,
 
-    /// Per-face geometry draw count (non-atomic u32 array, 256 entries).
+    /// Per-face geometry draw count (atomic u32 array, MAX_SHADOW_FACES entries).
     /// ShadowPass uses this as the `count_buffer` argument to
     /// `multi_draw_indexed_indirect_count` for movable geometry draws.
     pub face_geom_count_buf: Arc<wgpu::Buffer>,
@@ -108,8 +76,16 @@ impl ShadowDirtyPass {
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ShadowDirty BGL"),
             entries: &[
-                wgpu::BindGroupLayoutEntry { binding:8, visibility:wgpu::ShaderStages::COMPUTE,
-                    ty:wgpu::BindingType::Buffer {ty:wgpu::BufferBindingType::Storage {read_only:true},has_dynamic_offset:false,min_binding_size:None}, count:None },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
                 // 0: instances (read-only storage)
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -227,7 +203,7 @@ impl ShadowDirtyPass {
         });
 
         // prev_positions: one vec4f per movable draw slot.
-        // MAX_SHADOW_FACES (256) is a safe upper bound — scenes rarely have
+        // MAX_SHADOW_FACES is a safe upper bound — scenes rarely have
         // more than a few dozen movable shadow casters.
         let prev_positions_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ShadowDirty/PrevPositions"),
@@ -296,8 +272,20 @@ impl RenderPass for ShadowDirtyPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let movable_draw_count = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")).map(|b| b.shadow_movable_draw_count).unwrap_or(0);
-        let face_count = ctx.registry.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::resource_keys::shadow_matrices()).map(|s| s.shadow_count).unwrap_or(0)
+        let movable_draw_count = ctx
+            .registry
+            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new(
+                "object_batch",
+            ))
+            .map(|b| b.shadow_movable_draw_count)
+            .unwrap_or(0);
+        let face_count = ctx
+            .registry
+            .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
+                helio_core::resource_keys::shadow_matrices(),
+            )
+            .map(|s| s.shadow_count)
+            .unwrap_or(0)
             .min(MAX_SHADOW_FACES as u32);
 
         // Detect topology changes (objects added/removed from movable set).
@@ -320,17 +308,39 @@ impl RenderPass for ShadowDirtyPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
+        let Some(batch) = ctx
+            .registry
+            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new(
+                "object_batch",
+            ))
+        else {
             return Ok(());
         };
         let movable_draw_count = batch.shadow_movable_draw_count;
-        let Some(coords)=ctx.registry.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces()) else {return Ok(());};
-        let required=u64::from(movable_draw_count.max(1))*32;
-        if required>self.prev_positions_buf.size() {
-            self.prev_positions_buf=ctx.device.create_buffer(&wgpu::BufferDescriptor {label:Some("Shadow draw history"),size:required.next_power_of_two(),usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false});
-            self.bind_group_key=None;
+        let Some(coords) = ctx
+            .registry
+            .get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(
+                helio_core::resource_keys::coordinate_spaces(),
+            )
+        else {
+            return Ok(());
+        };
+        let required = u64::from(movable_draw_count.max(1)) * 32;
+        if required > self.prev_positions_buf.size() {
+            self.prev_positions_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Shadow draw history"),
+                size: required.next_power_of_two(),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.bind_group_key = None;
         }
-        let Some(shadow_data) = ctx.registry.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::resource_keys::shadow_matrices()) else {
+        let Some(shadow_data) = ctx
+            .registry
+            .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
+                helio_core::resource_keys::shadow_matrices(),
+            )
+        else {
             return Ok(());
         };
         let face_count = shadow_data.shadow_count;
@@ -342,50 +352,66 @@ impl RenderPass for ShadowDirtyPass {
         // ── Lazy bind group rebuild on GrowableBuffer reallocation ─────────────
         let inst_ptr = batch.instances as *const _ as usize;
         let mov_ptr = batch.shadow_movable_indirect as *const _ as usize;
-        let sm_ptr = shadow_data.desired_matrices.unwrap_or(shadow_data.shadow_matrices) as *const _ as usize;
+        let sm_ptr = shadow_data
+            .desired_matrices
+            .unwrap_or(shadow_data.shadow_matrices) as *const _ as usize;
         let ld_ptr = &*self.light_dirty_buf as *const _ as usize;
-        let key = (inst_ptr, mov_ptr, sm_ptr, ld_ptr, coords.coordinate_spaces as *const _ as usize);
+        let key = (
+            inst_ptr,
+            mov_ptr,
+            sm_ptr,
+            ld_ptr,
+            coords.coordinate_spaces as *const _ as usize,
+        );
 
         if self.bind_group_key != Some(key) {
-            self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("ShadowDirty BG"),
-                layout: &self.bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {binding:8,resource:coords.coordinate_spaces.as_entire_binding()},
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: batch.instances.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: batch.shadow_movable_indirect.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.prev_positions_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: shadow_data.desired_matrices.unwrap_or(shadow_data.shadow_matrices).as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: self.face_dirty_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: self.face_geom_count_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: self.uniform_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: self.light_dirty_buf.as_entire_binding(),
-                    },
-                ],
-            }));
+            self.bind_group = Some(
+                ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("ShadowDirty BG"),
+                    layout: &self.bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: coords.coordinate_spaces.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: batch.instances.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: batch.shadow_movable_indirect.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.prev_positions_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: shadow_data
+                                .desired_matrices
+                                .unwrap_or(shadow_data.shadow_matrices)
+                                .as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: self.face_dirty_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: self.face_geom_count_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: self.uniform_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: self.light_dirty_buf.as_entire_binding(),
+                        },
+                    ],
+                }),
+            );
             self.bind_group_key = Some(key);
         }
 
