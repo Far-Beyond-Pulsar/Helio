@@ -28,16 +28,25 @@ pub struct ShadowLightProps {
     #[gpu(as = u32, with = cast_shadows_to_shadow_request)]
     pub cast_shadows: bool,
     #[property(category = "Shadows")]
+    #[gpu(as = u32)]
     pub cast_static_shadows: bool,
     #[property(category = "Shadows")]
+    #[gpu(as = u32)]
     pub cast_dynamic_shadows: bool,
     #[property(category = "Shadows")]
     #[gpu(as = f32, with = volumetric_shadow_strength)]
     pub cast_volumetric_shadow: bool,
     #[property(category = "Shadows")]
+    #[gpu(as = u32)]
     pub cast_contact_shadows: bool,
     #[property(min = 0.0, max = 10.0, step = 0.01, category = "Shadows")]
     pub shadow_bias: f32,
+    #[property(min = 0.0625, max = 15.9375, step = 0.0625, category = "Shadows")]
+    #[gpu]
+    pub shadow_priority: f32,
+    #[property(min = 128, max = 2048, category = "Shadows")]
+    #[gpu]
+    pub shadow_max_resolution: u32,
     #[property(min = 0.0, max = 10.0, step = 0.01, category = "Shadows")]
     pub shadow_normal_bias: f32,
     #[property(min = 0.0, max = 10.0, step = 0.01, category = "Shadows")]
@@ -65,6 +74,8 @@ impl Default for ShadowLightProps {
             cast_volumetric_shadow: true,
             cast_contact_shadows: false,
             shadow_bias: 0.5,
+            shadow_priority: 1.0,
+            shadow_max_resolution: 2048,
             shadow_normal_bias: 0.5,
             shadow_slope_bias: 0.5,
             shadow_filter_sharpen: 0.0,
@@ -92,6 +103,8 @@ impl ShadowLightProps {
         if let Some(v) = obj.get("cast_contact_shadows").and_then(|v| v.as_bool()) {
             self.cast_contact_shadows = v;
         }
+        if let Some(v) = obj.get("shadow_priority").and_then(Value::as_f64) { self.shadow_priority = v as f32; }
+        if let Some(v) = obj.get("shadow_max_resolution").and_then(Value::as_u64) { self.shadow_max_resolution = v.min(2048).max(128) as u32; }
         if let Some(v) = obj.get("shadow_bias").and_then(|v| v.as_f64()) {
             self.shadow_bias = v as f32;
         }
@@ -136,6 +149,8 @@ impl ShadowLightProps {
             "cast_contact_shadows".to_string(),
             Value::from(self.cast_contact_shadows),
         );
+        out.insert("shadow_priority".into(), Value::from(self.shadow_priority));
+        out.insert("shadow_max_resolution".into(), Value::from(self.shadow_max_resolution));
         out.insert("shadow_bias".to_string(), Value::from(self.shadow_bias));
         out.insert(
             "shadow_normal_bias".to_string(),

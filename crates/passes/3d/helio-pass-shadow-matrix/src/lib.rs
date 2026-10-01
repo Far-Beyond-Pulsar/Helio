@@ -114,13 +114,14 @@ impl ShadowMatrixPass {
                 if ok {
                     let mapped=self.staging.slice(..).get_mapped_range().unwrap();
                     let table=bytemuck::pod_read_unaligned::<ResidencyTable>(&mapped);
-                    if table.header[1]==*nonce {
+                    if table.header[1]==*nonce && *nonce==self.nonce {
                         for s in 0..self.caster_capacity() as usize {
                             let old=self.residency.residents[s];let mut new=table.residents[s];
                             if old.owner==new.owner {new.strength=old.strength;}
-                            if old.owner!=new.owner || old.tiles!=new.tiles {
+                            if old.owner!=new.owner || old.tiles!=new.tiles || old.flags!=new.flags {
                                 self.generations[s]=self.generations[s].wrapping_add(1);
                                 for f in 0..6 {
+                                    if old.owner==new.owner && old.tiles[f]==new.tiles[f] && old.flags==new.flags {continue;}
                                     let t=new.tiles[f];let a=self.shadow_atlas_size as f32;
                                     let atlas=[t.x as f32/a,t.y as f32/a,t.size as f32/a,new.strength];
                                     let mut meta=[0u32;8];for j in 0..4 {meta[j]=atlas[j].to_bits();}
@@ -133,6 +134,8 @@ impl ShadowMatrixPass {
                             self.residency.residents[s]=new;
                         }
                         self.commit=true;
+                        // Retry missing tiles after fading residents release their space.
+                        self.rebuild |= self.residency.residents.iter().any(|r| r.owner!=0 && r.target==0);
                     }
                     drop(mapped);self.staging.unmap();
                 } else {self.rebuild=true;}
@@ -156,7 +159,7 @@ impl RenderPass for ShadowMatrixPass {
     }
     fn render_pass_descriptor<'a>(&'a self,_target:&'a wgpu::TextureView,_depth:&'a wgpu::TextureView,_resources:&'a helio_core::ResourceRegistry<'a>)->Option<wgpu::RenderPassDescriptor<'a>> {None}
     fn prepare(&mut self,ctx:&PrepareContext)->HelioResult<()> {
-        self.poll(ctx.queue);
+
         let lights=ctx.scene_buffers.get(helio_core::BufferKey::of("scene_lights"));
         self.rows=lights.map_or(0,|l|l.row_capacity());
         if let Some(l)=lights.filter(|l|l.buffer!=self.bound_lights) {
@@ -168,9 +171,10 @@ impl RenderPass for ShadowMatrixPass {
         }
         let generation=lights.map(|l|(l.epoch,l.content_generation));
         if generation!=self.last_generation {
-            self.rebuild=true;self.commit=true;self.last_generation=generation;
+            self.rebuild=true;self.commit=true;self.last_generation=generation;self.nonce=self.nonce.wrapping_add(1);
             for g in &mut self.generations {*g=g.wrapping_add(1);}
         }
+        self.poll(ctx.queue);
         let camera=&ctx.camera_data;
         let significant=camera.view_proj.iter().zip(self.last_view).any(|(a,b)|(*a-b).abs()>0.01)
             ||camera.position_near[..3].iter().zip(&self.last_position[..3]).any(|(a,b)|(*a-*b).abs()>0.05);

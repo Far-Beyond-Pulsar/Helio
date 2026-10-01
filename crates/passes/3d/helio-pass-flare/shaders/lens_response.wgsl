@@ -312,7 +312,7 @@ fn shadow_visibility(light: GpuLight, p: vec3<f32>) -> f32 {
         layer = light.shadow_index + point_light_face(p - light.position_range.xyz);
     }
     // Directional: the lens sits at distance zero, which is always cascade 0.
-    if layer >= arrayLength(&shadow_matrices) || layer >= textureNumLayers(shadow_atlas) { return 1.0; }
+    if layer >= arrayLength(&shadow_matrices) { return 1.0; }
     let proj = helio_shadow_project(shadow_matrices[layer].mat, p);
     if !proj.valid { return 1.0; }
     // Four taps around the lens position soften the handover at shadow edges.
@@ -320,7 +320,7 @@ fn shadow_visibility(light: GpuLight, p: vec3<f32>) -> f32 {
     var lit = 0.0;
     for (var k = 0u; k < 4u; k++) {
         let o = vec2(f32(k & 1u) - 0.5, f32(k >> 1u) - 0.5) * texel;
-        lit += textureSampleCompareLevel(shadow_atlas, shadow_samp, proj.uv + o, layer, proj.depth);
+        lit += budget_compare_dynamic(proj.uv + o, u32(layer), proj.depth);
     }
     return lit * 0.25;
 }
@@ -723,4 +723,43 @@ fn cs_temporal(@builtin(global_invocation_id) id: vec3<u32>) {
         // source entering the frame fades in as well.
     }
     textureStore(destination, vec2<i32>(id.xy), vec4(radiance(mix(previous, current, blend)), 0.0));
+}
+
+// Logical face metadata maps all filtering into a guarded physical tile.
+fn budget_resolution(layer:u32)->f32 {
+    if layer>=arrayLength(&shadow_matrices) {return 128.0;}
+    let m=shadow_matrices[layer];
+    return select(max(f32(m.policy.z),128.0),1024.0,m.policy.w==0u);
+}
+fn budget_layer(layer:u32)->u32 {
+    return select(shadow_matrices[layer].policy.x,layer,shadow_matrices[layer].policy.w==0u);
+}
+fn budget_uv(uv:vec2f,layer:u32,dims:vec2f)->vec2f {
+    let m=shadow_matrices[layer];
+    let offset=select(m.atlas.xy,vec2f(0),m.policy.w==0u);
+    let size=select(m.atlas.z,1.0,m.policy.w==0u);
+    let half_texel=0.5/dims;
+    return clamp(offset+uv*size,offset+half_texel,offset+vec2f(size)-half_texel);
+}
+fn budget_valid(layer:u32,disabled:u32)->bool {
+    if layer>=arrayLength(&shadow_matrices) {return false;}
+    let m=shadow_matrices[layer];
+    return m.policy.w==0u || (m.policy.w==2u && m.atlas.z>0.0 && (m.policy.y&disabled)==0u);
+}
+fn budget_strength(layer:u32)->f32 {
+    let m=shadow_matrices[layer];return select(m.atlas.w,1.0,m.policy.w==0u);
+}
+
+fn budget_compare_dynamic(uv:vec2f,layer:u32,depth:f32)->f32 {
+    if !budget_valid(layer,32u) {return 1.0;}
+    if budget_layer(layer)>=textureNumLayers(shadow_atlas) {return 1.0;}
+    let value=textureSampleCompareLevel(shadow_atlas,shadow_samp,budget_uv(uv,layer,vec2f(textureDimensions(shadow_atlas))),i32(budget_layer(layer)),depth);
+    return mix(1.0,value,budget_strength(layer));
+}
+fn budget_depth_dynamic(pixel:vec2i,layer:u32)->f32 {
+    if !budget_valid(layer,32u) {return 1.0;}
+    if budget_layer(layer)>=textureNumLayers(shadow_atlas) {return 1.0;}
+    let dims=vec2f(textureDimensions(shadow_atlas));
+    let uv=(vec2f(pixel)+0.5)/budget_resolution(layer);
+    return textureLoad(shadow_atlas,vec2i(budget_uv(uv,layer,dims)*dims),i32(budget_layer(layer)),0);
 }

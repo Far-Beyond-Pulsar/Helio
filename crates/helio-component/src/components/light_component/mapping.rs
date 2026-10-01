@@ -56,7 +56,8 @@ impl super::LightComponentGpuMirror {
             shadow_index: self.shadows.cast_shadows.0,
             light_type: self.general.light_type.0,
             inner_angle: self.attenuation.inner_cone_angle.0,
-            _pad: 0,
+            _pad: GpuLight::shadow_policy_bits(self.shadows.shadow_priority.0, self.shadows.shadow_max_resolution.0,
+                self.shadows.cast_static_shadows.0 != 0, self.shadows.cast_dynamic_shadows.0 != 0, self.shadows.cast_contact_shadows.0 != 0),
             god_rays_enabled: self.volumetrics.affects_volumetric_fog.0,
             // Density belongs to the medium. Preserve the legacy inscattering
             // gain by multiplying it into the new per-light scattering gain.

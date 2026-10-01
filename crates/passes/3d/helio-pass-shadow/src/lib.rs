@@ -77,6 +77,7 @@ pub struct ShadowPass {
     face_light_gen: Vec<u64>,
     face_last_update: Vec<u64>,
     face_strength: Vec<f32>,
+    face_ownership: Vec<(u32,helio_pass_shadow_matrix::ShadowTile)>,
     schedule_frame: u64,
 
     /// Depth-clear pipeline — renders a full-screen triangle at z=1.0 with
@@ -399,6 +400,7 @@ impl ShadowPass {
             transmittance::Transmittance::new(device, queue, &bgl_0, atlas_size, atlas_layers);
 
         Self {
+            face_ownership: vec![(0,Default::default());MAX_SHADOW_FACES],
             pipeline,
             face_static_gen: vec![u64::MAX; MAX_SHADOW_FACES],
             face_light_gen: vec![u64::MAX; MAX_SHADOW_FACES],
@@ -474,6 +476,8 @@ impl RenderPass for ShadowPass {
         builder.write_color_raw("static_shadow_atlas", wgpu::TextureFormat::Depth32Float, sz);
         builder.with_layers(self.atlas_layers);
         builder.read("object_batch");
+        builder.read("shadow_matrices");
+        builder.read("shadow_dirty");
         // Pass-owned (it caches with the static atlas): declared for ordering,
         // routed in `publish`.
         builder.write_buffer(TRANSMITTANCE_KEY);
@@ -531,9 +535,10 @@ impl RenderPass for ShadowPass {
             for (f,t) in r.tiles.iter().enumerate() {
                 let face=slot*6+f;
                 if r.owner==0 || t.size==0 {self.face_strength[face]=0.0;continue;}
+                if self.face_ownership[face]!=(r.owner,*t) {self.face_strength[face]=0.0;self.face_last_update[face]=0;self.face_ownership[face]=(r.owner,*t);}
                 let changed=self.face_light_gen[face]!=data.per_caster_dirty_gen[slot];
-                if changed {self.face_strength[face]=0.0;}
-                let target=if self.face_last_update[face]==0 || changed {0.0}else{r.strength};
+
+                let target=if self.face_last_update[face]==0 {0.0}else{r.strength};
                 self.face_strength[face]+=(target-self.face_strength[face]).clamp(-fade_step,fade_step);
                 ctx.queue.write_buffer(data.shadow_matrices,face as u64*96+76,bytemuck::bytes_of(&self.face_strength[face]));
                 let static_dirty=changed || self.face_static_gen[face]!=batch.shadow_static_generation;
@@ -548,7 +553,7 @@ impl RenderPass for ShadowPass {
         let bg=self.bg_0.as_ref().unwrap();
         for (face,static_dirty,_) in candidates {
             let r=&residency.residents[face/6];let tile=r.tiles[face%6];
-            let layers=2+u32::from(self.has_glass);
+            let layers=3;
             let cost=tile.size*tile.size*layers;
             if updates+layers>data.budget.updates_per_frame || texels+cost>data.budget.update_texels_per_frame {continue;}
             updates+=layers;texels+=cost;

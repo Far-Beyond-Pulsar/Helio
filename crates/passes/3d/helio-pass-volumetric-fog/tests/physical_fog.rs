@@ -702,9 +702,10 @@ impl helio_core::RenderPass for ShadowProducer {
         registry.write(
             helio_core::resource_keys::shadow_matrices(),
             helio_pass_shadow_matrix::ShadowMatricesFrameData {
+                desired_matrices: None, residency: None, budget: Default::default(),
                 shadow_matrices: matrices,
                 shadow_count: 6,
-                per_caster_dirty_gen: [0; 42],
+                per_caster_dirty_gen: [0; helio_pass_shadow_matrix::MAX_SHADOW_CASTERS],
                 movable_objects_generation: 0,
                 caster_layout: None,
             },

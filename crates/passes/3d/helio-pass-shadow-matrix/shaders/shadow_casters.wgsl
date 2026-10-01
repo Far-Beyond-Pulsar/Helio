@@ -34,7 +34,7 @@ struct Params {
 }
 struct Candidate { key:u32, resolution:u32, mask:u32, fade:f32 }
 struct Resident {
-    owner:u32, kind:u32, flags:u32, target:u32,
+    owner:u32, kind:u32, flags:u32, fade_target:u32,
     score:f32, strength:f32, resolution:u32, hash:u32,
     tiles:array<vec4u,6>,
 }
@@ -42,7 +42,7 @@ struct Table { header:vec4u, slots:array<Resident,256> }
 @group(0) @binding(0) var<storage,read_write> lights:array<GpuLight>;
 @group(0) @binding(1) var<uniform> params:Params;
 @group(0) @binding(2) var<storage,read_write> proposed:Table;
-@group(0) @binding(3) var<storage,read> active:Table;
+@group(0) @binding(3) var<storage,read> committed:Table;
 @group(0) @binding(4) var<storage,read_write> candidates:array<Candidate>;
 const NONE:u32=0xffffffffu;
 fn requested(l:GpuLight)->bool {
@@ -107,6 +107,11 @@ fn score_lights(@builtin(global_invocation_id) gid:vec3u) {
     let pixels=sqrt(coverage)*params.tuning.x;
     var res=128u;
     for(var t=0u;t<4u;t++) { if f32(res)<pixels && res*2u<=limit { res*=2u; } }
+    // Schmitt thresholds around the incumbent tier prevent camera jitter from resizing.
+    if incumbent && l.shadow_index/6u<params.capacity {
+        let old=committed.slots[l.shadow_index/6u].resolution;
+        if old>=128u && old<=limit && pixels<=f32(old)*(1.0+params.tuning.z) && pixels>=f32(old/2u)*(1.0-params.tuning.z) {res=old;}
+    }
     var mask=1u;
     if l.light_type==0u { mask=15u; }
     if l.light_type==1u { mask=point_mask(l.position_range.xyz); }
@@ -201,17 +206,21 @@ fn pack_tiles() {
     }
     var empty:Resident;
     for(var s=0u;s<params.capacity;s++) {
-        var r=active.slots[s];var keep=false;
+        var r=committed.slots[s];var keep=false;
         for(var i=0u;i<count;i++){if r.owner!=0u&&selected[i]==r.owner {keep=true;}}
-        r.target=0u;
+        r.fade_target=0u;
         if r.owner>0u&&r.owner<=params.rows&&keep {
             let c=candidates[r.owner-1u];r.score=bitcast<f32>(c.key);r.flags=lights[r.owner-1u]._pad;
             // Fade before reallocating tiers; the old tile remains valid until zero.
             if c.resolution==r.resolution || abs(f32(c.resolution)-f32(r.resolution))<=f32(r.resolution)*params.tuning.z {
-                r.target=u32(c.fade*65535.0);
+                r.fade_target=u32(c.fade*65535.0);
             }
         }
-        if r.target==0u&&r.strength<=0.0 {r=empty;}
+        if r.fade_target==0u&&r.strength<=0.0 {r=empty;}
+        // Invisible cube faces can be reclaimed without changing visible faces.
+        if keep && r.owner>0u && r.owner<=params.rows {
+            for(var f=0u;f<6u;f++) {if (candidates[r.owner-1u].mask&(1u<<f))==0u {r.tiles[f]=vec4u(0u);}}
+        }
         proposed.slots[s]=r;
         if r.owner!=0u {for(var f=0u;f<6u;f++){mark(r.tiles[f]);}}
     }
@@ -225,7 +234,7 @@ fn pack_tiles() {
         let c=candidates[owner-1u];let l=lights[owner-1u];
         if !found {proposed.slots[slot]=empty;proposed.slots[slot].owner=owner;
             proposed.slots[slot].kind=l.light_type;proposed.slots[slot].flags=l._pad;
-            proposed.slots[slot].target=u32(c.fade*65535.0);proposed.slots[slot].resolution=c.resolution;
+            proposed.slots[slot].fade_target=u32(c.fade*65535.0);proposed.slots[slot].resolution=c.resolution;
             proposed.slots[slot].score=bitcast<f32>(c.key);}
         for(var f=0u;f<6u;f++) {
             if (c.mask&(1u<<f))!=0u && proposed.slots[slot].tiles[f].z==0u {
@@ -243,6 +252,7 @@ fn commit_lights(@builtin(global_invocation_id) gid:vec3u) {
     if (flags&1u)==0u {flags|=1u|select(0u,2u,wants);}
     lights[i]._pad=flags;
     var index=NONE;
-    if wants {for(var s=0u;s<params.capacity;s++){if active.slots[s].owner==i+1u {index=s*6u;break;}}}
+    if wants {for(var s=0u;s<params.capacity;s++){if committed.slots[s].owner==i+1u {index=s*6u;break;}}}
     lights[i].shadow_index=index;
 }
+

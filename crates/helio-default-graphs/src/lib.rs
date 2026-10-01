@@ -33,7 +33,7 @@ use helio_pass_postprocess::{
     FogCompositePass, PostProcessPass, PostProcessVolumeBlendPass, FOGGED_HDR, FOGGED_HDR_FORMAT,
 };
 use helio_pass_shadow::ShadowPass;
-use helio_pass_shadow_cull::ShadowCullPass;
+
 use helio_pass_shadow_dirty::ShadowDirtyPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
@@ -200,7 +200,7 @@ fn add_common_early_passes(
     // a SceneDB lookup of a key nothing registers: a 64-byte dummy that held
     // one matrix, with nothing publishing it, so no raster shadow rendered.)
     let shadow_face_slots = helio_pass_shadow_matrix::MAX_SHADOW_FACES as u32;
-    let shadow_budget = config.shadow_budget.validate().map_err(|message| helio_core::Error::InvalidPassConfig(message.into()))?;
+    let shadow_budget = config.shadow_budget.validate().expect("invalid renderer shadow budget");
     let shadow_atlas_size = shadow_budget.atlas_size(device.limits().max_texture_dimension_2d);
     let shadow_matrices_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Shadow Matrices"),

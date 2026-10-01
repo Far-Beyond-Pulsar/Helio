@@ -47,10 +47,13 @@ impl ShadowBudget {
         if self.memory_bytes < 10 * u64::from(MIN_TILE_SIZE).pow(2) {
             return Err("shadow memory budget must hold a 128px tile in each atlas");
         }
-        if self.updates_per_frame == 0
-            || self.update_texels_per_frame < MIN_TILE_SIZE * MIN_TILE_SIZE
+        if self.updates_per_frame < 3
+            || self.update_texels_per_frame < 3 * MIN_TILE_SIZE * MIN_TILE_SIZE
         {
-            return Err("shadow update budget must allow at least one 128px tile");
+            return Err("shadow update budget must allow at least one 128px tile across depth and transmission");
+        }
+        if !self.max_resolution.is_power_of_two() || !(128..=2048).contains(&self.max_resolution) {
+            return Err("shadow maximum resolution must be a power of two from 128 through 2048");
         }
         if !self.max_distance.is_finite() || self.max_distance <= 0.0 {
             return Err("shadow distance must be finite and positive");

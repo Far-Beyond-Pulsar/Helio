@@ -89,7 +89,7 @@ pub struct ShadowDirtyPass {
     /// Bind group (lazy; rebuilt whenever the `instances` or `shadow_mats` buffer
     /// pointer changes due to `GrowableBuffer` reallocation).
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<(usize, usize, usize, usize)>,
+    bind_group_key: Option<(usize, usize, usize, usize, usize)>,
 
     /// `movable_draw_count` seen last frame; used to detect topology changes.
     last_movable_draw_count: u32,
@@ -108,6 +108,8 @@ impl ShadowDirtyPass {
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ShadowDirty BGL"),
             entries: &[
+                wgpu::BindGroupLayoutEntry { binding:8, visibility:wgpu::ShaderStages::COMPUTE,
+                    ty:wgpu::BindingType::Buffer {ty:wgpu::BufferBindingType::Storage {read_only:true},has_dynamic_offset:false,min_binding_size:None}, count:None },
                 // 0: instances (read-only storage)
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -229,7 +231,7 @@ impl ShadowDirtyPass {
         // more than a few dozen movable shadow casters.
         let prev_positions_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ShadowDirty/PrevPositions"),
-            size: (MAX_SHADOW_FACES * 16) as u64, // 256 × vec4f
+            size: (MAX_SHADOW_FACES * 32) as u64, // 256 × vec4f
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -280,6 +282,8 @@ impl RenderPass for ShadowDirtyPass {
 
     fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
         builder.read("object_batch");
+        builder.read("shadow_matrices");
+        builder.write_buffer("shadow_dirty");
     }
 
     fn render_pass_descriptor<'a>(
@@ -320,6 +324,12 @@ impl RenderPass for ShadowDirtyPass {
             return Ok(());
         };
         let movable_draw_count = batch.shadow_movable_draw_count;
+        let Some(coords)=ctx.registry.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces()) else {return Ok(());};
+        let required=u64::from(movable_draw_count.max(1))*32;
+        if required>self.prev_positions_buf.size() {
+            self.prev_positions_buf=ctx.device.create_buffer(&wgpu::BufferDescriptor {label:Some("Shadow draw history"),size:required.next_power_of_two(),usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_DST,mapped_at_creation:false});
+            self.bind_group_key=None;
+        }
         let Some(shadow_data) = ctx.registry.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::resource_keys::shadow_matrices()) else {
             return Ok(());
         };
@@ -334,13 +344,14 @@ impl RenderPass for ShadowDirtyPass {
         let mov_ptr = batch.shadow_movable_indirect as *const _ as usize;
         let sm_ptr = shadow_data.desired_matrices.unwrap_or(shadow_data.shadow_matrices) as *const _ as usize;
         let ld_ptr = &*self.light_dirty_buf as *const _ as usize;
-        let key = (inst_ptr, mov_ptr, sm_ptr, ld_ptr);
+        let key = (inst_ptr, mov_ptr, sm_ptr, ld_ptr, coords.coordinate_spaces as *const _ as usize);
 
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ShadowDirty BG"),
                 layout: &self.bgl,
                 entries: &[
+                    wgpu::BindGroupEntry {binding:8,resource:coords.coordinate_spaces.as_entire_binding()},
                     wgpu::BindGroupEntry {
                         binding: 0,
                         resource: batch.instances.as_entire_binding(),
