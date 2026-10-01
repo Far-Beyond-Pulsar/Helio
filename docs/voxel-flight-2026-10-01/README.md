@@ -51,13 +51,19 @@ The final report writer also fixes a diagnostic entry that initially caused
 Markdown/CSV export to panic after JSON export; the complete rerun produced
 all reports successfully. The memory counter includes the climate cache.
 
-Ground capture at f47bbb5f, final 1.25 hemisphere fill:
+Complete measurements and audit samples: [gates.json](gates.json).
+
+Ground capture from the final run, 1.25 hemisphere fill:
 
 ![Ground appearance](ground.png)
 
-Mountain capture at 6b1126aa, before the final fill adjustment (0.75 fill):
+Mountain capture from the same run:
 
 ![Mountain appearance](mountain.png)
+
+Orbital atmosphere and the remaining coarse silhouette:
+
+![Orbital limb](orbit-limb.png)
 
 These captures demonstrate the current result, including its shortcomings.
 They are not production art acceptance. Coarse geometric level transitions,
