@@ -640,7 +640,7 @@ impl Screen {
         let sun_view = sun.create_view(&Default::default());
         let climate = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("planet climate height"),
-            size: u64::from(size[0].max(1).div_ceil(2)) * u64::from(size[1].max(1).div_ceil(2)) * 4,
+            size: pixels * 4,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });

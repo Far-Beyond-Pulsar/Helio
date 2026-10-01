@@ -136,8 +136,12 @@ fn corner_ao(side1: bool, side2: bool, corner: bool) -> f32 {
 // distant depth discontinuities retain their own query. Occupancy is unchanged.
 @group(0) @binding(20) var<storage, read_write> climate_height_cache: array<i32>;
 
-fn climate_index(xy: vec2<u32>) -> u32 {
-    return (xy.y >> 1u) * ((u32(frame.screen.x) + 1u) >> 1u) + (xy.x >> 1u);
+fn climate_at(h: Hit, xy: vec2<u32>) -> i32 {
+    let dir = pixel_ray(vec2<f32>(xy) + 0.5);
+    let face = (h.info >> 2u) & 7u;
+    let ray = make_ray(camera.position_near.xyz, dir);
+    let cell = locate(ray, face_ray(face, ray), h.t, 0u);
+    return terrain_height(domain_point(face, cell.i, cell.j, 0u), u32(world.grid.w));
 }
 
 @compute @workgroup_size(8, 8)
@@ -147,20 +151,28 @@ fn climate(@builtin(global_invocation_id) id: vec3<u32>) {
     let anchor = hits[pixel_index(anchor_xy)];
     var height = 0;
     if (anchor.info & 3u) == ST_HIT && ((anchor.info >> 5u) & 31u) > 0u {
-        let dir = pixel_ray(vec2<f32>(anchor_xy) + 0.5);
-        let face = (anchor.info >> 2u) & 7u;
-        let ray = make_ray(camera.position_near.xyz, dir);
-        let cell = locate(ray, face_ray(face, ray), anchor.t, 0u);
-        height = terrain_height(domain_point(face, cell.i, cell.j, 0u), u32(world.grid.w));
+        height = climate_at(anchor, anchor_xy);
     }
-    climate_height_cache[climate_index(anchor_xy)] = height;
+    // Resolve discontinuities here as well. Keeping the terrain generator
+    // out of shade avoids carrying its registers through material/AO work.
+    for (var q = 0u; q < 4u; q++) {
+        let xy = anchor_xy + vec2<u32>(q & 1u, q >> 1u);
+        if any(xy >= vec2<u32>(frame.screen.xy)) { continue; }
+        let h = hits[pixel_index(xy)];
+        if (h.info & 3u) != ST_HIT || ((h.info >> 5u) & 31u) == 0u { continue; }
+        var own_height = height;
+        if ((anchor.info >> 5u) & 31u) == 0u || (anchor.info & 3u) != ST_HIT
+            || ((anchor.info >> 2u) & 7u) != ((h.info >> 2u) & 7u)
+            || abs(h.t - anchor.t) > max(1.0, h.t * 0.01) {
+            own_height = climate_at(h, xy);
+        }
+        climate_height_cache[pixel_index(xy)] = own_height;
+    }
 }
 
 @compute @workgroup_size(8, 8)
 fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     if any(id.xy >= vec2<u32>(frame.screen.xy)) { return; }
-    let anchor_xy = id.xy & vec2<u32>(0xfffffffeu);
-    let anchor = hits[pixel_index(anchor_xy)];
     let index = pixel_index(id.xy);
     let h = hits[index];
     var out: Surface;
@@ -195,17 +207,15 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // sea-level grass when the radial level size exceeds its elevation.
     // Fine columns already have the canonical top at base-cell precision;
     // avoid rerunning the generator and ray-to-grid mapping for each pixel.
-    var p = domain_point(face, h.i, h.j, 0u);
+    var p: vec3<i32>;
     var climate_height = top * world.grid.y;
-    if level > 0u {
+    if level == 0u {
+        p = domain_point(face, h.i, h.j, 0u);
+    } else {
         let ray = make_ray(camera.position_near.xyz, d);
         let appearance_cell = locate(ray, face_ray(face, ray), h.t, 0u);
         p = domain_point(face, appearance_cell.i, appearance_cell.j, 0u);
-        climate_height = climate_height_cache[climate_index(id.xy)];
-        if ((anchor.info >> 5u) & 31u) == 0u || (anchor.info & 3u) != ST_HIT
-            || ((anchor.info >> 2u) & 7u) != face || abs(h.t - anchor.t) > max(1.0, h.t * 0.01) {
-            climate_height = terrain_height(p, u32(world.grid.w));
-        }
+        climate_height = climate_height_cache[index];
     }
     if !edited {
         var lowest = top;

@@ -33,6 +33,12 @@ Small brushes are still omitted by coarse levels. Exact filtered canonical
 geometry and edit coverage at every distance are **not qualified** by this
 change, nor by the near-field CPU/GPU tests.
 
+All distant height queries, including discontinuity fallbacks, run in the
+climate prepass. The material shader only reads the resolved height, so the
+terrain generator's register pressure does not affect fine material/AO work.
+The screen cache stores one height per pixel (4 bytes); fine hits do not read
+it. At 1440x810 this adds 3.34 MiB relative to the former 2x2-only cache.
+
 Motion forecasts prefetch up to 350 ms ahead, bounded by ground clearance and
 the window capacity. Moving generation/admission budgets grow with backlog.
 The offscreen flight is still not a substitute for a quiet native fast-flight
