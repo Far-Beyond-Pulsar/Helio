@@ -3,8 +3,9 @@
 Destructible voxel worlds for Helio: Earth-sized cube-sphere planets, finite
 planes and effectively infinite planes, built from exact voxels of 0.1 m to
 1 m, fully editable, and rendered by tracing every pixel through a GPU-driven
-clipmap. There is no smooth or meshed terrain and no enlarged-block LOD: every
-visible surface is a real cell of the canonical grid at some level.
+clipmap. Terrain is traced rather than smoothly meshed. The current distance
+field uses larger, band-limited cells; preserving the base voxel geometry
+and small edits at every distance remains an open requirement.
 
 This document maps the system for people who will work on it: what each part
 does, how a frame flows, which invariants hold it together, why things are
@@ -22,7 +23,9 @@ hit used to retain an unrelated top-face normal and shade grass as subsoil.
 visibility at 64/300/1,000 km.
 
 Climate and filtered grass appearance use the ray's base-grid footprint and
-unrounded canonical height. This prevents high-altitude cells rounding snowy
+unrounded canonical height. Distant 2x2 pixel footprints share a height query;
+base-level hits and face/depth discontinuities use their own query. This
+prevents high-altitude cells rounding snowy
 mountains to sea-level grass. This is appearance filtering; the existing
 band-limited distance geometry remains a separate, unfinished fidelity gate.
 Small brushes are still omitted by coarse levels. Exact filtered canonical
@@ -407,13 +410,13 @@ and inside the budgeted loop in `Residency::plan`.
   no holes), but the table inconsistency behind it is not yet understood.
   Rings and fallback distances are identical in the bad frame and the one
   before; suspect block publication vs. the live-block list.
-- The fallback sky (Helio's sky pass) assumes world +Y up and a fixed sun;
-  away from the pole and from orbit the sky is wrong. Planned: atmosphere
-  around the planet from engine sky systems.
+- Hosts must supply `PlanetarySky` each frame for the planetary fallback;
+  otherwise the outdoor fallback keeps its fixed world +Y convention.
 - Dense construction stores edit references per column (4M-word pool);
   sparse block-override bricks would scale building further.
 - Edit ids (`next_brush`) grow monotonically after undo.
-- Distant grass colour variation reads as blotches from kilometres up.
+- Appearance contrast can be tuned, but existing coarse geometry transitions
+  and distant small-edit fidelity are still open.
 - `tests/gpu.rs` once hung when run in parallel with other GPU work; it has
   not reproduced since.
 

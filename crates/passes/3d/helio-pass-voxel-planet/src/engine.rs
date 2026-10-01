@@ -275,6 +275,7 @@ struct Pipelines {
     horizon_blocks: wgpu::ComputePipeline,
     horizon_suffix: wgpu::ComputePipeline,
     shade: wgpu::ComputePipeline,
+    climate: wgpu::ComputePipeline,
     sunlight: wgpu::ComputePipeline,
     gbuffer: wgpu::RenderPipeline,
 }
@@ -326,6 +327,7 @@ impl Pipelines {
             storage(17, false),
             storage(18, false),
             storage(19, true),
+            storage(20, false),
         ];
         trace_entries.push(wgpu::BindGroupLayoutEntry {
             binding: 9,
@@ -453,6 +455,7 @@ impl Pipelines {
             horizon_blocks: compute(&trace_pl, &trace_module, "horizon_blocks"),
             horizon_suffix: compute(&trace_pl, &trace_module, "horizon_suffix"),
             shade: compute(&trace_pl, &trace_module, "shade"),
+            climate: compute(&trace_pl, &trace_module, "climate"),
             sunlight: compute(&trace_pl, &trace_module, "sunlight"),
             gbuffer,
             gen_layout,
@@ -600,6 +603,7 @@ struct Screen {
     size: [u32; 2],
     hits: wgpu::Buffer,
     surfaces: wgpu::Buffer,
+    climate: wgpu::Buffer,
     sun: wgpu::Texture,
     sun_view: wgpu::TextureView,
 }
@@ -634,10 +638,17 @@ impl Screen {
             view_formats: &[],
         });
         let sun_view = sun.create_view(&Default::default());
+        let climate = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("planet climate height"),
+            size: u64::from(size[0].max(1).div_ceil(2)) * u64::from(size[1].max(1).div_ceil(2)) * 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
         Self {
             size,
             hits,
             surfaces,
+            climate,
             sun,
             sun_view,
         }
@@ -1243,6 +1254,7 @@ impl PlanetRenderer {
                 wgpu::BindGroupEntry { binding: 17, resource: self.buffers.horizon_acc.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 18, resource: self.buffers.horizon.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 19, resource: self.buffers.live_blocks.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 20, resource: self.screen.climate.as_entire_binding() },
             ],
         });
         let render_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1325,6 +1337,13 @@ impl PlanetRenderer {
         if let Some(p) = &mut self.profiler {
             p.end_pass(encoder, "planet_primary");
             p.begin_pass(encoder, "planet_shade");
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_bind_group(0, &trace_group, &[]);
+            pass.set_bind_group(1, camera_group, &[]);
+            Self::dispatch(&mut pass, &self.pipelines.climate,
+                [self.screen.size[0].div_ceil(16), self.screen.size[1].div_ceil(16), 1]);
         }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());

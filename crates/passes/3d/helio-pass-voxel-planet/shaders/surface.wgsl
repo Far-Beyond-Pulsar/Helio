@@ -131,9 +131,36 @@ fn corner_ao(side1: bool, side2: bool, corner: bool) -> f32 {
     return 3.0 - f32(u32(side1) + u32(side2) + u32(corner));
 }
 
+// Climate changes over metres to kilometres, so distant 2x2 footprints share
+// a canonical height evaluation. Base-level hits and depth discontinuities
+// retain their own exact query. Nothing here changes occupancy or trace hits.
+@group(0) @binding(20) var<storage, read_write> climate_height_cache: array<i32>;
+
+fn climate_index(xy: vec2<u32>) -> u32 {
+    return (xy.y >> 1u) * ((u32(frame.screen.x) + 1u) >> 1u) + (xy.x >> 1u);
+}
+
+@compute @workgroup_size(8, 8)
+fn climate(@builtin(global_invocation_id) id: vec3<u32>) {
+    let anchor_xy = id.xy * 2u;
+    if any(anchor_xy >= vec2<u32>(frame.screen.xy)) { return; }
+    let anchor = hits[pixel_index(anchor_xy)];
+    var height = 0;
+    if (anchor.info & 3u) == ST_HIT && ((anchor.info >> 5u) & 31u) > 0u {
+        let dir = pixel_ray(vec2<f32>(anchor_xy) + 0.5);
+        let face = (anchor.info >> 2u) & 7u;
+        let ray = make_ray(camera.position_near.xyz, dir);
+        let cell = locate(ray, face_ray(face, ray), anchor.t, 0u);
+        height = terrain_height(domain_point(face, cell.i, cell.j, 0u), u32(world.grid.w));
+    }
+    climate_height_cache[climate_index(anchor_xy)] = height;
+}
+
 @compute @workgroup_size(8, 8)
 fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     if any(id.xy >= vec2<u32>(frame.screen.xy)) { return; }
+    let anchor_xy = id.xy & vec2<u32>(0xfffffffeu);
+    let anchor = hits[pixel_index(anchor_xy)];
     let index = pixel_index(id.xy);
     let h = hits[index];
     var out: Surface;
@@ -168,7 +195,11 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // the radial level size exceeds its elevation.
     let appearance_cell = locate(make_ray(camera.position_near.xyz, d), face_ray(face, make_ray(camera.position_near.xyz, d)), h.t, 0u);
     let p = domain_point(face, select(appearance_cell.i, h.i, level == 0u), select(appearance_cell.j, h.j, level == 0u), 0u);
-    let climate_height = terrain_height(p, u32(world.grid.w));
+    var climate_height = climate_height_cache[climate_index(id.xy)];
+    if level == 0u || ((anchor.info >> 5u) & 31u) == 0u || (anchor.info & 3u) != ST_HIT
+        || ((anchor.info >> 2u) & 7u) != face || abs(h.t - anchor.t) > max(1.0, h.t * 0.01) {
+        climate_height = terrain_height(p, u32(world.grid.w));
+    }
     if !edited {
         var lowest = top;
         if x > 0u { lowest = min(lowest, column_top(c, x - 1u, y)); }

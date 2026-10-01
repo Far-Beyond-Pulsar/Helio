@@ -1383,7 +1383,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         let sun = normalize(globals.atmosphere_sun.xyz);
         let daylight = clamp(dot(normalize(globals.atmosphere_eye_radius.xyz), sun) * 2.0 + 0.15, 0.02, 1.0);
         let toward = max(dot(normalize(world_pos - cameras[0].position_near.xyz), sun), 0.0);
-        let haze = mix(vec3<f32>(0.28, 0.47, 0.78), vec3<f32>(0.85, 0.73, 0.54), pow(toward, 16.0)) * daylight;
+        let haze = mix(vec3<f32>(0.12, 0.22, 0.36), vec3<f32>(0.38, 0.30, 0.20), pow(toward, 16.0)) * daylight;
         color = color * transmission + haze * (vec3<f32>(1.0) - transmission);
     }
     // Tonemapping & bloom handled by PostProcessPass — write raw HDR linear.
