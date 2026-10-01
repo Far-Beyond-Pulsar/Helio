@@ -37,7 +37,7 @@ pub type SharedPlanetFrame = Arc<Mutex<Option<PlanetFrame>>>;
 
 /// Art controls, independent of occupancy, terrain recipes and edit journals.
 /// Palette RGB is sRGB in [0,1]; W is perceptual roughness.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct TerrainAppearance {
     pub palette: [[f32; 4]; 16],
@@ -1502,9 +1502,12 @@ impl PlanetPass {
         self.active.as_ref()
     }
     /// Changes art without recreating residency or altering the canonical world.
-    pub fn set_appearance(&mut self, appearance: TerrainAppearance) {
+    /// Returns true when temporal colour history needs invalidating.
+    pub fn set_appearance(&mut self, appearance: TerrainAppearance) -> bool {
+        if self.settings.appearance == appearance { return false; }
         self.settings.appearance = appearance;
         if let Some(renderer) = &mut self.active { renderer.settings.appearance = appearance; }
+        true
     }
     pub fn renderer_mut(&mut self) -> Option<&mut PlanetRenderer> {
         self.active.as_mut()

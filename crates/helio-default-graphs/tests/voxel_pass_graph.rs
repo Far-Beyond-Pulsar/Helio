@@ -350,3 +350,61 @@ fn planetary_sky_follows_the_world_eye_and_sun_through_resize() {
         assert!((mean - means[1][c]).abs() < 12.0, "sky reset during resize");
     }
 }
+
+/// Inspector edits get only one rendered frame before an idle viewport.
+/// Discarding colour history must show that edit without rebuilding columns.
+#[test]
+fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
+    let Some(mut editor) = editor(128, 72) else { return };
+    editor.renderer.set_editor_mode(false);
+    editor.renderer.set_tsr_quality(Some(helio_pass_tsr::TsrQuality::Native));
+    editor.renderer.set_jitter_enabled(false);
+    editor.renderer.set_ambient([1.0; 3], 1.0);
+    let planet = Arc::new(Planet::new(PlanetRecipe {
+        shape: helio_pass_voxel_planet::grid::Shape::Plane,
+        plane_size_m: 1024.0,
+        terrain: helio_pass_voxel_planet::TerrainSource {
+            generator: helio_pass_voxel_planet::landform::FLAT_ID.into(), ..Default::default()
+        },
+        ..Default::default()
+    }).unwrap());
+    let eye = glam::DVec3::Y * 20.0;
+    *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun: Vec3::Y, shadows: false });
+    editor.renderer.set_world_origin(Some(eye));
+    let camera = Camera::perspective_look_at(Vec3::ZERO, -Vec3::Y, Vec3::Z,
+        std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 1000.0);
+    for _ in 0..2000 {
+        editor.render(&camera);
+        if editor.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap().settled() { break; }
+    }
+    assert!(editor.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap().settled());
+    for _ in 0..16 { editor.render(&camera); }
+    let before = editor.rgba();
+    let columns = editor.renderer.find_pass::<PlanetPass>().unwrap().stats().unwrap().resident_columns;
+    let mean = |pixels: &[[u8;4]], channel| pixels.iter().map(|p| f64::from(p[channel])).sum::<f64>() / pixels.len() as f64;
+    let mut appearance = helio_pass_voxel_planet::engine::TerrainAppearance::default();
+    appearance.grass = [[0.85, 0.03, 0.03, 0.0]; 3];
+    appearance.detail = [0.0; 4];
+    assert!(editor.renderer.find_pass_mut::<PlanetPass>().unwrap().set_appearance(appearance));
+    editor.renderer.find_pass_mut::<helio_pass_tsr::TsrPass>().unwrap().reset_history();
+    editor.render(&camera);
+    let after = editor.rgba();
+    eprintln!("appearance before {:?}, after {:?}", [mean(&before,0),mean(&before,1)], [mean(&after,0),mean(&after,1)]);
+    assert!(mean(&after, 0) > mean(&after, 1) + 20.0);
+    assert!(mean(&after, 0) > mean(&before, 0) + 20.0);
+    assert_eq!(editor.renderer.find_pass::<PlanetPass>().unwrap().stats().unwrap().resident_columns, columns);
+    assert!(!editor.renderer.find_pass_mut::<PlanetPass>().unwrap().set_appearance(appearance));
+    assert!(editor.renderer.find_pass_mut::<PlanetPass>().unwrap().set_appearance(Default::default()));
+    editor.renderer.find_pass_mut::<helio_pass_tsr::TsrPass>().unwrap().reset_history();
+    editor.render(&camera);
+    let restored = editor.rgba();
+    assert!(mean(&restored, 1) > mean(&restored, 0));
+    editor.renderer.set_tsr_quality(Some(helio_pass_tsr::TsrQuality::Quality));
+    editor.render(&camera);
+    assert_eq!(editor.renderer.renderer_config().tsr_quality, Some(helio_pass_tsr::TsrQuality::Quality));
+    assert!(editor.renderer.find_pass::<helio_pass_tsr::TsrPass>().is_some());
+    editor.renderer.set_tsr_quality(None);
+    editor.render(&camera);
+    assert_eq!(editor.renderer.renderer_config().tsr_quality, None);
+    assert!(editor.renderer.find_pass::<helio_pass_tsr::TsrPass>().is_none());
+}

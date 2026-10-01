@@ -4,8 +4,17 @@ Windows, RTX 3060, 1920x1080 quality mode (1440x810 internal), 0.1 m recipe.
 Companion: [Pulsar-Native #994](https://github.com/Far-Beyond-Pulsar/Pulsar-Native/pull/994).
 
 CPU: 32 passed / 2 ignored. Existing GPU: 14 passed. New surface-entry and
-alpine-material regressions: 2 passed. Deferred graph/sky/resize: 3 passed.
+alpine-material regressions: 2 passed. Deferred graph/sky/resize: 4 passed.
 GPU suites were serial.
+
+The additional graph regression enables temporal reconstruction after initial
+construction, switches quality, and disables it again. Runtime quality was
+previously lost when reconstructing the graph config, so native selection
+could disagree with an initially configured harness. It also verifies that a
+material edit and reset of colour history show in one frame, keep resident
+columns, and restore the default palette. `PlanetPass::set_appearance` now
+reports whether appearance changed so hosts can invalidate history only when
+necessary. Pulsar resets temporal history on appearance edits and camera cuts.
 
 The full 5,314-frame offscreen flight at 6b1126aa reported:
 

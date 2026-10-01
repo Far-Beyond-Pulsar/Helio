@@ -750,6 +750,7 @@ impl Renderer {
             surface_format: self.surface_format,
             debug_mode: self.debug_mode,
             render_scale: self.render_scale,
+            tsr_quality: self.tsr_quality,
             render_mode: self.render_mode,
             enable_xr: self.enable_xr,
             ..self.graph_config
