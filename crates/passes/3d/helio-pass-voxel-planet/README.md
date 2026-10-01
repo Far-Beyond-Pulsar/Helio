@@ -3,9 +3,8 @@
 Destructible voxel worlds for Helio: Earth-sized cube-sphere planets, finite
 planes and effectively infinite planes, built from exact voxels of 0.1 m to
 1 m, fully editable, and rendered by tracing every pixel through a GPU-driven
-clipmap. Terrain is traced rather than smoothly meshed. The current distance
-field uses larger, band-limited cells; preserving the base voxel geometry
-and small edits at every distance remains an open requirement.
+clipmap. There is no smooth or meshed terrain and no enlarged-block LOD: every
+visible surface is a real cell of the canonical grid at some level.
 
 This document maps the system for people who will work on it: what each part
 does, how a frame flows, which invariants hold it together, why things are
@@ -13,67 +12,6 @@ the way they are, how to measure it and how to extend it. The Pulsar editor
 integration is documented in Pulsar-Native's `docs/voxel-system.md`.
 
 ## Contents
-
-### Flight and appearance corrections (draft)
-
-Level selection now defers a switch when the destination cell is already
-solid. Switching resolution is not a surface crossing: returning an interior
-hit used to retain an unrelated top-face normal and shade grass as subsoil.
-`tests/grey_patch.rs` checks radial surface entries at 1/4/16/64 km and snow
-visibility at 64/300/1,000 km.
-
-Climate and filtered grass appearance use the ray's base-grid footprint.
-Fine hits reuse the resident canonical column top at base-cell precision;
-distant 2x2 pixel footprints share an unrounded canonical height query,
-with individual queries at distant face/depth discontinuities. This
-prevents high-altitude cells rounding snowy
-mountains to sea-level grass. This is appearance filtering; the existing
-band-limited distance geometry remains a separate, unfinished fidelity gate.
-Small brushes are still omitted by coarse levels. Exact filtered canonical
-geometry and edit coverage at every distance are **not qualified** by this
-change, nor by the near-field CPU/GPU tests.
-
-All distant height queries, including discontinuity fallbacks, run in the
-climate prepass. The material shader only reads the resolved height, so the
-terrain generator's register pressure does not affect fine material/AO work.
-The screen cache stores one height per pixel (4 bytes); fine hits do not read
-it. At 1440x810 this adds 3.34 MiB relative to the former 2x2-only cache.
-
-Landform can reuse the resident coarse height when its symmetric height bound
-lies entirely in a material region where height has no effect: below the basin
-threshold, between that threshold and every possible rockline, or above every
-possible snowline. The canonical footprint must be inside the hit column and
-its packed tops must not be truncated. All other cases and custom generators
-keep the full query. `Settings::climate_height_reuse = false` disables the
-shortcut for audits. A GPU regression compares every surface byte with it on
-and off across lowland/alpine views at 330 m through 1,000 km; CPU checks cover
-both signs of the height bound at 0.1/0.3/1 m base sizes.
-
-Motion forecasts prefetch up to 350 ms ahead, bounded by ground clearance and
-the window capacity. Moving generation/admission budgets grow with backlog.
-The offscreen flight is still not a substitute for a quiet native fast-flight
-test. New Pulsar logs include eye/forward/up/viewport; replay preserves those
-poses when available, and identifies legacy altitude-only logs explicitly.
-
-`Settings::appearance` / `PlanetPass::set_appearance` control the sRGB palette,
-per-material roughness, three grass colours and detail contrast without
-rebuilding residency or changing recipes/edits. Defaults use muted meadow
-greens, cool rock, warmer soil and less reflective snow. Pulsar persists the
-same settings in `VoxelTerrainComponent.appearance_parameters` (JSON, empty
-means defaults). For example `{"detail":[0.6,0.12,0.04,0.0]}` reduces grass
-patch contrast, per-voxel pigment and edge occlusion; omitted fields retain
-defaults. RGB and detail values are clamped to [0,1] before GPU upload.
-RGB values are converted to linear colour on the CPU once per frame upload;
-roughness stays linear. Shading does not repeat palette gamma conversion.
-
-Hosts without an authored sky can call `Renderer::set_planetary_sky` with
-`PlanetarySky::earth_like(eye_m, radius_m, sun_direction)`. It shares the
-planet-centred eye and sun with the sky LUT and a bounded aerial-perspective
-approximation after deferred lighting. Authored skies retain precedence.
-Planetary sky is HDR and passes through the graph's normal tone mapping.
-Atmosphere settings survive graph resize; the graph regression checks the
-same local sky at two rotated poles. This is single scattering, not a claim
-of volumetric weather, vegetation, water or a completed AAA art pipeline.
 
 1. [Goals and non-goals](#goals-and-non-goals)
 2. [Crate map](#crate-map)
@@ -429,13 +367,13 @@ and inside the budgeted loop in `Residency::plan`.
   no holes), but the table inconsistency behind it is not yet understood.
   Rings and fallback distances are identical in the bad frame and the one
   before; suspect block publication vs. the live-block list.
-- Hosts must supply `PlanetarySky` each frame for the planetary fallback;
-  otherwise the outdoor fallback keeps its fixed world +Y convention.
+- The fallback sky (Helio's sky pass) assumes world +Y up and a fixed sun;
+  away from the pole and from orbit the sky is wrong. Planned: atmosphere
+  around the planet from engine sky systems.
 - Dense construction stores edit references per column (4M-word pool);
   sparse block-override bricks would scale building further.
 - Edit ids (`next_brush`) grow monotonically after undo.
-- Appearance contrast can be tuned, but existing coarse geometry transitions
-  and distant small-edit fidelity are still open.
+- Distant grass colour variation reads as blotches from kilometres up.
 - `tests/gpu.rs` once hung when run in parallel with other GPU work; it has
   not reproduced since.
 
