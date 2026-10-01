@@ -837,6 +837,36 @@ impl RenderGraph {
         }
     }
 
+    /// Names of the passes whose `execute()` cannot be recorded once and
+    /// reused (their [`RenderPass::recording_key`] is `None`). Empty when the
+    /// whole frame is reusable.
+    pub fn recording_blockers(&self) -> Vec<&'static str> {
+        self.passes
+            .iter()
+            .filter(|pass| pass.recording_key().is_none())
+            .map(|pass| pass.name())
+            .collect()
+    }
+
+    /// A key for the frame's recorded command stream, or `None` while any pass
+    /// still records per-frame-dependent commands (see
+    /// [`Self::recording_blockers`]). Combines the graph shape and size, the
+    /// chain layout, `target_slot` (which of the rotating output targets this
+    /// frame draws into, since commands bind it) and every pass's key. Equal
+    /// keys mean the commands are identical.
+    pub fn frame_recording_key(&self, target_slot: u64) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.passes.len().hash(&mut hasher);
+        (self.internal_w, self.internal_h, self.chain_generation).hash(&mut hasher);
+        self.subpass_chains.hash(&mut hasher);
+        target_slot.hash(&mut hasher);
+        for pass in &self.passes {
+            pass.recording_key()?.hash(&mut hasher);
+        }
+        Some(hasher.finish())
+    }
+
     /// How much pass recording goes into each graphics segment handed to the
     /// finish threads. Smaller budgets give more, shorter segments to spread
     /// across threads, at some per-command-buffer submit cost; zero cuts at

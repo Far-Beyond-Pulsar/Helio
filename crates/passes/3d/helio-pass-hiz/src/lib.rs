@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use helio_core::ResourceRegistry;
 
 /// Marker opting a shader into [`HIZ`]. Must appear in the source.
@@ -270,9 +270,7 @@ impl HiZBuildPass {
     /// Builds the min-depth pyramid consumed by SsrPass after mip 0 is seeded.
     ///
     /// Assumes `min_mip_views` / `min_mip_bind_groups` are already populated.
-    fn build_min_pyramid(&mut self, ctx: &mut PassContext) {
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
-
+    fn build_min_pyramid(&mut self, encoder: &mut CommandRecorder<'_>) {
         // Levels 1+ via MIN-reduction.
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -577,7 +575,7 @@ impl RenderPass for HiZBuildPass {
             bytes_per_row: Some(self.depth_copy_bytes_per_row),
             rows_per_image: Some(self.height.max(1)),
         };
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let mut encoder = ctx.graphics_cmds();
 
         // The min pyramid is optional: only SSR and WaterSim's reflections
         // read it, and they declare that before the frame executes. The depth
@@ -661,7 +659,7 @@ impl RenderPass for HiZBuildPass {
         // depth — anything that moves while the camera holds still would otherwise
         // reflect a frozen pyramid.
         if min_wanted {
-            self.build_min_pyramid(ctx);
+            self.build_min_pyramid(&mut encoder);
         }
 
         // ── HiZ reuse: skip the rebuild while camera and scene are unchanged ──

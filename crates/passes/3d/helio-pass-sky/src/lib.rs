@@ -16,7 +16,8 @@
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{
-    DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
+    CommandRecorder, DebugViewDescriptor, PassContext, PrepareContext, RenderCmds, RenderPass,
+    Result as HelioResult,
 };
 use pulsar_scenedb::gpu::{BufferKey, GpuMirrorHandle};
 
@@ -1697,7 +1698,7 @@ impl SkyPass {
     pub fn volume_view(&self) -> &wgpu::TextureView {
         &self.volume_views[self.ping]
     }
-    pub fn dispatch(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    pub fn dispatch(&mut self, encoder: &mut CommandRecorder<'_>) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Cloud Volume Simulation"),
             timestamp_writes: None,
@@ -1708,7 +1709,7 @@ impl SkyPass {
         drop(pass);
         self.ping = 1 - self.ping;
     }
-    pub fn render(&self, pass: &mut wgpu::RenderPass<'_>) {
+    pub fn render(&self, pass: &mut RenderCmds<'_>) {
         pass.set_pipeline(&self.render_pipeline);
         pass.set_bind_group(0, &self.render_groups[self.ping], &[]);
         pass.draw(0..3, 0..1);
@@ -1824,10 +1825,10 @@ impl RenderPass for SkyPass {
         _depth: &'a wgpu::TextureView,
         _resources: &'a helio_core::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        // Unified pass drives both sky_lut and pre_aa manually via encoder_ptr
+        // Unified pass drives both sky_lut and pre_aa manually via ctx.graphics_cmds()
         // to avoid encoder lock (graph would hold an active pre_aa pass while we
         // try to render the LUT). Returning None lets execute create both passes
-        // sequentially on encoder_ptr without conflict.
+        // sequentially on the graphics stream without conflict.
         None
     }
 
@@ -2043,7 +2044,7 @@ impl RenderPass for SkyPass {
         if has_sky {
             // Ensure LUT bind group is up to date (for generation)
             // LUT generation render pass — writes to graph-owned sky_lut texture if available.
-            // We use encoder_ptr directly because this pass also owns the subsequent pre_aa pass.
+            // We use the graphics stream (ctx.graphics_cmds()) directly because this pass also owns the subsequent pre_aa pass.
             if let Some(sky_lut_view) = ctx.registry.get(helio_core::ResourceKey::new("sky_lut")) {
                 if self.sky_lut_bg1_key != Some(scene_sky_key) {
                     self.sky_lut_bg1 =
@@ -2060,7 +2061,7 @@ impl RenderPass for SkyPass {
                         }));
                     self.sky_lut_bg1_key = Some(scene_sky_key);
                 }
-                let encoder = unsafe { &mut *ctx.encoder_ptr };
+                let mut encoder = ctx.graphics_cmds();
                 let attachments = [Some(wgpu::RenderPassColorAttachment {
                     view: sky_lut_view,
                     resolve_target: None,
@@ -2099,8 +2100,8 @@ impl RenderPass for SkyPass {
         // ── 2) Legacy cloud volume simulation dispatch ───────────────────────
         if self.config.enabled && !procedural_clouds && self.config.mode == CloudRenderMode::Layer2D
         {
-            let ce = unsafe { &mut *ctx.compute_encoder_ptr };
-            self.dispatch(ce);
+            let mut ce = ctx.compute_cmds();
+            self.dispatch(&mut ce);
         }
 
         if !self.use_high_perf {
@@ -2109,8 +2110,8 @@ impl RenderPass for SkyPass {
                 .registry
                 .get(helio_core::ResourceKey::new("pre_aa"))
                 .unwrap_or(ctx.target);
-            if let Some(ptr) = ctx.active_render_pass_ptr() {
-                unsafe { self.render(&mut *ptr) };
+            if let Some(mut rp) = ctx.render_cmds() {
+                self.render(&mut rp);
             } else {
                 let attachments = [Some(wgpu::RenderPassColorAttachment {
                     view: target_view,
@@ -2121,16 +2122,15 @@ impl RenderPass for SkyPass {
                         store: wgpu::StoreOp::Store,
                     },
                 })];
-                let mut pass = unsafe {
-                    (&mut *ctx.encoder_ptr).begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("Cloud Volume Raymarch (Legacy)"),
-                        color_attachments: &attachments,
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    })
-                };
+                let mut gfx = ctx.graphics_cmds();
+                let mut pass = gfx.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Cloud Volume Raymarch (Legacy)"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
                 if has_sky {
                     // Also composite sky when in legacy mode
                     if let Some(sky_lut_view) =
@@ -2227,7 +2227,7 @@ impl RenderPass for SkyPass {
                     },
                 ],
             });
-            let ce = unsafe { &mut *ctx.compute_encoder_ptr };
+            let mut ce = ctx.compute_cmds();
             let mut cpass = ce.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Finite Cloud Volume Low Resolution"),
                 timestamp_writes: None,
@@ -2287,7 +2287,7 @@ impl RenderPass for SkyPass {
                     },
                 ],
             });
-            let ce = unsafe { &mut *ctx.compute_encoder_ptr };
+            let mut ce = ctx.compute_cmds();
             let mut cpass = ce.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Finite Cloud Temporal Accumulation"),
                 timestamp_writes: None,
@@ -2363,8 +2363,7 @@ impl RenderPass for SkyPass {
 
         // Fallback composite: legacy render path ensures visible clouds even before
         // full graph wiring is complete (prevents blank sky during incremental rollout)
-        if let Some(ptr) = ctx.active_render_pass_ptr() {
-            let rp = unsafe { &mut *ptr };
+        if let Some(mut rp) = ctx.render_cmds() {
             if has_sky {
                 rp.set_pipeline(&self.sky_pipeline);
                 rp.set_bind_group(0, &self.sky_bg0, &[]);
@@ -2384,7 +2383,7 @@ impl RenderPass for SkyPass {
                 && !procedural_clouds
                 && self.config.mode == CloudRenderMode::Layer2D
             {
-                self.render(rp);
+                self.render(&mut rp);
             }
         } else {
             // No active pass — manual fallback (writes to pre_aa when graph allocates it)
@@ -2406,16 +2405,15 @@ impl RenderPass for SkyPass {
                 depth_ops: None,
                 stencil_ops: None,
             });
-            let mut pass = unsafe {
-                (&mut *ctx.encoder_ptr).begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Sky + Clouds Composite (Unified Fallback)"),
-                    color_attachments: &attachments,
-                    depth_stencil_attachment: depth_attachment,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                })
-            };
+            let mut gfx = ctx.graphics_cmds();
+            let mut pass = gfx.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Sky + Clouds Composite (Unified Fallback)"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: depth_attachment,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
             if has_sky {
                 pass.set_pipeline(if self.depth_tested {
                     &self.sky_pipeline_depth_tested
@@ -2444,16 +2442,14 @@ impl RenderPass for SkyPass {
                         store: wgpu::StoreOp::Store,
                     },
                 })];
-                pass = unsafe {
-                    (&mut *ctx.encoder_ptr).begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("Sky Clouds Composite"),
-                        color_attachments: &attachments,
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    })
-                };
+                pass = gfx.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Sky Clouds Composite"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
             }
             if volume_clouds_enabled {
                 pass.set_pipeline(&self.volume_composite_pipeline);

@@ -813,15 +813,15 @@ impl RenderPass for SdfPass {
         }
 
         if !self.gpu_passes_clean {
-            unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
+            ctx.graphics_cmds().copy_buffer_to_buffer(
                 &self.eval_indirect_template_buffer,
                 0,
                 &self.eval_indirect_buffer,
                 0,
                 self.level_count as u64 * 3 * 4,
             );
-            unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.dirty_flags_buffer, 0, None);
-            unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.dirty_bricks_buffer, 0, None);
+            ctx.graphics_cmds().clear_buffer(&self.dirty_flags_buffer, 0, None);
+            ctx.graphics_cmds().clear_buffer(&self.dirty_bricks_buffer, 0, None);
 
             {
                 let mut cpass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {

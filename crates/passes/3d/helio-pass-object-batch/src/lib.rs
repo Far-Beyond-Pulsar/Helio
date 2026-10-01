@@ -19,7 +19,7 @@
 //! step, tracked apart from this crate.
 
 use bytemuck::{Pod, Zeroable};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use helio_pass_gbuffer::StaticObjectComponent;
 use pulsar_scenedb::gpu::BufferKey;
 
@@ -1059,7 +1059,7 @@ impl ObjectBatchPass {
     /// integrated `execute()` and [`Self::run_once_for_testing`] -- same
     /// "test records identically to the real path" discipline `helio-pass-
     /// sprite-cull`'s `record`/`run_once_for_testing` split uses.
-    fn record(&self, encoder: &mut wgpu::CommandEncoder, capacity: u32) {
+    fn record(&self, encoder: &mut CommandRecorder<'_>, capacity: u32) {
         encoder.clear_buffer(&self.scratch.gather_count, 0, None);
         encoder.clear_buffer(&self.scratch.group_count, 0, None);
         encoder.clear_buffer(&self.scratch.range_count, 0, None);
@@ -1343,7 +1343,7 @@ impl ObjectBatchPass {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ObjBatch Test Encoder"),
         });
-        self.record(&mut encoder, capacity);
+        self.record(&mut CommandRecorder::from_encoder(&mut encoder), capacity);
         queue.submit([encoder.finish()]);
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
     }
@@ -1512,7 +1512,7 @@ impl RenderPass for ObjectBatchPass {
                 })
                 .unwrap_or(0)
         };
-        self.record(unsafe { &mut *ctx.encoder_ptr }, capacity);
+        self.record(&mut ctx.graphics_cmds(), capacity);
         Ok(())
     }
 }

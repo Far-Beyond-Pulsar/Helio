@@ -345,6 +345,8 @@ impl RenderPass for SmaaPass {
             ));
         }
 
+        let mut enc = ctx.graphics_cmds();
+
         // Pass 1 — edge detection → edge_view
         {
             let color = [Some(wgpu::RenderPassColorAttachment {
@@ -364,7 +366,7 @@ impl RenderPass for SmaaPass {
                 occlusion_query_set: None,
                 multiview_mask: None,
             };
-            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&desc);
+            let mut pass = enc.begin_render_pass(&desc);
             pass.set_pipeline(&self.edge_pipeline);
             pass.set_bind_group(0, self.edge_bind_group.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
@@ -389,7 +391,7 @@ impl RenderPass for SmaaPass {
                 occlusion_query_set: None,
                 multiview_mask: None,
             };
-            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&desc);
+            let mut pass = enc.begin_render_pass(&desc);
             pass.set_pipeline(&self.blend_pipeline);
             pass.set_bind_group(0, self.blend_bind_group.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
@@ -415,7 +417,7 @@ impl RenderPass for SmaaPass {
                 occlusion_query_set: None,
                 multiview_mask: None,
             };
-            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&desc);
+            let mut pass = enc.begin_render_pass(&desc);
             pass.set_pipeline(&self.neighbor_pipeline);
             pass.set_bind_group(0, self.neighbor_bind_group.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);

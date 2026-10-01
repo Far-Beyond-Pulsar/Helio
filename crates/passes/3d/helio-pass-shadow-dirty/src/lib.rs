@@ -383,7 +383,7 @@ impl RenderPass for ShadowDirtyPass {
         // Reset the complete output arrays before dispatch. Doing this as
         // encoder commands avoids the cross-workgroup race that occurs when
         // invocation zero clears storage while other workgroups write it.
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let mut encoder = ctx.graphics_cmds();
         encoder.clear_buffer(&self.face_dirty_buf, 0, None);
         encoder.clear_buffer(&self.face_geom_count_buf, 0, None);
 

@@ -384,7 +384,7 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// Executes the pass by recording GPU commands.
     ///
     /// This is the main entry point for recording work. Implementations should:
-    /// 1. Record into `ctx.active_render_pass_ptr()` when they return a render-pass descriptor,
+    /// 1. Record into `ctx.render_cmds()` when they return a render-pass descriptor,
     ///    or begin their own render/compute pass for the fallback path.
     /// 2. Set pipelines, bind groups, and issue draw/dispatch calls.
     /// 3. Access scene resources via `ctx.scene` (zero-copy).
@@ -582,14 +582,14 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     }
 
     /// Returns true if this pass's `execute()` never touches the main render
-    /// encoder (`ctx.encoder_ptr` / `ctx.active_render_pass`) — only
-    /// `ctx.compute_encoder_ptr` / `ctx.begin_compute_pass()`. Such passes may be
+    /// encoder (`ctx.graphics_cmds()` / `ctx.render_cmds()`) — only
+    /// `ctx.compute_cmds()` / `ctx.begin_compute_pass()`. Such passes may be
     /// placed inside an active subpass chain without closing the chain's open
     /// render pass, since their GPU work is recorded on a separate encoder that
     /// cannot conflict with it.
     ///
     /// Default `false`. Only opt in after auditing every encoder touch in
-    /// `execute()` — a single stray `ctx.encoder_ptr` use while the chain's
+    /// `execute()` — a single stray `ctx.graphics_cmds()` use while the chain's
     /// render pass is open is a real hazard, not just a missed optimization.
     fn chain_transparent(&self) -> bool {
         false
@@ -608,6 +608,24 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// Default `true`.
     fn supports_parallel_recording(&self) -> bool {
         true
+    }
+
+    /// A key identifying the commands `execute()` records, for reusing a
+    /// recording across frames (Helio#311).
+    ///
+    /// Return `Some(key)` only when `execute()` records *exactly the same
+    /// commands* every frame while the key is unchanged: no CPU branch on
+    /// per-frame data (dirty flags, readbacks, settled/skip decisions, counts),
+    /// with all of that decided on the GPU from buffers instead. The key must
+    /// change whenever the commands themselves would: a pipeline, bind group,
+    /// buffer or texture the pass records against is replaced, or a recorded
+    /// dispatch or draw size changes. Data that only changes *buffer contents*
+    /// does not belong in the key.
+    ///
+    /// `None` (the default) means "re-record every frame"; the graph then
+    /// cannot reuse a recording of the frame.
+    fn recording_key(&self) -> Option<u64> {
+        None
     }
 
     /// Optionally prepares per-frame data before GPU execution.

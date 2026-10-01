@@ -238,7 +238,7 @@ impl RenderPass for PortalEditorOverlayPass {
         if !self.editor_mode || self.portal_count == 0 {
             return Ok(());
         }
-        let Some(pass_ptr) = ctx.active_render_pass_ptr() else {
+        let Some(mut pass) = ctx.render_cmds() else {
             return Ok(());
         };
         let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {
@@ -267,7 +267,6 @@ impl RenderPass for PortalEditorOverlayPass {
             self.bind_group_key = Some(key);
         }
 
-        let pass = unsafe { &mut *pass_ptr };
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.draw(0..6, 0..self.portal_count);

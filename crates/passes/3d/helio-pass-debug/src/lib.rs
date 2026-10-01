@@ -5,7 +5,7 @@
 //! O(1) CPU execution — single `draw(0..vertex_count, 0..1)`.
 
 use bytemuck::{Pod, Zeroable};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderCmds, RenderPass, Result as HelioResult};
 
 const MAX_DEBUG_VERTS: u32 = 65536;
 const MAX_DEBUG_TRIS: u32 = 65536;
@@ -372,7 +372,7 @@ impl DebugPass {
 
 impl DebugPass {
     /// Common draw commands for both execute paths.
-    fn draw_commands(&self, rp: &mut wgpu::RenderPass) {
+    fn draw_commands(&self, rp: &mut RenderCmds<'_>) {
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
 
         if self.vertex_count > 0 {
@@ -461,7 +461,8 @@ impl DebugPass {
             multiview_mask: None,
         };
 
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&desc);
+        let mut enc = ctx.graphics_cmds();
+        let mut pass = enc.begin_render_pass(&desc);
         self.draw_commands(&mut pass);
         Ok(())
     }
@@ -525,8 +526,8 @@ impl RenderPass for DebugPass {
             return Ok(());
         }
         self.ensure_bind_group(ctx.device);
-        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
-        self.draw_commands(rp);
+        let mut rp = ctx.render_cmds().expect("DebugPass requires the graph render pass");
+        self.draw_commands(&mut rp);
         Ok(())
     }
 }

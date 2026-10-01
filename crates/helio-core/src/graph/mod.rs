@@ -3,10 +3,12 @@ mod barriers;
 mod execution;
 mod executor;
 mod pipeline_cache;
+mod recording_cache;
 mod resource;
 mod resource_lifetime;
 mod scheduling;
 
+pub use recording_cache::{RecordingCacheStats, UnitCacheStats};
 pub use attachments::{
     attachment_format, resolve_attachment_view, AttachmentSlot, ColorAttachmentIntent,
     DepthAttachmentIntent,

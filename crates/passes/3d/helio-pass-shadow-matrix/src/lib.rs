@@ -4,7 +4,7 @@
 //! O(1) CPU — single compute dispatch regardless of light count.
 
 use bytemuck::{Pod, Zeroable};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 pub mod gpu_types;
 pub use gpu_types::*;
@@ -69,6 +69,10 @@ pub struct ShadowMatrixPass {
     caster_copy_wanted: Option<(CasterKey, u32)>,
     /// Bumped per allocation and echoed by the kernel into `caster_table`.
     caster_nonce: u32,
+    /// View used for the most recent caster ranking. Kept separate from the
+    /// matrix pass view so small camera jitter does not reshuffle slots.
+    last_caster_view_proj: [f32; 16],
+    pending_caster_view_proj: [f32; 16],
     /// The allocation's layout, with the `caster_key` it was read for.
     caster_layout: Option<(CasterKey, CasterLayout)>,
     /// Per-slot dirty generations (what `ShadowPass` compares). Light edits
@@ -80,6 +84,7 @@ type CasterKey = (u64, u64, u32, u32);
 
 /// Bytes of `caster_table`: the count plus one light type per slot.
 const CASTER_TABLE_BYTES: u64 = 4 * (2 + MAX_SHADOW_CASTERS as u64);
+const CAMERA_REBALANCE_EPSILON: f32 = 0.025;
 
 /// Reading `caster_table` back after an allocation. Mapping has to wait for
 /// the copy's submission, so the copy and the map request are a frame apart.
@@ -254,6 +259,16 @@ impl ShadowMatrixPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let caster_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -280,6 +295,7 @@ impl ShadowMatrixPass {
             lights_buf,
             &caster_params_buf,
             &caster_table,
+            camera_buf,
         );
         let caster_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow caster allocation PL"),
@@ -321,6 +337,8 @@ impl ShadowMatrixPass {
             caster_readback: CasterReadback::Idle,
             caster_copy_wanted: None,
             caster_nonce: 0,
+            last_caster_view_proj: [0.0; 16],
+            pending_caster_view_proj: [0.0; 16],
             caster_layout: None,
             per_caster_generation: [1; 42],
         }
@@ -348,6 +366,7 @@ impl ShadowMatrixPass {
         lights: &wgpu::Buffer,
         params: &wgpu::Buffer,
         caster_table: &wgpu::Buffer,
+        camera: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Shadow caster allocation BG"),
@@ -356,6 +375,7 @@ impl ShadowMatrixPass {
                 wgpu::BindGroupEntry { binding: 0, resource: lights.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: params.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: caster_table.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: camera.as_entire_binding() },
             ],
         })
     }
@@ -417,9 +437,13 @@ impl ShadowMatrixPass {
                     None
                 };
                 match layout {
-                    Some(layout) => self.caster_layout = Some((key, layout)),
+                    Some(layout)
+                        if self.caster_key == Some(key) && nonce == self.caster_nonce =>
+                    {
+                        self.caster_layout = Some((key, layout))
+                    }
                     // Unreadable or stale: copy again while it is current.
-                    None if self.caster_key == Some(key) => {
+                    None if self.caster_key == Some(key) && nonce == self.caster_nonce => {
                         self.caster_copy_wanted = Some((key, nonce));
                     }
                     None => {}
@@ -430,7 +454,7 @@ impl ShadowMatrixPass {
     }
 
     /// Record the caster allocation: one workgroup over every light row.
-    fn record_caster_allocation(&self, encoder: &mut wgpu::CommandEncoder) {
+    fn record_caster_allocation(&self, encoder: &mut CommandRecorder<'_>) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Shadow caster allocation"),
             timestamp_writes: None,
@@ -527,15 +551,30 @@ impl RenderPass for ShadowMatrixPass {
                 &self.bound_lights,
                 &self.caster_params_buf,
                 &self.caster_table,
+                &self.camera_buf,
             );
             self.caster_key = None;
         }
-        // Reallocate slots only when the light rows change (Helio#246): no
-        // per-frame CPU scoring, and nothing at all while lights are idle.
+        // Light edits and meaningful camera changes trigger GPU allocation.
+        // Scoring still runs over light rows only on the GPU; the CPU compares
+        // camera matrices already available to the pass and never walks lights.
         let caster_key = lights.map(|lights| {
             (lights.epoch, lights.content_generation, lights.row_capacity(), self.caster_capacity())
         });
-        self.caster_rebuild = caster_key.filter(|key| self.caster_key != Some(*key));
+        let camera_rebalance = ctx.camera_data.view_proj.iter()
+            .zip(self.last_caster_view_proj)
+            .any(|(now, old)| (now - old).abs() > CAMERA_REBALANCE_EPSILON);
+        if camera_rebalance {
+            // The previous readback describes the old view's winners. Do not
+            // publish it while a new allocation is pending.
+            self.caster_layout = None;
+        }
+        self.caster_rebuild = caster_key.filter(|key| {
+            self.caster_key != Some(*key) || camera_rebalance
+        });
+        if self.caster_rebuild.is_some() {
+            self.pending_caster_view_proj = ctx.camera_data.view_proj;
+        }
         if let Some((_, _, row_count, caster_capacity)) = self.caster_rebuild {
             self.caster_nonce = self.caster_nonce.wrapping_add(1);
             let params = CasterParams { row_count, caster_capacity, nonce: self.caster_nonce, _pad: 0 };
@@ -579,15 +618,16 @@ impl RenderPass for ShadowMatrixPass {
         // Slots first: the matrices below, and every later pass, read the
         // `shadow_index` this writes into the same rows.
         if let Some(key) = self.caster_rebuild.take() {
-            self.record_caster_allocation(unsafe { &mut *ctx.encoder_ptr });
+            self.record_caster_allocation(&mut ctx.graphics_cmds());
             self.caster_key = Some(key);
+            self.last_caster_view_proj = self.pending_caster_view_proj;
             self.caster_copy_wanted = Some((key, self.caster_nonce));
         }
         // Copy the table out for the CPU once the staging buffer is free
         // (a buffer with a map pending cannot be written by a submission).
         if matches!(self.caster_readback, CasterReadback::Idle) {
             if let Some(key) = self.caster_copy_wanted.take() {
-                unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
+                ctx.graphics_cmds().copy_buffer_to_buffer(
                     &self.caster_table,
                     0,
                     &self.caster_table_staging,
@@ -598,11 +638,11 @@ impl RenderPass for ShadowMatrixPass {
             }
         }
         let wg = count.div_ceil(WORKGROUP_SIZE);
-        let mut pass =
-            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ShadowMatrix"),
-                timestamp_writes: None,
-            });
+        let mut cmds = ctx.graphics_cmds();
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("ShadowMatrix"),
+            timestamp_writes: None,
+        });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.dispatch_workgroups(wg, 1, 1);

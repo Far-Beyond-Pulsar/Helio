@@ -249,7 +249,8 @@ impl Profiler {
     /// - `name`: Pass name for debugging
     pub fn begin_gpu_pass(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         if self.enabled {
-            self.gpu.begin_pass(encoder, name);
+            self.gpu
+                .begin_pass(&mut crate::CommandRecorder::from_encoder(encoder), name);
         }
     }
 
@@ -269,14 +270,16 @@ impl Profiler {
     /// - `name`: Pass name for debugging
     pub fn end_gpu_pass(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         if self.enabled {
-            self.gpu.end_pass(encoder, name);
+            self.gpu
+                .end_pass(&mut crate::CommandRecorder::from_encoder(encoder), name);
         }
     }
 
     /// Resolve GPU timestamp queries to buffer (call after submitting command buffer)
     pub fn resolve_gpu_queries(&mut self, encoder: &mut wgpu::CommandEncoder, frame_index: u64) {
         if self.enabled {
-            self.gpu.resolve_queries(encoder, frame_index);
+            self.gpu
+                .resolve_queries(&mut crate::CommandRecorder::from_encoder(encoder), frame_index);
         }
     }
 
@@ -332,6 +335,20 @@ impl Profiler {
     /// Fold GPU samples from a worker-local profiler into this graph profiler.
     /// The worker query set is intentionally separate because wgpu query sets
     /// and encoders are not safely shared while recording on scoped threads.
+    /// Adds spans timed by a cached recording, whose timestamps it resolved
+    /// into `buffer` (see [`GpuProfiler::add_external_spans`]). Read back with
+    /// this frame's own spans by the next `resolve_gpu_queries`.
+    pub(crate) fn add_external_gpu_spans(
+        &mut self,
+        buffer: &wgpu::Buffer,
+        query_count: u32,
+        spans: &[(&'static str, u32, u32)],
+    ) {
+        if self.enabled {
+            self.gpu.add_external_spans(buffer, query_count, spans);
+        }
+    }
+
     pub(crate) fn merge_external_gpu_timings(&mut self, samples: &[GpuTimestamp]) {
         self.gpu.merge_external_timings(samples);
     }

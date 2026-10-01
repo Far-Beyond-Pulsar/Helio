@@ -55,7 +55,7 @@
 //! the pool (e.g. `SpriteBatchPass::reserve`) *before* wiring GPU culling in.
 
 use bytemuck::{Pod, Zeroable};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result};
+use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result};
 use std::sync::Arc;
 
 const WG_SIZE: u32 = 256;
@@ -657,7 +657,7 @@ impl RenderPass for SpriteCullPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        self.record(unsafe { &mut *ctx.encoder_ptr });
+        self.record(&mut ctx.graphics_cmds());
         Ok(())
     }
 }
@@ -668,7 +668,7 @@ impl SpriteCullPass {
     /// [`SpriteCullPass::run_once_for_testing`] — the graph-integrated path
     /// and the standalone test path must record identically, or a test pass
     /// proves nothing about the real one.
-    fn record(&self, encoder: &mut wgpu::CommandEncoder) {
+    fn record(&self, encoder: &mut CommandRecorder<'_>) {
         // Reset the atomic visible-count / instance_count field to zero
         // before culling. The other four `DrawIndexedIndirectArgs` fields
         // are static and were written once at construction.
@@ -751,7 +751,7 @@ impl SpriteCullPass {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("SpriteCullPass::run_once_for_testing"),
         });
-        self.record(&mut encoder);
+        self.record(&mut CommandRecorder::from_encoder(&mut encoder));
         queue.submit([encoder.finish()]);
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
     }

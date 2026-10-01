@@ -2,17 +2,17 @@
 ///
 /// Authors request a shadow map by writing any `shadow_index` other than
 /// `u32::MAX` (0 by convention). This kernel turns requests into atlas slots:
-/// it ranks requesting lights by importance (`intensity * range^2`,
-/// directional lights first), keeps the top `caster_capacity`, and writes
+/// it ranks requesting lights by projected camera coverage and distance
+/// (directional lights first), keeps the top `caster_capacity`, and writes
 /// `shadow_index = 6 * slot` back into the same `"scene_lights"` rows every
 /// pass already reads. Losers get `u32::MAX`. Slots follow row order, so a
 /// winning set that does not change keeps its slots.
 ///
 /// The request survives the overwrite in `_pad`: `ALLOCATED` marks a row this
 /// kernel has rewritten and `WANTS_SHADOW_MAP` holds the original request.
-/// SceneDB re-uploads a row whenever it is edited, which clears both bits, so
+/// SceneDB re-uploads a row whenever it is edited, which clears these bits, so
 /// the next run reads the author's value again. The pass dispatches this only
-/// when the light rows change; between edits the written slots stay valid.
+/// when light rows change or the view moves beyond its rebalance threshold.
 ///
 /// One workgroup. Each thread owns a contiguous chunk of rows, so prefix sums
 /// over chunk counts give row-ordered results: a four-digit radix select finds
@@ -52,12 +52,24 @@ struct CasterParams {
     _pad1: u32,
 }
 
+struct CameraUniforms {
+    view: mat4x4f,
+    proj: mat4x4f,
+    view_proj: mat4x4f,
+    inv_view_proj: mat4x4f,
+    position_near: vec4f,
+    forward_far: vec4f,
+    jitter_frame: vec4f,
+    prev_view_proj: mat4x4f,
+}
+
 @group(0) @binding(0) var<storage, read_write> lights: array<GpuLight>;
 @group(0) @binding(1) var<uniform> params: CasterParams;
 /// The allocation for the CPU: `[0]` = casters assigned, `[1 + slot]` =
 /// that slot's `light_type`, last word = `params.nonce`. Read back by ShadowMatrixPass so ShadowPass
 /// renders only the faces each caster uses.
 @group(0) @binding(2) var<storage, read_write> caster_table: array<u32>;
+@group(0) @binding(3) var<storage, read> cameras: array<CameraUniforms, 2>;
 
 const THREADS: u32 = 256u;
 const NO_SHADOW: u32 = 0xFFFFFFFFu;
@@ -68,6 +80,7 @@ const RT_EXPLICIT: u32 = 1u;
 const RT_ENABLED: u32 = 2u;
 const WANTS_SHADOW_MAP: u32 = 4u;
 const ALLOCATED: u32 = 8u;
+const PREVIOUS_WINNER: u32 = 16u;
 
 var<workgroup> histogram: array<atomic<u32>, 256>;
 var<workgroup> offsets: array<u32, 256>;
@@ -90,11 +103,36 @@ fn is_candidate(light: GpuLight) -> bool {
     return is_live(light) && requests_shadow_map(light);
 }
 
-/// Larger is more important. Non-negative floats order like their bits.
+/// Larger is more important. Estimate projected influence, reject lights
+/// outside the view, attenuate by distance, and favor current winners slightly
+/// to avoid slot churn when two scores are nearly tied. Non-negative floats
+/// order like their bits.
 fn importance_key(light: GpuLight) -> u32 {
     if light.light_type == LIGHT_TYPE_DIRECTIONAL { return 0xFFFFFFFFu; }
     let range = light.position_range.w;
-    let score = light.color_intensity.w * range * range;
+    let camera = cameras[0];
+    let position = light.position_range.xyz;
+    let distance_to_camera = distance(position, camera.position_near.xyz);
+    let clip = camera.view_proj * vec4f(position, 1.0);
+    var coverage = 1.0;
+    if clip.w > 0.0 {
+        let x_radius = range * length(vec3f(camera.view_proj[0].x, camera.view_proj[1].x, camera.view_proj[2].x));
+        let y_radius = range * length(vec3f(camera.view_proj[0].y, camera.view_proj[1].y, camera.view_proj[2].y));
+        let z_radius = range * length(vec3f(camera.view_proj[0].z, camera.view_proj[1].z, camera.view_proj[2].z));
+        let w_radius = range * length(vec3f(camera.view_proj[0].w, camera.view_proj[1].w, camera.view_proj[2].w));
+        if abs(clip.x) > clip.w + w_radius + x_radius
+            || abs(clip.y) > clip.w + w_radius + y_radius
+            || clip.z < -z_radius || clip.z > clip.w + w_radius + z_radius {
+            return 0u;
+        }
+        let projected_radius = max(x_radius, y_radius) / max(clip.w - w_radius, camera.position_near.w);
+        coverage = min(projected_radius * projected_radius, 1.0);
+    } else if clip.w + range * length(vec3f(camera.view_proj[0].w, camera.view_proj[1].w, camera.view_proj[2].w)) <= 0.0 {
+        return 0u;
+    }
+    let falloff = 1.0 / (1.0 + distance_to_camera * distance_to_camera * 0.01);
+    var score = max(light.color_intensity.w, 0.0) * coverage * falloff;
+    if (light._pad & PREVIOUS_WINNER) != 0u { score *= 1.15; }
     // NaN compares false: it ranks last instead of poisoning the order.
     return bitcast<u32>(select(0.0, min(score, 3.0e38), score > 0.0));
 }
@@ -215,7 +253,7 @@ fn assign_shadow_casters(@builtin(local_invocation_index) lid: u32) {
                 tie_rank++;
             }
         }
-        var pad = (light._pad & ~WANTS_SHADOW_MAP) | ALLOCATED | select(0u, WANTS_SHADOW_MAP, requested);
+        var pad = (light._pad & ~(WANTS_SHADOW_MAP | PREVIOUS_WINNER)) | ALLOCATED | select(0u, WANTS_SHADOW_MAP, requested);
         // Ray-traced shadows used to follow `shadow_index != u32::MAX` when no
         // explicit intent was set. Pin that intent before overwriting the slot.
         if (light._pad & RT_EXPLICIT) == 0u {
@@ -224,6 +262,7 @@ fn assign_shadow_casters(@builtin(local_invocation_index) lid: u32) {
         lights[i]._pad = pad;
         if wins {
             lights[i].shadow_index = slot * FACES_PER_CASTER;
+            pad |= PREVIOUS_WINNER;
             if 1u + slot < arrayLength(&caster_table) - 1u {
                 caster_table[1u + slot] = light.light_type;
             }
@@ -231,6 +270,7 @@ fn assign_shadow_casters(@builtin(local_invocation_index) lid: u32) {
         } else {
             lights[i].shadow_index = NO_SHADOW;
         }
+        lights[i]._pad = pad;
     }
     // Slots are handed out in thread order, so the last thread ends on the
     // total.

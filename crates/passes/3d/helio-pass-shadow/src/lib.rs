@@ -620,6 +620,7 @@ impl RenderPass for ShadowPass {
         let bg = self.bg_0.as_ref().unwrap();
 
         let pipeline = &self.pipeline;
+        let mut cmds = ctx.graphics_cmds();
 
         // ── Static atlas render ────────────────────────────────────────────────
         if need_static || any_dirty_caster {
@@ -632,7 +633,7 @@ impl RenderPass for ShadowPass {
                     }
                     let face_view = &self.static_face_views[face];
                     let dyn_offset = (face as u64 * FACE_BUF_STRIDE) as u32;
-                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                    let mut pass = cmds.begin_render_pass(
                         &wgpu::RenderPassDescriptor {
                             label: Some("Shadow/Static"),
                             color_attachments: &[],
@@ -666,7 +667,7 @@ impl RenderPass for ShadowPass {
             } else if need_static {
                 for &face in &active_faces {
                     let face_view = &self.static_face_views[face];
-                    let _pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                    let _pass = cmds.begin_render_pass(
                         &wgpu::RenderPassDescriptor {
                             label: Some("Shadow/StaticClear"),
                             color_attachments: &[],
@@ -700,7 +701,7 @@ impl RenderPass for ShadowPass {
                     }
                     self.transmittance.render_face(
                         ctx.device,
-                        unsafe { &mut *ctx.encoder_ptr },
+                        &mut cmds,
                         materials.as_ref(),
                         bg,
                         face,
@@ -749,7 +750,7 @@ impl RenderPass for ShadowPass {
 
                 if light_dirty {
                     // ── Light moved: full clear + culled draws ─────────────────
-                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                    let mut pass = cmds.begin_render_pass(
                         &wgpu::RenderPassDescriptor {
                             label: Some("Shadow/Dynamic/LightDirty"),
                             color_attachments: &[],
@@ -807,7 +808,7 @@ impl RenderPass for ShadowPass {
                     //   Fall back to a full clear + draw all movable geometry,
                     //   equivalent to the LightDirty path but without per-face culling.
                     if self.supports_multi_draw_count {
-                        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                        let mut pass = cmds.begin_render_pass(
                             &wgpu::RenderPassDescriptor {
                                 label: Some("Shadow/Dynamic/ObjectDirty"),
                                 color_attachments: &[],
@@ -854,7 +855,7 @@ impl RenderPass for ShadowPass {
                         }
                     } else {
                         // Fallback: full clear + draw all movable geometry (no per-face GPU culling).
-                        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                        let mut pass = cmds.begin_render_pass(
                             &wgpu::RenderPassDescriptor {
                                 label: Some("Shadow/Dynamic/ObjectDirty/Fallback"),
                                 color_attachments: &[],

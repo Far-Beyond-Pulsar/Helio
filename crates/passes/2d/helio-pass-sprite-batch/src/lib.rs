@@ -1010,10 +1010,9 @@ impl RenderPass for SpriteBatchPass {
             }));
         }
 
-        let Some(rp_ptr) = ctx.active_render_pass_ptr() else {
+        let Some(mut rp) = ctx.render_cmds() else {
             return Ok(());
         };
-        let rp = unsafe { &mut *rp_ptr };
         rp.set_pipeline(&self.pipeline);
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         rp.set_vertex_buffer(0, self.quad_vertex_buf.slice(..));

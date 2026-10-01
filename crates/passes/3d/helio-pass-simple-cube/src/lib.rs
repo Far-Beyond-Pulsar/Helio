@@ -268,7 +268,9 @@ impl RenderPass for SimpleCubePass {
             self.bind_group_key = Some(camera_ptr);
         }
 
-        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        let mut rp = ctx
+            .render_cmds()
+            .expect("SimpleCube requires the graph render pass");
         rp.set_pipeline(&self.pipeline);
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         rp.set_vertex_buffer(0, self.vertex_buf.slice(..));

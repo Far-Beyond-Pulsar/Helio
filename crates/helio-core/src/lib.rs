@@ -391,6 +391,8 @@ pub mod acceleration;
 pub mod actor;
 pub mod asset_types;
 pub mod camera;
+pub mod cmd;
+pub(crate) mod cmd_ir;
 pub mod context;
 pub mod entity;
 pub mod error;
@@ -461,6 +463,7 @@ pub use crate::acceleration::{
 };
 // Re-export core types
 pub use actor::Actor;
+pub use cmd::{CommandRecorder, ComputeCmds, RenderCmds};
 pub use context::{PassContext, PrepareContext};
 pub use entity::Entity;
 pub use error::{Error, Result};
@@ -468,7 +471,8 @@ pub use frame_storage::RenderFrameStorage;
 pub use graph::{
     BindingOverrideBuilder, DebugPassInfo, DebugResourceInfo, FinishSegment, FrameDebugData,
     GraphTimelineData, GraphTimelinePass, PipelineFormatCache, PipelineFormatKey,
-    PipelineFormatSet, PipelineHandle, PipelineRecipeBuilder, PipelineRegistry, RenderGraph,
+    PipelineFormatSet, PipelineHandle, PipelineRecipeBuilder, PipelineRegistry,
+    RecordingCacheStats, RenderGraph, UnitCacheStats,
 };
 pub use profiling::{
     FocusedTiming, FocusedTimingGroup, FocusedTimingReport, GpuTimingAvailability, Profiler,

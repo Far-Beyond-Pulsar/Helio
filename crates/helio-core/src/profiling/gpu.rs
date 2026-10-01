@@ -38,12 +38,12 @@
 //! let mut profiler = GpuProfiler::new(&device, &queue);
 //!
 //! // Write start timestamp
-//! profiler.begin_pass(&mut encoder, "ShadowPass");
+//! profiler.begin_pass(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), "ShadowPass");
 //!
 //! // GPU commands...
 //!
 //! // Write end timestamp
-//! profiler.end_pass(&mut encoder, "ShadowPass");
+//! profiler.end_pass(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), "ShadowPass");
 //! # }
 //! ```
 
@@ -70,9 +70,9 @@
 /// # fn example(device: &wgpu::Device, queue: &wgpu::Queue, mut encoder: &mut wgpu::CommandEncoder) {
 /// let mut profiler = GpuProfiler::new(&device, &queue);
 ///
-/// profiler.begin_pass(&mut encoder, "ShadowPass");
+/// profiler.begin_pass(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), "ShadowPass");
 /// // GPU commands...
-/// profiler.end_pass(&mut encoder, "ShadowPass");
+/// profiler.end_pass(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), "ShadowPass");
 /// # }
 /// ```
 use std::{
@@ -83,7 +83,9 @@ use std::{
     },
 };
 
-const QUERY_CAPACITY: u32 = 256;
+/// Room for the graph's own spans plus the per-unit spans of cached
+/// recordings (four queries per pass), see `add_external_spans`.
+const QUERY_CAPACITY: u32 = 2048;
 const READBACK_SLOT_COUNT: usize = 3;
 const MAP_PENDING: u8 = 0;
 const MAP_SUCCEEDED: u8 = 1;
@@ -105,6 +107,14 @@ struct ReadbackSlot {
     frame_index: u64,
 }
 
+/// Timestamps another command buffer resolved into `buffer` (8 bytes per
+/// query, starting at offset 0), and the spans they form.
+struct ExternalSpans {
+    buffer: wgpu::Buffer,
+    query_count: u32,
+    spans: Vec<QueryRange>,
+}
+
 pub struct GpuProfiler {
     query_set: Option<wgpu::QuerySet>,
     query_buffer: Option<wgpu::Buffer>,
@@ -116,6 +126,10 @@ pub struct GpuProfiler {
     dropped_readbacks: u64,
     query_overflows: u64,
     timestamp_period: f32, // Nanoseconds per timestamp tick
+    /// Spans whose timestamps were resolved elsewhere this frame (cached
+    /// recordings write their own query sets), copied in by the next
+    /// `resolve_queries`.
+    external: Vec<ExternalSpans>,
 }
 
 /// Combines timestamp samples with the same label while preserving the order
@@ -172,7 +186,7 @@ impl GpuProfiler {
             Some(device.create_query_set(&wgpu::QuerySetDescriptor {
                 label: Some("GPU Profiler QuerySet"),
                 ty: wgpu::QueryType::Timestamp,
-                count: QUERY_CAPACITY, // 128 passes * 2 timestamps per pass
+                count: QUERY_CAPACITY,
             }))
         } else {
             None
@@ -222,6 +236,7 @@ impl GpuProfiler {
             dropped_readbacks: 0,
             query_overflows: 0,
             timestamp_period,
+            external: Vec::new(),
         }
     }
 
@@ -240,6 +255,7 @@ impl GpuProfiler {
             dropped_readbacks: 0,
             query_overflows: 0,
             timestamp_period: 1.0,
+            external: Vec::new(),
         }
     }
 
@@ -265,10 +281,10 @@ impl GpuProfiler {
     /// # fn example(device: &wgpu::Device, queue: &wgpu::Queue) {
     /// # let mut profiler = GpuProfiler::new(&device, &queue);
     /// # let mut encoder = device.create_command_encoder(&Default::default());
-    /// profiler.begin_pass(&mut encoder, "ShadowPass");
+    /// profiler.begin_pass(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), "ShadowPass");
     /// # }
     /// ```
-    pub fn begin_pass(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
+    pub fn begin_pass(&mut self, encoder: &mut crate::CommandRecorder<'_>, name: &'static str) {
         if let Some(ref query_set) = self.query_set {
             if self.next_index + 1 >= QUERY_CAPACITY {
                 self.query_overflows = self.query_overflows.saturating_add(1);
@@ -303,10 +319,10 @@ impl GpuProfiler {
     /// # fn example(device: &wgpu::Device, queue: &wgpu::Queue) {
     /// # let mut profiler = GpuProfiler::new(&device, &queue);
     /// # let mut encoder = device.create_command_encoder(&Default::default());
-    /// profiler.end_pass(&mut encoder, "ShadowPass");
+    /// profiler.end_pass(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), "ShadowPass");
     /// # }
     /// ```
-    pub fn end_pass(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
+    pub fn end_pass(&mut self, encoder: &mut crate::CommandRecorder<'_>, name: &'static str) {
         if let Some(ref query_set) = self.query_set {
             if self.next_index >= QUERY_CAPACITY {
                 return;
@@ -331,8 +347,9 @@ impl GpuProfiler {
     /// Resolves this frame into an idle readback slot without waiting for the
     /// GPU. If all slots are still in flight, the sample is explicitly
     /// dropped rather than stalling or reusing a mapped buffer.
-    pub fn resolve_queries(&mut self, encoder: &mut wgpu::CommandEncoder, frame_index: u64) {
-        if self.next_index == 0 {
+    pub fn resolve_queries(&mut self, encoder: &mut crate::CommandRecorder<'_>, frame_index: u64) {
+        let external = core::mem::take(&mut self.external);
+        if self.next_index == 0 && external.is_empty() {
             self.pending_queries.clear();
             return;
         }
@@ -342,7 +359,9 @@ impl GpuProfiler {
             return;
         };
 
-        encoder.resolve_query_set(query_set, 0..self.next_index, query_buffer, 0);
+        if self.next_index > 0 {
+            encoder.resolve_query_set(query_set, 0..self.next_index, query_buffer, 0);
+        }
         let Some(slot) = self
             .readback_slots
             .iter_mut()
@@ -354,18 +373,65 @@ impl GpuProfiler {
             return;
         };
 
-        encoder.copy_buffer_to_buffer(
-            query_buffer,
-            0,
-            &slot.buffer,
-            0,
-            u64::from(self.next_index) * 8,
-        );
+        if self.next_index > 0 {
+            encoder.copy_buffer_to_buffer(
+                query_buffer,
+                0,
+                &slot.buffer,
+                0,
+                u64::from(self.next_index) * 8,
+            );
+        }
         slot.queries.clear();
         slot.queries.extend(self.pending_queries.drain(..));
+        // Already-resolved timestamps from cached recordings go after this
+        // profiler's own, their spans shifted to match.
+        let mut base = self.next_index;
+        for spans in external {
+            if base + spans.query_count > QUERY_CAPACITY {
+                self.query_overflows = self.query_overflows.saturating_add(1);
+                continue;
+            }
+            encoder.copy_buffer_to_buffer(
+                &spans.buffer,
+                0,
+                &slot.buffer,
+                u64::from(base) * 8,
+                u64::from(spans.query_count) * 8,
+            );
+            slot.queries.extend(
+                spans
+                    .spans
+                    .iter()
+                    .map(|&(name, start, end)| (name, start + base, end + base)),
+            );
+            base += spans.query_count;
+        }
         slot.frame_index = frame_index;
         slot.state = ReadbackState::CopySubmitted;
         self.next_index = 0;
+    }
+
+    /// Adds spans whose timestamps another command buffer has already
+    /// resolved into `buffer` this frame (8 bytes per query from offset 0,
+    /// `query_count` queries; span indices are relative to that buffer). They
+    /// are read back with this frame's own spans by the next
+    /// [`Self::resolve_queries`], which must be recorded after that command
+    /// buffer.
+    pub(crate) fn add_external_spans(
+        &mut self,
+        buffer: &wgpu::Buffer,
+        query_count: u32,
+        spans: &[(&'static str, u32, u32)],
+    ) {
+        if self.query_set.is_none() || query_count == 0 {
+            return;
+        }
+        self.external.push(ExternalSpans {
+            buffer: buffer.clone(),
+            query_count,
+            spans: spans.to_vec(),
+        });
     }
 
     /// Read back GPU timestamps (blocking, call after frame completion).

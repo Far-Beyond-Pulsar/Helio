@@ -21,6 +21,11 @@ members = [
 ]
 exclude = [
     "vendor/nebula",
+    # Patched wgpu (see [patch.crates-io] below); path dependencies inside the
+    # workspace root would otherwise be swept in as members.
+    "vendor/wgpu",
+    "vendor/wgpu-core",
+    "vendor/wgpu-hal",
     # Bake output, not a crate. Lands here when a demo is run with `crates/` as
     # the working directory, and the `crates/*` member glob would otherwise try
     # to read it as a workspace member and fail.
@@ -142,3 +147,11 @@ crossterm = "0.28"
 [patch."https://github.com/Far-Beyond-Pulsar/SceneDB"]
 pulsar_scenedb = { git = "https://github.com//Far-Beyond-Pulsar/SceneDB", rev = "7b0414b2975e8e1eb2d6ea489b710a2c411630b3" }
 pulsar_scenedb_derive = { git = "https://github.com//Far-Beyond-Pulsar/SceneDB", rev = "7b0414b2975e8e1eb2d6ea489b710a2c411630b3" }
+
+# Vendored wgpu 30.0.1 with raw-handle access for pipelines, pipeline layouts
+# and bind groups, and reusable Vulkan command buffers (Helio#311). Keep in
+# sync with the same patch in the Pulsar-Native root manifest.
+[patch.crates-io]
+wgpu = { path = "vendor/wgpu" }
+wgpu-core = { path = "vendor/wgpu-core" }
+wgpu-hal = { path = "vendor/wgpu-hal" }

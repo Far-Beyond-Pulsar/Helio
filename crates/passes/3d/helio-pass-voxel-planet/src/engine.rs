@@ -1040,7 +1040,7 @@ impl PlanetRenderer {
         }
     }
 
-    fn dispatch(pass: &mut wgpu::ComputePass<'_>, pipeline: &wgpu::ComputePipeline, groups: [u32; 3]) {
+    fn dispatch(pass: &mut helio_core::ComputeCmds<'_>, pipeline: &wgpu::ComputePipeline, groups: [u32; 3]) {
         if groups.iter().all(|g| *g > 0) {
             pass.set_pipeline(pipeline);
             pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
@@ -1053,7 +1053,7 @@ impl PlanetRenderer {
     #[allow(clippy::too_many_arguments)]
     pub fn encode(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut helio_core::CommandRecorder<'_>,
         camera_data: &helio_core::GpuCameraUniforms,
         frame: &PlanetFrame,
         size: [u32; 2],
@@ -1547,9 +1547,9 @@ impl RenderPass for PlanetPass {
             view!("gbuffer_extra"),
             view!("gbuffer_velocity"),
         ];
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let mut encoder = ctx.graphics_cmds();
         renderer.encode(
-            encoder,
+            &mut encoder,
             ctx.camera_data,
             &frame,
             [ctx.width, ctx.height],

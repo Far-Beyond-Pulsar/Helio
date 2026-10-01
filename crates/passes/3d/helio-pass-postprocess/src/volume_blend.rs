@@ -312,7 +312,7 @@ impl RenderPass for PostProcessVolumeBlendPass {
             self.bind_group_key = Some(key);
         }
         // Record with the fog consumers to preserve producer/copy/consumer order.
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let mut encoder = ctx.graphics_cmds();
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("PostProcess Resolve"), timestamp_writes: None });
             pass.set_pipeline(&self.pipeline);

@@ -411,7 +411,7 @@ impl LiveLightCompaction {
     fn record(&mut self, ctx: &mut PassContext, lights_buf: &wgpu::Buffer) {
         let Some(key) = self.pending.take() else { return };
         let rows = key.2;
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let mut encoder = ctx.graphics_cmds();
         encoder.clear_buffer(&self.live_buf, 0, Some(4));
         if rows > 0 {
             let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -898,7 +898,8 @@ impl RadianceCascadesPass {
             label: Some("RadianceCascades (Fallback)"),
             timestamp_writes: None,
         };
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&desc);
+        let mut cmds = ctx.graphics_cmds();
+        let mut pass = cmds.begin_compute_pass(&desc);
         pass.set_pipeline(&self.fb_pipeline);
         pass.set_bind_group(0, self.fb_bind_group.as_ref().unwrap(), &[]);
         pass.dispatch_workgroups(wg_x, wg_y, 1);
@@ -946,7 +947,8 @@ impl RadianceCascadesPass {
             label: Some("RadianceCascades (RT)"),
             timestamp_writes: None,
         };
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&desc);
+        let mut cmds = ctx.graphics_cmds();
+        let mut pass = cmds.begin_compute_pass(&desc);
         pass.set_pipeline(rt_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(wg_x, wg_y, 1);

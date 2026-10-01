@@ -190,7 +190,7 @@ impl RenderPass for FxaaPass {
             self.bind_group_key = Some(input_view.clone());
         }
 
-        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        let mut rp = ctx.render_cmds().expect("FxaaPass requires the graph render pass");
         rp.set_pipeline(&self.pipeline);
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         rp.draw(0..3, 0..1);
