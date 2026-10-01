@@ -34,6 +34,19 @@ pub(crate) const EVICT_AFTER_FRAMES: u64 = 16;
 /// `false`); it is on by default.
 pub(crate) const RECORDING_CACHE_ENV: &str = "HELIO_RECORDING_CACHE";
 
+/// Environment variable that prints, every 300 frames, which units missed and
+/// why (`1`, `on` or `true`).
+pub(crate) const RECORDING_CACHE_LOG_ENV: &str = "HELIO_RECORDING_CACHE_LOG";
+
+pub(crate) fn log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var(RECORDING_CACHE_LOG_ENV).is_ok_and(|value| {
+            matches!(value.to_ascii_lowercase().as_str(), "1" | "on" | "true")
+        })
+    })
+}
+
 /// One cached recording of a unit.
 pub(crate) struct CachedRecording {
     pub(crate) compute_cmds: Stream,

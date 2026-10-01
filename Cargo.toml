@@ -148,9 +148,8 @@ crossterm = "0.28"
 pulsar_scenedb = { git = "https://github.com//Far-Beyond-Pulsar/SceneDB", rev = "7b0414b2975e8e1eb2d6ea489b710a2c411630b3" }
 pulsar_scenedb_derive = { git = "https://github.com//Far-Beyond-Pulsar/SceneDB", rev = "7b0414b2975e8e1eb2d6ea489b710a2c411630b3" }
 
-# Vendored wgpu 30.0.1 with raw-handle access for pipelines, pipeline layouts
-# and bind groups, and reusable Vulkan command buffers (Helio#311). Keep in
-# sync with the same patch in the Pulsar-Native root manifest.
+# Vendored wgpu 30.0.1, patched with reusable command buffers (Helio#311).
+# Keep in sync with the same patch in the Pulsar-Native root manifest.
 [patch.crates-io]
 wgpu = { path = "vendor/wgpu" }
 wgpu-core = { path = "vendor/wgpu-core" }

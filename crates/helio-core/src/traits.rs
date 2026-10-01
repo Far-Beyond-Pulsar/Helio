@@ -610,24 +610,6 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         true
     }
 
-    /// A key identifying the commands `execute()` records, for reusing a
-    /// recording across frames (Helio#311).
-    ///
-    /// Return `Some(key)` only when `execute()` records *exactly the same
-    /// commands* every frame while the key is unchanged: no CPU branch on
-    /// per-frame data (dirty flags, readbacks, settled/skip decisions, counts),
-    /// with all of that decided on the GPU from buffers instead. The key must
-    /// change whenever the commands themselves would: a pipeline, bind group,
-    /// buffer or texture the pass records against is replaced, or a recorded
-    /// dispatch or draw size changes. Data that only changes *buffer contents*
-    /// does not belong in the key.
-    ///
-    /// `None` (the default) means "re-record every frame"; the graph then
-    /// cannot reuse a recording of the frame.
-    fn recording_key(&self) -> Option<u64> {
-        None
-    }
-
     /// Optionally prepares per-frame data before GPU execution.
     ///
     /// Called once per frame **before** `execute()`. Use this to upload per-frame uniforms

@@ -1294,6 +1294,38 @@ impl RenderGraph {
         }
     }
 
+    /// Prints the units that missed since the last report, with their last
+    /// miss reason (`HELIO_RECORDING_CACHE_LOG=1`).
+    fn log_recording_cache(&mut self) {
+        let stats = self.recording_cache_stats();
+        let missing: Vec<_> = stats.units.iter().filter(|u| u.misses > 0).collect();
+        let hits: u64 = stats.units.iter().map(|u| u.hits).sum();
+        let misses: u64 = stats.units.iter().map(|u| u.misses).sum();
+        eprintln!(
+            "Helio recording cache: {hits} hits, {misses} misses over {} units",
+            stats.units.len()
+        );
+        for unit in missing {
+            eprintln!(
+                "  {}: {} hits, {} misses{}{}",
+                unit.passes.join("+"),
+                unit.hits,
+                unit.misses,
+                unit.uncacheable
+                    .map(|reason| format!(", uncacheable: {reason}"))
+                    .unwrap_or_default(),
+                unit.last_miss
+                    .as_ref()
+                    .map(|reason| format!(", last miss: {reason}"))
+                    .unwrap_or_default(),
+            );
+        }
+        for slot in &mut self.unit_caches {
+            slot.hits = 0;
+            slot.misses = 0;
+        }
+    }
+
     /// Drops every cached recording (and the resources they keep alive).
     pub(crate) fn reset_recording_cache(&mut self) {
         self.unit_caches = (0..self.passes.len()).map(|_| UnitCache::default()).collect();
@@ -1964,7 +1996,13 @@ impl RenderGraph {
         let timed = self.profiler.is_enabled();
         let pass_names: Vec<&'static str> = self.passes.iter().map(|pass| pass.name()).collect();
         let profiler = &mut self.profiler;
-        let (passes, pre_pass_actions) = (&mut self.passes, &self.pre_pass_actions);
+        // Raw pointer, not a borrow, exactly as in the serial loop:
+        // `pre_pass_actions` is graph-owned and immutable for the duration of
+        // execution, and each `unsafe { &*pre_pass_actions_ptr }` reborrow gets
+        // its own inferred lifetime, long enough for `publish_group`'s `'a`
+        // (tied to `visible`) rather than the shorter `&mut self` borrow.
+        let pre_pass_actions_ptr: *const Vec<Vec<PrePassAction>> = &self.pre_pass_actions;
+        let passes = &mut self.passes;
         let bundles = &self.gpu_render_bundles;
         for layer in layers {
             for range in layer {
@@ -1974,7 +2012,7 @@ impl RenderGraph {
                     if bundles.get(pass_index).map_or(false, |bundle| bundle.is_some()) {
                         continue;
                     }
-                    if let Some(actions) = pre_pass_actions.get(pass_index) {
+                    if let Some(actions) = unsafe { &*pre_pass_actions_ptr }.get(pass_index) {
                         for action in actions {
                             match action {
                                 PrePassAction::Route { name, view } => {
@@ -2019,6 +2057,11 @@ impl RenderGraph {
 
             // Built per layer: `visible` and `passes` are mutated between
             // layers, which would invalidate pointers taken earlier.
+            let unit_caches_ptr = if cache {
+                self.unit_caches.as_mut_ptr()
+            } else {
+                std::ptr::null_mut()
+            };
             let env = Arc::new(ParallelFrameEnv {
                 passes: passes.as_mut_ptr(),
                 pipeline_registries: self.pipeline_registries.as_slice()
@@ -2259,6 +2302,14 @@ impl RenderGraph {
         // is a serial per-pass diagnostic, so it forces serial recording.
         let use_parallel_recording =
             !self.finish_breakdown_enabled && self.parallel_recording_active();
+        // The recording cache records every unit (on workers when parallel
+        // recording is on, in pass order on this thread otherwise) and
+        // resubmits units whose commands did not change.
+        let cache_decision = self.recording_cache_decision();
+        let use_recording_cache = cache_decision.is_ok();
+        self.recording_cache_active = use_recording_cache;
+        self.recording_cache_inactive_reason = cache_decision.err();
+        let use_unit_path = use_parallel_recording || use_recording_cache;
         let mut worker_profilers: Vec<Profiler> = Vec::new();
 
         let mut chain_rp: Option<std::mem::ManuallyDrop<wgpu::RenderPass<'_>>> = None;
@@ -2302,9 +2353,9 @@ impl RenderGraph {
         let (finish_reply_tx, finish_reply_rx) = mpsc::channel::<FinishReply>();
         #[cfg(not(target_arch = "wasm32"))]
         let mut finishes_in_flight = 0usize;
-        let mut compute_segments: Vec<wgpu::CommandBuffer> = Vec::new();
+        let mut compute_segments: Vec<SubmitEntry> = Vec::new();
         // Indexed by segment; `None` while its finish is still in flight.
-        let mut graphics_segments: Vec<Option<wgpu::CommandBuffer>> = Vec::new();
+        let mut graphics_segments: Vec<Option<SubmitEntry>> = Vec::new();
         let mut segment_passes: Vec<&'static str> = Vec::new();
         let mut segment_recording = std::time::Duration::ZERO;
         let new_encoder = |label: &'static str| {
@@ -2334,10 +2385,10 @@ impl RenderGraph {
                             ))
                         });
                         let start = std::time::Instant::now();
-                        compute_segments.push(done_compute.finish());
+                        compute_segments.push(SubmitEntry::Once(done_compute.finish()));
                         let compute = start.elapsed();
                         let start = std::time::Instant::now();
-                        graphics_segments[index] = Some(done_graphics.finish());
+                        graphics_segments[index] = Some(SubmitEntry::Once(done_graphics.finish()));
                         let graphics = start.elapsed();
                         self.finish_breakdown.push(FinishSegment {
                             passes,
@@ -2355,7 +2406,7 @@ impl RenderGraph {
                         let unsent = Some(done_graphics);
                         match unsent {
                             Some(done_graphics) => {
-                                graphics_segments[index] = Some(done_graphics.finish());
+                                graphics_segments[index] = Some(SubmitEntry::Once(done_graphics.finish()));
                             }
                             None => {
                                 #[cfg(not(target_arch = "wasm32"))]
@@ -2382,7 +2433,7 @@ impl RenderGraph {
         // nobody needs this frame.
         self.publish_frame_demands(scene, registry, resized_this_frame);
 
-        if use_parallel_recording {
+        if use_unit_path {
             // Cut the graph's opening timestamps into their own command
             // buffers so the unit recordings slot between them and the closing
             // timestamps recorded below. Submission order stays what the serial
@@ -2391,27 +2442,75 @@ impl RenderGraph {
             let open_compute =
                 std::mem::replace(&mut compute_encoder, new_encoder("Compute Graph"));
             let open_graphics = std::mem::replace(&mut encoder, new_encoder("Render Graph"));
-            compute_segments.push(open_compute.finish());
-            graphics_segments.push(Some(open_graphics.finish()));
-            let recordings = self.execute_parallel_units(
+            compute_segments.push(SubmitEntry::Once(open_compute.finish()));
+            graphics_segments.push(Some(SubmitEntry::Once(open_graphics.finish())));
+            let layers = if use_parallel_recording {
+                std::mem::take(&mut self.parallel_units)
+            } else {
+                std::mem::take(&mut self.sequential_units)
+            };
+            let recorded = self.execute_parallel_units(
                 scene,
                 target,
                 depth,
                 registry,
                 &reflected_groups,
                 resized_this_frame,
-            )?;
-            for recording in recordings {
+                &layers,
+                !use_parallel_recording,
+                use_recording_cache,
+            );
+            if use_parallel_recording {
+                self.parallel_units = layers;
+            } else {
+                self.sequential_units = layers;
+            }
+            let mut unit_graphics = Vec::new();
+            for recording in recorded? {
                 for (name, duration) in recording.cpu_timings {
                     self.profiler.record_external_cpu_timing(name, duration);
                 }
-                compute_segments.push(recording.compute);
-                graphics_segments.push(Some(recording.graphics));
-                worker_profilers.push(recording.profiler);
+                let unit = recording.first_pass;
+                // A cached unit timed itself into its own query set; its
+                // results join this frame's readback.
+                if use_recording_cache && !matches!(recording.profiler, Some(_)) {
+                    if let Some(timer) = self.unit_caches.get(unit).and_then(|s| s.timer.as_ref()) {
+                        if self.profiler.is_enabled() {
+                            self.profiler.add_external_gpu_spans(
+                                &timer.resolve,
+                                timer.query_count,
+                                &timer.spans,
+                            );
+                        }
+                    }
+                }
+                compute_segments.extend(SubmitEntry::from_unit(recording.compute, unit, false));
+                unit_graphics.extend(SubmitEntry::from_unit(recording.graphics, unit, true));
+                worker_profilers.extend(recording.profiler);
+            }
+            graphics_segments.extend(unit_graphics.into_iter().map(Some));
+
+            if use_recording_cache {
+                let frame = scene.frame_count();
+                let mut unsupported = false;
+                for slot in &mut self.unit_caches {
+                    slot.evict_stale(frame);
+                    unsupported |= slot.uncacheable
+                        == Some("the backend cannot resubmit command buffers");
+                }
+                if unsupported {
+                    // Nothing on this backend can be reused: stop paying for
+                    // recording into streams.
+                    self.recording_cache_unsupported = true;
+                    self.reset_recording_cache();
+                }
+                if frame % 300 == 0 && recording_cache::log_enabled() {
+                    self.log_recording_cache();
+                }
             }
         }
 
-        if !use_parallel_recording {
+        if !use_unit_path {
             // Raw pointer, not a borrow: `self.passes.iter_mut()` below holds
             // `self.passes` mutably for the loop body, and `pre_pass_actions`
             // is graph-owned and immutable for the duration of execution --
@@ -2479,6 +2578,7 @@ impl RenderGraph {
                             pipelines: &self.pipeline_registries[pass_index],
                             reflected_bind_groups: &reflected_groups[pass_index],
                             reflected_pipeline: self.reflected_pipelines[pass_index].as_ref(),
+                            recorded: None,
                             #[cfg(debug_assertions)]
                             chain_transparent: false,
                         };
@@ -2643,6 +2743,7 @@ impl RenderGraph {
                             pipelines: &self.pipeline_registries[pass_index],
                             reflected_bind_groups: &reflected_groups[pass_index],
                             reflected_pipeline: self.reflected_pipelines[pass_index].as_ref(),
+                            recorded: None,
                             #[cfg(debug_assertions)]
                             chain_transparent: false,
                         };
@@ -2714,6 +2815,7 @@ impl RenderGraph {
                                 pipelines: &self.pipeline_registries[pass_index],
                                 reflected_bind_groups: &reflected_groups[pass_index],
                                 reflected_pipeline: self.reflected_pipelines[pass_index].as_ref(),
+                                recorded: None,
                                 #[cfg(debug_assertions)]
                                 chain_transparent: false,
                             };
@@ -2769,6 +2871,7 @@ impl RenderGraph {
                         pipelines: &self.pipeline_registries[pass_index],
                         reflected_bind_groups: &reflected_groups[pass_index],
                         reflected_pipeline: self.reflected_pipelines[pass_index].as_ref(),
+                        recorded: None,
                         #[cfg(debug_assertions)]
                         chain_transparent: bridged,
                     };
@@ -2842,7 +2945,9 @@ impl RenderGraph {
                 for _ in 0..finishes_in_flight {
                     match finish_reply_rx.recv() {
                         Ok((COMPUTE_SEGMENT, Ok(buffer))) => compute_last = Some(buffer),
-                        Ok((index, Ok(buffer))) => graphics_segments[index] = Some(buffer),
+                        Ok((index, Ok(buffer))) => {
+                            graphics_segments[index] = Some(SubmitEntry::Once(buffer))
+                        }
                         Ok((_, Err(payload))) => {
                             first_panic.get_or_insert(payload);
                         }
@@ -2854,19 +2959,64 @@ impl RenderGraph {
                 }
             }
             let mut command_buffers = compute_segments;
-            command_buffers.extend(compute_last);
+            command_buffers.extend(compute_last.map(SubmitEntry::Once));
             command_buffers.extend(graphics_segments.into_iter().map(|segment| {
                 segment.expect("every graphics segment is finished before submit")
             }));
-            command_buffers.push(graphics_last);
+            command_buffers.push(SubmitEntry::Once(graphics_last));
             command_buffers
         };
-        let mut command_buffers = command_buffers;
-        command_buffers.extend(parallel_command_buffers);
         let submission_index = {
             #[cfg(not(target_arch = "wasm32"))]
             profiling::profile_scope!("RenderGraph: queue.submit (graph)");
-            scene.queue().submit(command_buffers)
+            // Reusable buffers are submitted by reference: cached ones from the
+            // cache, this frame's uncached ones from `owned`, which outlives
+            // the submission.
+            enum Planned {
+                Once(wgpu::CommandBuffer),
+                Owned(usize),
+                Cached { unit: usize, variant: usize, graphics: bool },
+            }
+            let mut owned: Vec<wgpu::ReusableCommandBuffer> = Vec::new();
+            let planned: Vec<Planned> = command_buffers
+                .into_iter()
+                .map(|entry| match entry {
+                    SubmitEntry::Once(buffer) => Planned::Once(buffer),
+                    SubmitEntry::Reusable(buffer) => {
+                        owned.push(buffer);
+                        Planned::Owned(owned.len() - 1)
+                    }
+                    SubmitEntry::Cached {
+                        unit,
+                        variant,
+                        graphics,
+                    } => Planned::Cached {
+                        unit,
+                        variant,
+                        graphics,
+                    },
+                })
+                .collect();
+            let unit_caches = &self.unit_caches;
+            let owned = &owned;
+            let items = planned.into_iter().filter_map(|planned| match planned {
+                Planned::Once(buffer) => Some(wgpu::SubmitItem::Once(buffer)),
+                Planned::Owned(index) => Some(wgpu::SubmitItem::Reusable(&owned[index])),
+                Planned::Cached {
+                    unit,
+                    variant,
+                    graphics,
+                } => {
+                    let recording = unit_caches.get(unit)?.variants.get(variant)?;
+                    let buffer = if graphics {
+                        recording.graphics.as_ref()
+                    } else {
+                        recording.compute.as_ref()
+                    };
+                    buffer.map(wgpu::SubmitItem::Reusable)
+                }
+            });
+            scene.queue().submit_mixed(items)
         };
         {
             #[cfg(not(target_arch = "wasm32"))]

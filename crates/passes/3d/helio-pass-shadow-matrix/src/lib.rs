@@ -446,7 +446,8 @@ impl ShadowMatrixPass {
                     None if self.caster_key == Some(key) && nonce == self.caster_nonce => {
                         self.caster_copy_wanted = Some((key, nonce));
                     }
-                    None => {}
+                    // A readable result can still belong to an older allocation.
+                    Some(_) | None => {}
                 }
                 self.caster_readback = CasterReadback::Idle;
             }

@@ -1,18 +1,21 @@
-# Command interface (Helio#311)
+# Command interface and recording cache (Helio#311)
 
 Passes record GPU work through core-owned handles instead of raw wgpu objects.
-This is what lets the core, later, record a frame once into native reusable
-command buffers (Vulkan / D3D12) and resubmit it, with wgpu still owning
-devices, resources, pipelines, bind groups and shaders.
+The core decides what a recorded command does: encode it into wgpu directly,
+or capture it so a frame whose commands did not change is resubmitted from
+already-encoded, reusable command buffers instead of being encoded and
+validated again. wgpu keeps owning devices, resources, pipelines, bind groups
+and shaders.
 
 ## Status
 
 | Step | State |
 |---|---|
-| 1. Core command interface (`helio_core::cmd`), wgpu-forwarding backend, passes migrated | in progress |
-| 2. Data-driven frames: per-frame CPU branches moved into GPU data; `recording_key` per pass | API added (`RenderPass::recording_key`, `RenderGraph::recording_blockers`); passes still return `None` |
-| 3. Native Vulkan/D3D12 backend behind the same handles | wgpu patched (see `vendor/README.md`): raw pipeline / layout / bind-group handles and reusable Vulkan buffers exist; the recorder itself is not written |
-| 4. Metal / WebGPU / GL keep the wgpu backend | falls out of 1 |
+| 1. Core command interface (`helio_core::cmd`); all passes migrated | done |
+| 2. Record once, resubmit: the recording cache (below) | done; on by default on Vulkan and D3D12 |
+| 3. Native reusable command buffers | done, inside wgpu: the vendored wgpu keeps a frame's native Vulkan/D3D12 command buffers and resubmits them (`vendor/README.md`) |
+| 4. Metal / WebGPU / GL fall back to encoding every frame | done (the cache switches itself off) |
+| Raising the hit rate: passes that record different commands every frame | ongoing; see "Making passes cacheable" |
 
 ## The types
 
@@ -121,52 +124,64 @@ rg -n "encoder_ptr|active_render_pass_ptr|active_compute_pass_ptr|wgpu::(Command
 
 (`wgpu::CommandEncoder` left over for rule 3 is allowed; say so in the report.)
 
-## Step 2: data-driven frames (audit first)
+## The recording cache
 
-A frame can be recorded once only if every pass's `execute()` records the same
-commands each frame while its inputs are unchanged. Anything that decides
-*which commands* to record from per-frame CPU data must move to the GPU
-(indirect draws/dispatches, GPU-side skip flags, GPU counts):
+Each frame, every unit (one pass, or one fused chain) records through the
+same handles, but in cache mode the handles append owned commands to two
+streams per unit (`cmd_ir`: compute and graphics) instead of encoding. Then,
+per unit (`graph/recording_cache.rs`):
 
-* `helio-pass-shadow`: per-face pass selection from CPU dirty flags
-  (`need_static`, `any_dirty_caster`, `objects_moved`).
-* `helio-pass-object-batch`: skips its dispatch chain when settled
-  (`skip_this_frame`).
-* geometry passes: one pipeline per material range from a CPU readback (#307).
-* the graph rebuilds reflected bind groups every frame (#307); GPU timestamp
-  query indices change per frame; the output target rotates (one recording per
-  target slot, see `RenderGraph::frame_recording_key`).
+* **Hit**: the streams equal a cached recording of this unit (same commands,
+  same arguments, same wgpu objects by identity; debug labels ignored). The
+  cached `wgpu::ReusableCommandBuffer`s are submitted again. wgpu skips
+  encoding and validation and only records per-submission barriers,
+  memory-init clears and lifetime tracking.
+* **Miss**: the streams are encoded once into reusable command buffers and
+  cached as a new variant. Up to four variants per unit, so ping-pong passes
+  alternate between two cached recordings. A variant unused for 16 frames is
+  dropped with the resources it keeps alive.
 
-A pass opts in by returning `Some(key)` from `RenderPass::recording_key`
-(see its docs for the contract). `RenderGraph::recording_blockers()` lists the
-passes still returning `None`.
+Correctness never depends on a pass: any CPU decision that changes the
+recorded commands produces different streams and misses. `prepare()`,
+`publish()` and `execute()` still run every frame; only wgpu encoding is
+skipped on a hit.
 
-## Step 3: native backend (wgpu patched, recorder pending)
+Per-pass GPU timing keeps working: a cached unit writes its timestamps at
+fixed indices into its own query set and resolves them into its own buffer
+(both part of the cached commands), and the graph profiler copies those
+results into its frame readback.
 
-**Update:** Helio now vendors wgpu / wgpu-core / wgpu-hal 30.0.1 with the
-missing hal accessors and a reusable-Vulkan-buffer switch (`vendor/README.md`).
-What follows is the original analysis of why that was needed; what remains is
-the recorder, barriers and queue synchronisation.
+Switches: `RenderGraph::set_recording_cache(false)` or
+`HELIO_RECORDING_CACHE=0`. The cache is also off for the finish-breakdown
+diagnostic, on the web, and on backends that cannot reuse command buffers
+(detected on the first frame).
 
-Checked against wgpu / wgpu-core / wgpu-hal 30.0.1: the public hal escape
-hatches cover `Device`, `Queue`, `CommandEncoder` (`as_hal_mut`), `Buffer`,
-`Texture`, `TextureView`, `Adapter`, `Instance`, `Surface` and acceleration
-structures. They do **not** cover `RenderPipeline`, `ComputePipeline`,
-`BindGroup`, `BindGroupLayout` or `PipelineLayout`.
+Units that can never be reused (acceleration-structure builds or uses, surface
+textures) are recorded straight into wgpu every frame, as without the cache.
 
-A native command buffer has to bind `VkPipeline` / `ID3D12PipelineState` and
-descriptor sets / root tables, so "wgpu keeps owning pipelines and bind groups,
-Helio records natively" cannot be built on stock wgpu. The ways forward are:
+### Making passes cacheable
 
-1. Patch wgpu (`[patch.crates-io]` with vendored wgpu, wgpu-core, wgpu-hal)
-   to expose raw handles for those four object kinds, and keep them alive for
-   as long as a native buffer referencing them can be submitted (wgpu frees
-   descriptor sets when a bind group drops).
-2. Create pipelines and bind groups for the hot passes directly through
-   wgpu-hal, side-stepping wgpu's objects for those passes.
+`RenderGraph::recording_cache_stats()` (or `HELIO_RECORDING_CACHE_LOG=1`, which
+prints it every 300 frames) reports per unit: hits, misses, cached
+variants, and the last miss reason (which stream, which command, whether its
+kind or only its arguments changed). A unit that misses every frame records
+different commands every frame. Typical causes, from the pass audit:
 
-Both are project-scale, backend-specific, and need Vulkan and D3D12 hardware
-to validate, plus barrier derivation from `declare_resources` and queue
-synchronisation with wgpu's own submissions. The handle types are enums so
-either can be added later without touching passes. Until then the frame-level
-win comes from step 2: do less per frame, and decide less on the CPU.
+* **Bind groups or buffers created every frame** (often keyed on raw pointers
+  of views). Create them once, rebuild only when an input really changes.
+* **CPU counts as draw/dispatch arguments** (`instance_count`, `emitter_count`,
+  light counts). Use indirect draws/dispatches with GPU-written counts.
+* **CPU skip/early-return on data** (`count == 0`, dirty flags, `settled`).
+  Record the work unconditionally and let an indirect count of zero do nothing.
+* **Readback state machines** (`copy when Idle`): fine, they alternate between
+  a few variants.
+* **Optional per-frame timestamp queries owned by the pass** with changing
+  indices: use fixed indices.
+
+Each fix is purely a hit-rate improvement and can land pass by pass.
+
+## Worker recording (Helio#309)
+
+Units of one dependency layer record concurrently on resident worker
+threads (`HELIO_PARALLEL_RECORDING=0` to switch off). With or without
+workers, the cache handles each unit on the thread that recorded it.

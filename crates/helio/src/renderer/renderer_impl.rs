@@ -480,6 +480,12 @@ impl Renderer {
         self.graph.finish_breakdown()
     }
 
+    /// Per-pass hit/miss counters of the recording cache; see
+    /// [`helio_core::RenderGraph::recording_cache_stats`].
+    pub fn recording_cache_stats(&self) -> helio_core::RecordingCacheStats {
+        self.graph.recording_cache_stats()
+    }
+
     pub fn add_pass(&mut self, pass: Box<dyn helio_core::RenderPass>) {
         self.graph.add_pass(pass);
     }
