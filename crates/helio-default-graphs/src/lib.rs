@@ -489,7 +489,9 @@ fn add_late_passes(
     graph.add_pass(Box::new(helio::DebugDrawPass::new(
         device,
         debug_camera_buf,
-        config.surface_format,
+        // This editor overlay renders into `pre_aa`, the internal HDR scene
+        // target, rather than the swapchain-sized surface target.
+        wgpu::TextureFormat::Rgba16Float,
         debug_state,
         true,
         true,
