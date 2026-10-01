@@ -221,7 +221,7 @@ impl Flight {
         let mut config = RendererConfig::new(size[0], size[1], wgpu::TextureFormat::Rgba8Unorm).with_tsr_quality(quality);
         config.enable_foliage = false;
         let mut renderer = RendererBuilder::new(config, mirror)
-            .with_ambient([0.55, 0.68, 0.88], 0.75)
+            .with_ambient([0.55, 0.68, 0.88], 1.25)
             .with_external_device()
             .with_pass_build_context(Box::new(move |ctx| build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])))
             .build(device.clone(), queue.clone(), size[0], size[1], config.surface_format);
