@@ -141,11 +141,15 @@ pub struct PlanetarySky {
     pub atmosphere_height_m: f32,
     pub sun_direction: [f32; 3],
     pub exposure: f32,
+    /// Linear HDR diffuse environment radiance, independent of direct sunlight.
+    /// Zero gives a solar-only atmosphere; the default keeps night air readable.
+    pub ambient_radiance: [f32; 3],
 }
 
 impl PlanetarySky {
     pub fn earth_like(eye_m: [f64; 3], radius_m: f64, sun_direction: [f32; 3]) -> Self {
-        Self { eye_m, radius_m, atmosphere_height_m: 60_000.0, sun_direction, exposure: 0.7 }
+        Self { eye_m, radius_m, atmosphere_height_m: 60_000.0, sun_direction, exposure: 0.7,
+            ambient_radiance: [0.02, 0.04, 0.08] }
     }
     pub fn is_valid(&self) -> bool {
         self.eye_m.iter().all(|v| v.is_finite()) && self.radius_m.is_finite() && self.radius_m > 0.0
@@ -153,6 +157,7 @@ impl PlanetarySky {
             && self.exposure.is_finite() && self.exposure >= 0.0
             && self.sun_direction.iter().all(|v| v.is_finite())
             && self.sun_direction.iter().map(|v| v*v).sum::<f32>() > 1e-10
+            && self.ambient_radiance.iter().all(|v| v.is_finite() && *v >= 0.0)
     }
 }
 
@@ -764,8 +769,8 @@ impl SkyPass {
 
         // ── Atmospheric Sky Pipelines (LUT + Composite) ───────────────────────
         let planetary_eye_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Planetary atmosphere eye (km)"),
-            size: 16,
+            label: Some("Planetary atmosphere eye (km) and ambient radiance"),
+            size: 32,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -2033,9 +2038,10 @@ impl RenderPass for SkyPass {
         // Planetary coordinates belong to a separate uniform, never to
         // SceneDB's authored sky row. Disable it whenever an authored sky wins.
         let planet = self.planetary_sky.filter(|_| self.fallback_sky_enabled);
-        let eye = planet.map_or([0.0f32; 4], |p| [
+        let eye = planet.map_or([0.0f32; 8], |p| [
             (p.eye_m[0] * 0.001) as f32, (p.eye_m[1] * 0.001) as f32,
             (p.eye_m[2] * 0.001) as f32, 1.0,
+            p.ambient_radiance[0], p.ambient_radiance[1], p.ambient_radiance[2], 0.0,
         ]);
         ctx.write_buffer(&self.planetary_eye_buffer, 0, bytemuck::cast_slice(&eye));
         // Upload sky uniforms (Nishita atmosphere + cloud overlay params)

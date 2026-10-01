@@ -148,7 +148,8 @@ so all GPU positions are small.
 
 Helio's sky pass accepts a `PlanetarySky` with the f64 eye, planet radius
 and sun direction. Its lookup follows the radial horizon, including from
-orbit; an authored scene sky takes precedence.
+orbit; an authored scene sky takes precedence. `ambient_radiance` supplies
+dim diffuse light on the night side; set it to zero for solar-only lighting.
 
 ### CPU: `Residency::plan` (render thread)
 

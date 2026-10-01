@@ -365,6 +365,8 @@ fn orbital_atmosphere_has_no_wedges_outside_the_shell() {
     for (case, distance_scale, up) in [
         ("north", 1.5, Vec3::Y),
         ("equator", 1.5, Vec3::X),
+        ("south", 1.5, -Vec3::Y),
+        ("opposite_equator", 1.5, -Vec3::X),
         ("tilted", 3.0, Vec3::new(0.3, 0.7, -0.4).normalize()),
         ("distant", 16.0, Vec3::new(-0.4, 0.2, 0.8).normalize()),
     ] {
@@ -416,6 +418,73 @@ fn orbital_atmosphere_has_no_wedges_outside_the_shell() {
                 "{case}: dark limb sector {sector}: {bright}/{count}");
         }
     }
+}
+
+/// Planet shadow removes direct sunlight, not the atmosphere's ambient light.
+/// Rotating a night-side view to the opposite pole must retain the same sky.
+#[test]
+fn shadowed_planet_has_a_dim_atmosphere_from_ground_and_orbit() {
+    const SIZE: u32 = 513;
+    let Some(mut editor) = editor(SIZE, SIZE) else { return };
+    editor.renderer.set_editor_mode(false);
+    editor.renderer.set_tsr_quality(None);
+    editor.renderer.set_jitter_enabled(false);
+    let radius = 6_371_000.0f64;
+    let mut means = Vec::new();
+    for (case, up, orbital) in [
+        ("night_north", Vec3::Y, true),
+        ("night_south", -Vec3::Y, true),
+        ("night_ground_north", Vec3::Y, false),
+        ("night_ground_south", -Vec3::Y, false),
+    ] {
+        let distance = if orbital { radius * 1.5 } else { radius + 20.0 };
+        let eye = up.as_dvec3() * distance;
+        let tangent = up.any_orthonormal_vector();
+        let half_fov_tan = if orbital { (((radius + 60_000.0) / distance).asin()).tan() * 1.25 } else { 0.5 };
+        let forward = if orbital { -up } else { (tangent + 0.15 * up).normalize() };
+        let camera_up = if orbital { tangent } else { up };
+        editor.renderer.set_planetary_sky(Some(helio_pass_sky::PlanetarySky::earth_like(eye.to_array(), radius, (-up).to_array())));
+        let camera = Camera::perspective_look_at(Vec3::ZERO, forward, camera_up,
+            (2.0 * half_fov_tan.atan()) as f32, 1.0, 0.05, 40_000_000.0);
+        for _ in 0..4 { editor.render(&camera); }
+        let pixels = editor.rgba();
+        if let Ok(output) = std::env::var("HELIO_ATMOSPHERE_CAPTURE") {
+            std::fs::create_dir_all(&output).unwrap();
+            let bytes: Vec<_> = pixels.iter().flat_map(|p| p.iter().copied()).collect();
+            image::save_buffer(std::path::Path::new(&output).join(format!("{case}.png")),
+                &bytes, SIZE, SIZE, image::ColorType::Rgba8).unwrap();
+        }
+        let mut values = Vec::new();
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let nx = 2.0 * (f64::from(x) + 0.5) / f64::from(SIZE) - 1.0;
+                let ny = 2.0 * (f64::from(y) + 0.5) / f64::from(SIZE) - 1.0;
+                let tan_theta = nx.hypot(ny) * half_fov_tan;
+                let impact = distance * tan_theta / (1.0 + tan_theta * tan_theta).sqrt();
+                let pixel = pixels[(y * SIZE + x) as usize];
+                if !orbital || (impact > radius + 3_000.0 && impact < radius + 18_000.0) {
+                    values.push(f64::from(pixel[2]));
+                }
+                if orbital && impact > radius + 100_000.0 { assert!(pixel[2] <= 4, "{case}: light outside the shell"); }
+            }
+        }
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        eprintln!("NIGHT_ATMOSPHERE {case}: blue={mean:.3}");
+        assert!(mean > 4.0 && mean < 60.0, "{case}: night atmosphere missing or too bright: {mean}");
+        means.push(mean);
+    }
+    assert!((means[0] - means[1]).abs() < 2.0, "opposite orbital hemispheres differ: {means:?}");
+    assert!((means[2] - means[3]).abs() < 2.0, "opposite ground hemispheres differ: {means:?}");
+    // The ambient contribution is explicit: a solar-only night remains dark.
+    let mut solar_only = helio_pass_sky::PlanetarySky::earth_like(
+        [0.0, -(radius + 20.0), 0.0], radius, Vec3::Y.to_array());
+    solar_only.ambient_radiance = [0.0; 3];
+    editor.renderer.set_planetary_sky(Some(solar_only));
+    let camera = Camera::perspective_look_at(Vec3::ZERO, Vec3::new(1.0,-0.15,0.0), -Vec3::Y,
+        (2.0 * 0.5f32.atan()), 1.0, 0.05, 40_000_000.0);
+    for _ in 0..4 { editor.render(&camera); }
+    assert!(editor.rgba().iter().all(|p| p[0] <= 1 && p[1] <= 1 && p[2] <= 1),
+        "zero ambient must not leave a glowing night sky");
 }
 
 /// Inspector edits get only one rendered frame before an idle viewport.

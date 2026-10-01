@@ -1,10 +1,15 @@
+struct PlanetaryAtmosphere {
+    eye: vec4<f32>,
+    ambient: vec4<f32>,
+}
+
 // Shared encoding for the planetary sky-view LUT. Half its rows resolve the
 // surface-facing sky, half resolve the limb/sky above the geometric horizon.
 // Squared angular distance concentrates both halves at the horizon, and an
 // exterior eye spends no rows on directions that miss the atmosphere.
 fn planet_sky_basis() -> mat3x3<f32> {
     var up = vec3<f32>(0.0, 1.0, 0.0);
-    if dot(planetary_eye.xyz, planetary_eye.xyz) > 1e-10 { up = normalize(planetary_eye.xyz); }
+    if dot(planetary.eye.xyz, planetary.eye.xyz) > 1e-10 { up = normalize(planetary.eye.xyz); }
     var tangent = sky.sun_direction - up * dot(sky.sun_direction, up);
     if dot(tangent, tangent) < 1e-6 {
         let axis = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(up.y) > 0.9);
@@ -15,7 +20,7 @@ fn planet_sky_basis() -> mat3x3<f32> {
 }
 
 fn planet_sky_angles() -> vec2<f32> {
-    let distance = max(length(planetary_eye.xyz), sky.earth_radius);
+    let distance = max(length(planetary.eye.xyz), sky.earth_radius);
     let horizon = atan2(sky.earth_radius, sqrt(max((distance - sky.earth_radius) * (distance + sky.earth_radius), 0.0)));
     var outer = 3.14159265358979;
     if distance > sky.atm_radius {
