@@ -773,28 +773,18 @@ impl RenderPass for ShadowPass {
                         pass.set_bind_group(0, bg, &[dyn_offset]);
                         pass.set_vertex_buffer(0, vertices.buffer.slice(..));
                         pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
-                        let face_offset = face as u64 * MAX_DRAWS_PER_FACE as u64 * 20;
-                        #[cfg(not(target_arch = "wasm32"))]
-                        if self.supports_multi_draw_count {
-                            pass.multi_draw_indexed_indirect_count(
-                                &self.face_cull_indirect,
-                                face_offset,
-                                &self.face_cull_counts,
-                                face as u64 * 4,
-                                MAX_DRAWS_PER_FACE,
-                            );
-                        } else {
-                            pass.multi_draw_indexed_indirect(
-                                &self.face_cull_indirect,
-                                face_offset,
-                                MAX_DRAWS_PER_FACE,
-                            );
-                        }
-                        #[cfg(target_arch = "wasm32")]
-                        pass.multi_draw_indexed_indirect(
+                        let gpu_count = self.supports_multi_draw_count.then_some(
+                            helio_pass_gbuffer::GpuDrawCount {
+                                buffer: &self.face_cull_counts,
+                                offset: face as u64 * 4,
+                            },
+                        );
+                        helio_pass_gbuffer::multi_draw_indexed_indirect(
+                            &mut pass,
                             &self.face_cull_indirect,
-                            face_offset,
+                            face as u32 * MAX_DRAWS_PER_FACE,
                             MAX_DRAWS_PER_FACE,
+                            gpu_count,
                         );
                     }
                 } else if objects_moved {
@@ -843,13 +833,15 @@ impl RenderPass for ShadowPass {
                             pass.set_bind_group(0, bg, &[dyn_offset]);
                             pass.set_vertex_buffer(0, vertices.buffer.slice(..));
                             pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
-                            let face_offset = face as u64 * MAX_DRAWS_PER_FACE as u64 * 20;
-                            pass.multi_draw_indexed_indirect_count(
+                            helio_pass_gbuffer::multi_draw_indexed_indirect(
+                                &mut pass,
                                 &self.face_cull_indirect,
-                                face_offset,
-                                &self.face_cull_counts,
-                                face as u64 * 4,
+                                face as u32 * MAX_DRAWS_PER_FACE,
                                 MAX_DRAWS_PER_FACE,
+                                Some(helio_pass_gbuffer::GpuDrawCount {
+                                    buffer: &self.face_cull_counts,
+                                    offset: face as u64 * 4,
+                                }),
                             );
                         }
                     } else {
@@ -878,11 +870,12 @@ impl RenderPass for ShadowPass {
                             pass.set_bind_group(0, bg, &[dyn_offset]);
                             pass.set_vertex_buffer(0, vertices.buffer.slice(..));
                             pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
-                            let face_offset = face as u64 * MAX_DRAWS_PER_FACE as u64 * 20;
-                            pass.multi_draw_indexed_indirect(
+                            helio_pass_gbuffer::multi_draw_indexed_indirect(
+                                &mut pass,
                                 &self.face_cull_indirect,
-                                face_offset,
+                                face as u32 * MAX_DRAWS_PER_FACE,
                                 MAX_DRAWS_PER_FACE,
+                                None,
                             );
                         }
                     }

@@ -1,9 +1,10 @@
-/// GPU shadow-caster allocation (Helio#246).
+/// GPU shadow-caster allocation (Helio#246, view-aware budget selection).
 ///
 /// Authors request a shadow map by writing any `shadow_index` other than
 /// `u32::MAX` (0 by convention). This kernel turns requests into atlas slots:
-/// it ranks requesting lights by importance (`intensity * range^2`,
-/// directional lights first), keeps the top `caster_capacity`, and writes
+/// it ranks requesting lights by projected coverage, distance attenuation,
+/// and a small incumbent-slot hysteresis bonus, keeps the top
+/// `caster_capacity`, and writes
 /// `shadow_index = 6 * slot` back into the same `"scene_lights"` rows every
 /// pass already reads. Losers get `u32::MAX`. Slots follow row order, so a
 /// winning set that does not change keeps its slots.
@@ -50,6 +51,8 @@ struct CasterParams {
     caster_capacity: u32,
     nonce: u32,
     _pad1: u32,
+    view_proj: mat4x4<f32>,
+    camera_position: vec4f,
 }
 
 @group(0) @binding(0) var<storage, read_write> lights: array<GpuLight>;
@@ -86,15 +89,38 @@ fn requests_shadow_map(light: GpuLight) -> bool {
     return light.shadow_index != NO_SHADOW;
 }
 
+fn projected_score(light: GpuLight) -> f32 {
+    if light.light_type == LIGHT_TYPE_DIRECTIONAL {
+        return 1.0e20;
+    }
+    let radius = max(light.position_range.w, 0.0);
+    let delta = light.position_range.xyz - params.camera_position.xyz;
+    let distance_sq = max(dot(delta, delta), 1.0);
+    let clip = params.view_proj * vec4f(light.position_range.xyz, 1.0);
+    // A sphere bound is conservative: lights whose influence does not touch
+    // the view are excluded, while intersecting edge lights remain eligible.
+    let clip_radius = radius * max(abs(params.view_proj[0][0]), abs(params.view_proj[1][1]));
+    if clip.w + clip_radius <= 0.0 { return 0.0; }
+    if abs(clip.x) > clip.w + clip_radius || abs(clip.y) > clip.w + clip_radius { return 0.0; }
+    // Projected area approximates screen coverage. Radiometric falloff keeps
+    // nearby useful lights ahead of equally sized lights at range.
+    let projected_radius = radius / max(abs(clip.w), 0.01);
+    let coverage = min(projected_radius * projected_radius, 4.0);
+    let falloff = 1.0 / (1.0 + distance_sq);
+    let score = max(light.color_intensity.w, 0.0) * coverage * falloff;
+    // Retaining an existing allocation within a narrow score margin prevents
+    // slot churn when two lights have nearly equal importance.
+    let incumbent = (light._pad & ALLOCATED) != 0u && light.shadow_index != NO_SHADOW;
+    return score * select(1.0, 1.15, incumbent);
+}
+
 fn is_candidate(light: GpuLight) -> bool {
-    return is_live(light) && requests_shadow_map(light);
+    return is_live(light) && requests_shadow_map(light) && projected_score(light) > 0.0;
 }
 
 /// Larger is more important. Non-negative floats order like their bits.
 fn importance_key(light: GpuLight) -> u32 {
-    if light.light_type == LIGHT_TYPE_DIRECTIONAL { return 0xFFFFFFFFu; }
-    let range = light.position_range.w;
-    let score = light.color_intensity.w * range * range;
+    let score = projected_score(light);
     // NaN compares false: it ranks last instead of poisoning the order.
     return bitcast<u32>(select(0.0, min(score, 3.0e38), score > 0.0));
 }

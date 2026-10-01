@@ -55,9 +55,9 @@ pub struct ShadowMatrixPass {
     /// `(epoch, content_generation, row_capacity, caster_capacity)` of the
     /// light rows the slots were last assigned for. Written slots stay valid
     /// until SceneDB re-uploads a row, which bumps the content generation.
-    caster_key: Option<(u64, u64, u32, u32)>,
+    caster_key: Option<CasterKey>,
     /// Set by `prepare` when `caster_key` is stale; `execute` reallocates.
-    caster_rebuild: Option<(u64, u64, u32, u32)>,
+    caster_rebuild: Option<CasterKey>,
     /// `[caster count, light_type per slot]`, written by the allocation.
     caster_table: wgpu::Buffer,
     /// CPU-mappable copy of `caster_table`.
@@ -74,9 +74,10 @@ pub struct ShadowMatrixPass {
     /// Per-slot dirty generations (what `ShadowPass` compares). Light edits
     /// dirty every slot; camera movement only the camera-fitted ones.
     per_caster_generation: [u64; 42],
+    caster_view_generation: u64,
 }
 
-type CasterKey = (u64, u64, u32, u32);
+type CasterKey = (u64, u64, u32, u32, u64);
 
 /// Bytes of `caster_table`: the count plus one light type per slot.
 const CASTER_TABLE_BYTES: u64 = 4 * (2 + MAX_SHADOW_CASTERS as u64);
@@ -88,7 +89,10 @@ enum CasterReadback {
     /// The copy for this key is recorded; map it next frame.
     Copied((CasterKey, u32)),
     /// Map requested; the callback stores whether it succeeded.
-    Mapping((CasterKey, u32), std::sync::Arc<std::sync::Mutex<Option<bool>>>),
+    Mapping(
+        (CasterKey, u32),
+        std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+    ),
 }
 
 /// Uniforms of `shadow_casters.wgsl`.
@@ -101,6 +105,8 @@ struct CasterParams {
     /// allocation rather than an older one.
     nonce: u32,
     _pad: u32,
+    view_proj: [f32; 16],
+    camera_position: [f32; 4],
 }
 
 /// Most casters any consumer addresses (`MAX_SHADOW_LIGHTS` in the lighting
@@ -200,7 +206,14 @@ impl ShadowMatrixPass {
         let bind_group = Self::bind(
             device,
             &bind_group_layout,
-            [lights_buf, shadow_matrix_buf, camera_buf, &uniform_buf, shadow_dirty_buf, shadow_hashes_buf],
+            [
+                lights_buf,
+                shadow_matrix_buf,
+                camera_buf,
+                &uniform_buf,
+                shadow_dirty_buf,
+                shadow_hashes_buf,
+            ],
         );
 
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -221,41 +234,42 @@ impl ShadowMatrixPass {
             label: Some("Shadow caster allocation"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shadow_casters.wgsl").into()),
         });
-        let caster_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Shadow caster allocation BGL"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+        let caster_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Shadow caster allocation BGL"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-            ],
-        });
+                ],
+            });
         let caster_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Shadow caster allocation params"),
             size: std::mem::size_of::<CasterParams>() as u64,
@@ -306,7 +320,8 @@ impl ShadowMatrixPass {
             shadow_hashes_buf: shadow_hashes_buf.clone(),
             bound_lights: lights_buf.clone(),
             shadow_atlas_size: shadow_atlas_size.max(1),
-            face_capacity: (shadow_matrix_buf.size() / std::mem::size_of::<GpuShadowMatrix>() as u64) as u32,
+            face_capacity: (shadow_matrix_buf.size()
+                / std::mem::size_of::<GpuShadowMatrix>() as u64) as u32,
             last_lights_generation: None,
             last_view_proj: [0.0; 16],
             frame_generation: 0,
@@ -323,6 +338,7 @@ impl ShadowMatrixPass {
             caster_nonce: 0,
             caster_layout: None,
             per_caster_generation: [1; 42],
+            caster_view_generation: 0,
         }
     }
 
@@ -353,9 +369,18 @@ impl ShadowMatrixPass {
             label: Some("Shadow caster allocation BG"),
             layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: lights.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: params.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: caster_table.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: lights.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: caster_table.as_entire_binding(),
+                },
             ],
         })
     }
@@ -444,7 +469,6 @@ impl ShadowMatrixPass {
         &self.shadow_matrix_buf
     }
 
-
     fn bind(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
@@ -504,7 +528,9 @@ impl RenderPass for ShadowMatrixPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.poll_caster_readback();
-        let lights = ctx.scene_buffers.get(helio_core::BufferKey::of("scene_lights"));
+        let lights = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("scene_lights"));
         // SceneDB grows the lights buffer with the scene: follow the
         // reallocation instead of reading the buffer bound at construction.
         if let Some(lights) = lights.filter(|lights| lights.buffer != self.bound_lights) {
@@ -530,16 +556,34 @@ impl RenderPass for ShadowMatrixPass {
             );
             self.caster_key = None;
         }
-        // Reallocate slots only when the light rows change (Helio#246): no
-        // per-frame CPU scoring, and nothing at all while lights are idle.
+        let camera_moved = ctx.camera_data.view_proj != self.last_view_proj;
+        if camera_moved {
+            self.caster_view_generation = self.caster_view_generation.wrapping_add(1);
+        }
+        // A camera move reruns the GPU ranking. CPU work remains constant:
+        // only the camera matrix and position are written here.
         let caster_key = lights.map(|lights| {
-            (lights.epoch, lights.content_generation, lights.row_capacity(), self.caster_capacity())
+            (
+                lights.epoch,
+                lights.content_generation,
+                lights.row_capacity(),
+                self.caster_capacity(),
+                self.caster_view_generation,
+            )
         });
         self.caster_rebuild = caster_key.filter(|key| self.caster_key != Some(*key));
-        if let Some((_, _, row_count, caster_capacity)) = self.caster_rebuild {
+        if let Some((_, _, row_count, caster_capacity, _)) = self.caster_rebuild {
             self.caster_nonce = self.caster_nonce.wrapping_add(1);
-            let params = CasterParams { row_count, caster_capacity, nonce: self.caster_nonce, _pad: 0 };
-            ctx.queue.write_buffer(&self.caster_params_buf, 0, bytemuck::bytes_of(&params));
+            let params = CasterParams {
+                row_count,
+                caster_capacity,
+                nonce: self.caster_nonce,
+                _pad: 0,
+                view_proj: ctx.camera_data.view_proj,
+                camera_position: ctx.camera_data.position_near,
+            };
+            ctx.queue
+                .write_buffer(&self.caster_params_buf, 0, bytemuck::bytes_of(&params));
         }
         let u = ShadowMatrixUniforms {
             light_count: lights.map_or(0, |lights| lights.row_capacity()),

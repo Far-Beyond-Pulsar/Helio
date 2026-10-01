@@ -701,7 +701,9 @@ fn cs_build_draw_calls(@builtin(global_invocation_id) gid: vec3<u32>) {
 @group(0) @binding(5) var<storage, read_write> block_range_totals: array<u32>;
 @group(0) @binding(6) var<storage, read> group_shading_rls: array<u32>;
 
-var<workgroup> range_scan_buf: array<u32, 256>;
+var<workgroup> opaque_range_scan: array<u32, 256>;
+var<workgroup> transparent_range_scan: array<u32, 256>;
+var<workgroup> forward_range_scan: array<u32, 256>;
 
 @compute @workgroup_size(WG)
 fn cs_range_local_scan(
@@ -712,7 +714,9 @@ fn cs_range_local_scan(
     let count = group_count_rls[0];
     let has_elem = gid.x < count;
     var is_start = 0u;
+    var shading = 0u;
     if has_elem {
+        shading = group_shading_rls[gid.x];
         if gid.x == 0u {
             is_start = 1u;
         } else {
@@ -725,7 +729,12 @@ fn cs_range_local_scan(
             }
         }
     }
-    range_scan_buf[lid.x] = is_start;
+    let opaque_start = select(0u, 1u, is_start != 0u && (shading & 3u) == 0u);
+    let transparent_start = select(0u, 1u, is_start != 0u && (shading & 3u) == 1u);
+    let forward_start = select(0u, 1u, is_start != 0u && (shading & 2u) != 0u);
+    opaque_range_scan[lid.x] = opaque_start;
+    transparent_range_scan[lid.x] = transparent_start;
+    forward_range_scan[lid.x] = forward_start;
     workgroupBarrier();
 
     var offset = 1u;
@@ -733,21 +742,31 @@ fn cs_range_local_scan(
         if offset >= WG {
             break;
         }
-        var v = 0u;
+        var opaque_value = 0u;
+        var transparent_value = 0u;
+        var forward_value = 0u;
         if lid.x >= offset {
-            v = range_scan_buf[lid.x - offset];
+            opaque_value = opaque_range_scan[lid.x - offset];
+            transparent_value = transparent_range_scan[lid.x - offset];
+            forward_value = forward_range_scan[lid.x - offset];
         }
         workgroupBarrier();
-        range_scan_buf[lid.x] += v;
+        opaque_range_scan[lid.x] += opaque_value;
+        transparent_range_scan[lid.x] += transparent_value;
+        forward_range_scan[lid.x] += forward_value;
         workgroupBarrier();
         offset = offset * 2u;
     }
 
     if has_elem {
-        local_range_rank[gid.x] = range_scan_buf[lid.x];
+        local_range_rank[gid.x * 3u] = opaque_range_scan[lid.x];
+        local_range_rank[gid.x * 3u + 1u] = transparent_range_scan[lid.x];
+        local_range_rank[gid.x * 3u + 2u] = forward_range_scan[lid.x];
     }
     if lid.x == WG - 1u {
-        block_range_totals[wgid.x] = range_scan_buf[lid.x];
+        block_range_totals[wgid.x * 3u] = opaque_range_scan[lid.x];
+        block_range_totals[wgid.x * 3u + 1u] = transparent_range_scan[lid.x];
+        block_range_totals[wgid.x * 3u + 2u] = forward_range_scan[lid.x];
     }
 }
 
@@ -760,13 +779,23 @@ struct RangeBlockUniform {
 
 @compute @workgroup_size(1)
 fn cs_range_block_scan() {
-    var running = 0u;
-    for (var blk = 0u; blk < rbu.num_blocks; blk++) {
-        let total = block_range_totals_s[blk];
-        block_range_totals_s[blk] = running;
-        running += total;
+    var total_ranges = 0u;
+    for (var bucket = 0u; bucket < 3u; bucket++) {
+        var running = 0u;
+        for (var blk = 0u; blk < rbu.num_blocks; blk++) {
+            let index = blk * 3u + bucket;
+            let total = block_range_totals_s[index];
+            block_range_totals_s[index] = running;
+            running += total;
+        }
+        range_count_out[bucket] = running;
+        let dispatch_args = 4u + bucket * 3u;
+        range_count_out[dispatch_args] = running;
+        range_count_out[dispatch_args + 1u] = 1u;
+        range_count_out[dispatch_args + 2u] = 1u;
+        total_ranges += running;
     }
-    range_count_out[0] = running;
+    range_count_out[3] = total_ranges;
 }
 
 struct GpuRangeOut {
@@ -787,8 +816,7 @@ struct GpuRangeOut {
 @group(0) @binding(7) var<storage, read_write> opaque_ranges: array<GpuRangeOut>;
 @group(0) @binding(8) var<storage, read_write> transparent_ranges: array<GpuRangeOut>;
 @group(0) @binding(9) var<storage, read_write> forward_ranges: array<GpuRangeOut>;
-@group(0) @binding(10) var<storage, read_write> range_bucket_counts: array<atomic<u32>>; // [opaque, transparent, forward]
-
+@group(0) @binding(10) var<storage, read_write> draw_counts_out: array<u32>;
 @compute @workgroup_size(WG)
 fn cs_range_write(
     @builtin(global_invocation_id) gid: vec3<u32>,
@@ -840,15 +868,22 @@ fn cs_range_write(
     let shading = group_shading_rw[g];
     let is_transparent = (shading & 1u) != 0u;
     let is_forward = (shading & 2u) != 0u;
+    let range_capacity = (arrayLength(&draw_counts_out) - 4u) / 3u;
     if is_forward {
-        let slot = atomicAdd(&range_bucket_counts[2], 1u);
+        let slot = block_range_base_rw[wgid.x * 3u + 2u]
+            + local_range_rank_rw[g * 3u + 2u] - 1u;
         forward_ranges[slot] = range;
+        draw_counts_out[4u + 2u * range_capacity + slot] = range.count;
     } else if is_transparent {
-        let slot = atomicAdd(&range_bucket_counts[1], 1u);
+        let slot = block_range_base_rw[wgid.x * 3u + 1u]
+            + local_range_rank_rw[g * 3u + 1u] - 1u;
         transparent_ranges[slot] = range;
+        draw_counts_out[4u + range_capacity + slot] = range.count;
     } else {
-        let slot = atomicAdd(&range_bucket_counts[0], 1u);
+        let slot = block_range_base_rw[wgid.x * 3u]
+            + local_range_rank_rw[g * 3u] - 1u;
         opaque_ranges[slot] = range;
+        draw_counts_out[4u + slot] = range.count;
     }
 }
 
