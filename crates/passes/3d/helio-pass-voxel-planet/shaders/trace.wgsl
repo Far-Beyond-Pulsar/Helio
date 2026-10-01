@@ -301,6 +301,7 @@ fn cross_face(r: Ray, cur_in: Cursor, t: f32) -> Cursor {
 // block j, top), tier 0 if none. All three loads issue before any test. A
 // complete block is fully resident and empty above its top.
 fn summary_block(level: u32, face: u32, ci: i32, cj: i32, k: i32) -> vec4<i32> {
+    if (frame.hints.w & 4u) != 0u { return vec4<i32>(0); }
     let b3 = vec2<i32>(ci >> 6u, cj >> 6u);
     let b2 = vec2<i32>(ci >> 4u, cj >> 4u);
     let b1 = vec2<i32>(ci >> 2u, cj >> 2u);

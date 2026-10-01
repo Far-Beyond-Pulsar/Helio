@@ -221,6 +221,14 @@ impl EditHeap {
     }
 }
 
+/// A submitted column owns both journals until its publication result is known.
+struct EditPublication {
+    record: u32,
+    previous: Option<(u32, u32)>,
+    next: Option<(u32, u32)>,
+    evicted: bool,
+}
+
 /// Work produced for one frame.
 #[derive(Default)]
 pub struct FrameWork {
@@ -269,6 +277,7 @@ pub struct Residency {
     delayed_records: Vec<u32>,
     levels: Vec<Level>,
     edits: EditHeap,
+    publishing: FxHashMap<u64, EditPublication>,
     /// GPU face-brush index for each (brush id, face entry).
     brush_gpu: Vec<Vec<u32>>,
     synced: Vec<crate::edits::Brush>,
@@ -331,6 +340,7 @@ impl Residency {
             delayed_records: Vec::new(),
             levels,
             edits: EditHeap::default(),
+            publishing: FxHashMap::default(),
             brush_gpu: Vec::new(),
             synced: Vec::new(),
             synced_hash: Vec::new(),
@@ -428,13 +438,26 @@ impl Residency {
             let ci = i64::from(fb.center[0]) / 2;
             let cj = i64::from(fb.center[1]) / 2;
             for level in 0..self.grid.levels() {
-                if !fb.active(level) {
-                    continue;
-                }
+                if !fb.active(level) { continue; }
                 let col = i64::from(BRICK) << level;
-                let (i0, i1) = ((ci - r_cells).div_euclid(col), (ci + r_cells).div_euclid(col));
-                let (j0, j1) = ((cj - r_cells).div_euclid(col), (cj + r_cells).div_euclid(col));
+                // Extended brush coordinates overlap adjacent faces, but
+                // column keys only encode valid indices on this face.
+                let last = (i64::from(self.grid.cells()) - 1).div_euclid(col);
+                let (i0, i1) = ((ci - r_cells).div_euclid(col).max(0), (ci + r_cells).div_euclid(col).min(last));
+                let (j0, j1) = ((cj - r_cells).div_euclid(col).max(0), (cj + r_cells).div_euclid(col).min(last));
+                if i0 > i1 || j0 > j1 { continue; }
                 if (i1 - i0 + 1) * (j1 - j0 + 1) > 1 << 16 {
+                    // A large valid brush can cover millions of possible
+                    // columns, but only the resident subset needs rebuilding.
+                    for (key, _) in self.residents.iter() {
+                        let (face, lv, a, b) = unpack(key);
+                        if face == fb.face() && lv == level
+                            && (i0..=i1).contains(&i64::from(a))
+                            && (j0..=j1).contains(&i64::from(b))
+                        {
+                            self.urgent.push(key);
+                        }
+                    }
                     continue;
                 }
                 for a in i0..=i1 {
@@ -535,7 +558,11 @@ impl Residency {
         if let Some(res) = self.residents.remove(key, &mut work.table_writes) {
             work.evictions.push(res.record);
             self.delayed_records.push(res.record);
-            if let Some(block) = res.edit_block {
+            if let Some(publication) = self.publishing.get_mut(&key) {
+                // The result can arrive after this record has been reused for
+                // another key. Keep ownership until then and ignore that result.
+                publication.evicted = true;
+            } else if let Some(block) = res.edit_block {
                 self.edits.release(block);
             }
         }
@@ -675,15 +702,21 @@ impl Residency {
                 deferred_urgent.push(key);
                 continue;
             }
+            if self.publishing.contains_key(&key) {
+                deferred_urgent.push(key);
+                continue;
+            }
             let Some(res) = self.residents.get(key) else { continue };
             let Ok(block) = self.edit_list(planet, key, &mut work) else {
                 deferred_urgent.push(key);
                 continue;
             };
-            if let Some(old) = res.edit_block {
-                self.edits.release(old);
-            }
-            self.residents.get_mut(key).unwrap().edit_block = block;
+            self.publishing.insert(key, EditPublication {
+                record: res.record,
+                previous: res.edit_block,
+                next: block,
+                evicted: false,
+            });
             work.jobs.push(Job {
                 key0: key as u32,
                 key1: (key >> 32) as u32,
@@ -725,6 +758,12 @@ impl Residency {
             let requeue = |this: &mut Self| {
                 this.levels[index].pending.insert(key, bucket);
             };
+            // A retired key may still have a publication result in flight.
+            // Do not let that result acknowledge a different incarnation.
+            if self.publishing.contains_key(&key) {
+                requeue(self);
+                break;
+            }
             let Some(record) = self.alloc_record() else {
                 requeue(self);
                 break;
@@ -740,8 +779,14 @@ impl Residency {
             if !blocks {
                 self.block_conflicts += 1;
             }
-            let slot = self.residents.insert(key, Resident { record, slot: 0, edit_block: block, blocks });
+            let slot = self.residents.insert(key, Resident { record, slot: 0, edit_block: None, blocks });
             work.table_writes.push((slot, record));
+            self.publishing.insert(key, EditPublication {
+                record,
+                previous: None,
+                next: block,
+                evicted: false,
+            });
             work.jobs.push(Job {
                 key0: key as u32,
                 key1: (key >> 32) as u32,
@@ -767,7 +812,7 @@ impl Residency {
         }
         let mut stats = self.stats;
         stats.resident_columns = self.residents.len();
-        stats.pending_columns = self.levels.iter().map(|l| l.pending.len()).sum::<usize>() + self.urgent.len();
+        stats.pending_columns = self.levels.iter().map(|l| l.pending.len()).sum::<usize>() + self.urgent.len() + self.publishing.len();
         stats.active_levels = self.levels.iter().filter(|l| l.active).count() as u32;
         stats.finest_level = self.levels.iter().position(|l| l.active).unwrap_or(0) as u32;
         stats.jobs = work.jobs.len();
@@ -776,6 +821,33 @@ impl Residency {
         stats.table_load = self.residents.load();
         self.stats = stats;
         work
+    }
+
+    /// Acknowledge every submitted job, including successful publications.
+    /// The engine must reserve a readback slot before issuing any jobs.
+    pub fn complete_jobs(&mut self, results: impl IntoIterator<Item = (u64, u32)>) {
+        let mut failed = Vec::new();
+        for (key, status) in results {
+            let Some(publication) = self.publishing.remove(&key) else { continue };
+            if publication.evicted {
+                if let Some(block) = publication.previous { self.edits.release(block); }
+                if let Some(block) = publication.next { self.edits.release(block); }
+                continue;
+            }
+            let resident = self.residents.get_mut(key).expect("live publication has a resident");
+            assert_eq!(resident.record, publication.record);
+            if status == 0 {
+                resident.edit_block = publication.next;
+                if let Some(block) = publication.previous { self.edits.release(block); }
+            } else {
+                // A failed replacement leaves the previous GPU column intact.
+                if let Some(block) = publication.next { self.edits.release(block); }
+                failed.push((key, status));
+            }
+        }
+        self.requeue(failed);
+        self.stats.pending_columns = self.levels.iter().map(|l| l.pending.len()).sum::<usize>()
+            + self.urgent.len() + self.publishing.len();
     }
 
     /// Re-queue columns whose jobs could not complete (scratch/pool pressure).
@@ -795,7 +867,13 @@ impl Residency {
         self.stats.requeued += count;
     }
 
-    /// Every pending window column has been issued.
+    /// An edit journal or its publication is still changing GPU columns.
+    /// Initial unedited column publications do not invalidate summaries.
+    pub fn pending_edits(&self) -> bool {
+        !self.urgent.is_empty()
+            || self.publishing.values().any(|p| p.previous.is_some() || p.next.is_some())
+    }
+
     /// Live tier-1 summary block slots, when they changed since the last call.
     pub fn take_live_blocks(&mut self) -> Option<&[u32]> {
         std::mem::take(&mut self.live_dirty).then_some(self.live_tier1.as_slice())
@@ -848,6 +926,7 @@ impl Residency {
 
     pub fn idle(&self) -> bool {
         self.urgent.is_empty()
+            && self.publishing.is_empty()
             && self.applied == self.requested
             && self.diffs.is_empty()
             && self.levels.iter().all(|l| l.pending.is_empty())
@@ -858,6 +937,159 @@ impl Residency {
 mod tests {
     use super::*;
     use crate::planet::PlanetRecipe;
+
+    fn edit_fixture() -> (std::sync::Arc<Planet>, Residency, u64, DVec3) {
+        let planet = std::sync::Arc::new(Planet::new(PlanetRecipe {
+            shape: crate::grid::Shape::Plane,
+            ..Default::default()
+        }).unwrap());
+        let grid = *planet.grid();
+        let eye = DVec3::new(0.0, 10.0, 0.0);
+        let (cell, _) = grid.locate(DVec3::ZERO);
+        let key = pack(key0(cell.face, 0, cell.i >> 3), (cell.j >> 3) as u32);
+        let mut r = Residency::new(grid, Capacity { table_bits: 8, edit_words: 64, ..Default::default() });
+        r.residents.insert(key, Resident { record: 0, slot: 0, edit_block: None, blocks: false });
+        r.block_conflicts = 1;
+        r.next_record = 1;
+        r.last_request = Some(WindowRequest {
+            eye, prefetch_eye: None, lod0: 1.0,
+            outer_radius: planet.outer_radius(), planet: Some(planet.clone()), serial: 1,
+        });
+        (planet, r, key, eye)
+    }
+
+    fn test_brush(radius: f64) -> crate::edits::Brush {
+        crate::edits::Brush {
+            center: [0.0, 0.0, 0.0], radius,
+            shape: crate::edits::BrushShape::Sphere,
+            op: crate::edits::BrushOp::Add, material: 2,
+        }
+    }
+
+    #[test]
+    fn large_brush_and_undo_invalidate_resident_fine_columns() {
+        let (mut planet, mut r, key, _) = edit_fixture();
+        std::sync::Arc::make_mut(&mut planet).apply(test_brush(1_000.0)).unwrap();
+        let mut work = FrameWork::default();
+        r.sync_edits(&planet, &mut work);
+        assert!(r.urgent.contains(&key), "large footprint must not skip fine residents");
+        r.urgent.clear();
+        std::sync::Arc::make_mut(&mut planet).undo().unwrap();
+        r.sync_edits(&planet, &mut work);
+        assert!(r.urgent.contains(&key), "undo must rebuild the same resident footprint");
+    }
+
+    #[test]
+    fn failed_edit_publication_preserves_refs_and_churn_reclaims_them() {
+        let (mut planet, mut r, key, eye) = edit_fixture();
+        assert!(!r.pending_edits());
+        for round in 0..100 {
+            std::sync::Arc::make_mut(&mut planet).apply(test_brush(0.2)).unwrap();
+            // Avoid changing windows: only test edit publication ownership.
+            r.last_request.as_mut().unwrap().outer_radius = planet.outer_radius();
+            let work = r.plan(&planet, eye, 1.0, 1);
+            assert_eq!(work.job_keys, vec![key]);
+            let next = r.publishing[&key].next.unwrap();
+            assert!(r.pending_edits());
+            assert_eq!(r.residents.get(key).unwrap().edit_block, None);
+            assert!(!r.edits.free[next.1 as usize].contains(&next.0));
+            r.complete_jobs([(key, 2)]);
+            assert!(r.pending_edits(), "failed edit must remain pending for retry");
+            assert_eq!(r.residents.get(key).unwrap().edit_block, None);
+            assert!(r.edits.free[next.1 as usize].contains(&next.0));
+            let retry = r.plan(&planet, eye, 1.0, 1);
+            assert_eq!(retry.job_keys, vec![key]);
+            r.complete_jobs([(key, 0)]);
+            let published = r.residents.get(key).unwrap().edit_block.unwrap();
+            std::sync::Arc::make_mut(&mut planet).undo().unwrap();
+            let undo = r.plan(&planet, eye, 1.0, 1);
+            assert_eq!(undo.job_keys, vec![key]);
+            assert!(r.pending_edits(), "undo must retain old edit ownership until publication");
+            assert_eq!(r.residents.get(key).unwrap().edit_block, Some(published));
+            assert!(!r.edits.free[published.1 as usize].contains(&published.0));
+            // A repeated plan must not issue the same key before its result.
+            let waiting = r.plan(&planet, eye, 1.0, 1);
+            assert!(waiting.jobs.is_empty());
+            r.complete_jobs([(key, 2)]);
+            assert!(r.pending_edits(), "failed edit must remain pending for retry");
+            assert_eq!(r.residents.get(key).unwrap().edit_block, Some(published));
+            let retry = r.plan(&planet, eye, 1.0, 1);
+            assert_eq!(retry.job_keys, vec![key]);
+            r.complete_jobs([(key, 0)]);
+            assert_eq!(r.residents.get(key).unwrap().edit_block, None);
+            assert!(r.edits.free[published.1 as usize].contains(&published.0));
+            assert!(r.publishing.is_empty());
+            assert!(!r.pending_edits());
+            assert_eq!(r.edits.top, 2, "edit refs leaked on round {round}");
+        }
+    }
+
+    #[test]
+    fn evicted_publication_reclaims_both_journals_without_touching_reused_record() {
+        let (mut planet, mut r, key, eye) = edit_fixture();
+        std::sync::Arc::make_mut(&mut planet).apply(test_brush(0.2)).unwrap();
+        r.last_request.as_mut().unwrap().outer_radius = planet.outer_radius();
+        r.plan(&planet, eye, 1.0, 1);
+        r.complete_jobs([(key, 0)]);
+        let previous = r.residents.get(key).unwrap().edit_block.unwrap();
+        std::sync::Arc::make_mut(&mut planet).apply(test_brush(0.1)).unwrap();
+        r.plan(&planet, eye, 1.0, 1);
+        let next = r.publishing[&key].next.unwrap();
+        let mut work = FrameWork::default();
+        r.evict(key, &mut work);
+        assert!(r.publishing[&key].evicted);
+        assert!(r.pending_edits());
+        assert!(!r.edits.free[previous.1 as usize].contains(&previous.0));
+        assert!(!r.edits.free[next.1 as usize].contains(&next.0));
+        let other = pack((key as u32) + 1, (key >> 32) as u32);
+        let other_block = r.edits.alloc(2, r.capacity.edit_words).unwrap();
+        r.residents.insert(other, Resident { record: 0, slot: 0, edit_block: Some(other_block), blocks: false });
+        r.complete_jobs([(key, 0)]);
+        assert_eq!(r.residents.get(other).unwrap().edit_block, Some(other_block));
+        assert!(!r.edits.free[other_block.1 as usize].contains(&other_block.0));
+        assert!(r.edits.free[previous.1 as usize].contains(&previous.0));
+        assert!(r.edits.free[next.1 as usize].contains(&next.0));
+        assert!(r.publishing.is_empty());
+        assert!(!r.pending_edits());
+    }
+
+    #[test]
+    fn unedited_publication_does_not_mark_edits_pending() {
+        let (_, mut r, key, _) = edit_fixture();
+        r.publishing.insert(key, EditPublication {
+            record: 0, previous: None, next: None, evicted: false,
+        });
+        assert!(!r.pending_edits());
+        r.complete_jobs([(key, 0)]);
+        assert!(!r.pending_edits());
+    }
+
+    #[test]
+    fn face_edge_brush_invalidates_both_faces_without_outside_keys() {
+        let mut planet = Planet::new(PlanetRecipe { radius_m: 1_000.0, ..Default::default() }).unwrap();
+        let grid = *planet.grid();
+        let center = grid.ground_point(2, 0.1, f64::from(grid.cells()) * 0.5);
+        let brush = crate::edits::Brush { center: center.to_array(), ..test_brush(0.2) };
+        let faces = brush.resolve(&grid).unwrap();
+        assert!(faces.len() >= 2, "brush must straddle a face edge");
+        let mut r = Residency::new(grid, Capacity { table_bits: 8, ..Default::default() });
+        let mut expected = Vec::new();
+        for (record, fb) in faces.iter().enumerate() {
+            let i = (fb.center[0] / 2).clamp(0, grid.cells() - 1) >> 3;
+            let j = (fb.center[1] / 2).clamp(0, grid.cells() - 1) >> 3;
+            let key = pack(key0(fb.face(), 0, i), j as u32);
+            expected.push(key);
+            r.residents.insert(key, Resident { record: record as u32, ..Default::default() });
+        }
+        planet.apply(brush).unwrap();
+        r.sync_edits(&planet, &mut FrameWork::default());
+        for key in expected { assert!(r.urgent.contains(&key)); }
+        assert!(r.urgent.iter().all(|&key| {
+            let (_, level, i, j) = unpack(key);
+            (0..grid.cells() >> (level + 3)).contains(&i)
+                && (0..grid.cells() >> (level + 3)).contains(&j)
+        }));
+    }
 
     /// The GPU hash table holds exactly the residents, each found by linear
     /// probing from its home slot before any empty slot (what `find_column`
@@ -890,7 +1122,8 @@ mod tests {
         let settle = |r: &mut Residency, eye: DVec3, worst: &mut f64| {
             for _ in 0..20_000 {
                 let started = std::time::Instant::now();
-                r.plan(&planet, eye, lod0, 100_000);
+                let work = r.plan(&planet, eye, lod0, 100_000);
+                r.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
                 *worst = worst.max(started.elapsed().as_secs_f64() * 1000.0);
                 if r.idle() {
                     return;
@@ -936,6 +1169,7 @@ mod tests {
             for _ in 0..1000 {
                 let work = residency.plan(&planet, eye, lod0, 100_000);
                 total += work.jobs.len();
+                residency.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
                 if residency.idle() {
                     break;
                 }
@@ -958,7 +1192,8 @@ mod tests {
         let mut residency = Residency::new(grid, Capacity { table_bits: 20, ..Default::default() });
         let mut eye = planet.surface_point(grid.direction(0, 3e7, 4e7), 2.0);
         for step in 0..40 {
-            let _ = residency.plan(&planet, eye, 120.0, 20_000);
+            let work = residency.plan(&planet, eye, 120.0, 20_000);
+            residency.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
             eye = planet.surface_point(eye + DVec3::new(0.0, 0.0, 70.0 * f64::from(step % 3)), 2.0);
         }
         table_is_exact(&residency);

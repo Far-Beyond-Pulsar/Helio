@@ -885,6 +885,8 @@ impl PlanetRenderer {
         frame.grass = self.settings.appearance.grass.map(linear);
         frame.detail = self.settings.appearance.detail.map(clean);
         frame.hints[1] = u32::from(self.settings.climate_height_reuse);
+        // Summary tops from an older journal cannot prune live edits.
+        frame.hints[3] = if self.residency.pending_edits() { 4 } else { 0 };
         for face in 0..6u8 {
             // A plane has one face; the others keep default frames.
             let f = grid.face_frame(face, eye);
@@ -1066,7 +1068,7 @@ impl PlanetRenderer {
 
     fn poll_readbacks(&mut self) {
         let _ = self.device.poll(wgpu::PollType::Poll);
-        let mut failed = Vec::new();
+        let mut completed = Vec::new();
         for r in &mut self.readbacks {
             if r.stage == 2 && r.state.load(Ordering::Acquire) {
                 {
@@ -1074,9 +1076,7 @@ impl PlanetRenderer {
                     for (index, key) in r.keys.iter().enumerate() {
                         let at = index * JOB_OUT_BYTES as usize;
                         let status = u32::from_le_bytes(data[at..at + 4].try_into().unwrap());
-                        if status != 0 {
-                            failed.push((*key, status));
-                        }
+                        completed.push((*key, status));
                     }
                     let probe = u64::from(self.settings.capacity.max_jobs) * JOB_OUT_BYTES;
                     let at = probe as usize;
@@ -1087,9 +1087,9 @@ impl PlanetRenderer {
                 r.state.store(false, Ordering::Release);
             }
         }
-        self.stats.failed_jobs += failed.iter().filter(|(_, s)| *s != 1).count();
-        self.stats.overflow_columns += failed.iter().filter(|(_, s)| *s == 1).count();
-        self.residency.requeue(failed);
+        self.stats.failed_jobs += completed.iter().filter(|(_, s)| *s != 0 && *s != 1).count();
+        self.stats.overflow_columns += completed.iter().filter(|(_, s)| *s == 1).count();
+        self.residency.complete_jobs(completed);
         // Start mapping readbacks encoded in earlier frames.
         for r in &mut self.readbacks {
             if r.stage == 1 {
@@ -1125,6 +1125,13 @@ impl PlanetRenderer {
         depth: &wgpu::TextureView,
         frame_num: u64,
     ) {
+        // An edit-only publication keeps the recipe/pipelines but changes
+        // the authoritative journal. Direct renderer users need the same
+        // synchronization as PlanetPass's mailbox path.
+        if !Arc::ptr_eq(&self.planet, &frame.planet) {
+            assert_eq!(self.planet.recipe(), frame.planet.recipe(), "recreate PlanetRenderer after a recipe change");
+            self.planet = frame.planet.clone();
+        }
         if let Some(p) = &mut self.profiler {
             // Timestamps arrive frames late and the same sample is returned
             // until a newer one completes: each sample is used once, with the
@@ -1181,8 +1188,12 @@ impl PlanetRenderer {
         // faster; admission costs ~0.3 us per column, diffs about as much).
         let cpu_ms = if moving { 1.5 + 2.5 * backlog } else { 4.0 };
         self.residency.set_cpu_budget(Some(std::time::Duration::from_secs_f64(cpu_ms * 1.0e-3)));
-        let budget = ((target_ms / self.ms_per_job.max(1e-5)) as usize)
+        let desired_budget = ((target_ms / self.ms_per_job.max(1e-5)) as usize)
             .clamp(256, self.settings.job_budget.min(self.settings.capacity.max_jobs as usize));
+        // Every publication needs completion feedback before its old journal
+        // storage can be reused. Apply backpressure rather than issuing jobs
+        // whose outcomes cannot be observed.
+        let budget = if self.readbacks.iter().any(|r| r.stage == 0) { desired_budget } else { 0 };
         let work = if self.settings.freeze_residency {
             FrameWork::default()
         } else {
