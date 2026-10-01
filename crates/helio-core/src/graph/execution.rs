@@ -366,6 +366,7 @@ fn run_parallel_work_item(job: &ParallelWorkItem) -> crate::Result<ParallelWorke
         let mut render_pass = encoder.begin_render_pass(&standalone_desc);
         let mut ctx = PassContext {
             encoder_ptr,
+            queue: worker_queue,
             compute_encoder_ptr: &mut compute_encoder,
             target,
             depth,
@@ -399,6 +400,7 @@ fn run_parallel_work_item(job: &ParallelWorkItem) -> crate::Result<ParallelWorke
     } else {
         let mut ctx = PassContext {
             encoder_ptr: &mut encoder,
+            queue: worker_queue,
             compute_encoder_ptr: &mut compute_encoder,
             target,
             depth,
@@ -1752,6 +1754,7 @@ impl RenderGraph {
                         self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
                         let mut ctx = PassContext {
                             encoder_ptr: &mut encoder as *mut _,
+                            queue: scene.queue(),
                             compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
                             target,
                             depth,
@@ -1914,6 +1917,7 @@ impl RenderGraph {
 
                         let mut ctx = PassContext {
                             encoder_ptr: std::ptr::addr_of_mut!(encoder),
+                            queue: scene.queue(),
                             compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
                             target,
                             depth,
@@ -1987,6 +1991,7 @@ impl RenderGraph {
                         {
                             let mut ctx = PassContext {
                                 encoder_ptr: std::ptr::addr_of_mut!(encoder),
+                                queue: scene.queue(),
                                 compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
                                 target,
                                 depth,
@@ -2042,6 +2047,7 @@ impl RenderGraph {
 
                     let mut ctx = PassContext {
                         encoder_ptr: std::ptr::addr_of_mut!(encoder),
+                        queue: scene.queue(),
                         compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
                         target,
                         depth,

@@ -202,6 +202,10 @@ pub struct PassContext<'a> {
     /// Access via `unsafe { &mut *ctx.encoder_ptr }`.
     pub encoder_ptr: *mut wgpu::CommandEncoder,
 
+    /// Queue for small pass-owned uploads during execute(). Prefer encoding
+    /// copies for frame data; this is for sparse control values only.
+    pub queue: &'a wgpu::Queue,
+
     /// Separate compute encoder for compute dispatches (always available, even
     /// during a render pass on the render encoder).  Access via unsafe.
     pub compute_encoder_ptr: *mut wgpu::CommandEncoder,
