@@ -124,3 +124,131 @@ fn reusable_command_buffers_resubmit_and_interleave_with_queue_writes() {
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     });
 }
+
+// Keep many render submissions in flight and preserve a pixel from every
+// frame. Reading only the final image would miss intermittent black frames.
+#[test]
+fn reusable_rendering_preserves_every_frame_under_queue_pressure() {
+    pollster::block_on(async {
+        let instance = wgpu::Instance::new(
+            wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+        );
+        let Ok(adapter) = instance.request_adapter(&Default::default()).await else {
+            eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: render replay stress");
+            return;
+        };
+        let backend = adapter.get_info().backend;
+        let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
+        eprintln!("render replay stress backend: {backend:?}");
+        let params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("replay frame color"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("replay frame color"),
+            source: wgpu::ShaderSource::Wgsl(r#"
+@group(0) @binding(0) var<uniform> color: vec4<u32>;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let p = array<vec2<f32>, 3>(vec2(-1., -1.), vec2(3., -1.), vec2(-1., 3.));
+    return vec4(p[i], 0., 1.);
+}
+@fragment fn fs() -> @location(0) vec4<f32> {
+    return vec4<f32>(color) / 255.;
+}
+"#.into()),
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("replay frame color"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &shader, entry_point: Some("vs"),
+                compilation_options: Default::default(), buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader, entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None, write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(), depth_stencil: None,
+            multisample: Default::default(), multiview_mask: None, cache: None,
+        });
+        let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None, layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: params.as_entire_binding() }],
+        });
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("replay stress target"),
+            size: wgpu::Extent3d { width: 256, height: 256, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        if !encoder.mark_reusable() {
+            eprintln!("render replay stress unsupported on {backend:?}");
+            return;
+        }
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("replay stress draw"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view, depth_slice: None, resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None, timestamp_writes: None,
+                occlusion_query_set: None, multiview_mask: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &binding, &[]);
+            for _ in 0..32 { pass.draw(0..3, 0..1); }
+        }
+        let draw = encoder.finish().into_reusable().unwrap();
+        const FRAMES: u32 = 96;
+        let pixels = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("replay frame pixels"), size: u64::from(FRAMES) * 256,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        for frame in 0..FRAMES {
+            let color = [frame + 1, 255 - frame, 127, 255];
+            queue.write_buffer(&params, 0, bytemuck::cast_slice(&color));
+            let mut capture = device.create_command_encoder(&Default::default());
+            capture.copy_texture_to_buffer(
+                target.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &pixels,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: u64::from(frame) * 256,
+                        bytes_per_row: Some(256), rows_per_image: Some(1),
+                    },
+                },
+                wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            );
+            queue.submit_mixed([
+                wgpu::SubmitItem::Reusable(&draw),
+                wgpu::SubmitItem::Once(capture.finish()),
+            ]);
+        }
+        pixels.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let mapped = pixels.slice(..).get_mapped_range().unwrap();
+        for frame in 0..FRAMES {
+            let offset = frame as usize * 256;
+            assert_eq!(&mapped[offset..offset + 4],
+                &[frame as u8 + 1, 255 - frame as u8, 127, 255],
+                "{backend:?}: frame {frame} became black or stale");
+        }
+        drop(mapped);
+        pixels.unmap();
+    });
+}
