@@ -980,6 +980,22 @@ impl RenderPass for DebugDrawPass {
         "DebugDraw"
     }
 
+    fn reads(&self) -> &'static [&'static str] {
+        if self.editor_mode {
+            &["pre_aa"]
+        } else {
+            &[]
+        }
+    }
+
+    fn writes(&self) -> &'static [&'static str] {
+        if self.editor_mode {
+            &["pre_aa"]
+        } else {
+            &[]
+        }
+    }
+
     fn render_pass_descriptor<'a>(
         &'a self,
         target: &'a wgpu::TextureView,
