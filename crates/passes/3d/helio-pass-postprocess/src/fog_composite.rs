@@ -320,7 +320,7 @@ impl RenderPass for FogCompositePass {
             }));
             self.bind_group_key = Some(key);
         }
-        let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        let mut pass = ctx.render_cmds().expect("FogCompositePass requires the graph render pass");
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.draw(0..3, 0..1);

@@ -134,7 +134,7 @@ impl Target {
         self.clear(gpu, &mut encoder);
         let v: Vec<&wgpu::TextureView> = self.views.iter().collect();
         renderer.encode(
-            &mut encoder,
+            &mut helio_core::CommandRecorder::from_encoder(&mut encoder),
             &camera,
             frame,
             self.size,

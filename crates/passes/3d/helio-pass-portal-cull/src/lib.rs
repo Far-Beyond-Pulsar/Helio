@@ -433,23 +433,22 @@ impl RenderPass for PortalCullPass {
 
         let draw_workgroups = self.draw_count.min(PORTAL_DRAW_CAPACITY);
         let chain_workgroups = self.chain_count;
+        let mut cmds = ctx.graphics_cmds();
 
         {
-            let mut pass =
-                unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("PortalCull Select"),
-                    timestamp_writes: None,
-                });
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("PortalCull Select"),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(&self.select_pipeline);
             pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(draw_workgroups, chain_workgroups, 1);
         }
         {
-            let mut pass =
-                unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("PortalCull Finalize"),
-                    timestamp_writes: None,
-                });
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("PortalCull Finalize"),
+                timestamp_writes: None,
+            });
             pass.set_pipeline(&self.finalize_pipeline);
             pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(draw_workgroups.div_ceil(64), 1, 1);
@@ -493,7 +492,7 @@ impl RenderPass for PortalCullPass {
         }
         if ctx.frame_num % 60 == 0 {
             let size = (PORTAL_DRAW_CAPACITY as u64) * 4;
-            unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
+            cmds.copy_buffer_to_buffer(
                 &self.portal_stats_buf,
                 0,
                 &self.portal_stats_staging,

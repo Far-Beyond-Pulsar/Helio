@@ -605,7 +605,7 @@ impl RenderPass for TransparentPass {
             self.fog_key = Some(fog_key);
         }
         let indirect = culled.indirect;
-        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        let mut rp = ctx.render_cmds().expect("TransparentPass requires the graph render pass");
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
         rp.set_bind_group(2, self.fog_group.as_ref().unwrap(), &[]);
@@ -625,7 +625,7 @@ impl RenderPass for TransparentPass {
             let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
             rp.set_pipeline(pipeline);
             helio_pass_gbuffer::multi_draw_indexed_indirect(
-                rp,
+                &mut rp,
                 indirect,
                 start,
                 count,

@@ -508,7 +508,7 @@ impl RenderPass for OcclusionCullPass {
         if !self.hiz_warmed_up {
             let instance_count = batch.instance_count as u64;
             if instance_count > 0 {
-                unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
+                ctx.graphics_cmds().copy_buffer_to_buffer(
                     indirect_dispatch.compacted_indices,
                     0,
                     &self.compacted_indices_2_buf,
@@ -610,11 +610,11 @@ impl RenderPass for OcclusionCullPass {
 
         // One workgroup per draw-call group — its 64 lanes cooperatively
         // Hi-Z-test and compact that group's frustum survivors.
-        let mut pass =
-            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("OcclusionCull"),
-                timestamp_writes: None,
-            });
+        let mut cmds = ctx.graphics_cmds();
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("OcclusionCull"),
+            timestamp_writes: None,
+        });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.dispatch_workgroups(draw_count, 1, 1);

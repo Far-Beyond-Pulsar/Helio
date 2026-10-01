@@ -29,7 +29,7 @@
 //! | 2b. Cluster cull | `cs_cluster_cull` | one lane per 4×4 blade cluster | `visible_blades`, counters |
 //! | 3. Finalize | `cs_finalize` | four lanes | `foliage_indirect` |
 //!
-//! All four are recorded on `ctx.encoder_ptr` — the **main render encoder** — and this
+//! All four are recorded on `ctx.graphics_cmds()` — the **main graphics stream** — and this
 //! pass deliberately does not opt into `chain_transparent`. See the header of
 //! `shaders/foliage_cull.wgsl` and the plan's §6.2 for why that is not a missed
 //! optimisation but a correctness requirement about which frame's Hi-Z gets read.

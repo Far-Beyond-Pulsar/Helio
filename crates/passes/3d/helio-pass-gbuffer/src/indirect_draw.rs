@@ -9,6 +9,8 @@
 //! is flat. Every GPU-driven draw goes through [`multi_draw_indexed_indirect`]
 //! so the fast path is the default wherever the device supports it.
 
+use helio_core::RenderCmds;
+
 /// Where a draw's count lives on the GPU: a `u32` at `offset` in `buffer`.
 #[derive(Clone, Copy)]
 pub struct GpuDrawCount<'a> {
@@ -27,7 +29,7 @@ pub const DRAW_INDEXED_INDIRECT_STRIDE: u64 = 20;
 /// with `count` as its maximum; without it, one `multi_draw_indexed_indirect`;
 /// on wasm32, which has no multi-draw, one `draw_indexed_indirect` per entry.
 pub fn multi_draw_indexed_indirect(
-    pass: &mut wgpu::RenderPass<'_>,
+    pass: &mut RenderCmds<'_>,
     indirect: &wgpu::Buffer,
     first: u32,
     count: u32,

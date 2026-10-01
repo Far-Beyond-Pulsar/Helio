@@ -38,12 +38,12 @@
 //! let mut profiler = GpuProfiler::new(&device, &queue);
 //!
 //! // Write start timestamp
-//! profiler.begin_pass(&mut encoder, "ShadowPass");
+//! profiler.begin_pass(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), "ShadowPass");
 //!
 //! // GPU commands...
 //!
 //! // Write end timestamp
-//! profiler.end_pass(&mut encoder, "ShadowPass");
+//! profiler.end_pass(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), "ShadowPass");
 //! # }
 //! ```
 
@@ -70,9 +70,9 @@
 /// # fn example(device: &wgpu::Device, queue: &wgpu::Queue, mut encoder: &mut wgpu::CommandEncoder) {
 /// let mut profiler = GpuProfiler::new(&device, &queue);
 ///
-/// profiler.begin_pass(&mut encoder, "ShadowPass");
+/// profiler.begin_pass(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), "ShadowPass");
 /// // GPU commands...
-/// profiler.end_pass(&mut encoder, "ShadowPass");
+/// profiler.end_pass(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), "ShadowPass");
 /// # }
 /// ```
 use std::{
@@ -265,10 +265,10 @@ impl GpuProfiler {
     /// # fn example(device: &wgpu::Device, queue: &wgpu::Queue) {
     /// # let mut profiler = GpuProfiler::new(&device, &queue);
     /// # let mut encoder = device.create_command_encoder(&Default::default());
-    /// profiler.begin_pass(&mut encoder, "ShadowPass");
+    /// profiler.begin_pass(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), "ShadowPass");
     /// # }
     /// ```
-    pub fn begin_pass(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
+    pub fn begin_pass(&mut self, encoder: &mut crate::CommandRecorder<'_>, name: &'static str) {
         if let Some(ref query_set) = self.query_set {
             if self.next_index + 1 >= QUERY_CAPACITY {
                 self.query_overflows = self.query_overflows.saturating_add(1);
@@ -303,10 +303,10 @@ impl GpuProfiler {
     /// # fn example(device: &wgpu::Device, queue: &wgpu::Queue) {
     /// # let mut profiler = GpuProfiler::new(&device, &queue);
     /// # let mut encoder = device.create_command_encoder(&Default::default());
-    /// profiler.end_pass(&mut encoder, "ShadowPass");
+    /// profiler.end_pass(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), "ShadowPass");
     /// # }
     /// ```
-    pub fn end_pass(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
+    pub fn end_pass(&mut self, encoder: &mut crate::CommandRecorder<'_>, name: &'static str) {
         if let Some(ref query_set) = self.query_set {
             if self.next_index >= QUERY_CAPACITY {
                 return;
@@ -331,7 +331,7 @@ impl GpuProfiler {
     /// Resolves this frame into an idle readback slot without waiting for the
     /// GPU. If all slots are still in flight, the sample is explicitly
     /// dropped rather than stalling or reusing a mapped buffer.
-    pub fn resolve_queries(&mut self, encoder: &mut wgpu::CommandEncoder, frame_index: u64) {
+    pub fn resolve_queries(&mut self, encoder: &mut crate::CommandRecorder<'_>, frame_index: u64) {
         if self.next_index == 0 {
             self.pending_queries.clear();
             return;

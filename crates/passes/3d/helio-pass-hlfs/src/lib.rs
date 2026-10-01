@@ -15,7 +15,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result};
+use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result};
 mod bindings;
 mod pipelines;
 mod resources;
@@ -496,18 +496,18 @@ impl HlfsPass {
             + 16
             + 4
     }
-    fn record(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    fn record(&mut self, encoder: &mut CommandRecorder<'_>) {
         let p = &self.pipelines;
         let t = &self.targets;
         let parity = self.write_history;
         let common = self.external.common.as_ref().expect("HLFS inputs bound");
         let gbuffer = self.external.gbuffer.as_ref().expect("HLFS GBuffer bound");
-        let timestamp = |encoder: &mut wgpu::CommandEncoder, index| {
+        let timestamp = |encoder: &mut CommandRecorder<'_>, index| {
             if let Some(query) = &self.timing_query {
                 encoder.write_timestamp(query, index);
             }
         };
-        let dispatch = |encoder: &mut wgpu::CommandEncoder,
+        let dispatch = |encoder: &mut CommandRecorder<'_>,
                         name,
                         pipeline: &wgpu::ComputePipeline,
                         resources: &wgpu::BindGroup,
@@ -933,7 +933,7 @@ impl RenderPass for HlfsPass {
         // These dispatches read the GBuffer just rendered, so they belong on the
         // render encoder rather than the early compute encoder.
         // Returning no render descriptor guarantees there is no active render pass.
-        self.record(unsafe { &mut *ctx.encoder_ptr });
+        self.record(&mut ctx.graphics_cmds());
         Ok(())
     }
 }

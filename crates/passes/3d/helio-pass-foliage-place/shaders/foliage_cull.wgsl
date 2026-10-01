@@ -14,7 +14,7 @@
 // and the two encoders are submitted as `[compute_encoder, encoder]`, so *all* compute-
 // encoder work runs before *all* render-encoder work. A `chain_transparent` foliage cull
 // would therefore Hi-Z-test against the **previous** frame's pyramid. `HiZBuildPass` and
-// `OcclusionCullPass` both use `ctx.encoder_ptr` for exactly this reason and neither opts
+// `OcclusionCullPass` both use `ctx.graphics_cmds()` for exactly this reason and neither opts
 // in. See the plan's §6.2 (marked [audit] — the first draft had this wrong).
 
 const WG_SIZE: u32 = 64u;

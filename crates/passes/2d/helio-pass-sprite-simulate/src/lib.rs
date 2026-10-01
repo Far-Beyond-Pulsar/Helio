@@ -216,7 +216,7 @@ impl RenderPass for SpriteSimulatePass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let mut encoder = ctx.graphics_cmds();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("SpriteSimulate"),
             timestamp_writes: None,

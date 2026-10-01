@@ -391,6 +391,7 @@ pub mod acceleration;
 pub mod actor;
 pub mod asset_types;
 pub mod camera;
+pub mod cmd;
 pub mod context;
 pub mod entity;
 pub mod error;
@@ -461,6 +462,7 @@ pub use crate::acceleration::{
 };
 // Re-export core types
 pub use actor::Actor;
+pub use cmd::{CommandRecorder, ComputeCmds, RenderCmds};
 pub use context::{PassContext, PrepareContext};
 pub use entity::Entity;
 pub use error::{Error, Result};

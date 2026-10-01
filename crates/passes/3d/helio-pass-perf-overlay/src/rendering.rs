@@ -3,7 +3,7 @@ use crate::{
     MaterialTimingEntry, PerfOverlayMode, PerfOverlayRuntime, TileMetrics, VisualizeParams,
     TILE_SIZE,
 };
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::{Arc, Mutex};
 
 // ── Shared GPU state (created once, shared between passes) ──────────────────────
@@ -798,7 +798,7 @@ impl RenderPass for PerfOverlayPass {
                 self.visualize_bind_group_key = Some(key);
             }
 
-            let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+            let mut rp = ctx.render_cmds().expect("PerfOverlay requires the graph render pass");
             rp.set_pipeline(&self.visualize_pipeline);
             rp.set_bind_group(0, self.visualize_bind_group.as_ref().unwrap(), &[]);
             rp.draw(0..3, 0..1);
@@ -1021,7 +1021,7 @@ impl MaterialProfiler {
     pub fn profile_next(
         &mut self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut CommandRecorder<'_>,
         light_buf: &wgpu::Buffer,
     ) -> bool {
         if self.profiling_complete {

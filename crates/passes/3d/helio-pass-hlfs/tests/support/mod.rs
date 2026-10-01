@@ -723,9 +723,7 @@ impl helio_core::RenderPass for Timestamp {
     }
     fn execute(&mut self, ctx: &mut helio_core::PassContext) -> helio_core::Result<()> {
         // The lighting dispatches run on the render encoder after the GBuffer.
-        unsafe {
-            (&mut *ctx.encoder_ptr).write_timestamp(&self.query, self.index);
-        }
+        ctx.graphics_cmds().write_timestamp(&self.query, self.index);
         Ok(())
     }
 }

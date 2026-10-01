@@ -474,11 +474,11 @@ impl RenderPass for DecalPass {
         }
 
         {
-            let mut cp =
-                unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("DecalCollect"),
-                    timestamp_writes: None,
-                });
+            let mut enc = ctx.graphics_cmds();
+            let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("DecalCollect"),
+                timestamp_writes: None,
+            });
             cp.set_pipeline(&self.collect_pipeline);
             cp.set_bind_group(0, self.bg_collect.as_ref().unwrap(), &[]);
             cp.set_bind_group(1, self.bg_textures.as_ref().unwrap(), &[]);
@@ -516,11 +516,11 @@ impl RenderPass for DecalPass {
         }
 
         {
-            let mut cp =
-                unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("DecalApply"),
-                    timestamp_writes: None,
-                });
+            let mut enc = ctx.graphics_cmds();
+            let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("DecalApply"),
+                timestamp_writes: None,
+            });
             cp.set_pipeline(&self.apply_pipeline);
             cp.set_bind_group(0, self.bg_apply.as_ref().unwrap(), &[]);
             cp.dispatch_workgroups(ctx.width.div_ceil(16), ctx.height.div_ceil(16), 1);

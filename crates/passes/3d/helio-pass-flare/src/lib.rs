@@ -3,7 +3,7 @@
 //! the optical model and the `postprocess_uniforms` -> `lens_output` contract.
 
 use helio_core::graph::ResourceBuilder;
-use helio_core::{PassContext, RenderPass, ResourceKey, Result as HelioResult};
+use helio_core::{CommandRecorder, PassContext, RenderPass, ResourceKey, Result as HelioResult};
 
 pub mod gpu_types;
 pub use gpu_types::*;
@@ -345,7 +345,7 @@ impl LensFlarePass {
 
     /// This frame's filtered source image (pyramid level 0) becomes next
     /// frame's reprojected history.
-    fn store_history(&self, encoder: &mut wgpu::CommandEncoder) {
+    fn store_history(&self, encoder: &mut CommandRecorder<'_>) {
         encoder.copy_texture_to_texture(
             self.bright.texture.as_image_copy(),
             self.history.as_image_copy(),
@@ -353,7 +353,7 @@ impl LensFlarePass {
         );
     }
 
-    fn clear(&self, encoder: &mut wgpu::CommandEncoder) {
+    fn clear(&self, encoder: &mut CommandRecorder<'_>) {
         let attachments = [Some(wgpu::RenderPassColorAttachment {
             view: &self.output.view, resolve_target: None, depth_slice: None,
             ops: wgpu::Operations {
@@ -372,7 +372,7 @@ impl LensFlarePass {
     fn record(
         &mut self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut CommandRecorder<'_>,
         input: Option<&wgpu::TextureView>,
         pp: Option<&wgpu::Buffer>,
         optics: OpticsInputs<'_>,
@@ -655,7 +655,7 @@ impl RenderPass for LensFlarePass {
         };
         // Must follow fog/TSR on the graphics encoder. The separate compute
         // encoder is submitted BEFORE graphics and would sample stale HDR.
-        self.record(ctx.device, unsafe { &mut *ctx.encoder_ptr }, input, pp, optics);
+        self.record(ctx.device, &mut ctx.graphics_cmds(), input, pp, optics);
         Ok(())
     }
 }

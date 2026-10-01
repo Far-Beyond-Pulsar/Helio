@@ -213,7 +213,7 @@ impl RenderPass for PlanarReflectionPass {
             self.bg_1_key = Some(key);
         }
 
-        let cpass = unsafe { &mut *ctx.compute_encoder_ptr };
+        let mut cpass = ctx.compute_cmds();
         let mut pass = cpass.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Planar Reflection Trace"),
             timestamp_writes: None,
