@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use super::resource_lifetime::ResourceLifetime;
+use super::recording_cache::{self, CachedRecording, Encoded, UnitCache, UnitTimer};
 use super::scheduling::{compute_parallel_layers, CachedPass, PrePassAction};
+use crate::cmd_ir::{Cmd, RenderPassDesc, Stream};
+use crate::context::RecordedStreams;
 use super::{DebugPassInfo, DebugResourceInfo, FrameDebugData};
 
 /// Maximum number of resident render workers. Bounded so a flamegraph records
@@ -64,6 +67,12 @@ struct ParallelFrameEnv {
     /// Whether GPU timestamps are being written; workers allocate query sets
     /// only then.
     timed: bool,
+    /// The recording cache's slots, indexed by a unit's first pass; null
+    /// when the cache is off. Jobs of one layer touch disjoint slots.
+    unit_caches: *mut UnitCache,
+    /// Whether timestamps can be written inside command encoders, which
+    /// cached units need to time themselves.
+    timestamps_in_encoders: bool,
 }
 
 // SAFETY: see the type docs; the dispatcher keeps every referent alive and
@@ -87,15 +96,55 @@ struct ParallelUnitJob {
     done: mpsc::Sender<usize>,
 }
 
-/// A finished unit: its two command buffers plus per-pass CPU timings and the
-/// private GPU profiler (merged into the graph's after submission).
+/// A finished unit: its two command buffers plus per-pass CPU timings and,
+/// for units recorded straight into wgpu, the private GPU profiler (merged
+/// into the graph's after submission).
 struct UnitRecording {
     /// Index of the unit's first pass; serial recording order.
     first_pass: usize,
-    graphics: wgpu::CommandBuffer,
-    compute: wgpu::CommandBuffer,
+    graphics: UnitBuffer,
+    compute: UnitBuffer,
     cpu_timings: Vec<(&'static str, std::time::Duration)>,
-    profiler: Profiler,
+    profiler: Option<Profiler>,
+}
+
+/// One of a unit's two command buffers for this frame.
+enum UnitBuffer {
+    /// Nothing was recorded on this stream.
+    Empty,
+    /// Encoded this frame, submitted once.
+    Once(wgpu::CommandBuffer),
+    /// Encoded reusable this frame but not cached; submitted once.
+    Reusable(wgpu::ReusableCommandBuffer),
+    /// The unit's cached recording `variant` (see `UnitCache::variants`).
+    Cached { variant: usize },
+}
+
+/// One command buffer of the frame's submission, in order.
+enum SubmitEntry {
+    Once(wgpu::CommandBuffer),
+    Reusable(wgpu::ReusableCommandBuffer),
+    /// A cached recording of the unit whose first pass is `unit`.
+    Cached {
+        unit: usize,
+        variant: usize,
+        graphics: bool,
+    },
+}
+
+impl SubmitEntry {
+    fn from_unit(buffer: UnitBuffer, unit: usize, graphics: bool) -> Option<Self> {
+        match buffer {
+            UnitBuffer::Empty => None,
+            UnitBuffer::Once(buffer) => Some(SubmitEntry::Once(buffer)),
+            UnitBuffer::Reusable(buffer) => Some(SubmitEntry::Reusable(buffer)),
+            UnitBuffer::Cached { variant } => Some(SubmitEntry::Cached {
+                unit,
+                variant,
+                graphics,
+            }),
+        }
+    }
 }
 
 /// A fixed set of persistent threads that execute parallel pass layers.
@@ -311,6 +360,14 @@ fn parallel_worker_loop(rx: mpsc::Receiver<ParallelWorkerMsg>) {
 /// registry mutably, which concurrent recording only borrows shared.
 fn run_parallel_unit(job: &ParallelUnitJob) -> crate::Result<UnitRecording> {
     let env: &ParallelFrameEnv = &job.env;
+    if !env.unit_caches.is_null() {
+        // SAFETY: the slot of this job's first pass; jobs of one layer cover
+        // disjoint units (see `ParallelFrameEnv`).
+        let slot = unsafe { &mut *env.unit_caches.add(job.range.start) };
+        if slot.uncacheable.is_none() {
+            return record_unit_cached(job, slot);
+        }
+    }
     // SAFETY: the dispatcher builds `env` from live graph and host objects and
     // does not touch them (nor drop `env`'s referents) until every job of the
     // layer has reported completion. Jobs of one layer cover disjoint pass
@@ -398,6 +455,7 @@ fn run_parallel_unit(job: &ParallelUnitJob) -> crate::Result<UnitRecording> {
                 pipelines: &pipeline_registries[$pass_index],
                 reflected_bind_groups: &reflected_groups[$pass_index],
                 reflected_pipeline: reflected_pipelines[$pass_index].as_ref(),
+                recorded: None,
                 #[cfg(debug_assertions)]
                 chain_transparent: $transparent,
             }
@@ -600,11 +658,350 @@ fn run_parallel_unit(job: &ParallelUnitJob) -> crate::Result<UnitRecording> {
     profiler.resolve_gpu_queries(&mut compute_encoder, env.frame_num);
     Ok(UnitRecording {
         first_pass: first,
-        graphics: encoder.finish(),
-        compute: compute_encoder.finish(),
+        graphics: UnitBuffer::Once(encoder.finish()),
+        compute: UnitBuffer::Once(compute_encoder.finish()),
         cpu_timings,
-        profiler,
+        profiler: Some(profiler),
     })
+}
+
+/// Records one unit into its recorded streams and resolves them against the
+/// unit's cache (see [`recording_cache`]): resubmits a matching cached
+/// recording, or encodes the streams once and caches them.
+///
+/// Mirrors [`run_parallel_unit`] command for command; only the destination
+/// differs. GPU timing writes fixed query indices into the unit's own query
+/// set instead of a per-frame profiler, so timed recordings stay cacheable.
+fn record_unit_cached(job: &ParallelUnitJob, slot: &mut UnitCache) -> crate::Result<UnitRecording> {
+    let env: &ParallelFrameEnv = &job.env;
+    // SAFETY: as in `run_parallel_unit`.
+    let device: &Arc<wgpu::Device> = unsafe { &*env.device };
+    let queue: &Arc<wgpu::Queue> = unsafe { &*env.queue };
+    let target: &wgpu::TextureView = unsafe { &*env.target };
+    let depth: &wgpu::TextureView = unsafe { &*env.depth };
+    let camera: &wgpu::Buffer = unsafe { &*env.camera };
+    let camera_data: &crate::GpuCameraUniforms = unsafe { &*env.camera_data };
+    let scene_buffers: &crate::SceneBufferProjection = unsafe { &*env.scene_buffers };
+    let registry: &crate::ResourceRegistry<'_> =
+        unsafe { &*(env.registry_ptr as *const crate::ResourceRegistry<'_>) };
+    let pool: &GraphTexturePool = unsafe { &*env.pool };
+    let pipeline_cache: &PipelineFormatCache = unsafe { &*env.pipeline_cache };
+    let pipeline_registries: &[PipelineRegistry] = unsafe { &*env.pipeline_registries };
+    let reflected_groups: &[Vec<wgpu::BindGroup>] = unsafe { &*env.reflected_groups };
+    let reflected_pipelines: &[Option<crate::shader::ReflectedPipeline>] =
+        unsafe { &*env.reflected_pipelines };
+    let pass_cache: &[Option<CachedPass>] = unsafe { &*env.pass_cache };
+    let chain_membership: &[bool] = unsafe { &*env.chain_membership };
+    let bundles: &[Option<wgpu::RenderBundle>] = unsafe { &*env.gpu_render_bundles };
+
+    let first = job.range.start;
+    let fused = job.range.len() > 1
+        && pass_cache
+            .get(first)
+            .and_then(|cached| cached.as_ref())
+            .map_or(false, |cached| cached.chain_range == job.range);
+
+    // The unit's own timestamp queries, created on first use.
+    let timer_set = if env.timed && env.timestamps_in_encoders {
+        if slot.timer.is_none() {
+            let names: Vec<&'static str> = job
+                .range
+                .clone()
+                // SAFETY: as below; only the name is read.
+                .map(|i| unsafe { &*env.passes.add(i) }.name())
+                .collect();
+            let chain_label = fused
+                .then(|| pass_cache[first].as_ref().map(|c| c.chain_label))
+                .flatten();
+            slot.timer = Some(UnitTimer::new(device, &names, chain_label));
+        }
+        slot.timer
+            .as_ref()
+            .map(|t| (t.query_set.clone(), t.resolve.clone(), t.query_count))
+    } else {
+        None
+    };
+
+    let mut graphics: Stream = std::mem::take(&mut slot.scratch_graphics);
+    let mut compute: Stream = std::mem::take(&mut slot.scratch_compute);
+    graphics.clear();
+    compute.clear();
+    let graphics_ptr = std::ptr::NonNull::from(&mut graphics);
+    let compute_ptr = std::ptr::NonNull::from(&mut compute);
+    // Appends to a stream outside any pass's handle (the graph's own
+    // commands). No handle into the stream is alive at these points.
+    let push = |stream: std::ptr::NonNull<Stream>, cmd: Cmd| unsafe {
+        (*stream.as_ptr()).push(cmd);
+    };
+    let timestamp = |stream: std::ptr::NonNull<Stream>, index: u32| {
+        if let Some((set, _, _)) = &timer_set {
+            push(
+                stream,
+                Cmd::WriteTimestamp {
+                    set: set.clone(),
+                    index,
+                },
+            );
+        }
+    };
+
+    // A pass context records into the streams; it is never given a wgpu
+    // encoder or pass, so its profiler stays unused.
+    let mut profiler = Profiler::new_worker(device, queue, false);
+    let mut frame_storage = RenderFrameStorage::new();
+    let mut cpu_timings: Vec<(&'static str, std::time::Duration)> =
+        Vec::with_capacity(job.range.len());
+    let mut chain_open = false;
+    macro_rules! pass_ctx {
+        ($pass_index:expr, $subpass_index:expr, $subpass_count:expr, $render_pass_open:expr, $transparent:expr) => {
+            PassContext {
+                encoder_ptr: std::ptr::null_mut(),
+                compute_encoder_ptr: std::ptr::null_mut(),
+                target,
+                depth,
+                camera,
+                camera_data,
+                camera_generation: env.camera_generation,
+                scene_buffers,
+                profiler: &mut profiler,
+                frame_num: env.frame_num,
+                width: env.width,
+                height: env.height,
+                device,
+                registry,
+                owns_device: env.owns_device,
+                resource_pool: pool,
+                subpass_index: $subpass_index,
+                subpass_count: $subpass_count,
+                active_render_pass: None,
+                active_compute_pass: None,
+                pipeline_cache,
+                pipelines: &pipeline_registries[$pass_index],
+                reflected_bind_groups: &reflected_groups[$pass_index],
+                reflected_pipeline: reflected_pipelines[$pass_index].as_ref(),
+                recorded: Some(RecordedStreams {
+                    graphics: graphics_ptr,
+                    compute: compute_ptr,
+                    render_pass_open: $render_pass_open,
+                }),
+                #[cfg(debug_assertions)]
+                chain_transparent: $transparent,
+            }
+        };
+    }
+    // The recorded form of a pass's attachments, with the store ops the graph
+    // chose and the XR multiview mask, as the direct path applies them.
+    let capture = |desc: &wgpu::RenderPassDescriptor<'_>, cache: Option<&CachedPass>| {
+        let mut captured = RenderPassDesc::capture(desc);
+        if let Some(cache) = cache {
+            for (i, attachment) in captured.color.iter_mut().enumerate() {
+                if let (Some(store), Some(attachment)) =
+                    (cache.store_ops.get(i).copied().flatten(), attachment.as_mut())
+                {
+                    attachment.ops.store = store;
+                }
+            }
+        }
+        if env.xr_active {
+            captured.multiview_mask = Some(std::num::NonZeroU32::new(0b11).unwrap());
+        }
+        Box::new(captured)
+    };
+    macro_rules! close_chain {
+        () => {
+            if chain_open {
+                push(graphics_ptr, Cmd::EndRenderPass);
+                timestamp(graphics_ptr, 3);
+                chain_open = false;
+            }
+        };
+    }
+
+    for (k, pass_index) in job.range.clone().enumerate() {
+        // SAFETY: as in `run_parallel_unit`.
+        let pass: &mut Box<dyn RenderPass> = unsafe { &mut *env.passes.add(pass_index) };
+        let pass_name = pass.name();
+        let execute_start = std::time::Instant::now();
+        let q = 4 * k as u32;
+
+        if let Some(bundle) = bundles.get(pass_index).and_then(|bundle| bundle.as_ref()) {
+            let desc = pass.render_pass_descriptor_with_pool_and_storage(
+                target,
+                depth,
+                registry,
+                pool,
+                &mut frame_storage,
+            );
+            timestamp(compute_ptr, q);
+            timestamp(graphics_ptr, q + 2);
+            if let Some(desc) = desc {
+                push(graphics_ptr, Cmd::BeginRenderPass(Box::new(RenderPassDesc::capture(&desc))));
+                push(graphics_ptr, Cmd::ExecuteBundles(vec![bundle.clone()]));
+                push(graphics_ptr, Cmd::EndRenderPass);
+            } else {
+                let mut ctx = pass_ctx!(pass_index, 0, 0, false, false);
+                ctx.apply_reflected_bind_groups();
+                #[cfg(not(target_arch = "wasm32"))]
+                profiling::profile_scope_with_context!(pass.name(), job.scope_context);
+                pass.execute(&mut ctx)?;
+            }
+            timestamp(compute_ptr, q + 1);
+            timestamp(graphics_ptr, q + 3);
+            cpu_timings.push((pass_name, execute_start.elapsed()));
+            continue;
+        }
+
+        let desc = pass.render_pass_descriptor_with_pool_and_storage(
+            target,
+            depth,
+            registry,
+            pool,
+            &mut frame_storage,
+        );
+        let mut timed_graphics = false;
+        if let Some(desc) = desc {
+            let cache = pass_cache.get(pass_index).and_then(|cached| cached.as_ref());
+            timestamp(compute_ptr, q);
+            if fused {
+                let c = cache.ok_or_else(|| {
+                    crate::Error::InvalidPassConfig(format!(
+                        "{pass_name}: fused chain member has no cached pass data"
+                    ))
+                })?;
+                if pass_index == c.chain_range.start {
+                    timestamp(graphics_ptr, 2);
+                    push(graphics_ptr, Cmd::BeginRenderPass(capture(&desc, Some(c))));
+                    chain_open = true;
+                }
+                let mut ctx = pass_ctx!(pass_index, c.subpass_index, c.subpass_count, true, false);
+                ctx.apply_reflected_bind_groups();
+                #[cfg(not(target_arch = "wasm32"))]
+                profiling::profile_scope_with_context!(pass.name(), job.scope_context);
+                pass.execute(&mut ctx)?;
+                drop(ctx);
+                if pass_index + 1 >= c.chain_range.end {
+                    close_chain!();
+                }
+            } else {
+                timestamp(graphics_ptr, q + 2);
+                timed_graphics = true;
+                push(graphics_ptr, Cmd::BeginRenderPass(capture(&desc, cache)));
+                let mut ctx = pass_ctx!(pass_index, 0, 0, true, false);
+                ctx.apply_reflected_bind_groups();
+                #[cfg(not(target_arch = "wasm32"))]
+                profiling::profile_scope_with_context!(pass.name(), job.scope_context);
+                pass.execute(&mut ctx)?;
+                drop(ctx);
+                push(graphics_ptr, Cmd::EndRenderPass);
+            }
+        } else {
+            let bridged = fused
+                && chain_membership.get(pass_index).copied().unwrap_or(false)
+                && pass.chain_transparent();
+            timestamp(compute_ptr, q);
+            if !bridged {
+                close_chain!();
+                timestamp(graphics_ptr, q + 2);
+                timed_graphics = true;
+            }
+            let mut ctx = pass_ctx!(pass_index, 0, 0, false, bridged);
+            ctx.apply_reflected_bind_groups();
+            #[cfg(not(target_arch = "wasm32"))]
+            profiling::profile_scope_with_context!(pass.name(), job.scope_context);
+            pass.execute(&mut ctx)?;
+        }
+        timestamp(compute_ptr, q + 1);
+        if timed_graphics {
+            timestamp(graphics_ptr, q + 3);
+        }
+        cpu_timings.push((pass_name, execute_start.elapsed()));
+    }
+    close_chain!();
+    if let Some((set, resolve, count)) = &timer_set {
+        push(
+            graphics_ptr,
+            Cmd::ResolveQuerySet {
+                set: set.clone(),
+                range: 0..*count,
+                dst: resolve.clone(),
+                offset: 0,
+            },
+        );
+    }
+
+    let recording = |graphics: UnitBuffer, compute: UnitBuffer| UnitRecording {
+        first_pass: first,
+        graphics,
+        compute,
+        cpu_timings: Vec::new(),
+        profiler: None,
+    };
+
+    // Hit: resubmit the cached recording.
+    if let Some(variant) = slot.find(&compute, &graphics) {
+        slot.hits += 1;
+        slot.variants[variant].last_used = env.frame_num;
+        let has_compute = slot.variants[variant].compute.is_some();
+        let has_graphics = slot.variants[variant].graphics.is_some();
+        // Drop this frame's clones; keep the allocations.
+        graphics.clear();
+        compute.clear();
+        slot.scratch_graphics = graphics;
+        slot.scratch_compute = compute;
+        let mut out = recording(
+            if has_graphics { UnitBuffer::Cached { variant } } else { UnitBuffer::Empty },
+            if has_compute { UnitBuffer::Cached { variant } } else { UnitBuffer::Empty },
+        );
+        out.cpu_timings = cpu_timings;
+        return Ok(out);
+    }
+
+    // Miss: encode once, and cache when both streams came out reusable.
+    slot.misses += 1;
+    slot.last_miss = Some(slot.describe_miss(&compute, &graphics));
+    let encoded_compute =
+        recording_cache::encode_stream(device, &compute, "Helio Cached Compute Unit");
+    let encoded_graphics =
+        recording_cache::encode_stream(device, &graphics, "Helio Cached Render Unit");
+    let once_reason = [&encoded_compute, &encoded_graphics]
+        .into_iter()
+        .find_map(|encoded| match encoded {
+            Some(Encoded::Once(_, reason)) => Some(*reason),
+            _ => None,
+        });
+    let mut out = if let Some(reason) = once_reason {
+        // Not reusable: submit what was encoded this once, and record this
+        // unit straight into wgpu from now on.
+        slot.uncacheable = Some(reason);
+        let to_unit = |encoded: Option<Encoded>| match encoded {
+            None => UnitBuffer::Empty,
+            Some(Encoded::Once(cb, _)) => UnitBuffer::Once(cb),
+            Some(Encoded::Reusable(cb)) => UnitBuffer::Reusable(cb),
+        };
+        recording(to_unit(encoded_graphics), to_unit(encoded_compute))
+    } else {
+        let reusable = |encoded: Option<Encoded>| match encoded {
+            Some(Encoded::Reusable(cb)) => Some(cb),
+            _ => None,
+        };
+        let compute_cb = reusable(encoded_compute);
+        let graphics_cb = reusable(encoded_graphics);
+        let has_compute = compute_cb.is_some();
+        let has_graphics = graphics_cb.is_some();
+        let variant = slot.insert(CachedRecording {
+            compute_cmds: compute,
+            graphics_cmds: graphics,
+            compute: compute_cb,
+            graphics: graphics_cb,
+            last_used: env.frame_num,
+        });
+        recording(
+            if has_graphics { UnitBuffer::Cached { variant } } else { UnitBuffer::Empty },
+            if has_compute { UnitBuffer::Cached { variant } } else { UnitBuffer::Empty },
+        )
+    };
+    out.cpu_timings = cpu_timings;
+    Ok(out)
 }
 
 pub struct RenderGraph {
@@ -651,6 +1048,17 @@ pub struct RenderGraph {
     /// Whether independent units are recorded on worker threads; see
     /// [`Self::set_parallel_recording`].
     pub(crate) parallel_recording: bool,
+    /// Units in pass order, one per layer: how units are recorded when worker
+    /// recording is off but the recording cache is on.
+    pub(crate) sequential_units: Vec<Vec<std::ops::Range<usize>>>,
+    /// The recording cache (see [`recording_cache`]), indexed by a unit's
+    /// first pass.
+    pub(crate) unit_caches: Vec<UnitCache>,
+    recording_cache: bool,
+    /// Set once the backend turned out unable to reuse command buffers.
+    recording_cache_unsupported: bool,
+    recording_cache_active: bool,
+    recording_cache_inactive_reason: Option<&'static str>,
     /// Persistent render workers, built lazily on the first parallel frame.
     /// See [`ParallelRenderPool`].
     parallel_pool: OnceLock<Arc<ParallelRenderPool>>,
@@ -775,6 +1183,14 @@ impl RenderGraph {
             parallel_recording: !std::env::var(PARALLEL_RECORDING_ENV).is_ok_and(|value| {
                 matches!(value.to_ascii_lowercase().as_str(), "0" | "off" | "false")
             }),
+            sequential_units: Vec::new(),
+            unit_caches: Vec::new(),
+            recording_cache: !std::env::var(recording_cache::RECORDING_CACHE_ENV).is_ok_and(
+                |value| matches!(value.to_ascii_lowercase().as_str(), "0" | "off" | "false"),
+            ),
+            recording_cache_unsupported: false,
+            recording_cache_active: false,
+            recording_cache_inactive_reason: None,
             parallel_pool: OnceLock::new(),
             #[cfg(not(target_arch = "wasm32"))]
             encoder_finish_pool: OnceLock::new(),
@@ -837,34 +1253,71 @@ impl RenderGraph {
         }
     }
 
-    /// Names of the passes whose `execute()` cannot be recorded once and
-    /// reused (their [`RenderPass::recording_key`] is `None`). Empty when the
-    /// whole frame is reusable.
-    pub fn recording_blockers(&self) -> Vec<&'static str> {
-        self.passes
-            .iter()
-            .filter(|pass| pass.recording_key().is_none())
-            .map(|pass| pass.name())
-            .collect()
+    /// Choose whether frames are recorded through the recording cache (the
+    /// default): units whose commands match a cached recording resubmit its
+    /// already-encoded command buffers instead of encoding again. Also
+    /// controlled by the `HELIO_RECORDING_CACHE` environment variable (`0`,
+    /// `off` or `false` disables it). Only the Vulkan and D3D12 backends can
+    /// reuse command buffers; elsewhere the cache switches itself off.
+    pub fn set_recording_cache(&mut self, enabled: bool) {
+        self.recording_cache = enabled;
+        if !enabled {
+            self.reset_recording_cache();
+        }
     }
 
-    /// A key for the frame's recorded command stream, or `None` while any pass
-    /// still records per-frame-dependent commands (see
-    /// [`Self::recording_blockers`]). Combines the graph shape and size, the
-    /// chain layout, `target_slot` (which of the rotating output targets this
-    /// frame draws into, since commands bind it) and every pass's key. Equal
-    /// keys mean the commands are identical.
-    pub fn frame_recording_key(&self, target_slot: u64) -> Option<u64> {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.passes.len().hash(&mut hasher);
-        (self.internal_w, self.internal_h, self.chain_generation).hash(&mut hasher);
-        self.subpass_chains.hash(&mut hasher);
-        target_slot.hash(&mut hasher);
-        for pass in &self.passes {
-            pass.recording_key()?.hash(&mut hasher);
+    /// Per-unit hit/miss counters of the recording cache, and why each unit
+    /// last missed. A unit that misses every frame records different commands
+    /// every frame (a CPU branch, a rebuilt bind group, a changing dispatch
+    /// size); see `docs/command_interface.md`.
+    pub fn recording_cache_stats(&self) -> recording_cache::RecordingCacheStats {
+        let mut units = Vec::new();
+        for layer in &self.sequential_units {
+            for range in layer {
+                let Some(slot) = self.unit_caches.get(range.start) else {
+                    continue;
+                };
+                units.push(recording_cache::UnitCacheStats {
+                    passes: self.passes[range.clone()].iter().map(|p| p.name()).collect(),
+                    hits: slot.hits,
+                    misses: slot.misses,
+                    cached_variants: slot.variants.len(),
+                    uncacheable: slot.uncacheable,
+                    last_miss: slot.last_miss.clone(),
+                });
+            }
         }
-        Some(hasher.finish())
+        recording_cache::RecordingCacheStats {
+            active: self.recording_cache_active,
+            inactive_reason: self.recording_cache_inactive_reason,
+            units,
+        }
+    }
+
+    /// Drops every cached recording (and the resources they keep alive).
+    pub(crate) fn reset_recording_cache(&mut self) {
+        self.unit_caches = (0..self.passes.len()).map(|_| UnitCache::default()).collect();
+    }
+
+    /// Whether this frame records through the recording cache, and if not,
+    /// why not.
+    fn recording_cache_decision(&self) -> std::result::Result<(), &'static str> {
+        if !self.recording_cache {
+            return Err("switched off");
+        }
+        if self.recording_cache_unsupported {
+            return Err("the backend cannot resubmit command buffers");
+        }
+        if self.finish_breakdown_enabled {
+            return Err("the finish breakdown diagnostic records serially");
+        }
+        if cfg!(target_arch = "wasm32") {
+            return Err("not available on the web");
+        }
+        if self.unit_caches.len() != self.passes.len() || self.sequential_units.is_empty() {
+            return Err("the graph is not locked");
+        }
+        Ok(())
     }
 
     /// How much pass recording goes into each graphics segment handed to the
@@ -1155,6 +1608,8 @@ impl RenderGraph {
                 self.init_transients(self.output_w, self.output_h);
                 self.resize_pending = true;
             }
+            // Cached recordings may hold the replaced pass's objects.
+            self.reset_recording_cache();
         }
     }
 
@@ -1488,11 +1943,18 @@ impl RenderGraph {
         visible: &mut crate::ResourceRegistry<'a>,
         reflected_groups: &[Vec<wgpu::BindGroup>],
         resized_this_frame: bool,
+        layers: &[Vec<std::ops::Range<usize>>],
+        inline_only: bool,
+        cache: bool,
     ) -> Result<Vec<UnitRecording>> {
         #[cfg(not(target_arch = "wasm32"))]
         profiling::profile_scope!("RenderGraph::execute_parallel_units");
         let mut recordings: Vec<UnitRecording> = Vec::new();
-        let layers = self.parallel_units.clone();
+        let timestamps_in_encoders = self.profiler.gpu_timing_supported()
+            && self
+                .device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
         let scope_context = profiling::current_scope_context();
         let internal_w = self.internal_w;
         let internal_h = self.internal_h;
@@ -1504,7 +1966,7 @@ impl RenderGraph {
         let profiler = &mut self.profiler;
         let (passes, pre_pass_actions) = (&mut self.passes, &self.pre_pass_actions);
         let bundles = &self.gpu_render_bundles;
-        for layer in &layers {
+        for layer in layers {
             for range in layer {
                 for pass_index in range.clone() {
                     // A bundle pass replays pre-recorded commands and skips
@@ -1584,6 +2046,8 @@ impl RenderGraph {
                 owns_device,
                 xr_active,
                 timed,
+                unit_caches: unit_caches_ptr,
+                timestamps_in_encoders,
             });
 
             let units = layer.len();
@@ -1600,7 +2064,7 @@ impl RenderGraph {
                     store_index: pos,
                     done: done_tx.clone(),
                 };
-                if pos + 1 == units {
+                if inline_only || pos + 1 == units {
                     // The last unit records right here instead of waiting for
                     // a worker hand-off; a single-unit layer never leaves this
                     // thread. A panic is held until the workers are done,

@@ -239,7 +239,12 @@ impl RenderGraph {
             let (writes, reads, _) = self.chain_read_write_sets();
             compute_unit_layers(&writes, &reads, &self.subpass_chains)
         };
+        let mut sequential: Vec<std::ops::Range<usize>> = units.iter().flatten().cloned().collect();
+        sequential.sort_by_key(|range| range.start);
+        self.sequential_units = sequential.into_iter().map(|range| vec![range]).collect();
         self.parallel_units = units;
+        // Units changed, so cached recordings (keyed by unit) are stale.
+        self.reset_recording_cache();
     }
 
     /// Detect chains of adjacent passes where each writes a resource the next
