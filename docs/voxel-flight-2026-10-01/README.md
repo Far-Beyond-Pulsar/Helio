@@ -16,25 +16,40 @@ columns, and restore the default palette. `PlanetPass::set_appearance` now
 reports whether appearance changed so hosts can invalidate history only when
 necessary. Pulsar resets temporal history on appearance edits and camera cuts.
 
-The full 5,314-frame offscreen flight at 6b1126aa reported:
+The final 5,676-frame offscreen flight used runtime code at 9a4f9dd4 and
+the stricter audit in this PR. It reported:
 
 | Observation | Result |
 |---|---|
-| Warm full-graph sync p95 | 9.36 ms |
-| Movement sync p99 | 17.85 ms |
-| Terrain GPU p95 | 7.61 ms; 5 ms target unmet |
-| Descent arrival | 2 frames / 8.16 ms |
+| Warm full-graph sync p95 | 11.82 ms |
+| Movement sync p99 | 22.71 ms |
+| Terrain GPU p95 | 9.69 ms; 5 ms target unmet |
+| Descent arrival | 2 frames / 7.66 ms |
 | Changed pixels after 250 ms vs settled | 0% |
-| Local edit visibility | 25.45 ms |
+| Local edit visibility | 27.47 ms |
 | Settled loading/exhausted rays | 0 |
-| Near-field cell disagreement | 24 / 168,561; not exact agreement |
+| Sampled near-field exact cell disagreement | 26 / 168,561; fails exact agreement |
 | Resize resident columns | 708,723 before and after |
-| Logical terrain GPU memory | ~541.04 MiB including climate cache |
+| Logical terrain GPU memory | 541.12 MiB including climate cache |
 
 CPU compilation ran concurrently. This is not isolated native-editor timing.
-The memory counter originally omitted the ~1.11 MiB climate cache; that
-accounting is corrected in 08a56a92. The final fill adjustment changes
-appearance only, and follows the timing run above.
+An earlier run at 6b1126aa measured terrain p95 7.61 ms before the final
+hemisphere-fill adjustment; neither run meets the 5 ms target. No cause for
+the timing difference has been established.
+
+The previous audit reported only disagreements exceeding three base voxels
+in ray distance. It counted 24 and incorrectly accepted a small error rate
+as an exactness gate. The final audit separately records that diagnostic and
+requires zero cell disagreements. It finds 24 in the mountain walk and one
+each in ground-up and arrival views. Comparison samples unjittered GPU level-0
+hits every seventh pixel when the CPU also hits within 60% of the level-0
+range; it does not qualify all rays or distance levels. The sampled sunlight
+comparison also finds 613 disagreements; representative 2x2 shadow sharing
+remains approximate. These are open gates, not waived by passing timings.
+
+The final report writer also fixes a diagnostic entry that initially caused
+Markdown/CSV export to panic after JSON export; the complete rerun produced
+all reports successfully. The memory counter includes the climate cache.
 
 Ground capture at f47bbb5f, final 1.25 hemisphere fill:
 

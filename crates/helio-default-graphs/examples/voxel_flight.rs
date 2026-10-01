@@ -527,6 +527,7 @@ impl Flight {
         let tan = (std::f32::consts::FRAC_PI_4 * 0.5).tan();
         let aspect = size[0] as f32 / size[1] as f32;
         let (mut compared, mut mismatched) = (0usize, 0usize);
+        let mut exact_mismatched = 0usize;
         let (mut sun_compared, mut sun_mismatched) = (0usize, 0usize);
         let mut sun_samples = Vec::new();
         let mut samples = Vec::new();
@@ -573,7 +574,9 @@ impl Flight {
                     && w(1) as i32 == cpu.cell.i
                     && w(2) as i32 == cpu.cell.j
                     && w(3) as i32 == cpu.cell.k;
-                // TAA jitter moves the GPU sample by up to half a pixel.
+                // Audit jitter is disabled. Keep the old distance-threshold
+                // diagnostic, but it is not an exact-cell acceptance gate.
+                exact_mismatched += usize::from(!same);
                 if !same && (t - cpu.distance).abs() > self.planet.grid().voxel_size() * 3.0 {
                     mismatched += 1;
                     if samples.len() < 4 {
@@ -617,7 +620,7 @@ impl Flight {
             let mean = work.iter().map(|w| f64::from(w[index])).sum::<f64>() / work.len() as f64;
             stats.insert((*name).into(), serde_json::json!({"mean": mean, "p50": q(0.5), "p95": q(0.95), "max": q(1.0)}));
         }
-        serde_json::json!({"name": name, "mismatch_samples": samples, "stuck": stuck, "work": stats, "miss": counts[0], "hit": counts[1], "exhausted": counts[2], "loading": counts[3], "compared": compared, "mismatched": mismatched, "sun_compared": sun_compared, "sun_mismatched": sun_mismatched, "sun_samples": sun_samples})
+        serde_json::json!({"name": name, "mismatch_samples": samples, "stuck": stuck, "work": stats, "miss": counts[0], "hit": counts[1], "exhausted": counts[2], "loading": counts[3], "compared": compared, "mismatched": mismatched, "exact_mismatched": exact_mismatched, "sun_compared": sun_compared, "sun_mismatched": sun_mismatched, "sun_samples": sun_samples})
     }
 }
 
@@ -1304,9 +1307,14 @@ fn main() {
     let terrain = gather(&terrain_names, true);
     let bad_rays: u64 = audits.iter().map(|a| a["exhausted"].as_u64().unwrap() + a["loading"].as_u64().unwrap()).sum();
     let mismatched: u64 = audits.iter().map(|a| a["mismatched"].as_u64().unwrap()).sum();
+    let exact_mismatched: u64 = audits.iter().map(|a| a["exact_mismatched"].as_u64().unwrap()).sum();
     let compared: u64 = audits.iter().map(|a| a["compared"].as_u64().unwrap()).sum();
     let edit_max = report["edits"]["max_ms"].as_f64().unwrap_or(f64::INFINITY);
     let arrival = report["arrival"]["sync_ms_to_settle"].as_f64().unwrap();
+    report.insert(
+        "near_field_distance_threshold_disagreements".into(),
+        serde_json::json!({"compared": compared, "mismatched": mismatched, "threshold_base_voxels": 3}),
+    );
     let gates = serde_json::json!([
         {"gate": "warm full-graph sync p95 <= 16.67 ms", "value": percentile(&warm, 0.95), "pass": percentile(&warm, 0.95) <= 16.67},
         {"gate": "movement sync p99 <= 25 ms", "value": percentile(&moving, 0.99), "pass": percentile(&moving, 0.99) <= 25.0},
@@ -1315,7 +1323,7 @@ fn main() {
         {"gate": "arrival settles <= 250 ms after descent", "value": arrival, "pass": arrival <= 250.0},
         {"gate": "visible local edit <= 100 ms", "value": edit_max, "pass": edit_max <= 100.0 && unmatched == 0},
         {"gate": "no exhausted/loading rays in settled audits", "value": bad_rays, "pass": bad_rays == 0},
-        {"gate": "near-field CPU/GPU cell agreement", "value": format!("{mismatched}/{compared}"), "pass": compared > 0 && mismatched * 1000 <= compared},
+        {"gate": "sampled near-field exact CPU/GPU cell agreement", "value": format!("{exact_mismatched}/{compared}"), "pass": compared > 0 && exact_mismatched == 0},
         {"gate": "resize keeps residency", "value": report["resize"].clone(), "pass": after >= before / 2},
     ]);
     report.insert("gates".into(), gates.clone());
