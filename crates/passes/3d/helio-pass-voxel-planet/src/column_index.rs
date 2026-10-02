@@ -36,6 +36,8 @@ const CHUNK_BITS: u32 = 16;
 
 pub struct ColumnIndex {
     table: Vec<u32>,
+    /// One bit per occupied table slot, for bounded sparse retirement.
+    occupied: Vec<u64>,
     mask: u32,
     /// Entries by record, in chunks of 2^16 that are never moved.
     chunks: Vec<Box<[Entry]>>,
@@ -44,7 +46,9 @@ pub struct ColumnIndex {
 
 impl ColumnIndex {
     pub fn new(table_bits: u32) -> Self {
-        Self { table: vec![NONE; 1 << table_bits], mask: (1u32 << table_bits) - 1, chunks: Vec::new(), len: 0 }
+        let slots = 1usize << table_bits;
+        Self { table: vec![NONE; slots], occupied: vec![0; slots.div_ceil(64)],
+            mask: (1u32 << table_bits) - 1, chunks: Vec::new(), len: 0 }
     }
 
     /// The table as the GPU sees it (record per slot, `NONE` when empty).
@@ -52,13 +56,18 @@ impl ColumnIndex {
         &self.table
     }
 
-    /// Stable bounded retirement traversal. Removal backshifts later
-    /// entries, so a caller that removes this slot must inspect it again.
-    pub(crate) fn resident_at_slot(&self, slot: usize) -> Option<(u64, Resident)> {
-        let record = *self.table.get(slot)?;
-        if record == NONE { return None; }
+    /// Inspect exactly one occupancy word from `start`. Return its next
+    /// resident slot, or the first slot of the next word when none remain.
+    /// Removal backshifts later entries, so recheck a removed resident's slot.
+    pub(crate) fn retirement_step(&self, start: usize) -> (usize, Option<(u64, Resident)>) {
+        debug_assert!(start < self.table.len());
+        let word = start / 64;
+        let remaining = self.occupied[word] & (u64::MAX << (start % 64));
+        if remaining == 0 { return (((word + 1) * 64).min(self.table.len()), None); }
+        let slot = word * 64 + remaining.trailing_zeros() as usize;
+        let record = self.table[slot];
         let entry = self.entry(record);
-        Some((entry.key, entry.resident))
+        (slot, Some((entry.key, entry.resident)))
     }
 
     pub fn len(&self) -> usize {
@@ -128,6 +137,7 @@ impl ColumnIndex {
             slot = (slot + 1) & self.mask;
         }
         self.table[slot as usize] = resident.record;
+        self.occupied[slot as usize / 64] |= 1u64 << (slot % 64);
         resident.slot = slot;
         *self.entry_mut(resident.record) = Entry { key, resident };
         self.len += 1;
@@ -158,6 +168,9 @@ impl ColumnIndex {
             next = (next + 1) & self.mask;
         }
         self.table[gap as usize] = NONE;
+        // Backshift keeps every intermediate gap occupied; only the final
+        // gap becomes empty, so no moved record needs an occupancy update.
+        self.occupied[gap as usize / 64] &= !(1u64 << (gap % 64));
         writes.push((gap, NONE));
         self.len -= 1;
         Some(removed)
@@ -206,7 +219,10 @@ mod tests {
             }
             for (slot, value) in writes {
                 mirror[slot as usize] = value;
+                assert_eq!(index.occupied[slot as usize / 64] & (1u64 << (slot % 64)) != 0,
+                    index.table[slot as usize] != NONE, "occupancy must follow every shifted/freed slot");
             }
+            assert_eq!(index.occupied.iter().map(|word| word.count_ones() as usize).sum::<usize>(), index.len());
         }
         assert_eq!(mirror, index.table);
         assert_eq!(index.len(), reference.len());
@@ -218,5 +234,53 @@ mod tests {
         for key in 0..1500u64 {
             assert_eq!(index.contains_key(key), reference.contains_key(&key));
         }
+    }
+
+    #[test]
+    fn sparse_retirement_rechecks_word_edges_after_wrapped_backshift_and_refill() {
+        let mut index = ColumnIndex::new(8);
+        // Collisions cross both a bitmap-word boundary and the table wrap.
+        let mut keys = Vec::new();
+        for home in [62, 255] {
+            keys.extend((0..100_000u64).filter(|&key| index.home(key) == home).take(4));
+        }
+        assert_eq!(keys.len(), 8);
+        for (record, &key) in keys.iter().enumerate() {
+            index.insert(key, Resident { record: record as u32, ..Default::default() });
+        }
+        let keep: std::collections::HashSet<_> = [keys[2], keys[6]].into_iter().collect();
+        let mut visited = std::collections::HashSet::new();
+        let mut slot = 0;
+        let mut steps = 0;
+        while slot < index.table.len() {
+            steps += 1;
+            let (next, resident) = index.retirement_step(slot);
+            assert!(next >= slot && next <= ((slot / 64 + 1) * 64), "each step inspects one word only");
+            slot = next;
+            if let Some((key, _)) = resident {
+                visited.insert(key);
+                if !keep.contains(&key) {
+                    index.remove(key, &mut Vec::new());
+                    continue;
+                }
+                slot += 1;
+            }
+        }
+        assert!(steps <= keys.len() + 4 + keys.len(), "empty slots must skip wordwise");
+        assert_eq!(index.iter().map(|(key, _)| key).collect::<std::collections::HashSet<_>>(), keep);
+        assert!(keys.iter().all(|key| visited.contains(key)));
+
+        // Reusing a formerly empty slot must restore its bit, including a
+        // record reused after retirement. Compare enumeration to the table.
+        index.insert(keys[0], Resident { record: 0, ..Default::default() });
+        let mut seen = std::collections::HashSet::new();
+        let mut slot = 0;
+        while slot < index.table.len() {
+            let (next, resident) = index.retirement_step(slot);
+            slot = next;
+            if let Some((key, _)) = resident { seen.insert(key); slot += 1; }
+        }
+        assert_eq!(seen, index.iter().map(|(key, _)| key).collect());
+        assert!(seen.contains(&keys[0]));
     }
 }

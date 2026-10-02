@@ -912,15 +912,23 @@ impl Residency {
         while self.diffs.iter().any(|diffs| !diffs.is_empty()) && !out_of_time() {
             for _ in 0..128 {
                 if self.retire_obsolete_owner_step(work) { continue; }
-                if let Some((key, _)) = self.residents.resident_at_slot(self.retire_slot) {
+                // Admission only inserts current demand. Once this serial's
+                // pass is complete, remaining adds need no repeated scan.
+                // Lease expiry retires separately, and aliases stay above.
+                if self.retire_finished_serial >= self.applied { break; }
+                // Each step inspects one bitmap word at most. Empty slots
+                // skip together, while the round/deadline bound is unchanged.
+                let (slot, resident) = self.residents.retirement_step(self.retire_slot);
+                self.retire_slot = slot;
+                if let Some((key, _)) = resident {
                     let level = unpack(key).1 as usize;
                     if self.levels[level].wanted.is_some() && !self.protected_wanted(key) {
                         self.evict(key, work);
                         // Backshift may have moved another resident here.
                         continue;
                     }
+                    self.retire_slot += 1;
                 }
-                self.retire_slot += 1;
                 if self.retire_slot == self.residents.table().len() {
                     self.retire_slot = 0;
                     self.retire_finished_serial = self.retire_started_serial;
@@ -1562,9 +1570,43 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_sparse_retirement_finishes_once_while_adds_continue_and_restarts_on_new_demand() {
+        let (planet, _, _, _) = edit_fixture();
+        let mut r = Residency::new(*planet.grid(), Capacity { table_bits: 10, ..Default::default() });
+        let face = crate::grid::PLANE_FACE;
+        let keys: Vec<_> = (1000..2024).map(|i| pack(key0(face, 0, i), 0)).collect();
+        r.residents.insert(keys[0], Resident { record: 0, ..Default::default() });
+        r.block_conflicts += 1;
+        r.apply(snapshot_update(1, &keys));
+        let round = |r: &mut Residency, work: &mut FrameWork| {
+            let calls = std::cell::Cell::new(0);
+            r.apply_snapshot(work, &|| { calls.set(calls.get() + 1); calls.get() > 1 });
+        };
+        let mut work = FrameWork::default();
+        round(&mut r, &mut work);
+        assert_eq!(r.retire_finished_serial, 1,
+            "one resident plus16 bitmap words must finish within128 bounded retirement steps");
+        assert_eq!(r.queued_delta_ops, 896, "the long fullwanted list remains partially admitted");
+        assert_eq!(r.retire_slot, 0);
+        round(&mut r, &mut work);
+        assert_eq!(r.retire_slot, 0, "unchanged residents must not be rescanned while adds continue");
+        assert_eq!(r.retire_finished_serial, 1);
+        assert_eq!(r.queued_delta_ops, 768);
+        assert!(work.evictions.is_empty());
+
+        // A subsequent serial drops the resident; completed-pass state must
+        // not prevent this new retirement, even while the old adds were long.
+        r.apply(snapshot_update(2, &keys[1..]));
+        round(&mut r, &mut work);
+        assert_eq!(r.retire_finished_serial, 2);
+        assert_eq!(work.evictions, vec![0]);
+        assert!(!r.residents.contains_key(keys[0]));
+    }
+
+    #[test]
     fn visible_alias_retirement_releases_obsolete_owners_before_full_table_scan() {
         let (planet, _, _, _) = edit_fixture();
-        let mut r = Residency::new(*planet.grid(), Capacity { table_bits: 12, ..Default::default() });
+        let mut r = Residency::new(*planet.grid(), Capacity { table_bits: 14, ..Default::default() });
         let face = crate::grid::PLANE_FACE;
         let old: Vec<_> = (1000..1004).flat_map(|j| (1000..1004).map(move |i| pack(key0(face, 0, i), j))).collect();
         let current: Vec<_> = old.iter().map(|&key| {
