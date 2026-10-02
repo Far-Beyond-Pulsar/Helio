@@ -442,7 +442,6 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let pixel = h.t * 2.0 / (camera.proj[1][1] * frame.screen.y);
     // Material filtering is appearance only: explicit brush materials and
     // topology cuts retain the canonical procedural classification.
-    if !edited && (c.info & INFO_TOPOLOGY) == 0u { material_footprint = pixel; }
     let size = frame.layer.y * f32(1 << level);
     var canonical_up = vec3<f32>(0.0);
     var canonical_relief = vec4<f32>(0.0);
@@ -491,6 +490,14 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         let field = column_relief_gradient(face, up, vec2<f32>(gi, gj), radius);
         fallback_normal = normalize(up - field.xyz);
         fallback_slope = field.w;
+    }
+    if !edited && (c.info & INFO_TOPOLOGY) == 0u {
+        var material_normal = hit_up(h.t, d);
+        if smooth_w > 0.0 { material_normal = fallback_normal; }
+        if canonical_w > 0.0 { material_normal = normalize(mix(material_normal, canonical_relief.xyz, canonical_w)); }
+        // Bound the grazing expansion; voxel detail and normal gates keep
+        // their own footprint. This scalar approximation is material-only.
+        material_footprint = pixel / max(abs(dot(material_normal, d)), 0.25);
     }
     if !edited {
         var lowest = top;
@@ -641,6 +648,12 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             // Single-voxel flecks (mud and sand in meadows) blend into grass.
             albedo = mix(albedo, grass, appearance_w);
         }
+    }
+    if material_snow_mix.x >= 0.0 {
+        albedo = pigment * (material_snow_mix.x * palette(M_SNOW)
+            + material_snow_mix.y * palette(material_rock_id)
+            + material_snow_mix.z * palette(M_DARK_STONE)
+            + material_snow_mix.w * palette(M_DIRT));
     }
     out.t = h.t;
     let a8 = vec4<u32>(vec4<f32>(clamp(pow(albedo, vec3<f32>(1.0 / 2.2)), vec3<f32>(0.0), vec3<f32>(1.0)), ao) * 255.0 + 0.5);

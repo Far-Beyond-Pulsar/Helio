@@ -74,19 +74,50 @@ fn landform_strata(p: vec3<i32>, altitude: i32) -> i32 {
 
 // Material noise is defined in the fixed 5 cm half-reference domain.
 // Four samples per lattice spacing retain contrast; below two samples the
-// unresolved octave contributes its zero mean instead of aliased class noise.
+// unresolved octave contributes its coverage instead of aliased class noise.
 fn material_noise_support(shift: u32, pixel: f32) -> f32 {
     if pixel <= 0.0 { return 1.0; }
     let wavelength = 0.05 * f32(1u << shift);
     return 1.0 - smoothstep(wavelength * 0.25, wavelength * 0.5, pixel);
 }
 
-fn material_noise_value(value: i32, support: f32) -> i32 {
-    if support >= 1.0 { return value; }
-    return i32(round(f32(value) * support));
+// Empirical CDF of the project's integer noise on cube-face/plane slices:
+// 1.2M samples, four seeds, three axes. The normalized two-octave sum agrees
+// within 0.0035 coverage at these knots; this is an appearance approximation.
+fn material_noise_cdf(value: f32) -> f32 {
+    let cdf = array<f32, 33>(0.00000000, 0.00000250, 0.00002000, 0.00006917, 0.00032333, 0.00097500, 0.00300250, 0.00770250, 0.01944750, 0.04330750, 0.07070667, 0.10610750, 0.16352167, 0.23430250, 0.31787500, 0.40675833, 0.50058917, 0.59367667, 0.68297667, 0.76579917, 0.83619500, 0.89390500, 0.92928833, 0.95633250, 0.98046750, 0.99220417, 0.99696000, 0.99898750, 0.99968417, 0.99994000, 0.99998250, 0.99999750, 1.00000000);
+    let x = clamp(value / 65536.0 * 16.0 + 16.0, 0.0, 32.0);
+    let i = min(u32(x), 31u);
+    return mix(cdf[i], cdf[i + 1u], x - f32(i));
+}
+
+fn snow_material_coverage(resolved: f32, deviation: f32, threshold: f32,
+    altitude: i32, dry: bool, depth: i32) -> vec4<f32> {
+    let snow = material_noise_cdf((threshold - resolved) / deviation);
+    let rock = 1.0 - snow;
+    if dry { return vec4<f32>(snow, rock, 0.0, 0.0); }
+    // Integrate the existing alternating 4.5m stone bands too: replacing
+    // unresolved snow with a single rock colour would bias their mean.
+    let mean_altitude = f32(altitude) + resolved * (3000.0 / 65536.0);
+    let first = i32(floor((mean_altitude - 4000.0) / 4500.0));
+    var stone = 0.0;
+    for (var b = first; b < first + 4; b++) {
+        if (b & 1) != 0 { continue; }
+        let lo = max(threshold, (f32(b) * 4500.0 - f32(altitude)) * (65536.0 / 3000.0));
+        let hi = (f32(b + 1) * 4500.0 - f32(altitude)) * (65536.0 / 3000.0);
+        if hi > lo {
+            stone += material_noise_cdf((hi - resolved) / deviation)
+                - material_noise_cdf((lo - resolved) / deviation);
+        }
+    }
+    stone = clamp(stone, 0.0, rock);
+    let dirt = select(0.0, rock * 0.125, depth < 1);
+    let remaining = select(1.0, 0.875, depth < 1);
+    return vec4<f32>(snow, stone * remaining, (rock - stone) * remaining, dirt);
 }
 
 fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
+    material_snow_mix = vec4<f32>(-1.0, 0.0, 0.0, 0.0);
     let dirt = terrain.header.z;
     let steep = slope >= terrain.shape.y;
     let wet = landform_moisture(p);
@@ -118,13 +149,25 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
     let seed = bitcast<u32>(terrain.header.w);
     var outcrop = -NOISE_ONE;
     if alpine > 0 || slope >= 5 {
-        let broad_support = material_noise_support(10u, material_footprint);
-        let fine_support = material_noise_support(7u, material_footprint);
-        var broad = 0;
-        var fine = 0;
-        if broad_support > 0.0 { broad = material_noise_value(noise(p, 10u, seed ^ 0x1B56C4E9u), broad_support); }
-        if fine_support > 0.0 { fine = material_noise_value(noise(p, 7u, seed ^ 0x6A09E667u), fine_support); }
-        outcrop = broad + fine / 3;
+        // Preserve the original integer samples and canonical classification.
+        let broad = noise(p, 10u, seed ^ 0x1B56C4E9u);
+        let fine = noise(p, 7u, seed ^ 0x6A09E667u) / 3;
+        outcrop = broad + fine;
+        if material_footprint > 0.0 && top_height > snowline && depth < dirt {
+            let broad_support = material_noise_support(10u, material_footprint);
+            let fine_support = material_noise_support(7u, material_footprint);
+            if min(broad_support, fine_support) < 1.0 {
+                let resolved = f32(broad) * broad_support + f32(fine) * fine_support;
+                let deviation = sqrt((1.0 - broad_support * broad_support)
+                    + (1.0 - fine_support * fine_support) / 9.0);
+                // Match truncating integer division at negative slopes too.
+                let q = 6 - slope;
+                let threshold = select(f32((q - 1) * 8192) + 0.5, f32(q * 8192) - 0.5, q > 0);
+                let dry = wet < FINE_ONE / 10 * 3 && !steep;
+                material_rock_id = select(M_STONE, M_SAND, dry);
+                material_snow_mix = snow_material_coverage(resolved, deviation, threshold, altitude, dry, depth);
+            }
+        }
     }
     // Snow does not hold on faces steeper than ~37 degrees: rock streaks the snowfields.
     if top_height > snowline && depth < dirt && slope + outcrop / 8192 < 6 { return M_SNOW; }
