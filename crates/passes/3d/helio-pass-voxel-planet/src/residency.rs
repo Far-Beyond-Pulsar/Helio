@@ -775,6 +775,7 @@ impl Residency {
 
     fn refresh_visible_pending(&mut self, deadline: Option<std::time::Instant>) {
         let mut promoted = Vec::new();
+        let mut pending = Vec::new();
         let mut blocks = std::mem::take(&mut self.visible_blocks);
         let requested_blocks = blocks.len();
         let source = self.visible_source.take().filter(|source| self.source_is_current(*source, 8));
@@ -803,14 +804,19 @@ impl Residency {
             }
             if !ordinary && !self.transient_wanted(key) { continue; }
             promoted.push(key);
-            let state = &mut self.levels[level];
             for &key in &keys[..count] {
                 if !self.publishing.contains_key(&key)
                     && (!self.residents.contains_key(key) || self.initial_retries.contains(&key)) {
-                    state.pending.insert(key, 0);
+                    pending.push((level, key));
                 }
             }
         }
+        // Select nearest blocks first under the deadline, then commit that
+        // bounded selection in reverse: buckets pop newest first. Remove all
+        // selected keys before reinsertion so swap-removal cannot fragment
+        // complete blocks, including keys already waiting in bucket zero.
+        for &(level, key) in &pending { self.levels[level].pending.remove(key); }
+        for &(level, key) in pending.iter().rev() { self.levels[level].pending.insert(key, 0); }
         for key in promoted { self.queue_obsolete_owners(key); }
     }
 
@@ -1668,6 +1674,71 @@ mod tests {
         r.prioritize_visible_blocks([(blocks[64] as u32, (blocks[64] >> 32) as u32)]);
         r.refresh_visible_pending(None);
         assert_eq!(r.levels[0].pending.len(), 64 * 16, "inactive feedback cannot resurrect a level");
+    }
+
+    fn visible_order_fixture() -> (std::sync::Arc<Planet>, Residency, DVec3, Vec<u64>, Vec<u64>) {
+        let (planet, mut r, old, eye) = edit_fixture();
+        let (face, _, i, j) = unpack(old);
+        r.evict(old, &mut FrameWork::default());
+        let block = |offset| {
+            let key = pack(key0(face, 0, (i & !3) + offset), (j & !3) as u32);
+            let (keys, count) = r.visible_columns(key).unwrap();
+            keys[..count].to_vec()
+        };
+        // Both blocks are outside the camera-anchor refresh neighborhood.
+        let near = block(40);
+        let far = block(80);
+        let point = |key| {
+            let (face, _, i, j) = unpack(key);
+            planet.grid().ground_point(face, f64::from((i + 2) * BRICK), f64::from((j + 2) * BRICK))
+        };
+        assert!(planet.grid().ground_distance(eye, point(near[0])) < planet.grid().ground_distance(eye, point(far[0])));
+        r.levels[0].wanted = Some(std::sync::Arc::new(near.iter().chain(&far).copied().collect()));
+        r.levels[0].active = true;
+        for &key in near.iter().chain(&far) { r.levels[0].pending.insert(key, 0); }
+        (planet, r, eye, near, far)
+    }
+
+    #[test]
+    fn visible_nearest_complete_block_is_admitted_before_farther_with_partial_budget() {
+        let (planet, mut r, eye, near, far) = visible_order_fixture();
+        let requests = || [near[0], far[0]].map(|key| (key as u32, (key >> 32) as u32));
+        let mut admitted = FxHashSet::default();
+        for _ in 0..2 {
+            r.prioritize_visible_blocks(requests());
+            let work = r.plan(&planet, eye, 1.0, 8);
+            assert_eq!(work.jobs.len(), 8);
+            assert!(work.job_keys.iter().all(|key| near.contains(key)), "nearest visible geometry must consume the partial budget first");
+            admitted.extend(work.job_keys.iter().copied());
+            r.complete_jobs(work.job_keys.iter().map(|key| (*key, 0)));
+        }
+        assert_eq!(admitted, near.iter().copied().collect());
+        assert!(far.iter().all(|key| !r.residents.contains_key(*key)));
+        let work = r.plan(&planet, eye, 1.0, 16);
+        assert_eq!(work.job_keys.iter().copied().collect::<FxHashSet<_>>(), far.iter().copied().collect());
+    }
+
+    #[test]
+    fn visible_changed_nearest_order_reprioritizes_existing_bucket_zero_blocks() {
+        let (planet, mut r, _, near, far) = visible_order_fixture();
+        r.prioritize_visible_blocks([near[0], far[0]].map(|key| (key as u32, (key >> 32) as u32)));
+        r.refresh_visible_pending(None);
+        assert!(near.iter().chain(&far).all(|key| r.levels[0].pending.at[key].0 == 0));
+        let (face, _, i, j) = unpack(far[0]);
+        let mut eye = planet.grid().ground_point(face, f64::from((i + 42) * BRICK), f64::from((j + 2) * BRICK));
+        eye.y = 10.0;
+        let distance = |key| {
+            let (face, _, i, j) = unpack(key);
+            planet.grid().ground_distance(eye, planet.grid().ground_point(face,
+                f64::from((i + 2) * BRICK), f64::from((j + 2) * BRICK)))
+        };
+        assert!(distance(far[0]) < distance(near[0]), "the camera moved beyond both blocks, reversing their physical distance order");
+        // Keep this test's authored demand fixed, independently of the planner.
+        r.last_request.as_mut().unwrap().eye = eye;
+        r.prioritize_visible_blocks([far[0], near[0]].map(|key| (key as u32, (key >> 32) as u32)));
+        let work = r.plan(&planet, eye, 1.0, 16);
+        assert_eq!(work.job_keys.iter().copied().collect::<FxHashSet<_>>(), far.iter().copied().collect());
+        assert!(near.iter().all(|key| !r.residents.contains_key(*key)));
     }
 
     #[test]
