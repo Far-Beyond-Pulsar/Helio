@@ -66,6 +66,19 @@ fn pack(k0: u32, k1: u32) -> u64 {
     u64::from(k0) | (u64::from(k1) << 32)
 }
 
+/// Retire whole summary owners before spreading removals across other
+/// blocks. All three tiers must release their references before an incoming
+/// block can reuse a toroidal slot. Membership and delta order stay intact.
+pub(crate) fn order_removes_by_blocks(mut removes: Vec<u64>) -> Vec<u64> {
+    removes.sort_by_key(|key| {
+        let header = *key as u32 >> 24;
+        let ci = (*key as u32 & 0xffffff) as i32;
+        let cj = (*key >> 32) as i32;
+        (header, ci >> 6, cj >> 6, ci >> 4, cj >> 4, ci >> 2, cj >> 2, ci, cj)
+    });
+    removes
+}
+
 /// The render thread applies only a bounded prefix of a diff per frame.
 /// Admit nearby complete blocks before peripheral rows reach that prefix.
 /// Bucket scanner-emitted blocks, then sort each bucket's block descriptors:
@@ -404,7 +417,7 @@ impl WindowPlanner {
                         center: dir,
                         radius: 0.0,
                         adds: Vec::new(),
-                        removes: state.wanted.drain().collect(),
+                        removes: order_removes_by_blocks(state.wanted.drain().collect()),
                     });
                     state.active = false;
                 }
@@ -436,7 +449,7 @@ impl WindowPlanner {
                 }
                 next.insert(key);
             }
-            let removes = state.wanted.iter().filter(|k| !next.contains(k)).copied().collect();
+            let removes = order_removes_by_blocks(state.wanted.iter().filter(|k| !next.contains(k)).copied().collect());
             prioritize_incoming_blocks(grid, request, level, radius, &mut adds);
             let adds = order_adds_by_priority(adds);
             state.wanted = next;
@@ -533,6 +546,30 @@ mod tests {
             let actual: Vec<_> = after[start..end].iter().map(|(_, key)| *key).collect();
             assert_eq!(actual, expected[&identity], "stable ordering may not scramble a block's columns");
             start = end;
+        }
+    }
+
+    #[test]
+    fn retirement_order_preserves_membership_and_contiguous_owners_at_every_tier() {
+        let original: Vec<_> = (0..2).flat_map(|face| (0..68).flat_map(move |j|
+            (0..136).map(move |i| pack(key0(face, 0, i), j)))).collect();
+        let ordered = order_removes_by_blocks(original.clone());
+        assert_eq!(ordered.len(), original.len());
+        assert_eq!(ordered.iter().copied().collect::<FxHashSet<_>>(), original.iter().copied().collect::<FxHashSet<_>>());
+        let mut reversed = original;
+        reversed.reverse();
+        assert_eq!(order_removes_by_blocks(reversed), ordered, "hash iteration must not decide retirement order");
+        for tier in 1..=3 {
+            let mut seen = FxHashSet::default();
+            let mut last = None;
+            for &key in &ordered {
+                let (face, level, i, j) = column_identity(key);
+                let owner = (face, level, i >> (2 * tier), j >> (2 * tier));
+                if last != Some(owner) {
+                    assert!(seen.insert(owner), "tier{tier} owner is fragmented across bounded retirement rounds");
+                    last = Some(owner);
+                }
+            }
         }
     }
 

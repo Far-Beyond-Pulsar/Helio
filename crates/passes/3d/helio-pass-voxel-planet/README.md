@@ -172,9 +172,10 @@ dim diffuse light on the night side; set it to zero for solar-only lighting.
    the worker bounds the terrain around the eye per level
    (`Planet::local_outer_radius`), so over a meadow 1 km below the fine
    levels are off instead of streaming columns under a tenth of a pixel.
-3. **Diff application.** Diffs are queued and applied in order within the
-   frame's CPU budget (1.5-4 ms moving by backlog, 4 ms still): active levels
-   interleave removals and additions, so incoming columns can load before
+3. **Diff application.** Each level keeps its diff order. Global coverage
+   goes first; other levels share bounded turns within the frame's CPU
+   budget (1.5-4 ms moving by backlog, 4 ms still). Active levels
+   interleave block-grouped removals and additions, so incoming columns can load before
    retirement finishes. A switched-off level clears its queue. Diffs get
    at most 60 % of the budget while columns wait. A level
    with unapplied diffs is *catching up*: its `fallback_distances` entry is 0
