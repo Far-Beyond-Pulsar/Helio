@@ -14,6 +14,9 @@ pub struct WindowRequest {
     pub eye: DVec3,
     /// A bounded motion forecast. Coverage metadata remains centred on eye.
     pub prefetch_eye: Option<DVec3>,
+    /// Priority-only anchors; neither changes the wanted window.
+    pub priority_eye: Option<DVec3>,
+    pub view_focus: Option<DVec3>,
     /// Level-0 range (metres).
     pub lod0: f64,
     /// Radius bounding every solid cell.
@@ -61,6 +64,84 @@ pub struct WindowPlanner {
 
 fn pack(k0: u32, k1: u32) -> u64 {
     u64::from(k0) | (u64::from(k1) << 32)
+}
+
+/// The render thread applies only a bounded prefix of a diff per frame.
+/// Admit nearby complete blocks before peripheral rows reach that prefix.
+/// Bucket scanner-emitted blocks, then sort each bucket's block descriptors:
+/// moving crescents often share the last bucket, despite differing urgency.
+/// The background planner sorts blocks rather than individual columns.
+fn order_adds_by_priority(adds: Vec<(f32, u64)>) -> Vec<(f32, u64)> {
+    const BUCKETS: usize = 64;
+    let bucket = |priority: f32| ((priority.max(0.0) * BUCKETS as f32) as usize).min(BUCKETS - 1);
+    let block = |key: u64| (key as u32 & 0xff000000, (key as u32 & 0xffffff) >> 2, (key >> 34) as u32);
+    let mut runs = Vec::new();
+    let mut at = 0;
+    while at < adds.len() {
+        let start = at;
+        let identity = block(adds[start].1);
+        at += 1;
+        while at < adds.len() && block(adds[at].1) == identity { at += 1; }
+        runs.push((adds[start].0, start, at));
+    }
+    let mut offsets = [0usize; BUCKETS];
+    for &(priority, _, _) in &runs { offsets[bucket(priority)] += 1; }
+    let mut start = 0;
+    for offset in &mut offsets {
+        let count = *offset;
+        *offset = start;
+        start += count;
+    }
+    let mut grouped = vec![(0.0, 0, 0); runs.len()];
+    let begins = offsets;
+    for item in runs {
+        let index = &mut offsets[bucket(item.0)];
+        grouped[*index] = item;
+        *index += 1;
+    }
+    for index in 0..BUCKETS {
+        grouped[begins[index]..offsets[index]].sort_by(|a, b| a.0.total_cmp(&b.0));
+    }
+    let mut ordered = Vec::with_capacity(adds.len());
+    for (_, start, end) in grouped { ordered.extend_from_slice(&adds[start..end]); }
+    ordered
+}
+
+/// Rank only new blocks, after membership is fixed, before the render
+/// thread's bounded diff prefix decides which columns can be generated.
+fn prioritize_incoming_blocks(grid: Grid, request: &WindowRequest, level: u32, radius: f64, adds: &mut [(f32, u64)]) {
+    let forecast = request.priority_eye.or(request.prefetch_eye);
+    let focus = request.view_focus;
+    if forecast.is_none() && focus.is_none() { return; }
+    let forecast_penalty = forecast.map_or(0.0, |point| grid.ground_distance(request.eye, point) * 0.25);
+    let focus_penalty = focus.map_or(0.0, |point| grid.ground_distance(request.eye, point) * 0.125);
+    let cells = BRICK << level;
+    let columns = grid.cells() / cells;
+    let denominator = radius.max(grid.level_size(level));
+    let mut start = 0;
+    while start < adds.len() {
+        let key = adds[start].1;
+        let face = ((key as u32 >> 24) & 7) as u8;
+        let bi = (key as u32 & 0xffffff) as i32 & !3;
+        let bj = (key >> 32) as i32 & !3;
+        let mut end = start + 1;
+        while end < adds.len() {
+            let other = adds[end].1;
+            if ((other as u32 >> 24) & 7) as u8 != face
+                || ((other as u32 & 0xffffff) as i32 & !3) != bi
+                || ((other >> 32) as i32 & !3) != bj { break; }
+            end += 1;
+        }
+        let i = f64::from(bi) + f64::from((columns - bi).min(4)) * 0.5;
+        let j = f64::from(bj) + f64::from((columns - bj).min(4)) * 0.5;
+        let point = grid.ground_point(face, i * f64::from(cells), j * f64::from(cells));
+        let mut distance = grid.ground_distance(request.eye, point);
+        if let Some(future) = forecast { distance = distance.min(grid.ground_distance(future, point) + forecast_penalty); }
+        if let Some(focus) = focus { distance = distance.min(grid.ground_distance(focus, point) + focus_penalty); }
+        let priority = (distance / denominator) as f32;
+        for item in &mut adds[start..end] { item.0 = priority; }
+        start = end;
+    }
 }
 
 /// Keep altitude-scaled lookahead, with a horizontal floor for ground flight.
@@ -356,6 +437,8 @@ impl WindowPlanner {
                 next.insert(key);
             }
             let removes = state.wanted.iter().filter(|k| !next.contains(k)).copied().collect();
+            prioritize_incoming_blocks(grid, request, level, radius, &mut adds);
+            let adds = order_adds_by_priority(adds);
             state.wanted = next;
             state.active = true;
             state.center = dir;
@@ -428,6 +511,97 @@ impl Drop for WindowWorker {
 mod tests {
     use super::*;
     use crate::{Planet, PlanetRecipe, TerrainSource};
+
+    fn block_identity(key: u64) -> (u8, u32, i32, i32) {
+        let (face, level, i, j) = column_identity(key);
+        (face, level, i >> 2, j >> 2)
+    }
+
+    fn assert_block_runs_preserved(before: &[(f32, u64)], after: &[(f32, u64)]) {
+        assert_eq!(before.len(), after.len());
+        let keys = |list: &[(f32, u64)]| list.iter().map(|(_, key)| *key).collect::<FxHashSet<_>>();
+        assert!(keys(before) == keys(after), "priority may not change wanted membership");
+        let mut expected = rustc_hash::FxHashMap::<_, Vec<u64>>::default();
+        for &(_, key) in before { expected.entry(block_identity(key)).or_default().push(key); }
+        let mut seen = FxHashSet::default();
+        let mut start = 0;
+        while start < after.len() {
+            let identity = block_identity(after[start].1);
+            assert!(seen.insert(identity), "a complete block was split across the diff");
+            let mut end = start + 1;
+            while end < after.len() && block_identity(after[end].1) == identity { end += 1; }
+            let actual: Vec<_> = after[start..end].iter().map(|(_, key)| *key).collect();
+            assert_eq!(actual, expected[&identity], "stable ordering may not scramble a block's columns");
+            start = end;
+        }
+    }
+
+    #[test]
+    fn diff_priority_orders_equal_bucket_blocks_and_preserves_boosted_groups() {
+        let mut original = Vec::new();
+        // The first three all map to the last priority bucket. Negative
+        // priorities also share a bucket, but stronger boosts must go first.
+        for (index, priority) in [1.2, 1.01, 0.99, -0.1, -0.4, 0.99].into_iter().enumerate() {
+            let members = if index == 3 { 8 } else { 16 };
+            for member in 0..members {
+                original.push((priority, pack(key0(PLANE_FACE, 0, index as i32 * 4 + member % 4), (member / 4) as u32)));
+            }
+        }
+        let ordered = order_adds_by_priority(original.clone());
+        assert_block_runs_preserved(&original, &ordered);
+        assert!(ordered.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        let tied: Vec<_> = ordered.iter().filter(|(priority, _)| *priority == 0.99).map(|(_, key)| *key).collect();
+        let original_tied: Vec<_> = original.iter().filter(|(priority, _)| *priority == 0.99).map(|(_, key)| *key).collect();
+        assert_eq!(tied, original_tied, "equal-priority blocks retain deterministic scanner order");
+    }
+
+    #[test]
+    fn visible_forward_block_enters_diff_before_nearer_peripheral_rows_without_growing_window() {
+        for shape in [crate::grid::Shape::Plane, crate::grid::Shape::Sphere] {
+            let planet = Planet::new(PlanetRecipe {
+                shape, radius_m: 10000.0, plane_size_m: 40000.0,
+                terrain: TerrainSource { generator: crate::landform::FLAT_ID.into(), ..Default::default() },
+                ..Default::default()
+            }).unwrap();
+            let grid = *planet.grid();
+            let ground = grid.radius();
+            let eye = DVec3::Y * (ground + 30.0);
+            let request = WindowRequest { eye, prefetch_eye: None, priority_eye: None, view_focus: None,
+                lod0: 160.0, outer_radius: planet.outer_radius(), planet: None, serial: 1 };
+            let mut baseline_planner = WindowPlanner::new(grid);
+            let mut focused_planner = WindowPlanner::new(grid);
+            baseline_planner.update(&request);
+            focused_planner.update(&request);
+            let eye = eye + DVec3::X * 50.0;
+            let focus = DVec3::new(191.0, ground, 0.0);
+            let request = WindowRequest { eye, serial: 2, ..request };
+            let baseline = baseline_planner.update(&request);
+            let focused = focused_planner.update(&WindowRequest {
+                priority_eye: Some(DVec3::new(102.5, ground, 0.0)), view_focus: Some(focus), ..request
+            });
+            for (before, after) in baseline.levels.iter().zip(&focused.levels) {
+                assert_eq!((before.level, before.active, before.center, before.radius),
+                    (after.level, after.active, after.center, after.radius));
+                assert_block_runs_preserved(&before.adds, &after.adds);
+                // Both old and new demand contain whole blocks, so incoming
+                // membership also consists of complete blocks.
+                assert_complete_demand(grid, &after.adds);
+            }
+            let before = &baseline.levels.iter().find(|level| level.level == 0).unwrap().adds;
+            let after = &focused.levels.iter().find(|level| level.level == 0).unwrap().adds;
+            let find_block = |list: &[(f32, u64)], point| {
+                let coords = grid.face_coords(PLANE_FACE, point).unwrap();
+                let bi = (coords[0] / f64::from(BRICK)).floor() as i32 >> 2;
+                let bj = (coords[1] / f64::from(BRICK)).floor() as i32 >> 2;
+                list.iter().position(|(_, key)| block_identity(*key) == (PLANE_FACE, 0, bi, bj)).unwrap()
+            };
+            let peripheral = DVec3::new(170.0, ground, -30.0);
+            assert!(find_block(before, peripheral) < find_block(before, focus),
+                "fixture must expose distance-only ordering ahead of the visible focus");
+            assert!(find_block(after, focus) < find_block(after, peripheral),
+                "actual view focus must reach the bounded diff prefix first");
+        }
+    }
 
     fn column_identity(key: u64) -> (u8, u32, i32, i32) {
         let k0 = key as u32;
@@ -519,7 +693,7 @@ mod tests {
             ..Default::default()
         }).unwrap();
         let grid = *planet.grid();
-        let request = WindowRequest { eye: DVec3::Y * 0.5, prefetch_eye: None,
+        let request = WindowRequest { eye: DVec3::Y * 0.5, prefetch_eye: None, priority_eye: None, view_focus: None,
             lod0: 1.405499947, outer_radius: planet.outer_radius(), planet: None, serial: 1 };
         let update = WindowPlanner::new(grid).update(&request);
         let fine = update.levels.iter().find(|l| l.level == 0).unwrap();
@@ -661,7 +835,7 @@ mod tests {
             assert!((coverage - eye).length() <= 21.000001);
             assert!((priority - eye).length() > 50.0);
             let old = eye + ((eye - previous) * (0.35f64 / 0.016).min(24.0)).clamp_length_max(21.0);
-            let request = WindowRequest { eye, prefetch_eye: Some(coverage), lod0: 120.0,
+            let request = WindowRequest { eye, prefetch_eye: Some(coverage), priority_eye: None, view_focus: None, lod0: 120.0,
                 outer_radius: planet.outer_radius(), planet: None, serial: 1 };
             let candidate = WindowPlanner::new(*grid).update(&request);
             let baseline = WindowPlanner::new(*grid).update(&WindowRequest { prefetch_eye: Some(old), ..request.clone() });
@@ -690,6 +864,7 @@ mod tests {
         let mut request = WindowRequest {
             eye: DVec3::Y * 1000.0,
             prefetch_eye: None,
+            priority_eye: None, view_focus: None,
             lod0: 100.0,
             outer_radius: planet.outer_radius(),
             planet: Some(planet), serial: 1,
@@ -723,7 +898,7 @@ mod tests {
                 let eye = DVec3::Y * (planet.outer_radius() + 30.0);
                 assert!(eye.length() < planet.grid().radius());
                 let request = WindowRequest {
-                    eye, prefetch_eye: None, lod0: 120.0,
+                    eye, prefetch_eye: None, priority_eye: None, view_focus: None, lod0: 120.0,
                     outer_radius: planet.outer_radius(), planet: Some(planet.clone()), serial: 1,
                 };
                 let update = WindowPlanner::new(*planet.grid()).update(&request);

@@ -774,6 +774,8 @@ impl Residency {
         let request = WindowRequest {
             eye,
             prefetch_eye: self.prefetch_eye,
+            priority_eye: self.priority_eye,
+            view_focus: self.view_focus,
             lod0,
             outer_radius: planet.outer_radius(),
             planet: Some(planet.clone()),
@@ -1358,7 +1360,7 @@ mod tests {
         r.block_conflicts = 1;
         r.next_record = 1;
         r.last_request = Some(WindowRequest {
-            eye, prefetch_eye: None, lod0: 1.0,
+            eye, prefetch_eye: None, priority_eye: None, view_focus: None, lod0: 1.0,
             outer_radius: planet.outer_radius(), planet: Some(planet.clone()), serial: 1,
         });
         (planet, r, key, eye)

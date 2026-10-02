@@ -165,7 +165,9 @@ dim diffuse light on the night side; set it to zero for solar-only lighting.
    returns add/remove diffs. Level 0 covers the level-0 distance (cells about
    a pixel wide at its edge), each coarser level twice the distance. Windows
    request complete 4x4-column groups to match the traversal's residency
-   gate. A level is on only if terrain within its reach can be nearer than
+   gate. Incoming groups are ordered by the eye, motion forecast and visible
+   ground focus before the render thread applies its bounded diff prefix.
+   A level is on only if terrain within its reach can be nearer than
    that distance:
    the worker bounds the terrain around the eye per level
    (`Planet::local_outer_radius`), so over a meadow 1 km below the fine
