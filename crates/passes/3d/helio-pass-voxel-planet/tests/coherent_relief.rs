@@ -38,13 +38,20 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
         @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) id:vec3<u32>) {{
             if id.x>=arrayLength(&probes) {{return;}}
             let p=probes[id.x];
-            answers[id.x*2u]=vec4<f32>(canonical_relief_slope(u32(p.params.x),p.up.xyz,p.gradient.xyz,p.params.y),
+            answers[id.x*3u]=vec4<f32>(canonical_relief_slope(u32(p.params.x),p.up.xyz,p.gradient.xyz,p.params.y),
                 canonical_relief_confidence(p.params.z),canonical_relief_face_weight(0u,p.params.w,false),canonical_relief_face_weight(4u,p.params.w,false));
             let base=detail_filter_weight(p.params.w);
-            answers[id.x*2u+1u]=vec4<f32>(base,
+            answers[id.x*3u+1u]=vec4<f32>(base,
                 base*canonical_relief_face_weight(0u,p.params.w*2.0,true),
                 base*canonical_relief_face_weight(0u,p.params.w*4.0,true),
                 base*canonical_relief_face_weight(0u,p.params.w*32.0,false));
+            let dithers=array<f32,4>(0.0,0.25,0.5,1.0);
+            var stencil:vec4<f32>;
+            for (var n=0u;n<4u;n++) {{
+                let distance=(p.params.w*10.0+1.0)/(1.0-0.5*dithers[n]);
+                stencil[n]=canonical_stencil_weight(distance,10.0,dithers[n]);
+            }}
+            answers[id.x*3u+2u]=stencil;
         }}
     "#
     );
@@ -154,7 +161,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
             );
             let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("chart answers"),
-                size: (probes.len() * 32) as u64,
+                size: (probes.len() * 48) as u64,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
@@ -197,8 +204,8 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                 pass.dispatch_workgroups((probes.len() as u32 + 63) / 64, 1, 1);
             }
             gpu.queue.submit([encoder.finish()]);
-            let bytes = read_buffer(&gpu, &output, (probes.len() * 32) as u64);
-            let pairs: &[[[f32; 4]; 2]] = bytemuck::cast_slice(&bytes);
+            let bytes = read_buffer(&gpu, &output, (probes.len() * 48) as u64);
+            let pairs: &[[[f32; 4]; 3]] = bytemuck::cast_slice(&bytes);
             let actual: Vec<[f32; 4]> = pairs.iter().map(|p| p[0]).collect();
             for (index, pair) in pairs.iter().enumerate() {
                 let weight=expected[index][2] as f32;
@@ -208,6 +215,28 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                 }
                 assert_eq!(pair[1][3],0.0,
                     "oversized streamed fallback wall lost its geometric normal at probe{index}");
+                for (n, dither) in [0.0, 0.25, 0.5, 1.0].into_iter().enumerate() {
+                    let distance = (f64::from(probes[index][2][3]) * 10.0 + 1.0) / (1.0 - 0.5 * dither);
+                    // Independently enumerate both ends of compatible depth
+                    // and primary-dither intervals, rather than copying the
+                    // shader's selected-distance shortcut.
+                    let tolerance = (distance * 0.02).max(1.0);
+                    let mut nearest = f64::INFINITY;
+                    for depth in [distance - tolerance, distance + tolerance] {
+                        for noise in [0.0, 1.0] {
+                            nearest = nearest.min(depth * (1.0 + dither * (noise - 0.5)));
+                        }
+                    }
+                    let expected = smooth(10.0, 12.5, nearest);
+                    assert!((f64::from(pair[2][n]) - expected).abs() < 2e-5,
+                        "stencil support disagrees with primary bounds at probe{index} dither{dither}");
+                    if nearest <= 10.0 {
+                        assert_eq!(pair[2][n], 0.0, "L0-compatible stencil must not acquire canonical confidence");
+                    }
+                    if nearest >= 12.5 {
+                        assert_eq!(pair[2][n], 1.0, "fully coarse stencil must retain canonical relief");
+                    }
+                }
             }
             for (index, (a, e)) in actual.iter().zip(&expected).enumerate() {
                 for component in 0..4 {

@@ -264,12 +264,23 @@ fn cached_relief_normal(xy: vec2<u32>, center: Hit, up: vec3<f32>) -> vec4<f32> 
     let gradient = (dh_a * (bb * a - ab * b) + dh_b * (aa * b - ab * a)) / determinant;
     // Fade confidence across steep gradients instead of abruptly changing
     // lighting and material support at the same slope boundary.
-    let confidence = canonical_relief_confidence(dot(gradient, gradient));
+    let confidence = canonical_relief_confidence(dot(gradient, gradient))
+        * canonical_stencil_weight(center.t, frame.lod.x, frame.lod.y);
     return vec4<f32>(normalize(up - gradient), confidence);
 }
 
 fn canonical_relief_confidence(gradient_squared: f32) -> f32 {
     return 1.0 - smoothstep(4.0, 9.0, gradient_squared);
+}
+
+// Compatible stencil hits and their anchors may be nearer by this depth
+// tolerance and use the finest end of primary's dither. Keep their canonical
+// derivative contribution zero through that L0 boundary, then introduce it
+// gradually; the local column slope continues to shade this transition.
+fn canonical_stencil_weight(distance: f32, lod0: f32, dither: f32) -> f32 {
+    let tolerance = max(1.0, distance * 0.02);
+    let nearest_selected = (distance - tolerance) * (1.0 - 0.5 * dither);
+    return smoothstep(lod0, lod0 * 1.25, nearest_selected);
 }
 
 // Average authored detail only as it becomes unresolved by the render grid.
