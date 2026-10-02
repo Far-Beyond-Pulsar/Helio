@@ -3,6 +3,8 @@ mod common;
 use common::*;
 use helio_pass_voxel_planet::grid::face_axes;
 use wgpu::util::DeviceExt;
+use bytemuck::Zeroable;
+use helio_pass_voxel_planet::{landform::{self, LandformConstants}, terrain};
 
 #[test]
 fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
@@ -23,8 +25,27 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
         .split("fn mul_q24")
         .next()
         .unwrap();
+    let noise=include_str!("../shaders/noise.wgsl");
+    let landform=include_str!("../shaders/landform.wgsl");
+    let materials=world.split("const M_AIR").nth(1).unwrap().split("// Face bases").next().unwrap();
+    let mut terrain_constants=LandformConstants::zeroed();
+    terrain_constants.header=[0,100,7,123];
+    terrain_constants.levels=[0,0,2_000_000,-8000];
+    terrain_constants.shape=[0,16,0,0];
+    terrain_constants.octaves[6].shift=10;
+    let terrain_uniform=gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label:Some("canonical slope material constants"),contents:bytemuck::bytes_of(&terrain_constants),usage:wgpu::BufferUsages::UNIFORM,
+    });
     let source = format!(
         r#"
+        {noise}
+        const M_AIR{materials}
+        {landform}
+        @group(0) @binding(3) var<uniform> terrain:TerrainConstants;
+        var<private> material_footprint:f32=0.0;
+        var<private> material_snow_mix:vec4<f32>=vec4<f32>(-1.0,0.0,0.0,0.0);
+        var<private> material_rock_id:u32=0u;
+        var<private> material_rock_base_id:u32=0u;
         struct Face {{m_a:vec4<f32>,m_b:vec4<f32>}}
         struct Frame {{faces:array<Face,6>,layer:vec4<f32>}}
         struct Probe {{up:vec4<f32>,gradient:vec4<f32>,params:vec4<f32>}}
@@ -38,10 +59,10 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
         @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) id:vec3<u32>) {{
             if id.x>=arrayLength(&probes) {{return;}}
             let p=probes[id.x];
-            answers[id.x*11u]=vec4<f32>(canonical_relief_slope(u32(p.params.x),p.up.xyz,p.gradient.xyz,p.params.y),
+            answers[id.x*13u]=vec4<f32>(canonical_relief_slope(u32(p.params.x),p.up.xyz,p.gradient.xyz,p.params.y),
                 canonical_relief_confidence(p.params.z),canonical_relief_face_weight(0u,p.params.w,false),canonical_relief_face_weight(4u,p.params.w,false));
             let base=detail_filter_weight(p.params.w);
-            answers[id.x*11u+1u]=vec4<f32>(base,
+            answers[id.x*13u+1u]=vec4<f32>(base,
                 base*canonical_relief_face_weight(0u,p.params.w*2.0,true),
                 base*canonical_relief_face_weight(0u,p.params.w*4.0,true),
                 base*canonical_relief_face_weight(0u,p.params.w*32.0,false));
@@ -51,16 +72,16 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                 let distance=(p.params.w*10.0+1.0)/(1.0-0.5*dithers[n]);
                 stencil[n]=canonical_stencil_weight(distance,10.0,dithers[n]);
             }}
-            answers[id.x*11u+2u]=stencil;
-            answers[id.x*11u+3u]=column_relief_gradient(u32(p.params.x),p.up.xyz,
+            answers[id.x*13u+2u]=stencil;
+            answers[id.x*13u+3u]=column_relief_gradient(u32(p.params.x),p.up.xyz,
                 vec2<f32>(p.up.w,p.gradient.w),p.params.y);
-            answers[id.x*11u+4u]=vec4<f32>(detail_filter_weight(1.5*appearance_projection(1.0,4u).x),
+            answers[id.x*13u+4u]=vec4<f32>(detail_filter_weight(1.5*appearance_projection(1.0,4u).x),
                 detail_filter_weight(1.5*appearance_projection(0.1,4u).x),detail_filter_weight(5.0*appearance_projection(0.1,0u).x),
                 detail_filter_weight(1.5*appearance_projection(0.1,6u).x));
-            answers[id.x*11u+5u]=vec4<f32>(detail_filter_weight(1.0*appearance_projection(1.0,4u).x),
+            answers[id.x*13u+5u]=vec4<f32>(detail_filter_weight(1.0*appearance_projection(1.0,4u).x),
                 detail_filter_weight(2.0*appearance_projection(0.5,4u).x),detail_filter_weight(2.0*appearance_projection(-0.5,4u).x),
                 detail_filter_weight(1.0*appearance_projection(0.1,6u).x));
-            answers[id.x*11u+6u]=vec4<f32>(detail_filter_weight(1.5*appearance_projection(1.0,4u).y),
+            answers[id.x*13u+6u]=vec4<f32>(detail_filter_weight(1.5*appearance_projection(1.0,4u).y),
                 detail_filter_weight(1.5*appearance_projection(0.1,4u).y),
                 detail_filter_weight(5.0*appearance_projection(0.1,0u).y),
                 detail_filter_weight(1.5*appearance_projection(0.1,6u).y));
@@ -68,7 +89,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
             // but one perpendicular footprint. The original 4fp sphere
             // rejects it; bounded anisotropic support admits it.
             let grazing=vec3<f32>(sqrt(35.0)/6.0,0.0,1.0/6.0);
-            answers[id.x*11u+7u]=vec4<f32>(shadow_reuse_distance_squared(
+            answers[id.x*13u+7u]=vec4<f32>(shadow_reuse_distance_squared(
                 vec3<f32>(1.0,0.0,-sqrt(35.0)),vec3<f32>(0.0,0.0,1.0),grazing,1.0,1.0),
                 shadow_reuse_distance_squared(vec3<f32>(1.0,2.0,3.0),
                     vec3<f32>(0.0,0.0,1.0),vec3<f32>(0.0,0.0,1.0),1.0,1.0),
@@ -78,7 +99,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                     vec3<f32>(0.0,0.0,1.0),grazing,1.0,1.0));
             let delta=vec3<f32>(1.0,0.0,-sqrt(35.0));
             let view=vec3<f32>(0.0,0.0,1.0);
-            answers[id.x*11u+8u]=vec4<f32>(shadow_reuse_distance_squared(delta,view,grazing,0.0,1.0),
+            answers[id.x*13u+8u]=vec4<f32>(shadow_reuse_distance_squared(delta,view,grazing,0.0,1.0),
                 shadow_reuse_distance_squared(delta,view,grazing,1.0,0.0),
                 shadow_reuse_distance_squared(delta,view,grazing,0.0,0.0),
                 shadow_reuse_distance_squared(delta,view,grazing,1.0,1.0));
@@ -87,13 +108,32 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
             let phase=i32(id.x&7u);
             let secant=column_secant_derivative(phase/8,(phase+7)/8,0,0);
             let local=f32((phase+1)/8-(phase-1+8)/8+1)/2.0;
-            answers[id.x*11u+9u]=vec4<f32>(local,secant.x,secant.y,
+            answers[id.x*13u+9u]=vec4<f32>(local,secant.x,secant.y,
                 f32((phase+7)/8-phase/8));
             let up=vec3<f32>(0.0,0.0,1.0);
             let field_normal=normalize(up-vec3<f32>(secant.x,0.0,0.0));
             let face=vec3<f32>(1.0,0.0,0.0);
-            answers[id.x*11u+10u]=vec4<f32>(normalize(mix(face,field_normal,
+            answers[id.x*13u+10u]=vec4<f32>(normalize(mix(face,field_normal,
                 detail_filter_weight(2.0))),dot(field_normal,up));
+            let offset=i32((id.x>>3u)&7u);
+            let cell=i32(id.x&7u);
+            let left=max(cell-1,0);
+            let right=min(cell+1,7);
+            let block=(((offset+7)*7/4)-(offset*7/4))*8/7;
+            let stair_local=f32(((offset+right)*7/4)-(offset+left)*7/4)*8.0/f32(right-left);
+            let point=vec3<i32>(i32(hash3(i32(id.x),0,0,123u)&0xffffffu)*2+1,
+                1<<27,i32(hash3(i32(id.x),2,0,123u)&0xffffffu)*2+1);
+            let weights=vec3<f32>(0.0,0.5,1.0);
+            var fine_ids:vec3<f32>;
+            var coarse_ids:vec3<f32>;
+            for (var w=0u;w<3u;w++) {{
+                fine_ids[w]=f32(ground_material(point,1000000,0,
+                    filtered_material_slope(block,stair_local,weights[w],0u),9999)&M_ID);
+                coarse_ids[w]=f32(ground_material(point,1000000,0,
+                    filtered_material_slope(block,stair_local,weights[w],1u),9999)&M_ID);
+            }}
+            answers[id.x*13u+11u]=vec4<f32>(fine_ids,stair_local);
+            answers[id.x*13u+12u]=vec4<f32>(coarse_ids,f32(block));
         }}
     "#
     );
@@ -205,7 +245,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
             );
             let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("chart answers"),
-                size: (probes.len() * 176) as u64,
+                size: (probes.len() * 208) as u64,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
@@ -238,6 +278,9 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                         binding: 2,
                         resource: output.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding:3,resource:terrain_uniform.as_entire_binding(),
+                    },
                 ],
             });
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -248,10 +291,32 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                 pass.dispatch_workgroups((probes.len() as u32 + 63) / 64, 1, 1);
             }
             gpu.queue.submit([encoder.finish()]);
-            let bytes = read_buffer(&gpu, &output, (probes.len() * 176) as u64);
-            let pairs: &[[[f32; 4]; 11]] = bytemuck::cast_slice(&bytes);
+            let bytes = read_buffer(&gpu, &output, (probes.len() * 208) as u64);
+            let pairs: &[[[f32; 4]; 13]] = bytemuck::cast_slice(&bytes);
             let actual: Vec<[f32; 4]> = pairs.iter().map(|p| p[0]).collect();
+            let mut material_disagreements=0usize;
             for (index, pair) in pairs.iter().enumerate() {
+                material_disagreements+=usize::from(pair[11][2]!=pair[12][2]);
+                let offset=((index>>3)&7) as i32;
+                let cell=(index&7) as i32;
+                let height=|i:i32| ((offset+i)*7).div_euclid(4);
+                let canonical_slope=terrain::block_slope(|x,_|height(x),cell,0);
+                let left=(cell-1).max(0);
+                let right=(cell+1).min(7);
+                let local=8.0*f64::from(height(right)-height(left))/f64::from(right-left);
+                assert!((13..=14).contains(&canonical_slope) && canonical_slope<terrain_constants.shape[1]);
+                assert_eq!(pair[11][3],local as f32,"stair fixture did not expose canonical-neighbour disagreement");
+                assert_eq!(pair[12][3],canonical_slope as f32,"GPU block support disagrees with CPU query");
+                let point=glam::IVec3::new((helio_pass_voxel_planet::noise::hash3(index as i32,0,0,123)&0xffffff) as i32*2+1,
+                    1<<27,(helio_pass_voxel_planet::noise::hash3(index as i32,2,0,123)&0xffffff) as i32*2+1);
+                let canonical_id=landform::ground_material(&terrain_constants,point,1000000,0,canonical_slope,9999)&terrain::material::ID;
+                assert_eq!(&pair[11][..3],&[canonical_id as f32;3],
+                    "filtered L0 material disagrees with canonical CPU query at phase{offset}/cell{cell}");
+                for (w,weight) in [0.0,0.5,1.0].into_iter().enumerate() {
+                    let coarse_slope=(f64::from(canonical_slope)*(1.0-weight)+local*weight) as i32;
+                    let expected=landform::ground_material(&terrain_constants,point,1000000,0,coarse_slope,9999)&terrain::material::ID;
+                    assert_eq!(pair[12][w],expected as f32,"existing coarse material blend changed");
+                }
                 let phase=index&7;
                 let authored_height=|i:i32| i.div_euclid(8);
                 let local=f64::from(authored_height(phase as i32+1)-authored_height(phase as i32-1))/2.0;
@@ -321,6 +386,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                     }
                 }
             }
+            assert!(material_disagreements>0,"stair fixture failed to expose the old local-derivative material stripes");
             for (index, (a, e)) in actual.iter().zip(&expected).enumerate() {
                 for component in 0..4 {
                     assert!((a[component] as f64-e[component]).abs()<2e-5,"plane{plane} voxel{voxel} probe{index} component{component}: {:?} expected{:?}",a,e);

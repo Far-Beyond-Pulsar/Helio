@@ -384,6 +384,15 @@ fn column_relief_gradient(face: u32, up: vec3<f32>, derivative: vec2<f32>, radiu
     return vec4<f32>(gradient, 8.0 * max(abs(derivative.x), abs(derivative.y)));
 }
 
+// Canonical L0 materials use the resident 8x8 block support, as CPU
+// Planet::material does. A quantized neighbour derivative can cross hard
+// material thresholds at each terrace; coarse appearance keeps its existing
+// continuous physical-gradient blend.
+fn filtered_material_slope(block: i32, local: f32, weight: f32, level: u32) -> i32 {
+    if level == 0u || weight <= 0.0 { return block; }
+    return i32(mix(f32(block), local, weight));
+}
+
 // The existing block endpoints average base-height quantization over seven
 // cells. This support is used only by filtered natural L0 lighting; material
 // slope and resolved voxel face normals keep their original support.
@@ -580,7 +589,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             // Packed tops differ by at most 255, so the Q16 delta fits i32.
             slope = max(abs(di), abs(dj)) / 57344;
         }
-        if smooth_w > 0.0 { slope = i32(mix(f32(slope), fallback_slope, smooth_w)); }
+        slope = filtered_material_slope(slope, fallback_slope, smooth_w, level);
         if canonical_w > 0.0 {
             let gradient = canonical_up - canonical_relief.xyz / dot(canonical_relief.xyz, canonical_up);
             let radius = length(frame.eye.xyz * frame.eye.w + camera.position_near.xyz + h.t * d);
