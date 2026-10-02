@@ -47,6 +47,8 @@ pub struct WindowUpdate {
     /// Exact latest demand, shared with the planner without copying its keys.
     /// Lets bounded admission bypass obsolete diffs during continuous motion.
     pub wanted: Vec<(u32, std::sync::Arc<FxHashSet<u64>>)>,
+    /// Worker updates replace full demand instead of retaining camera history.
+    pub snapshot: bool,
 }
 
 #[derive(Default)]
@@ -63,6 +65,7 @@ struct LevelState {
 pub struct WindowPlanner {
     grid: Grid,
     levels: Vec<LevelState>,
+    snapshot: bool,
 }
 
 fn pack(k0: u32, k1: u32) -> u64 {
@@ -227,6 +230,7 @@ impl WindowPlanner {
     pub fn new(grid: Grid) -> Self {
         Self {
             grid,
+            snapshot: false,
             levels: (0..grid.levels()).map(|_| LevelState::default()).collect(),
         }
     }
@@ -400,6 +404,7 @@ impl WindowPlanner {
         let top_level = grid.levels() - 1;
         let mut update = WindowUpdate {
             serial: request.serial,
+            snapshot: self.snapshot,
             ..Default::default()
         };
         for level in 0..grid.levels() {
@@ -420,7 +425,8 @@ impl WindowPlanner {
                         center: dir,
                         radius: 0.0,
                         adds: Vec::new(),
-                        removes: order_removes_by_blocks(state.wanted.iter().copied().collect()),
+                        removes: if self.snapshot { Vec::new() }
+                            else { order_removes_by_blocks(state.wanted.iter().copied().collect()) },
                     });
                     state.wanted = Default::default();
                     update.wanted.push((level, state.wanted.clone()));
@@ -449,12 +455,13 @@ impl WindowPlanner {
             let mut next = FxHashSet::with_capacity_and_hasher(scanned.len(), Default::default());
             let mut adds = Vec::new();
             for (priority, key) in scanned {
-                if !state.wanted.contains(&key) {
+                if self.snapshot || !state.wanted.contains(&key) {
                     adds.push((priority, key));
                 }
                 next.insert(key);
             }
-            let removes = order_removes_by_blocks(state.wanted.iter().filter(|k| !next.contains(k)).copied().collect());
+            let removes = if self.snapshot { Vec::new() }
+                else { order_removes_by_blocks(state.wanted.iter().filter(|k| !next.contains(k)).copied().collect()) };
             prioritize_incoming_blocks(grid, request, level, radius, &mut adds);
             let adds = order_adds_by_priority(adds);
             state.wanted = std::sync::Arc::new(next);
@@ -478,22 +485,43 @@ impl WindowPlanner {
 
 /// Background planner: always works on the most recent request.
 pub struct WindowWorker {
-    requests: Option<mpsc::Sender<WindowRequest>>,
-    updates: Mutex<mpsc::Receiver<WindowUpdate>>,
+    requests: Option<mpsc::Sender<WindowMessage>>,
+    updates: Mutex<Option<mpsc::Receiver<WindowUpdate>>>,
     thread: Option<std::thread::JoinHandle<()>>,
+}
+
+enum WindowMessage {
+    Request(WindowRequest),
+    RetireWanted(std::sync::Arc<FxHashSet<u64>>),
+    RetireDiff(LevelDiff),
+    RetirePayload(Box<dyn Send>),
 }
 
 impl WindowWorker {
     pub fn start(grid: Grid) -> Self {
-        let (request_tx, request_rx) = mpsc::channel::<WindowRequest>();
-        let (update_tx, update_rx) = mpsc::channel();
+        let (request_tx, request_rx) = mpsc::channel::<WindowMessage>();
+        // Preserve every ordered delta without accumulating full demand
+        // snapshots when the renderer is temporarily stalled.
+        let (update_tx, update_rx) = mpsc::sync_channel(1);
         let thread = std::thread::Builder::new()
             .name("voxel-planet-windows".into())
             .spawn(move || {
                 let mut planner = WindowPlanner::new(grid);
-                while let Ok(mut request) = request_rx.recv() {
-                    while let Ok(newer) = request_rx.try_recv() {
-                        request = newer;
+                planner.snapshot = true;
+                while let Ok(message) = request_rx.recv() {
+                    let mut request = match message {
+                        WindowMessage::Request(request) => request,
+                        WindowMessage::RetireWanted(wanted) => { drop(wanted); continue; }
+                        WindowMessage::RetireDiff(diff) => { drop(diff); continue; }
+                        WindowMessage::RetirePayload(payload) => { drop(payload); continue; }
+                    };
+                    while let Ok(message) = request_rx.try_recv() {
+                        match message {
+                            WindowMessage::Request(newer) => request = newer,
+                            WindowMessage::RetireWanted(wanted) => drop(wanted),
+                            WindowMessage::RetireDiff(diff) => drop(diff),
+                            WindowMessage::RetirePayload(payload) => drop(payload),
+                        }
                     }
                     if update_tx.send(planner.update(&request)).is_err() {
                         break;
@@ -503,23 +531,36 @@ impl WindowWorker {
             .expect("spawn window planner");
         Self {
             requests: Some(request_tx),
-            updates: Mutex::new(update_rx),
+            updates: Mutex::new(Some(update_rx)),
             thread: Some(thread),
         }
     }
     pub fn request(&self, request: WindowRequest) {
         if let Some(tx) = &self.requests {
-            let _ = tx.send(request);
+            let _ = tx.send(WindowMessage::Request(request));
         }
     }
     pub fn try_update(&self) -> Option<WindowUpdate> {
-        self.updates.lock().ok()?.try_recv().ok()
+        self.updates.lock().ok()?.as_ref()?.try_recv().ok()
+    }
+    /// Free old snapshots and completed delta buffers off the render thread.
+    pub(crate) fn retire_wanted(&self, wanted: std::sync::Arc<FxHashSet<u64>>) {
+        if let Some(tx) = &self.requests { let _ = tx.send(WindowMessage::RetireWanted(wanted)); }
+    }
+    pub(crate) fn retire_diff(&self, diff: LevelDiff) {
+        if let Some(tx) = &self.requests { let _ = tx.send(WindowMessage::RetireDiff(diff)); }
+    }
+    pub(crate) fn retire_payload(&self, payload: impl Send + 'static) {
+        if let Some(tx) = &self.requests { let _ = tx.send(WindowMessage::RetirePayload(Box::new(payload))); }
     }
 }
 
 impl Drop for WindowWorker {
     fn drop(&mut self) {
         self.requests = None;
+        // A bounded output may be blocked on send; disconnect it before
+        // joining so shutdown does not depend on another render frame.
+        if let Ok(updates) = self.updates.get_mut() { *updates = None; }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -530,6 +571,26 @@ impl Drop for WindowWorker {
 mod tests {
     use super::*;
     use crate::{Planet, PlanetRecipe, TerrainSource};
+
+    #[test]
+    fn bounded_worker_output_disconnects_before_shutdown_join() {
+        let (requests, _rx) = mpsc::channel();
+        let (updates, receiver) = mpsc::sync_channel(1);
+        let (ready, ready_rx) = mpsc::channel();
+        let worker = WindowWorker {
+            requests: Some(requests), updates: Mutex::new(Some(receiver)),
+            thread: Some(std::thread::spawn(move || {
+                updates.send(WindowUpdate::default()).unwrap();
+                ready.send(()).unwrap();
+                assert!(updates.send(WindowUpdate::default()).is_err(),
+                    "shutdown must disconnect an undrained, full output channel");
+            })),
+        };
+        ready_rx.recv().unwrap();
+        let (done, done_rx) = mpsc::channel();
+        std::thread::spawn(move || { drop(worker); done.send(()).unwrap(); });
+        done_rx.recv_timeout(std::time::Duration::from_secs(2)).expect("bounded worker shutdown deadlocked");
+    }
 
     fn block_identity(key: u64) -> (u8, u32, i32, i32) {
         let (face, level, i, j) = column_identity(key);
@@ -650,7 +711,6 @@ mod tests {
         let k0 = key as u32;
         (((k0 >> 24) & 7) as u8, k0 >> 27, (k0 & 0xff_ffff) as i32, (key >> 32) as i32)
     }
-
     fn assert_complete_demand(grid: Grid, scanned: &[(f32, u64)]) {
         let wanted: FxHashSet<_> = scanned.iter().map(|(_, key)| *key).collect();
         assert_eq!(wanted.len(), scanned.len(), "a column must be emitted only once");

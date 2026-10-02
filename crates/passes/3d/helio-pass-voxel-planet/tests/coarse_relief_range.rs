@@ -29,6 +29,7 @@ fn relief_hit_respects_requested_trace_range() {
             .replace("BLOCK_ENTRY", "vec4<i32>")
             .replace("SHAPE_ID", "1u"),
     );
+    source.push_str(include_str!("../shaders/visible_feedback.wgsl"));
     source.push_str(include_str!("../shaders/trace.wgsl"));
     source.push_str(
         r#"
@@ -113,6 +114,7 @@ fn relief_hit_respects_requested_trace_range() {
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
+    let feedback = buffer("inert visible feedback", &vec![0; 18448], false);
     let bindings = [
         (0, &frame, true, false),
         (1, &world, true, false),
@@ -125,6 +127,7 @@ fn relief_hit_respects_requested_trace_range() {
         (15, &blocks, false, false),
         (16, &constants, true, false),
         (17, &out, false, true),
+        (21, &feedback, false, true),
     ];
     let entries: Vec<_> = bindings
         .iter()

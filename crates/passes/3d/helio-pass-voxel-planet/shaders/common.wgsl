@@ -1,6 +1,10 @@
 // Shared planet residency structures. `ACCESS` is replaced by `read` or
 // `read_write` per pipeline module.
 
+// Shade may low-pass procedural material detail for the current pixel.
+// Other entry points and canonical material queries retain zero footprint.
+var<private> material_footprint: f32 = 0.0;
+
 struct FaceGpu {
     m_a: vec4<f32>,   // α-family plane normal at the eye (xyz), distance to axis (w)
     q_a: vec4<f32>,   // in-plane radial direction (xyz), eye fraction (w)

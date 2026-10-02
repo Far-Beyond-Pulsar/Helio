@@ -11,6 +11,7 @@ fn interleaved_gradient(p: vec2<f32>, frame_index: f32) -> f32 {
 @compute @workgroup_size(8, 8)
 fn primary(@builtin(global_invocation_id) id: vec3<u32>) {
     if any(id.xy >= vec2<u32>(frame.screen.xy)) { return; }
+    begin_visible_feedback_pixel(id.xy);
     let d = pixel_ray(vec2<f32>(id.xy) + 0.5);
     let r = make_ray(camera.position_near.xyz, d);
     let sky = eye_sky(d, 0.0);
@@ -439,6 +440,9 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         climate_height = climate_height_cache[index];
     }
     let pixel = h.t * 2.0 / (camera.proj[1][1] * frame.screen.y);
+    // Material filtering is appearance only: explicit brush materials and
+    // topology cuts retain the canonical procedural classification.
+    if !edited && (c.info & INFO_TOPOLOGY) == 0u { material_footprint = pixel; }
     let size = frame.layer.y * f32(1 << level);
     var canonical_up = vec3<f32>(0.0);
     var canonical_relief = vec4<f32>(0.0);

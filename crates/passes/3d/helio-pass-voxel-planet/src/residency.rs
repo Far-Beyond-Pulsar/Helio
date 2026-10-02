@@ -263,6 +263,11 @@ pub struct Stats {
     pub window_rebuild_ms: f64,
     pub edit_words: u32,
     pub table_load: f32,
+    /// Allocated backing storage of queued add/remove delta vectors.
+    pub queued_delta_bytes: usize,
+    pub queued_delta_ops: usize,
+    /// Capacity of latest shared membership sets, in keys.
+    pub wanted_key_capacity: usize,
 }
 
 pub struct Residency {
@@ -302,6 +307,13 @@ pub struct Residency {
     /// Window diffs in FIFO order within each level. A large fine-window
     /// retirement must not delay incoming demand at every coarser level.
     diffs: Vec<VecDeque<QueuedDiff>>,
+    queued_delta_bytes: usize,
+    queued_delta_ops: usize,
+    snapshot_mode: bool,
+    retire_slot: usize,
+    retire_started_serial: u64,
+    retire_finished_serial: u64,
+    obsolete_owners: VecDeque<OwnerRetirement>,
     /// Next non-global level to receive a bounded diff round.
     diff_cursor: usize,
     /// Per level, diffs still queued for it (its window is not yet exact).
@@ -312,6 +324,8 @@ pub struct Residency {
     prefetch_eye: Option<DVec3>,
     priority_eye: Option<DVec3>,
     view_focus: Option<DVec3>,
+    /// Bounded asynchronous feedback from primary rays missing fine data.
+    visible_blocks: Vec<u64>,
 }
 
 /// A window diff being applied: removes first, then (for a level switched
@@ -321,6 +335,17 @@ struct QueuedDiff {
     removed: usize,
     cleared: bool,
     added: usize,
+    serial: u64,
+}
+
+struct OwnerRetirement {
+    owner: (u32, u8, u32, i32, i32),
+    offset: u32,
+}
+
+fn delta_bytes(diff: &LevelDiff) -> usize {
+    diff.adds.capacity() * std::mem::size_of::<(f32, u64)>()
+        + diff.removes.capacity() * std::mem::size_of::<u64>()
 }
 
 impl Residency {
@@ -365,12 +390,20 @@ impl Residency {
             requested: 0,
             applied: 0,
             diffs: (0..grid.levels()).map(|_| VecDeque::new()).collect(),
+            queued_delta_bytes: 0,
+            queued_delta_ops: 0,
+            snapshot_mode: false,
+            retire_slot: 0,
+            retire_started_serial: 0,
+            retire_finished_serial: 0,
+            obsolete_owners: VecDeque::new(),
             diff_cursor: 0,
             catching_up: vec![0; grid.levels() as usize],
             cpu_budget: None,
             prefetch_eye: None,
             priority_eye: None,
             view_focus: None,
+            visible_blocks: Vec::new(),
         }
     }
 
@@ -629,20 +662,76 @@ impl Residency {
         self.view_focus = focus.filter(|point| point.is_finite());
     }
 
+    /// Queue at most64 block identities for the next bounded plan refresh.
+    /// Feedback changes priority, never resident window coverage.
+    pub fn prioritize_visible_blocks(&mut self, blocks: impl IntoIterator<Item = (u32, u32)>) {
+        self.visible_blocks.clear();
+        self.visible_blocks.extend(blocks.into_iter().take(64).map(|(a, b)| pack(a, b)));
+    }
+
+    fn refresh_visible_pending(&mut self, deadline: Option<std::time::Instant>) {
+        let mut promoted = Vec::new();
+        for key in std::mem::take(&mut self.visible_blocks) {
+            if deadline.is_some_and(|at| std::time::Instant::now() >= at) { break; }
+            let (face, level, i, j) = unpack(key);
+            if level >= self.grid.levels() || face >= 6 || i & 3 != 0 || j & 3 != 0 { continue; }
+            let state = &mut self.levels[level as usize];
+            if !state.active { continue; }
+            let Some(wanted) = &state.wanted else { continue };
+            let columns = self.grid.cells() / (BRICK << level);
+            if !(0..columns).contains(&i) || !(0..columns).contains(&j) { continue; }
+            let mut keys = [0u64; 16];
+            let mut count = 0;
+            for y in j..(j + 4).min(columns) {
+                for x in i..(i + 4).min(columns) {
+                    keys[count] = pack(key0(face, level, x), y as u32);
+                    count += 1;
+                }
+            }
+            if !keys[..count].iter().all(|key| wanted.contains(key)) { continue; }
+            promoted.push(key);
+            for &key in &keys[..count] {
+                if !self.publishing.contains_key(&key)
+                    && (!self.residents.contains_key(key) || self.initial_retries.contains(&key)) {
+                    state.pending.insert(key, 0);
+                }
+            }
+        }
+        for key in promoted { self.queue_obsolete_owners(key); }
+    }
+
     /// Publish latest demand before queueing bounded window operations.
     fn apply(&mut self, update: WindowUpdate) {
+        self.snapshot_mode |= update.snapshot;
         for (level, wanted) in update.wanted {
-            self.levels[level as usize].wanted = Some(wanted);
+            if let Some(previous) = self.levels[level as usize].wanted.replace(wanted) {
+                if let Planner::Worker(worker) = &self.planner { worker.retire_wanted(previous); }
+            }
         }
         for diff in update.levels {
             let level = diff.level as usize;
+            if update.snapshot {
+                // The worker supplies every current key, so old additions
+                // need no historical replay. Actual residents retire below.
+                for old in std::mem::take(&mut self.diffs[level]) {
+                    self.queued_delta_bytes -= delta_bytes(&old.diff);
+                    self.queued_delta_ops -= old.diff.removes.len() - old.removed + old.diff.adds.len() - old.added;
+                    if let Planner::Worker(worker) = &self.planner { worker.retire_diff(old.diff); }
+                }
+                let pending = std::mem::take(&mut self.levels[level].pending);
+                if let Planner::Worker(worker) = &self.planner { worker.retire_payload(pending); }
+                self.catching_up[level] = 0;
+                if self.retire_slot == 0 { self.retire_started_serial = update.serial; }
+            }
             // The window metadata changes at once; the level is marked as
             // catching up (no guaranteed coverage) until its ops are done.
             self.levels[level].active = diff.active;
             self.levels[level].center = diff.center;
             self.levels[level].radius = diff.radius;
             self.catching_up[level] += 1;
-            self.diffs[level].push_back(QueuedDiff { diff, removed: 0, cleared: false, added: 0 });
+            self.queued_delta_bytes += delta_bytes(&diff);
+            self.queued_delta_ops += diff.removes.len() + diff.adds.len();
+            self.diffs[level].push_back(QueuedDiff { diff, removed: 0, cleared: false, added: 0, serial: update.serial });
         }
         self.stats.window_rebuild_ms = update.planning_ms;
         self.applied = update.serial;
@@ -660,10 +749,108 @@ impl Residency {
         None
     }
 
+    /// Prioritize obsolete alias owners without retaining old window keys.
+    /// Retirement rechecks latest membership before every individual column.
+    fn queue_obsolete_owners(&mut self, key: u64) {
+        if !self.snapshot_mode { return; }
+        let (face, level, i, j) = unpack(key);
+        for tier in 1..=BLOCK_TIERS {
+            if self.obsolete_owners.len() >= 64 { break; }
+            let desired = (level, face, tier, i >> (2 * tier), j >> (2 * tier));
+            let slot = block_slot(level, face, tier, desired.3, desired.4);
+            if let Some(&owner) = self.block_owner.get(&slot) {
+                if owner != desired && !self.obsolete_owners.iter().any(|task| task.owner == owner) {
+                    self.obsolete_owners.push_back(OwnerRetirement { owner, offset: 0 });
+                }
+            }
+        }
+    }
+
+    fn retire_obsolete_owner_step(&mut self, work: &mut FrameWork) -> bool {
+        let Some(task) = self.obsolete_owners.front_mut() else { return false };
+        if !self.blocks.contains_key(&task.owner) {
+            self.obsolete_owners.pop_front();
+            return true;
+        }
+        let (level, face, tier, bi, bj) = task.owner;
+        let size = 1u32 << (2 * tier);
+        let i = bi * size as i32 + (task.offset % size) as i32;
+        let j = bj * size as i32 + (task.offset / size) as i32;
+        task.offset += 1;
+        if task.offset == size * size { self.obsolete_owners.pop_front(); }
+        let key = pack(key0(face, level, i), j as u32);
+        if self.levels[level as usize].wanted.as_ref().is_some_and(|wanted| !wanted.contains(&key)) {
+            self.levels[level as usize].pending.remove(key);
+            if self.residents.contains_key(key) { self.evict(key, work); }
+        }
+        true
+    }
+
+    /// Snapshot mode holds one full demand per level. Retire actual residents
+    /// through a persistent table cursor, never millions of historical keys.
+    fn apply_snapshot(&mut self, work: &mut FrameWork, out_of_time: &impl Fn() -> bool) {
+        while self.diffs.iter().any(|diffs| !diffs.is_empty()) && !out_of_time() {
+            for _ in 0..128 {
+                if self.retire_obsolete_owner_step(work) { continue; }
+                if let Some((key, _)) = self.residents.resident_at_slot(self.retire_slot) {
+                    let level = unpack(key).1 as usize;
+                    if self.levels[level].wanted.as_ref().is_some_and(|wanted| !wanted.contains(&key)) {
+                        self.evict(key, work);
+                        // Backshift may have moved another resident here.
+                        continue;
+                    }
+                }
+                self.retire_slot += 1;
+                if self.retire_slot == self.residents.table().len() {
+                    self.retire_slot = 0;
+                    self.retire_finished_serial = self.retire_started_serial;
+                    self.retire_started_serial = self.applied;
+                }
+            }
+            let top = self.diffs.len() - 1;
+            let has_adds = |level: usize| self.diffs[level].front().is_some_and(|q| q.added < q.diff.adds.len());
+            let mut next = has_adds(top).then_some(top);
+            if next.is_none() {
+                for _ in 0..top {
+                    let level = self.diff_cursor;
+                    self.diff_cursor = (self.diff_cursor + 1) % top;
+                    if has_adds(level) { next = Some(level); break; }
+                }
+            }
+            if let Some(level) = next {
+                let queued = self.diffs[level].front_mut().unwrap();
+                let end = (queued.added + 128).min(queued.diff.adds.len());
+                let state = &mut self.levels[level];
+                let wanted = state.wanted.as_ref().unwrap();
+                for &(priority, key) in &queued.diff.adds[queued.added..end] {
+                    if wanted.contains(&key) && !self.publishing.contains_key(&key)
+                        && (!self.residents.contains_key(key) || self.initial_retries.contains(&key)) {
+                        state.pending.insert(key, PendingQueue::bucket(priority));
+                    }
+                }
+                self.queued_delta_ops -= end - queued.added;
+                queued.added = end;
+            }
+            for level in 0..self.diffs.len() {
+                if self.diffs[level].front().is_some_and(|q|
+                    q.added == q.diff.adds.len() && self.retire_finished_serial >= q.serial) {
+                    let completed = self.diffs[level].pop_front().unwrap();
+                    self.queued_delta_bytes -= delta_bytes(&completed.diff);
+                    self.catching_up[level] = 0;
+                    if let Planner::Worker(worker) = &self.planner { worker.retire_diff(completed.diff); }
+                }
+            }
+        }
+    }
+
     /// Retire oldest owners while admitting the newest incoming demand.
     /// Latest membership makes out-of-order additions safe: an old removal
     /// cannot evict a returned column, and obsolete additions cannot run.
     fn apply_queued(&mut self, work: &mut FrameWork, out_of_time: &impl Fn() -> bool) {
+        if self.snapshot_mode {
+            self.apply_snapshot(work, out_of_time);
+            return;
+        }
         const CHUNK: usize = 256;
         while let Some(level) = self.next_diff_level() {
             let mut queued = self.diffs[level].pop_front().unwrap();
@@ -681,6 +868,7 @@ impl Residency {
                     self.evict(key, work);
                 }
             }
+            self.queued_delta_ops -= end - queued.removed;
             queued.removed = end;
             if wanted.is_none() && !queued.diff.active && queued.removed == queued.diff.removes.len() && !queued.cleared {
                 self.levels[level].pending.clear();
@@ -698,6 +886,7 @@ impl Residency {
                         self.levels[level].pending.insert(key, PendingQueue::bucket(priority));
                     }
                 }
+                self.queued_delta_ops -= end - incoming.added;
                 incoming.added = end;
             } else if queued.diff.active || queued.removed == queued.diff.removes.len() {
                 let end = (queued.added + if queued.diff.active { CHUNK / 2 } else { CHUNK }).min(queued.diff.adds.len());
@@ -707,18 +896,23 @@ impl Residency {
                         self.levels[level].pending.insert(key, PendingQueue::bucket(priority));
                     }
                 }
+                self.queued_delta_ops -= end - queued.added;
                 queued.added = end;
             }
             if queued.removed == queued.diff.removes.len() && queued.added == queued.diff.adds.len() {
                 self.catching_up[level] -= 1;
+                self.queued_delta_bytes -= delta_bytes(&queued.diff);
+                if let Planner::Worker(worker) = &self.planner { worker.retire_diff(queued.diff); }
             } else {
                 self.diffs[level].push_front(queued);
             }
             // Newer additions may finish a diff before its FIFO turn.
             while self.diffs[level].back().is_some_and(|diff|
                 diff.removed == diff.diff.removes.len() && diff.added == diff.diff.adds.len()) {
-                self.diffs[level].pop_back();
+                let completed = self.diffs[level].pop_back().unwrap();
                 self.catching_up[level] -= 1;
+                self.queued_delta_bytes -= delta_bytes(&completed.diff);
+                if let Planner::Worker(worker) = &self.planner { worker.retire_diff(completed.diff); }
             }
             if out_of_time() { return; }
         }
@@ -874,13 +1068,18 @@ impl Residency {
         let t_drain = started.elapsed();
         // Diffs take at most 60 % of the time while columns wait, so a
         // window moving at speed cannot starve generation.
-        let share = if self.levels.iter().all(|l| l.pending.is_empty()) { 1.0 } else { 0.6 };
-        let apply_out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b.mul_f64(share));
-        self.apply_queued(&mut work, &apply_out_of_time);
+        // New demand may not have reached pending yet. Keep admission's
+        // share even when queues were empty before applying the first diff.
+        let apply_out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b.mul_f64(0.6));
+        if !apply_out_of_time() { self.apply_queued(&mut work, &apply_out_of_time); }
         // Window diffs may spend 60% of the CPU budget. Refresh gets at most
         // the next 10%, leaving 30% for issuing generation jobs this frame.
         let refresh_deadline = budget_time.map(|budget| started + budget.mul_f64(0.7));
-        self.refresh_near_pending(eye, refresh_deadline);
+        let near_deadline = budget_time.map(|budget| started + budget.mul_f64(0.65));
+        self.refresh_near_pending(eye, near_deadline);
+        // Feedback wins over broad camera anchors, and has its own half
+        // of the existing refresh reserve rather than being demoted by it.
+        self.refresh_visible_pending(refresh_deadline);
         let t_apply = started.elapsed();
         // Urgent edit regenerations first.
         let mut urgent = std::mem::take(&mut self.urgent);
@@ -936,7 +1135,7 @@ impl Residency {
         let mut last_summary_check = None;
         while work.jobs.len() < budget {
             steps += 1;
-            if steps % 64 == 0 && out_of_time() {
+            if (steps == 1 || steps % 64 == 0) && out_of_time() {
                 break;
             }
             let mut best: Option<(usize, usize)> = None;
@@ -1019,19 +1218,23 @@ impl Residency {
             work.job_keys.push(key);
         }
         for (index, key, bucket) in awaiting_publication {
+            self.queue_obsolete_owners(key);
             self.levels[index].pending.insert(key, bucket);
         }
         let trace_ms: Option<f64> = std::env::var("HELIO_VOXEL_PLAN_TRACE").ok().map(|v| v.parse().unwrap_or(10.0));
         if trace_ms.is_some_and(|ms| started.elapsed().as_secs_f64() * 1e3 > ms) {
             eprintln!(
-                "PLAN_TRACE edits {:.2} drain {:.2} apply {:.2} admit {:.2} ms jobs {} evictions {} queued_diffs {} steps {steps}",
+                "PLAN_TRACE edits {:.2} drain {:.2} apply {:.2} admit {:.2} ms jobs {} evictions {} queued_diffs {} steps {steps} queued_bytes {} queued_ops {} wanted_capacity {}",
                 t_edits.as_secs_f64() * 1e3,
                 (t_drain - t_edits).as_secs_f64() * 1e3,
                 (t_apply - t_drain).as_secs_f64() * 1e3,
                 (started.elapsed() - t_apply).as_secs_f64() * 1e3,
                 work.jobs.len(),
                 work.evictions.len(),
-                self.diffs.iter().map(VecDeque::len).sum::<usize>()
+                self.diffs.iter().map(VecDeque::len).sum::<usize>(),
+                self.queued_delta_bytes,
+                self.queued_delta_ops,
+                self.levels.iter().filter_map(|level| level.wanted.as_ref()).map(|wanted| wanted.capacity()).sum::<usize>()
             );
         }
         let mut stats = self.stats;
@@ -1043,6 +1246,9 @@ impl Residency {
         stats.evictions = work.evictions.len();
         stats.edit_words = self.edits.top;
         stats.table_load = self.residents.load();
+        stats.queued_delta_bytes = self.queued_delta_bytes;
+        stats.queued_delta_ops = self.queued_delta_ops;
+        stats.wanted_key_capacity = self.levels.iter().filter_map(|level| level.wanted.as_ref()).map(|wanted| wanted.capacity()).sum();
         self.stats = stats;
         work
     }
@@ -1170,6 +1376,200 @@ mod tests {
     use super::*;
     use crate::planet::PlanetRecipe;
 
+    fn snapshot_update(serial: u64, keys: &[u64]) -> WindowUpdate {
+        WindowUpdate { serial, snapshot: true,
+            wanted: vec![(0, std::sync::Arc::new(keys.iter().copied().collect()))],
+            levels: vec![LevelDiff { level: 0, active: true, radius: 100.0,
+                adds: keys.iter().map(|&key| (0.0, key)).collect(), ..Default::default() }],
+            ..Default::default() }
+    }
+
+    #[test]
+    fn moving_snapshots_bound_history_and_converge_without_generating_obsolete_keys() {
+        let (planet, mut r, old, eye) = edit_fixture();
+        let face = crate::grid::PLANE_FACE;
+        let mut latest = Vec::new();
+        for serial in 1..=500 {
+            let i = 1000 + (serial % 50) as i32 * 4;
+            latest = (1000..1004).flat_map(|j| (i..i + 4).map(move |x| pack(key0(face, 0, x), j))).collect();
+            r.apply(snapshot_update(serial, &latest));
+            assert_eq!(r.diffs.iter().map(VecDeque::len).sum::<usize>(), 1);
+            assert_eq!(r.queued_delta_ops, 16);
+            assert_eq!(r.queued_delta_bytes, 16 * std::mem::size_of::<(f32, u64)>());
+            assert!(r.levels[0].pending.is_empty(), "superseded pending history must not accumulate");
+        }
+        r.requested = r.applied;
+        let work = r.plan(&planet, eye, 1.0, 16);
+        assert_eq!(work.job_keys.iter().copied().collect::<FxHashSet<_>>(), latest.iter().copied().collect());
+        assert_eq!(work.evictions, vec![0]);
+        assert!(!r.residents.contains_key(old));
+        r.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
+        assert!(r.idle());
+        assert_eq!((r.queued_delta_bytes, r.queued_delta_ops), (0, 0));
+        assert!(latest.iter().all(|&key| r.residents.get(key).unwrap().blocks));
+    }
+
+    #[test]
+    fn snapshot_retirement_rechecks_backshifted_slots_and_quarantines_publications() {
+        let (planet, _, _, _) = edit_fixture();
+        let mut r = Residency::new(*planet.grid(), Capacity { table_bits: 8, ..Default::default() });
+        let keys: Vec<_> = (1000..5000).map(|i| pack(key0(crate::grid::PLANE_FACE, 0, i), 0))
+            .filter(|key| slot_hash(*key as u32, (*key >> 32) as u32) & 255 == 10).take(3).collect();
+        assert_eq!(keys.len(), 3);
+        for (record, &key) in keys.iter().enumerate() {
+            r.residents.insert(key, Resident { record: record as u32, ..Default::default() });
+            r.block_conflicts += 1;
+        }
+        r.publishing.insert(keys[0], EditPublication {
+            record: 0, previous: None, next: None, evicted: false, initial_bucket: Some(0),
+        });
+        r.apply(snapshot_update(1, &keys[1..2]));
+        r.retire_slot = 10;
+        r.retire_started_serial = 1;
+        let mut work = FrameWork::default();
+        r.apply_snapshot(&mut work, &|| false);
+        assert_eq!(work.evictions.len(), 2);
+        assert_eq!(r.residents.iter().map(|(key, _)| key).collect::<Vec<_>>(), vec![keys[1]]);
+        assert!(r.publishing[&keys[0]].evicted);
+        r.complete_jobs([(keys[0], 3)]);
+        assert!(r.publishing.is_empty() && r.initial_retries.is_empty());
+        assert_eq!(r.catching_up[0], 0);
+    }
+
+    #[test]
+    fn visible_alias_retirement_releases_obsolete_owners_before_full_table_scan() {
+        let (planet, _, _, _) = edit_fixture();
+        let mut r = Residency::new(*planet.grid(), Capacity { table_bits: 12, ..Default::default() });
+        let face = crate::grid::PLANE_FACE;
+        let old: Vec<_> = (1000..1004).flat_map(|j| (1000..1004).map(move |i| pack(key0(face, 0, i), j))).collect();
+        let current: Vec<_> = old.iter().map(|&key| {
+            let (_, _, i, j) = unpack(key);
+            pack(key0(face, 0, i + 512), j as u32)
+        }).collect();
+        for (record, &key) in old.iter().enumerate() {
+            assert!(r.acquire_blocks(key, &mut FrameWork::default()));
+            r.residents.insert(key, Resident { record: record as u32, blocks: true, ..Default::default() });
+        }
+        r.apply(snapshot_update(1, &current));
+        r.prioritize_visible_blocks([(current[0] as u32, (current[0] >> 32) as u32)]);
+        r.refresh_visible_pending(None);
+        let rounds = std::cell::Cell::new(0);
+        let mut work = FrameWork::default();
+        r.apply_snapshot(&mut work, &|| { rounds.set(rounds.get() + 1); rounds.get() > 1 });
+        assert_eq!(work.evictions.len(), 16, "the obsolete4x4 owner must retire in the first bounded round");
+        assert!(r.retire_finished_serial < 1, "fixture must not rely on a whole-table scan");
+        assert!(current.iter().all(|&key| !r.blocks_conflict(key)));
+        assert!(current.iter().all(|key| r.levels[0].pending.at.contains_key(key)));
+        assert!(r.catching_up[0] > 0);
+    }
+
+    #[test]
+    fn tier3_alias_retirement_keeps_its_cursor_and_protects_returned_columns() {
+        let (planet, _, _, _) = edit_fixture();
+        let mut r = Residency::new(*planet.grid(), Capacity { table_bits: 12, ..Default::default() });
+        let face = crate::grid::PLANE_FACE;
+        let old = pack(key0(face, 0, 960), 960);
+        let returned = pack(key0(face, 0, 1000), 1000);
+        for (record, key) in [old, returned].into_iter().enumerate() {
+            assert!(r.acquire_blocks(key, &mut FrameWork::default()));
+            r.residents.insert(key, Resident { record: record as u32, blocks: true, ..Default::default() });
+        }
+        let current: Vec<_> = (960..964).flat_map(|j| (1472..1476).map(move |i| pack(key0(face, 0, i), j))).collect();
+        let mut wanted = current.clone();
+        wanted.push(returned);
+        r.apply(snapshot_update(1, &wanted));
+        r.queue_obsolete_owners(current[0]);
+        let round = |r: &mut Residency, work: &mut FrameWork| {
+            let calls = std::cell::Cell::new(0);
+            r.apply_snapshot(work, &|| { calls.set(calls.get() + 1); calls.get() > 1 });
+        };
+        let mut work = FrameWork::default();
+        round(&mut r, &mut work);
+        let first = r.obsolete_owners.front().unwrap();
+        assert_eq!(first.owner.2, 3);
+        let offset = first.offset;
+        assert!(offset > 0 && offset < 4096);
+        round(&mut r, &mut work);
+        assert!(r.obsolete_owners.front().unwrap().offset > offset,
+            "deadline slices must continue the tier3 scan instead of restarting its first row");
+        r.apply_snapshot(&mut work, &|| false);
+        assert!(r.residents.contains_key(returned), "latest wanted membership protects returned terrain through every owner tier");
+        assert!(!r.residents.contains_key(old));
+        assert!(r.blocks_conflict(current[0]), "a still wanted old owner cannot be silently reassigned");
+        r.apply(snapshot_update(2, &current));
+        r.queue_obsolete_owners(current[0]);
+        r.apply_snapshot(&mut work, &|| false);
+        assert!(!r.residents.contains_key(returned));
+        assert!(!r.blocks_conflict(current[0]));
+        assert_eq!(r.catching_up[0], 0);
+    }
+
+    #[test]
+    fn visible_feedback_promotes_only_complete_current_blocks_without_ownership_changes() {
+        let (_, mut r, resident, _) = edit_fixture();
+        let face = crate::grid::PLANE_FACE;
+        let block = |i| (0..4).flat_map(move |j| (i..i + 4).map(move |x| pack(key0(face, 0, x), j))).collect::<Vec<_>>();
+        let visible = block(1000);
+        let incomplete = block(2000);
+        let stale = block(3000);
+        let wanted = visible.iter().chain(&incomplete[..15]).copied().collect::<FxHashSet<_>>();
+        r.levels[0].active = true;
+        r.levels[0].wanted = Some(std::sync::Arc::new(wanted.clone()));
+        r.levels[0].pending.insert(visible[0], 50);
+        let requests = [visible[0], incomplete[0], stale[0]];
+        r.prioritize_visible_blocks(requests.map(|key| (key as u32, (key >> 32) as u32)));
+        r.refresh_visible_pending(None);
+        assert_eq!(r.levels[0].pending.keys().copied().collect::<FxHashSet<_>>(), visible.iter().copied().collect());
+        assert!(visible.iter().all(|key| r.levels[0].pending.at[key].0 == 0));
+        assert_eq!(r.levels[0].wanted.as_deref(), Some(&wanted));
+        assert_eq!(r.residents.len(), 1);
+        assert!(r.residents.contains_key(resident) && r.publishing.is_empty() && r.blocks.is_empty());
+    }
+
+    #[test]
+    fn visible_feedback_obeys_fixed_work_cap_and_elapsed_deadline() {
+        let (_, mut r, _, _) = edit_fixture();
+        let face = crate::grid::PLANE_FACE;
+        let blocks: Vec<_> = (0..65).map(|b| pack(key0(face, 0, 1000 + b * 4), 0)).collect();
+        let wanted = blocks.iter().flat_map(|&key| {
+            let (_, _, i, j) = unpack(key);
+            (j..j + 4).flat_map(move |y| (i..i + 4).map(move |x| pack(key0(face, 0, x), y as u32)))
+        }).collect::<FxHashSet<_>>();
+        r.levels[0].active = true;
+        r.levels[0].wanted = Some(std::sync::Arc::new(wanted));
+        let requests = || blocks.iter().map(|&key| (key as u32, (key >> 32) as u32));
+        r.prioritize_visible_blocks(requests());
+        r.refresh_visible_pending(Some(std::time::Instant::now()));
+        assert!(r.levels[0].pending.is_empty(), "feedback cannot spend admission's elapsed reserve");
+        r.prioritize_visible_blocks(requests());
+        r.refresh_visible_pending(None);
+        assert_eq!(r.levels[0].pending.len(), 64 * 16);
+        assert!(!r.levels[0].pending.at.contains_key(&blocks[64]));
+        r.levels[0].active = false;
+        r.prioritize_visible_blocks([(blocks[64] as u32, (blocks[64] >> 32) as u32)]);
+        r.refresh_visible_pending(None);
+        assert_eq!(r.levels[0].pending.len(), 64 * 16, "inactive feedback cannot resurrect a level");
+    }
+
+    #[test]
+    fn elapsed_plan_deadline_preserves_diffs_and_pending_without_admitting_work() {
+        let (planet, mut r, _, eye) = edit_fixture();
+        let key = pack(key0(crate::grid::PLANE_FACE, 0, 1000), 0);
+        r.levels[0].pending.insert(key, 1);
+        r.apply(WindowUpdate { levels: vec![LevelDiff {
+            level: 0, active: true, adds: vec![(0.0, key)], ..Default::default()
+        }], ..Default::default() });
+        r.set_cpu_budget(Some(std::time::Duration::ZERO));
+        let work = r.plan(&planet, eye, 1.0, 16);
+        assert!(work.jobs.is_empty() && work.evictions.is_empty());
+        assert_eq!(r.diffs[0][0].added, 0, "expired budget must not apply a mandatory first batch");
+        assert!(r.levels[0].pending.at.contains_key(&key));
+        assert_eq!(r.catching_up[0], 1);
+        r.set_cpu_budget(None);
+        let work = r.plan(&planet, eye, 1.0, 16);
+        assert_eq!(work.job_keys, vec![key], "deferred demand must remain admissible next frame");
+    }
+
     #[test]
     fn latest_frontier_bypasses_obsolete_diff_backlog_and_converges() {
         let planet = Planet::new(PlanetRecipe { shape: crate::grid::Shape::Plane, ..Default::default() }).unwrap();
@@ -1192,9 +1592,13 @@ mod tests {
         assert!(old.iter().all(|key| !r.levels[0].pending.at.contains_key(key)),
             "obsolete additions must never enter generation");
         assert!(r.catching_up[0] > 0, "partial retirement cannot claim complete coverage");
+        assert_eq!(r.queued_delta_ops, r.diffs.iter().flatten().map(|q|
+            q.diff.removes.len() - q.removed + q.diff.adds.len() - q.added).sum::<usize>());
+        assert_eq!(r.queued_delta_bytes, r.diffs.iter().flatten().map(|q| delta_bytes(&q.diff)).sum::<usize>());
         r.apply_queued(&mut work, &|| false);
         assert_eq!(r.levels[0].pending.keys().copied().collect::<FxHashSet<_>>(), latest.into_iter().collect());
         assert_eq!(r.catching_up[0], 0);
+        assert_eq!((r.queued_delta_ops, r.queued_delta_bytes), (0, 0));
     }
 
     #[test]
@@ -1453,14 +1857,13 @@ mod tests {
             eye, prefetch_eye: None, priority_eye: None, view_focus: None,
             lod0: 120.0, outer_radius: planet.outer_radius(), planet: Some(planet.clone()), serial: 1,
         });
-        residency.set_cpu_budget(Some(std::time::Duration::ZERO));
+        residency.set_cpu_budget(None);
         let work = residency.plan(&planet, eye, 120.0, 16);
         assert_eq!(work.job_keys.len(), incoming.len());
         assert_eq!(work.job_keys.iter().copied().collect::<std::collections::HashSet<_>>(), incoming.iter().copied().collect());
         assert!(work.job_keys.iter().all(|&key| residency.residents.get(key).unwrap().blocks),
             "incoming columns must acquire summaries before the remaining outgoing owners retire");
-        assert_eq!(residency.catching_up[0], 1);
-        assert!(!residency.diffs[0].is_empty() && residency.residents.len() > work.jobs.len());
+        assert_eq!(residency.catching_up[0], 0);
         residency.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
         residency.apply_queued(&mut FrameWork::default(), &|| false);
         assert_eq!(residency.catching_up[0], 0);

@@ -72,6 +72,20 @@ fn landform_strata(p: vec3<i32>, altitude: i32) -> i32 {
     return altitude + scale_q16(noise(p, 11u, bitcast<u32>(terrain.header.w) ^ 0x9B05688Cu), 8000);
 }
 
+// Material noise is defined in the fixed 5 cm half-reference domain.
+// Four samples per lattice spacing retain contrast; below two samples the
+// unresolved octave contributes its zero mean instead of aliased class noise.
+fn material_noise_support(shift: u32, pixel: f32) -> f32 {
+    if pixel <= 0.0 { return 1.0; }
+    let wavelength = 0.05 * f32(1u << shift);
+    return 1.0 - smoothstep(wavelength * 0.25, wavelength * 0.5, pixel);
+}
+
+fn material_noise_value(value: i32, support: f32) -> i32 {
+    if support >= 1.0 { return value; }
+    return i32(round(f32(value) * support));
+}
+
 fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
     let dirt = terrain.header.z;
     let steep = slope >= terrain.shape.y;
@@ -104,7 +118,13 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
     let seed = bitcast<u32>(terrain.header.w);
     var outcrop = -NOISE_ONE;
     if alpine > 0 || slope >= 5 {
-        outcrop = noise(p, 10u, seed ^ 0x1B56C4E9u) + noise(p, 7u, seed ^ 0x6A09E667u) / 3;
+        let broad_support = material_noise_support(10u, material_footprint);
+        let fine_support = material_noise_support(7u, material_footprint);
+        var broad = 0;
+        var fine = 0;
+        if broad_support > 0.0 { broad = material_noise_value(noise(p, 10u, seed ^ 0x1B56C4E9u), broad_support); }
+        if fine_support > 0.0 { fine = material_noise_value(noise(p, 7u, seed ^ 0x6A09E667u), fine_support); }
+        outcrop = broad + fine / 3;
     }
     // Snow does not hold on faces steeper than ~37 degrees: rock streaks the snowfields.
     if top_height > snowline && depth < dirt && slope + outcrop / 8192 < 6 { return M_SNOW; }

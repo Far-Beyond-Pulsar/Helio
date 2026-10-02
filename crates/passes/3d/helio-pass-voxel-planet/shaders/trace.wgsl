@@ -479,10 +479,13 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
             } else if want < cur.level {
                 let finer = locate(r, fr, t, want);
                 let hint = column_hint(want, finer.face, finer.i >> 3u, finer.j >> 3u);
+                if hint == 0u { request_visible_block(finer.face, want, finer.i >> 3u, finer.j >> 3u); }
                 if hint != 0u {
                     let found = find_column(column_key0(finer.face, want, finer.i >> 3u), bitcast<u32>(finer.j >> 3u));
                     if found != NONE && column_valid(records[found]) && !level_contains_solid(finer, found, r, t) {
                         cur = finer;
+                    } else if found == NONE || !column_valid(records[found]) {
+                        request_visible_block(finer.face, want, finer.i >> 3u, finer.j >> 3u);
                     }
                 }
             }
@@ -499,6 +502,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                         if column_valid(col) { break; }
                     }
                 }
+                request_visible_block(cur.face, cur.level, cur.i >> 3u, cur.j >> 3u);
                 if cur.level + 1u >= u32(frame.layer_i.z) {
                     return make_hit(ST_LOADING, t, cur, normal, NONE);
                 }

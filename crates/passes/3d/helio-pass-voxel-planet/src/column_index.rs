@@ -52,6 +52,15 @@ impl ColumnIndex {
         &self.table
     }
 
+    /// Stable bounded retirement traversal. Removal backshifts later
+    /// entries, so a caller that removes this slot must inspect it again.
+    pub(crate) fn resident_at_slot(&self, slot: usize) -> Option<(u64, Resident)> {
+        let record = *self.table.get(slot)?;
+        if record == NONE { return None; }
+        let entry = self.entry(record);
+        Some((entry.key, entry.resident))
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
