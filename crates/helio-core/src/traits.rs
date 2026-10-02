@@ -329,6 +329,16 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// - **O(1)**: Returns a static string (no allocations)
     fn name(&self) -> &'static str;
 
+    /// The Rust type path of this pass, e.g. `helio_pass_fxaa::FxaaPass`.
+    ///
+    /// The default body is instantiated per implementing type, so it reports
+    /// the concrete type even when called through `dyn RenderPass`; do not
+    /// override it. Shader hot reload uses the leading path segment (the
+    /// defining crate) to find the passes that own an edited shader.
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     /// Move pass-owned persistent data from the same pass in a replaced graph.
     /// Called on the replacement before its first frame, on the same device.
     /// Opt-in implementations must check source/configuration compatibility and

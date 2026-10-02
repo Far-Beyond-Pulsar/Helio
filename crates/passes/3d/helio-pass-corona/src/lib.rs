@@ -154,15 +154,8 @@ impl CoronaPass {
         camera_buf: &wgpu::Buffer,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
-        let source = include_str!("../shaders/corona.wgsl");
-        let compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Corona Compute Shader"),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
-        });
-        let render_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Corona Render Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/corona_render.wgsl").into()),
-        });
+        let compute_shader = helio_core::shader::module(device, "Corona Compute Shader", helio_core::include_wgsl!("../shaders/corona.wgsl"));
+        let render_shader = helio_core::shader::module(device, "Corona Render Shader", helio_core::include_wgsl!("../shaders/corona_render.wgsl"));
 
         // ── Buffers ──────────────────────────────────────────────────────────
 

@@ -307,10 +307,7 @@ impl SpriteBatchPass {
         queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Sprite Batch Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sprite.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "Sprite Batch Shader", helio_core::include_wgsl!("../shaders/sprite.wgsl"));
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sprite Batch BGL"),

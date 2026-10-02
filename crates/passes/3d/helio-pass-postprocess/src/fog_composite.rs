@@ -65,7 +65,7 @@ impl FogCompositePass {
         let shader = helio_core::shader::module(
             device,
             "Fog Composite",
-            include_str!("../shaders/fog_composite.wgsl"),
+            helio_core::include_wgsl!("../shaders/fog_composite.wgsl"),
         );
         let fragment = wgpu::ShaderStages::FRAGMENT;
         let texture = |binding, sample_type, view_dimension| wgpu::BindGroupLayoutEntry {

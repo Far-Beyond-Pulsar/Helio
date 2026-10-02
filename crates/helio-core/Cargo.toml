@@ -19,6 +19,9 @@ naga = { version = "30.0.0", features = ["wgsl-in"] }
 # module code gates every `profiling::profile_scope!` site with the same cfg.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 profiling = { workspace = true, optional = true }
+# Shader hot reload: native only (the watcher reads the source tree).
+notify = { workspace = true, optional = true }
+log = { workspace = true, optional = true }
 
 [dev-dependencies]
 pollster = { workspace = true }
@@ -27,5 +30,10 @@ helio-pass-hiz = { workspace = true }
 helio-pass-foliage-place = { workspace = true }
 
 [features]
-default = ["profiling"]
+default = ["profiling", "shader-hot-reload"]
 profiling = ["dep:profiling"]
+# Recompile `.wgsl` files edited while the app runs (see `shader::hot`). On by
+# default: steady state costs one atomic load per frame, and a binary with no
+# source tree on disk (or `HELIO_SHADER_HOT_RELOAD=0`) never starts the watcher.
+# Compiled out on wasm32.
+shader-hot-reload = ["dep:notify", "dep:log"]

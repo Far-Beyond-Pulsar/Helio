@@ -335,10 +335,7 @@ impl RadianceCascades2DPass {
         });
 
         // ── Scene build ───────────────────────────────────────────────────
-        let scene_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("RC Scene Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/rc_scene.wgsl").into()),
-        });
+        let scene_shader = helio_core::shader::module(device, "RC Scene Shader", helio_core::include_wgsl!("../shaders/rc_scene.wgsl"));
         let scene_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("RC Scene BGL"),
             entries: &[
@@ -391,10 +388,7 @@ impl RadianceCascades2DPass {
         });
 
         // ── Jump-flood seed + step ──────────────────────────────────────
-        let jfa_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("RC JFA Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/rc_jfa.wgsl").into()),
-        });
+        let jfa_shader = helio_core::shader::module(device, "RC JFA Shader", helio_core::include_wgsl!("../shaders/rc_jfa.wgsl"));
         let jfa_dims_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("RC Dims Uniform"),
             size: std::mem::size_of::<DimsUniform>() as u64,
@@ -533,10 +527,7 @@ impl RadianceCascades2DPass {
         };
 
         // ── Distance field ──────────────────────────────────────────────
-        let dist_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("RC Distance Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/rc_distance.wgsl").into()),
-        });
+        let dist_shader = helio_core::shader::module(device, "RC Distance Shader", helio_core::include_wgsl!("../shaders/rc_distance.wgsl"));
         let dist_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("RC Distance BGL"),
             entries: &[
@@ -578,10 +569,7 @@ impl RadianceCascades2DPass {
         });
 
         // ── Cascades ────────────────────────────────────────────────────
-        let cascade_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("RC Cascade Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/rc_cascade.wgsl").into()),
-        });
+        let cascade_shader = helio_core::shader::module(device, "RC Cascade Shader", helio_core::include_wgsl!("../shaders/rc_cascade.wgsl"));
         let cascade_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("RC Cascade BGL"),
             entries: &[
@@ -856,10 +844,7 @@ impl RadianceCascadesCompositePass {
         ambient: [f32; 3],
         exposure: f32,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("RC Composite Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/rc_composite.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "RC Composite Shader", helio_core::include_wgsl!("../shaders/rc_composite.wgsl"));
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("RC Composite BGL"),
             entries: &[

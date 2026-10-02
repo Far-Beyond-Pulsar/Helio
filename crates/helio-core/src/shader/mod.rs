@@ -24,9 +24,13 @@
 //! let shader = helio_core::shader::module(
 //!     device,
 //!     "SSR Trace Shader",
-//!     include_str!("../shaders/ssr_trace.wgsl"),
+//!     helio_core::include_wgsl!("../shaders/ssr_trace.wgsl"),
 //! );
 //! ```
+//!
+//! [`include_wgsl!`] is `include_str!` plus the file's identity; with the
+//! `shader-hot-reload` feature that identity lets [`hot`] recompile the shader
+//! when the file changes. With the feature off it is exactly `include_str!`.
 //!
 //! Opting in is per-shader: a shader without the marker is passed through
 //! untouched, so unmigrated passes that declare their own `Camera` keep working
@@ -53,7 +57,11 @@
 use std::borrow::Cow;
 
 pub mod directives;
+#[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+pub mod hot;
 pub mod reflection;
+#[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+pub use hot::ShaderFile;
 pub use directives::{parse as parse_directives, PipelineDirectives};
 pub use reflection::{
     create_bind_group_layouts, create_pipeline_layout, create_reflected_bind_groups,
@@ -70,8 +78,145 @@ pub use reflection::{
 /// no specific pass (like `PassContext::camera` being a first-class field).
 pub const PRELUDE: &str = include_str!("prelude.wgsl");
 
+/// [`PRELUDE`] with its on-disk identity, so hot reload can watch and
+/// override it like any other shader file.
+#[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+pub(crate) const PRELUDE_FILE: ShaderFile = ShaderFile {
+    embedded: PRELUDE,
+    manifest_dir: env!("CARGO_MANIFEST_DIR"),
+    file: file!(),
+    rel: "prelude.wgsl",
+};
+
 /// Marker opting a shader into the prelude. Must appear in the source.
 pub const MARKER: &str = "//!use helio_prelude";
+
+/// Embeds a `.wgsl` file the way `include_str!` does, but with the file's
+/// identity attached so the shader can be hot reloaded.
+///
+/// Use it in place of `include_str!` wherever a shader is handed to
+/// [`module`]/[`module_with`]. With the `shader-hot-reload` feature off it
+/// *is* `include_str!` (a `&'static str`), so nothing changes.
+///
+/// ```ignore
+/// let shader = helio_core::shader::module(
+///     device,
+///     "SSR Trace Shader",
+///     helio_core::include_wgsl!("../shaders/ssr_trace.wgsl"),
+/// );
+/// ```
+#[cfg(not(all(feature = "shader-hot-reload", not(target_arch = "wasm32"))))]
+#[macro_export]
+macro_rules! include_wgsl {
+    ($rel:expr) => {
+        include_str!($rel)
+    };
+}
+
+/// Embeds a `.wgsl` file the way `include_str!` does, but with the file's
+/// identity attached so the shader can be hot reloaded.
+///
+/// Expands to a [`ShaderFile`](crate::shader::ShaderFile) carrying the
+/// embedded text, the crate's manifest dir, `file!()` and the relative path,
+/// from which the on-disk file is located at runtime.
+#[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+#[macro_export]
+macro_rules! include_wgsl {
+    ($rel:expr) => {
+        $crate::shader::ShaderFile {
+            embedded: include_str!($rel),
+            manifest_dir: env!("CARGO_MANIFEST_DIR"),
+            file: file!(),
+            rel: $rel,
+        }
+    };
+}
+
+/// Declares a [`ShaderSnippet`] backed by a `.wgsl` file, so a hot reload of
+/// that file changes what the snippet expands to. With the feature off it is
+/// `ShaderSnippet::new(marker, include_str!(rel))`.
+#[cfg(not(all(feature = "shader-hot-reload", not(target_arch = "wasm32"))))]
+#[macro_export]
+macro_rules! wgsl_snippet {
+    ($marker:expr, $rel:expr) => {
+        $crate::shader::ShaderSnippet::new($marker, include_str!($rel))
+    };
+}
+
+/// Declares a [`ShaderSnippet`] backed by a `.wgsl` file, so a hot reload of
+/// that file changes what the snippet expands to.
+#[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+#[macro_export]
+macro_rules! wgsl_snippet {
+    ($marker:expr, $rel:expr) => {
+        $crate::shader::ShaderSnippet::from_file($marker, $crate::include_wgsl!($rel))
+    };
+}
+
+/// Shader text handed to [`module`]/[`module_with`].
+///
+/// Built from a plain `&str` (never hot reloaded) or, with the
+/// `shader-hot-reload` feature, from an [`include_wgsl!`] value that carries
+/// the file's identity.
+#[derive(Clone, Copy)]
+pub struct ShaderSource<'a> {
+    /// The text compiled when no hot-reload override exists.
+    pub text: &'a str,
+    /// On-disk identity of `text`, when it came from `include_wgsl!`.
+    #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+    pub file: Option<ShaderFile>,
+}
+
+impl<'a> From<&'a str> for ShaderSource<'a> {
+    fn from(text: &'a str) -> Self {
+        Self {
+            text,
+            #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+            file: None,
+        }
+    }
+}
+
+impl<'a> From<&'a String> for ShaderSource<'a> {
+    fn from(text: &'a String) -> Self {
+        text.as_str().into()
+    }
+}
+
+#[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+impl From<ShaderFile> for ShaderSource<'static> {
+    fn from(file: ShaderFile) -> Self {
+        Self {
+            text: file.embedded,
+            file: Some(file),
+        }
+    }
+}
+
+/// Where expansion gets the text of the prelude and of each snippet.
+///
+/// [`resolve_with`] uses the live source (the embedded text, or the latest
+/// hot-reload override); the hot-reload watcher expands against a candidate
+/// override set to validate a change before accepting it.
+pub(crate) trait TextSource {
+    fn prelude(&self) -> Cow<'_, str>;
+    fn snippet<'s>(&'s self, snippet: &'s ShaderSnippet) -> Cow<'s, str>;
+}
+
+/// The text compiled into the binary.
+#[cfg(not(all(feature = "shader-hot-reload", not(target_arch = "wasm32"))))]
+struct Embedded;
+
+#[cfg(not(all(feature = "shader-hot-reload", not(target_arch = "wasm32"))))]
+impl TextSource for Embedded {
+    fn prelude(&self) -> Cow<'_, str> {
+        Cow::Borrowed(PRELUDE)
+    }
+
+    fn snippet<'s>(&'s self, snippet: &'s ShaderSnippet) -> Cow<'s, str> {
+        Cow::Borrowed(snippet.source)
+    }
+}
 
 /// A pass-declared shader snippet: text pre-pended to a shader's source when
 /// the shader contains `marker` as a WGSL comment.
@@ -88,11 +233,32 @@ pub struct ShaderSnippet {
     pub marker: &'static str,
     /// Text pre-pended to the shader when `marker` is present.
     pub source: &'static str,
+    /// On-disk identity of `source`, when declared through [`wgsl_snippet!`]
+    /// (so hot reload can watch it and override `source`).
+    #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+    pub file: Option<ShaderFile>,
 }
 
 impl ShaderSnippet {
+    /// A snippet whose text is not hot reloadable. Prefer [`wgsl_snippet!`]
+    /// for a snippet that lives in a `.wgsl` file.
     pub const fn new(marker: &'static str, source: &'static str) -> Self {
-        Self { marker, source }
+        Self {
+            marker,
+            source,
+            #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+            file: None,
+        }
+    }
+
+    /// A snippet backed by a `.wgsl` file; see [`wgsl_snippet!`].
+    #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+    pub const fn from_file(marker: &'static str, file: ShaderFile) -> Self {
+        Self {
+            marker,
+            source: file.embedded,
+            file: Some(file),
+        }
     }
 
     fn used_by(&self, source: &str) -> bool {
@@ -114,16 +280,38 @@ pub fn expanded_lines(source: &str) -> usize {
 /// diagnostics back to the original file. Depends on which of `snippets`
 /// (plus the prelude) the source opts into.
 pub fn expanded_lines_with(source: &str, snippets: &[ShaderSnippet]) -> usize {
+    expanded_lines_from(source, snippets, live_text())
+}
+
+/// [`expanded_lines_with`] against an explicit text source.
+pub(crate) fn expanded_lines_from(
+    source: &str,
+    snippets: &[ShaderSnippet],
+    text: &dyn TextSource,
+) -> usize {
     let mut lines = 0;
     if uses_prelude(source) {
-        lines += PRELUDE.lines().count() + 1;
+        lines += text.prelude().lines().count() + 1;
     }
     for snippet in snippets {
         if snippet.used_by(source) {
-            lines += snippet.source.lines().count() + 1;
+            lines += text.snippet(snippet).lines().count() + 1;
         }
     }
     lines
+}
+
+/// The text source [`resolve_with`] expands against.
+#[cfg(not(all(feature = "shader-hot-reload", not(target_arch = "wasm32"))))]
+fn live_text() -> &'static dyn TextSource {
+    &Embedded
+}
+
+/// The text source [`resolve_with`] expands against: embedded text, unless a
+/// hot-reload override replaced it.
+#[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+fn live_text() -> &'static dyn TextSource {
+    &hot::Live
 }
 
 /// Expands a shader source to what the GPU actually compiles, using only the
@@ -141,6 +329,15 @@ pub fn resolve(source: &str) -> Cow<'_, str> {
 /// test validates exactly what the runtime builds rather than an
 /// approximation of it.
 pub fn resolve_with<'a>(source: &'a str, snippets: &[ShaderSnippet]) -> Cow<'a, str> {
+    resolve_from(source, snippets, live_text())
+}
+
+/// [`resolve_with`] against an explicit text source.
+pub(crate) fn resolve_from<'a>(
+    source: &'a str,
+    snippets: &[ShaderSnippet],
+    text: &dyn TextSource,
+) -> Cow<'a, str> {
     let prelude = uses_prelude(source);
     let active: Vec<&ShaderSnippet> = snippets.iter().filter(|s| s.used_by(source)).collect();
     if !prelude && active.is_empty() {
@@ -182,42 +379,116 @@ pub fn resolve_with<'a>(source: &'a str, snippets: &[ShaderSnippet]) -> Cow<'a, 
     };
 
     if prelude {
-        out.push_str(PRELUDE);
+        out.push_str(&text.prelude());
         out.push('\n');
     }
     // Snippets follow the prelude, in caller-supplied order — the order a
     // pass lists its own snippets in is that pass's concern, not the core's.
     for snippet in active {
-        out.push_str(snippet.source);
+        out.push_str(&text.snippet(snippet));
         out.push('\n');
     }
     out.push_str(&body);
     Cow::Owned(out)
 }
 
+/// The text of a shader a pass rewrites in Rust before compiling it (binding
+/// array substitutions, tier-specific defines, ...).
+///
+/// Pass the result to [`module`]/[`module_with`] as a plain `&str`. With the
+/// `shader-hot-reload` feature, an [`include_wgsl!`] source is registered with
+/// the watcher and this returns the latest accepted on-disk text instead of the
+/// embedded text, so the rewrite is applied to the edited file. The file is
+/// not validated on the CPU (it is not valid WGSL until rewritten); the
+/// host's GPU error scope judges the rebuilt result. With the feature off this
+/// is just the embedded text.
+pub fn source_text<'a>(label: &str, source: impl Into<ShaderSource<'a>>) -> Cow<'a, str> {
+    let source = source.into();
+    #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+    {
+        hot::current_source(&source, label, &[], false)
+    }
+    #[cfg(not(all(feature = "shader-hot-reload", not(target_arch = "wasm32"))))]
+    {
+        let _ = label;
+        Cow::Borrowed(source.text)
+    }
+}
+
 /// Creates a shader module, expanding only the generic prelude if the source
 /// opts in. Equivalent to `module_with(device, label, source, &[])`.
-pub fn module(device: &wgpu::Device, label: &str, source: &str) -> wgpu::ShaderModule {
+///
+/// `source` is a `&str` or an [`include_wgsl!`] value; only the latter is
+/// hot reloadable.
+pub fn module<'a>(
+    device: &wgpu::Device,
+    label: &str,
+    source: impl Into<ShaderSource<'a>>,
+) -> wgpu::ShaderModule {
     module_with(device, label, source, &[])
 }
 
 /// Creates a shader module, expanding the prelude and any of `snippets` the
 /// source opts into.
-pub fn module_with(
+///
+/// With the `shader-hot-reload` feature, an [`include_wgsl!`] source is
+/// registered with the watcher and compiled from the latest on-disk text once
+/// one has been accepted, instead of the text embedded in the binary.
+pub fn module_with<'a>(
     device: &wgpu::Device,
     label: &str,
-    source: &str,
+    source: impl Into<ShaderSource<'a>>,
     snippets: &[ShaderSnippet],
 ) -> wgpu::ShaderModule {
-    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+    let source = source.into();
+    #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+    let text = hot::current_source(&source, label, snippets, true);
+    #[cfg(not(all(feature = "shader-hot-reload", not(target_arch = "wasm32"))))]
+    let text = Cow::Borrowed(source.text);
+    // The one sanctioned call: every other site goes through here so the
+    // shader is hot reloadable (see clippy.toml).
+    #[allow(clippy::disallowed_methods, clippy::let_and_return)]
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
-        source: wgpu::ShaderSource::Wgsl(resolve_with(source, snippets)),
-    })
+        source: wgpu::ShaderSource::Wgsl(resolve_with(&text, snippets)),
+    });
+    module
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(all(feature = "shader-hot-reload", not(target_arch = "wasm32"))))]
+    #[test]
+    fn include_wgsl_is_include_str_when_hot_reload_is_off() {
+        // Same type and same text, so every existing `&str` call site keeps
+        // compiling and behaving identically.
+        let via_macro: &'static str = crate::include_wgsl!("prelude.wgsl");
+        assert_eq!(via_macro, include_str!("prelude.wgsl"));
+        assert_eq!(via_macro, PRELUDE);
+    }
+
+    #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+    #[test]
+    fn include_wgsl_carries_the_embedded_text_when_hot_reload_is_on() {
+        let file = crate::include_wgsl!("prelude.wgsl");
+        assert_eq!(file.embedded, PRELUDE);
+        assert_eq!(file.rel, "prelude.wgsl");
+        assert!(file.file.ends_with("mod.rs"));
+        let source: ShaderSource<'_> = file.into();
+        assert_eq!(source.text, PRELUDE);
+        assert!(source.file.is_some());
+    }
+
+    #[test]
+    fn plain_str_converts_to_a_source() {
+        let source: ShaderSource<'_> = "fn x() {}".into();
+        assert_eq!(source.text, "fn x() {}");
+        let owned = String::from("fn y() {}");
+        let source: ShaderSource<'_> = (&owned).into();
+        assert_eq!(source.text, "fn y() {}");
+    }
 
     #[test]
     fn source_without_marker_is_untouched() {

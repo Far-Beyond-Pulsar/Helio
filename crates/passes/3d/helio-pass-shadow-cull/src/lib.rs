@@ -81,10 +81,7 @@ impl ShadowCullPass {
     /// this pass only *reads* it to skip clean faces.
     pub fn new(device: &wgpu::Device, face_dirty_buf: Arc<wgpu::Buffer>) -> Self {
         // ── Shader ────────────────────────────────────────────────────────────
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("ShadowCull Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shadow_cull.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "ShadowCull Shader", helio_core::include_wgsl!("../shaders/shadow_cull.wgsl"));
 
         // ── Uniform buffer ────────────────────────────────────────────────────
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {

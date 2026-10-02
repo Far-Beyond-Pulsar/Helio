@@ -66,6 +66,10 @@ impl RadiantShaderCache {
                     material_binding.max_textures,
                 )
             };
+            // Runtime-generated WGSL (template + material graph + webgpu
+            // fixups): there is no source file to watch, so it cannot go
+            // through `helio_core::shader::module`'s registered path.
+            #[allow(clippy::disallowed_methods)]
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(label),
                 source: wgpu::ShaderSource::Wgsl(source.into()),

@@ -43,7 +43,7 @@ pub const HIZ: &str = include_str!("../shaders/hiz_trace.wgsl");
 /// `helio_core::shader::resolve_with`/`module_with` by any shader opting in
 /// via [`HIZ_MARKER`] — `helio-core` itself never names this snippet.
 pub const HIZ_SNIPPET: helio_core::shader::ShaderSnippet =
-    helio_core::shader::ShaderSnippet::new(HIZ_MARKER, HIZ);
+    helio_core::wgsl_snippet!(HIZ_MARKER, "../shaders/hiz_trace.wgsl");
 const WORKGROUP_SIZE: u32 = 8;
 const MAX_MIP_LEVELS: u32 = 12;
 
@@ -115,10 +115,7 @@ impl HiZBuildPass {
         }));
 
         // Phase 2: mip-chain downsampling pipeline
-        let mip_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("HiZ Build Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/hiz_build.wgsl").into()),
-        });
+        let mip_shader = helio_core::shader::module(device, "HiZ Build Shader", helio_core::include_wgsl!("../shaders/hiz_build.wgsl"));
 
         let mip_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("HiZ Mip BGL"),
@@ -190,12 +187,7 @@ impl HiZBuildPass {
                  culling and SSR use a conservative far-depth fallback"
             );
         }
-        let fallback_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("HiZ Far Depth Fallback Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/hiz_far_depth_fallback.wgsl").into(),
-            ),
-        });
+        let fallback_shader = helio_core::shader::module(device, "HiZ Far Depth Fallback Shader", helio_core::include_wgsl!("../shaders/hiz_far_depth_fallback.wgsl"));
         let fallback_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("HiZ Far Depth Fallback BGL"),
             entries: &[

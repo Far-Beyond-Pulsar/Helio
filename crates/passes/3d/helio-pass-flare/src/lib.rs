@@ -8,7 +8,6 @@ use helio_core::{PassContext, RenderPass, ResourceKey, Result as HelioResult};
 pub mod gpu_types;
 pub use gpu_types::*;
 
-const SHADER: &str = include_str!("../shaders/lens_response.wgsl");
 pub const OUTPUT_KEY: &str = "lens_output";
 /// Optional graph texture replacing the built-in procedural lens dirt.
 pub const DIRT_KEY: &str = "lens_dirt";
@@ -239,7 +238,11 @@ impl LensFlarePass {
                 },
             ],
         });
-        let shader = helio_core::shader::module(device, "Physical lens response", SHADER);
+        let shader = helio_core::shader::module(
+            device,
+            "Physical lens response",
+            helio_core::include_wgsl!("../shaders/lens_response.wgsl"),
+        );
         let pipeline = |entry, layouts: &[Option<&wgpu::BindGroupLayout>]| {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(entry), bind_group_layouts: layouts, immediate_size: 0,

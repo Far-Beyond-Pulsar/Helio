@@ -156,6 +156,9 @@ pub struct Renderer {
     pub(crate) clear_target_next_frame: bool,
     pub(crate) graph_rebuilder: Option<GraphRebuilder>,
     pub(crate) graph_rebuild_hook: Option<GraphRebuildHook>,
+    /// Shader hot-reload bookkeeping (see `shader_reload.rs`).
+    #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+    pub(crate) shader_reload: super::shader_reload::ShaderReloadState,
     /// Frontend-owned SceneDB GPU projection. The CPU SceneDB remains outside
     /// Helio and is flushed by its owner at the frame boundary.
     pub(crate) scene_db: SceneDbHandle,

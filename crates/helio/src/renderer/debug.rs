@@ -272,10 +272,7 @@ impl DebugPass {
         target_format: wgpu::TextureFormat,
         depth_test: bool,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Debug Draw Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/debug_draw.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "Debug Draw Shader", helio_core::include_wgsl!("../../shaders/debug_draw.wgsl"));
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Debug Draw BGL"),
@@ -795,12 +792,7 @@ impl DebugDrawPass {
         // against real geometry rather than painting over it.
         pass.set_use_scene_depth(editor_mode && depth_test);
 
-        let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Infinite Debug Grid Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../../shaders/infinite_grid.wgsl").into(),
-            ),
-        });
+        let grid_shader = helio_core::shader::module(device, "Infinite Debug Grid Shader", helio_core::include_wgsl!("../../shaders/infinite_grid.wgsl"));
         let grid_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Infinite Debug Grid BGL"),
             entries: &[wgpu::BindGroupLayoutEntry {

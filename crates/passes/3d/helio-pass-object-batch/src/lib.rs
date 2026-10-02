@@ -417,10 +417,7 @@ pub struct ObjectBatchPass {
 
 impl ObjectBatchPass {
     pub fn new(device: &wgpu::Device) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("ObjectBatch Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/object_batch.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "ObjectBatch Shader", helio_core::include_wgsl!("../shaders/object_batch.wgsl"));
 
         let cs = wgpu::ShaderStages::COMPUTE;
         let bgls = BindGroupLayouts {

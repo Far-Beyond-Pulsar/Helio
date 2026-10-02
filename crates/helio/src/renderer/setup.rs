@@ -267,6 +267,8 @@ impl Renderer {
             cull_stats_buffer,
             graph_rebuilder,
             graph_rebuild_hook: None,
+            #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+            shader_reload: Default::default(),
             scene_db,
             tsr_quality: config.tsr_quality,
             fallback_sky_enabled: false,

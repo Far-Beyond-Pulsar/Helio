@@ -164,10 +164,7 @@ impl SpriteCullPass {
         let max_blocks = max_visible.div_ceil(WG_SIZE).max(1);
 
         // ── Cull ────────────────────────────────────────────────────────────
-        let cull_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Sprite Cull Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sprite_cull.wgsl").into()),
-        });
+        let cull_shader = helio_core::shader::module(device, "Sprite Cull Shader", helio_core::include_wgsl!("../shaders/sprite_cull.wgsl"));
         let cull_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sprite Cull BGL"),
             entries: &[
@@ -296,10 +293,7 @@ impl SpriteCullPass {
         });
 
         // ── Sort ────────────────────────────────────────────────────────────
-        let sort_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Sprite Sort Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sprite_sort.wgsl").into()),
-        });
+        let sort_shader = helio_core::shader::module(device, "Sprite Sort Shader", helio_core::include_wgsl!("../shaders/sprite_sort.wgsl"));
 
         let prepare_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Sprite Sort Prepare Pipeline"),

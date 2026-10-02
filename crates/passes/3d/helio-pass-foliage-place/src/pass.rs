@@ -354,14 +354,8 @@ impl FoliagePlacePass {
         });
 
         // ── Pipelines ──────────────────────────────────────────────────────────
-        let place_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Foliage Place Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/foliage_place.wgsl").into()),
-        });
-        let cull_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Foliage Cull Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/foliage_cull.wgsl").into()),
-        });
+        let place_shader = helio_core::shader::module(device, "Foliage Place Shader", helio_core::include_wgsl!("../shaders/foliage_place.wgsl"));
+        let cull_shader = helio_core::shader::module(device, "Foliage Cull Shader", helio_core::include_wgsl!("../shaders/foliage_cull.wgsl"));
 
         let place_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Foliage Place BGL"),

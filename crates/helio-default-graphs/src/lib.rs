@@ -126,6 +126,81 @@ fn declare_common_external_inputs(graph: &mut RenderGraph) {
     graph.declare_external_input("corona_emitters");
 }
 
+/// Which of this crate's passes shader hot reload may swap on their own
+/// (see [`helio_core::SwapPolicy`] for what a swap does and why a policy is
+/// needed).
+///
+/// Derived by auditing every constructor call in this file for handles the
+/// builder creates and shares between passes. Those passes form a group and
+/// are swapped together:
+///
+/// * shadows: `ShadowMatrixPass` + `ShadowDirtyPass` (dirty-flag buffer),
+///   `ShadowDirtyPass` + `ShadowCullPass` + `ShadowPass` (face dirty, geometry
+///   count, indirect and count buffers)
+/// * `HiZBuildPass` + `OcclusionCullPass` (Hi-Z sampler)
+/// * `PortalCullPass` + `PortalInstancePass` (portal output buffers)
+/// * `FoliagePlacePass` + `FoliageGBufferPass` (blade arena, tile table,
+///   visible blades, indirect buffer)
+/// * every perf-overlay pass (one shared `PerfOverlayShared`)
+///
+/// Everything else listed as independent takes only renderer-owned handles
+/// (camera, debug camera and cull-stats buffers, debug-draw state, SceneDB,
+/// the debug-overlay state) and plain configuration; those are the same objects
+/// in the live and the replacement graph. `GBufferPass`, `ForwardLitPass`
+/// and `TransparentPass` are left out on purpose: they build part of their
+/// WGSL at runtime and keep material/template registrations, so edits to them
+/// rebuild the whole graph. So are passes from the application's voxel,
+/// lighting and final-pass factories, which this crate cannot vouch for.
+///
+/// Dropping the replacement's unswapped passes has no side effects beyond the
+/// ones a resize already has: none of these constructors spawns a thread,
+/// registers into a global or shared registry, or writes a file, and the
+/// replacement graph's pipeline cache has no persistence path.
+fn default_swap_policy() -> helio_core::SwapPolicy {
+    use helio_core::graph::type_name_of as name;
+    helio_core::SwapPolicy::new()
+        .independent::<ObjectBatchPass>()
+        .independent::<IndirectDispatchPass>()
+        .independent::<SkyPass>()
+        .independent::<LightCullPass>()
+        .independent::<DecalPass>()
+        .independent::<SsrPass>()
+        .independent::<helio_pass_ssr::SsrCompositePass>()
+        .independent::<PlanarReflectionPass>()
+        .independent::<DeferredLightPass>()
+        .independent::<HlfsPass>()
+        .independent::<VirtualGeometryPass>()
+        .independent::<PortalMaskPass>()
+        .independent::<PortalEditorOverlayPass>()
+        .independent::<BillboardPass>()
+        .independent::<CoronaPass>()
+        .independent::<WaterSimPass>()
+        .independent::<helio::DebugDrawPass>()
+        .independent::<DebugOverlayPass>()
+        .independent::<PostProcessVolumeBlendPass>()
+        .independent::<VolumetricFogPass>()
+        .independent::<FogCompositePass>()
+        .independent::<TsrPass>()
+        .independent::<FxaaPass>()
+        .independent::<LensFlarePass>()
+        .independent::<PostProcessPass>()
+        .independent::<DofPass>()
+        .group_types(&[
+            name::<ShadowMatrixPass>(),
+            name::<ShadowDirtyPass>(),
+            name::<ShadowCullPass>(),
+            name::<ShadowPass>(),
+        ])
+        .group_types(&[name::<HiZBuildPass>(), name::<OcclusionCullPass>()])
+        .group_types(&[name::<PortalCullPass>(), name::<PortalInstancePass>()])
+        .group_types(&[name::<FoliagePlacePass>(), name::<FoliageGBufferPass>()])
+        .group_types(&[
+            name::<PerfOverlayAnalyzerPass>(),
+            name::<PerfOverlayCostAnalyzerPass>(),
+            name::<PerfOverlayPass>(),
+        ])
+}
+
 /// Where a graph composites the sky into `pre_aa`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SkyPlacement {
@@ -1004,6 +1079,7 @@ fn build_default_graph_internal(
             )
         },
     );
+    graph.set_swap_policy(default_swap_policy());
     graph.set_graph_data(rebuilder);
 
     graph
@@ -1224,6 +1300,7 @@ fn build_fxaa_graph_internal(
             )
         },
     );
+    graph.set_swap_policy(default_swap_policy());
     graph.set_graph_data(rebuilder);
 
     graph
@@ -1358,6 +1435,7 @@ fn build_hlfs_graph_internal(
             )
         },
     );
+    graph.set_swap_policy(default_swap_policy());
     graph.set_graph_data(rebuilder);
 
     graph
@@ -1583,6 +1661,7 @@ fn build_fxaa_hlfs_graph_internal(
             )
         },
     );
+    graph.set_swap_policy(default_swap_policy());
     graph.set_graph_data(rebuilder);
 
     graph
@@ -1857,6 +1936,7 @@ fn build_forward_graph_internal(
             )
         },
     );
+    graph.set_swap_policy(default_swap_policy());
     graph.set_graph_data(rebuilder);
 
     graph

@@ -101,7 +101,7 @@ impl SsrPass {
         let shader = helio_core::shader::module_with(
             device,
             "SSR Trace Shader",
-            include_str!("../shaders/ssr_trace.wgsl"),
+            helio_core::include_wgsl!("../shaders/ssr_trace.wgsl"),
             &[helio_pass_hiz::HIZ_SNIPPET],
         );
 
@@ -179,7 +179,7 @@ impl SsrPass {
             let rt_shader = helio_core::shader::module(
                 device,
                 "SSR RT Trace Shader",
-                include_str!("../shaders/ssr_trace_rt.wgsl"),
+                helio_core::include_wgsl!("../shaders/ssr_trace_rt.wgsl"),
             );
 
             let rt_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

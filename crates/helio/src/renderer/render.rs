@@ -115,6 +115,11 @@ impl Renderer {
             self.poll_cull_stats_readback();
         }
 
+        // Before the resize drain: a pending resize rebuilds from the latest
+        // shader sources anyway, so a reload on the same frame costs nothing.
+        #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+        self.poll_shader_reload();
+
         if let Some((w, h)) = self.pending_resize.take() {
             helio_core::cpu_scope!("Helio: apply_resize_now");
             self.apply_resize_now(w, h);
@@ -887,12 +892,8 @@ impl Renderer {
             ));
         }
         if self.xr_mirror_pipeline.is_none() {
-            let module = self
-                .device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("XR Mirror Shader"),
-                    source: wgpu::ShaderSource::Wgsl(XR_MIRROR_WGSL.into()),
-                });
+            let module =
+                helio_core::shader::module(&self.device, "XR Mirror Shader", XR_MIRROR_WGSL);
             self.xr_mirror_pipeline = Some(self.device.create_render_pipeline(
                 &wgpu::RenderPipelineDescriptor {
                     label: Some("XR Mirror Pipeline"),

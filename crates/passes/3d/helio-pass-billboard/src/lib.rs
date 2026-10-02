@@ -78,10 +78,7 @@ impl BillboardPass {
         camera_buf: &wgpu::Buffer,
         target_format: wgpu::TextureFormat,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Billboard Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/billboard.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "Billboard Shader", helio_core::include_wgsl!("../shaders/billboard.wgsl"));
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Billboard Globals"),

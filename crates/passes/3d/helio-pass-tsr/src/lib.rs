@@ -251,14 +251,8 @@ impl TsrPass {
         format: wgpu::TextureFormat,
         quality: TsrQuality,
     ) -> Self {
-        let tsr_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("TSR Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/tsr_main.wgsl").into()),
-        });
-        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("TSR Blit Shader"),
-            source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
-        });
+        let tsr_shader = helio_core::shader::module(device, "TSR Shader", helio_core::include_wgsl!("../shaders/tsr_main.wgsl"));
+        let blit_shader = helio_core::shader::module(device, "TSR Blit Shader", BLIT_WGSL);
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("TSR Uniform"),

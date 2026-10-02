@@ -69,12 +69,7 @@ impl PerfOverlayShared {
             mapped_at_creation: false,
         });
 
-        let color_compare_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("PerfOverlay Color Compare Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/analyze_color_overdraw.wgsl").into(),
-            ),
-        });
+        let color_compare_shader = helio_core::shader::module(device, "PerfOverlay Color Compare Shader", helio_core::include_wgsl!("../shaders/analyze_color_overdraw.wgsl"));
 
         let color_compare_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PerfOverlay Color Compare BGL"),
@@ -146,10 +141,7 @@ impl PerfOverlayShared {
             mapped_at_creation: false,
         });
 
-        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("PerfOverlay Blit Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/blit_color.wgsl").into()),
-        });
+        let blit_shader = helio_core::shader::module(device, "PerfOverlay Blit Shader", helio_core::include_wgsl!("../shaders/blit_color.wgsl"));
 
         let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PerfOverlay Blit BGL"),
@@ -206,12 +198,7 @@ impl PerfOverlayShared {
             mapped_at_creation: false,
         });
 
-        let cost_compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("PerfOverlay Cost Compute Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/compute_shader_cost.wgsl").into(),
-            ),
-        });
+        let cost_compute_shader = helio_core::shader::module(device, "PerfOverlay Cost Compute Shader", helio_core::include_wgsl!("../shaders/compute_shader_cost.wgsl"));
 
         let cost_compute_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PerfOverlay Cost Compute BGL"),
@@ -401,12 +388,7 @@ impl PerfOverlayPass {
             .expect("tile grid overflow: viewport dimensions too large");
         drop(shared_guard);
 
-        let aggregate_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("PerfOverlay Aggregate Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/aggregate_tiles.wgsl").into(),
-            ),
-        });
+        let aggregate_shader = helio_core::shader::module(device, "PerfOverlay Aggregate Shader", helio_core::include_wgsl!("../shaders/aggregate_tiles.wgsl"));
 
         let aggregate_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PerfOverlay Aggregate BGL"),
@@ -494,10 +476,7 @@ impl PerfOverlayPass {
             mapped_at_creation: false,
         });
 
-        let visualize_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("PerfOverlay Visualize Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/visualize.wgsl").into()),
-        });
+        let visualize_shader = helio_core::shader::module(device, "PerfOverlay Visualize Shader", helio_core::include_wgsl!("../shaders/visualize.wgsl"));
 
         let visualize_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PerfOverlay Visualize BGL"),
@@ -888,12 +867,7 @@ impl MaterialProfiler {
             mapped_at_creation: false,
         });
 
-        let profile_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Material Profile Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/profile_material.wgsl").into(),
-            ),
-        });
+        let profile_shader = helio_core::shader::module(device, "Material Profile Shader", helio_core::include_wgsl!("../shaders/profile_material.wgsl"));
 
         let profile_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Material Profile BGL"),

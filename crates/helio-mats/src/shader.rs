@@ -23,7 +23,7 @@ pub const PBR_MARKER: &str = "//!use pbr_eval";
 /// marker mechanism, but this is the snippet form for anything that wants
 /// to go through `resolve_with`/`module_with` instead.
 pub const PBR_EVAL_SNIPPET: helio_core::shader::ShaderSnippet =
-    helio_core::shader::ShaderSnippet::new(PBR_MARKER, PBR_EVAL);
+    helio_core::wgsl_snippet!(PBR_MARKER, "../shaders/pbr_eval.wgsl");
 
 /// Replace native material binding arrays with baseline-WebGPU bindings.
 ///
