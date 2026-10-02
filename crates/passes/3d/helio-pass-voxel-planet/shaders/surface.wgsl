@@ -493,7 +493,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let normal_filter_w = select(coarse_w, base_filter_w * relief_face_w, FAR_RELIEF && frame.hints.z != 0u);
     let smooth_w = select(normal_filter_w, 0.0, (c.info & INFO_TOPOLOGY) != 0u);
     // Angle-aware area support is shading-only. The original weights above
-    // still choose slope/material/strata and the sunlight lift origin.
+    // still choose slope/material/strata; shadow support follows the displayed normal.
     let area_coarse_w = detail_filter_weight(size / pixel * projection.y);
     let shade_filter_w = select(area_coarse_w, area_base_w * relief_face_w, FAR_RELIEF && frame.hints.z != 0u);
     let shade_smooth_w = select(shade_filter_w, 0.0, (c.info & INFO_TOPOLOGY) != 0u);
@@ -589,21 +589,19 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     if shade_smooth_w > 0.0 {
         normal = normalize(mix(normal, fallback_normal, shade_smooth_w));
     }
-    if smooth_w > 0.0 {
-        if code < 4u && smooth_w > 0.5 {
-            if !edited {
-                let material_layer = surface_material_layer(top, material_fraction, level,
-                    (top - 1) << level, 0, code, smooth_w, material_relief,
-                    (c.info & INFO_TOPOLOGY) != 0u);
-                material = ground_material(p, climate_height, 0, slope, material_layer);
-                speck = (material & M_SPECK) != 0u;
-                material &= M_ID;
-            }
-            // Paint changes pigment, so it keeps the unpainted light origin.
-            // Sunlight treats the riser as part of the slope: traced from
-            // the column's top surface, not into the step above it.
-            lift = u32(clamp(top - h.k, 0, 255));
-        }
+    if code < 4u && smooth_w > 0.5 && !edited {
+        let material_layer = surface_material_layer(top, material_fraction, level,
+            (top - 1) << level, 0, code, smooth_w, material_relief,
+            (c.info & INFO_TOPOLOGY) != 0u);
+        material = ground_material(p, climate_height, 0, slope, material_layer);
+        speck = (material & M_SPECK) != 0u;
+        material &= M_ID;
+    }
+    if code < 4u && shade_smooth_w > 0.5 {
+        // Paint keeps the unpainted light origin. Filtered natural risers
+        // receive light at the top surface; topology and oversized fallback
+        // wall guards already suppress shade_smooth_w above.
+        lift = u32(clamp(top - h.k, 0, 255));
     }
     let raw_smooth_w = canonical_w;
     if shade_canonical_w > 0.0 {
@@ -693,7 +691,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let a8 = vec4<u32>(vec4<f32>(clamp(pow(albedo, vec3<f32>(1.0 / 2.2)), vec3<f32>(0.0), vec3<f32>(1.0)), ao) * 255.0 + 0.5);
     out.albedo_ao = a8.x | (a8.y << 8u) | (a8.z << 16u) | (a8.w << 24u);
     out.normal = oct_encode(normal);
-    let filtered = u32(round(smooth_w * 7.0));
+    let filtered = u32(round(shade_smooth_w * 7.0));
     out.flags = ST_HIT | (material << 8u) | (level << 16u) | (filtered << 21u) | (lift << 24u);
     surfaces[index] = out;
 }
