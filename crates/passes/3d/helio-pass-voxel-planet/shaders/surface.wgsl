@@ -114,6 +114,13 @@ fn hit_normal(h: Hit, d: vec3<f32>) -> vec3<f32> {
     return -d;
 }
 
+// Keep the large planetary origin in integers until it has been removed.
+// Adding a ~50M base index in f32 first loses several authored voxel fractions.
+fn face_local_cell(eye_index: vec3<i32>, hit_index: vec3<i32>, relative: vec3<f32>, level: u32) -> vec3<f32> {
+    let origin_delta = (hit_index << vec3<u32>(level)) - eye_index;
+    return (relative - vec3<f32>(origin_delta)) / f32(1u << level);
+}
+
 // Occupancy of a level cell; `home` is the hit's own column, which serves
 // most neighbour queries without a hash lookup.
 fn occupied(face: u32, level: u32, i: i32, j: i32, k: i32, home: Column, hi: i32, hj: i32) -> bool {
@@ -678,14 +685,10 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         let c11 = corner_ao(s1, s3, occupied(face, level, f.x + du.x + dv.x, f.y + du.y + dv.y, f.z + du.z + dv.z, c, h.i, h.j));
         // Position of the hit inside the face.
         let fr = face_ray(face, make_ray(camera.position_near.xyz, d));
-        let scale = 1.0 / f32(1 << level);
-        var cell = vec3<f32>(
-            (f32(fr.idx.x) + face_coord(fr, 0u, h.t)) * scale,
-            (f32(fr.idx.y) + face_coord(fr, 1u, h.t)) * scale,
-            (f32(frame.layer_i.x) + layer_coord(make_ray(camera.position_near.xyz, d), h.t)) * scale,
-        );
-        let uv = clamp(vec2<f32>(cell[u_axis] - f32(select(select(h.i, h.j, u_axis == 1u), h.k, u_axis == 2u)),
-                                 cell[v_axis] - f32(select(select(h.i, h.j, v_axis == 1u), h.k, v_axis == 2u))), vec2<f32>(0.0), vec2<f32>(1.0));
+        let cell = face_local_cell(vec3<i32>(fr.idx, frame.layer_i.x), vec3<i32>(h.i, h.j, h.k),
+            vec3<f32>(face_coord(fr, 0u, h.t), face_coord(fr, 1u, h.t),
+                layer_coord(make_ray(camera.position_near.xyz, d), h.t)), level);
+        let uv = clamp(vec2<f32>(cell[u_axis], cell[v_axis]), vec2<f32>(0.0), vec2<f32>(1.0));
         if axis < 2u && material == M_GRASS && appearance_w <= 0.5 {
             let tooth = f32(hash3(h.i, h.j, h.k * 4 + i32(floor(uv.x * 4.0)), 0x5bd1e995u) & 7u) / 7.0;
             // Continuous in distance (not level), so level changes show no band.
