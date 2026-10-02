@@ -322,6 +322,53 @@ fn canonical_relief_slope(face: u32, up: vec3<f32>, gradient: vec3<f32>, radius:
     return 8.0 * radius * frame.layer.z / frame.layer.y * max(abs(di), abs(dj));
 }
 
+// Convert the existing column derivatives to a physical tangent gradient.
+// Cube-sphere chart directions are oblique away from the face centre; solve
+// their two constraints instead of treating the plane normals as orthogonal.
+fn column_relief_gradient(face: u32, up: vec3<f32>, derivative: vec2<f32>, radius: f32) -> vec4<f32> {
+    var vi: vec3<f32>;
+    var vj: vec3<f32>;
+    if is_plane() {
+        let f = frame.faces[face];
+        vi = f.m_a.xyz * (frame.layer.z / frame.layer.y);
+        vj = f.m_b.xyz * (frame.layer.z / frame.layer.y);
+    } else {
+        let n = vec3<f32>(face_axis(face, 0u));
+        let a = vec3<f32>(face_axis(face, 1u));
+        let b = vec3<f32>(face_axis(face, 2u));
+        let un = dot(up, n);
+        let ua = dot(up, a);
+        let ub = dot(up, b);
+        let scale = radius * frame.layer.z / frame.layer.y;
+        vi = (a - up * ua) * (scale * (un + ua * ua / un));
+        vj = (b - up * ub) * (scale * (un + ub * ub / un));
+    }
+    let aa = dot(vi, vi);
+    let bb = dot(vj, vj);
+    let ab = dot(vi, vj);
+    let determinant = aa * bb - ab * ab;
+    let gradient = (derivative.x * (bb * vi - ab * vj)
+        + derivative.y * (aa * vj - ab * vi)) / determinant;
+    // These input derivatives are already radial cells per chart cell:
+    // the physical gradient maps back to the same eighths used by materials.
+    return vec4<f32>(gradient, 8.0 * max(abs(derivative.x), abs(derivative.y)));
+}
+
+// Relief changes geometry inside the last coarse cell. Natural surface
+// strata use that stored authored top, not the enclosing coarse voxel.
+// Cuts, deep samples and resolvable walls keep their actual hit layer.
+fn surface_material_layer(top: i32, fraction: u32, level: u32, hit_layer: i32,
+    depth: i32, code: u32, filtered: f32, relief: bool, topology: bool) -> i32 {
+    if !relief || topology || depth != 0 || (code != 4u && (code >= 4u || filtered <= 0.5)) {
+        return hit_layer;
+    }
+    if fraction == 0u { return (top << level) - 1; }
+    var remainder: u32;
+    if level <= 16u { remainder = fraction >> (16u - level); }
+    else { remainder = fraction << (level - 16u); }
+    return ((top - 1) << level) + i32(remainder) - 1;
+}
+
 // A natural riser remains surface material even inside a topology column.
 // Subsoil on a side requires a resident base-solid neighbour removed by the
 // edit journal. No generator query is needed to certify this cut face.
@@ -408,6 +455,39 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         canonical_relief = cached_relief_normal(id.xy, h, canonical_up);
     }
     let canonical_w = canonical_relief.w * authored_relief_w * relief_face_w;
+    let material_relief = (c.info & INFO_RELIEF) != 0u && column_tops_fit(c);
+    var material_fraction = 0u;
+    if material_relief { material_fraction = column_relief_fraction(c, x, y); }
+    let coarse_w = detail_filter_weight(size / pixel);
+    let authored_w = select(0.0, base_filter_w, FAR_RELIEF && frame.hints.z != 0u);
+    // Visibility may temporarily use a coarser column. Its enlarged cell
+    // edges are not visible authored voxels, even when the normal stencil rejects.
+    let appearance_w = max(coarse_w, authored_w);
+    // Generated base tops do not describe edit walls, cave ceilings or floors.
+    // Paint-only and ignored tiny lists keep their existing filtering.
+    let normal_filter_w = select(coarse_w, base_filter_w * relief_face_w, FAR_RELIEF && frame.hints.z != 0u);
+    let smooth_w = select(normal_filter_w, 0.0, (c.info & INFO_TOPOLOGY) != 0u);
+    var fallback_normal = vec3<f32>(0.0);
+    var fallback_slope = 0.0;
+    if smooth_w > 0.0 {
+        let x0 = select(x - 1u, 0u, x == 0u);
+        let x1 = min(x + 1u, 7u);
+        let y0 = select(y - 1u, 0u, y == 0u);
+        let y1 = min(y + 1u, 7u);
+        let di = column_top(c, x1, y) - column_top(c, x0, y);
+        let dj = column_top(c, x, y1) - column_top(c, x, y0);
+        var gi = f32(di) / f32(x1 - x0);
+        var gj = f32(dj) / f32(y1 - y0);
+        if level >= 1u && column_tops_fit(c) && (c.info & INFO_RELIEF) != 0u {
+            gi = f32(column_relief_delta_q16(c, vec2<u32>(x1, y), vec2<u32>(x0, y), di)) / (65536.0 * f32(x1 - x0));
+            gj = f32(column_relief_delta_q16(c, vec2<u32>(x, y1), vec2<u32>(x, y0), dj)) / (65536.0 * f32(y1 - y0));
+        }
+        let up = hit_up(h.t, d);
+        let radius = frame.eye.w + height_rel(make_ray(camera.position_near.xyz, d), h.t);
+        let field = column_relief_gradient(face, up, vec2<f32>(gi, gj), radius);
+        fallback_normal = normalize(up - field.xyz);
+        fallback_slope = field.w;
+    }
     if !edited {
         var lowest = top;
         if x > 0u { lowest = min(lowest, column_top(c, x - 1u, y)); }
@@ -426,6 +506,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             // Packed tops differ by at most 255, so the Q16 delta fits i32.
             slope = max(abs(di), abs(dj)) / 57344;
         }
+        if smooth_w > 0.0 { slope = i32(mix(f32(slope), fallback_slope, smooth_w)); }
         if canonical_w > 0.0 {
             let gradient = canonical_up - canonical_relief.xyz / dot(canonical_relief.xyz, canonical_up);
             let radius = length(frame.eye.xyz * frame.eye.w + camera.position_near.xyz + h.t * d);
@@ -449,7 +530,10 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
                 depth = max(top - 1 - h.k, 0) << level;
             }
         }
-        material = ground_material(p, climate_height, depth, slope, h.k << level);
+        let material_layer = surface_material_layer(top, material_fraction, level,
+            h.k << level, depth, code, smooth_w, material_relief,
+            (c.info & INFO_TOPOLOGY) != 0u);
+        material = ground_material(p, climate_height, depth, slope, material_layer);
         speck = (material & M_SPECK) != 0u;
         material &= M_ID;
     }
@@ -460,35 +544,15 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // field and shows surface material on its risers. Cells several pixels
     // wide keep crisp faces; the blend follows the pixel footprint, so level
     // changes show no seam.
-    let coarse_w = detail_filter_weight(size / pixel);
-    let authored_w = select(0.0, base_filter_w, FAR_RELIEF && frame.hints.z != 0u);
-    // Visibility may temporarily use a coarser column. Its enlarged cell
-    // edges are not visible authored voxels, even when the normal stencil rejects.
-    let appearance_w = max(coarse_w, authored_w);
-    // Generated base tops do not describe edit walls, cave ceilings or floors.
-    // Paint-only and ignored tiny lists keep their existing filtering.
-    let normal_filter_w = select(coarse_w, base_filter_w * relief_face_w, FAR_RELIEF && frame.hints.z != 0u);
-    let smooth_w = select(normal_filter_w, 0.0, (c.info & INFO_TOPOLOGY) != 0u);
     var lift = 0u;
     if smooth_w > 0.0 {
-        let x0 = select(x - 1u, 0u, x == 0u);
-        let x1 = min(x + 1u, 7u);
-        let y0 = select(y - 1u, 0u, y == 0u);
-        let y1 = min(y + 1u, 7u);
-        let di = column_top(c, x1, y) - column_top(c, x0, y);
-        let dj = column_top(c, x, y1) - column_top(c, x, y0);
-        var gi = f32(di) / f32(x1 - x0);
-        var gj = f32(dj) / f32(y1 - y0);
-        if level >= 1u && column_tops_fit(c) && (c.info & INFO_RELIEF) != 0u {
-            gi = f32(column_relief_delta_q16(c, vec2<u32>(x1, y), vec2<u32>(x0, y), di)) / (65536.0 * f32(x1 - x0));
-            gj = f32(column_relief_delta_q16(c, vec2<u32>(x, y1), vec2<u32>(x, y0), dj)) / (65536.0 * f32(y1 - y0));
-        }
-        let up = hit_up(h.t, d);
-        let macro_normal = normalize(up - gi * plane_normal(face, 0u, h.i << level) - gj * plane_normal(face, 1u, h.j << level));
-        normal = normalize(mix(normal, macro_normal, smooth_w));
+        normal = normalize(mix(normal, fallback_normal, smooth_w));
         if code < 4u && smooth_w > 0.5 {
             if !edited {
-                material = ground_material(p, climate_height, 0, slope, (top - 1) << level);
+                let material_layer = surface_material_layer(top, material_fraction, level,
+                    (top - 1) << level, 0, code, smooth_w, material_relief,
+                    (c.info & INFO_TOPOLOGY) != 0u);
+                material = ground_material(p, climate_height, 0, slope, material_layer);
                 speck = (material & M_SPECK) != 0u;
                 material &= M_ID;
             }
