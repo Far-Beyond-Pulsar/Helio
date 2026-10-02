@@ -38,10 +38,10 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
         @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) id:vec3<u32>) {{
             if id.x>=arrayLength(&probes) {{return;}}
             let p=probes[id.x];
-            answers[id.x*3u]=vec4<f32>(canonical_relief_slope(u32(p.params.x),p.up.xyz,p.gradient.xyz,p.params.y),
+            answers[id.x*4u]=vec4<f32>(canonical_relief_slope(u32(p.params.x),p.up.xyz,p.gradient.xyz,p.params.y),
                 canonical_relief_confidence(p.params.z),canonical_relief_face_weight(0u,p.params.w,false),canonical_relief_face_weight(4u,p.params.w,false));
             let base=detail_filter_weight(p.params.w);
-            answers[id.x*3u+1u]=vec4<f32>(base,
+            answers[id.x*4u+1u]=vec4<f32>(base,
                 base*canonical_relief_face_weight(0u,p.params.w*2.0,true),
                 base*canonical_relief_face_weight(0u,p.params.w*4.0,true),
                 base*canonical_relief_face_weight(0u,p.params.w*32.0,false));
@@ -51,7 +51,9 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                 let distance=(p.params.w*10.0+1.0)/(1.0-0.5*dithers[n]);
                 stencil[n]=canonical_stencil_weight(distance,10.0,dithers[n]);
             }}
-            answers[id.x*3u+2u]=stencil;
+            answers[id.x*4u+2u]=stencil;
+            answers[id.x*4u+3u]=column_relief_gradient(u32(p.params.x),p.up.xyz,
+                vec2<f32>(p.up.w,p.gradient.w),p.params.y);
         }}
     "#
     );
@@ -81,6 +83,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
             frame[50] = delta as f32;
             let mut probes = Vec::<[[f32; 4]; 3]>::new();
             let mut expected = Vec::<[f64; 4]>::new();
+            let mut expected_gradient=Vec::<[f64;4]>::new();
             for face in 0u8..6 {
                 let [n, a, b] = face_axes(face);
                 for (ta, tb) in [(0.0f64, 0.0f64), (0.55, -0.4), (-0.3, 0.61)] {
@@ -122,8 +125,8 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                             (4.0, 1.2501),
                         ] {
                             probes.push([
-                                up.as_vec3().extend(0.0).to_array(),
-                                gradient.as_vec3().extend(0.0).to_array(),
+                                up.as_vec3().extend(di as f32).to_array(),
+                                gradient.as_vec3().extend(dj as f32).to_array(),
                                 [
                                     face as f32,
                                     radius as f32,
@@ -131,6 +134,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                                     projected_cell as f32,
                                 ],
                             ]);
+                            expected_gradient.push([gradient.x,gradient.y,gradient.z,slope]);
                             expected.push([
                                 slope,
                                 1.0 - smooth(4.0, 9.0, gradient_squared),
@@ -161,7 +165,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
             );
             let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("chart answers"),
-                size: (probes.len() * 48) as u64,
+                size: (probes.len() * 64) as u64,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
@@ -204,10 +208,15 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                 pass.dispatch_workgroups((probes.len() as u32 + 63) / 64, 1, 1);
             }
             gpu.queue.submit([encoder.finish()]);
-            let bytes = read_buffer(&gpu, &output, (probes.len() * 48) as u64);
-            let pairs: &[[[f32; 4]; 3]] = bytemuck::cast_slice(&bytes);
+            let bytes = read_buffer(&gpu, &output, (probes.len() * 64) as u64);
+            let pairs: &[[[f32; 4]; 4]] = bytemuck::cast_slice(&bytes);
             let actual: Vec<[f32; 4]> = pairs.iter().map(|p| p[0]).collect();
             for (index, pair) in pairs.iter().enumerate() {
+                for component in 0..4 {
+                    assert!((f64::from(pair[3][component])-expected_gradient[index][component]).abs()<2e-5,
+                        "physical fallback gradient disagrees with independent chart finite differences: plane{plane} voxel{voxel} probe{index} component{component}: {:?} expected{:?}",
+                        pair[3],expected_gradient[index]);
+                }
                 let weight=expected[index][2] as f32;
                 for level in 0..3 {
                     assert!((pair[1][level]-weight).abs()<2e-5,
@@ -263,6 +272,90 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                 "coherent relief plane{plane} voxel{voxel}:{} slope/support cases",
                 probes.len()
             );
+        }
+    }
+}
+
+
+#[test]
+fn fractional_natural_surface_material_altitude_preserves_authored_strata() {
+    let Some(gpu) = gpu() else { return };
+    let surface=include_str!("../shaders/surface.wgsl");
+    let helper=surface.split("fn surface_material_layer").nth(1).unwrap()
+        .split("// A natural riser").next().unwrap();
+    let source=format!(r#"
+        struct Probe {{a:vec4<i32>,b:vec4<i32>,c:vec4<i32>}}
+        @group(0) @binding(0) var<storage,read> probes:array<Probe>;
+        @group(0) @binding(1) var<storage,read_write> answers:array<i32>;
+        fn surface_material_layer{helper}
+        @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) id:vec3<u32>) {{
+            if id.x>=arrayLength(&probes) {{return;}}
+            let p=probes[id.x];
+            answers[id.x]=surface_material_layer(p.a.x,u32(p.a.y),u32(p.a.z),p.a.w,
+                p.b.x,u32(p.b.y),bitcast<f32>(p.b.z),p.b.w!=0,p.c.x!=0);
+        }}
+    "#);
+    let mut probes=Vec::<[[i32;4];3]>::new();
+    let mut expected=Vec::<i32>::new();
+    for authored_top in [-531i32,0,1,24657,50004] {
+        for level in 1u32..=16 {
+            let size=1i32<<level;
+            let remainder=authored_top.rem_euclid(size);
+            let top=authored_top.div_euclid(size)+i32::from(remainder!=0);
+            let fraction=(remainder as u32)<<(16-level);
+            let coarse_hit=(top-1)*size;
+            for (depth,code,filtered,relief,topology) in [
+                (0,4,0.0f32,true,false),
+                (0,0,1.0,true,false),
+                (0,0,0.5,true,false),
+                (0,0,0.49,true,false),
+                (3,4,1.0,true,false),
+                (0,4,1.0,true,true),
+                (0,4,1.0,false,false),
+                (0,5,1.0,true,false),
+            ] {
+                let corrected=relief&&!topology&&depth==0&&(code==4||(code<4&&filtered>0.5));
+                probes.push([[top,fraction as i32,level as i32,coarse_hit],
+                    [depth,code,filtered.to_bits() as i32,i32::from(relief)],
+                    [i32::from(topology),0,0,0]]);
+                expected.push(if corrected {authored_top-1} else {coarse_hit});
+            }
+        }
+    }
+    let shader=gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label:Some("fractional material altitude"),source:wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let input=gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label:None,contents:bytemuck::cast_slice(&probes),usage:wgpu::BufferUsages::STORAGE,
+    });
+    let output=gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label:None,size:(probes.len()*4) as u64,
+        usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC,mapped_at_creation:false,
+    });
+    let pipeline=gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label:None,layout:None,module:&shader,entry_point:Some("probe"),
+        compilation_options:Default::default(),cache:None,
+    });
+    let group=gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label:None,layout:&pipeline.get_bind_group_layout(0),entries:&[
+            wgpu::BindGroupEntry {binding:0,resource:input.as_entire_binding()},
+            wgpu::BindGroupEntry {binding:1,resource:output.as_entire_binding()},
+        ],
+    });
+    let mut encoder=gpu.device.create_command_encoder(&Default::default());
+    {
+        let mut pass=encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);pass.set_bind_group(0,&group,&[]);
+        pass.dispatch_workgroups((probes.len() as u32+63)/64,1,1);
+    }
+    gpu.queue.submit([encoder.finish()]);
+    let bytes=read_buffer(&gpu,&output,(probes.len()*4) as u64);
+    let actual:&[i32]=bytemuck::cast_slice(&bytes);
+    assert_eq!(actual,expected.as_slice(),"fractional surface layers changed authored strata or exposed cut/wall depth");
+    for mm in [100i32,300,1000] {
+        for (index,(actual,expected)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!((actual*mm).div_euclid(4500),(expected*mm).div_euclid(4500),"rock band probe{index}");
+            assert_eq!((actual*mm).div_euclid(2100),(expected*mm).div_euclid(2100),"sandstone/clay band probe{index}");
         }
     }
 }
