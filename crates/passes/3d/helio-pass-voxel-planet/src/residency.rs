@@ -1055,8 +1055,8 @@ impl Residency {
     /// Refresh a fixed neighborhood of complete tier-1 blocks. Traversal
     /// only uses a streaming level after all sixteen columns of a block are
     /// published, so keep its pending columns together at one priority.
-    /// Only already wanted columns are touched; incomplete window edges
-    /// retain their original queue order rather than consuming this priority.
+    /// Only complete current wanted blocks are touched. They may bypass an
+    /// old diff's priority prefix; this does not expand window membership.
     fn refresh_near_pending(&mut self, eye: DVec3, deadline: Option<std::time::Instant>) {
         let out_of_time = || deadline.is_some_and(|at| std::time::Instant::now() >= at);
         if out_of_time() { return; }
@@ -1079,7 +1079,8 @@ impl Residency {
         faces[..grid.faces().len()].copy_from_slice(grid.faces());
         faces[..grid.faces().len()].sort_unstable_by_key(|face| *face != primary_face);
         for (level, state) in self.levels.iter_mut().enumerate() {
-            if !state.active || state.pending.is_empty() {
+            if !state.active || (state.pending.is_empty()
+                && (state.wanted.is_none() || self.catching_up[level] == 0)) {
                 continue;
             }
             let cells = BRICK << level;
@@ -1121,6 +1122,7 @@ impl Residency {
                 // the actual-camera block first when bucket rounding ties.
                 blocks[..count].sort_unstable_by(|a, b| b.2.total_cmp(&a.2));
                 for &(bi, bj, distance) in &blocks[..count] {
+                    if out_of_time() { return; }
                     // A CPU-resident full block has no pending admissions to
                     // group. Avoid sixteen hash probes every stopped frame.
                     if self.initial_retries.is_empty()
@@ -1133,13 +1135,21 @@ impl Residency {
                         let i = bi * 4 + (index % 4) as i32;
                         let j = bj * 4 + (index / 4) as i32;
                         *key = pack(key0(face, level as u32, i), j as u32);
-                        complete &= state.pending.at.contains_key(key) || self.residents.contains_key(*key);
+                        complete &= state.wanted.as_ref().map_or_else(
+                            || state.pending.at.contains_key(key) || self.residents.contains_key(*key),
+                            |wanted| wanted.contains(key));
                     }
                     if !complete { continue; }
                     let priority = distance / state.radius.max(grid.level_size(level as u32));
                     let bucket = PendingQueue::bucket(priority as f32);
                     for key in keys {
-                        if state.pending.remove(key) {
+                        let queued = state.pending.remove(key);
+                        // A camera turn can expose wanted data before the
+                        // worker's old priority prefix reaches pending. Bypass
+                        // that ordering only for a fully current wanted block;
+                        // admission still owns records, summaries and edits.
+                        if queued || (state.wanted.is_some() && !self.residents.contains_key(key)
+                            && !self.publishing.contains_key(&key)) {
                             state.pending.insert(key, bucket);
                         }
                     }
@@ -2845,6 +2855,98 @@ mod tests {
         residency.set_lod_dither(f64::NAN);
         residency.plan(&planet, eye, 100.0, 0);
         assert_eq!(residency.requested, serial + 1, "equivalent sanitized settings must not restart planning");
+    }
+
+
+    fn focus_prefix_fixture() -> (std::sync::Arc<Planet>, Residency, DVec3, Vec<u64>) {
+        let planet = std::sync::Arc::new(Planet::new(PlanetRecipe { shape: crate::grid::Shape::Plane,
+            plane_size_m: 1000.0, ..Default::default() }).unwrap());
+        let grid = *planet.grid();
+        let eye = DVec3::Y * 30.0;
+        let (cell, _) = grid.locate(eye);
+        let ci = (cell.i >> 3) & !3;
+        let cj = (cell.j >> 3) & !3;
+        let focus_keys: Vec<_> = (cj..cj+4).flat_map(|j|
+            (ci+24..ci+28).map(move |i| pack(key0(crate::grid::PLANE_FACE,0,i),j as u32))).collect();
+        let focus = grid.ground_point(crate::grid::PLANE_FACE,
+            f64::from(ci+26)*8.0,f64::from(cj+2)*8.0);
+        let old: Vec<_> = (cj..cj+16).flat_map(|j|
+            (ci-80..ci-64).map(move |i| pack(key0(crate::grid::PLANE_FACE,0,i),j as u32))).collect();
+        let keys: Vec<_> = old.into_iter().chain(focus_keys.iter().copied()).collect();
+        let mut r = Residency::new(grid,Capacity::default());
+        let mut update = snapshot_update(1,&keys);
+        for (priority,_) in &mut update.levels[0].adds { *priority=0.9; }
+        r.apply(update);
+        r.requested=1;
+        r.last_request=Some(WindowRequest {eye,prefetch_eye:None,priority_eye:None,view_focus:None,
+            lod0:120.0,lod_dither:0.0,outer_radius:planet.outer_radius(),planet:Some(planet.clone()),serial:1});
+        r.set_view_focus(Some(focus));
+        (planet,r,eye,focus_keys)
+    }
+
+    #[test]
+    fn wanted_focus_bypasses_old_unadmitted_prefix_with_normal_publication() {
+        let (planet,mut r,eye,focus) = focus_prefix_fixture();
+        assert!(r.levels[0].pending.is_empty());
+        assert_eq!(r.diffs[0][0].added,0);
+        r.refresh_near_pending(eye,None);
+        assert_eq!(r.levels[0].pending.len(),16);
+        assert!(focus.iter().all(|k|r.levels[0].pending.at.contains_key(k)));
+        assert_eq!(r.diffs[0][0].added,0,"priority refresh must not consume or replace the worker prefix");
+        assert!(r.residents.is_empty() && r.publishing.is_empty() && r.blocks.is_empty());
+        r.refresh_near_pending(eye,None);
+        assert_eq!(r.levels[0].pending.len(),16,"repeated refresh must not duplicate wanted keys");
+        let work = r.plan(&planet,eye,120.0,16);
+        assert_eq!(r.requested,1,"camera-only focus must preserve window membership and serial");
+        assert_eq!(work.job_keys.iter().copied().collect::<FxHashSet<_>>(),focus.iter().copied().collect());
+        assert_eq!(work.jobs.len(),16);
+        for key in &focus {
+            let resident=r.residents.get(*key).unwrap();
+            assert!(resident.blocks);
+            assert_eq!(r.publishing[key].record,resident.record);
+        }
+        r.complete_jobs(work.job_keys.iter().map(|k|(*k,0)));
+        assert!(r.publishing.is_empty());
+    }
+
+    #[test]
+    fn wanted_focus_rejects_mixed_retired_and_expired_demand() {
+        for retired in [false,true] {
+            let (_,mut r,eye,focus) = focus_prefix_fixture();
+            // All16 still sit in old pending, but15 current wanted members
+            // cannot authorize a complete block assembled from mixed epochs.
+            for &key in &focus {r.levels[0].pending.insert(key,50);}
+            let mut wanted = r.levels[0].wanted.as_ref().unwrap().as_ref().clone();
+            wanted.remove(&focus[0]);
+            r.levels[0].wanted=Some(std::sync::Arc::new(wanted));
+            let stamp=VisibleStamp {frame:10,view:7,at:std::time::Instant::now()};
+            r.visible_view=Some(stamp);
+            r.visible_leases.insert(focus[0] & !(3u64 | (3u64<<32)),
+                VisibleLease {source:stamp,serial:2,retiring:false,retired:0});
+            assert!(r.transient_wanted(focus[0]),"a valid GPU lease deliberately supplies the missing member");
+            r.levels[0].active=!retired;
+            let before=r.levels[0].pending.at.clone();
+            r.refresh_near_pending(eye,None);
+            assert_eq!(r.levels[0].pending.at,before);
+            assert!(r.residents.is_empty() && r.publishing.is_empty());
+        }
+        let (_,mut r,eye,_) = focus_prefix_fixture();
+        r.refresh_near_pending(eye,Some(std::time::Instant::now()));
+        assert!(r.levels[0].pending.is_empty(),"an elapsed refresh deadline admits no partial block");
+    }
+
+    #[test]
+    fn wanted_focus_preserves_partial_job_budget_and_coarser_priority() {
+        let (planet,mut r,eye,focus) = focus_prefix_fixture();
+        r.refresh_near_pending(eye,None);
+        let coarse=pack(key0(crate::grid::PLANE_FACE,1,1),1);
+        r.levels[1].active=true;
+        r.levels[1].pending.insert(coarse,0);
+        let work=r.plan(&planet,eye,120.0,7);
+        assert_eq!(work.jobs.len(),7,"promotion must not round a GPU allowance up to a complete block");
+        assert_eq!(work.job_keys[0],coarse,"a closer coarser pending key must retain its priority");
+        assert!(work.job_keys[1..].iter().all(|key|focus.contains(key)));
+        assert_eq!(focus.iter().filter(|key|r.levels[0].pending.at.contains_key(key)).count(),10);
     }
 
 }
