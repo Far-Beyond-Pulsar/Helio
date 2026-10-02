@@ -546,7 +546,9 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // coarse cell stands for many base voxels, so its pigment is their mean;
     // fading by the level cell's footprint instead jumped 2x at every level
     // boundary (a sawtooth of speckle contrast: rings while ascending).
-    let hv = hash3(h.i, h.j, h.k + i32(face) * 7919 + i32(level) * 104729, 0x68bc21ebu);
+    // The same base-domain point supplies pigment on every face and level.
+    // Coarse indices or level salts would choose a new colour pattern at LOD.
+    let hv = hash3(p.x, p.y, p.z, 0x68bc21ebu);
     let base_w = base_filter_w;
     let jitter = mix(f32(hv & 255u) / 255.0, 0.5, base_w);
     let pigment = 1.0 + frame.detail.y * (jitter - 0.5);
