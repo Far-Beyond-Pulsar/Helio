@@ -31,7 +31,7 @@ struct Column {
     key0: u32,   // column i | face << 24 | level << 27
     key1: u32,   // column j
     k_lo: i32,   // lowest band brick layer (level bricks)
-    info: u32,   // n_band 0..9 | n_mixed 9..18 | class 18..22 | top gap 22..25 | ext 29 | overflow 30 | valid 31
+    info: u32,   // n_band 0..9 | n_mixed 9..18 | class 18..22 | top gap 22..25 | topology 27 | relief 28 | ext 29 | overflow 30 | valid 31
     run: u32,    // first pool unit
     mixed: u32,  // band bricks 0..32 that store an occupancy mask
     solid: u32,  // band bricks 0..32 that are completely occupied
@@ -59,6 +59,9 @@ const TOMBSTONE: u32 = 0xfffffffeu;
 const INFO_VALID: u32 = 0x80000000u;
 const INFO_OVERFLOW: u32 = 0x40000000u;
 const INFO_EXT: u32 = 0x20000000u;
+const INFO_RELIEF: u32 = 0x10000000u;
+// Effective Add/Remove lists: base-field gradients cannot describe cut faces.
+const INFO_TOPOLOGY: u32 = 0x08000000u;
 const UNIT_WORDS: u32 = 16u;
 const MAX_PROBES: u32 = 64u;
 
@@ -114,13 +117,22 @@ fn column_valid(c: Column) -> bool {
 
 fn band_count(c: Column) -> u32 { return c.info & 511u; }
 
+// Relative terrain tops occupy one byte. A 32-brick band fits only when
+// its highest occupied top is below the exact 256-cell upper boundary.
+fn column_tops_fit(c: Column) -> bool {
+    let count = band_count(c);
+    return count < 32u || (count == 32u && ((c.info >> 22u) & 7u) != 0u);
+}
+
 // First empty layer above every occupied cell (level cells): the band top
 // less the empty layers of its top brick.
 fn column_top_cell(c: Column) -> i32 {
     return (c.k_lo + i32(band_count(c))) * 8 - i32((c.info >> 22u) & 7u);
 }
 
-fn header_units(c: Column) -> u32 { return select(1u, 2u, (c.info & INFO_EXT) != 0u); }
+fn header_units(c: Column) -> u32 {
+    return select(1u, 2u, (c.info & INFO_EXT) != 0u) + select(0u, 2u, (c.info & INFO_RELIEF) != 0u);
+}
 
 // Brick state of band brick `b`: 0 air, 1 solid, 2 mixed. Also returns the
 // pool unit of a mixed brick.
@@ -155,6 +167,16 @@ fn column_top(c: Column, x: u32, y: u32) -> i32 {
     let cell = x + y * 8u;
     let word = pool[c.run * UNIT_WORDS + (cell >> 2u)];
     return c.k_lo * 8 + i32((word >> ((cell & 3u) * 8u)) & 255u);
+}
+
+// Zero denotes a top exactly on the upper coarse-cell boundary. Other
+// fractions reconstruct the authored base-layer top inside the last voxel.
+fn column_relief_fraction(c: Column, x: u32, y: u32) -> u32 {
+    if !column_tops_fit(c) { return 0u; }
+    let cell = x + y * 8u;
+    let offset = select(1u, 2u, (c.info & INFO_EXT) != 0u);
+    let word = pool[(c.run + offset) * UNIT_WORDS + (cell >> 1u)];
+    return (word >> ((cell & 1u) * 16u)) & 65535u;
 }
 
 fn center_half(i: i32, level: u32) -> i32 {

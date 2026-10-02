@@ -426,7 +426,12 @@ fn published_tops_bound_occupancy() {
         let gap = ((info >> 22) & 7) as i32;
         let run = c[4];
         let ext = info & 0x2000_0000 != 0;
-        let header = if ext { 2 } else { 1 };
+        // Fractional tops occupy two units after the existing column header.
+        let relief = info & 0x1000_0000 != 0;
+        let header = (if ext { 2 } else { 1 }) + if relief { 2 } else { 0 };
+        if relief {
+            assert!(n_band < 32 || (n_band == 32 && gap > 0), "fractional tops overflow their packed byte range");
+        }
         let published = (k_lo + n_band) * 8 - gap;
         // Highest occupied cell from the brick masks.
         let mut highest = i32::MIN;

@@ -63,6 +63,69 @@ fn pack(k0: u32, k1: u32) -> u64 {
     u64::from(k0) | (u64::from(k1) << 32)
 }
 
+/// Keep altitude-scaled lookahead, with a horizontal floor for ground flight.
+/// This forecast only prioritizes already wanted columns. The planner uses
+/// the shorter clearance-clamped forecast to avoid growing windows sideways.
+pub(crate) fn motion_forecast(grid: &Grid, eye: DVec3, previous: DVec3, dt: f64, lod0: f64, clearance: f64) -> Option<DVec3> {
+    if !dt.is_finite() || dt <= 0.0 || dt > 0.25 || !eye.is_finite() || !previous.is_finite() {
+        return None;
+    }
+    let step = eye - previous;
+    if step.length_squared() <= 0.0001 { return None; }
+    let forecast = step * (0.35 / dt.max(0.001)).min(24.0);
+    let up = grid.up(eye);
+    let radial = forecast.dot(up);
+    let tangent = forecast - up * radial;
+    let radial_limit = clearance.max(20.0) * 0.7;
+    let tangent_limit = (lod0 * 0.5).max(radial_limit);
+    Some(eye + tangent.clamp_length_max(tangent_limit) + up * radial.clamp(-radial_limit, radial_limit))
+}
+
+/// Preserve the original coverage forecast: horizontal lookahead enlarges
+/// every side of a circular window, so it stays bounded by terrain clearance.
+pub(crate) fn window_forecast(eye: DVec3, previous: DVec3, dt: f64, clearance: f64) -> Option<DVec3> {
+    if !dt.is_finite() || dt <= 0.0 || dt > 0.25 || !eye.is_finite() || !previous.is_finite() {
+        return None;
+    }
+    let step = eye - previous;
+    if step.length_squared() <= 0.0001 { return None; }
+    let forecast = step * (0.35 / dt.max(0.001)).min(24.0);
+    Some(eye + forecast.clamp_length_max(clearance.max(20.0) * 0.7))
+}
+
+/// Approximate centre-view terrain focus for scheduling only. Intersect the
+/// plane or the local ground-radius sphere; actual tracing still uses terrain.
+pub(crate) fn visible_focus(grid: &Grid, eye: DVec3, forward: DVec3, ground_radial: f64, max_distance: f64) -> Option<DVec3> {
+    if !eye.is_finite() || !ground_radial.is_finite() || !max_distance.is_finite() || max_distance <= 0.0 {
+        return None;
+    }
+    let direction = forward.try_normalize()?;
+    if direction.dot(grid.up(eye)) >= -1.0e-6 { return None; }
+    let t = if grid.is_plane() {
+        (ground_radial - eye.y) / direction.y
+    } else {
+        if ground_radial <= 0.0 { return None; }
+        let radius = eye.length();
+        let b = eye.dot(direction);
+        // Avoid subtracting nearly equal squared planetary radii or roots.
+        let c = (radius - ground_radial) * (radius + ground_radial);
+        if c <= 0.0 { return None; }
+        let discriminant = b * b - c;
+        if discriminant < 0.0 { return None; }
+        c / (-b + discriminant.sqrt())
+    };
+    if !t.is_finite() || t <= 0.0 || t > max_distance { return None; }
+    let point = eye + direction * t;
+    if !point.is_finite() { return None; }
+    if grid.is_plane() && grid.shape() != crate::grid::Shape::InfinitePlane {
+        let coords = grid.face_coords(PLANE_FACE, point)?;
+        if coords[0] < 0.0 || coords[1] < 0.0 || coords[0] >= f64::from(grid.cells()) || coords[1] >= f64::from(grid.cells()) {
+            return None;
+        }
+    }
+    Some(point)
+}
+
 impl WindowPlanner {
     pub fn new(grid: Grid) -> Self {
         Self {
@@ -86,11 +149,24 @@ impl WindowPlanner {
         let hi_j = ((cj + reach).ceil() as i32).min(cols - 1);
         let limit = radius / col + 0.75;
         let mut out = Vec::new();
-        for y in lo_j..=hi_j {
-            for x in lo_i..=hi_i {
+        if lo_i > hi_i || lo_j > hi_j { return out; }
+        // Traversal admits complete tier-1 blocks. Expand only blocks that
+        // intersect the original column-centre circle: partial boundary
+        // blocks would otherwise stay unusable even after settling.
+        for bj in lo_j / 4..=hi_j / 4 {
+            let (y0, y1) = (bj * 4, (bj * 4 + 3).min(cols - 1));
+            for bi in lo_i / 4..=hi_i / 4 {
+                let (x0, x1) = (bi * 4, (bi * 4 + 3).min(cols - 1));
+                let x = (ci.floor() as i32).clamp(x0.max(lo_i), x1.min(hi_i));
+                let y = (cj.floor() as i32).clamp(y0.max(lo_j), y1.min(hi_j));
                 let d = (f64::from(x) + 0.5 - ci).hypot(f64::from(y) + 0.5 - cj);
-                if d <= limit {
-                    out.push(((d / limit.max(1e-12)) as f32, pack(key0(PLANE_FACE, level, x), y as u32)));
+                if d > limit { continue; }
+                let priority = ((f64::from(x0 + x1 + 1) * 0.5 - ci)
+                    .hypot(f64::from(y0 + y1 + 1) * 0.5 - cj) / limit.max(1e-12)) as f32;
+                for y in y0..=y1 {
+                    for x in x0..=x1 {
+                        out.push((priority, pack(key0(PLANE_FACE, level, x), y as u32)));
+                    }
                 }
             }
         }
@@ -131,20 +207,44 @@ impl WindowPlanner {
             if lo_i > hi_i || lo_j > hi_j {
                 continue;
             }
-            let tan_i: Vec<f64> = (lo_i..=hi_i)
+            let block_lo_i = lo_i & !3;
+            let block_hi_i = (hi_i | 3).min(cols - 1);
+            let block_lo_j = lo_j & !3;
+            let block_hi_j = (hi_j | 3).min(cols - 1);
+            let tan_i: Vec<f64> = (block_lo_i..=block_hi_i)
+                .map(|c| grid.angle((f64::from(c) + 0.5) * f64::from(col_cells)).tan())
+                .collect();
+            let tan_j: Vec<f64> = (block_lo_j..=block_hi_j)
                 .map(|c| grid.angle((f64::from(c) + 0.5) * f64::from(col_cells)).tan())
                 .collect();
             let (da, db) = (dir.dot(a), dir.dot(b));
-            for cj in lo_j..=hi_j {
-                let tb = grid.angle((f64::from(cj) + 0.5) * f64::from(col_cells)).tan();
-                for (x, &ta) in tan_i.iter().enumerate() {
-                    let cos = (dn + ta * da + tb * db) / (1.0 + ta * ta + tb * tb).sqrt();
-                    if cos < cos_limit {
-                        continue;
+            for bj in lo_j / 4..=hi_j / 4 {
+                let (y0, y1) = (bj * 4, (bj * 4 + 3).min(cols - 1));
+                for bi in lo_i / 4..=hi_i / 4 {
+                    let (x0, x1) = (bi * 4, (bi * 4 + 3).min(cols - 1));
+                    let mut intersects = false;
+                    'columns: for y in y0.max(lo_j)..=y1.min(hi_j) {
+                        let tb = tan_j[(y - block_lo_j) as usize];
+                        for x in x0.max(lo_i)..=x1.min(hi_i) {
+                            let ta = tan_i[(x - block_lo_i) as usize];
+                            let cos = (dn + ta * da + tb * db) / (1.0 + ta * ta + tb * tb).sqrt();
+                            if cos >= cos_limit {
+                                intersects = true;
+                                break 'columns;
+                            }
+                        }
                     }
-                    let angle = cos.clamp(-1.0, 1.0).acos();
-                    let key = pack(key0(face, level, lo_i + x as i32), cj as u32);
-                    out.push(((angle / theta.max(1e-12)) as f32, key));
+                    if !intersects { continue; }
+                    // One priority per block also keeps admission grouped.
+                    let ta = grid.angle(f64::from(x0 + x1 + 1) * 0.5 * f64::from(col_cells)).tan();
+                    let tb = grid.angle(f64::from(y0 + y1 + 1) * 0.5 * f64::from(col_cells)).tan();
+                    let cos = (dn + ta * da + tb * db) / (1.0 + ta * ta + tb * tb).sqrt();
+                    let priority = (cos.clamp(-1.0, 1.0).acos() / theta.max(1e-12)) as f32;
+                    for y in y0..=y1 {
+                        for x in x0..=x1 {
+                            out.push((priority, pack(key0(face, level, x), y as u32)));
+                        }
+                    }
                 }
             }
         }
@@ -190,8 +290,10 @@ impl WindowPlanner {
         let eye = request.eye;
         // Window centre: the eye direction on a sphere, its ground point on a plane.
         let dir = if grid.is_plane() { DVec3::new(eye.x, 0.0, eye.z) } else { eye.normalize() };
-        let height = (grid.radial(eye) - r0).max(0.0);
-        let peak = request.outer_radius - r0;
+        // Below-datum terrain still has a horizon. Use the datum sphere as
+        // the conservative radius, with nonnegative clearance and peak.
+        let height = (grid.radial(eye) - r0.min(request.outer_radius)).max(0.0);
+        let peak = (request.outer_radius - r0).max(0.0);
         // Farthest terrain that can rise above the horizon (none on a plane).
         let horizon = if grid.is_plane() {
             f64::INFINITY
@@ -327,6 +429,255 @@ mod tests {
     use super::*;
     use crate::{Planet, PlanetRecipe, TerrainSource};
 
+    fn column_identity(key: u64) -> (u8, u32, i32, i32) {
+        let k0 = key as u32;
+        (((k0 >> 24) & 7) as u8, k0 >> 27, (k0 & 0xff_ffff) as i32, (key >> 32) as i32)
+    }
+
+    fn assert_complete_demand(grid: Grid, scanned: &[(f32, u64)]) {
+        let wanted: FxHashSet<_> = scanned.iter().map(|(_, key)| *key).collect();
+        assert_eq!(wanted.len(), scanned.len(), "a column must be emitted only once");
+        for &key in &wanted {
+            let (face, level, i, j) = column_identity(key);
+            let cols = grid.cells() / (BRICK << level);
+            assert!((0..cols).contains(&i) && (0..cols).contains(&j));
+            for y in (j & !3)..=((j | 3).min(cols - 1)) {
+                for x in (i & !3)..=((i | 3).min(cols - 1)) {
+                    assert!(wanted.contains(&pack(key0(face, level, x), y as u32)),
+                        "column ({i},{j}) requires complete block, missing ({x},{y}) at L{level}");
+                }
+            }
+        }
+    }
+
+    // The former centre-circle demand, independently checked against the
+    // block closure so the fix neither drops coverage nor expands whole rings.
+    fn circle_demand(grid: Grid, level: u32, center: DVec3, radius: f64) -> FxHashSet<u64> {
+        let col_cells = BRICK << level;
+        let cols = grid.cells() / col_cells;
+        let mut wanted = FxHashSet::default();
+        if grid.is_plane() {
+            let coords = grid.face_coords(PLANE_FACE, center).unwrap();
+            let (ci, cj) = (coords[0] / f64::from(col_cells), coords[1] / f64::from(col_cells));
+            let reach = (radius / (grid.level_size(level) * f64::from(BRICK)) + 1.0).min(f64::from(cols));
+            let limit = reach - 0.25;
+            for j in ((cj - reach).floor() as i32).max(0)..=((cj + reach).ceil() as i32).min(cols - 1) {
+                for i in ((ci - reach).floor() as i32).max(0)..=((ci + reach).ceil() as i32).min(cols - 1) {
+                    if (f64::from(i) + 0.5 - ci).hypot(f64::from(j) + 0.5 - cj) <= limit {
+                        wanted.insert(pack(key0(PLANE_FACE, level, i), j as u32));
+                    }
+                }
+            }
+        } else {
+            let col_angle = grid.delta() * f64::from(col_cells);
+            let theta = (radius / grid.radius()).min(std::f64::consts::PI);
+            let cos_limit = (theta + col_angle * 0.75).min(std::f64::consts::PI).cos();
+            for face in 0..6u8 {
+                let [n, a, b] = face_axes(face);
+                let dn = center.dot(n);
+                if theta < 1.2 && dn < (theta + 1.0).min(std::f64::consts::PI).cos() { continue; }
+                let (lo_i, hi_i, lo_j, hi_j) = if dn > 0.2 && theta < 0.9 {
+                    let ci = grid.index_of_angle(center.dot(a).atan2(dn)) / f64::from(col_cells);
+                    let cj = grid.index_of_angle(center.dot(b).atan2(dn)) / f64::from(col_cells);
+                    let reach = theta / col_angle / 0.7 + 2.0;
+                    (((ci - reach).floor() as i32).max(0), ((ci + reach).ceil() as i32).min(cols - 1),
+                     ((cj - reach).floor() as i32).max(0), ((cj + reach).ceil() as i32).min(cols - 1))
+                } else { (0, cols - 1, 0, cols - 1) };
+                for j in lo_j..=hi_j {
+                    for i in lo_i..=hi_i {
+                        let direction = grid.direction(face, (i * col_cells) as f64 + f64::from(col_cells) * 0.5,
+                            (j * col_cells) as f64 + f64::from(col_cells) * 0.5);
+                        if center.dot(direction) >= cos_limit { wanted.insert(pack(key0(face, level, i), j as u32)); }
+                    }
+                }
+            }
+        }
+        wanted
+    }
+
+    fn assert_only_block_closure(grid: Grid, scanned: &[(f32, u64)], original: &FxHashSet<u64>) {
+        let mut expected = FxHashSet::default();
+        for &key in original {
+            let (face, level, i, j) = column_identity(key);
+            let cols = grid.cells() / (BRICK << level);
+            for y in (j & !3)..=((j | 3).min(cols - 1)) {
+                for x in (i & !3)..=((i | 3).min(cols - 1)) {
+                    expected.insert(pack(key0(face, level, x), y as u32));
+                }
+            }
+        }
+        let actual: FxHashSet<_> = scanned.iter().map(|(_, key)| *key).collect();
+        assert!(actual == expected, "demand must be exactly the closure of intersected blocks: actual{} expected{}", actual.len(), expected.len());
+        assert_complete_demand(grid, scanned);
+    }
+
+    #[test]
+    fn tiny_window_at_block_corner_requests_usable_near_columns() {
+        let planet = Planet::new(PlanetRecipe {
+            shape: crate::grid::Shape::Plane, plane_size_m: 40000.0,
+            terrain: TerrainSource { generator: crate::landform::FLAT_ID.into(), ..Default::default() },
+            ..Default::default()
+        }).unwrap();
+        let grid = *planet.grid();
+        let request = WindowRequest { eye: DVec3::Y * 0.5, prefetch_eye: None,
+            lod0: 1.405499947, outer_radius: planet.outer_radius(), planet: None, serial: 1 };
+        let update = WindowPlanner::new(grid).update(&request);
+        let fine = update.levels.iter().find(|l| l.level == 0).unwrap();
+        let original = circle_demand(grid, 0, fine.center, fine.radius);
+        assert_eq!(original.len(), 68, "fixture must expose the former incomplete corner window");
+        assert_eq!(fine.adds.len(), 192, "only the twelve intersected blocks are required");
+        assert_only_block_closure(grid, &fine.adds, &original);
+    }
+
+    #[test]
+    fn native_windows_add_only_boundary_block_padding_with_bounded_growth() {
+        for shape in [crate::grid::Shape::Plane, crate::grid::Shape::Sphere] {
+            let planet = Planet::new(PlanetRecipe { shape, radius_m: 1_000_000.0,
+                plane_size_m: 40000.0, ..Default::default() }).unwrap();
+            let grid = *planet.grid();
+            let planner = WindowPlanner::new(grid);
+            let col = grid.level_size(0) * f64::from(BRICK);
+            for (radius_cols, growth) in [(18.0, 1.4), (80.0, 1.1), (200.0, 1.05)] {
+                for center in [DVec3::Y, DVec3::new(1.0, 1.0, 0.0).normalize()] {
+                    let center = if grid.is_plane() { DVec3::new(0.23, 0.0, 0.41) } else { center };
+                    let radius = col * radius_cols;
+                    let scanned = planner.scan(0, center, radius);
+                    let original = circle_demand(grid, 0, center, radius);
+                    assert_only_block_closure(grid, &scanned, &original);
+                    assert!((scanned.len() as f64) <= original.len() as f64 * growth,
+                        "boundary padding grew {:?} radius{radius_cols}: {} to {}", shape, original.len(), scanned.len());
+                    if grid.is_plane() || center == DVec3::Y {
+                        for face in 0..6 {
+                            let indices: Vec<_> = scanned.iter().map(|(_, key)| column_identity(*key))
+                                .filter(|(f, _, _, _)| *f == face).collect();
+                            if indices.is_empty() { continue; }
+                            for axis in [2, 3] {
+                                let coordinate = |c: &(u8, u32, i32, i32)| if axis == 2 { c.2 } else { c.3 };
+                                let span = indices.iter().map(coordinate).max().unwrap() - indices.iter().map(coordinate).min().unwrap() + 1;
+                                assert!(span < max_window_columns() as i32, "block padding may not alias the summary torus");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn finite_face_edge_demand_clips_complete_blocks_to_world_columns() {
+        let planet = Planet::new(PlanetRecipe { shape: crate::grid::Shape::Plane,
+            plane_size_m: 40500.0, ..Default::default() }).unwrap();
+        let grid = *planet.grid();
+        let level = grid.levels() - 2;
+        let cols = grid.cells() / (BRICK << level);
+        assert_eq!(cols % 4, 2, "fixture must have a partial final block");
+        let center = DVec3::new(grid.cells() as f64 * grid.voxel_size() * 0.5 - 0.01, 0.0, 0.0);
+        let radius = grid.level_size(level) * f64::from(BRICK) * 2.0;
+        let scanned = WindowPlanner::new(grid).scan_plane(level, center, radius);
+        assert_only_block_closure(grid, &scanned, &circle_demand(grid, level, center, radius));
+        assert!(scanned.iter().any(|(_, key)| column_identity(*key).2 == cols - 1));
+    }
+
+    #[test]
+    fn low_altitude_forecast_keeps_tangent_lookahead_without_unbounded_descent() {
+        for shape in [crate::grid::Shape::Plane, crate::grid::Shape::Sphere] {
+            let planet = Planet::new(PlanetRecipe { shape, ..Default::default() }).unwrap();
+            let grid = planet.grid();
+            let eye = DVec3::Y * if grid.is_plane() { 2.0 } else { grid.radius() + 2.0 };
+            let previous = eye - DVec3::X * 2.0 + DVec3::Y * 2.0;
+            let future = motion_forecast(grid, eye, previous, 0.016, 120.0, 2.0).unwrap();
+            let offset = future - eye;
+            let up = grid.up(eye);
+            let radial = offset.dot(up);
+            assert!(radial.abs() <= 14.000001);
+            assert!((offset - up * radial).length() > 14.0,
+                "horizontal prefetch must not inherit the small clearance clamp");
+            assert!(offset.length() < 80.0);
+            assert!(motion_forecast(grid, eye, previous, 0.3, 120.0, 2.0).is_none());
+            let teleport = motion_forecast(grid, eye, eye - DVec3::X * 100_000.0, 0.016, 120.0, 2.0).unwrap();
+            assert!((teleport - eye).length() <= 60.0, "teleport may not enqueue its entire path");
+            let high_eye = grid.at_radial(eye, grid.radius() + 10_000.0);
+            let high = motion_forecast(grid, high_eye, high_eye - DVec3::X * 1000.0, 0.016, 120.0, 10_000.0).unwrap();
+            let lookahead = (high - high_eye).length();
+            assert!(lookahead > 1000.0 && lookahead <= 7000.000001,
+                "orbital lookahead must retain its altitude-scaled range: {lookahead}");
+        }
+    }
+
+    #[test]
+    fn centre_view_focus_is_stable_and_rejects_non_terrain_rays() {
+        for shape in [crate::grid::Shape::Plane, crate::grid::Shape::Sphere] {
+            let planet = Planet::new(PlanetRecipe { shape, ..Default::default() }).unwrap();
+            let grid = planet.grid();
+            let ground = if grid.is_plane() { 0.0 } else { grid.radius() };
+            let eye = DVec3::Y * (ground + 30.0);
+            let pitch = -0.45f64;
+            let forward = DVec3::new(pitch.cos(), pitch.sin(), 0.0);
+            let focus = visible_focus(grid, eye, forward, ground, 200.0).unwrap();
+            assert!((focus.x - 30.0 / (-pitch).tan()).abs() < 0.01);
+            assert!((grid.radial(focus) - ground).abs() < 1.0e-6);
+            assert!(visible_focus(grid, eye, DVec3::Y, ground, 200.0).is_none());
+            assert!(visible_focus(grid, eye, DVec3::X, ground, 200.0).is_none());
+            assert!(visible_focus(grid, eye, forward, ground, 10.0).is_none());
+        }
+        let planet = Planet::new(PlanetRecipe { shape: crate::grid::Shape::Plane, plane_size_m: 100.0, ..Default::default() }).unwrap();
+        assert!(visible_focus(planet.grid(), DVec3::new(49.0, 30.0, 0.0), DVec3::new(1.0, -0.5, 0.0), 0.0, 200.0).is_none());
+    }
+
+    #[test]
+    fn shallow_view_focus_uses_camera_far_instead_of_fine_level_range() {
+        for shape in [crate::grid::Shape::Plane, crate::grid::Shape::Sphere] {
+            let planet = Planet::new(PlanetRecipe { shape, plane_size_m: 10000.0, ..Default::default() }).unwrap();
+            let grid = planet.grid();
+            let ground = if grid.is_plane() { 0.0 } else { grid.radius() };
+            let eye = DVec3::Y * (ground + 30.0);
+            let pitch = -12.0f64.to_radians();
+            let forward = DVec3::new(pitch.cos(), pitch.sin(), 0.0);
+            let lod0 = 15.5;
+            assert!(visible_focus(grid, eye, forward, ground, lod0 * 4.0).is_none());
+            let focus = visible_focus(grid, eye, forward, ground, 1000.0).unwrap();
+            assert!((focus - eye).length() > 140.0 && (focus - eye).length() < 145.0);
+            assert!((focus.x - 30.0 / (-pitch).tan()).abs() < 0.02);
+            assert!((grid.radial(focus) - ground).abs() < 1.0e-6);
+            assert!(visible_focus(grid, eye, forward, ground, 100.0).is_none(),
+                "an intersection beyond the camera far plane must remain rejected");
+        }
+    }
+
+    #[test]
+    fn longer_priority_forecast_keeps_original_horizontal_window_count() {
+        for shape in [crate::grid::Shape::Plane, crate::grid::Shape::Sphere] {
+            let planet = Planet::new(PlanetRecipe {
+                shape, radius_m: 1000.0, plane_size_m: 1000.0,
+                terrain: TerrainSource { generator: crate::landform::FLAT_ID.into(), ..Default::default() },
+                ..Default::default()
+            }).unwrap();
+            let grid = planet.grid();
+            let ground = if grid.is_plane() { 0.0 } else { grid.radius() };
+            let eye = DVec3::Y * (ground + 30.0);
+            let previous = eye - DVec3::X * 2.4;
+            let coverage = window_forecast(eye, previous, 0.016, 30.0).unwrap();
+            let priority = motion_forecast(grid, eye, previous, 0.016, 120.0, 30.0).unwrap();
+            assert!((coverage - eye).length() <= 21.000001);
+            assert!((priority - eye).length() > 50.0);
+            let old = eye + ((eye - previous) * (0.35f64 / 0.016).min(24.0)).clamp_length_max(21.0);
+            let request = WindowRequest { eye, prefetch_eye: Some(coverage), lod0: 120.0,
+                outer_radius: planet.outer_radius(), planet: None, serial: 1 };
+            let candidate = WindowPlanner::new(*grid).update(&request);
+            let baseline = WindowPlanner::new(*grid).update(&WindowRequest { prefetch_eye: Some(old), ..request.clone() });
+            for (after, before) in candidate.levels.iter().zip(&baseline.levels) {
+                assert_eq!(after.active, before.active);
+                assert_eq!(after.radius, before.radius);
+                let after: FxHashSet<_> = after.adds.iter().map(|(_, key)| *key).collect();
+                let before: FxHashSet<_> = before.adds.iter().map(|(_, key)| *key).collect();
+                assert_eq!(after, before, "priority-only motion may not grow the wanted window");
+            }
+            let expanded = WindowPlanner::new(*grid).update(&WindowRequest { prefetch_eye: Some(priority), ..request });
+            let fine_count = |update: &WindowUpdate| update.levels.iter().find(|l| l.level == 0).unwrap().adds.len();
+            assert!(fine_count(&expanded) > fine_count(&candidate), "fixture must expose the circular expansion regression");
+        }
+    }
+
     #[test]
     fn descending_forecast_admits_fine_windows_before_arrival_and_releases_them_at_stop() {
         let planet = std::sync::Arc::new(Planet::new(PlanetRecipe {
@@ -354,5 +705,35 @@ mod tests {
         let update = planner.update(&request);
         let fine = update.levels.iter().find(|l| l.level == 0).unwrap();
         assert!(!fine.active && !fine.removes.is_empty());
+    }
+
+    #[test]
+    fn below_datum_sphere_keeps_fine_windows_and_finite_horizon_metadata() {
+        for voxel_size_m in [0.1, 0.3, 1.0] {
+            for height in [-53.7, -600.0] {
+                let planet = std::sync::Arc::new(Planet::new(PlanetRecipe {
+                    shape: crate::grid::Shape::Sphere, radius_m: 1000.0, voxel_size_m,
+                    terrain: TerrainSource {
+                        generator: crate::landform::FLAT_ID.into(),
+                        settings: format!("{{\"height_m\":{height}}}"),
+                        ..Default::default()
+                    }, ..Default::default()
+                }).unwrap());
+                assert!(planet.outer_radius() < planet.grid().radius());
+                let eye = DVec3::Y * (planet.outer_radius() + 30.0);
+                assert!(eye.length() < planet.grid().radius());
+                let request = WindowRequest {
+                    eye, prefetch_eye: None, lod0: 120.0,
+                    outer_radius: planet.outer_radius(), planet: Some(planet.clone()), serial: 1,
+                };
+                let update = WindowPlanner::new(*planet.grid()).update(&request);
+                assert!(update.levels.iter().all(|level| level.radius.is_finite() && level.center.is_finite()));
+                for level in [0, 1] {
+                    let fine = update.levels.iter().find(|diff| diff.level == level).unwrap();
+                    assert!(fine.active && !fine.adds.is_empty(),
+                        "negative terrain must retain fineL{level} coverage, height{height}, size{voxel_size_m}");
+                }
+            }
+        }
     }
 }

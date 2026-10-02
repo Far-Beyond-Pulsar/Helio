@@ -132,10 +132,13 @@ impl PendingQueue {
     fn keys(&self) -> impl Iterator<Item = &u64> {
         self.at.keys()
     }
-    /// Queue `key` in `bucket`; false if already queued.
+    /// Queue or reprioritize `key`; false when its bucket is unchanged.
     fn insert(&mut self, key: u64, bucket: usize) -> bool {
-        if self.at.contains_key(&key) {
-            return false;
+        if let Some(&(old, _)) = self.at.get(&key) {
+            if old as usize == bucket {
+                return false;
+            }
+            self.remove(key);
         }
         if self.buckets.is_empty() {
             self.buckets.resize(BUCKETS, Vec::new());
@@ -301,6 +304,8 @@ pub struct Residency {
     /// is unbounded (deterministic, for tests).
     cpu_budget: Option<std::time::Duration>,
     prefetch_eye: Option<DVec3>,
+    priority_eye: Option<DVec3>,
+    view_focus: Option<DVec3>,
 }
 
 /// A window diff being applied: removes first, then (for a level switched
@@ -356,6 +361,8 @@ impl Residency {
             catching_up: vec![0; grid.levels() as usize],
             cpu_budget: None,
             prefetch_eye: None,
+            priority_eye: None,
+            view_focus: None,
         }
     }
 
@@ -494,18 +501,22 @@ impl Residency {
         Ok(Some(block))
     }
 
-    /// Reference every summary block of a column, or none when any tier's
-    /// table slot belongs to another block (a window larger than the table).
-    fn acquire_blocks(&mut self, key: u64, work: &mut FrameWork) -> bool {
+    fn blocks_conflict(&self, key: u64) -> bool {
         let (face, level, ci, cj) = unpack(key);
-        let conflict = (1..=BLOCK_TIERS).any(|tier| {
+        (1..=BLOCK_TIERS).any(|tier| {
             let bkey = (level, face, tier, ci >> (2 * tier), cj >> (2 * tier));
             !self.blocks.contains_key(&bkey)
                 && self.block_owner.get(&block_slot(level, face, tier, bkey.3, bkey.4)).is_some_and(|owner| *owner != bkey)
-        });
-        if conflict {
+        })
+    }
+
+    /// Reference every summary block of a column, or none when any tier's
+    /// table slot belongs to another block (a window larger than the table).
+    fn acquire_blocks(&mut self, key: u64, work: &mut FrameWork) -> bool {
+        if self.blocks_conflict(key) {
             return false;
         }
+        let (face, level, ci, cj) = unpack(key);
         for tier in 1..=BLOCK_TIERS {
             let (bi, bj) = (ci >> (2 * tier), cj >> (2 * tier));
             let bkey = (level, face, tier, bi, bj);
@@ -578,6 +589,17 @@ impl Residency {
         self.prefetch_eye = eye.filter(|eye| eye.is_finite());
     }
 
+    /// Longer motion lookahead only reprioritizes existing pending columns.
+    /// It does not enlarge the resident windows or their coverage metadata.
+    pub fn set_priority_eye(&mut self, eye: Option<DVec3>) {
+        self.priority_eye = eye.filter(|eye| eye.is_finite());
+    }
+
+    /// Priority-only focus: does not expand windows or claim resident data.
+    pub fn set_view_focus(&mut self, focus: Option<DVec3>) {
+        self.view_focus = focus.filter(|point| point.is_finite());
+    }
+
     /// Queue a window diff; [`Self::apply_queued`] applies it in order.
     fn apply(&mut self, update: WindowUpdate) {
         for diff in update.levels {
@@ -599,8 +621,12 @@ impl Residency {
         const CHUNK: usize = 256;
         while let Some(mut queued) = self.diffs.pop_front() {
             let level = queued.diff.level as usize;
-            while queued.removed < queued.diff.removes.len() {
-                let end = (queued.removed + CHUNK).min(queued.diff.removes.len());
+            // Retiring a moving window must not consume every diff slice
+            // before visible incoming columns reach the generation queue.
+            // Keep the same operation bound, sharing active rounds equally.
+            let remove_chunk = if queued.diff.active { CHUNK / 2 } else { CHUNK };
+            loop {
+                let end = (queued.removed + remove_chunk).min(queued.diff.removes.len());
                 for i in queued.removed..end {
                     let key = queued.diff.removes[i];
                     self.levels[level].pending.remove(key);
@@ -609,30 +635,124 @@ impl Residency {
                     }
                 }
                 queued.removed = end;
+                if !queued.diff.active && queued.removed == queued.diff.removes.len() && !queued.cleared {
+                    self.levels[level].pending.clear();
+                    queued.cleared = true;
+                }
+                if queued.diff.active || queued.removed == queued.diff.removes.len() {
+                    let end = (queued.added + if queued.diff.active { CHUNK / 2 } else { CHUNK }).min(queued.diff.adds.len());
+                    for i in queued.added..end {
+                        let (priority, key) = queued.diff.adds[i];
+                        if !self.residents.contains_key(key) {
+                            self.levels[level].pending.insert(key, PendingQueue::bucket(priority));
+                        }
+                    }
+                    queued.added = end;
+                }
+                if queued.removed == queued.diff.removes.len() && queued.added == queued.diff.adds.len() {
+                    self.catching_up[level] -= 1;
+                    break;
+                }
                 if out_of_time() {
                     self.diffs.push_front(queued);
                     return;
                 }
             }
-            if !queued.diff.active && !queued.cleared {
-                self.levels[level].pending.clear();
-                queued.cleared = true;
+        }
+    }
+
+    /// Refresh a fixed neighborhood of complete tier-1 blocks. Traversal
+    /// only uses a streaming level after all sixteen columns of a block are
+    /// published, so keep its pending columns together at one priority.
+    /// Only already wanted columns are touched; incomplete window edges
+    /// retain their original queue order rather than consuming this priority.
+    fn refresh_near_pending(&mut self, eye: DVec3, deadline: Option<std::time::Instant>) {
+        let out_of_time = || deadline.is_some_and(|at| std::time::Instant::now() >= at);
+        if out_of_time() { return; }
+        let grid = self.grid;
+        let forecast = self.priority_eye.or(self.prefetch_eye);
+        let forecast_penalty = forecast.map_or(0.0, |future| grid.ground_distance(eye, future) * 0.25);
+        let focus = self.view_focus;
+        let focus_penalty = focus.map_or(0.0, |point| grid.ground_distance(eye, point) * 0.125);
+        let anchors = [Some(eye), forecast, focus];
+        let mut coordinates = [[None; 3]; 6];
+        for &face in grid.faces() {
+            for (index, anchor) in anchors.iter().enumerate() {
+                coordinates[face as usize][index] = anchor.and_then(|point| grid.face_coords(face, point));
             }
-            while queued.added < queued.diff.adds.len() {
-                let end = (queued.added + CHUNK).min(queued.diff.adds.len());
-                for i in queued.added..end {
-                    let (priority, key) = queued.diff.adds[i];
-                    if !self.residents.contains_key(key) {
-                        self.levels[level].pending.insert(key, PendingQueue::bucket(priority));
+        }
+        // At cube seams prioritize the actual camera's face before its
+        // neighbors; the near levels are already visited before far levels.
+        let primary_face = if grid.is_plane() { crate::grid::PLANE_FACE } else { crate::grid::face_of(eye) };
+        let mut faces = [0u8; 6];
+        faces[..grid.faces().len()].copy_from_slice(grid.faces());
+        faces[..grid.faces().len()].sort_unstable_by_key(|face| *face != primary_face);
+        for (level, state) in self.levels.iter_mut().enumerate() {
+            if !state.active || state.pending.is_empty() {
+                continue;
+            }
+            let cells = BRICK << level;
+            let columns = grid.cells() / cells;
+            let size = f64::from(cells);
+            for &face in &faces[..grid.faces().len()] {
+                // Check between fixed face groups, so refresh cannot consume
+                // the generation-admission reserve when a backlog grows.
+                if out_of_time() { return; }
+                // Two aligned blocks per axis around each anchor: at most
+                // 3 * 4 * 16 key probes per face/level, regardless of backlog.
+                let mut blocks = [(0i32, 0i32, 0.0f64); 12];
+                let mut count = 0usize;
+                for coords in coordinates[face as usize].into_iter().flatten() {
+                    let ci = (coords[0] / size).floor() as i32;
+                    let cj = (coords[1] / size).floor() as i32;
+                    let bi = ci.div_euclid(4);
+                    let bj = cj.div_euclid(4);
+                    let ni = bi + if ci.rem_euclid(4) < 2 { -1 } else { 1 };
+                    let nj = bj + if cj.rem_euclid(4) < 2 { -1 } else { 1 };
+                    for y in [bj, nj] {
+                        for x in [bi, ni] {
+                            if x < 0 || y < 0 || x >= columns / 4 || y >= columns / 4
+                                || blocks[..count].iter().any(|&(i, j, _)| i == x && j == y) { continue; }
+                            let point = grid.ground_point(face, f64::from(x * 4 + 2) * size, f64::from(y * 4 + 2) * size);
+                            let current_distance = grid.ground_distance(point, eye);
+                            let forecast_distance = forecast.map_or(current_distance, |future| {
+                                current_distance.min(grid.ground_distance(point, future) + forecast_penalty)
+                            });
+                            let distance = focus.map_or(forecast_distance, |point_of_interest| {
+                                forecast_distance.min(grid.ground_distance(point, point_of_interest) + focus_penalty)
+                            });
+                            blocks[count] = (x, y, distance);
+                            count += 1;
+                        }
                     }
                 }
-                queued.added = end;
-                if out_of_time() && queued.added < queued.diff.adds.len() {
-                    self.diffs.push_front(queued);
-                    return;
+                // Buckets pop newest first: insert far blocks first, keeping
+                // the actual-camera block first when bucket rounding ties.
+                blocks[..count].sort_unstable_by(|a, b| b.2.total_cmp(&a.2));
+                for &(bi, bj, distance) in &blocks[..count] {
+                    // A CPU-resident full block has no pending admissions to
+                    // group. Avoid sixteen hash probes every stopped frame.
+                    if self.blocks.get(&(level as u32, face, 1, bi, bj)).is_some_and(|block| block.refs == 16) {
+                        continue;
+                    }
+                    let mut keys = [0u64; 16];
+                    let mut complete = true;
+                    for (index, key) in keys.iter_mut().enumerate() {
+                        let i = bi * 4 + (index % 4) as i32;
+                        let j = bj * 4 + (index / 4) as i32;
+                        *key = pack(key0(face, level as u32, i), j as u32);
+                        complete &= state.pending.at.contains_key(key) || self.residents.contains_key(*key);
+                    }
+                    if !complete { continue; }
+                    let priority = distance / state.radius.max(grid.level_size(level as u32));
+                    let bucket = PendingQueue::bucket(priority as f32);
+                    for key in keys {
+                        if state.pending.remove(key) {
+                            state.pending.insert(key, bucket);
+                        }
+                    }
                 }
             }
-            self.catching_up[level] -= 1;
         }
     }
 
@@ -691,6 +811,10 @@ impl Residency {
         let share = if self.levels.iter().all(|l| l.pending.is_empty()) { 1.0 } else { 0.6 };
         let apply_out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b.mul_f64(share));
         self.apply_queued(&mut work, &apply_out_of_time);
+        // Window diffs may spend 60% of the CPU budget. Refresh gets at most
+        // the next 10%, leaving 30% for issuing generation jobs this frame.
+        let refresh_deadline = budget_time.map(|budget| started + budget.mul_f64(0.7));
+        self.refresh_near_pending(eye, refresh_deadline);
         let t_apply = started.elapsed();
         // Urgent edit regenerations first.
         let mut urgent = std::mem::take(&mut self.urgent);
@@ -735,6 +859,7 @@ impl Residency {
         // blocks, table): bounded by time as well as by the GPU budget, and
         // resumes next frame.
         let mut steps = 0u32;
+        let mut awaiting_publication = Vec::new();
         while work.jobs.len() < budget {
             steps += 1;
             if steps % 64 == 0 && out_of_time() {
@@ -761,8 +886,17 @@ impl Residency {
             // A retired key may still have a publication result in flight.
             // Do not let that result acknowledge a different incarnation.
             if self.publishing.contains_key(&key) {
-                requeue(self);
-                break;
+                // Keep this incarnation queued, but let unrelated columns
+                // use the remaining budget while its GPU result is in flight.
+                awaiting_publication.push((index, key, bucket));
+                continue;
+            }
+            // Active diffs can now queue incoming columns before all outgoing
+            // blocks retire. Wait for an alias owner instead of permanently
+            // publishing a column without summaries during a large move.
+            if self.catching_up[index] > 0 && self.blocks_conflict(key) {
+                awaiting_publication.push((index, key, bucket));
+                continue;
             }
             let Some(record) = self.alloc_record() else {
                 requeue(self);
@@ -796,6 +930,9 @@ impl Residency {
                 pad: [0; 3],
             });
             work.job_keys.push(key);
+        }
+        for (index, key, bucket) in awaiting_publication {
+            self.levels[index].pending.insert(key, bucket);
         }
         let trace_ms: Option<f64> = std::env::var("HELIO_VOXEL_PLAN_TRACE").ok().map(|v| v.parse().unwrap_or(10.0));
         if trace_ms.is_some_and(|ms| started.elapsed().as_secs_f64() * 1e3 > ms) {
@@ -937,6 +1074,275 @@ impl Residency {
 mod tests {
     use super::*;
     use crate::planet::PlanetRecipe;
+
+    #[test]
+    fn queued_column_moves_ahead_when_its_priority_changes() {
+        let mut queue = PendingQueue::default();
+        queue.insert(10, 40);
+        queue.insert(20, 4);
+        queue.insert(30, 40);
+        assert!(queue.insert(10, 0));
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue.pop(), Some((10, 0)));
+        assert_eq!(queue.pop(), Some((20, 4)));
+        assert_eq!(queue.pop(), Some((30, 40)));
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn moving_camera_refreshes_surviving_pending_columns() {
+        let planet = std::sync::Arc::new(Planet::new(PlanetRecipe {
+            shape: crate::grid::Shape::Plane,
+            plane_size_m: 1000.0,
+            terrain: crate::TerrainSource { generator: crate::landform::FLAT_ID.into(), ..Default::default() },
+            ..Default::default()
+        }).unwrap());
+        let mut residency = Residency::new(*planet.grid(), Capacity::default());
+        let first_eye = DVec3::new(0.0, 2.0, 0.0);
+        residency.plan(&planet, first_eye, 10.0, 0);
+        let old = residency.levels[0].pending.at.clone();
+        let moved_eye = first_eye + DVec3::X * 8.0;
+        residency.plan(&planet, moved_eye, 10.0, 0);
+        let promoted: Vec<_> = residency.levels[0].pending.at.iter()
+            .filter(|(key, (bucket, _))| old.get(key).is_some_and(|(previous, _)| previous > bucket))
+            .collect();
+        assert!(!promoted.is_empty(), "overlapping jobs closer to the moving camera must be promoted");
+        assert!(promoted.iter().all(|(key, _)| !residency.residents.contains_key(**key)),
+            "reprioritization must preserve pending work without publishing unfinished columns");
+    }
+
+    #[test]
+    fn retired_inflight_column_does_not_block_unrelated_admissions() {
+        let (planet, mut residency, blocked, eye) = edit_fixture();
+        residency.residents.remove(blocked, &mut Vec::new());
+        residency.publishing.insert(blocked, EditPublication {
+            record: 0, previous: None, next: None, evicted: true,
+        });
+        let (_, level, i, j) = unpack(blocked);
+        let available = pack(key0(crate::grid::PLANE_FACE, level, i + 1), j as u32);
+        residency.levels[level as usize].pending.insert(available, 1);
+        residency.levels[level as usize].pending.insert(blocked, 0);
+        let work = residency.plan(&planet, eye, 1.0, 2);
+        assert_eq!(work.job_keys, vec![available]);
+        assert!(residency.levels[level as usize].pending.at.contains_key(&blocked));
+        assert_eq!(residency.publishing[&blocked].record, 0,
+            "retired publication must retain its incarnation until completion");
+    }
+
+    #[test]
+    fn active_window_hands_off_incoming_columns_before_retirement_finishes() {
+        let planet = Planet::new(PlanetRecipe { shape: crate::grid::Shape::Plane, ..Default::default() }).unwrap();
+        let mut residency = Residency::new(*planet.grid(), Capacity::default());
+        let face = crate::grid::PLANE_FACE;
+        let removed: Vec<_> = (1000..1512).map(|i| pack(key0(face, 0, i), 0)).collect();
+        let added: Vec<_> = (2000..2512).map(|i| pack(key0(face, 0, i), 0)).collect();
+        for &key in &removed { residency.levels[0].pending.insert(key, 40); }
+        residency.apply(WindowUpdate { serial: 1, levels: vec![LevelDiff {
+            level: 0, active: true, radius: 100.0,
+            removes: removed.clone(), adds: added.iter().map(|key| (0.1, *key)).collect(),
+            ..Default::default()
+        }], ..Default::default() });
+        let mut work = FrameWork::default();
+        residency.apply_queued(&mut work, &|| true);
+        let diff = residency.diffs.front().unwrap();
+        assert_eq!((diff.removed, diff.added), (128, 128),
+            "one bounded256-operation slice must expose incoming demand alongside retirement");
+        assert!(added[..128].iter().all(|key| residency.levels[0].pending.at.contains_key(key)));
+        assert!(removed[128..].iter().all(|key| residency.levels[0].pending.at.contains_key(key)));
+        assert_eq!(residency.catching_up[0], 1, "partial handoff must not claim complete coverage");
+        residency.apply_queued(&mut work, &|| false);
+        let wanted: std::collections::HashSet<_> = residency.levels[0].pending.keys().copied().collect();
+        assert_eq!(wanted, added.into_iter().collect());
+        assert_eq!(residency.catching_up[0], 0);
+        assert!(residency.diffs.is_empty() && work.jobs.is_empty() && residency.publishing.is_empty());
+    }
+
+    #[test]
+    fn early_incoming_summary_alias_waits_for_retirement_without_blocking_other_jobs() {
+        let (planet, mut residency, old, eye) = edit_fixture();
+        let mut work = FrameWork::default();
+        assert!(residency.acquire_blocks(old, &mut work));
+        residency.residents.get_mut(old).unwrap().blocks = true;
+        let (face, level, i, j) = unpack(old);
+        let incoming = pack(key0(face, level, i + 512), j as u32);
+        let available = pack(key0(face, level, i + 80), j as u32);
+        assert!(residency.blocks_conflict(incoming));
+        assert!(!residency.blocks_conflict(available));
+        residency.catching_up[level as usize] = 1;
+        residency.levels[level as usize].pending.insert(incoming, 0);
+        residency.levels[level as usize].pending.insert(available, 1);
+        let work = residency.plan(&planet, eye, 1.0, 2);
+        assert_eq!(work.job_keys, vec![available]);
+        assert!(!residency.residents.contains_key(incoming));
+        assert!(residency.levels[level as usize].pending.at.contains_key(&incoming));
+        let mut retirement = FrameWork::default();
+        residency.evict(old, &mut retirement);
+        residency.catching_up[level as usize] = 0;
+        let work = residency.plan(&planet, eye, 1.0, 1);
+        assert_eq!(work.job_keys, vec![incoming]);
+        assert!(residency.residents.get(incoming).unwrap().blocks,
+            "early staging may not permanently publish a summaryless incoming column");
+    }
+
+    fn block_identity(key: u64) -> (u8, u32, i32, i32) {
+        let (face, level, i, j) = unpack(key);
+        (face, level, i >> 2, j >> 2)
+    }
+
+    fn queue_complete_block(pending: &mut PendingQueue, key: u64, bucket: usize) {
+        let (face, level, bi, bj) = block_identity(key);
+        for j in bj * 4..bj * 4 + 4 {
+            for i in bi * 4..bi * 4 + 4 {
+                pending.insert(pack(key0(face, level, i), j as u32), bucket);
+            }
+        }
+    }
+
+    #[test]
+    fn current_camera_jobs_precede_equivalent_forecast_jobs() {
+        let planet = Planet::new(PlanetRecipe { shape: crate::grid::Shape::Plane, ..Default::default() }).unwrap();
+        let grid = *planet.grid();
+        let eye = DVec3::Y * 2.0;
+        let future = eye + DVec3::X * 20.0;
+        let key_at = |point| {
+            let (cell, _) = grid.locate(point);
+            pack(key0(cell.face, 0, cell.i >> 3), (cell.j >> 3) as u32)
+        };
+        let current_key = key_at(eye);
+        let forecast_key = key_at(future);
+        let mut residency = Residency::new(grid, Capacity::default());
+        residency.set_prefetch_eye(Some(future));
+        let level = &mut residency.levels[0];
+        level.active = true;
+        level.radius = 100.0;
+        queue_complete_block(&mut level.pending, current_key, 40);
+        queue_complete_block(&mut level.pending, forecast_key, 40);
+        residency.refresh_near_pending(eye, None);
+        let pending = &mut residency.levels[0].pending;
+        let current_priority = pending.at[&current_key].0;
+        let forecast_priority = pending.at[&forecast_key].0;
+        assert!(current_priority < forecast_priority && forecast_priority < 40);
+        for key in [current_key, forecast_key] {
+            for _ in 0..16 { assert_eq!(block_identity(pending.pop().unwrap().0), block_identity(key)); }
+        }
+    }
+
+    #[test]
+    fn priority_forecast_does_not_replan_or_expand_windows() {
+        let planet = std::sync::Arc::new(Planet::new(PlanetRecipe {
+            shape: crate::grid::Shape::Plane, plane_size_m: 1000.0,
+            terrain: crate::TerrainSource { generator: crate::landform::FLAT_ID.into(), ..Default::default() },
+            ..Default::default()
+        }).unwrap());
+        let mut residency = Residency::new(*planet.grid(), Capacity::default());
+        let eye = DVec3::Y * 30.0;
+        let coverage = eye + DVec3::X * 21.0;
+        residency.set_prefetch_eye(Some(coverage));
+        residency.plan(&planet, eye, 120.0, 0);
+        let serial = residency.requested;
+        let pending: Vec<_> = residency.levels.iter().map(|level| level.pending.keys().copied().collect::<std::collections::HashSet<_>>()).collect();
+        residency.set_priority_eye(Some(eye + DVec3::X * 60.0));
+        residency.plan(&planet, eye, 120.0, 0);
+        assert_eq!(residency.requested, serial);
+        assert_eq!(residency.last_request.as_ref().unwrap().prefetch_eye, Some(coverage));
+        for (level, before) in residency.levels.iter().zip(pending) {
+            assert_eq!(level.pending.keys().copied().collect::<std::collections::HashSet<_>>(), before);
+        }
+        assert!(residency.residents.len() == 0 && residency.publishing.is_empty());
+        let wanted: Vec<_> = residency.levels.iter().map(|level| level.pending.keys().copied().collect::<std::collections::HashSet<_>>()).collect();
+        let pitch = -12.0f64.to_radians();
+        let focus = crate::windows::visible_focus(planet.grid(), eye, DVec3::new(pitch.cos(), pitch.sin(), 0.0), 0.0, 1000.0).unwrap();
+        residency.set_view_focus(Some(focus));
+        residency.plan(&planet, eye, 120.0, 0);
+        assert_eq!(residency.requested, serial, "distant visible focus must not request a wider window");
+        for (level, before) in residency.levels.iter().zip(wanted) {
+            assert_eq!(level.pending.keys().copied().collect::<std::collections::HashSet<_>>(), before);
+        }
+        assert!(residency.residents.len() == 0 && residency.publishing.is_empty());
+    }
+
+    #[test]
+    fn visible_forward_focus_promotes_existing_pending_work_without_publication() {
+        let planet = Planet::new(PlanetRecipe { shape: crate::grid::Shape::Plane, ..Default::default() }).unwrap();
+        let grid = *planet.grid();
+        let eye = DVec3::Y * 30.0;
+        let pitch = -0.45f64;
+        let focus = crate::windows::visible_focus(&grid, eye, DVec3::new(pitch.cos(), pitch.sin(), 0.0), 0.0, 200.0).unwrap();
+        let forecast = eye + DVec3::X * 43.0;
+        let key_at = |point| {
+            let (cell, _) = grid.locate(point);
+            pack(key0(cell.face, 0, cell.i >> 3), (cell.j >> 3) as u32)
+        };
+        let current_key = key_at(eye);
+        let focus_key = key_at(focus);
+        let forecast_key = key_at(forecast);
+        let behind_key = key_at(eye - DVec3::X * focus.x);
+        let mut residency = Residency::new(grid, Capacity::default());
+        residency.set_prefetch_eye(Some(forecast));
+        residency.set_view_focus(Some(focus));
+        let level = &mut residency.levels[0];
+        level.active = true;
+        level.radius = 100.0;
+        for key in [current_key, focus_key, forecast_key, behind_key] { queue_complete_block(&mut level.pending, key, 50); }
+        residency.refresh_near_pending(eye, None);
+        assert_eq!(residency.residents.len(), 0);
+        assert!(residency.publishing.is_empty());
+        let pending = &mut residency.levels[0].pending;
+        assert_eq!(pending.len(), 64, "focus must not enqueue data outside existing pending windows");
+        for key in [current_key, focus_key, forecast_key, behind_key] {
+            for _ in 0..16 { assert_eq!(block_identity(pending.pop().unwrap().0), block_identity(key)); }
+        }
+    }
+
+    #[test]
+    fn incomplete_block_is_not_promoted_and_complete_blocks_stay_together() {
+        let planet = Planet::new(PlanetRecipe { shape: crate::grid::Shape::Plane, ..Default::default() }).unwrap();
+        let grid = *planet.grid();
+        let eye = DVec3::Y * 2.0;
+        let (cell, _) = grid.locate(eye);
+        let ci = cell.i >> 3;
+        let cj = cell.j >> 3;
+        let key = pack(key0(cell.face, 0, ci), cj as u32);
+        let incomplete_key = pack(key0(cell.face, 0, (ci & !3) - 4), (cj & !3) as u32);
+        let mut residency = Residency::new(grid, Capacity::default());
+        let level = &mut residency.levels[0];
+        level.active = true;
+        level.radius = 100.0;
+        queue_complete_block(&mut level.pending, key, 40);
+        queue_complete_block(&mut level.pending, incomplete_key, 40);
+        level.pending.remove(incomplete_key);
+        let before: std::collections::HashSet<_> = level.pending.keys().copied().collect();
+        residency.refresh_near_pending(eye, None);
+        let pending = &mut residency.levels[0].pending;
+        assert_eq!(before, pending.keys().copied().collect());
+        for (&candidate, &(bucket, _)) in &pending.at {
+            if block_identity(candidate) == block_identity(incomplete_key) { assert_eq!(bucket, 40); }
+        }
+        for _ in 0..16 { assert_eq!(block_identity(pending.pop().unwrap().0), block_identity(key)); }
+        assert_eq!(pending.len(), 15);
+        assert_eq!(residency.residents.len(), 0);
+        assert!(residency.publishing.is_empty());
+    }
+
+    #[test]
+    fn expired_refresh_reserve_keeps_pending_queue_and_admission_work_intact() {
+        let planet = Planet::new(PlanetRecipe { shape: crate::grid::Shape::Plane, ..Default::default() }).unwrap();
+        let grid = *planet.grid();
+        let eye = DVec3::Y * 2.0;
+        let (cell, _) = grid.locate(eye);
+        let key = pack(key0(cell.face, 0, cell.i >> 3), (cell.j >> 3) as u32);
+        let mut residency = Residency::new(grid, Capacity::default());
+        let level = &mut residency.levels[0];
+        level.active = true;
+        level.radius = 100.0;
+        queue_complete_block(&mut level.pending, key, 40);
+        let before = level.pending.at.clone();
+        residency.refresh_near_pending(eye, Some(std::time::Instant::now()));
+        assert_eq!(residency.levels[0].pending.at, before,
+            "elapsed refresh reserve must leave existing work ready for admission");
+        assert!(residency.levels[0].pending.pop().is_some());
+        assert!(residency.residents.len() == 0 && residency.publishing.is_empty());
+    }
 
     fn edit_fixture() -> (std::sync::Arc<Planet>, Residency, u64, DVec3) {
         let planet = std::sync::Arc::new(Planet::new(PlanetRecipe {

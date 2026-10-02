@@ -125,9 +125,12 @@ fn settled_level_transitions_enter_the_surface_not_subsoil() {
     let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
     let target = Target::new(&gpu, [384, 216]);
     let mut renderer = renderer(&gpu, planet.clone(), [384, 216]);
+    let grid = *planet.grid();
+    assert!(renderer.settings_mut().coarse_relief, "this regression exercises authored fractional tops");
     for height in [1_000., 4_000., 16_000., 64_000.] {
         let frame = frame(&planet, planet.surface_point(DVec3::Y, height));
         let forward = Vec3::new(1., -0.6, 0.).normalize();
+        let camera = target.camera(forward, Vec3::Y);
         for n in 0..2000 {
             target.render(&gpu, &mut renderer, &frame, forward, n);
             if renderer.settled() { break; }
@@ -135,12 +138,37 @@ fn settled_level_transitions_enter_the_surface_not_subsoil() {
         assert!(renderer.settled());
         target.render(&gpu, &mut renderer, &frame, forward, 2001);
         let mut tops = 0;
-        for hit in hits(&gpu, &renderer) {
+        for (pixel, hit) in hits(&gpu, &renderer).into_iter().enumerate() {
             assert!(hit.status < 2, "unresolved ray at {height} m: {hit:?}");
             if hit.status == 1 && hit.normal == 4 {
                 tops += 1;
-                let top = planet.column_top(hit.face, hit.i, hit.j, hit.level);
-                assert_eq!(hit.k, top - 1, "synthetic interior top-face hit at {height} m: {hit:?}");
+                // Query the CPU generator independently of GPU metadata.
+                // Fractional coarse tops preserve the authored base layer
+                // inside a conservatively ceil-rounded coarse cell, whereas
+                // column_top is the legacy whole-cell floor-rounded surface.
+                let field_height = planet.field().height(
+                    grid.domain_point(hit.face, hit.i, hit.j, hit.level),
+                    hit.level + grid.level_offset(),
+                );
+                let base_top = i64::from(field_height).div_euclid(i64::from(grid.layer_mm()));
+                let scale = 1i64 << hit.level;
+                let enclosing_top = -(-base_top).div_euclid(scale);
+
+                // A correct cell ID alone cannot certify a real surface entry.
+                // Reconstruct the world-space ray in f64 and require its hit
+                // radius to match the authored boundary, allowing only f32
+                // ray roundoff and the stored 16-bit fraction's quantization.
+                let direction = pixel_dir(&target, &camera,
+                    pixel as u32 % target.size[0], pixel as u32 / target.size[0]);
+                let actual_height = grid.height(frame.eye + direction * f64::from(hit.t));
+                let authored_height = base_top as f64 * grid.voxel_size();
+                let fraction_quantum = if hit.level <= 16 { 0.0 }
+                    else { grid.voxel_size() * scale as f64 / 65536.0 };
+                let ray_roundoff = grid.voxel_size() * 0.25 + f64::from(hit.t) * 2.0e-6;
+                assert!((actual_height - authored_height).abs() <= fraction_quantum + ray_roundoff,
+                    "synthetic interior radial entry at {height} m: {hit:?}, hit height{actual_height}, authored{authored_height}");
+                assert_eq!(i64::from(hit.k), enclosing_top - 1,
+                    "synthetic interior top-face cell at {height} m: {hit:?}, authored base top{base_top}");
             }
         }
         assert!(tops > 10_000);

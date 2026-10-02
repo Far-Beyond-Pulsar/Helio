@@ -7,7 +7,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, IVec4, Mat4, Vec3, Vec4};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use wgpu::util::DeviceExt;
 
 pub const GBUFFER_FORMATS: [wgpu::TextureFormat; 8] = [
@@ -79,6 +79,12 @@ pub struct Settings {
     /// Reuse a coarse climate height only when Landform bounds prove that
     /// every canonical height gives the same material. Disable for audits.
     pub climate_height_reuse: bool,
+    /// Preserve sub-cell radial relief in unedited coarse columns.
+    /// Set before generating columns; resident columns retain their format.
+    pub coarse_relief: bool,
+    /// Reconstruct distant slope lighting from existing raw climate samples,
+    /// blending by pixel footprint independently of the current clipmap level.
+    pub far_relief: bool,
     /// Diagnostics: skip residency planning (no jobs, windows or evictions)
     /// so several renders see identical GPU state.
     pub freeze_residency: bool,
@@ -97,6 +103,8 @@ impl Default for Settings {
             horizon: std::env::var_os("HELIO_VOXEL_NO_HORIZON").is_none(),
             residency_hints: true,
             climate_height_reuse: true,
+            coarse_relief: std::env::var("HELIO_VOXEL_COARSE_RELIEF").ok().is_none_or(|v| v != "0"),
+            far_relief: std::env::var("HELIO_VOXEL_FAR_RELIEF").ok().is_none_or(|v| v != "0"),
             freeze_residency: false,
             frame_override: None,
             capacity: Capacity::default(),
@@ -286,12 +294,34 @@ struct Pipelines {
     horizon_blocks: wgpu::ComputePipeline,
     horizon_suffix: wgpu::ComputePipeline,
     shade: wgpu::ComputePipeline,
+    shade_relief: OnceLock<wgpu::ComputePipeline>,
+    shade_module: wgpu::ShaderModule,
+    shade_layout: wgpu::PipelineLayout,
     climate: wgpu::ComputePipeline,
     sunlight: wgpu::ComputePipeline,
     gbuffer: wgpu::RenderPipeline,
 }
 
 impl Pipelines {
+    fn shade_for(&self, device: &wgpu::Device, relief: bool) -> &wgpu::ComputePipeline {
+        if !relief {
+            return &self.shade;
+        }
+        self.shade_relief.get_or_init(|| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("planet shade relief"),
+                layout: Some(&self.shade_layout),
+                module: &self.shade_module,
+                entry_point: Some("shade"),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[("FAR_RELIEF", 1.0)],
+                    ..Default::default()
+                },
+                cache: None,
+            })
+        })
+    }
+
     /// Whether these pipelines serve a world of this shape and program.
     fn serve(&self, plane: bool, program: &TerrainProgram) -> bool {
         self.plane == plane && self.program == program.key
@@ -468,6 +498,9 @@ impl Pipelines {
             shade: compute(&trace_pl, &trace_module, "shade"),
             climate: compute(&trace_pl, &trace_module, "climate"),
             sunlight: compute(&trace_pl, &trace_module, "sunlight"),
+            shade_relief: OnceLock::new(),
+            shade_module: trace_module,
+            shade_layout: trace_pl,
             gbuffer,
             gen_layout,
             trace_layout,
@@ -884,9 +917,13 @@ impl PlanetRenderer {
         frame.palette = self.settings.appearance.palette.map(linear);
         frame.grass = self.settings.appearance.grass.map(linear);
         frame.detail = self.settings.appearance.detail.map(clean);
-        frame.hints[1] = u32::from(self.settings.climate_height_reuse);
+        // Material-equivalent quantized tops are not equivalent derivatives.
+        // The relief prototype needs raw heights at the existing 2x2 anchors.
+        frame.hints[1] = u32::from(self.settings.climate_height_reuse && !self.settings.far_relief);
+        frame.hints[2] = u32::from(self.settings.far_relief);
         // Summary tops from an older journal cannot prune live edits.
-        frame.hints[3] = if self.residency.pending_edits() { 4 } else { 0 };
+        frame.hints[3] = (if self.residency.pending_edits() { 4 } else { 0 })
+            | (if self.settings.coarse_relief { 8 } else { 0 });
         for face in 0..6u8 {
             // A plane has one face; the others keep default frames.
             let f = grid.face_frame(face, eye);
@@ -1166,17 +1203,28 @@ impl PlanetRenderer {
         // when it is still (fast convergence), from the measured job cost.
         let now = std::time::Instant::now();
         let moving = self.last_eye.is_none_or(|(eye, _)| eye.distance(frame.eye) > 0.01);
+        let ground_clearance = self.planet.ground_height(frame.eye);
         let predicted = self.last_eye.and_then(|(eye, when)| {
             let dt = now.duration_since(when).as_secs_f64();
-            let step = frame.eye - eye;
             if !moving || dt > 0.25 { return None; }
-            // Forecast 350 ms, bounded by terrain clearance and horizontal
-            // window limits. A teleport does not enqueue an entire flight path.
-            let forecast = step * (0.35 / dt.max(0.001)).min(24.0);
-            let limit = self.planet.ground_height(frame.eye).max(20.0) * 0.7;
-            Some(frame.eye + forecast.clamp_length_max(limit))
+            crate::windows::motion_forecast(self.planet.grid(), frame.eye, eye, dt,
+                lod0, ground_clearance)
         });
-        self.residency.set_prefetch_eye(predicted);
+        let coverage = self.last_eye.and_then(|(eye, when)| {
+            crate::windows::window_forecast(frame.eye, eye, now.duration_since(when).as_secs_f64(), ground_clearance)
+        });
+        self.residency.set_prefetch_eye(coverage);
+        self.residency.set_priority_eye(predicted);
+        let forward = DVec3::new(f64::from(camera_data.forward_far[0]),
+            f64::from(camera_data.forward_far[1]), f64::from(camera_data.forward_far[2]));
+        let ground_radial = self.planet.grid().radial(frame.eye) - ground_clearance;
+        let camera_far = f64::from(camera_data.forward_far[3]);
+        let focus_far = if camera_far.is_finite() && camera_far > 0.0 { camera_far }
+            else if self.planet.grid().is_plane() {
+                f64::from(self.planet.grid().cells()) * self.planet.grid().voxel_size() * std::f64::consts::SQRT_2
+            } else { self.planet.grid().radius() * 4.0 };
+        let focus = crate::windows::visible_focus(self.planet.grid(), frame.eye, forward, ground_radial, focus_far);
+        self.residency.set_view_focus(focus);
         self.last_eye = Some((frame.eye, now));
         // Spend additional generation time when visible detail is catching up,
         // rather than withholding it until the camera stops moving.
@@ -1184,7 +1232,7 @@ impl PlanetRenderer {
         let target_ms = if moving { 1.5 + 1.5 * backlog } else { 6.0 };
         // CPU for applying window diffs and admitting columns: small while
         // moving (a big diff spreads over frames instead of freezing one),
-        // growing to 3 ms with the backlog (a new region streams in ~2x
+        // growing to 4 ms with the backlog (a new region streams in ~2x
         // faster; admission costs ~0.3 us per column, diffs about as much).
         let cpu_ms = if moving { 1.5 + 2.5 * backlog } else { 4.0 };
         self.residency.set_cpu_budget(Some(std::time::Duration::from_secs_f64(cpu_ms * 1.0e-3)));
@@ -1375,7 +1423,7 @@ impl PlanetRenderer {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_bind_group(0, &trace_group, &[]);
             pass.set_bind_group(1, camera_group, &[]);
-            Self::dispatch(&mut pass, &self.pipelines.shade, groups);
+            Self::dispatch(&mut pass, self.pipelines.shade_for(&self.device, self.settings.far_relief), groups);
         }
         if let Some(p) = &mut self.profiler {
             p.end_pass(encoder, "planet_shade");

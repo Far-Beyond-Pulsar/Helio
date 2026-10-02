@@ -1636,7 +1636,11 @@ fn cruise(flight: &mut Flight, height: f64) {
     let start = DVec3::new(deg.to_radians().sin(), deg.to_radians().cos(), 0.0);
     let r = flight.planet.surface_point(start, 0.0).length();
     let mut eye = start * (r + height);
-    let speed = 10.0 * (height / 20.0).max(1.0);
+    let speed = std::env::var("HELIO_VOXEL_FLIGHT_CRUISE_SPEED").ok()
+        .and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(10.0 * (height / 20.0).max(1.0));
+    let capture_every = std::env::var("HELIO_VOXEL_FLIGHT_CRUISE_EVERY").ok()
+        .and_then(|v| v.parse::<usize>().ok()).filter(|v| *v > 0).unwrap_or(300);
     let dt = 1.0 / 60.0;
     let view = |eye: DVec3| {
         let up = eye.normalize();
@@ -1669,8 +1673,11 @@ fn cruise(flight: &mut Flight, height: f64) {
                 stats.resident_columns, stats.pending_columns, stats.jobs, stats.job_budget, stats.us_per_job, stats.plan_cpu_ms, stats.upload_cpu_ms, a * 100.0, b * 100.0
             );
         }
-        if frame % 300 == 0 {
+        if frame % capture_every == 0 {
             flight.capture(&format!("cruise_{:05}", (t * 100.0) as u32));
+        }
+        if moving && t + dt >= secs {
+            flight.capture("cruise-arrival");
         }
         if converged.is_some() && t > secs + 2.0 {
             break;
@@ -1679,6 +1686,7 @@ fn cruise(flight: &mut Flight, height: f64) {
         frame += 1;
     }
     flight.capture("cruise_end");
+    flight.write_csv();
     eprintln!("CRUISE converged {converged:?} s after stopping");
 }
 

@@ -3,8 +3,10 @@
 Destructible voxel worlds for Helio: Earth-sized cube-sphere planets, finite
 planes and effectively infinite planes, built from exact voxels of 0.1 m to
 1 m, fully editable, and rendered by tracing every pixel through a GPU-driven
-clipmap. There is no smooth or meshed terrain and no enlarged-block LOD: every
-visible surface is a real cell of the canonical grid at some level.
+clipmap. Near geometry and gameplay use the authored voxel grid. Distant
+columns without geometry edits retain fractional radial height and filtered
+slope lighting so sub-pixel terrain keeps its relief without tracing every
+tiny voxel.
 
 This document maps the system for people who will work on it: what each part
 does, how a frame flows, which invariants hold it together, why things are
@@ -26,12 +28,12 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
 
 ## Goals and non-goals
 
-- Crisp voxels at every distance: near cells are cubes; far cells are the
-  same field sampled at a coarser level, shaded with filtered appearance so
-  sub-pixel cells do not alias. No meshes, no smooth LOD surface.
+- Crisp near voxels and stable distant relief: filter sub-pixel detail while
+  preserving visible landforms, materials and edits, without visible LOD steps.
 - One world, two consumers: the CPU (collision, ray casts, edits, gameplay
   queries) and the GPU (streaming, rendering) evaluate the same integer field
-  and the same edits and agree to the bit.
+  and the same edits. Field evaluations agree to the bit; distant rendering
+  filters their appearance without changing the authored world.
 - Space to ground in seconds: a camera can fall from orbit to walking height
   at the editor's altitude-proportional speed while residency keeps up.
 - Destruction at scale: tens of thousands of edits stay exact and cheap.
@@ -59,7 +61,7 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
 | `shaders/common.wgsl` | GPU residency structures: column records, hash lookup, summary blocks. |
 | `shaders/generate.wgsl` | GPU column generation, brick-run allocation and publication (evict -> generate -> count -> refill -> allocate -> fixup -> publish). |
 | `shaders/horizon.wgsl` | Directional sky bound: per azimuth sector and distance bucket, the elevation that clears all terrain. |
-| `shaders/trace.wgsl` | Exact hierarchical traversal of the canonical grid. |
+| `shaders/trace.wgsl` | Hierarchical grid traversal with authored radial tops for unedited distant columns. |
 | `shaders/surface.wgsl` | Primary rays, shading (materials, filtered appearance, AO), traced sunlight. |
 | `shaders/gbuffer.wgsl`, `shaders/view.wgsl` | GBuffer publication (depth-tested against meshes) and shared view helpers. |
 | `tests/gpu.rs` | GPU correctness tests (see [Tests](#tests)). |
@@ -106,9 +108,11 @@ the CPU raycast what the GPU draws.
   continent wavelengths is constant over metres and steps by one unit; scaled
   by kilometres of relief that became long straight terraces.
 - Detail finer than a level's footprint is omitted at that level: coarse
-  levels are band-limited point samples of the same field, not a separate
-  smooth approximation. That is why LOD transitions never change the shape of
-  the land, only its resolution.
+  levels are band-limited point samples of the same field. Levels 1 and above
+  retain fractional radial tops unless Add/Remove edits change their geometry.
+  Paint retains that relief. Slope lighting and face detail follow the authored
+  pixel footprint, using existing raw climate samples rather than tracing finer
+  cells.
 - Heights are relative to the datum (the planet radius or the plane's y = 0)
   and may be negative: lowland and ocean basins sit below it. Nothing in the
   pipeline may clamp heights to the datum (see the band-top invariant below).
@@ -159,15 +163,18 @@ dim diffuse light on the night side; set it to zero for solar-only lighting.
 2. **Windows.** When the eye moved, a `WindowRequest` goes to the window
    worker thread, which computes each level's wanted disc of columns and
    returns add/remove diffs. Level 0 covers the level-0 distance (cells about
-   a pixel wide at its edge), each coarser level twice the distance. A level
-   is on only if terrain within its reach can be nearer than that distance:
+   a pixel wide at its edge), each coarser level twice the distance. Windows
+   request complete 4x4-column groups to match the traversal's residency
+   gate. A level is on only if terrain within its reach can be nearer than
+   that distance:
    the worker bounds the terrain around the eye per level
    (`Planet::local_outer_radius`), so over a meadow 1 km below the fine
    levels are off instead of streaming columns under a tenth of a pixel.
 3. **Diff application.** Diffs are queued and applied in order within the
-   frame's CPU budget (1.5-3 ms moving by backlog, 4 ms still): removes evict residents,
-   a switched-off level clears its queue, adds become pending in a priority
-   bucket. Diffs get at most 60 % of the budget while columns wait. A level
+   frame's CPU budget (1.5-4 ms moving by backlog, 4 ms still): active levels
+   interleave removals and additions, so incoming columns can load before
+   retirement finishes. A switched-off level clears its queue. Diffs get
+   at most 60 % of the budget while columns wait. A level
    with unapplied diffs is *catching up*: its `fallback_distances` entry is 0
    (no guaranteed coverage).
 4. **Admission.** Pending columns are issued nearest-first (the coarsest level
@@ -242,7 +249,7 @@ dim diffuse light on the night side; set it to zero for solar-only lighting.
   used once with the job count of the frame it measured (dividing by the
   last frame's jobs overestimated the cost 2-7x). Measured: ~0.22 us per
   column on an RTX 3060, ~6500 jobs per moving frame. The CPU budget for
-  diffs and admission grows from 1.5 to 3 ms while moving as the backlog
+  diffs and admission grows from 1.5 to 4 ms while moving as the backlog
   reaches 20k columns.
 - **Pending queues are exact.** Each level's pending columns sit in
   priority buckets with a position index, so a window moving at speed
@@ -303,11 +310,13 @@ times come from timestamps.
 | `HELIO_VOXEL_FLIGHT_TRIP_FROM=<km>`, `_TRIP_FPS=<n>`, `_TRIP_EVERY=<frames>` | Trip start on the flank of the nearest summit (rock, scree, snow); flight frames per second (120; the editor runs near 60); capture cadence. |
 | `HELIO_VOXEL_FLIGHT_LODCMP=<km>` | One view over a flank rendered with levels forced progressively coarser: surface colour shares must not change (they stay within 3 %). |
 | `HELIO_VOXEL_FLIGHT_CRUISE=<m>`, `_CRUISE_SECS=<s>` | Level flight at that height at the editor's speed for 20 s, then a stop: residency lag while moving and time to converge. |
+| `HELIO_VOXEL_FLIGHT_CRUISE_SPEED=<m/s>`, `_CRUISE_EVERY=<frames>` | Override level-flight speed and capture cadence; cruise also writes frame timings. |
 | `HELIO_VOXEL_FLIGHT_REPLAY=<engine.log>`, `_REPLAY_FROM/_TO=<s of day>`, `_REPLAY_DEG` | Replays the altitude timeline of a Pulsar editor session logged with `PULSAR_VOXEL_STATS=1`. |
 | `HELIO_VOXEL_FLIGHT_SUN=x,y,z` | Sun direction (the editor's default Sun is straight up). |
 | `HELIO_VOXEL_FLIGHT_QUICK=1`, `_GROUND_ONLY=1`, `_CPU_PROBE=1` | Short timing probe, ground audits only, CPU per pass. |
 | `HELIO_VOXEL_PLAN_TRACE=<ms>` | Logs residency plan phases of frames taking over `<ms>` (10 if not a number). |
 | `HELIO_VOXEL_LOD_DITHER`, `HELIO_VOXEL_NO_HORIZON`, `HELIO_VOXEL_NO_FAILSAFE` | Override the dither width; disable the sky bound; disable its fail-safe (A/B timing). |
+| `HELIO_VOXEL_COARSE_RELIEF=0`, `HELIO_VOXEL_FAR_RELIEF=0` | Disable fractional radial tops or raw-climate slope lighting for A/B comparisons. Set before loading terrain. |
 
 Measuring pitfalls: synchronous readbacks (audits, probes, captures) idle
 the GPU and the driver drops its clock (frames right after them show 210 MHz
