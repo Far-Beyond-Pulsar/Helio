@@ -6,6 +6,7 @@
 pub mod asset_component;
 pub mod components;
 pub mod mesh_cache;
+mod motion_gate;
 pub mod subsystems;
 
 pub use asset_component::*;
