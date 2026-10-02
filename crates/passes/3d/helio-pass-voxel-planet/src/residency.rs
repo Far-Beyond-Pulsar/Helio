@@ -339,6 +339,7 @@ pub struct Residency {
     /// CPU time per `plan` for applying diffs and admitting columns; `None`
     /// is unbounded (deterministic, for tests).
     cpu_budget: Option<std::time::Duration>,
+    lod_dither: f64,
     prefetch_eye: Option<DVec3>,
     priority_eye: Option<DVec3>,
     view_focus: Option<DVec3>,
@@ -423,6 +424,7 @@ impl Residency {
             diff_cursor: 0,
             catching_up: vec![0; grid.levels() as usize],
             cpu_budget: None,
+            lod_dither: 0.0,
             prefetch_eye: None,
             priority_eye: None,
             view_focus: None,
@@ -671,6 +673,10 @@ impl Residency {
     /// admitting columns (`None`: unbounded). The rest carries over.
     pub fn set_cpu_budget(&mut self, budget: Option<std::time::Duration>) {
         self.cpu_budget = budget;
+    }
+
+    pub(crate) fn set_lod_dither(&mut self, dither: f64) {
+        self.lod_dither = crate::windows::sanitize_lod_dither(dither);
     }
 
     pub fn set_prefetch_eye(&mut self, eye: Option<DVec3>) {
@@ -1163,6 +1169,7 @@ impl Residency {
             priority_eye: self.priority_eye,
             view_focus: self.view_focus,
             lod0,
+            lod_dither: self.lod_dither,
             outer_radius: planet.outer_radius(),
             planet: Some(planet.clone()),
             serial: self.requested + 1,
@@ -1170,6 +1177,7 @@ impl Residency {
         let changed = self.last_request.as_ref().is_none_or(|last| {
             last.eye.distance(eye) > self.grid.voxel_size() * 2.0
                 || (last.lod0 - lod0).abs() > lod0 * 0.01
+                || last.lod_dither != request.lod_dither
                 || last.outer_radius != request.outer_radius
                 || last.prefetch_eye != request.prefetch_eye
         });
@@ -2240,7 +2248,7 @@ mod tests {
         residency.requested = 1;
         residency.last_request = Some(WindowRequest {
             eye, prefetch_eye: None, priority_eye: None, view_focus: None,
-            lod0: 120.0, outer_radius: planet.outer_radius(), planet: Some(planet.clone()), serial: 1,
+            lod0: 120.0, lod_dither: 0.0, outer_radius: planet.outer_radius(), planet: Some(planet.clone()), serial: 1,
         });
         residency.set_cpu_budget(None);
         let work = residency.plan(&planet, eye, 120.0, 16);
@@ -2523,7 +2531,7 @@ mod tests {
         r.block_conflicts = 1;
         r.next_record = 1;
         r.last_request = Some(WindowRequest {
-            eye, prefetch_eye: None, priority_eye: None, view_focus: None, lod0: 1.0,
+            eye, prefetch_eye: None, priority_eye: None, view_focus: None, lod0: 1.0, lod_dither: 0.0,
             outer_radius: planet.outer_radius(), planet: Some(planet.clone()), serial: 1,
         });
         (planet, r, key, eye)
@@ -2818,4 +2826,25 @@ mod tests {
         }
         table_is_exact(&residency);
     }
+
+    #[test]
+    fn renderer_dither_setting_replans_without_camera_motion() {
+        let planet = std::sync::Arc::new(Planet::new(crate::planet::PlanetRecipe {
+            shape: crate::grid::Shape::Plane, plane_size_m: 1000.0,
+            terrain: crate::terrain::TerrainSource { generator: crate::landform::FLAT_ID.into(), ..Default::default() },
+            ..Default::default() }).unwrap());
+        let mut residency = Residency::new(*planet.grid(), Capacity::default());
+        let eye = DVec3::Y * 110.0;
+        residency.plan(&planet, eye, 100.0, 0);
+        let serial = residency.requested;
+        residency.set_lod_dither(0.25);
+        residency.plan(&planet, eye, 100.0, 0);
+        assert_eq!(residency.requested, serial + 1);
+        assert_eq!(residency.last_request.as_ref().unwrap().lod_dither, 0.25);
+        assert!(residency.levels[0].active);
+        residency.set_lod_dither(f64::NAN);
+        residency.plan(&planet, eye, 100.0, 0);
+        assert_eq!(residency.requested, serial + 1, "equivalent sanitized settings must not restart planning");
+    }
+
 }

@@ -99,6 +99,12 @@ pub struct Settings {
     pub appearance: TerrainAppearance,
 }
 
+impl Settings {
+    fn sanitized_lod_dither(&self) -> f32 {
+        crate::windows::sanitize_lod_dither(f64::from(self.lod_dither)) as f32
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -1028,7 +1034,7 @@ impl PlanetRenderer {
         let cut = SKY_CUT_M.max(0.75 * planet.air_clearance(eye));
         // Farthest ray distance: past the far side of a planet, or across a plane.
         let far = if grid.is_plane() { f64::from(grid.cells()) * s * 2.0 + rho.abs() } else { rho + grid.radius() * 3.0 };
-        frame.lod = [lod0 as f32, self.settings.lod_dither, -cut as f32, far as f32];
+        frame.lod = [lod0 as f32, self.settings.sanitized_lod_dither(), -cut as f32, far as f32];
         let (_, rings) = self.sky_rings(eye, lod0, cut);
         for (level, phi) in rings.iter().enumerate().take(32) {
             frame.ring[level / 4][level % 4] = *phi as f32;
@@ -1074,9 +1080,9 @@ impl PlanetRenderer {
         let rings = if grid.is_plane() {
             // Points in [eye - cut, outer] differ in height by at most dz.
             let dz = cut.max(planet.outer_radius() - rho);
-            plane_sky_rings(lod0, f64::from(self.settings.lod_dither), dz, &fallback)
+            plane_sky_rings(lod0, f64::from(self.settings.sanitized_lod_dither()), dz, &fallback)
         } else {
-            sky_rings(lod0, f64::from(self.settings.lod_dither), rho, r_lo, planet.outer_radius(), &fallback)
+            sky_rings(lod0, f64::from(self.settings.sanitized_lod_dither()), rho, r_lo, planet.outer_radius(), &fallback)
         };
         (fallback, rings)
     }
@@ -1287,6 +1293,7 @@ impl PlanetRenderer {
         let coverage = self.last_eye.and_then(|(eye, when)| {
             crate::windows::window_forecast(frame.eye, eye, now.duration_since(when).as_secs_f64(), ground_clearance)
         });
+        self.residency.set_lod_dither(f64::from(self.settings.sanitized_lod_dither()));
         self.residency.set_prefetch_eye(coverage);
         self.residency.set_priority_eye(predicted);
         let forecasted = std::time::Instant::now();

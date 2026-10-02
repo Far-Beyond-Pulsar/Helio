@@ -9,6 +9,11 @@ use glam::DVec3;
 use rustc_hash::FxHashSet;
 use std::sync::{mpsc, Mutex};
 
+/// The same finite selection range is used by tracing and window planning.
+pub(crate) fn sanitize_lod_dither(value: f64) -> f64 {
+    if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.25 }
+}
+
 #[derive(Clone)]
 pub struct WindowRequest {
     pub eye: DVec3,
@@ -19,6 +24,7 @@ pub struct WindowRequest {
     pub view_focus: Option<DVec3>,
     /// Level-0 range (metres).
     pub lod0: f64,
+    pub lod_dither: f64,
     /// Radius bounding every solid cell.
     pub outer_radius: f64,
     /// The world, for local terrain bounds (none: the global bound only).
@@ -66,6 +72,7 @@ pub struct WindowPlanner {
     grid: Grid,
     levels: Vec<LevelState>,
     snapshot: bool,
+    lod_dither: Option<f64>,
 }
 
 fn pack(k0: u32, k1: u32) -> u64 {
@@ -231,6 +238,7 @@ impl WindowPlanner {
         Self {
             grid,
             snapshot: false,
+            lod_dither: None,
             levels: (0..grid.levels()).map(|_| LevelState::default()).collect(),
         }
     }
@@ -389,6 +397,9 @@ impl WindowPlanner {
         let grid = self.grid;
         let r0 = grid.radius();
         let eye = request.eye;
+        let dither = sanitize_lod_dither(request.lod_dither);
+        let dither_changed = self.lod_dither != Some(dither);
+        self.lod_dither = Some(dither);
         // Window centre: the eye direction on a sphere, its ground point on a plane.
         let dir = if grid.is_plane() { DVec3::new(eye.x, 0.0, eye.z) } else { eye.normalize() };
         // Below-datum terrain still has a horizon. Use the datum sphere as
@@ -408,8 +419,14 @@ impl WindowPlanner {
             ..Default::default()
         };
         for level in 0..grid.levels() {
-            let reach = request.lod0 * f64::from(1u32 << level) * 1.05;
-            let inner = if level == 0 { 0.0 } else { request.lod0 * f64::from(1u32 << (level - 1)) };
+            let nominal = request.lod0 * f64::from(1u32 << level);
+            // selected=t*(1+d*(hash-.5)); fine selection can extend to
+            // nominal/(1-d/2), and the next level can start correspondingly early.
+            let selected_reach = nominal / (1.0 - dither * 0.5);
+            let reach = (nominal * 1.05).max(selected_reach);
+            let inner = if level == 0 { 0.0 } else {
+                request.lod0 * f64::from(1u32 << (level - 1)) / (1.0 + dither * 0.5)
+            };
             // Height over the highest terrain the level's window can hold:
             // over a meadow far below, fine levels are not needed at all.
             let altitude = grid.radial(eye) - self.local_outer(request, level, reach);
@@ -437,6 +454,19 @@ impl WindowPlanner {
             let col = grid.level_size(level) * f64::from(BRICK);
             // The direct-mapped summary tables bound the window diameter.
             let cap = col * f64::from(max_window_columns() / 2 - 2) * 0.8;
+            // Recentring tolerates a three-column vector displacement. On a
+            // sphere that is a chord: convert it to a conservative arc length.
+            let drift = if grid.is_plane() { col * 3.0 } else {
+                2.0 * r0 * (col * 3.0 / (2.0 * r0)).min(1.0).asin()
+            };
+            let tangential_col = grid.delta() * f64::from(BRICK << level)
+                * if grid.is_plane() { 1.0 } else { r0 };
+            // The scanner already admits centres an extra .75 angular column
+            // outwards. A face's nearest centre is at most one angular column
+            // away (its projection Jacobian norm is <=sqrt(2)). Complete blocks
+            // are retained; this remaining slack covers centre hysteresis.
+            let slack = tangential_col * 0.25 + col * 0.25;
+            let pad = (col * 2.0).max(drift + slack - (reach - selected_reach));
             let radius = if level == top_level {
                 // The coarsest level covers the whole world.
                 if grid.is_plane() { f64::from(grid.cells()) * grid.voxel_size() * 1.5 } else { r0 * 4.0 }
@@ -444,10 +474,19 @@ impl WindowPlanner {
                 let future_reach = (reach * reach - future_altitude.max(0.0).powi(2)).max(0.0).sqrt();
                 let motion = grid.ground_distance(eye, future);
                 ((reach * reach - altitude.max(0.0).powi(2)).max(0.0).sqrt()
-                    .max(future_reach + motion.min(reach * 0.5)).min(horizon) + col * 2.0).min(cap)
+                    .max(future_reach + motion.min(reach * 0.5)).min(horizon) + pad).min(cap)
             };
             let moved = if grid.is_plane() { state.center.distance(dir) } else { state.center.distance(dir) * r0 };
-            if state.active && moved <= col * 3.0 && (radius - state.radius).abs() <= state.radius * 0.08 + col {
+            let actual_drift = if grid.is_plane() { moved } else {
+                2.0 * r0 * (moved / (2.0 * r0)).min(1.0).asin()
+            };
+            let needed_radius = ((selected_reach * selected_reach - altitude.max(0.0).powi(2)).max(0.0).sqrt()
+                .max((selected_reach * selected_reach - future_altitude.max(0.0).powi(2)).max(0.0).sqrt()
+                    + grid.ground_distance(eye, future).min(selected_reach * 0.5))
+                .min(horizon) + actual_drift + slack).min(cap);
+            if state.active && !dither_changed && moved <= col * 3.0
+                && needed_radius <= state.radius
+                && (radius - state.radius).abs() <= state.radius * 0.08 + col {
                 continue;
             }
             let scanned = self.scan(level, dir, radius);
@@ -671,7 +710,7 @@ mod tests {
             let ground = grid.radius();
             let eye = DVec3::Y * (ground + 30.0);
             let request = WindowRequest { eye, prefetch_eye: None, priority_eye: None, view_focus: None,
-                lod0: 160.0, outer_radius: planet.outer_radius(), planet: None, serial: 1 };
+                lod0: 160.0, lod_dither: 0.0, outer_radius: planet.outer_radius(), planet: None, serial: 1 };
             let mut baseline_planner = WindowPlanner::new(grid);
             let mut focused_planner = WindowPlanner::new(grid);
             baseline_planner.update(&request);
@@ -797,12 +836,15 @@ mod tests {
         }).unwrap();
         let grid = *planet.grid();
         let request = WindowRequest { eye: DVec3::Y * 0.5, prefetch_eye: None, priority_eye: None, view_focus: None,
-            lod0: 1.405499947, outer_radius: planet.outer_radius(), planet: None, serial: 1 };
+            lod0: 1.405499947, lod_dither: 0.0, outer_radius: planet.outer_radius(), planet: None, serial: 1 };
         let update = WindowPlanner::new(grid).update(&request);
         let fine = update.levels.iter().find(|l| l.level == 0).unwrap();
+        let old_reach = request.lod0 * 1.05;
+        let old_altitude = (request.eye.y - request.outer_radius).max(0.0);
+        let old_radius = (old_reach * old_reach - old_altitude.powi(2)).sqrt() + 1.6;
+        let former = circle_demand(grid, 0, fine.center, old_radius);
+        assert_eq!(former.len(), 68, "fixture must expose the former incomplete corner window");
         let original = circle_demand(grid, 0, fine.center, fine.radius);
-        assert_eq!(original.len(), 68, "fixture must expose the former incomplete corner window");
-        assert_eq!(fine.adds.len(), 192, "only the twelve intersected blocks are required");
         assert_only_block_closure(grid, &fine.adds, &original);
     }
 
@@ -938,7 +980,7 @@ mod tests {
             assert!((coverage - eye).length() <= 21.000001);
             assert!((priority - eye).length() > 50.0);
             let old = eye + ((eye - previous) * (0.35f64 / 0.016).min(24.0)).clamp_length_max(21.0);
-            let request = WindowRequest { eye, prefetch_eye: Some(coverage), priority_eye: None, view_focus: None, lod0: 120.0,
+            let request = WindowRequest { eye, prefetch_eye: Some(coverage), priority_eye: None, view_focus: None, lod0: 120.0, lod_dither: 0.0,
                 outer_radius: planet.outer_radius(), planet: None, serial: 1 };
             let candidate = WindowPlanner::new(*grid).update(&request);
             let baseline = WindowPlanner::new(*grid).update(&WindowRequest { prefetch_eye: Some(old), ..request.clone() });
@@ -968,7 +1010,7 @@ mod tests {
             eye: DVec3::Y * 1000.0,
             prefetch_eye: None,
             priority_eye: None, view_focus: None,
-            lod0: 100.0,
+            lod0: 100.0, lod_dither: 0.0,
             outer_radius: planet.outer_radius(),
             planet: Some(planet), serial: 1,
         };
@@ -1001,7 +1043,7 @@ mod tests {
                 let eye = DVec3::Y * (planet.outer_radius() + 30.0);
                 assert!(eye.length() < planet.grid().radius());
                 let request = WindowRequest {
-                    eye, prefetch_eye: None, priority_eye: None, view_focus: None, lod0: 120.0,
+                    eye, prefetch_eye: None, priority_eye: None, view_focus: None, lod0: 120.0, lod_dither: 0.0,
                     outer_radius: planet.outer_radius(), planet: Some(planet.clone()), serial: 1,
                 };
                 let update = WindowPlanner::new(*planet.grid()).update(&request);
@@ -1014,4 +1056,121 @@ mod tests {
             }
         }
     }
+
+    fn flat_request(shape: crate::grid::Shape, height: f64, lod0: f64, dither: f64) -> (Grid, WindowRequest) {
+        let planet = Planet::new(PlanetRecipe { shape, radius_m: 6_371_000.0, plane_size_m: 1000.0,
+            terrain: TerrainSource { generator: crate::landform::FLAT_ID.into(), ..Default::default() },
+            ..Default::default() }).unwrap();
+        let grid = *planet.grid();
+        let eye = DVec3::Y * (if grid.is_plane() { height } else { grid.radius() + height });
+        (grid, WindowRequest { eye, prefetch_eye: None, priority_eye: None, view_focus: None,
+            lod0, lod_dither: dither, outer_radius: if grid.is_plane() { 0.0 } else { grid.radius() }, planet: None, serial: 1 })
+    }
+
+    fn assert_surface_witness(grid: Grid, request: &WindowRequest, i: i32, j: i32, expose_old_gap: bool) {
+        let point = grid.ground_point(PLANE_FACE, (f64::from(i) + 0.5) * 8.0, (f64::from(j) + 0.5) * 8.0);
+        let delta = point - request.eye;
+        let t = delta.length();
+        // This is a real first intersection with the flat surface, not an
+        // empty-space request. Inward sphere incidence proves the near root.
+        if !grid.is_plane() { assert!(delta.dot(point) < 0.0); }
+        let hd = f64::from(crate::noise::hash3(i >> 1, j >> 1, i32::from(PLANE_FACE) | 8, 0x2545f491) & 1023) / 1023.0;
+        let selected = t * (1.0 + sanitize_lod_dither(request.lod_dither) * (hd - 0.5));
+        assert!(selected < request.lod0, "surface ray must select L0: t{t} selected{selected}");
+        let update = WindowPlanner::new(grid).update(request);
+        let fine = update.levels.iter().find(|l| l.level == 0 && l.active).unwrap();
+        let keys: FxHashSet<_> = fine.adds.iter().map(|(_, k)| *k).collect();
+        for y in (j & !3)..=(j | 3) {
+            for x in (i & !3)..=(i | 3) { assert!(keys.contains(&pack(key0(PLANE_FACE, 0, x), y as u32))); }
+        }
+        if expose_old_gap {
+            let reach = request.lod0 * 1.05;
+            let old_radius = (reach * reach - 0.3f64.powi(2)).sqrt() + 1.6;
+            let old = WindowPlanner::new(grid).scan(0, fine.center, old_radius);
+            assert!(!old.iter().any(|(_, k)| *k == pack(key0(PLANE_FACE, 0, i), j as u32)),
+                "fixture must prove an actual omitted fine surface block");
+        }
+    }
+
+    #[test]
+    fn renderer_dither_known_surface_fringe_is_wanted_on_plane_and_sphere() {
+        let lod0 = 0.1 / (2.0 * (std::f64::consts::FRAC_PI_8).tan() / 729.0);
+        for (shape, i, j) in [(crate::grid::Shape::Plane, 500, 620),
+            (crate::grid::Shape::Sphere, 6_225_799, 6_225_898)] {
+            let (grid, request) = flat_request(shape, 0.3, lod0, 0.25);
+            assert_surface_witness(grid, &request, i, j, true);
+            let mut planner = WindowPlanner::new(grid);
+            planner.update(&request);
+            let point = grid.ground_point(PLANE_FACE, (f64::from(i) + 0.5) * 8.0, (f64::from(j) + 0.5) * 8.0);
+            let moved = WindowRequest { eye: request.eye + DVec3::new(point.x, 0.0, point.z).normalize() * 2.39, serial: 2, ..request };
+            planner.update(&moved);
+            assert!(grid.ground_distance(moved.eye, point) < lod0 / 0.875);
+            assert!(planner.levels[0].wanted.contains(&pack(key0(PLANE_FACE, 0, i), j as u32)));
+        }
+    }
+
+    #[test]
+    fn renderer_dither_zero_preserves_native_radius_and_max_has_real_surface_coverage() {
+        let native_lod0 = 0.1 / (2.0 * (std::f64::consts::FRAC_PI_8).tan() / 729.0);
+        let (grid, request) = flat_request(crate::grid::Shape::Plane, 0.3, native_lod0, 0.0);
+        let update = WindowPlanner::new(grid).update(&request);
+        let fine = update.levels.iter().find(|l| l.level == 0).unwrap();
+        let reach = native_lod0 * 1.05;
+        assert_eq!(fine.radius, (reach * reach - 0.3f64.powi(2)).sqrt() + 1.6);
+        assert_surface_witness(grid, &request, 524, 620, false);
+        let default = WindowPlanner::new(grid).update(&WindowRequest { lod_dither: 0.25, ..request.clone() });
+        let default_fine = default.levels.iter().find(|l| l.level == 0).unwrap();
+        assert!(default_fine.adds.len() <= fine.adds.len() * 5 / 4,
+            "native fine-window closure growth must remain below25% in this fixture");
+        eprintln!("native plane L0 demand: dither0 {} radius{:.6}; dither.25 {} radius{:.6}",
+            fine.adds.len(), fine.radius, default_fine.adds.len(), default_fine.radius);
+        let lod0 = 0.1 / (2.0 * (std::f64::consts::FRAC_PI_8).tan() / 300.0);
+        let (grid, request) = flat_request(crate::grid::Shape::Plane, 0.3, lod0, 99.0);
+        let (i, j) = (535..550).flat_map(|i| (620..628).map(move |j| (i, j))).find(|&(i, j)| {
+            let t = (grid.ground_point(PLANE_FACE, (f64::from(i)+0.5)*8.0, (f64::from(j)+0.5)*8.0) - request.eye).length();
+            let hd = f64::from(crate::noise::hash3(i>>1, j>>1, i32::from(PLANE_FACE)|8, 0x2545f491)&1023)/1023.0;
+            t > lod0 * 1.5 && t*(0.5+hd) < lod0
+        }).expect("max-dither witness beyond the nominal footprint");
+        assert_surface_witness(grid, &request, i, j, true);
+    }
+
+    #[test]
+    fn renderer_dither_retargets_same_view_activation_forecast_and_horizon() {
+        let (grid, mut request) = flat_request(crate::grid::Shape::Plane, 110.0, 100.0, 0.0);
+        let mut planner = WindowPlanner::new(grid);
+        assert!(!planner.update(&request).levels.iter().any(|l| l.level == 0 && l.active));
+        request.lod_dither = 0.25; request.serial += 1;
+        assert!(planner.update(&request).levels.iter().any(|l| l.level == 0 && l.active));
+        request.eye = DVec3::Y * 1000.0; request.prefetch_eye = Some(DVec3::Y * 110.0); request.serial += 1;
+        assert!(WindowPlanner::new(grid).update(&request).levels.iter().any(|l| l.level == 0 && l.active));
+        request.lod_dither = 0.0;
+        assert!(!WindowPlanner::new(grid).update(&request).levels.iter().any(|l| l.level == 0 && l.active));
+        let planet = Planet::new(PlanetRecipe { radius_m: 1000.0,
+            terrain: TerrainSource { generator: crate::landform::FLAT_ID.into(), ..Default::default() },
+            ..Default::default() }).unwrap();
+        let grid = *planet.grid();
+        let request = WindowRequest { eye: DVec3::Y * 1000.4, prefetch_eye: None,
+            lod0: 30.0, outer_radius: grid.radius(), ..request };
+        assert!(!WindowPlanner::new(grid).update(&request).levels.iter().any(|l| l.level == 1 && l.active));
+        assert!(WindowPlanner::new(grid).update(&WindowRequest { lod_dither: 0.25, ..request }).levels.iter().any(|l| l.level == 1 && l.active));
+    }
+
+    #[test]
+    fn renderer_dither_sanitization_and_torus_cap_are_shared_and_bounded() {
+        for (raw, expected) in [(-1.0,0.0),(0.0,0.0),(0.25,0.25),(1.0,1.0),(2.0,1.0),
+            (f64::NAN,0.25),(f64::INFINITY,0.25),(f64::NEG_INFINITY,0.25)] {
+            assert_eq!(sanitize_lod_dither(raw), expected);
+        }
+        for shape in [crate::grid::Shape::Plane, crate::grid::Shape::Sphere] {
+            let (grid, request) = flat_request(shape, 0.3, 300.0, 1.0);
+            let update = WindowPlanner::new(grid).update(&request);
+            for diff in update.levels.iter().filter(|l| l.level + 1 < grid.levels()) {
+                let col = grid.level_size(diff.level) * f64::from(BRICK);
+                assert!(diff.radius <= col * f64::from(max_window_columns()/2-2) * 0.8);
+                assert_complete_demand(grid, &diff.adds);
+            }
+            assert!(update.levels.iter().any(|l| l.level + 1 == grid.levels() && l.active));
+        }
+    }
+
 }
