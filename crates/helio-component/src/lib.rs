@@ -7,6 +7,8 @@ pub mod asset_component;
 pub mod components;
 pub mod mesh_cache;
 mod motion_gate;
+mod static_move_watch;
+pub use static_move_watch::StaticMoveWatch;
 pub mod subsystems;
 
 pub use asset_component::*;
