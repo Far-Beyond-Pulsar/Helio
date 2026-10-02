@@ -281,8 +281,10 @@ fn unresolved_outcrop_preserves_canonical_ids_and_mean_palette() {
         "fixture must exercise dirt flecks and both broad rock strata below snowline"
     );
     for channel in 0..3 {
-        assert!((below_exact[channel]-below_filtered[channel]).abs()/below_count as f32<0.02,
-            "filtered rock flecks must preserve their canonical palette mean");
+        assert!(
+            (below_exact[channel] - below_filtered[channel]).abs() / (below_count as f32) < 0.02,
+            "filtered rock flecks must preserve their canonical palette mean"
+        );
     }
     let n = points.len() as f32;
     assert!(canonical_snow > 0 && canonical_snow < points.len());
