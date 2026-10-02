@@ -163,7 +163,9 @@ dim diffuse light on the night side; set it to zero for solar-only lighting.
    are queued as urgent regenerations.
 2. **Windows.** When the eye moved, a `WindowRequest` goes to the window
    worker thread, which computes each level's wanted disc of columns and
-   returns add/remove diffs. Level 0 covers the level-0 distance (cells about
+   returns the latest wanted snapshot per level. Superseded snapshots retire
+   on the worker; actual resident columns retire incrementally. Level 0
+   covers the level-0 distance (cells about
    a pixel wide at its edge), each coarser level twice the distance. Windows
    request complete 4x4-column groups to match the traversal's residency
    gate. Incoming groups are ordered by the eye, motion forecast and visible
@@ -173,10 +175,10 @@ dim diffuse light on the night side; set it to zero for solar-only lighting.
    the worker bounds the terrain around the eye per level
    (`Planet::local_outer_radius`), so over a meadow 1 km below the fine
    levels are off instead of streaming columns under a tenth of a pixel.
-3. **Diff application.** Each level keeps its diff order. Global coverage
+3. **Diff application.** Each level keeps only its current demand. Global coverage
    goes first; other levels share bounded turns within the frame's CPU
    budget (1.5-4 ms moving by backlog, 4 ms still). Active levels
-   interleave block-grouped removals and additions, so incoming columns can load before
+   interleave bounded resident retirement and additions, so incoming columns can load before
    retirement finishes. A switched-off level clears its queue. Diffs get
    at most 60 % of the budget while columns wait. A level
    with unapplied diffs is *catching up*: its `fallback_distances` entry is 0
@@ -210,7 +212,9 @@ dim diffuse light on the night side; set it to zero for solar-only lighting.
    level from distance (with a per-column stable dither band) and repeatedly
    exits the largest provably empty box: a summary block whose top it is
    above, a column above its top, an air brick; only mixed bricks run a cell
-   DDA. A column that is not resident falls back to a coarser level.
+   DDA. A column that is not resident falls back to a coarser level. A rotating
+   pixel sample requests missing 4x4 blocks through bounded asynchronous
+   feedback; the CPU prioritizes requests still in the current wanted set.
 5. **Shade**: material from the generator (or edit), macro normals and
    filtered appearance for cells about a pixel wide, AO from neighbour
    occupancy.

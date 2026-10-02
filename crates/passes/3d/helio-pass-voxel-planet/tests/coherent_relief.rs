@@ -38,10 +38,10 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
         @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) id:vec3<u32>) {{
             if id.x>=arrayLength(&probes) {{return;}}
             let p=probes[id.x];
-            answers[id.x*4u]=vec4<f32>(canonical_relief_slope(u32(p.params.x),p.up.xyz,p.gradient.xyz,p.params.y),
+            answers[id.x*7u]=vec4<f32>(canonical_relief_slope(u32(p.params.x),p.up.xyz,p.gradient.xyz,p.params.y),
                 canonical_relief_confidence(p.params.z),canonical_relief_face_weight(0u,p.params.w,false),canonical_relief_face_weight(4u,p.params.w,false));
             let base=detail_filter_weight(p.params.w);
-            answers[id.x*4u+1u]=vec4<f32>(base,
+            answers[id.x*7u+1u]=vec4<f32>(base,
                 base*canonical_relief_face_weight(0u,p.params.w*2.0,true),
                 base*canonical_relief_face_weight(0u,p.params.w*4.0,true),
                 base*canonical_relief_face_weight(0u,p.params.w*32.0,false));
@@ -51,9 +51,19 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                 let distance=(p.params.w*10.0+1.0)/(1.0-0.5*dithers[n]);
                 stencil[n]=canonical_stencil_weight(distance,10.0,dithers[n]);
             }}
-            answers[id.x*4u+2u]=stencil;
-            answers[id.x*4u+3u]=column_relief_gradient(u32(p.params.x),p.up.xyz,
+            answers[id.x*7u+2u]=stencil;
+            answers[id.x*7u+3u]=column_relief_gradient(u32(p.params.x),p.up.xyz,
                 vec2<f32>(p.up.w,p.gradient.w),p.params.y);
+            answers[id.x*7u+4u]=vec4<f32>(detail_filter_weight(1.5*appearance_projection(1.0,4u).x),
+                detail_filter_weight(1.5*appearance_projection(0.1,4u).x),detail_filter_weight(5.0*appearance_projection(0.1,0u).x),
+                detail_filter_weight(1.5*appearance_projection(0.1,6u).x));
+            answers[id.x*7u+5u]=vec4<f32>(detail_filter_weight(1.0*appearance_projection(1.0,4u).x),
+                detail_filter_weight(2.0*appearance_projection(0.5,4u).x),detail_filter_weight(2.0*appearance_projection(-0.5,4u).x),
+                detail_filter_weight(1.0*appearance_projection(0.1,6u).x));
+            answers[id.x*7u+6u]=vec4<f32>(detail_filter_weight(1.5*appearance_projection(1.0,4u).y),
+                detail_filter_weight(1.5*appearance_projection(0.1,4u).y),
+                detail_filter_weight(5.0*appearance_projection(0.1,0u).y),
+                detail_filter_weight(1.5*appearance_projection(0.1,6u).y));
         }}
     "#
     );
@@ -165,7 +175,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
             );
             let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("chart answers"),
-                size: (probes.len() * 64) as u64,
+                size: (probes.len() * 112) as u64,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
@@ -208,10 +218,16 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                 pass.dispatch_workgroups((probes.len() as u32 + 63) / 64, 1, 1);
             }
             gpu.queue.submit([encoder.finish()]);
-            let bytes = read_buffer(&gpu, &output, (probes.len() * 64) as u64);
-            let pairs: &[[[f32; 4]; 4]] = bytemuck::cast_slice(&bytes);
+            let bytes = read_buffer(&gpu, &output, (probes.len() * 112) as u64);
+            let pairs: &[[[f32; 4]; 7]] = bytemuck::cast_slice(&bytes);
             let actual: Vec<[f32; 4]> = pairs.iter().map(|p| p[0]).collect();
             for (index, pair) in pairs.iter().enumerate() {
+                assert_eq!(pair[4],[0.0,1.0,0.0,0.0],
+                    "grazing hash support must preserve resolved walls and unknown faces");
+                assert_eq!(pair[5],[0.5,0.5,0.5,0.5],
+                    "head-on support, incidence sign and unknown-face support changed");
+                assert_eq!(pair[6],[0.0,1.0,0.0,0.0],
+                    "area support must retain resolved long faces and head-on/unknown support");
                 for component in 0..4 {
                     assert!((f64::from(pair[3][component])-expected_gradient[index][component]).abs()<2e-5,
                         "physical fallback gradient disagrees with independent chart finite differences: plane{plane} voxel{voxel} probe{index} component{component}: {:?} expected{:?}",

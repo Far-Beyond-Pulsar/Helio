@@ -297,6 +297,14 @@ fn detail_filter_weight(projected_cell: f32) -> f32 {
     return 1.0 - smoothstep(0.75, 1.25, projected_cell);
 }
 
+// Independent hash detail aliases along a face's compressed projected axis.
+// Limit the expansion to four times; resolved long faces retain contrast.
+// Interior/unknown face code 6 has no geometric normal to project.
+fn appearance_projection(incidence: f32, code: u32) -> vec2<f32> {
+    let cosine = select(clamp(abs(incidence), 0.25, 1.0), 1.0, code >= 6u);
+    return vec2<f32>(cosine, sqrt(cosine));
+}
+
 // A visible angular wall is still a wall. Only unresolved natural risers
 // borrow a continuous height-field normal; radial terrain tops retain it.
 fn canonical_relief_face_weight(code: u32, projected_cell: f32, selected_level: bool) -> f32 {
@@ -446,6 +454,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         p = domain_point(face, appearance_cell.i, appearance_cell.j, 0u);
         climate_height = climate_height_cache[index];
     }
+    let actual_normal = hit_normal(h, d);
     let pixel = h.t * 2.0 / (camera.proj[1][1] * frame.screen.y);
     // Material filtering is appearance only: explicit brush materials and
     // topology cuts retain the canonical procedural classification.
@@ -453,6 +462,12 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     var canonical_up = vec3<f32>(0.0);
     var canonical_relief = vec4<f32>(0.0);
     let base_filter_w = detail_filter_weight(frame.layer.y / pixel);
+    var projection = vec2<f32>(1.0);
+    if !edited && (c.info & INFO_TOPOLOGY) == 0u {
+        projection = appearance_projection(dot(actual_normal, d), code);
+    }
+    let hash_filter_w = detail_filter_weight(frame.layer.y / pixel * projection.x);
+    let area_base_w = detail_filter_weight(frame.layer.y / pixel * projection.y);
     // Primary can select either adjacent level under its bounded dither.
     // A still coarser resident column is streaming fallback, whose resolvable
     // walls must keep their actual face normal.
@@ -477,9 +492,17 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // Paint-only and ignored tiny lists keep their existing filtering.
     let normal_filter_w = select(coarse_w, base_filter_w * relief_face_w, FAR_RELIEF && frame.hints.z != 0u);
     let smooth_w = select(normal_filter_w, 0.0, (c.info & INFO_TOPOLOGY) != 0u);
+    // Angle-aware area support is shading-only. The original weights above
+    // still choose slope/material/strata and the sunlight lift origin.
+    let area_coarse_w = detail_filter_weight(size / pixel * projection.y);
+    let shade_filter_w = select(area_coarse_w, area_base_w * relief_face_w, FAR_RELIEF && frame.hints.z != 0u);
+    let shade_smooth_w = select(shade_filter_w, 0.0, (c.info & INFO_TOPOLOGY) != 0u);
+    let shade_canonical_w = canonical_relief.w * area_base_w * relief_face_w;
+    let ao_appearance_w = max(appearance_w, max(area_coarse_w,
+        select(0.0, area_base_w, FAR_RELIEF && frame.hints.z != 0u)));
     var fallback_normal = vec3<f32>(0.0);
     var fallback_slope = 0.0;
-    if smooth_w > 0.0 {
+    if smooth_w > 0.0 || shade_smooth_w > 0.0 {
         let x0 = select(x - 1u, 0u, x == 0u);
         let x1 = min(x + 1u, 7u);
         let y0 = select(y - 1u, 0u, y == 0u);
@@ -555,7 +578,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         speck = (material & M_SPECK) != 0u;
         material &= M_ID;
     }
-    var normal = hit_normal(h, d);
+    var normal = actual_normal;
     // Filtered appearance (after "Filtered appearance for voxels", HPG
     // 2023): a cell covering about a pixel stands for a smooth slope of many
     // finer steps, so it is lit with the macro normal of the column's height
@@ -563,8 +586,10 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // wide keep crisp faces; the blend follows the pixel footprint, so level
     // changes show no seam.
     var lift = 0u;
+    if shade_smooth_w > 0.0 {
+        normal = normalize(mix(normal, fallback_normal, shade_smooth_w));
+    }
     if smooth_w > 0.0 {
-        normal = normalize(mix(normal, fallback_normal, smooth_w));
         if code < 4u && smooth_w > 0.5 {
             if !edited {
                 let material_layer = surface_material_layer(top, material_fraction, level,
@@ -581,8 +606,8 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
     let raw_smooth_w = canonical_w;
-    if canonical_w > 0.0 {
-        normal = normalize(mix(normal, canonical_relief.xyz, canonical_w));
+    if shade_canonical_w > 0.0 {
+        normal = normalize(mix(normal, canonical_relief.xyz, shade_canonical_w));
     }
     // Neighbourhood occlusion around the air cell in front of the face.
     var ao = 1.0;
@@ -628,11 +653,11 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             soil_side = uv.y < 1.0 - lip;
         }
         let a = mix(mix(c00, c10, uv.x), mix(c01, c11, uv.x), uv.y) / 3.0;
-        ao = mix(mix(0.42, 1.0, a), 1.0, appearance_w);
+        ao = mix(mix(0.42, 1.0, a), 1.0, ao_appearance_w);
         // Crisp voxel edges while a cell covers several pixels.
         let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
         let fade = clamp((size / pixel - 3.0) / 6.0, 0.0, 1.0);
-        ao *= 1.0 - frame.detail.z * fade * (1.0 - appearance_w) * (1.0 - smoothstep(0.0, 0.12, edge));
+        ao *= 1.0 - frame.detail.z * fade * (1.0 - ao_appearance_w) * (1.0 - smoothstep(0.0, 0.12, edge));
     }
     // Per-voxel pigment variation over world-space grass patches (Lay of
     // the Land look), averaged out as *base* voxels shrink below a pixel. A
@@ -642,7 +667,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // The same base-domain point supplies pigment on every face and level.
     // Coarse indices or level salts would choose a new colour pattern at LOD.
     let hv = hash3(p.x, p.y, p.z, 0x68bc21ebu);
-    let base_w = base_filter_w;
+    let base_w = hash_filter_w;
     let jitter = mix(f32(hv & 255u) / 255.0, 0.5, base_w);
     let pigment = 1.0 + frame.detail.y * (jitter - 0.5);
     var albedo = palette(select(material, M_DIRT, soil_side)) * pigment;
@@ -661,8 +686,8 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             + material_snow_mix.y * palette(material_rock_id)
             + material_snow_mix.z * palette(M_DARK_STONE)
             + material_snow_mix.w * palette(M_DIRT));
-    } else if base_filter_w > 0.0 && material_rock_base_id != M_AIR && !edited && (c.info & INFO_TOPOLOGY) == 0u {
-        albedo = filtered_rock_flecks(albedo, pigment, material_rock_base_id, base_filter_w);
+    } else if hash_filter_w > 0.0 && material_rock_base_id != M_AIR && !edited && (c.info & INFO_TOPOLOGY) == 0u {
+        albedo = filtered_rock_flecks(albedo, pigment, material_rock_base_id, hash_filter_w);
     }
     out.t = h.t;
     let a8 = vec4<u32>(vec4<f32>(clamp(pow(albedo, vec3<f32>(1.0 / 2.2)), vec3<f32>(0.0), vec3<f32>(1.0)), ao) * 255.0 + 0.5);
