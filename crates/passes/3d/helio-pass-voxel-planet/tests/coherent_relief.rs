@@ -38,8 +38,13 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
         @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) id:vec3<u32>) {{
             if id.x>=arrayLength(&probes) {{return;}}
             let p=probes[id.x];
-            answers[id.x]=vec4<f32>(canonical_relief_slope(u32(p.params.x),p.up.xyz,p.gradient.xyz,p.params.y),
-                canonical_relief_confidence(p.params.z),canonical_relief_face_weight(0u,p.params.w),canonical_relief_face_weight(4u,p.params.w));
+            answers[id.x*2u]=vec4<f32>(canonical_relief_slope(u32(p.params.x),p.up.xyz,p.gradient.xyz,p.params.y),
+                canonical_relief_confidence(p.params.z),canonical_relief_face_weight(0u,p.params.w,false),canonical_relief_face_weight(4u,p.params.w,false));
+            let base=detail_filter_weight(p.params.w);
+            answers[id.x*2u+1u]=vec4<f32>(base,
+                base*canonical_relief_face_weight(0u,p.params.w*2.0,true),
+                base*canonical_relief_face_weight(0u,p.params.w*4.0,true),
+                base*canonical_relief_face_weight(0u,p.params.w*32.0,false));
         }}
     "#
     );
@@ -98,10 +103,16 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                         let slope = 8.0 * di.abs().max(dj.abs());
                         for (gradient_squared, projected_cell) in [
                             (3.99, 0.5),
-                            (4.0, 1.0),
-                            (4.01, 1.75),
-                            (6.5, 2.5),
+                            (4.0, 0.75),
+                            (4.01, 0.7501),
+                            (6.5, 1.25),
                             (9.0, 4.0),
+                            (4.0, 0.7499),
+                            (4.0, 0.9999),
+                            (4.0, 1.0),
+                            (4.0, 1.0001),
+                            (4.0, 1.2499),
+                            (4.0, 1.2501),
                         ] {
                             probes.push([
                                 up.as_vec3().extend(0.0).to_array(),
@@ -116,7 +127,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                             expected.push([
                                 slope,
                                 1.0 - smooth(4.0, 9.0, gradient_squared),
-                                1.0 - smooth(1.0, 2.5, projected_cell),
+                                1.0 - smooth(0.75, 1.25, projected_cell),
                                 1.0,
                             ]);
                         }
@@ -143,7 +154,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
             );
             let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("chart answers"),
-                size: (probes.len() * 16) as u64,
+                size: (probes.len() * 32) as u64,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
@@ -186,8 +197,18 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                 pass.dispatch_workgroups((probes.len() as u32 + 63) / 64, 1, 1);
             }
             gpu.queue.submit([encoder.finish()]);
-            let bytes = read_buffer(&gpu, &output, (probes.len() * 16) as u64);
-            let actual: &[[f32; 4]] = bytemuck::cast_slice(&bytes);
+            let bytes = read_buffer(&gpu, &output, (probes.len() * 32) as u64);
+            let pairs: &[[[f32; 4]; 2]] = bytemuck::cast_slice(&bytes);
+            let actual: Vec<[f32; 4]> = pairs.iter().map(|p| p[0]).collect();
+            for (index, pair) in pairs.iter().enumerate() {
+                let weight=expected[index][2] as f32;
+                for level in 0..3 {
+                    assert!((pair[1][level]-weight).abs()<2e-5,
+                        "authored filtering changed across selected L0/L1/L2 at probe{index}");
+                }
+                assert_eq!(pair[1][3],0.0,
+                    "oversized streamed fallback wall lost its geometric normal at probe{index}");
+            }
             for (index, (a, e)) in actual.iter().zip(&expected).enumerate() {
                 for component in 0..4 {
                     assert!((a[component] as f64-e[component]).abs()<2e-5,"plane{plane} voxel{voxel} probe{index} component{component}: {:?} expected{:?}",a,e);
@@ -202,6 +223,13 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                 actual[3][2], 0.0,
                 "resolved angular wall received canonical height normal"
             );
+            assert_eq!(actual[1][2], 1.0, "subpixel lower boundary must be fully averaged");
+            assert_eq!(actual[7][2], 0.5, "one pixel must retain half the authored contrast");
+            assert_eq!(actual[10][2], 0.0, "resolvable detail must retain full contrast");
+            for (a, b) in [(1usize, 2usize), (6, 7), (7, 8), (9, 10)] {
+                assert!((actual[a][2] - actual[b][2]).abs() < 0.001,
+                    "filter discontinuity around one-pixel boundaries: {a}/{b}");
+            }
             eprintln!(
                 "coherent relief plane{plane} voxel{voxel}:{} slope/support cases",
                 probes.len()

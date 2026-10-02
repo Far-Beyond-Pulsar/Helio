@@ -272,12 +272,19 @@ fn canonical_relief_confidence(gradient_squared: f32) -> f32 {
     return 1.0 - smoothstep(4.0, 9.0, gradient_squared);
 }
 
+// Average authored detail only as it becomes unresolved by the render grid.
+// The transition straddles one pixel; resolvable faces keep their contrast.
+fn detail_filter_weight(projected_cell: f32) -> f32 {
+    return 1.0 - smoothstep(0.75, 1.25, projected_cell);
+}
+
 // A visible angular wall is still a wall. Only unresolved natural risers
 // borrow a continuous height-field normal; radial terrain tops retain it.
-fn canonical_relief_face_weight(code: u32, projected_cell: f32) -> f32 {
+fn canonical_relief_face_weight(code: u32, projected_cell: f32, selected_level: bool) -> f32 {
     if code == 4u { return 1.0; }
     if code >= 4u { return 0.0; }
-    return 1.0 - smoothstep(1.0, 2.5, projected_cell);
+    if selected_level { return 1.0; }
+    return detail_filter_weight(projected_cell);
 }
 
 // Convert a physical tangent gradient to the generator's slope convention:
@@ -377,8 +384,13 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = frame.layer.y * f32(1 << level);
     var canonical_up = vec3<f32>(0.0);
     var canonical_relief = vec4<f32>(0.0);
-    let authored_relief_w = smoothstep(1.0, 4.0, pixel / frame.layer.y);
-    let relief_face_w = canonical_relief_face_weight(code, size / pixel);
+    let base_filter_w = detail_filter_weight(frame.layer.y / pixel);
+    // Primary can select either adjacent level under its bounded dither.
+    // A still coarser resident column is streaming fallback, whose resolvable
+    // walls must keep their actual face normal.
+    let selected_level = level <= level_for(h.t * (1.0 + 0.5 * frame.lod.y));
+    let authored_relief_w = base_filter_w;
+    let relief_face_w = canonical_relief_face_weight(code, size / pixel, selected_level);
     if FAR_RELIEF && frame.hints.z != 0u && level > 0u && authored_relief_w > 0.0
         && relief_face_w > 0.0 && (!edited || (c.info & INFO_RELIEF) != 0u) {
         canonical_up = hit_up(h.t, d);
@@ -437,14 +449,15 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // field and shows surface material on its risers. Cells several pixels
     // wide keep crisp faces; the blend follows the pixel footprint, so level
     // changes show no seam.
-    let coarse_w = clamp((2.5 - size / pixel) / 1.5, 0.0, 1.0);
-    let authored_w = select(0.0, smoothstep(1.0, 4.0, pixel / frame.layer.y), FAR_RELIEF && frame.hints.z != 0u);
+    let coarse_w = detail_filter_weight(size / pixel);
+    let authored_w = select(0.0, base_filter_w, FAR_RELIEF && frame.hints.z != 0u);
     // Visibility may temporarily use a coarser column. Its enlarged cell
     // edges are not visible authored voxels, even when the normal stencil rejects.
     let appearance_w = max(coarse_w, authored_w);
     // Generated base tops do not describe edit walls, cave ceilings or floors.
     // Paint-only and ignored tiny lists keep their existing filtering.
-    let smooth_w = select(coarse_w, 0.0, (c.info & INFO_TOPOLOGY) != 0u);
+    let normal_filter_w = select(coarse_w, base_filter_w * relief_face_w, FAR_RELIEF && frame.hints.z != 0u);
+    let smooth_w = select(normal_filter_w, 0.0, (c.info & INFO_TOPOLOGY) != 0u);
     var lift = 0u;
     if smooth_w > 0.0 {
         let x0 = select(x - 1u, 0u, x == 0u);
@@ -534,7 +547,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // fading by the level cell's footprint instead jumped 2x at every level
     // boundary (a sawtooth of speckle contrast: rings while ascending).
     let hv = hash3(h.i, h.j, h.k + i32(face) * 7919 + i32(level) * 104729, 0x68bc21ebu);
-    let base_w = clamp((2.5 - frame.layer.y / pixel) / 1.5, 0.0, 1.0);
+    let base_w = base_filter_w;
     let jitter = mix(f32(hv & 255u) / 255.0, 0.5, base_w);
     let pigment = 1.0 + frame.detail.y * (jitter - 0.5);
     var albedo = palette(select(material, M_DIRT, soil_side)) * pigment;
