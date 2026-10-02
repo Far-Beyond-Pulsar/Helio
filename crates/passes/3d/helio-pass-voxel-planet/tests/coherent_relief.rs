@@ -38,10 +38,10 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
         @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) id:vec3<u32>) {{
             if id.x>=arrayLength(&probes) {{return;}}
             let p=probes[id.x];
-            answers[id.x*7u]=vec4<f32>(canonical_relief_slope(u32(p.params.x),p.up.xyz,p.gradient.xyz,p.params.y),
+            answers[id.x*9u]=vec4<f32>(canonical_relief_slope(u32(p.params.x),p.up.xyz,p.gradient.xyz,p.params.y),
                 canonical_relief_confidence(p.params.z),canonical_relief_face_weight(0u,p.params.w,false),canonical_relief_face_weight(4u,p.params.w,false));
             let base=detail_filter_weight(p.params.w);
-            answers[id.x*7u+1u]=vec4<f32>(base,
+            answers[id.x*9u+1u]=vec4<f32>(base,
                 base*canonical_relief_face_weight(0u,p.params.w*2.0,true),
                 base*canonical_relief_face_weight(0u,p.params.w*4.0,true),
                 base*canonical_relief_face_weight(0u,p.params.w*32.0,false));
@@ -51,19 +51,37 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                 let distance=(p.params.w*10.0+1.0)/(1.0-0.5*dithers[n]);
                 stencil[n]=canonical_stencil_weight(distance,10.0,dithers[n]);
             }}
-            answers[id.x*7u+2u]=stencil;
-            answers[id.x*7u+3u]=column_relief_gradient(u32(p.params.x),p.up.xyz,
+            answers[id.x*9u+2u]=stencil;
+            answers[id.x*9u+3u]=column_relief_gradient(u32(p.params.x),p.up.xyz,
                 vec2<f32>(p.up.w,p.gradient.w),p.params.y);
-            answers[id.x*7u+4u]=vec4<f32>(detail_filter_weight(1.5*appearance_projection(1.0,4u).x),
+            answers[id.x*9u+4u]=vec4<f32>(detail_filter_weight(1.5*appearance_projection(1.0,4u).x),
                 detail_filter_weight(1.5*appearance_projection(0.1,4u).x),detail_filter_weight(5.0*appearance_projection(0.1,0u).x),
                 detail_filter_weight(1.5*appearance_projection(0.1,6u).x));
-            answers[id.x*7u+5u]=vec4<f32>(detail_filter_weight(1.0*appearance_projection(1.0,4u).x),
+            answers[id.x*9u+5u]=vec4<f32>(detail_filter_weight(1.0*appearance_projection(1.0,4u).x),
                 detail_filter_weight(2.0*appearance_projection(0.5,4u).x),detail_filter_weight(2.0*appearance_projection(-0.5,4u).x),
                 detail_filter_weight(1.0*appearance_projection(0.1,6u).x));
-            answers[id.x*7u+6u]=vec4<f32>(detail_filter_weight(1.5*appearance_projection(1.0,4u).y),
+            answers[id.x*9u+6u]=vec4<f32>(detail_filter_weight(1.5*appearance_projection(1.0,4u).y),
                 detail_filter_weight(1.5*appearance_projection(0.1,4u).y),
                 detail_filter_weight(5.0*appearance_projection(0.1,0u).y),
                 detail_filter_weight(1.5*appearance_projection(0.1,6u).y));
+            // One-pixel coplanar grazing separation: 6 world footprints,
+            // but one perpendicular footprint. The original 4fp sphere
+            // rejects it; bounded anisotropic support admits it.
+            let grazing=vec3<f32>(sqrt(35.0)/6.0,0.0,1.0/6.0);
+            answers[id.x*9u+7u]=vec4<f32>(shadow_reuse_distance_squared(
+                vec3<f32>(1.0,0.0,-sqrt(35.0)),vec3<f32>(0.0,0.0,1.0),grazing,1.0,1.0),
+                shadow_reuse_distance_squared(vec3<f32>(1.0,2.0,3.0),
+                    vec3<f32>(0.0,0.0,1.0),vec3<f32>(0.0,0.0,1.0),1.0,1.0),
+                shadow_reuse_distance_squared(vec3<f32>(0.0,0.0,17.0),
+                    vec3<f32>(0.0,0.0,1.0),grazing,1.0,1.0),
+                shadow_reuse_distance_squared(vec3<f32>(5.0,0.0,0.0),
+                    vec3<f32>(0.0,0.0,1.0),grazing,1.0,1.0));
+            let delta=vec3<f32>(1.0,0.0,-sqrt(35.0));
+            let view=vec3<f32>(0.0,0.0,1.0);
+            answers[id.x*9u+8u]=vec4<f32>(shadow_reuse_distance_squared(delta,view,grazing,0.0,1.0),
+                shadow_reuse_distance_squared(delta,view,grazing,1.0,0.0),
+                shadow_reuse_distance_squared(delta,view,grazing,0.0,0.0),
+                shadow_reuse_distance_squared(delta,view,grazing,1.0,1.0));
         }}
     "#
     );
@@ -175,7 +193,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
             );
             let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("chart answers"),
-                size: (probes.len() * 112) as u64,
+                size: (probes.len() * 144) as u64,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
@@ -218,10 +236,21 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                 pass.dispatch_workgroups((probes.len() as u32 + 63) / 64, 1, 1);
             }
             gpu.queue.submit([encoder.finish()]);
-            let bytes = read_buffer(&gpu, &output, (probes.len() * 112) as u64);
-            let pairs: &[[[f32; 4]; 7]] = bytemuck::cast_slice(&bytes);
+            let bytes = read_buffer(&gpu, &output, (probes.len() * 144) as u64);
+            let pairs: &[[[f32; 4]; 9]] = bytemuck::cast_slice(&bytes);
             let actual: Vec<[f32; 4]> = pairs.iter().map(|p| p[0]).collect();
             for (index, pair) in pairs.iter().enumerate() {
+                for value in &pair[8][..3] {
+                    assert!((*value-36.0).abs()<1e-5 && *value>16.0,
+                        "topology/unfiltered query or representative lost its original distance cap");
+                }
+                assert!((pair[8][3]-3.1875).abs()<1e-5,
+                    "both filtered samples must enable bounded anisotropic support");
+                assert!((pair[7][0]-3.1875).abs()<1e-5 && pair[7][0]<16.0,
+                    "coplanar grazing pixel failed bounded representative reuse");
+                assert_eq!(pair[7][1],14.0,"head-on world cap changed");
+                assert!(pair[7][2]>16.0,"depth extension exceeded its fourfold bound");
+                assert_eq!(pair[7][3],25.0,"perpendicular screen separation changed");
                 assert_eq!(pair[4],[0.0,1.0,0.0,0.0],
                     "grazing hash support must preserve resolved walls and unknown faces");
                 assert_eq!(pair[5],[0.5,0.5,0.5,0.5],

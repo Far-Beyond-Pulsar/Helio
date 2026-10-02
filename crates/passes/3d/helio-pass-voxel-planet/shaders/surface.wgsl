@@ -305,6 +305,20 @@ fn appearance_projection(incidence: f32, code: u32) -> vec2<f32> {
     return vec2<f32>(cosine, sqrt(cosine));
 }
 
+// Coplanar grazing samples are far apart along the view direction even
+// within one screen pixel. Keep the perpendicular footprint unchanged and
+// bound the along-view extension to four times the original world radius.
+fn shadow_reuse_distance_squared(delta: vec3<f32>, eye_to_sample: vec3<f32>, normal: vec3<f32>,
+    query_filtered: f32, representative_filtered: f32) -> f32 {
+    if query_filtered <= 0.0 || representative_filtered <= 0.0 { return dot(delta, delta); }
+    let view = normalize(eye_to_sample);
+    let cosine = clamp(abs(dot(normal, view)), 0.25, 1.0);
+    if cosine >= 1.0 { return dot(delta, delta); }
+    let along = dot(delta, view);
+    let perpendicular = delta - view * along;
+    return dot(perpendicular, perpendicular) + along * along * cosine * cosine;
+}
+
 // A visible angular wall is still a wall. Only unresolved natural risers
 // borrow a continuous height-field normal; radial terrain tops retain it.
 fn canonical_relief_face_weight(code: u32, projected_cell: f32, selected_level: bool) -> f32 {
@@ -782,6 +796,7 @@ fn sun_visibility(s: SunSample) -> f32 {
 var<workgroup> rep_vis: array<f32, 64>;
 var<workgroup> rep_pos: array<vec4<f32>, 64>;
 var<workgroup> rep_nrm: array<vec3<f32>, 64>;
+var<workgroup> rep_filtered: array<f32, 64>;
 
 // Whether pixel sample `q` lies on the surface of representative `slot`, so
 // it can take that ray's visibility: same validity and, for surfaces, a
@@ -798,7 +813,11 @@ fn on_rep_surface(slot: u32, q: SunSample) -> bool {
     let d = q.position - pos.xyz;
     let cell = frame.layer.y * f32(1u << u32(max(q.level, 0)));
     let plane = 0.5 * fp + 2.0 * cell * q.filtered;
-    return dot(q.normal, rep_nrm[slot]) > 0.9 && abs(dot(d, q.normal)) < plane && dot(d, d) < 16.0 * fp * fp;
+    // Both samples must represent filtered terrain. Topology surfaces keep
+    // zero support and the original world-distance cap, including edit walls.
+    let separation = shadow_reuse_distance_squared(d, q.position - camera.position_near.xyz,
+        q.normal, q.filtered, rep_filtered[slot]);
+    return dot(q.normal, rep_nrm[slot]) > 0.9 && abs(dot(d, q.normal)) < plane && separation < 16.0 * fp * fp;
 }
 
 // One sunlight ray per 2x2 block at a representative pixel that rotates each
@@ -824,6 +843,7 @@ fn sunlight(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
     rep_vis[own] = rv;
     rep_pos[own] = vec4<f32>(rs.position, select(-1.0, rs.footprint, rs.valid));
     rep_nrm[own] = rs.normal;
+    rep_filtered[own] = rs.filtered;
     workgroupBarrier();
     if !inside { return; }
     let sun = normalize(frame.sun.xyz);
