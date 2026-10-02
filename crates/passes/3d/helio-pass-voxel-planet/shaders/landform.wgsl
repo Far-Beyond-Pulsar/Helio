@@ -118,6 +118,7 @@ fn snow_material_coverage(resolved: f32, deviation: f32, threshold: f32,
 
 fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
     material_snow_mix = vec4<f32>(-1.0, 0.0, 0.0, 0.0);
+    material_rock_base_id = M_AIR;
     let dirt = terrain.header.z;
     let steep = slope >= terrain.shape.y;
     let wet = landform_moisture(p);
@@ -182,8 +183,10 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
     var exposed = outcrop + 2 * alpine - NOISE_ONE;
     if slope >= 5 { exposed += NOISE_ONE / 2; }
     if steep || (exposed > 0 && depth < dirt) {
+        let rock = select(M_DARK_STONE, M_STONE, (div_floor(altitude + scale_q16(outcrop, 3000), 4500) & 1) == 0);
+        if depth < 1 { material_rock_base_id = rock; }
         if depth < 1 && (h & 7u) == 0u { return M_DIRT; }
-        return select(M_DARK_STONE, M_STONE, (div_floor(altitude + scale_q16(outcrop, 3000), 4500) & 1) == 0);
+        return rock;
     }
     if depth == 0 {
         if exposed > -NOISE_ONE / 16 { return M_GRAVEL; }

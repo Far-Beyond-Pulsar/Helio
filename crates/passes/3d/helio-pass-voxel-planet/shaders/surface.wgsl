@@ -55,6 +55,13 @@ fn palette(m: u32) -> vec3<f32> {
     return frame.palette[min(m, 15u)].rgb;
 }
 
+// Canonical rock keeps its dirt flecks; unresolved natural appearance keeps
+// their 1/8 coverage instead of a fresh full-contrast hash choice per pixel.
+fn filtered_rock_flecks(albedo: vec3<f32>, pigment: f32, rock: u32, weight: f32) -> vec3<f32> {
+    let mean = pigment * (0.875 * palette(rock) + 0.125 * palette(M_DIRT));
+    return mix(albedo, mean, weight);
+}
+
 // Grass colour from dry through meadow to lush green by world-space
 // patches (continuous across levels). The patch octave (25.6 m wavelength)
 // fades out as a pixel's footprint approaches it, so distant terrain shows
@@ -654,6 +661,8 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             + material_snow_mix.y * palette(material_rock_id)
             + material_snow_mix.z * palette(M_DARK_STONE)
             + material_snow_mix.w * palette(M_DIRT));
+    } else if base_filter_w > 0.0 && material_rock_base_id != M_AIR && !edited && (c.info & INFO_TOPOLOGY) == 0u {
+        albedo = filtered_rock_flecks(albedo, pigment, material_rock_base_id, base_filter_w);
     }
     out.t = h.t;
     let a8 = vec4<u32>(vec4<f32>(clamp(pow(albedo, vec3<f32>(1.0 / 2.2)), vec3<f32>(0.0), vec3<f32>(1.0)), ao) * 255.0 + 0.5);

@@ -7,6 +7,7 @@ var<private> material_footprint: f32 = 0.0;
 // Negative snow weight disables appearance coverage; IDs remain canonical.
 var<private> material_snow_mix: vec4<f32> = vec4<f32>(-1.0, 0.0, 0.0, 0.0);
 var<private> material_rock_id: u32 = 0u;
+var<private> material_rock_base_id: u32 = 0u;
 
 struct FaceGpu {
     m_a: vec4<f32>,   // α-family plane normal at the eye (xyz), distance to axis (w)
