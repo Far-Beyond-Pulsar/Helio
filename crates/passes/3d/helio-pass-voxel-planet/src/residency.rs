@@ -106,6 +106,24 @@ struct Block {
 
 /// Priority buckets of the pending queue (normalized window distance).
 const BUCKETS: usize = 64;
+const VISIBLE_BLOCKS: usize = 64;
+const VISIBLE_LEASE_FRAMES: u32 = 32;
+const VISIBLE_LEASE_TIME: std::time::Duration = std::time::Duration::from_millis(500);
+
+#[derive(Clone, Copy)]
+struct VisibleStamp {
+    frame: u32,
+    view: u32,
+    at: std::time::Instant,
+}
+
+struct VisibleLease {
+    source: VisibleStamp,
+    /// First worker request whose result can supersede this temporary demand.
+    serial: u64,
+    retiring: bool,
+    retired: usize,
+}
 
 /// Wanted but not yet issued columns of one level, by priority bucket.
 /// Removal is exact (swap-remove with a position index): a window moving
@@ -326,6 +344,11 @@ pub struct Residency {
     view_focus: Option<DVec3>,
     /// Bounded asynchronous feedback from primary rays missing fine data.
     visible_blocks: Vec<u64>,
+    visible_source: Option<VisibleStamp>,
+    visible_view: Option<VisibleStamp>,
+    /// Full aligned block identities. Retiring entries still count toward
+    /// the cap until their normal publication acknowledgments are finished.
+    visible_leases: FxHashMap<u64, VisibleLease>,
 }
 
 /// A window diff being applied: removes first, then (for a level switched
@@ -404,6 +427,9 @@ impl Residency {
             priority_eye: None,
             view_focus: None,
             visible_blocks: Vec::new(),
+            visible_source: None,
+            visible_view: None,
+            visible_leases: FxHashMap::default(),
         }
     }
 
@@ -666,30 +692,118 @@ impl Residency {
     /// Feedback changes priority, never resident window coverage.
     pub fn prioritize_visible_blocks(&mut self, blocks: impl IntoIterator<Item = (u32, u32)>) {
         self.visible_blocks.clear();
-        self.visible_blocks.extend(blocks.into_iter().take(64).map(|(a, b)| pack(a, b)));
+        self.visible_blocks.extend(blocks.into_iter().take(VISIBLE_BLOCKS).map(|(a, b)| pack(a, b)));
+        self.visible_source = None;
+    }
+
+    pub(crate) fn set_visible_view(&mut self, frame: u32, view: u32, at: std::time::Instant) {
+        self.visible_view = Some(VisibleStamp { frame, view, at });
+    }
+
+    /// Only the accepted GPU batch can create temporary demand. Preserve its
+    /// original stamp so delayed or replayed feedback cannot extend a lease.
+    pub(crate) fn prioritize_visible_blocks_from(&mut self, blocks: impl IntoIterator<Item = (u32, u32)>,
+        frame: u32, view: u32, at: std::time::Instant) {
+        self.prioritize_visible_blocks(blocks);
+        self.visible_source = Some(VisibleStamp { frame, view, at });
+    }
+
+    fn visible_columns(&self, key: u64) -> Option<([u64; 16], usize)> {
+        let (face, level, i, j) = unpack(key);
+        if level >= self.grid.levels() || !self.grid.faces().contains(&face) || i & 3 != 0 || j & 3 != 0 { return None; }
+        let columns = self.grid.cells() / (BRICK << level);
+        if !(0..columns).contains(&i) || !(0..columns).contains(&j) { return None; }
+        let mut keys = [0; 16];
+        let mut count = 0;
+        for y in j..(j + 4).min(columns) {
+            for x in i..(i + 4).min(columns) {
+                keys[count] = pack(key0(face, level, x), y as u32);
+                count += 1;
+            }
+        }
+        Some((keys, count))
+    }
+
+    fn current_wanted(&self, key: u64) -> bool {
+        self.levels[unpack(key).1 as usize].wanted.as_ref().is_some_and(|wanted| wanted.contains(&key))
+    }
+
+    fn transient_wanted(&self, key: u64) -> bool {
+        self.visible_leases.get(&(key & !(3u64 | (3u64 << 32)))).is_some_and(|lease|
+            !lease.retiring && self.applied < lease.serial
+                && self.source_is_current(lease.source, VISIBLE_LEASE_FRAMES))
+    }
+
+    fn protected_wanted(&self, key: u64) -> bool {
+        self.current_wanted(key) || self.transient_wanted(key)
+    }
+
+    fn source_is_current(&self, source: VisibleStamp, frames: u32) -> bool {
+        self.visible_view.is_some_and(|now| now.view == source.view
+            && now.frame.wrapping_sub(source.frame) <= frames
+            && now.at.checked_duration_since(source.at).is_some_and(|age| age <= VISIBLE_LEASE_TIME))
+    }
+
+    /// Expiry uses bounded normal eviction, including its record/journal
+    /// quarantine. A newer wanted snapshot always protects a returned column.
+    fn retire_visible_leases(&mut self, work: &mut FrameWork, out_of_time: &impl Fn() -> bool) {
+        let blocks: Vec<_> = self.visible_leases.keys().copied().collect();
+        let mut steps = 0;
+        for block in blocks {
+            let expire = !self.source_is_current(self.visible_leases[&block].source, VISIBLE_LEASE_FRAMES)
+                || self.applied >= self.visible_leases[&block].serial;
+            self.visible_leases.get_mut(&block).unwrap().retiring |= expire;
+            if !self.visible_leases[&block].retiring { continue; }
+            let (keys, count) = self.visible_columns(block).unwrap();
+            while self.visible_leases[&block].retired < count {
+                if steps == 128 || out_of_time() { return; }
+                let index = self.visible_leases[&block].retired;
+                self.visible_leases.get_mut(&block).unwrap().retired += 1;
+                steps += 1;
+                let key = keys[index];
+                if !self.current_wanted(key) {
+                    self.levels[unpack(key).1 as usize].pending.remove(key);
+                    self.initial_retries.remove(&key);
+                    if self.residents.contains_key(key) { self.evict(key, work); }
+                }
+            }
+            if !keys[..count].iter().any(|key| self.publishing.contains_key(key)) {
+                self.visible_leases.remove(&block);
+            }
+        }
     }
 
     fn refresh_visible_pending(&mut self, deadline: Option<std::time::Instant>) {
         let mut promoted = Vec::new();
-        for key in std::mem::take(&mut self.visible_blocks) {
+        let mut blocks = std::mem::take(&mut self.visible_blocks);
+        let requested_blocks = blocks.len();
+        let source = self.visible_source.take().filter(|source| self.source_is_current(*source, 8));
+        // Reinsert leased demand after snapshot replacement cleared pending.
+        for &key in self.visible_leases.keys() {
+            if blocks.len() == VISIBLE_BLOCKS { break; }
+            if !blocks.contains(&key) { blocks.push(key); }
+        }
+        for (index, key) in blocks.into_iter().enumerate() {
             if deadline.is_some_and(|at| std::time::Instant::now() >= at) { break; }
-            let (face, level, i, j) = unpack(key);
-            if level >= self.grid.levels() || face >= 6 || i & 3 != 0 || j & 3 != 0 { continue; }
-            let state = &mut self.levels[level as usize];
-            if !state.active { continue; }
-            let Some(wanted) = &state.wanted else { continue };
-            let columns = self.grid.cells() / (BRICK << level);
-            if !(0..columns).contains(&i) || !(0..columns).contains(&j) { continue; }
-            let mut keys = [0u64; 16];
-            let mut count = 0;
-            for y in j..(j + 4).min(columns) {
-                for x in i..(i + 4).min(columns) {
-                    keys[count] = pack(key0(face, level, x), y as u32);
-                    count += 1;
+            let Some((keys, count)) = self.visible_columns(key) else { continue };
+            let level = unpack(key).1 as usize;
+            let ordinary = self.levels[level].active && keys[..count].iter().all(|&key| self.current_wanted(key));
+            if !ordinary && self.requested > self.applied && index < requested_blocks {
+                if let Some(source) = source {
+                    if let Some(lease) = self.visible_leases.get_mut(&key) {
+                        let newer = source.frame.wrapping_sub(lease.source.frame);
+                        if !lease.retiring && newer > 0 && newer < 0x8000_0000 {
+                            lease.source = source;
+                            lease.serial = self.requested;
+                        }
+                    } else if self.visible_leases.len() < VISIBLE_BLOCKS {
+                        self.visible_leases.insert(key, VisibleLease { source, serial: self.requested, retiring: false, retired: 0 });
+                    }
                 }
             }
-            if !keys[..count].iter().all(|key| wanted.contains(key)) { continue; }
+            if !ordinary && !self.transient_wanted(key) { continue; }
             promoted.push(key);
+            let state = &mut self.levels[level];
             for &key in &keys[..count] {
                 if !self.publishing.contains_key(&key)
                     && (!self.residents.contains_key(key) || self.initial_retries.contains(&key)) {
@@ -779,7 +893,7 @@ impl Residency {
         task.offset += 1;
         if task.offset == size * size { self.obsolete_owners.pop_front(); }
         let key = pack(key0(face, level, i), j as u32);
-        if self.levels[level as usize].wanted.as_ref().is_some_and(|wanted| !wanted.contains(&key)) {
+        if self.levels[level as usize].wanted.is_some() && !self.protected_wanted(key) {
             self.levels[level as usize].pending.remove(key);
             if self.residents.contains_key(key) { self.evict(key, work); }
         }
@@ -794,7 +908,7 @@ impl Residency {
                 if self.retire_obsolete_owner_step(work) { continue; }
                 if let Some((key, _)) = self.residents.resident_at_slot(self.retire_slot) {
                     let level = unpack(key).1 as usize;
-                    if self.levels[level].wanted.as_ref().is_some_and(|wanted| !wanted.contains(&key)) {
+                    if self.levels[level].wanted.is_some() && !self.protected_wanted(key) {
                         self.evict(key, work);
                         // Backshift may have moved another resident here.
                         continue;
@@ -862,7 +976,7 @@ impl Residency {
             let end = (queued.removed + remove_chunk).min(queued.diff.removes.len());
             for i in queued.removed..end {
                 let key = queued.diff.removes[i];
-                if wanted.as_ref().is_some_and(|keys| keys.contains(&key)) { continue; }
+                if self.protected_wanted(key) { continue; }
                 self.levels[level].pending.remove(key);
                 if self.residents.contains_key(key) {
                     self.evict(key, work);
@@ -1071,6 +1185,7 @@ impl Residency {
         // New demand may not have reached pending yet. Keep admission's
         // share even when queues were empty before applying the first diff.
         let apply_out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b.mul_f64(0.6));
+        self.retire_visible_leases(&mut work, &apply_out_of_time);
         if !apply_out_of_time() { self.apply_queued(&mut work, &apply_out_of_time); }
         // Window diffs may spend 60% of the CPU budget. Refresh gets at most
         // the next 10%, leaving 30% for issuing generation jobs this frame.
@@ -1150,7 +1265,10 @@ impl Residency {
             }
             let Some((_, index)) = best else { break };
             let (key, bucket) = self.levels[index].pending.pop().unwrap();
-            if self.levels[index].wanted.as_ref().is_some_and(|wanted| !wanted.contains(&key)) {
+            let transient = self.transient_wanted(key);
+            let leased = self.visible_leases.contains_key(&(key & !(3u64 | (3u64 << 32))));
+            if (self.levels[index].wanted.as_ref().is_some_and(|wanted| !wanted.contains(&key))
+                || leased && !self.current_wanted(key)) && !transient {
                 continue;
             }
             let retry = self.initial_retries.contains(&key);
@@ -1171,10 +1289,10 @@ impl Residency {
             // Active diffs can now queue incoming columns before all outgoing
             // blocks retire. Wait for an alias owner instead of permanently
             // publishing a column without summaries during a large move.
-            let conflict = if !retry || self.catching_up[index] > 0 {
+            let conflict = if !retry || self.catching_up[index] > 0 || transient {
                 self.blocks_conflict_cached(key, &mut last_summary_check)
             } else { false };
-            if self.catching_up[index] > 0 && conflict {
+            if (self.catching_up[index] > 0 || transient) && conflict {
                 awaiting_publication.push((index, key, bucket));
                 continue;
             }
@@ -1368,6 +1486,7 @@ impl Residency {
             && self.applied == self.requested
             && self.diffs.iter().all(VecDeque::is_empty)
             && self.levels.iter().all(|l| l.pending.is_empty())
+            && self.visible_leases.is_empty()
     }
 }
 
@@ -1568,6 +1687,159 @@ mod tests {
         r.set_cpu_budget(None);
         let work = r.plan(&planet, eye, 1.0, 16);
         assert_eq!(work.job_keys, vec![key], "deferred demand must remain admissible next frame");
+    }
+
+    fn visible_bridge_fixture() -> (std::sync::Arc<Planet>, Residency, DVec3, std::time::Instant) {
+        let (planet, mut r, old, eye) = edit_fixture();
+        r.evict(old, &mut FrameWork::default());
+        r.levels[0].wanted = Some(Default::default());
+        r.levels[0].active = false;
+        r.snapshot_mode = true;
+        r.requested = 2;
+        r.applied = 1;
+        let at = std::time::Instant::now();
+        r.set_visible_view(10, 7, at);
+        (planet, r, eye, at)
+    }
+
+    fn lease_block(r: &mut Residency, i: i32, at: std::time::Instant) -> Vec<u64> {
+        let key = pack(key0(crate::grid::PLANE_FACE, 0, i), 1000);
+        r.prioritize_visible_blocks_from([(key as u32, (key >> 32) as u32)], 10, 7, at);
+        r.refresh_visible_pending(None);
+        let (keys, count) = r.visible_columns(key).unwrap();
+        keys[..count].to_vec()
+    }
+
+    #[test]
+    fn visible_bridge_rejects_stale_sources_and_requires_worker_lag() {
+        let (_, mut r, _, at) = visible_bridge_fixture();
+        let key = pack(key0(crate::grid::PLANE_FACE, 0, 1000), 1000);
+        for (frame, view, time) in [(1, 7, at), (10, 8, at), (10, 7, at - VISIBLE_LEASE_TIME * 2)] {
+            r.prioritize_visible_blocks_from([(key as u32, (key >> 32) as u32)], frame, view, time);
+            r.refresh_visible_pending(None);
+            assert!(r.visible_leases.is_empty() && r.levels[0].pending.is_empty());
+        }
+        r.requested = r.applied;
+        lease_block(&mut r, 1000, at);
+        assert!(r.visible_leases.is_empty(), "ordinary snapshots remain authoritative when caught up");
+        r.requested += 1;
+        lease_block(&mut r, 1000, at);
+        assert_eq!(r.visible_leases.len(), 1);
+        r.requested += 1;
+        lease_block(&mut r, 1000, at);
+        assert_eq!(r.visible_leases[&key].serial, 2, "replaying the same GPU frame cannot renew its request epoch");
+        r.set_visible_view(11, 8, at);
+        r.retire_visible_leases(&mut FrameWork::default(), &|| false);
+        assert!(r.visible_leases.is_empty() && r.levels[0].pending.is_empty());
+    }
+
+    #[test]
+    fn visible_bridge_survives_stale_snapshot_queue_replacement_then_transfers() {
+        let (planet, mut r, eye, at) = visible_bridge_fixture();
+        let keys = lease_block(&mut r, 1000, at);
+        r.apply(snapshot_update(1, &[]));
+        assert!(r.levels[0].pending.is_empty());
+        let work = r.plan(&planet, eye, 1.0, 16);
+        assert_eq!(work.job_keys.iter().copied().collect::<FxHashSet<_>>(), keys.iter().copied().collect());
+        assert!(keys.iter().all(|key| r.residents.get(*key).unwrap().blocks));
+        r.complete_jobs(work.job_keys.iter().map(|key| (*key, 0)));
+        r.apply(snapshot_update(2, &keys));
+        let work = r.plan(&planet, eye, 1.0, 16);
+        assert!(work.evictions.is_empty() && work.jobs.is_empty());
+        assert!(r.visible_leases.is_empty() && r.idle());
+        assert!(keys.iter().all(|key| r.residents.contains_key(*key)), "the authoritative wanted set protects transferred columns");
+    }
+
+    #[test]
+    fn visible_bridge_does_not_steal_live_summary_owners_when_level_is_settled() {
+        let (planet, mut r, eye, at) = visible_bridge_fixture();
+        let keys = lease_block(&mut r, 1000, at);
+        let old: Vec<_> = keys.iter().map(|key| {
+            let (face, level, i, j) = unpack(*key);
+            pack(key0(face, level, i - 512), j as u32)
+        }).collect();
+        r.levels[0].wanted = Some(std::sync::Arc::new(old.iter().copied().collect()));
+        for (record, key) in old.iter().enumerate() {
+            assert!(r.acquire_blocks(*key, &mut FrameWork::default()));
+            r.residents.insert(*key, Resident { record: record as u32, blocks: true, ..Default::default() });
+        }
+        r.next_record = old.len() as u32;
+        r.delayed_records.clear();
+        assert_eq!(r.catching_up[0], 0);
+        let work = r.plan(&planet, eye, 1.0, 16);
+        assert!(work.jobs.is_empty() && work.evictions.is_empty() && r.publishing.is_empty());
+        assert_eq!(r.block_conflicts, 0);
+        assert!(old.iter().all(|key| r.residents.get(*key).unwrap().blocks));
+        assert!(keys.iter().all(|key| r.levels[0].pending.at.contains_key(key)));
+    }
+
+    #[test]
+    fn visible_bridge_expiry_quarantines_inflight_edits_and_cannot_retry_old_keys() {
+        let (mut planet, mut r, eye, at) = visible_bridge_fixture();
+        let (cell, _) = planet.grid().locate(DVec3::ZERO);
+        let i = (cell.i >> 3) & !3;
+        let j = (cell.j >> 3) & !3;
+        let key = pack(key0(cell.face, 0, i), j as u32);
+        std::sync::Arc::make_mut(&mut planet).apply(test_brush(0.2)).unwrap();
+        r.last_request.as_mut().unwrap().outer_radius = planet.outer_radius();
+        r.prioritize_visible_blocks_from([(key as u32, (key >> 32) as u32)], 10, 7, at);
+        r.refresh_visible_pending(None);
+        let first = r.plan(&planet, eye, 1.0, 16);
+        assert_eq!(first.jobs.len(), 16);
+        let journals: Vec<_> = r.publishing.values().filter_map(|p| p.next).collect();
+        assert!(!journals.is_empty(), "temporary columns still query the canonical edit journal");
+        r.set_visible_view(10 + VISIBLE_LEASE_FRAMES + 1, 7, at);
+        let expired = r.plan(&planet, eye, 1.0, 16);
+        assert!(expired.jobs.is_empty());
+        assert_eq!(expired.evictions.len(), 16);
+        assert_eq!(r.visible_leases.len(), 1, "inflight acknowledgments retain their capped lease slot");
+        assert!(r.publishing.values().all(|p| p.evicted));
+        r.complete_jobs(first.job_keys.iter().map(|key| (*key, 3)));
+        assert!(r.initial_retries.is_empty() && r.publishing.is_empty());
+        r.retire_visible_leases(&mut FrameWork::default(), &|| false);
+        assert!(r.visible_leases.is_empty());
+        assert!(journals.iter().all(|block| r.edits.free[block.1 as usize].contains(&block.0)));
+    }
+
+    #[test]
+    fn visible_bridge_expiry_removes_failed_initial_publication_retry() {
+        let (planet, mut r, eye, at) = visible_bridge_fixture();
+        let keys = lease_block(&mut r, 1000, at);
+        let first = r.plan(&planet, eye, 1.0, 1);
+        r.complete_jobs([(first.job_keys[0], 3)]);
+        assert_eq!(r.initial_retries.len(), 1);
+        r.set_visible_view(10, 7, at + VISIBLE_LEASE_TIME + std::time::Duration::from_millis(1));
+        let expired = r.plan(&planet, eye, 1.0, 16);
+        assert!(expired.jobs.is_empty() && r.initial_retries.is_empty());
+        assert!(keys.iter().all(|key| !r.residents.contains_key(*key)));
+        assert!(r.visible_leases.is_empty() && r.levels[0].pending.is_empty());
+    }
+
+    #[test]
+    fn visible_bridge_caps_churn_and_retires_in_bounded_slices() {
+        let (_, mut r, _, at) = visible_bridge_fixture();
+        let face = crate::grid::PLANE_FACE;
+        let blocks: Vec<_> = (0..VISIBLE_BLOCKS as i32).map(|n| pack(key0(face, 0, 1000 + 4 * n), 1000)).collect();
+        r.prioritize_visible_blocks_from(blocks.iter().map(|key| (*key as u32, (*key >> 32) as u32)), 10, 7, at);
+        r.refresh_visible_pending(None);
+        assert_eq!(r.visible_leases.len(), VISIBLE_BLOCKS);
+        assert_eq!(r.levels[0].pending.len(), 1024);
+        for i in (3000..3400).step_by(4) {
+            lease_block(&mut r, i, at);
+            assert_eq!(r.visible_leases.len(), VISIBLE_BLOCKS);
+            assert_eq!(r.levels[0].pending.len(), 1024);
+        }
+        r.set_visible_view(43, 7, at);
+        r.retire_visible_leases(&mut FrameWork::default(), &|| false);
+        assert_eq!(r.visible_leases.len(), VISIBLE_BLOCKS - 8);
+        assert_eq!(r.levels[0].pending.len(), 1024 - 128);
+        r.set_visible_view(10, 7, at);
+        lease_block(&mut r, 3000, at);
+        assert_eq!(r.visible_leases.len(), VISIBLE_BLOCKS - 7);
+        assert!(r.visible_leases.values().filter(|lease| lease.retiring).count() <= VISIBLE_BLOCKS);
+        r.set_visible_view(43, 7, at);
+        for _ in 0..8 { r.retire_visible_leases(&mut FrameWork::default(), &|| false); }
+        assert!(r.visible_leases.is_empty() && r.levels[0].pending.is_empty());
     }
 
     #[test]

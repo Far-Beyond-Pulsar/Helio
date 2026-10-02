@@ -1289,6 +1289,7 @@ impl PlanetRenderer {
         });
         self.residency.set_prefetch_eye(coverage);
         self.residency.set_priority_eye(predicted);
+        let forecasted = std::time::Instant::now();
         let forward = DVec3::new(f64::from(camera_data.forward_far[0]),
             f64::from(camera_data.forward_far[1]), f64::from(camera_data.forward_far[2]));
         let feedback_view = visible_feedback::View {
@@ -1297,14 +1298,17 @@ impl PlanetRenderer {
             // Membership is checked again by residency. Allow ordinary fast
             // flight during asynchronous readback; reject distant relocations.
             max_eye_delta: (lod0 * 32.0).max(ground_clearance.abs() * 2.0).max(1024.0),
+            captured_at: now,
         };
+        self.residency.set_visible_view(feedback_view.frame, feedback_view.id, now);
         let requested = self.visible_feedback.poll(feedback_view);
         self.stats.visible_request_blocks = self.visible_feedback.counts[0].min(visible_feedback::CAPACITY as u32);
         self.stats.visible_request_overflow = self.visible_feedback.counts[1] != 0;
         self.stats.visible_request_attempts = self.visible_feedback.counts[2];
         if self.settings.visible_feedback && !self.settings.freeze_residency {
             let grid = self.planet.grid();
-            let mut requested: Vec<_> = requested.into_iter().map(|key| {
+            let source = requested.source;
+            let mut requested: Vec<_> = requested.blocks.into_iter().map(|key| {
                     let face = ((key.0 >> 24) & 7) as u8;
                     let level = key.0 >> 27;
                     if !grid.faces().contains(&face) || level >= grid.levels() { return (f64::INFINITY, key); }
@@ -1314,8 +1318,12 @@ impl PlanetRenderer {
                     (grid.ground_distance(frame.eye, point), key)
             }).collect();
             requested.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-            self.residency.prioritize_visible_blocks(requested.into_iter().map(|(_, key)| key));
+            if let Some(source) = source {
+                self.residency.prioritize_visible_blocks_from(
+                    requested.into_iter().map(|(_, key)| key), source.frame, source.id, source.captured_at);
+            }
         }
+        let feedback_done = std::time::Instant::now();
         let ground_radial = self.planet.grid().radial(frame.eye) - ground_clearance;
         let camera_far = f64::from(camera_data.forward_far[3]);
         let focus_far = if camera_far.is_finite() && camera_far > 0.0 { camera_far }
@@ -1325,6 +1333,7 @@ impl PlanetRenderer {
         let focus = crate::windows::visible_focus(self.planet.grid(), frame.eye, forward, ground_radial, focus_far);
         self.residency.set_view_focus(focus);
         self.last_eye = Some((frame.eye, now));
+        let focused = std::time::Instant::now();
         // Spend additional generation time when visible detail is catching up,
         // rather than withholding it until the camera stops moving.
         let backlog = (self.residency.stats.pending_columns as f64 / 80_000.0).min(1.0);
@@ -1354,6 +1363,14 @@ impl PlanetRenderer {
         }
         self.frame_jobs.push_back((frame_num, work.jobs.len()));
         self.stats.plan_cpu_ms = started.elapsed().as_secs_f64() * 1000.0;
+        if std::env::var("HELIO_VOXEL_PLAN_TRACE").ok()
+            .is_some_and(|value| self.stats.plan_cpu_ms > value.parse::<f64>().unwrap_or(10.0)) {
+            eprintln!("OUTER_PLAN_TRACE clearance_forecast {:.2} feedback {:.2} focus {:.2} residency {:.2} ms",
+                (forecasted - started).as_secs_f64() * 1e3,
+                (feedback_done - forecasted).as_secs_f64() * 1e3,
+                (focused - feedback_done).as_secs_f64() * 1e3,
+                (std::time::Instant::now() - focused).as_secs_f64() * 1e3);
+        }
         let uploading = std::time::Instant::now();
         let (patches, block_patches) = self.upload(&work);
         if let Some(live) = self.residency.take_live_blocks() {

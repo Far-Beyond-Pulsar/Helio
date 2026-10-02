@@ -16,6 +16,13 @@ pub(super) struct View {
     pub id: u32,
     pub frame: u32,
     pub max_eye_delta: f64,
+    pub captured_at: std::time::Instant,
+}
+
+#[derive(Default)]
+pub(super) struct Batch {
+    pub blocks: Vec<(u32, u32)>,
+    pub source: Option<View>,
 }
 
 impl View {
@@ -93,8 +100,9 @@ impl Feedback {
 
     // The caller already polls the device without waiting. Mapping begins
     // only on the next encode, after the copy has been submitted.
-    pub fn poll(&mut self, current: View) -> Vec<(u32, u32)> {
+    pub fn poll(&mut self, current: View) -> Batch {
         let mut blocks = Vec::new();
+        let mut source = None;
         let mut newest_age = u32::MAX;
         for r in &mut self.readbacks {
             let state = r.state.load(Ordering::Acquire);
@@ -109,6 +117,7 @@ impl Feedback {
                             *count = u32::from_le_bytes(data[n * 4..n * 4 + 4].try_into().unwrap());
                         }
                         blocks = decode(&data);
+                        source = r.view;
                     }
                     r.buffer.unmap();
                 }
@@ -131,7 +140,7 @@ impl Feedback {
         // Prefer the newest completed frame, rather than replaying old views.
         blocks.sort_unstable();
         blocks.dedup();
-        blocks
+        Batch { blocks, source }
     }
 
     pub fn begin(&mut self, encoder: &mut wgpu::CommandEncoder, view: View) -> Option<usize> {
@@ -186,6 +195,7 @@ mod tests {
             id: 1,
             frame: u32::MAX - 1,
             max_eye_delta: 50.0,
+            captured_at: std::time::Instant::now(),
         };
         let now = View {
             frame: 1,
