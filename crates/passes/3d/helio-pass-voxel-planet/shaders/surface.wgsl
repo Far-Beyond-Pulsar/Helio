@@ -384,6 +384,13 @@ fn column_relief_gradient(face: u32, up: vec3<f32>, derivative: vec2<f32>, radiu
     return vec4<f32>(gradient, 8.0 * max(abs(derivative.x), abs(derivative.y)));
 }
 
+// The existing block endpoints average base-height quantization over seven
+// cells. This support is used only by filtered natural L0 lighting; material
+// slope and resolved voxel face normals keep their original support.
+fn column_secant_derivative(tx0: i32, tx7: i32, ty0: i32, ty7: i32) -> vec2<f32> {
+    return vec2<f32>(f32(tx7 - tx0), f32(ty7 - ty0)) / 7.0;
+}
+
 // Relief changes geometry inside the last coarse cell. Natural surface
 // strata use that stored authored top, not the enclosing coarse voxel.
 // Cuts, deep samples and resolvable walls keep their actual hit layer.
@@ -516,6 +523,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         select(0.0, area_base_w, FAR_RELIEF && frame.hints.z != 0u)));
     var fallback_normal = vec3<f32>(0.0);
     var fallback_slope = 0.0;
+    var fallback_shade_normal = vec3<f32>(0.0);
     if smooth_w > 0.0 || shade_smooth_w > 0.0 {
         let x0 = select(x - 1u, 0u, x == 0u);
         let x1 = min(x + 1u, 7u);
@@ -533,6 +541,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         let radius = frame.eye.w + height_rel(make_ray(camera.position_near.xyz, d), h.t);
         let field = column_relief_gradient(face, up, vec2<f32>(gi, gj), radius);
         fallback_normal = normalize(up - field.xyz);
+        fallback_shade_normal = fallback_normal;
         fallback_slope = field.w;
     }
     if !edited && (c.info & INFO_TOPOLOGY) == 0u {
@@ -553,6 +562,16 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         let tx7 = column_top(c, 7u, y);
         let ty0 = column_top(c, x, 0u);
         let ty7 = column_top(c, x, 7u);
+        if level == 0u && shade_smooth_w > 0.0 && (c.info & INFO_TOPOLOGY) == 0u {
+            // A two-cell derivative of integer L0 tops pulses at every riser.
+            // Reuse the material block's endpoint reads for shading alone,
+            // avoiding new generator queries and retaining canonical IDs.
+            let up = hit_up(h.t, d);
+            let radius = frame.eye.w + height_rel(make_ray(camera.position_near.xyz, d), h.t);
+            let field = column_relief_gradient(face, up,
+                column_secant_derivative(tx0, tx7, ty0, ty7), radius);
+            fallback_shade_normal = normalize(up - field.xyz);
+        }
         slope = block_slope_of(tx0, tx7, ty0, ty7);
         if level >= 1u && column_tops_fit(c) && (c.info & INFO_RELIEF) != 0u {
             let di = column_relief_delta_q16(c, vec2<u32>(7u, y), vec2<u32>(0u, y), tx7 - tx0);
@@ -601,7 +620,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // changes show no seam.
     var lift = 0u;
     if shade_smooth_w > 0.0 {
-        normal = normalize(mix(normal, fallback_normal, shade_smooth_w));
+        normal = normalize(mix(normal, fallback_shade_normal, shade_smooth_w));
     }
     if code < 4u && smooth_w > 0.5 && !edited {
         let material_layer = surface_material_layer(top, material_fraction, level,
