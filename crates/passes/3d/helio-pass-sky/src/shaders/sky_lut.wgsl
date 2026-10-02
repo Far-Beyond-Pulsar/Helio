@@ -1,3 +1,4 @@
+//!use planetary_lut
 // sky_lut.wgsl – Sky-View LUT generation pass (Hillaire 2020)
 //
 // Renders Nishita single-scatter atmosphere into a 192×108 Rgba16Float panoramic

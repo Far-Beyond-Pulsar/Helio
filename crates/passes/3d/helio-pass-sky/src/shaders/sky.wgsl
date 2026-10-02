@@ -1,3 +1,4 @@
+//!use planetary_lut
 // Sky pass – Nishita single-scatter atmospheric model + FBM volumetric clouds
 //
 // Bind groups:

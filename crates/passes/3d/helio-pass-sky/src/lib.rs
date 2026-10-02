@@ -64,6 +64,9 @@ pub const CLOUD_TEMPORAL_SHADER: &str = include_str!("shaders/cloud_temporal.wgs
 pub const SKY_LUT_SHADER: &str = concat!(include_str!("shaders/planetary_lut.wgsl"), include_str!("shaders/sky_lut.wgsl"));
 pub const SKY_SHADER: &str = concat!(include_str!("shaders/planetary_lut.wgsl"), include_str!("shaders/sky.wgsl"));
 
+const PLANETARY_LUT_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::wgsl_snippet!("//!use planetary_lut", "shaders/planetary_lut.wgsl");
+
 pub const LUT_WIDTH: u32 = 192;
 pub const LUT_HEIGHT: u32 = 108;
 
@@ -786,8 +789,18 @@ impl SkyPass {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
-        let sky_lut_module = helio_core::shader::module(device, "Sky LUT Shader (Unified)", helio_core::include_wgsl!("shaders/sky_lut.wgsl"));
-        let sky_module = helio_core::shader::module(device, "Sky Composite Shader (Unified)", helio_core::include_wgsl!("shaders/sky.wgsl"));
+        let sky_lut_module = helio_core::shader::module_with(
+            device,
+            "Sky LUT Shader (Unified)",
+            helio_core::include_wgsl!("shaders/sky_lut.wgsl"),
+            &[PLANETARY_LUT_SNIPPET],
+        );
+        let sky_module = helio_core::shader::module_with(
+            device,
+            "Sky Composite Shader (Unified)",
+            helio_core::include_wgsl!("shaders/sky.wgsl"),
+            &[PLANETARY_LUT_SNIPPET],
+        );
         // Sky LUT BGLs: camera storage + sky uniforms
         let sky_lut_bgl0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sky LUT BGL0 (Unified)"),
