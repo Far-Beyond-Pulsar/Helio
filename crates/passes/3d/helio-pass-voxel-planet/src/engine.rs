@@ -155,9 +155,16 @@ pub struct PlanetStats {
     pub jobs: usize,
     pub evictions: usize,
     pub failed_jobs: usize,
+    /// Completed generation results by status (ok, band, scratch, pool, skipped).
+    pub jobs_by_status: [usize; 5],
     pub overflow_columns: usize,
     pub free_pages: i32,
     pub pool_pages: u32,
+    /// Available runs in each power-of-two allocation class.
+    pub free_runs_by_class: [u32; 10],
+    pub free_pool_units: u64,
+    pub reclaimable_pages: u32,
+    pub recycled_pages: u32,
     pub active_levels: u32,
     pub finest_level: u32,
     pub plan_cpu_ms: f64,
@@ -287,6 +294,10 @@ struct Pipelines {
     refill: wgpu::ComputePipeline,
     allocate: wgpu::ComputePipeline,
     fixup: wgpu::ComputePipeline,
+    recycle_layout: wgpu::BindGroupLayout,
+    reclaim_pages: wgpu::ComputePipeline,
+    compact_runs: wgpu::ComputePipeline,
+    finish_recycle: wgpu::ComputePipeline,
     publish: wgpu::ComputePipeline,
     level_suffix: wgpu::ComputePipeline,
     primary: wgpu::ComputePipeline,
@@ -346,6 +357,7 @@ impl Pipelines {
             storage(14, false),
             storage(15, false),
             uniform(16),
+            storage(17, false),
         ]
         .into();
         let gen_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -442,6 +454,16 @@ impl Pipelines {
                 cache: None,
             })
         };
+        let recycle_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("planet allocator recycling"),
+            entries: &[storage(0, false), storage(1, false), storage(2, true),
+                storage(3, false), storage(4, false), storage(5, false)],
+        });
+        let recycle_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("planet allocator recycling"),
+            bind_group_layouts: &[Some(&recycle_layout)], immediate_size: 0,
+        });
+        let recycle_module = module("planet allocator recycling", include_str!("../shaders/allocator_recycle.wgsl").to_owned());
         let gbuffer = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("planet gbuffer"),
             layout: Some(&render_pl),
@@ -486,6 +508,10 @@ impl Pipelines {
             refill: compute(&gen_pl, &gen_module, "refill"),
             allocate: compute(&gen_pl, &gen_module, "allocate"),
             fixup: compute(&gen_pl, &gen_module, "fixup"),
+            reclaim_pages: compute(&recycle_pl, &recycle_module, "reclaim_pages"),
+            compact_runs: compute(&recycle_pl, &recycle_module, "compact_runs"),
+            finish_recycle: compute(&recycle_pl, &recycle_module, "finish_recycle"),
+            recycle_layout,
             publish: compute(&gen_pl, &gen_module, "publish"),
             level_suffix: compute(&gen_pl, &gen_module, "level_suffix"),
             primary: compute(&trace_pl, &trace_module, "primary"),
@@ -521,6 +547,9 @@ struct Buffers {
     scratch: wgpu::Buffer,
     alloc: wgpu::Buffer,
     free_runs: wgpu::Buffer,
+    free_runs_spare: Option<wgpu::Buffer>,
+    page_meta: wgpu::Buffer,
+    recycle_counts: wgpu::Buffer,
     free_pages: wgpu::Buffer,
     evictions: wgpu::Buffer,
     level_tops: wgpu::Buffer,
@@ -562,6 +591,10 @@ impl Buffers {
         let job_out = make("planet job results", u64::from(cap.max_jobs) * JOB_OUT_BYTES, st | wgpu::BufferUsages::COPY_SRC);
         let scratch = make("planet scratch", u64::from(cap.scratch_units) * 64, st);
         let free_runs = make("planet free runs", u64::from(cap.pool_units) * 8, st);
+        // Unassigned zeroed pages have no free runs; refill initializes both
+        // fields before a page is visible to allocation.
+        let page_meta = make("planet allocation pages", u64::from(pages) * 8, st);
+        let recycle_counts = make("planet recycled class counts", 64, st);
         let block_state = make(
             "planet block summaries",
             u64::from(crate::residency::block_region()) * 6 * 24 * 16,
@@ -627,6 +660,9 @@ impl Buffers {
             scratch,
             alloc,
             free_runs,
+            free_runs_spare: None,
+            page_meta,
+            recycle_counts,
             free_pages,
             evictions,
             level_tops,
@@ -726,6 +762,7 @@ pub struct PlanetRenderer {
     costed_frame: Option<u64>,
     last_eye: Option<(DVec3, std::time::Instant)>,
     last_frame_num: u64,
+    recycle_pending: bool,
 }
 
 impl PlanetRenderer {
@@ -807,6 +844,7 @@ impl PlanetRenderer {
             last_jobs: 0,
             last_eye: None,
             last_frame_num: 0,
+            recycle_pending: false,
             pipelines,
             buffers,
         }
@@ -815,7 +853,7 @@ impl PlanetRenderer {
     fn gen_group(device: &wgpu::Device, p: &Pipelines, b: &Buffers) -> wgpu::BindGroup {
         let entries: Vec<wgpu::BindGroupEntry> = [
             &b.frame, &b.world, &b.table, &b.records, &b.pool, &b.brushes, &b.edit_refs, &b.jobs, &b.job_out,
-            &b.scratch, &b.alloc, &b.free_runs, &b.free_pages, &b.evictions, &b.level_tops, &b.block_state, &b.terrain,
+            &b.scratch, &b.alloc, &b.free_runs, &b.free_pages, &b.evictions, &b.level_tops, &b.block_state, &b.terrain, &b.page_meta,
         ]
         .iter()
         .enumerate()
@@ -1115,6 +1153,16 @@ impl PlanetRenderer {
                     let probe = u64::from(self.settings.capacity.max_jobs) * JOB_OUT_BYTES;
                     let at = probe as usize;
                     self.stats.free_pages = i32::from_le_bytes(data[at + 120..at + 124].try_into().unwrap());
+                    self.stats.reclaimable_pages = i32::from_le_bytes(data[at + 104..at + 108].try_into().unwrap()).max(0) as u32;
+                    self.stats.recycled_pages = i32::from_le_bytes(data[at + 108..at + 112].try_into().unwrap()).max(0) as u32;
+                    for class in 0..10 {
+                        self.stats.free_runs_by_class[class] = i32::from_le_bytes(
+                            data[at + class * 4..at + class * 4 + 4].try_into().unwrap(),
+                        ).max(0) as u32;
+                    }
+                    self.stats.free_pool_units = self.stats.free_pages.max(0) as u64 * 512
+                        + self.stats.free_runs_by_class.iter().enumerate()
+                            .map(|(class, count)| u64::from(*count) << class).sum::<u64>();
                 }
                 r.buffer.unmap();
                 r.stage = 0;
@@ -1122,6 +1170,12 @@ impl PlanetRenderer {
             }
         }
         self.stats.failed_jobs += completed.iter().filter(|(_, s)| *s != 0 && *s != 1).count();
+        for (_, status) in &completed {
+            if let Some(count) = self.stats.jobs_by_status.get_mut(*status as usize) { *count += 1; }
+        }
+        if completed.iter().any(|(_, status)| *status == 3) && self.stats.reclaimable_pages > 0 {
+            self.recycle_pending = true;
+        }
         self.stats.overflow_columns += completed.iter().filter(|(_, s)| *s == 1).count();
         self.residency.complete_jobs(completed);
         // Start mapping readbacks encoded in earlier frames.
@@ -1337,15 +1391,53 @@ impl PlanetRenderer {
             ],
         });
         let camera_group = &self.camera_group;
+        // Recycle only under observed pool pressure with wholly free pages.
+        // The spare stack is allocated lazily; normal frames do no pool scan.
+        let recycle_groups = if self.recycle_pending && self.stats.reclaimable_pages > 0 {
+            self.recycle_pending = false;
+            if self.buffers.free_runs_spare.is_none() {
+                let bytes = self.buffers.free_runs.size();
+                self.buffers.free_runs_spare = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("planet recycled free runs"), size: bytes,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+                }));
+                self.buffers.bytes += bytes;
+            }
+            let b = &self.buffers;
+            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("planet allocator recycling"), layout: &self.pipelines.recycle_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: b.alloc.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: b.page_meta.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: b.free_runs.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: b.free_runs_spare.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: b.free_pages.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: b.recycle_counts.as_entire_binding() },
+                ],
+            });
+            encoder.clear_buffer(&self.buffers.recycle_counts, 0, None);
+            std::mem::swap(&mut self.buffers.free_runs, self.buffers.free_runs_spare.as_mut().unwrap());
+            let new_group = Self::gen_group(&self.device, &self.pipelines, &self.buffers);
+            let old_group = std::mem::replace(&mut self.gen_group, new_group);
+            Some((old_group, group))
+        } else { None };
         if let Some(p) = &mut self.profiler {
             p.begin_pass(encoder, "planet_residency");
         }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_bind_group(0, &self.gen_group, &[]);
+            pass.set_bind_group(0, recycle_groups.as_ref().map_or(&self.gen_group, |groups| &groups.0), &[]);
             let wg = |n: u32| n.div_ceil(64);
             if evictions > 0 {
                 Self::dispatch(&mut pass, &self.pipelines.evict, [wg(evictions), 1, 1]);
+            }
+            if let Some((_, group)) = &recycle_groups {
+                pass.set_bind_group(0, group, &[]);
+                Self::dispatch(&mut pass, &self.pipelines.reclaim_pages, [self.stats.pool_pages.div_ceil(128), 1, 1]);
+                let groups = (self.settings.capacity.pool_units * 2).div_ceil(256);
+                Self::dispatch(&mut pass, &self.pipelines.compact_runs, [groups.min(32768), groups.div_ceil(32768), 1]);
+                Self::dispatch(&mut pass, &self.pipelines.finish_recycle, [1, 1, 1]);
+                pass.set_bind_group(0, &self.gen_group, &[]);
             }
             if patches > 0 {
                 // `patch_table` reads pairs after the eviction list.

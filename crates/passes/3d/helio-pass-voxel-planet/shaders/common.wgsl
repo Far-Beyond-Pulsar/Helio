@@ -62,6 +62,12 @@ const INFO_EXT: u32 = 0x20000000u;
 const INFO_RELIEF: u32 = 0x10000000u;
 // Effective Add/Remove lists: base-field gradients cannot describe cut faces.
 const INFO_TOPOLOGY: u32 = 0x08000000u;
+// Low-level authored tops can share the existing byte header with their
+// fractional remainder. This changes storage only, not the traced surface.
+const INFO_RELIEF_INLINE: u32 = 0x04000000u;
+// Natural columns are exactly solid below their stored per-cell tops.
+// Add/Remove columns retain arbitrary brick occupancy instead.
+const INFO_HEIGHTFIELD: u32 = 0x02000000u;
 const UNIT_WORDS: u32 = 16u;
 const MAX_PROBES: u32 = 64u;
 
@@ -131,7 +137,8 @@ fn column_top_cell(c: Column) -> i32 {
 }
 
 fn header_units(c: Column) -> u32 {
-    return select(1u, 2u, (c.info & INFO_EXT) != 0u) + select(0u, 2u, (c.info & INFO_RELIEF) != 0u);
+    return select(1u, 2u, (c.info & INFO_EXT) != 0u)
+        + select(0u, 2u, (c.info & INFO_RELIEF) != 0u && (c.info & INFO_RELIEF_INLINE) == 0u);
 }
 
 // Brick state of band brick `b`: 0 air, 1 solid, 2 mixed. Also returns the
@@ -166,7 +173,12 @@ fn brick_bit(unit: u32, x: u32, y: u32, z: u32) -> bool {
 fn column_top(c: Column, x: u32, y: u32) -> i32 {
     let cell = x + y * 8u;
     let word = pool[c.run * UNIT_WORDS + (cell >> 2u)];
-    return c.k_lo * 8 + i32((word >> ((cell & 3u) * 8u)) & 255u);
+    let offset = (word >> ((cell & 3u) * 8u)) & 255u;
+    if (c.info & INFO_RELIEF_INLINE) != 0u {
+        let level = c.key0 >> 27u;
+        return c.k_lo * 8 + i32((offset + (1u << level) - 1u) >> level);
+    }
+    return c.k_lo * 8 + i32(offset);
 }
 
 // Zero denotes a top exactly on the upper coarse-cell boundary. Other
@@ -174,6 +186,12 @@ fn column_top(c: Column, x: u32, y: u32) -> i32 {
 fn column_relief_fraction(c: Column, x: u32, y: u32) -> u32 {
     if !column_tops_fit(c) { return 0u; }
     let cell = x + y * 8u;
+    if (c.info & INFO_RELIEF_INLINE) != 0u {
+        let level = c.key0 >> 27u;
+        let word = pool[c.run * UNIT_WORDS + (cell >> 2u)];
+        let offset = (word >> ((cell & 3u) * 8u)) & 255u;
+        return (offset & ((1u << level) - 1u)) << (16u - level);
+    }
     let offset = select(1u, 2u, (c.info & INFO_EXT) != 0u);
     let word = pool[(c.run + offset) * UNIT_WORDS + (cell >> 1u)];
     return (word >> ((cell & 1u) * 16u)) & 65535u;

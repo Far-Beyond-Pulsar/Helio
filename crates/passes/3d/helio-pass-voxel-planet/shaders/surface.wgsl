@@ -118,6 +118,9 @@ fn occupied(face: u32, level: u32, i: i32, j: i32, k: i32, home: Column, hi: i32
         c = records[record];
         if !column_valid(c) { return false; }
     }
+    if (c.info & INFO_HEIGHTFIELD) != 0u {
+        return k < column_top(c, u32(i & 7), u32(j & 7));
+    }
     let b = (k >> 3u) - c.k_lo;
     if b < 0 { return true; }
     if b >= i32(band_count(c)) { return false; }
@@ -259,9 +262,46 @@ fn cached_relief_normal(xy: vec2<u32>, center: Hit, up: vec3<f32>) -> vec4<f32> 
     let dh_a = f32(climate_height_cache[pixel_index(right)] - climate_height_cache[pixel_index(left)]) * 0.001;
     let dh_b = f32(climate_height_cache[pixel_index(below)] - climate_height_cache[pixel_index(above)]) * 0.001;
     let gradient = (dh_a * (bb * a - ab * b) + dh_b * (aa * b - ab * a)) / determinant;
-    // A sharp cliff is not a slowly varying filtered surface.
-    if dot(gradient, gradient) > 4.0 { return vec4<f32>(0.0); }
-    return vec4<f32>(normalize(up - gradient), 1.0);
+    // Fade confidence across steep gradients instead of abruptly changing
+    // lighting and material support at the same slope boundary.
+    let confidence = canonical_relief_confidence(dot(gradient, gradient));
+    return vec4<f32>(normalize(up - gradient), confidence);
+}
+
+fn canonical_relief_confidence(gradient_squared: f32) -> f32 {
+    return 1.0 - smoothstep(4.0, 9.0, gradient_squared);
+}
+
+// A visible angular wall is still a wall. Only unresolved natural risers
+// borrow a continuous height-field normal; radial terrain tops retain it.
+fn canonical_relief_face_weight(code: u32, projected_cell: f32) -> f32 {
+    if code == 4u { return 1.0; }
+    if code >= 4u { return 0.0; }
+    return 1.0 - smoothstep(1.0, 2.5, projected_cell);
+}
+
+// Convert a physical tangent gradient to the generator's slope convention:
+// eighths of a radial voxel per angular index step. On the cube-sphere,
+// moving one chart coordinate holds the other cell plane fixed. The chart
+// tangents and angular/radial scale therefore matter away from face centres.
+fn canonical_relief_slope(face: u32, up: vec3<f32>, gradient: vec3<f32>, radius: f32) -> f32 {
+    if is_plane() {
+        let f = frame.faces[face];
+        return 8.0 * frame.layer.z / frame.layer.y * max(abs(dot(gradient, f.m_a.xyz)), abs(dot(gradient, f.m_b.xyz)));
+    }
+    let n = vec3<f32>(face_axis(face, 0u));
+    let a = vec3<f32>(face_axis(face, 1u));
+    let b = vec3<f32>(face_axis(face, 2u));
+    let un = dot(up, n);
+    let ma = normalize(a * un - n * dot(up, a));
+    let mb = normalize(b * un - n * dot(up, b));
+    let qa = normalize(n * un + a * dot(up, a));
+    let qb = normalize(n * un + b * dot(up, b));
+    let ti = cross(mb, up);
+    let tj = cross(ma, up);
+    let di = dot(gradient, ti) * dot(qa, up) / dot(ma, ti);
+    let dj = dot(gradient, tj) * dot(qb, up) / dot(mb, tj);
+    return 8.0 * radius * frame.layer.z / frame.layer.y * max(abs(di), abs(dj));
 }
 
 // A natural riser remains surface material even inside a topology column.
@@ -333,6 +373,18 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         p = domain_point(face, appearance_cell.i, appearance_cell.j, 0u);
         climate_height = climate_height_cache[index];
     }
+    let pixel = h.t * 2.0 / (camera.proj[1][1] * frame.screen.y);
+    let size = frame.layer.y * f32(1 << level);
+    var canonical_up = vec3<f32>(0.0);
+    var canonical_relief = vec4<f32>(0.0);
+    let authored_relief_w = smoothstep(1.0, 4.0, pixel / frame.layer.y);
+    let relief_face_w = canonical_relief_face_weight(code, size / pixel);
+    if FAR_RELIEF && frame.hints.z != 0u && level > 0u && authored_relief_w > 0.0
+        && relief_face_w > 0.0 && (!edited || (c.info & INFO_RELIEF) != 0u) {
+        canonical_up = hit_up(h.t, d);
+        canonical_relief = cached_relief_normal(id.xy, h, canonical_up);
+    }
+    let canonical_w = canonical_relief.w * authored_relief_w * relief_face_w;
     if !edited {
         var lowest = top;
         if x > 0u { lowest = min(lowest, column_top(c, x - 1u, y)); }
@@ -350,6 +402,14 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             // Same truncation as block_slope_of, eighths per coarse cell.
             // Packed tops differ by at most 255, so the Q16 delta fits i32.
             slope = max(abs(di), abs(dj)) / 57344;
+        }
+        if canonical_w > 0.0 {
+            let gradient = canonical_up - canonical_relief.xyz / dot(canonical_relief.xyz, canonical_up);
+            let radius = length(frame.eye.xyz * frame.eye.w + camera.position_near.xyz + h.t * d);
+            let canonical_slope = canonical_relief_slope(face, canonical_up, gradient, radius);
+            // Lighting and material thresholds share the same derivative and
+            // confidence; changing LOD blocks cannot silently change only rock/snow.
+            slope = i32(mix(f32(slope), canonical_slope, canonical_w));
         }
         // Canonical materials use the column top cell, which is resident.
         // Depth counts from the lowest neighbouring top: an exposed riser
@@ -377,8 +437,6 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // field and shows surface material on its risers. Cells several pixels
     // wide keep crisp faces; the blend follows the pixel footprint, so level
     // changes show no seam.
-    let pixel = h.t * 2.0 / (camera.proj[1][1] * frame.screen.y);
-    let size = frame.layer.y * f32(1 << level);
     let coarse_w = clamp((2.5 - size / pixel) / 1.5, 0.0, 1.0);
     let authored_w = select(0.0, smoothstep(1.0, 4.0, pixel / frame.layer.y), FAR_RELIEF && frame.hints.z != 0u);
     // Visibility may temporarily use a coarser column. Its enlarged cell
@@ -416,14 +474,9 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             lift = u32(clamp(top - h.k, 0, 255));
         }
     }
-    var raw_smooth_w = 0.0;
-    if FAR_RELIEF && frame.hints.z != 0u && level > 0u && (!edited || (c.info & INFO_RELIEF) != 0u) {
-        let relief = cached_relief_normal(id.xy, h, hit_up(h.t, d));
-        // Use authored footprint rather than the changing level-cell size.
-        // The confidence gate retains the existing normal near discontinuities.
-        let weight = relief.w * smoothstep(1.0, 4.0, pixel / frame.layer.y);
-        raw_smooth_w = weight;
-        normal = normalize(mix(normal, relief.xyz, weight));
+    let raw_smooth_w = canonical_w;
+    if canonical_w > 0.0 {
+        normal = normalize(mix(normal, canonical_relief.xyz, canonical_w));
     }
     // Neighbourhood occlusion around the air cell in front of the face.
     var ao = 1.0;

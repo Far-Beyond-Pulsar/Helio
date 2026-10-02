@@ -8,6 +8,7 @@ use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Planet, PlanetRecipe, 
 use std::sync::Arc;
 
 const RELIEF: u32 = 0x10000000;
+const INLINE_RELIEF: u32 = 0x04000000;
 fn flat(shape: Shape, height: f64) -> Planet {
     Planet::new(PlanetRecipe {
         shape,
@@ -435,14 +436,22 @@ fn l1_to_l5_zero_fraction_matches_legacy_whole_cell_hits() {
                 assert_eq!(a.level, level);
                 assert_eq!(b.level, level);
                 assert_ne!(columns[index][3] & RELIEF, 0);
-                let at = columns[index][4] as usize * 64
-                    + 64
-                    + ((b.j & 7) as usize * 8 + (b.i & 7) as usize) * 2;
-                assert_eq!(
-                    u16::from_le_bytes(pool[at..at + 2].try_into().unwrap()),
-                    0,
-                    "fixture must use zero-fraction fast path"
-                );
+                let cell = (b.j & 7) as usize * 8 + (b.i & 7) as usize;
+                if columns[index][3] & INLINE_RELIEF != 0 {
+                    // Inspect the base-layer remainder independently of the
+                    // shader decoder. Inline relief must also use a smaller
+                    // run than the old four-unit Q16 representation.
+                    let at = columns[index][4] as usize * 64 + cell;
+                    assert_eq!(u32::from(pool[at]) % (1 << level), 0);
+                    assert!((columns[index][3] >> 18) & 15 < 2);
+                } else {
+                    let at = columns[index][4] as usize * 64 + 64 + cell * 2;
+                    assert_eq!(
+                        u16::from_le_bytes(pool[at..at + 2].try_into().unwrap()),
+                        0,
+                        "fixture must use zero-fraction fast path"
+                    );
+                }
                 assert_eq!(
                     (
                         a.status,

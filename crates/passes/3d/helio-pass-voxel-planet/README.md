@@ -110,6 +110,7 @@ the CPU raycast what the GPU draws.
 - Detail finer than a level's footprint is omitted at that level: coarse
   levels are band-limited point samples of the same field. Levels 1 and above
   retain fractional radial tops unless Add/Remove edits change their geometry.
+  Short low-level spans store exact base-layer tops in the existing byte header.
   Paint retains that relief. Slope lighting and face detail follow the authored
   pixel footprint, using existing raw climate samples rather than tracing finer
   cells.
@@ -194,7 +195,11 @@ dim diffuse light on the night side; set it to zero for solar-only lighting.
    the 8x8 columns, apply edits, find the occupied band (solid below, air
    above, mixed bricks in between), allocate a brick run of the right size
    class, write mixed bricks, publish the record, and raise the column's
-   summary-block tops and the level's top. Evicted runs return to free lists.
+   summary-block tops and the level's top. Evicted runs return to free lists;
+   under pool pressure, wholly free pages can change allocation class. Failed
+   initial columns retry through visibility priorities within the CPU budget.
+   Natural columns reconstruct exact cell occupancy from their stored tops;
+   Add/Remove columns keep arbitrary mixed-brick occupancy.
 3. **Horizon** (`horizon.wgsl`): the directional sky bound. Resident summary
    blocks are binned by azimuth sector and distance bucket around the eye;
    each bucket stores the lowest elevation that clears it.

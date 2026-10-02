@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use crate::planet::Planet;
 use bytemuck::{Pod, Zeroable};
 use glam::DVec3;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 pub const NONE: u32 = u32::MAX;
 pub const TOMBSTONE: u32 = u32::MAX - 1;
@@ -230,6 +230,8 @@ struct EditPublication {
     previous: Option<(u32, u32)>,
     next: Option<(u32, u32)>,
     evicted: bool,
+    /// Initial allocation failures retry through normal visibility priorities.
+    initial_bucket: Option<usize>,
 }
 
 /// Work produced for one frame.
@@ -281,6 +283,7 @@ pub struct Residency {
     levels: Vec<Level>,
     edits: EditHeap,
     publishing: FxHashMap<u64, EditPublication>,
+    initial_retries: FxHashSet<u64>,
     /// GPU face-brush index for each (brush id, face entry).
     brush_gpu: Vec<Vec<u32>>,
     synced: Vec<crate::edits::Brush>,
@@ -347,6 +350,7 @@ impl Residency {
             levels,
             edits: EditHeap::default(),
             publishing: FxHashMap::default(),
+            initial_retries: FxHashSet::default(),
             brush_gpu: Vec::new(),
             synced: Vec::new(),
             synced_hash: Vec::new(),
@@ -563,6 +567,7 @@ impl Residency {
     }
 
     fn evict(&mut self, key: u64, work: &mut FrameWork) {
+        self.initial_retries.remove(&key);
         match self.residents.get(key).map(|r| r.blocks) {
             Some(true) => self.release_blocks(key, work),
             Some(false) => self.block_conflicts -= 1,
@@ -742,7 +747,8 @@ impl Residency {
                 for &(bi, bj, distance) in &blocks[..count] {
                     // A CPU-resident full block has no pending admissions to
                     // group. Avoid sixteen hash probes every stopped frame.
-                    if self.blocks.get(&(level as u32, face, 1, bi, bj)).is_some_and(|block| block.refs == 16) {
+                    if self.initial_retries.is_empty()
+                        && self.blocks.get(&(level as u32, face, 1, bi, bj)).is_some_and(|block| block.refs == 16) {
                         continue;
                     }
                     let mut keys = [0u64; 16];
@@ -833,10 +839,12 @@ impl Residency {
         urgent.sort_unstable();
         urgent.dedup();
         let mut deferred_urgent = Vec::new();
-        for key in urgent {
-            if work.jobs.len() >= budget {
+        let mut urgent = urgent.into_iter();
+        while let Some(key) = urgent.next() {
+            if work.jobs.len() >= budget || out_of_time() {
                 deferred_urgent.push(key);
-                continue;
+                deferred_urgent.extend(urgent);
+                break;
             }
             if self.publishing.contains_key(&key) {
                 deferred_urgent.push(key);
@@ -847,18 +855,23 @@ impl Residency {
                 deferred_urgent.push(key);
                 continue;
             };
+            let initial = self.initial_retries.remove(&key);
+            if initial {
+                self.levels[unpack(key).1 as usize].pending.remove(key);
+            }
             self.publishing.insert(key, EditPublication {
                 record: res.record,
                 previous: res.edit_block,
                 next: block,
                 evicted: false,
+                initial_bucket: None,
             });
             work.jobs.push(Job {
                 key0: key as u32,
                 key1: (key >> 32) as u32,
                 record: res.record,
                 edits: block.map_or(0, |b| b.0 + 1),
-                flags: 1,
+                flags: u32::from(!initial),
                 pad: [0; 3],
             });
             work.job_keys.push(key);
@@ -889,7 +902,8 @@ impl Residency {
             }
             let Some((_, index)) = best else { break };
             let (key, bucket) = self.levels[index].pending.pop().unwrap();
-            if self.residents.contains_key(key) {
+            let retry = self.initial_retries.contains(&key);
+            if self.residents.contains_key(key) && !retry {
                 continue;
             }
             let requeue = |this: &mut Self| {
@@ -910,28 +924,33 @@ impl Residency {
                 awaiting_publication.push((index, key, bucket));
                 continue;
             }
-            let Some(record) = self.alloc_record() else {
+            let record = if retry { Some(self.residents.get(key).unwrap().record) } else { self.alloc_record() };
+            let Some(record) = record else {
                 requeue(self);
                 break;
             };
             let Ok(block) = self.edit_list(planet, key, &mut work) else {
-                self.free_records.push(record);
+                if !retry { self.free_records.push(record); }
                 requeue(self);
                 break;
             };
             // Columns always become resident; one whose summary blocks alias
             // another block's table slots simply has no summaries.
-            let blocks = self.acquire_blocks(key, &mut work);
-            if !blocks {
-                self.block_conflicts += 1;
+            if !retry {
+                let blocks = self.acquire_blocks(key, &mut work);
+                if !blocks {
+                    self.block_conflicts += 1;
+                }
+                let slot = self.residents.insert(key, Resident { record, slot: 0, edit_block: None, blocks });
+                work.table_writes.push((slot, record));
             }
-            let slot = self.residents.insert(key, Resident { record, slot: 0, edit_block: None, blocks });
-            work.table_writes.push((slot, record));
+            self.initial_retries.remove(&key);
             self.publishing.insert(key, EditPublication {
                 record,
                 previous: None,
                 next: block,
                 evicted: false,
+                initial_bucket: Some(bucket),
             });
             work.jobs.push(Job {
                 key0: key as u32,
@@ -991,7 +1010,15 @@ impl Residency {
             } else {
                 // A failed replacement leaves the previous GPU column intact.
                 if let Some(block) = publication.next { self.edits.release(block); }
-                failed.push((key, status));
+                if let Some(bucket) = publication.initial_bucket {
+                    if status != 1 {
+                        self.initial_retries.insert(key);
+                        self.levels[unpack(key).1 as usize].pending.insert(key, bucket);
+                        self.stats.requeued += 1;
+                    }
+                } else {
+                    failed.push((key, status));
+                }
             }
         }
         self.requeue(failed);
@@ -1129,6 +1156,7 @@ mod tests {
         residency.residents.remove(blocked, &mut Vec::new());
         residency.publishing.insert(blocked, EditPublication {
             record: 0, previous: None, next: None, evicted: true,
+            initial_bucket: Some(0),
         });
         let (_, level, i, j) = unpack(blocked);
         let available = pack(key0(crate::grid::PLANE_FACE, level, i + 1), j as u32);
@@ -1643,8 +1671,57 @@ mod tests {
         let (_, mut r, key, _) = edit_fixture();
         r.publishing.insert(key, EditPublication {
             record: 0, previous: None, next: None, evicted: false,
+            initial_bucket: Some(0),
         });
         assert!(!r.pending_edits());
+        r.complete_jobs([(key, 0)]);
+        assert!(!r.pending_edits());
+    }
+
+    #[test]
+    fn initial_pool_retry_keeps_visibility_priority_and_summary_ownership() {
+        let (planet, mut r, key, eye) = edit_fixture();
+        r.evict(key, &mut FrameWork::default());
+        r.levels[0].pending.insert(key, BUCKETS - 1);
+        let first = r.plan(&planet, eye, 1.0, 1);
+        assert_eq!(first.job_keys, vec![key]);
+        let record = first.jobs[0].record;
+        let refs: Vec<_> = r.blocks.iter().map(|(key, block)| (*key, block.refs)).collect();
+        r.complete_jobs([(key, 3)]);
+        assert!(r.initial_retries.contains(&key));
+        assert!(r.urgent.is_empty());
+        assert!(!r.pending_edits(), "pool pressure is not an edit publication");
+        assert_eq!(r.levels[0].pending.len(), 1);
+        let retry = r.plan(&planet, eye, 1.0, 1);
+        assert_eq!(retry.job_keys, vec![key]);
+        assert_eq!(retry.jobs[0].record, record);
+        assert_eq!(retry.jobs[0].flags, 0);
+        assert!(retry.table_writes.is_empty(), "retry retains its table identity");
+        assert!(retry.block_inits.is_empty(), "retry must not reacquire summary references");
+        assert!(refs.iter().all(|(key, count)| r.blocks[key].refs == *count));
+        r.complete_jobs([(key, 0)]);
+        assert!(r.initial_retries.is_empty() && r.publishing.is_empty());
+        assert!(!r.pending_edits());
+    }
+
+    #[test]
+    fn urgent_retry_respects_cpu_deadline_and_preserves_edit_ownership() {
+        let (mut planet, mut r, key, eye) = edit_fixture();
+        std::sync::Arc::make_mut(&mut planet).apply(test_brush(0.2)).unwrap();
+        r.last_request.as_mut().unwrap().outer_radius = planet.outer_radius();
+        let first = r.plan(&planet, eye, 1.0, 1);
+        assert_eq!(first.job_keys, vec![key]);
+        r.complete_jobs([(key, 3)]);
+        assert!(!r.initial_retries.contains(&key));
+        assert!(r.urgent.contains(&key) && r.pending_edits());
+        r.set_cpu_budget(Some(std::time::Duration::ZERO));
+        let waiting = r.plan(&planet, eye, 1.0, 1);
+        assert!(waiting.jobs.is_empty());
+        assert!(r.urgent.contains(&key) && r.pending_edits());
+        r.set_cpu_budget(None);
+        let retry = r.plan(&planet, eye, 1.0, 1);
+        assert_eq!(retry.job_keys, vec![key]);
+        assert_eq!(retry.jobs[0].flags, 1);
         r.complete_jobs([(key, 0)]);
         assert!(!r.pending_edits());
     }

@@ -375,6 +375,9 @@ fn level_contains_solid(c: Cursor, record: u32, r: Ray, t: f32) -> bool {
         let fraction = column_relief_fraction(col, u32(c.i & 7), u32(c.j & 7));
         if fraction != 0u { return height_rel(r, t) <= relief_height(col, c.i, c.j, c.level, fraction); }
     }
+    if (col.info & INFO_HEIGHTFIELD) != 0u {
+        return c.k < column_top(col, u32(c.i & 7), u32(c.j & 7));
+    }
     if c.k < col.k_lo * 8 { return true; }
     let band = (c.k >> 3u) - col.k_lo;
     if band >= i32(band_count(col)) { return false; }
@@ -587,9 +590,13 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                     // The inner DDA can cross the requested endpoint before
                     // returning to the outer traversal range check.
                     if t > t_end { return make_hit(ST_MISS, t_end, cur, normal, NONE); }
-                    if brick_bit(s.y, u32(cur.i & 7), u32(cur.j & 7), u32(cur.k & 7)) {
-                        return make_hit(ST_HIT, t, cur, normal, record);
+                    var cell_solid = false;
+                    if (col.info & INFO_HEIGHTFIELD) != 0u {
+                        cell_solid = cur.k < column_top(col, u32(cur.i & 7), u32(cur.j & 7));
+                    } else {
+                        cell_solid = brick_bit(s.y, u32(cur.i & 7), u32(cur.j & 7), u32(cur.k & 7));
                     }
+                    if cell_solid { return make_hit(ST_HIT, t, cur, normal, record); }
                     let t_next = max(min(ta, min(tb, tr.x)), t);
                     if t_next >= 3.0e38 { return make_hit(ST_MISS, t, cur, normal, NONE); }
                     t = t_next;

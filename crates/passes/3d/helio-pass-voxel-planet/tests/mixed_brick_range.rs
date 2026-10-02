@@ -13,11 +13,15 @@ fn mixed_brick_hits_respect_requested_trace_range() {
     // Each ray starts in an air layer of a mixed brick, then crosses its
     // occupied bottom layer. Cover original L0, zero-fraction coarse tops,
     // and a topology-edited column whose Remove cut leaves that layer solid.
-    for (level, relief, topology) in [
-        (0u32, false, false),
-        (1, true, false),
-        (5, true, false),
-        (3, false, true),
+    let mut previous_bitmap: Option<Vec<u8>> = None;
+    for (level, relief, topology, compact) in [
+        (0u32, false, false, false),
+        (0, false, false, true),
+        (1, true, false, false),
+        (1, true, false, true),
+        (5, true, false, false),
+        (5, true, false, true),
+        (3, false, true, false),
     ] {
         let quantum = 0.1 * (1u32 << level) as f32;
         let expected = 100.0 - 9.0 * quantum;
@@ -80,10 +84,11 @@ fn mixed_brick_hits_respect_requested_trace_range() {
         let ci = (512 >> level) / 8;
         let info = 0x80000000u32
             | 1
-            | (1 << 9)
+            | if compact { 0 } else { 1 << 9 }
             | (7 << 22)
             | if relief { 0x10000000 } else { 0 }
-            | if topology { 0x08000000 } else { 0 };
+            | if topology { 0x08000000 } else { 0 }
+            | if compact { 0x02000000 } else { 0 };
         let mut record = vec![0u8; 32];
         ints(
             &mut record,
@@ -102,8 +107,15 @@ fn mixed_brick_hits_respect_requested_trace_range() {
         let mut pool = vec![0u32; 64];
         pool[..16].fill(if topology { 0x08080808 } else { 0x01010101 });
         let mixed_offset = if relief { 48 } else { 16 };
-        pool[mixed_offset] = u32::MAX;
-        pool[mixed_offset + 1] = u32::MAX;
+        if compact {
+            // The mixed-mask stays set, but its virtual brick pointer has no
+            // allocated payload. A mistaken bitmap read cannot reproduce the
+            // original occupied layer; compact consumers must use its top.
+            pool.truncate(mixed_offset);
+        } else {
+            pool[mixed_offset] = u32::MAX;
+            pool[mixed_offset + 1] = u32::MAX;
+        }
         let mut brush = vec![0u8; 32];
         ints(&mut brush, 0, &[1088, 1088, 209, 0, 64, 64, 0, 0]); // Remove box, coarse z=9..15.
         let edit_refs = if topology {
@@ -253,6 +265,14 @@ fn mixed_brick_hits_respect_requested_trace_range() {
             8,
             "wrong occupied layer"
         );
-        eprintln!("mixed range L{level} relief={relief} topology={topology}: clipped MISS, bounded exact HIT");
+        if compact {
+            assert_eq!(
+                data.as_slice(), previous_bitmap.as_ref().unwrap().as_slice(),
+                "L{level} compact storage changed exact hit/MISS records"
+            );
+        } else if !topology {
+            previous_bitmap = Some(data);
+        }
+        eprintln!("mixed range L{level} relief={relief} topology={topology} compact={compact}: clipped MISS, bounded exact HIT");
     }
 }
