@@ -183,6 +183,8 @@ impl PendingQueue {
 #[derive(Default)]
 struct Level {
     active: bool,
+    /// Latest worker demand, independent of partially applied older diffs.
+    wanted: Option<std::sync::Arc<FxHashSet<u64>>>,
     /// Window centre and angular radius of the last applied diff.
     center: DVec3,
     /// Ground radius of the applied window (metres).
@@ -516,12 +518,33 @@ impl Residency {
         })
     }
 
+    /// Columns in one aligned tier-1 block share every summary owner.
+    /// Cache only the last block: an intervening admission may claim a slot
+    /// that was free at an earlier check of another block.
+    fn blocks_conflict_cached(&self, key: u64, last: &mut Option<(u64, bool)>) -> bool {
+        let block = key & !(3u64 | (3u64 << 32));
+        if let Some((previous, conflict)) = *last {
+            if previous == block { return conflict; }
+        }
+        let conflict = self.blocks_conflict(key);
+        *last = Some((block, conflict));
+        conflict
+    }
+
     /// Reference every summary block of a column, or none when any tier's
     /// table slot belongs to another block (a window larger than the table).
+    #[cfg(test)]
     fn acquire_blocks(&mut self, key: u64, work: &mut FrameWork) -> bool {
         if self.blocks_conflict(key) {
             return false;
         }
+        self.reference_blocks(key, work);
+        true
+    }
+
+    /// Admission has checked ownership; no retirement occurs until the next
+    /// plan, so referencing this same block cannot introduce an alias.
+    fn reference_blocks(&mut self, key: u64, work: &mut FrameWork) {
         let (face, level, ci, cj) = unpack(key);
         for tier in 1..=BLOCK_TIERS {
             let (bi, bj) = (ci >> (2 * tier), cj >> (2 * tier));
@@ -540,7 +563,6 @@ impl Residency {
                 self.live_dirty = true;
             }
         }
-        true
     }
 
     fn release_blocks(&mut self, key: u64, work: &mut FrameWork) {
@@ -607,8 +629,11 @@ impl Residency {
         self.view_focus = focus.filter(|point| point.is_finite());
     }
 
-    /// Queue a window diff; [`Self::apply_queued`] applies it in order.
+    /// Publish latest demand before queueing bounded window operations.
     fn apply(&mut self, update: WindowUpdate) {
+        for (level, wanted) in update.wanted {
+            self.levels[level as usize].wanted = Some(wanted);
+        }
         for diff in update.levels {
             let level = diff.level as usize;
             // The window metadata changes at once; the level is marked as
@@ -635,29 +660,46 @@ impl Residency {
         None
     }
 
-    /// Apply one bounded round per level until done or out of time.
+    /// Retire oldest owners while admitting the newest incoming demand.
+    /// Latest membership makes out-of-order additions safe: an old removal
+    /// cannot evict a returned column, and obsolete additions cannot run.
     fn apply_queued(&mut self, work: &mut FrameWork, out_of_time: &impl Fn() -> bool) {
         const CHUNK: usize = 256;
         while let Some(level) = self.next_diff_level() {
             let mut queued = self.diffs[level].pop_front().unwrap();
+            let wanted = self.levels[level].wanted.clone();
             // Retiring a moving window must not consume every diff slice
             // before visible incoming columns reach the generation queue.
             // Keep the same operation bound, sharing active rounds equally.
-            let remove_chunk = if queued.diff.active { CHUNK / 2 } else { CHUNK };
+            let remove_chunk = if queued.diff.active || wanted.is_some() { CHUNK / 2 } else { CHUNK };
             let end = (queued.removed + remove_chunk).min(queued.diff.removes.len());
             for i in queued.removed..end {
                 let key = queued.diff.removes[i];
+                if wanted.as_ref().is_some_and(|keys| keys.contains(&key)) { continue; }
                 self.levels[level].pending.remove(key);
                 if self.residents.contains_key(key) {
                     self.evict(key, work);
                 }
             }
             queued.removed = end;
-            if !queued.diff.active && queued.removed == queued.diff.removes.len() && !queued.cleared {
+            if wanted.is_none() && !queued.diff.active && queued.removed == queued.diff.removes.len() && !queued.cleared {
                 self.levels[level].pending.clear();
                 queued.cleared = true;
             }
-            if queued.diff.active || queued.removed == queued.diff.removes.len() {
+            if let Some(wanted) = &wanted {
+                // A subsequent diff contains the frontier visible now. Do not
+                // make it wait for an earlier camera's complete window.
+                let newest = self.diffs[level].iter().rposition(|diff| diff.added < diff.diff.adds.len());
+                let incoming = if let Some(at) = newest { &mut self.diffs[level][at] } else { &mut queued };
+                let end = (incoming.added + CHUNK / 2).min(incoming.diff.adds.len());
+                for i in incoming.added..end {
+                    let (priority, key) = incoming.diff.adds[i];
+                    if wanted.contains(&key) && !self.residents.contains_key(key) {
+                        self.levels[level].pending.insert(key, PendingQueue::bucket(priority));
+                    }
+                }
+                incoming.added = end;
+            } else if queued.diff.active || queued.removed == queued.diff.removes.len() {
                 let end = (queued.added + if queued.diff.active { CHUNK / 2 } else { CHUNK }).min(queued.diff.adds.len());
                 for i in queued.added..end {
                     let (priority, key) = queued.diff.adds[i];
@@ -671,6 +713,12 @@ impl Residency {
                 self.catching_up[level] -= 1;
             } else {
                 self.diffs[level].push_front(queued);
+            }
+            // Newer additions may finish a diff before its FIFO turn.
+            while self.diffs[level].back().is_some_and(|diff|
+                diff.removed == diff.diff.removes.len() && diff.added == diff.diff.adds.len()) {
+                self.diffs[level].pop_back();
+                self.catching_up[level] -= 1;
             }
             if out_of_time() { return; }
         }
@@ -885,6 +933,7 @@ impl Residency {
         // resumes next frame.
         let mut steps = 0u32;
         let mut awaiting_publication = Vec::new();
+        let mut last_summary_check = None;
         while work.jobs.len() < budget {
             steps += 1;
             if steps % 64 == 0 && out_of_time() {
@@ -902,6 +951,9 @@ impl Residency {
             }
             let Some((_, index)) = best else { break };
             let (key, bucket) = self.levels[index].pending.pop().unwrap();
+            if self.levels[index].wanted.as_ref().is_some_and(|wanted| !wanted.contains(&key)) {
+                continue;
+            }
             let retry = self.initial_retries.contains(&key);
             if self.residents.contains_key(key) && !retry {
                 continue;
@@ -920,7 +972,10 @@ impl Residency {
             // Active diffs can now queue incoming columns before all outgoing
             // blocks retire. Wait for an alias owner instead of permanently
             // publishing a column without summaries during a large move.
-            if self.catching_up[index] > 0 && self.blocks_conflict(key) {
+            let conflict = if !retry || self.catching_up[index] > 0 {
+                self.blocks_conflict_cached(key, &mut last_summary_check)
+            } else { false };
+            if self.catching_up[index] > 0 && conflict {
                 awaiting_publication.push((index, key, bucket));
                 continue;
             }
@@ -937,7 +992,8 @@ impl Residency {
             // Columns always become resident; one whose summary blocks alias
             // another block's table slots simply has no summaries.
             if !retry {
-                let blocks = self.acquire_blocks(key, &mut work);
+                let blocks = !conflict;
+                if blocks { self.reference_blocks(key, &mut work); }
                 if !blocks {
                     self.block_conflicts += 1;
                 }
@@ -1113,6 +1169,54 @@ impl Residency {
 mod tests {
     use super::*;
     use crate::planet::PlanetRecipe;
+
+    #[test]
+    fn latest_frontier_bypasses_obsolete_diff_backlog_and_converges() {
+        let planet = Planet::new(PlanetRecipe { shape: crate::grid::Shape::Plane, ..Default::default() }).unwrap();
+        let mut r = Residency::new(*planet.grid(), Capacity { table_bits: 8, ..Default::default() });
+        let keys = |start, len| (start..start + len).map(|i| pack(key0(crate::grid::PLANE_FACE, 0, i), 0)).collect::<Vec<_>>();
+        let old = keys(1000, 1024);
+        let latest = keys(3000, 16);
+        for (serial, demand) in [(1, &old), (2, &latest)] {
+            r.apply(WindowUpdate { serial,
+                levels: vec![LevelDiff { level: 0, active: true,
+                    adds: demand.iter().map(|&key| (0.1, key)).collect(),
+                    removes: if serial == 2 { old.clone() } else { vec![] }, ..Default::default() }],
+                wanted: vec![(0, std::sync::Arc::new(demand.iter().copied().collect()))],
+                ..Default::default() });
+        }
+        let mut work = FrameWork::default();
+        r.apply_queued(&mut work, &|| true);
+        assert!(latest.iter().all(|key| r.levels[0].pending.at.contains_key(key)),
+            "new visible demand must reach the first bounded slice");
+        assert!(old.iter().all(|key| !r.levels[0].pending.at.contains_key(key)),
+            "obsolete additions must never enter generation");
+        assert!(r.catching_up[0] > 0, "partial retirement cannot claim complete coverage");
+        r.apply_queued(&mut work, &|| false);
+        assert_eq!(r.levels[0].pending.keys().copied().collect::<FxHashSet<_>>(), latest.into_iter().collect());
+        assert_eq!(r.catching_up[0], 0);
+    }
+
+    #[test]
+    fn returned_window_preserves_resident_and_pending_columns_during_old_retirement() {
+        let (_, mut r, resident, _) = edit_fixture();
+        let (_, level, i, j) = unpack(resident);
+        let pending = pack(key0(crate::grid::PLANE_FACE, level, i + 1), j as u32);
+        r.levels[level as usize].pending.insert(pending, 1);
+        let wanted = std::sync::Arc::new([resident, pending].into_iter().collect::<FxHashSet<_>>());
+        r.apply(WindowUpdate { serial: 1,
+            levels: vec![LevelDiff { level, active: false, removes: vec![resident, pending], ..Default::default() }],
+            wanted: vec![(level, Default::default())], ..Default::default() });
+        r.apply(WindowUpdate { serial: 2,
+            levels: vec![LevelDiff { level, active: true, adds: vec![(0.1, resident), (0.1, pending)], ..Default::default() }],
+            wanted: vec![(level, wanted)], ..Default::default() });
+        let mut work = FrameWork::default();
+        r.apply_queued(&mut work, &|| false);
+        assert!(r.residents.contains_key(resident), "old retirement cannot evict a returned resident");
+        assert!(r.levels[level as usize].pending.at.contains_key(&pending), "old inactive clear cannot erase current demand");
+        assert!(work.evictions.is_empty());
+        assert_eq!(r.catching_up[level as usize], 0);
+    }
 
     #[test]
     fn queued_column_moves_ahead_when_its_priority_changes() {
@@ -1389,6 +1493,72 @@ mod tests {
         assert_eq!(work.job_keys, vec![incoming]);
         assert!(residency.residents.get(incoming).unwrap().blocks,
             "early staging may not permanently publish a summaryless incoming column");
+    }
+
+    #[test]
+    fn summary_check_revalidates_interleaved_full_keys_and_resets_after_retirement() {
+        let (_, mut r, old, _) = edit_fixture();
+        r.evict(old, &mut FrameWork::default());
+        let (face, level, i, j) = unpack(old);
+        let a = pack(key0(face, level, i & !3), (j & !3) as u32);
+        let alias = pack(key0(face, level, (i & !3) + 512), (j & !3) as u32);
+        let mut last = None;
+        let mut work = FrameWork::default();
+        // First inspect a free owner, then let its toroidal alias claim it.
+        assert!(!r.blocks_conflict_cached(a, &mut last));
+        assert!(!r.blocks_conflict_cached(alias, &mut last));
+        r.reference_blocks(alias, &mut work);
+        assert!(r.blocks_conflict_cached(a, &mut last), "a cached free slot cannot survive an intervening alias admission");
+        // Clearing two low index bits must retain signed j, face and level.
+        let different_level = pack(key0(face, level + 1, i & !3), (j & !3) as u32);
+        assert!(!r.blocks_conflict_cached(different_level, &mut last));
+        assert!(r.blocks_conflict_cached(a, &mut last));
+        let negative = pack(key0(face, level + 1, i & !3), (-4i32) as u32);
+        let positive_alias = pack(key0(face, level + 1, i & !3), 508);
+        assert!(!r.blocks_conflict_cached(negative, &mut last));
+        r.reference_blocks(negative, &mut work);
+        assert!(r.blocks_conflict_cached(positive_alias, &mut last), "signed j and its positive toroidal alias must retain different identities");
+        r.release_blocks(negative, &mut work);
+        r.release_blocks(alias, &mut work);
+        // Each plan owns a new cache, after retirement has completed.
+        let mut next_plan = None;
+        assert!(!r.blocks_conflict_cached(a, &mut next_plan));
+        assert!(r.block_owner.is_empty() && r.blocks.is_empty());
+    }
+
+    #[test]
+    fn cached_block_admission_defers_aliases_without_duplicating_summary_refs() {
+        let (planet, mut r, old, eye) = edit_fixture();
+        r.evict(old, &mut FrameWork::default());
+        let (face, level, i, j) = unpack(old);
+        let key = |offset| pack(key0(face, level, (i & !3) + offset), (j & !3) as u32);
+        let a = key(0);
+        let alias = key(512);
+        let b = key(64);
+        queue_complete_block(&mut r.levels[level as usize].pending, a, 0);
+        queue_complete_block(&mut r.levels[level as usize].pending, alias, 1);
+        queue_complete_block(&mut r.levels[level as usize].pending, b, 2);
+        r.catching_up[level as usize] = 1;
+        let work = r.plan(&planet, eye, 1.0, 48);
+        assert_eq!(work.jobs.len(), 32);
+        assert_eq!(r.levels[level as usize].pending.len(), 16, "only the blocked owner must carry over");
+        assert!(work.job_keys.iter().all(|&key| r.residents.get(key).unwrap().blocks));
+        for (&owner, block) in &r.blocks {
+            let expected = work.job_keys.iter().filter(|&&key| {
+                let (face, level, i, j) = unpack(key);
+                owner == (level, face, owner.2, i >> (2 * owner.2), j >> (2 * owner.2))
+            }).count() as u32;
+            assert_eq!(block.refs, expected, "summary references must count admitted columns exactly");
+            assert_eq!(r.block_owner[&block.slot], owner);
+        }
+        r.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
+        for &key in &work.job_keys {
+            if block_identity(key) == block_identity(a) { r.evict(key, &mut FrameWork::default()); }
+        }
+        let next = r.plan(&planet, eye, 1.0, 16);
+        assert_eq!(next.jobs.len(), 16, "retired owners must become admissible in the next plan");
+        assert!(next.job_keys.iter().all(|&key| block_identity(key) == block_identity(alias)));
+        assert!(next.job_keys.iter().all(|&key| r.residents.get(key).unwrap().blocks));
     }
 
     fn block_identity(key: u64) -> (u8, u32, i32, i32) {

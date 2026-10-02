@@ -44,6 +44,9 @@ pub struct WindowUpdate {
     pub serial: u64,
     pub levels: Vec<LevelDiff>,
     pub planning_ms: f64,
+    /// Exact latest demand, shared with the planner without copying its keys.
+    /// Lets bounded admission bypass obsolete diffs during continuous motion.
+    pub wanted: Vec<(u32, std::sync::Arc<FxHashSet<u64>>)>,
 }
 
 #[derive(Default)]
@@ -51,7 +54,7 @@ struct LevelState {
     active: bool,
     center: DVec3,
     radius: f64,
-    wanted: FxHashSet<u64>,
+    wanted: std::sync::Arc<FxHashSet<u64>>,
     /// Last local terrain bound: where, over what ground radius, the bound,
     /// and the world's outer radius then (edits change it).
     bound: Option<(DVec3, f64, f64, f64)>,
@@ -417,8 +420,10 @@ impl WindowPlanner {
                         center: dir,
                         radius: 0.0,
                         adds: Vec::new(),
-                        removes: order_removes_by_blocks(state.wanted.drain().collect()),
+                        removes: order_removes_by_blocks(state.wanted.iter().copied().collect()),
                     });
+                    state.wanted = Default::default();
+                    update.wanted.push((level, state.wanted.clone()));
                     state.active = false;
                 }
                 continue;
@@ -452,7 +457,8 @@ impl WindowPlanner {
             let removes = order_removes_by_blocks(state.wanted.iter().filter(|k| !next.contains(k)).copied().collect());
             prioritize_incoming_blocks(grid, request, level, radius, &mut adds);
             let adds = order_adds_by_priority(adds);
-            state.wanted = next;
+            state.wanted = std::sync::Arc::new(next);
+            update.wanted.push((level, state.wanted.clone()));
             state.active = true;
             state.center = dir;
             state.radius = radius;
