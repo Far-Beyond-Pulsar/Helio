@@ -839,10 +839,15 @@ impl Residency {
     }
 
     fn refresh_visible_pending(&mut self, deadline: Option<std::time::Instant>) {
+        self.refresh_visible_pending_until(|| deadline.is_some_and(|at| std::time::Instant::now() >= at));
+    }
+
+    fn refresh_visible_pending_until(&mut self, mut out_of_time: impl FnMut() -> bool) {
         let rank_requests = self.visible_rank_source.is_none_or(|source| self.source_is_current(source, 8));
         if !rank_requests {
             self.visible_admission.clear();
             self.visible_rank_source = None;
+            self.visible_blocks.clear();
         }
         let mut promoted = Vec::new();
         let mut pending = Vec::new();
@@ -857,8 +862,16 @@ impl Residency {
             if blocks.len() == VISIBLE_BLOCKS { break; }
             if !blocks.contains(&key) { blocks.push(key); }
         }
-        for (index, key) in blocks.into_iter().enumerate() {
-            if deadline.is_some_and(|at| std::time::Instant::now() >= at) { break; }
+        for (index, &key) in blocks.iter().enumerate() {
+            if out_of_time() {
+                // Resume only captured requests, retaining their original
+                // age. Lease reinsertion is reconstructed on the next plan.
+                if index < requested_blocks {
+                    self.visible_blocks.extend_from_slice(&blocks[index..requested_blocks]);
+                    self.visible_source = source;
+                }
+                break;
+            }
             let Some((keys, count)) = self.visible_columns(key) else { continue };
             let level = unpack(key).1 as usize;
             let ordinary = self.levels[level].active && keys[..count].iter().all(|&key| self.current_wanted(key));
@@ -2036,6 +2049,77 @@ mod tests {
         r.refresh_visible_pending(None);
         let (keys, count) = r.visible_columns(key).unwrap();
         keys[..count].to_vec()
+    }
+
+    #[test]
+    fn visible_refresh_deadline_resumes_requested_tail_with_original_source() {
+        let (_, mut r, _, at) = visible_bridge_fixture();
+        let old_lease = lease_block(&mut r, 1008, at);
+        let blocks = [1000, 1004].map(|i| pack(key0(crate::grid::PLANE_FACE, 0, i), 1000));
+        r.prioritize_visible_blocks_from(blocks.map(|key| (key as u32, (key >> 32) as u32)), 10, 7, at);
+        let mut checks = 0;
+        r.refresh_visible_pending_until(|| { checks += 1; checks > 1 });
+        let (first, count) = r.visible_columns(blocks[0]).unwrap();
+        assert_eq!(count, 16);
+        assert!(first.iter().all(|key| r.levels[0].pending.at.contains_key(key)));
+        assert_eq!(r.visible_admission.len(), 16, "the processed block's entire rank must commit together");
+        assert_eq!(r.visible_blocks, vec![blocks[1]], "retain requests, not appended lease reinsertion");
+        let source = r.visible_source.unwrap();
+        assert_eq!((source.frame, source.view, source.at), (10, 7, at));
+        assert!(old_lease.iter().all(|key| r.levels[0].pending.at.contains_key(key)));
+        r.set_visible_view(11, 7, at + std::time::Duration::from_millis(1));
+        r.refresh_visible_pending_until(|| false);
+        let (second, count) = r.visible_columns(blocks[1]).unwrap();
+        assert_eq!(count, 16);
+        assert!(second.iter().all(|key| r.levels[0].pending.at.contains_key(key)));
+        assert_eq!(r.visible_admission.len(), 32);
+        let lease = &r.visible_leases[&blocks[1]];
+        assert_eq!((lease.source.frame, lease.source.view, lease.source.at), (10, 7, at),
+            "resumption cannot refresh the captured source or extend its lease");
+        assert!(r.visible_blocks.is_empty() && r.visible_source.is_none());
+    }
+
+    #[test]
+    fn visible_refresh_deferred_source_expiry_discards_requests() {
+        for cause in 0..3 {
+            let (_, mut r, _, at) = visible_bridge_fixture();
+            let block = pack(key0(crate::grid::PLANE_FACE, 0, 1000), 1000);
+            r.prioritize_visible_blocks_from([(block as u32, (block >> 32) as u32)], 10, 7, at);
+            r.refresh_visible_pending_until(|| true);
+            assert_eq!(r.visible_blocks, vec![block]);
+            match cause {
+                0 => r.set_visible_view(19, 7, at),
+                1 => r.set_visible_view(11, 8, at),
+                _ => r.set_visible_view(11, 7, at + VISIBLE_LEASE_TIME + std::time::Duration::from_nanos(1)),
+            }
+            r.refresh_visible_pending_until(|| false);
+            assert!(r.visible_blocks.is_empty() && r.visible_source.is_none());
+            assert!(r.visible_admission.is_empty() && r.visible_rank_source.is_none());
+            assert!(r.visible_leases.is_empty() && r.levels[0].pending.is_empty(),
+                "expired captured requests cannot create demand or leases");
+        }
+    }
+
+    #[test]
+    fn visible_refresh_fresh_batch_replaces_unprocessed_tail() {
+        let (_, mut r, _, at) = visible_bridge_fixture();
+        let block = |i| pack(key0(crate::grid::PLANE_FACE, 0, i), 1000);
+        let stale = block(1000);
+        r.prioritize_visible_blocks_from([(stale as u32, (stale >> 32) as u32)], 10, 7, at);
+        r.refresh_visible_pending_until(|| true);
+        let fresh = block(1004);
+        let captured = at + std::time::Duration::from_millis(1);
+        r.set_visible_view(11, 7, captured);
+        r.prioritize_visible_blocks_from([(fresh as u32, (fresh >> 32) as u32)], 11, 7, captured);
+        assert_eq!(r.visible_blocks, vec![fresh]);
+        r.refresh_visible_pending_until(|| false);
+        let (fresh_keys, count) = r.visible_columns(fresh).unwrap();
+        assert_eq!(count, 16);
+        assert!(fresh_keys.iter().all(|key| r.levels[0].pending.at.contains_key(key)));
+        assert!(!r.visible_leases.contains_key(&stale));
+        let lease = &r.visible_leases[&fresh];
+        assert_eq!((lease.source.frame, lease.source.view, lease.source.at), (11, 7, captured));
+        assert_eq!(r.visible_admission.len(), 16);
     }
 
     #[test]
