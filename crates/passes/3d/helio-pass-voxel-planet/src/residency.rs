@@ -262,6 +262,22 @@ fn pop_pending(levels: &mut [Level], top_level: u32,
     Some((index, key, bucket))
 }
 
+/// A full tier-1 block references its sixteen distinct resident columns.
+/// Snapshot additions for that exact run cannot queue work unless a failed
+/// initial publication is retrying. Partial or reordered runs use the usual
+/// per-column gates, and publication in flight remains owned by its record.
+fn resident_snapshot_run(adds: &[(f32, u64)], retrying: bool,
+    refs: impl FnOnce((u32, u8, u32, i32, i32)) -> Option<u32>) -> usize {
+    if retrying || adds.len() < 16 { return 0; }
+    let (face, level, i, j) = unpack(adds[0].1);
+    if i & 3 != 0 || j & 3 != 0 { return 0; }
+    for (index, &(_, key)) in adds[..16].iter().enumerate() {
+        let expected = pack(key0(face, level, i + (index % 4) as i32), (j + (index / 4) as i32) as u32);
+        if key != expected { return 0; }
+    }
+    if refs((level, face, 1, i >> 2, j >> 2)) == Some(16) { 16 } else { 0 }
+}
+
 enum Planner {
     Inline(WindowPlanner),
     Worker(WindowWorker),
@@ -1043,11 +1059,17 @@ impl Residency {
                 let end = (queued.added + 128).min(queued.diff.adds.len());
                 let state = &mut self.levels[level];
                 let wanted = state.wanted.as_ref().unwrap();
-                for &(priority, key) in &queued.diff.adds[queued.added..end] {
+                let mut at = queued.added;
+                while at < end {
+                    let skip = resident_snapshot_run(&queued.diff.adds[at..end], !self.initial_retries.is_empty(),
+                        |identity| self.blocks.get(&identity).map(|block| block.refs));
+                    if skip != 0 { at += skip; continue; }
+                    let (priority, key) = queued.diff.adds[at];
                     if wanted.contains(&key) && !self.publishing.contains_key(&key)
                         && (!self.residents.contains_key(key) || self.initial_retries.contains(&key)) {
                         state.pending.insert(key, PendingQueue::bucket(priority));
                     }
+                    at += 1;
                 }
                 self.queued_delta_ops -= end - queued.added;
                 queued.added = end;
@@ -1605,6 +1627,88 @@ impl Residency {
 mod tests {
     use super::*;
     use crate::planet::PlanetRecipe;
+
+    #[test]
+    fn resident_snapshot_run_requires_exact_complete_owner() {
+        let adds: Vec<_> = (0..16).map(|member| (0.1, pack(key0(2, 3, 8 + member % 4), (12 + member / 4) as u32))).collect();
+        let lookups = std::cell::Cell::new(0);
+        assert_eq!(resident_snapshot_run(&adds, false, |identity| {
+            assert_eq!(identity, (3, 2, 1, 2, 3));
+            lookups.set(lookups.get() + 1);
+            Some(16)
+        }), 16);
+        assert_eq!(lookups.get(), 1, "a complete resident run needs one summary lookup");
+        for refs in [None, Some(15), Some(17)] {
+            assert_eq!(resident_snapshot_run(&adds, false, |_| refs), 0);
+        }
+        assert_eq!(resident_snapshot_run(&adds, false, |identity|
+            (identity == (3, 2, 1, 130, 3)).then_some(16)), 0,
+            "a toroidal alias is not the exact summary owner");
+    }
+
+    #[test]
+    fn resident_snapshot_run_preserves_retries_partial_and_reordered_demand() {
+        let adds: Vec<_> = (0..16).map(|member| (0.1, pack(key0(2, 3, 8 + member % 4), (12 + member / 4) as u32))).collect();
+        let never_lookup = |_| -> Option<u32> { panic!("unproven runs must use per-column gates") };
+        assert_eq!(resident_snapshot_run(&adds, true, never_lookup), 0);
+        assert_eq!(resident_snapshot_run(&adds[..15], false, never_lookup), 0);
+        let mut changed = adds.clone();
+        changed.swap(6, 7);
+        assert_eq!(resident_snapshot_run(&changed, false, never_lookup), 0);
+        changed = adds.clone();
+        changed[6] = changed[5];
+        assert_eq!(resident_snapshot_run(&changed, false, never_lookup), 0);
+        changed = adds.clone();
+        changed[15].1 = pack(key0(2, 3, 12), 15);
+        assert_eq!(resident_snapshot_run(&changed, false, never_lookup), 0);
+        changed = adds.clone();
+        changed.rotate_left(1);
+        assert_eq!(resident_snapshot_run(&changed, false, never_lookup), 0);
+    }
+
+    #[test]
+    fn resident_snapshot_skip_preserves_publication_retirement_and_deadline() {
+        let planet = Planet::new(PlanetRecipe { shape: crate::grid::Shape::Plane, ..Default::default() }).unwrap();
+        let mut r = Residency::new(*planet.grid(), Capacity { table_bits: 8, ..Default::default() });
+        let face = crate::grid::PLANE_FACE;
+        let run = |i0| (12..16).flat_map(move |j| (i0..i0 + 4).map(move |i|
+            (0.1, pack(key0(face, 0, i), j as u32)))).collect::<Vec<_>>();
+        let resident = run(8);
+        let missing = run(12);
+        let mut work = FrameWork::default();
+        for (record, &(_, key)) in resident.iter().enumerate() {
+            assert!(r.acquire_blocks(key, &mut work));
+            r.residents.insert(key, Resident { record: record as u32, slot: 0, edit_block: None, blocks: true });
+            r.publishing.insert(key, EditPublication { record: record as u32,
+                previous: None, next: None, evicted: false, initial_bucket: Some(6) });
+        }
+        let obsolete = pack(key0(face, 0, 20), 20);
+        assert!(r.acquire_blocks(obsolete, &mut work));
+        r.residents.insert(obsolete, Resident { record: 16, slot: 0, edit_block: None, blocks: true });
+        let adds: Vec<_> = resident.iter().chain(&missing).copied().collect();
+        let update = |serial| WindowUpdate { serial, snapshot: true,
+            wanted: vec![(0, std::sync::Arc::new(adds.iter().map(|&(_, key)| key).collect()))],
+            levels: vec![LevelDiff { level: 0, active: true, adds: adds.clone(), ..Default::default() }],
+            ..Default::default() };
+        r.apply(update(1));
+        r.apply_snapshot(&mut work, &|| true);
+        assert_eq!(r.diffs[0][0].added, 0, "an expired slice cannot consume a resident run");
+        r.apply_snapshot(&mut work, &|| false);
+        assert_eq!(r.levels[0].pending.keys().copied().collect::<FxHashSet<_>>(),
+            missing.iter().map(|&(_, key)| key).collect());
+        assert_eq!(r.blocks[&(0, face, 1, 2, 3)].refs, 16);
+        assert!(resident.iter().all(|&(_, key)| r.publishing.contains_key(&key)));
+        assert!(!r.residents.contains_key(obsolete) && work.evictions.contains(&16));
+        assert!(r.diffs[0].is_empty() && r.catching_up[0] == 0 && r.queued_delta_ops == 0);
+        // A failed initial publication retains its summary but must requeue.
+        let retry = resident[6].1;
+        r.publishing.remove(&retry);
+        r.initial_retries.insert(retry);
+        r.apply(update(2));
+        r.apply_snapshot(&mut work, &|| false);
+        assert!(r.levels[0].pending.at.contains_key(&retry));
+        assert_eq!(r.levels[0].pending.len(), missing.len() + 1);
+    }
 
     #[test]
     fn cached_pending_selection_matches_full_scan_across_plan_boundaries() {
