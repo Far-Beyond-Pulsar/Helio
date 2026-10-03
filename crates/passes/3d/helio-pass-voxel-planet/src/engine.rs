@@ -220,6 +220,11 @@ pub struct PlanetStats {
     pub queued_delta_bytes: usize,
     pub queued_delta_ops: usize,
     pub wanted_key_capacity: usize,
+    /// Last CPU plan's selected columns and guarded admission outcomes.
+    pub admission_attempts: usize,
+    pub admission_alias_deferred: usize,
+    pub admission_publication_deferred: usize,
+    pub admission_batched_columns: usize,
     pub active_levels: u32,
     pub finest_level: u32,
     pub plan_cpu_ms: f64,
@@ -1735,6 +1740,10 @@ impl PlanetRenderer {
         self.stats.queued_delta_bytes = rs.queued_delta_bytes;
         self.stats.queued_delta_ops = rs.queued_delta_ops;
         self.stats.wanted_key_capacity = rs.wanted_key_capacity;
+        self.stats.admission_attempts = rs.admission_attempts;
+        self.stats.admission_alias_deferred = rs.admission_alias_deferred;
+        self.stats.admission_publication_deferred = rs.admission_publication_deferred;
+        self.stats.admission_batched_columns = rs.admission_batched_columns;
         self.stats.jobs = rs.jobs;
         self.stats.evictions = rs.evictions;
         self.stats.active_levels = rs.active_levels;

@@ -353,6 +353,11 @@ pub struct Stats {
     pub queued_delta_ops: usize,
     /// Capacity of latest shared membership sets, in keys.
     pub wanted_key_capacity: usize,
+    /// Last plan's selected columns, including guarded deferrals.
+    pub admission_attempts: usize,
+    pub admission_alias_deferred: usize,
+    pub admission_publication_deferred: usize,
+    pub admission_batched_columns: usize,
 }
 
 pub struct Residency {
@@ -678,18 +683,23 @@ impl Residency {
     /// Admission has checked ownership; no retirement occurs until the next
     /// plan, so referencing this same block cannot introduce an alias.
     fn reference_blocks(&mut self, key: u64, work: &mut FrameWork) {
+        self.reference_blocks_count(key, 1, work);
+    }
+
+    /// An aligned tier-1 block shares all three summary identities.
+    fn reference_blocks_count(&mut self, key: u64, count: u32, work: &mut FrameWork) {
         let (face, level, ci, cj) = unpack(key);
         for tier in 1..=BLOCK_TIERS {
             let (bi, bj) = (ci >> (2 * tier), cj >> (2 * tier));
             let bkey = (level, face, tier, bi, bj);
             if let Some(b) = self.blocks.get_mut(&bkey) {
-                b.refs += 1;
+                b.refs += count;
                 continue;
             }
             let slot = block_slot(level, face, tier, bi, bj);
             self.block_owner.insert(slot, bkey);
             work.block_inits.push((slot, bi, bj));
-            self.blocks.insert(bkey, Block { slot, refs: 1 });
+            self.blocks.insert(bkey, Block { slot, refs: count });
             if tier == 1 {
                 self.live_index.insert(slot, self.live_tier1.len());
                 self.live_tier1.push(slot);
@@ -1271,6 +1281,62 @@ impl Residency {
         }
     }
 
+    /// Admit only a complete, unedited block already ranked by visible feedback.
+    fn admit_visible_block(&mut self, planet: &Planet, index: usize, first: u64, bucket: usize,
+        budget: usize, deadline: Option<std::time::Instant>, work: &mut FrameWork) -> bool {
+        let expired = || deadline.is_some_and(|at| std::time::Instant::now() >= at);
+        // Only intact ranked blocks: never regroup partial work, overtake
+        // global coverage, invent lease demand, or batch an edit publication.
+        if expired() || !planet.edits().is_empty() || budget.saturating_sub(work.jobs.len()) < 16
+            || index == (self.grid.levels() - 1) as usize
+            || !self.levels[(self.grid.levels() - 1) as usize].pending.is_empty() {
+            return false;
+        }
+        let Some((keys, 16)) = self.visible_columns(first) else { return false };
+        if unpack(first).1 as usize != index || self.visible_admission.len() < 15
+            || !self.visible_admission.iter().take(15).zip(&keys[1..])
+                .all(|(&(level, key), &expected)| level == index && key == expected) {
+            return false;
+        }
+        let available = self.free_records.len()
+            + self.capacity.records.saturating_sub(self.next_record) as usize;
+        let table_limit = (1usize << self.capacity.table_bits) - 1;
+        if available < 16 || self.residents.len().saturating_add(16) > table_limit {
+            return false;
+        }
+        if self.blocks_conflict(first) { return false; }
+        for (offset, &key) in keys.iter().enumerate() {
+            if !self.current_wanted(key) || self.residents.contains_key(key)
+                || self.initial_retries.contains(&key) || self.publishing.contains_key(&key)
+                || (offset != 0 && !self.levels[index].pending.at.contains_key(&key)) {
+                return false;
+            }
+        }
+        if expired() { return false; }
+        // All fallible guards ran before mutation. The preflight reserved
+        // sixteen individual record identities; shared refs change only once.
+        self.reference_blocks_count(first, 16, work);
+        for (offset, &key) in keys.iter().enumerate() {
+            let column_bucket = if offset == 0 { bucket } else {
+                self.visible_admission.pop_front();
+                let bucket = self.levels[index].pending.at[&key].0 as usize;
+                self.levels[index].pending.remove(key);
+                bucket
+            };
+            let record = self.alloc_record().expect("complete block record preflight");
+            let slot = self.residents.insert(key, Resident { record, slot: 0, edit_block: None, blocks: true });
+            work.table_writes.push((slot, record));
+            self.publishing.insert(key, EditPublication {
+                record, previous: None, next: None, evicted: false, initial_bucket: Some(column_bucket),
+            });
+            work.jobs.push(Job {
+                key0: key as u32, key1: (key >> 32) as u32, record, edits: 0, flags: 0, pad: [0; 3],
+            });
+            work.job_keys.push(key);
+        }
+        true
+    }
+
     /// Plan one frame. `lod0` is the level-0 distance, `budget` the maximum
     /// number of column jobs.
     pub fn plan(&mut self, planet: &std::sync::Arc<Planet>, eye: DVec3, lod0: f64, budget: usize) -> FrameWork {
@@ -1395,6 +1461,11 @@ impl Residency {
         let mut last_summary_check = None;
         let mut pending_selection = None;
         let admission_deadline = budget_time.map(|budget| started + budget);
+        let mut admission_attempts = 0;
+        let mut alias_deferred = 0;
+        let mut publication_deferred = 0;
+        let mut batched_columns = 0;
+        let mut batch_attempts = 0;
         while work.jobs.len() < budget {
             steps += 1;
             if (steps == 1 || steps % 64 == 0) && out_of_time() {
@@ -1402,6 +1473,25 @@ impl Residency {
             }
             let Some((index, key, bucket)) = pop_pending(&mut self.levels, top_level,
                 &mut self.visible_admission, &mut pending_selection, admission_deadline) else { break };
+            admission_attempts += 1;
+            if batch_attempts < VISIBLE_BLOCKS && index != top_level as usize
+                && key & (3u64 | (3u64 << 32)) == 0
+                && self.visible_admission.front().is_some_and(|&(level, next)|
+                    level == index && next & !(3u64 | (3u64 << 32)) == key) {
+                batch_attempts += 1;
+                if self.admit_visible_block(planet, index, key, bucket, budget, admission_deadline, &mut work) {
+                    admission_attempts += 15;
+                    batched_columns += 16;
+                    last_summary_check = None;
+                    if out_of_time() { break; }
+                    continue;
+                }
+                if out_of_time() {
+                    self.levels[index].pending.insert(key, bucket);
+                    self.visible_admission.push_front((index, key));
+                    break;
+                }
+            }
             let transient = self.transient_wanted(key);
             let leased = self.visible_leases.contains_key(&(key & !(3u64 | (3u64 << 32))));
             if (self.levels[index].wanted.as_ref().is_some_and(|wanted| !wanted.contains(&key))
@@ -1418,6 +1508,7 @@ impl Residency {
             // A retired key may still have a publication result in flight.
             // Do not let that result acknowledge a different incarnation.
             if self.publishing.contains_key(&key) {
+                publication_deferred += 1;
                 // Keep this incarnation queued, but let unrelated columns
                 // use the remaining budget while its GPU result is in flight.
                 awaiting_publication.push((index, key, bucket));
@@ -1430,6 +1521,7 @@ impl Residency {
                 self.blocks_conflict_cached(key, &mut last_summary_check)
             } else { false };
             if (self.catching_up[index] > 0 || transient) && conflict {
+                alias_deferred += 1;
                 awaiting_publication.push((index, key, bucket));
                 continue;
             }
@@ -1479,7 +1571,7 @@ impl Residency {
         let trace_ms: Option<f64> = std::env::var("HELIO_VOXEL_PLAN_TRACE").ok().map(|v| v.parse().unwrap_or(10.0));
         if trace_ms.is_some_and(|ms| started.elapsed().as_secs_f64() * 1e3 > ms) {
             eprintln!(
-                "PLAN_TRACE edits {:.2} drain {:.2} apply {:.2} admit {:.2} ms jobs {} evictions {} queued_diffs {} steps {steps} queued_bytes {} queued_ops {} wanted_capacity {}",
+                "PLAN_TRACE edits {:.2} drain {:.2} apply {:.2} admit {:.2} ms jobs {} evictions {} queued_diffs {} steps {steps} queued_bytes {} queued_ops {} wanted_capacity {} admission_attempts {admission_attempts} alias_deferred {alias_deferred} publication_deferred {publication_deferred} batched_columns {batched_columns}",
                 t_edits.as_secs_f64() * 1e3,
                 (t_drain - t_edits).as_secs_f64() * 1e3,
                 (t_apply - t_drain).as_secs_f64() * 1e3,
@@ -1504,6 +1596,10 @@ impl Residency {
         stats.queued_delta_bytes = self.queued_delta_bytes;
         stats.queued_delta_ops = self.queued_delta_ops;
         stats.wanted_key_capacity = self.levels.iter().filter_map(|level| level.wanted.as_ref()).map(|wanted| wanted.capacity()).sum();
+        stats.admission_attempts = admission_attempts;
+        stats.admission_alias_deferred = alias_deferred;
+        stats.admission_publication_deferred = publication_deferred;
+        stats.admission_batched_columns = batched_columns;
         self.stats = stats;
         work
     }
@@ -2138,6 +2234,148 @@ mod tests {
         r.levels[0].active = true;
         for &key in near.iter().chain(&far) { r.levels[0].pending.insert(key, 0); }
         (planet, r, eye, near, far)
+    }
+
+    fn batch_admission_fixture() -> (std::sync::Arc<Planet>, Residency, Vec<u64>, Vec<u64>) {
+        let (planet, mut r, _, near, far) = visible_order_fixture();
+        r.levels[0].pending.remove(near[0]); // pop_pending has selected the first key.
+        r.visible_admission.extend(near[1..].iter().chain(&far).map(|&key| (0, key)));
+        (planet, r, near, far)
+    }
+
+    #[test]
+    fn complete_visible_batch_preserves_individual_publications_and_reference_release() {
+        let (planet, mut r, near, far) = batch_admission_fixture();
+        let mut work = FrameWork::default();
+        assert!(r.admit_visible_block(&planet, 0, near[0], 0, 16, None, &mut work));
+        assert_eq!(work.job_keys, near);
+        assert_eq!(r.visible_admission.iter().map(|&(_, key)| key).collect::<Vec<_>>(), far);
+        assert_eq!(work.jobs.iter().map(|job| job.record).collect::<FxHashSet<_>>().len(), 16);
+        assert_eq!(work.table_writes.len(), 16);
+        assert_eq!(r.blocks.len(), 3);
+        assert!(r.blocks.values().all(|block| block.refs == 16));
+        assert!(work.jobs.iter().all(|job| job.edits == 0 && job.flags == 0));
+        table_is_exact(&r);
+        // One failed GPU publication retries its own record without acquiring
+        // references again; successful columns remain independently resident.
+        let record = r.residents.get(near[0]).unwrap().record;
+        r.complete_jobs(near.iter().enumerate().map(|(i, &key)| (key, if i == 0 { 3 } else { 0 })));
+        assert_eq!(r.initial_retries.iter().copied().collect::<Vec<_>>(), vec![near[0]]);
+        assert_eq!(r.residents.get(near[0]).unwrap().record, record);
+        assert!(r.blocks.values().all(|block| block.refs == 16));
+        for &key in &near { r.evict(key, &mut FrameWork::default()); }
+        assert!(r.blocks.is_empty() && r.block_owner.is_empty() && r.live_tier1.is_empty());
+        assert_eq!(r.delayed_records.len(), 17); // includes the original fixture's evicted record.
+        table_is_exact(&r);
+    }
+
+    #[test]
+    fn complete_visible_batch_rejects_every_partial_or_owned_case_without_mutation() {
+        for case in 0..13 {
+            let (mut planet, mut r, near, _) = batch_admission_fixture();
+            let mut budget = 16;
+            let mut deadline = None;
+            match case {
+                0 => budget = 15,
+                1 => deadline = Some(std::time::Instant::now()),
+                2 => { std::sync::Arc::make_mut(&mut planet).apply(test_brush(0.2)).unwrap(); }
+                3 => r.capacity.records = 15,
+                4 => { r.levels[0].pending.remove(near[7]); }
+                5 => { r.visible_admission.remove(7); }
+                6 => { r.residents.insert(near[7], Resident { record: 1, ..Default::default() }); }
+                7 => { r.initial_retries.insert(near[7]); }
+                8 => {
+                    r.publishing.insert(near[7], EditPublication {
+                        record: 1, previous: None, next: None, evicted: false, initial_bucket: Some(0),
+                    });
+                }
+                9 => { std::sync::Arc::make_mut(r.levels[0].wanted.as_mut().unwrap()).remove(&near[7]); }
+                10 => {
+                    let (face, level, i, j) = unpack(near[0]);
+                    let slot = block_slot(level, face, 3, i >> 6, j >> 6);
+                    r.block_owner.insert(slot, (level, face, 3, (i >> 6) + 8, j >> 6));
+                    assert!(r.blocks_conflict(near[0]));
+                }
+                11 => r.visible_admission[0].0 = 1,
+                12 => r.visible_admission.swap(0, 1),
+                _ => unreachable!(),
+            }
+            let before = (r.residents.len(), r.publishing.len(), r.next_record,
+                r.free_records.clone(), r.visible_admission.clone(), r.levels[0].pending.len(), r.block_owner.clone());
+            let mut work = FrameWork::default();
+            assert!(!r.admit_visible_block(&planet, 0, near[0], 0, budget, deadline, &mut work), "case {case}");
+            assert!(work.jobs.is_empty() && work.job_keys.is_empty() && work.table_writes.is_empty() && work.block_inits.is_empty());
+            assert_eq!(before, (r.residents.len(), r.publishing.len(), r.next_record,
+                r.free_records.clone(), r.visible_admission.clone(), r.levels[0].pending.len(), r.block_owner.clone()), "case {case}");
+            assert!(r.blocks.is_empty());
+        }
+    }
+
+    #[test]
+    fn complete_visible_batch_cannot_overtake_global_coverage_or_admit_lease_only_demand() {
+        let (planet, mut r, near, _) = batch_admission_fixture();
+        let mut work = FrameWork::default();
+        let top = r.grid.levels() - 1;
+        let global = pack(key0(0, top, 0), 0);
+        r.levels[top as usize].pending.insert(global, 0);
+        assert!(!r.admit_visible_block(&planet, 0, near[0], 0, 16, None, &mut work));
+        r.levels[top as usize].pending.remove(global);
+        let now = std::time::Instant::now();
+        r.set_visible_view(10, 0, now);
+        r.visible_leases.insert(near[0], VisibleLease {
+            source: VisibleStamp { frame: 10, view: 0, at: now }, serial: r.applied + 1, retiring: false, retired: 0,
+        });
+        std::sync::Arc::make_mut(r.levels[0].wanted.as_mut().unwrap()).remove(&near[7]);
+        assert!(r.transient_wanted(near[7]));
+        assert!(!r.admit_visible_block(&planet, 0, near[0], 0, 16, None, &mut work));
+        assert!(work.jobs.is_empty() && r.blocks.is_empty());
+    }
+
+    #[test]
+    fn complete_visible_batch_accumulates_existing_parent_refs_without_reinitializing_them() {
+        let (planet, mut r, near, _) = batch_admission_fixture();
+        let mut work = FrameWork::default();
+        assert!(r.admit_visible_block(&planet, 0, near[0], 0, 32, None, &mut work));
+        let second = r.visible_columns(near[0] + 4).unwrap().0;
+        std::sync::Arc::make_mut(r.levels[0].wanted.as_mut().unwrap()).extend(second);
+        r.visible_admission.clear();
+        for &key in &second[1..] {
+            r.levels[0].pending.insert(key, 0);
+            r.visible_admission.push_back((0, key));
+        }
+        assert!(r.admit_visible_block(&planet, 0, second[0], 0, 32, None, &mut work));
+        assert_eq!(work.block_inits.len(), 4, "second tier-1 block shares both existing parents");
+        for (&owner, block) in &r.blocks {
+            let expected = work.job_keys.iter().filter(|&&key| {
+                let (face, level, i, j) = unpack(key);
+                owner == (level, face, owner.2, i >> (2 * owner.2), j >> (2 * owner.2))
+            }).count() as u32;
+            assert_eq!(block.refs, expected);
+            assert_eq!(r.block_owner[&block.slot], owner);
+        }
+        r.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
+        for &key in &near { r.evict(key, &mut FrameWork::default()); }
+        assert!(r.blocks.values().all(|block| block.refs == 16));
+        assert!(second.iter().all(|&key| r.residents.get(key).unwrap().blocks));
+        table_is_exact(&r);
+    }
+
+    #[test]
+    fn complete_visible_batch_plan_uses_existing_rank_and_reports_last_plan_counters() {
+        let (planet, mut r, eye, near, far) = visible_order_fixture();
+        r.prioritize_visible_blocks([near[0], far[0]].map(|key| (key as u32, (key >> 32) as u32)));
+        let work = r.plan(&planet, eye, 1.0, 16);
+        assert_eq!(work.job_keys, near);
+        assert_eq!(r.stats.admission_batched_columns, 16);
+        assert_eq!(r.stats.admission_attempts, 16);
+        assert_eq!(r.stats.admission_alias_deferred, 0);
+        assert_eq!(r.stats.admission_publication_deferred, 0);
+        assert!(far.iter().all(|&key| !r.residents.contains_key(key)));
+        r.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
+        r.set_cpu_budget(Some(std::time::Duration::ZERO));
+        assert!(r.plan(&planet, eye, 1.0, 16).jobs.is_empty());
+        assert_eq!(r.stats.admission_attempts, 0);
+        assert_eq!(r.stats.admission_batched_columns, 0);
     }
 
     #[test]
