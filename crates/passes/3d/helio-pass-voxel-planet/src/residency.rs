@@ -1019,8 +1019,12 @@ impl Residency {
     /// through a persistent table cursor, never millions of historical keys.
     fn apply_snapshot(&mut self, work: &mut FrameWork, out_of_time: &impl Fn() -> bool) {
         while self.diffs.iter().any(|diffs| !diffs.is_empty()) && !out_of_time() {
-            for _ in 0..128 {
-                if self.retire_obsolete_owner_step(work) { continue; }
+            for step in 0..128 {
+                // Protected alias owners can be requeued after every slice.
+                // Reserve half the same bounded work for the normal cursor
+                // until its serial completes, then let owners use all of it.
+                if (step < 64 || self.retire_finished_serial >= self.applied)
+                    && self.retire_obsolete_owner_step(work) { continue; }
                 // Admission only inserts current demand. Once this serial's
                 // pass is complete, remaining adds need no repeated scan.
                 // Lease expiry retires separately, and aliases stay above.
@@ -2001,6 +2005,69 @@ mod tests {
         assert!(!r.residents.contains_key(returned));
         assert!(!r.blocks_conflict(current[0]));
         assert_eq!(r.catching_up[0], 0);
+    }
+
+    #[test]
+    fn protected_alias_requeues_cannot_starve_bounded_snapshot_retirement() {
+        let (planet, _, _, _) = edit_fixture();
+        let mut r = Residency::new(*planet.grid(), Capacity { table_bits: 14, ..Default::default() });
+        let face = crate::grid::PLANE_FACE;
+        let protected = pack(key0(face, 0, 1000), 1000);
+        assert!(r.acquire_blocks(protected, &mut FrameWork::default()));
+        r.residents.insert(protected, Resident { record: 0, blocks: true, ..Default::default() });
+        let current: Vec<_> = (960..964).flat_map(|j| (1472..1476).map(move |i| pack(key0(face, 0, i), j))).collect();
+        let mut wanted = current.clone();
+        wanted.push(protected);
+        r.apply(snapshot_update(1, &wanted));
+        r.queue_obsolete_owners(current[0]);
+        assert_eq!(r.obsolete_owners.len(), 1);
+        assert_eq!(r.obsolete_owners.front().unwrap().owner.2, 3);
+        let owner = r.obsolete_owners.front().unwrap().owner;
+        let slot = r.blocks[&owner].slot;
+        let mut work = FrameWork::default();
+        for _ in 0..128 {
+            let calls = std::cell::Cell::new(0);
+            // One actual bounded planning slice, with refresh between slices.
+            r.apply_snapshot(&mut work, &|| { calls.set(calls.get() + 1); calls.get() > 1 });
+            r.queue_obsolete_owners(current[0]);
+        }
+        // Under owner-only retirement, the 4096-step protected task finishes
+        // at each 32nd slice boundary and refresh requeues it unchanged. The
+        // normal cursor never gets a step and this serial cannot complete.
+        assert_eq!(r.retire_finished_serial, 1);
+        assert!(r.diffs[0].is_empty() && r.catching_up[0] == 0);
+        assert_eq!((r.queued_delta_ops, r.queued_delta_bytes), (0, 0));
+        assert!(work.evictions.is_empty());
+        assert!(r.residents.contains_key(protected));
+        assert_eq!(r.blocks[&owner].refs, 1);
+        assert_eq!(r.block_owner[&slot], owner);
+        assert!(r.blocks_conflict(current[0]), "a protected owner must never be reassigned");
+    }
+
+    #[test]
+    fn completed_snapshot_serial_returns_the_full_retirement_slice_to_owners() {
+        let (planet, _, _, _) = edit_fixture();
+        let mut r = Residency::new(*planet.grid(), Capacity { table_bits: 14, ..Default::default() });
+        let face = crate::grid::PLANE_FACE;
+        let protected = pack(key0(face, 0, 1000), 1000);
+        assert!(r.acquire_blocks(protected, &mut FrameWork::default()));
+        r.residents.insert(protected, Resident { record: 0, blocks: true, ..Default::default() });
+        let conflict = pack(key0(face, 0, 1472), 960);
+        let mut wanted: Vec<_> = (1000..2024).map(|i| pack(key0(face, 0, i), 0)).collect();
+        wanted.extend([protected, conflict]);
+        r.apply(snapshot_update(1, &wanted));
+        r.retire_finished_serial = r.applied;
+        r.queue_obsolete_owners(conflict);
+        assert_eq!(r.obsolete_owners.len(), 1);
+        assert_eq!(r.obsolete_owners.front().unwrap().owner.2, 3);
+        let calls = std::cell::Cell::new(0);
+        let mut work = FrameWork::default();
+        r.apply_snapshot(&mut work, &|| { calls.set(calls.get() + 1); calls.get() > 1 });
+        assert_eq!(r.obsolete_owners.front().unwrap().offset, 128);
+        assert_eq!(r.retire_finished_serial, 1);
+        assert_eq!(r.retire_slot, 0, "a completed serial needs no normal rescan");
+        assert_eq!(r.queued_delta_ops, wanted.len() - 128);
+        assert!(work.evictions.is_empty() && r.residents.contains_key(protected));
     }
 
     #[test]
