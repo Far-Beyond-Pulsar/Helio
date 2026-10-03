@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 pub const ID: &str = "helio.landform";
 pub const VERSION: u32 = 1;
-pub(crate) const DISPLAY_PROGRAM: &str = "helio.landform/1-ridge-envelope/1";
+pub(crate) const DISPLAY_PROGRAM: &str = "helio.landform/1-ridge-envelope/2";
 pub const FLAT_ID: &str = "helio.flat";
 pub const FLAT_VERSION: u32 = 1;
 

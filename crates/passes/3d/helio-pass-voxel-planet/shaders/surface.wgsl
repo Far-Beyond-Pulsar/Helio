@@ -592,6 +592,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         fallback_slope = field.w;
     }
     if natural_material_filter_allowed(edited, c) {
+        material_weathered_skin = true;
         let material_up = hit_up(h.t, d);
         var material_normal = material_up;
         if smooth_w > 0.0 { material_normal = fallback_normal; }

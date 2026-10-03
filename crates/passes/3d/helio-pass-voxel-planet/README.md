@@ -387,6 +387,8 @@ editor-facing enums (Pulsar's `VoxelTerrainMaterial`).
 and detail without rebuilding terrain. RGB is sRGB; roughness is linear.
 When it returns `true`, reset temporal colour history to show the change in
 an idle viewport.
+Unedited Landform rock has a world-space weathered surface coating;
+canonical material ids, underlying strata and explicit paint are unchanged.
 
 **A brush shape.** Extend `BrushShape`, its per-face resolution in
 `edits.rs`, the containment test in both `edits.rs` and `generate.wgsl`

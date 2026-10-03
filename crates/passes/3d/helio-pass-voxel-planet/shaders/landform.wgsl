@@ -166,6 +166,51 @@ fn rock_phase_integral(value: f32, noise_scale: f32, cutoff: f32, cut_cdf: f32, 
         - cut_cdf * (x - cutoff), 0.0) / (1.0 - cut_cdf);
 }
 
+// Stable integration in the rare upper CDF tail. Its tiny probability cannot
+// be recovered by subtracting the two large integrated CDF values in f32.
+fn weathered_tail_interval(index: u32, cut: f32, lo: f32, hi: f32) -> vec2<f32> {
+    let left = max(-65536.0 + f32(index) * 4096.0, cut);
+    let right = -65536.0 + f32(index + 1u) * 4096.0;
+    if left >= right { return vec2<f32>(0.0); }
+    let density = MATERIAL_NOISE_CDF[index + 1u] - MATERIAL_NOISE_CDF[index];
+    let start = max(left, lo);
+    let end = min(right, hi);
+    let linear = max(end - start, 0.0) * 0.5
+        * (clamp((start - lo) / (hi - lo), 0.0, 1.0) + clamp((end - lo) / (hi - lo), 0.0, 1.0));
+    let saturated = max(right - max(left, hi), 0.0);
+    return density * vec2<f32>(linear + saturated, right - left);
+}
+// A restrained world-space coating on exposed natural rock, independent of
+// geological IDs. Reuse the outcrop samples; unresolved noise contributes the
+// conditional mean of a linear weathering ramp instead of altitude contours.
+fn weathered_stone_coverage(resolved: f32, deviation: f32, cutoff: f32) -> f32 {
+    let lower = -16384.0;
+    let upper = 16384.0;
+    var mean = clamp((resolved - lower) / (upper - lower), 0.0, 1.0);
+    if deviation > 0.0 {
+        let lo = (lower - resolved) / deviation;
+        let hi = (upper - resolved) / deviation;
+        if hi <= max(cutoff, -65536.0) { return 0.65; }
+        if lo >= 65536.0 { return 0.35; }
+        let cut = clamp(cutoff, -65536.0, 65536.0);
+        if cut >= 49152.0 && cut < 65536.0 {
+            let tail = weathered_tail_interval(28u, cut, lo, hi)
+                + weathered_tail_interval(29u, cut, lo, hi)
+                + weathered_tail_interval(30u, cut, lo, hi)
+                + weathered_tail_interval(31u, cut, lo, hi);
+            return 0.35 + 0.30 * clamp(tail.x / tail.y, 0.0, 1.0);
+        }
+        let cut_cdf = material_noise_cdf(cut);
+        if cut_cdf < 1.0 {
+            let cut_integral = material_noise_integral(cut);
+            let area = rock_phase_integral(upper - resolved, deviation, cut, cut_cdf, cut_integral)
+                - rock_phase_integral(lower - resolved, deviation, cut, cut_cdf, cut_integral);
+            mean = clamp(1.0 - area / (upper - lower), 0.0, 1.0);
+        }
+    }
+    return 0.35 + 0.30 * mean;
+}
+
 fn rock_box_cdf(value: f32, left: f32, width: f32,
     noise_scale: f32, cutoff: f32, cut_cdf: f32, cutoff_integral: f32) -> f32 {
     if noise_scale <= 0.0 { return clamp((value - left) / width, 0.0, 1.0); }
@@ -275,6 +320,12 @@ fn snow_material_coverage(resolved: f32, deviation: f32, threshold: f32,
     let snow = material_noise_cdf((threshold - resolved) / deviation);
     let rock = 1.0 - snow;
     if dry { return vec4<f32>(snow, rock, 0.0, 0.0); }
+    if material_weathered_skin {
+        let stone = rock * weathered_stone_coverage(resolved, deviation, (threshold - resolved) / deviation);
+        let dirt = select(0.0, rock * 0.125, depth < 1);
+        let remaining = select(1.0, 0.875, depth < 1);
+        return vec4<f32>(snow, stone * remaining, (rock - stone) * remaining, dirt);
+    }
     // Integrate the existing alternating 4.5m stone bands too: replacing
     // unresolved snow with a single rock colour would bias their mean.
     // Radial support filters exposed rock conditioned on this snow threshold;
@@ -392,7 +443,11 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
         let band_weight = max(smoothstep(1.125, 2.25, material_radial_span), 1.0 - outcrop_support);
         // Snow/rock coverage already includes its conditioned stone bands;
         // the shader consumes that vector instead of this separate metadata.
-        if material_footprint > 0.0 && band_weight > 0.0 && material_snow_mix.x < 0.0 {
+        if material_weathered_skin && depth < dirt && material_snow_mix.x < 0.0 {
+            let exposure = f32(NOISE_ONE - 2 * alpine - select(0, NOISE_ONE / 2, slope >= 5)) + 0.5;
+            let cutoff = select(-65536.0, (exposure - resolved_outcrop) / max(outcrop_deviation, 0.0001), !steep);
+            material_stone_coverage = weathered_stone_coverage(resolved_outcrop, outcrop_deviation, cutoff);
+        } else if material_footprint > 0.0 && band_weight > 0.0 && material_snow_mix.x < 0.0 {
             // Exposure conditions the phase distribution on non-steep patches.
             let exposure = f32(NOISE_ONE - 2 * alpine - select(0, NOISE_ONE / 2, slope >= 5)) + 0.5;
             let cutoff = select(-65536.0, (exposure - resolved_outcrop) / max(outcrop_deviation, 0.0001), !steep);

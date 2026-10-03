@@ -4,6 +4,8 @@
 // Shade may low-pass procedural material detail for the current pixel.
 // Other entry points and canonical material queries retain zero footprint.
 var<private> material_footprint: f32 = 0.0;
+// Natural surface coating is shade-only; canonical queries keep their IDs.
+var<private> material_weathered_skin: bool = false;
 // Radial height range of the material pixel, in metres; zero outside shade.
 var<private> material_radial_span: f32 = 0.0;
 // Negative disables display-only light/dark stone coverage.
