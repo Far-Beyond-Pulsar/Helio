@@ -211,6 +211,29 @@ struct Level {
     pending: PendingQueue,
 }
 
+/// Admission only removes pending keys until deferred keys are returned at
+/// the end of a plan. While the selected bucket survives, no other level can
+/// overtake it. Keep the cache local to that removal-only phase.
+fn select_pending_level(levels: &mut [Level], top_level: u32,
+    cached: &mut Option<(usize, usize)>) -> Option<(usize, usize)> {
+    if let Some((index, bucket)) = *cached {
+        if levels[index].pending.best() == Some(bucket) {
+            return Some((index, bucket));
+        }
+    }
+    let mut best: Option<(usize, usize, usize)> = None;
+    for (index, level) in levels.iter_mut().enumerate() {
+        if let Some(bucket) = level.pending.best() {
+            let priority = if index as u32 == top_level { 0 } else { bucket + 1 };
+            if best.is_none_or(|previous| priority < previous.0) {
+                best = Some((priority, index, bucket));
+            }
+        }
+    }
+    *cached = best.map(|(_, index, bucket)| (index, bucket));
+    *cached
+}
+
 enum Planner {
     Inline(WindowPlanner),
     Worker(WindowWorker),
@@ -1280,22 +1303,13 @@ impl Residency {
         let mut steps = 0u32;
         let mut awaiting_publication = Vec::new();
         let mut last_summary_check = None;
+        let mut pending_selection = None;
         while work.jobs.len() < budget {
             steps += 1;
             if (steps == 1 || steps % 64 == 0) && out_of_time() {
                 break;
             }
-            let mut best: Option<(usize, usize)> = None;
-            for index in 0..self.levels.len() {
-                if let Some(bucket) = self.levels[index].pending.best() {
-                    // Normalized distance, the global level before any other.
-                    let p = if index as u32 == top_level { 0 } else { bucket + 1 };
-                    if best.is_none_or(|b| p < b.0) {
-                        best = Some((p, index));
-                    }
-                }
-            }
-            let Some((_, index)) = best else { break };
+            let Some((index, _)) = select_pending_level(&mut self.levels, top_level, &mut pending_selection) else { break };
             let (key, bucket) = self.levels[index].pending.pop().unwrap();
             let transient = self.transient_wanted(key);
             let leased = self.visible_leases.contains_key(&(key & !(3u64 | (3u64 << 32))));
@@ -1526,6 +1540,63 @@ impl Residency {
 mod tests {
     use super::*;
     use crate::planet::PlanetRecipe;
+
+    #[test]
+    fn cached_pending_selection_matches_full_scan_across_plan_boundaries() {
+        fn fixture() -> Vec<Level> {
+            let mut levels: Vec<_> = (0..6).map(|_| Level::default()).collect();
+            for (level, key, bucket) in [(0,100,4), (0,101,4), (0,102,20),
+                (1,200,4), (1,201,0), (2,300,0), (2,301,63),
+                (4,400,3), (5,500,50), (5,501,1)] {
+                levels[level].pending.insert(key, bucket);
+            }
+            levels
+        }
+        fn oracle_pop(levels: &mut [Level]) -> Option<(usize, u64, usize)> {
+            // Independent full scan: global coverage wins, ties retain the
+            // lowest level, and each bucket retains its normal LIFO order.
+            let mut choices = Vec::new();
+            for (index, level) in levels.iter_mut().enumerate() {
+                if let Some(bucket) = level.pending.best() {
+                    choices.push((if index == 5 { 0 } else { bucket + 1 }, index));
+                }
+            }
+            let (_, index) = choices.into_iter().min()?;
+            let (key, bucket) = levels[index].pending.pop().unwrap();
+            Some((index, key, bucket))
+        }
+        let mut cached_levels = fixture();
+        let mut oracle_levels = fixture();
+        let mut observed = Vec::new();
+        for (phase, budget) in [7, 2, usize::MAX].into_iter().enumerate() {
+            // A new plan must see new urgent priorities and previously
+            // deferred publications rather than retaining its old winner.
+            let mut selection = None;
+            for _ in 0..budget {
+                let expected = oracle_pop(&mut oracle_levels);
+                let actual = select_pending_level(&mut cached_levels, 5, &mut selection)
+                    .map(|(index, _)| {
+                        let (key, bucket) = cached_levels[index].pending.pop().unwrap();
+                        (index, key, bucket)
+                    });
+                assert_eq!(actual, expected);
+                let Some((_, key, _)) = actual else { break };
+                observed.push(key);
+            }
+            let incoming: &[(usize, u64, usize)] = match phase {
+                0 => &[(5,501,1), (2,300,0), (3,350,0)],
+                1 => &[(5,502,63), (0,103,0)],
+                _ => &[],
+            };
+            for &(level, key, bucket) in incoming {
+                cached_levels[level].pending.insert(key, bucket);
+                oracle_levels[level].pending.insert(key, bucket);
+            }
+        }
+        assert_eq!(observed, [501,500,201,300,400,101,100,
+            501,300,502,103,350,200,102,301]);
+        assert!(cached_levels.iter().all(|level| level.pending.is_empty()));
+    }
 
     fn snapshot_update(serial: u64, keys: &[u64]) -> WindowUpdate {
         WindowUpdate { serial, snapshot: true,
