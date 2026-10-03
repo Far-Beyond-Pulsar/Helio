@@ -77,10 +77,7 @@ fn unpack(key: u64) -> (u8, u32, i32, i32) {
 /// Direct-mapped summary blocks: per (level, face) a toroidal table for each
 /// tier of 4^tier x 4^tier columns. Entries are `[bi, bj, max top, count]`.
 pub const BLOCK_TIERS: u32 = 3;
-pub const BLOCK_LOG2: [u32; 3] = [8, 6, 4];
-/// Coverage remains bounded independently of the summary address space.
-/// Spare slots allow protected older demand and current visible demand to coexist.
-const COVERAGE_WINDOW_COLUMNS: i32 = 504;
+pub const BLOCK_LOG2: [u32; 3] = [7, 5, 3];
 
 pub fn block_region() -> u32 {
     BLOCK_LOG2.iter().map(|l| 1u32 << (2 * l)).sum()
@@ -96,9 +93,9 @@ pub fn block_slot(level: u32, face: u8, tier: u32, bi: i32, bj: i32) -> u32 {
     offset + (((bj & mask) as u32) << l) + (bi & mask) as u32
 }
 
-/// Fixed column window diameter used by the coverage planner.
+/// Largest column window diameter the block tables support.
 pub fn max_window_columns() -> i32 {
-    COVERAGE_WINDOW_COLUMNS
+    (1 << BLOCK_LOG2[0]) * 4 - 8
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1748,63 +1745,6 @@ mod tests {
     use super::*;
     use crate::planet::PlanetRecipe;
 
-    fn summary_column_period() -> i32 {
-        (1 << BLOCK_LOG2[0]) * 4
-    }
-
-    #[test]
-    fn summary_address_space_expands_without_expanding_coverage() {
-        assert_eq!(summary_column_period(), 1024);
-        assert_eq!(max_window_columns(), 504);
-        assert_eq!(block_region(), 69_888);
-        assert_eq!(u64::from(block_region()) * 6 * 24 * 16, 161_021_952);
-        for level in 0..24 {
-            for face in 0..6 {
-                let region = (level * 6 + u32::from(face)) * block_region();
-                let mut tier_start = region;
-                for tier in 1..=BLOCK_TIERS {
-                    let edge = 1i32 << BLOCK_LOG2[tier as usize - 1];
-                    let columns = 1 << (2 * tier);
-                    assert_eq!(edge * columns, summary_column_period());
-                    for coordinate in [-edge - 1, -edge, -1, 0, edge - 1, edge, edge + 1] {
-                        let slot = block_slot(level, face, tier, coordinate, -coordinate);
-                        assert!((tier_start..tier_start + (edge * edge) as u32).contains(&slot));
-                        assert_eq!(slot, block_slot(level, face, tier, coordinate + edge, -coordinate));
-                        assert_ne!(slot, block_slot(level, face, tier, coordinate + edge / 2, -coordinate));
-                    }
-                    tier_start += (edge * edge) as u32;
-                }
-                assert_eq!(tier_start, region + block_region());
-            }
-        }
-    }
-
-    #[test]
-    fn half_period_visible_blocks_coexist_but_full_period_protected_alias_waits() {
-        let (planet, _, _, _) = edit_fixture();
-        let mut r = Residency::new(*planet.grid(), Capacity::default());
-        let face = crate::grid::PLANE_FACE;
-        let keys: Vec<_> = [1024, 1536].into_iter().flat_map(|base|
-            (1024..1028).flat_map(move |j| (base..base + 4).map(move |i| pack(key0(face, 0, i), j)))).collect();
-        let mut work = FrameWork::default();
-        for &key in &keys {
-            assert!(r.acquire_blocks(key, &mut work));
-        }
-        assert_eq!(r.blocks.len(), 6);
-        assert!(r.blocks.values().all(|block| block.refs == 16));
-        let alias = pack(key0(face, 0, 1024 + summary_column_period()), 1024);
-        let before = (r.blocks.len(), r.block_owner.len(), work.block_inits.len());
-        assert!(r.blocks_conflict(alias));
-        assert!(!r.acquire_blocks(alias, &mut work));
-        assert_eq!((r.blocks.len(), r.block_owner.len(), work.block_inits.len()), before);
-        for &key in &keys[..16] { r.release_blocks(key, &mut work); }
-        assert!(!r.blocks_conflict(alias), "only the retired owner frees its alias slots");
-        assert_eq!(r.blocks.len(), 3);
-        assert!(r.blocks.values().all(|block| block.refs == 16));
-        for &key in &keys[16..] { r.release_blocks(key, &mut work); }
-        assert!(r.blocks.is_empty() && r.block_owner.is_empty());
-    }
-
     #[test]
     fn resident_snapshot_run_requires_exact_complete_owner() {
         let adds: Vec<_> = (0..16).map(|member| (0.1, pack(key0(2, 3, 8 + member % 4), (12 + member / 4) as u32))).collect();
@@ -1819,7 +1759,7 @@ mod tests {
             assert_eq!(resident_snapshot_run(&adds, false, |_| refs), 0);
         }
         assert_eq!(resident_snapshot_run(&adds, false, |identity|
-            (identity == (3, 2, 1, 2 + (1 << BLOCK_LOG2[0]), 3)).then_some(16)), 0,
+            (identity == (3, 2, 1, 130, 3)).then_some(16)), 0,
             "a toroidal alias is not the exact summary owner");
     }
 
@@ -2120,7 +2060,7 @@ mod tests {
         let old: Vec<_> = (1000..1004).flat_map(|j| (1000..1004).map(move |i| pack(key0(face, 0, i), j))).collect();
         let current: Vec<_> = old.iter().map(|&key| {
             let (_, _, i, j) = unpack(key);
-            pack(key0(face, 0, i + summary_column_period()), j as u32)
+            pack(key0(face, 0, i + 512), j as u32)
         }).collect();
         for (record, &key) in old.iter().enumerate() {
             assert!(r.acquire_blocks(key, &mut FrameWork::default()));
@@ -2150,7 +2090,7 @@ mod tests {
             assert!(r.acquire_blocks(key, &mut FrameWork::default()));
             r.residents.insert(key, Resident { record: record as u32, blocks: true, ..Default::default() });
         }
-        let current: Vec<_> = (960..964).flat_map(|j| ((960 + summary_column_period())..(964 + summary_column_period())).map(move |i| pack(key0(face, 0, i), j))).collect();
+        let current: Vec<_> = (960..964).flat_map(|j| (1472..1476).map(move |i| pack(key0(face, 0, i), j))).collect();
         let mut wanted = current.clone();
         wanted.push(returned);
         r.apply(snapshot_update(1, &wanted));
@@ -2188,7 +2128,7 @@ mod tests {
         let protected = pack(key0(face, 0, 1000), 1000);
         assert!(r.acquire_blocks(protected, &mut FrameWork::default()));
         r.residents.insert(protected, Resident { record: 0, blocks: true, ..Default::default() });
-        let current: Vec<_> = (960..964).flat_map(|j| ((960 + summary_column_period())..(964 + summary_column_period())).map(move |i| pack(key0(face, 0, i), j))).collect();
+        let current: Vec<_> = (960..964).flat_map(|j| (1472..1476).map(move |i| pack(key0(face, 0, i), j))).collect();
         let mut wanted = current.clone();
         wanted.push(protected);
         r.apply(snapshot_update(1, &wanted));
@@ -2225,7 +2165,7 @@ mod tests {
         let protected = pack(key0(face, 0, 1000), 1000);
         assert!(r.acquire_blocks(protected, &mut FrameWork::default()));
         r.residents.insert(protected, Resident { record: 0, blocks: true, ..Default::default() });
-        let conflict = pack(key0(face, 0, 960 + summary_column_period()), 960);
+        let conflict = pack(key0(face, 0, 1472), 960);
         let mut wanted: Vec<_> = (1000..2024).map(|i| pack(key0(face, 0, i), 0)).collect();
         wanted.extend([protected, conflict]);
         r.apply(snapshot_update(1, &wanted));
@@ -2376,7 +2316,7 @@ mod tests {
                 10 => {
                     let (face, level, i, j) = unpack(near[0]);
                     let slot = block_slot(level, face, 3, i >> 6, j >> 6);
-                    r.block_owner.insert(slot, (level, face, 3, (i >> 6) + (1 << BLOCK_LOG2[2]), j >> 6));
+                    r.block_owner.insert(slot, (level, face, 3, (i >> 6) + 8, j >> 6));
                     assert!(r.blocks_conflict(near[0]));
                 }
                 11 => r.visible_admission[0].0 = 1,
@@ -2788,7 +2728,7 @@ mod tests {
         let keys = lease_block(&mut r, 1000, at);
         let old: Vec<_> = keys.iter().map(|key| {
             let (face, level, i, j) = unpack(*key);
-            pack(key0(face, level, i + summary_column_period()), j as u32)
+            pack(key0(face, level, i - 512), j as u32)
         }).collect();
         r.levels[0].wanted = Some(std::sync::Arc::new(old.iter().copied().collect()));
         for (record, key) in old.iter().enumerate() {
@@ -3136,7 +3076,7 @@ mod tests {
         assert_eq!(retired_owners.len(), 8);
         let incoming: Vec<_> = removed[..16].iter().map(|&key| {
             let (face, level, i, j) = unpack(key);
-            pack(key0(face, level, i + summary_column_period()), j as u32)
+            pack(key0(face, level, i + 512), j as u32)
         }).collect();
         assert!(incoming.iter().all(|&key| residency.blocks_conflict(key)));
         residency.apply(WindowUpdate { serial: 1, levels: vec![LevelDiff {
@@ -3184,7 +3124,7 @@ mod tests {
         assert!(residency.acquire_blocks(old, &mut work));
         residency.residents.get_mut(old).unwrap().blocks = true;
         let (face, level, i, j) = unpack(old);
-        let incoming = pack(key0(face, level, i + summary_column_period()), j as u32);
+        let incoming = pack(key0(face, level, i + 512), j as u32);
         let available = pack(key0(face, level, i + 80), j as u32);
         assert!(residency.blocks_conflict(incoming));
         assert!(!residency.blocks_conflict(available));
@@ -3210,7 +3150,7 @@ mod tests {
         r.evict(old, &mut FrameWork::default());
         let (face, level, i, j) = unpack(old);
         let a = pack(key0(face, level, i & !3), (j & !3) as u32);
-        let alias = pack(key0(face, level, (i & !3) + summary_column_period()), (j & !3) as u32);
+        let alias = pack(key0(face, level, (i & !3) + 512), (j & !3) as u32);
         let mut last = None;
         let mut work = FrameWork::default();
         // First inspect a free owner, then let its toroidal alias claim it.
@@ -3223,7 +3163,7 @@ mod tests {
         assert!(!r.blocks_conflict_cached(different_level, &mut last));
         assert!(r.blocks_conflict_cached(a, &mut last));
         let negative = pack(key0(face, level + 1, i & !3), (-4i32) as u32);
-        let positive_alias = pack(key0(face, level + 1, i & !3), (summary_column_period() - 4) as u32);
+        let positive_alias = pack(key0(face, level + 1, i & !3), 508);
         assert!(!r.blocks_conflict_cached(negative, &mut last));
         r.reference_blocks(negative, &mut work);
         assert!(r.blocks_conflict_cached(positive_alias, &mut last), "signed j and its positive toroidal alias must retain different identities");
@@ -3242,7 +3182,7 @@ mod tests {
         let (face, level, i, j) = unpack(old);
         let key = |offset| pack(key0(face, level, (i & !3) + offset), (j & !3) as u32);
         let a = key(0);
-        let alias = key(summary_column_period());
+        let alias = key(512);
         let b = key(64);
         queue_complete_block(&mut r.levels[level as usize].pending, a, 0);
         queue_complete_block(&mut r.levels[level as usize].pending, alias, 1);

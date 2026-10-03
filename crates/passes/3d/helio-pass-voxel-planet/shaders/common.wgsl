@@ -106,12 +106,12 @@ fn column_slot(key0: u32, key1: u32) -> u32 {
     return hash3(bitcast<i32>(key0), bitcast<i32>(key1), 0x2f6b1d3a, 0x9e3779b9u);
 }
 
-// Table edge log2 per tier: 8, 6, 4 (see residency::BLOCK_LOG2).
+// Table edge log2 per tier: 7, 5, 3 (see residency::BLOCK_LOG2).
 fn block_slot(level: u32, face: u32, tier: u32, bi: i32, bj: i32) -> u32 {
     var offset = (level * 6u + face) * frame.extra.y;
-    if tier >= 2u { offset += 1u << 16u; }
-    if tier >= 3u { offset += 1u << 12u; }
-    let l = 10u - 2u * tier;
+    if tier >= 2u { offset += 1u << 14u; }
+    if tier >= 3u { offset += 1u << 10u; }
+    let l = 9u - 2u * tier;
     let mask = (1 << l) - 1;
     return offset + (u32(bj & mask) << l) + u32(bi & mask);
 }
