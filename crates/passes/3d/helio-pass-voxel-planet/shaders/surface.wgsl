@@ -328,10 +328,11 @@ fn detail_filter_weight(projected_cell: f32) -> f32 {
 }
 
 // Independent hash detail aliases along a face's compressed projected axis.
-// Limit the expansion to four times; resolved long faces retain contrast.
+// Use its actual projected support, including near-tangent subpixel faces.
+// Area support keeps resolved long faces distinct from hash detail.
 // Interior/unknown face code 6 has no geometric normal to project.
 fn appearance_projection(incidence: f32, code: u32) -> vec2<f32> {
-    let cosine = select(clamp(abs(incidence), 0.25, 1.0), 1.0, code >= 6u);
+    let cosine = select(clamp(abs(incidence), 0.0, 1.0), 1.0, code >= 6u);
     return vec2<f32>(cosine, sqrt(cosine));
 }
 

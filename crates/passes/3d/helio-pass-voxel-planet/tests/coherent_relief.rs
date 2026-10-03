@@ -7,6 +7,96 @@ use bytemuck::Zeroable;
 use helio_pass_voxel_planet::{landform::{self, LandformConstants}, terrain};
 
 #[test]
+fn grazing_projection_uses_actual_support_and_preserves_edit_guards() {
+    let surface = include_str!("../shaders/surface.wgsl");
+    let helpers = surface.split("fn detail_filter_weight").nth(1).unwrap()
+        .split("// Coplanar grazing").next().unwrap();
+    let gate = surface.split("var projection = vec2<f32>(1.0);").nth(1).unwrap()
+        .split("let hash_filter_w").next().unwrap();
+    // Projected appearance is not an input to canonical classification or
+    // the existing material-depth/layer selection.
+    assert!(surface.contains("let top_material = code < 4u && smooth_w > 0.5;"));
+    assert!(surface.contains("ground_material(p, climate_height, material_depth, slope, material_layer)"));
+    let Some(gpu) = gpu() else { return };
+    let source = format!(r#"
+        struct Column {{info:u32}}
+        const INFO_TOPOLOGY:u32=1u;
+        @group(0) @binding(0) var<storage,read> probes:array<vec4<f32>>;
+        @group(0) @binding(1) var<storage,read_write> answers:array<vec4<f32>>;
+        fn detail_filter_weight{helpers}
+        @compute @workgroup_size(16) fn probe(@builtin(global_invocation_id) id:vec3<u32>) {{
+            if id.x>=arrayLength(&probes) {{return;}}
+            let p=probes[id.x];
+            let code=u32(p.z);
+            let flags=u32(p.w);
+            let edited=(flags&1u)!=0u;
+            let c=Column(select(0u,INFO_TOPOLOGY,(flags&2u)!=0u));
+            let actual_normal=vec3<f32>(1.0,0.0,0.0);
+            let d=vec3<f32>(p.y,sqrt(max(1.0-p.y*p.y,0.0)),0.0);
+            var projection=vec2<f32>(1.0);
+            {gate}
+            let support=p.x*projection;
+            answers[id.x]=vec4<f32>(support,detail_filter_weight(support.x),detail_filter_weight(support.y));
+        }}
+    "#);
+    // Width, signed incidence, face code, edited/topology bits.
+    let probes = [
+        [20.0f32,0.01,4.0,0.0], [20.0,0.001,4.0,0.0],
+        [20.0,0.01,0.0,0.0], [2.0,1.0,4.0,0.0],
+        [5.0,0.5,0.0,0.0], [100.0,0.1,0.0,0.0],
+        [20.0,0.001,6.0,0.0], [20.0,0.001,4.0,1.0],
+        [20.0,0.001,0.0,2.0], [20.0,-0.01,4.0,0.0],
+        [20.0,0.0,4.0,0.0],
+    ];
+    let shader = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label:Some("grazing production appearance support"),source:wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let input = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label:None,contents:bytemuck::cast_slice(&probes),usage:wgpu::BufferUsages::STORAGE,
+    });
+    let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label:None,size:(probes.len()*16) as u64,
+        usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC,mapped_at_creation:false,
+    });
+    let pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label:None,layout:None,module:&shader,entry_point:Some("probe"),
+        compilation_options:Default::default(),cache:None,
+    });
+    let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label:None,layout:&pipeline.get_bind_group_layout(0),entries:&[
+            wgpu::BindGroupEntry {binding:0,resource:input.as_entire_binding()},
+            wgpu::BindGroupEntry {binding:1,resource:output.as_entire_binding()},
+        ],
+    });
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    {
+        let mut pass=encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);pass.set_bind_group(0,&group,&[]);
+        pass.dispatch_workgroups(1,1,1);
+    }
+    gpu.queue.submit([encoder.finish()]);
+    let bytes=read_buffer(&gpu,&output,(probes.len()*16) as u64);
+    let actual:&[[f32;4]]=bytemuck::cast_slice(&bytes);
+    for (index,(p,a)) in probes.iter().zip(actual).enumerate() {
+        // Orthographic projection of a unit square has compressed length
+        // |N.D| and area |N.D|, hence area-equivalent length sqrt(|N.D|).
+        let cosine=if p[2]>=6.0 || p[3]!=0.0 {1.0} else {f64::from(p[1]).abs()};
+        let axis=f64::from(p[0])*cosine;
+        let area=f64::from(p[0])*cosine.sqrt();
+        let filter=|x:f64| {
+            let t=((x-0.75)/0.5).clamp(0.0,1.0);
+            1.0-t*t*(3.0-2.0*t)
+        };
+        for (component,expected) in [axis,area,filter(axis),filter(area)].into_iter().enumerate() {
+            assert!((f64::from(a[component])-expected).abs()<2e-5,"probe{index} component{component}");
+        }
+    }
+    assert_eq!(&actual[0][2..], &[1.0,0.0]);
+    assert_eq!(&actual[1][2..], &[1.0,1.0]);
+    for index in 3..=8 { assert_eq!(&actual[index][2..], &[0.0,0.0]); }
+}
+
+#[test]
 fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
     let Some(gpu) = gpu() else { return };
     let surface = include_str!("../shaders/surface.wgsl");
@@ -50,6 +140,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
         var<private> material_snow_mix:vec4<f32>=vec4<f32>(-1.0,0.0,0.0,0.0);
         var<private> material_rock_id:u32=0u;
         var<private> material_rock_base_id:u32=0u;
+        var<private> material_weathered_skin:bool=false;
         struct Face {{m_a:vec4<f32>,m_b:vec4<f32>}}
         struct Frame {{faces:array<Face,6>,layer:vec4<f32>}}
         struct Probe {{up:vec4<f32>,gradient:vec4<f32>,params:vec4<f32>}}
@@ -80,7 +171,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
             answers[id.x*13u+3u]=column_relief_gradient(u32(p.params.x),p.up.xyz,
                 vec2<f32>(p.up.w,p.gradient.w),p.params.y);
             answers[id.x*13u+4u]=vec4<f32>(detail_filter_weight(1.5*appearance_projection(1.0,4u).x),
-                detail_filter_weight(1.5*appearance_projection(0.1,4u).x),detail_filter_weight(5.0*appearance_projection(0.1,0u).x),
+                detail_filter_weight(1.5*appearance_projection(0.1,4u).x),detail_filter_weight(20.0*appearance_projection(0.1,0u).x),
                 detail_filter_weight(1.5*appearance_projection(0.1,6u).x));
             answers[id.x*13u+5u]=vec4<f32>(detail_filter_weight(1.0*appearance_projection(1.0,4u).x),
                 detail_filter_weight(2.0*appearance_projection(0.5,4u).x),detail_filter_weight(2.0*appearance_projection(-0.5,4u).x),
