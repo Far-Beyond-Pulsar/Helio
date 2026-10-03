@@ -424,10 +424,18 @@ fn filtered_material_slope(block: i32, local: f32, weight: f32, level: u32) -> i
 }
 
 // The existing block endpoints average base-height quantization over seven
-// cells. This support is used only by filtered natural L0 lighting; material
-// slope and resolved voxel face normals keep their original support.
+// cells. Filtered natural L0 lighting and unresolved stratum support reuse
+// it; material slope and resolved voxel face normals keep their support.
 fn column_secant_derivative(tx0: i32, tx7: i32, ty0: i32, ty7: i32) -> vec2<f32> {
     return vec2<f32>(f32(tx7 - tx0), f32(ty7 - ty0)) / 7.0;
+}
+
+// Radial support of a ray/plane pixel differential. The angular half-width
+// bounds the linear approximation when the pixel cone crosses tangency.
+fn radial_material_span(pixel: f32, distance: f32, ray: vec3<f32>, up: vec3<f32>, normal: vec3<f32>) -> f32 {
+    let numerator = cross(ray, cross(up, normal));
+    let epsilon = max(0.5 * pixel / max(distance, 0.05), 0.00000095367431640625);
+    return pixel * length(numerator) / max(abs(dot(normal, ray)), epsilon);
 }
 
 // Relief changes geometry inside the last coarse cell. Natural surface
@@ -591,17 +599,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         // Bound the grazing expansion; voxel detail and normal gates keep
         // their own footprint. This scalar approximation is material-only.
         material_footprint = pixel / max(abs(dot(material_normal, d)), 0.25);
-        // Ray/plane radial differential: G = U - N*(U.D)/(N.D).
-        // The cross form is zero for a flat surface without subtracting
-        // nearly equal terms. Unlike the noise footprint, altitude support
-        // must expand at grazing angles or distant strata keep aliasing.
-        let radial_numerator = cross(d, cross(material_up, material_normal));
-        // When the pixel cone crosses a plane-parallel ray, its linear
-        // footprint is unbounded. Use its angular half-width (plus a float
-        // precision floor) as a finite appearance fallback at that limit.
-        let radial_epsilon = max(0.5 * pixel / max(h.t, 0.05), 0.00000095367431640625);
-        material_radial_span = pixel * length(radial_numerator)
-            / max(abs(dot(material_normal, d)), radial_epsilon);
+        material_radial_span = radial_material_span(pixel, h.t, d, material_up, material_normal);
     }
     if !edited {
         var lowest = top;
@@ -613,15 +611,22 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         let tx7 = column_top(c, 7u, y);
         let ty0 = column_top(c, x, 0u);
         let ty7 = column_top(c, x, 7u);
-        if level == 0u && shade_smooth_w > 0.0 && (c.info & INFO_TOPOLOGY) == 0u {
+        if level == 0u && (shade_smooth_w > 0.0 || hash_filter_w > 0.0)
+            && natural_material_filter_allowed(edited, c) {
             // A two-cell derivative of integer L0 tops pulses at every riser.
-            // Reuse the material block's endpoint reads for shading alone,
-            // avoiding new generator queries and retaining canonical IDs.
+            // Reuse the material block's endpoint reads without new terrain
+            // queries or changes to canonical material IDs.
             let up = hit_up(h.t, d);
             let radius = frame.eye.w + height_rel(make_ray(camera.position_near.xyz, d), h.t);
             let field = column_relief_gradient(face, up,
                 column_secant_derivative(tx0, tx7, ty0, ty7), radius);
             fallback_shade_normal = normalize(up - field.xyz);
+            // A locally flat terrace can have zero two-cell derivative.
+            // Reuse the block secant as support for an unresolved terrace
+            // ensemble, not as the exact normal of a resolved voxel face.
+            // Noise/grass support and canonical material IDs stay unchanged.
+            material_radial_span = max(material_radial_span,
+                radial_material_span(pixel, h.t, d, up, fallback_shade_normal));
         }
         slope = block_slope_of(tx0, tx7, ty0, ty7);
         if level >= 1u && column_tops_fit(c) && (c.info & INFO_RELIEF) != 0u {
@@ -771,8 +776,15 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     } else if material_stone_coverage >= 0.0 && material_rock_base_id == M_AIR
         && natural_material_filter_allowed(edited, c) {
         albedo = pigment * mix(palette(M_DARK_STONE), palette(M_STONE), material_stone_coverage);
-    } else if hash_filter_w > 0.0 && material_rock_base_id != M_AIR && natural_material_filter_allowed(edited, c) {
-        albedo = filtered_rock_flecks(albedo, pigment, material_rock_base_id, hash_filter_w);
+    } else if material_rock_base_id != M_AIR && natural_material_filter_allowed(edited, c) {
+        // Band support is independent of single-voxel fleck support. Keep a
+        // resolved dirt fleck while filtering unresolved stone around it.
+        if material_stone_coverage >= 0.0 && material != M_DIRT {
+            albedo = pigment * mix(palette(M_DARK_STONE), palette(M_STONE), material_stone_coverage);
+        }
+        if hash_filter_w > 0.0 {
+            albedo = filtered_rock_flecks(albedo, pigment, material_rock_base_id, hash_filter_w);
+        }
     }
     out.t = h.t;
     let a8 = vec4<u32>(vec4<f32>(clamp(pow(albedo, vec3<f32>(1.0 / 2.2)), vec3<f32>(0.0), vec3<f32>(1.0)), ao) * 255.0 + 0.5);

@@ -260,19 +260,32 @@ fn snow_material_coverage(resolved: f32, deviation: f32, threshold: f32,
     if dry { return vec4<f32>(snow, rock, 0.0, 0.0); }
     // Integrate the existing alternating 4.5m stone bands too: replacing
     // unresolved snow with a single rock colour would bias their mean.
-    let mean_altitude = f32(altitude) + resolved * (3000.0 / 65536.0);
-    let first = i32(floor((mean_altitude - 4000.0) / 4500.0));
+    // Radial support filters exposed rock conditioned on this snow threshold;
+    // snow probability itself keeps the existing outcrop-noise coverage.
+    let band_weight = smoothstep(1.125, 2.25, material_radial_span);
+    var filtered_stone = -1.0;
+    if band_weight > 0.0 {
+        let phase = f32(rem_floor(altitude, 9000)) + resolved * (3000.0 / 65536.0);
+        let coverage = rock_band_coverage(phase, material_radial_span * 1000.0,
+            deviation, (threshold - resolved) / deviation);
+        if coverage >= 0.0 { filtered_stone = rock * coverage; }
+    }
     var stone = 0.0;
-    for (var b = first; b < first + 4; b++) {
-        if (b & 1) != 0 { continue; }
-        let lo = max(threshold, (f32(b) * 4500.0 - f32(altitude)) * (65536.0 / 3000.0));
-        let hi = (f32(b + 1) * 4500.0 - f32(altitude)) * (65536.0 / 3000.0);
-        if hi > lo {
-            stone += material_noise_cdf((hi - resolved) / deviation)
-                - material_noise_cdf((lo - resolved) / deviation);
+    if band_weight < 1.0 || filtered_stone < 0.0 {
+        let mean_altitude = f32(altitude) + resolved * (3000.0 / 65536.0);
+        let first = i32(floor((mean_altitude - 4000.0) / 4500.0));
+        for (var b = first; b < first + 4; b++) {
+            if (b & 1) != 0 { continue; }
+            let lo = max(threshold, (f32(b) * 4500.0 - f32(altitude)) * (65536.0 / 3000.0));
+            let hi = (f32(b + 1) * 4500.0 - f32(altitude)) * (65536.0 / 3000.0);
+            if hi > lo {
+                stone += material_noise_cdf((hi - resolved) / deviation)
+                    - material_noise_cdf((lo - resolved) / deviation);
+            }
         }
     }
     stone = clamp(stone, 0.0, rock);
+    if filtered_stone >= 0.0 { stone = mix(stone, filtered_stone, band_weight); }
     let dirt = select(0.0, rock * 0.125, depth < 1);
     let remaining = select(1.0, 0.875, depth < 1);
     return vec4<f32>(snow, stone * remaining, (rock - stone) * remaining, dirt);
