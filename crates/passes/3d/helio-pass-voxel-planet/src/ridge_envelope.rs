@@ -96,28 +96,11 @@ pub(crate) fn bake_ridge_suffix(
     Ok(packed)
 }
 
-/// Display-child and canonical-climate comparisons use the same wider bound.
-/// Each filtered ridge can move by at most its absolute amplitude; both
-/// coarse and fine display fields may move, so add twice the omitted sum.
-pub(crate) fn render_bounds(
-    grid: &Grid,
-    k: &LandformConstants,
-    mut bounds: [i32; 24],
-) -> [i32; 24] {
-    for (level, bound) in bounds.iter_mut().enumerate() {
-        let effective = level as u32 + grid.level_offset();
-        let dropped: i64 = k.octaves[..k.header[0] as usize]
-            .iter()
-            .filter(|o| o.kind == 2 && o.shift < effective + 3)
-            .map(|o| i64::from(o.amplitude).abs())
-            .sum();
-        if dropped == 0 {
-            continue;
-        }
-        let cell_mm = i64::from(grid.layer_mm()) << level;
-        let extra = (2 * dropped + cell_mm - 1) / cell_mm + 2;
-        *bound = (i64::from(*bound) + extra).min(i64::from(i32::MAX / 2)) as i32;
-    }
+/// Display and canonical suffixes share the interval from the sum of negative
+/// amplitudes to the sum of positive amplitudes. Filtering and mask contraction
+/// preserve it, so their difference needs only its width: the omitted absolute
+/// amplitude sum already included in the canonical bounds and quantization pad.
+pub(crate) fn render_bounds(_grid: &Grid, _k: &LandformConstants, bounds: [i32; 24]) -> [i32; 24] {
     bounds
 }
 #[cfg(test)]
@@ -251,25 +234,49 @@ mod tests {
     }
 
     #[test]
-    fn display_bounds_preserve_canonical_bounds_and_cover_both_signed_changes() {
+    fn display_bounds_reuse_canonical_suffix_diameter() {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let k = LandformConstants::new(&grid, &Landform::default(), 7);
-        let canonical = k.bound_margins(&grid);
-        let display = render_bounds(&grid, &k, canonical);
-        for level in 0..24 {
-            let delta: i64 = k.octaves[..k.header[0] as usize]
-                .iter()
-                .filter(|o| o.kind == 2 && o.shift < level as u32 + grid.level_offset() + 3)
-                .map(|o| i64::from(o.amplitude).abs())
-                .sum();
-            let mm = i64::from(grid.layer_mm()) << level;
-            assert!(i64::from(display[level] - canonical[level]) * mm >= 2 * delta);
-            if delta == 0 {
-                assert_eq!(display[level], canonical[level]);
+        for signs in [0u32, 0b1111111, 0b0101010] {
+            let mut k = LandformConstants::new(&grid, &Landform::default(), 7);
+            for (r, o) in k.octaves.iter_mut().filter(|o| o.kind == 2).enumerate() {
+                if signs & (1 << r) != 0 {
+                    o.amplitude = -o.amplitude;
+                }
+            }
+            let canonical = k.bound_margins(&grid);
+            assert_eq!(render_bounds(&grid, &k, canonical), canonical);
+            assert_eq!(canonical[17], 7);
+            assert_eq!(canonical, k.bound_margins(&grid));
+        }
+        assert_eq!(std::mem::size_of::<LandformConstants>() + 66 * 16, 1616);
+    }
+
+    #[test]
+    fn signed_suffix_mask_rounding_preserves_the_diameter() {
+        // Mixed signs and non-integral mask products exercise the rounding
+        // premise independently of the bake's statistical approximation.
+        let negative = -2_105_360;
+        let positive = 2_400_000;
+        let diameter = positive - negative;
+        let masks = [0, 1, FINE_ONE / 7, FINE_ONE / 2, FINE_ONE - 1, FINE_ONE];
+        let prefixes = [-4_505_360, -1, 0, 1, 4_505_360];
+        let mut minimum = i32::MAX;
+        let mut maximum = i32::MIN;
+        for prefix in prefixes {
+            for region in masks {
+                for land in masks {
+                    let mask = |x| mul_fine(mul_fine(x, region), land);
+                    let baseline = mask(prefix);
+                    for tail in [negative, negative + 1, -1, 0, 1, positive - 1, positive] {
+                        let actual = mask(prefix + tail) - baseline;
+                        assert!((negative..=positive).contains(&actual));
+                        minimum = minimum.min(actual);
+                        maximum = maximum.max(actual);
+                    }
+                }
             }
         }
-        assert_eq!(canonical, k.bound_margins(&grid));
-        assert_eq!(std::mem::size_of::<LandformConstants>() + 66 * 16, 1616);
+        assert_eq!(maximum - minimum, diameter);
     }
 
     #[test]
