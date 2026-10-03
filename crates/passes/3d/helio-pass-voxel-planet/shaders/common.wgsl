@@ -4,6 +4,10 @@
 // Shade may low-pass procedural material detail for the current pixel.
 // Other entry points and canonical material queries retain zero footprint.
 var<private> material_footprint: f32 = 0.0;
+// Radial height range of the material pixel, in metres; zero outside shade.
+var<private> material_radial_span: f32 = 0.0;
+// Negative disables display-only light/dark stone coverage.
+var<private> material_stone_coverage: f32 = -1.0;
 // Negative snow weight disables appearance coverage; IDs remain canonical.
 var<private> material_snow_mix: vec4<f32> = vec4<f32>(-1.0, 0.0, 0.0, 0.0);
 var<private> material_rock_id: u32 = 0u;

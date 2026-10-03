@@ -55,10 +55,16 @@ fn palette(m: u32) -> vec3<f32> {
     return frame.palette[min(m, 15u)].rgb;
 }
 
+fn natural_material_filter_allowed(edited: bool, c: Column) -> bool {
+    return !edited && (c.info & INFO_TOPOLOGY) == 0u && column_tops_fit(c);
+}
+
 // Canonical rock keeps its dirt flecks; unresolved natural appearance keeps
 // their 1/8 coverage instead of a fresh full-contrast hash choice per pixel.
 fn filtered_rock_flecks(albedo: vec3<f32>, pigment: f32, rock: u32, weight: f32) -> vec3<f32> {
-    let mean = pigment * (0.875 * palette(rock) + 0.125 * palette(M_DIRT));
+    let stone = select(palette(rock), mix(palette(M_DARK_STONE), palette(M_STONE),
+        max(material_stone_coverage, 0.0)), material_stone_coverage >= 0.0);
+    let mean = pigment * (0.875 * stone + 0.125 * palette(M_DIRT));
     return mix(albedo, mean, weight);
 }
 
@@ -560,13 +566,18 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         fallback_shade_normal = fallback_normal;
         fallback_slope = field.w;
     }
-    if !edited && (c.info & INFO_TOPOLOGY) == 0u {
-        var material_normal = hit_up(h.t, d);
+    if natural_material_filter_allowed(edited, c) {
+        let material_up = hit_up(h.t, d);
+        var material_normal = material_up;
         if smooth_w > 0.0 { material_normal = fallback_normal; }
         if canonical_w > 0.0 { material_normal = normalize(mix(material_normal, canonical_relief.xyz, canonical_w)); }
         // Bound the grazing expansion; voxel detail and normal gates keep
         // their own footprint. This scalar approximation is material-only.
         material_footprint = pixel / max(abs(dot(material_normal, d)), 0.25);
+        // A pixel footprint on the surface projects to this radial height span.
+        // Horizontal metres alone are not a strata altitude bandwidth.
+        let radial_cosine = clamp(dot(material_normal, material_up), 0.0, 1.0);
+        material_radial_span = material_footprint * sqrt(max(0.0, 1.0 - radial_cosine * radial_cosine));
     }
     if !edited {
         var lowest = top;
@@ -733,7 +744,10 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             + material_snow_mix.y * palette(material_rock_id)
             + material_snow_mix.z * palette(M_DARK_STONE)
             + material_snow_mix.w * palette(M_DIRT));
-    } else if hash_filter_w > 0.0 && material_rock_base_id != M_AIR && !edited && (c.info & INFO_TOPOLOGY) == 0u {
+    } else if material_stone_coverage >= 0.0 && material_rock_base_id == M_AIR
+        && natural_material_filter_allowed(edited, c) {
+        albedo = pigment * mix(palette(M_DARK_STONE), palette(M_STONE), material_stone_coverage);
+    } else if hash_filter_w > 0.0 && material_rock_base_id != M_AIR && natural_material_filter_allowed(edited, c) {
         albedo = filtered_rock_flecks(albedo, pigment, material_rock_base_id, hash_filter_w);
     }
     out.t = h.t;

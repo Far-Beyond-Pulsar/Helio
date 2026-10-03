@@ -106,6 +106,8 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
         {world_source}
         {landform_source}
         var<private> material_footprint:f32=0.0;
+        var<private> material_radial_span:f32=0.0;
+        var<private> material_stone_coverage:f32=-1.0;
         var<private> material_snow_mix:vec4<f32>=vec4<f32>(-1.0,0.0,0.0,0.0);
         var<private> material_rock_id:u32=0u;
         var<private> material_rock_base_id:u32=0u;

@@ -144,8 +144,104 @@ fn material_noise_support(shift: u32, pixel: f32) -> f32 {
 // Empirical CDF of the project's integer noise on cube-face/plane slices:
 // 1.2M samples, four seeds, three axes. The normalized two-octave sum agrees
 // within 0.0035 coverage at these knots; this is an appearance approximation.
+// Same measured noise distribution as snow, plus its piecewise-linear
+// integral. This permits a box convolution without new noise samples.
+const MATERIAL_NOISE_CDF = array<f32, 33>(0.00000000, 0.00000250, 0.00002000, 0.00006917, 0.00032333, 0.00097500, 0.00300250, 0.00770250, 0.01944750, 0.04330750, 0.07070667, 0.10610750, 0.16352167, 0.23430250, 0.31787500, 0.40675833, 0.50058917, 0.59367667, 0.68297667, 0.76579917, 0.83619500, 0.89390500, 0.92928833, 0.95633250, 0.98046750, 0.99220417, 0.99696000, 0.99898750, 0.99968417, 0.99994000, 0.99998250, 0.99999750, 1.00000000);
+const MATERIAL_NOISE_AREA = array<f32, 33>(0.0000000000, 0.0000012500, 0.0000125000, 0.0000570850, 0.0002533350, 0.0009025000, 0.0028912500, 0.0082437500, 0.0218187500, 0.0531962500, 0.1102033350, 0.1986104200, 0.3334250050, 0.5323370900, 0.8084258400, 1.1707425050, 1.6244162550, 2.1715491750, 2.8098758450, 3.5342637650, 4.3352608500, 5.2003108500, 6.1119075150, 7.0547179300, 8.0231179300, 9.0094537650, 10.0040358500, 11.0020096000, 12.0013454350, 13.0011575200, 14.0011187700, 15.0011087700, 16.0011075200);
+
+fn material_noise_integral(value: f32) -> f32 {
+    let x = clamp(value / 4096.0 + 16.0, 0.0, 32.0);
+    let i = min(u32(x), 31u);
+    let t = x - f32(i);
+    return 4096.0 * (MATERIAL_NOISE_AREA[i] + MATERIAL_NOISE_CDF[i] * t
+        + 0.5 * (MATERIAL_NOISE_CDF[i + 1u] - MATERIAL_NOISE_CDF[i]) * t * t)
+        + max(value - 65536.0, 0.0);
+}
+
+// Integral of the unresolved phase CDF, conditioned on natural rock exposure.
+// The CDF is an appearance approximation; canonical integer IDs never use it.
+fn rock_phase_integral(value: f32, noise_scale: f32, cutoff: f32, cut_cdf: f32) -> f32 {
+    let x = max(value / noise_scale, cutoff);
+    return noise_scale * max(material_noise_integral(x) - material_noise_integral(cutoff)
+        - cut_cdf * (x - cutoff), 0.0) / (1.0 - cut_cdf);
+}
+
+fn rock_box_cdf(value: f32, left: f32, width: f32,
+    noise_scale: f32, cutoff: f32, cut_cdf: f32) -> f32 {
+    if noise_scale <= 0.0 { return clamp((value - left) / width, 0.0, 1.0); }
+    let width_q16 = width / noise_scale;
+    if width_q16 <= 4096.0 {
+        // A narrow box meets at most one CDF knot. Integrate its local
+        // trapezoids instead of cancelling two large cumulative areas.
+        let hi = (value - left) / noise_scale;
+        let lo = hi - width_q16;
+        if hi <= cutoff { return 0.0; }
+        if lo >= 65536.0 { return 1.0; }
+        let a = max(lo, cutoff);
+        let split = min((floor(a / 4096.0) + 1.0) * 4096.0, hi);
+        let fa = max(material_noise_cdf(a) - cut_cdf, 0.0) / (1.0 - cut_cdf);
+        let fs = max(material_noise_cdf(split) - cut_cdf, 0.0) / (1.0 - cut_cdf);
+        let fh = max(material_noise_cdf(hi) - cut_cdf, 0.0) / (1.0 - cut_cdf);
+        return clamp(0.5 * ((fa + fs) * (split - a) + (fs + fh) * (hi - split)) / width_q16, 0.0, 1.0);
+    }
+    return clamp((rock_phase_integral(value - left, noise_scale, cutoff, cut_cdf)
+        - rock_phase_integral(value - left - width, noise_scale, cutoff, cut_cdf)) / width, 0.0, 1.0);
+}
+
+fn rock_band_coverage(phase: f32, span: f32, deviation: f32, cutoff: f32) -> f32 {
+    let cut_cdf = material_noise_cdf(cutoff);
+    if deviation > 0.0 && cut_cdf > 0.999 { return -1.0; }
+    let noise_scale = deviation * (3000.0 / 65536.0);
+    if span <= 0.0 || (span < min(1.0, noise_scale * 65.536) && noise_scale > 0.0) {
+        if noise_scale <= 0.0 { return select(0.0, 1.0, fract(phase / 9000.0) < 0.5); }
+        let first = i32(floor((phase - 4000.0) / 9000.0));
+        var coverage = 0.0;
+        for (var b = first; b < first + 3; b++) {
+            let lo = max((f32(b) * 9000.0 - phase) / noise_scale, cutoff);
+            let hi = max((f32(b) * 9000.0 + 4500.0 - phase) / noise_scale, cutoff);
+            coverage += (material_noise_cdf(hi) - material_noise_cdf(lo)) / (1.0 - cut_cdf);
+        }
+        return clamp(coverage, 0.0, 1.0);
+    }
+    if noise_scale <= 0.0 {
+        if span < 1.0 {
+            // Centre on the nearest band boundary before adding a tiny span.
+            // Avoid cancelling a sub-mm pixel against a 4.5 m global phase.
+            let p = phase - floor(phase / 9000.0) * 9000.0;
+            if p < 2250.0 || p >= 6750.0 {
+                let edge = select(p, p - 9000.0, p >= 6750.0);
+                return clamp(0.5 + edge / span, 0.0, 1.0);
+            }
+            return clamp(0.5 - (p - 4500.0) / span, 0.0, 1.0);
+        }
+        let lo = phase - span * 0.5;
+        let hi = phase + span * 0.5;
+        let lo_period = floor(lo / 9000.0);
+        let hi_period = floor(hi / 9000.0);
+        let measure = 4500.0 * (hi_period - lo_period)
+            + min(hi - hi_period * 9000.0, 4500.0)
+            - min(lo - lo_period * 9000.0, 4500.0);
+        return clamp(measure / span, 0.0, 1.0);
+    }
+    // Whole 9 m periods have exactly half light stone, for any noise phase.
+    // Only a remainder below 9 m needs integration: bounded even at orbit.
+    let whole = floor(span / 9000.0) * 9000.0;
+    let remainder = max(span - whole, 0.0);
+    if remainder < 0.01 && whole > 0.0 { return 0.5; }
+    let start = phase - span * 0.5;
+    let left = start - floor(start / 9000.0) * 9000.0;
+    let first = i32(floor((left - 4000.0) / 9000.0));
+    var coverage = 0.0;
+    for (var b = first; b < first + 4; b++) {
+        let lo = f32(b) * 9000.0;
+        coverage += rock_box_cdf(lo + 4500.0, left, remainder, noise_scale, cutoff, cut_cdf)
+            - rock_box_cdf(lo, left, remainder, noise_scale, cutoff, cut_cdf);
+    }
+    return clamp((whole * 0.5 + remainder * coverage) / span, 0.0, 1.0);
+}
+
 fn material_noise_cdf(value: f32) -> f32 {
-    let cdf = array<f32, 33>(0.00000000, 0.00000250, 0.00002000, 0.00006917, 0.00032333, 0.00097500, 0.00300250, 0.00770250, 0.01944750, 0.04330750, 0.07070667, 0.10610750, 0.16352167, 0.23430250, 0.31787500, 0.40675833, 0.50058917, 0.59367667, 0.68297667, 0.76579917, 0.83619500, 0.89390500, 0.92928833, 0.95633250, 0.98046750, 0.99220417, 0.99696000, 0.99898750, 0.99968417, 0.99994000, 0.99998250, 0.99999750, 1.00000000);
+    let cdf = MATERIAL_NOISE_CDF;
     let x = clamp(value / 65536.0 * 16.0 + 16.0, 0.0, 32.0);
     let i = min(u32(x), 31u);
     return mix(cdf[i], cdf[i + 1u], x - f32(i));
@@ -179,6 +275,7 @@ fn snow_material_coverage(resolved: f32, deviation: f32, threshold: f32,
 fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
     material_snow_mix = vec4<f32>(-1.0, 0.0, 0.0, 0.0);
     material_rock_base_id = M_AIR;
+    material_stone_coverage = -1.0;
     let dirt = terrain.header.z;
     let steep = slope >= terrain.shape.y;
     let wet = landform_moisture(p);
@@ -209,18 +306,27 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
     // outcrop can reach the rock fringe: skip it (same result).
     let seed = bitcast<u32>(terrain.header.w);
     var outcrop = -NOISE_ONE;
+    var resolved_outcrop = f32(outcrop);
+    var outcrop_deviation = 0.0;
+    var outcrop_support = 1.0;
     if alpine > 0 || slope >= 5 {
         // Preserve the original integer samples and canonical classification.
         let broad = noise(p, 10u, seed ^ 0x1B56C4E9u);
         let fine = noise(p, 7u, seed ^ 0x6A09E667u) / 3;
         outcrop = broad + fine;
-        if material_footprint > 0.0 && top_height > snowline && depth < dirt {
+        resolved_outcrop = f32(outcrop);
+        if material_footprint > 1.6 {
             let broad_support = material_noise_support(10u, material_footprint);
             let fine_support = material_noise_support(7u, material_footprint);
-            if min(broad_support, fine_support) < 1.0 {
-                let resolved = f32(broad) * broad_support + f32(fine) * fine_support;
-                let deviation = sqrt((1.0 - broad_support * broad_support)
+            outcrop_support = min(broad_support, fine_support);
+            if outcrop_support < 1.0 {
+                resolved_outcrop = f32(broad) * broad_support + f32(fine) * fine_support;
+                outcrop_deviation = sqrt((1.0 - broad_support * broad_support)
                     + (1.0 - fine_support * fine_support) / 9.0);
+            }
+            if outcrop_deviation > 0.0 && top_height > snowline && depth < dirt {
+                let resolved = resolved_outcrop;
+                let deviation = outcrop_deviation;
                 // Match truncating integer division at negative slopes too.
                 let q = 6 - slope;
                 let threshold = select(f32((q - 1) * 8192) + 0.5, f32(q * 8192) - 0.5, q > 0);
@@ -245,6 +351,19 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
     if steep || (exposed > 0 && depth < dirt) {
         let rock = select(M_DARK_STONE, M_STONE, (div_floor(altitude + scale_q16(outcrop, 3000), 4500) & 1) == 0);
         if depth < 1 { material_rock_base_id = rock; }
+        // Four samples per 4.5 m band retain its resolved contrast, matching
+        // the noise support gate. No coverage work on fully resolved rock.
+        let band_weight = max(smoothstep(1.125, 2.25, material_radial_span), 1.0 - outcrop_support);
+        if material_footprint > 0.0 && band_weight > 0.0 {
+            // Exposure conditions the phase distribution on non-steep patches.
+            let exposure = f32(NOISE_ONE - 2 * alpine - select(0, NOISE_ONE / 2, slope >= 5)) + 0.5;
+            let cutoff = select(-65536.0, (exposure - resolved_outcrop) / max(outcrop_deviation, 0.0001), !steep);
+            let phase = f32(rem_floor(altitude, 9000)) + resolved_outcrop * (3000.0 / 65536.0);
+            let coverage = rock_band_coverage(phase, material_radial_span * 1000.0, outcrop_deviation, cutoff);
+            if coverage >= 0.0 {
+                material_stone_coverage = mix(select(0.0, 1.0, rock == M_STONE), coverage, band_weight);
+            }
+        }
         if depth < 1 && (h & 7u) == 0u { return M_DIRT; }
         return rock;
     }
