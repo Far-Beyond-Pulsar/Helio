@@ -160,23 +160,24 @@ fn material_noise_integral(value: f32) -> f32 {
 
 // Integral of the unresolved phase CDF, conditioned on natural rock exposure.
 // The CDF is an appearance approximation; canonical integer IDs never use it.
-fn rock_phase_integral(value: f32, noise_scale: f32, cutoff: f32, cut_cdf: f32) -> f32 {
+fn rock_phase_integral(value: f32, noise_scale: f32, cutoff: f32, cut_cdf: f32, cutoff_integral: f32) -> f32 {
     let x = max(value / noise_scale, cutoff);
-    return noise_scale * max(material_noise_integral(x) - material_noise_integral(cutoff)
+    return noise_scale * max(material_noise_integral(x) - cutoff_integral
         - cut_cdf * (x - cutoff), 0.0) / (1.0 - cut_cdf);
 }
 
 fn rock_box_cdf(value: f32, left: f32, width: f32,
-    noise_scale: f32, cutoff: f32, cut_cdf: f32) -> f32 {
+    noise_scale: f32, cutoff: f32, cut_cdf: f32, cutoff_integral: f32) -> f32 {
     if noise_scale <= 0.0 { return clamp((value - left) / width, 0.0, 1.0); }
     let width_q16 = width / noise_scale;
+    let hi = (value - left) / noise_scale;
+    let lo = hi - width_q16;
+    // Saturated endpoints need no CDF primitive, including wide boxes.
+    if hi <= max(cutoff, -65536.0) { return 0.0; }
+    if lo >= 65536.0 { return 1.0; }
     if width_q16 <= 4096.0 {
         // A narrow box meets at most one CDF knot. Integrate its local
         // trapezoids instead of cancelling two large cumulative areas.
-        let hi = (value - left) / noise_scale;
-        let lo = hi - width_q16;
-        if hi <= cutoff { return 0.0; }
-        if lo >= 65536.0 { return 1.0; }
         let a = max(lo, cutoff);
         let split = min((floor(a / 4096.0) + 1.0) * 4096.0, hi);
         let fa = max(material_noise_cdf(a) - cut_cdf, 0.0) / (1.0 - cut_cdf);
@@ -184,26 +185,14 @@ fn rock_box_cdf(value: f32, left: f32, width: f32,
         let fh = max(material_noise_cdf(hi) - cut_cdf, 0.0) / (1.0 - cut_cdf);
         return clamp(0.5 * ((fa + fs) * (split - a) + (fs + fh) * (hi - split)) / width_q16, 0.0, 1.0);
     }
-    return clamp((rock_phase_integral(value - left, noise_scale, cutoff, cut_cdf)
-        - rock_phase_integral(value - left - width, noise_scale, cutoff, cut_cdf)) / width, 0.0, 1.0);
+    return clamp((rock_phase_integral(value - left, noise_scale, cutoff, cut_cdf, cutoff_integral)
+        - rock_phase_integral(value - left - width, noise_scale, cutoff, cut_cdf, cutoff_integral)) / width, 0.0, 1.0);
 }
 
 fn rock_band_coverage(phase: f32, span: f32, deviation: f32, cutoff: f32) -> f32 {
-    let cut_cdf = material_noise_cdf(cutoff);
-    if deviation > 0.0 && cut_cdf > 0.999 { return -1.0; }
     let noise_scale = deviation * (3000.0 / 65536.0);
-    if span <= 0.0 || (span < min(1.0, noise_scale * 65.536) && noise_scale > 0.0) {
-        if noise_scale <= 0.0 { return select(0.0, 1.0, fract(phase / 9000.0) < 0.5); }
-        let first = i32(floor((phase - 4000.0) / 9000.0));
-        var coverage = 0.0;
-        for (var b = first; b < first + 3; b++) {
-            let lo = max((f32(b) * 9000.0 - phase) / noise_scale, cutoff);
-            let hi = max((f32(b) * 9000.0 + 4500.0 - phase) / noise_scale, cutoff);
-            coverage += (material_noise_cdf(hi) - material_noise_cdf(lo)) / (1.0 - cut_cdf);
-        }
-        return clamp(coverage, 0.0, 1.0);
-    }
     if noise_scale <= 0.0 {
+        if span <= 0.0 { return select(0.0, 1.0, fract(phase / 9000.0) < 0.5); }
         if span < 1.0 {
             // Centre on the nearest band boundary before adding a tiny span.
             // Avoid cancelling a sub-mm pixel against a 4.5 m global phase.
@@ -223,6 +212,18 @@ fn rock_band_coverage(phase: f32, span: f32, deviation: f32, cutoff: f32) -> f32
             - min(lo - lo_period * 9000.0, 4500.0);
         return clamp(measure / span, 0.0, 1.0);
     }
+    let cut_cdf = material_noise_cdf(cutoff);
+    if cut_cdf > 0.999 { return -1.0; }
+    if span <= 0.0 || (span < min(1.0, noise_scale * 65.536) && noise_scale > 0.0) {
+        let first = i32(floor((phase - 4000.0) / 9000.0));
+        var coverage = 0.0;
+        for (var b = first; b < first + 3; b++) {
+            let lo = max((f32(b) * 9000.0 - phase) / noise_scale, cutoff);
+            let hi = max((f32(b) * 9000.0 + 4500.0 - phase) / noise_scale, cutoff);
+            coverage += (material_noise_cdf(hi) - material_noise_cdf(lo)) / (1.0 - cut_cdf);
+        }
+        return clamp(coverage, 0.0, 1.0);
+    }
     // Whole 9 m periods have exactly half light stone, for any noise phase.
     // Only a remainder below 9 m needs integration: bounded even at orbit.
     let whole = floor(span / 9000.0) * 9000.0;
@@ -231,11 +232,16 @@ fn rock_band_coverage(phase: f32, span: f32, deviation: f32, cutoff: f32) -> f32
     let start = phase - span * 0.5;
     let left = start - floor(start / 9000.0) * 9000.0;
     let first = i32(floor((left - 4000.0) / 9000.0));
+    var cutoff_integral = 0.0;
+    if remainder / noise_scale > 4096.0 {
+        // Identical for all eight endpoints; narrow boxes never use it.
+        cutoff_integral = material_noise_integral(cutoff);
+    }
     var coverage = 0.0;
     for (var b = first; b < first + 4; b++) {
         let lo = f32(b) * 9000.0;
-        coverage += rock_box_cdf(lo + 4500.0, left, remainder, noise_scale, cutoff, cut_cdf)
-            - rock_box_cdf(lo, left, remainder, noise_scale, cutoff, cut_cdf);
+        coverage += rock_box_cdf(lo + 4500.0, left, remainder, noise_scale, cutoff, cut_cdf, cutoff_integral)
+            - rock_box_cdf(lo, left, remainder, noise_scale, cutoff, cut_cdf, cutoff_integral);
     }
     return clamp((whole * 0.5 + remainder * coverage) / span, 0.0, 1.0);
 }
