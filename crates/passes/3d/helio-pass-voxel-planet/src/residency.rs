@@ -234,6 +234,34 @@ fn select_pending_level(levels: &mut [Level], top_level: u32,
     *cached
 }
 
+/// Keep complete visible blocks in their camera-distance order across levels.
+/// Global coverage still wins; an unavailable visible key is consumed once,
+/// so it cannot prevent ordinary admission from making progress this plan.
+fn pop_pending(levels: &mut [Level], top_level: u32,
+    visible: &mut VecDeque<(usize, u64)>, cached: &mut Option<(usize, usize)>,
+    deadline: Option<std::time::Instant>)
+    -> Option<(usize, u64, usize)> {
+    let top = top_level as usize;
+    if let Some((key, bucket)) = levels[top].pending.pop() {
+        return Some((top, key, bucket));
+    }
+    let mut skipped = 0usize;
+    while !visible.is_empty() {
+        if skipped % 64 == 0 && deadline.is_some_and(|at| std::time::Instant::now() >= at) {
+            return None;
+        }
+        let (index, key) = visible.pop_front().unwrap();
+        skipped += 1;
+        let Some(level) = levels.get_mut(index) else { continue };
+        let Some(&(bucket, _)) = level.pending.at.get(&key) else { continue };
+        level.pending.remove(key);
+        return Some((index, key, bucket as usize));
+    }
+    let (index, _) = select_pending_level(levels, top_level, cached)?;
+    let (key, bucket) = levels[index].pending.pop()?;
+    Some((index, key, bucket))
+}
+
 enum Planner {
     Inline(WindowPlanner),
     Worker(WindowWorker),
@@ -368,6 +396,9 @@ pub struct Residency {
     view_focus: Option<DVec3>,
     /// Bounded asynchronous feedback from primary rays missing fine data.
     visible_blocks: Vec<u64>,
+    /// At most 64 blocks' columns, retaining rank through partial budgets.
+    visible_admission: VecDeque<(usize, u64)>,
+    visible_rank_source: Option<VisibleStamp>,
     visible_source: Option<VisibleStamp>,
     visible_view: Option<VisibleStamp>,
     /// Full aligned block identities. Retiring entries still count toward
@@ -452,6 +483,8 @@ impl Residency {
             priority_eye: None,
             view_focus: None,
             visible_blocks: Vec::new(),
+            visible_admission: VecDeque::new(),
+            visible_rank_source: None,
             visible_source: None,
             visible_view: None,
             visible_leases: FxHashMap::default(),
@@ -720,6 +753,8 @@ impl Residency {
     /// Queue at most64 block identities for the next bounded plan refresh.
     /// Feedback changes priority, never resident window coverage.
     pub fn prioritize_visible_blocks(&mut self, blocks: impl IntoIterator<Item = (u32, u32)>) {
+        self.visible_admission.clear();
+        self.visible_rank_source = None;
         self.visible_blocks.clear();
         self.visible_blocks.extend(blocks.into_iter().take(VISIBLE_BLOCKS).map(|(a, b)| pack(a, b)));
         self.visible_source = None;
@@ -735,6 +770,7 @@ impl Residency {
         frame: u32, view: u32, at: std::time::Instant) {
         self.prioritize_visible_blocks(blocks);
         self.visible_source = Some(VisibleStamp { frame, view, at });
+        self.visible_rank_source = self.visible_source;
     }
 
     fn visible_columns(&self, key: u64) -> Option<([u64; 16], usize)> {
@@ -803,10 +839,18 @@ impl Residency {
     }
 
     fn refresh_visible_pending(&mut self, deadline: Option<std::time::Instant>) {
+        let rank_requests = self.visible_rank_source.is_none_or(|source| self.source_is_current(source, 8));
+        if !rank_requests {
+            self.visible_admission.clear();
+            self.visible_rank_source = None;
+        }
         let mut promoted = Vec::new();
         let mut pending = Vec::new();
         let mut blocks = std::mem::take(&mut self.visible_blocks);
         let requested_blocks = blocks.len();
+        let mut ranked: FxHashSet<_> = if requested_blocks != 0 {
+            self.visible_admission.iter().copied().collect()
+        } else { FxHashSet::default() };
         let source = self.visible_source.take().filter(|source| self.source_is_current(*source, 8));
         // Reinsert leased demand after snapshot replacement cleared pending.
         for &key in self.visible_leases.keys() {
@@ -837,6 +881,13 @@ impl Residency {
                 if !self.publishing.contains_key(&key)
                     && (!self.residents.contains_key(key) || self.initial_retries.contains(&key)) {
                     pending.push((level, key));
+                    // Leases requeue ordinary demand, but do not invent a
+                    // new distance rank after the captured view expires.
+                    if rank_requests && index < requested_blocks
+                        && self.visible_admission.len() < VISIBLE_BLOCKS * 16
+                        && ranked.insert((level, key)) {
+                        self.visible_admission.push_back((level, key));
+                    }
                 }
             }
         }
@@ -1304,13 +1355,14 @@ impl Residency {
         let mut awaiting_publication = Vec::new();
         let mut last_summary_check = None;
         let mut pending_selection = None;
+        let admission_deadline = budget_time.map(|budget| started + budget);
         while work.jobs.len() < budget {
             steps += 1;
             if (steps == 1 || steps % 64 == 0) && out_of_time() {
                 break;
             }
-            let Some((index, _)) = select_pending_level(&mut self.levels, top_level, &mut pending_selection) else { break };
-            let (key, bucket) = self.levels[index].pending.pop().unwrap();
+            let Some((index, key, bucket)) = pop_pending(&mut self.levels, top_level,
+                &mut self.visible_admission, &mut pending_selection, admission_deadline) else { break };
             let transient = self.transient_wanted(key);
             let leased = self.visible_leases.contains_key(&(key & !(3u64 | (3u64 << 32))));
             if (self.levels[index].wanted.as_ref().is_some_and(|wanted| !wanted.contains(&key))
@@ -1596,6 +1648,80 @@ mod tests {
         assert_eq!(observed, [501,500,201,300,400,101,100,
             501,300,502,103,350,200,102,301]);
         assert!(cached_levels.iter().all(|level| level.pending.is_empty()));
+    }
+
+    #[test]
+    fn visible_rank_crosses_levels_and_yields_to_global_coverage() {
+        let mut levels: Vec<Level> = (0..6).map(|_| Level::default()).collect();
+        // The visible L3 block is nearer than the L0 block. Ordinary bucket
+        // ties used to select L0 first, losing the engine's distance order.
+        for key in 300..316 { levels[3].pending.insert(key, 0); }
+        for key in 100..116 { levels[0].pending.insert(key, 0); }
+        levels[5].pending.insert(500, 63);
+        let mut visible: VecDeque<_> = (300..316).map(|key| (3, key))
+            .chain((100..116).map(|key| (0, key))).collect();
+        let mut cached = None;
+        assert_eq!(pop_pending(&mut levels, 5, &mut visible, &mut cached, None), Some((5, 500, 63)));
+        // A partial frame stops after eight jobs without changing rank.
+        for key in 300..308 {
+            assert_eq!(pop_pending(&mut levels, 5, &mut visible, &mut cached, None), Some((3, key, 0)));
+        }
+        assert_eq!(visible.front(), Some(&(3, 308)));
+        for key in 308..316 {
+            assert_eq!(pop_pending(&mut levels, 5, &mut visible, &mut cached, None), Some((3, key, 0)));
+        }
+        assert_eq!(pop_pending(&mut levels, 5, &mut visible, &mut cached, None), Some((0, 100, 0)));
+    }
+
+    #[test]
+    fn unavailable_visible_rank_does_not_starve_ordinary_admission() {
+        let mut levels: Vec<Level> = (0..6).map(|_| Level::default()).collect();
+        levels[0].pending.insert(100, 3);
+        levels[3].pending.insert(300, 0);
+        let mut visible = VecDeque::from([(3, 999), (3, 300)]);
+        let mut cached = None;
+        assert_eq!(pop_pending(&mut levels, 5, &mut visible, &mut cached, None), Some((3, 300, 0)));
+        // Production may defer this key for an in-flight publication/alias.
+        // It returns to its ordinary bucket, not the visible head this plan.
+        levels[3].pending.insert(300, 4);
+        assert_eq!(pop_pending(&mut levels, 5, &mut visible, &mut cached, None), Some((0, 100, 3)));
+        assert_eq!(pop_pending(&mut levels, 5, &mut visible, &mut cached, None), Some((3, 300, 4)));
+        assert_eq!(pop_pending(&mut levels, 5, &mut visible, &mut cached, None), None);
+    }
+
+    #[test]
+    fn expired_visible_admission_deadline_keeps_remaining_rank() {
+        let mut levels: Vec<Level> = (0..6).map(|_| Level::default()).collect();
+        levels[0].pending.insert(100, 0);
+        let mut visible = VecDeque::from([(3, 999), (0, 100)]);
+        let mut cached = None;
+        assert_eq!(pop_pending(&mut levels, 5, &mut visible, &mut cached,
+            Some(std::time::Instant::now())), None);
+        assert_eq!(visible.len(), 2);
+        assert_eq!(pop_pending(&mut levels, 5, &mut visible, &mut cached, None), Some((0, 100, 0)));
+    }
+
+    #[test]
+    fn visible_rank_replacement_and_source_expiry_discard_old_camera_order() {
+        let (_, mut r, _, _) = edit_fixture();
+        r.visible_admission.push_back((0, 123));
+        r.prioritize_visible_blocks(std::iter::empty());
+        assert!(r.visible_admission.is_empty());
+        let at = std::time::Instant::now();
+        r.prioritize_visible_blocks_from(std::iter::empty(), 10, 7, at);
+        r.visible_admission.push_back((0, 123));
+        r.set_visible_view(19, 7, at);
+        r.refresh_visible_pending(None);
+        assert!(r.visible_admission.is_empty());
+        assert!(r.visible_rank_source.is_none());
+        let (_, mut r, _, at) = visible_bridge_fixture();
+        let keys = lease_block(&mut r, 1000, at);
+        assert_eq!(r.visible_admission.len(), keys.len());
+        r.set_visible_view(19, 7, at);
+        r.refresh_visible_pending(None);
+        assert!(r.transient_wanted(keys[0]), "the 32-frame ownership lease remains valid");
+        assert!(keys.iter().all(|key| r.levels[0].pending.at.contains_key(key)));
+        assert!(r.visible_admission.is_empty(), "lease reinsertion must not recreate expired 8-frame camera rank");
     }
 
     fn snapshot_update(serial: u64, keys: &[u64]) -> WindowUpdate {
@@ -2026,10 +2152,12 @@ mod tests {
         r.refresh_visible_pending(None);
         assert_eq!(r.visible_leases.len(), VISIBLE_BLOCKS);
         assert_eq!(r.levels[0].pending.len(), 1024);
+        assert_eq!(r.visible_admission.len(), VISIBLE_BLOCKS * 16);
         for i in (3000..3400).step_by(4) {
             lease_block(&mut r, i, at);
             assert_eq!(r.visible_leases.len(), VISIBLE_BLOCKS);
             assert_eq!(r.levels[0].pending.len(), 1024);
+            assert!(r.visible_admission.len() <= VISIBLE_BLOCKS * 16);
         }
         r.set_visible_view(43, 7, at);
         r.retire_visible_leases(&mut FrameWork::default(), &|| false);
