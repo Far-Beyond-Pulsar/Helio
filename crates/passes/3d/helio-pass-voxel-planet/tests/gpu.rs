@@ -8,6 +8,94 @@ use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Cell, Planet, PlanetRe
 use std::sync::Arc;
 
 #[test]
+fn summary_slots_match_cpu_across_grid_shapes_and_signed_tier_boundaries() {
+    use helio_pass_voxel_planet::grid::Shape;
+    use helio_pass_voxel_planet::residency::{block_region, block_slot, BLOCK_LOG2};
+    use wgpu::util::DeviceExt;
+    let Some(gpu) = gpu() else { return };
+    let mut queries: Vec<[i32; 8]> = Vec::new();
+    let mut expected = Vec::new();
+    for shape in [Shape::Sphere, Shape::Plane, Shape::InfinitePlane] {
+        let planet = Planet::new(PlanetRecipe { shape, ..Default::default() }).unwrap();
+        for level in 0..planet.grid().levels() {
+            for &face in planet.grid().faces() {
+                for tier in 1..=3 {
+                    let edge = 1i32 << BLOCK_LOG2[tier as usize - 1];
+                    let coordinates = [-edge - 1, -edge, -edge + 1, -1, 0, 1, edge - 1, edge, edge + 1];
+                    for bi in coordinates {
+                        for bj in coordinates {
+                            queries.push([level as i32, face as i32, tier as i32, 0, bi, bj, 0, 0]);
+                            expected.push(block_slot(level, face, tier, bi, bj));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Exercise the exact production helper, including its hardcoded tier
+    // strides. A second copy of its arithmetic would miss ABI regressions.
+    let common = include_str!("../shaders/common.wgsl");
+    let start = common.find("fn block_slot(").unwrap();
+    let end = start + common[start..].find("\n}").unwrap() + 2;
+    let source = format!(r#"
+struct Frame {{ extra: vec4<u32> }}
+struct Query {{ info: vec4<i32>, coords: vec4<i32> }}
+@group(0) @binding(0) var<uniform> frame: Frame;
+@group(0) @binding(1) var<storage, read> queries: array<Query>;
+@group(0) @binding(2) var<storage, read_write> output: array<u32>;
+{}
+@compute @workgroup_size(64)
+fn check(@builtin(global_invocation_id) id: vec3<u32>) {{
+    if id.x >= arrayLength(&queries) {{ return; }}
+    let q = queries[id.x];
+    output[id.x] = block_slot(u32(q.info.x), u32(q.info.y), u32(q.info.z), q.coords.x, q.coords.y);
+}}
+"#, &common[start..end]);
+    let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("production summary slot parity"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: None, layout: None, module: &module, entry_point: Some("check"),
+        compilation_options: Default::default(), cache: None,
+    });
+    let frame = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: None, contents: bytemuck::cast_slice(&[0u32, block_region(), 0, 0]),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+    let input = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: None, contents: bytemuck::cast_slice(&queries), usage: wgpu::BufferUsages::STORAGE,
+    });
+    let bytes = (expected.len() * 4) as u64;
+    let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None, size: bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None, layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: frame.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: input.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: output.as_entire_binding() },
+        ],
+    });
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups((queries.len() as u32).div_ceil(64), 1, 1);
+    }
+    gpu.queue.submit([encoder.finish()]);
+    let data = read_buffer(&gpu, &output, bytes);
+    for (index, expected) in expected.into_iter().enumerate() {
+        let actual = u32::from_le_bytes(data[index * 4..index * 4 + 4].try_into().unwrap());
+        assert_eq!(actual, expected, "query {:?}", queries[index]);
+    }
+}
+
+#[test]
 fn terrain_programs_are_bit_identical_to_cpu() {
     let Some(gpu) = gpu() else { return };
     use helio_pass_voxel_planet::grid::Shape;
