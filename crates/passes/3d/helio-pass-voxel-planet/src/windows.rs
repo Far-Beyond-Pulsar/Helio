@@ -86,6 +86,77 @@ fn pack(k0: u32, k1: u32) -> u64 {
     u64::from(k0) | (u64::from(k1) << 32)
 }
 
+/// Snapshot scanners retain one descriptor per intersecting summary block.
+/// Membership and row-major column order are identical to the delta scanner.
+#[derive(Clone, Copy)]
+struct SnapshotBlock {
+    priority: f32,
+    first: u64,
+    width: u32,
+    height: u32,
+}
+
+fn snapshot_columns(grid: Grid, request: &WindowRequest, level: u32, radius: f64,
+    mut blocks: Vec<SnapshotBlock>) -> (FxHashSet<u64>, Vec<(f32, u64)>) {
+    let forecast = request.priority_eye.or(request.prefetch_eye);
+    let focus = request.view_focus;
+    if forecast.is_some() || focus.is_some() {
+        let forecast_penalty = forecast.map_or(0.0, |point| grid.ground_distance(request.eye, point) * 0.25);
+        let focus_penalty = focus.map_or(0.0, |point| grid.ground_distance(request.eye, point) * 0.125);
+        let cells = BRICK << level;
+        let columns = grid.cells() / cells;
+        let denominator = radius.max(grid.level_size(level));
+        for block in &mut blocks {
+            let key = block.first;
+            let face = ((key as u32 >> 24) & 7) as u8;
+            let bi = (key as u32 & 0xffffff) as i32 & !3;
+            let bj = (key >> 32) as i32 & !3;
+            // Keep the original priority arithmetic, including clipped edges.
+            let i = f64::from(bi) + f64::from((columns - bi).min(4)) * 0.5;
+            let j = f64::from(bj) + f64::from((columns - bj).min(4)) * 0.5;
+            let point = grid.ground_point(face, i * f64::from(cells), j * f64::from(cells));
+            let mut distance = grid.ground_distance(request.eye, point);
+            if let Some(future) = forecast { distance = distance.min(grid.ground_distance(future, point) + forecast_penalty); }
+            if let Some(focus) = focus { distance = distance.min(grid.ground_distance(focus, point) + focus_penalty); }
+            block.priority = (distance / denominator) as f32;
+        }
+    }
+    const BUCKETS: usize = 64;
+    let bucket = |priority: f32| ((priority.max(0.0) * BUCKETS as f32) as usize).min(BUCKETS - 1);
+    let mut offsets = [0usize; BUCKETS];
+    for block in &blocks { offsets[bucket(block.priority)] += 1; }
+    let mut start = 0;
+    for offset in &mut offsets {
+        let count = *offset;
+        *offset = start;
+        start += count;
+    }
+    let begins = offsets;
+    let mut grouped = vec![SnapshotBlock { priority: 0.0, first: 0, width: 0, height: 0 }; blocks.len()];
+    for block in blocks.drain(..) {
+        let index = &mut offsets[bucket(block.priority)];
+        grouped[*index] = block;
+        *index += 1;
+    }
+    drop(blocks);
+    for index in 0..BUCKETS {
+        grouped[begins[index]..offsets[index]].sort_by(|a, b| a.priority.total_cmp(&b.priority));
+    }
+    let count = grouped.iter().map(|block| (block.width * block.height) as usize).sum();
+    let mut wanted = FxHashSet::with_capacity_and_hasher(count, Default::default());
+    let mut adds = Vec::with_capacity(count);
+    for block in grouped {
+        for y in 0..block.height {
+            for x in 0..block.width {
+                let key = pack(block.first as u32 + x, (block.first >> 32) as u32 + y);
+                wanted.insert(key);
+                adds.push((block.priority, key));
+            }
+        }
+    }
+    (wanted, adds)
+}
+
 /// Retire whole summary owners before spreading removals across other
 /// blocks. All three tiers must release their references before an incoming
 /// block can reuse a toroidal slot. Membership and delta order stay intact.
@@ -367,6 +438,119 @@ impl WindowPlanner {
         out
     }
 
+    /// Columns of a plane level within `radius` of ground point `center`.
+    fn scan_snapshot_plane(&self, level: u32, center: DVec3, radius: f64, base_priority: bool) -> Vec<SnapshotBlock> {
+        let grid = self.grid;
+        let col_cells = BRICK << level;
+        let cols = grid.cells() / col_cells;
+        let col = grid.level_size(level) * f64::from(BRICK);
+        let c = grid.face_coords(PLANE_FACE, center).unwrap_or([0.0; 3]);
+        let (ci, cj) = (c[0] / f64::from(col_cells), c[1] / f64::from(col_cells));
+        let reach = (radius / col + 1.0).min(f64::from(cols));
+        let lo_i = ((ci - reach).floor() as i32).max(0);
+        let hi_i = ((ci + reach).ceil() as i32).min(cols - 1);
+        let lo_j = ((cj - reach).floor() as i32).max(0);
+        let hi_j = ((cj + reach).ceil() as i32).min(cols - 1);
+        let limit = radius / col + 0.75;
+        let mut out = Vec::new();
+        if lo_i > hi_i || lo_j > hi_j { return out; }
+        // Traversal admits complete tier-1 blocks. Expand only blocks that
+        // intersect the original column-centre circle: partial boundary
+        // blocks would otherwise stay unusable even after settling.
+        for bj in lo_j / 4..=hi_j / 4 {
+            let (y0, y1) = (bj * 4, (bj * 4 + 3).min(cols - 1));
+            for bi in lo_i / 4..=hi_i / 4 {
+                let (x0, x1) = (bi * 4, (bi * 4 + 3).min(cols - 1));
+                let x = (ci.floor() as i32).clamp(x0.max(lo_i), x1.min(hi_i));
+                let y = (cj.floor() as i32).clamp(y0.max(lo_j), y1.min(hi_j));
+                let d = (f64::from(x) + 0.5 - ci).hypot(f64::from(y) + 0.5 - cj);
+                if d > limit { continue; }
+                let priority = if base_priority { ((f64::from(x0 + x1 + 1) * 0.5 - ci)
+                    .hypot(f64::from(y0 + y1 + 1) * 0.5 - cj) / limit.max(1e-12)) as f32 } else { 0.0 };
+                out.push(SnapshotBlock { priority, first: pack(key0(PLANE_FACE, level, x0), y0 as u32),
+                    width: (x1 - x0 + 1) as u32, height: (y1 - y0 + 1) as u32 });
+            }
+        }
+        out
+    }
+
+    fn scan_snapshot(&self, level: u32, dir: DVec3, radius: f64, base_priority: bool) -> Vec<SnapshotBlock> {
+        let grid = self.grid;
+        if grid.is_plane() {
+            return self.scan_snapshot_plane(level, dir, radius, base_priority);
+        }
+        let r0 = grid.radius();
+        let col_cells = BRICK << level;
+        let cols = grid.cells() / col_cells;
+        let col_angle = grid.delta() * f64::from(col_cells);
+        let theta = (radius / r0).min(std::f64::consts::PI);
+        let cos_limit = (theta + col_angle * 0.75).min(std::f64::consts::PI).cos();
+        let mut out = Vec::new();
+        for face in 0..6u8 {
+            let [n, a, b] = face_axes(face);
+            let dn = dir.dot(n);
+            if theta < 1.2 && dn < (theta + 1.0).min(std::f64::consts::PI).cos() {
+                continue;
+            }
+            let (lo_i, hi_i, lo_j, hi_j) = if dn > 0.2 && theta < 0.9 {
+                let ai = grid.index_of_angle(dir.dot(a).atan2(dn)) / f64::from(col_cells);
+                let bj = grid.index_of_angle(dir.dot(b).atan2(dn)) / f64::from(col_cells);
+                let reach = theta / col_angle / 0.7 + 2.0;
+                (
+                    ((ai - reach).floor() as i32).max(0),
+                    ((ai + reach).ceil() as i32).min(cols - 1),
+                    ((bj - reach).floor() as i32).max(0),
+                    ((bj + reach).ceil() as i32).min(cols - 1),
+                )
+            } else {
+                (0, cols - 1, 0, cols - 1)
+            };
+            if lo_i > hi_i || lo_j > hi_j {
+                continue;
+            }
+            let block_lo_i = lo_i & !3;
+            let block_hi_i = (hi_i | 3).min(cols - 1);
+            let block_lo_j = lo_j & !3;
+            let block_hi_j = (hi_j | 3).min(cols - 1);
+            let tan_i: Vec<f64> = (block_lo_i..=block_hi_i)
+                .map(|c| grid.angle((f64::from(c) + 0.5) * f64::from(col_cells)).tan())
+                .collect();
+            let tan_j: Vec<f64> = (block_lo_j..=block_hi_j)
+                .map(|c| grid.angle((f64::from(c) + 0.5) * f64::from(col_cells)).tan())
+                .collect();
+            let (da, db) = (dir.dot(a), dir.dot(b));
+            for bj in lo_j / 4..=hi_j / 4 {
+                let (y0, y1) = (bj * 4, (bj * 4 + 3).min(cols - 1));
+                for bi in lo_i / 4..=hi_i / 4 {
+                    let (x0, x1) = (bi * 4, (bi * 4 + 3).min(cols - 1));
+                    let mut intersects = false;
+                    'columns: for y in y0.max(lo_j)..=y1.min(hi_j) {
+                        let tb = tan_j[(y - block_lo_j) as usize];
+                        for x in x0.max(lo_i)..=x1.min(hi_i) {
+                            let ta = tan_i[(x - block_lo_i) as usize];
+                            let cos = (dn + ta * da + tb * db) / (1.0 + ta * ta + tb * tb).sqrt();
+                            if cos >= cos_limit {
+                                intersects = true;
+                                break 'columns;
+                            }
+                        }
+                    }
+                    if !intersects { continue; }
+                    // Forecast/focus ranking replaces this value completely.
+                    let priority = if base_priority {
+                        let ta = grid.angle(f64::from(x0 + x1 + 1) * 0.5 * f64::from(col_cells)).tan();
+                        let tb = grid.angle(f64::from(y0 + y1 + 1) * 0.5 * f64::from(col_cells)).tan();
+                        let cos = (dn + ta * da + tb * db) / (1.0 + ta * ta + tb * tb).sqrt();
+                        (cos.clamp(-1.0, 1.0).acos() / theta.max(1e-12)) as f32
+                    } else { 0.0 };
+                    out.push(SnapshotBlock { priority, first: pack(key0(face, level, x0), y0 as u32),
+                        width: (x1 - x0 + 1) as u32, height: (y1 - y0 + 1) as u32 });
+                }
+            }
+        }
+        out
+    }
+
     /// Radial bound of the terrain within a level's reach of the eye's
     /// ground point (see [`crate::planet::Planet::local_outer_radius`]).
     /// Computed only where it can matter: a level far above the highest
@@ -406,6 +590,145 @@ impl WindowPlanner {
     /// Compute only the owned range. Independent workers never scan or retain
     /// wanted sets for the other's levels; both use the global coarsest level.
     fn update_range(&mut self, request: &WindowRequest, range: std::ops::Range<u32>) -> WindowUpdate {
+        assert!(range.start < range.end && range.end <= self.grid.levels());
+        let started = std::time::Instant::now();
+        let grid = self.grid;
+        let r0 = grid.radius();
+        let eye = request.eye;
+        let dither = sanitize_lod_dither(request.lod_dither);
+        let dither_changed = self.lod_dither != Some(dither);
+        self.lod_dither = Some(dither);
+        // Window centre: the eye direction on a sphere, its ground point on a plane.
+        let dir = if grid.is_plane() { DVec3::new(eye.x, 0.0, eye.z) } else { eye.normalize() };
+        // Below-datum terrain still has a horizon. Use the datum sphere as
+        // the conservative radius, with nonnegative clearance and peak.
+        let height = (grid.radial(eye) - r0.min(request.outer_radius)).max(0.0);
+        let peak = (request.outer_radius - r0).max(0.0);
+        // Farthest terrain that can rise above the horizon (none on a plane).
+        let horizon = if grid.is_plane() {
+            f64::INFINITY
+        } else {
+            (2.0 * r0 * height + height * height).sqrt() + (2.0 * r0 * peak + peak * peak).sqrt()
+        };
+        let top_level = grid.levels() - 1;
+        let mut update = WindowUpdate {
+            serial: request.serial,
+            snapshot: self.snapshot,
+            partial: range.end < grid.levels(),
+            processed_levels: ((1u32 << range.end) - 1) & !((1u32 << range.start) - 1),
+            ..Default::default()
+        };
+        for level in range {
+            let nominal = request.lod0 * f64::from(1u32 << level);
+            // selected=t*(1+d*(hash-.5)); fine selection can extend to
+            // nominal/(1-d/2), and the next level can start correspondingly early.
+            let selected_reach = nominal / (1.0 - dither * 0.5);
+            let reach = (nominal * 1.05).max(selected_reach);
+            let inner = if level == 0 { 0.0 } else {
+                request.lod0 * f64::from(1u32 << (level - 1)) / (1.0 + dither * 0.5)
+            };
+            // Height over the highest terrain the level's window can hold:
+            // over a meadow far below, fine levels are not needed at all.
+            let altitude = grid.radial(eye) - self.local_outer(request, level, reach);
+            let future = request.prefetch_eye.unwrap_or(eye);
+            let future_altitude = grid.radial(future) - self.local_outer(request, level, reach);
+            let needed = level == top_level || (altitude.min(future_altitude) < reach && inner < horizon);
+            let state = &mut self.levels[level as usize];
+            if !needed {
+                if state.active {
+                    update.levels.push(LevelDiff {
+                        level,
+                        active: false,
+                        center: dir,
+                        radius: 0.0,
+                        adds: Vec::new(),
+                        removes: if self.snapshot { Vec::new() }
+                            else { order_removes_by_blocks(state.wanted.iter().copied().collect()) },
+                    });
+                    state.wanted = Default::default();
+                    update.wanted.push((level, state.wanted.clone()));
+                    state.active = false;
+                }
+                continue;
+            }
+            let col = grid.level_size(level) * f64::from(BRICK);
+            // The direct-mapped summary tables bound the window diameter.
+            let cap = col * f64::from(max_window_columns() / 2 - 2) * 0.8;
+            // Recentring tolerates a three-column vector displacement. On a
+            // sphere that is a chord: convert it to a conservative arc length.
+            let drift = if grid.is_plane() { col * 3.0 } else {
+                2.0 * r0 * (col * 3.0 / (2.0 * r0)).min(1.0).asin()
+            };
+            let tangential_col = grid.delta() * f64::from(BRICK << level)
+                * if grid.is_plane() { 1.0 } else { r0 };
+            // The scanner already admits centres an extra .75 angular column
+            // outwards. A face's nearest centre is at most one angular column
+            // away (its projection Jacobian norm is <=sqrt(2)). Complete blocks
+            // are retained; this remaining slack covers centre hysteresis.
+            let slack = tangential_col * 0.25 + col * 0.25;
+            let pad = (col * 2.0).max(drift + slack - (reach - selected_reach));
+            let radius = if level == top_level {
+                // The coarsest level covers the whole world.
+                if grid.is_plane() { f64::from(grid.cells()) * grid.voxel_size() * 1.5 } else { r0 * 4.0 }
+            } else {
+                let future_reach = (reach * reach - future_altitude.max(0.0).powi(2)).max(0.0).sqrt();
+                let motion = grid.ground_distance(eye, future);
+                ((reach * reach - altitude.max(0.0).powi(2)).max(0.0).sqrt()
+                    .max(future_reach + motion.min(reach * 0.5)).min(horizon) + pad).min(cap)
+            };
+            let moved = if grid.is_plane() { state.center.distance(dir) } else { state.center.distance(dir) * r0 };
+            let actual_drift = if grid.is_plane() { moved } else {
+                2.0 * r0 * (moved / (2.0 * r0)).min(1.0).asin()
+            };
+            let needed_radius = ((selected_reach * selected_reach - altitude.max(0.0).powi(2)).max(0.0).sqrt()
+                .max((selected_reach * selected_reach - future_altitude.max(0.0).powi(2)).max(0.0).sqrt()
+                    + grid.ground_distance(eye, future).min(selected_reach * 0.5))
+                .min(horizon) + actual_drift + slack).min(cap);
+            if state.active && !dither_changed && moved <= col * 3.0
+                && needed_radius <= state.radius
+                && (radius - state.radius).abs() <= state.radius * 0.08 + col {
+                continue;
+            }
+            let (next, adds, removes) = if self.snapshot {
+                let base_priority = request.priority_eye.or(request.prefetch_eye).is_none() && request.view_focus.is_none();
+                let blocks = self.scan_snapshot(level, dir, radius, base_priority);
+                let (next, adds) = snapshot_columns(grid, request, level, radius, blocks);
+                (next, adds, Vec::new())
+            } else {
+                // The original delta scanner remains independent of the
+                // snapshot block path and its tests use it as the oracle.
+                let scanned = self.scan(level, dir, radius);
+                let state = &self.levels[level as usize];
+                let mut next = FxHashSet::with_capacity_and_hasher(scanned.len(), Default::default());
+                let mut adds = Vec::new();
+                for (priority, key) in scanned {
+                    if !state.wanted.contains(&key) { adds.push((priority, key)); }
+                    next.insert(key);
+                }
+                let removes = order_removes_by_blocks(state.wanted.iter().filter(|k| !next.contains(k)).copied().collect());
+                prioritize_incoming_blocks(grid, request, level, radius, &mut adds);
+                (next, order_adds_by_priority(adds), removes)
+            };
+            let state = &mut self.levels[level as usize];
+            state.wanted = std::sync::Arc::new(next);
+            update.wanted.push((level, state.wanted.clone()));
+            state.active = true;
+            state.center = dir;
+            state.radius = radius;
+            update.levels.push(LevelDiff {
+                level,
+                active: true,
+                center: dir,
+                radius,
+                adds,
+                removes,
+            });
+        }
+        update.planning_ms = started.elapsed().as_secs_f64() * 1000.0;
+        update
+    }
+    #[cfg(test)]
+    fn update_range_column_snapshot_oracle(&mut self, request: &WindowRequest, range: std::ops::Range<u32>) -> WindowUpdate {
         assert!(range.start < range.end && range.end <= self.grid.levels());
         let started = std::time::Instant::now();
         let grid = self.grid;
@@ -643,6 +966,98 @@ impl Drop for WindowWorker {
 mod tests {
     use super::*;
     use crate::{Planet, PlanetRecipe, TerrainSource};
+
+    fn assert_snapshot_column_parity(expected: &WindowUpdate, actual: &WindowUpdate) {
+        assert_eq!(actual.serial, expected.serial);
+        assert_eq!(actual.snapshot, expected.snapshot);
+        assert_eq!(actual.partial, expected.partial);
+        assert_eq!(actual.processed_levels, expected.processed_levels);
+        assert_eq!(actual.levels.len(), expected.levels.len());
+        for (actual, expected) in actual.levels.iter().zip(&expected.levels) {
+            assert_eq!((actual.level, actual.active, actual.center, actual.radius),
+                (expected.level, expected.active, expected.center, expected.radius));
+            assert_eq!(actual.removes, expected.removes);
+            let exact = |items: &[(f32, u64)]| items.iter().map(|(priority, key)| (priority.to_bits(), *key)).collect::<Vec<_>>();
+            assert_eq!(exact(&actual.adds), exact(&expected.adds), "exact ordered priorities L{}", actual.level);
+        }
+        assert_eq!(actual.wanted.len(), expected.wanted.len());
+        for ((level, wanted), (expected_level, expected_wanted)) in actual.wanted.iter().zip(&expected.wanted) {
+            assert_eq!(level, expected_level);
+            assert_eq!(wanted, expected_wanted, "exact wanted L{level}");
+        }
+    }
+
+    #[test]
+    fn snapshot_blocks_match_independent_column_scanner_at_faces_edges_and_priority_anchors() {
+        for shape in [crate::grid::Shape::Plane, crate::grid::Shape::Sphere, crate::grid::Shape::InfinitePlane] {
+            let planet = Planet::new(PlanetRecipe { shape, radius_m: 1000.0, plane_size_m: 40500.0,
+                voxel_size_m: 0.1, ..Default::default() }).unwrap();
+            let grid = *planet.grid();
+            let planner = WindowPlanner::new(grid);
+            let levels = [0, 1, 2, grid.levels().saturating_sub(2), grid.levels() - 1];
+            for level in levels.into_iter().filter(|level| *level < grid.levels()) {
+                let col = grid.level_size(level) * f64::from(BRICK);
+                let centers = if grid.is_plane() {
+                    let half = f64::from(grid.cells()) * grid.voxel_size() * 0.5;
+                    vec![DVec3::new(0.23, 0.0, 0.41), DVec3::new(half - 0.01, 0.0, half - 0.01),
+                        DVec3::new(-half + 0.01, 0.0, -half + 0.01)]
+                } else {
+                    vec![DVec3::Y, DVec3::new(1.0, 1.0, 0.0).normalize(),
+                        DVec3::new(-1.0, 1.0, -1.0).normalize()]
+                };
+                for center in centers {
+                    for radius in [col * 0.01, col * 2.0, col * 18.0, col * 80.0] {
+                        for anchors in 0..4 {
+                            let eye = if grid.is_plane() { center + DVec3::Y } else { center * (grid.radius() + 1.0) };
+                            let request = WindowRequest { eye,
+                                prefetch_eye: (anchors & 1 != 0).then_some(eye + DVec3::X * col),
+                                priority_eye: (anchors == 3).then_some(eye + DVec3::Z * col * 3.0),
+                                view_focus: (anchors & 2 != 0).then_some(eye + DVec3::Z * col * 2.0),
+                                lod0: 100.0, lod_dither: 0.25, outer_radius: planet.outer_radius(), planet: None, serial: 1 };
+                            let scanned = planner.scan(level, center, radius);
+                            let expected_wanted: FxHashSet<_> = scanned.iter().map(|(_, key)| *key).collect();
+                            let mut expected_adds = scanned;
+                            prioritize_incoming_blocks(grid, &request, level, radius, &mut expected_adds);
+                            let expected_adds = order_adds_by_priority(expected_adds);
+                            let base_priority = request.priority_eye.or(request.prefetch_eye).is_none() && request.view_focus.is_none();
+                            let blocks = planner.scan_snapshot(level, center, radius, base_priority);
+                            let (wanted, adds) = snapshot_columns(grid, &request, level, radius, blocks);
+                            assert_eq!(wanted, expected_wanted, "membership {shape:?} L{level} radius{radius} anchors{anchors}");
+                            let exact = |items: &[(f32, u64)]| items.iter().map(|(priority, key)| (priority.to_bits(), *key)).collect::<Vec<_>>();
+                            assert_eq!(exact(&adds), exact(&expected_adds), "order/priority {shape:?} L{level} radius{radius} anchors{anchors}");
+                            assert_eq!(adds.len(), wanted.len(), "no duplicate columns");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_descriptor_updates_match_legacy_full_snapshots_across_view_history() {
+        for shape in [crate::grid::Shape::Plane, crate::grid::Shape::Sphere, crate::grid::Shape::InfinitePlane] {
+            let planet = std::sync::Arc::new(Planet::new(PlanetRecipe { shape, radius_m: 1000.0,
+                plane_size_m: 1024.0, voxel_size_m: 0.1, ..Default::default() }).unwrap());
+            let grid = *planet.grid();
+            let mut old = WindowPlanner::new(grid);
+            old.snapshot = true;
+            let mut new = WindowPlanner::new(grid);
+            new.snapshot = true;
+            for (step, (shift, height, dither)) in [(0.0, 2.0, 0.25), (0.0, 2.0, 0.25),
+                (4.0, 2.0, 0.25), (20.0, 2.0, 0.25), (45.0, 300.0, 0.25),
+                (45.0, 2.0, 0.25), (45.0, 2.0, 0.0), (45.0, 2.0, 1.0)].into_iter().enumerate() {
+                let eye = if grid.is_plane() { DVec3::new(shift, height, -shift) }
+                    else { DVec3::new(1.0 + shift / 1000.0, 1.0, 0.1).normalize() * (grid.radius() + height) };
+                let request = WindowRequest { eye, prefetch_eye: Some(eye + DVec3::X * 3.0),
+                    priority_eye: Some(eye + DVec3::Z * 20.0), view_focus: Some(eye + DVec3::X * 40.0),
+                    lod0: 20.0, lod_dither: dither, outer_radius: planet.outer_radius(),
+                    planet: Some(planet.clone()), serial: step as u64 + 1 };
+                let expected = old.update_range_column_snapshot_oracle(&request, 0..grid.levels());
+                let actual = new.update(&request);
+                assert_snapshot_column_parity(&expected, &actual);
+            }
+        }
+    }
 
     #[test]
     fn independent_ranges_preserve_full_planner_demand_and_order_across_view_history() {
