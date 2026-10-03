@@ -590,6 +590,12 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
             k0 = (cur.k >> 3u) << 3u;
             k1 = k0 + 8;
             if s.x == 2u {
+                // Classify the current exact cell before solving its exit.
+                // Partial relief cells returned or continued above this path.
+                if (col.info & INFO_HEIGHTFIELD) != 0u
+                    && cur.k < column_top(col, u32(cur.i & 7), u32(cur.j & 7)) {
+                    return make_hit(ST_HIT, t, cur, normal, record);
+                }
                 // Exact cell DDA inside the mixed brick.
                 var ta = select(plane_t(fr, 0u, select(cur.i, cur.i + 1, fr.dir.x > 0) << lv), 3.0e38, fr.dir.x == 0);
                 var tb = select(plane_t(fr, 1u, select(cur.j, cur.j + 1, fr.dir.y > 0) << lv), 3.0e38, fr.dir.y == 0);
