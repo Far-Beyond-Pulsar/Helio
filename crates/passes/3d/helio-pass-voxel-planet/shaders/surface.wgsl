@@ -689,7 +689,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             vec3<f32>(face_coord(fr, 0u, h.t), face_coord(fr, 1u, h.t),
                 layer_coord(make_ray(camera.position_near.xyz, d), h.t)), level);
         let uv = clamp(vec2<f32>(cell[u_axis], cell[v_axis]), vec2<f32>(0.0), vec2<f32>(1.0));
-        if axis < 2u && material == M_GRASS && appearance_w <= 0.5 {
+        if axis < 2u && material == M_GRASS {
             let tooth = f32(hash3(h.i, h.j, h.k * 4 + i32(floor(uv.x * 4.0)), 0x5bd1e995u) & 7u) / 7.0;
             // Continuous in distance (not level), so level changes show no band.
             let lip = 0.22 + 0.1 * tooth + 0.68 * (1.0 - 1.0 / max(h.t / frame.lod.x, 1.0));
@@ -717,8 +717,12 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     if (material == M_GRASS && !soil_side) || appearance_w > 0.0 {
         var grass = grass_albedo(p, pixel) * pigment;
         if code != 4u { grass *= mix(0.9, 1.0, max(appearance_w, raw_smooth_w)); }
-        if material == M_GRASS && !soil_side {
-            albedo = grass;
+        if material == M_GRASS {
+            // Keep the resolved soil lip, then average its coverage only as
+            // authored voxels become sub-pixel. A boolean cutoff at half the
+            // filter weight made dirt switch to grass along a distance ring.
+            albedo = mix(grass, palette(M_DIRT) * pigment,
+                select(0.0, 1.0 - appearance_w, soil_side));
         } else if code == 4u && speck {
             // Single-voxel flecks (mud and sand in meadows) blend into grass.
             albedo = mix(albedo, grass, appearance_w);
@@ -755,6 +759,20 @@ struct SunSample {
     filtered: f32,
 }
 
+// A riser hit already contains its within-cell radial fraction. Lift only
+// to the resident surface, including its authored relief remainder, rather
+// than adding whole cells and overshooting the surface by that fraction.
+fn filtered_shadow_lift(c: Column, h: Hit, r: Ray) -> f32 {
+    if !column_tops_fit(c) || (c.info & INFO_TOPOLOGY) != 0u { return 0.0; }
+    let level = (h.info >> 5u) & 31u;
+    var fraction = 0u;
+    if (c.info & INFO_RELIEF) != 0u {
+        fraction = column_relief_fraction(c, u32(h.i & 7), u32(h.j & 7));
+    }
+    let receiver_top = relief_height(c, h.i, h.j, level, fraction);
+    return max(receiver_top - height_rel(r, h.t), 0.0);
+}
+
 // Surface point that receives sunlight at pixel `p`: the terrain hit, or the
 // mesh depth when a mesh covers the terrain.
 fn sun_sample(p: vec2<u32>) -> SunSample {
@@ -787,9 +805,10 @@ fn sun_sample(p: vec2<u32>) -> SunSample {
         out.normal = sun;
         out.valid = true;
     }
-    if out.level >= 0 {
+    if out.level >= 0 && (s.flags >> 24u) != 0u {
         // Filtered risers receive the light of their column's top surface.
-        let lift = f32(s.flags >> 24u) * frame.layer.y * f32(1 << u32(out.level));
+        let h = hits[pixel_index(p)];
+        let lift = filtered_shadow_lift(records[h.record], h, make_ray(camera.position_near.xyz, d));
         out.position += hit_up(s.t, d) * lift;
     }
     out.footprint = length(out.position - camera.position_near.xyz) * 2.0 / (camera.proj[1][1] * frame.screen.y);
