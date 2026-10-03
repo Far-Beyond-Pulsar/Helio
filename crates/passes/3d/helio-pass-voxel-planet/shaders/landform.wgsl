@@ -373,7 +373,9 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
         // Four samples per 4.5 m band retain its resolved contrast, matching
         // the noise support gate. No coverage work on fully resolved rock.
         let band_weight = max(smoothstep(1.125, 2.25, material_radial_span), 1.0 - outcrop_support);
-        if material_footprint > 0.0 && band_weight > 0.0 {
+        // Snow/rock coverage already includes its conditioned stone bands;
+        // the shader consumes that vector instead of this separate metadata.
+        if material_footprint > 0.0 && band_weight > 0.0 && material_snow_mix.x < 0.0 {
             // Exposure conditions the phase distribution on non-steep patches.
             let exposure = f32(NOISE_ONE - 2 * alpine - select(0, NOISE_ONE / 2, slope >= 5)) + 0.5;
             let cutoff = select(-65536.0, (exposure - resolved_outcrop) / max(outcrop_deviation, 0.0001), !steep);

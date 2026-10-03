@@ -660,10 +660,15 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
                 depth = max(top - 1 - h.k, 0) << level;
             }
         }
+        // Filtered natural sides use the top material. Select those final
+        // inputs once instead of evaluating and discarding a lower sample.
+        let top_material = code < 4u && smooth_w > 0.5;
+        let material_depth = select(depth, 0, top_material);
+        let sample_layer = select(h.k << level, (top - 1) << level, top_material);
         let material_layer = surface_material_layer(top, material_fraction, level,
-            h.k << level, depth, code, smooth_w, material_relief,
+            sample_layer, material_depth, code, smooth_w, material_relief,
             (c.info & INFO_TOPOLOGY) != 0u);
-        material = ground_material(p, climate_height, depth, slope, material_layer);
+        material = ground_material(p, climate_height, material_depth, slope, material_layer);
         speck = (material & M_SPECK) != 0u;
         material &= M_ID;
     }
@@ -677,14 +682,6 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     var lift = 0u;
     if shade_smooth_w > 0.0 {
         normal = normalize(mix(normal, fallback_shade_normal, shade_smooth_w));
-    }
-    if code < 4u && smooth_w > 0.5 && !edited {
-        let material_layer = surface_material_layer(top, material_fraction, level,
-            (top - 1) << level, 0, code, smooth_w, material_relief,
-            (c.info & INFO_TOPOLOGY) != 0u);
-        material = ground_material(p, climate_height, 0, slope, material_layer);
-        speck = (material & M_SPECK) != 0u;
-        material &= M_ID;
     }
     if code < 4u && shade_smooth_w > 0.5 {
         // Paint keeps the unpainted light origin. Filtered natural risers
