@@ -1287,7 +1287,7 @@ impl Residency {
         let expired = || deadline.is_some_and(|at| std::time::Instant::now() >= at);
         // Only intact ranked blocks: never regroup partial work, overtake
         // global coverage, invent lease demand, or batch an edit publication.
-        if expired() || !planet.edits().is_empty() || budget.saturating_sub(work.jobs.len()) < 16
+        if expired() || budget.saturating_sub(work.jobs.len()) < 16
             || index == (self.grid.levels() - 1) as usize
             || !self.levels[(self.grid.levels() - 1) as usize].pending.is_empty() {
             return false;
@@ -1305,10 +1305,27 @@ impl Residency {
             return false;
         }
         if self.blocks_conflict(first) { return false; }
+        // Every key in this aligned block shares the captured lease identity.
+        // Match scalar admission without creating or refreshing any demand.
+        let transient = self.transient_wanted(first);
         for (offset, &key) in keys.iter().enumerate() {
-            if !self.current_wanted(key) || self.residents.contains_key(key)
+            if (!self.current_wanted(key) && !transient) || self.residents.contains_key(key)
                 || self.initial_retries.contains(&key) || self.publishing.contains_key(&key)
                 || (offset != 0 && !self.levels[index].pending.at.contains_key(&key)) {
+                return false;
+            }
+        }
+        if !planet.edits().is_empty() {
+            // Match edit_list's base-cell query units and level threshold.
+            // A brush anywhere in this conservative union keeps the whole
+            // block on the scalar path; unrelated world edits do not disable
+            // unedited block admission throughout the planet.
+            let (face, level, i, j) = unpack(first);
+            let span = i64::from(BRICK) << level;
+            let i0 = i64::from(i) * span;
+            let j0 = i64::from(j) * span;
+            if !planet.edits().query(face, i0, i0 + 4 * span - 1,
+                j0, j0 + 4 * span - 1, level).is_empty() {
                 return false;
             }
         }
@@ -2278,7 +2295,13 @@ mod tests {
             match case {
                 0 => budget = 15,
                 1 => deadline = Some(std::time::Instant::now()),
-                2 => { std::sync::Arc::make_mut(&mut planet).apply(test_brush(0.2)).unwrap(); }
+                2 => {
+                    let (face, _, i, j) = unpack(near[0]);
+                    let center = planet.grid().ground_point(face, f64::from(i * BRICK) + 0.5, f64::from(j * BRICK) + 0.5);
+                    std::sync::Arc::make_mut(&mut planet).apply(crate::edits::Brush {
+                        center: center.to_array(), ..test_brush(0.2)
+                    }).unwrap();
+                }
                 3 => r.capacity.records = 15,
                 4 => { r.levels[0].pending.remove(near[7]); }
                 5 => { r.visible_admission.remove(7); }
@@ -2312,7 +2335,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_visible_batch_cannot_overtake_global_coverage_or_admit_lease_only_demand() {
+    fn complete_visible_batch_cannot_overtake_global_coverage_or_invent_lease_demand() {
         let (planet, mut r, near, _) = batch_admission_fixture();
         let mut work = FrameWork::default();
         let top = r.grid.levels() - 1;
@@ -2320,15 +2343,10 @@ mod tests {
         r.levels[top as usize].pending.insert(global, 0);
         assert!(!r.admit_visible_block(&planet, 0, near[0], 0, 16, None, &mut work));
         r.levels[top as usize].pending.remove(global);
-        let now = std::time::Instant::now();
-        r.set_visible_view(10, 0, now);
-        r.visible_leases.insert(near[0], VisibleLease {
-            source: VisibleStamp { frame: 10, view: 0, at: now }, serial: r.applied + 1, retiring: false, retired: 0,
-        });
         std::sync::Arc::make_mut(r.levels[0].wanted.as_mut().unwrap()).remove(&near[7]);
-        assert!(r.transient_wanted(near[7]));
+        assert!(!r.transient_wanted(near[7]));
         assert!(!r.admit_visible_block(&planet, 0, near[0], 0, 16, None, &mut work));
-        assert!(work.jobs.is_empty() && r.blocks.is_empty());
+        assert!(work.jobs.is_empty() && r.blocks.is_empty() && r.visible_leases.is_empty());
     }
 
     #[test]
@@ -2376,6 +2394,72 @@ mod tests {
         assert!(r.plan(&planet, eye, 1.0, 16).jobs.is_empty());
         assert_eq!(r.stats.admission_attempts, 0);
         assert_eq!(r.stats.admission_batched_columns, 0);
+    }
+
+    #[test]
+    fn complete_visible_batch_accepts_distant_persisted_edit_without_dropping_it() {
+        let (mut planet, mut r, near, _) = batch_admission_fixture();
+        let brush = crate::edits::Brush { op: crate::edits::BrushOp::Remove, ..test_brush(1.5) };
+        std::sync::Arc::make_mut(&mut planet).apply(brush).unwrap();
+        assert_eq!(planet.edits().len(), 1);
+        let mut work = FrameWork::default();
+        r.sync_edits(&planet, &mut work);
+        assert!(near.iter().all(|&key| r.edit_list(&planet, key, &mut work).unwrap().is_none()));
+        assert!(r.admit_visible_block(&planet, 0, near[0], 0, 16, None, &mut work));
+        assert_eq!(work.job_keys, near);
+        assert!(work.jobs.iter().all(|job| job.edits == 0));
+        assert_eq!(planet.edits().brushes().copied().collect::<Vec<_>>(), vec![brush]);
+    }
+
+    #[test]
+    fn complete_visible_batch_keeps_intersecting_and_tangent_edits_on_scalar_path_at_each_level() {
+        use crate::edits::{Brush, BrushOp};
+        for level in [0, 3] {
+            for op in [BrushOp::Add, BrushOp::Remove, BrushOp::Paint] {
+                for tangent in [false, true] {
+                    let (mut planet, mut r, near, _) = batch_admission_fixture();
+                    let (face, _, i, j) = unpack(near[0]);
+                    let first = pack(key0(face, level, (i >> level) & !3), ((j >> level) & !3) as u32);
+                    let keys = r.visible_columns(first).unwrap().0;
+                    let index = level as usize;
+                    r.levels[index].wanted = Some(std::sync::Arc::new(keys.into_iter().collect()));
+                    r.visible_admission.clear();
+                    r.levels[index].pending.clear();
+                    for &key in &keys[1..] {
+                        r.levels[index].pending.insert(key, 0);
+                        r.visible_admission.push_back((index, key));
+                    }
+                    let (_, _, i, j) = unpack(first);
+                    let span = i64::from(BRICK) << level;
+                    let i0 = i64::from(i) * span;
+                    let j0 = i64::from(j) * span;
+                    let i1 = i0 + 4 * span - 1;
+                    let radius = planet.grid().voxel_size() * 5.0;
+                    // Query containment includes one conservative base-cell
+                    // margin. Test equality at that margin, including L3.
+                    let x = if tangent { i1 + 6 } else { i0 };
+                    let center = planet.grid().ground_point(face, x as f64, (j0 + 2 * span) as f64);
+                    let brush = Brush { center: center.to_array(), radius, op, material: 3, ..test_brush(radius) };
+                    let resolved = brush.resolve(planet.grid()).unwrap();
+                    if tangent {
+                        let face_brush = resolved.iter().find(|b| b.face() == face).unwrap();
+                        assert_eq!(i64::from(face_brush.center[0]) / 2 - i64::from(face_brush.radius_half) / 2 - 1, i1);
+                        assert!(face_brush.active(level));
+                    }
+                    std::sync::Arc::make_mut(&mut planet).apply(brush).unwrap();
+                    let mut work = FrameWork::default();
+                    r.sync_edits(&planet, &mut work);
+                    let before = (r.next_record, r.visible_admission.clone(), r.levels[index].pending.len(), work.table_writes.len());
+                    assert!(!r.admit_visible_block(&planet, index, first, 0, 16, None, &mut work), "{op:?} tangent={tangent} level={level}");
+                    assert!(work.jobs.is_empty() && r.blocks.is_empty());
+                    assert_eq!(before, (r.next_record, r.visible_admission.clone(), r.levels[index].pending.len(), work.table_writes.len()));
+                    // The unchanged scalar edit-list path must still attach
+                    // the real journal brush to at least one touched column.
+                    assert!(keys.iter().any(|&key| r.edit_list(&planet, key, &mut work).unwrap().is_some()), "{op:?} tangent={tangent} level={level}");
+                    assert_eq!(planet.edits().len(), 1);
+                }
+            }
+        }
     }
 
     #[test]
@@ -2458,6 +2542,73 @@ mod tests {
         r.refresh_visible_pending(None);
         let (keys, count) = r.visible_columns(key).unwrap();
         keys[..count].to_vec()
+    }
+
+    #[test]
+    fn complete_visible_batch_accepts_captured_lease_and_preserves_expiry_ownership() {
+        let (planet, mut r, _, at) = visible_bridge_fixture();
+        let keys = lease_block(&mut r, 1000, at);
+        let first = keys[0];
+        assert!(keys.iter().all(|&key| !r.current_wanted(key) && r.transient_wanted(key)));
+        assert_eq!(r.visible_admission.pop_front(), Some((0, first)));
+        r.levels[0].pending.remove(first);
+        let lease = &r.visible_leases[&first];
+        let original = (lease.source.frame, lease.source.view, lease.source.at, lease.serial, lease.retiring, lease.retired);
+        let mut work = FrameWork::default();
+        assert!(r.admit_visible_block(&planet, 0, first, 0, 16, None, &mut work));
+        assert_eq!(work.job_keys, keys);
+        assert_eq!(r.visible_leases.len(), 1);
+        let lease = &r.visible_leases[&first];
+        assert_eq!(original, (lease.source.frame, lease.source.view, lease.source.at, lease.serial, lease.retiring, lease.retired));
+        assert!(r.blocks.values().all(|block| block.refs == 16));
+        assert_eq!(work.jobs.iter().map(|job| job.record).collect::<FxHashSet<_>>().len(), 16);
+        table_is_exact(&r);
+        // Expiry releases each ordinary reference and quarantines in-flight
+        // publications; batching cannot extend the captured source lifetime.
+        r.set_visible_view(11, 7, at + std::time::Duration::from_millis(501));
+        let mut expired = FrameWork::default();
+        r.retire_visible_leases(&mut expired, &|| false);
+        assert_eq!(expired.evictions.len(), 16);
+        assert!(r.blocks.is_empty() && r.block_owner.is_empty());
+        assert!(keys.iter().all(|key| r.publishing[key].evicted));
+        assert_eq!(r.visible_leases.len(), 1, "in-flight ownership still counts toward the lease cap");
+        r.complete_jobs(keys.iter().map(|&key| (key, 0)));
+        r.retire_visible_leases(&mut expired, &|| false);
+        assert!(r.publishing.is_empty() && r.visible_leases.is_empty());
+        table_is_exact(&r);
+    }
+
+    #[test]
+    fn complete_visible_batch_rejects_invalid_captured_leases_without_mutation() {
+        for cause in 0..8 {
+            let (planet, mut r, _, at) = visible_bridge_fixture();
+            let keys = lease_block(&mut r, 1000, at);
+            let first = keys[0];
+            assert_eq!(r.visible_admission.pop_front(), Some((0, first)));
+            r.levels[0].pending.remove(first);
+            match cause {
+                0 => r.set_visible_view(43, 7, at + std::time::Duration::from_millis(1)),
+                1 => r.set_visible_view(11, 7, at + std::time::Duration::from_millis(501)),
+                2 => r.set_visible_view(11, 8, at + std::time::Duration::from_millis(1)),
+                3 => r.visible_leases.get_mut(&first).unwrap().retiring = true,
+                4 => r.applied = r.visible_leases[&first].serial,
+                5 => r.applied = r.visible_leases[&first].serial + 1,
+                6 => { r.visible_leases.remove(&first); }
+                7 => r.set_visible_view(11, 7, at - std::time::Duration::from_millis(1)),
+                _ => unreachable!(),
+            }
+            assert!(!r.transient_wanted(first), "cause {cause}");
+            let lease_stamp = |r: &Residency| r.visible_leases.get(&first).map(|lease|
+                (lease.source.frame, lease.source.view, lease.source.at, lease.serial, lease.retiring, lease.retired));
+            let before = (r.next_record, r.free_records.clone(), r.delayed_records.clone(),
+                r.visible_admission.clone(), r.levels[0].pending.len(), r.visible_leases.len(), lease_stamp(&r));
+            let mut work = FrameWork::default();
+            assert!(!r.admit_visible_block(&planet, 0, first, 0, 16, None, &mut work), "cause {cause}");
+            assert_eq!(before, (r.next_record, r.free_records.clone(), r.delayed_records.clone(),
+                r.visible_admission.clone(), r.levels[0].pending.len(), r.visible_leases.len(), lease_stamp(&r)));
+            assert!(work.jobs.is_empty() && work.table_writes.is_empty() && work.block_inits.is_empty());
+            assert!(r.blocks.is_empty() && r.block_owner.is_empty() && r.publishing.is_empty());
+        }
     }
 
     #[test]
