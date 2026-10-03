@@ -90,6 +90,9 @@ pub struct Settings {
     pub far_relief: bool,
     /// Prioritize complete missing blocks requested by primary GPU rays.
     pub visible_feedback: bool,
+    /// Opt-in sparse primary-hit diagnostics. Set before renderer creation;
+    /// the default pipeline removes its GPU work through specialization.
+    pub primary_samples: bool,
     /// Diagnostics: skip residency planning (no jobs, windows or evictions)
     /// so several renders see identical GPU state.
     pub freeze_residency: bool,
@@ -117,6 +120,7 @@ impl Default for Settings {
             coarse_relief: std::env::var("HELIO_VOXEL_COARSE_RELIEF").ok().is_none_or(|v| v != "0"),
             far_relief: std::env::var("HELIO_VOXEL_FAR_RELIEF").ok().is_none_or(|v| v != "0"),
             visible_feedback: std::env::var("HELIO_VOXEL_VISIBLE_FEEDBACK").ok().is_none_or(|v| v != "0"),
+            primary_samples: std::env::var("HELIO_VOXEL_PRIMARY_SAMPLES").ok().is_some_and(|v| v == "1"),
             freeze_residency: false,
             frame_override: None,
             capacity: Capacity::default(),
@@ -181,6 +185,11 @@ pub struct PlanetStats {
     pub visible_request_blocks: u32,
     pub visible_request_overflow: bool,
     pub visible_request_attempts: u32,
+    pub primary_sampling_enabled: bool,
+    /// Only a freshly accepted asynchronous sample; absent on rejection or
+    /// when this encode did not receive a new sample. These are sampled rays,
+    /// not whole-image coverage or a residency-completion measurement.
+    pub sampled_primary: Option<SampledPrimaryStats>,
     pub queued_delta_bytes: usize,
     pub queued_delta_ops: usize,
     pub wanted_key_capacity: usize,
@@ -196,6 +205,27 @@ pub struct PlanetStats {
     /// frame's job budget.
     pub us_per_job: f64,
     pub job_budget: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SampledPrimaryStats {
+    pub encoded_frame: u64,
+    pub source_frame: u32,
+    pub age_frames: u32,
+    pub captured_at: std::time::Instant,
+    pub eye: DVec3,
+    pub forward: DVec3,
+    pub up: DVec3,
+    pub view_id: u32,
+    pub viewport: [u32; 2],
+    pub projection_y: f32,
+    pub stride: u32,
+    pub sampled_rays: u32,
+    pub terrain_hits: u32,
+    /// Base cells are excluded: close canonical voxels may fill many pixels.
+    pub coarse_over_2px: u32,
+    pub coarse_over_4px: u32,
+    pub unresolved: u32,
 }
 
 struct Readback {
@@ -307,6 +337,7 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -
 struct Pipelines {
     plane: bool,
     program: String,
+    primary_samples: bool,
     gen_layout: wgpu::BindGroupLayout,
     trace_layout: wgpu::BindGroupLayout,
     render_layout: wgpu::BindGroupLayout,
@@ -359,11 +390,11 @@ impl Pipelines {
     }
 
     /// Whether these pipelines serve a world of this shape and program.
-    fn serve(&self, plane: bool, program: &TerrainProgram) -> bool {
-        self.plane == plane && self.program == program.key
+    fn serve(&self, plane: bool, program: &TerrainProgram, primary_samples: bool) -> bool {
+        self.plane == plane && self.program == program.key && self.primary_samples == primary_samples
     }
 
-    fn new(device: &wgpu::Device, plane: bool, program: &TerrainProgram) -> Self {
+    fn new(device: &wgpu::Device, plane: bool, program: &TerrainProgram, primary_samples: bool) -> Self {
         let gen_entries: Vec<_> = [
             uniform(0),
             uniform(1),
@@ -471,6 +502,7 @@ impl Pipelines {
             bind_group_layouts: &[Some(&render_layout), Some(&camera_layout)],
             immediate_size: 0,
         });
+        let primary_constants = [("VISIBLE_FEEDBACK", 1.0), ("PRIMARY_SAMPLES", if primary_samples { 1.0 } else { 0.0 })];
         let compute = |layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModule, entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
@@ -478,7 +510,7 @@ impl Pipelines {
                 module,
                 entry_point: Some(entry),
                 compilation_options: wgpu::PipelineCompilationOptions {
-                    constants: if entry == "primary" { &[("VISIBLE_FEEDBACK", 1.0)] }
+                    constants: if entry == "primary" { &primary_constants }
                         else if entry == "generate" && program.key == crate::landform::DISPLAY_PROGRAM {
                             &[("RIDGE_DISPLAY_GENERATION", 1.0)]
                         } else { &[] },
@@ -533,6 +565,7 @@ impl Pipelines {
         Self {
             plane,
             program: program.key.to_string(),
+            primary_samples,
             patch: compute(&gen_pl, &gen_module, "patch_table"),
             patch_blocks: compute(&gen_pl, &gen_module, "patch_blocks"),
             evict: compute(&gen_pl, &gen_module, "evict"),
@@ -819,9 +852,9 @@ impl PlanetRenderer {
         let program = planet.field().program();
         let pipelines = previous
             .map(|r| &r.pipelines)
-            .filter(|p| p.serve(plane, &program))
+            .filter(|p| p.serve(plane, &program, settings.primary_samples))
             .cloned()
-            .unwrap_or_else(|| Arc::new(Pipelines::new(device, plane, &program)));
+            .unwrap_or_else(|| Arc::new(Pipelines::new(device, plane, &program, settings.primary_samples)));
         let mut buffers = Buffers::new(device, &settings.capacity, &planet);
         let visible_feedback = visible_feedback::Feedback::new(device);
         buffers.bytes += visible_feedback.bytes();
@@ -1310,6 +1343,11 @@ impl PlanetRenderer {
             f64::from(camera_data.forward_far[1]), f64::from(camera_data.forward_far[2]));
         let feedback_view = visible_feedback::View {
             eye: frame.eye, forward: forward.normalize_or_zero(), size,
+            up: DVec3::new(f64::from(camera_data.view[1]), f64::from(camera_data.view[5]),
+                f64::from(camera_data.view[9])).normalize_or_zero(),
+            projection_y: camera_data.proj[5].abs(),
+            encoded_frame: frame_num,
+            diagnostic_stride: self.pipelines.primary_samples.then(|| visible_feedback::sample_stride(size)),
             id: camera_data.jitter_frame[3].to_bits(), frame: self.frame_index,
             // Membership is checked again by residency. Allow ordinary fast
             // flight during asynchronous readback; reject distant relocations.
@@ -1318,6 +1356,8 @@ impl PlanetRenderer {
         };
         self.residency.set_visible_view(feedback_view.frame, feedback_view.id, now);
         let requested = self.visible_feedback.poll(feedback_view);
+        self.stats.primary_sampling_enabled = self.pipelines.primary_samples;
+        self.stats.sampled_primary = requested.sampled_primary;
         self.stats.visible_request_blocks = self.visible_feedback.counts[0].min(visible_feedback::CAPACITY as u32);
         self.stats.visible_request_overflow = self.visible_feedback.counts[1] != 0;
         self.stats.visible_request_attempts = self.visible_feedback.counts[2];
@@ -1409,12 +1449,17 @@ impl PlanetRenderer {
         let jobs = work.jobs.len() as u32;
         let evictions = work.evictions.len() as u32;
         let mut uniform = self.frame_uniform(frame.eye, size, lod0, jobs, evictions, frame.sun, frame.shadows);
-        let feedback_copy = if self.settings.visible_feedback && !self.settings.freeze_residency
-            && (!self.residency.idle() || self.visible_feedback.view_changed(feedback_view)) {
-            self.visible_feedback.begin(encoder, feedback_view)
+        let request_copy = self.settings.visible_feedback && !self.settings.freeze_residency
+            && (!self.residency.idle() || self.visible_feedback.view_changed(feedback_view));
+        let feedback_copy = if !self.settings.freeze_residency && (request_copy || self.pipelines.primary_samples) {
+            self.visible_feedback.begin(encoder, feedback_view, request_copy)
         } else { None };
         if feedback_copy.is_some() {
-            uniform.hints[3] |= 16 | ((self.frame_index & 0xffffff) << 8);
+            uniform.hints[3] |= (if request_copy { 16 } else { 0 })
+                | ((self.frame_index & 0xffffff) << 8);
+            if let Some(stride) = feedback_view.diagnostic_stride {
+                uniform.screen[3] = visible_feedback::sample_flags(uniform.screen[3] as u32, stride) as f32;
+            }
         }
         uniform.extra[0] = patches;
         uniform.extra[1] = crate::residency::block_region();

@@ -31,6 +31,7 @@ fn primary(@builtin(global_invocation_id) id: vec3<u32>) {
         t0 = t1;
         t1 = frame.lod.w;
     }
+    sample_primary_hit(id.xy, hit);
     hits[pixel_index(id.xy)] = hit;
 }
 
