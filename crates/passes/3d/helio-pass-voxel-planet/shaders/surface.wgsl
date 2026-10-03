@@ -439,6 +439,23 @@ fn radial_material_span(pixel: f32, distance: f32, ray: vec3<f32>, up: vec3<f32>
     return pixel * length(numerator) / max(abs(dot(normal, ray)), epsilon);
 }
 
+// A side lip varies along radial UV, not the face's arbitrary compressed
+// axis. Average its threshold over the actual ray/plane radial support only
+// when unresolved. The clipped interval conditions colour on this face;
+// visibility and resolved voxel edges remain the primary hit's responsibility.
+fn soil_lip_coverage(v: f32, lip: f32, pixel: f32, distance: f32, ray: vec3<f32>,
+    up: vec3<f32>, normal: vec3<f32>, radial_size: f32, allowed: bool) -> f32 {
+    let point = select(0.0, 1.0, v < 1.0 - lip);
+    if !allowed { return point; }
+    let span = radial_material_span(pixel, distance, ray, up, normal) / radial_size;
+    let weight = detail_filter_weight(1.0 / max(span, 0.000001));
+    if weight <= 0.0 { return point; }
+    let lo = max(v - 0.5 * span, 0.0);
+    let hi = min(v + 0.5 * span, 1.0);
+    let coverage = clamp((min(hi, 1.0 - lip) - lo) / max(hi - lo, 0.000001), 0.0, 1.0);
+    return mix(point, coverage, weight);
+}
+
 // Relief changes geometry inside the last coarse cell. Natural surface
 // strata use that stored authored top, not the enclosing coarse voxel.
 // Cuts, deep samples and resolvable walls keep their actual hit layer.
@@ -701,6 +718,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // covers more of the face with distance, where one coarse cell stands for
     // a grassy slope of many fine steps.
     var soil_side = false;
+    var soil_coverage = 0.0;
     // Fully filtered cells use neither voxel AO nor face detail.
     if code < 6u && appearance_w < 1.0 {
         let axis = code >> 1u;
@@ -733,6 +751,8 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             // Continuous in distance (not level), so level changes show no band.
             let lip = 0.22 + 0.1 * tooth + 0.68 * (1.0 - 1.0 / max(h.t / frame.lod.x, 1.0));
             soil_side = uv.y < 1.0 - lip;
+            soil_coverage = soil_lip_coverage(uv.y, lip, pixel, h.t, d,
+                hit_up(h.t, d), actual_normal, size, natural_material_filter_allowed(edited, c));
         }
         let a = mix(mix(c00, c10, uv.x), mix(c01, c11, uv.x), uv.y) / 3.0;
         ao = mix(mix(0.42, 1.0, a), 1.0, ao_appearance_w);
@@ -753,7 +773,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let jitter = mix(f32(hv & 255u) / 255.0, 0.5, base_w);
     let pigment = 1.0 + frame.detail.y * (jitter - 0.5);
     var albedo = palette(select(material, M_DIRT, soil_side)) * pigment;
-    if (material == M_GRASS && !soil_side) || appearance_w > 0.0 {
+    if (material == M_GRASS && soil_coverage < 1.0) || appearance_w > 0.0 {
         var grass = grass_albedo(p, pixel) * pigment;
         if code != 4u { grass *= mix(0.9, 1.0, max(appearance_w, raw_smooth_w)); }
         if material == M_GRASS {
@@ -761,7 +781,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             // authored voxels become sub-pixel. A boolean cutoff at half the
             // filter weight made dirt switch to grass along a distance ring.
             albedo = mix(grass, palette(M_DIRT) * pigment,
-                select(0.0, 1.0 - appearance_w, soil_side));
+                soil_coverage * (1.0 - appearance_w));
         } else if code == 4u && speck {
             // Single-voxel flecks (mud and sand in meadows) blend into grass.
             albedo = mix(albedo, grass, appearance_w);

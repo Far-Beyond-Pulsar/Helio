@@ -7,6 +7,151 @@ use bytemuck::Zeroable;
 use helio_pass_voxel_planet::{landform::{self, LandformConstants}, terrain};
 
 #[test]
+fn grazing_soil_lip_filters_radial_coverage_and_preserves_protected_faces() {
+    let surface = include_str!("../shaders/surface.wgsl");
+    let radial = surface.split("fn radial_material_span").nth(1).unwrap()
+        .split("// Relief changes geometry").next().unwrap();
+    let detail = surface.split("fn detail_filter_weight").nth(1).unwrap()
+        .split("// Independent hash detail").next().unwrap();
+    let natural = surface.split("fn natural_material_filter_allowed").nth(1).unwrap()
+        .split("// Canonical rock").next().unwrap();
+    let call = surface.split("soil_coverage = soil_lip_coverage").nth(1).unwrap()
+        .split(';').next().unwrap();
+    assert!(surface.contains("if axis < 2u && material == M_GRASS {"));
+    assert!(surface.contains("soil_coverage * (1.0 - appearance_w)"));
+    assert!(surface.contains("ground_material(p, climate_height, material_depth, slope, material_layer)"));
+    let Some(gpu) = gpu() else { return };
+    let source = format!(r#"
+        struct Column {{info:u32, fit:u32}}
+        struct Hit {{t:f32}}
+        struct Probe {{lip_width:vec4<f32>, ray_flags:vec4<f32>, appearance:vec4<f32>}}
+        const INFO_TOPOLOGY:u32=1u;
+        @group(0) @binding(0) var<storage,read> probes:array<Probe>;
+        @group(0) @binding(1) var<storage,read_write> answers:array<vec4<f32>>;
+        fn column_tops_fit(c:Column)->bool {{return c.fit!=0u;}}
+        fn hit_up(t:f32,d:vec3<f32>)->vec3<f32> {{return vec3<f32>(0.0,0.0,1.0);}}
+        fn detail_filter_weight{detail}
+        fn natural_material_filter_allowed{natural}
+        fn radial_material_span{radial}
+        @compute @workgroup_size(32) fn probe(@builtin(global_invocation_id) id:vec3<u32>) {{
+            if id.x>=arrayLength(&probes) {{return;}}
+            let p=probes[id.x];
+            let uv=vec2<f32>(0.5,p.lip_width.x);
+            let lip=p.lip_width.y;
+            let pixel=1.0/p.lip_width.z;
+            let code=u32(p.lip_width.w);
+            let flags=u32(p.ray_flags.w);
+            let edited=(flags&1u)!=0u;
+            let c=Column(select(0u,INFO_TOPOLOGY,(flags&2u)!=0u),select(1u,0u,(flags&4u)!=0u));
+            let d=p.ray_flags.xyz;
+            let actual_normal=vec3<f32>(1.0,0.0,0.0);
+            let h=Hit(p.appearance.y);
+            let size=1.0;
+            let appearance_w=p.appearance.x;
+            var soil_coverage=0.0;
+            if (code>>1u)<2u {{soil_coverage=soil_lip_coverage{call};}}
+            answers[id.x]=vec4<f32>(soil_coverage,select(0.0,1.0,uv.y<1.0-lip),
+                soil_coverage*(1.0-appearance_w),select(0.0,1.0,soil_coverage<1.0||appearance_w>0.0));
+        }}
+    "#);
+    let ray = |cosine:f32, radial:bool| {
+        let tangent=(1.0-cosine*cosine).sqrt();
+        if radial {[cosine,0.0,tangent]} else {[cosine,tangent,0.0]}
+    };
+    let mut probes = Vec::<[[f32;4];3]>::new();
+    for (v,lip,width,code,cosine,radial,flags,appearance) in [
+        (0.2,0.27,20.0,0.0,0.01,true,0.0,0.0),
+        (0.8,0.27,20.0,0.0,0.01,true,0.0,0.0),
+        (0.2,0.27,20.0,0.0,0.001,true,0.0,0.0),
+        (0.2,0.27,20.0,0.0,0.001,false,0.0,0.0),
+        (0.8,0.27,20.0,0.0,0.001,false,0.0,0.0),
+        (0.2,0.27,20.0,0.0,1.0,true,0.0,0.0),
+        (0.8,0.27,20.0,0.0,1.0,true,0.0,0.0),
+        (0.2,0.27,20.0,0.0,0.001,true,1.0,0.0),
+        (0.2,0.27,20.0,0.0,0.001,true,2.0,0.0),
+        (0.2,0.27,20.0,0.0,0.001,true,4.0,0.0),
+        (0.2,0.27,20.0,4.0,0.001,true,0.0,0.0),
+        (0.2,0.27,20.0,6.0,0.001,true,0.0,0.0),
+        (0.7,0.27,20.0,0.0,0.05,true,0.0,0.0),
+        (0.7,0.27,20.0,0.0,0.04,true,0.0,0.0),
+        (0.2,0.87,20.0,0.0,-0.01,true,0.0,0.0),
+        (0.2,0.27,20.0,0.0,0.01,true,0.0,0.6),
+    ] {
+        let d=ray(cosine,radial);
+        probes.push([[v,lip,width,code],[d[0],d[1],d[2],flags],[appearance,100.0,0.0,0.0]]);
+    }
+    let shader=gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label:Some("production radial soil coverage"),source:wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let input=gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label:None,contents:bytemuck::cast_slice(&probes),usage:wgpu::BufferUsages::STORAGE,
+    });
+    let output=gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label:None,size:(probes.len()*16) as u64,
+        usage:wgpu::BufferUsages::STORAGE|wgpu::BufferUsages::COPY_SRC,mapped_at_creation:false,
+    });
+    let pipeline=gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label:None,layout:None,module:&shader,entry_point:Some("probe"),
+        compilation_options:Default::default(),cache:None,
+    });
+    let group=gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label:None,layout:&pipeline.get_bind_group_layout(0),entries:&[
+            wgpu::BindGroupEntry {binding:0,resource:input.as_entire_binding()},
+            wgpu::BindGroupEntry {binding:1,resource:output.as_entire_binding()},
+        ],
+    });
+    let mut encoder=gpu.device.create_command_encoder(&Default::default());
+    {
+        let mut pass=encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);pass.set_bind_group(0,&group,&[]);
+        pass.dispatch_workgroups(1,1,1);
+    }
+    gpu.queue.submit([encoder.finish()]);
+    let bytes=read_buffer(&gpu,&output,(probes.len()*16) as u64);
+    let actual:&[[f32;4]]=bytemuck::cast_slice(&bytes);
+    for (index,(p,a)) in probes.iter().zip(actual).enumerate() {
+        let [v,lip,width,code]=p[0].map(f64::from);
+        let [dx,dy,dz,flags]=p[1].map(f64::from);
+        let point=if v<1.0-lip {1.0} else {0.0};
+        let coverage=if code>=4.0 {0.0} else if flags!=0.0 {point} else {
+            // Independent double ray/plane intersections along two screen
+            // tangents. The derivative of radial hit position gives the
+            // pixel interval without reproducing the production cross form.
+            let d=glam::DVec3::new(dx,dy,dz).normalize();
+            let e0=glam::DVec3::Y.cross(d).normalize();
+            let e1=d.cross(e0);
+            let epsilon=1e-7;
+            let hit=|direction:glam::DVec3| direction*(100.0*d.x/direction.x);
+            let derivative=|e:glam::DVec3| (hit(d+e*epsilon).z-hit(d-e*epsilon).z)/(2.0*epsilon*100.0);
+            let span=derivative(e0).hypot(derivative(e1))/width;
+            let t=((1.0/span-0.75)/0.5).clamp(0.0,1.0);
+            let weight=1.0-t*t*(3.0-2.0*t);
+            let lo=(v-span/2.0).max(0.0);
+            let hi=(v+span/2.0).min(1.0);
+            let n=100_000;
+            let covered=(0..n).filter(|i| (lo+(hi-lo)*(*i as f64+0.5)/n as f64) < 1.0-lip).count();
+            point*(1.0-weight)+(covered as f64/n as f64)*weight
+        };
+        assert!((f64::from(a[0])-coverage).abs()<2e-5,"soil probe{index}: {a:?}, expected{coverage}");
+        assert_eq!(f64::from(a[1]),point);
+        assert!((f64::from(a[2])-coverage*(1.0-f64::from(p[2][0]))).abs()<2e-5);
+        assert_eq!(a[3],if coverage<1.0 || p[2][0]>0.0 {1.0} else {0.0},
+            "grass branch must execute for fractional coverage and preserve full-soil protection");
+        // Distinct custom palette endpoints obey the same coverage. IDs and
+        // occupied geometry are not replaced by a thresholded material.
+        for (grass,dirt) in [(0.2,0.8),(0.9,0.1)] {
+            let colour=grass+(dirt-grass)*f64::from(a[2]);
+            let expected=grass+(dirt-grass)*coverage*(1.0-f64::from(p[2][0]));
+            assert!((colour-expected).abs()<2e-5);
+        }
+    }
+    assert!((actual[0][0]-actual[1][0]).abs()<1e-6,"unresolved radial phase must converge");
+    assert_eq!(actual[3][0],1.0,"lateral grazing must not erase a resolved radial lip");
+    assert_eq!(actual[4][0],0.0);
+    for index in 7..=9 {assert_eq!(actual[index][0],1.0,"protected side{index}");}
+}
+
+#[test]
 fn grazing_projection_uses_actual_support_and_preserves_edit_guards() {
     let surface = include_str!("../shaders/surface.wgsl");
     let helpers = surface.split("fn detail_filter_weight").nth(1).unwrap()
