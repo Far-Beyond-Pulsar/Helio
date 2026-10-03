@@ -16,7 +16,6 @@ pub mod noise;
 pub mod planet;
 pub mod residency;
 mod ridge_envelope;
-mod visible_priority;
 pub mod terrain;
 pub mod windows;
 #[cfg(feature = "engine")]

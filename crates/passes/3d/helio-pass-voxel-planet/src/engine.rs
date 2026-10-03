@@ -212,8 +212,6 @@ pub struct PlanetStats {
     pub visible_request_blocks: u32,
     pub visible_request_overflow: bool,
     pub visible_request_attempts: u32,
-    /// Distinct urgent blocks in this encode's freshly accepted readback.
-    pub visible_urgent_blocks: usize,
     pub primary_sampling_enabled: bool,
     /// Only a freshly accepted asynchronous sample; absent on rejection or
     /// when this encode did not receive a new sample. These are sampled rays,
@@ -1390,20 +1388,26 @@ impl PlanetRenderer {
         self.stats.visible_request_blocks = self.visible_feedback.counts[0].min(visible_feedback::CAPACITY as u32);
         self.stats.visible_request_overflow = self.visible_feedback.counts[1] != 0;
         self.stats.visible_request_attempts = self.visible_feedback.counts[2];
-        self.stats.visible_urgent_blocks = requested.urgent_blocks;
-        let ground_radial = self.planet.grid().radial(frame.eye) - ground_clearance;
         if self.settings.visible_feedback && !self.settings.freeze_residency {
             let grid = self.planet.grid();
             let source = requested.source;
-            let requested = crate::visible_priority::order_blocks(grid, frame.eye,
-                feedback_view.forward, feedback_view.up, feedback_view.projection_y, size,
-                ground_radial, requested.blocks, requested.urgent_blocks);
+            let mut requested: Vec<_> = requested.blocks.into_iter().map(|key| {
+                    let face = ((key.0 >> 24) & 7) as u8;
+                    let level = key.0 >> 27;
+                    if !grid.faces().contains(&face) || level >= grid.levels() { return (f64::INFINITY, key); }
+                    let cell_size = f64::from(crate::grid::BRICK << level);
+                    let point = grid.ground_point(face, (f64::from(key.0 & 0xffffff) + 2.0) * cell_size,
+                        (f64::from(key.1 as i32) + 2.0) * cell_size);
+                    (grid.ground_distance(frame.eye, point), key)
+            }).collect();
+            requested.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
             if let Some(source) = source {
                 self.residency.prioritize_visible_blocks_from(
-                    requested, source.frame, source.id, source.captured_at);
+                    requested.into_iter().map(|(_, key)| key), source.frame, source.id, source.captured_at);
             }
         }
         let feedback_done = std::time::Instant::now();
+        let ground_radial = self.planet.grid().radial(frame.eye) - ground_clearance;
         let camera_far = f64::from(camera_data.forward_far[3]);
         let focus_far = if camera_far.is_finite() && camera_far > 0.0 { camera_far }
             else if self.planet.grid().is_plane() {
