@@ -355,6 +355,9 @@ pub struct Stats {
     /// Original enqueue to apply latency of the last accepted range chunk.
     pub fine_apply_age_ms: Option<f64>,
     pub far_apply_age_ms: Option<f64>,
+    /// Worker compute time of the last accepted chunk in each range.
+    pub fine_planning_ms: Option<f64>,
+    pub far_planning_ms: Option<f64>,
     /// Current eye's ground distance from the authoritative level-0 centre.
     /// Inactive level 0 has no meaningful centre.
     pub fine_window_lag_m: Option<f64>,
@@ -370,6 +373,20 @@ pub struct Stats {
     pub admission_alias_deferred: usize,
     pub admission_publication_deferred: usize,
     pub admission_batched_columns: usize,
+    /// Last plan stage intervals; edit time includes record-return setup.
+    /// Authority includes request submission and accepted update application;
+    /// windows includes lease retirement and queued/snapshot work. Admission
+    /// includes urgent edit jobs and deferred-column reinsertion.
+    pub plan_edits_ms: f64,
+    pub plan_authority_ms: f64,
+    pub plan_windows_ms: f64,
+    pub plan_near_ms: f64,
+    pub plan_visible_ms: f64,
+    pub plan_admission_ms: f64,
+    /// Issued jobs by level range, including urgent regenerations; these are
+    /// not publication completions or counts of visible coherent blocks.
+    pub fine_jobs: usize,
+    pub far_jobs: usize,
 }
 
 pub struct Residency {
@@ -991,8 +1008,14 @@ impl Residency {
         let age = update.issued_at.and_then(|issued|
             std::time::Instant::now().checked_duration_since(issued))
             .map(|age| age.as_secs_f64() * 1e3);
-        if accepted & fine_mask != 0 { self.stats.fine_apply_age_ms = age; }
-        if accepted & !fine_mask != 0 { self.stats.far_apply_age_ms = age; }
+        if accepted & fine_mask != 0 {
+            self.stats.fine_apply_age_ms = age;
+            self.stats.fine_planning_ms = Some(update.planning_ms);
+        }
+        if accepted & !fine_mask != 0 {
+            self.stats.far_apply_age_ms = age;
+            self.stats.far_planning_ms = Some(update.planning_ms);
+        }
         let accepts = |level: u32| level < 32 && accepted & (1u32 << level) != 0;
         // A second chunk at the same request serial can replace far demand
         // after the fine chunk's scan completed. Scan epochs describe actual
@@ -1492,11 +1515,13 @@ impl Residency {
         let apply_out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b.mul_f64(0.6));
         self.retire_visible_leases(&mut work, &apply_out_of_time);
         if !apply_out_of_time() { self.apply_queued(&mut work, &apply_out_of_time); }
+        let t_windows = started.elapsed();
         // Window diffs may spend 60% of the CPU budget. Refresh gets at most
         // the next 10%, leaving 30% for issuing generation jobs this frame.
         let refresh_deadline = budget_time.map(|budget| started + budget.mul_f64(0.7));
         let near_deadline = budget_time.map(|budget| started + budget.mul_f64(0.65));
         self.refresh_near_pending(eye, near_deadline);
+        let t_near = started.elapsed();
         // Feedback wins over broad camera anchors, and has its own half
         // of the existing refresh reserve rather than being demoted by it.
         self.refresh_visible_pending(refresh_deadline);
@@ -1662,6 +1687,7 @@ impl Residency {
             self.queue_obsolete_owners(key);
             self.levels[index].pending.insert(key, bucket);
         }
+        let t_admission = started.elapsed();
         let trace_ms: Option<f64> = std::env::var("HELIO_VOXEL_PLAN_TRACE").ok().map(|v| v.parse().unwrap_or(10.0));
         if trace_ms.is_some_and(|ms| started.elapsed().as_secs_f64() * 1e3 > ms) {
             eprintln!(
@@ -1680,6 +1706,14 @@ impl Residency {
         }
         self.update_authority_stats();
         let mut stats = self.stats;
+        stats.plan_edits_ms = t_edits.as_secs_f64() * 1e3;
+        stats.plan_authority_ms = (t_drain - t_edits).as_secs_f64() * 1e3;
+        stats.plan_windows_ms = (t_windows - t_drain).as_secs_f64() * 1e3;
+        stats.plan_near_ms = (t_near - t_windows).as_secs_f64() * 1e3;
+        stats.plan_visible_ms = (t_apply - t_near).as_secs_f64() * 1e3;
+        stats.plan_admission_ms = (t_admission - t_apply).as_secs_f64() * 1e3;
+        (stats.fine_jobs, stats.far_jobs) = work.jobs.iter().fold((0, 0), |(fine, far), job|
+            if job.key0 >> 27 < 3 { (fine + 1, far) } else { (fine, far + 1) });
         stats.fine_window_lag_m = self.levels[0].active.then(||
             self.grid.ground_distance(self.levels[0].center, eye));
         stats.resident_columns = self.residents.len();

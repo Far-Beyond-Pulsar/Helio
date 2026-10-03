@@ -234,6 +234,17 @@ pub struct PlanetStats {
     pub far_apply_age_ms: Option<f64>,
     /// Current eye distance from the authoritative level-0 window centre.
     pub fine_window_lag_m: Option<f64>,
+    /// Last accepted worker range cost and last CPU plan's stage costs.
+    pub fine_planning_ms: Option<f64>,
+    pub far_planning_ms: Option<f64>,
+    pub plan_edits_ms: f64,
+    pub plan_authority_ms: f64,
+    pub plan_windows_ms: f64,
+    pub plan_near_ms: f64,
+    pub plan_visible_ms: f64,
+    pub plan_admission_ms: f64,
+    pub fine_jobs: usize,
+    pub far_jobs: usize,
     pub active_levels: u32,
     pub finest_level: u32,
     pub plan_cpu_ms: f64,
@@ -1760,6 +1771,16 @@ impl PlanetRenderer {
         self.stats.fine_apply_age_ms = rs.fine_apply_age_ms;
         self.stats.far_apply_age_ms = rs.far_apply_age_ms;
         self.stats.fine_window_lag_m = rs.fine_window_lag_m;
+        self.stats.fine_planning_ms = rs.fine_planning_ms;
+        self.stats.far_planning_ms = rs.far_planning_ms;
+        self.stats.plan_edits_ms = rs.plan_edits_ms;
+        self.stats.plan_authority_ms = rs.plan_authority_ms;
+        self.stats.plan_windows_ms = rs.plan_windows_ms;
+        self.stats.plan_near_ms = rs.plan_near_ms;
+        self.stats.plan_visible_ms = rs.plan_visible_ms;
+        self.stats.plan_admission_ms = rs.plan_admission_ms;
+        self.stats.fine_jobs = rs.fine_jobs;
+        self.stats.far_jobs = rs.far_jobs;
         self.stats.jobs = rs.jobs;
         self.stats.evictions = rs.evictions;
         self.stats.active_levels = rs.active_levels;
