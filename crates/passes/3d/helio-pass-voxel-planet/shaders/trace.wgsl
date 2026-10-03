@@ -456,6 +456,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
         }
         let key = vec4<i32>(cur.i >> 3u, cur.j >> 3u, i32(cur.face), i32(cur.level));
         var skip = vec4<i32>(0);
+        var summary_checked = false;
         if any(key != loaded) {
             // Column-coherent stochastic LOD transition: each column switches
             // level at its own distance within the dither band. The threshold
@@ -490,6 +491,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 }
             }
             skip = summary_block(cur.level, cur.face, cur.i >> 3u, cur.j >> 3u, cur.k);
+            summary_checked = true;
         }
         if skip.x == 0 && any(vec4<i32>(cur.i >> 3u, cur.j >> 3u, i32(cur.face), i32(cur.level)) != loaded) {
             loop {
@@ -510,6 +512,8 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 cur.j >>= 1u;
                 cur.k >>= 1u;
                 cur.level += 1u;
+                // Fallback changed the key and radial cursor of the query.
+                summary_checked = false;
             }
             loaded = vec4<i32>(cur.i >> 3u, cur.j >> 3u, i32(cur.face), i32(cur.level));
         }
@@ -529,7 +533,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 return make_hit(ST_HIT, t, cur, normal, record);
             }
             above = cur.k >= k0;
-            if above {
+            if above && !summary_checked {
                 skip = summary_block(lv, cur.face, ci, cj, cur.k);
             }
         }
