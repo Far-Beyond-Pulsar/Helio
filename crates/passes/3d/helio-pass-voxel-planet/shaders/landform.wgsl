@@ -214,6 +214,18 @@ fn rock_band_coverage(phase: f32, span: f32, deviation: f32, cutoff: f32) -> f32
     }
     let cut_cdf = material_noise_cdf(cutoff);
     if cut_cdf > 0.999 { return -1.0; }
+    // The empirical noise has bounded support. Conditioning only truncates
+    // its lower end; a support box inside one band has exact 0/1 coverage.
+    let noise_low = max(cutoff, -65536.0);
+    let radial_width = max(span, 0.0);
+    if radial_width + noise_scale * (65536.0 - noise_low) < 4500.0 {
+        let lower = phase + noise_scale * noise_low - radial_width * 0.5;
+        let upper = phase + noise_scale * 65536.0 + radial_width * 0.5;
+        let lower_band = floor(lower / 4500.0);
+        if lower_band == floor(upper / 4500.0) {
+            return select(0.0, 1.0, (i32(lower_band) & 1) == 0);
+        }
+    }
     if span <= 0.0 || (span < min(1.0, noise_scale * 65.536) && noise_scale > 0.0) {
         let first = i32(floor((phase - 4000.0) / 9000.0));
         var coverage = 0.0;
@@ -229,6 +241,11 @@ fn rock_band_coverage(phase: f32, span: f32, deviation: f32, cutoff: f32) -> f32
     let whole = floor(span / 9000.0) * 9000.0;
     let remainder = max(span - whole, 0.0);
     if remainder < 0.01 && whole > 0.0 { return 0.5; }
+    // A partial period differs from its half-coverage mean by at most
+    // min(r, period-r)/2. Positive mixtures of noise phases, including
+    // conditional ones, keep that bound. Skip integration below 1/1024
+    // absolute coverage error; the near/resolved path stays exact.
+    if min(remainder, 9000.0 - remainder) <= span * (1.0 / 512.0) { return 0.5; }
     let start = phase - span * 0.5;
     let left = start - floor(start / 9000.0) * 9000.0;
     let first = i32(floor((left - 4000.0) / 9000.0));
