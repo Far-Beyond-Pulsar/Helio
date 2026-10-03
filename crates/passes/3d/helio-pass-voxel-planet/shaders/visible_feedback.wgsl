@@ -14,6 +14,9 @@ struct VisibleRequests {
 @group(0) @binding(21) var<storage, read_write> visible_requests: VisibleRequests;
 var<private> visible_request_attempts: u32 = 0u;
 var<private> visible_feedback_sample: bool = false;
+// Valid face keys cannot equal this sentinel. Retain the first missing
+// block across trace hops and the primary sky-bound retry without emitting.
+var<private> visible_request_candidate: vec2<u32> = vec2<u32>(0xffffffffu, 0u);
 
 fn begin_visible_feedback_pixel(xy: vec2<u32>) {
     let phase = frame.hints.w >> 8u;
@@ -21,16 +24,32 @@ fn begin_visible_feedback_pixel(xy: vec2<u32>) {
         && (xy.y & 7u) == ((phase >> 3u) & 7u);
 }
 
+fn visible_feedback_enabled() -> bool {
+    return VISIBLE_FEEDBACK && visible_feedback_sample && (frame.hints.w & 16u) != 0u && visible_request_attempts < 1u;
+}
+
 fn request_visible_block(face: u32, level: u32, ci: i32, cj: i32) {
-    if !VISIBLE_FEEDBACK || !visible_feedback_sample || (frame.hints.w & 16u) == 0u || visible_request_attempts >= 1u { return; }
+    if !visible_feedback_enabled() || visible_request_candidate.x != 0xffffffffu { return; }
+    visible_request_candidate = vec2<u32>(column_key0(face, level, ci & ~3), bitcast<u32>(cj & ~3));
+}
+
+// A missing block under the final coarse Hit takes priority over an earlier
+// missing air block. The CPU still admits the same complete aligned block.
+fn prefer_visible_block(face: u32, level: u32, ci: i32, cj: i32) {
+    if !visible_feedback_enabled() { return; }
+    visible_request_candidate = vec2<u32>(column_key0(face, level, ci & ~3), bitcast<u32>(cj & ~3));
+}
+
+fn finish_visible_feedback_pixel() {
+    if !visible_feedback_enabled() || visible_request_candidate.x == 0xffffffffu { return; }
     visible_request_attempts += 1u;
     atomicAdd(&visible_requests.attempts, 1u);
     if atomicLoad(&visible_requests.count) >= VISIBLE_REQUEST_CAPACITY {
         atomicStore(&visible_requests.overflow, 1u);
         return;
     }
-    let key0 = column_key0(face, level, ci & ~3);
-    let key1 = bitcast<u32>(cj & ~3);
+    let key0 = visible_request_candidate.x;
+    let key1 = visible_request_candidate.y;
     let salt = frame.hints.w >> 8u;
     let hash = column_slot(key0, key1 ^ (salt * 0x9e3779b9u)) & 131071u;
     let bit = 1u << (hash & 31u);

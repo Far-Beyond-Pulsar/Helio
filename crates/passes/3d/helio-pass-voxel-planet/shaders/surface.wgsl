@@ -31,6 +31,22 @@ fn primary(@builtin(global_invocation_id) id: vec3<u32>) {
         t0 = t1;
         t1 = frame.lod.w;
     }
+    if visible_feedback_enabled() {
+        let wanted_level = level_for(hit.t);
+        if (hit.info & 3u) == ST_HIT && ((hit.info >> 5u) & 31u) > wanted_level {
+            let face = (hit.info >> 2u) & 7u;
+            let wanted = locate(r, face_ray(face, r), hit.t, wanted_level);
+            var missing = column_hint(wanted_level, face, wanted.i >> 3u, wanted.j >> 3u) == 0u;
+            if !missing {
+                let found = find_column(column_key0(face, wanted_level, wanted.i >> 3u), bitcast<u32>(wanted.j >> 3u));
+                missing = found == NONE || !column_valid(records[found]);
+            }
+            if missing { prefer_visible_block(face, wanted_level, wanted.i >> 3u, wanted.j >> 3u); }
+        }
+        // Emit once after the final result. Unresolved rays retain their
+        // first missing block, including candidates from the sky retry.
+        finish_visible_feedback_pixel();
+    }
     sample_primary_hit(id.xy, hit);
     hits[pixel_index(id.xy)] = hit;
 }
@@ -575,10 +591,17 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         // Bound the grazing expansion; voxel detail and normal gates keep
         // their own footprint. This scalar approximation is material-only.
         material_footprint = pixel / max(abs(dot(material_normal, d)), 0.25);
-        // A pixel footprint on the surface projects to this radial height span.
-        // Horizontal metres alone are not a strata altitude bandwidth.
-        let radial_cosine = clamp(dot(material_normal, material_up), 0.0, 1.0);
-        material_radial_span = material_footprint * sqrt(max(0.0, 1.0 - radial_cosine * radial_cosine));
+        // Ray/plane radial differential: G = U - N*(U.D)/(N.D).
+        // The cross form is zero for a flat surface without subtracting
+        // nearly equal terms. Unlike the noise footprint, altitude support
+        // must expand at grazing angles or distant strata keep aliasing.
+        let radial_numerator = cross(d, cross(material_up, material_normal));
+        // When the pixel cone crosses a plane-parallel ray, its linear
+        // footprint is unbounded. Use its angular half-width (plus a float
+        // precision floor) as a finite appearance fallback at that limit.
+        let radial_epsilon = max(0.5 * pixel / max(h.t, 0.05), 0.00000095367431640625);
+        material_radial_span = pixel * length(radial_numerator)
+            / max(abs(dot(material_normal, d)), radial_epsilon);
     }
     if !edited {
         var lowest = top;

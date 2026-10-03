@@ -162,6 +162,33 @@ struct FrameGpu {
     detail: [f32; 4],
 }
 
+// Queued window operations are CPU work even before they reach pending.
+// They can include resident keys, so this is pressure, not a missing-column
+// estimate. Use the larger queue without adding overlapping demand twice.
+fn streaming_time_budgets(moving: bool, pending: usize, queued_ops: usize) -> (f64, f64) {
+    let backlog = (pending.max(queued_ops) as f64 / 80_000.0).min(1.0);
+    if moving { (1.5 + 1.5 * backlog, 1.5 + 2.5 * backlog) } else { (6.0, 4.0) }
+}
+
+#[cfg(test)]
+mod streaming_policy_tests {
+    use super::streaming_time_budgets;
+
+    #[test]
+    fn queued_demand_before_admission_uses_existing_caps() {
+        // Native cruise had very little pending while a full wanted snapshot
+        // waited in the bounded CPU queue. It must not look nearly idle.
+        assert_eq!(streaming_time_budgets(true, 1_553, 923_488), (3.0, 4.0));
+        assert_eq!(streaming_time_budgets(true, 0, 80_000), (3.0, 4.0));
+        assert_eq!(streaming_time_budgets(true, 80_000, 0), (3.0, 4.0));
+        assert_eq!(streaming_time_budgets(true, usize::MAX, usize::MAX), (3.0, 4.0));
+        // The same demand crossing queue stages is not counted twice.
+        assert_eq!(streaming_time_budgets(true, 40_000, 40_000), (2.25, 2.75));
+        assert_eq!(streaming_time_budgets(true, 0, 0), (1.5, 1.5));
+        assert_eq!(streaming_time_budgets(false, 0, 0), (6.0, 4.0));
+    }
+}
+
 /// Public per-frame statistics.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PlanetStats {
@@ -1392,13 +1419,14 @@ impl PlanetRenderer {
         let focused = std::time::Instant::now();
         // Spend additional generation time when visible detail is catching up,
         // rather than withholding it until the camera stops moving.
-        let backlog = (self.residency.stats.pending_columns as f64 / 80_000.0).min(1.0);
-        let target_ms = if moving { 1.5 + 1.5 * backlog } else { 6.0 };
+        // Completion polling refreshes pending; queued ops are from the last
+        // completed plan. New worker demand joins this signal next encode.
+        let (target_ms, cpu_ms) = streaming_time_budgets(moving,
+            self.residency.stats.pending_columns, self.residency.stats.queued_delta_ops);
         // CPU for applying window diffs and admitting columns: small while
         // moving (a big diff spreads over frames instead of freezing one),
         // growing to 4 ms with the backlog (a new region streams in ~2x
         // faster; admission costs ~0.3 us per column, diffs about as much).
-        let cpu_ms = if moving { 1.5 + 2.5 * backlog } else { 4.0 };
         self.residency.set_cpu_budget(Some(std::time::Duration::from_secs_f64(cpu_ms * 1.0e-3)));
         let desired_budget = ((target_ms / self.ms_per_job.max(1e-5)) as usize)
             .clamp(256, self.settings.job_budget.min(self.settings.capacity.max_jobs as usize));

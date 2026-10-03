@@ -12,22 +12,38 @@ use wgpu::util::DeviceExt;
 const BYTES: u64 = 18_448;
 
 fn fixture(gpu: &Gpu, inputs: &[[u32; 4]], epoch: u32, enabled: bool, hint: bool) -> Vec<u8> {
+    fixture_mode(gpu, inputs, epoch, enabled, hint, false, true)
+}
+
+fn fixture_mode(gpu: &Gpu, inputs: &[[u32; 4]], epoch: u32, enabled: bool, hint: bool,
+    prefer: bool, finish: bool) -> Vec<u8> {
     let common = include_str!("../shaders/common.wgsl");
     let keys = &common
         [common.find("fn column_key0(").unwrap()..common.find("// Table edge log2").unwrap()];
+    // This isolated fixture tests requests; the complete primary path below
+    // also composes the separate Hit sampling code and its frame bindings.
+    let requests_shader = include_str!("../shaders/visible_feedback.wgsl")
+        .split("// Four independent").next().unwrap();
     let source = format!(
         "{}\nstruct Frame {{ hints: vec4<u32> }}\n@group(0) @binding(0) var<uniform> frame: Frame;\n{}\n{}\n{}",
         include_str!("../shaders/noise.wgsl"), keys,
-        include_str!("../shaders/visible_feedback.wgsl"),
+        requests_shader,
         r#"@group(0) @binding(22) var<storage, read> inputs: array<vec4<u32>>;
+override PREFER_FINAL: bool = false;
 @compute @workgroup_size(64)
 fn check(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= arrayLength(&inputs) { return; }
     let v = inputs[id.x];
     begin_visible_feedback_pixel(vec2<u32>(id.x & 255u, id.x >> 8u));
     request_visible_block(v.x, v.y, bitcast<i32>(v.z), bitcast<i32>(v.w));
-    // A second hop from the same invocation must not issue a second request.
+    // Another hop (or sky retry) retains the first candidate without emitting.
     request_visible_block((v.x + 1u) % 6u, v.y, bitcast<i32>(v.z) + 32, bitcast<i32>(v.w));
+    if PREFER_FINAL { prefer_visible_block((v.x + 1u) % 6u, v.y, bitcast<i32>(v.z) + 32, bitcast<i32>(v.w)); }
+    if frame.hints.y != 0u {
+        finish_visible_feedback_pixel();
+        // Finalization itself must not be able to consume another attempt.
+        finish_visible_feedback_pixel();
+    }
 }"#
     );
     let module = gpu
@@ -44,7 +60,10 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {
             module: &module,
             entry_point: Some("check"),
             compilation_options: wgpu::PipelineCompilationOptions {
-                constants: &[("VISIBLE_FEEDBACK", if enabled { 1.0 } else { 0.0 })],
+                constants: &[
+                    ("VISIBLE_FEEDBACK", if enabled { 1.0 } else { 0.0 }),
+                    ("PREFER_FINAL", if prefer { 1.0 } else { 0.0 }),
+                ],
                 ..Default::default()
             },
             cache: None,
@@ -53,7 +72,7 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
-            contents: bytemuck::cast_slice(&[0u32, 0, 0, (epoch << 8) | if hint { 16 } else { 0 }]),
+            contents: bytemuck::cast_slice(&[0u32, u32::from(finish), 0, (epoch << 8) | if hint { 16 } else { 0 }]),
             usage: wgpu::BufferUsages::UNIFORM,
         });
     let probes = gpu
@@ -116,6 +135,29 @@ fn bit(key: (u32, u32), epoch: u32) -> u32 {
 }
 
 #[test]
+fn deferred_request_prefers_final_hit_and_emits_once_after_retry() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIP deferred feedback: no GPU adapter");
+        return;
+    };
+    let input = [[2, 4, 13, (-9i32) as u32]];
+    let deferred = fixture_mode(&gpu, &input, 0, true, true, false, false);
+    assert_eq!([word(&deferred, 0), word(&deferred, 1), word(&deferred, 2)], [0; 3],
+        "trace hops must save candidates without publishing before finalization");
+
+    // With no usable final Hit preference, another hop/sky retry cannot
+    // replace the first missing block or consume another request attempt.
+    let unresolved = fixture(&gpu, &input, 0, true, true);
+    assert_eq!(word(&unresolved, 2), 1);
+    assert_eq!(requests(&unresolved), HashSet::from([full_key(input[0])]));
+
+    let preferred = fixture_mode(&gpu, &input, 0, true, true, true, true);
+    assert_eq!(word(&preferred, 2), 1, "preference and repeated finalization share one attempt");
+    assert_eq!(requests(&preferred), HashSet::from([full_key([3, 4, 45, (-9i32) as u32])]),
+        "the final missing Hit footprint must replace the earlier missing air block");
+}
+
+#[test]
 fn visible_requests_bound_emission_preserve_keys_and_retry_collisions() {
     let Some(gpu) = gpu() else {
         eprintln!("SKIP visible feedback: no GPU adapter");
@@ -167,7 +209,9 @@ fn visible_requests_bound_emission_preserve_keys_and_retry_collisions() {
     let common = include_str!("../shaders/common.wgsl");
     let keys = &common
         [common.find("fn column_key0(").unwrap()..common.find("// Table edge log2").unwrap()];
-    let source=format!("{}\nstruct Frame {{hints:vec4<u32>}} @group(0) @binding(0) var<uniform> frame:Frame;\n{}\n{}\n@compute @workgroup_size(1) fn off() {{begin_visible_feedback_pixel(vec2<u32>(0));request_visible_block(0,0,0,0);}}",include_str!("../shaders/noise.wgsl"),keys,include_str!("../shaders/visible_feedback.wgsl"));
+    let requests_shader = include_str!("../shaders/visible_feedback.wgsl")
+        .split("// Four independent").next().unwrap();
+    let source=format!("{}\nstruct Frame {{hints:vec4<u32>}} @group(0) @binding(0) var<uniform> frame:Frame;\n{}\n{}\n@compute @workgroup_size(1) fn off() {{begin_visible_feedback_pixel(vec2<u32>(0));request_visible_block(0,0,0,0);prefer_visible_block(0,0,4,4);finish_visible_feedback_pixel();}}",include_str!("../shaders/noise.wgsl"),keys,requests_shader);
     let module = gpu
         .device
         .create_shader_module(wgpu::ShaderModuleDescriptor {
