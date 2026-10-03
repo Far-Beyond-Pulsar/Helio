@@ -311,6 +311,102 @@ pub(crate) fn visible_focus(grid: &Grid, eye: DVec3, forward: DVec3, ground_radi
     Some(point)
 }
 
+
+// A single-column spherical predicate shared with both complete-block scanners.
+fn column_in_circle(dn: f64, da: f64, db: f64, ta: f64, tb: f64, cos_limit: f64) -> bool {
+    (dn + ta * da + tb * db) / (1.0 + ta * ta + tb * tb).sqrt() >= cos_limit
+}
+
+/// Revalidate an already captured block against the CURRENT global-bound window.
+/// This is a bounded conservative superset of local-bound planner demand, not a
+/// frustum/occlusion test. No generator query or wanted-set expansion is performed.
+pub(crate) fn current_block_wanted(grid: &Grid, request: &WindowRequest, key: u64) -> bool {
+    let k0 = key as u32;
+    let (face, level, i, j) = (((k0 >> 24) & 7) as u8, k0 >> 27,
+        (k0 & 0xff_ffff) as i32, (key >> 32) as u32 as i32);
+    if level >= grid.levels().min(3) || !grid.faces().contains(&face)
+        || i < 0 || j < 0 || i & 3 != 0 || j & 3 != 0
+        || !request.eye.is_finite() || !request.outer_radius.is_finite()
+        || !request.lod0.is_finite() || request.lod0 <= 0.0 {
+        return false;
+    }
+    let cells = BRICK << level;
+    let cols = grid.cells() / cells;
+    if i >= cols || j >= cols { return false; }
+    let r0 = grid.radius();
+    let dither = sanitize_lod_dither(request.lod_dither);
+    let nominal = request.lod0 * f64::from(1u32 << level);
+    let selected = nominal / (1.0 - dither * 0.5);
+    let reach = (nominal * 1.05).max(selected);
+    let inner = if level == 0 { 0.0 } else { nominal * 0.5 / (1.0 + dither * 0.5) };
+    let future = request.prefetch_eye.unwrap_or(request.eye);
+    if !future.is_finite() { return false; }
+    let altitude = grid.radial(request.eye) - request.outer_radius;
+    let future_altitude = grid.radial(future) - request.outer_radius;
+    let height = (grid.radial(request.eye) - r0.min(request.outer_radius)).max(0.0);
+    let peak = (request.outer_radius - r0).max(0.0);
+    let horizon = if grid.is_plane() { f64::INFINITY } else {
+        (2.0 * r0 * height + height * height).sqrt() + (2.0 * r0 * peak + peak * peak).sqrt()
+    };
+    if altitude.min(future_altitude) >= reach || inner >= horizon { return false; }
+    let col = grid.level_size(level) * f64::from(BRICK);
+    let cap = col * f64::from(max_window_columns() / 2 - 2) * 0.8;
+    let drift = if grid.is_plane() { col * 3.0 } else {
+        2.0 * r0 * (col * 3.0 / (2.0 * r0)).min(1.0).asin()
+    };
+    let tangential_col = grid.delta() * f64::from(cells) * if grid.is_plane() { 1.0 } else { r0 };
+    let slack = tangential_col * 0.25 + col * 0.25;
+    let pad = (col * 2.0).max(drift + slack - (reach - selected));
+    let motion = grid.ground_distance(request.eye, future);
+    let radius = ((reach * reach - altitude.max(0.0).powi(2)).max(0.0).sqrt()
+        .max((reach * reach - future_altitude.max(0.0).powi(2)).max(0.0).sqrt()
+            + motion.min(reach * 0.5)).min(horizon) + pad).min(cap);
+    if !radius.is_finite() || radius < 0.0 { return false; }
+    let (x1, y1) = ((i + 3).min(cols - 1), (j + 3).min(cols - 1));
+    if grid.is_plane() {
+        let c = grid.face_coords(PLANE_FACE, request.eye).unwrap_or([0.0; 3]);
+        let (ci, cj) = (c[0] / f64::from(cells), c[1] / f64::from(cells));
+        let bounds = (radius / col + 1.0).min(f64::from(cols));
+        let (lo_i, hi_i) = (((ci - bounds).floor() as i32).max(0), ((ci + bounds).ceil() as i32).min(cols - 1));
+        let (lo_j, hi_j) = (((cj - bounds).floor() as i32).max(0), ((cj + bounds).ceil() as i32).min(cols - 1));
+        return plane_block_in_circle(ci, cj, i, x1, j, y1, lo_i, hi_i, lo_j, hi_j, radius / col + 0.75);
+    }
+    let dir = request.eye.normalize_or_zero();
+    if dir.length_squared() == 0.0 { return false; }
+    let [n, a, b] = face_axes(face);
+    let (dn, da, db) = (dir.dot(n), dir.dot(a), dir.dot(b));
+    let angle = grid.delta() * f64::from(cells);
+    let theta = (radius / r0).min(std::f64::consts::PI);
+    if theta < 1.2 && dn < (theta + 1.0).min(std::f64::consts::PI).cos() { return false; }
+    let (lo_i, hi_i, lo_j, hi_j) = if dn > 0.2 && theta < 0.9 {
+        let ai = grid.index_of_angle(da.atan2(dn)) / f64::from(cells);
+        let bj = grid.index_of_angle(db.atan2(dn)) / f64::from(cells);
+        let bounds = theta / angle / 0.7 + 2.0;
+        (((ai - bounds).floor() as i32).max(0), ((ai + bounds).ceil() as i32).min(cols - 1),
+         ((bj - bounds).floor() as i32).max(0), ((bj + bounds).ceil() as i32).min(cols - 1))
+    } else { (0, cols - 1, 0, cols - 1) };
+    let cos_limit = (theta + angle * 0.75).min(std::f64::consts::PI).cos();
+    let mut ta = [0.0; 4];
+    for x in i.max(lo_i)..=x1.min(hi_i) {
+        ta[(x - i) as usize] = grid.angle((f64::from(x) + 0.5) * f64::from(cells)).tan();
+    }
+    for y in j.max(lo_j)..=y1.min(hi_j) {
+        let tb = grid.angle((f64::from(y) + 0.5) * f64::from(cells)).tan();
+        for x in i.max(lo_i)..=x1.min(hi_i) {
+            if column_in_circle(dn, da, db, ta[(x - i) as usize], tb, cos_limit) { return true; }
+        }
+    }
+    false
+}
+
+fn plane_block_in_circle(ci: f64, cj: f64, x0: i32, x1: i32, y0: i32, y1: i32,
+    lo_i: i32, hi_i: i32, lo_j: i32, hi_j: i32, limit: f64) -> bool {
+    if x0.max(lo_i) > x1.min(hi_i) || y0.max(lo_j) > y1.min(hi_j) { return false; }
+    let x = (ci.floor() as i32).clamp(x0.max(lo_i), x1.min(hi_i));
+    let y = (cj.floor() as i32).clamp(y0.max(lo_j), y1.min(hi_j));
+    (f64::from(x) + 0.5 - ci).hypot(f64::from(y) + 0.5 - cj) <= limit
+}
+
 impl WindowPlanner {
     pub fn new(grid: Grid) -> Self {
         Self {
@@ -344,10 +440,7 @@ impl WindowPlanner {
             let (y0, y1) = (bj * 4, (bj * 4 + 3).min(cols - 1));
             for bi in lo_i / 4..=hi_i / 4 {
                 let (x0, x1) = (bi * 4, (bi * 4 + 3).min(cols - 1));
-                let x = (ci.floor() as i32).clamp(x0.max(lo_i), x1.min(hi_i));
-                let y = (cj.floor() as i32).clamp(y0.max(lo_j), y1.min(hi_j));
-                let d = (f64::from(x) + 0.5 - ci).hypot(f64::from(y) + 0.5 - cj);
-                if d > limit { continue; }
+                if !plane_block_in_circle(ci, cj, x0, x1, y0, y1, lo_i, hi_i, lo_j, hi_j, limit) { continue; }
                 let priority = ((f64::from(x0 + x1 + 1) * 0.5 - ci)
                     .hypot(f64::from(y0 + y1 + 1) * 0.5 - cj) / limit.max(1e-12)) as f32;
                 for y in y0..=y1 {
@@ -414,8 +507,7 @@ impl WindowPlanner {
                         let tb = tan_j[(y - block_lo_j) as usize];
                         for x in x0.max(lo_i)..=x1.min(hi_i) {
                             let ta = tan_i[(x - block_lo_i) as usize];
-                            let cos = (dn + ta * da + tb * db) / (1.0 + ta * ta + tb * tb).sqrt();
-                            if cos >= cos_limit {
+                            if column_in_circle(dn, da, db, ta, tb, cos_limit) {
                                 intersects = true;
                                 break 'columns;
                             }
@@ -461,10 +553,7 @@ impl WindowPlanner {
             let (y0, y1) = (bj * 4, (bj * 4 + 3).min(cols - 1));
             for bi in lo_i / 4..=hi_i / 4 {
                 let (x0, x1) = (bi * 4, (bi * 4 + 3).min(cols - 1));
-                let x = (ci.floor() as i32).clamp(x0.max(lo_i), x1.min(hi_i));
-                let y = (cj.floor() as i32).clamp(y0.max(lo_j), y1.min(hi_j));
-                let d = (f64::from(x) + 0.5 - ci).hypot(f64::from(y) + 0.5 - cj);
-                if d > limit { continue; }
+                if !plane_block_in_circle(ci, cj, x0, x1, y0, y1, lo_i, hi_i, lo_j, hi_j, limit) { continue; }
                 let priority = if base_priority { ((f64::from(x0 + x1 + 1) * 0.5 - ci)
                     .hypot(f64::from(y0 + y1 + 1) * 0.5 - cj) / limit.max(1e-12)) as f32 } else { 0.0 };
                 out.push(SnapshotBlock { priority, first: pack(key0(PLANE_FACE, level, x0), y0 as u32),
@@ -528,8 +617,7 @@ impl WindowPlanner {
                         let tb = tan_j[(y - block_lo_j) as usize];
                         for x in x0.max(lo_i)..=x1.min(hi_i) {
                             let ta = tan_i[(x - block_lo_i) as usize];
-                            let cos = (dn + ta * da + tb * db) / (1.0 + ta * ta + tb * tb).sqrt();
-                            if cos >= cos_limit {
+                            if column_in_circle(dn, da, db, ta, tb, cos_limit) {
                                 intersects = true;
                                 break 'columns;
                             }
@@ -1936,6 +2024,78 @@ mod tests {
             }
             assert!(update.levels.iter().any(|l| l.level + 1 == grid.levels() && l.active));
         }
+    }
+
+    #[test]
+    fn current_block_demand_matches_independent_global_column_oracle() {
+        for shape in [crate::grid::Shape::Plane, crate::grid::Shape::Sphere, crate::grid::Shape::InfinitePlane] {
+            let planet = crate::planet::Planet::new(crate::PlanetRecipe { shape,
+                radius_m: 1000.0, plane_size_m: 1024.0, voxel_size_m: 0.1,
+                terrain: crate::TerrainSource { generator: crate::landform::FLAT_ID.into(), ..Default::default() },
+                ..Default::default() }).unwrap();
+            let grid = *planet.grid();
+            for dither in [0.0, 0.25, 1.0] {
+                for direction in [DVec3::Y, DVec3::new(1.0, 1.0, 0.0).normalize(),
+                    DVec3::new(1.0, 1.0, 1.0).normalize()] {
+                    let eye = if grid.is_plane() { DVec3::new(2.1, 2.0, -1.7) }
+                        else { direction * (grid.radius() + 2.0) };
+                    let request = WindowRequest { eye, prefetch_eye: None, priority_eye: None,
+                        view_focus: None, lod0: 8.0, lod_dither: dither, outer_radius: planet.outer_radius(),
+                        planet: None, serial: 1 };
+                    let mut oracle = WindowPlanner::new(grid);
+                    oracle.snapshot = true;
+                    let update = oracle.update_range_column_snapshot_oracle(&request, 0..grid.levels());
+                    for level in 0..grid.levels().min(3) {
+                        let wanted = update.wanted.iter().find(|(l, _)| *l == level).unwrap().1.clone();
+                        let mut blocks: FxHashSet<_> = wanted.iter().map(|key| key & !(3u64 | (3u64 << 32))).collect();
+                        for &face in grid.faces() {
+                            let columns = grid.cells() / (BRICK << level);
+                            // Include rejected remote/boundary/face keys, not just positive oracle keys.
+                            // InfinitePlane L0 has exactly 2^24 columns: its one-past
+                            // i cannot be passed to checked key0. The 32-bit j word
+                            // can represent that boundary without corrupting face bits.
+                            for (i, j) in [(0, 0), (0, columns), (columns - 4, columns - 4)] {
+                                blocks.insert(pack(key0(face, level, i), j as u32));
+                            }
+                            if columns < 1 << 24 {
+                                blocks.insert(pack(key0(face, level, columns), 0));
+                            }
+                            // Raw malformed keys test decoder rejection, without
+                            // violating the production encoder's 24-bit invariant.
+                            assert!(!current_block_wanted(&grid, &request,
+                                pack((7u32 << 24) | (level << 27), 0)));
+                            assert!(!current_block_wanted(&grid, &request,
+                                pack(key0(face, level, 0), u32::MAX)));
+                        }
+                        for block in blocks {
+                            let present = wanted.contains(&block);
+                            assert_eq!(current_block_wanted(&grid, &request, block), present,
+                                "shape {shape:?} level {level} dither {dither} block {block}");
+                        }
+                    }
+                    let invalid = WindowRequest { lod0: f64::NAN, ..request.clone() };
+                    assert!(!current_block_wanted(&grid, &invalid, 0));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn current_block_demand_rejects_altitude_invalid_and_remote_keys() {
+        let grid = Grid::plane(crate::grid::Shape::Plane, 1024.0, 0.1).unwrap();
+        let request = WindowRequest { eye: DVec3::Y * 2.0, prefetch_eye: None,
+            priority_eye: None, view_focus: None, lod0: 8.0, lod_dither: 0.25,
+            outer_radius: grid.radius(), planet: None, serial: 1 };
+        let (cell, _) = grid.locate(DVec3::ZERO);
+        let key = pack(key0(cell.face, 0, (cell.i >> 3) & !3), ((cell.j >> 3) & !3) as u32);
+        assert!(current_block_wanted(&grid, &request, key));
+        assert!(!current_block_wanted(&grid, &WindowRequest { eye: DVec3::Y * 100.0, ..request.clone() }, key));
+        assert!(!current_block_wanted(&grid, &request, key + 1));
+        assert!(!current_block_wanted(&grid, &request, pack(key0(cell.face, 3, 0), 0)));
+        assert!(!current_block_wanted(&grid, &request, pack(key0(cell.face, 0, 0), 0)));
+        // Clipped edge rectangle itself uses the same scanner predicate.
+        assert!(plane_block_in_circle(2.1, 1.8, 0, 2, 0, 2, 0, 2, 0, 2, 1.0));
+        assert!(!plane_block_in_circle(2.1, 1.8, 4, 6, 4, 6, 0, 2, 0, 2, 1.0));
     }
 
 }

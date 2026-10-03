@@ -123,6 +123,8 @@ struct VisibleLease {
     serial: u64,
     retiring: bool,
     retired: usize,
+    /// Current-frame geometric validation; never changes the captured stamp.
+    current_demand_frame: Option<u32>,
 }
 
 /// Wanted but not yet issued columns of one level, by priority bucket.
@@ -421,6 +423,7 @@ pub struct Residency {
     frame: u32,
     planner: Planner,
     last_request: Option<WindowRequest>,
+    current_request: Option<WindowRequest>,
     requested: u64,
     applied: u64,
     /// Demand authority can arrive independently for fine and far levels.
@@ -522,6 +525,7 @@ impl Residency {
             frame: 0,
             planner,
             last_request: None,
+            current_request: None,
             requested: 0,
             applied: 0,
             applied_levels: vec![0; grid.levels() as usize],
@@ -861,8 +865,18 @@ impl Residency {
 
     fn transient_wanted(&self, key: u64) -> bool {
         self.visible_leases.get(&(key & !(3u64 | (3u64 << 32)))).is_some_and(|lease|
-            !lease.retiring && self.applied_levels[unpack(key).1 as usize] < lease.serial
+            !lease.retiring && (match lease.current_demand_frame {
+                Some(frame) => frame == self.frame,
+                None => self.applied_levels[unpack(key).1 as usize] < lease.serial,
+            })
                 && self.source_is_current(lease.source, VISIBLE_LEASE_FRAMES))
+    }
+
+    fn current_captured_block(&self, key: u64) -> bool {
+        let level = unpack(key).1 as usize;
+        level < self.levels.len().min(3) && self.levels[level].active
+            && self.current_request.as_ref().is_some_and(|request|
+                crate::windows::current_block_wanted(&self.grid, request, key))
     }
 
     fn protected_wanted(&self, key: u64) -> bool {
@@ -881,9 +895,19 @@ impl Residency {
         let blocks: Vec<_> = self.visible_leases.keys().copied().collect();
         let mut steps = 0;
         for block in blocks {
-            let expire = !self.source_is_current(self.visible_leases[&block].source, VISIBLE_LEASE_FRAMES)
-                || self.applied_levels[unpack(block).1 as usize] >= self.visible_leases[&block].serial;
-            self.visible_leases.get_mut(&block).unwrap().retiring |= expire;
+            let lease = &self.visible_leases[&block];
+            let source_live = self.source_is_current(lease.source, VISIBLE_LEASE_FRAMES);
+            let was_bounded = lease.current_demand_frame.is_some();
+            let superseded = self.applied_levels[unpack(block).1 as usize] >= lease.serial;
+            let ordinary = self.visible_columns(block).is_some_and(|(keys, count)|
+                self.levels[unpack(block).1 as usize].active
+                    && keys[..count].iter().all(|&key| self.current_wanted(key)));
+            let bounded_current = !ordinary && !lease.retiring && source_live && (was_bounded || superseded)
+                && !out_of_time() && self.current_captured_block(block);
+            let expire = ordinary || !source_live || (was_bounded || superseded) && !bounded_current;
+            let lease = self.visible_leases.get_mut(&block).unwrap();
+            lease.current_demand_frame = bounded_current.then_some(self.frame);
+            lease.retiring |= expire;
             if !self.visible_leases[&block].retiring { continue; }
             let (keys, count) = self.visible_columns(block).unwrap();
             while self.visible_leases[&block].retired < count {
@@ -942,16 +966,24 @@ impl Residency {
             let level = unpack(key).1 as usize;
             let ordinary = self.levels[level].active && keys[..count].iter().all(|&key| self.current_wanted(key));
             if !ordinary && self.requested > self.applied_levels[unpack(key).1 as usize] && index < requested_blocks {
-                if let Some(source) = source.filter(|source|
-                    self.applied_issued_at[level].is_none_or(|issued| source.at >= issued)) {
+                if let Some(source) = source {
+                    let after_authority = self.applied_issued_at[level].is_none_or(|issued| source.at >= issued);
+                    let bounded_current = self.visible_leases.get(&key).is_some_and(|lease|
+                        !lease.retiring && lease.current_demand_frame == Some(self.frame))
+                        || self.current_request.is_some() && !out_of_time()
+                            && self.current_captured_block(key);
+                    if !after_authority && !bounded_current { continue; }
                     if let Some(lease) = self.visible_leases.get_mut(&key) {
                         let newer = source.frame.wrapping_sub(lease.source.frame);
                         if !lease.retiring && newer > 0 && newer < 0x8000_0000 {
                             lease.source = source;
                             lease.serial = self.requested;
                         }
+                        if !lease.retiring && bounded_current {
+                            lease.current_demand_frame = Some(self.frame);
+                        }
                     } else if self.visible_leases.len() < VISIBLE_BLOCKS {
-                        self.visible_leases.insert(key, VisibleLease { source, serial: self.requested, retiring: false, retired: 0 });
+                        self.visible_leases.insert(key, VisibleLease { source, serial: self.requested, retiring: false, retired: 0, current_demand_frame: bounded_current.then_some(self.frame) });
                     }
                 }
             }
@@ -1480,6 +1512,7 @@ impl Residency {
             planet: Some(planet.clone()),
             serial: self.requested + 1,
         };
+        self.current_request = Some(request.clone());
         let changed = self.last_request.as_ref().is_none_or(|last| {
             last.eye.distance(eye) > self.grid.voxel_size() * 2.0
                 || (last.lod0 - lod0).abs() > lod0 * 0.01
@@ -4062,7 +4095,7 @@ mod tests {
             let stamp=VisibleStamp {frame:10,view:7,at:std::time::Instant::now()};
             r.visible_view=Some(stamp);
             r.visible_leases.insert(focus[0] & !(3u64 | (3u64<<32)),
-                VisibleLease {source:stamp,serial:2,retiring:false,retired:0});
+                VisibleLease {source:stamp,serial:2,retiring:false,retired:0,current_demand_frame:None});
             assert!(r.transient_wanted(focus[0]),"a valid GPU lease deliberately supplies the missing member");
             r.levels[0].active=!retired;
             let before=r.levels[0].pending.at.clone();
@@ -4087,6 +4120,220 @@ mod tests {
         assert_eq!(work.job_keys[0],coarse,"a closer coarser pending key must retain its priority");
         assert!(work.job_keys[1..].iter().all(|key|focus.contains(key)));
         assert_eq!(focus.iter().filter(|key|r.levels[0].pending.at.contains_key(key)).count(),10);
+    }
+
+    fn current_bridge_fixture() -> (std::sync::Arc<Planet>, Residency, u64, std::time::Instant) {
+        let (planet, mut r, eye, at) = visible_bridge_fixture();
+        let (cell, _) = r.grid.locate(eye);
+        let key = pack(key0(cell.face, 0, (cell.i >> 3) & !3), ((cell.j >> 3) & !3) as u32);
+        let request = WindowRequest { eye, prefetch_eye: None, priority_eye: None,
+            view_focus: None, lod0: 160.0, lod_dither: 0.25,
+            outer_radius: planet.outer_radius(), planet: Some(planet.clone()), serial: 3 };
+        // Keep plan's renderer settings identical to the outstanding request.
+        // Otherwise its default dither of 0 installs a new inline wanted snapshot.
+        r.set_lod_dither(request.lod_dither);
+        r.current_request = Some(request.clone());
+        r.last_request = Some(request);
+        r.requested = 3;
+        r.levels[0].active = true;
+        r.applied_levels[0] = 2;
+        r.applied_issued_at[0] = Some(at + std::time::Duration::from_millis(1));
+        (planet, r, key, at)
+    }
+
+    #[test]
+    fn current_revalidation_holds_preauthority_demand_across_ack_without_renewing_capture() {
+        let (_, mut r, block, at) = current_bridge_fixture();
+        r.prioritize_visible_blocks_from([(block as u32, (block >> 32) as u32)], 10, 7, at);
+        r.refresh_visible_pending(None);
+        assert!(r.transient_wanted(block));
+        assert_eq!(r.visible_admission.len(), 16);
+        let original = (r.visible_leases[&block].source.frame, r.visible_leases[&block].source.at);
+        for serial in 3..7 {
+            r.frame += 1;
+            r.requested = serial + 1;
+            r.apply(WindowUpdate { serial, partial: true, processed_levels: 1,
+                issued_at: Some(at + std::time::Duration::from_millis(serial)), ..Default::default() });
+            r.retire_visible_leases(&mut FrameWork::default(), &|| false);
+            assert!(r.transient_wanted(block), "current geometry remains useful after authority acknowledgment");
+            assert_eq!(original, (r.visible_leases[&block].source.frame, r.visible_leases[&block].source.at));
+            assert_eq!(r.visible_leases[&block].serial, 3, "geometric revalidation never renews source epoch");
+        }
+        // Replaying the same source cannot refresh either clock.
+        r.prioritize_visible_blocks_from([(block as u32, (block >> 32) as u32)], 10, 7, at);
+        r.refresh_visible_pending(None);
+        assert_eq!(r.visible_leases[&block].serial, 3);
+        r.set_visible_view(10 + VISIBLE_LEASE_FRAMES + 1, 7, at);
+        r.retire_visible_leases(&mut FrameWork::default(), &|| false);
+        assert!(r.visible_leases.is_empty());
+        r.refresh_visible_pending(None);
+        assert!(r.visible_leases.is_empty());
+    }
+
+    #[test]
+    fn current_revalidation_rejects_remote_inactive_stale_and_deadline() {
+        for cause in 0..6 {
+            let (_, mut r, block, at) = current_bridge_fixture();
+            match cause {
+                0 => r.current_request.as_mut().unwrap().eye += DVec3::X * 1000.0,
+                1 => r.levels[0].active = false,
+                2 => r.set_visible_view(19, 7, at),
+                3 => r.set_visible_view(10, 8, at),
+                4 => r.set_visible_view(10, 7, at + VISIBLE_LEASE_TIME * 2),
+                _ => {}
+            }
+            r.prioritize_visible_blocks_from([(block as u32, (block >> 32) as u32)], 10, 7, at);
+            r.refresh_visible_pending_until(|| cause == 5);
+            assert!(r.visible_leases.is_empty() && r.visible_admission.is_empty() && r.levels[0].pending.is_empty());
+        }
+    }
+
+    #[test]
+    fn current_revalidation_keeps_edits_and_quarantines_expired_publication() {
+        let (mut planet, mut r, block, at) = current_bridge_fixture();
+        std::sync::Arc::make_mut(&mut planet).apply(test_brush(1.5)).unwrap();
+        // Keep the worker outstanding: plan must not install an inline wanted set here.
+        r.last_request.as_mut().unwrap().outer_radius = planet.outer_radius();
+        r.prioritize_visible_blocks_from([(block as u32, (block >> 32) as u32)], 10, 7, at);
+        r.refresh_visible_pending(None);
+        let request = r.current_request.as_ref().unwrap().clone();
+        let first = r.plan(&planet, request.eye, request.lod0, 16);
+        assert_eq!(first.jobs.len(), 16);
+        assert_eq!(r.requested, 3, "the fixture must leave worker authority outstanding");
+        assert!(first.job_keys.iter().all(|key| unpack(*key).1 == 0 && !r.current_wanted(*key)),
+            "the admitted jobs must be the leased fine block, not global inline coverage");
+        assert!(r.publishing.values().any(|p| p.next.is_some()), "canonical edit lists remain scalar and intact");
+        r.applied_levels[0] = r.requested;
+        r.frame += 1;
+        let mut hold = FrameWork::default();
+        r.retire_visible_leases(&mut hold, &|| false);
+        assert!(hold.evictions.is_empty());
+        assert!(first.job_keys.iter().all(|key| r.protected_wanted(*key)));
+        assert!(r.publishing.values().all(|p| !p.evicted));
+        r.complete_jobs(first.job_keys.iter().map(|key| (*key, 0)));
+        assert!(r.publishing.is_empty() && first.job_keys.iter().all(|key| r.residents.contains_key(*key)));
+        // A departure invalidates the per-frame exception even before original TTL.
+        r.current_request.as_mut().unwrap().eye += DVec3::X * 1000.0;
+        r.frame += 1;
+        let mut expired = FrameWork::default();
+        r.retire_visible_leases(&mut expired, &|| false);
+        assert_eq!(expired.evictions.len(), 16);
+        assert!(r.visible_leases.is_empty() && r.blocks.is_empty());
+        table_is_exact(&r);
+    }
+
+    #[test]
+    fn current_revalidation_transfers_to_authority_and_expires_inflight_without_refresh() {
+        let (planet, mut r, block, at) = current_bridge_fixture();
+        r.prioritize_visible_blocks_from([(block as u32, (block >> 32) as u32)], 10, 7, at);
+        r.refresh_visible_pending(None);
+        let request = r.current_request.as_ref().unwrap().clone();
+        let work = r.plan(&planet, request.eye, request.lod0, 16);
+        assert_eq!(work.jobs.len(), 16);
+        assert_eq!(r.requested, 3, "the fixture must leave worker authority outstanding");
+        assert!(work.job_keys.iter().all(|key| unpack(*key).1 == 0 && !r.current_wanted(*key)),
+            "the admitted jobs must be the leased fine block, not global inline coverage");
+        let keys = work.job_keys.clone();
+        // A live publication survives repeated acknowledgment while independently current.
+        r.applied_levels[0] = r.requested;
+        r.frame += 1;
+        r.retire_visible_leases(&mut FrameWork::default(), &|| false);
+        assert!(r.publishing.values().all(|p| !p.evicted));
+        // Original wall-clock TTL still quarantines in-flight records.
+        r.set_visible_view(11, 7, at + VISIBLE_LEASE_TIME + std::time::Duration::from_millis(1));
+        let mut expired = FrameWork::default();
+        r.retire_visible_leases(&mut expired, &|| false);
+        assert_eq!(expired.evictions.len(), 16);
+        assert!(r.publishing.values().all(|p| p.evicted));
+        assert_eq!(r.visible_leases.len(), 1);
+        r.complete_jobs(keys.iter().map(|&key| (key, 0)));
+        r.retire_visible_leases(&mut expired, &|| false);
+        assert!(r.visible_leases.is_empty() && r.publishing.is_empty());
+        table_is_exact(&r);
+
+        let (_, mut r, block, at) = current_bridge_fixture();
+        r.prioritize_visible_blocks_from([(block as u32, (block >> 32) as u32)], 10, 7, at);
+        r.refresh_visible_pending(None);
+        let (keys, count) = r.visible_columns(block).unwrap();
+        r.levels[0].wanted = Some(std::sync::Arc::new(keys[..count].iter().copied().collect()));
+        r.applied_levels[0] = 3;
+        let mut handoff = FrameWork::default();
+        r.retire_visible_leases(&mut handoff, &|| false);
+        assert!(r.visible_leases.is_empty() && handoff.evictions.is_empty());
+        assert!(keys.iter().all(|&key| r.current_wanted(key)));
+    }
+
+
+    /// Capture hash iteration order first, then modify only values. This
+    /// deterministically puts a current bounded lease behind retirement's
+    /// exact 128-step limit (or behind an already elapsed deadline), without
+    /// assuming any particular hash order.
+    fn current_revalidation_retirement_tail(expired_blocks: usize, elapsed_deadline: bool) {
+        let (planet, mut r, base, at) = current_bridge_fixture();
+        let (face, level, i, j) = unpack(base);
+        r.set_visible_view(10, 7, at + std::time::Duration::from_millis(3));
+        for offset in 0..expired_blocks + 2 {
+            let block = pack(key0(face, level, i + offset as i32 * 4), j as u32);
+            assert!(r.current_captured_block(block));
+            assert_eq!(r.visible_columns(block).unwrap().1, 16);
+            r.visible_leases.insert(block, VisibleLease {
+                source: VisibleStamp { frame: 10, view: 7, at },
+                serial: 3, retiring: false, retired: 0,
+                current_demand_frame: Some(r.frame),
+            });
+        }
+        let ordered: Vec<_> = r.visible_leases.keys().copied().collect();
+        for &block in &ordered[..expired_blocks] {
+            r.visible_leases.get_mut(&block).unwrap().retiring = true;
+        }
+        let bounded = ordered[expired_blocks];
+        let legacy = ordered[expired_blocks + 1];
+        let lease = r.visible_leases.get_mut(&legacy).unwrap();
+        lease.current_demand_frame = None;
+        lease.source.at = at + std::time::Duration::from_millis(2);
+        let (keys, count) = r.visible_columns(bounded).unwrap();
+        let wanted = keys[1];
+        r.levels[0].wanted = Some(std::sync::Arc::new([wanted].into_iter().collect()));
+        for &key in &keys[..count] { r.levels[0].pending.insert(key, 0); }
+        r.visible_admission = keys[1..count].iter().map(|&key| (0, key)).collect();
+        let original = (r.visible_leases[&bounded].source.frame,
+            r.visible_leases[&bounded].source.at, r.visible_leases[&bounded].serial);
+        let old_frame = r.frame;
+        r.frame += 1;
+        let mut retired = FrameWork::default();
+        r.retire_visible_leases(&mut retired, &|| elapsed_deadline);
+        // The final retiring block causes the early return before visiting
+        // either tail lease. Both remain live and the bounded marker is old.
+        assert_eq!(r.visible_leases[&ordered[expired_blocks - 1]].retired, 0);
+        assert_eq!(r.visible_leases[&bounded].current_demand_frame, Some(old_frame));
+        assert!(!r.visible_leases[&bounded].retiring);
+        assert!(r.applied_levels[0] < r.visible_leases[&bounded].serial);
+        assert!(r.source_is_current(r.visible_leases[&bounded].source, VISIBLE_LEASE_FRAMES));
+        assert!(!r.transient_wanted(bounded), "unvisited current-bound demand must fail closed");
+        assert!(!r.protected_wanted(bounded));
+        assert!(r.protected_wanted(wanted), "ordinary authority membership remains protected");
+        assert!(r.transient_wanted(legacy), "an unacknowledged original bridge is unchanged");
+        assert!(!r.admit_visible_block(&planet, 0, bounded, 0, 16, None, &mut FrameWork::default()),
+            "a complete ranked block cannot use an unvalidated tail lease");
+        // A later plan may revalidate the same original capture; it must
+        // restore only geometric permission, never its serial or TTL.
+        r.frame += 1;
+        r.retire_visible_leases(&mut retired, &|| false);
+        assert_eq!(r.visible_leases[&bounded].current_demand_frame, Some(r.frame));
+        assert!(r.transient_wanted(bounded) && r.protected_wanted(bounded));
+        assert!(r.transient_wanted(legacy));
+        assert_eq!(original, (r.visible_leases[&bounded].source.frame,
+            r.visible_leases[&bounded].source.at, r.visible_leases[&bounded].serial));
+    }
+
+    #[test]
+    fn current_revalidation_unvisited_128_step_tail_fails_closed_then_recovers() {
+        current_revalidation_retirement_tail(9, false);
+    }
+
+    #[test]
+    fn current_revalidation_unvisited_deadline_tail_fails_closed_then_recovers() {
+        current_revalidation_retirement_tail(1, true);
     }
 
 }

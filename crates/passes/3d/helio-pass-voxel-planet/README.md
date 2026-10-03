@@ -219,7 +219,8 @@ dim diffuse light on the night side; set it to zero for solar-only lighting.
    pixel sample requests missing 4x4 blocks through bounded asynchronous
    feedback. While the worker catches up, up to 64 fresh requested blocks
    can load through temporary demand; they retain normal edit/publication
-   rules and expire when the current snapshot arrives or their lease ends.
+   rules. Near requests remain useful across delayed snapshots only while
+   they intersect the current camera window; their original lease still expires.
 5. **Shade**: material from the generator (or edit), macro normals and
    filtered appearance for cells about a pixel wide, AO from neighbour
    occupancy.
