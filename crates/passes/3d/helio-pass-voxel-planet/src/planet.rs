@@ -222,7 +222,7 @@ impl Planet {
                 let (bi, bj) = (cell.i & !7, cell.j & !7);
                 let slope = terrain::block_slope(|x, y| self.column_top(cell.face, bi + x, bj + y, 0), cell.i & 7, cell.j & 7);
                 let p = self.grid.domain_point(cell.face, cell.i, cell.j, 0);
-                let top_height = top * self.grid.layer_mm() as i32;
+                let top_height = self.column_height(cell.face, cell.i, cell.j, 0);
                 self.field.ground_material(p, top_height, top - 1 - cell.k, slope, cell.k) & material::ID
             }
         }
@@ -444,6 +444,16 @@ impl Planet {
         let top = self.column_top(cell.face, cell.i, cell.j, 0);
         self.grid.height(eye) - f64::from(top) * self.grid.voxel_size()
     }
+    /// The same generated-ground clearance without the shared window cache.
+    /// A render-frame forecast needs one sample and must not wait for a large
+    /// background cache rehash or clear while the planner holds its mutex.
+    pub(crate) fn ground_height_uncached_for_streaming(&self, eye: DVec3) -> f64 {
+        let (cell, _) = self.grid.locate(eye);
+        let point = self.grid.domain_point(cell.face, cell.i, cell.j, 0);
+        let height = self.field.height(point, self.grid.level_offset());
+        let top = terrain::top_cells(&self.grid, height, 0);
+        self.grid.height(eye) - f64::from(top) * self.grid.voxel_size()
+    }
     /// Radial coordinate bounding the solid cells whose ground point lies
     /// within ground distance `radius` of the point below `eye`: generated
     /// terrain from column tops plus a margin, additions from the edit top.
@@ -644,6 +654,20 @@ mod tests {
                 assert!((measured - h).abs() <= p.grid().voxel_size() * 1.01, "{dir} {h}: {measured}");
                 // A conservative clearance never exceeds it.
                 assert!(p.air_clearance(eye) <= measured + p.grid().voxel_size());
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_clearance_matches_ground_without_taking_the_cache_lock() {
+        for shape in [Shape::Sphere, Shape::Plane] {
+            let p = Planet::new(PlanetRecipe { shape, plane_size_m: 3_000.0, ..Default::default() }).unwrap();
+            for eye in [DVec3::new(100.0, 50.0, -80.0), DVec3::new(-2.8e6, 5.2e6, -2.3e6)] {
+                let expected = p.ground_height(eye);
+                let cache_guard = p.heights.lock().unwrap();
+                let actual = p.ground_height_uncached_for_streaming(eye);
+                assert_eq!(actual, expected);
+                drop(cache_guard);
             }
         }
     }

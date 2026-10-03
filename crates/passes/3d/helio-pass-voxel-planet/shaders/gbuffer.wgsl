@@ -31,7 +31,7 @@ fn gbuffer(@builtin(position) pixel: vec4<f32>) -> GOut {
     let a = unpack4x8unorm(s.albedo_ao);
     let material = (s.flags >> 8u) & 255u;
     let normal = oct_decode(s.normal);
-    let roughness = select(0.9, 0.55, material == M_SNOW);
+    let roughness = clamp(frame.palette[min(material, 15u)].w, 0.04, 1.0);
     let f0 = 0.03;
     let albedo = pow(a.rgb, vec3<f32>(2.2));
     var out: GOut;

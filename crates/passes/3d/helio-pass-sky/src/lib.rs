@@ -61,8 +61,11 @@ pub const CLOUD_VOLUME_COMPOSITE_SHADER: &str = include_str!("shaders/cloud_volu
 pub const CLOUD_TEMPORAL_SHADER: &str = include_str!("shaders/cloud_temporal.wgsl");
 
 // ── Atmospheric Sky LUT Shader (Hillaire 2020) ──────────────────────────────
-pub const SKY_LUT_SHADER: &str = include_str!("shaders/sky_lut.wgsl");
-pub const SKY_SHADER: &str = include_str!("shaders/sky.wgsl");
+pub const SKY_LUT_SHADER: &str = concat!(include_str!("shaders/planetary_lut.wgsl"), include_str!("shaders/sky_lut.wgsl"));
+pub const SKY_SHADER: &str = concat!(include_str!("shaders/planetary_lut.wgsl"), include_str!("shaders/sky.wgsl"));
+
+const PLANETARY_LUT_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::wgsl_snippet!("//!use planetary_lut", "shaders/planetary_lut.wgsl");
 
 pub const LUT_WIDTH: u32 = 192;
 pub const LUT_HEIGHT: u32 = 108;
@@ -128,6 +131,36 @@ impl ShaderSkyUniforms {
             cloud_quality: CloudQuality::High as u32,
             cloud_resolution: CloudResolution::Quarter as u32,
         }
+    }
+}
+
+/// Planet-centred atmosphere for a procedural world without an authored sky.
+/// Eye and radius are metres in f64; conversion to km happens after rebasing.
+/// Authored SceneDB skies keep their existing contract.
+#[derive(Clone, Copy, Debug)]
+pub struct PlanetarySky {
+    pub eye_m: [f64; 3],
+    pub radius_m: f64,
+    pub atmosphere_height_m: f32,
+    pub sun_direction: [f32; 3],
+    pub exposure: f32,
+    /// Linear HDR diffuse environment radiance, independent of direct sunlight.
+    /// Zero gives a solar-only atmosphere; the default keeps night air readable.
+    pub ambient_radiance: [f32; 3],
+}
+
+impl PlanetarySky {
+    pub fn earth_like(eye_m: [f64; 3], radius_m: f64, sun_direction: [f32; 3]) -> Self {
+        Self { eye_m, radius_m, atmosphere_height_m: 60_000.0, sun_direction, exposure: 0.7,
+            ambient_radiance: [0.02, 0.04, 0.08] }
+    }
+    pub fn is_valid(&self) -> bool {
+        self.eye_m.iter().all(|v| v.is_finite()) && self.radius_m.is_finite() && self.radius_m > 0.0
+            && self.atmosphere_height_m.is_finite() && self.atmosphere_height_m > 0.0
+            && self.exposure.is_finite() && self.exposure >= 0.0
+            && self.sun_direction.iter().all(|v| v.is_finite())
+            && self.sun_direction.iter().map(|v| v*v).sum::<f32>() > 1e-10
+            && self.ambient_radiance.iter().all(|v| v.is_finite() && *v >= 0.0)
     }
 }
 
@@ -269,6 +302,8 @@ pub struct SkyPass {
     /// A renderer backend may request the ordinary sky when no authored
     /// SceneDB sky row is present (for example, a generated outdoor world).
     fallback_sky_enabled: bool,
+    planetary_sky: Option<PlanetarySky>,
+    planetary_eye_buffer: wgpu::Buffer,
     // ── Legacy simulation / volume ──────────────────────────────────────────
     sim_pipeline: wgpu::ComputePipeline,
     render_pipeline: wgpu::RenderPipeline,
@@ -406,6 +441,10 @@ fn texture_2d(
 
 impl SkyPass {
     /// Use the pass-owned atmosphere only when the scene has no sky row.
+    pub fn set_planetary_sky(&mut self, sky: Option<PlanetarySky>) {
+        self.planetary_sky = sky.filter(PlanetarySky::is_valid);
+    }
+
     pub fn set_fallback_sky_enabled(&mut self, enabled: bool) {
         self.fallback_sky_enabled = enabled;
     }
@@ -726,6 +765,12 @@ impl SkyPass {
         });
 
         // ── Atmospheric Sky Pipelines (LUT + Composite) ───────────────────────
+        let planetary_eye_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Planetary atmosphere eye (km) and ambient radiance"),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let sky_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Sky Uniforms (Unifed)"),
             size: std::mem::size_of::<ShaderSkyUniforms>() as u64,
@@ -736,7 +781,7 @@ impl SkyPass {
         });
         let sky_lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Sky LUT Sampler (Unified)"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
@@ -744,8 +789,18 @@ impl SkyPass {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
-        let sky_lut_module = helio_core::shader::module(device, "Sky LUT Shader (Unified)", helio_core::include_wgsl!("shaders/sky_lut.wgsl"));
-        let sky_module = helio_core::shader::module(device, "Sky Composite Shader (Unified)", helio_core::include_wgsl!("shaders/sky.wgsl"));
+        let sky_lut_module = helio_core::shader::module_with(
+            device,
+            "Sky LUT Shader (Unified)",
+            helio_core::include_wgsl!("shaders/sky_lut.wgsl"),
+            &[PLANETARY_LUT_SNIPPET],
+        );
+        let sky_module = helio_core::shader::module_with(
+            device,
+            "Sky Composite Shader (Unified)",
+            helio_core::include_wgsl!("shaders/sky.wgsl"),
+            &[PLANETARY_LUT_SNIPPET],
+        );
         // Sky LUT BGLs: camera storage + sky uniforms
         let sky_lut_bgl0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sky LUT BGL0 (Unified)"),
@@ -754,6 +809,15 @@ impl SkyPass {
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }, wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
@@ -779,6 +843,9 @@ impl SkyPass {
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: camera_buf.as_entire_binding(),
+            }, wgpu::BindGroupEntry {
+                binding: 1,
+                resource: planetary_eye_buffer.as_entire_binding(),
             }],
         });
         // Built lazily in `execute()`, resolved fresh against SceneDB every
@@ -828,6 +895,15 @@ impl SkyPass {
                     min_binding_size: None,
                 },
                 count: None,
+            }, wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
             }],
         });
         let sky_bgl1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -867,6 +943,9 @@ impl SkyPass {
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: camera_buf.as_entire_binding(),
+            }, wgpu::BindGroupEntry {
+                binding: 1,
+                resource: planetary_eye_buffer.as_entire_binding(),
             }],
         });
         let sky_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1638,6 +1717,8 @@ impl SkyPass {
             allocated_divisor: config.divisor,
             use_high_perf: true,
             fallback_sky_enabled: false,
+            planetary_sky: None,
+            planetary_eye_buffer,
             sky_uniform_buf,
             sky_lut_pipeline,
             sky_lut_bgl0,
@@ -1937,6 +2018,15 @@ impl RenderPass for SkyPass {
             bytemuck::cast_slice(&temporal_values),
         );
 
+        // Planetary coordinates belong to a separate uniform, never to
+        // SceneDB's authored sky row. Disable it whenever an authored sky wins.
+        let planet = self.planetary_sky.filter(|_| self.fallback_sky_enabled);
+        let eye = planet.map_or([0.0f32; 8], |p| [
+            (p.eye_m[0] * 0.001) as f32, (p.eye_m[1] * 0.001) as f32,
+            (p.eye_m[2] * 0.001) as f32, 1.0,
+            p.ambient_radiance[0], p.ambient_radiance[1], p.ambient_radiance[2], 0.0,
+        ]);
+        ctx.write_buffer(&self.planetary_eye_buffer, 0, bytemuck::cast_slice(&eye));
         // Upload sky uniforms (Nishita atmosphere + cloud overlay params)
         if self.fallback_sky_enabled
             || ctx
@@ -1949,6 +2039,13 @@ impl RenderPass for SkyPass {
                 sky_uniforms.exposure = 1.0;
                 sky_uniforms.earth_radius = 6371.0;
                 sky_uniforms.atm_radius = 6431.0;
+            }
+            if let Some(p) = planet {
+                let length = p.sun_direction.iter().map(|v| v*v).sum::<f32>().sqrt();
+                sky_uniforms.sun_direction = p.sun_direction.map(|v| v / length);
+                sky_uniforms.earth_radius = (p.radius_m * 0.001) as f32;
+                sky_uniforms.atm_radius = sky_uniforms.earth_radius + p.atmosphere_height_m * 0.001;
+                sky_uniforms.exposure = p.exposure;
             }
             if let Some(clouds) = ctx
                 .registry

@@ -60,9 +60,12 @@ struct DeferredGlobals {
     ambient_up: [f32; 4],
     /// Hemisphere ground-bounce colour (rgb, unscaled).
     ambient_ground: [f32; 4],
+    atmosphere_eye_radius: [f32; 4],
+    atmosphere_sun: [f32; 4],
 }
 
 pub struct DeferredLightPass {
+    atmosphere: Option<([f64; 3], f64, [f32; 3])>,
     pipeline: wgpu::RenderPipeline,
     reflection_pipeline: wgpu::RenderPipeline,
     reflection_debug_pipeline: wgpu::RenderPipeline,
@@ -131,6 +134,10 @@ pub struct DeferredLightPass {
 }
 
 impl DeferredLightPass {
+    /// Optional procedural atmosphere: eye/radius in metres, sun toward light.
+    pub fn set_planetary_atmosphere(&mut self, atmosphere: Option<([f64; 3], f64, [f32; 3])>) {
+        self.atmosphere = atmosphere;
+    }
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -836,6 +843,7 @@ impl DeferredLightPass {
         let fallback_lightmap_uv_view = fallback_lightmap_uv_tex.create_view(&Default::default());
 
         Self {
+            atmosphere: None,
             pipeline,
             reflection_pipeline,
             reflection_debug_pipeline,
@@ -1010,6 +1018,8 @@ impl RenderPass for DeferredLightPass {
             _pad: [0; 2],
             ambient_up: [ambient_up[0], ambient_up[1], ambient_up[2], 0.0],
             ambient_ground: [ambient_ground[0], ambient_ground[1], ambient_ground[2], 0.0],
+            atmosphere_eye_radius: self.atmosphere.map_or([0.0; 4], |(eye, radius, _)| [(eye[0]*0.001) as f32, (eye[1]*0.001) as f32, (eye[2]*0.001) as f32, (radius*0.001) as f32]),
+            atmosphere_sun: self.atmosphere.map_or([0.0; 4], |(_, _, sun)| [sun[0], sun[1], sun[2], 0.0]),
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())

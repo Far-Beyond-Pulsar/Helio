@@ -7,7 +7,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, IVec4, Mat4, Vec3, Vec4};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use wgpu::util::DeviceExt;
 
 pub const GBUFFER_FORMATS: [wgpu::TextureFormat; 8] = [
@@ -35,6 +35,38 @@ pub struct PlanetFrame {
 
 pub type SharedPlanetFrame = Arc<Mutex<Option<PlanetFrame>>>;
 
+/// Art controls, independent of occupancy, terrain recipes and edit journals.
+/// Palette RGB is sRGB in [0,1]; W is perceptual roughness.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct TerrainAppearance {
+    pub palette: [[f32; 4]; 16],
+    /// Dry, meadow and lush grass colours (sRGB).
+    pub grass: [[f32; 4]; 3],
+    /// Grass patch contrast, voxel pigment contrast, edge occlusion strength.
+    pub detail: [f32; 4],
+}
+
+impl Default for TerrainAppearance {
+    fn default() -> Self {
+        let colours = [
+            [200,0,200], [91,125,65], [120,87,61], [133,139,142],
+            [203,188,151], [217,228,236], [28,72,92], [116,111,102],
+            [185,142,104], [82,88,95], [101,75,53], [59,102,52],
+            [155,113,89], [148,77,63], [158,119,79], [121,126,130],
+        ];
+        let roughness = [0.9,0.94,0.96,0.84,0.93,0.78,0.35,0.9,0.88,0.82,0.97,0.94,0.92,0.86,0.86,0.85];
+        Self {
+            palette: std::array::from_fn(|i| [colours[i][0] as f32 / 255.0, colours[i][1] as f32 / 255.0, colours[i][2] as f32 / 255.0, roughness[i]]),
+            grass: [[137.0/255.0,143.0/255.0,91.0/255.0,0.0], [91.0/255.0,125.0/255.0,65.0/255.0,0.0], [55.0/255.0,99.0/255.0,58.0/255.0,0.0]],
+            detail: [0.75,0.18,0.08,0.0],
+        }
+    }
+}
+
+#[path = "visible_feedback.rs"]
+mod visible_feedback;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
     /// Level cells project to this many pixels where their range starts.
@@ -47,12 +79,33 @@ pub struct Settings {
     pub horizon: bool,
     /// Skip hash lookups of columns the summary blocks prove absent.
     pub residency_hints: bool,
+    /// Reuse a coarse climate height only when Landform bounds prove that
+    /// every canonical height gives the same material. Disable for audits.
+    pub climate_height_reuse: bool,
+    /// Preserve sub-cell radial relief in unedited coarse columns.
+    /// Set before generating columns; resident columns retain their format.
+    pub coarse_relief: bool,
+    /// Reconstruct distant slope lighting from existing raw climate samples,
+    /// blending by pixel footprint independently of the current clipmap level.
+    pub far_relief: bool,
+    /// Prioritize complete missing blocks requested by primary GPU rays.
+    pub visible_feedback: bool,
+    /// Opt-in sparse primary-hit diagnostics. Set before renderer creation;
+    /// the default pipeline removes its GPU work through specialization.
+    pub primary_samples: bool,
     /// Diagnostics: skip residency planning (no jobs, windows or evictions)
     /// so several renders see identical GPU state.
     pub freeze_residency: bool,
     /// Diagnostics: fixed frame index for the sunlight representative pattern.
     pub frame_override: Option<u32>,
     pub capacity: Capacity,
+    pub appearance: TerrainAppearance,
+}
+
+impl Settings {
+    fn sanitized_lod_dither(&self) -> f32 {
+        crate::windows::sanitize_lod_dither(f64::from(self.lod_dither)) as f32
+    }
 }
 
 impl Default for Settings {
@@ -63,9 +116,15 @@ impl Default for Settings {
             job_budget: 12_288,
             horizon: std::env::var_os("HELIO_VOXEL_NO_HORIZON").is_none(),
             residency_hints: true,
+            climate_height_reuse: true,
+            coarse_relief: std::env::var("HELIO_VOXEL_COARSE_RELIEF").ok().is_none_or(|v| v != "0"),
+            far_relief: std::env::var("HELIO_VOXEL_FAR_RELIEF").ok().is_none_or(|v| v != "0"),
+            visible_feedback: std::env::var("HELIO_VOXEL_VISIBLE_FEEDBACK").ok().is_none_or(|v| v != "0"),
+            primary_samples: std::env::var("HELIO_VOXEL_PRIMARY_SAMPLES").ok().is_some_and(|v| v == "1"),
             freeze_residency: false,
             frame_override: None,
             capacity: Capacity::default(),
+            appearance: TerrainAppearance::default(),
         }
     }
 }
@@ -98,6 +157,36 @@ struct FrameGpu {
     ring: [[f32; 4]; 8],
     /// x: tier-1 summary blocks prove column absence (`blocks_exact`).
     hints: [u32; 4],
+    palette: [[f32; 4]; 16],
+    grass: [[f32; 4]; 3],
+    detail: [f32; 4],
+}
+
+// Queued window operations are CPU work even before they reach pending.
+// They can include resident keys, so this is pressure, not a missing-column
+// estimate. Use the larger queue without adding overlapping demand twice.
+fn streaming_time_budgets(moving: bool, pending: usize, queued_ops: usize) -> (f64, f64) {
+    let backlog = (pending.max(queued_ops) as f64 / 80_000.0).min(1.0);
+    if moving { (1.5 + 1.5 * backlog, 1.5 + 2.5 * backlog) } else { (6.0, 4.0) }
+}
+
+#[cfg(test)]
+mod streaming_policy_tests {
+    use super::streaming_time_budgets;
+
+    #[test]
+    fn queued_demand_before_admission_uses_existing_caps() {
+        // Native cruise had very little pending while a full wanted snapshot
+        // waited in the bounded CPU queue. It must not look nearly idle.
+        assert_eq!(streaming_time_budgets(true, 1_553, 923_488), (3.0, 4.0));
+        assert_eq!(streaming_time_budgets(true, 0, 80_000), (3.0, 4.0));
+        assert_eq!(streaming_time_budgets(true, 80_000, 0), (3.0, 4.0));
+        assert_eq!(streaming_time_budgets(true, usize::MAX, usize::MAX), (3.0, 4.0));
+        // The same demand crossing queue stages is not counted twice.
+        assert_eq!(streaming_time_budgets(true, 40_000, 40_000), (2.25, 2.75));
+        assert_eq!(streaming_time_budgets(true, 0, 0), (1.5, 1.5));
+        assert_eq!(streaming_time_budgets(false, 0, 0), (6.0, 4.0));
+    }
 }
 
 /// Public per-frame statistics.
@@ -109,9 +198,53 @@ pub struct PlanetStats {
     pub jobs: usize,
     pub evictions: usize,
     pub failed_jobs: usize,
+    /// Completed generation results by status (ok, band, scratch, pool, skipped).
+    pub jobs_by_status: [usize; 5],
     pub overflow_columns: usize,
     pub free_pages: i32,
     pub pool_pages: u32,
+    /// Available runs in each power-of-two allocation class.
+    pub free_runs_by_class: [u32; 10],
+    pub free_pool_units: u64,
+    pub reclaimable_pages: u32,
+    pub recycled_pages: u32,
+    /// Latest asynchronous primary-ray feedback: requests, saturation, attempts.
+    pub visible_request_blocks: u32,
+    pub visible_request_overflow: bool,
+    pub visible_request_attempts: u32,
+    pub primary_sampling_enabled: bool,
+    /// Only a freshly accepted asynchronous sample; absent on rejection or
+    /// when this encode did not receive a new sample. These are sampled rays,
+    /// not whole-image coverage or a residency-completion measurement.
+    pub sampled_primary: Option<SampledPrimaryStats>,
+    pub queued_delta_bytes: usize,
+    pub queued_delta_ops: usize,
+    pub wanted_key_capacity: usize,
+    /// Last CPU plan's selected columns and guarded admission outcomes.
+    pub admission_attempts: usize,
+    pub admission_alias_deferred: usize,
+    pub admission_publication_deferred: usize,
+    pub admission_batched_columns: usize,
+    /// Accepted window authority; ages describe the last accepted range update.
+    pub requested_serial: u64,
+    pub applied_serial: u64,
+    pub fine_applied_serial: u64,
+    pub far_applied_serial: Option<u64>,
+    pub fine_apply_age_ms: Option<f64>,
+    pub far_apply_age_ms: Option<f64>,
+    /// Current eye distance from the authoritative level-0 window centre.
+    pub fine_window_lag_m: Option<f64>,
+    /// Last accepted worker range cost and last CPU plan's stage costs.
+    pub fine_planning_ms: Option<f64>,
+    pub far_planning_ms: Option<f64>,
+    pub plan_edits_ms: f64,
+    pub plan_authority_ms: f64,
+    pub plan_windows_ms: f64,
+    pub plan_near_ms: f64,
+    pub plan_visible_ms: f64,
+    pub plan_admission_ms: f64,
+    pub fine_jobs: usize,
+    pub far_jobs: usize,
     pub active_levels: u32,
     pub finest_level: u32,
     pub plan_cpu_ms: f64,
@@ -124,6 +257,27 @@ pub struct PlanetStats {
     /// frame's job budget.
     pub us_per_job: f64,
     pub job_budget: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SampledPrimaryStats {
+    pub encoded_frame: u64,
+    pub source_frame: u32,
+    pub age_frames: u32,
+    pub captured_at: std::time::Instant,
+    pub eye: DVec3,
+    pub forward: DVec3,
+    pub up: DVec3,
+    pub view_id: u32,
+    pub viewport: [u32; 2],
+    pub projection_y: f32,
+    pub stride: u32,
+    pub sampled_rays: u32,
+    pub terrain_hits: u32,
+    /// Base cells are excluded: close canonical voxels may fill many pixels.
+    pub coarse_over_2px: u32,
+    pub coarse_over_4px: u32,
+    pub unresolved: u32,
 }
 
 struct Readback {
@@ -175,7 +329,7 @@ struct WorldGpu {
 impl WorldGpu {
     fn new(planet: &Planet) -> Self {
         let g = planet.grid();
-        let m = planet.field().bound_margins();
+        let m = planet.field().render_bound_margins();
         Self {
             grid: [g.reference_cells(), g.layer_mm() as i32, g.cells(), g.level_offset() as i32],
             scale: [g.domain_scale(), 0, 0, 0],
@@ -213,6 +367,19 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -
             .replace("BLOCK_ENTRY", block_entry)
             .replace("SHAPE_ID", if plane { "1u" } else { "0u" }),
     );
+    if program.key == crate::landform::DISPLAY_PROGRAM {
+        s.push_str(include_str!("../shaders/landform_climate.wgsl"));
+        if generation {
+            s.push_str("fn generation_height(face:u32,i:i32,j:i32,level:u32,display:bool)->i32 { if display { return terrain_display_height(domain_point(face,i,j,level),level+u32(world.grid.w)); } return field_height(face,i,j,level); }\n");
+        }
+    } else {
+        // Custom generators keep their full query; only Landform's material
+        // classification and symmetric bounds justify the shortcut.
+        s.push_str("fn climate_height_reusable(top: i32, level: u32) -> bool { return false; }\n");
+        if generation {
+            s.push_str("fn generation_height(face:u32,i:i32,j:i32,level:u32,display:bool)->i32 { return field_height(face,i,j,level); }\n");
+        }
+    }
     for part in parts {
         s.push_str(&part.replace("ACCESS", access));
     }
@@ -222,6 +389,7 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -
 struct Pipelines {
     plane: bool,
     program: String,
+    primary_samples: bool,
     gen_layout: wgpu::BindGroupLayout,
     trace_layout: wgpu::BindGroupLayout,
     render_layout: wgpu::BindGroupLayout,
@@ -234,6 +402,10 @@ struct Pipelines {
     refill: wgpu::ComputePipeline,
     allocate: wgpu::ComputePipeline,
     fixup: wgpu::ComputePipeline,
+    recycle_layout: wgpu::BindGroupLayout,
+    reclaim_pages: wgpu::ComputePipeline,
+    compact_runs: wgpu::ComputePipeline,
+    finish_recycle: wgpu::ComputePipeline,
     publish: wgpu::ComputePipeline,
     level_suffix: wgpu::ComputePipeline,
     primary: wgpu::ComputePipeline,
@@ -241,17 +413,40 @@ struct Pipelines {
     horizon_blocks: wgpu::ComputePipeline,
     horizon_suffix: wgpu::ComputePipeline,
     shade: wgpu::ComputePipeline,
+    shade_relief: OnceLock<wgpu::ComputePipeline>,
+    shade_module: wgpu::ShaderModule,
+    shade_layout: wgpu::PipelineLayout,
+    climate: wgpu::ComputePipeline,
     sunlight: wgpu::ComputePipeline,
     gbuffer: wgpu::RenderPipeline,
 }
 
 impl Pipelines {
-    /// Whether these pipelines serve a world of this shape and program.
-    fn serve(&self, plane: bool, program: &TerrainProgram) -> bool {
-        self.plane == plane && self.program == program.key
+    fn shade_for(&self, device: &wgpu::Device, relief: bool) -> &wgpu::ComputePipeline {
+        if !relief {
+            return &self.shade;
+        }
+        self.shade_relief.get_or_init(|| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("planet shade relief"),
+                layout: Some(&self.shade_layout),
+                module: &self.shade_module,
+                entry_point: Some("shade"),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[("FAR_RELIEF", 1.0)],
+                    ..Default::default()
+                },
+                cache: None,
+            })
+        })
     }
 
-    fn new(device: &wgpu::Device, plane: bool, program: &TerrainProgram) -> Self {
+    /// Whether these pipelines serve a world of this shape and program.
+    fn serve(&self, plane: bool, program: &TerrainProgram, primary_samples: bool) -> bool {
+        self.plane == plane && self.program == program.key && self.primary_samples == primary_samples
+    }
+
+    fn new(device: &wgpu::Device, plane: bool, program: &TerrainProgram, primary_samples: bool) -> Self {
         let gen_entries: Vec<_> = [
             uniform(0),
             uniform(1),
@@ -270,6 +465,7 @@ impl Pipelines {
             storage(14, false),
             storage(15, false),
             uniform(16),
+            storage(17, false),
         ]
         .into();
         let gen_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -292,6 +488,8 @@ impl Pipelines {
             storage(17, false),
             storage(18, false),
             storage(19, true),
+            storage(20, false),
+            storage(21, false),
         ];
         trace_entries.push(wgpu::BindGroupLayoutEntry {
             binding: 9,
@@ -332,6 +530,7 @@ impl Pipelines {
         let trace_src = [
             include_str!("../shaders/view.wgsl"),
             include_str!("../shaders/horizon.wgsl"),
+            include_str!("../shaders/visible_feedback.wgsl"),
             include_str!("../shaders/trace.wgsl"),
             include_str!("../shaders/surface.wgsl"),
         ];
@@ -355,16 +554,33 @@ impl Pipelines {
             bind_group_layouts: &[Some(&render_layout), Some(&camera_layout)],
             immediate_size: 0,
         });
+        let primary_constants = [("VISIBLE_FEEDBACK", 1.0), ("PRIMARY_SAMPLES", if primary_samples { 1.0 } else { 0.0 })];
         let compute = |layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModule, entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
                 layout: Some(layout),
                 module,
                 entry_point: Some(entry),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: if entry == "primary" { &primary_constants }
+                        else if entry == "generate" && program.key == crate::landform::DISPLAY_PROGRAM {
+                            &[("RIDGE_DISPLAY_GENERATION", 1.0)]
+                        } else { &[] },
+                    ..Default::default()
+                },
                 cache: None,
             })
         };
+        let recycle_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("planet allocator recycling"),
+            entries: &[storage(0, false), storage(1, false), storage(2, true),
+                storage(3, false), storage(4, false), storage(5, false)],
+        });
+        let recycle_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("planet allocator recycling"),
+            bind_group_layouts: &[Some(&recycle_layout)], immediate_size: 0,
+        });
+        let recycle_module = module("planet allocator recycling", include_str!("../shaders/allocator_recycle.wgsl").to_owned());
         let gbuffer = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("planet gbuffer"),
             layout: Some(&render_pl),
@@ -401,6 +617,7 @@ impl Pipelines {
         Self {
             plane,
             program: program.key.to_string(),
+            primary_samples,
             patch: compute(&gen_pl, &gen_module, "patch_table"),
             patch_blocks: compute(&gen_pl, &gen_module, "patch_blocks"),
             evict: compute(&gen_pl, &gen_module, "evict"),
@@ -409,6 +626,10 @@ impl Pipelines {
             refill: compute(&gen_pl, &gen_module, "refill"),
             allocate: compute(&gen_pl, &gen_module, "allocate"),
             fixup: compute(&gen_pl, &gen_module, "fixup"),
+            reclaim_pages: compute(&recycle_pl, &recycle_module, "reclaim_pages"),
+            compact_runs: compute(&recycle_pl, &recycle_module, "compact_runs"),
+            finish_recycle: compute(&recycle_pl, &recycle_module, "finish_recycle"),
+            recycle_layout,
             publish: compute(&gen_pl, &gen_module, "publish"),
             level_suffix: compute(&gen_pl, &gen_module, "level_suffix"),
             primary: compute(&trace_pl, &trace_module, "primary"),
@@ -416,7 +637,11 @@ impl Pipelines {
             horizon_blocks: compute(&trace_pl, &trace_module, "horizon_blocks"),
             horizon_suffix: compute(&trace_pl, &trace_module, "horizon_suffix"),
             shade: compute(&trace_pl, &trace_module, "shade"),
+            climate: compute(&trace_pl, &trace_module, "climate"),
             sunlight: compute(&trace_pl, &trace_module, "sunlight"),
+            shade_relief: OnceLock::new(),
+            shade_module: trace_module,
+            shade_layout: trace_pl,
             gbuffer,
             gen_layout,
             trace_layout,
@@ -440,6 +665,9 @@ struct Buffers {
     scratch: wgpu::Buffer,
     alloc: wgpu::Buffer,
     free_runs: wgpu::Buffer,
+    free_runs_spare: Option<wgpu::Buffer>,
+    page_meta: wgpu::Buffer,
+    recycle_counts: wgpu::Buffer,
     free_pages: wgpu::Buffer,
     evictions: wgpu::Buffer,
     level_tops: wgpu::Buffer,
@@ -481,6 +709,10 @@ impl Buffers {
         let job_out = make("planet job results", u64::from(cap.max_jobs) * JOB_OUT_BYTES, st | wgpu::BufferUsages::COPY_SRC);
         let scratch = make("planet scratch", u64::from(cap.scratch_units) * 64, st);
         let free_runs = make("planet free runs", u64::from(cap.pool_units) * 8, st);
+        // Unassigned zeroed pages have no free runs; refill initializes both
+        // fields before a page is visible to allocation.
+        let page_meta = make("planet allocation pages", u64::from(pages) * 8, st);
+        let recycle_counts = make("planet recycled class counts", 64, st);
         let block_state = make(
             "planet block summaries",
             u64::from(crate::residency::block_region()) * 6 * 24 * 16,
@@ -546,6 +778,9 @@ impl Buffers {
             scratch,
             alloc,
             free_runs,
+            free_runs_spare: None,
+            page_meta,
+            recycle_counts,
             free_pages,
             evictions,
             level_tops,
@@ -563,6 +798,7 @@ struct Screen {
     size: [u32; 2],
     hits: wgpu::Buffer,
     surfaces: wgpu::Buffer,
+    climate: wgpu::Buffer,
     sun: wgpu::Texture,
     sun_view: wgpu::TextureView,
 }
@@ -597,10 +833,17 @@ impl Screen {
             view_formats: &[],
         });
         let sun_view = sun.create_view(&Default::default());
+        let climate = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("planet climate height"),
+            size: pixels * 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
         Self {
             size,
             hits,
             surfaces,
+            climate,
             sun,
             sun_view,
         }
@@ -623,6 +866,7 @@ pub struct PlanetRenderer {
     /// Last local projection and precise eye, for motion in the shared GBuffer.
     camera_history: Option<(u64, u32, DVec3, Mat4)>,
     readbacks: Vec<Readback>,
+    visible_feedback: visible_feedback::Feedback,
     frame_index: u32,
     stats: PlanetStats,
     sun_active: bool,
@@ -635,8 +879,9 @@ pub struct PlanetRenderer {
     /// last updated `ms_per_job`.
     frame_jobs: std::collections::VecDeque<(u64, usize)>,
     costed_frame: Option<u64>,
-    last_eye: Option<DVec3>,
+    last_eye: Option<(DVec3, std::time::Instant)>,
     last_frame_num: u64,
+    recycle_pending: bool,
 }
 
 impl PlanetRenderer {
@@ -659,10 +904,12 @@ impl PlanetRenderer {
         let program = planet.field().program();
         let pipelines = previous
             .map(|r| &r.pipelines)
-            .filter(|p| p.serve(plane, &program))
+            .filter(|p| p.serve(plane, &program, settings.primary_samples))
             .cloned()
-            .unwrap_or_else(|| Arc::new(Pipelines::new(device, plane, &program)));
-        let buffers = Buffers::new(device, &settings.capacity, &planet);
+            .unwrap_or_else(|| Arc::new(Pipelines::new(device, plane, &program, settings.primary_samples)));
+        let mut buffers = Buffers::new(device, &settings.capacity, &planet);
+        let visible_feedback = visible_feedback::Feedback::new(device);
+        buffers.bytes += visible_feedback.bytes();
         let gen_group = Self::gen_group(device, &pipelines, &buffers);
         let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("planet local camera"),
@@ -703,6 +950,7 @@ impl PlanetRenderer {
             camera_group,
             camera_history: None,
             readbacks,
+            visible_feedback,
             frame_index: 0,
             stats: PlanetStats::default(),
             sun_active: false,
@@ -718,6 +966,7 @@ impl PlanetRenderer {
             last_jobs: 0,
             last_eye: None,
             last_frame_num: 0,
+            recycle_pending: false,
             pipelines,
             buffers,
         }
@@ -726,7 +975,7 @@ impl PlanetRenderer {
     fn gen_group(device: &wgpu::Device, p: &Pipelines, b: &Buffers) -> wgpu::BindGroup {
         let entries: Vec<wgpu::BindGroupEntry> = [
             &b.frame, &b.world, &b.table, &b.records, &b.pool, &b.brushes, &b.edit_refs, &b.jobs, &b.job_out,
-            &b.scratch, &b.alloc, &b.free_runs, &b.free_pages, &b.evictions, &b.level_tops, &b.block_state, &b.terrain,
+            &b.scratch, &b.alloc, &b.free_runs, &b.free_pages, &b.evictions, &b.level_tops, &b.block_state, &b.terrain, &b.page_meta,
         ]
         .iter()
         .enumerate()
@@ -812,12 +1061,27 @@ impl PlanetRenderer {
     /// Residency has issued and completed every window column.
     pub fn settled(&self) -> bool {
         self.residency.idle() && self.readbacks.iter().all(|r| r.stage == 0)
+            && !self.visible_feedback.pending()
     }
 
     fn frame_uniform(&self, eye: DVec3, size: [u32; 2], lod0: f64, jobs: u32, evictions: u32, sun: Vec3, shadows: bool) -> FrameGpu {
         let planet = &self.planet;
         let grid = planet.grid();
         let mut frame = FrameGpu::default();
+        let clean = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+        // Public appearance values stay sRGB; convert the three colour
+        // channels once on upload instead of evaluating pow per shaded pixel.
+        let linear = |row: [f32; 4]| [clean(row[0]).powf(2.2), clean(row[1]).powf(2.2), clean(row[2]).powf(2.2), clean(row[3])];
+        frame.palette = self.settings.appearance.palette.map(linear);
+        frame.grass = self.settings.appearance.grass.map(linear);
+        frame.detail = self.settings.appearance.detail.map(clean);
+        // Material-equivalent quantized tops are not equivalent derivatives.
+        // The relief prototype needs raw heights at the existing 2x2 anchors.
+        frame.hints[1] = u32::from(self.settings.climate_height_reuse && !self.settings.far_relief);
+        frame.hints[2] = u32::from(self.settings.far_relief);
+        // Summary tops from an older journal cannot prune live edits.
+        frame.hints[3] = (if self.residency.pending_edits() { 4 } else { 0 })
+            | (if self.settings.coarse_relief { 8 } else { 0 });
         for face in 0..6u8 {
             // A plane has one face; the others keep default frames.
             let f = grid.face_frame(face, eye);
@@ -864,7 +1128,7 @@ impl PlanetRenderer {
         let cut = SKY_CUT_M.max(0.75 * planet.air_clearance(eye));
         // Farthest ray distance: past the far side of a planet, or across a plane.
         let far = if grid.is_plane() { f64::from(grid.cells()) * s * 2.0 + rho.abs() } else { rho + grid.radius() * 3.0 };
-        frame.lod = [lod0 as f32, self.settings.lod_dither, -cut as f32, far as f32];
+        frame.lod = [lod0 as f32, self.settings.sanitized_lod_dither(), -cut as f32, far as f32];
         let (_, rings) = self.sky_rings(eye, lod0, cut);
         for (level, phi) in rings.iter().enumerate().take(32) {
             frame.ring[level / 4][level % 4] = *phi as f32;
@@ -910,9 +1174,9 @@ impl PlanetRenderer {
         let rings = if grid.is_plane() {
             // Points in [eye - cut, outer] differ in height by at most dz.
             let dz = cut.max(planet.outer_radius() - rho);
-            plane_sky_rings(lod0, f64::from(self.settings.lod_dither), dz, &fallback)
+            plane_sky_rings(lod0, f64::from(self.settings.sanitized_lod_dither()), dz, &fallback)
         } else {
-            sky_rings(lod0, f64::from(self.settings.lod_dither), rho, r_lo, planet.outer_radius(), &fallback)
+            sky_rings(lod0, f64::from(self.settings.sanitized_lod_dither()), rho, r_lo, planet.outer_radius(), &fallback)
         };
         (fallback, rings)
     }
@@ -999,7 +1263,7 @@ impl PlanetRenderer {
 
     fn poll_readbacks(&mut self) {
         let _ = self.device.poll(wgpu::PollType::Poll);
-        let mut failed = Vec::new();
+        let mut completed = Vec::new();
         for r in &mut self.readbacks {
             if r.stage == 2 && r.state.load(Ordering::Acquire) {
                 {
@@ -1007,22 +1271,36 @@ impl PlanetRenderer {
                     for (index, key) in r.keys.iter().enumerate() {
                         let at = index * JOB_OUT_BYTES as usize;
                         let status = u32::from_le_bytes(data[at..at + 4].try_into().unwrap());
-                        if status != 0 {
-                            failed.push((*key, status));
-                        }
+                        completed.push((*key, status));
                     }
                     let probe = u64::from(self.settings.capacity.max_jobs) * JOB_OUT_BYTES;
                     let at = probe as usize;
                     self.stats.free_pages = i32::from_le_bytes(data[at + 120..at + 124].try_into().unwrap());
+                    self.stats.reclaimable_pages = i32::from_le_bytes(data[at + 104..at + 108].try_into().unwrap()).max(0) as u32;
+                    self.stats.recycled_pages = i32::from_le_bytes(data[at + 108..at + 112].try_into().unwrap()).max(0) as u32;
+                    for class in 0..10 {
+                        self.stats.free_runs_by_class[class] = i32::from_le_bytes(
+                            data[at + class * 4..at + class * 4 + 4].try_into().unwrap(),
+                        ).max(0) as u32;
+                    }
+                    self.stats.free_pool_units = self.stats.free_pages.max(0) as u64 * 512
+                        + self.stats.free_runs_by_class.iter().enumerate()
+                            .map(|(class, count)| u64::from(*count) << class).sum::<u64>();
                 }
                 r.buffer.unmap();
                 r.stage = 0;
                 r.state.store(false, Ordering::Release);
             }
         }
-        self.stats.failed_jobs += failed.iter().filter(|(_, s)| *s != 1).count();
-        self.stats.overflow_columns += failed.iter().filter(|(_, s)| *s == 1).count();
-        self.residency.requeue(failed);
+        self.stats.failed_jobs += completed.iter().filter(|(_, s)| *s != 0 && *s != 1).count();
+        for (_, status) in &completed {
+            if let Some(count) = self.stats.jobs_by_status.get_mut(*status as usize) { *count += 1; }
+        }
+        if completed.iter().any(|(_, status)| *status == 3) && self.stats.reclaimable_pages > 0 {
+            self.recycle_pending = true;
+        }
+        self.stats.overflow_columns += completed.iter().filter(|(_, s)| *s == 1).count();
+        self.residency.complete_jobs(completed);
         // Start mapping readbacks encoded in earlier frames.
         for r in &mut self.readbacks {
             if r.stage == 1 {
@@ -1058,6 +1336,13 @@ impl PlanetRenderer {
         depth: &wgpu::TextureView,
         frame_num: u64,
     ) {
+        // An edit-only publication keeps the recipe/pipelines but changes
+        // the authoritative journal. Direct renderer users need the same
+        // synchronization as PlanetPass's mailbox path.
+        if !Arc::ptr_eq(&self.planet, &frame.planet) {
+            assert_eq!(self.planet.recipe(), frame.planet.recipe(), "recreate PlanetRenderer after a recipe change");
+            self.planet = frame.planet.clone();
+        }
         if let Some(p) = &mut self.profiler {
             // Timestamps arrive frames late and the same sample is returned
             // until a newer one completes: each sample is used once, with the
@@ -1090,18 +1375,90 @@ impl PlanetRenderer {
         let started = std::time::Instant::now();
         // Generation budget: small while the view moves (frame pacing), large
         // when it is still (fast convergence), from the measured job cost.
-        let moving = self.last_eye.is_none_or(|e| e.distance(frame.eye) > 0.01);
-        self.last_eye = Some(frame.eye);
-        let target_ms = if moving { 1.5 } else { 6.0 };
+        let now = std::time::Instant::now();
+        let moving = self.last_eye.is_none_or(|(eye, _)| eye.distance(frame.eye) > 0.01);
+        let ground_clearance = self.planet.ground_height_uncached_for_streaming(frame.eye);
+        let predicted = self.last_eye.and_then(|(eye, when)| {
+            let dt = now.duration_since(when).as_secs_f64();
+            if !moving || dt > 0.25 { return None; }
+            crate::windows::motion_forecast(self.planet.grid(), frame.eye, eye, dt,
+                lod0, ground_clearance)
+        });
+        let coverage = self.last_eye.and_then(|(eye, when)| {
+            crate::windows::window_forecast(frame.eye, eye, now.duration_since(when).as_secs_f64(), ground_clearance)
+        });
+        self.residency.set_lod_dither(f64::from(self.settings.sanitized_lod_dither()));
+        self.residency.set_prefetch_eye(coverage);
+        self.residency.set_priority_eye(predicted);
+        let forecasted = std::time::Instant::now();
+        let forward = DVec3::new(f64::from(camera_data.forward_far[0]),
+            f64::from(camera_data.forward_far[1]), f64::from(camera_data.forward_far[2]));
+        let feedback_view = visible_feedback::View {
+            eye: frame.eye, forward: forward.normalize_or_zero(), size,
+            up: DVec3::new(f64::from(camera_data.view[1]), f64::from(camera_data.view[5]),
+                f64::from(camera_data.view[9])).normalize_or_zero(),
+            projection_y: camera_data.proj[5].abs(),
+            encoded_frame: frame_num,
+            diagnostic_stride: self.pipelines.primary_samples.then(|| visible_feedback::sample_stride(size)),
+            id: camera_data.jitter_frame[3].to_bits(), frame: self.frame_index,
+            // Membership is checked again by residency. Allow ordinary fast
+            // flight during asynchronous readback; reject distant relocations.
+            max_eye_delta: (lod0 * 32.0).max(ground_clearance.abs() * 2.0).max(1024.0),
+            captured_at: now,
+        };
+        self.residency.set_visible_view(feedback_view.frame, feedback_view.id, now);
+        let requested = self.visible_feedback.poll(feedback_view);
+        self.stats.primary_sampling_enabled = self.pipelines.primary_samples;
+        self.stats.sampled_primary = requested.sampled_primary;
+        self.stats.visible_request_blocks = self.visible_feedback.counts[0].min(visible_feedback::CAPACITY as u32);
+        self.stats.visible_request_overflow = self.visible_feedback.counts[1] != 0;
+        self.stats.visible_request_attempts = self.visible_feedback.counts[2];
+        if self.settings.visible_feedback && !self.settings.freeze_residency {
+            let grid = self.planet.grid();
+            let source = requested.source;
+            let mut requested: Vec<_> = requested.blocks.into_iter().map(|key| {
+                    let face = ((key.0 >> 24) & 7) as u8;
+                    let level = key.0 >> 27;
+                    if !grid.faces().contains(&face) || level >= grid.levels() { return (f64::INFINITY, key); }
+                    let cell_size = f64::from(crate::grid::BRICK << level);
+                    let point = grid.ground_point(face, (f64::from(key.0 & 0xffffff) + 2.0) * cell_size,
+                        (f64::from(key.1 as i32) + 2.0) * cell_size);
+                    (grid.ground_distance(frame.eye, point), key)
+            }).collect();
+            requested.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some(source) = source {
+                self.residency.prioritize_visible_blocks_from(
+                    requested.into_iter().map(|(_, key)| key), source.frame, source.id, source.captured_at);
+            }
+        }
+        let feedback_done = std::time::Instant::now();
+        let ground_radial = self.planet.grid().radial(frame.eye) - ground_clearance;
+        let camera_far = f64::from(camera_data.forward_far[3]);
+        let focus_far = if camera_far.is_finite() && camera_far > 0.0 { camera_far }
+            else if self.planet.grid().is_plane() {
+                f64::from(self.planet.grid().cells()) * self.planet.grid().voxel_size() * std::f64::consts::SQRT_2
+            } else { self.planet.grid().radius() * 4.0 };
+        let focus = crate::windows::visible_focus(self.planet.grid(), frame.eye, forward, ground_radial, focus_far);
+        self.residency.set_view_focus(focus);
+        self.last_eye = Some((frame.eye, now));
+        let focused = std::time::Instant::now();
+        // Spend additional generation time when visible detail is catching up,
+        // rather than withholding it until the camera stops moving.
+        // Completion polling refreshes pending; queued ops are from the last
+        // completed plan. New worker demand joins this signal next encode.
+        let (target_ms, cpu_ms) = streaming_time_budgets(moving,
+            self.residency.stats.pending_columns, self.residency.stats.queued_delta_ops);
         // CPU for applying window diffs and admitting columns: small while
         // moving (a big diff spreads over frames instead of freezing one),
-        // growing to 3 ms with the backlog (a new region streams in ~2x
+        // growing to 4 ms with the backlog (a new region streams in ~2x
         // faster; admission costs ~0.3 us per column, diffs about as much).
-        let backlog = (self.residency.stats.pending_columns as f64 / 20_000.0).min(1.0);
-        let cpu_ms = if moving { 1.5 + 1.5 * backlog } else { 4.0 };
         self.residency.set_cpu_budget(Some(std::time::Duration::from_secs_f64(cpu_ms * 1.0e-3)));
-        let budget = ((target_ms / self.ms_per_job.max(1e-5)) as usize)
+        let desired_budget = ((target_ms / self.ms_per_job.max(1e-5)) as usize)
             .clamp(256, self.settings.job_budget.min(self.settings.capacity.max_jobs as usize));
+        // Every publication needs completion feedback before its old journal
+        // storage can be reused. Apply backpressure rather than issuing jobs
+        // whose outcomes cannot be observed.
+        let budget = if self.readbacks.iter().any(|r| r.stage == 0) { desired_budget } else { 0 };
         let work = if self.settings.freeze_residency {
             FrameWork::default()
         } else {
@@ -1115,6 +1472,14 @@ impl PlanetRenderer {
         }
         self.frame_jobs.push_back((frame_num, work.jobs.len()));
         self.stats.plan_cpu_ms = started.elapsed().as_secs_f64() * 1000.0;
+        if std::env::var("HELIO_VOXEL_PLAN_TRACE").ok()
+            .is_some_and(|value| self.stats.plan_cpu_ms > value.parse::<f64>().unwrap_or(10.0)) {
+            eprintln!("OUTER_PLAN_TRACE clearance_forecast {:.2} feedback {:.2} focus {:.2} residency {:.2} ms",
+                (forecasted - started).as_secs_f64() * 1e3,
+                (feedback_done - forecasted).as_secs_f64() * 1e3,
+                (focused - feedback_done).as_secs_f64() * 1e3,
+                (std::time::Instant::now() - focused).as_secs_f64() * 1e3);
+        }
         let uploading = std::time::Instant::now();
         let (patches, block_patches) = self.upload(&work);
         if let Some(live) = self.residency.take_live_blocks() {
@@ -1137,6 +1502,18 @@ impl PlanetRenderer {
         let jobs = work.jobs.len() as u32;
         let evictions = work.evictions.len() as u32;
         let mut uniform = self.frame_uniform(frame.eye, size, lod0, jobs, evictions, frame.sun, frame.shadows);
+        let request_copy = self.settings.visible_feedback && !self.settings.freeze_residency
+            && (!self.residency.idle() || self.visible_feedback.view_changed(feedback_view));
+        let feedback_copy = if !self.settings.freeze_residency && (request_copy || self.pipelines.primary_samples) {
+            self.visible_feedback.begin(encoder, feedback_view, request_copy)
+        } else { None };
+        if feedback_copy.is_some() {
+            uniform.hints[3] |= (if request_copy { 16 } else { 0 })
+                | ((self.frame_index & 0xffffff) << 8);
+            if let Some(stride) = feedback_view.diagnostic_stride {
+                uniform.screen[3] = visible_feedback::sample_flags(uniform.screen[3] as u32, stride) as f32;
+            }
+        }
         uniform.extra[0] = patches;
         uniform.extra[1] = crate::residency::block_region();
         uniform.extra[2] = block_patches;
@@ -1188,6 +1565,8 @@ impl PlanetRenderer {
                 wgpu::BindGroupEntry { binding: 17, resource: self.buffers.horizon_acc.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 18, resource: self.buffers.horizon.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 19, resource: self.buffers.live_blocks.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 20, resource: self.screen.climate.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 21, resource: self.visible_feedback.buffer.as_entire_binding() },
             ],
         });
         let render_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1199,15 +1578,53 @@ impl PlanetRenderer {
             ],
         });
         let camera_group = &self.camera_group;
+        // Recycle only under observed pool pressure with wholly free pages.
+        // The spare stack is allocated lazily; normal frames do no pool scan.
+        let recycle_groups = if self.recycle_pending && self.stats.reclaimable_pages > 0 {
+            self.recycle_pending = false;
+            if self.buffers.free_runs_spare.is_none() {
+                let bytes = self.buffers.free_runs.size();
+                self.buffers.free_runs_spare = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("planet recycled free runs"), size: bytes,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+                }));
+                self.buffers.bytes += bytes;
+            }
+            let b = &self.buffers;
+            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("planet allocator recycling"), layout: &self.pipelines.recycle_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: b.alloc.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: b.page_meta.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: b.free_runs.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: b.free_runs_spare.as_ref().unwrap().as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: b.free_pages.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: b.recycle_counts.as_entire_binding() },
+                ],
+            });
+            encoder.clear_buffer(&self.buffers.recycle_counts, 0, None);
+            std::mem::swap(&mut self.buffers.free_runs, self.buffers.free_runs_spare.as_mut().unwrap());
+            let new_group = Self::gen_group(&self.device, &self.pipelines, &self.buffers);
+            let old_group = std::mem::replace(&mut self.gen_group, new_group);
+            Some((old_group, group))
+        } else { None };
         if let Some(p) = &mut self.profiler {
             p.begin_pass(encoder, "planet_residency");
         }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_bind_group(0, &self.gen_group, &[]);
+            pass.set_bind_group(0, recycle_groups.as_ref().map_or(&self.gen_group, |groups| &groups.0), &[]);
             let wg = |n: u32| n.div_ceil(64);
             if evictions > 0 {
                 Self::dispatch(&mut pass, &self.pipelines.evict, [wg(evictions), 1, 1]);
+            }
+            if let Some((_, group)) = &recycle_groups {
+                pass.set_bind_group(0, group, &[]);
+                Self::dispatch(&mut pass, &self.pipelines.reclaim_pages, [self.stats.pool_pages.div_ceil(128), 1, 1]);
+                let groups = (self.settings.capacity.pool_units * 2).div_ceil(256);
+                Self::dispatch(&mut pass, &self.pipelines.compact_runs, [groups.min(32768), groups.div_ceil(32768), 1]);
+                Self::dispatch(&mut pass, &self.pipelines.finish_recycle, [1, 1, 1]);
+                pass.set_bind_group(0, &self.gen_group, &[]);
             }
             if patches > 0 {
                 // `patch_table` reads pairs after the eviction list.
@@ -1267,6 +1684,7 @@ impl PlanetRenderer {
             pass.set_bind_group(1, camera_group, &[]);
             Self::dispatch(&mut pass, &self.pipelines.primary, groups);
         }
+        if let Some(at) = feedback_copy { self.visible_feedback.copy(encoder, at); }
         if let Some(p) = &mut self.profiler {
             p.end_pass(encoder, "planet_primary");
             p.begin_pass(encoder, "planet_shade");
@@ -1275,7 +1693,14 @@ impl PlanetRenderer {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_bind_group(0, &trace_group, &[]);
             pass.set_bind_group(1, camera_group, &[]);
-            Self::dispatch(&mut pass, &self.pipelines.shade, groups);
+            Self::dispatch(&mut pass, &self.pipelines.climate,
+                [self.screen.size[0].div_ceil(16), self.screen.size[1].div_ceil(16), 1]);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_bind_group(0, &trace_group, &[]);
+            pass.set_bind_group(1, camera_group, &[]);
+            Self::dispatch(&mut pass, self.pipelines.shade_for(&self.device, self.settings.far_relief), groups);
         }
         if let Some(p) = &mut self.profiler {
             p.end_pass(encoder, "planet_shade");
@@ -1332,6 +1757,30 @@ impl PlanetRenderer {
         let rs = self.residency.stats;
         self.stats.resident_columns = rs.resident_columns;
         self.stats.pending_columns = rs.pending_columns;
+        self.stats.queued_delta_bytes = rs.queued_delta_bytes;
+        self.stats.queued_delta_ops = rs.queued_delta_ops;
+        self.stats.wanted_key_capacity = rs.wanted_key_capacity;
+        self.stats.admission_attempts = rs.admission_attempts;
+        self.stats.admission_alias_deferred = rs.admission_alias_deferred;
+        self.stats.admission_publication_deferred = rs.admission_publication_deferred;
+        self.stats.admission_batched_columns = rs.admission_batched_columns;
+        self.stats.requested_serial = rs.requested_serial;
+        self.stats.applied_serial = rs.applied_serial;
+        self.stats.fine_applied_serial = rs.fine_applied_serial;
+        self.stats.far_applied_serial = rs.far_applied_serial;
+        self.stats.fine_apply_age_ms = rs.fine_apply_age_ms;
+        self.stats.far_apply_age_ms = rs.far_apply_age_ms;
+        self.stats.fine_window_lag_m = rs.fine_window_lag_m;
+        self.stats.fine_planning_ms = rs.fine_planning_ms;
+        self.stats.far_planning_ms = rs.far_planning_ms;
+        self.stats.plan_edits_ms = rs.plan_edits_ms;
+        self.stats.plan_authority_ms = rs.plan_authority_ms;
+        self.stats.plan_windows_ms = rs.plan_windows_ms;
+        self.stats.plan_near_ms = rs.plan_near_ms;
+        self.stats.plan_visible_ms = rs.plan_visible_ms;
+        self.stats.plan_admission_ms = rs.plan_admission_ms;
+        self.stats.fine_jobs = rs.fine_jobs;
+        self.stats.far_jobs = rs.far_jobs;
         self.stats.jobs = rs.jobs;
         self.stats.evictions = rs.evictions;
         self.stats.active_levels = rs.active_levels;
@@ -1339,7 +1788,9 @@ impl PlanetRenderer {
         self.stats.window_rebuild_ms = rs.window_rebuild_ms;
         self.stats.lod0_distance = lod0;
         self.stats.pool_pages = self.settings.capacity.pool_units / 512;
-        self.stats.logical_bytes = self.buffers.bytes + u64::from(size[0]) * u64::from(size[1]) * (32 + 16 + 8);
+        self.stats.logical_bytes = self.buffers.bytes
+            + u64::from(size[0]) * u64::from(size[1]) * (32 + 16 + 8)
+            + self.screen.climate.size();
         if self.residency.idle() {
             self.initial_complete = true;
         }
@@ -1425,6 +1876,14 @@ impl PlanetPass {
     pub fn renderer(&self) -> Option<&PlanetRenderer> {
         self.active.as_ref()
     }
+    /// Changes art without recreating residency or altering the canonical world.
+    /// Returns true when temporal colour history needs invalidating.
+    pub fn set_appearance(&mut self, appearance: TerrainAppearance) -> bool {
+        if self.settings.appearance == appearance { return false; }
+        self.settings.appearance = appearance;
+        if let Some(renderer) = &mut self.active { renderer.settings.appearance = appearance; }
+        true
+    }
     pub fn renderer_mut(&mut self) -> Option<&mut PlanetRenderer> {
         self.active.as_mut()
     }
@@ -1466,6 +1925,7 @@ impl RenderPass for PlanetPass {
             return false;
         }
         self.active = previous.active.take();
+        self.settings.appearance = previous.settings.appearance;
         self.active.is_some()
     }
     fn reads(&self) -> &'static [&'static str] {
