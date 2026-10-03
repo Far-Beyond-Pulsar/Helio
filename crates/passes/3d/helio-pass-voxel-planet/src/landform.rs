@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 pub const ID: &str = "helio.landform";
 pub const VERSION: u32 = 1;
+pub(crate) const DISPLAY_PROGRAM: &str = "helio.landform/1-ridge-envelope/1";
 pub const FLAT_ID: &str = "helio.flat";
 pub const FLAT_VERSION: u32 = 1;
 
@@ -459,12 +460,21 @@ impl TerrainGenerator for LandformGenerator {
 pub struct LandformField {
     constants: LandformConstants,
     bounds: [i32; 24],
+    render_bounds: [i32; 24],
+    ridge_suffix: Option<[[i32; 4]; 66]>,
 }
 
 impl LandformField {
     pub fn new(grid: &Grid, land: &Landform, seed: u32) -> Self {
         let constants = LandformConstants::new(grid, land, seed);
-        Self { bounds: constants.bound_margins(grid), constants }
+        let bounds = constants.bound_margins(grid);
+        // Unsupported recipes retain the canonical path. In particular, do
+        // not saturate already-invalid huge finite amplitudes into new terrain.
+        let ridge_suffix = crate::ridge_envelope::bake_ridge_suffix(grid, &constants).ok();
+        let render_bounds = if ridge_suffix.is_some() {
+            crate::ridge_envelope::render_bounds(grid, &constants, bounds)
+        } else { bounds };
+        Self { bounds, render_bounds, ridge_suffix, constants }
     }
     pub fn constants(&self) -> &LandformConstants {
         &self.constants
@@ -484,11 +494,18 @@ impl TerrainField for LandformField {
     fn bound_margins(&self) -> [i32; 24] {
         self.bounds
     }
+    fn render_bound_margins(&self) -> [i32; 24] {
+        self.render_bounds
+    }
     fn program(&self) -> TerrainProgram {
+        let mut canonical = self.constants;
+        canonical.shape[2] = i32::from(self.ridge_suffix.is_some());
+        let mut constants = bytemuck::bytes_of(&canonical).to_vec();
+        constants.extend_from_slice(bytemuck::cast_slice(&self.ridge_suffix.unwrap_or([[0; 4]; 66])));
         TerrainProgram {
-            key: Cow::Borrowed("helio.landform/1"),
+            key: Cow::Borrowed(DISPLAY_PROGRAM),
             wgsl: Cow::Borrowed(include_str!("../shaders/landform.wgsl")),
-            constants: bytemuck::bytes_of(&self.constants).to_vec(),
+            constants,
         }
     }
 }

@@ -108,7 +108,10 @@ the CPU raycast what the GPU draws.
   continent wavelengths is constant over metres and steps by one unit; scaled
   by kilometres of relief that became long straight terraces.
 - Detail finer than a level's footprint is omitted at that level: coarse
-  levels are band-limited point samples of the same field. Levels 1 and above
+  levels are band-limited point samples of the same field. Landform display
+  generation retains the conditional mean of unresolved ridges, rather than
+  dropping their mountain height. This lookup is baked once per recipe;
+  canonical field queries and level 0 remain unchanged. Levels 1 and above
   retain fractional radial tops unless Add/Remove edits change their geometry.
   Short low-level spans store exact base-layer tops in the existing byte header.
   Paint retains that relief. Slope lighting and face detail follow the authored

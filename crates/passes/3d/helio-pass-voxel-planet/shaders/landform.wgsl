@@ -7,13 +7,42 @@ struct TerrainConstants {
     levels: vec4<i32>, // basin floor, lowland, snowline, basin threshold (mm)
     shape: vec4<i32>,  // mountain mask bias, steep slope (cells), pad, pad
     octaves: array<LandformOctave, 32>,
+    ridge_suffix: array<vec4<i32>, 66>, // signed conditional suffix means
 }
 
 fn landform_resolved(o: LandformOctave, level: u32) -> bool {
     return o.kind <= 1u || o.shift >= level + 3u;
 }
 
-fn terrain_height(p: vec3<i32>, level: u32) -> i32 {
+override RIDGE_DISPLAY_GENERATION: bool = false;
+
+fn ridge_suffix_knot(row: u32, knot: u32) -> i32 {
+    let index = row * 33u + knot;
+    return terrain.ridge_suffix[index >> 2u][index & 3u];
+}
+
+fn ridge_suffix_mean(row: u32, incoming: i32) -> i32 {
+    let weight = clamp(incoming, FINE_ONE / 4, FINE_ONE - 1);
+    let delta = weight - FINE_ONE / 4;
+    // (.75 * 2^24)/32 = 3*2^17 exactly. Last interval reaches weight1.
+    let step = 393216;
+    let knot = min(u32(delta / step), 31u);
+    let remainder = delta - i32(knot) * step;
+    let fraction = (remainder << 7u) / 3;
+    let lo = ridge_suffix_knot(row, knot);
+    let hi = ridge_suffix_knot(row, knot + 1u);
+    return lo + mul_fine(hi - lo, fraction);
+}
+
+fn ridge_display_support(shift: u32, effective_level: u32) -> i32 {
+    if shift >= effective_level + 3u { return FINE_ONE; }
+    if shift == effective_level + 2u { return FINE_ONE / 2; }
+    return 0;
+}
+
+// The false mode preserves the canonical operation order. Only generation
+// compiles the display capability; climate, shade and verify_field stay exact.
+fn terrain_height_mode(p: vec3<i32>, level: u32, display: bool) -> i32 {
     let count = u32(terrain.header.x);
     var warp = vec3<i32>(0);
     for (var index = 0u; index < LANDFORM_WARP; index++) {
@@ -28,8 +57,31 @@ fn terrain_height(p: vec3<i32>, level: u32) -> i32 {
     var ridged = 0;
     var ridge_weight = FINE_ONE - 1;
     var detail = 0;
+    var ridge_gain = FINE_ONE;
+    var ridge_row = 0u;
     for (var index = LANDFORM_WARP; index < count; index++) {
         let o = terrain.octaves[index];
+        if RIDGE_DISPLAY_GENERATION && display && o.kind == 2u {
+            // Expand B[k](w)=(1-s)*F[k](w)+s*(A[k]*v+B[k+1](next(w))).
+            // Repeated lattice shifts may have several partial octaves.
+            if ridge_gain != 0 {
+                let support = ridge_display_support(o.shift, level);
+                if support != FINE_ONE {
+                    let mean_gain = mul_fine(ridge_gain, FINE_ONE - support);
+                    ridged += mul_fine(ridge_suffix_mean(ridge_row, ridge_weight), mean_gain);
+                    ridge_gain = mul_fine(ridge_gain, support);
+                }
+                if ridge_gain != 0 {
+                    let n = noise_fine(q, o.shift, o.seed);
+                    let r = clamp(FINE_ONE - abs(n), 0, FINE_ONE - 1);
+                    let v = mul_fine(mul_fine(r, r), ridge_weight);
+                    ridged += mul_fine(mul_fine(o.amplitude, v), ridge_gain);
+                    ridge_weight = clamp(v * 2, FINE_ONE / 4, FINE_ONE - 1);
+                }
+            }
+            ridge_row += 1u;
+            continue;
+        }
         if !landform_resolved(o, level) { continue; }
         if o.kind == 0u {
             continent += mul_fine(noise_fine(q, o.shift, o.seed), o.amplitude << 8u);
@@ -59,6 +111,14 @@ fn terrain_height(p: vec3<i32>, level: u32) -> i32 {
     let mountains = mul_fine(mul_fine(ridged, region), land);
     let wet = clamp(FINE_ONE + c * 2, FINE_ONE / 8, FINE_ONE);
     return base + mountains + mul_fine(detail, wet);
+}
+
+fn terrain_height(p: vec3<i32>, level: u32) -> i32 {
+    return terrain_height_mode(p, level, false);
+}
+
+fn terrain_display_height(p: vec3<i32>, level: u32) -> i32 {
+    return terrain_height_mode(p, level, terrain.shape.z != 0);
 }
 
 fn landform_moisture(p: vec3<i32>) -> i32 {

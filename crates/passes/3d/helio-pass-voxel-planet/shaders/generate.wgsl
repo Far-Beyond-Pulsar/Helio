@@ -104,8 +104,12 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     // This replaces the existing initialization barrier; the edit list is
     // scanned once per workgroup, with no extra terrain query or barrier.
     let topology_flags = workgroupUniformLoad(&g_topology_flags);
-    let requested_relief = (frame.hints.w & 8u) != 0u && level >= 1u && topology_flags == 0u;
-    let height = field_height(face, i, j, level);
+    // An edit changes occupancy, not the display field of untouched lanes.
+    // Mixed topology retains bitmap storage; continuous fractions require a
+    // heightfield, so only their metadata is disabled for topology brushes.
+    let display_base = (frame.hints.w & 8u) != 0u && level >= 1u;
+    let requested_relief = display_base && topology_flags == 0u;
+    let height = generation_height(face, i, j, level, display_base);
     let base_top = div_floor(height, world.grid.y);
     let remainder = u32(base_top) & ((1u << level) - 1u);
     var top = base_top >> level;

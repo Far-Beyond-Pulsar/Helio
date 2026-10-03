@@ -247,7 +247,7 @@ struct WorldGpu {
 impl WorldGpu {
     fn new(planet: &Planet) -> Self {
         let g = planet.grid();
-        let m = planet.field().bound_margins();
+        let m = planet.field().render_bound_margins();
         Self {
             grid: [g.reference_cells(), g.layer_mm() as i32, g.cells(), g.level_offset() as i32],
             scale: [g.domain_scale(), 0, 0, 0],
@@ -285,12 +285,18 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -
             .replace("BLOCK_ENTRY", block_entry)
             .replace("SHAPE_ID", if plane { "1u" } else { "0u" }),
     );
-    if program.key == "helio.landform/1" {
+    if program.key == crate::landform::DISPLAY_PROGRAM {
         s.push_str(include_str!("../shaders/landform_climate.wgsl"));
+        if generation {
+            s.push_str("fn generation_height(face:u32,i:i32,j:i32,level:u32,display:bool)->i32 { if display { return terrain_display_height(domain_point(face,i,j,level),level+u32(world.grid.w)); } return field_height(face,i,j,level); }\n");
+        }
     } else {
         // Custom generators keep their full query; only Landform's material
         // classification and symmetric bounds justify the shortcut.
         s.push_str("fn climate_height_reusable(top: i32, level: u32) -> bool { return false; }\n");
+        if generation {
+            s.push_str("fn generation_height(face:u32,i:i32,j:i32,level:u32,display:bool)->i32 { return field_height(face,i,j,level); }\n");
+        }
     }
     for part in parts {
         s.push_str(&part.replace("ACCESS", access));
@@ -472,7 +478,10 @@ impl Pipelines {
                 module,
                 entry_point: Some(entry),
                 compilation_options: wgpu::PipelineCompilationOptions {
-                    constants: if entry == "primary" { &[("VISIBLE_FEEDBACK", 1.0)] } else { &[] },
+                    constants: if entry == "primary" { &[("VISIBLE_FEEDBACK", 1.0)] }
+                        else if entry == "generate" && program.key == crate::landform::DISPLAY_PROGRAM {
+                            &[("RIDGE_DISPLAY_GENERATION", 1.0)]
+                        } else { &[] },
                     ..Default::default()
                 },
                 cache: None,

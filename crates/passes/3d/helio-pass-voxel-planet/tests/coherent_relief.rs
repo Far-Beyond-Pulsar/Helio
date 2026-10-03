@@ -33,8 +33,10 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
     terrain_constants.levels=[0,0,2_000_000,-8000];
     terrain_constants.shape=[0,16,0,0];
     terrain_constants.octaves[6].shift=10;
+    let mut terrain_bytes = bytemuck::bytes_of(&terrain_constants).to_vec();
+    terrain_bytes.resize(terrain_bytes.len() + 66 * 16, 0);
     let terrain_uniform=gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label:Some("canonical slope material constants"),contents:bytemuck::bytes_of(&terrain_constants),usage:wgpu::BufferUsages::UNIFORM,
+        label:Some("canonical slope material constants"),contents:&terrain_bytes,usage:wgpu::BufferUsages::UNIFORM,
     });
     let source = format!(
         r#"
