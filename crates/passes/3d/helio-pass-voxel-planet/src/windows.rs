@@ -861,10 +861,89 @@ impl WindowPlanner {
     }
 }
 
+/// Merge only unpublished full snapshots from the same independently owned
+/// range. A newer no-op certifies old membership, so retain its unconsumed
+/// diff/wanted pair; a new changed or inactive level replaces both together.
+fn coalesce_unpublished_snapshot(mut newer: WindowUpdate, older: WindowUpdate) -> WindowUpdate {
+    assert!(newer.snapshot && older.snapshot);
+    assert_ne!(newer.processed_levels, 0);
+    assert_eq!(newer.processed_levels, older.processed_levels);
+    if newer.serial < older.serial { return older; }
+    let changed = newer.levels.iter().fold(0u32, |mask, diff| mask | (1u32 << diff.level))
+        | newer.wanted.iter().fold(0u32, |mask, (level, _)| mask | (1u32 << level));
+    // Superseded vectors and Arc values are destroyed by this worker, outside
+    // the mailbox lock. Retained metadata remains paired with its own keys.
+    for diff in older.levels {
+        if changed & (1u32 << diff.level) == 0 { newer.levels.push(diff); }
+    }
+    for (level, wanted) in older.wanted {
+        if changed & (1u32 << level) == 0 { newer.wanted.push((level, wanted)); }
+    }
+    newer.levels.sort_by_key(|diff| diff.level);
+    newer.wanted.sort_by_key(|(level, _)| *level);
+    newer
+}
+
+#[derive(Default)]
+struct WindowMailboxState {
+    closed: bool,
+    pending: [Option<WindowUpdate>; 2],
+    next_range: usize,
+}
+
+#[derive(Default)]
+struct WindowMailbox {
+    state: Mutex<WindowMailboxState>,
+}
+
+impl WindowMailbox {
+    fn is_closed(&self) -> bool {
+        self.state.lock().map_or(true, |state| state.closed)
+    }
+
+    /// Exactly one producer owns each slot. Take/merge/replace prevents a
+    /// completed result from blocking the next request, with at most one
+    /// pending fine and one pending far update. Large work is outside locks.
+    fn publish(&self, range: usize, update: WindowUpdate) -> bool {
+        let previous = {
+            let Ok(mut state) = self.state.lock() else { return false };
+            if state.closed { return false; }
+            state.pending[range].take()
+        };
+        let update = match previous { Some(previous) => coalesce_unpublished_snapshot(update, previous), None => update };
+        {
+            let Ok(mut state) = self.state.lock() else { return false };
+            if state.closed { return false; }
+            debug_assert!(state.pending[range].is_none(), "one producer per owned range");
+            state.pending[range] = Some(update);
+        }
+        true
+    }
+
+    fn take(&self) -> Option<WindowUpdate> {
+        let mut state = self.state.lock().ok()?;
+        if state.closed { return None; }
+        for offset in 0..2 {
+            let range = (state.next_range + offset) % 2;
+            if let Some(update) = state.pending[range].take() {
+                state.next_range = (range + 1) % 2;
+                return Some(update);
+            }
+        }
+        None
+    }
+
+    fn close(&self) -> [Option<WindowUpdate>; 2] {
+        let mut state = self.state.lock().unwrap();
+        state.closed = true;
+        std::mem::take(&mut state.pending)
+    }
+}
+
 /// Independent fine/far planners, each working on its most recent request.
 pub struct WindowWorker {
     requests: Option<Vec<mpsc::Sender<WindowMessage>>>,
-    updates: Mutex<Option<mpsc::Receiver<WindowUpdate>>>,
+    updates: std::sync::Arc<WindowMailbox>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -877,18 +956,15 @@ enum WindowMessage {
 
 impl WindowWorker {
     pub fn start(grid: Grid) -> Self {
-        // The shared output stays bounded. A completed far result can hold
-        // fine publication only until the renderer next drains this channel,
-        // not for the duration of the far scan or its retirement work.
-        let (update_tx, update_rx) = mpsc::sync_channel(1);
+        let updates = std::sync::Arc::new(WindowMailbox::default());
         let fine_end = grid.levels().min(3);
         let mut ranges = vec![0..fine_end];
         if fine_end < grid.levels() { ranges.push(fine_end..grid.levels()); }
         let mut requests = Vec::with_capacity(ranges.len());
         let mut threads = Vec::with_capacity(ranges.len());
-        for range in ranges {
+        for (range_index, range) in ranges.into_iter().enumerate() {
             let (request_tx, request_rx) = mpsc::channel::<WindowMessage>();
-            let update_tx = update_tx.clone();
+            let updates = updates.clone();
             let name = if range.start == 0 { "voxel-planet-windows-fine" } else { "voxel-planet-windows-far" };
             let thread = std::thread::Builder::new()
             .name(name.into())
@@ -896,6 +972,7 @@ impl WindowWorker {
                 let mut planner = WindowPlanner::new(grid);
                 planner.snapshot = true;
                 while let Ok(message) = request_rx.recv() {
+                    if updates.is_closed() { break; }
                     let (mut request, mut issued_at) = match message {
                         WindowMessage::Request(request, issued_at) => (request, issued_at),
                         WindowMessage::RetireWanted(wanted) => { drop(wanted); continue; }
@@ -910,22 +987,17 @@ impl WindowWorker {
                             WindowMessage::RetirePayload(payload) => drop(payload),
                         }
                     }
+                    if updates.is_closed() { break; }
                     let mut update = planner.update_range(&request, range.clone());
                     update.issued_at = Some(issued_at);
-                    if update_tx.send(update).is_err() {
-                        break;
-                    }
+                    if !updates.publish(range_index, update) { break; }
                 }
             })
             .expect("spawn window planner");
             requests.push(request_tx);
             threads.push(thread);
         }
-        Self {
-            requests: Some(requests),
-            updates: Mutex::new(Some(update_rx)),
-            threads,
-        }
+        Self { requests: Some(requests), updates, threads }
     }
     pub fn request(&self, request: WindowRequest) {
         let issued_at = std::time::Instant::now();
@@ -935,9 +1007,7 @@ impl WindowWorker {
             }
         }
     }
-    pub fn try_update(&self) -> Option<WindowUpdate> {
-        self.updates.lock().ok()?.as_ref()?.try_recv().ok()
-    }
+    pub fn try_update(&self) -> Option<WindowUpdate> { self.updates.take() }
     /// Free old snapshots and completed delta buffers off the render thread.
     pub(crate) fn retire_wanted(&self, wanted: std::sync::Arc<FxHashSet<u64>>) {
         if let Some(tx) = self.requests.as_ref().and_then(|channels| channels.last()) { let _ = tx.send(WindowMessage::RetireWanted(wanted)); }
@@ -952,13 +1022,14 @@ impl WindowWorker {
 
 impl Drop for WindowWorker {
     fn drop(&mut self) {
+        // Close before joining; producers never need another render drain.
+        // Move the at-most-two buffered snapshots to a shutdown-only thread:
+        // their possibly large destructors run off the caller and off locks.
+        let pending = self.updates.close();
         self.requests = None;
-        // A bounded output may be blocked on send; disconnect it before
-        // joining so shutdown does not depend on another render frame.
-        if let Ok(updates) = self.updates.get_mut() { *updates = None; }
-        for thread in self.threads.drain(..) {
-            let _ = thread.join();
-        }
+        let cleanup = pending.iter().any(Option::is_some).then(|| std::thread::spawn(move || drop(pending)));
+        for thread in self.threads.drain(..) { let _ = thread.join(); }
+        if let Some(cleanup) = cleanup { let _ = cleanup.join(); }
     }
 }
 
@@ -1135,12 +1206,12 @@ mod tests {
         worker.retire_payload(BlockDrop { started, release: release_rx });
         let blocking = start_rx.recv_timeout(std::time::Duration::from_secs(2));
         worker.request(request.clone());
-        let near = worker.updates.lock().unwrap().as_ref().unwrap().recv_timeout(std::time::Duration::from_secs(2));
+        let near = receive_window_update(&worker);
         // Always unblock before asserting, so a failed test cannot hang Drop.
         release.send(()).unwrap();
         blocking.expect("far retirement did not start");
         let near = near.expect("fine planner waited for far retirement");
-        let far = worker.updates.lock().unwrap().as_ref().unwrap().recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        let far = receive_window_update(&worker).unwrap();
         assert_eq!(near.processed_levels, 7);
         assert!(near.partial && !far.partial);
         assert_eq!(near.processed_levels & far.processed_levels, 0);
@@ -1159,52 +1230,170 @@ mod tests {
         let (_, mut request) = flat_request(crate::grid::Shape::Plane, 0.3, 2.0, 0.25);
         request.serial = 9;
         worker.request(request);
-        let update = worker.updates.lock().unwrap().as_ref().unwrap().recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        let update = receive_window_update(&worker).unwrap();
         assert_eq!(update.processed_levels, (1u32 << grid.levels()) - 1);
         assert!(!update.partial);
         assert!(worker.try_update().is_none());
     }
 
+    fn receive_window_update(worker: &WindowWorker) -> Result<WindowUpdate, &'static str> {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Some(update) = worker.try_update() { return Ok(update); }
+            if std::time::Instant::now() >= until { return Err("window mailbox timed out"); }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    fn mailbox_snapshot(serial: u64, mask: u32, changes: &[(u32, bool, u64)]) -> WindowUpdate {
+        let mut update = WindowUpdate { serial, snapshot: true, partial: mask == 7, processed_levels: mask,
+            issued_at: Some(std::time::Instant::now()), ..Default::default() };
+        for &(level, active, key) in changes {
+            let adds = if active { vec![(level as f32 + 0.125, key)] } else { Vec::new() };
+            let wanted = std::sync::Arc::new(adds.iter().map(|(_, key)| *key).collect::<FxHashSet<_>>());
+            update.wanted.push((level, wanted));
+            update.levels.push(LevelDiff { level, active, center: DVec3::new(serial as f64, level as f64, 0.0),
+                radius: serial as f64 + 0.5, adds, removes: Vec::new() });
+        }
+        update
+    }
+
     #[test]
-    fn bounded_worker_output_disconnects_before_shutdown_join() {
-        let (requests, _rx) = mpsc::channel();
-        let (updates, receiver) = mpsc::sync_channel(1);
+    fn latest_mailbox_changed_then_noop_retains_unpublished_pairs_and_new_authority() {
+        let mailbox = WindowMailbox::default();
+        let first = mailbox_snapshot(10, 7, &[(0, true, 100), (1, true, 101)]);
+        let first_level1 = first.wanted[1].1.clone();
+        assert!(mailbox.publish(0, first));
+        let changed = mailbox_snapshot(11, 7, &[(0, true, 200)]);
+        let changed_level0 = changed.wanted[0].1.clone();
+        assert!(mailbox.publish(0, changed));
+        let noop = mailbox_snapshot(12, 7, &[]);
+        let newest_stamp = noop.issued_at;
+        assert!(mailbox.publish(0, noop));
+        let output = mailbox.take().unwrap();
+        assert_eq!((output.serial, output.processed_levels, output.issued_at), (12, 7, newest_stamp));
+        assert_eq!(output.levels.iter().map(|diff| diff.level).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!((output.levels[0].center.x, output.levels[0].radius), (11.0, 11.5));
+        assert_eq!((output.levels[1].center.x, output.levels[1].radius), (10.0, 10.5));
+        assert_eq!(output.levels[0].adds, [(0.125, 200)]);
+        assert_eq!(output.levels[1].adds, [(1.125, 101)]);
+        assert!(std::sync::Arc::ptr_eq(&output.wanted[0].1, &changed_level0));
+        assert!(std::sync::Arc::ptr_eq(&output.wanted[1].1, &first_level1));
+        assert!(mailbox.take().is_none());
+    }
+
+    #[test]
+    fn latest_mailbox_inactive_replaces_active_and_stale_message_cannot_restore_it() {
+        let mailbox = WindowMailbox::default();
+        let active = mailbox_snapshot(10, 7, &[(0, true, 100)]);
+        let old_wanted = active.wanted[0].1.clone();
+        assert!(mailbox.publish(0, active));
+        assert!(mailbox.publish(0, mailbox_snapshot(11, 7, &[(0, false, 0)])));
+        assert_eq!(std::sync::Arc::strong_count(&old_wanted), 1, "superseded wanted was released");
+        assert!(mailbox.publish(0, mailbox_snapshot(9, 7, &[(0, true, 999)])));
+        assert!(mailbox.publish(0, mailbox_snapshot(12, 7, &[])));
+        let output = mailbox.take().unwrap();
+        assert_eq!(output.serial, 12);
+        assert_eq!(output.levels.len(), 1);
+        assert!(!output.levels[0].active);
+        assert_eq!(output.levels[0].center.x, 11.0);
+        assert!(output.levels[0].adds.is_empty());
+        assert!(output.wanted[0].1.is_empty());
+    }
+
+    #[test]
+    fn latest_mailbox_bounds_two_pending_outputs_and_does_not_mix_ranges() {
+        let mailbox = WindowMailbox::default();
+        for serial in 1..=100 {
+            assert!(mailbox.publish(0, mailbox_snapshot(serial, 7, &[(0, true, serial)])));
+            assert!(mailbox.publish(1, mailbox_snapshot(serial, 0x78, &[(3, true, serial + 1000)])));
+            assert_eq!(mailbox.state.lock().unwrap().pending.iter().filter(|slot| slot.is_some()).count(), 2);
+        }
+        let fine = mailbox.take().unwrap();
+        let far = mailbox.take().unwrap();
+        assert_eq!((fine.serial, fine.processed_levels), (100, 7));
+        assert_eq!((far.serial, far.processed_levels), (100, 0x78));
+        assert_eq!(fine.levels[0].adds[0].1, 100);
+        assert_eq!(far.levels[0].adds[0].1, 1100);
+        assert!(mailbox.take().is_none());
+        // Fair take order resumes at the other range when only fine was taken.
+        assert!(mailbox.publish(0, mailbox_snapshot(101, 7, &[])));
+        assert_eq!(mailbox.take().unwrap().processed_levels, 7);
+        assert!(mailbox.publish(0, mailbox_snapshot(102, 7, &[])));
+        assert!(mailbox.publish(1, mailbox_snapshot(102, 0x78, &[])));
+        assert_eq!(mailbox.take().unwrap().processed_levels, 0x78);
+    }
+
+    #[test]
+    fn fine_worker_keeps_computing_latest_request_with_both_outputs_undrained() {
+        let (grid, mut request) = flat_request(crate::grid::Shape::Plane, 0.3, 6.0, 0.25);
+        let worker = WindowWorker::start(grid);
+        worker.request(request.clone());
+        let wait_pending = |serial| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                let matched = worker.updates.state.lock().unwrap().pending[0].as_ref().is_some_and(|update| update.serial == serial);
+                if matched { return true; }
+                if std::time::Instant::now() >= until { return false; }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+        assert!(wait_pending(request.serial));
+        request.serial += 1;
+        request.eye.x += 20.0;
+        worker.request(request.clone());
+        assert!(wait_pending(request.serial), "fine computation waited for undrained output");
+        request.serial += 1;
+        worker.request(request.clone());
+        assert!(wait_pending(request.serial), "fine no-op authority waited for consumer");
+        let output = worker.updates.state.lock().unwrap().pending[0].take().unwrap();
+        assert_eq!(output.serial, request.serial);
+        assert_eq!(output.processed_levels, 7);
+        assert!(!output.wanted.is_empty(), "latest no-op lost unpublished full demand");
+        assert!(output.levels.iter().any(|diff| diff.active && !diff.adds.is_empty()));
+    }
+
+    #[test]
+    fn bounded_worker_output_closes_before_shutdown_join() {
+        let updates = std::sync::Arc::new(WindowMailbox::default());
+        let producer = updates.clone();
         let (ready, ready_rx) = mpsc::channel();
-        let worker = WindowWorker {
-            requests: Some(vec![requests]), updates: Mutex::new(Some(receiver)),
+        let worker = WindowWorker { requests: None, updates,
             threads: vec![std::thread::spawn(move || {
-                updates.send(WindowUpdate::default()).unwrap();
+                assert!(producer.publish(0, mailbox_snapshot(1, 7, &[])));
                 ready.send(()).unwrap();
-                assert!(updates.send(WindowUpdate::default()).is_err(),
-                    "shutdown must disconnect an undrained, full output channel");
+                let mut serial = 2;
+                while producer.publish(0, mailbox_snapshot(serial, 7, &[])) { serial += 1; }
+                assert!(producer.is_closed());
             })],
         };
         ready_rx.recv().unwrap();
         let (done, done_rx) = mpsc::channel();
         std::thread::spawn(move || { drop(worker); done.send(()).unwrap(); });
-        done_rx.recv_timeout(std::time::Duration::from_secs(2)).expect("bounded worker shutdown deadlocked");
+        done_rx.recv_timeout(std::time::Duration::from_secs(2)).expect("latest mailbox shutdown deadlocked");
     }
 
     #[test]
-    fn bounded_worker_output_disconnects_before_both_shutdown_joins() {
-        let (updates, receiver) = mpsc::sync_channel(1);
+    fn bounded_worker_output_closes_before_both_shutdown_joins() {
+        let updates = std::sync::Arc::new(WindowMailbox::default());
         let (ready, ready_rx) = mpsc::channel();
-        let threads = (0..2).map(|_| {
-            let updates = updates.clone();
+        let threads = (0..2).map(|range| {
+            let producer = updates.clone();
             let ready = ready.clone();
             std::thread::spawn(move || {
+                let mask = if range == 0 { 7 } else { 0x78 };
+                assert!(producer.publish(range, mailbox_snapshot(1, mask, &[])));
                 ready.send(()).unwrap();
-                // One send can fill the channel; both workers eventually
-                // observe disconnection without requiring a render drain.
-                let _ = updates.send(WindowUpdate::default());
-                assert!(updates.send(WindowUpdate::default()).is_err());
+                let mut serial = 2;
+                while producer.publish(range, mailbox_snapshot(serial, mask, &[])) { serial += 1; }
+                assert!(producer.is_closed());
             })
         }).collect();
-        let worker = WindowWorker { requests: None, updates: Mutex::new(Some(receiver)), threads };
+        let worker = WindowWorker { requests: None, updates, threads };
         ready_rx.recv().unwrap(); ready_rx.recv().unwrap();
         let (done, done_rx) = mpsc::channel();
         std::thread::spawn(move || { drop(worker); done.send(()).unwrap(); });
-        done_rx.recv_timeout(std::time::Duration::from_secs(2)).expect("two blocked window workers failed to join");
+        done_rx.recv_timeout(std::time::Duration::from_secs(2)).expect("two latest window producers failed to join");
     }
 
     fn block_identity(key: u64) -> (u8, u32, i32, i32) {
