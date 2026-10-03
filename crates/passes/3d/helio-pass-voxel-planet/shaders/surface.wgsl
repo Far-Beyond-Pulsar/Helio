@@ -45,7 +45,7 @@ fn primary(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         // Emit once after the final result. Unresolved rays retain their
         // first missing block, including candidates from the sky retry.
-        finish_visible_feedback_pixel();
+        finish_visible_feedback_pixel(hit);
     }
     sample_primary_hit(id.xy, hit);
     hits[pixel_index(id.xy)] = hit;

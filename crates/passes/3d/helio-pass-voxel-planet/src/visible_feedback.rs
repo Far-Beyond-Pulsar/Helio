@@ -5,7 +5,10 @@ use std::sync::{
 };
 
 pub(super) const CAPACITY: usize = 256;
-const COPY_BYTES: u64 = 16 + CAPACITY as u64 * 8;
+const URGENT_CAPACITY: usize = 192;
+const ORDINARY_CAPACITY: usize = CAPACITY - URGENT_CAPACITY;
+const HEADER_BYTES: usize = 24;
+const COPY_BYTES: u64 = HEADER_BYTES as u64 + CAPACITY as u64 * 8;
 const STORAGE_BYTES: u64 = COPY_BYTES + 4096 * 4;
 // Frame.screen.w is an exactly represented integer f32. Its existing low
 // bits 1/2 control the horizon/fail-safe; bit 3 enables this diagnostic and
@@ -56,6 +59,8 @@ pub(super) struct View {
 #[derive(Default)]
 pub(super) struct Batch {
     pub blocks: Vec<(u32, u32)>,
+    /// Urgent keys form the prefix after deduplication across both banks.
+    pub urgent_blocks: usize,
     pub source: Option<View>,
     pub sampled_primary: Option<super::SampledPrimaryStats>,
 }
@@ -166,6 +171,7 @@ impl Feedback {
     // only on the next encode, after the copy has been submitted.
     pub fn poll(&mut self, current: View) -> Batch {
         let mut blocks = Vec::new();
+        let mut urgent_blocks = 0;
         let mut source = None;
         let mut sampled_primary = None;
         let mut newest_age = u32::MAX;
@@ -178,10 +184,8 @@ impl Feedback {
                     }) {
                         newest_age = current.frame.wrapping_sub(r.view.unwrap().frame);
                         let data = r.buffer.slice(..).get_mapped_range().unwrap();
-                        for (n, count) in self.counts.iter_mut().enumerate() {
-                            *count = u32::from_le_bytes(data[n * 4..n * 4 + 4].try_into().unwrap());
-                        }
-                        blocks = decode(&data);
+                        self.counts = decode_counts(&data);
+                        (blocks, urgent_blocks) = decode(&data);
                         source = r.view;
                         sampled_primary = decode_sample(u32::from_le_bytes(data[12..16].try_into().unwrap()),
                             r.view.unwrap(), current);
@@ -205,11 +209,11 @@ impl Feedback {
             }
         }
         // Prefer the newest completed frame, rather than replaying old views.
-        blocks.sort_unstable();
-        blocks.dedup();
+        // Decoding sorts each bank and removes cross-bank duplicates with
+        // urgent precedence. Keep that prefix for the caller's view ranking.
         // No cached diagnostic is replayed when no accepted fresh readback
         // arrived. Request counters retain their historical API separately.
-        Batch { blocks, source, sampled_primary }
+        Batch { blocks, urgent_blocks, source, sampled_primary }
     }
 
     pub fn begin(&mut self, encoder: &mut wgpu::CommandEncoder, view: View, requests: bool) -> Option<usize> {
@@ -228,15 +232,30 @@ impl Feedback {
     }
 }
 
-fn decode(data: &[u8]) -> Vec<(u32, u32)> {
+fn decode_counts(data: &[u8]) -> [u32; 3] {
+    if data.len() < HEADER_BYTES { return [0; 3]; }
+    let word = |at: usize| u32::from_le_bytes(data[at..at + 4].try_into().unwrap());
+    [word(0).min(ORDINARY_CAPACITY as u32) + word(16).min(URGENT_CAPACITY as u32),
+        word(4), word(8)]
+}
+
+fn decode(data: &[u8]) -> (Vec<(u32, u32)>, usize) {
     if data.len() < COPY_BYTES as usize {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let word = |at: usize| u32::from_le_bytes(data[at..at + 4].try_into().unwrap());
-    let count = (word(0) as usize).min(CAPACITY);
-    (0..count)
-        .map(|i| (word(16 + i * 8), word(20 + i * 8)))
-        .collect()
+    let key = |i: usize| (word(HEADER_BYTES + i * 8), word(HEADER_BYTES + 4 + i * 8));
+    let mut urgent: Vec<_> = (0..(word(16) as usize).min(URGENT_CAPACITY)).map(key).collect();
+    let mut ordinary: Vec<_> = (0..(word(0) as usize).min(ORDINARY_CAPACITY))
+        .map(|i| key(URGENT_CAPACITY + i)).collect();
+    urgent.sort_unstable();
+    urgent.dedup();
+    ordinary.sort_unstable();
+    ordinary.dedup();
+    ordinary.retain(|key| urgent.binary_search(key).is_err());
+    let urgent_blocks = urgent.len();
+    urgent.extend(ordinary);
+    (urgent, urgent_blocks)
 }
 
 #[cfg(test)]
@@ -403,14 +422,64 @@ var<private> frame:Frame; var<private> camera:Camera;
     #[test]
     fn feedback_decodes_bounded_full_keys_and_signed_indices() {
         let mut data = vec![0u8; COPY_BYTES as usize];
-        data[..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        put_word(&mut data, 0, u32::MAX);
+        put_word(&mut data, 16, u32::MAX);
+        for i in 0..CAPACITY { put_key(&mut data, i, (i as u32, i as u32)); }
         let key = 12u32 | (2 << 24) | (7 << 27);
-        data[16..20].copy_from_slice(&key.to_le_bytes());
-        data[20..24].copy_from_slice(&(-8i32).to_le_bytes());
-        let keys = decode(&data);
+        put_key(&mut data, 0, (key, (-8i32) as u32));
+        let (keys, urgent) = decode(&data);
         assert_eq!(keys.len(), CAPACITY);
-        assert_eq!(keys[0], (key, (-8i32) as u32));
-        assert!(decode(&data[..16]).is_empty());
+        assert_eq!(urgent, URGENT_CAPACITY);
+        assert!(keys[..urgent].contains(&(key, (-8i32) as u32)));
+        assert_eq!(decode_counts(&data)[0], CAPACITY as u32);
+        for truncated in [0, 16, HEADER_BYTES, COPY_BYTES as usize - 1] {
+            assert_eq!(decode(&data[..truncated]), (Vec::new(), 0));
+        }
+    }
+
+    fn put_word(data: &mut [u8], at: usize, value: u32) {
+        data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_key(data: &mut [u8], index: usize, key: (u32, u32)) {
+        put_word(data, HEADER_BYTES + index * 8, key.0);
+        put_word(data, HEADER_BYTES + index * 8 + 4, key.1);
+    }
+
+    #[test]
+    fn feedback_banks_keep_urgent_precedence_and_counter_layout() {
+        assert_eq!(HEADER_BYTES, 24);
+        assert_eq!(COPY_BYTES, 2072);
+        assert_eq!(STORAGE_BYTES, 18456);
+        let mut data = vec![0u8; COPY_BYTES as usize];
+        for (at, value) in [(0, 3), (4, 1), (8, 97), (12, 0x03020100), (16, 3), (20, u32::MAX)] {
+            put_word(&mut data, at, value);
+        }
+        put_key(&mut data, 0, (90, 3));
+        put_key(&mut data, 1, (70, 5));
+        put_key(&mut data, 2, (90, 3));
+        put_key(&mut data, URGENT_CAPACITY, (1, 4));
+        put_key(&mut data, URGENT_CAPACITY + 1, (70, 5));
+        put_key(&mut data, URGENT_CAPACITY + 2, (1, 4));
+        assert_eq!(decode(&data), (vec![(70, 5), (90, 3), (1, 4)], 2));
+        assert_eq!(decode_counts(&data), [6, 1, 97], "counts are bank entries before CPU deduplication");
+        assert_eq!(u32::from_le_bytes(data[12..16].try_into().unwrap()), 0x03020100,
+            "sampled counters retain their original header word");
+        assert_eq!(decode_counts(&data[..HEADER_BYTES - 1]), [0; 3]);
+    }
+
+    #[test]
+    fn feedback_banks_decode_independently_when_either_is_empty() {
+        let mut data = vec![0u8; COPY_BYTES as usize];
+        put_key(&mut data, 0, (10, 11));
+        put_key(&mut data, URGENT_CAPACITY, (20, 21));
+        put_word(&mut data, 16, 1);
+        assert_eq!(decode(&data), (vec![(10, 11)], 1));
+        put_word(&mut data, 16, 0);
+        put_word(&mut data, 0, 1);
+        assert_eq!(decode(&data), (vec![(20, 21)], 0));
+        put_word(&mut data, 0, 0);
+        assert_eq!(decode(&data), (Vec::new(), 0));
     }
 
     #[test]

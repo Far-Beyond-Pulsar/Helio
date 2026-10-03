@@ -9,7 +9,36 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
-const BYTES: u64 = 18_448;
+const BYTES: u64 = 18_456;
+const URGENT_CAPACITY: usize = 192;
+const ORDINARY_CAPACITY: usize = 64;
+const FIXTURE_GLOBALS: &str = r#"
+const ST_HIT:u32=1u;
+struct Hit { t:f32, info:u32 }
+struct Frame { hints:vec4<u32>, screen:vec4<f32>, layer:vec4<f32> }
+@group(0) @binding(0) var<uniform> frame:Frame;
+struct Camera { proj:mat4x4<f32> }
+var<private> camera:Camera;
+fn level_for(t:f32)->u32 { return frame.hints.z; }
+"#;
+
+struct FixtureCase {
+    prefer: bool,
+    finish: bool,
+    mixed: bool,
+    status: u32,
+    level: u32,
+    wanted: u32,
+    distance: f32,
+    voxel: f32,
+}
+
+impl Default for FixtureCase {
+    fn default() -> Self {
+        Self { prefer:false, finish:true, mixed:false, status:3, level:4,
+            wanted:0, distance:50.0, voxel:0.1 }
+    }
+}
 
 fn fixture(gpu: &Gpu, inputs: &[[u32; 4]], epoch: u32, enabled: bool, hint: bool) -> Vec<u8> {
     fixture_mode(gpu, inputs, epoch, enabled, hint, false, true)
@@ -17,6 +46,13 @@ fn fixture(gpu: &Gpu, inputs: &[[u32; 4]], epoch: u32, enabled: bool, hint: bool
 
 fn fixture_mode(gpu: &Gpu, inputs: &[[u32; 4]], epoch: u32, enabled: bool, hint: bool,
     prefer: bool, finish: bool) -> Vec<u8> {
+    fixture_case(gpu, inputs, epoch, enabled, hint, FixtureCase {
+        prefer, finish, status:if prefer { 1 } else { 3 }, ..Default::default()
+    })
+}
+
+fn fixture_case(gpu: &Gpu, inputs: &[[u32; 4]], epoch: u32, enabled: bool, hint: bool,
+    case: FixtureCase) -> Vec<u8> {
     let common = include_str!("../shaders/common.wgsl");
     let keys = &common
         [common.find("fn column_key0(").unwrap()..common.find("// Table edge log2").unwrap()];
@@ -25,24 +61,29 @@ fn fixture_mode(gpu: &Gpu, inputs: &[[u32; 4]], epoch: u32, enabled: bool, hint:
     let requests_shader = include_str!("../shaders/visible_feedback.wgsl")
         .split("// Four independent").next().unwrap();
     let source = format!(
-        "{}\nstruct Frame {{ hints: vec4<u32> }}\n@group(0) @binding(0) var<uniform> frame: Frame;\n{}\n{}\n{}",
-        include_str!("../shaders/noise.wgsl"), keys,
+        "{}\n{}\n{}\n{}\n{}",
+        include_str!("../shaders/noise.wgsl"), FIXTURE_GLOBALS, keys,
         requests_shader,
         r#"@group(0) @binding(22) var<storage, read> inputs: array<vec4<u32>>;
 override PREFER_FINAL: bool = false;
+override MIXED_BANKS: bool = false;
 @compute @workgroup_size(64)
 fn check(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= arrayLength(&inputs) { return; }
     let v = inputs[id.x];
+    camera.proj[1][1] = 1.0;
     begin_visible_feedback_pixel(vec2<u32>(id.x & 255u, id.x >> 8u));
     request_visible_block(v.x, v.y, bitcast<i32>(v.z), bitcast<i32>(v.w));
     // Another hop (or sky retry) retains the first candidate without emitting.
     request_visible_block((v.x + 1u) % 6u, v.y, bitcast<i32>(v.z) + 32, bitcast<i32>(v.w));
-    if PREFER_FINAL { prefer_visible_block((v.x + 1u) % 6u, v.y, bitcast<i32>(v.z) + 32, bitcast<i32>(v.w)); }
+    if PREFER_FINAL && (!MIXED_BANKS || (id.x & 8u) == 0u) {
+        prefer_visible_block((v.x + 1u) % 6u, v.y, bitcast<i32>(v.z) + 32, bitcast<i32>(v.w));
+    }
     if frame.hints.y != 0u {
-        finish_visible_feedback_pixel();
+        let hit = Hit(frame.screen.z, u32(frame.screen.x) | (u32(frame.layer.x) << 5u));
+        finish_visible_feedback_pixel(hit);
         // Finalization itself must not be able to consume another attempt.
-        finish_visible_feedback_pixel();
+        finish_visible_feedback_pixel(hit);
     }
 }"#
     );
@@ -62,7 +103,8 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {
             compilation_options: wgpu::PipelineCompilationOptions {
                 constants: &[
                     ("VISIBLE_FEEDBACK", if enabled { 1.0 } else { 0.0 }),
-                    ("PREFER_FINAL", if prefer { 1.0 } else { 0.0 }),
+                    ("PREFER_FINAL", if case.prefer { 1.0 } else { 0.0 }),
+                    ("MIXED_BANKS", if case.mixed { 1.0 } else { 0.0 }),
                 ],
                 ..Default::default()
             },
@@ -72,7 +114,11 @@ fn check(@builtin(global_invocation_id) id: vec3<u32>) {
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: None,
-            contents: bytemuck::cast_slice(&[0u32, u32::from(finish), 0, (epoch << 8) | if hint { 16 } else { 0 }]),
+            contents: bytemuck::cast_slice(&[
+                [0u32, u32::from(case.finish), case.wanted, (epoch << 8) | if hint { 16 } else { 0 }],
+                [(case.status as f32).to_bits(), 729.0f32.to_bits(), case.distance.to_bits(), 0],
+                [(case.level as f32).to_bits(), case.voxel.to_bits(), 0, 0],
+            ]),
             usage: wgpu::BufferUsages::UNIFORM,
         });
     let probes = gpu
@@ -120,9 +166,13 @@ fn word(data: &[u8], i: usize) -> u32 {
     u32::from_le_bytes(data[i * 4..i * 4 + 4].try_into().unwrap())
 }
 fn requests(data: &[u8]) -> HashSet<(u32, u32)> {
-    (0..word(data, 0).min(256) as usize)
-        .map(|i| (word(data, 4 + i * 2), word(data, 5 + i * 2)))
-        .collect()
+    bank_requests(data, true).union(&bank_requests(data, false)).copied().collect()
+}
+fn bank_requests(data: &[u8], urgent: bool) -> HashSet<(u32, u32)> {
+    let (count, offset) = if urgent {
+        (word(data, 4).min(URGENT_CAPACITY as u32) as usize, 0)
+    } else { (word(data, 0).min(ORDINARY_CAPACITY as u32) as usize, URGENT_CAPACITY) };
+    (offset..offset + count).map(|i| (word(data, 6 + i * 2), word(data, 7 + i * 2))).collect()
 }
 fn full_key(v: [u32; 4]) -> (u32, u32) {
     (
@@ -131,7 +181,7 @@ fn full_key(v: [u32; 4]) -> (u32, u32) {
     )
 }
 fn bit(key: (u32, u32), epoch: u32) -> u32 {
-    slot_hash(key.0, key.1 ^ epoch.wrapping_mul(0x9e3779b9)) & 131071
+    slot_hash(key.0, key.1 ^ epoch.wrapping_mul(0x9e3779b9)) & 65535
 }
 
 #[test]
@@ -152,9 +202,63 @@ fn deferred_request_prefers_final_hit_and_emits_once_after_retry() {
     assert_eq!(requests(&unresolved), HashSet::from([full_key(input[0])]));
 
     let preferred = fixture_mode(&gpu, &input, 0, true, true, true, true);
+    assert_eq!([word(&preferred, 0), word(&preferred, 4)], [0, 1]);
     assert_eq!(word(&preferred, 2), 1, "preference and repeated finalization share one attempt");
     assert_eq!(requests(&preferred), HashSet::from([full_key([3, 4, 45, (-9i32) as u32])]),
         "the final missing Hit footprint must replace the earlier missing air block");
+}
+
+#[test]
+fn urgent_bank_requires_final_missing_surface_and_strict_coarse_threshold() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIP urgent feedback classification: no GPU adapter");
+        return;
+    };
+    let input = [[2, 0, 12, (-12i32) as u32]];
+    for (prefer, status, level, wanted, width, urgent) in [
+        (false, 1, 1, 0, 8.0, false),
+        (true, 1, 1, 0, 3.9, false),
+        (true, 1, 1, 0, 4.0, false),
+        (true, 1, 1, 0, 4.1, true),
+        (true, 1, 1, 1, 8.0, false),
+        (true, 1, 0, 0, 8.0, false),
+        (true, 0, 1, 0, 8.0, false),
+        (true, 2, 1, 0, 8.0, false),
+        (true, 3, 1, 0, 8.0, false),
+    ] {
+        // distance=height/2 and projection=1 produce an exact one-metre
+        // pixel footprint; exactly4px therefore has no threshold ambiguity.
+        let data = fixture_case(&gpu, &input, 0, true, true, FixtureCase {
+            prefer, status, level, wanted, distance:364.5,
+            voxel:width / (1u32 << level) as f32, ..Default::default()
+        });
+        assert_eq!(word(&data, 2), 1);
+        assert_eq!([word(&data, 0), word(&data, 4)],
+            if urgent { [0,1] } else { [1,0] },
+            "prefer={prefer},status={status},level={level},wanted={wanted},width={width}");
+        assert_eq!(requests(&data).len(), 1);
+    }
+}
+
+#[test]
+fn ordinary_request_cannot_suppress_urgent_duplicate() {
+    let Some(gpu) = gpu() else {
+        eprintln!("SKIP feedback bank isolation: no GPU adapter");
+        return;
+    };
+    let inputs: Vec<_> = (0..256 * 8).map(|i| {
+        if i & 8 == 0 { [2, 4, 12, (-12i32) as u32] }
+        else { [3, 4, 44, (-12i32) as u32] }
+    }).collect();
+    let data = fixture_case(&gpu, &inputs, 0, true, true, FixtureCase {
+        prefer:true, mixed:true, status:1, ..Default::default()
+    });
+    let key = full_key([3, 4, 44, (-12i32) as u32]);
+    assert_eq!(word(&data, 2), 32);
+    assert_eq!([word(&data, 0), word(&data, 4)], [1,1]);
+    assert_eq!(bank_requests(&data, true), HashSet::from([key]));
+    assert_eq!(bank_requests(&data, false), HashSet::from([key]));
+    assert_eq!(word(&data, 1), 0);
 }
 
 #[test]
@@ -163,7 +267,7 @@ fn visible_requests_bound_emission_preserve_keys_and_retry_collisions() {
         eprintln!("SKIP visible feedback: no GPU adapter");
         return;
     };
-    let inputs: Vec<_> = (0..256 * 64)
+    let inputs: Vec<_> = (0..256 * 16)
         .map(|i| {
             [
                 (i % 6) as u32,
@@ -186,7 +290,7 @@ fn visible_requests_bound_emission_preserve_keys_and_retry_collisions() {
             .collect();
         assert_eq!(
             word(&data, 2),
-            256,
+            64,
             "exactly one attempt per selected pixel"
         );
         let actual = requests(&data);
@@ -211,7 +315,7 @@ fn visible_requests_bound_emission_preserve_keys_and_retry_collisions() {
         [common.find("fn column_key0(").unwrap()..common.find("// Table edge log2").unwrap()];
     let requests_shader = include_str!("../shaders/visible_feedback.wgsl")
         .split("// Four independent").next().unwrap();
-    let source=format!("{}\nstruct Frame {{hints:vec4<u32>}} @group(0) @binding(0) var<uniform> frame:Frame;\n{}\n{}\n@compute @workgroup_size(1) fn off() {{begin_visible_feedback_pixel(vec2<u32>(0));request_visible_block(0,0,0,0);prefer_visible_block(0,0,4,4);finish_visible_feedback_pixel();}}",include_str!("../shaders/noise.wgsl"),keys,requests_shader);
+    let source=format!("{}\n{}\n{}\n{}\n@compute @workgroup_size(1) fn off() {{begin_visible_feedback_pixel(vec2<u32>(0));request_visible_block(0,0,0,0);prefer_visible_block(0,0,4,4);finish_visible_feedback_pixel(Hit(50.0,1u));}}",include_str!("../shaders/noise.wgsl"),FIXTURE_GLOBALS,keys,requests_shader);
     let module = gpu
         .device
         .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -234,8 +338,23 @@ fn visible_requests_bound_emission_preserve_keys_and_retry_collisions() {
     let data = fixture(&gpu, &big, 0, true, true);
     assert_eq!(word(&data, 2), 1024);
     assert_ne!(word(&data, 1), 0);
-    assert!(word(&data, 0) >= 256);
-    assert_eq!(requests(&data).len(), 256);
+    assert!(word(&data, 0) >= ORDINARY_CAPACITY as u32);
+    assert_eq!(requests(&data).len(), ORDINARY_CAPACITY);
+    assert_eq!(word(&data, 4), 0);
+    let urgent = fixture_mode(&gpu, &big, 0, true, true, true, true);
+    assert_eq!(word(&urgent, 2), 1024);
+    assert_ne!(word(&urgent, 1), 0);
+    assert!(word(&urgent, 4) >= URGENT_CAPACITY as u32);
+    assert_eq!(bank_requests(&urgent, true).len(), URGENT_CAPACITY);
+    assert_eq!(word(&urgent, 0), 0);
+    let mixed = fixture_case(&gpu, &big, 0, true, true, FixtureCase {
+        prefer:true, mixed:true, status:1, ..Default::default()
+    });
+    assert_eq!(word(&mixed, 2), 1024);
+    assert_ne!(word(&mixed, 1), 0);
+    assert_eq!(bank_requests(&mixed, true).len(), URGENT_CAPACITY);
+    assert_eq!(bank_requests(&mixed, false).len(), ORDINARY_CAPACITY);
+    assert_eq!(requests(&mixed).len(), 256);
     let mut by_bit = std::collections::HashMap::new();
     let (a, b) = (0..10000)
         .find_map(|i| {

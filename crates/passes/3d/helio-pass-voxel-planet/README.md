@@ -217,7 +217,9 @@ dim diffuse light on the night side; set it to zero for solar-only lighting.
    above, a column above its top, an air brick; only mixed bricks run a cell
    DDA. A column that is not resident falls back to a coarser level. A rotating
    pixel sample requests missing 4x4 blocks through bounded asynchronous
-   feedback. While the worker catches up, up to 64 fresh requested blocks
+   feedback: 192 slots for final fallback hits above four pixels, 64 for
+   ordinary requests. CPU ordering puts urgent and current-view demand
+   first. While the worker catches up, up to 64 fresh requested blocks
    can load through temporary demand; they retain normal edit/publication
    rules and expire when the current snapshot arrives or their lease ends.
 5. **Shade**: material from the generator (or edit), macro normals and

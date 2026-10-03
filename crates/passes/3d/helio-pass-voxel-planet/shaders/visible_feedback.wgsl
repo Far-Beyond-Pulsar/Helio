@@ -3,11 +3,15 @@
 override VISIBLE_FEEDBACK: bool = false;
 override PRIMARY_SAMPLES: bool = false;
 const VISIBLE_REQUEST_CAPACITY: u32 = 256u;
+const VISIBLE_URGENT_CAPACITY: u32 = 192u;
+const VISIBLE_ORDINARY_CAPACITY: u32 = VISIBLE_REQUEST_CAPACITY - VISIBLE_URGENT_CAPACITY;
 struct VisibleRequests {
     count: atomic<u32>,
     overflow: atomic<u32>,
     attempts: atomic<u32>,
     sampled: atomic<u32>,
+    urgent_count: atomic<u32>,
+    padding: u32,
     keys: array<vec2<u32>, 256>,
     seen: array<atomic<u32>, 4096>,
 }
@@ -17,6 +21,7 @@ var<private> visible_feedback_sample: bool = false;
 // Valid face keys cannot equal this sentinel. Retain the first missing
 // block across trace hops and the primary sky-bound retry without emitting.
 var<private> visible_request_candidate: vec2<u32> = vec2<u32>(0xffffffffu, 0u);
+var<private> visible_request_surface: bool = false;
 
 fn begin_visible_feedback_pixel(xy: vec2<u32>) {
     let phase = frame.hints.w >> 8u;
@@ -38,25 +43,43 @@ fn request_visible_block(face: u32, level: u32, ci: i32, cj: i32) {
 fn prefer_visible_block(face: u32, level: u32, ci: i32, cj: i32) {
     if !visible_feedback_enabled() { return; }
     visible_request_candidate = vec2<u32>(column_key0(face, level, ci & ~3), bitcast<u32>(cj & ~3));
+    visible_request_surface = true;
 }
 
-fn finish_visible_feedback_pixel() {
+fn visible_feedback_urgent(hit: Hit) -> bool {
+    let level = (hit.info >> 5u) & 31u;
+    if !visible_request_surface || (hit.info & 3u) != ST_HIT || level <= level_for(hit.t) { return false; }
+    let pixel = 2.0 * max(hit.t, 0.05) / (abs(camera.proj[1][1]) * frame.screen.y);
+    return frame.layer.y * f32(1u << level) / pixel > 4.0;
+}
+
+fn finish_visible_feedback_pixel(hit: Hit) {
     if !visible_feedback_enabled() || visible_request_candidate.x == 0xffffffffu { return; }
     visible_request_attempts += 1u;
     atomicAdd(&visible_requests.attempts, 1u);
-    if atomicLoad(&visible_requests.count) >= VISIBLE_REQUEST_CAPACITY {
+    let urgent = visible_feedback_urgent(hit);
+    let capacity = select(VISIBLE_ORDINARY_CAPACITY, VISIBLE_URGENT_CAPACITY, urgent);
+    var count: u32;
+    if urgent { count = atomicLoad(&visible_requests.urgent_count); }
+    else { count = atomicLoad(&visible_requests.count); }
+    if count >= capacity {
         atomicStore(&visible_requests.overflow, 1u);
         return;
     }
     let key0 = visible_request_candidate.x;
     let key1 = visible_request_candidate.y;
     let salt = frame.hints.w >> 8u;
-    let hash = column_slot(key0, key1 ^ (salt * 0x9e3779b9u)) & 131071u;
+    // Independent banks: an ordinary ray cannot suppress an urgent request
+    // for the same block. Keep the existing total bitset and key capacities.
+    let hash = (column_slot(key0, key1 ^ (salt * 0x9e3779b9u)) & 65535u)
+        + select(65536u, 0u, urgent);
     let bit = 1u << (hash & 31u);
     if (atomicOr(&visible_requests.seen[hash >> 5u], bit) & bit) != 0u { return; }
-    let at = atomicAdd(&visible_requests.count, 1u);
-    if at < VISIBLE_REQUEST_CAPACITY {
-        visible_requests.keys[at] = vec2<u32>(key0, key1);
+    var at: u32;
+    if urgent { at = atomicAdd(&visible_requests.urgent_count, 1u); }
+    else { at = atomicAdd(&visible_requests.count, 1u); }
+    if at < capacity {
+        visible_requests.keys[at + select(VISIBLE_URGENT_CAPACITY, 0u, urgent)] = vec2<u32>(key0, key1);
     } else {
         atomicStore(&visible_requests.overflow, 1u);
     }
