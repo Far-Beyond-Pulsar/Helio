@@ -55,6 +55,13 @@ pub struct WindowUpdate {
     pub wanted: Vec<(u32, std::sync::Arc<FxHashSet<u64>>)>,
     /// Worker updates replace full demand instead of retaining camera history.
     pub snapshot: bool,
+    /// This message owns only the fine range; other levels arrive separately.
+    /// Completion is determined by per-level serial authority, not this flag.
+    pub partial: bool,
+    /// Levels evaluated by this message, including unchanged/inactive levels.
+    pub processed_levels: u32,
+    /// Original enqueue time, shared by both independently planned ranges.
+    pub issued_at: Option<std::time::Instant>,
 }
 
 #[derive(Default)]
@@ -393,6 +400,13 @@ impl WindowPlanner {
     /// Diff every level against the request. Levels whose window has not
     /// moved enough are left untouched (hysteresis of three columns).
     pub fn update(&mut self, request: &WindowRequest) -> WindowUpdate {
+        self.update_range(request, 0..self.grid.levels())
+    }
+
+    /// Compute only the owned range. Independent workers never scan or retain
+    /// wanted sets for the other's levels; both use the global coarsest level.
+    fn update_range(&mut self, request: &WindowRequest, range: std::ops::Range<u32>) -> WindowUpdate {
+        assert!(range.start < range.end && range.end <= self.grid.levels());
         let started = std::time::Instant::now();
         let grid = self.grid;
         let r0 = grid.radius();
@@ -416,9 +430,11 @@ impl WindowPlanner {
         let mut update = WindowUpdate {
             serial: request.serial,
             snapshot: self.snapshot,
+            partial: range.end < grid.levels(),
+            processed_levels: ((1u32 << range.end) - 1) & !((1u32 << range.start) - 1),
             ..Default::default()
         };
-        for level in 0..grid.levels() {
+        for level in range {
             let nominal = request.lod0 * f64::from(1u32 << level);
             // selected=t*(1+d*(hash-.5)); fine selection can extend to
             // nominal/(1-d/2), and the next level can start correspondingly early.
@@ -522,15 +538,15 @@ impl WindowPlanner {
     }
 }
 
-/// Background planner: always works on the most recent request.
+/// Independent fine/far planners, each working on its most recent request.
 pub struct WindowWorker {
-    requests: Option<mpsc::Sender<WindowMessage>>,
+    requests: Option<Vec<mpsc::Sender<WindowMessage>>>,
     updates: Mutex<Option<mpsc::Receiver<WindowUpdate>>>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    threads: Vec<std::thread::JoinHandle<()>>,
 }
 
 enum WindowMessage {
-    Request(WindowRequest),
+    Request(WindowRequest, std::time::Instant),
     RetireWanted(std::sync::Arc<FxHashSet<u64>>),
     RetireDiff(LevelDiff),
     RetirePayload(Box<dyn Send>),
@@ -538,45 +554,62 @@ enum WindowMessage {
 
 impl WindowWorker {
     pub fn start(grid: Grid) -> Self {
-        let (request_tx, request_rx) = mpsc::channel::<WindowMessage>();
-        // Preserve every ordered delta without accumulating full demand
-        // snapshots when the renderer is temporarily stalled.
+        // The shared output stays bounded. A completed far result can hold
+        // fine publication only until the renderer next drains this channel,
+        // not for the duration of the far scan or its retirement work.
         let (update_tx, update_rx) = mpsc::sync_channel(1);
-        let thread = std::thread::Builder::new()
-            .name("voxel-planet-windows".into())
+        let fine_end = grid.levels().min(3);
+        let mut ranges = vec![0..fine_end];
+        if fine_end < grid.levels() { ranges.push(fine_end..grid.levels()); }
+        let mut requests = Vec::with_capacity(ranges.len());
+        let mut threads = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            let (request_tx, request_rx) = mpsc::channel::<WindowMessage>();
+            let update_tx = update_tx.clone();
+            let name = if range.start == 0 { "voxel-planet-windows-fine" } else { "voxel-planet-windows-far" };
+            let thread = std::thread::Builder::new()
+            .name(name.into())
             .spawn(move || {
                 let mut planner = WindowPlanner::new(grid);
                 planner.snapshot = true;
                 while let Ok(message) = request_rx.recv() {
-                    let mut request = match message {
-                        WindowMessage::Request(request) => request,
+                    let (mut request, mut issued_at) = match message {
+                        WindowMessage::Request(request, issued_at) => (request, issued_at),
                         WindowMessage::RetireWanted(wanted) => { drop(wanted); continue; }
                         WindowMessage::RetireDiff(diff) => { drop(diff); continue; }
                         WindowMessage::RetirePayload(payload) => { drop(payload); continue; }
                     };
                     while let Ok(message) = request_rx.try_recv() {
                         match message {
-                            WindowMessage::Request(newer) => request = newer,
+                            WindowMessage::Request(newer, at) => { request = newer; issued_at = at; }
                             WindowMessage::RetireWanted(wanted) => drop(wanted),
                             WindowMessage::RetireDiff(diff) => drop(diff),
                             WindowMessage::RetirePayload(payload) => drop(payload),
                         }
                     }
-                    if update_tx.send(planner.update(&request)).is_err() {
+                    let mut update = planner.update_range(&request, range.clone());
+                    update.issued_at = Some(issued_at);
+                    if update_tx.send(update).is_err() {
                         break;
                     }
                 }
             })
             .expect("spawn window planner");
+            requests.push(request_tx);
+            threads.push(thread);
+        }
         Self {
-            requests: Some(request_tx),
+            requests: Some(requests),
             updates: Mutex::new(Some(update_rx)),
-            thread: Some(thread),
+            threads,
         }
     }
     pub fn request(&self, request: WindowRequest) {
-        if let Some(tx) = &self.requests {
-            let _ = tx.send(WindowMessage::Request(request));
+        let issued_at = std::time::Instant::now();
+        if let Some(channels) = &self.requests {
+            for tx in channels {
+                let _ = tx.send(WindowMessage::Request(request.clone(), issued_at));
+            }
         }
     }
     pub fn try_update(&self) -> Option<WindowUpdate> {
@@ -584,13 +617,13 @@ impl WindowWorker {
     }
     /// Free old snapshots and completed delta buffers off the render thread.
     pub(crate) fn retire_wanted(&self, wanted: std::sync::Arc<FxHashSet<u64>>) {
-        if let Some(tx) = &self.requests { let _ = tx.send(WindowMessage::RetireWanted(wanted)); }
+        if let Some(tx) = self.requests.as_ref().and_then(|channels| channels.last()) { let _ = tx.send(WindowMessage::RetireWanted(wanted)); }
     }
     pub(crate) fn retire_diff(&self, diff: LevelDiff) {
-        if let Some(tx) = &self.requests { let _ = tx.send(WindowMessage::RetireDiff(diff)); }
+        if let Some(tx) = self.requests.as_ref().and_then(|channels| channels.last()) { let _ = tx.send(WindowMessage::RetireDiff(diff)); }
     }
     pub(crate) fn retire_payload(&self, payload: impl Send + 'static) {
-        if let Some(tx) = &self.requests { let _ = tx.send(WindowMessage::RetirePayload(Box::new(payload))); }
+        if let Some(tx) = self.requests.as_ref().and_then(|channels| channels.last()) { let _ = tx.send(WindowMessage::RetirePayload(Box::new(payload))); }
     }
 }
 
@@ -600,7 +633,7 @@ impl Drop for WindowWorker {
         // A bounded output may be blocked on send; disconnect it before
         // joining so shutdown does not depend on another render frame.
         if let Ok(updates) = self.updates.get_mut() { *updates = None; }
-        if let Some(thread) = self.thread.take() {
+        for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
     }
@@ -612,23 +645,151 @@ mod tests {
     use crate::{Planet, PlanetRecipe, TerrainSource};
 
     #[test]
+    fn independent_ranges_preserve_full_planner_demand_and_order_across_view_history() {
+        for shape in [crate::grid::Shape::Plane, crate::grid::Shape::Sphere, crate::grid::Shape::InfinitePlane] {
+            let planet = Planet::new(PlanetRecipe { shape, radius_m: 1000.0, plane_size_m: 1024.0,
+                voxel_size_m: 0.1, terrain: TerrainSource { generator: crate::landform::FLAT_ID.into(), ..Default::default() },
+                ..Default::default() }).unwrap();
+            let grid = *planet.grid();
+            assert!(grid.levels() > 3);
+            for snapshot in [false, true] {
+                let mut full = WindowPlanner::new(grid);
+                let mut fine = WindowPlanner::new(grid);
+                let mut far = WindowPlanner::new(grid);
+                full.snapshot = snapshot; fine.snapshot = snapshot; far.snapshot = snapshot;
+                for (index, (horizontal, height, dither)) in [
+                    (0.0, 0.3, 0.25), (1.0, 0.3, 0.25), (2.0, 0.3, 0.25),
+                    (2.0, 0.3, 0.25), (2.0, 300.0, 0.25), (-1.0, 0.3, 1.0), (-1.0, 0.3, 1.0),
+                ].into_iter().enumerate() {
+                    let eye = if grid.is_plane() { DVec3::new(horizontal * 16.0, height, 3.0) }
+                        else {
+                            // Cross the +Y/+X seam, then stop and change altitude.
+                            let direction = if horizontal == 0.0 { DVec3::Y }
+                                else { DVec3::new(1.0 + (horizontal - 1.5) * 0.02, 1.0, 0.0).normalize() };
+                            direction * (grid.radius() + height)
+                        };
+                    let request = WindowRequest { eye, prefetch_eye: None, priority_eye: None, view_focus: None,
+                        lod0: 6.0, lod_dither: dither, outer_radius: grid.radius(), planet: None,
+                        serial: index as u64 + 1 };
+                    let expected = full.update(&request);
+                    let near = fine.update_range(&request, 0..3);
+                    let distant = far.update_range(&request, 3..grid.levels());
+                    assert_eq!(near.processed_levels, 7);
+                    assert!(near.partial && !distant.partial && !expected.partial);
+                    assert_eq!(near.processed_levels & distant.processed_levels, 0);
+                    assert_eq!(near.processed_levels | distant.processed_levels, expected.processed_levels);
+                    assert_eq!((near.serial, distant.serial), (expected.serial, expected.serial));
+                    assert_eq!((near.snapshot, distant.snapshot), (snapshot, snapshot));
+                    assert!(near.issued_at.is_none() && distant.issued_at.is_none());
+                    let diffs: Vec<_> = near.levels.iter().chain(&distant.levels).collect();
+                    assert_eq!(diffs.len(), expected.levels.len());
+                    for (actual, expected) in diffs.into_iter().zip(&expected.levels) {
+                        assert_eq!((actual.level, actual.active, actual.center, actual.radius),
+                            (expected.level, expected.active, expected.center, expected.radius));
+                        assert_eq!(actual.adds, expected.adds, "stable complete-block priorities must agree");
+                        assert_eq!(actual.removes, expected.removes, "retirement order must agree");
+                    }
+                    let wanted: Vec<_> = near.wanted.iter().chain(&distant.wanted).collect();
+                    assert_eq!(wanted.len(), expected.wanted.len());
+                    for (actual, expected) in wanted.into_iter().zip(&expected.wanted) {
+                        assert_eq!(actual.0, expected.0);
+                        assert_eq!(actual.1.as_ref(), expected.1.as_ref());
+                    }
+                    assert!(fine.levels[3..].iter().all(|l| !l.active && l.wanted.is_empty() && l.bound.is_none()));
+                    assert!(far.levels[..3].iter().all(|l| !l.active && l.wanted.is_empty() && l.bound.is_none()));
+                    if index == 3 || index == 6 {
+                        assert!(expected.levels.is_empty(), "a stopped view is an authority-only update");
+                        assert!(near.levels.is_empty() && distant.levels.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fine_worker_publishes_while_far_retirement_is_blocked() {
+        struct BlockDrop { started: mpsc::Sender<()>, release: mpsc::Receiver<()> }
+        impl Drop for BlockDrop {
+            fn drop(&mut self) { let _ = self.started.send(()); let _ = self.release.recv(); }
+        }
+        let (grid, request) = flat_request(crate::grid::Shape::Plane, 0.3, 6.0, 0.25);
+        let worker = WindowWorker::start(grid);
+        assert_eq!(worker.threads.len(), 2);
+        let (started, start_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        worker.retire_payload(BlockDrop { started, release: release_rx });
+        let blocking = start_rx.recv_timeout(std::time::Duration::from_secs(2));
+        worker.request(request.clone());
+        let near = worker.updates.lock().unwrap().as_ref().unwrap().recv_timeout(std::time::Duration::from_secs(2));
+        // Always unblock before asserting, so a failed test cannot hang Drop.
+        release.send(()).unwrap();
+        blocking.expect("far retirement did not start");
+        let near = near.expect("fine planner waited for far retirement");
+        let far = worker.updates.lock().unwrap().as_ref().unwrap().recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        assert_eq!(near.processed_levels, 7);
+        assert!(near.partial && !far.partial);
+        assert_eq!(near.processed_levels & far.processed_levels, 0);
+        assert_eq!(near.processed_levels | far.processed_levels, (1u32 << grid.levels()) - 1);
+        assert_eq!((near.serial, far.serial), (request.serial, request.serial));
+        assert!(near.issued_at.is_some());
+        assert_eq!(near.issued_at, far.issued_at, "both ranges retain one original enqueue stamp");
+    }
+
+    #[test]
+    fn small_grid_uses_one_complete_worker_without_an_empty_authority_message() {
+        let grid = Grid::plane(crate::grid::Shape::Plane, 6.4, 0.1).unwrap();
+        assert!(grid.levels() <= 3);
+        let worker = WindowWorker::start(grid);
+        assert_eq!(worker.threads.len(), 1);
+        let (_, mut request) = flat_request(crate::grid::Shape::Plane, 0.3, 2.0, 0.25);
+        request.serial = 9;
+        worker.request(request);
+        let update = worker.updates.lock().unwrap().as_ref().unwrap().recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        assert_eq!(update.processed_levels, (1u32 << grid.levels()) - 1);
+        assert!(!update.partial);
+        assert!(worker.try_update().is_none());
+    }
+
+    #[test]
     fn bounded_worker_output_disconnects_before_shutdown_join() {
         let (requests, _rx) = mpsc::channel();
         let (updates, receiver) = mpsc::sync_channel(1);
         let (ready, ready_rx) = mpsc::channel();
         let worker = WindowWorker {
-            requests: Some(requests), updates: Mutex::new(Some(receiver)),
-            thread: Some(std::thread::spawn(move || {
+            requests: Some(vec![requests]), updates: Mutex::new(Some(receiver)),
+            threads: vec![std::thread::spawn(move || {
                 updates.send(WindowUpdate::default()).unwrap();
                 ready.send(()).unwrap();
                 assert!(updates.send(WindowUpdate::default()).is_err(),
                     "shutdown must disconnect an undrained, full output channel");
-            })),
+            })],
         };
         ready_rx.recv().unwrap();
         let (done, done_rx) = mpsc::channel();
         std::thread::spawn(move || { drop(worker); done.send(()).unwrap(); });
         done_rx.recv_timeout(std::time::Duration::from_secs(2)).expect("bounded worker shutdown deadlocked");
+    }
+
+    #[test]
+    fn bounded_worker_output_disconnects_before_both_shutdown_joins() {
+        let (updates, receiver) = mpsc::sync_channel(1);
+        let (ready, ready_rx) = mpsc::channel();
+        let threads = (0..2).map(|_| {
+            let updates = updates.clone();
+            let ready = ready.clone();
+            std::thread::spawn(move || {
+                ready.send(()).unwrap();
+                // One send can fill the channel; both workers eventually
+                // observe disconnection without requiring a render drain.
+                let _ = updates.send(WindowUpdate::default());
+                assert!(updates.send(WindowUpdate::default()).is_err());
+            })
+        }).collect();
+        let worker = WindowWorker { requests: None, updates: Mutex::new(Some(receiver)), threads };
+        ready_rx.recv().unwrap(); ready_rx.recv().unwrap();
+        let (done, done_rx) = mpsc::channel();
+        std::thread::spawn(move || { drop(worker); done.send(()).unwrap(); });
+        done_rx.recv_timeout(std::time::Duration::from_secs(2)).expect("two blocked window workers failed to join");
     }
 
     fn block_identity(key: u64) -> (u8, u32, i32, i32) {

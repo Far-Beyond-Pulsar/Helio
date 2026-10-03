@@ -225,6 +225,15 @@ pub struct PlanetStats {
     pub admission_alias_deferred: usize,
     pub admission_publication_deferred: usize,
     pub admission_batched_columns: usize,
+    /// Accepted window authority; ages describe the last accepted range update.
+    pub requested_serial: u64,
+    pub applied_serial: u64,
+    pub fine_applied_serial: u64,
+    pub far_applied_serial: Option<u64>,
+    pub fine_apply_age_ms: Option<f64>,
+    pub far_apply_age_ms: Option<f64>,
+    /// Current eye distance from the authoritative level-0 window centre.
+    pub fine_window_lag_m: Option<f64>,
     pub active_levels: u32,
     pub finest_level: u32,
     pub plan_cpu_ms: f64,
@@ -1744,6 +1753,13 @@ impl PlanetRenderer {
         self.stats.admission_alias_deferred = rs.admission_alias_deferred;
         self.stats.admission_publication_deferred = rs.admission_publication_deferred;
         self.stats.admission_batched_columns = rs.admission_batched_columns;
+        self.stats.requested_serial = rs.requested_serial;
+        self.stats.applied_serial = rs.applied_serial;
+        self.stats.fine_applied_serial = rs.fine_applied_serial;
+        self.stats.far_applied_serial = rs.far_applied_serial;
+        self.stats.fine_apply_age_ms = rs.fine_apply_age_ms;
+        self.stats.far_apply_age_ms = rs.far_apply_age_ms;
+        self.stats.fine_window_lag_m = rs.fine_window_lag_m;
         self.stats.jobs = rs.jobs;
         self.stats.evictions = rs.evictions;
         self.stats.active_levels = rs.active_levels;

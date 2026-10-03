@@ -346,6 +346,18 @@ pub struct Stats {
     pub evictions: usize,
     pub requeued: usize,
     pub window_rebuild_ms: f64,
+    pub requested_serial: u64,
+    /// Minimum accepted authority over every grid level.
+    pub applied_serial: u64,
+    pub fine_applied_serial: u64,
+    /// Unavailable when this grid has no levels beyond the fine range.
+    pub far_applied_serial: Option<u64>,
+    /// Original enqueue to apply latency of the last accepted range chunk.
+    pub fine_apply_age_ms: Option<f64>,
+    pub far_apply_age_ms: Option<f64>,
+    /// Current eye's ground distance from the authoritative level-0 centre.
+    /// Inactive level 0 has no meaningful centre.
+    pub fine_window_lag_m: Option<f64>,
     pub edit_words: u32,
     pub table_load: f32,
     /// Allocated backing storage of queued add/remove delta vectors.
@@ -394,6 +406,12 @@ pub struct Residency {
     last_request: Option<WindowRequest>,
     requested: u64,
     applied: u64,
+    /// Demand authority can arrive independently for fine and far levels.
+    /// `applied` is their minimum, never a partial whole-world acknowledgment.
+    applied_levels: Vec<u64>,
+    /// Serial zero is a valid first inline update, distinct from no authority.
+    applied_seen: u32,
+    applied_issued_at: Vec<Option<std::time::Instant>>,
     /// Window diffs in FIFO order within each level. A large fine-window
     /// retirement must not delay incoming demand at every coarser level.
     diffs: Vec<VecDeque<QueuedDiff>>,
@@ -401,8 +419,9 @@ pub struct Residency {
     queued_delta_ops: usize,
     snapshot_mode: bool,
     retire_slot: usize,
-    retire_started_serial: u64,
-    retire_finished_serial: u64,
+    snapshot_epoch: u64,
+    retire_started_epoch: u64,
+    retire_finished_epoch: u64,
     obsolete_owners: VecDeque<OwnerRetirement>,
     /// Next non-global level to receive a bounded diff round.
     diff_cursor: usize,
@@ -434,7 +453,7 @@ struct QueuedDiff {
     removed: usize,
     cleared: bool,
     added: usize,
-    serial: u64,
+    retirement_epoch: u64,
 }
 
 struct OwnerRetirement {
@@ -488,13 +507,17 @@ impl Residency {
             last_request: None,
             requested: 0,
             applied: 0,
+            applied_levels: vec![0; grid.levels() as usize],
+            applied_seen: 0,
+            applied_issued_at: vec![None; grid.levels() as usize],
             diffs: (0..grid.levels()).map(|_| VecDeque::new()).collect(),
             queued_delta_bytes: 0,
             queued_delta_ops: 0,
             snapshot_mode: false,
             retire_slot: 0,
-            retire_started_serial: 0,
-            retire_finished_serial: 0,
+            snapshot_epoch: 0,
+            retire_started_epoch: 0,
+            retire_finished_epoch: 0,
             obsolete_owners: VecDeque::new(),
             diff_cursor: 0,
             catching_up: vec![0; grid.levels() as usize],
@@ -821,7 +844,7 @@ impl Residency {
 
     fn transient_wanted(&self, key: u64) -> bool {
         self.visible_leases.get(&(key & !(3u64 | (3u64 << 32)))).is_some_and(|lease|
-            !lease.retiring && self.applied < lease.serial
+            !lease.retiring && self.applied_levels[unpack(key).1 as usize] < lease.serial
                 && self.source_is_current(lease.source, VISIBLE_LEASE_FRAMES))
     }
 
@@ -842,7 +865,7 @@ impl Residency {
         let mut steps = 0;
         for block in blocks {
             let expire = !self.source_is_current(self.visible_leases[&block].source, VISIBLE_LEASE_FRAMES)
-                || self.applied >= self.visible_leases[&block].serial;
+                || self.applied_levels[unpack(block).1 as usize] >= self.visible_leases[&block].serial;
             self.visible_leases.get_mut(&block).unwrap().retiring |= expire;
             if !self.visible_leases[&block].retiring { continue; }
             let (keys, count) = self.visible_columns(block).unwrap();
@@ -901,8 +924,9 @@ impl Residency {
             let Some((keys, count)) = self.visible_columns(key) else { continue };
             let level = unpack(key).1 as usize;
             let ordinary = self.levels[level].active && keys[..count].iter().all(|&key| self.current_wanted(key));
-            if !ordinary && self.requested > self.applied && index < requested_blocks {
-                if let Some(source) = source {
+            if !ordinary && self.requested > self.applied_levels[unpack(key).1 as usize] && index < requested_blocks {
+                if let Some(source) = source.filter(|source|
+                    self.applied_issued_at[level].is_none_or(|issued| source.at >= issued)) {
                     if let Some(lease) = self.visible_leases.get_mut(&key) {
                         let newer = source.frame.wrapping_sub(lease.source.frame);
                         if !lease.retiring && newer > 0 && newer < 0x8000_0000 {
@@ -941,13 +965,58 @@ impl Residency {
 
     /// Publish latest demand before queueing bounded window operations.
     fn apply(&mut self, update: WindowUpdate) {
-        self.snapshot_mode |= update.snapshot;
+        // Legacy complete updates had no mask, acknowledged every level,
+        // and could replace queued snapshot payloads at the same serial.
+        // Ranged worker messages always carry an explicit authority mask,
+        // including unchanged/inactive levels. Fine and far serials can arrive
+        // out of order; only an older message for the SAME level is obsolete.
+        let legacy = update.processed_levels == 0 && !update.partial;
+        let processed = if update.processed_levels != 0 { update.processed_levels }
+            else if !update.partial { u32::MAX }
+            else { 0 };
+        let mut accepted = 0u32;
+        for (level, serial) in self.applied_levels.iter_mut().enumerate() {
+            if processed & (1u32 << level) != 0 && (update.serial > *serial
+                || self.applied_seen & (1u32 << level) == 0
+                || legacy && update.serial == *serial) {
+                accepted |= 1u32 << level;
+                self.applied_seen |= 1u32 << level;
+                *serial = update.serial;
+                self.applied_issued_at[level] = update.issued_at;
+            }
+        }
+        self.applied = self.applied_levels.iter().copied().min().unwrap_or(0);
+        self.update_authority_stats();
+        let fine_mask = (1u32 << self.grid.levels().min(3)) - 1;
+        let age = update.issued_at.and_then(|issued|
+            std::time::Instant::now().checked_duration_since(issued))
+            .map(|age| age.as_secs_f64() * 1e3);
+        if accepted & fine_mask != 0 { self.stats.fine_apply_age_ms = age; }
+        if accepted & !fine_mask != 0 { self.stats.far_apply_age_ms = age; }
+        let accepts = |level: u32| level < 32 && accepted & (1u32 << level) != 0;
+        // A second chunk at the same request serial can replace far demand
+        // after the fine chunk's scan completed. Scan epochs describe actual
+        // accepted snapshot payloads, not request/whole-world authority.
+        if update.snapshot && (update.wanted.iter().any(|(level, _)| accepts(*level))
+            || update.levels.iter().any(|diff| accepts(diff.level))) {
+            self.snapshot_epoch += 1;
+            if self.retire_slot == 0 { self.retire_started_epoch = self.snapshot_epoch; }
+        }
+        if accepted != 0 { self.snapshot_mode |= update.snapshot; }
         for (level, wanted) in update.wanted {
+            if !accepts(level) {
+                if let Planner::Worker(worker) = &self.planner { worker.retire_wanted(wanted); }
+                continue;
+            }
             if let Some(previous) = self.levels[level as usize].wanted.replace(wanted) {
                 if let Planner::Worker(worker) = &self.planner { worker.retire_wanted(previous); }
             }
         }
         for diff in update.levels {
+            if !accepts(diff.level) {
+                if let Planner::Worker(worker) = &self.planner { worker.retire_diff(diff); }
+                continue;
+            }
             let level = diff.level as usize;
             if update.snapshot {
                 // The worker supplies every current key, so old additions
@@ -960,7 +1029,6 @@ impl Residency {
                 let pending = std::mem::take(&mut self.levels[level].pending);
                 if let Planner::Worker(worker) = &self.planner { worker.retire_payload(pending); }
                 self.catching_up[level] = 0;
-                if self.retire_slot == 0 { self.retire_started_serial = update.serial; }
             }
             // The window metadata changes at once; the level is marked as
             // catching up (no guaranteed coverage) until its ops are done.
@@ -970,10 +1038,18 @@ impl Residency {
             self.catching_up[level] += 1;
             self.queued_delta_bytes += delta_bytes(&diff);
             self.queued_delta_ops += diff.removes.len() + diff.adds.len();
-            self.diffs[level].push_back(QueuedDiff { diff, removed: 0, cleared: false, added: 0, serial: update.serial });
+            self.diffs[level].push_back(QueuedDiff { diff, removed: 0, cleared: false, added: 0,
+                retirement_epoch: self.snapshot_epoch });
         }
-        self.stats.window_rebuild_ms = update.planning_ms;
-        self.applied = update.serial;
+        if accepted != 0 { self.stats.window_rebuild_ms = update.planning_ms; }
+    }
+
+    fn update_authority_stats(&mut self) {
+        let fine = self.applied_levels.len().min(3);
+        self.stats.requested_serial = self.requested;
+        self.stats.applied_serial = self.applied;
+        self.stats.fine_applied_serial = self.applied_levels[..fine].iter().copied().min().unwrap_or(0);
+        self.stats.far_applied_serial = self.applied_levels[fine..].iter().copied().min();
     }
 
     /// Global coverage wins; other levels share rounds, keeping their own FIFO.
@@ -1028,17 +1104,18 @@ impl Residency {
     /// Snapshot mode holds one full demand per level. Retire actual residents
     /// through a persistent table cursor, never millions of historical keys.
     fn apply_snapshot(&mut self, work: &mut FrameWork, out_of_time: &impl Fn() -> bool) {
-        while self.diffs.iter().any(|diffs| !diffs.is_empty()) && !out_of_time() {
+        while (self.diffs.iter().any(|diffs| !diffs.is_empty())
+            || self.retire_finished_epoch < self.snapshot_epoch) && !out_of_time() {
             for step in 0..128 {
                 // Protected alias owners can be requeued after every slice.
                 // Reserve half the same bounded work for the normal cursor
-                // until its serial completes, then let owners use all of it.
-                if (step < 64 || self.retire_finished_serial >= self.applied)
+                // until its epoch completes, then let owners use all of it.
+                if (step < 64 || self.retire_finished_epoch >= self.snapshot_epoch)
                     && self.retire_obsolete_owner_step(work) { continue; }
-                // Admission only inserts current demand. Once this serial's
+                // Admission only inserts current demand. Once this snapshot's
                 // pass is complete, remaining adds need no repeated scan.
                 // Lease expiry retires separately, and aliases stay above.
-                if self.retire_finished_serial >= self.applied { break; }
+                if self.retire_finished_epoch >= self.snapshot_epoch { break; }
                 // Each step inspects one bitmap word at most. Empty slots
                 // skip together, while the round/deadline bound is unchanged.
                 let (slot, resident) = self.residents.retirement_step(self.retire_slot);
@@ -1054,8 +1131,8 @@ impl Residency {
                 }
                 if self.retire_slot == self.residents.table().len() {
                     self.retire_slot = 0;
-                    self.retire_finished_serial = self.retire_started_serial;
-                    self.retire_started_serial = self.applied;
+                    self.retire_finished_epoch = self.retire_started_epoch;
+                    self.retire_started_epoch = self.snapshot_epoch;
                 }
             }
             let top = self.diffs.len() - 1;
@@ -1090,7 +1167,7 @@ impl Residency {
             }
             for level in 0..self.diffs.len() {
                 if self.diffs[level].front().is_some_and(|q|
-                    q.added == q.diff.adds.len() && self.retire_finished_serial >= q.serial) {
+                    q.added == q.diff.adds.len() && self.retire_finished_epoch >= q.retirement_epoch) {
                     let completed = self.diffs[level].pop_front().unwrap();
                     self.queued_delta_bytes -= delta_bytes(&completed.diff);
                     self.catching_up[level] = 0;
@@ -1601,7 +1678,10 @@ impl Residency {
                 self.levels.iter().filter_map(|level| level.wanted.as_ref()).map(|wanted| wanted.capacity()).sum::<usize>()
             );
         }
+        self.update_authority_stats();
         let mut stats = self.stats;
+        stats.fine_window_lag_m = self.levels[0].active.then(||
+            self.grid.ground_distance(self.levels[0].center, eye));
         stats.resident_columns = self.residents.len();
         stats.pending_columns = self.levels.iter().map(|l| l.pending.len()).sum::<usize>() + self.urgent.len() + self.publishing.len();
         stats.active_levels = self.levels.iter().filter(|l| l.active).count() as u32;
@@ -1734,6 +1814,8 @@ impl Residency {
         self.urgent.is_empty()
             && self.publishing.is_empty()
             && self.applied == self.requested
+            && (self.applied_seen == 0 || self.applied_seen == (1u32 << self.grid.levels()) - 1)
+            && (!self.snapshot_mode || self.retire_finished_epoch >= self.snapshot_epoch)
             && self.diffs.iter().all(VecDeque::is_empty)
             && self.levels.iter().all(|l| l.pending.is_empty())
             && self.visible_leases.is_empty()
@@ -1967,6 +2049,185 @@ mod tests {
     }
 
     #[test]
+    fn early_unchanged_authority_supersedes_only_its_levels_leases() {
+        let (_, mut r, _, at) = visible_bridge_fixture();
+        assert!(r.grid.levels() > 3);
+        let fine = pack(key0(crate::grid::PLANE_FACE, 0, 1000), 1000);
+        let far = pack(key0(crate::grid::PLANE_FACE, 3, 128), 128);
+        r.levels[3].wanted = Some(Default::default());
+        r.prioritize_visible_blocks_from([fine, far].map(|key| (key as u32, (key >> 32) as u32)), 10, 7, at);
+        r.refresh_visible_pending(None);
+        assert!(r.transient_wanted(fine) && r.transient_wanted(far));
+        r.apply(WindowUpdate { serial: 2, partial: true, processed_levels: 0b111,
+            snapshot: true, ..Default::default() });
+        assert_eq!(&r.applied_levels[..3], &[2, 2, 2], "unchanged levels still acknowledge authority");
+        assert_eq!(r.applied, 1, "unpublished far levels prevent whole-world readiness");
+        assert!(!r.idle());
+        assert!(!r.transient_wanted(fine) && r.transient_wanted(far));
+        let mut work = FrameWork::default();
+        r.retire_visible_leases(&mut work, &|| false);
+        assert!(!r.visible_leases.contains_key(&fine));
+        assert!(r.visible_leases.contains_key(&far) && r.transient_wanted(far));
+        assert_eq!(r.snapshot_epoch, 0, "authority-only no-op does not rescan unchanged membership");
+        r.apply(WindowUpdate { serial: 2, processed_levels: ((1 << r.grid.levels()) - 1) & !0b111,
+            snapshot: true, ..Default::default() });
+        assert_eq!(r.applied, 2);
+        assert!(!r.transient_wanted(far));
+        r.retire_visible_leases(&mut work, &|| false);
+        assert!(r.idle());
+    }
+
+    #[test]
+    fn same_serial_far_snapshot_restarts_retirement_after_fine_scan() {
+        for far_diff in [false, true] {
+            let (planet, mut r, fine, _) = edit_fixture();
+            let far = pack(key0(crate::grid::PLANE_FACE, 3, 128), 128);
+            r.residents.insert(far, Resident { record: 1, blocks: false, ..Default::default() });
+            r.block_conflicts += 1;
+            r.next_record = 2;
+            r.levels[3].wanted = Some(std::sync::Arc::new([far].into_iter().collect()));
+            r.requested = 2;
+            r.apply(WindowUpdate { serial: 2, partial: true, processed_levels: 0b111, snapshot: true,
+                wanted: vec![(0, Default::default())],
+                levels: vec![LevelDiff { level: 0, ..Default::default() }], ..Default::default() });
+            let mut work = FrameWork::default();
+            r.apply_snapshot(&mut work, &|| false);
+            assert_eq!(r.retire_finished_epoch, 1);
+            assert!(!r.residents.contains_key(fine) && r.residents.contains_key(far));
+            assert!(r.diffs.iter().all(VecDeque::is_empty));
+            assert!(!r.idle(), "the completed near scan cannot acknowledge far authority");
+            r.apply(WindowUpdate { serial: 2, processed_levels: ((1 << r.grid.levels()) - 1) & !0b111,
+                snapshot: true, wanted: vec![(3, Default::default())],
+                levels: if far_diff { vec![LevelDiff { level: 3, ..Default::default() }] } else { vec![] },
+                ..Default::default() });
+            assert_eq!(r.snapshot_epoch, 2);
+            assert!(!r.idle(), "wanted-only authority still owns an unfinished retirement scan");
+            r.apply_snapshot(&mut work, &|| false);
+            assert!(!r.residents.contains_key(far), "far owners must retire at the same request serial");
+            assert_eq!(r.retire_finished_epoch, 2);
+            assert!(r.diffs.iter().all(VecDeque::is_empty));
+            assert!(r.catching_up.iter().all(|&count| count == 0));
+            assert_eq!((r.queued_delta_bytes, r.queued_delta_ops), (0, 0));
+            assert_eq!(work.evictions, vec![0, 1]);
+            assert!(r.idle());
+            table_is_exact(&r);
+            drop(planet);
+        }
+    }
+
+    #[test]
+    fn ranged_authority_accepts_old_far_without_rolling_back_new_fine() {
+        let (_, mut r, _, _) = edit_fixture();
+        let fine = pack(key0(crate::grid::PLANE_FACE, 0, 1000), 1000);
+        let obsolete = pack(key0(crate::grid::PLANE_FACE, 0, 2000), 1000);
+        let far = pack(key0(crate::grid::PLANE_FACE, 3, 128), 128);
+        r.requested = 14;
+        let mut near = snapshot_update(14, &[fine]);
+        near.partial = true;
+        near.processed_levels = 0b111;
+        r.apply(near);
+        r.apply(WindowUpdate { serial: 10, processed_levels: ((1 << r.grid.levels()) - 1) & !0b111,
+            snapshot: true, wanted: vec![(3, std::sync::Arc::new([far].into_iter().collect()))],
+            levels: vec![LevelDiff { level: 3, active: true, adds: vec![(0.0, far)], ..Default::default() }],
+            ..Default::default() });
+        assert_eq!(r.applied, 10);
+        assert_eq!((r.stats.fine_applied_serial, r.stats.far_applied_serial), (14, Some(10)));
+        assert!(r.current_wanted(fine) && r.current_wanted(far));
+        let before = (r.snapshot_epoch, r.queued_delta_bytes, r.queued_delta_ops);
+        let mut stale = snapshot_update(13, &[obsolete]);
+        stale.partial = true;
+        stale.processed_levels = 0b111;
+        r.apply(stale);
+        assert_eq!(before, (r.snapshot_epoch, r.queued_delta_bytes, r.queued_delta_ops));
+        assert!(r.current_wanted(fine) && !r.current_wanted(obsolete));
+        assert_eq!(r.diffs[0][0].diff.adds, vec![(0.0, fine)]);
+        assert!(!r.idle());
+        r.apply(WindowUpdate { serial: 14, processed_levels: ((1 << r.grid.levels()) - 1) & !0b111,
+            snapshot: true, ..Default::default() });
+        assert_eq!(r.applied, 14);
+        // A duplicate chunk cannot replace the installed membership either.
+        let mut duplicate = snapshot_update(14, &[obsolete]);
+        duplicate.partial = true;
+        duplicate.processed_levels = 0b111;
+        r.apply(duplicate);
+        assert!(r.current_wanted(fine) && !r.current_wanted(obsolete));
+    }
+
+    #[test]
+    fn initial_explicit_zero_serial_installs_demand_without_allowing_duplicate_rollback() {
+        let (_, mut r, _, _) = edit_fixture();
+        let current = pack(key0(crate::grid::PLANE_FACE, 0, 1000), 1000);
+        let stale = pack(key0(crate::grid::PLANE_FACE, 0, 2000), 1000);
+        let mut first = snapshot_update(0, &[current]);
+        first.processed_levels = 1;
+        r.apply(first);
+        assert!(r.current_wanted(current));
+        assert_eq!(r.queued_delta_ops, 1);
+        let mut duplicate = snapshot_update(0, &[stale]);
+        duplicate.processed_levels = 1;
+        r.apply(duplicate);
+        assert!(r.current_wanted(current) && !r.current_wanted(stale));
+        assert_eq!(r.queued_delta_ops, 1);
+        assert_eq!(r.snapshot_epoch, 1);
+    }
+
+    #[test]
+    fn installed_enqueue_authority_rejects_old_capture_but_allows_new_bridge() {
+        let (_, mut r, _, at) = visible_bridge_fixture();
+        let block = pack(key0(crate::grid::PLANE_FACE, 0, 1000), 1000);
+        let issued = at + std::time::Duration::from_millis(1);
+        r.apply(WindowUpdate { serial: 2, partial: true, processed_levels: 0b111,
+            issued_at: Some(issued), ..Default::default() });
+        r.requested = 3;
+        r.prioritize_visible_blocks_from([(block as u32, (block >> 32) as u32)], 10, 7, at);
+        r.refresh_visible_pending(None);
+        assert!(r.visible_leases.is_empty() && r.levels[0].pending.is_empty(),
+            "the perpetually open next-request gap cannot revive pre-authority GPU demand");
+        r.set_visible_view(11, 7, issued);
+        r.prioritize_visible_blocks_from([(block as u32, (block >> 32) as u32)], 11, 7, issued);
+        r.refresh_visible_pending(None);
+        assert!(r.transient_wanted(block), "capture after installed authority can bridge request 3");
+        assert_eq!(r.visible_leases[&block].serial, 3);
+        // A newer far enqueue stamp must neither supersede this fine lease
+        // nor prevent prioritizing complete current fine wanted membership.
+        r.apply(WindowUpdate { serial: 3, processed_levels: 1 << 3,
+            issued_at: Some(issued + std::time::Duration::from_millis(1)), ..Default::default() });
+        assert!(r.transient_wanted(block));
+        let (keys, count) = r.visible_columns(block).unwrap();
+        r.apply(WindowUpdate { serial: 3, partial: true, processed_levels: 0b111,
+            issued_at: Some(issued + std::time::Duration::from_millis(2)),
+            wanted: vec![(0, std::sync::Arc::new(keys[..count].iter().copied().collect()))],
+            levels: vec![LevelDiff { level: 0, active: true, ..Default::default() }], ..Default::default() });
+        r.retire_visible_leases(&mut FrameWork::default(), &|| false);
+        r.prioritize_visible_blocks_from([(block as u32, (block >> 32) as u32)], 11, 7, issued);
+        r.refresh_visible_pending(None);
+        assert!(r.visible_leases.is_empty());
+        assert!(keys[..count].iter().all(|key| r.levels[0].pending.at.contains_key(key)),
+            "ordinary current wanted priority does not require a newer capture");
+    }
+
+    #[test]
+    fn range_latency_and_window_lag_keep_unavailable_distinct_from_zero() {
+        let (planet, mut r, _, eye) = edit_fixture();
+        let issued = std::time::Instant::now() - std::time::Duration::from_millis(100);
+        r.apply(WindowUpdate { serial: 1, partial: true, processed_levels: 0b111,
+            issued_at: Some(issued), ..Default::default() });
+        assert!(r.stats.fine_apply_age_ms.is_some_and(|age| age >= 100.0));
+        assert_eq!(r.stats.far_apply_age_ms, None);
+        let fine_age = r.stats.fine_apply_age_ms;
+        r.apply(WindowUpdate { serial: 1, processed_levels: 1 << 3,
+            issued_at: Some(std::time::Instant::now() + std::time::Duration::from_secs(10)), ..Default::default() });
+        assert_eq!(r.stats.fine_apply_age_ms, fine_age);
+        assert_eq!(r.stats.far_apply_age_ms, None, "future clocks cannot report a fake zero latency");
+        r.plan(&planet, eye, 1.0, 0);
+        assert_eq!(r.stats.fine_window_lag_m, None);
+        r.levels[0].active = true;
+        r.levels[0].center = DVec3::new(3.0, 0.0, 4.0);
+        r.plan(&planet, eye, 1.0, 0);
+        assert_eq!(r.stats.fine_window_lag_m, Some(5.0));
+    }
+
+    #[test]
     fn moving_snapshots_bound_history_and_converge_without_generating_obsolete_keys() {
         let (planet, mut r, old, eye) = edit_fixture();
         let face = crate::grid::PLANE_FACE;
@@ -2007,7 +2268,7 @@ mod tests {
         });
         r.apply(snapshot_update(1, &keys[1..2]));
         r.retire_slot = 10;
-        r.retire_started_serial = 1;
+        r.retire_started_epoch = 1;
         let mut work = FrameWork::default();
         r.apply_snapshot(&mut work, &|| false);
         assert_eq!(work.evictions.len(), 2);
@@ -2033,13 +2294,13 @@ mod tests {
         };
         let mut work = FrameWork::default();
         round(&mut r, &mut work);
-        assert_eq!(r.retire_finished_serial, 1,
+        assert_eq!(r.retire_finished_epoch, 1,
             "one resident plus16 bitmap words must finish within128 bounded retirement steps");
         assert_eq!(r.queued_delta_ops, 896, "the long fullwanted list remains partially admitted");
         assert_eq!(r.retire_slot, 0);
         round(&mut r, &mut work);
         assert_eq!(r.retire_slot, 0, "unchanged residents must not be rescanned while adds continue");
-        assert_eq!(r.retire_finished_serial, 1);
+        assert_eq!(r.retire_finished_epoch, 1);
         assert_eq!(r.queued_delta_ops, 768);
         assert!(work.evictions.is_empty());
 
@@ -2047,7 +2308,7 @@ mod tests {
         // not prevent this new retirement, even while the old adds were long.
         r.apply(snapshot_update(2, &keys[1..]));
         round(&mut r, &mut work);
-        assert_eq!(r.retire_finished_serial, 2);
+        assert_eq!(r.retire_finished_epoch, 2);
         assert_eq!(work.evictions, vec![0]);
         assert!(!r.residents.contains_key(keys[0]));
     }
@@ -2073,7 +2334,7 @@ mod tests {
         let mut work = FrameWork::default();
         r.apply_snapshot(&mut work, &|| { rounds.set(rounds.get() + 1); rounds.get() > 1 });
         assert_eq!(work.evictions.len(), 16, "the obsolete4x4 owner must retire in the first bounded round");
-        assert!(r.retire_finished_serial < 1, "fixture must not rely on a whole-table scan");
+        assert!(r.retire_finished_epoch < 1, "fixture must not rely on a whole-table scan");
         assert!(current.iter().all(|&key| !r.blocks_conflict(key)));
         assert!(current.iter().all(|key| r.levels[0].pending.at.contains_key(key)));
         assert!(r.catching_up[0] > 0);
@@ -2147,7 +2408,7 @@ mod tests {
         // Under owner-only retirement, the 4096-step protected task finishes
         // at each 32nd slice boundary and refresh requeues it unchanged. The
         // normal cursor never gets a step and this serial cannot complete.
-        assert_eq!(r.retire_finished_serial, 1);
+        assert_eq!(r.retire_finished_epoch, 1);
         assert!(r.diffs[0].is_empty() && r.catching_up[0] == 0);
         assert_eq!((r.queued_delta_ops, r.queued_delta_bytes), (0, 0));
         assert!(work.evictions.is_empty());
@@ -2169,7 +2430,7 @@ mod tests {
         let mut wanted: Vec<_> = (1000..2024).map(|i| pack(key0(face, 0, i), 0)).collect();
         wanted.extend([protected, conflict]);
         r.apply(snapshot_update(1, &wanted));
-        r.retire_finished_serial = r.applied;
+        r.retire_finished_epoch = r.snapshot_epoch;
         r.queue_obsolete_owners(conflict);
         assert_eq!(r.obsolete_owners.len(), 1);
         assert_eq!(r.obsolete_owners.front().unwrap().owner.2, 3);
@@ -2177,7 +2438,7 @@ mod tests {
         let mut work = FrameWork::default();
         r.apply_snapshot(&mut work, &|| { calls.set(calls.get() + 1); calls.get() > 1 });
         assert_eq!(r.obsolete_owners.front().unwrap().offset, 128);
-        assert_eq!(r.retire_finished_serial, 1);
+        assert_eq!(r.retire_finished_epoch, 1);
         assert_eq!(r.retire_slot, 0, "a completed serial needs no normal rescan");
         assert_eq!(r.queued_delta_ops, wanted.len() - 128);
         assert!(work.evictions.is_empty() && r.residents.contains_key(protected));
@@ -2531,6 +2792,8 @@ mod tests {
         r.snapshot_mode = true;
         r.requested = 2;
         r.applied = 1;
+        r.applied_levels.fill(1);
+        r.applied_seen = (1u32 << r.grid.levels()) - 1;
         let at = std::time::Instant::now();
         r.set_visible_view(10, 7, at);
         (planet, r, eye, at)
@@ -2591,8 +2854,8 @@ mod tests {
                 1 => r.set_visible_view(11, 7, at + std::time::Duration::from_millis(501)),
                 2 => r.set_visible_view(11, 8, at + std::time::Duration::from_millis(1)),
                 3 => r.visible_leases.get_mut(&first).unwrap().retiring = true,
-                4 => r.applied = r.visible_leases[&first].serial,
-                5 => r.applied = r.visible_leases[&first].serial + 1,
+                4 => r.applied_levels[0] = r.visible_leases[&first].serial,
+                5 => r.applied_levels[0] = r.visible_leases[&first].serial + 1,
                 6 => { r.visible_leases.remove(&first); }
                 7 => r.set_visible_view(11, 7, at - std::time::Duration::from_millis(1)),
                 _ => unreachable!(),
