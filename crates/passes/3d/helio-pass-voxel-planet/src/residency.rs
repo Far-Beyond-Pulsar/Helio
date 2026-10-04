@@ -1406,6 +1406,15 @@ impl Residency {
         selected
     }
 
+    // A failed initial publication matters only to its exact 4x4 level tile.
+    // Full resident tiles elsewhere can retain their preparation fast path.
+    fn tile_has_initial_retry(retries: &FxHashSet<u64>, face: u8, level: u32,
+        bi: i32, bj: i32) -> bool {
+        if retries.is_empty() { return false; }
+        (0..16).any(|index| retries.contains(&pack(
+            key0(face, level, bi * 4 + index % 4), (bj * 4 + index / 4) as u32)))
+    }
+
     /// Current camera tiles may arrive before the worker's wanted snapshot.
     /// Reuse its capped lease/publication path and FIFO; no forecast demand.
     fn refresh_camera_pending(&mut self, blocks: &[u64], deadline: Option<std::time::Instant>) {
@@ -1444,9 +1453,12 @@ impl Residency {
             // Tier-1 refs count exact resident columns, including in-flight
             // publications. Preserve the lease above, but avoid probing all
             // sixteen records again when none can need an initial retry.
-            if count == 16 && self.initial_retries.is_empty()
+            if count == 16
                 && self.blocks.get(&(level as u32, face, 1, i >> 2, j >> 2))
-                    .is_some_and(|owner| owner.refs == 16) { continue; }
+                    .is_some_and(|owner| owner.refs == 16)
+                && !Self::tile_has_initial_retry(&self.initial_retries, face, level as u32, i >> 2, j >> 2) {
+                continue;
+            }
             let start = candidates.len();
             for &key in &keys[..count] {
                 if !self.publishing.contains_key(&key)
@@ -1936,8 +1948,8 @@ impl Residency {
                     if out_of_time() { return; }
                     // A CPU-resident full block has no pending admissions to
                     // group. Avoid sixteen hash probes every stopped frame.
-                    if self.initial_retries.is_empty()
-                        && self.blocks.get(&(level as u32, face, 1, bi, bj)).is_some_and(|block| block.refs == 16) {
+                    if self.blocks.get(&(level as u32, face, 1, bi, bj)).is_some_and(|block| block.refs == 16)
+                        && !Self::tile_has_initial_retry(&self.initial_retries, face, level as u32, bi, bj) {
                         continue;
                     }
                     let mut keys = [0u64; 16];
@@ -2167,10 +2179,18 @@ impl Residency {
         self.retire_visible_leases_current(&camera_blocks, &mut work, &out_of_time);
         self.retire_pool_pressure(&mut work, &selected_owners, budget_time.map(|budget| started + budget));
         let t_windows = started.elapsed();
-        let refresh_deadline = budget_time.map(|budget| started + budget);
+        // Preparation must leave time to submit the columns it selects.
+        // Captured feedback keeps its clock/FIFO validation before Camera
+        // intake, but cannot consume the entire preparation allowance.
+        let refresh_deadline = budget_time.map(|budget|
+            started + budget - (budget / 4).min(std::time::Duration::from_millis(1)));
+        let feedback_deadline = refresh_deadline.map(|deadline| {
+            let now = std::time::Instant::now();
+            now + deadline.saturating_duration_since(now) / 2
+        });
         // Validate Captured clocks before building the new Camera FIFO; stale
         // rank cleanup cannot erase current demand. Geometry still gates leases.
-        if !out_of_time() { self.refresh_visible_pending(refresh_deadline); }
+        if !out_of_time() { self.refresh_visible_pending(feedback_deadline); }
         self.refresh_camera_pending(&camera_blocks, refresh_deadline);
         let t_visible = started.elapsed();
         // Ordinary near demand cannot delay already queued visible work.
@@ -5910,6 +5930,9 @@ mod tests {
         r.urgent.push(keys[0]);
         let (face, level, i, j) = unpack(block);
         let captured = pack(key0(face, level, i + 4), j as u32);
+        r.initial_retries.insert(captured);
+        assert!(!Residency::tile_has_initial_retry(&r.initial_retries, face, level, i >> 2, j >> 2));
+        assert!(Residency::tile_has_initial_retry(&r.initial_retries, face, level, (i + 4) >> 2, j >> 2));
         let source = r.visible_view.unwrap();
         r.visible_leases.insert(captured, VisibleLease { origin: LeaseOrigin::Captured(source),
             serial: r.requested, retiring: false, retired: 0,
@@ -5932,6 +5955,42 @@ mod tests {
         assert_eq!(r.urgent, vec![keys[0]]);
         assert!(!r.edits.free[previous.1 as usize].contains(&previous.0));
         assert!(!r.edits.free[next.1 as usize].contains(&next.0));
+    }
+
+    #[test]
+    fn near_refresh_complete_tile_ignores_unrelated_initial_retry() {
+        let planet = Planet::new(PlanetRecipe { shape: crate::grid::Shape::Plane, ..Default::default() }).unwrap();
+        let grid = *planet.grid();
+        let eye = DVec3::Y * 2.0;
+        let (cell, _) = grid.locate(eye);
+        let i = (cell.i >> 3) & !3;
+        let j = (cell.j >> 3) & !3;
+        let block = pack(key0(cell.face, 0, i), j as u32);
+        let mut r = Residency::new(grid, Capacity { table_bits: 8, ..Default::default() });
+        let (keys, count) = r.visible_columns(block).unwrap();
+        assert_eq!(count, 16);
+        for &key in &keys {
+            let record = r.alloc_record().unwrap();
+            assert!(r.acquire_blocks(key, &mut FrameWork::default()));
+            r.residents.insert(key, Resident { record, blocks: true, ..Default::default() });
+            r.levels[0].pending.insert(key, 40);
+        }
+        r.levels[0].active = true;
+        r.levels[0].radius = 100.0;
+        r.levels[0].wanted = Some(std::sync::Arc::new(keys.into_iter().collect()));
+        let unrelated = pack(key0(cell.face, 0, i + 8), j as u32);
+        r.initial_retries.insert(unrelated);
+        let before = r.levels[0].pending.at.clone();
+        r.refresh_near_pending(eye, None);
+        assert_eq!(r.levels[0].pending.at, before,
+            "an unrelated failed tile must not reprioritize a complete resident tile");
+        r.initial_retries.insert(keys[2]);
+        r.refresh_near_pending(eye, None);
+        assert_ne!(r.levels[0].pending.at[&keys[2]].0, 40,
+            "a full tile containing a failed initial publication must still refresh its retry");
+        assert!(r.initial_retries.contains(&keys[2]) && r.initial_retries.contains(&unrelated));
+        assert_eq!(r.residents.len(), 16);
+        assert!(r.publishing.is_empty());
     }
 
     #[test]
