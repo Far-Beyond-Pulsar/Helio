@@ -1451,6 +1451,7 @@ impl Residency {
         if out_of_time() || self.ground_clearance.is_none() { return; }
         let mut candidates = Vec::new();
         let mut refreshed = FxHashSet::default();
+        let mut finished_tiles = FxHashSet::default();
         let mut camera_leases = self.visible_leases.values()
             .filter(|lease| matches!(lease.origin, LeaseOrigin::Camera)).count();
         'tiles: for &block in blocks {
@@ -1486,6 +1487,7 @@ impl Residency {
                 && self.blocks.get(&(level as u32, face, 1, i >> 2, j >> 2))
                     .is_some_and(|owner| owner.refs == 16)
                 && !Self::tile_has_initial_retry(&self.initial_retries, face, level as u32, i >> 2, j >> 2) {
+                finished_tiles.insert(block);
                 continue;
             }
             let mut pending = Vec::with_capacity(count);
@@ -1511,9 +1513,20 @@ impl Residency {
         // bucket instead of masquerading as permanently captured fine work.
         let current: FxHashSet<_> = blocks.iter().copied().collect();
         let mut remaining = std::mem::take(&mut self.visible_admission);
+        let mut last_finished = None;
         remaining.retain(|entry| {
             let block = entry.1 & !(3u64 | (3u64 << 32));
-            !refreshed.contains(&block) && (current.contains(&block)
+            // Intake can stop before reaching this tile. Check its coherent
+            // FIFO run once too, without probing any resident columns.
+            if last_finished.is_none_or(|previous| previous != block) {
+                let (face, level, i, j) = unpack(block);
+                if self.blocks.get(&(level, face, 1, i >> 2, j >> 2)).is_some_and(|owner| owner.refs == 16)
+                    && !Self::tile_has_initial_retry(&self.initial_retries, face, level, i >> 2, j >> 2) {
+                    finished_tiles.insert(block);
+                }
+                last_finished = Some(block);
+            }
+            !finished_tiles.contains(&block) && !refreshed.contains(&block) && (current.contains(&block)
                 || self.visible_leases.get(&block)
                     .is_some_and(|lease| matches!(lease.origin, LeaseOrigin::Captured(_))))
         });
@@ -2121,6 +2134,14 @@ impl Residency {
         // can consume the whole frame budget; keep its epoch and quarantine.
         if self.snapshot_mode { self.apply_snapshot_selected(work, &expired, selected); }
         else { self.apply_queued(work, &expired); }
+        self.clear_resolved_pool_pressure();
+    }
+
+    fn clear_resolved_pool_pressure(&mut self) {
+        if self.initial_retries.is_empty() && self.urgent.is_empty()
+            && (!self.snapshot_mode || self.retire_finished_epoch >= self.snapshot_epoch) {
+            self.pool_pressure = false;
+        }
     }
 
     /// Bootstrap global coverage without first scanning obsolete fine residents.
@@ -2533,9 +2554,12 @@ impl Residency {
                 self.snapshot_epoch += 1;
                 if self.retire_slot == 0 { self.retire_started_epoch = self.snapshot_epoch; }
             }
-            self.pool_pressure = pool_full;
+            self.pool_pressure |= pool_full;
         }
         self.requeue(failed);
+        // An unrelated success cannot abandon older pool-backed retries or
+        // their reclaim pass. Replacement failures enter urgent via requeue.
+        if completed && !pool_full { self.clear_resolved_pool_pressure(); }
         self.stats.pending_columns = self.levels.iter().map(|l| l.pending.len()).sum::<usize>()
             + self.urgent.len() + self.publishing.len();
     }
@@ -5772,10 +5796,59 @@ mod tests {
         r.publishing.insert(current[0], EditPublication { record, previous: Some(previous),
             next: None, evicted: false, initial_bucket: None });
         r.complete_jobs([(current[0], 0)]);
-        assert!(!r.pool_pressure, "successful acknowledgement returns to normal admission priority");
+        assert!(r.pool_pressure, "a success cannot abandon queued replacement retry ownership");
+        // The production urgent loop consumes a retry before submitting it.
+        // Resolve that queue and finish the actual protected reclaim cursor.
+        r.urgent.clear();
+        r.apply_snapshot_selected(&mut FrameWork::default(), &|| false, &selected);
+        r.retire_pool_pressure(&mut FrameWork::default(), &selected, None);
+        assert!(!r.pool_pressure, "resolved retries and completed retirement return to normal admission");
         r.complete_jobs([(u64::MAX, 3)]);
         assert!(!r.pool_pressure, "stale pool failures cannot re-enter pressure");
         assert!(r.edits.free[previous.1 as usize].contains(&previous.0));
+    }
+
+    #[test]
+    fn pool_pressure_success_keeps_older_initial_retry_until_it_resolves() {
+        let (planet, mut r, _, current) = current_alias_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.levels[0].wanted = Some(std::sync::Arc::new(current.iter().copied().collect()));
+        let selected = select_camera_owners(&mut vec![current[0]]);
+        r.handoff_camera_owners(&selected, &mut FrameWork::default(), &|| false);
+        for &key in &current[..2] {
+            let record = r.alloc_record().unwrap();
+            assert!(r.acquire_blocks(key, &mut FrameWork::default()));
+            r.residents.insert(key, Resident { record, blocks: true, ..Default::default() });
+            r.publishing.insert(key, EditPublication { record, previous: None, next: None,
+                evicted: false, initial_bucket: Some(0) });
+        }
+        r.complete_jobs([(current[0], 3)]);
+        assert!(r.pool_pressure && r.initial_retries.contains(&current[0]));
+        r.complete_jobs([(current[1], 0)]);
+        assert!(r.pool_pressure && r.initial_retries.contains(&current[0]),
+            "unrelated successful initial publication cannot abandon an older failed initial retry");
+        let work = r.plan(&planet, eye, 160.0, 1);
+        assert_eq!(work.job_keys, vec![current[0]], "the failed record is reused through normal admission");
+        assert!(!r.initial_retries.contains(&current[0]));
+        r.complete_jobs([(current[0], 0)]);
+        assert_eq!(r.retire_finished_epoch, r.snapshot_epoch);
+        assert!(!r.pool_pressure, "resolved retry and finished pass release the pressure slice");
+        table_is_exact(&r);
+    }
+
+    #[test]
+    fn pool_pressure_completed_retirement_clears_without_another_acknowledgment() {
+        let (_, mut r, _, _) = current_alias_fixture();
+        r.pool_pressure = true;
+        r.snapshot_epoch += 1;
+        r.retire_started_epoch = r.snapshot_epoch;
+        assert!(r.retire_finished_epoch < r.snapshot_epoch);
+        r.clear_resolved_pool_pressure();
+        assert!(r.pool_pressure, "unfinished retirement remains live even after retry queues resolve");
+        r.apply_snapshot(&mut FrameWork::default(), &|| false);
+        r.retire_pool_pressure(&mut FrameWork::default(), &SelectedOwners::default(), None);
+        assert_eq!(r.retire_finished_epoch, r.snapshot_epoch);
+        assert!(!r.pool_pressure, "retirement completion need not wait for a nonexistent next job acknowledgment");
     }
 
     #[test]
@@ -5822,6 +5895,16 @@ mod tests {
         assert_eq!(retry.job_keys, vec![key]);
         assert_eq!(retry.jobs[0].record, record);
         r.complete_jobs([(key, 0)]);
+        assert!(r.pool_pressure, "the other fifteen failed initial publications still need reclamation");
+        assert_eq!(r.initial_retries.len(), 15);
+        let remaining = r.plan(&planet, eye, 160.0, 15);
+        assert_eq!(remaining.jobs.len(), 15);
+        assert!(remaining.job_keys.iter().all(|key| first.job_keys.contains(key) && *key != first.job_keys[0]));
+        r.complete_jobs(remaining.job_keys.iter().map(|&key| (key, 0)));
+        r.apply_snapshot(&mut FrameWork::default(), &|| false);
+        r.retire_pool_pressure(&mut FrameWork::default(), &Default::default(), None);
+        assert!(r.initial_retries.is_empty());
+        assert_eq!(r.retire_finished_epoch, r.snapshot_epoch);
         assert!(!r.pool_pressure);
     }
 
@@ -6270,6 +6353,39 @@ mod tests {
         assert_eq!(work.jobs.len(), 16);
         assert!(work.job_keys.iter().all(|&key| r.current_wanted(key)));
         assert_eq!(r.stats.camera_jobs, [16, 0, 0], "current ordinary jobs count despite having no Camera lease");
+    }
+
+    #[test]
+    fn camera_refresh_finished_fifo_tail_drops_full_tiles_but_keeps_exact_retries() {
+        let (planet, mut r, _, at) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        let blocks = r.camera_blocks(eye, &|| false)[..3].to_vec();
+        r.refresh_camera_pending(&blocks, None);
+        let mut work = FrameWork::default();
+        for &block in &blocks {
+            let level = unpack(block).1 as usize;
+            assert_eq!(r.visible_admission.pop_front(), Some((level, block)));
+            r.levels[level].pending.remove(block);
+            assert!(r.admit_visible_block(&planet, level, block, 0, 48, None, &mut work));
+        }
+        assert_eq!(work.job_keys.len(), 48);
+        r.complete_jobs(work.job_keys.iter().enumerate().map(|(index, &key)| (key, if index < 32 { 0 } else { 3 })));
+        assert_eq!(r.initial_retries.len(), 16);
+        let source = VisibleStamp { frame: 10, view: 7, at };
+        r.visible_leases.get_mut(&blocks[2]).unwrap().origin = LeaseOrigin::Captured(source);
+        r.visible_admission = work.job_keys.iter().map(|&key| (unpack(key).1 as usize, key)).collect();
+        // Intake expires before any tile is reached. Its existing FIFO still
+        // proves full tiles by exact refs, independently of per-column probes.
+        let mut checks = 0;
+        r.refresh_camera_pending_until(&blocks, || { checks += 1; checks > 1 });
+        assert_eq!(r.visible_admission.iter().map(|entry| entry.1).collect::<Vec<_>>(), work.job_keys[32..]);
+        assert_eq!(r.initial_retries.len(), 16, "finished filtering never consumes a failed record retry");
+        r.refresh_camera_pending_until(&blocks, || false);
+        assert_eq!(r.visible_admission.len(), 16);
+        let retained = r.visible_leases[&blocks[2]].captured_source();
+        assert_eq!((retained.frame, retained.view, retained.at), (source.frame, source.view, source.at));
+        table_is_exact(&r);
     }
 
     #[test]
