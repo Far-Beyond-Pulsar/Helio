@@ -2831,12 +2831,29 @@ impl Residency {
     pub fn idle(&self) -> bool {
         self.urgent.is_empty()
             && self.publishing.is_empty()
+            && self.initial_retries.is_empty()
             && self.applied == self.requested
             && (self.applied_seen == 0 || self.applied_seen == (1u32 << self.grid.levels()) - 1)
             && (!self.snapshot_mode || self.retire_finished_epoch >= self.snapshot_epoch)
             && self.diffs.iter().all(VecDeque::is_empty)
             && self.levels.iter().all(|l| l.pending.is_empty())
-            && self.visible_leases.is_empty()
+            // A completed current Camera lease still authorizes retained
+            // records outside the worker window; it is not unfinished work.
+            // Captured expiry, retirement and incomplete/detached summaries
+            // still need another plan, as do the pending/publication guards.
+            && self.visible_leases.iter().all(|(&key, lease)| {
+                if !matches!(lease.origin, LeaseOrigin::Camera) || lease.retiring
+                    || lease.current_demand_frame != Some(self.frame) { return false; }
+                let (face, level, i, j) = unpack(key);
+                self.visible_columns(key).is_some_and(|(_, count)| {
+                    self.blocks.get(&(level, face, 1, i >> 2, j >> 2))
+                        .is_some_and(|block| block.refs == count as u32)
+                        && (1..=BLOCK_TIERS).all(|tier| {
+                            let owner = (level, face, tier, i >> (2 * tier), j >> (2 * tier));
+                            self.block_owner.get(&block_slot(level, face, tier, owner.3, owner.4)) == Some(&owner)
+                        })
+                })
+            })
     }
 }
 
@@ -5439,6 +5456,71 @@ mod tests {
         assert!(r.diffs.iter().all(|diff| diff.is_empty()));
         assert_eq!(r.retire_finished_epoch, r.snapshot_epoch);
         (planet, r, old, new)
+    }
+
+    fn complete_camera_lease_fixture() -> (Residency, Vec<u64>) {
+        let (planet, mut r, _, current) = current_alias_fixture();
+        r.applied = r.requested;
+        r.levels[0].wanted = Some(Default::default());
+        let mut blocks = vec![current[0]];
+        let selected = select_camera_owners(&mut blocks);
+        r.handoff_camera_tiles(&blocks, &selected, &mut FrameWork::default(), &|| false);
+        r.refresh_camera_pending(&blocks, None);
+        assert_eq!(r.visible_admission.pop_front(), Some((0, current[0])));
+        r.levels[0].pending.remove(current[0]);
+        let mut work = FrameWork::default();
+        assert!(r.admit_visible_block(&planet, 0, current[0], 0, 16, None, &mut work));
+        assert_eq!(work.job_keys, current);
+        assert!(!r.idle(), "unacknowledged Camera generation must prevent readiness");
+        r.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
+        (r, current)
+    }
+
+    #[test]
+    fn camera_lease_idle_completed_current_data_preserves_authorization() {
+        let (mut r, keys) = complete_camera_lease_fixture();
+        assert!(keys.iter().all(|&key| !r.current_wanted(key) && r.transient_wanted(key)));
+        assert!(r.levels.iter().all(|level| level.pending.is_empty()));
+        assert!(r.publishing.is_empty() && r.initial_retries.is_empty());
+        assert_eq!(r.visible_leases.len(), 1);
+        assert!(r.idle(), "fully acknowledged attached Camera data must allow readiness without dropping its lease");
+        let records: Vec<_> = keys.iter().map(|&key| r.residents.get(key).unwrap().record).collect();
+        let mut blocks = vec![keys[0]];
+        let selected = select_camera_owners(&mut blocks);
+        let mut unchanged = FrameWork::default();
+        r.handoff_camera_tiles(&blocks, &selected, &mut unchanged, &|| false);
+        r.refresh_camera_pending(&blocks, None);
+        assert!(r.idle() && unchanged.block_inits.is_empty() && unchanged.jobs.is_empty());
+        assert_eq!(r.visible_leases.len(), 1);
+        assert_eq!(records, keys.iter().map(|&key| r.residents.get(key).unwrap().record).collect::<Vec<_>>());
+        assert!(keys.iter().all(|&key| r.protected_wanted(key)));
+    }
+
+    #[test]
+    fn camera_lease_idle_incomplete_retry_publication_and_retirement_still_need_work() {
+        for case in 0..8 {
+            let (mut r, keys) = complete_camera_lease_fixture();
+            assert!(r.idle());
+            match case {
+                0 => r.evict(keys[0], &mut FrameWork::default()),
+                1 => { r.initial_retries.insert(keys[0]); },
+                2 => { r.urgent.push(keys[0]); },
+                3 => {
+                    r.publishing.insert(keys[0], EditPublication { record: r.residents.get(keys[0]).unwrap().record,
+                        previous: None, next: None, evicted: false, initial_bucket: None });
+                }
+                4 => { r.visible_leases.get_mut(&keys[0]).unwrap().retiring = true; },
+                5 => { r.visible_leases.get_mut(&keys[0]).unwrap().current_demand_frame = None; },
+                6 => {
+                    r.visible_leases.get_mut(&keys[0]).unwrap().origin = LeaseOrigin::Captured(r.visible_view.unwrap());
+                }
+                _ => {
+                    let (face, level, i, j) = unpack(keys[0]);
+                    r.detach_summary_owner((level, face, 2, i >> 4, j >> 4), &mut FrameWork::default());
+                }
+            }
+            assert!(!r.idle(), "case {case} still requires generation, publication, summary repair or expiry");
+        }
     }
 
     #[test]
