@@ -288,11 +288,36 @@ fn current_geometry_allows(grid: &Grid, request: Option<&WindowRequest>, key: u6
         crate::windows::current_block_wanted(grid, request, key & !(3u64 | (3u64 << 32))))
 }
 
+type SelectedOwners = FxHashMap<u32, (u32, u8, u32, i32, i32)>;
+
+fn selected_owner_allows(key: u64, selected: &SelectedOwners) -> bool {
+    let (face, level, i, j) = unpack(key);
+    if selected.is_empty() || level >= 3 { return true; }
+    (1..=BLOCK_TIERS).all(|tier| {
+        let owner = (level, face, tier, i >> (2 * tier), j >> (2 * tier));
+        selected.get(&block_slot(level, face, tier, owner.3, owner.4)).is_none_or(|wanted| *wanted == owner)
+    })
+}
+
+fn select_camera_owners(blocks: &mut Vec<u64>) -> SelectedOwners {
+    let mut selected = SelectedOwners::default();
+    blocks.retain(|&key| {
+        if !selected_owner_allows(key, &selected) { return false; }
+        let (face, level, i, j) = unpack(key);
+        for tier in 1..=BLOCK_TIERS {
+            let owner = (level, face, tier, i >> (2 * tier), j >> (2 * tier));
+            selected.insert(block_slot(level, face, tier, owner.3, owner.4), owner);
+        }
+        true
+    });
+    selected
+}
+
 fn cached_current_geometry(grid: &Grid, request: Option<&WindowRequest>, key: u64,
-    last: &mut Option<(u64, bool)>) -> bool {
+    last: &mut Option<(u64, bool)>, selected: &SelectedOwners) -> bool {
     let block = key & !(3u64 | (3u64 << 32));
     if let Some((_, allowed)) = last.filter(|&(previous, _)| previous == block) { return allowed; }
-    let allowed = current_geometry_allows(grid, request, key);
+    let allowed = selected_owner_allows(key, selected) && current_geometry_allows(grid, request, key);
     *last = Some((block, allowed));
     allowed
 }
@@ -519,6 +544,7 @@ struct QueuedDiff {
 struct OwnerRetirement {
     owner: (u32, u8, u32, i32, i32),
     offset: u32,
+    selected: bool,
 }
 
 fn delta_bytes(diff: &LevelDiff) -> usize {
@@ -937,8 +963,11 @@ impl Residency {
 
     fn current_camera_block(&self, key: u64) -> bool {
         // Ground clearance bounds the column below the eye, not a nearby
-        // raised slope. The current window predicate uses the terrain bound.
-        self.current_captured_block(key)
+        // raised slope. Current geometry can need a fine level before its
+        // worker snapshot activates it; captured feedback keeps that guard.
+        unpack(key).1 < self.grid.levels().min(3)
+            && self.current_request.as_ref().is_some_and(|request|
+                crate::windows::current_block_wanted(&self.grid, request, key))
     }
 
     fn protected_wanted(&self, key: u64) -> bool {
@@ -1130,7 +1159,6 @@ impl Residency {
             view.forward * view.tan_half[1] - view.up];
         let mut covered_end = nearest;
         'levels: for level in 0..self.levels.len().min(3) {
-            if !self.levels[level].active { continue; }
             let size = f64::from(BRICK << level);
             let width = grid.level_size(level as u32) * f64::from(BRICK * 4);
             let start = nearest.max(covered_end - width);
@@ -1369,25 +1397,72 @@ impl Residency {
             let slot = block_slot(level, face, tier, desired.3, desired.4);
             if let Some(&owner) = self.block_owner.get(&slot) {
                 if owner != desired && !self.obsolete_owners.iter().any(|task| task.owner == owner) {
-                    self.obsolete_owners.push_back(OwnerRetirement { owner, offset: 0 });
+                    self.obsolete_owners.push_back(OwnerRetirement { owner, offset: 0, selected: false });
                 }
             }
         }
     }
 
+    fn prioritize_camera_owners(&mut self, blocks: &[u64], selected: &SelectedOwners) {
+        // Clear withdrawn priority even when the deadline leaves a task
+        // unvisited. A returned view may regenerate its earlier prefix.
+        for task in &mut self.obsolete_owners {
+            let (level, face, tier, i, j) = task.owner;
+            task.selected &= selected.get(&block_slot(level, face, tier, i, j))
+                .is_some_and(|wanted| *wanted != task.owner);
+        }
+        // A live captured stamp can refer to terrain hundreds of metres
+        // behind the current view. Only conflicting selected slots supersede
+        // it; its journals and records still retire through normal eviction.
+        for (&block, lease) in &mut self.visible_leases {
+            if !selected_owner_allows(block, selected) { lease.retiring = true; }
+        }
+        if !self.snapshot_mode { return; }
+        let mut owners = Vec::new();
+        for &key in blocks {
+            let (face, level, i, j) = unpack(key);
+            for tier in 1..=BLOCK_TIERS {
+                let desired = (level, face, tier, i >> (2 * tier), j >> (2 * tier));
+                let slot = block_slot(level, face, tier, desired.3, desired.4);
+                if let Some(&owner) = self.block_owner.get(&slot) {
+                    if owner != desired && !owners.contains(&owner) { owners.push(owner); }
+                }
+                if owners.len() == 64 { break; }
+            }
+            if owners.len() == 64 { break; }
+        }
+        // Preserve every existing walk cursor, but process current view
+        // aliases before old admission requests in the same bounded FIFO.
+        for owner in owners.into_iter().rev() {
+            let mut task = self.obsolete_owners.iter().position(|task| task.owner == owner)
+                .and_then(|at| self.obsolete_owners.remove(at))
+                .unwrap_or(OwnerRetirement { owner, offset: 0, selected: false });
+            // Previously visited columns may have been protected by captured
+            // demand. Revisit that prefix once when priority changes, then
+            // preserve progress throughout subsequent selected slices.
+            if !task.selected { task.offset = 0; }
+            task.selected = true;
+            if self.obsolete_owners.len() == 64 { self.obsolete_owners.pop_back(); }
+            self.obsolete_owners.push_front(task);
+        }
+    }
+
     #[cfg(test)]
     fn retire_obsolete_owner_step(&mut self, work: &mut FrameWork) -> bool {
-        self.retire_obsolete_owner_step_current(work, &mut None)
+        self.retire_obsolete_owner_step_current(work, &mut None, &SelectedOwners::default())
     }
 
     fn retire_obsolete_owner_step_current(&mut self, work: &mut FrameWork,
-        last_demand: &mut Option<(u64, bool)>) -> bool {
+        last_demand: &mut Option<(u64, bool)>, selected: &SelectedOwners) -> bool {
         let Some(task) = self.obsolete_owners.front_mut() else { return false };
         if !self.blocks.contains_key(&task.owner) {
             self.obsolete_owners.pop_front();
             return true;
         }
         let (level, face, tier, bi, bj) = task.owner;
+        let selected_conflict = selected.get(&block_slot(level, face, tier, bi, bj))
+            .is_some_and(|wanted| *wanted != task.owner);
+        task.selected &= selected_conflict;
         let size = 1u32 << (2 * tier);
         // Walk complete tier-1 groups, then their sixteen columns. A large
         // outgoing owner is often only a clipped fringe; absent groups have
@@ -1403,8 +1478,9 @@ impl Residency {
         if absent { return true; }
         let key = pack(key0(face, level, i), j as u32);
         let wanted_now = self.current_wanted(key)
-            && cached_current_geometry(&self.grid, self.current_request.as_ref(), key, last_demand);
-        if self.levels[level as usize].wanted.is_some() && !wanted_now && !self.transient_wanted(key) {
+            && cached_current_geometry(&self.grid, self.current_request.as_ref(), key, last_demand, selected);
+        if self.levels[level as usize].wanted.is_some() && !wanted_now
+            && (selected_conflict || !self.transient_wanted(key)) {
             self.levels[level as usize].pending.remove(key);
             if self.residents.contains_key(key) { self.evict(key, work); }
         }
@@ -1414,6 +1490,11 @@ impl Residency {
     /// Snapshot mode holds one full demand per level. Retire actual residents
     /// through a persistent table cursor, never millions of historical keys.
     fn apply_snapshot(&mut self, work: &mut FrameWork, out_of_time: &impl Fn() -> bool) {
+        self.apply_snapshot_selected(work, out_of_time, &SelectedOwners::default());
+    }
+
+    fn apply_snapshot_selected(&mut self, work: &mut FrameWork, out_of_time: &impl Fn() -> bool,
+        selected: &SelectedOwners) {
         let mut last_demand = None;
         while (self.diffs.iter().any(|diffs| !diffs.is_empty())
             || self.retire_finished_epoch < self.snapshot_epoch
@@ -1426,7 +1507,7 @@ impl Residency {
                 // Reserve half the same bounded work for the normal cursor
                 // until its epoch completes, then let owners use all of it.
                 if (step < 64 || self.retire_finished_epoch >= self.snapshot_epoch)
-                    && self.retire_obsolete_owner_step_current(work, &mut last_demand) { continue; }
+                    && self.retire_obsolete_owner_step_current(work, &mut last_demand, selected) { continue; }
                 // Admission only inserts current demand. Once this snapshot's
                 // pass is complete, remaining adds need no repeated scan.
                 // Lease expiry retires separately, and aliases stay above.
@@ -1472,7 +1553,7 @@ impl Residency {
                         |identity| self.blocks.get(&identity).map(|block| block.refs));
                     if skip != 0 { at += skip; continue; }
                     let (priority, key) = queued.diff.adds[at];
-                    let allowed = cached_current_geometry(&self.grid, self.current_request.as_ref(), key, &mut last_demand);
+                    let allowed = cached_current_geometry(&self.grid, self.current_request.as_ref(), key, &mut last_demand, selected);
                     if allowed && wanted.contains(&key) && !self.publishing.contains_key(&key)
                         && (!self.residents.contains_key(key) || self.initial_retries.contains(&key)) {
                         state.pending.insert(key, PendingQueue::bucket(priority));
@@ -1822,9 +1903,14 @@ impl Residency {
         // New demand may not have reached pending yet. Keep admission's
         // share even when queues were empty before applying the first diff.
         let apply_out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b.mul_f64(0.6));
-        let camera_blocks = self.camera_blocks(eye, &apply_out_of_time);
+        let mut camera_blocks = self.camera_blocks(eye, &apply_out_of_time);
+        let selected_owners = select_camera_owners(&mut camera_blocks);
+        self.prioritize_camera_owners(&camera_blocks, &selected_owners);
         self.retire_visible_leases_current(&camera_blocks, &mut work, &apply_out_of_time);
-        if !apply_out_of_time() { self.apply_queued(&mut work, &apply_out_of_time); }
+        if !apply_out_of_time() {
+            if self.snapshot_mode { self.apply_snapshot_selected(&mut work, &apply_out_of_time, &selected_owners); }
+            else { self.apply_queued(&mut work, &apply_out_of_time); }
+        }
         let t_windows = started.elapsed();
         // Window diffs may spend 60% of the CPU budget. Refresh gets at most
         // the next 10%, leaving 30% for issuing generation jobs this frame.
@@ -1909,7 +1995,8 @@ impl Residency {
             let visible_batch = key == block_key
                 && self.visible_admission.front().is_some_and(|&(level, next)|
                     level == index && next & !(3u64 | (3u64 << 32)) == key);
-            if index != top_level as usize && (visible_batch && batch_attempts < TEMPORARY_LEASES
+            let preferred = selected_owner_allows(block_key, &selected_owners);
+            if preferred && index != top_level as usize && (visible_batch && batch_attempts < TEMPORARY_LEASES
                 || self.visible_admission.is_empty() && last_batch_block != Some(block_key)) {
                 if visible_batch { batch_attempts += 1; }
                 last_batch_block = Some(block_key);
@@ -1932,7 +2019,8 @@ impl Residency {
                 }
             }
             let transient = self.transient_wanted(key);
-            let allowed = cached_current_geometry(&self.grid, self.current_request.as_ref(), key, &mut last_demand);
+            if !preferred { continue; }
+            let allowed = cached_current_geometry(&self.grid, self.current_request.as_ref(), key, &mut last_demand, &selected_owners);
             if !allowed && !transient { continue; }
             let leased = self.visible_leases.contains_key(&(key & !(3u64 | (3u64 << 32))));
             if (self.levels[index].wanted.as_ref().is_some_and(|wanted| !wanted.contains(&key))
@@ -2830,7 +2918,7 @@ mod tests {
         assert!(r.acquire_blocks(old, &mut FrameWork::default()));
         r.residents.insert(old, Resident { record: 0, blocks: true, ..Default::default() });
         r.levels[0].wanted = Some(std::sync::Arc::new([incoming].into_iter().collect()));
-        r.obsolete_owners.push_back(OwnerRetirement { owner: (0, face, 3, 15, 15), offset: 0 });
+        r.obsolete_owners.push_back(OwnerRetirement { owner: (0, face, 3, 15, 15), offset: 0, selected: false });
         assert!(r.blocks_conflict(incoming));
         let mut work = FrameWork::default();
         let mut steps = 0;
@@ -4764,6 +4852,131 @@ mod tests {
     }
 
     #[test]
+    fn current_alias_selected_replaces_live_captured_owner_and_quarantines_edit_ack() {
+        let (mut planet, mut r, old, new) = current_alias_fixture();
+        let source = r.visible_view.unwrap();
+        r.visible_leases.insert(old[0], VisibleLease {
+            origin: LeaseOrigin::Captured(source), serial: r.requested,
+            retiring: false, retired: 0, current_demand_frame: None,
+        });
+        assert!(r.source_is_current(source, VISIBLE_LEASE_FRAMES) && r.transient_wanted(old[0]));
+        assert!(r.applied_levels[0] < r.visible_leases[&old[0]].serial,
+            "the live captured owner still awaits its worker acknowledgment");
+        let (face, level, i, j) = unpack(old[0]);
+        let center = r.grid.ground_point(face, f64::from((i + 2) * (BRICK << level)),
+            f64::from((j + 2) * (BRICK << level)));
+        std::sync::Arc::make_mut(&mut planet).apply(crate::edits::Brush {
+            center: center.to_array(), ..test_brush(1.5)
+        }).unwrap();
+        r.sync_edits(&planet, &mut FrameWork::default());
+        r.urgent.clear();
+        for request in [&mut r.current_request, &mut r.last_request] {
+            let request = request.as_mut().unwrap();
+            request.outer_radius = planet.outer_radius();
+            request.planet = Some(planet.clone());
+        }
+        let previous = r.edits.alloc(2, r.capacity.edit_words).unwrap();
+        let next = r.edits.alloc(2, r.capacity.edit_words).unwrap();
+        let record = r.residents.get(old[0]).unwrap().record;
+        r.residents.get_mut(old[0]).unwrap().edit_block = Some(previous);
+        r.publishing.insert(old[0], EditPublication { record, previous: Some(previous),
+            next: Some(next), evicted: false, initial_bucket: None });
+        // Put a partially walked older request before the current alias.
+        let oldest = (0, face, 3, -8, -8);
+        r.obsolete_owners.push_back(OwnerRetirement { owner: oldest, offset: 256, selected: false });
+        let mut blocks = vec![new[0]];
+        let selected = select_camera_owners(&mut blocks);
+        r.prioritize_camera_owners(&blocks, &selected);
+        assert_ne!(r.obsolete_owners.front().unwrap().owner, oldest);
+        assert!(r.obsolete_owners.iter().any(|task| task.owner == oldest && task.offset == 256));
+        assert_eq!(r.visible_leases[&old[0]].captured_source().frame, source.frame);
+        assert_eq!(r.visible_leases[&old[0]].captured_source().at, source.at);
+        assert!(r.visible_leases[&old[0]].retiring && !r.transient_wanted(old[0]));
+        let mut retired = FrameWork::default();
+        r.apply_snapshot_selected(&mut retired, &|| false, &selected);
+        assert_eq!(retired.evictions.len(), old.len());
+        assert!(new.iter().all(|&key| !r.blocks_conflict(key)));
+        assert!(r.publishing[&old[0]].evicted);
+        for journal in [previous, next] {
+            assert!(!r.edits.free[journal.1 as usize].contains(&journal.0));
+        }
+        assert!(r.delayed_records.contains(&record), "retired records stay quarantined until a later frame");
+
+        // Fresh feedback for the same losing owner cannot refresh its stamp
+        // or reissue work before the current selected block is published.
+        r.prioritize_visible_blocks_from([(old[0] as u32, (old[0] >> 32) as u32)],
+            source.frame + 1, source.view, source.at + std::time::Duration::from_millis(1));
+        r.refresh_visible_pending(None);
+        assert!(r.visible_leases[&old[0]].retiring && !r.transient_wanted(old[0]));
+        for &key in &old { r.levels[0].pending.insert(key, 0); }
+        let eye = r.current_request.as_ref().unwrap().eye;
+        let work = r.plan(&planet, eye, 160.0, 16);
+        assert_eq!(work.job_keys, new);
+        assert!(old.iter().all(|&key| !r.residents.contains_key(key)));
+        r.complete_jobs([(old[0], 2)]);
+        for journal in [previous, next] {
+            assert!(r.edits.free[journal.1 as usize].contains(&journal.0));
+        }
+        r.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
+        table_is_exact(&r);
+        assert_eq!(planet.edits().len(), 1);
+    }
+
+    #[test]
+    fn current_alias_selected_promotion_revisits_protected_prefix_once_then_keeps_progress() {
+        let (_, mut r, old, new) = current_alias_fixture();
+        r.queue_obsolete_owners(new[0]);
+        for task in &mut r.obsolete_owners { task.offset = 8; }
+        assert!(old.iter().all(|&key| r.residents.contains_key(key)));
+        let mut blocks = vec![new[0]];
+        let selected = select_camera_owners(&mut blocks);
+        r.prioritize_camera_owners(&blocks, &selected);
+        assert!(r.obsolete_owners.iter().all(|task| task.offset == 0 && task.selected));
+        let mut work = FrameWork::default();
+        let mut last = None;
+        for _ in 0..8 {
+            assert!(r.retire_obsolete_owner_step_current(&mut work, &mut last, &selected));
+        }
+        assert_eq!(work.evictions.len(), 8, "the earlier protected prefix retires in this bounded slice");
+        assert_eq!(r.obsolete_owners.front().unwrap().offset, 8);
+        r.prioritize_camera_owners(&blocks, &selected);
+        assert_eq!(r.obsolete_owners.front().unwrap().offset, 8,
+            "continuing selected priority must not restart a partial walk every frame");
+        r.prioritize_camera_owners(&[], &SelectedOwners::default());
+        assert!(r.obsolete_owners.iter().all(|task| !task.selected),
+            "withdrawal clears priority without requiring a deadline-limited walker visit");
+        let record = r.alloc_record().unwrap();
+        assert!(r.acquire_blocks(old[0], &mut work));
+        r.residents.insert(old[0], Resident { record, blocks: true, ..Default::default() });
+        r.prioritize_camera_owners(&blocks, &selected);
+        assert_eq!(r.obsolete_owners.front().unwrap().offset, 0,
+            "a later conflicting view must revisit regenerated prefix columns");
+        r.apply_snapshot_selected(&mut work, &|| false, &selected);
+        assert_eq!(work.evictions.len(), 17);
+        assert!(new.iter().all(|&key| !r.blocks_conflict(key)));
+    }
+
+    #[test]
+    fn current_alias_selected_winner_is_coherent_and_nonconflicting_capture_stays_live() {
+        let (_, mut r, old, new) = current_alias_fixture();
+        let source = r.visible_view.unwrap();
+        let safe = new[0] + 4;
+        r.visible_leases.insert(safe, VisibleLease { origin: LeaseOrigin::Captured(source),
+            serial: r.requested, retiring: false, retired: 0, current_demand_frame: None });
+        let mut blocks = vec![new[0], old[0], safe];
+        let selected = select_camera_owners(&mut blocks);
+        assert_eq!(blocks, vec![new[0], safe], "one ranked winner owns all three slots; the losing alias cannot ping-pong");
+        assert!(!selected_owner_allows(old[0], &selected));
+        r.prioritize_camera_owners(&blocks, &selected);
+        assert!(!r.visible_leases[&safe].retiring && r.transient_wanted(safe));
+        let mut repeated = vec![new[0], old[0], safe];
+        assert_eq!(select_camera_owners(&mut repeated), selected);
+        assert_eq!(repeated, blocks);
+        assert!(selected.len() <= CAMERA_CANDIDATES * BLOCK_TIERS as usize);
+        assert!(r.obsolete_owners.len() <= 64);
+    }
+
+    #[test]
     fn current_alias_returned_and_live_transient_owners_remain_protected() {
         for transient in [false, true] {
             let (_, mut r, old, new) = current_alias_fixture();
@@ -4843,6 +5056,46 @@ mod tests {
         r.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
         table_is_exact(&r);
         assert!(keys.iter().all(|&key| !r.residents.contains_key(key)));
+    }
+
+    #[test]
+    fn camera_arrival_descends_before_worker_activation_without_reviving_capture() {
+        let (planet, mut r, _, at) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        r.levels[0].active = false;
+        let current = r.camera_blocks(eye, &|| false);
+        assert!(current.iter().any(|&key| unpack(key).1 == 0));
+        let first = current[0];
+        assert!(r.current_camera_block(first) && !r.current_captured_block(first));
+        r.prioritize_visible_blocks_from([(first as u32, (first >> 32) as u32)], 10, 7, at);
+        r.refresh_visible_pending(None);
+        assert!(r.visible_leases.is_empty() && r.levels[0].pending.is_empty(),
+            "inactive captured feedback remains rejected");
+        let work = r.plan(&planet, eye, 160.0, 16);
+        assert_eq!(work.jobs.len(), 16);
+        assert!(work.job_keys.iter().all(|&key| unpack(key).1 == 0 && r.transient_wanted(key)));
+        assert!(!r.levels[0].active && r.levels[0].wanted.as_ref().unwrap().is_empty(),
+            "Camera leases do not forge worker activation or authority");
+        assert_eq!(r.stats.camera_jobs, [16, 0, 0]);
+        r.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
+        let mut inactive = snapshot_update(3, &[]);
+        inactive.levels[0].active = false;
+        r.apply(inactive);
+        let waiting = r.plan(&planet, eye, 160.0, 0);
+        assert!(waiting.evictions.is_empty());
+        assert!(work.job_keys.iter().all(|&key| r.residents.contains_key(key) && r.transient_wanted(key)),
+            "a delayed inactive acknowledgment cannot evict current Camera terrain");
+        table_is_exact(&r);
+        let high = eye + DVec3::Y * (planet.outer_radius() + 1_000.0);
+        r.current_request.as_mut().unwrap().eye = high;
+        r.set_ground_clearance(1_000.0);
+        assert!(r.camera_blocks(high, &|| false).is_empty());
+        r.frame += 1;
+        let mut retired = FrameWork::default();
+        r.retire_visible_leases(&mut retired, &|| false);
+        assert_eq!(retired.evictions.len(), work.jobs.len());
+        assert!(work.job_keys.iter().all(|&key| !r.residents.contains_key(key)));
     }
 
     #[test]
@@ -5011,7 +5264,10 @@ mod tests {
         r.current_request.as_mut().unwrap().eye = eye;
         r.set_ground_clearance(50.0);
         r.levels[0].active = false;
-        assert!(r.camera_blocks(eye, &|| false).is_empty());
+        let current = r.camera_blocks(eye, &|| false);
+        assert!(!current.is_empty(), "current geometry can precede worker activation");
+        assert!(current.iter().all(|&key| !r.current_captured_block(key)),
+            "captured feedback still rejects inactive levels");
     }
 
     #[test]
