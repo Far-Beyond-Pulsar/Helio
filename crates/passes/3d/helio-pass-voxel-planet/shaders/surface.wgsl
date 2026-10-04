@@ -31,6 +31,7 @@ fn primary(@builtin(global_invocation_id) id: vec3<u32>) {
         t0 = t1;
         t1 = frame.lod.w;
     }
+    hit = refine_coarse_hit(r, t0, t1, hit);
     if visible_feedback_enabled() {
         let wanted_level = level_for(hit.t);
         if (hit.info & 3u) == ST_HIT && ((hit.info >> 5u) & 31u) > wanted_level {

@@ -678,3 +678,76 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
     }
     return make_hit(ST_EXHAUSTED, t, cur, normal, NONE);
 }
+
+// Recover one natural desired-level column at a final coarse primary contact.
+// This does not alter empty-space traversal or accept an interior fine cursor.
+fn refine_coarse_hit(r: Ray, t_start: f32, t_end: f32, coarse: Hit) -> Hit {
+    if (coarse.info & 3u) != ST_HIT { return coarse; }
+    let want = level_for(coarse.t);
+    if want >= ((coarse.info >> 5u) & 31u) { return coarse; }
+    let face = (coarse.info >> 2u) & 7u;
+    let fr = face_ray(face, r);
+    var contact = locate(r, fr, coarse.t, want);
+    // Retain the actual coarse DDA side at an exact contact plane/corner.
+    let delta = ((coarse.info >> 5u) & 31u) - want;
+    contact.i = clamp(contact.i, coarse.i << delta, ((coarse.i + 1) << delta) - 1);
+    contact.j = clamp(contact.j, coarse.j << delta, ((coarse.j + 1) << delta) - 1);
+    let ci = contact.i >> 3u;
+    let cj = contact.j >> 3u;
+    // CPU summary ownership is not proof of this exact GPU record's absence.
+    // Only this one hash lookup bypasses the hint; global traversal stays fast.
+    let record = find_column(column_key0(face, want, ci), bitcast<u32>(cj));
+    if record == NONE { return coarse; }
+    let col = records[record];
+    if !column_valid(col) || (col.info & INFO_HEIGHTFIELD) == 0u
+        || (col.info & INFO_TOPOLOGY) != 0u || !column_tops_fit(col) { return coarse; }
+    let i0 = ci * 8;
+    let j0 = cj * 8;
+    let ia = select(i0 + 8, i0, fr.dir.x > 0) << want;
+    let jb = select(j0 + 8, j0, fr.dir.y > 0) << want;
+    let entry_a = select(plane_t(fr, 0u, ia), -3.0e38, fr.dir.x == 0);
+    let entry_b = select(plane_t(fr, 1u, jb), -3.0e38, fr.dir.y == 0);
+    let exit_a = select(plane_t(fr, 0u, select(i0, i0 + 8, fr.dir.x > 0) << want), 3.0e38, fr.dir.x == 0);
+    let exit_b = select(plane_t(fr, 1u, select(j0, j0 + 8, fr.dir.y > 0) << want), 3.0e38, fr.dir.y == 0);
+    var t = max(t_start, max(entry_a, entry_b));
+    let end = min(t_end, min(exit_a, exit_b));
+    if t > coarse.t || t >= end || face_at(r, t) != face { return coarse; }
+    var cur = locate(r, fr, t, want);
+    // At an entry plane floor owns the outgoing cell for negative motion.
+    if t == entry_a { cur.i = select(i0 + 7, i0, fr.dir.x > 0); }
+    if t == entry_b { cur.j = select(j0 + 7, j0, fr.dir.y > 0); }
+    if (cur.i >> 3u) != ci || (cur.j >> 3u) != cj
+        || level_contains_solid(cur, record, r, t) { return coarse; }
+    var normal = 6u;
+    // A line crosses at most eight cells on each angular axis of this column.
+    // Heightfields solve the stored top directly, never walk empty radial cells.
+    for (var step = 0u; step < 17u; step++) {
+        if level_contains_solid(cur, record, r, t) {
+            return make_hit(ST_HIT, t, cur, normal, record);
+        }
+        let ta = select(plane_t(fr, 0u, select(cur.i, cur.i + 1, fr.dir.x > 0) << want), 3.0e38, fr.dir.x == 0);
+        let tb = select(plane_t(fr, 1u, select(cur.j, cur.j + 1, fr.dir.y > 0) << want), 3.0e38, fr.dir.y == 0);
+        var fraction = 0u;
+        if (col.info & INFO_RELIEF) != 0u {
+            fraction = column_relief_fraction(col, u32(cur.i & 7), u32(cur.j & 7));
+        }
+        let surface = relief_height(col, cur.i, cur.j, want, fraction);
+        let enter = relief_enter(r, surface, t);
+        let angular = min(ta, tb);
+        if enter < angular || (fraction != 0u && enter <= angular) {
+            if enter > end || enter >= 3.0e38 { return coarse; }
+            cur.k = column_top(col, u32(cur.i & 7), u32(cur.j & 7)) - 1;
+            return make_hit(ST_HIT, enter, cur, normal_code(2u, -1), record);
+        }
+        if angular >= end || angular >= 3.0e38 { return coarse; }
+        t = max(angular, t);
+        cur.k = (frame.layer_i.x + i32(floor(layer_coord(r, t)))) >> want;
+        // Angular DDA wins a simultaneous radial crossing; its companion axis
+        // stays outgoing until the following iteration, including exact corners.
+        if rising(r, t) && height_rel(r, t) == layer_height(cur.k << want) { cur.k -= 1; }
+        if ta <= tb { cur.i += fr.dir.x; normal = normal_code(0u, fr.dir.x); }
+        else { cur.j += fr.dir.y; normal = normal_code(1u, fr.dir.y); }
+        if (cur.i >> 3u) != ci || (cur.j >> 3u) != cj { return coarse; }
+    }
+    return coarse;
+}
