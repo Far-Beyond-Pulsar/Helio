@@ -408,8 +408,8 @@ pub struct Stats {
     /// not publication completions or counts of visible coherent blocks.
     pub fine_jobs: usize,
     pub far_jobs: usize,
-    /// Current selected tiles, live Camera leases and issued Camera-origin
-    /// columns, respectively, for levels 0–2. Jobs are not completions.
+    /// Current selected tiles, live Camera leases and jobs for current
+    /// selected tiles (any ownership), for levels 0–2. Jobs are not completions.
     pub camera_candidate_blocks: [u32; 3],
     pub camera_lease_blocks: [u32; 3],
     pub camera_jobs: [u32; 3],
@@ -922,10 +922,9 @@ impl Residency {
     }
 
     fn current_camera_block(&self, key: u64) -> bool {
-        self.current_captured_block(key) && self.current_request.as_ref().is_some_and(|request|
-            self.ground_clearance.is_some_and(|clearance|
-                clearance < request.lod0 * f64::from(1u32 << unpack(key).1)
-                    / (1.0 - request.lod_dither * 0.5)))
+        // Ground clearance bounds the column below the eye, not a nearby
+        // raised slope. The current window predicate uses the terrain bound.
+        self.current_captured_block(key)
     }
 
     fn protected_wanted(&self, key: u64) -> bool {
@@ -1104,54 +1103,78 @@ impl Residency {
         let ground_radial = grid.radial(eye) - clearance;
         let radial_up = grid.up(eye);
         let direction = (view.forward - radial_up * view.forward.dot(radial_up)).normalize_or_zero();
-        let Some(lower) = crate::windows::visible_focus(&grid, eye,
+        let nearest = crate::windows::visible_focus(&grid, eye,
             view.forward - view.up * view.tan_half[1], ground_radial, request.lod0 * 8.0)
-            else { return Vec::new() };
-        let nearest = grid.ground_distance(eye, lower);
+            .map_or(0.0, |lower| grid.ground_distance(eye, lower));
         let ground = eye - radial_up * clearance;
         let mut candidates = Vec::new();
+        let mut inspected = FxHashSet::default();
+        let planes = [view.forward,
+            view.forward * view.tan_half[0] + view.right,
+            view.forward * view.tan_half[0] - view.right,
+            view.forward * view.tan_half[1] + view.up,
+            view.forward * view.tan_half[1] - view.up];
         let mut covered_end = nearest;
         'levels: for level in 0..self.levels.len().min(3) {
             if !self.levels[level].active { continue; }
             let size = f64::from(BRICK << level);
             let width = grid.level_size(level as u32) * f64::from(BRICK * 4);
             let start = nearest.max(covered_end - width);
-            let mut seed = ground + direction * (start + width * 3.0);
+            let seed = ground + direction * (start + width * 3.0);
             covered_end = start + width * 6.0;
-            if !grid.is_plane() { seed = seed.normalize_or_zero() * ground_radial; }
-            let face = if grid.is_plane() { crate::grid::PLANE_FACE } else { crate::grid::face_of(seed) };
-            let Some(coords) = grid.face_coords(face, seed) else { continue };
-            let bi = (coords[0] / size).floor() as i32 / 4;
-            let bj = (coords[1] / size).floor() as i32 / 4;
-            for y in bj - 4..bj + 4 {
-                for x in bi - 4..bi + 4 {
-                    if out_of_time() { break 'levels; }
-                    if x < 0 || y < 0 { continue; }
-                    let block = pack(key0(face, level as u32, x * 4), (y * 4) as u32);
-                    if !self.current_camera_block(block) { continue; }
-                    let mut point = grid.ground_point(face, f64::from(x * 4 + 2) * size,
-                        f64::from(y * 4 + 2) * size);
-                    if grid.is_plane() { point.y = ground_radial; }
-                    else { point = point.normalize_or_zero() * ground_radial; }
-                    let relative = point - eye;
-                    let depth = relative.dot(view.forward);
-                    // Tile extent plus one tile of radial slope variation;
-                    // this ranks demand only, never clips rendered terrain.
-                    let bound = width * 1.75;
-                    if depth + bound <= 0.0
-                        || relative.dot(view.right).abs() > depth.max(0.0) * view.tan_half[0] + bound
-                        || relative.dot(view.up).abs() > depth.max(0.0) * view.tan_half[1] + bound { continue; }
-                    let distance2 = relative.length_squared().max(0.01);
-                    let projected_cell = request.lod0 * f64::from(1u32 << level) / distance2.sqrt();
-                    let oversized = if level == 0 { 1.0 } else { (projected_cell / 4.0).max(1.0) };
-                    // Screen coverage per issued tile; oversized coarser cells
-                    // cannot displace visibly resolved finer tiles.
-                    let benefit = width * width / (distance2 * oversized.powi(4));
-                    candidates.push((benefit, block));
+            let reach = request.lod0 * f64::from(1u32 << level) / (1.0 - request.lod_dither * 0.5);
+            let radial_lo = request.planet.as_ref().map_or(ground_radial, |planet| planet.inner_radius())
+                .max(grid.radial(eye) - reach);
+            let radial_hi = request.outer_radius.min(grid.radial(eye) + reach);
+            if radial_lo > radial_hi { continue; }
+            // Keep the flat lower-edge strip and a small near strip: a raised
+            // ridge can enter the view before that flat intersection.
+            let near = ground + direction * (width * 2.0);
+            for (mut seed, half_x, half_y) in [(seed, 4, 4), (near, 2, 4)] {
+                if !grid.is_plane() { seed = seed.normalize_or_zero() * ground_radial; }
+                let face = if grid.is_plane() { crate::grid::PLANE_FACE } else { crate::grid::face_of(seed) };
+                let Some(coords) = grid.face_coords(face, seed) else { continue };
+                let bi = (coords[0] / size).floor() as i32 / 4;
+                let bj = (coords[1] / size).floor() as i32 / 4;
+                for y in bj - half_y..bj + half_y {
+                    for x in bi - half_x..bi + half_x {
+                        if out_of_time() { break 'levels; }
+                        if x < 0 || y < 0 { continue; }
+                        let block = pack(key0(face, level as u32, x * 4), (y * 4) as u32);
+                        if !inspected.insert(block) || !self.current_camera_block(block) { continue; }
+                        let mut point = grid.ground_point(face, f64::from(x * 4 + 2) * size,
+                            f64::from(y * 4 + 2) * size);
+                        if grid.is_plane() { point.y = ground_radial; }
+                        else { point = point.normalize_or_zero() * ground_radial; }
+                        let relative = point - eye;
+                        let radial_up = grid.up(point);
+                        let midpoint = point + radial_up * ((radial_lo + radial_hi) * 0.5 - ground_radial);
+                        let height = (radial_hi - radial_lo) * 0.5;
+                        // Test the possible vertical interval, clipped to this
+                        // level's reach. Scheduling never clips rendered terrain.
+                        let bound = width * 1.75;
+                        if planes.iter().any(|normal| normal.dot(midpoint - eye)
+                            + height * normal.dot(radial_up).abs()
+                            + bound * (*normal - radial_up * normal.dot(radial_up)).length() < 0.0) { continue; }
+                        let distance2 = relative.length_squared().max(0.01);
+                        let projected_cell = request.lod0 * f64::from(1u32 << level) / distance2.sqrt();
+                        let oversized = if level == 0 { 1.0 } else { (projected_cell / 4.0).max(1.0) };
+                        // Screen coverage per issued tile; oversized coarser cells
+                        // cannot displace visibly resolved finer tiles.
+                        let benefit = width * width / (distance2 * oversized.powi(4));
+                        candidates.push((benefit, block));
+                    }
                 }
             }
         }
-        candidates.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+        candidates.sort_unstable_by(|a, b| unpack(a.1).1.cmp(&unpack(b.1).1)
+            .then_with(|| b.0.total_cmp(&a.0)));
+        let mut selected = [0; 3];
+        candidates.retain(|&(_, key)| {
+            let count = &mut selected[unpack(key).1 as usize];
+            *count += 1;
+            *count <= 8 * 8
+        });
         candidates.truncate(CAMERA_CANDIDATES);
         candidates.into_iter().map(|(_, block)| block).collect()
     }
@@ -1194,21 +1217,21 @@ impl Residency {
             }
         }
         if candidates.is_empty() { return; }
-        // Stable captured fine ranks win, even if an older far rank was at
-        // the FIFO head. Reuse the same bounded FIFO for current camera work.
-        let (mut fine, mut remaining): (VecDeque<_>, VecDeque<_>) =
-            std::mem::take(&mut self.visible_admission).into_iter().partition(|&(level, key)|
-                level < 3 && !self.visible_leases.get(&(key & !(3u64 | (3u64 << 32))))
-                    .is_some_and(|lease| matches!(lease.origin, LeaseOrigin::Camera)));
-        let ranked: FxHashSet<_> = fine.iter().copied().collect();
+        // Current view ranks must replace the previous view's ordinary ranks,
+        // which have no lease origin. They remain queued at their normal
+        // bucket instead of masquerading as permanently captured fine work.
+        let mut remaining = std::mem::take(&mut self.visible_admission);
         let current: FxHashSet<_> = candidates.iter().copied().collect();
-        remaining.retain(|entry| !current.contains(entry));
+        remaining.retain(|entry| !current.contains(entry)
+            && self.visible_leases.get(&(entry.1 & !(3u64 | (3u64 << 32))))
+                .is_some_and(|lease| matches!(lease.origin, LeaseOrigin::Captured(_))));
+        let mut fine = VecDeque::new();
         for candidate in candidates {
-            if ranked.contains(&candidate) { continue; }
             if fine.len() == VISIBLE_ADMISSION_COLUMNS { break; }
             fine.push_back(candidate);
         }
-        // Dropping a far rank leaves its ordinary pending job intact.
+        // Captured clocks and pending ownership are unchanged. Their ranks
+        // follow current demand, so old L2 work cannot hold up current L0.
         remaining.truncate((VISIBLE_ADMISSION_COLUMNS).saturating_sub(fine.len()));
         fine.append(&mut remaining);
         self.visible_admission = fine;
@@ -1986,9 +2009,9 @@ impl Residency {
                 stats.camera_lease_blocks[unpack(block).1 as usize] += 1;
             }
         }
+        let selected_camera: FxHashSet<_> = camera_blocks.iter().copied().collect();
         for &key in &work.job_keys {
-            if self.visible_leases.get(&(key & !(3u64 | (3u64 << 32))))
-                .is_some_and(|lease| matches!(lease.origin, LeaseOrigin::Camera)) {
+            if selected_camera.contains(&(key & !(3u64 | (3u64 << 32)))) {
                 stats.camera_jobs[unpack(key).1 as usize] += 1;
             }
         }
@@ -4662,6 +4685,44 @@ mod tests {
     }
 
     #[test]
+    fn camera_arrival_new_ordinary_view_replaces_old_ranks_and_precedes_captured_coarse() {
+        let (planet, mut r, _, at) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        let blocks = r.camera_blocks(eye, &|| false);
+        let (old, old_count) = r.visible_columns(blocks[0]).unwrap();
+        let (new, new_count) = r.visible_columns(blocks[1]).unwrap();
+        let wanted: FxHashSet<_> = old[..old_count].iter().chain(&new[..new_count]).copied().collect();
+        r.levels[0].wanted = Some(std::sync::Arc::new(wanted));
+        r.refresh_camera_pending(&blocks[..1], None);
+        assert_eq!(r.visible_admission.len(), old_count);
+        assert!(r.visible_leases.is_empty(), "ordinary Camera ranks have no lease origin");
+
+        let captured = pack(key0(crate::grid::PLANE_FACE, 2, 128), 128);
+        let (captured_keys, captured_count) = r.visible_columns(captured).unwrap();
+        let source = VisibleStamp { frame: 10, view: 7, at };
+        r.visible_leases.insert(captured, VisibleLease { origin: LeaseOrigin::Captured(source),
+            serial: 3, retiring: false, retired: 0, current_demand_frame: Some(r.frame) });
+        for &key in &captured_keys[..captured_count] {
+            r.levels[2].pending.insert(key, 0);
+            r.visible_admission.push_back((2, key));
+        }
+        r.refresh_camera_pending(&blocks[1..2], None);
+        let ranks: Vec<_> = r.visible_admission.iter().copied().collect();
+        assert_eq!(&ranks[..new_count], &new[..new_count].iter().map(|&key| (0, key)).collect::<Vec<_>>());
+        assert_eq!(&ranks[new_count..], &captured_keys[..captured_count].iter().map(|&key| (2, key)).collect::<Vec<_>>());
+        assert!(old[..old_count].iter().all(|key| r.levels[0].pending.at.contains_key(key)));
+        assert_eq!(r.visible_leases[&captured].captured_source().at, source.at);
+        assert_eq!(r.visible_leases[&captured].captured_source().frame, source.frame);
+        assert!(new[..new_count].iter().all(|&key| r.current_wanted(key)));
+        assert!(!r.visible_leases.contains_key(&blocks[1]));
+        let work = r.plan(&planet, eye, 160.0, 16);
+        assert_eq!(work.jobs.len(), 16);
+        assert!(work.job_keys.iter().all(|&key| r.current_wanted(key)));
+        assert_eq!(r.stats.camera_jobs, [16, 0, 0], "current ordinary jobs count despite having no Camera lease");
+    }
+
+    #[test]
     fn camera_arrival_expiry_preserves_edited_inflight_publication() {
         let (mut planet, mut r, _, _) = current_bridge_fixture();
         let eye = r.current_request.as_ref().unwrap().eye;
@@ -4751,12 +4812,16 @@ mod tests {
         r.refresh_visible_pending(None);
         let stamp = r.visible_leases[&block].captured_source();
         r.refresh_camera_pending(&before, None);
-        assert_eq!(r.visible_admission.front(), Some(&(0, block)));
+        let first = r.visible_admission.front().unwrap().1;
+        assert_eq!(first & !(3u64 | (3u64 << 32)), before[0]);
         assert_eq!(r.visible_leases[&block].captured_source().at, stamp.at);
         assert_eq!(r.visible_leases[&block].captured_source().frame, stamp.frame);
+        let high = eye + DVec3::Y * (r.current_request.as_ref().unwrap().outer_radius + 1_000.0);
+        r.current_request.as_mut().unwrap().eye = high;
         r.set_ground_clearance(1_000.0);
-        assert!(r.camera_blocks(eye, &|| false).is_empty());
-        r.set_ground_clearance(10.0);
+        assert!(r.camera_blocks(high, &|| false).is_empty());
+        r.current_request.as_mut().unwrap().eye = eye;
+        r.set_ground_clearance(50.0);
         r.levels[0].active = false;
         assert!(r.camera_blocks(eye, &|| false).is_empty());
     }
@@ -4793,7 +4858,42 @@ mod tests {
         r.refresh_camera_pending(&down, None);
         assert!(r.visible_leases.values().all(|lease| matches!(lease.origin, LeaseOrigin::Camera)));
         r.set_camera_view(DVec3::Y, DVec3::Z, [0.65, 0.414]);
+        r.current_request.as_mut().unwrap().outer_radius = 0.0;
         assert!(r.camera_blocks(eye, &|| false).is_empty());
+    }
+
+    #[test]
+    fn camera_arrival_raised_visible_tile_survives_flat_proxy_and_missed_ground() {
+        for rising_view in [false, true] {
+            let (mut planet, mut r, _, _) = current_bridge_fixture();
+            let eye = DVec3::new(0.0, 50.0, 0.0);
+            let actual = DVec3::new(8.0, if rising_view { 56.0 } else { 46.0 }, 0.0);
+            std::sync::Arc::make_mut(&mut planet).apply(crate::edits::Brush {
+                center: actual.to_array(), ..test_brush(2.0)
+            }).unwrap();
+            let request = r.current_request.as_mut().unwrap();
+            request.eye = eye;
+            request.lod0 = 30.0;
+            request.outer_radius = planet.outer_radius();
+            request.planet = Some(planet.clone());
+            r.set_ground_clearance(50.0);
+            r.set_camera_view(DVec3::new(1.0, if rising_view { 0.8 } else { -0.17 }, 0.0), DVec3::Y, [0.65, 0.414]);
+            let view = r.camera_view.unwrap();
+            let relative = actual - eye;
+            assert!(relative.dot(view.forward) > 0.0
+                && relative.dot(view.up).abs() < relative.dot(view.forward) * view.tan_half[1]);
+            let proxy = DVec3::new(actual.x, 0.0, actual.z) - eye;
+            assert!(proxy.dot(view.up).abs() > proxy.dot(view.forward) * view.tan_half[1] + 3.2 * 1.75);
+            if rising_view {
+                assert!(crate::windows::visible_focus(&r.grid, eye,
+                    view.forward - view.up * view.tan_half[1], 0.0, 240.0).is_none());
+            }
+            let (cell, _) = r.grid.locate(actual);
+            let block = pack(key0(cell.face, 0, (cell.i >> 3) & !3), ((cell.j >> 3) & !3) as u32);
+            let current = r.camera_blocks(eye, &|| false);
+            assert!(current.len() <= CAMERA_CANDIDATES && current.contains(&block));
+            assert!(r.current_camera_block(block), "under-eye clearance is not a distance bound on a raised ridge");
+        }
     }
 
     #[test]
@@ -4832,6 +4932,8 @@ mod tests {
         r.levels[2].active = true;
         let current = r.camera_blocks(eye, &|| false);
         assert!(current.len() <= CAMERA_CANDIDATES);
+        assert!(current.windows(2).all(|pair| unpack(pair[0]).1 <= unpack(pair[1]).1),
+            "current fine demand must precede a larger coarser tile");
         assert!(current.iter().any(|&key| unpack(key).1 == 0));
         assert!(current.iter().any(|&key| unpack(key).1 > 0), "projected coverage cannot spend every slot on L0");
         let view = r.camera_view.unwrap();

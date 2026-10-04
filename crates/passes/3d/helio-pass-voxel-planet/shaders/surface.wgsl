@@ -448,7 +448,7 @@ fn soil_lip_coverage(v: f32, lip: f32, pixel: f32, distance: f32, ray: vec3<f32>
     let point = select(0.0, 1.0, v < 1.0 - lip);
     if !allowed { return point; }
     let span = radial_material_span(pixel, distance, ray, up, normal) / radial_size;
-    let weight = detail_filter_weight(1.0 / max(span, 0.000001));
+    let weight = detail_filter_weight((1.0 - lip) / max(span, 0.000001));
     if weight <= 0.0 { return point; }
     let lo = max(v - 0.5 * span, 0.0);
     let hi = min(v + 0.5 * span, 1.0);
@@ -578,11 +578,11 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let normal_filter_w = select(coarse_w, base_filter_w * relief_face_w, FAR_RELIEF && frame.hints.z != 0u);
     let smooth_w = select(normal_filter_w, 0.0, (c.info & INFO_TOPOLOGY) != 0u);
     // A grazing face can have subpixel area while its long edge is resolved.
-    // Filter pigment along its compressed axis, but retain the face normal
-    // and occlusion until the authored cell itself becomes subpixel.
+    // Keep the resolved face normal. Pigment and corner occlusion can alias
+    // along the compressed axis even while that face's long edge is resolved.
     let shade_smooth_w = smooth_w;
     let shade_canonical_w = canonical_w;
-    let ao_appearance_w = appearance_w;
+    let ao_appearance_w = max(appearance_w, detail_filter_weight(size / pixel * projection.x));
     var fallback_normal = vec3<f32>(0.0);
     var fallback_slope = 0.0;
     var fallback_shade_normal = vec3<f32>(0.0);
