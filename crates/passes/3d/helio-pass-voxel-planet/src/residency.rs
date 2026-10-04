@@ -1302,6 +1302,13 @@ impl Residency {
             .unwrap_or_else(|| view.up - radial_up * view.up.dot(radial_up));
         let side = direction.cross(radial_up).normalize_or_zero();
         let ground = eye - radial_up * clearance;
+        let bottom = view.forward - view.up * view.tan_half[1];
+        let downward = -bottom.dot(radial_up);
+        let entry_reach = (downward > 0.0).then(|| [-1.0, 0.0, 1.0].into_iter().map(|x| {
+            let ray = bottom + view.right * (view.tan_half[0] * x);
+            clearance.max(0.0) * (ray - radial_up * ray.dot(radial_up)).length()
+                / (-ray.dot(radial_up)).max(downward * 0.25)
+        }).fold(0.0, f64::max));
         let planes = [view.forward,
             view.forward * view.tan_half[0] + view.right,
             view.forward * view.tan_half[0] - view.right,
@@ -1326,8 +1333,14 @@ impl Residency {
             let radial_hi = request.outer_radius.min(grid.radial(eye) + reach);
             if radial_lo > radial_hi { continue; }
             let mut blocks = Vec::new();
-            if clearance.abs() <= far + tile_radius {
-                let radius = ((far + tile_radius).powi(2) - clearance.powi(2)).max(0.0).sqrt();
+            // A ray starts in air columns before its first ground hit. Discover
+            // that small swept corridor first, so the fixed 512-probe ceiling
+            // cannot omit the traversal dependencies behind the ground wedge.
+            for corridor in [true, false] {
+                if corridor && entry_reach.is_none() { continue; }
+                if clearance.abs() > far + tile_radius { continue; }
+                let radius = if corridor { entry_reach.unwrap().min(far) + tile_radius }
+                    else { ((far + tile_radius).powi(2) - clearance.powi(2)).max(0.0).sqrt() };
                 let circumscribed = radius / (std::f64::consts::PI / 8.0).cos();
                 let mut polygon: Vec<_> = (0..8).map(|i| {
                     let a = (f64::from(i) + 0.5) * std::f64::consts::FRAC_PI_4;
@@ -1337,7 +1350,8 @@ impl Residency {
                 for normal in planes {
                     clip(&mut polygon, [normal.dot(direction), normal.dot(side)],
                         normal.dot(ground - eye) + tile_radius * normal.length()
-                            + curvature * normal.dot(radial_up).abs());
+                            + curvature * normal.dot(radial_up).abs()
+                            + if corridor { normal.dot(radial_up).max(0.0) * clearance.max(0.0) } else { 0.0 });
                 }
                 for &face in grid.faces() {
                     if polygon.is_empty() { break; }
@@ -1399,26 +1413,33 @@ impl Residency {
                 let ground_visible = distance - tile_radius <= far && distance + tile_radius >= near
                     && planes.iter().all(|normal| normal.dot(relative)
                         + tile_radius * (*normal - up * normal.dot(up)).length() >= 0.0);
+                let horizontal = (point - ground - radial_up * (point - ground).dot(radial_up)).length();
+                let entry = entry_reach.is_some_and(|reach| horizontal - tile_radius <= reach.min(far))
+                    && planes.iter().all(|normal| normal.dot(relative)
+                        + normal.dot(up).max(0.0) * clearance.max(0.0)
+                        + tile_radius * (*normal - up * normal.dot(up)).length() >= 0.0);
                 let midpoint = point + up * ((radial_lo + radial_hi) * 0.5 - ground_radial);
                 let height = (radial_hi - radial_lo) * 0.5;
-                if !ground_visible && planes.iter().any(|normal| normal.dot(midpoint - eye)
+                if !entry && !ground_visible && planes.iter().any(|normal| normal.dot(midpoint - eye)
                     + height * normal.dot(up).abs() + width * 1.75
                         * (*normal - up * normal.dot(up)).length() < 0.0) { continue; }
                 let benefit = width * width / distance.powi(2).max(0.01);
-                candidates.push((ground_visible, benefit, block));
+                candidates.push((if entry { 2u8 } else { u8::from(ground_visible) }, benefit, block));
             }
         }
         candidates.sort_unstable_by(|a, b| unpack(a.2).1.cmp(&unpack(b.2).1)
             .then_with(|| b.0.cmp(&a.0)).then_with(|| b.1.total_cmp(&a.1)));
         let mut ground: [Vec<u64>; 3] = std::array::from_fn(|_| Vec::new());
         let mut raised: [Vec<u64>; 3] = std::array::from_fn(|_| Vec::new());
-        for (visible, _, key) in candidates {
+        let mut entry: [Vec<u64>; 3] = std::array::from_fn(|_| Vec::new());
+        for (class, _, key) in candidates {
             let band = unpack(key).1 as usize - base;
-            let list = if visible { &mut ground[band] } else { &mut raised[band] };
-            if list.len() < if visible { 160 } else { 8 } { list.push(key); }
+            let (list, cap) = match class { 2 => (&mut entry[band], 64),
+                1 => (&mut ground[band], 160), _ => (&mut raised[band], 8) };
+            if list.len() < cap { list.push(key); }
         }
         let mut selected = Vec::with_capacity(CAMERA_CANDIDATES);
-        for bands in [&ground, &raised] {
+        for bands in [&entry, &ground, &raised] {
             for row in 0..bands.iter().map(Vec::len).max().unwrap_or(0) {
                 for band in bands {
                     if selected.len() == CAMERA_CANDIDATES { break; }
@@ -2074,8 +2095,8 @@ impl Residency {
         }
         let mut column_buckets = [bucket; 16];
         for (member, &key) in keys.iter().enumerate() {
-            if (!transient && !self.current_wanted(key)) || self.residents.contains_key(key)
-                || self.initial_retries.contains(&key) || self.publishing.contains_key(&key) {
+            if self.initial_retries.contains(&key) || self.publishing.contains_key(&key)
+                || (!transient && !self.current_wanted(key)) || self.residents.contains_key(key) {
                 return false;
             }
             if key != selected {
@@ -2170,6 +2191,8 @@ impl Residency {
     pub fn plan(&mut self, planet: &std::sync::Arc<Planet>, eye: DVec3, lod0: f64, budget: usize) -> FrameWork {
         self.frame = self.frame.wrapping_add(1);
         let started = std::time::Instant::now();
+        let trace_ms: Option<f64> = std::env::var("HELIO_VOXEL_PLAN_TRACE").ok().map(|v| v.parse().unwrap_or(10.0));
+        let trace_admission = trace_ms.is_some() && self.frame % 30 == 0;
         let budget_time = self.cpu_budget;
         let out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b);
         let mut work = FrameWork::default();
@@ -2259,6 +2282,8 @@ impl Residency {
         let t_apply = started.elapsed();
         let t_near = t_windows + (t_apply - t_visible);
         // Urgent edit regenerations first.
+        let urgent_count = self.urgent.len();
+        let urgent_started = trace_admission.then(std::time::Instant::now);
         let mut urgent = std::mem::take(&mut self.urgent);
         urgent.sort_unstable();
         urgent.dedup();
@@ -2301,6 +2326,7 @@ impl Residency {
             work.job_keys.push(key);
         }
         self.urgent = deferred_urgent;
+        let urgent_time = urgent_started.map_or(std::time::Duration::ZERO, |at| at.elapsed());
         // Merge pending windows by normalized distance; the coarsest level
         // (global coverage) always goes first.
         let top_level = self.grid.levels() - 1;
@@ -2319,38 +2345,56 @@ impl Residency {
         let mut batched_columns = 0;
         let mut batch_attempts = 0;
         let mut last_batch_block = None;
+        let mut pop_time = std::time::Duration::ZERO;
+        let mut batch_time = std::time::Duration::ZERO;
+        let mut stop_reason = "queue_empty";
+        let mut stop_key = None;
         while work.jobs.len() < budget {
             steps += 1;
             if (steps == 1 || steps % 64 == 0) && out_of_time() {
+                stop_reason = "frame_deadline";
                 break;
             }
-            let Some((index, key, bucket)) = pop_pending(&mut self.levels, top_level,
-                &mut self.visible_admission, &mut pending_selection, admission_deadline) else { break };
+            let pop_started = trace_admission.then(std::time::Instant::now);
+            let next = pop_pending(&mut self.levels, top_level,
+                &mut self.visible_admission, &mut pending_selection, admission_deadline);
+            pop_time += pop_started.map_or(std::time::Duration::ZERO, |at| at.elapsed());
+            let Some((index, key, bucket)) = next else {
+                if out_of_time() { stop_reason = "pop_deadline"; }
+                break;
+            };
+            stop_key = Some(key);
             admission_attempts += 1;
             let block_key = key & !(3u64 | (3u64 << 32));
             let visible_batch = key == block_key
                 && self.visible_admission.front().is_some_and(|&(level, next)|
                     level == index && next & !(3u64 | (3u64 << 32)) == key);
             let preferred = selected_owner_allows(block_key, &selected_owners);
-            if preferred && index != top_level as usize && (visible_batch && batch_attempts < TEMPORARY_LEASES
+            // Retried/in-flight heads cannot be sixteen new records. Reuse
+            // their exact scalar path before an impossible batch preflight.
+            if preferred && !self.initial_retries.contains(&key) && !self.publishing.contains_key(&key)
+                && index != top_level as usize && (visible_batch && batch_attempts < TEMPORARY_LEASES
                 || self.visible_admission.is_empty() && last_batch_block != Some(block_key)) {
                 if visible_batch { batch_attempts += 1; }
                 last_batch_block = Some(block_key);
+                let batch_started = trace_admission.then(std::time::Instant::now);
                 let admitted = if visible_batch {
                     self.admit_visible_block(planet, index, key, bucket, budget, admission_deadline, &mut work)
                 } else {
                     self.admit_pending_block(planet, index, key, bucket, budget, admission_deadline, false, &mut work)
                 };
+                batch_time += batch_started.map_or(std::time::Duration::ZERO, |at| at.elapsed());
                 if admitted {
                     admission_attempts += 15;
                     batched_columns += 16;
                     last_summary_check = None;
-                    if out_of_time() { break; }
+                    if out_of_time() { stop_reason = "batch_commit_deadline"; break; }
                     continue;
                 }
                 if out_of_time() {
                     self.levels[index].pending.insert(key, bucket);
                     if visible_batch { self.visible_admission.push_front((index, key)); }
+                    stop_reason = "batch_preflight_deadline";
                     break;
                 }
             }
@@ -2364,7 +2408,7 @@ impl Residency {
                 continue;
             }
             let retry = self.initial_retries.contains(&key);
-            if self.residents.contains_key(key) && !retry {
+            if !retry && self.residents.contains_key(key) {
                 continue;
             }
             let requeue = |this: &mut Self| {
@@ -2393,11 +2437,13 @@ impl Residency {
             let record = if retry { Some(self.residents.get(key).unwrap().record) } else { self.alloc_record() };
             let Some(record) = record else {
                 requeue(self);
+                stop_reason = "record_capacity";
                 break;
             };
             let Ok(block) = self.edit_list(planet, key, &mut work) else {
                 if !retry { self.free_records.push(record); }
                 requeue(self);
+                stop_reason = "edit_capacity";
                 break;
             };
             // Columns always become resident; one whose summary blocks alias
@@ -2433,6 +2479,7 @@ impl Residency {
             self.queue_obsolete_owners(key);
             self.levels[index].pending.insert(key, bucket);
         }
+        if work.jobs.len() >= budget { stop_reason = "job_budget"; }
         self.dirty_detached_publications(&mut work);
         let t_admission = started.elapsed();
         // Capacity-blocked admission also reaches this cleanup. Evicted record
@@ -2442,7 +2489,41 @@ impl Residency {
             else { self.apply_queued(&mut work, &out_of_time); }
         }
         let background = started.elapsed() - t_admission;
-        let trace_ms: Option<f64> = std::env::var("HELIO_VOXEL_PLAN_TRACE").ok().map(|v| v.parse().unwrap_or(10.0));
+        if trace_admission && trace_ms.is_some_and(|ms| started.elapsed().as_secs_f64() * 1e3 > ms) {
+            let key = stop_key.unwrap_or(0);
+            let mut attached = [0usize; 3];
+            let mut missing = [0usize; 3];
+            for (&slot, &owner) in &selected_owners {
+                let tier = owner.2 as usize - 1;
+                if self.block_owner.get(&slot) == Some(&owner) { attached[tier] += 1; }
+                else { missing[tier] += 1; }
+            }
+            let detached_full = camera_blocks.iter().filter(|&&key| {
+                let (face, level, i, j) = unpack(key);
+                let owner = (level, face, 1, i >> 2, j >> 2);
+                self.blocks.get(&owner).is_some_and(|block| block.refs == 16)
+                    && self.block_owner.get(&block_slot(level, face, 1, i >> 2, j >> 2)) != Some(&owner)
+            }).count();
+            let (entry_cell, _) = self.grid.locate(eye);
+            let entry_base = self.camera_base_level() as u32;
+            let mut entry_refs = [0u32; 3];
+            let mut entry_attached = [false; 3];
+            let mut entry_selected = [false; 3];
+            for band in 0..3 {
+                let level = entry_base + band as u32;
+                let (i, j) = ((entry_cell.i >> (3 + level)) & !3, (entry_cell.j >> (3 + level)) & !3);
+                let block = pack(key0(entry_cell.face, level, i), j as u32);
+                let owner = (level, entry_cell.face, 1, i >> 2, j >> 2);
+                entry_refs[band] = self.blocks.get(&owner).map_or(0, |state| state.refs);
+                entry_attached[band] = self.block_owner.get(&block_slot(level, entry_cell.face, 1, i >> 2, j >> 2)) == Some(&owner);
+                entry_selected[band] = camera_blocks.contains(&block);
+            }
+            eprintln!("PLAN_ADMISSION_TRACE urgent_count {urgent_count} urgent_remaining {} urgent_ms {:.3} pop_ms {:.3} batch_ms {:.3} fifo_remaining {} stop {stop_reason} level {} key {key:#018x} initial_retry {} resident {} publishing {} free_records {} next_record {} record_capacity {} selected_attached {attached:?} selected_missing {missing:?} detached_full_camera {detached_full} entry_selected {entry_selected:?} entry_refs {entry_refs:?} entry_attached {entry_attached:?}",
+                self.urgent.len(), urgent_time.as_secs_f64() * 1e3, pop_time.as_secs_f64() * 1e3,
+                batch_time.as_secs_f64() * 1e3, self.visible_admission.len(), unpack(key).1,
+                self.initial_retries.contains(&key), self.residents.contains_key(key), self.publishing.contains_key(&key),
+                self.free_records.len(), self.next_record, self.capacity.records);
+        }
         if trace_ms.is_some_and(|ms| started.elapsed().as_secs_f64() * 1e3 > ms) {
             eprintln!(
                 "PLAN_TRACE edits {:.2} drain {:.2} apply {:.2} admit {:.2} ms jobs {} evictions {} queued_diffs {} steps {steps} queued_bytes {} queued_ops {} wanted_capacity {} admission_attempts {admission_attempts} alias_deferred {alias_deferred} publication_deferred {publication_deferred} batched_columns {batched_columns}",
@@ -5809,6 +5890,39 @@ mod tests {
     }
 
     #[test]
+    fn admission_retry_head_reuses_exact_record_before_large_ordinary_queue() {
+        let (planet, mut r, _, _) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        let block = r.camera_blocks(eye, &|| false)[0];
+        let (keys, count) = r.visible_columns(block).unwrap();
+        assert_eq!(count, 16);
+        r.levels[0].wanted = Some(std::sync::Arc::new(keys.into_iter().collect()));
+        for &key in &keys {
+            let record = r.alloc_record().unwrap();
+            assert!(r.acquire_blocks(key, &mut FrameWork::default()));
+            r.residents.insert(key, Resident { record, blocks: true, ..Default::default() });
+        }
+        let record = r.residents.get(keys[0]).unwrap().record;
+        r.initial_retries.insert(keys[0]);
+        r.levels[0].pending.insert(keys[0], 0);
+        r.visible_admission.extend(keys.map(|key| (0, key)));
+        for j in 0..200 {
+            for i in 0..200 {
+                r.levels[3].pending.insert(pack(key0(crate::grid::PLANE_FACE, 3, i), j as u32), BUCKETS - 1);
+            }
+        }
+        let work = r.plan(&planet, eye, 160.0, 16);
+        assert_eq!(work.job_keys.first(), Some(&keys[0]), "a known retry head must reach its scalar record reuse before ordinary work");
+        assert_eq!(work.jobs[0].record, record);
+        assert_eq!(r.publishing[&keys[0]].record, record);
+        assert!(!r.initial_retries.contains(&keys[0]));
+        assert!(work.jobs.len() <= 16);
+        assert_eq!(r.levels[3].pending.len(), 40_000, "visible retry priority does not consume the ordinary backlog");
+        table_is_exact(&r);
+    }
+
+    #[test]
     fn pool_pressure_success_keeps_older_initial_retry_until_it_resolves() {
         let (planet, mut r, _, current) = current_alias_fixture();
         let eye = r.current_request.as_ref().unwrap().eye;
@@ -6503,8 +6617,10 @@ mod tests {
             let (face, level, i, j) = unpack(key);
             let point = r.grid.ground_point(face, f64::from((i + 2) * (BRICK << level)),
                 f64::from((j + 2) * (BRICK << level)));
-            (point - eye).dot(view.forward) > 0.0
-        }), "behind-eye/offscreen under-camera tiles do not consume the cap");
+            let width = r.grid.level_size(level) * f64::from(BRICK * 4);
+            (point - eye).dot(view.forward) + width * std::f64::consts::FRAC_1_SQRT_2
+                + view.forward.dot(r.grid.up(eye)).max(0.0) * 50.0 >= 0.0
+        }), "unrelated behind-eye tiles stay outside the swept entry corridor");
         let block = *before.last().unwrap();
         r.visible_admission.push_back((3, pack(key0(crate::grid::PLANE_FACE, 3, 128), 128)));
         r.prioritize_visible_blocks_from([(block as u32, (block >> 32) as u32)], 10, 7, at);
@@ -6538,7 +6654,13 @@ mod tests {
         r.set_ground_clearance(10.0);
         let current = r.camera_blocks(eye, &|| false);
         r.refresh_camera_pending(&current, None);
-        let old = current[0];
+        // Entry air columns stay needed after a turn. Use a forward ground
+        // tile beyond that corridor to exercise real selection departure.
+        let old = *current.iter().find(|&&key| {
+            let (face, level, i, j) = unpack(key);
+            level == 0 && r.grid.ground_point(face, f64::from((i + 2) * BRICK),
+                f64::from((j + 2) * BRICK)).x - eye.x > 30.0
+        }).expect("forward ground tile outside the entry corridor");
         assert!(r.current_camera_block(old));
         r.set_camera_view(DVec3::new(-1.0, -0.17, 0.0), DVec3::Y, [0.65, 0.414]);
         let turned = r.camera_blocks(eye, &|| false);
@@ -6655,6 +6777,39 @@ mod tests {
         r.set_camera_view(DVec3::new(pitch.cos(), pitch.sin(), 0.0), DVec3::Y,
             [tan_y * 1196.0 / 729.0, tan_y]);
         (planet, r, eye)
+    }
+
+    #[test]
+    fn camera_entry_corridor_contains_native_air_ray_tiles_before_ground() {
+        let (_, r, eye) = camera_ground_band_fixture(9.6);
+        let blocks = r.camera_blocks(eye, &|| false);
+        let view = r.camera_view.unwrap();
+        let bottom = view.forward - view.up * view.tan_half[1];
+        let first_ground = 9.6 / -bottom.y;
+        assert!((14.0..20.0).contains(&(first_ground * bottom.x)));
+        let tile = |point: DVec3| {
+            let (cell, _) = r.grid.locate(point);
+            pack(key0(cell.face, 0, (cell.i >> 3) & !3), ((cell.j >> 3) & !3) as u32)
+        };
+        let origin = tile(eye);
+        assert!(blocks.contains(&origin), "the fast trace's initial fine column is a dependency even when its ground proxy is offscreen");
+        assert!(blocks.iter().position(|&key| key == origin).unwrap() < 32);
+        for ix in 0..9 {
+            for iy in 0..5 {
+                let (x, y) = (f64::from(ix) / 4.0 - 1.0, f64::from(iy) / 2.0 - 1.0);
+                let ray = view.forward + view.right * (x * view.tan_half[0]) + view.up * (y * view.tan_half[1]);
+                for step in 0..32 {
+                    let fraction = f64::from(step) / 32.0;
+                    let point = eye + ray * (first_ground * fraction);
+                    assert!(point.y > 0.0);
+                    let key = tile(point);
+                    assert!(blocks.contains(&key), "missing entry air column x{x}/y{y}/fraction{fraction}");
+                    assert!(r.current_camera_block(key));
+                }
+            }
+        }
+        assert!(!blocks.contains(&tile(eye - DVec3::X * 20.0)), "unrelated backward columns remain excluded");
+        assert!(blocks.len() <= CAMERA_CANDIDATES);
     }
 
     #[test]
