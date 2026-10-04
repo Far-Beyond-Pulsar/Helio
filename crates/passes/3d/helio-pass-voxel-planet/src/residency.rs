@@ -1091,6 +1091,9 @@ impl Residency {
                 }
             }
         }
+        // Stamping selected demand is necessary for the later admission pass.
+        // Expiry scans must not consume its reserved time after preparation ends.
+        if out_of_time() { return; }
         // Snapshot Camera demand is a current-frame block lease, not an
         // eviction list. Keep exact records and journals for background cleanup.
         if self.snapshot_mode {
@@ -2235,6 +2238,12 @@ impl Residency {
         let trace_admission = trace_ms.is_some() && self.frame % 30 == 0;
         let budget_time = self.cpu_budget;
         let out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b);
+        // Discovery and ownership preparation share the intake deadline.
+        // Repeating this prefix must leave time for already queued columns.
+        let refresh_deadline = budget_time.map(|budget|
+            started + budget - (budget / 4).min(std::time::Duration::from_millis(1)));
+        let preparation_out_of_time = move || refresh_deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline);
         let mut work = FrameWork::default();
         // Records evicted last frame are safe to reuse now.
         let delayed = std::mem::take(&mut self.delayed_records);
@@ -2283,10 +2292,10 @@ impl Residency {
             }
         }
         let t_drain = started.elapsed();
-        self.queue_global_adds(&out_of_time);
+        self.queue_global_adds(&preparation_out_of_time);
         // Current view work owns admission before obsolete window retirement.
         // The existing total deadline bounds every phase of this plan.
-        let mut camera_blocks = self.camera_blocks(eye, &out_of_time);
+        let mut camera_blocks = self.camera_blocks(eye, &preparation_out_of_time);
         // Keep each tile's sixteen columns together, advancing all view bands
         // before a longer finest-band prefix can consume the deadline.
         let mut band_rank = [0u32; 32];
@@ -2297,16 +2306,14 @@ impl Residency {
             (rank, level)
         });
         let selected_owners = select_camera_owners(&mut camera_blocks);
-        self.handoff_camera_owners(&selected_owners, &mut work, &out_of_time);
-        self.promote_camera_residents(&camera_blocks, &selected_owners, &mut work, &out_of_time);
-        self.retire_visible_leases_current(&camera_blocks, &mut work, &out_of_time);
-        self.retire_pool_pressure(&mut work, &selected_owners, budget_time.map(|budget| started + budget));
+        self.handoff_camera_owners(&selected_owners, &mut work, &preparation_out_of_time);
+        self.promote_camera_residents(&camera_blocks, &selected_owners, &mut work, &preparation_out_of_time);
+        self.retire_visible_leases_current(&camera_blocks, &mut work, &preparation_out_of_time);
+        self.retire_pool_pressure(&mut work, &selected_owners, refresh_deadline);
         let t_windows = started.elapsed();
         // Preparation must leave time to submit the columns it selects.
         // Captured feedback keeps its clock/FIFO validation before Camera
         // intake, but cannot consume the entire preparation allowance.
-        let refresh_deadline = budget_time.map(|budget|
-            started + budget - (budget / 4).min(std::time::Duration::from_millis(1)));
         let feedback_deadline = refresh_deadline.map(|deadline| {
             let now = std::time::Instant::now();
             now + deadline.saturating_duration_since(now) / 2
@@ -5964,6 +5971,61 @@ mod tests {
             assert!(work.evictions.is_empty(), "old {} retirement must not remove visible records", if snapshot { "snapshot" } else { "diff" });
             assert!(keys[..count].iter().all(|&key| r.residents.contains_key(key)));
         }
+    }
+
+    #[test]
+    fn plan_preparation_expiry_stamps_current_leases_without_unbudgeted_retirement() {
+        let (_, mut r, _, _) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        let blocks = r.camera_blocks(eye, &|| false);
+        r.refresh_camera_pending(&blocks[..2], None);
+        assert_eq!(r.visible_leases.len(), 2);
+        let prior_frame = r.frame;
+        let ranks = r.visible_admission.clone();
+        r.frame += 1;
+        let mut work = FrameWork::default();
+        r.retire_visible_leases_current(&blocks[..1], &mut work, &|| true);
+        assert_eq!(r.visible_leases.len(), 2, "expired preparation cannot scan and retire the omitted lease");
+        assert_eq!(r.visible_leases[&blocks[0]].current_demand_frame, Some(r.frame));
+        assert_eq!(r.visible_leases[&blocks[1]].current_demand_frame, Some(prior_frame));
+        assert!(r.transient_wanted(blocks[0]));
+        assert!(!r.transient_wanted(blocks[1]), "unvisited old demand is not renewed");
+        assert_eq!(r.visible_admission, ranks);
+        assert!(work.evictions.is_empty() && work.block_inits.is_empty());
+    }
+
+    #[test]
+    fn plan_preparation_backlog_leaves_time_for_existing_pending_publication() {
+        let (planet, mut r, _, _) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        let top = r.grid.levels() - 1;
+        let (cell, _) = r.grid.locate(eye);
+        let global = pack(key0(cell.face, top, cell.i >> (top + 3)), (cell.j >> (top + 3)) as u32);
+        // Replay a large valid addition backlog without inventing extra wanted
+        // tiles. The already pending column must not wait for that scan to end.
+        r.apply(WindowUpdate {
+            serial: 4, snapshot: true, partial: true, processed_levels: 1 << top,
+            wanted: vec![(top, std::sync::Arc::new([global].into_iter().collect()))],
+            levels: vec![LevelDiff { level: top, active: true,
+                adds: vec![(0.0, global); 500_000], ..Default::default() }],
+            ..Default::default()
+        });
+        r.levels[top as usize].pending.insert(global, 0);
+        r.set_cpu_budget(Some(std::time::Duration::from_millis(4)));
+        // A preempted test process can miss one frame's allowance; subsequent
+        // bounded plans must make progress, without a wall-clock assertion.
+        let mut submitted = None;
+        for _ in 0..4 {
+            let work = r.plan(&planet, eye, 160.0, 1);
+            if !work.jobs.is_empty() { submitted = Some(work); break; }
+        }
+        let work = submitted.expect("window preparation must leave admission time");
+        assert_eq!(work.job_keys, vec![global]);
+        assert!(r.queued_delta_ops > 0, "publication precedes completion of the addition backlog");
+        assert!(r.publishing.contains_key(&global));
+        table_is_exact(&r);
     }
 
     #[test]
