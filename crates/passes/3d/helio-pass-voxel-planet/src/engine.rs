@@ -225,6 +225,8 @@ pub struct PlanetStats {
     pub admission_alias_deferred: usize,
     pub admission_publication_deferred: usize,
     pub admission_batched_columns: usize,
+    /// Absolute first level represented by the three camera band counters.
+    pub camera_base_level: u32,
     pub camera_candidate_blocks: [u32; 3],
     pub camera_lease_blocks: [u32; 3],
     pub camera_jobs: [u32; 3],
@@ -1800,6 +1802,7 @@ impl PlanetRenderer {
         self.stats.plan_admission_ms = rs.plan_admission_ms;
         self.stats.fine_jobs = rs.fine_jobs;
         self.stats.far_jobs = rs.far_jobs;
+        self.stats.camera_base_level = rs.camera_base_level;
         self.stats.camera_candidate_blocks = rs.camera_candidate_blocks;
         self.stats.camera_lease_blocks = rs.camera_lease_blocks;
         self.stats.camera_jobs = rs.camera_jobs;
