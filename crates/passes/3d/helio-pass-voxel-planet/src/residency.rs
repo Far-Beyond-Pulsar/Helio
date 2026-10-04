@@ -302,7 +302,7 @@ fn selected_owner_allows(key: u64, selected: &SelectedOwners) -> bool {
 }
 
 fn select_camera_owners(blocks: &mut Vec<u64>) -> SelectedOwners {
-    let mut selected = SelectedOwners::default();
+    let mut selected = SelectedOwners::with_capacity_and_hasher(blocks.len() * BLOCK_TIERS as usize, Default::default());
     blocks.retain(|&key| {
         if !selected_owner_allows(key, &selected) { return false; }
         let (face, level, i, j) = unpack(key);
@@ -1465,16 +1465,16 @@ impl Residency {
                     + height * normal.dot(up).abs() + width * 1.75
                         * (*normal - up * normal.dot(up)).length() < 0.0) { continue; }
                 let benefit = width * width / distance.powi(2).max(0.01);
-                candidates.push((if entry { 2u8 } else { u8::from(ground_visible) }, benefit, block));
+                candidates.push((level, if entry { 2u8 } else { u8::from(ground_visible) }, benefit, block));
             }
         }
-        candidates.sort_unstable_by(|a, b| unpack(a.2).1.cmp(&unpack(b.2).1)
-            .then_with(|| b.0.cmp(&a.0)).then_with(|| b.1.total_cmp(&a.1)));
+        candidates.sort_unstable_by(|a, b| a.0.cmp(&b.0)
+            .then_with(|| b.1.cmp(&a.1)).then_with(|| b.2.total_cmp(&a.2)));
         let mut ground: [Vec<u64>; 3] = std::array::from_fn(|_| Vec::new());
         let mut raised: [Vec<u64>; 3] = std::array::from_fn(|_| Vec::new());
         let mut entry: [Vec<u64>; 3] = std::array::from_fn(|_| Vec::new());
-        for (class, _, key) in candidates {
-            let band = unpack(key).1 as usize - base;
+        for (level, class, _, key) in candidates {
+            let band = level - base;
             let (list, cap) = match class { 2 => (&mut entry[band], 64),
                 1 => (&mut ground[band], 160), _ => (&mut raised[band], 8) };
             if list.len() < cap { list.push(key); }
@@ -2210,12 +2210,15 @@ impl Residency {
 
     /// Bootstrap global coverage without first scanning obsolete fine residents.
     /// Latest wanted membership still rejects old queued additions.
-    fn queue_global_adds(&mut self, out_of_time: &impl Fn() -> bool) {
+    fn queue_global_adds(&mut self, limit: usize, out_of_time: &impl Fn() -> bool) {
         let top = self.levels.len() - 1;
         let wanted = self.levels[top].wanted.clone();
+        // Missing global coverage keeps its first admission priority without
+        // replaying a large resident payload before Camera discovery.
+        let mut inspected = 0;
         for queued in &mut self.diffs[top] {
             let start = queued.added;
-            while queued.added < queued.diff.adds.len() && !out_of_time() {
+            while queued.added < queued.diff.adds.len() && inspected < limit && !out_of_time() {
                 let (priority, key) = queued.diff.adds[queued.added];
                 if wanted.as_ref().is_some_and(|wanted| wanted.contains(&key))
                     && !self.publishing.contains_key(&key)
@@ -2223,9 +2226,10 @@ impl Residency {
                     self.levels[top].pending.insert(key, PendingQueue::bucket(priority));
                 }
                 queued.added += 1;
+                inspected += 1;
             }
             self.queued_delta_ops -= queued.added - start;
-            if out_of_time() { break; }
+            if inspected == limit || out_of_time() { break; }
         }
     }
 
@@ -2238,12 +2242,18 @@ impl Residency {
         let trace_admission = trace_ms.is_some() && self.frame % 30 == 0;
         let budget_time = self.cpu_budget;
         let out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b);
-        // Discovery and ownership preparation share the intake deadline.
-        // Repeating this prefix must leave time for already queued columns.
+        // Discovery and ownership leave a separate slice for fresh intake,
+        // which must not wait for a repeated preparation prefix to finish.
+        let window_deadline = budget_time.map(|budget| started + budget / 2);
+        let window_out_of_time = move || window_deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline);
+        // Candidate ranking and owner selection finish atomically after the
+        // discovery loop. Leave the second window quarter for that suffix.
+        let discovery_deadline = budget_time.map(|budget| started + budget / 4);
+        let discovery_out_of_time = move || discovery_deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline);
         let refresh_deadline = budget_time.map(|budget|
             started + budget - (budget / 4).min(std::time::Duration::from_millis(1)));
-        let preparation_out_of_time = move || refresh_deadline
-            .is_some_and(|deadline| std::time::Instant::now() >= deadline);
         let mut work = FrameWork::default();
         // Records evicted last frame are safe to reuse now.
         let delayed = std::mem::take(&mut self.delayed_records);
@@ -2292,10 +2302,10 @@ impl Residency {
             }
         }
         let t_drain = started.elapsed();
-        self.queue_global_adds(&preparation_out_of_time);
+        self.queue_global_adds(16, &window_out_of_time);
         // Current view work owns admission before obsolete window retirement.
         // The existing total deadline bounds every phase of this plan.
-        let mut camera_blocks = self.camera_blocks(eye, &preparation_out_of_time);
+        let mut camera_blocks = self.camera_blocks(eye, &discovery_out_of_time);
         // Keep each tile's sixteen columns together, advancing all view bands
         // before a longer finest-band prefix can consume the deadline.
         let mut band_rank = [0u32; 32];
@@ -2306,10 +2316,10 @@ impl Residency {
             (rank, level)
         });
         let selected_owners = select_camera_owners(&mut camera_blocks);
-        self.handoff_camera_owners(&selected_owners, &mut work, &preparation_out_of_time);
-        self.promote_camera_residents(&camera_blocks, &selected_owners, &mut work, &preparation_out_of_time);
-        self.retire_visible_leases_current(&camera_blocks, &mut work, &preparation_out_of_time);
-        self.retire_pool_pressure(&mut work, &selected_owners, refresh_deadline);
+        self.handoff_camera_owners(&selected_owners, &mut work, &window_out_of_time);
+        self.promote_camera_residents(&camera_blocks, &selected_owners, &mut work, &window_out_of_time);
+        self.retire_visible_leases_current(&camera_blocks, &mut work, &window_out_of_time);
+        self.retire_pool_pressure(&mut work, &selected_owners, window_deadline);
         let t_windows = started.elapsed();
         // Preparation must leave time to submit the columns it selects.
         // Captured feedback keeps its clock/FIFO validation before Camera
@@ -2323,12 +2333,17 @@ impl Residency {
         if !out_of_time() { self.refresh_visible_pending(feedback_deadline); }
         self.refresh_camera_pending(&camera_blocks, refresh_deadline);
         let t_visible = started.elapsed();
+        // Bootstrap is a small prefix, not a throughput cap. Continue global
+        // additions in unused intake time after current Camera work ran.
+        self.queue_global_adds(usize::MAX, &|| refresh_deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline));
+        let global_refresh = started.elapsed() - t_visible;
         // Ordinary near demand cannot delay already queued visible work.
         if self.visible_admission.is_empty() && !out_of_time() {
             self.refresh_near_pending(eye, refresh_deadline);
         }
         let t_apply = started.elapsed();
-        let t_near = t_windows + (t_apply - t_visible);
+        let t_near = t_windows + (t_apply - t_visible - global_refresh);
         // Urgent edit regenerations first.
         let urgent_count = self.urgent.len();
         let urgent_started = trace_admission.then(std::time::Instant::now);
@@ -2626,9 +2641,9 @@ impl Residency {
         }
         stats.plan_edits_ms = t_edits.as_secs_f64() * 1e3;
         stats.plan_authority_ms = (t_drain - t_edits).as_secs_f64() * 1e3;
-        stats.plan_windows_ms = (t_windows - t_drain + background).as_secs_f64() * 1e3;
+        stats.plan_windows_ms = (t_windows - t_drain + global_refresh + background).as_secs_f64() * 1e3;
         stats.plan_near_ms = (t_near - t_windows).as_secs_f64() * 1e3;
-        stats.plan_visible_ms = (t_apply - t_near).as_secs_f64() * 1e3;
+        stats.plan_visible_ms = (t_apply - t_near - global_refresh).as_secs_f64() * 1e3;
         stats.plan_admission_ms = (t_admission - t_apply).as_secs_f64() * 1e3;
         (stats.fine_jobs, stats.far_jobs) = work.jobs.iter().fold((0, 0), |(fine, far), job|
             if job.key0 >> 27 < 3 { (fine + 1, far) } else { (fine, far + 1) });
@@ -5973,6 +5988,56 @@ mod tests {
     }
 
     #[test]
+    fn plan_preparation_backlog_and_pressure_leave_fresh_camera_intake() {
+        for global_resident in [true, false] {
+            let (planet, mut r, _, _) = current_bridge_fixture();
+            let eye = r.current_request.as_ref().unwrap().eye;
+            r.set_ground_clearance(10.0);
+            let top = r.grid.levels() - 1;
+            let (cell, _) = r.grid.locate(eye);
+            let global = pack(key0(cell.face, top, cell.i >> (top + 3)), (cell.j >> (top + 3)) as u32);
+            r.apply(WindowUpdate {
+                serial: 4, snapshot: true, partial: true, processed_levels: 1 << top,
+                wanted: vec![(top, std::sync::Arc::new([global].into_iter().collect()))],
+                levels: vec![LevelDiff { level: top, active: true,
+                    adds: vec![(0.0, global); 500_000], ..Default::default() }],
+                ..Default::default()
+            });
+            // Both replayed resident additions and genuinely missing global
+            // coverage must leave time for entirely new Camera demand.
+            if global_resident {
+                let record = r.alloc_record().unwrap();
+                assert!(r.acquire_blocks(global, &mut FrameWork::default()));
+                r.residents.insert(global, Resident { record, blocks: true, ..Default::default() });
+            }
+            let retry = pack(key0(cell.face, 3, cell.i >> 6), (cell.j >> 6) as u32);
+            let record = r.alloc_record().unwrap();
+            r.residents.insert(retry, Resident { record, blocks: false, ..Default::default() });
+            r.block_conflicts += 1;
+            r.initial_retries.insert(retry);
+            r.levels[3].wanted = Some(std::sync::Arc::new([retry].into_iter().collect()));
+            r.pool_pressure = true;
+            r.set_cpu_budget(Some(std::time::Duration::from_millis(4)));
+            assert!(r.visible_admission.is_empty() && r.visible_leases.is_empty());
+            assert!(r.levels.iter().all(|state| state.pending.is_empty()));
+            let mut submitted = None;
+            for _ in 0..4 {
+                let work = r.plan(&planet, eye, 160.0, 16);
+                if !work.jobs.is_empty() { submitted = Some(work); break; }
+            }
+            let work = submitted.expect("fresh Camera demand needs intake time before admission");
+            if !global_resident { assert_eq!(work.job_keys[0], global, "missing global coverage retains first admission priority"); }
+            assert!(work.job_keys.iter().filter(|&&key| key != global).all(|&key| unpack(key).1 < 3 && !r.current_wanted(key)
+                && r.transient_wanted(key)), "jobs must come from newly authorized Camera tiles");
+            assert!(r.stats.camera_jobs.iter().sum::<u32>() > 0);
+            assert!(r.queued_delta_ops > 0 && r.pool_pressure,
+                "fresh publication must not await completion of backlog or pressure retirement");
+            assert!(r.publishing.keys().any(|key| work.job_keys.contains(key)));
+            table_is_exact(&r);
+        }
+    }
+
+    #[test]
     fn plan_view_first_global_bootstrap_and_urgent_edit_keep_priority() {
         for urgent in [false, true] {
             let (planet, mut r, _, _) = current_bridge_fixture();
@@ -5990,7 +6055,7 @@ mod tests {
                 ..Default::default()
             });
             let cursor = r.retire_slot;
-            r.queue_global_adds(&|| false);
+            r.queue_global_adds(usize::MAX, &|| false);
             assert_eq!(r.retire_slot, cursor, "bootstrap does not scan residents");
             assert_eq!(r.diffs[0][0].added, 0, "fine snapshot stays background work");
             assert!(!r.levels[top as usize].pending.is_empty());
