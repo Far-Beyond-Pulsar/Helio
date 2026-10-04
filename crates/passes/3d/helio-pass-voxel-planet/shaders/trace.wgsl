@@ -220,6 +220,54 @@ fn locate(r: Ray, fr: FaceRay, t: f32, level: u32) -> Cursor {
     return c;
 }
 
+// A coarse fallback may span several complete tiles of the requested level.
+// Revisit their real angular boundaries while walking air, before skipping them.
+struct TileExit {
+    t: f32,
+    axis: u32,
+    plane: i32,
+    other_lo: i32,
+    span: i32,
+}
+fn fallback_tile_exit(r: Ray, fr: FaceRay, t: f32, cur: Cursor, want: u32,
+                      at_tile: bool, tile_base: Cursor) -> TileExit {
+    var out = TileExit(3.0e38, 0u, 0, 0, 0);
+    if want >= cur.level { return out; }
+    var base = locate(r, fr, t, 0u);
+    if at_tile { base.i = tile_base.i; base.j = tile_base.j; }
+    let span = 32 << want;
+    let i0 = (base.i / span) * span;
+    let j0 = (base.j / span) * span;
+    let ia = select(i0, i0 + span, fr.dir.x > 0);
+    let jb = select(j0, j0 + span, fr.dir.y > 0);
+    let ta = select(plane_t(fr, 0u, ia), 3.0e38, fr.dir.x == 0);
+    let tb = select(plane_t(fr, 1u, jb), 3.0e38, fr.dir.y == 0);
+    out.t = max(min(ta, tb), t);
+    out.axis = select(1u, 0u, ta <= tb);
+    out.plane = select(jb, ia, ta <= tb);
+    out.other_lo = select(i0, j0, ta <= tb);
+    out.span = span;
+    return out;
+}
+fn tile_enter(r: Ray, fr: FaceRay, event: TileExit) -> Cursor {
+    var base = locate(r, fr, event.t, 0u);
+    // Only the selected angular axis has crossed. Keep the companion outgoing
+    // at a simultaneous corner, matching the ordinary DDA's axis ordering.
+    if event.axis == 0u {
+        base.i = select(event.plane - 1, event.plane, fr.dir.x > 0);
+        base.j = clamp(base.j, event.other_lo, event.other_lo + event.span - 1);
+    } else {
+        base.j = select(event.plane - 1, event.plane, fr.dir.y > 0);
+        base.i = clamp(base.i, event.other_lo, event.other_lo + event.span - 1);
+    }
+    // An angular crossing precedes a simultaneous rising radial crossing.
+    if rising(r, event.t) && height_rel(r, event.t) == layer_height(base.k) { base.k -= 1; }
+    return base;
+}
+fn cursor_level(base: Cursor, level: u32) -> Cursor {
+    return Cursor(base.face, level, base.i >> level, base.j >> level, base.k >> level);
+}
+
 fn normal_code(axis: u32, step: i32) -> u32 {
     // Normal of the entered face points back against the step.
     return axis * 2u + select(0u, 1u, step > 0);
@@ -423,6 +471,9 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
     var col: Column;
     var loaded = vec4<i32>(-1);
     var normal = 6u;
+    var selected_want = cur.level;
+    var at_tile = false;
+    var tile_base: Cursor;
     let n_base = frame.layer_i.y - 1;
     work_steps = 0u;
     work_lookups = 0u;
@@ -441,6 +492,8 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 t = t * (1.0 + 2e-6) + frame.layer.y * 1e-3;
                 if t > t_end { return make_hit(ST_MISS, t_end, cur, normal, NONE); }
                 cur = locate(r, fr, t, cur.level);
+                at_tile = false;
+                loaded = vec4<i32>(-1);
                 stalls = 0u;
             }
         } else {
@@ -453,6 +506,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
             if is_plane() { return make_hit(ST_MISS, t, cur, normal, NONE); }
             cur = cross_face(r, cur, t);
             fr = face_ray(cur.face, r);
+            at_tile = false;
             continue;
         }
         let key = vec4<i32>(cur.i >> 3u, cur.j >> 3u, i32(cur.face), i32(cur.level));
@@ -470,6 +524,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
             // Neighbouring rays in one column agree, so warps stay coherent.
             let hd = f32(hash3(key.x, key.y, key.z | (key.w << 3u), 0x2545f491u) & 1023u) / 1023.0;
             let want = level_for((t + lod_offset) * lod_scale * (1.0 + dither * (hd - 0.5)));
+            selected_want = want;
             if want > cur.level {
                 let d = want - cur.level;
                 var coarser = cur;
@@ -483,7 +538,14 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                     if found != NONE && column_valid(records[found]) { transition_record = found; }
                 }
             } else if want < cur.level {
-                let finer = locate(r, fr, t, want);
+                var finer = locate(r, fr, t, want);
+                if at_tile { finer = cursor_level(tile_base, want); }
+                // locate floors exact negative planes and positive corner companions.
+                // Retain the physical coarse DDA ownership at coincident exits.
+                let d = cur.level - want;
+                finer.i = clamp(finer.i, cur.i << d, ((cur.i + 1) << d) - 1);
+                finer.j = clamp(finer.j, cur.j << d, ((cur.j + 1) << d) - 1);
+                finer.k = clamp(finer.k, cur.k << d, ((cur.k + 1) << d) - 1);
                 let hint = column_hint(want, finer.face, finer.i >> 3u, finer.j >> 3u);
                 if hint == 0u { request_visible_block(finer.face, want, finer.i >> 3u, finer.j >> 3u); }
                 if hint != 0u {
@@ -575,6 +637,15 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 let ta = select(plane_t(fr, 0u, select(cur.i, cur.i + 1, fr.dir.x > 0) << lv), 3.0e38, fr.dir.x == 0);
                 let tb = select(plane_t(fr, 1u, select(cur.j, cur.j + 1, fr.dir.y > 0) << lv), 3.0e38, fr.dir.y == 0);
                 let enter = relief_enter(r, surface, t);
+                let tile_before_hit = fallback_tile_exit(r, fr, t, cur, selected_want, at_tile, tile_base);
+                if tile_before_hit.t < min(enter, min(ta, tb)) {
+                    t = tile_before_hit.t;
+                    tile_base = tile_enter(r, fr, tile_before_hit);
+                    cur = cursor_level(tile_base, lv);
+                    at_tile = true;
+                    loaded = vec4<i32>(-1);
+                    continue;
+                }
                 if enter <= min(ta, tb) && enter < 3.0e38 {
                     if enter > t_end { return make_hit(ST_MISS, t_end, cur, normal, NONE); }
                     // The solve can cross several radial cells inside this
@@ -586,10 +657,16 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 }
                 let next = max(min(ta, tb), t);
                 if next >= 3.0e38 { return make_hit(ST_MISS, t, cur, normal, NONE); }
+                at_tile = false;
                 t = next;
                 cur.k = (frame.layer_i.x + i32(floor(layer_coord(r, t)))) >> lv;
                 if ta <= tb { cur.i += fr.dir.x; normal = normal_code(0u, fr.dir.x); }
                 else { cur.j += fr.dir.y; normal = normal_code(1u, fr.dir.y); }
+                if tile_before_hit.t <= next {
+                    tile_base = tile_enter(r, fr, tile_before_hit);
+                    at_tile = true;
+                    loaded = vec4<i32>(-1);
+                }
                 continue;
             }
             let kb = (cur.k >> 3u) - col.k_lo;
@@ -610,6 +687,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 var ta = select(plane_t(fr, 0u, select(cur.i, cur.i + 1, fr.dir.x > 0) << lv), 3.0e38, fr.dir.x == 0);
                 var tb = select(plane_t(fr, 1u, select(cur.j, cur.j + 1, fr.dir.y > 0) << lv), 3.0e38, fr.dir.y == 0);
                 var tr = radial_exit(r, cur.k << lv, (cur.k + 1) << lv, t);
+                let tile = fallback_tile_exit(r, fr, t, cur, selected_want, at_tile, tile_base);
                 loop {
                     // The inner DDA can cross the requested endpoint before
                     // returning to the outer traversal range check.
@@ -623,6 +701,15 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                     if cell_solid { return make_hit(ST_HIT, t, cur, normal, record); }
                     let t_next = max(min(ta, min(tb, tr.x)), t);
                     if t_next >= 3.0e38 { return make_hit(ST_MISS, t, cur, normal, NONE); }
+                    if tile.t >= t && tile.t < t_next {
+                        t = tile.t;
+                        tile_base = tile_enter(r, fr, tile);
+                        cur = cursor_level(tile_base, lv);
+                        at_tile = true;
+                        loaded = vec4<i32>(-1);
+                        break;
+                    }
+                    at_tile = false;
                     t = t_next;
                     var angular_crossing = false;
                     if ta <= tb && ta <= tr.x {
@@ -641,6 +728,12 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                         normal = normal_code(2u, dk);
                         tr = radial_exit(r, cur.k << lv, (cur.k + 1) << lv, t);
                     }
+                    if tile.t <= t_next {
+                        tile_base = tile_enter(r, fr, tile);
+                        at_tile = true;
+                        loaded = vec4<i32>(-1);
+                        break;
+                    }
                     if (cur.i >> 3u) != ci || (cur.j >> 3u) != cj || cur.k < k0 || cur.k >= k1 { break; }
                     // The zero-fraction shortcut applies to one angular cell,
                     // not its whole column. Reclassify a partial neighbor
@@ -657,6 +750,16 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
         let xr = radial_exit(r, k0 << lv, k1 << lv, t);
         let t_next = max(min(xa, min(xb, xr.x)), t);
         if t_next >= 3.0e38 { return make_hit(ST_MISS, t, cur, normal, NONE); }
+        let tile = fallback_tile_exit(r, fr, t, cur, selected_want, at_tile, tile_base);
+        if tile.t < t_next {
+            t = tile.t;
+            tile_base = tile_enter(r, fr, tile);
+            cur = cursor_level(tile_base, lv);
+            at_tile = true;
+            loaded = vec4<i32>(-1);
+            continue;
+        }
+        at_tile = false;
         t = t_next;
         let li = clamp(fr.idx.x + i32(floor(face_coord(fr, 0u, t))), 0, n_base) >> lv;
         let lj = clamp(fr.idx.y + i32(floor(face_coord(fr, 1u, t))), 0, n_base) >> lv;
@@ -674,6 +777,11 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
             let dk = i32(xr.y);
             cur.k = select(k0 - 1, k1, dk > 0);
             normal = normal_code(2u, dk);
+        }
+        if tile.t <= t_next {
+            tile_base = tile_enter(r, fr, tile);
+            at_tile = true;
+            loaded = vec4<i32>(-1);
         }
     }
     return make_hit(ST_EXHAUSTED, t, cur, normal, NONE);

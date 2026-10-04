@@ -628,3 +628,357 @@ fn gpu_column_table_matches_cpu_while_moving() {
     }
     assert_eq!(worst, 0);
 }
+
+// Production traversal must revisit resident fine tiles hidden inside a coarse
+// empty box. The scalar reference is a horizontal 10cm grid ground at layer500.
+#[test]
+fn fallback_empty_skip_revisits_resident_fine_ground() {
+    use helio_pass_voxel_planet::{TerrainSource, grid::Shape};
+    let Some(gpu) = gpu() else { return };
+    let planet = Planet::new(PlanetRecipe {
+        shape: Shape::Plane,
+        terrain: TerrainSource {
+            generator: helio_pass_voxel_planet::landform::FLAT_ID.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .unwrap();
+    fn ints(bytes: &mut [u8], offset: usize, values: &[i32]) {
+        for (i, value) in values.iter().enumerate() {
+            bytes[offset + i * 4..offset + i * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    fn floats(bytes: &mut [u8], offset: usize, values: &[f32]) {
+        for (i, value) in values.iter().enumerate() {
+            bytes[offset + i * 4..offset + i * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    // Axis-aligned and simultaneous corner crossings, both signs. The last
+    // controls retain unavailable/solid finer-field guards and vertical rays.
+    for (label, e, direction, tile, complete, fine_top, fine_hit) in [
+        (
+            "positive",
+            Vec3::ZERO,
+            Vec3::new(0.9539392, -0.3, 0.0),
+            (17, 16),
+            true,
+            500,
+            true,
+        ),
+        (
+            "negative",
+            Vec3::new(6.3, 0.0, 0.0),
+            Vec3::new(-0.9539392, -0.3, 0.0),
+            (16, 16),
+            true,
+            500,
+            true,
+        ),
+        (
+            "positive corner",
+            Vec3::ZERO,
+            Vec3::new(0.6846532, -0.25, -0.6846532),
+            (17, 17),
+            true,
+            500,
+            true,
+        ),
+        (
+            "negative corner",
+            Vec3::new(6.3, 0.0, -6.3),
+            Vec3::new(-0.6846532, -0.25, 0.6846532),
+            (16, 16),
+            true,
+            500,
+            true,
+        ),
+        (
+            "negative coarse-plane tie",
+            Vec3::new(3.1, 0.0, 0.0),
+            Vec3::new(-0.9539392, -0.3, 0.0),
+            (15, 16),
+            true,
+            500,
+            true,
+        ),
+        (
+            "negative coarse-corner tie",
+            Vec3::new(3.1, 0.0, -3.1),
+            Vec3::new(-0.6846532, -0.25, 0.6846532),
+            (15, 15),
+            true,
+            500,
+            true,
+        ),
+        (
+            "partial",
+            Vec3::ZERO,
+            Vec3::new(0.9539392, -0.3, 0.0),
+            (17, 16),
+            false,
+            500,
+            false,
+        ),
+        (
+            "already solid",
+            Vec3::ZERO,
+            Vec3::new(0.9539392, -0.3, 0.0),
+            (17, 16),
+            true,
+            556,
+            false,
+        ),
+        (
+            "vertical",
+            Vec3::ZERO,
+            Vec3::NEG_Y,
+            (17, 16),
+            true,
+            500,
+            false,
+        ),
+    ] {
+        for enabled in [false, true] {
+            let mut source = String::from(include_str!("../shaders/noise.wgsl"));
+            source.push_str(include_str!("../shaders/world.wgsl"));
+            source.push_str(&planet.field().program().wgsl);
+            source.push_str(
+                &include_str!("../shaders/common.wgsl")
+                    .replace("ACCESS", "read")
+                    .replace("LEVEL_TOP", "i32")
+                    .replace("BLOCK_ENTRY", "vec4<i32>")
+                    .replace("SHAPE_ID", "1u"),
+            );
+            source.push_str(
+                "struct FixtureCamera { proj: mat4x4<f32>, } var<private> camera: FixtureCamera;\n",
+            );
+            source.push_str(include_str!("../shaders/visible_feedback.wgsl"));
+            let trace = include_str!("../shaders/trace.wgsl");
+            // Negative control disables only the new air checkpoint, reproducing
+            // the existing coarse skip with identical records/ray/LOD selection.
+            let baseline = trace.replace(
+                "if want >= cur.level { return out; }",
+                "if true { return out; }",
+            );
+            source.push_str(if enabled { trace } else { &baseline });
+            source.push_str(&format!(
+                r#"
+          @group(0) @binding(17) var<storage,read_write> range_hits:array<Hit>;
+          @compute @workgroup_size(1) fn fallback_probe() {{
+            let r=make_ray(vec3<f32>({},{},{}), vec3<f32>({},{},{}));
+            range_hits[0]=trace(r,0.0,30.0,0.0,1.0,0.0);
+          }}"#,
+                e.x, e.y, e.z, direction.x, direction.y, direction.z
+            ));
+            let mut frame = vec![0u8; 1168];
+            let face = 2 * 80;
+            floats(&mut frame, face, &[1.0, 0.0, 0.0, 0.0]);
+            floats(&mut frame, face + 16, &[0.0, 0.0, 0.0, 0.5]);
+            floats(&mut frame, face + 32, &[0.0, 0.0, -1.0, 0.0]);
+            floats(&mut frame, face + 48, &[0.0, 0.0, 0.0, 0.5]);
+            ints(&mut frame, face + 64, &[512, 512, 1, 0]);
+            floats(&mut frame, 480, &[0.0, 1.0, 0.0, 100.0]);
+            floats(&mut frame, 496, &[0.0, 0.1, 0.1, 100.0]);
+            ints(&mut frame, 512, &[512, 1024, 7, 2]);
+            floats(&mut frame, 528, &[88.0, 0.0, 0.0, 1000.0]);
+            floats(&mut frame, 544, &[1.0, 1.0, 0.0, 0.0]);
+            ints(&mut frame, 576, &[0, 0, 127, 4]);
+            ints(&mut frame, 688, &[0, 17472, 0, 0]);
+            ints(&mut frame, 832, &[1, 0, 0, 0]);
+            let mut world = vec![0u8; 128];
+            ints(&mut world, 0, &[1024, 100, 1024, 0]);
+            let mut record = vec![0u8; 20 * 32];
+            let mut pool = vec![0u32; 20 * 16];
+            let mut table_words = vec![u32::MAX; 128];
+            let mut block_words = vec![0i32; 7 * 6 * 17472 * 4];
+            let slot = (2 * 17472 + tile.1 * 128 + tile.0) as usize;
+            block_words[slot * 4..slot * 4 + 4].copy_from_slice(&[
+                tile.0,
+                tile.1,
+                fine_top,
+                if complete { 16 } else { 15 },
+            ]);
+            for id in 0..20 {
+                let (level, ci, cj, klo, offset, empty) = if id < 4 {
+                    (6, id % 2, id / 2, 0, 7, 1)
+                } else {
+                    let q = id - 4;
+                    (
+                        0,
+                        tile.0 * 4 + q % 4,
+                        tile.1 * 4 + q / 4,
+                        fine_top / 8,
+                        fine_top % 8,
+                        8 - fine_top % 8,
+                    )
+                };
+                let key0 = (ci as u32) | (2 << 24) | (level << 27);
+                let info = 0x82000000u32 | 1 | (1 << 9) | ((empty as u32) << 22);
+                ints(
+                    &mut record,
+                    id as usize * 32,
+                    &[key0 as i32, cj, klo, info as i32, id, 1, 0, 0],
+                );
+                pool[id as usize * 16..(id as usize + 1) * 16].fill((offset as u32) * 0x01010101);
+                let mut hash =
+                    (helio_pass_voxel_planet::noise::hash3(key0 as i32, cj, 0x2f6b1d3a, 0x9e3779b9)
+                        & 127) as usize;
+                while table_words[hash] != u32::MAX {
+                    hash = (hash + 1) & 127;
+                }
+                table_words[hash] = id as u32;
+            }
+            let buffer = |label: &str, data: &[u8], uniform: bool| {
+                let b = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: data.len() as u64,
+                    usage: (if uniform {
+                        wgpu::BufferUsages::UNIFORM
+                    } else {
+                        wgpu::BufferUsages::STORAGE
+                    }) | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                gpu.queue.write_buffer(&b, 0, data);
+                b
+            };
+            let frame = buffer("range frame", &frame, true);
+            let world = buffer("range world", &world, true);
+            let table = buffer("fallback table", bytemuck::cast_slice(&table_words), false);
+            let records = buffer("range record", &record, false);
+            let pool = buffer("range pool", bytemuck::cast_slice(&pool), false);
+            let brushes = buffer("range empty brushes", &[0; 32], false);
+            let refs = buffer("range empty refs", &[0; 4], false);
+            let tops = buffer("fallback tops", bytemuck::cast_slice(&[560i32; 64]), false);
+            let blocks = buffer("fallback blocks", bytemuck::cast_slice(&block_words), false);
+            let constants = buffer("range constants", &planet.field().program().constants, true);
+            let out = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("range output"),
+                size: 32,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let feedback = buffer("inert visible feedback", &vec![0; 18448], false);
+            let bindings = [
+                (0, &frame, true, false),
+                (1, &world, true, false),
+                (2, &table, false, false),
+                (3, &records, false, false),
+                (4, &pool, false, false),
+                (5, &brushes, false, false),
+                (6, &refs, false, false),
+                (14, &tops, false, false),
+                (15, &blocks, false, false),
+                (16, &constants, true, false),
+                (17, &out, false, true),
+                (21, &feedback, false, true),
+            ];
+            let entries: Vec<_> = bindings
+                .iter()
+                .map(
+                    |(binding, _, uniform, writable)| wgpu::BindGroupLayoutEntry {
+                        binding: *binding,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: if *uniform {
+                                wgpu::BufferBindingType::Uniform
+                            } else {
+                                wgpu::BufferBindingType::Storage {
+                                    read_only: !*writable,
+                                }
+                            },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                )
+                .collect();
+            let layout = gpu
+                .device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: None,
+                    entries: &entries,
+                });
+            let bind_entries: Vec<_> = bindings
+                .iter()
+                .map(|(binding, b, _, _)| wgpu::BindGroupEntry {
+                    binding: *binding,
+                    resource: b.as_entire_binding(),
+                })
+                .collect();
+            let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &layout,
+                entries: &bind_entries,
+            });
+            let pl = gpu
+                .device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[Some(&layout)],
+                    immediate_size: 0,
+                });
+            let shader = gpu
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("range trace shader"),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                });
+            let pipeline = gpu
+                .device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: None,
+                    layout: Some(&pl),
+                    module: &shader,
+                    entry_point: Some("fallback_probe"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+            gpu.queue.submit([encoder.finish()]);
+            let data = read_buffer(&gpu, &out, 32);
+            let word = |n: usize| u32::from_le_bytes(data[n * 4..n * 4 + 4].try_into().unwrap());
+            let level = (word(4) >> 5) & 31;
+            let t = f32::from_bits(word(0));
+            let expect_fine = fine_hit && (enabled || label.contains("coarse"));
+            let expected = if expect_fine { 1.2 } else { 6.4 } / -direction.y;
+            assert_eq!(
+                word(4) & 3,
+                1,
+                "{label} enabled={enabled} status info={:x} t={t}",
+                word(4)
+            );
+            assert_eq!(
+                level,
+                if expect_fine { 0 } else { 6 },
+                "{label} enabled={enabled} t={t}"
+            );
+            assert!(
+                (t - expected).abs() < 0.003,
+                "{label} enabled={enabled}: t={t}, scalar={expected}"
+            );
+            assert_eq!(
+                (word(4) >> 10) & 7,
+                4,
+                "{label}: ground hit must retain physical radial normal"
+            );
+            if expect_fine {
+                let point = e + direction * t;
+                let i = 512 + (0.5 + point.x / 0.1).floor() as i32;
+                let j = 512 + (0.5 - point.z / 0.1).floor() as i32;
+                assert_eq!(word(1) as i32, i, "{label} x ownership");
+                assert_eq!(word(2) as i32, j, "{label} y ownership");
+                assert_eq!(word(3), 499, "{label} exact radial cell");
+            }
+        }
+    }
+}
