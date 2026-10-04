@@ -479,6 +479,8 @@ pub struct Residency {
     edits: EditHeap,
     publishing: FxHashMap<u64, EditPublication>,
     initial_retries: FxHashSet<u64>,
+    /// Last acknowledged job batch hit the GPU brick pool limit.
+    pool_pressure: bool,
     /// GPU face-brush index for each (brush id, face entry).
     brush_gpu: Vec<Vec<u32>>,
     synced: Vec<crate::edits::Brush>,
@@ -586,6 +588,7 @@ impl Residency {
             edits: EditHeap::default(),
             publishing: FxHashMap::default(),
             initial_retries: FxHashSet::default(),
+            pool_pressure: false,
             brush_gpu: Vec::new(),
             synced: Vec::new(),
             synced_hash: Vec::new(),
@@ -1723,9 +1726,15 @@ impl Residency {
                 if let Some((key, _)) = resident {
                     let level = unpack(key).1 as usize;
                     if self.levels[level].wanted.is_some() && !self.protected_wanted(key) {
-                        self.evict(key, work);
-                        // Backshift may have moved another resident here.
-                        continue;
+                        let (face, _, i, j) = unpack(key);
+                        let owner = (level as u32, face, 1, i >> 2, j >> 2);
+                        // A reselected resident can precede its new Camera lease.
+                        let selected_current = selected.get(&block_slot(level as u32, face, 1, owner.3, owner.4)) == Some(&owner);
+                        if !selected_current {
+                            self.evict(key, work);
+                            // Backshift may have moved another resident here.
+                            continue;
+                        }
                     }
                     self.retire_slot += 1;
                 }
@@ -2050,6 +2059,20 @@ impl Residency {
         true
     }
 
+    fn retire_pool_pressure(&mut self, work: &mut FrameWork, selected: &SelectedOwners,
+        frame_deadline: Option<std::time::Instant>) {
+        if !self.pool_pressure { return; }
+        let mut deadline = std::time::Instant::now() + std::time::Duration::from_millis(1);
+        if let Some(frame_deadline) = frame_deadline { deadline = deadline.min(frame_deadline); }
+        let expired = || std::time::Instant::now() >= deadline;
+        if expired() { return; }
+        // Pool-full retries cannot make progress without releasing old data.
+        // Advance the existing protected retirement cursor before preparation
+        // can consume the whole frame budget; keep its epoch and quarantine.
+        if self.snapshot_mode { self.apply_snapshot_selected(work, &expired, selected); }
+        else { self.apply_queued(work, &expired); }
+    }
+
     /// Bootstrap global coverage without first scanning obsolete fine residents.
     /// Latest wanted membership still rejects old queued additions.
     fn queue_global_adds(&mut self, out_of_time: &impl Fn() -> bool) {
@@ -2142,6 +2165,7 @@ impl Residency {
         let selected_owners = select_camera_owners(&mut camera_blocks);
         self.handoff_camera_owners(&selected_owners, &mut work, &out_of_time);
         self.retire_visible_leases_current(&camera_blocks, &mut work, &out_of_time);
+        self.retire_pool_pressure(&mut work, &selected_owners, budget_time.map(|budget| started + budget));
         let t_windows = started.elapsed();
         let refresh_deadline = budget_time.map(|budget| started + budget);
         // Validate Captured clocks before building the new Camera FIFO; stale
@@ -2415,6 +2439,8 @@ impl Residency {
     /// The engine must reserve a readback slot before issuing any jobs.
     pub fn complete_jobs(&mut self, results: impl IntoIterator<Item = (u64, u32)>) {
         let mut failed = Vec::new();
+        let mut completed = false;
+        let mut pool_full = false;
         for (key, status) in results {
             let Some(publication) = self.publishing.remove(&key) else { continue };
             if publication.evicted {
@@ -2424,6 +2450,8 @@ impl Residency {
             }
             let resident = self.residents.get_mut(key).expect("live publication has a resident");
             assert_eq!(resident.record, publication.record);
+            completed = true;
+            pool_full |= status == 3;
             if status == 0 {
                 resident.edit_block = publication.next;
                 if let Some(block) = publication.previous { self.edits.release(block); }
@@ -2440,6 +2468,14 @@ impl Residency {
                     failed.push((key, status));
                 }
             }
+        }
+        if completed {
+            if pool_full && !self.pool_pressure && self.snapshot_mode
+                && self.retire_finished_epoch >= self.snapshot_epoch {
+                self.snapshot_epoch += 1;
+                if self.retire_slot == 0 { self.retire_started_epoch = self.snapshot_epoch; }
+            }
+            self.pool_pressure = pool_full;
         }
         self.requeue(failed);
         self.stats.pending_columns = self.levels.iter().map(|l| l.pending.len()).sum::<usize>()
@@ -5552,6 +5588,113 @@ mod tests {
         let next = r.plan(&planet, eye, 160.0, 16);
         assert_eq!(next.jobs.len(), 16);
         assert_eq!(next.job_keys, new, "the queued current tile uses safely reclaimed records next frame");
+    }
+
+    #[test]
+    fn pool_pressure_reclaims_before_admission_preserving_selected_edits_and_deadline() {
+        let (_, mut r, old, current) = current_alias_fixture();
+        let record = r.alloc_record().unwrap();
+        let previous = r.edits.alloc(2, r.capacity.edit_words).unwrap();
+        let next = r.edits.alloc(2, r.capacity.edit_words).unwrap();
+        r.residents.insert(current[0], Resident { record, edit_block: Some(previous), ..Default::default() });
+        r.publishing.insert(current[0], EditPublication { record, previous: Some(previous),
+            next: Some(next), evicted: false, initial_bucket: None });
+        r.levels[0].wanted = Some(Default::default());
+        let epoch = r.snapshot_epoch;
+        assert_eq!(r.retire_finished_epoch, epoch);
+        r.complete_jobs([(current[0], 3)]);
+        assert!(r.pool_pressure && r.urgent.contains(&current[0]), "replacement pool failure must activate reclamation");
+        assert_eq!(r.snapshot_epoch, epoch + 1, "pool pressure wakes a settled cursor once");
+        r.complete_jobs(std::iter::empty());
+        r.complete_jobs([(u64::MAX, 0)]);
+        assert!(r.pool_pressure, "empty or stale acknowledgements cannot clear pressure");
+        r.publishing.insert(old[0], EditPublication {
+            record: r.residents.get(old[0]).unwrap().record, previous: None,
+            next: None, evicted: false, initial_bucket: Some(0),
+        });
+        let mut blocks = vec![current[0]];
+        let selected = select_camera_owners(&mut blocks);
+        let mut work = FrameWork::default();
+        let quarantined = r.delayed_records.len();
+        r.retire_pool_pressure(&mut work, &selected, Some(std::time::Instant::now()));
+        assert!(work.evictions.is_empty(), "expired total frame budget admits no reclamation slice");
+        r.retire_pool_pressure(&mut work, &selected, None);
+        assert_eq!(work.evictions.len(), old.len(), "obsolete pool-backed data is reclaimed before view preparation");
+        assert!(old.iter().all(|&key| !r.residents.contains_key(key)));
+        assert!(r.residents.contains_key(current[0]), "reselected records need protection before Camera lease creation");
+        assert_eq!(r.residents.get(current[0]).unwrap().edit_block, Some(previous));
+        assert!(!r.edits.free[previous.1 as usize].contains(&previous.0));
+        assert!(r.edits.free[next.1 as usize].contains(&next.0));
+        assert!(r.free_records.is_empty(), "retired records retain their next-frame quarantine");
+        assert_eq!(r.delayed_records.len(), quarantined + old.len());
+        r.refresh_camera_pending(&blocks, Some(std::time::Instant::now()));
+        assert!(work.jobs.is_empty(), "reclamation already progressed even when admission has no remaining time");
+        let woke = r.snapshot_epoch;
+        r.complete_jobs([(old[0], 0)]);
+        assert!(r.pool_pressure, "evicted publication acknowledgements do not clear live pool pressure");
+        let other_record = r.alloc_record().unwrap();
+        r.residents.insert(current[1], Resident { record: other_record, ..Default::default() });
+        r.publishing.insert(current[1], EditPublication { record: other_record, previous: None,
+            next: None, evicted: false, initial_bucket: Some(0) });
+        r.publishing.insert(current[0], EditPublication { record, previous: Some(previous),
+            next: None, evicted: false, initial_bucket: None });
+        r.complete_jobs([(current[0], 3), (current[1], 0)]);
+        assert!(r.pool_pressure, "a mixed live batch containing pool failure retains pressure");
+        assert_eq!(r.snapshot_epoch, woke, "mixed acknowledgements do not repeatedly restart reclamation");
+        r.publishing.insert(current[0], EditPublication { record, previous: Some(previous),
+            next: None, evicted: false, initial_bucket: None });
+        r.complete_jobs([(current[0], 0)]);
+        assert!(!r.pool_pressure, "successful acknowledgement returns to normal admission priority");
+        r.complete_jobs([(u64::MAX, 3)]);
+        assert!(!r.pool_pressure, "stale pool failures cannot re-enter pressure");
+        assert!(r.edits.free[previous.1 as usize].contains(&previous.0));
+    }
+
+    #[test]
+    fn pool_pressure_expired_diff_deadline_preserves_explicit_removals() {
+        let (_, mut r, old, _) = current_alias_fixture();
+        r.snapshot_mode = false;
+        r.apply(WindowUpdate { serial: 4, partial: true, processed_levels: 1,
+            wanted: vec![(0, Default::default())],
+            levels: vec![LevelDiff { level: 0, active: true,
+                removes: old.clone(), ..Default::default() }], ..Default::default() });
+        let key = old[0];
+        r.publishing.insert(key, EditPublication { record: r.residents.get(key).unwrap().record,
+            previous: None, next: None, evicted: false, initial_bucket: Some(0) });
+        r.complete_jobs([(key, 3)]);
+        assert!(r.pool_pressure);
+        let mut work = FrameWork::default();
+        r.retire_pool_pressure(&mut work, &Default::default(), Some(std::time::Instant::now()));
+        assert!(work.evictions.is_empty());
+        assert_eq!(r.diffs[0][0].removed, 0);
+        assert!(old.iter().all(|&key| r.residents.contains_key(key)));
+        r.retire_pool_pressure(&mut work, &Default::default(), None);
+        assert_eq!(work.evictions.len(), old.len());
+    }
+
+    #[test]
+    fn pool_pressure_initial_retry_and_clear_ack_preserve_normal_budget_and_ownership() {
+        let (planet, mut r, _, _) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        let current = r.camera_blocks(eye, &|| false)[0];
+        r.refresh_camera_pending(&[current], None);
+        let first = r.plan(&planet, eye, 160.0, 16);
+        assert_eq!(first.jobs.len(), 16);
+        let key = first.job_keys[0];
+        r.complete_jobs(first.job_keys.iter().map(|&key| (key, 3)));
+        assert!(r.pool_pressure && r.initial_retries.contains(&key));
+        let record = r.residents.get(key).unwrap().record;
+        r.set_cpu_budget(Some(std::time::Duration::ZERO));
+        let deferred = r.plan(&planet, eye, 160.0, 16);
+        assert!(deferred.jobs.is_empty() && deferred.evictions.is_empty());
+        assert_eq!(r.residents.get(key).unwrap().record, record);
+        r.set_cpu_budget(None);
+        let retry = r.plan(&planet, eye, 160.0, 1);
+        assert_eq!(retry.job_keys, vec![key]);
+        assert_eq!(retry.jobs[0].record, record);
+        r.complete_jobs([(key, 0)]);
+        assert!(!r.pool_pressure);
     }
 
     #[test]
