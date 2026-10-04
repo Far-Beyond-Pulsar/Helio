@@ -1378,6 +1378,7 @@ impl Residency {
         let out_of_time = || deadline.is_some_and(|at| std::time::Instant::now() >= at);
         if out_of_time() || self.ground_clearance.is_none() { return; }
         let mut candidates = Vec::new();
+        let mut refreshed = FxHashSet::default();
         let mut camera_leases = self.visible_leases.values()
             .filter(|lease| matches!(lease.origin, LeaseOrigin::Camera)).count();
         for &block in blocks {
@@ -1401,6 +1402,14 @@ impl Residency {
                 if !self.transient_wanted(block) { continue; }
             }
             self.queue_obsolete_owners(block);
+            let (face, _, i, j) = unpack(block);
+            // Tier-1 refs count exact resident columns, including in-flight
+            // publications. Preserve the lease above, but avoid probing all
+            // sixteen records again when none can need an initial retry.
+            if count == 16 && self.initial_retries.is_empty()
+                && self.blocks.get(&(level as u32, face, 1, i >> 2, j >> 2))
+                    .is_some_and(|owner| owner.refs == 16) { continue; }
+            let start = candidates.len();
             for &key in &keys[..count] {
                 if !self.publishing.contains_key(&key)
                     && (!self.residents.contains_key(key) || self.initial_retries.contains(&key)) {
@@ -1408,21 +1417,22 @@ impl Residency {
                     candidates.push((level, key));
                 }
             }
+            if candidates.len() != start { refreshed.insert(block); }
         }
-        if candidates.is_empty() { return; }
+        if candidates.is_empty() && self.visible_admission.is_empty() { return; }
         // Current view ranks must replace the previous view's ordinary ranks,
         // which have no lease origin. They remain queued at their normal
         // bucket instead of masquerading as permanently captured fine work.
         let mut remaining = std::mem::take(&mut self.visible_admission);
-        let current: FxHashSet<_> = candidates.iter().copied().collect();
-        remaining.retain(|entry| !current.contains(entry)
-            && self.visible_leases.get(&(entry.1 & !(3u64 | (3u64 << 32))))
-                .is_some_and(|lease| matches!(lease.origin, LeaseOrigin::Captured(_))));
-        let mut fine = VecDeque::new();
-        for candidate in candidates {
-            if fine.len() == VISIBLE_ADMISSION_COLUMNS { break; }
-            fine.push_back(candidate);
-        }
+        remaining.retain(|entry| {
+            let block = entry.1 & !(3u64 | (3u64 << 32));
+            !refreshed.contains(&block) && self.visible_leases.get(&block)
+                .is_some_and(|lease| matches!(lease.origin, LeaseOrigin::Captured(_)))
+        });
+        // Move the selected column allocation directly into the FIFO. Ranking
+        // replacement needs tile identities, not a second per-column hash set.
+        let mut fine: VecDeque<_> = candidates.into();
+        fine.truncate(VISIBLE_ADMISSION_COLUMNS);
         // A captured ridge can require a finer level than the under-eye ground
         // bands. Keep that accepted whole-tile prefix and its original clocks.
         let base = self.camera_base_level();
@@ -5568,6 +5578,87 @@ mod tests {
         assert_eq!(source.frame, 10);
         assert_eq!(source.view, 7);
         assert_eq!(source.at, at, "intake never renews a captured source clock");
+    }
+
+    #[test]
+    fn camera_refresh_completed_tile_preserves_lease_edits_and_captured_fifo() {
+        let (_, mut r, _, _) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        let block = r.camera_blocks(eye, &|| false)[0];
+        r.refresh_camera_pending(&[block], None);
+        let (keys, count) = r.visible_columns(block).unwrap();
+        assert_eq!(count, 16);
+        for &key in &keys {
+            let record = r.alloc_record().unwrap();
+            assert!(r.acquire_blocks(key, &mut FrameWork::default()));
+            r.residents.insert(key, Resident { record, blocks: true, ..Default::default() });
+        }
+        let previous = r.edits.alloc(2, r.capacity.edit_words).unwrap();
+        let next = r.edits.alloc(2, r.capacity.edit_words).unwrap();
+        let record = r.residents.get(keys[0]).unwrap().record;
+        r.residents.get_mut(keys[0]).unwrap().edit_block = Some(previous);
+        r.publishing.insert(keys[0], EditPublication { record, previous: Some(previous),
+            next: Some(next), evicted: false, initial_bucket: None });
+        r.urgent.push(keys[0]);
+        let (face, level, i, j) = unpack(block);
+        let captured = pack(key0(face, level, i + 4), j as u32);
+        let source = r.visible_view.unwrap();
+        r.visible_leases.insert(captured, VisibleLease { origin: LeaseOrigin::Captured(source),
+            serial: r.requested, retiring: false, retired: 0,
+            current_demand_frame: Some(r.frame) });
+        let (captured_keys, _) = r.visible_columns(captured).unwrap();
+        r.visible_admission.extend(captured_keys.map(|key| (level as usize, key)));
+        let before = r.levels[level as usize].pending.at.clone();
+        r.frame += 1;
+        r.refresh_camera_pending(&[block], None);
+        assert_eq!(r.levels[level as usize].pending.at, before,
+            "completed resident tiles do not repeat per-column pending work");
+        assert_eq!(r.visible_admission.iter().copied().collect::<Vec<_>>(),
+            captured_keys.map(|key| (level as usize, key)),
+            "completed Camera ranks clear without discarding Captured demand");
+        assert_eq!(r.visible_leases[&block].current_demand_frame, Some(r.frame));
+        let LeaseOrigin::Captured(retained) = r.visible_leases[&captured].origin else { panic!("captured clock replaced") };
+        assert_eq!((retained.frame, retained.view, retained.at), (source.frame, source.view, source.at));
+        assert_eq!(r.residents.get(keys[0]).unwrap().edit_block, Some(previous));
+        assert_eq!(r.publishing[&keys[0]].next, Some(next));
+        assert_eq!(r.urgent, vec![keys[0]]);
+        assert!(!r.edits.free[previous.1 as usize].contains(&previous.0));
+        assert!(!r.edits.free[next.1 as usize].contains(&next.0));
+    }
+
+    #[test]
+    fn camera_refresh_partial_and_complete_retry_keep_exact_issuable_fifo() {
+        for resident_count in [9, 16] {
+            let (_, mut r, _, _) = current_bridge_fixture();
+            let eye = r.current_request.as_ref().unwrap().eye;
+            r.set_ground_clearance(10.0);
+            let block = r.camera_blocks(eye, &|| false)[0];
+            let source = r.visible_view.unwrap();
+            r.visible_leases.insert(block, VisibleLease { origin: LeaseOrigin::Captured(source),
+                serial: r.requested, retiring: false, retired: 0,
+                current_demand_frame: Some(r.frame) });
+            r.refresh_camera_pending(&[block], None);
+            let (keys, _) = r.visible_columns(block).unwrap();
+            for &key in &keys[..resident_count] {
+                let record = r.alloc_record().unwrap();
+                assert!(r.acquire_blocks(key, &mut FrameWork::default()));
+                r.residents.insert(key, Resident { record, blocks: true, ..Default::default() });
+            }
+            let record = r.residents.get(keys[8]).unwrap().record;
+            r.publishing.insert(keys[8], EditPublication { record, previous: None,
+                next: None, evicted: false, initial_bucket: Some(0) });
+            r.initial_retries.insert(keys[2]);
+            r.refresh_camera_pending(&[block], None);
+            let expected: Vec<_> = keys.iter().enumerate()
+                .filter(|&(index, _)| index == 2 || index >= resident_count)
+                .map(|(_, &key)| (0, key)).collect();
+            assert_eq!(r.visible_admission.iter().copied().collect::<Vec<_>>(), expected,
+                "tile replacement retains every missing column and retry exactly once");
+            assert!(r.initial_retries.contains(&keys[2]));
+            assert!(!r.publishing[&keys[8]].evicted);
+            assert!(matches!(r.visible_leases[&block].origin, LeaseOrigin::Captured(_)));
+        }
     }
 
     #[test]
