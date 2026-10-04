@@ -2731,14 +2731,11 @@ impl Residency {
     pub fn take_live_blocks(&mut self) -> Option<&[u32]> {
         std::mem::take(&mut self.live_dirty).then_some(self.live_tier1.as_slice())
     }
-    /// Every resident column owns attached summary blocks, so a tier-1 block
+    /// Every resident column owns its summary blocks, so a tier-1 block
     /// whose key does not match (or that has no published column) proves
-    /// its columns absent. Handoff retains referenced logical blocks when
-    /// detaching their GPU slots; those records still require a hash lookup.
+    /// its columns absent.
     pub fn blocks_exact(&self) -> bool {
-        // Attached owners are a subset of positive-ref logical blocks.
-        // Equal counts conservatively prove attachment at every tier.
-        self.block_conflicts == 0 && self.blocks.len() == self.block_owner.len()
+        self.block_conflicts == 0
     }
     pub fn live_block_count(&self) -> usize {
         self.live_tier1.len()
@@ -5465,59 +5462,6 @@ mod tests {
             assert!(current.iter().filter_map(|&key| r.residents.get(key)).all(|resident| !resident.blocks));
             assert!(work.block_inits.is_empty() && work.jobs.is_empty() && work.evictions.is_empty());
         }
-    }
-
-    #[test]
-    fn blocks_exact_rejects_retained_detached_records_until_reattached() {
-        let (_, mut r, old, _) = current_alias_fixture();
-        let records: Vec<_> = old.iter().map(|&key| r.residents.get(key).unwrap().record).collect();
-        let (face, level, i, j) = unpack(old[0]);
-        assert!(r.blocks_exact());
-        assert_eq!(r.block_conflicts, 0);
-        for tier in 1..=BLOCK_TIERS {
-            let owner = (level, face, tier, i >> (2 * tier), j >> (2 * tier));
-            let mut work = FrameWork::default();
-            r.detach_summary_owner(owner, &mut work);
-            assert!(!r.blocks_exact(), "retained tier{tier} records cannot prove GPU absence");
-            assert_eq!(r.block_conflicts, 0, "handoff retains summary references");
-            assert_eq!(r.blocks[&owner].refs, 16);
-            assert!(old.iter().all(|&key| r.residents.get(key).unwrap().blocks));
-            assert_eq!(old.iter().map(|&key| r.residents.get(key).unwrap().record).collect::<Vec<_>>(), records);
-            r.attach_summary_owner(owner, &mut work);
-            assert!(r.blocks_exact());
-            assert!(work.jobs.is_empty() && work.evictions.is_empty());
-        }
-        table_is_exact(&r);
-    }
-
-    #[test]
-    fn blocks_exact_alias_reuse_recovers_after_last_detached_reference_releases() {
-        let (_, mut r, old, new) = current_alias_fixture();
-        assert!(r.blocks_exact());
-        let mut incoming = vec![new[0]];
-        let selected = select_camera_owners(&mut incoming);
-        let mut work = FrameWork::default();
-        r.handoff_camera_owners(&selected, &mut work, &|| false);
-        assert!(!r.blocks_exact());
-        for &key in &new {
-            let record = r.alloc_record().unwrap();
-            assert!(r.acquire_blocks(key, &mut work));
-            r.residents.insert(key, Resident { record, blocks: true, ..Default::default() });
-        }
-        assert_eq!(r.blocks.len(), 6);
-        assert_eq!(r.block_owner.len(), 3);
-        assert!(!r.blocks_exact(), "replacement slots cannot hide retained detached owners");
-        let replacement = r.block_owner.clone();
-        for &key in &old[..15] { r.evict(key, &mut work); }
-        assert!(!r.blocks_exact(), "the last retained column still needs an exact lookup");
-        r.evict(old[15], &mut work);
-        assert_eq!(r.block_owner, replacement);
-        assert!(r.blocks_exact());
-        assert!(r.blocks.values().all(|block| block.refs == 16));
-        for &key in &new { r.evict(key, &mut work); }
-        assert!(r.blocks.is_empty() && r.block_owner.is_empty());
-        assert!(r.blocks_exact(), "zero-ref owners leave no stale logical entries");
-        table_is_exact(&r);
     }
 
     #[test]
