@@ -283,6 +283,20 @@ fn pop_pending(levels: &mut [Level], top_level: u32,
     Some((index, key, bucket))
 }
 
+fn current_geometry_allows(grid: &Grid, request: Option<&WindowRequest>, key: u64) -> bool {
+    unpack(key).1 >= 3 || request.is_none_or(|request|
+        crate::windows::current_block_wanted(grid, request, key & !(3u64 | (3u64 << 32))))
+}
+
+fn cached_current_geometry(grid: &Grid, request: Option<&WindowRequest>, key: u64,
+    last: &mut Option<(u64, bool)>) -> bool {
+    let block = key & !(3u64 | (3u64 << 32));
+    if let Some((_, allowed)) = last.filter(|&(previous, _)| previous == block) { return allowed; }
+    let allowed = current_geometry_allows(grid, request, key);
+    *last = Some((block, allowed));
+    allowed
+}
+
 /// A full tier-1 block references its sixteen distinct resident columns.
 /// Snapshot additions for that exact run cannot queue work unless a failed
 /// initial publication is retrying. Partial or reordered runs use the usual
@@ -1361,7 +1375,13 @@ impl Residency {
         }
     }
 
+    #[cfg(test)]
     fn retire_obsolete_owner_step(&mut self, work: &mut FrameWork) -> bool {
+        self.retire_obsolete_owner_step_current(work, &mut None)
+    }
+
+    fn retire_obsolete_owner_step_current(&mut self, work: &mut FrameWork,
+        last_demand: &mut Option<(u64, bool)>) -> bool {
         let Some(task) = self.obsolete_owners.front_mut() else { return false };
         if !self.blocks.contains_key(&task.owner) {
             self.obsolete_owners.pop_front();
@@ -1382,7 +1402,9 @@ impl Residency {
         if task.offset == size * size { self.obsolete_owners.pop_front(); }
         if absent { return true; }
         let key = pack(key0(face, level, i), j as u32);
-        if self.levels[level as usize].wanted.is_some() && !self.protected_wanted(key) {
+        let wanted_now = self.current_wanted(key)
+            && cached_current_geometry(&self.grid, self.current_request.as_ref(), key, last_demand);
+        if self.levels[level as usize].wanted.is_some() && !wanted_now && !self.transient_wanted(key) {
             self.levels[level as usize].pending.remove(key);
             if self.residents.contains_key(key) { self.evict(key, work); }
         }
@@ -1392,8 +1414,10 @@ impl Residency {
     /// Snapshot mode holds one full demand per level. Retire actual residents
     /// through a persistent table cursor, never millions of historical keys.
     fn apply_snapshot(&mut self, work: &mut FrameWork, out_of_time: &impl Fn() -> bool) {
+        let mut last_demand = None;
         while (self.diffs.iter().any(|diffs| !diffs.is_empty())
-            || self.retire_finished_epoch < self.snapshot_epoch) && !out_of_time() {
+            || self.retire_finished_epoch < self.snapshot_epoch
+            || !self.obsolete_owners.is_empty()) && !out_of_time() {
             for step in 0..128 {
                 // Each eviction remains atomic; stop before the next key
                 // once the window phase has consumed its time allowance.
@@ -1402,7 +1426,7 @@ impl Residency {
                 // Reserve half the same bounded work for the normal cursor
                 // until its epoch completes, then let owners use all of it.
                 if (step < 64 || self.retire_finished_epoch >= self.snapshot_epoch)
-                    && self.retire_obsolete_owner_step(work) { continue; }
+                    && self.retire_obsolete_owner_step_current(work, &mut last_demand) { continue; }
                 // Admission only inserts current demand. Once this snapshot's
                 // pass is complete, remaining adds need no repeated scan.
                 // Lease expiry retires separately, and aliases stay above.
@@ -1448,7 +1472,8 @@ impl Residency {
                         |identity| self.blocks.get(&identity).map(|block| block.refs));
                     if skip != 0 { at += skip; continue; }
                     let (priority, key) = queued.diff.adds[at];
-                    if wanted.contains(&key) && !self.publishing.contains_key(&key)
+                    let allowed = cached_current_geometry(&self.grid, self.current_request.as_ref(), key, &mut last_demand);
+                    if allowed && wanted.contains(&key) && !self.publishing.contains_key(&key)
                         && (!self.residents.contains_key(key) || self.initial_retries.contains(&key)) {
                         state.pending.insert(key, PendingQueue::bucket(priority));
                     }
@@ -1687,6 +1712,9 @@ impl Residency {
         // must all belong to current wanted demand at the selected bucket.
         // Match scalar admission without creating or refreshing any demand.
         let transient = visible && self.transient_wanted(first);
+        if !transient && !current_geometry_allows(&self.grid, self.current_request.as_ref(), first) {
+            return false;
+        }
         for &key in &keys {
             if (!self.current_wanted(key) && !transient) || self.residents.contains_key(key)
                 || self.initial_retries.contains(&key) || self.publishing.contains_key(&key)
@@ -1860,6 +1888,7 @@ impl Residency {
         let mut steps = 0u32;
         let mut awaiting_publication = Vec::new();
         let mut last_summary_check = None;
+        let mut last_demand = None;
         let mut pending_selection = None;
         let admission_deadline = budget_time.map(|budget| started + budget);
         let mut admission_attempts = 0;
@@ -1903,6 +1932,8 @@ impl Residency {
                 }
             }
             let transient = self.transient_wanted(key);
+            let allowed = cached_current_geometry(&self.grid, self.current_request.as_ref(), key, &mut last_demand);
+            if !allowed && !transient { continue; }
             let leased = self.visible_leases.contains_key(&(key & !(3u64 | (3u64 << 32))));
             if (self.levels[index].wanted.as_ref().is_some_and(|wanted| !wanted.contains(&key))
                 || leased && !self.current_wanted(key)) && !transient {
@@ -2577,7 +2608,7 @@ mod tests {
 
     #[test]
     fn moving_snapshots_bound_history_and_converge_without_generating_obsolete_keys() {
-        let (planet, mut r, old, eye) = edit_fixture();
+        let (planet, mut r, old, _) = edit_fixture();
         let face = crate::grid::PLANE_FACE;
         let mut latest = Vec::new();
         for serial in 1..=500 {
@@ -2590,7 +2621,8 @@ mod tests {
             assert!(r.levels[0].pending.is_empty(), "superseded pending history must not accumulate");
         }
         r.requested = r.applied;
-        let work = r.plan(&planet, eye, 1.0, 16);
+        let eye = set_fixture_request(&mut r, latest[0], 120.0);
+        let work = r.plan(&planet, eye, 120.0, 16);
         assert_eq!(work.job_keys.iter().copied().collect::<FxHashSet<_>>(), latest.iter().copied().collect());
         assert_eq!(work.evictions, vec![0]);
         assert!(!r.residents.contains_key(old));
@@ -2947,6 +2979,9 @@ mod tests {
         r.levels[0].wanted = Some(std::sync::Arc::new(near.iter().chain(&far).copied().collect()));
         r.levels[0].active = true;
         for &key in near.iter().chain(&far) { r.levels[0].pending.insert(key, 0); }
+        // These authored current blocks are32–64m away, so their fine
+        // window must encompass them rather than use the edit fixture's1m.
+        r.last_request.as_mut().unwrap().lod0 = 120.0;
         (planet, r, eye, near, far)
     }
 
@@ -2960,7 +2995,7 @@ mod tests {
     #[test]
     fn complete_ordinary_batch_uses_selected_bucket_without_visible_feedback() {
         let (planet, mut r, eye, near, far) = visible_order_fixture();
-        let work = r.plan(&planet, eye, 1.0, 16);
+        let work = r.plan(&planet, eye, 120.0, 16);
         assert_eq!(work.job_keys, far, "same-bucket ordinary LIFO selection remains authoritative");
         assert_eq!(r.stats.admission_batched_columns, 16);
         assert_eq!(r.stats.admission_attempts, 16);
@@ -2981,17 +3016,18 @@ mod tests {
             let (planet, fixture, old, eye) = edit_fixture();
             let mut r = Residency::new(*planet.grid(), Capacity { table_bits: 12, ..Default::default() });
             r.last_request = fixture.last_request.clone();
+            r.last_request.as_mut().unwrap().lod0 = 120.0;
             let (face, _, i, j) = unpack(old);
             let mut wanted = FxHashSet::default();
             for block in 0..100 {
-                let first = pack(key0(face, 0, (i & !3) + 40 + block * 4), (j & !3) as u32);
+                let first = pack(key0(face, 0, (i & !3) + 40 + (block % 10) * 4), ((j & !3) + (block / 10) * 4) as u32);
                 let (keys, count) = r.visible_columns(first).unwrap();
                 assert_eq!(count, 16);
                 for key in keys { wanted.insert(key); r.levels[0].pending.insert(key, 0); }
             }
             r.levels[0].active = true;
             r.levels[0].wanted = Some(std::sync::Arc::new(wanted.clone()));
-            let work = r.plan(&planet, eye, 1.0, budget);
+            let work = r.plan(&planet, eye, 120.0, budget);
             assert_eq!(work.jobs.len(), budget);
             assert_eq!(r.stats.admission_batched_columns, 1536,
                 "ordinary generation must not stop batching at visible feedback's64-block cap");
@@ -3170,7 +3206,7 @@ mod tests {
     fn complete_visible_batch_plan_uses_existing_rank_and_reports_last_plan_counters() {
         let (planet, mut r, eye, near, far) = visible_order_fixture();
         r.prioritize_visible_blocks([near[0], far[0]].map(|key| (key as u32, (key >> 32) as u32)));
-        let work = r.plan(&planet, eye, 1.0, 16);
+        let work = r.plan(&planet, eye, 120.0, 16);
         assert_eq!(work.job_keys, near);
         assert_eq!(r.stats.admission_batched_columns, 16);
         assert_eq!(r.stats.admission_attempts, 16);
@@ -3179,7 +3215,7 @@ mod tests {
         assert!(far.iter().all(|&key| !r.residents.contains_key(key)));
         r.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
         r.set_cpu_budget(Some(std::time::Duration::ZERO));
-        assert!(r.plan(&planet, eye, 1.0, 16).jobs.is_empty());
+        assert!(r.plan(&planet, eye, 120.0, 16).jobs.is_empty());
         assert_eq!(r.stats.admission_attempts, 0);
         assert_eq!(r.stats.admission_batched_columns, 0);
     }
@@ -3257,7 +3293,7 @@ mod tests {
         let mut admitted = FxHashSet::default();
         for _ in 0..2 {
             r.prioritize_visible_blocks(requests());
-            let work = r.plan(&planet, eye, 1.0, 8);
+            let work = r.plan(&planet, eye, 120.0, 8);
             assert_eq!(work.jobs.len(), 8);
             assert!(work.job_keys.iter().all(|key| near.contains(key)), "nearest visible geometry must consume the partial budget first");
             admitted.extend(work.job_keys.iter().copied());
@@ -3265,7 +3301,7 @@ mod tests {
         }
         assert_eq!(admitted, near.iter().copied().collect());
         assert!(far.iter().all(|key| !r.residents.contains_key(*key)));
-        let work = r.plan(&planet, eye, 1.0, 16);
+        let work = r.plan(&planet, eye, 120.0, 16);
         assert_eq!(work.job_keys.iter().copied().collect::<FxHashSet<_>>(), far.iter().copied().collect());
     }
 
@@ -3287,7 +3323,7 @@ mod tests {
         // Keep this test's authored demand fixed, independently of the planner.
         r.last_request.as_mut().unwrap().eye = eye;
         r.prioritize_visible_blocks([far[0], near[0]].map(|key| (key as u32, (key >> 32) as u32)));
-        let work = r.plan(&planet, eye, 1.0, 16);
+        let work = r.plan(&planet, eye, 120.0, 16);
         assert_eq!(work.job_keys.iter().copied().collect::<FxHashSet<_>>(), far.iter().copied().collect());
         assert!(near.iter().all(|key| !r.residents.contains_key(*key)));
     }
@@ -3295,7 +3331,8 @@ mod tests {
     #[test]
     fn elapsed_plan_deadline_preserves_diffs_and_pending_without_admitting_work() {
         let (planet, mut r, _, eye) = edit_fixture();
-        let key = pack(key0(crate::grid::PLANE_FACE, 0, 1000), 0);
+        let (cell, _) = r.grid.locate(eye);
+        let key = pack(key0(cell.face, 0, (cell.i >> 3) + 1), (cell.j >> 3) as u32);
         r.levels[0].pending.insert(key, 1);
         r.apply(WindowUpdate { levels: vec![LevelDiff {
             level: 0, active: true, adds: vec![(0.0, key)], ..Default::default()
@@ -3885,7 +3922,9 @@ mod tests {
             }
         }
         assert!(incoming.iter().all(|&key| !residency.blocks_conflict(key)));
-        let eye = DVec3::Y * 30.0;
+        let (face, level, i, j) = unpack(incoming[0]);
+        let eye = residency.grid.ground_point(face, f64::from((i + 2) * (BRICK << level)),
+            f64::from((j + 2) * (BRICK << level))) + DVec3::Y * 30.0;
         // Keep this isolated delta as the planner's current request, then
         // give admission its normal deadline and fixed16-job GPU allowance.
         residency.requested = 1;
@@ -3909,26 +3948,27 @@ mod tests {
 
     #[test]
     fn early_incoming_summary_alias_waits_for_retirement_without_blocking_other_jobs() {
-        let (planet, mut residency, old, eye) = edit_fixture();
+        let (planet, mut residency, old, _) = edit_fixture();
         let mut work = FrameWork::default();
         assert!(residency.acquire_blocks(old, &mut work));
         residency.residents.get_mut(old).unwrap().blocks = true;
         let (face, level, i, j) = unpack(old);
         let incoming = pack(key0(face, level, i + 512), j as u32);
-        let available = pack(key0(face, level, i + 80), j as u32);
+        let available = pack(key0(face, level, i + 480), j as u32);
+        let eye = set_fixture_request(&mut residency, incoming, 120.0);
         assert!(residency.blocks_conflict(incoming));
         assert!(!residency.blocks_conflict(available));
         residency.catching_up[level as usize] = 1;
         residency.levels[level as usize].pending.insert(incoming, 0);
         residency.levels[level as usize].pending.insert(available, 1);
-        let work = residency.plan(&planet, eye, 1.0, 2);
+        let work = residency.plan(&planet, eye, 120.0, 2);
         assert_eq!(work.job_keys, vec![available]);
         assert!(!residency.residents.contains_key(incoming));
         assert!(residency.levels[level as usize].pending.at.contains_key(&incoming));
         let mut retirement = FrameWork::default();
         residency.evict(old, &mut retirement);
         residency.catching_up[level as usize] = 0;
-        let work = residency.plan(&planet, eye, 1.0, 1);
+        let work = residency.plan(&planet, eye, 120.0, 1);
         assert_eq!(work.job_keys, vec![incoming]);
         assert!(residency.residents.get(incoming).unwrap().blocks,
             "early staging may not permanently publish a summaryless incoming column");
@@ -3969,7 +4009,11 @@ mod tests {
     fn cached_block_admission_defers_aliases_without_duplicating_summary_refs() {
         let (planet, mut r, old, eye) = edit_fixture();
         r.evict(old, &mut FrameWork::default());
-        let (face, level, i, j) = unpack(old);
+        let (face, _, _, _) = unpack(old);
+        // Two toroidal aliases cannot simultaneously lie in a fine current
+        // window. Exercise their shared admission/reference guards atL3.
+        let level = 3;
+        let (i, j) = (0, 0);
         let key = |offset| pack(key0(face, level, (i & !3) + offset), (j & !3) as u32);
         let a = key(0);
         let alias = key(512);
@@ -4572,7 +4616,8 @@ mod tests {
     fn wanted_focus_preserves_partial_job_budget_and_coarser_priority() {
         let (planet,mut r,eye,focus) = focus_prefix_fixture();
         r.refresh_near_pending(eye,None);
-        let coarse=pack(key0(crate::grid::PLANE_FACE,1,1),1);
+        let (cell, _) = r.grid.locate(eye);
+        let coarse=pack(key0(cell.face,1,cell.i >> 4),(cell.j >> 4) as u32);
         r.levels[1].active=true;
         r.levels[1].pending.insert(coarse,0);
         let work=r.plan(&planet,eye,120.0,7);
@@ -4580,6 +4625,16 @@ mod tests {
         assert_eq!(work.job_keys[0],coarse,"a closer coarser pending key must retain its priority");
         assert!(work.job_keys[1..].iter().all(|key|focus.contains(key)));
         assert_eq!(focus.iter().filter(|key|r.levels[0].pending.at.contains_key(key)).count(),10);
+    }
+
+    fn set_fixture_request(r: &mut Residency, key: u64, lod0: f64) -> DVec3 {
+        let (face, level, i, j) = unpack(key);
+        let eye = r.grid.ground_point(face, f64::from((i + 2) * (BRICK << level)),
+            f64::from((j + 2) * (BRICK << level))) + DVec3::Y * 10.0;
+        let request = r.last_request.as_mut().unwrap();
+        request.eye = eye;
+        request.lod0 = lod0;
+        eye
     }
 
     fn current_bridge_fixture() -> (std::sync::Arc<Planet>, Residency, u64, std::time::Instant) {
@@ -4600,6 +4655,139 @@ mod tests {
         r.applied_levels[0] = 2;
         r.applied_issued_at[0] = Some(at + std::time::Duration::from_millis(1));
         (planet, r, key, at)
+    }
+
+    fn current_alias_fixture() -> (std::sync::Arc<Planet>, Residency, Vec<u64>, Vec<u64>) {
+        let (planet, mut r, _, _) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        let incoming = r.camera_blocks(eye, &|| false)[0];
+        let (face, level, i, j) = unpack(incoming);
+        let outgoing = pack(key0(face, level, i - 512), j as u32);
+        let columns = |r: &Residency, block| {
+            let (keys, count) = r.visible_columns(block).unwrap();
+            keys[..count].to_vec()
+        };
+        let old = columns(&r, outgoing);
+        let new = columns(&r, incoming);
+        r.levels[0].wanted = Some(std::sync::Arc::new(old.iter().chain(&new).copied().collect()));
+        for &key in &old {
+            let record = r.alloc_record().unwrap();
+            assert!(r.acquire_blocks(key, &mut FrameWork::default()));
+            r.residents.insert(key, Resident { record, blocks: true, ..Default::default() });
+        }
+        assert!(r.current_wanted(old[0]), "accepted worker demand intentionally still wants the old owner");
+        assert!(!current_geometry_allows(&r.grid, r.current_request.as_ref(), old[0]));
+        assert!(current_geometry_allows(&r.grid, r.current_request.as_ref(), new[0]));
+        assert!(r.blocks_conflict(new[0]));
+        assert!(r.diffs.iter().all(|diff| diff.is_empty()));
+        assert_eq!(r.retire_finished_epoch, r.snapshot_epoch);
+        (planet, r, old, new)
+    }
+
+    #[test]
+    fn current_alias_settled_demand_retires_stale_wanted_and_publishes_current_block() {
+        let (planet, mut r, old, new) = current_alias_fixture();
+        let epoch = r.snapshot_epoch;
+        r.queue_obsolete_owners(new[0]);
+        let mut retired = FrameWork::default();
+        r.apply_snapshot(&mut retired, &|| false);
+        assert_eq!(retired.evictions.len(), old.len());
+        assert!(old.iter().all(|&key| !r.residents.contains_key(key) && r.current_wanted(key)));
+        assert!(new.iter().all(|&key| !r.blocks_conflict(key)));
+        assert!(r.obsolete_owners.is_empty());
+        assert_eq!(r.snapshot_epoch, epoch, "a stationary turn needs no new worker epoch to retire aliases");
+
+        let eye = r.current_request.as_ref().unwrap().eye;
+        let work = r.plan(&planet, eye, 160.0, 16);
+        assert_eq!(work.job_keys, new);
+        r.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
+        table_is_exact(&r);
+        assert!(new.iter().all(|&key| r.residents.contains_key(key)));
+    }
+
+    #[test]
+    fn current_alias_stale_adds_and_admission_preserve_evicted_edit_publication() {
+        let (mut planet, mut r, old, new) = current_alias_fixture();
+        let (face, level, i, j) = unpack(old[0]);
+        let center = r.grid.ground_point(face, f64::from((i + 2) * (BRICK << level)),
+            f64::from((j + 2) * (BRICK << level)));
+        std::sync::Arc::make_mut(&mut planet).apply(crate::edits::Brush {
+            center: center.to_array(), ..test_brush(1.5)
+        }).unwrap();
+        r.sync_edits(&planet, &mut FrameWork::default());
+        r.urgent.clear();
+        for request in [&mut r.current_request, &mut r.last_request] {
+            let request = request.as_mut().unwrap();
+            request.outer_radius = planet.outer_radius();
+            request.planet = Some(planet.clone());
+        }
+        let previous = r.edits.alloc(2, r.capacity.edit_words).unwrap();
+        let next = r.edits.alloc(2, r.capacity.edit_words).unwrap();
+        let record = r.residents.get(old[0]).unwrap().record;
+        r.residents.get_mut(old[0]).unwrap().edit_block = Some(previous);
+        r.publishing.insert(old[0], EditPublication { record, previous: Some(previous),
+            next: Some(next), evicted: false, initial_bucket: None });
+        r.queue_obsolete_owners(new[0]);
+        r.apply_snapshot(&mut FrameWork::default(), &|| false);
+        assert!(r.publishing[&old[0]].evicted);
+        for journal in [previous, next] {
+            assert!(!r.edits.free[journal.1 as usize].contains(&journal.0));
+        }
+
+        let wanted: Vec<_> = old.iter().chain(&new).copied().collect();
+        r.apply(snapshot_update(3, &wanted));
+        r.apply_snapshot(&mut FrameWork::default(), &|| false);
+        assert!(old.iter().all(|key| !r.levels[0].pending.at.contains_key(key)), "stale accepted additions cannot reclaim an alias");
+        assert!(new.iter().all(|key| r.levels[0].pending.at.contains_key(key)));
+        r.complete_jobs([(old[0], 2)]);
+        assert!(!r.publishing.contains_key(&old[0]) && !r.initial_retries.contains(&old[0]));
+        for journal in [previous, next] {
+            assert!(r.edits.free[journal.1 as usize].contains(&journal.0));
+        }
+        assert_eq!(planet.edits().len(), 1, "retiring GPU ownership retains the canonical edit");
+
+        // Even an already queued stale block must fail both the batch and
+        // scalar gates, instead of recapturing the just released owner slot.
+        r.levels[0].pending.clear();
+        for &key in &old[1..] { r.levels[0].pending.insert(key, 0); }
+        let mut rejected = FrameWork::default();
+        assert!(!r.admit_pending_block(&planet, 0, old[0], 0, 16, None, false, &mut rejected));
+        assert!(rejected.jobs.is_empty());
+        r.levels[0].pending.insert(old[0], 0);
+        r.ground_clearance = None;
+        let eye = r.current_request.as_ref().unwrap().eye;
+        let work = r.plan(&planet, eye, 160.0, 1);
+        assert!(work.job_keys.iter().all(|key| !old.contains(key)));
+        assert!(old.iter().all(|&key| !r.residents.contains_key(key)));
+        table_is_exact(&r);
+    }
+
+    #[test]
+    fn current_alias_returned_and_live_transient_owners_remain_protected() {
+        for transient in [false, true] {
+            let (_, mut r, old, new) = current_alias_fixture();
+            if transient {
+                let source = r.visible_view.unwrap();
+                r.visible_leases.insert(old[0], VisibleLease {
+                    origin: LeaseOrigin::Captured(source), serial: r.requested,
+                    retiring: false, retired: 0, current_demand_frame: Some(r.frame),
+                });
+                assert!(r.transient_wanted(old[0]));
+            } else {
+                let (face, level, i, j) = unpack(old[0]);
+                let eye = r.grid.ground_point(face, f64::from((i + 2) * (BRICK << level)),
+                    f64::from((j + 2) * (BRICK << level))) + DVec3::Y * 10.0;
+                r.current_request.as_mut().unwrap().eye = eye;
+                assert!(current_geometry_allows(&r.grid, r.current_request.as_ref(), old[0]));
+            }
+            r.queue_obsolete_owners(new[0]);
+            let mut retired = FrameWork::default();
+            r.apply_snapshot(&mut retired, &|| false);
+            assert!(retired.evictions.is_empty());
+            assert!(old.iter().all(|&key| r.residents.contains_key(key)));
+            assert!(r.blocks_conflict(new[0]), "current or transient owner cannot be silently replaced");
+        }
     }
 
     #[test]
