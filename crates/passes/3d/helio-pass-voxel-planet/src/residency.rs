@@ -1055,11 +1055,18 @@ impl Residency {
     }
 
     fn refresh_visible_pending_until(&mut self, mut out_of_time: impl FnMut() -> bool) {
+        self.refresh_visible_pending_current_until(&[], &mut out_of_time);
+    }
+
+    fn refresh_visible_pending_current_until(&mut self, camera_blocks: &[u64], mut out_of_time: impl FnMut() -> bool) {
         let mut captured_leases = self.visible_leases.values()
             .filter(|lease| matches!(lease.origin, LeaseOrigin::Captured(_))).count();
         let rank_requests = self.visible_rank_source.is_none_or(|source| self.source_is_current(source, 8));
         if !rank_requests {
-            self.visible_admission.clear();
+            // Captured rank expiry must not erase current demand already
+            // queued earlier in this plan, including ordinary unleased tiles.
+            let current: FxHashSet<_> = camera_blocks.iter().copied().collect();
+            self.visible_admission.retain(|(_, key)| current.contains(&(key & !(3u64 | (3u64 << 32)))));
             self.visible_rank_source = None;
             self.visible_blocks.clear();
         }
@@ -1198,38 +1205,73 @@ impl Residency {
                         if planes.iter().any(|normal| normal.dot(midpoint - eye)
                             + height * normal.dot(radial_up).abs()
                             + bound * (*normal - radial_up * normal.dot(radial_up)).length() < 0.0) { continue; }
+                        // The possible height interval admits raised slopes,
+                        // but is not evidence that a near tile is visible.
+                        // Rank the ground footprint first, with its tile extent
+                        // rather than the larger slope-admission margin.
+                        let ground_bound = width * std::f64::consts::FRAC_1_SQRT_2;
+                        let ground_visible = planes.iter().all(|normal| normal.dot(relative)
+                            + ground_bound * (*normal - radial_up * normal.dot(radial_up)).length() >= 0.0);
                         let distance2 = relative.length_squared().max(0.01);
                         let projected_cell = request.lod0 * f64::from(1u32 << level) / distance2.sqrt();
                         let oversized = if level == 0 { 1.0 } else { (projected_cell / 4.0).max(1.0) };
                         // Screen coverage per issued tile; oversized coarser cells
                         // cannot displace visibly resolved finer tiles.
                         let benefit = width * width / (distance2 * oversized.powi(4));
-                        candidates.push((benefit, block));
+                        candidates.push((ground_visible, benefit, block));
                     }
                 }
             }
         }
-        candidates.sort_unstable_by(|a, b| unpack(a.1).1.cmp(&unpack(b.1).1)
-            .then_with(|| b.0.total_cmp(&a.0)));
+        candidates.sort_unstable_by(|a, b| unpack(a.2).1.cmp(&unpack(b.2).1)
+            .then_with(|| b.0.cmp(&a.0))
+            .then_with(|| b.1.total_cmp(&a.1)));
+        let mut available_raised = [0usize; 3];
+        for &(ground, _, key) in &candidates {
+            if !ground { available_raised[unpack(key).1 as usize] += 1; }
+        }
         let mut selected = [0; 3];
-        candidates.retain(|&(_, key)| {
+        candidates.retain(|&(ground, _, key)| {
+            let level = unpack(key).1 as usize;
+            // Reserve eight of the same 64 slots for possible raised terrain.
+            // When ground candidates are scarce, the interval can use the rest.
+            let ground_limit = 64 - available_raised[level].min(8);
+            if ground && selected[level] == ground_limit { return false; }
             let count = &mut selected[unpack(key).1 as usize];
             *count += 1;
             *count <= 8 * 8
         });
         candidates.truncate(CAMERA_CANDIDATES);
-        candidates.into_iter().map(|(_, block)| block).collect()
+        candidates.into_iter().map(|(_, _, block)| block).collect()
     }
 
     /// Current camera tiles may arrive before the worker's wanted snapshot.
     /// Reuse its capped lease/publication path and FIFO; no forecast demand.
     fn refresh_camera_pending(&mut self, blocks: &[u64], deadline: Option<std::time::Instant>) {
-        let out_of_time = || deadline.is_some_and(|at| std::time::Instant::now() >= at);
+        self.refresh_camera_pending_until(blocks,
+            || deadline.is_some_and(|at| std::time::Instant::now() >= at));
+    }
+
+    fn refresh_camera_pending_until(&mut self, blocks: &[u64], mut out_of_time: impl FnMut() -> bool) {
         if out_of_time() || self.ground_clearance.is_none() { return; }
+        // A bounded intake must reach the actual visible bands before it
+        // spends its remaining slice filling the nearest level's whole list.
+        // Keep each sixteen-column tile coherent for normal batch admission.
+        let mut bands: [Vec<u64>; 3] = std::array::from_fn(|_| Vec::new());
+        for &block in blocks {
+            let level = unpack(block).1 as usize;
+            if level < bands.len() { bands[level].push(block); }
+        }
+        let mut ordered = Vec::with_capacity(blocks.len());
+        for row in 0..bands.iter().map(Vec::len).max().unwrap_or(0) {
+            for band in &bands {
+                if let Some(&block) = band.get(row) { ordered.push(block); }
+            }
+        }
         let mut candidates = Vec::new();
         let mut camera_leases = self.visible_leases.values()
             .filter(|lease| matches!(lease.origin, LeaseOrigin::Camera)).count();
-        for &block in blocks {
+        for block in ordered {
             if out_of_time() { break; }
             let level = unpack(block).1 as usize;
             let Some((keys, count)) = self.visible_columns(block) else { continue };
@@ -1898,27 +1940,35 @@ impl Residency {
             }
         }
         let t_drain = started.elapsed();
-        // Diffs take at most 60 % of the time while columns wait, so a
-        // window moving at speed cannot starve generation.
-        // New demand may not have reached pending yet. Keep admission's
-        // share even when queues were empty before applying the first diff.
-        let apply_out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b.mul_f64(0.6));
-        let mut camera_blocks = self.camera_blocks(eye, &apply_out_of_time);
+        let camera_out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b.mul_f64(0.35));
+        let mut camera_blocks = self.camera_blocks(eye, &camera_out_of_time);
+        let current_view = !camera_blocks.is_empty();
         let selected_owners = select_camera_owners(&mut camera_blocks);
         self.prioritize_camera_owners(&camera_blocks, &selected_owners);
-        self.retire_visible_leases_current(&camera_blocks, &mut work, &apply_out_of_time);
+        // Current view intake precedes background snapshots and captured
+        // feedback. All stages still share the same total CPU deadline.
+        let retire_out_of_time = move || budget_time.is_some_and(|b|
+            started.elapsed() >= b.mul_f64(if current_view { 0.15 } else { 0.6 }));
+        self.retire_visible_leases_current(&camera_blocks, &mut work, &retire_out_of_time);
+        let t_camera = started.elapsed();
+        self.refresh_camera_pending(&camera_blocks, budget_time.map(|b| started + b.mul_f64(0.35)));
+        let camera_time = started.elapsed() - t_camera;
+        let apply_out_of_time = move || budget_time.is_some_and(|b|
+            started.elapsed() >= b.mul_f64(if current_view { 0.45 } else { 0.6 }));
         if !apply_out_of_time() {
             if self.snapshot_mode { self.apply_snapshot_selected(&mut work, &apply_out_of_time, &selected_owners); }
             else { self.apply_queued(&mut work, &apply_out_of_time); }
         }
-        let t_windows = started.elapsed();
-        // Window diffs may spend 60% of the CPU budget. Refresh gets at most
-        // the next 10%, leaving 30% for issuing generation jobs this frame.
-        let refresh_deadline = budget_time.map(|budget| started + budget.mul_f64(0.7));
-        let visible_deadline = budget_time.map(|budget| started + budget.mul_f64(0.65));
-        self.refresh_visible_pending(visible_deadline);
+        let t_windows = started.elapsed() - camera_time;
+        // With current view work, preserve45% for issuing generation jobs.
+        // Without it, background window/captured scheduling keeps its share.
+        let refresh_deadline = budget_time.map(|budget|
+            started + budget.mul_f64(if current_view { 0.55 } else { 0.7 }));
+        let visible_deadline = budget_time.map(|budget|
+            started + budget.mul_f64(if current_view { 0.5 } else { 0.65 }));
+        self.refresh_visible_pending_current_until(&camera_blocks,
+            || visible_deadline.is_some_and(|at| std::time::Instant::now() >= at));
         let t_visible = started.elapsed();
-        self.refresh_camera_pending(&camera_blocks, refresh_deadline);
         self.refresh_near_pending(eye, refresh_deadline);
         let t_apply = started.elapsed();
         let t_near = t_windows + (t_apply - t_visible);
@@ -5033,6 +5083,69 @@ mod tests {
     }
 
     #[test]
+    fn camera_arrival_short_intake_queues_coherent_tiles_in_every_band() {
+        let (planet, mut r, _, _) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        let available = r.camera_blocks(eye, &|| false);
+        let blocks: Vec<_> = (0..3).flat_map(|level|
+            available.iter().copied().filter(move |&block| unpack(block).1 == level).take(2)).collect();
+        assert_eq!(blocks.len(), 6);
+        let mut checks = 0;
+        r.refresh_camera_pending_until(&blocks, || { checks += 1; checks > 4 });
+        assert_eq!(checks, 5, "the callback stops before the fourth atomic tile");
+        assert_eq!(r.visible_leases.len(), 3);
+        let queued: Vec<_> = r.visible_admission.iter().copied().collect();
+        assert_eq!(queued.len(), 48);
+        for level in 0..3 {
+            let (keys, count) = r.visible_columns(blocks[level * 2]).unwrap();
+            assert_eq!(count, 16);
+            assert_eq!(&queued[level * 16..level * 16 + 16],
+                &keys.iter().map(|&key| (level, key)).collect::<Vec<_>>());
+            assert!(!r.visible_leases.contains_key(&blocks[level * 2 + 1]));
+        }
+        r.refresh_camera_pending_until(&blocks, || true);
+        assert_eq!(r.visible_admission.iter().copied().collect::<Vec<_>>(), queued);
+        let work = r.plan(&planet, eye, 160.0, 48);
+        assert_eq!(work.jobs.len(), 48, "unchanged generation cap admits three complete tiles");
+        assert_eq!(r.stats.camera_jobs, [16, 16, 16]);
+        assert_eq!(r.stats.admission_batched_columns, 48);
+        r.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
+        table_is_exact(&r);
+    }
+
+    #[test]
+    fn camera_arrival_expired_captured_rank_preserves_fresh_ordinary_and_leased_fifo() {
+        let (_, mut r, _, at) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        let available = r.camera_blocks(eye, &|| false);
+        let blocks: Vec<_> = (0..2).map(|level|
+            *available.iter().find(|&&block| unpack(block).1 == level).unwrap()).collect();
+        let (ordinary, count) = r.visible_columns(blocks[0]).unwrap();
+        r.levels[0].wanted = Some(std::sync::Arc::new(ordinary[..count].iter().copied().collect()));
+        r.refresh_camera_pending(&blocks, None);
+        assert!(!r.visible_leases.contains_key(&blocks[0]));
+        assert!(matches!(r.visible_leases[&blocks[1]].origin, LeaseOrigin::Camera));
+        let current: Vec<_> = r.visible_admission.iter().copied().collect();
+        let captured = pack(key0(crate::grid::PLANE_FACE, 2, 128), 128);
+        let source = VisibleStamp { frame: 10, view: 7, at };
+        r.visible_leases.insert(captured, VisibleLease { origin: LeaseOrigin::Captured(source),
+            serial: 3, retiring: false, retired: 0, current_demand_frame: Some(r.frame) });
+        let (old, old_count) = r.visible_columns(captured).unwrap();
+        r.visible_admission.extend(old[..old_count].iter().map(|&key| (2, key)));
+        r.visible_rank_source = Some(source);
+        r.set_visible_view(19, 7, at);
+        r.refresh_visible_pending_current_until(&blocks, || false);
+        assert_eq!(r.visible_admission.iter().copied().collect::<Vec<_>>(), current);
+        assert!(r.visible_rank_source.is_none());
+        assert_eq!(r.visible_leases[&captured].captured_source().frame, source.frame);
+        assert_eq!(r.visible_leases[&captured].captured_source().at, source.at);
+        assert_eq!(r.visible_leases[&captured].serial, 3);
+        assert!(r.transient_wanted(captured), "rank expiry keeps the original captured lease TTL");
+    }
+
+    #[test]
     fn camera_arrival_issues_fine_before_old_far_without_worker_membership() {
         let (planet, mut r, _, _) = current_bridge_fixture();
         let eye = r.current_request.as_ref().unwrap().eye;
@@ -5304,6 +5417,48 @@ mod tests {
         r.set_camera_view(DVec3::Y, DVec3::Z, [0.65, 0.414]);
         r.current_request.as_mut().unwrap().outer_radius = 0.0;
         assert!(r.camera_blocks(eye, &|| false).is_empty());
+    }
+
+    #[test]
+    fn camera_arrival_native_grazing_ranks_visible_ground_before_near_height_possibilities() {
+        let (_, mut r, _, _) = current_bridge_fixture();
+        let eye = DVec3::new(0.0, 9.7, 0.0);
+        let request = r.current_request.as_mut().unwrap();
+        request.eye = eye;
+        request.lod0 = 88.0;
+        r.set_ground_clearance(9.7);
+        let pitch = (-9.595f64).to_radians();
+        let tan_y = (22.5f64).to_radians().tan();
+        r.set_camera_view(DVec3::new(pitch.cos(), pitch.sin(), 0.0),
+            DVec3::new(-pitch.sin(), pitch.cos(), 0.0),
+            [tan_y * 1196.0 / 729.0, tan_y]);
+        let view = r.camera_view.unwrap();
+        let lower = crate::windows::visible_focus(&r.grid, eye,
+            view.forward - view.up * tan_y, 0.0, 704.0).unwrap();
+        assert!((lower.x - 15.47).abs() < 0.02);
+        let current = r.camera_blocks(eye, &|| false);
+        assert!(current.len() <= CAMERA_CANDIDATES);
+        let fine: Vec<_> = current.iter().copied().filter(|&key| unpack(key).1 == 0).collect();
+        assert_eq!(fine.len(), 64);
+        // The near strip is admitted by possible heights, but its flat ground
+        // lies below the viewport. It must not consume the bounded intake prefix.
+        for &key in fine.iter().take(16) {
+            let (face, _, i, j) = unpack(key);
+            let nearest_corner = r.grid.ground_point(face, f64::from(i * BRICK),
+                f64::from(j * BRICK));
+            let farthest_corner = r.grid.ground_point(face, f64::from((i + 4) * BRICK),
+                f64::from((j + 4) * BRICK));
+            assert!(nearest_corner.x.max(farthest_corner.x) >= lower.x,
+                "a wholly invisible flat-ground tile displaced the visible intake prefix");
+        }
+        let block_at = |x| {
+            let (cell, _) = r.grid.locate(DVec3::new(x, 0.0, 0.0));
+            pack(key0(cell.face, 0, (cell.i >> 3) & !3), ((cell.j >> 3) & !3) as u32)
+        };
+        let visible = fine.iter().position(|&key| key == block_at(20.0)).unwrap();
+        let possible = fine.iter().position(|&key| key == block_at(6.0)).unwrap();
+        assert!(visible < possible, "actual visible ground outranks a closer height-only possibility");
+        assert!(possible >= 56, "the raised-terrain reservation follows visible ground");
     }
 
     #[test]
