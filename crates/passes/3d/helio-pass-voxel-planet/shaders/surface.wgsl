@@ -553,7 +553,6 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         projection = appearance_projection(dot(actual_normal, d), code);
     }
     let hash_filter_w = detail_filter_weight(frame.layer.y / pixel * projection.x);
-    let area_base_w = detail_filter_weight(frame.layer.y / pixel * projection.y);
     // Primary can select either adjacent level under its bounded dither.
     // A still coarser resident column is streaming fallback, whose resolvable
     // walls must keep their actual face normal.
@@ -578,14 +577,12 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // Paint-only and ignored tiny lists keep their existing filtering.
     let normal_filter_w = select(coarse_w, base_filter_w * relief_face_w, FAR_RELIEF && frame.hints.z != 0u);
     let smooth_w = select(normal_filter_w, 0.0, (c.info & INFO_TOPOLOGY) != 0u);
-    // Angle-aware area support is shading-only. The original weights above
-    // still choose slope/material/strata; shadow support follows the displayed normal.
-    let area_coarse_w = detail_filter_weight(size / pixel * projection.y);
-    let shade_filter_w = select(area_coarse_w, area_base_w * relief_face_w, FAR_RELIEF && frame.hints.z != 0u);
-    let shade_smooth_w = select(shade_filter_w, 0.0, (c.info & INFO_TOPOLOGY) != 0u);
-    let shade_canonical_w = canonical_relief.w * area_base_w * relief_face_w;
-    let ao_appearance_w = max(appearance_w, max(area_coarse_w,
-        select(0.0, area_base_w, FAR_RELIEF && frame.hints.z != 0u)));
+    // A grazing face can have subpixel area while its long edge is resolved.
+    // Filter pigment along its compressed axis, but retain the face normal
+    // and occlusion until the authored cell itself becomes subpixel.
+    let shade_smooth_w = smooth_w;
+    let shade_canonical_w = canonical_w;
+    let ao_appearance_w = appearance_w;
     var fallback_normal = vec3<f32>(0.0);
     var fallback_slope = 0.0;
     var fallback_shade_normal = vec3<f32>(0.0);
@@ -749,7 +746,13 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         if axis < 2u && material == M_GRASS {
             let tooth = f32(hash3(h.i, h.j, h.k * 4 + i32(floor(uv.x * 4.0)), 0x5bd1e995u) & 7u) / 7.0;
             // Continuous in distance (not level), so level changes show no band.
-            let lip = 0.22 + 0.1 * tooth + 0.68 * (1.0 - 1.0 / max(h.t / frame.lod.x, 1.0));
+            let distance_fade = 1.0 - 1.0 / max(h.t / frame.lod.x, 1.0);
+            let cut_lip = 0.22 + 0.1 * tooth + 0.68 * distance_fade;
+            // Natural turf wraps the riser; exposed soil on brush cuts stays
+            // canonical. A thin soil edge avoids contour stripes on hills.
+            let turf_lip = 0.72 + 0.1 * tooth;
+            let lip = select(cut_lip, turf_lip + (1.0 - turf_lip) * distance_fade,
+                natural_material_filter_allowed(edited, c));
             soil_side = uv.y < 1.0 - lip;
             soil_coverage = soil_lip_coverage(uv.y, lip, pixel, h.t, d,
                 hit_up(h.t, d), actual_normal, size, natural_material_filter_allowed(edited, c));

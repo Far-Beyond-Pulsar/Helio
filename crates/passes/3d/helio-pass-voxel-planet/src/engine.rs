@@ -225,6 +225,9 @@ pub struct PlanetStats {
     pub admission_alias_deferred: usize,
     pub admission_publication_deferred: usize,
     pub admission_batched_columns: usize,
+    pub camera_candidate_blocks: [u32; 3],
+    pub camera_lease_blocks: [u32; 3],
+    pub camera_jobs: [u32; 3],
     /// Accepted window authority; ages describe the last accepted range update.
     pub requested_serial: u64,
     pub applied_serial: u64,
@@ -1378,6 +1381,7 @@ impl PlanetRenderer {
         let now = std::time::Instant::now();
         let moving = self.last_eye.is_none_or(|(eye, _)| eye.distance(frame.eye) > 0.01);
         let ground_clearance = self.planet.ground_height_uncached_for_streaming(frame.eye);
+        self.residency.set_ground_clearance(ground_clearance);
         let predicted = self.last_eye.and_then(|(eye, when)| {
             let dt = now.duration_since(when).as_secs_f64();
             if !moving || dt > 0.25 { return None; }
@@ -1407,6 +1411,8 @@ impl PlanetRenderer {
             captured_at: now,
         };
         self.residency.set_visible_view(feedback_view.frame, feedback_view.id, now);
+        self.residency.set_camera_view(forward, feedback_view.up,
+            [1.0 / f64::from(camera_data.proj[0].abs()), tan_half]);
         let requested = self.visible_feedback.poll(feedback_view);
         self.stats.primary_sampling_enabled = self.pipelines.primary_samples;
         self.stats.sampled_primary = requested.sampled_primary;
@@ -1781,6 +1787,9 @@ impl PlanetRenderer {
         self.stats.plan_admission_ms = rs.plan_admission_ms;
         self.stats.fine_jobs = rs.fine_jobs;
         self.stats.far_jobs = rs.far_jobs;
+        self.stats.camera_candidate_blocks = rs.camera_candidate_blocks;
+        self.stats.camera_lease_blocks = rs.camera_lease_blocks;
+        self.stats.camera_jobs = rs.camera_jobs;
         self.stats.jobs = rs.jobs;
         self.stats.evictions = rs.evictions;
         self.stats.active_levels = rs.active_levels;

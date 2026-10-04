@@ -107,6 +107,11 @@ struct Block {
 /// Priority buckets of the pending queue (normalized window distance).
 const BUCKETS: usize = 64;
 const VISIBLE_BLOCKS: usize = 64;
+const CAMERA_CANDIDATES: usize = 3 * 8 * 8;
+// Current footprint plus its departing publications awaiting GPU completion.
+const CAMERA_LEASES: usize = 2 * CAMERA_CANDIDATES;
+const TEMPORARY_LEASES: usize = VISIBLE_BLOCKS + CAMERA_LEASES;
+const VISIBLE_ADMISSION_COLUMNS: usize = TEMPORARY_LEASES * 16;
 const VISIBLE_LEASE_FRAMES: u32 = 32;
 const VISIBLE_LEASE_TIME: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -117,8 +122,22 @@ struct VisibleStamp {
     at: std::time::Instant,
 }
 
+#[derive(Clone, Copy)]
+enum LeaseOrigin {
+    Captured(VisibleStamp),
+    Camera,
+}
+
+#[derive(Clone, Copy)]
+struct CameraView {
+    forward: DVec3,
+    up: DVec3,
+    right: DVec3,
+    tan_half: [f64; 2],
+}
+
 struct VisibleLease {
-    source: VisibleStamp,
+    origin: LeaseOrigin,
     /// First worker request whose result can supersede this temporary demand.
     serial: u64,
     retiring: bool,
@@ -389,6 +408,11 @@ pub struct Stats {
     /// not publication completions or counts of visible coherent blocks.
     pub fine_jobs: usize,
     pub far_jobs: usize,
+    /// Current selected tiles, live Camera leases and issued Camera-origin
+    /// columns, respectively, for levels 0–2. Jobs are not completions.
+    pub camera_candidate_blocks: [u32; 3],
+    pub camera_lease_blocks: [u32; 3],
+    pub camera_jobs: [u32; 3],
 }
 
 pub struct Residency {
@@ -424,6 +448,8 @@ pub struct Residency {
     planner: Planner,
     last_request: Option<WindowRequest>,
     current_request: Option<WindowRequest>,
+    ground_clearance: Option<f64>,
+    camera_view: Option<CameraView>,
     requested: u64,
     applied: u64,
     /// Demand authority can arrive independently for fine and far levels.
@@ -526,6 +552,8 @@ impl Residency {
             planner,
             last_request: None,
             current_request: None,
+            ground_clearance: None,
+            camera_view: None,
             requested: 0,
             applied: 0,
             applied_levels: vec![0; grid.levels() as usize],
@@ -805,6 +833,17 @@ impl Residency {
         self.lod_dither = crate::windows::sanitize_lod_dither(dither);
     }
 
+    pub(crate) fn set_ground_clearance(&mut self, clearance: f64) {
+        self.ground_clearance = clearance.is_finite().then_some(clearance);
+    }
+
+    pub(crate) fn set_camera_view(&mut self, forward: DVec3, up: DVec3, tan_half: [f64; 2]) {
+        self.camera_view = forward.try_normalize().and_then(|forward|
+            forward.cross(up).try_normalize().filter(|_|
+                tan_half.into_iter().all(|value| value.is_finite() && value > 0.0))
+                .map(|right| CameraView { forward, right, up: right.cross(forward), tan_half }));
+    }
+
     pub fn set_prefetch_eye(&mut self, eye: Option<DVec3>) {
         self.prefetch_eye = eye.filter(|eye| eye.is_finite());
     }
@@ -869,7 +908,10 @@ impl Residency {
                 Some(frame) => frame == self.frame,
                 None => self.applied_levels[unpack(key).1 as usize] < lease.serial,
             })
-                && self.source_is_current(lease.source, VISIBLE_LEASE_FRAMES))
+                && match lease.origin {
+                    LeaseOrigin::Captured(source) => self.source_is_current(source, VISIBLE_LEASE_FRAMES),
+                    LeaseOrigin::Camera => lease.current_demand_frame == Some(self.frame),
+                })
     }
 
     fn current_captured_block(&self, key: u64) -> bool {
@@ -877,6 +919,13 @@ impl Residency {
         level < self.levels.len().min(3) && self.levels[level].active
             && self.current_request.as_ref().is_some_and(|request|
                 crate::windows::current_block_wanted(&self.grid, request, key))
+    }
+
+    fn current_camera_block(&self, key: u64) -> bool {
+        self.current_captured_block(key) && self.current_request.as_ref().is_some_and(|request|
+            self.ground_clearance.is_some_and(|clearance|
+                clearance < request.lod0 * f64::from(1u32 << unpack(key).1)
+                    / (1.0 - request.lod_dither * 0.5)))
     }
 
     fn protected_wanted(&self, key: u64) -> bool {
@@ -891,30 +940,60 @@ impl Residency {
 
     /// Expiry uses bounded normal eviction, including its record/journal
     /// quarantine. A newer wanted snapshot always protects a returned column.
+    #[cfg(test)]
     fn retire_visible_leases(&mut self, work: &mut FrameWork, out_of_time: &impl Fn() -> bool) {
+        let camera_blocks = self.current_request.as_ref()
+            .map_or_else(Vec::new, |request| self.camera_blocks(request.eye, out_of_time));
+        self.retire_visible_leases_current(&camera_blocks, work, out_of_time);
+    }
+
+    fn retire_visible_leases_current(&mut self, camera_blocks: &[u64], work: &mut FrameWork, out_of_time: &impl Fn() -> bool) {
+        // Geometry was selected this frame before the bounded retirement walk.
+        // Its unvisited tail must retain ownership during snapshot application.
+        for block in camera_blocks {
+            if let Some(lease) = self.visible_leases.get_mut(block) {
+                if !lease.retiring && matches!(lease.origin, LeaseOrigin::Camera) {
+                    lease.current_demand_frame = Some(self.frame);
+                }
+            }
+        }
         let blocks: Vec<_> = self.visible_leases.keys().copied().collect();
         let mut steps = 0;
+        let mut captured_steps = 0;
+        let limit = if self.visible_leases.iter().any(|(&block, lease)|
+            matches!(lease.origin, LeaseOrigin::Camera) && (lease.retiring || !camera_blocks.contains(&block))) {
+            CAMERA_CANDIDATES * 16
+        } else { 128 };
         for block in blocks {
             let lease = &self.visible_leases[&block];
-            let source_live = self.source_is_current(lease.source, VISIBLE_LEASE_FRAMES);
+            let source_live = match lease.origin {
+                LeaseOrigin::Captured(source) => self.source_is_current(source, VISIBLE_LEASE_FRAMES),
+                LeaseOrigin::Camera => camera_blocks.contains(&block),
+            };
             let was_bounded = lease.current_demand_frame.is_some();
             let superseded = self.applied_levels[unpack(block).1 as usize] >= lease.serial;
             let ordinary = self.visible_columns(block).is_some_and(|(keys, count)|
                 self.levels[unpack(block).1 as usize].active
                     && keys[..count].iter().all(|&key| self.current_wanted(key)));
-            let bounded_current = !ordinary && !lease.retiring && source_live && (was_bounded || superseded)
-                && !out_of_time() && self.current_captured_block(block);
+            let bounded_current = !ordinary && !lease.retiring && source_live && match lease.origin {
+                LeaseOrigin::Camera => true,
+                LeaseOrigin::Captured(_) => (was_bounded || superseded)
+                    && !out_of_time() && self.current_captured_block(block),
+            };
             let expire = ordinary || !source_live || (was_bounded || superseded) && !bounded_current;
             let lease = self.visible_leases.get_mut(&block).unwrap();
             lease.current_demand_frame = bounded_current.then_some(self.frame);
             lease.retiring |= expire;
             if !self.visible_leases[&block].retiring { continue; }
             let (keys, count) = self.visible_columns(block).unwrap();
+            let captured = matches!(self.visible_leases[&block].origin, LeaseOrigin::Captured(_));
             while self.visible_leases[&block].retired < count {
-                if steps == 128 || out_of_time() { return; }
+                if steps == limit || out_of_time() { return; }
+                if captured && captured_steps == 128 { break; }
                 let index = self.visible_leases[&block].retired;
                 self.visible_leases.get_mut(&block).unwrap().retired += 1;
                 steps += 1;
+                captured_steps += usize::from(captured);
                 let key = keys[index];
                 if !self.current_wanted(key) {
                     self.levels[unpack(key).1 as usize].pending.remove(key);
@@ -922,6 +1001,7 @@ impl Residency {
                     if self.residents.contains_key(key) { self.evict(key, work); }
                 }
             }
+            if self.visible_leases[&block].retired < count { continue; }
             if !keys[..count].iter().any(|key| self.publishing.contains_key(key)) {
                 self.visible_leases.remove(&block);
             }
@@ -933,6 +1013,8 @@ impl Residency {
     }
 
     fn refresh_visible_pending_until(&mut self, mut out_of_time: impl FnMut() -> bool) {
+        let mut captured_leases = self.visible_leases.values()
+            .filter(|lease| matches!(lease.origin, LeaseOrigin::Captured(_))).count();
         let rank_requests = self.visible_rank_source.is_none_or(|source| self.source_is_current(source, 8));
         if !rank_requests {
             self.visible_admission.clear();
@@ -948,9 +1030,9 @@ impl Residency {
         } else { FxHashSet::default() };
         let source = self.visible_source.take().filter(|source| self.source_is_current(*source, 8));
         // Reinsert leased demand after snapshot replacement cleared pending.
-        for &key in self.visible_leases.keys() {
+        for (&key, lease) in &self.visible_leases {
             if blocks.len() == VISIBLE_BLOCKS { break; }
-            if !blocks.contains(&key) { blocks.push(key); }
+            if matches!(lease.origin, LeaseOrigin::Captured(_)) && !blocks.contains(&key) { blocks.push(key); }
         }
         for (index, &key) in blocks.iter().enumerate() {
             if out_of_time() {
@@ -974,16 +1056,19 @@ impl Residency {
                             && self.current_captured_block(key);
                     if !after_authority && !bounded_current { continue; }
                     if let Some(lease) = self.visible_leases.get_mut(&key) {
-                        let newer = source.frame.wrapping_sub(lease.source.frame);
-                        if !lease.retiring && newer > 0 && newer < 0x8000_0000 {
-                            lease.source = source;
-                            lease.serial = self.requested;
+                        if let LeaseOrigin::Captured(previous) = lease.origin {
+                            let newer = source.frame.wrapping_sub(previous.frame);
+                            if !lease.retiring && newer > 0 && newer < 0x8000_0000 {
+                                lease.origin = LeaseOrigin::Captured(source);
+                                lease.serial = self.requested;
+                            }
                         }
                         if !lease.retiring && bounded_current {
                             lease.current_demand_frame = Some(self.frame);
                         }
-                    } else if self.visible_leases.len() < VISIBLE_BLOCKS {
-                        self.visible_leases.insert(key, VisibleLease { source, serial: self.requested, retiring: false, retired: 0, current_demand_frame: bounded_current.then_some(self.frame) });
+                    } else if captured_leases < VISIBLE_BLOCKS && self.visible_leases.len() < TEMPORARY_LEASES {
+                        self.visible_leases.insert(key, VisibleLease { origin: LeaseOrigin::Captured(source), serial: self.requested, retiring: false, retired: 0, current_demand_frame: bounded_current.then_some(self.frame) });
+                        captured_leases += 1;
                     }
                 }
             }
@@ -996,7 +1081,7 @@ impl Residency {
                     // Leases requeue ordinary demand, but do not invent a
                     // new distance rank after the captured view expires.
                     if rank_requests && index < requested_blocks
-                        && self.visible_admission.len() < VISIBLE_BLOCKS * 16
+                        && self.visible_admission.len() < VISIBLE_ADMISSION_COLUMNS
                         && ranked.insert((level, key)) {
                         self.visible_admission.push_back((level, key));
                     }
@@ -1010,6 +1095,123 @@ impl Residency {
         for &(level, key) in &pending { self.levels[level].pending.remove(key); }
         for &(level, key) in pending.iter().rev() { self.levels[level].pending.insert(key, 0); }
         for key in promoted { self.queue_obsolete_owners(key); }
+    }
+
+    fn camera_blocks(&self, eye: DVec3, out_of_time: &impl Fn() -> bool) -> Vec<u64> {
+        let (Some(clearance), Some(view), Some(request)) =
+            (self.ground_clearance, self.camera_view, self.current_request.as_ref()) else { return Vec::new() };
+        let grid = self.grid;
+        let ground_radial = grid.radial(eye) - clearance;
+        let radial_up = grid.up(eye);
+        let direction = (view.forward - radial_up * view.forward.dot(radial_up)).normalize_or_zero();
+        let Some(lower) = crate::windows::visible_focus(&grid, eye,
+            view.forward - view.up * view.tan_half[1], ground_radial, request.lod0 * 8.0)
+            else { return Vec::new() };
+        let nearest = grid.ground_distance(eye, lower);
+        let ground = eye - radial_up * clearance;
+        let mut candidates = Vec::new();
+        let mut covered_end = nearest;
+        'levels: for level in 0..self.levels.len().min(3) {
+            if !self.levels[level].active { continue; }
+            let size = f64::from(BRICK << level);
+            let width = grid.level_size(level as u32) * f64::from(BRICK * 4);
+            let start = nearest.max(covered_end - width);
+            let mut seed = ground + direction * (start + width * 3.0);
+            covered_end = start + width * 6.0;
+            if !grid.is_plane() { seed = seed.normalize_or_zero() * ground_radial; }
+            let face = if grid.is_plane() { crate::grid::PLANE_FACE } else { crate::grid::face_of(seed) };
+            let Some(coords) = grid.face_coords(face, seed) else { continue };
+            let bi = (coords[0] / size).floor() as i32 / 4;
+            let bj = (coords[1] / size).floor() as i32 / 4;
+            for y in bj - 4..bj + 4 {
+                for x in bi - 4..bi + 4 {
+                    if out_of_time() { break 'levels; }
+                    if x < 0 || y < 0 { continue; }
+                    let block = pack(key0(face, level as u32, x * 4), (y * 4) as u32);
+                    if !self.current_camera_block(block) { continue; }
+                    let mut point = grid.ground_point(face, f64::from(x * 4 + 2) * size,
+                        f64::from(y * 4 + 2) * size);
+                    if grid.is_plane() { point.y = ground_radial; }
+                    else { point = point.normalize_or_zero() * ground_radial; }
+                    let relative = point - eye;
+                    let depth = relative.dot(view.forward);
+                    // Tile extent plus one tile of radial slope variation;
+                    // this ranks demand only, never clips rendered terrain.
+                    let bound = width * 1.75;
+                    if depth + bound <= 0.0
+                        || relative.dot(view.right).abs() > depth.max(0.0) * view.tan_half[0] + bound
+                        || relative.dot(view.up).abs() > depth.max(0.0) * view.tan_half[1] + bound { continue; }
+                    let distance2 = relative.length_squared().max(0.01);
+                    let projected_cell = request.lod0 * f64::from(1u32 << level) / distance2.sqrt();
+                    let oversized = if level == 0 { 1.0 } else { (projected_cell / 4.0).max(1.0) };
+                    // Screen coverage per issued tile; oversized coarser cells
+                    // cannot displace visibly resolved finer tiles.
+                    let benefit = width * width / (distance2 * oversized.powi(4));
+                    candidates.push((benefit, block));
+                }
+            }
+        }
+        candidates.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+        candidates.truncate(CAMERA_CANDIDATES);
+        candidates.into_iter().map(|(_, block)| block).collect()
+    }
+
+    /// Current camera tiles may arrive before the worker's wanted snapshot.
+    /// Reuse its capped lease/publication path and FIFO; no forecast demand.
+    fn refresh_camera_pending(&mut self, blocks: &[u64], deadline: Option<std::time::Instant>) {
+        let out_of_time = || deadline.is_some_and(|at| std::time::Instant::now() >= at);
+        if out_of_time() || self.ground_clearance.is_none() { return; }
+        let mut candidates = Vec::new();
+        let mut camera_leases = self.visible_leases.values()
+            .filter(|lease| matches!(lease.origin, LeaseOrigin::Camera)).count();
+        for &block in blocks {
+            if out_of_time() { break; }
+            let level = unpack(block).1 as usize;
+            let Some((keys, count)) = self.visible_columns(block) else { continue };
+            let ordinary = keys[..count].iter().all(|&key| self.current_wanted(key));
+            if !ordinary {
+                if let Some(lease) = self.visible_leases.get_mut(&block) {
+                    // Captured stamps retain their original TTL and serial.
+                    if matches!(lease.origin, LeaseOrigin::Camera) && !lease.retiring {
+                        lease.current_demand_frame = Some(self.frame);
+                    }
+                } else if camera_leases < CAMERA_LEASES && self.visible_leases.len() < TEMPORARY_LEASES {
+                    self.visible_leases.insert(block, VisibleLease {
+                        origin: LeaseOrigin::Camera, serial: self.requested,
+                        retiring: false, retired: 0, current_demand_frame: Some(self.frame),
+                    });
+                    camera_leases += 1;
+                }
+                if !self.transient_wanted(block) { continue; }
+            }
+            self.queue_obsolete_owners(block);
+            for &key in &keys[..count] {
+                if !self.publishing.contains_key(&key)
+                    && (!self.residents.contains_key(key) || self.initial_retries.contains(&key)) {
+                    self.levels[level].pending.insert(key, 0);
+                    candidates.push((level, key));
+                }
+            }
+        }
+        if candidates.is_empty() { return; }
+        // Stable captured fine ranks win, even if an older far rank was at
+        // the FIFO head. Reuse the same bounded FIFO for current camera work.
+        let (mut fine, mut remaining): (VecDeque<_>, VecDeque<_>) =
+            std::mem::take(&mut self.visible_admission).into_iter().partition(|&(level, key)|
+                level < 3 && !self.visible_leases.get(&(key & !(3u64 | (3u64 << 32))))
+                    .is_some_and(|lease| matches!(lease.origin, LeaseOrigin::Camera)));
+        let ranked: FxHashSet<_> = fine.iter().copied().collect();
+        let current: FxHashSet<_> = candidates.iter().copied().collect();
+        remaining.retain(|entry| !current.contains(entry));
+        for candidate in candidates {
+            if ranked.contains(&candidate) { continue; }
+            if fine.len() == VISIBLE_ADMISSION_COLUMNS { break; }
+            fine.push_back(candidate);
+        }
+        // Dropping a far rank leaves its ordinary pending job intact.
+        remaining.truncate((VISIBLE_ADMISSION_COLUMNS).saturating_sub(fine.len()));
+        fine.append(&mut remaining);
+        self.visible_admission = fine;
     }
 
     /// Publish latest demand before queueing bounded window operations.
@@ -1144,10 +1346,18 @@ impl Residency {
         }
         let (level, face, tier, bi, bj) = task.owner;
         let size = 1u32 << (2 * tier);
-        let i = bi * size as i32 + (task.offset % size) as i32;
-        let j = bj * size as i32 + (task.offset / size) as i32;
-        task.offset += 1;
+        // Walk complete tier-1 groups, then their sixteen columns. A large
+        // outgoing owner is often only a clipped fringe; absent groups have
+        // no resident summary references and need no sixteen scalar probes.
+        let groups = size / 4;
+        let group = task.offset / 16;
+        let member = task.offset % 16;
+        let i = bi * size as i32 + ((group % groups) * 4 + member % 4) as i32;
+        let j = bj * size as i32 + ((group / groups) * 4 + member / 4) as i32;
+        let absent = !self.blocks.contains_key(&(level, face, 1, i >> 2, j >> 2));
+        task.offset += if absent { 16 - member } else { 1 };
         if task.offset == size * size { self.obsolete_owners.pop_front(); }
+        if absent { return true; }
         let key = pack(key0(face, level, i), j as u32);
         if self.levels[level as usize].wanted.is_some() && !self.protected_wanted(key) {
             self.levels[level as usize].pending.remove(key);
@@ -1162,6 +1372,9 @@ impl Residency {
         while (self.diffs.iter().any(|diffs| !diffs.is_empty())
             || self.retire_finished_epoch < self.snapshot_epoch) && !out_of_time() {
             for step in 0..128 {
+                // Each eviction remains atomic; stop before the next key
+                // once the window phase has consumed its time allowance.
+                if out_of_time() { return; }
                 // Protected alias owners can be requeued after every slice.
                 // Reserve half the same bounded work for the normal cursor
                 // until its epoch completes, then let owners use all of it.
@@ -1207,6 +1420,7 @@ impl Residency {
                 let wanted = state.wanted.as_ref().unwrap();
                 let mut at = queued.added;
                 while at < end {
+                    if out_of_time() { break; }
                     let skip = resident_snapshot_run(&queued.diff.adds[at..end], !self.initial_retries.is_empty(),
                         |identity| self.blocks.get(&identity).map(|block| block.refs));
                     if skip != 0 { at += skip; continue; }
@@ -1217,8 +1431,8 @@ impl Residency {
                     }
                     at += 1;
                 }
-                self.queued_delta_ops -= end - queued.added;
-                queued.added = end;
+                self.queued_delta_ops -= at - queued.added;
+                queued.added = at;
             }
             for level in 0..self.diffs.len() {
                 if self.diffs[level].front().is_some_and(|q|
@@ -1416,18 +1630,27 @@ impl Residency {
     /// Admit only a complete, unedited block already ranked by visible feedback.
     fn admit_visible_block(&mut self, planet: &Planet, index: usize, first: u64, bucket: usize,
         budget: usize, deadline: Option<std::time::Instant>, work: &mut FrameWork) -> bool {
+        self.admit_pending_block(planet, index, first, bucket, budget, deadline, true, work)
+    }
+
+    /// Share the existing intact-block path with ordinary same-priority demand.
+    fn admit_pending_block(&mut self, planet: &Planet, index: usize, selected: u64, bucket: usize,
+        budget: usize, deadline: Option<std::time::Instant>, visible: bool, work: &mut FrameWork) -> bool {
         let expired = || deadline.is_some_and(|at| std::time::Instant::now() >= at);
-        // Only intact ranked blocks: never regroup partial work, overtake
+        // Only intact blocks: never regroup partial work, overtake
         // global coverage, invent lease demand, or batch an edit publication.
         if expired() || budget.saturating_sub(work.jobs.len()) < 16
             || index == (self.grid.levels() - 1) as usize
             || !self.levels[(self.grid.levels() - 1) as usize].pending.is_empty() {
             return false;
         }
+        let first = selected & !(3u64 | (3u64 << 32));
         let Some((keys, 16)) = self.visible_columns(first) else { return false };
-        if unpack(first).1 as usize != index || self.visible_admission.len() < 15
+        if unpack(first).1 as usize != index { return false; }
+        if visible && (selected != first || self.visible_admission.len() < 15
             || !self.visible_admission.iter().take(15).zip(&keys[1..])
-                .all(|(&(level, key), &expected)| level == index && key == expected) {
+                .all(|(&(level, key), &expected)| level == index && key == expected))
+            || !visible && !self.visible_admission.is_empty() {
             return false;
         }
         let available = self.free_records.len()
@@ -1437,13 +1660,15 @@ impl Residency {
             return false;
         }
         if self.blocks_conflict(first) { return false; }
-        // Every key in this aligned block shares the captured lease identity.
+        // Visible keys may share an existing captured lease. Ordinary keys
+        // must all belong to current wanted demand at the selected bucket.
         // Match scalar admission without creating or refreshing any demand.
-        let transient = self.transient_wanted(first);
-        for (offset, &key) in keys.iter().enumerate() {
+        let transient = visible && self.transient_wanted(first);
+        for &key in &keys {
             if (!self.current_wanted(key) && !transient) || self.residents.contains_key(key)
                 || self.initial_retries.contains(&key) || self.publishing.contains_key(&key)
-                || (offset != 0 && !self.levels[index].pending.at.contains_key(&key)) {
+                || (key != selected && self.levels[index].pending.at.get(&key)
+                    .is_none_or(|entry| !visible && entry.0 as usize != bucket)) {
                 return false;
             }
         }
@@ -1465,9 +1690,9 @@ impl Residency {
         // All fallible guards ran before mutation. The preflight reserved
         // sixteen individual record identities; shared refs change only once.
         self.reference_blocks_count(first, 16, work);
-        for (offset, &key) in keys.iter().enumerate() {
-            let column_bucket = if offset == 0 { bucket } else {
-                self.visible_admission.pop_front();
+        for &key in &keys {
+            let column_bucket = if key == selected { bucket } else {
+                if visible { self.visible_admission.pop_front(); }
                 let bucket = self.levels[index].pending.at[&key].0 as usize;
                 self.levels[index].pending.remove(key);
                 bucket
@@ -1546,19 +1771,20 @@ impl Residency {
         // New demand may not have reached pending yet. Keep admission's
         // share even when queues were empty before applying the first diff.
         let apply_out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b.mul_f64(0.6));
-        self.retire_visible_leases(&mut work, &apply_out_of_time);
+        let camera_blocks = self.camera_blocks(eye, &apply_out_of_time);
+        self.retire_visible_leases_current(&camera_blocks, &mut work, &apply_out_of_time);
         if !apply_out_of_time() { self.apply_queued(&mut work, &apply_out_of_time); }
         let t_windows = started.elapsed();
         // Window diffs may spend 60% of the CPU budget. Refresh gets at most
         // the next 10%, leaving 30% for issuing generation jobs this frame.
         let refresh_deadline = budget_time.map(|budget| started + budget.mul_f64(0.7));
-        let near_deadline = budget_time.map(|budget| started + budget.mul_f64(0.65));
-        self.refresh_near_pending(eye, near_deadline);
-        let t_near = started.elapsed();
-        // Feedback wins over broad camera anchors, and has its own half
-        // of the existing refresh reserve rather than being demoted by it.
-        self.refresh_visible_pending(refresh_deadline);
+        let visible_deadline = budget_time.map(|budget| started + budget.mul_f64(0.65));
+        self.refresh_visible_pending(visible_deadline);
+        let t_visible = started.elapsed();
+        self.refresh_camera_pending(&camera_blocks, refresh_deadline);
+        self.refresh_near_pending(eye, refresh_deadline);
         let t_apply = started.elapsed();
+        let t_near = t_windows + (t_apply - t_visible);
         // Urgent edit regenerations first.
         let mut urgent = std::mem::take(&mut self.urgent);
         urgent.sort_unstable();
@@ -1618,6 +1844,7 @@ impl Residency {
         let mut publication_deferred = 0;
         let mut batched_columns = 0;
         let mut batch_attempts = 0;
+        let mut last_batch_block = None;
         while work.jobs.len() < budget {
             steps += 1;
             if (steps == 1 || steps % 64 == 0) && out_of_time() {
@@ -1626,12 +1853,20 @@ impl Residency {
             let Some((index, key, bucket)) = pop_pending(&mut self.levels, top_level,
                 &mut self.visible_admission, &mut pending_selection, admission_deadline) else { break };
             admission_attempts += 1;
-            if batch_attempts < VISIBLE_BLOCKS && index != top_level as usize
-                && key & (3u64 | (3u64 << 32)) == 0
+            let block_key = key & !(3u64 | (3u64 << 32));
+            let visible_batch = key == block_key
                 && self.visible_admission.front().is_some_and(|&(level, next)|
-                    level == index && next & !(3u64 | (3u64 << 32)) == key) {
-                batch_attempts += 1;
-                if self.admit_visible_block(planet, index, key, bucket, budget, admission_deadline, &mut work) {
+                    level == index && next & !(3u64 | (3u64 << 32)) == key);
+            if index != top_level as usize && (visible_batch && batch_attempts < TEMPORARY_LEASES
+                || self.visible_admission.is_empty() && last_batch_block != Some(block_key)) {
+                if visible_batch { batch_attempts += 1; }
+                last_batch_block = Some(block_key);
+                let admitted = if visible_batch {
+                    self.admit_visible_block(planet, index, key, bucket, budget, admission_deadline, &mut work)
+                } else {
+                    self.admit_pending_block(planet, index, key, bucket, budget, admission_deadline, false, &mut work)
+                };
+                if admitted {
                     admission_attempts += 15;
                     batched_columns += 16;
                     last_summary_check = None;
@@ -1640,7 +1875,7 @@ impl Residency {
                 }
                 if out_of_time() {
                     self.levels[index].pending.insert(key, bucket);
-                    self.visible_admission.push_front((index, key));
+                    if visible_batch { self.visible_admission.push_front((index, key)); }
                     break;
                 }
             }
@@ -1739,6 +1974,24 @@ impl Residency {
         }
         self.update_authority_stats();
         let mut stats = self.stats;
+        stats.camera_candidate_blocks = [0; 3];
+        stats.camera_lease_blocks = [0; 3];
+        stats.camera_jobs = [0; 3];
+        for &block in &camera_blocks {
+            stats.camera_candidate_blocks[unpack(block).1 as usize] += 1;
+        }
+        for (&block, lease) in &self.visible_leases {
+            if !lease.retiring && lease.current_demand_frame == Some(self.frame)
+                && matches!(lease.origin, LeaseOrigin::Camera) {
+                stats.camera_lease_blocks[unpack(block).1 as usize] += 1;
+            }
+        }
+        for &key in &work.job_keys {
+            if self.visible_leases.get(&(key & !(3u64 | (3u64 << 32))))
+                .is_some_and(|lease| matches!(lease.origin, LeaseOrigin::Camera)) {
+                stats.camera_jobs[unpack(key).1 as usize] += 1;
+            }
+        }
         stats.plan_edits_ms = t_edits.as_secs_f64() * 1e3;
         stats.plan_authority_ms = (t_drain - t_edits).as_secs_f64() * 1e3;
         stats.plan_windows_ms = (t_windows - t_drain).as_secs_f64() * 1e3;
@@ -1891,6 +2144,11 @@ impl Residency {
 
 #[cfg(test)]
 mod tests {
+    impl VisibleLease {
+        fn captured_source(&self) -> VisibleStamp {
+            match self.origin { LeaseOrigin::Captured(source) => source, LeaseOrigin::Camera => panic!("expected capture") }
+        }
+    }
     use super::*;
     use crate::planet::PlanetRecipe;
 
@@ -2347,6 +2605,63 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_deadline_slices_retirement_and_additions_without_skipping_work() {
+        let (planet, _, _, _) = edit_fixture();
+        let face = crate::grid::PLANE_FACE;
+        let mut r = Residency::new(*planet.grid(), Capacity { table_bits: 8, ..Default::default() });
+        let old: Vec<_> = (1000..5000).map(|i| pack(key0(face, 0, i), 0))
+            .filter(|key| slot_hash(*key as u32, (*key >> 32) as u32) & 255 == 10).take(3).collect();
+        assert_eq!(old.len(), 3);
+        for (record, &key) in old.iter().enumerate() {
+            r.residents.insert(key, Resident { record: record as u32, ..Default::default() });
+            r.block_conflicts += 1;
+        }
+        r.publishing.insert(old[0], EditPublication {
+            record: 0, previous: None, next: None, evicted: false, initial_bucket: Some(0),
+        });
+        r.apply(snapshot_update(1, &old[1..2]));
+        r.retire_slot = 10;
+        let calls = std::cell::Cell::new(0);
+        let mut work = FrameWork::default();
+        r.apply_snapshot(&mut work, &|| { calls.set(calls.get() + 1); calls.get() > 2 });
+        assert_eq!(work.evictions, vec![0]);
+        assert_eq!(r.retire_slot, 10, "resume at the backshifted slot after the last atomic eviction");
+        assert_eq!(r.diffs[0].front().unwrap().added, 0);
+        assert_eq!(r.queued_delta_ops, 1, "expired retirement must not consume the additions batch");
+        assert!(r.publishing[&old[0]].evicted);
+        r.apply_snapshot(&mut work, &|| false);
+        assert_eq!(work.evictions, vec![0, 2]);
+        assert!(r.residents.contains_key(old[1]));
+        r.complete_jobs([(old[0], 3)]);
+        assert!(r.publishing.is_empty() && r.initial_retries.is_empty());
+        table_is_exact(&r);
+
+        let mut r = Residency::new(*planet.grid(), Capacity { table_bits: 10, ..Default::default() });
+        let wanted: Vec<_> = (1000..1256).map(|i| pack(key0(face, 0, i), 0)).collect();
+        r.residents.insert(wanted[2], Resident { record: 0, ..Default::default() });
+        r.block_conflicts += 1;
+        r.publishing.insert(wanted[2], EditPublication {
+            record: 0, previous: None, next: None, evicted: false, initial_bucket: Some(0),
+        });
+        r.apply(snapshot_update(1, &wanted));
+        r.retire_finished_epoch = r.snapshot_epoch;
+        let calls = std::cell::Cell::new(0);
+        r.apply_snapshot(&mut FrameWork::default(), &|| { calls.set(calls.get() + 1); calls.get() > 7 });
+        assert_eq!(r.diffs[0].front().unwrap().added, 5);
+        assert_eq!(r.queued_delta_ops, wanted.len() - 5, "only inspected additions advance the cursor");
+        assert_eq!(r.levels[0].pending.keys().copied().collect::<FxHashSet<_>>(),
+            wanted[..5].iter().copied().filter(|key| *key != wanted[2]).collect());
+        assert!(!r.publishing[&wanted[2]].evicted);
+        r.apply_snapshot(&mut FrameWork::default(), &|| false);
+        assert!(r.diffs[0].is_empty() && r.catching_up[0] == 0);
+        assert_eq!((r.queued_delta_ops, r.queued_delta_bytes), (0, 0));
+        assert_eq!(r.levels[0].pending.keys().copied().collect::<FxHashSet<_>>(),
+            wanted.iter().copied().filter(|key| *key != wanted[2]).collect());
+        assert!(r.residents.contains_key(wanted[2]) && !r.publishing[&wanted[2]].evicted);
+        table_is_exact(&r);
+    }
+
+    #[test]
     fn snapshot_sparse_retirement_finishes_once_while_adds_continue_and_restarts_on_new_demand() {
         let (planet, _, _, _) = edit_fixture();
         let mut r = Residency::new(*planet.grid(), Capacity { table_bits: 10, ..Default::default() });
@@ -2357,18 +2672,19 @@ mod tests {
         r.apply(snapshot_update(1, &keys));
         let round = |r: &mut Residency, work: &mut FrameWork| {
             let calls = std::cell::Cell::new(0);
-            r.apply_snapshot(work, &|| { calls.set(calls.get() + 1); calls.get() > 1 });
+            r.apply_snapshot(work, &|| { calls.set(calls.get() + 1); calls.get() > 257 });
         };
         let mut work = FrameWork::default();
         round(&mut r, &mut work);
         assert_eq!(r.retire_finished_epoch, 1,
             "one resident plus16 bitmap words must finish within128 bounded retirement steps");
-        assert_eq!(r.queued_delta_ops, 896, "the long fullwanted list remains partially admitted");
+        let remaining = r.queued_delta_ops;
+        assert!(remaining > 0 && remaining < keys.len(), "the long fullwanted list remains partially admitted");
         assert_eq!(r.retire_slot, 0);
         round(&mut r, &mut work);
         assert_eq!(r.retire_slot, 0, "unchanged residents must not be rescanned while adds continue");
         assert_eq!(r.retire_finished_epoch, 1);
-        assert_eq!(r.queued_delta_ops, 768);
+        assert!(r.queued_delta_ops < remaining);
         assert!(work.evictions.is_empty());
 
         // A subsequent serial drops the resident; completed-pass state must
@@ -2399,7 +2715,7 @@ mod tests {
         r.refresh_visible_pending(None);
         let rounds = std::cell::Cell::new(0);
         let mut work = FrameWork::default();
-        r.apply_snapshot(&mut work, &|| { rounds.set(rounds.get() + 1); rounds.get() > 1 });
+        r.apply_snapshot(&mut work, &|| { rounds.set(rounds.get() + 1); rounds.get() > 257 });
         assert_eq!(work.evictions.len(), 16, "the obsolete4x4 owner must retire in the first bounded round");
         assert!(r.retire_finished_epoch < 1, "fixture must not rely on a whole-table scan");
         assert!(current.iter().all(|&key| !r.blocks_conflict(key)));
@@ -2424,8 +2740,7 @@ mod tests {
         r.apply(snapshot_update(1, &wanted));
         r.queue_obsolete_owners(current[0]);
         let round = |r: &mut Residency, work: &mut FrameWork| {
-            let calls = std::cell::Cell::new(0);
-            r.apply_snapshot(work, &|| { calls.set(calls.get() + 1); calls.get() > 1 });
+            for _ in 0..16 { r.retire_obsolete_owner_step(work); }
         };
         let mut work = FrameWork::default();
         round(&mut r, &mut work);
@@ -2449,6 +2764,35 @@ mod tests {
     }
 
     #[test]
+    fn sparse_tier3_owner_skips_absent_groups_before_the_alias_can_publish() {
+        let (planet, _, _, _) = edit_fixture();
+        let mut r = Residency::new(*planet.grid(), Capacity::default());
+        let face = crate::grid::PLANE_FACE;
+        // Last column of a 64x64 owner: scalar retirement would require all
+        // 4096 probes even though only this last tier-1 group is resident.
+        let old = pack(key0(face, 0, 1023), 1023);
+        let incoming = pack(key0(face, 0, 1535), 1023);
+        assert!(r.acquire_blocks(old, &mut FrameWork::default()));
+        r.residents.insert(old, Resident { record: 0, blocks: true, ..Default::default() });
+        r.levels[0].wanted = Some(std::sync::Arc::new([incoming].into_iter().collect()));
+        r.obsolete_owners.push_back(OwnerRetirement { owner: (0, face, 3, 15, 15), offset: 0 });
+        assert!(r.blocks_conflict(incoming));
+        let mut work = FrameWork::default();
+        let mut steps = 0;
+        while !r.obsolete_owners.is_empty() {
+            assert!(r.retire_obsolete_owner_step(&mut work));
+            steps += 1;
+            assert!(steps <= 272, "sparse owner must skip absent tier-1 groups");
+        }
+        assert_eq!(steps, 271);
+        eprintln!("sparse tier-3 retirement: {steps} probes, scalar traversal: 4096");
+        assert_eq!(work.evictions, vec![0]);
+        assert!(!r.residents.contains_key(old));
+        assert!(!r.blocks_conflict(incoming));
+        assert!(r.blocks.is_empty() && r.block_owner.is_empty());
+    }
+
+    #[test]
     fn protected_alias_requeues_cannot_starve_bounded_snapshot_retirement() {
         let (planet, _, _, _) = edit_fixture();
         let mut r = Residency::new(*planet.grid(), Capacity { table_bits: 14, ..Default::default() });
@@ -2468,13 +2812,14 @@ mod tests {
         let mut work = FrameWork::default();
         for _ in 0..128 {
             let calls = std::cell::Cell::new(0);
-            // One actual bounded planning slice, with refresh between slices.
-            r.apply_snapshot(&mut work, &|| { calls.set(calls.get() + 1); calls.get() > 1 });
+            // Grant at most one full128-step retirement/addition pair,
+            // with refresh between budget slices.
+            r.apply_snapshot(&mut work, &|| { calls.set(calls.get() + 1); calls.get() > 257 });
             r.queue_obsolete_owners(current[0]);
         }
-        // Under owner-only retirement, the 4096-step protected task finishes
-        // at each 32nd slice boundary and refresh requeues it unchanged. The
-        // normal cursor never gets a step and this serial cannot complete.
+        // Under owner-only retirement, refresh repeatedly requeues the same
+        // protected task. The normal cursor never gets a step and this
+        // serial cannot complete.
         assert_eq!(r.retire_finished_epoch, 1);
         assert!(r.diffs[0].is_empty() && r.catching_up[0] == 0);
         assert_eq!((r.queued_delta_ops, r.queued_delta_bytes), (0, 0));
@@ -2503,8 +2848,9 @@ mod tests {
         assert_eq!(r.obsolete_owners.front().unwrap().owner.2, 3);
         let calls = std::cell::Cell::new(0);
         let mut work = FrameWork::default();
-        r.apply_snapshot(&mut work, &|| { calls.set(calls.get() + 1); calls.get() > 1 });
-        assert_eq!(r.obsolete_owners.front().unwrap().offset, 128);
+        r.apply_snapshot(&mut work, &|| { calls.set(calls.get() + 1); calls.get() > 257 });
+        assert!(r.obsolete_owners.front().unwrap().offset >= 128,
+            "the same slice may skip absent groups but must still advance");
         assert_eq!(r.retire_finished_epoch, 1);
         assert_eq!(r.retire_slot, 0, "a completed serial needs no normal rescan");
         assert_eq!(r.queued_delta_ops, wanted.len() - 128);
@@ -2586,6 +2932,97 @@ mod tests {
         r.levels[0].pending.remove(near[0]); // pop_pending has selected the first key.
         r.visible_admission.extend(near[1..].iter().chain(&far).map(|&key| (0, key)));
         (planet, r, near, far)
+    }
+
+    #[test]
+    fn complete_ordinary_batch_uses_selected_bucket_without_visible_feedback() {
+        let (planet, mut r, eye, near, far) = visible_order_fixture();
+        let work = r.plan(&planet, eye, 1.0, 16);
+        assert_eq!(work.job_keys, far, "same-bucket ordinary LIFO selection remains authoritative");
+        assert_eq!(r.stats.admission_batched_columns, 16);
+        assert_eq!(r.stats.admission_attempts, 16);
+        assert!(r.visible_admission.is_empty() && r.visible_leases.is_empty());
+        assert!(near.iter().all(|&key| !r.residents.contains_key(key)));
+        assert!(work.jobs.iter().all(|job| job.edits == 0 && job.flags == 0));
+        assert_eq!(work.jobs.iter().map(|job| job.record).collect::<FxHashSet<_>>().len(), 16);
+        assert!(r.blocks.values().all(|block| block.refs == 16));
+        r.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
+        for key in work.job_keys { r.evict(key, &mut FrameWork::default()); }
+        assert!(r.blocks.is_empty() && r.block_owner.is_empty());
+        table_is_exact(&r);
+    }
+
+    #[test]
+    fn ordinary_batch_exceeds_visible_capacity_and_obeys_partial_job_budget() {
+        for budget in [1536, 1540] {
+            let (planet, fixture, old, eye) = edit_fixture();
+            let mut r = Residency::new(*planet.grid(), Capacity { table_bits: 12, ..Default::default() });
+            r.last_request = fixture.last_request.clone();
+            let (face, _, i, j) = unpack(old);
+            let mut wanted = FxHashSet::default();
+            for block in 0..100 {
+                let first = pack(key0(face, 0, (i & !3) + 40 + block * 4), (j & !3) as u32);
+                let (keys, count) = r.visible_columns(first).unwrap();
+                assert_eq!(count, 16);
+                for key in keys { wanted.insert(key); r.levels[0].pending.insert(key, 0); }
+            }
+            r.levels[0].active = true;
+            r.levels[0].wanted = Some(std::sync::Arc::new(wanted.clone()));
+            let work = r.plan(&planet, eye, 1.0, budget);
+            assert_eq!(work.jobs.len(), budget);
+            assert_eq!(r.stats.admission_batched_columns, 1536,
+                "ordinary generation must not stop batching at visible feedback's64-block cap");
+            assert_eq!(r.levels[0].pending.len(), wanted.len() - budget);
+            assert!(work.job_keys.iter().all(|key| wanted.contains(key)));
+            assert_eq!(work.job_keys.iter().copied().collect::<FxHashSet<_>>().len(), budget);
+            assert!(r.visible_admission.is_empty() && r.visible_leases.is_empty());
+            table_is_exact(&r);
+            r.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
+            for key in work.job_keys { r.evict(key, &mut FrameWork::default()); }
+            assert!(r.blocks.is_empty() && r.block_owner.is_empty());
+        }
+    }
+
+    #[test]
+    fn ordinary_batch_rejects_partial_mixed_priority_owned_or_edited_demand() {
+        for case in 0..10 {
+            let (mut planet, mut r, _, near, _) = visible_order_fixture();
+            let selected = near[15];
+            r.levels[0].pending.remove(selected);
+            let mut budget = 16;
+            let mut deadline = None;
+            match case {
+                0 => { r.levels[0].pending.remove(near[7]); }
+                1 => { r.levels[0].pending.insert(near[7], 1); }
+                2 => { std::sync::Arc::make_mut(r.levels[0].wanted.as_mut().unwrap()).remove(&near[7]); }
+                3 => { r.residents.insert(near[7], Resident { record: 0, ..Default::default() }); }
+                4 => { r.publishing.insert(near[7], EditPublication {
+                    record: 0, previous: None, next: None, evicted: false, initial_bucket: Some(0),
+                }); }
+                5 => { r.visible_admission.push_back((0, near[7])); }
+                6 => {
+                    let top = r.grid.levels() - 1;
+                    r.levels[top as usize].pending.insert(pack(key0(0, top, 0), 0), 0);
+                }
+                7 => budget = 15,
+                8 => deadline = Some(std::time::Instant::now()),
+                9 => {
+                    let (face, _, i, j) = unpack(near[0]);
+                    let center = planet.grid().ground_point(face, f64::from(i * BRICK) + 0.5, f64::from(j * BRICK) + 0.5);
+                    std::sync::Arc::make_mut(&mut planet).apply(crate::edits::Brush {
+                        center: center.to_array(), ..test_brush(0.2)
+                    }).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let before = (r.residents.len(), r.publishing.len(), r.levels[0].pending.len(),
+                r.next_record, r.free_records.clone(), r.visible_admission.clone());
+            let mut work = FrameWork::default();
+            assert!(!r.admit_pending_block(&planet, 0, selected, 0, budget, deadline, false, &mut work), "case {case}");
+            assert!(work.jobs.is_empty() && work.block_inits.is_empty() && work.table_writes.is_empty());
+            assert_eq!(before, (r.residents.len(), r.publishing.len(), r.levels[0].pending.len(),
+                r.next_record, r.free_records.clone(), r.visible_admission.clone()), "case {case}");
+        }
     }
 
     #[test]
@@ -2883,13 +3320,13 @@ mod tests {
         assert_eq!(r.visible_admission.pop_front(), Some((0, first)));
         r.levels[0].pending.remove(first);
         let lease = &r.visible_leases[&first];
-        let original = (lease.source.frame, lease.source.view, lease.source.at, lease.serial, lease.retiring, lease.retired);
+        let original = (lease.captured_source().frame, lease.captured_source().view, lease.captured_source().at, lease.serial, lease.retiring, lease.retired);
         let mut work = FrameWork::default();
         assert!(r.admit_visible_block(&planet, 0, first, 0, 16, None, &mut work));
         assert_eq!(work.job_keys, keys);
         assert_eq!(r.visible_leases.len(), 1);
         let lease = &r.visible_leases[&first];
-        assert_eq!(original, (lease.source.frame, lease.source.view, lease.source.at, lease.serial, lease.retiring, lease.retired));
+        assert_eq!(original, (lease.captured_source().frame, lease.captured_source().view, lease.captured_source().at, lease.serial, lease.retiring, lease.retired));
         assert!(r.blocks.values().all(|block| block.refs == 16));
         assert_eq!(work.jobs.iter().map(|job| job.record).collect::<FxHashSet<_>>().len(), 16);
         table_is_exact(&r);
@@ -2929,7 +3366,7 @@ mod tests {
             }
             assert!(!r.transient_wanted(first), "cause {cause}");
             let lease_stamp = |r: &Residency| r.visible_leases.get(&first).map(|lease|
-                (lease.source.frame, lease.source.view, lease.source.at, lease.serial, lease.retiring, lease.retired));
+                (lease.captured_source().frame, lease.captured_source().view, lease.captured_source().at, lease.serial, lease.retiring, lease.retired));
             let before = (r.next_record, r.free_records.clone(), r.delayed_records.clone(),
                 r.visible_admission.clone(), r.levels[0].pending.len(), r.visible_leases.len(), lease_stamp(&r));
             let mut work = FrameWork::default();
@@ -2964,7 +3401,7 @@ mod tests {
         assert!(second.iter().all(|key| r.levels[0].pending.at.contains_key(key)));
         assert_eq!(r.visible_admission.len(), 32);
         let lease = &r.visible_leases[&blocks[1]];
-        assert_eq!((lease.source.frame, lease.source.view, lease.source.at), (10, 7, at),
+        assert_eq!((lease.captured_source().frame, lease.captured_source().view, lease.captured_source().at), (10, 7, at),
             "resumption cannot refresh the captured source or extend its lease");
         assert!(r.visible_blocks.is_empty() && r.visible_source.is_none());
     }
@@ -3008,7 +3445,7 @@ mod tests {
         assert!(fresh_keys.iter().all(|key| r.levels[0].pending.at.contains_key(key)));
         assert!(!r.visible_leases.contains_key(&stale));
         let lease = &r.visible_leases[&fresh];
-        assert_eq!((lease.source.frame, lease.source.view, lease.source.at), (11, 7, captured));
+        assert_eq!((lease.captured_source().frame, lease.captured_source().view, lease.captured_source().at), (11, 7, captured));
         assert_eq!(r.visible_admission.len(), 16);
     }
 
@@ -4095,7 +4532,7 @@ mod tests {
             let stamp=VisibleStamp {frame:10,view:7,at:std::time::Instant::now()};
             r.visible_view=Some(stamp);
             r.visible_leases.insert(focus[0] & !(3u64 | (3u64<<32)),
-                VisibleLease {source:stamp,serial:2,retiring:false,retired:0,current_demand_frame:None});
+                VisibleLease {origin:LeaseOrigin::Captured(stamp),serial:2,retiring:false,retired:0,current_demand_frame:None});
             assert!(r.transient_wanted(focus[0]),"a valid GPU lease deliberately supplies the missing member");
             r.levels[0].active=!retired;
             let before=r.levels[0].pending.at.clone();
@@ -4132,6 +4569,7 @@ mod tests {
         // Keep plan's renderer settings identical to the outstanding request.
         // Otherwise its default dither of 0 installs a new inline wanted snapshot.
         r.set_lod_dither(request.lod_dither);
+        r.set_camera_view(DVec3::new(1.0, -0.17, 0.0), DVec3::Y, [0.65, 0.414]);
         r.current_request = Some(request.clone());
         r.last_request = Some(request);
         r.requested = 3;
@@ -4148,7 +4586,7 @@ mod tests {
         r.refresh_visible_pending(None);
         assert!(r.transient_wanted(block));
         assert_eq!(r.visible_admission.len(), 16);
-        let original = (r.visible_leases[&block].source.frame, r.visible_leases[&block].source.at);
+        let original = (r.visible_leases[&block].captured_source().frame, r.visible_leases[&block].captured_source().at);
         for serial in 3..7 {
             r.frame += 1;
             r.requested = serial + 1;
@@ -4156,7 +4594,7 @@ mod tests {
                 issued_at: Some(at + std::time::Duration::from_millis(serial)), ..Default::default() });
             r.retire_visible_leases(&mut FrameWork::default(), &|| false);
             assert!(r.transient_wanted(block), "current geometry remains useful after authority acknowledgment");
-            assert_eq!(original, (r.visible_leases[&block].source.frame, r.visible_leases[&block].source.at));
+            assert_eq!(original, (r.visible_leases[&block].captured_source().frame, r.visible_leases[&block].captured_source().at));
             assert_eq!(r.visible_leases[&block].serial, 3, "geometric revalidation never renews source epoch");
         }
         // Replaying the same source cannot refresh either clock.
@@ -4168,6 +4606,269 @@ mod tests {
         assert!(r.visible_leases.is_empty());
         r.refresh_visible_pending(None);
         assert!(r.visible_leases.is_empty());
+    }
+
+    #[test]
+    fn camera_arrival_issues_fine_before_old_far_without_worker_membership() {
+        let (planet, mut r, _, _) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        let far = pack(key0(crate::grid::PLANE_FACE, 3, 128), 128);
+        let (keys, count) = r.visible_columns(far).unwrap();
+        r.levels[3].active = true;
+        r.levels[3].wanted = Some(std::sync::Arc::new(keys[..count].iter().copied().collect()));
+        for &key in &keys[..count] {
+            r.levels[3].pending.insert(key, 0);
+            r.visible_admission.push_back((3, key));
+        }
+        assert!(r.levels[0].wanted.as_ref().unwrap().is_empty());
+        let work = r.plan(&planet, eye, 160.0, 16);
+        assert_eq!(work.jobs.len(), 16);
+        assert!(work.job_keys.iter().all(|&key| unpack(key).1 == 0 && !r.current_wanted(key)));
+        assert!(work.job_keys.iter().all(|&key| r.transient_wanted(key)));
+        assert!(r.visible_leases.values().all(|lease| matches!(lease.origin, LeaseOrigin::Camera)));
+        assert_eq!(r.stats.admission_batched_columns, 16);
+        assert_eq!(r.stats.camera_jobs, [16, 0, 0]);
+        r.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
+        table_is_exact(&r);
+        assert!(keys.iter().all(|&key| !r.residents.contains_key(key)));
+    }
+
+    #[test]
+    fn camera_arrival_preserves_captured_capacity_while_admitting_visible_camera_tiles() {
+        let (_, mut r, _, at) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        r.levels[1].active = true;
+        r.levels[2].active = true;
+        let blocks: Vec<_> = (0..VISIBLE_BLOCKS).map(|n|
+            pack(key0(crate::grid::PLANE_FACE, 3, 128 + n as i32 * 4), 128)).collect();
+        for &block in &blocks {
+            r.visible_leases.insert(block, VisibleLease {
+                origin: LeaseOrigin::Captured(VisibleStamp { frame: 10, view: 7, at }),
+                serial: 3, retiring: false, retired: 0, current_demand_frame: None,
+            });
+        }
+        let current = r.camera_blocks(eye, &|| false);
+        assert!(current.len() > VISIBLE_BLOCKS && current.len() <= CAMERA_CANDIDATES);
+        r.set_visible_view(11, 7, at);
+        r.prioritize_visible_blocks_from(blocks.iter().map(|&key| (key as u32, (key >> 32) as u32)), 11, 7, at);
+        r.refresh_visible_pending(None);
+        r.refresh_camera_pending(&current, None);
+        assert_eq!(r.visible_leases.values().filter(|lease| matches!(lease.origin, LeaseOrigin::Captured(_))).count(), VISIBLE_BLOCKS);
+        assert_eq!(r.visible_leases.values().filter(|lease| matches!(lease.origin, LeaseOrigin::Camera)).count(), current.len());
+        assert!(r.visible_leases.len() <= TEMPORARY_LEASES && r.visible_admission.len() <= VISIBLE_ADMISSION_COLUMNS);
+        assert_eq!(r.visible_admission.front().unwrap().0, 0);
+    }
+
+    #[test]
+    fn camera_arrival_expiry_preserves_edited_inflight_publication() {
+        let (mut planet, mut r, _, _) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        let first = r.camera_blocks(eye, &|| false)[0];
+        let (face, level, i, j) = unpack(first);
+        let center = r.grid.ground_point(face, f64::from((i + 2) * (BRICK << level)),
+            f64::from((j + 2) * (BRICK << level)));
+        std::sync::Arc::make_mut(&mut planet).apply(crate::edits::Brush {
+            center: center.to_array(), ..test_brush(1.5)
+        }).unwrap();
+        r.last_request.as_mut().unwrap().outer_radius = planet.outer_radius();
+        let work = r.plan(&planet, eye, 160.0, 64);
+        assert!(!work.jobs.is_empty());
+        assert!(work.jobs.iter().any(|job| job.edits != 0));
+        let departed = eye + DVec3::new(10_000.0, 0.0, 0.0);
+        r.current_request.as_mut().unwrap().eye = departed;
+        r.frame += 1;
+        assert!(work.job_keys.iter().all(|&key| !r.transient_wanted(key)));
+        let mut retired = FrameWork::default();
+        for _ in 0..8 { r.retire_visible_leases(&mut retired, &|| false); }
+        assert_eq!(retired.evictions.len(), work.jobs.len());
+        assert!(work.job_keys.iter().all(|key| r.publishing[key].evicted));
+        assert!(!r.visible_leases.is_empty(), "in-flight ownership keeps its capacity slot");
+        r.complete_jobs(work.job_keys.iter().map(|&key| (key, 0)));
+        r.retire_visible_leases(&mut retired, &|| false);
+        assert!(r.visible_leases.is_empty() && r.publishing.is_empty());
+        assert_eq!(planet.edits().len(), 1);
+        table_is_exact(&r);
+    }
+
+    #[test]
+    fn camera_arrival_origin_caps_and_mixed_retirement_are_bounded() {
+        let (_, mut r, _, at) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        let current = r.camera_blocks(eye, &|| false);
+        for (origin, count, level) in [
+            (LeaseOrigin::Captured(VisibleStamp { frame: 10, view: 7, at }), VISIBLE_BLOCKS, 3),
+            (LeaseOrigin::Camera, CAMERA_LEASES, 0),
+        ] {
+            for n in 0..count {
+                let base = if level == 3 { 128 } else { 1000 };
+                let block = pack(key0(crate::grid::PLANE_FACE, level, base + n as i32 * 4), base as u32);
+                assert!(r.visible_columns(block).is_some());
+                r.visible_leases.insert(block, VisibleLease { origin, serial: 3,
+                    retiring: false, retired: 0, current_demand_frame: Some(r.frame) });
+            }
+        }
+        assert_eq!(r.visible_leases.len(), TEMPORARY_LEASES);
+        r.refresh_camera_pending(&current, None);
+        assert!(current.iter().all(|block| !r.visible_leases.contains_key(block)));
+        let extra = pack(key0(crate::grid::PLANE_FACE, 0, 3000), 1000);
+        r.prioritize_visible_blocks_from([(extra as u32, (extra >> 32) as u32)], 10, 7, at);
+        r.refresh_visible_pending(None);
+        assert!(!r.visible_leases.contains_key(&extra));
+        assert_eq!(r.visible_leases.values().filter(|lease| matches!(lease.origin, LeaseOrigin::Camera)).count(), CAMERA_LEASES);
+        assert_eq!(r.visible_leases.values().filter(|lease| matches!(lease.origin, LeaseOrigin::Captured(_))).count(), VISIBLE_BLOCKS);
+        for lease in r.visible_leases.values_mut() { lease.retiring = true; }
+        r.retire_visible_leases_current(&[], &mut FrameWork::default(), &|| false);
+        assert_eq!(r.visible_leases.len(), TEMPORARY_LEASES - CAMERA_CANDIDATES);
+        let captured_left = r.visible_leases.values().filter(|lease| matches!(lease.origin, LeaseOrigin::Captured(_))).count();
+        assert!(captured_left >= VISIBLE_BLOCKS - 8, "mixed Camera work cannot increase captured retirement beyond 128 columns");
+        assert!(r.visible_leases.values().all(|lease| lease.retired == 0));
+    }
+
+    #[test]
+    fn camera_arrival_grazing_strip_preserves_captured_fine_and_view_guards() {
+        let (_, mut r, _, at) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye + DVec3::Y * 40.0;
+        r.current_request.as_mut().unwrap().eye = eye;
+        r.set_ground_clearance(50.0);
+        let view = r.camera_view.unwrap();
+        let focus = crate::windows::visible_focus(&r.grid, eye, view.forward, 0.0, 1000.0).unwrap();
+        assert!(focus.distance(eye) > r.current_request.as_ref().unwrap().lod0);
+        let before = r.camera_blocks(eye, &|| false);
+        assert!(before.len() > 4 && before.len() <= CAMERA_CANDIDATES);
+        assert!(before.iter().all(|&key| {
+            let (face, level, i, j) = unpack(key);
+            let point = r.grid.ground_point(face, f64::from((i + 2) * (BRICK << level)),
+                f64::from((j + 2) * (BRICK << level)));
+            (point - eye).dot(view.forward) > 0.0
+        }), "behind-eye/offscreen under-camera tiles do not consume the cap");
+        let block = *before.last().unwrap();
+        r.visible_admission.push_back((3, pack(key0(crate::grid::PLANE_FACE, 3, 128), 128)));
+        r.prioritize_visible_blocks_from([(block as u32, (block >> 32) as u32)], 10, 7, at);
+        r.refresh_visible_pending(None);
+        let stamp = r.visible_leases[&block].captured_source();
+        r.refresh_camera_pending(&before, None);
+        assert_eq!(r.visible_admission.front(), Some(&(0, block)));
+        assert_eq!(r.visible_leases[&block].captured_source().at, stamp.at);
+        assert_eq!(r.visible_leases[&block].captured_source().frame, stamp.frame);
+        r.set_ground_clearance(1_000.0);
+        assert!(r.camera_blocks(eye, &|| false).is_empty());
+        r.set_ground_clearance(10.0);
+        r.levels[0].active = false;
+        assert!(r.camera_blocks(eye, &|| false).is_empty());
+    }
+
+    #[test]
+    fn camera_arrival_selection_departure_releases_lease_without_expanding_cap() {
+        let (_, mut r, _, _) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        let current = r.camera_blocks(eye, &|| false);
+        r.refresh_camera_pending(&current, None);
+        let old = current[0];
+        assert!(r.current_camera_block(old));
+        r.set_camera_view(DVec3::new(-1.0, -0.17, 0.0), DVec3::Y, [0.65, 0.414]);
+        let turned = r.camera_blocks(eye, &|| false);
+        assert!(!turned.contains(&old) && r.current_camera_block(old),
+            "a turned-away tile may remain inside the radial window");
+        r.frame += 1;
+        r.retire_visible_leases_current(&turned, &mut FrameWork::default(), &|| false);
+        assert!(!r.transient_wanted(old));
+        r.refresh_camera_pending(&turned, None);
+        assert!(r.visible_leases.len() <= TEMPORARY_LEASES);
+    }
+
+    #[test]
+    fn camera_arrival_radial_down_view_requests_ground_and_up_view_does_not() {
+        let (_, mut r, _, _) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        r.set_camera_view(-DVec3::Y, DVec3::Z, [0.65, 0.414]);
+        let down = r.camera_blocks(eye, &|| false);
+        assert!(!down.is_empty() && down.len() <= CAMERA_CANDIDATES);
+        assert!(down.iter().all(|&key| r.current_camera_block(key)));
+        r.refresh_camera_pending(&down, None);
+        assert!(r.visible_leases.values().all(|lease| matches!(lease.origin, LeaseOrigin::Camera)));
+        r.set_camera_view(DVec3::Y, DVec3::Z, [0.65, 0.414]);
+        assert!(r.camera_blocks(eye, &|| false).is_empty());
+    }
+
+    #[test]
+    fn camera_arrival_selected_deadline_tail_retains_current_frame_ownership() {
+        let (_, mut r, _, _) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        let current = r.camera_blocks(eye, &|| false);
+        r.refresh_camera_pending(&current, None);
+        assert!(r.visible_leases.len() > 8);
+        let tail = *r.visible_leases.keys().last().unwrap();
+        for (&key, lease) in &mut r.visible_leases {
+            if key != tail { lease.retiring = true; }
+        }
+        let old_frame = r.frame;
+        r.frame += 1;
+        assert_eq!(r.visible_leases[&tail].current_demand_frame, Some(old_frame));
+        let checks = std::cell::Cell::new(0);
+        r.retire_visible_leases_current(&[tail], &mut FrameWork::default(), &|| {
+            checks.set(checks.get() + 1);
+            checks.get() > 128
+        });
+        assert_eq!(r.visible_leases[&tail].current_demand_frame, Some(r.frame));
+        assert!(r.transient_wanted(tail) && r.protected_wanted(tail));
+        assert!(r.visible_leases.len() > 1, "deadline leaves an unvisited ownership tail");
+        assert!(matches!(r.visible_leases[&tail].origin, LeaseOrigin::Camera));
+    }
+
+    #[test]
+    fn camera_arrival_overlapping_bands_cover_the_middle_grazing_strip() {
+        let (_, mut r, _, _) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.current_request.as_mut().unwrap().lod0 = 88.0;
+        r.set_ground_clearance(10.0);
+        r.levels[1].active = true;
+        r.levels[2].active = true;
+        let current = r.camera_blocks(eye, &|| false);
+        assert!(current.len() <= CAMERA_CANDIDATES);
+        assert!(current.iter().any(|&key| unpack(key).1 == 0));
+        assert!(current.iter().any(|&key| unpack(key).1 > 0), "projected coverage cannot spend every slot on L0");
+        let view = r.camera_view.unwrap();
+        for ahead in [40.0, 50.0, 60.0] {
+            let depth = (DVec3::new(ahead, 0.0, eye.z) - eye).dot(view.forward);
+            for fraction in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+                let lateral = depth * view.tan_half[0] * fraction;
+                let covered = current.iter().any(|&key| {
+                    let (face, level, i, j) = unpack(key);
+                    let cells = BRICK << level;
+                    let a = r.grid.ground_point(face, f64::from(i * cells), f64::from(j * cells));
+                    let b = r.grid.ground_point(face, f64::from((i + 4) * cells), f64::from((j + 4) * cells));
+                    a.x.min(b.x) <= ahead && a.x.max(b.x) >= ahead
+                        && a.z.min(b.z) <= eye.z + lateral && a.z.max(b.z) >= eye.z + lateral
+                });
+                assert!(covered, "frustum band has missing demand at ahead {ahead}, lateral {lateral}");
+            }
+        }
+        for lateral in [-16.0, -8.0, 0.0, 8.0, 16.0] {
+            let mut intervals = Vec::new();
+            for &key in &current {
+                let (face, level, i, j) = unpack(key);
+                let cells = BRICK << level;
+                let a = r.grid.ground_point(face, f64::from(i * cells), f64::from(j * cells));
+                let b = r.grid.ground_point(face, f64::from((i + 4) * cells), f64::from((j + 4) * cells));
+                let strip = eye.z + lateral;
+                if a.z.min(b.z) <= strip && a.z.max(b.z) >= strip {
+                    intervals.push((a.x.min(b.x), a.x.max(b.x)));
+                }
+            }
+            intervals.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+            let mut reached = 40.0;
+            for (start, end) in intervals {
+                if start <= reached + 1.0e-6 { reached = reached.max(end); }
+            }
+            assert!(reached >= 60.0, "visible strip at lateral {lateral} leaves 40–60m without current demand; reached {reached}");
+        }
     }
 
     #[test]
@@ -4277,7 +4978,7 @@ mod tests {
             assert!(r.current_captured_block(block));
             assert_eq!(r.visible_columns(block).unwrap().1, 16);
             r.visible_leases.insert(block, VisibleLease {
-                source: VisibleStamp { frame: 10, view: 7, at },
+                origin: LeaseOrigin::Captured(VisibleStamp { frame: 10, view: 7, at }),
                 serial: 3, retiring: false, retired: 0,
                 current_demand_frame: Some(r.frame),
             });
@@ -4290,14 +4991,14 @@ mod tests {
         let legacy = ordered[expired_blocks + 1];
         let lease = r.visible_leases.get_mut(&legacy).unwrap();
         lease.current_demand_frame = None;
-        lease.source.at = at + std::time::Duration::from_millis(2);
+        if let LeaseOrigin::Captured(source) = &mut lease.origin { source.at = at + std::time::Duration::from_millis(2); }
         let (keys, count) = r.visible_columns(bounded).unwrap();
         let wanted = keys[1];
         r.levels[0].wanted = Some(std::sync::Arc::new([wanted].into_iter().collect()));
         for &key in &keys[..count] { r.levels[0].pending.insert(key, 0); }
         r.visible_admission = keys[1..count].iter().map(|&key| (0, key)).collect();
-        let original = (r.visible_leases[&bounded].source.frame,
-            r.visible_leases[&bounded].source.at, r.visible_leases[&bounded].serial);
+        let original = (r.visible_leases[&bounded].captured_source().frame,
+            r.visible_leases[&bounded].captured_source().at, r.visible_leases[&bounded].serial);
         let old_frame = r.frame;
         r.frame += 1;
         let mut retired = FrameWork::default();
@@ -4308,7 +5009,7 @@ mod tests {
         assert_eq!(r.visible_leases[&bounded].current_demand_frame, Some(old_frame));
         assert!(!r.visible_leases[&bounded].retiring);
         assert!(r.applied_levels[0] < r.visible_leases[&bounded].serial);
-        assert!(r.source_is_current(r.visible_leases[&bounded].source, VISIBLE_LEASE_FRAMES));
+        assert!(r.source_is_current(r.visible_leases[&bounded].captured_source(), VISIBLE_LEASE_FRAMES));
         assert!(!r.transient_wanted(bounded), "unvisited current-bound demand must fail closed");
         assert!(!r.protected_wanted(bounded));
         assert!(r.protected_wanted(wanted), "ordinary authority membership remains protected");
@@ -4322,8 +5023,8 @@ mod tests {
         assert_eq!(r.visible_leases[&bounded].current_demand_frame, Some(r.frame));
         assert!(r.transient_wanted(bounded) && r.protected_wanted(bounded));
         assert!(r.transient_wanted(legacy));
-        assert_eq!(original, (r.visible_leases[&bounded].source.frame,
-            r.visible_leases[&bounded].source.at, r.visible_leases[&bounded].serial));
+        assert_eq!(original, (r.visible_leases[&bounded].captured_source().frame,
+            r.visible_leases[&bounded].captured_source().at, r.visible_leases[&bounded].serial));
     }
 
     #[test]
