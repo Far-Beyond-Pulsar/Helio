@@ -139,6 +139,54 @@ fn production_summary_handoff_rebuilds_retained_edited_records_and_complete_pare
     assert_entry(&full, 3, 8, 0, 123, 4096);
     assert_ne!(&full[slot(1, 0, 0) * 4..slot(1, 0, 0) * 4 + 2], &[0, 0]);
     assert_eq!(read_buffer(&gpu, &record_buffer, record_buffer.size()), bytemuck::cast_slice::<_, u8>(&canonical));
+    // No changed attachments means no resets, preserving every full count.
+    let unchanged = run(0);
+    assert_eq!(unchanged, full);
+    // A detached child leaves its exact records resident. Dirty ancestors are
+    // rebuilt even when not selected, retaining all untouched sibling counts.
+    let detached = [slot(1, 128, 0) as u32, NONE, NONE,
+        slot(2, 32, 0) as u32, 32, 0, slot(3, 8, 0) as u32, 8, 0];
+    gpu.queue.write_buffer(&patches, 0, bytemuck::cast_slice(&detached));
+    let detached = run(3);
+    assert_entry(&detached, 1, 129, 0, 8, 16);
+    assert_entry(&detached, 2, 32, 0, 8, 240);
+    assert_entry(&detached, 3, 8, 0, 8, 4080);
+    assert_eq!(read_buffer(&gpu, &record_buffer, record_buffer.size()), bytemuck::cast_slice::<_, u8>(&canonical));
+    // A retry can publish a retained detached record and increment matching
+    // parents. Its dirty closure removes that count without touching siblings.
+    gpu.queue.write_buffer(&blocks, slot(2, 32, 0) as u64 * 16,
+        bytemuck::cast_slice(&[32i32, 0, 123, 241]));
+    gpu.queue.write_buffer(&blocks, slot(3, 8, 0) as u64 * 16,
+        bytemuck::cast_slice(&[8i32, 0, 123, 4081]));
+    let ancestors = [slot(2, 32, 0) as u32, 32, 0, slot(3, 8, 0) as u32, 8, 0];
+    gpu.queue.write_buffer(&patches, 0, bytemuck::cast_slice(&ancestors));
+    let retried_detached = run(2);
+    assert_entry(&retried_detached, 2, 32, 0, 8, 240);
+    assert_entry(&retried_detached, 3, 8, 0, 8, 4080);
+    let returning_child = [slot(1, 128, 0) as u32, 128, 0,
+        slot(2, 32, 0) as u32, 32, 0, slot(3, 8, 0) as u32, 8, 0];
+    gpu.queue.write_buffer(&patches, 0, bytemuck::cast_slice(&returning_child));
+    let returned_child = run(3);
+    assert_entry(&returned_child, 1, 128, 0, 123, 16);
+    assert_entry(&returned_child, 1, 129, 0, 8, 16);
+    assert_entry(&returned_child, 2, 32, 0, 123, 256);
+    assert_entry(&returned_child, 3, 8, 0, 123, 4096);
+    // Invalidation matches the published metadata cleared by production evict;
+    // the remaining fifteen exact columns and all siblings retain positive counts.
+    records[17][0] = NONE;
+    records[17][3] = 0;
+    gpu.queue.write_buffer(&record_buffer, 0, bytemuck::cast_slice(&records));
+    let evicted = run(3);
+    assert_entry(&evicted, 1, 128, 0, 123, 15);
+    assert_entry(&evicted, 1, 129, 0, 8, 16);
+    assert_entry(&evicted, 2, 32, 0, 123, 255);
+    assert_entry(&evicted, 3, 8, 0, 123, 4095);
+    assert_eq!(read_buffer(&gpu, &record_buffer, record_buffer.size()), bytemuck::cast_slice::<_, u8>(&records));
+    records[17] = canonical[17];
+    gpu.queue.write_buffer(&record_buffer, 0, bytemuck::cast_slice(&records));
+    let restored = run(3);
+    assert_entry(&restored, 3, 8, 0, 123, 4096);
+    gpu.queue.write_buffer(&patches, 0, bytemuck::cast_slice(&descriptors));
     // Failed publication cannot certify a complete block; retained edit stays.
     records[17][3] |= OVERFLOW;
     gpu.queue.write_buffer(&record_buffer, 0, bytemuck::cast_slice(&records));

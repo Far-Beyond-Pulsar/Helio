@@ -104,6 +104,7 @@ fn atan_small(y: f32, x: f32) -> f32 {
 // Components are chosen with `select` so no vector is indexed dynamically.
 fn plane_t(fr: FaceRay, axis: u32, plane: i32) -> f32 {
     let b = axis == 1u;
+    if select(fr.dir.x, fr.dir.y, b) == 0 { return 3.0e38; }
     if is_plane() {
         let lm = select(fr.lm.x, fr.lm.y, b);
         if lm * f32(select(fr.dir.x, fr.dir.y, b)) <= 0.0 { return 3.0e38; }
@@ -457,6 +458,9 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
         let key = vec4<i32>(cur.i >> 3u, cur.j >> 3u, i32(cur.face), i32(cur.level));
         var skip = vec4<i32>(0);
         var summary_checked = false;
+        // An accepted level transition already probed this exact column.
+        // Reuse that record only within this step, after the normal hint gate.
+        var transition_record = NONE;
         if any(key != loaded) {
             // Column-coherent stochastic LOD transition: each column switches
             // level at its own distance within the dither band. The threshold
@@ -476,6 +480,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 let found = find_column(column_key0(cur.face, want, coarser.i >> 3u), bitcast<u32>(coarser.j >> 3u));
                 if found == NONE || !column_valid(records[found]) || !level_contains_solid(coarser, found, r, t) {
                     cur = coarser;
+                    if found != NONE && column_valid(records[found]) { transition_record = found; }
                 }
             } else if want < cur.level {
                 let finer = locate(r, fr, t, want);
@@ -485,6 +490,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                     let found = find_column(column_key0(finer.face, want, finer.i >> 3u), bitcast<u32>(finer.j >> 3u));
                     if found != NONE && column_valid(records[found]) && !level_contains_solid(finer, found, r, t) {
                         cur = finer;
+                        transition_record = found;
                     } else if found == NONE || !column_valid(records[found]) {
                         request_visible_block(finer.face, want, finer.i >> 3u, finer.j >> 3u);
                     }
@@ -498,7 +504,10 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 // Unusable columns skip the hash probe.
                 if column_hint(cur.level, cur.face, cur.i >> 3u, cur.j >> 3u) != 0u {
                     work_lookups += 1u;
-                    record = find_column(column_key0(cur.face, cur.level, cur.i >> 3u), bitcast<u32>(cur.j >> 3u));
+                    record = transition_record;
+                    if record == NONE {
+                        record = find_column(column_key0(cur.face, cur.level, cur.i >> 3u), bitcast<u32>(cur.j >> 3u));
+                    }
                     if record != NONE {
                         col = records[record];
                         if column_valid(col) { break; }
@@ -512,6 +521,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 cur.j >>= 1u;
                 cur.k >>= 1u;
                 cur.level += 1u;
+                transition_record = NONE;
                 // Fallback changed the key and radial cursor of the query.
                 summary_checked = false;
             }

@@ -190,13 +190,16 @@ impl PendingQueue {
         true
     }
     fn remove(&mut self, key: u64) -> bool {
-        let Some((bucket, index)) = self.at.remove(&key) else { return false };
+        self.take(key).is_some()
+    }
+    fn take(&mut self, key: u64) -> Option<usize> {
+        let (bucket, index) = self.at.remove(&key)?;
         let list = &mut self.buckets[bucket as usize];
         list.swap_remove(index as usize);
         if let Some(&moved) = list.get(index as usize) {
             self.at.get_mut(&moved).unwrap().1 = index;
         }
-        true
+        Some(bucket as usize)
     }
     /// Lowest non-empty bucket.
     fn best(&mut self) -> Option<usize> {
@@ -274,9 +277,8 @@ fn pop_pending(levels: &mut [Level], top_level: u32,
         let (index, key) = visible.pop_front().unwrap();
         skipped += 1;
         let Some(level) = levels.get_mut(index) else { continue };
-        let Some(&(bucket, _)) = level.pending.at.get(&key) else { continue };
-        level.pending.remove(key);
-        return Some((index, key, bucket as usize));
+        let Some(bucket) = level.pending.take(key) else { continue };
+        return Some((index, key, bucket));
     }
     let (index, _) = select_pending_level(levels, top_level, cached)?;
     let (key, bucket) = levels[index].pending.pop()?;
@@ -812,7 +814,7 @@ impl Residency {
             }
             let slot = block_slot(level, face, tier, bi, bj);
             self.block_owner.insert(slot, bkey);
-            work.block_inits.push((slot, bi, bj));
+            self.dirty_summary_chain(bkey, work);
             self.blocks.insert(bkey, Block { slot, refs: count });
             if tier == 1 {
                 self.live_index.insert(slot, self.live_tier1.len());
@@ -833,6 +835,40 @@ impl Residency {
                 self.detach_summary_owner(bkey, work);
             }
         }
+        // A retained detached child's later eviction may still decrement an
+        // attached parent. Recount that parent's actual attached children.
+        self.dirty_summary_chain((level, face, 1, ci >> 2, cj >> 2), work);
+    }
+
+    fn dirty_summary_chain(&self, owner: (u32, u8, u32, i32, i32), work: &mut FrameWork) {
+        let (level, face, tier, i, j) = owner;
+        for ancestor in tier..=BLOCK_TIERS {
+            let shift = 2 * (ancestor - tier);
+            let wanted = (level, face, ancestor, i >> shift, j >> shift);
+            let slot = block_slot(level, face, ancestor, wanted.3, wanted.4);
+            // Never reset a replacement occupying the same physical slot.
+            if self.block_owner.get(&slot) == Some(&wanted) {
+                work.block_inits.push((slot, wanted.3, wanted.4));
+            }
+        }
+    }
+
+    fn dirty_detached_publications(&self, work: &mut FrameWork) {
+        let mut previous = None;
+        for index in 0..work.job_keys.len() {
+            let key = work.job_keys[index] & !(3u64 | (3u64 << 32));
+            if previous == Some(key) { continue; }
+            previous = Some(key);
+            let (face, level, i, j) = unpack(key);
+            let child = (level, face, 1, i >> 2, j >> 2);
+            let slot = block_slot(level, face, 1, child.3, child.4);
+            if self.block_owner.get(&slot) != Some(&child) {
+                // Urgent regeneration and scalar initial retries can publish a
+                // retained detached record. Parents must exclude its absent
+                // child even if publication increments their matching identity.
+                self.dirty_summary_chain(child, work);
+            }
+        }
     }
 
     fn detach_summary_owner(&mut self, owner: (u32, u8, u32, i32, i32), work: &mut FrameWork) {
@@ -841,6 +877,7 @@ impl Residency {
         if self.block_owner.get(&slot) != Some(&owner) { return; }
         self.block_owner.remove(&slot);
         work.block_inits.push((slot, -1, -1));
+        self.dirty_summary_chain(owner, work);
         if tier == 1 {
             if let Some(at) = self.live_index.remove(&slot) {
                 self.live_tier1.swap_remove(at);
@@ -856,7 +893,7 @@ impl Residency {
         if self.block_owner.get(&slot) == Some(&owner) { return; }
         debug_assert!(!self.block_owner.contains_key(&slot));
         self.block_owner.insert(slot, owner);
-        work.block_inits.push((slot, owner.3, owner.4));
+        self.dirty_summary_chain(owner, work);
         if owner.2 == 1 {
             self.live_index.insert(slot, self.live_tier1.len());
             self.live_tier1.push(slot);
@@ -873,13 +910,7 @@ impl Residency {
             }
             // Only referenced blocks can attach: missing demand acquires
             // summaries during normal admission, never as zero-ref ghosts.
-            let attached = self.block_owner.get(&slot) == Some(&wanted);
             self.attach_summary_owner(wanted, work);
-            if attached {
-                // Exact records rebuild tier1; ordered child reductions rebuild
-                // both parents, including a return through another sibling.
-                work.block_inits.push((slot, wanted.3, wanted.4));
-            }
         }
     }
 
@@ -1385,21 +1416,25 @@ impl Residency {
             if out_of_time() { break; }
             let level = unpack(block).1 as usize;
             let Some((keys, count)) = self.visible_columns(block) else { continue };
-            let ordinary = keys[..count].iter().all(|&key| self.current_wanted(key));
-            if !ordinary {
-                if let Some(lease) = self.visible_leases.get_mut(&block) {
-                    // Captured stamps retain their original TTL and serial.
-                    if matches!(lease.origin, LeaseOrigin::Camera) && !lease.retiring {
-                        lease.current_demand_frame = Some(self.frame);
-                    }
-                } else if camera_leases < CAMERA_LEASES && self.visible_leases.len() < TEMPORARY_LEASES {
-                    self.visible_leases.insert(block, VisibleLease {
-                        origin: LeaseOrigin::Camera, serial: self.requested,
-                        retiring: false, retired: 0, current_demand_frame: Some(self.frame),
-                    });
-                    camera_leases += 1;
+            // Current tile authorization already proves demand for every
+            // member. Captured clocks remain unchanged; fresh Camera demand
+            // may refresh its existing lease without sixteen wanted probes.
+            if let Some(lease) = self.visible_leases.get_mut(&block) {
+                if matches!(lease.origin, LeaseOrigin::Camera) && !lease.retiring {
+                    lease.current_demand_frame = Some(self.frame);
                 }
-                if !self.transient_wanted(block) { continue; }
+            }
+            let leased = self.transient_wanted(block);
+            let ordinary = !leased && keys[..count].iter().all(|&key| self.current_wanted(key));
+            if !leased && !ordinary {
+                // An existing expired/retiring lease cannot be renewed here.
+                if self.visible_leases.contains_key(&block) || camera_leases >= CAMERA_LEASES
+                    || self.visible_leases.len() >= TEMPORARY_LEASES { continue; }
+                self.visible_leases.insert(block, VisibleLease {
+                    origin: LeaseOrigin::Camera, serial: self.requested,
+                    retiring: false, retired: 0, current_demand_frame: Some(self.frame),
+                });
+                camera_leases += 1;
             }
             self.queue_obsolete_owners(block);
             let (face, _, i, j) = unpack(block);
@@ -1965,12 +2000,16 @@ impl Residency {
         if !transient && !current_geometry_allows(&self.grid, self.current_request.as_ref(), first) {
             return false;
         }
-        for &key in &keys {
-            if (!self.current_wanted(key) && !transient) || self.residents.contains_key(key)
-                || self.initial_retries.contains(&key) || self.publishing.contains_key(&key)
-                || (key != selected && self.levels[index].pending.at.get(&key)
-                    .is_none_or(|entry| !visible && entry.0 as usize != bucket)) {
+        let mut column_buckets = [bucket; 16];
+        for (member, &key) in keys.iter().enumerate() {
+            if (!transient && !self.current_wanted(key)) || self.residents.contains_key(key)
+                || self.initial_retries.contains(&key) || self.publishing.contains_key(&key) {
                 return false;
+            }
+            if key != selected {
+                let Some(&(pending_bucket, _)) = self.levels[index].pending.at.get(&key) else { return false };
+                if !visible && pending_bucket as usize != bucket { return false; }
+                column_buckets[member] = pending_bucket as usize;
             }
         }
         if !planet.edits().is_empty() {
@@ -1991,13 +2030,12 @@ impl Residency {
         // All fallible guards ran before mutation. The preflight reserved
         // sixteen individual record identities; shared refs change only once.
         self.reference_blocks_count(first, 16, work);
-        for &key in &keys {
-            let column_bucket = if key == selected { bucket } else {
+        for (member, &key) in keys.iter().enumerate() {
+            if key != selected {
                 if visible { self.visible_admission.pop_front(); }
-                let bucket = self.levels[index].pending.at[&key].0 as usize;
                 self.levels[index].pending.remove(key);
-                bucket
-            };
+            }
+            let column_bucket = column_buckets[member];
             let record = self.alloc_record().expect("complete block record preflight");
             let slot = self.residents.insert(key, Resident { record, slot: 0, edit_block: None, blocks: true });
             work.table_writes.push((slot, record));
@@ -2292,6 +2330,7 @@ impl Residency {
             self.queue_obsolete_owners(key);
             self.levels[index].pending.insert(key, bucket);
         }
+        self.dirty_detached_publications(&mut work);
         let t_admission = started.elapsed();
         // Capacity-blocked admission also reaches this cleanup. Evicted record
         // identities retain their existing next-frame quarantine.
@@ -3382,6 +3421,28 @@ mod tests {
     }
 
     #[test]
+    fn complete_visible_batch_preserves_preflight_buckets_on_failed_publication() {
+        let (planet, mut r, keys, _) = batch_admission_fixture();
+        for (member, &key) in keys.iter().enumerate().skip(1) {
+            r.levels[0].pending.insert(key, member % BUCKETS);
+        }
+        let mut work = FrameWork::default();
+        assert!(r.admit_visible_block(&planet, 0, keys[0], 0, 16, None, &mut work));
+        assert_eq!(work.job_keys, keys);
+        for (member, &key) in keys.iter().enumerate() {
+            assert_eq!(r.publishing[&key].initial_bucket, Some(member % BUCKETS));
+        }
+        r.complete_jobs(keys.iter().map(|&key| (key, 2)));
+        for (member, &key) in keys.iter().enumerate() {
+            assert!(r.initial_retries.contains(&key));
+            assert_eq!(r.levels[0].pending.at[&key].0 as usize, member % BUCKETS,
+                "failed individual publication returns to its original priority bucket");
+        }
+        assert!(keys.iter().all(|&key| r.residents.get(key).is_some_and(|resident| resident.blocks)));
+        table_is_exact(&r);
+    }
+
+    #[test]
     fn complete_visible_batch_preserves_individual_publications_and_reference_release() {
         let (planet, mut r, near, far) = batch_admission_fixture();
         let mut work = FrameWork::default();
@@ -3471,7 +3532,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_visible_batch_accumulates_existing_parent_refs_without_reinitializing_them() {
+    fn complete_visible_batch_accumulates_existing_parent_refs_and_recounts_dirty_ancestors() {
         let (planet, mut r, near, _) = batch_admission_fixture();
         let mut work = FrameWork::default();
         assert!(r.admit_visible_block(&planet, 0, near[0], 0, 32, None, &mut work));
@@ -3483,7 +3544,8 @@ mod tests {
             r.visible_admission.push_back((0, key));
         }
         assert!(r.admit_visible_block(&planet, 0, second[0], 0, 32, None, &mut work));
-        assert_eq!(work.block_inits.len(), 4, "second tier-1 block shares both existing parents");
+        assert_eq!(work.block_inits.iter().map(|init| init.0).collect::<FxHashSet<_>>().len(), 4,
+            "second tier-1 block shares both existing parent allocations");
         for (&owner, block) in &r.blocks {
             let expected = work.job_keys.iter().filter(|&&key| {
                 let (face, level, i, j) = unpack(key);
@@ -4983,6 +5045,73 @@ mod tests {
     }
 
     #[test]
+    fn summary_handoff_unchanged_frame_does_not_reset_attached_summaries() {
+        let (_, mut r, old, _) = current_alias_fixture();
+        let mut current = vec![old[0]];
+        let selected = select_camera_owners(&mut current);
+        let owners = r.block_owner.clone();
+        let mut work = FrameWork::default();
+        r.handoff_camera_owners(&selected, &mut work, &|| false);
+        assert!(work.block_inits.is_empty() && work.jobs.is_empty() && work.evictions.is_empty());
+        assert_eq!(r.block_owner, owners);
+        assert!(r.blocks.values().all(|block| block.refs == 16));
+    }
+
+    #[test]
+    fn summary_handoff_dirty_child_recounts_unselected_parents_and_retained_siblings() {
+        let (_, mut r, old, _) = current_alias_fixture();
+        let (face, level, i, j) = unpack(old[0]);
+        let sibling = pack(key0(face, level, i ^ 4), j as u32);
+        let (siblings, count) = r.visible_columns(sibling).unwrap();
+        for &key in &siblings[..count] {
+            let record = r.alloc_record().unwrap();
+            assert!(r.acquire_blocks(key, &mut FrameWork::default()));
+            r.residents.insert(key, Resident { record, blocks: true, ..Default::default() });
+        }
+        let child = (level, face, 1, i >> 2, j >> 2);
+        let parent = (level, face, 2, i >> 4, j >> 4);
+        let grandparent = (level, face, 3, i >> 6, j >> 6);
+        let records: Vec<_> = old.iter().chain(&siblings[..count])
+            .map(|&key| r.residents.get(key).unwrap().record).collect();
+        let mut work = FrameWork::default();
+        r.detach_summary_owner(child, &mut work);
+        for owner in [parent, grandparent] {
+            assert!(work.block_inits.contains(&(r.blocks[&owner].slot, owner.3, owner.4)),
+                "unselected attached ancestors must drop the detached child's count");
+        }
+        work = FrameWork::default();
+        work.job_keys.extend([old[0], old[1], siblings[0]]);
+        r.dirty_detached_publications(&mut work);
+        assert_eq!(work.block_inits.len(), 2,
+            "detached urgent/scalar publication dirties only its attached parents once per tile");
+        for owner in [parent, grandparent] {
+            assert!(work.block_inits.contains(&(r.blocks[&owner].slot, owner.3, owner.4)));
+        }
+        work = FrameWork::default();
+        r.attach_summary_owner(child, &mut work);
+        for owner in [child, parent, grandparent] {
+            assert!(work.block_inits.contains(&(r.blocks[&owner].slot, owner.3, owner.4)),
+                "ordered rebuild must include returning child and all existing parents");
+        }
+        assert_eq!(r.blocks[&child].refs, 16);
+        assert_eq!(r.blocks[&(level, face, 1, (i ^ 4) >> 2, j >> 2)].refs, 16);
+        assert_eq!(r.blocks[&parent].refs, 32);
+        assert_eq!(r.blocks[&grandparent].refs, 32);
+        assert_eq!(old.iter().chain(&siblings[..count])
+            .map(|&key| r.residents.get(key).unwrap().record).collect::<Vec<_>>(), records);
+        assert!(work.jobs.is_empty() && work.evictions.is_empty());
+        // A later partial eviction must dirty the still-attached ancestors too.
+        work = FrameWork::default();
+        r.evict(old[0], &mut work);
+        assert_eq!(r.blocks[&child].refs, 15);
+        assert_eq!(r.blocks[&parent].refs, 31);
+        for owner in [child, parent, grandparent] {
+            assert!(work.block_inits.contains(&(r.blocks[&owner].slot, owner.3, owner.4)));
+        }
+        table_is_exact(&r);
+    }
+
+    #[test]
     fn summary_handoff_retains_exact_records_and_detached_release_cannot_clear_replacement() {
         let (_, mut r, old, new) = current_alias_fixture();
         let old_records: Vec<_> = old.iter().map(|&key| r.residents.get(key).unwrap().record).collect();
@@ -5046,7 +5175,9 @@ mod tests {
         assert!(!r.blocks_conflict(sibling));
         for (&slot, &owner) in &selected {
             assert_eq!(r.block_owner.get(&slot), Some(&owner));
-            assert!(work.block_inits.contains(&(slot, owner.3, owner.4)), "reattached parent must rebuild existing exact children");
+            if owner.2 > 1 {
+                assert!(work.block_inits.contains(&(slot, owner.3, owner.4)), "reattached parent must rebuild existing exact children");
+            }
         }
         assert_eq!(siblings[..count].iter().map(|&key| r.residents.get(key).unwrap().record).collect::<Vec<_>>(), records);
         assert!(work.jobs.is_empty() && work.evictions.is_empty());
@@ -5578,6 +5709,39 @@ mod tests {
         assert_eq!(source.frame, 10);
         assert_eq!(source.view, 7);
         assert_eq!(source.at, at, "intake never renews a captured source clock");
+    }
+
+    #[test]
+    fn camera_refresh_live_tile_authorization_preserves_expiry_and_partial_members() {
+        for kind in 0..4 {
+            let (_, mut r, _, _) = current_bridge_fixture();
+            let eye = r.current_request.as_ref().unwrap().eye;
+            r.set_ground_clearance(10.0);
+            let block = r.camera_blocks(eye, &|| false)[0];
+            let (keys, _) = r.visible_columns(block).unwrap();
+            let mut source = r.visible_view.unwrap();
+            if kind == 3 { source.frame = source.frame.wrapping_sub(VISIBLE_LEASE_FRAMES + 1); }
+            let origin = if kind < 2 { LeaseOrigin::Camera } else { LeaseOrigin::Captured(source) };
+            r.visible_leases.insert(block, VisibleLease { origin, serial: r.requested,
+                retiring: kind == 1, retired: 0, current_demand_frame: Some(r.frame) });
+            for &key in &keys[..5] {
+                let record = r.alloc_record().unwrap();
+                assert!(r.acquire_blocks(key, &mut FrameWork::default()));
+                r.residents.insert(key, Resident { record, blocks: true, ..Default::default() });
+            }
+            let record = r.residents.get(keys[4]).unwrap().record;
+            r.publishing.insert(keys[4], EditPublication { record, previous: None,
+                next: None, evicted: false, initial_bucket: Some(0) });
+            r.refresh_camera_pending(&[block], None);
+            let expected: Vec<_> = if kind == 0 || kind == 2 {
+                keys[5..].iter().map(|&key| (0, key)).collect()
+            } else { Vec::new() };
+            assert_eq!(r.visible_admission.iter().copied().collect::<Vec<_>>(), expected, "case {kind}");
+            assert!(!r.publishing[&keys[4]].evicted);
+            if let LeaseOrigin::Captured(retained) = r.visible_leases[&block].origin {
+                assert_eq!((retained.frame, retained.view, retained.at), (source.frame, source.view, source.at));
+            }
+        }
     }
 
     #[test]

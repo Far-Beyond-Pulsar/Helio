@@ -716,27 +716,14 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // a grassy slope of many fine steps.
     var soil_side = false;
     var soil_coverage = 0.0;
-    // Fully filtered cells use neither voxel AO nor face detail.
-    if code < 6u && appearance_w < 1.0 {
+    // Grazing faces can have fully filtered AO while their grass lip remains
+    // resolved. Only those lips still need face coordinates in that case.
+    if code < 6u && appearance_w < 1.0 &&
+        (ao_appearance_w < 1.0 || ((code >> 1u) < 2u && material == M_GRASS)) {
         let axis = code >> 1u;
-        let back = select(1, -1, (code & 1u) == 1u);
-        var f = vec3<i32>(h.i, h.j, h.k);
-        f[axis] += back;
         var u_axis = select(0u, 1u, axis == 0u);
         var v_axis = select(2u, 1u, axis == 2u);
         if axis == 2u { u_axis = 0u; v_axis = 1u; }
-        var du = vec3<i32>(0);
-        var dv = vec3<i32>(0);
-        du[u_axis] = 1;
-        dv[v_axis] = 1;
-        let s0 = occupied(face, level, f.x - du.x, f.y - du.y, f.z - du.z, c, h.i, h.j);
-        let s1 = occupied(face, level, f.x + du.x, f.y + du.y, f.z + du.z, c, h.i, h.j);
-        let s2 = occupied(face, level, f.x - dv.x, f.y - dv.y, f.z - dv.z, c, h.i, h.j);
-        let s3 = occupied(face, level, f.x + dv.x, f.y + dv.y, f.z + dv.z, c, h.i, h.j);
-        let c00 = corner_ao(s0, s2, occupied(face, level, f.x - du.x - dv.x, f.y - du.y - dv.y, f.z - du.z - dv.z, c, h.i, h.j));
-        let c10 = corner_ao(s1, s2, occupied(face, level, f.x + du.x - dv.x, f.y + du.y - dv.y, f.z + du.z - dv.z, c, h.i, h.j));
-        let c01 = corner_ao(s0, s3, occupied(face, level, f.x - du.x + dv.x, f.y - du.y + dv.y, f.z - du.z + dv.z, c, h.i, h.j));
-        let c11 = corner_ao(s1, s3, occupied(face, level, f.x + du.x + dv.x, f.y + du.y + dv.y, f.z + du.z + dv.z, c, h.i, h.j));
         // Position of the hit inside the face.
         let fr = face_ray(face, make_ray(camera.position_near.xyz, d));
         let cell = face_local_cell(vec3<i32>(fr.idx, frame.layer_i.x), vec3<i32>(h.i, h.j, h.k),
@@ -757,12 +744,29 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             soil_coverage = soil_lip_coverage(uv.y, lip, pixel, h.t, d,
                 hit_up(h.t, d), actual_normal, size, natural_material_filter_allowed(edited, c));
         }
-        let a = mix(mix(c00, c10, uv.x), mix(c01, c11, uv.x), uv.y) / 3.0;
-        ao = mix(mix(0.42, 1.0, a), 1.0, ao_appearance_w);
-        // Crisp voxel edges while a cell covers several pixels.
-        let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
-        let fade = clamp((size / pixel - 3.0) / 6.0, 0.0, 1.0);
-        ao *= 1.0 - frame.detail.z * fade * (1.0 - ao_appearance_w) * (1.0 - smoothstep(0.0, 0.12, edge));
+        if ao_appearance_w < 1.0 {
+            let back = select(1, -1, (code & 1u) == 1u);
+            var f = vec3<i32>(h.i, h.j, h.k);
+            f[axis] += back;
+            var du = vec3<i32>(0);
+            var dv = vec3<i32>(0);
+            du[u_axis] = 1;
+            dv[v_axis] = 1;
+            let s0 = occupied(face, level, f.x - du.x, f.y - du.y, f.z - du.z, c, h.i, h.j);
+            let s1 = occupied(face, level, f.x + du.x, f.y + du.y, f.z + du.z, c, h.i, h.j);
+            let s2 = occupied(face, level, f.x - dv.x, f.y - dv.y, f.z - dv.z, c, h.i, h.j);
+            let s3 = occupied(face, level, f.x + dv.x, f.y + dv.y, f.z + dv.z, c, h.i, h.j);
+            let c00 = corner_ao(s0, s2, occupied(face, level, f.x - du.x - dv.x, f.y - du.y - dv.y, f.z - du.z - dv.z, c, h.i, h.j));
+            let c10 = corner_ao(s1, s2, occupied(face, level, f.x + du.x - dv.x, f.y + du.y - dv.y, f.z + du.z - dv.z, c, h.i, h.j));
+            let c01 = corner_ao(s0, s3, occupied(face, level, f.x - du.x + dv.x, f.y - du.y + dv.y, f.z - du.z + dv.z, c, h.i, h.j));
+            let c11 = corner_ao(s1, s3, occupied(face, level, f.x + du.x + dv.x, f.y + du.y + dv.y, f.z + du.z + dv.z, c, h.i, h.j));
+            let a = mix(mix(c00, c10, uv.x), mix(c01, c11, uv.x), uv.y) / 3.0;
+            ao = mix(mix(0.42, 1.0, a), 1.0, ao_appearance_w);
+            // Crisp voxel edges while a cell covers several pixels.
+            let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+            let fade = clamp((size / pixel - 3.0) / 6.0, 0.0, 1.0);
+            ao *= 1.0 - frame.detail.z * fade * (1.0 - ao_appearance_w) * (1.0 - smoothstep(0.0, 0.12, edge));
+        }
     }
     // Per-voxel pigment variation over world-space grass patches (Lay of
     // the Land look), averaged out as *base* voxels shrink below a pixel. A
