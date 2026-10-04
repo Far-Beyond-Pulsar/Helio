@@ -907,6 +907,7 @@ impl Residency {
         }
     }
 
+    #[cfg(test)]
     fn handoff_camera_owners(&mut self, selected: &SelectedOwners, work: &mut FrameWork,
         out_of_time: &impl Fn() -> bool) {
         for (&slot, &wanted) in selected {
@@ -917,6 +918,42 @@ impl Residency {
             // Only referenced blocks can attach: missing demand acquires
             // summaries during normal admission, never as zero-ref ghosts.
             self.attach_summary_owner(wanted, work);
+        }
+    }
+
+    /// Finish one selected tile's summary identities before visiting another.
+    /// An unordered partial owner pass can leave every resident tile waiting
+    /// for a parent, although none of those records needs regeneration.
+    fn handoff_camera_tiles(&mut self, blocks: &[u64], selected: &SelectedOwners,
+        work: &mut FrameWork, out_of_time: &impl Fn() -> bool) {
+        for &block in blocks {
+            if out_of_time() { break; }
+            let (face, level, i, j) = unpack(block);
+            let child = (level, face, 1, i >> 2, j >> 2);
+            // A settled prefix needs neither record probes nor promotion.
+            // Detached refs alone are insufficient: all three identities
+            // must match this frame's selected, physically attached owners.
+            if self.blocks.get(&child).is_some_and(|state| state.refs == 16)
+                && (1..=BLOCK_TIERS).all(|tier| {
+                    let owner = (level, face, tier, i >> (2 * tier), j >> (2 * tier));
+                    let slot = block_slot(level, face, tier, owner.3, owner.4);
+                    selected.get(&slot) == Some(&owner) && self.block_owner.get(&slot) == Some(&owner)
+                }) { continue; }
+            if !selected_owner_allows(block, selected) { continue; }
+            // Three metadata identities are one bounded handoff. Exact
+            // records and their publication/edit ownership remain retained.
+            for tier in 1..=BLOCK_TIERS {
+                let wanted = (level, face, tier, i >> (2 * tier), j >> (2 * tier));
+                let slot = block_slot(level, face, tier, wanted.3, wanted.4);
+                if selected.get(&slot) != Some(&wanted) { continue; }
+                if let Some(&owner) = self.block_owner.get(&slot) {
+                    if owner != wanted { self.detach_summary_owner(owner, work); }
+                }
+                self.attach_summary_owner(wanted, work);
+            }
+            // Promotion still preflights all exact records and the deadline
+            // before its atomic refcount transition.
+            self.promote_camera_residents(std::slice::from_ref(&block), selected, work, out_of_time);
         }
     }
 
@@ -2316,8 +2353,7 @@ impl Residency {
             (rank, level)
         });
         let selected_owners = select_camera_owners(&mut camera_blocks);
-        self.handoff_camera_owners(&selected_owners, &mut work, &window_out_of_time);
-        self.promote_camera_residents(&camera_blocks, &selected_owners, &mut work, &window_out_of_time);
+        self.handoff_camera_tiles(&camera_blocks, &selected_owners, &mut work, &window_out_of_time);
         self.retire_visible_leases_current(&camera_blocks, &mut work, &window_out_of_time);
         self.retire_pool_pressure(&mut work, &selected_owners, window_deadline);
         let t_windows = started.elapsed();
@@ -5477,6 +5513,88 @@ mod tests {
             assert!(current.iter().filter_map(|&key| r.residents.get(key)).all(|resident| !resident.blocks));
             assert!(work.block_inits.is_empty() && work.jobs.is_empty() && work.evictions.is_empty());
         }
+    }
+
+    #[test]
+    fn summary_handoff_tiles_partial_parent_completes_nearest_before_deadline() {
+        let (_, mut r, old, current) = current_alias_fixture();
+        let (face, level, i, j) = unpack(current[0]);
+        let second = pack(key0(face, level, i + 4), j as u32);
+        let second_old = pack(key0(face, level, i + 4 - 512), j as u32);
+        let (old_keys, old_count) = r.visible_columns(second_old).unwrap();
+        let (second_keys, second_count) = r.visible_columns(second).unwrap();
+        for &key in &old_keys[..old_count] {
+            let record = r.alloc_record().unwrap();
+            assert!(r.acquire_blocks(key, &mut FrameWork::default()));
+            r.residents.insert(key, Resident { record, blocks: true, ..Default::default() });
+        }
+        for &key in current.iter().chain(&second_keys[..second_count]) {
+            let record = r.alloc_record().unwrap();
+            r.residents.insert(key, Resident { record, blocks: false, ..Default::default() });
+            r.block_conflicts += 1;
+        }
+        let records: Vec<_> = old.iter().chain(&old_keys[..old_count]).chain(&current)
+            .chain(&second_keys[..second_count]).map(|&key| r.residents.get(key).unwrap().record).collect();
+        let mut blocks = vec![current[0], second];
+        let selected = select_camera_owners(&mut blocks);
+        assert_eq!(blocks.len(), 2);
+        // Model an earlier partial owner pass: child cleared, both parents
+        // still old. Every current exact record is already present.
+        r.detach_summary_owner((level, face, 1, (i - 512) >> 2, j >> 2), &mut FrameWork::default());
+        assert!(r.blocks_conflict(current[0]));
+        let checks = std::cell::Cell::new(0usize);
+        let mut work = FrameWork::default();
+        r.handoff_camera_tiles(&blocks, &selected, &mut work, &|| {
+            checks.set(checks.get() + 1);
+            checks.get() > 19
+        });
+        assert!(current.iter().all(|&key| r.residents.get(key).unwrap().blocks));
+        assert!(second_keys[..second_count].iter().all(|&key| !r.residents.get(key).unwrap().blocks));
+        for tier in 1..=BLOCK_TIERS {
+            let owner = (level, face, tier, i >> (2 * tier), j >> (2 * tier));
+            assert_eq!(r.block_owner.get(&block_slot(level, face, tier, owner.3, owner.4)), Some(&owner));
+            assert_eq!(r.blocks[&owner].refs, 16);
+        }
+        assert!(r.blocks_conflict(second), "unvisited tile retains its previous child owner");
+        let checks = std::cell::Cell::new(0usize);
+        r.handoff_camera_tiles(&blocks, &selected, &mut work, &|| {
+            checks.set(checks.get() + 1);
+            checks.get() > 20
+        });
+        assert!(second_keys[..second_count].iter().all(|&key| r.residents.get(key).unwrap().blocks));
+        assert_eq!(r.block_conflicts, 0);
+        assert_eq!(records, old.iter().chain(&old_keys[..old_count]).chain(&current)
+            .chain(&second_keys[..second_count]).map(|&key| r.residents.get(key).unwrap().record).collect::<Vec<_>>());
+        assert!(work.jobs.is_empty() && work.evictions.is_empty());
+        table_is_exact(&r);
+    }
+
+    #[test]
+    fn summary_handoff_tiles_resident_detached_summaries_return_without_jobs() {
+        let (_, mut r, old, _) = current_alias_fixture();
+        let (face, level, i, j) = unpack(old[0]);
+        let records: Vec<_> = old.iter().map(|&key| r.residents.get(key).unwrap().record).collect();
+        for tier in 1..=BLOCK_TIERS {
+            r.detach_summary_owner((level, face, tier, i >> (2 * tier), j >> (2 * tier)), &mut FrameWork::default());
+        }
+        assert!(r.block_owner.is_empty());
+        assert!(r.blocks.values().all(|block| block.refs == 16));
+        let mut blocks = vec![old[0]];
+        let selected = select_camera_owners(&mut blocks);
+        let mut work = FrameWork::default();
+        r.handoff_camera_tiles(&blocks, &selected, &mut work, &|| false);
+        for (&slot, &owner) in &selected {
+            assert_eq!(r.block_owner.get(&slot), Some(&owner));
+            assert!(work.block_inits.contains(&(slot, owner.3, owner.4)));
+            assert_eq!(r.blocks[&owner].refs, 16);
+        }
+        assert_eq!(records, old.iter().map(|&key| r.residents.get(key).unwrap().record).collect::<Vec<_>>());
+        assert!(old.iter().all(|&key| r.residents.get(key).unwrap().blocks));
+        assert!(work.jobs.is_empty() && work.evictions.is_empty());
+        let mut unchanged = FrameWork::default();
+        r.handoff_camera_tiles(&blocks, &selected, &mut unchanged, &|| false);
+        assert!(unchanged.block_inits.is_empty());
+        table_is_exact(&r);
     }
 
     #[test]
