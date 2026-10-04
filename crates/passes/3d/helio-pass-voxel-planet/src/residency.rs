@@ -1161,10 +1161,21 @@ impl Residency {
     }
 
     fn refresh_visible_pending(&mut self, deadline: Option<std::time::Instant>) {
-        self.refresh_visible_pending_until(|| deadline.is_some_and(|at| std::time::Instant::now() >= at));
+        if let Some(deadline) = deadline {
+            self.refresh_visible_pending_cohort_until(8, || std::time::Instant::now() >= deadline);
+        } else {
+            self.refresh_visible_pending_until(|| false);
+        }
     }
 
-    fn refresh_visible_pending_until(&mut self, mut out_of_time: impl FnMut() -> bool) {
+    fn refresh_visible_pending_until(&mut self, out_of_time: impl FnMut() -> bool) {
+        self.refresh_visible_pending_cohort_until(VISIBLE_BLOCKS, out_of_time);
+    }
+
+    fn refresh_visible_pending_cohort_until(&mut self, cohort_limit: usize, mut out_of_time: impl FnMut() -> bool) {
+        // Do not scan or rebuild the existing FIFO after this phase expired.
+        // Captured requests keep their original source for the next frame.
+        if out_of_time() { return; }
         let mut captured_leases = self.visible_leases.values()
             .filter(|lease| matches!(lease.origin, LeaseOrigin::Captured(_))).count();
         let rank_requests = self.visible_rank_source.is_none_or(|source| self.source_is_current(source, 8));
@@ -1173,8 +1184,7 @@ impl Residency {
             self.visible_rank_source = None;
             self.visible_blocks.clear();
         }
-        let mut promoted = Vec::new();
-        let mut pending = Vec::new();
+        if out_of_time() { return; }
         let mut blocks = std::mem::take(&mut self.visible_blocks);
         let requested_blocks = blocks.len();
         let mut ranked: FxHashSet<_> = if requested_blocks != 0 {
@@ -1186,8 +1196,9 @@ impl Residency {
             if blocks.len() == VISIBLE_BLOCKS { break; }
             if matches!(lease.origin, LeaseOrigin::Captured(_)) && !blocks.contains(&key) { blocks.push(key); }
         }
-        for (index, &key) in blocks.iter().enumerate() {
-            if out_of_time() {
+        let mut staged = Vec::new();
+        'tiles: for (index, &key) in blocks.iter().enumerate() {
+            if staged.len() == cohort_limit || out_of_time() {
                 // Resume only captured requests, retaining their original
                 // age. Lease reinsertion is reconstructed on the next plan.
                 if index < requested_blocks {
@@ -1225,28 +1236,43 @@ impl Residency {
                 }
             }
             if !ordinary && !self.transient_wanted(key) { continue; }
-            promoted.push(key);
-            for &key in &keys[..count] {
-                if !self.publishing.contains_key(&key)
-                    && (!self.residents.contains_key(key) || self.initial_retries.contains(&key)) {
-                    pending.push((level, key));
-                    // Leases requeue ordinary demand, but do not invent a
-                    // new distance rank after the captured view expires.
-                    if rank_requests && index < requested_blocks
-                        && self.visible_admission.len() < VISIBLE_ADMISSION_COLUMNS
-                        && ranked.insert((level, key)) {
-                        self.visible_admission.push_back((level, key));
+            let mut pending = Vec::with_capacity(count);
+            for &column in &keys[..count] {
+                if out_of_time() {
+                    if index < requested_blocks {
+                        self.visible_blocks.extend_from_slice(&blocks[index..requested_blocks]);
+                        self.visible_source = source;
                     }
+                    break 'tiles;
+                }
+                if !self.publishing.contains_key(&column)
+                    && (self.initial_retries.contains(&column) || !self.residents.contains_key(column)) {
+                    pending.push(column);
                 }
             }
+            staged.push((key, level, pending, index < requested_blocks));
         }
-        // Select nearest blocks first under the deadline, then commit that
-        // bounded selection in reverse: buckets pop newest first. Remove all
-        // selected keys before reinsertion so swap-removal cannot fragment
-        // complete blocks, including keys already waiting in bucket zero.
-        for &(level, key) in &pending { self.levels[level].pending.remove(key); }
-        for &(level, key) in pending.iter().rev() { self.levels[level].pending.insert(key, 0); }
-        for key in promoted { self.queue_obsolete_owners(key); }
+        // Remove the complete cohort before reverse insertion: swap removal
+        // cannot fragment an earlier tile, and nearest tiles pop first even
+        // when captured distance ranks expired. Budgeted cohorts contain at
+        // most 128 columns, rather than an unchecked 1024-column final commit.
+        for (_, level, pending, _) in &staged {
+            for &column in pending { self.levels[*level].pending.remove(column); }
+        }
+        for (_, level, pending, _) in staged.iter().rev() {
+            for &column in pending.iter().rev() { self.levels[*level].pending.insert(column, 0); }
+        }
+        for (key, level, pending, requested) in staged {
+            for column in pending {
+                // Lease reinsertion never renews expired distance ranks.
+                if rank_requests && requested
+                    && self.visible_admission.len() < VISIBLE_ADMISSION_COLUMNS
+                    && ranked.insert((level, column)) {
+                    self.visible_admission.push_back((level, column));
+                }
+            }
+            self.queue_obsolete_owners(key);
+        }
     }
 
     fn camera_blocks(&self, eye: DVec3, out_of_time: &impl Fn() -> bool) -> Vec<u64> {
@@ -1418,13 +1444,16 @@ impl Residency {
     /// Current camera tiles may arrive before the worker's wanted snapshot.
     /// Reuse its capped lease/publication path and FIFO; no forecast demand.
     fn refresh_camera_pending(&mut self, blocks: &[u64], deadline: Option<std::time::Instant>) {
-        let out_of_time = || deadline.is_some_and(|at| std::time::Instant::now() >= at);
+        self.refresh_camera_pending_until(blocks, || deadline.is_some_and(|at| std::time::Instant::now() >= at));
+    }
+
+    fn refresh_camera_pending_until(&mut self, blocks: &[u64], mut out_of_time: impl FnMut() -> bool) {
         if out_of_time() || self.ground_clearance.is_none() { return; }
         let mut candidates = Vec::new();
         let mut refreshed = FxHashSet::default();
         let mut camera_leases = self.visible_leases.values()
             .filter(|lease| matches!(lease.origin, LeaseOrigin::Camera)).count();
-        for &block in blocks {
+        'tiles: for &block in blocks {
             if out_of_time() { break; }
             let level = unpack(block).1 as usize;
             let Some((keys, count)) = self.visible_columns(block) else { continue };
@@ -1459,25 +1488,34 @@ impl Residency {
                 && !Self::tile_has_initial_retry(&self.initial_retries, face, level as u32, i >> 2, j >> 2) {
                 continue;
             }
-            let start = candidates.len();
+            let mut pending = Vec::with_capacity(count);
             for &key in &keys[..count] {
+                if out_of_time() { break 'tiles; }
                 if !self.publishing.contains_key(&key)
-                    && (!self.residents.contains_key(key) || self.initial_retries.contains(&key)) {
+                    && (self.initial_retries.contains(&key) || !self.residents.contains_key(key)) {
+                    pending.push(key);
+                }
+            }
+            if out_of_time() { break; }
+            if !pending.is_empty() {
+                for key in pending {
                     self.levels[level].pending.insert(key, 0);
                     candidates.push((level, key));
                 }
+                refreshed.insert(block);
             }
-            if candidates.len() != start { refreshed.insert(block); }
         }
         if candidates.is_empty() && self.visible_admission.is_empty() { return; }
         // Current view ranks must replace the previous view's ordinary ranks,
         // which have no lease origin. They remain queued at their normal
         // bucket instead of masquerading as permanently captured fine work.
+        let current: FxHashSet<_> = blocks.iter().copied().collect();
         let mut remaining = std::mem::take(&mut self.visible_admission);
         remaining.retain(|entry| {
             let block = entry.1 & !(3u64 | (3u64 << 32));
-            !refreshed.contains(&block) && self.visible_leases.get(&block)
-                .is_some_and(|lease| matches!(lease.origin, LeaseOrigin::Captured(_)))
+            !refreshed.contains(&block) && (current.contains(&block)
+                || self.visible_leases.get(&block)
+                    .is_some_and(|lease| matches!(lease.origin, LeaseOrigin::Captured(_))))
         });
         // Move the selected column allocation directly into the FIFO. Ranking
         // replacement needs tile identities, not a second per-column hash set.
@@ -3860,7 +3898,7 @@ mod tests {
         let blocks = [1000, 1004].map(|i| pack(key0(crate::grid::PLANE_FACE, 0, i), 1000));
         r.prioritize_visible_blocks_from(blocks.map(|key| (key as u32, (key >> 32) as u32)), 10, 7, at);
         let mut checks = 0;
-        r.refresh_visible_pending_until(|| { checks += 1; checks > 1 });
+        r.refresh_visible_pending_until(|| { checks += 1; checks > 19 });
         let (first, count) = r.visible_columns(blocks[0]).unwrap();
         assert_eq!(count, 16);
         assert!(first.iter().all(|key| r.levels[0].pending.at.contains_key(key)));
@@ -3900,6 +3938,76 @@ mod tests {
             assert!(r.visible_leases.is_empty() && r.levels[0].pending.is_empty(),
                 "expired captured requests cannot create demand or leases");
         }
+    }
+
+    #[test]
+    fn visible_refresh_expired_entry_and_partial_tile_preserve_requests_and_ranks() {
+        let (_, mut r, _, at) = visible_bridge_fixture();
+        let blocks = [1000, 1004].map(|i| pack(key0(crate::grid::PLANE_FACE, 0, i), 1000));
+        r.prioritize_visible_blocks_from(blocks.map(|key| (key as u32, (key >> 32) as u32)), 10, 7, at);
+        r.visible_admission.push_back((0, 123));
+        let before = (r.visible_blocks.clone(), r.visible_admission.clone(),
+            r.visible_source.map(|source| (source.frame, source.view, source.at)));
+        r.refresh_visible_pending_cohort_until(8, || true);
+        assert_eq!(before, (r.visible_blocks.clone(), r.visible_admission.clone(),
+            r.visible_source.map(|source| (source.frame, source.view, source.at))));
+        assert!(r.visible_leases.is_empty() && r.levels[0].pending.is_empty());
+        let mut checks = 0;
+        r.refresh_visible_pending_cohort_until(8, || { checks += 1; checks > 7 });
+        assert_eq!(r.visible_blocks, blocks);
+        assert_eq!(r.visible_admission, before.1, "an incomplete tile never appends partial distance ranks");
+        assert!(r.levels[0].pending.is_empty() && r.obsolete_owners.is_empty());
+        let stamp = r.visible_source.unwrap();
+        assert_eq!((stamp.frame, stamp.view, stamp.at), (10, 7, at));
+        r.visible_admission.clear();
+        r.refresh_visible_pending_cohort_until(8, || false);
+        assert!(r.visible_blocks.is_empty());
+        assert_eq!(r.visible_admission.len(), 32);
+        for (index, block) in blocks.into_iter().enumerate() {
+            let (keys, count) = r.visible_columns(block).unwrap();
+            assert_eq!(count, 16);
+            assert_eq!(r.visible_admission.iter().skip(index * 16).take(16).copied().collect::<Vec<_>>(),
+                keys.map(|key| (0, key)));
+            let source = r.visible_leases[&block].captured_source();
+            assert_eq!((source.frame, source.view, source.at), (10, 7, at));
+        }
+    }
+
+    #[test]
+    fn visible_refresh_bounded_cohort_keeps_complete_nearest_bucket_order_without_ranks() {
+        let (_, mut r, _, at) = visible_bridge_fixture();
+        lease_block(&mut r, 1000, at);
+        lease_block(&mut r, 1004, at);
+        let order: Vec<_> = r.visible_leases.keys().copied().collect();
+        // Eight-frame distance priority expires while the original 32-frame
+        // ownership lease remains live. Lease reinsertion must use buckets.
+        r.set_visible_view(19, 7, at + std::time::Duration::from_millis(1));
+        r.refresh_visible_pending_cohort_until(8, || false);
+        assert!(r.visible_admission.is_empty());
+        for block in order {
+            let (keys, count) = r.visible_columns(block).unwrap();
+            assert_eq!(count, 16);
+            for key in keys {
+                assert_eq!(r.levels[0].pending.pop(), Some((key, 0)),
+                    "whole-cohort reverse insertion keeps the first selected tile above later tiles");
+            }
+        }
+        assert!(r.levels[0].pending.is_empty());
+    }
+
+    #[test]
+    fn visible_refresh_bounded_cohort_retains_original_requested_tail() {
+        let (_, mut r, _, at) = visible_bridge_fixture();
+        let blocks: Vec<_> = (0..10).map(|n| pack(key0(crate::grid::PLANE_FACE, 0, 1000 + n * 4), 1000)).collect();
+        r.prioritize_visible_blocks_from(blocks.iter().map(|&key| (key as u32, (key >> 32) as u32)), 10, 7, at);
+        r.refresh_visible_pending_cohort_until(8, || false);
+        assert_eq!(r.visible_admission.len(), 128);
+        assert_eq!(r.visible_blocks, blocks[8..]);
+        let source = r.visible_source.unwrap();
+        assert_eq!((source.frame, source.view, source.at), (10, 7, at));
+        r.refresh_visible_pending_cohort_until(8, || false);
+        assert!(r.visible_blocks.is_empty() && r.visible_source.is_none());
+        assert_eq!(r.visible_admission.len(), 160, "requested tail precedes reconstructed lease demand");
     }
 
     #[test]
@@ -6162,6 +6270,32 @@ mod tests {
         assert_eq!(work.jobs.len(), 16);
         assert!(work.job_keys.iter().all(|&key| r.current_wanted(key)));
         assert_eq!(r.stats.camera_jobs, [16, 0, 0], "current ordinary jobs count despite having no Camera lease");
+    }
+
+    #[test]
+    fn camera_arrival_partial_refresh_preserves_current_fifo_and_resumes_whole_tile() {
+        let (planet, mut r, _, _) = current_bridge_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        r.set_ground_clearance(10.0);
+        let blocks = r.camera_blocks(eye, &|| false);
+        let selected = [blocks[1], blocks[0]];
+        r.refresh_camera_pending(&selected[1..], None);
+        let before = r.visible_admission.clone();
+        let (new, count) = r.visible_columns(selected[0]).unwrap();
+        assert_eq!(count, 16);
+        let mut checks = 0;
+        r.refresh_camera_pending_until(&selected, || { checks += 1; checks > 7 });
+        assert_eq!(r.visible_admission, before, "interrupted staging preserves already queued current tiles");
+        assert!(new.iter().all(|key| !r.levels[0].pending.at.contains_key(key)),
+            "a partial tile cannot consume pending/FIFO priority");
+        assert!(r.transient_wanted(selected[0]), "selected camera authorization stays valid for resumption");
+        r.refresh_camera_pending_until(&selected, || false);
+        assert_eq!(r.visible_admission.len(), 32);
+        assert_eq!(r.visible_admission.iter().take(16).copied().collect::<Vec<_>>(), new.map(|key| (0, key)));
+        let work = r.plan(&planet, eye, 160.0, 32);
+        assert_eq!(work.jobs.len(), 32, "resumed current demand reaches normal admission");
+        assert_eq!(r.publishing.len(), 32);
+        table_is_exact(&r);
     }
 
     #[test]

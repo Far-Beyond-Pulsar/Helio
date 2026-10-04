@@ -294,17 +294,20 @@ fn refill(@builtin(local_invocation_index) c: u32) {
 fn allocate(@builtin(global_invocation_id) id: vec3<u32>) {
     let index = id.x;
     if index >= frame.counts.x || job_out[index].status != 0u { return; }
-    let c = job_out[index].size_class;
-    let slot = atomicSub(&alloc[A_TOP + c], 1) - 1;
-    if slot < 0 {
-        job_out[index].status = 3u;
+    // A larger free run can hold the same payload without changing geometry.
+    // Publish its actual class so replacement/eviction returns the entire run.
+    for (var c = job_out[index].size_class; c < CLASSES; c++) {
+        let slot = atomicSub(&alloc[A_TOP + c], 1) - 1;
+        if slot < 0 { continue; }
+        job_out[index].size_class = c;
+        job_out[index].run = free_runs[class_offset(c) + u32(slot)];
+        let page = job_out[index].run / PAGE_UNITS;
+        if atomicSub(&page_meta[page].free, 1u) == (PAGE_UNITS >> c) {
+            atomicSub(&alloc[26], 1);
+        }
         return;
     }
-    job_out[index].run = free_runs[class_offset(c) + u32(slot)];
-    let page = job_out[index].run / PAGE_UNITS;
-    if atomicSub(&page_meta[page].free, 1u) == (PAGE_UNITS >> c) {
-        atomicSub(&alloc[26], 1);
-    }
+    job_out[index].status = 3u;
 }
 
 @compute @workgroup_size(16)
