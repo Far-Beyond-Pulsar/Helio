@@ -399,6 +399,9 @@ struct Pipelines {
     camera_layout: wgpu::BindGroupLayout,
     patch: wgpu::ComputePipeline,
     patch_blocks: wgpu::ComputePipeline,
+    rebuild_tier1: wgpu::ComputePipeline,
+    rebuild_tier2: wgpu::ComputePipeline,
+    rebuild_tier3: wgpu::ComputePipeline,
     evict: wgpu::ComputePipeline,
     generate: wgpu::ComputePipeline,
     count: wgpu::ComputePipeline,
@@ -623,6 +626,9 @@ impl Pipelines {
             primary_samples,
             patch: compute(&gen_pl, &gen_module, "patch_table"),
             patch_blocks: compute(&gen_pl, &gen_module, "patch_blocks"),
+            rebuild_tier1: compute(&gen_pl, &gen_module, "rebuild_tier1"),
+            rebuild_tier2: compute(&gen_pl, &gen_module, "rebuild_tier2"),
+            rebuild_tier3: compute(&gen_pl, &gen_module, "rebuild_tier3"),
             evict: compute(&gen_pl, &gen_module, "evict"),
             generate: compute(&gen_pl, &gen_module, "generate"),
             count: compute(&gen_pl, &gen_module, "count"),
@@ -1650,6 +1656,13 @@ impl PlanetRenderer {
                 Self::dispatch(&mut pass, &self.pipelines.fixup, [1, 1, 1]);
                 Self::dispatch(&mut pass, &self.pipelines.publish, groups);
                 Self::dispatch(&mut pass, &self.pipelines.level_suffix, [1, 1, 1]);
+            }
+            if block_patches > 0 {
+                // Retained columns are visible immediately after summary handoff.
+                // Parent reductions follow their children, including jobs==0.
+                Self::dispatch(&mut pass, &self.pipelines.rebuild_tier1, [wg(block_patches), 1, 1]);
+                Self::dispatch(&mut pass, &self.pipelines.rebuild_tier2, [wg(block_patches), 1, 1]);
+                Self::dispatch(&mut pass, &self.pipelines.rebuild_tier3, [wg(block_patches), 1, 1]);
             }
         }
         if let Some(p) = &mut self.profiler {

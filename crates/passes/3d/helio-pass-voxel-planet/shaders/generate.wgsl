@@ -369,6 +369,78 @@ fn patch_blocks(@builtin(global_invocation_id) id: vec3<u32>) {
     atomicStore(&block_state[slot + 3u], 0);
 }
 
+// Reassigned summaries may already have valid columns in the hash table.
+// Recount after publication rather than regenerating or evicting those records.
+@compute @workgroup_size(64)
+fn rebuild_tier1(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= frame.extra.z { return; }
+    let at = frame.counts.y + frame.extra.x * 2u + id.x * 3u;
+    let block = evictions[at];
+    if block % frame.extra.y >= (1u << 14u) { return; }
+    let bi = bitcast<i32>(evictions[at + 1u]);
+    let bj = bitcast<i32>(evictions[at + 2u]);
+    if bi == -1 || bj == -1 { return; }
+    let slot = block * 4u;
+    if atomicLoad(&block_state[slot]) != bi || atomicLoad(&block_state[slot + 1u]) != bj { return; }
+    let chart = block / frame.extra.y;
+    let level = chart / 6u;
+    let face = chart % 6u;
+    let columns = (frame.layer_i.y >> level) >> 3u;
+    var top = -0x3fffffff;
+    var count = 0;
+    for (var j = 0; j < 4; j++) {
+        for (var i = 0; i < 4; i++) {
+            let ci = bi * 4 + i;
+            let cj = bj * 4 + j;
+            if ci < 0 || cj < 0 || ci >= columns || cj >= columns { continue; }
+            let record = find_column((level << 27u) | (face << 24u) | u32(ci), bitcast<u32>(cj));
+            if record == NONE { continue; }
+            let c = records[record];
+            if !column_valid(c) { continue; }
+            top = max(top, column_top_cell(c));
+            count += 1;
+        }
+    }
+    atomicStore(&block_state[slot + 2u], top);
+    atomicStore(&block_state[slot + 3u], count);
+}
+
+// Children are disjoint. Missing owners and negative partial counts cannot
+// certify a complete parent; a complete count retains every occupied top.
+fn rebuild_parent(index: u32, tier: u32) {
+    if index >= frame.extra.z { return; }
+    let at = frame.counts.y + frame.extra.x * 2u + index * 3u;
+    let block = evictions[at];
+    let local = block % frame.extra.y;
+    let expected_tier = select(2u, 3u, local >= (1u << 14u) + (1u << 10u));
+    if local < (1u << 14u) || expected_tier != tier { return; }
+    let bi = bitcast<i32>(evictions[at + 1u]);
+    let bj = bitcast<i32>(evictions[at + 2u]);
+    if bi == -1 || bj == -1 { return; }
+    let slot = block * 4u;
+    if atomicLoad(&block_state[slot]) != bi || atomicLoad(&block_state[slot + 1u]) != bj { return; }
+    let chart = block / frame.extra.y;
+    var top = -0x3fffffff;
+    var count = 0;
+    for (var j = 0; j < 4; j++) {
+        for (var i = 0; i < 4; i++) {
+            let child = vec2<i32>(bi * 4 + i, bj * 4 + j);
+            let child_slot = block_slot(chart / 6u, chart % 6u, tier - 1u, child.x, child.y) * 4u;
+            if atomicLoad(&block_state[child_slot]) != child.x || atomicLoad(&block_state[child_slot + 1u]) != child.y { continue; }
+            top = max(top, atomicLoad(&block_state[child_slot + 2u]));
+            count += atomicLoad(&block_state[child_slot + 3u]);
+        }
+    }
+    atomicStore(&block_state[slot + 2u], top);
+    atomicStore(&block_state[slot + 3u], count);
+}
+
+@compute @workgroup_size(64)
+fn rebuild_tier2(@builtin(global_invocation_id) id: vec3<u32>) { rebuild_parent(id.x, 2u); }
+
+@compute @workgroup_size(64)
+fn rebuild_tier3(@builtin(global_invocation_id) id: vec3<u32>) { rebuild_parent(id.x, 3u); }
+
 @compute @workgroup_size(64)
 fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let index = job_index(wg);

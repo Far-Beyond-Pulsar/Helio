@@ -763,8 +763,7 @@ impl Residency {
         let (face, level, ci, cj) = unpack(key);
         (1..=BLOCK_TIERS).any(|tier| {
             let bkey = (level, face, tier, ci >> (2 * tier), cj >> (2 * tier));
-            !self.blocks.contains_key(&bkey)
-                && self.block_owner.get(&block_slot(level, face, tier, bkey.3, bkey.4)).is_some_and(|owner| *owner != bkey)
+            self.block_owner.get(&block_slot(level, face, tier, bkey.3, bkey.4)).is_some_and(|owner| *owner != bkey)
         })
     }
 
@@ -806,6 +805,7 @@ impl Residency {
             let bkey = (level, face, tier, bi, bj);
             if let Some(b) = self.blocks.get_mut(&bkey) {
                 b.refs += count;
+                self.attach_summary_owner(bkey, work);
                 continue;
             }
             let slot = block_slot(level, face, tier, bi, bj);
@@ -827,18 +827,56 @@ impl Residency {
             let Some(b) = self.blocks.get_mut(&bkey) else { continue };
             b.refs -= 1;
             if b.refs == 0 {
-                let b = self.blocks.remove(&bkey).unwrap();
-                self.block_owner.remove(&b.slot);
-                work.block_inits.push((b.slot, -1, -1));
-                if tier == 1 {
-                    if let Some(at) = self.live_index.remove(&b.slot) {
-                        self.live_tier1.swap_remove(at);
-                        if let Some(&moved) = self.live_tier1.get(at) {
-                            self.live_index.insert(moved, at);
-                        }
-                        self.live_dirty = true;
-                    }
-                }
+                self.blocks.remove(&bkey);
+                self.detach_summary_owner(bkey, work);
+            }
+        }
+    }
+
+    fn detach_summary_owner(&mut self, owner: (u32, u8, u32, i32, i32), work: &mut FrameWork) {
+        let (level, face, tier, i, j) = owner;
+        let slot = block_slot(level, face, tier, i, j);
+        if self.block_owner.get(&slot) != Some(&owner) { return; }
+        self.block_owner.remove(&slot);
+        work.block_inits.push((slot, -1, -1));
+        if tier == 1 {
+            if let Some(at) = self.live_index.remove(&slot) {
+                self.live_tier1.swap_remove(at);
+                if let Some(&moved) = self.live_tier1.get(at) { self.live_index.insert(moved, at); }
+                self.live_dirty = true;
+            }
+        }
+    }
+
+    fn attach_summary_owner(&mut self, owner: (u32, u8, u32, i32, i32), work: &mut FrameWork) {
+        let Some(block) = self.blocks.get(&owner) else { return };
+        let slot = block.slot;
+        if self.block_owner.get(&slot) == Some(&owner) { return; }
+        debug_assert!(!self.block_owner.contains_key(&slot));
+        self.block_owner.insert(slot, owner);
+        work.block_inits.push((slot, owner.3, owner.4));
+        if owner.2 == 1 {
+            self.live_index.insert(slot, self.live_tier1.len());
+            self.live_tier1.push(slot);
+            self.live_dirty = true;
+        }
+    }
+
+    fn handoff_camera_owners(&mut self, selected: &SelectedOwners, work: &mut FrameWork,
+        out_of_time: &impl Fn() -> bool) {
+        for (&slot, &wanted) in selected {
+            if out_of_time() { break; }
+            if let Some(&owner) = self.block_owner.get(&slot) {
+                if owner != wanted { self.detach_summary_owner(owner, work); }
+            }
+            // Only referenced blocks can attach: missing demand acquires
+            // summaries during normal admission, never as zero-ref ghosts.
+            let attached = self.block_owner.get(&slot) == Some(&wanted);
+            self.attach_summary_owner(wanted, work);
+            if attached {
+                // Exact records rebuild tier1; ordered child reductions rebuild
+                // both parents, including a return through another sibling.
+                work.block_inits.push((slot, wanted.3, wanted.4));
             }
         }
     }
@@ -1455,7 +1493,8 @@ impl Residency {
     fn retire_obsolete_owner_step_current(&mut self, work: &mut FrameWork,
         last_demand: &mut Option<(u64, bool)>, selected: &SelectedOwners) -> bool {
         let Some(task) = self.obsolete_owners.front_mut() else { return false };
-        if !self.blocks.contains_key(&task.owner) {
+        let (level, face, tier, i, j) = task.owner;
+        if self.block_owner.get(&block_slot(level, face, tier, i, j)) != Some(&task.owner) {
             self.obsolete_owners.pop_front();
             return true;
         }
@@ -1905,7 +1944,7 @@ impl Residency {
         let apply_out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b.mul_f64(0.6));
         let mut camera_blocks = self.camera_blocks(eye, &apply_out_of_time);
         let selected_owners = select_camera_owners(&mut camera_blocks);
-        self.prioritize_camera_owners(&camera_blocks, &selected_owners);
+        self.handoff_camera_owners(&selected_owners, &mut work, &apply_out_of_time);
         self.retire_visible_leases_current(&camera_blocks, &mut work, &apply_out_of_time);
         if !apply_out_of_time() {
             if self.snapshot_mode { self.apply_snapshot_selected(&mut work, &apply_out_of_time, &selected_owners); }
@@ -4771,6 +4810,102 @@ mod tests {
         assert!(r.diffs.iter().all(|diff| diff.is_empty()));
         assert_eq!(r.retire_finished_epoch, r.snapshot_epoch);
         (planet, r, old, new)
+    }
+
+    #[test]
+    fn summary_handoff_retains_exact_records_and_detached_release_cannot_clear_replacement() {
+        let (_, mut r, old, new) = current_alias_fixture();
+        let old_records: Vec<_> = old.iter().map(|&key| r.residents.get(key).unwrap().record).collect();
+        let mut blocks = vec![new[0]];
+        let selected = select_camera_owners(&mut blocks);
+        r.queue_obsolete_owners(new[0]);
+        let mut work = FrameWork::default();
+        let attached_before = r.block_owner.clone();
+        r.handoff_camera_owners(&selected, &mut work, &|| true);
+        assert_eq!(r.block_owner, attached_before);
+        assert!(work.block_inits.is_empty(), "expired budget cannot detach any owner");
+        r.handoff_camera_owners(&selected, &mut work, &|| false);
+        assert!(work.evictions.is_empty() && work.jobs.is_empty());
+        assert_eq!(r.blocks.len(), 3, "absent incoming demand cannot create ghost summaries");
+        assert!(r.blocks.values().all(|block| block.refs == 16));
+        assert!(r.block_owner.is_empty() && r.live_tier1.is_empty());
+        assert_eq!(old.iter().map(|&key| r.residents.get(key).unwrap().record).collect::<Vec<_>>(), old_records);
+        while r.retire_obsolete_owner_step(&mut work) {}
+        assert!(work.evictions.is_empty(), "detached summary walks stop without retiring exact records");
+        for &key in &new {
+            let record = r.alloc_record().unwrap();
+            assert!(r.acquire_blocks(key, &mut work));
+            r.residents.insert(key, Resident { record, blocks: true, ..Default::default() });
+        }
+        let attached = r.block_owner.clone();
+        let live = r.live_tier1.clone();
+        work.block_inits.clear();
+        for &key in &old { r.evict(key, &mut work); }
+        assert_eq!(r.block_owner, attached);
+        assert_eq!(r.live_tier1, live);
+        assert!(work.block_inits.is_empty(), "old detached refs cannot reset replacement GPU slots");
+        assert!(new.iter().all(|&key| r.residents.get(key).unwrap().blocks));
+        table_is_exact(&r);
+    }
+
+    #[test]
+    fn summary_handoff_return_through_sibling_reattaches_parents_without_regeneration() {
+        let (_, mut r, old, new) = current_alias_fixture();
+        let (face, level, i, j) = unpack(old[0]);
+        let sibling = pack(key0(face, level, i ^ 4), j as u32);
+        let (siblings, count) = r.visible_columns(sibling).unwrap();
+        for &key in &siblings[..count] {
+            let record = r.alloc_record().unwrap();
+            assert!(r.acquire_blocks(key, &mut FrameWork::default()));
+            r.residents.insert(key, Resident { record, blocks: true, ..Default::default() });
+        }
+        let mut incoming = vec![new[0]];
+        let selected = select_camera_owners(&mut incoming);
+        let mut work = FrameWork::default();
+        r.handoff_camera_owners(&selected, &mut work, &|| false);
+        for &key in &new {
+            let record = r.alloc_record().unwrap();
+            assert!(r.acquire_blocks(key, &mut work));
+            r.residents.insert(key, Resident { record, blocks: true, ..Default::default() });
+        }
+        let records: Vec<_> = siblings[..count].iter().map(|&key| r.residents.get(key).unwrap().record).collect();
+        let mut returning = vec![sibling];
+        let selected = select_camera_owners(&mut returning);
+        work = FrameWork::default();
+        r.handoff_camera_owners(&selected, &mut work, &|| false);
+        assert!(!r.blocks_conflict(sibling));
+        for (&slot, &owner) in &selected {
+            assert_eq!(r.block_owner.get(&slot), Some(&owner));
+            assert!(work.block_inits.contains(&(slot, owner.3, owner.4)), "reattached parent must rebuild existing exact children");
+        }
+        assert_eq!(siblings[..count].iter().map(|&key| r.residents.get(key).unwrap().record).collect::<Vec<_>>(), records);
+        assert!(work.jobs.is_empty() && work.evictions.is_empty());
+        assert_eq!(r.live_tier1.iter().copied().collect::<FxHashSet<_>>().len(), r.live_tier1.len());
+        assert!(old.iter().chain(&new).all(|&key| r.residents.contains_key(key)));
+        table_is_exact(&r);
+    }
+
+    #[test]
+    fn summary_handoff_preserves_inflight_edit_journal_until_normal_retirement_ack() {
+        let (_, mut r, old, new) = current_alias_fixture();
+        let edit = r.edits.alloc(2, r.capacity.edit_words).unwrap();
+        let record = r.residents.get(old[0]).unwrap().record;
+        r.residents.get_mut(old[0]).unwrap().edit_block = Some(edit);
+        r.publishing.insert(old[0], EditPublication { record, previous: Some(edit), next: Some(edit), evicted: false, initial_bucket: None });
+        let mut incoming = vec![new[0]];
+        let selected = select_camera_owners(&mut incoming);
+        let mut work = FrameWork::default();
+        r.handoff_camera_owners(&selected, &mut work, &|| false);
+        assert_eq!(r.residents.get(old[0]).unwrap().edit_block, Some(edit));
+        assert!(!r.publishing[&old[0]].evicted);
+        assert!(!r.edits.free[edit.1 as usize].contains(&edit.0));
+        assert!(!r.free_records.contains(&record));
+        r.evict(old[0], &mut work);
+        assert!(r.publishing[&old[0]].evicted);
+        assert!(!r.edits.free[edit.1 as usize].contains(&edit.0));
+        r.complete_jobs([(old[0], 0)]);
+        assert!(r.edits.free[edit.1 as usize].contains(&edit.0));
+        assert!(!r.publishing.contains_key(&old[0]));
     }
 
     #[test]
