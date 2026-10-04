@@ -529,6 +529,8 @@ pub struct Residency {
     visible_blocks: Vec<u64>,
     /// At most 64 blocks' columns, retaining rank through partial budgets.
     visible_admission: VecDeque<(usize, u64)>,
+    /// Resume an interrupted intact-tile preflight through scalar admission.
+    timed_out_batch: Option<u64>,
     visible_rank_source: Option<VisibleStamp>,
     visible_source: Option<VisibleStamp>,
     visible_view: Option<VisibleStamp>,
@@ -624,6 +626,7 @@ impl Residency {
             view_focus: None,
             visible_blocks: Vec::new(),
             visible_admission: VecDeque::new(),
+            timed_out_batch: None,
             visible_rank_source: None,
             visible_source: None,
             visible_view: None,
@@ -1165,6 +1168,41 @@ impl Residency {
             self.refresh_visible_pending_cohort_until(8, || std::time::Instant::now() >= deadline);
         } else {
             self.refresh_visible_pending_until(|| false);
+        }
+    }
+
+    /// Ordinary columns can publish without summary references while a slot
+    /// aliases. A complete selected resident tile must acquire those missing
+    /// references after handoff, even though it needs no generation job.
+    fn promote_camera_residents(&mut self, blocks: &[u64], selected: &SelectedOwners,
+        work: &mut FrameWork, out_of_time: &impl Fn() -> bool) {
+        'tiles: for &block in blocks {
+            if out_of_time() { break; }
+            if !selected_owner_allows(block, selected) || self.blocks_conflict(block) { continue; }
+            let Some((keys, count)) = self.visible_columns(block) else { continue };
+            let (face, level, i, j) = unpack(block);
+            let owner = (level, face, 1, i >> 2, j >> 2);
+            if self.blocks.get(&owner).is_some_and(|state| state.refs == count as u32) { continue; }
+            let mut missing = [false; 16];
+            let mut references = 0;
+            for (index, &key) in keys[..count].iter().enumerate() {
+                if out_of_time() { break 'tiles; }
+                let Some(resident) = self.residents.get(key) else { continue 'tiles };
+                if self.publishing.get(&key).is_some_and(|publication|
+                    publication.evicted || publication.record != resident.record) { continue 'tiles; }
+                missing[index] = !resident.blocks;
+                references += u32::from(!resident.blocks);
+            }
+            if references == 0 { continue; }
+            if out_of_time() { break; }
+            // The complete preflight owns exact record identities. No records,
+            // edits, publication acknowledgments or pending keys are replaced.
+            self.reference_blocks_count(block, references, work);
+            for (index, &key) in keys[..count].iter().enumerate() {
+                if missing[index] { self.residents.get_mut(key).unwrap().blocks = true; }
+            }
+            self.block_conflicts -= references as usize;
+            self.dirty_summary_chain(owner, work);
         }
     }
 
@@ -2085,7 +2123,9 @@ impl Residency {
         if available < 16 || self.residents.len().saturating_add(16) > table_limit {
             return false;
         }
-        if self.blocks_conflict(first) { return false; }
+        let (face, level, i, j) = unpack(first);
+        if self.blocks.get(&(level, face, 1, i >> 2, j >> 2)).is_some_and(|block| block.refs > 0)
+            || self.blocks_conflict(first) { return false; }
         // Visible keys may share an existing captured lease. Ordinary keys
         // must all belong to current wanted demand at the selected bucket.
         // Match scalar admission without creating or refreshing any demand.
@@ -2258,6 +2298,7 @@ impl Residency {
         });
         let selected_owners = select_camera_owners(&mut camera_blocks);
         self.handoff_camera_owners(&selected_owners, &mut work, &out_of_time);
+        self.promote_camera_residents(&camera_blocks, &selected_owners, &mut work, &out_of_time);
         self.retire_visible_leases_current(&camera_blocks, &mut work, &out_of_time);
         self.retire_pool_pressure(&mut work, &selected_owners, budget_time.map(|budget| started + budget));
         let t_windows = started.elapsed();
@@ -2372,7 +2413,8 @@ impl Residency {
             let preferred = selected_owner_allows(block_key, &selected_owners);
             // Retried/in-flight heads cannot be sixteen new records. Reuse
             // their exact scalar path before an impossible batch preflight.
-            if preferred && !self.initial_retries.contains(&key) && !self.publishing.contains_key(&key)
+            if preferred && self.timed_out_batch != Some(block_key)
+                && !self.initial_retries.contains(&key) && !self.publishing.contains_key(&key)
                 && index != top_level as usize && (visible_batch && batch_attempts < TEMPORARY_LEASES
                 || self.visible_admission.is_empty() && last_batch_block != Some(block_key)) {
                 if visible_batch { batch_attempts += 1; }
@@ -2394,12 +2436,16 @@ impl Residency {
                 if out_of_time() {
                     self.levels[index].pending.insert(key, bucket);
                     if visible_batch { self.visible_admission.push_front((index, key)); }
+                    self.timed_out_batch = Some(block_key);
                     stop_reason = "batch_preflight_deadline";
                     break;
                 }
             }
             let transient = self.transient_wanted(key);
-            if !preferred { continue; }
+            if !preferred {
+                if self.timed_out_batch == Some(block_key) { self.timed_out_batch = None; }
+                continue;
+            }
             let allowed = cached_current_geometry(&self.grid, self.current_request.as_ref(), key, &mut last_demand, &selected_owners);
             if !allowed && !transient { continue; }
             let leased = self.visible_leases.contains_key(&(key & !(3u64 | (3u64 << 32))));
@@ -2474,6 +2520,11 @@ impl Residency {
                 pad: [0; 3],
             });
             work.job_keys.push(key);
+            if self.timed_out_batch == Some(block_key) && self.residents.get(key).is_some_and(|resident| resident.blocks) {
+                // The exact partial-tile guard now makes batching impossible;
+                // the next frame can cheaply finish its remaining columns.
+                self.timed_out_batch = None;
+            }
         }
         for (index, key, bucket) in awaiting_publication {
             self.queue_obsolete_owners(key);
@@ -3525,6 +3576,25 @@ mod tests {
         r.levels[0].pending.remove(near[0]); // pop_pending has selected the first key.
         r.visible_admission.extend(near[1..].iter().chain(&far).map(|&key| (0, key)));
         (planet, r, near, far)
+    }
+
+    #[test]
+    fn timed_out_batch_resumes_scalar_and_finishes_exact_partial_tile() {
+        let (planet, mut r, eye, near, far) = visible_order_fixture();
+        r.prioritize_visible_blocks([near[0], far[0]].map(|key| (key as u32, (key >> 32) as u32)));
+        // State retained when the previous frame restored an expired preflight.
+        r.timed_out_batch = Some(near[0]);
+        let first = r.plan(&planet, eye, 120.0, 16);
+        assert_eq!(first.job_keys, near);
+        assert_eq!(r.stats.admission_batched_columns, 0, "the stalled tile must advance through scalar admission");
+        assert_eq!(r.timed_out_batch, None);
+        assert_eq!(first.jobs.iter().map(|job| job.record).collect::<FxHashSet<_>>().len(), 16);
+        assert!(far.iter().all(|&key| !r.residents.contains_key(key)));
+        r.complete_jobs(first.job_keys.iter().map(|&key| (key, 0)));
+        let next = r.plan(&planet, eye, 120.0, 16);
+        assert_eq!(next.job_keys, far);
+        assert_eq!(r.stats.admission_batched_columns, 16, "other intact tiles retain the fast path");
+        table_is_exact(&r);
     }
 
     #[test]
@@ -5311,6 +5381,80 @@ mod tests {
         assert!(r.diffs.iter().all(|diff| diff.is_empty()));
         assert_eq!(r.retire_finished_epoch, r.snapshot_epoch);
         (planet, r, old, new)
+    }
+
+    #[test]
+    fn summary_promotion_selected_ordinary_conflict_records_need_no_regeneration() {
+        let (planet, mut r, old, current) = current_alias_fixture();
+        let eye = r.current_request.as_ref().unwrap().eye;
+        let view = r.camera_view.take();
+        let clearance = r.ground_clearance.take();
+        for &key in &current { r.levels[0].pending.insert(key, 0); }
+        let generated = r.plan(&planet, eye, 160.0, 16);
+        assert_eq!(generated.jobs.len(), 16);
+        assert!(generated.job_keys.iter().all(|key| current.contains(key)));
+        assert!(current.iter().all(|&key| !r.residents.get(key).unwrap().blocks));
+        assert_eq!(r.block_conflicts, 16);
+        r.complete_jobs(generated.job_keys.iter().map(|&key| (key, 0)));
+        let records: Vec<_> = old.iter().chain(&current).map(|&key| r.residents.get(key).unwrap().record).collect();
+        let previous = r.edits.alloc(2, r.capacity.edit_words).unwrap();
+        let next = r.edits.alloc(2, r.capacity.edit_words).unwrap();
+        r.residents.get_mut(current[0]).unwrap().edit_block = Some(previous);
+        r.publishing.insert(current[0], EditPublication { record: r.residents.get(current[0]).unwrap().record,
+            previous: Some(previous), next: Some(next), evicted: false, initial_bucket: None });
+        r.camera_view = view;
+        r.ground_clearance = clearance;
+        let attached = r.plan(&planet, eye, 160.0, 0);
+        assert!(attached.jobs.is_empty() && attached.evictions.is_empty());
+        assert!(current.iter().all(|&key| r.residents.get(key).unwrap().blocks));
+        assert_eq!(r.block_conflicts, 0);
+        let (face, level, i, j) = unpack(current[0]);
+        for tier in 1..=3 {
+            let owner = (level, face, tier, i >> (2 * tier), j >> (2 * tier));
+            assert_eq!(r.blocks[&owner].refs, 16);
+            assert_eq!(r.block_owner[&r.blocks[&owner].slot], owner);
+            assert!(attached.block_inits.contains(&(r.blocks[&owner].slot, owner.3, owner.4)));
+        }
+        assert_eq!(old.iter().chain(&current).map(|&key| r.residents.get(key).unwrap().record).collect::<Vec<_>>(), records);
+        assert_eq!(r.residents.get(current[0]).unwrap().edit_block, Some(previous));
+        assert_eq!(r.publishing[&current[0]].next, Some(next));
+        assert!(!r.edits.free[previous.1 as usize].contains(&previous.0));
+        assert!(!r.edits.free[next.1 as usize].contains(&next.0));
+        let repeated = r.plan(&planet, eye, 160.0, 0);
+        assert!(repeated.block_inits.is_empty(), "already referenced tiles must not recount every unchanged frame");
+        table_is_exact(&r);
+    }
+
+    #[test]
+    fn summary_promotion_complete_tile_guards_preserve_partial_deadline_and_alias_ownership() {
+        for case in 0..4 {
+            let (_, mut r, _, current) = current_alias_fixture();
+            let mut blocks = vec![current[0]];
+            let selected = select_camera_owners(&mut blocks);
+            if case != 0 { r.handoff_camera_owners(&selected, &mut FrameWork::default(), &|| false); }
+            for (index, &key) in current.iter().enumerate() {
+                if case == 1 && index == 15 { continue; }
+                let record = r.alloc_record().unwrap();
+                r.residents.insert(key, Resident { record, blocks: false, ..Default::default() });
+                r.block_conflicts += 1;
+            }
+            if case == 3 {
+                r.publishing.insert(current[0], EditPublication { record: r.residents.get(current[0]).unwrap().record + 1,
+                    previous: None, next: None, evicted: true, initial_bucket: None });
+            }
+            let owners = r.block_owner.clone();
+            let conflicts = r.block_conflicts;
+            let checks = std::cell::Cell::new(0usize);
+            let mut work = FrameWork::default();
+            r.promote_camera_residents(&blocks, &selected, &mut work, &|| {
+                checks.set(checks.get() + 1);
+                case == 2 && checks.get() > 8
+            });
+            assert_eq!(r.block_owner, owners, "case {case} cannot steal or partially attach a tile");
+            assert_eq!(r.block_conflicts, conflicts);
+            assert!(current.iter().filter_map(|&key| r.residents.get(key)).all(|resident| !resident.blocks));
+            assert!(work.block_inits.is_empty() && work.jobs.is_empty() && work.evictions.is_empty());
+        }
     }
 
     #[test]
