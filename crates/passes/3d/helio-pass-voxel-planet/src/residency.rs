@@ -1940,24 +1940,32 @@ impl Residency {
             }
         }
         let t_drain = started.elapsed();
-        let camera_out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b.mul_f64(0.6));
+        let camera_out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b.mul_f64(0.35));
         let mut camera_blocks = self.camera_blocks(eye, &camera_out_of_time);
+        let current_view = !camera_blocks.is_empty();
         let selected_owners = select_camera_owners(&mut camera_blocks);
         self.prioritize_camera_owners(&camera_blocks, &selected_owners);
-        // Release occupied summary slots before queueing their current tiles.
-        // Keep the original window allowance within the same total deadline.
-        let retire_out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b.mul_f64(0.6));
+        // Current view intake precedes background snapshots and captured
+        // feedback. All stages still share the same total CPU deadline.
+        let retire_out_of_time = move || budget_time.is_some_and(|b|
+            started.elapsed() >= b.mul_f64(if current_view { 0.15 } else { 0.6 }));
         self.retire_visible_leases_current(&camera_blocks, &mut work, &retire_out_of_time);
-        let apply_out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b.mul_f64(0.6));
+        let t_camera = started.elapsed();
+        self.refresh_camera_pending(&camera_blocks, budget_time.map(|b| started + b.mul_f64(0.35)));
+        let camera_time = started.elapsed() - t_camera;
+        let apply_out_of_time = move || budget_time.is_some_and(|b|
+            started.elapsed() >= b.mul_f64(if current_view { 0.45 } else { 0.6 }));
         if !apply_out_of_time() {
             if self.snapshot_mode { self.apply_snapshot_selected(&mut work, &apply_out_of_time, &selected_owners); }
             else { self.apply_queued(&mut work, &apply_out_of_time); }
         }
-        let t_windows = started.elapsed();
-        let refresh_deadline = budget_time.map(|budget| started + budget.mul_f64(0.7));
-        let visible_deadline = budget_time.map(|budget| started + budget.mul_f64(0.65));
-        // Current intake can use the captured reserve; admission retains30%.
-        self.refresh_camera_pending(&camera_blocks, refresh_deadline);
+        let t_windows = started.elapsed() - camera_time;
+        // With current view work, preserve45% for issuing generation jobs.
+        // Without it, background window/captured scheduling keeps its share.
+        let refresh_deadline = budget_time.map(|budget|
+            started + budget.mul_f64(if current_view { 0.55 } else { 0.7 }));
+        let visible_deadline = budget_time.map(|budget|
+            started + budget.mul_f64(if current_view { 0.5 } else { 0.65 }));
         self.refresh_visible_pending_current_until(&camera_blocks,
             || visible_deadline.is_some_and(|at| std::time::Instant::now() >= at));
         let t_visible = started.elapsed();
