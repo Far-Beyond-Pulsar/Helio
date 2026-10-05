@@ -30,8 +30,9 @@ fn empty_payload_store() -> VoxelPayloadStore {
     Arc::new(RwLock::new((0, HashMap::new())))
 }
 
+/// Files without a version use the generator's registered version.
 fn default_voxel_generator_version() -> u32 {
-    1
+    0
 }
 
 /// The registered terrain generator that fills a world: its id and output
@@ -997,7 +998,7 @@ mod tests {
         value.as_object_mut().unwrap().remove("max_chunk_lod");
         value.as_object_mut().unwrap().remove("lod_scale");
         let restored: VoxelTerrainComponent = serde_json::from_value(value).unwrap();
-        assert_eq!(restored.generator.version, 1);
+        assert_eq!(restored.generator.version, 0);
         assert_eq!(restored.chunk_edge_voxels, 8);
         assert_eq!(restored.max_chunk_lod, 16);
         assert_eq!(restored.lod_scale, 2);

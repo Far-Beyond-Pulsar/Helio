@@ -97,11 +97,13 @@ impl Clone for Planet {
 
 impl Planet {
     pub fn new(mut recipe: PlanetRecipe) -> Result<Self, String> {
-        // Name the concrete generator version (0 asks for the latest), so a
-        // saved recipe keeps its terrain when newer versions appear.
+        // Name the registered generator version (0 accepts it), so saved
+        // edits record the terrain they were made against.
         if recipe.terrain.version == 0 {
-            recipe.terrain.version = terrain::latest_version(&recipe.terrain.generator)
-                .ok_or_else(|| format!("unknown terrain generator {}", recipe.terrain.generator))?;
+            recipe.terrain.version = terrain::find(&recipe.terrain.generator, 0)
+                .ok_or_else(|| format!("unknown terrain generator {}", recipe.terrain.generator))?
+                .info()
+                .version;
         }
         let grid = match recipe.shape {
             Shape::Sphere => Grid::new(recipe.radius_m, recipe.voxel_size_m)?,
@@ -553,9 +555,10 @@ mod tests {
         Planet::new(PlanetRecipe::default()).unwrap()
     }
 
-    /// Landform v1: a pure heightfield, for column-top invariants.
+    /// Landform without caves and overhangs: a pure heightfield, for
+    /// column-top invariants.
     fn heightfield(recipe: PlanetRecipe) -> Planet {
-        let terrain = TerrainSource { version: crate::landform::LEGACY_VERSION, ..TerrainSource::default() };
+        let terrain = TerrainSource { settings: crate::landform::HEIGHTFIELD_SETTINGS.into(), ..TerrainSource::default() };
         Planet::new(PlanetRecipe { terrain, ..recipe }).unwrap()
     }
 

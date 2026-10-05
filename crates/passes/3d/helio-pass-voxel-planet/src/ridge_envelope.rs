@@ -248,7 +248,7 @@ mod tests {
             assert_eq!(canonical[17], 7);
             assert_eq!(canonical, k.bound_margins(&grid));
         }
-        assert_eq!(std::mem::size_of::<LandformConstants>() + 66 * 16, 1616);
+        assert_eq!(std::mem::size_of::<LandformConstants>() + 66 * 16, 1760);
     }
 
     #[test]
@@ -302,7 +302,7 @@ mod tests {
         constructor.sort_by(f64::total_cmp);
         let field = LandformField::new(&grid, &land, 7);
         let first = field.program();
-        assert_eq!(first.constants.len(), 1616);
+        assert_eq!(first.constants.len(), 1760);
         let start = Instant::now();
         for _ in 0..1024 {
             let program = field.program();

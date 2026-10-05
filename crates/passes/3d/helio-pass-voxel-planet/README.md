@@ -39,7 +39,8 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
 - Volumetric worlds: generated caves and overhangs, not only heightfields.
   Heightmaps are one input among others. A terrain program adds 3D terms
   around its surface (`terrain_extent`, `terrain_cell`); Landform v2 carves
-  tunnels and caverns and folds the surface into overhangs. Still limited:
+  tunnels and caverns and folds the surface into overhangs, and erosion
+  octaves carve branching gullies down its slopes. Still limited:
   each column stores one band of at most 256 bricks with solid ground below
   it, so caves reach ~170 m below the surface at 0.1 m voxels; deeper caves
   and core-deep holes need per-level vertical windows.
@@ -117,6 +118,23 @@ the CPU raycast what the GPU draws.
   `noise_fine` / `mul_fine` (Q24 with 12-bit limbs) exist because Q16 noise at
   continent wavelengths is constant over metres and steps by one unit; scaled
   by kilometres of relief that became long straight terraces.
+- The noise domain is a sphere at the planet's radius (planes: the
+  horizontal position), in 1.25 cm units: domain distance is physical
+  distance, the field is smooth across cube edges, and tangent directions
+  (slopes, gullies, later flow) are defined everywhere. Integer
+  `sphere_point` straightens the equal-angle cube coordinates with a tan
+  polynomial and normalizes them (Q30 Newton reciprocal square root, exact
+  64-bit products); the eighth-cell unit keeps its rounding far below a
+  layer of height on steep slopes.
+- Landform carries analytic gradients (`noise_fine_grad`, chain rule through
+  the domain warp) when an erosion octave is resolved. Each erosion octave
+  lays stripes across the downhill direction of the coarser terrain on its
+  own 3D lattice (random phase per corner, trilinear fade); its gradient
+  steers the finer octaves, so gullies branch. Only strictly coarser octaves
+  steer it, so every level that resolves it computes it alike. The phase
+  turns up to 2 sqrt(3) STRIPES times across a cell, so the steering field
+  is continuous (crest sign flips and clamp edges softened) and kept in
+  Q30 unit vectors: a 1e-5 direction error is centimetres of height.
 - Detail finer than a level's footprint is omitted at that level: coarse
   levels are band-limited point samples of the same field. Landform display
   generation retains the conditional mean of unresolved ridges, rather than
@@ -471,9 +489,9 @@ evaluated per job and the band holds at most 256 bricks. Return an empty
 extent at levels that cannot show a feature (Landform resolves tunnels while
 their radius spans a cell, covered caverns while a cell fits in the cover):
 volumetric columns lose relief and filtered shading. Use only the integer noise
-library. A change of generated output is a new version: keep the old one
-registered so saved worlds keep their terrain (Landform v1 is v2 without
-caves and overhangs). Register it with `terrain::register`. Add a test calling
+library. One version of each generator is registered; saved edits record
+it, so bump it when a released generator changes its output (in-development
+changes replace the output in place). Register it with `terrain::register`. Add a test calling
 `engine::verify_field` for every shape and `terrain::check_field`. Changing
 settings rebuilds the world without recompiling shaders; pipelines are keyed
 by program.

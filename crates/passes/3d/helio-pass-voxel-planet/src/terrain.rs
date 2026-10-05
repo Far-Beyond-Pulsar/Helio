@@ -38,8 +38,10 @@
 //! integer noise library (`shaders/noise.wgsl`, mirrored in
 //! [`crate::noise`]) and the material ids (`M_*`, see [`material`]).
 //! Heights are integer [`HEIGHT_ONE`] units (millimetres) above the datum;
-//! `p` is the column centre in half reference cells (0.05 m), independent
-//! of the world's voxel size, and `level` the column's footprint, `2^level`
+//! `p` is the column centre in domain units ([`crate::grid::DOMAIN_UNIT`],
+//! 1.25 cm) on the sphere of the planet's radius (a plane: its horizontal
+//! position), independent of the world's voxel size, and `level` the
+//! column's footprint, `2^level`
 //! reference cells wide, so a field can omit detail finer than it. The CPU
 //! and GPU functions must return equal values for every input:
 //! [`crate::engine::verify_field`] compares them, and [`check_field`] checks
@@ -185,8 +187,8 @@ pub trait TerrainGenerator: Send + Sync + 'static {
 #[serde(default)]
 pub struct TerrainSource {
     pub generator: String,
-    /// Generator output version; 0 means the latest registered version,
-    /// resolved when a world is built (`Planet::recipe` then names it).
+    /// Generator output version; 0 accepts the registered version, which
+    /// `Planet::recipe` then names.
     pub version: u32,
     pub seed: u64,
     /// Generator settings (JSON); empty means its defaults.
@@ -204,19 +206,17 @@ impl Default for TerrainSource {
     }
 }
 
-type Registry = RwLock<BTreeMap<(String, u32), Arc<dyn TerrainGenerator>>>;
+type Registry = RwLock<BTreeMap<String, Arc<dyn TerrainGenerator>>>;
 
 fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(|| {
-        let mut map: BTreeMap<(String, u32), Arc<dyn TerrainGenerator>> = BTreeMap::new();
+        let mut map: BTreeMap<String, Arc<dyn TerrainGenerator>> = BTreeMap::new();
         for generator in [
             Arc::new(crate::landform::LandformGenerator) as Arc<dyn TerrainGenerator>,
-            Arc::new(crate::landform::LandformLegacyGenerator),
             Arc::new(crate::landform::FlatGenerator),
         ] {
-            let info = generator.info();
-            map.insert((info.id, info.version), generator);
+            map.insert(generator.info().id, generator);
         }
         RwLock::new(map)
     })
@@ -229,29 +229,24 @@ pub fn register(generator: Arc<dyn TerrainGenerator>) -> Result<(), String> {
         return Err("a terrain generator needs an id and a nonzero version".into());
     }
     let mut map = registry().write().map_err(|_| "terrain registry poisoned")?;
-    let key = (info.id, info.version);
-    if map.contains_key(&key) {
-        return Err(format!("terrain generator {} v{} is already registered", key.0, key.1));
+    if map.contains_key(&info.id) {
+        return Err(format!("terrain generator {} is already registered", info.id));
     }
-    map.insert(key, generator);
+    map.insert(info.id, generator);
     Ok(())
 }
 
+/// The generator registered as `id`, if it has `version` (0 accepts the
+/// registered version). One version of each generator is registered.
 pub fn find(id: &str, version: u32) -> Option<Arc<dyn TerrainGenerator>> {
-    let version = if version == 0 { latest_version(id)? } else { version };
-    registry().read().ok()?.get(&(id.to_owned(), version)).cloned()
-}
-
-/// Highest registered version of generator `id`.
-pub fn latest_version(id: &str) -> Option<u32> {
-    let map = registry().read().ok()?;
-    map.keys().filter(|(name, _)| name == id).map(|(_, version)| *version).max()
+    let generator = registry().read().ok()?.get(id).cloned()?;
+    (version == 0 || generator.info().version == version).then_some(generator)
 }
 
 /// Every registered generator, by name.
 pub fn generators() -> Vec<GeneratorInfo> {
     let mut list: Vec<_> = registry().read().map(|map| map.values().map(|g| g.info()).collect()).unwrap_or_default();
-    list.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
+    list.sort_by(|a, b| a.name.cmp(&b.name));
     list
 }
 

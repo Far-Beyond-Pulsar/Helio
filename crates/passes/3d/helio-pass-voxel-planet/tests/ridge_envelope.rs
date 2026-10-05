@@ -16,6 +16,7 @@ struct World {
     grid: [i32; 4],
     scale: [u32; 4],
     bounds: [[i32; 4]; 6],
+    sphere: [u32; 4],
 }
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -204,25 +205,25 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
             .min()
             .unwrap();
         let far = max_shift.saturating_sub(1).max(1);
-        let fine = min_shift.saturating_sub(3);
+        let fine = min_shift.saturating_sub(5);
         let levels = [
             0,
             fine,
-            max_shift.saturating_sub(3),
-            max_shift.saturating_sub(2),
+            max_shift.saturating_sub(5),
+            max_shift.saturating_sub(4),
             far,
             4,
         ];
         let program = field.program();
-        // Landform constants (560), ridge suffix (1056), volume (64).
-        assert_eq!(program.constants.len(), 1680);
+        // Landform constants (704), ridge suffix (1056), volume (64).
+        assert_eq!(program.constants.len(), 1824);
         let lo = i32::from_le_bytes(
-            program.constants[560 + 31 * 4..560 + 32 * 4]
+            program.constants[704 + 31 * 4..704 + 32 * 4]
                 .try_into()
                 .unwrap(),
         );
         let hi = i32::from_le_bytes(
-            program.constants[560 + 32 * 4..560 + 33 * 4]
+            program.constants[704 + 32 * 4..704 + 33 * 4]
                 .try_into()
                 .unwrap(),
         );
@@ -272,6 +273,7 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
             ],
             scale: [grid.domain_scale(), 0, 0, 0],
             bounds: std::array::from_fn(|i| std::array::from_fn(|j| bounds[i * 4 + j])),
+            sphere: grid.sphere_constants(),
         };
         let input = gpu
             .device
@@ -387,14 +389,14 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
                 height[0], cpu,
                 "display compilation must not contaminate canonical queries"
             );
-            if level == 0 || level + 3 <= min_shift {
+            if level == 0 || level + 5 <= min_shift {
                 assert_eq!(
                     height[1], cpu,
                     "fully resolved and L0 generation stay exact"
                 );
                 exact += 1;
             }
-            if level > 0 && level + 2 > max_shift {
+            if level > 0 && level + 4 > max_shift {
                 let (land, region) = masks(k, point);
                 let expected = cpu + mul_fine(mul_fine(mean, region), land);
                 assert!(

@@ -31,7 +31,7 @@ impl TerrainGenerator for BroadRelief {
 }
 impl TerrainField for BroadRelief {
     fn height(&self, p: IVec3, _: u32) -> i32 {
-        (1_000_000 + p.x * 3 / 2 + p.z).clamp(-4_000_000, 4_000_000)
+        (1_000_000 + (p.x >> 2) * 3 / 2 + (p.z >> 2)).clamp(-4_000_000, 4_000_000)
     }
     fn ground_material(&self, _: IVec3, _: i32, _: i32, _: i32, _: i32) -> u32 {
         material::GRASS
@@ -50,7 +50,7 @@ impl TerrainField for BroadRelief {
                 r#"
 struct TerrainConstants { pad: vec4<i32>, }
 fn terrain_height(p: vec3<i32>, level: u32) -> i32 {
-    return clamp(1000000 + p.x * 3 / 2 + p.z, -4000000, 4000000);
+    return clamp(1000000 + (p.x >> 2u) * 3 / 2 + (p.z >> 2u), -4000000, 4000000);
 }
 fn ground_material(p: vec3<i32>, top: i32, depth: i32, slope: i32, layer: i32) -> u32 { return M_GRASS; }
 "#,
@@ -116,7 +116,7 @@ impl TerrainField for CutDepth {
             wgsl: Cow::Borrowed(
                 r#"
 struct TerrainConstants { params: vec4<i32>, }
-fn terrain_height(p: vec3<i32>, level: u32) -> i32 { return clamp(1000000 + p.x*3/2 + p.z, -4000000, 4000000); }
+fn terrain_height(p: vec3<i32>, level: u32) -> i32 { return clamp(1000000 + (p.x>>2u)*3/2 + (p.z>>2u), -4000000, 4000000); }
 fn ground_material(p: vec3<i32>, top:i32, depth:i32, slope:i32, layer:i32) -> u32 {
     return select(M_GRASS, M_STONE, depth * terrain.params.x > 2000);
 }

@@ -74,8 +74,8 @@ fn filtered_rock_flecks(albedo: vec3<f32>, pigment: f32, rock: u32, weight: f32)
 // level stepped the patch contrast at every level boundary, which showed as
 // rings sweeping outward while ascending.
 fn grass_albedo(p: vec3<i32>, pixel: f32) -> vec3<f32> {
-    let broad = f32(noise(p, 13u, 0x3c6ef372u)) / f32(NOISE_ONE);
-    let patches = f32(noise(p, 9u, 0xa54ff53au)) / f32(NOISE_ONE) * clamp((12.8 - pixel) / 6.4, 0.0, 1.0);
+    let broad = f32(noise(p, 15u, 0x3c6ef372u)) / f32(NOISE_ONE);
+    let patches = f32(noise(p, 11u, 0xa54ff53au)) / f32(NOISE_ONE) * clamp((12.8 - pixel) / 6.4, 0.0, 1.0);
     let t = clamp(0.58 + frame.detail.x * (0.6 * broad + 0.14 * patches), 0.0, 1.0);
     let dry = frame.grass[0].rgb;
     let meadow = frame.grass[1].rgb;
@@ -155,27 +155,44 @@ fn corner_ao(side1: bool, side2: bool, corner: bool) -> f32 {
 }
 
 // Climate changes over metres to kilometres, so distant 2x2 footprints share
-// a canonical height evaluation. Base-level hits use their resident top;
-// distant depth discontinuities retain their own query. Occupancy is unchanged.
+// one height. Coarse hits read their column's stored height; other columns
+// query the field at their own level only where the resident top cannot
+// decide the material. Occupancy is unchanged.
 @group(0) @binding(20) var<storage, read_write> climate_height_cache: array<i32>;
 
 fn climate_at(h: Hit, xy: vec2<u32>) -> i32 {
-    let dir = pixel_ray(vec2<f32>(xy) + 0.5);
     let face = (h.info >> 2u) & 7u;
+    let level = (h.info >> 5u) & 31u;
+    let c = records[h.record];
+    let x = u32(h.i & 7);
+    let y = u32(h.j & 7);
+    // Coarse relief columns store the generator's own height at this level
+    // (top and fraction): materials and far normals read it instead of
+    // running the generator per pixel, which richer fields (erosion) make
+    // too costly. Finer detail is below the pixel at this level anyway.
+    if frame.hints.y != 0u && (c.info & INFO_RELIEF) != 0u && column_tops_fit(c) {
+        let top = column_top(c, x, y);
+        let fraction = column_relief_fraction(c, x, y);
+        var layers = top << level;
+        if fraction != 0u {
+            var remainder: u32;
+            if level <= 16u { remainder = fraction >> (16u - level); } else { remainder = fraction << (level - 16u); }
+            layers = ((top - 1) << level) + i32(remainder);
+        }
+        return layers * world.grid.y;
+    }
+    let dir = pixel_ray(vec2<f32>(xy) + 0.5);
     let ray = make_ray(camera.position_near.xyz, dir);
     let cell = locate(ray, face_ray(face, ray), h.t, 0u);
-    let level = (h.info >> 5u) & 31u;
     if frame.hints.y != 0u && (cell.i >> level) == h.i && (cell.j >> level) == h.j {
-        let c = records[h.record];
-        var top = column_top(c, u32(h.i & 7), u32(h.j & 7));
-        // The climate bound proof uses the original floor-quantized field,
-        // whereas relief occupancy publishes a conservative ceil top.
-        if (c.info & INFO_RELIEF) != 0u && column_relief_fraction(c, u32(h.i & 7), u32(h.j & 7)) != 0u { top -= 1; }
         // Tall edited/steep bands can truncate their byte-packed column
-        // tops; those columns retain the full canonical query.
+        // tops; those columns retain the field query.
+        let top = column_top(c, x, y);
         if column_tops_fit(c) && !column_tops_down(c) && climate_height_reusable(top, level) {
             return i32(f32(top) * f32(world.grid.y) * f32(1u << level));
         }
+        // The field at this column's level: detail below it is sub-pixel.
+        return terrain_height(domain_point(face, h.i, h.j, level), level + u32(world.grid.w));
     }
     return terrain_height(domain_point(face, cell.i, cell.j, 0u), u32(world.grid.w));
 }

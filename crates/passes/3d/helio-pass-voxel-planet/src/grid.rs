@@ -7,6 +7,7 @@
 //! A plane uses the +Y face basis with axis-aligned cells and horizontal
 //! layers. Either way a straight ray crosses each boundary family in closed
 //! form, which lets the GPU traverse the exact canonical grid.
+use crate::noise::{mul_shr, Q30};
 use glam::{DVec3, IVec3};
 use serde::{Deserialize, Serialize};
 use std::f64::consts::FRAC_PI_4;
@@ -113,6 +114,9 @@ pub struct Grid {
 /// Reference grid resolution: the terrain domain is identical for every
 /// authored voxel size, so changing the grid never reshapes the planet.
 pub const REFERENCE_VOXEL: f64 = 0.1;
+/// Noise-domain unit (m): an eighth of a reference cell, so sphere domain
+/// points round to well under a layer of height on steep terrain.
+pub const DOMAIN_UNIT: f64 = REFERENCE_VOXEL / 8.0;
 
 fn face_cells(radius: f64, voxel_size: f64) -> (i64, u32) {
     edge_cells(radius * std::f64::consts::FRAC_PI_2, voxel_size)
@@ -416,14 +420,34 @@ impl Grid {
         );
         self.locate(centre).0
     }
-    /// Integer point on the "index cube" used as the noise domain, in half
-    /// base cells. Adjacent faces share their edge points, so procedural
-    /// fields are continuous across cube edges.
+    /// Integer noise-domain point of a level cell centre, in half reference
+    /// cells. On a sphere it lies on the sphere of the planet's radius along
+    /// the cell's direction ([`sphere_point`]): domain distance is physical
+    /// distance everywhere, the surface is smooth across cube edges (the
+    /// field has no crease there), and tangent directions (slopes, flow)
+    /// are well defined. On a plane it is the cell's horizontal position.
     pub fn domain_point(&self, face: u8, i: i32, j: i32, level: u32) -> IVec3 {
         if self.is_plane() {
             return plane_domain_point(self.origin_index(), self.domain_scale, i, j, level);
         }
-        domain_point(self.reference_cells, self.domain_scale, face, i, j, level)
+        sphere_point(domain_point(self.reference_cells, self.domain_scale, face, i, j, level), self.sphere_constants())
+    }
+
+    /// Constants of [`sphere_point`]: `inv = floor(2^(30 + shift) /
+    /// reference)` in `[2^23, 2^24)`, `shift`, and the domain radius
+    /// `round(16 reference / pi)`: the planet radius in domain units (a cube
+    /// half face spans a quarter turn of `reference` half cells).
+    pub fn sphere_constants(&self) -> [u32; 4] {
+        if self.is_plane() {
+            return [0; 4];
+        }
+        let reference = self.reference_cells as u64;
+        let mut shift = 0u32;
+        while (1u64 << (30 + shift)) / reference < (1 << 23) {
+            shift += 1;
+        }
+        let radius = (self.reference_cells as f64 * 16.0 / std::f64::consts::PI).round() as u32;
+        [((1u64 << (30 + shift)) / reference) as u32, shift, radius, 0]
     }
 
     /// Constants of [`volume_point`]: `(inv, shift, layer_q16)`. On a sphere
@@ -431,7 +455,8 @@ impl Grid {
     /// `[2^23, 2^24)`; on a plane `layer_q16` converts half layers to half
     /// reference cells.
     pub fn volume_constants(&self) -> (u32, u32, u32) {
-        let layer_q16 = ((u64::from(self.layer_mm) << 16) / 100) as u32;
+        // Half layers to domain units (12.5 mm).
+        let layer_q16 = ((u64::from(self.layer_mm) << 16) / 25) as u32;
         if self.is_plane() {
             return (0, 0, layer_q16);
         }
@@ -472,12 +497,50 @@ pub fn domain_point(reference: i32, scale: u32, face: u8, i: i32, j: i32, level:
     n * reference + a * u + b * v
 }
 
-/// `(a * b) >> s` of the exact 64-bit product (`mul_shr` in WGSL computes
-/// it with 16-bit limbs). The caller keeps the result within 32 bits.
+/// `tan(pi/4 x)` for `|x| <= 1` in Q30, odd and exact at 0 and +-1:
+/// `x - x (1 - x^2) (a + b x^2)` (within 6e-4). It only has to be smooth and
+/// monotone: it straightens the equal-angle cube coordinates into a
+/// direction.
 #[inline]
-pub fn mul_shr(a: u32, b: u32, s: u32) -> u32 {
-    ((u64::from(a) * u64::from(b)) >> s) as u32
+fn tan_quarter(x: i32) -> i32 {
+    let ax = x.unsigned_abs().min(Q30);
+    let x2 = mul_shr(ax, ax, 30);
+    let poly = 230_426_967u32 + mul_shr(53_687_091, x2, 30);
+    let m = (ax - mul_shr(ax, mul_shr(Q30 - x2, poly, 30), 30)) as i32;
+    if x < 0 { -m } else { m }
 }
+
+/// `1 / sqrt(d)` in Q30 for `d` in `[1, 3]` (Q30): Newton from a linear
+/// guess, four fixed steps.
+#[inline]
+fn rsqrt_q30(d: u32) -> u32 {
+    let mut y = 1_288_490_189u32 - mul_shr(d, 230_854_492, 30);
+    for _ in 0..4 {
+        let dy2 = mul_shr(d, mul_shr(y, y, 30), 30);
+        y = mul_shr(y, 3 * Q30 - dy2, 31);
+    }
+    y
+}
+
+/// Sphere domain point of a cube point `cube` (half reference cells, one
+/// component at +-reference): the direction `(tan(pi/4 c / reference))`
+/// normalized, times the domain radius. Computed per component, so the
+/// faces sharing an edge agree. Constants: [`Grid::sphere_constants`].
+/// Mirrored by `sphere_point` in WGSL.
+pub fn sphere_point(cube: IVec3, [inv, shift, radius, _]: [u32; 4]) -> IVec3 {
+    let t = cube.to_array().map(|c| {
+        let x = mul_shr(c.unsigned_abs(), inv, shift).min(Q30) as i32;
+        tan_quarter(if c < 0 { -x } else { x })
+    });
+    let d = t.iter().fold(0u32, |sum, &v| sum + mul_shr(v.unsigned_abs(), v.unsigned_abs(), 30));
+    let r = rsqrt_q30(d);
+    // Direction in Q31, then rounded to whole domain units.
+    IVec3::from_array(t.map(|v| {
+        let m = ((mul_shr(mul_shr(v.unsigned_abs(), r, 29), radius, 30) + 1) >> 1) as i32;
+        if v < 0 { -m } else { m }
+    }))
+}
+
 
 /// `p * r >> 30` for a signed component and a signed Q30 ratio.
 #[inline]
@@ -506,14 +569,14 @@ pub fn volume_point(p: IVec3, plane: bool, k: i32, level: u32, inv: u32, shift: 
     p + IVec3::new(scale_component(p.x, ratio), scale_component(p.y, ratio), scale_component(p.z, ratio))
 }
 
-/// Domain point of a plane level cell centre, in half reference cells
+/// Domain point of a plane level cell centre, in domain units (1.25 cm)
 /// relative to the world origin: `(u, 0, -v)` in the +Y face basis. The
 /// scaling rounds by magnitude, so it is symmetric about the origin.
 pub fn plane_domain_point(origin: i32, scale: u32, i: i32, j: i32, level: u32) -> IVec3 {
     let half = 1i32 << level;
     let scaled = |x: i32| {
         let x = x.wrapping_shl(level + 1).wrapping_add(half).wrapping_sub(origin << 1);
-        let m = mul_q24(x.unsigned_abs(), scale) as i32;
+        let m = (mul_q24(x.unsigned_abs(), scale) << 2) as i32;
         if x < 0 { -m } else { m }
     };
     IVec3::new(scaled(i), 0, -scaled(j))
@@ -643,14 +706,36 @@ mod tests {
         }
     }
 
+    /// Sphere domain points lie at the domain radius along the cell's
+    /// direction: neighbouring cells are 0.7 to 1 cell apart (8 units at a
+    /// face centre; equal-angle cells shrink towards the edges), and
+    /// neighbours across a cube edge are one cell apart.
     #[test]
-    fn domain_points_are_continuous_across_edges() {
+    fn sphere_domain_points_are_uniform_and_seamless() {
         let grid = earth();
         let n = grid.cells();
+        let radius = f64::from(grid.sphere_constants()[2]);
+        let mut worst_radius = 0f64;
+        let (mut shortest, mut longest) = (f64::MAX, 0f64);
+        for (i, j) in [(n / 2, n / 2), (n / 7, n / 3), (3, 5), (n - 2, n - 3), (n / 2, 1), (n - 1, n / 2)] {
+            for face in 0..6u8 {
+                let p = grid.domain_point(face, i, j, 0);
+                worst_radius = worst_radius.max((f64::from(p.as_dvec3().length() as f32) - radius).abs() / radius);
+                if i + 1 < n {
+                    let step = (grid.domain_point(face, i + 1, j, 0) - p).as_dvec3().length();
+                    shortest = shortest.min(step);
+                    longest = longest.max(step);
+                }
+            }
+        }
+        assert!(worst_radius < 1e-7, "radius error {worst_radius}");
+        assert!(shortest > 5.4 && longest < 8.6, "cell steps {shortest} .. {longest}");
+        // Neighbours across a cube edge are one cell apart.
         let a = grid.domain_point(4, n - 1, n / 2, 0);
         let edge = grid.neighbour(Cell::new(4, n - 1, n / 2, 0), 0, 1);
         let b = grid.domain_point(edge.face, edge.i, edge.j, 0);
-        assert!((a - b).abs().max_element() <= 2, "{a} {b}");
+        let gap = (a - b).as_dvec3().length();
+        assert!(gap > 5.4 && gap < 8.6, "{a} {b}");
     }
 
     /// Volumetric noise samples one seamless 3D domain: cells at equal
@@ -665,21 +750,21 @@ mod tests {
             let a = grid.volume_point(4, n - 1, n / 2, k, 0);
             let edge = grid.neighbour(Cell::new(4, n - 1, n / 2, k), 0, 1);
             let b = grid.volume_point(edge.face, edge.i, edge.j, edge.k, 0);
-            assert!((a - b).abs().max_element() <= 4, "k {k}: {a} {b}");
+            assert!((a - b).abs().max_element() <= 12, "k {k}: {a} {b}");
         }
-        // Radial step at a face centre: a 0.1 m layer scales the point by
-        // 0.1 / R, and the cube half size is (pi/2) R / 0.1 m, so the point
-        // moves pi/2 units (a horizontal 0.1 m cell moves it 2).
+        // Radial step: a 0.1 m layer scales the point by 0.1 / R at the
+        // domain radius R / 0.0125 m, so it moves 8 units, like a horizontal
+        // 0.1 m cell.
         let c = n / 2;
         let step = grid.volume_point(2, c, c, 1, 0) - grid.volume_point(2, c, c, 0, 0);
-        let expected = std::f64::consts::FRAC_PI_2;
+        let expected = 8.0;
         assert!((f64::from(step.length_squared()).sqrt() - expected).abs() < 0.6, "{step}");
         let core = grid.volume_point(2, c, c, -(grid.radius() / grid.voxel_size()) as i32, 0);
         // inv carries 24 bits: |p| ~ 2^27 units lands within ~16 (0.8 m).
-        assert!(core.abs().max_element() < 24, "the planet centre maps near the origin: {core}");
+        assert!(core.abs().max_element() < 96, "the planet centre maps near the origin: {core}");
         let plane = Grid::plane(Shape::Plane, 4_000.0, 0.5).unwrap();
         let p = plane.volume_point(PLANE_FACE, 10, 10, 4, 0);
-        assert_eq!(p.y, 45, "plane height in half reference cells: (4.5 * 0.5 m) / 0.05 m");
+        assert_eq!(p.y, 180, "plane height in domain units: (4.5 * 0.5 m) / 0.0125 m");
     }
 
     #[test]

@@ -36,7 +36,7 @@ impl TerrainGenerator for RawSphereGenerator {
 }
 impl TerrainField for RawSphereField {
     fn height(&self, p: IVec3, _: u32) -> i32 {
-        1_000_000 + p.x + p.z / 2
+        1_000_000 + (p.x >> 2) + (p.z >> 3)
     }
     fn ground_material(&self, _: IVec3, _: i32, _: i32, _: i32, _: i32) -> u32 {
         material::GRASS
@@ -57,7 +57,7 @@ impl TerrainField for RawSphereField {
             wgsl: Cow::Borrowed(
                 r#"
 struct TerrainConstants { pad:vec4<i32>, }
-fn terrain_height(p:vec3<i32>,level:u32)->i32{return 1000000+p.x+p.z/2;}
+fn terrain_height(p:vec3<i32>,level:u32)->i32{return 1000000+(p.x>>2u)+(p.z>>3u);}
 fn ground_material(p:vec3<i32>,top:i32,depth:i32,slope:i32,layer:i32)->u32{return M_GRASS;}
 "#,
             ),
@@ -81,11 +81,15 @@ fn world(size: f64) -> Arc<Planet> {
     )
 }
 fn smooth_height(g: &Grid, face: u8, i: f64, j: f64) -> f64 {
+    // The sphere domain mapping (`grid::sphere_point`) in f64.
     let [n, a, b] = face_axes(face);
     let reference = f64::from(g.reference_cells());
     let scale = f64::from(g.domain_scale()) / 16_777_216.0;
-    let p = n * reference + a * (2.0 * i * scale - reference) + b * (2.0 * j * scale - reference);
-    (1_000_000.0 + p.x + p.z * 0.5) * 0.001
+    let tan = |x: f64| x - x * (1.0 - x * x) * (1.0 - std::f64::consts::FRAC_PI_4 + 0.05 * x * x);
+    let u = tan((2.0 * i * scale - reference) / reference);
+    let v = tan((2.0 * j * scale - reference) / reference);
+    let p = (n + a * u + b * v).normalize() * f64::from(g.sphere_constants()[2]);
+    (1_000_000.0 + p.x / 4.0 + p.z / 8.0) * 0.001
 }
 fn authored_position(g: &Grid, face: u8, i: f64, j: f64) -> DVec3 {
     let [n, a, b] = face_axes(face);
@@ -105,11 +109,22 @@ fn authored_normal(g: &Grid, face: u8, i: f64, j: f64) -> DVec3 {
     let qj = b * (1.0 + tj * tj) * g.delta();
     let ui = (qi - up * up.dot(qi)) / length;
     let uj = (qj - up * up.dot(qj)) / length;
+    // Height derivative through the sphere domain mapping (`smooth_height`).
+    let reference = f64::from(g.reference_cells());
     let scale = f64::from(g.domain_scale()) / 16_777_216.0;
-    let dh = |v: DVec3| 0.002 * scale * (v.x + v.z * 0.5);
+    let alpha = 1.0 - std::f64::consts::FRAC_PI_4;
+    let tan = |x: f64| x - x * (1.0 - x * x) * (alpha + 0.05 * x * x);
+    let dtan = |x: f64| 1.0 - (alpha + 0.05 * x * x) * (1.0 - 3.0 * x * x) - 0.1 * x * x * (1.0 - x * x);
+    let u = (2.0 * i * scale - reference) / reference;
+    let v = (2.0 * j * scale - reference) / reference;
+    let dq = n + a * tan(u) + b * tan(v);
+    let unit = dq.normalize();
+    let domain_radius = f64::from(g.sphere_constants()[2]);
+    let dp = |d: DVec3| (d - unit * unit.dot(d)) * (domain_radius / dq.length());
+    let dh = |d: DVec3| 0.001 * (d.x / 4.0 + d.z / 8.0);
     let radius = g.radius() + smooth_height(g, face, i, j);
-    let pi = ui * radius + up * dh(a);
-    let pj = uj * radius + up * dh(b);
+    let pi = ui * radius + up * dh(dp(a * dtan(u) * 2.0 * scale / reference));
+    let pj = uj * radius + up * dh(dp(b * dtan(v) * 2.0 * scale / reference));
     let mut normal = pi.cross(pj).normalize();
     if normal.dot(up) < 0.0 {
         normal = -normal

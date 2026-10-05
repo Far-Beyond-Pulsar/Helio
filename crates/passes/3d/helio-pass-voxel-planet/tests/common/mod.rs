@@ -239,3 +239,37 @@ pub fn land(planet: &Planet, face: u8, fi: f64, fj: f64) -> DVec3 {
     }
     panic!("no land found");
 }
+
+/// A land column whose face fractions lie in `[lo, hi)` on both axes.
+pub fn land_within(planet: &Planet, face: u8, lo: f64, hi: f64) -> DVec3 {
+    let grid = planet.grid();
+    let n = f64::from(grid.cells());
+    for step in 0..1600 {
+        let a = lo + (hi - lo) * f64::from(step % 40) / 40.0;
+        let b = lo + (hi - lo) * f64::from(step / 40) / 40.0;
+        let (i, j) = ((a * n) as i32, (b * n) as i32);
+        if planet.column_top(face, i, j, 0) > 40 {
+            return grid.direction(face, f64::from(i) + 0.5, f64::from(j) + 0.5);
+        }
+    }
+    panic!("no land found in [{lo}, {hi})");
+}
+
+/// The highest of a coarse sample of columns: a mountain peak.
+pub fn peak(planet: &Planet) -> DVec3 {
+    let grid = planet.grid();
+    let n = grid.cells();
+    let mut best = (i32::MIN, 0u8, 0, 0);
+    for face in 0..6u8 {
+        for a in 0..120 {
+            for b in 0..120 {
+                let (i, j) = (n / 120 * a + n / 240, n / 120 * b + n / 240);
+                let h = planet.column_height(face, i, j, 0);
+                if h > best.0 {
+                    best = (h, face, i, j);
+                }
+            }
+        }
+    }
+    grid.direction(best.1, f64::from(best.2) + 0.5, f64::from(best.3) + 0.5)
+}

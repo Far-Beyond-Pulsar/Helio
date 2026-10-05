@@ -249,6 +249,8 @@ struct WorldGpu {
     /// domain scale (Q24), pad.
     scale: [u32; 4],
     bounds: [[i32; 4]; 6],
+    /// sphere domain constants (`Grid::sphere_constants`).
+    sphere: [u32; 4],
 }
 
 impl WorldGpu {
@@ -262,6 +264,7 @@ impl WorldGpu {
                 [g.domain_scale(), inv, shift, layer_q16]
             },
             bounds: std::array::from_fn(|i| std::array::from_fn(|j| m[i * 4 + j])),
+            sphere: g.sphere_constants(),
         }
     }
 }

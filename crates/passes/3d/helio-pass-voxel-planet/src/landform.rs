@@ -8,7 +8,7 @@
 //! are omitted: coarse levels are band-limited point samples of the same
 //! field rather than an independent smooth replacement.
 use crate::grid::Grid;
-use crate::noise::{hash3, mul_fine, noise, noise_fine, scale, FINE_ONE, ONE};
+use crate::noise::{fade, hash3, lerp, mul16, mul_fine, mul_shr_signed, noise, noise_fine, noise_fine_grad, scale, sin_turns, unit_q30, FINE_ONE, ONE};
 use crate::terrain::{material, GeneratorInfo, TerrainField, TerrainGenerator, TerrainProgram, HEIGHT_ONE};
 use bytemuck::{Pod, Zeroable};
 use glam::IVec3;
@@ -17,10 +17,10 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 pub const ID: &str = "helio.landform";
-/// Version 2 adds caves and overhangs; version 1 builds the same terrain
-/// without them (worlds saved with it keep their terrain).
+/// Output version, recorded with saved edits (one version is registered).
 pub const VERSION: u32 = 2;
-pub const LEGACY_VERSION: u32 = 1;
+/// Landform settings without caves and overhangs: a pure heightfield.
+pub const HEIGHTFIELD_SETTINGS: &str = r#"{"caves": false, "overhang_m": 0.0}"#;
 pub(crate) const DISPLAY_PROGRAM: &str = "helio.landform/2-ridge-envelope-volume/4";
 pub const FLAT_ID: &str = "helio.flat";
 pub const FLAT_VERSION: u32 = 1;
@@ -66,6 +66,15 @@ pub struct Landform {
     pub overhang_region_km: f64,
     /// Rough share of the land inside overhang regions (0..1).
     pub overhang_share: f64,
+    /// Erosion gullies: amplitude and wavelength of the largest octave,
+    /// octave count and amplitude ratio per halved wavelength. Gullies run
+    /// down the slope of the larger terrain (and of the coarser gullies, so
+    /// they branch) and fade out on ground flatter than `erosion_slope`.
+    pub erosion_m: f64,
+    pub erosion_km: f64,
+    pub erosion_octaves: u32,
+    pub erosion_gain: f64,
+    pub erosion_slope: f64,
 }
 
 impl Default for Landform {
@@ -94,6 +103,11 @@ impl Default for Landform {
             overhang_wavelength_m: 24.0,
             overhang_region_km: 3.0,
             overhang_share: 0.3,
+            erosion_m: 40.0,
+            erosion_km: 1.6,
+            erosion_octaves: 6,
+            erosion_gain: 0.5,
+            erosion_slope: 0.5,
         }
     }
 }
@@ -137,8 +151,7 @@ const SEED_OVERHANG_REGION: u32 = 0x4CF5_AD43;
 
 impl LandformVolume {
     pub fn new(grid: &Grid, land: &Landform) -> Self {
-        let half = crate::grid::REFERENCE_VOXEL * 0.5;
-        let shift = |metres: f64| ((metres / half).log2().round().clamp(1.0, 29.0)) as i32;
+        let shift = |metres: f64| ((metres / crate::grid::DOMAIN_UNIT).log2().round().clamp(1.0, 30.0)) as i32;
         let mm = |metres: f64| (metres.max(0.0) * 1000.0).round().min(f64::from(i32::MAX / 4)) as i32;
         // Threshold above which `share` of the noise lies.
         let threshold = |share: f64| (noise_quantile(1.0 - share.clamp(0.0, 1.0)) * f64::from(ONE)).round() as i32;
@@ -254,7 +267,7 @@ impl LandformVolume {
     }
 }
 
-pub const OCTAVES: usize = 32;
+pub const OCTAVES: usize = 40;
 pub const WARP_OCTAVES: usize = 6;
 
 /// One additive octave: lattice shift, amplitude (height units) and kind.
@@ -276,17 +289,20 @@ pub struct LandformConstants {
     pub header: [i32; 4],
     /// basin floor, lowland, snowline, basin threshold (mm).
     pub levels: [i32; 4],
-    /// mountain mask bias, steep slope (cells/cell), pad, pad.
+    /// mountain mask bias, steep slope (cells/cell), ridge display flag,
+    /// vertical axis (0 radial, 1 the plane's +Y).
     pub shape: [i32; 4],
+    /// erosion saturation slope (height units per gradient span), pad.
+    pub erosion: [i32; 4],
     pub octaves: [Octave; OCTAVES],
 }
 
 impl LandformConstants {
     pub fn new(grid: &Grid, land: &Landform, seed: u32) -> Self {
         let units = |metres: f64| (metres * f64::from(HEIGHT_ONE)).round() as i32;
-        // Lattice spacing for a wavelength, in reference half cells.
-        let half = crate::grid::REFERENCE_VOXEL * 0.5;
-        let shift = |metres: f64| ((metres / half).log2().round().clamp(1.0, 29.0)) as u32;
+        // Lattice spacing for a wavelength, in domain units.
+        let half = crate::grid::DOMAIN_UNIT;
+        let shift = |metres: f64| ((metres / half).log2().round().clamp(1.0, 30.0)) as u32;
         let mut octaves = Vec::new();
         let mut state = seed.wrapping_mul(0x9E37_79B9);
         let mut next_seed = || {
@@ -326,9 +342,10 @@ impl LandformConstants {
             });
         }
         let mut amplitude = land.mountain_m;
+        let mut ridges = Vec::new();
         for o in 0..7 {
             let w = land.mountain_km * 1_000.0 / f64::from(1u32 << o);
-            octaves.push(Octave {
+            ridges.push(Octave {
                 shift: shift(w),
                 amplitude: units(amplitude),
                 seed: next_seed(),
@@ -336,6 +353,26 @@ impl LandformConstants {
             });
             amplitude *= 0.47;
         }
+        // Erosion octaves join the ridges by wavelength, so each one follows
+        // only coarser terrain: whenever it is resolved, so is everything it
+        // reads, and every level computes it alike.
+        let mut gullies = Vec::new();
+        let mut amplitude = land.erosion_m;
+        for o in 0..land.erosion_octaves.min(8) {
+            let w = land.erosion_km * 1_000.0 / f64::from(1u32 << o);
+            if amplitude > 0.0 && w > 1.0 {
+                gullies.push(Octave { shift: shift(w), amplitude: units(amplitude), seed: next_seed(), kind: EROSION });
+            }
+            amplitude *= land.erosion_gain;
+        }
+        let mut gullies = gullies.into_iter().peekable();
+        for ridge in ridges {
+            while let Some(g) = gullies.next_if(|g| g.shift >= ridge.shift) {
+                octaves.push(g);
+            }
+            octaves.push(ridge);
+        }
+        octaves.extend(gullies);
         let mut amplitude = land.hill_m;
         let mut w = land.hill_km * 1_000.0;
         while w > 700.0 {
@@ -376,7 +413,13 @@ impl LandformConstants {
                 units(land.snowline_m),
                 units(-8.0),
             ],
-            shape: [ONE / 20, 16, 0, 0],
+            shape: [ONE / 20, 16, 0, i32::from(grid.is_plane())],
+            erosion: [
+                ((land.erosion_slope * f64::from(1u32 << GRAD_SHIFT) * crate::grid::DOMAIN_UNIT * 1_000.0).round() as i32).clamp(32, 1 << 26),
+                0,
+                0,
+                0,
+            ],
             octaves: table,
         }
     }
@@ -414,16 +457,22 @@ impl LandformConstants {
                     2 => 2.0 * f64::from(o.amplitude.abs()),
                     _ => f64::from(o.amplitude.abs()),
                 } / f64::from(ONE) * f64::from(ONE);
-                if o.kind >= 2 && o.shift < effective + 3 {
+                if o.kind >= 2 && o.shift < effective + RESOLVED_SHIFT {
                     dropped += f64::from(o.amplitude.abs());
                 } else if o.kind == 7 {
                     unwarped += amplitude * G / 2f64.powi(o.shift as i32);
+                } else if o.kind == EROSION {
+                    // Gullies are unwarped; their phase turns 2 pi STRIPES per
+                    // lattice spacing, plus the turning of their direction.
+                    unwarped += amplitude * 19.0 / 2f64.powi(o.shift as i32);
                 } else {
                     lipschitz += amplitude * G / 2f64.powi(o.shift as i32);
                 }
             }
-            // Half diagonal of a level cell in reference half cells.
-            let half_diagonal = 2f64.powi(level as i32 + 1) * ratio * std::f64::consts::SQRT_2 * 0.5;
+            // Half diagonal of a level cell in domain units (sphere cells
+            // are at most 1.05 times a face-centre cell).
+            let cell = crate::grid::REFERENCE_VOXEL / crate::grid::DOMAIN_UNIT;
+            let half_diagonal = 2f64.powi(level as i32) * cell * ratio * std::f64::consts::SQRT_2 * 0.5 * 1.05;
             let excess_mm = dropped + (lipschitz * (1.0 + warp) + unwarped) * half_diagonal;
             let cell_mm = f64::from(self.header[1]) * 2f64.powi(level as i32);
             out[level as usize] = ((excess_mm / cell_mm).ceil() as i64 + 2).clamp(2, 1 << 20) as i32;
@@ -445,48 +494,206 @@ impl LandformConstants {
     }
 }
 
+/// Smallest lattice shift resolved at `level`, above the level: a lattice
+/// of `2^(level + 5)` domain units spans four level cells.
+pub const RESOLVED_SHIFT: u32 = 5;
+
 /// Additive detail finer than about four level cells is omitted at `level`
 /// (`level` counts reference cells).
 #[inline]
 fn resolved(o: &Octave, level: u32) -> bool {
-    o.kind <= 1 || o.shift >= level + 3
+    o.kind <= 1 || o.shift >= level + RESOLVED_SHIFT
+}
+
+/// Octave kind of erosion gullies.
+pub const EROSION: u32 = 8;
+/// Gradients are in height units per `2^GRAD_SHIFT` domain units (3.3 km):
+/// gentle slopes keep about 20 bits, which gully directions need.
+pub const GRAD_SHIFT: u32 = 18;
+/// Gully stripes per erosion lattice spacing.
+const STRIPES: i32 = 2;
+
+/// A lattice-spacing derivative per gradient span.
+#[inline]
+fn per_span(d: i32, shift: u32) -> i32 {
+    if shift >= GRAD_SHIFT { d >> (shift - GRAD_SHIFT) } else { d << (GRAD_SHIFT - shift) }
+}
+
+#[inline]
+fn per_span3(d: IVec3, shift: u32) -> IVec3 {
+    IVec3::new(per_span(d.x, shift), per_span(d.y, shift), per_span(d.z, shift))
+}
+
+#[inline]
+fn mul_fine3(v: IVec3, b: i32) -> IVec3 {
+    IVec3::new(mul_fine(v.x, b), mul_fine(v.y, b), mul_fine(v.z, b))
+}
+
+/// Q24 weight of a clamp's derivative inside `(lo, hi)`, fading to zero over
+/// `FINE_ONE / 8` at both edges. Gullies are steered by a continuous
+/// gradient: a clamp's derivative switches on and off at its edges, and
+/// the direction jump would shift the gully phase into a cliff.
+#[inline]
+fn soft_inside(x: i32, lo: i32, hi: i32) -> i32 {
+    ((x - lo) * 8).clamp(0, FINE_ONE).min(((hi - x) * 8).clamp(0, FINE_ONE))
+}
+
+/// Steering gradient (height units per span, w.r.t. the warped point) of
+/// the large shape: basins and lowlands and the mountains resolved so far,
+/// with every kink softened ([`soft_inside`]).
+fn shape_gradient(k: &LandformConstants, c: i32, dc: IVec3, mask: i32, dmask: IVec3, ridged: i32, dridged: IVec3) -> IVec3 {
+    let dbase = if c < 0 {
+        mul_fine3(mul_fine3(-dc, soft_inside(-c, 0, FINE_ONE)), k.levels[0] - k.levels[1] / 8)
+    } else {
+        mul_fine3(mul_fine3(dc * 2, soft_inside(c * 2, 0, FINE_ONE)), k.levels[1])
+    };
+    let land = (c * 3).clamp(0, FINE_ONE);
+    let dland = mul_fine3(dc * 3, soft_inside(c * 3, 0, FINE_ONE));
+    let m = (mask - (k.shape[0] << 8)) * 3;
+    let region = m.clamp(0, FINE_ONE);
+    let dregion = mul_fine3(dmask * 3, soft_inside(m, 0, FINE_ONE));
+    let mr = mul_fine(ridged, region);
+    let dmr = mul_fine3(dridged, region) + mul_fine3(dregion, ridged);
+    dbase + mul_fine3(dmr, land) + mul_fine3(dland, mr)
+}
+
+/// One erosion octave at `p`: gully stripes along the downhill direction of
+/// `g` (height units per span w.r.t. `p`), blended over the octave's 3D
+/// lattice with a random phase per corner, and their gradient (which steers
+/// the finer octaves). `up` is the Q30 unit vertical.
+///
+/// The phase turns up to `2 sqrt(3) STRIPES` times across a lattice cell, so
+/// direction and offsets keep full precision (Q30 unit vectors, exact 64-bit
+/// products): a 1e-5 direction error would already shift a 40 m gully by
+/// centimetres between neighbouring columns.
+fn erosion_octave(k: &LandformConstants, o: &Octave, p: IVec3, g: IVec3, up: IVec3) -> (i32, IVec3) {
+    // Across the slope, horizontal: t = up x g, |t| the horizontal slope.
+    let t = IVec3::new(
+        mul_shr_signed(up.y, g.z, 30) - mul_shr_signed(up.z, g.y, 30),
+        mul_shr_signed(up.z, g.x, 30) - mul_shr_signed(up.x, g.z, 30),
+        mul_shr_signed(up.x, g.y, 30) - mul_shr_signed(up.y, g.x, 30),
+    );
+    let tn = unit_q30(t);
+    if tn == IVec3::ZERO {
+        return (0, IVec3::ZERO);
+    }
+    let slope = (mul_shr_signed(t.x, tn.x, 30) + mul_shr_signed(t.y, tn.y, 30) + mul_shr_signed(t.z, tn.z, 30)) as u32;
+    let saturation = k.erosion[0] as u32;
+    let strength = (((slope.min(saturation) >> 5) << 16) / (saturation >> 5).max(1)) as i32;
+    let s = o.shift;
+    let c = IVec3::new(p.x >> s, p.y >> s, p.z >> s);
+    let mask = (1i32 << s) - 1;
+    let w = [p.x, p.y, p.z].map(|v| fade(if s >= 16 { (v & mask) >> (s - 16) } else { (v & mask) << (16 - s) }));
+    let mut cos = [0i32; 8];
+    let mut sin = [0i32; 8];
+    for index in 0..8usize {
+        let corner = c + IVec3::new((index & 1) as i32, ((index >> 1) & 1) as i32, (index >> 2) as i32);
+        // Offset from the corner along tn, in Q16 lattice spacings.
+        let d = p - IVec3::new(corner.x << s, corner.y << s, corner.z << s);
+        let along = mul_shr_signed(d.x, tn.x, s + 14) + mul_shr_signed(d.y, tn.y, s + 14) + mul_shr_signed(d.z, tn.z, s + 14);
+        let phase = along * STRIPES + (hash3(corner.x, corner.y, corner.z, o.seed) & 0xffff) as i32;
+        // Gully profile pi/2 |cos(phase / 2)| - 1: V-shaped valleys between
+        // rounded ridges, zero mean (levels that omit it keep their height)
+        // and within the amplitude.
+        cos[index] = mul16(sin_turns((phase >> 1) + 16_384).abs(), 102_944) - ONE;
+        sin[index] = sin_turns(phase);
+    }
+    let tri = |v: [i32; 8]| {
+        let y0 = lerp(lerp(v[0], v[1], w[0]), lerp(v[2], v[3], w[0]), w[1]);
+        let y1 = lerp(lerp(v[4], v[5], w[0]), lerp(v[6], v[7], w[0]), w[1]);
+        lerp(y0, y1, w[2])
+    };
+    let value = scale(mul16(tri(cos), strength), o.amplitude);
+    // The steering derivative is the smooth cos(phase) one, so finer octaves
+    // see no direction flip at valley floors: -A s sin(phase) 2 pi STRIPES /
+    // lattice along tn (2 pi STRIPES = 3217 / 256).
+    let m = scale(mul16(tri(sin), strength), o.amplitude);
+    let magnitude = per_span(-((m * 3_217) >> 8), s);
+    (value, IVec3::new(mul_shr_signed(magnitude, tn.x, 30), mul_shr_signed(magnitude, tn.y, 30), mul_shr_signed(magnitude, tn.z, 30)))
 }
 
 /// Surface height (height units above the datum) of the column centred at
 /// domain point `p` with a `2^level` reference cell footprint.
 pub fn height(k: &LandformConstants, p: IVec3, level: u32) -> i32 {
     let count = k.header[0] as usize;
+    // Erosion follows the slope of the larger terrain: when one of its
+    // octaves is resolved here, the large octaves carry their gradients.
+    let erosion = k.octaves[WARP_OCTAVES..count].iter().any(|o| o.kind == EROSION && resolved(o, level));
     // The warp, continents, mountain regions and ridges scale up to
     // kilometres, so they use the fine (Q24) noise: 16-bit noise is constant
     // over metres at these wavelengths and its steps, multiplied by the
     // mountains, would cut terraces between neighbouring columns.
     //
     // The first six octaves are the domain warp (two per axis). The warp is a
-    // coordinate transform, so every level evaluates it.
+    // coordinate transform, so every level evaluates it. `jacobian[a]` is
+    // the gradient of warp axis `a` (Q24, dimensionless).
     let mut warp = [0i32; 3];
+    let mut jacobian = [IVec3::ZERO; 3];
     for o in &k.octaves[..WARP_OCTAVES] {
         let axis = (o.kind - 4) as usize;
-        warp[axis] = warp[axis].wrapping_add(mul_fine(o.amplitude, noise_fine(p, o.shift, o.seed)));
+        if erosion {
+            let (n, d) = noise_fine_grad(p, o.shift, o.seed);
+            warp[axis] = warp[axis].wrapping_add(mul_fine(o.amplitude, n));
+            let to_q24 = |v: i32| {
+                let m = mul_fine(v, o.amplitude);
+                if o.shift <= 24 { m << (24 - o.shift) } else { m >> (o.shift - 24) }
+            };
+            jacobian[axis] += IVec3::new(to_q24(d.x), to_q24(d.y), to_q24(d.z));
+        } else {
+            warp[axis] = warp[axis].wrapping_add(mul_fine(o.amplitude, noise_fine(p, o.shift, o.seed)));
+        }
     }
     let q = p + IVec3::from_array(warp);
+    // Gradients w.r.t. q map to p through (I + J)^T.
+    let unwarp = |g: IVec3| {
+        let column = |j: usize| g[j] + mul_fine(g.x, jacobian[0][j]) + mul_fine(g.y, jacobian[1][j]) + mul_fine(g.z, jacobian[2][j]);
+        IVec3::new(column(0), column(1), column(2))
+    };
+    let up = if k.shape[3] != 0 { IVec3::new(0, 1 << 30, 0) } else { unit_q30(p) };
     let mut continent = 0i32;
     let mut mask = 0i32;
     let mut ridged = 0i32;
     let mut ridge_weight = FINE_ONE - 1;
     let mut detail = 0i32;
+    let mut eroded = 0i32;
+    let (mut dcontinent, mut dmask, mut dridged, mut dweight, mut deroded) = (IVec3::ZERO, IVec3::ZERO, IVec3::ZERO, IVec3::ZERO, IVec3::ZERO);
     for o in &k.octaves[WARP_OCTAVES..count] {
         if !resolved(o, level) {
             continue;
         }
         match o.kind {
-            0 => continent = continent.wrapping_add(mul_fine(noise_fine(q, o.shift, o.seed), o.amplitude << 8)),
-            1 => mask = mask.wrapping_add(mul_fine(noise_fine(q, o.shift, o.seed), o.amplitude << 8)),
+            0 | 1 => {
+                let (n, d) = if erosion { noise_fine_grad(q, o.shift, o.seed) } else { (noise_fine(q, o.shift, o.seed), IVec3::ZERO) };
+                let v = mul_fine(n, o.amplitude << 8);
+                let dv = mul_fine3(per_span3(d, o.shift), o.amplitude << 8);
+                if o.kind == 0 {
+                    continent = continent.wrapping_add(v);
+                    dcontinent += dv;
+                } else {
+                    mask = mask.wrapping_add(v);
+                    dmask += dv;
+                }
+            }
             2 => {
-                let n = noise_fine(q, o.shift, o.seed);
+                let (n, d) = if erosion { noise_fine_grad(q, o.shift, o.seed) } else { (noise_fine(q, o.shift, o.seed), IVec3::ZERO) };
                 let r = (FINE_ONE - n.abs()).clamp(0, FINE_ONE - 1);
-                let v = mul_fine(mul_fine(r, r), ridge_weight);
+                let rr = mul_fine(r, r);
+                let v = mul_fine(rr, ridge_weight);
+                if erosion {
+                    // The crest's sign flip is softened over |n| < 1/4.
+                    let dr = mul_fine3(per_span3(-d, o.shift), (n * 4).clamp(-FINE_ONE, FINE_ONE));
+                    let dv = mul_fine3(mul_fine3(dr, r) * 2, ridge_weight) + mul_fine3(dweight, rr);
+                    dweight = mul_fine3(dv * 2, soft_inside(v * 2, FINE_ONE / 4, FINE_ONE - 1));
+                    dridged += mul_fine3(dv, o.amplitude);
+                }
                 ridge_weight = (v * 2).clamp(FINE_ONE / 4, FINE_ONE - 1);
                 ridged = ridged.wrapping_add(mul_fine(o.amplitude, v));
+            }
+            EROSION => {
+                let g = unwarp(shape_gradient(k, continent, dcontinent, mask, dmask, ridged, dridged)) + deroded;
+                let (e, de) = erosion_octave(k, o, p, g, up);
+                eroded = eroded.wrapping_add(e);
+                deroded += de;
             }
             _ => detail = detail.wrapping_add(scale(noise(if o.kind == 7 { p } else { q }, o.shift, o.seed), o.amplitude)),
         }
@@ -507,7 +714,7 @@ pub fn height(k: &LandformConstants, p: IVec3, level: u32) -> i32 {
     let mountains = mul_fine(mul_fine(ridged, region), land);
     // Land detail fades out under deep water.
     let wet = (FINE_ONE + c * 2).clamp(FINE_ONE / 8, FINE_ONE);
-    base.wrapping_add(mountains).wrapping_add(mul_fine(detail, wet))
+    base.wrapping_add(mountains).wrapping_add(eroded).wrapping_add(mul_fine(detail, wet))
 }
 
 /// Moisture in Q24 [0, FINE_ONE] from very low-frequency noise at `p`
@@ -520,7 +727,7 @@ pub fn moisture(k: &LandformConstants, p: IVec3) -> i32 {
 /// Strata altitude (mm): layers undulate +-8 m over ~100 m, so cuts
 /// through them never show flat rings.
 fn strata(c: &LandformConstants, p: IVec3, altitude: i32) -> i32 {
-    altitude + scale(noise(p, 11, (c.header[3] as u32) ^ 0x9B05_688C), 8_000)
+    altitude + scale(noise(p, 13, (c.header[3] as u32) ^ 0x9B05_688C), 8_000)
 }
 
 /// Material of a solid ground cell. `top_height` is the column height (mm),
@@ -572,7 +779,7 @@ pub fn ground_material(
     // outcrop can reach the rock fringe: skip it (same result).
     let seed = c.header[3] as u32;
     let outcrop = if alpine > 0 || slope >= 5 {
-        noise(p, 10, seed ^ 0x1B56_C4E9) + noise(p, 7, seed ^ 0x6A09_E667) / 3
+        noise(p, 12, seed ^ 0x1B56_C4E9) + noise(p, 9, seed ^ 0x6A09_E667) / 3
     } else {
         -ONE
     };
@@ -625,25 +832,6 @@ pub fn ground_material(
 
 /// Builds [`LandformField`]s from [`Landform`] settings.
 pub struct LandformGenerator;
-
-/// Landform version 1: the same terrain without caves or overhangs.
-pub struct LandformLegacyGenerator;
-
-impl TerrainGenerator for LandformLegacyGenerator {
-    fn info(&self) -> GeneratorInfo {
-        GeneratorInfo {
-            version: LEGACY_VERSION,
-            name: "Landform (v1, no caves)".into(),
-            ..LandformGenerator.info()
-        }
-    }
-    fn build(&self, grid: &Grid, seed: u64, settings: &str) -> Result<Arc<dyn TerrainField>, String> {
-        let mut land = parse_landform(settings)?;
-        land.caves = false;
-        land.overhang_m = 0.0;
-        landform_field(grid, seed, land)
-    }
-}
 
 fn parse_landform(settings: &str) -> Result<Landform, String> {
     if settings.trim().is_empty() {

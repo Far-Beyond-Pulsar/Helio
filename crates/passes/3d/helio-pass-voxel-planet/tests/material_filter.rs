@@ -93,13 +93,13 @@ fn unresolved_outcrop_preserves_canonical_ids_and_mean_palette() {
     );
     // Match the complete current TerrainConstants ABI, including the ridge LUT
     // and the volume terms (zero: no caves or overhangs).
-    let mut constants = [0i32; 420];
+    let mut constants = [0i32; 456];
     constants[1] = 100;
     constants[2] = 7;
     constants[3] = 123;
     constants[6] = 2_000_000;
     constants[9] = 16;
-    constants[12 + 6 * 4] = 10;
+    constants[16 + 6 * 4] = 10;
     let points: Vec<[i32; 4]> = (0..16384i32)
         .map(|i| {
             // Actual cube-face/plane slices: one domain coordinate is fixed.

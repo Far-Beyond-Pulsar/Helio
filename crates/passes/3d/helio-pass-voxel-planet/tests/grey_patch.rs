@@ -12,7 +12,7 @@ fn bounded_climate_reuse_preserves_surface_materials() {
     let Some(gpu) = gpu() else { return };
     let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
     let grid = *planet.grid();
-    let alpine = grid.direction(1, 69_257_724.5, 67_647_343.5);
+    let alpine = peak(&planet);
     let size = [129, 73];
     let target = Target::new(&gpu, size);
     let mut reference = Vec::new();
@@ -96,7 +96,7 @@ fn alpine_snow_does_not_become_grass_when_level_height_rounds_to_zero() {
     let Some(gpu) = gpu() else { return };
     let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
     let grid = *planet.grid();
-    let dir = grid.direction(1, 69_257_724.5, 67_647_343.5);
+    let dir = peak(&planet);
     let target = Target::new(&gpu, [128, 72]);
     let mut renderer = renderer(&gpu, planet.clone(), [128, 72]);
     // At 1,000 km, radial level cells exceed the mountain's elevation.
@@ -122,10 +122,10 @@ fn alpine_snow_does_not_become_grass_when_level_height_rounds_to_zero() {
 #[test]
 fn settled_level_transitions_enter_the_surface_not_subsoil() {
     let Some(gpu) = gpu() else { return };
-    // Top faces are checked against the heightfield top: Landform v1 (cave
-    // floors and overhang tops are elsewhere; cave_view covers those).
+    // Top faces are checked against the heightfield top: Landform without
+    // caves and overhangs (cave_view covers cave floors and overhang tops).
     let terrain = helio_pass_voxel_planet::TerrainSource {
-        version: helio_pass_voxel_planet::landform::LEGACY_VERSION,
+        settings: helio_pass_voxel_planet::landform::HEIGHTFIELD_SETTINGS.into(),
         ..Default::default()
     };
     let planet = Arc::new(Planet::new(PlanetRecipe { terrain, ..Default::default() }).unwrap());

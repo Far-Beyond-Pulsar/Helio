@@ -105,31 +105,35 @@ fn ground_view_matches_canonical_cpu_ray_casts() {
 fn find_cave(planet: &Planet) -> Option<(DVec3, Vec3)> {
     let grid = *planet.grid();
     let field = planet.field();
-    let dir = land(planet, 4, 0.37, 0.61);
-    let (base, _) = grid.locate(planet.surface_point(dir, 0.0));
     let mut rng = 0x2545_F491_4F6C_DD1Du64;
     let mut next = || {
         rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; rng
     };
-    for _ in 0..20_000 {
-        let i = base.i + (next() % 8000) as i32 - 4000;
-        let j = base.j + (next() % 8000) as i32 - 4000;
-        let (below, _) = field.extent(grid.domain_point(base.face, i, j, 0), 0);
-        if below == 0 {
-            continue;
-        }
-        let top = planet.column_top(base.face, i, j, 0);
-        let k = top - 4 - (next() % below.max(1) as u64) as i32;
-        let air = |di: i32, dj: i32, dk: i32| !planet.solid(Cell::new(base.face, i + di, j + dj, k + dk));
-        if (-1..=1).all(|a| (-1..=1).all(|b| (-1..=1).all(|c| air(a, b, c)))) {
-            let eye = grid.cell_center(Cell::new(base.face, i, j, k));
-            let up = eye.normalize();
-            let forward = (up.any_orthonormal_vector() - up * 0.15).normalize();
-            // A tunnel or small chamber: walls, floor and ceiling within the
-            // level-0 range that compare_near checks.
-            let side = up.cross(forward);
-            if [forward, -forward, side, -side, up, -up].iter().all(|d| planet.raycast(eye, *d, 8.0).is_some()) {
-                return Some((eye, forward.as_vec3()));
+    // Land sites across the faces until one lies in a cave region.
+    let sites = (0..6u8).flat_map(|face| [(0.37, 0.61), (0.2, 0.3), (0.7, 0.45)].map(|(a, b)| (face, a, b)));
+    for (face, a, b) in sites {
+        let dir = land(planet, face, a, b);
+        let (base, _) = grid.locate(planet.surface_point(dir, 0.0));
+        for _ in 0..4_000 {
+            let i = base.i + (next() % 8000) as i32 - 4000;
+            let j = base.j + (next() % 8000) as i32 - 4000;
+            let (below, _) = field.extent(grid.domain_point(base.face, i, j, 0), 0);
+            if below == 0 {
+                continue;
+            }
+            let top = planet.column_top(base.face, i, j, 0);
+            let k = top - 4 - (next() % below.max(1) as u64) as i32;
+            let air = |di: i32, dj: i32, dk: i32| !planet.solid(Cell::new(base.face, i + di, j + dj, k + dk));
+            if (-1..=1).all(|a| (-1..=1).all(|b| (-1..=1).all(|c| air(a, b, c)))) {
+                let eye = grid.cell_center(Cell::new(base.face, i, j, k));
+                let up = eye.normalize();
+                let forward = (up.any_orthonormal_vector() - up * 0.15).normalize();
+                // A tunnel or small chamber: walls, floor and ceiling within the
+                // level-0 range that compare_near checks.
+                let side = up.cross(forward);
+                if [forward, -forward, side, -side, up, -up].iter().all(|d| planet.raycast(eye, *d, 8.0).is_some()) {
+                    return Some((eye, forward.as_vec3()));
+                }
             }
         }
     }
@@ -156,7 +160,7 @@ fn cave_view_matches_canonical_cpu_ray_casts() {
 fn ground_view_near_a_far_face_edge_matches_cpu_ray_casts() {
     let Some(gpu) = gpu() else { return };
     let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
-    let dir = land(&planet, 4, 0.86, 0.9);
+    let dir = land_within(&planet, 4, 0.86, 0.99);
     let cell = planet.grid().locate(dir * planet.grid().radius()).0;
     assert!(cell.i >> 3 >= 1 << 23 && cell.j >> 3 >= 1 << 23, "{cell:?}");
     let eye = planet.surface_point(dir, 1.7);
