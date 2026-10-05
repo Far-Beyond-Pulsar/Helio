@@ -391,7 +391,7 @@ times come from timestamps.
 | `HELIO_VOXEL_FLIGHT_QUICK=1`, `_GROUND_ONLY=1`, `_CPU_PROBE=1` | Short timing probe, ground audits only, CPU per pass. |
 | `HELIO_VOXEL_PLAN_TRACE=<ms>` | Logs residency plan phases of frames taking over `<ms>` (10 if not a number). |
 | `HELIO_VOXEL_LOD_DITHER`, `HELIO_VOXEL_NO_HORIZON`, `HELIO_VOXEL_NO_FAILSAFE` | Override the dither width; disable the sky bound; disable its fail-safe (A/B timing). |
-| `HELIO_VOXEL_COARSE_RELIEF=0`, `HELIO_VOXEL_FAR_RELIEF=0` | Disable fractional radial tops or raw-climate slope lighting for A/B comparisons. Set before loading terrain. |
+| `HELIO_VOXEL_COARSE_RELIEF=0`, `HELIO_VOXEL_FAR_RELIEF=0`, `HELIO_VOXEL_RIDGE_DISPLAY=0` | Disable fractional radial tops, raw-climate slope lighting or ridge-envelope display heights for A/B comparisons. Set before loading terrain. |
 
 Measuring pitfalls: synchronous readbacks (audits, probes, captures) idle
 the GPU and the driver drops its clock (frames right after them show 210 MHz

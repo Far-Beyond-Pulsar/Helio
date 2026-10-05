@@ -112,7 +112,7 @@ impl Default for Settings {
             residency_hints: true,
             climate_height_reuse: true,
             coarse_relief: std::env::var("HELIO_VOXEL_COARSE_RELIEF").ok().is_none_or(|v| v != "0"),
-            ridge_display: true,
+            ridge_display: std::env::var("HELIO_VOXEL_RIDGE_DISPLAY").ok().is_none_or(|v| v != "0"),
             far_relief: std::env::var("HELIO_VOXEL_FAR_RELIEF").ok().is_none_or(|v| v != "0"),
             freeze_residency: false,
             frame_override: None,
