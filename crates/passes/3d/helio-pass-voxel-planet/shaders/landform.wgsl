@@ -8,6 +8,89 @@ struct TerrainConstants {
     shape: vec4<i32>,  // mountain mask bias, steep slope (cells), pad, pad
     octaves: array<LandformOctave, 32>,
     ridge_suffix: array<vec4<i32>, 66>, // signed conditional suffix means
+    // Caves and overhangs (`LandformVolume`): flags/region/depth, tunnel
+    // and cavern shapes, overhangs, sizes (tunnel radius, cavern, cover, layer mm).
+    volume: array<vec4<i32>, 4>,
+}
+
+const SEED_CAVE_REGION: u32 = 0xA511E9B3u;
+const SEED_TUNNEL_A: u32 = 0x63D83595u;
+const SEED_TUNNEL_B: u32 = 0x2B1F4C7Au;
+const SEED_CAVERN: u32 = 0x9E3779B1u;
+const SEED_OVERHANG: u32 = 0x7F4A7C15u;
+const SEED_OVERHANG_REGION: u32 = 0x4CF5AD43u;
+
+fn landform_seed() -> u32 { return bitcast<u32>(terrain.header.w); }
+
+// Tunnels and caverns resolved at `level` (`LandformVolume::caves_at`).
+fn landform_caves_at(level: u32) -> vec2<bool> {
+    let v = terrain.volume;
+    if (v[0].x & 1) == 0 { return vec2<bool>(false); }
+    let layer = v[3].w;
+    // Covered caverns also need a cell within their cover (`caves_at`).
+    let cavern = select(v[3].y, min(v[3].y, v[3].z), v[3].z > 0);
+    return vec2<bool>((v[3].x >> level) >= layer, (cavern >> level) >= layer);
+}
+
+fn landform_cave_region(p: vec3<i32>) -> bool {
+    let v = terrain.volume;
+    return noise(p, u32(v[0].y), landform_seed() ^ SEED_CAVE_REGION) > v[0].z;
+}
+
+fn landform_overhang_amplitude(p: vec3<i32>, level: u32) -> i32 {
+    let v = terrain.volume;
+    if (v[0].x & 2) == 0 { return 0; }
+    let n = noise(p, u32(v[2].z), landform_seed() ^ SEED_OVERHANG_REGION);
+    let ramp = clamp((n - v[2].w) * 4, 0, NOISE_ONE);
+    let a = scale_q16(ramp, v[2].x);
+    if (a >> level) < 2 * v[3].w { return 0; }
+    return a;
+}
+
+fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> {
+    let v = terrain.volume;
+    let layer = v[3].w;
+    let caves = landform_caves_at(level);
+    var below = 0;
+    if (caves.x || caves.y) && landform_cave_region(p) {
+        below = ((v[0].w / layer) >> level) + 2;
+    }
+    let a = landform_overhang_amplitude(p, level);
+    var above = 0;
+    if a > 0 {
+        above = ((a / layer) >> level) + 2;
+        below = max(below, above);
+    }
+    return vec2<i32>(below, above);
+}
+
+fn terrain_cell(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, k: i32) -> u32 {
+    let v = terrain.volume;
+    let layer = v[3].w;
+    var solid = k < top;
+    let a = landform_overhang_amplitude(p, level);
+    if a > 0 {
+        let cell = layer << level;
+        let d = (k - top) * cell + cell / 2;
+        let s = scale_q16(noise(q, u32(v[2].y), landform_seed() ^ SEED_OVERHANG), a);
+        solid = d < s;
+    }
+    let caves = landform_caves_at(level);
+    if solid && k < top && (caves.x || caves.y) && landform_cave_region(p) {
+        let cell = layer << level;
+        let depth = (top - k) * cell - cell / 2;
+        if depth <= v[0].w {
+            let w = v[1].y;
+            if caves.x
+                && abs(noise(q, u32(v[1].x), landform_seed() ^ SEED_TUNNEL_A)) < w
+                && abs(noise(q, u32(v[1].x), landform_seed() ^ SEED_TUNNEL_B)) < w {
+                solid = false;
+            } else if caves.y && depth >= v[3].z && noise(q, u32(v[1].z), landform_seed() ^ SEED_CAVERN) > v[1].w {
+                solid = false;
+            }
+        }
+    }
+    return select(0u, 1u, solid);
 }
 
 fn landform_resolved(o: LandformOctave, level: u32) -> bool {

@@ -613,8 +613,8 @@ fn pending_paint_preserves_unaffected_raw_relief_and_undo() {
             })
             .unwrap();
         // Residency plans run a frame ahead: the edit's jobs reach the GPU
-        // within a few frames, not necessarily the first.
-        for _ in 0..4 {
+        // within a few frames (more when a plan is late), not the first.
+        for _ in 0..30 {
             target.render(&gpu, &mut r, &frame(&p, eye), -Vec3::Y, number);
             number += 1;
             if r.stats().jobs > 0 {

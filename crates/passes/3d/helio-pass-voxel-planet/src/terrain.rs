@@ -19,7 +19,22 @@
 //! fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32
 //! ```
 //!
-//! and reads its constants from the `terrain` uniform. It may call the
+//! and optionally, for volumetric terrain (caves, overhangs, arches),
+//!
+//! ```wgsl
+//! fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32>
+//! fn terrain_cell(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, k: i32) -> u32
+//! ```
+//!
+//! `terrain_extent` bounds, in level cells, how far below the heightfield
+//! top (first air layer) and how far above it the column's cells may
+//! differ from the heightfield; `(0, 0)` means none (the default).
+//! `terrain_cell` returns the kind (0 air, 1 solid) of layer `k` in a
+//! column whose heightfield top is `top`; `q` is the cell centre's seamless
+//! 3D domain point (`volume_point`). Outside the extent it must equal
+//! `k < top`. Without them the engine uses the heightfield.
+//!
+//! The program reads its constants from the `terrain` uniform. It may call the
 //! integer noise library (`shaders/noise.wgsl`, mirrored in
 //! [`crate::noise`]) and the material ids (`M_*`, see [`material`]).
 //! Heights are integer [`HEIGHT_ONE`] units (millimetres) above the datum;
@@ -121,6 +136,25 @@ pub trait TerrainField: Send + Sync + 'static {
     fn render_bound_margins(&self) -> [i32; 24] {
         self.bound_margins()
     }
+    /// Level cells below and above the heightfield top in which the cells of
+    /// the column at domain point `p` may differ from the heightfield
+    /// (`terrain_extent` in WGSL). `(0, 0)`: a pure heightfield column.
+    fn extent(&self, _p: IVec3, _level: u32) -> (i32, i32) {
+        (0, 0)
+    }
+    /// Kind (0 air, 1 solid) of layer `k` of the column at `p` whose
+    /// heightfield top is `top`; `q` is the cell's 3D domain point
+    /// ([`Grid::volume_point`]). Must equal [`terrain_kind`] outside
+    /// [`Self::extent`] (`terrain_cell` in WGSL).
+    fn cell(&self, _p: IVec3, _q: IVec3, _level: u32, top: i32, k: i32) -> u32 {
+        terrain_kind(top, k)
+    }
+    /// Largest depth (mm) below the surface and height above it at which
+    /// any level's cells may differ from the heightfield: world bounds
+    /// (outer and inner radius, camera clearance) include them.
+    fn volume_bounds(&self) -> (i32, i32) {
+        (0, 0)
+    }
     fn program(&self) -> TerrainProgram;
 }
 
@@ -151,6 +185,8 @@ pub trait TerrainGenerator: Send + Sync + 'static {
 #[serde(default)]
 pub struct TerrainSource {
     pub generator: String,
+    /// Generator output version; 0 means the latest registered version,
+    /// resolved when a world is built (`Planet::recipe` then names it).
     pub version: u32,
     pub seed: u64,
     /// Generator settings (JSON); empty means its defaults.
@@ -161,7 +197,7 @@ impl Default for TerrainSource {
     fn default() -> Self {
         Self {
             generator: crate::landform::ID.into(),
-            version: crate::landform::VERSION,
+            version: 0,
             seed: 7,
             settings: String::new(),
         }
@@ -176,6 +212,7 @@ fn registry() -> &'static Registry {
         let mut map: BTreeMap<(String, u32), Arc<dyn TerrainGenerator>> = BTreeMap::new();
         for generator in [
             Arc::new(crate::landform::LandformGenerator) as Arc<dyn TerrainGenerator>,
+            Arc::new(crate::landform::LandformLegacyGenerator),
             Arc::new(crate::landform::FlatGenerator),
         ] {
             let info = generator.info();
@@ -201,7 +238,14 @@ pub fn register(generator: Arc<dyn TerrainGenerator>) -> Result<(), String> {
 }
 
 pub fn find(id: &str, version: u32) -> Option<Arc<dyn TerrainGenerator>> {
+    let version = if version == 0 { latest_version(id)? } else { version };
     registry().read().ok()?.get(&(id.to_owned(), version)).cloned()
+}
+
+/// Highest registered version of generator `id`.
+pub fn latest_version(id: &str) -> Option<u32> {
+    let map = registry().read().ok()?;
+    map.keys().filter(|(name, _)| name == id).map(|(_, version)| *version).max()
 }
 
 /// Every registered generator, by name.
@@ -230,10 +274,36 @@ pub fn top_cells(grid: &Grid, height: i32, level: u32) -> i32 {
     height.div_euclid(grid.layer_mm() as i32) >> level
 }
 
-/// Canonical terrain kind at a level cell before edits: 0 air, 1 solid.
+/// Heightfield terrain kind at a level cell before edits: 0 air, 1 solid.
 #[inline]
 pub fn terrain_kind(top: i32, k: i32) -> u32 {
     u32::from(k < top)
+}
+
+/// Generated kind of a level cell before edits, volumetric terms included
+/// (the GPU's per-cell generation rule).
+pub fn generated_kind(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i32, k: i32, level: u32, top: i32) -> u32 {
+    let p = grid.domain_point(face, i, j, level);
+    let (below, above) = field.extent(p, level);
+    if (below == 0 && above == 0) || k < top - below || k >= top + above {
+        return terrain_kind(top, k);
+    }
+    field.cell(p, grid.volume_point(face, i, j, k, level), level, top, k)
+}
+
+/// Generated top of a column (level cells): the first air above its highest
+/// generated solid cell, edits excluded. Equals `top` outside the field's
+/// volumetric extent; material depth counts from it (`generate.wgsl`).
+pub fn generated_top(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i32, level: u32, top: i32) -> i32 {
+    let p = grid.domain_point(face, i, j, level);
+    let (below, above) = field.extent(p, level);
+    if below == 0 && above == 0 {
+        return top;
+    }
+    (top - below..top + above)
+        .rev()
+        .find(|&k| field.cell(p, grid.volume_point(face, i, j, k, level), level, top, k) != 0)
+        .map_or(top - below, |k| k + 1)
 }
 
 /// Ground slope of a cell in its 8x8 column block, in eighths of a cell per

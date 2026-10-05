@@ -539,7 +539,7 @@ fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
         shape: helio_pass_voxel_planet::grid::Shape::Plane,
         plane_size_m: 1024.0,
         terrain: helio_pass_voxel_planet::TerrainSource {
-            generator: helio_pass_voxel_planet::landform::FLAT_ID.into(), ..Default::default()
+            generator: helio_pass_voxel_planet::landform::FLAT_ID.into(), version: helio_pass_voxel_planet::landform::FLAT_VERSION, ..Default::default()
         },
         ..Default::default()
     }).unwrap());

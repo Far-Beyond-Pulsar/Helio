@@ -580,9 +580,14 @@ impl Flight {
                 if !same && (t - cpu.distance).abs() > self.planet.grid().voxel_size() * 3.0 {
                     mismatched += 1;
                     if samples.len() < 4 {
+                        // Canonical kind of the GPU's cell: 1 means the CPU ray
+                        // passed a solid cell, 0 the GPU hit an air cell.
+                        let face = ((info >> 2) & 7) as u8;
+                        let kind = self.planet.kind(helio_pass_voxel_planet::Cell { face, i: w(1) as i32, j: w(2) as i32, k: w(3) as i32 });
+                        let (on_ray, _) = self.planet.grid().locate(eye + dir * (t + 0.001));
                         samples.push(format!(
-                            "px {x},{y} gpu f{} ({},{},{}) t {t:.3} cpu f{} ({},{},{}) t {:.3}",
-                            (info >> 2) & 7, w(1) as i32, w(2) as i32, w(3) as i32,
+                            "px {x},{y} gpu f{face} ({},{},{}) kind {kind} t {t:.3} ray cell ({},{},{}) kind {} cpu f{} ({},{},{}) t {:.3}",
+                            w(1) as i32, w(2) as i32, w(3) as i32, on_ray.i, on_ray.j, on_ray.k, self.planet.kind(on_ray),
                             cpu.cell.face, cpu.cell.i, cpu.cell.j, cpu.cell.k, cpu.distance
                         ));
                     }
@@ -670,8 +675,57 @@ fn highest_near(planet: &Planet, face: u8, fi: f64, fj: f64, span: f64) -> (DVec
     best
 }
 
-/// The highest summit near the spawn and two views of it: 300 m above the
-/// ground 12 km away, and on its slope 1.5 km below the summit.
+/// Views of generated volumetric terrain near `near`: inside a tunnel (an
+/// air pocket with walls within 8 m, below its column's heightfield top) and
+/// under an overhang (air below a solid cell above the heightfield top).
+fn volume_views(planet: &Planet, near: DVec3) -> Vec<(&'static str, DVec3, Vec3)> {
+    use helio_pass_voxel_planet::Cell;
+    let grid = *planet.grid();
+    let field = planet.field();
+    let (base, _) = grid.locate(near);
+    let mut rng = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    let (mut tunnel, mut overhang) = (None, None);
+    for _ in 0..200_000 {
+        if tunnel.is_some() && overhang.is_some() {
+            break;
+        }
+        let i = base.i + (next() % 20_000) as i32 - 10_000;
+        let j = base.j + (next() % 20_000) as i32 - 10_000;
+        let (below, above) = field.extent(grid.domain_point(base.face, i, j, 0), 0);
+        let top = planet.column_top(base.face, i, j, 0);
+        let solid = |di: i32, dj: i32, k: i32| planet.solid(Cell::new(base.face, i + di, j + dj, k));
+        if tunnel.is_none() && below > 4 {
+            let k = top - 4 - (next() % below as u64) as i32;
+            if (-1..=1).all(|a| (-1..=1).all(|b| (-1..=1).all(|c| !solid(a, b, k + c)))) {
+                let eye = grid.cell_center(Cell::new(base.face, i, j, k));
+                let up = grid.up(eye);
+                let ahead = up.any_orthonormal_vector();
+                let side = up.cross(ahead);
+                if [ahead, -ahead, side, -side, up, -up].iter().all(|d| planet.raycast(eye, *d, 8.0).is_some()) {
+                    tunnel = Some(("cave_tunnel", eye, (ahead - up * 0.1).normalize().as_vec3()));
+                }
+            }
+        }
+        if overhang.is_none() && above > 2 {
+            let k = top + (next() % above as u64) as i32;
+            if solid(0, 0, k) && !solid(0, 0, k - 1) && !solid(0, 0, k - 2) {
+                let eye = grid.cell_center(Cell::new(base.face, i, j, k - 2));
+                let up = grid.up(eye);
+                let ahead = up.any_orthonormal_vector();
+                overhang = Some(("overhang", eye - ahead * 6.0, (ahead + up * 0.25).normalize().as_vec3()));
+            }
+        }
+    }
+    tunnel.into_iter().chain(overhang).collect()
+}
+
+/// The highest summit near the spawn and two views of it: 300 m above the/// ground 12 km away, and on its slope 1.5 km below the summit.
 struct Mountain {
     peak: DVec3,
     views: Vec<(&'static str, DVec3, Vec3)>,
@@ -908,7 +962,9 @@ fn main() {
             flight.capture(name);
             audits.push(flight.audit(name, e, f));
         }
-        for (name, e, f) in mountain(&flight.planet, heading).views {
+        let volume = volume_views(&flight.planet, ground);
+        eprintln!("QUICK volume views: {:?}", volume.iter().map(|v| v.0).collect::<Vec<_>>());
+        for (name, e, f) in mountain(&flight.planet, heading).views.into_iter().chain(volume) {
             flight.settle(name, e, f);
             for _ in 0..30 {
                 flight.draw(name, e, f);

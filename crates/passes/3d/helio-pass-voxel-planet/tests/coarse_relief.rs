@@ -16,7 +16,7 @@ fn flat(shape: Shape, height: f64) -> Planet {
         radius_m: 10_000.0,
         plane_size_m: 40_000.0,
         terrain: TerrainSource {
-            generator: helio_pass_voxel_planet::landform::FLAT_ID.into(),
+            generator: helio_pass_voxel_planet::landform::FLAT_ID.into(), version: helio_pass_voxel_planet::landform::FLAT_VERSION,
             settings: format!("{{\"height_m\":{height}}}"),
             ..Default::default()
         },

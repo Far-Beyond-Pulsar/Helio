@@ -59,7 +59,7 @@ fn fine_grass_preserves_authored_srgb_after_linear_upload() {
         shape: helio_pass_voxel_planet::grid::Shape::Plane,
         plane_size_m: 1024.0,
         terrain: helio_pass_voxel_planet::TerrainSource {
-            generator: helio_pass_voxel_planet::landform::FLAT_ID.into(), ..Default::default()
+            generator: helio_pass_voxel_planet::landform::FLAT_ID.into(), version: helio_pass_voxel_planet::landform::FLAT_VERSION, ..Default::default()
         },
         ..Default::default()
     }).unwrap());
@@ -122,7 +122,13 @@ fn alpine_snow_does_not_become_grass_when_level_height_rounds_to_zero() {
 #[test]
 fn settled_level_transitions_enter_the_surface_not_subsoil() {
     let Some(gpu) = gpu() else { return };
-    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+    // Top faces are checked against the heightfield top: Landform v1 (cave
+    // floors and overhang tops are elsewhere; cave_view covers those).
+    let terrain = helio_pass_voxel_planet::TerrainSource {
+        version: helio_pass_voxel_planet::landform::LEGACY_VERSION,
+        ..Default::default()
+    };
+    let planet = Arc::new(Planet::new(PlanetRecipe { terrain, ..Default::default() }).unwrap());
     let target = Target::new(&gpu, [384, 216]);
     let mut renderer = renderer(&gpu, planet.clone(), [384, 216]);
     let grid = *planet.grid();

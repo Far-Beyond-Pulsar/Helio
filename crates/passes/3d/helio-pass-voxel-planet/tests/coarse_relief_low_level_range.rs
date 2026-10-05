@@ -20,7 +20,7 @@ fn l1_to_l5_fractional_top_hits_respect_requested_trace_range() {
             let planet = Planet::new(PlanetRecipe {
                 shape: Shape::Plane,
                 terrain: TerrainSource {
-                    generator: helio_pass_voxel_planet::landform::FLAT_ID.into(),
+                    generator: helio_pass_voxel_planet::landform::FLAT_ID.into(), version: helio_pass_voxel_planet::landform::FLAT_VERSION,
                     ..Default::default()
                 },
                 ..Default::default()

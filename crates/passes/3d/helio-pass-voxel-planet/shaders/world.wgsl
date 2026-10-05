@@ -4,7 +4,7 @@ const HEIGHT_ONE: i32 = 1000; // height units (mm) per metre
 
 struct World {
     grid: vec4<i32>,  // reference cells, layer thickness (mm), grid cells, level offset
-    scale: vec4<u32>, // domain scale (Q24), pad
+    scale: vec4<u32>, // domain scale (Q24), volume inv, volume shift, layer (Q16 of 0.1 m)
     bounds: array<vec4<i32>, 6>, // per-level finer-surface excess (level cells)
 }
 
@@ -82,6 +82,46 @@ fn domain_point(face: u32, i: i32, j: i32, level: u32) -> vec3<i32> {
     let u = i32(mul_q24((bitcast<u32>(i) << (level + 1u)) + half, scale)) - reference;
     let v = i32(mul_q24((bitcast<u32>(j) << (level + 1u)) + half, scale)) - reference;
     return face_axis(face, 0u) * reference + face_axis(face, 1u) * u + face_axis(face, 2u) * v;
+}
+
+// `(a * b) >> s` of the exact 64-bit product, from 16-bit limbs
+// (`grid::mul_shr`). The caller keeps the result within 32 bits.
+fn mul_shr(a: u32, b: u32, s: u32) -> u32 {
+    let a1 = a >> 16u;
+    let a0 = a & 0xffffu;
+    let b1 = b >> 16u;
+    let b0 = b & 0xffffu;
+    let m1 = a1 * b0;
+    let m2 = a0 * b1;
+    let mid = m1 + m2;
+    let mid_carry = select(0u, 0x10000u, mid < m1);
+    let lo0 = a0 * b0;
+    let lo = lo0 + (mid << 16u);
+    let lo_carry = select(0u, 1u, lo < lo0);
+    let hi = a1 * b1 + (mid >> 16u) + mid_carry + lo_carry;
+    if s == 0u { return lo; }
+    if s >= 32u { return hi >> (s - 32u); }
+    return (lo >> s) | (hi << (32u - s));
+}
+
+fn volume_component(p: i32, ratio: i32) -> i32 {
+    let m = i32(mul_shr(u32(abs(p)), u32(abs(ratio)), 30u));
+    return select(m, -m, (p < 0) != (ratio < 0));
+}
+
+// Seamless 3D domain point of a level cell centre (`grid::volume_point`):
+// the column's domain point scaled by (R + h) / R on a sphere, the height
+// as the vertical axis on a plane. Volumetric terrain samples 3D noise here.
+fn volume_point(face: u32, i: i32, j: i32, k: i32, level: u32) -> vec3<i32> {
+    let p = domain_point(face, i, j, level);
+    let h = (k << (level + 1u)) + (1 << level);
+    if is_plane() {
+        let v = i32(mul_shr(u32(abs(h)), world.scale.w, 16u));
+        return vec3<i32>(p.x, select(v, -v, h < 0), p.z);
+    }
+    let r = i32(mul_shr(u32(abs(h)), world.scale.y, world.scale.z));
+    let ratio = select(r, -r, h < 0);
+    return p + vec3<i32>(volume_component(p.x, ratio), volume_component(p.y, ratio), volume_component(p.z, ratio));
 }
 
 // Surface height of a level column: the terrain program at the column's

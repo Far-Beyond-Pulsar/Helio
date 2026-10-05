@@ -214,7 +214,8 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
             4,
         ];
         let program = field.program();
-        assert_eq!(program.constants.len(), 1616);
+        // Landform constants (560), ridge suffix (1056), volume (64).
+        assert_eq!(program.constants.len(), 1680);
         let lo = i32::from_le_bytes(
             program.constants[560 + 31 * 4..560 + 32 * 4]
                 .try_into()

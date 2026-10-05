@@ -173,7 +173,7 @@ fn climate_at(h: Hit, xy: vec2<u32>) -> i32 {
         if (c.info & INFO_RELIEF) != 0u && column_relief_fraction(c, u32(h.i & 7), u32(h.j & 7)) != 0u { top -= 1; }
         // Tall edited/steep bands can truncate their byte-packed column
         // tops; those columns retain the full canonical query.
-        if column_tops_fit(c) && climate_height_reusable(top, level) {
+        if column_tops_fit(c) && !column_tops_down(c) && climate_height_reusable(top, level) {
             return i32(f32(top) * f32(world.grid.y) * f32(1u << level));
         }
     }
@@ -475,6 +475,25 @@ fn removed_air_neighbour(h: Hit, c: Column, face: u32, level: u32, code: u32) ->
     return apply_edits(neighbour.edits, level, centre, 1u).x == 0u;
 }
 
+// Generated top of the cell across side face `code` (the hit's air side),
+// or `fallback` when that column is not resident. A cave wall lies far
+// below it; a natural riser does not.
+fn air_side_top(h: Hit, c: Column, face: u32, level: u32, code: u32, fallback: i32) -> i32 {
+    var ij = vec2<i32>(h.i, h.j);
+    if code < 2u { ij.x += select(-1, 1, code == 0u); }
+    else { ij.y += select(-1, 1, code == 2u); }
+    let n = cells_at(level);
+    if any(ij < vec2<i32>(0)) || any(ij >= vec2<i32>(n)) { return fallback; }
+    var neighbour = c;
+    if (ij.x >> 3) != (h.i >> 3) || (ij.y >> 3) != (h.j >> 3) {
+        let record = find_column(column_key0(face, level, ij.x >> 3), bitcast<u32>(ij.y >> 3));
+        if record == NONE { return fallback; }
+        neighbour = records[record];
+        if !column_valid(neighbour) { return fallback; }
+    }
+    return column_top(neighbour, u32(ij.x & 7), u32(ij.y & 7));
+}
+
 @compute @workgroup_size(8, 8)
 fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     if any(id.xy >= vec2<u32>(frame.screen.xy)) { return; }
@@ -653,7 +672,14 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         // subsoil (stone at coarse levels): grey bands sweeping with the LOD
         // rings. Proven edit cuts use their own column's depth instead.
         var depth = select(max(min(top, lowest) - 1 - h.k, 0) << level, 0, code < 4u);
-        if (c.info & INFO_TOPOLOGY) != 0u {
+        if column_tops_down(c) {
+            // Generated caves and overhangs: tops are the generated tops, so
+            // depth counts from the air side's top. Cave walls, floors and
+            // ceilings are buried; natural risers and lips are surface.
+            var air_top = min(top, lowest);
+            if code < 4u { air_top = air_side_top(h, c, face, level, code, air_top); }
+            depth = max(air_top - 1 - h.k, 0) << level;
+        } else if (c.info & INFO_TOPOLOGY) != 0u {
             if code >= 4u || removed_air_neighbour(h, c, face, level, code) {
                 depth = max(top - 1 - h.k, 0) << level;
             }

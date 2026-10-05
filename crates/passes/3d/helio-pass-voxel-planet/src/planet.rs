@@ -3,6 +3,7 @@
 use crate::edits::{apply, center_half, Brush, EditLog, FaceBrush};
 use crate::grid::{face_axes, Cell, Grid, Shape};
 use crate::terrain::{self, material, TerrainField, TerrainSource, HEIGHT_ONE};
+
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -95,7 +96,13 @@ impl Clone for Planet {
 }
 
 impl Planet {
-    pub fn new(recipe: PlanetRecipe) -> Result<Self, String> {
+    pub fn new(mut recipe: PlanetRecipe) -> Result<Self, String> {
+        // Name the concrete generator version (0 asks for the latest), so a
+        // saved recipe keeps its terrain when newer versions appear.
+        if recipe.terrain.version == 0 {
+            recipe.terrain.version = terrain::latest_version(&recipe.terrain.generator)
+                .ok_or_else(|| format!("unknown terrain generator {}", recipe.terrain.generator))?;
+        }
         let grid = match recipe.shape {
             Shape::Sphere => Grid::new(recipe.radius_m, recipe.voxel_size_m)?,
             shape => Grid::plane(shape, recipe.plane_size_m, recipe.voxel_size_m)?,
@@ -156,11 +163,16 @@ impl Planet {
     }
     /// Radius below which every cell is solid (terrain and removals).
     pub fn inner_radius(&self) -> f64 {
-        (self.grid.radius() + self.min_terrain_height() - self.grid.voxel_size() * 4.0).min(self.edit_bottom)
+        let caves = f64::from(self.field.volume_bounds().0) / f64::from(HEIGHT_ONE);
+        (self.grid.radius() + self.min_terrain_height() - caves - self.grid.voxel_size() * 4.0).min(self.edit_bottom)
     }
     /// Outer radius that bounds every solid cell (terrain and additions).
     pub fn outer_radius(&self) -> f64 {
-        (self.grid.radius() + self.max_terrain_height() + self.grid.voxel_size() * 4.0).max(self.edit_top + self.grid.voxel_size())
+        (self.grid.radius() + self.max_terrain_height() + self.overhang_height() + self.grid.voxel_size() * 4.0).max(self.edit_top + self.grid.voxel_size())
+    }
+    /// Largest rise (m) of generated overhangs over the heightfield.
+    pub fn overhang_height(&self) -> f64 {
+        f64::from(self.field.volume_bounds().1) / f64::from(HEIGHT_ONE)
     }
     /// Band-limited surface height of a level column, in height units.
     pub fn column_height(&self, face: u8, i: i32, j: i32, level: u32) -> i32 {
@@ -198,7 +210,7 @@ impl Planet {
     /// Material 0 on a solid cell means "terrain rule".
     pub fn sample_kind(&self, level: u32, face: u8, i: i32, j: i32, k: i32) -> (u32, u32) {
         let top = self.column_top(face, i, j, level);
-        let kind = terrain::terrain_kind(top, k);
+        let kind = terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, top);
         let center = [center_half(i, level), center_half(j, level), center_half(k, level)];
         apply(self.face_brushes(face, i, j, level).into_iter(), center, kind, 0)
     }
@@ -223,7 +235,11 @@ impl Planet {
                 let slope = terrain::block_slope(|x, y| self.column_top(cell.face, bi + x, bj + y, 0), cell.i & 7, cell.j & 7);
                 let p = self.grid.domain_point(cell.face, cell.i, cell.j, 0);
                 let top_height = self.column_height(cell.face, cell.i, cell.j, 0);
-                self.field.ground_material(p, top_height, top - 1 - cell.k, slope, cell.k) & material::ID
+                // Depth counts from the generated top: overhangs and the
+                // rock around caves lie below it.
+                let generated = terrain::generated_top(&self.grid, &*self.field, cell.face, cell.i, cell.j, 0, top);
+                let depth = (generated - 1 - cell.k).max(0);
+                self.field.ground_material(p, top_height, depth, slope, cell.k) & material::ID
             }
         }
     }
@@ -281,9 +297,13 @@ impl Planet {
                     let m = u * angle.cos() - fn_ * angle.sin();
                     let dm = d.dot(m);
                     // Leaving through the upper plane needs dm > 0, lower dm < 0.
+                    // That exit plane is never behind the ray: a crossing
+                    // rounded behind `t` (grazing planes, 6e6 m origins) is
+                    // taken now, not dropped (a dropped crossing left the
+                    // index stale for the rest of the ray).
                     if (dir == 1 && dm > 0.0) || (dir == -1 && dm < 0.0) {
                         let hit = -origin.dot(m) / dm;
-                        if hit > t - eps && hit < best {
+                        if hit < best {
                             best = hit;
                             step = (axis, dir, -m * f64::from(dir));
                         }
@@ -299,7 +319,9 @@ impl Planet {
             if disc_lo >= 0.0 {
                 let root = disc_lo.sqrt();
                 let enter = if b < 0.0 { c_lo / (-b + root) } else { -b - root };
-                if enter > t - eps && b + enter < 0.0 {
+                // Descending (before the perigee at -b): the lower layer
+                // crossing is the exit, wherever rounding puts it.
+                if b + t < 0.0 && b + enter < 0.0 {
                     radial = Some((enter, -1));
                 }
             }
@@ -433,7 +455,7 @@ impl Planet {
         }
         let (cell, _) = self.grid.locate(eye);
         let top = self.column_top(cell.face, cell.i, cell.j, 0);
-        (f64::from(cell.k - top) * self.grid.voxel_size()).max(0.0)
+        (f64::from(cell.k - top) * self.grid.voxel_size() - self.overhang_height()).max(0.0)
     }
     /// Height of `eye` above the generated ground directly below it (its
     /// column's top along the local vertical; edits are not considered).
@@ -502,7 +524,7 @@ impl Planet {
                 heap.push((OrdF64(bound(l - 1, a * 2 + da, b * 2 + db)), l - 1, a * 2 + da, b * 2 + db));
             }
         };
-        let terrain = g.radius() + top + g.voxel_size() * 4.0;
+        let terrain = g.radius() + top + self.overhang_height() + g.voxel_size() * 4.0;
         terrain.max(self.edit_top + g.voxel_size()).min(global)
     }
 }
@@ -529,6 +551,12 @@ mod tests {
 
     fn planet() -> Planet {
         Planet::new(PlanetRecipe::default()).unwrap()
+    }
+
+    /// Landform v1: a pure heightfield, for column-top invariants.
+    fn heightfield(recipe: PlanetRecipe) -> Planet {
+        let terrain = TerrainSource { version: crate::landform::LEGACY_VERSION, ..TerrainSource::default() };
+        Planet::new(PlanetRecipe { terrain, ..recipe }).unwrap()
     }
 
     /// Diagnostic: surface material shares of a mountain flank as each
@@ -636,7 +664,7 @@ mod tests {
 
     #[test]
     fn ground_height_is_altitude_above_the_column_below() {
-        let p = planet();
+        let p = heightfield(PlanetRecipe::default());
         for dir in [DVec3::new(0.1, 1.0, 0.2), DVec3::new(0.9, 0.4, -0.3), DVec3::new(-0.2, -0.7, 0.8)] {
             for h in [0.5, 12.0, 3000.0] {
                 let eye = p.surface_point(dir, h);
@@ -650,7 +678,7 @@ mod tests {
 
     #[test]
     fn terrain_bounds_hold_for_sampled_cells() {
-        let flat = TerrainSource { generator: crate::landform::FLAT_ID.into(), settings: r#"{"height_m": 3.3}"#.into(), ..Default::default() };
+        let flat = TerrainSource { generator: crate::landform::FLAT_ID.into(), version: crate::landform::FLAT_VERSION, settings: r#"{"height_m": 3.3}"#.into(), ..Default::default() };
         for (terrain, voxel) in [(TerrainSource::default(), 0.1), (TerrainSource::default(), 0.3), (TerrainSource::default(), 1.0), (flat, 0.1)] {
             let p = Planet::new(PlanetRecipe { voxel_size_m: voxel, terrain: terrain.clone(), ..Default::default() }).unwrap();
             let worst = terrain::check_field(&p, 6_000).unwrap_or_else(|e| panic!("{} at {voxel} m: {e}", terrain.generator));
@@ -659,7 +687,7 @@ mod tests {
     }
 
     fn plane(shape: Shape) -> Planet {
-        Planet::new(PlanetRecipe { shape, plane_size_m: 3_000.0, ..Default::default() }).unwrap()
+        heightfield(PlanetRecipe { shape, plane_size_m: 3_000.0, ..Default::default() })
     }
 
     #[test]
@@ -695,7 +723,7 @@ mod tests {
 
     #[test]
     fn raycast_down_hits_the_column_top() {
-        let p = planet();
+        let p = heightfield(PlanetRecipe::default());
         let g = *p.grid();
         for &(face, fi, fj) in &[(4u8, 0.31, 0.62), (0, 0.9, 0.1), (3, 0.5, 0.5)] {
             let i = (f64::from(g.cells()) * fi) as i32;

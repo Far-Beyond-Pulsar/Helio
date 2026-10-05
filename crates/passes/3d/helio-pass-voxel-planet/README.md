@@ -37,9 +37,12 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
 - Space to ground in seconds: a camera can fall from orbit to walking height
   at the editor's altitude-proportional speed while residency keeps up.
 - Volumetric worlds: generated caves and overhangs, not only heightfields.
-  Heightmaps are one input among others. Not yet supported: terrain programs
-  define a surface height per column, and each column stores one band of at
-  most 256 bricks with solid ground below it.
+  Heightmaps are one input among others. A terrain program adds 3D terms
+  around its surface (`terrain_extent`, `terrain_cell`); Landform v2 carves
+  tunnels and caverns and folds the surface into overhangs. Still limited:
+  each column stores one band of at most 256 bricks with solid ground below
+  it, so caves reach ~170 m below the surface at 0.1 m voxels; deeper caves
+  and core-deep holes need per-level vertical windows.
 - Destruction at any scale, up to the entire planet. Today tens of
   thousands of edits stay exact and cheap, but a brush is limited to 37,000
   half cells of radius (1.85 km at 0.1 m), and every regenerated column
@@ -219,8 +222,18 @@ they are once its work is on the GPU. Steps:
    summary-block tops and the level's top. Evicted runs return to free lists.
    Failed jobs (scratch or pool full) append their keys to a failure list
    that the CPU reads back and retries. Natural columns reconstruct exact
-   cell occupancy from their stored tops; Add/Remove columns keep arbitrary
-   mixed-brick occupancy.
+   cell occupancy from their stored tops; Add/Remove columns and generated
+   volumetric columns keep arbitrary mixed-brick occupancy. Cells within the
+   program's `terrain_extent` of the heightfield top are evaluated in 3D
+   (`terrain_cell` at the seamless `volume_point`); the band covers the
+   extent, and the column is marked `INFO_TOPOLOGY`, so the heightfield-only
+   paths (relief fractions, column-top normals and slopes) stay off for it.
+   Its header stores each cell's generated top (first air above the highest
+   generated solid cell, counted down from the band top; `INFO_RELIEF_INLINE`
+   with `INFO_TOPOLOGY`), so material depth counts from the real surface:
+   overhang lips are turf, cave walls, floors and ceilings are rock. Side
+   faces measure from the air-side cell's top (a cave wall lies far below
+   it, a natural riser does not).
 3. **Horizon** (`horizon.wgsl`): the directional sky bound. Resident summary
    blocks are binned by azimuth sector and distance bucket around the eye;
    each bucket stores the lowest elevation that clears it.
@@ -451,8 +464,16 @@ voxel_pass_graph` (the pass inside the deferred graph, editor overlays).
 **A terrain generator.** Implement `TerrainGenerator` (id, version, info with
 an optional settings-component name) returning a `TerrainField` and its
 `TerrainProgram` (WGSL defining `TerrainConstants`, `terrain_height`,
-`ground_material`, plus the constants' bytes). Use only the integer noise
-library. Register it with `terrain::register`. Add a test calling
+`ground_material`, plus the constants' bytes). Volumetric generators also
+define `terrain_extent` and `terrain_cell` (and `TerrainField::extent`,
+`cell`, `volume_bounds`); keep the extent tight, since every cell in it is
+evaluated per job and the band holds at most 256 bricks. Return an empty
+extent at levels that cannot show a feature (Landform resolves tunnels while
+their radius spans a cell, covered caverns while a cell fits in the cover):
+volumetric columns lose relief and filtered shading. Use only the integer noise
+library. A change of generated output is a new version: keep the old one
+registered so saved worlds keep their terrain (Landform v1 is v2 without
+caves and overhangs). Register it with `terrain::register`. Add a test calling
 `engine::verify_field` for every shape and `terrain::check_field`. Changing
 settings rebuilds the world without recompiling shaders; pipelines are keyed
 by program.

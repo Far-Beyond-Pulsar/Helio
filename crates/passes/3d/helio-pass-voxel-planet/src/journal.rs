@@ -244,8 +244,10 @@ impl Planet {
 
     /// A planet from its recipe and journal.
     pub fn from_journal(recipe: PlanetRecipe, bytes: &[u8]) -> Result<Self, JournalError> {
-        let contents = read(bytes, &recipe)?;
+        // Build first: the planet names the concrete generator version (a
+        // recipe may ask for the latest), which the journal was written with.
         let mut planet = Planet::new(recipe).map_err(|reason| JournalError::Rejected { index: 0, reason })?;
+        let contents = read(bytes, planet.recipe())?;
         planet.replay(&contents.entries)?;
         Ok(planet)
     }

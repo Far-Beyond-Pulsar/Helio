@@ -3,7 +3,7 @@
 mod common;
 use common::*;
 use glam::{DVec3, Vec3};
-use helio_pass_voxel_planet::terrain::material;
+use helio_pass_voxel_planet::terrain::{self, material};
 use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Cell, Planet, PlanetRecipe};
 use std::sync::Arc;
 
@@ -12,7 +12,7 @@ fn terrain_programs_are_bit_identical_to_cpu() {
     let Some(gpu) = gpu() else { return };
     use helio_pass_voxel_planet::grid::Shape;
     use helio_pass_voxel_planet::TerrainSource;
-    let flat = TerrainSource { generator: helio_pass_voxel_planet::landform::FLAT_ID.into(), settings: r#"{"height_m": -1.25, "soil_depth_m": 2.0}"#.into(), ..Default::default() };
+    let flat = TerrainSource { generator: helio_pass_voxel_planet::landform::FLAT_ID.into(), version: helio_pass_voxel_planet::landform::FLAT_VERSION, settings: r#"{"height_m": -1.25, "soil_depth_m": 2.0}"#.into(), ..Default::default() };
     for (shape, size, terrain) in [
         (Shape::Sphere, 0.1, TerrainSource::default()),
         (Shape::Sphere, 0.3, TerrainSource::default()),
@@ -94,6 +94,56 @@ fn ground_view_matches_canonical_cpu_ray_casts() {
     let eye = planet.surface_point(dir, 1.7);
     let up = eye.normalize();
     let forward = (up.any_orthonormal_vector() - up * 0.35).normalize().as_vec3();
+    let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [320, 180]);
+    eprintln!("compared {compared}, mismatched {mismatched}");
+    assert!(compared > 1000);
+    assert!(mismatched * 1000 <= compared, "{mismatched}/{compared}");
+}
+
+/// An eye inside a generated cave: an air cell with air around it, at least
+/// four cells below its column's heightfield top, in a cave region.
+fn find_cave(planet: &Planet) -> Option<(DVec3, Vec3)> {
+    let grid = *planet.grid();
+    let field = planet.field();
+    let dir = land(planet, 4, 0.37, 0.61);
+    let (base, _) = grid.locate(planet.surface_point(dir, 0.0));
+    let mut rng = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = || {
+        rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; rng
+    };
+    for _ in 0..20_000 {
+        let i = base.i + (next() % 8000) as i32 - 4000;
+        let j = base.j + (next() % 8000) as i32 - 4000;
+        let (below, _) = field.extent(grid.domain_point(base.face, i, j, 0), 0);
+        if below == 0 {
+            continue;
+        }
+        let top = planet.column_top(base.face, i, j, 0);
+        let k = top - 4 - (next() % below.max(1) as u64) as i32;
+        let air = |di: i32, dj: i32, dk: i32| !planet.solid(Cell::new(base.face, i + di, j + dj, k + dk));
+        if (-1..=1).all(|a| (-1..=1).all(|b| (-1..=1).all(|c| air(a, b, c)))) {
+            let eye = grid.cell_center(Cell::new(base.face, i, j, k));
+            let up = eye.normalize();
+            let forward = (up.any_orthonormal_vector() - up * 0.15).normalize();
+            // A tunnel or small chamber: walls, floor and ceiling within the
+            // level-0 range that compare_near checks.
+            let side = up.cross(forward);
+            if [forward, -forward, side, -side, up, -up].iter().all(|d| planet.raycast(eye, *d, 8.0).is_some()) {
+                return Some((eye, forward.as_vec3()));
+            }
+        }
+    }
+    None
+}
+
+/// Generated caves render exactly: from inside one, GPU primary hits (walls,
+/// floor, ceiling) match canonical CPU ray casts.
+#[test]
+fn cave_view_matches_canonical_cpu_ray_casts() {
+    let Some(gpu) = gpu() else { return };
+    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+    let (eye, forward) = find_cave(&planet).expect("a cave near the test site");
+    eprintln!("cave eye {} m below its column top", -planet.ground_height(eye));
     let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [320, 180]);
     eprintln!("compared {compared}, mismatched {mismatched}");
     assert!(compared > 1000);
@@ -415,6 +465,7 @@ fn published_tops_bound_occupancy() {
     let rec = words(records);
     let pool = words(pool);
     let (mut columns, mut bad) = (0usize, 0usize);
+    let (mut volumetric, mut wrong_tops) = (0usize, 0usize);
     for c in rec.chunks_exact(8) {
         let info = c[3];
         if info & 0xc000_0000 != 0x8000_0000 {
@@ -454,6 +505,26 @@ fn published_tops_bound_occupancy() {
             }
             assert_eq!(highest + 1, published, "packed authored top disagrees with published maximum");
         } else {
+            // Generated volumetric columns publish their generated tops
+            // (material depth) counting down from the band top.
+            if info & 0x0c00_0000 == 0x0c00_0000 {
+                volumetric += 1;
+                let (level, face) = (c[0] >> 27, ((c[0] >> 24) & 7) as u8);
+                let (ci, cj) = ((c[0] & 0xff_ffff) as i32, c[1] as i32);
+                for cell in 0..64u32 {
+                    let word = pool[(run * 16 + (cell >> 2)) as usize];
+                    let down = ((word >> ((cell & 3) * 8)) & 255) as i32;
+                    let (i, j) = (ci * 8 + (cell & 7) as i32, cj * 8 + (cell >> 3) as i32);
+                    let top = planet.column_top(face, i, j, level);
+                    let expected = terrain::generated_top(planet.grid(), planet.field(), face, i, j, level, top);
+                    if down < 255 && (k_lo + n_band) * 8 - down != expected {
+                        wrong_tops += 1;
+                        if wrong_tops < 6 {
+                            eprintln!("column key {:08x} {:08x} cell {cell}: generated top {} expected {expected}", c[0], c[1], (k_lo + n_band) * 8 - down);
+                        }
+                    }
+                }
+            }
             for b in (0..n_band).rev() {
                 let (mixed, solid, rank) = if b < 32 {
                     let bit = b as u32;
@@ -488,8 +559,10 @@ fn published_tops_bound_occupancy() {
         }
     }
     eprintln!("{columns} columns, {bad} with occupied cells above the published top");
+    eprintln!("{volumetric} volumetric columns, {wrong_tops} generated tops differing from the CPU");
     assert!(columns > 1000);
     assert_eq!(bad, 0);
+    assert_eq!(wrong_tops, 0);
 }
 
 /// Sky bound with the default LOD dither, settled and moving: frozen renders

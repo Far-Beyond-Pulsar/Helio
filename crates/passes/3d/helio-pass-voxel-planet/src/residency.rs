@@ -36,8 +36,13 @@ impl Default for Capacity {
             // hiding columns from the traversal).
             table_bits: 23,
             records: 3_000_000,
-            pool_units: 4 << 20,
-            scratch_units: 1 << 18,
+            // 512 MB. A 2560x1440 ground view used 99% of 4M units without
+            // caves (1.65M columns; coarse relief columns take 3 units), and
+            // cave walls are mixed bricks.
+            pool_units: 8 << 20,
+            // Every band brick of a frame's jobs before compaction: a cave
+            // column holds ~150 bricks at level 0 (a heightfield column 2-4).
+            scratch_units: 1 << 20,
             edit_words: 4 << 20,
             max_jobs: 16_384,
             max_evictions: 262_144,

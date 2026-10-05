@@ -455,6 +455,8 @@ impl Clone for VoxelTerrainComponent {
 #[category("Continents", category_color = "#6FA86F")]
 #[category("Mountains", category_color = "#9A8F84")]
 #[category("Detail", category_color = "#D1A73F")]
+#[category("Caves", category_color = "#7A6A9E")]
+#[category("Overhangs", category_color = "#A8826F")]
 #[serde(default)]
 pub struct VoxelLandformComponent {
     /// Typical continent width in kilometres.
@@ -487,8 +489,46 @@ pub struct VoxelLandformComponent {
     /// Scale of the domain warp that bends coasts and ridges, in kilometres.
     #[property(min = 0.0, max = 500.0, step = 1.0, category = "Detail", label = "Coastline warp (km)")]
     pub warp_km: f64,
+    /// Caves (tunnels and caverns) inside cave regions.
+    #[property(category = "Caves")]
+    pub caves: bool,
+    /// Deepest cave cell below the local surface, in metres.
+    #[property(min = 0.0, max = 170.0, step = 1.0, category = "Caves", label = "Cave depth (m)")]
+    pub cave_depth_m: f64,
+    /// Rough share of the land inside cave regions.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Cave regions (share)")]
+    pub cave_share: f64,
+    /// Size of the cave regions, in kilometres.
+    #[property(min = 0.1, max = 500.0, step = 0.1, category = "Caves", label = "Cave region size (km)")]
+    pub cave_region_km: f64,
+    /// Tunnel radius, in metres.
+    #[property(min = 0.0, max = 20.0, step = 0.1, category = "Caves", label = "Tunnel radius (m)")]
+    pub tunnel_radius_m: f64,
+    /// Wavelength of the tunnels' winding, in metres.
+    #[property(min = 4.0, max = 2000.0, step = 1.0, category = "Caves", label = "Tunnel winding (m)")]
+    pub tunnel_wavelength_m: f64,
+    /// Size of caverns, in metres.
+    #[property(min = 8.0, max = 4000.0, step = 1.0, category = "Caves", label = "Cavern size (m)")]
+    pub cavern_wavelength_m: f64,
+    /// Rough share of the cave volume opened as caverns.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Caverns (share)")]
+    pub cavern_share: f64,
+    /// Rock kept above caverns, in metres (tunnels may open into hillsides).
+    #[property(min = 0.0, max = 100.0, step = 0.5, category = "Caves", label = "Cavern cover (m)")]
+    pub cave_cover_m: f64,
+    /// Height by which the surface folds into overhangs and arches, in metres (0 disables them).
+    #[property(min = 0.0, max = 20.0, step = 0.5, category = "Overhangs", label = "Overhang height (m)")]
+    pub overhang_m: f64,
+    /// Wavelength of the overhang folds, in metres.
+    #[property(min = 4.0, max = 500.0, step = 1.0, category = "Overhangs", label = "Overhang size (m)")]
+    pub overhang_wavelength_m: f64,
+    /// Size of the overhang regions, in kilometres.
+    #[property(min = 0.1, max = 500.0, step = 0.1, category = "Overhangs", label = "Overhang region size (km)")]
+    pub overhang_region_km: f64,
+    /// Rough share of the land inside overhang regions.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Overhangs", label = "Overhang regions (share)")]
+    pub overhang_share: f64,
 }
-
 impl Default for VoxelLandformComponent {
     /// The planet generator's own defaults (Earth-like).
     fn default() -> Self {
@@ -503,7 +543,19 @@ impl Default for VoxelLandformComponent {
             hill_km: 9.0,
             roughness: 0.035,
             warp_km: 40.0,
-        }
+            caves: true,
+            cave_depth_m: 120.0,
+            cave_share: 0.45,
+            cave_region_km: 6.0,
+            tunnel_radius_m: 2.5,
+            tunnel_wavelength_m: 160.0,
+            cavern_wavelength_m: 160.0,
+            cavern_share: 0.04,
+            cave_cover_m: 4.0,
+            overhang_m: 6.0,
+            overhang_wavelength_m: 24.0,
+            overhang_region_km: 3.0,
+            overhang_share: 0.3,        }
     }
 }
 

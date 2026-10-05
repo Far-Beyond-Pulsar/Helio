@@ -425,6 +425,29 @@ impl Grid {
         }
         domain_point(self.reference_cells, self.domain_scale, face, i, j, level)
     }
+
+    /// Constants of [`volume_point`]: `(inv, shift, layer_q16)`. On a sphere
+    /// `inv = floor(2^(30 + shift) / (2 R_layers))` with `inv` in
+    /// `[2^23, 2^24)`; on a plane `layer_q16` converts half layers to half
+    /// reference cells.
+    pub fn volume_constants(&self) -> (u32, u32, u32) {
+        let layer_q16 = ((u64::from(self.layer_mm) << 16) / 100) as u32;
+        if self.is_plane() {
+            return (0, 0, layer_q16);
+        }
+        let layers = ((self.radius * 1000.0 / f64::from(self.layer_mm)).round() as u64).max(1) * 2;
+        let mut shift = 0u32;
+        while (1u64 << (30 + shift)) / layers < (1 << 23) {
+            shift += 1;
+        }
+        (((1u64 << (30 + shift)) / layers) as u32, shift, layer_q16)
+    }
+
+    /// Seamless 3D domain point of the level cell `(face, i, j, k)`.
+    pub fn volume_point(&self, face: u8, i: i32, j: i32, k: i32, level: u32) -> IVec3 {
+        let (inv, shift, layer_q16) = self.volume_constants();
+        volume_point(self.domain_point(face, i, j, level), self.is_plane(), k, level, inv, shift, layer_q16)
+    }
 }
 
 /// Approximately `(a * r) >> 24` with 16-bit limbs and only 32-bit integer
@@ -447,6 +470,40 @@ pub fn domain_point(reference: i32, scale: u32, face: u8, i: i32, j: i32, level:
     let u = mul_q24(((i as u32) << (level + 1)).wrapping_add(half), scale) as i32 - reference;
     let v = mul_q24(((j as u32) << (level + 1)).wrapping_add(half), scale) as i32 - reference;
     n * reference + a * u + b * v
+}
+
+/// `(a * b) >> s` of the exact 64-bit product (`mul_shr` in WGSL computes
+/// it with 16-bit limbs). The caller keeps the result within 32 bits.
+#[inline]
+pub fn mul_shr(a: u32, b: u32, s: u32) -> u32 {
+    ((u64::from(a) * u64::from(b)) >> s) as u32
+}
+
+/// `p * r >> 30` for a signed component and a signed Q30 ratio.
+#[inline]
+fn scale_component(p: i32, ratio: i32) -> i32 {
+    let m = mul_shr(p.unsigned_abs(), ratio.unsigned_abs(), 30) as i32;
+    if (p < 0) != (ratio < 0) { -m } else { m }
+}
+
+/// Seamless 3D domain point of a level cell centre (half reference cells).
+/// On a sphere the column's cube-surface domain point is scaled by
+/// `(R + h) / R`, so points at equal height agree across cube edges; on a
+/// plane the height is the vertical axis. Volumetric terrain (caves,
+/// overhangs) samples 3D noise here. Mirrored by `volume_point` in WGSL.
+#[allow(clippy::too_many_arguments)]
+pub fn volume_point(p: IVec3, plane: bool, k: i32, level: u32, inv: u32, shift: u32, layer_q16: u32) -> IVec3 {
+    // Cell centre height in half base layers.
+    let h = (k << (level + 1)).wrapping_add(1 << level);
+    if plane {
+        let v = mul_shr(h.unsigned_abs(), layer_q16, 16) as i32;
+        return IVec3::new(p.x, if h < 0 { -v } else { v }, p.z);
+    }
+    // Ratio h / (2 R_layers) in Q30: a Q24 ratio moved the point in ~0.4 m
+    // steps at Earth radius (|p| ~ 2^27), stair-stepping caves.
+    let r = mul_shr(h.unsigned_abs(), inv, shift) as i32;
+    let ratio = if h < 0 { -r } else { r };
+    p + IVec3::new(scale_component(p.x, ratio), scale_component(p.y, ratio), scale_component(p.z, ratio))
 }
 
 /// Domain point of a plane level cell centre, in half reference cells
@@ -594,6 +651,35 @@ mod tests {
         let edge = grid.neighbour(Cell::new(4, n - 1, n / 2, 0), 0, 1);
         let b = grid.domain_point(edge.face, edge.i, edge.j, 0);
         assert!((a - b).abs().max_element() <= 2, "{a} {b}");
+    }
+
+    /// Volumetric noise samples one seamless 3D domain: cells at equal
+    /// height across a cube edge get nearly equal points, a layer step moves
+    /// the point by about one reference voxel per 0.1 m, and points stay in
+    /// range from the core to far above the surface.
+    #[test]
+    fn volume_points_are_seamless_and_follow_height() {
+        let grid = earth();
+        let n = grid.cells();
+        for k in [-1_000_000, -1_200, -1, 0, 37, 50_000] {
+            let a = grid.volume_point(4, n - 1, n / 2, k, 0);
+            let edge = grid.neighbour(Cell::new(4, n - 1, n / 2, k), 0, 1);
+            let b = grid.volume_point(edge.face, edge.i, edge.j, edge.k, 0);
+            assert!((a - b).abs().max_element() <= 4, "k {k}: {a} {b}");
+        }
+        // Radial step at a face centre: a 0.1 m layer scales the point by
+        // 0.1 / R, and the cube half size is (pi/2) R / 0.1 m, so the point
+        // moves pi/2 units (a horizontal 0.1 m cell moves it 2).
+        let c = n / 2;
+        let step = grid.volume_point(2, c, c, 1, 0) - grid.volume_point(2, c, c, 0, 0);
+        let expected = std::f64::consts::FRAC_PI_2;
+        assert!((f64::from(step.length_squared()).sqrt() - expected).abs() < 0.6, "{step}");
+        let core = grid.volume_point(2, c, c, -(grid.radius() / grid.voxel_size()) as i32, 0);
+        // inv carries 24 bits: |p| ~ 2^27 units lands within ~16 (0.8 m).
+        assert!(core.abs().max_element() < 24, "the planet centre maps near the origin: {core}");
+        let plane = Grid::plane(Shape::Plane, 4_000.0, 0.5).unwrap();
+        let p = plane.volume_point(PLANE_FACE, 10, 10, 4, 0);
+        assert_eq!(p.y, 45, "plane height in half reference cells: (4.5 * 0.5 m) / 0.05 m");
     }
 
     #[test]

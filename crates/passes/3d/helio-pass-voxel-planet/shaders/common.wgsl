@@ -183,11 +183,24 @@ fn brick_bit(unit: u32, x: u32, y: u32, z: u32) -> bool {
     return ((pool[unit * UNIT_WORDS + (bit >> 5u)] >> (bit & 31u)) & 1u) != 0u;
 }
 
+// With INFO_TOPOLOGY (never stored with relief): per-cell tops count down
+// from the band top. Generated volumetric columns store their generated
+// top (first air above the highest generated solid cell, caves and
+// overhangs included) there; their bands are taller than a byte.
+const INFO_TOPS_DOWN: u32 = 0x04000000u;
+
+fn column_tops_down(c: Column) -> bool {
+    return (c.info & (INFO_TOPOLOGY | INFO_TOPS_DOWN)) == (INFO_TOPOLOGY | INFO_TOPS_DOWN);
+}
+
 // Column-local surface top (first air layer above ground, level cells).
 fn column_top(c: Column, x: u32, y: u32) -> i32 {
     let cell = x + y * 8u;
     let word = pool[c.run * UNIT_WORDS + (cell >> 2u)];
     let offset = (word >> ((cell & 3u) * 8u)) & 255u;
+    if column_tops_down(c) {
+        return (c.k_lo + i32(band_count(c))) * 8 - i32(offset);
+    }
     if (c.info & INFO_RELIEF_INLINE) != 0u {
         let level = c.key0 >> 27u;
         return c.k_lo * 8 + i32((offset + (1u << level) - 1u) >> level);
@@ -198,7 +211,7 @@ fn column_top(c: Column, x: u32, y: u32) -> i32 {
 // Zero denotes a top exactly on the upper coarse-cell boundary. Other
 // fractions reconstruct the authored base-layer top inside the last voxel.
 fn column_relief_fraction(c: Column, x: u32, y: u32) -> u32 {
-    if !column_tops_fit(c) { return 0u; }
+    if (c.info & INFO_RELIEF) == 0u || !column_tops_fit(c) { return 0u; }
     let cell = x + y * 8u;
     if (c.info & INFO_RELIEF_INLINE) != 0u {
         let level = c.key0 >> 27u;

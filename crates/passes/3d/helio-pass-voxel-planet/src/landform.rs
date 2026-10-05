@@ -17,8 +17,11 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 pub const ID: &str = "helio.landform";
-pub const VERSION: u32 = 1;
-pub(crate) const DISPLAY_PROGRAM: &str = "helio.landform/1-ridge-envelope/2";
+/// Version 2 adds caves and overhangs; version 1 builds the same terrain
+/// without them (worlds saved with it keep their terrain).
+pub const VERSION: u32 = 2;
+pub const LEGACY_VERSION: u32 = 1;
+pub(crate) const DISPLAY_PROGRAM: &str = "helio.landform/2-ridge-envelope-volume/4";
 pub const FLAT_ID: &str = "helio.flat";
 pub const FLAT_VERSION: u32 = 1;
 
@@ -40,6 +43,29 @@ pub struct Landform {
     pub roughness: f64,
     pub warp_km: f64,
     pub snowline_m: f64,
+    /// Caves (tunnels and caverns) inside cave regions.
+    pub caves: bool,
+    /// Deepest cave cell below the local surface.
+    pub cave_depth_m: f64,
+    /// Rough share of the land inside cave regions (0..1).
+    pub cave_share: f64,
+    /// Wavelength of the cave regions.
+    pub cave_region_km: f64,
+    /// Tunnel radius and the wavelength of their winding.
+    pub tunnel_radius_m: f64,
+    pub tunnel_wavelength_m: f64,
+    /// Cavern wavelength and rough share of the cave volume they open (0..1).
+    pub cavern_wavelength_m: f64,
+    pub cavern_share: f64,
+    /// Rock kept above caverns (tunnels may open into hillsides).
+    pub cave_cover_m: f64,
+    /// Overhangs and arches: the surface is displaced in 3D by up to this
+    /// height inside overhang regions (0 disables them).
+    pub overhang_m: f64,
+    pub overhang_wavelength_m: f64,
+    pub overhang_region_km: f64,
+    /// Rough share of the land inside overhang regions (0..1).
+    pub overhang_share: f64,
 }
 
 impl Default for Landform {
@@ -55,7 +81,176 @@ impl Default for Landform {
             roughness: 0.035,
             warp_km: 40.0,
             snowline_m: 3_000.0,
+            caves: true,
+            cave_depth_m: 120.0,
+            cave_share: 0.45,
+            cave_region_km: 6.0,
+            tunnel_radius_m: 2.5,
+            tunnel_wavelength_m: 160.0,
+            cavern_wavelength_m: 160.0,
+            cavern_share: 0.04,
+            cave_cover_m: 4.0,
+            overhang_m: 6.0,
+            overhang_wavelength_m: 24.0,
+            overhang_region_km: 3.0,
+            overhang_share: 0.3,
         }
+    }
+}
+
+/// Volumetric terms of `landform.wgsl` (`TerrainConstants::volume`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+pub struct LandformVolume {
+    /// flags (1 caves, 2 overhangs), region shift, region threshold (Q16), depth (mm).
+    pub caves: [i32; 4],
+    /// tunnel shift, tunnel half width (Q16), cavern shift, cavern threshold (Q16).
+    pub shapes: [i32; 4],
+    /// overhang amplitude (mm), shift, region shift, region threshold (Q16).
+    pub overhangs: [i32; 4],
+    /// tunnel radius (mm), cavern size (mm), cover (mm), layer (mm).
+    pub sizes: [i32; 4],
+}
+
+/// Quantile of [`noise`] (in units of [`ONE`]), from 400k samples: symmetric,
+/// standard deviation 0.27, slightly lighter tails than a Gaussian
+/// (`tests::noise_distribution_quantiles`).
+fn noise_quantile(p: f64) -> f64 {
+    const TABLE: [(f64, f64); 6] = [(0.5, 0.0), (0.75, 0.1937), (0.9, 0.3533), (0.95, 0.446), (0.99, 0.5851), (1.0, 0.75)];
+    let (sign, p) = if p < 0.5 { (-1.0, 1.0 - p) } else { (1.0, p) };
+    let mut value = TABLE[5].1;
+    for w in TABLE.windows(2) {
+        if p <= w[1].0 {
+            value = w[0].1 + (w[1].1 - w[0].1) * (p - w[0].0) / (w[1].0 - w[0].0);
+            break;
+        }
+    }
+    sign * value
+}
+
+const SEED_CAVE_REGION: u32 = 0xA511_E9B3;
+const SEED_TUNNEL_A: u32 = 0x63D8_3595;
+const SEED_TUNNEL_B: u32 = 0x2B1F_4C7A;
+const SEED_CAVERN: u32 = 0x9E37_79B1;
+const SEED_OVERHANG: u32 = 0x7F4A_7C15;
+const SEED_OVERHANG_REGION: u32 = 0x4CF5_AD43;
+
+impl LandformVolume {
+    pub fn new(grid: &Grid, land: &Landform) -> Self {
+        let half = crate::grid::REFERENCE_VOXEL * 0.5;
+        let shift = |metres: f64| ((metres / half).log2().round().clamp(1.0, 29.0)) as i32;
+        let mm = |metres: f64| (metres.max(0.0) * 1000.0).round().min(f64::from(i32::MAX / 4)) as i32;
+        // Threshold above which `share` of the noise lies.
+        let threshold = |share: f64| (noise_quantile(1.0 - share.clamp(0.0, 1.0)) * f64::from(ONE)).round() as i32;
+        let layer = grid.layer_mm() as i32;
+        // The level-0 band must hold the caves, the overhangs and the
+        // column's own relief within 256 bricks (2048 cells).
+        let depth = mm(land.cave_depth_m).min(1_700 * layer);
+        let mut flags = 0;
+        if land.caves && depth > 0 && land.tunnel_radius_m.max(land.cavern_wavelength_m) > 0.0 {
+            flags |= 1;
+        }
+        let overhang = mm(land.overhang_m).min(200 * layer);
+        if overhang > 0 {
+            flags |= 2;
+        }
+        // Tunnels are where two noises are both near zero; their radius is
+        // about the half width over the noise slope (~2 per wavelength).
+        let width = (2.0 * land.tunnel_radius_m / land.tunnel_wavelength_m.max(1e-3) * f64::from(ONE)).round() as i32;
+        Self {
+            caves: [flags, shift(land.cave_region_km * 1000.0), threshold(land.cave_share), depth],
+            shapes: [shift(land.tunnel_wavelength_m), width.clamp(0, ONE), shift(land.cavern_wavelength_m), threshold(land.cavern_share)],
+            overhangs: [overhang, shift(land.overhang_wavelength_m), shift(land.overhang_region_km * 1000.0), threshold(land.overhang_share)],
+            sizes: [mm(land.tunnel_radius_m), mm(land.cavern_wavelength_m / 4.0), mm(land.cave_cover_m), layer],
+        }
+    }
+
+    fn seed(&self, seed: u32, salt: u32) -> u32 {
+        seed ^ salt
+    }
+
+    /// Whether tunnels and caverns are resolved at `level` (their size is at
+    /// least one level cell). Caverns under a rock cover also need a cell
+    /// within that cover: coarser cells could not show them from outside,
+    /// and their columns keep the heightfield's relief and filtering.
+    fn caves_at(&self, level: u32) -> (bool, bool) {
+        if self.caves[0] & 1 == 0 {
+            return (false, false);
+        }
+        let layer = self.sizes[3];
+        let cavern = if self.sizes[2] > 0 { self.sizes[1].min(self.sizes[2]) } else { self.sizes[1] };
+        ((self.sizes[0] >> level) >= layer, (cavern >> level) >= layer)
+    }
+
+    fn cave_region(&self, p: IVec3, seed: u32) -> bool {
+        noise(p, self.caves[1] as u32, self.seed(seed, SEED_CAVE_REGION)) > self.caves[2]
+    }
+
+    /// Overhang amplitude (mm) of the column at `p`, 0 where it is smaller
+    /// than two level cells.
+    fn overhang_amplitude(&self, p: IVec3, level: u32, seed: u32) -> i32 {
+        if self.caves[0] & 2 == 0 {
+            return 0;
+        }
+        let n = noise(p, self.overhangs[2] as u32, self.seed(seed, SEED_OVERHANG_REGION));
+        let ramp = (n.wrapping_sub(self.overhangs[3]).wrapping_mul(4)).clamp(0, ONE);
+        let a = scale(ramp, self.overhangs[0]);
+        if (a >> level) < 2 * self.sizes[3] { 0 } else { a }
+    }
+
+    /// Level cells below and above the heightfield top that may differ.
+    pub fn extent(&self, p: IVec3, level: u32, seed: u32) -> (i32, i32) {
+        let layer = self.sizes[3];
+        let (tunnels, caverns) = self.caves_at(level);
+        let mut below = 0;
+        if (tunnels || caverns) && self.cave_region(p, seed) {
+            below = (self.caves[3] / layer >> level) + 2;
+        }
+        let a = self.overhang_amplitude(p, level, seed);
+        let mut above = 0;
+        if a > 0 {
+            above = (a / layer >> level) + 2;
+            below = below.max(above);
+        }
+        (below, above)
+    }
+
+    /// Kind of layer `k` of the column at `p` (heightfield top `top`), with
+    /// 3D domain point `q`.
+    pub fn cell(&self, p: IVec3, q: IVec3, level: u32, top: i32, k: i32, seed: u32) -> u32 {
+        let layer = self.sizes[3];
+        let mut solid = k < top;
+        let a = self.overhang_amplitude(p, level, seed);
+        if a > 0 {
+            // Height of the cell centre over the heightfield top against a
+            // 3D displacement: the surface folds into overhangs and arches.
+            let cell = layer.wrapping_shl(level);
+            let d = k.wrapping_sub(top).wrapping_mul(cell).wrapping_add(cell / 2);
+            let s = scale(noise(q, self.overhangs[1] as u32, self.seed(seed, SEED_OVERHANG)), a);
+            solid = d < s;
+        }
+        let (tunnels, caverns) = self.caves_at(level);
+        if solid && k < top && (tunnels || caverns) && self.cave_region(p, seed) {
+            let cell = layer.wrapping_shl(level);
+            let depth = top.wrapping_sub(k).wrapping_mul(cell).wrapping_sub(cell / 2);
+            if depth <= self.caves[3] {
+                let w = self.shapes[1];
+                if tunnels
+                    && noise(q, self.shapes[0] as u32, self.seed(seed, SEED_TUNNEL_A)).abs() < w
+                    && noise(q, self.shapes[0] as u32, self.seed(seed, SEED_TUNNEL_B)).abs() < w
+                {
+                    solid = false;
+                } else if caverns && depth >= self.sizes[2] && noise(q, self.shapes[2] as u32, self.seed(seed, SEED_CAVERN)) > self.shapes[3] {
+                    solid = false;
+                }
+            }
+        }
+        u32::from(solid)
+    }
+
+    /// Extra level cells a finer column's top may rise over a coarse one.
+    fn rise_cells(&self, level: u32) -> i32 {
+        if self.caves[0] & 2 == 0 { 0 } else { (self.overhangs[0] / self.sizes[3] >> level) + 2 }
     }
 }
 
@@ -431,26 +626,64 @@ pub fn ground_material(
 /// Builds [`LandformField`]s from [`Landform`] settings.
 pub struct LandformGenerator;
 
+/// Landform version 1: the same terrain without caves or overhangs.
+pub struct LandformLegacyGenerator;
+
+impl TerrainGenerator for LandformLegacyGenerator {
+    fn info(&self) -> GeneratorInfo {
+        GeneratorInfo {
+            version: LEGACY_VERSION,
+            name: "Landform (v1, no caves)".into(),
+            ..LandformGenerator.info()
+        }
+    }
+    fn build(&self, grid: &Grid, seed: u64, settings: &str) -> Result<Arc<dyn TerrainField>, String> {
+        let mut land = parse_landform(settings)?;
+        land.caves = false;
+        land.overhang_m = 0.0;
+        landform_field(grid, seed, land)
+    }
+}
+
+fn parse_landform(settings: &str) -> Result<Landform, String> {
+    if settings.trim().is_empty() {
+        Ok(Landform::default())
+    } else {
+        serde_json::from_str(settings).map_err(|e| format!("invalid landform settings: {e}"))
+    }
+}
+
 impl TerrainGenerator for LandformGenerator {
     fn info(&self) -> GeneratorInfo {
         GeneratorInfo {
             id: ID.into(),
             version: VERSION,
             name: "Landform".into(),
-            description: "Continents, ocean basins, mountain ranges and hills with meadows, dry lands, rock, strata and snow.".into(),
+            description: "Continents, ocean basins, mountain ranges and hills with meadows, dry lands, rock, strata, snow, caves and overhangs.".into(),
             settings_component: Some("VoxelLandformComponent".into()),
         }
     }
     fn build(&self, grid: &Grid, seed: u64, settings: &str) -> Result<Arc<dyn TerrainField>, String> {
-        let land: Landform = if settings.trim().is_empty() {
-            Landform::default()
-        } else {
-            serde_json::from_str(settings).map_err(|e| format!("invalid landform settings: {e}"))?
-        };
+        landform_field(grid, seed, parse_landform(settings)?)
+    }
+}
+
+fn landform_field(grid: &Grid, seed: u64, land: Landform) -> Result<Arc<dyn TerrainField>, String> {
+    {
         let positive = [land.continent_km, land.mountain_km, land.hill_km];
         let finite = [land.ocean_depth_m, land.lowland_m, land.mountain_m, land.hill_m, land.roughness, land.warp_km, land.snowline_m];
         if positive.iter().any(|v| !v.is_finite() || *v <= 0.0) || finite.iter().any(|v| !v.is_finite()) {
             return Err("landform settings must be finite, with positive wavelengths".into());
+        }
+        let volume = [land.cave_depth_m, land.cave_share, land.cave_region_km, land.tunnel_radius_m, land.tunnel_wavelength_m,
+            land.cavern_wavelength_m, land.cavern_share, land.cave_cover_m, land.overhang_m, land.overhang_wavelength_m,
+            land.overhang_region_km, land.overhang_share];
+        if volume.iter().any(|v| !v.is_finite() || *v < 0.0) {
+            return Err("landform cave and overhang settings must be finite and non-negative".into());
+        }
+        if land.cave_region_km <= 0.0 || land.tunnel_wavelength_m <= 0.0 || land.cavern_wavelength_m <= 0.0
+            || land.overhang_wavelength_m <= 0.0 || land.overhang_region_km <= 0.0 {
+            return Err("landform cave and overhang wavelengths must be positive".into());
         }
         Ok(Arc::new(LandformField::new(grid, &land, (seed ^ (seed >> 32)) as u32)))
     }
@@ -459,6 +692,7 @@ impl TerrainGenerator for LandformGenerator {
 /// A [`Landform`] on one grid.
 pub struct LandformField {
     constants: LandformConstants,
+    volume: LandformVolume,
     bounds: [i32; 24],
     render_bounds: [i32; 24],
     ridge_suffix: Option<[[i32; 4]; 66]>,
@@ -467,17 +701,31 @@ pub struct LandformField {
 impl LandformField {
     pub fn new(grid: &Grid, land: &Landform, seed: u32) -> Self {
         let constants = LandformConstants::new(grid, land, seed);
-        let bounds = constants.bound_margins(grid);
+        let volume = LandformVolume::new(grid, land);
+        let mut bounds = constants.bound_margins(grid);
         // Unsupported recipes retain the canonical path. In particular, do
         // not saturate already-invalid huge finite amplitudes into new terrain.
         let ridge_suffix = crate::ridge_envelope::bake_ridge_suffix(grid, &constants).ok();
-        let render_bounds = if ridge_suffix.is_some() {
+        let mut render_bounds = if ridge_suffix.is_some() {
             crate::ridge_envelope::render_bounds(grid, &constants, bounds)
         } else { bounds };
-        Self { bounds, render_bounds, ridge_suffix, constants }
+        // Overhangs raise a finer column's highest solid cell over its
+        // heightfield top.
+        for level in 0..24u32 {
+            let rise = volume.rise_cells(level);
+            bounds[level as usize] = bounds[level as usize].saturating_add(rise);
+            render_bounds[level as usize] = render_bounds[level as usize].saturating_add(rise);
+        }
+        Self { bounds, render_bounds, ridge_suffix, constants, volume }
     }
     pub fn constants(&self) -> &LandformConstants {
         &self.constants
+    }
+    pub fn volume(&self) -> &LandformVolume {
+        &self.volume
+    }
+    fn seed(&self) -> u32 {
+        self.constants.header[3] as u32
     }
 }
 
@@ -497,11 +745,22 @@ impl TerrainField for LandformField {
     fn render_bound_margins(&self) -> [i32; 24] {
         self.render_bounds
     }
+    fn extent(&self, p: IVec3, level: u32) -> (i32, i32) {
+        self.volume.extent(p, level, self.seed())
+    }
+    fn cell(&self, p: IVec3, q: IVec3, level: u32, top: i32, k: i32) -> u32 {
+        self.volume.cell(p, q, level, top, k, self.seed())
+    }
+    fn volume_bounds(&self) -> (i32, i32) {
+        let flags = self.volume.caves[0];
+        (if flags & 1 != 0 { self.volume.caves[3] } else { 0 }, if flags & 2 != 0 { self.volume.overhangs[0] } else { 0 })
+    }
     fn program(&self) -> TerrainProgram {
         let mut canonical = self.constants;
         canonical.shape[2] = i32::from(self.ridge_suffix.is_some());
         let mut constants = bytemuck::bytes_of(&canonical).to_vec();
         constants.extend_from_slice(bytemuck::cast_slice(&self.ridge_suffix.unwrap_or([[0; 4]; 66])));
+        constants.extend_from_slice(bytemuck::bytes_of(&self.volume));
         TerrainProgram {
             key: Cow::Borrowed(DISPLAY_PROGRAM),
             wgsl: Cow::Borrowed(include_str!("../shaders/landform.wgsl")),
@@ -593,6 +852,63 @@ impl TerrainField for FlatField {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terrain::{generated_kind, top_cells, TerrainField};
+
+    #[test]
+    #[ignore = "measurement"]
+    fn noise_distribution_quantiles() {
+        let mut v: Vec<i32> = Vec::new();
+        let mut rng = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; rng
+        };
+        for _ in 0..400_000 {
+            let p = IVec3::new((next() % 1_000_000) as i32, (next() % 1_000_000) as i32, (next() % 1_000_000) as i32);
+            v.push(noise(p, 10, next() as u32));
+        }
+        v.sort_unstable();
+        let q = |f: f64| f64::from(v[((v.len() - 1) as f64 * f) as usize]) / f64::from(ONE);
+        let mean = v.iter().map(|x| f64::from(*x)).sum::<f64>() / v.len() as f64;
+        let sd = (v.iter().map(|x| (f64::from(*x) - mean).powi(2)).sum::<f64>() / v.len() as f64).sqrt() / f64::from(ONE);
+        let near = v.iter().filter(|x| x.abs() < ONE / 20).count() as f64 / v.len() as f64;
+        eprintln!("sd {sd:.4}; q50 {:.4} q75 {:.4} q90 {:.4} q95 {:.4} q99 {:.4}; P(|n| < 0.05) {near:.4}", q(0.5), q(0.75), q(0.9), q(0.95), q(0.99));
+    }
+
+    /// Version 2 carves caves and raises overhangs, only inside the declared
+    /// extent; version 1 (and caves off) stays a pure heightfield.
+    #[test]
+    fn caves_and_overhangs_stay_inside_their_extent() {
+        let grid = Grid::new(6_371_000.0, 0.1).unwrap();
+        let v2 = LandformField::new(&grid, &Landform::default(), 7);
+        let v1 = LandformField::new(&grid, &Landform { caves: false, overhang_m: 0.0, ..Landform::default() }, 7);
+        let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; rng
+        };
+        let (mut cave, mut overhang, mut volumetric) = (0, 0, 0);
+        for _ in 0..1500 {
+            let face = (next() % 6) as u8;
+            let (i, j) = ((next() % grid.cells() as u64) as i32, (next() % grid.cells() as u64) as i32);
+            let p = grid.domain_point(face, i, j, 0);
+            let top = top_cells(&grid, v2.height(p, grid.level_offset()), 0);
+            assert_eq!(v1.extent(p, 0), (0, 0));
+            let (below, above) = v2.extent(p, 0);
+            volumetric += usize::from(below + above > 0);
+            for _ in 0..24 {
+                // Inside and around the extent.
+                let k = top - below - 4 + (next() % (below + above + 8) as u64) as i32;
+                let kind = generated_kind(&grid, &v2, face, i, j, k, 0, top);
+                assert_eq!(generated_kind(&grid, &v1, face, i, j, k, 0, top), u32::from(k < top));
+                if k < top - below || k >= top + above {
+                    assert_eq!(kind, u32::from(k < top), "outside the extent the heightfield holds");
+                }
+                cave += usize::from(kind == 0 && k < top);
+                overhang += usize::from(kind == 1 && k >= top);
+            }
+        }
+        eprintln!("{volumetric}/1500 volumetric columns, {cave} cave and {overhang} overhang samples");
+        assert!(volumetric > 100 && cave > 0 && overhang > 0);
+    }
 
     #[test]
     fn climate_bounds_cover_both_signs_of_canonical_height_change() {

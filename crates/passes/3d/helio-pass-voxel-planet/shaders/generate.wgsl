@@ -68,6 +68,7 @@ var<workgroup> g_any: array<atomic<u32>, 2>;
 var<workgroup> g_base: u32;
 var<workgroup> g_fraction: array<atomic<u32>, 32>;
 var<workgroup> g_topology_flags: u32;
+var<workgroup> g_volume: atomic<u32>;
 
 @compute @workgroup_size(64)
 fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
@@ -101,6 +102,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         atomicStore(&g_band[1], -0x7fffffff);
         atomicStore(&g_any[0], 0u);
         atomicStore(&g_any[1], 0u);
+        atomicStore(&g_volume, 0u);
     }
     if li < 16u {
         atomicStore(&g_words[li], 0u);
@@ -138,6 +140,17 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     // lowland below datum) and each column stored the empty bricks.
     atomicMin(&g_band[0], top - 1);
     atomicMax(&g_band[1], top);
+    // Volumetric terrain (caves, overhangs): the program may change cells
+    // within its extent around the heightfield top; those cells are
+    // evaluated in 3D and the column keeps arbitrary occupancy.
+    let column_point = domain_point(face, i, j, level);
+    let extent = terrain_extent(column_point, level);
+    let field_top = base_top >> level;
+    if extent.x != 0 || extent.y != 0 {
+        atomicMin(&g_band[0], field_top - extent.x - 1);
+        atomicMax(&g_band[1], field_top + extent.y);
+        atomicOr(&g_volume, 1u);
+    }
     if job.edits != 0u {
         let count = edit_refs[job.edits - 1u];
         for (var e = li; e < count; e += 64u) {
@@ -158,8 +171,9 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let k_lo = lo_cell >> 3u;
     let k_hi = ((max(hi_cell, lo_cell + 1) - 1) >> 3u) + 1;
     let n_band = u32(k_hi - k_lo);
-    let relief = requested_relief && n_band <= 32u && hi_cell - k_lo * 8 <= 255;
-    let heightfield = topology_flags == 0u && n_band <= 32u && hi_cell - k_lo * 8 <= 255;
+    let volumetric = atomicLoad(&g_volume) != 0u;
+    let relief = requested_relief && !volumetric && n_band <= 32u && hi_cell - k_lo * 8 <= 255;
+    let heightfield = topology_flags == 0u && !volumetric && n_band <= 32u && hi_cell - k_lo * 8 <= 255;
     if requested_relief && !relief { top = base_top >> level; }
     // When the whole column fits in 255 authored layers, store its exact
     // base-grid top in the existing byte instead of allocating two Q16 units.
@@ -199,10 +213,18 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         atomicStore(&g_words[li], 0u);
     }
     workgroupBarrier();
+    // Generated top of a volumetric lane: first air above its highest
+    // generated solid cell (overhang lips, cave openings; edits excluded).
+    var generated_top = top;
+    if extent.x != 0 || extent.y != 0 { generated_top = field_top - extent.x; }
     for (var b = 0u; b < n_band; b++) {
         for (var z = 0u; z < 8u; z++) {
             let k = (k_lo + i32(b)) * 8 + i32(z);
             var kind = terrain_kind(top, k);
+            if k >= field_top - extent.x && k < field_top + extent.y {
+                kind = terrain_cell(column_point, volume_point(face, i, j, k, level), level, field_top, k);
+                if kind != 0u { generated_top = max(generated_top, k + 1); }
+            }
             if job.edits != 0u {
                 let c = vec3<i32>(center_half(i, level), center_half(j, level), center_half(k, level));
                 kind = apply_edits(job.edits, level, c, kind).x;
@@ -220,6 +242,12 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
             if w != 0xffffffffu { atomicOr(&g_any[1], 1u); }
         }
         workgroupBarrier();
+        // The cleared words gather the generated tops after the last brick
+        // (no extra barrier); they replace the header's heightfield tops.
+        if volumetric && b + 1u == n_band {
+            let down = u32(clamp(k_hi * 8 - generated_top, 0, 255));
+            atomicOr(&g_words[li >> 2u], down << ((li & 3u) * 8u));
+        }
         if li == 0u {
             let some = atomicExchange(&g_any[0], 0u) != 0u;
             let holes = atomicExchange(&g_any[1], 0u) != 0u;
@@ -231,11 +259,15 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         }
         workgroupBarrier();
     }
+    if volumetric && li < 16u { scratch[base * UNIT_WORDS + li] = atomicLoad(&g_words[li]); }
     if li == 0u {
         var out: JobOut;
         out.status = 0u;
         out.pad = select(0u, INFO_RELIEF, relief) | select(0u, INFO_RELIEF_INLINE, inline_relief)
-            | select(0u, INFO_HEIGHTFIELD, heightfield) | topology_flags;
+            | select(0u, INFO_HEIGHTFIELD, heightfield) | topology_flags
+            // Generated caves and overhangs are not described by column tops
+            // (slopes, relief normals, heightfield storage): like edit cuts.
+            | select(0u, INFO_TOPOLOGY | INFO_TOPS_DOWN, volumetric);
         out.k_lo = k_lo;
         out.n_band = n_band;
         out.scratch = base;

@@ -15,7 +15,8 @@ use crate::{VoxelChunkKey, VoxelDomain, VoxelStoredPayload};
 /// hills on planets, planes and infinite planes). Its settings component is
 /// `VoxelLandformComponent`.
 pub const VOXEL_TERRAIN_GENERATOR: &str = "helio.landform";
-pub const VOXEL_TERRAIN_GENERATOR_VERSION: u32 = 1;
+/// Landform version 2 adds caves and overhangs (version 1 stays available).
+pub const VOXEL_TERRAIN_GENERATOR_VERSION: u32 = 2;
 /// The streamed voxel terrain renderer, which draws every registered
 /// terrain generator.
 pub const VOXEL_TERRAIN_RENDERER: &str = "helio.voxel-terrain";

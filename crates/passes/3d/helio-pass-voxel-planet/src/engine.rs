@@ -257,7 +257,10 @@ impl WorldGpu {
         let m = planet.field().render_bound_margins();
         Self {
             grid: [g.reference_cells(), g.layer_mm() as i32, g.cells(), g.level_offset() as i32],
-            scale: [g.domain_scale(), 0, 0, 0],
+            scale: {
+                let (inv, shift, layer_q16) = g.volume_constants();
+                [g.domain_scale(), inv, shift, layer_q16]
+            },
             bounds: std::array::from_fn(|i| std::array::from_fn(|j| m[i * 4 + j])),
         }
     }
@@ -281,6 +284,11 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -
     let mut s = String::from(include_str!("../shaders/noise.wgsl"));
     s.push_str(include_str!("../shaders/world.wgsl"));
     s.push_str(&program.wgsl);
+    if !program.wgsl.contains("fn terrain_cell") {
+        // Heightfield programs: no volumetric terms (`TerrainField::extent`, `cell`).
+        s.push_str("fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
+        s.push_str("fn terrain_cell(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, k: i32) -> u32 { return select(0u, 1u, k < top); }\n");
+    }
     // Generation updates the summaries atomically; traversal reads plain values.
     // Traversal reads a summary block entry as one vector load.
     let generation = parts.iter().any(|p| p.contains("fn level_suffix"));
@@ -1998,13 +2006,22 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
     let kernel = "
 @group(0) @binding(20) var<storage, read> verify_in: array<vec4<i32>>;
 @group(0) @binding(21) var<storage, read> verify_extra: array<vec4<i32>>;
-@group(0) @binding(22) var<storage, read_write> verify_out: array<vec2<i32>>;
+@group(0) @binding(22) var<storage, read_write> verify_out: array<vec4<i32>>;
 @compute @workgroup_size(64) fn verify(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= arrayLength(&verify_in) { return; }
     let a = verify_in[id.x];
     let e = verify_extra[id.x];
-    let p = domain_point(u32(a.x), a.y, a.z, u32(a.w));
-    verify_out[id.x] = vec2<i32>(field_height(u32(a.x), a.y, a.z, u32(a.w)), i32(ground_material(p, e.x, e.y, e.z, e.w)));
+    let level = u32(a.w);
+    let p = domain_point(u32(a.x), a.y, a.z, level);
+    let height = field_height(u32(a.x), a.y, a.z, level);
+    // A layer near the column top (inside any volumetric extent).
+    let top = top_cells(height, level);
+    let extent = terrain_extent(p, level);
+    let k = top - extent.x - 1 + rem_floor(e.w, max(extent.x + extent.y + 2, 1));
+    let q = volume_point(u32(a.x), a.y, a.z, k, level);
+    let cell = terrain_cell(p, q, level, top, k);
+    verify_out[id.x] = vec4<i32>(height, i32(ground_material(p, e.x, e.y, e.z, e.w)),
+        i32(cell) | (extent.x << 1u) | (extent.y << 16u), q.x ^ q.y ^ q.z);
 }
 ";
     let module = helio_core::shader::module(
@@ -2025,7 +2042,7 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
     let terrain = init("verify terrain", &terrain_bytes(&program), wgpu::BufferUsages::UNIFORM);
     let ins = init("verify inputs", bytemuck::cast_slice(&inputs), wgpu::BufferUsages::STORAGE);
     let ext = init("verify extra", bytemuck::cast_slice(&extra), wgpu::BufferUsages::STORAGE);
-    let bytes = u64::from(samples) * 8;
+    let bytes = u64::from(samples) * 16;
     let out = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("verify out"),
         size: bytes.max(8),
@@ -2063,12 +2080,21 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
     device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| e.to_string())?;
     rx.recv().map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
     let data = read.slice(..).get_mapped_range().map_err(|e| e.to_string())?;
-    let gpu: &[[i32; 2]] = bytemuck::cast_slice(&data[..bytes as usize]);
+    let gpu: &[[i32; 4]] = bytemuck::cast_slice(&data[..bytes as usize]);
     for ((a, e), g) in inputs.iter().zip(&extra).zip(gpu) {
-        let p = grid.domain_point(a.x as u8, a.y, a.z, a.w as u32);
+        let level = a.w as u32;
+        let p = grid.domain_point(a.x as u8, a.y, a.z, level);
+        let height = field.height(p, level + grid.level_offset());
+        let top = crate::terrain::top_cells(&grid, height, level);
+        let (below, above) = field.extent(p, level);
+        let k = top - below - 1 + e.w.rem_euclid((below + above + 2).max(1));
+        let q = grid.volume_point(a.x as u8, a.y, a.z, k, level);
+        let cell = field.cell(p, q, level, top, k) as i32;
         let cpu = [
-            field.height(p, a.w as u32 + grid.level_offset()),
+            height,
             field.ground_material(p, e.x, e.y, e.z, e.w) as i32,
+            cell | (below << 1) | (above << 16),
+            q.x ^ q.y ^ q.z,
         ];
         if *g != cpu {
             return Err(format!("column {a} with inputs {e}: GPU {g:?}, CPU {cpu:?}"));
