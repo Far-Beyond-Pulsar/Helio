@@ -586,6 +586,7 @@ fn gpu_column_table_matches_cpu_while_moving() {
     let size = [320, 180];
     let target = Target::new(&gpu, size);
     let mut r = renderer(&gpu, planet.clone(), size);
+    r.settings_mut().table_snapshots = true;
     settle(&gpu, &target, &mut r, &frame(&planet, ground), east.as_vec3());
     let mut worst = 0usize;
     for step in 0..40u64 {
@@ -593,6 +594,7 @@ fn gpu_column_table_matches_cpu_while_moving() {
         let forward = (east - eye.normalize() * 0.4).normalize().as_vec3();
         target.render(&gpu, &mut r, &frame(&planet, eye), forward, 5_000 + step);
         let (buffer, cpu) = r.column_table();
+        assert!(!cpu.is_empty(), "no table snapshot");
         let bytes = read_buffer(&gpu, buffer, (cpu.len() * 4) as u64);
         let gpu_table: &[u32] = bytemuck::cast_slice(&bytes);
         let differ = gpu_table.iter().zip(cpu).filter(|(a, b)| a != b).count();

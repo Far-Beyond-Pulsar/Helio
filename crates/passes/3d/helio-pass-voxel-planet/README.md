@@ -146,7 +146,18 @@ publishes a `PlanetFrame` (eye in f64 world metres, planet, sun) into a shared
 mailbox; frames are camera-relative (the renderer's world origin is the eye),
 so all GPU positions are small.
 
-### CPU: `Residency::plan` (render thread)
+### CPU: `Residency::plan` (residency worker thread)
+
+The residency lives on its own thread (`ResidencyWorker`). Each frame the
+render thread takes the finished plan, uploads its work and submits the
+next request (eye, level-0 distance, job budget, CPU budget, job failures
+read back). The worker plans while the frame is encoded and executed. At
+most one plan is in flight and each result is uploaded once, in order, so
+the GPU sees exactly the sequence of `plan` calls. A result that is not
+ready when the next frame starts is uploaded a frame later (`late_plans`).
+With the result come the stats, the
+summary block list and the `Coverage` that `fallback_distances` needs, as
+they are once its work is on the GPU. Steps:
 
 1. **Edit sync.** New or undone brushes since the last frame are found by
    prefix hash; new face brushes are uploaded; resident columns they touch
@@ -160,16 +171,22 @@ so all GPU positions are small.
    (`Planet::local_outer_radius`), so over a meadow 1 km below the fine
    levels are off instead of streaming columns under a tenth of a pixel.
 3. **Diff application.** Diffs are queued and applied in order within the
-   frame's CPU budget (1.5-3 ms moving by backlog, 4 ms still): removes evict residents,
+   plan's CPU budget (60 % of the frame interval, at least 1.5 ms moving or 4 ms
+   still, at most 12 ms): removes evict residents,
    a switched-off level clears its queue, adds become pending in a priority
    bucket. Diffs get at most 60 % of the budget while columns wait. A level
    with unapplied diffs is *catching up*: its `fallback_distances` entry is 0
    (no guaranteed coverage).
-4. **Admission.** Pending columns are issued nearest-first (the coarsest level
+4. **Re-ranking.** Priorities are distances from the eye when the window
+   was planned. Once the eye has moved 1/16 of a level's radius from where
+   its queue was ranked, the queued columns are re-bucketed by distance from
+   the current eye, up to 32k per plan, farthest-ranked first.
+5. **Admission.** Pending columns are issued nearest-first (the coarsest level
    always first, for global coverage) until the GPU job budget (from the
    measured GPU cost per job) or the CPU budget runs out: allocate a record,
    build its edit-reference list, reference its summary blocks, insert it in
-   the hash table. Everything issued this frame is one GPU patch.
+   the hash table. Everything issued by one plan is one GPU patch, with each
+   table and summary block slot once, at its final value.
 
 ### GPU
 
@@ -216,16 +233,32 @@ so all GPU positions are small.
   columns grow with the pixel count: at 1440p a ground view holds ~1.7M
   columns and 80% of the pool, the editor viewport ~2.8M (the record cap was
   3M). Once records or pool units ran out, admission stopped and the view
-  stayed coarse. Admission is CPU-bound (~1500 columns per 3 ms frame) while
-  churn grows with resolution squared times speed: at 1440p flying 90 m/s
+  stayed coarse. Admission is CPU-bound (~2 us per column) while churn grows with resolution squared times speed: at 1440p flying 90 m/s
   near the ground the windows churn ~100k columns/s, and at 25 km altitude
   and 25 km/s about as many. Above 85% of records or pool, or with over 10%
   of the wanted columns outstanding while moving (pending or to be added by
   queued diffs; a still camera is loading, not churning), the
   level-0 distance shrinks in 10-25% steps (`lod_pressure` in the stats;
   churn falls with its square, cells get slightly wider on screen); below
-  65% and 2% it recovers in 5% steps. The CPU budget grows to 4 ms with the
-  outstanding work.
+  65% and 2% it recovers in 5% steps.
+- **Residency plans run one frame ahead, off the render thread.**
+  Admission on the render thread took 1.5-4 ms of every frame and still
+  managed only ~1500-3000 columns per frame. `ResidencyWorker` keeps one
+  plan in flight: frame N uploads the plan requested in frame N-1. Ordering
+  invariants carry over unchanged because results are uploaded in request
+  order, once each: records evicted by one plan are reused only by the next,
+  and table patches are final values computed on the worker. Everything the
+  render thread reads about residency (stats, `Coverage`, `blocks_exact`,
+  live blocks, diagnostics' table copy) comes with the result, so it matches
+  the GPU state, not the worker's newer state. The plan's job readback is
+  reserved when it is requested. `freeze_residency` neither takes nor
+  requests a plan. A still, idle view requests no plans, so `settled()`
+  becomes true.
+- **Pending priorities follow the eye.** A window's adds are ranked by
+  distance from where it was planned. With admission lagging at speed, the
+  eye flew over columns queued as far while columns it had left were issued
+  first. A level whose queue was ranked 1/16 of its radius from the current
+  eye is re-ranked, in bounded chunks.
 - **Window plans are coalesced.** A new plan is requested only after the
   previous one has been applied; the worker diffs against the last window it
   sent, so one diff spans all motion since. A request per moved frame queued
@@ -269,9 +302,8 @@ so all GPU positions are small.
   frames late and repeat until a newer sample completes, so each sample is
   used once with the job count of the frame it measured (dividing by the
   last frame's jobs overestimated the cost 2-7x). Measured: ~0.22 us per
-  column on an RTX 3060, ~6500 jobs per moving frame. The CPU budget for
-  diffs and admission grows from 1.5 to 3 ms while moving as the backlog
-  reaches 20k columns.
+  column on an RTX 3060, ~6500 jobs per moving frame. The residency
+  worker's CPU budget is 60% of the frame interval (1.5-12 ms).
 - **Pending queues are exact.** Each level's pending columns sit in
   priority buckets with a position index, so a window moving at speed
   removes columns in O(1). A lazy heap kept millions of stale entries and
@@ -284,7 +316,8 @@ so all GPU positions are small.
   stay in the GPU bounds where correctness depends on them). Being
   optimistic here only makes a coarser level draw that terrain.
 - **No frame does unbounded CPU work.** Window diffs and admission are
-  time-budgeted; nothing rehashes or reallocates in bulk on the render
+  time-budgeted on the residency worker (a late plan costs a frame without
+  uploads); nothing rehashes or reallocates in bulk there or on the render
   thread (a 1M-entry `HashMap` doubling cost 70 ms; a table rehash 70-90 ms).
   If you add per-column CPU work, keep it inside the budgeted loops.
 - **Stable LOD dither.** The level-transition threshold is hashed per column,

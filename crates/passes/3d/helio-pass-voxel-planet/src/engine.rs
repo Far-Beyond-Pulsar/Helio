@@ -1,7 +1,7 @@
 //! Helio integration: GPU residency, exact traversal and GBuffer output.
 use crate::grid::Cell;
 use crate::planet::Planet;
-use crate::residency::{Capacity, FrameWork, Residency, NONE};
+use crate::residency::{Capacity, FrameWork, PlanRequest, PlanResult, Residency, ResidencyWorker, NONE};
 use crate::terrain::TerrainProgram;
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, IVec4, Mat4, Vec3, Vec4};
@@ -82,6 +82,9 @@ pub struct Settings {
     pub freeze_residency: bool,
     /// Diagnostics: fixed frame index for the sunlight representative pattern.
     pub frame_override: Option<u32>,
+    /// Diagnostics: keep a copy of the CPU column table as uploaded (see
+    /// `PlanetRenderer::column_table`; copies 32 MB per plan).
+    pub table_snapshots: bool,
     pub capacity: Capacity,
     pub appearance: TerrainAppearance,
 }
@@ -96,6 +99,7 @@ impl Default for Settings {
             residency_hints: true,
             freeze_residency: false,
             frame_override: None,
+            table_snapshots: false,
             capacity: Capacity::default(),
             appearance: TerrainAppearance::default(),
         }
@@ -158,7 +162,13 @@ pub struct PlanetStats {
     pub pool_pages: u32,
     pub active_levels: u32,
     pub finest_level: u32,
+    /// Residency worker CPU time of the last uploaded plan.
     pub plan_cpu_ms: f64,
+    /// Frames whose residency plan was not ready (cumulative; such a frame
+    /// uploads nothing).
+    pub late_plans: usize,
+    /// Pending columns re-ranked against a moved eye (cumulative).
+    pub reranked: usize,
     pub upload_cpu_ms: f64,
     pub encode_cpu_ms: f64,
     pub window_rebuild_ms: f64,
@@ -176,7 +186,7 @@ struct Readback {
     /// Failure entries copied (at most the jobs issued since the last copy).
     entries: u32,
     state: Arc<AtomicBool>,
-    stage: u8, // 0 free, 1 encoded, 2 mapping
+    stage: u8, // 0 free, 1 encoded, 2 mapping, 3 reserved for an in-flight plan's jobs
 }
 
 const PROBE_BYTES: u64 = 128;
@@ -699,7 +709,21 @@ pub struct PlanetRenderer {
     pipelines: Arc<Pipelines>,
     buffers: Buffers,
     screen: Screen,
-    residency: Residency,
+    residency: ResidencyWorker,
+    /// The residency as the GPU holds it: the last uploaded plan's result
+    /// (its work taken).
+    plan: PlanResult,
+    /// Job outcomes read back, for the next plan request.
+    failed: Vec<(u64, u32)>,
+    /// Readback reserved for the in-flight plan's jobs.
+    plan_readback: Option<usize>,
+    /// Planet, eye and level-0 distance of the last plan request.
+    submitted: Option<(Arc<Planet>, DVec3, f64)>,
+    /// Mean interval between encoded frames (ms), for the worker's budget.
+    frame_ms: f64,
+    last_encode: Option<std::time::Instant>,
+    /// `residency_health` was asked for: scan the table in the next plan.
+    want_probe: AtomicBool,
     planet: Arc<Planet>,
     settings: Settings,
     gen_group: wgpu::BindGroup,
@@ -787,7 +811,14 @@ impl PlanetRenderer {
             device: device.clone(),
             queue: queue.clone(),
             screen: Screen::new(device, size),
-            residency: Residency::with_worker(*planet.grid(), settings.capacity),
+            residency: ResidencyWorker::start(*planet.grid(), settings.capacity),
+            plan: PlanResult::initial(*planet.grid()),
+            failed: Vec::new(),
+            plan_readback: None,
+            submitted: None,
+            frame_ms: 16.7,
+            last_encode: None,
+            want_probe: AtomicBool::new(false),
             planet,
             settings,
             gen_group,
@@ -851,17 +882,21 @@ impl PlanetRenderer {
     pub fn hit_buffer(&self) -> &wgpu::Buffer {
         &self.screen.hits
     }
-    /// GPU column hash table and the CPU table it must equal (diagnostics).
+    /// GPU column hash table and the CPU table it must equal once the last
+    /// encoded frame has executed (diagnostics; empty unless
+    /// `Settings::table_snapshots` was set before that frame's plan).
     pub fn column_table(&self) -> (&wgpu::Buffer, &[u32]) {
-        (&self.buffers.table, self.residency.table())
+        (&self.buffers.table, self.plan.table.as_deref().unwrap_or(&[]))
+    }
+    /// Longest column table probe run, entries beyond the GPU probe limit,
+    /// and queued window diffs (diagnostics). The worker scans the table on
+    /// request, so the probe figures trail the call by a frame or two.
+    pub fn residency_health(&self) -> (u32, usize, usize) {
+        self.want_probe.store(true, Ordering::Relaxed);
+        let (longest, beyond) = self.plan.probe.unwrap_or_default();
+        (longest, beyond, self.plan.queued_diffs)
     }
     /// Column records, brick pool and summary blocks (diagnostics).
-    /// Longest column table probe run, entries beyond the GPU probe limit,
-    /// and queued window diffs (diagnostics; scans the table).
-    pub fn residency_health(&self) -> (u32, usize, usize) {
-        let (longest, beyond) = self.residency.table_probe_stats(64);
-        (longest, beyond, self.residency.queued_diffs())
-    }
     pub fn residency_buffers(&self) -> [&wgpu::Buffer; 3] {
         [&self.buffers.records, &self.buffers.pool, &self.buffers.block_state]
     }
@@ -914,7 +949,7 @@ impl PlanetRenderer {
     }
     /// Residency has issued and completed every window column.
     pub fn settled(&self) -> bool {
-        self.residency.idle() && self.readbacks.iter().all(|r| r.stage == 0)
+        self.plan.idle && !self.residency.in_flight() && self.failed.is_empty() && self.readbacks.iter().all(|r| r.stage == 0)
     }
 
     fn frame_uniform(&self, eye: DVec3, size: [u32; 2], lod0: f64, jobs: u32, evictions: u32, sun: Vec3, shadows: bool) -> FrameGpu {
@@ -1004,7 +1039,8 @@ impl PlanetRenderer {
         // >= the cut radius.
         let r_lo = rho - cut;
         let fallback: Vec<f64> = self
-            .residency
+            .plan
+            .coverage
             .fallback_distances(eye)
             .iter()
             .map(|distance| {
@@ -1029,10 +1065,6 @@ impl PlanetRenderer {
     /// Upload this frame's residency changes. Returns (table patches,
     /// summary block patches) appended after the eviction list.
     fn upload(&mut self, work: &FrameWork) -> (u32, u32) {
-        let q = &self.queue;
-        if work.full_table {
-            q.write_buffer(&self.buffers.table, 0, bytemuck::cast_slice(self.residency.table()));
-        }
         for (index, brush) in &work.brush_writes {
             if *index >= self.buffers.brush_capacity {
                 self.grow_brushes(*index + 1);
@@ -1045,32 +1077,14 @@ impl PlanetRenderer {
         if !work.jobs.is_empty() {
             self.queue.write_buffer(&self.buffers.jobs, 0, bytemuck::cast_slice(&work.jobs));
         }
-        // Evictions followed by table patches (slot, value) pairs. The GPU
-        // applies patches in parallel, and backward-shift deletion writes a
-        // slot several times in a frame: each slot is sent once, with its
-        // final value (an earlier value winning left an empty slot inside a
-        // probe run, hiding every column past it).
+        // Evictions followed by table patches (slot, value) pairs and summary
+        // block patches. The GPU applies patches in parallel; the residency
+        // sends each slot once, with its final value.
         let mut words: Vec<u32> = work.evictions.clone();
-        let mut patches = 0;
-        if !work.full_table {
-            let table = self.residency.table();
-            let mut sent = rustc_hash::FxHashSet::default();
-            for (slot, _) in &work.table_writes {
-                if sent.insert(*slot) {
-                    words.push(*slot);
-                    words.push(table[*slot as usize]);
-                    patches += 1;
-                }
-            }
+        for (slot, value) in &work.table_writes {
+            words.extend([*slot, *value]);
         }
-        // A slot released and re-acquired in one frame must end in its last
-        // state; the GPU patches entries in parallel.
-        let mut last = rustc_hash::FxHashMap::default();
-        for (index, (slot, _, _)) in work.block_inits.iter().enumerate() {
-            last.insert(*slot, index);
-        }
-        let block_inits: Vec<_> = work.block_inits.iter().enumerate().filter(|(i, (slot, _, _))| last[slot] == *i).map(|(_, b)| *b).collect();
-        for (slot, bi, bj) in &block_inits {
+        for (slot, bi, bj) in &work.block_inits {
             words.extend([*slot, *bi as u32, *bj as u32]);
         }
         if !words.is_empty() {
@@ -1086,7 +1100,7 @@ impl PlanetRenderer {
             }
             self.queue.write_buffer(&self.buffers.evictions, 0, bytemuck::cast_slice(&words));
         }
-        (patches, block_inits.len() as u32)
+        (work.table_writes.len() as u32, work.block_inits.len() as u32)
     }
 
     fn grow_brushes(&mut self, needed: u32) {
@@ -1138,7 +1152,7 @@ impl PlanetRenderer {
         }
         self.stats.failed_jobs += failed.iter().filter(|(_, s)| *s != 1).count();
         self.stats.overflow_columns += failed.iter().filter(|(_, s)| *s == 1).count();
-        self.residency.requeue(failed);
+        self.failed.extend(failed);
         // Start mapping readbacks encoded in earlier frames.
         for r in &mut self.readbacks {
             if r.stage == 1 {
@@ -1172,14 +1186,14 @@ impl PlanetRenderer {
             return;
         }
         let cap = &self.settings.capacity;
-        let rs = &self.residency.stats;
+        let rs = &self.plan.stats;
         let records = (rs.resident_columns + rs.pending_columns) as f64 / f64::from(cap.records);
         // `free_units` is 0 until the first allocator readback.
         let pool = if self.stats.free_units == 0 { 0.0 } else { 1.0 - self.stats.free_units as f64 / f64::from(cap.pool_units) };
         // Only wanted columns count: removals a pressure step itself queues
         // must not raise it further. A still camera's backlog is loading,
         // not churn: it never raises pressure and never blocks recovery.
-        let outstanding = rs.pending_columns + self.residency.queued_adds();
+        let outstanding = rs.pending_columns + self.plan.queued_adds;
         let backlog = if moving { outstanding as f64 / (rs.resident_columns + outstanding).max(1) as f64 } else { 0.0 };
         let pressure = if records > 0.85 || pool > 0.85 || (backlog > 0.1 && outstanding > 50_000) {
             // Churn falls with the square of the pressure; a deep backlog
@@ -1239,6 +1253,70 @@ impl PlanetRenderer {
         }
     }
 
+    /// Take the finished residency plan, whose work this frame uploads, and
+    /// request the next one, which the worker plans while this frame is
+    /// encoded and executed. Returns the work and the readback reserved for
+    /// its jobs.
+    fn exchange_plan(&mut self, eye: DVec3, lod0: f64, moving: bool) -> (FrameWork, Option<usize>) {
+        let mut work = FrameWork::default();
+        let mut readback = None;
+        if let Some(mut result) = self.residency.try_take() {
+            work = std::mem::take(&mut result.work);
+            readback = self.plan_readback.take();
+            self.stats.plan_cpu_ms = result.plan_ms;
+            result.probe = result.probe.or(self.plan.probe);
+            self.plan = result;
+        } else if self.residency.in_flight() {
+            self.stats.late_plans += 1;
+        }
+        if !self.residency.in_flight() && self.wants_plan(eye, lod0) {
+            // Generation budget: small while the view moves (frame pacing),
+            // large when it is still (fast convergence), from the measured
+            // job cost. Every job's outcome must reach the CPU (a failure the
+            // CPU never sees leaves a resident hole that is never retried):
+            // without a free readback to reserve, the plan issues no jobs.
+            let target_ms = if moving { 1.5 } else { 6.0 };
+            let free = self.readbacks.iter().position(|r| r.stage == 0);
+            let budget = free.map_or(0, |_| {
+                ((target_ms / self.ms_per_job.max(1e-5)) as usize)
+                    .clamp(256, self.settings.job_budget.min(self.settings.capacity.max_jobs as usize))
+            });
+            if let Some(index) = free {
+                self.readbacks[index].stage = 3;
+                self.plan_readback = Some(index);
+            }
+            // Most of the time until the next frame takes the result (a late
+            // result costs a frame without uploads).
+            let cpu_ms = (self.frame_ms * 0.6).clamp(if moving { 1.5 } else { 4.0 }, 12.0);
+            self.stats.job_budget = budget;
+            self.residency.submit(PlanRequest {
+                planet: self.planet.clone(),
+                eye,
+                lod0,
+                budget,
+                cpu_budget: std::time::Duration::from_secs_f64(cpu_ms * 1.0e-3),
+                failed: std::mem::take(&mut self.failed),
+                table: self.settings.table_snapshots,
+                probe: self.want_probe.swap(false, Ordering::Relaxed),
+            });
+            self.submitted = Some((self.planet.clone(), eye, lod0));
+        }
+        (work, readback)
+    }
+
+    /// Whether a plan can change anything: residency is still busy, job
+    /// outcomes wait, or the edits or view changed since the last request
+    /// (the residency replans windows once the eye moves two voxels).
+    fn wants_plan(&self, eye: DVec3, lod0: f64) -> bool {
+        !self.plan.idle
+            || !self.failed.is_empty()
+            || self.submitted.as_ref().is_none_or(|(planet, at, requested)| {
+                !Arc::ptr_eq(planet, &self.planet)
+                    || at.distance(eye) > self.planet.grid().voxel_size()
+                    || (requested - lod0).abs() > lod0 * 0.005
+            })
+    }
+
     /// Encode one frame: residency, primary visibility, shading and GBuffer.
     /// The shared camera supplies orientation, projection and jitter. Its
     /// translation is replaced only in this pass's private camera buffer.
@@ -1282,48 +1360,32 @@ impl PlanetRenderer {
         self.poll_readbacks();
         let tan_half = 1.0 / f64::from(camera_data.proj[5]).abs().max(1e-6);
         let lod0 = Residency::lod_distance(self.planet.grid(), tan_half, size[1], f64::from(self.settings.lod_pixels)) / self.lod_pressure;
-        let started = std::time::Instant::now();
-        // Generation budget: small while the view moves (frame pacing), large
-        // when it is still (fast convergence), from the measured job cost.
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_encode {
+            // Idle editor gaps are not frame time.
+            let ms = (now - last).as_secs_f64() * 1000.0;
+            self.frame_ms = self.frame_ms * 0.9 + ms.min(50.0) * 0.1;
+        }
+        self.last_encode = Some(now);
         let moving = self.last_eye.is_none_or(|e| e.distance(frame.eye) > 0.01);
         self.last_eye = Some(frame.eye);
         self.update_lod_pressure(frame_num, moving);
-        let target_ms = if moving { 1.5 } else { 6.0 };
-        // CPU for applying window diffs and admitting columns: small while
-        // moving (a big diff spreads over frames instead of freezing one),
-        // growing to 4 ms with the backlog (a new region streams in ~2x
-        // faster; admission costs ~0.3 us per column, diffs about as much).
-        // Queued diff operations count: while a coalesced plan is applied,
-        // nothing may be pending yet the windows lag.
-        let outstanding = self.residency.stats.pending_columns + self.residency.queued_ops();
-        let backlog = (outstanding as f64 / 20_000.0).min(1.0);
-        let cpu_ms = if moving { 1.5 + 2.5 * backlog } else { 4.0 };
-        self.residency.set_cpu_budget(Some(std::time::Duration::from_secs_f64(cpu_ms * 1.0e-3)));
-        // Every job's outcome must reach the CPU (a failure the CPU never
-        // sees leaves a resident hole that is never retried): no free
-        // readback, no jobs this frame.
-        let budget = if self.readbacks.iter().any(|r| r.stage == 0) {
-            ((target_ms / self.ms_per_job.max(1e-5)) as usize)
-                .clamp(256, self.settings.job_budget.min(self.settings.capacity.max_jobs as usize))
+        // Frozen: no plan is taken or started, so renders see identical GPU
+        // state (an in-flight plan waits).
+        let (work, plan_readback) = if self.settings.freeze_residency {
+            (FrameWork::default(), None)
         } else {
-            0
-        };
-        let work = if self.settings.freeze_residency {
-            FrameWork::default()
-        } else {
-            self.residency.plan(&self.planet, frame.eye, lod0, budget)
+            self.exchange_plan(frame.eye, lod0, moving)
         };
         self.last_jobs = work.jobs.len();
         self.stats.us_per_job = self.ms_per_job * 1000.0;
-        self.stats.job_budget = budget;
         if self.frame_jobs.len() == 16 {
             self.frame_jobs.pop_front();
         }
         self.frame_jobs.push_back((frame_num, work.jobs.len()));
-        self.stats.plan_cpu_ms = started.elapsed().as_secs_f64() * 1000.0;
         let uploading = std::time::Instant::now();
         let (patches, block_patches) = self.upload(&work);
-        if let Some(live) = self.residency.take_live_blocks() {
+        if let Some(live) = self.plan.live_blocks.take() {
             let bytes = (live.len() * 4) as u64;
             if bytes > self.buffers.live_blocks.size() {
                 self.buffers.live_blocks = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1334,10 +1396,10 @@ impl PlanetRenderer {
                 });
             }
             if !live.is_empty() {
-                self.queue.write_buffer(&self.buffers.live_blocks, 0, bytemuck::cast_slice(live));
+                self.queue.write_buffer(&self.buffers.live_blocks, 0, bytemuck::cast_slice(&live));
             }
         }
-        let live_blocks = self.residency.live_block_count() as u32;
+        let live_blocks = self.plan.live_block_count as u32;
         self.stats.upload_cpu_ms = uploading.elapsed().as_secs_f64() * 1000.0;
         let encoding = std::time::Instant::now();
         let jobs = work.jobs.len() as u32;
@@ -1347,7 +1409,7 @@ impl PlanetRenderer {
         uniform.extra[1] = crate::residency::block_region();
         uniform.extra[2] = block_patches;
         uniform.extra[3] = live_blocks;
-        uniform.hints[0] = u32::from(self.settings.residency_hints && self.residency.blocks_exact());
+        uniform.hints[0] = u32::from(self.settings.residency_hints && self.plan.blocks_exact);
         self.queue.write_buffer(&self.buffers.frame, 0, bytemuck::bytes_of(&uniform));
         // All terrain rays (including sunlight rays reconstructed from mesh
         // depth) are offsets from PlanetFrame::eye. Using the scene's world
@@ -1444,11 +1506,21 @@ impl PlanetRenderer {
         if let Some(p) = &mut self.profiler {
             p.end_pass(encoder, "planet_residency");
         }
-        // Allocator counters and this frame's failed jobs (the budget is 0
-        // without a free readback), then the failure list restarts. Counters
-        // alone are sampled every 30 frames.
-        let sample = jobs > 0 || frame_num % 30 == 0;
-        if let Some(r) = self.readbacks.iter_mut().find(|r| r.stage == 0).filter(|_| sample) {
+        // Allocator counters and this frame's failed jobs (into the readback
+        // reserved when the plan was requested; without a free one its job
+        // budget was 0), then the failure list restarts. Counters alone are
+        // sampled every 30 frames.
+        let readback = match plan_readback {
+            Some(index) if jobs > 0 => Some(index),
+            reserved => {
+                if let Some(index) = reserved {
+                    self.readbacks[index].stage = 0;
+                }
+                self.readbacks.iter().position(|r| r.stage == 0).filter(|_| frame_num % 30 == 0)
+            }
+        };
+        debug_assert!(jobs == 0 || readback.is_some(), "jobs without a readback");
+        if let Some(r) = readback.map(|index| &mut self.readbacks[index]) {
             encoder.copy_buffer_to_buffer(&self.buffers.alloc, 0, &r.buffer, 0, PROBE_BYTES);
             if jobs > 0 {
                 encoder.copy_buffer_to_buffer(&self.buffers.failures, 0, &r.buffer, PROBE_BYTES, u64::from(jobs) * FAILURE_BYTES);
@@ -1542,19 +1614,20 @@ impl PlanetRenderer {
             p.resolve_queries(encoder, frame_num);
         }
         self.stats.encode_cpu_ms = encoding.elapsed().as_secs_f64() * 1000.0;
-        let rs = self.residency.stats;
+        let rs = self.plan.stats;
         self.stats.resident_columns = rs.resident_columns;
         self.stats.pending_columns = rs.pending_columns;
-        self.stats.jobs = rs.jobs;
-        self.stats.evictions = rs.evictions;
+        self.stats.jobs = jobs as usize;
+        self.stats.evictions = evictions as usize;
         self.stats.active_levels = rs.active_levels;
         self.stats.finest_level = rs.finest_level;
         self.stats.window_rebuild_ms = rs.window_rebuild_ms;
         self.stats.table_refused = rs.table_refused;
+        self.stats.reranked = rs.reranked;
         self.stats.lod0_distance = lod0;
         self.stats.pool_pages = self.settings.capacity.pool_units / 512;
         self.stats.logical_bytes = self.buffers.bytes + u64::from(size[0]) * u64::from(size[1]) * (32 + 16 + 8);
-        if self.residency.idle() {
+        if self.plan.idle {
             self.initial_complete = true;
         }
         self.stats.ready = self.initial_complete;

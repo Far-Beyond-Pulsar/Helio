@@ -1695,8 +1695,8 @@ fn long_route(flight: &mut Flight, secs: f64) {
         let (longest, beyond, diffs) = flight.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap().residency_health();
         let (a, b, w) = blocky(flight);
         eprintln!(
-            "LONG {stage} t {t:6.1} h {height:8.0} v {speed:7.0} resident {} pending {} diffs {diffs} jobs {} budget {} failed {} free_pages {}/{} free_units {:.0}% recycles {} lod_pressure {:.2} probe {longest} beyond64 {beyond} plan {:.2} blocky>2px {:.2}% >4px {:.2}% widest {w:.1}",
-            stats.resident_columns, stats.pending_columns, stats.jobs, stats.job_budget, stats.failed_jobs, stats.free_pages, stats.pool_pages, stats.free_units as f64 / (f64::from(stats.pool_pages) * 512.0) * 100.0, stats.recycles, stats.lod_pressure, stats.plan_cpu_ms, a * 100.0, b * 100.0
+            "LONG {stage} t {t:6.1} h {height:8.0} v {speed:7.0} resident {} pending {} diffs {diffs} jobs {} budget {} failed {} free_pages {}/{} free_units {:.0}% recycles {} lod_pressure {:.2} probe {longest} beyond64 {beyond} plan {:.2} late {} reranked {} blocky>2px {:.2}% >4px {:.2}% widest {w:.1}",
+            stats.resident_columns, stats.pending_columns, stats.jobs, stats.job_budget, stats.failed_jobs, stats.free_pages, stats.pool_pages, stats.free_units as f64 / (f64::from(stats.pool_pages) * 512.0) * 100.0, stats.recycles, stats.lod_pressure, stats.plan_cpu_ms, stats.late_plans, stats.reranked, a * 100.0, b * 100.0
         );
         b
     };
