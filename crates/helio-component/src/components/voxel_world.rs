@@ -27,7 +27,7 @@ use helio_voxel_data::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditJ
 use pulsar_scene_model::components::Transform;
 use pulsar_scenedb::{Entity, World};
 
-use super::{VoxelTerrainComponent, VoxelWorldShape};
+use super::{BlockData, VoxelTerrainComponent, VoxelWorldShape};
 
 /// The world of a terrain form and generator.
 pub fn world_recipe(shape: VoxelWorldShape, planet_radius: f64, plane_size: f64, voxel_size: f64, source: TerrainSource) -> PlanetRecipe {
@@ -160,7 +160,8 @@ pub fn terrain_world(world: &World, entity: Entity) -> Result<Arc<Planet>, Strin
 
 /// Append edits to a terrain's journal after checking that each applies.
 pub fn append_edits(world: &mut World, entity: Entity, edits: Vec<VoxelBrushEdit>) -> Result<(), String> {
-    let grid = *terrain_world(world, entity)?.grid();
+    let planet = terrain_world(world, entity)?;
+    let grid = *planet.grid();
     let component = world.get::<VoxelTerrainComponent>(entity).ok_or("the entity has no voxel terrain")?;
     if !component.editable {
         return Err("the voxel terrain is not editable".into());
@@ -171,10 +172,70 @@ pub fn append_edits(world: &mut World, entity: Entity, edits: Vec<VoxelBrushEdit
         }
         planet_brush(edit).resolve(&grid)?;
     }
+    // Capture break payloads from the pre-edit world before appending to the
+    // authoritative component journal. This keeps set_block and bulk
+    // fill/remove methods on one consistent event path.
+    let mut broken = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for edit in edits.iter().filter(|edit| edit.op == VoxelBrushOp::Remove) {
+        for (cell, center) in removed_block_centres(&planet, edit)? {
+            let old_material = planet.material(cell);
+            if old_material != material::AIR && seen.insert(cell) {
+                broken.push(BlockData {
+                    x: center.x,
+                    y: center.y,
+                    z: center.z,
+                    material: old_material,
+                });
+            }
+        }
+    }
     let mut component = world.get_mut::<VoxelTerrainComponent>(entity).ok_or("the entity has no voxel terrain")?;
     component.edits.extend(edits);
+    component.pending_block_broken.extend(broken);
     component.source_revision = component.source_revision.wrapping_add(1);
     Ok(())
+}
+
+/// Enumerate exact base-cell centres covered by a removal brush using the
+/// same resolved half-cell containment predicate as the terrain renderer.
+fn removed_block_centres(
+    planet: &Planet,
+    edit: &VoxelBrushEdit,
+) -> Result<Vec<(helio_pass_voxel_planet::Cell, DVec3)>, String> {
+    let grid = planet.grid();
+    let mut cells = std::collections::HashSet::new();
+    for face_brush in planet_brush(edit).resolve(grid)? {
+        let radius = i64::from(face_brush.radius_half);
+        let center = face_brush.center;
+        let low = center.map(|value| (i64::from(value) - radius - 1).div_euclid(2));
+        let high = center.map(|value| (i64::from(value) + radius - 1).div_euclid(2));
+        for k in low[2]..=high[2] {
+            for j in low[1]..=high[1] {
+                for i in low[0]..=high[0] {
+                    let [i, j, k] = [i as i32, j as i32, k as i32];
+                    let sample = [
+                        helio_pass_voxel_planet::edits::center_half(i, 0),
+                        helio_pass_voxel_planet::edits::center_half(j, 0),
+                        helio_pass_voxel_planet::edits::center_half(k, 0),
+                    ];
+                    if !face_brush.contains(sample) {
+                        continue;
+                    }
+                    let position = grid.position(
+                        face_brush.face(),
+                        [f64::from(i) + 0.5, f64::from(j) + 0.5, f64::from(k) + 0.5],
+                    );
+                    let (cell, _) = grid.locate(position);
+                    cells.insert(cell);
+                }
+            }
+        }
+    }
+    Ok(cells
+        .into_iter()
+        .map(|cell| (cell, grid.cell_center(cell)))
+        .collect())
 }
 
 /// The edit that makes the cell containing `p` exactly `material` (0 air).
@@ -248,7 +309,8 @@ impl VoxelTerrainComponent {
     #[world_method(category = "Voxel")]
     fn set_block(world: &mut World, entity: Entity, x: f64, y: f64, z: f64, material: u32) -> Result<(), String> {
         let planet = terrain_world(world, entity)?;
-        let edit = block_edit(&planet, position(x, y, z)?, material);
+        let point = position(x, y, z)?;
+        let edit = block_edit(&planet, point, material);
         append_edits(world, entity, vec![edit])
     }
 

@@ -5,7 +5,7 @@
 //! renderer-independent data API. No persistence behavior is implied by the
 //! runtime data fields.
 
-use engine_class_derive::engine_class;
+use engine_class_derive::{component_events, engine_class};
 use helio_voxel_data::{
     VoxelEditJournal,
     VoxelStoredPayload, VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION,
@@ -28,6 +28,28 @@ use std::{
 /// chunk keys (for example signed XYZ bit patterns plus an LOD word).
 fn empty_payload_store() -> VoxelPayloadStore {
     Arc::new(RwLock::new((0, HashMap::new())))
+}
+
+/// Typed payload for the terrain's block-broken Blueprint event. Coordinates
+/// are the exact world-space centre of the removed base cell; `material` is
+/// the material that was present before the edit.
+#[engine_class(no_register)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BlockData {
+    #[property]
+    pub x: f64,
+    #[property]
+    pub y: f64,
+    #[property]
+    pub z: f64,
+    #[property]
+    pub material: u32,
+}
+
+#[component_events(class = "VoxelTerrainComponent")]
+pub trait TerrainEvents {
+    #[bp_event]
+    fn block_broken() -> BlockData {}
 }
 
 fn default_voxel_generator_version() -> u32 {
@@ -275,6 +297,10 @@ pub struct VoxelTerrainComponent {
     /// clones copy the index/revision and share immutable payload allocations.
     #[serde(skip)]
     payloads: VoxelPayloadStore,
+    /// Runtime-only events committed by world methods and drained after the
+    /// method releases its World borrow. Clones start with an empty outbox.
+    #[serde(skip)]
+    pub(crate) pending_block_broken: Vec<BlockData>,
     /// Whether this terrain source participates in rendering and queries.
     #[property]
     pub enabled: bool,
@@ -355,6 +381,7 @@ impl Default for VoxelTerrainComponent {
     fn default() -> Self {
         Self {
             payloads: empty_payload_store(),
+            pending_block_broken: Vec::new(),
             enabled: true,
             shape: VoxelWorldShape::default(),
             planet_radius: default_planet_radius(),
@@ -413,6 +440,7 @@ impl Clone for VoxelTerrainComponent {
     fn clone(&self) -> Self {
         Self {
             payloads: clone_payload_store(&self.payloads),
+            pending_block_broken: Vec::new(),
             enabled: self.enabled,
             shape: self.shape,
             planet_radius: self.planet_radius,
