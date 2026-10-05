@@ -25,7 +25,16 @@ fn hydrate_light_component(
     entity: pulsar_scenedb::Entity,
     data: &serde_json::Value,
 ) -> Result<(), String> {
-    let parsed: LightComponent = serde_json::from_value(data.clone()).map_err(|error| error.to_string())?;
+    // Levels store component values in the flat property shape consumed by
+    // the editor. `LightComponent`'s Rust representation groups those same
+    // properties into sub-props (`general`, `intensity`, etc.), so direct
+    // serde only works for the newer nested representation. Accept both: this
+    // keeps projects authored before the sub-props migration load at runtime.
+    let parsed: LightComponent = if data.get("general").is_some() {
+        serde_json::from_value(data.clone()).map_err(|error| error.to_string())?
+    } else {
+        LightComponent::from_component_data(data)
+    };
 
     if parsed.general.enabled {
         parsed.sync_gpu_mirror(world, entity);
