@@ -222,7 +222,7 @@ impl Planet {
                 let (bi, bj) = (cell.i & !7, cell.j & !7);
                 let slope = terrain::block_slope(|x, y| self.column_top(cell.face, bi + x, bj + y, 0), cell.i & 7, cell.j & 7);
                 let p = self.grid.domain_point(cell.face, cell.i, cell.j, 0);
-                let top_height = top * self.grid.layer_mm() as i32;
+                let top_height = self.column_height(cell.face, cell.i, cell.j, 0);
                 self.field.ground_material(p, top_height, top - 1 - cell.k, slope, cell.k) & material::ID
             }
         }

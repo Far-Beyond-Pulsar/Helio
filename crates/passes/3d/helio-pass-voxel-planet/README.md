@@ -3,8 +3,10 @@
 Destructible voxel worlds for Helio: Earth-sized cube-sphere planets, finite
 planes and effectively infinite planes, built from exact voxels of 0.1 m to
 1 m, fully editable, and rendered by tracing every pixel through a GPU-driven
-clipmap. There is no smooth or meshed terrain and no enlarged-block LOD: every
-visible surface is a real cell of the canonical grid at some level.
+clipmap. Near geometry and gameplay use the authored voxel grid. Distant
+columns without geometry edits retain fractional radial height and filtered
+slope lighting so sub-pixel terrain keeps its relief without tracing every
+tiny voxel.
 
 This document maps the system for people who will work on it: what each part
 does, how a frame flows, which invariants hold it together, why things are
@@ -26,12 +28,12 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
 
 ## Goals and non-goals
 
-- Crisp voxels at every distance: near cells are cubes; far cells are the
-  same field sampled at a coarser level, shaded with filtered appearance so
-  sub-pixel cells do not alias. No meshes, no smooth LOD surface.
+- Crisp near voxels and stable distant relief: filter sub-pixel detail while
+  preserving visible landforms, materials and edits, without visible LOD steps.
 - One world, two consumers: the CPU (collision, ray casts, edits, gameplay
   queries) and the GPU (streaming, rendering) evaluate the same integer field
-  and the same edits and agree to the bit.
+  and the same edits. Field evaluations agree to the bit; distant rendering
+  filters their appearance without changing the authored world.
 - Space to ground in seconds: a camera can fall from orbit to walking height
   at the editor's altitude-proportional speed while residency keeps up.
 - Destruction at scale: tens of thousands of edits stay exact and cheap.
@@ -59,7 +61,7 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
 | `shaders/common.wgsl` | GPU residency structures: column records, hash lookup, summary blocks. |
 | `shaders/generate.wgsl` | GPU column generation, brick-run allocation and publication (evict -> generate -> count -> refill -> allocate -> fixup -> publish). |
 | `shaders/horizon.wgsl` | Directional sky bound: per azimuth sector and distance bucket, the elevation that clears all terrain. |
-| `shaders/trace.wgsl` | Exact hierarchical traversal of the canonical grid. |
+| `shaders/trace.wgsl` | Hierarchical grid traversal with authored radial tops for unedited distant columns. |
 | `shaders/surface.wgsl` | Primary rays, shading (materials, filtered appearance, AO), traced sunlight. |
 | `shaders/gbuffer.wgsl`, `shaders/view.wgsl` | GBuffer publication (depth-tested against meshes) and shared view helpers. |
 | `tests/gpu.rs` | GPU correctness tests (see [Tests](#tests)). |
@@ -106,9 +108,15 @@ the CPU raycast what the GPU draws.
   continent wavelengths is constant over metres and steps by one unit; scaled
   by kilometres of relief that became long straight terraces.
 - Detail finer than a level's footprint is omitted at that level: coarse
-  levels are band-limited point samples of the same field, not a separate
-  smooth approximation. That is why LOD transitions never change the shape of
-  the land, only its resolution.
+  levels are band-limited point samples of the same field. Landform display
+  generation retains the conditional mean of unresolved ridges, rather than
+  dropping their mountain height. This lookup is baked once per recipe;
+  canonical field queries and level 0 remain unchanged. Levels 1 and above
+  retain fractional radial tops unless Add/Remove edits change their geometry.
+  Short low-level spans store exact base-layer tops in the existing byte header.
+  Paint retains that relief. Slope lighting and face detail follow the authored
+  pixel footprint, using existing raw climate samples rather than tracing finer
+  cells.
 - Heights are relative to the datum (the planet radius or the plane's y = 0)
   and may be negative: lowland and ocean basins sit below it. Nothing in the
   pipeline may clamp heights to the datum (see the band-top invariant below).
@@ -145,6 +153,11 @@ The pass is a GBuffer-stage pass in Helio's deferred graph. The frontend
 publishes a `PlanetFrame` (eye in f64 world metres, planet, sun) into a shared
 mailbox; frames are camera-relative (the renderer's world origin is the eye),
 so all GPU positions are small.
+
+Helio's sky pass accepts a `PlanetarySky` with the f64 eye, planet radius
+and sun direction. Its lookup follows the radial horizon, including from
+orbit; an authored scene sky takes precedence. `ambient_radiance` supplies
+dim diffuse light on the night side; set it to zero for solar-only lighting.
 
 ### CPU: `Residency::plan` (residency worker thread)
 
@@ -198,7 +211,9 @@ they are once its work is on the GPU. Steps:
    class, write mixed bricks, publish the record, and raise the column's
    summary-block tops and the level's top. Evicted runs return to free lists.
    Failed jobs (scratch or pool full) append their keys to a failure list
-   that the CPU reads back and retries.
+   that the CPU reads back and retries. Natural columns reconstruct exact
+   cell occupancy from their stored tops; Add/Remove columns keep arbitrary
+   mixed-brick occupancy.
 3. **Horizon** (`horizon.wgsl`): the directional sky bound. Resident summary
    blocks are binned by azimuth sector and distance bucket around the eye;
    each bucket stores the lowest elevation that clears it.
@@ -323,6 +338,12 @@ they are once its work is on the GPU. Steps:
 - **Stable LOD dither.** The level-transition threshold is hashed per column,
   not per frame, so a moving camera sees each column change level once
   instead of flickering between two levels while TAA history is rejected.
+- **A level switch is not a surface.** When a ray changes level, the new
+  level may already be solid at the cursor although the ray has only crossed
+  air at the old one. `trace.wgsl` keeps walking the current level there
+  (`level_contains_solid`) instead of publishing an interior hit with the
+  last, unrelated face normal. Without that check, moving cameras saw grey
+  patches sweep across the terrain in waves along transition rings.
 - **Camera-relative frames.** All GPU positions are relative to the eye.
   Anything defined in world space (overlays, billboards, SceneDB rows) must
   be rebased by `PrepareContext::world_origin`. Rays toward the far plane must
@@ -370,6 +391,7 @@ times come from timestamps.
 | `HELIO_VOXEL_FLIGHT_QUICK=1`, `_GROUND_ONLY=1`, `_CPU_PROBE=1` | Short timing probe, ground audits only, CPU per pass. |
 | `HELIO_VOXEL_PLAN_TRACE=<ms>` | Logs residency plan phases of frames taking over `<ms>` (10 if not a number). |
 | `HELIO_VOXEL_LOD_DITHER`, `HELIO_VOXEL_NO_HORIZON`, `HELIO_VOXEL_NO_FAILSAFE` | Override the dither width; disable the sky bound; disable its fail-safe (A/B timing). |
+| `HELIO_VOXEL_COARSE_RELIEF=0`, `HELIO_VOXEL_FAR_RELIEF=0` | Disable fractional radial tops or raw-climate slope lighting for A/B comparisons. Set before loading terrain. |
 
 Measuring pitfalls: synchronous readbacks (audits, probes, captures) idle
 the GPU and the driver drops its clock (frames right after them show 210 MHz
@@ -402,7 +424,20 @@ voxel_pass_graph` (the pass inside the deferred graph, editor overlays).
   the GPU table equals the CPU table every frame while moving; the local
   terrain bound holds for sampled columns and is local over lowland.
 - Graph: settles, resizes and drops the source in the deferred graph; editor
-  overlays stay in world space in camera-relative frames.
+  overlays stay in world space in camera-relative frames; the planetary sky
+  follows the eye and sun, has no wedges from orbit and keeps a dim shadowed
+  hemisphere; appearance edits show in one frame without rebuilding residency.
+- Appearance and relief (one file each): `grey_patch` (level transitions
+  enter the surface, not subsoil; alpine features survive distance),
+  `coarse_relief*`, `column_relief`, `raw_sphere_relief`, `far_relief`,
+  `mixed_brick_range` (fractional tops, heightfield columns, paint and
+  edits), `ridge_envelope` (display generation keeps ridge mass; canonical
+  queries stay exact), `coherent_relief`, `material_filter`, `face_local_uv`,
+  `shadow_receiver` (filtered materials, slopes, soil lips, grazing faces and
+  shadow origins). Windows want complete 4x4 blocks
+  (`windows::tests`). Two far-relief checks are `#[ignore]`d as known defects
+  present before this layout too: one L12 pixel's relief normal at 0.3 m, and
+  one pixel's material id under raw sphere relief.
 
 ## Extending
 
@@ -416,8 +451,15 @@ settings rebuilds the world without recompiling shaders; pipelines are keyed
 by program.
 
 **A material.** Add the id to `terrain::material` and `world.wgsl`, its
-colour to `palette` in `surface.wgsl`, and to editor-facing enums (Pulsar's
-`VoxelTerrainMaterial`).
+default colour and roughness to `TerrainAppearance` in `engine.rs`, and to
+editor-facing enums (Pulsar's `VoxelTerrainMaterial`).
+
+**Appearance.** `PlanetPass::set_appearance` updates palette, grass colours
+and detail without rebuilding terrain. RGB is sRGB; roughness is linear.
+When it returns `true`, reset temporal colour history to show the change in
+an idle viewport.
+Unedited Landform rock has a world-space weathered surface coating;
+canonical material ids, underlying strata and explicit paint are unchanged.
 
 **A brush shape.** Extend `BrushShape`, its per-face resolution in
 `edits.rs`, the containment test in both `edits.rs` and `generate.wgsl`

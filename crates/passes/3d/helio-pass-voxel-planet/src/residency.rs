@@ -396,6 +396,8 @@ pub struct Residency {
     /// CPU time per `plan` for applying diffs and admitting columns; `None`
     /// is unbounded (deterministic, for tests).
     cpu_budget: Option<std::time::Duration>,
+    /// Traversal level-transition dither (see `set_lod_dither`).
+    lod_dither: f64,
 }
 
 /// A window diff being applied: removes first, then (for a level switched
@@ -449,6 +451,7 @@ impl Residency {
             diffs: VecDeque::new(),
             catching_up: vec![0; grid.levels() as usize],
             cpu_budget: None,
+            lod_dither: 0.25,
         }
     }
 
@@ -650,6 +653,12 @@ impl Residency {
         self.cpu_budget = budget;
     }
 
+    /// Width of the traversal's stochastic level transition; windows cover
+    /// the whole band in which a level can be selected.
+    pub fn set_lod_dither(&mut self, dither: f64) {
+        self.lod_dither = dither;
+    }
+
     /// Queue a window diff; [`Self::apply_queued`] applies it in order.
     fn apply(&mut self, update: WindowUpdate) {
         for diff in update.levels {
@@ -776,6 +785,7 @@ impl Residency {
         let request = WindowRequest {
             eye,
             lod0,
+            lod_dither: self.lod_dither,
             outer_radius: planet.outer_radius(),
             planet: Some(planet.clone()),
             serial: self.requested + 1,
@@ -783,6 +793,7 @@ impl Residency {
         let changed = self.last_request.as_ref().is_none_or(|last| {
             last.eye.distance(eye) > self.grid.voxel_size() * 2.0
                 || (last.lod0 - lod0).abs() > lod0 * 0.01
+                || last.lod_dither != request.lod_dither
                 || last.outer_radius != request.outer_radius
         });
         // Coalesce: no new plan while the last one is outstanding or its
@@ -943,6 +954,7 @@ impl Residency {
         let started = std::time::Instant::now();
         self.requeue(request.failed);
         self.set_cpu_budget(Some(request.cpu_budget));
+        self.set_lod_dither(request.lod_dither);
         let work = self.plan(&request.planet, request.eye, request.lod0, request.budget);
         PlanResult {
             work,
@@ -1055,6 +1067,8 @@ pub struct PlanRequest {
     pub planet: std::sync::Arc<Planet>,
     pub eye: DVec3,
     pub lod0: f64,
+    /// Traversal level-transition dither (`Residency::set_lod_dither`).
+    pub lod_dither: f64,
     /// Maximum column jobs.
     pub budget: usize,
     /// CPU time for diffs, re-ranking and admission.

@@ -325,8 +325,65 @@ fn column_hint(level: u32, face: u32, ci: i32, cj: i32) -> u32 {
     let b = vec2<i32>(ci >> 2u, cj >> 2u);
     let e = block_state[block_slot(level, face, 1u, b.x, b.y)];
     if e.w == 16 && all(e.xy == b) { return 1u; }
+    // A finite face may end inside a tier-1 block. Only its in-world
+    // columns can be published; interior blocks still require all 16.
+    let cols = cells_at(level) >> 3u;
+    if (cols & 3) != 0 && all(b >= vec2<i32>(0)) && all(e.xy == b) {
+        let extent = clamp(vec2<i32>(cols) - b * 4, vec2<i32>(0), vec2<i32>(4));
+        let expected = extent.x * extent.y;
+        if expected > 0 && e.w == expected { return 1u; }
+    }
     if level + 1u >= u32(frame.layer_i.z) { return 2u; }
     return 0u;
+}
+
+// Changing resolution is not a ray/solid boundary. A different level can
+// already be solid at the cursor, although the ray has only visited air at
+// its current level. Keep walking the current field in that overlap instead
+// of publishing an interior hit with the last (unrelated) face normal.
+// Unedited coarse columns keep an authored-height remainder in their
+// header. Occupancy and all summaries enclose it with a ceil-height top.
+fn relief_height(c: Column, i: i32, j: i32, level: u32, fraction: u32) -> f32 {
+    let top = column_top(c, u32(i & 7), u32(j & 7));
+    var correction = 0.0;
+    if fraction != 0u { correction = (1.0 - f32(fraction) / 65536.0) * f32(1u << level) * frame.layer.y; }
+    return layer_height(top << level) - correction;
+}
+
+// First inward crossing of an arbitrary radial surface; no crossing means
+// the conservative top voxel was only a broad-phase overlap (including
+// grazing silhouette rays). The angular DDA then moves to the next cell.
+fn relief_enter(r: Ray, height: f32, t: f32) -> f32 {
+    if is_plane() {
+        if r.ol >= 0.0 { return 3.0e38; }
+        let enter = (height - r.eo) / r.ol;
+        if enter < t - abs(t) * 1e-6 { return 3.0e38; }
+        return max(enter, t);
+    }
+    if t >= -r.b { return 3.0e38; }
+    let c = 2.0 * frame.eye.w * (height - r.eo) + (height * height - r.ee);
+    let discriminant = r.b * r.b + c;
+    if discriminant < 0.0 { return 3.0e38; }
+    let enter = -c / (-r.b + sqrt(discriminant));
+    if enter < t - abs(t) * 1e-6 { return 3.0e38; }
+    return max(enter, t);
+}
+
+fn level_contains_solid(c: Cursor, record: u32, r: Ray, t: f32) -> bool {
+    let col = records[record];
+    if (col.info & INFO_RELIEF) != 0u && column_tops_fit(col) {
+        let fraction = column_relief_fraction(col, u32(c.i & 7), u32(c.j & 7));
+        if fraction != 0u { return height_rel(r, t) <= relief_height(col, c.i, c.j, c.level, fraction); }
+    }
+    if (col.info & INFO_HEIGHTFIELD) != 0u {
+        return c.k < column_top(col, u32(c.i & 7), u32(c.j & 7));
+    }
+    if c.k < col.k_lo * 8 { return true; }
+    let band = (c.k >> 3u) - col.k_lo;
+    if band >= i32(band_count(col)) { return false; }
+    let s = brick_state(col, u32(band));
+    if s.x == 2u { return brick_bit(s.y, u32(c.i & 7), u32(c.j & 7), u32(c.k & 7)); }
+    return s.x == 1u;
 }
 
 // Walk the ray from t_start to t_end. Level selection uses
@@ -381,6 +438,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
             stalls += 1u;
             if stalls > 3u {
                 t = t * (1.0 + 2e-6) + frame.layer.y * 1e-3;
+                if t > t_end { return make_hit(ST_MISS, t_end, cur, normal, NONE); }
                 cur = locate(r, fr, t, cur.level);
                 stalls = 0u;
             }
@@ -398,6 +456,10 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
         }
         let key = vec4<i32>(cur.i >> 3u, cur.j >> 3u, i32(cur.face), i32(cur.level));
         var skip = vec4<i32>(0);
+        var summary_checked = false;
+        // An accepted level transition already probed this exact column.
+        // Reuse that record only within this step, after the normal hint gate.
+        var transition_record = NONE;
         if any(key != loaded) {
             // Column-coherent stochastic LOD transition: each column switches
             // level at its own distance within the dither band. The threshold
@@ -409,30 +471,39 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
             let want = level_for((t + lod_offset) * lod_scale * (1.0 + dither * (hd - 0.5)));
             if want > cur.level {
                 let d = want - cur.level;
-                cur.i >>= d;
-                cur.j >>= d;
-                cur.k >>= d;
-                cur.level = want;
+                var coarser = cur;
+                coarser.i >>= d;
+                coarser.j >>= d;
+                coarser.k >>= d;
+                coarser.level = want;
+                let found = find_column(column_key0(cur.face, want, coarser.i >> 3u), bitcast<u32>(coarser.j >> 3u));
+                if found == NONE || !column_valid(records[found]) || !level_contains_solid(coarser, found, r, t) {
+                    cur = coarser;
+                    if found != NONE && column_valid(records[found]) { transition_record = found; }
+                }
             } else if want < cur.level {
                 let finer = locate(r, fr, t, want);
                 let hint = column_hint(want, finer.face, finer.i >> 3u, finer.j >> 3u);
-                if hint == 1u {
-                    cur = finer;
-                } else if hint == 2u {
+                if hint != 0u {
                     let found = find_column(column_key0(finer.face, want, finer.i >> 3u), bitcast<u32>(finer.j >> 3u));
-                    if found != NONE && column_valid(records[found]) {
+                    if found != NONE && column_valid(records[found]) && !level_contains_solid(finer, found, r, t) {
                         cur = finer;
+                        transition_record = found;
                     }
                 }
             }
             skip = summary_block(cur.level, cur.face, cur.i >> 3u, cur.j >> 3u, cur.k);
+            summary_checked = true;
         }
         if skip.x == 0 && any(vec4<i32>(cur.i >> 3u, cur.j >> 3u, i32(cur.face), i32(cur.level)) != loaded) {
             loop {
                 // Unusable columns skip the hash probe.
                 if column_hint(cur.level, cur.face, cur.i >> 3u, cur.j >> 3u) != 0u {
                     work_lookups += 1u;
-                    record = find_column(column_key0(cur.face, cur.level, cur.i >> 3u), bitcast<u32>(cur.j >> 3u));
+                    record = transition_record;
+                    if record == NONE {
+                        record = find_column(column_key0(cur.face, cur.level, cur.i >> 3u), bitcast<u32>(cur.j >> 3u));
+                    }
                     if record != NONE {
                         col = records[record];
                         if column_valid(col) { break; }
@@ -445,6 +516,9 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 cur.j >>= 1u;
                 cur.k >>= 1u;
                 cur.level += 1u;
+                transition_record = NONE;
+                // Fallback changed the key and radial cursor of the query.
+                summary_checked = false;
             }
             loaded = vec4<i32>(cur.i >> 3u, cur.j >> 3u, i32(cur.face), i32(cur.level));
         }
@@ -464,7 +538,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 return make_hit(ST_HIT, t, cur, normal, record);
             }
             above = cur.k >= k0;
-            if above {
+            if above && !summary_checked {
                 skip = summary_block(lv, cur.face, ci, cj, cur.k);
             }
         }
@@ -482,6 +556,37 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 work_skips += 1u;
             }
         } else {
+            var fraction = 0u;
+            if (col.info & INFO_RELIEF) != 0u && column_tops_fit(col) {
+                fraction = column_relief_fraction(col, u32(cur.i & 7), u32(cur.j & 7));
+            }
+            // A zero remainder has the same occupied layers as the original
+            // whole-cell brick path, so it needs no arbitrary-radius solve.
+            if fraction != 0u {
+                // Preserve the actual radial top of this angular cell. The
+                // branch precedes both solid and mixed brick hit paths.
+                let surface = relief_height(col, cur.i, cur.j, lv, fraction);
+                if height_rel(r, t) <= surface { return make_hit(ST_HIT, t, cur, normal, record); }
+                let ta = select(plane_t(fr, 0u, select(cur.i, cur.i + 1, fr.dir.x > 0) << lv), 3.0e38, fr.dir.x == 0);
+                let tb = select(plane_t(fr, 1u, select(cur.j, cur.j + 1, fr.dir.y > 0) << lv), 3.0e38, fr.dir.y == 0);
+                let enter = relief_enter(r, surface, t);
+                if enter <= min(ta, tb) && enter < 3.0e38 {
+                    if enter > t_end { return make_hit(ST_MISS, t_end, cur, normal, NONE); }
+                    // The solve can cross several radial cells inside this
+                    // column's band. Publish this angular cell's enclosing
+                    // solid layer, not the cursor from before the solve.
+                    var entered = cur;
+                    entered.k = column_top(col, u32(cur.i & 7), u32(cur.j & 7)) - 1;
+                    return make_hit(ST_HIT, enter, entered, normal_code(2u, -1), record);
+                }
+                let next = max(min(ta, tb), t);
+                if next >= 3.0e38 { return make_hit(ST_MISS, t, cur, normal, NONE); }
+                t = next;
+                cur.k = (frame.layer_i.x + i32(floor(layer_coord(r, t)))) >> lv;
+                if ta <= tb { cur.i += fr.dir.x; normal = normal_code(0u, fr.dir.x); }
+                else { cur.j += fr.dir.y; normal = normal_code(1u, fr.dir.y); }
+                continue;
+            }
             let kb = (cur.k >> 3u) - col.k_lo;
             let s = brick_state(col, u32(kb));
             if s.x == 1u {
@@ -490,22 +595,38 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
             k0 = (cur.k >> 3u) << 3u;
             k1 = k0 + 8;
             if s.x == 2u {
+                // Classify the current exact cell before solving its exit.
+                // Partial relief cells returned or continued above this path.
+                if (col.info & INFO_HEIGHTFIELD) != 0u
+                    && cur.k < column_top(col, u32(cur.i & 7), u32(cur.j & 7)) {
+                    return make_hit(ST_HIT, t, cur, normal, record);
+                }
                 // Exact cell DDA inside the mixed brick.
                 var ta = select(plane_t(fr, 0u, select(cur.i, cur.i + 1, fr.dir.x > 0) << lv), 3.0e38, fr.dir.x == 0);
                 var tb = select(plane_t(fr, 1u, select(cur.j, cur.j + 1, fr.dir.y > 0) << lv), 3.0e38, fr.dir.y == 0);
                 var tr = radial_exit(r, cur.k << lv, (cur.k + 1) << lv, t);
                 loop {
-                    if brick_bit(s.y, u32(cur.i & 7), u32(cur.j & 7), u32(cur.k & 7)) {
-                        return make_hit(ST_HIT, t, cur, normal, record);
+                    // The inner DDA can cross the requested endpoint before
+                    // returning to the outer traversal range check.
+                    if t > t_end { return make_hit(ST_MISS, t_end, cur, normal, NONE); }
+                    var cell_solid = false;
+                    if (col.info & INFO_HEIGHTFIELD) != 0u {
+                        cell_solid = cur.k < column_top(col, u32(cur.i & 7), u32(cur.j & 7));
+                    } else {
+                        cell_solid = brick_bit(s.y, u32(cur.i & 7), u32(cur.j & 7), u32(cur.k & 7));
                     }
+                    if cell_solid { return make_hit(ST_HIT, t, cur, normal, record); }
                     let t_next = max(min(ta, min(tb, tr.x)), t);
                     if t_next >= 3.0e38 { return make_hit(ST_MISS, t, cur, normal, NONE); }
                     t = t_next;
+                    var angular_crossing = false;
                     if ta <= tb && ta <= tr.x {
+                        angular_crossing = true;
                         cur.i += fr.dir.x;
                         normal = normal_code(0u, fr.dir.x);
                         ta = plane_t(fr, 0u, select(cur.i, cur.i + 1, fr.dir.x > 0) << lv);
                     } else if tb <= tr.x {
+                        angular_crossing = true;
                         cur.j += fr.dir.y;
                         normal = normal_code(1u, fr.dir.y);
                         tb = plane_t(fr, 1u, select(cur.j, cur.j + 1, fr.dir.y > 0) << lv);
@@ -516,6 +637,11 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                         tr = radial_exit(r, cur.k << lv, (cur.k + 1) << lv, t);
                     }
                     if (cur.i >> 3u) != ci || (cur.j >> 3u) != cj || cur.k < k0 || cur.k >= k1 { break; }
+                    // The zero-fraction shortcut applies to one angular cell,
+                    // not its whole column. Reclassify a partial neighbor
+                    // before interpreting its enclosing ceil voxel as solid.
+                    if angular_crossing && (col.info & INFO_RELIEF) != 0u && column_tops_fit(col)
+                        && column_relief_fraction(col, u32(cur.i & 7), u32(cur.j & 7)) != 0u { break; }
                 }
                 continue;
             }

@@ -7,7 +7,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, IVec4, Mat4, Vec3, Vec4};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use wgpu::util::DeviceExt;
 
 pub const GBUFFER_FORMATS: [wgpu::TextureFormat; 8] = [
@@ -77,6 +77,19 @@ pub struct Settings {
     pub horizon: bool,
     /// Skip hash lookups of columns the summary blocks prove absent.
     pub residency_hints: bool,
+    /// Reuse a coarse climate height only when Landform bounds prove that
+    /// every canonical height gives the same material. Disable for audits.
+    pub climate_height_reuse: bool,
+    /// Preserve sub-cell radial relief in unedited coarse columns.
+    /// Set before generating columns; resident columns retain their format.
+    pub coarse_relief: bool,
+    /// Generate coarse Landform columns from the ridge-envelope display
+    /// height (unresolved ridges keep their mean mass). Disable to audit
+    /// coarse tops against the canonical field. Set before generating.
+    pub ridge_display: bool,
+    /// Reconstruct distant slope lighting from existing raw climate samples,
+    /// blending by pixel footprint independently of the current clipmap level.
+    pub far_relief: bool,
     /// Diagnostics: skip residency planning (no jobs, windows or evictions)
     /// so several renders see identical GPU state.
     pub freeze_residency: bool,
@@ -97,6 +110,10 @@ impl Default for Settings {
             job_budget: 12_288,
             horizon: std::env::var_os("HELIO_VOXEL_NO_HORIZON").is_none(),
             residency_hints: true,
+            climate_height_reuse: true,
+            coarse_relief: std::env::var("HELIO_VOXEL_COARSE_RELIEF").ok().is_none_or(|v| v != "0"),
+            ridge_display: true,
+            far_relief: std::env::var("HELIO_VOXEL_FAR_RELIEF").ok().is_none_or(|v| v != "0"),
             freeze_residency: false,
             frame_override: None,
             table_snapshots: false,
@@ -237,7 +254,7 @@ struct WorldGpu {
 impl WorldGpu {
     fn new(planet: &Planet) -> Self {
         let g = planet.grid();
-        let m = planet.field().bound_margins();
+        let m = planet.field().render_bound_margins();
         Self {
             grid: [g.reference_cells(), g.layer_mm() as i32, g.cells(), g.level_offset() as i32],
             scale: [g.domain_scale(), 0, 0, 0],
@@ -275,6 +292,19 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -
             .replace("BLOCK_ENTRY", block_entry)
             .replace("SHAPE_ID", if plane { "1u" } else { "0u" }),
     );
+    if program.key == crate::landform::DISPLAY_PROGRAM {
+        s.push_str(include_str!("../shaders/landform_climate.wgsl"));
+        if generation {
+            s.push_str("fn generation_height(face:u32,i:i32,j:i32,level:u32,display:bool)->i32 { if display { return terrain_display_height(domain_point(face,i,j,level),level+u32(world.grid.w)); } return field_height(face,i,j,level); }\n");
+        }
+    } else {
+        // Custom generators keep their full query; only Landform's material
+        // classification and symmetric bounds justify the shortcut.
+        s.push_str("fn climate_height_reusable(top: i32, level: u32) -> bool { return false; }\n");
+        if generation {
+            s.push_str("fn generation_height(face:u32,i:i32,j:i32,level:u32,display:bool)->i32 { return field_height(face,i,j,level); }\n");
+        }
+    }
     for part in parts {
         s.push_str(&part.replace("ACCESS", access));
     }
@@ -307,11 +337,34 @@ struct Pipelines {
     horizon_blocks: wgpu::ComputePipeline,
     horizon_suffix: wgpu::ComputePipeline,
     shade: wgpu::ComputePipeline,
+    shade_relief: OnceLock<wgpu::ComputePipeline>,
+    shade_module: wgpu::ShaderModule,
+    shade_layout: wgpu::PipelineLayout,
+    climate: wgpu::ComputePipeline,
     sunlight: wgpu::ComputePipeline,
     gbuffer: wgpu::RenderPipeline,
 }
 
 impl Pipelines {
+    fn shade_for(&self, device: &wgpu::Device, relief: bool) -> &wgpu::ComputePipeline {
+        if !relief {
+            return &self.shade;
+        }
+        self.shade_relief.get_or_init(|| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("planet shade relief"),
+                layout: Some(&self.shade_layout),
+                module: &self.shade_module,
+                entry_point: Some("shade"),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[("FAR_RELIEF", 1.0)],
+                    ..Default::default()
+                },
+                cache: None,
+            })
+        })
+    }
+
     /// Whether these pipelines serve a world of this shape and program.
     fn serve(&self, plane: bool, program: &TerrainProgram) -> bool {
         self.plane == plane && self.program == program.key
@@ -360,6 +413,7 @@ impl Pipelines {
             storage(17, false),
             storage(18, false),
             storage(19, true),
+            storage(20, false),
         ];
         trace_entries.push(wgpu::BindGroupLayoutEntry {
             binding: 9,
@@ -439,7 +493,14 @@ impl Pipelines {
                 layout: Some(layout),
                 module,
                 entry_point: Some(entry),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: if entry == "generate" && program.key == crate::landform::DISPLAY_PROGRAM {
+                        &[("RIDGE_DISPLAY_GENERATION", 1.0)]
+                    } else {
+                        &[]
+                    },
+                    ..Default::default()
+                },
                 cache: None,
             })
         };
@@ -498,7 +559,11 @@ impl Pipelines {
             horizon_blocks: compute(&trace_pl, &trace_module, "horizon_blocks"),
             horizon_suffix: compute(&trace_pl, &trace_module, "horizon_suffix"),
             shade: compute(&trace_pl, &trace_module, "shade"),
+            climate: compute(&trace_pl, &trace_module, "climate"),
             sunlight: compute(&trace_pl, &trace_module, "sunlight"),
+            shade_relief: OnceLock::new(),
+            shade_module: trace_module,
+            shade_layout: trace_pl,
             gbuffer,
             gen_layout,
             trace_layout,
@@ -658,6 +723,9 @@ struct Screen {
     size: [u32; 2],
     hits: wgpu::Buffer,
     surfaces: wgpu::Buffer,
+    /// Per pixel, the raw terrain height the climate pass sampled (far
+    /// relief derives slopes from neighbouring pixels).
+    climate: wgpu::Buffer,
     sun: wgpu::Texture,
     sun_view: wgpu::TextureView,
 }
@@ -692,10 +760,17 @@ impl Screen {
             view_formats: &[],
         });
         let sun_view = sun.create_view(&Default::default());
+        let climate = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("planet climate height"),
+            size: pixels * 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
         Self {
             size,
             hits,
             surfaces,
+            climate,
             sun,
             sun_view,
         }
@@ -962,6 +1037,11 @@ impl PlanetRenderer {
         frame.palette = self.settings.appearance.palette.map(linear);
         frame.grass = self.settings.appearance.grass.map(linear);
         frame.detail = self.settings.appearance.detail.map(clean);
+        // Material-equivalent quantized tops are not equivalent derivatives:
+        // far relief needs raw heights at the existing 2x2 anchors.
+        frame.hints[1] = u32::from(self.settings.climate_height_reuse && !self.settings.far_relief);
+        frame.hints[2] = u32::from(self.settings.far_relief);
+        frame.hints[3] = (if self.settings.coarse_relief { 8 } else { 0 }) | (if self.settings.ridge_display { 16 } else { 0 });
         for face in 0..6u8 {
             // A plane has one face; the others keep default frames.
             let f = grid.face_frame(face, eye);
@@ -1293,6 +1373,7 @@ impl PlanetRenderer {
                 planet: self.planet.clone(),
                 eye,
                 lod0,
+                lod_dither: f64::from(self.settings.lod_dither),
                 budget,
                 cpu_budget: std::time::Duration::from_secs_f64(cpu_ms * 1.0e-3),
                 failed: std::mem::take(&mut self.failed),
@@ -1351,6 +1432,13 @@ impl PlanetRenderer {
                     self.ms_per_job = self.ms_per_job * 0.7 + sample * 0.3;
                 }
             }
+        }
+        // An edit-only publication keeps the recipe/pipelines but changes
+        // the authoritative journal. Direct renderer users need the same
+        // synchronization as PlanetPass's mailbox path.
+        if !Arc::ptr_eq(&self.planet, &frame.planet) {
+            assert_eq!(self.planet.recipe(), frame.planet.recipe(), "recreate PlanetRenderer after a recipe change");
+            self.planet = frame.planet.clone();
         }
         self.frame_index = self.frame_index.wrapping_add(1);
         self.last_frame_num = frame_num;
@@ -1456,6 +1544,7 @@ impl PlanetRenderer {
                 wgpu::BindGroupEntry { binding: 17, resource: self.buffers.horizon_acc.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 18, resource: self.buffers.horizon.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 19, resource: self.buffers.live_blocks.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 20, resource: self.screen.climate.as_entire_binding() },
             ],
         });
         let render_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1560,7 +1649,13 @@ impl PlanetRenderer {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_bind_group(0, &trace_group, &[]);
             pass.set_bind_group(1, camera_group, &[]);
-            Self::dispatch(&mut pass, &self.pipelines.shade, groups);
+            Self::dispatch(&mut pass, &self.pipelines.climate, [size[0].div_ceil(16), size[1].div_ceil(16), 1]);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_bind_group(0, &trace_group, &[]);
+            pass.set_bind_group(1, camera_group, &[]);
+            Self::dispatch(&mut pass, self.pipelines.shade_for(&self.device, self.settings.far_relief), groups);
         }
         if let Some(p) = &mut self.profiler {
             p.end_pass(encoder, "planet_shade");
@@ -1626,7 +1721,7 @@ impl PlanetRenderer {
         self.stats.reranked = rs.reranked;
         self.stats.lod0_distance = lod0;
         self.stats.pool_pages = self.settings.capacity.pool_units / 512;
-        self.stats.logical_bytes = self.buffers.bytes + u64::from(size[0]) * u64::from(size[1]) * (32 + 16 + 8);
+        self.stats.logical_bytes = self.buffers.bytes + u64::from(size[0]) * u64::from(size[1]) * (32 + 16 + 8 + 4);
         if self.plan.idle {
             self.initial_complete = true;
         }
@@ -1765,6 +1860,8 @@ impl RenderPass for PlanetPass {
             return false;
         }
         self.active = previous.active.take();
+        // A graph rebuild must not revert the host's art settings.
+        self.settings.appearance = previous.settings.appearance;
         self.active.is_some()
     }
     fn reads(&self) -> &'static [&'static str] {

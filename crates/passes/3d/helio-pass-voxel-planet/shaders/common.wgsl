@@ -1,6 +1,20 @@
 // Shared planet residency structures. `ACCESS` is replaced by `read` or
 // `read_write` per pipeline module.
 
+// Shade may low-pass procedural material detail for the current pixel.
+// Other entry points and canonical material queries retain zero footprint.
+var<private> material_footprint: f32 = 0.0;
+// Natural surface coating is shade-only; canonical queries keep their IDs.
+var<private> material_weathered_skin: bool = false;
+// Radial height range of the material pixel, in metres; zero outside shade.
+var<private> material_radial_span: f32 = 0.0;
+// Negative disables display-only light/dark stone coverage.
+var<private> material_stone_coverage: f32 = -1.0;
+// Negative snow weight disables appearance coverage; IDs remain canonical.
+var<private> material_snow_mix: vec4<f32> = vec4<f32>(-1.0, 0.0, 0.0, 0.0);
+var<private> material_rock_id: u32 = 0u;
+var<private> material_rock_base_id: u32 = 0u;
+
 struct FaceGpu {
     m_a: vec4<f32>,   // α-family plane normal at the eye (xyz), distance to axis (w)
     q_a: vec4<f32>,   // in-plane radial direction (xyz), eye fraction (w)
@@ -21,17 +35,17 @@ struct Frame {
     neighbours: array<vec4<u32>, 6>, // face across -a, +a, -b, +b
     extra: vec4<u32>,      // table patches, block region, block patches, live tier-1 blocks
     ring: array<vec4<f32>, 8>, // per level: sky bound block exclusion angle
-    hints: vec4<u32>,      // x: tier-1 summary blocks prove column absence
-    palette: array<vec4<f32>, 16>, // linear albedo per material, roughness
-    grass: array<vec4<f32>, 3>,    // linear dry, meadow, lush grass
-    detail: vec4<f32>,     // grass patch contrast, pigment contrast, edge darkening
+    hints: vec4<u32>,
+    palette: array<vec4<f32>, 16>,
+    grass: array<vec4<f32>, 3>,
+    detail: vec4<f32>,      // x: tier-1 summary blocks prove column absence
 }
 
 struct Column {
     key0: u32,   // column i | face << 24 | level << 27
     key1: u32,   // column j
     k_lo: i32,   // lowest band brick layer (level bricks)
-    info: u32,   // n_band 0..9 | n_mixed 9..18 | class 18..22 | top gap 22..25 | ext 29 | overflow 30 | valid 31
+    info: u32,   // n_band 0..9 | n_mixed 9..18 | class 18..22 | top gap 22..25 | topology 27 | relief 28 | ext 29 | overflow 30 | valid 31
     run: u32,    // first pool unit
     mixed: u32,  // band bricks 0..32 that store an occupancy mask
     solid: u32,  // band bricks 0..32 that are completely occupied
@@ -59,6 +73,15 @@ const TOMBSTONE: u32 = 0xfffffffeu;
 const INFO_VALID: u32 = 0x80000000u;
 const INFO_OVERFLOW: u32 = 0x40000000u;
 const INFO_EXT: u32 = 0x20000000u;
+const INFO_RELIEF: u32 = 0x10000000u;
+// Effective Add/Remove lists: base-field gradients cannot describe cut faces.
+const INFO_TOPOLOGY: u32 = 0x08000000u;
+// Low-level authored tops can share the existing byte header with their
+// fractional remainder. This changes storage only, not the traced surface.
+const INFO_RELIEF_INLINE: u32 = 0x04000000u;
+// Natural columns are exactly solid below their stored per-cell tops.
+// Add/Remove columns retain arbitrary brick occupancy instead.
+const INFO_HEIGHTFIELD: u32 = 0x02000000u;
 const UNIT_WORDS: u32 = 16u;
 const MAX_PROBES: u32 = 64u;
 
@@ -114,13 +137,23 @@ fn column_valid(c: Column) -> bool {
 
 fn band_count(c: Column) -> u32 { return c.info & 511u; }
 
+// Relative terrain tops occupy one byte. A 32-brick band fits only when
+// its highest occupied top is below the exact 256-cell upper boundary.
+fn column_tops_fit(c: Column) -> bool {
+    let count = band_count(c);
+    return count < 32u || (count == 32u && ((c.info >> 22u) & 7u) != 0u);
+}
+
 // First empty layer above every occupied cell (level cells): the band top
 // less the empty layers of its top brick.
 fn column_top_cell(c: Column) -> i32 {
     return (c.k_lo + i32(band_count(c))) * 8 - i32((c.info >> 22u) & 7u);
 }
 
-fn header_units(c: Column) -> u32 { return select(1u, 2u, (c.info & INFO_EXT) != 0u); }
+fn header_units(c: Column) -> u32 {
+    return select(1u, 2u, (c.info & INFO_EXT) != 0u)
+        + select(0u, 2u, (c.info & INFO_RELIEF) != 0u && (c.info & INFO_RELIEF_INLINE) == 0u);
+}
 
 // Brick state of band brick `b`: 0 air, 1 solid, 2 mixed. Also returns the
 // pool unit of a mixed brick.
@@ -154,7 +187,28 @@ fn brick_bit(unit: u32, x: u32, y: u32, z: u32) -> bool {
 fn column_top(c: Column, x: u32, y: u32) -> i32 {
     let cell = x + y * 8u;
     let word = pool[c.run * UNIT_WORDS + (cell >> 2u)];
-    return c.k_lo * 8 + i32((word >> ((cell & 3u) * 8u)) & 255u);
+    let offset = (word >> ((cell & 3u) * 8u)) & 255u;
+    if (c.info & INFO_RELIEF_INLINE) != 0u {
+        let level = c.key0 >> 27u;
+        return c.k_lo * 8 + i32((offset + (1u << level) - 1u) >> level);
+    }
+    return c.k_lo * 8 + i32(offset);
+}
+
+// Zero denotes a top exactly on the upper coarse-cell boundary. Other
+// fractions reconstruct the authored base-layer top inside the last voxel.
+fn column_relief_fraction(c: Column, x: u32, y: u32) -> u32 {
+    if !column_tops_fit(c) { return 0u; }
+    let cell = x + y * 8u;
+    if (c.info & INFO_RELIEF_INLINE) != 0u {
+        let level = c.key0 >> 27u;
+        let word = pool[c.run * UNIT_WORDS + (cell >> 2u)];
+        let offset = (word >> ((cell & 3u) * 8u)) & 255u;
+        return (offset & ((1u << level) - 1u)) << (16u - level);
+    }
+    let offset = select(1u, 2u, (c.info & INFO_EXT) != 0u);
+    let word = pool[(c.run + offset) * UNIT_WORDS + (cell >> 1u)];
+    return (word >> ((cell & 1u) * 16u)) & 65535u;
 }
 
 fn center_half(i: i32, level: u32) -> i32 {

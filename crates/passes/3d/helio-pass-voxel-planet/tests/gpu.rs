@@ -426,35 +426,60 @@ fn published_tops_bound_occupancy() {
         let gap = ((info >> 22) & 7) as i32;
         let run = c[4];
         let ext = info & 0x2000_0000 != 0;
-        let header = if ext { 2 } else { 1 };
+        // Wide fractional tops occupy two units after the column header;
+        // inline tops retain their authored-cell offset in each packed byte.
+        let relief = info & 0x1000_0000 != 0;
+        let inline = info & 0x0400_0000 != 0;
+        let heightfield = info & 0x0200_0000 != 0;
+        let header = (if ext { 2 } else { 1 }) + if relief && !inline { 2 } else { 0 };
+        if relief {
+            assert!(n_band < 32 || (n_band == 32 && gap > 0), "fractional tops overflow their packed byte range");
+        }
         let published = (k_lo + n_band) * 8 - gap;
         // Highest occupied cell from the brick masks.
         let mut highest = i32::MIN;
-        for b in (0..n_band).rev() {
-            let (mixed, solid, rank) = if b < 32 {
-                let bit = b as u32;
-                ((c[5] >> bit) & 1 != 0, (c[6] >> bit) & 1 != 0, (c[5] & ((1u32 << bit) - 1)).count_ones())
-            } else {
-                let e = ((run + 1) * 16) as usize;
-                let (w, bit) = ((b >> 5) as usize, (b & 31) as u32);
-                let mut rank = 0;
-                for q in 0..w {
-                    rank += pool[e + q].count_ones();
+        if heightfield {
+            // Independently decode all 64 authored tops. These columns store
+            // solid-below-top occupancy exactly and have no bitmap payload.
+            let level = c[0] >> 27;
+            for cell in 0..64u32 {
+                let word = pool[(run * 16 + (cell >> 2)) as usize];
+                let offset = ((word >> ((cell & 3) * 8)) & 255) as i32;
+                let top_offset = if inline {
+                    (offset + (1i32 << level) - 1) >> level
+                } else {
+                    offset
+                };
+                highest = highest.max(k_lo * 8 + top_offset - 1);
+            }
+            assert_eq!(highest + 1, published, "packed authored top disagrees with published maximum");
+        } else {
+            for b in (0..n_band).rev() {
+                let (mixed, solid, rank) = if b < 32 {
+                    let bit = b as u32;
+                    ((c[5] >> bit) & 1 != 0, (c[6] >> bit) & 1 != 0, (c[5] & ((1u32 << bit) - 1)).count_ones())
+                } else {
+                    let e = ((run + 1) * 16) as usize;
+                    let (w, bit) = ((b >> 5) as usize, (b & 31) as u32);
+                    let mut rank = 0;
+                    for q in 0..w {
+                        rank += pool[e + q].count_ones();
+                    }
+                    rank += (pool[e + w] & ((1u32 << bit) - 1)).count_ones();
+                    ((pool[e + w] >> bit) & 1 != 0, (pool[e + 8 + w] >> bit) & 1 != 0, rank)
+                };
+                if solid {
+                    highest = (k_lo + b) * 8 + 7;
+                    break;
                 }
-                rank += (pool[e + w] & ((1u32 << bit) - 1)).count_ones();
-                ((pool[e + w] >> bit) & 1 != 0, (pool[e + 8 + w] >> bit) & 1 != 0, rank)
-            };
-            if solid {
-                highest = (k_lo + b) * 8 + 7;
-                break;
+                if mixed {
+                    let unit = ((run + header + rank) * 16) as usize;
+                    let z = (0..8).rev().find(|z| pool[unit + 2 * z] | pool[unit + 2 * z + 1] != 0).unwrap_or(0) as i32;
+                    highest = (k_lo + b) * 8 + z;
+                    break;
+                }
             }
-            if mixed {
-                let unit = ((run + header + rank) * 16) as usize;
-                let z = (0..8).rev().find(|z| pool[unit + 2 * z] | pool[unit + 2 * z + 1] != 0).unwrap_or(0) as i32;
-                highest = (k_lo + b) * 8 + z;
-                break;
             }
-        }
         if highest >= published {
             bad += 1;
             if bad < 6 {

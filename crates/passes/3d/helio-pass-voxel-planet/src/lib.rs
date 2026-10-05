@@ -15,6 +15,7 @@ pub mod landform;
 pub mod noise;
 pub mod planet;
 pub mod residency;
+mod ridge_envelope;
 pub mod terrain;
 pub mod windows;
 #[cfg(feature = "engine")]
