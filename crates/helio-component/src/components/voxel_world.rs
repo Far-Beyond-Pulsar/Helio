@@ -27,7 +27,7 @@ use helio_voxel_data::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditJ
 use pulsar_scene_model::components::Transform;
 use pulsar_scenedb::{Entity, World};
 
-use super::{BlockData, VoxelTerrainComponent, VoxelWorldShape};
+use super::{BlockData, BlockMaterialChange, VoxelTerrainComponent, VoxelWorldShape};
 
 /// The world of a terrain form and generator.
 pub fn world_recipe(shape: VoxelWorldShape, planet_radius: f64, plane_size: f64, voxel_size: f64, source: TerrainSource) -> PlanetRecipe {
@@ -172,20 +172,47 @@ pub fn append_edits(world: &mut World, entity: Entity, edits: Vec<VoxelBrushEdit
         }
         planet_brush(edit).resolve(&grid)?;
     }
-    // Capture break payloads from the pre-edit world before appending to the
-    // authoritative component journal. This keeps set_block and bulk
-    // fill/remove methods on one consistent event path.
+    // Simulate the validated batch in order so events describe the exact
+    // before/after state for every cell, including overlapping brushes.
     let mut broken = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for edit in edits.iter().filter(|edit| edit.op == VoxelBrushOp::Remove) {
-        for (cell, center) in removed_block_centres(&planet, edit)? {
-            let old_material = planet.material(cell);
-            if old_material != material::AIR && seen.insert(cell) {
+    let mut placed = Vec::new();
+    let mut changed = Vec::new();
+    let mut preview = (*planet).clone();
+    for edit in &edits {
+        let affected = affected_block_centres(&preview, edit)?;
+        let before: Vec<_> = affected
+            .into_iter()
+            .map(|(cell, center)| (cell, center, preview.material(cell)))
+            .collect();
+        preview.apply(planet_brush(edit))?;
+        for (cell, center, previous_material) in before {
+            let next_material = preview.material(cell);
+            if previous_material == next_material {
+                continue;
+            }
+            if previous_material != material::AIR {
                 broken.push(BlockData {
                     x: center.x,
                     y: center.y,
                     z: center.z,
-                    material: old_material,
+                    material: previous_material,
+                });
+            }
+            if next_material != material::AIR {
+                placed.push(BlockData {
+                    x: center.x,
+                    y: center.y,
+                    z: center.z,
+                    material: next_material,
+                });
+            }
+            if previous_material != material::AIR && next_material != material::AIR {
+                changed.push(BlockMaterialChange {
+                    x: center.x,
+                    y: center.y,
+                    z: center.z,
+                    previous_material,
+                    material: next_material,
                 });
             }
         }
@@ -193,13 +220,15 @@ pub fn append_edits(world: &mut World, entity: Entity, edits: Vec<VoxelBrushEdit
     let mut component = world.get_mut::<VoxelTerrainComponent>(entity).ok_or("the entity has no voxel terrain")?;
     component.edits.extend(edits);
     component.pending_block_broken.extend(broken);
+    component.pending_block_placed.extend(placed);
+    component.pending_block_material_changed.extend(changed);
     component.source_revision = component.source_revision.wrapping_add(1);
     Ok(())
 }
 
-/// Enumerate exact base-cell centres covered by a removal brush using the
-/// same resolved half-cell containment predicate as the terrain renderer.
-fn removed_block_centres(
+/// Enumerate exact base-cell centres covered by a brush using the same
+/// resolved half-cell containment predicate as the terrain renderer.
+fn affected_block_centres(
     planet: &Planet,
     edit: &VoxelBrushEdit,
 ) -> Result<Vec<(helio_pass_voxel_planet::Cell, DVec3)>, String> {

@@ -11,7 +11,7 @@ use super::{TerrainEventsEventWriterExt as _, VoxelComponent, VoxelFlatTerrainCo
 
 // Component callbacks borrow the authoritative terrain row from SceneDB.
 // The pending event list is transient transport state populated only after a
-// successful block removal; the EventHub writer queues delivery after the
+// successful block edit; the EventHub writer queues delivery after the
 // component borrow is released.
 #[register_component_runtime(class = "VoxelTerrainComponent", enabled = enabled)]
 impl VoxelTerrainComponent {
@@ -27,21 +27,45 @@ impl VoxelTerrainComponent {
         // Terrain-specific Rust systems can add per-instance reactions here.
     }
 
+    #[bp_handler("block_placed")]
+    fn on_block_placed(
+        &mut self,
+        _context: &mut pulsar_world_registry::ComponentContext<'_>,
+        _block: super::BlockData,
+    ) {
+        // Terrain-specific Rust systems can add per-instance reactions here.
+    }
+
+    #[bp_handler("block_material_changed")]
+    fn on_block_material_changed(
+        &mut self,
+        _context: &mut pulsar_world_registry::ComponentContext<'_>,
+        _change: super::BlockMaterialChange,
+    ) {
+        // Terrain-specific Rust systems can add per-instance reactions here.
+    }
+
     fn tick(
         &mut self,
         context: &mut pulsar_world_registry::ComponentContext<'_>,
         _delta_seconds: f32,
     ) {
-        let mut pending = std::mem::take(&mut self.pending_block_broken);
-        let mut pending = pending.into_iter();
-        while let Some(block) = pending.next() {
-            if let Err(error) = context.events.block_broken(block.clone()) {
-                tracing::warn!(entity = ?context.entity, %error, "could not queue terrain block_broken event; retaining it");
-                self.pending_block_broken.push(block);
-                self.pending_block_broken.extend(pending);
-                break;
-            }
+        macro_rules! flush_events {
+            ($field:ident, $writer:ident, $event_name:literal) => {{
+                let mut events = std::mem::take(&mut self.$field).into_iter();
+                while let Some(event) = events.next() {
+                    if let Err(error) = context.events.$writer(event.clone()) {
+                        tracing::warn!(entity = ?context.entity, %error, event = $event_name, "could not queue terrain event; retaining it");
+                        self.$field.push(event);
+                        self.$field.extend(events);
+                        break;
+                    }
+                }
+            }};
         }
+        flush_events!(pending_block_broken, block_broken, "block_broken");
+        flush_events!(pending_block_placed, block_placed, "block_placed");
+        flush_events!(pending_block_material_changed, block_material_changed, "block_material_changed");
     }
 }
 
