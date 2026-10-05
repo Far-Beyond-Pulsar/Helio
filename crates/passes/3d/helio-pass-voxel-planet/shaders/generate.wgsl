@@ -28,6 +28,7 @@ struct JobOut {
 const CLASSES: u32 = 10u;
 const PAGE_UNITS: u32 = 512u;
 const A_TOP: u32 = 0u;
+const A_FAILS: u32 = 10u;
 const A_NEED: u32 = 16u;
 const A_PAGES: u32 = 30u;
 const A_SCRATCH: u32 = 31u;
@@ -40,11 +41,15 @@ const MAX_BAND: u32 = 256u;
 @group(0) @binding(11) var<storage, read_write> free_runs: array<u32>;
 @group(0) @binding(12) var<storage, read_write> free_pages: array<u32>;
 @group(0) @binding(13) var<storage, read> evictions: array<u32>;
+// Failed jobs (key0, key1, status, 0), appended until the CPU copies them.
+@group(0) @binding(17) var<storage, read_write> failures: array<u32>;
+// Per pool page: free runs and size class. A page whose runs are all free
+// returns to the free page stack under pool pressure (allocator_recycle).
 struct PageMeta {
     free: atomic<u32>,
     size_class: u32,
 }
-@group(0) @binding(17) var<storage, read_write> page_meta: array<PageMeta>;
+@group(0) @binding(18) var<storage, read_write> page_meta: array<PageMeta>;
 
 fn class_offset(c: u32) -> u32 {
     let p = frame.counts.w;
@@ -61,8 +66,6 @@ var<workgroup> g_words: array<atomic<u32>, 16>;
 var<workgroup> g_masks: array<atomic<u32>, 16>;
 var<workgroup> g_any: array<atomic<u32>, 2>;
 var<workgroup> g_base: u32;
-var<workgroup> g_fraction: array<atomic<u32>, 32>;
-var<workgroup> g_topology_flags: u32;
 
 @compute @workgroup_size(64)
 fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
@@ -77,21 +80,8 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let y = i32(li >> 3u);
     let i = ci * 8 + x;
     let j = cj * 8 + y;
+    let top = top_cells(field_height(face, i, j, level), level);
     if li == 0u {
-        var topology = false;
-        if job.edits != 0u {
-            let count = edit_refs[job.edits - 1u];
-            for (var e = 0u; e < count; e++) {
-                // Native publication lists are already level-filtered. Match
-                // apply_edits defensively; Paint retains the base geometry.
-                let b = brushes[edit_refs[job.edits + e]];
-                if b.radius_half >= (1u << level) && ((b.flags >> 4u) & 3u) < 2u {
-                    topology = true;
-                    break;
-                }
-            }
-        }
-        g_topology_flags = select(0u, INFO_TOPOLOGY, topology);
         atomicStore(&g_band[0], 0x7fffffff);
         atomicStore(&g_band[1], -0x7fffffff);
         atomicStore(&g_any[0], 0u);
@@ -101,28 +91,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         atomicStore(&g_words[li], 0u);
         atomicStore(&g_masks[li], 0u);
     }
-    // This replaces the existing initialization barrier; the edit list is
-    // scanned once per workgroup, with no extra terrain query or barrier.
-    let topology_flags = workgroupUniformLoad(&g_topology_flags);
-    // An edit changes occupancy, not the display field of untouched lanes.
-    // Mixed topology retains bitmap storage; continuous fractions require a
-    // heightfield, so only their metadata is disabled for topology brushes.
-    let display_base = (frame.hints.w & 8u) != 0u && level >= 1u;
-    let requested_relief = display_base && topology_flags == 0u;
-    let height = generation_height(face, i, j, level, display_base);
-    let base_top = div_floor(height, world.grid.y);
-    let remainder = u32(base_top) & ((1u << level) - 1u);
-    var top = base_top >> level;
-    if requested_relief && remainder != 0u { top += 1; }
-    var fraction = 0u;
-    if requested_relief && remainder != 0u {
-        // Shifts avoid overflowing a u32 product at planetary coarse levels.
-        if level <= 16u { fraction = remainder << (16u - level); }
-        else { fraction = max(remainder >> (level - 16u), 1u); }
-    }
-    // The following band reduction barrier completes this clear before any
-    // lane writes its packed fraction.
-    if requested_relief && li < 32u { atomicStore(&g_fraction[li], 0u); }
+    workgroupBarrier();
     // Everything below the band is solid ground, everything above is air.
     // The band follows the terrain wherever it is: clamping its top to the
     // datum (a sea-level leftover) made every column below datum claim the
@@ -151,21 +120,12 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let k_lo = lo_cell >> 3u;
     let k_hi = ((max(hi_cell, lo_cell + 1) - 1) >> 3u) + 1;
     let n_band = u32(k_hi - k_lo);
-    let relief = requested_relief && n_band <= 32u && hi_cell - k_lo * 8 <= 255;
-    let heightfield = topology_flags == 0u && n_band <= 32u && hi_cell - k_lo * 8 <= 255;
-    if requested_relief && !relief { top = base_top >> level; }
-    // When the whole column fits in 255 authored layers, store its exact
-    // base-grid top in the existing byte instead of allocating two Q16 units.
-    // The bound includes the ceil top, so every lane is guaranteed to fit.
-    let inline_relief = relief && level <= 7u && hi_cell - k_lo * 8 <= i32(255u >> level);
-    let wide_relief = relief && !inline_relief;
-    let scratch_header = select(1u, 3u, wide_relief);
     if n_band > MAX_BAND {
         if li == 0u { job_out[index].status = 1u; }
         return;
     }
     if li == 0u {
-        let need = i32(scratch_header + n_band);
+        let need = i32(1u + n_band);
         let base = atomicAdd(&alloc[A_SCRATCH], need);
         if u32(base + need) * UNIT_WORDS > arrayLength(&scratch) {
             g_base = NONE;
@@ -178,15 +138,9 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         if li == 0u { job_out[index].status = 2u; }
         return;
     }
-    if wide_relief { atomicOr(&g_fraction[li >> 1u], fraction << ((li & 1u) * 16u)); }
-    // Fractions and byte-packed tops share the existing publication barrier.
-    // Disabled metadata performs no fraction atomics or extra barriers.
-    let stored_top = select(top - k_lo * 8, base_top - ((k_lo * 8) << level), inline_relief);
-    atomicOr(&g_words[li >> 2u], u32(clamp(stored_top, 0, 255)) << ((li & 3u) * 8u));
+    // Column tops relative to the band base, one byte per cell.
+    atomicOr(&g_words[li >> 2u], u32(clamp(top - k_lo * 8, 0, 255)) << ((li & 3u) * 8u));
     workgroupBarrier();
-    if wide_relief && li < 32u {
-        scratch[(base + 1u) * UNIT_WORDS + li] = atomicLoad(&g_fraction[li]);
-    }
     if li < 16u {
         scratch[base * UNIT_WORDS + li] = atomicLoad(&g_words[li]);
         atomicStore(&g_words[li], 0u);
@@ -208,7 +162,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         workgroupBarrier();
         if li < 16u {
             let w = atomicExchange(&g_words[li], 0u);
-            scratch[(base + scratch_header + b) * UNIT_WORDS + li] = w;
+            scratch[(base + 1u + b) * UNIT_WORDS + li] = w;
             if w != 0u { atomicOr(&g_any[0], 1u); }
             if w != 0xffffffffu { atomicOr(&g_any[1], 1u); }
         }
@@ -227,8 +181,6 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     if li == 0u {
         var out: JobOut;
         out.status = 0u;
-        out.pad = select(0u, INFO_RELIEF, relief) | select(0u, INFO_RELIEF_INLINE, inline_relief)
-            | select(0u, INFO_HEIGHTFIELD, heightfield) | topology_flags;
         out.k_lo = k_lo;
         out.n_band = n_band;
         out.scratch = base;
@@ -238,16 +190,13 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
             out.solid[w] = atomicLoad(&g_masks[8u + w]);
             mixed += countOneBits(out.mixed[w]);
         }
-        // The scratch masks still certify exact summary tops. Natural
-        // columns need no duplicate occupancy payload in the resident pool.
-        out.n_mixed = select(mixed, 0u, heightfield);
+        out.n_mixed = mixed;
         job_out[index] = out;
     }
 }
 
 fn run_units(o: JobOut) -> u32 {
-    return select(1u, 2u, o.n_band > 32u)
-        + select(0u, 2u, (o.pad & INFO_RELIEF) != 0u && (o.pad & INFO_RELIEF_INLINE) == 0u) + o.n_mixed;
+    return select(1u, 2u, o.n_band > 32u) + o.n_mixed;
 }
 
 fn class_of(units: u32) -> u32 {
@@ -281,7 +230,6 @@ fn refill(@builtin(local_invocation_index) c: u32) {
         let page = free_pages[page_index];
         page_meta[page].size_class = c;
         atomicStore(&page_meta[page].free, runs);
-        atomicAdd(&alloc[26], 1);
         for (var r = 0u; r < runs; r++) {
             free_runs[offset + u32(top)] = page * PAGE_UNITS + r * size;
             top++;
@@ -294,20 +242,15 @@ fn refill(@builtin(local_invocation_index) c: u32) {
 fn allocate(@builtin(global_invocation_id) id: vec3<u32>) {
     let index = id.x;
     if index >= frame.counts.x || job_out[index].status != 0u { return; }
-    // A larger free run can hold the same payload without changing geometry.
-    // Publish its actual class so replacement/eviction returns the entire run.
-    for (var c = job_out[index].size_class; c < CLASSES; c++) {
-        let slot = atomicSub(&alloc[A_TOP + c], 1) - 1;
-        if slot < 0 { continue; }
-        job_out[index].size_class = c;
-        job_out[index].run = free_runs[class_offset(c) + u32(slot)];
-        let page = job_out[index].run / PAGE_UNITS;
-        if atomicSub(&page_meta[page].free, 1u) == (PAGE_UNITS >> c) {
-            atomicSub(&alloc[26], 1);
-        }
+    let c = job_out[index].size_class;
+    let slot = atomicSub(&alloc[A_TOP + c], 1) - 1;
+    if slot < 0 {
+        job_out[index].status = 3u;
         return;
     }
-    job_out[index].status = 3u;
+    let run = free_runs[class_offset(c) + u32(slot)];
+    job_out[index].run = run;
+    atomicSub(&page_meta[run / PAGE_UNITS].free, 1u);
 }
 
 @compute @workgroup_size(16)
@@ -324,9 +267,7 @@ fn free_run(c: Column) {
     let cls = (c.info >> 18u) & 15u;
     let slot = atomicAdd(&alloc[A_TOP + cls], 1);
     free_runs[class_offset(cls) + u32(slot)] = c.run;
-    if atomicAdd(&page_meta[c.run / PAGE_UNITS].free, 1u) + 1u == (PAGE_UNITS >> cls) {
-        atomicAdd(&alloc[26], 1);
-    }
+    atomicAdd(&page_meta[c.run / PAGE_UNITS].free, 1u);
 }
 
 @compute @workgroup_size(64)
@@ -372,78 +313,6 @@ fn patch_blocks(@builtin(global_invocation_id) id: vec3<u32>) {
     atomicStore(&block_state[slot + 3u], 0);
 }
 
-// Reassigned summaries may already have valid columns in the hash table.
-// Recount after publication rather than regenerating or evicting those records.
-@compute @workgroup_size(64)
-fn rebuild_tier1(@builtin(global_invocation_id) id: vec3<u32>) {
-    if id.x >= frame.extra.z { return; }
-    let at = frame.counts.y + frame.extra.x * 2u + id.x * 3u;
-    let block = evictions[at];
-    if block % frame.extra.y >= (1u << 14u) { return; }
-    let bi = bitcast<i32>(evictions[at + 1u]);
-    let bj = bitcast<i32>(evictions[at + 2u]);
-    if bi == -1 || bj == -1 { return; }
-    let slot = block * 4u;
-    if atomicLoad(&block_state[slot]) != bi || atomicLoad(&block_state[slot + 1u]) != bj { return; }
-    let chart = block / frame.extra.y;
-    let level = chart / 6u;
-    let face = chart % 6u;
-    let columns = (frame.layer_i.y >> level) >> 3u;
-    var top = -0x3fffffff;
-    var count = 0;
-    for (var j = 0; j < 4; j++) {
-        for (var i = 0; i < 4; i++) {
-            let ci = bi * 4 + i;
-            let cj = bj * 4 + j;
-            if ci < 0 || cj < 0 || ci >= columns || cj >= columns { continue; }
-            let record = find_column((level << 27u) | (face << 24u) | u32(ci), bitcast<u32>(cj));
-            if record == NONE { continue; }
-            let c = records[record];
-            if !column_valid(c) { continue; }
-            top = max(top, column_top_cell(c));
-            count += 1;
-        }
-    }
-    atomicStore(&block_state[slot + 2u], top);
-    atomicStore(&block_state[slot + 3u], count);
-}
-
-// Children are disjoint. Missing owners and negative partial counts cannot
-// certify a complete parent; a complete count retains every occupied top.
-fn rebuild_parent(index: u32, tier: u32) {
-    if index >= frame.extra.z { return; }
-    let at = frame.counts.y + frame.extra.x * 2u + index * 3u;
-    let block = evictions[at];
-    let local = block % frame.extra.y;
-    let expected_tier = select(2u, 3u, local >= (1u << 14u) + (1u << 10u));
-    if local < (1u << 14u) || expected_tier != tier { return; }
-    let bi = bitcast<i32>(evictions[at + 1u]);
-    let bj = bitcast<i32>(evictions[at + 2u]);
-    if bi == -1 || bj == -1 { return; }
-    let slot = block * 4u;
-    if atomicLoad(&block_state[slot]) != bi || atomicLoad(&block_state[slot + 1u]) != bj { return; }
-    let chart = block / frame.extra.y;
-    var top = -0x3fffffff;
-    var count = 0;
-    for (var j = 0; j < 4; j++) {
-        for (var i = 0; i < 4; i++) {
-            let child = vec2<i32>(bi * 4 + i, bj * 4 + j);
-            let child_slot = block_slot(chart / 6u, chart % 6u, tier - 1u, child.x, child.y) * 4u;
-            if atomicLoad(&block_state[child_slot]) != child.x || atomicLoad(&block_state[child_slot + 1u]) != child.y { continue; }
-            top = max(top, atomicLoad(&block_state[child_slot + 2u]));
-            count += atomicLoad(&block_state[child_slot + 3u]);
-        }
-    }
-    atomicStore(&block_state[slot + 2u], top);
-    atomicStore(&block_state[slot + 3u], count);
-}
-
-@compute @workgroup_size(64)
-fn rebuild_tier2(@builtin(global_invocation_id) id: vec3<u32>) { rebuild_parent(id.x, 2u); }
-
-@compute @workgroup_size(64)
-fn rebuild_tier3(@builtin(global_invocation_id) id: vec3<u32>) { rebuild_parent(id.x, 3u); }
-
 @compute @workgroup_size(64)
 fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let index = job_index(wg);
@@ -451,7 +320,16 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
     let job = jobs[index];
     let o = job_out[index];
     if o.status != 0u {
-        // A new column stays unpublished; a replaced column keeps its old data.
+        // Report the failure (the CPU retries all but band overflows); a new
+        // column stays unpublished, a replaced column keeps its old data.
+        if li == 0u {
+            let at = u32(atomicAdd(&alloc[A_FAILS], 1)) * 4u;
+            if at + 3u < arrayLength(&failures) {
+                failures[at] = job.key0;
+                failures[at + 1u] = job.key1;
+                failures[at + 2u] = o.status;
+            }
+        }
         if li == 0u && (job.flags & 1u) == 0u {
             var c: Column;
             c.key0 = job.key0;
@@ -462,20 +340,14 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         return;
     }
     let ext = o.n_band > 32u;
-    let wide_relief = (o.pad & INFO_RELIEF) != 0u && (o.pad & INFO_RELIEF_INLINE) == 0u;
-    let scratch_header = select(1u, 3u, wide_relief);
-    let plain_header = select(1u, 2u, ext);
-    let header = plain_header + select(0u, 2u, wide_relief);
-    if wide_relief && li < 32u {
-        pool[(o.run + plain_header) * UNIT_WORDS + li] = scratch[(o.scratch + 1u) * UNIT_WORDS + li];
-    }
+    let header = select(1u, 2u, ext);
     if li < 16u {
         pool[o.run * UNIT_WORDS + li] = scratch[o.scratch * UNIT_WORDS + li];
         if ext {
             pool[(o.run + 1u) * UNIT_WORDS + li] = select(o.solid[li - 8u], o.mixed[li], li < 8u);
         }
     }
-    let total = select(o.n_band * UNIT_WORDS, 0u, (o.pad & INFO_HEIGHTFIELD) != 0u);
+    let total = o.n_band * UNIT_WORDS;
     for (var w = li; w < total; w += 64u) {
         let b = w / UNIT_WORDS;
         let bit = b & 31u;
@@ -484,7 +356,7 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         var rank = countOneBits(o.mixed[word] & ((1u << bit) - 1u));
         for (var q = 0u; q < word; q++) { rank += countOneBits(o.mixed[q]); }
         pool[(o.run + header + rank) * UNIT_WORDS + (w % UNIT_WORDS)] =
-            scratch[(o.scratch + scratch_header + b) * UNIT_WORDS + (w % UNIT_WORDS)];
+            scratch[(o.scratch + 1u + b) * UNIT_WORDS + (w % UNIT_WORDS)];
     }
     if li == 0u {
         let previous = records[job.record];
@@ -504,7 +376,7 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
                 break;
             }
             if ((o.mixed[word] >> bit) & 1u) != 0u {
-                let base = (o.scratch + scratch_header + u32(b)) * UNIT_WORDS;
+                let base = (o.scratch + 1u + u32(b)) * UNIT_WORDS;
                 var z = 7;
                 while z > 0 && (scratch[base + 2u * u32(z)] | scratch[base + 2u * u32(z) + 1u]) == 0u { z -= 1; }
                 exact = (o.k_lo + b) * 8 + z + 1;
@@ -528,7 +400,7 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         c.key0 = job.key0;
         c.key1 = job.key1;
         c.k_lo = o.k_lo;
-        c.info = o.n_band | (o.n_mixed << 9u) | (o.size_class << 18u) | (gap << 22u) | select(0u, INFO_EXT, ext) | (o.pad & (INFO_RELIEF | INFO_RELIEF_INLINE | INFO_HEIGHTFIELD | INFO_TOPOLOGY)) | INFO_VALID;
+        c.info = o.n_band | (o.n_mixed << 9u) | (o.size_class << 18u) | (gap << 22u) | select(0u, INFO_EXT, ext) | INFO_VALID;
         c.run = o.run;
         c.mixed = o.mixed[0];
         c.solid = o.solid[0];

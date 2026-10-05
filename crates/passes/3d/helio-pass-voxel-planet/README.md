@@ -3,10 +3,8 @@
 Destructible voxel worlds for Helio: Earth-sized cube-sphere planets, finite
 planes and effectively infinite planes, built from exact voxels of 0.1 m to
 1 m, fully editable, and rendered by tracing every pixel through a GPU-driven
-clipmap. Near geometry and gameplay use the authored voxel grid. Distant
-columns without geometry edits retain fractional radial height and filtered
-slope lighting so sub-pixel terrain keeps its relief without tracing every
-tiny voxel.
+clipmap. There is no smooth or meshed terrain and no enlarged-block LOD: every
+visible surface is a real cell of the canonical grid at some level.
 
 This document maps the system for people who will work on it: what each part
 does, how a frame flows, which invariants hold it together, why things are
@@ -28,12 +26,12 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
 
 ## Goals and non-goals
 
-- Crisp near voxels and stable distant relief: filter sub-pixel detail while
-  preserving visible landforms, materials and edits, without visible LOD steps.
+- Crisp voxels at every distance: near cells are cubes; far cells are the
+  same field sampled at a coarser level, shaded with filtered appearance so
+  sub-pixel cells do not alias. No meshes, no smooth LOD surface.
 - One world, two consumers: the CPU (collision, ray casts, edits, gameplay
   queries) and the GPU (streaming, rendering) evaluate the same integer field
-  and the same edits. Field evaluations agree to the bit; distant rendering
-  filters their appearance without changing the authored world.
+  and the same edits and agree to the bit.
 - Space to ground in seconds: a camera can fall from orbit to walking height
   at the editor's altitude-proportional speed while residency keeps up.
 - Destruction at scale: tens of thousands of edits stay exact and cheap.
@@ -61,7 +59,7 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
 | `shaders/common.wgsl` | GPU residency structures: column records, hash lookup, summary blocks. |
 | `shaders/generate.wgsl` | GPU column generation, brick-run allocation and publication (evict -> generate -> count -> refill -> allocate -> fixup -> publish). |
 | `shaders/horizon.wgsl` | Directional sky bound: per azimuth sector and distance bucket, the elevation that clears all terrain. |
-| `shaders/trace.wgsl` | Hierarchical grid traversal with authored radial tops for unedited distant columns. |
+| `shaders/trace.wgsl` | Exact hierarchical traversal of the canonical grid. |
 | `shaders/surface.wgsl` | Primary rays, shading (materials, filtered appearance, AO), traced sunlight. |
 | `shaders/gbuffer.wgsl`, `shaders/view.wgsl` | GBuffer publication (depth-tested against meshes) and shared view helpers. |
 | `tests/gpu.rs` | GPU correctness tests (see [Tests](#tests)). |
@@ -108,15 +106,9 @@ the CPU raycast what the GPU draws.
   continent wavelengths is constant over metres and steps by one unit; scaled
   by kilometres of relief that became long straight terraces.
 - Detail finer than a level's footprint is omitted at that level: coarse
-  levels are band-limited point samples of the same field. Landform display
-  generation retains the conditional mean of unresolved ridges, rather than
-  dropping their mountain height. This lookup is baked once per recipe;
-  canonical field queries and level 0 remain unchanged. Levels 1 and above
-  retain fractional radial tops unless Add/Remove edits change their geometry.
-  Short low-level spans store exact base-layer tops in the existing byte header.
-  Paint retains that relief. Slope lighting and face detail follow the authored
-  pixel footprint, using existing raw climate samples rather than tracing finer
-  cells.
+  levels are band-limited point samples of the same field, not a separate
+  smooth approximation. That is why LOD transitions never change the shape of
+  the land, only its resolution.
 - Heights are relative to the datum (the planet radius or the plane's y = 0)
   and may be negative: lowland and ocean basins sit below it. Nothing in the
   pipeline may clamp heights to the datum (see the band-top invariant below).
@@ -154,36 +146,23 @@ publishes a `PlanetFrame` (eye in f64 world metres, planet, sun) into a shared
 mailbox; frames are camera-relative (the renderer's world origin is the eye),
 so all GPU positions are small.
 
-Helio's sky pass accepts a `PlanetarySky` with the f64 eye, planet radius
-and sun direction. Its lookup follows the radial horizon, including from
-orbit; an authored scene sky takes precedence. `ambient_radiance` supplies
-dim diffuse light on the night side; set it to zero for solar-only lighting.
-
 ### CPU: `Residency::plan` (render thread)
 
 1. **Edit sync.** New or undone brushes since the last frame are found by
    prefix hash; new face brushes are uploaded; resident columns they touch
    are queued as urgent regenerations.
-2. **Windows.** When the eye moved, a `WindowRequest` goes to the window
-   worker thread, which computes each level's wanted disc of columns and
-   returns the latest wanted snapshot per level. Superseded snapshots retire
-   on the worker; actual resident columns retire incrementally. Level 0
-   covers the level-0 distance (cells about
-   a pixel wide at its edge), each coarser level twice the distance. Windows
-   request complete 4x4-column groups to match the traversal's residency
-   gate. Incoming groups are ordered by the eye, motion forecast and visible
-   ground focus before the render thread applies its bounded diff prefix.
-   A level is on only if terrain within its reach can be nearer than
-   that distance:
+2. **Windows.** When the eye moved and the previous plan has been applied,
+   a `WindowRequest` goes to the window worker thread, which computes each level's wanted disc of columns and
+   returns add/remove diffs. Level 0 covers the level-0 distance (cells about
+   a pixel wide at its edge), each coarser level twice the distance. A level
+   is on only if terrain within its reach can be nearer than that distance:
    the worker bounds the terrain around the eye per level
    (`Planet::local_outer_radius`), so over a meadow 1 km below the fine
    levels are off instead of streaming columns under a tenth of a pixel.
-3. **Diff application.** Each level keeps only its current demand. Global coverage
-   goes first; other levels share bounded turns within the frame's CPU
-   budget (1.5-4 ms moving by backlog, 4 ms still). Active levels
-   interleave bounded resident retirement and additions, so incoming columns can load before
-   retirement finishes. A switched-off level clears its queue. Diffs get
-   at most 60 % of the budget while columns wait. A level
+3. **Diff application.** Diffs are queued and applied in order within the
+   frame's CPU budget (1.5-3 ms moving by backlog, 4 ms still): removes evict residents,
+   a switched-off level clears its queue, adds become pending in a priority
+   bucket. Diffs get at most 60 % of the budget while columns wait. A level
    with unapplied diffs is *catching up*: its `fallback_distances` entry is 0
    (no guaranteed coverage).
 4. **Admission.** Pending columns are issued nearest-first (the coarsest level
@@ -200,11 +179,9 @@ dim diffuse light on the night side; set it to zero for solar-only lighting.
    the 8x8 columns, apply edits, find the occupied band (solid below, air
    above, mixed bricks in between), allocate a brick run of the right size
    class, write mixed bricks, publish the record, and raise the column's
-   summary-block tops and the level's top. Evicted runs return to free lists;
-   under pool pressure, wholly free pages can change allocation class. Failed
-   initial columns retry through visibility priorities within the CPU budget.
-   Natural columns reconstruct exact cell occupancy from their stored tops;
-   Add/Remove columns keep arbitrary mixed-brick occupancy.
+   summary-block tops and the level's top. Evicted runs return to free lists.
+   Failed jobs (scratch or pool full) append their keys to a failure list
+   that the CPU reads back and retries.
 3. **Horizon** (`horizon.wgsl`): the directional sky bound. Resident summary
    blocks are binned by azimuth sector and distance bucket around the eye;
    each bucket stores the lowest elevation that clears it.
@@ -215,12 +192,7 @@ dim diffuse light on the night side; set it to zero for solar-only lighting.
    level from distance (with a per-column stable dither band) and repeatedly
    exits the largest provably empty box: a summary block whose top it is
    above, a column above its top, an air brick; only mixed bricks run a cell
-   DDA. A column that is not resident falls back to a coarser level. A rotating
-   pixel sample requests missing 4x4 blocks through bounded asynchronous
-   feedback. While the worker catches up, up to 64 fresh requested blocks
-   can load through temporary demand; they retain normal edit/publication
-   rules. Near requests remain useful across delayed snapshots only while
-   they intersect the current camera window; their original lease still expires.
+   DDA. A column that is not resident falls back to a coarser level.
 5. **Shade**: material from the generator (or edit), macro normals and
    filtered appearance for cells about a pixel wide, AO from neighbour
    occupancy.
@@ -240,10 +212,41 @@ dim diffuse light on the night side; set it to zero for solar-only lighting.
   claimed ~30 m of air, rays stepped cell by cell through it (137 steps per
   ray instead of 6) and columns stored empty bricks. Tops are allowed to be
   loose only by the 3-bit `gap` (<= 7 cells).
+- **Demand stays inside capacity; nothing stalls at a limit.** Resident
+  columns grow with the pixel count: at 1440p a ground view holds ~1.7M
+  columns and 80% of the pool, the editor viewport ~2.8M (the record cap was
+  3M). Once records or pool units ran out, admission stopped and the view
+  stayed coarse. Admission is CPU-bound (~1500 columns per 3 ms frame) while
+  churn grows with resolution squared times speed: at 1440p flying 90 m/s
+  near the ground the windows churn ~100k columns/s, and at 25 km altitude
+  and 25 km/s about as many. Above 85% of records or pool, or with over 10%
+  of the wanted columns outstanding while moving (pending or to be added by
+  queued diffs; a still camera is loading, not churning), the
+  level-0 distance shrinks in 10-25% steps (`lod_pressure` in the stats;
+  churn falls with its square, cells get slightly wider on screen); below
+  65% and 2% it recovers in 5% steps. The CPU budget grows to 4 ms with the
+  outstanding work.
+- **Window plans are coalesced.** A new plan is requested only after the
+  previous one has been applied; the worker diffs against the last window it
+  sent, so one diff spans all motion since. A request per moved frame queued
+  every intermediate window: climbing at 1440p the queue reached 3000+ level
+  diffs, eviction and admission fell further behind every frame and the view
+  stayed coarse (100% of terrain pixels enlarged, up to 465 px).
+- **Every job outcome reaches the CPU.** Failed jobs are appended to a GPU
+  list that is copied to a readback with the allocator counters; with no free
+  readback the frame issues no jobs. Results used to be copied only when a
+  readback slot was free and otherwise assumed successful, so a failed column
+  stayed resident on the CPU, unpublished on the GPU, and was never retried.
+- **Pool pages return to the free stack.** Size classes take whole pages; a
+  per-page free-run count lets `allocator_recycle.wgsl` (run under pool
+  pressure, at most every 60 frames) give wholly free pages back, so terrain
+  that changes character no longer strands pages in classes it stopped using.
 - **Exact traversal, conservative accelerations.** The sky bound, summary
   blocks and residency hints may only skip space proven empty; tests compare
   renders with and without each acceleration.
-- **Hash table.** Linear probing, `slot_hash(key0, key1)`, at most
+- **Hash table.** 8M slots (at 4M slots and 2.5M+ columns probe runs passed
+  the GPU limit). A column is only inserted within the GPU's probe limit of
+  its home slot (`ColumnIndex::can_insert`). Linear probing, `slot_hash(key0, key1)`, at most
   `MAX_PROBES = 64` probes on the GPU. The CPU uses the same table for its own
   lookups (`ColumnIndex`); deletion is backward shift (no tombstones), so
   probe runs never degrade and the table never needs a rehash. Every slot
@@ -267,7 +270,7 @@ dim diffuse light on the night side; set it to zero for solar-only lighting.
   used once with the job count of the frame it measured (dividing by the
   last frame's jobs overestimated the cost 2-7x). Measured: ~0.22 us per
   column on an RTX 3060, ~6500 jobs per moving frame. The CPU budget for
-  diffs and admission grows from 1.5 to 4 ms while moving as the backlog
+  diffs and admission grows from 1.5 to 3 ms while moving as the backlog
   reaches 20k columns.
 - **Pending queues are exact.** Each level's pending columns sit in
   priority buckets with a position index, so a window moving at speed
@@ -327,14 +330,13 @@ times come from timestamps.
 | `HELIO_VOXEL_FLIGHT_BLOCKY=1` | Logs the share of terrain pixels drawn by a coarser-than-base level with cells wider than 2 and 4 px (by design at most ~2.2 px; wider means a finer level is still loading). Cruise and replay always log it. |
 | `HELIO_VOXEL_FLIGHT_TRIP_FROM=<km>`, `_TRIP_FPS=<n>`, `_TRIP_EVERY=<frames>` | Trip start on the flank of the nearest summit (rock, scree, snow); flight frames per second (120; the editor runs near 60); capture cadence. |
 | `HELIO_VOXEL_FLIGHT_LODCMP=<km>` | One view over a flank rendered with levels forced progressively coarser: surface colour shares must not change (they stay within 3 %). |
+| `HELIO_VOXEL_FLIGHT_LONG=<s>` | Sustained heavy travel (dives from 25 km to 30 m and climbs, turning, at 2-3x editor speed), then a stop: logs pool, table probe runs, queued diffs, `lod_pressure` and enlarged blocks. Run it at the editor's resolution (e.g. `2560 1440`); at 720p demand is 4x lower and capacity limits never show. |
 | `HELIO_VOXEL_FLIGHT_CRUISE=<m>`, `_CRUISE_SECS=<s>` | Level flight at that height at the editor's speed for 20 s, then a stop: residency lag while moving and time to converge. |
-| `HELIO_VOXEL_FLIGHT_CRUISE_SPEED=<m/s>`, `_CRUISE_EVERY=<frames>` | Override level-flight speed and capture cadence; cruise also writes frame timings. |
 | `HELIO_VOXEL_FLIGHT_REPLAY=<engine.log>`, `_REPLAY_FROM/_TO=<s of day>`, `_REPLAY_DEG` | Replays the altitude timeline of a Pulsar editor session logged with `PULSAR_VOXEL_STATS=1`. |
 | `HELIO_VOXEL_FLIGHT_SUN=x,y,z` | Sun direction (the editor's default Sun is straight up). |
 | `HELIO_VOXEL_FLIGHT_QUICK=1`, `_GROUND_ONLY=1`, `_CPU_PROBE=1` | Short timing probe, ground audits only, CPU per pass. |
 | `HELIO_VOXEL_PLAN_TRACE=<ms>` | Logs residency plan phases of frames taking over `<ms>` (10 if not a number). |
 | `HELIO_VOXEL_LOD_DITHER`, `HELIO_VOXEL_NO_HORIZON`, `HELIO_VOXEL_NO_FAILSAFE` | Override the dither width; disable the sky bound; disable its fail-safe (A/B timing). |
-| `HELIO_VOXEL_COARSE_RELIEF=0`, `HELIO_VOXEL_FAR_RELIEF=0` | Disable fractional radial tops or raw-climate slope lighting for A/B comparisons. Set before loading terrain. |
 
 Measuring pitfalls: synchronous readbacks (audits, probes, captures) idle
 the GPU and the driver drops its clock (frames right after them show 210 MHz
@@ -381,15 +383,8 @@ settings rebuilds the world without recompiling shaders; pipelines are keyed
 by program.
 
 **A material.** Add the id to `terrain::material` and `world.wgsl`, its
-default colour and roughness to `TerrainAppearance` in `engine.rs`, and to
-editor-facing enums (Pulsar's `VoxelTerrainMaterial`).
-
-**Appearance.** `PlanetPass::set_appearance` updates palette, grass colours
-and detail without rebuilding terrain. RGB is sRGB; roughness is linear.
-When it returns `true`, reset temporal colour history to show the change in
-an idle viewport.
-Unedited Landform rock has a world-space weathered surface coating;
-canonical material ids, underlying strata and explicit paint are unchanged.
+colour to `palette` in `surface.wgsl`, and to editor-facing enums (Pulsar's
+`VoxelTerrainMaterial`).
 
 **A brush shape.** Extend `BrushShape`, its per-face resolution in
 `edits.rs`, the containment test in both `edits.rs` and `generate.wgsl`
@@ -406,6 +401,9 @@ and inside the budgeted loop in `Residency::plan`.
   no holes), but the table inconsistency behind it is not yet understood.
   Rings and fallback distances are identical in the bad frame and the one
   before; suspect block publication vs. the live-block list.
+- The fallback sky (Helio's sky pass) assumes world +Y up and a fixed sun;
+  away from the pole and from orbit the sky is wrong. Planned: atmosphere
+  around the planet from engine sky systems.
 - Dense construction stores edit references per column (4M-word pool);
   sparse block-override bricks would scale building further.
 - Edit ids (`next_brush`) grow monotonically after undo.

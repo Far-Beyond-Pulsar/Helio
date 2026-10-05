@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 pub const ID: &str = "helio.landform";
 pub const VERSION: u32 = 1;
-pub(crate) const DISPLAY_PROGRAM: &str = "helio.landform/1-ridge-envelope/2";
 pub const FLAT_ID: &str = "helio.flat";
 pub const FLAT_VERSION: u32 = 1;
 
@@ -460,21 +459,12 @@ impl TerrainGenerator for LandformGenerator {
 pub struct LandformField {
     constants: LandformConstants,
     bounds: [i32; 24],
-    render_bounds: [i32; 24],
-    ridge_suffix: Option<[[i32; 4]; 66]>,
 }
 
 impl LandformField {
     pub fn new(grid: &Grid, land: &Landform, seed: u32) -> Self {
         let constants = LandformConstants::new(grid, land, seed);
-        let bounds = constants.bound_margins(grid);
-        // Unsupported recipes retain the canonical path. In particular, do
-        // not saturate already-invalid huge finite amplitudes into new terrain.
-        let ridge_suffix = crate::ridge_envelope::bake_ridge_suffix(grid, &constants).ok();
-        let render_bounds = if ridge_suffix.is_some() {
-            crate::ridge_envelope::render_bounds(grid, &constants, bounds)
-        } else { bounds };
-        Self { bounds, render_bounds, ridge_suffix, constants }
+        Self { bounds: constants.bound_margins(grid), constants }
     }
     pub fn constants(&self) -> &LandformConstants {
         &self.constants
@@ -494,18 +484,11 @@ impl TerrainField for LandformField {
     fn bound_margins(&self) -> [i32; 24] {
         self.bounds
     }
-    fn render_bound_margins(&self) -> [i32; 24] {
-        self.render_bounds
-    }
     fn program(&self) -> TerrainProgram {
-        let mut canonical = self.constants;
-        canonical.shape[2] = i32::from(self.ridge_suffix.is_some());
-        let mut constants = bytemuck::bytes_of(&canonical).to_vec();
-        constants.extend_from_slice(bytemuck::cast_slice(&self.ridge_suffix.unwrap_or([[0; 4]; 66])));
         TerrainProgram {
-            key: Cow::Borrowed(DISPLAY_PROGRAM),
+            key: Cow::Borrowed("helio.landform/1"),
             wgsl: Cow::Borrowed(include_str!("../shaders/landform.wgsl")),
-            constants,
+            constants: bytemuck::bytes_of(&self.constants).to_vec(),
         }
     }
 }
@@ -593,35 +576,6 @@ impl TerrainField for FlatField {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn climate_bounds_cover_both_signs_of_canonical_height_change() {
-        for voxel in [0.1, 0.3, 1.0] {
-            let grid = Grid::new(6_371_000.0, voxel).unwrap();
-            let k = LandformConstants::new(&grid, &Landform::default(), 7);
-            let bounds = k.bound_margins(&grid);
-            let mut rng = 0x2545_F491_4F6C_DD1Du64;
-            let mut next = || {
-                rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; rng
-            };
-            for _ in 0..5000 {
-                let level = 1 + (next() % u64::from(grid.levels() - 1)) as u32;
-                let face = (next() % 6) as u8;
-                let cells = (grid.cells() >> level).max(1) as u64;
-                let i = (next() % cells) as i32;
-                let j = (next() % cells) as i32;
-                let coarse = height(&k, grid.domain_point(face, i, j, level), level + grid.level_offset());
-                let top = coarse.div_euclid(k.header[1]) >> level;
-                let fi = (i << level) + (next() % (1u64 << level)) as i32;
-                let fj = (j << level) + (next() % (1u64 << level)) as i32;
-                let canonical = i64::from(height(&k, grid.domain_point(face, fi, fj, 0), grid.level_offset()));
-                let cell_mm = i64::from(k.header[1]) * (1i64 << level);
-                let lo = i64::from(top - bounds[level as usize]) * cell_mm;
-                let hi = i64::from(top + bounds[level as usize]) * cell_mm;
-                assert!((lo..=hi).contains(&canonical), "{voxel} m level {level}: {canonical} outside {lo}..={hi}");
-            }
-        }
-    }
 
     #[test]
     fn height_range_is_planetary_and_levels_agree_on_large_scale() {
