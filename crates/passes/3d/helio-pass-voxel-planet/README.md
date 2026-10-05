@@ -36,11 +36,18 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
   filters their appearance without changing the authored world.
 - Space to ground in seconds: a camera can fall from orbit to walking height
   at the editor's altitude-proportional speed while residency keeps up.
-- Destruction at scale: tens of thousands of edits stay exact and cheap.
+- Volumetric worlds: generated caves and overhangs, not only heightfields.
+  Heightmaps are one input among others. Not yet supported: terrain programs
+  define a surface height per column, and each column stores one band of at
+  most 256 bricks with solid ground below it.
+- Destruction at any scale, up to the entire planet. Today tens of
+  thousands of edits stay exact and cheap, but a brush is limited to 37,000
+  half cells of radius (1.85 km at 0.1 m), and every regenerated column
+  replays its whole brush list.
 - Budgets (RTX 3060, 1080p Quality, i.e. 1440x810 internal): terrain GPU
   p95 <= 5 ms, no CPU frame stalls, terrain GPU memory <= 1 GiB.
-- Non-goals (for now): caves in generated terrain (edits make caves),
-  translucent water, meshes inside the voxel pass, multiple worlds per pass.
+- Non-goals (for now): translucent water, meshes inside the voxel pass,
+  multiple worlds per pass.
 
 ## Crate map
 
