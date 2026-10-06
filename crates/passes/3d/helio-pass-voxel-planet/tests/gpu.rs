@@ -334,6 +334,50 @@ fn a_deep_shaft_renders_exactly_at_any_depth() {
     }
 }
 
+/// Tools ask the pass for the terrain hit under a view point (the editor's
+/// brush): the answer, a few frames later, lies within its cell size of the
+/// exact CPU hit along that pixel's ray, near and far; the sky has none.
+#[test]
+fn picks_report_the_terrain_hit_under_the_view() {
+    use helio_pass_voxel_planet::engine::{PickRequest, SharedPicks};
+    let Some(gpu) = gpu() else { return };
+    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+    let ground = planet.surface_point(land(&planet, 2, 0.47, 0.53), 0.0);
+    let eye = planet.surface_point(ground, 60.0);
+    let up = planet.grid().up(eye);
+    let forward = (up.any_orthonormal_vector() - up * 0.15).normalize().as_vec3();
+    let size = [256, 144];
+    let target = Target::new(&gpu, size);
+    let mut renderer = renderer(&gpu, planet.clone(), size);
+    let picks: SharedPicks = Default::default();
+    let mut frame = frame(&planet, eye);
+    frame.picks = Some(picks.clone());
+    let frames = settle(&gpu, &target, &mut renderer, &frame, forward);
+    let camera = target.camera(forward, up.as_vec3());
+    // Pixels from just below the horizon to the bottom, and one in the sky.
+    let pixels = [(128u32, 2u32), (128, 70), (40, 80), (200, 100), (128, 143)];
+    picks.lock().unwrap().requests.extend(pixels.iter().enumerate().map(|(n, &(x, y))| PickRequest {
+        id: n as u64,
+        uv: [(x as f32 + 0.5) / size[0] as f32, (y as f32 + 0.5) / size[1] as f32],
+    }));
+    for n in 0..4 {
+        target.render(&gpu, &mut renderer, &frame, forward, (frames + n) as u64);
+    }
+    let results = std::mem::take(&mut picks.lock().unwrap().results);
+    assert_eq!(results.len(), pixels.len(), "every request is answered");
+    for result in results {
+        let (x, y) = pixels[result.id as usize];
+        let dir = pixel_dir(&target, &camera, x, y);
+        let cpu = planet.raycast(eye, dir, 100_000.0);
+        eprintln!("pick {x},{y}: {:?} cpu {:?}", result.hit, cpu.map(|c| c.distance));
+        match (result.hit, cpu) {
+            (Some(hit), Some(cpu)) => assert!((hit.distance - cpu.distance).abs() <= hit.cell_m * 2.0 + 0.5, "pixel {x},{y}: {hit:?} vs {}", cpu.distance),
+            (None, None) => {}
+            (hit, cpu) => panic!("pixel {x},{y}: pick {hit:?}, cpu {cpu:?}"),
+        }
+    }
+}
+
 /// Planet-scale brushes: a sphere of 3 km radius (64-bit containment; the
 /// old 32-bit test capped brushes at 1.85 km) leaves a crater 3 km deep. On
 /// its floor, GPU hits match canonical CPU ray casts.

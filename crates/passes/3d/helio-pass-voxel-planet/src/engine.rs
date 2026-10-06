@@ -31,9 +31,57 @@ pub struct PlanetFrame {
     /// Direction towards the sun (planet-centred frame).
     pub sun: Vec3,
     pub shadows: bool,
+    /// Where tools ask for the terrain hit under points of the view.
+    pub picks: Option<SharedPicks>,
 }
 
 pub type SharedPlanetFrame = Arc<Mutex<Option<PlanetFrame>>>;
+
+/// A request for the terrain hit under view point `uv` (0..1, from the top
+/// left), answered a frame or two later in [`Picks::results`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PickRequest {
+    pub id: u64,
+    pub uv: [f32; 2],
+}
+
+/// The answer to a [`PickRequest`]: the distance from the eye of the first
+/// terrain hit along that pixel's ray and the size of the cell that drew it
+/// (how far the exact surface can be from it), or `None` (sky, loading).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PickResult {
+    pub id: u64,
+    pub hit: Option<PickHit>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PickHit {
+    pub distance: f64,
+    pub cell_m: f64,
+}
+
+/// Pick requests and answers shared between a tool and the pass.
+#[derive(Default, Debug)]
+pub struct Picks {
+    pub requests: Vec<PickRequest>,
+    pub results: Vec<PickResult>,
+}
+
+pub type SharedPicks = Arc<Mutex<Picks>>;
+
+/// Picks per readback (one frame's requests beyond it wait a frame).
+const MAX_PICKS: usize = 8;
+/// Bytes of a `Hit` (trace.wgsl).
+const HIT_BYTES: u64 = 32;
+
+/// One frame's copied hits for pick requests.
+struct PickSlot {
+    buffer: wgpu::Buffer,
+    requests: Vec<u64>,
+    sink: Option<SharedPicks>,
+    state: Arc<AtomicBool>,
+    stage: u8, // 0 free, 1 copied, 2 mapping
+}
 
 pub use crate::terrain::{MaterialAppearance, TerrainAppearance, MATERIALS};
 
@@ -832,6 +880,7 @@ pub struct PlanetRenderer {
     /// Last local projection and precise eye, for motion in the shared GBuffer.
     camera_history: Option<(u64, u32, DVec3, Mat4)>,
     readbacks: Vec<Readback>,
+    picks: Vec<PickSlot>,
     frame_index: u32,
     stats: PlanetStats,
     sun_active: bool,
@@ -930,6 +979,20 @@ impl PlanetRenderer {
             camera_group,
             camera_history: None,
             readbacks,
+            picks: (0..3)
+                .map(|_| PickSlot {
+                    buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("planet pick readback"),
+                        size: MAX_PICKS as u64 * HIT_BYTES,
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                        mapped_at_creation: false,
+                    }),
+                    requests: Vec::new(),
+                    sink: None,
+                    state: Arc::new(AtomicBool::new(false)),
+                    stage: 0,
+                })
+                .collect(),
             frame_index: 0,
             stats: PlanetStats::default(),
             sun_active: false,
@@ -1226,6 +1289,70 @@ impl PlanetRenderer {
         (work.table_writes.len() as u32, work.block_inits.len() as u32)
     }
 
+    /// Copy the hits under this frame's pick requests for readback.
+    fn copy_picks(slots: &mut [PickSlot], hits: &wgpu::Buffer, encoder: &mut wgpu::CommandEncoder, picks: &SharedPicks, size: [u32; 2]) {
+        let Some(slot) = slots.iter_mut().find(|slot| slot.stage == 0) else { return };
+        let requests: Vec<PickRequest> = {
+            let Ok(mut shared) = picks.lock() else { return };
+            let n = shared.requests.len().min(MAX_PICKS);
+            shared.requests.drain(..n).collect()
+        };
+        if requests.is_empty() {
+            return;
+        }
+        for (n, request) in requests.iter().enumerate() {
+            let x = ((request.uv[0].clamp(0.0, 1.0) * size[0] as f32) as u32).min(size[0].max(1) - 1);
+            let y = ((request.uv[1].clamp(0.0, 1.0) * size[1] as f32) as u32).min(size[1].max(1) - 1);
+            let pixel = u64::from(x) + u64::from(y) * u64::from(size[0]);
+            encoder.copy_buffer_to_buffer(hits, pixel * HIT_BYTES, &slot.buffer, n as u64 * HIT_BYTES, HIT_BYTES);
+        }
+        slot.requests = requests.iter().map(|r| r.id).collect();
+        slot.sink = Some(picks.clone());
+        slot.stage = 1;
+    }
+
+    /// Answer picks whose hits arrived; start mapping last frame's copies.
+    fn poll_picks(&mut self) {
+        let voxel = self.planet.grid().voxel_size();
+        for slot in &mut self.picks {
+            if slot.stage == 2 && slot.state.load(Ordering::Acquire) {
+                let results: Vec<PickResult> = {
+                    let data = slot.buffer.slice(..).get_mapped_range().unwrap();
+                    slot.requests
+                        .iter()
+                        .enumerate()
+                        .map(|(n, &id)| {
+                            let at = n * HIT_BYTES as usize;
+                            let t = f32::from_le_bytes(data[at..at + 4].try_into().unwrap());
+                            let info = u32::from_le_bytes(data[at + 16..at + 20].try_into().unwrap());
+                            let hit = (info & 3 == 1 && t.is_finite() && t > 0.0)
+                                .then(|| PickHit { distance: f64::from(t), cell_m: voxel * f64::from(1u32 << ((info >> 5) & 31)) });
+                            PickResult { id, hit }
+                        })
+                        .collect()
+                };
+                slot.buffer.unmap();
+                if let Some(Ok(mut shared)) = slot.sink.take().as_ref().map(|s| s.lock()) {
+                    shared.results.extend(results);
+                }
+                slot.requests.clear();
+                slot.stage = 0;
+                slot.state.store(false, Ordering::Release);
+            }
+        }
+        for slot in &mut self.picks {
+            if slot.stage == 1 {
+                let state = slot.state.clone();
+                slot.buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                    if result.is_ok() {
+                        state.store(true, Ordering::Release);
+                    }
+                });
+                slot.stage = 2;
+            }
+        }
+    }
+
     fn grow_brushes(&mut self, needed: u32) {
         let capacity = needed.next_power_of_two().max(self.buffers.brush_capacity * 2);
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1507,6 +1634,7 @@ impl PlanetRenderer {
             self.screen = Screen::new(&self.device, size);
         }
         self.poll_readbacks();
+        self.poll_picks();
         let tan_half = 1.0 / f64::from(camera_data.proj[5]).abs().max(1e-6);
         let lod0 = Residency::lod_distance(self.planet.grid(), tan_half, size[1], f64::from(self.settings.lod_pixels)) / self.lod_pressure;
         let now = std::time::Instant::now();
@@ -1701,6 +1829,9 @@ impl PlanetRenderer {
             pass.set_bind_group(0, &trace_group, &[]);
             pass.set_bind_group(1, camera_group, &[]);
             Self::dispatch(&mut pass, &self.pipelines.primary, groups);
+        }
+        if let Some(picks) = &frame.picks {
+            Self::copy_picks(&mut self.picks, &self.screen.hits, encoder, picks, size);
         }
         if let Some(p) = &mut self.profiler {
             p.end_pass(encoder, "planet_primary");

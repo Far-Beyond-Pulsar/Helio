@@ -205,6 +205,15 @@ Edit cost does not grow with the brushes piled on one spot (sculpting):
   column's brushes queried once, instead of a ray from the outer radius
   through the edit index cell by cell (426 ms at 2000 brushes before).
 
+**Picks.** A tool asks the pass for the terrain hit under a view point
+(`PlanetFrame::picks`): the pass copies that pixel's primary hit to a small
+readback ring, and the answer (distance along the pixel's ray and the size of
+the cell that drew it) arrives a few frames later. The editor's brush walks
+the exact base grid only a few cells around it: a CPU walk from the eye
+through 0.1 m cells took seconds to reach a mountain 20 km away and tens of
+seconds near the horizon. Ray walks look a column's top and brushes up once
+per column.
+
 Sculpting stress (`HELIO_VOXEL_FLIGHT_SCULPT=1`, three stamps a frame on one
 ring): brush CPU per frame 397 / 590 / 1704 ms -> 0.4 / 1.8 / 4.8 ms (dig r1,
 dig r4, build r1), terrain GPU 49 / 76 / 134 ms at 720p -> 13 / 16 / 21 ms at

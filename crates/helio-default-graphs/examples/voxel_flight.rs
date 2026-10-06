@@ -292,7 +292,7 @@ impl Flight {
     }
 
     fn draw_with_up(&mut self, stage: &str, eye: DVec3, forward: Vec3, view_up: Option<Vec3>) -> f64 {
-        *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: self.planet.clone(), sun: self.sun, shadows: self.shadows });
+        *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: self.planet.clone(), sun: self.sun, shadows: self.shadows, picks: None });
         self.renderer.set_world_origin(Some(eye));
         self.renderer.set_planetary_sky(Some(helio_pass_sky::PlanetarySky::earth_like(
             eye.to_array(), self.planet.grid().radius(), self.sun.to_array(),

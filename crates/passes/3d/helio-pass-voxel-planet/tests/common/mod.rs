@@ -152,7 +152,7 @@ pub fn renderer(gpu: &Gpu, planet: Arc<Planet>, size: [u32; 2]) -> PlanetRendere
 }
 
 pub fn frame(planet: &Arc<Planet>, eye: DVec3) -> PlanetFrame {
-    PlanetFrame { eye, planet: planet.clone(), sun: Vec3::new(0.3, 0.8, 0.4), shadows: false }
+    PlanetFrame { eye, planet: planet.clone(), sun: Vec3::new(0.3, 0.8, 0.4), shadows: false, picks: None }
 }
 
 /// Decoded primary hit.

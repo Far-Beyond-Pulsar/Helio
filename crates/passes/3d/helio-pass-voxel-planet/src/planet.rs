@@ -41,6 +41,25 @@ impl Default for PlanetRecipe {
 }
 
 impl PlanetRecipe {
+    /// Fingerprint of the ground this recipe makes (form, voxel size,
+    /// generator, seed and settings, the settings compared as JSON values):
+    /// edits belong to it (`VoxelEditJournal::made_on`).
+    pub fn fingerprint(&self) -> u64 {
+        let settings: serde_json::Value = serde_json::from_str(&self.terrain.settings).unwrap_or(serde_json::Value::Null);
+        // Only the size the shape uses.
+        let (radius, plane) = match self.shape {
+            Shape::Sphere => (self.radius_m, 0.0),
+            _ => (0.0, self.plane_size_m),
+        };
+        let key = serde_json::json!([self.version, self.shape, radius, plane, self.voxel_size_m,
+            self.terrain.generator, self.terrain.version, self.terrain.seed, settings]);
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for byte in key.to_string().bytes() {
+            h = (h ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
+        }
+        // 0 means "no terrain yet".
+        h.max(1)
+    }
     pub fn from_json(json: &str) -> Result<Self, String> {
         if json.trim().is_empty() {
             return Ok(Self::default());
@@ -57,6 +76,13 @@ impl PlanetRecipe {
 }
 
 /// Result of an exact ray cast on the base grid.
+/// The base column a ray walk is in (`Planet::kind_in`).
+struct RayColumn {
+    key: (u8, i32, i32),
+    top: i32,
+    brushes: Vec<FaceBrush>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RayHit {
     pub cell: Cell,
@@ -216,6 +242,25 @@ impl Planet {
         let center = [center_half(i, level), center_half(j, level), center_half(k, level)];
         apply(self.face_brushes(face, i, j, level).into_iter(), center, || self.grid.volume_point(face, i, j, k, level), kind, 0)
     }
+    /// [`Self::kind`] for cells walked by a ray: the column's top and
+    /// brushes are looked up once per column, not per cell.
+    fn kind_in(&self, column: &mut Option<RayColumn>, cell: Cell) -> u32 {
+        let key = (cell.face, cell.i, cell.j);
+        if column.as_ref().is_none_or(|c| c.key != key) {
+            *column = Some(RayColumn {
+                key,
+                top: self.column_top(cell.face, cell.i, cell.j, 0),
+                brushes: self.face_brushes(cell.face, cell.i, cell.j, 0),
+            });
+        }
+        let c = column.as_ref().expect("filled above");
+        let kind = terrain::generated_kind(&self.grid, &*self.field, cell.face, cell.i, cell.j, cell.k, 0, c.top);
+        if c.brushes.is_empty() {
+            return kind;
+        }
+        let center = [center_half(cell.i, 0), center_half(cell.j, 0), center_half(cell.k, 0)];
+        apply(c.brushes.iter().copied(), center, || self.grid.volume_point(cell.face, cell.i, cell.j, cell.k, 0), kind, 0).0
+    }
     /// Canonical kind at a base cell.
     pub fn kind(&self, cell: Cell) -> u32 {
         self.sample_kind(0, cell.face, cell.i, cell.j, cell.k).0
@@ -278,12 +323,13 @@ impl Planet {
         let (mut cell, _) = grid.locate(origin + d * (t + eps));
         let mut previous = cell;
         let mut normal = -d;
+        let mut column = None;
         let n = grid.cells();
         for _ in 0..4_000_000 {
             if t > limit {
                 return None;
             }
-            if stop(self.kind(cell)) {
+            if stop(self.kind_in(&mut column, cell)) {
                 return Some(RayHit {
                     cell,
                     previous,
@@ -414,12 +460,13 @@ impl Planet {
         let mut t = t0;
         let mut previous = cell_of(idx);
         let mut normal = -d;
+        let mut column = None;
         for _ in 0..4_000_000 {
             if t > t1 {
                 return None;
             }
             let cell = cell_of(idx);
-            if stop(self.kind(cell)) {
+            if stop(self.kind_in(&mut column, cell)) {
                 return Some(RayHit { cell, previous, distance: t, normal });
             }
             let axis = if next[0] <= next[1] && next[0] <= next[2] { 0 } else if next[1] <= next[2] { 1 } else { 2 };
