@@ -490,9 +490,11 @@ impl Planet {
         // Smallest ground width of a base cell (equal-angle cube cells
         // shrink to 1/sqrt(2) of the centre width towards face edges).
         let base = if g.is_plane() { g.voxel_size() } else { g.delta() * g.radius() * 0.7 };
-        // Coarsest level still resolving the region in a few cells.
+        // Coarsest level still resolving the region in a few cells. Field
+        // queries exist at any level, beyond the world's resident ones (a
+        // small plane has few): the region stays a few columns wide.
         let mut level = 0;
-        while level + 1 < g.levels() && base * f64::from(1u32 << (level + 1)) * 3.0 < radius {
+        while level + 1 < 24 && base * f64::from(1u32 << (level + 1)) * 3.0 < radius {
             level += 1;
         }
         let reach = (radius / (base * f64::from(1u32 << level))).ceil() as i32 + 1;

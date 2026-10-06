@@ -214,7 +214,6 @@ fn raw_sphere_relief_restores_physical_authored_normal_without_changing_hits_or_
                         coarse_relief: true,
                         far_relief: false,
                         lod_pixels: 0.125,
-                        climate_height_reuse: true,
                         frame_override: Some(37),
                         ..Default::default()
                     },

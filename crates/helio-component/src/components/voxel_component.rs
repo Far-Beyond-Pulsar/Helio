@@ -458,6 +458,7 @@ impl Clone for VoxelTerrainComponent {
 #[category("Detail", category_color = "#D1A73F")]
 #[category("Caves", category_color = "#7A6A9E")]
 #[category("Overhangs", category_color = "#A8826F")]
+#[category("Erosion", category_color = "#B5734A")]
 #[serde(default)]
 pub struct VoxelLandformComponent {
     /// Typical continent width in kilometres.
@@ -529,6 +530,21 @@ pub struct VoxelLandformComponent {
     /// Rough share of the land inside overhang regions.
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Overhangs", label = "Overhang regions (share)")]
     pub overhang_share: f64,
+    /// Depth of the largest erosion gullies, in metres (0 disables erosion).
+    #[property(min = 0.0, max = 500.0, step = 1.0, category = "Erosion", label = "Gully depth (m)")]
+    pub erosion_m: f64,
+    /// Spacing of the largest gullies, in kilometres.
+    #[property(min = 0.05, max = 50.0, step = 0.05, category = "Erosion", label = "Gully spacing (km)")]
+    pub erosion_km: f64,
+    /// Number of gully octaves, each half the spacing of the previous one.
+    #[property(min = 0.0, max = 8.0, step = 1.0, category = "Erosion", label = "Gully octaves")]
+    pub erosion_octaves: u32,
+    /// Depth ratio from one gully octave to the next finer one.
+    #[property(min = 0.0, max = 1.0, step = 0.05, category = "Erosion", label = "Gully depth ratio")]
+    pub erosion_gain: f64,
+    /// Ground slope (rise over run) at which gullies reach full depth.
+    #[property(min = 0.05, max = 3.0, step = 0.05, category = "Erosion", label = "Full-depth slope")]
+    pub erosion_slope: f64,
 }
 impl Default for VoxelLandformComponent {
     /// The planet generator's own defaults (Earth-like).
@@ -556,7 +572,13 @@ impl Default for VoxelLandformComponent {
             overhang_m: 6.0,
             overhang_wavelength_m: 24.0,
             overhang_region_km: 3.0,
-            overhang_share: 0.3,        }
+            overhang_share: 0.3,
+            erosion_m: 40.0,
+            erosion_km: 1.6,
+            erosion_octaves: 6,
+            erosion_gain: 0.5,
+            erosion_slope: 0.5,
+        }
     }
 }
 

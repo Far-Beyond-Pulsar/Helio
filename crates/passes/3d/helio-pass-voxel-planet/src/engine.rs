@@ -77,9 +77,6 @@ pub struct Settings {
     pub horizon: bool,
     /// Skip hash lookups of columns the summary blocks prove absent.
     pub residency_hints: bool,
-    /// Reuse a coarse climate height only when Landform bounds prove that
-    /// every canonical height gives the same material. Disable for audits.
-    pub climate_height_reuse: bool,
     /// Preserve sub-cell radial relief in unedited coarse columns.
     /// Set before generating columns; resident columns retain their format.
     pub coarse_relief: bool,
@@ -110,7 +107,6 @@ impl Default for Settings {
             job_budget: 12_288,
             horizon: std::env::var_os("HELIO_VOXEL_NO_HORIZON").is_none(),
             residency_hints: true,
-            climate_height_reuse: true,
             coarse_relief: std::env::var("HELIO_VOXEL_COARSE_RELIEF").ok().is_none_or(|v| v != "0"),
             ridge_display: std::env::var("HELIO_VOXEL_RIDGE_DISPLAY").ok().is_none_or(|v| v != "0"),
             far_relief: std::env::var("HELIO_VOXEL_FAR_RELIEF").ok().is_none_or(|v| v != "0"),
@@ -304,14 +300,10 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -
             .replace("SHAPE_ID", if plane { "1u" } else { "0u" }),
     );
     if program.key == crate::landform::DISPLAY_PROGRAM {
-        s.push_str(include_str!("../shaders/landform_climate.wgsl"));
         if generation {
             s.push_str("fn generation_height(face:u32,i:i32,j:i32,level:u32,display:bool)->i32 { if display { return terrain_display_height(domain_point(face,i,j,level),level+u32(world.grid.w)); } return field_height(face,i,j,level); }\n");
         }
     } else {
-        // Custom generators keep their full query; only Landform's material
-        // classification and symmetric bounds justify the shortcut.
-        s.push_str("fn climate_height_reusable(top: i32, level: u32) -> bool { return false; }\n");
         if generation {
             s.push_str("fn generation_height(face:u32,i:i32,j:i32,level:u32,display:bool)->i32 { return field_height(face,i,j,level); }\n");
         }
@@ -1048,9 +1040,6 @@ impl PlanetRenderer {
         frame.palette = self.settings.appearance.palette.map(linear);
         frame.grass = self.settings.appearance.grass.map(linear);
         frame.detail = self.settings.appearance.detail.map(clean);
-        // Material-equivalent quantized tops are not equivalent derivatives:
-        // far relief needs raw heights at the existing 2x2 anchors.
-        frame.hints[1] = u32::from(self.settings.climate_height_reuse && !self.settings.far_relief);
         frame.hints[2] = u32::from(self.settings.far_relief);
         frame.hints[3] = (if self.settings.coarse_relief { 8 } else { 0 }) | (if self.settings.ridge_display { 16 } else { 0 });
         for face in 0..6u8 {

@@ -434,7 +434,6 @@ fn stored_coarse_heights_recover_authored_normal_without_raw_climate_queries() {
                 lod_pixels: 4.0,
                 coarse_relief: true,
                 far_relief: false,
-                climate_height_reuse: true,
                 frame_override: Some(37),
                 ..Default::default()
             },

@@ -125,7 +125,6 @@ fn stored_material_slope_matches_field_and_exposes_rounded_classification() {
             Settings {
                 coarse_relief: true,
                 far_relief: false,
-                climate_height_reuse: true,
                 frame_override: Some(37),
                 ..Default::default()
             },
@@ -286,7 +285,6 @@ fn stored_sphere_normals_match_authored_macro_slopes_and_ignore_reuse_hint() {
                     coarse_relief: true,
                     lod_pixels: 4.0,
                     far_relief: false,
-                    climate_height_reuse: true,
                     frame_override: Some(37),
                     ..Default::default()
                 },
@@ -306,7 +304,6 @@ fn stored_sphere_normals_match_authored_macro_slopes_and_ignore_reuse_hint() {
             r.settings_mut().freeze_residency = true;
             target.render(&gpu, &mut r, &f, forward, 2001);
             let hs = hits(&gpu, &r);
-            let hit_bytes = read_buffer(&gpu, r.hit_buffer(), 96 * 54 * 32);
             let before = read_buffer(&gpu, r.surface_buffer(), 96 * 54 * 16);
             let mut checked = 0;
             let mut tilted = 0;
@@ -358,24 +355,7 @@ fn stored_sphere_normals_match_authored_macro_slopes_and_ignore_reuse_hint() {
                     "sphere fixture never recovered meaningful tilted relief: {tilted}"
                 )
             }
-            r.settings_mut().climate_height_reuse = false;
-            target.render(&gpu, &mut r, &f, forward, 2002);
-            assert_eq!(
-                hit_bytes,
-                read_buffer(&gpu, r.hit_buffer(), 96 * 54 * 32),
-                "climate hint changed primary"
-            );
-            let after = read_buffer(&gpu, r.surface_buffer(), 96 * 54 * 16);
-            for (index, h) in hs.iter().enumerate() {
-                if h.status == 1 {
-                    assert_eq!(
-                        &before[index * 16 + 8..index * 16 + 12],
-                        &after[index * 16 + 8..index * 16 + 12],
-                        "climate hint changed stored normal"
-                    )
-                }
-            }
-            eprintln!("sphere stored normals size{size} axis{axis:?}: {checked} CPU field matches, {tilted} tilted, reuse-hint byte parity");
+            eprintln!("sphere stored normals size{size} axis{axis:?}: {checked} CPU field matches, {tilted} tilted");
         }
     }
 }

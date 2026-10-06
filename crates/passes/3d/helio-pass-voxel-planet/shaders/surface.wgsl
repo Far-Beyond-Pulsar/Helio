@@ -154,47 +154,62 @@ fn corner_ao(side1: bool, side2: bool, corner: bool) -> f32 {
     return 3.0 - f32(u32(side1) + u32(side2) + u32(corner));
 }
 
-// Climate changes over metres to kilometres, so distant 2x2 footprints share
-// one height. Coarse hits read their column's stored height; other columns
-// query the field at their own level only where the resident top cannot
-// decide the material. Occupancy is unchanged.
+// Coarse hits take their material height and far-relief height from the
+// resident columns: each level cell stores the generator's own height (top
+// and relief fraction), blended between the four nearest cell centres. The
+// generator never runs per pixel, whatever it computes.
 @group(0) @binding(20) var<storage, read_write> climate_height_cache: array<i32>;
+
+// Stored height (mm) of level cell `ij` of `face`: the relief column's
+// authored top, or its whole-cell top. `.y` is 0 where no resident column
+// describes it.
+fn stored_height(face: u32, level: u32, ij: vec2<i32>, home: Column, home_ij: vec2<i32>) -> vec2<i32> {
+    let n = cells_at(level);
+    if any(ij < vec2<i32>(0)) || any(ij >= vec2<i32>(n)) { return vec2<i32>(0); }
+    var c = home;
+    if any((ij >> vec2<u32>(3u)) != (home_ij >> vec2<u32>(3u))) {
+        let record = find_column(column_key0(face, level, ij.x >> 3u), bitcast<u32>(ij.y >> 3u));
+        if record == NONE { return vec2<i32>(0); }
+        c = records[record];
+        if !column_valid(c) { return vec2<i32>(0); }
+    }
+    if !column_tops_fit(c) && !column_tops_down(c) { return vec2<i32>(0); }
+    let x = u32(ij.x & 7);
+    let y = u32(ij.y & 7);
+    let top = column_top(c, x, y);
+    var layers = top << level;
+    let fraction = column_relief_fraction(c, x, y);
+    if fraction != 0u {
+        var remainder: u32;
+        if level <= 16u { remainder = fraction >> (16u - level); } else { remainder = fraction << (level - 16u); }
+        layers = ((top - 1) << level) + i32(remainder);
+    }
+    return vec2<i32>(layers * world.grid.y, 1);
+}
 
 fn climate_at(h: Hit, xy: vec2<u32>) -> i32 {
     let face = (h.info >> 2u) & 7u;
     let level = (h.info >> 5u) & 31u;
     let c = records[h.record];
-    let x = u32(h.i & 7);
-    let y = u32(h.j & 7);
-    // Coarse relief columns store the generator's own height at this level
-    // (top and fraction): materials and far normals read it instead of
-    // running the generator per pixel, which richer fields (erosion) make
-    // too costly. Finer detail is below the pixel at this level anyway.
-    if frame.hints.y != 0u && (c.info & INFO_RELIEF) != 0u && column_tops_fit(c) {
-        let top = column_top(c, x, y);
-        let fraction = column_relief_fraction(c, x, y);
-        var layers = top << level;
-        if fraction != 0u {
-            var remainder: u32;
-            if level <= 16u { remainder = fraction >> (16u - level); } else { remainder = fraction << (level - 16u); }
-            layers = ((top - 1) << level) + i32(remainder);
-        }
-        return layers * world.grid.y;
-    }
-    let dir = pixel_ray(vec2<f32>(xy) + 0.5);
-    let ray = make_ray(camera.position_near.xyz, dir);
+    let home = vec2<i32>(h.i, h.j);
+    let own = stored_height(face, level, home, c, home);
+    // The base cell under the pixel, in half base cells from the first
+    // level-cell centre: integer, so planet-sized indices stay exact.
+    let ray = make_ray(camera.position_near.xyz, pixel_ray(vec2<f32>(xy) + 0.5));
     let cell = locate(ray, face_ray(face, ray), h.t, 0u);
-    if frame.hints.y != 0u && (cell.i >> level) == h.i && (cell.j >> level) == h.j {
-        // Tall edited/steep bands can truncate their byte-packed column
-        // tops; those columns retain the field query.
-        let top = column_top(c, x, y);
-        if column_tops_fit(c) && !column_tops_down(c) && climate_height_reusable(top, level) {
-            return i32(f32(top) * f32(world.grid.y) * f32(1u << level));
-        }
-        // The field at this column's level: detail below it is sub-pixel.
-        return terrain_height(domain_point(face, h.i, h.j, level), level + u32(world.grid.w));
-    }
-    return terrain_height(domain_point(face, cell.i, cell.j, 0u), u32(world.grid.w));
+    let span = 2 << level;
+    let offset = (vec2<i32>(cell.i, cell.j) << vec2<u32>(1u)) + vec2<i32>(1 - (1 << level));
+    let lo = offset >> vec2<u32>(level + 1u);
+    let t = vec2<f32>(offset - lo * span) / f32(span);
+    let h00 = stored_height(face, level, lo, c, home);
+    let h10 = stored_height(face, level, lo + vec2<i32>(1, 0), c, home);
+    let h01 = stored_height(face, level, lo + vec2<i32>(0, 1), c, home);
+    let h11 = stored_height(face, level, lo + vec2<i32>(1, 1), c, home);
+    if h00.y == 0 || h10.y == 0 || h01.y == 0 || h11.y == 0 { return own.x; }
+    // Differences keep millimetre precision in f32.
+    let d = vec3<f32>(f32(h10.x - h00.x), f32(h01.x - h00.x), f32(h11.x - h00.x));
+    let blend = d.x * t.x * (1.0 - t.y) + d.y * (1.0 - t.x) * t.y + d.z * t.x * t.y;
+    return h00.x + i32(round(blend));
 }
 
 @compute @workgroup_size(8, 8)

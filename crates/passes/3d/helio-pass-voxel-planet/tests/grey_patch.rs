@@ -8,51 +8,6 @@ use std::sync::Arc;
 /// Compare the bounded shortcut with full canonical climate queries through
 /// the actual GPU shaders, including odd screen edges and alpine transitions.
 #[test]
-fn bounded_climate_reuse_preserves_surface_materials() {
-    let Some(gpu) = gpu() else { return };
-    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
-    let grid = *planet.grid();
-    let alpine = peak(&planet);
-    let size = [129, 73];
-    let target = Target::new(&gpu, size);
-    let mut reference = Vec::new();
-    for reuse in [false, true] {
-        let settings = helio_pass_voxel_planet::engine::Settings {
-            climate_height_reuse: reuse, ..Default::default()
-        };
-        let mut renderer = helio_pass_voxel_planet::engine::PlanetRenderer::new(
-            &gpu.device, &gpu.queue, planet.clone(), settings, size);
-        let views = [
-            (DVec3::Y, 330.0), (DVec3::Y, 3000.0),
-            (alpine, 330.0), (alpine, 3000.0),
-            (alpine, 64_000.0), (alpine, 300_000.0), (alpine, 1_000_000.0),
-        ];
-        for (view, (dir, altitude)) in views.into_iter().enumerate() {
-            let f = frame(&planet, planet.surface_point(dir, altitude));
-            let forward = -dir.as_vec3();
-            for n in 0..2000 {
-                target.render(&gpu, &mut renderer, &f, forward, n);
-                if renderer.settled() { break; }
-            }
-            assert!(renderer.settled());
-            target.render(&gpu, &mut renderer, &f, forward, 2001);
-            let surfaces = read_buffer(&gpu, renderer.surface_buffer(), u64::from(size[0] * size[1]) * 16);
-            if !reuse {
-                reference.push(surfaces);
-            } else {
-                // All surface bytes, not just material IDs: hit geometry,
-                // filtered normals, speckles, albedo and AO must agree too.
-                let mismatches = surfaces.chunks_exact(16).zip(reference[view].chunks_exact(16))
-                    .filter(|(a, b)| a != b).count();
-                assert_eq!(mismatches, 0, "climate shortcut changed {mismatches} pixels at {altitude} m");
-            }
-        }
-    }
-}
-
-/// Upload-side gamma conversion must preserve authored sRGB values. Looking
-/// straight down at flat fine voxels excludes lighting, pigment and edge AO.
-#[test]
 fn fine_grass_preserves_authored_srgb_after_linear_upload() {
     let Some(gpu) = gpu() else { return };
     let planet = Arc::new(Planet::new(PlanetRecipe {
@@ -95,7 +50,6 @@ fn fine_grass_preserves_authored_srgb_after_linear_upload() {
 fn alpine_snow_does_not_become_grass_when_level_height_rounds_to_zero() {
     let Some(gpu) = gpu() else { return };
     let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
-    let grid = *planet.grid();
     let dir = peak(&planet);
     let target = Target::new(&gpu, [128, 72]);
     let mut renderer = renderer(&gpu, planet.clone(), [128, 72]);
