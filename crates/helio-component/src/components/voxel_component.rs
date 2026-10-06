@@ -780,46 +780,83 @@ impl Default for VoxelOverhangs {
     }
 }
 
-/// Settings of the layered terrain generator (`helio.terrain`): an ordered
-/// stack of layers (continents, mountains, erosion, hills, craters,
-/// basins, plateaus), caves, overhangs and a material style. Any world is
-/// a stack: an Earth-like planet, a cratered moon, a flat block world, or
-/// one a game builds from a seed. It configures the
-/// [`VoxelTerrainComponent`] on the same entity, whose seed varies it; its
-/// serialized form is the generator's settings JSON.
-#[engine_class(category = "Voxel/Terrain", clone, debug, serialize, deserialize)]
-#[category("Layers", category_color = "#6FA86F")]
-#[category("Caves", category_color = "#7A6A9E")]
-#[category("Overhangs", category_color = "#A8826F")]
-#[category("Materials", category_color = "#D1A73F")]
+/// An ordered terrain layer stack, its caves and overhangs and its
+/// materials: the `helio.terrain` settings, edited as one value (the
+/// inspector's stack editor), so a preset replaces all of it at once.
+#[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[serde(default)]
-pub struct VoxelTerrainLayersComponent {
+pub struct VoxelTerrainStack {
     /// Applied in order; at most eight enabled.
-    #[property(category = "Layers")]
+    #[property]
     pub layers: Vec<VoxelTerrainLayer>,
-    #[property(category = "Caves")]
+    #[property]
     pub caves: VoxelCaves,
-    #[property(category = "Overhangs")]
+    #[property]
     pub overhangs: VoxelOverhangs,
-    #[property(category = "Materials", label = "Style")]
+    #[property(label = "Material style")]
     pub materials: VoxelMaterialStyle,
     /// Earthlike: flat ground above this height is snow.
-    #[property(min = -10000.0, max = 100000.0, step = 10.0, category = "Materials", label = "Snowline (m)")]
+    #[property(min = -10000.0, max = 100000.0, step = 10.0, label = "Snowline (m)")]
     pub snowline_m: f64,
     /// Depth of the soil (Earthlike, Layered) or regolith (Lunar).
-    #[property(min = 0.0, max = 1000.0, step = 0.1, category = "Materials", label = "Soil depth (m)")]
+    #[property(min = 0.0, max = 1000.0, step = 0.1, label = "Soil depth (m)")]
     pub soil_depth_m: f64,
     /// Layered: the surface, soil and rock materials (rock is also the
     /// Rules style's fallback).
-    #[property(category = "Materials")]
+    #[property]
     pub surface: VoxelTerrainMaterial,
-    #[property(category = "Materials")]
+    #[property]
     pub soil: VoxelTerrainMaterial,
-    #[property(category = "Materials")]
+    #[property]
     pub rock: VoxelTerrainMaterial,
     /// Rules style: tried in order, at most 16.
-    #[property(category = "Materials")]
+    #[property]
     pub rules: Vec<VoxelMaterialRule>,
+}
+
+impl Default for VoxelTerrainStack {
+    fn default() -> Self {
+        Self::earth()
+    }
+}
+
+impl PartialEq for VoxelTerrainStack {
+    fn eq(&self, other: &Self) -> bool {
+        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
+    }
+}
+
+fn serialize_terrain_stack_json(value: &VoxelTerrainStack) -> pulsar_reflection::ReflectResult<serde_json::Value> {
+    serde_json::to_value(value).map_err(|e| pulsar_reflection::ReflectError::SerializationFailed(e.to_string()))
+}
+
+fn deserialize_terrain_stack_json(value: serde_json::Value) -> pulsar_reflection::ReflectResult<VoxelTerrainStack> {
+    serde_json::from_value(value).map_err(|e| pulsar_reflection::ReflectError::DeserializationFailed(e.to_string()))
+}
+
+/// Registered for reflection; its editor (`voxel_stack_editor`) is
+/// registered there.
+#[pulsar_reflection::pulsar_type(
+    serialize_json_with = serialize_terrain_stack_json,
+    deserialize_json_with = deserialize_terrain_stack_json
+)]
+#[allow(dead_code)]
+type RegisteredVoxelTerrainStack = VoxelTerrainStack;
+
+/// Settings of the layered terrain generator (`helio.terrain`): an ordered
+/// stack of layers (continents, mountains, erosion, hills, craters,
+/// basins, plateaus), caves, overhangs and materials. Any world is a stack:
+/// an Earth-like planet, a cratered moon, a desert, a flat block world, or
+/// one a game builds from a seed. It configures the [`VoxelTerrainComponent`]
+/// on the same entity, whose seed varies it; its serialized form (the
+/// stack's fields, flattened) is the generator's settings JSON.
+#[engine_class(category = "Voxel/Terrain", clone, debug, serialize, deserialize)]
+#[category("Terrain", category_color = "#6FA86F")]
+#[serde(default)]
+pub struct VoxelTerrainLayersComponent {
+    #[serde(flatten)]
+    #[property(category = "Terrain", label = "Terrain stack")]
+    pub stack: VoxelTerrainStack,
 }
 
 impl Default for VoxelTerrainLayersComponent {
@@ -829,6 +866,35 @@ impl Default for VoxelTerrainLayersComponent {
 }
 
 impl VoxelTerrainLayersComponent {
+    pub fn earth() -> Self {
+        Self { stack: VoxelTerrainStack::earth() }
+    }
+    pub fn moon() -> Self {
+        Self { stack: VoxelTerrainStack::moon() }
+    }
+    pub fn desert() -> Self {
+        Self { stack: VoxelTerrainStack::desert() }
+    }
+    pub fn flat(height_m: f64) -> Self {
+        Self { stack: VoxelTerrainStack::flat(height_m) }
+    }
+}
+
+impl VoxelTerrainStack {
+    /// The presets by name: "earth", "moon", "desert" and "flat".
+    pub const PRESETS: [&'static str; 4] = ["earth", "moon", "desert", "flat"];
+
+    /// A preset by name (case-insensitive).
+    pub fn preset(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "earth" => Some(Self::earth()),
+            "moon" => Some(Self::moon()),
+            "desert" => Some(Self::desert()),
+            "flat" => Some(Self::flat(0.0)),
+            _ => None,
+        }
+    }
+
     /// Continents and oceans, ridged mountains with branching erosion,
     /// hills and roughness; caves, overhangs, meadows, rock and snow.
     pub fn earth() -> Self {
