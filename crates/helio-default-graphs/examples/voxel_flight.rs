@@ -1004,6 +1004,7 @@ fn main() {
                 None => look(eye, heading, pitch),
             };
             let name = format!("view_{height}_{}", -pitch);
+            eprintln!("VIEWS {name}: eye {:.1} m from the centre, ground {:.1} m above the datum", eye.length(), eye.length() - height - flight.planet.grid().radius());
             flight.settle(&name, eye, forward);
             for _ in 0..8 {
                 flight.draw(&name, eye, forward);

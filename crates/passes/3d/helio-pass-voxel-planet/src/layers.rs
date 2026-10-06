@@ -344,8 +344,7 @@ impl TerrainLayers {
                 Layer::new(Continents),
                 Layer { mask: LayerMask::Land, ..Layer::new(Mountains) },
                 Layer::new(Erosion),
-                Layer { mask: LayerMask::AboveDeepSea, ..Layer::new(Hills) },
-                Self::knolls(),
+                Self::earth_hills(),
                 Layer { mask: LayerMask::AboveDeepSea, ..Layer::new(Roughness) },
             ],
             caves: Caves::default(),
@@ -360,10 +359,11 @@ impl TerrainLayers {
         }
     }
 
-    /// Earth's knolls: rolling ground a kilometre across, so the land near
-    /// the eye has shape (its hills slope ~3 %).
-    fn knolls() -> Layer {
-        Layer { mask: LayerMask::AboveDeepSea, height_m: 45.0, scale_km: 1.4, persistence: 0.45, ..Layer::new(LayerKind::Hills) }
+    /// Earth's hills: 140 m over 9 km down to knolls of ~30 m over a
+    /// kilometre, so the land near the eye has shape (four octaves at half
+    /// persistence left it sloping ~3 %).
+    fn earth_hills() -> Layer {
+        Layer { mask: LayerMask::AboveDeepSea, octaves: 5, persistence: 0.6, ..Layer::new(LayerKind::Hills) }
     }
 
     /// A dry world of dunes and mesas, with materials from rules: dune sand
@@ -372,7 +372,11 @@ impl TerrainLayers {
     pub fn desert() -> Self {
         use LayerKind::*;
         let mut earth = Self::earth();
-        earth.layers.retain(|l| l.kind != Continents && *l != Self::knolls());
+        earth.layers.retain(|l| l.kind != Continents);
+        // The desert's hills stay gentle under its dunes.
+        for l in earth.layers.iter_mut().filter(|l| l.kind == Hills) {
+            *l = Layer { mask: l.mask, ..Layer::new(Hills) };
+        }
         for l in &mut earth.layers {
             l.mask = LayerMask::Everywhere;
         }

@@ -912,8 +912,7 @@ impl VoxelTerrainStack {
                 VoxelTerrainLayer::new(Continents),
                 VoxelTerrainLayer { mask: VoxelLayerMask::Land, ..VoxelTerrainLayer::new(Mountains) },
                 VoxelTerrainLayer::new(Erosion),
-                VoxelTerrainLayer { mask: VoxelLayerMask::AboveDeepSea, ..VoxelTerrainLayer::new(Hills) },
-                Self::knolls(),
+                Self::earth_hills(),
                 VoxelTerrainLayer { mask: VoxelLayerMask::AboveDeepSea, ..VoxelTerrainLayer::new(Roughness) },
             ],
             caves: VoxelCaves::default(),
@@ -928,9 +927,9 @@ impl VoxelTerrainStack {
         }
     }
 
-    /// Earth's knolls: rolling ground a kilometre across.
-    fn knolls() -> VoxelTerrainLayer {
-        VoxelTerrainLayer { mask: VoxelLayerMask::AboveDeepSea, height_m: 45.0, scale_km: 1.4, persistence: 0.45, ..VoxelTerrainLayer::new(VoxelLayerKind::Hills) }
+    /// Earth's hills: 140 m over 9 km down to knolls a kilometre across.
+    fn earth_hills() -> VoxelTerrainLayer {
+        VoxelTerrainLayer { mask: VoxelLayerMask::AboveDeepSea, octaves: 5, persistence: 0.6, ..VoxelTerrainLayer::new(VoxelLayerKind::Hills) }
     }
 
     /// Dunes and mesas with materials from rules: sand on gentle ground,
@@ -939,7 +938,11 @@ impl VoxelTerrainStack {
     pub fn desert() -> Self {
         use VoxelTerrainMaterial as M;
         let mut earth = Self::earth();
-        earth.layers.retain(|l| l.kind != VoxelLayerKind::Continents && *l != Self::knolls());
+        earth.layers.retain(|l| l.kind != VoxelLayerKind::Continents);
+        // The desert's hills stay gentle under its dunes.
+        for l in earth.layers.iter_mut().filter(|l| l.kind == VoxelLayerKind::Hills) {
+            *l = VoxelTerrainLayer { mask: l.mask, ..VoxelTerrainLayer::new(VoxelLayerKind::Hills) };
+        }
         for l in &mut earth.layers {
             l.mask = VoxelLayerMask::Everywhere;
         }

@@ -139,9 +139,9 @@ the CPU raycast what the GPU draws.
   or switched to another kind starts from that kind's defaults
   (`Layer::new`; the presets are made of them). The octave table holds 64
   (6 for the warp); cost follows the octaves used.
-- Earth: continents, mountain ranges with erosion, 140 m hills over 9 km,
-  45 m knolls over 1.4 km (the land near the eye has shape) and metre-scale
-  roughness. Low basins get mud patches of a few metres (single-cell mud
+- Earth: continents, mountain ranges with erosion, hills from 140 m over
+  9 km down to ~30 m knolls over a kilometre (five octaves at persistence
+  0.6: the land near the eye has shape) and metre-scale roughness. Low basins get mud patches of a few metres (single-cell mud
   and sand specks read as noise that hid the ground's shape). The snowline
   wanders a sixth of its height over ~1.6 km above a rock band a sixth as
   tall, so meadows climb and no ruler-straight snow edge runs along a range.
