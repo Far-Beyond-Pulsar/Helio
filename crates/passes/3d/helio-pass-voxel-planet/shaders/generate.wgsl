@@ -124,7 +124,8 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let requested_relief = display_base && topology_flags == 0u;
     // Bit 16: the display height keeps unresolved ridges' mean (off only
     // for audits against the canonical field).
-    let height = generation_height(face, i, j, level, display_base && (frame.hints.w & 16u) != 0u);
+    let column = generation_column(face, i, j, level, display_base && (frame.hints.w & 16u) != 0u);
+    let height = column.x;
     let base_top = div_floor(height, world.grid.y);
     let remainder = u32(base_top) & ((1u << level) - 1u);
     var top = base_top >> level;
@@ -222,7 +223,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let stored_top = select(top - k_lo * 8, base_top - ((k_lo * 8) << level), inline_relief);
     atomicOr(&g_words[li >> 2u], u32(clamp(stored_top, 0, 255)) << ((li & 3u) * 8u));
     if surface_words {
-        let word = terrain_surface(column_point, level + u32(world.grid.w), height) & 0xffu;
+        let word = u32(column.y) & 0xffu;
         atomicOr(&g_surface[li >> 2u], word << ((li & 3u) * 8u));
     }
     workgroupBarrier();

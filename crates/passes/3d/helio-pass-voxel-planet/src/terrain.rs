@@ -28,6 +28,16 @@
 //! fn terrain_surface(p: vec3<i32>, level: u32, height: i32) -> u32
 //! ```
 //!
+//! A program whose height and surface word share their work (or that is
+//! large) may also define both at once for generation, which then calls it
+//! at a single site (shader compilers inline every call, so each call site
+//! of a large program costs compile time; `display` asks for the program's
+//! coarse display variant, if it has one, and may be ignored):
+//!
+//! ```wgsl
+//! fn terrain_column(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> // (height, surface word)
+//! ```
+//!
 //! and optionally, for volumetric terrain (caves, overhangs, arches),
 //!
 //! ```wgsl

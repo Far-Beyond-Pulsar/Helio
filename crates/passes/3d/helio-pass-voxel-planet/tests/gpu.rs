@@ -835,3 +835,15 @@ fn gpu_column_table_matches_cpu_while_moving() {
     }
     assert_eq!(worst, 0);
 }
+
+/// Diagnostics: cold pipeline compile times (run with
+/// `HELIO_VOXEL_PIPELINE_TIMES=1 HELIO_VOXEL_SHADER_SALT=<new number>`).
+#[test]
+#[ignore = "measurement"]
+fn pipeline_compile_times() {
+    let Some(gpu) = gpu() else { return };
+    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+    let started = std::time::Instant::now();
+    let _renderer = renderer(&gpu, planet, [64, 64]);
+    eprintln!("renderer built in {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
+}

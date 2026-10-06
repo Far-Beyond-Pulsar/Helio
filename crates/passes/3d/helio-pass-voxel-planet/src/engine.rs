@@ -293,15 +293,27 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -
             .replace("ACCESS", access)
             .replace("LEVEL_TOP", level_top)
             .replace("BLOCK_ENTRY", block_entry)
-            .replace("SHAPE_ID", if plane { "1u" } else { "0u" }),
+            .replace("SHAPE_ID", if plane { "1u" } else { "0u" })
+            // Diagnostics: a different probe limit per salt misses every
+            // driver shader cache, to measure cold pipeline compiles.
+            .replace(
+                "const MAX_PROBES: u32 = 64u;",
+                &std::env::var("HELIO_VOXEL_SHADER_SALT")
+                    .ok()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .map_or_else(|| "const MAX_PROBES: u32 = 64u;".to_string(), |salt| format!("const MAX_PROBES: u32 = {}u;", 64 + salt % 64)),
+            ),
     );
-    if program.key == crate::landform::DISPLAY_PROGRAM {
+    // Generation evaluates a column's height and surface word at one call
+    // site (`terrain_column`): compilers inline every call, and each copy
+    // of a large program is compile time.
+    if program.wgsl.contains("fn terrain_column") {
         if generation {
-            s.push_str("fn generation_height(face:u32,i:i32,j:i32,level:u32,display:bool)->i32 { if display { return terrain_display_height(domain_point(face,i,j,level),level+u32(world.grid.w)); } return field_height(face,i,j,level); }\n");
+            s.push_str("fn generation_column(face:u32,i:i32,j:i32,level:u32,display:bool)->vec2<i32> { return terrain_column(domain_point(face,i,j,level),level+u32(world.grid.w),display); }\n");
         }
     } else {
         if generation {
-            s.push_str("fn generation_height(face:u32,i:i32,j:i32,level:u32,display:bool)->i32 { return field_height(face,i,j,level); }\n");
+            s.push_str("fn generation_column(face:u32,i:i32,j:i32,level:u32,display:bool)->vec2<i32> { let h = field_height(face,i,j,level); return vec2<i32>(h, i32(terrain_surface(domain_point(face,i,j,level),level+u32(world.grid.w),h))); }\n");
         }
     }
     for part in parts {
@@ -486,8 +498,10 @@ impl Pipelines {
             bind_group_layouts: &[Some(&render_layout), Some(&camera_layout)],
             immediate_size: 0,
         });
+        let times = std::env::var_os("HELIO_VOXEL_PIPELINE_TIMES").is_some();
         let compute = |layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModule, entry: &str| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            let started = std::time::Instant::now();
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
                 layout: Some(layout),
                 module,
@@ -501,7 +515,11 @@ impl Pipelines {
                     ..Default::default()
                 },
                 cache: None,
-            })
+            });
+            if times {
+                eprintln!("PIPELINE {entry} {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
+            }
+            pipeline
         };
         let gbuffer = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("planet gbuffer"),

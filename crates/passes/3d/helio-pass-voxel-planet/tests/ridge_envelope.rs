@@ -59,8 +59,8 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
     let wrapper = source_engine
         .lines()
         .find(|line| {
-            line.contains("s.push_str(\"fn generation_height")
-                && line.contains("terrain_display_height")
+            line.contains("s.push_str(\"fn generation_column")
+                && line.contains("terrain_column")
         })
         .unwrap()
         .trim()
@@ -75,7 +75,8 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
     let gates = [
         "let display_base =",
         "let requested_relief =",
-        "let height = generation_height",
+        "let column = generation_column",
+        "let height = column.x",
     ]
     .map(|prefix| {
         generation

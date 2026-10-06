@@ -400,10 +400,9 @@ fn landform_noise(p: vec3<i32>, o: LandformOctave, gradient: bool) -> vec4<i32> 
     return vec4<i32>(noise_fine(p, o.shift, o.seed), 0, 0, 0);
 }
 
-// One ridge octave into layer `l`'s chain (`height_parts`), weighted by
-// `gain`; `tracked` carries gradients.
-fn landform_ridge(l: u32, o: LandformOctave, q: vec3<i32>, tracked: bool, gain: i32) {
-    let nd = landform_noise(q, o, tracked);
+// One ridge octave (noise `nd`) into layer `l`'s chain (`height_parts`),
+// weighted by `gain`; `tracked` carries gradients.
+fn landform_ridge(l: u32, o: LandformOctave, nd: vec4<i32>, tracked: bool, gain: i32) {
     let n = nd.x;
     let r = clamp(FINE_ONE - abs(n), 0, FINE_ONE - 1);
     let rr = mul_fine(r, r);
@@ -426,6 +425,10 @@ fn landform_ridge(l: u32, o: LandformOctave, q: vec3<i32>, tracked: bool, gain: 
 // Height and surface word (`height_parts`). The false mode preserves the
 // canonical operation order. Only generation compiles the display
 // capability; climate, shade and verify_field stay exact.
+//
+// Compilers inline every call: each octave reaches one fine-noise site and
+// one ridge site, and generation evaluates this once per column
+// (`terrain_column`). Three inlined copies took 22 s to compile.
 fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
     let count = min(u32(max(terrain.header.x, 0)), 48u);
     // Erosion follows the larger terrain's slope (`height_parts`).
@@ -473,9 +476,12 @@ fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
         let o = terrain.octaves[index];
         let l = (o.kind >> 8u) & 7u;
         let kind = o.kind & 0xffu;
+        var gain = FINE_ONE;
+        var gradient = erosion;
         if RIDGE_DISPLAY_GENERATION && display && o.kind == display_tag {
             // Expand B[k](w)=(1-s)*F[k](w)+s*(A[k]*v+B[k+1](next(w))).
             // Repeated lattice shifts may have several partial octaves.
+            var partial = ridge_gain;
             if ridge_gain != 0 {
                 let support = ridge_display_support(o.shift, level);
                 if support != FINE_ONE {
@@ -483,25 +489,31 @@ fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
                     lf_value[l] += mul_fine(ridge_suffix_mean(ridge_row, lf_weight[l]), mean_gain);
                     ridge_gain = mul_fine(ridge_gain, support);
                 }
-                if ridge_gain != 0 {
-                    // Resolved erosion octaves precede every partial ridge:
-                    // only fully supported ridges carry gradients.
-                    landform_ridge(l, o, q, erosion && ridge_gain == FINE_ONE, ridge_gain);
-                }
+                partial = ridge_gain;
             }
             ridge_row += 1u;
+            if partial == 0 { continue; }
+            // Resolved erosion octaves precede every partial ridge: only
+            // fully supported ridges carry gradients.
+            gain = ridge_gain;
+            gradient = erosion && ridge_gain == FINE_ONE;
+        } else if !landform_resolved(o, level) {
             continue;
         }
-        if !landform_resolved(o, level) { continue; }
-        if kind <= LF_REGION {
-            let nd = landform_noise(q, o, erosion);
-            let v = mul_fine(nd.x, o.amplitude << 8u);
-            let dv = mul_fine3(landform_per_span3(nd.yzw, o.shift), o.amplitude << 8u);
-            if kind == LF_CONTINENT { lf_value[l] += v; lf_dvalue[l] += dv; } else { lf_region[l] += v; lf_dregion[l] += dv; }
-        } else if kind == LF_RIDGE {
-            landform_ridge(l, o, q, erosion, FINE_ONE);
-        } else if kind == LF_HILLS {
-            lf_value[l] += mul_fine(o.amplitude, noise_fine(q, o.shift, o.seed));
+        if kind <= LF_HILLS || kind == LF_BASIN {
+            // The octave's one fine-noise evaluation (basins: unwarped).
+            let nd = landform_noise(select(q, p, kind == LF_BASIN), o, gradient && kind <= LF_RIDGE);
+            if kind == LF_RIDGE {
+                landform_ridge(l, o, nd, gradient, gain);
+            } else if kind <= LF_REGION {
+                let v = mul_fine(nd.x, o.amplitude << 8u);
+                let dv = mul_fine3(landform_per_span3(nd.yzw, o.shift), o.amplitude << 8u);
+                if kind == LF_CONTINENT { lf_value[l] += v; lf_dvalue[l] += dv; } else { lf_region[l] += v; lf_dregion[l] += dv; }
+            } else if kind == LF_HILLS {
+                lf_value[l] += mul_fine(o.amplitude, nd.x);
+            } else {
+                lf_value[l] += nd.x;
+            }
         } else if kind == LF_EROSION {
             let gq = landform_steering();
             // (I + J)^T: column j gathers every warp axis' dependence on p_j.
@@ -517,8 +529,6 @@ fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
             let c = landform_crater(terrain.layers[l], o, p, up);
             lf_value[l] += c.x;
             ejecta = max(ejecta, c.y);
-        } else if kind == LF_BASIN {
-            lf_value[l] += noise_fine(p, o.shift, o.seed);
         } else {
             lf_value[l] += scale_q16(noise(p, o.shift, o.seed), o.amplitude);
         }
@@ -575,8 +585,10 @@ fn terrain_surface(p: vec3<i32>, level: u32, height: i32) -> u32 {
     return u32(landform_surface);
 }
 
-fn terrain_display_height(p: vec3<i32>, level: u32) -> i32 {
-    return terrain_parts_mode(p, level, terrain.shape.z != 0).x;
+// Height and surface word of a column being generated (`display`: its
+// coarse ridges keep their envelope).
+fn terrain_column(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
+    return terrain_parts_mode(p, level, display && terrain.shape.z != 0);
 }
 
 fn landform_moisture(p: vec3<i32>) -> i32 {
