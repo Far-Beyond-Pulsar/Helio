@@ -55,19 +55,22 @@ struct Column {
     key0: u32,   // column i | face << 24 | level << 27
     key1: u32,   // column j
     k_lo: i32,   // lowest band brick layer (level bricks)
-    info: u32,   // n_band 0..9 | n_mixed 9..18 | class 18..22 | top gap 22..25 | topology 27 | relief 28 | ext 29 | overflow 30 | valid 31
+    info: u32,   // n_band 0..9 | clip below 9 | clip above 10 | class 18..22 | top gap 22..25 | topology 27 | relief 28 | ext 29 | overflow 30 | valid 31
     run: u32,    // first pool unit
     mixed: u32,  // band bricks 0..32 that store an occupancy mask
     solid: u32,  // band bricks 0..32 that are completely occupied
     edits: u32,  // 1 + edit-ref list offset, or 0
 }
 
+// `edits::FaceBrush`: shape 0 is a ball in volume space, 1 a cube in index
+// space; k_lo/k_hi bound the half-cell heights it touches.
 struct FaceBrush {
     flags: u32,
     radius_half: u32,
-    pad0: u32,
-    pad1: u32,
+    k_lo: i32,
+    k_hi: i32,
     center: vec4<i32>,
+    ball: vec4<i32>,
 }
 
 // World shape, substituted when the pipelines are built: 0 sphere, 1 plane.
@@ -92,6 +95,11 @@ const INFO_RELIEF_INLINE: u32 = 0x04000000u;
 // Natural columns are exactly solid below their stored per-cell tops.
 // Add/Remove columns retain arbitrary brick occupancy instead.
 const INFO_HEIGHTFIELD: u32 = 0x02000000u;
+// A band clipped to a window around the eye's layer (`generate.wgsl`) does
+// not describe its cells below (above) the band: rays there use a coarser
+// level instead of taking them as solid ground (air).
+const INFO_CLIP_BELOW: u32 = 0x200u;
+const INFO_CLIP_ABOVE: u32 = 0x400u;
 const UNIT_WORDS: u32 = 16u;
 const MAX_PROBES: u32 = 64u;
 
@@ -146,6 +154,13 @@ fn column_valid(c: Column) -> bool {
 }
 
 fn band_count(c: Column) -> u32 { return c.info & 511u; }
+
+// Whether a valid column describes its level cell layer `k`.
+fn column_knows(c: Column, k: i32) -> bool {
+    if (c.info & INFO_CLIP_BELOW) != 0u && k < c.k_lo * 8 { return false; }
+    if (c.info & INFO_CLIP_ABOVE) != 0u && k >= (c.k_lo + i32(band_count(c))) * 8 { return false; }
+    return true;
+}
 
 // Relative terrain tops occupy one byte. A 32-brick band fits only when
 // its highest occupied top is below the exact 256-cell upper boundary.
@@ -252,23 +267,38 @@ fn center_half(i: i32, level: u32) -> i32 {
     return (i << (level + 1u)) + (1 << level);
 }
 
-fn brush_contains(b: FaceBrush, c: vec3<i32>) -> bool {
-    let r = b.radius_half;
-    let d = vec3<u32>(vec3<i32>(abs(c - b.center.xyz)));
+// Exact containment (`FaceBrush::contains`): cubes test the cell's half-cell
+// centre `c`, balls its volume point `q`, with exact 64-bit squares.
+fn brush_contains(b: FaceBrush, c: vec3<i32>, q: vec3<i32>) -> bool {
+    if ((b.flags >> 6u) & 3u) == 1u {
+        return all(vec3<u32>(abs(c - b.center.xyz)) <= vec3<u32>(b.radius_half));
+    }
+    let r = u32(abs(b.ball.w));
+    let d = vec3<u32>(abs(q - b.ball.xyz));
     if any(d > vec3<u32>(r)) { return false; }
-    if ((b.flags >> 6u) & 3u) == 1u { return true; }
-    return d.x * d.x + d.y * d.y + d.z * d.z <= r * r;
+    let sum = add_wide(add_wide(mul_wide(d.x, d.x), mul_wide(d.y, d.y)), mul_wide(d.z, d.z));
+    let rr = mul_wide(r, r);
+    return sum.y < rr.y || (sum.y == rr.y && sum.x <= rr.x);
 }
 
-// Applies an ordered edit list; returns (kind, material).
-fn apply_edits(list: u32, level: u32, c: vec3<i32>, kind_in: u32) -> vec2<u32> {
+// Applies an ordered edit list to the level cell with half-cell centre `c`
+// in the column with domain point `p`; returns (kind, material).
+fn apply_edits(list: u32, level: u32, c: vec3<i32>, p: vec3<i32>, kind_in: u32) -> vec2<u32> {
     var kind = kind_in;
     var material = 0u;
     if list == 0u { return vec2<u32>(kind, material); }
     let count = edit_refs[list - 1u];
+    var q = vec3<i32>(0);
+    var q_ready = false;
     for (var e = 0u; e < count; e++) {
         let b = brushes[edit_refs[list + e]];
-        if b.radius_half < (1u << level) || !brush_contains(b, c) { continue; }
+        if b.radius_half < (1u << level) { continue; }
+        // The cell's volume point, once, when a ball needs it.
+        if !q_ready && ((b.flags >> 6u) & 3u) == 0u {
+            q = volume_point_half(p, c.z);
+            q_ready = true;
+        }
+        if !brush_contains(b, c, q) { continue; }
         let op = (b.flags >> 4u) & 3u;
         if op == 0u {
             kind = 0u;

@@ -32,16 +32,20 @@
 //!
 //! ```wgsl
 //! fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32>
-//! fn terrain_cell(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, k: i32) -> u32
+//! fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, k: i32) -> i32
 //! ```
 //!
 //! `terrain_extent` bounds, in level cells, how far below the heightfield
 //! top (first air layer) and how far above it the column's cells may
 //! differ from the heightfield; `(0, 0)` means none (the default).
-//! `terrain_cell` returns the kind (0 air, 1 solid) of layer `k` in a
-//! column whose heightfield top is `top`; `q` is the cell centre's seamless
-//! 3D domain point (`volume_point`). Outside the extent it must equal
-//! `k < top`. Without them the engine uses the heightfield.
+//! `terrain_density` is the signed distance from the centre of layer `k`
+//! to the surface, in [`DENSITY_ONE`] units per level cell, positive inside
+//! solid, in a column whose heightfield top is `top`; `q` is the cell
+//! centre's seamless 3D domain point (`volume_point`). The cell is solid
+//! where it is positive. Outside the extent its sign must be the
+//! heightfield's (`k < top`). Without them the engine uses the heightfield
+//! ([`heightfield_density`]). Distances, not just solid or air, are what a
+//! smooth surface (interpolated between cell centres) needs.
 //!
 //! The program reads its constants from the `terrain` uniform. It may call the
 //! integer noise library (`shaders/noise.wgsl`, mirrored in
@@ -160,12 +164,14 @@ pub trait TerrainField: Send + Sync + 'static {
     fn extent(&self, _p: IVec3, _level: u32) -> (i32, i32) {
         (0, 0)
     }
-    /// Kind (0 air, 1 solid) of layer `k` of the column at `p` whose
-    /// heightfield top is `top`; `q` is the cell's 3D domain point
-    /// ([`Grid::volume_point`]). Must equal [`terrain_kind`] outside
-    /// [`Self::extent`] (`terrain_cell` in WGSL).
-    fn cell(&self, _p: IVec3, _q: IVec3, _level: u32, top: i32, k: i32) -> u32 {
-        terrain_kind(top, k)
+    /// Signed distance ([`DENSITY_ONE`] per level cell, positive inside
+    /// solid) from the centre of layer `k` of the column at `p`, whose
+    /// heightfield top is `top`, to the surface; `q` is the cell's 3D domain
+    /// point ([`Grid::volume_point`]). The cell is solid where it is
+    /// positive; outside [`Self::extent`] its sign must be
+    /// [`terrain_kind`]'s (`terrain_density` in WGSL).
+    fn density(&self, _p: IVec3, _q: IVec3, _level: u32, top: i32, k: i32) -> i32 {
+        heightfield_density(top, k)
     }
     /// Largest depth (mm) below the surface and height above it at which
     /// any level's cells may differ from the heightfield: world bounds
@@ -362,6 +368,18 @@ pub fn terrain_kind(top: i32, k: i32) -> u32 {
     u32::from(k < top)
 }
 
+/// Density units per level cell ([`TerrainField::density`]).
+pub const DENSITY_ONE: i32 = 256;
+/// Largest density magnitude, in level cells.
+pub const DENSITY_CELLS: i32 = 1 << 16;
+
+/// Density of a heightfield cell: the distance from the centre of layer `k`
+/// to the column top `top` (`heightfield_density` in WGSL).
+#[inline]
+pub fn heightfield_density(top: i32, k: i32) -> i32 {
+    top.saturating_sub(k).clamp(-DENSITY_CELLS, DENSITY_CELLS) * DENSITY_ONE - DENSITY_ONE / 2
+}
+
 /// Generated kind of a level cell before edits, volumetric terms included
 /// (the GPU's per-cell generation rule).
 pub fn generated_kind(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i32, k: i32, level: u32, top: i32) -> u32 {
@@ -370,7 +388,7 @@ pub fn generated_kind(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j
     if (below == 0 && above == 0) || k < top - below || k >= top + above {
         return terrain_kind(top, k);
     }
-    field.cell(p, grid.volume_point(face, i, j, k, level), level, top, k)
+    u32::from(field.density(p, grid.volume_point(face, i, j, k, level), level, top, k) > 0)
 }
 
 /// Generated top of a column (level cells): the first air above its highest
@@ -384,7 +402,7 @@ pub fn generated_top(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j:
     }
     (top - below..top + above)
         .rev()
-        .find(|&k| field.cell(p, grid.volume_point(face, i, j, k, level), level, top, k) != 0)
+        .find(|&k| field.density(p, grid.volume_point(face, i, j, k, level), level, top, k) > 0)
         .map_or(top - below, |k| k + 1)
 }
 

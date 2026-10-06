@@ -145,8 +145,8 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
             answers[id.x*2u]=vec4<i32>(field_height(face,i,j,level),height,
                 i32(requested_relief),i32(display_base));
             let kind_in=select(1u,0u,op==1u);
-            let edited=apply_edits(p.chart.w,level,brush.center.xyz,kind_in).x;
-            let untouched=apply_edits(p.chart.w,level,brush.center.xyz+vec3<i32>(i32(brush.radius_half)*2+1,0,0),kind_in).x;
+            let edited=apply_edits(p.chart.w,level,brush.center.xyz,vec3<i32>(0),kind_in).x;
+            let untouched=apply_edits(p.chart.w,level,brush.center.xyz+vec3<i32>(i32(brush.radius_half)*2+1,0,0),vec3<i32>(0),kind_in).x;
             answers[id.x*2u+1u]=vec4<i32>(i32(edited),i32(untouched),i32(kind_in),i32(topology_flags));
         }}
     "#
@@ -215,15 +215,15 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
             4,
         ];
         let program = field.program();
-        // Stack constants (976), ridge suffix (1056), volume (64).
-        assert_eq!(program.constants.len(), 2096);
+        // Stack constants (2016), ridge suffix (1056), volume (64).
+        assert_eq!(program.constants.len(), 3136);
         let lo = i32::from_le_bytes(
-            program.constants[976 + 31 * 4..976 + 32 * 4]
+            program.constants[2016 + 31 * 4..2016 + 32 * 4]
                 .try_into()
                 .unwrap(),
         );
         let hi = i32::from_le_bytes(
-            program.constants[976 + 32 * 4..976 + 33 * 4]
+            program.constants[2016 + 32 * 4..2016 + 33 * 4]
                 .try_into()
                 .unwrap(),
         );
@@ -248,11 +248,14 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
                     // tiny-wavelength fixture where a one-metre brush is active.
                     let radius = (1u32 << level).max(20);
                     let op = u32::from(topology == 2);
+                    // A cube: index-space containment of the probed cells.
                     brush_values.push(FaceBrush {
-                        flags: face | (op << 4),
+                        flags: face | (op << 4) | (1 << 6),
                         radius_half: radius,
-                        pad: [0; 2],
-                        center: [0, 0, 0, 0],
+                        k_lo: -(radius as i32),
+                        k_hi: radius as i32,
+                        center: [0, 0, 0, radius as i32],
+                        ball: [0; 4],
                     });
                     let list = refs.len() as u32 + 1;
                     refs.extend_from_slice(&[1, brush_index]);

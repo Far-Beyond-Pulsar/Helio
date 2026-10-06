@@ -486,7 +486,8 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 let hint = column_hint(want, finer.face, finer.i >> 3u, finer.j >> 3u);
                 if hint != 0u {
                     let found = find_column(column_key0(finer.face, want, finer.i >> 3u), bitcast<u32>(finer.j >> 3u));
-                    if found != NONE && column_valid(records[found]) && !level_contains_solid(finer, found, r, t) {
+                    if found != NONE && column_valid(records[found]) && column_knows(records[found], finer.k)
+                        && !level_contains_solid(finer, found, r, t) {
                         cur = finer;
                         transition_record = found;
                     }
@@ -506,7 +507,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                     }
                     if record != NONE {
                         col = records[record];
-                        if column_valid(col) { break; }
+                        if column_valid(col) && column_knows(col, cur.k) { break; }
                     }
                 }
                 if cur.level + 1u >= u32(frame.layer_i.z) {
@@ -532,6 +533,19 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
         var k0 = 0;
         var k1 = 0x3fffffff >> lv;
         var above = skip.x > 0;
+        if !above && !column_knows(col, cur.k) {
+            // Beyond a clipped band (the cursor moved vertically inside the
+            // column): continue at the coarser level, whose window is larger.
+            if cur.level + 1u >= u32(frame.layer_i.z) {
+                return make_hit(ST_LOADING, t, cur, normal, NONE);
+            }
+            cur.i >>= 1u;
+            cur.j >>= 1u;
+            cur.k >>= 1u;
+            cur.level += 1u;
+            loaded = vec4<i32>(-1);
+            continue;
+        }
         if !above {
             k0 = column_top_cell(col);
             if cur.k < col.k_lo * 8 {

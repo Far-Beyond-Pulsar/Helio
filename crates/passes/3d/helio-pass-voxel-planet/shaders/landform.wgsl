@@ -3,14 +3,20 @@ const LANDFORM_WARP: u32 = 6u; // leading domain-warp slots (two per axis)
 
 struct LandformOctave { shift: u32, amplitude: i32, seed: u32, kind: u32 } // kind | layer << 8
 struct StackLayer { kind: u32, mask: u32, a: i32, b: i32 }
+// `landform::PackedRule`: material, speck share, patch shift and threshold;
+// height and slope ranges; depth and moisture ranges; erosion range, band
+// period and parity.
+struct MaterialRule { head: vec4<i32>, height_slope: vec4<i32>, depth_moisture: vec4<i32>, surface_bands: vec4<i32> }
 struct TerrainConstants {
     header: vec4<i32>, // octave count, layer mm, soil depth (cells), seed
     levels: vec4<i32>, // moisture shift, continents layer + 1, snowline, low-basin height (mm)
     shape: vec4<i32>,  // ridge display layer + 1, steep slope (cells), ridge display flag, plane (+Y up)
     style: vec4<i32>,  // material style, Layered surface / soil / rock ids
     stack: vec4<i32>,  // layer count, erosion amplitude sum, domain radius, warp octaves
+    materials: vec4<i32>, // rules style: rule count, fallback material
     layers: array<StackLayer, 8>,
     octaves: array<LandformOctave, 48>,
+    rules: array<MaterialRule, 16>,
     ridge_suffix: array<vec4<i32>, 66>, // signed conditional suffix means
     // Caves and overhangs (`LandformVolume`): flags/region/depth, tunnel
     // and cavern shapes, overhangs, sizes (tunnel radius, cavern, cover, layer mm).
@@ -85,33 +91,52 @@ fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> {
     return vec2<i32>(below, above);
 }
 
-fn terrain_cell(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, k: i32) -> u32 {
+// mm per noise unit at lattice shift s: 2^s * 12.5 mm / 2^17 (`density`).
+fn landform_noise_mm(excess: i32, shift: i32) -> i32 {
+    return mul_shr_signed(excess, 25 << u32(shift), 18u);
+}
+
+// Signed distance of a cell to the surface, CSG of the surface, overhangs
+// and caves (`LandformVolume::density`).
+fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, k: i32) -> i32 {
     let v = terrain.volume;
-    let layer = v[3].w;
-    var solid = k < top;
     let a = landform_overhang_amplitude(p, level);
+    let caves = landform_caves_at(level);
+    if a == 0 && !caves.x && !caves.y { return heightfield_density(top, k); }
+    let layer = v[3].w;
+    let cell = layer << level;
+    let d = (k - top) * cell + cell / 2;
+    var solid = k < top;
+    var f = -d;
     if a > 0 {
-        let cell = layer << level;
-        let d = (k - top) * cell + cell / 2;
         let s = scale_q16(noise(q, u32(v[2].y), landform_seed() ^ SEED_OVERHANG), a);
         solid = d < s;
+        f = s - d;
     }
-    let caves = landform_caves_at(level);
-    if solid && k < top && (caves.x || caves.y) && landform_cave_region(p) {
-        let cell = layer << level;
+    if caves.x || caves.y {
+        let region = noise(p, u32(v[0].y), landform_seed() ^ SEED_CAVE_REGION);
         let depth = (top - k) * cell - cell / 2;
-        if depth <= v[0].w {
+        let outside = max(max(landform_noise_mm(v[0].z - region, v[0].y), d), depth - v[0].w);
+        var walls = 0x7fffffff;
+        var carved = false;
+        if caves.x {
             let w = v[1].y;
-            if caves.x
-                && abs(noise(q, u32(v[1].x), landform_seed() ^ SEED_TUNNEL_A)) < w
-                && abs(noise(q, u32(v[1].x), landform_seed() ^ SEED_TUNNEL_B)) < w {
-                solid = false;
-            } else if caves.y && depth >= v[3].z && noise(q, u32(v[1].z), landform_seed() ^ SEED_CAVERN) > v[1].w {
-                solid = false;
-            }
+            let na = abs(noise(q, u32(v[1].x), landform_seed() ^ SEED_TUNNEL_A));
+            let nb = abs(noise(q, u32(v[1].x), landform_seed() ^ SEED_TUNNEL_B));
+            walls = min(walls, landform_noise_mm(max(na, nb) - w, v[1].x));
+            carved = carved || (na < w && nb < w);
         }
+        if caves.y {
+            let n = noise(q, u32(v[1].z), landform_seed() ^ SEED_CAVERN);
+            walls = min(walls, max(landform_noise_mm(v[1].w - n, v[1].z), v[3].z - depth));
+            carved = carved || (depth >= v[3].z && n > v[1].w);
+        }
+        f = min(f, max(outside, walls));
+        if solid && k < top && region > v[0].z && depth <= v[0].w && carved { solid = false; }
     }
-    return select(0u, 1u, solid);
+    let density = clamp(f, -(1 << 22u), 1 << 22u) * 256 / max(cell, 1);
+    if solid { return max(density, 1); }
+    return min(density, 0);
 }
 
 // Masks are always evaluated; other detail finer than about four level
@@ -525,7 +550,7 @@ fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
         h += landform_masked(layer.mask, x, lw);
     }
     var surface = 0;
-    if terrain.style.x == 0 {
+    if terrain.style.x == 0 || terrain.style.x == 3 {
         surface = clamp(eroded * 127 / max(terrain.stack.y, 1), -127, 127) & 0xff;
     } else if terrain.style.x == 1 {
         surface = (ejecta >> 1u) | (select(0, 1, basin >= FINE_ONE / 2) << 7u);
@@ -798,12 +823,39 @@ fn ground_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slop
     material_coverage = -1.0;
     material_coverage_ids = vec2<u32>(M_DARK_STONE, M_STONE);
     if terrain.style.x == 1 { return lunar_material(p, surface, depth, slope, layer); }
+    if terrain.style.x == 3 { return rules_material(p, surface, top_height, depth, slope, layer); }
     if terrain.style.x == 2 {
         if depth == 0 { return u32(terrain.style.y); }
         if depth <= terrain.header.z { return u32(terrain.style.z); }
         return u32(terrain.style.w);
     }
     return earthlike_material(p, surface, top_height, depth, slope, layer);
+}
+
+// The first rule whose conditions hold, else the fallback (`rules_material`).
+fn rules_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
+    let wet = landform_moisture(p) >> 8u;
+    let erosion = i32(surface << 24u) >> 24u;
+    let altitude = layer * terrain.header.y;
+    let seed = bitcast<u32>(terrain.header.w);
+    let count = min(u32(max(terrain.materials.x, 0)), 16u);
+    for (var index = 0u; index < count; index++) {
+        let r = terrain.rules[index];
+        if top_height < r.height_slope.x || top_height > r.height_slope.y
+            || slope < r.height_slope.z || slope > r.height_slope.w
+            || depth < r.depth_moisture.x || depth > r.depth_moisture.y
+            || wet < r.depth_moisture.z || wet > r.depth_moisture.w
+            || erosion < r.surface_bands.x || erosion > r.surface_bands.y { continue; }
+        let salt = index * 0x9E3779B9u;
+        if r.surface_bands.z > 0 && (div_floor(landform_strata(p, altitude), r.surface_bands.z) & 1) != r.surface_bands.w { continue; }
+        if r.head.z > 0 && noise(p, u32(r.head.z), seed ^ 0x68E31DA4u ^ salt) <= r.head.w { continue; }
+        if r.head.y > 0 {
+            if i32(hash3(p.x, p.y, p.z ^ (layer * 0x9e37), 0x5f356495u ^ salt) & 255u) >= r.head.y { continue; }
+            return u32(r.head.x) | select(0u, M_SPECK, depth == 0);
+        }
+        return u32(r.head.x);
+    }
+    return u32(terrain.materials.y);
 }
 
 // Lunar materials (`lunar_material`): 1 regolith, 2 mare, 3 ejecta, 4 rock,

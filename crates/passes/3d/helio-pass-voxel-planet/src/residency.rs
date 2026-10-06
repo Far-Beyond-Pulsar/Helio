@@ -64,6 +64,14 @@ pub struct Job {
 /// First key word of a level column: its (never negative) column index in
 /// 24 bits, the face and the level. 2^24 columns cover a 0.1 m Earth face
 /// (1.25e7 columns) and an infinite plane (2^24).
+/// Readback status of a column published with a band clipped to the window
+/// around the eye (`STATUS_CLIPPED` in generate.wgsl); its word is the
+/// window centre in level cells.
+pub const STATUS_CLIPPED: u32 = 5;
+/// Level cells the eye may move vertically before a clipped band is
+/// regenerated: a quarter of its 256-brick window.
+const CLIP_SLACK: i64 = 256 * 8 / 4;
+
 pub fn key0(face: u8, level: u32, ci: i32) -> u32 {
     debug_assert!((0..1 << 24).contains(&ci), "column index {ci} outside 24 bits");
     (ci as u32 & 0xff_ffff) | (u32::from(face) << 24) | (level << 27)
@@ -386,6 +394,9 @@ pub struct Residency {
     synced_hash: Vec<u64>,
     next_brush: u32,
     urgent: Vec<u64>,
+    /// Resident columns whose band is clipped to a window around the eye's
+    /// layer, with the window centre (level cells).
+    clipped: FxHashMap<u64, i32>,
     pub stats: Stats,
     frame: u32,
     planner: Planner,
@@ -447,6 +458,7 @@ impl Residency {
             synced_hash: Vec::new(),
             next_brush: 0,
             urgent: Vec::new(),
+            clipped: FxHashMap::default(),
             stats: Stats::default(),
             frame: 0,
             planner,
@@ -534,8 +546,10 @@ impl Residency {
             self.synced.push(resolved.brush);
             self.synced_hash.push(resolved.prefix);
         }
+        // Large footprints scan the residents instead of their rectangles.
+        let mut scans: Vec<(u8, u32, i64, i64, i64, i64)> = Vec::new();
         for fb in touched {
-            let r_cells = i64::from(fb.radius_half) / 2 + 1;
+            let r_cells = fb.extent_cells();
             let ci = i64::from(fb.center[0]) / 2;
             let cj = i64::from(fb.center[1]) / 2;
             for level in 0..self.grid.levels() {
@@ -546,6 +560,7 @@ impl Residency {
                 let (i0, i1) = ((ci - r_cells).div_euclid(col), (ci + r_cells).div_euclid(col));
                 let (j0, j1) = ((cj - r_cells).div_euclid(col), (cj + r_cells).div_euclid(col));
                 if (i1 - i0 + 1) * (j1 - j0 + 1) > 1 << 16 {
+                    scans.push((fb.face(), level, i0, i1, j0, j1));
                     continue;
                 }
                 for a in i0..=i1 {
@@ -555,6 +570,15 @@ impl Residency {
                             self.urgent.push(key);
                         }
                     }
+                }
+            }
+        }
+        if !scans.is_empty() {
+            for (key, _) in self.residents.iter() {
+                let (face, level, ci, cj) = unpack(key);
+                let (ci, cj) = (i64::from(ci), i64::from(cj));
+                if scans.iter().any(|&(f, l, i0, i1, j0, j1)| f == face && l == level && (i0..=i1).contains(&ci) && (j0..=j1).contains(&cj)) {
+                    self.urgent.push(key);
                 }
             }
         }
@@ -643,6 +667,7 @@ impl Residency {
             Some(false) => self.block_conflicts -= 1,
             None => {}
         }
+        self.clipped.remove(&key);
         if let Some(res) = self.residents.remove(key, &mut work.table_writes) {
             work.evictions.push(res.record);
             self.delayed_records.push(res.record);
@@ -784,6 +809,7 @@ impl Residency {
         let delayed = std::mem::take(&mut self.delayed_records);
         self.free_records.extend(delayed);
         self.sync_edits(planet, &mut work);
+        self.follow_clipped(eye);
         let t_edits = started.elapsed();
         // Ask the planner for new windows when the view changed, then apply
         // every diff that is ready (the worker always plans the latest view).
@@ -852,6 +878,8 @@ impl Residency {
                 deferred_urgent.push(key);
                 continue;
             };
+            // Still clipped, it is reported again with its new window.
+            self.clipped.remove(&key);
             if let Some(old) = res.edit_block {
                 self.edits.release(old);
             }
@@ -978,21 +1006,49 @@ impl Residency {
         }
     }
 
-    /// Re-queue columns whose jobs could not complete (scratch/pool pressure).
-    pub fn requeue(&mut self, keys: impl IntoIterator<Item = (u64, u32)>) {
+    /// Re-queue columns whose jobs could not complete (scratch/pool
+    /// pressure), and note columns published with a clipped band
+    /// ([`STATUS_CLIPPED`], with their window centre).
+    pub fn requeue(&mut self, keys: impl IntoIterator<Item = (u64, u32, i32)>) {
         let mut count = 0;
-        for (key, status) in keys {
-            if status == 1 {
-                // Band overflow: stays unpublished; coarser levels cover it.
+        for (key, status, word) in keys {
+            if !self.residents.contains_key(key) {
                 continue;
             }
-            if !self.residents.contains_key(key) {
+            if status == STATUS_CLIPPED {
+                self.clipped.insert(key, word);
                 continue;
             }
             self.urgent.push(key);
             count += 1;
         }
         self.stats.requeued += count;
+    }
+
+    /// Clipped bands follow the eye vertically: a column whose window centre
+    /// is more than a quarter window from the eye's layer at its level is
+    /// regenerated around the current eye.
+    fn follow_clipped(&mut self, eye: DVec3) {
+        if self.clipped.is_empty() {
+            return;
+        }
+        let grid = &self.grid;
+        let layer = ((grid.radial(eye) - grid.radius()) / grid.voxel_size()).floor() as i64;
+        let stale: Vec<u64> = self
+            .clipped
+            .iter()
+            .filter(|(key, centre)| ((layer >> unpack(**key).1) - i64::from(**centre)).abs() > CLIP_SLACK)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in stale {
+            self.clipped.remove(&key);
+            self.urgent.push(key);
+        }
+    }
+
+    /// Resident columns with a clipped band.
+    pub fn clipped_columns(&self) -> usize {
+        self.clipped.len()
     }
 
     /// Every pending window column has been issued.
@@ -1078,8 +1134,9 @@ pub struct PlanRequest {
     pub budget: usize,
     /// CPU time for diffs, re-ranking and admission.
     pub cpu_budget: std::time::Duration,
-    /// Job outcomes read back since the last request (see [`Residency::requeue`]).
-    pub failed: Vec<(u64, u32)>,
+    /// Job outcomes read back since the last request (key, status, word; see
+    /// [`Residency::requeue`]).
+    pub failed: Vec<(u64, u32, i32)>,
     /// Diagnostics: also return a copy of the column table.
     pub table: bool,
     /// Diagnostics: also scan the table's probe runs.

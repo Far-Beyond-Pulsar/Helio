@@ -12,8 +12,8 @@
 //! coarser than themselves, in any layer, at every level.
 use crate::grid::{Grid, DOMAIN_UNIT};
 use crate::landform::{
-    noise_quantile, LandformConstants, LandformField, LandformVolume, Octave, StackLayer, BASIN, CONTINENT, CRATER, CRATER_RADIUS_Q19, EROSION, GRAD_SHIFT,
-    HILLS, LAYERS, OCTAVES, REGION, RIDGE, ROUGHNESS, STYLE_EARTHLIKE, STYLE_LAYERED, STYLE_LUNAR, WARP, WARP_OCTAVES,
+    noise_quantile, LandformConstants, LandformField, LandformVolume, Octave, PackedRule, StackLayer, BASIN, CONTINENT, CRATER, CRATER_RADIUS_Q19, EROSION,
+    GRAD_SHIFT, HILLS, LAYERS, OCTAVES, REGION, RIDGE, ROUGHNESS, RULES, STYLE_EARTHLIKE, STYLE_LAYERED, STYLE_LUNAR, STYLE_RULES, WARP, WARP_OCTAVES,
 };
 use crate::noise::{FINE_ONE, ONE};
 use crate::terrain::{material, GeneratorInfo, TerrainField, TerrainGenerator, TerrainSource, HEIGHT_ONE};
@@ -125,6 +125,107 @@ pub enum MaterialStyle {
     Lunar,
     /// A `surface` layer over `soil_depth_m` of `soil` over `rock`.
     Layered,
+    /// The first of the [`MaterialRule`]s that holds, else `rock`: a game's
+    /// own biomes (snow above a height, rock on steep slopes, sediment in
+    /// gullies, strata, patches).
+    Rules,
+}
+
+/// One material rule: the material of a ground cell where every condition
+/// holds (ranges are inclusive). Rules are tried in order.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MaterialRule {
+    /// Material name (see [`material::NAMES`]).
+    pub material: String,
+    /// Column height above the datum (m).
+    pub min_height_m: f64,
+    pub max_height_m: f64,
+    /// Ground slope, rise over run (1 is 45 degrees).
+    pub min_slope: f64,
+    pub max_slope: f64,
+    /// Depth below the column top (m); 0 is the exposed surface.
+    pub min_depth_m: f64,
+    pub max_depth_m: f64,
+    /// Moisture, 0 (dry) to 1 (wet), varying over the continents' scale.
+    pub min_moisture: f64,
+    pub max_moisture: f64,
+    /// Erosion, -1 (gully floors) to 1 (the ribs between gullies).
+    pub min_erosion: f64,
+    pub max_erosion: f64,
+    /// Patches: noise blobs of this size (km; 0 none) covering `patch_share`.
+    pub patch_km: f64,
+    pub patch_share: f64,
+    /// Strata: bands of this thickness (m; 0 none), the odd ones or the even.
+    pub band_m: f64,
+    pub odd_bands: bool,
+    /// Single-cell specks: this share of the cells (1 for all cells).
+    pub speck_share: f64,
+}
+
+impl Default for MaterialRule {
+    fn default() -> Self {
+        Self {
+            material: "Stone".into(),
+            min_height_m: -1.0e6,
+            max_height_m: 1.0e6,
+            min_slope: 0.0,
+            max_slope: 1.0e3,
+            min_depth_m: 0.0,
+            max_depth_m: 1.0e6,
+            min_moisture: 0.0,
+            max_moisture: 1.0,
+            min_erosion: -1.0,
+            max_erosion: 1.0,
+            patch_km: 0.0,
+            patch_share: 0.5,
+            band_m: 0.0,
+            odd_bands: false,
+            speck_share: 1.0,
+        }
+    }
+}
+
+impl MaterialRule {
+    /// `material` everywhere (narrow it with the fields).
+    pub fn new(material: &str) -> Self {
+        Self { material: material.into(), ..Self::default() }
+    }
+
+    fn validate(&self, index: usize) -> Result<(), String> {
+        let values = [
+            self.min_height_m, self.max_height_m, self.min_slope, self.max_slope, self.min_depth_m, self.max_depth_m, self.min_moisture,
+            self.max_moisture, self.min_erosion, self.max_erosion, self.patch_km, self.patch_share, self.band_m, self.speck_share,
+        ];
+        if values.iter().any(|v| !v.is_finite()) || self.patch_km < 0.0 || self.band_m < 0.0 {
+            return Err(format!("material rule {index} has a non-finite or negative size"));
+        }
+        if material::from_name(&self.material).is_none() {
+            return Err(format!("material rule {index}: unknown material {:?}", self.material));
+        }
+        Ok(())
+    }
+
+    fn pack(&self, grid: &Grid) -> PackedRule {
+        let mm = |m: f64| (m * f64::from(HEIGHT_ONE)).clamp(-2.0e9, 2.0e9).round() as i32;
+        let eighths = |s: f64| (s * 8.0).clamp(-1.0e9, 1.0e9).floor() as i32;
+        let cells = |m: f64| (m / grid.voxel_size()).clamp(-1.0e9, 1.0e9).round() as i32;
+        let q16 = |v: f64| (v.clamp(0.0, 1.0) * 65_536.0).round() as i32;
+        let byte = |v: f64| (v.clamp(-1.0, 1.0) * 127.0).round() as i32;
+        let patch = if self.patch_km > 0.0 {
+            let shift = ((self.patch_km * 1_000.0 / DOMAIN_UNIT).log2().round().clamp(1.0, 30.0)) as i32;
+            (shift, (noise_quantile(1.0 - self.patch_share.clamp(0.0, 1.0)) * f64::from(ONE)).round() as i32)
+        } else {
+            (0, 0)
+        };
+        let speck = if self.speck_share >= 1.0 { 0 } else { ((self.speck_share.max(0.0) * 256.0).round() as i32).clamp(1, 255) };
+        PackedRule {
+            head: [material::from_name(&self.material).unwrap_or(material::STONE) as i32, speck, patch.0, patch.1],
+            height_slope: [mm(self.min_height_m), mm(self.max_height_m), eighths(self.min_slope), eighths(self.max_slope)],
+            depth_moisture: [cells(self.min_depth_m), cells(self.max_depth_m), q16(self.min_moisture), q16(self.max_moisture)],
+            surface_bands: [byte(self.min_erosion), byte(self.max_erosion), mm(self.band_m).max(0), i32::from(self.odd_bands)],
+        }
+    }
 }
 
 /// Generated caves: tunnels and caverns inside cave regions.
@@ -195,10 +296,13 @@ pub struct TerrainLayers {
     pub snowline_m: f64,
     /// Depth of the soil (Earthlike, Layered) or regolith (Lunar).
     pub soil_depth_m: f64,
-    /// Layered: material names (see [`material::NAMES`]).
+    /// Layered: material names (see [`material::NAMES`]); `rock` is also
+    /// the Rules style's fallback.
     pub surface: String,
     pub soil: String,
     pub rock: String,
+    /// Rules style: tried in order (at most 16).
+    pub rules: Vec<MaterialRule>,
 }
 
 impl Default for TerrainLayers {
@@ -264,6 +368,54 @@ impl TerrainLayers {
             surface: "Grass".into(),
             soil: "Dirt".into(),
             rock: "Stone".into(),
+            rules: Vec::new(),
+        }
+    }
+
+    /// A dry world of dunes and mesas, with materials from rules: dune sand
+    /// on gentle ground, sandstone and clay strata on slopes, gravel in the
+    /// gullies, scattered stone patches and dark stone specks.
+    pub fn desert() -> Self {
+        use LayerKind::*;
+        let mut earth = Self::earth();
+        earth.layers.retain(|l| l.kind != Continents);
+        for l in &mut earth.layers {
+            l.mask = LayerMask::Everywhere;
+        }
+        earth.layers.insert(1, Layer { kind: Plateau, height_m: 400.0, ..Layer::default() });
+        let rule = |material: &str, f: &dyn Fn(&mut MaterialRule)| {
+            let mut r = MaterialRule::new(material);
+            f(&mut r);
+            r
+        };
+        Self {
+            materials: MaterialStyle::Rules,
+            rules: vec![
+                rule("Gravel", &|r| {
+                    r.max_depth_m = 0.3;
+                    r.max_erosion = -0.4;
+                    r.min_slope = 0.2;
+                }),
+                rule("Sand", &|r| {
+                    r.max_depth_m = 1.5;
+                    r.max_slope = 0.6;
+                }),
+                rule("DarkStone", &|r| {
+                    r.max_depth_m = 0.0;
+                    r.speck_share = 0.06;
+                }),
+                rule("Stone", &|r| {
+                    r.patch_km = 0.05;
+                    r.patch_share = 0.15;
+                }),
+                rule("Clay", &|r| {
+                    r.band_m = 2.5;
+                    r.odd_bands = true;
+                }),
+            ],
+            rock: "Sandstone".into(),
+            snowline_m: 1.0e5,
+            ..earth
         }
     }
 
@@ -364,6 +516,12 @@ impl TerrainLayers {
             if material::from_name(name).is_none() {
                 return Err(format!("unknown material {name:?}"));
             }
+        }
+        if self.rules.len() > RULES {
+            return Err(format!("a terrain has at most {RULES} material rules"));
+        }
+        for (index, rule) in self.rules.iter().enumerate() {
+            rule.validate(index)?;
         }
         Ok(())
     }
@@ -522,15 +680,22 @@ impl TerrainLayers {
             MaterialStyle::Earthlike => STYLE_EARTHLIKE,
             MaterialStyle::Lunar => STYLE_LUNAR,
             MaterialStyle::Layered => STYLE_LAYERED,
+            MaterialStyle::Rules => STYLE_RULES,
         };
+        let mut rules = [PackedRule::default(); RULES];
+        for (packed, rule) in rules.iter_mut().zip(&self.rules) {
+            *packed = rule.pack(grid);
+        }
         let constants = LandformConstants {
             header: [(WARP_OCTAVES + octaves.len()) as i32, grid.layer_mm() as i32, soil, seed as i32],
             levels: [shift(moisture / 2.0) as i32, continents, units(self.snowline_m), units(-8.0)],
             shape: [display, 16, 0, i32::from(grid.is_plane())],
             style: [style, id(&self.surface), id(&self.soil), id(&self.rock)],
             stack: [self.layers.iter().filter(|l| l.enabled).count() as i32, erosion_sum.max(1), grid.sphere_constants()[2] as i32, warps],
+            materials: [self.rules.len() as i32, id(&self.rock), 0, 0],
             layers,
             octaves: table,
+            rules,
         };
         Ok((constants, LandformVolume::new(grid, &self.caves, &self.overhangs)))
     }
@@ -672,6 +837,37 @@ mod tests {
                 eprintln!("{name} {shape:?}: worst {worst:?}");
             }
         }
+    }
+
+    /// Rules apply in order: the first that holds picks the material.
+    #[test]
+    fn material_rules_pick_the_first_rule_that_holds() {
+        use crate::landform::ground_material;
+        let grid = Grid::new(1_000_000.0, 0.1).unwrap();
+        let (k, _) = TerrainLayers::desert().compile(&grid, 7).unwrap();
+        let gully = (-100i32 as u32) & 0xff;
+        let id = |m: u32| m & material::ID;
+        let mut seen = std::collections::BTreeMap::new();
+        for n in 0..4_000 {
+            let p = grid.domain_point(2, 1_000 + n * 977, 2_000 + n * 131, 0);
+            // A gully floor on a slope: gravel, the first rule.
+            assert_eq!(ground_material(&k, p, gully, 500_000, 0, 4, 5_000), material::GRAVEL);
+            // Gentle ground near the surface: sand.
+            assert_eq!(ground_material(&k, p, 0, 500_000, 3, 2, 5_000), material::SAND);
+            // Deeper: stone patches, clay bands or the sandstone fallback.
+            let deep = id(ground_material(&k, p, 0, 500_000, 40, 2, 4_960 + n % 40));
+            assert!([material::STONE, material::CLAY, material::SANDSTONE].contains(&deep), "{deep}");
+            *seen.entry(deep).or_insert(0) += 1;
+            // Steep exposed ground: dark stone specks among the others.
+            *seen.entry(1000 + id(ground_material(&k, p, 0, 500_000, 0, 10, 5_000))).or_insert(0) += 1;
+        }
+        eprintln!("{seen:?}");
+        assert!(seen.len() >= 5, "patches, bands, fallback and specks all occur: {seen:?}");
+        let mut many = TerrainLayers::desert();
+        many.rules = vec![MaterialRule::default(); 17];
+        assert!(many.compile(&grid, 7).is_err());
+        many.rules = vec![MaterialRule::new("Lava")];
+        assert!(many.compile(&grid, 7).is_err());
     }
 
     #[test]

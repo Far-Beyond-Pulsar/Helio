@@ -13,14 +13,16 @@ struct Job {
 }
 
 struct JobOut {
-    status: u32,   // 0 ok, 1 overflow, 2 scratch full, 3 pool full, 4 skipped
+    status: u32,   // 0 ok, 2 scratch full, 3 pool full, 4 skipped
     k_lo: i32,
     n_band: u32,
     n_mixed: u32,
     scratch: u32,
     size_class: u32,
     run: u32,
-    pad: u32,
+    pad: u32,      // record info flags
+    top: i32,      // first air above every occupied cell, clipped or not
+    centre: i32,   // clipped bands: the eye layer the window is centred on
     mixed: array<u32, 8>,
     solid: array<u32, 8>,
 }
@@ -33,6 +35,8 @@ const A_NEED: u32 = 16u;
 const A_PAGES: u32 = 30u;
 const A_SCRATCH: u32 = 31u;
 const MAX_BAND: u32 = 256u;
+// Readback status of a published clipped column (with its window centre).
+const STATUS_CLIPPED: u32 = 5u;
 
 @group(0) @binding(7) var<storage, read> jobs: array<Job>;
 @group(0) @binding(8) var<storage, read_write> job_out: array<JobOut>;
@@ -158,10 +162,9 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         for (var e = li; e < count; e += 64u) {
             let b = brushes[edit_refs[job.edits + e]];
             if b.radius_half < (1u << level) { continue; }
-            let r = i32(b.radius_half);
             let shift = level + 1u;
-            let lo = (b.center.z - r) >> shift;
-            let hi = ((b.center.z + r) >> shift) + 1;
+            let lo = b.k_lo >> shift;
+            let hi = (b.k_hi >> shift) + 1;
             let op = (b.flags >> 4u) & 3u;
             if op == 0u { atomicMin(&g_band[0], lo - 1); }
             if op == 1u { atomicMax(&g_band[1], hi + 1); }
@@ -170,8 +173,22 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     workgroupBarrier();
     let lo_cell = atomicLoad(&g_band[0]);
     let hi_cell = atomicLoad(&g_band[1]);
-    let k_lo = lo_cell >> 3u;
-    let k_hi = ((max(hi_cell, lo_cell + 1) - 1) >> 3u) + 1;
+    var k_lo = lo_cell >> 3u;
+    var k_hi = ((max(hi_cell, lo_cell + 1) - 1) >> 3u) + 1;
+    // A band taller than MAX_BAND bricks (deep digs, deep caves, cliffs)
+    // keeps the window of MAX_BAND bricks around the eye's layer at this
+    // level: rays beyond a clipped side use coarser levels, whose windows
+    // reach twice as far, and the CPU regenerates the column when the eye
+    // moves a quarter window vertically. Any depth stays representable.
+    let centre = frame.layer_i.x >> level;
+    var clip = 0u;
+    if k_hi - k_lo > i32(MAX_BAND) {
+        let lo = clamp((centre >> 3u) - i32(MAX_BAND / 2u), k_lo, k_hi - i32(MAX_BAND));
+        if lo > k_lo { clip |= INFO_CLIP_BELOW; }
+        if lo + i32(MAX_BAND) < k_hi { clip |= INFO_CLIP_ABOVE; }
+        k_lo = lo;
+        k_hi = lo + i32(MAX_BAND);
+    }
     let n_band = u32(k_hi - k_lo);
     let volumetric = atomicLoad(&g_volume) != 0u;
     let relief = requested_relief && !volumetric && n_band <= 32u && hi_cell - k_lo * 8 <= 255;
@@ -185,10 +202,6 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let surface_words = world.sphere.w != 0u;
     let scratch_surface = select(1u, 3u, wide_relief);
     let scratch_header = scratch_surface + select(0u, 1u, surface_words);
-    if n_band > MAX_BAND {
-        if li == 0u { job_out[index].status = 1u; }
-        return;
-    }
     if li == 0u {
         let need = i32(scratch_header + n_band);
         let base = atomicAdd(&alloc[A_SCRATCH], need);
@@ -233,12 +246,12 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
             let k = (k_lo + i32(b)) * 8 + i32(z);
             var kind = terrain_kind(top, k);
             if k >= field_top - extent.x && k < field_top + extent.y {
-                kind = terrain_cell(column_point, volume_point(face, i, j, k, level), level, field_top, k);
+                kind = select(0u, 1u, terrain_density(column_point, volume_point(face, i, j, k, level), level, field_top, k) > 0);
                 if kind != 0u { generated_top = max(generated_top, k + 1); }
             }
             if job.edits != 0u {
                 let c = vec3<i32>(center_half(i, level), center_half(j, level), center_half(k, level));
-                kind = apply_edits(job.edits, level, c, kind).x;
+                kind = apply_edits(job.edits, level, c, column_point, kind).x;
             }
             if kind != 0u {
                 let bit = li + z * 64u;
@@ -278,7 +291,9 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
             | select(0u, INFO_HEIGHTFIELD, heightfield) | topology_flags
             // Generated caves and overhangs are not described by column tops
             // (slopes, relief normals, heightfield storage): like edit cuts.
-            | select(0u, INFO_TOPOLOGY | INFO_TOPS_DOWN, volumetric);
+            | select(0u, INFO_TOPOLOGY | INFO_TOPS_DOWN, volumetric) | clip;
+        out.top = hi_cell;
+        out.centre = centre;
         out.k_lo = k_lo;
         out.n_band = n_band;
         out.scratch = base;
@@ -422,8 +437,8 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
     let job = jobs[index];
     let o = job_out[index];
     if o.status != 0u {
-        // Report the failure (the CPU retries all but band overflows); a new
-        // column stays unpublished, a replaced column keeps its old data.
+        // Report the failure (the CPU retries it); a new column stays
+        // unpublished, a replaced column keeps its old data.
         if li == 0u {
             let at = u32(atomicAdd(&alloc[A_FAILS], 1)) * 4u;
             if at + 3u < arrayLength(&failures) {
@@ -497,8 +512,10 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
                 break;
             }
         }
-        let gap = u32(clamp(band_top - exact, 0, 7));
-        let top_cell = band_top - i32(gap);
+        // A band clipped above bounds its summaries with the unclipped top.
+        let clipped_above = (o.pad & INFO_CLIP_ABOVE) != 0u;
+        let gap = select(u32(clamp(band_top - exact, 0, 7)), 0u, clipped_above);
+        let top_cell = select(band_top - i32(gap), max(o.top, band_top), clipped_above);
         let ci = i32(job.key0 & 0xffffffu);
         let cj = bitcast<i32>(job.key1);
         for (var tier = 1u; tier <= 3u; tier++) {
@@ -514,7 +531,8 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         c.key0 = job.key0;
         c.key1 = job.key1;
         c.k_lo = o.k_lo;
-        c.info = o.n_band | (o.n_mixed << 9u) | (o.size_class << 18u) | (gap << 22u) | select(0u, INFO_EXT, ext) | (o.pad & (INFO_RELIEF | INFO_RELIEF_INLINE | INFO_HEIGHTFIELD | INFO_TOPOLOGY)) | INFO_VALID;
+        c.info = o.n_band | (o.size_class << 18u) | (gap << 22u) | select(0u, INFO_EXT, ext)
+            | (o.pad & (INFO_RELIEF | INFO_RELIEF_INLINE | INFO_HEIGHTFIELD | INFO_TOPOLOGY | INFO_CLIP_BELOW | INFO_CLIP_ABOVE)) | INFO_VALID;
         c.run = o.run;
         c.mixed = o.mixed[0];
         c.solid = o.solid[0];
@@ -522,6 +540,17 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         records[job.record] = c;
         let level = job.key0 >> 27u;
         atomicMax(&level_tops[level], top_cell << level);
+        // Clipped columns are reported with their window centre, so the CPU
+        // can regenerate them when the eye leaves the window.
+        if (o.pad & (INFO_CLIP_BELOW | INFO_CLIP_ABOVE)) != 0u {
+            let at = u32(atomicAdd(&alloc[A_FAILS], 1)) * 4u;
+            if at + 3u < arrayLength(&failures) {
+                failures[at] = job.key0;
+                failures[at + 1u] = job.key1;
+                failures[at + 2u] = STATUS_CLIPPED;
+                failures[at + 3u] = bitcast<u32>(o.centre);
+            }
+        }
     }
 }
 

@@ -9,6 +9,12 @@ fn unresolved_outcrop_preserves_canonical_ids_and_mean_palette() {
     let noise = include_str!("../shaders/noise.wgsl");
     let landform = include_str!("../shaders/landform.wgsl");
     let world = include_str!("../shaders/world.wgsl");
+    let density = {
+        let start = include_str!("../shaders/world.wgsl").find("fn heightfield_density").unwrap();
+        let rest = &include_str!("../shaders/world.wgsl")[start..];
+        &rest[..rest.find("
+}").unwrap() + 2]
+    };
     let materials = world
         .split("const M_AIR")
         .nth(1)
@@ -28,6 +34,7 @@ fn unresolved_outcrop_preserves_canonical_ids_and_mean_palette() {
         r#"
         {noise}
         const M_AIR{materials}
+        {density}
         {landform}
         fn palette(id:u32)->vec3<f32> {{
             let p=array<vec3<f32>,16>(vec3<f32>(200.,0.,200.),vec3<f32>(91.,125.,65.),
@@ -96,7 +103,7 @@ fn unresolved_outcrop_preserves_canonical_ids_and_mean_palette() {
     );
     // Match the complete current TerrainConstants ABI, including the ridge LUT
     // and the volume terms (zero: no caves or overhangs).
-    let mut constants = [0i32; 524];
+    let mut constants = [0i32; 784];
     constants[1] = 100;
     constants[2] = 7;
     constants[3] = 123;

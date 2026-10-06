@@ -264,6 +264,12 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
         .unwrap();
     let noise=include_str!("../shaders/noise.wgsl");
     let landform=include_str!("../shaders/landform.wgsl");
+    let density = {
+        let start = include_str!("../shaders/world.wgsl").find("fn heightfield_density").unwrap();
+        let rest = &include_str!("../shaders/world.wgsl")[start..];
+        &rest[..rest.find("
+}").unwrap() + 2]
+    };
     let materials=world.split("const M_AIR").nth(1).unwrap().split("// Face bases").next().unwrap();
     let mut terrain_constants=LandformConstants::zeroed();
     terrain_constants.header=[0,100,7,123];
@@ -279,6 +285,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
         r#"
         {noise}
         const M_AIR{materials}
+        {density}
         {landform}
         @group(0) @binding(3) var<uniform> terrain:TerrainConstants;
         var<private> material_footprint:f32=0.0;

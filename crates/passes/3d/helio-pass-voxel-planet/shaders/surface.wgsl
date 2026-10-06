@@ -515,7 +515,7 @@ fn removed_air_neighbour(h: Hit, c: Column, face: u32, level: u32, code: u32) ->
     let base_top = column_top(neighbour, u32(ij.x & 7), u32(ij.y & 7));
     if terrain_kind(base_top, h.k) == 0u { return false; }
     let centre = vec3<i32>(center_half(ij.x, level), center_half(ij.y, level), center_half(h.k, level));
-    return apply_edits(neighbour.edits, level, centre, 1u).x == 0u;
+    return apply_edits(neighbour.edits, level, centre, domain_point(face, ij.x, ij.y, level), 1u).x == 0u;
 }
 
 // Generated top of the cell across side face `code` (the hit's air side),
@@ -561,7 +561,8 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     var kind = terrain_kind(top, h.k);
     var material = 0u;
     if c.edits != 0u {
-        let km = apply_edits(c.edits, level, vec3<i32>(center_half(h.i, level), center_half(h.j, level), center_half(h.k, level)), kind);
+        let km = apply_edits(c.edits, level, vec3<i32>(center_half(h.i, level), center_half(h.j, level), center_half(h.k, level)),
+            domain_point(face, h.i, h.j, level), kind);
         kind = km.x;
         material = km.y;
     }

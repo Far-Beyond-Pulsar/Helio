@@ -15,6 +15,10 @@ fn terrain_programs_are_bit_identical_to_cpu() {
     use helio_pass_voxel_planet::layers::TerrainLayers;
     let moon = TerrainLayers::moon().source(7);
     let flat = TerrainLayers { soil_depth_m: 2.0, ..TerrainLayers::flat_at(-1.25) }.source(7);
+    let desert = TerrainLayers::desert().source(7);
+    let mut deep = TerrainLayers::earth();
+    deep.caves.depth_m = 900.0;
+    let deep = deep.source(7);
     for (shape, size, terrain) in [
         (Shape::Sphere, 0.1, TerrainSource::default()),
         (Shape::Sphere, 0.3, TerrainSource::default()),
@@ -28,6 +32,9 @@ fn terrain_programs_are_bit_identical_to_cpu() {
         (Shape::Sphere, 1.0, moon.clone()),
         (Shape::Plane, 0.1, moon.clone()),
         (Shape::InfinitePlane, 0.1, moon),
+        (Shape::Sphere, 0.1, desert.clone()),
+        (Shape::Plane, 0.3, desert),
+        (Shape::Sphere, 0.1, deep),
     ] {
         let planet = Planet::new(PlanetRecipe { shape, voxel_size_m: size, plane_size_m: 5_000.0, terrain: terrain.clone(), ..Default::default() }).unwrap();
         helio_pass_voxel_planet::engine::verify_field(&gpu.device, &gpu.queue, &planet, 20_000)
@@ -53,12 +60,25 @@ fn settle(gpu: &Gpu, target: &Target, renderer: &mut helio_pass_voxel_planet::en
 fn compare_near(gpu: &Gpu, planet: &Arc<Planet>, eye: DVec3, forward: Vec3, size: [u32; 2]) -> (usize, usize) {
     let target = Target::new(gpu, size);
     let mut renderer = renderer(gpu, planet.clone(), size);
+    compare_view(gpu, &target, &mut renderer, planet, eye, forward, size)
+}
+
+/// [`compare_near`] with a renderer kept across views (the eye moves).
+fn compare_view(
+    gpu: &Gpu,
+    target: &Target,
+    renderer: &mut helio_pass_voxel_planet::engine::PlanetRenderer,
+    planet: &Arc<Planet>,
+    eye: DVec3,
+    forward: Vec3,
+    size: [u32; 2],
+) -> (usize, usize) {
     let frame = frame(planet, eye);
-    let frames = settle(gpu, &target, &mut renderer, &frame, forward);
+    let frames = settle(gpu, target, renderer, &frame, forward);
     let stats = renderer.stats();
     eprintln!("settled after {frames} frames: {stats:?}");
     assert_eq!(stats.failed_jobs, 0);
-    let hits = hits(gpu, &renderer);
+    let hits = hits(gpu, renderer);
     let up = planet.grid().up(eye).as_vec3();
     let camera = target.camera(forward, if forward.normalize().dot(up).abs() > 0.99 { up.any_orthonormal_vector() } else { up });
     let lod0 = stats.lod0_distance;
@@ -152,6 +172,22 @@ fn find_cave(planet: &Planet) -> Option<(DVec3, Vec3)> {
 fn cave_view_matches_canonical_cpu_ray_casts() {
     let Some(gpu) = gpu() else { return };
     let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+    let (eye, forward) = find_cave(&planet).expect("a cave near the test site");
+    eprintln!("cave eye {} m below its column top", -planet.ground_height(eye));
+    let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [320, 180]);
+    eprintln!("compared {compared}, mismatched {mismatched}");
+    assert!(compared > 1000);
+    assert!(mismatched * 1000 <= compared, "{mismatched}/{compared}");
+}
+
+/// Caves 800 m deep, far below what one band holds at the fine levels:
+/// from inside one at a random depth, GPU hits match CPU ray casts.
+#[test]
+fn deep_cave_view_matches_canonical_cpu_ray_casts() {
+    let Some(gpu) = gpu() else { return };
+    let mut stack = helio_pass_voxel_planet::layers::TerrainLayers::earth();
+    stack.caves.depth_m = 800.0;
+    let planet = Arc::new(Planet::new(PlanetRecipe { terrain: stack.source(7), ..Default::default() }).unwrap());
     let (eye, forward) = find_cave(&planet).expect("a cave near the test site");
     eprintln!("cave eye {} m below its column top", -planet.ground_height(eye));
     let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [320, 180]);
@@ -261,6 +297,90 @@ fn edits_propagate_to_gpu_generation() {
     eprintln!("compared {compared}, mismatched {mismatched}");
     assert!(compared > 1000);
     assert!(mismatched * 1000 <= compared, "{mismatched}/{compared}");
+}
+
+/// Destruction to any depth: a 600 m shaft is far taller than a column's
+/// 256-brick band at the fine levels, which keep a window around the eye
+/// (clipped bands) and use coarser levels beyond it. At the bottom and after
+/// climbing 300 m (the windows follow the eye), GPU hits near the eye match
+/// canonical CPU ray casts exactly, with no loading or exhausted rays.
+#[test]
+fn a_deep_shaft_renders_exactly_at_any_depth() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 3, 0.41, 0.57);
+    let up = planet.grid().up(planet.surface_point(dir, 0.0));
+    let ground = planet.surface_point(dir, 0.0);
+    let mut depth = -10.0;
+    while depth < 600.0 {
+        let center = ground - up * depth;
+        planet.apply(Brush { center: center.to_array(), radius: 2.0, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0 }).unwrap();
+        depth += 3.0;
+    }
+    let planet = Arc::new(planet);
+    let size = [256, 144];
+    let target = Target::new(&gpu, size);
+    let mut renderer = renderer(&gpu, planet.clone(), size);
+    let side = up.any_orthonormal_vector();
+    for (depth, pitch) in [(590.0, -0.6), (290.0, 0.4)] {
+        let eye = ground - up * depth + side * 0.7;
+        let forward = (side + up * pitch).normalize().as_vec3();
+        let (compared, mismatched) = compare_view(&gpu, &target, &mut renderer, &planet, eye, forward, size);
+        let stats = renderer.stats();
+        eprintln!("{depth} m deep: compared {compared}, mismatched {mismatched}, clipped columns {}", stats.clipped_columns);
+        assert!(stats.clipped_columns > 0, "the shaft needs clipped bands");
+        assert!(compared > 1000);
+        assert_eq!(mismatched, 0);
+    }
+}
+
+/// Planet-scale brushes: a sphere of 3 km radius (64-bit containment; the
+/// old 32-bit test capped brushes at 1.85 km) leaves a crater 3 km deep. On
+/// its floor, GPU hits match canonical CPU ray casts.
+#[test]
+fn a_planet_scale_crater_renders_exactly_on_its_floor() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 5, 0.33, 0.52);
+    let ground = planet.surface_point(dir, 0.0);
+    let up = planet.grid().up(ground);
+    planet.apply(Brush { center: ground.to_array(), radius: 3_000.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+    let planet = Arc::new(planet);
+    let eye = ground - up * (3_000.0 - 1.7);
+    assert!(!planet.solid(planet.grid().locate(eye).0), "the eye is in the crater");
+    let side = up.any_orthonormal_vector();
+    let forward = (side - up * 0.4).normalize().as_vec3();
+    let size = [256, 144];
+    let target = Target::new(&gpu, size);
+    let mut renderer = renderer(&gpu, planet.clone(), size);
+    let (compared, mismatched) = compare_view(&gpu, &target, &mut renderer, &planet, eye, forward, size);
+    eprintln!("crater floor: compared {compared}, mismatched {mismatched}, clipped columns {}", renderer.stats().clipped_columns);
+    assert!(compared > 1000);
+    assert_eq!(mismatched, 0);
+}
+
+/// The whole planet is destructible: a ball around the planet's centre
+/// (resolved in volume space on every face) hollows out the core of a 3 km
+/// world. From inside the hollow, GPU hits on its inner wall match
+/// canonical CPU ray casts.
+#[test]
+fn a_hollowed_core_renders_exactly_from_inside() {
+    let Some(gpu) = gpu() else { return };
+    let recipe = PlanetRecipe { radius_m: 3_000.0, terrain: helio_pass_voxel_planet::layers::TerrainLayers::earth().heightfield().source(7), ..Default::default() };
+    let mut planet = Planet::new(recipe).unwrap();
+    planet.apply(Brush { center: [0.0; 3], radius: 1_500.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+    let up = DVec3::new(0.3, 0.9, 0.2).normalize();
+    let eye = up * (1_500.0 - 1.7);
+    assert!(!planet.solid(planet.grid().locate(eye).0), "the eye is in the hollow");
+    assert!(planet.solid(planet.grid().locate(up * 1_500.5).0), "the hollow has a wall");
+    assert!(!planet.solid(planet.grid().locate(up * 10.0).0), "the core is gone");
+    let planet = Arc::new(planet);
+    let side = up.any_orthonormal_vector();
+    let forward = (side + up * 0.5).normalize().as_vec3();
+    let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [256, 144]);
+    eprintln!("hollow core: compared {compared}, mismatched {mismatched}");
+    assert!(compared > 1000);
+    assert_eq!(mismatched, 0);
 }
 
 /// Destruction and construction at scale: a building of single 0.1 m

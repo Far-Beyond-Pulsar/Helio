@@ -192,6 +192,24 @@ const Q30: u32 = 1073741824u;
 
 // `(a * b) >> s` of the exact 64-bit product, from 16-bit limbs
 // (`noise::mul_shr`). The caller keeps the result within 32 bits.
+// Exact 64-bit product of a and b as (low, high) words.
+fn mul_wide(a: u32, b: u32) -> vec2<u32> {
+    let a1 = a >> 16u;
+    let a0 = a & 0xffffu;
+    let b1 = b >> 16u;
+    let b0 = b & 0xffffu;
+    let mid = a1 * b0 + a0 * b1;
+    let mid_carry = select(0u, 0x10000u, mid < a1 * b0);
+    let lo0 = a0 * b0;
+    let lo = lo0 + (mid << 16u);
+    return vec2<u32>(lo, a1 * b1 + (mid >> 16u) + mid_carry + select(0u, 1u, lo < lo0));
+}
+
+fn add_wide(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> {
+    let lo = a.x + b.x;
+    return vec2<u32>(lo, a.y + b.y + select(0u, 1u, lo < a.x));
+}
+
 fn mul_shr(a: u32, b: u32, s: u32) -> u32 {
     let a1 = a >> 16u;
     let a0 = a & 0xffffu;

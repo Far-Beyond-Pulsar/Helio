@@ -214,7 +214,7 @@ impl Planet {
         let top = self.column_top(face, i, j, level);
         let kind = terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, top);
         let center = [center_half(i, level), center_half(j, level), center_half(k, level)];
-        apply(self.face_brushes(face, i, j, level).into_iter(), center, kind, 0)
+        apply(self.face_brushes(face, i, j, level).into_iter(), center, || self.grid.volume_point(face, i, j, k, level), kind, 0)
     }
     /// Canonical kind at a base cell.
     pub fn kind(&self, cell: Cell) -> u32 {

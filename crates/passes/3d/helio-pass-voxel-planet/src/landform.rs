@@ -14,7 +14,7 @@
 use crate::grid::Grid;
 use crate::layers::{Caves, Overhangs};
 use crate::noise::{fade, hash3, lerp, mul16, mul_fine, mul_shr, mul_shr_signed, noise, noise_fine, noise_fine_grad, scale, sin_turns, unit_q30, FINE_ONE, ONE, Q30};
-use crate::terrain::{MaterialAppearance, TerrainAppearance, TerrainField, TerrainProgram, HEIGHT_ONE, MATERIALS};
+use crate::terrain::{heightfield_density, MaterialAppearance, TerrainAppearance, TerrainField, TerrainProgram, DENSITY_ONE, HEIGHT_ONE, MATERIALS};
 use bytemuck::{Pod, Zeroable};
 use glam::IVec3;
 use std::borrow::Cow;
@@ -67,9 +67,9 @@ impl LandformVolume {
         // Threshold above which `share` of the noise lies.
         let threshold = |share: f64| (noise_quantile(1.0 - share.clamp(0.0, 1.0)) * f64::from(ONE)).round() as i32;
         let layer = grid.layer_mm() as i32;
-        // The level-0 band must hold the caves, the overhangs and the
-        // column's own relief within 256 bricks (2048 cells).
-        let depth = mm(caves.depth_m).min(1_700 * layer);
+        // Caves may reach any depth: bands taller than a column holds are
+        // clipped to a window around the eye (generate.wgsl).
+        let depth = mm(caves.depth_m);
         let mut flags = 0;
         if caves.enabled && depth > 0 && caves.tunnel_radius_m.max(caves.cavern_wavelength_m) > 0.0 {
             flags |= 1;
@@ -139,37 +139,64 @@ impl LandformVolume {
         (below, above)
     }
 
-    /// Kind of layer `k` of the column at `p` (heightfield top `top`), with
-    /// 3D domain point `q`.
-    pub fn cell(&self, p: IVec3, q: IVec3, level: u32, top: i32, k: i32, seed: u32) -> u32 {
-        let layer = self.sizes[3];
-        let mut solid = k < top;
+    /// Density of layer `k` of the column at `p` (heightfield top `top`),
+    /// with 3D domain point `q` ([`TerrainField::density`]), as constructive
+    /// solid geometry on distances (intersection: minimum, union: maximum):
+    /// the surface, folded by overhangs, minus the caves, which carve where
+    /// the column is in a cave region, the cell between the heightfield top
+    /// and the cave depth, and in a tunnel or (under the cover) a cavern.
+    /// Noise distances are the noise's excess over its threshold divided by
+    /// its slope (about 2 per wavelength). The sign is exactly the solid
+    /// test's.
+    pub fn density(&self, p: IVec3, q: IVec3, level: u32, top: i32, k: i32, seed: u32) -> i32 {
         let a = self.overhang_amplitude(p, level, seed);
+        let (tunnels, caverns) = self.caves_at(level);
+        if a == 0 && !tunnels && !caverns {
+            return heightfield_density(top, k);
+        }
+        let layer = self.sizes[3];
+        let cell = layer.wrapping_shl(level);
+        // Height of the cell centre over the heightfield top (mm).
+        let d = k.wrapping_sub(top).wrapping_mul(cell).wrapping_add(cell / 2);
+        let mut solid = k < top;
+        let mut f = d.wrapping_neg();
         if a > 0 {
-            // Height of the cell centre over the heightfield top against a
-            // 3D displacement: the surface folds into overhangs and arches.
-            let cell = layer.wrapping_shl(level);
-            let d = k.wrapping_sub(top).wrapping_mul(cell).wrapping_add(cell / 2);
+            // Against a 3D displacement: the surface folds into overhangs
+            // and arches.
             let s = scale(noise(q, self.overhangs[1] as u32, self.seed(seed, SEED_OVERHANG)), a);
             solid = d < s;
+            f = s.wrapping_sub(d);
         }
-        let (tunnels, caverns) = self.caves_at(level);
-        if solid && k < top && (tunnels || caverns) && self.cave_region(p, seed) {
-            let cell = layer.wrapping_shl(level);
+        if tunnels || caverns {
+            // mm per noise unit at lattice shift s: 2^s * 12.5 mm / 2^17.
+            let mm = |excess: i32, shift: i32| mul_shr_signed(excess, 25 << shift, 18);
+            let region = noise(p, self.caves[1] as u32, self.seed(seed, SEED_CAVE_REGION));
             let depth = top.wrapping_sub(k).wrapping_mul(cell).wrapping_sub(cell / 2);
-            if depth <= self.caves[3] {
+            // Solid outside the region, above the heightfield top, below the
+            // cave depth...
+            let outside = mm(self.caves[2] - region, self.caves[1]).max(d).max(depth - self.caves[3]);
+            // ...or outside both the tunnels and the caverns.
+            let mut walls = i32::MAX;
+            let mut carved = false;
+            if tunnels {
                 let w = self.shapes[1];
-                if tunnels
-                    && noise(q, self.shapes[0] as u32, self.seed(seed, SEED_TUNNEL_A)).abs() < w
-                    && noise(q, self.shapes[0] as u32, self.seed(seed, SEED_TUNNEL_B)).abs() < w
-                {
-                    solid = false;
-                } else if caverns && depth >= self.sizes[2] && noise(q, self.shapes[2] as u32, self.seed(seed, SEED_CAVERN)) > self.shapes[3] {
-                    solid = false;
-                }
+                let na = noise(q, self.shapes[0] as u32, self.seed(seed, SEED_TUNNEL_A)).abs();
+                let nb = noise(q, self.shapes[0] as u32, self.seed(seed, SEED_TUNNEL_B)).abs();
+                walls = walls.min(mm(na.max(nb) - w, self.shapes[0]));
+                carved |= na < w && nb < w;
+            }
+            if caverns {
+                let n = noise(q, self.shapes[2] as u32, self.seed(seed, SEED_CAVERN));
+                walls = walls.min(mm(self.shapes[3] - n, self.shapes[2]).max(self.sizes[2] - depth));
+                carved |= depth >= self.sizes[2] && n > self.shapes[3];
+            }
+            f = f.min(outside.max(walls));
+            if solid && k < top && region > self.caves[2] && depth <= self.caves[3] && carved {
+                solid = false;
             }
         }
-        u32::from(solid)
+        let f = f.clamp(-(1 << 22), 1 << 22) * DENSITY_ONE / cell.max(1);
+        if solid { f.max(1) } else { f.min(0) }
     }
 
     /// Extra level cells a finer column's top may rise over a coarse one.
@@ -261,6 +288,28 @@ impl StackLayer {
 pub const STYLE_EARTHLIKE: i32 = 0;
 pub const STYLE_LUNAR: i32 = 1;
 pub const STYLE_LAYERED: i32 = 2;
+/// An ordered list of material rules (`LandformConstants::rules`).
+pub const STYLE_RULES: i32 = 3;
+/// Material rules a stack may have.
+pub const RULES: usize = 16;
+
+/// One packed material rule (`MaterialRule` in WGSL, from
+/// [`crate::layers::MaterialRule`]): every condition must hold.
+/// Ranges are inclusive.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+pub struct PackedRule {
+    /// material id, speck share (Q8, 0: every cell), patch lattice shift (0:
+    /// no patches), patch threshold (Q16).
+    pub head: [i32; 4],
+    /// column height range (mm), slope range (eighths of a cell per cell).
+    pub height_slope: [i32; 4],
+    /// depth range (cells below the column top), moisture range (Q16).
+    pub depth_moisture: [i32; 4],
+    /// erosion range (the signed surface byte), strata band period (mm, 0:
+    /// none) and parity.
+    pub surface_bands: [i32; 4],
+}
 
 /// `TerrainConstants` of `landform.wgsl` (uniform layout).
 #[repr(C)]
@@ -280,8 +329,11 @@ pub struct LandformConstants {
     /// layer count, sum of the erosion amplitudes (height units), domain
     /// radius (0 on planes), warp octaves (0 or 6).
     pub stack: [i32; 4],
+    /// Rules style: rule count, fallback material, pad.
+    pub materials: [i32; 4],
     pub layers: [StackLayer; LAYERS],
     pub octaves: [Octave; OCTAVES],
+    pub rules: [PackedRule; RULES],
 }
 
 /// Crater radius of the largest crater of a cell (Q19 of the lattice cell,
@@ -857,7 +909,7 @@ pub fn height_parts(k: &LandformConstants, p: IVec3, level: u32) -> (i32, u32) {
         h = h.wrapping_add(masked(layer.mask, x, land, wet));
     }
     let surface = match k.style[0] {
-        STYLE_EARTHLIKE => ((eroded * 127 / k.stack[1].max(1)).clamp(-127, 127) as u32) & 0xff,
+        STYLE_EARTHLIKE | STYLE_RULES => ((eroded * 127 / k.stack[1].max(1)).clamp(-127, 127) as u32) & 0xff,
         STYLE_LUNAR => (ejecta >> 1) | (u32::from(basin >= FINE_ONE / 2) << 7),
         _ => 0,
     };
@@ -989,9 +1041,48 @@ fn earthlike_material(
 pub fn ground_material(c: &LandformConstants, p: IVec3, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
     match c.style[0] {
         STYLE_LUNAR => lunar_material(c, p, surface, depth, slope, layer),
+        STYLE_RULES => rules_material(c, p, surface, top_height, depth, slope, layer),
         STYLE_LAYERED => (if depth == 0 { c.style[1] } else if depth <= c.header[2] { c.style[2] } else { c.style[3] }) as u32,
         _ => earthlike_material(c, p, surface, top_height, depth, slope, layer),
     }
+}
+
+/// The first rule whose conditions hold, else the fallback material.
+/// Patches are noise above a threshold (their coverage); strata bands
+/// follow the undulating altitude (`strata`); specks are single cells
+/// flagged [`crate::terrain::material::SPECK`] on the surface.
+fn rules_material(c: &LandformConstants, p: IVec3, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
+    let wet = moisture(c, p) >> 8;
+    let erosion = i32::from(surface as u8 as i8);
+    let altitude = layer.wrapping_mul(c.header[1]);
+    let seed = c.header[3] as u32;
+    let count = (c.materials[0].max(0) as usize).min(RULES);
+    for (index, r) in c.rules[..count].iter().enumerate() {
+        let within = |v: i32, lo: i32, hi: i32| v >= lo && v <= hi;
+        if !within(top_height, r.height_slope[0], r.height_slope[1])
+            || !within(slope, r.height_slope[2], r.height_slope[3])
+            || !within(depth, r.depth_moisture[0], r.depth_moisture[1])
+            || !within(wet, r.depth_moisture[2], r.depth_moisture[3])
+            || !within(erosion, r.surface_bands[0], r.surface_bands[1])
+        {
+            continue;
+        }
+        let salt = (index as u32).wrapping_mul(0x9E37_79B9);
+        if r.surface_bands[2] > 0 && strata(c, p, altitude).div_euclid(r.surface_bands[2]) & 1 != r.surface_bands[3] {
+            continue;
+        }
+        if r.head[2] > 0 && noise(p, r.head[2] as u32, seed ^ 0x68E3_1DA4 ^ salt) <= r.head[3] {
+            continue;
+        }
+        if r.head[1] > 0 {
+            if (hash3(p.x, p.y, p.z ^ layer.wrapping_mul(0x9e37), 0x5f35_6495 ^ salt) & 255) as i32 >= r.head[1] {
+                continue;
+            }
+            return r.head[0] as u32 | if depth == 0 { crate::terrain::material::SPECK } else { 0 };
+        }
+        return r.head[0] as u32;
+    }
+    c.materials[1] as u32
 }
 
 /// Lunar materials: ids into [`lunar_appearance`].
@@ -1111,8 +1202,8 @@ impl TerrainField for LandformField {
     fn extent(&self, p: IVec3, level: u32) -> (i32, i32) {
         self.volume.extent(p, level, self.seed())
     }
-    fn cell(&self, p: IVec3, q: IVec3, level: u32, top: i32, k: i32) -> u32 {
-        self.volume.cell(p, q, level, top, k, self.seed())
+    fn density(&self, p: IVec3, q: IVec3, level: u32, top: i32, k: i32) -> i32 {
+        self.volume.density(p, q, level, top, k, self.seed())
     }
     fn volume_bounds(&self) -> (i32, i32) {
         let flags = self.volume.caves[0];
@@ -1199,6 +1290,48 @@ mod tests {
         }
         eprintln!("{volumetric}/1500 volumetric columns, {cave} cave and {overhang} overhang samples");
         assert!(volumetric > 100 && cave > 0 && overhang > 0);
+    }
+
+    /// Densities are signed distances: positive exactly in solid cells,
+    /// one cell apart down a heightfield column, and small on both sides of
+    /// every surface crossing (caves, overhangs), so a smooth surface can be
+    /// interpolated between cell centres.
+    #[test]
+    fn densities_are_signed_distances_to_the_surface() {
+        use crate::terrain::{heightfield_density, DENSITY_ONE};
+        let grid = Grid::new(6_371_000.0, 0.1).unwrap();
+        let field = TerrainLayers::earth().field(&grid, 7).unwrap();
+        assert_eq!(heightfield_density(10, 9) - heightfield_density(10, 10), DENSITY_ONE);
+        assert!(heightfield_density(10, 9) > 0 && heightfield_density(10, 10) < 0);
+        let mut rng = 0x5851_F42D_4C95_7F2Du64;
+        let mut next = || {
+            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; rng
+        };
+        let (mut crossings, mut worst) = (0, 0);
+        for _ in 0..3000 {
+            let face = (next() % 6) as u8;
+            let (i, j) = ((next() % grid.cells() as u64) as i32, (next() % grid.cells() as u64) as i32);
+            let p = grid.domain_point(face, i, j, 0);
+            let (below, above) = field.extent(p, 0);
+            if below + above == 0 {
+                continue;
+            }
+            let top = top_cells(&grid, field.height(p, grid.level_offset()), 0);
+            let density = |k: i32| field.density(p, grid.volume_point(face, i, j, k, 0), 0, top, k);
+            let mut previous = density(top - below);
+            for k in top - below + 1..top + above {
+                let d = density(k);
+                assert_eq!(u32::from(d > 0), generated_kind(&grid, &field, face, i, j, k, 0, top));
+                if (d > 0) != (previous > 0) {
+                    crossings += 1;
+                    worst = worst.max(d.abs() + previous.abs());
+                }
+                previous = d;
+            }
+        }
+        eprintln!("{crossings} surface crossings, largest |d| sum across one {worst} ({} cells)", f64::from(worst) / f64::from(DENSITY_ONE));
+        assert!(crossings > 100);
+        assert!(worst <= 6 * DENSITY_ONE, "{worst}");
     }
 
     #[test]

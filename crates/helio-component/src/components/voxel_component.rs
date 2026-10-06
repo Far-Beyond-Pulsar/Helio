@@ -519,7 +519,108 @@ pub enum VoxelMaterialStyle {
     Lunar,
     /// The surface material over Soil depth of soil over rock.
     Layered,
+    /// The first material rule that holds, else the rock material: a
+    /// game's own biomes.
+    Rules,
 }
+
+/// One material rule: the material of a ground cell where every condition
+/// holds (ranges are inclusive). Rules are tried in order.
+#[engine_class(no_register, clone, debug, serialize, deserialize)]
+#[serde(default)]
+pub struct VoxelMaterialRule {
+    #[property]
+    pub material: VoxelTerrainMaterial,
+    /// Column height above the datum.
+    #[property(min = -100000.0, max = 100000.0, step = 10.0, label = "Min height (m)")]
+    pub min_height_m: f64,
+    #[property(min = -100000.0, max = 1000000.0, step = 10.0, label = "Max height (m)")]
+    pub max_height_m: f64,
+    /// Ground slope, rise over run (1 is 45 degrees).
+    #[property(min = 0.0, max = 1000.0, step = 0.05)]
+    pub min_slope: f64,
+    #[property(min = 0.0, max = 1000.0, step = 0.05)]
+    pub max_slope: f64,
+    /// Depth below the column top; 0 is the exposed surface.
+    #[property(min = 0.0, max = 1000000.0, step = 0.1, label = "Min depth (m)")]
+    pub min_depth_m: f64,
+    #[property(min = 0.0, max = 1000000.0, step = 0.1, label = "Max depth (m)")]
+    pub max_depth_m: f64,
+    /// Moisture, 0 (dry) to 1 (wet).
+    #[property(min = 0.0, max = 1.0, step = 0.01)]
+    pub min_moisture: f64,
+    #[property(min = 0.0, max = 1.0, step = 0.01)]
+    pub max_moisture: f64,
+    /// Erosion, -1 (gully floors) to 1 (the ribs between gullies).
+    #[property(min = -1.0, max = 1.0, step = 0.05)]
+    pub min_erosion: f64,
+    #[property(min = -1.0, max = 1.0, step = 0.05)]
+    pub max_erosion: f64,
+    /// Patches of this size (0: none) covering Patch share.
+    #[property(min = 0.0, max = 10000.0, step = 0.01, label = "Patch size (km)")]
+    pub patch_km: f64,
+    #[property(min = 0.0, max = 1.0, step = 0.01)]
+    pub patch_share: f64,
+    /// Strata bands of this thickness (0: none), odd or even ones.
+    #[property(min = 0.0, max = 10000.0, step = 0.1, label = "Band (m)")]
+    pub band_m: f64,
+    #[property]
+    pub odd_bands: bool,
+    /// Share of the cells as single-cell specks (1: all cells).
+    #[property(min = 0.0, max = 1.0, step = 0.01)]
+    pub speck_share: f64,
+}
+
+impl Default for VoxelMaterialRule {
+    fn default() -> Self {
+        Self {
+            material: VoxelTerrainMaterial::Stone,
+            min_height_m: -1.0e6,
+            max_height_m: 1.0e6,
+            min_slope: 0.0,
+            max_slope: 1.0e3,
+            min_depth_m: 0.0,
+            max_depth_m: 1.0e6,
+            min_moisture: 0.0,
+            max_moisture: 1.0,
+            min_erosion: -1.0,
+            max_erosion: 1.0,
+            patch_km: 0.0,
+            patch_share: 0.5,
+            band_m: 0.0,
+            odd_bands: false,
+            speck_share: 1.0,
+        }
+    }
+}
+
+impl PartialEq for VoxelMaterialRule {
+    fn eq(&self, other: &Self) -> bool {
+        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
+    }
+}
+
+impl VoxelMaterialRule {
+    /// `material` everywhere (narrow it with the fields).
+    pub fn new(material: VoxelTerrainMaterial) -> Self {
+        Self { material, ..Self::default() }
+    }
+}
+
+fn serialize_material_rule_json(value: &VoxelMaterialRule) -> pulsar_reflection::ReflectResult<serde_json::Value> {
+    serde_json::to_value(value).map_err(|e| pulsar_reflection::ReflectError::SerializationFailed(e.to_string()))
+}
+
+fn deserialize_material_rule_json(value: serde_json::Value) -> pulsar_reflection::ReflectResult<VoxelMaterialRule> {
+    serde_json::from_value(value).map_err(|e| pulsar_reflection::ReflectError::DeserializationFailed(e.to_string()))
+}
+
+#[pulsar_reflection::pulsar_type(
+    serialize_json_with = serialize_material_rule_json,
+    deserialize_json_with = deserialize_material_rule_json
+)]
+#[allow(dead_code)]
+type RegisteredVoxelMaterialRule = VoxelMaterialRule;
 
 /// One layer of a terrain stack. Fields mean what the layer's kind says;
 /// unused ones are ignored.
@@ -708,13 +809,17 @@ pub struct VoxelTerrainLayersComponent {
     /// Depth of the soil (Earthlike, Layered) or regolith (Lunar).
     #[property(min = 0.0, max = 1000.0, step = 0.1, category = "Materials", label = "Soil depth (m)")]
     pub soil_depth_m: f64,
-    /// Layered: the surface, soil and rock materials.
+    /// Layered: the surface, soil and rock materials (rock is also the
+    /// Rules style's fallback).
     #[property(category = "Materials")]
     pub surface: VoxelTerrainMaterial,
     #[property(category = "Materials")]
     pub soil: VoxelTerrainMaterial,
     #[property(category = "Materials")]
     pub rock: VoxelTerrainMaterial,
+    /// Rules style: tried in order, at most 16.
+    #[property(category = "Materials")]
+    pub rules: Vec<VoxelMaterialRule>,
 }
 
 impl Default for VoxelTerrainLayersComponent {
@@ -776,6 +881,33 @@ impl VoxelTerrainLayersComponent {
             surface: VoxelTerrainMaterial::Grass,
             soil: VoxelTerrainMaterial::Dirt,
             rock: VoxelTerrainMaterial::Stone,
+            rules: Vec::new(),
+        }
+    }
+
+    /// Dunes and mesas with materials from rules: sand on gentle ground,
+    /// sandstone and clay strata, gravel in gullies, stone patches and dark
+    /// stone specks.
+    pub fn desert() -> Self {
+        use VoxelTerrainMaterial as M;
+        let mut earth = Self::earth();
+        earth.layers.retain(|l| l.kind != VoxelLayerKind::Continents);
+        for l in &mut earth.layers {
+            l.mask = VoxelLayerMask::Everywhere;
+        }
+        earth.layers.insert(1, VoxelTerrainLayer { height_m: 400.0, ..VoxelTerrainLayer::new(VoxelLayerKind::Plateau) });
+        Self {
+            materials: VoxelMaterialStyle::Rules,
+            rules: vec![
+                VoxelMaterialRule { max_depth_m: 0.3, max_erosion: -0.4, min_slope: 0.2, ..VoxelMaterialRule::new(M::Gravel) },
+                VoxelMaterialRule { max_depth_m: 1.5, max_slope: 0.6, ..VoxelMaterialRule::new(M::Sand) },
+                VoxelMaterialRule { max_depth_m: 0.0, speck_share: 0.06, ..VoxelMaterialRule::new(M::DarkStone) },
+                VoxelMaterialRule { patch_km: 0.05, patch_share: 0.15, ..VoxelMaterialRule::new(M::Stone) },
+                VoxelMaterialRule { band_m: 2.5, odd_bands: true, ..VoxelMaterialRule::new(M::Clay) },
+            ],
+            rock: M::Sandstone,
+            snowline_m: 1.0e5,
+            ..earth
         }
     }
 

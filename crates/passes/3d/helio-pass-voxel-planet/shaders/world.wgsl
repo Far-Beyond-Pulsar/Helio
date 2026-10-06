@@ -133,8 +133,11 @@ fn volume_component(p: i32, ratio: i32) -> i32 {
 // the column's domain point scaled by (R + h) / R on a sphere, the height
 // as the vertical axis on a plane. Volumetric terrain samples 3D noise here.
 fn volume_point(face: u32, i: i32, j: i32, k: i32, level: u32) -> vec3<i32> {
-    let p = domain_point(face, i, j, level);
-    let h = (k << (level + 1u)) + (1 << level);
+    return volume_point_half(domain_point(face, i, j, level), (k << (level + 1u)) + (1 << level));
+}
+
+// Volume point at half-layer height `h` above the column with domain point `p`.
+fn volume_point_half(p: vec3<i32>, h: i32) -> vec3<i32> {
     if is_plane() {
         let v = i32(mul_shr(u32(abs(h)), world.scale.w, 16u));
         return vec3<i32>(p.x, select(v, -v, h < 0), p.z);
@@ -152,6 +155,13 @@ fn field_height(face: u32, i: i32, j: i32, level: u32) -> i32 {
 
 fn top_cells(height: i32, level: u32) -> i32 {
     return div_floor(height, world.grid.y) >> level;
+}
+
+// Density of a heightfield cell (`terrain::heightfield_density`): its
+// distance to the column top, 256 per level cell, positive inside solid.
+fn heightfield_density(top: i32, k: i32) -> i32 {
+    let cells = clamp(top - k, -65536, 65536);
+    return cells * 256 - 128;
 }
 
 fn terrain_kind(top: i32, k: i32) -> u32 {

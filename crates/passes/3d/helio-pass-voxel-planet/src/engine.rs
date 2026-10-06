@@ -144,7 +144,12 @@ pub struct PlanetStats {
     pub jobs: usize,
     pub evictions: usize,
     pub failed_jobs: usize,
-    pub overflow_columns: usize,
+    /// Jobs retried because one frame's jobs outgrew the generation
+    /// scratch (tall clipped bands); the job budget then shrinks.
+    pub scratch_retries: usize,
+    /// Columns published with a band clipped to the window around the eye
+    /// (deep digs, deep caves), reported as they are generated.
+    pub clipped_columns: usize,
     pub free_pages: i32,
     /// Free brick pool units (unassigned pages and free runs of all classes).
     pub free_units: u64,
@@ -274,10 +279,10 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -
         // No surface word: columns store none (`World::sphere.w`).
         s.push_str("fn terrain_surface(p: vec3<i32>, level: u32, height: i32) -> u32 { return 0u; }\n");
     }
-    if !program.wgsl.contains("fn terrain_cell") {
-        // Heightfield programs: no volumetric terms (`TerrainField::extent`, `cell`).
+    if !program.wgsl.contains("fn terrain_density") {
+        // Heightfield programs: no volumetric terms (`TerrainField::extent`, `density`).
         s.push_str("fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
-        s.push_str("fn terrain_cell(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, k: i32) -> u32 { return select(0u, 1u, k < top); }\n");
+        s.push_str("fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, k: i32) -> i32 { return heightfield_density(top, k); }\n");
     }
     // Generation updates the summaries atomically; traversal reads plain values.
     // Traversal reads a summary block entry as one vector load.
@@ -600,7 +605,9 @@ struct Buffers {
     bytes: u64,
 }
 
-const JOB_OUT_BYTES: u64 = 96;
+const JOB_OUT_BYTES: u64 = 104;
+/// Bytes per face brush (`edits::FaceBrush`).
+const BRUSH_BYTES: u64 = std::mem::size_of::<crate::edits::FaceBrush>() as u64;
 /// Must match `SECTORS` and `BUCKETS` in horizon.wgsl.
 const HORIZON_SECTORS: u32 = 256;
 const HORIZON_BUCKETS: u32 = 32;
@@ -645,7 +652,7 @@ impl Buffers {
         );
         let live_blocks = make("planet live summary blocks", 65_536 * 4, st);
         let brush_capacity = 65_536;
-        let brushes = make("planet brushes", u64::from(brush_capacity) * 32, st | wgpu::BufferUsages::COPY_SRC);
+        let brushes = make("planet brushes", u64::from(brush_capacity) * BRUSH_BYTES, st | wgpu::BufferUsages::COPY_SRC);
         let table_init = vec![NONE; 1 << cap.table_bits];
         bytes += (table_init.len() * 4) as u64;
         let table = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -783,7 +790,7 @@ pub struct PlanetRenderer {
     /// (its work taken).
     plan: PlanResult,
     /// Job outcomes read back, for the next plan request.
-    failed: Vec<(u64, u32)>,
+    failed: Vec<(u64, u32, i32)>,
     /// Readback reserved for the in-flight plan's jobs.
     plan_readback: Option<usize>,
     /// Planet, eye and level-0 distance of the last plan request.
@@ -818,6 +825,8 @@ pub struct PlanetRenderer {
     lod_pressure: f64,
     /// Failed jobs counted at the last pressure step.
     pressure_failed_jobs: usize,
+    /// Job budget scale under scratch pressure (1 without).
+    scratch_scale: f64,
     last_pressure_update: u64,
     /// The pool ran short (from readbacks); last frame that recycled pages.
     pool_pressure: bool,
@@ -913,6 +922,7 @@ impl PlanetRenderer {
             last_recycle: 0,
             lod_pressure: 1.0,
             pressure_failed_jobs: 0,
+            scratch_scale: 1.0,
             last_pressure_update: 0,
             last_jobs: 0,
             last_eye: None,
@@ -1158,7 +1168,7 @@ impl PlanetRenderer {
             if *index >= self.buffers.brush_capacity {
                 self.grow_brushes(*index + 1);
             }
-            self.queue.write_buffer(&self.buffers.brushes, u64::from(*index) * 32, bytemuck::bytes_of(brush));
+            self.queue.write_buffer(&self.buffers.brushes, u64::from(*index) * BRUSH_BYTES, bytemuck::bytes_of(brush));
         }
         for (base, words) in &work.edit_writes {
             self.queue.write_buffer(&self.buffers.edit_refs, u64::from(*base) * 4, bytemuck::cast_slice(words));
@@ -1196,14 +1206,14 @@ impl PlanetRenderer {
         let capacity = needed.next_power_of_two().max(self.buffers.brush_capacity * 2);
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("planet brushes"),
-            size: u64::from(capacity) * 32,
+            size: u64::from(capacity) * BRUSH_BYTES,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(&self.buffers.brushes, 0, &buffer, 0, u64::from(self.buffers.brush_capacity) * 32);
+        encoder.copy_buffer_to_buffer(&self.buffers.brushes, 0, &buffer, 0, u64::from(self.buffers.brush_capacity) * BRUSH_BYTES);
         self.queue.submit([encoder.finish()]);
-        self.buffers.bytes += u64::from(capacity - self.buffers.brush_capacity) * 32;
+        self.buffers.bytes += u64::from(capacity - self.buffers.brush_capacity) * BRUSH_BYTES;
         self.buffers.brushes = buffer;
         self.buffers.brush_capacity = capacity;
         self.gen_group = Self::gen_group(&self.device, &self.pipelines, &self.buffers);
@@ -1222,12 +1232,12 @@ impl PlanetRenderer {
                     for e in 0..entries {
                         let at = PROBE_BYTES as usize / 4 + e * 4;
                         let key = u64::from(word(at) as u32) | (u64::from(word(at + 1) as u32) << 32);
-                        failed.push((key, word(at + 2) as u32));
+                        failed.push((key, word(at + 2) as u32, word(at + 3)));
                     }
                     self.stats.free_pages = word(30);
                     // Pool pressure: generation failed for want of space, or
                     // few pages are left to give to a size class.
-                    if failed.iter().any(|(_, status)| *status == 3) || (word(30).max(0) as u32) < pages / 16 {
+                    if failed.iter().any(|(_, status, _)| *status == 3) || (word(30).max(0) as u32) < pages / 16 {
                         self.pool_pressure = true;
                     }
                     // Free runs of every size class plus unassigned pages.
@@ -1239,8 +1249,17 @@ impl PlanetRenderer {
                 r.state.store(false, Ordering::Release);
             }
         }
-        self.stats.failed_jobs += failed.iter().filter(|(_, s)| *s != 1).count();
-        self.stats.overflow_columns += failed.iter().filter(|(_, s)| *s == 1).count();
+        // Scratch overflow: halve the job budget; recover while it does not
+        // recur (bands of 256 bricks take 256 scratch units per job).
+        let scratch = failed.iter().filter(|(_, s, _)| *s == 2).count();
+        if scratch > 0 {
+            self.scratch_scale = (self.scratch_scale * 0.5).max(1.0 / 64.0);
+        } else if self.scratch_scale < 1.0 {
+            self.scratch_scale = (self.scratch_scale * 1.1).min(1.0);
+        }
+        self.stats.scratch_retries += scratch;
+        self.stats.failed_jobs += failed.iter().filter(|(_, s, _)| *s != crate::residency::STATUS_CLIPPED && *s != 2).count();
+        self.stats.clipped_columns += failed.iter().filter(|(_, s, _)| *s == crate::residency::STATUS_CLIPPED).count();
         self.failed.extend(failed);
         // Start mapping readbacks encoded in earlier frames.
         for r in &mut self.readbacks {
@@ -1371,9 +1390,13 @@ impl PlanetRenderer {
             // without a free readback to reserve, the plan issues no jobs.
             let target_ms = if moving { 1.5 } else { 6.0 };
             let free = self.readbacks.iter().position(|r| r.stage == 0);
+            // The floor keeps the measured per-job cost (which includes fixed
+            // per-frame work) from shrinking the budget into a spiral; only
+            // scratch pressure lowers it.
+            let floor = ((256.0 * self.scratch_scale) as usize).max(16);
             let budget = free.map_or(0, |_| {
-                ((target_ms / self.ms_per_job.max(1e-5)) as usize)
-                    .clamp(256, self.settings.job_budget.min(self.settings.capacity.max_jobs as usize))
+                ((target_ms / self.ms_per_job.max(1e-5) * self.scratch_scale) as usize)
+                    .clamp(floor, self.settings.job_budget.min(self.settings.capacity.max_jobs as usize))
             });
             if let Some(index) = free {
                 self.readbacks[index].stage = 3;
@@ -2026,10 +2049,10 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
     let extent = terrain_extent(p, level);
     let k = top - extent.x - 1 + rem_floor(e.w, max(extent.x + extent.y + 2, 1));
     let q = volume_point(u32(a.x), a.y, a.z, k, level);
-    let cell = terrain_cell(p, q, level, top, k);
+    let density = terrain_density(p, q, level, top, k);
     let surface = terrain_surface(p, level + u32(world.grid.w), height) & 0xffu;
     verify_out[id.x] = vec4<i32>(height, i32(ground_material(p, surface, e.x, e.y, e.z, e.w)),
-        i32(cell) | (extent.x << 1u) | (extent.y << 16u), (q.x ^ q.y ^ q.z) + i32(surface) * 7919);
+        density, (q.x ^ q.y ^ q.z) + i32(surface) * 7919 + extent.x * 65599 + extent.y * 257);
 }
 ";
     let module = helio_core::shader::module(
@@ -2097,13 +2120,13 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
         let (below, above) = field.extent(p, level);
         let k = top - below - 1 + e.w.rem_euclid((below + above + 2).max(1));
         let q = grid.volume_point(a.x as u8, a.y, a.z, k, level);
-        let cell = field.cell(p, q, level, top, k) as i32;
+        let density = field.density(p, q, level, top, k);
         let surface = field.surface(p, level + grid.level_offset(), height) & 0xff;
         let cpu = [
             height,
             field.ground_material(p, surface, e.x, e.y, e.z, e.w) as i32,
-            cell | (below << 1) | (above << 16),
-            (q.x ^ q.y ^ q.z).wrapping_add(surface as i32 * 7919),
+            density,
+            (q.x ^ q.y ^ q.z).wrapping_add(surface as i32 * 7919).wrapping_add(below.wrapping_mul(65599)).wrapping_add(above.wrapping_mul(257)),
         ];
         if *g != cpu {
             return Err(format!("column {a} with inputs {e}: GPU {g:?}, CPU {cpu:?}"));

@@ -38,16 +38,14 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
   at the editor's altitude-proportional speed while residency keeps up.
 - Volumetric worlds: generated caves and overhangs, not only heightfields.
   Heightmaps are one input among others. A terrain program adds 3D terms
-  around its surface (`terrain_extent`, `terrain_cell`); the built-in
+  around its surface (`terrain_extent`, `terrain_density`); the built-in
   generator carves tunnels and caverns and folds the surface into overhangs,
-  and erosion octaves carve branching gullies down its slopes. Still limited:
-  each column stores one band of at most 256 bricks with solid ground below
-  it, so caves reach ~170 m below the surface at 0.1 m voxels; deeper caves
-  and core-deep holes need per-level vertical windows.
-- Destruction at any scale, up to the entire planet. Today tens of
-  thousands of edits stay exact and cheap, but a brush is limited to 37,000
-  half cells of radius (1.85 km at 0.1 m), and every regenerated column
-  replays its whole brush list.
+  and erosion octaves carve branching gullies down its slopes. Caves may
+  reach any depth (see clipped bands below).
+- Destruction at any scale, up to the entire planet: digs of any depth,
+  sphere brushes hundreds of kilometres wide, a hollowed core. Tens of
+  thousands of edits stay exact and cheap; every regenerated column replays
+  its whole brush list.
 - Budgets (RTX 3060, 1080p Quality, i.e. 1440x810 internal): terrain GPU
   p95 <= 5 ms, no CPU frame stalls, terrain GPU memory <= 1 GiB.
 - Non-goals (for now): translucent water, meshes inside the voxel pass,
@@ -262,7 +260,7 @@ they are once its work is on the GPU. Steps:
    cell occupancy from their stored tops; Add/Remove columns and generated
    volumetric columns keep arbitrary mixed-brick occupancy. Cells within the
    program's `terrain_extent` of the heightfield top are evaluated in 3D
-   (`terrain_cell` at the seamless `volume_point`); the band covers the
+   (the sign of `terrain_density` at the seamless `volume_point`); the band covers the
    extent, and the column is marked `INFO_TOPOLOGY`, so the heightfield-only
    paths (relief fractions, column-top normals and slopes) stay off for it.
    Its header stores each cell's generated top (first air above the highest
@@ -411,8 +409,25 @@ they are once its work is on the GPU. Steps:
   surface material on risers, so distant terrain has no contour lines; cells
   several pixels wide keep crisp faces. The blend follows the pixel
   footprint, so level changes show no seam.
-- **Band overflow.** A column taller than `MAX_BAND` bricks is not published;
-  coarser levels cover it.
+- **Clipped bands.** A column stores one band of at most `MAX_BAND` (256)
+  bricks, with solid ground below and air above. A taller one (a deep dig,
+  deep caves, a crater wall) keeps the 256 bricks around the eye's layer at
+  its level and is flagged clipped below and/or above (`INFO_CLIP_*`): rays
+  beyond a clipped side continue at the next coarser level, whose window
+  reaches twice as far (never refining into it), and summary and level tops
+  keep the unclipped top. Generation reports clipped columns with their
+  window centre (`STATUS_CLIPPED`); residency regenerates them when the eye
+  moves a quarter window vertically (`follow_clipped`). Columns used to be
+  left unpublished instead, so deep holes showed only at coarse levels.
+- **Brushes.** Cubes are tested in each face's half-cell index space (a
+  one-block cube is exactly one cell, aligned with the ground); spheres are
+  balls in the seamless volume space (`Grid::volume_point`), round at any
+  size and depth, the planet's centre included (a ball around the core
+  resolves onto every face). Both use exact 64-bit squares, up to 2^29 half
+  cells of radius. A face brush carries its horizontal culling extent and
+  the half-cell heights it can touch (band bounds). Jobs whose bands outgrow
+  the generation scratch are retried with a smaller job budget
+  (`scratch_retries`).
 
 ## Measuring
 
@@ -509,8 +524,15 @@ pool unit per column, only for programs that define it), passed to
 style: the erosion term, so gully floors fill with gravel and rock shows on
 the ribs; Lunar: fresh ejecta and basins); shading never runs the generator
 per pixel. Volumetric generators also
-define `terrain_extent` and `terrain_cell` (and `TerrainField::extent`,
-`cell`, `volume_bounds`); keep the extent tight, since every cell in it is
+define `terrain_extent` and `terrain_density` (and `TerrainField::extent`,
+`density`, `volume_bounds`). A density is the signed distance from the cell
+centre to the surface (256 per level cell, positive inside solid; the cell is
+solid where it is positive): combine terms as constructive solid geometry on
+distances (intersection: minimum, union: maximum), and make every cut a
+term (the built-in caves' region edge, depth floor and cavern cover are),
+so the field is a distance on both sides of every surface. Smooth surfaces
+interpolate it between cell centres (`densities_are_signed_distances_to_the_surface`
+holds the built-in field within 1.6 cells across every crossing). Keep the extent tight, since every cell in it is
 evaluated per job and the band holds at most 256 bricks. Return an empty
 extent at levels that cannot show a feature (the stack resolves tunnels while
 their radius spans a cell, covered caverns while a cell fits in the cover):
@@ -533,6 +555,15 @@ materials, a mix of four, and the material whose flecks are averaged.
 The Earthlike style uses them for snow edges and stone bands; canonical ids
 never change.
 
+**Material rules.** A stack picks materials by style: Earthlike (meadows,
+dry lands, outcrops, strata, snow, with display filtering), Lunar, Layered,
+or Rules: an ordered list of up to 16 `MaterialRule`s, each a material and
+conditions that must all hold (column height, slope, depth below the top,
+moisture, the erosion surface word, noise patches with a size and share,
+strata bands, single-cell specks); the first that holds wins, else `rock`.
+Rules are uniform data (`PackedRule`), so a game's biomes change without
+recompiling shaders (`TerrainLayers::desert` is built from rules only).
+
 **Appearance.** `PlanetPass::set_appearance` updates the material table
 and detail without rebuilding terrain. RGB is sRGB; roughness is linear.
 When it returns `true`, reset temporal colour history to show the change in
@@ -540,9 +571,9 @@ an idle viewport.
 Unedited Earthlike rock has a world-space weathered surface coating;
 canonical material ids, underlying strata and explicit paint are unchanged.
 
-**A brush shape.** Extend `BrushShape`, its per-face resolution in
-`edits.rs`, the containment test in both `edits.rs` and `generate.wgsl`
-(`apply_edits`), and the band bounds from brushes in `generate.wgsl`.
+**A brush shape.** Extend `BrushShape`, its per-face resolution (culling
+extent, height bounds) in `edits.rs`, and the containment test in both
+`FaceBrush::contains` and `brush_contains` (`common.wgsl`).
 
 **GPU work per column.** Put it in `generate.wgsl`; keep CPU admission cheap
 and inside the budgeted loop in `Residency::plan`.

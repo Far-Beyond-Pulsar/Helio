@@ -314,14 +314,15 @@ fn layer_mut(stack: &mut VoxelTerrainLayersComponent, index: u32) -> Result<&mut
 // worlds by changing layers; the terrain rebuilds from the new settings.
 #[pulsar_scenedb::component_methods]
 impl VoxelTerrainLayersComponent {
-    /// Replace the stack with a preset: "earth", "moon" or "flat".
+    /// Replace the stack with a preset: "earth", "moon", "desert" or "flat".
     #[world_method(category = "Voxel")]
     fn use_preset(world: &mut World, entity: Entity, name: String) -> Result<(), String> {
         let preset = match name.to_ascii_lowercase().as_str() {
             "earth" => VoxelTerrainLayersComponent::earth(),
             "moon" => VoxelTerrainLayersComponent::moon(),
             "flat" => VoxelTerrainLayersComponent::flat(0.0),
-            _ => return Err(format!("unknown terrain preset {name:?} (earth, moon or flat)")),
+            "desert" => VoxelTerrainLayersComponent::desert(),
+            _ => return Err(format!("unknown terrain preset {name:?} (earth, moon, desert or flat)")),
         };
         *layers_mut(world, entity)? = preset;
         Ok(())
