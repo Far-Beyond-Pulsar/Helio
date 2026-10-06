@@ -9,13 +9,13 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
-use gpui::{prelude::*, px, AnyElement, App, Entity, SharedString, Subscription, Window};
+use gpui::{prelude::*, px, AnyElement, App, Entity, SharedString, Subscription, WeakEntity, Window};
 use pulsar_reflection::{BoundPropertyEditor, EngineClass, PropertyEditorArgs, PropertyEditorFactory, PropertyMetadata, PropertyWriteBack};
 use ui::button::{Button, ButtonVariants as _};
 use ui::dropdown::{Dropdown, DropdownEvent, DropdownState};
 use ui::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _};
 
-use super::{VoxelMaterialRule, VoxelTerrainLayer, VoxelTerrainStack};
+use super::{VoxelLayerKind, VoxelMaterialRule, VoxelTerrainLayer, VoxelTerrainStack};
 
 /// The editor registered for a property type, if any.
 fn editor_factory(type_id: std::any::TypeId) -> Option<PropertyEditorFactory> {
@@ -135,6 +135,7 @@ pub struct VoxelTerrainStackEditor {
     overhangs: FieldRows,
     layers: Vec<FieldRows>,
     rules: Vec<FieldRows>,
+    this: WeakEntity<Self>,
     _subs: Vec<Subscription>,
 }
 
@@ -153,10 +154,21 @@ impl VoxelTerrainStackEditor {
             }
             this.presets.update(cx, |state, cx| state.set_selected_index(None, window, cx));
         })];
-        let materials = Self::rows(&id, "materials", &current, &write_back, |s| Some(s.clone()), |s, v| *s = v, &value, window, cx);
-        let caves = Self::rows(&id, "caves", &current, &write_back, |s| Some(s.caves.clone()), |s, v| s.caves = v, &value.caves, window, cx);
-        let overhangs =
-            Self::rows(&id, "overhangs", &current, &write_back, |s| Some(s.overhangs.clone()), |s, v| s.overhangs = v, &value.overhangs, window, cx);
+        let this = cx.weak_entity();
+        let materials = Self::rows(&id, "materials", &this, &current, &write_back, |s| Some(s.clone()), |s, v| replace(s, v), &value, window, cx);
+        let caves = Self::rows(&id, "caves", &this, &current, &write_back, |s| Some(s.caves.clone()), |s, v| replace(&mut s.caves, v), &value.caves, window, cx);
+        let overhangs = Self::rows(
+            &id,
+            "overhangs",
+            &this,
+            &current,
+            &write_back,
+            |s| Some(s.overhangs.clone()),
+            |s, v| replace(&mut s.overhangs, v),
+            &value.overhangs,
+            window,
+            cx,
+        );
         let mut editor = Self {
             label: args.display_name.to_string(),
             id,
@@ -168,6 +180,7 @@ impl VoxelTerrainStackEditor {
             overhangs,
             layers: Vec::new(),
             rules: Vec::new(),
+            this,
             _subs: subs,
         };
         editor.sync_lists(window, cx);
@@ -175,31 +188,46 @@ impl VoxelTerrainStackEditor {
     }
 
     /// Field rows of the part of the stack `get` reads and `set` writes.
+    /// `set` returns true when it changed more than the edited field (a
+    /// layer's new kind brings that kind's defaults): every row then shows
+    /// the new values.
     #[allow(clippy::too_many_arguments)]
     fn rows<T: EngineClass + Clone>(
         id: &str,
         part: &str,
+        this: &WeakEntity<Self>,
         current: &Arc<Mutex<VoxelTerrainStack>>,
         write_back: &PropertyWriteBack,
         get: impl Fn(&VoxelTerrainStack) -> Option<T> + Send + Sync + 'static,
-        set: impl Fn(&mut VoxelTerrainStack, T) + Send + Sync + 'static,
+        set: impl Fn(&mut VoxelTerrainStack, T) -> bool + Send + Sync + 'static,
         value: &T,
         window: &mut Window,
         cx: &mut App,
     ) -> FieldRows {
         let (read, write) = (current.clone(), current.clone());
         let write_back = write_back.clone();
+        let this = this.clone();
         FieldRows::new(
             value,
             &format!("{id}-{part}"),
             move || read.lock().ok().and_then(|stack| get(&stack)),
             move |v, window, cx| {
-                let stack = {
+                let (stack, reshaped) = {
                     let Ok(mut stack) = write.lock() else { return };
-                    set(&mut stack, v);
-                    stack.clone()
+                    let reshaped = set(&mut stack, v);
+                    (stack.clone(), reshaped)
                 };
                 write_back(Box::new(stack), window, cx);
+                if reshaped {
+                    // After the editor that wrote returns: it is mid-event.
+                    let this = this.clone();
+                    window.defer(cx, move |window, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            this.refresh(window, cx);
+                            cx.notify();
+                        });
+                    });
+                }
             },
             window,
             cx,
@@ -216,14 +244,11 @@ impl VoxelTerrainStackEditor {
                     Self::rows(
                         &self.id,
                         &format!("layer{i}"),
+                        &self.this,
                         &self.current,
                         &self.write_back,
                         move |s| s.layers.get(i).cloned(),
-                        move |s, v| {
-                            if let Some(layer) = s.layers.get_mut(i) {
-                                *layer = v;
-                            }
-                        },
+                        move |s, v| s.layers.get_mut(i).is_some_and(|layer| set_layer(layer, v)),
                         &value.layers[i],
                         window,
                         cx,
@@ -237,14 +262,11 @@ impl VoxelTerrainStackEditor {
                     Self::rows(
                         &self.id,
                         &format!("rule{i}"),
+                        &self.this,
                         &self.current,
                         &self.write_back,
                         move |s| s.rules.get(i).cloned(),
-                        move |s, v| {
-                            if let Some(rule) = s.rules.get_mut(i) {
-                                *rule = v;
-                            }
-                        },
+                        move |s, v| s.rules.get_mut(i).is_some_and(|rule| replace(rule, v)),
                         &value.rules[i],
                         window,
                         cx,
@@ -274,7 +296,7 @@ impl VoxelTerrainStackEditor {
     fn edit_list(&mut self, list: List, edit: ListEdit, window: &mut Window, cx: &mut gpui::Context<Self>) {
         let mut stack = self.current.lock().map(|s| s.clone()).unwrap_or_default();
         match list {
-            List::Layers => apply_list_edit(&mut stack.layers, edit, VoxelTerrainLayer::default),
+            List::Layers => apply_list_edit(&mut stack.layers, edit, || VoxelTerrainLayer::new(VoxelLayerKind::Hills)),
             List::Rules => apply_list_edit(&mut stack.rules, edit, VoxelMaterialRule::default),
         }
         self.write(stack, window, cx);
@@ -361,6 +383,24 @@ pub fn validation_error(stack: &VoxelTerrainStack) -> Option<String> {
         Ok(layers) => layers.validate().err(),
         Err(error) => Some(error.to_string()),
     }
+}
+
+/// Store an edited value; nothing else changes.
+fn replace<T>(slot: &mut T, value: T) -> bool {
+    *slot = value;
+    false
+}
+
+/// Store an edited layer. A new kind starts from that kind's defaults (the
+/// old numbers mean something else, or nothing, for it), keeping whether
+/// the layer is on and where it applies; returns true then.
+pub fn set_layer(layer: &mut VoxelTerrainLayer, edited: VoxelTerrainLayer) -> bool {
+    if edited.kind == layer.kind {
+        *layer = edited;
+        return false;
+    }
+    *layer = VoxelTerrainLayer { enabled: edited.enabled, mask: edited.mask, ..VoxelTerrainLayer::new(edited.kind) };
+    true
 }
 
 /// A layer's or rule's title: its position and kind or material.

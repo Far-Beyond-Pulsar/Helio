@@ -24,6 +24,9 @@
 //! * `HELIO_VOXEL_FLIGHT_CPU_PROBE=1` per-pass CPU cost of a steady view.
 //! * `HELIO_VOXEL_FLIGHT_REVERSAL_AUDIT=1` audits two frames of the fast descent.
 //! * `HELIO_VOXEL_FLIGHT_DEBUG=<mode>` Helio debug view.
+//! * `HELIO_VOXEL_FLIGHT_HEIGHTFIELD=1` the Earth stack without caves and overhangs.
+//! * `HELIO_VOXEL_FLIGHT_SCULPT=1` sculpting stress (editor strokes, edits
+//!   piling up in one area): per-stroke frame, brush and generation cost.
 //!
 //! `gates.json` / `gates.md` evaluate the declared acceptance targets.
 use glam::{DVec3, Vec3};
@@ -209,8 +212,6 @@ impl Flight {
             }),
         );
         scene.world.flush_gpu_mirror(&queue);
-        // The mirror owns the uploaded rows for the lifetime of the flight.
-        std::mem::forget(scene);
         let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
         let pass_source = source.clone();
         let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| {
@@ -226,6 +227,22 @@ impl Flight {
             .with_pass_build_context(Box::new(move |ctx| build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])))
             .build(device.clone(), queue.clone(), size[0], size[1], config.surface_format);
         renderer.set_fallback_sky_enabled(true);
+        // HELIO_VOXEL_FLIGHT_LOOK="exposure,contrast,saturation": the camera
+        // post-process of an outdoor look (ACES tone map and a grade).
+        if let Ok(look) = std::env::var("HELIO_VOXEL_FLIGHT_LOOK") {
+            let v: Vec<f32> = look.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            let at = |i: usize, d: f32| v.get(i).copied().unwrap_or(d);
+            let mut post = helio_pass_postprocess::PostProcessSettings::default();
+            post.tonemap_operator = helio::TonemapOperator::Aces;
+            post.tonemap_exposure = at(0, 1.0);
+            post.color_contrast = [at(1, 1.0); 3];
+            post.color_saturation = [at(2, 1.0); 3];
+            let camera = scene.world.spawn();
+            scene.world.insert(camera, helio_pass_postprocess::CameraPostProcessComponent::new(0, &post));
+            scene.world.flush_gpu_mirror(&queue);
+        }
+        // The mirror owns the uploaded rows for the lifetime of the flight.
+        std::mem::forget(scene);
         if let Some(mode) = std::env::var("HELIO_VOXEL_FLIGHT_DEBUG").ok().and_then(|v| v.parse().ok()) {
             renderer.set_debug_mode(mode);
         }
@@ -772,7 +789,16 @@ fn main() {
         other => panic!("unknown quality {other}"),
     };
     let voxel: f64 = std::env::var("HELIO_VOXEL_FLIGHT_VOXEL").ok().map_or(0.1, |v| v.parse().unwrap());
-    let planet = Planet::new(PlanetRecipe { voxel_size_m: voxel, ..Default::default() }).unwrap();
+    // HELIO_VOXEL_FLIGHT_HEIGHTFIELD=1: the Earth stack without caves and
+    // overhangs (A/B for volumetric columns).
+    // HELIO_VOXEL_FLIGHT_SEED=<n>: the Earth stack with another seed (7).
+    let seed = std::env::var("HELIO_VOXEL_FLIGHT_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(7);
+    let terrain = if std::env::var_os("HELIO_VOXEL_FLIGHT_HEIGHTFIELD").is_some() {
+        helio_pass_voxel_planet::layers::TerrainLayers::earth().heightfield().source(seed)
+    } else {
+        helio_pass_voxel_planet::layers::TerrainLayers::earth().source(seed)
+    };
+    let planet = Planet::new(PlanetRecipe { voxel_size_m: voxel, terrain, ..Default::default() }).unwrap();
     let mut flight = Flight::new(&output, size, quality, planet);
     let validation = flight.device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut report = serde_json::Map::new();
@@ -938,6 +964,58 @@ fn main() {
         flight.write_csv();
         let error = pollster::block_on(validation.pop());
         assert!(error.is_none(), "GPU validation: {error:?}");
+        return;
+    }
+    // HELIO_VOXEL_FLIGHT_VIEWS="height:pitch,...": settle and capture views
+    // above the ground site (`view_<height>_<pitch>.png`).
+    if let Ok(views) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS") {
+        // HELIO_VOXEL_FLIGHT_VIEWS_CAVES=1: from the nearest cave region
+        // (columns whose generated volume reaches the surface).
+        let mut ground = if std::env::var_os("HELIO_VOXEL_FLIGHT_VIEWS_CAVES").is_some() { cave_region_ground(&flight.planet, ground) } else { ground };
+        // HELIO_VOXEL_FLIGHT_VIEWS_MOUNTAIN=<km>: on the flank of the nearest
+        // high summit, that far from it, looking at it.
+        let mut range = None;
+        // HELIO_VOXEL_FLIGHT_VIEWS_POLE=<bearing rad>: at the north pole (the
+        // Pulsar example's spawn), looking along that bearing (x towards z).
+        let mut pole_bearing = None;
+        if let Some(bearing) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS_POLE").ok().and_then(|v| v.parse::<f64>().ok()) {
+            ground = flight.planet.surface_point(DVec3::Y, 0.0);
+            pole_bearing = Some(bearing);
+        }
+        if let Some(km) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS_MOUNTAIN").ok().and_then(|v| v.parse::<f64>().ok()) {
+            let r = mountain(&flight.planet, heading);
+            let away = tangent(r.peak, heading + std::f64::consts::PI).as_dvec3();
+            ground = flight.planet.surface_point(r.peak + away * km * 1000.0, 0.0);
+            range = Some(r);
+        }
+        for view in views.split(',') {
+            let mut parts = view.split(':').map(|v| v.trim().parse::<f64>().unwrap());
+            let (height, pitch) = (parts.next().unwrap(), parts.next().unwrap_or(-20.0));
+            let eye = flight.planet.surface_point(ground, height);
+            let forward = match &range {
+                _ if pole_bearing.is_some() => {
+                    let (b, p) = (pole_bearing.unwrap(), pitch.to_radians());
+                    (DVec3::new(b.cos() * p.cos(), p.sin(), b.sin() * p.cos())).as_vec3().normalize()
+                }
+                Some(r) => {
+                    let p = (pitch as f32).to_radians();
+                    (level_toward(r, eye).as_vec3() * p.cos() + up_for(eye) * p.sin()).normalize()
+                }
+                None => look(eye, heading, pitch),
+            };
+            let name = format!("view_{height}_{}", -pitch);
+            flight.settle(&name, eye, forward);
+            for _ in 0..8 {
+                flight.draw(&name, eye, forward);
+            }
+            flight.capture(&name);
+        }
+        flight.write_csv();
+        return;
+    }
+    if std::env::var_os("HELIO_VOXEL_FLIGHT_SCULPT").is_some() {
+        sculpt_stress(&mut flight, ground, heading);
+        flight.write_csv();
         return;
     }
     if std::env::var_os("HELIO_VOXEL_FLIGHT_QUICK").is_some() {
@@ -1927,4 +2005,86 @@ fn lod_compare(flight: &mut Flight, km: f64) {
             );
         }
     }
+}
+
+/// Sculpting as the editor does it: stamps every 0.6 radius along a drag
+/// (`stroke_fill`), several per frame, in laps of a ring around the aim
+/// point, so edits pile up in one area as in a long session.
+/// The ground point of the column nearest `ground` (rings of 64 cells, up to
+/// 64 km) whose generated volume (caves, overhangs) reaches its surface.
+fn cave_region_ground(planet: &Planet, ground: DVec3) -> DVec3 {
+    let grid = *planet.grid();
+    let (base, _) = grid.locate(ground);
+    for ring in 0..1000i32 {
+        for step in 0..(8 * ring).max(1) {
+            let side = step / (2 * ring).max(1);
+            let along = step % (2 * ring).max(1) - ring;
+            let (di, dj) = match side { 0 => (along, -ring), 1 => (ring, along), 2 => (-along, ring), _ => (-ring, -along) };
+            let (i, j) = (base.i + di * 64, base.j + dj * 64);
+            if !(0..grid.cells()).contains(&i) || !(0..grid.cells()).contains(&j) {
+                continue;
+            }
+            if planet.field().extent(grid.domain_point(base.face, i, j, 0), 0).0 > 0 {
+                let cell = helio_pass_voxel_planet::Cell::new(base.face, i, j, planet.column_top(base.face, i, j, 0));
+                eprintln!("VIEWS cave region {} m away", grid.cell_center(cell).distance(ground).round());
+                return planet.surface_point(grid.cell_center(cell), 1.7);
+            }
+        }
+    }
+    ground
+}
+
+fn sculpt_stress(flight: &mut Flight, ground: DVec3, heading: f64) {
+    let up = ground.normalize();
+    let eye = ground + up * 8.0;
+    let forward = look(eye, heading, -40.0);
+    flight.settle("sculpt_prepare", eye, forward);
+    let target = flight.planet.raycast(eye, forward.as_dvec3(), 200.0).expect("aim at the ground").cell;
+    let target = flight.planet.grid().cell_center(target);
+    let side = tangent(target, heading).as_dvec3();
+    let ahead = up.cross(side);
+    let ring = 6.0;
+    let strokes = [
+        ("sculpt_dig_r1", 1.0, BrushShape::Sphere, BrushOp::Remove, 3usize, 240usize),
+        ("sculpt_dig_r4", 4.0, BrushShape::Sphere, BrushOp::Remove, 2, 120),
+        ("sculpt_build_r1", 1.0, BrushShape::Cube, BrushOp::Add, 3, 120),
+    ];
+    for (stage, radius, shape, op, per_frame, frames) in strokes {
+        let spacing = radius * 0.6;
+        let mut stamp = 0usize;
+        let (mut wall, mut apply) = (Vec::new(), Vec::new());
+        for _ in 0..frames {
+            let started = Instant::now();
+            let mut planet = (*flight.planet).clone();
+            for _ in 0..per_frame {
+                let angle = stamp as f64 * spacing / ring;
+                let point = target + (side * angle.cos() + ahead * angle.sin()) * ring;
+                let surface = flight.planet.surface_point(point, 0.0);
+                let center = if op == BrushOp::Add { surface + up * radius } else { surface - up * radius * 0.3 };
+                planet
+                    .apply(Brush { center: center.to_array(), radius, shape, op, material: if op == BrushOp::Add { material::BRICK } else { 0 } })
+                    .unwrap();
+                stamp += 1;
+            }
+            flight.planet = Arc::new(planet);
+            apply.push(started.elapsed().as_secs_f64() * 1000.0);
+            flight.draw(stage, eye, forward);
+            wall.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        let settle_started = Instant::now();
+        let (settle_frames, _) = flight.settle(&format!("{stage}_settle"), eye, forward);
+        let settle_ms = settle_started.elapsed().as_secs_f64() * 1000.0;
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+        let stats = flight.pass().stats().unwrap();
+        eprintln!(
+            "SCULPT {stage}: {} stamps (total edits {}), frame wall mean {:.2} p95 {:.2} ms, apply mean {:.3} ms, settle {settle_frames} frames {settle_ms:.0} ms, us/job {:.2}",
+            stamp,
+            flight.planet.edits().len(),
+            mean(&wall),
+            percentile(&wall, 0.95),
+            mean(&apply),
+            stats.us_per_job,
+        );
+    }
+    flight.capture("sculpt");
 }

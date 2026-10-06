@@ -100,6 +100,9 @@ const INFO_HEIGHTFIELD: u32 = 0x02000000u;
 // level instead of taking them as solid ground (air).
 const INFO_CLIP_BELOW: u32 = 0x200u;
 const INFO_CLIP_ABOVE: u32 = 0x400u;
+// The column's edit list holds Add or Paint brushes: shading looks up brush
+// materials only in such columns.
+const INFO_EDIT_MATERIALS: u32 = 0x800u;
 const UNIT_WORDS: u32 = 16u;
 const MAX_PROBES: u32 = 64u;
 
@@ -183,7 +186,7 @@ fn header_units(c: Column) -> u32 {
 
 fn surface_unit(c: Column) -> u32 {
     return select(1u, 2u, (c.info & INFO_EXT) != 0u)
-        + select(0u, 2u, (c.info & INFO_RELIEF) != 0u && (c.info & INFO_RELIEF_INLINE) == 0u);
+        + select(0u, 2u, info_relief_wide(c.info));
 }
 
 // Surface word of column cell (x, y) (`terrain_surface`); 0 without them.
@@ -222,7 +225,7 @@ fn brick_bit(unit: u32, x: u32, y: u32, z: u32) -> bool {
     return ((pool[unit * UNIT_WORDS + (bit >> 5u)] >> (bit & 31u)) & 1u) != 0u;
 }
 
-// With INFO_TOPOLOGY (never stored with relief): per-cell tops count down
+// With INFO_TOPOLOGY (generated volume, or edits, which never carry relief): per-cell tops count down
 // from the band top. Generated volumetric columns store their generated
 // top (first air above the highest generated solid cell, caves and
 // overhangs included) there; their bands are taller than a byte.
@@ -230,6 +233,17 @@ const INFO_TOPS_DOWN: u32 = 0x04000000u;
 
 fn column_tops_down(c: Column) -> bool {
     return (c.info & (INFO_TOPOLOGY | INFO_TOPS_DOWN)) == (INFO_TOPOLOGY | INFO_TOPS_DOWN);
+}
+
+// Relief fractions in two units after the header: every relief column but
+// an inline one. (A relief column with INFO_TOPOLOGY is generated volume
+// with tops counting down, whose INFO_TOPS_DOWN is the inline bit.)
+fn info_relief_wide(info: u32) -> bool {
+    return (info & INFO_RELIEF) != 0u && ((info & INFO_RELIEF_INLINE) == 0u || (info & INFO_TOPOLOGY) != 0u);
+}
+
+fn column_relief_inline(c: Column) -> bool {
+    return (c.info & INFO_RELIEF) != 0u && (c.info & INFO_RELIEF_INLINE) != 0u && (c.info & INFO_TOPOLOGY) == 0u;
 }
 
 // Column-local surface top (first air layer above ground, level cells).
@@ -250,9 +264,9 @@ fn column_top(c: Column, x: u32, y: u32) -> i32 {
 // Zero denotes a top exactly on the upper coarse-cell boundary. Other
 // fractions reconstruct the authored base-layer top inside the last voxel.
 fn column_relief_fraction(c: Column, x: u32, y: u32) -> u32 {
-    if (c.info & INFO_RELIEF) == 0u || !column_tops_fit(c) { return 0u; }
+    if (c.info & INFO_RELIEF) == 0u || !(column_tops_fit(c) || column_tops_down(c)) { return 0u; }
     let cell = x + y * 8u;
-    if (c.info & INFO_RELIEF_INLINE) != 0u {
+    if column_relief_inline(c) {
         let level = c.key0 >> 27u;
         let word = pool[c.run * UNIT_WORDS + (cell >> 2u)];
         let offset = (word >> ((cell & 3u) * 8u)) & 255u;
@@ -281,34 +295,37 @@ fn brush_contains(b: FaceBrush, c: vec3<i32>, q: vec3<i32>) -> bool {
     return sum.y < rr.y || (sum.y == rr.y && sum.x <= rr.x);
 }
 
-// Applies an ordered edit list to the level cell with half-cell centre `c`
-// in the column with domain point `p`; returns (kind, material).
-fn apply_edits(list: u32, level: u32, c: vec3<i32>, p: vec3<i32>, kind_in: u32) -> vec2<u32> {
-    var kind = kind_in;
-    var material = 0u;
-    if list == 0u { return vec2<u32>(kind, material); }
-    let count = edit_refs[list - 1u];
+// Flags of the latest brush of the ordered edit list whose op is in
+// `ops` (bit per op) containing the level cell with half-cell centre `c` in
+// the column with domain point `p`, or NONE. Scanned from the end, so a
+// fresh stroke is found first.
+fn latest_edit(list: u32, level: u32, c: vec3<i32>, p: vec3<i32>, ops: u32) -> u32 {
+    if list == 0u { return NONE; }
     var q = vec3<i32>(0);
     var q_ready = false;
-    for (var e = 0u; e < count; e++) {
-        let b = brushes[edit_refs[list + e]];
-        if b.radius_half < (1u << level) { continue; }
+    for (var e = edit_refs[list - 1u]; e > 0u; e--) {
+        let b = brushes[edit_refs[list + e - 1u]];
+        if b.radius_half < (1u << level) || ((ops >> ((b.flags >> 4u) & 3u)) & 1u) == 0u { continue; }
+        if c.z < b.k_lo || c.z > b.k_hi { continue; }
         // The cell's volume point, once, when a ball needs it.
         if !q_ready && ((b.flags >> 6u) & 3u) == 0u {
             q = volume_point_half(p, c.z);
             q_ready = true;
         }
-        if !brush_contains(b, c, q) { continue; }
-        let op = (b.flags >> 4u) & 3u;
-        if op == 0u {
-            kind = 0u;
-            material = 0u;
-        } else if op == 1u {
-            kind = 1u;
-            material = (b.flags >> 8u) & 255u;
-        } else if kind == 1u {
-            material = (b.flags >> 8u) & 255u;
-        }
+        if brush_contains(b, c, q) { return b.flags; }
     }
-    return vec2<u32>(kind, material);
+    return NONE;
+}
+
+const OPS_REMOVE: u32 = 1u;
+const OPS_MATERIAL: u32 = 6u;
+
+// Brush material of a solid cell (0: the terrain's). The latest Add or
+// Paint containing it decides: a later Remove containing it would have
+// left air, and a Paint over air is always followed by an Add that filled
+// it again.
+fn edit_material(list: u32, level: u32, c: vec3<i32>, p: vec3<i32>) -> u32 {
+    let flags = latest_edit(list, level, c, p, OPS_MATERIAL);
+    if flags == NONE { return 0u; }
+    return (flags >> 8u) & 255u;
 }

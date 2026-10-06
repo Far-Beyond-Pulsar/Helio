@@ -61,6 +61,15 @@ fn material_fleck(m: u32) -> u32 { return frame.materials[min(m, 15u)].links.y; 
 fn material_speck_host(m: u32) -> u32 { return frame.materials[min(m, 15u)].links.z; }
 fn material_fleck_share(m: u32) -> f32 { return f32(frame.materials[min(m, 15u)].links.w) / 65536.0; }
 
+// Whether a hit in layer `k` of column `c` (whose top there is `top`) lies on
+// the natural ground surface: any cell of a height-field column, and the top
+// cell (its surface and risers) of a generated cave or overhang column.
+// Cave walls, ceilings and edit cuts are not.
+fn natural_surface_hit(c: Column, k: i32, top: i32) -> bool {
+    if (c.info & INFO_TOPOLOGY) == 0u { return true; }
+    return column_tops_down(c) && c.edits == 0u && k >= top - 1;
+}
+
 fn natural_material_filter_allowed(edited: bool, c: Column) -> bool {
     return !edited && (c.info & INFO_TOPOLOGY) == 0u && column_tops_fit(c);
 }
@@ -87,7 +96,7 @@ fn material_albedo(m: u32, p: vec3<i32>, pixel: f32) -> vec3<f32> {
     if material.patches[0].w <= 0.0 { return material.colour.rgb; }
     let broad = f32(noise(p, 15u, 0x3c6ef372u)) / f32(NOISE_ONE);
     let patches = f32(noise(p, 11u, 0xa54ff53au)) / f32(NOISE_ONE) * clamp((12.8 - pixel) / 6.4, 0.0, 1.0);
-    let t = clamp(0.58 + frame.detail.x * (0.6 * broad + 0.14 * patches), 0.0, 1.0);
+    let t = clamp(0.52 + frame.detail.x * (0.7 * broad + 0.16 * patches), 0.0, 1.0);
     let dry = material.patches[0].rgb;
     let middle = material.patches[1].rgb;
     let lush = material.patches[2].rgb;
@@ -352,6 +361,15 @@ fn detail_filter_weight(projected_cell: f32) -> f32 {
     return 1.0 - smoothstep(0.75, 1.25, projected_cell);
 }
 
+// Lighting of base voxel steps: a step a few pixels wide is still a texture
+// of thin riser lines and step shadows, densest just before the coarser,
+// relief-smooth levels take over. Their macro normal fades in from four
+// pixels down, so the exact voxels near the eye blend into smooth ground
+// instead of a band of stripes.
+fn step_filter_weight(projected_cell: f32) -> f32 {
+    return 1.0 - smoothstep(1.0, 4.0, projected_cell);
+}
+
 // Independent hash detail aliases along a face's compressed projected axis.
 // Use its actual projected support, including near-tangent subpixel faces.
 // Area support keeps resolved long faces distinct from hash detail.
@@ -498,7 +516,8 @@ fn surface_material_layer(top: i32, fraction: u32, level: u32, hit_layer: i32,
 
 // A natural riser remains surface material even inside a topology column.
 // Subsoil on a side requires a resident base-solid neighbour removed by the
-// edit journal. No generator query is needed to certify this cut face.
+// edit journal. No generator query is needed to certify this cut face: the
+// neighbour is the hit's air side, so a Remove brush containing it cut it.
 fn removed_air_neighbour(h: Hit, c: Column, face: u32, level: u32, code: u32) -> bool {
     var ij = vec2<i32>(h.i, h.j);
     if code < 2u { ij.x += select(-1, 1, code == 0u); }
@@ -515,7 +534,7 @@ fn removed_air_neighbour(h: Hit, c: Column, face: u32, level: u32, code: u32) ->
     let base_top = column_top(neighbour, u32(ij.x & 7), u32(ij.y & 7));
     if terrain_kind(base_top, h.k) == 0u { return false; }
     let centre = vec3<i32>(center_half(ij.x, level), center_half(ij.y, level), center_half(h.k, level));
-    return apply_edits(neighbour.edits, level, centre, domain_point(face, ij.x, ij.y, level), 1u).x == 0u;
+    return latest_edit(neighbour.edits, level, centre, domain_point(face, ij.x, ij.y, level), OPS_REMOVE) != NONE;
 }
 
 // Generated top of the cell across side face `code` (the hit's air side),
@@ -558,13 +577,10 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let x = u32(h.i & 7);
     let y = u32(h.j & 7);
     let top = column_top(c, x, y);
-    var kind = terrain_kind(top, h.k);
     var material = 0u;
-    if c.edits != 0u {
-        let km = apply_edits(c.edits, level, vec3<i32>(center_half(h.i, level), center_half(h.j, level), center_half(h.k, level)),
-            domain_point(face, h.i, h.j, level), kind);
-        kind = km.x;
-        material = km.y;
+    if (c.info & INFO_EDIT_MATERIALS) != 0u {
+        material = edit_material(c.edits, level, vec3<i32>(center_half(h.i, level), center_half(h.j, level), center_half(h.k, level)),
+            domain_point(face, h.i, h.j, level));
     }
     let edited = material != 0u;
     var speck = false;
@@ -592,7 +608,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = frame.layer.y * f32(1 << level);
     var canonical_up = vec3<f32>(0.0);
     var canonical_relief = vec4<f32>(0.0);
-    let base_filter_w = detail_filter_weight(frame.layer.y / pixel);
+    let base_filter_w = step_filter_weight(frame.layer.y / pixel);
     var projection = vec2<f32>(1.0);
     if !edited && (c.info & INFO_TOPOLOGY) == 0u {
         projection = appearance_projection(dot(actual_normal, d), code);
@@ -621,7 +637,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // Generated base tops do not describe edit walls, cave ceilings or floors.
     // Paint-only and ignored tiny lists keep their existing filtering.
     let normal_filter_w = select(coarse_w, base_filter_w * relief_face_w, FAR_RELIEF && frame.hints.z != 0u);
-    let smooth_w = select(normal_filter_w, 0.0, (c.info & INFO_TOPOLOGY) != 0u);
+    let smooth_w = select(0.0, normal_filter_w, natural_surface_hit(c, h.k, top));
     // A grazing face can have subpixel area while its long edge is resolved.
     // Keep the resolved face normal. Pigment and corner occlusion can alias
     // along the compressed axis even while that face's long edge is resolved.
@@ -866,6 +882,25 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             albedo = filtered_rock_flecks(albedo, pigment, material_fleck_base, hash_filter_w);
         }
     }
+    let debug_view = frame.hints.w >> 8u;
+    if debug_view != 0u {
+        // Diagnostics (`Settings::debug_view`): level colours.
+        let colours = array<vec3<f32>, 8>(vec3<f32>(0.9, 0.2, 0.2), vec3<f32>(0.9, 0.6, 0.1), vec3<f32>(0.8, 0.9, 0.1), vec3<f32>(0.2, 0.8, 0.2),
+            vec3<f32>(0.1, 0.8, 0.8), vec3<f32>(0.2, 0.3, 0.9), vec3<f32>(0.6, 0.2, 0.9), vec3<f32>(0.9, 0.2, 0.7));
+        let shown = select(level, level_for(h.t), debug_view == 3u);
+        albedo = colours[min(shown, 7u)] * (0.45 + 0.55 * shade_smooth_w);
+        if debug_view == 4u {
+            // Column kinds: generated volume red, edit topology orange,
+            // relief green, plain blue.
+            var kind_colour = vec3<f32>(0.2, 0.3, 0.9);
+            if column_tops_down(c) { kind_colour = vec3<f32>(0.9, 0.2, 0.2); }
+            else if (c.info & INFO_TOPOLOGY) != 0u { kind_colour = vec3<f32>(0.9, 0.6, 0.1); }
+            else if (c.info & INFO_RELIEF) != 0u { kind_colour = vec3<f32>(0.2, 0.8, 0.2); }
+            albedo = kind_colour * (0.45 + 0.55 * shade_smooth_w);
+        }
+        ao = 1.0;
+        if debug_view == 2u { normal = hit_up(h.t, d); }
+    }
     out.t = h.t;
     let a8 = vec4<u32>(vec4<f32>(clamp(pow(albedo, vec3<f32>(1.0 / 2.2)), vec3<f32>(0.0), vec3<f32>(1.0)), ao) * 255.0 + 0.5);
     out.albedo_ao = a8.x | (a8.y << 8u) | (a8.z << 16u) | (a8.w << 24u);
@@ -893,7 +928,8 @@ struct SunSample {
 // to the resident surface, including its authored relief remainder, rather
 // than adding whole cells and overshooting the surface by that fraction.
 fn filtered_shadow_lift(c: Column, h: Hit, r: Ray) -> f32 {
-    if !column_tops_fit(c) || (c.info & INFO_TOPOLOGY) != 0u { return 0.0; }
+    if !column_tops_fit(c) && !column_tops_down(c) { return 0.0; }
+    if !natural_surface_hit(c, h.k, column_top(c, u32(h.i & 7), u32(h.j & 7))) { return 0.0; }
     let level = (h.info >> 5u) & 31u;
     var fraction = 0u;
     if (c.info & INFO_RELIEF) != 0u {

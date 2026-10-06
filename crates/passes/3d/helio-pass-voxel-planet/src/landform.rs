@@ -110,8 +110,10 @@ impl LandformVolume {
         noise(p, self.caves[1] as u32, self.seed(seed, SEED_CAVE_REGION)) > self.caves[2]
     }
 
-    /// Overhang amplitude (mm) of the column at `p`, 0 where it is smaller
-    /// than two level cells.
+    /// Overhang amplitude (mm) of the column at `p`, less two level cells
+    /// (overhangs smaller than that are not resolved at `level`). It grows
+    /// from 0 at the edge of an overhang region: a jump there left a step
+    /// seam along every region border.
     fn overhang_amplitude(&self, p: IVec3, level: u32, seed: u32) -> i32 {
         if self.caves[0] & 2 == 0 {
             return 0;
@@ -119,7 +121,7 @@ impl LandformVolume {
         let n = noise(p, self.overhangs[2] as u32, self.seed(seed, SEED_OVERHANG_REGION));
         let ramp = (n.wrapping_sub(self.overhangs[3]).wrapping_mul(4)).clamp(0, ONE);
         let a = scale(ramp, self.overhangs[0]);
-        if (a >> level) < 2 * self.sizes[3] { 0 } else { a }
+        if (a >> level) <= 2 * self.sizes[3] { 0 } else { a - ((2 * self.sizes[3]) << level) }
     }
 
     /// Level cells below and above the heightfield top that may differ.
@@ -206,7 +208,7 @@ impl LandformVolume {
 }
 
 /// Octave table size, warp included.
-pub const OCTAVES: usize = 48;
+pub const OCTAVES: usize = 64;
 /// Leading domain-warp octaves (two per axis, zero without a Warp layer).
 pub const WARP_OCTAVES: usize = 6;
 /// Layers of a stack.
@@ -947,18 +949,13 @@ fn earthlike_material(
     let h = hash3(p.x, p.y, p.z ^ layer.wrapping_mul(0x9e37), 0x2545_F491);
     let altitude = layer.wrapping_mul(c.header[1]);
     if top_height < c.levels[3] {
-        // Low basins: meadow with mud and sand patches over silt, gravel
-        // and stone. Surface variation hashes position only, so it never
-        // lines up with height contours.
+        // Low basins: meadow with mud patches of a few metres over silt,
+        // gravel and stone. Patches follow position noise, never height
+        // contours. (Single-cell mud and sand specks every few cells read as
+        // noise that hid the ground's shape.)
         if depth == 0 {
-            let s = hash3(p.x, p.y, p.z, 0x5f35_6495);
-            return if s & 15 == 0 {
-                DIRT | SPECK
-            } else if (s >> 4) & 31 == 0 {
-                SAND | SPECK
-            } else {
-                GRASS
-            };
+            let mud = noise(p, 8, (c.header[3] as u32) ^ 0x5f35_6495);
+            return if mud > ONE / 2 { DIRT } else { GRASS };
         }
         return if depth < dirt * 2 {
             if h & 3 == 0 { GRAVEL } else { CLAY }
@@ -966,9 +963,13 @@ fn earthlike_material(
             STONE
         };
     }
-    let snowline = c.levels[2] + mul_fine(c.levels[2] / 4, wet - FINE_ONE / 2);
+    // The snowline wanders a sixth of its height over ~1.6 km (a level
+    // snowline drew a ruler-straight edge along every range), and the
+    // alpine rock band below it is a sixth of its height: meadows climb.
+    let wander = scale(noise(p, 17, (c.header[3] as u32) ^ 0x3C6E_F372), c.levels[2] / 6);
+    let snowline = c.levels[2] + mul_fine(c.levels[2] / 4, wet - FINE_ONE / 2) + wander;
     // Alpine weight: 0 below the rockline, ONE at the snowline.
-    let rockline = snowline - c.levels[2] / 3;
+    let rockline = snowline - c.levels[2] / 6;
     let band = (snowline - rockline).max(256);
     let alpine = ((top_height - rockline).clamp(0, band) / 256) * ONE / (band / 256);
     // Rock patches (~50 m and ~6 m octaves), also breaking up snow edges.

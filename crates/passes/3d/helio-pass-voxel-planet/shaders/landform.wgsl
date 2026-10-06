@@ -15,7 +15,7 @@ struct TerrainConstants {
     stack: vec4<i32>,  // layer count, erosion amplitude sum, domain radius, warp octaves
     materials: vec4<i32>, // rules style: rule count, fallback material
     layers: array<StackLayer, 8>,
-    octaves: array<LandformOctave, 48>,
+    octaves: array<LandformOctave, 64>,
     rules: array<MaterialRule, 16>,
     ridge_suffix: array<vec4<i32>, 66>, // signed conditional suffix means
     // Caves and overhangs (`LandformVolume`): flags/region/depth, tunnel
@@ -70,8 +70,9 @@ fn landform_overhang_amplitude(p: vec3<i32>, level: u32) -> i32 {
     let n = noise(p, u32(v[2].z), landform_seed() ^ SEED_OVERHANG_REGION);
     let ramp = clamp((n - v[2].w) * 4, 0, NOISE_ONE);
     let a = scale_q16(ramp, v[2].x);
-    if (a >> level) < 2 * v[3].w { return 0; }
-    return a;
+    if (a >> level) <= 2 * v[3].w { return 0; }
+    // Grows from 0 at the region edge (`overhang_amplitude`).
+    return a - ((2 * v[3].w) << level);
 }
 
 fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> {
@@ -430,7 +431,7 @@ fn landform_ridge(l: u32, o: LandformOctave, nd: vec4<i32>, tracked: bool, gain:
 // one ridge site, and generation evaluates this once per column
 // (`terrain_column`). Three inlined copies took 22 s to compile.
 fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
-    let count = min(u32(max(terrain.header.x, 0)), 48u);
+    let count = min(u32(max(terrain.header.x, 0)), 64u);
     // Erosion follows the larger terrain's slope (`height_parts`).
     var erosion = false;
     for (var index = LANDFORM_WARP; index < count; index++) {
@@ -894,22 +895,23 @@ fn earthlike_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, s
     let h = hash3(p.x, p.y, p.z ^ (layer * 0x9e37), 0x2545F491u);
     let altitude = layer * terrain.header.y;
     if top_height < terrain.levels.w {
-        // Low basins: meadow with mud and sand patches (position hash only,
-        // never aligned with height contours) over silt, gravel and stone.
+        // Low basins: meadow with mud patches of a few metres (position
+        // noise, never aligned with height contours) over silt, gravel and
+        // stone (`earthlike_material`).
         if depth == 0 {
-            let s = hash3(p.x, p.y, p.z, 0x5f356495u);
-            if (s & 15u) == 0u { return M_DIRT | M_SPECK; }
-            if ((s >> 4u) & 31u) == 0u { return M_SAND | M_SPECK; }
-            return M_GRASS;
+            let mud = noise(p, 8u, bitcast<u32>(terrain.header.w) ^ 0x5f356495u);
+            return select(M_GRASS, M_DIRT, mud > NOISE_ONE / 2);
         }
         if depth < dirt * 2 {
             return select(M_CLAY, M_GRAVEL, (h & 3u) == 0u);
         }
         return M_STONE;
     }
-    let snowline = terrain.levels.z + mul_fine(terrain.levels.z / 4, wet - FINE_ONE / 2);
+    // A wandering snowline over a narrow rock band (`earthlike_material`).
+    let wander = scale_q16(noise(p, 17u, bitcast<u32>(terrain.header.w) ^ 0x3C6EF372u), terrain.levels.z / 6);
+    let snowline = terrain.levels.z + mul_fine(terrain.levels.z / 4, wet - FINE_ONE / 2) + wander;
     // Alpine weight: 0 below the rockline, NOISE_ONE at the snowline.
-    let rockline = snowline - terrain.levels.z / 3;
+    let rockline = snowline - terrain.levels.z / 6;
     let band = max(snowline - rockline, 256);
     let alpine = (clamp(top_height - rockline, 0, band) / 256) * NOISE_ONE / (band / 256);
     // Rock patches (~50 m and ~6 m octaves), also breaking up snow edges.

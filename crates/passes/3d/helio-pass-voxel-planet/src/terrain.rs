@@ -242,7 +242,7 @@ impl Default for TerrainAppearance {
     fn default() -> Self {
         use crate::terrain::material::*;
         let colours: [[u8; 3]; MATERIALS] = [
-            [200, 0, 200], [91, 125, 65], [120, 87, 61], [133, 139, 142],
+            [200, 0, 200], [106, 126, 68], [128, 96, 66], [133, 139, 142],
             [203, 188, 151], [217, 228, 236], [28, 72, 92], [116, 111, 102],
             [185, 142, 104], [82, 88, 95], [101, 75, 53], [59, 102, 52],
             [155, 113, 89], [148, 77, 63], [158, 119, 79], [121, 126, 130],
@@ -254,7 +254,7 @@ impl Default for TerrainAppearance {
             MaterialAppearance { colour: [r, g, b, roughness[i]], ..Default::default() }
         });
         let turf = &mut materials[GRASS as usize];
-        turf.patches = Some([unit([137, 143, 91]), unit([91, 125, 65]), unit([55, 99, 58])]);
+        turf.patches = Some([unit([160, 150, 96]), unit([106, 126, 68]), unit([62, 98, 56])]);
         turf.lip = Some(DIRT as u8);
         for speck in [DIRT, SAND] {
             materials[speck as usize].speck_host = Some(GRASS as u8);

@@ -441,13 +441,30 @@ impl Planet {
     /// A point `clearance` metres above the solid surface over `p` (a
     /// direction or any point above the ground point on a planet; any point
     /// on a plane).
+    ///
+    /// Walks the base column under `p` down from the highest layer that can
+    /// be solid there (its generated top, or the top of an Add brush over
+    /// it), with the column's brushes queried once: a few cells, not a ray
+    /// from the world's outer radius through the edit index cell by cell.
     pub fn surface_point(&self, p: DVec3, clearance: f64) -> DVec3 {
-        let up = self.grid.up(p);
-        let top = self.grid.at_radial(p, self.outer_radius() + 1.0);
-        match self.raycast(top, -up, f64::INFINITY) {
-            Some(hit) => top - up * (hit.distance - clearance),
-            None => self.grid.at_radial(p, self.grid.radius() + clearance),
+        let g = &self.grid;
+        let (cell, _) = g.locate(g.at_radial(p, g.radius()));
+        let (face, i, j) = (cell.face, cell.i, cell.j);
+        let top = self.column_top(face, i, j, 0);
+        let brushes = self.face_brushes(face, i, j, 0);
+        let added = brushes.iter().filter(|b| b.op() == 1).map(|b| b.k_hi.div_euclid(2) + 1).max().unwrap_or(i32::MIN);
+        let mut k = terrain::generated_top(g, &*self.field, face, i, j, 0, top).max(added);
+        let floor = ((self.inner_radius() - g.radius()) / g.voxel_size()).floor() as i32;
+        while k > floor {
+            let below = k - 1;
+            let kind = terrain::generated_kind(g, &*self.field, face, i, j, below, 0, top);
+            let center = [center_half(i, 0), center_half(j, 0), center_half(below, 0)];
+            if apply(brushes.iter().copied(), center, || g.volume_point(face, i, j, below, 0), kind, 0).0 == 1 {
+                break;
+            }
+            k = below;
         }
+        g.at_radial(p, g.layer_radius(f64::from(k)) + clearance)
     }
     /// Distance from `eye` to the nearest possible solid cell, conservative.
     pub fn air_clearance(&self, eye: DVec3) -> f64 {
@@ -796,6 +813,47 @@ mod tests {
 mod scaling {
     use super::*;
     use crate::edits::{BrushOp, BrushShape};
+
+    /// Cost of what sculpting does per stamp, as edits pile up in one area
+    /// (editor strokes): copy the world, apply a stamp, cast the editor's
+    /// aim ray, find the ground. Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn sculpt_query_costs() {
+        let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+        let ground = planet.surface_point(DVec3::new(0.3, 1.0, 0.2), 0.0);
+        let up = ground.normalize();
+        let side = up.any_orthonormal_vector();
+        let ahead = up.cross(side);
+        let eye = ground + up * 8.0;
+        let time = |f: &mut dyn FnMut()| {
+            let t = std::time::Instant::now();
+            for _ in 0..20 {
+                f();
+            }
+            t.elapsed().as_secs_f64() * 1000.0 / 20.0
+        };
+        let mut stamp = 0usize;
+        for target in [0usize, 100, 400, 1000, 2000] {
+            while stamp < target {
+                let angle = stamp as f64 * 0.6 / 6.0;
+                let p = ground + (side * angle.cos() + ahead * angle.sin()) * 6.0;
+                planet.apply(Brush { center: (p - up * 0.3).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+                stamp += 1;
+            }
+            let aim = (ground + side * 6.0 - eye).normalize();
+            let clone = time(&mut || drop(std::hint::black_box(planet.clone())));
+            let mut copy = planet.clone();
+            let apply = time(&mut || {
+                copy.apply(Brush { center: (ground - up * 0.3).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+            });
+            let raycast = time(&mut || drop(std::hint::black_box(planet.raycast(eye, aim, 200.0))));
+            let surface = time(&mut || drop(std::hint::black_box(planet.surface_point(ground + side * 6.0, 0.0))));
+            let (cell, _) = planet.grid().locate(ground + side * 6.0 - up * 0.5);
+            let solid = time(&mut || drop(std::hint::black_box(planet.solid(cell))));
+            eprintln!("SCULPT_COST {stamp:5} edits: clone {clone:.3} ms, apply {apply:.3} ms, aim raycast {raycast:.3} ms, surface_point {surface:.3} ms, solid {solid:.4} ms");
+        }
+    }
 
     /// Cost of copying a world with many edits (what a shared world pays per
     /// appended edit). Run with `--ignored --nocapture`.

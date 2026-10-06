@@ -114,6 +114,27 @@ impl Default for Layer {
     }
 }
 
+impl Layer {
+    /// A layer of `kind` with that kind's defaults: added alone to a stack,
+    /// it shows (craters with depth and rims, mountains with their ranges).
+    /// The Earth preset is made of these.
+    pub fn new(kind: LayerKind) -> Self {
+        use LayerKind::*;
+        let base = Self { kind, ..Self::default() };
+        match kind {
+            Hills => Self { height_m: 140.0, scale_km: 9.0, ..base },
+            Warp => Self { scale_km: 40.0, ..base },
+            Continents => Self { height_m: 2_400.0, base_m: 180.0, scale_km: 3_000.0, ..base },
+            Mountains => Self { height_m: 2_400.0, scale_km: 20.0, octaves: 7, persistence: 0.47, region_km: 240.0, coverage: 0.45, ..base },
+            Roughness => Self { scale_km: 0.512, octaves: 9, ratio: 0.035, ..base },
+            Erosion => Self { height_m: 40.0, scale_km: 1.6, octaves: 6, ratio: 0.5, ..base },
+            Craters => Self { scale_km: 40.0, octaves: 8, coverage: 0.3, persistence: 1.25, ratio: 0.2, ratio2: 0.3, ratio3: 0.15, ..base },
+            Basins => Self { height_m: 1_200.0, scale_km: 900.0, coverage: 0.3, ..base },
+            Plateau => Self { height_m: 400.0, ..base },
+        }
+    }
+}
+
 /// How surface and buried cells get their materials.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MaterialStyle {
@@ -317,48 +338,15 @@ impl TerrainLayers {
     /// meadows, dry lands, rock, strata and snow.
     pub fn earth() -> Self {
         use LayerKind::*;
-        let layer = |kind, f: &dyn Fn(&mut Layer)| {
-            let mut l = Layer { kind, ..Layer::default() };
-            f(&mut l);
-            l
-        };
         Self {
             layers: vec![
-                layer(Warp, &|l| l.scale_km = 40.0),
-                layer(Continents, &|l| {
-                    l.scale_km = 3_000.0;
-                    l.height_m = 2_400.0;
-                    l.base_m = 180.0;
-                }),
-                layer(Mountains, &|l| {
-                    l.mask = LayerMask::Land;
-                    l.height_m = 2_400.0;
-                    l.scale_km = 20.0;
-                    l.octaves = 7;
-                    l.persistence = 0.47;
-                    l.region_km = 240.0;
-                    l.coverage = 0.45;
-                }),
-                layer(Erosion, &|l| {
-                    l.height_m = 40.0;
-                    l.scale_km = 1.6;
-                    l.octaves = 6;
-                    l.persistence = 0.5;
-                    l.ratio = 0.5;
-                }),
-                layer(Hills, &|l| {
-                    l.mask = LayerMask::AboveDeepSea;
-                    l.height_m = 140.0;
-                    l.scale_km = 9.0;
-                    l.octaves = 4;
-                    l.persistence = 0.5;
-                }),
-                layer(Roughness, &|l| {
-                    l.mask = LayerMask::AboveDeepSea;
-                    l.scale_km = 0.512;
-                    l.octaves = 9;
-                    l.ratio = 0.035;
-                }),
+                Layer::new(Warp),
+                Layer::new(Continents),
+                Layer { mask: LayerMask::Land, ..Layer::new(Mountains) },
+                Layer::new(Erosion),
+                Layer { mask: LayerMask::AboveDeepSea, ..Layer::new(Hills) },
+                Self::knolls(),
+                Layer { mask: LayerMask::AboveDeepSea, ..Layer::new(Roughness) },
             ],
             caves: Caves::default(),
             overhangs: Overhangs::default(),
@@ -372,17 +360,23 @@ impl TerrainLayers {
         }
     }
 
+    /// Earth's knolls: rolling ground a kilometre across, so the land near
+    /// the eye has shape (its hills slope ~3 %).
+    fn knolls() -> Layer {
+        Layer { mask: LayerMask::AboveDeepSea, height_m: 45.0, scale_km: 1.4, persistence: 0.45, ..Layer::new(LayerKind::Hills) }
+    }
+
     /// A dry world of dunes and mesas, with materials from rules: dune sand
     /// on gentle ground, sandstone and clay strata on slopes, gravel in the
     /// gullies, scattered stone patches and dark stone specks.
     pub fn desert() -> Self {
         use LayerKind::*;
         let mut earth = Self::earth();
-        earth.layers.retain(|l| l.kind != Continents);
+        earth.layers.retain(|l| l.kind != Continents && *l != Self::knolls());
         for l in &mut earth.layers {
             l.mask = LayerMask::Everywhere;
         }
-        earth.layers.insert(1, Layer { kind: Plateau, height_m: 400.0, ..Layer::default() });
+        earth.layers.insert(1, Layer::new(Plateau));
         let rule = |material: &str, f: &dyn Fn(&mut MaterialRule)| {
             let mut r = MaterialRule::new(material);
             f(&mut r);

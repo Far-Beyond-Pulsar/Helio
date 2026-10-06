@@ -135,7 +135,16 @@ the CPU raycast what the GPU draws.
   CPU and GPU, so changing layers never recompiles shaders. Octaves
   accumulate per layer; the layers then compose in stack order (Basins
   flatten what precedes them). Bounds (`bound_margins`, `height_range`)
-  derive from the layers, so any stack keeps `check_field`.
+  derive from the layers, so any stack keeps `check_field`. A layer added
+  or switched to another kind starts from that kind's defaults
+  (`Layer::new`; the presets are made of them). The octave table holds 64
+  (6 for the warp); cost follows the octaves used.
+- Earth: continents, mountain ranges with erosion, 140 m hills over 9 km,
+  45 m knolls over 1.4 km (the land near the eye has shape) and metre-scale
+  roughness. Low basins get mud patches of a few metres (single-cell mud
+  and sand specks read as noise that hid the ground's shape). The snowline
+  wanders a sixth of its height over ~1.6 km above a rock band a sixth as
+  tall, so meadows climb and no ruler-straight snow edge runs along a range.
 - Craters: one candidate per cell of a 3D lattice per size, kept with the
   layer's density when within half a cell of the surface, so they are
   seamless across cube edges; parabolic bowl, smooth-min rim, ejecta to twice
@@ -181,6 +190,25 @@ Copying a world with 50k edits costs about 0.1 ms, and the renderer finds the
 common prefix of its synced log and the current one by binary search on
 prefix hashes (O(1) when unchanged). The finest index tile is one column (8
 cells), which keeps dense block edits (buildings) cheap to query.
+
+Edit cost does not grow with the brushes piled on one spot (sculpting):
+
+- Generation culls a column's list per brick: the workgroup loads it in
+  chunks of 64, keeps the brushes whose box reaches the brick (in list order,
+  by ballot and rank) and applies only those to the brick's cells.
+- Shading never replays the list for occupancy (the bricks have it). A hit
+  in a column with Add or Paint brushes (`INFO_EDIT_MATERIALS`) takes its
+  material from the latest Add or Paint containing the cell, scanning from
+  the end; a later Remove containing it would have left air.
+- `Planet::surface_point` walks the column under the point down from its
+  highest possibly solid layer (generated top, Add brush tops) with the
+  column's brushes queried once, instead of a ray from the outer radius
+  through the edit index cell by cell (426 ms at 2000 brushes before).
+
+Sculpting stress (`HELIO_VOXEL_FLIGHT_SCULPT=1`, three stamps a frame on one
+ring): brush CPU per frame 397 / 590 / 1704 ms -> 0.4 / 1.8 / 4.8 ms (dig r1,
+dig r4, build r1), terrain GPU 49 / 76 / 134 ms at 720p -> 13 / 16 / 21 ms at
+1440p.
 
 ### Planet
 
@@ -261,8 +289,14 @@ they are once its work is on the GPU. Steps:
    volumetric columns keep arbitrary mixed-brick occupancy. Cells within the
    program's `terrain_extent` of the heightfield top are evaluated in 3D
    (the sign of `terrain_density` at the seamless `volume_point`); the band covers the
-   extent, and the column is marked `INFO_TOPOLOGY`, so the heightfield-only
-   paths (relief fractions, column-top normals and slopes) stay off for it.
+   extent, and the column is marked `INFO_TOPOLOGY`. A cell the volume
+   leaves as the heightfield has it keeps the heightfield's kind, so where
+   caves and overhangs leave a lane's top cell and the air above it intact,
+   the lane keeps its relief fraction (wide units; the fraction is 0 in
+   lanes whose surface the volume changes) and the trace cuts only the top
+   cell with it, the bricks below deciding (caves under a relief surface).
+   Without this, cave and overhang regions (about half of Earth's land)
+   showed level-sized terraces at every coarse level.
    Its header stores each cell's generated top (first air above the highest
    generated solid cell, counted down from the band top; `INFO_RELIEF_INLINE`
    with `INFO_TOPOLOGY`), so material depth counts from the real surface:
@@ -408,7 +442,15 @@ they are once its work is on the GPU. Steps:
   cells about a pixel wide are shaded with the column's macro normal and show
   surface material on risers, so distant terrain has no contour lines; cells
   several pixels wide keep crisp faces. The blend follows the pixel
-  footprint, so level changes show no seam.
+  footprint, so level changes show no seam. Base voxel steps fade in from 4
+  pixels down (`step_filter_weight`), not from about one: at 1.3-3 pixels
+  their riser lines and step shadows formed a band of stripes just before
+  the relief-smooth levels ("voxels, smooth, voxels again"). The natural top
+  of generated cave and overhang columns filters too; cave walls and edit
+  cuts stay crisp (`natural_surface_hit`).
+- **Overhang amplitude** grows from 0 at an overhang region's edge (less the
+  two level cells a level cannot resolve). It used to jump from 0 to two
+  cells there, a step seam along every region border.
 - **Clipped bands.** A column stores one band of at most `MAX_BAND` (256)
   bricks, with solid ground below and air above. A taller one (a deep dig,
   deep caves, a crater wall) keeps the 256 bricks around the eye's layer at
@@ -460,6 +502,13 @@ times come from timestamps.
 | `HELIO_VOXEL_FLIGHT_CRUISE=<m>`, `_CRUISE_SECS=<s>` | Level flight at that height at the editor's speed for 20 s, then a stop: residency lag while moving and time to converge. |
 | `HELIO_VOXEL_FLIGHT_REPLAY=<engine.log>`, `_REPLAY_FROM/_TO=<s of day>`, `_REPLAY_DEG` | Replays the altitude timeline of a Pulsar editor session logged with `PULSAR_VOXEL_STATS=1`. |
 | `HELIO_VOXEL_FLIGHT_SUN=x,y,z` | Sun direction (the editor's default Sun is straight up). |
+| `HELIO_VOXEL_FLIGHT_VIEWS=h:pitch,...` | Settles and captures views `h` metres above the ground site (`view_<h>_<pitch>.png`); with `_VIEWS_CAVES=1` above the nearest cave or overhang region. |
+| `HELIO_VOXEL_FLIGHT_SCULPT=1` | Sculpting stress: dig r1, dig r4 and build r1 strokes stamped three (two) times a frame on one ring; logs brush CPU, frame time and generation cost per stroke. |
+| `HELIO_VOXEL_FLIGHT_HEIGHTFIELD=1` | The Earth stack without caves and overhangs. |
+| `HELIO_VOXEL_FLIGHT_SEED=<n>` | The Earth stack with another seed (7). |
+| `HELIO_VOXEL_FLIGHT_VIEWS_POLE=<rad>`, `_VIEWS_MOUNTAIN=<km>` | `VIEWS` from the north pole (Pulsar's example spawn) along a bearing, or from the flank of the nearest summit facing it. |
+| `HELIO_VOXEL_FLIGHT_LOOK=exposure,contrast,saturation` | A camera post-process with an outdoor look (ACES tone map and a grade), as the Pulsar example level has. |
+| `HELIO_VOXEL_DEBUG=<n>` | Debug shading: 1 level colours (brighter where filtered), 2 the same lit from the vertical (only sun shadows stay dark), 3 the level the distance asks for, 4 column kinds (generated volume red, edit topology orange, relief green, plain blue). |
 | `HELIO_VOXEL_FLIGHT_QUICK=1`, `_GROUND_ONLY=1`, `_CPU_PROBE=1` | Short timing probe, ground audits only, CPU per pass. |
 | `HELIO_VOXEL_PLAN_TRACE=<ms>` | Logs residency plan phases of frames taking over `<ms>` (10 if not a number). |
 | `HELIO_VOXEL_LOD_DITHER`, `HELIO_VOXEL_NO_HORIZON`, `HELIO_VOXEL_NO_FAILSAFE` | Override the dither width; disable the sky bound; disable its fail-safe (A/B timing). |

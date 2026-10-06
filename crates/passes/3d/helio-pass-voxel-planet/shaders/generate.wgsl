@@ -74,6 +74,14 @@ var<workgroup> g_fraction: array<atomic<u32>, 32>;
 var<workgroup> g_topology_flags: u32;
 var<workgroup> g_volume: atomic<u32>;
 var<workgroup> g_surface: array<atomic<u32>, 16>;
+// Per-brick brush culling: one chunk of the column's edit list at a time,
+// kept brushes compacted in list order (ballot bits, then ranks).
+var<workgroup> g_keep: array<atomic<u32>, 2>;
+var<workgroup> g_list: array<FaceBrush, 64>;
+var<workgroup> g_edit_count: u32;
+// g_volume bits: generated volumetric terrain; brushes that set materials.
+const VOLUME_TERRAIN: u32 = 1u;
+const VOLUME_MATERIALS: u32 = 2u;
 
 @compute @workgroup_size(64)
 fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
@@ -103,6 +111,9 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
             }
         }
         g_topology_flags = select(0u, INFO_TOPOLOGY, topology);
+        g_edit_count = select(0u, edit_refs[job.edits - 1u], job.edits != 0u);
+        atomicStore(&g_keep[0], 0u);
+        atomicStore(&g_keep[1], 0u);
         atomicStore(&g_band[0], 0x7fffffff);
         atomicStore(&g_band[1], -0x7fffffff);
         atomicStore(&g_any[0], 0u);
@@ -156,7 +167,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     if extent.x != 0 || extent.y != 0 {
         atomicMin(&g_band[0], field_top - extent.x - 1);
         atomicMax(&g_band[1], field_top + extent.y);
-        atomicOr(&g_volume, 1u);
+        atomicOr(&g_volume, VOLUME_TERRAIN);
     }
     if job.edits != 0u {
         let count = edit_refs[job.edits - 1u];
@@ -169,6 +180,8 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
             let op = (b.flags >> 4u) & 3u;
             if op == 0u { atomicMin(&g_band[0], lo - 1); }
             if op == 1u { atomicMax(&g_band[1], hi + 1); }
+            // Shading reads brush materials only where some brush sets one.
+            if op != 0u { atomicOr(&g_volume, VOLUME_MATERIALS); }
         }
     }
     workgroupBarrier();
@@ -191,14 +204,18 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         k_hi = lo + i32(MAX_BAND);
     }
     let n_band = u32(k_hi - k_lo);
-    let volumetric = atomicLoad(&g_volume) != 0u;
-    let relief = requested_relief && !volumetric && n_band <= 32u && hi_cell - k_lo * 8 <= 255;
+    let volume_bits = atomicLoad(&g_volume);
+    let volumetric = (volume_bits & VOLUME_TERRAIN) != 0u;
+    // Generated caves and overhangs keep the relief of the natural surface
+    // they leave intact (their tops count down from the band top, which a
+    // band of at most 32 bricks always fits).
+    let relief = requested_relief && n_band <= 32u && (volumetric || hi_cell - k_lo * 8 <= 255);
     let heightfield = topology_flags == 0u && !volumetric && n_band <= 32u && hi_cell - k_lo * 8 <= 255;
     if requested_relief && !relief { top = base_top >> level; }
     // When the whole column fits in 255 authored layers, store its exact
     // base-grid top in the existing byte instead of allocating two Q16 units.
     // The bound includes the ceil top, so every lane is guaranteed to fit.
-    let inline_relief = relief && level <= 7u && hi_cell - k_lo * 8 <= i32(255u >> level);
+    let inline_relief = relief && !volumetric && level <= 7u && hi_cell - k_lo * 8 <= i32(255u >> level);
     let wide_relief = relief && !inline_relief;
     let surface_words = world.sphere.w != 0u;
     let scratch_surface = select(1u, 3u, wide_relief);
@@ -217,7 +234,8 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         if li == 0u { job_out[index].status = 2u; }
         return;
     }
-    if wide_relief { atomicOr(&g_fraction[li >> 1u], fraction << ((li & 1u) * 16u)); }
+    // A volumetric column's fractions follow its generation (below).
+    if wide_relief && !volumetric { atomicOr(&g_fraction[li >> 1u], fraction << ((li & 1u) * 16u)); }
     // Fractions and byte-packed tops share the existing publication barrier.
     // Disabled metadata performs no fraction atomics or extra barriers.
     let stored_top = select(top - k_lo * 8, base_top - ((k_lo * 8) << level), inline_relief);
@@ -230,7 +248,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     if surface_words && li < 16u {
         scratch[(base + scratch_surface) * UNIT_WORDS + li] = atomicLoad(&g_surface[li]);
     }
-    if wide_relief && li < 32u {
+    if wide_relief && !volumetric && li < 32u {
         scratch[(base + 1u) * UNIT_WORDS + li] = atomicLoad(&g_fraction[li]);
     }
     if li < 16u {
@@ -242,19 +260,88 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     // generated solid cell (overhang lips, cave openings; edits excluded).
     var generated_top = top;
     if extent.x != 0 || extent.y != 0 { generated_top = field_top - extent.x; }
+    // Caves or overhangs change this lane's top cell or the air above it:
+    // its surface is no longer the relief surface.
+    var surface_changed = false;
+    let edit_count = workgroupUniformLoad(&g_edit_count);
+    let ch = vec2<i32>(center_half(i, level), center_half(j, level));
+    // The column's footprint in half cells, for culling brushes per brick.
+    let half_cell = 1 << (level + 1u);
+    let foot_lo = vec2<i32>(ci, cj) * 8 * half_cell;
+    let foot_hi = foot_lo + 8 * half_cell;
     for (var b = 0u; b < n_band; b++) {
+        var kinds: array<u32, 8>;
         for (var z = 0u; z < 8u; z++) {
             let k = (k_lo + i32(b)) * 8 + i32(z);
             var kind = terrain_kind(top, k);
             if k >= field_top - extent.x && k < field_top + extent.y {
-                kind = select(0u, 1u, terrain_density(column_point, volume_point(face, i, j, k, level), level, field_top, k) > 0);
+                // A cell the volume leaves as the heightfield has it keeps the
+                // heightfield's kind (with relief, its ceil top cell).
+                let dense = select(0u, 1u, terrain_density(column_point, volume_point(face, i, j, k, level), level, field_top, k) > 0);
+                if dense != terrain_kind(field_top, k) {
+                    kind = dense;
+                    if k >= top - 1 { surface_changed = true; }
+                }
                 if kind != 0u { generated_top = max(generated_top, k + 1); }
             }
-            if job.edits != 0u {
-                let c = vec3<i32>(center_half(i, level), center_half(j, level), center_half(k, level));
-                kind = apply_edits(job.edits, level, c, column_point, kind).x;
+            kinds[z] = kind;
+        }
+        // The edit list in order, in chunks of 64 brushes: each lane culls
+        // one brush against this brick's box, the kept ones are compacted in
+        // list order and every lane applies them to its eight cells. Bricks
+        // no brush reaches cost one bounds test per brush, not per cell.
+        let brick_lo = ((k_lo + i32(b)) * 8) * half_cell;
+        let brick_hi = brick_lo + 8 * half_cell;
+        for (var start = 0u; start < edit_count; start += 64u) {
+            let e = start + li;
+            var keep = false;
+            var brush: FaceBrush;
+            if e < edit_count {
+                brush = brushes[edit_refs[job.edits + e]];
+                let extent_half = brush.center.w + half_cell;
+                keep = brush.radius_half >= (1u << level)
+                    && brush.k_hi + half_cell >= brick_lo && brush.k_lo - half_cell < brick_hi
+                    && brush.center.x + extent_half >= foot_lo.x && brush.center.x - extent_half < foot_hi.x
+                    && brush.center.y + extent_half >= foot_lo.y && brush.center.y - extent_half < foot_hi.y;
+                if keep { atomicOr(&g_keep[li >> 5u], 1u << (li & 31u)); }
             }
-            if kind != 0u {
+            workgroupBarrier();
+            let m0 = atomicLoad(&g_keep[0]);
+            let m1 = atomicLoad(&g_keep[1]);
+            if keep {
+                var rank = countOneBits(m0 & ((1u << (li & 31u)) - 1u));
+                if li >= 32u { rank = countOneBits(m0) + countOneBits(m1 & ((1u << (li & 31u)) - 1u)); }
+                g_list[rank] = brush;
+            }
+            workgroupBarrier();
+            // Every lane has read the ballot; the next chunk starts after the
+            // closing barrier.
+            if li == 0u {
+                atomicStore(&g_keep[0], 0u);
+                atomicStore(&g_keep[1], 0u);
+            }
+            let kept = countOneBits(m0) + countOneBits(m1);
+            for (var z = 0u; z < 8u && kept != 0u; z++) {
+                let c = vec3<i32>(ch, center_half((k_lo + i32(b)) * 8 + i32(z), level));
+                var q = vec3<i32>(0);
+                var q_ready = false;
+                for (var n = 0u; n < kept; n++) {
+                    let bb = g_list[n];
+                    if c.z < bb.k_lo || c.z > bb.k_hi { continue; }
+                    if !q_ready && ((bb.flags >> 6u) & 3u) == 0u {
+                        q = volume_point_half(column_point, c.z);
+                        q_ready = true;
+                    }
+                    if !brush_contains(bb, c, q) { continue; }
+                    let op = (bb.flags >> 4u) & 3u;
+                    if op == 0u { kinds[z] = 0u; }
+                    else if op == 1u { kinds[z] = 1u; }
+                }
+            }
+            workgroupBarrier();
+        }
+        for (var z = 0u; z < 8u; z++) {
+            if kinds[z] != 0u {
                 let bit = li + z * 64u;
                 atomicOr(&g_words[bit >> 5u], 1u << (bit & 31u));
             }
@@ -285,6 +372,11 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         workgroupBarrier();
     }
     if volumetric && li < 16u { scratch[base * UNIT_WORDS + li] = atomicLoad(&g_words[li]); }
+    if wide_relief && volumetric {
+        atomicOr(&g_fraction[li >> 1u], select(fraction, 0u, surface_changed) << ((li & 1u) * 16u));
+        workgroupBarrier();
+        if li < 32u { scratch[(base + 1u) * UNIT_WORDS + li] = atomicLoad(&g_fraction[li]); }
+    }
     if li == 0u {
         var out: JobOut;
         out.status = 0u;
@@ -292,7 +384,8 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
             | select(0u, INFO_HEIGHTFIELD, heightfield) | topology_flags
             // Generated caves and overhangs are not described by column tops
             // (slopes, relief normals, heightfield storage): like edit cuts.
-            | select(0u, INFO_TOPOLOGY | INFO_TOPS_DOWN, volumetric) | clip;
+            | select(0u, INFO_TOPOLOGY | INFO_TOPS_DOWN, volumetric) | clip
+            | select(0u, INFO_EDIT_MATERIALS, (volume_bits & VOLUME_MATERIALS) != 0u);
         out.top = hi_cell;
         out.centre = centre;
         out.k_lo = k_lo;
@@ -313,7 +406,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
 
 fn run_units(o: JobOut) -> u32 {
     return select(1u, 2u, o.n_band > 32u)
-        + select(0u, 2u, (o.pad & INFO_RELIEF) != 0u && (o.pad & INFO_RELIEF_INLINE) == 0u)
+        + select(0u, 2u, info_relief_wide(o.pad))
         + select(0u, 1u, world.sphere.w != 0u) + o.n_mixed;
 }
 
@@ -458,7 +551,7 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         return;
     }
     let ext = o.n_band > 32u;
-    let wide_relief = (o.pad & INFO_RELIEF) != 0u && (o.pad & INFO_RELIEF_INLINE) == 0u;
+    let wide_relief = info_relief_wide(o.pad);
     let surface_words = world.sphere.w != 0u;
     let scratch_surface = select(1u, 3u, wide_relief);
     let scratch_header = scratch_surface + select(0u, 1u, surface_words);
@@ -533,7 +626,8 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         c.key1 = job.key1;
         c.k_lo = o.k_lo;
         c.info = o.n_band | (o.size_class << 18u) | (gap << 22u) | select(0u, INFO_EXT, ext)
-            | (o.pad & (INFO_RELIEF | INFO_RELIEF_INLINE | INFO_HEIGHTFIELD | INFO_TOPOLOGY | INFO_CLIP_BELOW | INFO_CLIP_ABOVE)) | INFO_VALID;
+            | (o.pad & (INFO_RELIEF | INFO_RELIEF_INLINE | INFO_HEIGHTFIELD | INFO_TOPOLOGY | INFO_CLIP_BELOW | INFO_CLIP_ABOVE
+                | INFO_EDIT_MATERIALS)) | INFO_VALID;
         c.run = o.run;
         c.mixed = o.mixed[0];
         c.solid = o.solid[0];

@@ -688,9 +688,16 @@ impl PartialEq for VoxelTerrainLayer {
 }
 
 impl VoxelTerrainLayer {
-    /// A layer of `kind` with the default parameters.
+    /// A layer of `kind` with that kind's defaults (the generator's own
+    /// table, `layers::Layer::new`): what the inspector shows when a layer
+    /// is added or changes kind.
     pub fn new(kind: VoxelLayerKind) -> Self {
-        Self { kind, ..Self::default() }
+        use helio_pass_voxel_planet::layers::{Layer, LayerKind};
+        serde_json::to_value(kind)
+            .and_then(serde_json::from_value::<LayerKind>)
+            .and_then(|kind| serde_json::to_value(Layer::new(kind)))
+            .and_then(serde_json::from_value)
+            .unwrap_or(Self { kind, ..Self::default() })
     }
 }
 
@@ -899,45 +906,15 @@ impl VoxelTerrainStack {
     /// hills and roughness; caves, overhangs, meadows, rock and snow.
     pub fn earth() -> Self {
         use VoxelLayerKind::*;
-        let layer = |kind, f: &dyn Fn(&mut VoxelTerrainLayer)| {
-            let mut l = VoxelTerrainLayer::new(kind);
-            f(&mut l);
-            l
-        };
         Self {
             layers: vec![
-                layer(Warp, &|l| l.scale_km = 40.0),
-                layer(Continents, &|l| {
-                    l.scale_km = 3_000.0;
-                    l.height_m = 2_400.0;
-                    l.base_m = 180.0;
-                }),
-                layer(Mountains, &|l| {
-                    l.mask = VoxelLayerMask::Land;
-                    l.height_m = 2_400.0;
-                    l.scale_km = 20.0;
-                    l.octaves = 7;
-                    l.persistence = 0.47;
-                    l.region_km = 240.0;
-                    l.coverage = 0.45;
-                }),
-                layer(Erosion, &|l| {
-                    l.height_m = 40.0;
-                    l.scale_km = 1.6;
-                    l.octaves = 6;
-                    l.ratio = 0.5;
-                }),
-                layer(Hills, &|l| {
-                    l.mask = VoxelLayerMask::AboveDeepSea;
-                    l.height_m = 140.0;
-                    l.scale_km = 9.0;
-                }),
-                layer(Roughness, &|l| {
-                    l.mask = VoxelLayerMask::AboveDeepSea;
-                    l.scale_km = 0.512;
-                    l.octaves = 9;
-                    l.ratio = 0.035;
-                }),
+                VoxelTerrainLayer::new(Warp),
+                VoxelTerrainLayer::new(Continents),
+                VoxelTerrainLayer { mask: VoxelLayerMask::Land, ..VoxelTerrainLayer::new(Mountains) },
+                VoxelTerrainLayer::new(Erosion),
+                VoxelTerrainLayer { mask: VoxelLayerMask::AboveDeepSea, ..VoxelTerrainLayer::new(Hills) },
+                Self::knolls(),
+                VoxelTerrainLayer { mask: VoxelLayerMask::AboveDeepSea, ..VoxelTerrainLayer::new(Roughness) },
             ],
             caves: VoxelCaves::default(),
             overhangs: VoxelOverhangs::default(),
@@ -951,17 +928,22 @@ impl VoxelTerrainStack {
         }
     }
 
+    /// Earth's knolls: rolling ground a kilometre across.
+    fn knolls() -> VoxelTerrainLayer {
+        VoxelTerrainLayer { mask: VoxelLayerMask::AboveDeepSea, height_m: 45.0, scale_km: 1.4, persistence: 0.45, ..VoxelTerrainLayer::new(VoxelLayerKind::Hills) }
+    }
+
     /// Dunes and mesas with materials from rules: sand on gentle ground,
     /// sandstone and clay strata, gravel in gullies, stone patches and dark
     /// stone specks.
     pub fn desert() -> Self {
         use VoxelTerrainMaterial as M;
         let mut earth = Self::earth();
-        earth.layers.retain(|l| l.kind != VoxelLayerKind::Continents);
+        earth.layers.retain(|l| l.kind != VoxelLayerKind::Continents && *l != Self::knolls());
         for l in &mut earth.layers {
             l.mask = VoxelLayerMask::Everywhere;
         }
-        earth.layers.insert(1, VoxelTerrainLayer { height_m: 400.0, ..VoxelTerrainLayer::new(VoxelLayerKind::Plateau) });
+        earth.layers.insert(1, VoxelTerrainLayer::new(VoxelLayerKind::Plateau));
         Self {
             materials: VoxelMaterialStyle::Rules,
             rules: vec![

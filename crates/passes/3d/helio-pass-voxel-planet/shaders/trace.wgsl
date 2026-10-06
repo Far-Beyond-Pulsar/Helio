@@ -373,7 +373,10 @@ fn level_contains_solid(c: Cursor, record: u32, r: Ray, t: f32) -> bool {
     let col = records[record];
     if (col.info & INFO_RELIEF) != 0u && column_tops_fit(col) {
         let fraction = column_relief_fraction(col, u32(c.i & 7), u32(c.j & 7));
-        if fraction != 0u { return height_rel(r, t) <= relief_height(col, c.i, c.j, c.level, fraction); }
+        // The relief surface cuts the top cell; below it, occupancy (caves).
+        if fraction != 0u && c.k >= column_top(col, u32(c.i & 7), u32(c.j & 7)) - 1 {
+            return height_rel(r, t) <= relief_height(col, c.i, c.j, c.level, fraction);
+        }
     }
     if (col.info & INFO_HEIGHTFIELD) != 0u {
         return c.k < column_top(col, u32(c.i & 7), u32(c.j & 7));
@@ -576,6 +579,9 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
             }
             // A zero remainder has the same occupied layers as the original
             // whole-cell brick path, so it needs no arbitrary-radius solve.
+            // Below the top cell the bricks decide (generated caves keep
+            // their occupancy under a relief surface).
+            if fraction != 0u && cur.k < column_top(col, u32(cur.i & 7), u32(cur.j & 7)) - 1 { fraction = 0u; }
             if fraction != 0u {
                 // Preserve the actual radial top of this angular cell. The
                 // branch precedes both solid and mixed brick hit paths.

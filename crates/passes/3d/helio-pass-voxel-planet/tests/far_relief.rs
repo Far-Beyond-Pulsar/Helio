@@ -487,7 +487,7 @@ fn stored_coarse_heights_recover_authored_normal_without_raw_climate_queries() {
 }
 
 // This regression qualifies edit publication scope rather than edited topology:
-// sub-voxel brushes remain in the journal but apply_edits ignores them at the
+// sub-voxel brushes remain in the journal but the edit shaders ignore them at the
 // displayed coarse level. They must not flatten unrelated or same-column relief.
 
 #[test]

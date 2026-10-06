@@ -612,7 +612,9 @@ fn published_tops_bound_occupancy() {
         // Wide fractional tops occupy two units after the column header;
         // inline tops retain their authored-cell offset in each packed byte.
         let relief = info & 0x1000_0000 != 0;
-        let inline = info & 0x0400_0000 != 0;
+        // Bit 26 is the inline flag, or with INFO_TOPOLOGY (bit 27) tops
+        // counting down (generated volume, whose relief is wide).
+        let inline = info & 0x0c00_0000 == 0x0400_0000;
         let heightfield = info & 0x0200_0000 != 0;
         let header = (if ext { 2 } else { 1 }) + (if relief && !inline { 2 } else { 0 }) + surface_units;
         if relief {
@@ -649,7 +651,11 @@ fn published_tops_bound_occupancy() {
                     let (i, j) = (ci * 8 + (cell & 7) as i32, cj * 8 + (cell >> 3) as i32);
                     let top = planet.column_top(face, i, j, level);
                     let expected = terrain::generated_top(planet.grid(), planet.field(), face, i, j, level, top);
-                    if down < 255 && (k_lo + n_band) * 8 - down != expected {
+                    let got = (k_lo + n_band) * 8 - down;
+                    // With relief, a surface the volume leaves intact keeps
+                    // its partial top cell (the ceil top).
+                    let ceil = relief && expected == top && got == top + 1;
+                    if down < 255 && got != expected && !ceil {
                         wrong_tops += 1;
                         if wrong_tops < 6 {
                             eprintln!("column key {:08x} {:08x} cell {cell}: generated top {} expected {expected}", c[0], c[1], (k_lo + n_band) * 8 - down);
@@ -846,4 +852,20 @@ fn pipeline_compile_times() {
     let started = std::time::Instant::now();
     let _renderer = renderer(&gpu, planet, [64, 64]);
     eprintln!("renderer built in {:.0} ms", started.elapsed().as_secs_f64() * 1e3);
+}
+
+/// Diagnostics: GPU cost of the terrain program per column, for each preset,
+/// on the ground (generation evaluates it for every column it streams).
+#[test]
+#[ignore = "measurement"]
+fn terrain_program_cost() {
+    let Some(gpu) = gpu() else { return };
+    use helio_pass_voxel_planet::layers::TerrainLayers;
+    for (name, stack) in [("earth", TerrainLayers::earth()), ("moon", TerrainLayers::moon()), ("desert", TerrainLayers::desert())] {
+        let planet = Planet::new(PlanetRecipe { terrain: stack.source(7), ..Default::default() }).unwrap();
+        let eye = planet.surface_point(land(&planet, 4, 0.37, 0.61), 2.0);
+        let mut runs: Vec<f64> = (0..5).map(|_| helio_pass_voxel_planet::engine::time_field(&gpu.device, &gpu.queue, &planet, eye, 1024, 20)).collect();
+        runs.sort_by(f64::total_cmp);
+        eprintln!("TERRAIN_COST {name}: {:.2} ns/column (median of 5; min {:.2})", runs[2], runs[0]);
+    }
 }

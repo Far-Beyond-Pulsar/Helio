@@ -269,8 +269,8 @@ mod tests {
             assert_eq!(render_bounds(&grid, &k, canonical), canonical);
             assert_eq!(canonical, k.bound_margins(&grid));
         }
-        // Constants (2016) and the ridge suffix (1056).
-        assert_eq!(std::mem::size_of::<LandformConstants>() + 66 * 16, 3072);
+        // Constants (2272) and the ridge suffix (1056).
+        assert_eq!(std::mem::size_of::<LandformConstants>() + 66 * 16, 3328);
     }
 
     #[test]
