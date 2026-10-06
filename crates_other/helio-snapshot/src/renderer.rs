@@ -136,6 +136,7 @@ async fn render_snapshot_async<P: AsRef<Path>>(
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("helio-snapshot"),
             required_features: helio::required_wgpu_features(adapter.features()),
+            experimental_features: helio::required_experimental_features(adapter.features()),
             required_limits: helio::required_wgpu_limits(adapter.limits()),
             ..Default::default()
         })
@@ -575,6 +576,7 @@ impl SnapshotBatch {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("helio-snapshot-batch"),
                 required_features: helio::required_wgpu_features(adapter.features()),
+                experimental_features: helio::required_experimental_features(adapter.features()),
                 required_limits: helio::required_wgpu_limits(adapter.limits()),
                 ..Default::default()
             })
