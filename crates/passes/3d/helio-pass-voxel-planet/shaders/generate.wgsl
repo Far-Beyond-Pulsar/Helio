@@ -56,6 +56,8 @@ var<workgroup> g_words: array<atomic<u32>, 16>;
 var<workgroup> g_masks: array<atomic<u32>, 16>;
 var<workgroup> g_any: array<atomic<u32>, 2>;
 var<workgroup> g_base: u32;
+var<workgroup> g_k_lo: i32;
+var<workgroup> g_n_band: u32;
 
 @compute @workgroup_size(64)
 fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
@@ -105,11 +107,18 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         }
     }
     workgroupBarrier();
-    let lo_cell = atomicLoad(&g_band[0]);
-    let hi_cell = atomicLoad(&g_band[1]);
-    let k_lo = lo_cell >> 3u;
-    let k_hi = ((max(hi_cell, lo_cell + 1) - 1) >> 3u) + 1;
-    let n_band = u32(k_hi - k_lo);
+    // Reduce the atomic bounds once, then explicitly broadcast the derived
+    // loop values. FXC otherwise treats each lane's atomicLoad result as
+    // varying and rejects barriers inside the n_band loop below.
+    if li == 0u {
+        let lo_cell = atomicLoad(&g_band[0]);
+        let hi_cell = atomicLoad(&g_band[1]);
+        g_k_lo = lo_cell >> 3u;
+        let k_hi = ((max(hi_cell, lo_cell + 1) - 1) >> 3u) + 1;
+        g_n_band = u32(k_hi - g_k_lo);
+    }
+    let k_lo = workgroupUniformLoad(&g_k_lo);
+    let n_band = workgroupUniformLoad(&g_n_band);
     if n_band > MAX_BAND {
         if li == 0u { job_out[index].status = 1u; }
         return;

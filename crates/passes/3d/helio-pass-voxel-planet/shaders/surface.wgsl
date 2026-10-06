@@ -241,15 +241,25 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     if code < 6u && smooth_w < 1.0 {
         let axis = code >> 1u;
         let back = select(1, -1, (code & 1u) == 1u);
-        var f = vec3<i32>(h.i, h.j, h.k);
-        f[axis] += back;
-        var u_axis = select(0u, 1u, axis == 0u);
-        var v_axis = select(2u, 1u, axis == 2u);
-        if axis == 2u { u_axis = 0u; v_axis = 1u; }
-        var du = vec3<i32>(0);
-        var dv = vec3<i32>(0);
-        du[u_axis] = 1;
-        dv[v_axis] = 1;
+        // Build the face basis with scalar selects instead of dynamically
+        // writing vector components. FXC rejects local vector l-values
+        // indexed by a runtime value in this compute entry point.
+        let axis_dir = vec3<i32>(
+            select(0, 1, axis == 0u),
+            select(0, 1, axis == 1u),
+            select(0, 1, axis == 2u),
+        );
+        let f = vec3<i32>(h.i, h.j, h.k) + axis_dir * back;
+        let du = vec3<i32>(
+            select(1, 0, axis == 0u),
+            select(0, 1, axis == 0u),
+            0,
+        );
+        let dv = vec3<i32>(
+            0,
+            select(0, 1, axis == 2u),
+            select(1, 0, axis == 2u),
+        );
         let s0 = occupied(face, level, f.x - du.x, f.y - du.y, f.z - du.z, c, h.i, h.j);
         let s1 = occupied(face, level, f.x + du.x, f.y + du.y, f.z + du.z, c, h.i, h.j);
         let s2 = occupied(face, level, f.x - dv.x, f.y - dv.y, f.z - dv.z, c, h.i, h.j);
