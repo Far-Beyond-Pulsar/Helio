@@ -276,8 +276,12 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             (f32(fr.idx.y) + face_coord(fr, 1u, h.t)) * scale,
             (f32(frame.layer_i.x) + layer_coord(make_ray(camera.position_near.xyz, d), h.t)) * scale,
         );
-        let uv = clamp(vec2<f32>(cell[u_axis] - f32(select(select(h.i, h.j, u_axis == 1u), h.k, u_axis == 2u)),
-                                 cell[v_axis] - f32(select(select(h.i, h.j, v_axis == 1u), h.k, v_axis == 2u))), vec2<f32>(0.0), vec2<f32>(1.0));
+        let cell_origin = vec3<f32>(f32(h.i), f32(h.j), f32(h.k));
+        let local_cell = cell - cell_origin;
+        let uv = clamp(vec2<f32>(
+            dot(local_cell, vec3<f32>(du)),
+            dot(local_cell, vec3<f32>(dv)),
+        ), vec2<f32>(0.0), vec2<f32>(1.0));
         if axis < 2u && material == M_GRASS && smooth_w <= 0.5 {
             let tooth = f32(hash3(h.i, h.j, h.k * 4 + i32(floor(uv.x * 4.0)), 0x5bd1e995u) & 7u) / 7.0;
             // Continuous in distance (not level), so level changes show no band.
