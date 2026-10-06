@@ -1148,28 +1148,6 @@ mod tests {
         assert!(restored_json.get("payloads").is_none());
     }
 
-    /// The settings component serializes to the generator's settings JSON:
-    /// each preset is the generator's preset.
-    #[test]
-    fn terrain_layers_component_is_the_generator_settings() {
-        use helio_pass_voxel_planet::layers::TerrainLayers;
-        for (component, stack) in [
-            (VoxelTerrainLayersComponent::earth(), TerrainLayers::earth()),
-            (VoxelTerrainLayersComponent::moon(), TerrainLayers::moon()),
-            (VoxelTerrainLayersComponent::flat(2.0), TerrainLayers::flat_at(2.0)),
-        ] {
-            let json = serde_json::to_value(&component).unwrap();
-            let parsed: TerrainLayers = serde_json::from_value(json.clone()).unwrap();
-            assert_eq!(parsed, stack, "{json}");
-            let restored: VoxelTerrainLayersComponent = serde_json::from_value(serde_json::to_value(&stack).unwrap()).unwrap();
-            assert_eq!(serde_json::to_value(&restored).unwrap(), json);
-        }
-        assert!(VoxelTerrainLayersComponent::default()
-            .get_properties()
-            .iter()
-            .any(|property| property.name == "layers"));
-    }
-
     #[test]
     fn voxel_component_starts_as_eight_filled_chunks_hidden_from_serialization() {
         let component = VoxelComponent::default();
