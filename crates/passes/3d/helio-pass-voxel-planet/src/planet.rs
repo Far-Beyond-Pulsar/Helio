@@ -241,7 +241,7 @@ impl Planet {
                 // rock around caves lie below it.
                 let generated = terrain::generated_top(&self.grid, &*self.field, cell.face, cell.i, cell.j, 0, top);
                 let depth = (generated - 1 - cell.k).max(0);
-                let surface = self.field.surface(p, self.grid.level_offset(), top_height) & 0xffff;
+                let surface = self.field.surface(p, self.grid.level_offset(), top_height) & 0xff;
                 self.field.ground_material(p, surface, top_height, depth, slope, cell.k) & material::ID
             }
         }

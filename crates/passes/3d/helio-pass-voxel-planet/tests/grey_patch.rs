@@ -19,8 +19,10 @@ fn fine_grass_preserves_authored_srgb_after_linear_upload() {
         ..Default::default()
     }).unwrap());
     let mut settings = helio_pass_voxel_planet::engine::Settings::default();
-    settings.appearance.materials[helio_pass_voxel_planet::terrain::material::GRASS as usize].patches = Some([[0.25, 0.5, 0.75]; 3]);
-    settings.appearance.detail = [0.0; 4];
+    let mut appearance = helio_pass_voxel_planet::engine::TerrainAppearance::default();
+    appearance.materials[helio_pass_voxel_planet::terrain::material::GRASS as usize].patches = Some([[0.25, 0.5, 0.75]; 3]);
+    appearance.detail = [0.0; 4];
+    settings.appearance = Some(appearance);
     let size = [96, 64];
     let target = Target::new(&gpu, size);
     let mut renderer = helio_pass_voxel_planet::engine::PlanetRenderer::new(

@@ -483,9 +483,9 @@ voxel_pass_graph` (the pass inside the deferred graph, editor overlays).
 an optional settings-component name) returning a `TerrainField` and its
 `TerrainProgram` (WGSL defining `TerrainConstants`, `terrain_height`,
 `ground_material`, plus the constants' bytes). A program may also define
-`terrain_surface(p, level, height) -> u32`: a 16-bit surface word per column
-cell, computed once when the column is generated and stored with it (two
-pool units per column, only for programs that define it), passed to
+`terrain_surface(p, level, height) -> u32`: an 8-bit surface word per column
+cell, computed once when the column is generated and stored with it (one
+pool unit per column, only for programs that define it), passed to
 `ground_material`. It carries what materials need besides height (Landform:
 its erosion term, so gully floors fill with gravel and rock shows on the
 ribs); shading never runs the generator per pixel. Volumetric generators also

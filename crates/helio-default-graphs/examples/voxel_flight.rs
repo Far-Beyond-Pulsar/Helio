@@ -412,7 +412,7 @@ impl Flight {
                 return (frames, ms);
             }
         }
-        panic!("{stage}: residency did not settle");
+        panic!("{stage}: residency did not settle: {:?}", self.pass().renderer().map(|r| r.stats()));
     }
 
     fn read(&self, buffer: &wgpu::Buffer) -> Vec<u8> {
@@ -1044,9 +1044,27 @@ fn main() {
             }
         }
         PLANE_WORLD.store(false, std::sync::atomic::Ordering::Relaxed);
+        // A moon: another generator through the same contract, with its own
+        // material table (the renderer's appearance defaults to it).
+        flight.planet = Arc::new(Planet::new(PlanetRecipe {
+            radius_m: 1_737_400.0,
+            terrain: helio_pass_voxel_planet::TerrainSource { generator: helio_pass_voxel_planet::moon::ID.into(), ..Default::default() },
+            ..Default::default()
+        }).unwrap());
+        let moon_dir = DVec3::new(0.31, 1.0, 0.17).normalize();
+        for (view, height, pitch) in [("moon_ground", 1.7, -12.0), ("moon_330", 330.0, -35.0), ("moon_5k", 5_000.0, -40.0), ("moon_orbit", 300_000.0, -70.0)] {
+            let e = flight.planet.surface_point(moon_dir, height);
+            let f = look(e, heading, pitch);
+            flight.settle(view, e, f);
+            for _ in 0..30 {
+                flight.draw(view, e, f);
+            }
+            flight.capture(view);
+            audits.push(flight.audit(view, e, f));
+        }
         let mut groups: BTreeMap<String, Vec<&Sample>> = BTreeMap::new();
         for s in &flight.samples {
-            if s.stage.starts_with("plane") || s.stage.starts_with("infinite") {
+            if s.stage.starts_with("plane") || s.stage.starts_with("infinite") || s.stage.starts_with("moon") {
                 groups.entry(s.stage.clone()).or_default().push(s);
             }
         }
@@ -1059,7 +1077,7 @@ fn main() {
                 stage("planet_primary"), stage("planet_shade"), stage("planet_sunlight")
             );
         }
-        for a in audits.iter().filter(|a| a["name"].as_str().is_some_and(|n| n.starts_with("plane") || n.starts_with("infinite"))) {
+        for a in audits.iter().filter(|a| a["name"].as_str().is_some_and(|n| n.starts_with("plane") || n.starts_with("infinite") || n.starts_with("moon"))) {
             eprintln!("QUICK audit {a}");
         }
         flight.write_csv();

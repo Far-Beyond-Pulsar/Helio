@@ -69,7 +69,7 @@ var<workgroup> g_base: u32;
 var<workgroup> g_fraction: array<atomic<u32>, 32>;
 var<workgroup> g_topology_flags: u32;
 var<workgroup> g_volume: atomic<u32>;
-var<workgroup> g_surface: array<atomic<u32>, 32>;
+var<workgroup> g_surface: array<atomic<u32>, 16>;
 
 @compute @workgroup_size(64)
 fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
@@ -109,7 +109,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         atomicStore(&g_words[li], 0u);
         atomicStore(&g_masks[li], 0u);
     }
-    if li < 32u { atomicStore(&g_surface[li], 0u); }
+    if li < 16u { atomicStore(&g_surface[li], 0u); }
     // This replaces the existing initialization barrier; the edit list is
     // scanned once per workgroup, with no extra terrain query or barrier.
     let topology_flags = workgroupUniformLoad(&g_topology_flags);
@@ -184,7 +184,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let wide_relief = relief && !inline_relief;
     let surface_words = world.sphere.w != 0u;
     let scratch_surface = select(1u, 3u, wide_relief);
-    let scratch_header = scratch_surface + select(0u, 2u, surface_words);
+    let scratch_header = scratch_surface + select(0u, 1u, surface_words);
     if n_band > MAX_BAND {
         if li == 0u { job_out[index].status = 1u; }
         return;
@@ -209,11 +209,11 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let stored_top = select(top - k_lo * 8, base_top - ((k_lo * 8) << level), inline_relief);
     atomicOr(&g_words[li >> 2u], u32(clamp(stored_top, 0, 255)) << ((li & 3u) * 8u));
     if surface_words {
-        let word = terrain_surface(column_point, level + u32(world.grid.w), height) & 0xffffu;
-        atomicOr(&g_surface[li >> 1u], word << ((li & 1u) * 16u));
+        let word = terrain_surface(column_point, level + u32(world.grid.w), height) & 0xffu;
+        atomicOr(&g_surface[li >> 2u], word << ((li & 3u) * 8u));
     }
     workgroupBarrier();
-    if surface_words && li < 32u {
+    if surface_words && li < 16u {
         scratch[(base + scratch_surface) * UNIT_WORDS + li] = atomicLoad(&g_surface[li]);
     }
     if wide_relief && li < 32u {
@@ -298,7 +298,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
 fn run_units(o: JobOut) -> u32 {
     return select(1u, 2u, o.n_band > 32u)
         + select(0u, 2u, (o.pad & INFO_RELIEF) != 0u && (o.pad & INFO_RELIEF_INLINE) == 0u)
-        + select(0u, 2u, world.sphere.w != 0u) + o.n_mixed;
+        + select(0u, 1u, world.sphere.w != 0u) + o.n_mixed;
 }
 
 fn class_of(units: u32) -> u32 {
@@ -445,14 +445,14 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
     let wide_relief = (o.pad & INFO_RELIEF) != 0u && (o.pad & INFO_RELIEF_INLINE) == 0u;
     let surface_words = world.sphere.w != 0u;
     let scratch_surface = select(1u, 3u, wide_relief);
-    let scratch_header = scratch_surface + select(0u, 2u, surface_words);
+    let scratch_header = scratch_surface + select(0u, 1u, surface_words);
     let plain_header = select(1u, 2u, ext);
     let pool_surface = plain_header + select(0u, 2u, wide_relief);
-    let header = pool_surface + select(0u, 2u, surface_words);
+    let header = pool_surface + select(0u, 1u, surface_words);
     if wide_relief && li < 32u {
         pool[(o.run + plain_header) * UNIT_WORDS + li] = scratch[(o.scratch + 1u) * UNIT_WORDS + li];
     }
-    if surface_words && li < 32u {
+    if surface_words && li < 16u {
         pool[(o.run + pool_surface) * UNIT_WORDS + li] = scratch[(o.scratch + scratch_surface) * UNIT_WORDS + li];
     }
     if li < 16u {

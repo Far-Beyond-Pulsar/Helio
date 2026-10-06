@@ -35,74 +35,7 @@ pub struct PlanetFrame {
 
 pub type SharedPlanetFrame = Arc<Mutex<Option<PlanetFrame>>>;
 
-/// How one terrain material looks. Shading knows materials only through
-/// these properties (no material is special), so any generator can define
-/// its own: regolith and basalt on a moon, coloured sands elsewhere.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-pub struct MaterialAppearance {
-    /// sRGB colour in [0, 1] and perceptual roughness.
-    pub colour: [f32; 4],
-    /// Dry, middle and lush world-space patch colours (sRGB), when the
-    /// material varies by patches (turf).
-    pub patches: Option<[[f32; 3]; 3]>,
-    /// Material showing on the sides of this material's surface cells below
-    /// a lip (soil under turf).
-    pub lip: Option<u8>,
-    /// Material of this one's single-voxel flecks and their share, averaged
-    /// into its colour once flecks are below a pixel.
-    pub fleck: Option<(u8, f32)>,
-    /// Material a filtered single-voxel speck of this one blends into.
-    pub speck_host: Option<u8>,
-}
-
-impl Default for MaterialAppearance {
-    fn default() -> Self {
-        Self { colour: [1.0, 0.0, 1.0, 0.9], patches: None, lip: None, fleck: None, speck_host: None }
-    }
-}
-
-/// Number of terrain materials a world can define.
-pub const MATERIALS: usize = 16;
-
-/// Art controls, independent of occupancy, terrain recipes and edit journals.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-pub struct TerrainAppearance {
-    /// Per material id (see [`MaterialAppearance`]).
-    pub materials: [MaterialAppearance; MATERIALS],
-    /// Patch contrast, voxel pigment contrast, edge darkening.
-    pub detail: [f32; 4],
-}
-
-impl Default for TerrainAppearance {
-    /// The built-in generators' materials (`terrain::material`).
-    fn default() -> Self {
-        use crate::terrain::material::*;
-        let colours: [[u8; 3]; MATERIALS] = [
-            [200, 0, 200], [91, 125, 65], [120, 87, 61], [133, 139, 142],
-            [203, 188, 151], [217, 228, 236], [28, 72, 92], [116, 111, 102],
-            [185, 142, 104], [82, 88, 95], [101, 75, 53], [59, 102, 52],
-            [155, 113, 89], [148, 77, 63], [158, 119, 79], [121, 126, 130],
-        ];
-        let roughness = [0.9, 0.94, 0.96, 0.84, 0.93, 0.78, 0.35, 0.9, 0.88, 0.82, 0.97, 0.94, 0.92, 0.86, 0.86, 0.85];
-        let unit = |c: [u8; 3]| c.map(|v| f32::from(v) / 255.0);
-        let mut materials: [MaterialAppearance; MATERIALS] = std::array::from_fn(|i| {
-            let [r, g, b] = unit(colours[i]);
-            MaterialAppearance { colour: [r, g, b, roughness[i]], ..Default::default() }
-        });
-        let turf = &mut materials[GRASS as usize];
-        turf.patches = Some([unit([137, 143, 91]), unit([91, 125, 65]), unit([55, 99, 58])]);
-        turf.lip = Some(DIRT as u8);
-        for speck in [DIRT, SAND] {
-            materials[speck as usize].speck_host = Some(GRASS as u8);
-        }
-        for rock in [STONE, DARK_STONE, SANDSTONE] {
-            materials[rock as usize].fleck = Some((DIRT as u8, 0.125));
-        }
-        Self { materials, detail: [0.75, 0.18, 0.08, 0.0] }
-    }
-}
+pub use crate::terrain::{MaterialAppearance, TerrainAppearance, MATERIALS};
 
 /// `MaterialGpu` of common.wgsl.
 #[repr(C)]
@@ -144,7 +77,9 @@ pub struct Settings {
     /// `PlanetRenderer::column_table`; copies 32 MB per plan).
     pub table_snapshots: bool,
     pub capacity: Capacity,
-    pub appearance: TerrainAppearance,
+    /// Material table and detail; `None` uses the terrain generator's own
+    /// ([`crate::terrain::TerrainField::appearance`]).
+    pub appearance: Option<TerrainAppearance>,
 }
 
 impl Default for Settings {
@@ -162,7 +97,7 @@ impl Default for Settings {
             frame_override: None,
             table_snapshots: false,
             capacity: Capacity::default(),
-            appearance: TerrainAppearance::default(),
+            appearance: None,
         }
     }
 }
@@ -881,6 +816,8 @@ pub struct PlanetRenderer {
     /// Divides the level-0 distance while demand exceeds the record or pool
     /// capacity (>= 1; see `update_lod_pressure`).
     lod_pressure: f64,
+    /// Failed jobs counted at the last pressure step.
+    pressure_failed_jobs: usize,
     last_pressure_update: u64,
     /// The pool ran short (from readbacks); last frame that recycled pages.
     pool_pressure: bool,
@@ -975,6 +912,7 @@ impl PlanetRenderer {
             pool_pressure: false,
             last_recycle: 0,
             lod_pressure: 1.0,
+            pressure_failed_jobs: 0,
             last_pressure_update: 0,
             last_jobs: 0,
             last_eye: None,
@@ -1093,8 +1031,9 @@ impl PlanetRenderer {
         // Appearance is public in sRGB; convert once per frame, not per pixel.
         let clean = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
         let linear = |c: [f32; 4]| [clean(c[0]).powf(2.2), clean(c[1]).powf(2.2), clean(c[2]).powf(2.2), clean(c[3])];
+        let appearance = self.settings.appearance.unwrap_or_else(|| planet.field().appearance());
         frame.materials = std::array::from_fn(|id| {
-            let m = &self.settings.appearance.materials[id];
+            let m = &appearance.materials[id];
             let link = |other: Option<u8>| other.filter(|&o| usize::from(o) < MATERIALS).map_or(id as u32, u32::from);
             let rgb = |c: [f32; 3]| linear([c[0], c[1], c[2], 1.0]);
             let mut patches = [[0.0; 4]; 3];
@@ -1109,7 +1048,7 @@ impl PlanetRenderer {
                 links: [link(m.lip), link(fleck), link(m.speck_host), (share * 65_536.0) as u32],
             }
         });
-        frame.detail = self.settings.appearance.detail.map(clean);
+        frame.detail = appearance.detail.map(clean);
         frame.hints[2] = u32::from(self.settings.far_relief);
         frame.hints[3] = (if self.settings.coarse_relief { 8 } else { 0 }) | (if self.settings.ridge_display { 16 } else { 0 });
         for face in 0..6u8 {
@@ -1340,16 +1279,21 @@ impl PlanetRenderer {
         let records = (rs.resident_columns + rs.pending_columns) as f64 / f64::from(cap.records);
         // `free_units` is 0 until the first allocator readback.
         let pool = if self.stats.free_units == 0 { 0.0 } else { 1.0 - self.stats.free_units as f64 / f64::from(cap.pool_units) };
+        // No free page and jobs waiting to retry: the free units left belong
+        // to other size classes, so the pool is full for the columns wanted
+        // (counting units alone left a fragmented pool failing forever).
+        let starved = self.stats.free_pages == 0 && self.stats.free_units != 0 && self.stats.failed_jobs > self.pressure_failed_jobs;
+        self.pressure_failed_jobs = self.stats.failed_jobs;
         // Only wanted columns count: removals a pressure step itself queues
         // must not raise it further. A still camera's backlog is loading,
         // not churn: it never raises pressure and never blocks recovery.
         let outstanding = rs.pending_columns + self.plan.queued_adds;
         let backlog = if moving { outstanding as f64 / (rs.resident_columns + outstanding).max(1) as f64 } else { 0.0 };
-        let pressure = if records > 0.85 || pool > 0.85 || (backlog > 0.1 && outstanding > 50_000) {
+        let pressure = if records > 0.85 || pool > 0.85 || starved || (backlog > 0.1 && outstanding > 50_000) {
             // Churn falls with the square of the pressure; a deep backlog
             // (fast flight at high resolution) takes bigger steps.
             (self.lod_pressure * if backlog > 0.25 { 1.25 } else { 1.1 }).min(4.0)
-        } else if records < 0.65 && pool < 0.65 && backlog < 0.02 {
+        } else if records < 0.65 && pool < 0.65 && !starved && backlog < 0.02 {
             (self.lod_pressure / 1.05).max(1.0)
         } else {
             self.lod_pressure
@@ -1889,9 +1833,10 @@ impl PlanetPass {
             r.set_profiling(enabled);
         }
     }
-    /// Change the art without touching residency or the world. Returns true
-    /// when it changed (temporal colour history should be reset).
-    pub fn set_appearance(&mut self, appearance: TerrainAppearance) -> bool {
+    /// Change the art without touching residency or the world (`None`: the
+    /// terrain generator's own). Returns true when it changed (temporal
+    /// colour history should be reset).
+    pub fn set_appearance(&mut self, appearance: Option<TerrainAppearance>) -> bool {
         if self.settings.appearance == appearance {
             return false;
         }
@@ -2082,7 +2027,7 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
     let k = top - extent.x - 1 + rem_floor(e.w, max(extent.x + extent.y + 2, 1));
     let q = volume_point(u32(a.x), a.y, a.z, k, level);
     let cell = terrain_cell(p, q, level, top, k);
-    let surface = terrain_surface(p, level + u32(world.grid.w), height) & 0xffffu;
+    let surface = terrain_surface(p, level + u32(world.grid.w), height) & 0xffu;
     verify_out[id.x] = vec4<i32>(height, i32(ground_material(p, surface, e.x, e.y, e.z, e.w)),
         i32(cell) | (extent.x << 1u) | (extent.y << 16u), (q.x ^ q.y ^ q.z) + i32(surface) * 7919);
 }
@@ -2153,7 +2098,7 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
         let k = top - below - 1 + e.w.rem_euclid((below + above + 2).max(1));
         let q = grid.volume_point(a.x as u8, a.y, a.z, k, level);
         let cell = field.cell(p, q, level, top, k) as i32;
-        let surface = field.surface(p, level + grid.level_offset(), height) & 0xffff;
+        let surface = field.surface(p, level + grid.level_offset(), height) & 0xff;
         let cpu = [
             height,
             field.ground_material(p, surface, e.x, e.y, e.z, e.w) as i32,

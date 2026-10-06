@@ -129,7 +129,7 @@ pub struct LandformVolume {
 /// Quantile of [`noise`] (in units of [`ONE`]), from 400k samples: symmetric,
 /// standard deviation 0.27, slightly lighter tails than a Gaussian
 /// (`tests::noise_distribution_quantiles`).
-fn noise_quantile(p: f64) -> f64 {
+pub(crate) fn noise_quantile(p: f64) -> f64 {
     const TABLE: [(f64, f64); 6] = [(0.5, 0.0), (0.75, 0.1937), (0.9, 0.3533), (0.95, 0.446), (0.99, 0.5851), (1.0, 0.75)];
     let (sign, p) = if p < 0.5 { (-1.0, 1.0 - p) } else { (1.0, p) };
     let mut value = TABLE[5].1;

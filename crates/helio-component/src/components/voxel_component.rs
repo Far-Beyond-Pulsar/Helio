@@ -638,6 +638,79 @@ impl Default for VoxelFlatTerrainComponent {
     }
 }
 
+/// Settings of the moon generator (`helio.moon`): cratered highlands and
+/// dark basalt maria over regolith. It configures the
+/// [`VoxelTerrainComponent`] on the same entity; the base component's seed
+/// varies the moon.
+#[engine_class(category = "Voxel/Terrain", clone, debug, serialize, deserialize)]
+#[category("Highlands", category_color = "#9A9890")]
+#[category("Maria", category_color = "#55565A")]
+#[category("Craters", category_color = "#C4C2BC")]
+#[category("Ground", category_color = "#8E8C87")]
+#[serde(default)]
+pub struct VoxelMoonComponent {
+    /// Height of the rolling highlands, in metres.
+    #[property(min = 0.0, max = 20000.0, step = 10.0, category = "Highlands", label = "Highland height (m)")]
+    pub highland_m: f64,
+    /// Wavelength of the highlands, in kilometres.
+    #[property(min = 1.0, max = 5000.0, step = 1.0, category = "Highlands", label = "Highland size (km)")]
+    pub highland_km: f64,
+    /// Rough share of the surface in dark basalt maria.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Maria", label = "Maria (share)")]
+    pub mare_share: f64,
+    /// Size of the maria, in kilometres.
+    #[property(min = 1.0, max = 10000.0, step = 1.0, category = "Maria", label = "Mare size (km)")]
+    pub mare_km: f64,
+    /// Depth of the maria below the highlands, in metres.
+    #[property(min = 0.0, max = 20000.0, step = 10.0, category = "Maria", label = "Mare depth (m)")]
+    pub mare_depth_m: f64,
+    /// Diameter of the largest craters, in kilometres.
+    #[property(min = 0.01, max = 2000.0, step = 0.5, category = "Craters", label = "Largest crater (km)")]
+    pub crater_km: f64,
+    /// Number of crater sizes, each half the previous one.
+    #[property(min = 0.0, max = 12.0, step = 1.0, category = "Craters", label = "Crater sizes")]
+    pub crater_octaves: u32,
+    /// Share of the surface lattice holding a crater at the largest size.
+    #[property(min = 0.0, max = 0.95, step = 0.01, category = "Craters", label = "Crater density")]
+    pub crater_density: f64,
+    /// Density growth from one crater size to the next smaller one.
+    #[property(min = 0.5, max = 3.0, step = 0.05, category = "Craters", label = "Density growth")]
+    pub crater_density_growth: f64,
+    /// Depth of a simple crater as a fraction of its diameter.
+    #[property(min = 0.0, max = 0.5, step = 0.01, category = "Craters", label = "Depth ratio")]
+    pub crater_depth_ratio: f64,
+    /// Rim height as a fraction of the crater depth.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Craters", label = "Rim ratio")]
+    pub crater_rim_ratio: f64,
+    /// Share of craters young enough to show bright ejecta.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Craters", label = "Fresh craters (share)")]
+    pub fresh_share: f64,
+    /// Regolith depth over the bedrock, in metres.
+    #[property(min = 0.0, max = 100.0, step = 0.5, category = "Ground", label = "Regolith depth (m)")]
+    pub regolith_m: f64,
+}
+
+impl Default for VoxelMoonComponent {
+    /// The moon generator's own defaults.
+    fn default() -> Self {
+        Self {
+            highland_m: 1_500.0,
+            highland_km: 250.0,
+            mare_share: 0.3,
+            mare_km: 900.0,
+            mare_depth_m: 1_200.0,
+            crater_km: 40.0,
+            crater_octaves: 10,
+            crater_density: 0.3,
+            crater_density_growth: 1.25,
+            crater_depth_ratio: 0.2,
+            crater_rim_ratio: 0.3,
+            fresh_share: 0.15,
+            regolith_m: 4.0,
+        }
+    }
+}
+
 // SceneDB component methods are the stable scripting/registry surface for
 // individual edits and bounded brush batches. The editor uses
 // `VoxelSourceSession` for asynchronous, generation-checked brush strokes.

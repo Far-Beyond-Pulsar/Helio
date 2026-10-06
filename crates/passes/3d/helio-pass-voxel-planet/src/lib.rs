@@ -12,6 +12,7 @@ pub mod edits;
 pub mod grid;
 pub mod journal;
 pub mod landform;
+pub mod moon;
 pub mod noise;
 pub mod planet;
 pub mod residency;

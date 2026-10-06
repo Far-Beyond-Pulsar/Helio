@@ -12,6 +12,7 @@ fn terrain_programs_are_bit_identical_to_cpu() {
     let Some(gpu) = gpu() else { return };
     use helio_pass_voxel_planet::grid::Shape;
     use helio_pass_voxel_planet::TerrainSource;
+    let moon = TerrainSource { generator: helio_pass_voxel_planet::moon::ID.into(), ..Default::default() };
     let flat = TerrainSource { generator: helio_pass_voxel_planet::landform::FLAT_ID.into(), version: helio_pass_voxel_planet::landform::FLAT_VERSION, settings: r#"{"height_m": -1.25, "soil_depth_m": 2.0}"#.into(), ..Default::default() };
     for (shape, size, terrain) in [
         (Shape::Sphere, 0.1, TerrainSource::default()),
@@ -22,6 +23,10 @@ fn terrain_programs_are_bit_identical_to_cpu() {
         (Shape::InfinitePlane, 1.0, TerrainSource::default()),
         (Shape::Plane, 0.1, flat.clone()),
         (Shape::Sphere, 0.1, flat),
+        (Shape::Sphere, 0.1, moon.clone()),
+        (Shape::Sphere, 1.0, moon.clone()),
+        (Shape::Plane, 0.1, moon.clone()),
+        (Shape::InfinitePlane, 0.1, moon),
     ] {
         let planet = Planet::new(PlanetRecipe { shape, voxel_size_m: size, plane_size_m: 5_000.0, terrain: terrain.clone(), ..Default::default() }).unwrap();
         helio_pass_voxel_planet::engine::verify_field(&gpu.device, &gpu.queue, &planet, 20_000)
@@ -471,7 +476,7 @@ fn published_tops_bound_occupancy() {
     let (mut columns, mut bad) = (0usize, 0usize);
     let (mut volumetric, mut wrong_tops) = (0usize, 0usize);
     // Programs with a surface word store it after the header and relief.
-    let surface_units = if planet.field().program().wgsl.contains("fn terrain_surface") { 2 } else { 0 };
+    let surface_units = if planet.field().program().wgsl.contains("fn terrain_surface") { 1 } else { 0 };
     for c in rec.chunks_exact(8) {
         let info = c[3];
         if info & 0xc000_0000 != 0x8000_0000 {

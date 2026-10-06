@@ -20,7 +20,7 @@
 //! ```
 //!
 //! and optionally a surface word per column cell, computed once when the
-//! column is generated and stored with it (16 bits): whatever the materials
+//! column is generated and stored with it (8 bits): whatever the materials
 //! need besides height (biome, sediment, crater age), so shading never
 //! runs the generator per pixel.
 //!
@@ -136,7 +136,7 @@ pub trait TerrainField: Send + Sync + 'static {
     /// per cell, and `layer` the cell's layer index (0 is the layer just
     /// above the datum).
     fn ground_material(&self, p: IVec3, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32;
-    /// Surface word (16 bits) of the column at `p` whose height is `height`
+    /// Surface word (8 bits) of the column at `p` whose height is `height`
     /// (`terrain_surface` in WGSL, stored per column cell at generation):
     /// inputs of the materials besides height. 0 when the program has none.
     fn surface(&self, _p: IVec3, _level: u32, _height: i32) -> u32 {
@@ -173,7 +173,81 @@ pub trait TerrainField: Send + Sync + 'static {
     fn volume_bounds(&self) -> (i32, i32) {
         (0, 0)
     }
+    /// The generator's own material table and detail (the renderer's
+    /// appearance unless the world overrides it).
+    fn appearance(&self) -> TerrainAppearance {
+        TerrainAppearance::default()
+    }
     fn program(&self) -> TerrainProgram;
+}
+
+/// How one terrain material looks. Shading knows materials only through
+/// these properties (no material is special), so any generator can define
+/// its own: regolith and basalt on a moon, coloured sands elsewhere.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MaterialAppearance {
+    /// sRGB colour in [0, 1] and perceptual roughness.
+    pub colour: [f32; 4],
+    /// Dry, middle and lush world-space patch colours (sRGB), when the
+    /// material varies by patches (turf).
+    pub patches: Option<[[f32; 3]; 3]>,
+    /// Material showing on the sides of this material's surface cells below
+    /// a lip (soil under turf).
+    pub lip: Option<u8>,
+    /// Material of this one's single-voxel flecks and their share, averaged
+    /// into its colour once flecks are below a pixel.
+    pub fleck: Option<(u8, f32)>,
+    /// Material a filtered single-voxel speck of this one blends into.
+    pub speck_host: Option<u8>,
+}
+
+impl Default for MaterialAppearance {
+    fn default() -> Self {
+        Self { colour: [1.0, 0.0, 1.0, 0.9], patches: None, lip: None, fleck: None, speck_host: None }
+    }
+}
+
+/// Number of terrain materials a world can define.
+pub const MATERIALS: usize = 16;
+
+/// Art controls, independent of occupancy, terrain recipes and edit journals.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerrainAppearance {
+    /// Per material id (see [`MaterialAppearance`]).
+    pub materials: [MaterialAppearance; MATERIALS],
+    /// Patch contrast, voxel pigment contrast, edge darkening.
+    pub detail: [f32; 4],
+}
+
+impl Default for TerrainAppearance {
+    /// The built-in generators' materials (`terrain::material`).
+    fn default() -> Self {
+        use crate::terrain::material::*;
+        let colours: [[u8; 3]; MATERIALS] = [
+            [200, 0, 200], [91, 125, 65], [120, 87, 61], [133, 139, 142],
+            [203, 188, 151], [217, 228, 236], [28, 72, 92], [116, 111, 102],
+            [185, 142, 104], [82, 88, 95], [101, 75, 53], [59, 102, 52],
+            [155, 113, 89], [148, 77, 63], [158, 119, 79], [121, 126, 130],
+        ];
+        let roughness = [0.9, 0.94, 0.96, 0.84, 0.93, 0.78, 0.35, 0.9, 0.88, 0.82, 0.97, 0.94, 0.92, 0.86, 0.86, 0.85];
+        let unit = |c: [u8; 3]| c.map(|v| f32::from(v) / 255.0);
+        let mut materials: [MaterialAppearance; MATERIALS] = std::array::from_fn(|i| {
+            let [r, g, b] = unit(colours[i]);
+            MaterialAppearance { colour: [r, g, b, roughness[i]], ..Default::default() }
+        });
+        let turf = &mut materials[GRASS as usize];
+        turf.patches = Some([unit([137, 143, 91]), unit([91, 125, 65]), unit([55, 99, 58])]);
+        turf.lip = Some(DIRT as u8);
+        for speck in [DIRT, SAND] {
+            materials[speck as usize].speck_host = Some(GRASS as u8);
+        }
+        for rock in [STONE, DARK_STONE, SANDSTONE] {
+            materials[rock as usize].fleck = Some((DIRT as u8, 0.125));
+        }
+        Self { materials, detail: [0.75, 0.18, 0.08, 0.0] }
+    }
 }
 
 /// What a generator is, for registration and editor pickers.
@@ -231,6 +305,7 @@ fn registry() -> &'static Registry {
         for generator in [
             Arc::new(crate::landform::LandformGenerator) as Arc<dyn TerrainGenerator>,
             Arc::new(crate::landform::FlatGenerator),
+            Arc::new(crate::moon::MoonGenerator),
         ] {
             map.insert(generator.info().id, generator);
         }
