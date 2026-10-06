@@ -735,7 +735,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         let material_layer = surface_material_layer(top, material_fraction, level,
             sample_layer, material_depth, code, smooth_w, material_relief,
             (c.info & INFO_TOPOLOGY) != 0u);
-        material = ground_material(p, climate_height, material_depth, slope, material_layer);
+        material = ground_material(p, column_surface(c, x, y), climate_height, material_depth, slope, material_layer);
         speck = (material & M_SPECK) != 0u;
         material &= M_ID;
     }

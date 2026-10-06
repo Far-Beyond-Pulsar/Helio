@@ -61,7 +61,7 @@ fn relief_hit_respects_requested_trace_range() {
     floats(&mut frame, 528, &[0.05, 0.0, 0.0, 1000.0]);
     floats(&mut frame, 544, &[1.0, 1.0, 0.0, 0.0]);
     ints(&mut frame, 576, &[0, 0, 0, 4]);
-    let mut world = vec![0u8; 128];
+    let mut world = vec![0u8; 144];
     ints(&mut world, 0, &[1024, 100, 1024, 0]);
     let mut record = vec![0u8; 32];
     ints(

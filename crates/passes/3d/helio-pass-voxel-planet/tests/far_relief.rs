@@ -33,7 +33,7 @@ impl TerrainField for BroadRelief {
     fn height(&self, p: IVec3, _: u32) -> i32 {
         (1_000_000 + (p.x >> 2) * 3 / 2 + (p.z >> 2)).clamp(-4_000_000, 4_000_000)
     }
-    fn ground_material(&self, _: IVec3, _: i32, _: i32, _: i32, _: i32) -> u32 {
+    fn ground_material(&self, _: IVec3, _: u32, _: i32, _: i32, _: i32, _: i32) -> u32 {
         material::GRASS
     }
     fn height_range(&self) -> (i32, i32) {
@@ -52,7 +52,7 @@ struct TerrainConstants { pad: vec4<i32>, }
 fn terrain_height(p: vec3<i32>, level: u32) -> i32 {
     return clamp(1000000 + (p.x >> 2u) * 3 / 2 + (p.z >> 2u), -4000000, 4000000);
 }
-fn ground_material(p: vec3<i32>, top: i32, depth: i32, slope: i32, layer: i32) -> u32 { return M_GRASS; }
+fn ground_material(p: vec3<i32>, surface:u32, top: i32, depth: i32, slope: i32, layer: i32) -> u32 { return M_GRASS; }
 "#,
             ),
         }
@@ -94,7 +94,7 @@ impl TerrainField for CutDepth {
     fn height(&self, p: IVec3, level: u32) -> i32 {
         BroadRelief.height(p, level)
     }
-    fn ground_material(&self, _: IVec3, _: i32, depth: i32, _: i32, _: i32) -> u32 {
+    fn ground_material(&self, _: IVec3, _: u32, _: i32, depth: i32, _: i32, _: i32) -> u32 {
         if i64::from(depth) * i64::from(self.0) > 2000 {
             material::STONE
         } else {
@@ -117,7 +117,7 @@ impl TerrainField for CutDepth {
                 r#"
 struct TerrainConstants { params: vec4<i32>, }
 fn terrain_height(p: vec3<i32>, level: u32) -> i32 { return clamp(1000000 + (p.x>>2u)*3/2 + (p.z>>2u), -4000000, 4000000); }
-fn ground_material(p: vec3<i32>, top:i32, depth:i32, slope:i32, layer:i32) -> u32 {
+fn ground_material(p: vec3<i32>, surface:u32, top:i32, depth:i32, slope:i32, layer:i32) -> u32 {
     return select(M_GRASS, M_STONE, depth * terrain.params.x > 2000);
 }
 "#,
@@ -770,7 +770,7 @@ fn distant_add_remove_cut_faces_keep_native_normals() {
                     let expected_material =
                         original
                             .field()
-                            .ground_material(IVec3::ZERO, 0, depth, 0, 0);
+                            .ground_material(IVec3::ZERO, 0, 0, depth, 0, 0);
                     assert_eq!(
                         mat, expected_material,
                         "Remove material depth oracle at {h:?}, depth{depth}"

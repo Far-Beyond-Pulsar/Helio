@@ -36,7 +36,7 @@ impl TerrainField for SlopeThreshold {
     fn height(&self, p: IVec3, _: u32) -> i32 {
         (1_000_000 + (p.x >> 2) * 12).clamp(-4_000_000, 4_000_000)
     }
-    fn ground_material(&self, _: IVec3, _: i32, _: i32, slope: i32, _: i32) -> u32 {
+    fn ground_material(&self, _: IVec3, _: u32, _: i32, _: i32, slope: i32, _: i32) -> u32 {
         if slope >= 2 {
             material::BRICK
         } else {
@@ -59,7 +59,7 @@ impl TerrainField for SlopeThreshold {
                 r#"
 struct TerrainConstants { pad: vec4<i32>, }
 fn terrain_height(p:vec3<i32>,level:u32)->i32 { return clamp(1000000+(p.x>>2u)*12,-4000000,4000000); }
-fn ground_material(p:vec3<i32>,top:i32,depth:i32,slope:i32,layer:i32)->u32 { return select(M_GRASS,M_BRICK,slope>=2); }
+fn ground_material(p:vec3<i32>,surface:u32, top:i32,depth:i32,slope:i32,layer:i32)->u32 { return select(M_GRASS,M_BRICK,slope>=2); }
 "#,
             ),
         }

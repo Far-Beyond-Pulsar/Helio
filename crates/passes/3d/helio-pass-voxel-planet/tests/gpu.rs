@@ -470,6 +470,8 @@ fn published_tops_bound_occupancy() {
     let pool = words(pool);
     let (mut columns, mut bad) = (0usize, 0usize);
     let (mut volumetric, mut wrong_tops) = (0usize, 0usize);
+    // Programs with a surface word store it after the header and relief.
+    let surface_units = if planet.field().program().wgsl.contains("fn terrain_surface") { 2 } else { 0 };
     for c in rec.chunks_exact(8) {
         let info = c[3];
         if info & 0xc000_0000 != 0x8000_0000 {
@@ -486,7 +488,7 @@ fn published_tops_bound_occupancy() {
         let relief = info & 0x1000_0000 != 0;
         let inline = info & 0x0400_0000 != 0;
         let heightfield = info & 0x0200_0000 != 0;
-        let header = (if ext { 2 } else { 1 }) + if relief && !inline { 2 } else { 0 };
+        let header = (if ext { 2 } else { 1 }) + (if relief && !inline { 2 } else { 0 }) + surface_units;
         if relief {
             assert!(n_band < 32 || (n_band == 32 && gap > 0), "fractional tops overflow their packed byte range");
         }

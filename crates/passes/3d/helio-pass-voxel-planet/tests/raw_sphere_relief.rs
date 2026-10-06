@@ -38,7 +38,7 @@ impl TerrainField for RawSphereField {
     fn height(&self, p: IVec3, _: u32) -> i32 {
         1_000_000 + (p.x >> 2) + (p.z >> 3)
     }
-    fn ground_material(&self, _: IVec3, _: i32, _: i32, _: i32, _: i32) -> u32 {
+    fn ground_material(&self, _: IVec3, _: u32, _: i32, _: i32, _: i32, _: i32) -> u32 {
         material::GRASS
     }
     fn height_range(&self) -> (i32, i32) {
@@ -58,7 +58,7 @@ impl TerrainField for RawSphereField {
                 r#"
 struct TerrainConstants { pad:vec4<i32>, }
 fn terrain_height(p:vec3<i32>,level:u32)->i32{return 1000000+(p.x>>2u)+(p.z>>3u);}
-fn ground_material(p:vec3<i32>,top:i32,depth:i32,slope:i32,layer:i32)->u32{return M_GRASS;}
+fn ground_material(p:vec3<i32>,surface:u32, top:i32,depth:i32,slope:i32,layer:i32)->u32{return M_GRASS;}
 "#,
             ),
         }

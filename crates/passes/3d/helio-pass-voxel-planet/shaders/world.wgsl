@@ -6,7 +6,7 @@ struct World {
     grid: vec4<i32>,  // reference cells, layer thickness (mm), grid cells, level offset
     scale: vec4<u32>, // domain scale (Q24), volume inv, volume shift, half layer (Q16 domain units)
     bounds: array<vec4<i32>, 6>, // per-level finer-surface excess (level cells)
-    sphere: vec4<u32>, // sphere domain: 1 / reference (inv, shift), domain radius, pad
+    sphere: vec4<u32>, // sphere domain: 1 / reference (inv, shift), domain radius; w: surface words stored
 }
 
 // Engine material ids (terrain::material).

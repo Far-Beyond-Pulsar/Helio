@@ -19,7 +19,7 @@ fn grazing_soil_lip_filters_radial_coverage_and_preserves_protected_faces() {
         .split(';').next().unwrap();
     assert!(surface.contains("if axis < 2u && material_lip(material) != material {"));
     assert!(surface.contains("soil_coverage * (1.0 - appearance_w)"));
-    assert!(surface.contains("ground_material(p, climate_height, material_depth, slope, material_layer)"));
+    assert!(surface.contains("ground_material(p, column_surface(c, x, y), climate_height, material_depth, slope, material_layer)"));
     let Some(gpu) = gpu() else { return };
     let source = format!(r#"
         struct Column {{info:u32, fit:u32}}
@@ -163,7 +163,7 @@ fn grazing_projection_uses_actual_support_and_preserves_edit_guards() {
     // Projected appearance is not an input to canonical classification or
     // the existing material-depth/layer selection.
     assert!(surface.contains("let top_material = code < 4u && smooth_w > 0.5;"));
-    assert!(surface.contains("ground_material(p, climate_height, material_depth, slope, material_layer)"));
+    assert!(surface.contains("ground_material(p, column_surface(c, x, y), climate_height, material_depth, slope, material_layer)"));
     let Some(gpu) = gpu() else { return };
     let source = format!(r#"
         struct Column {{info:u32}}
@@ -371,9 +371,9 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
             var fine_ids:vec3<f32>;
             var coarse_ids:vec3<f32>;
             for (var w=0u;w<3u;w++) {{
-                fine_ids[w]=f32(ground_material(point,1000000,0,
+                fine_ids[w]=f32(ground_material(point,0u,1000000,0,
                     filtered_material_slope(block,stair_local,weights[w],0u),9999)&M_ID);
-                coarse_ids[w]=f32(ground_material(point,1000000,0,
+                coarse_ids[w]=f32(ground_material(point,0u,1000000,0,
                     filtered_material_slope(block,stair_local,weights[w],1u),9999)&M_ID);
             }}
             answers[id.x*13u+11u]=vec4<f32>(fine_ids,stair_local);
@@ -553,12 +553,12 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                 assert_eq!(pair[12][3],canonical_slope as f32,"GPU block support disagrees with CPU query");
                 let point=glam::IVec3::new((helio_pass_voxel_planet::noise::hash3(index as i32,0,0,123)&0xffffff) as i32*2+1,
                     1<<27,(helio_pass_voxel_planet::noise::hash3(index as i32,2,0,123)&0xffffff) as i32*2+1);
-                let canonical_id=landform::ground_material(&terrain_constants,point,1000000,0,canonical_slope,9999)&terrain::material::ID;
+                let canonical_id=landform::ground_material(&terrain_constants,point,0,1000000,0,canonical_slope,9999)&terrain::material::ID;
                 assert_eq!(&pair[11][..3],&[canonical_id as f32;3],
                     "filtered L0 material disagrees with canonical CPU query at phase{offset}/cell{cell}");
                 for (w,weight) in [0.0,0.5,1.0].into_iter().enumerate() {
                     let coarse_slope=(f64::from(canonical_slope)*(1.0-weight)+local*weight) as i32;
-                    let expected=landform::ground_material(&terrain_constants,point,1000000,0,coarse_slope,9999)&terrain::material::ID;
+                    let expected=landform::ground_material(&terrain_constants,point,0,1000000,0,coarse_slope,9999)&terrain::material::ID;
                     assert_eq!(pair[12][w],expected as f32,"existing coarse material blend changed");
                 }
                 let phase=index&7;

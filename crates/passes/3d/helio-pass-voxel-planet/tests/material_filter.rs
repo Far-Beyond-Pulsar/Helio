@@ -57,30 +57,30 @@ fn unresolved_outcrop_preserves_canonical_ids_and_mean_palette() {
             if id.x>=arrayLength(&points) {{return;}}
             let p=points[id.x].xyz;
             material_footprint=0.0;
-            let canonical=ground_material(p,4000000,0,5,39999);
+            let canonical=ground_material(p,0u,4000000,0,5,39999);
             material_footprint=0.1;
-            let near=ground_material(p,4000000,0,5,39999);
+            let near=ground_material(p,0u,4000000,0,5,39999);
             let near_disabled=u32(material_mix.x<0.0);
             material_footprint=128.0;
-            let far=ground_material(p,4000000,0,5,39999);
+            let far=ground_material(p,0u,4000000,0,5,39999);
             coverage[id.x*4u]=material_mix;
             let far_rock=material_mix_ids.y;
             // The 6.4m octave is unresolved here; the 51.2m octave remains.
             material_footprint=6.4;
-            let middle=ground_material(p,4000000,0,5,39999);
+            let middle=ground_material(p,0u,4000000,0,5,39999);
             coverage[id.x*4u+1u]=material_mix;
             let middle_rock=material_mix_ids.y;
             material_footprint=0.0;
-            let reset=ground_material(p,4000000,0,5,39999);
+            let reset=ground_material(p,0u,4000000,0,5,39999);
             answers[id.x*4u]=vec4<u32>(canonical,near,far,middle);
             answers[id.x*4u+1u]=vec4<u32>(far_rock,middle_rock,near_disabled,u32(material_mix.x<0.0 && reset==canonical));
             // Below every snowline, a steep natural rock face also has dirt
             // flecks. Metadata changes appearance, never its canonical ID.
-            let below=ground_material(p,1500000,0,20,14999);
+            let below=ground_material(p,0u,1500000,0,20,14999);
             let below_base=material_fleck_base;
             let near_colour=palette(below);
             material_footprint=128.0;
-            let below_far=ground_material(p,1500000,0,20,14999);
+            let below_far=ground_material(p,0u,1500000,0,20,14999);
             let far_base=material_fleck_base;
             var far_colour=palette(below_far);
             if far_base!=M_AIR {{far_colour=filtered_rock_flecks(far_colour,1.0,far_base,1.0);}}
@@ -88,7 +88,7 @@ fn unresolved_outcrop_preserves_canonical_ids_and_mean_palette() {
             coverage[id.x*4u+3u]=vec4<f32>(far_colour,0.0);
             let snow_disabled=u32(material_mix.x<0.0);
             let stone_coverage=material_coverage;
-            let basin=ground_material(p,-1000,0,0,0);
+            let basin=ground_material(p,0u,-1000,0,0,0);
             answers[id.x*4u+2u]=vec4<u32>(below,below_far,below_base,far_base);
             answers[id.x*4u+3u]=vec4<u32>(snow_disabled,u32(material_fleck_base==M_AIR),basin,bitcast<u32>(stone_coverage));
         }}

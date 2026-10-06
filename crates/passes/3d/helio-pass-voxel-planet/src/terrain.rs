@@ -16,7 +16,16 @@
 //! ```wgsl
 //! struct TerrainConstants { /* the bytes of TerrainProgram::constants */ }
 //! fn terrain_height(p: vec3<i32>, level: u32) -> i32
-//! fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32
+//! fn ground_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32
+//! ```
+//!
+//! and optionally a surface word per column cell, computed once when the
+//! column is generated and stored with it (16 bits): whatever the materials
+//! need besides height (biome, sediment, crater age), so shading never
+//! runs the generator per pixel.
+//!
+//! ```wgsl
+//! fn terrain_surface(p: vec3<i32>, level: u32, height: i32) -> u32
 //! ```
 //!
 //! and optionally, for volumetric terrain (caves, overhangs, arches),
@@ -119,13 +128,20 @@ pub trait TerrainField: Send + Sync + 'static {
     /// centred at domain point `p` whose footprint is `2^level` reference
     /// cells.
     fn height(&self, p: IVec3, level: u32) -> i32;
-    /// Material of a solid ground cell: `top_height` is its column's top
+    /// Material of a solid ground cell: `surface` is its column cell's
+    /// surface word ([`Self::surface`]), `top_height` its column's top
     /// ([`HEIGHT_ONE`] units, a whole number of voxel layers), `depth` the
     /// cells below the column top (0 is the exposed top cell), `slope` the
     /// ground slope across the cell's 8x8 column block in eighths of a cell
     /// per cell, and `layer` the cell's layer index (0 is the layer just
     /// above the datum).
-    fn ground_material(&self, p: IVec3, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32;
+    fn ground_material(&self, p: IVec3, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32;
+    /// Surface word (16 bits) of the column at `p` whose height is `height`
+    /// (`terrain_surface` in WGSL, stored per column cell at generation):
+    /// inputs of the materials besides height. 0 when the program has none.
+    fn surface(&self, _p: IVec3, _level: u32, _height: i32) -> u32 {
+        0
+    }
     /// Lowest and highest height any column can have at any level.
     fn height_range(&self) -> (i32, i32);
     /// Per grid level `L >= 1`: how many level-`L` cells the top of any

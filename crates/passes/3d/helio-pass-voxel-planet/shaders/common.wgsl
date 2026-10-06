@@ -160,9 +160,23 @@ fn column_top_cell(c: Column) -> i32 {
     return (c.k_lo + i32(band_count(c))) * 8 - i32((c.info >> 22u) & 7u);
 }
 
+// Header units: the tops (and extension masks), wide relief fractions, then
+// the surface words when the program has them (one 16-bit word per cell).
 fn header_units(c: Column) -> u32 {
+    return surface_unit(c) + select(0u, 2u, world.sphere.w != 0u);
+}
+
+fn surface_unit(c: Column) -> u32 {
     return select(1u, 2u, (c.info & INFO_EXT) != 0u)
         + select(0u, 2u, (c.info & INFO_RELIEF) != 0u && (c.info & INFO_RELIEF_INLINE) == 0u);
+}
+
+// Surface word of column cell (x, y) (`terrain_surface`); 0 without them.
+fn column_surface(c: Column, x: u32, y: u32) -> u32 {
+    if world.sphere.w == 0u { return 0u; }
+    let cell = x + y * 8u;
+    let word = pool[(c.run + surface_unit(c)) * UNIT_WORDS + (cell >> 1u)];
+    return (word >> ((cell & 1u) * 16u)) & 0xffffu;
 }
 
 // Brick state of band brick `b`: 0 air, 1 solid, 2 mixed. Also returns the

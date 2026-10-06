@@ -292,7 +292,8 @@ struct WorldGpu {
     /// domain scale (Q24), pad.
     scale: [u32; 4],
     bounds: [[i32; 4]; 6],
-    /// sphere domain constants (`Grid::sphere_constants`).
+    /// sphere domain constants (`Grid::sphere_constants`); w: columns store
+    /// a surface word per cell.
     sphere: [u32; 4],
 }
 
@@ -307,7 +308,11 @@ impl WorldGpu {
                 [g.domain_scale(), inv, shift, layer_q16]
             },
             bounds: std::array::from_fn(|i| std::array::from_fn(|j| m[i * 4 + j])),
-            sphere: g.sphere_constants(),
+            sphere: {
+                let mut sphere = g.sphere_constants();
+                sphere[3] = u32::from(planet.field().program().wgsl.contains("fn terrain_surface"));
+                sphere
+            },
         }
     }
 }
@@ -330,6 +335,10 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -
     let mut s = String::from(include_str!("../shaders/noise.wgsl"));
     s.push_str(include_str!("../shaders/world.wgsl"));
     s.push_str(&program.wgsl);
+    if !program.wgsl.contains("fn terrain_surface") {
+        // No surface word: columns store none (`World::sphere.w`).
+        s.push_str("fn terrain_surface(p: vec3<i32>, level: u32, height: i32) -> u32 { return 0u; }\n");
+    }
     if !program.wgsl.contains("fn terrain_cell") {
         // Heightfield programs: no volumetric terms (`TerrainField::extent`, `cell`).
         s.push_str("fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
@@ -2073,8 +2082,9 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
     let k = top - extent.x - 1 + rem_floor(e.w, max(extent.x + extent.y + 2, 1));
     let q = volume_point(u32(a.x), a.y, a.z, k, level);
     let cell = terrain_cell(p, q, level, top, k);
-    verify_out[id.x] = vec4<i32>(height, i32(ground_material(p, e.x, e.y, e.z, e.w)),
-        i32(cell) | (extent.x << 1u) | (extent.y << 16u), q.x ^ q.y ^ q.z);
+    let surface = terrain_surface(p, level + u32(world.grid.w), height) & 0xffffu;
+    verify_out[id.x] = vec4<i32>(height, i32(ground_material(p, surface, e.x, e.y, e.z, e.w)),
+        i32(cell) | (extent.x << 1u) | (extent.y << 16u), (q.x ^ q.y ^ q.z) + i32(surface) * 7919);
 }
 ";
     let module = helio_core::shader::module(
@@ -2143,11 +2153,12 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
         let k = top - below - 1 + e.w.rem_euclid((below + above + 2).max(1));
         let q = grid.volume_point(a.x as u8, a.y, a.z, k, level);
         let cell = field.cell(p, q, level, top, k) as i32;
+        let surface = field.surface(p, level + grid.level_offset(), height) & 0xffff;
         let cpu = [
             height,
-            field.ground_material(p, e.x, e.y, e.z, e.w) as i32,
+            field.ground_material(p, surface, e.x, e.y, e.z, e.w) as i32,
             cell | (below << 1) | (above << 16),
-            q.x ^ q.y ^ q.z,
+            (q.x ^ q.y ^ q.z).wrapping_add(surface as i32 * 7919),
         ];
         if *g != cpu {
             return Err(format!("column {a} with inputs {e}: GPU {g:?}, CPU {cpu:?}"));

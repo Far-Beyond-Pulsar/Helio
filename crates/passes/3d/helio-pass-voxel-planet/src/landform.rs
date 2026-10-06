@@ -292,7 +292,8 @@ pub struct LandformConstants {
     /// mountain mask bias, steep slope (cells/cell), ridge display flag,
     /// vertical axis (0 radial, 1 the plane's +Y).
     pub shape: [i32; 4],
-    /// erosion saturation slope (height units per gradient span), pad.
+    /// erosion saturation slope (height units per gradient span), sum of
+    /// the erosion amplitudes (height units), pad.
     pub erosion: [i32; 4],
     pub octaves: [Octave; OCTAVES],
 }
@@ -416,7 +417,7 @@ impl LandformConstants {
             shape: [ONE / 20, 16, 0, i32::from(grid.is_plane())],
             erosion: [
                 ((land.erosion_slope * f64::from(1u32 << GRAD_SHIFT) * crate::grid::DOMAIN_UNIT * 1_000.0).round() as i32).clamp(32, 1 << 26),
-                0,
+                table[..octaves.len()].iter().filter(|o| o.kind == EROSION).map(|o| o.amplitude).sum::<i32>().max(1),
                 0,
                 0,
             ],
@@ -615,6 +616,19 @@ fn erosion_octave(k: &LandformConstants, o: &Octave, p: IVec3, g: IVec3, up: IVe
 /// Surface height (height units above the datum) of the column centred at
 /// domain point `p` with a `2^level` reference cell footprint.
 pub fn height(k: &LandformConstants, p: IVec3, level: u32) -> i32 {
+    height_parts(k, p, level).0
+}
+
+/// Surface word of a column (`terrain_surface`): its erosion term as a
+/// signed byte of the erosion amplitude sum (negative: gully floors,
+/// positive: the ribs between them).
+pub fn surface(k: &LandformConstants, p: IVec3, level: u32) -> u32 {
+    let eroded = height_parts(k, p, level).1;
+    ((eroded * 127 / k.erosion[1].max(1)).clamp(-127, 127) as u32) & 0xff
+}
+
+/// [`height`] and its erosion term.
+fn height_parts(k: &LandformConstants, p: IVec3, level: u32) -> (i32, i32) {
     let count = k.header[0] as usize;
     // Erosion follows the slope of the larger terrain: when one of its
     // octaves is resolved here, the large octaves carry their gradients.
@@ -714,7 +728,7 @@ pub fn height(k: &LandformConstants, p: IVec3, level: u32) -> i32 {
     let mountains = mul_fine(mul_fine(ridged, region), land);
     // Land detail fades out under deep water.
     let wet = (FINE_ONE + c * 2).clamp(FINE_ONE / 8, FINE_ONE);
-    base.wrapping_add(mountains).wrapping_add(eroded).wrapping_add(mul_fine(detail, wet))
+    (base.wrapping_add(mountains).wrapping_add(eroded).wrapping_add(mul_fine(detail, wet)), eroded)
 }
 
 /// Moisture in Q24 [0, FINE_ONE] from very low-frequency noise at `p`
@@ -737,6 +751,7 @@ fn strata(c: &LandformConstants, p: IVec3, altitude: i32) -> i32 {
 pub fn ground_material(
     c: &LandformConstants,
     p: IVec3,
+    surface: u32,
     top_height: i32,
     depth: i32,
     slope: i32,
@@ -802,6 +817,12 @@ pub fn ground_material(
     if slope >= 5 {
         exposed += ONE / 2;
     }
+    // Erosion on slopes: rock shows on the ribs between gullies; sediment
+    // fills their floors.
+    let gully = i32::from(surface as u8 as i8);
+    if slope >= 2 {
+        exposed += gully * (ONE / 256);
+    }
     if steep || (exposed > 0 && depth < dirt) {
         return if depth < 1 && h & 7 == 0 {
             DIRT
@@ -812,7 +833,7 @@ pub fn ground_material(
         };
     }
     if depth == 0 {
-        if exposed > -ONE / 16 {
+        if exposed > -ONE / 16 || (gully < -64 && slope >= 3) {
             GRAVEL
         } else if exposed > -ONE / 8 {
             DIRT
@@ -921,8 +942,11 @@ impl TerrainField for LandformField {
     fn height(&self, p: IVec3, level: u32) -> i32 {
         height(&self.constants, p, level)
     }
-    fn ground_material(&self, p: IVec3, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
-        ground_material(&self.constants, p, top_height, depth, slope, layer)
+    fn ground_material(&self, p: IVec3, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
+        ground_material(&self.constants, p, surface, top_height, depth, slope, layer)
+    }
+    fn surface(&self, p: IVec3, level: u32, _height: i32) -> u32 {
+        surface(&self.constants, p, level)
     }
     fn height_range(&self) -> (i32, i32) {
         self.constants.height_range()
@@ -1018,7 +1042,7 @@ impl TerrainField for FlatField {
     fn height(&self, _p: IVec3, _level: u32) -> i32 {
         self.constants[0]
     }
-    fn ground_material(&self, _p: IVec3, _top_height: i32, depth: i32, _slope: i32, _layer: i32) -> u32 {
+    fn ground_material(&self, _p: IVec3, _surface: u32, _top_height: i32, depth: i32, _slope: i32, _layer: i32) -> u32 {
         let c = &self.constants;
         (if depth == 0 { c[1] } else if depth <= c[3] { c[2] } else { c[4] }) as u32
     }
@@ -1195,9 +1219,9 @@ mod tests {
         let settings = r#"{"height_m": 2.34, "soil_depth_m": 0.5, "surface": "Sand", "rock": "dark_stone"}"#;
         let field = FlatGenerator.build(&grid, 0, settings).unwrap();
         assert_eq!(field.height(IVec3::ZERO, 0), 2_300);
-        assert_eq!(field.ground_material(IVec3::ZERO, 2_300, 0, 0, 22), material::SAND);
-        assert_eq!(field.ground_material(IVec3::ZERO, 2_300, 5, 0, 17), material::DIRT);
-        assert_eq!(field.ground_material(IVec3::ZERO, 2_300, 6, 0, 16), material::DARK_STONE);
+        assert_eq!(field.ground_material(IVec3::ZERO, 0, 2_300, 0, 0, 22), material::SAND);
+        assert_eq!(field.ground_material(IVec3::ZERO, 0, 2_300, 5, 0, 17), material::DIRT);
+        assert_eq!(field.ground_material(IVec3::ZERO, 0, 2_300, 6, 0, 16), material::DARK_STONE);
         assert!(FlatGenerator.build(&grid, 0, r#"{"rock": "Air"}"#).is_err());
     }
 }

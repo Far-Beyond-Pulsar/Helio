@@ -24,7 +24,8 @@ fn main() {
                 land += 1;
                 let top = terrain::top_cells(&g, hh, level);
                 let p = g.domain_point(face, i >> level, j >> level, level);
-                let mat = planet.field().ground_material(p, hh, 0, 0, top - 1) & terrain::material::ID;
+                let surface = planet.field().surface(p, level + g.level_offset(), hh) & 0xffff;
+                let mat = planet.field().ground_material(p, surface, hh, 0, 0, top - 1) & terrain::material::ID;
                 let base = match mat { 1 => [80, 130, 50], 4 => [210, 190, 130], 5 => [240, 240, 245], 8 | 12 => [190, 110, 70], 3 | 9 => [120, 120, 120], _ => [140, 100, 70] };
                 let shade = (0.6 + m / 6000.0).clamp(0.4, 1.3);
                 base.map(|v: i32| (f64::from(v) * shade).min(255.0) as u8)

@@ -79,7 +79,7 @@ fn mixed_brick_hits_respect_requested_trace_range() {
         floats(&mut frame, 528, &[1.0, 0.0, 0.0, 1000.0]);
         floats(&mut frame, 544, &[1.0, 1.0, 0.0, 0.0]);
         ints(&mut frame, 576, &[0, 0, 0, 4]);
-        let mut world = vec![0u8; 128];
+        let mut world = vec![0u8; 144];
         ints(&mut world, 0, &[1024, 100, 1024, 0]);
         let ci = (512 >> level) / 8;
         let info = 0x80000000u32

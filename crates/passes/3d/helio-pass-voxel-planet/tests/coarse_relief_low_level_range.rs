@@ -77,7 +77,7 @@ fn l1_to_l5_fractional_top_hits_respect_requested_trace_range() {
             );
             floats(&mut frame, 544, &[1.0, 1.0, 0.0, 0.0]);
             ints(&mut frame, 576, &[0, 0, 0, 4]);
-            let mut world = vec![0u8; 128];
+            let mut world = vec![0u8; 144];
             ints(&mut world, 0, &[1024, 100, 1024, 0]);
             let ci = (512 >> level) / 8;
             let k_lo = ceil_top / 8 - 1;

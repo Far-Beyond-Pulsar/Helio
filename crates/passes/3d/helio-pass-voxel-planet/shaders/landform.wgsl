@@ -335,11 +335,24 @@ fn terrain_height_mode(p: vec3<i32>, level: u32, display: bool) -> i32 {
     let region = clamp((mask - (terrain.shape.x << 8u)) * 3, 0, FINE_ONE);
     let mountains = mul_fine(mul_fine(ridged, region), land);
     let wet = clamp(FINE_ONE + c * 2, FINE_ONE / 8, FINE_ONE);
+    landform_eroded = eroded;
+    landform_eroded_at = vec4<i32>(p, i32(level));
     return base + mountains + eroded + mul_fine(detail, wet);
 }
 
 fn terrain_height(p: vec3<i32>, level: u32) -> i32 {
     return terrain_height_mode(p, level, false);
+}
+
+// Erosion term of the last height evaluated in this invocation: generation
+// asks for the surface word right after the column's height.
+var<private> landform_eroded: i32 = 0;
+var<private> landform_eroded_at: vec4<i32> = vec4<i32>(0x7fffffff);
+
+// Surface word (`landform::surface`): the erosion term as a signed byte.
+fn terrain_surface(p: vec3<i32>, level: u32, height: i32) -> u32 {
+    if any(landform_eroded_at != vec4<i32>(p, i32(level))) { _ = terrain_height(p, level); }
+    return u32(clamp(landform_eroded * 127 / max(terrain.erosion.y, 1), -127, 127)) & 0xffu;
 }
 
 fn terrain_display_height(p: vec3<i32>, level: u32) -> i32 {
@@ -584,7 +597,7 @@ fn snow_material_coverage(resolved: f32, deviation: f32, threshold: f32,
     return vec4<f32>(snow, stone * remaining, (rock - stone) * remaining, dirt);
 }
 
-fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
+fn ground_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
     material_mix = vec4<f32>(-1.0, 0.0, 0.0, 0.0);
     material_fleck_base = M_AIR;
     material_coverage = -1.0;
@@ -661,6 +674,8 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
     // bare soil fringe them. Deeper cells keep the strata.
     var exposed = outcrop + 2 * alpine - NOISE_ONE;
     if slope >= 5 { exposed += NOISE_ONE / 2; }
+    let gully = i32(surface << 24u) >> 24u;
+    if slope >= 2 { exposed += gully * (NOISE_ONE / 256); }
     if steep || (exposed > 0 && depth < dirt) {
         let rock = select(M_DARK_STONE, M_STONE, (div_floor(altitude + scale_q16(outcrop, 3000), 4500) & 1) == 0);
         if depth < 1 { material_fleck_base = rock; }
@@ -687,7 +702,7 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
         return rock;
     }
     if depth == 0 {
-        if exposed > -NOISE_ONE / 16 { return M_GRAVEL; }
+        if exposed > -NOISE_ONE / 16 || (gully < -64 && slope >= 3) { return M_GRAVEL; }
         if exposed > -NOISE_ONE / 8 { return M_DIRT; }
         return M_GRASS;
     }

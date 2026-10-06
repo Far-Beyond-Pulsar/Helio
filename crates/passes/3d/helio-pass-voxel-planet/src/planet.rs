@@ -241,7 +241,8 @@ impl Planet {
                 // rock around caves lie below it.
                 let generated = terrain::generated_top(&self.grid, &*self.field, cell.face, cell.i, cell.j, 0, top);
                 let depth = (generated - 1 - cell.k).max(0);
-                self.field.ground_material(p, top_height, depth, slope, cell.k) & material::ID
+                let surface = self.field.surface(p, self.grid.level_offset(), top_height) & 0xffff;
+                self.field.ground_material(p, surface, top_height, depth, slope, cell.k) & material::ID
             }
         }
     }
@@ -610,7 +611,7 @@ mod tests {
                 Some((i, j)) => g.domain_point(2, i, j, 0),
                 None => g.domain_point(2, a, b, level),
             };
-            p.field().ground_material(q, (top << level) * g.layer_mm() as i32, 0, slope, (top - 1) << level)
+            p.field().ground_material(q, 0, (top << level) * g.layer_mm() as i32, 0, slope, (top - 1) << level)
         };
         let samples = 6000;
         let span = 40_000.0 / (g.delta() * g.radius());
