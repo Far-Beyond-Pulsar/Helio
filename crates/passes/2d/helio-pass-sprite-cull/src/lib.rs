@@ -66,13 +66,14 @@ const INDIRECT_INSTANCE_COUNT_OFFSET: u64 = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
+// Field order and padding must match `shaders/sprite_cull.wgsl::CullUniforms`.
 struct CullUniforms {
     view_min: [f32; 2],
     view_max: [f32; 2],
     slot_count: u32,
     max_visible: u32,
-    scene_mode: u32,
     _pad0: u32,
+    scene_mode: u32,
 }
 
 const SORT_BITS: usize = 32;
