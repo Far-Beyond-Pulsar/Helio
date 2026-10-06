@@ -457,6 +457,16 @@ they are once its work is on the GPU. Steps:
   the relief-smooth levels ("voxels, smooth, voxels again"). The natural top
   of generated cave and overhang columns filters too; cave walls and edit
   cuts stay crisp (`natural_surface_hit`).
+- **Material slope at one scale.** Materials (rock, scree, snow, grass)
+  classify a slope measured the same way whatever level draws the pixel:
+  central differences of the level-4 heights two cells (3.2 m) each way,
+  relief included, interpolated between level-4 cell centres
+  (`material_slope` in surface.wgsl and planet.rs). Each level used to
+  measure across its own 8-cell block (0.7 m at level 0, 11 m at level 4):
+  rock and snow changed as the camera approached, and the 0.1 m steps of
+  level 0 flickered across the thresholds (a rock riser on every step of a
+  snowfield). Forced-coarser views of one flank now keep their rock share
+  within 18-24 % (it was 34 % at the finest levels, 19 % at the coarsest).
 - **Overhang amplitude** grows from 0 at an overhang region's edge (less the
   two level cells a level cannot resolve). It used to jump from 0 to two
   cells there, a step seam along every region border.

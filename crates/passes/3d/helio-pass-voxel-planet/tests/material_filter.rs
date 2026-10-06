@@ -103,7 +103,8 @@ fn unresolved_outcrop_preserves_canonical_ids_and_mean_palette() {
     );
     // Match the complete current TerrainConstants ABI, including the ridge LUT
     // and the volume terms (zero: no caves or overhangs).
-    let mut constants = [0i32; 784];
+    const WORDS: usize = (std::mem::size_of::<helio_pass_voxel_planet::landform::LandformConstants>() + 66 * 16 + 64) / 4;
+    let mut constants = [0i32; WORDS];
     constants[1] = 100;
     constants[2] = 7;
     constants[3] = 123;

@@ -24,7 +24,7 @@ fn filtered_riser_receiver_reaches_resident_top_without_overshooting() {
     let source = format!(r#"
 struct Frame {{ eye:vec4<f32>, layer:vec4<f32>, layer_i:vec4<i32> }}
 struct Column {{ top:i32, fraction:u32, info:u32, fits:u32 }}
-struct Hit {{ t:f32, i:i32, j:i32, info:u32 }}
+struct Hit {{ t:f32, i:i32, j:i32, k:i32, info:u32 }}
 struct Ray {{ eo:f32, ee:f32, ol:f32, el:f32 }}
 struct Probe {{ integers:vec4<i32>, values:vec4<f32> }}
 const INFO_RELIEF:u32=0x10000000u;
@@ -35,6 +35,9 @@ fn is_plane()->bool {{ return PLANE; }}
 fn column_tops_fit(c:Column)->bool {{ return c.fits!=0u; }}
 fn column_top(c:Column,x:u32,y:u32)->i32 {{ return c.top; }}
 fn column_relief_fraction(c:Column,x:u32,y:u32)->u32 {{ return c.fraction; }}
+// Height-field receivers: every hit lies on the natural surface.
+fn column_tops_down(c:Column)->bool {{ return false; }}
+fn natural_surface_hit(c:Column,k:i32,top:i32)->bool {{ return (c.info&INFO_TOPOLOGY)==0u; }}
 {helpers}
 @group(0) @binding(0) var<storage,read> probes:array<Probe>;
 @group(0) @binding(1) var<storage,read_write> answers:array<vec4<f32>>;
@@ -46,7 +49,7 @@ fn column_relief_fraction(c:Column,x:u32,y:u32)->u32 {{ return c.fraction; }}
     frame.layer_i=vec4<i32>(p.integers.x,0,0,0);
     let flags=bitcast<u32>(p.integers.w);
     let c=Column(p.integers.z,u32(p.values.w),flags&0xfffffffeu,flags&1u);
-    let h=Hit(0.0,0,0,u32(p.integers.y)<<5u);
+    let h=Hit(0.0,0,0,p.integers.z-1,u32(p.integers.y)<<5u);
     // A radial ray offset at t=0 tests both the plane and stable sphere formula.
     let r=Ray(p.values.y,p.values.y*p.values.y,0.0,0.0);
     let lift=filtered_shadow_lift(c,h,r);

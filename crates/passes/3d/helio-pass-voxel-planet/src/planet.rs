@@ -261,6 +261,28 @@ impl Planet {
         let center = [center_half(cell.i, 0), center_half(cell.j, 0), center_half(cell.k, 0)];
         apply(c.brushes.iter().copied(), center, || self.grid.volume_point(cell.face, cell.i, cell.j, cell.k, 0), kind, 0).0
     }
+    /// Slope (eighths of a cell per cell) that classifies the materials of
+    /// base column (i, j), whatever level draws it: central differences of
+    /// level-4 heights two cells (3.2 m) each way, in base layers (as the
+    /// shader reads them from level-4 columns' relief).
+    ///
+    /// Block slopes of level-4 cells are interpolated between their centres
+    /// (in 32nds, truncated as the shader does).
+    pub fn material_slope(&self, face: u8, i: i32, j: i32) -> i32 {
+        const LEVEL: u32 = 4;
+        // Central differences two level-4 cells each way, in base layers
+        // (Q16 level-4 cells in the shader).
+        let block = |mi: i32, mj: i32| {
+            let top = |x: i32, y: i32| terrain::top_cells(&self.grid, self.column_height(face, x, y, LEVEL), 0);
+            let di = (top(mi + 2, mj) - top(mi - 2, mj)).abs();
+            let dj = (top(mi, mj + 2) - top(mi, mj - 2)).abs();
+            (di.max(dj) << (16 - LEVEL)) / 32_768
+        };
+        let (ri, rj) = (i * 2 + 1 - 16, j * 2 + 1 - 16);
+        let (ai, aj) = (ri >> 5, rj >> 5);
+        let (wi, wj) = (ri - (ai << 5), rj - (aj << 5));
+        ((32 - wi) * (32 - wj) * block(ai, aj) + wi * (32 - wj) * block(ai + 1, aj) + (32 - wi) * wj * block(ai, aj + 1) + wi * wj * block(ai + 1, aj + 1)) >> 10
+    }
     /// Canonical kind at a base cell.
     pub fn kind(&self, cell: Cell) -> u32 {
         self.sample_kind(0, cell.face, cell.i, cell.j, cell.k).0
@@ -276,10 +298,7 @@ impl Planet {
             _ if material != 0 => material,
             _ => {
                 let top = self.column_top(cell.face, cell.i, cell.j, 0);
-                // Slope is measured inside the cell's 8x8 column block, which
-                // is exactly what the GPU shading pass has resident.
-                let (bi, bj) = (cell.i & !7, cell.j & !7);
-                let slope = terrain::block_slope(|x, y| self.column_top(cell.face, bi + x, bj + y, 0), cell.i & 7, cell.j & 7);
+                let slope = self.material_slope(cell.face, cell.i, cell.j);
                 let p = self.grid.domain_point(cell.face, cell.i, cell.j, 0);
                 let top_height = self.column_height(cell.face, cell.i, cell.j, 0);
                 // Depth counts from the generated top: overhangs and the

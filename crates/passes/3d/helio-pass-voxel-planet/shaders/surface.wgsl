@@ -274,6 +274,75 @@ fn column_relief_delta_q16(c: Column, a: vec2<u32>, b: vec2<u32>, top_delta: i32
     return top_delta * 65536 + ca - cb;
 }
 
+// Materials classify slopes measured at one scale, whatever level draws
+// them: across the 8-cell block of the level-4 column (11 m at 0.1 m voxels,
+// 13 m of terrain resolved), relief included (`material_slope` in planet.rs).
+// Each level used to measure across its own block (0.7 m at level 0, 11 m at
+// level 4): rock and snow changed as the camera approached, and the 0.1 m
+// steps of level 0 flickered across the thresholds (rock on every riser).
+const MATERIAL_SLOPE_LEVEL: u32 = 4u;
+
+// Block slope (eighths of a cell per cell) of column `c` through cell (x, y),
+// with relief fractions when it stores them.
+fn column_block_slope(c: Column, x: u32, y: u32) -> i32 {
+    let tx0 = column_top(c, 0u, y);
+    let tx7 = column_top(c, 7u, y);
+    let ty0 = column_top(c, x, 0u);
+    let ty7 = column_top(c, x, 7u);
+    if (c.info & INFO_RELIEF) != 0u && (column_tops_fit(c) || column_tops_down(c)) {
+        let di = column_relief_delta_q16(c, vec2<u32>(7u, y), vec2<u32>(0u, y), tx7 - tx0);
+        let dj = column_relief_delta_q16(c, vec2<u32>(x, 7u), vec2<u32>(x, 0u), ty7 - ty0);
+        return max(abs(di), abs(dj)) / 57344;
+    }
+    return block_slope_of(tx0, tx7, ty0, ty7);
+}
+
+// Height of level-4 cell (mi, mj) in Q16 level-4 cells (its relief top),
+// or i32::MIN while its column is not resident.
+fn level4_height_q16(face: u32, mi: i32, mj: i32) -> i32 {
+    let record = find_column(column_key0(face, MATERIAL_SLOPE_LEVEL, mi >> 3), bitcast<u32>(mj >> 3));
+    if record == NONE { return -2147483647 - 1; }
+    let m = records[record];
+    if !column_valid(m) || !(column_tops_fit(m) || column_tops_down(m)) { return -2147483647 - 1; }
+    let x = u32(mi & 7);
+    let y = u32(mj & 7);
+    let f = column_relief_fraction(m, x, y);
+    return column_top(m, x, y) * 65536 + select(0, i32(f) - 65536, f != 0u);
+}
+
+// Slope at level-4 cell (mi, mj) in eighths of a cell per cell: central
+// differences two cells each way (`level4_slope` in planet.rs), or -1.
+fn level4_block_slope(face: u32, mi: i32, mj: i32) -> i32 {
+    let e = level4_height_q16(face, mi + 2, mj);
+    let w = level4_height_q16(face, mi - 2, mj);
+    let n = level4_height_q16(face, mi, mj + 2);
+    let s = level4_height_q16(face, mi, mj - 2);
+    if min(min(e, w), min(n, s)) == -2147483647 - 1 { return -1; }
+    return max(abs(e - w), abs(n - s)) / 32768;
+}
+
+// The material slope of the base cells under hit cell (i, j) of `level`
+// (below MATERIAL_SLOPE_LEVEL): level-4 block slopes interpolated between
+// cell centres at the base cell at the hit cell's centre (stepwise slopes
+// gave outcrops 1.6 m stairs), or `own` while they are not resident.
+fn material_slope(face: u32, i: i32, j: i32, level: u32, own: i32) -> i32 {
+    // Base cell at the hit cell's centre, in half base cells relative to
+    // the first level-4 cell centre.
+    let half = 1 << level;
+    let ri = ((i << level) + (half >> 1)) * 2 + 1 - 16;
+    let rj = ((j << level) + (half >> 1)) * 2 + 1 - 16;
+    let ai = ri >> 5u;
+    let aj = rj >> 5u;
+    let wi = ri - (ai << 5u);
+    let wj = rj - (aj << 5u);
+    let s00 = level4_block_slope(face, ai, aj);
+    let s10 = level4_block_slope(face, ai + 1, aj);
+    let s01 = level4_block_slope(face, ai, aj + 1);
+    let s11 = level4_block_slope(face, ai + 1, aj + 1);
+    if min(min(s00, s10), min(s01, s11)) < 0 { return own; }
+    return ((32 - wi) * (32 - wj) * s00 + wi * (32 - wj) * s10 + (32 - wi) * wj * s01 + wi * wj * s11) >> 10u;
+}
+
 fn relief_compatible(xy: vec2<u32>, center: Hit) -> bool {
     let h = hits[pixel_index(xy)];
     let anchor_xy = (xy >> vec2<u32>(1u)) << vec2<u32>(1u);
@@ -705,16 +774,13 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             material_radial_span = max(material_radial_span,
                 radial_material_span(pixel, h.t, d, up, fallback_shade_normal));
         }
-        slope = block_slope_of(tx0, tx7, ty0, ty7);
-        if level >= 1u && column_tops_fit(c) && (c.info & INFO_RELIEF) != 0u {
-            let di = column_relief_delta_q16(c, vec2<u32>(7u, y), vec2<u32>(0u, y), tx7 - tx0);
-            let dj = column_relief_delta_q16(c, vec2<u32>(x, 7u), vec2<u32>(x, 0u), ty7 - ty0);
-            // Same truncation as block_slope_of, eighths per coarse cell.
-            // Packed tops differ by at most 255, so the Q16 delta fits i32.
-            slope = max(abs(di), abs(dj)) / 57344;
+        slope = column_block_slope(c, x, y);
+        if level < MATERIAL_SLOPE_LEVEL {
+            slope = material_slope(face, h.i, h.j, level, slope);
+        } else {
+            slope = filtered_material_slope(slope, fallback_slope, smooth_w, level);
         }
-        slope = filtered_material_slope(slope, fallback_slope, smooth_w, level);
-        if canonical_w > 0.0 {
+        if canonical_w > 0.0 && level >= MATERIAL_SLOPE_LEVEL {
             let gradient = canonical_up - canonical_relief.xyz / dot(canonical_relief.xyz, canonical_up);
             let radius = length(frame.eye.xyz * frame.eye.w + camera.position_near.xyz + h.t * d);
             let canonical_slope = canonical_relief_slope(face, canonical_up, gradient, radius);
