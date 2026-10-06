@@ -466,7 +466,8 @@ impl Planet {
     /// all terrain: it is the altitude a camera or vehicle moves by.
     pub fn ground_height(&self, eye: DVec3) -> f64 {
         let (cell, _) = self.grid.locate(eye);
-        let top = self.column_top(cell.face, cell.i, cell.j, 0);
+        // The generated top: overhang lips and cave mouths included.
+        let top = terrain::generated_top(&self.grid, &*self.field, cell.face, cell.i, cell.j, 0, self.column_top(cell.face, cell.i, cell.j, 0));
         self.grid.height(eye) - f64::from(top) * self.grid.voxel_size()
     }
     /// Radial coordinate bounding the solid cells whose ground point lies
@@ -724,6 +725,18 @@ mod tests {
             if shape == Shape::Plane {
                 assert!(p.raycast(DVec3::new(5_000.0, 10.0, 0.0), -DVec3::Y, 1000.0).is_none());
             }
+        }
+    }
+
+    /// A point placed above the ground reads that height, wherever the
+    /// ground is (overhang lips and cave mouths included).
+    #[test]
+    fn ground_height_is_height_above_the_generated_ground() {
+        let p = planet();
+        for dir in [DVec3::Y, DVec3::new(0.3, 1.0, -0.2), DVec3::new(-0.7, 0.2, 0.68), DVec3::new(0.1, -0.4, 0.9)] {
+            let eye = p.surface_point(dir.normalize(), 2.0);
+            let h = p.ground_height(eye);
+            assert!((h - 2.0).abs() < 0.2, "{dir}: {h}");
         }
     }
 
