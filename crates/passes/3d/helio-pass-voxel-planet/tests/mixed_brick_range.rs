@@ -58,7 +58,7 @@ fn mixed_brick_hits_respect_requested_trace_range() {
         }}
     "#
         ));
-        let mut frame = vec![0u8; 1168];
+        let mut frame = vec![0u8; 2144];
         fn ints(bytes: &mut [u8], offset: usize, values: &[i32]) {
             for (i, v) in values.iter().enumerate() {
                 bytes[offset + i * 4..offset + i * 4 + 4].copy_from_slice(&v.to_le_bytes());

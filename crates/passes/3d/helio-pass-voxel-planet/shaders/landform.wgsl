@@ -585,9 +585,10 @@ fn snow_material_coverage(resolved: f32, deviation: f32, threshold: f32,
 }
 
 fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
-    material_snow_mix = vec4<f32>(-1.0, 0.0, 0.0, 0.0);
-    material_rock_base_id = M_AIR;
-    material_stone_coverage = -1.0;
+    material_mix = vec4<f32>(-1.0, 0.0, 0.0, 0.0);
+    material_fleck_base = M_AIR;
+    material_coverage = -1.0;
+    material_coverage_ids = vec2<u32>(M_DARK_STONE, M_STONE);
     let dirt = terrain.header.z;
     let steep = slope >= terrain.shape.y;
     let wet = landform_moisture(p);
@@ -643,8 +644,8 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
                 let q = 6 - slope;
                 let threshold = select(f32((q - 1) * 8192) + 0.5, f32(q * 8192) - 0.5, q > 0);
                 let dry = wet < FINE_ONE / 10 * 3 && !steep;
-                material_rock_id = select(M_STONE, M_SAND, dry);
-                material_snow_mix = snow_material_coverage(resolved, deviation, threshold, altitude, dry, depth);
+                material_mix_ids = vec4<u32>(M_SNOW, select(M_STONE, M_SAND, dry), M_DARK_STONE, M_DIRT);
+                material_mix = snow_material_coverage(resolved, deviation, threshold, altitude, dry, depth);
             }
         }
     }
@@ -662,24 +663,24 @@ fn ground_material(p: vec3<i32>, top_height: i32, depth: i32, slope: i32, layer:
     if slope >= 5 { exposed += NOISE_ONE / 2; }
     if steep || (exposed > 0 && depth < dirt) {
         let rock = select(M_DARK_STONE, M_STONE, (div_floor(altitude + scale_q16(outcrop, 3000), 4500) & 1) == 0);
-        if depth < 1 { material_rock_base_id = rock; }
+        if depth < 1 { material_fleck_base = rock; }
         // Four samples per 4.5 m band retain its resolved contrast, matching
         // the noise support gate. No coverage work on fully resolved rock.
         let band_weight = max(smoothstep(1.125, 2.25, material_radial_span), 1.0 - outcrop_support);
         // Snow/rock coverage already includes its conditioned stone bands;
         // the shader consumes that vector instead of this separate metadata.
-        if material_weathered_skin && depth < dirt && material_snow_mix.x < 0.0 {
+        if material_weathered_skin && depth < dirt && material_mix.x < 0.0 {
             let exposure = f32(NOISE_ONE - 2 * alpine - select(0, NOISE_ONE / 2, slope >= 5)) + 0.5;
             let cutoff = select(-65536.0, (exposure - resolved_outcrop) / max(outcrop_deviation, 0.0001), !steep);
-            material_stone_coverage = weathered_stone_coverage(resolved_outcrop, outcrop_deviation, cutoff);
-        } else if material_footprint > 0.0 && band_weight > 0.0 && material_snow_mix.x < 0.0 {
+            material_coverage = weathered_stone_coverage(resolved_outcrop, outcrop_deviation, cutoff);
+        } else if material_footprint > 0.0 && band_weight > 0.0 && material_mix.x < 0.0 {
             // Exposure conditions the phase distribution on non-steep patches.
             let exposure = f32(NOISE_ONE - 2 * alpine - select(0, NOISE_ONE / 2, slope >= 5)) + 0.5;
             let cutoff = select(-65536.0, (exposure - resolved_outcrop) / max(outcrop_deviation, 0.0001), !steep);
             let phase = f32(rem_floor(altitude, 9000)) + resolved_outcrop * (3000.0 / 65536.0);
             let coverage = rock_band_coverage(phase, material_radial_span * 1000.0, outcrop_deviation, cutoff);
             if coverage >= 0.0 {
-                material_stone_coverage = mix(select(0.0, 1.0, rock == M_STONE), coverage, band_weight);
+                material_coverage = mix(select(0.0, 1.0, rock == M_STONE), coverage, band_weight);
             }
         }
         if depth < 1 && (h & 7u) == 0u { return M_DIRT; }

@@ -558,7 +558,7 @@ fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
     let columns = editor.renderer.find_pass::<PlanetPass>().unwrap().stats().unwrap().resident_columns;
     let mean = |pixels: &[[u8;4]], channel| pixels.iter().map(|p| f64::from(p[channel])).sum::<f64>() / pixels.len() as f64;
     let mut appearance = helio_pass_voxel_planet::engine::TerrainAppearance::default();
-    appearance.grass = [[0.85, 0.03, 0.03, 0.0]; 3];
+    appearance.materials[helio_pass_voxel_planet::terrain::material::GRASS as usize].patches = Some([[0.85, 0.03, 0.03]; 3]);
     appearance.detail = [0.0; 4];
     assert!(editor.renderer.find_pass_mut::<PlanetPass>().unwrap().set_appearance(appearance));
     editor.renderer.find_pass_mut::<helio_pass_tsr::TsrPass>().unwrap().reset_history();

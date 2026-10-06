@@ -496,11 +496,18 @@ changes replace the output in place). Register it with `terrain::register`. Add 
 settings rebuilds the world without recompiling shaders; pipelines are keyed
 by program.
 
-**A material.** Add the id to `terrain::material` and `world.wgsl`, its
-default colour and roughness to `TerrainAppearance` in `engine.rs`, and to
-editor-facing enums (Pulsar's `VoxelTerrainMaterial`).
+**Materials.** Shading knows a material only through its
+`MaterialAppearance` (16 per world): colour and roughness, optional
+world-space patch colours (turf), a lip material on the sides of its surface
+cells (soil under turf), the material and share of its single-voxel flecks,
+and the host a filtered speck blends into. No material id is special to the
+renderer. A terrain program may report display-only blends for the shaded
+cell through the appearance channel (`common.wgsl`): a coverage between two
+materials, a mix of four, and the material whose flecks are averaged.
+Landform uses them for snow edges and stone bands; canonical ids never
+change.
 
-**Appearance.** `PlanetPass::set_appearance` updates palette, grass colours
+**Appearance.** `PlanetPass::set_appearance` updates the material table
 and detail without rebuilding terrain. RGB is sRGB; roughness is linear.
 When it returns `true`, reset temporal colour history to show the change in
 an idle viewport.

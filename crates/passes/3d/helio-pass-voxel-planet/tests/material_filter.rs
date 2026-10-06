@@ -38,6 +38,8 @@ fn unresolved_outcrop_preserves_canonical_ids_and_mean_palette() {
                 vec3<f32>(148.,77.,63.),vec3<f32>(158.,119.,79.),vec3<f32>(121.,126.,130.));
             return pow(p[id]/255.0,vec3<f32>(2.2));
         }}
+        fn material_fleck(m:u32)->u32 {{return M_DIRT;}}
+        fn material_fleck_share(m:u32)->f32 {{return 0.125;}}
         fn filtered_rock_flecks{rock_helper}
         @group(0) @binding(0) var<uniform> terrain:TerrainConstants;
         @group(0) @binding(1) var<storage,read> points:array<vec4<i32>>;
@@ -46,10 +48,11 @@ fn unresolved_outcrop_preserves_canonical_ids_and_mean_palette() {
         var<private> material_footprint:f32=0.0;
         var<private> material_weathered_skin:bool=false;
         var<private> material_radial_span:f32=0.0;
-        var<private> material_stone_coverage:f32=-1.0;
-        var<private> material_snow_mix:vec4<f32>=vec4<f32>(-1.0,0.0,0.0,0.0);
-        var<private> material_rock_id:u32=0u;
-        var<private> material_rock_base_id:u32=0u;
+        var<private> material_coverage:f32=-1.0;
+        var<private> material_coverage_ids:vec2<u32>=vec2<u32>(0u);
+        var<private> material_mix:vec4<f32>=vec4<f32>(-1.0,0.0,0.0,0.0);
+        var<private> material_mix_ids:vec4<u32>=vec4<u32>(0u);
+        var<private> material_fleck_base:u32=0u;
         @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) id:vec3<u32>) {{
             if id.x>=arrayLength(&points) {{return;}}
             let p=points[id.x].xyz;
@@ -57,37 +60,37 @@ fn unresolved_outcrop_preserves_canonical_ids_and_mean_palette() {
             let canonical=ground_material(p,4000000,0,5,39999);
             material_footprint=0.1;
             let near=ground_material(p,4000000,0,5,39999);
-            let near_disabled=u32(material_snow_mix.x<0.0);
+            let near_disabled=u32(material_mix.x<0.0);
             material_footprint=128.0;
             let far=ground_material(p,4000000,0,5,39999);
-            coverage[id.x*4u]=material_snow_mix;
-            let far_rock=material_rock_id;
+            coverage[id.x*4u]=material_mix;
+            let far_rock=material_mix_ids.y;
             // The 6.4m octave is unresolved here; the 51.2m octave remains.
             material_footprint=6.4;
             let middle=ground_material(p,4000000,0,5,39999);
-            coverage[id.x*4u+1u]=material_snow_mix;
-            let middle_rock=material_rock_id;
+            coverage[id.x*4u+1u]=material_mix;
+            let middle_rock=material_mix_ids.y;
             material_footprint=0.0;
             let reset=ground_material(p,4000000,0,5,39999);
             answers[id.x*4u]=vec4<u32>(canonical,near,far,middle);
-            answers[id.x*4u+1u]=vec4<u32>(far_rock,middle_rock,near_disabled,u32(material_snow_mix.x<0.0 && reset==canonical));
+            answers[id.x*4u+1u]=vec4<u32>(far_rock,middle_rock,near_disabled,u32(material_mix.x<0.0 && reset==canonical));
             // Below every snowline, a steep natural rock face also has dirt
             // flecks. Metadata changes appearance, never its canonical ID.
             let below=ground_material(p,1500000,0,20,14999);
-            let below_base=material_rock_base_id;
+            let below_base=material_fleck_base;
             let near_colour=palette(below);
             material_footprint=128.0;
             let below_far=ground_material(p,1500000,0,20,14999);
-            let far_base=material_rock_base_id;
+            let far_base=material_fleck_base;
             var far_colour=palette(below_far);
             if far_base!=M_AIR {{far_colour=filtered_rock_flecks(far_colour,1.0,far_base,1.0);}}
             coverage[id.x*4u+2u]=vec4<f32>(filtered_rock_flecks(near_colour,1.0,below_base,0.0),0.0);
             coverage[id.x*4u+3u]=vec4<f32>(far_colour,0.0);
-            let snow_disabled=u32(material_snow_mix.x<0.0);
-            let stone_coverage=material_stone_coverage;
+            let snow_disabled=u32(material_mix.x<0.0);
+            let stone_coverage=material_coverage;
             let basin=ground_material(p,-1000,0,0,0);
             answers[id.x*4u+2u]=vec4<u32>(below,below_far,below_base,far_base);
-            answers[id.x*4u+3u]=vec4<u32>(snow_disabled,u32(material_rock_base_id==M_AIR),basin,bitcast<u32>(stone_coverage));
+            answers[id.x*4u+3u]=vec4<u32>(snow_disabled,u32(material_fleck_base==M_AIR),basin,bitcast<u32>(stone_coverage));
         }}
     "#
     );
@@ -373,7 +376,10 @@ const M_DARK_STONE:u32=9u;
 struct Column {{ info:u32, fits:u32 }}
 fn column_tops_fit(c:Column)->bool {{return c.fits!=0u;}}
 {guards}
-var<private> material_stone_coverage:f32=-1.0;
+var<private> material_coverage:f32=-1.0;
+var<private> material_coverage_ids:vec2<u32>=vec2<u32>(M_DARK_STONE,M_STONE);
+fn material_fleck(m:u32)->u32 {{return M_DIRT;}}
+fn material_fleck_share(m:u32)->f32 {{return 0.125;}}
 // Deliberately non-default authored palette; no hard-coded rock colours.
 fn palette(id:u32)->vec3<f32> {{
     if id==M_STONE {{return vec3<f32>(0.8,0.1,0.6);}}
@@ -386,8 +392,8 @@ fn palette(id:u32)->vec3<f32> {{
 @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) id:vec3<u32>) {{
     if id.x>=arrayLength(&probes) {{return;}}
     let p=probes[id.x];
-    material_stone_coverage=rock_band_coverage(p.x,p.y,p.z,p.w);
-    answers[id.x*2u]=vec4<f32>(filtered_rock_flecks(palette(M_STONE),0.75,M_STONE,1.0),material_stone_coverage);
+    material_coverage=rock_band_coverage(p.x,p.y,p.z,p.w);
+    answers[id.x*2u]=vec4<f32>(filtered_rock_flecks(palette(M_STONE),0.75,M_STONE,1.0),material_coverage);
     answers[id.x*2u+1u]=vec4<f32>(f32(natural_material_filter_allowed(false,Column(0u,1u))),
         f32(natural_material_filter_allowed(true,Column(0u,1u))),
         f32(natural_material_filter_allowed(false,Column(INFO_TOPOLOGY,1u))),

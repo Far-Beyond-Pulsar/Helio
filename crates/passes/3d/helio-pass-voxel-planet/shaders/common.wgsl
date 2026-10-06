@@ -8,12 +8,15 @@ var<private> material_footprint: f32 = 0.0;
 var<private> material_weathered_skin: bool = false;
 // Radial height range of the material pixel, in metres; zero outside shade.
 var<private> material_radial_span: f32 = 0.0;
-// Negative disables display-only light/dark stone coverage.
-var<private> material_stone_coverage: f32 = -1.0;
-// Negative snow weight disables appearance coverage; IDs remain canonical.
-var<private> material_snow_mix: vec4<f32> = vec4<f32>(-1.0, 0.0, 0.0, 0.0);
-var<private> material_rock_id: u32 = 0u;
-var<private> material_rock_base_id: u32 = 0u;
+// Display-only appearance a terrain program may report for the shaded cell
+// (canonical IDs never change). A coverage between two materials (negative:
+// none), a mix of four (negative first weight: none), and the material whose
+// single-voxel flecks the filtered colour averages (air: none).
+var<private> material_coverage: f32 = -1.0;
+var<private> material_coverage_ids: vec2<u32> = vec2<u32>(0u);
+var<private> material_mix: vec4<f32> = vec4<f32>(-1.0, 0.0, 0.0, 0.0);
+var<private> material_mix_ids: vec4<u32> = vec4<u32>(0u);
+var<private> material_fleck_base: u32 = 0u;
 
 struct FaceGpu {
     m_a: vec4<f32>,   // α-family plane normal at the eye (xyz), distance to axis (w)
@@ -36,9 +39,16 @@ struct Frame {
     extra: vec4<u32>,      // table patches, block region, block patches, live tier-1 blocks
     ring: array<vec4<f32>, 8>, // per level: sky bound block exclusion angle
     hints: vec4<u32>,
-    palette: array<vec4<f32>, 16>,
-    grass: array<vec4<f32>, 3>,
-    detail: vec4<f32>,      // x: tier-1 summary blocks prove column absence
+    materials: array<MaterialGpu, 16>,
+    detail: vec4<f32>,      // patch contrast, pigment contrast, edge darkening
+}
+
+// A terrain material's appearance (`engine::MaterialAppearance`): shading
+// knows materials only through this table.
+struct MaterialGpu {
+    colour: vec4<f32>,              // linear colour, roughness
+    patches: array<vec4<f32>, 3>,   // linear dry/middle/lush patch colours; patches[0].w 1: varies
+    links: vec4<u32>,               // lip, fleck, speck host (self: none), fleck share (Q16)
 }
 
 struct Column {

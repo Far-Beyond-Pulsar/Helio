@@ -14,10 +14,10 @@ fn grazing_soil_lip_filters_radial_coverage_and_preserves_protected_faces() {
     let detail = surface.split("fn detail_filter_weight").nth(1).unwrap()
         .split("// Independent hash detail").next().unwrap();
     let natural = surface.split("fn natural_material_filter_allowed").nth(1).unwrap()
-        .split("// Canonical rock").next().unwrap();
+        .split("// A material's filtered").next().unwrap();
     let call = surface.split("soil_coverage = soil_lip_coverage").nth(1).unwrap()
         .split(';').next().unwrap();
-    assert!(surface.contains("if axis < 2u && material == M_GRASS {"));
+    assert!(surface.contains("if axis < 2u && material_lip(material) != material {"));
     assert!(surface.contains("soil_coverage * (1.0 - appearance_w)"));
     assert!(surface.contains("ground_material(p, climate_height, material_depth, slope, material_layer)"));
     let Some(gpu) = gpu() else { return };
@@ -284,10 +284,11 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
         @group(0) @binding(3) var<uniform> terrain:TerrainConstants;
         var<private> material_footprint:f32=0.0;
         var<private> material_radial_span:f32=0.0;
-        var<private> material_stone_coverage:f32=-1.0;
-        var<private> material_snow_mix:vec4<f32>=vec4<f32>(-1.0,0.0,0.0,0.0);
-        var<private> material_rock_id:u32=0u;
-        var<private> material_rock_base_id:u32=0u;
+        var<private> material_coverage:f32=-1.0;
+        var<private> material_coverage_ids:vec2<u32>=vec2<u32>(0u);
+        var<private> material_mix:vec4<f32>=vec4<f32>(-1.0,0.0,0.0,0.0);
+        var<private> material_mix_ids:vec4<u32>=vec4<u32>(0u);
+        var<private> material_fleck_base:u32=0u;
         var<private> material_weathered_skin:bool=false;
         struct Face {{m_a:vec4<f32>,m_b:vec4<f32>}}
         struct Frame {{faces:array<Face,6>,layer:vec4<f32>}}

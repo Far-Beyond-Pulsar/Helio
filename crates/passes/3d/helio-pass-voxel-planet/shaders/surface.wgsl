@@ -51,36 +51,47 @@ fn srgb(c: vec3<f32>) -> vec3<f32> {
 }
 
 fn palette(m: u32) -> vec3<f32> {
-    return frame.palette[min(m, 15u)].rgb;
+    return frame.materials[min(m, 15u)].colour.rgb;
 }
+
+// Material on the sides of `m`'s surface cells below its lip (soil under
+// turf); `m` itself when it has none.
+fn material_lip(m: u32) -> u32 { return frame.materials[min(m, 15u)].links.x; }
+fn material_fleck(m: u32) -> u32 { return frame.materials[min(m, 15u)].links.y; }
+fn material_speck_host(m: u32) -> u32 { return frame.materials[min(m, 15u)].links.z; }
+fn material_fleck_share(m: u32) -> f32 { return f32(frame.materials[min(m, 15u)].links.w) / 65536.0; }
 
 fn natural_material_filter_allowed(edited: bool, c: Column) -> bool {
     return !edited && (c.info & INFO_TOPOLOGY) == 0u && column_tops_fit(c);
 }
 
-// Canonical rock keeps its dirt flecks; unresolved natural appearance keeps
-// their 1/8 coverage instead of a fresh full-contrast hash choice per pixel.
+// A material's filtered single-voxel flecks keep their share of its colour
+// instead of a fresh full-contrast hash choice per pixel.
 fn filtered_rock_flecks(albedo: vec3<f32>, pigment: f32, rock: u32, weight: f32) -> vec3<f32> {
-    let stone = select(palette(rock), mix(palette(M_DARK_STONE), palette(M_STONE),
-        max(material_stone_coverage, 0.0)), material_stone_coverage >= 0.0);
-    let mean = pigment * (0.875 * stone + 0.125 * palette(M_DIRT));
+    let stone = select(palette(rock), mix(palette(material_coverage_ids.x), palette(material_coverage_ids.y),
+        max(material_coverage, 0.0)), material_coverage >= 0.0);
+    let share = material_fleck_share(rock);
+    let mean = pigment * ((1.0 - share) * stone + share * palette(material_fleck(rock)));
     return mix(albedo, mean, weight);
 }
 
-// Grass colour from dry through meadow to lush green by world-space
-// patches (continuous across levels). The patch octave (25.6 m wavelength)
-// fades out as a pixel's footprint approaches it, so distant terrain shows
-// its average. The fade follows the footprint, not the level: fading by
-// level stepped the patch contrast at every level boundary, which showed as
-// rings sweeping outward while ascending.
-fn grass_albedo(p: vec3<i32>, pixel: f32) -> vec3<f32> {
+// Colour of material `m`: its world-space patches from dry through middle
+// to lush when it varies (continuous across levels), else its colour. The
+// patch octave (25.6 m wavelength) fades out as a pixel's footprint
+// approaches it, so distant terrain shows its average. The fade follows
+// the footprint, not the level: fading by level stepped the patch contrast
+// at every level boundary, which showed as rings sweeping outward while
+// ascending.
+fn material_albedo(m: u32, p: vec3<i32>, pixel: f32) -> vec3<f32> {
+    let material = frame.materials[min(m, 15u)];
+    if material.patches[0].w <= 0.0 { return material.colour.rgb; }
     let broad = f32(noise(p, 15u, 0x3c6ef372u)) / f32(NOISE_ONE);
     let patches = f32(noise(p, 11u, 0xa54ff53au)) / f32(NOISE_ONE) * clamp((12.8 - pixel) / 6.4, 0.0, 1.0);
     let t = clamp(0.58 + frame.detail.x * (0.6 * broad + 0.14 * patches), 0.0, 1.0);
-    let dry = frame.grass[0].rgb;
-    let meadow = frame.grass[1].rgb;
-    let lush = frame.grass[2].rgb;
-    return select(mix(meadow, lush, t * 2.0 - 1.0), mix(dry, meadow, t * 2.0), t < 0.5);
+    let dry = material.patches[0].rgb;
+    let middle = material.patches[1].rgb;
+    let lush = material.patches[2].rgb;
+    return select(mix(middle, lush, t * 2.0 - 1.0), mix(dry, middle, t * 2.0), t < 0.5);
 }
 
 fn plane_normal(face: u32, axis: u32, plane: i32) -> vec3<f32> {
@@ -759,7 +770,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // Grazing faces can have fully filtered AO while their grass lip remains
     // resolved. Only those lips still need face coordinates in that case.
     if code < 6u && appearance_w < 1.0 &&
-        (ao_appearance_w < 1.0 || ((code >> 1u) < 2u && material == M_GRASS)) {
+        (ao_appearance_w < 1.0 || ((code >> 1u) < 2u && material_lip(material) != material)) {
         let axis = code >> 1u;
         var u_axis = select(0u, 1u, axis == 0u);
         var v_axis = select(2u, 1u, axis == 2u);
@@ -770,7 +781,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             vec3<f32>(face_coord(fr, 0u, h.t), face_coord(fr, 1u, h.t),
                 layer_coord(make_ray(camera.position_near.xyz, d), h.t)), level);
         let uv = clamp(vec2<f32>(cell[u_axis], cell[v_axis]), vec2<f32>(0.0), vec2<f32>(1.0));
-        if axis < 2u && material == M_GRASS {
+        if axis < 2u && material_lip(material) != material {
             let tooth = f32(hash3(h.i, h.j, h.k * 4 + i32(floor(uv.x * 4.0)), 0x5bd1e995u) & 7u) / 7.0;
             // Continuous in distance (not level), so level changes show no band.
             let distance_fade = 1.0 - 1.0 / max(h.t / frame.lod.x, 1.0);
@@ -819,37 +830,39 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let base_w = hash_filter_w;
     let jitter = mix(f32(hv & 255u) / 255.0, 0.5, base_w);
     let pigment = 1.0 + frame.detail.y * (jitter - 0.5);
-    var albedo = palette(select(material, M_DIRT, soil_side)) * pigment;
-    if (material == M_GRASS && soil_coverage < 1.0) || appearance_w > 0.0 {
-        var grass = grass_albedo(p, pixel) * pigment;
-        if code != 4u { grass *= mix(0.9, 1.0, max(appearance_w, raw_smooth_w)); }
-        if material == M_GRASS {
+    let lip = material_lip(material);
+    var albedo = palette(select(material, lip, soil_side)) * pigment;
+    if (lip != material && soil_coverage < 1.0) || appearance_w > 0.0 {
+        let host = material_speck_host(material);
+        if lip != material {
+            var surface = material_albedo(material, p, pixel) * pigment;
+            if code != 4u { surface *= mix(0.9, 1.0, max(appearance_w, raw_smooth_w)); }
             // Keep the resolved soil lip, then average its coverage only as
             // authored voxels become sub-pixel. A boolean cutoff at half the
-            // filter weight made dirt switch to grass along a distance ring.
-            albedo = mix(grass, palette(M_DIRT) * pigment,
-                soil_coverage * (1.0 - appearance_w));
-        } else if code == 4u && speck {
-            // Single-voxel flecks (mud and sand in meadows) blend into grass.
-            albedo = mix(albedo, grass, appearance_w);
+            // filter weight made the lip switch to turf along a distance ring.
+            albedo = mix(surface, palette(lip) * pigment, soil_coverage * (1.0 - appearance_w));
+        } else if code == 4u && speck && host != material {
+            // Filtered single-voxel specks (mud and sand in meadows) blend
+            // into their host material.
+            albedo = mix(albedo, material_albedo(host, p, pixel) * pigment, appearance_w);
         }
     }
-    if material_snow_mix.x >= 0.0 {
-        albedo = pigment * (material_snow_mix.x * palette(M_SNOW)
-            + material_snow_mix.y * palette(material_rock_id)
-            + material_snow_mix.z * palette(M_DARK_STONE)
-            + material_snow_mix.w * palette(M_DIRT));
-    } else if material_stone_coverage >= 0.0 && material_rock_base_id == M_AIR
+    if material_mix.x >= 0.0 {
+        albedo = pigment * (material_mix.x * palette(material_mix_ids.x)
+            + material_mix.y * palette(material_mix_ids.y)
+            + material_mix.z * palette(material_mix_ids.z)
+            + material_mix.w * palette(material_mix_ids.w));
+    } else if material_coverage >= 0.0 && material_fleck_base == M_AIR
         && natural_material_filter_allowed(edited, c) {
-        albedo = pigment * mix(palette(M_DARK_STONE), palette(M_STONE), material_stone_coverage);
-    } else if material_rock_base_id != M_AIR && natural_material_filter_allowed(edited, c) {
+        albedo = pigment * mix(palette(material_coverage_ids.x), palette(material_coverage_ids.y), material_coverage);
+    } else if material_fleck_base != M_AIR && natural_material_filter_allowed(edited, c) {
         // Band support is independent of single-voxel fleck support. Keep a
-        // resolved dirt fleck while filtering unresolved stone around it.
-        if material_stone_coverage >= 0.0 && material != M_DIRT {
-            albedo = pigment * mix(palette(M_DARK_STONE), palette(M_STONE), material_stone_coverage);
+        // resolved fleck while filtering unresolved coverage around it.
+        if material_coverage >= 0.0 && material != material_fleck(material_fleck_base) {
+            albedo = pigment * mix(palette(material_coverage_ids.x), palette(material_coverage_ids.y), material_coverage);
         }
         if hash_filter_w > 0.0 {
-            albedo = filtered_rock_flecks(albedo, pigment, material_rock_base_id, hash_filter_w);
+            albedo = filtered_rock_flecks(albedo, pigment, material_fleck_base, hash_filter_w);
         }
     }
     out.t = h.t;

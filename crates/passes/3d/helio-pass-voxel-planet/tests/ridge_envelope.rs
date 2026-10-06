@@ -109,10 +109,11 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
         var<private> material_footprint:f32=0.0;
         var<private> material_weathered_skin:bool=false;
         var<private> material_radial_span:f32=0.0;
-        var<private> material_stone_coverage:f32=-1.0;
-        var<private> material_snow_mix:vec4<f32>=vec4<f32>(-1.0,0.0,0.0,0.0);
-        var<private> material_rock_id:u32=0u;
-        var<private> material_rock_base_id:u32=0u;
+        var<private> material_coverage:f32=-1.0;
+        var<private> material_coverage_ids:vec2<u32>=vec2<u32>(0u);
+        var<private> material_mix:vec4<f32>=vec4<f32>(-1.0,0.0,0.0,0.0);
+        var<private> material_mix_ids:vec4<u32>=vec4<u32>(0u);
+        var<private> material_fleck_base:u32=0u;
         struct Frame {{hints:vec4<u32>}}
         struct Probe {{cell:vec4<i32>,chart:vec4<u32>}}
         @group(0) @binding(0) var<uniform> frame:Frame;

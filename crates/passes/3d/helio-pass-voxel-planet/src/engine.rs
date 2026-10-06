@@ -35,34 +35,82 @@ pub struct PlanetFrame {
 
 pub type SharedPlanetFrame = Arc<Mutex<Option<PlanetFrame>>>;
 
+/// How one terrain material looks. Shading knows materials only through
+/// these properties (no material is special), so any generator can define
+/// its own: regolith and basalt on a moon, coloured sands elsewhere.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct MaterialAppearance {
+    /// sRGB colour in [0, 1] and perceptual roughness.
+    pub colour: [f32; 4],
+    /// Dry, middle and lush world-space patch colours (sRGB), when the
+    /// material varies by patches (turf).
+    pub patches: Option<[[f32; 3]; 3]>,
+    /// Material showing on the sides of this material's surface cells below
+    /// a lip (soil under turf).
+    pub lip: Option<u8>,
+    /// Material of this one's single-voxel flecks and their share, averaged
+    /// into its colour once flecks are below a pixel.
+    pub fleck: Option<(u8, f32)>,
+    /// Material a filtered single-voxel speck of this one blends into.
+    pub speck_host: Option<u8>,
+}
+
+impl Default for MaterialAppearance {
+    fn default() -> Self {
+        Self { colour: [1.0, 0.0, 1.0, 0.9], patches: None, lip: None, fleck: None, speck_host: None }
+    }
+}
+
+/// Number of terrain materials a world can define.
+pub const MATERIALS: usize = 16;
+
 /// Art controls, independent of occupancy, terrain recipes and edit journals.
-/// Palette RGB is sRGB in [0,1] per material id; W is perceptual roughness.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct TerrainAppearance {
-    pub palette: [[f32; 4]; 16],
-    /// Dry, meadow and lush grass colours (sRGB).
-    pub grass: [[f32; 4]; 3],
-    /// Grass patch contrast, voxel pigment contrast, edge darkening.
+    /// Per material id (see [`MaterialAppearance`]).
+    pub materials: [MaterialAppearance; MATERIALS],
+    /// Patch contrast, voxel pigment contrast, edge darkening.
     pub detail: [f32; 4],
 }
 
 impl Default for TerrainAppearance {
+    /// The built-in generators' materials (`terrain::material`).
     fn default() -> Self {
-        let colours: [[u8; 3]; 16] = [
+        use crate::terrain::material::*;
+        let colours: [[u8; 3]; MATERIALS] = [
             [200, 0, 200], [91, 125, 65], [120, 87, 61], [133, 139, 142],
             [203, 188, 151], [217, 228, 236], [28, 72, 92], [116, 111, 102],
             [185, 142, 104], [82, 88, 95], [101, 75, 53], [59, 102, 52],
             [155, 113, 89], [148, 77, 63], [158, 119, 79], [121, 126, 130],
         ];
         let roughness = [0.9, 0.94, 0.96, 0.84, 0.93, 0.78, 0.35, 0.9, 0.88, 0.82, 0.97, 0.94, 0.92, 0.86, 0.86, 0.85];
-        let srgb = |c: [u8; 3], w: f32| [f32::from(c[0]) / 255.0, f32::from(c[1]) / 255.0, f32::from(c[2]) / 255.0, w];
-        Self {
-            palette: std::array::from_fn(|i| srgb(colours[i], roughness[i])),
-            grass: [srgb([137, 143, 91], 0.0), srgb([91, 125, 65], 0.0), srgb([55, 99, 58], 0.0)],
-            detail: [0.75, 0.18, 0.08, 0.0],
+        let unit = |c: [u8; 3]| c.map(|v| f32::from(v) / 255.0);
+        let mut materials: [MaterialAppearance; MATERIALS] = std::array::from_fn(|i| {
+            let [r, g, b] = unit(colours[i]);
+            MaterialAppearance { colour: [r, g, b, roughness[i]], ..Default::default() }
+        });
+        let turf = &mut materials[GRASS as usize];
+        turf.patches = Some([unit([137, 143, 91]), unit([91, 125, 65]), unit([55, 99, 58])]);
+        turf.lip = Some(DIRT as u8);
+        for speck in [DIRT, SAND] {
+            materials[speck as usize].speck_host = Some(GRASS as u8);
         }
+        for rock in [STONE, DARK_STONE, SANDSTONE] {
+            materials[rock as usize].fleck = Some((DIRT as u8, 0.125));
+        }
+        Self { materials, detail: [0.75, 0.18, 0.08, 0.0] }
     }
+}
+
+/// `MaterialGpu` of common.wgsl.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+struct MaterialGpu {
+    colour: [f32; 4],
+    patches: [[f32; 4]; 3],
+    links: [u32; 4],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -148,8 +196,7 @@ struct FrameGpu {
     /// x: tier-1 summary blocks prove column absence (`blocks_exact`).
     hints: [u32; 4],
     /// Linear appearance (see `TerrainAppearance`).
-    palette: [[f32; 4]; 16],
-    grass: [[f32; 4]; 3],
+    materials: [MaterialGpu; MATERIALS],
     detail: [f32; 4],
 }
 
@@ -1037,8 +1084,22 @@ impl PlanetRenderer {
         // Appearance is public in sRGB; convert once per frame, not per pixel.
         let clean = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
         let linear = |c: [f32; 4]| [clean(c[0]).powf(2.2), clean(c[1]).powf(2.2), clean(c[2]).powf(2.2), clean(c[3])];
-        frame.palette = self.settings.appearance.palette.map(linear);
-        frame.grass = self.settings.appearance.grass.map(linear);
+        frame.materials = std::array::from_fn(|id| {
+            let m = &self.settings.appearance.materials[id];
+            let link = |other: Option<u8>| other.filter(|&o| usize::from(o) < MATERIALS).map_or(id as u32, u32::from);
+            let rgb = |c: [f32; 3]| linear([c[0], c[1], c[2], 1.0]);
+            let mut patches = [[0.0; 4]; 3];
+            if let Some(p) = m.patches {
+                patches = p.map(rgb);
+                patches[0][3] = 1.0;
+            }
+            let (fleck, share) = m.fleck.map_or((None, 0.0), |(f, s)| (Some(f), clean(s)));
+            MaterialGpu {
+                colour: linear(m.colour),
+                patches,
+                links: [link(m.lip), link(fleck), link(m.speck_host), (share * 65_536.0) as u32],
+            }
+        });
         frame.detail = self.settings.appearance.detail.map(clean);
         frame.hints[2] = u32::from(self.settings.far_relief);
         frame.hints[3] = (if self.settings.coarse_relief { 8 } else { 0 }) | (if self.settings.ridge_display { 16 } else { 0 });
