@@ -4,7 +4,8 @@ use common::*;
 use helio_pass_voxel_planet::{
     edits::FaceBrush,
     grid::Grid,
-    landform::{Landform, LandformConstants, LandformField},
+    landform::{LandformConstants, CONTINENT, REGION, RIDGE, WARP},
+    layers::{LayerKind, TerrainLayers},
     noise::{hash3, mul_fine, noise_fine, FINE_ONE},
     TerrainField,
 };
@@ -29,22 +30,23 @@ struct Probe {
 // This independently computes those masks, not the production display loop.
 fn masks(k: &LandformConstants, p: glam::IVec3) -> (i32, i32) {
     let mut q = p;
-    for o in &k.octaves[..6] {
-        q[(o.kind - 4) as usize] += mul_fine(o.amplitude, noise_fine(p, o.shift, o.seed));
+    for o in &k.octaves[..k.stack[3] as usize] {
+        q[(o.kind - WARP) as usize] += mul_fine(o.amplitude, noise_fine(p, o.shift, o.seed));
     }
     let mut continent = 0i32;
     let mut mask = 0i32;
     for o in &k.octaves[6..k.header[0] as usize] {
-        if o.kind == 0 {
+        if o.class() == CONTINENT {
             continent += mul_fine(noise_fine(q, o.shift, o.seed), o.amplitude << 8);
         }
-        if o.kind == 1 {
+        if o.class() == REGION {
             mask += mul_fine(noise_fine(q, o.shift, o.seed), o.amplitude << 8);
         }
     }
+    let bias = k.layers[k.shape[0] as usize - 1].a;
     (
         (continent * 3).clamp(0, FINE_ONE),
-        ((mask - (k.shape[0] << 8)) * 3).clamp(0, FINE_ONE),
+        ((mask - (bias << 8)) * 3).clamp(0, FINE_ONE),
     )
 }
 
@@ -183,25 +185,22 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
     let mut exact = 0;
     let mut edits = 0;
     for (mountain_km, mountain_m) in [(20.0, 2400.0), (20.0, -2400.0), (0.000001, 20.0)] {
-        let field = LandformField::new(
-            &grid,
-            &Landform {
-                mountain_km,
-                mountain_m,
-                ..Default::default()
-            },
-            7,
-        );
+        let mut stack = TerrainLayers::earth();
+        for layer in stack.layers.iter_mut().filter(|l| l.kind == LayerKind::Mountains) {
+            layer.scale_km = mountain_km;
+            layer.height_m = mountain_m;
+        }
+        let field = stack.field(&grid, 7).unwrap();
         let k = field.constants();
         let max_shift = k.octaves[..k.header[0] as usize]
             .iter()
-            .filter(|o| o.kind == 2)
+            .filter(|o| o.class() == RIDGE)
             .map(|o| o.shift)
             .max()
             .unwrap();
         let min_shift = k.octaves[..k.header[0] as usize]
             .iter()
-            .filter(|o| o.kind == 2)
+            .filter(|o| o.class() == RIDGE)
             .map(|o| o.shift)
             .min()
             .unwrap();
@@ -216,15 +215,15 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
             4,
         ];
         let program = field.program();
-        // Landform constants (704), ridge suffix (1056), volume (64).
-        assert_eq!(program.constants.len(), 1824);
+        // Stack constants (976), ridge suffix (1056), volume (64).
+        assert_eq!(program.constants.len(), 2096);
         let lo = i32::from_le_bytes(
-            program.constants[704 + 31 * 4..704 + 32 * 4]
+            program.constants[976 + 31 * 4..976 + 32 * 4]
                 .try_into()
                 .unwrap(),
         );
         let hi = i32::from_le_bytes(
-            program.constants[704 + 32 * 4..704 + 33 * 4]
+            program.constants[976 + 32 * 4..976 + 33 * 4]
                 .try_into()
                 .unwrap(),
         );

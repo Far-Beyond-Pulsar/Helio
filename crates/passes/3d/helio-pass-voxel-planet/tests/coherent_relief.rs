@@ -267,9 +267,8 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
     let materials=world.split("const M_AIR").nth(1).unwrap().split("// Face bases").next().unwrap();
     let mut terrain_constants=LandformConstants::zeroed();
     terrain_constants.header=[0,100,7,123];
-    terrain_constants.levels=[0,0,2_000_000,-8000];
+    terrain_constants.levels=[9,0,2_000_000,-8000];
     terrain_constants.shape=[0,16,0,0];
-    terrain_constants.octaves[6].shift=10;
     let mut terrain_bytes = bytemuck::bytes_of(&terrain_constants).to_vec();
     // Ridge suffix (66 vec4) and volume terms (4 vec4, zero: no caves).
     terrain_bytes.resize(terrain_bytes.len() + 66 * 16 + 4 * 16, 0);

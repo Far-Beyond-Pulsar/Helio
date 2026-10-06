@@ -2,8 +2,8 @@
 //!
 //! * [`grid`] — equal-angle cube-sphere cells aligned with gravity.
 //! * [`terrain`] — pluggable terrain generators, evaluated bit-for-bit
-//!   identically on CPU and GPU, built from [`noise`]; [`landform`] holds
-//!   the built-in generators.
+//!   identically on CPU and GPU, built from [`noise`]; [`layers`] is the
+//!   built-in one (ordered layer stacks, interpreted by [`landform`]).
 //! * [`edits`] — ordered brushes with exact integer containment.
 //! * [`planet`] — canonical queries, materials and exact ray casts.
 //! * `engine` — Helio GBuffer pass with GPU-driven clipmap residency.
@@ -12,7 +12,7 @@ pub mod edits;
 pub mod grid;
 pub mod journal;
 pub mod landform;
-pub mod moon;
+pub mod layers;
 pub mod noise;
 pub mod planet;
 pub mod residency;

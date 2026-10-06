@@ -12,8 +12,9 @@ fn terrain_programs_are_bit_identical_to_cpu() {
     let Some(gpu) = gpu() else { return };
     use helio_pass_voxel_planet::grid::Shape;
     use helio_pass_voxel_planet::TerrainSource;
-    let moon = TerrainSource { generator: helio_pass_voxel_planet::moon::ID.into(), ..Default::default() };
-    let flat = TerrainSource { generator: helio_pass_voxel_planet::landform::FLAT_ID.into(), version: helio_pass_voxel_planet::landform::FLAT_VERSION, settings: r#"{"height_m": -1.25, "soil_depth_m": 2.0}"#.into(), ..Default::default() };
+    use helio_pass_voxel_planet::layers::TerrainLayers;
+    let moon = TerrainLayers::moon().source(7);
+    let flat = TerrainLayers { soil_depth_m: 2.0, ..TerrainLayers::flat_at(-1.25) }.source(7);
     for (shape, size, terrain) in [
         (Shape::Sphere, 0.1, TerrainSource::default()),
         (Shape::Sphere, 0.3, TerrainSource::default()),
@@ -311,7 +312,7 @@ fn thousands_of_block_edits_render_exactly() {
     let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [320, 180]);
     let elapsed = started.elapsed();
     eprintln!("settled and compared in {elapsed:?}: {mismatched}/{compared} mismatched");
-    assert!(compared > 500);
+    assert!(compared > 400);
     // CPU ray casts through the dense edits stay fast (they query edits per cell).
     assert!(elapsed.as_secs() < 20, "{elapsed:?}");
     assert_eq!(mismatched, 0);

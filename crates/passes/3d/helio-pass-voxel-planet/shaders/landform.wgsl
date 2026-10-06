@@ -1,18 +1,38 @@
-// The landform terrain program; mirror of src/landform.rs.
-const LANDFORM_WARP: u32 = 6u; // leading domain-warp octaves (two per axis)
+// The terrain-stack interpreter of `helio.terrain`; mirror of src/landform.rs.
+const LANDFORM_WARP: u32 = 6u; // leading domain-warp slots (two per axis)
 
-struct LandformOctave { shift: u32, amplitude: i32, seed: u32, kind: u32 }
+struct LandformOctave { shift: u32, amplitude: i32, seed: u32, kind: u32 } // kind | layer << 8
+struct StackLayer { kind: u32, mask: u32, a: i32, b: i32 }
 struct TerrainConstants {
-    header: vec4<i32>, // octave count, layer mm, dirt depth (cells), seed
-    levels: vec4<i32>, // basin floor, lowland, snowline, basin threshold (mm)
-    shape: vec4<i32>,  // mountain mask bias, steep slope (cells), ridge display flag, plane (+Y up)
-    erosion: vec4<i32>, // erosion saturation slope (height units per span), pad
-    octaves: array<LandformOctave, 40>,
+    header: vec4<i32>, // octave count, layer mm, soil depth (cells), seed
+    levels: vec4<i32>, // moisture shift, continents layer + 1, snowline, low-basin height (mm)
+    shape: vec4<i32>,  // ridge display layer + 1, steep slope (cells), ridge display flag, plane (+Y up)
+    style: vec4<i32>,  // material style, Layered surface / soil / rock ids
+    stack: vec4<i32>,  // layer count, erosion amplitude sum, domain radius, warp octaves
+    layers: array<StackLayer, 8>,
+    octaves: array<LandformOctave, 48>,
     ridge_suffix: array<vec4<i32>, 66>, // signed conditional suffix means
     // Caves and overhangs (`LandformVolume`): flags/region/depth, tunnel
     // and cavern shapes, overhangs, sizes (tunnel radius, cavern, cover, layer mm).
     volume: array<vec4<i32>, 4>,
 }
+
+// Octave kinds (`landform::CONTINENT` ...).
+const LF_CONTINENT: u32 = 0u;
+const LF_REGION: u32 = 1u;
+const LF_RIDGE: u32 = 2u;
+const LF_HILLS: u32 = 3u;
+const LF_WARP: u32 = 4u;
+const LF_EROSION: u32 = 8u;
+const LF_CRATER: u32 = 9u;
+const LF_BASIN: u32 = 10u;
+// Layer kinds (`StackLayer::CONTINENTS` ...).
+const LAYER_CONTINENTS: u32 = 2u;
+const LAYER_MOUNTAINS: u32 = 3u;
+const LAYER_HILLS: u32 = 4u;
+const LAYER_CRATERS: u32 = 7u;
+const LAYER_BASINS: u32 = 8u;
+const LAYER_PLATEAU: u32 = 9u;
 
 const SEED_CAVE_REGION: u32 = 0xA511E9B3u;
 const SEED_TUNNEL_A: u32 = 0x63D83595u;
@@ -94,9 +114,14 @@ fn terrain_cell(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, k: i32) -> u32
     return select(0u, 1u, solid);
 }
 
+// Masks are always evaluated; other detail finer than about four level
+// cells is omitted (`landform::resolved`).
 fn landform_resolved(o: LandformOctave, level: u32) -> bool {
-    return o.kind <= 1u || o.shift >= level + 5u; // landform::RESOLVED_SHIFT
+    let kind = o.kind & 0xffu;
+    return kind <= LF_REGION || kind == LF_BASIN || o.shift >= level + 5u; // landform::RESOLVED_SHIFT
 }
+
+fn landform_layer_count() -> u32 { return min(u32(max(terrain.stack.x, 0)), 8u); }
 
 override RIDGE_DISPLAY_GENERATION: bool = false;
 
@@ -124,7 +149,6 @@ fn ridge_display_support(shift: u32, effective_level: u32) -> i32 {
     return 0;
 }
 
-const LANDFORM_EROSION: u32 = 8u; // landform::EROSION
 const LANDFORM_GRAD_SHIFT: u32 = 18u; // landform::GRAD_SHIFT
 const LANDFORM_STRIPES: i32 = 2;
 
@@ -146,23 +170,81 @@ fn soft_inside(x: i32, lo: i32, hi: i32) -> i32 {
     return min(clamp((x - lo) * 8, 0, FINE_ONE), clamp((hi - x) * 8, 0, FINE_ONE));
 }
 
-// Steering gradient of the large shape w.r.t. the warped point
-// (`shape_gradient`).
-fn landform_shape_gradient(c: i32, dc: vec3<i32>, mask: i32, dmask: vec3<i32>, ridged: i32, dridged: vec3<i32>) -> vec3<i32> {
-    var dbase: vec3<i32>;
+// Continents base (`continent_base`).
+fn landform_base(c: i32, floor: i32, lowland: i32) -> i32 {
     if c < 0 {
-        dbase = mul_fine3(mul_fine3(-dc, soft_inside(-c, 0, FINE_ONE)), terrain.levels.x - terrain.levels.y / 8);
-    } else {
-        dbase = mul_fine3(mul_fine3(dc * 2, soft_inside(c * 2, 0, FINE_ONE)), terrain.levels.y);
+        let t = min(-c, FINE_ONE);
+        return mul_fine(floor, t) + mul_fine(lowland / 8, FINE_ONE - t);
     }
-    let land = clamp(c * 3, 0, FINE_ONE);
+    return mul_fine(lowland, min(c * 2, FINE_ONE));
+}
+
+// Land weight and deep-sea fade (`land_masks`).
+fn landform_land(c: i32) -> vec2<i32> {
+    return vec2<i32>(clamp(c * 3, 0, FINE_ONE), clamp(FINE_ONE + c * 2, FINE_ONE / 8, FINE_ONE));
+}
+
+fn landform_masked(mask: u32, x: i32, lw: vec2<i32>) -> i32 {
+    if mask == 1u { return mul_fine(x, lw.x); }
+    if mask == 2u { return mul_fine(x, lw.y); }
+    return x;
+}
+
+// Per-layer accumulators (`Accumulators`), reset by every height evaluation.
+var<private> lf_value: array<i32, 8>;
+var<private> lf_region: array<i32, 8>;
+var<private> lf_weight: array<i32, 8>;
+var<private> lf_dvalue: array<vec3<i32>, 8>;
+var<private> lf_dregion: array<vec3<i32>, 8>;
+var<private> lf_dweight: array<vec3<i32>, 8>;
+
+// Continents value and gradient, FINE_ONE (all land) without them.
+fn landform_continent() -> vec4<i32> {
+    let ci = terrain.levels.y - 1;
+    if ci < 0 { return vec4<i32>(FINE_ONE, 0, 0, 0); }
+    let l = u32(ci) & 7u;
+    return vec4<i32>(lf_value[l], lf_dvalue[l]);
+}
+
+// Steering gradient of the continents and mountains w.r.t. the warped point
+// (`steering`).
+fn landform_steering() -> vec3<i32> {
+    let cd = landform_continent();
+    let c = cd.x;
+    let dc = cd.yzw;
+    let lw = landform_land(c);
     let dland = mul_fine3(dc * 3, soft_inside(c * 3, 0, FINE_ONE));
-    let m = (mask - (terrain.shape.x << 8u)) * 3;
-    let region = clamp(m, 0, FINE_ONE);
-    let dregion = mul_fine3(dmask * 3, soft_inside(m, 0, FINE_ONE));
-    let mr = mul_fine(ridged, region);
-    let dmr = mul_fine3(dridged, region) + mul_fine3(dregion, ridged);
-    return dbase + mul_fine3(dmr, land) + mul_fine3(dland, mr);
+    let dwet = mul_fine3(dc * 2, soft_inside(FINE_ONE + c * 2, FINE_ONE / 8, FINE_ONE));
+    var g = vec3<i32>(0);
+    for (var l = 0u; l < landform_layer_count(); l++) {
+        let layer = terrain.layers[l];
+        var x = 0;
+        var dx = vec3<i32>(0);
+        if layer.kind == LAYER_CONTINENTS {
+            if c < 0 {
+                dx = mul_fine3(mul_fine3(-dc, soft_inside(-c, 0, FINE_ONE)), layer.a - layer.b / 8);
+            } else {
+                dx = mul_fine3(mul_fine3(dc * 2, soft_inside(c * 2, 0, FINE_ONE)), layer.b);
+            }
+            x = landform_base(c, layer.a, layer.b);
+        } else if layer.kind == LAYER_MOUNTAINS {
+            let m = (lf_region[l] - (layer.a << 8u)) * 3;
+            let region = clamp(m, 0, FINE_ONE);
+            let dregion = mul_fine3(lf_dregion[l] * 3, soft_inside(m, 0, FINE_ONE));
+            x = mul_fine(lf_value[l], region);
+            dx = mul_fine3(lf_dvalue[l], region) + mul_fine3(dregion, lf_value[l]);
+        } else {
+            continue;
+        }
+        if layer.mask == 1u {
+            g += mul_fine3(dx, lw.x) + mul_fine3(dland, x);
+        } else if layer.mask == 2u {
+            g += mul_fine3(dx, lw.y) + mul_fine3(dwet, x);
+        } else {
+            g += dx;
+        }
+    }
+    return g;
 }
 
 fn trilerp_q16(v: array<i32, 8>, w: vec3<i32>) -> i32 {
@@ -177,7 +259,7 @@ fn landform_lattice_q16(v: i32, mask: i32, s: u32) -> i32 {
 }
 
 // One erosion octave (`erosion_octave`): `.x` height, `.yzw` gradient.
-fn landform_erosion(o: LandformOctave, p: vec3<i32>, g: vec3<i32>, up: vec3<i32>) -> vec4<i32> {
+fn landform_erosion(saturation_slope: i32, o: LandformOctave, p: vec3<i32>, g: vec3<i32>, up: vec3<i32>) -> vec4<i32> {
     let t = vec3<i32>(
         mul_shr_signed(up.y, g.z, 30u) - mul_shr_signed(up.z, g.y, 30u),
         mul_shr_signed(up.z, g.x, 30u) - mul_shr_signed(up.x, g.z, 30u),
@@ -185,7 +267,7 @@ fn landform_erosion(o: LandformOctave, p: vec3<i32>, g: vec3<i32>, up: vec3<i32>
     let tn = unit_q30(t);
     if all(tn == vec3<i32>(0)) { return vec4<i32>(0); }
     let slope = u32(mul_shr_signed(t.x, tn.x, 30u) + mul_shr_signed(t.y, tn.y, 30u) + mul_shr_signed(t.z, tn.z, 30u));
-    let saturation = u32(terrain.erosion.x);
+    let saturation = u32(max(saturation_slope, 1));
     let strength = i32(((min(slope, saturation) >> 5u) << 16u) / max(saturation >> 5u, 1u));
     let s = o.shift;
     let c = p >> vec3<u32>(s);
@@ -207,26 +289,132 @@ fn landform_erosion(o: LandformOctave, p: vec3<i32>, g: vec3<i32>, up: vec3<i32>
     return vec4<i32>(value, mul_shr_signed(magnitude, tn.x, 30u), mul_shr_signed(magnitude, tn.y, 30u), mul_shr_signed(magnitude, tn.z, 30u));
 }
 
+const LANDFORM_CRATER_RADIUS: i32 = 157286; // landform::CRATER_RADIUS_Q19
+const LANDFORM_REACH: i32 = 67108864; // squared ejecta reach in crater radii (Q24)
+
+// 2^60 / d for d in [2^29, 2^30) (`recip_q30`).
+fn landform_recip_q30(d: u32) -> u32 {
+    var y = 3031741621u - mul_shr(d, 2021161080u, 30u);
+    for (var step = 0u; step < 4u; step++) {
+        y = mul_shr(y, 2u * Q30 - mul_shr(d, y, 30u), 30u);
+    }
+    return y;
+}
+
+// r2 / rad2 in Q24 (`squared_ratio`).
+fn landform_squared_ratio(r2: u32, rad2: u32) -> u32 {
+    let bits = 32u - countLeadingZeros(rad2);
+    return mul_shr(r2, landform_recip_q30(rad2 << (30u - bits)), 6u + bits);
+}
+
+// Polynomial smooth minimum over a width `k` (`smooth_min`).
+fn landform_smooth_min(a: i32, b: i32, k: i32) -> i32 {
+    let m = min(a, b);
+    let gap = abs(a - b);
+    if k <= 0 || gap >= k { return m; }
+    let n = (k - gap) << 8u;
+    let q = ((n / k) << 8u) + ((n % k) << 8u) / k;
+    return m - scale_q16(mul16(q, q), k) / 4;
+}
+
+// One crater octave (`crater_octave`): height (mm), freshest ejecta.
+fn landform_crater(layer: StackLayer, o: LandformOctave, p: vec3<i32>, up: vec3<i32>) -> vec2<i32> {
+    let s = o.shift;
+    let density = o.seed & 0xffffu;
+    let radius_domain = u32(terrain.stack.z);
+    let c0 = p >> vec3<u32>(s);
+    var height = 0;
+    var ejecta = 0u;
+    for (var index = 0; index < 27; index++) {
+        let cell = c0 + vec3<i32>(index % 3 - 1, (index / 3) % 3 - 1, index / 9 - 1);
+        let a = hash3(cell.x, cell.y, cell.z, o.seed);
+        if (a & 0xffffu) >= density { continue; }
+        let b = hash3(cell.x, cell.y, cell.z, o.seed ^ 0x6C8E9CF5u);
+        let jitter = vec3<i32>(i32(b & 1023u), i32((b >> 10u) & 1023u), i32((b >> 20u) & 1023u));
+        let centre = (cell << vec3<u32>(s)) + (jitter << vec3<u32>(s - 10u));
+        // Only centres within half a cell of the surface.
+        if terrain.shape.w != 0 {
+            if abs(centre.y) >= (1 << (s - 1u)) { continue; }
+        } else {
+            let ac = vec3<u32>(abs(centre));
+            let len2 = mul_shr(ac.x, ac.x, 30u) + mul_shr(ac.y, ac.y, 30u) + mul_shr(ac.z, ac.z, 30u);
+            let r2 = mul_shr(radius_domain, radius_domain, 30u);
+            if u32(abs(i32(len2) - i32(r2))) >= (radius_domain >> (30u - s)) { continue; }
+        }
+        // Squared horizontal distance in Q28 lattice cells from Q(19 + e)
+        // offsets, exact for coarse lattices (`crater_octave`).
+        let e = select(0u, s - 19u, s >= 19u);
+        var d = centre - p;
+        if s < 19u { d = d << vec3<u32>(19u - s); }
+        if max(max(abs(d.x), abs(d.y)), abs(d.z)) >= (1 << (19u + e)) { continue; }
+        let along = mul_shr_signed(d.x, up.x, 20u + e) + mul_shr_signed(d.y, up.y, 20u + e) + mul_shr_signed(d.z, up.z, 20u + e);
+        let ad = vec3<u32>(abs(d));
+        let len2 = mul_shr(ad.x, ad.x, 10u + 2u * e) + mul_shr(ad.y, ad.y, 10u + 2u * e) + mul_shr(ad.z, ad.z, 10u + 2u * e);
+        let aa = mul_shr(u32(abs(along)), u32(abs(along)), 30u);
+        let r2 = select(0u, len2 - aa, len2 > aa);
+        let size = 36045 + i32(((a >> 16u) * 29491u) >> 16u);
+        let radius = max(mul16(LANDFORM_CRATER_RADIUS, size), 1);
+        let rad2 = max(mul_shr(u32(radius), u32(radius), 10u), 1u);
+        if r2 >= 4u * rad2 { continue; }
+        let x2 = i32(landform_squared_ratio(r2, rad2));
+        let depth = scale_q16(size, o.amplitude);
+        let rim = scale_q16(layer.a, depth);
+        let bowl = mul_fine(x2, depth + rim) - depth;
+        let t = (LANDFORM_REACH - x2) / 3;
+        let ejecta_height = mul_fine(mul_fine(mul_fine(t, t), t), rim);
+        height += landform_smooth_min(bowl, ejecta_height, rim / 4);
+        if (hash3(cell.x, cell.y, cell.z, o.seed ^ 0x1B873593u) & 0xffffu) < u32(layer.b) {
+            ejecta = max(ejecta, 255u - u32((x2 >> 16u) * 255 / (LANDFORM_REACH >> 16u)));
+        }
+    }
+    return vec2<i32>(height, i32(ejecta));
+}
+
 fn landform_noise(p: vec3<i32>, o: LandformOctave, gradient: bool) -> vec4<i32> {
     if gradient { return noise_fine_grad(p, o.shift, o.seed); }
     return vec4<i32>(noise_fine(p, o.shift, o.seed), 0, 0, 0);
 }
 
-// The false mode preserves the canonical operation order. Only generation
-// compiles the display capability; climate, shade and verify_field stay exact.
-fn terrain_height_mode(p: vec3<i32>, level: u32, display: bool) -> i32 {
-    let count = u32(terrain.header.x);
-    // Erosion follows the larger terrain's slope (`height`).
+// One ridge octave into layer `l`'s chain (`height_parts`), weighted by
+// `gain`; `tracked` carries gradients.
+fn landform_ridge(l: u32, o: LandformOctave, q: vec3<i32>, tracked: bool, gain: i32) {
+    let nd = landform_noise(q, o, tracked);
+    let n = nd.x;
+    let r = clamp(FINE_ONE - abs(n), 0, FINE_ONE - 1);
+    let rr = mul_fine(r, r);
+    let v = mul_fine(rr, lf_weight[l]);
+    if tracked {
+        // The crest's sign flip is softened over |n| < 1/4.
+        let dr = mul_fine3(landform_per_span3(-nd.yzw, o.shift), clamp(n * 4, -FINE_ONE, FINE_ONE));
+        let dv = mul_fine3(mul_fine3(dr, r) * 2, lf_weight[l]) + mul_fine3(lf_dweight[l], rr);
+        lf_dweight[l] = mul_fine3(dv * 2, soft_inside(v * 2, FINE_ONE / 4, FINE_ONE - 1));
+        lf_dvalue[l] += mul_fine3(dv, o.amplitude);
+    }
+    lf_weight[l] = clamp(v * 2, FINE_ONE / 4, FINE_ONE - 1);
+    if gain == FINE_ONE {
+        lf_value[l] += mul_fine(o.amplitude, v);
+    } else {
+        lf_value[l] += mul_fine(mul_fine(o.amplitude, v), gain);
+    }
+}
+
+// Height and surface word (`height_parts`). The false mode preserves the
+// canonical operation order. Only generation compiles the display
+// capability; climate, shade and verify_field stay exact.
+fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
+    let count = min(u32(max(terrain.header.x, 0)), 48u);
+    // Erosion follows the larger terrain's slope (`height_parts`).
     var erosion = false;
     for (var index = LANDFORM_WARP; index < count; index++) {
         let o = terrain.octaves[index];
-        if o.kind == LANDFORM_EROSION && landform_resolved(o, level) { erosion = true; }
+        if (o.kind & 0xffu) == LF_EROSION && landform_resolved(o, level) { erosion = true; }
     }
     var warp = vec3<i32>(0);
     var jx = vec3<i32>(0);
     var jy = vec3<i32>(0);
     var jz = vec3<i32>(0);
-    for (var index = 0u; index < LANDFORM_WARP; index++) {
+    let warps = min(u32(max(terrain.stack.w, 0)), LANDFORM_WARP);
+    for (var index = 0u; index < warps; index++) {
         let o = terrain.octaves[index];
         let nd = landform_noise(p, o, erosion);
         let n = mul_fine(o.amplitude, nd.x);
@@ -235,133 +423,139 @@ fn terrain_height_mode(p: vec3<i32>, level: u32, display: bool) -> i32 {
             let m = mul_fine3(nd.yzw, o.amplitude);
             if o.shift <= 24u { jac = m << vec3<u32>(24u - o.shift); } else { jac = m >> vec3<u32>(o.shift - 24u); }
         }
-        let axis = o.kind - 4u;
+        let axis = min(o.kind - LF_WARP, 2u);
         if axis == 0u { warp.x += n; jx += jac; } else if axis == 1u { warp.y += n; jy += jac; } else { warp.z += n; jz += jac; }
     }
     let q = p + warp;
     var up = vec3<i32>(0, 1073741824, 0);
     if terrain.shape.w == 0 { up = unit_q30(p); }
-    var continent = 0;
-    var mask = 0;
-    var ridged = 0;
-    var ridge_weight = FINE_ONE - 1;
-    var detail = 0;
+    for (var l = 0u; l < 8u; l++) {
+        lf_value[l] = 0;
+        lf_region[l] = 0;
+        lf_weight[l] = FINE_ONE - 1;
+        lf_dvalue[l] = vec3<i32>(0);
+        lf_dregion[l] = vec3<i32>(0);
+        lf_dweight[l] = vec3<i32>(0);
+    }
     var eroded = 0;
-    var dcontinent = vec3<i32>(0);
-    var dmask = vec3<i32>(0);
-    var dridged = vec3<i32>(0);
-    var dweight = vec3<i32>(0);
     var deroded = vec3<i32>(0);
+    var ejecta = 0;
+    var display_tag = 0xffffffffu;
+    if terrain.shape.x > 0 { display_tag = (u32(terrain.shape.x - 1) << 8u) | LF_RIDGE; }
     var ridge_gain = FINE_ONE;
     var ridge_row = 0u;
     for (var index = LANDFORM_WARP; index < count; index++) {
         let o = terrain.octaves[index];
-        if RIDGE_DISPLAY_GENERATION && display && o.kind == 2u {
+        let l = (o.kind >> 8u) & 7u;
+        let kind = o.kind & 0xffu;
+        if RIDGE_DISPLAY_GENERATION && display && o.kind == display_tag {
             // Expand B[k](w)=(1-s)*F[k](w)+s*(A[k]*v+B[k+1](next(w))).
             // Repeated lattice shifts may have several partial octaves.
             if ridge_gain != 0 {
                 let support = ridge_display_support(o.shift, level);
                 if support != FINE_ONE {
                     let mean_gain = mul_fine(ridge_gain, FINE_ONE - support);
-                    ridged += mul_fine(ridge_suffix_mean(ridge_row, ridge_weight), mean_gain);
+                    lf_value[l] += mul_fine(ridge_suffix_mean(ridge_row, lf_weight[l]), mean_gain);
                     ridge_gain = mul_fine(ridge_gain, support);
                 }
                 if ridge_gain != 0 {
                     // Resolved erosion octaves precede every partial ridge:
                     // only fully supported ridges carry gradients.
-                    let tracked = erosion && ridge_gain == FINE_ONE;
-                    let nd = landform_noise(q, o, tracked);
-                    let n = nd.x;
-                    let r = clamp(FINE_ONE - abs(n), 0, FINE_ONE - 1);
-                    let rr = mul_fine(r, r);
-                    let v = mul_fine(rr, ridge_weight);
-                    if tracked {
-                        let dr = mul_fine3(landform_per_span3(-nd.yzw, o.shift), clamp(n * 4, -FINE_ONE, FINE_ONE));
-                        let dv = mul_fine3(mul_fine3(dr, r) * 2, ridge_weight) + mul_fine3(dweight, rr);
-                        dweight = mul_fine3(dv * 2, soft_inside(v * 2, FINE_ONE / 4, FINE_ONE - 1));
-                        dridged += mul_fine3(dv, o.amplitude);
-                    }
-                    ridged += mul_fine(mul_fine(o.amplitude, v), ridge_gain);
-                    ridge_weight = clamp(v * 2, FINE_ONE / 4, FINE_ONE - 1);
+                    landform_ridge(l, o, q, erosion && ridge_gain == FINE_ONE, ridge_gain);
                 }
             }
             ridge_row += 1u;
             continue;
         }
         if !landform_resolved(o, level) { continue; }
-        if o.kind <= 1u {
+        if kind <= LF_REGION {
             let nd = landform_noise(q, o, erosion);
             let v = mul_fine(nd.x, o.amplitude << 8u);
             let dv = mul_fine3(landform_per_span3(nd.yzw, o.shift), o.amplitude << 8u);
-            if o.kind == 0u { continent += v; dcontinent += dv; } else { mask += v; dmask += dv; }
-        } else if o.kind == 2u {
-            let nd = landform_noise(q, o, erosion);
-            let n = nd.x;
-            let r = clamp(FINE_ONE - abs(n), 0, FINE_ONE - 1);
-            let rr = mul_fine(r, r);
-            let v = mul_fine(rr, ridge_weight);
-            if erosion {
-                let dr = mul_fine3(landform_per_span3(-nd.yzw, o.shift), clamp(n * 4, -FINE_ONE, FINE_ONE));
-                let dv = mul_fine3(mul_fine3(dr, r) * 2, ridge_weight) + mul_fine3(dweight, rr);
-                dweight = mul_fine3(dv * 2, soft_inside(v * 2, FINE_ONE / 4, FINE_ONE - 1));
-                dridged += mul_fine3(dv, o.amplitude);
-            }
-            ridge_weight = clamp(v * 2, FINE_ONE / 4, FINE_ONE - 1);
-            ridged += mul_fine(o.amplitude, v);
-        } else if o.kind == LANDFORM_EROSION {
-            let gq = landform_shape_gradient(continent, dcontinent, mask, dmask, ridged, dridged);
+            if kind == LF_CONTINENT { lf_value[l] += v; lf_dvalue[l] += dv; } else { lf_region[l] += v; lf_dregion[l] += dv; }
+        } else if kind == LF_RIDGE {
+            landform_ridge(l, o, q, erosion, FINE_ONE);
+        } else if kind == LF_HILLS {
+            lf_value[l] += mul_fine(o.amplitude, noise_fine(q, o.shift, o.seed));
+        } else if kind == LF_EROSION {
+            let gq = landform_steering();
             // (I + J)^T: column j gathers every warp axis' dependence on p_j.
             let gp = gq + vec3<i32>(
                 mul_fine(gq.x, jx.x) + mul_fine(gq.y, jy.x) + mul_fine(gq.z, jz.x),
                 mul_fine(gq.x, jx.y) + mul_fine(gq.y, jy.y) + mul_fine(gq.z, jz.y),
                 mul_fine(gq.x, jx.z) + mul_fine(gq.y, jy.z) + mul_fine(gq.z, jz.z));
-            let e = landform_erosion(o, p, gp + deroded, up);
+            let e = landform_erosion(terrain.layers[l].a, o, p, gp + deroded, up);
+            lf_value[l] += e.x;
             eroded += e.x;
             deroded += e.yzw;
+        } else if kind == LF_CRATER {
+            let c = landform_crater(terrain.layers[l], o, p, up);
+            lf_value[l] += c.x;
+            ejecta = max(ejecta, c.y);
+        } else if kind == LF_BASIN {
+            lf_value[l] += noise_fine(p, o.shift, o.seed);
         } else {
-            detail += scale_q16(noise(select(q, p, o.kind == 7u), o.shift, o.seed), o.amplitude);
+            lf_value[l] += scale_q16(noise(p, o.shift, o.seed), o.amplitude);
         }
     }
-    let c = continent;
-    var base: i32;
-    if c < 0 {
-        let t = min(-c, FINE_ONE);
-        base = mul_fine(terrain.levels.x, t) + mul_fine(terrain.levels.y / 8, FINE_ONE - t);
-    } else {
-        let t = min(c * 2, FINE_ONE);
-        base = mul_fine(terrain.levels.y, t);
+    // Compose the layers in stack order.
+    let c = landform_continent().x;
+    let lw = landform_land(c);
+    var h = 0;
+    var basin = 0;
+    for (var l = 0u; l < landform_layer_count(); l++) {
+        let layer = terrain.layers[l];
+        var x = 0;
+        if layer.kind == LAYER_CONTINENTS {
+            x = landform_base(c, layer.a, layer.b);
+        } else if layer.kind == LAYER_MOUNTAINS {
+            x = mul_fine(lf_value[l], clamp((lf_region[l] - (layer.a << 8u)) * 3, 0, FINE_ONE));
+        } else if layer.kind == LAYER_BASINS {
+            // Basins flatten what lies below them in the stack by half and
+            // sink it by their depth.
+            let m = landform_masked(layer.mask, clamp((lf_value[l] - layer.b) * 4, 0, FINE_ONE), lw);
+            basin = max(basin, m);
+            h = mul_fine(h, FINE_ONE - m / 2) - mul_fine(layer.a, m);
+            continue;
+        } else if layer.kind == LAYER_PLATEAU {
+            x = layer.a;
+        } else if layer.kind >= LAYER_HILLS && layer.kind <= LAYER_CRATERS {
+            x = lf_value[l];
+        }
+        h += landform_masked(layer.mask, x, lw);
     }
-    let land = clamp(c * 3, 0, FINE_ONE);
-    let region = clamp((mask - (terrain.shape.x << 8u)) * 3, 0, FINE_ONE);
-    let mountains = mul_fine(mul_fine(ridged, region), land);
-    let wet = clamp(FINE_ONE + c * 2, FINE_ONE / 8, FINE_ONE);
-    landform_eroded = eroded;
-    landform_eroded_at = vec4<i32>(p, i32(level));
-    return base + mountains + eroded + mul_fine(detail, wet);
+    var surface = 0;
+    if terrain.style.x == 0 {
+        surface = clamp(eroded * 127 / max(terrain.stack.y, 1), -127, 127) & 0xff;
+    } else if terrain.style.x == 1 {
+        surface = (ejecta >> 1u) | (select(0, 1, basin >= FINE_ONE / 2) << 7u);
+    }
+    landform_surface = surface;
+    landform_surface_at = vec4<i32>(p, i32(level));
+    return vec2<i32>(h, surface);
 }
 
 fn terrain_height(p: vec3<i32>, level: u32) -> i32 {
-    return terrain_height_mode(p, level, false);
+    return terrain_parts_mode(p, level, false).x;
 }
 
-// Erosion term of the last height evaluated in this invocation: generation
-// asks for the surface word right after the column's height.
-var<private> landform_eroded: i32 = 0;
-var<private> landform_eroded_at: vec4<i32> = vec4<i32>(0x7fffffff);
+// Surface word of the last height evaluated in this invocation: generation
+// asks for it right after the column's height.
+var<private> landform_surface: i32 = 0;
+var<private> landform_surface_at: vec4<i32> = vec4<i32>(0x7fffffff);
 
-// Surface word (`landform::surface`): the erosion term as a signed byte.
+// Surface word (`landform::surface`), by material style.
 fn terrain_surface(p: vec3<i32>, level: u32, height: i32) -> u32 {
-    if any(landform_eroded_at != vec4<i32>(p, i32(level))) { _ = terrain_height(p, level); }
-    return u32(clamp(landform_eroded * 127 / max(terrain.erosion.y, 1), -127, 127)) & 0xffu;
+    if any(landform_surface_at != vec4<i32>(p, i32(level))) { _ = terrain_height(p, level); }
+    return u32(landform_surface);
 }
 
 fn terrain_display_height(p: vec3<i32>, level: u32) -> i32 {
-    return terrain_height_mode(p, level, terrain.shape.z != 0);
+    return terrain_parts_mode(p, level, terrain.shape.z != 0).x;
 }
 
 fn landform_moisture(p: vec3<i32>) -> i32 {
-    let o = max(terrain.octaves[6].shift, 2u) - 1u;
-    return (noise_fine(p, o, bitcast<u32>(terrain.header.w) ^ 0x51ED270Bu) + FINE_ONE) / 2;
+    return (noise_fine(p, u32(max(terrain.levels.x, 1)), bitcast<u32>(terrain.header.w) ^ 0x51ED270Bu) + FINE_ONE) / 2;
 }
 
 // Strata altitude (mm): layers undulate +-8 m over ~100 m, so cuts through
@@ -597,11 +791,38 @@ fn snow_material_coverage(resolved: f32, deviation: f32, threshold: f32,
     return vec4<f32>(snow, stone * remaining, (rock - stone) * remaining, dirt);
 }
 
+// Material of a solid ground cell by material style (`ground_material`).
 fn ground_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
     material_mix = vec4<f32>(-1.0, 0.0, 0.0, 0.0);
     material_fleck_base = M_AIR;
     material_coverage = -1.0;
     material_coverage_ids = vec2<u32>(M_DARK_STONE, M_STONE);
+    if terrain.style.x == 1 { return lunar_material(p, surface, depth, slope, layer); }
+    if terrain.style.x == 2 {
+        if depth == 0 { return u32(terrain.style.y); }
+        if depth <= terrain.header.z { return u32(terrain.style.z); }
+        return u32(terrain.style.w);
+    }
+    return earthlike_material(p, surface, top_height, depth, slope, layer);
+}
+
+// Lunar materials (`lunar_material`): 1 regolith, 2 mare, 3 ejecta, 4 rock,
+// 5 basalt, 6 anorthosite.
+fn lunar_material(p: vec3<i32>, surface: u32, depth: i32, slope: i32, layer: i32) -> u32 {
+    let ejecta = (surface & 0x7fu) << 1u;
+    let mare = (surface & 0x80u) != 0u;
+    let h = hash3(p.x, p.y, p.z ^ (layer * 0x9e37), 0x2545F491u);
+    if depth == 0 {
+        if slope >= 12 || (slope >= 6 && (h & 3u) == 0u) { return 4u; }
+        if ejecta > (h & 0xffu) { return 3u; }
+        return select(1u, 2u, mare);
+    }
+    if depth < terrain.header.z { return select(1u, 2u, mare); }
+    return select(6u, 5u, mare);
+}
+
+// Earthlike materials (`earthlike_material`).
+fn earthlike_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
     let dirt = terrain.header.z;
     let steep = slope >= terrain.shape.y;
     let wet = landform_moisture(p);

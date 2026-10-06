@@ -1044,11 +1044,11 @@ fn main() {
             }
         }
         PLANE_WORLD.store(false, std::sync::atomic::Ordering::Relaxed);
-        // A moon: another generator through the same contract, with its own
+        // A moon: another layer stack (craters, basins) with the lunar
         // material table (the renderer's appearance defaults to it).
         flight.planet = Arc::new(Planet::new(PlanetRecipe {
             radius_m: 1_737_400.0,
-            terrain: helio_pass_voxel_planet::TerrainSource { generator: helio_pass_voxel_planet::moon::ID.into(), ..Default::default() },
+            terrain: helio_pass_voxel_planet::layers::TerrainLayers::moon().source(7),
             ..Default::default()
         }).unwrap());
         let moon_dir = DVec3::new(0.31, 1.0, 0.17).normalize();

@@ -13,9 +13,7 @@ fn fine_grass_preserves_authored_srgb_after_linear_upload() {
     let planet = Arc::new(Planet::new(PlanetRecipe {
         shape: helio_pass_voxel_planet::grid::Shape::Plane,
         plane_size_m: 1024.0,
-        terrain: helio_pass_voxel_planet::TerrainSource {
-            generator: helio_pass_voxel_planet::landform::FLAT_ID.into(), version: helio_pass_voxel_planet::landform::FLAT_VERSION, ..Default::default()
-        },
+        terrain: helio_pass_voxel_planet::layers::TerrainLayers::flat().source(7),
         ..Default::default()
     }).unwrap());
     let mut settings = helio_pass_voxel_planet::engine::Settings::default();
@@ -80,10 +78,7 @@ fn settled_level_transitions_enter_the_surface_not_subsoil() {
     let Some(gpu) = gpu() else { return };
     // Top faces are checked against the heightfield top: Landform without
     // caves and overhangs (cave_view covers cave floors and overhang tops).
-    let terrain = helio_pass_voxel_planet::TerrainSource {
-        settings: helio_pass_voxel_planet::landform::HEIGHTFIELD_SETTINGS.into(),
-        ..Default::default()
-    };
+    let terrain = helio_pass_voxel_planet::layers::TerrainLayers::earth().heightfield().source(7);
     let planet = Arc::new(Planet::new(PlanetRecipe { terrain, ..Default::default() }).unwrap());
     let target = Target::new(&gpu, [384, 216]);
     let mut renderer = renderer(&gpu, planet.clone(), [384, 216]);

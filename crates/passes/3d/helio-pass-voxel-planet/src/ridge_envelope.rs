@@ -1,11 +1,26 @@
+//! Ridge envelopes: coarse levels draw the display layer's unresolved
+//! ridges as their conditional mean given the incoming ridge weight, baked
+//! per stack into a suffix table (`TerrainConstants::ridge_suffix`).
 use crate::grid::Grid;
-use crate::landform::{LandformConstants, WARP_OCTAVES};
+use crate::landform::{LandformConstants, Octave, RIDGE, WARP, WARP_OCTAVES};
 use crate::noise::{hash3, mul_fine, noise_fine, FINE_ONE};
 use glam::IVec3;
 
 pub(crate) const KNOTS: usize = 33;
+/// Most ridges a display layer may have (suffix rows).
 pub(crate) const RIDGES: usize = 7;
 const SAMPLE_COUNT: usize = 2048;
+
+/// The ridge octaves of the stack's display layer, coarsest first.
+pub(crate) fn display_ridges(k: &LandformConstants) -> Vec<Octave> {
+    let display = k.shape[0];
+    if display <= 0 {
+        return Vec::new();
+    }
+    let tag = ((display as u32 - 1) << 8) | RIDGE;
+    let count = (k.header[0].max(0) as usize).min(k.octaves.len());
+    k.octaves[WARP_OCTAVES.min(count)..count].iter().filter(|o| o.kind == tag).copied().collect()
+}
 
 pub(crate) fn bake_ridge_suffix(
     grid: &Grid,
@@ -15,12 +30,10 @@ pub(crate) fn bake_ridge_suffix(
     if !(WARP_OCTAVES..=k.octaves.len()).contains(&count) {
         return Err("invalid octave count");
     }
-    let ridges: Vec<_> = k.octaves[WARP_OCTAVES..count]
-        .iter()
-        .filter(|o| o.kind == 2)
-        .collect();
-    if ridges.len() != RIDGES || ridges.windows(2).any(|o| o[0].shift < o[1].shift) {
-        return Err("suffix filtering requires the stock ordered seven-ridge recipe");
+    let ridges = display_ridges(k);
+    let n = ridges.len();
+    if n == 0 || n > RIDGES || ridges.windows(2).any(|o| o[0].shift < o[1].shift) {
+        return Err("suffix filtering requires a display layer of one to seven ordered ridges");
     }
     // Current limb multiplication contract. Canonical validation currently
     // accepts values outside it; do not silently saturate the new bake.
@@ -42,8 +55,8 @@ pub(crate) fn bake_ridge_suffix(
         let j = (hash3(index as i32, 1, 0, 0x51978213) % (grid.cells() as u32)) as i32;
         let p = grid.domain_point(face, i, j, 0);
         let mut warp = [0i32; 3];
-        for o in &k.octaves[..WARP_OCTAVES] {
-            let axis = (o.kind - 4) as usize;
+        for o in &k.octaves[..(k.stack[3].max(0) as usize).min(WARP_OCTAVES)] {
+            let axis = (o.kind.wrapping_sub(WARP)) as usize;
             if axis >= 3 {
                 return Err("invalid warp axis");
             }
@@ -57,7 +70,7 @@ pub(crate) fn bake_ridge_suffix(
             p.z.checked_add(warp[2]).ok_or("warped domain overflows")?,
         );
         samples.push(std::array::from_fn(|r| {
-            let o = ridges[r];
+            let Some(o) = ridges.get(r) else { return 0 };
             let n = noise_fine(q, o.shift, o.seed);
             let ridge = (FINE_ONE - n.abs()).clamp(0, FINE_ONE - 1);
             mul_fine(ridge, ridge)
@@ -65,13 +78,13 @@ pub(crate) fn bake_ridge_suffix(
     }
 
     let mut packed = [[0i32; 4]; 66];
-    for row in 0..RIDGES {
+    for row in 0..n {
         for knot in 0..KNOTS {
             let incoming = (FINE_ONE / 4 + (knot as i32) * 393216).min(FINE_ONE - 1);
             let mut sum = 0i64;
             for sample in &samples {
                 let mut weight = incoming;
-                for r in row..RIDGES {
+                for r in row..n {
                     let v = mul_fine(sample[r], weight);
                     sum += i64::from(mul_fine(ridges[r].amplitude, v));
                     weight = (v * 2).clamp(FINE_ONE / 4, FINE_ONE - 1);
@@ -92,7 +105,8 @@ pub(crate) fn bake_ridge_suffix(
             }
         }
     }
-    // Row7 is the zero terminal suffix. All values remain signed.
+    // Rows from the ridge count on are the zero terminal suffix. All values
+    // remain signed.
     Ok(packed)
 }
 
@@ -107,18 +121,26 @@ pub(crate) fn render_bounds(_grid: &Grid, _k: &LandformConstants, bounds: [i32; 
 mod tests {
     use super::*;
     use crate::grid::Shape;
-    use crate::landform::Landform;
+    use crate::layers::{Layer, LayerKind, TerrainLayers};
 
     // Exact i64 product is independent of the production limb implementation.
     fn product(a: i32, b: i32) -> i32 {
         (i64::from(a) * i64::from(b) / i64::from(FINE_ONE)) as i32
     }
 
+    /// Earth constants with its mountain layer changed by `f`.
+    fn earth(grid: &Grid, seed: u32, f: impl Fn(&mut Layer)) -> LandformConstants {
+        let mut stack = TerrainLayers::earth();
+        stack.layers.iter_mut().filter(|l| l.kind == LayerKind::Mountains).for_each(f);
+        stack.compile(grid, seed).unwrap().0
+    }
+
+    fn is_display_ridge(k: &LandformConstants, o: &Octave) -> bool {
+        k.shape[0] > 0 && o.kind == (((k.shape[0] as u32 - 1) << 8) | RIDGE)
+    }
+
     fn holdout(grid: &Grid, k: &LandformConstants) -> Vec<[i32; RIDGES]> {
-        let ridges: Vec<_> = k.octaves[..k.header[0] as usize]
-            .iter()
-            .filter(|o| o.kind == 2)
-            .collect();
+        let ridges = display_ridges(k);
         (0..8192)
             .map(|index| {
                 // Distinct salt and sequence from the constructor's 2048 samples.
@@ -128,14 +150,12 @@ mod tests {
                 let j = (hash3(id, -97, 31, 0xA49BA217) % grid.cells() as u32) as i32;
                 let p = grid.domain_point(face, i, j, 0);
                 let mut q = p;
-                for o in &k.octaves[..WARP_OCTAVES] {
-                    q[(o.kind - 4) as usize] +=
-                        product(o.amplitude, noise_fine(p, o.shift, o.seed));
+                for o in &k.octaves[..k.stack[3] as usize] {
+                    q[(o.kind - WARP) as usize] += product(o.amplitude, noise_fine(p, o.shift, o.seed));
                 }
                 std::array::from_fn(|r| {
-                    let o = ridges[r];
-                    let value =
-                        (FINE_ONE - noise_fine(q, o.shift, o.seed).abs()).clamp(0, FINE_ONE - 1);
+                    let Some(o) = ridges.get(r) else { return 0 };
+                    let value = (FINE_ONE - noise_fine(q, o.shift, o.seed).abs()).clamp(0, FINE_ONE - 1);
                     product(value, value)
                 })
             })
@@ -144,33 +164,25 @@ mod tests {
 
     #[test]
     fn suffix_means_match_independent_full_ridge_holdout() {
-        for grid in [
-            Grid::new(6_371_000.0, 0.1).unwrap(),
-            Grid::plane(Shape::Plane, 100_000.0, 0.3).unwrap(),
-        ] {
-            for mountain_km in [20.0, 0.000001, 1_000_000.0] {
-                let land = Landform {
-                    mountain_km,
-                    ..Landform::default()
-                };
-                let k = LandformConstants::new(&grid, &land, 19);
+        for grid in [Grid::new(6_371_000.0, 0.1).unwrap(), Grid::plane(Shape::Plane, 100_000.0, 0.3).unwrap()] {
+            for (scale_km, octaves) in [(20.0, 7), (0.000001, 7), (100_000.0, 7), (20.0, 4)] {
+                let k = earth(&grid, 19, |l| {
+                    l.scale_km = scale_km;
+                    l.octaves = octaves;
+                });
                 let lut = bake_ridge_suffix(&grid, &k).unwrap();
                 let samples = holdout(&grid, &k);
-                let ridges: Vec<_> = k.octaves[..k.header[0] as usize]
-                    .iter()
-                    .filter(|o| o.kind == 2)
-                    .collect();
-                for row in 0..RIDGES {
-                    let magnitude: i64 = ridges[row..]
-                        .iter()
-                        .map(|o| i64::from(o.amplitude).abs())
-                        .sum();
+                let ridges = display_ridges(&k);
+                let n = ridges.len();
+                assert_eq!(n, octaves as usize);
+                for row in 0..n {
+                    let magnitude: i64 = ridges[row..].iter().map(|o| i64::from(o.amplitude).abs()).sum();
                     for half_knot in (0..=64).step_by(2).chain([7, 23, 47]) {
                         let incoming = (FINE_ONE / 4 + half_knot as i32 * 196608).min(FINE_ONE - 1);
                         let mut sum = 0i64;
                         for sample in &samples {
                             let mut weight = incoming;
-                            for r in row..RIDGES {
+                            for r in row..n {
                                 let v = product(sample[r], weight);
                                 sum += i64::from(product(ridges[r].amplitude, v));
                                 weight = (v * 2).clamp(FINE_ONE / 4, FINE_ONE - 1);
@@ -188,11 +200,14 @@ mod tests {
                         let error = (actual - expected).abs();
                         let tolerance = (magnitude * 15 / 1000).max(16);
                         assert!(error <= tolerance,
-                            "wavelength={mountain_km}, row={row}, half-knot={half_knot}: {actual} vs {expected}, error={error}, allowed={tolerance}");
+                            "scale={scale_km} km x{octaves}, row={row}, half-knot={half_knot}: {actual} vs {expected}, error={error}, allowed={tolerance}");
                     }
                 }
-                let all = i64::from(lut[(32) / 4][(32) % 4]);
-                assert!(all > 0, "unresolved positive ridge mass must not vanish");
+                // Rows past the ridge count are the zero terminal suffix.
+                for index in n * KNOTS..264 {
+                    assert_eq!(lut[index / 4][index % 4], 0);
+                }
+                assert!(lut[32 / 4][32 % 4] > 0, "unresolved positive ridge mass must not vanish");
             }
         }
     }
@@ -200,11 +215,12 @@ mod tests {
     #[test]
     fn signed_amplitudes_repeated_shifts_and_unsafe_recipes_are_explicit() {
         let grid = Grid::new(6_371_000.0, 1.0).unwrap();
-        let k = LandformConstants::new(&grid, &Landform::default(), 7);
+        let k = earth(&grid, 7, |_| {});
         let positive = bake_ridge_suffix(&grid, &k).unwrap();
+        let count = k.header[0] as usize;
         let mut negative = k;
-        for o in &mut negative.octaves[..negative.header[0] as usize] {
-            if o.kind == 2 {
+        for o in &mut negative.octaves[..count] {
+            if is_display_ridge(&k, o) {
                 o.amplitude = -o.amplitude;
             }
         }
@@ -213,20 +229,25 @@ mod tests {
             assert_eq!(positive[index / 4][index % 4], -neg[index / 4][index % 4]);
         }
         let mut zero = k;
-        for o in &mut zero.octaves[..zero.header[0] as usize] {
-            if o.kind == 2 {
+        for o in &mut zero.octaves[..count] {
+            if is_display_ridge(&k, o) {
                 o.amplitude = 0;
                 o.shift = 1;
             }
         }
         assert_eq!(bake_ridge_suffix(&grid, &zero).unwrap(), [[0; 4]; 66]);
         let mut invalid = k;
-        let first = invalid.octaves.iter().position(|o| o.kind == 2).unwrap();
+        let first = invalid.octaves.iter().position(|o| is_display_ridge(&k, o)).unwrap();
+        let second = first + 1 + invalid.octaves[first + 1..].iter().position(|o| is_display_ridge(&k, o)).unwrap();
         invalid.octaves[first].amplitude = 1 << 28;
         assert!(bake_ridge_suffix(&grid, &invalid).is_err());
         invalid = k;
-        invalid.octaves[first + 1].shift = invalid.octaves[first].shift + 1;
+        invalid.octaves[second].shift = invalid.octaves[first].shift + 1;
         assert!(bake_ridge_suffix(&grid, &invalid).is_err());
+        // No display layer: no bake.
+        let mut none = k;
+        none.shape[0] = 0;
+        assert!(bake_ridge_suffix(&grid, &none).is_err());
         // Mixed signs test recipe; no positive-only assumption in the payload.
         let mut mixed = k;
         mixed.octaves[first].amplitude = -mixed.octaves[first].amplitude;
@@ -237,18 +258,19 @@ mod tests {
     fn display_bounds_reuse_canonical_suffix_diameter() {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
         for signs in [0u32, 0b1111111, 0b0101010] {
-            let mut k = LandformConstants::new(&grid, &Landform::default(), 7);
-            for (r, o) in k.octaves.iter_mut().filter(|o| o.kind == 2).enumerate() {
+            let mut k = earth(&grid, 7, |_| {});
+            let tag = ((k.shape[0] as u32 - 1) << 8) | RIDGE;
+            for (r, o) in k.octaves.iter_mut().filter(|o| o.kind == tag).enumerate() {
                 if signs & (1 << r) != 0 {
                     o.amplitude = -o.amplitude;
                 }
             }
             let canonical = k.bound_margins(&grid);
             assert_eq!(render_bounds(&grid, &k, canonical), canonical);
-            assert_eq!(canonical[17], 7);
             assert_eq!(canonical, k.bound_margins(&grid));
         }
-        assert_eq!(std::mem::size_of::<LandformConstants>() + 66 * 16, 1760);
+        // Constants (976) and the ridge suffix (1056).
+        assert_eq!(std::mem::size_of::<LandformConstants>() + 66 * 16, 2032);
     }
 
     #[test]
@@ -282,12 +304,11 @@ mod tests {
     #[test]
     #[ignore = "constructor microbenchmark; run optimized and without concurrent engine work"]
     fn constructor_bake_cost_and_cached_payload() {
-        use crate::landform::LandformField;
         use crate::terrain::TerrainField;
         use std::{hint::black_box, time::Instant};
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let land = Landform::default();
-        let k = LandformConstants::new(&grid, &land, 7);
+        let stack = TerrainLayers::earth();
+        let k = stack.compile(&grid, 7).unwrap().0;
         let mut bake = Vec::new();
         let mut constructor = Vec::new();
         for _ in 0..9 {
@@ -295,14 +316,14 @@ mod tests {
             black_box(bake_ridge_suffix(&grid, &k).unwrap());
             bake.push(start.elapsed().as_secs_f64() * 1000.0);
             let start = Instant::now();
-            black_box(LandformField::new(&grid, &land, 7));
+            black_box(stack.field(&grid, 7).unwrap());
             constructor.push(start.elapsed().as_secs_f64() * 1000.0);
         }
         bake.sort_by(f64::total_cmp);
         constructor.sort_by(f64::total_cmp);
-        let field = LandformField::new(&grid, &land, 7);
+        let field = stack.field(&grid, 7).unwrap();
         let first = field.program();
-        assert_eq!(first.constants.len(), 1760);
+        assert_eq!(first.constants.len(), 2096);
         let start = Instant::now();
         for _ in 0..1024 {
             let program = field.program();

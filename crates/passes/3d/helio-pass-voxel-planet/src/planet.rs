@@ -559,10 +559,10 @@ mod tests {
         Planet::new(PlanetRecipe::default()).unwrap()
     }
 
-    /// Landform without caves and overhangs: a pure heightfield, for
+    /// Earth without caves and overhangs: a pure heightfield, for
     /// column-top invariants.
     fn heightfield(recipe: PlanetRecipe) -> Planet {
-        let terrain = TerrainSource { settings: crate::landform::HEIGHTFIELD_SETTINGS.into(), ..TerrainSource::default() };
+        let terrain = crate::layers::TerrainLayers::earth().heightfield().source(TerrainSource::default().seed);
         Planet::new(PlanetRecipe { terrain, ..recipe }).unwrap()
     }
 
@@ -685,7 +685,7 @@ mod tests {
 
     #[test]
     fn terrain_bounds_hold_for_sampled_cells() {
-        let flat = TerrainSource { generator: crate::landform::FLAT_ID.into(), version: crate::landform::FLAT_VERSION, settings: r#"{"height_m": 3.3}"#.into(), ..Default::default() };
+        let flat = crate::layers::TerrainLayers::flat_at(3.3).source(7);
         for (terrain, voxel) in [(TerrainSource::default(), 0.1), (TerrainSource::default(), 0.3), (TerrainSource::default(), 1.0), (flat, 0.1)] {
             let p = Planet::new(PlanetRecipe { voxel_size_m: voxel, terrain: terrain.clone(), ..Default::default() }).unwrap();
             let worst = terrain::check_field(&p, 6_000).unwrap_or_else(|e| panic!("{} at {voxel} m: {e}", terrain.generator));

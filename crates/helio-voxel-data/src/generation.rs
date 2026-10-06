@@ -11,12 +11,11 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{VoxelChunkKey, VoxelDomain, VoxelStoredPayload};
 
-/// Helio's built-in landform terrain generator (continents, mountains and
-/// hills on planets, planes and infinite planes). Its settings component is
-/// `VoxelLandformComponent`.
-pub const VOXEL_TERRAIN_GENERATOR: &str = "helio.landform";
-/// Landform version 2 adds caves and overhangs (version 1 stays available).
-pub const VOXEL_TERRAIN_GENERATOR_VERSION: u32 = 2;
+/// Helio's built-in terrain generator: ordered layer stacks (planets,
+/// moons, flat worlds) on planets, planes and infinite planes. Its settings
+/// component is `VoxelTerrainLayersComponent`.
+pub const VOXEL_TERRAIN_GENERATOR: &str = "helio.terrain";
+pub const VOXEL_TERRAIN_GENERATOR_VERSION: u32 = 1;
 /// The streamed voxel terrain renderer, which draws every registered
 /// terrain generator.
 pub const VOXEL_TERRAIN_RENDERER: &str = "helio.voxel-terrain";

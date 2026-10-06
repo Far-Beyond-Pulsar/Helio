@@ -253,7 +253,7 @@ impl Default for TerrainAppearance {
 /// What a generator is, for registration and editor pickers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GeneratorInfo {
-    /// Stable id stored in worlds, e.g. `helio.landform`.
+    /// Stable id stored in worlds, e.g. `helio.terrain`.
     pub id: String,
     /// Output version: a change that alters any generated column is a new
     /// version, so saved worlds keep the terrain they were edited against.
@@ -288,7 +288,7 @@ pub struct TerrainSource {
 impl Default for TerrainSource {
     fn default() -> Self {
         Self {
-            generator: crate::landform::ID.into(),
+            generator: crate::layers::ID.into(),
             version: 0,
             seed: 7,
             settings: String::new(),
@@ -302,11 +302,7 @@ fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(|| {
         let mut map: BTreeMap<String, Arc<dyn TerrainGenerator>> = BTreeMap::new();
-        for generator in [
-            Arc::new(crate::landform::LandformGenerator) as Arc<dyn TerrainGenerator>,
-            Arc::new(crate::landform::FlatGenerator),
-            Arc::new(crate::moon::MoonGenerator),
-        ] {
+        for generator in [Arc::new(crate::layers::LayersGenerator) as Arc<dyn TerrainGenerator>] {
             map.insert(generator.info().id, generator);
         }
         RwLock::new(map)
@@ -454,9 +450,8 @@ mod tests {
     #[test]
     fn built_in_generators_are_listed_and_duplicates_rejected() {
         let ids: Vec<_> = generators().into_iter().map(|g| g.id).collect();
-        assert!(ids.contains(&crate::landform::ID.to_string()));
-        assert!(ids.contains(&crate::landform::FLAT_ID.to_string()));
-        assert!(register(Arc::new(crate::landform::FlatGenerator)).is_err());
+        assert!(ids.contains(&crate::layers::ID.to_string()));
+        assert!(register(Arc::new(crate::layers::LayersGenerator)).is_err());
         let grid = Grid::plane(crate::grid::Shape::Plane, 1024.0, 0.1).unwrap();
         let unknown = TerrainSource { generator: "example.none".into(), ..TerrainSource::default() };
         assert!(build(&unknown, &grid).is_err());

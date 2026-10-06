@@ -56,7 +56,7 @@ impl VoxelGeneratorRef {
 }
 
 impl Default for VoxelGeneratorRef {
-    /// The landform generator.
+    /// The layered terrain generator.
     fn default() -> Self {
         Self::new(VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION)
     }
@@ -263,7 +263,7 @@ fn default_plane_size() -> f64 {
 /// palette, editability, and the world's edits (an ordered brush journal
 /// plus per-sample payload chunks). A generator's own settings live in its
 /// settings component on the same entity (for example
-/// [`VoxelLandformComponent`] for the built-in planet generator), or in the
+/// [`VoxelTerrainLayersComponent`] for the built-in generator), or in the
 /// opaque `generator_parameters` for generators without one. `domain_mode`
 /// describes the chunk-key domain of live sample data.
 #[engine_class(category = "Voxel/Terrain", debug, serialize, deserialize)]
@@ -391,7 +391,7 @@ impl Default for VoxelTerrainComponent {
 
 impl VoxelTerrainComponent {
     /// A planet of `radius` metres with Helio's terrain generator and 0.1 m
-    /// voxels. Add a [`VoxelLandformComponent`] to shape its continents and
+    /// voxels. Add a [`VoxelTerrainLayersComponent`] to shape its continents and
     /// mountains.
     pub fn planet(radius: f64) -> Self {
         Self { shape: VoxelWorldShape::Sphere, planet_radius: radius, ..Self::default() }
@@ -448,140 +448,6 @@ impl Clone for VoxelTerrainComponent {
     }
 }
 
-/// Settings of the landform generator (`helio.landform`): the scale and
-/// height of continents, mountains and hills, surface roughness and the
-/// snowline. It configures the [`VoxelTerrainComponent`] on the same
-/// entity; the base component's seed varies the landform.
-#[engine_class(category = "Voxel/Terrain", clone, debug, serialize, deserialize)]
-#[category("Continents", category_color = "#6FA86F")]
-#[category("Mountains", category_color = "#9A8F84")]
-#[category("Detail", category_color = "#D1A73F")]
-#[category("Caves", category_color = "#7A6A9E")]
-#[category("Overhangs", category_color = "#A8826F")]
-#[category("Erosion", category_color = "#B5734A")]
-#[serde(default)]
-pub struct VoxelLandformComponent {
-    /// Typical continent width in kilometres.
-    #[property(min = 10.0, max = 20000.0, step = 10.0, category = "Continents", label = "Continent width (km)")]
-    pub continent_km: f64,
-    /// Depth of the low basins below the datum, in metres.
-    #[property(min = 0.0, max = 10000.0, step = 10.0, category = "Continents", label = "Ocean depth (m)")]
-    pub ocean_depth_m: f64,
-    /// Typical lowland height above the datum, in metres.
-    #[property(min = 0.0, max = 5000.0, step = 10.0, category = "Continents", label = "Lowland height (m)")]
-    pub lowland_m: f64,
-    /// Height of mountain ranges, in metres.
-    #[property(min = 0.0, max = 9000.0, step = 10.0, category = "Mountains", label = "Mountain height (m)")]
-    pub mountain_m: f64,
-    /// Spacing of mountain ridges, in kilometres.
-    #[property(min = 1.0, max = 500.0, step = 1.0, category = "Mountains", label = "Ridge spacing (km)")]
-    pub mountain_km: f64,
-    /// Height above which flat ground is snow, in metres.
-    #[property(min = 0.0, max = 10000.0, step = 10.0, category = "Mountains", label = "Snowline (m)")]
-    pub snowline_m: f64,
-    /// Height of rolling hills, in metres.
-    #[property(min = 0.0, max = 2000.0, step = 1.0, category = "Detail", label = "Hill height (m)")]
-    pub hill_m: f64,
-    /// Spacing of hills, in kilometres.
-    #[property(min = 0.1, max = 100.0, step = 0.1, category = "Detail", label = "Hill spacing (km)")]
-    pub hill_km: f64,
-    /// Metre-scale roughness as a fraction of each detail wavelength.
-    #[property(min = 0.0, max = 0.2, step = 0.005, category = "Detail")]
-    pub roughness: f64,
-    /// Scale of the domain warp that bends coasts and ridges, in kilometres.
-    #[property(min = 0.0, max = 500.0, step = 1.0, category = "Detail", label = "Coastline warp (km)")]
-    pub warp_km: f64,
-    /// Caves (tunnels and caverns) inside cave regions.
-    #[property(category = "Caves")]
-    pub caves: bool,
-    /// Deepest cave cell below the local surface, in metres.
-    #[property(min = 0.0, max = 170.0, step = 1.0, category = "Caves", label = "Cave depth (m)")]
-    pub cave_depth_m: f64,
-    /// Rough share of the land inside cave regions.
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Cave regions (share)")]
-    pub cave_share: f64,
-    /// Size of the cave regions, in kilometres.
-    #[property(min = 0.1, max = 500.0, step = 0.1, category = "Caves", label = "Cave region size (km)")]
-    pub cave_region_km: f64,
-    /// Tunnel radius, in metres.
-    #[property(min = 0.0, max = 20.0, step = 0.1, category = "Caves", label = "Tunnel radius (m)")]
-    pub tunnel_radius_m: f64,
-    /// Wavelength of the tunnels' winding, in metres.
-    #[property(min = 4.0, max = 2000.0, step = 1.0, category = "Caves", label = "Tunnel winding (m)")]
-    pub tunnel_wavelength_m: f64,
-    /// Size of caverns, in metres.
-    #[property(min = 8.0, max = 4000.0, step = 1.0, category = "Caves", label = "Cavern size (m)")]
-    pub cavern_wavelength_m: f64,
-    /// Rough share of the cave volume opened as caverns.
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Caverns (share)")]
-    pub cavern_share: f64,
-    /// Rock kept above caverns, in metres (tunnels may open into hillsides).
-    #[property(min = 0.0, max = 100.0, step = 0.5, category = "Caves", label = "Cavern cover (m)")]
-    pub cave_cover_m: f64,
-    /// Height by which the surface folds into overhangs and arches, in metres (0 disables them).
-    #[property(min = 0.0, max = 20.0, step = 0.5, category = "Overhangs", label = "Overhang height (m)")]
-    pub overhang_m: f64,
-    /// Wavelength of the overhang folds, in metres.
-    #[property(min = 4.0, max = 500.0, step = 1.0, category = "Overhangs", label = "Overhang size (m)")]
-    pub overhang_wavelength_m: f64,
-    /// Size of the overhang regions, in kilometres.
-    #[property(min = 0.1, max = 500.0, step = 0.1, category = "Overhangs", label = "Overhang region size (km)")]
-    pub overhang_region_km: f64,
-    /// Rough share of the land inside overhang regions.
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Overhangs", label = "Overhang regions (share)")]
-    pub overhang_share: f64,
-    /// Depth of the largest erosion gullies, in metres (0 disables erosion).
-    #[property(min = 0.0, max = 500.0, step = 1.0, category = "Erosion", label = "Gully depth (m)")]
-    pub erosion_m: f64,
-    /// Spacing of the largest gullies, in kilometres.
-    #[property(min = 0.05, max = 50.0, step = 0.05, category = "Erosion", label = "Gully spacing (km)")]
-    pub erosion_km: f64,
-    /// Number of gully octaves, each half the spacing of the previous one.
-    #[property(min = 0.0, max = 8.0, step = 1.0, category = "Erosion", label = "Gully octaves")]
-    pub erosion_octaves: u32,
-    /// Depth ratio from one gully octave to the next finer one.
-    #[property(min = 0.0, max = 1.0, step = 0.05, category = "Erosion", label = "Gully depth ratio")]
-    pub erosion_gain: f64,
-    /// Ground slope (rise over run) at which gullies reach full depth.
-    #[property(min = 0.05, max = 3.0, step = 0.05, category = "Erosion", label = "Full-depth slope")]
-    pub erosion_slope: f64,
-}
-impl Default for VoxelLandformComponent {
-    /// The planet generator's own defaults (Earth-like).
-    fn default() -> Self {
-        Self {
-            continent_km: 3_000.0,
-            ocean_depth_m: 2_400.0,
-            lowland_m: 180.0,
-            mountain_m: 2_400.0,
-            mountain_km: 20.0,
-            snowline_m: 3_000.0,
-            hill_m: 140.0,
-            hill_km: 9.0,
-            roughness: 0.035,
-            warp_km: 40.0,
-            caves: true,
-            cave_depth_m: 120.0,
-            cave_share: 0.45,
-            cave_region_km: 6.0,
-            tunnel_radius_m: 2.5,
-            tunnel_wavelength_m: 160.0,
-            cavern_wavelength_m: 160.0,
-            cavern_share: 0.04,
-            cave_cover_m: 4.0,
-            overhang_m: 6.0,
-            overhang_wavelength_m: 24.0,
-            overhang_region_km: 3.0,
-            overhang_share: 0.3,
-            erosion_m: 40.0,
-            erosion_km: 1.6,
-            erosion_octaves: 6,
-            erosion_gain: 0.5,
-            erosion_slope: 0.5,
-        }
-    }
-}
-
 /// A solid terrain material.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, pulsar_reflection::Reflectable)]
 pub enum VoxelTerrainMaterial {
@@ -603,110 +469,351 @@ pub enum VoxelTerrainMaterial {
     Cobble,
 }
 
-/// Settings of the flat generator (`helio.flat`): level ground at `height`
-/// with a surface layer over soil over rock. It configures the
-/// [`VoxelTerrainComponent`] on the same entity.
-#[engine_class(category = "Voxel/Terrain", clone, debug, serialize, deserialize)]
-#[category("Ground", category_color = "#6FA86F")]
+/// What a terrain layer adds (`helio_pass_voxel_planet::layers::LayerKind`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, pulsar_reflection::Reflectable)]
+pub enum VoxelLayerKind {
+    /// Rolling relief, bent by the warp (hills, highlands).
+    #[default]
+    Hills,
+    /// Bends the layers after it (coastlines, ridge lines); first only.
+    Warp,
+    /// Continents and ocean basins: Height is the ocean depth, Base the
+    /// lowland height. Provides the land masks.
+    Continents,
+    /// Ridged mountain ranges inside regions (Coverage, Region size).
+    Mountains,
+    /// Metre-scale detail; Ratio is its amplitude per wavelength.
+    Roughness,
+    /// Branching gullies down the slope of the coarser layers; full depth
+    /// on slopes steeper than Ratio.
+    Erosion,
+    /// Crater sizes from Scale down: Coverage is the density of the
+    /// largest, Persistence its growth per size, Ratio depth/diameter,
+    /// Ratio 2 rim/depth, Ratio 3 the share of fresh craters.
+    Craters,
+    /// Smooth low plains covering Coverage of the surface, Height deep;
+    /// they flatten the layers before them.
+    Basins,
+    /// A constant height (a flat world is one plateau).
+    Plateau,
+}
+
+/// Where a terrain layer applies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, pulsar_reflection::Reflectable)]
+pub enum VoxelLayerMask {
+    #[default]
+    Everywhere,
+    /// Land only (needs a Continents layer).
+    Land,
+    /// Everywhere but fading out under deep sea (needs a Continents layer).
+    AboveDeepSea,
+}
+
+/// How generated cells get their materials.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, pulsar_reflection::Reflectable)]
+pub enum VoxelMaterialStyle {
+    /// Meadows, dry lands, rock, strata and snow above the snowline.
+    #[default]
+    Earthlike,
+    /// Regolith over bedrock, dark basins, bright young ejecta.
+    Lunar,
+    /// The surface material over Soil depth of soil over rock.
+    Layered,
+}
+
+/// One layer of a terrain stack. Fields mean what the layer's kind says;
+/// unused ones are ignored.
+#[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[serde(default)]
-pub struct VoxelFlatTerrainComponent {
-    /// Ground height above the entity origin, in metres.
-    #[serde(rename = "height_m")]
-    #[property(min = -10000.0, max = 10000.0, step = 0.1, category = "Ground", label = "Height (m)")]
-    pub height: f64,
-    /// Depth of the soil under the surface layer, in metres.
-    #[serde(rename = "soil_depth_m")]
-    #[property(min = 0.0, max = 1000.0, step = 0.1, category = "Ground", label = "Soil depth (m)")]
-    pub soil_depth: f64,
-    #[property(category = "Ground")]
+pub struct VoxelTerrainLayer {
+    #[property]
+    pub kind: VoxelLayerKind,
+    #[property]
+    pub enabled: bool,
+    #[property]
+    pub mask: VoxelLayerMask,
+    /// Main height: first octave amplitude, basin or ocean depth, plateau height.
+    #[property(min = -100000.0, max = 100000.0, step = 1.0, label = "Height (m)")]
+    pub height_m: f64,
+    /// Secondary height: the lowlands of Continents.
+    #[property(min = -100000.0, max = 100000.0, step = 1.0, label = "Base (m)")]
+    pub base_m: f64,
+    /// Wavelength of the first octave or the largest feature.
+    #[property(min = 0.001, max = 100000.0, step = 0.1, label = "Scale (km)")]
+    pub scale_km: f64,
+    #[property(min = 0.0, max = 16.0, step = 1.0)]
+    pub octaves: u32,
+    /// Amplitude ratio between octaves (craters: density growth).
+    #[property(min = 0.0, max = 3.0, step = 0.01)]
+    pub persistence: f64,
+    /// Share of the surface covered (mountain regions, basins, craters).
+    #[property(min = 0.0, max = 1.0, step = 0.01)]
+    pub coverage: f64,
+    /// Size of the regions the layer occupies.
+    #[property(min = 0.1, max = 100000.0, step = 1.0, label = "Region size (km)")]
+    pub region_km: f64,
+    #[property(min = 0.0, max = 4.0, step = 0.005)]
+    pub ratio: f64,
+    #[property(min = 0.0, max = 4.0, step = 0.01, label = "Ratio 2")]
+    pub ratio2: f64,
+    #[property(min = 0.0, max = 1.0, step = 0.01, label = "Ratio 3")]
+    pub ratio3: f64,
+}
+
+impl Default for VoxelTerrainLayer {
+    fn default() -> Self {
+        Self {
+            kind: VoxelLayerKind::Hills,
+            enabled: true,
+            mask: VoxelLayerMask::Everywhere,
+            height_m: 100.0,
+            base_m: 0.0,
+            scale_km: 10.0,
+            octaves: 4,
+            persistence: 0.5,
+            coverage: 0.5,
+            region_km: 100.0,
+            ratio: 0.0,
+            ratio2: 0.0,
+            ratio3: 0.0,
+        }
+    }
+}
+
+impl PartialEq for VoxelTerrainLayer {
+    fn eq(&self, other: &Self) -> bool {
+        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
+    }
+}
+
+impl VoxelTerrainLayer {
+    /// A layer of `kind` with the default parameters.
+    pub fn new(kind: VoxelLayerKind) -> Self {
+        Self { kind, ..Self::default() }
+    }
+}
+
+fn serialize_terrain_layer_json(value: &VoxelTerrainLayer) -> pulsar_reflection::ReflectResult<serde_json::Value> {
+    serde_json::to_value(value).map_err(|e| pulsar_reflection::ReflectError::SerializationFailed(e.to_string()))
+}
+
+fn deserialize_terrain_layer_json(value: serde_json::Value) -> pulsar_reflection::ReflectResult<VoxelTerrainLayer> {
+    serde_json::from_value(value).map_err(|e| pulsar_reflection::ReflectError::DeserializationFailed(e.to_string()))
+}
+
+#[pulsar_reflection::pulsar_type(
+    serialize_json_with = serialize_terrain_layer_json,
+    deserialize_json_with = deserialize_terrain_layer_json
+)]
+#[allow(dead_code)]
+type RegisteredVoxelTerrainLayer = VoxelTerrainLayer;
+
+/// Generated caves: tunnels and caverns inside cave regions.
+#[engine_class(no_register, clone, debug, serialize, deserialize)]
+#[category("Caves", category_color = "#7A6A9E")]
+#[derive(pulsar_reflection::Reflectable)]
+#[serde(default)]
+pub struct VoxelCaves {
+    #[property(category = "Caves")]
+    pub enabled: bool,
+    /// Deepest cave cell below the local surface.
+    #[property(min = 0.0, max = 170.0, step = 1.0, category = "Caves", label = "Depth (m)")]
+    pub depth_m: f64,
+    /// Rough share of the land inside cave regions.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Regions (share)")]
+    pub share: f64,
+    #[property(min = 0.1, max = 500.0, step = 0.1, category = "Caves", label = "Region size (km)")]
+    pub region_km: f64,
+    #[property(min = 0.0, max = 20.0, step = 0.1, category = "Caves", label = "Tunnel radius (m)")]
+    pub tunnel_radius_m: f64,
+    #[property(min = 4.0, max = 2000.0, step = 1.0, category = "Caves", label = "Tunnel winding (m)")]
+    pub tunnel_wavelength_m: f64,
+    #[property(min = 8.0, max = 4000.0, step = 1.0, category = "Caves", label = "Cavern size (m)")]
+    pub cavern_wavelength_m: f64,
+    /// Rough share of the cave volume opened as caverns.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Caverns (share)")]
+    pub cavern_share: f64,
+    /// Rock kept above caverns (tunnels may open into hillsides).
+    #[property(min = 0.0, max = 100.0, step = 0.5, category = "Caves", label = "Cavern cover (m)")]
+    pub cover_m: f64,
+}
+
+impl Default for VoxelCaves {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            depth_m: 120.0,
+            share: 0.45,
+            region_km: 6.0,
+            tunnel_radius_m: 2.5,
+            tunnel_wavelength_m: 160.0,
+            cavern_wavelength_m: 160.0,
+            cavern_share: 0.04,
+            cover_m: 4.0,
+        }
+    }
+}
+
+/// Generated overhangs and arches: the surface folded in 3D.
+#[engine_class(no_register, clone, debug, serialize, deserialize)]
+#[category("Overhangs", category_color = "#A8826F")]
+#[derive(pulsar_reflection::Reflectable)]
+#[serde(default)]
+pub struct VoxelOverhangs {
+    #[property(category = "Overhangs")]
+    pub enabled: bool,
+    /// Largest displacement over the heightfield.
+    #[property(min = 0.0, max = 20.0, step = 0.5, category = "Overhangs", label = "Height (m)")]
+    pub height_m: f64,
+    #[property(min = 4.0, max = 500.0, step = 1.0, category = "Overhangs", label = "Size (m)")]
+    pub wavelength_m: f64,
+    #[property(min = 0.1, max = 500.0, step = 0.1, category = "Overhangs", label = "Region size (km)")]
+    pub region_km: f64,
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Overhangs", label = "Regions (share)")]
+    pub share: f64,
+}
+
+impl Default for VoxelOverhangs {
+    fn default() -> Self {
+        Self { enabled: true, height_m: 6.0, wavelength_m: 24.0, region_km: 3.0, share: 0.3 }
+    }
+}
+
+/// Settings of the layered terrain generator (`helio.terrain`): an ordered
+/// stack of layers (continents, mountains, erosion, hills, craters,
+/// basins, plateaus), caves, overhangs and a material style. Any world is
+/// a stack: an Earth-like planet, a cratered moon, a flat block world, or
+/// one a game builds from a seed. It configures the
+/// [`VoxelTerrainComponent`] on the same entity, whose seed varies it; its
+/// serialized form is the generator's settings JSON.
+#[engine_class(category = "Voxel/Terrain", clone, debug, serialize, deserialize)]
+#[category("Layers", category_color = "#6FA86F")]
+#[category("Caves", category_color = "#7A6A9E")]
+#[category("Overhangs", category_color = "#A8826F")]
+#[category("Materials", category_color = "#D1A73F")]
+#[serde(default)]
+pub struct VoxelTerrainLayersComponent {
+    /// Applied in order; at most eight enabled.
+    #[property(category = "Layers")]
+    pub layers: Vec<VoxelTerrainLayer>,
+    #[property(category = "Caves")]
+    pub caves: VoxelCaves,
+    #[property(category = "Overhangs")]
+    pub overhangs: VoxelOverhangs,
+    #[property(category = "Materials", label = "Style")]
+    pub materials: VoxelMaterialStyle,
+    /// Earthlike: flat ground above this height is snow.
+    #[property(min = -10000.0, max = 100000.0, step = 10.0, category = "Materials", label = "Snowline (m)")]
+    pub snowline_m: f64,
+    /// Depth of the soil (Earthlike, Layered) or regolith (Lunar).
+    #[property(min = 0.0, max = 1000.0, step = 0.1, category = "Materials", label = "Soil depth (m)")]
+    pub soil_depth_m: f64,
+    /// Layered: the surface, soil and rock materials.
+    #[property(category = "Materials")]
     pub surface: VoxelTerrainMaterial,
-    #[property(category = "Ground")]
+    #[property(category = "Materials")]
     pub soil: VoxelTerrainMaterial,
-    #[property(category = "Ground")]
+    #[property(category = "Materials")]
     pub rock: VoxelTerrainMaterial,
 }
 
-impl Default for VoxelFlatTerrainComponent {
+impl Default for VoxelTerrainLayersComponent {
     fn default() -> Self {
+        Self::earth()
+    }
+}
+
+impl VoxelTerrainLayersComponent {
+    /// Continents and oceans, ridged mountains with branching erosion,
+    /// hills and roughness; caves, overhangs, meadows, rock and snow.
+    pub fn earth() -> Self {
+        use VoxelLayerKind::*;
+        let layer = |kind, f: &dyn Fn(&mut VoxelTerrainLayer)| {
+            let mut l = VoxelTerrainLayer::new(kind);
+            f(&mut l);
+            l
+        };
         Self {
-            height: 0.0,
-            soil_depth: 1.0,
+            layers: vec![
+                layer(Warp, &|l| l.scale_km = 40.0),
+                layer(Continents, &|l| {
+                    l.scale_km = 3_000.0;
+                    l.height_m = 2_400.0;
+                    l.base_m = 180.0;
+                }),
+                layer(Mountains, &|l| {
+                    l.mask = VoxelLayerMask::Land;
+                    l.height_m = 2_400.0;
+                    l.scale_km = 20.0;
+                    l.octaves = 7;
+                    l.persistence = 0.47;
+                    l.region_km = 240.0;
+                    l.coverage = 0.45;
+                }),
+                layer(Erosion, &|l| {
+                    l.height_m = 40.0;
+                    l.scale_km = 1.6;
+                    l.octaves = 6;
+                    l.ratio = 0.5;
+                }),
+                layer(Hills, &|l| {
+                    l.mask = VoxelLayerMask::AboveDeepSea;
+                    l.height_m = 140.0;
+                    l.scale_km = 9.0;
+                }),
+                layer(Roughness, &|l| {
+                    l.mask = VoxelLayerMask::AboveDeepSea;
+                    l.scale_km = 0.512;
+                    l.octaves = 9;
+                    l.ratio = 0.035;
+                }),
+            ],
+            caves: VoxelCaves::default(),
+            overhangs: VoxelOverhangs::default(),
+            materials: VoxelMaterialStyle::Earthlike,
+            snowline_m: 3_000.0,
+            soil_depth_m: 0.7,
             surface: VoxelTerrainMaterial::Grass,
             soil: VoxelTerrainMaterial::Dirt,
             rock: VoxelTerrainMaterial::Stone,
         }
     }
-}
 
-/// Settings of the moon generator (`helio.moon`): cratered highlands and
-/// dark basalt maria over regolith. It configures the
-/// [`VoxelTerrainComponent`] on the same entity; the base component's seed
-/// varies the moon.
-#[engine_class(category = "Voxel/Terrain", clone, debug, serialize, deserialize)]
-#[category("Highlands", category_color = "#9A9890")]
-#[category("Maria", category_color = "#55565A")]
-#[category("Craters", category_color = "#C4C2BC")]
-#[category("Ground", category_color = "#8E8C87")]
-#[serde(default)]
-pub struct VoxelMoonComponent {
-    /// Height of the rolling highlands, in metres.
-    #[property(min = 0.0, max = 20000.0, step = 10.0, category = "Highlands", label = "Highland height (m)")]
-    pub highland_m: f64,
-    /// Wavelength of the highlands, in kilometres.
-    #[property(min = 1.0, max = 5000.0, step = 1.0, category = "Highlands", label = "Highland size (km)")]
-    pub highland_km: f64,
-    /// Rough share of the surface in dark basalt maria.
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Maria", label = "Maria (share)")]
-    pub mare_share: f64,
-    /// Size of the maria, in kilometres.
-    #[property(min = 1.0, max = 10000.0, step = 1.0, category = "Maria", label = "Mare size (km)")]
-    pub mare_km: f64,
-    /// Depth of the maria below the highlands, in metres.
-    #[property(min = 0.0, max = 20000.0, step = 10.0, category = "Maria", label = "Mare depth (m)")]
-    pub mare_depth_m: f64,
-    /// Diameter of the largest craters, in kilometres.
-    #[property(min = 0.01, max = 2000.0, step = 0.5, category = "Craters", label = "Largest crater (km)")]
-    pub crater_km: f64,
-    /// Number of crater sizes, each half the previous one.
-    #[property(min = 0.0, max = 12.0, step = 1.0, category = "Craters", label = "Crater sizes")]
-    pub crater_octaves: u32,
-    /// Share of the surface lattice holding a crater at the largest size.
-    #[property(min = 0.0, max = 0.95, step = 0.01, category = "Craters", label = "Crater density")]
-    pub crater_density: f64,
-    /// Density growth from one crater size to the next smaller one.
-    #[property(min = 0.5, max = 3.0, step = 0.05, category = "Craters", label = "Density growth")]
-    pub crater_density_growth: f64,
-    /// Depth of a simple crater as a fraction of its diameter.
-    #[property(min = 0.0, max = 0.5, step = 0.01, category = "Craters", label = "Depth ratio")]
-    pub crater_depth_ratio: f64,
-    /// Rim height as a fraction of the crater depth.
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Craters", label = "Rim ratio")]
-    pub crater_rim_ratio: f64,
-    /// Share of craters young enough to show bright ejecta.
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Craters", label = "Fresh craters (share)")]
-    pub fresh_share: f64,
-    /// Regolith depth over the bedrock, in metres.
-    #[property(min = 0.0, max = 100.0, step = 0.5, category = "Ground", label = "Regolith depth (m)")]
-    pub regolith_m: f64,
-}
-
-impl Default for VoxelMoonComponent {
-    /// The moon generator's own defaults.
-    fn default() -> Self {
+    /// Cratered highlands and dark basalt plains over regolith, no caves.
+    pub fn moon() -> Self {
+        use VoxelLayerKind::*;
         Self {
-            highland_m: 1_500.0,
-            highland_km: 250.0,
-            mare_share: 0.3,
-            mare_km: 900.0,
-            mare_depth_m: 1_200.0,
-            crater_km: 40.0,
-            crater_octaves: 10,
-            crater_density: 0.3,
-            crater_density_growth: 1.25,
-            crater_depth_ratio: 0.2,
-            crater_rim_ratio: 0.3,
-            fresh_share: 0.15,
-            regolith_m: 4.0,
+            layers: vec![
+                VoxelTerrainLayer { height_m: 1_500.0, scale_km: 250.0, octaves: 3, ..VoxelTerrainLayer::new(Hills) },
+                VoxelTerrainLayer { height_m: 1_200.0, scale_km: 900.0, coverage: 0.3, ..VoxelTerrainLayer::new(Basins) },
+                VoxelTerrainLayer {
+                    scale_km: 40.0,
+                    octaves: 10,
+                    coverage: 0.3,
+                    persistence: 1.25,
+                    ratio: 0.2,
+                    ratio2: 0.3,
+                    ratio3: 0.15,
+                    ..VoxelTerrainLayer::new(Craters)
+                },
+            ],
+            caves: VoxelCaves { enabled: false, ..VoxelCaves::default() },
+            overhangs: VoxelOverhangs { enabled: false, ..VoxelOverhangs::default() },
+            materials: VoxelMaterialStyle::Lunar,
+            soil_depth_m: 4.0,
+            ..Self::earth()
+        }
+    }
+
+    /// Level ground at `height_m`: grass over a metre of dirt over stone.
+    pub fn flat(height_m: f64) -> Self {
+        Self {
+            layers: vec![VoxelTerrainLayer { height_m, ..VoxelTerrainLayer::new(VoxelLayerKind::Plateau) }],
+            caves: VoxelCaves { enabled: false, ..VoxelCaves::default() },
+            overhangs: VoxelOverhangs { enabled: false, ..VoxelOverhangs::default() },
+            materials: VoxelMaterialStyle::Layered,
+            soil_depth_m: 1.0,
+            ..Self::earth()
         }
     }
 }
@@ -1039,6 +1146,28 @@ mod tests {
         let restored: T = serde_json::from_value(serialized).unwrap();
         let restored_json = serde_json::to_value(restored).unwrap();
         assert!(restored_json.get("payloads").is_none());
+    }
+
+    /// The settings component serializes to the generator's settings JSON:
+    /// each preset is the generator's preset.
+    #[test]
+    fn terrain_layers_component_is_the_generator_settings() {
+        use helio_pass_voxel_planet::layers::TerrainLayers;
+        for (component, stack) in [
+            (VoxelTerrainLayersComponent::earth(), TerrainLayers::earth()),
+            (VoxelTerrainLayersComponent::moon(), TerrainLayers::moon()),
+            (VoxelTerrainLayersComponent::flat(2.0), TerrainLayers::flat_at(2.0)),
+        ] {
+            let json = serde_json::to_value(&component).unwrap();
+            let parsed: TerrainLayers = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(parsed, stack, "{json}");
+            let restored: VoxelTerrainLayersComponent = serde_json::from_value(serde_json::to_value(&stack).unwrap()).unwrap();
+            assert_eq!(serde_json::to_value(&restored).unwrap(), json);
+        }
+        assert!(VoxelTerrainLayersComponent::default()
+            .get_properties()
+            .iter()
+            .any(|property| property.name == "layers"));
     }
 
     #[test]

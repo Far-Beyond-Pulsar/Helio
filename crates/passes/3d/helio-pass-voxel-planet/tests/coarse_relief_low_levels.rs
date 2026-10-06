@@ -4,7 +4,7 @@ use common::*;
 use glam::{DVec3, Vec3};
 use helio_pass_voxel_planet::engine::{PlanetRenderer, Settings};
 use helio_pass_voxel_planet::grid::Shape;
-use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Planet, PlanetRecipe, TerrainSource};
+use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Planet, PlanetRecipe};
 use std::sync::Arc;
 
 const RELIEF: u32 = 0x10000000;
@@ -14,11 +14,7 @@ fn flat(shape: Shape, height: f64) -> Planet {
         shape,
         radius_m: 10000.0,
         plane_size_m: 40000.0,
-        terrain: TerrainSource {
-            generator: helio_pass_voxel_planet::landform::FLAT_ID.into(), version: helio_pass_voxel_planet::landform::FLAT_VERSION,
-            settings: format!("{{\"height_m\":{height}}}"),
-            ..Default::default()
-        },
+        terrain: helio_pass_voxel_planet::layers::TerrainLayers::flat_at(height).source(7),
         ..Default::default()
     })
     .unwrap()

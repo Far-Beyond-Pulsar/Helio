@@ -1,116 +1,27 @@
-//! The built-in landform generator (`helio.landform`): continents, ocean
-//! basins, ridged mountain ranges, hills and metre-scale roughness, with
-//! meadows, dry lands, rock outcrops, strata and snow. Also the flat
-//! generator (`helio.flat`). `landform.wgsl` and `flat.wgsl` mirror them.
+//! The terrain-stack interpreter of `helio.terrain` ([`crate::layers`]).
+//!
+//! A stack compiles to one octave table sorted from coarsest to finest,
+//! each octave tagged with its layer (`kind | layer << 8`), plus a table of
+//! layers. [`height_parts`] runs the octaves into per-layer accumulators,
+//! then composes the layers in stack order with their masks; every world
+//! (planet, moon, plane) runs this same code, and `landform.wgsl` mirrors
+//! it, so changing layers never recompiles shaders.
 //!
 //! Every operation is wrapping two's-complement integer arithmetic, so CPU
 //! and GPU agree to the bit. Additive octaves finer than a column footprint
 //! are omitted: coarse levels are band-limited point samples of the same
 //! field rather than an independent smooth replacement.
 use crate::grid::Grid;
-use crate::noise::{fade, hash3, lerp, mul16, mul_fine, mul_shr_signed, noise, noise_fine, noise_fine_grad, scale, sin_turns, unit_q30, FINE_ONE, ONE};
-use crate::terrain::{material, GeneratorInfo, TerrainField, TerrainGenerator, TerrainProgram, HEIGHT_ONE};
+use crate::layers::{Caves, Overhangs};
+use crate::noise::{fade, hash3, lerp, mul16, mul_fine, mul_shr, mul_shr_signed, noise, noise_fine, noise_fine_grad, scale, sin_turns, unit_q30, FINE_ONE, ONE, Q30};
+use crate::terrain::{MaterialAppearance, TerrainAppearance, TerrainField, TerrainProgram, HEIGHT_ONE, MATERIALS};
 use bytemuck::{Pod, Zeroable};
 use glam::IVec3;
-use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::sync::Arc;
 
-pub const ID: &str = "helio.landform";
-/// Output version, recorded with saved edits (one version is registered).
-pub const VERSION: u32 = 2;
-/// Landform settings without caves and overhangs: a pure heightfield.
-pub const HEIGHTFIELD_SETTINGS: &str = r#"{"caves": false, "overhang_m": 0.0}"#;
-pub(crate) const DISPLAY_PROGRAM: &str = "helio.landform/2-ridge-envelope-volume/4";
-pub const FLAT_ID: &str = "helio.flat";
-pub const FLAT_VERSION: u32 = 1;
-
-/// Landform settings in metres (the generator's settings JSON). The same
-/// settings produce a similar world at every supported voxel size.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Landform {
-    /// Wavelength of continents.
-    pub continent_km: f64,
-    /// Ocean floor depth and typical lowland height.
-    pub ocean_depth_m: f64,
-    pub lowland_m: f64,
-    pub mountain_m: f64,
-    pub mountain_km: f64,
-    pub hill_m: f64,
-    pub hill_km: f64,
-    /// Amplitude of metre-scale roughness as a fraction of wavelength.
-    pub roughness: f64,
-    pub warp_km: f64,
-    pub snowline_m: f64,
-    /// Caves (tunnels and caverns) inside cave regions.
-    pub caves: bool,
-    /// Deepest cave cell below the local surface.
-    pub cave_depth_m: f64,
-    /// Rough share of the land inside cave regions (0..1).
-    pub cave_share: f64,
-    /// Wavelength of the cave regions.
-    pub cave_region_km: f64,
-    /// Tunnel radius and the wavelength of their winding.
-    pub tunnel_radius_m: f64,
-    pub tunnel_wavelength_m: f64,
-    /// Cavern wavelength and rough share of the cave volume they open (0..1).
-    pub cavern_wavelength_m: f64,
-    pub cavern_share: f64,
-    /// Rock kept above caverns (tunnels may open into hillsides).
-    pub cave_cover_m: f64,
-    /// Overhangs and arches: the surface is displaced in 3D by up to this
-    /// height inside overhang regions (0 disables them).
-    pub overhang_m: f64,
-    pub overhang_wavelength_m: f64,
-    pub overhang_region_km: f64,
-    /// Rough share of the land inside overhang regions (0..1).
-    pub overhang_share: f64,
-    /// Erosion gullies: amplitude and wavelength of the largest octave,
-    /// octave count and amplitude ratio per halved wavelength. Gullies run
-    /// down the slope of the larger terrain (and of the coarser gullies, so
-    /// they branch) and fade out on ground flatter than `erosion_slope`.
-    pub erosion_m: f64,
-    pub erosion_km: f64,
-    pub erosion_octaves: u32,
-    pub erosion_gain: f64,
-    pub erosion_slope: f64,
-}
-
-impl Default for Landform {
-    fn default() -> Self {
-        Self {
-            continent_km: 3_000.0,
-            ocean_depth_m: 2_400.0,
-            lowland_m: 180.0,
-            mountain_m: 2_400.0,
-            mountain_km: 20.0,
-            hill_m: 140.0,
-            hill_km: 9.0,
-            roughness: 0.035,
-            warp_km: 40.0,
-            snowline_m: 3_000.0,
-            caves: true,
-            cave_depth_m: 120.0,
-            cave_share: 0.45,
-            cave_region_km: 6.0,
-            tunnel_radius_m: 2.5,
-            tunnel_wavelength_m: 160.0,
-            cavern_wavelength_m: 160.0,
-            cavern_share: 0.04,
-            cave_cover_m: 4.0,
-            overhang_m: 6.0,
-            overhang_wavelength_m: 24.0,
-            overhang_region_km: 3.0,
-            overhang_share: 0.3,
-            erosion_m: 40.0,
-            erosion_km: 1.6,
-            erosion_octaves: 6,
-            erosion_gain: 0.5,
-            erosion_slope: 0.5,
-        }
-    }
-}
+/// Program key: one WGSL source for every stack; generation compiles the
+/// ridge-envelope display variant of it.
+pub(crate) const DISPLAY_PROGRAM: &str = "helio.terrain/1-stack-ridge-envelope";
 
 /// Volumetric terms of `landform.wgsl` (`TerrainConstants::volume`).
 #[repr(C)]
@@ -150,7 +61,7 @@ const SEED_OVERHANG: u32 = 0x7F4A_7C15;
 const SEED_OVERHANG_REGION: u32 = 0x4CF5_AD43;
 
 impl LandformVolume {
-    pub fn new(grid: &Grid, land: &Landform) -> Self {
+    pub fn new(grid: &Grid, caves: &Caves, overhangs: &Overhangs) -> Self {
         let shift = |metres: f64| ((metres / crate::grid::DOMAIN_UNIT).log2().round().clamp(1.0, 30.0)) as i32;
         let mm = |metres: f64| (metres.max(0.0) * 1000.0).round().min(f64::from(i32::MAX / 4)) as i32;
         // Threshold above which `share` of the noise lies.
@@ -158,23 +69,23 @@ impl LandformVolume {
         let layer = grid.layer_mm() as i32;
         // The level-0 band must hold the caves, the overhangs and the
         // column's own relief within 256 bricks (2048 cells).
-        let depth = mm(land.cave_depth_m).min(1_700 * layer);
+        let depth = mm(caves.depth_m).min(1_700 * layer);
         let mut flags = 0;
-        if land.caves && depth > 0 && land.tunnel_radius_m.max(land.cavern_wavelength_m) > 0.0 {
+        if caves.enabled && depth > 0 && caves.tunnel_radius_m.max(caves.cavern_wavelength_m) > 0.0 {
             flags |= 1;
         }
-        let overhang = mm(land.overhang_m).min(200 * layer);
+        let overhang = if overhangs.enabled { mm(overhangs.height_m).min(200 * layer) } else { 0 };
         if overhang > 0 {
             flags |= 2;
         }
         // Tunnels are where two noises are both near zero; their radius is
         // about the half width over the noise slope (~2 per wavelength).
-        let width = (2.0 * land.tunnel_radius_m / land.tunnel_wavelength_m.max(1e-3) * f64::from(ONE)).round() as i32;
+        let width = (2.0 * caves.tunnel_radius_m / caves.tunnel_wavelength_m.max(1e-3) * f64::from(ONE)).round() as i32;
         Self {
-            caves: [flags, shift(land.cave_region_km * 1000.0), threshold(land.cave_share), depth],
-            shapes: [shift(land.tunnel_wavelength_m), width.clamp(0, ONE), shift(land.cavern_wavelength_m), threshold(land.cavern_share)],
-            overhangs: [overhang, shift(land.overhang_wavelength_m), shift(land.overhang_region_km * 1000.0), threshold(land.overhang_share)],
-            sizes: [mm(land.tunnel_radius_m), mm(land.cavern_wavelength_m / 4.0), mm(land.cave_cover_m), layer],
+            caves: [flags, shift(caves.region_km * 1000.0), threshold(caves.share), depth],
+            shapes: [shift(caves.tunnel_wavelength_m), width.clamp(0, ONE), shift(caves.cavern_wavelength_m), threshold(caves.cavern_share)],
+            overhangs: [overhang, shift(overhangs.wavelength_m), shift(overhangs.region_km * 1000.0), threshold(overhangs.share)],
+            sizes: [mm(caves.tunnel_radius_m), mm(caves.cavern_wavelength_m / 4.0), mm(caves.cover_m), layer],
         }
     }
 
@@ -267,162 +178,168 @@ impl LandformVolume {
     }
 }
 
-pub const OCTAVES: usize = 40;
+/// Octave table size, warp included.
+pub const OCTAVES: usize = 48;
+/// Leading domain-warp octaves (two per axis, zero without a Warp layer).
 pub const WARP_OCTAVES: usize = 6;
+/// Layers of a stack.
+pub const LAYERS: usize = 8;
 
-/// One additive octave: lattice shift, amplitude (height units) and kind.
+/// Octave kinds (low byte of [`Octave::kind`]; the layer index is above).
+pub const CONTINENT: u32 = 0;
+/// Mountain region mask.
+pub const REGION: u32 = 1;
+pub const RIDGE: u32 = 2;
+/// Warped fBm (fine noise).
+pub const HILLS: u32 = 3;
+/// Domain warp, one kind per axis (4, 5, 6).
+pub const WARP: u32 = 4;
+/// Unwarped metre-scale fBm (16-bit noise).
+pub const ROUGHNESS: u32 = 7;
+/// Erosion gullies.
+pub const EROSION: u32 = 8;
+/// Crater lattice; its density (Q16) is the seed's low 16 bits.
+pub const CRATER: u32 = 9;
+/// Basin mask (fine noise, unwarped).
+pub const BASIN: u32 = 10;
+
+/// One octave: lattice shift, amplitude (height units; Q16 weight for the
+/// masks) and seed, and `kind | layer << 8`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct Octave {
     pub shift: u32,
     pub amplitude: i32,
     pub seed: u32,
-    /// 0 = continent, 1 = mountain mask, 2 = ridged, 3 = hills/detail, 4 = warp.
     pub kind: u32,
 }
+
+impl Octave {
+    #[inline]
+    pub fn class(&self) -> u32 {
+        self.kind & 0xff
+    }
+    #[inline]
+    pub fn layer(&self) -> usize {
+        ((self.kind >> 8) & (LAYERS as u32 - 1)) as usize
+    }
+}
+
+/// One layer of the compiled stack: its kind, mask and two parameters.
+///
+/// | kind | `a` | `b` |
+/// |---|---|---|
+/// | continents | ocean floor (height units, negative) | lowland height |
+/// | mountains | region mask bias (Q16) | |
+/// | erosion | saturation slope (height units per gradient span) | |
+/// | craters | rim over depth (Q16) | share of fresh craters (Q16) |
+/// | basins | depth (height units) | mask threshold (Q24) |
+/// | plateau | height (height units, whole layers) | |
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+pub struct StackLayer {
+    pub kind: u32,
+    /// 0 everywhere, 1 land, 2 above deep sea.
+    pub mask: u32,
+    pub a: i32,
+    pub b: i32,
+}
+
+impl StackLayer {
+    pub const WARP: u32 = 1;
+    pub const CONTINENTS: u32 = 2;
+    pub const MOUNTAINS: u32 = 3;
+    pub const HILLS: u32 = 4;
+    pub const ROUGHNESS: u32 = 5;
+    pub const EROSION: u32 = 6;
+    pub const CRATERS: u32 = 7;
+    pub const BASINS: u32 = 8;
+    pub const PLATEAU: u32 = 9;
+}
+
+/// Material styles (`LandformConstants::style[0]`).
+pub const STYLE_EARTHLIKE: i32 = 0;
+pub const STYLE_LUNAR: i32 = 1;
+pub const STYLE_LAYERED: i32 = 2;
 
 /// `TerrainConstants` of `landform.wgsl` (uniform layout).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
 pub struct LandformConstants {
-    /// octave count, layer thickness (mm), dirt depth (cells), seed.
+    /// octave count (warp slots included), layer thickness (mm), soil
+    /// depth (cells), seed.
     pub header: [i32; 4],
-    /// basin floor, lowland, snowline, basin threshold (mm).
+    /// moisture shift, continents layer + 1 (0: none, all land), snowline,
+    /// low-basin height (mm).
     pub levels: [i32; 4],
-    /// mountain mask bias, steep slope (cells/cell), ridge display flag,
-    /// vertical axis (0 radial, 1 the plane's +Y).
+    /// ridge display layer + 1 (0: none), steep slope (cells/cell), ridge
+    /// display flag, vertical axis (0 radial, 1 the plane's +Y).
     pub shape: [i32; 4],
-    /// erosion saturation slope (height units per gradient span), sum of
-    /// the erosion amplitudes (height units), pad.
-    pub erosion: [i32; 4],
+    /// material style, then the Layered surface, soil and rock ids.
+    pub style: [i32; 4],
+    /// layer count, sum of the erosion amplitudes (height units), domain
+    /// radius (0 on planes), warp octaves (0 or 6).
+    pub stack: [i32; 4],
+    pub layers: [StackLayer; LAYERS],
     pub octaves: [Octave; OCTAVES],
 }
 
+/// Crater radius of the largest crater of a cell (Q19 of the lattice cell,
+/// 0.3): with the ejecta at twice the radius, the 3x3x3 cells around a
+/// point hold every crater reaching it.
+pub const CRATER_RADIUS_Q19: u32 = 157_286;
+/// Squared ejecta reach in crater radii (Q24).
+const REACH: i32 = 4 << 24;
+
 impl LandformConstants {
-    pub fn new(grid: &Grid, land: &Landform, seed: u32) -> Self {
-        let units = |metres: f64| (metres * f64::from(HEIGHT_ONE)).round() as i32;
-        // Lattice spacing for a wavelength, in domain units.
-        let half = crate::grid::DOMAIN_UNIT;
-        let shift = |metres: f64| ((metres / half).log2().round().clamp(1.0, 30.0)) as u32;
-        let mut octaves = Vec::new();
-        let mut state = seed.wrapping_mul(0x9E37_79B9);
-        let mut next_seed = || {
-            state = state.wrapping_add(0x6D2B_79F5);
-            state
-        };
-        // Domain warp: two octaves per axis, amplitude in domain units, always
-        // evaluated with 16-bit noise so the displacement is continuous.
-        let warp_units = land.warp_km * 1_000.0 * 0.15 / half;
-        for axis in 0..3 {
-            for o in 0..2 {
-                let w = land.warp_km * 1_000.0 / f64::from(1u32 << o);
-                octaves.push(Octave {
-                    shift: shift(w),
-                    amplitude: (warp_units / f64::from(1u32 << o)).round() as i32,
-                    seed: next_seed(),
-                    kind: 4 + axis as u32,
-                });
+    fn stack_layers(&self) -> &[StackLayer] {
+        &self.layers[..(self.stack[0].max(0) as usize).min(LAYERS)]
+    }
+
+    fn table(&self) -> &[Octave] {
+        &self.octaves[WARP_OCTAVES..(self.header[0].max(WARP_OCTAVES as i32) as usize).min(OCTAVES)]
+    }
+
+    /// The continents layer, if the stack has one.
+    fn continents(&self) -> Option<usize> {
+        (self.levels[1] > 0).then(|| (self.levels[1] - 1) as usize & (LAYERS - 1))
+    }
+
+    /// Largest change (height units) each layer's own term can make.
+    fn magnitudes(&self) -> [f64; LAYERS] {
+        let mut m = [0.0; LAYERS];
+        for o in self.table() {
+            let a = f64::from(o.amplitude).abs();
+            m[o.layer()] += match o.class() {
+                CONTINENT | REGION | BASIN => 0.0,
+                // Up to two overlapping craters per octave reach a point.
+                CRATER => 2.0 * a * (1.0 + f64::from(self.layers[o.layer()].a) / 65_536.0),
+                _ => a,
+            };
+        }
+        for (l, layer) in self.stack_layers().iter().enumerate() {
+            m[l] += match layer.kind {
+                StackLayer::CONTINENTS => f64::from(layer.a).abs() + f64::from(layer.b).abs(),
+                StackLayer::BASINS | StackLayer::PLATEAU => f64::from(layer.a).abs(),
+                _ => 0.0,
+            };
+        }
+        m
+    }
+
+    /// Per layer, the largest change the layer makes as composed: its own
+    /// term, and for basins also flattening the layers before them by half.
+    fn effects(&self) -> [f64; LAYERS] {
+        let m = self.magnitudes();
+        let mut before = 0.0;
+        let mut e = m;
+        for (l, layer) in self.stack_layers().iter().enumerate() {
+            if layer.kind == StackLayer::BASINS {
+                e[l] += before / 2.0;
             }
+            before += e[l];
         }
-        for o in 0..4 {
-            let w = land.continent_km * 1_000.0 / f64::from(1u32 << o);
-            octaves.push(Octave {
-                shift: shift(w),
-                amplitude: ONE >> o,
-                seed: next_seed(),
-                kind: 0,
-            });
-        }
-        for o in 0..2 {
-            let w = land.mountain_km * 12_000.0 / f64::from(1u32 << o);
-            octaves.push(Octave {
-                shift: shift(w),
-                amplitude: ONE >> o,
-                seed: next_seed(),
-                kind: 1,
-            });
-        }
-        let mut amplitude = land.mountain_m;
-        let mut ridges = Vec::new();
-        for o in 0..7 {
-            let w = land.mountain_km * 1_000.0 / f64::from(1u32 << o);
-            ridges.push(Octave {
-                shift: shift(w),
-                amplitude: units(amplitude),
-                seed: next_seed(),
-                kind: 2,
-            });
-            amplitude *= 0.47;
-        }
-        // Erosion octaves join the ridges by wavelength, so each one follows
-        // only coarser terrain: whenever it is resolved, so is everything it
-        // reads, and every level computes it alike.
-        let mut gullies = Vec::new();
-        let mut amplitude = land.erosion_m;
-        for o in 0..land.erosion_octaves.min(8) {
-            let w = land.erosion_km * 1_000.0 / f64::from(1u32 << o);
-            if amplitude > 0.0 && w > 1.0 {
-                gullies.push(Octave { shift: shift(w), amplitude: units(amplitude), seed: next_seed(), kind: EROSION });
-            }
-            amplitude *= land.erosion_gain;
-        }
-        let mut gullies = gullies.into_iter().peekable();
-        for ridge in ridges {
-            while let Some(g) = gullies.next_if(|g| g.shift >= ridge.shift) {
-                octaves.push(g);
-            }
-            octaves.push(ridge);
-        }
-        octaves.extend(gullies);
-        let mut amplitude = land.hill_m;
-        let mut w = land.hill_km * 1_000.0;
-        while w > 700.0 {
-            octaves.push(Octave {
-                shift: shift(w),
-                amplitude: units(amplitude),
-                seed: next_seed(),
-                kind: 3,
-            });
-            amplitude *= 0.5;
-            w *= 0.5;
-        }
-        let mut w = 512.0;
-        while w >= 1.9 && octaves.len() < OCTAVES {
-            octaves.push(Octave {
-                shift: shift(w),
-                amplitude: units(w * land.roughness),
-                seed: next_seed(),
-                // Metre-scale detail is not warped (kind 7).
-                kind: 7,
-            });
-            w *= 0.5;
-        }
-        assert!(octaves.len() <= OCTAVES, "too many octaves");
-        let count = octaves.len() as i32;
-        let mut table = [Octave::default(); OCTAVES];
-        table[..octaves.len()].copy_from_slice(&octaves);
-        Self {
-            header: [
-                count,
-                grid.layer_mm() as i32,
-                ((0.7 / grid.voxel_size()).round() as i32).max(1),
-                seed as i32,
-            ],
-            levels: [
-                units(-land.ocean_depth_m),
-                units(land.lowland_m),
-                units(land.snowline_m),
-                units(-8.0),
-            ],
-            shape: [ONE / 20, 16, 0, i32::from(grid.is_plane())],
-            erosion: [
-                ((land.erosion_slope * f64::from(1u32 << GRAD_SHIFT) * crate::grid::DOMAIN_UNIT * 1_000.0).round() as i32).clamp(32, 1 << 26),
-                table[..octaves.len()].iter().filter(|o| o.kind == EROSION).map(|o| o.amplitude).sum::<i32>().max(1),
-                0,
-                0,
-            ],
-            octaves: table,
-        }
+        e
     }
 
     /// Conservative per-level surface excess, in level cells (see
@@ -435,14 +352,18 @@ impl LandformConstants {
     /// (5.3 per lattice spacing); `check_field` samples the result.
     pub fn bound_margins(&self, grid: &Grid) -> [i32; 24] {
         const G: f64 = 8.0;
-        let count = self.header[0] as usize;
-        let ridged_sum: f64 = self.octaves[..count].iter().filter(|o| o.kind == 2).map(|o| f64::from(o.amplitude.abs())).sum();
-        let detail_sum: f64 = self.octaves[..count].iter().filter(|o| o.kind == 3 || o.kind == 7).map(|o| f64::from(o.amplitude.abs())).sum();
+        let magnitude = self.magnitudes();
+        let effect = self.effects();
+        let layers = self.stack_layers();
+        let masked = |mask: u32| layers.iter().enumerate().filter(|(_, l)| l.mask == mask).map(|(l, _)| effect[l]).sum::<f64>();
+        // The continents scale the base, the land mask (x3) and the deep-sea
+        // fade (x2) of the layers they mask.
+        let shape = self.continents().map_or(0.0, |l| f64::from(layers[l].a).abs() + 2.0 * f64::from(layers[l].b).abs());
+        let continent = shape + 3.0 * masked(1) + 2.0 * masked(2);
         // Domain warp Lipschitz constant (dimensionless).
-        let warp = self.octaves[..WARP_OCTAVES]
+        let warp = self.octaves[..self.stack[3] as usize]
             .iter()
-            .filter(|o| o.kind == 4)
-            .map(|o| f64::from(o.amplitude) * G / 2f64.powi(o.shift as i32))
+            .map(|o| f64::from(o.amplitude.abs()) * G / 2f64.powi(o.shift as i32))
             .sum::<f64>();
         let ratio = f64::from(grid.reference_cells()) / f64::from(grid.cells());
         let mut out = [0i32; 24];
@@ -451,23 +372,26 @@ impl LandformConstants {
             let mut dropped = 0.0;
             let mut lipschitz = 0.0;
             let mut unwarped = 0.0;
-            for o in &self.octaves[WARP_OCTAVES..count] {
-                let amplitude = match o.kind {
-                    0 => f64::from(self.levels[0].abs()) + 2.0 * f64::from(self.levels[1].abs()) + 3.0 * ridged_sum + 2.0 * detail_sum,
-                    1 => 3.0 * ridged_sum,
-                    2 => 2.0 * f64::from(o.amplitude.abs()),
-                    _ => f64::from(o.amplitude.abs()),
-                } / f64::from(ONE) * f64::from(ONE);
-                if o.kind >= 2 && o.shift < effective + RESOLVED_SHIFT {
-                    dropped += f64::from(o.amplitude.abs());
-                } else if o.kind == 7 {
-                    unwarped += amplitude * G / 2f64.powi(o.shift as i32);
-                } else if o.kind == EROSION {
-                    // Gullies are unwarped; their phase turns 2 pi STRIPES per
-                    // lattice spacing, plus the turning of their direction.
-                    unwarped += amplitude * 19.0 / 2f64.powi(o.shift as i32);
-                } else {
-                    lipschitz += amplitude * G / 2f64.powi(o.shift as i32);
+            for o in self.table() {
+                let a = f64::from(o.amplitude.abs());
+                let per = 1.0 / 2f64.powi(o.shift as i32);
+                let relief = match o.class() {
+                    CRATER => 2.0 * a * (1.0 + f64::from(self.layers[o.layer()].a) / 65_536.0),
+                    _ => a,
+                };
+                match o.class() {
+                    CONTINENT => lipschitz += continent * G * per,
+                    REGION => lipschitz += 3.0 * magnitude[o.layer()] * G * per,
+                    BASIN => unwarped += 4.0 * effect[o.layer()] * G * per,
+                    _ if !resolved(o, effective) => dropped += relief,
+                    RIDGE => lipschitz += 2.0 * a * G * per,
+                    HILLS => lipschitz += a * G * per,
+                    // Gullies: the phase turns 2 pi STRIPES per lattice
+                    // spacing, plus the turning of their direction.
+                    EROSION => unwarped += a * 19.0 * per,
+                    // Bowl slope 2 (depth + rim) per radius, radius >= 0.165 cells.
+                    CRATER => unwarped += relief * 13.0 * per,
+                    _ => unwarped += a * G * per,
                 }
             }
             // Half diagonal of a level cell in domain units (sphere cells
@@ -483,15 +407,21 @@ impl LandformConstants {
 
     /// Conservative lowest and highest surface height (height units).
     pub fn height_range(&self) -> (i32, i32) {
-        let mut sum = i64::from(self.levels[1].abs());
-        for o in &self.octaves[WARP_OCTAVES..self.header[0] as usize] {
-            if o.kind >= 2 {
-                sum += i64::from(o.amplitude.abs());
+        let layers = self.stack_layers();
+        let effect = self.effects();
+        let plateau: f64 = layers.iter().filter(|l| l.kind == StackLayer::PLATEAU).map(|l| f64::from(l.a)).sum();
+        let basins = layers.iter().any(|l| l.kind == StackLayer::BASINS);
+        let mut spread = 0.0;
+        for (l, layer) in layers.iter().enumerate() {
+            // Basins may flatten a plateau: then it is spread, not an offset.
+            if layer.kind != StackLayer::PLATEAU || basins {
+                spread += effect[l];
             }
         }
-        let hi = sum + 10 * i64::from(HEIGHT_ONE);
-        let lo = -hi - i64::from(self.levels[0].abs());
-        (lo.max(i64::from(i32::MIN / 2)) as i32, hi.min(i64::from(i32::MAX / 2)) as i32)
+        let centre = if basins { 0.0 } else { plateau };
+        let pad = if spread > 0.0 { 10.0 * f64::from(HEIGHT_ONE) } else { 0.0 };
+        let clamp = |v: f64| v.clamp(f64::from(i32::MIN / 2), f64::from(i32::MAX / 2)) as i32;
+        (clamp((centre - spread - pad).floor()), clamp((centre + spread + pad).ceil()))
     }
 }
 
@@ -500,14 +430,12 @@ impl LandformConstants {
 pub const RESOLVED_SHIFT: u32 = 5;
 
 /// Additive detail finer than about four level cells is omitted at `level`
-/// (`level` counts reference cells).
+/// (`level` counts reference cells); masks are always evaluated.
 #[inline]
 fn resolved(o: &Octave, level: u32) -> bool {
-    o.kind <= 1 || o.shift >= level + RESOLVED_SHIFT
+    matches!(o.class(), CONTINENT | REGION | BASIN) || o.shift >= level + RESOLVED_SHIFT
 }
 
-/// Octave kind of erosion gullies.
-pub const EROSION: u32 = 8;
 /// Gradients are in height units per `2^GRAD_SHIFT` domain units (3.3 km):
 /// gentle slopes keep about 20 bits, which gully directions need.
 pub const GRAD_SHIFT: u32 = 18;
@@ -539,25 +467,6 @@ fn soft_inside(x: i32, lo: i32, hi: i32) -> i32 {
     ((x - lo) * 8).clamp(0, FINE_ONE).min(((hi - x) * 8).clamp(0, FINE_ONE))
 }
 
-/// Steering gradient (height units per span, w.r.t. the warped point) of
-/// the large shape: basins and lowlands and the mountains resolved so far,
-/// with every kink softened ([`soft_inside`]).
-fn shape_gradient(k: &LandformConstants, c: i32, dc: IVec3, mask: i32, dmask: IVec3, ridged: i32, dridged: IVec3) -> IVec3 {
-    let dbase = if c < 0 {
-        mul_fine3(mul_fine3(-dc, soft_inside(-c, 0, FINE_ONE)), k.levels[0] - k.levels[1] / 8)
-    } else {
-        mul_fine3(mul_fine3(dc * 2, soft_inside(c * 2, 0, FINE_ONE)), k.levels[1])
-    };
-    let land = (c * 3).clamp(0, FINE_ONE);
-    let dland = mul_fine3(dc * 3, soft_inside(c * 3, 0, FINE_ONE));
-    let m = (mask - (k.shape[0] << 8)) * 3;
-    let region = m.clamp(0, FINE_ONE);
-    let dregion = mul_fine3(dmask * 3, soft_inside(m, 0, FINE_ONE));
-    let mr = mul_fine(ridged, region);
-    let dmr = mul_fine3(dridged, region) + mul_fine3(dregion, ridged);
-    dbase + mul_fine3(dmr, land) + mul_fine3(dland, mr)
-}
-
 /// One erosion octave at `p`: gully stripes along the downhill direction of
 /// `g` (height units per span w.r.t. `p`), blended over the octave's 3D
 /// lattice with a random phase per corner, and their gradient (which steers
@@ -567,7 +476,8 @@ fn shape_gradient(k: &LandformConstants, c: i32, dc: IVec3, mask: i32, dmask: IV
 /// direction and offsets keep full precision (Q30 unit vectors, exact 64-bit
 /// products): a 1e-5 direction error would already shift a 40 m gully by
 /// centimetres between neighbouring columns.
-fn erosion_octave(k: &LandformConstants, o: &Octave, p: IVec3, g: IVec3, up: IVec3) -> (i32, IVec3) {
+/// `saturation` is the slope (height units per span) of full depth.
+fn erosion_octave(saturation: i32, o: &Octave, p: IVec3, g: IVec3, up: IVec3) -> (i32, IVec3) {
     // Across the slope, horizontal: t = up x g, |t| the horizontal slope.
     let t = IVec3::new(
         mul_shr_signed(up.y, g.z, 30) - mul_shr_signed(up.z, g.y, 30),
@@ -579,7 +489,7 @@ fn erosion_octave(k: &LandformConstants, o: &Octave, p: IVec3, g: IVec3, up: IVe
         return (0, IVec3::ZERO);
     }
     let slope = (mul_shr_signed(t.x, tn.x, 30) + mul_shr_signed(t.y, tn.y, 30) + mul_shr_signed(t.z, tn.z, 30)) as u32;
-    let saturation = k.erosion[0] as u32;
+    let saturation = saturation.max(1) as u32;
     let strength = (((slope.min(saturation) >> 5) << 16) / (saturation >> 5).max(1)) as i32;
     let s = o.shift;
     let c = IVec3::new(p.x >> s, p.y >> s, p.z >> s);
@@ -613,38 +523,236 @@ fn erosion_octave(k: &LandformConstants, o: &Octave, p: IVec3, g: IVec3, up: IVe
     (value, IVec3::new(mul_shr_signed(magnitude, tn.x, 30), mul_shr_signed(magnitude, tn.y, 30), mul_shr_signed(magnitude, tn.z, 30)))
 }
 
+/// Ocean floor to lowland base of the continents at `c` (Q24): shelf then
+/// deep ocean below the coast, lowlands rising inland.
+#[inline]
+fn continent_base(c: i32, floor: i32, lowland: i32) -> i32 {
+    if c < 0 {
+        let t = (-c).min(FINE_ONE);
+        mul_fine(floor, t).wrapping_add(mul_fine(lowland / 8, FINE_ONE - t))
+    } else {
+        mul_fine(lowland, (c * 2).min(FINE_ONE))
+    }
+}
+
+/// Land weight (rises from the coast) and deep-sea fade at continent value
+/// `c`; without continents `c` is `FINE_ONE`, all land.
+#[inline]
+fn land_masks(c: i32) -> (i32, i32) {
+    ((c * 3).clamp(0, FINE_ONE), (FINE_ONE + c * 2).clamp(FINE_ONE / 8, FINE_ONE))
+}
+
+#[inline]
+fn masked(mask: u32, x: i32, land: i32, wet: i32) -> i32 {
+    match mask {
+        1 => mul_fine(x, land),
+        2 => mul_fine(x, wet),
+        _ => x,
+    }
+}
+
+/// Mountain region weight of a mountain layer from its mask noise.
+#[inline]
+fn region_weight(region: i32, bias: i32) -> i32 {
+    ((region - (bias << 8)) * 3).clamp(0, FINE_ONE)
+}
+
+/// Per-layer accumulators of [`height_parts`] and their gradients.
+struct Accumulators {
+    /// continents: Q24 value; mountains: ridged sum; basins: Q24 mask noise;
+    /// other layers: height.
+    value: [i32; LAYERS],
+    /// mountains: Q24 region noise.
+    region: [i32; LAYERS],
+    /// mountains: ridge weight of the next octave.
+    weight: [i32; LAYERS],
+    dvalue: [IVec3; LAYERS],
+    dregion: [IVec3; LAYERS],
+    dweight: [IVec3; LAYERS],
+}
+
+/// Steering gradient (height units per span, w.r.t. the warped point) of
+/// the continents and mountains resolved so far, masked as composed, with
+/// every kink softened ([`soft_inside`]).
+fn steering(k: &LandformConstants, s: &Accumulators) -> IVec3 {
+    let (c, dc) = k.continents().map_or((FINE_ONE, IVec3::ZERO), |l| (s.value[l], s.dvalue[l]));
+    let (land, wet) = land_masks(c);
+    let dland = mul_fine3(dc * 3, soft_inside(c * 3, 0, FINE_ONE));
+    let dwet = mul_fine3(dc * 2, soft_inside(FINE_ONE + c * 2, FINE_ONE / 8, FINE_ONE));
+    let mut g = IVec3::ZERO;
+    for (l, layer) in k.stack_layers().iter().enumerate() {
+        let (x, dx) = match layer.kind {
+            StackLayer::CONTINENTS => {
+                let d = if c < 0 {
+                    mul_fine3(mul_fine3(-dc, soft_inside(-c, 0, FINE_ONE)), layer.a - layer.b / 8)
+                } else {
+                    mul_fine3(mul_fine3(dc * 2, soft_inside(c * 2, 0, FINE_ONE)), layer.b)
+                };
+                (continent_base(c, layer.a, layer.b), d)
+            }
+            StackLayer::MOUNTAINS => {
+                let m = (s.region[l] - (layer.a << 8)) * 3;
+                let region = m.clamp(0, FINE_ONE);
+                let dregion = mul_fine3(s.dregion[l] * 3, soft_inside(m, 0, FINE_ONE));
+                (mul_fine(s.value[l], region), mul_fine3(s.dvalue[l], region) + mul_fine3(dregion, s.value[l]))
+            }
+            _ => continue,
+        };
+        g += match layer.mask {
+            1 => mul_fine3(dx, land) + mul_fine3(dland, x),
+            2 => mul_fine3(dx, wet) + mul_fine3(dwet, x),
+            _ => dx,
+        };
+    }
+    g
+}
+
+/// `2^60 / d` for `d` in `[2^29, 2^30)`: Newton from a linear guess, four
+/// fixed steps on exact 64-bit products.
+#[inline]
+fn recip_q30(d: u32) -> u32 {
+    let mut y = 3_031_741_621u32 - mul_shr(d, 2_021_161_080, 30);
+    for _ in 0..4 {
+        y = mul_shr(y, 2 * Q30 - mul_shr(d, y, 30), 30);
+    }
+    y
+}
+
+/// `r2 / rad2` in Q24 (`r2 < 4 rad2`, `rad2 > 0`).
+#[inline]
+fn squared_ratio(r2: u32, rad2: u32) -> u32 {
+    let bits = 32 - rad2.leading_zeros();
+    mul_shr(r2, recip_q30(rad2 << (30 - bits)), 6 + bits)
+}
+
+/// Polynomial smooth minimum of `a` and `b` over a width `k` (mm).
+#[inline]
+fn smooth_min(a: i32, b: i32, k: i32) -> i32 {
+    let m = a.min(b);
+    let gap = (a - b).abs();
+    if k <= 0 || gap >= k {
+        return m;
+    }
+    // (k - gap) / k in Q16, exactly (two division steps in 32 bits).
+    let n = (k - gap) << 8;
+    let q = ((n / k) << 8) + ((n % k) << 8) / k;
+    m - scale(mul16(q, q), k) / 4
+}
+
+/// One crater octave at `p` (vertical `up`, Q30): height (mm) and the
+/// freshest ejecta reaching `p` (0..255).
+///
+/// An octave has one candidate crater per cell of a 3D lattice, at a hashed
+/// point; it exists with the octave's density when that point lies within
+/// half a cell of the surface (sphere or plane), so craters are seamless
+/// across cube edges. Each has a parabolic bowl, a rim and an ejecta
+/// blanket out to twice its radius.
+fn crater_octave(k: &LandformConstants, layer: &StackLayer, o: &Octave, p: IVec3, up: IVec3) -> (i32, u32) {
+    let s = o.shift;
+    let density = o.seed & 0xffff;
+    let radius_domain = k.stack[2] as u32;
+    let c0 = IVec3::new(p.x >> s, p.y >> s, p.z >> s);
+    let (mut height, mut ejecta) = (0i32, 0u32);
+    for index in 0..27 {
+        let cell = c0 + IVec3::new(index % 3 - 1, (index / 3) % 3 - 1, index / 9 - 1);
+        let a = hash3(cell.x, cell.y, cell.z, o.seed);
+        if a & 0xffff >= density {
+            continue;
+        }
+        let b = hash3(cell.x, cell.y, cell.z, o.seed ^ 0x6C8E_9CF5);
+        let jitter = IVec3::new((b & 1023) as i32, ((b >> 10) & 1023) as i32, ((b >> 20) & 1023) as i32);
+        let centre = IVec3::new(
+            (cell.x << s) + (jitter.x << (s - 10)),
+            (cell.y << s) + (jitter.y << (s - 10)),
+            (cell.z << s) + (jitter.z << (s - 10)),
+        );
+        // Only centres within half a cell of the surface.
+        if k.shape[3] != 0 {
+            if centre.y.abs() >= 1 << (s - 1) {
+                continue;
+            }
+        } else {
+            let len2 = mul_shr(centre.x.unsigned_abs(), centre.x.unsigned_abs(), 30)
+                + mul_shr(centre.y.unsigned_abs(), centre.y.unsigned_abs(), 30)
+                + mul_shr(centre.z.unsigned_abs(), centre.z.unsigned_abs(), 30);
+            let r2 = mul_shr(radius_domain, radius_domain, 30);
+            if (len2 as i32 - r2 as i32).unsigned_abs() >= radius_domain >> (30 - s) {
+                continue;
+            }
+        }
+        // Squared horizontal distance in Q28 lattice cells; nothing beyond
+        // a cell reaches `p`. Offsets are Q(19 + e) cells: Q19 for fine
+        // lattices, whole domain units (e = s - 19) for coarse ones, whose
+        // squares are exact 64-bit products. Rounding the offsets of a large
+        // crater to Q19 would move its steep walls by centimetres between
+        // neighbouring columns.
+        let e = s.saturating_sub(19);
+        let d = centre - p;
+        let d = if s >= 19 { d } else { IVec3::new(d.x << (19 - s), d.y << (19 - s), d.z << (19 - s)) };
+        if d.abs().max_element() >= 1 << (19 + e) {
+            continue;
+        }
+        // The centre may lie half a cell off the surface: the vertical part
+        // cancels, so it keeps 10 more bits (Q29).
+        let along = mul_shr_signed(d.x, up.x, 20 + e) + mul_shr_signed(d.y, up.y, 20 + e) + mul_shr_signed(d.z, up.z, 20 + e);
+        let square = |v: i32| mul_shr(v.unsigned_abs(), v.unsigned_abs(), 10 + 2 * e);
+        let along2 = mul_shr(along.unsigned_abs(), along.unsigned_abs(), 30);
+        let r2 = (square(d.x) + square(d.y) + square(d.z)).saturating_sub(along2);
+        // Radius 0.55 to 1 of the largest; depth in proportion.
+        let size = 36_045 + (((a >> 16) * 29_491) >> 16) as i32;
+        let radius = mul16(CRATER_RADIUS_Q19 as i32, size).max(1);
+        let rad2 = mul_shr(radius as u32, radius as u32, 10).max(1);
+        if r2 >= 4 * rad2 {
+            continue;
+        }
+        // (r / radius)^2 in Q24, below 4 (the ejecta reach): a full-precision
+        // reciprocal, so large craters move smoothly between columns.
+        let x2 = squared_ratio(r2, rad2) as i32;
+        let depth = scale(size, o.amplitude);
+        let rim = scale(layer.a, depth);
+        // The bowl rises as x^2; the ejecta falls as t^3 from the rim to
+        // twice the radius; a smooth minimum rounds the rim between them.
+        let bowl = mul_fine(x2, depth + rim) - depth;
+        let t = (REACH - x2) / 3;
+        let ejecta_height = mul_fine(mul_fine(mul_fine(t, t), t), rim);
+        height += smooth_min(bowl, ejecta_height, rim / 4);
+        if (hash3(cell.x, cell.y, cell.z, o.seed ^ 0x1B87_3593) & 0xffff) < layer.b as u32 {
+            ejecta = ejecta.max(255 - ((x2 >> 16) * 255 / (REACH >> 16)) as u32);
+        }
+    }
+    (height, ejecta)
+}
+
 /// Surface height (height units above the datum) of the column centred at
 /// domain point `p` with a `2^level` reference cell footprint.
 pub fn height(k: &LandformConstants, p: IVec3, level: u32) -> i32 {
     height_parts(k, p, level).0
 }
 
-/// Surface word of a column (`terrain_surface`): its erosion term as a
-/// signed byte of the erosion amplitude sum (negative: gully floors,
-/// positive: the ribs between them).
+/// Surface word of a column (`terrain_surface`), by material style.
+/// Earthlike: the erosion term as a signed byte of the erosion amplitude
+/// sum (negative: gully floors, positive: the ribs between them). Lunar:
+/// the freshest ejecta (bits 0..6) and the basin flag (bit 7).
 pub fn surface(k: &LandformConstants, p: IVec3, level: u32) -> u32 {
-    let eroded = height_parts(k, p, level).1;
-    ((eroded * 127 / k.erosion[1].max(1)).clamp(-127, 127) as u32) & 0xff
+    height_parts(k, p, level).1
 }
 
-/// [`height`] and its erosion term.
-fn height_parts(k: &LandformConstants, p: IVec3, level: u32) -> (i32, i32) {
-    let count = k.header[0] as usize;
+/// [`height`] and [`surface`].
+pub fn height_parts(k: &LandformConstants, p: IVec3, level: u32) -> (i32, u32) {
     // Erosion follows the slope of the larger terrain: when one of its
     // octaves is resolved here, the large octaves carry their gradients.
-    let erosion = k.octaves[WARP_OCTAVES..count].iter().any(|o| o.kind == EROSION && resolved(o, level));
-    // The warp, continents, mountain regions and ridges scale up to
-    // kilometres, so they use the fine (Q24) noise: 16-bit noise is constant
-    // over metres at these wavelengths and its steps, multiplied by the
-    // mountains, would cut terraces between neighbouring columns.
+    let erosion = k.table().iter().any(|o| o.class() == EROSION && resolved(o, level));
+    // The warp, masks, ridges and hills scale up to kilometres, so they use
+    // the fine (Q24) noise: 16-bit noise is constant over metres at these
+    // wavelengths and its steps, multiplied by the relief, would cut
+    // terraces between neighbouring columns.
     //
-    // The first six octaves are the domain warp (two per axis). The warp is a
-    // coordinate transform, so every level evaluates it. `jacobian[a]` is
-    // the gradient of warp axis `a` (Q24, dimensionless).
+    // The warp is a coordinate transform, so every level evaluates it.
+    // `jacobian[a]` is the gradient of warp axis `a` (Q24, dimensionless).
     let mut warp = [0i32; 3];
     let mut jacobian = [IVec3::ZERO; 3];
-    for o in &k.octaves[..WARP_OCTAVES] {
-        let axis = (o.kind - 4) as usize;
+    for o in &k.octaves[..(k.stack[3].max(0) as usize).min(WARP_OCTAVES)] {
+        let axis = ((o.kind - WARP) as usize).min(2);
         if erosion {
             let (n, d) = noise_fine_grad(p, o.shift, o.seed);
             warp[axis] = warp[axis].wrapping_add(mul_fine(o.amplitude, n));
@@ -663,79 +771,103 @@ fn height_parts(k: &LandformConstants, p: IVec3, level: u32) -> (i32, i32) {
         let column = |j: usize| g[j] + mul_fine(g.x, jacobian[0][j]) + mul_fine(g.y, jacobian[1][j]) + mul_fine(g.z, jacobian[2][j]);
         IVec3::new(column(0), column(1), column(2))
     };
-    let up = if k.shape[3] != 0 { IVec3::new(0, 1 << 30, 0) } else { unit_q30(p) };
-    let mut continent = 0i32;
-    let mut mask = 0i32;
-    let mut ridged = 0i32;
-    let mut ridge_weight = FINE_ONE - 1;
-    let mut detail = 0i32;
+    let up = if k.shape[3] != 0 { IVec3::new(0, Q30 as i32, 0) } else { unit_q30(p) };
+    let mut s = Accumulators {
+        value: [0; LAYERS],
+        region: [0; LAYERS],
+        weight: [FINE_ONE - 1; LAYERS],
+        dvalue: [IVec3::ZERO; LAYERS],
+        dregion: [IVec3::ZERO; LAYERS],
+        dweight: [IVec3::ZERO; LAYERS],
+    };
     let mut eroded = 0i32;
-    let (mut dcontinent, mut dmask, mut dridged, mut dweight, mut deroded) = (IVec3::ZERO, IVec3::ZERO, IVec3::ZERO, IVec3::ZERO, IVec3::ZERO);
-    for o in &k.octaves[WARP_OCTAVES..count] {
+    let mut deroded = IVec3::ZERO;
+    let mut ejecta = 0u32;
+    for o in k.table() {
         if !resolved(o, level) {
             continue;
         }
-        match o.kind {
-            0 | 1 => {
+        let l = o.layer();
+        match o.class() {
+            CONTINENT | REGION => {
                 let (n, d) = if erosion { noise_fine_grad(q, o.shift, o.seed) } else { (noise_fine(q, o.shift, o.seed), IVec3::ZERO) };
                 let v = mul_fine(n, o.amplitude << 8);
                 let dv = mul_fine3(per_span3(d, o.shift), o.amplitude << 8);
-                if o.kind == 0 {
-                    continent = continent.wrapping_add(v);
-                    dcontinent += dv;
+                if o.class() == CONTINENT {
+                    s.value[l] = s.value[l].wrapping_add(v);
+                    s.dvalue[l] += dv;
                 } else {
-                    mask = mask.wrapping_add(v);
-                    dmask += dv;
+                    s.region[l] = s.region[l].wrapping_add(v);
+                    s.dregion[l] += dv;
                 }
             }
-            2 => {
+            RIDGE => {
                 let (n, d) = if erosion { noise_fine_grad(q, o.shift, o.seed) } else { (noise_fine(q, o.shift, o.seed), IVec3::ZERO) };
                 let r = (FINE_ONE - n.abs()).clamp(0, FINE_ONE - 1);
                 let rr = mul_fine(r, r);
-                let v = mul_fine(rr, ridge_weight);
+                let v = mul_fine(rr, s.weight[l]);
                 if erosion {
                     // The crest's sign flip is softened over |n| < 1/4.
                     let dr = mul_fine3(per_span3(-d, o.shift), (n * 4).clamp(-FINE_ONE, FINE_ONE));
-                    let dv = mul_fine3(mul_fine3(dr, r) * 2, ridge_weight) + mul_fine3(dweight, rr);
-                    dweight = mul_fine3(dv * 2, soft_inside(v * 2, FINE_ONE / 4, FINE_ONE - 1));
-                    dridged += mul_fine3(dv, o.amplitude);
+                    let dv = mul_fine3(mul_fine3(dr, r) * 2, s.weight[l]) + mul_fine3(s.dweight[l], rr);
+                    s.dweight[l] = mul_fine3(dv * 2, soft_inside(v * 2, FINE_ONE / 4, FINE_ONE - 1));
+                    s.dvalue[l] += mul_fine3(dv, o.amplitude);
                 }
-                ridge_weight = (v * 2).clamp(FINE_ONE / 4, FINE_ONE - 1);
-                ridged = ridged.wrapping_add(mul_fine(o.amplitude, v));
+                s.weight[l] = (v * 2).clamp(FINE_ONE / 4, FINE_ONE - 1);
+                s.value[l] = s.value[l].wrapping_add(mul_fine(o.amplitude, v));
             }
+            HILLS => s.value[l] = s.value[l].wrapping_add(mul_fine(o.amplitude, noise_fine(q, o.shift, o.seed))),
             EROSION => {
-                let g = unwarp(shape_gradient(k, continent, dcontinent, mask, dmask, ridged, dridged)) + deroded;
-                let (e, de) = erosion_octave(k, o, p, g, up);
+                let g = unwarp(steering(k, &s)) + deroded;
+                let (e, de) = erosion_octave(k.layers[l].a, o, p, g, up);
+                s.value[l] = s.value[l].wrapping_add(e);
                 eroded = eroded.wrapping_add(e);
                 deroded += de;
             }
-            _ => detail = detail.wrapping_add(scale(noise(if o.kind == 7 { p } else { q }, o.shift, o.seed), o.amplitude)),
+            CRATER => {
+                let (h, e) = crater_octave(k, &k.layers[l], o, p, up);
+                s.value[l] = s.value[l].wrapping_add(h);
+                ejecta = ejecta.max(e);
+            }
+            BASIN => s.value[l] = s.value[l].wrapping_add(noise_fine(p, o.shift, o.seed)),
+            _ => s.value[l] = s.value[l].wrapping_add(scale(noise(p, o.shift, o.seed), o.amplitude)),
         }
     }
-    // Continents: c in about [-1.9, 1.9] (Q24); shape basin/lowland transition.
-    let c = continent;
-    let base = if c < 0 {
-        // Continental shelf then deep ocean.
-        let t = (-c).min(FINE_ONE);
-        mul_fine(k.levels[0], t).wrapping_add(mul_fine(k.levels[1] / 8, FINE_ONE - t))
-    } else {
-        let t = (c * 2).min(FINE_ONE);
-        mul_fine(k.levels[1], t)
+    // Compose the layers in stack order.
+    let c = k.continents().map_or(FINE_ONE, |l| s.value[l]);
+    let (land, wet) = land_masks(c);
+    let mut h = 0i32;
+    let mut basin = 0i32;
+    for (l, layer) in k.stack_layers().iter().enumerate() {
+        let x = match layer.kind {
+            StackLayer::CONTINENTS => continent_base(c, layer.a, layer.b),
+            StackLayer::MOUNTAINS => mul_fine(s.value[l], region_weight(s.region[l], layer.a)),
+            StackLayer::BASINS => {
+                // Basins flatten what lies below them in the stack by half
+                // and sink it by their depth.
+                let m = masked(layer.mask, (s.value[l].wrapping_sub(layer.b).wrapping_mul(4)).clamp(0, FINE_ONE), land, wet);
+                basin = basin.max(m);
+                h = mul_fine(h, FINE_ONE - m / 2).wrapping_sub(mul_fine(layer.a, m));
+                continue;
+            }
+            StackLayer::PLATEAU => layer.a,
+            StackLayer::HILLS | StackLayer::ROUGHNESS | StackLayer::EROSION | StackLayer::CRATERS => s.value[l],
+            _ => 0,
+        };
+        h = h.wrapping_add(masked(layer.mask, x, land, wet));
+    }
+    let surface = match k.style[0] {
+        STYLE_EARTHLIKE => ((eroded * 127 / k.stack[1].max(1)).clamp(-127, 127) as u32) & 0xff,
+        STYLE_LUNAR => (ejecta >> 1) | (u32::from(basin >= FINE_ONE / 2) << 7),
+        _ => 0,
     };
-    // Mountains rise only on land, inside the mountain-region mask.
-    let land = (c * 3).clamp(0, FINE_ONE);
-    let region = ((mask - (k.shape[0] << 8)) * 3).clamp(0, FINE_ONE);
-    let mountains = mul_fine(mul_fine(ridged, region), land);
-    // Land detail fades out under deep water.
-    let wet = (FINE_ONE + c * 2).clamp(FINE_ONE / 8, FINE_ONE);
-    (base.wrapping_add(mountains).wrapping_add(eroded).wrapping_add(mul_fine(detail, wet)), eroded)
+    (h, surface)
 }
 
 /// Moisture in Q24 [0, FINE_ONE] from very low-frequency noise at `p`
 /// (fine, so dry-land edges follow smooth curves).
 pub fn moisture(k: &LandformConstants, p: IVec3) -> i32 {
-    let o = k.octaves[6].shift.saturating_sub(1).max(1);
-    (noise_fine(p, o, (k.header[3] as u32) ^ 0x51ED_270B) + FINE_ONE) / 2
+    (noise_fine(p, k.levels[0].max(1) as u32, (k.header[3] as u32) ^ 0x51ED_270B) + FINE_ONE) / 2
 }
 
 /// Strata altitude (mm): layers undulate +-8 m over ~100 m, so cuts
@@ -744,11 +876,9 @@ fn strata(c: &LandformConstants, p: IVec3, altitude: i32) -> i32 {
     altitude + scale(noise(p, 13, (c.header[3] as u32) ^ 0x9B05_688C), 8_000)
 }
 
-/// Material of a solid ground cell. `top_height` is the column height (mm),
-/// `depth` cells below the column top (0 = exposed top cell), `slope` the
-/// ground slope across the cell's 8x8 column block in eighths of a cell per
-/// cell, `layer` the base layer index of the cell.
-pub fn ground_material(
+/// Earthlike materials: meadows, dry lands, rock outcrops, strata and snow
+/// above the snowline; gravel in erosion gullies.
+fn earthlike_material(
     c: &LandformConstants,
     p: IVec3,
     surface: u32,
@@ -851,54 +981,74 @@ pub fn ground_material(
     }
 }
 
-/// Builds [`LandformField`]s from [`Landform`] settings.
-pub struct LandformGenerator;
-
-fn parse_landform(settings: &str) -> Result<Landform, String> {
-    if settings.trim().is_empty() {
-        Ok(Landform::default())
-    } else {
-        serde_json::from_str(settings).map_err(|e| format!("invalid landform settings: {e}"))
+/// Material of a solid ground cell by the stack's material style.
+/// `top_height` is the column height (mm), `depth` cells below the column
+/// top (0 = exposed top cell), `slope` the ground slope across the cell's
+/// 8x8 column block in eighths of a cell per cell, `layer` the base layer
+/// index of the cell.
+pub fn ground_material(c: &LandformConstants, p: IVec3, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
+    match c.style[0] {
+        STYLE_LUNAR => lunar_material(c, p, surface, depth, slope, layer),
+        STYLE_LAYERED => (if depth == 0 { c.style[1] } else if depth <= c.header[2] { c.style[2] } else { c.style[3] }) as u32,
+        _ => earthlike_material(c, p, surface, top_height, depth, slope, layer),
     }
 }
 
-impl TerrainGenerator for LandformGenerator {
-    fn info(&self) -> GeneratorInfo {
-        GeneratorInfo {
-            id: ID.into(),
-            version: VERSION,
-            name: "Landform".into(),
-            description: "Continents, ocean basins, mountain ranges and hills with meadows, dry lands, rock, strata, snow, caves and overhangs.".into(),
-            settings_component: Some("VoxelLandformComponent".into()),
-        }
-    }
-    fn build(&self, grid: &Grid, seed: u64, settings: &str) -> Result<Arc<dyn TerrainField>, String> {
-        landform_field(grid, seed, parse_landform(settings)?)
-    }
+/// Lunar materials: ids into [`lunar_appearance`].
+pub mod lunar {
+    pub const REGOLITH: u32 = 1;
+    pub const MARE: u32 = 2;
+    pub const EJECTA: u32 = 3;
+    pub const ROCK: u32 = 4;
+    pub const BASALT: u32 = 5;
+    pub const ANORTHOSITE: u32 = 6;
 }
 
-fn landform_field(grid: &Grid, seed: u64, land: Landform) -> Result<Arc<dyn TerrainField>, String> {
-    {
-        let positive = [land.continent_km, land.mountain_km, land.hill_km];
-        let finite = [land.ocean_depth_m, land.lowland_m, land.mountain_m, land.hill_m, land.roughness, land.warp_km, land.snowline_m];
-        if positive.iter().any(|v| !v.is_finite() || *v <= 0.0) || finite.iter().any(|v| !v.is_finite()) {
-            return Err("landform settings must be finite, with positive wavelengths".into());
+/// Regolith over bedrock, dark basin plains, bright young ejecta thinning
+/// out away from the crater, boulders on steep slopes.
+fn lunar_material(c: &LandformConstants, p: IVec3, surface: u32, depth: i32, slope: i32, layer: i32) -> u32 {
+    use lunar::*;
+    let ejecta = (surface & 0x7f) << 1;
+    let mare = surface & 0x80 != 0;
+    let h = hash3(p.x, p.y, p.z ^ layer.wrapping_mul(0x9e37), 0x2545_F491);
+    if depth == 0 {
+        if slope >= 12 || (slope >= 6 && h & 3 == 0) {
+            return ROCK;
         }
-        let volume = [land.cave_depth_m, land.cave_share, land.cave_region_km, land.tunnel_radius_m, land.tunnel_wavelength_m,
-            land.cavern_wavelength_m, land.cavern_share, land.cave_cover_m, land.overhang_m, land.overhang_wavelength_m,
-            land.overhang_region_km, land.overhang_share];
-        if volume.iter().any(|v| !v.is_finite() || *v < 0.0) {
-            return Err("landform cave and overhang settings must be finite and non-negative".into());
+        if ejecta > (h & 0xff) {
+            return EJECTA;
         }
-        if land.cave_region_km <= 0.0 || land.tunnel_wavelength_m <= 0.0 || land.cavern_wavelength_m <= 0.0
-            || land.overhang_wavelength_m <= 0.0 || land.overhang_region_km <= 0.0 {
-            return Err("landform cave and overhang wavelengths must be positive".into());
-        }
-        Ok(Arc::new(LandformField::new(grid, &land, (seed ^ (seed >> 32)) as u32)))
+        return if mare { MARE } else { REGOLITH };
     }
+    if depth < c.header[2] {
+        return if mare { MARE } else { REGOLITH };
+    }
+    if mare { BASALT } else { ANORTHOSITE }
 }
 
-/// A [`Landform`] on one grid.
+/// The lunar material table: greys of regolith, mare, fresh ejecta,
+/// boulders, basalt and anorthosite (sRGB).
+pub fn lunar_appearance() -> TerrainAppearance {
+    use lunar::*;
+    let mut table = TerrainAppearance::default();
+    let colour = |rgb: [u8; 3], roughness: f32| MaterialAppearance {
+        colour: [f32::from(rgb[0]) / 255.0, f32::from(rgb[1]) / 255.0, f32::from(rgb[2]) / 255.0, roughness],
+        ..Default::default()
+    };
+    table.materials = [MaterialAppearance::default(); MATERIALS];
+    table.materials[REGOLITH as usize] = colour([142, 140, 135], 0.95);
+    table.materials[MARE as usize] = colour([84, 84, 86], 0.95);
+    table.materials[EJECTA as usize] = colour([196, 194, 188], 0.93);
+    table.materials[ROCK as usize] = colour([112, 110, 106], 0.85);
+    table.materials[BASALT as usize] = colour([58, 59, 63], 0.8);
+    table.materials[ANORTHOSITE as usize] = colour([168, 166, 158], 0.85);
+    // Fresh ejecta and boulders thin out into the surrounding regolith.
+    table.materials[EJECTA as usize].speck_host = Some(REGOLITH as u8);
+    table.detail = [0.0, 0.12, 0.08, 0.0];
+    table
+}
+
+/// A compiled terrain stack on one grid.
 pub struct LandformField {
     constants: LandformConstants,
     volume: LandformVolume,
@@ -908,16 +1058,17 @@ pub struct LandformField {
 }
 
 impl LandformField {
-    pub fn new(grid: &Grid, land: &Landform, seed: u32) -> Self {
-        let constants = LandformConstants::new(grid, land, seed);
-        let volume = LandformVolume::new(grid, land);
+    pub fn new(grid: &Grid, constants: LandformConstants, volume: LandformVolume) -> Self {
         let mut bounds = constants.bound_margins(grid);
-        // Unsupported recipes retain the canonical path. In particular, do
-        // not saturate already-invalid huge finite amplitudes into new terrain.
+        // Stacks without a supported display layer keep the canonical path.
+        // In particular, do not saturate invalid huge amplitudes into new
+        // terrain.
         let ridge_suffix = crate::ridge_envelope::bake_ridge_suffix(grid, &constants).ok();
         let mut render_bounds = if ridge_suffix.is_some() {
             crate::ridge_envelope::render_bounds(grid, &constants, bounds)
-        } else { bounds };
+        } else {
+            bounds
+        };
         // Overhangs raise a finer column's highest solid cell over its
         // heightfield top.
         for level in 0..24u32 {
@@ -967,6 +1118,9 @@ impl TerrainField for LandformField {
         let flags = self.volume.caves[0];
         (if flags & 1 != 0 { self.volume.caves[3] } else { 0 }, if flags & 2 != 0 { self.volume.overhangs[0] } else { 0 })
     }
+    fn appearance(&self) -> TerrainAppearance {
+        if self.constants.style[0] == STYLE_LUNAR { lunar_appearance() } else { TerrainAppearance::default() }
+    }
     fn program(&self) -> TerrainProgram {
         let mut canonical = self.constants;
         canonical.shape[2] = i32::from(self.ridge_suffix.is_some());
@@ -981,90 +1135,15 @@ impl TerrainField for LandformField {
     }
 }
 
-/// Settings of the flat generator: level ground at `height_m` with a
-/// surface layer over soil over rock.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Flat {
-    pub height_m: f64,
-    pub soil_depth_m: f64,
-    /// Material names (see [`material::NAMES`]).
-    pub surface: String,
-    pub soil: String,
-    pub rock: String,
-}
-
-impl Default for Flat {
-    fn default() -> Self {
-        Self { height_m: 0.0, soil_depth_m: 1.0, surface: "Grass".into(), soil: "Dirt".into(), rock: "Stone".into() }
-    }
-}
-
-/// Builds [`FlatField`]s from [`Flat`] settings.
-pub struct FlatGenerator;
-
-impl TerrainGenerator for FlatGenerator {
-    fn info(&self) -> GeneratorInfo {
-        GeneratorInfo {
-            id: FLAT_ID.into(),
-            version: FLAT_VERSION,
-            name: "Flat".into(),
-            description: "Level ground: a surface layer over soil over rock.".into(),
-            settings_component: Some("VoxelFlatTerrainComponent".into()),
-        }
-    }
-    fn build(&self, grid: &Grid, _seed: u64, settings: &str) -> Result<Arc<dyn TerrainField>, String> {
-        let flat: Flat = if settings.trim().is_empty() {
-            Flat::default()
-        } else {
-            serde_json::from_str(settings).map_err(|e| format!("invalid flat terrain settings: {e}"))?
-        };
-        if !flat.height_m.is_finite() || flat.height_m.abs() > 1.0e6 || !flat.soil_depth_m.is_finite() || flat.soil_depth_m < 0.0 {
-            return Err("flat terrain height and soil depth must be finite (height within 1000 km)".into());
-        }
-        let id = |name: &str| material::from_name(name).ok_or_else(|| format!("unknown flat terrain material {name:?}"));
-        let (surface, soil, rock) = (id(&flat.surface)?, id(&flat.soil)?, id(&flat.rock)?);
-        let layer = grid.layer_mm() as i32;
-        // Whole layers, so the surface is exactly one cell boundary.
-        let height = ((flat.height_m * f64::from(HEIGHT_ONE)).round() as i32).div_euclid(layer) * layer;
-        let depth = (flat.soil_depth_m / grid.voxel_size()).round() as i32;
-        Ok(Arc::new(FlatField { constants: [height, surface as i32, soil as i32, depth, rock as i32, 0, 0, 0] }))
-    }
-}
-
-/// `TerrainConstants` of `flat.wgsl`: height, surface, soil, soil depth
-/// (cells), rock.
-pub struct FlatField {
-    constants: [i32; 8],
-}
-
-impl TerrainField for FlatField {
-    fn height(&self, _p: IVec3, _level: u32) -> i32 {
-        self.constants[0]
-    }
-    fn ground_material(&self, _p: IVec3, _surface: u32, _top_height: i32, depth: i32, _slope: i32, _layer: i32) -> u32 {
-        let c = &self.constants;
-        (if depth == 0 { c[1] } else if depth <= c[3] { c[2] } else { c[4] }) as u32
-    }
-    fn height_range(&self) -> (i32, i32) {
-        (self.constants[0], self.constants[0])
-    }
-    fn bound_margins(&self) -> [i32; 24] {
-        [2; 24]
-    }
-    fn program(&self) -> TerrainProgram {
-        TerrainProgram {
-            key: Cow::Borrowed("helio.flat/1"),
-            wgsl: Cow::Borrowed(include_str!("../shaders/flat.wgsl")),
-            constants: bytemuck::cast_slice(&self.constants).to_vec(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layers::TerrainLayers;
     use crate::terrain::{generated_kind, top_cells, TerrainField};
+
+    fn earth(grid: &Grid) -> LandformConstants {
+        TerrainLayers::earth().compile(grid, 7).unwrap().0
+    }
 
     #[test]
     #[ignore = "measurement"]
@@ -1086,13 +1165,13 @@ mod tests {
         eprintln!("sd {sd:.4}; q50 {:.4} q75 {:.4} q90 {:.4} q95 {:.4} q99 {:.4}; P(|n| < 0.05) {near:.4}", q(0.5), q(0.75), q(0.9), q(0.95), q(0.99));
     }
 
-    /// Version 2 carves caves and raises overhangs, only inside the declared
-    /// extent; version 1 (and caves off) stays a pure heightfield.
+    /// Caves and overhangs change cells only inside the declared extent;
+    /// without them the stack is a pure heightfield.
     #[test]
     fn caves_and_overhangs_stay_inside_their_extent() {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let v2 = LandformField::new(&grid, &Landform::default(), 7);
-        let v1 = LandformField::new(&grid, &Landform { caves: false, overhang_m: 0.0, ..Landform::default() }, 7);
+        let v2 = TerrainLayers::earth().field(&grid, 7).unwrap();
+        let v1 = TerrainLayers::earth().heightfield().field(&grid, 7).unwrap();
         let mut rng = 0x9e37_79b9_7f4a_7c15u64;
         let mut next = || {
             rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; rng
@@ -1126,7 +1205,7 @@ mod tests {
     fn climate_bounds_cover_both_signs_of_canonical_height_change() {
         for voxel in [0.1, 0.3, 1.0] {
             let grid = Grid::new(6_371_000.0, voxel).unwrap();
-            let k = LandformConstants::new(&grid, &Landform::default(), 7);
+            let k = earth(&grid);
             let bounds = k.bound_margins(&grid);
             let mut rng = 0x2545_F491_4F6C_DD1Du64;
             let mut next = || {
@@ -1154,7 +1233,7 @@ mod tests {
     #[test]
     fn height_range_is_planetary_and_levels_agree_on_large_scale() {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let k = LandformConstants::new(&grid, &Landform::default(), 7);
+        let k = earth(&grid);
         let (range_lo, range_hi) = k.height_range();
         let mut lo = i32::MAX;
         let mut hi = i32::MIN;
@@ -1188,7 +1267,7 @@ mod tests {
     #[test]
     fn the_field_has_no_steps_between_neighbouring_columns() {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let k = LandformConstants::new(&grid, &Landform::default(), 7);
+        let k = earth(&grid);
         let n = grid.cells() as u64;
         let mut rng = 0x9E37_79B9_7F4A_7C15u64;
         let mut next = || {
@@ -1211,17 +1290,5 @@ mod tests {
             }
         }
         assert!(steps == 0, "{steps} steps, worst second difference {worst} mm");
-    }
-
-    #[test]
-    fn flat_ground_is_one_whole_layer_with_its_materials() {
-        let grid = Grid::plane(crate::grid::Shape::Plane, 1024.0, 0.1).unwrap();
-        let settings = r#"{"height_m": 2.34, "soil_depth_m": 0.5, "surface": "Sand", "rock": "dark_stone"}"#;
-        let field = FlatGenerator.build(&grid, 0, settings).unwrap();
-        assert_eq!(field.height(IVec3::ZERO, 0), 2_300);
-        assert_eq!(field.ground_material(IVec3::ZERO, 0, 2_300, 0, 0, 22), material::SAND);
-        assert_eq!(field.ground_material(IVec3::ZERO, 0, 2_300, 5, 0, 17), material::DIRT);
-        assert_eq!(field.ground_material(IVec3::ZERO, 0, 2_300, 6, 0, 16), material::DARK_STONE);
-        assert!(FlatGenerator.build(&grid, 0, r#"{"rock": "Air"}"#).is_err());
     }
 }

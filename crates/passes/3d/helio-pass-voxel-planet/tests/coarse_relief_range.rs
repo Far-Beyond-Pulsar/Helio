@@ -2,7 +2,7 @@
 mod common;
 use common::*;
 use helio_pass_voxel_planet::grid::Shape;
-use helio_pass_voxel_planet::{Planet, PlanetRecipe, TerrainSource};
+use helio_pass_voxel_planet::{Planet, PlanetRecipe};
 
 #[test]
 fn relief_hit_respects_requested_trace_range() {
@@ -12,10 +12,7 @@ fn relief_hit_respects_requested_trace_range() {
     };
     let planet = Planet::new(PlanetRecipe {
         shape: Shape::Plane,
-        terrain: TerrainSource {
-            generator: helio_pass_voxel_planet::landform::FLAT_ID.into(), version: helio_pass_voxel_planet::landform::FLAT_VERSION,
-            ..Default::default()
-        },
+        terrain: helio_pass_voxel_planet::layers::TerrainLayers::flat().source(7),
         ..Default::default()
     })
     .unwrap();

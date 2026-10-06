@@ -38,9 +38,9 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
   at the editor's altitude-proportional speed while residency keeps up.
 - Volumetric worlds: generated caves and overhangs, not only heightfields.
   Heightmaps are one input among others. A terrain program adds 3D terms
-  around its surface (`terrain_extent`, `terrain_cell`); Landform v2 carves
-  tunnels and caverns and folds the surface into overhangs, and erosion
-  octaves carve branching gullies down its slopes. Still limited:
+  around its surface (`terrain_extent`, `terrain_cell`); the built-in
+  generator carves tunnels and caverns and folds the surface into overhangs,
+  and erosion octaves carve branching gullies down its slopes. Still limited:
   each column stores one band of at most 256 bricks with solid ground below
   it, so caves reach ~170 m below the surface at 0.1 m voxels; deeper caves
   and core-deep holes need per-level vertical windows.
@@ -60,7 +60,8 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
 | `src/grid.rs` | The canonical grid: equal-angle cube sphere (or plane), cells, levels, faces, exact cell walking maths. |
 | `src/noise.rs`, `shaders/noise.wgsl` | Bit-exact integer noise (Q16 and fine Q24). The only noise terrain may use. |
 | `src/terrain.rs` | Pluggable generators: `TerrainGenerator` -> `TerrainField` (CPU) + `TerrainProgram` (WGSL). Registry, material ids, `check_field`. |
-| `src/landform.rs`, `shaders/landform.wgsl`, `shaders/flat.wgsl` | Built-in generators `helio.landform` and `helio.flat`. |
+| `src/layers.rs` | The built-in generator `helio.terrain`: ordered layer stacks (`TerrainLayers`), presets (Earth, moon, flat), validation and compilation. |
+| `src/landform.rs`, `shaders/landform.wgsl` | The stack interpreter (CPU and WGSL): octaves, layer composition, craters, erosion, caves, overhangs and material styles. |
 | `src/edits.rs` | Brushes (sphere/cube, remove/add/paint), per-face integer resolution, the shared `EditLog` and its tile index. |
 | `src/journal.rs` | Binary append-only edit journal (save/replay with recipe fingerprint and checksums). |
 | `src/planet.rs` | `PlanetRecipe` + `Planet`: canonical queries (`kind`, `material`, `solid`), exact ray casts, `surface_point`, `air_clearance`, `ground_height`. |
@@ -126,7 +127,24 @@ the CPU raycast what the GPU draws.
   polynomial and normalizes them (Q30 Newton reciprocal square root, exact
   64-bit products); the eighth-cell unit keeps its rounding far below a
   layer of height on steep slopes.
-- Landform carries analytic gradients (`noise_fine_grad`, chain rule through
+- Every world is an ordered layer stack (`layers.rs`): Warp, Continents,
+  Mountains, Hills, Roughness, Erosion, Craters, Basins, Plateau, each with
+  a mask (everywhere, land, above deep sea), plus caves, overhangs and a
+  material style (Earthlike, Lunar, Layered). Planet, moon or plane is a
+  game decision: the stack is data (presets `earth`, `moon`, `flat`, or one
+  a game builds from a seed), compiled to one octave table sorted coarse to
+  fine with each octave tagged with its layer. One interpreter runs it on
+  CPU and GPU, so changing layers never recompiles shaders. Octaves
+  accumulate per layer; the layers then compose in stack order (Basins
+  flatten what precedes them). Bounds (`bound_margins`, `height_range`)
+  derive from the layers, so any stack keeps `check_field`.
+- Craters: one candidate per cell of a 3D lattice per size, kept with the
+  layer's density when within half a cell of the surface, so they are
+  seamless across cube edges; parabolic bowl, smooth-min rim, ejecta to twice
+  the radius. Large craters keep full-precision offsets (exact 64-bit
+  squares): rounding them moved their steep walls by centimetres between
+  columns.
+- The stack carries analytic gradients (`noise_fine_grad`, chain rule through
   the domain warp) when an erosion octave is resolved. Each erosion octave
   lays stripes across the downhill direction of the coarser terrain on its
   own 3D lattice (random phase per corner, trilinear fade); its gradient
@@ -136,9 +154,10 @@ the CPU raycast what the GPU draws.
   is continuous (crest sign flips and clamp edges softened) and kept in
   Q30 unit vectors: a 1e-5 direction error is centimetres of height.
 - Detail finer than a level's footprint is omitted at that level: coarse
-  levels are band-limited point samples of the same field. Landform display
-  generation retains the conditional mean of unresolved ridges, rather than
-  dropping their mountain height. This lookup is baked once per recipe;
+  levels are band-limited point samples of the same field. Display
+  generation retains the conditional mean of the display layer's (the first
+  Mountains layer's) unresolved ridges, rather than dropping their mountain
+  height. This lookup is baked once per stack;
   canonical field queries and level 0 remain unchanged. Levels 1 and above
   retain fractional radial tops unless Add/Remove edits change their geometry.
   Short low-level spans store exact base-layer tops in the existing byte header.
@@ -486,13 +505,14 @@ an optional settings-component name) returning a `TerrainField` and its
 `terrain_surface(p, level, height) -> u32`: an 8-bit surface word per column
 cell, computed once when the column is generated and stored with it (one
 pool unit per column, only for programs that define it), passed to
-`ground_material`. It carries what materials need besides height (Landform:
-its erosion term, so gully floors fill with gravel and rock shows on the
-ribs); shading never runs the generator per pixel. Volumetric generators also
+`ground_material`. It carries what materials need besides height (Earthlike
+style: the erosion term, so gully floors fill with gravel and rock shows on
+the ribs; Lunar: fresh ejecta and basins); shading never runs the generator
+per pixel. Volumetric generators also
 define `terrain_extent` and `terrain_cell` (and `TerrainField::extent`,
 `cell`, `volume_bounds`); keep the extent tight, since every cell in it is
 evaluated per job and the band holds at most 256 bricks. Return an empty
-extent at levels that cannot show a feature (Landform resolves tunnels while
+extent at levels that cannot show a feature (the stack resolves tunnels while
 their radius spans a cell, covered caverns while a cell fits in the cover):
 volumetric columns lose relief and filtered shading. Use only the integer noise
 library. One version of each generator is registered; saved edits record
@@ -510,14 +530,14 @@ and the host a filtered speck blends into. No material id is special to the
 renderer. A terrain program may report display-only blends for the shaded
 cell through the appearance channel (`common.wgsl`): a coverage between two
 materials, a mix of four, and the material whose flecks are averaged.
-Landform uses them for snow edges and stone bands; canonical ids never
-change.
+The Earthlike style uses them for snow edges and stone bands; canonical ids
+never change.
 
 **Appearance.** `PlanetPass::set_appearance` updates the material table
 and detail without rebuilding terrain. RGB is sRGB; roughness is linear.
 When it returns `true`, reset temporal colour history to show the change in
 an idle viewport.
-Unedited Landform rock has a world-space weathered surface coating;
+Unedited Earthlike rock has a world-space weathered surface coating;
 canonical material ids, underlying strata and explicit paint are unchanged.
 
 **A brush shape.** Extend `BrushShape`, its per-face resolution in
