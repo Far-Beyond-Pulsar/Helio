@@ -1613,6 +1613,7 @@ dependencies = [
 name = "helio-default-graphs"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "glam 0.33.5",
  "helio",
  "helio-core",
@@ -1653,6 +1654,7 @@ dependencies = [
  "helio-pass-voxel-planet",
  "helio-pass-water-sim",
  "image",
+ "log",
  "pollster 0.4.0",
  "pulsar_scenedb",
  "serde_json",
