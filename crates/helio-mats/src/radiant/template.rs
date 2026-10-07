@@ -57,6 +57,23 @@ impl RadiantTemplate {
             src.replace("// RADIANT_OVERRIDE_SURFACE\n", "")
                 .replace("// RADIANT_OVERRIDE_END\n", "")
         } else {
+            // Graph materials carry module-scope declarations separately from
+            // the surface assignments injected into radiant_eval_surface.
+            // PSGC emits a complete fragment module; the runtime adapter turns
+            // that into this small two-part representation.
+            let (graph_declarations, graph_body) = graph_wgsl
+                .split_once("\n/*RADIANT_GRAPH_BODY*/\n")
+                .map(|(declarations, body)| {
+                    (declarations.strip_prefix("/*RADIANT_GRAPH_DECLARATIONS*/\n").unwrap_or(declarations), body)
+                })
+                .unwrap_or(("", graph_wgsl));
+            let src = if graph_declarations.is_empty() {
+                src
+            } else if let Some(at) = src.find("fn radiant_eval_surface") {
+                format!("{}{}\n{}", &src[..at], graph_declarations, &src[at..])
+            } else {
+                src
+            };
             // Graph present: replace everything from OVERRIDE_SURFACE to OVERRIDE_END
             // with the graph's override code
             let override_start = "// RADIANT_OVERRIDE_SURFACE";
@@ -65,7 +82,7 @@ impl RadiantTemplate {
                 if let Some(end) = src.find(override_end) {
                     let before = &src[..start];
                     let after = &src[end + override_end.len()..];
-                    format!("{}{}\n{}", before, graph_wgsl, after)
+                    format!("{}{}\n{}", before, graph_body, after)
                 } else {
                     src
                 }

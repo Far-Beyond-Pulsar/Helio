@@ -27,7 +27,7 @@ pub use material::{
     MATERIAL_CLASS_SKIN, MATERIAL_CLASS_SUBSURFACE, MAX_MATERIAL_TEXTURES,
 };
 pub use radiant::{
-    RadiantGraphRegistry, RadiantShaderCache, RadiantShaderKey, RadiantTemplate,
+    graph_source, register_graph_source, RadiantGraphRegistry, RadiantShaderCache, RadiantShaderKey, RadiantTemplate,
     RadiantTemplateRegistry, SharedTemplateRegistry,
 };
 pub use shader::{

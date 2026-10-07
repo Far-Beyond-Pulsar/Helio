@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::sync::{OnceLock, RwLock};
 
 const MAX_GRAPH_SNIPPETS: usize = 4096;
 
@@ -52,4 +53,35 @@ impl RadiantGraphRegistry {
     pub fn len(&self) -> usize {
         self.snippets.len()
     }
+}
+
+/// Process-wide graph source registry shared by SceneDB's material projection
+/// and the render passes. The source is immutable for a given content hash.
+static ACTIVE_GRAPHS: OnceLock<RwLock<RadiantGraphRegistry>> = OnceLock::new();
+
+fn active_graphs() -> &'static RwLock<RadiantGraphRegistry> {
+    ACTIVE_GRAPHS.get_or_init(|| RwLock::new(RadiantGraphRegistry::new()))
+}
+
+/// Register graph WGSL for render rows that reference `graph_hash`.
+pub fn register_graph_source(graph_hash: u64, wgsl_snippet: String) {
+    if graph_hash == 0 {
+        return;
+    }
+    if let Ok(mut registry) = active_graphs().write() {
+        registry.register(graph_hash, wgsl_snippet);
+    }
+}
+
+/// Clone a graph snippet so a render pass can compile it without holding the
+/// registry lock during pipeline creation.
+pub fn graph_source(graph_hash: u64) -> Option<String> {
+    if graph_hash == 0 {
+        return None;
+    }
+    active_graphs()
+        .read()
+        .ok()?
+        .get(graph_hash)
+        .map(str::to_owned)
 }

@@ -908,6 +908,13 @@ impl GBufferPass {
         graph_wgsl: &str,
     ) -> &wgpu::RenderPipeline {
         if !self.pipelines.contains_key(&key) {
+            let registered_graph;
+            let graph_wgsl = if graph_wgsl.is_empty() && key.graph_hash != 0 {
+                registered_graph = helio_mats::graph_source(key.graph_hash);
+                registered_graph.as_deref().unwrap_or("")
+            } else {
+                graph_wgsl
+            };
             // The renderer only ever hands us a shared registry when a
             // caller actually registers custom (id >= 5) templates; nothing
             // wires that up yet (see `template_registry`'s doc). Rather than
