@@ -14,14 +14,11 @@ use helio::Movability;
 use pulsar_scene_model::Transform;
 use pulsar_scenedb::{ChangeRead, ComponentChangeKind, Entity, World};
 
-/// The movability that forbids moving `object`, if any: `Movability` is
-/// projected onto the component instances (meshes, lights) that author it,
-/// and an object is fixed when any of its instances is.
+/// The movability that forbids moving `object`, if any: an object is fixed
+/// when it, or any of its mesh or light instances, authors a movability that
+/// cannot move.
 fn fixed_movability(world: &World, object: Entity) -> Option<Movability> {
-    std::iter::once(object)
-        .chain(pulsar_scene_model::attachments::instances(world, object))
-        .filter_map(|entity| world.get::<Movability>(entity).copied())
-        .find(|movability| !movability.can_move())
+    crate::components::object_movability(world, object).filter(|movability| !movability.can_move())
 }
 
 /// Reads `Transform` changes from SceneDB's change journal (its own cursor, so
@@ -126,21 +123,48 @@ mod tests {
         assert!(watch.poll(&world).is_empty());
     }
 
+    /// The movability its mesh and light instances author fixes an object;
+    /// one movable instance does not free it.
     #[test]
     fn an_object_is_fixed_through_its_component_instances() {
+        use crate::components::{LightComponent, ObjectMovability, StaticMeshComponent};
         let mut world = World::new();
+        let attach = |world: &mut World, object, class: &str| {
+            pulsar_scene_model::attachments::spawn_instance(
+                world,
+                object,
+                pulsar_scene_model::NewInstance::new(class),
+            )
+            .unwrap()
+        };
         let object = world.spawn();
         world.insert(object, Transform::default());
-        let mesh = pulsar_scene_model::attachments::spawn_instance(
-            &mut world,
-            object,
-            pulsar_scene_model::NewInstance::new("StaticMeshComponent"),
-        )
-        .unwrap();
-        world.insert(mesh, Movability::Static);
+        let mesh = attach(&mut world, object, "StaticMeshComponent");
+        world.insert(
+            mesh,
+            StaticMeshComponent {
+                movability: ObjectMovability::Static,
+                ..Default::default()
+            },
+        );
+        let light = attach(&mut world, object, "LightComponent");
+        let mut movable_light = LightComponent::default();
+        movable_light.general.movability = ObjectMovability::Movable;
+        world.insert(light, movable_light);
+        let free = world.spawn();
+        world.insert(free, Transform::default());
+        let free_mesh = attach(&mut world, free, "StaticMeshComponent");
+        world.insert(
+            free_mesh,
+            StaticMeshComponent {
+                movability: ObjectMovability::Movable,
+                ..Default::default()
+            },
+        );
         let mut watch = StaticMoveWatch::new(&world);
 
         nudge(&mut world, object);
+        nudge(&mut world, free);
         assert_eq!(watch.poll(&world), vec![object]);
     }
 }

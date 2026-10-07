@@ -228,6 +228,7 @@ impl Renderer {
             ray_frame: Default::default(),
             prev_view_proj: glam::Mat4::IDENTITY,
             previous_world_origin: None,
+            scene_derivations: Vec::new(),
             world_origin: None,
             debug_camera_buffer,
             ambient_color: [0.05, 0.05, 0.08],

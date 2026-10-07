@@ -65,6 +65,10 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 glam = { workspace = true, features = ["serde"] }
 helio.workspace = true
+helio-mats.workspace = true
+# Shader-graph material slots compile at upload time (static_mesh_draw).
+psgc.workspace = true
+image.workspace = true
 helio-voxel-data.workspace = true
 helio-asset-compat = { workspace = true }
 helio-pass-postprocess = { workspace = true }

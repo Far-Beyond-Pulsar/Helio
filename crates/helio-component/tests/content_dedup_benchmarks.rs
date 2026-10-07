@@ -85,7 +85,7 @@ fn bm3_bulk_hydrate_10k_entities_one_shared_asset() {
     eprintln!("BM3: hydrated+inserted {N} entities sharing 1 asset in {elapsed:?} ({:.1} us/entity)", elapsed.as_micros() as f64 / N as f64);
 
     let vpool = store
-        .interned_var_len_pool::<PackedVertex>(pulsar_scenedb::gpu::BufferKey::of("StaticMeshComponent::vertices"))
+        .interned_var_len_pool::<PackedVertex>(pulsar_scenedb::gpu::BufferKey::of("builtin_mesh_vertex"))
         .unwrap();
     let audit = vpool.audit();
     assert_eq!(audit.len(), 1, "10k entities sharing one asset must collapse to exactly 1 interned GPU allocation");

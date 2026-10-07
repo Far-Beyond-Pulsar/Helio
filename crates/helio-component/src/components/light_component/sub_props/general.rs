@@ -20,8 +20,8 @@ pub struct GeneralLightProps {
     #[property(category = "General")]
     #[gpu(as = u32, with = light_type_to_gpu_u32)]
     pub light_type: LightType,
-    /// See [`ObjectMovability`] (Pulsar-Native#837); projected into SceneDB's
-    /// `helio::Movability` on the light entity.
+    /// See [`ObjectMovability`] (Pulsar-Native#837); read through
+    /// [`crate::components::object_movability`].
     #[property(category = "General")]
     #[serde(default)]
     pub movability: ObjectMovability,

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+pub mod scene_join;
+
 use helio::DebugDrawState;
 use helio::GraphRebuilder;
 use helio::PassBuildContext;

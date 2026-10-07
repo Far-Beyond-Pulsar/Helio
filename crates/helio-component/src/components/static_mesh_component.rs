@@ -772,10 +772,10 @@ pub struct StaticMeshComponent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_material_override: Option<LegacyMaterialOverrideData>,
 
-    /// What may change about this mesh at runtime (Pulsar-Native#837). The
-    /// scene bridge projects it into SceneDB's `helio::Movability` and the
-    /// object row's movable flag; levels saved before it load as Static,
-    /// which is how their rows were already flagged.
+    /// What may change about this mesh at runtime (Pulsar-Native#837). It
+    /// sets the movable flag of the mesh's draw rows ([`super::StaticMeshDraw`])
+    /// and the object's [`super::object_movability`]; levels saved before it
+    /// load as Static, which is how their rows were already flagged.
     #[property]
     #[serde(default)]
     pub movability: super::ObjectMovability,
@@ -824,12 +824,11 @@ pub struct StaticMeshComponent {
 
     /// Local-space bounding sphere (xyz = center, w = radius) computed once
     /// from `vertices`' actual positions at hydrate time -- see
-    /// `decode_static_mesh_component`. CPU-only (not `#[gpu]`-mirrored):
-    /// the only consumer is `sync_static_mesh_rows`, which transforms it by
-    /// each entity's world transform to build `StaticObjectComponent`'s
-    /// culling bounds. Not derived from `transform.scale` -- a thin mesh at
-    /// scale 1.0 and a cube at scale 1.0 have different real extents and
-    /// must not collapse to the same bound.
+    /// `decode_static_mesh_component`. Uploaded with the derived draw rows
+    /// ([`super::StaticMeshDraw`]); the renderer's scene join transforms it
+    /// by the owner's transform for culling. Not derived from
+    /// `transform.scale` -- a thin mesh at scale 1.0 and a cube at scale 1.0
+    /// have different real extents and must not collapse to the same bound.
     #[serde(skip)]
     pub bounds_local: [f32; 4],
 }

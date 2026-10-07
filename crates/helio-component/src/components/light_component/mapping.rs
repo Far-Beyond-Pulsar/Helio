@@ -25,14 +25,10 @@ impl super::LightComponentGpuMirror {
     /// bakes in world-space position, which lives on a COMPLETELY SEPARATE
     /// component (`Transform`, updated every frame the object moves, on no
     /// schedule related to this component's own property edits) and simply
-    /// doesn't exist yet at the moment THIS mirror gets built. No upload-
-    /// time transform can pre-combine two values produced by two
-    /// independent systems on two independent schedules -- `HelioRenderer::
-    /// rebuild_light_frame` is the one place both are actually available at
-    /// once, and overwrites these three components from the live `Transform`
-    /// right before use, the same "model-space payload + per-frame
-    /// transform combine" split `rebuild_static_mesh_frame` already uses
-    /// for mesh geometry.
+    /// doesn't exist yet at the moment THIS mirror gets built. The
+    /// renderer's scene join combines the two on the GPU, reading the
+    /// derived [`super::LightSourceRow`] (this mapping's output) and the
+    /// owner object's transform row.
     ///
     /// Translates whatever row it is given; a disabled light's row carries
     /// `general.enabled == 0`, and consumers skip it.
