@@ -479,7 +479,10 @@ impl StaticMeshMaterialSlotsEditor {
         self.subscriptions.clear();
         self.value = value.clone();
         let project_root = engine_state::get_project_path().map(std::path::PathBuf::from);
-        let queries = vec![AssetQuery::extension("mat")];
+        let queries = vec![
+            AssetQuery::extension("mat"),
+            AssetQuery::folder_marker("shader_graph_save.json"),
+        ];
         for (index, slot) in value.slots.iter().enumerate() {
             let key = (slot.source_material, index);
             let picker = cx.new(|cx| {
