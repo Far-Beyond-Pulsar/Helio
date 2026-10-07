@@ -13,7 +13,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::asset_component::AssetComponentRegistration;
-use crate::subsystems::{load_mesh_upload, resolve_asset_path};
+use crate::mesh_cache::{MeshMaterialSlot, MeshSection};
+use crate::subsystems::{load_mesh_asset_upload, resolve_asset_path};
 
 pulsar_reflection::inventory::submit! {
     AssetComponentRegistration {
@@ -90,8 +91,11 @@ impl pulsar_scenedb::handle_ledger::ContentAddressed for MeshAssetPath {
         let Some(project_root) = engine_state::get_project_path() else {
             return HandleId::ZERO;
         };
-        let abs_path = crate::subsystems::resolve_asset_path(std::path::Path::new(&project_root), path);
-        crate::mesh_cache::content_id_for_path(&abs_path).map(HandleId).unwrap_or(HandleId::ZERO)
+        let abs_path =
+            crate::subsystems::resolve_asset_path(std::path::Path::new(&project_root), path);
+        crate::mesh_cache::content_id_for_path(&abs_path)
+            .map(HandleId)
+            .unwrap_or(HandleId::ZERO)
     }
 }
 
@@ -110,6 +114,98 @@ impl From<String> for MeshAssetPath {
 impl From<&str> for MeshAssetPath {
     fn from(s: &str) -> Self {
         Self(s.to_string())
+    }
+}
+
+/// One component-level material choice corresponding to a mesh asset slot.
+/// `source_material` is a stable matching key for reimport reconciliation;
+/// it is not a GPU material index.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct StaticMeshMaterialSlot {
+    pub source_material: Option<u32>,
+    pub name: String,
+    #[serde(default)]
+    pub material_asset: String,
+    #[serde(default)]
+    pub imported_surface: crate::mesh_cache::ImportedSurfaceMaterial,
+    #[serde(default)]
+    pub surface_override: Option<crate::mesh_cache::ImportedSurfaceMaterial>,
+}
+
+/// Temporary persistence adapter for levels authored with the deprecated
+/// `MaterialOverrideComponent`. Scene loading migrates this into each mesh
+/// slot and clears it before the component is saved again.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LegacyMaterialOverrideData {
+    pub base_color: [f32; 4],
+    pub metallic: f32,
+    pub roughness: f32,
+    pub emissive_color: [f32; 3],
+    pub emissive_intensity: f32,
+    pub alpha: f32,
+}
+
+impl LegacyMaterialOverrideData {
+    pub fn into_surface(self) -> crate::mesh_cache::ImportedSurfaceMaterial {
+        crate::mesh_cache::ImportedSurfaceMaterial {
+            base_color: self.base_color,
+            roughness: self.roughness,
+            metallic: self.metallic,
+            emissive: self.emissive_color,
+            emissive_intensity: self.emissive_intensity,
+            alpha: self.alpha,
+        }
+    }
+}
+
+/// Editor-facing dynamic list of per-slot material assignments. Kept as one
+/// reflected value so a custom property editor can render a named picker for
+/// every imported slot instead of exposing an unhelpful raw vector editor.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct StaticMeshMaterialSlots {
+    pub slots: Vec<StaticMeshMaterialSlot>,
+}
+
+/// Small native surface-material document used by mesh slots. Material graph
+/// assets can later compile into the same GPU row; this format keeps slot
+/// assignment functional for scalar PBR materials today.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SurfaceMaterialAsset {
+    pub version: u32,
+    pub base_color: [f32; 4],
+    pub metallic: f32,
+    pub roughness: f32,
+    pub emissive_color: [f32; 3],
+    pub emissive_intensity: f32,
+    pub alpha: f32,
+}
+
+impl Default for SurfaceMaterialAsset {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            base_color: [0.22, 0.15, 0.08, 1.0],
+            metallic: 0.0,
+            roughness: 0.7,
+            emissive_color: [0.0; 3],
+            emissive_intensity: 0.0,
+            alpha: 1.0,
+        }
+    }
+}
+
+impl From<crate::mesh_cache::ImportedSurfaceMaterial> for SurfaceMaterialAsset {
+    fn from(value: crate::mesh_cache::ImportedSurfaceMaterial) -> Self {
+        Self {
+            base_color: value.base_color,
+            metallic: value.metallic,
+            roughness: value.roughness,
+            emissive_color: value.emissive,
+            emissive_intensity: value.emissive_intensity,
+            alpha: value.alpha,
+            ..Self::default()
+        }
     }
 }
 
@@ -316,6 +412,325 @@ fn mesh_asset_editor(
 #[allow(dead_code)]
 type RegisteredMeshAssetPath = MeshAssetPath;
 
+fn serialize_material_slots_json(
+    value: &StaticMeshMaterialSlots,
+) -> pulsar_reflection::ReflectResult<serde_json::Value> {
+    serde_json::to_value(value)
+        .map_err(|error| ReflectError::SerializationFailed(error.to_string()))
+}
+
+fn deserialize_material_slots_json(
+    value: serde_json::Value,
+) -> pulsar_reflection::ReflectResult<StaticMeshMaterialSlots> {
+    serde_json::from_value(value)
+        .map_err(|error| ReflectError::DeserializationFailed(error.to_string()))
+}
+
+struct MaterialSlotPickerRow {
+    key: (Option<u32>, usize),
+    name: String,
+    path: String,
+    picker: gpui::Entity<ui_common::asset_picker::MeshAssetPicker>,
+}
+
+struct StaticMeshMaterialSlotsEditor {
+    label: String,
+    id_prefix: String,
+    prop_name: String,
+    value: StaticMeshMaterialSlots,
+    rows: Vec<MaterialSlotPickerRow>,
+    write_back: pulsar_reflection::PropertyWriteBack,
+    subscriptions: Vec<gpui::Subscription>,
+}
+
+impl StaticMeshMaterialSlotsEditor {
+    fn new(
+        args: &pulsar_reflection::PropertyEditorArgs<'_>,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> Self {
+        let mut editor = Self {
+            label: args.display_name.to_owned(),
+            id_prefix: args.id_prefix.to_owned(),
+            prop_name: args.prop_name.to_owned(),
+            value: args
+                .current_value
+                .downcast_ref::<StaticMeshMaterialSlots>()
+                .cloned()
+                .unwrap_or_default(),
+            rows: Vec::new(),
+            write_back: args.write_back.clone(),
+            subscriptions: Vec::new(),
+        };
+        let initial = editor.value.clone();
+        editor.rebuild_rows(&initial, window, cx);
+        editor
+    }
+
+    fn rebuild_rows(
+        &mut self,
+        value: &StaticMeshMaterialSlots,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        use gpui::AppContext as _;
+        use ui_common::asset_picker::{AssetPickedEvent, AssetQuery, MeshAssetPicker};
+
+        self.rows.clear();
+        self.subscriptions.clear();
+        self.value = value.clone();
+        let project_root = engine_state::get_project_path().map(std::path::PathBuf::from);
+        let queries = vec![
+            AssetQuery::extension("material"),
+            AssetQuery::extension("mat"),
+        ];
+        for (index, slot) in value.slots.iter().enumerate() {
+            let key = (slot.source_material, index);
+            let picker = cx.new(|cx| {
+                MeshAssetPicker::new(
+                    slot.material_asset.clone(),
+                    Vec::new(),
+                    project_root.clone(),
+                    queries.clone(),
+                    window,
+                    cx,
+                )
+            });
+            self.subscriptions.push(cx.subscribe_in(
+                &picker,
+                window,
+                move |this: &mut Self, picker, _event: &AssetPickedEvent, window, cx| {
+                    let selected = picker.read(cx).selected_path().to_owned();
+                    this.set_slot_material(key, selected, window, cx);
+                },
+            ));
+            self.rows.push(MaterialSlotPickerRow {
+                key,
+                name: if slot.name.is_empty() {
+                    format!("Material Slot {}", index + 1)
+                } else {
+                    slot.name.clone()
+                },
+                path: slot.material_asset.clone(),
+                picker,
+            });
+        }
+        cx.notify();
+    }
+
+    fn set_slot_material(
+        &mut self,
+        key: (Option<u32>, usize),
+        path: String,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if let Some(slot) = self
+            .value
+            .slots
+            .get_mut(key.1)
+            .filter(|slot| slot.source_material == key.0)
+        {
+            if slot.material_asset == path {
+                return;
+            }
+            slot.material_asset = path.clone();
+            if let Some(row) = self.rows.get_mut(key.1) {
+                row.path = path;
+            }
+            (self.write_back)(Box::new(self.value.clone()), window, cx);
+            cx.notify();
+        }
+    }
+
+    fn create_material_asset(
+        &mut self,
+        key: (Option<u32>, usize),
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(project_root) = engine_state::get_project_path().map(std::path::PathBuf::from)
+        else {
+            return;
+        };
+        let Some(slot) = self
+            .value
+            .slots
+            .get(key.1)
+            .filter(|slot| slot.source_material == key.0)
+            .cloned()
+        else {
+            return;
+        };
+        let safe_name: String = slot
+            .name
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect();
+        let directory = project_root.join("materials");
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            tracing::warn!(%error, path = %directory.display(), "could not create materials directory");
+            return;
+        }
+        let stem = if safe_name.trim_matches('_').is_empty() {
+            format!("Material_{}", key.1 + 1)
+        } else {
+            safe_name
+        };
+        let (path, relative) = (0..)
+            .map(|suffix| {
+                let file_name = if suffix == 0 {
+                    format!("{stem}.mat")
+                } else {
+                    format!("{stem}_{suffix}.mat")
+                };
+                (directory.join(&file_name), format!("materials/{file_name}"))
+            })
+            .find(|(path, _)| !path.exists())
+            .expect("unbounded unique material filename search");
+        let material = SurfaceMaterialAsset::from(slot.imported_surface);
+        let Ok(bytes) = serde_json::to_vec_pretty(&material) else {
+            return;
+        };
+        if let Err(error) = std::fs::write(&path, bytes) {
+            tracing::warn!(%error, path = %path.display(), "could not write surface material asset");
+            return;
+        }
+        self.set_slot_material(key, relative.clone(), window, cx);
+        if let Some(row) = self.rows.get(key.1) {
+            row.picker.update(cx, |picker, _| picker.set_selected_path(relative));
+        }
+    }
+
+    fn set_value(
+        &mut self,
+        value: &StaticMeshMaterialSlots,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let same_slots = self.value.slots.len() == value.slots.len()
+            && self
+                .value
+                .slots
+                .iter()
+                .zip(&value.slots)
+                .all(|(a, b)| a.source_material == b.source_material && a.name == b.name);
+        if !same_slots {
+            self.rebuild_rows(value, window, cx);
+            return;
+        }
+        self.value = value.clone();
+        for (row, slot) in self.rows.iter_mut().zip(&value.slots) {
+            if row.path != slot.material_asset {
+                row.path = slot.material_asset.clone();
+                row.picker.update(cx, |picker, _| {
+                    picker.set_selected_path(slot.material_asset.clone())
+                });
+            }
+        }
+        cx.notify();
+    }
+}
+
+impl gpui::Render for StaticMeshMaterialSlotsEditor {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::prelude::*;
+        use ui::button::{Button, ButtonVariants as _};
+        use ui::{ActiveTheme, Sizable, h_flex, popover::Popover, v_flex};
+
+        let mut rows = v_flex().w_full().gap_1().child(
+            gpui::div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(self.label.clone()),
+        );
+        if self.rows.is_empty() {
+            rows = rows.child(
+                gpui::div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Select a mesh to load its material slots"),
+            );
+        }
+        for (index, row) in self.rows.iter().enumerate() {
+            let picker = row.picker.clone();
+            let row_key = row.key;
+            let display = if row.path.is_empty() {
+                "Use imported material".to_owned()
+            } else {
+                std::path::Path::new(&row.path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(&row.path)
+                    .to_owned()
+            };
+            rows = rows.child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .items_center()
+                    .gap_2()
+                    .child(gpui::div().text_xs().child(row.name.clone()))
+                    .child(
+                        Popover::<ui_common::asset_picker::MeshAssetPicker>::new(format!(
+                            "material-slot-picker-{}-{}-{index}",
+                            self.id_prefix, self.prop_name
+                        ))
+                        .anchor(gpui::Corner::BottomRight)
+                        .trigger(
+                            Button::new(format!(
+                                "material-slot-picker-btn-{}-{index}",
+                                self.id_prefix
+                            ))
+                            .label(display)
+                            .small()
+                            .ghost()
+                            .dropdown_caret(true),
+                        )
+                        .content(move |_window, _cx| picker.clone()),
+                    )
+                    .child(Button::new(format!(
+                            "create-material-{}-{}-{index}",
+                            self.id_prefix, self.prop_name
+                        ))
+                        .label("Create")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.create_material_asset(row_key, window, cx);
+                        }))),
+            );
+        }
+        rows
+    }
+}
+
+fn material_slots_editor(
+    args: &pulsar_reflection::PropertyEditorArgs<'_>,
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) -> pulsar_reflection::BoundPropertyEditor {
+    use gpui::AppContext as _;
+    let entity = cx.new(|cx| StaticMeshMaterialSlotsEditor::new(args, window, cx));
+    pulsar_reflection::BoundPropertyEditor::new(
+        entity,
+        |editor: &mut StaticMeshMaterialSlotsEditor,
+         value: &StaticMeshMaterialSlots,
+         window,
+         cx| { editor.set_value(value, window, cx) },
+    )
+}
+
+#[pulsar_reflection::pulsar_type(
+    serialize_json_with = serialize_material_slots_json,
+    deserialize_json_with = deserialize_material_slots_json,
+    editor = material_slots_editor
+)]
+#[allow(dead_code)]
+type RegisteredStaticMeshMaterialSlots = StaticMeshMaterialSlots;
+
 // ── StaticMeshComponent ───────────────────────────────────────────────────────
 
 /// Attaches a mesh asset to a scene object.
@@ -329,7 +744,15 @@ type RegisteredMeshAssetPath = MeshAssetPath;
 /// `engine_class_derive`'s `struct_has_gpu_vec_field` check) -- unlike
 /// every OTHER `scene_store` struct so far, which are all plain fixed-size
 /// `Pod` rows.
-#[engine_class(category = "Rendering", default, clone, debug, serialize, deserialize, scene_store)]
+#[engine_class(
+    category = "Rendering",
+    default,
+    clone,
+    debug,
+    serialize,
+    deserialize,
+    scene_store
+)]
 pub struct StaticMeshComponent {
     /// Relative asset path to the mesh file (e.g. "meshes/primitives/SM_Cube.fbx").
     ///
@@ -337,6 +760,18 @@ pub struct StaticMeshComponent {
     /// search browser instead of a plain text input.
     #[property]
     pub mesh_asset: MeshAssetPath,
+
+    /// Material assets assigned to the imported mesh's named material slots.
+    /// Empty assignments use the mesh's imported/default material.
+    #[property]
+    #[serde(default)]
+    pub material_slots: StaticMeshMaterialSlots,
+
+    /// One-load migration field; old levels store these surface values in a
+    /// separate component record. Hydration fans them out over the imported
+    /// slots, then clears this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_material_override: Option<LegacyMaterialOverrideData>,
 
     /// What may change about this mesh at runtime (Pulsar-Native#837). The
     /// scene bridge projects it into SceneDB's `helio::Movability` and the
@@ -378,6 +813,22 @@ pub struct StaticMeshComponent {
     #[gpu(buffer = "builtin_mesh_index", mirror = Once, content_id = "mesh_asset")]
     #[serde(skip)]
     pub indices: Vec<u32>,
+
+    /// Section ranges and source material-slot indices. The packed table is
+    /// shared by content identity with the mesh geometry and mirrored through
+    /// SceneDB's growable GPU pool; the names remain CPU-side asset metadata.
+    #[gpu(buffer = "builtin_mesh_section", mirror = Once, content_id = "mesh_asset")]
+    #[serde(skip)]
+    pub gpu_sections: Vec<u32>,
+
+    /// Names and source material indices discovered while loading the mesh.
+    /// These are asset metadata, not authored per-instance overrides.
+    #[serde(skip)]
+    pub material_slot_metadata: Vec<MeshMaterialSlot>,
+
+    /// Index ranges that route imported geometry to material slots.
+    #[serde(skip)]
+    pub mesh_sections: Vec<MeshSection>,
 
     /// Local-space bounding sphere (xyz = center, w = radius) computed once
     /// from `vertices`' actual positions at hydrate time -- see
@@ -422,30 +873,29 @@ impl ScenePropsProjector for StaticMeshComponent {
 /// (`&mut World, Entity, &Value` / `&mut World, Entity`) carries a
 /// `ComponentRuntimeContext` to pull a project root from the way
 /// `sync_component` does.
-fn load_mesh_geometry(mesh_asset: &str) -> ([f32; 4], Vec<PackedVertex>, Vec<u32>) {
+fn load_mesh_geometry(mesh_asset: &str) -> ([f32; 4], crate::mesh_cache::MeshAssetUpload) {
     let mesh_asset = mesh_asset.trim();
     // Baseline fallback for "no mesh assigned" / "failed to load" -- matches
     // the safety-net minimum the old transform-scale heuristic used
     // (`scale.length().max(0.2) * 0.5`), overwritten below on a real load.
     let mut bounds_local = [0.0, 0.0, 0.0, 0.5];
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
+    let mut upload = crate::mesh_cache::MeshAssetUpload::default();
 
     if !mesh_asset.is_empty() {
         match engine_state::get_project_path() {
             Some(project_root) => {
                 let abs_path = resolve_asset_path(std::path::Path::new(&project_root), mesh_asset);
-                match load_mesh_upload(&abs_path) {
-                    Some(upload) => {
+                match load_mesh_asset_upload(&abs_path) {
+                    Some(loaded) => {
                         tracing::info!(
-                            "StaticMeshComponent: loaded '{}' ({} vertices, {} indices)",
+                            "StaticMeshComponent: loaded '{}' ({} vertices, {} indices, {} material sections)",
                             abs_path.display(),
-                            upload.vertices.len(),
-                            upload.indices.len()
+                            loaded.geometry.vertices.len(),
+                            loaded.geometry.indices.len(),
+                            loaded.sections.len()
                         );
-                        bounds_local = local_bounding_sphere(&upload.vertices);
-                        vertices = upload.vertices;
-                        indices = upload.indices;
+                        bounds_local = local_bounding_sphere(&loaded.geometry.vertices);
+                        upload = loaded;
                     }
                     None => {
                         tracing::warn!(
@@ -465,7 +915,70 @@ fn load_mesh_geometry(mesh_asset: &str) -> ([f32; 4], Vec<PackedVertex>, Vec<u32
         }
     }
 
-    (bounds_local, vertices, indices)
+    (bounds_local, upload)
+}
+
+fn reconcile_material_slots(
+    existing: &StaticMeshMaterialSlots,
+    asset_slots: &[MeshMaterialSlot],
+) -> StaticMeshMaterialSlots {
+    let slots = asset_slots
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            let previous = existing
+                .slots
+                .iter()
+                .find(|slot| {
+                    source.source_material.is_some()
+                        && slot.source_material == source.source_material
+                })
+                .or_else(|| {
+                    existing
+                        .slots
+                        .iter()
+                        .find(|slot| slot.name == source.name && !source.name.is_empty())
+                });
+            StaticMeshMaterialSlot {
+                source_material: source.source_material,
+                name: if source.name.is_empty() {
+                    format!("Material Slot {}", index + 1)
+                } else {
+                    source.name.clone()
+                },
+                material_asset: previous
+                    .map(|slot| slot.material_asset.clone())
+                    .unwrap_or_default(),
+                imported_surface: source.surface,
+                surface_override: previous.and_then(|slot| slot.surface_override),
+            }
+        })
+        .collect();
+    StaticMeshMaterialSlots { slots }
+}
+
+fn apply_legacy_material_override(component: &mut StaticMeshComponent) {
+    let Some(legacy) = component.legacy_material_override.take() else {
+        return;
+    };
+    let surface = legacy.into_surface();
+    for slot in &mut component.material_slots.slots {
+        slot.surface_override = Some(surface);
+    }
+}
+
+fn pack_gpu_sections(sections: &[MeshSection]) -> Vec<u32> {
+    sections
+        .iter()
+        .flat_map(|section| {
+            [
+                section.first_index,
+                section.index_count,
+                section.material_slot,
+                0,
+            ]
+        })
+        .collect()
 }
 
 /// Custom hydrate for `#[register_world_component(hydrate = ...)]`
@@ -487,10 +1000,16 @@ fn hydrate_static_mesh_component(
 ) -> Result<(), String> {
     let mut parsed: StaticMeshComponent =
         serde_json::from_value(data.clone()).map_err(|error| error.to_string())?;
-    let (bounds_local, vertices, indices) = load_mesh_geometry(parsed.mesh_asset.as_str());
+    let (bounds_local, upload) = load_mesh_geometry(parsed.mesh_asset.as_str());
     parsed.bounds_local = bounds_local;
-    parsed.vertices = vertices;
-    parsed.indices = indices;
+    parsed.vertices = upload.geometry.vertices;
+    parsed.indices = upload.geometry.indices;
+    parsed.gpu_sections = pack_gpu_sections(&upload.sections);
+    parsed.material_slots =
+        reconcile_material_slots(&parsed.material_slots, &upload.material_slots);
+    apply_legacy_material_override(&mut parsed);
+    parsed.mesh_sections = upload.sections;
+    parsed.material_slot_metadata = upload.material_slots;
 
     world.insert(entity, parsed);
     Ok(())
@@ -514,10 +1033,16 @@ fn refresh_static_mesh_gpu_mirror(
     let Some(mut component) = world.get::<StaticMeshComponent>(entity).cloned() else {
         return;
     };
-    let (bounds_local, vertices, indices) = load_mesh_geometry(component.mesh_asset.as_str());
+    let (bounds_local, upload) = load_mesh_geometry(component.mesh_asset.as_str());
     component.bounds_local = bounds_local;
-    component.vertices = vertices;
-    component.indices = indices;
+    component.vertices = upload.geometry.vertices;
+    component.indices = upload.geometry.indices;
+    component.gpu_sections = pack_gpu_sections(&upload.sections);
+    component.material_slots =
+        reconcile_material_slots(&component.material_slots, &upload.material_slots);
+    apply_legacy_material_override(&mut component);
+    component.mesh_sections = upload.sections;
+    component.material_slot_metadata = upload.material_slots;
     world.insert(entity, component);
 }
 
