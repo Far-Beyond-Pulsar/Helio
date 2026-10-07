@@ -22,7 +22,6 @@ pub struct DebugVertex {
 
 pub struct DebugDrawState {
     pub editor_enabled: bool,
-    pub camera_position: glam::Vec3,
     /// Double-precision world position of the frame's coordinate origin for
     /// camera-relative frames (see `Renderer::set_world_origin`). Editor
     /// overlays defined in world space (the grid plane at world y = 0) are
@@ -226,7 +225,6 @@ impl Default for DebugDrawState {
     fn default() -> Self {
         Self {
             editor_enabled: false,
-            camera_position: glam::Vec3::ZERO,
             world_origin: None,
             user_lines: Vec::new(),
             user_lines_generation: 0,
@@ -771,8 +769,10 @@ pub struct DebugDrawPass {
     cached_line_gen: u64,
     cached_tri_gen: u64,
     editor_volume_cache: Vec<DebugVertex>,
-    editor_marker_lines: [DebugVertex; 6],
-    editor_last_cam: Option<[f32; 3]>,
+    /// Frame origin the uploaded editor overlay lines were rebased to.
+    editor_origin: Option<glam::DVec3>,
+    /// Frame origin the uploaded user geometry was rebased to.
+    user_origin: Option<glam::DVec3>,
     /// `(editor_volume_generation, editor_layers_generation)` the cache was
     /// last built from.
     editor_last_volume_gen: Option<(u64, u64)>,
@@ -876,12 +876,8 @@ impl DebugDrawPass {
             cached_line_gen: u64::MAX,
             cached_tri_gen: u64::MAX,
             editor_volume_cache: Vec::new(),
-            editor_marker_lines: [DebugVertex {
-                position: [0.0, 0.0, 0.0],
-                _pad: 0.0,
-                color: [0.0, 1.0, 1.0, 1.0],
-            }; 6],
-            editor_last_cam: None,
+            editor_origin: None,
+            user_origin: None,
             editor_last_volume_gen: None,
         }
     }
@@ -931,41 +927,6 @@ impl DebugDrawPass {
         self.editor_volume_cache.extend_from_slice(volume_lines);
     }
 
-    fn update_editor_marker(&mut self, cam: glam::Vec3) {
-        let camera_marker_color = [0.0, 1.0, 1.0, 1.0];
-        self.editor_marker_lines = [
-            DebugVertex {
-                position: [cam.x - 0.3, cam.y, cam.z],
-                _pad: 0.0,
-                color: camera_marker_color,
-            },
-            DebugVertex {
-                position: [cam.x + 0.3, cam.y, cam.z],
-                _pad: 0.0,
-                color: camera_marker_color,
-            },
-            DebugVertex {
-                position: [cam.x, cam.y - 0.3, cam.z],
-                _pad: 0.0,
-                color: camera_marker_color,
-            },
-            DebugVertex {
-                position: [cam.x, cam.y + 0.3, cam.z],
-                _pad: 0.0,
-                color: camera_marker_color,
-            },
-            DebugVertex {
-                position: [cam.x, cam.y, cam.z - 0.3],
-                _pad: 0.0,
-                color: camera_marker_color,
-            },
-            DebugVertex {
-                position: [cam.x, cam.y, cam.z + 0.3],
-                _pad: 0.0,
-                color: camera_marker_color,
-            },
-        ];
-    }
 }
 
 impl RenderPass for DebugDrawPass {
@@ -999,7 +960,6 @@ impl RenderPass for DebugDrawPass {
 
         if self.editor_mode {
             let editor_enabled = state.editor_enabled;
-            let cam = state.camera_position;
             let volume_gen = state.editor_volume_generation;
 
             if !editor_enabled {
@@ -1007,58 +967,49 @@ impl RenderPass for DebugDrawPass {
                     self.pass.update_lines(ctx.queue, &[]);
                     self.cached_line_gen = 0;
                 }
-                self.editor_last_cam = None;
+                self.editor_origin = None;
                 self.pass.update_tris(ctx.queue, &[]);
                 self.cached_tri_gen = 0;
                 return Ok(());
             }
 
             // The grid itself is procedural and is drawn as a single
-            // fullscreen triangle. Only bounds and the camera marker remain
-            // in the transient debug line buffer.
+            // fullscreen triangle.
             self.update_infinite_grid(ctx, state.world_origin);
 
-            // Camera movement only updates the procedural grid uniform and
-            // the camera marker. No CPU grid is rebuilt or uploaded.
-            let mut volume_rebuilt = false;
+            // Overlay lines (volume bounds, editor line layers) are world
+            // space. A camera-relative frame draws them relative to its
+            // origin, subtracted in double precision; they are re-uploaded
+            // when the origin moves. (Uploading world positions placed them
+            // by the camera's offset from the world origin, and a marker
+            // drawn at the viewing camera itself showed as a cross through
+            // the middle of every view.)
+            let origin = state.world_origin.unwrap_or(glam::DVec3::ZERO);
             let layers_gen = state.editor_layers_generation;
-            if self.editor_last_volume_gen != Some((volume_gen, layers_gen)) {
+            let rebuilt = self.editor_last_volume_gen != Some((volume_gen, layers_gen));
+            if rebuilt {
                 self.rebuild_editor_volume_cache(&state.editor_volume_lines);
                 for layer in state.editor_line_layers.values() {
                     self.editor_volume_cache.extend_from_slice(layer);
                 }
                 self.editor_last_volume_gen = Some((volume_gen, layers_gen));
-                volume_rebuilt = true;
             }
             drop(state);
-
-            let cam_arr = [cam.x, cam.y, cam.z];
-            if self.editor_last_cam != Some(cam_arr)
-                || self.cached_line_gen == u64::MAX
-                || volume_rebuilt
-            {
-                self.update_editor_marker(cam);
-
-                if volume_rebuilt || self.cached_line_gen == u64::MAX {
-                    let mut lines = Vec::with_capacity(
-                        self.editor_volume_cache.len() + self.editor_marker_lines.len(),
-                    );
-                    lines.extend_from_slice(&self.editor_volume_cache);
-                    lines.extend_from_slice(&self.editor_marker_lines);
-                    self.pass.update_lines(ctx.queue, &lines);
-                } else {
-                    self.pass.update_lines_at(
-                        ctx.queue,
-                        self.editor_volume_cache.len(),
-                        &self.editor_marker_lines,
-                    );
-                    self.pass.set_line_vertex_count(
-                        self.editor_volume_cache.len() + self.editor_marker_lines.len(),
-                    );
-                }
-
-                self.editor_last_cam = Some(cam_arr);
+            if rebuilt || self.editor_origin != Some(origin) || self.cached_line_gen == u64::MAX {
+                let lines: Vec<DebugVertex> = self
+                    .editor_volume_cache
+                    .iter()
+                    .map(|v| DebugVertex {
+                        position: (glam::DVec3::from_array(v.position.map(f64::from)) - origin).as_vec3().to_array(),
+                        ..*v
+                    })
+                    .collect();
+                self.pass.update_lines(ctx.queue, &lines);
+                self.editor_origin = Some(origin);
                 self.cached_line_gen = self.cached_line_gen.wrapping_add(1);
+                if self.cached_line_gen == u64::MAX {
+                    self.cached_line_gen = 1;
+                }
             }
 
             if self.cached_tri_gen != 0 {
@@ -1070,15 +1021,27 @@ impl RenderPass for DebugDrawPass {
 
         let user_lines_generation = state.user_lines_generation;
         let user_tris_generation = state.user_tris_generation;
-
-        if user_lines_generation != self.cached_line_gen {
-            self.pass.update_lines(ctx.queue, &state.user_lines);
+        // User geometry is world space too (see the editor overlay above).
+        let origin = state.world_origin.unwrap_or(glam::DVec3::ZERO);
+        let moved = self.user_origin != Some(origin);
+        let rebase = |vertices: &[DebugVertex]| -> Vec<DebugVertex> {
+            vertices
+                .iter()
+                .map(|v| DebugVertex {
+                    position: (glam::DVec3::from_array(v.position.map(f64::from)) - origin).as_vec3().to_array(),
+                    ..*v
+                })
+                .collect()
+        };
+        if user_lines_generation != self.cached_line_gen || moved {
+            self.pass.update_lines(ctx.queue, &rebase(&state.user_lines));
             self.cached_line_gen = user_lines_generation;
         }
-        if user_tris_generation != self.cached_tri_gen {
-            self.pass.update_tris(ctx.queue, &state.user_tris);
+        if user_tris_generation != self.cached_tri_gen || moved {
+            self.pass.update_tris(ctx.queue, &rebase(&state.user_tris));
             self.cached_tri_gen = user_tris_generation;
         }
+        self.user_origin = Some(origin);
         Ok(())
     }
 
