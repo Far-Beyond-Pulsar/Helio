@@ -64,7 +64,12 @@ impl RadiantTemplate {
             let (graph_declarations, graph_body) = graph_wgsl
                 .split_once("\n/*RADIANT_GRAPH_BODY*/\n")
                 .map(|(declarations, body)| {
-                    (declarations.strip_prefix("/*RADIANT_GRAPH_DECLARATIONS*/\n").unwrap_or(declarations), body)
+                    (
+                        declarations
+                            .strip_prefix("/*RADIANT_GRAPH_DECLARATIONS*/\n")
+                            .unwrap_or(declarations),
+                        body,
+                    )
                 })
                 .unwrap_or(("", graph_wgsl));
             let src = if graph_declarations.is_empty() {
@@ -244,8 +249,13 @@ impl RadiantTemplateRegistry {
     /// Override an existing class with a new WGSL source (used by TransparentPass
     /// to replace the default gbuffer base with its own transparent base shader).
     pub fn override_class(&mut self, class: u32, name: &str, wgsl_source: &str) {
-        self.templates
-            .insert(class, RadiantTemplate { name: Arc::from(name), wgsl_source: Arc::from(wgsl_source) });
+        self.templates.insert(
+            class,
+            RadiantTemplate {
+                name: Arc::from(name),
+                wgsl_source: Arc::from(wgsl_source),
+            },
+        );
     }
 
     /// Load a template from a WGSL file on disk. The template should contain

@@ -68,10 +68,25 @@ pub fn apply_webgpu_material_bindings(src: &str, max_textures: usize) -> String 
     }
     sample_switch.push_str("        default: { return fallback; }\n    }");
 
-    source.replace(
+    let mut source = source.replace(
         "return textureSample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], uv);",
         &sample_switch,
-    )
+    );
+    // Blueprint graphs bind TextureSrc assets to fixed SceneDB texture slots
+    // at compile time. Lower those constant indices to the same individual
+    // bindings used by the WebGPU fallback path.
+    for index in 0..max_textures {
+        source = source
+            .replace(
+                &format!("scene_textures[{index}u]"),
+                &format!("scene_texture_{index}"),
+            )
+            .replace(
+                &format!("scene_samplers[{index}u]"),
+                &format!("scene_sampler_{index}"),
+            );
+    }
+    source
 }
 
 /// Replace the decal pass's scene binding arrays with baseline-WebGPU bindings.

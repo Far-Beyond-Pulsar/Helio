@@ -166,8 +166,8 @@ pub struct StaticMeshMaterialSlots {
     pub slots: Vec<StaticMeshMaterialSlot>,
 }
 
-/// Small native scalar-PBR surface document used by mesh slots. The shader
-/// graph editor's `.material` assets are not runtime material assets yet.
+/// Small scalar-PBR surface document supported by mesh slots alongside
+/// compiled shader-graph material folders.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SurfaceMaterialAsset {
