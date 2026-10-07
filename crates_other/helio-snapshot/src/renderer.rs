@@ -119,11 +119,13 @@ pub fn render_preview<P: AsRef<Path>>(
 /// the conventional `*_BaseColor`, `*_Albedo`, or `*_Diffuse` image beside the
 /// model. Use that map for preview thumbnails when the imported material has
 /// no color texture at all.
-fn attach_sidecar_base_color(
-    model_path: &Path,
-    scene: &mut helio_asset_compat::ConvertedScene,
-) {
-    if scene.materials.is_empty() || scene.materials.iter().all(|material| material.textures.base_color.is_some()) {
+fn attach_sidecar_base_color(model_path: &Path, scene: &mut helio_asset_compat::ConvertedScene) {
+    if scene.materials.is_empty()
+        || scene
+            .materials
+            .iter()
+            .all(|material| material.textures.base_color.is_some())
+    {
         return;
     }
 
@@ -246,7 +248,7 @@ fn rasterize_preview(
         projected.push(vertices);
     }
 
-    let mut image = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 0]));
+    let mut image = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
     let mut depth = vec![f32::NEG_INFINITY; (width * height) as usize];
     if !min_x.is_finite() || !min_y.is_finite() || max_x <= min_x || max_y <= min_y {
         return image;
@@ -287,9 +289,8 @@ fn rasterize_preview(
             };
             // Projected Y is up while image Y is down. Negating it here keeps
             // imported meshes upright in the thumbnail.
-            let to_screen = |point: Vec2| {
-                Vec2::new(point.x * scale + offset.x, offset.y - point.y * scale)
-            };
+            let to_screen =
+                |point: Vec2| Vec2::new(point.x * scale + offset.x, offset.y - point.y * scale);
             let a = to_screen(ia.0);
             let b = to_screen(ib.0);
             let c = to_screen(ic.0);
@@ -347,8 +348,7 @@ fn rasterize_preview(
                                 linear_to_srgb(rgb[0]),
                                 linear_to_srgb(rgb[1]),
                                 linear_to_srgb(rgb[2]),
-                                ((base_color[3] * texel[3]).clamp(0.0, 1.0) * 255.0 + 0.5)
-                                    as u8,
+                                ((base_color[3] * texel[3]).clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
                             ]),
                         );
                     }
@@ -412,7 +412,11 @@ fn address_coordinate(value: f32, mode: wgpu::AddressMode) -> f32 {
         wgpu::AddressMode::Repeat => value.rem_euclid(1.0),
         wgpu::AddressMode::MirrorRepeat => {
             let period = value.rem_euclid(2.0);
-            if period <= 1.0 { period } else { 2.0 - period }
+            if period <= 1.0 {
+                period
+            } else {
+                2.0 - period
+            }
         }
     }
 }
