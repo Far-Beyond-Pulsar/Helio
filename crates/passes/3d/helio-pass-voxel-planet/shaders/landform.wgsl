@@ -879,18 +879,8 @@ fn lunar_material(p: vec3<i32>, surface: u32, depth: i32, slope: i32, layer: i32
     let h = hash3(p.x, p.y, p.z ^ (layer * 0x9e37), 0x2545F491u);
     if depth == 0 {
         if slope >= 12 || (slope >= 6 && (h & 3u) == 0u) { return M_BOULDER; }
-        let host = select(M_REGOLITH, M_MARE, mare);
-        let fresh = ejecta > (h & 0xffu);
-        // Display only: once voxels shrink below a pixel, the ejecta's
-        // share of the ground blends into its host's colour instead of a
-        // per-pixel hash choice (sparkling salt-and-pepper noise).
-        let voxels = material_footprint * 1000.0 / f32(terrain.header.y);
-        let weight = smoothstep(1.0, 2.0, voxels);
-        if weight > 0.0 {
-            material_coverage_ids = vec2<u32>(host, M_EJECTA);
-            material_coverage = mix(select(0.0, 1.0, fresh), f32(ejecta) / 256.0, weight);
-        }
-        return select(host, M_EJECTA, fresh);
+        if ejecta > (h & 0xffu) { return M_EJECTA; }
+        return select(M_REGOLITH, M_MARE, mare);
     }
     if depth < terrain.header.z { return select(M_REGOLITH, M_MARE, mare); }
     return select(M_ANORTHOSITE, M_BASALT, mare);
