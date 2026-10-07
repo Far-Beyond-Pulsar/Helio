@@ -1,5 +1,6 @@
 mod foliage_component;
 mod camera_post_process_component;
+mod environment_rows;
 mod fog_component;
 mod lens_flare_props;
 mod light_component;
@@ -30,6 +31,7 @@ pub use reflection_capture_component::*;
 pub use spline_component::*;
 pub use static_mesh_component::*;
 pub use static_mesh_draw::*;
+pub use environment_rows::*;
 pub use voxel_component::*;
 pub use voxel_component_runtime::*;
 pub use water_volume_component::*;

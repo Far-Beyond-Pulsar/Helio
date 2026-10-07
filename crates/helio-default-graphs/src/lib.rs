@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+pub mod environment_join;
 pub mod scene_join;
 
 use helio::DebugDrawState;

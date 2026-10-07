@@ -1,7 +1,8 @@
-//! Per-view PP baseline, stored in the post-process pass's SceneDB schema.
+//! A render view's post-process baseline. It reaches the post-process
+//! resolve as its derived row ([`super::environment_rows`]) through the
+//! graph's environment join.
 use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
-use pulsar_reflection::{get_subsystem, ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
-use crate::subsystems::PendingWorldWrites;
+use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
 use super::PostProcessSettingsProps;
 
 pub const CAMERA_POST_PROCESS_CLASS_NAME: &str = "CameraPostProcessComponent";
@@ -26,12 +27,7 @@ impl Default for CameraPostProcessComponent {
     }
 }
 
-fn remove_camera(world: &mut pulsar_scenedb::World, entity: pulsar_scenedb::Entity) {
-    world.remove::<CameraPostProcessComponent>(entity);
-    world.remove::<helio_pass_postprocess::CameraPostProcessComponent>(entity);
-}
-
-#[register_world_component(remove = remove_camera)]
+#[register_world_component]
 #[register_runtime_behavior]
 impl ComponentRuntimeBehavior for CameraPostProcessComponent {
     const CLASS_NAME: &'static str = CAMERA_POST_PROCESS_CLASS_NAME;
@@ -39,18 +35,8 @@ impl ComponentRuntimeBehavior for CameraPostProcessComponent {
     fn sync_component(
         _owner: &RuntimeComponentOwner,
         _component_index: usize,
-        component: &Self,
-        context: &mut dyn ComponentRuntimeContext,
+        _component: &Self,
+        _context: &mut dyn ComponentRuntimeContext,
     ) {
-        let Some(entity) = context.subsystems_mut().get_mut::<pulsar_scenedb::Entity>().copied() else { return; };
-        let writes = get_subsystem!(context, PendingWorldWrites);
-        if !component.enabled {
-            writes.push(move |world| { world.remove::<helio_pass_postprocess::CameraPostProcessComponent>(entity); });
-            return;
-        }
-        let packed = helio_pass_postprocess::CameraPostProcessComponent::new(
-            component.view_id, &component.settings.to_settings(),
-        );
-        writes.push(move |world| { world.insert(entity, packed); });
     }
 }
