@@ -86,7 +86,9 @@ impl StaticMeshDraw {
             .iter()
             .map(|section| {
                 let material = resolve_slot_material(
-                    mesh.material_slots.slots.get(section.material_slot as usize),
+                    mesh.material_slots
+                        .slots
+                        .get(section.material_slot as usize),
                     mirror,
                 );
                 MeshSectionDraw {

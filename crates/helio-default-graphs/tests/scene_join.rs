@@ -79,7 +79,12 @@ impl Scene {
         ));
     }
 
-    fn projection(&self, device: &wgpu::Device, queue: &wgpu::Queue, generation: u64) -> SceneBufferProjection {
+    fn projection(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        generation: u64,
+    ) -> SceneBufferProjection {
         SceneBufferProjection::from_handles(self.buffers.iter().map(|(key, bytes, row_bytes)| {
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
@@ -101,7 +106,11 @@ impl Scene {
     }
 }
 
-fn read<T: bytemuck::Pod>(device: &wgpu::Device, queue: &wgpu::Queue, buffer: &wgpu::Buffer) -> Vec<T> {
+fn read<T: bytemuck::Pod>(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+) -> Vec<T> {
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
         size: buffer.size(),
@@ -111,7 +120,9 @@ fn read<T: bytemuck::Pod>(device: &wgpu::Device, queue: &wgpu::Queue, buffer: &w
     let mut encoder = device.create_command_encoder(&Default::default());
     encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, buffer.size());
     queue.submit([encoder.finish()]);
-    staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    staging
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.unwrap());
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     let out = bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec();
     staging.unmap();
@@ -181,25 +192,62 @@ fn close(a: &[f32], b: &[f32]) -> bool {
 /// with two sections, 2 = light instance of 0, 3 = a disabled mesh
 /// instance of 0.
 fn base_scene() -> Scene {
-    let mut scene = Scene { buffers: Vec::new() };
+    let mut scene = Scene {
+        buffers: Vec::new(),
+    };
     let transform = Transform {
         position: [1.0, 2.0, 3.0],
         rotation: [30.0, 45.0, 10.0],
         scale: [2.0, 1.0, 0.5],
     };
-    scene.put(KEYS.transforms, &[transform, Transform::zeroed_row(), Transform::zeroed_row(), Transform::zeroed_row()]);
+    scene.put(
+        KEYS.transforms,
+        &[
+            transform,
+            Transform::zeroed_row(),
+            Transform::zeroed_row(),
+            Transform::zeroed_row(),
+        ],
+    );
     scene.put(KEYS.generations, &[3u32, 5, 7, 9]);
     scene.put(KEYS.hidden, &[0u32, 0, 0, 0]);
-    let owner = |enabled| Owner { index: 0, generation: 3, enabled };
+    let owner = |enabled| Owner {
+        index: 0,
+        generation: 3,
+        enabled,
+    };
     scene.put(
         KEYS.owners,
-        &[Owner { index: 0, generation: 0, enabled: 0 }, owner(1), owner(1), owner(0)],
+        &[
+            Owner {
+                index: 0,
+                generation: 0,
+                enabled: 0,
+            },
+            owner(1),
+            owner(1),
+            owner(0),
+        ],
     );
     // Instances 1 and 3: vertices at 100.., indices at 200.., sections at
     // pool slots 0..2 and 2..3.
-    scene.put(KEYS.vertex_handles, &[[0u32, 0], [100, 24], [0, 0], [100, 24]]);
-    scene.put(KEYS.index_handles, &[[0u32, 0], [200, 36], [0, 0], [200, 36]]);
-    scene.put(KEYS.mesh_bounds, &[[0.0f32; 4], [0.5, 0.0, 0.0, 1.5], [0.0; 4], [0.0, 0.0, 0.0, 1.0]]);
+    scene.put(
+        KEYS.vertex_handles,
+        &[[0u32, 0], [100, 24], [0, 0], [100, 24]],
+    );
+    scene.put(
+        KEYS.index_handles,
+        &[[0u32, 0], [200, 36], [0, 0], [200, 36]],
+    );
+    scene.put(
+        KEYS.mesh_bounds,
+        &[
+            [0.0f32; 4],
+            [0.5, 0.0, 0.0, 1.5],
+            [0.0; 4],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    );
     scene.put(KEYS.mesh_flags, &[0u32, helio::INSTANCE_FLAG_MOVABLE, 0, 0]);
     scene.put(KEYS.section_handles, &[[0u32, 0], [0, 2], [0, 0], [2, 1]]);
     let section = |first_index, index_count, base| Section {
@@ -213,7 +261,11 @@ fn base_scene() -> Scene {
     };
     scene.put(
         KEYS.mesh_sections,
-        &[section(0, 12, 0.1), section(12, 24, 0.2), section(0, 36, 0.3)],
+        &[
+            section(0, 12, 0.1),
+            section(12, 24, 0.2),
+            section(0, 36, 0.3),
+        ],
     );
     let mut light = helio::GpuLight {
         position_range: [0.0, 0.0, 0.0, 10.0],
@@ -222,7 +274,15 @@ fn base_scene() -> Scene {
         ..Default::default()
     };
     light._pad = 1;
-    scene.put(KEYS.light_sources, &[helio::GpuLight::default(), helio::GpuLight::default(), light, helio::GpuLight::default()]);
+    scene.put(
+        KEYS.light_sources,
+        &[
+            helio::GpuLight::default(),
+            helio::GpuLight::default(),
+            light,
+            helio::GpuLight::default(),
+        ],
+    );
     scene
 }
 
@@ -246,10 +306,16 @@ fn placed_instances_are_joined_with_their_owner_and_nothing_else_is() {
     let scene = base_scene();
     let out = run(&mut join, &device, &queue, &scene, 1);
 
-    let objects: Vec<helio_pass_gbuffer::StaticObjectComponent> =
-        read(&device, &queue, &out.get(BufferKey::of("static_objects")).unwrap().buffer);
-    let materials: Vec<helio::GpuMaterial> =
-        read(&device, &queue, &out.get(BufferKey::of("materials")).unwrap().buffer);
+    let objects: Vec<helio_pass_gbuffer::StaticObjectComponent> = read(
+        &device,
+        &queue,
+        &out.get(BufferKey::of("static_objects")).unwrap().buffer,
+    );
+    let materials: Vec<helio::GpuMaterial> = read(
+        &device,
+        &queue,
+        &out.get(BufferKey::of("materials")).unwrap().buffer,
+    );
     let transform = Transform {
         position: [1.0, 2.0, 3.0],
         rotation: [30.0, 45.0, 10.0],
@@ -274,24 +340,65 @@ fn placed_instances_are_joined_with_their_owner_and_nothing_else_is() {
         );
         let got = objects[slot as usize];
         assert_eq!(
-            (got.mesh_slot, got.mesh_generation, got.material_slot, got.material_generation),
+            (
+                got.mesh_slot,
+                got.mesh_generation,
+                got.material_slot,
+                got.material_generation
+            ),
             (1, 6, slot, 6),
             "section {slot} identity"
         );
         assert_eq!(
-            (got.index_count, got.first_index, got.vertex_offset, got.flags),
-            (expected.index_count, expected.first_index, expected.vertex_offset, expected.flags),
+            (
+                got.index_count,
+                got.first_index,
+                got.vertex_offset,
+                got.flags
+            ),
+            (
+                expected.index_count,
+                expected.first_index,
+                expected.vertex_offset,
+                expected.flags
+            ),
             "section {slot} draw range"
         );
-        assert!(close(bytemuck::cast_slice(&got.transform), bytemuck::cast_slice(&expected.transform)), "model matrix");
-        assert!(close(bytemuck::cast_slice(&got.normal_mat), bytemuck::cast_slice(&expected.normal_mat)), "normal matrix");
-        assert!(close(&got.bounds, &expected.bounds), "bounds {:?} vs {:?}", got.bounds, expected.bounds);
-        assert_eq!(materials[slot as usize].base_color[0], base, "section {slot} material");
+        assert!(
+            close(
+                bytemuck::cast_slice(&got.transform),
+                bytemuck::cast_slice(&expected.transform)
+            ),
+            "model matrix"
+        );
+        assert!(
+            close(
+                bytemuck::cast_slice(&got.normal_mat),
+                bytemuck::cast_slice(&expected.normal_mat)
+            ),
+            "normal matrix"
+        );
+        assert!(
+            close(&got.bounds, &expected.bounds),
+            "bounds {:?} vs {:?}",
+            got.bounds,
+            expected.bounds
+        );
+        assert_eq!(
+            materials[slot as usize].base_color[0], base,
+            "section {slot} material"
+        );
     }
-    assert_eq!(objects[2].mesh_generation, 0, "a disabled instance draws nothing");
+    assert_eq!(
+        objects[2].mesh_generation, 0,
+        "a disabled instance draws nothing"
+    );
 
-    let lights: Vec<helio::GpuLight> =
-        read(&device, &queue, &out.get(BufferKey::of("scene_lights")).unwrap().buffer);
+    let lights: Vec<helio::GpuLight> = read(
+        &device,
+        &queue,
+        &out.get(BufferKey::of("scene_lights")).unwrap().buffer,
+    );
     let light = lights[2];
     assert!(close(&light.position_range, &[1.0, 2.0, 3.0, 10.0]));
     let direction = glam::Quat::from_euler(
@@ -300,12 +407,29 @@ fn placed_instances_are_joined_with_their_owner_and_nothing_else_is() {
         30f32.to_radians(),
         10f32.to_radians(),
     ) * -glam::Vec3::Y;
-    assert!(close(&light.direction_outer[..3], &direction.to_array()), "light direction");
-    assert_eq!(light._pad, 0, "the enabled flag does not leak into the output");
-    assert_eq!(lights[1].color_intensity, [0.0; 4], "rows without a light stay dark");
-    let billboards: Vec<[f32; 12]> =
-        read(&device, &queue, &out.get(BufferKey::of("billboard_instances")).unwrap().buffer);
-    assert!(close(&billboards[2][..3], &[1.0, 2.0, 3.0]), "billboard at the light");
+    assert!(
+        close(&light.direction_outer[..3], &direction.to_array()),
+        "light direction"
+    );
+    assert_eq!(
+        light._pad, 0,
+        "the enabled flag does not leak into the output"
+    );
+    assert_eq!(
+        lights[1].color_intensity, [0.0; 4],
+        "rows without a light stay dark"
+    );
+    let billboards: Vec<[f32; 12]> = read(
+        &device,
+        &queue,
+        &out.get(BufferKey::of("billboard_instances"))
+            .unwrap()
+            .buffer,
+    );
+    assert!(
+        close(&billboards[2][..3], &[1.0, 2.0, 3.0]),
+        "billboard at the light"
+    );
 }
 
 #[test]
@@ -318,20 +442,41 @@ fn hiding_the_owner_a_stale_generation_or_a_disabled_light_removes_the_rows() {
     let mut scene = base_scene();
     scene.put(KEYS.hidden, &[1u32, 0, 0, 0]);
     let out = run(&mut join, &device, &queue, &scene, 1);
-    let objects: Vec<helio_pass_gbuffer::StaticObjectComponent> =
-        read(&device, &queue, &out.get(BufferKey::of("static_objects")).unwrap().buffer);
-    assert!(objects.iter().all(|o| o.mesh_generation == 0), "hidden owner");
-    let lights: Vec<helio::GpuLight> =
-        read(&device, &queue, &out.get(BufferKey::of("scene_lights")).unwrap().buffer);
-    assert!(lights.iter().all(|l| l.color_intensity[3] == 0.0), "hidden owner");
-    assert!(out.get(BufferKey::of("billboard_instances")).is_none(), "billboards off");
+    let objects: Vec<helio_pass_gbuffer::StaticObjectComponent> = read(
+        &device,
+        &queue,
+        &out.get(BufferKey::of("static_objects")).unwrap().buffer,
+    );
+    assert!(
+        objects.iter().all(|o| o.mesh_generation == 0),
+        "hidden owner"
+    );
+    let lights: Vec<helio::GpuLight> = read(
+        &device,
+        &queue,
+        &out.get(BufferKey::of("scene_lights")).unwrap().buffer,
+    );
+    assert!(
+        lights.iter().all(|l| l.color_intensity[3] == 0.0),
+        "hidden owner"
+    );
+    assert!(
+        out.get(BufferKey::of("billboard_instances")).is_none(),
+        "billboards off"
+    );
 
     let mut scene = base_scene();
     scene.put(KEYS.generations, &[4u32, 5, 7, 9]);
     let out = run(&mut join, &device, &queue, &scene, 2);
-    let objects: Vec<helio_pass_gbuffer::StaticObjectComponent> =
-        read(&device, &queue, &out.get(BufferKey::of("static_objects")).unwrap().buffer);
-    assert!(objects.iter().all(|o| o.mesh_generation == 0), "stale owner generation");
+    let objects: Vec<helio_pass_gbuffer::StaticObjectComponent> = read(
+        &device,
+        &queue,
+        &out.get(BufferKey::of("static_objects")).unwrap().buffer,
+    );
+    assert!(
+        objects.iter().all(|o| o.mesh_generation == 0),
+        "stale owner generation"
+    );
 
     let mut scene = base_scene();
     let mut light = helio::GpuLight {
@@ -341,9 +486,15 @@ fn hiding_the_owner_a_stale_generation_or_a_disabled_light_removes_the_rows() {
     light._pad = 0;
     scene.put(KEYS.light_sources, &[light, light, light, light]);
     let out = run(&mut join, &device, &queue, &scene, 3);
-    let lights: Vec<helio::GpuLight> =
-        read(&device, &queue, &out.get(BufferKey::of("scene_lights")).unwrap().buffer);
-    assert!(lights.iter().all(|l| l.color_intensity[3] == 0.0), "disabled light");
+    let lights: Vec<helio::GpuLight> = read(
+        &device,
+        &queue,
+        &out.get(BufferKey::of("scene_lights")).unwrap().buffer,
+    );
+    assert!(
+        lights.iter().all(|l| l.color_intensity[3] == 0.0),
+        "disabled light"
+    );
 }
 
 #[test]
