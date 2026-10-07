@@ -13,8 +13,7 @@ use helio::MeshUpload;
 /// (indirectly, via `Subsystems`) plus this queue -- push a closure here
 /// instead of authoring immediately, and `engine_backend` applies every
 /// queued write during the pass's own short, pre-existing Phase 2 write
-/// lock (the same one `refresh_world_component_gpu_mirror_for_class` already
-/// runs under, for the identical reason).
+/// lock.
 ///
 /// Registered once per `sync_snapshot_components` call via `register_ref`,
 /// shared (by the caller) across the whole sync pass so every entity's

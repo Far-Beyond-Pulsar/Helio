@@ -34,10 +34,8 @@ impl super::LightComponentGpuMirror {
     /// transform combine" split `rebuild_static_mesh_frame` already uses
     /// for mesh geometry.
     ///
-    /// Called only for an ENABLED light -- `runtime.rs`'s hydrate checks
-    /// `general.enabled` itself and skips `sync_gpu_mirror` (so this mirror
-    /// is never even inserted) when it's `false`, the same "disabled means
-    /// absent, not zeroed" contract this type has always had.
+    /// Translates whatever row it is given; a disabled light's row carries
+    /// `general.enabled == 0`, and consumers skip it.
     pub fn to_helio_gpu_light(&self) -> GpuLight {
         GpuLight {
             position_range: [0.0, 0.0, 0.0, self.attenuation.range.0],
@@ -139,14 +137,9 @@ mod tests {
     use helio::LightType as HelioLightType;
     use pulsar_world_registry::GpuMirrored;
 
-    // NOTE: "a disabled light produces no GpuLight" is no longer this
-    // function's responsibility -- `to_helio_gpu_light` always translates
-    // whatever mirror it's given; "disabled means absent" now lives one
-    // level up, in `runtime.rs`'s hydrate (which skips `sync_gpu_mirror`
-    // entirely for a disabled light, so no `LightComponentGpuMirror` --
-    // and therefore no `to_helio_gpu_light` call -- ever happens). See
-    // `runtime.rs`'s `hydrate_omits_light_gpu_data_for_a_disabled_light`
-    // for that coverage.
+    // NOTE: "a disabled light produces no GpuLight" is not this function's
+    // responsibility -- `to_helio_gpu_light` translates whatever row it is
+    // given, and the row's `general.enabled` tells consumers to skip it.
 
     #[test]
     fn mirror_carries_color_and_intensity_with_a_zeroed_position_placeholder() {

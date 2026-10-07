@@ -8,7 +8,10 @@ use crate::components::ObjectMovability;
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("General", category_color = "#F4C542")]
 pub struct GeneralLightProps {
+    /// Uploaded as 0/1: a disabled light keeps its GPU row, marked absent,
+    /// so its presence is data rather than whether a row exists.
     #[property(category = "General")]
+    #[gpu(as = u32, with = enabled_to_gpu_u32)]
     pub enabled: bool,
     #[property(category = "General")]
     pub affects_world: bool,
@@ -45,6 +48,10 @@ impl Default for GeneralLightProps {
             lighting_channel_2: false,
         }
     }
+}
+
+fn enabled_to_gpu_u32(enabled: bool) -> u32 {
+    u32::from(enabled)
 }
 
 impl GeneralLightProps {
