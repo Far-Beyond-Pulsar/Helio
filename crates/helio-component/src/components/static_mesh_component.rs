@@ -20,7 +20,7 @@ pulsar_reflection::inventory::submit! {
     AssetComponentRegistration {
         asset_kind: plugin_editor_api::AssetKind::Mesh,
         class_name: "StaticMeshComponent",
-        data_field: "mesh_asset",
+        value_for: |path| Box::new(StaticMeshComponent::for_mesh_asset(path)),
     }
 }
 // Mat4/Quat/Vec3 used to build the transform passed to sync_mesh_object.
@@ -976,6 +976,19 @@ fn load_mesh_asset_into(component: &mut StaticMeshComponent) {
     apply_legacy_material_override(component);
     component.mesh_sections = upload.sections;
     component.material_slot_metadata = upload.material_slots;
+}
+
+impl StaticMeshComponent {
+    /// A component showing the mesh asset at the project-relative `path`,
+    /// its geometry loaded, as decoding `{"mesh_asset": path}` would give.
+    pub fn for_mesh_asset(path: &str) -> Self {
+        let mut component = Self {
+            mesh_asset: MeshAssetPath::new(path),
+            ..Default::default()
+        };
+        load_mesh_asset_into(&mut component);
+        component
+    }
 }
 
 /// `StaticMeshComponent`'s JSON boundary decoder (Pulsar-Native#561 Phase
