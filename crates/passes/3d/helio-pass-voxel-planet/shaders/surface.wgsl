@@ -51,15 +51,15 @@ fn srgb(c: vec3<f32>) -> vec3<f32> {
 }
 
 fn palette(m: u32) -> vec3<f32> {
-    return frame.materials[min(m, 15u)].colour.rgb;
+    return frame.materials[min(m, MATERIAL_SLOTS - 1u)].colour.rgb;
 }
 
 // Material on the sides of `m`'s surface cells below its lip (soil under
 // turf); `m` itself when it has none.
-fn material_lip(m: u32) -> u32 { return frame.materials[min(m, 15u)].links.x; }
-fn material_fleck(m: u32) -> u32 { return frame.materials[min(m, 15u)].links.y; }
-fn material_speck_host(m: u32) -> u32 { return frame.materials[min(m, 15u)].links.z; }
-fn material_fleck_share(m: u32) -> f32 { return f32(frame.materials[min(m, 15u)].links.w) / 65536.0; }
+fn material_lip(m: u32) -> u32 { return frame.materials[min(m, MATERIAL_SLOTS - 1u)].links.x; }
+fn material_fleck(m: u32) -> u32 { return frame.materials[min(m, MATERIAL_SLOTS - 1u)].links.y; }
+fn material_speck_host(m: u32) -> u32 { return frame.materials[min(m, MATERIAL_SLOTS - 1u)].links.z; }
+fn material_fleck_share(m: u32) -> f32 { return f32(frame.materials[min(m, MATERIAL_SLOTS - 1u)].links.w) / 65536.0; }
 
 // Whether a hit in layer `k` of column `c` (whose top there is `top`) lies on
 // the natural ground surface: any cell of a height-field column, and the top
@@ -107,12 +107,22 @@ fn filtered_rock_flecks(albedo: vec3<f32>, stone: vec3<f32>, pigment: f32, rock:
 // voxels at any distance its voxels can be seen from, and averages to its
 // patch colour beyond.
 fn material_albedo(m: u32, p: vec3<i32>, pixel: f32, voxel: f32) -> vec3<f32> {
-    let material = frame.materials[min(m, 15u)];
+    let material = frame.materials[min(m, MATERIAL_SLOTS - 1u)];
     if material.patches[0].w <= 0.0 { return material.colour.rgb; }
     let broad = f32(noise(p, 15u, 0x3c6ef372u)) / f32(NOISE_ONE);
     let patches = f32(noise(p, 11u, 0xa54ff53au)) / f32(NOISE_ONE) * clamp((12.8 - pixel) / 6.4, 0.0, 1.0);
+    // Clumps of 6.4 m and 1.6 m: texture that reads from tens to hundreds
+    // of metres, where single voxels have averaged out (the ground looked
+    // flat and blurred there). Each fades as it shrinks below a few pixels.
+    var clumps = 0.0;
+    if pixel < 3.2 {
+        clumps += 0.35 * f32(noise(p, 9u, 0x510e527fu)) / f32(NOISE_ONE) * clamp((3.2 - pixel) / 1.6, 0.0, 1.0);
+    }
+    if pixel < 0.8 {
+        clumps += 0.3 * f32(noise(p, 7u, 0x9b05688cu)) / f32(NOISE_ONE) * clamp((0.8 - pixel) / 0.4, 0.0, 1.0);
+    }
     let blade = f32(hash3(p.x, p.y, p.z, 0x1b873593u) & 255u) / 255.0 - 0.5;
-    let t = clamp(0.52 + frame.detail.x * (0.7 * broad + 0.16 * patches) + 0.5 * frame.detail.y * blade * voxel, 0.0, 1.0);
+    let t = clamp(0.52 + frame.detail.x * (0.7 * broad + 0.16 * patches + clumps) + 0.5 * frame.detail.y * blade * voxel, 0.0, 1.0);
     let dry = material.patches[0].rgb;
     let middle = material.patches[1].rgb;
     let lush = material.patches[2].rgb;
@@ -667,14 +677,22 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // sea-level grass when the radial level size exceeds its elevation.
     // Fine columns already have the canonical top at base-cell precision;
     // avoid rerunning the generator and ray-to-grid mapping for each pixel.
+    // The point is the base cell's 3D volume point, height included:
+    // sampling the column's 2D point gave every voxel of a cliff the same
+    // colour and material choice (vertical streaks down every steep face).
     var p: vec3<i32>;
     var climate_height = top * world.grid.y;
     if level == 0u {
-        p = domain_point(face, h.i, h.j, 0u);
+        p = volume_point(face, h.i, h.j, h.k, 0u);
     } else {
         let ray = make_ray(camera.position_near.xyz, d);
         let appearance_cell = locate(ray, face_ray(face, ray), h.t, 0u);
-        p = domain_point(face, appearance_cell.i, appearance_cell.j, 0u);
+        // A quarter layer into the solid: a top face's point lies on the
+        // boundary between two layers.
+        let code_now = (h.info >> 10u) & 7u;
+        let nudge = select(0.0, select(-0.25, 0.25, code_now == 5u), code_now >= 4u && code_now < 6u);
+        let k = frame.layer_i.x + i32(floor(layer_coord(ray, h.t) + nudge));
+        p = volume_point(face, appearance_cell.i, appearance_cell.j, k, 0u);
         climate_height = climate_height_cache[index];
     }
     let actual_normal = hit_normal(h, d);

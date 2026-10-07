@@ -1091,12 +1091,7 @@ fn rules_material(c: &LandformConstants, p: IVec3, surface: u32, top_height: i32
 
 /// Lunar materials: ids into [`lunar_appearance`].
 pub mod lunar {
-    pub const REGOLITH: u32 = 1;
-    pub const MARE: u32 = 2;
-    pub const EJECTA: u32 = 3;
-    pub const ROCK: u32 = 4;
-    pub const BASALT: u32 = 5;
-    pub const ANORTHOSITE: u32 = 6;
+    pub use crate::terrain::material::{ANORTHOSITE, BASALT, BOULDER as ROCK, EJECTA, MARE, REGOLITH};
 }
 
 /// Regolith over bedrock, dark basin plains, bright young ejecta thinning
@@ -1121,26 +1116,10 @@ fn lunar_material(c: &LandformConstants, p: IVec3, surface: u32, depth: i32, slo
     if mare { BASALT } else { ANORTHOSITE }
 }
 
-/// The lunar material table: greys of regolith, mare, fresh ejecta,
-/// boulders, basalt and anorthosite (sRGB).
+/// The lunar look: the shared material table (lunar ground has its own
+/// ids there) with steps lit as crisp voxels (no atmosphere softens them).
 pub fn lunar_appearance() -> TerrainAppearance {
-    use lunar::*;
-    let mut table = TerrainAppearance::default();
-    let colour = |rgb: [u8; 3], roughness: f32| MaterialAppearance {
-        colour: [f32::from(rgb[0]) / 255.0, f32::from(rgb[1]) / 255.0, f32::from(rgb[2]) / 255.0, roughness],
-        ..Default::default()
-    };
-    table.materials = [MaterialAppearance::default(); MATERIALS];
-    table.materials[REGOLITH as usize] = colour([142, 140, 135], 0.95);
-    table.materials[MARE as usize] = colour([84, 84, 86], 0.95);
-    table.materials[EJECTA as usize] = colour([196, 194, 188], 0.93);
-    table.materials[ROCK as usize] = colour([112, 110, 106], 0.85);
-    table.materials[BASALT as usize] = colour([58, 59, 63], 0.8);
-    table.materials[ANORTHOSITE as usize] = colour([168, 166, 158], 0.85);
-    // Fresh ejecta and boulders thin out into the surrounding regolith.
-    table.materials[EJECTA as usize].speck_host = Some(REGOLITH as u8);
-    table.detail = [0.0, 0.12, 0.08, 0.0];
-    table
+    TerrainAppearance { detail: [0.2, 0.12, 0.08, 0.0], ..TerrainAppearance::default() }
 }
 
 /// A compiled terrain stack on one grid.

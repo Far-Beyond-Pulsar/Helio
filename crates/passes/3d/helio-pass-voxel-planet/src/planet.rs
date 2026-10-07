@@ -299,13 +299,16 @@ impl Planet {
             _ => {
                 let slope = self.material_slope(cell.face, cell.i, cell.j);
                 let p = self.grid.domain_point(cell.face, cell.i, cell.j, 0);
+                // Materials vary in 3D (`shade` samples the cell's volume
+                // point): a cliff's voxels are not one column's colour.
+                let q = self.grid.volume_point(cell.face, cell.i, cell.j, cell.k, 0);
                 let top_height = self.column_height(cell.face, cell.i, cell.j, 0);
                 // Depth counts from the generated top: overhangs and the
                 // rock around caves lie below it.
                 let generated = terrain::generated_top(&self.grid, &*self.field, cell.face, cell.i, cell.j, 0, top_height);
                 let depth = (generated - 1 - cell.k).max(0);
                 let surface = self.field.surface(p, self.grid.level_offset(), top_height) & 0xff;
-                self.field.ground_material(p, surface, top_height, depth, slope, cell.k) & material::ID
+                self.field.ground_material(q, surface, top_height, depth, slope, cell.k) & material::ID
             }
         }
     }

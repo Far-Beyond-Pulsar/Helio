@@ -134,6 +134,15 @@ fn planet_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         assert!(stats.resident_columns > 1000, "{stats:?}");
         assert_eq!(stats.pending_columns, 0);
         eprintln!("VOXEL_GRAPH_SETTLED frames={frames} resident={}", stats.resident_columns);
+        // A still view stays settled: hosts render until it is (the editor
+        // viewport goes idle only after its settling frames pass with no
+        // request). Periodic counter readbacks used to request frames
+        // forever.
+        for still in 0..120 {
+            renderer.render(&camera, &view).unwrap();
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            assert!(!renderer.find_pass::<PlanetPass>().unwrap().needs_frame(), "a settled still view asked for frame {still}");
+        }
 
         // Removing the source drops the planet renderer.
         *source.lock().unwrap() = None;

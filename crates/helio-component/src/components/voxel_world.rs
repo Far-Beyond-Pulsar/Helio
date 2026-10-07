@@ -26,6 +26,14 @@ use helio_pass_voxel_planet::{
 };
 /// Terrain material ids (`material::GRASS`, ...) and their names.
 pub use helio_pass_voxel_planet::terrain::material;
+
+/// Base colour (linear 0..1 sRGB-encoded components, as authored) of material
+/// `id` in the built-in appearance, for editor palettes.
+pub fn material_colour(id: u32) -> [f32; 3] {
+    let table = helio_pass_voxel_planet::terrain::TerrainAppearance::default();
+    let colour = table.materials.get(id as usize).map_or([0.5; 4], |m| m.colour);
+    [colour[0], colour[1], colour[2]]
+}
 use helio_voxel_data::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditJournal};
 use pulsar_scene_model::components::Transform;
 use pulsar_scenedb::{Entity, World};

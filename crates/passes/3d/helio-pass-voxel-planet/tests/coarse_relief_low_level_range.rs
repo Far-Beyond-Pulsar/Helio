@@ -44,7 +44,9 @@ fn l1_to_l5_fractional_top_hits_respect_requested_trace_range() {
         }}
     "#
             ));
-            let mut frame = vec![0u8; 2144];
+            // FrameGpu: 864 bytes of view state, the material table (80
+            // bytes a slot) and the detail vector.
+            let mut frame = vec![0u8; 864 + 80 * helio_pass_voxel_planet::terrain::MATERIALS + 16];
             fn ints(bytes: &mut [u8], offset: usize, values: &[i32]) {
                 for (i, v) in values.iter().enumerate() {
                     bytes[offset + i * 4..offset + i * 4 + 4].copy_from_slice(&v.to_le_bytes());

@@ -872,19 +872,18 @@ fn rules_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slope
     return u32(terrain.materials.y);
 }
 
-// Lunar materials (`lunar_material`): 1 regolith, 2 mare, 3 ejecta, 4 rock,
-// 5 basalt, 6 anorthosite.
+// Lunar materials (`lunar_material`).
 fn lunar_material(p: vec3<i32>, surface: u32, depth: i32, slope: i32, layer: i32) -> u32 {
     let ejecta = (surface & 0x7fu) << 1u;
     let mare = (surface & 0x80u) != 0u;
     let h = hash3(p.x, p.y, p.z ^ (layer * 0x9e37), 0x2545F491u);
     if depth == 0 {
-        if slope >= 12 || (slope >= 6 && (h & 3u) == 0u) { return 4u; }
-        if ejecta > (h & 0xffu) { return 3u; }
-        return select(1u, 2u, mare);
+        if slope >= 12 || (slope >= 6 && (h & 3u) == 0u) { return M_BOULDER; }
+        if ejecta > (h & 0xffu) { return M_EJECTA; }
+        return select(M_REGOLITH, M_MARE, mare);
     }
-    if depth < terrain.header.z { return select(1u, 2u, mare); }
-    return select(6u, 5u, mare);
+    if depth < terrain.header.z { return select(M_REGOLITH, M_MARE, mare); }
+    return select(M_ANORTHOSITE, M_BASALT, mare);
 }
 
 // Earthlike materials (`earthlike_material`).

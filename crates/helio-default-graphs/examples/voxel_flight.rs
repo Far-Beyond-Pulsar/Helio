@@ -2133,7 +2133,10 @@ fn capture_views(flight: &mut Flight, views: &str, ground: DVec3, heading: f64) 
         let name = format!("view_{height}_{}", -pitch);
         eprintln!("VIEWS {name}: eye {:.1} m from the centre, ground {:.1} m above the datum", eye.length(), eye.length() - height - flight.planet.grid().radius());
         flight.settle(&name, eye, forward);
-        for _ in 0..8 {
+        // HELIO_VOXEL_FLIGHT_VIEWS_HOLD=<frames>: a still camera that long
+        // (an editor keeps rendering ~90 frames after the camera stops).
+        let hold = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS_HOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+        for _ in 0..hold {
             flight.draw(&name, eye, forward);
         }
         flight.capture(&name);

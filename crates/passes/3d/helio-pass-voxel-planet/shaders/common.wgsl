@@ -39,7 +39,7 @@ struct Frame {
     extra: vec4<u32>,      // table patches, block region, block patches, live tier-1 blocks
     ring: array<vec4<f32>, 8>, // per level: sky bound block exclusion angle
     hints: vec4<u32>,
-    materials: array<MaterialGpu, 16>,
+    materials: array<MaterialGpu, 32>,
     detail: vec4<f32>,      // patch contrast, pigment contrast, edge darkening
 }
 

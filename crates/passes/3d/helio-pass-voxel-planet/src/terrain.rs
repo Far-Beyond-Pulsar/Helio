@@ -103,7 +103,17 @@ pub mod material {
     pub const BRICK: u32 = 13;
     pub const PLANKS: u32 = 14;
     pub const COBBLE: u32 = 15;
-    pub const COUNT: u32 = 16;
+    /// Lunar ground: fine regolith, dark mare plains, bright fresh ejecta,
+    /// boulders, and the basalt and anorthosite bedrock under them.
+    pub const REGOLITH: u32 = 16;
+    pub const MARE: u32 = 17;
+    pub const EJECTA: u32 = 18;
+    pub const BOULDER: u32 = 19;
+    pub const BASALT: u32 = 20;
+    pub const ANORTHOSITE: u32 = 21;
+    /// Ids in use, air included (every terrain program shares them, so a
+    /// painted material means the same on any world).
+    pub const COUNT: u32 = 22;
     /// Flag on a ground material: a single-voxel fleck of a surface (mud
     /// in a meadow) that blends into grass once its cell is about a pixel
     /// wide instead of tinting the distant ground.
@@ -112,9 +122,9 @@ pub mod material {
     pub const ID: u32 = 0xff;
 
     /// Names of the solid materials, in id order after air.
-    pub const NAMES: [&str; 15] = [
+    pub const NAMES: [&str; COUNT as usize - 1] = [
         "Grass", "Dirt", "Stone", "Sand", "Snow", "Water", "Gravel", "Sandstone", "DarkStone", "Wood", "Leaves", "Clay",
-        "Brick", "Planks", "Cobble",
+        "Brick", "Planks", "Cobble", "Regolith", "Mare", "Ejecta", "Boulder", "Basalt", "Anorthosite",
     ];
 
     /// The material id of a name in [`NAMES`] (ignoring case and `_`).
@@ -227,8 +237,9 @@ impl Default for MaterialAppearance {
     }
 }
 
-/// Number of terrain materials a world can define.
-pub const MATERIALS: usize = 16;
+/// Material slots of a world's appearance table (ids 0..MATERIALS; the
+/// built-in ones are [`material::NAMES`]).
+pub const MATERIALS: usize = 32;
 
 /// Art controls, independent of occupancy, terrain recipes and edit journals.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -245,17 +256,26 @@ impl Default for TerrainAppearance {
     /// The built-in generators' materials (`terrain::material`).
     fn default() -> Self {
         use crate::terrain::material::*;
-        let colours: [[u8; 3]; MATERIALS] = [
+        // Air and unused slots are magenta (a missing material shows).
+        let colours: [[u8; 3]; COUNT as usize] = [
             [200, 0, 200], [106, 126, 68], [128, 96, 66], [133, 139, 142],
             [203, 188, 151], [217, 228, 236], [28, 72, 92], [116, 111, 102],
             [185, 142, 104], [82, 88, 95], [101, 75, 53], [59, 102, 52],
             [155, 113, 89], [148, 77, 63], [158, 119, 79], [121, 126, 130],
+            [142, 140, 135], [84, 84, 86], [196, 194, 188], [112, 110, 106],
+            [58, 59, 63], [168, 166, 158],
         ];
-        let roughness = [0.9, 0.94, 0.96, 0.84, 0.93, 0.78, 0.35, 0.9, 0.88, 0.82, 0.97, 0.94, 0.92, 0.86, 0.86, 0.85];
+        let roughness = [
+            0.9, 0.94, 0.96, 0.84, 0.93, 0.78, 0.35, 0.9, 0.88, 0.82, 0.97, 0.94, 0.92, 0.86, 0.86, 0.85,
+            0.95, 0.95, 0.93, 0.85, 0.8, 0.85,
+        ];
         let unit = |c: [u8; 3]| c.map(|v| f32::from(v) / 255.0);
-        let mut materials: [MaterialAppearance; MATERIALS] = std::array::from_fn(|i| {
-            let [r, g, b] = unit(colours[i]);
-            MaterialAppearance { colour: [r, g, b, roughness[i]], ..Default::default() }
+        let mut materials: [MaterialAppearance; MATERIALS] = std::array::from_fn(|i| match colours.get(i) {
+            Some(&c) => {
+                let [r, g, b] = unit(c);
+                MaterialAppearance { colour: [r, g, b, roughness[i]], ..Default::default() }
+            }
+            None => MaterialAppearance::default(),
         });
         let turf = &mut materials[GRASS as usize];
         turf.patches = Some([unit([160, 150, 96]), unit([106, 126, 68]), unit([62, 98, 56])]);
@@ -271,6 +291,12 @@ impl Default for TerrainAppearance {
         // Dark stone alternates with stone in 4.5 m strata on cliffs: a shade
         // darker, not a band of another colour (zebra stripes on outcrops).
         materials[DARK_STONE as usize].patches = Some([unit([140, 138, 131]), unit([110, 115, 119]), unit([82, 87, 94])]);
+        // Lunar ground varies in maturity (fresh is brighter); fresh ejecta
+        // and boulders thin out into the regolith around them.
+        materials[REGOLITH as usize].patches = Some([unit([158, 156, 150]), unit([142, 140, 135]), unit([118, 117, 113])]);
+        materials[MARE as usize].patches = Some([unit([98, 98, 99]), unit([84, 84, 86]), unit([68, 68, 71])]);
+        materials[BOULDER as usize].patches = Some([unit([130, 128, 123]), unit([112, 110, 106]), unit([90, 89, 86])]);
+        materials[EJECTA as usize].speck_host = Some(REGOLITH as u8);
         Self { materials, detail: [0.3, 0.3, 0.08, 0.7] }
     }
 }

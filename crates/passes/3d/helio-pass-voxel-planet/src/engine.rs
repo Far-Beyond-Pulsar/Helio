@@ -1116,9 +1116,16 @@ impl PlanetRenderer {
     pub fn frame_number(&self) -> u64 {
         self.last_frame_num
     }
-    /// Residency has issued and completed every window column.
+    /// Residency has issued and completed every window column. A readback
+    /// of the allocator counters alone (sampled every 30 frames) carries no
+    /// job outcome: counting it kept hosts that render until settled (the
+    /// editor viewport) rendering forever, each sample restarting their
+    /// settling.
     pub fn settled(&self) -> bool {
-        self.plan.idle && !self.residency.in_flight() && self.failed.is_empty() && self.readbacks.iter().all(|r| r.stage == 0)
+        self.plan.idle
+            && !self.residency.in_flight()
+            && self.failed.is_empty()
+            && self.readbacks.iter().all(|r| r.stage == 0 || (r.stage != 3 && r.entries == 0))
     }
 
     fn frame_uniform(&self, eye: DVec3, size: [u32; 2], lod0: f64, jobs: u32, evictions: u32, sun: Vec3, shadows: bool) -> FrameGpu {
