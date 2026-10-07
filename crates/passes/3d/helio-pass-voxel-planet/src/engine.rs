@@ -336,7 +336,7 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -
     if !program.wgsl.contains("fn terrain_density") {
         // Heightfield programs: no volumetric terms (`TerrainField::extent`, `density`).
         s.push_str("fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
-        s.push_str("fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, k: i32) -> i32 { return heightfield_density(top, k); }\n");
+        s.push_str("fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, k: i32) -> i32 { return heightfield_density(top, k); }\n");
     }
     // Generation updates the summaries atomically; traversal reads plain values.
     // Traversal reads a summary block entry as one vector load.
@@ -402,34 +402,12 @@ struct Pipelines {
     horizon_blocks: wgpu::ComputePipeline,
     horizon_suffix: wgpu::ComputePipeline,
     shade: wgpu::ComputePipeline,
-    shade_relief: OnceLock<wgpu::ComputePipeline>,
-    shade_module: wgpu::ShaderModule,
-    shade_layout: wgpu::PipelineLayout,
     climate: wgpu::ComputePipeline,
     sunlight: wgpu::ComputePipeline,
     gbuffer: wgpu::RenderPipeline,
 }
 
 impl Pipelines {
-    fn shade_for(&self, device: &wgpu::Device, relief: bool) -> &wgpu::ComputePipeline {
-        if !relief {
-            return &self.shade;
-        }
-        self.shade_relief.get_or_init(|| {
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("planet shade relief"),
-                layout: Some(&self.shade_layout),
-                module: &self.shade_module,
-                entry_point: Some("shade"),
-                compilation_options: wgpu::PipelineCompilationOptions {
-                    constants: &[("FAR_RELIEF", 1.0)],
-                    ..Default::default()
-                },
-                cache: None,
-            })
-        })
-    }
-
     /// Whether these pipelines serve a world of this shape and program.
     fn serve(&self, plane: bool, program: &TerrainProgram) -> bool {
         self.plane == plane && self.program == program.key
@@ -608,39 +586,48 @@ impl Pipelines {
             multiview_mask: None,
             cache: None,
         });
-        Self {
-            plane,
-            program: program.key.to_string(),
-            patch: compute(&gen_pl, &gen_module, "patch_table"),
-            patch_blocks: compute(&gen_pl, &gen_module, "patch_blocks"),
-            evict: compute(&gen_pl, &gen_module, "evict"),
-            generate: compute(&gen_pl, &gen_module, "generate"),
-            count: compute(&gen_pl, &gen_module, "count"),
-            refill: compute(&gen_pl, &gen_module, "refill"),
-            allocate: compute(&gen_pl, &gen_module, "allocate"),
-            fixup: compute(&gen_pl, &gen_module, "fixup"),
-            publish: compute(&gen_pl, &gen_module, "publish"),
-            level_suffix: compute(&gen_pl, &gen_module, "level_suffix"),
-            reclaim: compute(&recycle_pl, &recycle_module, "reclaim"),
-            compact: compute(&recycle_pl, &recycle_module, "compact"),
-            finish_recycle: compute(&recycle_pl, &recycle_module, "finish"),
-            recycle_layout,
-            primary: compute(&trace_pl, &trace_module, "primary"),
-            horizon_clear: compute(&trace_pl, &trace_module, "horizon_clear"),
-            horizon_blocks: compute(&trace_pl, &trace_module, "horizon_blocks"),
-            horizon_suffix: compute(&trace_pl, &trace_module, "horizon_suffix"),
-            shade: compute(&trace_pl, &trace_module, "shade"),
-            climate: compute(&trace_pl, &trace_module, "climate"),
-            sunlight: compute(&trace_pl, &trace_module, "sunlight"),
-            shade_relief: OnceLock::new(),
-            shade_module: trace_module,
-            shade_layout: trace_pl,
-            gbuffer,
-            gen_layout,
-            trace_layout,
-            render_layout,
-            camera_layout,
-        }
+        // The large programs (the terrain generator, shading with the
+        // material rules, the two tracers) compile on their own threads:
+        // drivers compile pipelines in parallel, and these took ~12 s in a
+        // row cold (90 s on a loaded editor start).
+        std::thread::scope(|scope| {
+            let generate = scope.spawn(|| compute(&gen_pl, &gen_module, "generate"));
+            let shade = scope.spawn(|| compute(&trace_pl, &trace_module, "shade"));
+            let sunlight = scope.spawn(|| compute(&trace_pl, &trace_module, "sunlight"));
+            let primary = scope.spawn(|| compute(&trace_pl, &trace_module, "primary"));
+            let climate = scope.spawn(|| compute(&trace_pl, &trace_module, "climate"));
+            let join = |h: std::thread::ScopedJoinHandle<'_, wgpu::ComputePipeline>| h.join().expect("pipeline compile thread");
+            Self {
+                plane,
+                program: program.key.to_string(),
+                patch: compute(&gen_pl, &gen_module, "patch_table"),
+                patch_blocks: compute(&gen_pl, &gen_module, "patch_blocks"),
+                evict: compute(&gen_pl, &gen_module, "evict"),
+                count: compute(&gen_pl, &gen_module, "count"),
+                refill: compute(&gen_pl, &gen_module, "refill"),
+                allocate: compute(&gen_pl, &gen_module, "allocate"),
+                fixup: compute(&gen_pl, &gen_module, "fixup"),
+                publish: compute(&gen_pl, &gen_module, "publish"),
+                level_suffix: compute(&gen_pl, &gen_module, "level_suffix"),
+                reclaim: compute(&recycle_pl, &recycle_module, "reclaim"),
+                compact: compute(&recycle_pl, &recycle_module, "compact"),
+                finish_recycle: compute(&recycle_pl, &recycle_module, "finish"),
+                recycle_layout,
+                horizon_clear: compute(&trace_pl, &trace_module, "horizon_clear"),
+                horizon_blocks: compute(&trace_pl, &trace_module, "horizon_blocks"),
+                horizon_suffix: compute(&trace_pl, &trace_module, "horizon_suffix"),
+                generate: join(generate),
+                shade: join(shade),
+                sunlight: join(sunlight),
+                primary: join(primary),
+                climate: join(climate),
+                gbuffer,
+                gen_layout,
+                trace_layout,
+                render_layout,
+                camera_layout,
+            }
+        })
     }
 }
 
@@ -931,6 +918,19 @@ impl PlanetRenderer {
             .filter(|p| p.serve(plane, &program))
             .cloned()
             .unwrap_or_else(|| Arc::new(Pipelines::new(device, plane, &program)));
+        Self::with_pipelines(pipelines, device, queue, planet, settings, size)
+    }
+
+    /// A renderer for `planet` drawn with already compiled `pipelines`
+    /// (which must serve its shape and terrain program).
+    fn with_pipelines(
+        pipelines: Arc<Pipelines>,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        planet: Arc<Planet>,
+        settings: Settings,
+        size: [u32; 2],
+    ) -> Self {
         let buffers = Buffers::new(device, &settings.capacity, &planet);
         let gen_group = Self::gen_group(device, &pipelines, &buffers);
         let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1847,7 +1847,7 @@ impl PlanetRenderer {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_bind_group(0, &trace_group, &[]);
             pass.set_bind_group(1, camera_group, &[]);
-            Self::dispatch(&mut pass, self.pipelines.shade_for(&self.device, self.settings.far_relief), groups);
+            Self::dispatch(&mut pass, &self.pipelines.shade, groups);
         }
         if let Some(p) = &mut self.profiler {
             p.end_pass(encoder, "planet_shade");
@@ -1981,7 +1981,40 @@ pub struct PlanetPass {
     source: SharedPlanetFrame,
     settings: Settings,
     active: Option<PlanetRenderer>,
+    /// The frame `active` draws: the source's while it serves the same
+    /// recipe, else the last one it did (the previous terrain stays on
+    /// screen while the new one's pipelines compile).
+    shown: Option<PlanetFrame>,
+    /// Pipelines compiling on a worker thread for a shape and program.
+    compiling: Option<CompilingPipelines>,
+    /// The last compiled pipelines, kept while no world is shown, so a
+    /// world of the same program comes back without compiling.
+    compiled: Option<Arc<Pipelines>>,
     profiling: bool,
+}
+
+/// Pipelines for a world shape and terrain program, compiled on a worker
+/// thread: cold, they take seconds, which used to freeze the host at start
+/// and on every terrain change.
+struct CompilingPipelines {
+    plane: bool,
+    program: String,
+    done: Arc<OnceLock<Arc<Pipelines>>>,
+}
+
+impl CompilingPipelines {
+    fn start(device: &wgpu::Device, plane: bool, program: crate::TerrainProgram) -> Self {
+        let done = Arc::new(OnceLock::new());
+        let (device, cell) = (device.clone(), done.clone());
+        let key = program.key.to_string();
+        std::thread::Builder::new()
+            .name("voxel pipelines".into())
+            .spawn(move || {
+                let _ = cell.set(Arc::new(Pipelines::new(&device, plane, &program)));
+            })
+            .expect("spawn the voxel pipeline compiler");
+        Self { plane, program: key, done }
+    }
 }
 
 impl PlanetPass {
@@ -1993,6 +2026,9 @@ impl PlanetPass {
             source,
             settings,
             active: None,
+            shown: None,
+            compiling: None,
+            compiled: None,
             profiling: false,
         }
     }
@@ -2027,7 +2063,7 @@ impl PlanetPass {
     /// A host viewport should keep rendering until residency settles.
     pub fn needs_frame(&self) -> bool {
         let has_source = self.source.try_lock().map_or(true, |s| s.is_some());
-        has_source && self.active.as_ref().is_some_and(|r| !r.settled())
+        has_source && (self.compiling.is_some() || self.active.as_ref().is_some_and(|r| !r.settled()))
     }
 }
 
@@ -2053,6 +2089,9 @@ impl RenderPass for PlanetPass {
             return false;
         }
         self.active = previous.active.take();
+        self.shown = previous.shown.take();
+        self.compiling = previous.compiling.take();
+        self.compiled = previous.compiled.take();
         // A graph rebuild must not revert the host's art settings.
         self.settings.appearance = previous.settings.appearance;
         self.active.is_some()
@@ -2082,35 +2121,61 @@ impl RenderPass for PlanetPass {
             .lock()
             .map_err(|_| helio_core::Error::InvalidPassConfig("planet frame source poisoned".into()))?
             .clone();
-        match frame {
-            None => self.active = None,
-            Some(frame) => {
-                let same = self.active.as_ref().is_some_and(|r| {
-                    Arc::ptr_eq(r.planet(), &frame.planet)
-                        || (r.planet().recipe() == frame.planet.recipe())
-                });
-                if !same {
-                    let mut renderer = PlanetRenderer::replacing(
-                        self.active.as_ref(),
-                        ctx.device,
-                        ctx.queue,
-                        frame.planet.clone(),
-                        self.settings,
-                        [ctx.width, ctx.height],
-                    );
-                    renderer.set_profiling(self.profiling);
-                    self.active = Some(renderer);
-                } else if let Some(r) = &mut self.active {
-                    // Same recipe: adopt the newer edit state without rebuilding.
-                    r.planet = frame.planet.clone();
-                }
+        let Some(frame) = frame else {
+            self.active = None;
+            self.shown = None;
+            self.compiling = None;
+            return Ok(());
+        };
+        let same = self.active.as_ref().is_some_and(|r| {
+            Arc::ptr_eq(r.planet(), &frame.planet) || r.planet().recipe() == frame.planet.recipe()
+        });
+        if same {
+            // Same recipe: adopt the newer edit state without rebuilding.
+            if let Some(r) = &mut self.active {
+                r.planet = frame.planet.clone();
+            }
+            self.compiling = None;
+            self.shown = Some(frame);
+            return Ok(());
+        }
+        let plane = frame.planet.grid().is_plane();
+        let program = frame.planet.field().program();
+        let ready = match (&self.compiled, &self.compiling) {
+            (Some(p), _) if p.serve(plane, &program) => Some(p.clone()),
+            (_, Some(c)) if c.plane == plane && c.program == program.key => c.done.get().cloned(),
+            _ => {
+                self.compiling = Some(CompilingPipelines::start(ctx.device, plane, program));
+                None
+            }
+        };
+        match ready {
+            Some(pipelines) => {
+                let mut renderer = PlanetRenderer::with_pipelines(
+                    pipelines.clone(),
+                    ctx.device,
+                    ctx.queue,
+                    frame.planet.clone(),
+                    self.settings,
+                    [ctx.width, ctx.height],
+                );
+                renderer.set_profiling(self.profiling);
+                self.active = Some(renderer);
+                self.compiling = None;
+                self.compiled = Some(pipelines);
+                self.shown = Some(frame);
+            }
+            // Until then the previous terrain (if any) stays, seen from
+            // the new frame's eye.
+            None => {
+                self.shown = self.active.as_ref().map(|r| PlanetFrame { planet: r.planet().clone(), ..frame });
             }
         }
         Ok(())
     }
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let Some(renderer) = &mut self.active else { return Ok(()) };
-        let Some(frame) = self.source.lock().ok().and_then(|f| f.clone()) else { return Ok(()) };
+        let Some(frame) = self.shown.clone() else { return Ok(()) };
         let missing = |name: &str| helio_core::Error::ResourceNotFound(name.into());
         let g = ctx
             .registry
@@ -2275,7 +2340,7 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
     let extent = terrain_extent(p, level);
     let k = top - extent.x - 1 + rem_floor(e.w, max(extent.x + extent.y + 2, 1));
     let q = volume_point(u32(a.x), a.y, a.z, k, level);
-    let density = terrain_density(p, q, level, top, k);
+    let density = terrain_density(p, q, level, top, height, k);
     let surface = terrain_surface(p, level + u32(world.grid.w), height) & 0xffu;
     verify_out[id.x] = vec4<i32>(height, i32(ground_material(p, surface, e.x, e.y, e.z, e.w)),
         density, (q.x ^ q.y ^ q.z) + i32(surface) * 7919 + extent.x * 65599 + extent.y * 257);
@@ -2346,7 +2411,7 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
         let (below, above) = field.extent(p, level);
         let k = top - below - 1 + e.w.rem_euclid((below + above + 2).max(1));
         let q = grid.volume_point(a.x as u8, a.y, a.z, k, level);
-        let density = field.density(p, q, level, top, k);
+        let density = field.density(p, q, level, top, height, k);
         let surface = field.surface(p, level + grid.level_offset(), height) & 0xff;
         let cpu = [
             height,

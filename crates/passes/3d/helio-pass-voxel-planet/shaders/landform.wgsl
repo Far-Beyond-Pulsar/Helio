@@ -98,15 +98,16 @@ fn landform_noise_mm(excess: i32, shift: i32) -> i32 {
 }
 
 // Signed distance of a cell to the surface, CSG of the surface, overhangs
-// and caves (`LandformVolume::density`).
-fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, k: i32) -> i32 {
+// and caves (`LandformVolume::density`); `height` is the column's field
+// height (mm), the surface the volume folds.
+fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, k: i32) -> i32 {
     let v = terrain.volume;
     let a = landform_overhang_amplitude(p, level);
     let caves = landform_caves_at(level);
     if a == 0 && !caves.x && !caves.y { return heightfield_density(top, k); }
     let layer = v[3].w;
     let cell = layer << level;
-    let d = (k - top) * cell + cell / 2;
+    let d = k * cell + cell / 2 - height;
     var solid = k < top;
     var f = -d;
     if a > 0 {
@@ -116,7 +117,7 @@ fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, k: i32) -> 
     }
     if caves.x || caves.y {
         let region = noise(p, u32(v[0].y), landform_seed() ^ SEED_CAVE_REGION);
-        let depth = (top - k) * cell - cell / 2;
+        let depth = -d;
         let outside = max(max(landform_noise_mm(v[0].z - region, v[0].y), d), depth - v[0].w);
         var walls = 0x7fffffff;
         var carved = false;
@@ -971,10 +972,9 @@ fn earthlike_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, s
         let band_weight = max(smoothstep(1.125, 2.25, material_radial_span), 1.0 - outcrop_support);
         // Snow/rock coverage already includes its conditioned stone bands;
         // the shader consumes that vector instead of this separate metadata.
-        if material_weathered_skin && depth < dirt && material_mix.x < 0.0 {
-            let exposure = f32(NOISE_ONE - 2 * alpine - select(0, NOISE_ONE / 2, slope >= 5)) + 0.5;
-            let cutoff = select(-65536.0, (exposure - resolved_outcrop) / max(outcrop_deviation, 0.0001), !steep);
-            material_coverage = weathered_stone_coverage(resolved_outcrop, outcrop_deviation, cutoff);
+        // Natural rock surfaces take their colour variation from the stone's
+        // patches (shade); band coverage filters cuts and buried strata.
+        if material_weathered_skin && depth < dirt {
         } else if material_footprint > 0.0 && band_weight > 0.0 && material_mix.x < 0.0 {
             // Exposure conditions the phase distribution on non-steep patches.
             let exposure = f32(NOISE_ONE - 2 * alpine - select(0, NOISE_ONE / 2, slope >= 5)) + 0.5;

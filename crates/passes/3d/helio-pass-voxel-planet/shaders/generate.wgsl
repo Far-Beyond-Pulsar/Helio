@@ -83,6 +83,26 @@ var<workgroup> g_edit_count: u32;
 const VOLUME_TERRAIN: u32 = 1u;
 const VOLUME_MATERIALS: u32 = 2u;
 
+const NO_DENSITY: i32 = -2147483647 - 1;
+
+// Relief of a generated surface (caves, overhangs): the zero crossing of
+// the signed distances between the centres of the highest solid cell
+// (density `solid`) and the air cell above it (`air`), in cells above the
+// solid cell's centre. Unchanged lanes keep the heightfield's convention (the
+// partial top cell is solid, cut at the exact height); changed lanes follow
+// it too, or their neighbouring tops differed by up to half a cell: ledges
+// all over overhang regions at levels with relief, gone at level 0.
+fn volume_crossing(solid: i32, air: i32) -> f32 {
+    return f32(solid) / f32(solid - air);
+}
+
+// Q16 fraction of a cell whose surface lies `h` cells above its bottom (0:
+// the whole cell).
+fn cell_fraction(h: f32) -> u32 {
+    if h >= 1.0 { return 0u; }
+    return clamp(u32(h * 65536.0), 1u, 65535u);
+}
+
 @compute @workgroup_size(64)
 fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let index = job_index(wg);
@@ -263,6 +283,13 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     // Caves or overhangs change this lane's top cell or the air above it:
     // its surface is no longer the relief surface.
     var surface_changed = false;
+    // Densities at the generated surface (the highest solid cell inside the
+    // volume and the air cell above it): the relief of a changed surface.
+    var top_solid = NO_DENSITY;
+    var top_air = NO_DENSITY;
+    var top_fraction = 0u;
+    // Lanes the overhangs fold (their volume reaches above the surface).
+    let overhang_lane = extent.y > 0;
     let edit_count = workgroupUniformLoad(&g_edit_count);
     let ch = vec2<i32>(center_half(i, level), center_half(j, level));
     // The column's footprint in half cells, for culling brushes per brick.
@@ -273,16 +300,37 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         var kinds: array<u32, 8>;
         for (var z = 0u; z < 8u; z++) {
             let k = (k_lo + i32(b)) * 8 + i32(z);
-            var kind = terrain_kind(top, k);
+            var kind = terrain_kind(select(top, field_top, overhang_lane), k);
             if k >= field_top - extent.x && k < field_top + extent.y {
-                // A cell the volume leaves as the heightfield has it keeps the
+                // Overhangs fold the exact surface: their lanes take every
+                // cell, and their relief, from the density. Elsewhere (caves)
+                // a cell the volume leaves as the heightfield has it keeps the
                 // heightfield's kind (with relief, its ceil top cell).
-                let dense = select(0u, 1u, terrain_density(column_point, volume_point(face, i, j, k, level), level, field_top, k) > 0);
+                let density = terrain_density(column_point, volume_point(face, i, j, k, level), level, field_top, height, k);
+                let dense = select(0u, 1u, density > 0);
                 if dense != terrain_kind(field_top, k) {
                     kind = dense;
                     if k >= top - 1 { surface_changed = true; }
+                } else if overhang_lane {
+                    kind = dense;
                 }
-                if kind != 0u { generated_top = max(generated_top, k + 1); }
+                if kind != 0u {
+                    generated_top = max(generated_top, k + 1);
+                    top_solid = density;
+                    top_air = NO_DENSITY;
+                    top_fraction = 0u;
+                } else if top_solid != NO_DENSITY && top_air == NO_DENSITY {
+                    top_air = density;
+                    let t = select(0.5, volume_crossing(top_solid, density), top_solid > 0);
+                    if requested_relief && t > 0.5 {
+                        // The surface rises into this cell: solid, cut there.
+                        kind = 1u;
+                        generated_top = max(generated_top, k + 1);
+                        top_fraction = cell_fraction(t - 0.5);
+                    } else {
+                        top_fraction = cell_fraction(0.5 + t);
+                    }
+                }
             }
             kinds[z] = kind;
         }
@@ -373,7 +421,8 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     }
     if volumetric && li < 16u { scratch[base * UNIT_WORDS + li] = atomicLoad(&g_words[li]); }
     if wide_relief && volumetric {
-        atomicOr(&g_fraction[li >> 1u], select(fraction, 0u, surface_changed) << ((li & 1u) * 16u));
+        if surface_changed || overhang_lane { fraction = top_fraction; }
+        atomicOr(&g_fraction[li >> 1u], fraction << ((li & 1u) * 16u));
         workgroupBarrier();
         if li < 32u { scratch[(base + 1u) * UNIT_WORDS + li] = atomicLoad(&g_fraction[li]); }
     }

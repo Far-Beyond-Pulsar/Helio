@@ -694,11 +694,12 @@ fn published_tops_bound_occupancy() {
                     let down = ((word >> ((cell & 3) * 8)) & 255) as i32;
                     let (i, j) = (ci * 8 + (cell & 7) as i32, cj * 8 + (cell >> 3) as i32);
                     let top = planet.column_top(face, i, j, level);
-                    let expected = terrain::generated_top(planet.grid(), planet.field(), face, i, j, level, top);
+                    let expected = terrain::generated_top(planet.grid(), planet.field(), face, i, j, level, planet.column_height(face, i, j, level));
                     let got = (k_lo + n_band) * 8 - down;
-                    // With relief, a surface the volume leaves intact keeps
-                    // its partial top cell (the ceil top).
-                    let ceil = relief && expected == top && got == top + 1;
+                    // With relief, the partial top cell is solid (cut at
+                    // the surface), whether the volume changed the surface
+                    // or not.
+                    let ceil = relief && got == expected + 1;
                     if down < 255 && got != expected && !ceil {
                         wrong_tops += 1;
                         if wrong_tops < 6 {

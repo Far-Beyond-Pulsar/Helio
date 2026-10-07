@@ -3,8 +3,7 @@ mod common;
 use common::*;
 use helio_pass_voxel_planet::grid::face_axes;
 use wgpu::util::DeviceExt;
-use bytemuck::Zeroable;
-use helio_pass_voxel_planet::{landform::{self, LandformConstants}, terrain};
+use helio_pass_voxel_planet::terrain;
 
 #[test]
 fn grazing_soil_lip_filters_radial_coverage_and_preserves_protected_faces() {
@@ -264,31 +263,9 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
         .next()
         .unwrap();
     let noise=include_str!("../shaders/noise.wgsl");
-    let landform=include_str!("../shaders/landform.wgsl");
-    let density = {
-        let start = include_str!("../shaders/world.wgsl").find("fn heightfield_density").unwrap();
-        let rest = &include_str!("../shaders/world.wgsl")[start..];
-        &rest[..rest.find("
-}").unwrap() + 2]
-    };
-    let materials=world.split("const M_AIR").nth(1).unwrap().split("// Face bases").next().unwrap();
-    let mut terrain_constants=LandformConstants::zeroed();
-    terrain_constants.header=[0,100,7,123];
-    terrain_constants.levels=[9,0,2_000_000,-8000];
-    terrain_constants.shape=[0,16,0,0];
-    let mut terrain_bytes = bytemuck::bytes_of(&terrain_constants).to_vec();
-    // Ridge suffix (66 vec4) and volume terms (4 vec4, zero: no caves).
-    terrain_bytes.resize(terrain_bytes.len() + 66 * 16 + 4 * 16, 0);
-    let terrain_uniform=gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label:Some("canonical slope material constants"),contents:&terrain_bytes,usage:wgpu::BufferUsages::UNIFORM,
-    });
     let source = format!(
         r#"
         {noise}
-        const M_AIR{materials}
-        {density}
-        {landform}
-        @group(0) @binding(3) var<uniform> terrain:TerrainConstants;
         var<private> material_footprint:f32=0.0;
         var<private> material_radial_span:f32=0.0;
         var<private> material_coverage:f32=-1.0;
@@ -310,7 +287,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
         @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) id:vec3<u32>) {{
             if id.x>=arrayLength(&probes) {{return;}}
             let p=probes[id.x];
-            answers[id.x*13u]=vec4<f32>(canonical_relief_slope(u32(p.params.x),p.up.xyz,p.gradient.xyz,p.params.y),
+            answers[id.x*13u]=vec4<f32>(0.0,
                 canonical_relief_confidence(p.params.z),canonical_relief_face_weight(0u,p.params.w,false),canonical_relief_face_weight(4u,p.params.w,false));
             let base=detail_filter_weight(p.params.w);
             answers[id.x*13u+1u]=vec4<f32>(base,
@@ -366,25 +343,6 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
             let face=vec3<f32>(1.0,0.0,0.0);
             answers[id.x*13u+10u]=vec4<f32>(normalize(mix(face,field_normal,
                 detail_filter_weight(2.0))),dot(field_normal,up));
-            let offset=i32((id.x>>3u)&7u);
-            let cell=i32(id.x&7u);
-            let left=max(cell-1,0);
-            let right=min(cell+1,7);
-            let block=(((offset+7)*7/4)-(offset*7/4))*8/7;
-            let stair_local=f32(((offset+right)*7/4)-(offset+left)*7/4)*8.0/f32(right-left);
-            let point=vec3<i32>(i32(hash3(i32(id.x),0,0,123u)&0xffffffu)*2+1,
-                1<<27,i32(hash3(i32(id.x),2,0,123u)&0xffffffu)*2+1);
-            let weights=vec3<f32>(0.0,0.5,1.0);
-            var fine_ids:vec3<f32>;
-            var coarse_ids:vec3<f32>;
-            for (var w=0u;w<3u;w++) {{
-                fine_ids[w]=f32(ground_material(point,0u,1000000,0,
-                    filtered_material_slope(block,stair_local,weights[w],0u),9999)&M_ID);
-                coarse_ids[w]=f32(ground_material(point,0u,1000000,0,
-                    filtered_material_slope(block,stair_local,weights[w],1u),9999)&M_ID);
-            }}
-            answers[id.x*13u+11u]=vec4<f32>(fine_ids,stair_local);
-            answers[id.x*13u+12u]=vec4<f32>(coarse_ids,f32(block));
         }}
     "#
     );
@@ -529,9 +487,6 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                         binding: 2,
                         resource: output.as_entire_binding(),
                     },
-                    wgpu::BindGroupEntry {
-                        binding:3,resource:terrain_uniform.as_entire_binding(),
-                    },
                 ],
             });
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -545,29 +500,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
             let bytes = read_buffer(&gpu, &output, (probes.len() * 208) as u64);
             let pairs: &[[[f32; 4]; 13]] = bytemuck::cast_slice(&bytes);
             let actual: Vec<[f32; 4]> = pairs.iter().map(|p| p[0]).collect();
-            let mut material_disagreements=0usize;
             for (index, pair) in pairs.iter().enumerate() {
-                material_disagreements+=usize::from(pair[11][2]!=pair[12][2]);
-                let offset=((index>>3)&7) as i32;
-                let cell=(index&7) as i32;
-                let height=|i:i32| ((offset+i)*7).div_euclid(4);
-                let canonical_slope=terrain::block_slope(|x,_|height(x),cell,0);
-                let left=(cell-1).max(0);
-                let right=(cell+1).min(7);
-                let local=8.0*f64::from(height(right)-height(left))/f64::from(right-left);
-                assert!((13..=14).contains(&canonical_slope) && canonical_slope<terrain_constants.shape[1]);
-                assert_eq!(pair[11][3],local as f32,"stair fixture did not expose canonical-neighbour disagreement");
-                assert_eq!(pair[12][3],canonical_slope as f32,"GPU block support disagrees with CPU query");
-                let point=glam::IVec3::new((helio_pass_voxel_planet::noise::hash3(index as i32,0,0,123)&0xffffff) as i32*2+1,
-                    1<<27,(helio_pass_voxel_planet::noise::hash3(index as i32,2,0,123)&0xffffff) as i32*2+1);
-                let canonical_id=landform::ground_material(&terrain_constants,point,0,1000000,0,canonical_slope,9999)&terrain::material::ID;
-                assert_eq!(&pair[11][..3],&[canonical_id as f32;3],
-                    "filtered L0 material disagrees with canonical CPU query at phase{offset}/cell{cell}");
-                for (w,weight) in [0.0,0.5,1.0].into_iter().enumerate() {
-                    let coarse_slope=(f64::from(canonical_slope)*(1.0-weight)+local*weight) as i32;
-                    let expected=landform::ground_material(&terrain_constants,point,0,1000000,0,coarse_slope,9999)&terrain::material::ID;
-                    assert_eq!(pair[12][w],expected as f32,"existing coarse material blend changed");
-                }
                 let phase=index&7;
                 let authored_height=|i:i32| i.div_euclid(8);
                 let local=f64::from(authored_height(phase as i32+1)-authored_height(phase as i32-1))/2.0;
@@ -637,9 +570,10 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                     }
                 }
             }
-            assert!(material_disagreements>0,"stair fixture failed to expose the old local-derivative material stripes");
             for (index, (a, e)) in actual.iter().zip(&expected).enumerate() {
-                for component in 0..4 {
+                // Materials no longer read a screen-space slope (one slope
+                // field at every level: `material_slope`).
+                for component in 1..4 {
                     assert!((a[component] as f64-e[component]).abs()<2e-5,"plane{plane} voxel{voxel} probe{index} component{component}: {:?} expected{:?}",a,e);
                 }
             }

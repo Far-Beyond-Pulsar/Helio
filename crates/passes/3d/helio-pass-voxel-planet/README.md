@@ -298,14 +298,19 @@ they are once its work is on the GPU. Steps:
    volumetric columns keep arbitrary mixed-brick occupancy. Cells within the
    program's `terrain_extent` of the heightfield top are evaluated in 3D
    (the sign of `terrain_density` at the seamless `volume_point`); the band covers the
-   extent, and the column is marked `INFO_TOPOLOGY`. A cell the volume
-   leaves as the heightfield has it keeps the heightfield's kind, so where
-   caves and overhangs leave a lane's top cell and the air above it intact,
-   the lane keeps its relief fraction (wide units; the fraction is 0 in
-   lanes whose surface the volume changes) and the trace cuts only the top
-   cell with it, the bricks below deciding (caves under a relief surface).
-   Without this, cave and overhang regions (about half of Earth's land)
-   showed level-sized terraces at every coarse level.
+   extent, and the column is marked `INFO_TOPOLOGY`. Densities are signed
+   distances to the field height itself (mm, passed to `terrain_density`),
+   not to the floor of the level's cell, so a coarse level folds the same
+   surface the base level does. Lanes the overhangs fold take every cell and
+   their relief from the density: the top cell's fraction is the zero
+   crossing between the highest solid cell's centre and the air cell above,
+   and a crossing in the upper half of that air cell makes it the solid
+   partial top cell, as in a heightfield. Elsewhere a cell the volume leaves
+   as the heightfield has it keeps the heightfield's kind and relief. Before,
+   lanes whose surface the volume changed lost their relief: overhang
+   regions (about a third of Earth's land) showed whole-cell ledges at every
+   coarse level, drawn as grey and brown patches that became grass on
+   approach.
    Its header stores each cell's generated top (first air above the highest
    generated solid cell, counted down from the band top; `INFO_RELIEF_INLINE`
    with `INFO_TOPOLOGY`), so material depth counts from the real surface:
@@ -451,17 +456,25 @@ they are once its work is on the GPU. Steps:
   cells about a pixel wide are shaded with the column's macro normal and show
   surface material on risers, so distant terrain has no contour lines; cells
   several pixels wide keep crisp faces. The blend follows the pixel
-  footprint, so level changes show no seam. Base voxel steps fade in from 4
-  pixels down (`step_filter_weight`), not from about one: at 1.3-3 pixels
-  their riser lines and step shadows formed a band of stripes just before
-  the relief-smooth levels ("voxels, smooth, voxels again"). The natural top
+  footprint, so level changes show no seam. Base voxel steps fade from 2
+  pixels down (`step_filter_weight`). Natural ground at any size is lit
+  partly with its slope's normal (step softness, appearance `detail.w`,
+  0.7 on Earth), casts no step shadows, keeps AO soft and keeps turf on its
+  risers: a staircase standing for a slope reads as voxel texture instead
+  of black contour lines and brown soil dashes on every step. Each resolved
+  voxel's colour also moves along its material's patch ramp by its own hash
+  (blades of different hue; weathered and fresh stone), so the ground reads
+  as made of voxels wherever its voxels are resolved. The natural top
   of generated cave and overhang columns filters too; cave walls and edit
   cuts stay crisp (`natural_surface_hit`).
 - **Material slope at one scale.** Materials (rock, scree, snow, grass)
   classify a slope measured the same way whatever level draws the pixel:
-  central differences of the level-4 heights two cells (3.2 m) each way,
-  relief included, interpolated between level-4 cell centres
-  (`material_slope` in surface.wgsl and planet.rs). Each level used to
+  central differences of relief heights 3.2 m each way (two level-4 cells,
+  one level-5 cell), interpolated between cell centres; levels 4 and finer
+  read level-4 columns, level 5 its own, coarser levels their own cells
+  (`material_slope` in surface.wgsl and planet.rs). Coarse levels used to
+  mix in a two-cell local derivative and a screen-space gradient, steeper
+  over roughness: hillsides turned to rock and scree far away. Each level used to
   measure across its own 8-cell block (0.7 m at level 0, 11 m at level 4):
   rock and snow changed as the camera approached, and the 0.1 m steps of
   level 0 flickered across the thresholds (a rock riser on every step of a
@@ -525,9 +538,11 @@ times come from timestamps.
 | `HELIO_VOXEL_FLIGHT_SCULPT=1` | Sculpting stress: dig r1, dig r4 and build r1 strokes stamped three (two) times a frame on one ring; logs brush CPU, frame time and generation cost per stroke. |
 | `HELIO_VOXEL_FLIGHT_HEIGHTFIELD=1` | The Earth stack without caves and overhangs. |
 | `HELIO_VOXEL_FLIGHT_SEED=<n>` | The Earth stack with another seed (7). |
+| `HELIO_VOXEL_FLIGHT_PRESET=earth\|moon\|desert`, `_NO_CAVES`, `_NO_OVERHANGS`, `_GRAIN=scale_m,octaves,ratio` | The layer stack; without caves or overhangs; an extra roughness layer. |
+| `HELIO_VOXEL_FLIGHT_VIEWS_AHEAD=<m>,<right m>`, `_LOD_PIXELS=<f>` | `VIEWS` from a site moved along the view heading; the renderer's `lod_pixels` (2: every level one step finer). `VIEWS` and `LODCMP` (with `_VIEWS_POLE`: the pole's hills at 60 and 300 m) skip the ground audits. |
 | `HELIO_VOXEL_FLIGHT_VIEWS_POLE=<rad>`, `_VIEWS_MOUNTAIN=<km>` | `VIEWS` from the north pole (Pulsar's example spawn) along a bearing, or from the flank of the nearest summit facing it. |
 | `HELIO_VOXEL_FLIGHT_LOOK=exposure,contrast,saturation` | A camera post-process with an outdoor look (ACES tone map and a grade), as the Pulsar example level has. |
-| `HELIO_VOXEL_DEBUG=<n>` | Debug shading: 1 level colours (brighter where filtered), 2 the same lit from the vertical (only sun shadows stay dark), 3 the level the distance asks for, 4 column kinds (generated volume red, edit topology orange, relief green, plain blue). |
+| `HELIO_VOXEL_DEBUG=<n>` | Debug shading: 1 level colours (brighter where filtered), 2 the same lit from the vertical (only sun shadows stay dark), 3 the level the distance asks for, 4 column kinds (generated volume red, edit topology orange, relief green, plain blue), 5 faces and burial (red sides, blue undersides, green where material depth > 0). |
 | `HELIO_VOXEL_FLIGHT_QUICK=1`, `_GROUND_ONLY=1`, `_CPU_PROBE=1` | Short timing probe, ground audits only, CPU per pass. |
 | `HELIO_VOXEL_PLAN_TRACE=<ms>` | Logs residency plan phases of frames taking over `<ms>` (10 if not a number). |
 | `HELIO_VOXEL_LOD_DITHER`, `HELIO_VOXEL_NO_HORIZON`, `HELIO_VOXEL_NO_FAILSAFE` | Override the dither width; disable the sky bound; disable its fail-safe (A/B timing). |
@@ -610,7 +625,9 @@ it, so bump it when a released generator changes its output (in-development
 changes replace the output in place). Register it with `terrain::register`. Add a test calling
 `engine::verify_field` for every shape and `terrain::check_field`. Changing
 settings rebuilds the world without recompiling shaders; pipelines are keyed
-by program.
+by program. A new program compiles on a worker thread (`PlanetPass`; the
+large pipelines in parallel, ~12 s in a row cold) while the previous terrain
+stays on screen, so neither a host's start nor a terrain change freezes it.
 
 **Materials.** Shading knows a material only through its
 `MaterialAppearance` (16 per world): colour and roughness, optional

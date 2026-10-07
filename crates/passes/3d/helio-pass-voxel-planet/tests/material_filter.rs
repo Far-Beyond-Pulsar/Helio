@@ -90,8 +90,8 @@ fn unresolved_outcrop_preserves_canonical_ids_and_mean_palette() {
             let below_far=ground_material(p,0u,1500000,0,20,14999);
             let far_base=material_fleck_base;
             var far_colour=palette(below_far);
-            if far_base!=M_AIR {{far_colour=filtered_rock_flecks(far_colour,1.0,far_base,1.0);}}
-            coverage[id.x*4u+2u]=vec4<f32>(filtered_rock_flecks(near_colour,1.0,below_base,0.0),0.0);
+            if far_base!=M_AIR {{far_colour=filtered_rock_flecks(far_colour,select(palette(far_base), mix(palette(material_coverage_ids.x), palette(material_coverage_ids.y), max(material_coverage,0.0)), material_coverage>=0.0),1.0,far_base,1.0);}}
+            coverage[id.x*4u+2u]=vec4<f32>(filtered_rock_flecks(near_colour,near_colour,1.0,below_base,0.0),0.0);
             coverage[id.x*4u+3u]=vec4<f32>(far_colour,0.0);
             let snow_disabled=u32(material_mix.x<0.0);
             let stone_coverage=material_coverage;
@@ -401,7 +401,7 @@ fn palette(id:u32)->vec3<f32> {{
     if id.x>=arrayLength(&probes) {{return;}}
     let p=probes[id.x];
     material_coverage=rock_band_coverage(p.x,p.y,p.z,p.w);
-    answers[id.x*2u]=vec4<f32>(filtered_rock_flecks(palette(M_STONE),0.75,M_STONE,1.0),material_coverage);
+    answers[id.x*2u]=vec4<f32>(filtered_rock_flecks(palette(M_STONE),0.75*select(palette(M_STONE), mix(palette(material_coverage_ids.x), palette(material_coverage_ids.y), max(material_coverage,0.0)), material_coverage>=0.0),0.75,M_STONE,1.0),material_coverage);
     answers[id.x*2u+1u]=vec4<f32>(f32(natural_material_filter_allowed(false,Column(0u,1u))),
         f32(natural_material_filter_allowed(true,Column(0u,1u))),
         f32(natural_material_filter_allowed(false,Column(INFO_TOPOLOGY,1u))),

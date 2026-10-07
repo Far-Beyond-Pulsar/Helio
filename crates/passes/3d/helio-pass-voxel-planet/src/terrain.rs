@@ -42,7 +42,7 @@
 //!
 //! ```wgsl
 //! fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32>
-//! fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, k: i32) -> i32
+//! fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, k: i32) -> i32
 //! ```
 //!
 //! `terrain_extent` bounds, in level cells, how far below the heightfield
@@ -50,8 +50,10 @@
 //! differ from the heightfield; `(0, 0)` means none (the default).
 //! `terrain_density` is the signed distance from the centre of layer `k`
 //! to the surface, in [`DENSITY_ONE`] units per level cell, positive inside
-//! solid, in a column whose heightfield top is `top`; `q` is the cell
-//! centre's seamless 3D domain point (`volume_point`). The cell is solid
+//! solid, in a column whose heightfield top is `top` (its field height
+//! `height`, mm: the exact surface the volume folds, so that coarse levels
+//! show it, not a floor of their cell); `q` is the cell centre's seamless
+//! 3D domain point (`volume_point`). The cell is solid
 //! where it is positive. Outside the extent its sign must be the
 //! heightfield's (`k < top`). Without them the engine uses the heightfield
 //! ([`heightfield_density`]). Distances, not just solid or air, are what a
@@ -176,11 +178,12 @@ pub trait TerrainField: Send + Sync + 'static {
     }
     /// Signed distance ([`DENSITY_ONE`] per level cell, positive inside
     /// solid) from the centre of layer `k` of the column at `p`, whose
-    /// heightfield top is `top`, to the surface; `q` is the cell's 3D domain
+    /// heightfield top is `top` (field height `height`, mm), to the surface;
+    /// `q` is the cell's 3D domain
     /// point ([`Grid::volume_point`]). The cell is solid where it is
     /// positive; outside [`Self::extent`] its sign must be
     /// [`terrain_kind`]'s (`terrain_density` in WGSL).
-    fn density(&self, _p: IVec3, _q: IVec3, _level: u32, top: i32, k: i32) -> i32 {
+    fn density(&self, _p: IVec3, _q: IVec3, _level: u32, top: i32, _height: i32, k: i32) -> i32 {
         heightfield_density(top, k)
     }
     /// Largest depth (mm) below the surface and height above it at which
@@ -233,7 +236,8 @@ pub const MATERIALS: usize = 16;
 pub struct TerrainAppearance {
     /// Per material id (see [`MaterialAppearance`]).
     pub materials: [MaterialAppearance; MATERIALS],
-    /// Patch contrast, voxel pigment contrast, edge darkening.
+    /// Patch contrast, voxel pigment contrast, edge darkening, step
+    /// softness (share of the slope's normal in natural voxel steps' light).
     pub detail: [f32; 4],
 }
 
@@ -262,7 +266,12 @@ impl Default for TerrainAppearance {
         for rock in [STONE, DARK_STONE, SANDSTONE] {
             materials[rock as usize].fleck = Some((DIRT as u8, 0.125));
         }
-        Self { materials, detail: [0.75, 0.18, 0.08, 0.0] }
+        // Weathered and fresh stone: lichen-warm, the rock's grey, darker.
+        materials[STONE as usize].patches = Some([unit([160, 157, 149]), unit([133, 139, 142]), unit([98, 104, 110])]);
+        // Dark stone alternates with stone in 4.5 m strata on cliffs: a shade
+        // darker, not a band of another colour (zebra stripes on outcrops).
+        materials[DARK_STONE as usize].patches = Some([unit([140, 138, 131]), unit([110, 115, 119]), unit([82, 87, 94])]);
+        Self { materials, detail: [0.3, 0.3, 0.08, 0.7] }
     }
 }
 
@@ -391,20 +400,24 @@ pub fn heightfield_density(top: i32, k: i32) -> i32 {
 }
 
 /// Generated kind of a level cell before edits, volumetric terms included
-/// (the GPU's per-cell generation rule).
-pub fn generated_kind(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i32, k: i32, level: u32, top: i32) -> u32 {
+/// (the GPU's per-cell generation rule), in the column of field height
+/// `height` (mm).
+pub fn generated_kind(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i32, k: i32, level: u32, height: i32) -> u32 {
+    let top = top_cells(grid, height, level);
     let p = grid.domain_point(face, i, j, level);
     let (below, above) = field.extent(p, level);
     if (below == 0 && above == 0) || k < top - below || k >= top + above {
         return terrain_kind(top, k);
     }
-    u32::from(field.density(p, grid.volume_point(face, i, j, k, level), level, top, k) > 0)
+    u32::from(field.density(p, grid.volume_point(face, i, j, k, level), level, top, height, k) > 0)
 }
 
 /// Generated top of a column (level cells): the first air above its highest
 /// generated solid cell, edits excluded. Equals `top` outside the field's
 /// volumetric extent; material depth counts from it (`generate.wgsl`).
-pub fn generated_top(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i32, level: u32, top: i32) -> i32 {
+/// `height` is the column's field height (mm).
+pub fn generated_top(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i32, level: u32, height: i32) -> i32 {
+    let top = top_cells(grid, height, level);
     let p = grid.domain_point(face, i, j, level);
     let (below, above) = field.extent(p, level);
     if below == 0 && above == 0 {
@@ -412,7 +425,7 @@ pub fn generated_top(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j:
     }
     (top - below..top + above)
         .rev()
-        .find(|&k| field.density(p, grid.volume_point(face, i, j, k, level), level, top, k) > 0)
+        .find(|&k| field.density(p, grid.volume_point(face, i, j, k, level), level, top, height, k) > 0)
         .map_or(top - below, |k| k + 1)
 }
 

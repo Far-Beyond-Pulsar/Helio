@@ -141,7 +141,8 @@ impl LandformVolume {
         (below, above)
     }
 
-    /// Density of layer `k` of the column at `p` (heightfield top `top`),
+    /// Density of layer `k` of the column at `p` (heightfield top `top`,
+    /// field height `height` mm, which the overhangs fold exactly),
     /// with 3D domain point `q` ([`TerrainField::density`]), as constructive
     /// solid geometry on distances (intersection: minimum, union: maximum):
     /// the surface, folded by overhangs, minus the caves, which carve where
@@ -150,7 +151,7 @@ impl LandformVolume {
     /// Noise distances are the noise's excess over its threshold divided by
     /// its slope (about 2 per wavelength). The sign is exactly the solid
     /// test's.
-    pub fn density(&self, p: IVec3, q: IVec3, level: u32, top: i32, k: i32, seed: u32) -> i32 {
+    pub fn density(&self, p: IVec3, q: IVec3, level: u32, top: i32, height: i32, k: i32, seed: u32) -> i32 {
         let a = self.overhang_amplitude(p, level, seed);
         let (tunnels, caverns) = self.caves_at(level);
         if a == 0 && !tunnels && !caverns {
@@ -158,8 +159,10 @@ impl LandformVolume {
         }
         let layer = self.sizes[3];
         let cell = layer.wrapping_shl(level);
-        // Height of the cell centre over the heightfield top (mm).
-        let d = k.wrapping_sub(top).wrapping_mul(cell).wrapping_add(cell / 2);
+        // Height of the cell centre over the surface (mm): the field height
+        // itself, not the floor of this level's cell (coarse levels drew
+        // cave and overhang regions as terraces of whole cells).
+        let d = k.wrapping_mul(cell).wrapping_add(cell / 2).wrapping_sub(height);
         let mut solid = k < top;
         let mut f = d.wrapping_neg();
         if a > 0 {
@@ -173,7 +176,7 @@ impl LandformVolume {
             // mm per noise unit at lattice shift s: 2^s * 12.5 mm / 2^17.
             let mm = |excess: i32, shift: i32| mul_shr_signed(excess, 25 << shift, 18);
             let region = noise(p, self.caves[1] as u32, self.seed(seed, SEED_CAVE_REGION));
-            let depth = top.wrapping_sub(k).wrapping_mul(cell).wrapping_sub(cell / 2);
+            let depth = d.wrapping_neg();
             // Solid outside the region, above the heightfield top, below the
             // cave depth...
             let outside = mm(self.caves[2] - region, self.caves[1]).max(d).max(depth - self.caves[3]);
@@ -1203,8 +1206,8 @@ impl TerrainField for LandformField {
     fn extent(&self, p: IVec3, level: u32) -> (i32, i32) {
         self.volume.extent(p, level, self.seed())
     }
-    fn density(&self, p: IVec3, q: IVec3, level: u32, top: i32, k: i32) -> i32 {
-        self.volume.density(p, q, level, top, k, self.seed())
+    fn density(&self, p: IVec3, q: IVec3, level: u32, top: i32, height: i32, k: i32) -> i32 {
+        self.volume.density(p, q, level, top, height, k, self.seed())
     }
     fn volume_bounds(&self) -> (i32, i32) {
         let flags = self.volume.caves[0];
@@ -1273,15 +1276,16 @@ mod tests {
             let face = (next() % 6) as u8;
             let (i, j) = ((next() % grid.cells() as u64) as i32, (next() % grid.cells() as u64) as i32);
             let p = grid.domain_point(face, i, j, 0);
-            let top = top_cells(&grid, v2.height(p, grid.level_offset()), 0);
+            let height = v2.height(p, grid.level_offset());
+            let top = top_cells(&grid, height, 0);
             assert_eq!(v1.extent(p, 0), (0, 0));
             let (below, above) = v2.extent(p, 0);
             volumetric += usize::from(below + above > 0);
             for _ in 0..24 {
                 // Inside and around the extent.
                 let k = top - below - 4 + (next() % (below + above + 8) as u64) as i32;
-                let kind = generated_kind(&grid, &v2, face, i, j, k, 0, top);
-                assert_eq!(generated_kind(&grid, &v1, face, i, j, k, 0, top), u32::from(k < top));
+                let kind = generated_kind(&grid, &v2, face, i, j, k, 0, height);
+                assert_eq!(generated_kind(&grid, &v1, face, i, j, k, 0, height), u32::from(k < top));
                 if k < top - below || k >= top + above {
                     assert_eq!(kind, u32::from(k < top), "outside the extent the heightfield holds");
                 }
@@ -1317,12 +1321,13 @@ mod tests {
             if below + above == 0 {
                 continue;
             }
-            let top = top_cells(&grid, field.height(p, grid.level_offset()), 0);
-            let density = |k: i32| field.density(p, grid.volume_point(face, i, j, k, 0), 0, top, k);
+            let height = field.height(p, grid.level_offset());
+            let top = top_cells(&grid, height, 0);
+            let density = |k: i32| field.density(p, grid.volume_point(face, i, j, k, 0), 0, top, height, k);
             let mut previous = density(top - below);
             for k in top - below + 1..top + above {
                 let d = density(k);
-                assert_eq!(u32::from(d > 0), generated_kind(&grid, &field, face, i, j, k, 0, top));
+                assert_eq!(u32::from(d > 0), generated_kind(&grid, &field, face, i, j, k, 0, height));
                 if (d > 0) != (previous > 0) {
                     crossings += 1;
                     worst = worst.max(d.abs() + previous.abs());

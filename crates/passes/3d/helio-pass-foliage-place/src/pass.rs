@@ -944,7 +944,7 @@ impl RenderPass for FoliagePlacePass {
         self.pump_readback(ctx.device);
         if ctx.frame_num % 120 == 0 {
             let c = self.debug_counters;
-            log::info!(
+            log::debug!(
                 "[foliage] queued_tiles={} placed={} visible L0={} L1={} L2={} L3={} \
                  visible_overflow={} placement_overflow={}",
                 self.queued_tile_count,

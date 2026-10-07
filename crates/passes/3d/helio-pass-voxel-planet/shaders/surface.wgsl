@@ -86,12 +86,11 @@ fn natural_material_filter_allowed(edited: bool, c: Column) -> bool {
 
 
 // A material's filtered single-voxel flecks keep their share of its colour
-// instead of a fresh full-contrast hash choice per pixel.
-fn filtered_rock_flecks(albedo: vec3<f32>, pigment: f32, rock: u32, weight: f32) -> vec3<f32> {
-    let stone = select(palette(rock), mix(palette(material_coverage_ids.x), palette(material_coverage_ids.y),
-        max(material_coverage, 0.0)), material_coverage >= 0.0);
+// (`stone`, the rock's own colour there) instead of a fresh full-contrast
+// hash choice per pixel.
+fn filtered_rock_flecks(albedo: vec3<f32>, stone: vec3<f32>, pigment: f32, rock: u32, weight: f32) -> vec3<f32> {
     let share = material_fleck_share(rock);
-    let mean = pigment * ((1.0 - share) * stone + share * palette(material_fleck(rock)));
+    let mean = (1.0 - share) * stone + share * pigment * palette(material_fleck(rock));
     return mix(albedo, mean, weight);
 }
 
@@ -102,12 +101,18 @@ fn filtered_rock_flecks(albedo: vec3<f32>, pigment: f32, rock: u32, weight: f32)
 // the footprint, not the level: fading by level stepped the patch contrast
 // at every level boundary, which showed as rings sweeping outward while
 // ascending.
-fn material_albedo(m: u32, p: vec3<i32>, pixel: f32) -> vec3<f32> {
+// Each resolved voxel also moves along the dry-to-lush ramp by its own
+// hash (`voxel` is 1 while base voxels are resolved, fading to 0 as they
+// shrink below a pixel): blades of different hue, so turf reads as made of
+// voxels at any distance its voxels can be seen from, and averages to its
+// patch colour beyond.
+fn material_albedo(m: u32, p: vec3<i32>, pixel: f32, voxel: f32) -> vec3<f32> {
     let material = frame.materials[min(m, 15u)];
     if material.patches[0].w <= 0.0 { return material.colour.rgb; }
     let broad = f32(noise(p, 15u, 0x3c6ef372u)) / f32(NOISE_ONE);
     let patches = f32(noise(p, 11u, 0xa54ff53au)) / f32(NOISE_ONE) * clamp((12.8 - pixel) / 6.4, 0.0, 1.0);
-    let t = clamp(0.52 + frame.detail.x * (0.7 * broad + 0.16 * patches), 0.0, 1.0);
+    let blade = f32(hash3(p.x, p.y, p.z, 0x1b873593u) & 255u) / 255.0 - 0.5;
+    let t = clamp(0.52 + frame.detail.x * (0.7 * broad + 0.16 * patches) + 0.5 * frame.detail.y * blade * voxel, 0.0, 1.0);
     let dry = material.patches[0].rgb;
     let middle = material.patches[1].rgb;
     let lush = material.patches[2].rgb;
@@ -273,7 +278,9 @@ fn climate(@builtin(global_invocation_id) id: vec3<u32>) {
 // anchors, avoiding the shared-height plateaus inside each block. Reject
 // incomplete, edited and discontinuous neighbourhoods instead of inventing
 // relief across silhouettes, cuts, chart edges or streaming boundaries.
-override FAR_RELIEF: bool = false;
+// Raw-climate slope lighting (`Settings::far_relief`, frame.hints.z): a
+// runtime switch, so one shade pipeline serves both.
+fn far_relief() -> bool { return frame.hints.z != 0u; }
 
 // Difference of stored filtered heights in coarse-cell units. Subtract the
 // integer tops before conversion to retain small slopes at large elevations.
@@ -285,71 +292,91 @@ fn column_relief_delta_q16(c: Column, a: vec2<u32>, b: vec2<u32>, top_delta: i32
     return top_delta * 65536 + ca - cb;
 }
 
-// Materials classify slopes measured at one scale, whatever level draws
-// them: across the 8-cell block of the level-4 column (11 m at 0.1 m voxels,
-// 13 m of terrain resolved), relief included (`material_slope` in planet.rs).
-// Each level used to measure across its own block (0.7 m at level 0, 11 m at
-// level 4): rock and snow changed as the camera approached, and the 0.1 m
-// steps of level 0 flickered across the thresholds (rock on every riser).
+// Materials classify one slope field, whatever level draws them: central
+// differences of relief heights 3.2 m each way (two level-4 cells, one
+// level-5 cell), interpolated bilinearly between cell centres. Levels finer
+// than 4 read level-4 columns (`material_slope` in planet.rs); level 5 the
+// same baseline from its own cells; coarser levels their own cells, whose
+// pixels cover more than that baseline anyway. Measuring at each level's own
+// scale changed rock and snow with distance (grey hillsides far away that
+// became grass on approach).
 const MATERIAL_SLOPE_LEVEL: u32 = 4u;
+const NO_HEIGHT: i32 = -2147483647 - 1;
 
-// Block slope (eighths of a cell per cell) of column `c` through cell (x, y),
-// with relief fractions when it stores them.
-fn column_block_slope(c: Column, x: u32, y: u32) -> i32 {
-    let tx0 = column_top(c, 0u, y);
-    let tx7 = column_top(c, 7u, y);
-    let ty0 = column_top(c, x, 0u);
-    let ty7 = column_top(c, x, 7u);
-    if (c.info & INFO_RELIEF) != 0u && (column_tops_fit(c) || column_tops_down(c)) {
-        let di = column_relief_delta_q16(c, vec2<u32>(7u, y), vec2<u32>(0u, y), tx7 - tx0);
-        let dj = column_relief_delta_q16(c, vec2<u32>(x, 7u), vec2<u32>(x, 0u), ty7 - ty0);
-        return max(abs(di), abs(dj)) / 57344;
-    }
-    return block_slope_of(tx0, tx7, ty0, ty7);
+// The (up to) 2x2 resident columns of `level` covering cells [lo, hi].
+struct SlopeColumns {
+    face: u32,
+    level: u32,
+    origin: vec2<i32>,
+    records: vec4<u32>,
 }
 
-// Height of level-4 cell (mi, mj) in Q16 level-4 cells (its relief top),
-// or i32::MIN while its column is not resident.
-fn level4_height_q16(face: u32, mi: i32, mj: i32) -> i32 {
-    let record = find_column(column_key0(face, MATERIAL_SLOPE_LEVEL, mi >> 3), bitcast<u32>(mj >> 3));
-    if record == NONE { return -2147483647 - 1; }
+fn slope_record(face: u32, level: u32, ci: i32, cj: i32) -> u32 {
+    let record = find_column(column_key0(face, level, ci), bitcast<u32>(cj));
+    if record == NONE { return NONE; }
     let m = records[record];
-    if !column_valid(m) || !(column_tops_fit(m) || column_tops_down(m)) { return -2147483647 - 1; }
+    if !column_valid(m) || !(column_tops_fit(m) || column_tops_down(m)) { return NONE; }
+    return record;
+}
+
+fn slope_columns(face: u32, level: u32, lo: vec2<i32>, hi: vec2<i32>) -> SlopeColumns {
+    var out: SlopeColumns;
+    out.face = face;
+    out.level = level;
+    out.origin = lo >> vec2<u32>(3u);
+    let far = hi >> vec2<u32>(3u);
+    out.records.x = slope_record(face, level, out.origin.x, out.origin.y);
+    out.records.y = select(NONE, slope_record(face, level, far.x, out.origin.y), far.x != out.origin.x);
+    out.records.z = select(NONE, slope_record(face, level, out.origin.x, far.y), far.y != out.origin.y);
+    out.records.w = select(NONE, slope_record(face, level, far.x, far.y), any(far != out.origin));
+    return out;
+}
+
+// Relief height of cell (mi, mj) in Q16 cells of the columns' level, or
+// NO_HEIGHT while its column is not resident.
+fn slope_height_q16(cols: SlopeColumns, mi: i32, mj: i32) -> i32 {
+    let q = vec2<i32>(mi, mj) >> vec2<u32>(3u);
+    let k = u32(q.x != cols.origin.x) + 2u * u32(q.y != cols.origin.y);
+    let record = cols.records[k];
+    if record == NONE { return NO_HEIGHT; }
+    let m = records[record];
     let x = u32(mi & 7);
     let y = u32(mj & 7);
     let f = column_relief_fraction(m, x, y);
     return column_top(m, x, y) * 65536 + select(0, i32(f) - 65536, f != 0u);
 }
 
-// Slope at level-4 cell (mi, mj) in eighths of a cell per cell: central
-// differences two cells each way (`level4_slope` in planet.rs), or -1.
-fn level4_block_slope(face: u32, mi: i32, mj: i32) -> i32 {
-    let e = level4_height_q16(face, mi + 2, mj);
-    let w = level4_height_q16(face, mi - 2, mj);
-    let n = level4_height_q16(face, mi, mj + 2);
-    let s = level4_height_q16(face, mi, mj - 2);
-    if min(min(e, w), min(n, s)) == -2147483647 - 1 { return -1; }
-    return max(abs(e - w), abs(n - s)) / 32768;
+// Slope at cell (mi, mj) in eighths of a cell per cell from central
+// differences `d` cells each way, or -1.
+fn slope_at(cols: SlopeColumns, mi: i32, mj: i32, d: i32) -> i32 {
+    let e = slope_height_q16(cols, mi + d, mj);
+    let w = slope_height_q16(cols, mi - d, mj);
+    let n = slope_height_q16(cols, mi, mj + d);
+    let s = slope_height_q16(cols, mi, mj - d);
+    if min(min(e, w), min(n, s)) == NO_HEIGHT { return -1; }
+    return max(abs(e - w), abs(n - s)) / (16384 * d);
 }
 
-// The material slope of the base cells under hit cell (i, j) of `level`
-// (below MATERIAL_SLOPE_LEVEL): level-4 block slopes interpolated between
-// cell centres at the base cell at the hit cell's centre (stepwise slopes
-// gave outcrops 1.6 m stairs), or `own` while they are not resident.
+// The material slope of hit cell (i, j) of `level`, at the base cell at the
+// hit cell's centre, or `own` while the columns it reads are not resident.
 fn material_slope(face: u32, i: i32, j: i32, level: u32, own: i32) -> i32 {
+    let s = max(level, MATERIAL_SLOPE_LEVEL);
+    let d = select(1, 2, s == MATERIAL_SLOPE_LEVEL);
     // Base cell at the hit cell's centre, in half base cells relative to
-    // the first level-4 cell centre.
+    // the first cell centre of level `s`.
     let half = 1 << level;
-    let ri = ((i << level) + (half >> 1)) * 2 + 1 - 16;
-    let rj = ((j << level) + (half >> 1)) * 2 + 1 - 16;
-    let ai = ri >> 5u;
-    let aj = rj >> 5u;
-    let wi = ri - (ai << 5u);
-    let wj = rj - (aj << 5u);
-    let s00 = level4_block_slope(face, ai, aj);
-    let s10 = level4_block_slope(face, ai + 1, aj);
-    let s01 = level4_block_slope(face, ai, aj + 1);
-    let s11 = level4_block_slope(face, ai + 1, aj + 1);
+    let ri = ((i << level) + (half >> 1)) * 2 + 1 - (1 << s);
+    let rj = ((j << level) + (half >> 1)) * 2 + 1 - (1 << s);
+    let ai = ri >> (s + 1u);
+    let aj = rj >> (s + 1u);
+    // Weights in 32nds (exact at level 4, as planet.rs truncates them).
+    let wi = (ri - (ai << (s + 1u))) >> (s - 4u);
+    let wj = (rj - (aj << (s + 1u))) >> (s - 4u);
+    let cols = slope_columns(face, s, vec2<i32>(ai - d, aj - d), vec2<i32>(ai + 1 + d, aj + 1 + d));
+    let s00 = slope_at(cols, ai, aj, d);
+    let s10 = slope_at(cols, ai + 1, aj, d);
+    let s01 = slope_at(cols, ai, aj + 1, d);
+    let s11 = slope_at(cols, ai + 1, aj + 1, d);
     if min(min(s00, s10), min(s01, s11)) < 0 { return own; }
     return ((32 - wi) * (32 - wj) * s00 + wi * (32 - wj) * s10 + (32 - wi) * wj * s01 + wi * wj * s11) >> 10u;
 }
@@ -385,7 +412,7 @@ fn relief_source_pixel(xy: vec2<u32>) -> vec2<u32> {
 }
 
 fn cached_relief_normal(xy: vec2<u32>, center: Hit, up: vec3<f32>) -> vec4<f32> {
-    if !FAR_RELIEF || frame.hints.z == 0u { return vec4<f32>(0.0); }
+    if !far_relief() { return vec4<f32>(0.0); }
     let extent = vec2<u32>(frame.screen.xy);
     if any(xy < vec2<u32>(2u)) || any(xy + vec2<u32>(2u) >= extent) { return vec4<f32>(0.0); }
     let left = xy - vec2<u32>(2u, 0u);
@@ -447,7 +474,7 @@ fn detail_filter_weight(projected_cell: f32) -> f32 {
 // pixels down, so the exact voxels near the eye blend into smooth ground
 // instead of a band of stripes.
 fn step_filter_weight(projected_cell: f32) -> f32 {
-    return 1.0 - smoothstep(1.0, 4.0, projected_cell);
+    return 1.0 - smoothstep(1.0, 2.0, projected_cell);
 }
 
 // Independent hash detail aliases along a face's compressed projected axis.
@@ -482,30 +509,6 @@ fn canonical_relief_face_weight(code: u32, projected_cell: f32, selected_level: 
     return detail_filter_weight(projected_cell);
 }
 
-// Convert a physical tangent gradient to the generator's slope convention:
-// eighths of a radial voxel per angular index step. On the cube-sphere,
-// moving one chart coordinate holds the other cell plane fixed. The chart
-// tangents and angular/radial scale therefore matter away from face centres.
-fn canonical_relief_slope(face: u32, up: vec3<f32>, gradient: vec3<f32>, radius: f32) -> f32 {
-    if is_plane() {
-        let f = frame.faces[face];
-        return 8.0 * frame.layer.z / frame.layer.y * max(abs(dot(gradient, f.m_a.xyz)), abs(dot(gradient, f.m_b.xyz)));
-    }
-    let n = vec3<f32>(face_axis(face, 0u));
-    let a = vec3<f32>(face_axis(face, 1u));
-    let b = vec3<f32>(face_axis(face, 2u));
-    let un = dot(up, n);
-    let ma = normalize(a * un - n * dot(up, a));
-    let mb = normalize(b * un - n * dot(up, b));
-    let qa = normalize(n * un + a * dot(up, a));
-    let qb = normalize(n * un + b * dot(up, b));
-    let ti = cross(mb, up);
-    let tj = cross(ma, up);
-    let di = dot(gradient, ti) * dot(qa, up) / dot(ma, ti);
-    let dj = dot(gradient, tj) * dot(qb, up) / dot(mb, tj);
-    return 8.0 * radius * frame.layer.z / frame.layer.y * max(abs(di), abs(dj));
-}
-
 // Convert the existing column derivatives to a physical tangent gradient.
 // Cube-sphere chart directions are oblique away from the face centre; solve
 // their two constraints instead of treating the plane normals as orthogonal.
@@ -536,15 +539,6 @@ fn column_relief_gradient(face: u32, up: vec3<f32>, derivative: vec2<f32>, radiu
     // These input derivatives are already radial cells per chart cell:
     // the physical gradient maps back to the same eighths used by materials.
     return vec4<f32>(gradient, 8.0 * max(abs(derivative.x), abs(derivative.y)));
-}
-
-// Canonical L0 materials use the resident 8x8 block support, as CPU
-// Planet::material does. A quantized neighbour derivative can cross hard
-// material thresholds at each terrace; coarse appearance keeps its existing
-// continuous physical-gradient blend.
-fn filtered_material_slope(block: i32, local: f32, weight: f32, level: u32) -> i32 {
-    if level == 0u || weight <= 0.0 { return block; }
-    return i32(mix(f32(block), local, weight));
 }
 
 // The existing block endpoints average base-height quantization over seven
@@ -666,6 +660,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let natural_material = natural_material_at(edited, c, h.k, top);
     var speck = false;
     var slope = 0;
+    var debug_depth = 0;
     // Appearance is sampled at the ray's base-grid footprint, not the
     // centre of an increasingly large level cell. Climate uses the canonical
     // unrounded height at coarse levels: a 3 km snowfield must not become
@@ -701,7 +696,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let selected_level = level <= level_for(h.t * (1.0 + 0.5 * frame.lod.y));
     let authored_relief_w = base_filter_w;
     let relief_face_w = canonical_relief_face_weight(code, size / pixel, selected_level);
-    if FAR_RELIEF && frame.hints.z != 0u && level > 0u && authored_relief_w > 0.0
+    if far_relief() && level > 0u && authored_relief_w > 0.0
         && relief_face_w > 0.0 && (!edited || (c.info & INFO_RELIEF) != 0u) {
         canonical_up = hit_up(h.t, d);
         canonical_relief = cached_relief_normal(id.xy, h, canonical_up);
@@ -711,22 +706,28 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     var material_fraction = 0u;
     if material_relief { material_fraction = column_relief_fraction(c, x, y); }
     let coarse_w = detail_filter_weight(size / pixel);
-    let authored_w = select(0.0, base_filter_w, FAR_RELIEF && frame.hints.z != 0u);
+    let authored_w = select(0.0, base_filter_w, far_relief());
     // Visibility may temporarily use a coarser column. Its enlarged cell
     // edges are not visible authored voxels, even when the normal stencil rejects.
     let appearance_w = max(coarse_w, authored_w);
     // Generated base tops do not describe edit walls, cave ceilings or floors.
     // Paint-only and ignored tiny lists keep their existing filtering.
-    let normal_filter_w = select(coarse_w, base_filter_w * relief_face_w, FAR_RELIEF && frame.hints.z != 0u);
+    let normal_filter_w = select(coarse_w, base_filter_w * relief_face_w, far_relief());
     let smooth_w = select(0.0, normal_filter_w, natural_surface_hit(c, h.k, top));
     // A grazing face can have subpixel area while its long edge is resolved.
     // Keep the resolved face normal. Pigment and corner occlusion can alias
     // along the compressed axis even while that face's long edge is resolved.
-    let shade_smooth_w = smooth_w;
+    // Natural ground is a staircase of base voxels standing for a smooth
+    // slope: its steps are lit partly with the slope's normal (`step
+    // softness`, appearance detail.w), cast no step shadows and keep turf on
+    // their risers, so they read as voxel texture instead of black contour
+    // lines. Edits and cave walls keep crisp faces.
+    let natural_step = !edited && natural_surface_hit(c, h.k, top);
+    let soft_w = select(0.0, frame.detail.w, natural_step);
+    let shade_smooth_w = max(smooth_w, soft_w);
     let shade_canonical_w = canonical_w;
-    let ao_appearance_w = max(appearance_w, detail_filter_weight(size / pixel * projection.x));
+    let ao_appearance_w = max(max(appearance_w, soft_w), detail_filter_weight(size / pixel * projection.x));
     var fallback_normal = vec3<f32>(0.0);
-    var fallback_slope = 0.0;
     var fallback_shade_normal = vec3<f32>(0.0);
     if smooth_w > 0.0 || shade_smooth_w > 0.0 {
         let x0 = select(x - 1u, 0u, x == 0u);
@@ -746,7 +747,6 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         let field = column_relief_gradient(face, up, vec2<f32>(gi, gj), radius);
         fallback_normal = normalize(up - field.xyz);
         fallback_shade_normal = fallback_normal;
-        fallback_slope = field.w;
     }
     if natural_material {
         material_weathered_skin = true;
@@ -786,20 +786,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             material_radial_span = max(material_radial_span,
                 radial_material_span(pixel, h.t, d, up, fallback_shade_normal));
         }
-        slope = column_block_slope(c, x, y);
-        if level < MATERIAL_SLOPE_LEVEL {
-            slope = material_slope(face, h.i, h.j, level, slope);
-        } else {
-            slope = filtered_material_slope(slope, fallback_slope, smooth_w, level);
-        }
-        if canonical_w > 0.0 && level >= MATERIAL_SLOPE_LEVEL {
-            let gradient = canonical_up - canonical_relief.xyz / dot(canonical_relief.xyz, canonical_up);
-            let radius = length(frame.eye.xyz * frame.eye.w + camera.position_near.xyz + h.t * d);
-            let canonical_slope = canonical_relief_slope(face, canonical_up, gradient, radius);
-            // Lighting and material thresholds share the same derivative and
-            // confidence; changing LOD blocks cannot silently change only rock/snow.
-            slope = i32(mix(f32(slope), canonical_slope, canonical_w));
-        }
+        slope = material_slope(face, h.i, h.j, level, block_slope_of(tx0, tx7, ty0, ty7));
         // Canonical materials use the column top cell, which is resident.
         // Depth counts from the lowest neighbouring top: an exposed riser
         // above it is surface, not subsoil (coarse levels step in large
@@ -826,6 +813,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         // inputs once instead of evaluating and discarding a lower sample.
         let top_material = code < 4u && smooth_w > 0.5;
         let material_depth = select(depth, 0, top_material);
+        debug_depth = material_depth;
         let sample_layer = select(h.k << level, (top - 1) << level, top_material);
         let material_layer = surface_material_layer(top, material_fraction, level,
             sample_layer, material_depth, code, smooth_w, material_relief,
@@ -851,7 +839,6 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         // wall guards already suppress shade_smooth_w above.
         lift = u32(clamp(top - h.k, 0, 255));
     }
-    let raw_smooth_w = canonical_w;
     if shade_canonical_w > 0.0 {
         normal = normalize(mix(normal, canonical_relief.xyz, shade_canonical_w));
     }
@@ -881,11 +868,9 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             // Continuous in distance (not level), so level changes show no band.
             let distance_fade = 1.0 - 1.0 / max(h.t / frame.lod.x, 1.0);
             let cut_lip = 0.22 + 0.1 * tooth + 0.68 * distance_fade;
-            // Natural turf wraps the riser; exposed soil on brush cuts stays
-            // canonical. A thin soil edge avoids contour stripes on hills.
-            let turf_lip = 0.72 + 0.1 * tooth;
-            let lip = select(cut_lip, turf_lip + (1.0 - turf_lip) * distance_fade,
-                natural_material);
+            // Natural turf wraps the riser (a soil edge drew a brown contour
+            // stripe on every step of a hill); brush cuts show their soil.
+            let lip = select(cut_lip, 1.0, natural_material);
             soil_side = uv.y < 1.0 - lip;
             soil_coverage = soil_lip_coverage(uv.y, lip, pixel, h.t, d,
                 hit_up(h.t, d), actual_normal, size, natural_material);
@@ -926,12 +911,14 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let jitter = mix(f32(hv & 255u) / 255.0, 0.5, base_w);
     let pigment = 1.0 + frame.detail.y * (jitter - 0.5);
     let lip = material_lip(material);
-    var albedo = palette(select(material, lip, soil_side)) * pigment;
+    // Every material's colour varies by its patches and voxels (turf hues,
+    // weathered stone), not only turf: rock used to be one flat grey.
+    let voxel_w = 1.0 - hash_filter_w;
+    let surface = material_albedo(material, p, pixel, voxel_w) * pigment;
+    var albedo = select(surface, palette(lip) * pigment, soil_side);
     if (lip != material && soil_coverage < 1.0) || appearance_w > 0.0 {
         let host = material_speck_host(material);
         if lip != material {
-            var surface = material_albedo(material, p, pixel) * pigment;
-            if code != 4u { surface *= mix(0.9, 1.0, max(appearance_w, raw_smooth_w)); }
             // Keep the resolved soil lip, then average its coverage only as
             // authored voxels become sub-pixel. A boolean cutoff at half the
             // filter weight made the lip switch to turf along a distance ring.
@@ -939,7 +926,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         } else if code == 4u && speck && host != material {
             // Filtered single-voxel specks (mud and sand in meadows) blend
             // into their host material.
-            albedo = mix(albedo, material_albedo(host, p, pixel) * pigment, appearance_w);
+            albedo = mix(albedo, material_albedo(host, p, pixel, voxel_w) * pigment, appearance_w);
         }
     }
     if material_mix.x >= 0.0 {
@@ -957,7 +944,9 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             albedo = pigment * mix(palette(material_coverage_ids.x), palette(material_coverage_ids.y), material_coverage);
         }
         if hash_filter_w > 0.0 {
-            albedo = filtered_rock_flecks(albedo, pigment, material_fleck_base, hash_filter_w);
+            let stone = select(material_albedo(material_fleck_base, p, pixel, voxel_w) * pigment, albedo,
+                material_coverage >= 0.0 && material != material_fleck(material_fleck_base));
+            albedo = filtered_rock_flecks(albedo, stone, pigment, material_fleck_base, hash_filter_w);
         }
     }
     let debug_view = frame.hints.w >> 8u;
@@ -976,6 +965,11 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             else if (c.info & INFO_RELIEF) != 0u { kind_colour = vec3<f32>(0.2, 0.8, 0.2); }
             albedo = kind_colour * (0.45 + 0.55 * shade_smooth_w);
         }
+        if debug_view == 5u {
+            // Faces and burial: red sides, blue undersides, green buried
+            // (material depth > 0).
+            albedo = vec3<f32>(select(0.15, 0.9, code < 4u), select(0.15, 0.9, debug_depth > 0), select(0.15, 0.9, code == 5u));
+        }
         ao = 1.0;
         if debug_view == 2u { normal = hit_up(h.t, d); }
     }
@@ -983,7 +977,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let a8 = vec4<u32>(vec4<f32>(clamp(pow(albedo, vec3<f32>(1.0 / 2.2)), vec3<f32>(0.0), vec3<f32>(1.0)), ao) * 255.0 + 0.5);
     out.albedo_ao = a8.x | (a8.y << 8u) | (a8.z << 16u) | (a8.w << 24u);
     out.normal = oct_encode(normal);
-    let filtered = u32(round(shade_smooth_w * 7.0));
+    let filtered = select(u32(round(shade_smooth_w * 7.0)), 7u, natural_step);
     out.flags = ST_HIT | (material << 8u) | (level << 16u) | (filtered << 21u) | (lift << 24u);
     surfaces[index] = out;
 }

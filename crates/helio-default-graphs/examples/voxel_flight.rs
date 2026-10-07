@@ -423,10 +423,15 @@ impl Flight {
     /// Draw until residency is complete; returns (frames, synchronized ms).
     fn settle(&mut self, stage: &str, eye: DVec3, forward: Vec3) -> (usize, f64) {
         let mut ms = 0.0;
-        for frames in 1..=3000 {
+        // Frames before the pipelines finish compiling (on a worker) draw
+        // no terrain and do not count.
+        let mut frames = 0;
+        while frames < 3000 {
             ms += self.draw(stage, eye, forward);
-            if self.pass().renderer().is_some_and(|r| r.settled()) {
-                return (frames, ms);
+            match self.pass().renderer() {
+                Some(r) if r.settled() => return (frames + 1, ms),
+                Some(_) => frames += 1,
+                None => {}
             }
         }
         panic!("{stage}: residency did not settle: {:?}", self.pass().renderer().map(|r| r.stats()));
@@ -793,10 +798,28 @@ fn main() {
     // overhangs (A/B for volumetric columns).
     // HELIO_VOXEL_FLIGHT_SEED=<n>: the Earth stack with another seed (7).
     let seed = std::env::var("HELIO_VOXEL_FLIGHT_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(7);
+    // HELIO_VOXEL_FLIGHT_PRESET=earth|moon|desert: the layer stack (Earth).
+    let stack = match std::env::var("HELIO_VOXEL_FLIGHT_PRESET").as_deref() {
+        Ok("moon") => helio_pass_voxel_planet::layers::TerrainLayers::moon(),
+        Ok("desert") => helio_pass_voxel_planet::layers::TerrainLayers::desert(),
+        Ok("earth") | Err(_) => helio_pass_voxel_planet::layers::TerrainLayers::earth(),
+        Ok(other) => panic!("unknown preset {other}"),
+    };
+    // HELIO_VOXEL_FLIGHT_GRAIN=scale_m,octaves,ratio: an extra roughness
+    // layer (A/B for ground grain).
+    let mut stack = stack;
+    // HELIO_VOXEL_FLIGHT_NO_CAVES / _NO_OVERHANGS: A/B for volumetric terms.
+    stack.caves.enabled &= std::env::var_os("HELIO_VOXEL_FLIGHT_NO_CAVES").is_none();
+    stack.overhangs.enabled &= std::env::var_os("HELIO_VOXEL_FLIGHT_NO_OVERHANGS").is_none();
+    if let Ok(grain) = std::env::var("HELIO_VOXEL_FLIGHT_GRAIN") {
+        use helio_pass_voxel_planet::layers::{Layer, LayerKind, LayerMask};
+        let v: Vec<f64> = grain.split(',').map(|x| x.trim().parse().unwrap()).collect();
+        stack.layers.push(Layer { kind: LayerKind::Roughness, mask: LayerMask::AboveDeepSea, scale_km: v[0] / 1000.0, octaves: v[1] as u32, ratio: v[2], ..Layer::default() });
+    }
     let terrain = if std::env::var_os("HELIO_VOXEL_FLIGHT_HEIGHTFIELD").is_some() {
-        helio_pass_voxel_planet::layers::TerrainLayers::earth().heightfield().source(seed)
+        stack.heightfield().source(seed)
     } else {
-        helio_pass_voxel_planet::layers::TerrainLayers::earth().source(seed)
+        stack.source(seed)
     };
     let planet = Planet::new(PlanetRecipe { voxel_size_m: voxel, terrain, ..Default::default() }).unwrap();
     let mut flight = Flight::new(&output, size, quality, planet);
@@ -809,6 +832,14 @@ fn main() {
     let dir = land_near(&flight.planet, 2, 0.47, 0.53, 20.0);
     let ground = flight.planet.surface_point(dir, 1.7);
     let heading = 0.6;
+    if let Ok(views) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS") {
+        capture_views(&mut flight, &views, ground, heading);
+        return;
+    }
+    if let Some(km) = std::env::var("HELIO_VOXEL_FLIGHT_LODCMP").ok().and_then(|v| v.parse::<f64>().ok()) {
+        lod_compare(&mut flight, km);
+        return;
+    }
     let forward = look(ground, heading, -12.0);
     let (frames, ms) = flight.settle("ground_load", ground, forward);
     eprintln!("VOXEL_FLIGHT ground load {frames} frames {ms:.1} ms");
@@ -864,10 +895,6 @@ fn main() {
     }
     if let Some(secs) = std::env::var("HELIO_VOXEL_FLIGHT_LONG").ok().and_then(|v| v.parse::<f64>().ok()) {
         long_route(&mut flight, secs);
-        return;
-    }
-    if let Some(km) = std::env::var("HELIO_VOXEL_FLIGHT_LODCMP").ok().and_then(|v| v.parse::<f64>().ok()) {
-        lod_compare(&mut flight, km);
         return;
     }
     if let Ok(log) = std::env::var("HELIO_VOXEL_FLIGHT_REPLAY") {
@@ -964,54 +991,6 @@ fn main() {
         flight.write_csv();
         let error = pollster::block_on(validation.pop());
         assert!(error.is_none(), "GPU validation: {error:?}");
-        return;
-    }
-    // HELIO_VOXEL_FLIGHT_VIEWS="height:pitch,...": settle and capture views
-    // above the ground site (`view_<height>_<pitch>.png`).
-    if let Ok(views) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS") {
-        // HELIO_VOXEL_FLIGHT_VIEWS_CAVES=1: from the nearest cave region
-        // (columns whose generated volume reaches the surface).
-        let mut ground = if std::env::var_os("HELIO_VOXEL_FLIGHT_VIEWS_CAVES").is_some() { cave_region_ground(&flight.planet, ground) } else { ground };
-        // HELIO_VOXEL_FLIGHT_VIEWS_MOUNTAIN=<km>: on the flank of the nearest
-        // high summit, that far from it, looking at it.
-        let mut range = None;
-        // HELIO_VOXEL_FLIGHT_VIEWS_POLE=<bearing rad>: at the north pole (the
-        // Pulsar example's spawn), looking along that bearing (x towards z).
-        let mut pole_bearing = None;
-        if let Some(bearing) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS_POLE").ok().and_then(|v| v.parse::<f64>().ok()) {
-            ground = flight.planet.surface_point(DVec3::Y, 0.0);
-            pole_bearing = Some(bearing);
-        }
-        if let Some(km) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS_MOUNTAIN").ok().and_then(|v| v.parse::<f64>().ok()) {
-            let r = mountain(&flight.planet, heading);
-            let away = tangent(r.peak, heading + std::f64::consts::PI).as_dvec3();
-            ground = flight.planet.surface_point(r.peak + away * km * 1000.0, 0.0);
-            range = Some(r);
-        }
-        for view in views.split(',') {
-            let mut parts = view.split(':').map(|v| v.trim().parse::<f64>().unwrap());
-            let (height, pitch) = (parts.next().unwrap(), parts.next().unwrap_or(-20.0));
-            let eye = flight.planet.surface_point(ground, height);
-            let forward = match &range {
-                _ if pole_bearing.is_some() => {
-                    let (b, p) = (pole_bearing.unwrap(), pitch.to_radians());
-                    (DVec3::new(b.cos() * p.cos(), p.sin(), b.sin() * p.cos())).as_vec3().normalize()
-                }
-                Some(r) => {
-                    let p = (pitch as f32).to_radians();
-                    (level_toward(r, eye).as_vec3() * p.cos() + up_for(eye) * p.sin()).normalize()
-                }
-                None => look(eye, heading, pitch),
-            };
-            let name = format!("view_{height}_{}", -pitch);
-            eprintln!("VIEWS {name}: eye {:.1} m from the centre, ground {:.1} m above the datum", eye.length(), eye.length() - height - flight.planet.grid().radius());
-            flight.settle(&name, eye, forward);
-            for _ in 0..8 {
-                flight.draw(&name, eye, forward);
-            }
-            flight.capture(&name);
-        }
-        flight.write_csv();
         return;
     }
     if std::env::var_os("HELIO_VOXEL_FLIGHT_SCULPT").is_some() {
@@ -1971,10 +1950,18 @@ fn blocky(flight: &mut Flight) -> (f64, f64, f64) {
 /// 1, 2, 4, 8, 16: each doubling moves every level one step coarser):
 /// surface colours must not depend on the level that draws them.
 fn lod_compare(flight: &mut Flight, km: f64) {
-    let range = mountain(&flight.planet, 0.0);
-    let away = tangent(range.peak, std::f64::consts::PI).as_dvec3();
-    let ground = (range.peak + away * km * 1000.0).normalize();
-    for height in [300.0, 1500.0] {
+    // HELIO_VOXEL_FLIGHT_VIEWS_POLE: over the pole's hills instead (the
+    // Pulsar example), at lower heights.
+    let pole = std::env::var_os("HELIO_VOXEL_FLIGHT_VIEWS_POLE").is_some();
+    let ground = if pole {
+        DVec3::Y
+    } else {
+        let range = mountain(&flight.planet, 0.0);
+        let away = tangent(range.peak, std::f64::consts::PI).as_dvec3();
+        (range.peak + away * km * 1000.0).normalize()
+    };
+    let heights: &[f64] = if pole { &[60.0, 300.0] } else { &[300.0, 1500.0] };
+    for &height in heights {
         let eye = flight.planet.surface_point(ground, height);
         let up = eye.normalize();
         let ahead = (DVec3::X - up * DVec3::X.dot(up)).normalize();
@@ -2088,4 +2075,68 @@ fn sculpt_stress(flight: &mut Flight, ground: DVec3, heading: f64) {
         );
     }
     flight.capture("sculpt");
+}
+
+/// HELIO_VOXEL_FLIGHT_VIEWS="height:pitch,...": settles and captures views
+/// above the ground site (`view_<height>_<pitch>.png`), skipping the ground
+/// audits.
+fn capture_views(flight: &mut Flight, views: &str, ground: DVec3, heading: f64) {
+    // HELIO_VOXEL_FLIGHT_VIEWS_CAVES=1: from the nearest cave region
+    // (columns whose generated volume reaches the surface).
+    let mut ground = if std::env::var_os("HELIO_VOXEL_FLIGHT_VIEWS_CAVES").is_some() { cave_region_ground(&flight.planet, ground) } else { ground };
+    // HELIO_VOXEL_FLIGHT_VIEWS_MOUNTAIN=<km>: on the flank of the nearest
+    // high summit, that far from it, looking at it.
+    let mut range = None;
+    // HELIO_VOXEL_FLIGHT_VIEWS_POLE=<bearing rad>: at the north pole (the
+    // Pulsar example's spawn), looking along that bearing (x towards z).
+    let mut pole_bearing = None;
+    if let Some(bearing) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS_POLE").ok().and_then(|v| v.parse::<f64>().ok()) {
+        ground = flight.planet.surface_point(DVec3::Y, 0.0);
+        pole_bearing = Some(bearing);
+    }
+    if let Some(km) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS_MOUNTAIN").ok().and_then(|v| v.parse::<f64>().ok()) {
+        let r = mountain(&flight.planet, heading);
+        let away = tangent(r.peak, heading + std::f64::consts::PI).as_dvec3();
+        ground = flight.planet.surface_point(r.peak + away * km * 1000.0, 0.0);
+        range = Some(r);
+    }
+    // HELIO_VOXEL_FLIGHT_VIEWS_AHEAD=<m>,<right m>: moves the ground site
+    // along the view heading (non-pole views), to visit what a view showed.
+    if let Ok(ahead) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS_AHEAD") {
+        let v: Vec<f64> = ahead.split(',').map(|x| x.trim().parse().unwrap()).collect();
+        let forward = tangent(ground, heading).as_dvec3();
+        let right = tangent(ground, heading - std::f64::consts::FRAC_PI_2).as_dvec3();
+        ground = flight.planet.surface_point(ground + forward * v[0] + right * v.get(1).copied().unwrap_or(0.0), 0.0);
+    }
+    // HELIO_VOXEL_FLIGHT_LOD_PIXELS=<f>: the renderer's lod_pixels (2: every
+    // level one step finer), to compare a view across levels.
+    if let Some(lod) = std::env::var("HELIO_VOXEL_FLIGHT_LOD_PIXELS").ok().and_then(|v| v.parse::<f32>().ok()) {
+        if let Some(r) = flight.pass().renderer_mut() {
+            r.settings_mut().lod_pixels = lod;
+        }
+    }
+    for view in views.split(',') {
+        let mut parts = view.split(':').map(|v| v.trim().parse::<f64>().unwrap());
+        let (height, pitch) = (parts.next().unwrap(), parts.next().unwrap_or(-20.0));
+        let eye = flight.planet.surface_point(ground, height);
+        let forward = match &range {
+            _ if pole_bearing.is_some() => {
+                let (b, p) = (pole_bearing.unwrap(), pitch.to_radians());
+                (DVec3::new(b.cos() * p.cos(), p.sin(), b.sin() * p.cos())).as_vec3().normalize()
+            }
+            Some(r) => {
+                let p = (pitch as f32).to_radians();
+                (level_toward(r, eye).as_vec3() * p.cos() + up_for(eye) * p.sin()).normalize()
+            }
+            None => look(eye, heading, pitch),
+        };
+        let name = format!("view_{height}_{}", -pitch);
+        eprintln!("VIEWS {name}: eye {:.1} m from the centre, ground {:.1} m above the datum", eye.length(), eye.length() - height - flight.planet.grid().radius());
+        flight.settle(&name, eye, forward);
+        for _ in 0..8 {
+            flight.draw(&name, eye, forward);
+        }
+        flight.capture(&name);
+    }
+    flight.write_csv();
 }

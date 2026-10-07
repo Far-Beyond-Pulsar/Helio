@@ -79,7 +79,7 @@ impl PlanetRecipe {
 /// The base column a ray walk is in (`Planet::kind_in`).
 struct RayColumn {
     key: (u8, i32, i32),
-    top: i32,
+    height: i32,
     brushes: Vec<FaceBrush>,
 }
 
@@ -237,8 +237,8 @@ impl Planet {
     /// Canonical `(kind, material)` of a level cell: kind 0 air, 1 solid.
     /// Material 0 on a solid cell means "terrain rule".
     pub fn sample_kind(&self, level: u32, face: u8, i: i32, j: i32, k: i32) -> (u32, u32) {
-        let top = self.column_top(face, i, j, level);
-        let kind = terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, top);
+        let height = self.column_height(face, i, j, level);
+        let kind = terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, height);
         let center = [center_half(i, level), center_half(j, level), center_half(k, level)];
         apply(self.face_brushes(face, i, j, level).into_iter(), center, || self.grid.volume_point(face, i, j, k, level), kind, 0)
     }
@@ -249,12 +249,12 @@ impl Planet {
         if column.as_ref().is_none_or(|c| c.key != key) {
             *column = Some(RayColumn {
                 key,
-                top: self.column_top(cell.face, cell.i, cell.j, 0),
+                height: self.column_height(cell.face, cell.i, cell.j, 0),
                 brushes: self.face_brushes(cell.face, cell.i, cell.j, 0),
             });
         }
         let c = column.as_ref().expect("filled above");
-        let kind = terrain::generated_kind(&self.grid, &*self.field, cell.face, cell.i, cell.j, cell.k, 0, c.top);
+        let kind = terrain::generated_kind(&self.grid, &*self.field, cell.face, cell.i, cell.j, cell.k, 0, c.height);
         if c.brushes.is_empty() {
             return kind;
         }
@@ -297,13 +297,12 @@ impl Planet {
             0 => material::AIR,
             _ if material != 0 => material,
             _ => {
-                let top = self.column_top(cell.face, cell.i, cell.j, 0);
                 let slope = self.material_slope(cell.face, cell.i, cell.j);
                 let p = self.grid.domain_point(cell.face, cell.i, cell.j, 0);
                 let top_height = self.column_height(cell.face, cell.i, cell.j, 0);
                 // Depth counts from the generated top: overhangs and the
                 // rock around caves lie below it.
-                let generated = terrain::generated_top(&self.grid, &*self.field, cell.face, cell.i, cell.j, 0, top);
+                let generated = terrain::generated_top(&self.grid, &*self.field, cell.face, cell.i, cell.j, 0, top_height);
                 let depth = (generated - 1 - cell.k).max(0);
                 let surface = self.field.surface(p, self.grid.level_offset(), top_height) & 0xff;
                 self.field.ground_material(p, surface, top_height, depth, slope, cell.k) & material::ID
@@ -516,14 +515,14 @@ impl Planet {
         let g = &self.grid;
         let (cell, _) = g.locate(g.at_radial(p, g.radius()));
         let (face, i, j) = (cell.face, cell.i, cell.j);
-        let top = self.column_top(face, i, j, 0);
+        let height = self.column_height(face, i, j, 0);
         let brushes = self.face_brushes(face, i, j, 0);
         let added = brushes.iter().filter(|b| b.op() == 1).map(|b| b.k_hi.div_euclid(2) + 1).max().unwrap_or(i32::MIN);
-        let mut k = terrain::generated_top(g, &*self.field, face, i, j, 0, top).max(added);
+        let mut k = terrain::generated_top(g, &*self.field, face, i, j, 0, height).max(added);
         let floor = ((self.inner_radius() - g.radius()) / g.voxel_size()).floor() as i32;
         while k > floor {
             let below = k - 1;
-            let kind = terrain::generated_kind(g, &*self.field, face, i, j, below, 0, top);
+            let kind = terrain::generated_kind(g, &*self.field, face, i, j, below, 0, height);
             let center = [center_half(i, 0), center_half(j, 0), center_half(below, 0)];
             if apply(brushes.iter().copied(), center, || g.volume_point(face, i, j, below, 0), kind, 0).0 == 1 {
                 break;
@@ -550,7 +549,7 @@ impl Planet {
     pub fn ground_height(&self, eye: DVec3) -> f64 {
         let (cell, _) = self.grid.locate(eye);
         // The generated top: overhang lips and cave mouths included.
-        let top = terrain::generated_top(&self.grid, &*self.field, cell.face, cell.i, cell.j, 0, self.column_top(cell.face, cell.i, cell.j, 0));
+        let top = terrain::generated_top(&self.grid, &*self.field, cell.face, cell.i, cell.j, 0, self.column_height(cell.face, cell.i, cell.j, 0));
         self.grid.height(eye) - f64::from(top) * self.grid.voxel_size()
     }
     /// Radial coordinate bounding the solid cells whose ground point lies
