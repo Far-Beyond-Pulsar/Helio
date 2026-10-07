@@ -166,9 +166,8 @@ pub struct StaticMeshMaterialSlots {
     pub slots: Vec<StaticMeshMaterialSlot>,
 }
 
-/// Small native surface-material document used by mesh slots. Material graph
-/// assets can later compile into the same GPU row; this format keeps slot
-/// assignment functional for scalar PBR materials today.
+/// Small native scalar-PBR surface document used by mesh slots. The shader
+/// graph editor's `.material` assets are not runtime material assets yet.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SurfaceMaterialAsset {
@@ -480,10 +479,7 @@ impl StaticMeshMaterialSlotsEditor {
         self.subscriptions.clear();
         self.value = value.clone();
         let project_root = engine_state::get_project_path().map(std::path::PathBuf::from);
-        let queries = vec![
-            AssetQuery::extension("material"),
-            AssetQuery::extension("mat"),
-        ];
+        let queries = vec![AssetQuery::extension("mat")];
         for (index, slot) in value.slots.iter().enumerate() {
             let key = (slot.source_material, index);
             let picker = cx.new(|cx| {
@@ -814,13 +810,6 @@ pub struct StaticMeshComponent {
     #[serde(skip)]
     pub indices: Vec<u32>,
 
-    /// Section ranges and source material-slot indices. The packed table is
-    /// shared by content identity with the mesh geometry and mirrored through
-    /// SceneDB's growable GPU pool; the names remain CPU-side asset metadata.
-    #[gpu(buffer = "builtin_mesh_section", mirror = Once, content_id = "mesh_asset")]
-    #[serde(skip)]
-    pub gpu_sections: Vec<u32>,
-
     /// Names and source material indices discovered while loading the mesh.
     /// These are asset metadata, not authored per-instance overrides.
     #[serde(skip)]
@@ -967,20 +956,6 @@ fn apply_legacy_material_override(component: &mut StaticMeshComponent) {
     }
 }
 
-fn pack_gpu_sections(sections: &[MeshSection]) -> Vec<u32> {
-    sections
-        .iter()
-        .flat_map(|section| {
-            [
-                section.first_index,
-                section.index_count,
-                section.material_slot,
-                0,
-            ]
-        })
-        .collect()
-}
-
 /// Custom hydrate for `#[register_world_component(hydrate = ...)]`
 /// (Pulsar-Native#561 Phase D). Loads `mesh_asset`'s actual vertex/index
 /// data, once, right here at hydrate time -- not per render frame, and not
@@ -1004,7 +979,6 @@ fn hydrate_static_mesh_component(
     parsed.bounds_local = bounds_local;
     parsed.vertices = upload.geometry.vertices;
     parsed.indices = upload.geometry.indices;
-    parsed.gpu_sections = pack_gpu_sections(&upload.sections);
     parsed.material_slots =
         reconcile_material_slots(&parsed.material_slots, &upload.material_slots);
     apply_legacy_material_override(&mut parsed);
@@ -1037,7 +1011,6 @@ fn refresh_static_mesh_gpu_mirror(
     component.bounds_local = bounds_local;
     component.vertices = upload.geometry.vertices;
     component.indices = upload.geometry.indices;
-    component.gpu_sections = pack_gpu_sections(&upload.sections);
     component.material_slots =
         reconcile_material_slots(&component.material_slots, &upload.material_slots);
     apply_legacy_material_override(&mut component);

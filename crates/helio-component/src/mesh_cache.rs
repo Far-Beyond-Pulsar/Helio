@@ -10,9 +10,8 @@
 //! Format (`PMSH`): a small header (magic + version + vertex/index counts)
 //! followed by the bytemuck-packed [`PackedVertex`] and `u32` index arrays.
 //!
-//! NOTE: only mesh geometry is baked today. Materials/textures from the source
-//! scene are not yet written as native assets — that's a follow-up once the
-//! engine's native material-asset format is wired in here.
+//! The v3 format also stores mesh sections and imported scalar PBR material
+//! values. Source texture payloads are still not copied into native assets.
 //!
 //! # v2: content-id provenance (Pulsar-Native#632/#658)
 //!
@@ -102,17 +101,6 @@ pub struct MeshSection {
     pub first_index: u32,
     pub index_count: u32,
     pub material_slot: u32,
-}
-
-/// Packed shader-facing section data. Material asset references remain on the
-/// authored component; this table is only the geometry/index-to-slot map.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
-#[repr(C)]
-pub struct GpuMeshSection {
-    pub first_index: u32,
-    pub index_count: u32,
-    pub material_slot: u32,
-    pub _padding: u32,
 }
 
 /// Full static-mesh payload used by import, hydration, and rendering.
