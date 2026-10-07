@@ -62,12 +62,15 @@ fn material_speck_host(m: u32) -> u32 { return frame.materials[min(m, MATERIAL_S
 fn material_fleck_share(m: u32) -> f32 { return f32(frame.materials[min(m, MATERIAL_SLOTS - 1u)].links.w) / 65536.0; }
 
 // Whether a hit in layer `k` of column `c` (whose top there is `top`) lies on
-// the natural ground surface: any cell of a height-field column, and the top
-// cell (its surface and risers) of a generated cave or overhang column.
-// Cave walls, ceilings and edit cuts are not.
+// the natural ground surface: any cell of a height-field column, and the
+// generated top cell (its surface and risers) of a column with caves,
+// overhangs or edits. Cave walls, ceilings and cells below the top are not;
+// a top cell's face that a dig exposed is not either (the caller checks
+// `removed_air_neighbour`). Edited columns used to lose all natural
+// appearance: brown soil dashes and contour lines around every edit.
 fn natural_surface_hit(c: Column, k: i32, top: i32) -> bool {
     if (c.info & INFO_TOPOLOGY) == 0u { return true; }
-    return column_tops_down(c) && c.edits == 0u && k >= top - 1;
+    return k >= top - 1;
 }
 
 // Natural material filtering for a hit in layer `k` of column `c` (top
@@ -77,7 +80,7 @@ fn natural_surface_hit(c: Column, k: i32, top: i32) -> bool {
 // down every gentle slope of a cave region.
 fn natural_material_at(edited: bool, c: Column, k: i32, top: i32) -> bool {
     return natural_material_filter_allowed(edited, c)
-        || (!edited && column_tops_down(c) && natural_surface_hit(c, k, top));
+        || (!edited && (c.info & INFO_TOPOLOGY) != 0u && natural_surface_hit(c, k, top));
 }
 
 fn natural_material_filter_allowed(edited: bool, c: Column) -> bool {
@@ -667,7 +670,10 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             domain_point(face, h.i, h.j, level));
     }
     let edited = material != 0u;
-    let natural_material = natural_material_at(edited, c, h.k, top);
+    // A face a dig exposed (its air-side cell was removed) shows the cut.
+    let exposed = (c.info & INFO_TOPOLOGY) != 0u && c.edits != 0u && code < 4u
+        && removed_air_neighbour(h, c, face, level, code);
+    let natural_material = natural_material_at(edited, c, h.k, top) && !exposed;
     var speck = false;
     var slope = 0;
     var debug_depth = 0;
@@ -731,7 +737,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // Generated base tops do not describe edit walls, cave ceilings or floors.
     // Paint-only and ignored tiny lists keep their existing filtering.
     let normal_filter_w = select(coarse_w, base_filter_w * relief_face_w, far_relief());
-    let smooth_w = select(0.0, normal_filter_w, natural_surface_hit(c, h.k, top));
+    let smooth_w = select(0.0, normal_filter_w, natural_surface_hit(c, h.k, top) && !exposed);
     // A grazing face can have subpixel area while its long edge is resolved.
     // Keep the resolved face normal. Pigment and corner occlusion can alias
     // along the compressed axis even while that face's long edge is resolved.
@@ -740,7 +746,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // softness`, appearance detail.w), cast no step shadows and keep turf on
     // their risers, so they read as voxel texture instead of black contour
     // lines. Edits and cave walls keep crisp faces.
-    let natural_step = !edited && natural_surface_hit(c, h.k, top);
+    let natural_step = !edited && !exposed && natural_surface_hit(c, h.k, top);
     let soft_w = select(0.0, frame.detail.w, natural_step);
     let shade_smooth_w = max(smooth_w, soft_w);
     let shade_canonical_w = canonical_w;
@@ -823,7 +829,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             if code < 4u { air_top = air_side_top(h, c, face, level, code, air_top); }
             depth = max(air_top - 1 - h.k, 0) << level;
         } else if (c.info & INFO_TOPOLOGY) != 0u {
-            if code >= 4u || removed_air_neighbour(h, c, face, level, code) {
+            if code >= 4u || exposed {
                 depth = max(top - 1 - h.k, 0) << level;
             }
         }
