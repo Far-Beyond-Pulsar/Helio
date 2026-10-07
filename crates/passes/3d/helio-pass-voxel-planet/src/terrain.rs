@@ -297,7 +297,10 @@ impl Default for TerrainAppearance {
         materials[MARE as usize].patches = Some([unit([98, 98, 99]), unit([84, 84, 86]), unit([68, 68, 71])]);
         materials[BOULDER as usize].patches = Some([unit([130, 128, 123]), unit([112, 110, 106]), unit([90, 89, 86])]);
         materials[EJECTA as usize].speck_host = Some(REGOLITH as u8);
-        Self { materials, detail: [0.3, 0.3, 0.08, 0.7] }
+        // Steps of natural ground are lit almost wholly with the slope: voxels
+        // read through their own colours (pigment, hue), not as dark contour
+        // lines along every riser.
+        Self { materials, detail: [0.3, 0.4, 0.08, 0.9] }
     }
 }
 

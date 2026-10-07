@@ -125,7 +125,7 @@ fn material_albedo(m: u32, p: vec3<i32>, pixel: f32, voxel: f32) -> vec3<f32> {
         clumps += 0.3 * f32(noise(p, 7u, 0x9b05688cu)) / f32(NOISE_ONE) * clamp((0.8 - pixel) / 0.4, 0.0, 1.0);
     }
     let blade = f32(hash3(p.x, p.y, p.z, 0x1b873593u) & 255u) / 255.0 - 0.5;
-    let t = clamp(0.52 + frame.detail.x * (0.7 * broad + 0.16 * patches + clumps) + 0.5 * frame.detail.y * blade * voxel, 0.0, 1.0);
+    let t = clamp(0.52 + frame.detail.x * (0.7 * broad + 0.16 * patches + clumps) + frame.detail.y * blade * voxel, 0.0, 1.0);
     let dry = material.patches[0].rgb;
     let middle = material.patches[1].rgb;
     let lush = material.patches[2].rgb;
