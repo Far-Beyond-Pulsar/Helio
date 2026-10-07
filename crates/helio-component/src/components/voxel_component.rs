@@ -7,8 +7,7 @@
 
 use engine_class_derive::{component_events, engine_class};
 use helio_voxel_data::{
-    VoxelEditJournal,
-    VoxelStoredPayload, VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION,
+    VoxelEditJournal, VoxelStoredPayload, VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION,
 };
 pub use helio_voxel_data::{VoxelPayloadKey, VoxelPayloadStore};
 use pulsar_scene_model::components::Transform;
@@ -87,13 +86,19 @@ pub struct VoxelGeneratorRef {
     #[serde(rename = "generator_id", default)]
     pub id: String,
     /// Output version; a new version may generate different terrain.
-    #[serde(rename = "generator_version", default = "default_voxel_generator_version")]
+    #[serde(
+        rename = "generator_version",
+        default = "default_voxel_generator_version"
+    )]
     pub version: u32,
 }
 
 impl VoxelGeneratorRef {
     pub fn new(id: impl Into<String>, version: u32) -> Self {
-        Self { id: id.into(), version }
+        Self {
+            id: id.into(),
+            version,
+        }
     }
 }
 
@@ -104,12 +109,18 @@ impl Default for VoxelGeneratorRef {
     }
 }
 
-fn serialize_generator_ref_json(value: &VoxelGeneratorRef) -> pulsar_reflection::ReflectResult<serde_json::Value> {
-    serde_json::to_value(value).map_err(|e| pulsar_reflection::ReflectError::SerializationFailed(e.to_string()))
+fn serialize_generator_ref_json(
+    value: &VoxelGeneratorRef,
+) -> pulsar_reflection::ReflectResult<serde_json::Value> {
+    serde_json::to_value(value)
+        .map_err(|e| pulsar_reflection::ReflectError::SerializationFailed(e.to_string()))
 }
 
-fn deserialize_generator_ref_json(value: serde_json::Value) -> pulsar_reflection::ReflectResult<VoxelGeneratorRef> {
-    serde_json::from_value(value).map_err(|e| pulsar_reflection::ReflectError::DeserializationFailed(e.to_string()))
+fn deserialize_generator_ref_json(
+    value: serde_json::Value,
+) -> pulsar_reflection::ReflectResult<VoxelGeneratorRef> {
+    serde_json::from_value(value)
+        .map_err(|e| pulsar_reflection::ReflectError::DeserializationFailed(e.to_string()))
 }
 
 /// Registered for reflection; the picker editor is registered by the host
@@ -279,7 +290,17 @@ impl Clone for VoxelComponent {
 }
 
 /// Overall form of a voxel world.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, pulsar_reflection::Reflectable)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    pulsar_reflection::Reflectable,
+)]
 pub enum VoxelWorldShape {
     /// A planet centred on the entity origin (`planet_radius`).
     Sphere,
@@ -335,15 +356,33 @@ pub struct VoxelTerrainComponent {
     pub shape: VoxelWorldShape,
     /// Planet radius in metres (sphere worlds).
     #[serde(default = "default_planet_radius")]
-    #[property(min = 1000.0, max = 50000000.0, step = 1000.0, category = "World", label = "Planet radius (m)")]
+    #[property(
+        min = 1000.0,
+        max = 50000000.0,
+        step = 1000.0,
+        category = "World",
+        label = "Planet radius (m)"
+    )]
     pub planet_radius: f64,
     /// Edge length of a finite plane in metres.
     #[serde(default = "default_plane_size")]
-    #[property(min = 16.0, max = 13000000.0, step = 16.0, category = "World", label = "Plane size (m)")]
+    #[property(
+        min = 16.0,
+        max = 13000000.0,
+        step = 16.0,
+        category = "World",
+        label = "Plane size (m)"
+    )]
     pub plane_size: f64,
     /// Edge length of a base-resolution voxel in metres (0.1 to 1 for
     /// streamed terrain).
-    #[property(min = 0.1, max = 1.0, step = 0.05, category = "World", label = "Voxel size (m)")]
+    #[property(
+        min = 0.1,
+        max = 1.0,
+        step = 0.05,
+        category = "World",
+        label = "Voxel size (m)"
+    )]
     pub voxel_size: f64,
     /// The registered terrain generator that fills the world. Its settings
     /// live in its settings component on the same entity.
@@ -441,15 +480,26 @@ impl VoxelTerrainComponent {
     /// voxels. Add a [`VoxelLandformComponent`] to shape its continents and
     /// mountains.
     pub fn planet(radius: f64) -> Self {
-        Self { shape: VoxelWorldShape::Sphere, planet_radius: radius, ..Self::default() }
+        Self {
+            shape: VoxelWorldShape::Sphere,
+            planet_radius: radius,
+            ..Self::default()
+        }
     }
     /// A square plane of `size` metres with Helio's terrain generator.
     pub fn plane(size: f64) -> Self {
-        Self { shape: VoxelWorldShape::Plane, plane_size: size, ..Self::default() }
+        Self {
+            shape: VoxelWorldShape::Plane,
+            plane_size: size,
+            ..Self::default()
+        }
     }
     /// A plane without edges within reach, with Helio's terrain generator.
     pub fn infinite_plane() -> Self {
-        Self { shape: VoxelWorldShape::InfinitePlane, ..Self::default() }
+        Self {
+            shape: VoxelWorldShape::InfinitePlane,
+            ..Self::default()
+        }
     }
 
     /// Low-level live SceneDB data capability. Normal
@@ -508,34 +558,88 @@ impl Clone for VoxelTerrainComponent {
 #[serde(default)]
 pub struct VoxelLandformComponent {
     /// Typical continent width in kilometres.
-    #[property(min = 10.0, max = 20000.0, step = 10.0, category = "Continents", label = "Continent width (km)")]
+    #[property(
+        min = 10.0,
+        max = 20000.0,
+        step = 10.0,
+        category = "Continents",
+        label = "Continent width (km)"
+    )]
     pub continent_km: f64,
     /// Depth of the low basins below the datum, in metres.
-    #[property(min = 0.0, max = 10000.0, step = 10.0, category = "Continents", label = "Ocean depth (m)")]
+    #[property(
+        min = 0.0,
+        max = 10000.0,
+        step = 10.0,
+        category = "Continents",
+        label = "Ocean depth (m)"
+    )]
     pub ocean_depth_m: f64,
     /// Typical lowland height above the datum, in metres.
-    #[property(min = 0.0, max = 5000.0, step = 10.0, category = "Continents", label = "Lowland height (m)")]
+    #[property(
+        min = 0.0,
+        max = 5000.0,
+        step = 10.0,
+        category = "Continents",
+        label = "Lowland height (m)"
+    )]
     pub lowland_m: f64,
     /// Height of mountain ranges, in metres.
-    #[property(min = 0.0, max = 9000.0, step = 10.0, category = "Mountains", label = "Mountain height (m)")]
+    #[property(
+        min = 0.0,
+        max = 9000.0,
+        step = 10.0,
+        category = "Mountains",
+        label = "Mountain height (m)"
+    )]
     pub mountain_m: f64,
     /// Spacing of mountain ridges, in kilometres.
-    #[property(min = 1.0, max = 500.0, step = 1.0, category = "Mountains", label = "Ridge spacing (km)")]
+    #[property(
+        min = 1.0,
+        max = 500.0,
+        step = 1.0,
+        category = "Mountains",
+        label = "Ridge spacing (km)"
+    )]
     pub mountain_km: f64,
     /// Height above which flat ground is snow, in metres.
-    #[property(min = 0.0, max = 10000.0, step = 10.0, category = "Mountains", label = "Snowline (m)")]
+    #[property(
+        min = 0.0,
+        max = 10000.0,
+        step = 10.0,
+        category = "Mountains",
+        label = "Snowline (m)"
+    )]
     pub snowline_m: f64,
     /// Height of rolling hills, in metres.
-    #[property(min = 0.0, max = 2000.0, step = 1.0, category = "Detail", label = "Hill height (m)")]
+    #[property(
+        min = 0.0,
+        max = 2000.0,
+        step = 1.0,
+        category = "Detail",
+        label = "Hill height (m)"
+    )]
     pub hill_m: f64,
     /// Spacing of hills, in kilometres.
-    #[property(min = 0.1, max = 100.0, step = 0.1, category = "Detail", label = "Hill spacing (km)")]
+    #[property(
+        min = 0.1,
+        max = 100.0,
+        step = 0.1,
+        category = "Detail",
+        label = "Hill spacing (km)"
+    )]
     pub hill_km: f64,
     /// Metre-scale roughness as a fraction of each detail wavelength.
     #[property(min = 0.0, max = 0.2, step = 0.005, category = "Detail")]
     pub roughness: f64,
     /// Scale of the domain warp that bends coasts and ridges, in kilometres.
-    #[property(min = 0.0, max = 500.0, step = 1.0, category = "Detail", label = "Coastline warp (km)")]
+    #[property(
+        min = 0.0,
+        max = 500.0,
+        step = 1.0,
+        category = "Detail",
+        label = "Coastline warp (km)"
+    )]
     pub warp_km: f64,
 }
 
@@ -558,7 +662,17 @@ impl Default for VoxelLandformComponent {
 }
 
 /// A solid terrain material.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, pulsar_reflection::Reflectable)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    pulsar_reflection::Reflectable,
+)]
 pub enum VoxelTerrainMaterial {
     #[default]
     Grass,
@@ -591,7 +705,13 @@ pub struct VoxelFlatTerrainComponent {
     pub height: f64,
     /// Depth of the soil under the surface layer, in metres.
     #[serde(rename = "soil_depth_m")]
-    #[property(min = 0.0, max = 1000.0, step = 0.1, category = "Ground", label = "Soil depth (m)")]
+    #[property(
+        min = 0.0,
+        max = 1000.0,
+        step = 0.1,
+        category = "Ground",
+        label = "Soil depth (m)"
+    )]
     pub soil_depth: f64,
     #[property(category = "Ground")]
     pub surface: VoxelTerrainMaterial,
@@ -792,7 +912,8 @@ fn edit_terrain_samples(
         let edits = samples
             .iter()
             .map(|s| {
-                let p = glam::DVec3::new(s[0] as f64 + 0.5, s[1] as f64 + 0.5, s[2] as f64 + 0.5) * voxel;
+                let p = glam::DVec3::new(s[0] as f64 + 0.5, s[1] as f64 + 0.5, s[2] as f64 + 0.5)
+                    * voxel;
                 super::voxel_world::block_edit(&planet, p, u32::from(material_slot))
             })
             .collect();
@@ -811,7 +932,10 @@ fn edit_terrain_samples(
     if component.material_ids.len() > usize::from(u8::MAX) {
         return Err("voxel terrain material palette exceeds 255 IDs".into());
     }
-    let transform = world.get::<Transform>(entity).copied().unwrap_or_default();
+    // The terrain instance's placement is its owner object's transform.
+    let transform = pulsar_scene_model::attachments::owner_component::<Transform>(world, entity)
+        .copied()
+        .unwrap_or_default();
     let [sx, sy, sz] = transform.scale;
     if transform
         .rotation
@@ -825,7 +949,10 @@ fn edit_terrain_samples(
         || (sx - sz).abs() > 1.0e-5
         || transform.position.iter().any(|value| !value.is_finite())
     {
-        return Err("voxel terrain edits require an unrotated transform with finite positive uniform scale".into());
+        return Err(
+            "voxel terrain edits require an unrotated transform with finite positive uniform scale"
+                .into(),
+        );
     }
     let max_lod = u8::try_from(component.max_chunk_lod)
         .map_err(|_| "max_chunk_lod must fit in a chunk key".to_string())?;

@@ -471,15 +471,17 @@ const TANGENT_COLOR: [f32; 4] = [0.35, 0.85, 1.0, 0.8];
 /// editor overlay: the sampled curve, plus control points, control polygon
 /// and tangent handles on selected splines.
 pub fn spline_debug_lines(world: &pulsar_scenedb::World) -> Vec<helio::DebugVertex> {
+    use pulsar_scene_model::attachments;
     let mut lines = Vec::new();
-    for (entity, spline) in world.query::<&SplineComponent>() {
+    // Each enabled spline instance, drawn with its owner object's transform.
+    for (_, owner, spline) in attachments::enabled_components::<SplineComponent>(world) {
         if world
-            .get::<pulsar_scene_model::Visibility>(entity)
+            .get::<pulsar_scene_model::Visibility>(owner)
             .is_some_and(|v| !v.visible)
         {
             continue;
         }
-        let Some(transform) = world.get::<pulsar_scene_model::Transform>(entity) else {
+        let Some(transform) = world.get::<pulsar_scene_model::Transform>(owner) else {
             continue;
         };
         if !spline.is_valid() {
@@ -495,7 +497,7 @@ pub fn spline_debug_lines(world: &pulsar_scenedb::World) -> Vec<helio::DebugVert
             ),
             Vec3::from_array(transform.position),
         );
-        let selected = world.get::<pulsar_scene_model::Selected>(entity).is_some();
+        let selected = world.get::<pulsar_scene_model::Selected>(owner).is_some();
         append_spline_lines(&mut lines, spline, model, selected);
     }
     lines
@@ -517,7 +519,11 @@ fn append_spline_lines(
             });
         }
     };
-    let curve_color = if selected { SELECTED_CURVE_COLOR } else { CURVE_COLOR };
+    let curve_color = if selected {
+        SELECTED_CURVE_COLOR
+    } else {
+        CURVE_COLOR
+    };
     let samples: Vec<Vec3> = spline.samples().into_iter().map(world_point).collect();
     for pair in samples.windows(2) {
         segment(pair[0], pair[1], curve_color);
@@ -525,12 +531,20 @@ fn append_spline_lines(
     if !selected {
         return;
     }
-    let controls: Vec<Vec3> = spline.points.iter().map(|p| world_point(p.position)).collect();
+    let controls: Vec<Vec3> = spline
+        .points
+        .iter()
+        .map(|p| world_point(p.position))
+        .collect();
     for pair in controls.windows(2) {
         segment(pair[0], pair[1], CONTROL_POLYGON_COLOR);
     }
     if spline.closed && controls.len() > 2 {
-        segment(controls[controls.len() - 1], controls[0], CONTROL_POLYGON_COLOR);
+        segment(
+            controls[controls.len() - 1],
+            controls[0],
+            CONTROL_POLYGON_COLOR,
+        );
     }
     // Control points as small crosses, sized to the curve's own scale.
     let extent = controls
@@ -545,11 +559,21 @@ fn append_spline_lines(
             segment(*p - axis * r, *p + axis * r, SELECTED_CURVE_COLOR);
         }
     }
-    if matches!(spline.algorithm, CurveAlgorithm::Bezier | CurveAlgorithm::Hermite) {
+    if matches!(
+        spline.algorithm,
+        CurveAlgorithm::Bezier | CurveAlgorithm::Hermite
+    ) {
         for p in &spline.points {
             let at = Vec3::from_array(p.position);
-            for handle in [at - Vec3::from_array(p.arrive), at + Vec3::from_array(p.leave)] {
-                segment(world_point(p.position), world_point(handle.to_array()), TANGENT_COLOR);
+            for handle in [
+                at - Vec3::from_array(p.arrive),
+                at + Vec3::from_array(p.leave),
+            ] {
+                segment(
+                    world_point(p.position),
+                    world_point(handle.to_array()),
+                    TANGENT_COLOR,
+                );
             }
         }
     }
