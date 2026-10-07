@@ -43,6 +43,7 @@ fn grazing_soil_lip_filters_radial_coverage_and_preserves_protected_faces() {
             let flags=u32(p.ray_flags.w);
             let edited=(flags&1u)!=0u;
             let c=Column(select(0u,INFO_TOPOLOGY,(flags&2u)!=0u),select(1u,0u,(flags&4u)!=0u));
+            let natural_material=natural_material_filter_allowed(edited,c);
             let d=p.ray_flags.xyz;
             let actual_normal=vec3<f32>(1.0,0.0,0.0);
             let h=Hit(p.appearance.y);

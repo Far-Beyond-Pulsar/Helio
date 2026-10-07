@@ -70,9 +70,20 @@ fn natural_surface_hit(c: Column, k: i32, top: i32) -> bool {
     return column_tops_down(c) && c.edits == 0u && k >= top - 1;
 }
 
+// Natural material filtering for a hit in layer `k` of column `c` (top
+// `top` there): natural columns, and the natural top surface of generated
+// cave and overhang columns (`natural_surface_hit`). Those got edit-cut
+// appearance: grass risers showed bare soil under a thin lip, brown stripes
+// down every gentle slope of a cave region.
+fn natural_material_at(edited: bool, c: Column, k: i32, top: i32) -> bool {
+    return natural_material_filter_allowed(edited, c)
+        || (!edited && column_tops_down(c) && natural_surface_hit(c, k, top));
+}
+
 fn natural_material_filter_allowed(edited: bool, c: Column) -> bool {
     return !edited && (c.info & INFO_TOPOLOGY) == 0u && column_tops_fit(c);
 }
+
 
 // A material's filtered single-voxel flecks keep their share of its colour
 // instead of a fresh full-contrast hash choice per pixel.
@@ -652,6 +663,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             domain_point(face, h.i, h.j, level));
     }
     let edited = material != 0u;
+    let natural_material = natural_material_at(edited, c, h.k, top);
     var speck = false;
     var slope = 0;
     // Appearance is sampled at the ray's base-grid footprint, not the
@@ -736,7 +748,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         fallback_shade_normal = fallback_normal;
         fallback_slope = field.w;
     }
-    if natural_material_filter_allowed(edited, c) {
+    if natural_material {
         material_weathered_skin = true;
         let material_up = hit_up(h.t, d);
         var material_normal = material_up;
@@ -758,7 +770,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         let ty0 = column_top(c, x, 0u);
         let ty7 = column_top(c, x, 7u);
         if level == 0u && (shade_smooth_w > 0.0 || hash_filter_w > 0.0)
-            && natural_material_filter_allowed(edited, c) {
+            && natural_material {
             // A two-cell derivative of integer L0 tops pulses at every riser.
             // Reuse the material block's endpoint reads without new terrain
             // queries or changes to canonical material IDs.
@@ -873,10 +885,10 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             // canonical. A thin soil edge avoids contour stripes on hills.
             let turf_lip = 0.72 + 0.1 * tooth;
             let lip = select(cut_lip, turf_lip + (1.0 - turf_lip) * distance_fade,
-                natural_material_filter_allowed(edited, c));
+                natural_material);
             soil_side = uv.y < 1.0 - lip;
             soil_coverage = soil_lip_coverage(uv.y, lip, pixel, h.t, d,
-                hit_up(h.t, d), actual_normal, size, natural_material_filter_allowed(edited, c));
+                hit_up(h.t, d), actual_normal, size, natural_material);
         }
         if ao_appearance_w < 1.0 {
             let back = select(1, -1, (code & 1u) == 1u);
@@ -936,9 +948,9 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             + material_mix.z * palette(material_mix_ids.z)
             + material_mix.w * palette(material_mix_ids.w));
     } else if material_coverage >= 0.0 && material_fleck_base == M_AIR
-        && natural_material_filter_allowed(edited, c) {
+        && natural_material {
         albedo = pigment * mix(palette(material_coverage_ids.x), palette(material_coverage_ids.y), material_coverage);
-    } else if material_fleck_base != M_AIR && natural_material_filter_allowed(edited, c) {
+    } else if material_fleck_base != M_AIR && natural_material {
         // Band support is independent of single-voxel fleck support. Keep a
         // resolved fleck while filtering unresolved coverage around it.
         if material_coverage >= 0.0 && material != material_fleck(material_fleck_base) {
