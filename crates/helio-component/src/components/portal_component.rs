@@ -8,7 +8,6 @@
 //! (Pulsar-Native#1035, Phase 4; tracked in Pulsar-Native#1055).
 
 use engine_class_derive::{engine_class, register_world_component};
-use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
 
 pub const PORTAL_CLASS_NAME: &str = "PortalComponent";
 
@@ -37,18 +36,7 @@ impl Default for PortalComponent {
 }
 
 #[register_world_component]
-impl ComponentRuntimeBehavior for PortalComponent {
-    const CLASS_NAME: &'static str = PORTAL_CLASS_NAME;
-
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-        // Not rendered (see the module doc): nothing to sync.
-    }
-}
+impl PortalComponent {}
 
 // Reported unfinished (Pulsar-Native#1035, Phase 4; tracked in #1055): the
 // properties card shows the reason and issue, and attaching one logs them once.

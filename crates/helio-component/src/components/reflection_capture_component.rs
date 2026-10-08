@@ -10,9 +10,7 @@
 //! `"reflection_captures"` buffer.
 
 use engine_class_derive::{engine_class, register_world_component};
-use pulsar_reflection::{
-    ComponentRuntimeBehavior, ComponentRuntimeContext, Reflectable, RuntimeComponentOwner,
-};
+use pulsar_reflection::Reflectable;
 use serde::{Deserialize, Serialize};
 
 pub const REFLECTION_CAPTURE_CLASS_NAME: &str = "ReflectionCaptureComponent";
@@ -93,18 +91,7 @@ impl Default for ReflectionCaptureComponent {
 }
 
 #[register_world_component]
-impl ComponentRuntimeBehavior for ReflectionCaptureComponent {
-    const CLASS_NAME: &'static str = REFLECTION_CAPTURE_CLASS_NAME;
-
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-        // Not rendered (see the module doc): nothing to sync.
-    }
-}
+impl ReflectionCaptureComponent {}
 
 // Reported unfinished (Pulsar-Native#1035, Phase 4; tracked in #1054): the
 // properties card shows the reason and issue, and attaching one logs them once.
@@ -119,10 +106,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runtime_behavior_has_the_reflected_component_name() {
+    fn registers_under_its_class_name() {
         assert_eq!(
-            <ReflectionCaptureComponent as ComponentRuntimeBehavior>::CLASS_NAME,
-            REFLECTION_CAPTURE_CLASS_NAME
+            pulsar_world_registry::component_id_for_class(REFLECTION_CAPTURE_CLASS_NAME),
+            Some(pulsar_scenedb::component_id::<ReflectionCaptureComponent>())
         );
     }
 }

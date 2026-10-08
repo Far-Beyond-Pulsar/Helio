@@ -2,7 +2,6 @@
 //! (`environment_rows::FoliageSourceRow`), built from the mappings here.
 
 use engine_class_derive::{register_world_component};
-use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
 
 use super::FoliageComponent;
 
@@ -71,28 +70,16 @@ pub(crate) fn wind(component: &FoliageComponent) -> helio_pass_foliage_place::Gp
 }
 
 #[register_world_component]
-impl ComponentRuntimeBehavior for FoliageComponent {
-    const CLASS_NAME: &'static str = "FoliageComponent";
-
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-        // Foliage reaches its passes through its derived source row; there
-        // is nothing to sync.
-    }
-}
+impl FoliageComponent {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn runtime_behavior_has_the_reflected_component_name() {
+    fn registers_under_its_class_name() {
         assert_eq!(
-            <FoliageComponent as ComponentRuntimeBehavior>::CLASS_NAME,
-            "FoliageComponent"
+            pulsar_world_registry::component_id_for_class("FoliageComponent"),
+            Some(pulsar_scenedb::component_id::<FoliageComponent>())
         );
     }
 }

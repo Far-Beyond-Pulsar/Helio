@@ -5,7 +5,6 @@
 //! revisioned external updates without coupling component hydration to a pass.
 
 use engine_class_derive::{register_component_runtime, register_world_component};
-use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
 
 use super::{TerrainEventsEventWriterExt as _, VoxelComponent, VoxelFlatTerrainComponent, VoxelLandformComponent, VoxelTerrainComponent};
 
@@ -70,61 +69,16 @@ impl VoxelTerrainComponent {
 }
 
 #[register_world_component]
-impl ComponentRuntimeBehavior for VoxelComponent {
-    const CLASS_NAME: &'static str = "VoxelComponent";
-
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-        // Authoring data is already present as a typed SceneDB World row.
-    }
-}
+impl VoxelComponent {}
 
 #[register_world_component]
-impl ComponentRuntimeBehavior for VoxelTerrainComponent {
-    const CLASS_NAME: &'static str = "VoxelTerrainComponent";
-
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-        // A future voxel backend will consume terrain configuration and
-        // external revisioned data batches independently of scene hydration.
-    }
-}
+impl VoxelTerrainComponent {}
 
 #[register_world_component]
-impl ComponentRuntimeBehavior for VoxelLandformComponent {
-    const CLASS_NAME: &'static str = "VoxelLandformComponent";
-
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-        // Settings of the terrain on the same entity, read when it is projected.
-    }
-}
+impl VoxelLandformComponent {}
 
 #[register_world_component]
-impl ComponentRuntimeBehavior for VoxelFlatTerrainComponent {
-    const CLASS_NAME: &'static str = "VoxelFlatTerrainComponent";
-
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-        // Settings of the terrain on the same entity, read when it is projected.
-    }
-}
+impl VoxelFlatTerrainComponent {}
 
 // Reported unfinished (Pulsar-Native#1035, Phase 4; tracked in #1056): the
 // properties card shows the reason and issue, and attaching one logs them once.

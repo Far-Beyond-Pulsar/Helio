@@ -1,5 +1,4 @@
 use engine_class_derive::{register_world_component};
-use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
 
 use super::LightComponent;
 
@@ -21,32 +20,11 @@ fn decode_light_component(data: &serde_json::Value) -> Result<LightComponent, St
     }
 }
 
-// Phase B5 (Pulsar-Native#556). No `on_removed` hook: Helio holds no
-// persistent light actor. Removing the component clears its GPU row through
-// SceneDB, and a disabled light's row says so (`general.enabled` is part of
-// it).
+// Helio holds no light actor: the light's derived `LightSourceRow` follows
+// every write through SceneDB, removing the component clears it, and a
+// disabled light's row says so (`general.enabled` is part of it).
 #[register_world_component(decode = decode_light_component)]
-impl ComponentRuntimeBehavior for LightComponent {
-    const CLASS_NAME: &'static str = "LightComponent";
-
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-        // Deliberately empty (Pulsar-Native#561, mirroring
-        // `StaticMeshComponent::sync_component`'s own doc for why). The
-        // `GpuLight` translation is the generated `LightComponentGpuMirror`
-        // row, which SceneDB writes on every write of this component. Resolving
-        // every entity's already-hydrated mirror into Helio's actual light
-        // list happens once per frame, for every light at once
-        // (`HelioRenderer::rebuild_light_frame`, `renderer.rs`) -- this
-        // trait's `&Self`-only, one-component-at-a-time signature has no
-        // way to do that, deliberately (see `StaticMeshComponent::
-        // sync_component`'s doc for the same structural reason).
-    }
-}
+impl LightComponent {}
 
 #[cfg(test)]
 mod tests {

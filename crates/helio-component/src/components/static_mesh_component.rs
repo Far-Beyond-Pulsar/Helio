@@ -4,10 +4,7 @@ use engine_class_derive::{
     engine_class, register_scene_props_applier, register_world_component,
 };
 use helio::PackedVertex;
-use pulsar_reflection::{
-    ComponentRuntimeBehavior, ComponentRuntimeContext, ReflectError, RuntimeComponentOwner,
-    ScenePropsProjector,
-};
+use pulsar_reflection::{ReflectError, ScenePropsProjector};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -784,9 +781,9 @@ pub struct StaticMeshComponent {
     /// separate asset registry, the payload itself (per the governing rule:
     /// "it doesn't hold an int32 that points to the mesh, it holds the
     /// mesh"). Populated once, at hydrate time, by
-    /// `decode_static_mesh_component` -- never authored directly, never
-    /// touched by `sync_component` (which only ever sees `&World`, never
-    /// disk I/O). Never round-tripped through JSON: mesh geometry lives in
+    /// `decode_static_mesh_component` (or `property_written` when
+    /// `mesh_asset` changes) -- never authored directly. Never
+    /// round-tripped through JSON: mesh geometry lives in
     /// the asset file `mesh_asset` already names, re-derived at hydrate
     /// time, not duplicated into every saved scene.
     ///
@@ -861,9 +858,7 @@ impl ScenePropsProjector for StaticMeshComponent {
 /// disk-load behavior, just triggered at different times. Resolves the
 /// project-relative path via `engine_state::get_project_path()` -- a
 /// global, context-free accessor, since neither caller's fixed signature
-/// (`&Value` / `&mut Self, Option<&str>`) carries a
-/// `ComponentRuntimeContext` to pull a project root from the way
-/// `sync_component` does.
+/// (`&Value` / `&mut Self, Option<&str>`) carries a project root.
 fn load_mesh_geometry(mesh_asset: &str) -> ([f32; 4], crate::mesh_cache::MeshAssetUpload) {
     let mesh_asset = mesh_asset.trim();
     // Baseline fallback for "no mesh assigned" / "failed to load" -- matches
@@ -1045,29 +1040,4 @@ fn local_bounding_sphere(vertices: &[PackedVertex]) -> [f32; 4] {
     decode = decode_static_mesh_component,
     property_written = static_mesh_property_written
 )]
-impl ComponentRuntimeBehavior for StaticMeshComponent {
-    const CLASS_NAME: &'static str = "StaticMeshComponent";
-
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-        // Deliberately empty (Pulsar-Native#561 Phase E cutover). This used
-        // to load `mesh_asset` itself and call `Renderer::scene_mut()
-        // .insert_entity(SceneEntity::mesh(upload))` -- a second, independent
-        // copy of the mesh data in Helio's own mesh pool, loaded from disk a
-        // second time every dirty pass, on top of what `decode_static_mesh_component`
-        // already does (loads the file once, populates this component's own
-        // `#[gpu] vertices`/`indices` fields, which SceneDB mirrors straight
-        // into the SAME pool `helio::Scene`'s `MeshPool` reads from -- see
-        // `mesh.rs`'s `rebind_static_pools`/`adopt_static_slice`). Resolving
-        // a `MeshId`/`ObjectDescriptor` for that already-GPU-resident data
-        // needs the entity's row (`entity.index()`) and the SceneDB-side
-        // `..._gpu_handle` accessors this trait's `&Self`-only signature has
-        // no way to reach -- that's `engine_backend`'s
-        // `HelioRenderer::sync_snapshot_components`, which already has
-        // `Entity`/`World` in scope for exactly this reason.
-    }
-}
+impl StaticMeshComponent {}

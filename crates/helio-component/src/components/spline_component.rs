@@ -9,10 +9,7 @@
 
 use engine_class_derive::{engine_class, register_world_component};
 use glam::Vec3;
-use pulsar_reflection::{
-    pulsar_type, ComponentRuntimeBehavior, ComponentRuntimeContext, ReflectError, ReflectResult,
-    Reflectable, RuntimeComponentOwner,
-};
+use pulsar_reflection::{pulsar_type, ReflectError, ReflectResult, Reflectable};
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub const SPLINE_CLASS_NAME: &str = "SplineComponent";
@@ -449,17 +446,7 @@ impl SplineComponent {
 // The World value is the curve; nothing is pushed anywhere else. The
 // renderer reads it back through `spline_debug_lines`.
 #[register_world_component]
-impl ComponentRuntimeBehavior for SplineComponent {
-    const CLASS_NAME: &'static str = SPLINE_CLASS_NAME;
-
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-    }
-}
+impl SplineComponent {}
 
 const CURVE_COLOR: [f32; 4] = [0.55, 0.62, 0.72, 1.0];
 const SELECTED_CURVE_COLOR: [f32; 4] = [1.0, 0.72, 0.16, 1.0];

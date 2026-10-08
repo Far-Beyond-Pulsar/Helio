@@ -33,5 +33,4 @@ pub use static_mesh_component::*;
 pub use static_mesh_draw::*;
 pub use environment_rows::*;
 pub use voxel_component::*;
-pub use voxel_component_runtime::*;
 pub use water_volume_component::*;

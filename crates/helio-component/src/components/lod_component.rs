@@ -1,10 +1,7 @@
 //! Level of Detail (LOD) component for performance optimization
 
 use engine_class_derive::{engine_class, register_world_component};
-use pulsar_reflection::{
-    pulsar_type, ComponentRuntimeBehavior, ComponentRuntimeContext, ReflectError, ReflectResult,
-    RuntimeComponentOwner,
-};
+use pulsar_reflection::{pulsar_type, ReflectError, ReflectResult};
 
 /// LOD component for managing mesh detail based on distance
 ///
@@ -30,32 +27,11 @@ pub struct LODComponent {
     pub lod_bias: f32,
 }
 
-// Pulsar-Native#561 (editor-side "everything is a real World component, no
-// ComponentDb-only flat JSON left"): `LODComponent` never drove any Helio
-// behavior directly (LOD selection is a renderer-internal runtime decision,
-// not a "sync this component to a Helio scene object" operation), so this
-// stays a no-op `sync_component` -- same free-win shape already established
-// for `RigidbodyComponent`/`PhysicsComponent` (Phase B5). What matters here
-// isn't the dispatch (there's nothing to dispatch), it's that
-// `#[register_world_component]` makes this class hydrate into a real typed
-// `World` value, reachable through the same live-edit path
-// (`SceneDatabase::update_live_component_property`/
-// `read_live_component_property`) as every other component, instead of
-// living only in `ComponentDb`'s flat JSON.
+// A World-resident typed component (Pulsar-Native#561), edited through the
+// same live path as every other component. Nothing consumes it yet; it is
+// declared unfinished below (#1053).
 #[register_world_component]
-impl ComponentRuntimeBehavior for LODComponent {
-    const CLASS_NAME: &'static str = "LODComponent";
-
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-        // No Helio-side behavior -- LOD selection happens at render time by
-        // reading this component's data directly, not via a sync push.
-    }
-}
+impl LODComponent {}
 
 /// Single LOD level descriptor
 #[engine_class(no_register, default, clone, debug, serialize, deserialize)]

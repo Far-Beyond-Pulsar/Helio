@@ -2,7 +2,6 @@
 //! pass through their derived rows ([`super::environment_rows`]) and the
 //! graph's environment join; nothing here writes pass rows.
 use engine_class_derive::{engine_class, register_world_component};
-use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
 use helio_pass_volumetric_fog::GlobalFogComponent as GlobalMedium;
 use super::FogMode;
 
@@ -91,13 +90,7 @@ impl Default for LocalFogVolumeComponent {
 }
 
 #[register_world_component]
-impl ComponentRuntimeBehavior for GlobalFogComponent {
-    const CLASS_NAME: &'static str = "GlobalFogComponent";
-    fn sync_component(_owner: &RuntimeComponentOwner, _index: usize, _component: &Self, _context: &mut dyn ComponentRuntimeContext) {}
-}
+impl GlobalFogComponent {}
 
 #[register_world_component]
-impl ComponentRuntimeBehavior for LocalFogVolumeComponent {
-    const CLASS_NAME: &'static str = "LocalFogVolumeComponent";
-    fn sync_component(_owner: &RuntimeComponentOwner, _index: usize, _component: &Self, _context: &mut dyn ComponentRuntimeContext) {}
-}
+impl LocalFogVolumeComponent {}

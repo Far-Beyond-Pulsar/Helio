@@ -2,7 +2,6 @@
 //! resolve as its derived row ([`super::environment_rows`]) through the
 //! graph's environment join.
 use engine_class_derive::{engine_class, register_world_component};
-use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
 use super::PostProcessSettingsProps;
 
 pub const CAMERA_POST_PROCESS_CLASS_NAME: &str = "CameraPostProcessComponent";
@@ -28,14 +27,4 @@ impl Default for CameraPostProcessComponent {
 }
 
 #[register_world_component]
-impl ComponentRuntimeBehavior for CameraPostProcessComponent {
-    const CLASS_NAME: &'static str = CAMERA_POST_PROCESS_CLASS_NAME;
-
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-    }
-}
+impl CameraPostProcessComponent {}

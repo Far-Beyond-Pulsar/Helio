@@ -26,7 +26,6 @@
 
 use engine_class_derive::{engine_class, register_world_component};
 use helio_pass_water_sim::GpuWaterVolume;
-use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
 use serde::{Deserialize, Serialize};
 
 pub const WATER_VOLUME_CLASS_NAME: &str = "WaterVolumeComponent";
@@ -300,29 +299,17 @@ impl WaterVolumeComponent {
 }
 
 #[register_world_component]
-impl ComponentRuntimeBehavior for WaterVolumeComponent {
-    const CLASS_NAME: &'static str = WATER_VOLUME_CLASS_NAME;
-
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-        // The component reaches the water passes through its derived
-        // source row (`environment_rows`); there is nothing to sync.
-    }
-}
+impl WaterVolumeComponent {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn runtime_behavior_has_the_reflected_component_name() {
+    fn registers_under_its_class_name() {
         assert_eq!(
-            <WaterVolumeComponent as ComponentRuntimeBehavior>::CLASS_NAME,
-            WATER_VOLUME_CLASS_NAME
+            pulsar_world_registry::component_id_for_class(WATER_VOLUME_CLASS_NAME),
+            Some(pulsar_scenedb::component_id::<WaterVolumeComponent>())
         );
     }
 

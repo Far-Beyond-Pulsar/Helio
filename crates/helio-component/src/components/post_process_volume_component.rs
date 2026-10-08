@@ -10,10 +10,7 @@ use helio_pass_postprocess::{
     ExposureMode as HelioExposureMode, FogMode as HelioFogMode, PostProcessSettings,
     PostProcessVolumeDescriptor,
 };
-use pulsar_reflection::{
-    ComponentRuntimeBehavior, ComponentRuntimeContext, Reflectable,
-    RuntimeComponentOwner,
-};
+use pulsar_reflection::Reflectable;
 use serde::{Deserialize, Serialize};
 
 
@@ -700,16 +697,4 @@ impl PostProcessVolumeComponent {
 }
 
 #[register_world_component]
-impl ComponentRuntimeBehavior for PostProcessVolumeComponent {
-    const CLASS_NAME: &'static str = POST_PROCESS_VOLUME_CLASS_NAME;
-
-    /// Nothing to do: the volume reaches the post-process resolve as its
-    /// derived row ([`super::environment_rows`]).
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-    }
-}
+impl PostProcessVolumeComponent {}
