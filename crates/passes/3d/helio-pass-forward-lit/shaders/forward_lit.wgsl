@@ -378,7 +378,7 @@ const LIGHT_LOCAL_FORWARD: vec3<f32> = vec3<f32>(0.0, 0.0, -1.0);
 
 // Matches `Quat::from_euler(EulerRot::YXZ, rotation[1].to_radians(),
 // rotation[0].to_radians(), rotation[2].to_radians())`, the exact call
-// `HelioRenderer::rebuild_static_mesh_frame` (engine_backend) uses for
+// Pulsar's `Transform` composition (`pulsar_scene_model`) uses for
 // this same `Transform.rotation` field -- `rotation = [pitch_x, yaw_y,
 // roll_z]` in degrees. Composition order (glam's own `from_euler`
 // definition for this enum variant) is Y * X * Z: a vector is rotated by
