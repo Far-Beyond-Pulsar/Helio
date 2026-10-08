@@ -14,7 +14,7 @@ use super::LightComponent;
 /// write through SceneDB's mirror dispatch.
 fn decode_light_component(data: &serde_json::Value) -> Result<LightComponent, String> {
     if data.get("general").is_some() {
-        serde_json::from_value(data.clone()).map_err(|error| error.to_string())
+        pulsar_world_registry::decode_json(data)
     } else {
         Ok(LightComponent::from_component_data(data))
     }

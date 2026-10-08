@@ -984,8 +984,7 @@ impl StaticMeshComponent {
 /// loads that asset's data once, here, so the value that enters the world is
 /// complete. Its `#[gpu]` pools are then written by SceneDB's normal insert.
 fn decode_static_mesh_component(data: &serde_json::Value) -> Result<StaticMeshComponent, String> {
-    let mut component: StaticMeshComponent =
-        serde_json::from_value(data.clone()).map_err(|error| error.to_string())?;
+    let mut component: StaticMeshComponent = pulsar_world_registry::decode_json(data)?;
     load_mesh_asset_into(&mut component);
     Ok(component)
 }
