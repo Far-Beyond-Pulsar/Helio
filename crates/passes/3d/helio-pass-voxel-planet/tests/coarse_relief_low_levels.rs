@@ -436,10 +436,11 @@ fn l1_to_l5_zero_fraction_matches_legacy_whole_cell_hits() {
                 if columns[index][3] & INLINE_RELIEF != 0 {
                     // Inspect the base-layer remainder independently of the
                     // shader decoder. Inline relief must also use a smaller
-                    // run than the old four-unit Q16 representation.
+                    // run than the Q16 representation: tops, surface words
+                    // and offsets (3 units, class 2) against 5 (class 3).
                     let at = columns[index][4] as usize * 64 + cell;
                     assert_eq!(u32::from(pool[at]) % (1 << level), 0);
-                    assert!((columns[index][3] >> 18) & 15 < 2);
+                    assert!((columns[index][3] >> 18) & 15 < 3);
                 } else {
                     let at = columns[index][4] as usize * 64 + 64 + cell * 2;
                     assert_eq!(

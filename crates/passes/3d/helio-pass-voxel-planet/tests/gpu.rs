@@ -721,7 +721,8 @@ fn published_tops_bound_occupancy() {
         // always wide).
         let inline = info & 0x0400_0000 != 0;
         let heightfield = info & 0x0200_0000 != 0;
-        let header = (if ext { 2 } else { 1 }) + (if relief && !inline { 2 } else { 0 }) + surface_units;
+        // Then one unit of surface offsets.
+        let header = (if ext { 2 } else { 1 }) + (if relief && !inline { 2 } else { 0 }) + surface_units + 1;
         if relief {
             assert!(n_band < 32 || (n_band == 32 && gap > 0), "fractional tops overflow their packed byte range");
         }
@@ -807,6 +808,62 @@ fn published_tops_bound_occupancy() {
     assert!(columns > 1000);
     assert_eq!(bad, 0);
     assert_eq!(wrong_tops, 0);
+}
+
+/// Surface offsets reconstruct the generator's exact height below voxel
+/// precision: stored height (level-0 top, or the relief's base-cell top)
+/// plus offset is the field height to 1/128 of a base cell, for the smooth
+/// shading normals of natural ground.
+#[test]
+fn surface_offsets_reconstruct_the_field_height() {
+    let Some(gpu) = gpu() else { return };
+    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+    let dir = land(&planet, 4, 0.37, 0.61);
+    let eye = planet.surface_point(dir, 30.0);
+    let up = eye.normalize();
+    let forward = (up.any_orthonormal_vector() - up * 0.5).normalize().as_vec3();
+    let size = [320, 180];
+    let target = Target::new(&gpu, size);
+    // Canonical heights (no ridge display), so the CPU field is the reference.
+    let settings = helio_pass_voxel_planet::engine::Settings { ridge_display: false, ..Default::default() };
+    let mut r = helio_pass_voxel_planet::engine::PlanetRenderer::new(&gpu.device, &gpu.queue, planet.clone(), settings, size);
+    settle(&gpu, &target, &mut r, &frame(&planet, eye), forward);
+    let [records, pool, _] = r.residency_buffers();
+    let words = |b: &wgpu::Buffer| -> Vec<u32> {
+        read_buffer(&gpu, b, b.size()).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
+    };
+    let (rec, pool) = (words(records), words(pool));
+    let surface_units = if planet.field().program().wgsl.contains("fn terrain_surface") { 1 } else { 0 };
+    let layer = planet.grid().layer_mm() as f64;
+    let (mut lanes, mut worst) = (0usize, 0.0f64);
+    for c in rec.chunks_exact(8) {
+        let info = c[3];
+        // Valid natural columns: level 0 heightfields and inline relief.
+        if info & 0xc000_0000 != 0x8000_0000 || info & 0x1000 != 0 || info & 0x0800_0000 != 0 {
+            continue;
+        }
+        let level = c[0] >> 27;
+        let inline = info & 0x1000_0000 != 0 && info & 0x0400_0000 != 0;
+        if level != 0 && !inline {
+            continue;
+        }
+        let (face, ci, cj, k_lo, run) = (((c[0] >> 24) & 7) as u8, (c[0] & 0xff_ffff) as i32, c[1] as i32, c[2] as i32, c[4]);
+        let ext = info & 0x2000_0000 != 0;
+        let offsets = run + if ext { 2 } else { 1 } + surface_units;
+        for cell in 0..64u32 {
+            let byte = |unit: u32| ((pool[(unit * 16 + (cell >> 2)) as usize] >> ((cell & 3) * 8)) & 255) as i32;
+            // Stored base-cell height: the top byte above the band base.
+            let stored = ((k_lo * 8) << level) + byte(run);
+            let offset = (byte(offsets) - 128) as f64 / 128.0;
+            let (i, j) = (ci * 8 + (cell & 7) as i32, cj * 8 + (cell >> 3) as i32);
+            let exact = planet.column_height(face, i, j, level) as f64 / layer;
+            worst = worst.max((stored as f64 + offset - exact).abs());
+            lanes += 1;
+        }
+    }
+    eprintln!("{lanes} lanes, largest error {worst:.4} base cells");
+    assert!(lanes > 10_000);
+    assert!(worst <= 1.0 / 128.0 + 1e-9, "{worst}");
 }
 
 /// Generated volume is stored only where the volume changes a cell: in cave

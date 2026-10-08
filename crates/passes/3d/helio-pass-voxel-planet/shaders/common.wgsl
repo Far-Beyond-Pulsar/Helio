@@ -184,10 +184,25 @@ fn column_top_cell(c: Column) -> i32 {
     return (c.k_lo + i32(band_count(c))) * 8 - i32((c.info >> 22u) & 7u);
 }
 
-// Header units: the tops (and extension masks), wide relief fractions, then
-// the surface words when the program has them (one byte per cell).
+// Header units: the tops (and extension masks), wide relief fractions, the
+// surface words when the program has them (one byte per cell), then the
+// surface offsets (one byte per cell).
 fn header_units(c: Column) -> u32 {
+    return offset_unit(c) + 1u;
+}
+
+fn offset_unit(c: Column) -> u32 {
     return surface_unit(c) + select(0u, 1u, world.sphere.w != 0u);
+}
+
+// Height of the exact surface of column cell (x, y) over its stored height
+// (the relief's base-cell top, the level-0 top, else the level top), in
+// base cells from -1 to 1: the generator's surface below voxel precision,
+// for smooth shading. Occupancy never reads it.
+fn column_surface_offset(c: Column, x: u32, y: u32) -> f32 {
+    let cell = x + y * 8u;
+    let word = pool[(c.run + offset_unit(c)) * UNIT_WORDS + (cell >> 2u)];
+    return (f32((word >> ((cell & 3u) * 8u)) & 0xffu) - 128.0) / 128.0;
 }
 
 fn surface_unit(c: Column) -> u32 {

@@ -74,6 +74,8 @@ var<workgroup> g_fraction: array<atomic<u32>, 32>;
 var<workgroup> g_topology_flags: u32;
 var<workgroup> g_volume: atomic<u32>;
 var<workgroup> g_surface: array<atomic<u32>, 16>;
+// Surface offsets (`column_surface_offset`), one byte per lane.
+var<workgroup> g_offset: array<atomic<u32>, 16>;
 // Per-brick brush culling: one chunk of the column's edit list at a time,
 // kept brushes compacted in list order (ballot bits, then ranks).
 var<workgroup> g_keep: array<atomic<u32>, 2>;
@@ -181,7 +183,10 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         atomicStore(&g_words[li], 0u);
         atomicStore(&g_masks[li], 0u);
     }
-    if li < 16u { atomicStore(&g_surface[li], 0u); }
+    if li < 16u {
+        atomicStore(&g_surface[li], 0u);
+        atomicStore(&g_offset[li], 0u);
+    }
     // This replaces the existing initialization barrier; the edit list is
     // scanned once per workgroup, with no extra terrain query or barrier.
     let topology_flags = workgroupUniformLoad(&g_topology_flags);
@@ -318,7 +323,8 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let wide_relief = relief && !inline_relief;
     let surface_words = world.sphere.w != 0u;
     let scratch_surface = select(1u, 3u, wide_relief);
-    let scratch_header = scratch_surface + select(0u, 1u, surface_words);
+    let scratch_offset = scratch_surface + select(0u, 1u, surface_words);
+    let scratch_header = scratch_offset + 1u;
     if li == 0u {
         let need = i32(scratch_header + n_band);
         let base = atomicAdd(&alloc[A_SCRATCH], need);
@@ -366,6 +372,9 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     var top_solid = NO_DENSITY;
     var top_air = NO_DENSITY;
     var top_fraction = 0u;
+    // The generated surface's height above its highest solid cell's centre
+    // (cells), from the densities' zero crossing.
+    var top_crossing = 0.5;
     // Lanes the overhangs fold take every evaluated cell, and their relief,
     // from the density.
     let dense_lane = leaning && changed;
@@ -400,6 +409,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 } else if top_solid != NO_DENSITY && top_air == NO_DENSITY {
                     top_air = density;
                     let t = select(0.5, volume_crossing(top_solid, density), top_solid > 0);
+                    top_crossing = t;
                     if requested_relief && t > 0.5 {
                         // The surface rises into this cell: solid, cut there.
                         kind = 1u;
@@ -498,12 +508,33 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         workgroupBarrier();
     }
     if volumetric && li < 16u { scratch[base * UNIT_WORDS + li] = atomicLoad(&g_words[li]); }
+    let density_surface = surface_changed || dense_lane;
     if wide_relief && volumetric {
-        if surface_changed || dense_lane { fraction = top_fraction; }
+        if density_surface { fraction = top_fraction; }
         atomicOr(&g_fraction[li >> 1u], fraction << ((li & 1u) * 16u));
-        workgroupBarrier();
-        if li < 32u { scratch[(base + 1u) * UNIT_WORDS + li] = atomicLoad(&g_fraction[li]); }
     }
+    // Surface offset: the exact surface's height over the stored one (the
+    // relief's base-cell top, the level-0 top, else the level top), in
+    // 128ths of a base cell from -1 to 1. Only shading reads it (smooth
+    // normals at every level); occupancy and relief keep the voxels' grid.
+    // A density surface takes it from its zero crossing at level 0; its
+    // relief fraction carries that precision at coarser levels.
+    var offset = 128;
+    if density_surface {
+        if level == 0u && top_air != NO_DENSITY {
+            offset = 128 + i32(round((top_crossing - 0.5) * 128.0));
+        }
+    } else {
+        let stored = select(top << level, base_top, relief || level == 0u);
+        let above = clamp(height - stored * world.grid.y, -world.grid.y, world.grid.y);
+        offset = 128 + div_floor(above * 128, world.grid.y);
+    }
+    atomicOr(&g_offset[li >> 2u], u32(clamp(offset, 0, 255)) << ((li & 3u) * 8u));
+    workgroupBarrier();
+    if wide_relief && volumetric && li < 32u {
+        scratch[(base + 1u) * UNIT_WORDS + li] = atomicLoad(&g_fraction[li]);
+    }
+    if li < 16u { scratch[(base + scratch_offset) * UNIT_WORDS + li] = atomicLoad(&g_offset[li]); }
     if li == 0u {
         var out: JobOut;
         out.status = 0u;
@@ -534,7 +565,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
 fn run_units(o: JobOut) -> u32 {
     return select(1u, 2u, o.n_band > 32u)
         + select(0u, 2u, info_relief_wide(o.pad))
-        + select(0u, 1u, world.sphere.w != 0u) + o.n_mixed;
+        + select(0u, 1u, world.sphere.w != 0u) + 1u + o.n_mixed;
 }
 
 fn class_of(units: u32) -> u32 {
@@ -681,15 +712,20 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
     let wide_relief = info_relief_wide(o.pad);
     let surface_words = world.sphere.w != 0u;
     let scratch_surface = select(1u, 3u, wide_relief);
-    let scratch_header = scratch_surface + select(0u, 1u, surface_words);
+    let scratch_offset = scratch_surface + select(0u, 1u, surface_words);
+    let scratch_header = scratch_offset + 1u;
     let plain_header = select(1u, 2u, ext);
     let pool_surface = plain_header + select(0u, 2u, wide_relief);
-    let header = pool_surface + select(0u, 1u, surface_words);
+    let pool_offset = pool_surface + select(0u, 1u, surface_words);
+    let header = pool_offset + 1u;
     if wide_relief && li < 32u {
         pool[(o.run + plain_header) * UNIT_WORDS + li] = scratch[(o.scratch + 1u) * UNIT_WORDS + li];
     }
     if surface_words && li < 16u {
         pool[(o.run + pool_surface) * UNIT_WORDS + li] = scratch[(o.scratch + scratch_surface) * UNIT_WORDS + li];
+    }
+    if li < 16u {
+        pool[(o.run + pool_offset) * UNIT_WORDS + li] = scratch[(o.scratch + scratch_offset) * UNIT_WORDS + li];
     }
     if li < 16u {
         pool[o.run * UNIT_WORDS + li] = scratch[o.scratch * UNIT_WORDS + li];

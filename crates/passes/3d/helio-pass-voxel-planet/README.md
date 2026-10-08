@@ -466,11 +466,28 @@ they are once its work is on the GPU. Steps:
   be built as `far.xyz - far.w * eye` (homogeneous): with near 5 cm and far
   40 000 km the far plane is at f32 infinity and dividing by `w` gives NaN.
 - **Filtered appearance** (after "Filtered appearance for voxels", HPG 2023):
-  cells about a pixel wide are shaded with the column's macro normal and show
+  cells about a pixel wide are shaded with the ground's smooth normal and show
   surface material on risers, so distant terrain has no contour lines; cells
   several pixels wide keep crisp faces. The blend follows the pixel
   footprint, so level changes show no seam. Base voxel steps fade from 2
-  pixels down (`step_filter_weight`). Natural ground at any size is lit
+  pixels down by the size their faces project to (`step_filter_weight`: a
+  riser seen from above is a fraction of a voxel tall on screen).
+- **Smooth surface model.** Every column stores, per cell, the exact surface
+  below voxel precision: a surface offset (one byte, 1/128 of a base cell,
+  `column_surface_offset`) over its stored height (level-0 top or relief
+  base-cell top), from the generator's exact height or, at level 0, a
+  density surface's zero crossing; coarser density surfaces keep it in their
+  Q16 relief fractions. Occupancy, relief and materials never read it. The
+  smooth normal (`relief_field_gradient`) is its central differences one
+  cell each way at the four cell centres around the pixel's base cell,
+  interpolated bilinearly across cells and columns, at every level. The
+  per-column stencils it replaced lit a voxel staircase: one secant per 8x8
+  column at level 0 (0.8 m tiles under a low sun) and in-column differences
+  of base-quantized heights at coarser levels, zero on treads metres long
+  and spiking at risers (dark worms along contours and column borders).
+  Cost: +0.34 ms shade at 1196x729 (`surface_offsets_reconstruct_the_field_height`,
+  `stored_sphere_normals_match_authored_macro_slopes_and_ignore_reuse_hint`).
+  Natural ground at any size is lit
   partly with its slope's normal (step softness, appearance `detail.w`,
   0.7 on Earth), casts no step shadows, keeps AO soft and keeps turf on its
   risers: a staircase standing for a slope reads as voxel texture instead

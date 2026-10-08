@@ -332,18 +332,6 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                 shadow_reuse_distance_squared(delta,view,grazing,1.0,0.0),
                 shadow_reuse_distance_squared(delta,view,grazing,0.0,0.0),
                 shadow_reuse_distance_squared(delta,view,grazing,1.0,1.0));
-            // Quantized 1:8 shallow stair: sample every phase, including the
-            // block whose endpoints remain on the same authored terrace.
-            let phase=i32(id.x&7u);
-            let secant=column_secant_derivative(phase/8,(phase+7)/8,0,0);
-            let local=f32((phase+1)/8-(phase-1+8)/8+1)/2.0;
-            answers[id.x*13u+9u]=vec4<f32>(local,secant.x,secant.y,
-                f32((phase+7)/8-phase/8));
-            let up=vec3<f32>(0.0,0.0,1.0);
-            let field_normal=normalize(up-vec3<f32>(secant.x,0.0,0.0));
-            let face=vec3<f32>(1.0,0.0,0.0);
-            answers[id.x*13u+10u]=vec4<f32>(normalize(mix(face,field_normal,
-                detail_filter_weight(2.0))),dot(field_normal,up));
         }}
     "#
     );
@@ -502,23 +490,6 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
             let pairs: &[[[f32; 4]; 13]] = bytemuck::cast_slice(&bytes);
             let actual: Vec<[f32; 4]> = pairs.iter().map(|p| p[0]).collect();
             for (index, pair) in pairs.iter().enumerate() {
-                let phase=index&7;
-                let authored_height=|i:i32| i.div_euclid(8);
-                let local=f64::from(authored_height(phase as i32+1)-authored_height(phase as i32-1))/2.0;
-                let secant=f64::from(authored_height(phase as i32+7)-authored_height(phase as i32))/7.0;
-                assert!((f64::from(pair[9][0])-local).abs()<1e-6);
-                assert!((f64::from(pair[9][1])-secant).abs()<1e-6);
-                assert_eq!(pair[9][2],0.0,"cross-slope appeared on a one-axis stair");
-                assert!((secant-0.125).abs()<=0.125,
-                    "block support failed to suppress the quantized local slope pulse");
-                if local==0.5 {
-                    assert!((secant-0.125).abs()<(local-0.125).abs(),
-                        "filtered stair riser retained its half-cell derivative spike");
-                }
-                assert_eq!(&pair[10][..3],&[1.0,0.0,0.0],
-                    "resolved face normal changed under secant shading support");
-                assert!((f64::from(pair[10][3])-1.0/(1.0+secant*secant).sqrt()).abs()<1e-6,
-                    "fully filtered stair normal disagrees with its endpoint support");
                 for value in &pair[8][..3] {
                     assert!((*value-36.0).abs()<1e-5 && *value>16.0,
                         "topology/unfiltered query or representative lost its original distance cap");

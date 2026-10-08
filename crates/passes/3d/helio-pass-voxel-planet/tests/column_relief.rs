@@ -233,26 +233,27 @@ fn unpack_normal(word: u32) -> Vec3 {
         Vec3::new(x, y, z).normalize()
     }
 }
+/// The smooth normal of the natural ground (`relief_field_gradient` in
+/// surface.wgsl), from the field itself: central differences of the exact
+/// height one hit-level cell each way at the four cell centres around the
+/// base cell under the pixel, interpolated bilinearly.
 fn authored_macro_normal(p: &Planet, h: Hit, eye: DVec3, dir: Vec3) -> Vec3 {
     let g = p.grid();
-    let x = h.i & 7;
-    let y = h.j & 7;
-    let ci = h.i & !7;
-    let cj = h.j & !7;
-    let x0 = (x - 1).max(0);
-    let x1 = (x + 1).min(7);
-    let y0 = (y - 1).max(0);
-    let y1 = (y + 1).min(7);
-    let base = |i, j| {
-        i64::from(
-            p.field()
-                .height(g.domain_point(h.face, i, j, h.level), h.level),
-        )
-        .div_euclid(i64::from(g.layer_mm()))
+    let s = h.level;
+    let (base_cell, _) = g.locate(eye + dir.as_dvec3() * f64::from(h.t));
+    // Exact height of level-`s` cell (i, j) in base cells.
+    let height = |i: i32, j: i32| f64::from(p.field().height(g.domain_point(h.face, i, j, s), s)) / f64::from(g.layer_mm());
+    let r = [base_cell.i, base_cell.j].map(|b| b * 2 + 1 - (1 << s));
+    let a = r.map(|r| r >> (s + 1));
+    let w = [0, 1].map(|k| f64::from(r[k] - (a[k] << (s + 1))) / f64::from(2 << s));
+    let step = (1u32 << s) as f64;
+    let gradient = |i: i32, j: i32| {
+        ((height(i + 1, j) - height(i - 1, j)) / (2.0 * step), (height(i, j + 1) - height(i, j - 1)) / (2.0 * step))
     };
-    let step = (1u32 << h.level) as f64;
-    let gi = (base(ci + x1, h.j) - base(ci + x0, h.j)) as f64 / (step * f64::from(x1 - x0));
-    let gj = (base(h.i, cj + y1) - base(h.i, cj + y0)) as f64 / (step * f64::from(y1 - y0));
+    let lerp = |x: (f64, f64), y: (f64, f64), t: f64| (x.0 + (y.0 - x.0) * t, x.1 + (y.1 - x.1) * t);
+    let g0 = lerp(gradient(a[0], a[1]), gradient(a[0] + 1, a[1]), w[0]);
+    let g1 = lerp(gradient(a[0], a[1] + 1), gradient(a[0] + 1, a[1] + 1), w[0]);
+    let (gi, gj) = lerp(g0, g1, w[1]);
     let [n, a, b] = helio_pass_voxel_planet::grid::face_axes(h.face);
     let ai = g.angle(f64::from(h.i << h.level));
     let aj = g.angle(f64::from(h.j << h.level));

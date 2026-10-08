@@ -101,9 +101,10 @@ fn mixed_brick_hits_respect_requested_trace_range() {
                 if topology { 1 } else { 0 },
             ],
         );
-        let mut pool = vec![0u32; 64];
+        // Tops, (relief fractions), surface offsets, then the mixed brick.
+        let mut pool = vec![0u32; 80];
         pool[..16].fill(if topology { 0x08080808 } else { 0x01010101 });
-        let mixed_offset = if relief { 48 } else { 16 };
+        let mixed_offset = if relief { 64 } else { 32 };
         if compact {
             // The mixed-mask stays set, but its virtual brick pointer has no
             // allocated payload. A mistaken bitmap read cannot reproduce the

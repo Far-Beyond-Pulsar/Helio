@@ -394,6 +394,62 @@ fn material_slope(face: u32, i: i32, j: i32, level: u32, own: i32) -> i32 {
     return ((32 - wi) * (32 - wj) * s00 + wi * (32 - wj) * s10 + (32 - wi) * wj * s01 + wi * wj * s11) >> 10u;
 }
 
+// Gradient of the natural ground at base cell `base` (radial cells per
+// cell of level `s`), continuous across cells, columns and risers: central
+// differences of the relief heights one cell each way at the four level-`s`
+// cell centres around it, interpolated bilinearly, from the exact surface
+// (relief heights with their surface offsets: a voxel staircase has flat
+// treads metres long on gentle ground, so its differences are zero there
+// and spike at the risers). `.z` is 0 while those columns are not
+// resident. Filtered shading lights the ground with it at every level. The
+// per-column stencils it replaced were discontinuous: one secant per 8x8
+// column at level 0 (0.8 m tiles under a low sun) and in-column central
+// differences at coarser levels (dark worms along risers and column
+// borders).
+fn relief_field_gradient(face: u32, s: u32, base: vec2<i32>, home: u32, home_column: vec2<i32>) -> vec3<f32> {
+    let r = base * 2 + 1 - (1 << s);
+    let a = r >> vec2<u32>(s + 1u);
+    let w = vec2<f32>(r - (a << vec2<u32>(s + 1u))) / f32(2 << s);
+    // The (up to) 2x2 columns covering cells a - 1 ..= a + 2, each looked up
+    // and loaded once (the hit's own column without a lookup).
+    let origin = (a - 1) >> vec2<u32>(3u);
+    let far = (a + 2) >> vec2<u32>(3u);
+    var columns: array<Column, 4>;
+    for (var k = 0; k < 4; k++) {
+        let q = origin + vec2<i32>(k & 1, k >> 1u);
+        if any(q > far) { continue; }
+        var record = home;
+        if any(q != home_column) { record = slope_record(face, s, q.x, q.y); }
+        if record == NONE { return vec3<f32>(0.0); }
+        columns[k] = records[record];
+    }
+    // Exact surface heights (Q16 cells) of the 12 cells the differences
+    // read: rows a.y - 1 ..= a.y + 2 of columns a.x - 1 ..= a.x + 2, but the
+    // corners.
+    var heights: array<i32, 16>;
+    for (var n = 0; n < 16; n++) {
+        let d = vec2<i32>(n & 3, n >> 2u) - 1;
+        if (d.x == -1 || d.x == 2) && (d.y == -1 || d.y == 2) { continue; }
+        let cell = a + d;
+        let q = cell >> vec2<u32>(3u);
+        let m = columns[u32(q.x != origin.x) + 2u * u32(q.y != origin.y)];
+        let x = u32(cell.x & 7);
+        let y = u32(cell.y & 7);
+        let f = column_relief_fraction(m, x, y);
+        let offset = column_surface_offset(m, x, y);
+        heights[n] = column_top(m, x, y) * 65536 + select(0, i32(f) - 65536, f != 0u)
+            + i32(round(offset * 65536.0 / f32(1u << s)));
+    }
+    // Central differences at the four cell centres (Q16 heights two cells
+    // apart; wrapping differences stay exact), interpolated bilinearly.
+    var g: array<vec2<f32>, 4>;
+    for (var c = 0; c < 4; c++) {
+        let at = (c & 1) + 1 + ((c >> 1u) + 1) * 4;
+        g[c] = vec2<f32>(f32(heights[at + 1] - heights[at - 1]), f32(heights[at + 4] - heights[at - 4])) / 131072.0;
+    }
+    return vec3<f32>(mix(mix(g[0], g[1], w.x), mix(g[2], g[3], w.x), w.y), 1.0);
+}
+
 fn relief_compatible(xy: vec2<u32>, center: Hit) -> bool {
     let h = hits[pixel_index(xy)];
     let anchor_xy = (xy >> vec2<u32>(1u)) << vec2<u32>(1u);
@@ -554,13 +610,6 @@ fn column_relief_gradient(face: u32, up: vec3<f32>, derivative: vec2<f32>, radiu
     return vec4<f32>(gradient, 8.0 * max(abs(derivative.x), abs(derivative.y)));
 }
 
-// The existing block endpoints average base-height quantization over seven
-// cells. Filtered natural L0 lighting and unresolved stratum support reuse
-// it; material slope and resolved voxel face normals keep their support.
-fn column_secant_derivative(tx0: i32, tx7: i32, ty0: i32, ty7: i32) -> vec2<f32> {
-    return vec2<f32>(f32(tx7 - tx0), f32(ty7 - ty0)) / 7.0;
-}
-
 // Radial support of a ray/plane pixel differential. The angular half-width
 // bounds the linear approximation when the pixel cone crosses tangency.
 fn radial_material_span(pixel: f32, distance: f32, ray: vec3<f32>, up: vec3<f32>, normal: vec3<f32>) -> f32 {
@@ -695,6 +744,8 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // colour and material choice (vertical streaks down every steep face).
     var p: vec3<i32>;
     var climate_height = top * world.grid.y;
+    // Base cell under the pixel (the relief field's sample point).
+    var base_ij = vec2<i32>(h.i, h.j);
     if level == 0u {
         p = volume_point(face, h.i, h.j, h.k, 0u);
     } else {
@@ -706,6 +757,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         let nudge = select(0.0, select(-0.25, 0.25, code_now == 5u), code_now >= 4u && code_now < 6u);
         let k = frame.layer_i.x + i32(floor(layer_coord(ray, h.t) + nudge));
         p = volume_point(face, appearance_cell.i, appearance_cell.j, k, 0u);
+        base_ij = vec2<i32>(appearance_cell.i, appearance_cell.j);
         climate_height = climate_height_cache[index];
     }
     let actual_normal = hit_normal(h, d);
@@ -715,12 +767,16 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = frame.layer.y * f32(1 << level);
     var canonical_up = vec3<f32>(0.0);
     var canonical_relief = vec4<f32>(0.0);
-    let base_filter_w = step_filter_weight(frame.layer.y / pixel);
     var projection = vec2<f32>(1.0);
     if !edited && (c.info & INFO_TOPOLOGY) == 0u {
         projection = appearance_projection(dot(actual_normal, d), code);
     }
     let hash_filter_w = detail_filter_weight(frame.layer.y / pixel * projection.x);
+    // Base steps filter by the size their faces project to: a riser seen
+    // from above is a fraction of a voxel tall on screen. Filtering by the
+    // voxel's size kept risers 1-2 voxels wide lit as walls, one-pixel dark
+    // contour lines across every gentle slope.
+    let base_filter_w = step_filter_weight(frame.layer.y / pixel * projection.x);
     // Primary can select either adjacent level under its bounded dither.
     // A still coarser resident column is streaming fallback, whose resolvable
     // walls must keep their actual face normal.
@@ -758,24 +814,28 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let shade_smooth_w = max(smooth_w, soft_w);
     let shade_canonical_w = canonical_w;
     let ao_appearance_w = max(max(appearance_w, soft_w), detail_filter_weight(size / pixel * projection.x));
+    // Smooth normal of the natural ground (`relief_field_gradient`).
     var fallback_normal = vec3<f32>(0.0);
     var fallback_shade_normal = vec3<f32>(0.0);
-    if smooth_w > 0.0 || shade_smooth_w > 0.0 {
-        let x0 = select(x - 1u, 0u, x == 0u);
-        let x1 = min(x + 1u, 7u);
-        let y0 = select(y - 1u, 0u, y == 0u);
-        let y1 = min(y + 1u, 7u);
-        let di = column_top(c, x1, y) - column_top(c, x0, y);
-        let dj = column_top(c, x, y1) - column_top(c, x, y0);
-        var gi = f32(di) / f32(x1 - x0);
-        var gj = f32(dj) / f32(y1 - y0);
-        if level >= 1u && column_tops_known(c) && (c.info & INFO_RELIEF) != 0u {
-            gi = f32(column_relief_delta_q16(c, vec2<u32>(x1, y), vec2<u32>(x0, y), di)) / (65536.0 * f32(x1 - x0));
-            gj = f32(column_relief_delta_q16(c, vec2<u32>(x, y1), vec2<u32>(x, y0), dj)) / (65536.0 * f32(y1 - y0));
+    if smooth_w > 0.0 || shade_smooth_w > 0.0 || (level == 0u && hash_filter_w > 0.0) {
+        var g = relief_field_gradient(face, level, base_ij, h.record, vec2<i32>(h.i, h.j) >> vec2<u32>(3u));
+        if g.z == 0.0 {
+            // Its columns are still streaming: the hit column's own lanes.
+            let x0 = select(x - 1u, 0u, x == 0u);
+            let x1 = min(x + 1u, 7u);
+            let y0 = select(y - 1u, 0u, y == 0u);
+            let y1 = min(y + 1u, 7u);
+            let di = column_top(c, x1, y) - column_top(c, x0, y);
+            let dj = column_top(c, x, y1) - column_top(c, x, y0);
+            g = vec3<f32>(f32(di) / f32(x1 - x0), f32(dj) / f32(y1 - y0), 0.0);
+            if level >= 1u && column_tops_known(c) && (c.info & INFO_RELIEF) != 0u {
+                g.x = f32(column_relief_delta_q16(c, vec2<u32>(x1, y), vec2<u32>(x0, y), di)) / (65536.0 * f32(x1 - x0));
+                g.y = f32(column_relief_delta_q16(c, vec2<u32>(x, y1), vec2<u32>(x, y0), dj)) / (65536.0 * f32(y1 - y0));
+            }
         }
         let up = hit_up(h.t, d);
         let radius = frame.eye.w + height_rel(make_ray(camera.position_near.xyz, d), h.t);
-        let field = column_relief_gradient(face, up, vec2<f32>(gi, gj), radius);
+        let field = column_relief_gradient(face, up, g.xy, radius);
         fallback_normal = normalize(up - field.xyz);
         fallback_shade_normal = fallback_normal;
     }
@@ -802,20 +862,10 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         let ty7 = column_top(c, x, 7u);
         if level == 0u && (shade_smooth_w > 0.0 || hash_filter_w > 0.0)
             && natural_material {
-            // A two-cell derivative of integer L0 tops pulses at every riser.
-            // Reuse the material block's endpoint reads without new terrain
-            // queries or changes to canonical material IDs.
-            let up = hit_up(h.t, d);
-            let radius = frame.eye.w + height_rel(make_ray(camera.position_near.xyz, d), h.t);
-            let field = column_relief_gradient(face, up,
-                column_secant_derivative(tx0, tx7, ty0, ty7), radius);
-            fallback_shade_normal = normalize(up - field.xyz);
-            // A locally flat terrace can have zero two-cell derivative.
-            // Reuse the block secant as support for an unresolved terrace
-            // ensemble, not as the exact normal of a resolved voxel face.
-            // Noise/grass support and canonical material IDs stay unchanged.
+            // An unresolved terrace ensemble's radial support follows the
+            // ground's smooth normal, not a resolved voxel face's.
             material_radial_span = max(material_radial_span,
-                radial_material_span(pixel, h.t, d, up, fallback_shade_normal));
+                radial_material_span(pixel, h.t, d, hit_up(h.t, d), fallback_shade_normal));
         }
         slope = material_slope(face, h.i, h.j, level, block_slope_of(tx0, tx7, ty0, ty7));
         // Canonical materials use the column top cell, which is resident.
