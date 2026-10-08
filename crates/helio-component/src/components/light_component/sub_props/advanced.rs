@@ -1,6 +1,5 @@
 use engine_class_derive::engine_class;
 use serde_json::Value;
-use std::collections::HashMap;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Advanced", category_color = "#9CA3AF", default_collapsed = true)]
@@ -49,25 +48,5 @@ impl AdvancedLightProps {
         if let Some(v) = obj.get("diffuse_scale").and_then(|v| v.as_f64()) {
             self.diffuse_scale = v as f32;
         }
-    }
-
-    pub(crate) fn apply_to_scene_props(&self, out: &mut HashMap<String, Value>) {
-        out.insert(
-            "affects_translucency".to_string(),
-            Value::from(self.affects_translucency),
-        );
-        out.insert(
-            "affects_reflections".to_string(),
-            Value::from(self.affects_reflections),
-        );
-        out.insert(
-            "affects_global_illumination".to_string(),
-            Value::from(self.affects_global_illumination),
-        );
-        out.insert(
-            "specular_scale".to_string(),
-            Value::from(self.specular_scale),
-        );
-        out.insert("diffuse_scale".to_string(), Value::from(self.diffuse_scale));
     }
 }

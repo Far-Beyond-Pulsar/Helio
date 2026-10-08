@@ -910,15 +910,15 @@ mod scaling {
                 stamp += 1;
             }
             let aim = (ground + side * 6.0 - eye).normalize();
-            let clone = time(&mut || drop(std::hint::black_box(planet.clone())));
+            let clone = time(&mut || { std::hint::black_box(planet.clone()); });
             let mut copy = planet.clone();
             let apply = time(&mut || {
                 copy.apply(Brush { center: (ground - up * 0.3).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
             });
-            let raycast = time(&mut || drop(std::hint::black_box(planet.raycast(eye, aim, 200.0))));
-            let surface = time(&mut || drop(std::hint::black_box(planet.surface_point(ground + side * 6.0, 0.0))));
+            let raycast = time(&mut || { std::hint::black_box(planet.raycast(eye, aim, 200.0)); });
+            let surface = time(&mut || { std::hint::black_box(planet.surface_point(ground + side * 6.0, 0.0)); });
             let (cell, _) = planet.grid().locate(ground + side * 6.0 - up * 0.5);
-            let solid = time(&mut || drop(std::hint::black_box(planet.solid(cell))));
+            let solid = time(&mut || { std::hint::black_box(planet.solid(cell)); });
             eprintln!("SCULPT_COST {stamp:5} edits: clone {clone:.3} ms, apply {apply:.3} ms, aim raycast {raycast:.3} ms, surface_point {surface:.3} ms, solid {solid:.4} ms");
         }
     }

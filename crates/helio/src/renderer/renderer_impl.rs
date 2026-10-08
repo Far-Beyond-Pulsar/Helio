@@ -74,6 +74,10 @@ pub struct Renderer {
     pub(crate) prev_view_proj: glam::Mat4,
     /// World origin used to express the previous local camera projection.
     pub(crate) previous_world_origin: Option<glam::DVec3>,
+    /// GPU work deriving drawable scene buffers from the frontend's authored
+    /// ones, run each frame between the SceneDB snapshot and the graph. See
+    /// `helio_core::scene_derivation`.
+    pub(crate) scene_derivations: Vec<Box<dyn helio_core::SceneDerivation>>,
     pub(crate) world_origin: Option<glam::DVec3>,
     pub(crate) depth_texture: wgpu::Texture,
     pub(crate) depth_view: wgpu::TextureView,

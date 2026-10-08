@@ -8,6 +8,8 @@ pub struct PostProcessVolumeBlendPass {
     pipeline: wgpu::ComputePipeline,
     bgl: wgpu::BindGroupLayout,
     defaults: wgpu::Buffer,
+    /// What `defaults` holds; see [`Self::set_defaults`].
+    default_settings: crate::PostProcessSettings,
     blend_output_buf: wgpu::Buffer,
     resolved: wgpu::Buffer,
     fallback_pp_volumes: wgpu::Buffer,
@@ -245,14 +247,14 @@ impl PostProcessVolumeBlendPass {
             entry_point: Some("cs_volume_blend"), compilation_options: Default::default(), cache: None,
         });
         let defaults = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("PostProcess Defaults"), contents: bytemuck::bytes_of(&settings.to_gpu()), usage: wgpu::BufferUsages::UNIFORM,
+            label: Some("PostProcess Defaults"), contents: bytemuck::bytes_of(&settings.to_gpu()), usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let buffer = |label, size, usage| device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label), size, usage, mapped_at_creation: false,
         });
         let size = std::mem::size_of::<crate::GpuPostProcessUniforms>() as u64;
         Self {
-            pipeline, bgl, defaults,
+            pipeline, bgl, defaults, default_settings: settings.clone(),
             origin: buffer("PostProcess World Origin", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
             blend_output_buf: buffer("PostProcess Resolve Storage", size, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC),
             resolved: buffer("PostProcess Resolved Uniforms", size, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC),
@@ -281,6 +283,22 @@ impl PostProcessVolumeBlendPass {
             ),
         }
     }
+    /// Replace the baseline every view starts from before its camera row and
+    /// the volumes apply: a renderer setting (an editor viewport's toggles,
+    /// a project's graphics settings), not scene data.
+    pub fn set_defaults(&mut self, queue: &wgpu::Queue, settings: &crate::PostProcessSettings) {
+        let gpu = settings.to_gpu();
+        queue.write_buffer(&self.defaults, 0, bytemuck::bytes_of(&gpu));
+        self.dof.defaults = shape_enables_dof(gpu.dof_aperture_shape);
+        self.bloom.defaults = gpu.bloom_enabled != 0;
+        self.auto_exposure.defaults = gpu.exposure_mode != 0;
+        self.fog.defaults = gpu.fog_enabled != 0;
+        self.default_settings = settings.clone();
+    }
+
+    /// The baseline [`Self::set_defaults`] last set (or the constructor's).
+    pub fn defaults(&self) -> &crate::PostProcessSettings { &self.default_settings }
+
     /// GPU-derived settings, valid after the resolver dispatch and copy.
     pub fn resolved_uniforms(&self) -> &wgpu::Buffer { &self.resolved }
 }

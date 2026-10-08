@@ -55,6 +55,17 @@ struct PageMeta {
 }
 @group(0) @binding(18) var<storage, read_write> page_meta: array<PageMeta>;
 
+// A column's stored band: the highest top of its lanes, the brick range
+// kept (after clipping to MAX_BAND), the clip flags and the lowest natural
+// top of its lanes.
+struct Band {
+    hi_cell: i32,
+    k_lo: i32,
+    k_hi: i32,
+    clip: u32,
+    top_min: i32,
+}
+
 fn class_offset(c: u32) -> u32 {
     let p = frame.counts.w;
     if c == 0u { return 0u; }
@@ -72,6 +83,8 @@ var<workgroup> g_words: array<atomic<u32>, 16>;
 var<workgroup> g_masks: array<atomic<u32>, 16>;
 var<workgroup> g_any: array<atomic<u32>, 2>;
 var<workgroup> g_base: u32;
+// The column's band, reduced from the atomic bounds once (`Band`).
+var<workgroup> g_band_out: Band;
 var<workgroup> g_fraction: array<atomic<u32>, 32>;
 var<workgroup> g_topology_flags: u32;
 var<workgroup> g_volume: atomic<u32>;
@@ -293,30 +306,41 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         }
     }
     workgroupBarrier();
-    let lo_cell = atomicLoad(&g_band[0]);
-    let hi_cell = atomicLoad(&g_band[1]);
-    var k_lo = lo_cell >> 3u;
-    var k_hi = ((max(hi_cell, lo_cell + 1) - 1) >> 3u) + 1;
-    // A band taller than MAX_BAND bricks (deep digs, deep caves, cliffs)
-    // keeps the window of MAX_BAND bricks around the eye's layer at this
-    // level: rays beyond a clipped side use coarser levels, whose windows
-    // reach twice as far, and the CPU regenerates the column when the eye
-    // moves a quarter window vertically. Any depth stays representable.
+    // Lane 0 reduces the atomic bounds and broadcasts the band: the brick
+    // loop below holds barriers, and FXC rejects barriers under control flow
+    // that depends on per-lane atomic loads.
     let centre = frame.layer_i.x >> level;
-    var clip = 0u;
-    if k_hi - k_lo > i32(MAX_BAND) {
-        let lo = clamp((centre >> 3u) - i32(MAX_BAND / 2u), k_lo, k_hi - i32(MAX_BAND));
-        if lo > k_lo { clip |= INFO_CLIP_BELOW; }
-        if lo + i32(MAX_BAND) < k_hi { clip |= INFO_CLIP_ABOVE; }
-        k_lo = lo;
-        k_hi = lo + i32(MAX_BAND);
+    if li == 0u {
+        let lo_cell = atomicLoad(&g_band[0]);
+        let hi_cell = atomicLoad(&g_band[1]);
+        var k_lo = lo_cell >> 3u;
+        var k_hi = ((max(hi_cell, lo_cell + 1) - 1) >> 3u) + 1;
+        // A band taller than MAX_BAND bricks (deep digs, deep caves, cliffs)
+        // keeps the window of MAX_BAND bricks around the eye's layer at this
+        // level: rays beyond a clipped side use coarser levels, whose windows
+        // reach twice as far, and the CPU regenerates the column when the eye
+        // moves a quarter window vertically. Any depth stays representable.
+        var clip = 0u;
+        if k_hi - k_lo > i32(MAX_BAND) {
+            let lo = clamp((centre >> 3u) - i32(MAX_BAND / 2u), k_lo, k_hi - i32(MAX_BAND));
+            if lo > k_lo { clip |= INFO_CLIP_BELOW; }
+            if lo + i32(MAX_BAND) < k_hi { clip |= INFO_CLIP_ABOVE; }
+            k_lo = lo;
+            k_hi = lo + i32(MAX_BAND);
+        }
+        g_band_out = Band(hi_cell, k_lo, k_hi, clip, atomicLoad(&g_top_min));
     }
+    let band = workgroupUniformLoad(&g_band_out);
+    let hi_cell = band.hi_cell;
+    let k_lo = band.k_lo;
+    let k_hi = band.k_hi;
+    let clip = band.clip;
     let n_band = u32(k_hi - k_lo);
     // An edited column whose natural tops no longer fit a byte above the band
     // base (a deep dig) counts them down from the band top when they fit
     // there (`INFO_TOPS_DOWN`).
     let tops_down = topology_flags != 0u && n_band >= 32u && (clip & INFO_CLIP_ABOVE) == 0u
-        && k_hi * 8 - atomicLoad(&g_top_min) <= 255;
+        && k_hi * 8 - band.top_min <= 255;
     let volume_bits = atomicLoad(&g_volume);
     let volumetric = (volume_bits & VOLUME_TERRAIN) != 0u;
     // Generated caves and overhangs keep the relief of the natural surface

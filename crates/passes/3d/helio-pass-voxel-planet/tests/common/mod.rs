@@ -91,9 +91,9 @@ impl Target {
         let f = forward.normalize();
         let right = f.cross(up_hint).normalize();
         let up = right.cross(f);
-        let view = Mat4::look_to_rh(Vec3::ZERO, f, up);
+        let view = glam::camera::rh::view::look_to_mat4(Vec3::ZERO, f, up);
         let aspect = self.size[0] as f32 / self.size[1] as f32;
-        let proj = Mat4::perspective_rh(self.fov_y, aspect, 0.05, 30_000_000.0);
+        let proj = glam::camera::rh::proj::directx::perspective(self.fov_y, aspect, 0.05, 30_000_000.0);
         helio_core::GpuCameraUniforms::new(view, proj, Vec3::ZERO, 0.05, 30_000_000.0, 0, [0.0, 0.0], proj * view)
     }
 

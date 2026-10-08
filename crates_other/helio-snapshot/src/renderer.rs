@@ -1,15 +1,15 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use glam::Vec3;
-use helio::{
-    Camera, GpuLight, GpuMaterial, LightType, Renderer, RendererBuilder, RendererConfig,
+use glam::{Vec2, Vec3};
+use helio::{Camera, GpuLight, GpuMaterial, LightType, Renderer, RendererBuilder, RendererConfig};
+use helio_asset_compat::{
+    load_scene_file_with_config, upload_scene_materials, ConvertedTextureRef, LoadConfig,
 };
-use helio_asset_compat::{load_scene_file_with_config, upload_scene_materials, LoadConfig};
 use helio_pass_forward_lit::LightComponent;
 use helio_pass_gbuffer::{MaterialComponent, MeshComponent, StaticObjectComponent};
-use pulsar_scenedb::{Entity, SceneDb, World};
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
+use pulsar_scenedb::{Entity, SceneDb, World};
 use thiserror::Error;
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -94,6 +94,373 @@ pub fn render_snapshot<P: AsRef<Path>>(
     pollster::block_on(render_snapshot_async(model_path, config))
 }
 
+/// Render a lightweight CPU mesh preview for editor thumbnails.
+///
+/// Unlike [`render_snapshot`], this does not initialize a second GPU device or
+/// depend on the renderer's full scene pipeline. It loads the same converted
+/// mesh data, projects the actual triangles, and applies a simple neutral
+/// directional shade. This is useful for asset browsers, where the silhouette
+/// matters more than imported material fidelity.
+pub fn render_preview<P: AsRef<Path>>(
+    model_path: P,
+    config: SnapshotConfig,
+) -> Result<image::RgbaImage, SnapshotError> {
+    let load_config = LoadConfig::default()
+        .with_uv_flip(config.flip_uv_y)
+        .with_merge_meshes(false);
+    let model_path = model_path.as_ref();
+    let mut scene = load_scene_file_with_config(model_path, load_config)?;
+    attach_sidecar_base_color(model_path, &mut scene);
+    let (aabb_min, aabb_max) = compute_aabb(&scene)?;
+    Ok(rasterize_preview(&scene, aabb_min, aabb_max, &config))
+}
+
+/// Some FBX exporters omit their external color-map connection while leaving
+/// the conventional `*_BaseColor`, `*_Albedo`, or `*_Diffuse` image beside the
+/// model. Use that map for preview thumbnails when the imported material has
+/// no color texture at all.
+fn attach_sidecar_base_color(model_path: &Path, scene: &mut helio_asset_compat::ConvertedScene) {
+    if scene.materials.is_empty()
+        || scene
+            .materials
+            .iter()
+            .all(|material| material.textures.base_color.is_some())
+    {
+        return;
+    }
+
+    let Some(stem) = model_path.file_stem().and_then(|stem| stem.to_str()) else {
+        set_preview_fallback_color(scene);
+        return;
+    };
+    let Some(parent) = model_path.parent() else {
+        set_preview_fallback_color(scene);
+        return;
+    };
+    let prefix = format!("{stem}_").to_lowercase();
+    let mut candidates = std::fs::read_dir(parent)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let file_name = path.file_name()?.to_str()?.to_lowercase();
+            let extension = path.extension()?.to_str()?.to_lowercase();
+            if !file_name.starts_with(&prefix)
+                || !matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp" | "tga")
+            {
+                return None;
+            }
+            let priority = if file_name.contains("basecolor") || file_name.contains("base_color") {
+                0
+            } else if file_name.contains("albedo") {
+                1
+            } else if file_name.contains("diffuse") {
+                2
+            } else {
+                return None;
+            };
+            Some((priority, path))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    let Some((_, texture_path)) = candidates.into_iter().next() else {
+        set_preview_fallback_color(scene);
+        return;
+    };
+    let Ok(decoded) = image::open(&texture_path) else {
+        set_preview_fallback_color(scene);
+        return;
+    };
+    let rgba = decoded.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let texture_index = scene.textures.len();
+    scene.textures.push(helio::TextureUpload::rgba8(
+        texture_path.to_string_lossy(),
+        width,
+        height,
+        true,
+        rgba.into_raw(),
+        helio::TextureSamplerDesc::default(),
+    ));
+    let texture = ConvertedTextureRef {
+        texture_index,
+        uv_channel: 0,
+        transform: Default::default(),
+    };
+    for material in &mut scene.materials {
+        if material.textures.base_color.is_none() {
+            material.textures.base_color = Some(texture);
+        }
+    }
+}
+
+fn set_preview_fallback_color(scene: &mut helio_asset_compat::ConvertedScene) {
+    for material in &mut scene.materials {
+        if material.textures.base_color.is_none() {
+            material.gpu.base_color = [0.44, 0.66, 0.89, 1.0];
+        }
+    }
+}
+
+fn rasterize_preview(
+    scene: &helio_asset_compat::ConvertedScene,
+    aabb_min: Vec3,
+    aabb_max: Vec3,
+    cfg: &SnapshotConfig,
+) -> image::RgbaImage {
+    let width = cfg.width.max(1);
+    let height = cfg.height.max(1);
+    let center = (aabb_min + aabb_max) * 0.5;
+    let (view_dir, up) = view_dir_and_up(cfg.view);
+    let forward = view_dir.normalize_or_zero();
+    let right = forward.cross(up).normalize_or_zero();
+    let up = right.cross(forward).normalize_or_zero();
+
+    let mut projected = Vec::with_capacity(scene.meshes.len());
+    let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
+    let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for mesh in &scene.meshes {
+        let vertices: Vec<(Vec2, f32, Vec3, Vec2, Vec2)> = mesh
+            .vertices
+            .iter()
+            .map(|vertex| {
+                let world = mesh
+                    .node_transform
+                    .transform_point3(Vec3::from_array(vertex.position));
+                let relative = world - center;
+                let point = Vec2::new(relative.dot(right), relative.dot(up));
+                min_x = min_x.min(point.x);
+                min_y = min_y.min(point.y);
+                max_x = max_x.max(point.x);
+                max_y = max_y.max(point.y);
+                (
+                    point,
+                    -relative.dot(forward),
+                    world,
+                    Vec2::from_array(vertex.tex_coords0),
+                    Vec2::from_array(vertex.tex_coords1),
+                )
+            })
+            .collect();
+        projected.push(vertices);
+    }
+
+    let mut image = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 255]));
+    let mut depth = vec![f32::NEG_INFINITY; (width * height) as usize];
+    if !min_x.is_finite() || !min_y.is_finite() || max_x <= min_x || max_y <= min_y {
+        return image;
+    }
+
+    let projected_width = max_x - min_x;
+    let projected_height = max_y - min_y;
+    let scale =
+        (width.min(height) as f32 * 0.78) / projected_width.max(projected_height).max(0.001);
+    let offset = Vec2::new(
+        (width as f32 - projected_width * scale) * 0.5 - min_x * scale,
+        (height as f32 - projected_height * scale) * 0.5 + max_y * scale,
+    );
+    let light = Vec3::new(-0.35, 0.8, 0.55).normalize();
+
+    for (mesh, vertices) in scene.meshes.iter().zip(projected.iter()) {
+        let material = mesh
+            .material_index
+            .and_then(|index| scene.materials.get(index));
+        let base_color = material
+            .map(|material| material.gpu.base_color)
+            .unwrap_or([0.44, 0.66, 0.89, 1.0]);
+        let base_color_texture = material
+            .and_then(|material| material.textures.base_color)
+            .and_then(|texture| {
+                scene
+                    .textures
+                    .get(texture.texture_index)
+                    .map(|image| (image, texture))
+            });
+        for triangle in mesh.indices.chunks_exact(3) {
+            let (Some(&ia), Some(&ib), Some(&ic)) = (
+                triangle.first().and_then(|i| vertices.get(*i as usize)),
+                triangle.get(1).and_then(|i| vertices.get(*i as usize)),
+                triangle.get(2).and_then(|i| vertices.get(*i as usize)),
+            ) else {
+                continue;
+            };
+            // Projected Y is up while image Y is down. Negating it here keeps
+            // imported meshes upright in the thumbnail.
+            let to_screen =
+                |point: Vec2| Vec2::new(point.x * scale + offset.x, offset.y - point.y * scale);
+            let a = to_screen(ia.0);
+            let b = to_screen(ib.0);
+            let c = to_screen(ic.0);
+            let area = edge(a, b, c);
+            if area.abs() < 0.0001 {
+                continue;
+            }
+            let normal = (ib.2 - ia.2).cross(ic.2 - ia.2).normalize_or_zero();
+            let shade = 0.34 + 0.66 * normal.dot(light).abs();
+            let min_px = a.x.min(b.x).min(c.x).floor().max(0.0) as u32;
+            let max_px = a.x.max(b.x).max(c.x).ceil().min(width as f32 - 1.0) as u32;
+            let min_py = a.y.min(b.y).min(c.y).floor().max(0.0) as u32;
+            let max_py = a.y.max(b.y).max(c.y).ceil().min(height as f32 - 1.0) as u32;
+
+            for y in min_py..=max_py {
+                for x in min_px..=max_px {
+                    let p = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+                    let wa = edge(b, c, p) / area;
+                    let wb = edge(c, a, p) / area;
+                    let wc = edge(a, b, p) / area;
+                    if wa < 0.0 || wb < 0.0 || wc < 0.0 {
+                        continue;
+                    }
+                    let z = wa * ia.1 + wb * ib.1 + wc * ic.1;
+                    let index = (y * width + x) as usize;
+                    if z > depth[index] {
+                        depth[index] = z;
+                        let texel = base_color_texture.map_or([1.0; 4], |(texture, reference)| {
+                            let uv = if reference.uv_channel == 1 {
+                                ia.4 * wa + ib.4 * wb + ic.4 * wc
+                            } else {
+                                ia.3 * wa + ib.3 * wb + ic.3 * wc
+                            };
+                            let scaled = Vec2::new(
+                                uv.x * reference.transform.scale[0],
+                                uv.y * reference.transform.scale[1],
+                            );
+                            let (sin, cos) = reference.transform.rotation_radians.sin_cos();
+                            let transformed_uv = Vec2::new(
+                                cos * scaled.x - sin * scaled.y + reference.transform.offset[0],
+                                sin * scaled.x + cos * scaled.y + reference.transform.offset[1],
+                            );
+                            sample_texture_rgba(texture, transformed_uv)
+                        });
+                        let lit = shade;
+                        let rgb = [
+                            base_color[0] * texel[0] * lit,
+                            base_color[1] * texel[1] * lit,
+                            base_color[2] * texel[2] * lit,
+                        ];
+                        image.put_pixel(
+                            x,
+                            y,
+                            image::Rgba([
+                                linear_to_srgb(rgb[0]),
+                                linear_to_srgb(rgb[1]),
+                                linear_to_srgb(rgb[2]),
+                                ((base_color[3] * texel[3]).clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+                            ]),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    image
+}
+
+fn sample_texture_rgba(texture: &helio::TextureUpload, uv: Vec2) -> [f32; 4] {
+    if texture.width == 0
+        || texture.height == 0
+        || !matches!(
+            texture.format,
+            wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb
+        )
+        || texture.data.len() < (texture.width * texture.height * 4) as usize
+    {
+        return [1.0; 4];
+    }
+
+    let u = address_coordinate(uv.x, texture.sampler.address_mode_u);
+    let v = address_coordinate(uv.y, texture.sampler.address_mode_v);
+    let x = u * texture.width as f32 - 0.5;
+    let y = v * texture.height as f32 - 0.5;
+    let x0 = x.floor() as i32;
+    let y0 = y.floor() as i32;
+    let tx = x - x.floor();
+    let ty = y - y.floor();
+    let pixel = |px: i32, py: i32| {
+        let px = address_index(px, texture.width, texture.sampler.address_mode_u);
+        let py = address_index(py, texture.height, texture.sampler.address_mode_v);
+        let offset = ((py * texture.width + px) * 4) as usize;
+        let mut rgba = [0.0; 4];
+        for (channel, value) in rgba.iter_mut().enumerate() {
+            *value = texture.data[offset + channel] as f32 / 255.0;
+        }
+        if texture.format == wgpu::TextureFormat::Rgba8UnormSrgb {
+            for value in &mut rgba[..3] {
+                *value = srgb_to_linear(*value);
+            }
+        }
+        rgba
+    };
+    let top_left = pixel(x0, y0);
+    let top_right = pixel(x0 + 1, y0);
+    let bottom_left = pixel(x0, y0 + 1);
+    let bottom_right = pixel(x0 + 1, y0 + 1);
+    std::array::from_fn(|channel| {
+        let top = top_left[channel] * (1.0 - tx) + top_right[channel] * tx;
+        let bottom = bottom_left[channel] * (1.0 - tx) + bottom_right[channel] * tx;
+        top * (1.0 - ty) + bottom * ty
+    })
+}
+
+fn address_coordinate(value: f32, mode: wgpu::AddressMode) -> f32 {
+    match mode {
+        wgpu::AddressMode::ClampToEdge => value.clamp(0.0, 1.0),
+        wgpu::AddressMode::ClampToBorder => value.clamp(0.0, 1.0),
+        wgpu::AddressMode::Repeat => value.rem_euclid(1.0),
+        wgpu::AddressMode::MirrorRepeat => {
+            let period = value.rem_euclid(2.0);
+            if period <= 1.0 {
+                period
+            } else {
+                2.0 - period
+            }
+        }
+    }
+}
+
+fn address_index(index: i32, size: u32, mode: wgpu::AddressMode) -> u32 {
+    let size = size as i32;
+    match mode {
+        wgpu::AddressMode::ClampToEdge => index.clamp(0, size - 1) as u32,
+        wgpu::AddressMode::ClampToBorder => index.clamp(0, size - 1) as u32,
+        wgpu::AddressMode::Repeat => index.rem_euclid(size) as u32,
+        wgpu::AddressMode::MirrorRepeat => {
+            let period = size * 2;
+            let mirrored = index.rem_euclid(period);
+            if mirrored < size {
+                mirrored as u32
+            } else {
+                (period - 1 - mirrored) as u32
+            }
+        }
+    }
+}
+
+fn srgb_to_linear(value: f32) -> f32 {
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(value: f32) -> u8 {
+    let value = value.clamp(0.0, 1.0);
+    let encoded = if value <= 0.0031308 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0 + 0.5) as u8
+}
+
+fn edge(a: Vec2, b: Vec2, point: Vec2) -> f32 {
+    (point.x - a.x) * (b.y - a.y) - (point.y - a.y) * (b.x - a.x)
+}
+
 // ── Internals ─────────────────────────────────────────────────────────────────
 
 async fn render_snapshot_async<P: AsRef<Path>>(
@@ -136,6 +503,7 @@ async fn render_snapshot_async<P: AsRef<Path>>(
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("helio-snapshot"),
             required_features: helio::required_wgpu_features(adapter.features()),
+            experimental_features: helio::required_experimental_features(adapter.features()),
             required_limits: helio::required_wgpu_limits(adapter.limits()),
             ..Default::default()
         })
@@ -170,7 +538,9 @@ async fn render_snapshot_async<P: AsRef<Path>>(
     let mut scene_db = new_scene_db(&device, &queue);
     let mut renderer = RendererBuilder::new(renderer_cfg, scene_db_handle(&scene_db))
         .with_external_device()
-        .with_pass_build_context(Box::new(helio_default_graphs::build_default_graph_external_with_context))
+        .with_pass_build_context(Box::new(
+            helio_default_graphs::build_default_graph_external_with_context,
+        ))
         .build(device.clone(), queue.clone(), cfg.width, cfg.height, FORMAT);
 
     // ── 6. Upload all meshes + materials via helio-asset-compat ──────────────
@@ -189,16 +559,27 @@ async fn render_snapshot_async<P: AsRef<Path>>(
             Some(&id) => id,
             None => continue,
         };
-        let material_id = mesh.material_index.and_then(|i| material_ids.get(i).copied()).unwrap_or(fallback_mat);
+        let material_id = mesh
+            .material_index
+            .and_then(|i| material_ids.get(i).copied())
+            .unwrap_or(fallback_mat);
         let transform = mesh.node_transform;
         let world_center = transform.transform_point3(Vec3::ZERO);
 
-        insert_object(&mut scene_db.world, mesh_id, material_id, transform,
-            [world_center.x, world_center.y, world_center.z, radius], radius)?;
+        insert_object(
+            &mut scene_db.world,
+            mesh_id,
+            material_id,
+            transform,
+            [world_center.x, world_center.y, world_center.z, radius],
+            radius,
+        )?;
     }
 
     // ── 9. Two-light rig: key (warm directional) + fill (cool fill) ───────────
-    insert_light(&mut scene_db.world, GpuLight {
+    insert_light(
+        &mut scene_db.world,
+        GpuLight {
             position_range: [0.0, 0.0, 0.0, f32::MAX],
             direction_outer: [-0.5_f32.sqrt(), -0.5_f32.sqrt(), 0.0, 0.0],
             color_intensity: [1.0, 0.98, 0.95, 3.0],
@@ -222,8 +603,11 @@ async fn render_snapshot_async<P: AsRef<Path>>(
             light_function_index: -1,
             ies_angle_scale: 0.0,
             ies_angle_offset: 0.0,
-        });
-    insert_light(&mut scene_db.world, GpuLight {
+        },
+    );
+    insert_light(
+        &mut scene_db.world,
+        GpuLight {
             position_range: [0.0, 0.0, 0.0, f32::MAX],
             direction_outer: [0.5_f32.sqrt(), 0.5_f32.sqrt(), 0.0, 0.0],
             color_intensity: [0.5, 0.6, 0.8, 1.2],
@@ -247,7 +631,8 @@ async fn render_snapshot_async<P: AsRef<Path>>(
             light_function_index: -1,
             ies_angle_scale: 0.0,
             ies_angle_offset: 0.0,
-        });
+        },
+    );
     scene_db.world.flush_gpu_mirror(&queue);
 
     // ── 10. Auto-place camera to frame the bounding sphere ────────────────────
@@ -575,6 +960,7 @@ impl SnapshotBatch {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("helio-snapshot-batch"),
                 required_features: helio::required_wgpu_features(adapter.features()),
+                experimental_features: helio::required_experimental_features(adapter.features()),
                 required_limits: helio::required_wgpu_limits(adapter.limits()),
                 ..Default::default()
             })
@@ -606,8 +992,16 @@ impl SnapshotBatch {
         let scene_db = new_scene_db(&device, &queue);
         let renderer = RendererBuilder::new(renderer_cfg, scene_db_handle(&scene_db))
             .with_external_device()
-            .with_pass_build_context(Box::new(helio_default_graphs::build_default_graph_external_with_context))
-            .build(device.clone(), queue.clone(), config.width, config.height, FORMAT);
+            .with_pass_build_context(Box::new(
+                helio_default_graphs::build_default_graph_external_with_context,
+            ))
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                FORMAT,
+            );
 
         Ok(Self {
             device,
@@ -649,21 +1043,33 @@ impl SnapshotBatch {
         let camera = build_camera(center, radius, &self.config);
 
         let (mesh_ids, material_ids) = upload_scene_rows(&mut self.scene_db.world, &scene);
-        self.live_entities.extend(mesh_ids.iter().chain(material_ids.iter()).copied());
+        self.live_entities
+            .extend(mesh_ids.iter().chain(material_ids.iter()).copied());
         let fallback_mat = self.scene_db.world.spawn();
-        self.scene_db.world.insert(fallback_mat, fallback_material());
+        self.scene_db
+            .world
+            .insert(fallback_mat, fallback_material());
         self.live_entities.push(fallback_mat);
 
         for (i, mesh) in scene.meshes.iter().enumerate() {
             let Some(&mesh_id) = mesh_ids.get(i) else {
                 continue;
             };
-            let material_id = mesh.material_index.and_then(|i| material_ids.get(i).copied()).unwrap_or(fallback_mat);
+            let material_id = mesh
+                .material_index
+                .and_then(|i| material_ids.get(i).copied())
+                .unwrap_or(fallback_mat);
             let transform = mesh.node_transform;
             let world_center = transform.transform_point3(Vec3::ZERO);
 
-            let object = insert_object(&mut self.scene_db.world, mesh_id, material_id, transform,
-                [world_center.x, world_center.y, world_center.z, radius], radius)?;
+            let object = insert_object(
+                &mut self.scene_db.world,
+                mesh_id,
+                material_id,
+                transform,
+                [world_center.x, world_center.y, world_center.z, radius],
+                radius,
+            )?;
             self.live_entities.push(object);
         }
 
@@ -675,7 +1081,9 @@ impl SnapshotBatch {
             (rim_dir, [0.90, 0.95, 1.00], 0.8, u32::MAX),
         ] {
             let light = self.scene_db.world.spawn();
-            self.scene_db.world.insert(light, LightComponent::from(GpuLight {
+            self.scene_db.world.insert(
+                light,
+                LightComponent::from(GpuLight {
                     position_range: [0.0, 0.0, 0.0, f32::MAX],
                     direction_outer: [dir.x, dir.y, dir.z, 0.0],
                     color_intensity: [color[0], color[1], color[2], intensity],
@@ -699,7 +1107,8 @@ impl SnapshotBatch {
                     light_function_index: -1,
                     ies_angle_scale: 0.0,
                     ies_angle_offset: 0.0,
-                }));
+                }),
+            );
             self.live_entities.push(light);
         }
 

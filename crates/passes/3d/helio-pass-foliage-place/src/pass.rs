@@ -28,7 +28,7 @@ const LAYER_BYTES: u64 = std::mem::size_of::<GpuFoliageLayer>() as u64;
 /// `GpuBladeInstance` stores the type id in 8 bits, so 256 is not a budget choice — it is
 /// the representable maximum. Publishing more types than this cannot work, and clamping
 /// with a warning is better than blades silently rendering as type `id % 256`.
-const MAX_FOLIAGE_TYPES: u32 = 256;
+pub const MAX_FOLIAGE_TYPES: u32 = 256;
 
 /// Hard ceiling on the foliage layer table.
 ///
@@ -36,7 +36,7 @@ const MAX_FOLIAGE_TYPES: u32 = 256;
 /// a scene that authorially grows past it should raise this and reallocate the (fixed)
 /// layer buffer. The placement shader loops over the table once per candidate, so a large
 /// ceiling costs per-candidate loop iterations even when few entries are used.
-const MAX_FOLIAGE_LAYERS: u32 = 64;
+pub const MAX_FOLIAGE_LAYERS: u32 = 64;
 
 /// Compute workgroup size shared by `cs_place`, `cs_tile_cull` and `cs_cluster_cull`.
 const WORKGROUP_SIZE: u32 = 64;
@@ -118,6 +118,8 @@ pub struct FoliagePlacePass {
     density_scale: f32,
     warned_density_clamp: bool,
     warned_type_overflow: bool,
+    /// Whether any type row has a density; see [`crate::foliage_type_liveness`].
+    type_liveness: helio_core::SceneBufferLiveness,
     commands_recorded: u64,
 
     /// Non-blocking readback of [`Self::counters`], for diagnosing an empty field.
@@ -509,6 +511,7 @@ impl FoliagePlacePass {
             density_scale: 1.0,
             warned_density_clamp: false,
             warned_type_overflow: false,
+            type_liveness: crate::foliage_type_liveness(),
             commands_recorded: 0,
             counters_readback: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Foliage Counters Readback"),
@@ -796,6 +799,10 @@ impl RenderPass for FoliagePlacePass {
         let Some(type_handle) = ctx.scene_buffers.get(BufferKey::of("foliage_types")) else {
             return Ok(());
         };
+        self.type_liveness.update(ctx.device, ctx.queue, Some(type_handle));
+        if !self.type_liveness.maybe_live(type_handle) {
+            return Ok(());
+        }
         let mut type_count = (type_handle.buffer.size() / TYPE_BYTES) as u32;
         if type_count > MAX_FOLIAGE_TYPES {
             if !self.warned_type_overflow {
@@ -843,11 +850,21 @@ impl RenderPass for FoliagePlacePass {
             self.warned_density_clamp = true;
         }
 
-        // Residency is keyed on (tile_coord, generation); the generation is truncated to
-        // 32 bits because that is what `blade_seed` mixes. Wrapping is harmless — it takes
-        // 4 billion authoring edits, and a collision only means one tile keeps its blades
-        // through an edit it should have re-rolled.
-        let generation = type_handle.epoch as u32;
+        // Residency is keyed on (tile_coord, generation): a tile is re-placed whenever
+        // the type or layer table's contents change. The blades' seed follows the type
+        // table alone, so a tile re-placed because only the layers changed (a publisher
+        // may re-derive them when any object moves) grows the same blades wherever its
+        // layers still cover it. Both are truncated to 32 bits because that is what
+        // `blade_seed` mixes. Wrapping is harmless — it takes 4 billion authoring edits,
+        // and a collision only means one tile keeps its blades through an edit it should
+        // have re-rolled.
+        let mix = |handle: &helio_core::BufferHandle| {
+            handle.epoch ^ handle.content_generation.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        };
+        let seed_generation = mix(type_handle) as u32;
+        let layers = ctx.scene_buffers.get(BufferKey::of("foliage_layers"));
+        let generation =
+            (mix(type_handle) ^ layers.map_or(0, |h| mix(h).rotate_left(29))) as u32;
         let position_near = ctx.camera_data.position_near;
         let camera = [position_near[0], position_near[1], position_near[2]];
         let ring_update = self.ring.update([camera[0], camera[2]], generation);
@@ -859,7 +876,7 @@ impl RenderPass for FoliagePlacePass {
             );
         }
 
-        self.upload_tile_headers(ctx, generation);
+        self.upload_tile_headers(ctx, seed_generation);
 
         let queue = self.ring.place_queue();
         self.queued_tile_count = queue.len() as u32;

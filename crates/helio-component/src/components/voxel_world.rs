@@ -19,13 +19,19 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use glam::DVec3;
-use helio_pass_voxel_planet::{
-    grid::Shape,
-    terrain,
-    Brush, BrushOp, BrushShape, Planet, PlanetRecipe, TerrainSource,
-};
 /// Terrain material ids (`material::GRASS`, ...) and their names.
 pub use helio_pass_voxel_planet::terrain::material;
+use helio_pass_voxel_planet::{
+    grid::Shape, terrain, Brush, BrushOp, BrushShape, Planet, PlanetRecipe, TerrainSource,
+};
+use helio_voxel_data::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditJournal};
+use pulsar_scene_model::components::Transform;
+use pulsar_scenedb::{Entity, World};
+
+use super::{
+    BlockData, BlockMaterialChange, VoxelLayerKind, VoxelTerrainComponent, VoxelTerrainLayer,
+    VoxelTerrainLayersComponent, VoxelTerrainStack, VoxelWorldShape,
+};
 
 /// Base colour (linear 0..1 sRGB-encoded components, as authored) of material
 /// `id` in the built-in appearance, for editor palettes.
@@ -34,14 +40,15 @@ pub fn material_colour(id: u32) -> [f32; 3] {
     let colour = table.materials.get(id as usize).map_or([0.5; 4], |m| m.colour);
     [colour[0], colour[1], colour[2]]
 }
-use helio_voxel_data::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditJournal};
-use pulsar_scene_model::components::Transform;
-use pulsar_scenedb::{Entity, World};
-
-use super::{VoxelLayerKind, VoxelTerrainComponent, VoxelTerrainLayer, VoxelTerrainLayersComponent, VoxelTerrainStack, VoxelWorldShape};
 
 /// The world of a terrain form and generator.
-pub fn world_recipe(shape: VoxelWorldShape, planet_radius: f64, plane_size: f64, voxel_size: f64, source: TerrainSource) -> PlanetRecipe {
+pub fn world_recipe(
+    shape: VoxelWorldShape,
+    planet_radius: f64,
+    plane_size: f64,
+    voxel_size: f64,
+    source: TerrainSource,
+) -> PlanetRecipe {
     PlanetRecipe {
         shape: match shape {
             VoxelWorldShape::Sphere => Shape::Sphere,
@@ -80,11 +87,20 @@ pub fn generator_settings_component(id: &str, version: u32) -> Option<String> {
     terrain::find(id, version).and_then(|generator| generator.info().settings_component)
 }
 
-/// The generator settings (JSON) of a terrain entity: its settings
-/// component serialized when present, else `generator_parameters`.
-pub fn generator_settings(world: &World, entity: Entity, component: &VoxelTerrainComponent) -> String {
+/// The generator settings (JSON) of a terrain instance: its owner object's
+/// settings component serialized when present, else `generator_parameters`.
+pub fn generator_settings(
+    world: &World,
+    entity: Entity,
+    component: &VoxelTerrainComponent,
+) -> String {
+    let owner = pulsar_scene_model::attachments::owner_of(world, entity).unwrap_or(entity);
     generator_settings_component(&component.generator.id, component.generator.version)
-        .and_then(|class| pulsar_world_registry::get_world_component_as_engine_class(&class, world, entity))
+        .and_then(|class| {
+            let settings =
+                pulsar_world_registry::instances::resolve_instance(world, owner, &class, 0)?;
+            pulsar_world_registry::get_world_component_as_engine_class(&class, world, settings)
+        })
         .and_then(|settings| settings.to_json().ok())
         .map(|json| json.to_string())
         .unwrap_or_else(|| component.generator_parameters.clone())
@@ -96,10 +112,18 @@ pub fn is_generated(component: &VoxelTerrainComponent) -> bool {
     terrain::find(&component.generator.id, component.generator.version).is_some()
 }
 
-/// The recipe of a terrain entity, with its transform's uniform scale.
-fn entity_recipe(world: &World, entity: Entity, component: &VoxelTerrainComponent) -> Result<PlanetRecipe, String> {
-    let transform = world.get::<Transform>(entity).copied().unwrap_or_default();
-    if transform.position.iter().any(|v| v.abs() > 1.0e-6) || transform.rotation.iter().any(|v| v.abs() > 1.0e-5) {
+/// The recipe of a terrain instance, with its owner's uniform scale.
+fn entity_recipe(
+    world: &World,
+    entity: Entity,
+    component: &VoxelTerrainComponent,
+) -> Result<PlanetRecipe, String> {
+    let transform = pulsar_scene_model::attachments::owner_component::<Transform>(world, entity)
+        .copied()
+        .unwrap_or_default();
+    if transform.position.iter().any(|v| v.abs() > 1.0e-6)
+        || transform.rotation.iter().any(|v| v.abs() > 1.0e-5)
+    {
         return Err("a voxel world is centred on the world origin; move the entity to (0, 0, 0) without rotation".into());
     }
     let [sx, sy, sz] = transform.scale.map(f64::from);
@@ -112,7 +136,13 @@ fn entity_recipe(world: &World, entity: Entity, component: &VoxelTerrainComponen
         seed: component.seed,
         settings: generator_settings(world, entity, component),
     };
-    Ok(world_recipe(component.shape, component.planet_radius * sx, component.plane_size * sx, component.voxel_size * sx, source))
+    Ok(world_recipe(
+        component.shape,
+        component.planet_radius * sx,
+        component.plane_size * sx,
+        component.voxel_size * sx,
+        source,
+    ))
 }
 
 struct CachedWorld {
@@ -125,15 +155,20 @@ struct CachedWorld {
 /// extends the cached world.
 static WORLDS: Mutex<Option<HashMap<u64, CachedWorld>>> = Mutex::new(None);
 
-/// The CPU world of a terrain entity: its generated terrain with every
-/// journal edit applied.
+/// The CPU world of a terrain instance entity: its generated terrain with
+/// every journal edit applied.
 pub fn terrain_world(world: &World, entity: Entity) -> Result<Arc<Planet>, String> {
-    let component = world.get::<VoxelTerrainComponent>(entity).ok_or("the entity has no voxel terrain")?;
-    if !component.enabled {
+    let component = world
+        .get::<VoxelTerrainComponent>(entity)
+        .ok_or("the entity has no voxel terrain")?;
+    if !component.enabled || !pulsar_scene_model::attachments::is_enabled(world, entity) {
         return Err("the voxel terrain is disabled".into());
     }
     if !is_generated(component) {
-        return Err(format!("unknown terrain generator {} v{}", component.generator.id, component.generator.version));
+        return Err(format!(
+            "unknown terrain generator {} v{}",
+            component.generator.id, component.generator.version
+        ));
     }
     let recipe = entity_recipe(world, entity, component)?;
     let mut worlds = WORLDS.lock().unwrap_or_else(|e| e.into_inner());
@@ -165,27 +200,138 @@ pub fn terrain_world(world: &World, entity: Entity) -> Result<Arc<Planet>, Strin
     if worlds.len() >= 16 && !worlds.contains_key(&key) {
         worlds.clear();
     }
-    worlds.insert(key, CachedWorld { recipe, edits: component.edits.clone(), planet: Arc::clone(&planet) });
+    worlds.insert(
+        key,
+        CachedWorld {
+            recipe,
+            edits: component.edits.clone(),
+            planet: Arc::clone(&planet),
+        },
+    );
     Ok(planet)
 }
 
 /// Append edits to a terrain's journal after checking that each applies.
-pub fn append_edits(world: &mut World, entity: Entity, edits: Vec<VoxelBrushEdit>) -> Result<(), String> {
-    let grid = *terrain_world(world, entity)?.grid();
-    let component = world.get::<VoxelTerrainComponent>(entity).ok_or("the entity has no voxel terrain")?;
+pub fn append_edits(
+    world: &mut World,
+    entity: Entity,
+    edits: Vec<VoxelBrushEdit>,
+) -> Result<(), String> {
+    let planet = terrain_world(world, entity)?;
+    let grid = *planet.grid();
+    let component = world
+        .get::<VoxelTerrainComponent>(entity)
+        .ok_or("the entity has no voxel terrain")?;
     if !component.editable {
         return Err("the voxel terrain is not editable".into());
     }
     for edit in &edits {
-        if edit.op != VoxelBrushOp::Remove && (edit.material == material::AIR || edit.material >= material::COUNT) {
-            return Err(format!("material {} is not a solid terrain material (1 to {})", edit.material, material::COUNT - 1));
+        if edit.op != VoxelBrushOp::Remove
+            && (edit.material == material::AIR || edit.material >= material::COUNT)
+        {
+            return Err(format!(
+                "material {} is not a solid terrain material (1 to {})",
+                edit.material,
+                material::COUNT - 1
+            ));
         }
         planet_brush(edit).resolve(&grid)?;
     }
-    let mut component = world.get_mut::<VoxelTerrainComponent>(entity).ok_or("the entity has no voxel terrain")?;
+    // Simulate the validated batch in order so events describe the exact
+    // before/after state for every cell, including overlapping brushes.
+    let mut broken = Vec::new();
+    let mut placed = Vec::new();
+    let mut changed = Vec::new();
+    let mut preview = (*planet).clone();
+    for edit in &edits {
+        let affected = affected_block_centres(&preview, edit)?;
+        let before: Vec<_> = affected
+            .into_iter()
+            .map(|(cell, center)| (cell, center, preview.material(cell)))
+            .collect();
+        preview.apply(planet_brush(edit))?;
+        for (cell, center, previous_material) in before {
+            let next_material = preview.material(cell);
+            if previous_material == next_material {
+                continue;
+            }
+            if previous_material != material::AIR {
+                broken.push(BlockData {
+                    x: center.x,
+                    y: center.y,
+                    z: center.z,
+                    material: previous_material,
+                });
+            }
+            if next_material != material::AIR {
+                placed.push(BlockData {
+                    x: center.x,
+                    y: center.y,
+                    z: center.z,
+                    material: next_material,
+                });
+            }
+            if previous_material != material::AIR && next_material != material::AIR {
+                changed.push(BlockMaterialChange {
+                    x: center.x,
+                    y: center.y,
+                    z: center.z,
+                    previous_material,
+                    material: next_material,
+                });
+            }
+        }
+    }
+    let mut component = world
+        .get_mut::<VoxelTerrainComponent>(entity)
+        .ok_or("the entity has no voxel terrain")?;
     component.edits.extend(edits);
+    component.pending_block_broken.extend(broken);
+    component.pending_block_placed.extend(placed);
+    component.pending_block_material_changed.extend(changed);
     component.source_revision = component.source_revision.wrapping_add(1);
     Ok(())
+}
+
+/// Enumerate exact base-cell centres covered by a brush using the same
+/// resolved half-cell containment predicate as the terrain renderer.
+fn affected_block_centres(
+    planet: &Planet,
+    edit: &VoxelBrushEdit,
+) -> Result<Vec<(helio_pass_voxel_planet::Cell, DVec3)>, String> {
+    let grid = planet.grid();
+    let mut cells = std::collections::HashSet::new();
+    for face_brush in planet_brush(edit).resolve(grid)? {
+        let radius = i64::from(face_brush.radius_half);
+        let center = face_brush.center;
+        let low = center.map(|value| (i64::from(value) - radius - 1).div_euclid(2));
+        let high = center.map(|value| (i64::from(value) + radius - 1).div_euclid(2));
+        for k in low[2]..=high[2] {
+            for j in low[1]..=high[1] {
+                for i in low[0]..=high[0] {
+                    let [i, j, k] = [i as i32, j as i32, k as i32];
+                    let sample = [
+                        helio_pass_voxel_planet::edits::center_half(i, 0),
+                        helio_pass_voxel_planet::edits::center_half(j, 0),
+                        helio_pass_voxel_planet::edits::center_half(k, 0),
+                    ];
+                    if !face_brush.contains(sample) {
+                        continue;
+                    }
+                    let position = grid.position(
+                        face_brush.face(),
+                        [f64::from(i) + 0.5, f64::from(j) + 0.5, f64::from(k) + 0.5],
+                    );
+                    let (cell, _) = grid.locate(position);
+                    cells.insert(cell);
+                }
+            }
+        }
+    }
+    Ok(cells
+        .into_iter()
+        .map(|cell| (cell, grid.cell_center(cell)))
+        .collect())
 }
 
 /// The edit that makes the cell containing `p` exactly `material` (0 air).
@@ -197,13 +343,22 @@ pub fn block_edit(planet: &Planet, p: DVec3, material: u32) -> VoxelBrushEdit {
         // Contains only its own cell centre.
         radius: grid.voxel_size() * 0.5,
         shape: VoxelBrushShape::Cube,
-        op: if material == material::AIR { VoxelBrushOp::Remove } else { VoxelBrushOp::Add },
+        op: if material == material::AIR {
+            VoxelBrushOp::Remove
+        } else {
+            VoxelBrushOp::Add
+        },
         material,
     }
 }
 
 /// The edit that fills (or, with material 0, clears) a sphere or cube.
-pub fn shape_edit(center: DVec3, radius: f64, shape: VoxelBrushShape, material: u32) -> Result<VoxelBrushEdit, String> {
+pub fn shape_edit(
+    center: DVec3,
+    radius: f64,
+    shape: VoxelBrushShape,
+    material: u32,
+) -> Result<VoxelBrushEdit, String> {
     if !center.is_finite() || !radius.is_finite() || radius <= 0.0 {
         return Err("a fill needs a finite centre and a positive radius".into());
     }
@@ -211,7 +366,11 @@ pub fn shape_edit(center: DVec3, radius: f64, shape: VoxelBrushShape, material: 
         center: center.to_array(),
         radius,
         shape,
-        op: if material == material::AIR { VoxelBrushOp::Remove } else { VoxelBrushOp::Add },
+        op: if material == material::AIR {
+            VoxelBrushOp::Remove
+        } else {
+            VoxelBrushOp::Add
+        },
         material,
     })
 }
@@ -234,14 +393,20 @@ pub fn frame_view(planet: &Planet, eye: DVec3, forward: DVec3, height: f64) -> (
     let position = planet.surface_point(column, height);
     let up = grid.up(position);
     let along = forward - up * forward.dot(up);
-    let along = along.try_normalize().unwrap_or_else(|| up.any_orthonormal_vector());
+    let along = along
+        .try_normalize()
+        .unwrap_or_else(|| up.any_orthonormal_vector());
     let tilt = 0.2f64;
     (position, (along * tilt.cos() - up * tilt.sin()).normalize())
 }
 
 fn position(x: f64, y: f64, z: f64) -> Result<DVec3, String> {
     let p = DVec3::new(x, y, z);
-    if p.is_finite() { Ok(p) } else { Err("positions must be finite".into()) }
+    if p.is_finite() {
+        Ok(p)
+    } else {
+        Err("positions must be finite".into())
+    }
 }
 
 // Scripting surface. Blocks are the world's exact base cells.
@@ -257,25 +422,59 @@ impl VoxelTerrainComponent {
 
     /// Make the block containing the point `material` (0 removes it).
     #[world_method(category = "Voxel")]
-    fn set_block(world: &mut World, entity: Entity, x: f64, y: f64, z: f64, material: u32) -> Result<(), String> {
+    fn set_block(
+        world: &mut World,
+        entity: Entity,
+        x: f64,
+        y: f64,
+        z: f64,
+        material: u32,
+    ) -> Result<(), String> {
         let planet = terrain_world(world, entity)?;
-        let edit = block_edit(&planet, position(x, y, z)?, material);
+        let point = position(x, y, z)?;
+        let edit = block_edit(&planet, point, material);
         append_edits(world, entity, vec![edit])
     }
 
     /// Fill every block whose centre lies within `radius` of the point with
     /// `material` (0 digs a hole).
     #[world_method(category = "Voxel")]
-    fn fill_sphere(world: &mut World, entity: Entity, x: f64, y: f64, z: f64, radius: f64, material: u32) -> Result<(), String> {
-        let edit = shape_edit(position(x, y, z)?, radius, VoxelBrushShape::Sphere, material)?;
+    fn fill_sphere(
+        world: &mut World,
+        entity: Entity,
+        x: f64,
+        y: f64,
+        z: f64,
+        radius: f64,
+        material: u32,
+    ) -> Result<(), String> {
+        let edit = shape_edit(
+            position(x, y, z)?,
+            radius,
+            VoxelBrushShape::Sphere,
+            material,
+        )?;
         append_edits(world, entity, vec![edit])
     }
 
     /// Fill every block whose centre lies in the cube of half size
     /// `half_size` around the point, aligned with the ground.
     #[world_method(category = "Voxel")]
-    fn fill_cube(world: &mut World, entity: Entity, x: f64, y: f64, z: f64, half_size: f64, material: u32) -> Result<(), String> {
-        let edit = shape_edit(position(x, y, z)?, half_size, VoxelBrushShape::Cube, material)?;
+    fn fill_cube(
+        world: &mut World,
+        entity: Entity,
+        x: f64,
+        y: f64,
+        z: f64,
+        half_size: f64,
+        material: u32,
+    ) -> Result<(), String> {
+        let edit = shape_edit(
+            position(x, y, z)?,
+            half_size,
+            VoxelBrushShape::Cube,
+            material,
+        )?;
         append_edits(world, entity, vec![edit])
     }
 
@@ -299,7 +498,9 @@ impl VoxelTerrainComponent {
         if direction.length_squared() == 0.0 {
             return Err("the ray direction is zero".into());
         }
-        Ok(planet.raycast(position(x, y, z)?, direction, max_distance).map_or(-1.0, |hit| hit.distance))
+        Ok(planet
+            .raycast(position(x, y, z)?, direction, max_distance)
+            .map_or(-1.0, |hit| hit.distance))
     }
 
     /// Edge length of one block in metres.
@@ -309,8 +510,20 @@ impl VoxelTerrainComponent {
     }
 }
 
+/// The layers instance `entity` names: the instance itself, or the first
+/// layers instance of its owner object (a sibling component or the object).
+fn layers_instance(world: &World, entity: Entity) -> Result<Entity, String> {
+    if world.get::<VoxelTerrainLayersComponent>(entity).is_some() {
+        return Ok(entity);
+    }
+    let owner = pulsar_scene_model::attachments::owner_of(world, entity).unwrap_or(entity);
+    pulsar_world_registry::instances::resolve_instance(world, owner, "VoxelTerrainLayersComponent", 0)
+        .ok_or_else(|| "the object has no terrain layers".into())
+}
+
 fn layers_mut(world: &mut World, entity: Entity) -> Result<pulsar_scenedb::Mut<'_, VoxelTerrainLayersComponent>, String> {
-    world.get_mut::<VoxelTerrainLayersComponent>(entity).ok_or_else(|| "the entity has no terrain layers".into())
+    let instance = layers_instance(world, entity)?;
+    world.get_mut::<VoxelTerrainLayersComponent>(instance).ok_or_else(|| "the object has no terrain layers".into())
 }
 
 fn layer_mut(stack: &mut VoxelTerrainStack, index: u32) -> Result<&mut VoxelTerrainLayer, String> {
@@ -335,7 +548,8 @@ impl VoxelTerrainLayersComponent {
     /// Number of layers in the stack (enabled or not).
     #[world_method(pure, category = "Voxel")]
     fn layer_count(world: &World, entity: Entity) -> Result<u32, String> {
-        let stack = world.get::<VoxelTerrainLayersComponent>(entity).ok_or("the entity has no terrain layers")?;
+        let instance = layers_instance(world, entity)?;
+        let stack = world.get::<VoxelTerrainLayersComponent>(instance).ok_or("the object has no terrain layers")?;
         Ok(stack.stack.layers.len() as u32)
     }
 

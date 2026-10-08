@@ -10,9 +10,8 @@
 //! Format (`PMSH`): a small header (magic + version + vertex/index counts)
 //! followed by the bytemuck-packed [`PackedVertex`] and `u32` index arrays.
 //!
-//! NOTE: only mesh geometry is baked today. Materials/textures from the source
-//! scene are not yet written as native assets — that's a follow-up once the
-//! engine's native material-asset format is wired in here.
+//! The v3 format also stores mesh sections and imported scalar PBR material
+//! values. Source texture payloads are still not copied into native assets.
 //!
 //! # v2: content-id provenance (Pulsar-Native#632/#658)
 //!
@@ -34,23 +33,96 @@
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use bytemuck::Zeroable;
 use helio::{MeshUpload, PackedVertex};
-use pulsar_reflection::{RuntimeTypeInfo, TypeStructure, RUNTIME_TYPE_REGISTRY};
+use pulsar_reflection::{RUNTIME_TYPE_REGISTRY, RuntimeTypeInfo, TypeStructure};
 
 const MAGIC: &[u8; 4] = b"PMSH";
 /// Current WRITE version — every fresh `encode` call produces this.
 const VERSION: u32 = 2;
+/// Version 3 adds JSON-encoded section/material-slot metadata after the
+/// geometry payload. The geometry content id deliberately remains based on
+/// vertex/index bytes so identical geometry can still share GPU allocations
+/// even when its material assignment differs.
+const VERSION_WITH_SECTIONS: u32 = 3;
 const HEADER: usize = 4 + 4 + 8 + 8; // magic + version + vertex_count + index_count
 /// v2 only: `HEADER` bytes plus a trailing 16-byte `content_id: u128`,
 /// BEFORE the vertex/index payload (so a v1 reader that somehow ignored the
 /// version check would still fail the length check rather than misread
 /// content-id bytes as geometry).
 const HEADER_V2: usize = HEADER + 16;
+const HEADER_V3: usize = HEADER_V2 + 8; // metadata byte length
+
+/// One imported material slot on a static mesh asset. `source_material` is
+/// the material index assigned by the source format (for example FBX); the
+/// authored component may override that slot with a project material asset.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MeshMaterialSlot {
+    pub source_material: Option<u32>,
+    pub name: String,
+    #[serde(default)]
+    pub surface: ImportedSurfaceMaterial,
+}
+
+/// FBX/OBJ/glTF scalar material data retained by native mesh imports. Texture
+/// payloads remain separate assets; these values provide a deterministic PBR
+/// surface when a slot has no authored material assignment.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ImportedSurfaceMaterial {
+    pub base_color: [f32; 4],
+    pub roughness: f32,
+    pub metallic: f32,
+    pub emissive: [f32; 3],
+    pub emissive_intensity: f32,
+    pub alpha: f32,
+}
+
+impl Default for ImportedSurfaceMaterial {
+    fn default() -> Self {
+        Self {
+            base_color: [0.22, 0.15, 0.08, 1.0],
+            roughness: 0.7,
+            metallic: 0.0,
+            emissive: [0.0; 3],
+            emissive_intensity: 0.0,
+            alpha: 1.0,
+        }
+    }
+}
+
+/// An indexed section in the mesh's shared index buffer. Its `material_slot`
+/// selects the matching entry in [`MeshAssetUpload::material_slots`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MeshSection {
+    pub first_index: u32,
+    pub index_count: u32,
+    pub material_slot: u32,
+}
+
+/// Full static-mesh payload used by import, hydration, and rendering.
+#[derive(Debug, Clone)]
+pub struct MeshAssetUpload {
+    pub geometry: MeshUpload,
+    pub sections: Vec<MeshSection>,
+    pub material_slots: Vec<MeshMaterialSlot>,
+}
+
+impl Default for MeshAssetUpload {
+    fn default() -> Self {
+        Self {
+            geometry: MeshUpload {
+                vertices: Vec::new(),
+                indices: Vec::new(),
+            },
+            sections: Vec::new(),
+            material_slots: Vec::new(),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Engine-native import-schema types (bridge from solid_rs::configurator).
@@ -126,11 +198,17 @@ fn build_enum_type_info(label: &str, choices: &[String]) -> &'static RuntimeType
         structure: TypeStructure::Enum { variants },
         color: None,
     }));
-    cache.lock().expect("enum type cache poisoned").insert(key, info);
+    cache
+        .lock()
+        .expect("enum type cache poisoned")
+        .insert(key, info);
     info
 }
 
-fn convert_default(_kind: &helio_asset_compat::OptionKind, dv: &helio_asset_compat::OptionValue) -> Box<dyn Any + Send> {
+fn convert_default(
+    _kind: &helio_asset_compat::OptionKind,
+    dv: &helio_asset_compat::OptionValue,
+) -> Box<dyn Any + Send> {
     use helio_asset_compat::OptionValue as OV;
     match dv {
         OV::Bool(b) => Box::new(*b),
@@ -146,7 +224,9 @@ fn convert_field(field: &helio_asset_compat::OptionField) -> ImportField {
 
     let (type_info, constraints) = match &field.kind {
         OK::Bool => (
-            RUNTIME_TYPE_REGISTRY.get::<bool>().expect("bool registered"),
+            RUNTIME_TYPE_REGISTRY
+                .get::<bool>()
+                .expect("bool registered"),
             FieldConstraints::default(),
         ),
         OK::Int { min, max, step } => (
@@ -170,7 +250,9 @@ fn convert_field(field: &helio_asset_compat::OptionField) -> ImportField {
             FieldConstraints::default(),
         ),
         OK::Text => (
-            RUNTIME_TYPE_REGISTRY.get::<String>().expect("String registered"),
+            RUNTIME_TYPE_REGISTRY
+                .get::<String>()
+                .expect("String registered"),
             FieldConstraints::default(),
         ),
     };
@@ -186,7 +268,9 @@ fn convert_field(field: &helio_asset_compat::OptionField) -> ImportField {
 }
 
 /// Convert solid_rs configurator values to the engine's dynamic map.
-pub fn hashmap_from_option_values(values: &helio_asset_compat::OptionValues) -> HashMap<String, Box<dyn Any + Send>> {
+pub fn hashmap_from_option_values(
+    values: &helio_asset_compat::OptionValues,
+) -> HashMap<String, Box<dyn Any + Send>> {
     use helio_asset_compat::OptionValue as OV;
     let mut map = HashMap::new();
     for (k, v) in values.0.iter() {
@@ -203,7 +287,9 @@ pub fn hashmap_from_option_values(values: &helio_asset_compat::OptionValues) -> 
 }
 
 /// Convert the engine's dynamic value map back to solid_rs configurator values.
-pub fn option_values_from_hashmap(map: &HashMap<String, Box<dyn Any + Send>>) -> helio_asset_compat::OptionValues {
+pub fn option_values_from_hashmap(
+    map: &HashMap<String, Box<dyn Any + Send>>,
+) -> helio_asset_compat::OptionValues {
     use helio_asset_compat::OptionValue as OV;
     let mut vals = helio_asset_compat::OptionValues::new();
     for (k, v) in map {
@@ -232,7 +318,10 @@ pub fn option_values_from_hashmap(map: &HashMap<String, Box<dyn Any + Send>>) ->
 /// Native asset path for an imported source model: `<dest_dir>/<stem>.mesh`
 /// (e.g. dropping `foo.fbx` into `dir` → `dir/foo.mesh`).
 pub fn native_mesh_path(dest_dir: &Path, source: &Path) -> PathBuf {
-    let stem = source.file_stem().and_then(|s| s.to_str()).unwrap_or("mesh");
+    let stem = source
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mesh");
     dest_dir.join(format!("{stem}.mesh"))
 }
 
@@ -260,11 +349,13 @@ pub fn is_importable_model(ext: &str) -> bool {
 /// `(mtime, len, id)`: a stale entry (file's current mtime/len disagree
 /// with what's cached) is treated as a miss, so an edited file mints a new
 /// id on its next resolve rather than serving a stale one forever.
-static CONTENT_ID_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, (std::time::SystemTime, u64, u128)>>> =
-    std::sync::OnceLock::new();
+static CONTENT_ID_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<PathBuf, (std::time::SystemTime, u64, u128)>>,
+> = std::sync::OnceLock::new();
 const MAX_CONTENT_ID_CACHE_ENTRIES: usize = 4096;
 
-fn content_id_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, (std::time::SystemTime, u64, u128)>> {
+fn content_id_cache()
+-> &'static std::sync::Mutex<HashMap<PathBuf, (std::time::SystemTime, u64, u128)>> {
     CONTENT_ID_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
@@ -274,7 +365,7 @@ fn content_id_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, (std::time::
 /// - A native `.mesh` file: reads the id straight out of its v2 header (a
 ///   `HEADER_V2`-byte read, not a full geometry decode) when present; a v1
 ///   file with no stored id falls through to the memoization path below
-///   (it'll be upgraded to v2 the next time `load_mesh_upload` loads it,
+///   (it'll be upgraded to v3 on the next load,
 ///   see that fn's doc, but this call itself doesn't write anything).
 /// - Anything else (a v1 file with nothing to read yet, or a non-native
 ///   source path pre-import): canonicalizes `abs_path` (this is what makes
@@ -291,7 +382,7 @@ pub fn content_id_for_path(abs_path: &Path) -> Option<u128> {
         if let Ok(bytes) = std::fs::read(abs_path) {
             if bytes.len() >= HEADER_V2 && &bytes[0..4] == MAGIC {
                 if let Ok(version) = bytes[4..8].try_into().map(u32::from_le_bytes) {
-                    if version == VERSION {
+                    if version == VERSION || version == VERSION_WITH_SECTIONS {
                         if let Ok(id_bytes) = bytes[HEADER..HEADER_V2].try_into() {
                             return Some(u128::from_le_bytes(id_bytes));
                         }
@@ -307,7 +398,9 @@ pub fn content_id_for_path(abs_path: &Path) -> Option<u128> {
     let len = meta.len();
 
     {
-        let cache = content_id_cache().lock().expect("content id cache mutex poisoned");
+        let cache = content_id_cache()
+            .lock()
+            .expect("content id cache mutex poisoned");
         if let Some(&(cached_mtime, cached_len, id)) = cache.get(&canonical) {
             if cached_mtime == mtime && cached_len == len {
                 return Some(id);
@@ -317,7 +410,9 @@ pub fn content_id_for_path(abs_path: &Path) -> Option<u128> {
 
     let bytes = std::fs::read(&canonical).ok()?;
     let id = twox_hash::XxHash3_128::oneshot(&bytes);
-    let mut cache = content_id_cache().lock().expect("content id cache mutex poisoned");
+    let mut cache = content_id_cache()
+        .lock()
+        .expect("content id cache mutex poisoned");
     cache.insert(canonical, (mtime, len, id));
     while cache.len() > MAX_CONTENT_ID_CACHE_ENTRIES {
         if let Some(oldest) = cache.keys().next().cloned() {
@@ -338,10 +433,16 @@ pub fn content_id_for_path(abs_path: &Path) -> Option<u128> {
 /// [`content_id_for_path`]'s own silent-`None` tolerance — priming is an
 /// optimization, never load-bearing for correctness).
 pub fn prime_content_id_cache(abs_path: &Path, id: u128) {
-    let Ok(canonical) = std::fs::canonicalize(abs_path) else { return };
-    let Ok(meta) = std::fs::metadata(&canonical) else { return };
+    let Ok(canonical) = std::fs::canonicalize(abs_path) else {
+        return;
+    };
+    let Ok(meta) = std::fs::metadata(&canonical) else {
+        return;
+    };
     let Ok(mtime) = meta.modified() else { return };
-    let mut cache = content_id_cache().lock().expect("content id cache mutex poisoned");
+    let mut cache = content_id_cache()
+        .lock()
+        .expect("content id cache mutex poisoned");
     cache.insert(canonical, (mtime, meta.len(), id));
     while cache.len() > MAX_CONTENT_ID_CACHE_ENTRIES {
         if let Some(oldest) = cache.keys().next().cloned() {
@@ -388,6 +489,31 @@ pub fn encode(mesh: &MeshUpload, content_id: u128) -> Vec<u8> {
     out
 }
 
+/// Serialize a full mesh asset with section and imported material-slot
+/// metadata. Older `.mesh` files remain readable through [`decode_asset`].
+pub fn encode_asset(asset: &MeshAssetUpload, content_id: u128) -> Vec<u8> {
+    let metadata =
+        serde_json::to_vec(&(asset.sections.as_slice(), asset.material_slots.as_slice()))
+            .expect("mesh section metadata is serializable");
+    let mesh = &asset.geometry;
+    let mut out = Vec::with_capacity(
+        HEADER_V3
+            + mesh.vertices.len() * std::mem::size_of::<PackedVertex>()
+            + mesh.indices.len() * 4
+            + metadata.len(),
+    );
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&VERSION_WITH_SECTIONS.to_le_bytes());
+    out.extend_from_slice(&(mesh.vertices.len() as u64).to_le_bytes());
+    out.extend_from_slice(&(mesh.indices.len() as u64).to_le_bytes());
+    out.extend_from_slice(&content_id.to_le_bytes());
+    out.extend_from_slice(&(metadata.len() as u64).to_le_bytes());
+    out.extend_from_slice(bytemuck::cast_slice(&mesh.vertices));
+    out.extend_from_slice(bytemuck::cast_slice(&mesh.indices));
+    out.extend_from_slice(&metadata);
+    out
+}
+
 /// Parse a [`MeshUpload`] plus its content id from native `.mesh` bytes, or
 /// `None` if invalid / an unsupported version / a size mismatch (callers
 /// may fall back to converting a source). v1 files (no stored id) get one
@@ -395,25 +521,55 @@ pub fn encode(mesh: &MeshUpload, content_id: u128) -> Vec<u8> {
 /// fresh v2 write of the same geometry would store, so a later backfill
 /// write produces a byte-stable upgrade, not a new identity.
 pub fn decode(bytes: &[u8]) -> Option<(MeshUpload, u128)> {
+    let (asset, id) = decode_asset(bytes)?;
+    Some((asset.geometry, id))
+}
+
+/// Decode both legacy geometry-only assets (v1/v2) and sectioned v3 assets.
+/// Legacy assets become a single section and one unnamed material slot so
+/// downstream code has one uniform representation.
+pub fn decode_asset(bytes: &[u8]) -> Option<(MeshAssetUpload, u128)> {
     if bytes.len() < HEADER || &bytes[0..4] != MAGIC {
         return None;
     }
     let version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
-    if version != 1 && version != VERSION {
+    if version != 1 && version != VERSION && version != VERSION_WITH_SECTIONS {
         return None;
     }
     let vcount = u64::from_le_bytes(bytes[8..16].try_into().ok()?) as usize;
     let icount = u64::from_le_bytes(bytes[16..24].try_into().ok()?) as usize;
     let vbytes = vcount.checked_mul(std::mem::size_of::<PackedVertex>())?;
     let ibytes = icount.checked_mul(4)?;
-    let (vstart, stored_id) = if version == 1 {
-        (HEADER, None)
-    } else {
-        (HEADER_V2, Some(u128::from_le_bytes(bytes[HEADER..HEADER_V2].try_into().ok()?)))
+    let (vstart, stored_id, metadata_len) = match version {
+        1 => (HEADER, None, 0usize),
+        VERSION => (
+            HEADER_V2,
+            Some(u128::from_le_bytes(
+                bytes[HEADER..HEADER_V2].try_into().ok()?,
+            )),
+            0,
+        ),
+        VERSION_WITH_SECTIONS => {
+            if bytes.len() < HEADER_V3 {
+                return None;
+            }
+            (
+                HEADER_V3,
+                Some(u128::from_le_bytes(
+                    bytes[HEADER..HEADER_V2].try_into().ok()?,
+                )),
+                usize::try_from(u64::from_le_bytes(
+                    bytes[HEADER_V2..HEADER_V3].try_into().ok()?,
+                ))
+                .ok()?,
+            )
+        }
+        _ => return None,
     };
     let istart = vstart.checked_add(vbytes)?;
-    let end = istart.checked_add(ibytes)?;
-    if bytes.len() < end {
+    let geometry_end = istart.checked_add(ibytes)?;
+    let end = geometry_end.checked_add(metadata_len)?;
+    if bytes.len() != end {
         return None;
     }
 
@@ -422,14 +578,35 @@ pub fn decode(bytes: &[u8]) -> Option<(MeshUpload, u128)> {
     let mut vertices = vec![PackedVertex::zeroed(); vcount];
     bytemuck::cast_slice_mut(&mut vertices).copy_from_slice(&bytes[vstart..istart]);
     let mut indices = vec![0u32; icount];
-    bytemuck::cast_slice_mut(&mut indices).copy_from_slice(&bytes[istart..end]);
+    bytemuck::cast_slice_mut(&mut indices).copy_from_slice(&bytes[istart..geometry_end]);
 
-    let mesh = MeshUpload { vertices, indices };
+    let geometry = MeshUpload { vertices, indices };
     let id = match stored_id {
         Some(id) => id,
-        None => content_id_for_bytes(&mesh),
+        None => content_id_for_bytes(&geometry),
     };
-    Some((mesh, id))
+    let (sections, material_slots) = if version == VERSION_WITH_SECTIONS {
+        serde_json::from_slice(&bytes[geometry_end..end]).ok()?
+    } else if geometry.indices.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        (
+            vec![MeshSection {
+                first_index: 0,
+                index_count: geometry.indices.len() as u32,
+                material_slot: 0,
+            }],
+            vec![MeshMaterialSlot::default()],
+        )
+    };
+    Some((
+        MeshAssetUpload {
+            geometry,
+            sections,
+            material_slots,
+        },
+        id,
+    ))
 }
 
 /// Resolve import options for a native asset — options stored from a previous
@@ -450,6 +627,60 @@ pub fn resolve_options(native: &Path, ext: &str) -> HashMap<String, Box<dyn Any 
         .unwrap_or_default()
 }
 
+pub(crate) fn mesh_asset_from_converted_scene(
+    mut scene: helio_asset_compat::ConvertedScene,
+) -> Option<MeshAssetUpload> {
+    let mut material_slots: Vec<_> = (0..scene.materials.len())
+        .map(|index| MeshMaterialSlot {
+            source_material: Some(index as u32),
+            name: format!("Material {}", index + 1),
+            surface: scene.materials.get(index).map(|material| ImportedSurfaceMaterial {
+                base_color: material.gpu.base_color,
+                roughness: material.gpu.roughness_metallic[0],
+                metallic: material.gpu.roughness_metallic[1],
+                emissive: [material.gpu.emissive[0], material.gpu.emissive[1], material.gpu.emissive[2]],
+                emissive_intensity: material.gpu.emissive[3],
+                alpha: material.gpu.base_color[3],
+            }).unwrap_or_default(),
+        })
+        .collect();
+
+    let sectioned = scene.sectioned_mesh.take()?;
+    let mut indices = Vec::new();
+    let mut sections = Vec::with_capacity(sectioned.sections.len());
+    for imported in sectioned.sections {
+        let material_slot = imported.material_index.map_or_else(
+            || {
+                let index = material_slots.len() as u32;
+                material_slots.push(MeshMaterialSlot {
+                    source_material: None,
+                    name: format!("Material {}", index + 1),
+                    surface: ImportedSurfaceMaterial::default(),
+                });
+                index
+            },
+            |index| index as u32,
+        );
+        let first_index = u32::try_from(indices.len()).ok()?;
+        let index_count = u32::try_from(imported.indices.len()).ok()?;
+        indices.extend(imported.indices);
+        sections.push(MeshSection {
+            first_index,
+            index_count,
+            material_slot,
+        });
+    }
+
+    Some(MeshAssetUpload {
+        geometry: MeshUpload {
+            vertices: sectioned.vertices,
+            indices,
+        },
+        sections,
+        material_slots,
+    })
+}
+
 /// Import `source` into an engine-native `.mesh` asset at `native`, converting
 /// with `values`. The source file is **not** copied into the project. Persists
 /// the chosen options (keyed by the native path) for reimport. Returns the
@@ -459,22 +690,18 @@ pub fn import_model_to_native(
     native: &Path,
     values: &HashMap<String, Box<dyn Any + Send>>,
 ) -> Result<PathBuf, String> {
-    let ov = option_values_from_hashmap(values);
+    let mut ov = option_values_from_hashmap(values);
+    // A static mesh asset must retain source material boundaries. The loader
+    // normally returns one mesh per primitive; merged conversion bakes node
+    // transforms and emits a section table grouped by source material.
+    ov.set("merge_meshes", helio_asset_compat::OptionValue::Bool(true));
     let scene = helio_asset_compat::load_scene_file_with_values(source, &ov)
         .map_err(|e| format!("import conversion failed: {e}"))?;
 
-    let mesh = scene
-        .meshes
-        .into_iter()
-        .next()
-        .ok_or_else(|| "model contained no meshes".to_string())?;
-    let upload = MeshUpload {
-        vertices: mesh.vertices,
-        indices: mesh.indices,
-    };
-
-    let content_id = content_id_for_bytes(&upload);
-    std::fs::write(native, encode(&upload, content_id))
+    let upload = mesh_asset_from_converted_scene(scene)
+        .ok_or_else(|| "model contained no sectioned mesh geometry".to_string())?;
+    let content_id = content_id_for_bytes(&upload.geometry);
+    std::fs::write(native, encode_asset(&upload, content_id))
         .map_err(|e| format!("failed to write native mesh {}: {e}", native.display()))?;
 
     // Persist chosen options for reimport / configurator pre-fill (#409).
@@ -495,6 +722,10 @@ pub fn import_model_to_native(
         }
     }
 
+    // Placed meshes naming this asset reload it (the level editor subscribes).
+    pulsar_events::publish_asset_updated(
+        pulsar_events::AssetUpdated::new(plugin_editor_api::AssetKind::Mesh).with_path(native),
+    );
     Ok(native.to_path_buf())
 }
 
@@ -531,7 +762,10 @@ mod tests {
         let (back, decoded_id) = decode(&bytes).expect("decode");
         assert_eq!(back.vertices.len(), 3);
         assert_eq!(back.indices, vec![0, 1, 2]);
-        assert_eq!(decoded_id, id, "v2 must round-trip the exact stored id, not recompute it");
+        assert_eq!(
+            decoded_id, id,
+            "v2 must round-trip the exact stored id, not recompute it"
+        );
         // Truncated / garbage input is rejected, not panicked on.
         assert!(decode(&bytes[..10]).is_none());
         assert!(decode(b"nope").is_none());
@@ -563,13 +797,39 @@ mod tests {
 
         let v2 = encode(&mesh, id);
         let (_, id2) = decode(&v2).expect("v2 decode");
-        assert_eq!(id2, id, "backfilled id matches a fresh v2 write of the same geometry");
+        assert_eq!(
+            id2, id,
+            "backfilled id matches a fresh v2 write of the same geometry"
+        );
     }
 
     #[test]
     fn different_geometry_never_collides_in_practice() {
-        let a = MeshUpload { vertices: vec![PackedVertex::zeroed(); 3], indices: vec![0, 1, 2] };
-        let b = MeshUpload { vertices: vec![PackedVertex::zeroed(); 3], indices: vec![0, 2, 1] };
+        let a = MeshUpload {
+            vertices: vec![PackedVertex::zeroed(); 3],
+            indices: vec![0, 1, 2],
+        };
+        let b = MeshUpload {
+            vertices: vec![PackedVertex::zeroed(); 3],
+            indices: vec![0, 2, 1],
+        };
         assert_ne!(content_id_for_bytes(&a), content_id_for_bytes(&b));
+    }
+
+    #[test]
+    fn an_import_announces_the_written_mesh() {
+        let dir = std::env::temp_dir().join(format!("mesh-import-event-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../../assets/meshes/primitives/SM_Cube.fbx");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = std::sync::Arc::clone(&seen);
+        let _subscription = pulsar_events::subscribe_asset_updates(
+            Some(plugin_editor_api::AssetKind::Mesh),
+            move |event| record.lock().unwrap().push(event.path.clone()),
+        );
+        let native = import_model_to_native_default(&source, &dir).expect("the cube imports");
+        assert!(seen.lock().unwrap().contains(&Some(native.clone())), "{native:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -250,7 +250,7 @@ impl Flight {
             renderer.set_debug_mode(mode);
         }
         let target = Self::make_target(&device, size);
-        let mut csv = std::fs::File::create(output.join("frames.csv")).unwrap();
+        let csv = std::fs::File::create(output.join("frames.csv")).unwrap();
         Self {
             device,
             queue,

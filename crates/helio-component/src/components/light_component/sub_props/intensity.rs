@@ -1,6 +1,5 @@
 use engine_class_derive::engine_class;
 use serde_json::Value;
-use std::collections::HashMap;
 
 use super::super::IntensityUnits;
 
@@ -73,33 +72,5 @@ impl IntensityLightProps {
         if let Some(v) = obj.get("max_distance_fade_range").and_then(|v| v.as_f64()) {
             self.max_distance_fade_range = v as f32;
         }
-    }
-
-    pub(crate) fn apply_to_scene_props(&self, out: &mut HashMap<String, Value>) {
-        out.insert("intensity".to_string(), Value::from(self.intensity));
-        out.insert(
-            "intensity_units".to_string(),
-            Value::from(self.intensity_units as u64),
-        );
-        out.insert(
-            "exposure_compensation".to_string(),
-            Value::from(self.exposure_compensation),
-        );
-        out.insert(
-            "inverse_squared_falloff".to_string(),
-            Value::from(self.inverse_squared_falloff),
-        );
-        out.insert(
-            "indirect_intensity".to_string(),
-            Value::from(self.indirect_intensity),
-        );
-        out.insert(
-            "max_draw_distance".to_string(),
-            Value::from(self.max_draw_distance),
-        );
-        out.insert(
-            "max_distance_fade_range".to_string(),
-            Value::from(self.max_distance_fade_range),
-        );
     }
 }

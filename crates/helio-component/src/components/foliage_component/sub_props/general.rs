@@ -1,6 +1,5 @@
 use engine_class_derive::engine_class;
 use serde_json::Value;
-use std::collections::HashMap;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("General", category_color = "#F4C542")]
@@ -38,12 +37,4 @@ impl GeneralFoliageProps {
         }
     }
 
-    pub(crate) fn apply_to_scene_props(&self, out: &mut HashMap<String, Value>) {
-        out.insert("enabled".to_string(), Value::from(self.enabled));
-        out.insert("density".to_string(), Value::from(self.density));
-        out.insert(
-            "density_layer".to_string(),
-            Value::from(self.density_layer),
-        );
-    }
 }

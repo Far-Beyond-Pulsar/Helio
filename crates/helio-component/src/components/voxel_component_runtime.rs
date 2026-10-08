@@ -1,56 +1,86 @@
 //! SceneDB World registration for voxel authoring components.
 //!
-//! These behaviors intentionally do not invoke rendering or generation. A
-//! future voxel backend can observe the typed SceneDB rows and consume
-//! revisioned external updates without coupling component hydration to a pass.
+//! Registration never invokes rendering or generation: the voxel backend
+//! reads the terrain and layer instances when it projects the scene.
 
-use engine_class_derive::{register_runtime_behavior, register_world_component};
-use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
+use engine_class_derive::{register_component_runtime, register_world_component};
 
-use super::{VoxelComponent, VoxelTerrainComponent, VoxelTerrainLayersComponent};
+use super::{TerrainEventsEventWriterExt as _, VoxelComponent, VoxelTerrainComponent, VoxelTerrainLayersComponent};
 
-#[register_world_component]
-#[register_runtime_behavior]
-impl ComponentRuntimeBehavior for VoxelComponent {
-    const CLASS_NAME: &'static str = "VoxelComponent";
-
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
+// Component callbacks borrow the authoritative terrain row from SceneDB.
+// The pending event list is transient transport state populated only after a
+// successful block edit; the EventHub writer queues delivery after the
+// component borrow is released.
+#[register_component_runtime(class = "VoxelTerrainComponent", enabled = enabled)]
+impl VoxelTerrainComponent {
+    /// Native Rust counterpart to Blueprint listeners. The generated
+    /// adapter receives this event through the host-owned inbox on the next
+    /// component phase, after Gamma delivery and outside the emitter borrow.
+    #[bp_handler("block_broken")]
+    fn on_block_broken(
+        &mut self,
+        _context: &mut pulsar_world_registry::ComponentContext<'_>,
+        _block: super::BlockData,
     ) {
-        // Authoring data is already present as a typed SceneDB World row.
+        // Terrain-specific Rust systems can add per-instance reactions here.
+    }
+
+    #[bp_handler("block_placed")]
+    fn on_block_placed(
+        &mut self,
+        _context: &mut pulsar_world_registry::ComponentContext<'_>,
+        _block: super::BlockData,
+    ) {
+        // Terrain-specific Rust systems can add per-instance reactions here.
+    }
+
+    #[bp_handler("block_material_changed")]
+    fn on_block_material_changed(
+        &mut self,
+        _context: &mut pulsar_world_registry::ComponentContext<'_>,
+        _change: super::BlockMaterialChange,
+    ) {
+        // Terrain-specific Rust systems can add per-instance reactions here.
+    }
+
+    fn tick(
+        &mut self,
+        context: &mut pulsar_world_registry::ComponentContext<'_>,
+        _delta_seconds: f32,
+    ) {
+        macro_rules! flush_events {
+            ($field:ident, $writer:ident, $event_name:literal) => {{
+                let mut events = std::mem::take(&mut self.$field).into_iter();
+                while let Some(event) = events.next() {
+                    if let Err(error) = context.events.$writer(event.clone()) {
+                        tracing::warn!(entity = ?context.entity, %error, event = $event_name, "could not queue terrain event; retaining it");
+                        self.$field.push(event);
+                        self.$field.extend(events);
+                        break;
+                    }
+                }
+            }};
+        }
+        flush_events!(pending_block_broken, block_broken, "block_broken");
+        flush_events!(pending_block_placed, block_placed, "block_placed");
+        flush_events!(pending_block_material_changed, block_material_changed, "block_material_changed");
     }
 }
 
 #[register_world_component]
-#[register_runtime_behavior]
-impl ComponentRuntimeBehavior for VoxelTerrainComponent {
-    const CLASS_NAME: &'static str = "VoxelTerrainComponent";
-
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-        // A future voxel backend will consume terrain configuration and
-        // external revisioned data batches independently of scene hydration.
-    }
-}
+impl VoxelComponent {}
 
 #[register_world_component]
-#[register_runtime_behavior]
-impl ComponentRuntimeBehavior for VoxelTerrainLayersComponent {
-    const CLASS_NAME: &'static str = "VoxelTerrainLayersComponent";
+impl VoxelTerrainComponent {}
 
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-        // Settings of the terrain on the same entity, read when it is projected.
-    }
-}
+// Settings of the terrain on the same object, read when it is projected.
+#[register_world_component]
+impl VoxelTerrainLayersComponent {}
+
+// Reported unfinished (Pulsar-Native#1035, Phase 4; tracked in #1056): the
+// properties card shows the reason and issue, and attaching one logs them once.
+pulsar_world_registry::declare_unfinished_component!(
+    "VoxelComponent",
+    "no voxel renderer draws a free-standing voxel component; use a voxel terrain",
+    "https://github.com/Far-Beyond-Pulsar/Pulsar-Native/issues/1056",
+);

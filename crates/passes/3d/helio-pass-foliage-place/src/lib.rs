@@ -75,7 +75,7 @@ mod uniforms;
 pub mod wind;
 
 pub use frame_data::FoliageTerrainViews;
-pub use pass::FoliagePlacePass;
+pub use pass::{FoliagePlacePass, MAX_FOLIAGE_LAYERS, MAX_FOLIAGE_TYPES};
 pub use reference::{place_tile_reference, ReferenceCandidate, ReferencePlacement};
 pub use residency::{RingUpdate, TileRing};
 pub use uniforms::{FoliageCullUniforms, PlaceUniforms};
@@ -208,6 +208,18 @@ pub fn foliage_scene_is_present(buffers: &helio_core::SceneBufferProjection) -> 
     buffers
         .get(pulsar_scenedb::gpu::BufferKey::of("foliage_types"))
         .is_some_and(|handle| handle.buffer.size() >= std::mem::size_of::<GpuFoliageType>() as u64)
+}
+
+/// Whether any `foliage_types` row is live (has a density), from an async readback.
+///
+/// The foliage passes run only while this may hold. A publisher may keep a
+/// fixed-capacity table whose rows are all empty (no foliage authored, or all of it
+/// disabled), and that table must cost nothing, the same as an absent column.
+pub fn foliage_type_liveness() -> helio_core::SceneBufferLiveness {
+    helio_core::SceneBufferLiveness::with_row_predicate(|row| {
+        row.get(..4)
+            .is_some_and(|density| f32::from_le_bytes(density.try_into().unwrap()) > 0.0)
+    })
 }
 
 /// Mirror of [`wgpu::util::DrawIndirectArgs`] used only for layout assertions and tests.

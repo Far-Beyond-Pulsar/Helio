@@ -324,7 +324,7 @@ fn ground_field(face: u32, s: u32, base: vec2<i32>, home: u32, home_column: vec2
     let far = (a + 2) >> vec2<u32>(3u);
     let own = records[home];
     var columns: array<Column, 4>;
-    var present = vec4<bool>(false);
+    var present = array<bool, 4>(false, false, false, false);
     for (var k = 0; k < 4; k++) {
         let q = origin + vec2<i32>(k & 1, k >> 1u);
         if any(q > far) { continue; }
@@ -752,15 +752,17 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     if code < 6u && appearance_w < 1.0 &&
         (ao_appearance_w < 1.0 || ((code >> 1u) < 2u && material_lip(material) != material)) {
         let axis = code >> 1u;
-        var u_axis = select(0u, 1u, axis == 0u);
-        var v_axis = select(2u, 1u, axis == 2u);
-        if axis == 2u { u_axis = 0u; v_axis = 1u; }
+        // The face's basis from scalar selects: FXC rejects local vector
+        // l-values indexed by a runtime value (`v[axis] = ..`).
+        let axis_dir = vec3<i32>(select(0, 1, axis == 0u), select(0, 1, axis == 1u), select(0, 1, axis == 2u));
+        let du = vec3<i32>(select(1, 0, axis == 0u), select(0, 1, axis == 0u), 0);
+        let dv = vec3<i32>(0, select(0, 1, axis == 2u), select(1, 0, axis == 2u));
         // Position of the hit inside the face.
         let fr = face_ray(face, make_ray(camera.position_near.xyz, d));
         let cell = face_local_cell(vec3<i32>(fr.idx, frame.layer_i.x), vec3<i32>(h.i, h.j, h.k),
             vec3<f32>(face_coord(fr, 0u, h.t), face_coord(fr, 1u, h.t),
                 layer_coord(make_ray(camera.position_near.xyz, d), h.t)), level);
-        let uv = clamp(vec2<f32>(cell[u_axis], cell[v_axis]), vec2<f32>(0.0), vec2<f32>(1.0));
+        let uv = clamp(vec2<f32>(dot(cell, vec3<f32>(du)), dot(cell, vec3<f32>(dv))), vec2<f32>(0.0), vec2<f32>(1.0));
         if axis < 2u && material_lip(material) != material {
             let tooth = f32(hash3(h.i, h.j, h.k * 4 + i32(floor(uv.x * 4.0)), 0x5bd1e995u) & 7u) / 7.0;
             // Continuous in distance (not level), so level changes show no band.
@@ -775,12 +777,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         if ao_appearance_w < 1.0 {
             let back = select(1, -1, (code & 1u) == 1u);
-            var f = vec3<i32>(h.i, h.j, h.k);
-            f[axis] += back;
-            var du = vec3<i32>(0);
-            var dv = vec3<i32>(0);
-            du[u_axis] = 1;
-            dv[v_axis] = 1;
+            let f = vec3<i32>(h.i, h.j, h.k) + axis_dir * back;
             let s0 = occupied(face, level, f.x - du.x, f.y - du.y, f.z - du.z, c, h.i, h.j);
             let s1 = occupied(face, level, f.x + du.x, f.y + du.y, f.z + du.z, c, h.i, h.j);
             let s2 = occupied(face, level, f.x - dv.x, f.y - dv.y, f.z - dv.z, c, h.i, h.j);

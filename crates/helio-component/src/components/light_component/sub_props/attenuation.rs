@@ -1,6 +1,5 @@
 use engine_class_derive::engine_class;
 use serde_json::Value;
-use std::collections::HashMap;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Attenuation", category_color = "#6EC5FF")]
@@ -80,24 +79,5 @@ impl AttenuationLightProps {
         if let Some(v) = obj.get("outer_cone_angle").and_then(|v| v.as_f64()) {
             self.outer_cone_angle = v as f32;
         }
-    }
-
-    pub(crate) fn apply_to_scene_props(&self, out: &mut HashMap<String, Value>) {
-        out.insert("range".to_string(), Value::from(self.range));
-        out.insert("falloff_start".to_string(), Value::from(self.falloff_start));
-        out.insert(
-            "attenuation_exponent".to_string(),
-            Value::from(self.attenuation_exponent),
-        );
-        out.insert("source_radius".to_string(), Value::from(self.source_radius));
-        out.insert("source_length".to_string(), Value::from(self.source_length));
-        out.insert(
-            "inner_cone_angle".to_string(),
-            Value::from(self.inner_cone_angle),
-        );
-        out.insert(
-            "outer_cone_angle".to_string(),
-            Value::from(self.outer_cone_angle),
-        );
     }
 }

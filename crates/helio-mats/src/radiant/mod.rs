@@ -9,7 +9,7 @@ mod material_flags;
 mod shader_cache;
 pub mod template;
 
-pub use graph_registry::RadiantGraphRegistry;
+pub use graph_registry::{graph_source, register_graph_source, RadiantGraphRegistry};
 pub use material_flags::*;
 pub use shader_cache::*;
 pub use template::*;

@@ -235,7 +235,11 @@ fn cs_resolve(@builtin(local_invocation_index) lid: u32) {
     if selected == NONE_ROW { selected = atomicLoad(&wg_fallback_row); }
     var quality = 0u;
     var epoch = 0u;
-    var range = select(1000.0, config.fog_max_distance, config.fog_max_distance > HELIO_FROXEL_NEAR);
+    // The post-process fog block's range applies only when that fog is on.
+    // Disabled, the resolver reports a 1-unit placeholder range; using it
+    // would confine global and local media to the first unit of the grid.
+    var range = select(1000.0, config.fog_max_distance,
+        config.fog_enabled != 0u && config.fog_max_distance > HELIO_FROXEL_NEAR);
     media_list.render_enabled = fog_globals.enabled;
     media_list.temporal_blend = finite_clamp(fog_globals.temporal_blend, 0.01, 1.0);
     media_list.history_rejection = 0.8;

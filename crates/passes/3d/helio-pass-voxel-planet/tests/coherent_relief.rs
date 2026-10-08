@@ -3,7 +3,6 @@ mod common;
 use common::*;
 use helio_pass_voxel_planet::grid::face_axes;
 use wgpu::util::DeviceExt;
-use helio_pass_voxel_planet::terrain;
 
 #[test]
 fn grazing_soil_lip_filters_radial_coverage_and_preserves_protected_faces() {

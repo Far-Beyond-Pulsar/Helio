@@ -14,7 +14,7 @@
 use crate::grid::Grid;
 use crate::layers::{Caves, Overhangs};
 use crate::noise::{fade, hash3, lerp, mul16, mul_fine, mul_shr, mul_shr_signed, noise, noise_fine, noise_fine_grad, scale, sin_turns, unit_q30, FINE_ONE, ONE, Q30};
-use crate::terrain::{heightfield_density, MaterialAppearance, TerrainAppearance, TerrainField, TerrainProgram, DENSITY_ONE, HEIGHT_ONE, MATERIALS};
+use crate::terrain::{heightfield_density, TerrainAppearance, TerrainField, TerrainProgram, DENSITY_ONE, HEIGHT_ONE};
 use bytemuck::{Pod, Zeroable};
 use glam::IVec3;
 use std::borrow::Cow;
@@ -138,8 +138,9 @@ impl LandformVolume {
     }
 
     /// Q16 ramps of a column's cave region and cave entrance (see
-    /// [`Self::density`]).
-    pub(crate) fn cave_gates(&self, p: IVec3, seed: u32) -> (i32, i32) {
+    /// [`Self::density`]), for the cave statistics tests.
+    #[cfg(test)]
+    fn cave_gates(&self, p: IVec3, seed: u32) -> (i32, i32) {
         (
             noise_ramp(noise(p, self.caves[1] as u32, self.seed(seed, SEED_CAVE_REGION)), self.caves[2]),
             noise_ramp(noise(p, self.entrances[0] as u32, self.seed(seed, SEED_CAVE_ENTRANCE)), self.entrances[1]),

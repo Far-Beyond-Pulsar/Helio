@@ -76,6 +76,7 @@ pub struct RendererBuilder {
     config: RendererConfig,
     pass_graph_fn: Option<PassGraphBuilderFn>,
     editor_mode: bool,
+    scene_derivations: Vec<Box<dyn helio_core::SceneDerivation>>,
     ambient_color: [f32; 3],
     ambient_intensity: f32,
     clear_color: [f32; 4],
@@ -97,6 +98,7 @@ impl RendererBuilder {
             config,
             pass_graph_fn: None,
             editor_mode: false,
+            scene_derivations: Vec::new(),
             ambient_color: [0.05, 0.05, 0.08],
             ambient_intensity: 1.0,
             clear_color: [0.02, 0.02, 0.03, 1.0],
@@ -119,6 +121,13 @@ impl RendererBuilder {
     }
 
     /// Enable editor mode (shows the `EDITOR` group, enables gizmo drawing).
+    /// Add a scene derivation, run each frame (in the order added) between
+    /// the SceneDB snapshot and the graph; see `helio_core::scene_derivation`.
+    pub fn with_scene_derivation(mut self, derivation: Box<dyn helio_core::SceneDerivation>) -> Self {
+        self.scene_derivations.push(derivation);
+        self
+    }
+
     pub fn with_editor_mode(mut self, enabled: bool) -> Self {
         self.editor_mode = enabled;
         self
@@ -230,6 +239,7 @@ impl RendererBuilder {
 
         renderer.owns_device = self.owns_device;
         renderer.set_editor_mode(self.editor_mode);
+        renderer.scene_derivations = self.scene_derivations;
         renderer.set_ambient(self.ambient_color, self.ambient_intensity);
         renderer.set_clear_color(self.clear_color);
 

@@ -1,6 +1,5 @@
 use engine_class_derive::engine_class;
 use serde_json::Value;
-use std::collections::HashMap;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Wind", category_color = "#7EE787")]
@@ -94,38 +93,4 @@ impl WindFoliageProps {
         }
     }
 
-    pub(crate) fn apply_to_scene_props(&self, out: &mut HashMap<String, Value>) {
-        out.insert("trunk_sway".to_string(), Value::from(self.trunk_sway));
-        out.insert(
-            "branch_flutter".to_string(),
-            Value::from(self.branch_flutter),
-        );
-        out.insert("leaf_jitter".to_string(), Value::from(self.leaf_jitter));
-        out.insert(
-            "interaction_stiffness".to_string(),
-            Value::from(self.interaction_stiffness),
-        );
-        out.insert("wind_enabled".to_string(), Value::from(self.wind_enabled));
-        out.insert(
-            "wind_direction".to_string(),
-            serde_json::json!([
-                self.wind_direction[0],
-                self.wind_direction[1],
-                self.wind_direction[2]
-            ]),
-        );
-        out.insert("wind_speed".to_string(), Value::from(self.wind_speed));
-        out.insert(
-            "gust_amplitude".to_string(),
-            Value::from(self.gust_amplitude),
-        );
-        out.insert(
-            "gust_frequency".to_string(),
-            Value::from(self.gust_frequency),
-        );
-        out.insert(
-            "turbulence_scale".to_string(),
-            Value::from(self.turbulence_scale),
-        );
-    }
 }

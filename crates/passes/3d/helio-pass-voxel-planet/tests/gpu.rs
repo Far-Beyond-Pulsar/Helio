@@ -755,7 +755,6 @@ fn published_tops_bound_occupancy() {
                     let word = pool[(run * 16 + (cell >> 2)) as usize];
                     let down = ((word >> ((cell & 3) * 8)) & 255) as i32;
                     let (i, j) = (ci * 8 + (cell & 7) as i32, cj * 8 + (cell >> 3) as i32);
-                    let top = planet.column_top(face, i, j, level);
                     let expected = terrain::generated_top(planet.grid(), planet.field(), face, i, j, level, planet.column_height(face, i, j, level));
                     let got = (k_lo + n_band) * 8 - down;
                     // With relief, the partial top cell is solid (cut at

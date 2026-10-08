@@ -1,14 +1,16 @@
 //! A planet's air: the sky, the sun's colour through it, the sky's light on
-//! surfaces and aerial perspective. The pass-owned SceneDB row
-//! (`helio_pass_sky::AtmosphereComponent`) is the runtime authority; any
-//! scene may have one: a planet (centred on the owner) or flat ground at the
-//! world's origin. The sun is the scene's first directional light.
-use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
+//! surfaces and aerial perspective. Any scene may have one: a planet
+//! (centred on the owner) or flat ground at the world's origin. The sun is
+//! the scene's first directional light.
+//!
+//! SceneDB derives an `AtmosphereSourceRow` (`environment_rows`) from the
+//! authored value; the environment join places it as the sky pass's
+//! `helio_pass_sky::AtmosphereComponent` row in `"atmospheres"`.
+use engine_class_derive::{engine_class, register_world_component};
 use helio_pass_sky::atmosphere::placement;
 use helio_pass_sky::AtmosphereComponent as AtmosphereRow;
-use pulsar_reflection::{get_subsystem, ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner, Reflectable};
+use pulsar_reflection::Reflectable;
 use serde::{Deserialize, Serialize};
-use crate::subsystems::PendingWorldWrites;
 
 /// Where the atmosphere's planet is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Reflectable)]
@@ -101,14 +103,17 @@ impl AtmosphereComponent {
         }
     }
 
-    pub fn to_row(&self, owner: &RuntimeComponentOwner) -> AtmosphereRow {
+    /// The pass row in the owner's space: a planet placed at its owner has
+    /// a zero centre, which the environment join moves to the owner's world
+    /// position (`AtmosphereSourceRow`).
+    pub fn to_row(&self) -> AtmosphereRow {
         let bottom = self.planet_radius_km.max(0.001);
-        let (placement, center) = match self.placement {
-            AtmospherePlacement::GroundAtOrigin => (placement::GROUND_AT_ORIGIN, [0.0; 3]),
-            AtmospherePlacement::PlanetAtOwner => (placement::CENTER, owner.position),
+        let placement = match self.placement {
+            AtmospherePlacement::GroundAtOrigin => placement::GROUND_AT_ORIGIN,
+            AtmospherePlacement::PlanetAtOwner => placement::CENTER,
         };
         AtmosphereRow {
-            center,
+            center: [0.0; 3],
             placement,
             rayleigh_scattering: self.rayleigh_scattering,
             rayleigh_scale_height: self.rayleigh_scale_height_km.max(0.01),
@@ -123,43 +128,21 @@ impl AtmosphereComponent {
             bottom_radius: bottom,
             top_radius: bottom + self.thickness_km.max(0.001),
             sun_angular_radius: self.sun_angular_radius_deg.to_radians(),
-            enabled: 1,
+            enabled: u32::from(self.enabled),
         }
     }
 }
 
-fn remove_atmosphere(world: &mut pulsar_scenedb::World, entity: pulsar_scenedb::Entity) {
-    world.remove::<AtmosphereComponent>(entity);
-    world.remove::<AtmosphereRow>(entity);
-}
-
-#[register_world_component(remove = remove_atmosphere)]
-#[register_runtime_behavior]
-impl ComponentRuntimeBehavior for AtmosphereComponent {
-    const CLASS_NAME: &'static str = "AtmosphereComponent";
-    fn sync_component(owner: &RuntimeComponentOwner, _index: usize, component: &Self, context: &mut dyn ComponentRuntimeContext) {
-        let Some(entity) = context.subsystems_mut().get_mut::<pulsar_scenedb::Entity>().copied() else { return; };
-        let writes = get_subsystem!(context, PendingWorldWrites);
-        let row = component.enabled.then(|| component.to_row(owner));
-        writes.push(move |world| {
-            if let Some(row) = row { world.insert(entity, row); }
-            else { world.remove::<AtmosphereRow>(entity); }
-        });
-    }
-}
+#[register_world_component]
+impl AtmosphereComponent {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn with_owner<R>(position: [f32; 3], f: impl FnOnce(&RuntimeComponentOwner<'_>) -> R) -> R {
-        let props = std::collections::HashMap::new();
-        f(&RuntimeComponentOwner { scene_object_id: "air", position, rotation: [0.0; 3], scale: [1.0; 3], props: &props })
-    }
-
     #[test]
     fn defaults_are_earths_air_on_flat_ground() {
-        let row = with_owner([5.0, 6.0, 7.0], |owner| AtmosphereComponent::default().to_row(owner));
+        let row = AtmosphereComponent::default().to_row();
         let earth = AtmosphereRow::earth();
         assert_eq!(row.placement, placement::GROUND_AT_ORIGIN);
         assert_eq!(row.center, [0.0; 3]);
@@ -171,16 +154,18 @@ mod tests {
     }
 
     #[test]
-    fn a_planet_is_centred_on_its_owner() {
+    fn a_planet_is_placed_at_its_owner_by_the_join() {
         let component = AtmosphereComponent {
             placement: AtmospherePlacement::PlanetAtOwner,
             planet_radius_km: 1737.0,
             thickness_km: 40.0,
             ..Default::default()
         };
-        let row = with_owner([1.0, -2.0, 3.0], |owner| component.to_row(owner));
+        let row = component.to_row();
         assert_eq!(row.placement, placement::CENTER);
-        assert_eq!(row.center, [1.0, -2.0, 3.0]);
+        assert_eq!(row.center, [0.0; 3], "local: the join adds the owner's position");
         assert_eq!((row.bottom_radius, row.top_radius), (1737.0, 1777.0));
+        let disabled = AtmosphereComponent { enabled: false, ..component };
+        assert_eq!(disabled.to_row().enabled, 0);
     }
 }

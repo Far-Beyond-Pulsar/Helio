@@ -5,10 +5,9 @@
 //! renderer-independent data API. No persistence behavior is implied by the
 //! runtime data fields.
 
-use engine_class_derive::engine_class;
+use engine_class_derive::{component_events, engine_class};
 use helio_voxel_data::{
-    VoxelEditJournal,
-    VoxelStoredPayload, VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION,
+    VoxelEditJournal, VoxelStoredPayload, VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION,
 };
 pub use helio_voxel_data::{VoxelPayloadKey, VoxelPayloadStore};
 use pulsar_scene_model::components::Transform;
@@ -30,6 +29,49 @@ fn empty_payload_store() -> VoxelPayloadStore {
     Arc::new(RwLock::new((0, HashMap::new())))
 }
 
+/// Typed payload for block lifecycle events. Coordinates are the exact
+/// world-space centre of the base cell; `material` is the material present
+/// when the event occurred (before a break, or after a placement).
+#[engine_class(no_register)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BlockData {
+    #[property]
+    pub x: f64,
+    #[property]
+    pub y: f64,
+    #[property]
+    pub z: f64,
+    #[property]
+    pub material: u32,
+}
+
+/// Typed payload for a terrain cell whose material changed from one solid
+/// material to another.
+#[engine_class(no_register)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BlockMaterialChange {
+    #[property]
+    pub x: f64,
+    #[property]
+    pub y: f64,
+    #[property]
+    pub z: f64,
+    #[property]
+    pub previous_material: u32,
+    #[property]
+    pub material: u32,
+}
+
+#[component_events(class = "VoxelTerrainComponent")]
+pub trait TerrainEvents {
+    #[bp_event]
+    fn block_broken() -> BlockData {}
+    #[bp_event]
+    fn block_placed() -> BlockData {}
+    #[bp_event]
+    fn block_material_changed() -> BlockMaterialChange {}
+}
+
 /// Files without a version use the generator's registered version.
 fn default_voxel_generator_version() -> u32 {
     0
@@ -45,13 +87,19 @@ pub struct VoxelGeneratorRef {
     #[serde(rename = "generator_id", default)]
     pub id: String,
     /// Output version; a new version may generate different terrain.
-    #[serde(rename = "generator_version", default = "default_voxel_generator_version")]
+    #[serde(
+        rename = "generator_version",
+        default = "default_voxel_generator_version"
+    )]
     pub version: u32,
 }
 
 impl VoxelGeneratorRef {
     pub fn new(id: impl Into<String>, version: u32) -> Self {
-        Self { id: id.into(), version }
+        Self {
+            id: id.into(),
+            version,
+        }
     }
 }
 
@@ -62,12 +110,18 @@ impl Default for VoxelGeneratorRef {
     }
 }
 
-fn serialize_generator_ref_json(value: &VoxelGeneratorRef) -> pulsar_reflection::ReflectResult<serde_json::Value> {
-    serde_json::to_value(value).map_err(|e| pulsar_reflection::ReflectError::SerializationFailed(e.to_string()))
+fn serialize_generator_ref_json(
+    value: &VoxelGeneratorRef,
+) -> pulsar_reflection::ReflectResult<serde_json::Value> {
+    serde_json::to_value(value)
+        .map_err(|e| pulsar_reflection::ReflectError::SerializationFailed(e.to_string()))
 }
 
-fn deserialize_generator_ref_json(value: serde_json::Value) -> pulsar_reflection::ReflectResult<VoxelGeneratorRef> {
-    serde_json::from_value(value).map_err(|e| pulsar_reflection::ReflectError::DeserializationFailed(e.to_string()))
+fn deserialize_generator_ref_json(
+    value: serde_json::Value,
+) -> pulsar_reflection::ReflectResult<VoxelGeneratorRef> {
+    serde_json::from_value(value)
+        .map_err(|e| pulsar_reflection::ReflectError::DeserializationFailed(e.to_string()))
 }
 
 /// Registered for reflection; the picker editor is registered by the host
@@ -237,7 +291,17 @@ impl Clone for VoxelComponent {
 }
 
 /// Overall form of a voxel world.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, pulsar_reflection::Reflectable)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    pulsar_reflection::Reflectable,
+)]
 pub enum VoxelWorldShape {
     /// A planet centred on the entity origin (`planet_radius`).
     Sphere,
@@ -276,6 +340,14 @@ pub struct VoxelTerrainComponent {
     /// clones copy the index/revision and share immutable payload allocations.
     #[serde(skip)]
     payloads: VoxelPayloadStore,
+    /// Runtime-only events committed by world methods and drained after the
+    /// method releases its World borrow. Clones start with an empty outbox.
+    #[serde(skip)]
+    pub(crate) pending_block_broken: Vec<BlockData>,
+    #[serde(skip)]
+    pub(crate) pending_block_placed: Vec<BlockData>,
+    #[serde(skip)]
+    pub(crate) pending_block_material_changed: Vec<BlockMaterialChange>,
     /// Whether this terrain source participates in rendering and queries.
     #[property]
     pub enabled: bool,
@@ -285,15 +357,33 @@ pub struct VoxelTerrainComponent {
     pub shape: VoxelWorldShape,
     /// Planet radius in metres (sphere worlds).
     #[serde(default = "default_planet_radius")]
-    #[property(min = 1000.0, max = 50000000.0, step = 1000.0, category = "World", label = "Planet radius (m)")]
+    #[property(
+        min = 1000.0,
+        max = 50000000.0,
+        step = 1000.0,
+        category = "World",
+        label = "Planet radius (m)"
+    )]
     pub planet_radius: f64,
     /// Edge length of a finite plane in metres.
     #[serde(default = "default_plane_size")]
-    #[property(min = 16.0, max = 13000000.0, step = 16.0, category = "World", label = "Plane size (m)")]
+    #[property(
+        min = 16.0,
+        max = 13000000.0,
+        step = 16.0,
+        category = "World",
+        label = "Plane size (m)"
+    )]
     pub plane_size: f64,
     /// Edge length of a base-resolution voxel in metres (0.1 to 1 for
     /// streamed terrain).
-    #[property(min = 0.1, max = 1.0, step = 0.05, category = "World", label = "Voxel size (m)")]
+    #[property(
+        min = 0.1,
+        max = 1.0,
+        step = 0.05,
+        category = "World",
+        label = "Voxel size (m)"
+    )]
     pub voxel_size: f64,
     /// The registered terrain generator that fills the world. Its settings
     /// live in its settings component on the same entity.
@@ -361,6 +451,9 @@ impl Default for VoxelTerrainComponent {
     fn default() -> Self {
         Self {
             payloads: empty_payload_store(),
+            pending_block_broken: Vec::new(),
+            pending_block_placed: Vec::new(),
+            pending_block_material_changed: Vec::new(),
             enabled: true,
             shape: VoxelWorldShape::default(),
             planet_radius: default_planet_radius(),
@@ -394,15 +487,26 @@ impl VoxelTerrainComponent {
     /// voxels. Add a [`VoxelTerrainLayersComponent`] to shape its continents and
     /// mountains.
     pub fn planet(radius: f64) -> Self {
-        Self { shape: VoxelWorldShape::Sphere, planet_radius: radius, ..Self::default() }
+        Self {
+            shape: VoxelWorldShape::Sphere,
+            planet_radius: radius,
+            ..Self::default()
+        }
     }
     /// A square plane of `size` metres with Helio's terrain generator.
     pub fn plane(size: f64) -> Self {
-        Self { shape: VoxelWorldShape::Plane, plane_size: size, ..Self::default() }
+        Self {
+            shape: VoxelWorldShape::Plane,
+            plane_size: size,
+            ..Self::default()
+        }
     }
     /// A plane without edges within reach, with Helio's terrain generator.
     pub fn infinite_plane() -> Self {
-        Self { shape: VoxelWorldShape::InfinitePlane, ..Self::default() }
+        Self {
+            shape: VoxelWorldShape::InfinitePlane,
+            ..Self::default()
+        }
     }
 
     /// Low-level live SceneDB data capability. Normal
@@ -420,6 +524,9 @@ impl Clone for VoxelTerrainComponent {
     fn clone(&self) -> Self {
         Self {
             payloads: clone_payload_store(&self.payloads),
+            pending_block_broken: Vec::new(),
+            pending_block_placed: Vec::new(),
+            pending_block_material_changed: Vec::new(),
             enabled: self.enabled,
             shape: self.shape,
             planet_radius: self.planet_radius,
@@ -449,7 +556,17 @@ impl Clone for VoxelTerrainComponent {
 }
 
 /// A solid terrain material.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, pulsar_reflection::Reflectable)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    pulsar_reflection::Reflectable,
+)]
 pub enum VoxelTerrainMaterial {
     #[default]
     Grass,
@@ -1190,7 +1307,8 @@ fn edit_terrain_samples(
         let edits = samples
             .iter()
             .map(|s| {
-                let p = glam::DVec3::new(s[0] as f64 + 0.5, s[1] as f64 + 0.5, s[2] as f64 + 0.5) * voxel;
+                let p = glam::DVec3::new(s[0] as f64 + 0.5, s[1] as f64 + 0.5, s[2] as f64 + 0.5)
+                    * voxel;
                 super::voxel_world::block_edit(&planet, p, u32::from(material_slot))
             })
             .collect();
@@ -1209,7 +1327,10 @@ fn edit_terrain_samples(
     if component.material_ids.len() > usize::from(u8::MAX) {
         return Err("voxel terrain material palette exceeds 255 IDs".into());
     }
-    let transform = world.get::<Transform>(entity).copied().unwrap_or_default();
+    // The terrain instance's placement is its owner object's transform.
+    let transform = pulsar_scene_model::attachments::owner_component::<Transform>(world, entity)
+        .copied()
+        .unwrap_or_default();
     let [sx, sy, sz] = transform.scale;
     if transform
         .rotation
@@ -1223,7 +1344,10 @@ fn edit_terrain_samples(
         || (sx - sz).abs() > 1.0e-5
         || transform.position.iter().any(|value| !value.is_finite())
     {
-        return Err("voxel terrain edits require an unrotated transform with finite positive uniform scale".into());
+        return Err(
+            "voxel terrain edits require an unrotated transform with finite positive uniform scale"
+                .into(),
+        );
     }
     let max_lod = u8::try_from(component.max_chunk_lod)
         .map_err(|_| "max_chunk_lod must fit in a chunk key".to_string())?;
