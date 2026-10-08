@@ -1,9 +1,9 @@
 //! Level of Detail (LOD) component for performance optimization
 
-use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
+use engine_class_derive::{engine_class, register_world_component};
 use pulsar_reflection::{
-    ComponentRuntimeBehavior, ComponentRuntimeContext, ReflectError, ReflectResult,
-    RuntimeComponentOwner, pulsar_type,
+    pulsar_type, ComponentRuntimeBehavior, ComponentRuntimeContext, ReflectError, ReflectResult,
+    RuntimeComponentOwner,
 };
 
 /// LOD component for managing mesh detail based on distance
@@ -43,7 +43,6 @@ pub struct LODComponent {
 // `read_live_component_property`) as every other component, instead of
 // living only in `ComponentDb`'s flat JSON.
 #[register_world_component]
-#[register_runtime_behavior]
 impl ComponentRuntimeBehavior for LODComponent {
     const CLASS_NAME: &'static str = "LODComponent";
 
@@ -88,3 +87,10 @@ fn deserialize_lod_level_json(value: serde_json::Value) -> ReflectResult<LODLeve
     deserialize_json_with = deserialize_lod_level_json
 )]
 pub type RegisteredLodLevel = LODLevel;
+
+// Reported unsupported (Pulsar-Native#1035, Phase 4): the properties card
+// shows this reason, and attaching one logs it once.
+pulsar_world_registry::declare_unsupported_component!(
+    "LODComponent",
+    "nothing consumes LOD settings; meshes always draw their imported level of detail",
+);

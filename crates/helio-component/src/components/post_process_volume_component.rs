@@ -3,7 +3,7 @@
 //! placed by the graph's environment join with the owner's transform; camera
 //! settings reuse PostProcessSettingsProps.
 
-use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
+use engine_class_derive::{engine_class, register_world_component};
 use helio_pass_postprocess::{HdrOutputMode as HelioHdrOutputMode, TonemapOperator as HelioTonemapOperator};
 use super::lens_flare_props::LensFlareProps;
 use helio_pass_postprocess::{
@@ -700,7 +700,6 @@ impl PostProcessVolumeComponent {
 }
 
 #[register_world_component]
-#[register_runtime_behavior]
 impl ComponentRuntimeBehavior for PostProcessVolumeComponent {
     const CLASS_NAME: &'static str = POST_PROCESS_VOLUME_CLASS_NAME;
 

@@ -1,4 +1,4 @@
-use engine_class_derive::{register_runtime_behavior, register_world_component};
+use engine_class_derive::{register_world_component};
 use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
 
 use super::LightComponent;
@@ -26,7 +26,6 @@ fn decode_light_component(data: &serde_json::Value) -> Result<LightComponent, St
 // SceneDB, and a disabled light's row says so (`general.enabled` is part of
 // it).
 #[register_world_component(decode = decode_light_component)]
-#[register_runtime_behavior]
 impl ComponentRuntimeBehavior for LightComponent {
     const CLASS_NAME: &'static str = "LightComponent";
 

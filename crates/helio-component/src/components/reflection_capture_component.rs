@@ -9,7 +9,7 @@
 //! ReflectionCaptureComponent` remains the only schema of the
 //! `"reflection_captures"` buffer.
 
-use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
+use engine_class_derive::{engine_class, register_world_component};
 use pulsar_reflection::{
     ComponentRuntimeBehavior, ComponentRuntimeContext, Reflectable, RuntimeComponentOwner,
 };
@@ -93,7 +93,6 @@ impl Default for ReflectionCaptureComponent {
 }
 
 #[register_world_component]
-#[register_runtime_behavior]
 impl ComponentRuntimeBehavior for ReflectionCaptureComponent {
     const CLASS_NAME: &'static str = REFLECTION_CAPTURE_CLASS_NAME;
 
@@ -107,41 +106,16 @@ impl ComponentRuntimeBehavior for ReflectionCaptureComponent {
     }
 }
 
+// Reported unsupported (Pulsar-Native#1035, Phase 4): the properties card
+// shows this reason, and attaching one logs it once.
+pulsar_world_registry::declare_unsupported_component!(
+    REFLECTION_CAPTURE_CLASS_NAME,
+    "a capture contributes only with a baked cubemap, and this engine runs no probe baker",
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_subsystems::{Subsystem, SubsystemContext};
-    use pulsar_reflection::{apply_runtime_behavior_for_class, Subsystems};
-    use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
-
-    struct TestRuntimeContext {
-        project_root: PathBuf,
-        subsystems: Subsystems,
-        errors: Vec<String>,
-    }
-
-    impl ComponentRuntimeContext for TestRuntimeContext {
-        fn subsystems_mut(&mut self) -> &mut Subsystems {
-            &mut self.subsystems
-        }
-        fn project_root(&self) -> &Path {
-            &self.project_root
-        }
-        fn report_error(&mut self, message: String) {
-            self.errors.push(message);
-        }
-    }
-
-    fn owner<'a>(props: &'a HashMap<String, serde_json::Value>) -> RuntimeComponentOwner<'a> {
-        RuntimeComponentOwner {
-            scene_object_id: "probe",
-            position: [1.0, 2.0, 3.0],
-            rotation: [0.0; 3],
-            scale: [1.0; 3],
-            props,
-        }
-    }
 
     #[test]
     fn runtime_behavior_has_the_reflected_component_name() {
@@ -149,29 +123,5 @@ mod tests {
             <ReflectionCaptureComponent as ComponentRuntimeBehavior>::CLASS_NAME,
             REFLECTION_CAPTURE_CLASS_NAME
         );
-    }
-
-    #[test]
-    fn disabling_a_never_inserted_capture_is_a_quiet_no_op() {
-        let mut subsystems = Subsystems::new();
-        let mut context = TestRuntimeContext {
-            project_root: PathBuf::from("."),
-            subsystems,
-            errors: Vec::new(),
-        };
-        let props = HashMap::new();
-        let disabled = ReflectionCaptureComponent {
-            enabled: false,
-            ..Default::default()
-        };
-
-        assert!(apply_runtime_behavior_for_class(
-            REFLECTION_CAPTURE_CLASS_NAME,
-            &owner(&props),
-            0,
-            &serde_json::to_value(disabled).unwrap(),
-            &mut context,
-        ));
-        assert!(context.errors.is_empty());
     }
 }

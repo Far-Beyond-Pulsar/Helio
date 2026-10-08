@@ -7,7 +7,7 @@
 //! slots, so it writes no scene rows and is reported unsupported
 //! (Pulsar-Native#1035, Phase 4).
 
-use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
+use engine_class_derive::{engine_class, register_world_component};
 use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
 
 pub const PORTAL_CLASS_NAME: &str = "PortalComponent";
@@ -37,7 +37,6 @@ impl Default for PortalComponent {
 }
 
 #[register_world_component]
-#[register_runtime_behavior]
 impl ComponentRuntimeBehavior for PortalComponent {
     const CLASS_NAME: &'static str = PORTAL_CLASS_NAME;
 
@@ -50,3 +49,10 @@ impl ComponentRuntimeBehavior for PortalComponent {
         // Not rendered (see the module doc): nothing to sync.
     }
 }
+
+// Reported unsupported (Pulsar-Native#1035, Phase 4): the properties card
+// shows this reason, and attaching one logs it once.
+pulsar_world_registry::declare_unsupported_component!(
+    PORTAL_CLASS_NAME,
+    "portals need a linked peer portal and Helio's portal projection, which this engine does not provide",
+);

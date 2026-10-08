@@ -1,7 +1,7 @@
 //! Foliage reaches the foliage passes through its derived source row
 //! (`environment_rows::FoliageSourceRow`), built from the mappings here.
 
-use engine_class_derive::{register_runtime_behavior, register_world_component};
+use engine_class_derive::{register_world_component};
 use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
 
 use super::FoliageComponent;
@@ -71,7 +71,6 @@ pub(crate) fn wind(component: &FoliageComponent) -> helio_pass_foliage_place::Gp
 }
 
 #[register_world_component]
-#[register_runtime_behavior]
 impl ComponentRuntimeBehavior for FoliageComponent {
     const CLASS_NAME: &'static str = "FoliageComponent";
 

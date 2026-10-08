@@ -24,7 +24,7 @@
 //! is a different kind of integration than "one component, one purpose"
 //! placement. Deferred, not overlooked.
 
-use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
+use engine_class_derive::{engine_class, register_world_component};
 use helio_pass_water_sim::GpuWaterVolume;
 use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
 use serde::{Deserialize, Serialize};
@@ -300,7 +300,6 @@ impl WaterVolumeComponent {
 }
 
 #[register_world_component]
-#[register_runtime_behavior]
 impl ComponentRuntimeBehavior for WaterVolumeComponent {
     const CLASS_NAME: &'static str = WATER_VOLUME_CLASS_NAME;
 
@@ -318,38 +317,6 @@ impl ComponentRuntimeBehavior for WaterVolumeComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_subsystems::{Subsystem, SubsystemContext};
-    use pulsar_reflection::{apply_runtime_behavior_for_class, Subsystems};
-    use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
-
-    struct TestRuntimeContext {
-        project_root: PathBuf,
-        subsystems: Subsystems,
-        errors: Vec<String>,
-    }
-
-    impl ComponentRuntimeContext for TestRuntimeContext {
-        fn subsystems_mut(&mut self) -> &mut Subsystems {
-            &mut self.subsystems
-        }
-        fn project_root(&self) -> &Path {
-            &self.project_root
-        }
-        fn report_error(&mut self, message: String) {
-            self.errors.push(message);
-        }
-    }
-
-    fn owner<'a>(props: &'a HashMap<String, serde_json::Value>) -> RuntimeComponentOwner<'a> {
-        RuntimeComponentOwner {
-            scene_object_id: "lake",
-            position: [0.0, 0.0, 0.0],
-            rotation: [0.0; 3],
-            scale: [1.0; 3],
-            props,
-        }
-    }
 
     #[test]
     fn runtime_behavior_has_the_reflected_component_name() {
@@ -372,29 +339,5 @@ mod tests {
         assert_eq!(&row.bounds_min[0..3], &[-5.0, -2.0, -5.0]);
         assert_eq!(&row.bounds_max[0..3], &[5.0, 2.0, 5.0]);
         assert_eq!(row.bounds_max[3], 1.0);
-    }
-
-    #[test]
-    fn disabling_a_never_inserted_volume_is_a_quiet_no_op() {
-        let mut subsystems = Subsystems::new();
-        let mut context = TestRuntimeContext {
-            project_root: PathBuf::from("."),
-            subsystems,
-            errors: Vec::new(),
-        };
-        let props = HashMap::new();
-        let disabled = WaterVolumeComponent {
-            enabled: false,
-            ..Default::default()
-        };
-
-        assert!(apply_runtime_behavior_for_class(
-            WATER_VOLUME_CLASS_NAME,
-            &owner(&props),
-            0,
-            &serde_json::to_value(disabled).unwrap(),
-            &mut context,
-        ));
-        assert!(context.errors.is_empty());
     }
 }

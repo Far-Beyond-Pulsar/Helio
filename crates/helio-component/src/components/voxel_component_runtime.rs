@@ -4,7 +4,7 @@
 //! future voxel backend can observe the typed SceneDB rows and consume
 //! revisioned external updates without coupling component hydration to a pass.
 
-use engine_class_derive::{register_component_runtime, register_runtime_behavior, register_world_component};
+use engine_class_derive::{register_component_runtime, register_world_component};
 use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
 
 use super::{TerrainEventsEventWriterExt as _, VoxelComponent, VoxelFlatTerrainComponent, VoxelLandformComponent, VoxelTerrainComponent};
@@ -70,7 +70,6 @@ impl VoxelTerrainComponent {
 }
 
 #[register_world_component]
-#[register_runtime_behavior]
 impl ComponentRuntimeBehavior for VoxelComponent {
     const CLASS_NAME: &'static str = "VoxelComponent";
 
@@ -85,7 +84,6 @@ impl ComponentRuntimeBehavior for VoxelComponent {
 }
 
 #[register_world_component]
-#[register_runtime_behavior]
 impl ComponentRuntimeBehavior for VoxelTerrainComponent {
     const CLASS_NAME: &'static str = "VoxelTerrainComponent";
 
@@ -101,7 +99,6 @@ impl ComponentRuntimeBehavior for VoxelTerrainComponent {
 }
 
 #[register_world_component]
-#[register_runtime_behavior]
 impl ComponentRuntimeBehavior for VoxelLandformComponent {
     const CLASS_NAME: &'static str = "VoxelLandformComponent";
 
@@ -116,7 +113,6 @@ impl ComponentRuntimeBehavior for VoxelLandformComponent {
 }
 
 #[register_world_component]
-#[register_runtime_behavior]
 impl ComponentRuntimeBehavior for VoxelFlatTerrainComponent {
     const CLASS_NAME: &'static str = "VoxelFlatTerrainComponent";
 
@@ -129,3 +125,10 @@ impl ComponentRuntimeBehavior for VoxelFlatTerrainComponent {
         // Settings of the terrain on the same entity, read when it is projected.
     }
 }
+
+// Reported unsupported (Pulsar-Native#1035, Phase 4): the properties card
+// shows this reason, and attaching one logs it once.
+pulsar_world_registry::declare_unsupported_component!(
+    "VoxelComponent",
+    "no voxel renderer draws a free-standing voxel component; use a voxel terrain",
+);

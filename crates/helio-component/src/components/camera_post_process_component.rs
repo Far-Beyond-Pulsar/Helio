@@ -1,7 +1,7 @@
 //! A render view's post-process baseline. It reaches the post-process
 //! resolve as its derived row ([`super::environment_rows`]) through the
 //! graph's environment join.
-use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
+use engine_class_derive::{engine_class, register_world_component};
 use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
 use super::PostProcessSettingsProps;
 
@@ -28,7 +28,6 @@ impl Default for CameraPostProcessComponent {
 }
 
 #[register_world_component]
-#[register_runtime_behavior]
 impl ComponentRuntimeBehavior for CameraPostProcessComponent {
     const CLASS_NAME: &'static str = CAMERA_POST_PROCESS_CLASS_NAME;
 

@@ -7,7 +7,7 @@
 //! and the renderer draws it from the World in the editor's debug overlay
 //! ([`spline_debug_lines`]) instead of the UI painting it over the viewport.
 
-use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
+use engine_class_derive::{engine_class, register_world_component};
 use glam::Vec3;
 use pulsar_reflection::{
     pulsar_type, ComponentRuntimeBehavior, ComponentRuntimeContext, ReflectError, ReflectResult,
@@ -449,7 +449,6 @@ impl SplineComponent {
 // The World value is the curve; nothing is pushed anywhere else. The
 // renderer reads it back through `spline_debug_lines`.
 #[register_world_component]
-#[register_runtime_behavior]
 impl ComponentRuntimeBehavior for SplineComponent {
     const CLASS_NAME: &'static str = SPLINE_CLASS_NAME;
 

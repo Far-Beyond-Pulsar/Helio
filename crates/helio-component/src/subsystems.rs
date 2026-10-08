@@ -2,49 +2,6 @@ use std::path::{Path, PathBuf};
 
 use helio::MeshUpload;
 
-/// SceneDB writes a component's `sync_component` wants to make, queued
-/// instead of applied inline.
-///
-/// `ComponentRuntimeBehavior::sync_component` runs under the component-sync
-/// pass's read lock on `WorldSceneStore` (see `engine_backend`'s
-/// `sync_scene` doc for exactly why: a write lock held across the whole
-/// pass previously caused a real, shipped gizmo drag-release freeze). It
-/// therefore never has `&mut World`, only `&pulsar_scenedb::World`
-/// (indirectly, via `Subsystems`) plus this queue -- push a closure here
-/// instead of authoring immediately, and `engine_backend` applies every
-/// queued write during the pass's own short, pre-existing Phase 2 write
-/// lock.
-///
-/// Registered once per `sync_snapshot_components` call via `register_ref`,
-/// shared (by the caller) across the whole sync pass so every entity's
-/// queued writes land in one `Vec`, applied together.
-#[derive(Default)]
-pub struct PendingWorldWrites {
-    writes: Vec<Box<dyn FnOnce(&mut pulsar_scenedb::World) + Send>>,
-}
-
-impl PendingWorldWrites {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Queue a write. `entity` is typically captured by the closure (e.g.
-    /// via `move |world| { world.insert(entity, component); }`) -- this
-    /// method doesn't thread it through itself since some writes (a
-    /// `World::remove`, a multi-entity edit) don't fit a single-entity shape.
-    pub fn push(&mut self, write: impl FnOnce(&mut pulsar_scenedb::World) + Send + 'static) {
-        self.writes.push(Box::new(write));
-    }
-
-    /// Apply and clear every queued write. Called by `engine_backend` inside
-    /// the sync pass's Phase 2 write lock.
-    pub fn drain_and_apply(&mut self, world: &mut pulsar_scenedb::World) {
-        for write in self.writes.drain(..) {
-            write(world);
-        }
-    }
-}
-
 /// The engine's built-in assets — resolved at compile time so embedded
 /// primitives (SM_Cube, SM_Sphere, etc.) are always available.
 ///
