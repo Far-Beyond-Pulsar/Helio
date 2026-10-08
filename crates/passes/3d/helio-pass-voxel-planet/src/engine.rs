@@ -867,8 +867,16 @@ pub struct PlanetRenderer {
     sun_active: bool,
     profiler: Option<helio_core::profiling::GpuProfiler>,
     initial_complete: bool,
-    /// Measured GPU generation cost per column job (EMA) and last job count.
+    /// Marginal GPU generation cost per column job (ms), fitted with the
+    /// fixed per-frame residency work over `cost_samples`, and last job count.
     ms_per_job: f64,
+    /// Recent (jobs, residency GPU ms) samples: generation costs a fixed part
+    /// (table patches, evictions, allocation, publication setup) plus a
+    /// marginal part per job. Dividing all of it by the jobs inflated the
+    /// per-job cost 3-5x exactly while flying (few jobs, many evictions), so
+    /// the budget spiralled down to its floor: ~300 jobs a frame, 100k
+    /// columns pending and coarser LOD until the camera stopped.
+    cost_samples: std::collections::VecDeque<(f64, f64)>,
     last_jobs: usize,
     /// Jobs issued per recent frame number, and the frame whose timestamps
     /// last updated `ms_per_job`.
@@ -999,6 +1007,7 @@ impl PlanetRenderer {
             ms_per_job: 0.0013,
             frame_jobs: std::collections::VecDeque::new(),
             costed_frame: None,
+            cost_samples: std::collections::VecDeque::new(),
             pool_pressure: false,
             last_recycle: 0,
             lod_pressure: 1.0,
@@ -1541,9 +1550,9 @@ impl PlanetRenderer {
             // without a free readback to reserve, the plan issues no jobs.
             let target_ms = if moving { 1.5 } else { 6.0 };
             let free = self.readbacks.iter().position(|r| r.stage == 0);
-            // The floor keeps the measured per-job cost (which includes fixed
-            // per-frame work) from shrinking the budget into a spiral; only
-            // scratch pressure lowers it.
+            // Jobs buy generation time at their marginal cost (the fixed
+            // per-frame work is paid anyway); the floor keeps a budget while
+            // the fit has no samples; only scratch pressure lowers it.
             let floor = ((256.0 * self.scratch_scale) as usize).max(16);
             let budget = free.map_or(0, |_| {
                 ((target_ms / self.ms_per_job.max(1e-5) * self.scratch_scale) as usize)
@@ -1615,9 +1624,14 @@ impl PlanetRenderer {
             if completed.is_some() && completed != self.costed_frame {
                 self.costed_frame = completed;
                 let jobs = self.frame_jobs.iter().find(|(f, _)| Some(*f) == completed).map_or(0, |(_, j)| *j);
-                if jobs >= 256 && residency > 0.0 {
-                    let sample = residency / jobs as f64;
-                    self.ms_per_job = self.ms_per_job * 0.7 + sample * 0.3;
+                if residency > 0.0 {
+                    if self.cost_samples.len() == 64 {
+                        self.cost_samples.pop_front();
+                    }
+                    self.cost_samples.push_back((jobs as f64, residency));
+                    if let Some(marginal) = marginal_cost(&self.cost_samples) {
+                        self.ms_per_job = marginal;
+                    }
                 }
             }
         }
@@ -2440,4 +2454,42 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
         }
     }
     Ok(())
+}
+
+/// Marginal cost (ms per job) of a least-squares fit `ms = fixed + marginal *
+/// jobs` over `samples`, or `None` until they span enough job counts. Bounded
+/// to 0.1-50 us a job.
+fn marginal_cost(samples: &std::collections::VecDeque<(f64, f64)>) -> Option<f64> {
+    if samples.len() < 8 {
+        return None;
+    }
+    let n = samples.len() as f64;
+    let (mx, my) = samples.iter().fold((0.0, 0.0), |(x, y), (a, b)| (x + a / n, y + b / n));
+    let (sxx, sxy) = samples.iter().fold((0.0, 0.0), |(xx, xy), (a, b)| (xx + (a - mx) * (a - mx), xy + (a - mx) * (b - my)));
+    // Job counts must vary (by a few hundred) to separate the fixed part.
+    if sxx / n < 100.0 * 100.0 {
+        return None;
+    }
+    Some((sxy / sxx).clamp(1.0e-4, 0.05))
+}
+
+#[cfg(test)]
+mod cost_tests {
+    use super::marginal_cost;
+
+    /// The generation budget's per-job cost is the marginal one: a large
+    /// fixed part (evictions, table work) does not inflate it, whatever the
+    /// job counts.
+    #[test]
+    fn marginal_cost_separates_fixed_work() {
+        let samples: std::collections::VecDeque<(f64, f64)> =
+            [300.0, 2000.0, 450.0, 5000.0, 320.0, 1200.0, 4100.0, 800.0].iter().map(|&j| (j, 3.0 + 0.001 * j)).collect();
+        let marginal = marginal_cost(&samples).unwrap();
+        assert!((marginal - 0.001).abs() < 1e-9, "{marginal}");
+        // The old estimate (all time over the jobs) at 300 jobs: 11x too high.
+        assert!((3.0 + 0.3) / 300.0 > 10.0 * marginal);
+        // Job counts that barely vary cannot separate the parts.
+        let flat: std::collections::VecDeque<(f64, f64)> = (0..16).map(|i| (300.0 + f64::from(i), 3.3)).collect();
+        assert!(marginal_cost(&flat).is_none());
+    }
 }
