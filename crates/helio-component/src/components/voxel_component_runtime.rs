@@ -126,9 +126,10 @@ impl ComponentRuntimeBehavior for VoxelFlatTerrainComponent {
     }
 }
 
-// Reported unsupported (Pulsar-Native#1035, Phase 4): the properties card
-// shows this reason, and attaching one logs it once.
-pulsar_world_registry::declare_unsupported_component!(
+// Reported unfinished (Pulsar-Native#1035, Phase 4; tracked in #1056): the
+// properties card shows the reason and issue, and attaching one logs them once.
+pulsar_world_registry::declare_unfinished_component!(
     "VoxelComponent",
     "no voxel renderer draws a free-standing voxel component; use a voxel terrain",
+    "https://github.com/Far-Beyond-Pulsar/Pulsar-Native/issues/1056",
 );

@@ -4,8 +4,8 @@
 //! portal pairs: each portal names its peer, and a projection bridge turns
 //! the pairs into view and chain rows at reserved, dense entity slots. This
 //! component authors no peer, and the editor world cannot provide those
-//! slots, so it writes no scene rows and is reported unsupported
-//! (Pulsar-Native#1035, Phase 4).
+//! slots, so it writes no scene rows and is reported unfinished
+//! (Pulsar-Native#1035, Phase 4; tracked in Pulsar-Native#1055).
 
 use engine_class_derive::{engine_class, register_world_component};
 use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
@@ -50,9 +50,10 @@ impl ComponentRuntimeBehavior for PortalComponent {
     }
 }
 
-// Reported unsupported (Pulsar-Native#1035, Phase 4): the properties card
-// shows this reason, and attaching one logs it once.
-pulsar_world_registry::declare_unsupported_component!(
+// Reported unfinished (Pulsar-Native#1035, Phase 4; tracked in #1055): the
+// properties card shows the reason and issue, and attaching one logs them once.
+pulsar_world_registry::declare_unfinished_component!(
     PORTAL_CLASS_NAME,
     "portals need a linked peer portal and Helio's portal projection, which this engine does not provide",
+    "https://github.com/Far-Beyond-Pulsar/Pulsar-Native/issues/1055",
 );

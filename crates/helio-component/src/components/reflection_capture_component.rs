@@ -4,8 +4,8 @@
 //! **Not rendered by this engine.** Deferred lighting samples a capture only
 //! once a probe bake has assigned it a cubemap layer, and the engine runs no
 //! probe baker, so a capture would never contribute. The component keeps
-//! its authored settings, writes no scene rows and is reported unsupported
-//! (Pulsar-Native#1035, Phase 4). `helio_pass_deferred_light::
+//! its authored settings, writes no scene rows and is reported unfinished
+//! (Pulsar-Native#1035, Phase 4; tracked in Pulsar-Native#1054). `helio_pass_deferred_light::
 //! ReflectionCaptureComponent` remains the only schema of the
 //! `"reflection_captures"` buffer.
 
@@ -106,11 +106,12 @@ impl ComponentRuntimeBehavior for ReflectionCaptureComponent {
     }
 }
 
-// Reported unsupported (Pulsar-Native#1035, Phase 4): the properties card
-// shows this reason, and attaching one logs it once.
-pulsar_world_registry::declare_unsupported_component!(
+// Reported unfinished (Pulsar-Native#1035, Phase 4; tracked in #1054): the
+// properties card shows the reason and issue, and attaching one logs them once.
+pulsar_world_registry::declare_unfinished_component!(
     REFLECTION_CAPTURE_CLASS_NAME,
     "a capture contributes only with a baked cubemap, and this engine runs no probe baker",
+    "https://github.com/Far-Beyond-Pulsar/Pulsar-Native/issues/1054",
 );
 
 #[cfg(test)]

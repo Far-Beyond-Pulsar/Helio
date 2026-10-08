@@ -88,9 +88,10 @@ fn deserialize_lod_level_json(value: serde_json::Value) -> ReflectResult<LODLeve
 )]
 pub type RegisteredLodLevel = LODLevel;
 
-// Reported unsupported (Pulsar-Native#1035, Phase 4): the properties card
-// shows this reason, and attaching one logs it once.
-pulsar_world_registry::declare_unsupported_component!(
+// Reported unfinished (Pulsar-Native#1035, Phase 4; tracked in #1053): the
+// properties card shows the reason and issue, and attaching one logs them once.
+pulsar_world_registry::declare_unfinished_component!(
     "LODComponent",
     "nothing consumes LOD settings; meshes always draw their imported level of detail",
+    "https://github.com/Far-Beyond-Pulsar/Pulsar-Native/issues/1053",
 );
