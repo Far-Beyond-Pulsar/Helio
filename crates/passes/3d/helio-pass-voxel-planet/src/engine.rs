@@ -2456,21 +2456,25 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
     Ok(())
 }
 
-/// Marginal cost (ms per job) of a least-squares fit `ms = fixed + marginal *
-/// jobs` over `samples`, or `None` until they span enough job counts. Bounded
-/// to 0.1-50 us a job.
+/// Marginal cost (ms per job) of the generation work in `samples` (jobs, ms):
+/// a least-squares fit `ms = fixed + marginal * jobs`, at most the average
+/// cost (a fixed part is never negative), which is also the answer while the
+/// job counts vary too little to separate the parts. An unbounded fit read
+/// 50 us a job once (startup frames with many jobs also carried uploads):
+/// the budget fell to its floor, every frame then had the same job count,
+/// and the estimate could never recover. Bounded to 0.1-50 us a job.
 fn marginal_cost(samples: &std::collections::VecDeque<(f64, f64)>) -> Option<f64> {
-    if samples.len() < 8 {
+    let jobs: f64 = samples.iter().map(|s| s.0).sum();
+    if samples.len() < 8 || jobs < 256.0 {
         return None;
     }
+    let average = samples.iter().map(|s| s.1).sum::<f64>() / jobs;
     let n = samples.len() as f64;
     let (mx, my) = samples.iter().fold((0.0, 0.0), |(x, y), (a, b)| (x + a / n, y + b / n));
     let (sxx, sxy) = samples.iter().fold((0.0, 0.0), |(xx, xy), (a, b)| (xx + (a - mx) * (a - mx), xy + (a - mx) * (b - my)));
     // Job counts must vary (by a few hundred) to separate the fixed part.
-    if sxx / n < 100.0 * 100.0 {
-        return None;
-    }
-    Some((sxy / sxx).clamp(1.0e-4, 0.05))
+    let marginal = if sxx / n >= 100.0 * 100.0 { (sxy / sxx).min(average) } else { average };
+    Some(marginal.clamp(1.0e-4, 0.05))
 }
 
 #[cfg(test)]
@@ -2488,8 +2492,16 @@ mod cost_tests {
         assert!((marginal - 0.001).abs() < 1e-9, "{marginal}");
         // The old estimate (all time over the jobs) at 300 jobs: 11x too high.
         assert!((3.0 + 0.3) / 300.0 > 10.0 * marginal);
-        // Job counts that barely vary cannot separate the parts.
+        // Job counts that barely vary cannot separate the parts: the average.
         let flat: std::collections::VecDeque<(f64, f64)> = (0..16).map(|i| (300.0 + f64::from(i), 3.3)).collect();
-        assert!(marginal_cost(&flat).is_none());
+        assert!((marginal_cost(&flat).unwrap() - 3.3 / 307.5).abs() < 1e-6);
+        // A fit steeper than the average (time growing faster than the job
+        // count, from work that merely coincides with big frames) is capped
+        // there, so it can never pin the budget to its floor.
+        let skewed: std::collections::VecDeque<(f64, f64)> =
+            [256.0, 256.0, 256.0, 256.0, 9000.0, 12000.0, 256.0, 256.0].iter().map(|&j| (j, if j > 1000.0 { j * 0.01 } else { 0.3 })).collect();
+        let marginal = marginal_cost(&skewed).unwrap();
+        let average = skewed.iter().map(|s| s.1).sum::<f64>() / skewed.iter().map(|s| s.0).sum::<f64>();
+        assert!(marginal <= average + 1e-12, "{marginal} > {average}");
     }
 }
