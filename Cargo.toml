@@ -79,8 +79,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 helio-core = { path = "crates/helio-core" }
 helio-mats = { path = "crates/helio-mats" }
 helio-bake-types = { path = "crates/helio-bake-types" }
-pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "8f98f83", features = ["gpu"] }
-pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "8f98f83" }
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "1981d7ccf5607ffe816d6f123f09934ec06ad7c2", features = ["gpu"] }
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "1981d7ccf5607ffe816d6f123f09934ec06ad7c2" }
 # Must stay pinned to the exact rev pulsar_scenedb's own Cargo.toml pins --
 # a different rev is a different SourceId and thus a second,
 # type-incompatible copy of this crate in the build (see helio-wasm's
@@ -88,7 +88,7 @@ pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", 
 # that needs the Reflectable derive should depend on this workspace entry,
 # never its own direct git pin -- same reasoning as pulsar_scenedb's fleet
 # of stale per-crate pins fixed in the same session.
-pulsar_reflection = { git = "https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection", rev = "1c64758" }
+pulsar_reflection = { git = "https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection", rev = "091eae569b4dce9de7def958e8a77ff620b07047" }
 helio-default-graphs = { path = "crates/helio-default-graphs"}
 wasm-bindgen = "0.2"
 helio-pass-tsr = { path = "crates/passes/3d/helio-pass-tsr" }
@@ -133,15 +133,3 @@ microfont = "3.7.8"
 tiny_http = "0.12"
 ratatui = "0.29"
 crossterm = "0.28"
-
-# SceneDB inspector + reflection: route `pulsar_scenedb` (and its derive, which
-# the passes depend on directly) through the pushed `main` rev carrying the
-# batched `cpu_ranges` protocol and the `#[derive(SceneStore)]` -> `Reflectable`
-# registration. Mirrors Pulsar-Native/Cargo.toml's
-# `[patch."https://github.com/Far-Beyond-Pulsar/SceneDB"]`. Remove once Helio's
-# own `pulsar_scenedb`/`pulsar_scenedb_derive` pins are bumped to this rev.
-# The patch VALUE uses the `//`-spelled URL: cargo refuses a patch that points
-# at the exact source the manifest pins (same URL, even at a different rev).
-[patch."https://github.com/Far-Beyond-Pulsar/SceneDB"]
-pulsar_scenedb = { git = "https://github.com//Far-Beyond-Pulsar/SceneDB", rev = "7b0414b2975e8e1eb2d6ea489b710a2c411630b3" }
-pulsar_scenedb_derive = { git = "https://github.com//Far-Beyond-Pulsar/SceneDB", rev = "7b0414b2975e8e1eb2d6ea489b710a2c411630b3" }

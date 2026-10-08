@@ -3920,7 +3920,7 @@ dependencies = [
 [[package]]
 name = "pulsar_reflection"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection?rev=1c64758#1c647587eb2adf7b04c8b29cad277099de455173"
+source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection?rev=091eae569b4dce9de7def958e8a77ff620b07047#091eae569b4dce9de7def958e8a77ff620b07047"
 dependencies = [
  "dashmap",
  "glam 0.33.5",
@@ -3934,12 +3934,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulsar_reflection_codegen"
+version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection?rev=091eae569b4dce9de7def958e8a77ff620b07047#091eae569b4dce9de7def958e8a77ff620b07047"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "pulsar_reflection_derive"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection?rev=1c64758#1c647587eb2adf7b04c8b29cad277099de455173"
+source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection?rev=091eae569b4dce9de7def958e8a77ff620b07047#091eae569b4dce9de7def958e8a77ff620b07047"
 dependencies = [
  "owo-colors",
  "proc-macro2",
+ "pulsar_reflection_codegen",
  "quote",
  "syn 2.0.119",
 ]
@@ -3947,7 +3958,7 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb"
 version = "0.1.0"
-source = "git+https://github.com//Far-Beyond-Pulsar/SceneDB?rev=7b0414b2975e8e1eb2d6ea489b710a2c411630b3#7b0414b2975e8e1eb2d6ea489b710a2c411630b3"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=1981d7ccf5607ffe816d6f123f09934ec06ad7c2#1981d7ccf5607ffe816d6f123f09934ec06ad7c2"
 dependencies = [
  "ahash",
  "profiling 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/Pulsar-Profiling?rev=12424a5f75166332f9f1d2741281f6fc4847b44d)",
@@ -3963,9 +3974,10 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb_derive"
 version = "0.1.0"
-source = "git+https://github.com//Far-Beyond-Pulsar/SceneDB?rev=7b0414b2975e8e1eb2d6ea489b710a2c411630b3#7b0414b2975e8e1eb2d6ea489b710a2c411630b3"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=1981d7ccf5607ffe816d6f123f09934ec06ad7c2#1981d7ccf5607ffe816d6f123f09934ec06ad7c2"
 dependencies = [
  "proc-macro2",
+ "pulsar_reflection_codegen",
  "quote",
  "syn 2.0.119",
 ]
