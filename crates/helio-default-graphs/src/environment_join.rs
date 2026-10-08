@@ -1,13 +1,14 @@
 //! The environment join: the frontend's authored fog volumes, post-process
-//! volumes and camera post-process baselines to the rows the volumetric
-//! fog and post-process passes read, on the GPU (Pulsar-Native#1035,
-//! Phase 4).
+//! volumes, camera post-process baselines and water volumes to the rows the
+//! volumetric fog, post-process and water passes read, on the GPU
+//! (Pulsar-Native#1035, Phase 4).
 //!
 //! The same contract as [`crate::scene_join`]: each component instance
 //! derives a source row in its own space (`helio_component`'s
 //! `environment_rows`), keyed by the instance entity. Each frame one of its
-//! inputs changed, the join copies every *placed* source row into the same
-//! row of its pass buffer:
+//! inputs changed, the join copies every *placed* source row into its pass
+//! buffer, at the same row, or packed into the leading rows for a pass that
+//! reads a fixed number of them:
 //!
 //! | Source key | Published as | Placed when |
 //! |---|---|---|
@@ -15,6 +16,7 @@
 //! | `local_fog` | `"local_fog_media"` | as above; bounds = the owner-oriented box's world AABB |
 //! | `post_process_volumes` | `"post_process_volumes"` | as above; bounds as above |
 //! | `camera_post_process` | `"camera_postprocess"` | attached, enabled, owner current (visibility does not apply) |
+//! | `water_volumes` | `"water_volumes"`, packed into [`MAX_WATER_VOLUMES`] rows | as for volumes; the surface height follows the owner's Y |
 //!
 //! Every other row is zero, which each pass treats as inert. A volume's
 //! bounds follow its owner's position, rotation and scale. The passes and
@@ -38,15 +40,23 @@ pub const LOCAL_FOG_SOURCE_ROW_BYTES: u64 = 24 * 4;
 pub const POST_PROCESS_VOLUME_SOURCE_ROW_BYTES: u64 = 160 * 4;
 /// `CameraPostProcessSourceRow`: the `CameraPostProcessComponent` pass row.
 pub const CAMERA_POST_PROCESS_SOURCE_ROW_BYTES: u64 = 152 * 4;
+/// `WaterVolumeSourceRow`: local size (`w`: surface height above the
+/// owner), then the water volume row after its bounds (56 words).
+pub const WATER_VOLUME_SOURCE_ROW_BYTES: u64 = 60 * 4;
+/// Rows the water passes read (`helio_pass_water_sim::MAX_SIM_VOLUMES`):
+/// placed water volumes beyond these are not drawn.
+pub const MAX_WATER_VOLUMES: u32 = helio_pass_water_sim::MAX_SIM_VOLUMES;
 
 pub const GLOBAL_FOG_KEY: BufferKey = BufferKey::of("global_fog_media");
 pub const LOCAL_FOG_KEY: BufferKey = BufferKey::of("local_fog_media");
 pub const POST_PROCESS_VOLUMES_KEY: BufferKey = BufferKey::of("post_process_volumes");
 pub const CAMERA_POST_PROCESS_KEY: BufferKey = BufferKey::of("camera_postprocess");
+pub const WATER_VOLUMES_KEY: BufferKey = BufferKey::of("water_volumes");
 
 const WORKGROUP: u32 = 64;
 const SPATIAL: u32 = 1;
 const GATE_HIDDEN: u32 = 2;
+const SURFACE: u32 = 4;
 
 /// Where the frontend's rows live.
 #[derive(Clone, Copy, Debug)]
@@ -59,6 +69,7 @@ pub struct EnvironmentJoinKeys {
     pub local_fog: BufferKey,
     pub post_process_volumes: BufferKey,
     pub camera_post_process: BufferKey,
+    pub water_volumes: BufferKey,
 }
 
 #[repr(C)]
@@ -68,6 +79,8 @@ struct Uniforms {
     source_words: u32,
     output_words: u32,
     flags: u32,
+    capacity: u32,
+    _pad: [u32; 3],
 }
 
 /// One source kind and the pass buffer it becomes.
@@ -77,6 +90,9 @@ struct Table {
     source_row_bytes: u64,
     output_row_bytes: u64,
     flags: u32,
+    /// Packed into this many leading rows (`cs_compact_rows`) instead of
+    /// keeping the source row index.
+    capacity: Option<u32>,
     uniforms: wgpu::Buffer,
     buffer: wgpu::Buffer,
     rows: u32,
@@ -93,21 +109,24 @@ impl Table {
         source_row_bytes: u64,
         output_row_bytes: u64,
         flags: u32,
+        capacity: Option<u32>,
     ) -> Self {
+        let rows = capacity.unwrap_or(1);
         Self {
             label,
             key,
             source_row_bytes,
             output_row_bytes,
             flags,
+            capacity,
             uniforms: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
                 size: std::mem::size_of::<Uniforms>() as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
-            buffer: allocate(device, label, output_row_bytes, 1),
-            rows: 1,
+            buffer: allocate(device, label, output_row_bytes, rows),
+            rows,
             epoch: 0,
             content_generation: 0,
             last_inputs: None,
@@ -139,8 +158,9 @@ fn allocate(device: &wgpu::Device, label: &str, row_bytes: u64, rows: u32) -> wg
 pub struct EnvironmentJoin {
     keys: EnvironmentJoinKeys,
     pipeline: wgpu::ComputePipeline,
+    compact: wgpu::ComputePipeline,
     empty: wgpu::Buffer,
-    tables: [Table; 4],
+    tables: [Table; 5],
     reported: Vec<BufferKey>,
 }
 
@@ -152,18 +172,21 @@ impl EnvironmentJoin {
             label: Some("Environment Join"),
             source: wgpu::ShaderSource::Wgsl(format!("{common}\n{source}").into()),
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Environment Join"),
-            layout: None,
-            module: &module,
-            entry_point: Some("cs_join_rows"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let pipeline = |entry_point| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Environment Join"),
+                layout: None,
+                module: &module,
+                entry_point: Some(entry_point),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
         let volume = SPATIAL | GATE_HIDDEN;
         Self {
             keys,
-            pipeline,
+            pipeline: pipeline("cs_join_rows"),
+            compact: pipeline("cs_compact_rows"),
             empty: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Environment Join Empty Input"),
                 size: 256,
@@ -178,6 +201,7 @@ impl EnvironmentJoin {
                     GLOBAL_FOG_SOURCE_ROW_BYTES,
                     16 * 4,
                     GATE_HIDDEN,
+                    None,
                 ),
                 Table::new(
                     device,
@@ -186,6 +210,7 @@ impl EnvironmentJoin {
                     LOCAL_FOG_SOURCE_ROW_BYTES,
                     28 * 4,
                     volume,
+                    None,
                 ),
                 Table::new(
                     device,
@@ -194,6 +219,7 @@ impl EnvironmentJoin {
                     POST_PROCESS_VOLUME_SOURCE_ROW_BYTES,
                     164 * 4,
                     volume,
+                    None,
                 ),
                 Table::new(
                     device,
@@ -202,6 +228,16 @@ impl EnvironmentJoin {
                     CAMERA_POST_PROCESS_SOURCE_ROW_BYTES,
                     152 * 4,
                     0,
+                    None,
+                ),
+                Table::new(
+                    device,
+                    "Environment Join Water Volumes",
+                    WATER_VOLUMES_KEY,
+                    WATER_VOLUME_SOURCE_ROW_BYTES,
+                    64 * 4,
+                    volume | SURFACE,
+                    Some(MAX_WATER_VOLUMES),
                 ),
             ],
             reported: Vec::new(),
@@ -278,21 +314,21 @@ impl SceneDerivation for EnvironmentJoin {
             keys.local_fog,
             keys.post_process_volumes,
             keys.camera_post_process,
+            keys.water_volumes,
         ];
-        let sources: Vec<Option<&BufferHandle>> = (0..4)
+        let sources: Vec<Option<&BufferHandle>> = (0..source_keys.len())
             .map(|i| {
                 let row_bytes = self.tables[i].source_row_bytes;
                 self.input(inputs, source_keys[i], row_bytes)
             })
             .collect();
-        let layout = self.pipeline.get_bind_group_layout(0);
         let mut recorded = false;
         for (table, source) in self.tables.iter_mut().zip(sources) {
             let rows = source.map_or(0, |s| {
                 (s.buffer.size() / table.source_row_bytes).min(u64::from(u32::MAX)) as u32
             });
             let mut grew = false;
-            if rows > table.rows {
+            if table.capacity.is_none() && rows > table.rows {
                 table.rows = rows.next_power_of_two();
                 table.buffer =
                     allocate(ctx.device, table.label, table.output_row_bytes, table.rows);
@@ -316,12 +352,24 @@ impl SceneDerivation for EnvironmentJoin {
                     &table.uniforms,
                     0,
                     bytemuck::bytes_of(&Uniforms {
-                        rows: rows.min(table.rows),
+                        rows: if table.capacity.is_some() {
+                            rows
+                        } else {
+                            rows.min(table.rows)
+                        },
                         source_words: (table.source_row_bytes / 4) as u32,
                         output_words: (table.output_row_bytes / 4) as u32,
                         flags: table.flags,
+                        capacity: table.capacity.unwrap_or(0),
+                        _pad: [0; 3],
                     }),
                 );
+                let (pipeline, workgroups) = match table.capacity {
+                    // One workgroup walks every row in order.
+                    Some(_) => (&self.compact, 1),
+                    None => (&self.pipeline, rows.div_ceil(WORKGROUP).max(1)),
+                };
+                let layout = pipeline.get_bind_group_layout(0);
                 let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some(table.label),
                     layout: &layout,
@@ -339,9 +387,9 @@ impl SceneDerivation for EnvironmentJoin {
                     label: Some(table.label),
                     timestamp_writes: None,
                 });
-                pass.set_pipeline(&self.pipeline);
+                pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, &bind_group, &[]);
-                pass.dispatch_workgroups(rows.div_ceil(WORKGROUP).max(1), 1, 1);
+                pass.dispatch_workgroups(workgroups, 1, 1);
             }
             table.content_generation += 1;
             recorded = true;

@@ -32,7 +32,7 @@ const SIM_SIZE: u32 = 256;
 const CAUSTICS_SIZE: u32 = 256;
 const MAX_DROPS_BUFFERED: usize = 16;
 pub(crate) const CASCADE_COUNT: usize = 3;
-pub(crate) const MAX_SIM_VOLUMES: u32 = 8;
+pub const MAX_SIM_VOLUMES: u32 = 8;
 /// Fixed capacity for the `"water_hitboxes"` SceneDB buffer, mirroring
 /// `MAX_SIM_VOLUMES` above: this pass always reads exactly this many rows
 /// (zeroed/absent hitboxes are inert -- a degenerate zero-extent AABB

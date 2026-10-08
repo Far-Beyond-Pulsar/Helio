@@ -1,5 +1,5 @@
-//! The rows fog volumes, post-process volumes and camera post-process
-//! settings cast, as the renderer's environment join reads them
+//! The rows fog volumes, post-process volumes, camera post-process
+//! settings and water volumes cast, as the renderer's environment join reads them
 //! (Pulsar-Native#1035, Phase 4).
 //!
 //! Each is a second GPU registration on its authored component: SceneDB
@@ -20,19 +20,21 @@
 //! | [`LocalFogSourceRow`] | 4 size + 20: medium, edge fade | `LocalFogVolumeComponent` (8 bounds + 20) |
 //! | [`PostProcessVolumeSourceRow`] | 4 size + 156: the row after its bounds | `helio_pass_postprocess::PostProcessVolumeComponent` (8 bounds + 156) |
 //! | [`CameraPostProcessSourceRow`] | 152: the row | `helio_pass_postprocess::CameraPostProcessComponent` (152) |
+//! | [`WaterVolumeSourceRow`] | 4 size + 56: the row after its bounds | `helio_pass_water_sim::WaterVolumeComponent` (8 bounds + 56), packed into its leading rows |
 
 use pulsar_scenedb::gpu::GpuMirrorHandle;
 use pulsar_scenedb_derive::SceneStore;
 
 use super::{
     CameraPostProcessComponent, GlobalFogComponent, LocalFogVolumeComponent,
-    PostProcessVolumeComponent,
+    PostProcessVolumeComponent, WaterVolumeComponent,
 };
 
 pub const GLOBAL_FOG_SOURCES_BUFFER: &str = "global_fog_sources";
 pub const LOCAL_FOG_SOURCES_BUFFER: &str = "local_fog_sources";
 pub const POST_PROCESS_VOLUME_SOURCES_BUFFER: &str = "post_process_volume_sources";
 pub const CAMERA_POST_PROCESS_SOURCES_BUFFER: &str = "camera_postprocess_sources";
+pub const WATER_VOLUME_SOURCES_BUFFER: &str = "water_volume_sources";
 
 /// A global fog medium (`GlobalFogComponent` pass row, bit for bit;
 /// `enabled` 0 when the authored component is disabled).
@@ -94,6 +96,49 @@ pub struct CameraPostProcessSourceRow {
     pub lens: [f32; 16],
     #[gpu]
     pub lens_ext: [f32; 16],
+}
+
+/// A water volume: its local size (`xyz`, full extent before the owner's
+/// scale; `w`, the surface height above the owner's position), then the
+/// water volume row after its bounds: waves (wave params, direction,
+/// colour, extinction), optics (reflection and refraction, caustics, fog,
+/// surface params), shading (shadow, sun direction, SSR, simulation
+/// dynamics), wind and a reserved vec4. A disabled component has a zero
+/// size, which the join skips.
+#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+#[gpu(layout = packed, buffer = "water_volume_sources")]
+pub struct WaterVolumeSourceRow {
+    #[gpu]
+    pub size: [f32; 4],
+    #[gpu]
+    pub waves: [f32; 16],
+    #[gpu]
+    pub optics: [f32; 16],
+    #[gpu]
+    pub shading: [f32; 16],
+    #[gpu]
+    pub wind: [f32; 4],
+    #[gpu]
+    pub reserved: [f32; 4],
+}
+
+impl WaterVolumeSourceRow {
+    pub fn of(water: &WaterVolumeComponent) -> Self {
+        if !water.enabled {
+            return bytemuck::Zeroable::zeroed();
+        }
+        let size = [
+            water.size[0],
+            water.size[1],
+            water.size[2],
+            water.surface_height_offset,
+        ];
+        let gpu = water.local_gpu();
+        // The pass row after its two bound vec4s.
+        let after_bounds = &bytemuck::bytes_of(&gpu)[32..];
+        read(&[bytemuck::bytes_of(&size), after_bounds].concat())
+    }
 }
 
 /// `bytes`, which must be exactly a `T`, as a `T`.
@@ -207,6 +252,12 @@ derived_row!(
     camera_post_process_dispatch,
     camera_post_process_clear
 );
+derived_row!(
+    WaterVolumeComponent,
+    WaterVolumeSourceRow,
+    water_volume_dispatch,
+    water_volume_clear
+);
 
 #[cfg(test)]
 mod tests {
@@ -218,6 +269,11 @@ mod tests {
         assert_eq!(std::mem::size_of::<LocalFogSourceRow>(), 24 * 4);
         assert_eq!(std::mem::size_of::<PostProcessVolumeSourceRow>(), 160 * 4);
         assert_eq!(std::mem::size_of::<CameraPostProcessSourceRow>(), 152 * 4);
+        assert_eq!(std::mem::size_of::<WaterVolumeSourceRow>(), 60 * 4);
+        assert_eq!(
+            std::mem::size_of::<helio_pass_water_sim::WaterVolumeComponent>(),
+            64 * 4
+        );
         assert_eq!(
             std::mem::size_of::<helio_pass_volumetric_fog::GlobalFogComponent>(),
             16 * 4
@@ -255,6 +311,23 @@ mod tests {
         volume.enabled = false;
         let row = PostProcessVolumeSourceRow::of(&volume);
         assert!(bytemuck::bytes_of(&row)[16..].iter().all(|byte| *byte == 0));
+
+        let mut water = WaterVolumeComponent::default();
+        water.enabled = false;
+        let row = WaterVolumeSourceRow::of(&water);
+        assert!(bytemuck::bytes_of(&row).iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn a_water_row_is_the_pass_row_after_its_bounds() {
+        let mut water = WaterVolumeComponent::default();
+        water.surface_height_offset = 2.5;
+        let row = WaterVolumeSourceRow::of(&water);
+        assert_eq!(
+            &bytemuck::bytes_of(&row)[16..],
+            &bytemuck::bytes_of(&water.local_gpu())[32..]
+        );
+        assert_eq!(row.size, [200.0, 60.0, 200.0, 2.5]);
     }
 
     #[test]

@@ -1,12 +1,14 @@
-//! SceneDB-backed portal authoring component.
+//! Portal authoring component.
+//!
+//! **Not rendered by this engine.** Helio's portal passes draw linked
+//! portal pairs: each portal names its peer, and a projection bridge turns
+//! the pairs into view and chain rows at reserved, dense entity slots. This
+//! component authors no peer, and the editor world cannot provide those
+//! slots, so it writes no scene rows and is reported unsupported
+//! (Pulsar-Native#1035, Phase 4).
 
 use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
-use pulsar_reflection::{
-    get_subsystem, ComponentRuntimeBehavior, ComponentRuntimeContext, LiveKeySet,
-    RuntimeComponentOwner,
-};
-
-use crate::subsystems::PendingWorldWrites;
+use pulsar_reflection::{ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
 
 pub const PORTAL_CLASS_NAME: &str = "PortalComponent";
 
@@ -40,59 +42,11 @@ impl ComponentRuntimeBehavior for PortalComponent {
     const CLASS_NAME: &'static str = PORTAL_CLASS_NAME;
 
     fn sync_component(
-        owner: &RuntimeComponentOwner,
+        _owner: &RuntimeComponentOwner,
         _component_index: usize,
-        component: &Self,
-        context: &mut dyn ComponentRuntimeContext,
+        _component: &Self,
+        _context: &mut dyn ComponentRuntimeContext,
     ) {
-        let Some(entity) = context
-            .subsystems_mut()
-            .get_mut::<pulsar_scenedb::Entity>()
-            .copied()
-        else {
-            return;
-        };
-        let key = format!("portal:{}:{}", component.portal_id, owner.scene_object_id);
-        let live = get_subsystem!(context, LiveKeySet);
-        if component.enabled {
-            live.insert(key);
-        }
-        let writes = get_subsystem!(context, PendingWorldWrites);
-        if !component.enabled {
-            writes.push(move |world| {
-                world.remove::<helio_pass_portal_cull::components::PortalViewComponent>(entity);
-                world.remove::<helio_pass_portal_cull::components::PortalChainComponent>(entity);
-            });
-            return;
-        }
-
-        let q = glam::Quat::from_euler(
-            glam::EulerRot::YXZ,
-            owner.rotation[1].to_radians(),
-            owner.rotation[0].to_radians(),
-            owner.rotation[2].to_radians(),
-        );
-        let forward = q * glam::Vec3::NEG_Z;
-        let pose = helio::portal_pose_facing(
-            glam::Vec3::from_array(owner.position),
-            glam::Vec3::from_array(owner.position) + forward,
-            q * glam::Vec3::Y,
-        );
-        let view = helio_pass_portal_cull::components::PortalViewComponent {
-            transform: pose.transform.to_cols_array(),
-            inverse_transform: pose.transform.inverse().to_cols_array(),
-            half_extent: [component.width * 0.5, component.height * 0.5],
-            // Coordinate-space projection is a separate transient scene service;
-            // zero is the identity/default space for a standalone authored side.
-            coordinate_space: 0,
-            _pad: 0,
-        };
-        let chain = helio_pass_portal_cull::components::PortalChainComponent {
-            portals: vec![entity.index()],
-        };
-        writes.push(move |world| {
-            world.insert(entity, view);
-            world.insert(entity, chain);
-        });
+        // Not rendered (see the module doc): nothing to sync.
     }
 }

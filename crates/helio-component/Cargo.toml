@@ -78,8 +78,6 @@ helio-pass-water-sim = { workspace = true }
 # component's scripting methods and generator picker.
 helio-pass-voxel-planet = { workspace = true }
 helio-pass-foliage-place = { workspace = true }
-helio-pass-portal-cull = { workspace = true }
-helio-pass-deferred-light = { workspace = true }
 thiserror.workspace = true
 wgpu.workspace = true
 gpui-ce.workspace = true
