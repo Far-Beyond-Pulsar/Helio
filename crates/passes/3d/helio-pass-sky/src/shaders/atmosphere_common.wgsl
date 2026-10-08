@@ -305,3 +305,19 @@ fn atmosphere_integrate(p: AtmosphereParams, sun: vec3<f32>, transmittance_lut: 
     }
     return out;
 }
+
+// View ray through `ndc` from the camera's rotation and perspective
+// projection alone, never its position: a camera far from the world's origin
+// (absolute frames on a planet) loses every bit of a direction rebuilt as
+// `inv_view_proj * ndc - position`. World space, scaled to one unit of view
+// depth (its length times `atmosphere_view_depth` is a distance).
+fn atmosphere_view_ray(view: mat4x4<f32>, proj: mat4x4<f32>, ndc: vec2<f32>) -> vec3<f32> {
+    let v = vec3<f32>((ndc.x + proj[2][0]) / proj[0][0], (ndc.y + proj[2][1]) / proj[1][1], -1.0);
+    let rotation = mat3x3<f32>(view[0].xyz, view[1].xyz, view[2].xyz);
+    return transpose(rotation) * v;
+}
+
+// View depth (distance along the view axis) of a depth-buffer value.
+fn atmosphere_view_depth(proj: mat4x4<f32>, depth: f32) -> f32 {
+    return proj[3][2] / (depth + proj[2][2]);
+}

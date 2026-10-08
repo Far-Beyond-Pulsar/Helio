@@ -212,9 +212,7 @@ fn aerial_kernel(@builtin(global_invocation_id) id: vec3<u32>) {
     if !atmosphere_active() || any(vec2<f32>(id.xy) >= vec2<f32>(AERIAL_SLICES)) { return; }
     let camera = cameras[0];
     let uv = (vec2<f32>(id.xy) + 0.5) / AERIAL_SLICES;
-    let ndc = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.5, 1.0);
-    let world = camera.inv_view_proj * ndc;
-    let d = normalize(world.xyz / world.w - camera.position_near.xyz);
+    let d = normalize(atmosphere_view_ray(camera.view, camera.proj, vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0)));
     let eye = frame.eye.xyz;
     let range = frame.sun_illuminance.w;
     // Geometry the volume is sampled for may lie below the analytic ground.

@@ -82,10 +82,8 @@ fn fs_composite(in: VertexOut) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(in.position.xy);
     let depth = textureLoad(depth_texture, pixel, 0);
     let ndc = vec2<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
-    // A point at mid depth gives the direction even when the far plane is
-    // at infinity (w = 0 there).
-    let mid = camera.inv_view_proj * vec4<f32>(ndc, 0.5, 1.0);
-    let d = normalize(mid.xyz / mid.w - camera.position_near.xyz);
+    let ray = atmosphere_view_ray(camera.view, camera.proj, ndc);
+    let d = normalize(ray);
     let sun = frame.sun_illuminance.rgb;
     let eye = frame.eye.xyz;
     let r = length(eye);
@@ -115,8 +113,7 @@ fn fs_composite(in: VertexOut) -> @location(0) vec4<f32> {
         }
         return vec4<f32>(radiance, 0.0);
     }
-    let point = camera.inv_view_proj * vec4<f32>(ndc, depth, 1.0);
-    let distance = length(point.xyz / point.w - camera.position_near.xyz) * 0.001;
+    let distance = length(ray) * atmosphere_view_depth(camera.proj, depth) * 0.001;
     if in_space {
         let air = march_from_space(eye, d, distance);
         return vec4<f32>(air.radiance * sun, dot(air.transmittance, vec3<f32>(1.0 / 3.0)));

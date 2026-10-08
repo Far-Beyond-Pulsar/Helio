@@ -263,6 +263,10 @@ pub struct AtmospherePass {
     aerial: wgpu::TextureView,
     rows: helio_core::SceneBufferLiveness,
     active: bool,
+    /// `HELIO_ATMOSPHERE_TRACE=1`: the resolved frame's head (planet, sun,
+    /// illuminance, eye) read back and printed each frame (diagnostics).
+    trace: Option<Vec<(u64, wgpu::Buffer)>>,
+    frame_index: u64,
 }
 
 impl AtmospherePass {
@@ -369,7 +373,7 @@ impl AtmospherePass {
         let frame = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Atmosphere frame"),
             size: ATMOSPHERE_FRAME_BYTES,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
@@ -413,6 +417,8 @@ impl AtmospherePass {
                 row.len() >= 112 && row[108..112].iter().any(|&b| b != 0)
             }),
             active: false,
+            trace: std::env::var_os("HELIO_ATMOSPHERE_TRACE").map(|_| Vec::new()),
+            frame_index: 0,
         }
     }
 
@@ -491,6 +497,32 @@ impl RenderPass for AtmospherePass {
             pass.set_pipeline(&kernel.pipeline);
             pass.set_bind_group(1, kernel.group.as_ref(), &[]);
             pass.dispatch_workgroups(kernel.groups[0], kernel.groups[1], kernel.groups[2]);
+        }
+        drop(pass);
+        self.frame_index += 1;
+        if let Some(trace) = &mut self.trace {
+            // Map last frame's copy (submitted by now), copy this frame's.
+            for (index, buffer) in trace.drain(..) {
+                let probe = buffer.clone();
+                buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                    if result.is_err() { return; }
+                    let bytes = probe.slice(..).get_mapped_range().unwrap().to_vec();
+                    let f: &[f32] = bytemuck::cast_slice(&bytes);
+                    eprintln!(
+                        "ATMOSPHERE_TRACE frame {index} planet {:?} sun {:?} illuminance {:?} eye {:?} r {:.3}",
+                        &f[0..4], &f[4..8], &f[8..12], &f[12..16],
+                        (f[12] * f[12] + f[13] * f[13] + f[14] * f[14]).sqrt(),
+                    );
+                });
+            }
+            let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Atmosphere trace"),
+                size: 64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(&self.frame, 0, &staging, 0, 64);
+            trace.push((self.frame_index, staging));
         }
         Ok(())
     }

@@ -95,6 +95,9 @@ struct FogGlobals {
     _pad2: f32,
     grid: vec3<u32>,
     enabled: u32,
+    // Media are authored in world space; samples are in the frame's
+    // coordinates (the world origin is the camera in camera-relative frames).
+    world_origin: vec4<f32>,
 }
 
 const LIGHT_DIRECTIONAL: u32 = 0u;
@@ -573,7 +576,8 @@ fn add_world_medium(accum: Medium, m: WorldMedium, p: vec3<f32>, shape: f32) -> 
     return result;
 }
 
-fn medium_at(p: vec3<f32>, view_depth: f32) -> Medium {
+fn medium_at(frame_p: vec3<f32>, view_depth: f32) -> Medium {
+    let p = frame_p + fog_globals.world_origin.xyz;
     var m: Medium;
     if fog.fog_enabled != 0u && view_depth >= fog.fog_start_distance {
         m.extinction = density_at(p, fog);
@@ -657,7 +661,8 @@ fn global_optical_depth(config: FogUniforms, p: vec3<f32>, dir: vec3<f32>, dista
     return tau;
 }
 
-fn medium_transmittance(p: vec3<f32>, dir: vec3<f32>, distance: f32) -> f32 {
+fn medium_transmittance(frame_p: vec3<f32>, dir: vec3<f32>, distance: f32) -> f32 {
+    let p = frame_p + fog_globals.world_origin.xyz;
     var tau = 0.0;
     if fog.fog_enabled != 0u { tau += global_optical_depth(fog, p, dir, distance); }
     for (var i = 0u; i < global_count(); i++) {
