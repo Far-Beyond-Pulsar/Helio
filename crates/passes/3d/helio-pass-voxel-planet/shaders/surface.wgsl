@@ -69,7 +69,7 @@ fn material_fleck_share(m: u32) -> f32 { return f32(frame.materials[min(m, MATER
 // `removed_air_neighbour`). Edited columns used to lose all natural
 // appearance: brown soil dashes and contour lines around every edit.
 fn natural_surface_hit(c: Column, k: i32, top: i32) -> bool {
-    if (c.info & INFO_TOPOLOGY) == 0u { return true; }
+    if (c.info & (INFO_TOPOLOGY | INFO_GENERATED)) == 0u { return true; }
     return k >= top - 1;
 }
 
@@ -80,11 +80,11 @@ fn natural_surface_hit(c: Column, k: i32, top: i32) -> bool {
 // down every gentle slope of a cave region.
 fn natural_material_at(edited: bool, c: Column, k: i32, top: i32) -> bool {
     return natural_material_filter_allowed(edited, c)
-        || (!edited && (c.info & INFO_TOPOLOGY) != 0u && natural_surface_hit(c, k, top));
+        || (!edited && (c.info & (INFO_TOPOLOGY | INFO_GENERATED)) != 0u && natural_surface_hit(c, k, top));
 }
 
 fn natural_material_filter_allowed(edited: bool, c: Column) -> bool {
-    return !edited && (c.info & INFO_TOPOLOGY) == 0u && column_tops_fit(c);
+    return !edited && (c.info & (INFO_TOPOLOGY | INFO_GENERATED)) == 0u && column_tops_fit(c);
 }
 
 
@@ -222,7 +222,7 @@ fn stored_height(face: u32, level: u32, ij: vec2<i32>, home: Column, home_ij: ve
         c = records[record];
         if !column_valid(c) { return vec2<i32>(0); }
     }
-    if !column_tops_fit(c) && !column_tops_down(c) { return vec2<i32>(0); }
+    if !column_tops_known(c) { return vec2<i32>(0); }
     let x = u32(ij.x & 7);
     let y = u32(ij.y & 7);
     let top = column_top(c, x, y);
@@ -328,7 +328,7 @@ fn slope_record(face: u32, level: u32, ci: i32, cj: i32) -> u32 {
     let record = find_column(column_key0(face, level, ci), bitcast<u32>(cj));
     if record == NONE { return NONE; }
     let m = records[record];
-    if !column_valid(m) || !(column_tops_fit(m) || column_tops_down(m)) { return NONE; }
+    if !column_valid(m) || !column_tops_known(m) { return NONE; }
     return record;
 }
 
@@ -406,7 +406,7 @@ fn relief_compatible(xy: vec2<u32>, center: Hit) -> bool {
             || ((candidate.info >> 2u) & 7u) != face { return false; }
         if abs(candidate.t - center.t) > max(1.0, center.t * 0.02) { return false; }
         let column = records[candidate.record];
-        if (column.info & INFO_TOPOLOGY) != 0u || !column_tops_fit(column) { return false; }
+        if (column.info & INFO_TOPOLOGY) != 0u || !column_tops_known(column) { return false; }
     }
     return true;
 }
@@ -617,7 +617,7 @@ fn removed_air_neighbour(h: Hit, c: Column, face: u32, level: u32, code: u32) ->
         if record == NONE { return false; }
         neighbour = records[record];
     }
-    if !column_valid(neighbour) || !column_tops_fit(neighbour) || (neighbour.info & INFO_TOPOLOGY) == 0u { return false; }
+    if !column_valid(neighbour) || !column_tops_known(neighbour) || (neighbour.info & INFO_TOPOLOGY) == 0u { return false; }
     let base_top = column_top(neighbour, u32(ij.x & 7), u32(ij.y & 7));
     if terrain_kind(base_top, h.k) == 0u { return false; }
     let centre = vec3<i32>(center_half(ij.x, level), center_half(ij.y, level), center_half(h.k, level));
@@ -665,9 +665,16 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     let y = u32(h.j & 7);
     let top = column_top(c, x, y);
     var material = 0u;
+    // A cell an Add brush built is authored geometry: its faces keep their
+    // actual normals at any distance (painted ground stays natural).
+    var built = false;
     if (c.info & INFO_EDIT_MATERIALS) != 0u {
-        material = edit_material(c.edits, level, vec3<i32>(center_half(h.i, level), center_half(h.j, level), center_half(h.k, level)),
-            domain_point(face, h.i, h.j, level));
+        let flags = latest_edit(c.edits, level, vec3<i32>(center_half(h.i, level), center_half(h.j, level), center_half(h.k, level)),
+            domain_point(face, h.i, h.j, level), OPS_MATERIAL);
+        if flags != NONE {
+            material = (flags >> 8u) & 255u;
+            built = ((flags >> 4u) & 3u) == 1u;
+        }
     }
     let edited = material != 0u;
     // A face a dig exposed (its air-side cell was removed) shows the cut.
@@ -726,7 +733,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         canonical_relief = cached_relief_normal(id.xy, h, canonical_up);
     }
     let canonical_w = canonical_relief.w * authored_relief_w * relief_face_w;
-    let material_relief = (c.info & INFO_RELIEF) != 0u && column_tops_fit(c);
+    let material_relief = (c.info & INFO_RELIEF) != 0u && column_tops_known(c);
     var material_fraction = 0u;
     if material_relief { material_fraction = column_relief_fraction(c, x, y); }
     let coarse_w = detail_filter_weight(size / pixel);
@@ -737,7 +744,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // Generated base tops do not describe edit walls, cave ceilings or floors.
     // Paint-only and ignored tiny lists keep their existing filtering.
     let normal_filter_w = select(coarse_w, base_filter_w * relief_face_w, far_relief());
-    let smooth_w = select(0.0, normal_filter_w, natural_surface_hit(c, h.k, top) && !exposed);
+    let smooth_w = select(0.0, normal_filter_w, natural_surface_hit(c, h.k, top) && !exposed && !built);
     // A grazing face can have subpixel area while its long edge is resolved.
     // Keep the resolved face normal. Pigment and corner occlusion can alias
     // along the compressed axis even while that face's long edge is resolved.
@@ -762,7 +769,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         let dj = column_top(c, x, y1) - column_top(c, x, y0);
         var gi = f32(di) / f32(x1 - x0);
         var gj = f32(dj) / f32(y1 - y0);
-        if level >= 1u && column_tops_fit(c) && (c.info & INFO_RELIEF) != 0u {
+        if level >= 1u && column_tops_known(c) && (c.info & INFO_RELIEF) != 0u {
             gi = f32(column_relief_delta_q16(c, vec2<u32>(x1, y), vec2<u32>(x0, y), di)) / (65536.0 * f32(x1 - x0));
             gj = f32(column_relief_delta_q16(c, vec2<u32>(x, y1), vec2<u32>(x, y0), dj)) / (65536.0 * f32(y1 - y0));
         }
@@ -1024,7 +1031,7 @@ struct SunSample {
 // to the resident surface, including its authored relief remainder, rather
 // than adding whole cells and overshooting the surface by that fraction.
 fn filtered_shadow_lift(c: Column, h: Hit, r: Ray) -> f32 {
-    if !column_tops_fit(c) && !column_tops_down(c) { return 0.0; }
+    if !column_tops_known(c) { return 0.0; }
     if !natural_surface_hit(c, h.k, column_top(c, u32(h.i & 7), u32(h.j & 7))) { return 0.0; }
     let level = (h.info >> 5u) & 31u;
     var fraction = 0u;
@@ -1189,13 +1196,17 @@ fn sunlight(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
 // Sky visibility: the share of the sky dome a terrain point sees past the
 // terrain around it, as ambient occlusion at terrain scale (valleys, cliff
 // feet, overhangs, caves). The corner term in `shade` covers single cells;
-// screen-space AO skips terrain. It is the sky's visibility, not the face's:
-// rays are fixed and cosine-weighted around the local vertical, and the
-// sky's irradiance already gives each face its share of the dome by its
-// normal. So it varies smoothly over the terrain, and a block's estimate
-// serves every pixel near it whatever its face. Rays reach SKY_RANGE_CELLS
-// cells of the hit's level: occlusion keeps its size in cells, a coarse
-// level standing for a wider neighbourhood.
+// screen-space AO skips terrain. Rays are fixed and cosine-weighted around
+// the local vertical, counting only those that leave the face (the sky's
+// irradiance already gives each face its share of the dome by its normal:
+// a wall in the open is not occluded by the rock behind it). So it varies
+// smoothly over the terrain, and a block's estimate serves every pixel near
+// it. A face turned down (ceilings, overhang undersides) sees no dome, but
+// the ground under it, which that irradiance holds: what decides its light
+// is whether the space under it is enclosed, so its rays run all around,
+// just below level (cave walls stop them, an overhang lets them out). Rays reach
+// SKY_RANGE_CELLS cells of the hit's level: occlusion keeps its size in
+// cells, a coarse level standing for a wider neighbourhood.
 const SKY_RAYS: u32 = 6u;
 const SKY_RANGE_CELLS: f32 = 48.0;
 
@@ -1210,18 +1221,24 @@ fn sky_visibility(s: SunSample) -> f32 {
     let range = SKY_RANGE_CELLS * cell;
     var up = frame.eye.xyz;
     if !is_plane() { up = normalize(frame.eye.xyz + s.position / frame.eye.w); }
+    let ceiling = dot(s.normal, up) < -0.25;
     let t1 = normalize(select(cross(up, vec3<f32>(0.0, 0.0, 1.0)), cross(up, vec3<f32>(1.0, 0.0, 0.0)), abs(up.z) > 0.9));
     let t2 = cross(up, t1);
     // A filtered cell stands for a slope of small steps: its own steps do
     // not occlude it (as for sunlight).
     let skip = s.filtered * 2.0 * cell;
-    let origin = s.position + (s.normal + up) * eps;
+    let origin = s.position + s.normal * eps;
     var open = 0.0;
+    var total = 0.0;
     for (var i = 0u; i < SKY_RAYS; i++) {
         let u = (f32(i) + 0.5) / f32(SKY_RAYS);
         let phi = f32(i) * 2.39996323;
         let sin_t = sqrt(u);
-        let dir = normalize((t1 * cos(phi) + t2 * sin(phi)) * sin_t + up * sqrt(1.0 - u));
+        let around = t1 * cos(phi) + t2 * sin(phi);
+        var dir = normalize(around * sin_t + up * sqrt(1.0 - u));
+        if ceiling { dir = normalize(around - up * 0.02); }
+        else if dot(dir, s.normal) <= 0.0 { continue; }
+        total += 1.0;
         let hit = trace(make_ray(origin, dir), skip, range, offset, 1.0, 0.0);
         if (hit.info & 3u) == ST_MISS {
             open += 1.0;
@@ -1230,7 +1247,7 @@ fn sky_visibility(s: SunSample) -> f32 {
             open += smoothstep(0.5, 1.0, hit.t / range);
         }
     }
-    return open / f32(SKY_RAYS);
+    return select(1.0, open / total, total > 0.0);
 }
 
 // Squared distance from terrain sample `q` to representative `slot`'s

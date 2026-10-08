@@ -741,9 +741,15 @@ pub struct VoxelCaves {
     /// Rough share of the cave volume opened as caverns.
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Caverns (share)")]
     pub cavern_share: f64,
-    /// Rock kept above caverns (tunnels may open into hillsides).
-    #[property(min = 0.0, max = 100.0, step = 0.5, category = "Caves", label = "Cavern cover (m)")]
+    /// Rock kept over every cave: tunnels and caverns close towards it
+    /// instead of breaking the surface, except at entrances.
+    #[property(min = 0.0, max = 100.0, step = 0.5, category = "Caves", label = "Cover (m)")]
     pub cover_m: f64,
+    /// Rough share of a cave region where tunnels open to the surface.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Entrances (share)")]
+    pub entrance_share: f64,
+    #[property(min = 4.0, max = 2000.0, step = 1.0, category = "Caves", label = "Entrance spacing (m)")]
+    pub entrance_spacing_m: f64,
 }
 
 impl Default for VoxelCaves {
@@ -757,7 +763,9 @@ impl Default for VoxelCaves {
             tunnel_wavelength_m: 160.0,
             cavern_wavelength_m: 160.0,
             cavern_share: 0.04,
-            cover_m: 4.0,
+            cover_m: 6.0,
+            entrance_share: 0.05,
+            entrance_spacing_m: 80.0,
         }
     }
 }

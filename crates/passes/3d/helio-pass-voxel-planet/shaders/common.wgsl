@@ -103,6 +103,12 @@ const INFO_CLIP_ABOVE: u32 = 0x400u;
 // The column's edit list holds Add or Paint brushes: shading looks up brush
 // materials only in such columns.
 const INFO_EDIT_MATERIALS: u32 = 0x800u;
+// Generated volume (caves, overhangs): arbitrary occupancy, and per-cell
+// tops that count down from the band top (the generated top: first air
+// above the highest generated solid cell), so a band of any height keeps
+// them. Its untouched surface is natural terrain; only INFO_TOPOLOGY (edit
+// cuts) marks a cut.
+const INFO_GENERATED: u32 = 0x1000u;
 const UNIT_WORDS: u32 = 16u;
 const MAX_PROBES: u32 = 64u;
 
@@ -225,25 +231,24 @@ fn brick_bit(unit: u32, x: u32, y: u32, z: u32) -> bool {
     return ((pool[unit * UNIT_WORDS + (bit >> 5u)] >> (bit & 31u)) & 1u) != 0u;
 }
 
-// With INFO_TOPOLOGY (generated volume, or edits, which never carry relief): per-cell tops count down
-// from the band top. Generated volumetric columns store their generated
-// top (first air above the highest generated solid cell, caves and
-// overhangs included) there; their bands are taller than a byte.
-const INFO_TOPS_DOWN: u32 = 0x04000000u;
-
 fn column_tops_down(c: Column) -> bool {
-    return (c.info & (INFO_TOPOLOGY | INFO_TOPS_DOWN)) == (INFO_TOPOLOGY | INFO_TOPS_DOWN);
+    return (c.info & INFO_GENERATED) != 0u;
+}
+
+// Whether the column's per-cell tops describe its surface: they fit the
+// byte above the band base, or count down from the band top.
+fn column_tops_known(c: Column) -> bool {
+    return column_tops_fit(c) || column_tops_down(c);
 }
 
 // Relief fractions in two units after the header: every relief column but
-// an inline one. (A relief column with INFO_TOPOLOGY is generated volume
-// with tops counting down, whose INFO_TOPS_DOWN is the inline bit.)
+// an inline one.
 fn info_relief_wide(info: u32) -> bool {
-    return (info & INFO_RELIEF) != 0u && ((info & INFO_RELIEF_INLINE) == 0u || (info & INFO_TOPOLOGY) != 0u);
+    return (info & INFO_RELIEF) != 0u && (info & INFO_RELIEF_INLINE) == 0u;
 }
 
 fn column_relief_inline(c: Column) -> bool {
-    return (c.info & INFO_RELIEF) != 0u && (c.info & INFO_RELIEF_INLINE) != 0u && (c.info & INFO_TOPOLOGY) == 0u;
+    return (c.info & INFO_RELIEF) != 0u && (c.info & INFO_RELIEF_INLINE) != 0u;
 }
 
 // Column-local surface top (first air layer above ground, level cells).
@@ -264,7 +269,7 @@ fn column_top(c: Column, x: u32, y: u32) -> i32 {
 // Zero denotes a top exactly on the upper coarse-cell boundary. Other
 // fractions reconstruct the authored base-layer top inside the last voxel.
 fn column_relief_fraction(c: Column, x: u32, y: u32) -> u32 {
-    if (c.info & INFO_RELIEF) == 0u || !(column_tops_fit(c) || column_tops_down(c)) { return 0u; }
+    if (c.info & INFO_RELIEF) == 0u || !column_tops_known(c) { return 0u; }
     let cell = x + y * 8u;
     if column_relief_inline(c) {
         let level = c.key0 >> 27u;

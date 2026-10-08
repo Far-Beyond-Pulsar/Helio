@@ -686,6 +686,9 @@ fn distant_add_remove_cut_faces_keep_native_normals() {
                     lod_pixels: if op == BrushOp::Remove { 0.5 } else { 0.125 },
                     lod_dither: 0.0,
                     horizon: false,
+                    // Cut faces and their corner AO; sky visibility (deep
+                    // pits are occluded) has its own test.
+                    sky_occlusion: false,
                     frame_override: Some(37),
                     ..Default::default()
                 },
@@ -809,7 +812,7 @@ fn distant_add_remove_cut_faces_keep_native_normals() {
                 let actual = unpack_normal(u32::from_le_bytes(s[8..12].try_into().unwrap()));
                 let error = actual.dot(expected).clamp(-1.0, 1.0).acos();
                 assert!(error<0.001,"{op:?} {size}m cut normal pixel{index}: actual{actual:?} expected{expected:?} error{error}");
-                assert_eq!(s[7], 255, "subpixel authored cells exposed coarse AO grid");
+                assert_eq!(s[7], 255, "subpixel authored cells exposed coarse AO grid: {op:?} {size}m {h:?}");
                 assert_eq!(
                     (flags >> 21) & 7,
                     0,

@@ -19,8 +19,9 @@ struct TerrainConstants {
     rules: array<MaterialRule, 16>,
     ridge_suffix: array<vec4<i32>, 66>, // signed conditional suffix means
     // Caves and overhangs (`LandformVolume`): flags/region/depth, tunnel
-    // and cavern shapes, overhangs, sizes (tunnel radius, cavern, cover, layer mm).
-    volume: array<vec4<i32>, 4>,
+    // and cavern shapes, overhangs, sizes (tunnel radius, cavern, cover, layer
+    // mm), entrances (shift, threshold, tunnel and cavern tapers mm).
+    volume: array<vec4<i32>, 5>,
 }
 
 // Octave kinds (`landform::CONTINENT` ...).
@@ -46,6 +47,20 @@ const SEED_TUNNEL_B: u32 = 0x2B1F4C7Au;
 const SEED_CAVERN: u32 = 0x9E3779B1u;
 const SEED_OVERHANG: u32 = 0x7F4A7C15u;
 const SEED_OVERHANG_REGION: u32 = 0x4CF5AD43u;
+const SEED_CAVE_ENTRANCE: u32 = 0x1B873593u;
+
+// `x / span` in Q16 for `x` clamped to `[0, span]` (`landform::ramp_q16`).
+fn landform_ramp(x: i32, span: i32) -> i32 {
+    if span <= 0 { return select(0, NOISE_ONE, x >= 0); }
+    let xc = clamp(x, 0, span);
+    let s = u32(max(i32(firstLeadingBit(u32(span))) + 1 - 15, 0));
+    return ((xc >> s) << 16u) / max(span >> s, 1);
+}
+
+// A noise's ramp from 0 at `threshold` to one unit a quarter unit above it.
+fn landform_noise_ramp(n: i32, threshold: i32) -> i32 {
+    return clamp((n - threshold) * 4, 0, NOISE_ONE);
+}
 
 fn landform_seed() -> u32 { return bitcast<u32>(terrain.header.w); }
 
@@ -116,25 +131,34 @@ fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32
         f = s - d;
     }
     if caves.x || caves.y {
-        let region = noise(p, u32(v[0].y), landform_seed() ^ SEED_CAVE_REGION);
         let depth = -d;
-        let outside = max(max(landform_noise_mm(v[0].z - region, v[0].y), d), depth - v[0].w);
+        // Caves fade in over a region's edge and close towards the rock cover
+        // and the cave depth; at an entrance tunnels open to the surface.
+        let region = landform_noise_ramp(noise(p, u32(v[0].y), landform_seed() ^ SEED_CAVE_REGION), v[0].z);
+        let entrance = landform_noise_ramp(noise(p, u32(v[4].x), landform_seed() ^ SEED_CAVE_ENTRANCE), v[4].y);
+        let cover = v[3].z;
         var walls = 0x7fffffff;
         var carved = false;
         if caves.x {
-            let w = v[1].y;
+            let taper = v[4].z;
+            let open = min(min(max(landform_ramp(depth - cover, taper), entrance), region), landform_ramp(v[0].w - depth, taper));
+            let w = scale_q16(open, v[1].y);
             let na = abs(noise(q, u32(v[1].x), landform_seed() ^ SEED_TUNNEL_A));
             let nb = abs(noise(q, u32(v[1].x), landform_seed() ^ SEED_TUNNEL_B));
             walls = min(walls, landform_noise_mm(max(na, nb) - w, v[1].x));
             carved = carved || (na < w && nb < w);
         }
         if caves.y {
+            let taper = v[4].w;
+            let open = min(min(region, landform_ramp(depth - cover, taper)), landform_ramp(v[0].w - depth, taper));
+            // The threshold rises to the noise's top as the cavern closes.
+            let threshold = v[1].w + scale_q16(NOISE_ONE - open, NOISE_ONE - v[1].w);
             let n = noise(q, u32(v[1].z), landform_seed() ^ SEED_CAVERN);
-            walls = min(walls, max(landform_noise_mm(v[1].w - n, v[1].z), v[3].z - depth));
-            carved = carved || (depth >= v[3].z && n > v[1].w);
+            walls = min(walls, landform_noise_mm(threshold - n, v[1].z));
+            carved = carved || n > threshold;
         }
-        f = min(f, max(outside, walls));
-        if solid && k < top && region > v[0].z && depth <= v[0].w && carved { solid = false; }
+        f = min(f, walls);
+        if solid && carved { solid = false; }
     }
     let density = clamp(f, -(1 << 22u), 1 << 22u) * 256 / max(cell, 1);
     if solid { return max(density, 1); }

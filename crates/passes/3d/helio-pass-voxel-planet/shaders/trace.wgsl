@@ -371,7 +371,7 @@ fn relief_enter(r: Ray, height: f32, t: f32) -> f32 {
 
 fn level_contains_solid(c: Cursor, record: u32, r: Ray, t: f32) -> bool {
     let col = records[record];
-    if (col.info & INFO_RELIEF) != 0u && column_tops_fit(col) {
+    if (col.info & INFO_RELIEF) != 0u && column_tops_known(col) {
         let fraction = column_relief_fraction(col, u32(c.i & 7), u32(c.j & 7));
         // The relief surface cuts the top cell; below it, occupancy (caves).
         if fraction != 0u && c.k >= column_top(col, u32(c.i & 7), u32(c.j & 7)) - 1 {
@@ -574,7 +574,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
             }
         } else {
             var fraction = 0u;
-            if (col.info & INFO_RELIEF) != 0u && column_tops_fit(col) {
+            if (col.info & INFO_RELIEF) != 0u && column_tops_known(col) {
                 fraction = column_relief_fraction(col, u32(cur.i & 7), u32(cur.j & 7));
             }
             // A zero remainder has the same occupied layers as the original
@@ -660,7 +660,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                     // The zero-fraction shortcut applies to one angular cell,
                     // not its whole column. Reclassify a partial neighbor
                     // before interpreting its enclosing ceil voxel as solid.
-                    if angular_crossing && (col.info & INFO_RELIEF) != 0u && column_tops_fit(col)
+                    if angular_crossing && (col.info & INFO_RELIEF) != 0u && column_tops_known(col)
                         && column_relief_fraction(col, u32(cur.i & 7), u32(cur.j & 7)) != 0u { break; }
                 }
                 continue;

@@ -557,8 +557,14 @@ impl Residency {
                     continue;
                 }
                 let col = i64::from(BRICK) << level;
-                let (i0, i1) = ((ci - r_cells).div_euclid(col), (ci + r_cells).div_euclid(col));
-                let (j0, j1) = ((cj - r_cells).div_euclid(col), (cj + r_cells).div_euclid(col));
+                // A brush reaching past its face's edge (a planet-scale ball
+                // is resolved on every face) touches only that face's columns.
+                let last = i64::from(self.grid.cells()) / col - 1;
+                let (i0, i1) = ((ci - r_cells).div_euclid(col).max(0), (ci + r_cells).div_euclid(col).min(last));
+                let (j0, j1) = ((cj - r_cells).div_euclid(col).max(0), (cj + r_cells).div_euclid(col).min(last));
+                if i0 > i1 || j0 > j1 {
+                    continue;
+                }
                 if (i1 - i0 + 1) * (j1 - j0 + 1) > 1 << 16 {
                     scans.push((fb.face(), level, i0, i1, j0, j1));
                     continue;

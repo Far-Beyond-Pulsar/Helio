@@ -223,9 +223,9 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
             4,
         ];
         let program = field.program();
-        // Stack constants, ridge suffix (1056), volume (64).
+        // Stack constants, ridge suffix (1056), volume.
         let stack_bytes = std::mem::size_of::<LandformConstants>();
-        assert_eq!(program.constants.len(), stack_bytes + 1056 + 64);
+        assert_eq!(program.constants.len(), stack_bytes + 1056 + std::mem::size_of::<helio_pass_voxel_planet::landform::LandformVolume>());
         let lo = i32::from_le_bytes(
             program.constants[stack_bytes + 31 * 4..stack_bytes + 32 * 4]
                 .try_into()

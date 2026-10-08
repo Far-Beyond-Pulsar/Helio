@@ -265,8 +265,13 @@ pub struct Caves {
     /// Cavern size and the rough share of the cave volume they open.
     pub cavern_wavelength_m: f64,
     pub cavern_share: f64,
-    /// Rock kept above caverns (tunnels may open into hillsides).
+    /// Rock kept over every cave: tunnels and caverns close towards it
+    /// instead of breaking the surface, except at entrances.
     pub cover_m: f64,
+    /// Rough share of a cave region where tunnels open to the surface, in
+    /// zones about `entrance_spacing_m` across.
+    pub entrance_share: f64,
+    pub entrance_spacing_m: f64,
 }
 
 impl Default for Caves {
@@ -280,7 +285,9 @@ impl Default for Caves {
             tunnel_wavelength_m: 160.0,
             cavern_wavelength_m: 160.0,
             cavern_share: 0.04,
-            cover_m: 4.0,
+            cover_m: 6.0,
+            entrance_share: 0.05,
+            entrance_spacing_m: 80.0,
         }
     }
 }
@@ -500,11 +507,11 @@ impl TerrainLayers {
         }
         let c = &self.caves;
         let o = &self.overhangs;
-        let volume = [c.depth_m, c.share, c.region_km, c.tunnel_radius_m, c.tunnel_wavelength_m, c.cavern_wavelength_m, c.cavern_share, c.cover_m, o.height_m, o.wavelength_m, o.region_km, o.share];
+        let volume = [c.depth_m, c.share, c.region_km, c.tunnel_radius_m, c.tunnel_wavelength_m, c.cavern_wavelength_m, c.cavern_share, c.cover_m, c.entrance_share, c.entrance_spacing_m, o.height_m, o.wavelength_m, o.region_km, o.share];
         if volume.iter().any(|v| !v.is_finite() || *v < 0.0) {
             return Err("cave and overhang settings must be finite and non-negative".into());
         }
-        if c.region_km <= 0.0 || c.tunnel_wavelength_m <= 0.0 || c.cavern_wavelength_m <= 0.0 || o.wavelength_m <= 0.0 || o.region_km <= 0.0 {
+        if c.region_km <= 0.0 || c.tunnel_wavelength_m <= 0.0 || c.cavern_wavelength_m <= 0.0 || c.entrance_spacing_m <= 0.0 || o.wavelength_m <= 0.0 || o.region_km <= 0.0 {
             return Err("cave and overhang wavelengths must be positive".into());
         }
         if !self.snowline_m.is_finite() || !self.soil_depth_m.is_finite() || self.soil_depth_m < 0.0 {

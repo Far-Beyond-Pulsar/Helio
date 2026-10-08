@@ -35,6 +35,9 @@ pub struct LandformVolume {
     pub overhangs: [i32; 4],
     /// tunnel radius (mm), cavern size (mm), cover (mm), layer (mm).
     pub sizes: [i32; 4],
+    /// entrance shift, entrance threshold (Q16), tunnel taper (mm), cavern
+    /// taper (mm).
+    pub entrances: [i32; 4],
 }
 
 /// Quantile of [`noise`] (in units of [`ONE`]), from 400k samples: symmetric,
@@ -59,6 +62,23 @@ const SEED_TUNNEL_B: u32 = 0x2B1F_4C7A;
 const SEED_CAVERN: u32 = 0x9E37_79B1;
 const SEED_OVERHANG: u32 = 0x7F4A_7C15;
 const SEED_OVERHANG_REGION: u32 = 0x4CF5_AD43;
+const SEED_CAVE_ENTRANCE: u32 = 0x1B87_3593;
+
+/// `x / span` in Q16 for `x` clamped to `[0, span]` (mm), exact to the bit
+/// on the GPU (`landform_ramp`): 32-bit, with `span` cut to 15 bits.
+pub(crate) fn ramp_q16(x: i32, span: i32) -> i32 {
+    if span <= 0 {
+        return if x >= 0 { ONE } else { 0 };
+    }
+    let x = x.clamp(0, span);
+    let s = (32 - span.leading_zeros() as i32 - 15).max(0) as u32;
+    ((x >> s) << 16) / (span >> s).max(1)
+}
+
+/// A noise's ramp from 0 at `threshold` to one unit a quarter unit above it.
+fn noise_ramp(n: i32, threshold: i32) -> i32 {
+    (n.wrapping_sub(threshold).wrapping_mul(4)).clamp(0, ONE)
+}
 
 impl LandformVolume {
     pub fn new(grid: &Grid, caves: &Caves, overhangs: &Overhangs) -> Self {
@@ -81,11 +101,14 @@ impl LandformVolume {
         // Tunnels are where two noises are both near zero; their radius is
         // about the half width over the noise slope (~2 per wavelength).
         let width = (2.0 * caves.tunnel_radius_m / caves.tunnel_wavelength_m.max(1e-3) * f64::from(ONE)).round() as i32;
+        // Tunnels narrow to nothing over two radii towards the cover and
+        // the cave depth, caverns over a quarter of their size.
         Self {
             caves: [flags, shift(caves.region_km * 1000.0), threshold(caves.share), depth],
             shapes: [shift(caves.tunnel_wavelength_m), width.clamp(0, ONE), shift(caves.cavern_wavelength_m), threshold(caves.cavern_share)],
             overhangs: [overhang, shift(overhangs.wavelength_m), shift(overhangs.region_km * 1000.0), threshold(overhangs.share)],
             sizes: [mm(caves.tunnel_radius_m), mm(caves.cavern_wavelength_m / 4.0), mm(caves.cover_m), layer],
+            entrances: [shift(caves.entrance_spacing_m), threshold(caves.entrance_share), mm(2.0 * caves.tunnel_radius_m), mm(caves.cavern_wavelength_m / 4.0)],
         }
     }
 
@@ -104,6 +127,15 @@ impl LandformVolume {
         let layer = self.sizes[3];
         let cavern = if self.sizes[2] > 0 { self.sizes[1].min(self.sizes[2]) } else { self.sizes[1] };
         ((self.sizes[0] >> level) >= layer, (cavern >> level) >= layer)
+    }
+
+    /// Q16 ramps of a column's cave region and cave entrance (see
+    /// [`Self::density`]).
+    pub(crate) fn cave_gates(&self, p: IVec3, seed: u32) -> (i32, i32) {
+        (
+            noise_ramp(noise(p, self.caves[1] as u32, self.seed(seed, SEED_CAVE_REGION)), self.caves[2]),
+            noise_ramp(noise(p, self.entrances[0] as u32, self.seed(seed, SEED_CAVE_ENTRANCE)), self.entrances[1]),
+        )
     }
 
     fn cave_region(&self, p: IVec3, seed: u32) -> bool {
@@ -175,28 +207,36 @@ impl LandformVolume {
         if tunnels || caverns {
             // mm per noise unit at lattice shift s: 2^s * 12.5 mm / 2^17.
             let mm = |excess: i32, shift: i32| mul_shr_signed(excess, 25 << shift, 18);
-            let region = noise(p, self.caves[1] as u32, self.seed(seed, SEED_CAVE_REGION));
             let depth = d.wrapping_neg();
-            // Solid outside the region, above the heightfield top, below the
-            // cave depth...
-            let outside = mm(self.caves[2] - region, self.caves[1]).max(d).max(depth - self.caves[3]);
-            // ...or outside both the tunnels and the caverns.
+            // Caves fade in over a region's edge, and close towards the rock
+            // cover and the cave depth instead of ending in walls; at an
+            // entrance the cover is gone and tunnels open to the surface.
+            let region = noise_ramp(noise(p, self.caves[1] as u32, self.seed(seed, SEED_CAVE_REGION)), self.caves[2]);
+            let entrance = noise_ramp(noise(p, self.entrances[0] as u32, self.seed(seed, SEED_CAVE_ENTRANCE)), self.entrances[1]);
+            let cover = self.sizes[2];
             let mut walls = i32::MAX;
             let mut carved = false;
             if tunnels {
-                let w = self.shapes[1];
+                let taper = self.entrances[2];
+                let open = ramp_q16(depth.wrapping_sub(cover), taper).max(entrance);
+                let open = open.min(region).min(ramp_q16(self.caves[3].wrapping_sub(depth), taper));
+                let w = scale(open, self.shapes[1]);
                 let na = noise(q, self.shapes[0] as u32, self.seed(seed, SEED_TUNNEL_A)).abs();
                 let nb = noise(q, self.shapes[0] as u32, self.seed(seed, SEED_TUNNEL_B)).abs();
                 walls = walls.min(mm(na.max(nb) - w, self.shapes[0]));
                 carved |= na < w && nb < w;
             }
             if caverns {
+                let taper = self.entrances[3];
+                let open = region.min(ramp_q16(depth.wrapping_sub(cover), taper)).min(ramp_q16(self.caves[3].wrapping_sub(depth), taper));
+                // The threshold rises to the noise's top as the cavern closes.
+                let threshold = self.shapes[3] + scale(ONE - open, ONE - self.shapes[3]);
                 let n = noise(q, self.shapes[2] as u32, self.seed(seed, SEED_CAVERN));
-                walls = walls.min(mm(self.shapes[3] - n, self.shapes[2]).max(self.sizes[2] - depth));
-                carved |= depth >= self.sizes[2] && n > self.shapes[3];
+                walls = walls.min(mm(threshold - n, self.shapes[2]));
+                carved |= n > threshold;
             }
-            f = f.min(outside.max(walls));
-            if solid && k < top && region > self.caves[2] && depth <= self.caves[3] && carved {
+            f = f.min(walls);
+            if solid && carved {
                 solid = false;
             }
         }
@@ -1274,6 +1314,123 @@ mod tests {
         }
         eprintln!("{volumetric}/1500 volumetric columns, {cave} cave and {overhang} overhang samples");
         assert!(volumetric > 100 && cave > 0 && overhang > 0);
+    }
+
+    /// Caves keep their rock cover: no cell within the cover of a column
+    /// is carved, except where the column lies in an entrance zone.
+    #[test]
+    fn caves_open_to_the_surface_only_at_entrances() {
+        let grid = Grid::new(6_371_000.0, 0.1).unwrap();
+        let mut layers = TerrainLayers::earth();
+        layers.overhangs.enabled = false;
+        let field = layers.field(&grid, 7).unwrap();
+        let cover_cells = (layers.caves.cover_m / 0.1).floor() as i32;
+        let mut rng = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = || {
+            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; rng
+        };
+        let (mut regions, mut entrances, mut openings) = (0, 0, 0);
+        while regions < 4000 {
+            let face = (next() % 6) as u8;
+            let (i, j) = ((next() % grid.cells() as u64) as i32, (next() % grid.cells() as u64) as i32);
+            let p = grid.domain_point(face, i, j, 0);
+            let (region, entrance) = field.volume().cave_gates(p, field.seed());
+            if region == 0 {
+                continue;
+            }
+            regions += 1;
+            entrances += usize::from(entrance > 0);
+            let height = field.height(p, grid.level_offset());
+            let top = top_cells(&grid, height, 0);
+            for k in top - cover_cells..top {
+                if generated_kind(&grid, &field, face, i, j, k, 0, height) == 0 {
+                    assert!(entrance > 0, "carved {} cells under the surface outside an entrance", top - k);
+                    openings += 1;
+                }
+            }
+        }
+        eprintln!("{entrances}/{regions} cave-region columns in entrance zones, {openings} cells opened under the surface");
+        assert!(entrances > 0 && entrances < regions / 4);
+    }
+
+    /// Caves leave no floating rock: around a tunnel in an entrance zone,
+    /// every solid cell of a block is connected to its sides or floor.
+    #[test]
+    fn caves_leave_no_floating_rock() {
+        let grid = Grid::new(6_371_000.0, 0.1).unwrap();
+        let mut layers = TerrainLayers::earth();
+        layers.overhangs.enabled = false;
+        let field = layers.field(&grid, 7).unwrap();
+        let mut rng = 0x7A4F_19D3_2C85_E601u64;
+        let mut next = || {
+            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; rng
+        };
+        // A column of an entrance zone with a tunnel near the surface.
+        let (face, ci, cj, top) = loop {
+            let face = (next() % 6) as u8;
+            let (i, j) = ((next() % grid.cells() as u64) as i32, (next() % grid.cells() as u64) as i32);
+            let p = grid.domain_point(face, i, j, 0);
+            let (region, entrance) = field.volume().cave_gates(p, field.seed());
+            if region < ONE / 2 || entrance < ONE / 2 {
+                continue;
+            }
+            let height = field.height(p, grid.level_offset());
+            let top = top_cells(&grid, height, 0);
+            if (top - 30..top).any(|k| generated_kind(&grid, &field, face, i, j, k, 0, height) == 0) {
+                break (face, i, j, top);
+            }
+        };
+        const N: i32 = 40;
+        const H: i32 = 60;
+        let (k0, k1) = (top - H, top + 20);
+        let size = (N * N * (k1 - k0)) as usize;
+        let index = |x: i32, y: i32, z: i32| ((z * N + y) * N + x) as usize;
+        let mut solid = vec![false; size];
+        let mut carved = 0;
+        for y in 0..N {
+            for x in 0..N {
+                let (i, j) = (ci - N / 2 + x, cj - N / 2 + y);
+                let height = field.height(grid.domain_point(face, i, j, 0), grid.level_offset());
+                let column_top = top_cells(&grid, height, 0);
+                for z in 0..k1 - k0 {
+                    let k = k0 + z;
+                    let kind = generated_kind(&grid, &field, face, i, j, k, 0, height);
+                    solid[index(x, y, z)] = kind == 1;
+                    carved += usize::from(kind == 0 && k < column_top);
+                }
+            }
+        }
+        // Flood the rock reached from the block's floor and sides.
+        let mut reached = vec![false; size];
+        let mut stack = Vec::new();
+        for z in 0..k1 - k0 {
+            for y in 0..N {
+                for x in 0..N {
+                    let edge = z == 0 || x == 0 || y == 0 || x == N - 1 || y == N - 1;
+                    if edge && solid[index(x, y, z)] {
+                        reached[index(x, y, z)] = true;
+                        stack.push((x, y, z));
+                    }
+                }
+            }
+        }
+        while let Some((x, y, z)) = stack.pop() {
+            for (dx, dy, dz) in [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
+                let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+                if nx < 0 || ny < 0 || nz < 0 || nx >= N || ny >= N || nz >= k1 - k0 {
+                    continue;
+                }
+                let n = index(nx, ny, nz);
+                if solid[n] && !reached[n] {
+                    reached[n] = true;
+                    stack.push((nx, ny, nz));
+                }
+            }
+        }
+        let floating = solid.iter().zip(&reached).filter(|(s, r)| **s && !**r).count();
+        eprintln!("{carved} carved cells, {floating} floating");
+        assert!(carved > 100);
+        assert_eq!(floating, 0, "rock disconnected from the ground");
     }
 
     /// Densities are signed distances: positive exactly in solid cells,

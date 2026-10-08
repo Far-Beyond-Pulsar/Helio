@@ -431,9 +431,9 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         out.status = 0u;
         out.pad = select(0u, INFO_RELIEF, relief) | select(0u, INFO_RELIEF_INLINE, inline_relief)
             | select(0u, INFO_HEIGHTFIELD, heightfield) | topology_flags
-            // Generated caves and overhangs are not described by column tops
-            // (slopes, relief normals, heightfield storage): like edit cuts.
-            | select(0u, INFO_TOPOLOGY | INFO_TOPS_DOWN, volumetric) | clip
+            // Generated caves and overhangs: arbitrary occupancy under a
+            // natural surface, tops counting down from the band top.
+            | select(0u, INFO_GENERATED, volumetric) | clip
             | select(0u, INFO_EDIT_MATERIALS, (volume_bits & VOLUME_MATERIALS) != 0u);
         out.top = hi_cell;
         out.centre = centre;
@@ -675,7 +675,7 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         c.key1 = job.key1;
         c.k_lo = o.k_lo;
         c.info = o.n_band | (o.size_class << 18u) | (gap << 22u) | select(0u, INFO_EXT, ext)
-            | (o.pad & (INFO_RELIEF | INFO_RELIEF_INLINE | INFO_HEIGHTFIELD | INFO_TOPOLOGY | INFO_CLIP_BELOW | INFO_CLIP_ABOVE
+            | (o.pad & (INFO_RELIEF | INFO_RELIEF_INLINE | INFO_HEIGHTFIELD | INFO_TOPOLOGY | INFO_GENERATED | INFO_CLIP_BELOW | INFO_CLIP_ABOVE
                 | INFO_EDIT_MATERIALS)) | INFO_VALID;
         c.run = o.run;
         c.mixed = o.mixed[0];

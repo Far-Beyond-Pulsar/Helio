@@ -656,9 +656,9 @@ fn published_tops_bound_occupancy() {
         // Wide fractional tops occupy two units after the column header;
         // inline tops retain their authored-cell offset in each packed byte.
         let relief = info & 0x1000_0000 != 0;
-        // Bit 26 is the inline flag, or with INFO_TOPOLOGY (bit 27) tops
-        // counting down (generated volume, whose relief is wide).
-        let inline = info & 0x0c00_0000 == 0x0400_0000;
+        // Bit 26: inline fractional tops (generated volume, bit 12, is
+        // always wide).
+        let inline = info & 0x0400_0000 != 0;
         let heightfield = info & 0x0200_0000 != 0;
         let header = (if ext { 2 } else { 1 }) + (if relief && !inline { 2 } else { 0 }) + surface_units;
         if relief {
@@ -685,7 +685,7 @@ fn published_tops_bound_occupancy() {
         } else {
             // Generated volumetric columns publish their generated tops
             // (material depth) counting down from the band top.
-            if info & 0x0c00_0000 == 0x0c00_0000 {
+            if info & 0x1000 != 0 {
                 volumetric += 1;
                 let (level, face) = (c[0] >> 27, ((c[0] >> 24) & 7) as u8);
                 let (ci, cj) = ((c[0] & 0xff_ffff) as i32, c[1] as i32);

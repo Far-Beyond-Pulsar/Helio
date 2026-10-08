@@ -25,6 +25,7 @@ fn grazing_soil_lip_filters_radial_coverage_and_preserves_protected_faces() {
         struct Hit {{t:f32}}
         struct Probe {{lip_width:vec4<f32>, ray_flags:vec4<f32>, appearance:vec4<f32>}}
         const INFO_TOPOLOGY:u32=1u;
+        const INFO_GENERATED:u32=2u;
         @group(0) @binding(0) var<storage,read> probes:array<Probe>;
         @group(0) @binding(1) var<storage,read_write> answers:array<vec4<f32>>;
         fn column_tops_fit(c:Column)->bool {{return c.fit!=0u;}}

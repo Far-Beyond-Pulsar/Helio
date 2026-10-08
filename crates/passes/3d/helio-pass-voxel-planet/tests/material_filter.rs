@@ -103,7 +103,8 @@ fn unresolved_outcrop_preserves_canonical_ids_and_mean_palette() {
     );
     // Match the complete current TerrainConstants ABI, including the ridge LUT
     // and the volume terms (zero: no caves or overhangs).
-    const WORDS: usize = (std::mem::size_of::<helio_pass_voxel_planet::landform::LandformConstants>() + 66 * 16 + 64) / 4;
+    const WORDS: usize = (std::mem::size_of::<helio_pass_voxel_planet::landform::LandformConstants>() + 66 * 16
+        + std::mem::size_of::<helio_pass_voxel_planet::landform::LandformVolume>()) / 4;
     let mut constants = [0i32; WORDS];
     constants[1] = 100;
     constants[2] = 7;
@@ -378,6 +379,7 @@ fn stone_strata_box_matches_integrated_oracle_and_respects_surface_guards() {
     let shader = format!(r#"
 {band_helpers}
 const INFO_TOPOLOGY:u32=0x08000000u;
+const INFO_GENERATED:u32=0x1000u;
 const M_DIRT:u32=2u;
 const M_STONE:u32=3u;
 const M_DARK_STONE:u32=9u;
