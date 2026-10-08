@@ -1,4 +1,5 @@
 //!use pbr_eval
+//!use atmosphere
 
 //! Deferred lighting pass.
 //!
@@ -67,8 +68,6 @@ struct Globals {
     // Hemisphere ambient axis (xyz) and ground-bounce colour (rgb).
     ambient_up:        vec4<f32>,
     ambient_ground:    vec4<f32>,
-    atmosphere_eye_radius: vec4<f32>,
-    atmosphere_sun: vec4<f32>,
 }
 
 /// GpuLight (64 bytes, matches libhelio::GpuLight)
@@ -155,6 +154,13 @@ struct ShadowCasterCounts {
     _pad:                 u32,
 }
 @group(0) @binding(8) var<storage, read> shadow_caster_counts: ShadowCasterCounts;
+
+// The atmosphere resolved this frame (helio-pass-sky's AtmospherePass), or
+// a zeroed frame (planet.w = 0) without one. A uniform: the fragment stage
+// is at its storage-buffer limit. The sun reaches surfaces through the air
+// between them and space, and the sky lights them; the air between them and
+// the eye is the atmosphere composite's.
+@group(0) @binding(9) var<uniform> atmosphere: AtmosphereFrame;
 
 // min(dynamic, static) shadow comparison, skipping an atlas with no casters.
 fn compare_shadow_atlases(uv: vec2<f32>, layer: u32, depth_ref: f32) -> f32 {
@@ -806,7 +812,10 @@ fn pbr_direct_light(
 
     if light.light_type == 0u {  // Directional light
         L        = normalize(-light.direction_outer.xyz);
-        radiance = light.color_intensity.xyz * light.color_intensity.w;
+        // A distant light crosses the atmosphere, if any, to reach the point.
+        let through = atmosphere_transmittance_towards(
+            atmosphere, (world_pos - cameras[0].position_near.xyz) * 0.001, L);
+        radiance = light.color_intensity.xyz * light.color_intensity.w * through;
     } else {  // Point or spot light
         let to_light = light.position_range.xyz - world_pos;
         let dist     = length(to_light);
@@ -1314,10 +1323,17 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // When RC GI is active it replaces the hemisphere fallback with physically-
     // based global illumination.  When inactive the hemisphere ambient is used.
 
-    let sky_color      = globals.ambient_color.rgb * globals.ambient_intensity;
-    let ground_color   = globals.ambient_ground.rgb * globals.ambient_intensity;
-    let hemi_t         = dot(N, globals.ambient_up.xyz) * 0.5 + 0.5;
-    let hemi           = mix(ground_color, sky_color, hemi_t) * albedo;
+    // With an atmosphere the sky itself is the ambient light: its radiance,
+    // ground included, cosine-convolved at the eye.
+    var hemi: vec3<f32>;
+    if atmosphere.planet.w > 0.5 {
+        hemi = atmosphere_sky_irradiance(atmosphere, N) * albedo;
+    } else {
+        let sky_color    = globals.ambient_color.rgb * globals.ambient_intensity;
+        let ground_color = globals.ambient_ground.rgb * globals.ambient_intensity;
+        let hemi_t       = dot(N, globals.ambient_up.xyz) * 0.5 + 0.5;
+        hemi             = mix(ground_color, sky_color, hemi_t) * albedo;
+    }
 
     // RC weight: 0 = no RC data, 1 = full RC coverage
     let rc_weight      = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
@@ -1375,44 +1391,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         }
     }
 
-    // Aerial perspective is applied after lighting, never baked into albedo.
-    // This preserves material/debug buffers and edits, and uses the same
-    // planetary radius and eye as the atmosphere's sky view.
-    if globals.atmosphere_eye_radius.w > 0.0 {
-        let transmission = planetary_transmission(world_pos);
-        let sun = normalize(globals.atmosphere_sun.xyz);
-        let daylight = clamp(dot(normalize(globals.atmosphere_eye_radius.xyz), sun) * 2.0 + 0.15, 0.02, 1.0);
-        let toward = max(dot(normalize(world_pos - cameras[0].position_near.xyz), sun), 0.0);
-        let haze = mix(vec3<f32>(0.12, 0.22, 0.36), vec3<f32>(0.38, 0.30, 0.20), pow(toward, 16.0)) * daylight;
-        color = color * transmission + haze * (vec3<f32>(1.0) - transmission);
-    }
     // Tonemapping & bloom handled by PostProcessPass — write raw HDR linear.
     return vec4<f32>(color, alpha);
-}
-
-// Four samples through the atmospheric part of the eye/surface segment.
-// This is a bounded single-scatter approximation, not volumetric cloud GI.
-fn planetary_transmission(position: vec3<f32>) -> vec3<f32> {
-    let eye = globals.atmosphere_eye_radius.xyz;
-    let radius = globals.atmosphere_eye_radius.w;
-    if radius <= 0.0 { return vec3<f32>(1.0); }
-    let delta = (position - cameras[0].position_near.xyz) * 0.001;
-    let distance = length(delta);
-    if distance < 0.00001 { return vec3<f32>(1.0); }
-    let ray = delta / distance;
-    let b = dot(eye, ray);
-    let c = dot(eye, eye) - (radius + 60.0) * (radius + 60.0);
-    let disc = b*b - c;
-    if disc <= 0.0 { return vec3<f32>(1.0); }
-    let start = max(0.0, -b - sqrt(disc));
-    let end = min(distance, -b + sqrt(disc));
-    let ds = max(end - start, 0.0) / 4.0;
-    var optical = 0.0;
-    for (var i = 0u; i < 4u; i++) {
-        let p = eye + ray * (start + (f32(i) + 0.5) * ds);
-        optical += exp(-max(length(p) - radius, 0.0) / 8.0) * ds;
-    }
-    return exp(-vec3<f32>(0.0058, 0.0135, 0.0331) * optical);
 }
 
 // Reflection composition is deliberately isolated from base lighting so neither
@@ -1494,5 +1474,5 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
     }
 
     let contribution = select(spec_ind * ao_combined, spec_ind, has_lightmap);
-    return vec4<f32>(contribution * planetary_transmission(world_pos), 0.0);
+    return vec4<f32>(contribution, 0.0);
 }

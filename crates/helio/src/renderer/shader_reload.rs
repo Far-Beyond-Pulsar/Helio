@@ -254,15 +254,6 @@ impl Renderer {
         if let Some(hook) = &self.graph_rebuild_hook {
             hook(graph, &self.device);
         }
-        if let Some(sky) = graph.find_pass_mut::<helio_pass_sky::SkyPass>() {
-            sky.set_fallback_sky_enabled(self.fallback_sky_enabled);
-            sky.set_planetary_sky(self.planetary_sky);
-        }
-        if let Some(light) = graph.find_pass_mut::<helio_pass_deferred_light::DeferredLightPass>() {
-            light.set_planetary_atmosphere(
-                self.planetary_sky.map(|s| (s.eye_m, s.radius_m, s.sun_direction)),
-            );
-        }
     }
 
     /// Keeps the previous graph and puts the files of `batch` back to the text

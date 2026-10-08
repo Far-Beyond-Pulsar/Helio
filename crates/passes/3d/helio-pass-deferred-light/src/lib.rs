@@ -4,6 +4,7 @@ use helio_core::{
     DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
 use pulsar_scenedb::gpu::BufferKey;
+use helio_pass_sky::atmosphere::{ATMOSPHERE_FRAME, ATMOSPHERE_FRAME_BYTES, ATMOSPHERE_SNIPPET};
 
 mod components;
 pub mod gpu_types;
@@ -60,12 +61,9 @@ struct DeferredGlobals {
     ambient_up: [f32; 4],
     /// Hemisphere ground-bounce colour (rgb, unscaled).
     ambient_ground: [f32; 4],
-    atmosphere_eye_radius: [f32; 4],
-    atmosphere_sun: [f32; 4],
 }
 
 pub struct DeferredLightPass {
-    atmosphere: Option<([f64; 3], f64, [f32; 3])>,
     pipeline: wgpu::RenderPipeline,
     reflection_pipeline: wgpu::RenderPipeline,
     reflection_debug_pipeline: wgpu::RenderPipeline,
@@ -73,8 +71,11 @@ pub struct DeferredLightPass {
     shadow_config_buf: wgpu::Buffer,
     bgl_0: wgpu::BindGroupLayout,
     fallback_shadow_caster_counts: wgpu::Buffer,
-    /// `(camera, shadow caster counts)` `bind_group_0` was built against.
-    bind_group_0_key: Option<(wgpu::Buffer, wgpu::Buffer)>,
+    /// A zeroed `AtmosphereFrame`: no atmosphere, bound until one publishes.
+    fallback_atmosphere: wgpu::Buffer,
+    /// `(camera, shadow caster counts, atmosphere)` `bind_group_0` was
+    /// built against.
+    bind_group_0_key: Option<(wgpu::Buffer, wgpu::Buffer, wgpu::Buffer)>,
     bgl_1: wgpu::BindGroupLayout,
     bgl_2: wgpu::BindGroupLayout,
     bgl_3: wgpu::BindGroupLayout,
@@ -134,10 +135,6 @@ pub struct DeferredLightPass {
 }
 
 impl DeferredLightPass {
-    /// Optional procedural atmosphere: eye/radius in metres, sun toward light.
-    pub fn set_planetary_atmosphere(&mut self, atmosphere: Option<([f64; 3], f64, [f32; 3])>) {
-        self.atmosphere = atmosphere;
-    }
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -163,7 +160,7 @@ impl DeferredLightPass {
             device,
             "Deferred Lighting Shader",
             helio_core::include_wgsl!("../shaders/deferred_lighting.wgsl"),
-            &[helio_mats::PBR_EVAL_SNIPPET],
+            &[helio_mats::PBR_EVAL_SNIPPET, ATMOSPHERE_SNIPPET],
         );
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -231,7 +228,24 @@ impl DeferredLightPass {
                     },
                     count: None,
                 },
+                // The resolved atmosphere (see `atmosphere` in the shader).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(ATMOSPHERE_FRAME_BYTES),
+                    },
+                    count: None,
+                },
             ],
+        });
+        let fallback_atmosphere = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("DeferredLight No Atmosphere"),
+            size: ATMOSPHERE_FRAME_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
         });
         // Bound until ObjectBatch publishes its counts: claims casters in
         // both atlases, so both are sampled, as before the counts existed.
@@ -463,6 +477,10 @@ impl DeferredLightPass {
                 wgpu::BindGroupEntry {
                     binding: 8,
                     resource: fallback_shadow_caster_counts.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: fallback_atmosphere.as_entire_binding(),
                 },
             ],
         });
@@ -843,7 +861,6 @@ impl DeferredLightPass {
         let fallback_lightmap_uv_view = fallback_lightmap_uv_tex.create_view(&Default::default());
 
         Self {
-            atmosphere: None,
             pipeline,
             reflection_pipeline,
             reflection_debug_pipeline,
@@ -851,6 +868,7 @@ impl DeferredLightPass {
             shadow_config_buf,
             bgl_0,
             fallback_shadow_caster_counts,
+            fallback_atmosphere,
             bind_group_0_key: None,
             bgl_1,
             bgl_2,
@@ -935,6 +953,7 @@ impl RenderPass for DeferredLightPass {
             "shadow_sampler",
             "shadow_transmittance",
             "shadow_caster_counts",
+            ATMOSPHERE_FRAME,
             "ssao",
             "sky_lut",
             "tile_light_lists",
@@ -1018,8 +1037,6 @@ impl RenderPass for DeferredLightPass {
             _pad: [0; 2],
             ambient_up: [ambient_up[0], ambient_up[1], ambient_up[2], 0.0],
             ambient_ground: [ambient_ground[0], ambient_ground[1], ambient_ground[2], 0.0],
-            atmosphere_eye_radius: self.atmosphere.map_or([0.0; 4], |(eye, radius, _)| [(eye[0]*0.001) as f32, (eye[1]*0.001) as f32, (eye[2]*0.001) as f32, (radius*0.001) as f32]),
-            atmosphere_sun: self.atmosphere.map_or([0.0; 4], |(_, _, sun)| [sun[0], sun[1], sun[2], 0.0]),
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())
@@ -1380,12 +1397,17 @@ impl RenderPass for DeferredLightPass {
             self.bind_group_3_key = Some(tile_key);
         }
 
-        // ── Bind group 0: camera, globals, shadow config, caster counts ──────
+        // ── Bind group 0: camera, globals, shadow config, caster counts,
+        //    atmosphere ─────────────────────────────────────────────────────
         let caster_counts = ctx
             .registry
             .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("shadow_caster_counts"))
             .unwrap_or(&self.fallback_shadow_caster_counts);
-        let key_0 = (ctx.camera.clone(), caster_counts.clone());
+        let atmosphere = ctx
+            .registry
+            .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(ATMOSPHERE_FRAME))
+            .unwrap_or(&self.fallback_atmosphere);
+        let key_0 = (ctx.camera.clone(), caster_counts.clone(), atmosphere.clone());
         if self.bind_group_0_key.as_ref() != Some(&key_0) {
             self.bind_group_0 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("DeferredLight BG0"),
@@ -1395,6 +1417,7 @@ impl RenderPass for DeferredLightPass {
                     wgpu::BindGroupEntry { binding: 1, resource: self.globals_buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 7, resource: self.shadow_config_buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 8, resource: caster_counts.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 9, resource: atmosphere.as_entire_binding() },
                 ],
             });
             self.bind_group_0_key = Some(key_0);

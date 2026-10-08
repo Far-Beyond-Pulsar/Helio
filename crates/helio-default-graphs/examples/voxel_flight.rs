@@ -183,6 +183,7 @@ impl Flight {
             SceneGpuConfig { classes: vec![], tombstone_headroom: 0, max_cells_metadata: 0 },
         );
         helio_pass_sky::SkyComponent::register_gpu_columns_growable(&mut store, 4, &device);
+        helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(&mut store, 4, &device);
         helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut store, 16, &device);
         helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut store, 16, &device);
         helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(&mut store, 16, &device);
@@ -205,12 +206,16 @@ impl Flight {
             helio_pass_forward_lit::LightComponent::from(helio::GpuLight {
                 position_range: [0.0, 0.0, 0.0, f32::MAX],
                 direction_outer: [-sun_dir.x, -sun_dir.y, -sun_dir.z, 0.0],
-                color_intensity: [1.0, 0.94, 0.82, 3.0],
+                // The sun above the air: the atmosphere colours it.
+                color_intensity: [1.0, 1.0, 1.0, 3.0],
                 shadow_index: u32::MAX,
                 light_type: helio::LightType::Directional as u32,
                 ..Default::default()
             }),
         );
+        // Earth's air around the planet, centred on the world origin.
+        let air = scene.world.spawn();
+        scene.world.insert(air, helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], planet.grid().radius()));
         scene.world.flush_gpu_mirror(&queue);
         let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
         let pass_source = source.clone();
@@ -222,11 +227,9 @@ impl Flight {
         let mut config = RendererConfig::new(size[0], size[1], wgpu::TextureFormat::Rgba8Unorm).with_tsr_quality(quality);
         config.enable_foliage = false;
         let mut renderer = RendererBuilder::new(config, mirror)
-            .with_ambient([0.55, 0.68, 0.88], 1.25)
             .with_external_device()
             .with_pass_build_context(Box::new(move |ctx| build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])))
             .build(device.clone(), queue.clone(), size[0], size[1], config.surface_format);
-        renderer.set_fallback_sky_enabled(true);
         // HELIO_VOXEL_FLIGHT_LOOK="exposure,contrast,saturation": the camera
         // post-process of an outdoor look (ACES tone map and a grade).
         if let Ok(look) = std::env::var("HELIO_VOXEL_FLIGHT_LOOK") {
@@ -294,12 +297,7 @@ impl Flight {
     fn draw_with_up(&mut self, stage: &str, eye: DVec3, forward: Vec3, view_up: Option<Vec3>) -> f64 {
         *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: self.planet.clone(), sun: self.sun, shadows: self.shadows, picks: None });
         self.renderer.set_world_origin(Some(eye));
-        self.renderer.set_planetary_sky(Some(helio_pass_sky::PlanetarySky::earth_like(
-            eye.to_array(), self.planet.grid().radius(), self.sun.to_array(),
-        )));
         let up = up_for(eye);
-        // Hemisphere fill around the local vertical with a sunlit-grass bounce.
-        self.renderer.set_ambient_hemisphere(up.to_array(), Some([0.3, 0.34, 0.2]));
         let forward = forward.normalize();
         let up = view_up.unwrap_or_else(|| if forward.dot(up).abs() > 0.999 { up.any_orthonormal_vector() } else { up });
         let near = (self.planet.air_clearance(eye) * 0.25).clamp(0.05, 50_000.0) as f32;
@@ -828,7 +826,7 @@ fn main() {
     let mut audits = Vec::new();
     report.insert("config".into(), serde_json::json!({"size": size, "quality": format!("{quality:?}"), "voxel_m": flight.planet.grid().voxel_size(), "shadows": flight.shadows, "record": flight.record}));
 
-    // Ground spawn on the +Y face (the fallback sky assumes +Y up).
+    // Ground spawn on the +Y face.
     let dir = land_near(&flight.planet, 2, 0.47, 0.53, 20.0);
     let ground = flight.planet.surface_point(dir, 1.7);
     let heading = 0.6;

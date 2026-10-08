@@ -56,6 +56,7 @@ fn planet_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         let mut gpu_store =
             SceneGpuStore::new(&gpu_context, SceneGpuConfig { classes: Vec::new(), tombstone_headroom: 0, max_cells_metadata: 0 });
         helio_pass_sky::SkyComponent::register_gpu_columns_growable(&mut gpu_store, 4, &device);
+        helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, &device);
         helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
         helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
         helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
@@ -187,6 +188,9 @@ struct Editor {
     renderer: helio::Renderer,
     source: SharedPlanetFrame,
     target: wgpu::Texture,
+    scene: pulsar_scenedb::SceneDb,
+    sun: Option<pulsar_scenedb::Entity>,
+    air: Option<pulsar_scenedb::Entity>,
 }
 
 fn editor(width: u32, height: u32) -> Option<Editor> {
@@ -207,11 +211,14 @@ fn editor(width: u32, height: u32) -> Option<Editor> {
     let mut gpu_store =
         SceneGpuStore::new(&gpu_context, SceneGpuConfig { classes: Vec::new(), tombstone_headroom: 0, max_cells_metadata: 0 });
     helio_pass_sky::SkyComponent::register_gpu_columns_growable(&mut gpu_store, 4, &device);
+    helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, &device);
     helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
     helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
     helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
     helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
     let mirror = GpuMirrorHandle::new(Arc::new(gpu_store), Arc::clone(&queue));
+    let mut scene = pulsar_scenedb::SceneDb::new();
+    scene.world.attach_gpu_mirror(mirror.clone());
     let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
     let pass_source = Arc::clone(&source);
     let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| Box::new(PlanetPass::new(Arc::clone(&pass_source))));
@@ -225,7 +232,6 @@ fn editor(width: u32, height: u32) -> Option<Editor> {
         }))
         .build(Arc::clone(&device), Arc::clone(&queue), width, height, config.surface_format);
     renderer.set_editor_mode(true);
-    renderer.set_fallback_sky_enabled(true);
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("editor overlay target"),
         size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -236,10 +242,32 @@ fn editor(width: u32, height: u32) -> Option<Editor> {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
-    Some(Editor { device, queue, renderer, source, target })
+    Some(Editor { device, queue, renderer, source, target, scene, sun: None, air: None })
 }
 
 impl Editor {
+    /// A directional sun shining from `towards`, and the scene's atmosphere
+    /// row (`None` removes it).
+    fn set_sky(&mut self, towards: Vec3, air: Option<helio_pass_sky::AtmosphereComponent>) {
+        let sun = *self.sun.get_or_insert_with(|| self.scene.world.spawn());
+        self.scene.world.insert(sun, helio_pass_forward_lit::LightComponent::from(helio::GpuLight {
+            position_range: [0.0, 0.0, 0.0, f32::MAX],
+            direction_outer: [-towards.x, -towards.y, -towards.z, 0.0],
+            color_intensity: [1.0, 1.0, 1.0, 3.0],
+            shadow_index: u32::MAX,
+            light_type: helio::LightType::Directional as u32,
+            ..Default::default()
+        }));
+        let entity = *self.air.get_or_insert_with(|| self.scene.world.spawn());
+        match air {
+            Some(air) => self.scene.world.insert(entity, air),
+            None => {
+                self.scene.world.remove::<helio_pass_sky::AtmosphereComponent>(entity);
+            }
+        }
+        self.scene.world.flush_gpu_mirror(&self.queue);
+    }
+
     fn render(&mut self, camera: &Camera) {
         self.renderer.render(camera, &self.target.create_view(&Default::default())).unwrap();
         self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
@@ -329,47 +357,71 @@ fn editor_overlays_stay_in_world_space_in_camera_relative_frames() {
     assert!(axis > 0.001 && grey > 0.01, "grid missing: axis {axis:.4}, lines {grey:.4}");
 }
 
-/// The same local camera and sun at two poles must see the same atmosphere.
-/// The previous fixed +Y fallback produced a brown lower-hemisphere sky at X.
+const EARTH_RADIUS: f64 = 6_360_000.0;
+/// Earth's atmosphere preset: 100 km of air.
+const AIR_THICKNESS: f64 = 100_000.0;
+
+fn earth_air() -> helio_pass_sky::AtmosphereComponent {
+    helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], EARTH_RADIUS)
+}
+
+fn mean_rgb(pixels: &[[u8; 4]]) -> [f64; 3] {
+    std::array::from_fn(|c| pixels.iter().map(|p| f64::from(p[c])).sum::<f64>() / pixels.len() as f64)
+}
+
+fn capture(editor: &Editor, name: &str, pixels: &[[u8; 4]]) {
+    if let Ok(output) = std::env::var("HELIO_ATMOSPHERE_CAPTURE") {
+        std::fs::create_dir_all(&output).unwrap();
+        let size = editor.target.size();
+        let bytes: Vec<_> = pixels.iter().flat_map(|p| p.iter().copied()).collect();
+        image::save_buffer(std::path::Path::new(&output).join(format!("{name}.png")),
+            &bytes, size.width, size.height, image::ColorType::Rgba8).unwrap();
+    }
+}
+
+/// The same local camera and sun at two poles must see the same sky, and a
+/// resize must not reset it. The atmosphere is a scene row; the sun is the
+/// scene's directional light; the world origin is the eye.
 #[test]
-fn planetary_sky_follows_the_world_eye_and_sun_through_resize() {
+fn atmosphere_follows_the_world_eye_and_sun_through_resize() {
     let Some(mut editor) = editor(256, 144) else { return };
     editor.renderer.set_editor_mode(false);
+    let validation = editor.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let altitude = EARTH_RADIUS + 3_000.0;
     let cases = [
-        ([0.0, 6_374_000.0, 0.0], Vec3::new(0.6, 0.8, 0.0), Vec3::Y, [0.4, 0.8, 0.2]),
-        ([6_374_000.0, 0.0, 0.0], Vec3::new(0.8, -0.6, 0.0), Vec3::X, [0.8, -0.4, 0.2]),
+        (glam::DVec3::Y * altitude, Vec3::new(0.6, 0.8, 0.0), Vec3::Y, Vec3::new(0.4, 0.8, 0.2)),
+        (glam::DVec3::X * altitude, Vec3::new(0.8, -0.6, 0.0), Vec3::X, Vec3::new(0.8, -0.4, 0.2)),
     ];
     let mut means = Vec::new();
     for (eye, forward, up, sun) in cases {
-        editor.renderer.set_planetary_sky(Some(helio_pass_sky::PlanetarySky::earth_like(eye, 6_371_000.0, sun)));
+        editor.set_sky(sun.normalize(), Some(earth_air()));
+        editor.renderer.set_world_origin(Some(eye));
         let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 40_000_000.0);
         for _ in 0..8 { editor.render(&camera); }
         let pixels = editor.rgba();
-        let mean: [f64;3] = std::array::from_fn(|c| pixels.iter().map(|p| f64::from(p[c])).sum::<f64>() / pixels.len() as f64);
-        eprintln!("planetary sky mean {mean:?}");
+        capture(&editor, if up == Vec3::Y { "rotated_y" } else { "rotated_x" }, &pixels);
+        let mean = mean_rgb(&pixels);
+        eprintln!("ATMOSPHERE_ROTATED mean {mean:?}");
         means.push(mean);
     }
-    assert!(means[0][2] > means[0][0] + 10.0, "day sky must be blue");
-    for c in 0..3 { assert!((means[0][c] - means[1][c]).abs() < 12.0, "rotated sky mismatch: {means:?}"); }
+    assert!(means[0][2] > means[0][0] + 10.0, "day sky must be blue: {means:?}");
+    for c in 0..3 { assert!((means[0][c] - means[1][c]).abs() < 6.0, "rotated sky mismatch: {means:?}"); }
     editor.renderer.set_render_size(320, 180);
     editor.target = editor.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("resized planetary sky"), size: wgpu::Extent3d { width: 320, height: 180, depth_or_array_layers: 1 },
+        label: Some("resized atmosphere"), size: wgpu::Extent3d { width: 320, height: 180, depth_or_array_layers: 1 },
         mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC, view_formats: &[],
     });
     let camera = Camera::perspective_look_at(Vec3::ZERO, Vec3::new(0.8,-0.6,0.0), Vec3::X, std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 40_000_000.0);
     for _ in 0..8 { editor.render(&camera); }
-    let pixels = editor.rgba();
-    for c in 0..3 {
-        let mean = pixels.iter().map(|p| f64::from(p[c])).sum::<f64>() / pixels.len() as f64;
-        assert!((mean - means[1][c]).abs() < 12.0, "sky reset during resize");
-    }
+    let mean = mean_rgb(&editor.rgba());
+    for c in 0..3 { assert!((mean[c] - means[1][c]).abs() < 6.0, "sky reset during resize: {mean:?} vs {:?}", means[1]); }
+    assert!(pollster::block_on(validation.pop()).is_none());
 }
 
-/// The thin orbital limb must remain circular at arbitrary world orientations.
-/// A fixed world-Y panorama used to leak bright angular wedges outside the
-/// shell and miss whole sectors of the limb. No terrain is needed to expose it.
+/// The thin orbital limb must stay circular at any world orientation: no
+/// light outside the shell, no dark sectors in it.
 #[test]
 fn orbital_atmosphere_has_no_wedges_outside_the_shell() {
     const SIZE: u32 = 513;
@@ -377,7 +429,7 @@ fn orbital_atmosphere_has_no_wedges_outside_the_shell() {
     editor.renderer.set_editor_mode(false);
     editor.renderer.set_tsr_quality(None);
     editor.renderer.set_jitter_enabled(false);
-    let radius = 6_371_000.0f64;
+    let radius = EARTH_RADIUS;
     for (case, distance_scale, up) in [
         ("north", 1.5, Vec3::Y),
         ("equator", 1.5, Vec3::X),
@@ -388,20 +440,15 @@ fn orbital_atmosphere_has_no_wedges_outside_the_shell() {
     ] {
         let distance = radius * distance_scale;
         let eye = up.as_dvec3() * distance;
-        let outer_angle = ((radius + 60_000.0) / distance).asin();
+        let outer_angle = ((radius + AIR_THICKNESS) / distance).asin();
         let half_fov_tan = outer_angle.tan() * 1.25;
-        editor.renderer.set_planetary_sky(Some(helio_pass_sky::PlanetarySky::earth_like(eye.to_array(), radius, up.to_array())));
+        editor.set_sky(up, Some(earth_air()));
+        editor.renderer.set_world_origin(Some(eye));
         let camera = Camera::perspective_look_at(Vec3::ZERO, -up, up.any_orthonormal_vector(),
             (2.0 * half_fov_tan.atan()) as f32, 1.0, 0.05, 400_000_000.0);
-        editor.renderer.find_pass_mut::<helio_pass_tsr::TsrPass>().map(|p| p.reset_history());
-        for _ in 0..12 { editor.render(&camera); }
+        for _ in 0..4 { editor.render(&camera); }
         let pixels = editor.rgba();
-        if let Ok(output) = std::env::var("HELIO_ATMOSPHERE_CAPTURE") {
-            std::fs::create_dir_all(&output).unwrap();
-            let bytes: Vec<_> = pixels.iter().flat_map(|p| p.iter().copied()).collect();
-            image::save_buffer(std::path::Path::new(&output).join(format!("{case}.png")),
-                &bytes, SIZE, SIZE, image::ColorType::Rgba8).unwrap();
-        }
+        capture(&editor, case, &pixels);
         let mut outside = 0;
         let mut outside_bright = 0;
         let mut sectors = [[0usize; 2]; 24];
@@ -412,8 +459,7 @@ fn orbital_atmosphere_has_no_wedges_outside_the_shell() {
                 let tan_theta = nx.hypot(ny) * half_fov_tan;
                 let impact = distance * tan_theta / (1.0 + tan_theta * tan_theta).sqrt();
                 let pixel = pixels[(y * SIZE + x) as usize];
-                // Final graph FXAA may cover two neighbouring pixels. Test
-                // outside that footprint, not against a hard pre-AA boundary.
+                // FXAA may spread the edge over two pixels.
                 if nx.hypot(ny) > outer_angle.tan() / half_fov_tan + 4.0 / f64::from(SIZE) {
                     outside += 1;
                     outside_bright += usize::from(pixel[2] > 4);
@@ -436,79 +482,28 @@ fn orbital_atmosphere_has_no_wedges_outside_the_shell() {
     }
 }
 
-/// Planet shadow removes direct sunlight, not the atmosphere's ambient light.
-/// Rotating a night-side view to the opposite pole must retain the same sky.
+/// From orbit with the sun on the horizon of the pole below, the limb is lit
+/// on the sun's side and dark opposite, and a small sweep of the sun through
+/// the terminator changes it smoothly.
 #[test]
-fn shadowed_planet_has_a_dim_atmosphere_from_ground_and_orbit() {
+fn terminator_is_smooth_and_the_night_side_is_dark() {
     const SIZE: u32 = 513;
     let Some(mut editor) = editor(SIZE, SIZE) else { return };
     editor.renderer.set_editor_mode(false);
     editor.renderer.set_tsr_quality(None);
     editor.renderer.set_jitter_enabled(false);
-    let radius = 6_371_000.0f64;
-    let mut means = Vec::new();
-    for (case, up, orbital) in [
-        ("night_north", Vec3::Y, true),
-        ("night_south", -Vec3::Y, true),
-        ("night_ground_north", Vec3::Y, false),
-        ("night_ground_south", -Vec3::Y, false),
-    ] {
-        let distance = if orbital { radius * 1.5 } else { radius + 20.0 };
-        let eye = up.as_dvec3() * distance;
-        let tangent = up.any_orthonormal_vector();
-        let half_fov_tan = if orbital { (((radius + 60_000.0) / distance).asin()).tan() * 1.25 } else { 0.5 };
-        let forward = if orbital { -up } else { (tangent + 0.15 * up).normalize() };
-        let camera_up = if orbital { tangent } else { up };
-        editor.renderer.set_planetary_sky(Some(helio_pass_sky::PlanetarySky::earth_like(eye.to_array(), radius, (-up).to_array())));
-        let camera = Camera::perspective_look_at(Vec3::ZERO, forward, camera_up,
-            (2.0 * half_fov_tan.atan()) as f32, 1.0, 0.05, 40_000_000.0);
-        for _ in 0..4 { editor.render(&camera); }
-        let pixels = editor.rgba();
-        if let Ok(output) = std::env::var("HELIO_ATMOSPHERE_CAPTURE") {
-            std::fs::create_dir_all(&output).unwrap();
-            let bytes: Vec<_> = pixels.iter().flat_map(|p| p.iter().copied()).collect();
-            image::save_buffer(std::path::Path::new(&output).join(format!("{case}.png")),
-                &bytes, SIZE, SIZE, image::ColorType::Rgba8).unwrap();
-        }
-        let mut values = Vec::new();
-        for y in 0..SIZE {
-            for x in 0..SIZE {
-                let nx = 2.0 * (f64::from(x) + 0.5) / f64::from(SIZE) - 1.0;
-                let ny = 2.0 * (f64::from(y) + 0.5) / f64::from(SIZE) - 1.0;
-                let tan_theta = nx.hypot(ny) * half_fov_tan;
-                let impact = distance * tan_theta / (1.0 + tan_theta * tan_theta).sqrt();
-                let pixel = pixels[(y * SIZE + x) as usize];
-                if !orbital || (impact > radius + 3_000.0 && impact < radius + 18_000.0) {
-                    values.push(f64::from(pixel[2]));
-                }
-                if orbital && impact > radius + 100_000.0 { assert!(pixel[2] <= 4, "{case}: light outside the shell"); }
-            }
-        }
-        let mean = values.iter().sum::<f64>() / values.len() as f64;
-        eprintln!("NIGHT_ATMOSPHERE {case}: blue={mean:.3}");
-        assert!(mean > 4.0 && mean < 60.0, "{case}: night atmosphere missing or too bright: {mean}");
-        means.push(mean);
-    }
-    assert!((means[0] - means[1]).abs() < 2.0, "opposite orbital hemispheres differ: {means:?}");
-    assert!((means[2] - means[3]).abs() < 2.0, "opposite ground hemispheres differ: {means:?}");
-    // Ambient light must not erase the direct Sun's day/night boundary. A
-    // small sweep through the terminator must not switch the entire sky off.
+    let radius = EARTH_RADIUS;
     let distance = radius * 1.5;
-    let half_fov_tan = (((radius + 60_000.0) / distance).asin()).tan() * 1.25;
+    let half_fov_tan = (((radius + AIR_THICKNESS) / distance).asin()).tan() * 1.25;
+    editor.renderer.set_world_origin(Some(glam::DVec3::Y * distance));
     let camera = Camera::perspective_look_at(Vec3::ZERO, -Vec3::Y, Vec3::Z,
         (2.0 * half_fov_tan.atan()) as f32, 1.0, 0.05, 40_000_000.0);
-    let mut twilight_means = Vec::new();
+    let mut means = Vec::new();
     for (case, elevation) in [("twilight_before", -0.005), ("twilight", 0.0), ("twilight_after", 0.005)] {
-        let sun = Vec3::new(1.0, elevation, 0.0).normalize();
-        editor.renderer.set_planetary_sky(Some(helio_pass_sky::PlanetarySky::earth_like(
-            [0.0, distance, 0.0], radius, sun.to_array())));
+        editor.set_sky(Vec3::new(1.0, elevation, 0.0).normalize(), Some(earth_air()));
         for _ in 0..4 { editor.render(&camera); }
         let pixels = editor.rgba();
-        if let Ok(output) = std::env::var("HELIO_ATMOSPHERE_CAPTURE") {
-            let bytes: Vec<_> = pixels.iter().flat_map(|p| p.iter().copied()).collect();
-            image::save_buffer(std::path::Path::new(&output).join(format!("{case}.png")),
-                &bytes, SIZE, SIZE, image::ColorType::Rgba8).unwrap();
-        }
+        capture(&editor, case, &pixels);
         let mut sides = [Vec::new(), Vec::new()];
         for y in 0..SIZE {
             for x in 0..SIZE {
@@ -523,23 +518,52 @@ fn shadowed_planet_has_a_dim_atmosphere_from_ground_and_orbit() {
         }
         let side_means = sides.map(|v| v.iter().sum::<f64>() / v.len() as f64);
         eprintln!("TWILIGHT_ATMOSPHERE {case}: blue={side_means:?}");
-        assert!(side_means[0] > side_means[1] + 20.0, "{case}: ambient erased solar shadow");
-        assert!(side_means[1] > 4.0, "{case}: shadowed limb missing");
-        twilight_means.push(side_means);
+        let (lit, dark) = (side_means[0].max(side_means[1]), side_means[0].min(side_means[1]));
+        assert!(lit > dark + 20.0, "{case}: no day side on the limb: {side_means:?}");
+        assert!(dark < 8.0, "{case}: the night side glows: {side_means:?}");
+        means.push(side_means);
     }
-    for pair in twilight_means.windows(2) {
-        for c in 0..2 { assert!((pair[0][c] - pair[1][c]).abs() < 10.0, "abrupt twilight switch: {twilight_means:?}"); }
+    for pair in means.windows(2) {
+        for c in 0..2 { assert!((pair[0][c] - pair[1][c]).abs() < 10.0, "abrupt twilight switch: {means:?}"); }
     }
-    // The ambient contribution is explicit: a solar-only night remains dark.
-    let mut solar_only = helio_pass_sky::PlanetarySky::earth_like(
-        [0.0, -(radius + 20.0), 0.0], radius, Vec3::Y.to_array());
-    solar_only.ambient_radiance = [0.0; 3];
-    editor.renderer.set_planetary_sky(Some(solar_only));
-    let camera = Camera::perspective_look_at(Vec3::ZERO, Vec3::new(1.0,-0.15,0.0), -Vec3::Y,
-        2.0 * 0.5f32.atan(), 1.0, 0.05, 40_000_000.0);
-    for _ in 0..4 { editor.render(&camera); }
-    assert!(editor.rgba().iter().all(|p| p[0] <= 1 && p[1] <= 1 && p[2] <= 1),
-        "zero ambient must not leave a glowing night sky");
+}
+
+/// Not only planets: the default placement puts flat ground at the world's
+/// origin. A camera standing on it sees a blue sky above, a brighter horizon
+/// and darker ground below it, and nothing once the atmosphere row is gone.
+#[test]
+fn atmosphere_over_flat_ground_without_a_planet() {
+    let Some(mut editor) = editor(256, 144) else { return };
+    editor.renderer.set_editor_mode(false);
+    editor.renderer.set_tsr_quality(None);
+    editor.renderer.set_jitter_enabled(false);
+    let validation = editor.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let sun = Vec3::new(0.3, 0.6, 0.2).normalize();
+    editor.set_sky(sun, Some(helio_pass_sky::AtmosphereComponent::earth()));
+    let eye = Vec3::new(0.0, 2.0, 0.0);
+    let up_camera = Camera::perspective_look_at(eye, eye + Vec3::new(-0.3, 1.0, 0.1),
+        Vec3::Z, std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.1, 10_000.0);
+    for _ in 0..4 { editor.render(&up_camera); }
+    let zenith = mean_rgb(&editor.rgba());
+    let level_camera = Camera::perspective_look_at(eye, Vec3::new(-10.0, 2.0, 3.0),
+        Vec3::Y, std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.1, 10_000.0);
+    for _ in 0..4 { editor.render(&level_camera); }
+    let pixels = editor.rgba();
+    capture(&editor, "flat_horizon", &pixels);
+    let width = editor.target.size().width as usize;
+    let rows = pixels.len() / width;
+    let row_mean = |row: usize| mean_rgb(&pixels[row * width..(row + 1) * width]);
+    let (above, below) = (row_mean(rows / 2 - 6), row_mean(rows / 2 + 12));
+    let sum = |c: [f64; 3]| c[0] + c[1] + c[2];
+    eprintln!("FLAT_ATMOSPHERE zenith {zenith:?} above horizon {above:?} below {below:?}");
+    assert!(zenith[2] > zenith[0] + 15.0, "zenith must be blue: {zenith:?}");
+    assert!(sum(above) > sum(zenith), "horizon must be brighter than the zenith");
+    assert!(sum(above) > sum(below), "ground must be below the horizon");
+    editor.set_sky(sun, None);
+    for _ in 0..4 { editor.render(&up_camera); }
+    let removed = mean_rgb(&editor.rgba());
+    assert!(removed.iter().all(|&c| c < 2.0), "atmosphere left behind after removal: {removed:?}");
+    assert!(pollster::block_on(validation.pop()).is_none());
 }
 
 /// Inspector edits get only one rendered frame before an idle viewport.

@@ -37,7 +37,7 @@ use helio_pass_shadow_cull::ShadowCullPass;
 use helio_pass_shadow_dirty::ShadowDirtyPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
-use helio_pass_sky::SkyPass;
+use helio_pass_sky::{AtmosphereCompositePass, AtmospherePass, SkyPass};
 use helio_pass_ssr::SsrPass;
 use helio_pass_tsr::TsrPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
@@ -162,6 +162,8 @@ fn default_swap_policy() -> helio_core::SwapPolicy {
         .independent::<ObjectBatchPass>()
         .independent::<IndirectDispatchPass>()
         .independent::<SkyPass>()
+        .independent::<AtmospherePass>()
+        .independent::<AtmosphereCompositePass>()
         .independent::<LightCullPass>()
         .independent::<DecalPass>()
         .independent::<SsrPass>()
@@ -291,6 +293,10 @@ fn add_common_early_passes(
     // for readability, matching its role as the scene's sole GPU-driven
     // object-batch producer.
     graph.add_pass(Box::new(ObjectBatchPass::new(device)));
+    // Atmosphere LUTs and the resolved frame (sun, planet, sky irradiance)
+    // that lighting and the composite read; idle without an
+    // `AtmosphereComponent` row.
+    graph.add_pass(Box::new(AtmospherePass::new(device)));
 
     let hiz_pass = HiZBuildPass::new(device, queue, w, h);
     let hiz_sampler = Arc::clone(&hiz_pass.hiz_sampler);
@@ -496,6 +502,10 @@ fn add_late_passes(
     h: u32,
     _scene_db: helio::SceneDbHandle,
 ) {
+    // The atmosphere over everything lit: the sky where nothing was drawn,
+    // aerial perspective over geometry. Before the overlays (billboards,
+    // coronas, debug draw), which are not seen through the air.
+    graph.add_pass(Box::new(AtmosphereCompositePass::new(device, config.surface_format)));
     let lights_buf = scene_buffer_or_dummy(
         &_scene_db,
         device,

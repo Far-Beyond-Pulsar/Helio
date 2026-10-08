@@ -1,11 +1,10 @@
-//!use planetary_lut
 // sky_lut.wgsl – Sky-View LUT generation pass (Hillaire 2020)
 //
 // Renders Nishita single-scatter atmosphere into a 192×108 Rgba16Float panoramic
 // texture.  The main SkyPass samples this LUT instead of running the atmosphere
 // ray-march per screen-pixel, giving ~46× cost reduction at 1280×720.
 //
-// Authored-sky panoramic layout (planetary fallback uses planetary_lut.wgsl):
+// Authored-sky panoramic layout:
 //   u = azimuth / (2π) + 0.5            ∈ [0, 1]   (wraps)
 //   v = sin(elevation) * 0.5 + 0.5      ∈ [0, 1]   (sin-mapping, better horizon res)
 
@@ -44,7 +43,6 @@ struct SkyUniforms {
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(1) @binding(0) var<storage, read> sky_rows: array<SkyUniforms>;
 var<private> sky: SkyUniforms;
-@group(0) @binding(1) var<uniform> planetary: PlanetaryAtmosphere;
 
 // ── Vertex: full-screen triangle ─────────────────────────────────────────────
 
@@ -125,7 +123,6 @@ fn atmosphere(ro: vec3<f32>, rd: vec3<f32>) -> vec3<f32> {
 
     var radiance = vec3<f32>(0.0);
     var view_transmittance = vec3<f32>(1.0);
-    let ambient = select(vec3<f32>(0.0), planetary.ambient.xyz, planetary.eye.w > 0.0);
     var t         = t_start + ds * 0.5;
 
     for (var i = 0u; i < ATMO_STEPS; i++) {
@@ -144,7 +141,7 @@ fn atmosphere(ro: vec3<f32>, rd: vec3<f32>) -> vec3<f32> {
         // keeps a dense limb bounded by its incident ambient radiance and
         // avoids reintegrating camera optical depth at every sample.
         let segment_weight = (vec3<f32>(1.0) - step_transmittance) / max(extinction, vec3<f32>(1e-8));
-        var source = ambient * (scattering_r + scattering_m);
+        var source = vec3<f32>(0.0);
 
         let earth_hit = ray_sphere(p, sky.sun_direction, sky.earth_radius);
         if earth_hit.x < 0.0 || earth_hit.y < 0.0 {
@@ -181,19 +178,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let azimuth   = (uv.x - 0.5) * 2.0 * PI;
     let sin_elev  = uv.y * 2.0 - 1.0;        // [-1, 1]
     let cos_elev  = sqrt(max(1.0 - sin_elev * sin_elev, 0.0));
-    var ray_dir   = vec3<f32>(
+    let ray_dir   = vec3<f32>(
         cos_elev * cos(azimuth),
         sin_elev,
         cos_elev * sin(azimuth),
     );
-    if planetary.eye.w > 0.0 { ray_dir = planet_sky_direction(uv); }
-
-    let cam_atm = select(vec3<f32>(0.0, sky.earth_radius + 0.001, 0.0), planetary.eye.xyz, planetary.eye.w > 0.0);
+    let cam_atm = vec3<f32>(0.0, sky.earth_radius + 0.001, 0.0);
 
     // Below horizon: keep colour from horizon moving smoothly to night.
     // This ensures the whole lower hemisphere keeps sunset gradation.
     var out_col = atmosphere(cam_atm, ray_dir);
-    if sin_elev < 0.0 && planetary.eye.w == 0.0 {
+    if sin_elev < 0.0 {
         let horizon_dir = vec3<f32>(cos(azimuth), 0.0, sin(azimuth));
         let horizon_col = atmosphere(cam_atm, horizon_dir);
         let falloff = clamp(-sin_elev, 0.0, 1.0);

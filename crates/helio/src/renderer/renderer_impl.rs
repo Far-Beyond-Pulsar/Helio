@@ -111,9 +111,6 @@ pub struct Renderer {
     pub(crate) portal_projection_counts: Option<(u32, u32)>,
     /// TSR quality preset, preserved across graph rebuilds.
     pub(crate) tsr_quality: Option<helio_pass_tsr::TsrQuality>,
-    /// Outdoor fallback sky state must survive graph rebuilds triggered by resize or TSR.
-    pub(crate) fallback_sky_enabled: bool,
-    pub(crate) planetary_sky: Option<helio_pass_sky::PlanetarySky>,
     pub(crate) debug_mode: u32,
     pub(crate) editor_mode: bool,
     pub(crate) debug_state: Arc<Mutex<DebugDrawState>>,
@@ -560,25 +557,6 @@ impl Renderer {
         if let Some(pass) = self.find_pass_mut::<SkyPass>() {
             pass.set_cloud_mode(mode);
             pass.reset_history();
-        }
-    }
-
-    /// Set the procedural world's atmosphere (metres, planet-centred eye).
-    /// None clears it; authored skies take precedence in the sky pass.
-    pub fn set_planetary_sky(&mut self, sky: Option<helio_pass_sky::PlanetarySky>) {
-        let sky = sky.filter(helio_pass_sky::PlanetarySky::is_valid);
-        self.planetary_sky = sky;
-        if let Some(pass) = self.find_pass_mut::<helio_pass_deferred_light::DeferredLightPass>() {
-            pass.set_planetary_atmosphere(sky.map(|s| (s.eye_m, s.radius_m, s.sun_direction)));
-        }
-        if let Some(pass) = self.find_pass_mut::<SkyPass>() { pass.set_planetary_sky(sky); }
-    }
-
-    /// Use the default sky when a scene has no authored sky component.
-    pub fn set_fallback_sky_enabled(&mut self, enabled: bool) {
-        self.fallback_sky_enabled = enabled;
-        if let Some(pass) = self.find_pass_mut::<SkyPass>() {
-            pass.set_fallback_sky_enabled(enabled);
         }
     }
 

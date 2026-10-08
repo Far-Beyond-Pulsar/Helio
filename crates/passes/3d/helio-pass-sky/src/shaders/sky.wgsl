@@ -1,4 +1,3 @@
-//!use planetary_lut
 // Sky pass – Nishita single-scatter atmospheric model + FBM volumetric clouds
 //
 // Bind groups:
@@ -55,7 +54,6 @@ struct SkyUniforms {
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(1) @binding(0) var<storage, read> sky_rows: array<SkyUniforms>;
 var<private> sky: SkyUniforms;
-@group(0) @binding(1) var<uniform> planetary: PlanetaryAtmosphere;
 @group(1) @binding(1) var          sky_lut:     texture_2d<f32>;
 @group(1) @binding(2) var          sky_sampler: sampler;
 
@@ -151,8 +149,7 @@ fn sample_sky_lut(ray_dir: vec3<f32>) -> vec3<f32> {
     // V is inverted: NDC y=+1 (top of framebuffer) → texture row 0 → sin_elev=+1,
     // so v=0 corresponds to sin_elev=+1 (looking up), v=1 to sin_elev=-1 (below horizon).
     let v = 1.0 - (sin_elev * 0.5 + 0.5);
-    var uv = vec2<f32>(u, v);
-    if planetary.eye.w > 0.0 { uv = planet_sky_uv(ray_dir); }
+    let uv = vec2<f32>(u, v);
     // This LUT has no mip chain. Explicit LOD also avoids seam derivatives
     // selecting inconsistent samples along the azimuth wrap.
     return textureSampleLevel(sky_lut, sky_sampler, uv, 0.0).rgb;
@@ -349,7 +346,7 @@ fn aces_approx(v: vec3<f32>) -> vec3<f32> {
 // Fragment shader
 // ──────────────────────────────────────────────────────────────────────────────
 
-// A far-plane inverse VP can have w=0 (and a planetary camera position loses
+// A far-plane inverse VP can have w=0 (and a camera far from the origin loses
 // metres in f32). Perspective sky rays need only projection scale and rotation.
 fn sky_camera_ray(ndc: vec2<f32>) -> vec3<f32> {
     let camera = cameras[0];
@@ -376,14 +373,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     var sky_col = sample_sky_lut(ray_dir);
-    // A filtered LUT must never leak the thin limb into a ray that misses the
-    // shell. Evaluate that boundary at screen resolution, not LUT resolution.
-    if planetary.eye.w > 0.0 && ray_sphere(planetary.eye.xyz, ray_dir, sky.atm_radius).y < 0.0 {
-        sky_col = vec3<f32>(0.0);
-    }
 
     // Below horizon: preserve sunset colors with gradual darkening to night.
-    if ray_dir.y < 0.0 && planetary.eye.w == 0.0 {
+    if ray_dir.y < 0.0 {
         let t = clamp(-ray_dir.y, 0.0, 1.0); // 0 at horizon, 1 at straight down
         let dark = vec3<f32>(0.02, 0.01, 0.005);
         let descent = pow(t, 1.8); // smooth non-linear falloff
@@ -399,9 +391,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Sun disc — rendered per-pixel so it stays sharp at any resolution
     let cos_a = dot(ray_dir, sky.sun_direction);
-    let eye = planetary.eye.xyz;
-    let planet_occludes_sun = planetary.eye.w > 0.0 && ray_sphere(eye, ray_dir, sky.earth_radius).x > 0.0;
-    if cos_a > sky.sun_disk_cos && !planet_occludes_sun {
+    if cos_a > sky.sun_disk_cos {
         let t = smoothstep(sky.sun_disk_cos, sky.sun_disk_cos + 0.0002, cos_a);
         sky_col += t * vec3<f32>(1.5, 1.3, 0.9) * sky.sun_intensity * 0.08;
     }
@@ -411,6 +401,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         sky_col = trace_clouds(cameras[0].position_near.xyz, ray_dir, sky_col);
     }
 
-    let final_col = select(aces_approx(sky_col * sky.exposure), sky_col * sky.exposure, planetary.eye.w > 0.0);
-    return vec4<f32>(final_col, 1.0);
+    return vec4<f32>(aces_approx(sky_col * sky.exposure), 1.0);
 }

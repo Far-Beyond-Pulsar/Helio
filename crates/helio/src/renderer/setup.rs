@@ -271,8 +271,6 @@ impl Renderer {
             shader_reload: Default::default(),
             scene_db,
             tsr_quality: config.tsr_quality,
-            fallback_sky_enabled: false,
-            planetary_sky: None,
             template_registry: std::sync::Arc::new(std::sync::RwLock::new(
                 RadiantTemplateRegistry::new(),
             )),
