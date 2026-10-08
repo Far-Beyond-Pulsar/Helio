@@ -188,7 +188,7 @@ fn sky_view_kernel(@builtin(global_invocation_id) id: vec3<u32>) {
     let angles = sky_view_angles(p, r, uv);
     let basis = sky_view_basis(eye / r, frame.sun.xyz);
     let d = basis * vec3<f32>(sin(angles.x) * cos(angles.y), cos(angles.x), sin(angles.x) * sin(angles.y));
-    let segment = atmosphere_segment(frame.params, eye, d);
+    let segment = atmosphere_segment(frame.params, eye, d, true);
     var radiance = vec3<f32>(0.0);
     if segment.y > segment.x {
         let s = integrate(eye, d, segment.x, segment.y, 32.0);
@@ -217,7 +217,8 @@ fn aerial_kernel(@builtin(global_invocation_id) id: vec3<u32>) {
     let d = normalize(world.xyz / world.w - camera.position_near.xyz);
     let eye = frame.eye.xyz;
     let range = frame.sun_illuminance.w;
-    let segment = atmosphere_segment(frame.params, eye, d);
+    // Geometry the volume is sampled for may lie below the analytic ground.
+    let segment = atmosphere_segment(frame.params, eye, d, false);
     var radiance = vec3<f32>(0.0);
     var throughput = vec3<f32>(1.0);
     var t_prev = 0.0;

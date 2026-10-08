@@ -236,16 +236,20 @@ fn atmosphere_sky_irradiance(frame: AtmosphereFrame, n: vec3<f32>) -> vec3<f32> 
     return max(e, vec3<f32>(0.0));
 }
 
-// The segment of a ray inside the atmosphere's shell, cut at the ground:
-// x start, y end, z 1 when it ends on the ground.
-fn atmosphere_segment(p: AtmosphereParams, o: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+// The segment of a ray inside the atmosphere's shell: x start, y end, z 1
+// when it ends on the planet's analytic ground. Only rays that meet no
+// geometry (`to_ground`) end there: real terrain may lie below that sphere
+// (valleys under sea level), and the air reaches down to it.
+fn atmosphere_segment(p: AtmosphereParams, o: vec3<f32>, d: vec3<f32>, to_ground: bool) -> vec3<f32> {
     let top = ray_sphere(o, d, p.top_radius);
     if top.y <= 0.0 { return vec3<f32>(0.0); }
     let start = max(top.x, 0.0);
     var end = top.y;
-    let ground = ray_sphere(o, d, p.bottom_radius);
     var hit = 0.0;
-    if ground.x > 0.0 && ground.x < end { end = ground.x; hit = 1.0; }
+    if to_ground {
+        let ground = ray_sphere(o, d, p.bottom_radius);
+        if ground.x > 0.0 && ground.x < end { end = ground.x; hit = 1.0; }
+    }
     return vec3<f32>(start, max(end, start), hit);
 }
 

@@ -52,11 +52,12 @@ fn transmittance(r: f32, mu: f32) -> vec3<f32> {
     return textureSampleLevel(transmittance_lut, lut_sampler, transmittance_uv(frame.params, r, mu), 0.0).rgb;
 }
 
-// The air along `d` from the camera up to `limit` km, marched per pixel;
-// with no limit (sky pixels) it includes the sunlit ground it may end on.
+// The air along `d` from the camera, marched per pixel: up to geometry
+// `limit` km away, or (sky pixels, `limit` infinite) to the analytic ground,
+// whose sunlit albedo it then includes.
 fn march_from_space(eye: vec3<f32>, d: vec3<f32>, limit: f32) -> Scattering {
     let p = frame.params;
-    let segment = atmosphere_segment(p, eye, d);
+    let segment = atmosphere_segment(p, eye, d, limit > 1.0e37);
     let end = min(segment.y, limit);
     var out: Scattering;
     out.radiance = vec3<f32>(0.0);

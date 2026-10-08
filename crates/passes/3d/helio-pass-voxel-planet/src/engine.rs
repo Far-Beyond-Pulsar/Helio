@@ -1874,7 +1874,7 @@ impl PlanetRenderer {
                 let mut pass = encoder.begin_compute_pass(&Default::default());
                 pass.set_bind_group(0, &trace_group, &[]);
                 pass.set_bind_group(1, camera_group, &[]);
-                Self::dispatch(&mut pass, &self.pipelines.skylight, [size[0].div_ceil(16), size[1].div_ceil(16), 1]);
+                Self::dispatch(&mut pass, &self.pipelines.skylight, [size[0].div_ceil(32), size[1].div_ceil(32), 1]);
             }
             if let Some(p) = &mut self.profiler {
                 p.end_pass(encoder, "planet_skylight");
