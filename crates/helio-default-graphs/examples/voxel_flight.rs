@@ -2155,6 +2155,23 @@ fn capture_views(flight: &mut Flight, views: &str, ground: DVec3, heading: f64) 
             flight.draw(&name, eye, forward);
         }
         flight.capture(&name);
+        // HELIO_VOXEL_FLIGHT_VIEWS_FLY=<m/s>,<s>: then flies on along the view
+        // at that height above the ground, capturing every second (what an
+        // editor camera shows while refinement catches up).
+        if let Ok(fly) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS_FLY") {
+            let v: Vec<f64> = fly.split(',').map(|x| x.trim().parse().unwrap()).collect();
+            let up = eye.normalize();
+            let along = (forward.as_dvec3() - up * forward.as_dvec3().dot(up)).normalize();
+            let frames = (v[1] / DT) as usize;
+            for f in 1..=frames {
+                let site = flight.planet.surface_point(eye + along * v[0] * f as f64 * DT, 0.0);
+                let at = flight.planet.surface_point(site, height);
+                flight.draw(&name, at, forward);
+                if f % 60 == 0 {
+                    flight.capture(&format!("{name}_fly_{}", f / 60));
+                }
+            }
+        }
     }
     flight.write_csv();
 }
