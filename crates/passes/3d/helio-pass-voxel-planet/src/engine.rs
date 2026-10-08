@@ -1609,6 +1609,43 @@ impl PlanetRenderer {
         depth: &wgpu::TextureView,
         frame_num: u64,
     ) {
+        self.encode_profiled(encoder, camera_data, frame, size, gbuffer, depth, frame_num, None);
+    }
+
+    // Graph scopes share the enclosing VoxelPlanet pass's query set/readback.
+    // The private profiler remains responsible for generation budgeting.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_profiled(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        camera_data: &helio_core::GpuCameraUniforms,
+        frame: &PlanetFrame,
+        size: [u32; 2],
+        gbuffer: [&wgpu::TextureView; 8],
+        depth: &wgpu::TextureView,
+        frame_num: u64,
+        mut graph_context: Option<&mut PassContext<'_>>,
+    ) {
+        macro_rules! begin_stage {
+            ($stage:literal) => {
+                if let Some(p) = &mut self.profiler {
+                    p.begin_pass(encoder, concat!("planet_", $stage));
+                }
+                if let Some(ctx) = graph_context.as_deref_mut() {
+                    ctx.begin_gpu_scope(encoder, concat!("VoxelPlanet::", $stage));
+                }
+            };
+        }
+        macro_rules! end_stage {
+            ($stage:literal) => {
+                if let Some(ctx) = graph_context.as_deref_mut() {
+                    ctx.end_gpu_scope(encoder, concat!("VoxelPlanet::", $stage));
+                }
+                if let Some(p) = &mut self.profiler {
+                    p.end_pass(encoder, concat!("planet_", $stage));
+                }
+            };
+        }
         if let Some(p) = &mut self.profiler {
             // Timestamps arrive frames late and the same sample is returned
             // until a newer one completes: each sample is used once, with the
@@ -1764,9 +1801,7 @@ impl PlanetRenderer {
             self.recycle_pages(encoder);
         }
         let camera_group = &self.camera_group;
-        if let Some(p) = &mut self.profiler {
-            p.begin_pass(encoder, "planet_residency");
-        }
+        begin_stage!("residency");
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_bind_group(0, &self.gen_group, &[]);
@@ -1794,9 +1829,7 @@ impl PlanetRenderer {
                 Self::dispatch(&mut pass, &self.pipelines.level_suffix, [1, 1, 1]);
             }
         }
-        if let Some(p) = &mut self.profiler {
-            p.end_pass(encoder, "planet_residency");
-        }
+        end_stage!("residency");
         // Allocator counters and this frame's failed jobs (into the readback
         // reserved when the plan was requested; without a free one its job
         // budget was 0), then the failure list restarts. Counters alone are
@@ -1821,9 +1854,7 @@ impl PlanetRenderer {
             r.stage = 1;
         }
         let groups = [size[0].div_ceil(8), size[1].div_ceil(8), 1];
-        if let Some(p) = &mut self.profiler {
-            p.begin_pass(encoder, "planet_horizon");
-        }
+        begin_stage!("horizon");
         {
             // Directional sky bound from this frame's summary blocks.
             let mut pass = encoder.begin_compute_pass(&Default::default());
@@ -1833,10 +1864,8 @@ impl PlanetRenderer {
             Self::dispatch(&mut pass, &self.pipelines.horizon_blocks, [live_blocks.div_ceil(64), 1, 1]);
             Self::dispatch(&mut pass, &self.pipelines.horizon_suffix, [1, 1, 1]);
         }
-        if let Some(p) = &mut self.profiler {
-            p.end_pass(encoder, "planet_horizon");
-            p.begin_pass(encoder, "planet_primary");
-        }
+        end_stage!("horizon");
+        begin_stage!("primary");
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_bind_group(0, &trace_group, &[]);
@@ -1846,36 +1875,26 @@ impl PlanetRenderer {
         if let Some(picks) = &frame.picks {
             Self::copy_picks(&mut self.picks, &self.screen.hits, encoder, picks, size);
         }
-        if let Some(p) = &mut self.profiler {
-            p.end_pass(encoder, "planet_primary");
-            p.begin_pass(encoder, "planet_shade");
-        }
+        end_stage!("primary");
+        begin_stage!("shade");
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_bind_group(0, &trace_group, &[]);
             pass.set_bind_group(1, camera_group, &[]);
             Self::dispatch(&mut pass, &self.pipelines.shade, groups);
         }
-        if let Some(p) = &mut self.profiler {
-            p.end_pass(encoder, "planet_shade");
-        }
+        end_stage!("shade");
         if self.settings.sky_occlusion {
-            if let Some(p) = &mut self.profiler {
-                p.begin_pass(encoder, "planet_skylight");
-            }
+            begin_stage!("skylight");
             {
                 let mut pass = encoder.begin_compute_pass(&Default::default());
                 pass.set_bind_group(0, &trace_group, &[]);
                 pass.set_bind_group(1, camera_group, &[]);
                 Self::dispatch(&mut pass, &self.pipelines.skylight, [size[0].div_ceil(32), size[1].div_ceil(32), 1]);
             }
-            if let Some(p) = &mut self.profiler {
-                p.end_pass(encoder, "planet_skylight");
-            }
+            end_stage!("skylight");
         }
-        if let Some(p) = &mut self.profiler {
-            p.begin_pass(encoder, "planet_gbuffer");
-        }
+        begin_stage!("gbuffer");
         {
             let attachments = gbuffer.map(|view| {
                 Some(wgpu::RenderPassColorAttachment {
@@ -1902,23 +1921,17 @@ impl PlanetRenderer {
             pass.set_bind_group(1, camera_group, &[]);
             pass.draw(0..3, 0..1);
         }
-        if let Some(p) = &mut self.profiler {
-            p.end_pass(encoder, "planet_gbuffer");
-        }
+        end_stage!("gbuffer");
         self.sun_active = frame.shadows;
         if frame.shadows {
-            if let Some(p) = &mut self.profiler {
-                p.begin_pass(encoder, "planet_sunlight");
-            }
+            begin_stage!("sunlight");
             {
                 let mut pass = encoder.begin_compute_pass(&Default::default());
                 pass.set_bind_group(0, &trace_group, &[]);
                 pass.set_bind_group(1, camera_group, &[]);
                 Self::dispatch(&mut pass, &self.pipelines.sunlight, [size[0].div_ceil(16), size[1].div_ceil(16), 1]);
             }
-            if let Some(p) = &mut self.profiler {
-                p.end_pass(encoder, "planet_sunlight");
-            }
+            end_stage!("sunlight");
         }
         if let Some(p) = &mut self.profiler {
             p.resolve_queries(encoder, frame_num);
@@ -2222,7 +2235,7 @@ impl RenderPass for PlanetPass {
             view!("gbuffer_velocity"),
         ];
         let encoder = unsafe { &mut *ctx.encoder_ptr };
-        renderer.encode(
+        renderer.encode_profiled(
             encoder,
             ctx.camera_data,
             &frame,
@@ -2230,6 +2243,7 @@ impl RenderPass for PlanetPass {
             targets,
             ctx.depth,
             ctx.frame_num,
+            Some(ctx),
         );
         Ok(())
     }
