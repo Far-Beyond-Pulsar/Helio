@@ -39,7 +39,9 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
 - Volumetric worlds: generated caves and overhangs, not only heightfields.
   Heightmaps are one input among others. A terrain program adds 3D terms
   around its surface (`terrain_extent`, `terrain_density`); the built-in
-  generator carves tunnels and caverns and folds the surface into overhangs,
+  generator carves a cave network (tunnels and caverns under a rock cover,
+  open to the surface at entrances) and leans steep ground over into
+  overhangs (a continuous deformation of the heightfield: nothing floats),
   and erosion octaves carve branching gullies down its slopes. Caves may
   reach any depth (see clipped bands below).
 - Destruction at any scale, up to the entire planet: digs of any depth,
@@ -298,7 +300,9 @@ they are once its work is on the GPU. Steps:
    volumetric columns keep arbitrary mixed-brick occupancy. Cells within the
    program's `terrain_extent` of the heightfield top are evaluated in 3D
    (the sign of `terrain_density` at the seamless `volume_point`); the band covers the
-   extent, and the column is marked `INFO_TOPOLOGY`. Densities are signed
+   extent, and the column is marked `INFO_GENERATED` (`INFO_TOPOLOGY` is
+   only for edit cuts: a generated column keeps its natural surface, relief
+   and materials). Densities are signed
    distances to the field height itself (mm, passed to `terrain_density`),
    not to the floor of the level's cell, so a coarse level folds the same
    surface the base level does. Lanes the overhangs fold take every cell and
@@ -312,8 +316,8 @@ they are once its work is on the GPU. Steps:
    coarse level, drawn as grey and brown patches that became grass on
    approach.
    Its header stores each cell's generated top (first air above the highest
-   generated solid cell, counted down from the band top; `INFO_RELIEF_INLINE`
-   with `INFO_TOPOLOGY`), so material depth counts from the real surface:
+   generated solid cell, counted down from the band top; `INFO_GENERATED`),
+   so material depth counts from the real surface:
    overhang lips are turf, cave walls, floors and ceilings are rock. Side
    faces measure from the air-side cell's top (a cave wall lies far below
    it, a natural riser does not).
@@ -483,6 +487,26 @@ they are once its work is on the GPU. Steps:
 - **Overhang amplitude** grows from 0 at an overhang region's edge (less the
   two level cells a level cannot resolve). It used to jump from 0 to two
   cells there, a step seam along every region border.
+- **Overhangs lean the heightfield.** A cell is solid where it lies below
+  the field's height at a horizontally displaced point,
+  `z < H(x + W(x, z))`: `W` (`terrain_lean_offset`) varies with height at
+  the ledge spacing and eight times more slowly across the ground, so for
+  each height the map `x -> x + W` stays invertible and the solid is a
+  continuous deformation of the heightfield's (no floating rock, no tears).
+  Steep ground bends over into ledges; flat ground is unchanged. The engine
+  evaluates the field on a global lattice per level (`terrain_lean`: nodes
+  every `spacing` cells within `reach` of the column; generation's 64 lanes
+  evaluate the 8x8 nodes once per column) and passes the bilinear height at
+  the displaced point plus the column's own detail off the lattice
+  (`terrain::lean_height`); CPU and GPU agree to the bit
+  (`overhang_view_matches_canonical_cpu_ray_casts`,
+  `overhangs_lean_steep_ground_without_floating_rock`). The earlier overhangs
+  added a 3D noise to the height and left floating pieces and tears.
+- **Caves** are a network under a rock cover: tunnels narrow to nothing over
+  two radii towards the cover and the cave depth, caverns raise their
+  threshold as they close, and the cover opens only in entrance zones
+  (`caves_open_to_the_surface_only_at_entrances`,
+  `caves_leave_no_floating_rock`).
 - **Clipped bands.** A column stores one band of at most `MAX_BAND` (256)
   bricks, with solid ground below and air above. A taller one (a deep dig,
   deep caves, a crater wall) keeps the 256 bricks around the eye's layer at
@@ -534,7 +558,7 @@ times come from timestamps.
 | `HELIO_VOXEL_FLIGHT_CRUISE=<m>`, `_CRUISE_SECS=<s>` | Level flight at that height at the editor's speed for 20 s, then a stop: residency lag while moving and time to converge. |
 | `HELIO_VOXEL_FLIGHT_REPLAY=<engine.log>`, `_REPLAY_FROM/_TO=<s of day>`, `_REPLAY_DEG` | Replays the altitude timeline of a Pulsar editor session logged with `PULSAR_VOXEL_STATS=1`. |
 | `HELIO_VOXEL_FLIGHT_SUN=x,y,z` | Sun direction (the editor's default Sun is straight up). |
-| `HELIO_VOXEL_FLIGHT_VIEWS=h:pitch,...` | Settles and captures views `h` metres above the ground site (`view_<h>_<pitch>.png`); with `_VIEWS_CAVES=1` above the nearest cave or overhang region. |
+| `HELIO_VOXEL_FLIGHT_VIEWS=h:pitch,...` | Settles and captures views `h` metres above the ground site (`view_<h>_<pitch>.png`); with `_VIEWS_CAVES=1` above the nearest cave or overhang region, with `_VIEWS_OVERHANGS=1` above the nearest hillside of an overhang region. |
 | `HELIO_VOXEL_FLIGHT_SCULPT=1` | Sculpting stress: dig r1, dig r4 and build r1 strokes stamped three (two) times a frame on one ring; logs brush CPU, frame time and generation cost per stroke. |
 | `HELIO_VOXEL_FLIGHT_HEIGHTFIELD=1` | The Earth stack without caves and overhangs. |
 | `HELIO_VOXEL_FLIGHT_SEED=<n>` | The Earth stack with another seed (7). |
@@ -608,7 +632,9 @@ style: the erosion term, so gully floors fill with gravel and rock shows on
 the ribs; Lunar: fresh ejecta and basins); shading never runs the generator
 per pixel. Volumetric generators also
 define `terrain_extent` and `terrain_density` (and `TerrainField::extent`,
-`density`, `volume_bounds`). A density is the signed distance from the cell
+`density`, `volume_bounds`), and leaning ones `terrain_lean` and
+`terrain_lean_offset` (`TerrainField::lean`, `lean_offset`; the engine passes
+the leaning height to `terrain_density` as `lean_height`). A density is the signed distance from the cell
 centre to the surface (256 per level cell, positive inside solid; the cell is
 solid where it is positive): combine terms as constructive solid geometry on
 distances (intersection: minimum, union: maximum), and make every cut a

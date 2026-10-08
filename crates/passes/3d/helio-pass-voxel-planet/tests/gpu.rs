@@ -180,6 +180,67 @@ fn cave_view_matches_canonical_cpu_ray_casts() {
     assert!(mismatched * 1000 <= compared, "{mismatched}/{compared}");
 }
 
+/// An eye over leaning ground, looking up the slope: a column of an overhang
+/// region whose generated cells the lean moved off the heightfield by at
+/// least two cells, on sloping ground.
+fn find_overhang(planet: &Planet) -> Option<(DVec3, Vec3)> {
+    let grid = *planet.grid();
+    let field = planet.field();
+    let mut rng = 0x1D8E_4E27_C47D_124Fu64;
+    let mut next = || {
+        rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; rng
+    };
+    let sites = (0..6u8).flat_map(|face| [(0.37, 0.61), (0.2, 0.3), (0.7, 0.45)].map(|(a, b)| (face, a, b)));
+    for (face, a, b) in sites {
+        let dir = land(planet, face, a, b);
+        let (base, _) = grid.locate(planet.surface_point(dir, 0.0));
+        for _ in 0..20_000 {
+            let i = base.i + (next() % 40_000) as i32 - 20_000;
+            let j = base.j + (next() % 40_000) as i32 - 20_000;
+            let (_, above) = field.extent(grid.domain_point(base.face, i, j, 0), 0);
+            if above < 20 {
+                continue;
+            }
+            let top = |di: i32, dj: i32| planet.column_top(base.face, i + di, j + dj, 0);
+            let (si, sj) = (top(20, 0) - top(-20, 0), top(0, 20) - top(0, -20));
+            if si.abs().max(sj.abs()) < 8 {
+                continue;
+            }
+            let t = top(0, 0);
+            let changed = (t - above..t + above).filter(|&k| planet.solid(Cell::new(base.face, i, j, k)) != (k < t)).count();
+            if changed < 2 {
+                continue;
+            }
+            let eye = planet.surface_point(grid.cell_center(Cell::new(base.face, i, j, t)), 2.0);
+            let up = eye.normalize();
+            // Up the slope, a little downwards.
+            let (di, dj) = if si.abs() >= sj.abs() { (si.signum(), 0) } else { (0, sj.signum()) };
+            let along = grid.cell_center(Cell::new(base.face, i + di, j + dj, t)) - grid.cell_center(Cell::new(base.face, i, j, t));
+            let forward = ((along - up * along.dot(up)).normalize() - up * 0.3).normalize();
+            eprintln!("lean moved {changed} cells of the column; slope {} cells over 40", si.abs().max(sj.abs()));
+            return Some((eye, forward.as_vec3()));
+        }
+    }
+    None
+}
+
+/// Generated overhangs render exactly: over leaning ground, GPU primary hits
+/// match canonical CPU ray casts, so the generation's lean lattice
+/// reproduces the field's.
+#[test]
+fn overhang_view_matches_canonical_cpu_ray_casts() {
+    let Some(gpu) = gpu() else { return };
+    let mut stack = helio_pass_voxel_planet::layers::TerrainLayers::earth();
+    stack.caves.enabled = false;
+    let planet = Arc::new(Planet::new(PlanetRecipe { terrain: stack.source(7), ..Default::default() }).unwrap());
+    let (eye, forward) = find_overhang(&planet).expect("an overhang near the test site");
+    eprintln!("overhang eye {} m off its column top", planet.ground_height(eye));
+    let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [320, 180]);
+    eprintln!("compared {compared}, mismatched {mismatched}");
+    assert!(compared > 1000);
+    assert!(mismatched * 1000 <= compared, "{mismatched}/{compared}");
+}
+
 /// Caves 800 m deep, far below what one band holds at the fine levels:
 /// from inside one at a random depth, GPU hits match CPU ray casts.
 #[test]

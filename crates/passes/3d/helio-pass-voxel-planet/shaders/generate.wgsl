@@ -79,9 +79,13 @@ var<workgroup> g_surface: array<atomic<u32>, 16>;
 var<workgroup> g_keep: array<atomic<u32>, 2>;
 var<workgroup> g_list: array<FaceBrush, 64>;
 var<workgroup> g_edit_count: u32;
+// Field heights of the column's lean lattice nodes (`terrain::lean_height`).
+var<workgroup> g_lean: array<i32, 64>;
 // g_volume bits: generated volumetric terrain; brushes that set materials.
 const VOLUME_TERRAIN: u32 = 1u;
 const VOLUME_MATERIALS: u32 = 2u;
+// Some lane's surface leans (overhangs): the lattice is evaluated.
+const VOLUME_LEAN: u32 = 4u;
 
 const NO_DENSITY: i32 = -2147483647 - 1;
 
@@ -98,6 +102,30 @@ fn volume_crossing(solid: i32, air: i32) -> f32 {
 
 // Q16 fraction of a cell whose surface lies `h` cells above its bottom (0:
 // the whole cell).
+// Bilinear height of the lean lattice at `xy` (Q8 level cells from node
+// (0, 0)), nodes 0..8 per axis (`terrain::lattice_bilinear`).
+fn lean_bilinear(xy: vec2<i32>, spacing: i32) -> i32 {
+    let step = spacing * 256;
+    let n = clamp(vec2<i32>(div_floor(xy.x, step), div_floor(xy.y, step)), vec2<i32>(0), vec2<i32>(6));
+    let f = clamp((xy - n * step) / spacing, vec2<i32>(0), vec2<i32>(256));
+    let h00 = g_lean[n.x + n.y * 8];
+    let h10 = g_lean[n.x + 1 + n.y * 8];
+    let h01 = g_lean[n.x + (n.y + 1) * 8];
+    let h11 = g_lean[n.x + 1 + (n.y + 1) * 8];
+    let a = h00 + (((h10 - h00) * f.x) >> 8u);
+    let b = h01 + (((h11 - h01) * f.x) >> 8u);
+    return a + (((b - a) * f.y) >> 8u);
+}
+
+// Height (mm) of the heightfield displaced by the program's lean under cell
+// `(i, j, k)` (`terrain::lean_height`); `node` is the lattice's first node.
+fn lean_height(p: vec3<i32>, i: i32, j: i32, k: i32, level: u32, height: i32, spacing: i32, node: vec2<i32>) -> i32 {
+    let o = terrain_lean_offset(p, i, j, k, level);
+    if o.x == 0 && o.y == 0 { return height; }
+    let xy = vec2<i32>(i, j) * 256 + 128 - node * spacing * 256;
+    return lean_bilinear(xy + o, spacing) + height - lean_bilinear(xy, spacing);
+}
+
 fn cell_fraction(h: f32) -> u32 {
     if h >= 1.0 { return 0u; }
     return clamp(u32(h * 65536.0), 1u, 65535u);
@@ -189,6 +217,8 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         atomicMax(&g_band[1], field_top + extent.y);
         atomicOr(&g_volume, VOLUME_TERRAIN);
     }
+    let lean = terrain_lean(level);
+    if lean.x != 0 && extent.y > 0 { atomicOr(&g_volume, VOLUME_LEAN); }
     if job.edits != 0u {
         let count = edit_refs[job.edits - 1u];
         for (var e = li; e < count; e += 64u) {
@@ -226,6 +256,17 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let n_band = u32(k_hi - k_lo);
     let volume_bits = atomicLoad(&g_volume);
     let volumetric = (volume_bits & VOLUME_TERRAIN) != 0u;
+    // A leaning surface reads the field on a global lattice (nodes every
+    // `spacing` cells, shared by neighbouring columns): each lane evaluates
+    // one of the 8x8 nodes from `div_floor(8 ci - reach, spacing)`; the
+    // publication barrier below completes them before the band loop.
+    let lean_node = vec2<i32>(div_floor(ci * 8 - lean.x, max(lean.y, 1)), div_floor(cj * 8 - lean.x, max(lean.y, 1)));
+    if (volume_bits & VOLUME_LEAN) != 0u {
+        let last = (world.grid.z >> level) - 1;
+        let ni = clamp((lean_node.x + x) * lean.y, 0, last);
+        let nj = clamp((lean_node.y + y) * lean.y, 0, last);
+        g_lean[li] = generation_column(face, ni, nj, level, display_base && (frame.hints.w & 16u) != 0u).x;
+    }
     // Generated caves and overhangs keep the relief of the natural surface
     // they leave intact (their tops count down from the band top, which a
     // band of at most 32 bricks always fits).
@@ -306,7 +347,9 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 // cell, and their relief, from the density. Elsewhere (caves)
                 // a cell the volume leaves as the heightfield has it keeps the
                 // heightfield's kind (with relief, its ceil top cell).
-                let density = terrain_density(column_point, volume_point(face, i, j, k, level), level, field_top, height, k);
+                var lean_h = height;
+                if overhang_lane && lean.x != 0 { lean_h = lean_height(column_point, i, j, k, level, height, lean.y, lean_node); }
+                let density = terrain_density(column_point, volume_point(face, i, j, k, level), level, field_top, height, lean_h, k);
                 let dense = select(0u, 1u, density > 0);
                 if dense != terrain_kind(field_top, k) {
                     kind = dense;

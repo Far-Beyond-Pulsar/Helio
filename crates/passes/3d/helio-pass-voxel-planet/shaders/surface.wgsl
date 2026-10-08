@@ -1107,7 +1107,10 @@ fn sun_visibility(s: SunSample) -> f32 {
     if !is_plane() { up = normalize(frame.eye.xyz + s.position / frame.eye.w); }
     let skip = s.filtered * 2.0 * cell / max(dot(up, sun), 0.15);
     let blocker = trace(make_ray(s.position + s.normal * eps, sun), skip, frame.lod.w, offset, 1.0, 0.0);
-    return select(0.0, 1.0, (blocker.info & 3u) == ST_MISS);
+    // Terrain no level holds yet (streaming) is unknown, not an occluder:
+    // counting it drew the loading columns' outlines as shadows.
+    let status = blocker.info & 3u;
+    return select(0.0, 1.0, status == ST_MISS || status == ST_LOADING);
 }
 
 // Representative samples of the workgroup's 2x2 blocks: visibility,
@@ -1238,8 +1241,10 @@ fn sky_visibility(s: SunSample) -> f32 {
         var dir = normalize(around * sin_t + up * sqrt(1.0 - u));
         if ceiling { dir = normalize(around - up * 0.02); }
         else if dot(dir, s.normal) <= 0.0 { continue; }
-        total += 1.0;
         let hit = trace(make_ray(origin, dir), skip, range, offset, 1.0, 0.0);
+        // A ray into terrain no level holds yet (streaming) tells nothing.
+        if (hit.info & 3u) == ST_LOADING { continue; }
+        total += 1.0;
         if (hit.info & 3u) == ST_MISS {
             open += 1.0;
         } else {

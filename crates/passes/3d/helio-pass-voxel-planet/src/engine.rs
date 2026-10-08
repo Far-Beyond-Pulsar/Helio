@@ -340,7 +340,12 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -
     if !program.wgsl.contains("fn terrain_density") {
         // Heightfield programs: no volumetric terms (`TerrainField::extent`, `density`).
         s.push_str("fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
-        s.push_str("fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, k: i32) -> i32 { return heightfield_density(top, k); }\n");
+        s.push_str("fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32 { return heightfield_density(top, k); }\n");
+    }
+    if !program.wgsl.contains("fn terrain_lean") {
+        // No lean (`TerrainField::lean`).
+        s.push_str("fn terrain_lean(level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
+        s.push_str("fn terrain_lean_offset(p: vec3<i32>, i: i32, j: i32, k: i32, level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
     }
     // Generation updates the summaries atomically; traversal reads plain values.
     // Traversal reads a summary block entry as one vector load.
@@ -2370,10 +2375,14 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
     let extent = terrain_extent(p, level);
     let k = top - extent.x - 1 + rem_floor(e.w, max(extent.x + extent.y + 2, 1));
     let q = volume_point(u32(a.x), a.y, a.z, k, level);
-    let density = terrain_density(p, q, level, top, height, k);
+    // A leaning height around the surface (exercising the overhang clamp).
+    let density = terrain_density(p, q, level, top, height, height + (e.z & 8191) - 4096, k);
+    let lean = terrain_lean(level);
+    let offset = terrain_lean_offset(p, a.y, a.z, k, level);
     let surface = terrain_surface(p, level + u32(world.grid.w), height) & 0xffu;
     verify_out[id.x] = vec4<i32>(height, i32(ground_material(p, surface, e.x, e.y, e.z, e.w)),
-        density, (q.x ^ q.y ^ q.z) + i32(surface) * 7919 + extent.x * 65599 + extent.y * 257);
+        density, (q.x ^ q.y ^ q.z) + i32(surface) * 7919 + extent.x * 65599 + extent.y * 257
+            + lean.x * 7 + lean.y * 13 + offset.x * 31 + offset.y * 131);
 }
 ";
     let module = helio_core::shader::module(
@@ -2441,13 +2450,16 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
         let (below, above) = field.extent(p, level);
         let k = top - below - 1 + e.w.rem_euclid((below + above + 2).max(1));
         let q = grid.volume_point(a.x as u8, a.y, a.z, k, level);
-        let density = field.density(p, q, level, top, height, k);
+        let density = field.density(p, q, level, top, height, height.wrapping_add(e.z & 8191).wrapping_sub(4096), k);
+        let lean = field.lean(level);
+        let offset = field.lean_offset(p, a.y, a.z, k, level);
         let surface = field.surface(p, level + grid.level_offset(), height) & 0xff;
         let cpu = [
             height,
             field.ground_material(p, surface, e.x, e.y, e.z, e.w) as i32,
             density,
-            (q.x ^ q.y ^ q.z).wrapping_add(surface as i32 * 7919).wrapping_add(below.wrapping_mul(65599)).wrapping_add(above.wrapping_mul(257)),
+            (q.x ^ q.y ^ q.z).wrapping_add(surface as i32 * 7919).wrapping_add(below.wrapping_mul(65599)).wrapping_add(above.wrapping_mul(257))
+                .wrapping_add(lean.0 * 7).wrapping_add(lean.1 * 13).wrapping_add(offset.0.wrapping_mul(31)).wrapping_add(offset.1.wrapping_mul(131)),
         ];
         if *g != cpu {
             return Err(format!("column {a} with inputs {e}: GPU {g:?}, CPU {cpu:?}"));

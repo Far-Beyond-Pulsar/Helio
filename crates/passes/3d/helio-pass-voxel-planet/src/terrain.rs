@@ -42,8 +42,20 @@
 //!
 //! ```wgsl
 //! fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32>
-//! fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, k: i32) -> i32
+//! fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32
 //! ```
+//!
+//! and, to lean its surface (overhangs that are a continuous deformation of
+//! the heightfield: nothing floats),
+//!
+//! ```wgsl
+//! fn terrain_lean(level: u32) -> vec2<i32> // (reach, spacing) in level cells
+//! fn terrain_lean_offset(p: vec3<i32>, i: i32, j: i32, k: i32, level: u32) -> vec2<i32> // Q8 level cells
+//! ```
+//!
+//! The engine evaluates the field's height on a lattice of nodes every
+//! `spacing` cells, at the offset point under each cell, and passes it to
+//! `terrain_density` as `lean_height` ([`lean_height`]).
 //!
 //! `terrain_extent` bounds, in level cells, how far below the heightfield
 //! top (first air layer) and how far above it the column's cells may
@@ -53,7 +65,8 @@
 //! solid, in a column whose heightfield top is `top` (its field height
 //! `height`, mm: the exact surface the volume folds, so that coarse levels
 //! show it, not a floor of their cell); `q` is the cell centre's seamless
-//! 3D domain point (`volume_point`). The cell is solid
+//! 3D domain point (`volume_point`) and `lean_height` the leaning
+//! heightfield's height under it (`height` without lean). The cell is solid
 //! where it is positive. Outside the extent its sign must be the
 //! heightfield's (`k < top`). Without them the engine uses the heightfield
 //! ([`heightfield_density`]). Distances, not just solid or air, are what a
@@ -186,14 +199,31 @@ pub trait TerrainField: Send + Sync + 'static {
     fn extent(&self, _p: IVec3, _level: u32) -> (i32, i32) {
         (0, 0)
     }
+    /// Lean lattice of `level` (`terrain_lean` in WGSL): `(reach,
+    /// spacing)` in level cells, `(0, 0)` without lean. See
+    /// [`Self::lean_offset`].
+    fn lean(&self, _level: u32) -> (i32, i32) {
+        (0, 0)
+    }
+    /// Horizontal displacement (level cells, Q8, `|offset| < reach` cells)
+    /// of the heightfield under cell `(i, j, k)` of the column at `p`
+    /// (`terrain_lean_offset` in WGSL). The engine evaluates the field's
+    /// height there ([`lean_height`]) and passes it to [`Self::density`]:
+    /// a field leaning its surface this way is a continuous deformation of
+    /// its heightfield (overhangs on steep ground, no floating pieces), as
+    /// long as the offset varies slowly across the ground.
+    fn lean_offset(&self, _p: IVec3, _i: i32, _j: i32, _k: i32, _level: u32) -> (i32, i32) {
+        (0, 0)
+    }
     /// Signed distance ([`DENSITY_ONE`] per level cell, positive inside
     /// solid) from the centre of layer `k` of the column at `p`, whose
     /// heightfield top is `top` (field height `height`, mm), to the surface;
-    /// `q` is the cell's 3D domain
-    /// point ([`Grid::volume_point`]). The cell is solid where it is
-    /// positive; outside [`Self::extent`] its sign must be
-    /// [`terrain_kind`]'s (`terrain_density` in WGSL).
-    fn density(&self, _p: IVec3, _q: IVec3, _level: u32, top: i32, _height: i32, k: i32) -> i32 {
+    /// `q` is the cell's 3D domain point ([`Grid::volume_point`]) and
+    /// `lean_height` the height of the heightfield displaced by
+    /// [`Self::lean_offset`] under the cell (`height` without lean). The
+    /// cell is solid where it is positive; outside [`Self::extent`] its sign
+    /// must be [`terrain_kind`]'s (`terrain_density` in WGSL).
+    fn density(&self, _p: IVec3, _q: IVec3, _level: u32, top: i32, _height: i32, _lean_height: i32, k: i32) -> i32 {
         heightfield_density(top, k)
     }
     /// Largest depth (mm) below the surface and height above it at which
@@ -438,7 +468,85 @@ pub fn generated_kind(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j
     if (below == 0 && above == 0) || k < top - below || k >= top + above {
         return terrain_kind(top, k);
     }
-    u32::from(field.density(p, grid.volume_point(face, i, j, k, level), level, top, height, k) > 0)
+    let lean = lean_height(grid, field, face, i, j, k, level, height);
+    u32::from(field.density(p, grid.volume_point(face, i, j, k, level), level, top, height, lean, k) > 0)
+}
+
+/// Height (mm) of the heightfield displaced by the field's lean under cell
+/// `(i, j, k)` (`generate.wgsl` mirrors it): the field's height on the
+/// level's lean lattice, interpolated bilinearly at the displaced point,
+/// plus the column's own detail off that lattice (`height` minus the
+/// lattice at the cell). Without displacement it is exactly `height`.
+///
+/// The lattice is global (nodes every `spacing` cells of the face, height
+/// at the node's cell), so neighbouring columns agree; a column needs the
+/// 8x8 nodes from `div_floor(8 ci - reach, spacing)`, which the GPU's 64
+/// lanes evaluate once per column.
+pub fn lean_height(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i32, k: i32, level: u32, height: i32) -> i32 {
+    let (reach, spacing) = field.lean(level);
+    if reach == 0 {
+        return height;
+    }
+    let p = grid.domain_point(face, i, j, level);
+    let (ox, oy) = field.lean_offset(p, i, j, k, level);
+    if ox == 0 && oy == 0 {
+        return height;
+    }
+    let last = (grid.cells() >> level) - 1;
+    let (node_i, node_j) = lattice_origin(i, j, reach, spacing);
+    let node = |n: i32, m: i32| {
+        let (ni, nj) = (((node_i + n) * spacing).clamp(0, last), ((node_j + m) * spacing).clamp(0, last));
+        lattice_height(grid, field, face, ni, nj, level)
+    };
+    let sample = |x: i32, y: i32| lattice_bilinear(x - node_i * spacing * 256, y - node_j * spacing * 256, spacing, &node);
+    let (x, y) = (i * 256 + 128, j * 256 + 128);
+    sample(x + ox, y + oy).wrapping_add(height).wrapping_sub(sample(x, y))
+}
+
+/// First node of the lean lattice a column of 8x8 cells reads: the nodes
+/// from `div_floor(8 ci - reach, spacing)` cover the column and its reach.
+fn lattice_origin(i: i32, j: i32, reach: i32, spacing: i32) -> (i32, i32) {
+    (((i >> 3) * 8 - reach).div_euclid(spacing), ((j >> 3) * 8 - reach).div_euclid(spacing))
+}
+
+/// Bilinear height of the lean lattice at `(x, y)` (Q8 level cells from
+/// node (0, 0)), nodes `0..8` per axis.
+pub(crate) fn lattice_bilinear(x: i32, y: i32, spacing: i32, node: &dyn Fn(i32, i32) -> i32) -> i32 {
+    let step = spacing * 256;
+    let ni = x.div_euclid(step).clamp(0, 6);
+    let nj = y.div_euclid(step).clamp(0, 6);
+    let fu = ((x - ni * step) / spacing).clamp(0, 256);
+    let fv = ((y - nj * step) / spacing).clamp(0, 256);
+    let h00 = node(ni, nj);
+    let h10 = node(ni + 1, nj);
+    let h01 = node(ni, nj + 1);
+    let h11 = node(ni + 1, nj + 1);
+    let a = h00.wrapping_add(h10.wrapping_sub(h00).wrapping_mul(fu) >> 8);
+    let b = h01.wrapping_add(h11.wrapping_sub(h01).wrapping_mul(fu) >> 8);
+    a.wrapping_add(b.wrapping_sub(a).wrapping_mul(fv) >> 8)
+}
+
+/// The field's height at lattice node cell `(i, j)` of `level`, cached per
+/// thread (ray casts through a leaning region query the same nodes).
+fn lattice_height(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i32, level: u32) -> i32 {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static CACHE: RefCell<HashMap<(usize, u8, i32, i32, u32), i32>> = RefCell::new(HashMap::new());
+    }
+    let key = (field as *const dyn TerrainField as *const () as usize, face, i, j, level);
+    if let Some(h) = CACHE.with(|c| c.borrow().get(&key).copied()) {
+        return h;
+    }
+    let h = field.height(grid.domain_point(face, i, j, level), level + grid.level_offset());
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() > 1 << 16 {
+            c.clear();
+        }
+        c.insert(key, h);
+    });
+    h
 }
 
 /// Generated top of a column (level cells): the first air above its highest
@@ -454,7 +562,10 @@ pub fn generated_top(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j:
     }
     (top - below..top + above)
         .rev()
-        .find(|&k| field.density(p, grid.volume_point(face, i, j, k, level), level, top, height, k) > 0)
+        .find(|&k| {
+            let lean = lean_height(grid, field, face, i, j, k, level, height);
+            field.density(p, grid.volume_point(face, i, j, k, level), level, top, height, lean, k) > 0
+        })
         .map_or(top - below, |k| k + 1)
 }
 

@@ -770,7 +770,8 @@ impl Default for VoxelCaves {
     }
 }
 
-/// Generated overhangs and arches: the surface folded in 3D.
+/// Generated overhangs: steep ground leaning over, a continuous
+/// deformation of the heightfield (no floating rock).
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Overhangs", category_color = "#A8826F")]
 #[derive(pulsar_reflection::Reflectable)]
@@ -778,10 +779,11 @@ impl Default for VoxelCaves {
 pub struct VoxelOverhangs {
     #[property(category = "Overhangs")]
     pub enabled: bool,
-    /// Largest displacement over the heightfield.
+    /// Largest horizontal lean of the ground.
     #[property(min = 0.0, max = 20.0, step = 0.5, category = "Overhangs", label = "Height (m)")]
     pub height_m: f64,
-    #[property(min = 4.0, max = 500.0, step = 1.0, category = "Overhangs", label = "Size (m)")]
+    /// Vertical wavelength of the lean (ledge spacing).
+    #[property(min = 2.0, max = 500.0, step = 1.0, category = "Overhangs", label = "Ledge spacing (m)")]
     pub wavelength_m: f64,
     #[property(min = 0.1, max = 500.0, step = 0.1, category = "Overhangs", label = "Region size (km)")]
     pub region_km: f64,
@@ -791,7 +793,7 @@ pub struct VoxelOverhangs {
 
 impl Default for VoxelOverhangs {
     fn default() -> Self {
-        Self { enabled: true, height_m: 6.0, wavelength_m: 24.0, region_km: 3.0, share: 0.3 }
+        Self { enabled: true, height_m: 6.0, wavelength_m: 6.0, region_km: 3.0, share: 0.3 }
     }
 }
 

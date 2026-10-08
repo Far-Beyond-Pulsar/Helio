@@ -31,7 +31,8 @@ pub struct LandformVolume {
     pub caves: [i32; 4],
     /// tunnel shift, tunnel half width (Q16), cavern shift, cavern threshold (Q16).
     pub shapes: [i32; 4],
-    /// overhang amplitude (mm), shift, region shift, region threshold (Q16).
+    /// overhang amplitude (mm), lean shift (base cells), region shift, region
+    /// threshold (Q16).
     pub overhangs: [i32; 4],
     /// tunnel radius (mm), cavern size (mm), cover (mm), layer (mm).
     pub sizes: [i32; 4],
@@ -60,7 +61,12 @@ const SEED_CAVE_REGION: u32 = 0xA511_E9B3;
 const SEED_TUNNEL_A: u32 = 0x63D8_3595;
 const SEED_TUNNEL_B: u32 = 0x2B1F_4C7A;
 const SEED_CAVERN: u32 = 0x9E37_79B1;
-const SEED_OVERHANG: u32 = 0x7F4A_7C15;
+const SEED_LEAN_U: u32 = 0x7F4A_7C15;
+const SEED_LEAN_V: u32 = 0x3C6E_F372;
+/// The lean varies `2^LEAN_STRETCH` times more slowly across the ground than
+/// with height: its horizontal stretch stays far below one (a continuous
+/// deformation of the heightfield), while it bends steep ground over.
+const LEAN_STRETCH: u32 = 3;
 const SEED_OVERHANG_REGION: u32 = 0x4CF5_AD43;
 const SEED_CAVE_ENTRANCE: u32 = 0x1B87_3593;
 
@@ -95,6 +101,8 @@ impl LandformVolume {
             flags |= 1;
         }
         let overhang = if overhangs.enabled { mm(overhangs.height_m).min(200 * layer) } else { 0 };
+        // Lean wavelength in base cells (its noise is evaluated on cell indices).
+        let lean_shift = ((overhangs.wavelength_m * 1000.0 / f64::from(layer)).log2().round().clamp(1.0, 30.0)) as i32;
         if overhang > 0 {
             flags |= 2;
         }
@@ -106,7 +114,7 @@ impl LandformVolume {
         Self {
             caves: [flags, shift(caves.region_km * 1000.0), threshold(caves.share), depth],
             shapes: [shift(caves.tunnel_wavelength_m), width.clamp(0, ONE), shift(caves.cavern_wavelength_m), threshold(caves.cavern_share)],
-            overhangs: [overhang, shift(overhangs.wavelength_m), shift(overhangs.region_km * 1000.0), threshold(overhangs.share)],
+            overhangs: [overhang, lean_shift, shift(overhangs.region_km * 1000.0), threshold(overhangs.share)],
             sizes: [mm(caves.tunnel_radius_m), mm(caves.cavern_wavelength_m / 4.0), mm(caves.cover_m), layer],
             entrances: [shift(caves.entrance_spacing_m), threshold(caves.entrance_share), mm(2.0 * caves.tunnel_radius_m), mm(caves.cavern_wavelength_m / 4.0)],
         }
@@ -156,6 +164,39 @@ impl LandformVolume {
         if (a >> level) <= 2 * self.sizes[3] { 0 } else { a - ((2 * self.sizes[3]) << level) }
     }
 
+    /// Lean lattice of `level` (`TerrainField::lean`): the reach covers the
+    /// largest offset (the overhang height in level cells) and two more.
+    pub fn lean(&self, level: u32) -> (i32, i32) {
+        if self.caves[0] & 2 == 0 || (self.overhangs[0] >> level) <= 2 * self.sizes[3] {
+            return (0, 0);
+        }
+        let reach = self.overhangs[0] / self.sizes[3].wrapping_shl(level) + 2;
+        (reach, (7 + 2 * reach) / 6 + 1)
+    }
+
+    /// Horizontal offset (Q8 level cells) of the heightfield under cell
+    /// `(i, j, k)` (`TerrainField::lean_offset`): two noises of the cell's
+    /// base-cell position, stretched across the ground, scaled by the
+    /// column's overhang amplitude.
+    pub fn lean_offset(&self, p: IVec3, i: i32, j: i32, k: i32, level: u32, seed: u32) -> (i32, i32) {
+        let a = self.overhang_amplitude(p, level, seed);
+        if a == 0 {
+            return (0, 0);
+        }
+        let half = (1i32 << level) >> 1;
+        let input = IVec3::new(
+            i.wrapping_shl(level).wrapping_add(half) >> LEAN_STRETCH,
+            j.wrapping_shl(level).wrapping_add(half) >> LEAN_STRETCH,
+            k.wrapping_shl(level).wrapping_add(half),
+        );
+        let amplitude = a.wrapping_mul(256) / self.sizes[3].wrapping_shl(level);
+        let shift = self.overhangs[1] as u32;
+        (
+            scale(noise(input, shift, self.seed(seed, SEED_LEAN_U)), amplitude),
+            scale(noise(input, shift, self.seed(seed, SEED_LEAN_V)), amplitude),
+        )
+    }
+
     /// Level cells below and above the heightfield top that may differ.
     pub fn extent(&self, p: IVec3, level: u32, seed: u32) -> (i32, i32) {
         let layer = self.sizes[3];
@@ -183,7 +224,8 @@ impl LandformVolume {
     /// Noise distances are the noise's excess over its threshold divided by
     /// its slope (about 2 per wavelength). The sign is exactly the solid
     /// test's.
-    pub fn density(&self, p: IVec3, q: IVec3, level: u32, top: i32, height: i32, k: i32, seed: u32) -> i32 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn density(&self, p: IVec3, q: IVec3, level: u32, top: i32, height: i32, lean_height: i32, k: i32, seed: u32) -> i32 {
         let a = self.overhang_amplitude(p, level, seed);
         let (tunnels, caverns) = self.caves_at(level);
         if a == 0 && !tunnels && !caverns {
@@ -198,11 +240,12 @@ impl LandformVolume {
         let mut solid = k < top;
         let mut f = d.wrapping_neg();
         if a > 0 {
-            // Against a 3D displacement: the surface folds into overhangs
-            // and arches.
-            let s = scale(noise(q, self.overhangs[1] as u32, self.seed(seed, SEED_OVERHANG)), a);
-            solid = d < s;
-            f = s.wrapping_sub(d);
+            // The leaning heightfield (steep ground bends over), within the
+            // overhang height of the surface.
+            let lean = lean_height.clamp(height.wrapping_sub(a), height.wrapping_add(a));
+            let dl = k.wrapping_mul(cell).wrapping_add(cell / 2).wrapping_sub(lean);
+            solid = dl < 0;
+            f = dl.wrapping_neg();
         }
         if tunnels || caverns {
             // mm per noise unit at lattice shift s: 2^s * 12.5 mm / 2^17.
@@ -1225,8 +1268,14 @@ impl TerrainField for LandformField {
     fn extent(&self, p: IVec3, level: u32) -> (i32, i32) {
         self.volume.extent(p, level, self.seed())
     }
-    fn density(&self, p: IVec3, q: IVec3, level: u32, top: i32, height: i32, k: i32) -> i32 {
-        self.volume.density(p, q, level, top, height, k, self.seed())
+    fn lean(&self, level: u32) -> (i32, i32) {
+        self.volume.lean(level)
+    }
+    fn lean_offset(&self, p: IVec3, i: i32, j: i32, k: i32, level: u32) -> (i32, i32) {
+        self.volume.lean_offset(p, i, j, k, level, self.seed())
+    }
+    fn density(&self, p: IVec3, q: IVec3, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32 {
+        self.volume.density(p, q, level, top, height, lean_height, k, self.seed())
     }
     fn volume_bounds(&self) -> (i32, i32) {
         let flags = self.volume.caves[0];
@@ -1380,23 +1429,43 @@ mod tests {
                 break (face, i, j, top);
             }
         };
+        let block = rock_block(&grid, &field, face, ci, cj, top - 60, top + 20);
+        eprintln!("{} carved cells, {} floating", block.carved, block.floating);
+        assert!(block.carved > 100);
+        assert_eq!(block.floating, 0, "rock disconnected from the ground");
+    }
+
+    /// Generated rock of a 40x40 block of base columns centred on `(ci, cj)`,
+    /// layers `k0..k1`.
+    struct RockBlock {
+        /// Air cells under their column's heightfield top.
+        carved: usize,
+        /// Solid cells over their column's heightfield top.
+        raised: usize,
+        /// Solid cells over air in their column (ceilings, overhang lips).
+        ceilings: usize,
+        /// Solid cells the block's floor and sides do not reach through rock.
+        floating: usize,
+    }
+
+    fn rock_block(grid: &Grid, field: &LandformField, face: u8, ci: i32, cj: i32, k0: i32, k1: i32) -> RockBlock {
         const N: i32 = 40;
-        const H: i32 = 60;
-        let (k0, k1) = (top - H, top + 20);
         let size = (N * N * (k1 - k0)) as usize;
         let index = |x: i32, y: i32, z: i32| ((z * N + y) * N + x) as usize;
         let mut solid = vec![false; size];
-        let mut carved = 0;
+        let (mut carved, mut raised, mut ceilings) = (0, 0, 0);
         for y in 0..N {
             for x in 0..N {
                 let (i, j) = (ci - N / 2 + x, cj - N / 2 + y);
                 let height = field.height(grid.domain_point(face, i, j, 0), grid.level_offset());
-                let column_top = top_cells(&grid, height, 0);
+                let column_top = top_cells(grid, height, 0);
                 for z in 0..k1 - k0 {
                     let k = k0 + z;
-                    let kind = generated_kind(&grid, &field, face, i, j, k, 0, height);
+                    let kind = generated_kind(grid, field, face, i, j, k, 0, height);
                     solid[index(x, y, z)] = kind == 1;
                     carved += usize::from(kind == 0 && k < column_top);
+                    raised += usize::from(kind == 1 && k >= column_top);
+                    ceilings += usize::from(kind == 1 && z > 0 && !solid[index(x, y, z - 1)]);
                 }
             }
         }
@@ -1428,9 +1497,48 @@ mod tests {
             }
         }
         let floating = solid.iter().zip(&reached).filter(|(s, r)| **s && !**r).count();
-        eprintln!("{carved} carved cells, {floating} floating");
-        assert!(carved > 100);
-        assert_eq!(floating, 0, "rock disconnected from the ground");
+        RockBlock { carved, raised, ceilings, floating }
+    }
+
+    /// Overhangs lean steep ground over without tearing it: around steep
+    /// columns of an overhang region the rock forms ceilings over air, and
+    /// every solid cell stays connected to the ground.
+    #[test]
+    fn overhangs_lean_steep_ground_without_floating_rock() {
+        let grid = Grid::new(6_371_000.0, 0.1).unwrap();
+        let mut layers = TerrainLayers::earth();
+        layers.caves.enabled = false;
+        let field = layers.field(&grid, 7).unwrap();
+        let mut rng = 0x1D8E_4E27_C47D_124Fu64;
+        let mut next = || {
+            rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; rng
+        };
+        let (mut blocks, mut ceilings, mut raised) = (0, 0, 0);
+        let mut tries = 0;
+        while blocks < 4 {
+            tries += 1;
+            assert!(tries < 2_000_000, "no steep overhang ground found");
+            let face = (next() % 6) as u8;
+            let (i, j) = ((next() % grid.cells() as u64) as i32, (next() % grid.cells() as u64) as i32);
+            let p = grid.domain_point(face, i, j, 0);
+            if field.volume().overhang_amplitude(p, 0, field.seed()) < 3000 {
+                continue;
+            }
+            // Steep ground: over 45 degrees across a few metres.
+            let h = |di: i32, dj: i32| field.height(grid.domain_point(face, i + di, j + dj, 0), grid.level_offset());
+            let slope = (h(20, 0) - h(-20, 0)).abs().max((h(0, 20) - h(0, -20)).abs());
+            if slope < 4000 {
+                continue;
+            }
+            let top = top_cells(&grid, h(0, 0), 0);
+            let block = rock_block(&grid, &field, face, i, j, top - 80, top + 80);
+            eprintln!("block {blocks}: slope {slope} mm over 40 cells, {} ceilings, {} raised, {} floating", block.ceilings, block.raised, block.floating);
+            assert_eq!(block.floating, 0, "leaning rock disconnected from the ground");
+            ceilings += block.ceilings;
+            raised += block.raised;
+            blocks += 1;
+        }
+        assert!(ceilings > 0 && raised > 0, "steep ground did not lean over");
     }
 
     /// Densities are signed distances: positive exactly in solid cells,
@@ -1459,7 +1567,10 @@ mod tests {
             }
             let height = field.height(p, grid.level_offset());
             let top = top_cells(&grid, height, 0);
-            let density = |k: i32| field.density(p, grid.volume_point(face, i, j, k, 0), 0, top, height, k);
+            let density = |k: i32| {
+                let lean = crate::terrain::lean_height(&grid, &field, face, i, j, k, 0, height);
+                field.density(p, grid.volume_point(face, i, j, k, 0), 0, top, height, lean, k)
+            };
             let mut previous = density(top - below);
             for k in top - below + 1..top + above {
                 let d = density(k);

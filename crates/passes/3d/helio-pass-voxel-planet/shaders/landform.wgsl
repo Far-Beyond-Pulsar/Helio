@@ -45,7 +45,11 @@ const SEED_CAVE_REGION: u32 = 0xA511E9B3u;
 const SEED_TUNNEL_A: u32 = 0x63D83595u;
 const SEED_TUNNEL_B: u32 = 0x2B1F4C7Au;
 const SEED_CAVERN: u32 = 0x9E3779B1u;
-const SEED_OVERHANG: u32 = 0x7F4A7C15u;
+const SEED_LEAN_U: u32 = 0x7F4A7C15u;
+const SEED_LEAN_V: u32 = 0x3C6EF372u;
+// The lean varies 2^LEAN_STRETCH times more slowly across the ground
+// (`landform::LEAN_STRETCH`).
+const LEAN_STRETCH: u32 = 3u;
 const SEED_OVERHANG_REGION: u32 = 0x4CF5AD43u;
 const SEED_CAVE_ENTRANCE: u32 = 0x1B873593u;
 
@@ -90,6 +94,30 @@ fn landform_overhang_amplitude(p: vec3<i32>, level: u32) -> i32 {
     return a - ((2 * v[3].w) << level);
 }
 
+// Lean lattice of `level`: reach and node spacing (`LandformVolume::lean`).
+fn terrain_lean(level: u32) -> vec2<i32> {
+    let v = terrain.volume;
+    if (v[0].x & 2) == 0 || (v[2].x >> level) <= 2 * v[3].w { return vec2<i32>(0); }
+    let reach = v[2].x / (v[3].w << level) + 2;
+    return vec2<i32>(reach, (7 + 2 * reach) / 6 + 1);
+}
+
+// Horizontal offset (Q8 level cells) of the heightfield under cell
+// `(i, j, k)` (`LandformVolume::lean_offset`).
+fn terrain_lean_offset(p: vec3<i32>, i: i32, j: i32, k: i32, level: u32) -> vec2<i32> {
+    let a = landform_overhang_amplitude(p, level);
+    if a == 0 { return vec2<i32>(0); }
+    let v = terrain.volume;
+    let half = (1 << level) >> 1u;
+    let input = vec3<i32>(((i << level) + half) >> LEAN_STRETCH, ((j << level) + half) >> LEAN_STRETCH, (k << level) + half);
+    let amplitude = (a * 256) / (v[3].w << level);
+    let shift = u32(v[2].y);
+    return vec2<i32>(
+        scale_q16(noise(input, shift, landform_seed() ^ SEED_LEAN_U), amplitude),
+        scale_q16(noise(input, shift, landform_seed() ^ SEED_LEAN_V), amplitude),
+    );
+}
+
 fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> {
     let v = terrain.volume;
     let layer = v[3].w;
@@ -114,8 +142,9 @@ fn landform_noise_mm(excess: i32, shift: i32) -> i32 {
 
 // Signed distance of a cell to the surface, CSG of the surface, overhangs
 // and caves (`LandformVolume::density`); `height` is the column's field
-// height (mm), the surface the volume folds.
-fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, k: i32) -> i32 {
+// height (mm), the surface the volume folds, and `lean_height` the height
+// under the cell's lean offset (`terrain::lean_height`).
+fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32 {
     let v = terrain.volume;
     let a = landform_overhang_amplitude(p, level);
     let caves = landform_caves_at(level);
@@ -126,9 +155,11 @@ fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32
     var solid = k < top;
     var f = -d;
     if a > 0 {
-        let s = scale_q16(noise(q, u32(v[2].y), landform_seed() ^ SEED_OVERHANG), a);
-        solid = d < s;
-        f = s - d;
+        // The leaning heightfield, within the overhang height of the surface.
+        let lean = clamp(lean_height, height - a, height + a);
+        let dl = k * cell + cell / 2 - lean;
+        solid = dl < 0;
+        f = -dl;
     }
     if caves.x || caves.y {
         let depth = -d;

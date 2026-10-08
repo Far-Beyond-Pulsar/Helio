@@ -292,13 +292,17 @@ impl Default for Caves {
     }
 }
 
-/// Generated overhangs and arches: the surface displaced in 3D.
+/// Generated overhangs: steep ground leaning over, a continuous
+/// deformation of the heightfield (no floating rock).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Overhangs {
     pub enabled: bool,
-    /// Largest displacement over the heightfield.
+    /// Largest horizontal lean of the ground (and its displacement over the
+    /// heightfield).
     pub height_m: f64,
+    /// Vertical wavelength of the lean (ledge spacing); it varies eight
+    /// times more slowly across the ground.
     pub wavelength_m: f64,
     /// Size and rough share of the regions with overhangs.
     pub region_km: f64,
@@ -307,7 +311,7 @@ pub struct Overhangs {
 
 impl Default for Overhangs {
     fn default() -> Self {
-        Self { enabled: true, height_m: 6.0, wavelength_m: 24.0, region_km: 3.0, share: 0.3 }
+        Self { enabled: true, height_m: 6.0, wavelength_m: 6.0, region_km: 3.0, share: 0.3 }
     }
 }
 

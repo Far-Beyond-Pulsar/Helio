@@ -1998,7 +1998,9 @@ fn lod_compare(flight: &mut Flight, km: f64) {
 /// point, so edits pile up in one area as in a long session.
 /// The ground point of the column nearest `ground` (rings of 64 cells, up to
 /// 64 km) whose generated volume (caves, overhangs) reaches its surface.
-fn cave_region_ground(planet: &Planet, ground: DVec3) -> DVec3 {
+/// The nearest column (on a 64-cell lattice) whose generated volume extent
+/// (level cells below and above its top) passes `wanted`, 1.7 m above it.
+fn volume_region_ground(planet: &Planet, ground: DVec3, what: &str, wanted: impl Fn(u8, i32, i32, i32, i32) -> bool) -> DVec3 {
     let grid = *planet.grid();
     let (base, _) = grid.locate(ground);
     for ring in 0..1000i32 {
@@ -2010,9 +2012,10 @@ fn cave_region_ground(planet: &Planet, ground: DVec3) -> DVec3 {
             if !(0..grid.cells()).contains(&i) || !(0..grid.cells()).contains(&j) {
                 continue;
             }
-            if planet.field().extent(grid.domain_point(base.face, i, j, 0), 0).0 > 0 {
+            let (below, above) = planet.field().extent(grid.domain_point(base.face, i, j, 0), 0);
+            if wanted(base.face, i, j, below, above) {
                 let cell = helio_pass_voxel_planet::Cell::new(base.face, i, j, planet.column_top(base.face, i, j, 0));
-                eprintln!("VIEWS cave region {} m away", grid.cell_center(cell).distance(ground).round());
+                eprintln!("VIEWS {what} region {} m away", grid.cell_center(cell).distance(ground).round());
                 return planet.surface_point(grid.cell_center(cell), 1.7);
             }
         }
@@ -2081,7 +2084,21 @@ fn sculpt_stress(flight: &mut Flight, ground: DVec3, heading: f64) {
 fn capture_views(flight: &mut Flight, views: &str, ground: DVec3, heading: f64) {
     // HELIO_VOXEL_FLIGHT_VIEWS_CAVES=1: from the nearest cave region
     // (columns whose generated volume reaches the surface).
-    let mut ground = if std::env::var_os("HELIO_VOXEL_FLIGHT_VIEWS_CAVES").is_some() { cave_region_ground(&flight.planet, ground) } else { ground };
+    let mut ground = if std::env::var_os("HELIO_VOXEL_FLIGHT_VIEWS_CAVES").is_some() {
+        volume_region_ground(&flight.planet, ground, "cave", |_, _, _, below, _| below > 0)
+    } else {
+        ground
+    };
+    // HELIO_VOXEL_FLIGHT_VIEWS_OVERHANGS=1: from the nearest hillside (over
+    // 20 degrees across 4 m) of an overhang region at full strength (rock
+    // shelves, undercut ledges).
+    if std::env::var_os("HELIO_VOXEL_FLIGHT_VIEWS_OVERHANGS").is_some() {
+        let planet = flight.planet.clone();
+        ground = volume_region_ground(&flight.planet, ground, "overhang hillside", |face, i, j, _, above| {
+            let top = |di: i32, dj: i32| planet.column_top(face, i + di, j + dj, 0);
+            above >= 50 && (top(20, 0) - top(-20, 0)).abs().max((top(0, 20) - top(0, -20)).abs()) >= 15
+        });
+    }
     // HELIO_VOXEL_FLIGHT_VIEWS_MOUNTAIN=<km>: on the flank of the nearest
     // high summit, that far from it, looking at it.
     let mut range = None;
