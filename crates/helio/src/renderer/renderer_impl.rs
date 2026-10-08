@@ -92,8 +92,6 @@ pub struct Renderer {
     pub(crate) material_bindings: MaterialBindingResources,
     pub(crate) ambient_color: [f32; 3],
     pub(crate) ambient_intensity: f32,
-    pub(crate) ambient_up: [f32; 3],
-    pub(crate) ambient_ground: Option<[f32; 3]>,
     pub(crate) clear_color: [f32; 4],
     /// The configuration the current graph was built from: the recipe a
     /// rebuild (resize, a config change) hands the graph builder, so the new
@@ -616,16 +614,6 @@ impl Renderer {
     pub fn set_ambient(&mut self, color: [f32; 3], intensity: f32) {
         self.ambient_color = color;
         self.ambient_intensity = intensity;
-    }
-
-    /// Orient the hemisphere ambient: `up` is the axis the sky colour lights
-    /// (normalized here), `ground` the bounce colour for normals facing away
-    /// (`None` keeps the default, 15% of the sky colour). Hosts rendering a
-    /// planet set `up` to the local vertical at the camera.
-    pub fn set_ambient_hemisphere(&mut self, up: [f32; 3], ground: Option<[f32; 3]>) {
-        let up = glam::Vec3::from(up).try_normalize().unwrap_or(glam::Vec3::Y);
-        self.ambient_up = up.to_array();
-        self.ambient_ground = ground;
     }
 
     pub fn set_graph(&mut self, mut graph: RenderGraph) {

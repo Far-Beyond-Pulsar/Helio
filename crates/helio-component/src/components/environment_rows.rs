@@ -22,7 +22,7 @@
 //! | [`CameraPostProcessSourceRow`] | 152: the row | `helio_pass_postprocess::CameraPostProcessComponent` (152) |
 //! | [`WaterVolumeSourceRow`] | 4 size + 56: the row after its bounds | `helio_pass_water_sim::WaterVolumeComponent` (8 bounds + 56), packed into its leading rows |
 //! | [`FoliageSourceRow`] | 24 type + 4 layer + 12 wind | `helio_pass_foliage_place`'s `FoliageTypeComponent` (24), `FoliageLayerComponent` (8) and `FoliageWindComponent` (12), each packed |
-//! | [`AtmosphereSourceRow`] | 28: the row, its centre in the owner's space | `helio_pass_sky::AtmosphereComponent` (28) |
+//! | [`AtmosphereSourceRow`] | 4 centre + 16 media + 4 ground + 4 shell: the row, its centre in the owner's space | `helio_pass_sky::AtmosphereComponent` (28) |
 
 use pulsar_scenedb::gpu::GpuMirrorHandle;
 use pulsar_scenedb_derive::SceneStore;
@@ -41,15 +41,25 @@ pub const FOLIAGE_SOURCES_BUFFER: &str = "foliage_sources";
 pub const ATMOSPHERE_SOURCES_BUFFER: &str = "atmosphere_sources";
 
 /// An atmosphere (`helio_pass_sky::AtmosphereComponent` pass row, bit for
-/// bit, its centre in the owner's space: zero; the join adds the owner's
-/// position to a planet placed at its owner). `enabled` (the last word) is
-/// 0 when the authored component is disabled.
+/// bit): its centre and placement (`center`; the centre in the owner's
+/// space, zero: the join adds the owner's position to a planet placed at its
+/// owner), Rayleigh and Mie scattering, Mie and ozone absorption (`media`),
+/// ground albedo and ozone width (`ground`), and planet and atmosphere
+/// radii, sun size and enabled flag (`shell`; `enabled` 0 when the authored
+/// component is disabled). The placement and enabled words are `u32`s, kept
+/// as bits.
 #[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 #[gpu(layout = packed, buffer = "atmosphere_sources")]
 pub struct AtmosphereSourceRow {
     #[gpu]
-    pub air: [u32; 28],
+    pub center: [f32; 4],
+    #[gpu]
+    pub media: [f32; 16],
+    #[gpu]
+    pub ground: [f32; 4],
+    #[gpu]
+    pub shell: [f32; 4],
 }
 
 impl AtmosphereSourceRow {
@@ -422,9 +432,9 @@ mod tests {
         assert!(bytemuck::bytes_of(&row).iter().all(|byte| *byte == 0));
 
         let mut atmosphere = AtmosphereComponent::default();
-        assert_eq!(AtmosphereSourceRow::of(&atmosphere).air[27], 1);
+        assert_eq!(AtmosphereSourceRow::of(&atmosphere).shell[3].to_bits(), 1);
         atmosphere.enabled = false;
-        assert_eq!(AtmosphereSourceRow::of(&atmosphere).air[27], 0);
+        assert_eq!(AtmosphereSourceRow::of(&atmosphere).shell[3].to_bits(), 0);
     }
 
     #[test]
@@ -439,8 +449,8 @@ mod tests {
             bytemuck::bytes_of(&row),
             bytemuck::bytes_of(&atmosphere.to_row())
         );
-        assert_eq!(&row.air[..3], &[0; 3], "the join adds the owner's position");
-        assert_eq!(row.air[3], helio_pass_sky::atmosphere::placement::CENTER);
+        assert_eq!(&row.center[..3], &[0.0; 3], "the join adds the owner's position");
+        assert_eq!(row.center[3].to_bits(), helio_pass_sky::atmosphere::placement::CENTER);
     }
 
     #[test]

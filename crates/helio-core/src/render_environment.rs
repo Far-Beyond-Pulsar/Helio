@@ -18,13 +18,6 @@ pub struct RenderEnvironment<'a> {
     pub clear_color: [f32; 4],
     pub ambient_color: [f32; 3],
     pub ambient_intensity: f32,
-    /// Unit "up" axis of the hemisphere ambient: the sky colour lights
-    /// normals facing it, the ground colour normals facing away. World +Y for
-    /// flat scenes; the local radial direction on a planet.
-    pub ambient_up: [f32; 3],
-    /// Ground-bounce colour of the hemisphere ambient (scaled by
-    /// `ambient_intensity` like `ambient_color`).
-    pub ambient_ground: [f32; 3],
     /// Hardware ray tracing TLAS, if available. None on non-RT hardware or WASM.
     pub tlas: Option<&'a wgpu::Tlas>,
 }

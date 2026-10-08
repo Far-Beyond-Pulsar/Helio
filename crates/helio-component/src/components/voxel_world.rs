@@ -315,7 +315,7 @@ fn affected_block_centres(
                         helio_pass_voxel_planet::edits::center_half(j, 0),
                         helio_pass_voxel_planet::edits::center_half(k, 0),
                     ];
-                    if !face_brush.contains(sample) {
+                    if !face_brush.contains(sample, || grid.volume_point(face_brush.face(), i, j, k, 0)) {
                         continue;
                     }
                     let position = grid.position(
