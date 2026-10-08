@@ -66,6 +66,8 @@ fn job_index(wg: vec3<u32>) -> u32 {
 }
 
 var<workgroup> g_band: array<atomic<i32>, 2>;
+// Lowest natural top of the column's lanes (whether tops fit counting down).
+var<workgroup> g_top_min: atomic<i32>;
 var<workgroup> g_words: array<atomic<u32>, 16>;
 var<workgroup> g_masks: array<atomic<u32>, 16>;
 var<workgroup> g_any: array<atomic<u32>, 2>;
@@ -175,6 +177,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         atomicStore(&g_keep[1], 0u);
         atomicStore(&g_band[0], 0x7fffffff);
         atomicStore(&g_band[1], -0x7fffffff);
+        atomicStore(&g_top_min, 0x7fffffff);
         atomicStore(&g_any[0], 0u);
         atomicStore(&g_any[1], 0u);
         atomicStore(&g_volume, 0u);
@@ -247,6 +250,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     // lowland below datum) and each column stored the empty bricks.
     atomicMin(&g_band[0], top - 1);
     atomicMax(&g_band[1], top);
+    atomicMin(&g_top_min, top);
     // Volumetric terrain (caves, overhangs): the program may change cells
     // within its extent around the heightfield top, evaluated in 3D. Only
     // the cells it changes make generated volume: a column whose cells all
@@ -308,6 +312,11 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         k_hi = lo + i32(MAX_BAND);
     }
     let n_band = u32(k_hi - k_lo);
+    // An edited column whose natural tops no longer fit a byte above the band
+    // base (a deep dig) counts them down from the band top when they fit
+    // there (`INFO_TOPS_DOWN`).
+    let tops_down = topology_flags != 0u && n_band >= 32u && (clip & INFO_CLIP_ABOVE) == 0u
+        && k_hi * 8 - atomicLoad(&g_top_min) <= 255;
     let volume_bits = atomicLoad(&g_volume);
     let volumetric = (volume_bits & VOLUME_TERRAIN) != 0u;
     // Generated caves and overhangs keep the relief of the natural surface
@@ -343,7 +352,8 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     if wide_relief && !volumetric { atomicOr(&g_fraction[li >> 1u], fraction << ((li & 1u) * 16u)); }
     // Fractions and byte-packed tops share the existing publication barrier.
     // Disabled metadata performs no fraction atomics or extra barriers.
-    let stored_top = select(top - k_lo * 8, base_top - ((k_lo * 8) << level), inline_relief);
+    var stored_top = select(top - k_lo * 8, base_top - ((k_lo * 8) << level), inline_relief);
+    if tops_down { stored_top = k_hi * 8 - top; }
     atomicOr(&g_words[li >> 2u], u32(clamp(stored_top, 0, 255)) << ((li & 3u) * 8u));
     if surface_words {
         let word = u32(column.y) & 0xffu;
@@ -372,9 +382,11 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     var top_solid = NO_DENSITY;
     var top_air = NO_DENSITY;
     var top_fraction = 0u;
-    // The generated surface's height above its highest solid cell's centre
-    // (cells), from the densities' zero crossing.
-    var top_crossing = 0.5;
+    // Height (level cells) of the generated surface: the densities' zero
+    // crossing between the highest solid cell's centre and the air above.
+    var surface_crossing = 0.0;
+    // The air cell of that crossing.
+    var crossing_air = -0x7fffffff;
     // Lanes the overhangs fold take every evaluated cell, and their relief,
     // from the density.
     let dense_lane = leaning && changed;
@@ -388,12 +400,13 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         var kinds: array<u32, 8>;
         for (var z = 0u; z < 8u; z++) {
             let k = (k_lo + i32(b)) * 8 + i32(z);
-            var kind = terrain_kind(select(top, field_top, dense_lane), k);
+            // Cells the volume leaves keep the heightfield's kinds (with
+            // relief, its ceil top cell).
+            var kind = terrain_kind(top, k);
             if k >= eval_lo && k <= eval_hi {
                 // Overhangs fold the exact surface: their lanes take every
-                // cell, and their relief, from the density. Elsewhere (caves)
-                // a cell the volume leaves as the heightfield has it keeps the
-                // heightfield's kind (with relief, its ceil top cell).
+                // evaluated cell from the density. Elsewhere (caves) a cell
+                // the volume leaves as the heightfield has it keeps its kind.
                 let density = generated_density(column_point, face, i, j, k, level, field_top, height, leaning, lean.y, lean_node);
                 let dense = select(0u, 1u, density > 0);
                 if dense != terrain_kind(field_top, k) {
@@ -409,7 +422,8 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 } else if top_solid != NO_DENSITY && top_air == NO_DENSITY {
                     top_air = density;
                     let t = select(0.5, volume_crossing(top_solid, density), top_solid > 0);
-                    top_crossing = t;
+                    surface_crossing = f32(k) - 0.5 + t;
+                    crossing_air = k;
                     if requested_relief && t > 0.5 {
                         // The surface rises into this cell: solid, cut there.
                         kind = 1u;
@@ -508,26 +522,38 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         workgroupBarrier();
     }
     if volumetric && li < 16u { scratch[base * UNIT_WORDS + li] = atomicLoad(&g_words[li]); }
-    let density_surface = surface_changed || dense_lane;
+    // The density describes the lane's surface only when its last zero
+    // crossing is at the generated top (that air cell, or the one below when
+    // the surface rose into it): an undercut below an untouched top crossed
+    // lower, and its floor gave the top's relief and height (black specks
+    // across overhang regions).
+    let density_surface = (surface_changed || dense_lane) && top_air != NO_DENSITY
+        && (crossing_air == generated_top || crossing_air + 1 == generated_top);
     if wide_relief && volumetric {
         if density_surface { fraction = top_fraction; }
         atomicOr(&g_fraction[li >> 1u], fraction << ((li & 1u) * 16u));
     }
-    // Surface offset: the exact surface's height over the stored one (the
-    // relief's base-cell top, the level-0 top, else the level top), in
-    // 128ths of a base cell from -1 to 1. Only shading reads it (smooth
-    // normals at every level); occupancy and relief keep the voxels' grid.
-    // A density surface takes it from its zero crossing at level 0; its
-    // relief fraction carries that precision at coarser levels.
+    // Surface offset: the exact surface's height over the stored one, from -1
+    // to 1 units of its precision in 128ths (`column_surface_offset`): base
+    // cells over the relief's base-cell top or the level-0 top, level cells
+    // over a whole-cell top. Only shading reads it (smooth normals and
+    // material height at every level); occupancy keeps the voxels' grid.
+    // A density surface takes it from its zero crossing over its generated
+    // top (level cells, as a level-0 or whole-cell top is stored); a relief
+    // fraction carries that precision itself. A column with deep caves
+    // outgrows relief: its density lanes kept whole-cell tops, a staircase
+    // whose steps lit as dark dashes across distant cave regions.
     var offset = 128;
     if density_surface {
-        if level == 0u && top_air != NO_DENSITY {
-            offset = 128 + i32(round((top_crossing - 0.5) * 128.0));
+        if level == 0u || !relief {
+            offset = 128 + i32(round((surface_crossing - f32(generated_top)) * 128.0));
         }
     } else {
-        let stored = select(top << level, base_top, relief || level == 0u);
-        let above = clamp(height - stored * world.grid.y, -world.grid.y, world.grid.y);
-        offset = 128 + div_floor(above * 128, world.grid.y);
+        let base_units = relief || level == 0u;
+        let stored = select(top << level, base_top, base_units);
+        let unit = select(world.grid.y << level, world.grid.y, base_units);
+        let above = clamp(height - stored * world.grid.y, -unit, unit);
+        offset = 128 + i32(floor(f32(above) * 128.0 / f32(unit)));
     }
     atomicOr(&g_offset[li >> 2u], u32(clamp(offset, 0, 255)) << ((li & 3u) * 8u));
     workgroupBarrier();
@@ -542,7 +568,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
             | select(0u, INFO_HEIGHTFIELD, heightfield) | topology_flags
             // Generated caves and overhangs: arbitrary occupancy under a
             // natural surface, tops counting down from the band top.
-            | select(0u, INFO_GENERATED, volumetric) | clip
+            | select(0u, INFO_GENERATED, volumetric) | select(0u, INFO_TOPS_DOWN, tops_down) | clip
             | select(0u, INFO_EDIT_MATERIALS, (volume_bits & VOLUME_MATERIALS) != 0u);
         out.top = hi_cell;
         out.centre = centre;
@@ -789,7 +815,7 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         c.key1 = job.key1;
         c.k_lo = o.k_lo;
         c.info = o.n_band | (o.size_class << 18u) | (gap << 22u) | select(0u, INFO_EXT, ext)
-            | (o.pad & (INFO_RELIEF | INFO_RELIEF_INLINE | INFO_HEIGHTFIELD | INFO_TOPOLOGY | INFO_GENERATED | INFO_CLIP_BELOW | INFO_CLIP_ABOVE
+            | (o.pad & (INFO_RELIEF | INFO_RELIEF_INLINE | INFO_HEIGHTFIELD | INFO_TOPOLOGY | INFO_GENERATED | INFO_TOPS_DOWN | INFO_CLIP_BELOW | INFO_CLIP_ABOVE
                 | INFO_EDIT_MATERIALS)) | INFO_VALID;
         c.run = o.run;
         c.mixed = o.mixed[0];

@@ -811,14 +811,20 @@ fn published_tops_bound_occupancy() {
 }
 
 /// Surface offsets reconstruct the generator's exact height below voxel
-/// precision: stored height (level-0 top, or the relief's base-cell top)
-/// plus offset is the field height to 1/128 of a base cell, for the smooth
-/// shading normals of natural ground.
+/// precision: stored height plus offset is the field height to 1/128 of the
+/// stored height's precision, for the smooth shading normals and material
+/// height of natural ground. A base cell over a level-0 or relief top; a
+/// level cell over the whole-cell tops of columns without relief (here the
+/// columns a wide dig touches), whose surface once sank below its
+/// neighbours' (dark outlines around every edit).
 #[test]
 fn surface_offsets_reconstruct_the_field_height() {
     let Some(gpu) = gpu() else { return };
-    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
     let dir = land(&planet, 4, 0.37, 0.61);
+    let ground = planet.surface_point(dir, 0.0);
+    planet.apply(Brush { center: (ground + (ground.normalize().any_orthonormal_vector()) * 60.0).to_array(), radius: 40.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+    let planet = Arc::new(planet);
     let eye = planet.surface_point(dir, 30.0);
     let up = eye.normalize();
     let forward = (up.any_orthonormal_vector() - up * 0.5).normalize().as_vec3();
@@ -835,34 +841,42 @@ fn surface_offsets_reconstruct_the_field_height() {
     let (rec, pool) = (words(records), words(pool));
     let surface_units = if planet.field().program().wgsl.contains("fn terrain_surface") { 1 } else { 0 };
     let layer = planet.grid().layer_mm() as f64;
-    let (mut lanes, mut worst) = (0usize, 0.0f64);
+    let (mut lanes, mut whole, mut worst) = (0usize, 0usize, 0.0f64);
     for c in rec.chunks_exact(8) {
         let info = c[3];
-        // Valid natural columns: level 0 heightfields and inline relief.
-        if info & 0xc000_0000 != 0x8000_0000 || info & 0x1000 != 0 || info & 0x0800_0000 != 0 {
+        // Valid columns other than generated volume whose tops fit their
+        // byte: level-0 tops, inline relief, and whole-cell tops (no relief).
+        let n_band = info & 511;
+        let fits = n_band < 32 || (n_band == 32 && (info >> 22) & 7 != 0);
+        if info & 0xc000_0000 != 0x8000_0000 || info & 0x1000 != 0 || !fits {
             continue;
         }
         let level = c[0] >> 27;
-        let inline = info & 0x1000_0000 != 0 && info & 0x0400_0000 != 0;
-        if level != 0 && !inline {
+        let relief = info & 0x1000_0000 != 0;
+        let inline = relief && info & 0x0400_0000 != 0;
+        if level != 0 && relief && !inline {
             continue;
         }
+        // Units of the stored height and the offset, in base cells.
+        let unit = if level == 0 || relief { 1.0 } else { f64::from(1u32 << level) };
         let (face, ci, cj, k_lo, run) = (((c[0] >> 24) & 7) as u8, (c[0] & 0xff_ffff) as i32, c[1] as i32, c[2] as i32, c[4]);
         let ext = info & 0x2000_0000 != 0;
         let offsets = run + if ext { 2 } else { 1 } + surface_units;
         for cell in 0..64u32 {
             let byte = |unit: u32| ((pool[(unit * 16 + (cell >> 2)) as usize] >> ((cell & 3) * 8)) & 255) as i32;
-            // Stored base-cell height: the top byte above the band base.
-            let stored = ((k_lo * 8) << level) + byte(run);
-            let offset = (byte(offsets) - 128) as f64 / 128.0;
+            // Stored height (base cells): the top byte above the band base,
+            // in base cells (inline relief, level 0) or level cells.
+            let stored = if unit == 1.0 { f64::from(((k_lo * 8) << level) + byte(run)) } else { f64::from(k_lo * 8 + byte(run)) * unit };
+            let offset = (byte(offsets) - 128) as f64 / 128.0 * unit;
             let (i, j) = (ci * 8 + (cell & 7) as i32, cj * 8 + (cell >> 3) as i32);
             let exact = planet.column_height(face, i, j, level) as f64 / layer;
-            worst = worst.max((stored as f64 + offset - exact).abs());
+            worst = worst.max((stored + offset - exact).abs() / unit);
             lanes += 1;
+            whole += usize::from(unit > 1.0);
         }
     }
-    eprintln!("{lanes} lanes, largest error {worst:.4} base cells");
-    assert!(lanes > 10_000);
+    eprintln!("{lanes} lanes ({whole} over whole-cell tops), largest error {worst:.4} of a stored unit");
+    assert!(lanes > 10_000 && whole > 64);
     assert!(worst <= 1.0 / 128.0 + 1e-9, "{worst}");
 }
 

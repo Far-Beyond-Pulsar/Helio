@@ -38,7 +38,7 @@ fn column_relief_fraction(c:Column,x:u32,y:u32)->u32 {{ return c.fraction; }}
 // Height-field receivers: every hit lies on the natural surface.
 fn column_tops_down(c:Column)->bool {{ return false; }}
 fn column_tops_known(c:Column)->bool {{ return column_tops_fit(c) || column_tops_down(c); }}
-fn natural_surface_hit(c:Column,k:i32,top:i32)->bool {{ return (c.info&INFO_TOPOLOGY)==0u; }}
+fn natural_surface_hit(h:Hit,c:Column,top:i32)->bool {{ return (c.info&INFO_TOPOLOGY)==0u; }}
 {helpers}
 @group(0) @binding(0) var<storage,read> probes:array<Probe>;
 @group(0) @binding(1) var<storage,read_write> answers:array<vec4<f32>>;

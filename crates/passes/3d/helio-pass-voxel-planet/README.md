@@ -207,6 +207,18 @@ Edit cost does not grow with the brushes piled on one spot (sculpting):
   column's brushes queried once, instead of a ray from the outer radius
   through the edit index cell by cell (426 ms at 2000 brushes before).
 
+**Natural surface of edited columns.** A column a brush touches keeps its
+natural per-cell tops: counted up from the band base, or, when a deep dig
+lowered the base more than a byte below them, down from the band top
+(`INFO_TOPS_DOWN`, as generated volume does). Before, a pit deeper than
+about 25 m lost them: its whole brush footprint showed contour ripples and
+a dark outline, and its walls grass streaks (the cut detection read
+garbage). Such columns keep no relief, so their surface offsets count level
+cells (`column_surface_offset`). In edited and generated columns the
+natural ground is the top cell, the risers of steps down to neighbours (air
+side above the neighbour's top) and ledge lips within two cells of the top;
+cave walls, ceilings and dug faces are not.
+
 **Picks.** A tool asks the pass for the terrain hit under a view point
 (`PlanetFrame::picks`): the pass copies that pixel's primary hit to a small
 readback ring, and the answer (distance along the pixel's ray and the size of

@@ -61,16 +61,24 @@ fn material_fleck(m: u32) -> u32 { return frame.materials[min(m, MATERIAL_SLOTS 
 fn material_speck_host(m: u32) -> u32 { return frame.materials[min(m, MATERIAL_SLOTS - 1u)].links.z; }
 fn material_fleck_share(m: u32) -> f32 { return f32(frame.materials[min(m, MATERIAL_SLOTS - 1u)].links.w) / 65536.0; }
 
-// Whether a hit in layer `k` of column `c` (whose top there is `top`) lies on
-// the natural ground surface: any cell of a height-field column, and the
-// generated top cell (its surface and risers) of a column with caves,
-// overhangs or edits. Cave walls, ceilings and cells below the top are not;
-// a top cell's face that a dig exposed is not either (the caller checks
-// `removed_air_neighbour`). Edited columns used to lose all natural
-// appearance: brown soil dashes and contour lines around every edit.
-fn natural_surface_hit(c: Column, k: i32, top: i32) -> bool {
-    if (c.info & (INFO_TOPOLOGY | INFO_GENERATED)) == 0u { return true; }
-    return k >= top - 1;
+// Whether hit `h` of column `c` (whose top there is `top`) lies on the
+// natural ground surface: any cell of a height-field column; in a column with
+// caves, overhangs or edits, its top cell and the risers of the steps down
+// to its neighbours (side faces whose air side lies above the neighbour's
+// top). Cave walls (their air side lies below it), ceilings and other cells
+// are not; a face that a dig exposed is not either (the caller checks
+// `removed_air_neighbour`). Undersides within two cells of the top are the
+// lips of ledges the overhangs lean out (as thin as the level shows them);
+// deeper ones (cave ceilings, thick roofs) are not. Edited columns used to
+// lose all natural appearance (brown soil dashes and contour lines around
+// every edit), and cave-region risers below the top cell were lit as crisp
+// walls: dark, self-shadowed specks across every coarse hillside.
+fn natural_surface_hit(h: Hit, c: Column, top: i32) -> bool {
+    if (c.info & (INFO_TOPOLOGY | INFO_GENERATED)) == 0u || h.k >= top - 1 { return true; }
+    let code = (h.info >> 10u) & 7u;
+    if code == 5u { return h.k >= top - 3; }
+    if code >= 4u { return false; }
+    return h.k >= air_side_top(h, c, (h.info >> 2u) & 7u, (h.info >> 5u) & 31u, code, top);
 }
 
 // Natural material filtering for a hit in layer `k` of column `c` (top
@@ -78,9 +86,9 @@ fn natural_surface_hit(c: Column, k: i32, top: i32) -> bool {
 // cave and overhang columns (`natural_surface_hit`). Those got edit-cut
 // appearance: grass risers showed bare soil under a thin lip, brown stripes
 // down every gentle slope of a cave region.
-fn natural_material_at(edited: bool, c: Column, k: i32, top: i32) -> bool {
+fn natural_material_at(edited: bool, natural_hit: bool, c: Column) -> bool {
     return natural_material_filter_allowed(edited, c)
-        || (!edited && (c.info & (INFO_TOPOLOGY | INFO_GENERATED)) != 0u && natural_surface_hit(c, k, top));
+        || (!edited && (c.info & (INFO_TOPOLOGY | INFO_GENERATED)) != 0u && natural_hit);
 }
 
 fn natural_material_filter_allowed(edited: bool, c: Column) -> bool {
@@ -349,9 +357,9 @@ fn ground_field(face: u32, s: u32, base: vec2<i32>, home: u32, home_column: vec2
         let f = column_relief_fraction(m, x, y);
         let top = column_top(m, x, y);
         // Height above the top cell's top (cells): the relief's cut plus the
-        // surface offset (base cells).
+        // surface offset.
         let below = select(0.0, f32(i32(f) - 65536) / 65536.0, f != 0u)
-            + column_surface_offset(m, x, y) / f32(1u << s);
+            + column_surface_offset(m, x, y, s);
         heights[n] = top * 65536 + i32(round(below * 65536.0));
         if n == 5 { height0 = (top << s) * world.grid.y + i32(round(below * mm_per_cell)); }
     }
@@ -511,9 +519,12 @@ fn removed_air_neighbour(h: Hit, c: Column, face: u32, level: u32, code: u32) ->
         if record == NONE { return false; }
         neighbour = records[record];
     }
-    if !column_valid(neighbour) || !column_tops_known(neighbour) || (neighbour.info & INFO_TOPOLOGY) == 0u { return false; }
-    let base_top = column_top(neighbour, u32(ij.x & 7), u32(ij.y & 7));
-    if terrain_kind(base_top, h.k) == 0u { return false; }
+    if !column_valid(neighbour) || (neighbour.info & INFO_TOPOLOGY) == 0u { return false; }
+    // Air the heightfield had is not a cut. A deep dig's band outgrows the
+    // tops' byte: then the Remove brush covering the (now air) cell alone
+    // proves it (without it, every wall column of a deep pit showed grass).
+    if column_tops_known(neighbour)
+        && terrain_kind(column_top(neighbour, u32(ij.x & 7), u32(ij.y & 7)), h.k) == 0u { return false; }
     let centre = vec3<i32>(center_half(ij.x, level), center_half(ij.y, level), center_half(h.k, level));
     return latest_edit(neighbour.edits, level, centre, domain_point(face, ij.x, ij.y, level), OPS_REMOVE) != NONE;
 }
@@ -574,7 +585,8 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // A face a dig exposed (its air-side cell was removed) shows the cut.
     let exposed = (c.info & INFO_TOPOLOGY) != 0u && c.edits != 0u && code < 4u
         && removed_air_neighbour(h, c, face, level, code);
-    let natural_material = natural_material_at(edited, c, h.k, top) && !exposed;
+    let natural_hit = natural_surface_hit(h, c, top);
+    let natural_material = natural_material_at(edited, natural_hit, c) && !exposed;
     var speck = false;
     var slope = 0;
     var debug_depth = 0;
@@ -626,8 +638,13 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // edges are not visible authored voxels.
     let appearance_w = max(coarse_w, base_filter_w);
     // Generated base tops do not describe edit walls, cave ceilings or floors.
-    let smooth_w = select(0.0, base_filter_w * smooth_face_weight(code, size / pixel, selected_level),
-        natural_surface_hit(c, h.k, top) && !exposed && !built);
+    // A natural underside (a ledge's lip) faces down: filtered, it stands for
+    // the ground's slope like a riser (unfiltered lips one or two pixels wide
+    // were black specks under every leaning ledge of a hillside seen from
+    // below); resolved, it keeps its own shadowed face.
+    let ledge_lip = code == 5u && natural_hit;
+    let face_w = select(smooth_face_weight(code, size / pixel, selected_level), 1.0, ledge_lip);
+    let smooth_w = select(0.0, base_filter_w * face_w, natural_hit && !exposed && !built);
     // A grazing face can have subpixel area while its long edge is resolved.
     // Keep the resolved face normal. Pigment and corner occlusion can alias
     // along the compressed axis even while that face's long edge is resolved.
@@ -636,7 +653,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // softness`, appearance detail.w), cast no step shadows and keep turf on
     // their risers, so they read as voxel texture instead of black contour
     // lines. Edits and cave walls keep crisp faces.
-    let natural_step = !edited && !exposed && natural_surface_hit(c, h.k, top);
+    let natural_step = !edited && !exposed && natural_hit && !ledge_lip;
     let soft_w = select(0.0, frame.detail.w, natural_step);
     let shade_smooth_w = max(smooth_w, soft_w);
     let ao_appearance_w = max(max(appearance_w, soft_w), detail_filter_weight(size / pixel * projection.x));
@@ -681,7 +698,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
         // subsoil (stone at coarse levels): grey bands sweeping with the LOD
         // rings. Proven edit cuts use their own column's depth instead.
         var depth = select(max(min(top, lowest) - 1 - h.k, 0) << level, 0, code < 4u);
-        if column_tops_down(c) {
+        if column_generated(c) {
             // Generated caves and overhangs: tops are the generated tops, so
             // depth counts from the air side's top. Cave walls, floors and
             // ceilings are buried; natural risers and lips are surface.
@@ -841,7 +858,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
             // Column kinds: generated volume red, edit topology orange,
             // relief green, plain blue.
             var kind_colour = vec3<f32>(0.2, 0.3, 0.9);
-            if column_tops_down(c) { kind_colour = vec3<f32>(0.9, 0.2, 0.2); }
+            if column_generated(c) { kind_colour = vec3<f32>(0.9, 0.2, 0.2); }
             else if (c.info & INFO_TOPOLOGY) != 0u { kind_colour = vec3<f32>(0.9, 0.6, 0.1); }
             else if (c.info & INFO_RELIEF) != 0u { kind_colour = vec3<f32>(0.2, 0.8, 0.2); }
             albedo = kind_colour * (0.45 + 0.55 * shade_smooth_w);
@@ -882,7 +899,7 @@ struct SunSample {
 // than adding whole cells and overshooting the surface by that fraction.
 fn filtered_shadow_lift(c: Column, h: Hit, r: Ray) -> f32 {
     if !column_tops_known(c) { return 0.0; }
-    if !natural_surface_hit(c, h.k, column_top(c, u32(h.i & 7), u32(h.j & 7))) { return 0.0; }
+    if !natural_surface_hit(h, c, column_top(c, u32(h.i & 7), u32(h.j & 7))) { return 0.0; }
     let level = (h.info >> 5u) & 31u;
     var fraction = 0u;
     if (c.info & INFO_RELIEF) != 0u {

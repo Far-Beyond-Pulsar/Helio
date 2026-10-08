@@ -109,6 +109,13 @@ const INFO_EDIT_MATERIALS: u32 = 0x800u;
 // them. Its untouched surface is natural terrain; only INFO_TOPOLOGY (edit
 // cuts) marks a cut.
 const INFO_GENERATED: u32 = 0x1000u;
+// Per-cell tops count down from the band top: generated volume always, and
+// an edited column whose band outgrew counting up (a deep dig lowers the
+// band base hundreds of cells below its natural tops, which stay within a
+// byte of the band top). Without it such a column lost its natural surface:
+// its relief, ground normals, materials and cut detection read garbage
+// (contour ripples, a dark outline and grass streaks down deep pits).
+const INFO_TOPS_DOWN: u32 = 0x2000u;
 const UNIT_WORDS: u32 = 16u;
 const MAX_PROBES: u32 = 64u;
 
@@ -195,14 +202,19 @@ fn offset_unit(c: Column) -> u32 {
     return surface_unit(c) + select(0u, 1u, world.sphere.w != 0u);
 }
 
-// Height of the exact surface of column cell (x, y) over its stored height
-// (the relief's base-cell top, the level-0 top, else the level top), in
-// base cells from -1 to 1: the generator's surface below voxel precision,
-// for smooth shading. Occupancy never reads it.
-fn column_surface_offset(c: Column, x: u32, y: u32) -> f32 {
+// Height of the exact surface of column cell (x, y) of `level` over its
+// stored height, in level cells: the generator's surface below voxel
+// precision, for smooth shading. Occupancy never reads it. The byte holds
+// -1..1 units of the stored height's precision: a base cell over a relief or
+// level-0 top, a level cell over a whole-cell top (edited columns keep no
+// relief; base-cell units could not reach their surface, whose ground then
+// sank below its neighbours': dark column outlines around every edit).
+fn column_surface_offset(c: Column, x: u32, y: u32, level: u32) -> f32 {
     let cell = x + y * 8u;
     let word = pool[(c.run + offset_unit(c)) * UNIT_WORDS + (cell >> 2u)];
-    return (f32((word >> ((cell & 3u) * 8u)) & 0xffu) - 128.0) / 128.0;
+    let units = (f32((word >> ((cell & 3u) * 8u)) & 0xffu) - 128.0) / 128.0;
+    let base_units = (c.info & INFO_RELIEF) != 0u || level == 0u;
+    return select(units, units / f32(1u << level), base_units);
 }
 
 fn surface_unit(c: Column) -> u32 {
@@ -247,6 +259,10 @@ fn brick_bit(unit: u32, x: u32, y: u32, z: u32) -> bool {
 }
 
 fn column_tops_down(c: Column) -> bool {
+    return (c.info & (INFO_GENERATED | INFO_TOPS_DOWN)) != 0u;
+}
+
+fn column_generated(c: Column) -> bool {
     return (c.info & INFO_GENERATED) != 0u;
 }
 
