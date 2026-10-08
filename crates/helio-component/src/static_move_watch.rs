@@ -123,6 +123,40 @@ mod tests {
         assert!(watch.poll(&world).is_empty());
     }
 
+    /// An overflowed journal reports nothing it cannot attribute, then the
+    /// watch carries on from the newest entry.
+    #[test]
+    fn an_overflow_skips_the_evicted_moves_and_carries_on() {
+        let mut world = World::new();
+        let fixed = object(&mut world, Movability::Static);
+        let movable = object(&mut world, Movability::Movable);
+        let mut watch = StaticMoveWatch::new(&world);
+
+        for _ in 0..=pulsar_scenedb::change_journal::DEFAULT_JOURNAL_CAPACITY {
+            nudge(&mut world, movable);
+        }
+        nudge(&mut world, fixed);
+        assert!(watch.poll(&world).is_empty(), "overflowed: nothing attributed");
+
+        nudge(&mut world, fixed);
+        assert_eq!(watch.poll(&world), vec![fixed]);
+    }
+
+    /// A watch handed a replacement world (a level load) follows the new
+    /// world from its next poll on.
+    #[test]
+    fn a_replaced_world_is_followed_from_the_next_poll() {
+        let mut world = World::new();
+        object(&mut world, Movability::Static);
+        let mut watch = StaticMoveWatch::new(&world);
+
+        let mut replacement = World::new();
+        let fixed = object(&mut replacement, Movability::Static);
+        assert!(watch.poll(&replacement).is_empty(), "rebinds to the new world");
+        nudge(&mut replacement, fixed);
+        assert_eq!(watch.poll(&replacement), vec![fixed]);
+    }
+
     /// The movability its mesh and light instances author fixes an object;
     /// one movable instance does not free it.
     #[test]
