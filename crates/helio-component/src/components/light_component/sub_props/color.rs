@@ -1,6 +1,5 @@
 use engine_class_derive::engine_class;
 use serde_json::Value;
-use std::collections::HashMap;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Color", category_color = "#FF8AAE")]
@@ -71,34 +70,4 @@ impl ColorLightProps {
         }
     }
 
-    pub(crate) fn apply_to_scene_props(&self, out: &mut HashMap<String, Value>) {
-        out.insert(
-            "color".to_string(),
-            serde_json::json!([self.color[0], self.color[1], self.color[2], self.color[3]]),
-        );
-        out.insert(
-            "use_temperature".to_string(),
-            Value::from(self.use_temperature),
-        );
-        out.insert(
-            "temperature_kelvin".to_string(),
-            Value::from(self.temperature_kelvin),
-        );
-        out.insert(
-            "temperature_tint".to_string(),
-            Value::from(self.temperature_tint),
-        );
-        out.insert(
-            "color_saturation".to_string(),
-            Value::from(self.color_saturation),
-        );
-        out.insert(
-            "color_contrast".to_string(),
-            Value::from(self.color_contrast),
-        );
-        out.insert(
-            "use_physical_light_color".to_string(),
-            Value::from(self.use_physical_light_color),
-        );
-    }
 }

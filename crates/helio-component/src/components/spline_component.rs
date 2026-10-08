@@ -7,12 +7,9 @@
 //! and the renderer draws it from the World in the editor's debug overlay
 //! ([`spline_debug_lines`]) instead of the UI painting it over the viewport.
 
-use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
+use engine_class_derive::{engine_class, register_world_component};
 use glam::Vec3;
-use pulsar_reflection::{
-    pulsar_type, ComponentRuntimeBehavior, ComponentRuntimeContext, ReflectError, ReflectResult,
-    Reflectable, RuntimeComponentOwner,
-};
+use pulsar_reflection::{pulsar_type, ReflectError, ReflectResult, Reflectable};
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub const SPLINE_CLASS_NAME: &str = "SplineComponent";
@@ -449,18 +446,7 @@ impl SplineComponent {
 // The World value is the curve; nothing is pushed anywhere else. The
 // renderer reads it back through `spline_debug_lines`.
 #[register_world_component]
-#[register_runtime_behavior]
-impl ComponentRuntimeBehavior for SplineComponent {
-    const CLASS_NAME: &'static str = SPLINE_CLASS_NAME;
-
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-    }
-}
+impl SplineComponent {}
 
 const CURVE_COLOR: [f32; 4] = [0.55, 0.62, 0.72, 1.0];
 const SELECTED_CURVE_COLOR: [f32; 4] = [1.0, 0.72, 0.16, 1.0];
@@ -471,15 +457,17 @@ const TANGENT_COLOR: [f32; 4] = [0.35, 0.85, 1.0, 0.8];
 /// editor overlay: the sampled curve, plus control points, control polygon
 /// and tangent handles on selected splines.
 pub fn spline_debug_lines(world: &pulsar_scenedb::World) -> Vec<helio::DebugVertex> {
+    use pulsar_scene_model::attachments;
     let mut lines = Vec::new();
-    for (entity, spline) in world.query::<&SplineComponent>() {
+    // Each enabled spline instance, drawn with its owner object's transform.
+    for (_, owner, spline) in attachments::enabled_components::<SplineComponent>(world) {
         if world
-            .get::<pulsar_scene_model::Visibility>(entity)
+            .get::<pulsar_scene_model::Visibility>(owner)
             .is_some_and(|v| !v.visible)
         {
             continue;
         }
-        let Some(transform) = world.get::<pulsar_scene_model::Transform>(entity) else {
+        let Some(transform) = world.get::<pulsar_scene_model::Transform>(owner) else {
             continue;
         };
         if !spline.is_valid() {
@@ -495,10 +483,84 @@ pub fn spline_debug_lines(world: &pulsar_scenedb::World) -> Vec<helio::DebugVert
             ),
             Vec3::from_array(transform.position),
         );
-        let selected = world.get::<pulsar_scene_model::Selected>(entity).is_some();
+        let selected = world.get::<pulsar_scene_model::Selected>(owner).is_some();
         append_spline_lines(&mut lines, spline, model, selected);
     }
     lines
+}
+
+/// The editor's spline lines, rebuilt only when what they show changed.
+///
+/// Reads SceneDB's change journal (its own cursors, so no other reader is
+/// affected) for spline values, attachment state, and the transforms,
+/// visibility and selection of spline owners. Edits to anything else do not
+/// rebuild the lines.
+pub struct SplineLines {
+    cursors: Vec<pulsar_scenedb::ChangeCursor>,
+    /// Spline instances and their owners at the last build.
+    watched: std::collections::HashSet<pulsar_scenedb::Entity>,
+    /// The world revision at the last poll; a smaller one means the world
+    /// was replaced, and the cursors with it.
+    revision: u64,
+    built: bool,
+    scratch: Vec<pulsar_scenedb::ComponentChange>,
+}
+
+impl SplineLines {
+    pub fn new(world: &pulsar_scenedb::World) -> Self {
+        use pulsar_scene_model::{attachments::ComponentOwner, Selected, Transform, Visibility};
+        Self {
+            cursors: vec![
+                world.open_change_cursor::<SplineComponent>(),
+                world.open_change_cursor::<ComponentOwner>(),
+                world.open_change_cursor::<Transform>(),
+                world.open_change_cursor::<Visibility>(),
+                world.open_change_cursor::<Selected>(),
+            ],
+            watched: Default::default(),
+            revision: world.revision(),
+            built: false,
+            scratch: Vec::new(),
+        }
+    }
+
+    /// The lines to draw, when they changed since the last poll.
+    pub fn poll(&mut self, world: &pulsar_scenedb::World) -> Option<Vec<helio::DebugVertex>> {
+        if world.revision() < self.revision {
+            *self = Self::new(world);
+        }
+        self.revision = world.revision();
+        let mut dirty = !self.built;
+        for (index, cursor) in self.cursors.iter_mut().enumerate() {
+            self.scratch.clear();
+            if world.read_changes(cursor, &mut self.scratch)
+                == pulsar_scenedb::ChangeRead::Overflowed
+            {
+                dirty = true;
+            }
+            // Any spline change counts; other kinds count on a watched entity
+            // or on a spline instance (one newly attached or re-enabled).
+            dirty |= self.scratch.iter().any(|change| {
+                index == 0
+                    || self.watched.contains(&change.entity)
+                    || world.get::<SplineComponent>(change.entity).is_some()
+            });
+        }
+        if !dirty {
+            return None;
+        }
+        self.built = true;
+        self.watched.clear();
+        for (instance, _) in world.query::<&SplineComponent>() {
+            self.watched.insert(instance);
+            if let Some(owner) =
+                world.get::<pulsar_scene_model::attachments::ComponentOwner>(instance)
+            {
+                self.watched.insert(owner.entity());
+            }
+        }
+        Some(spline_debug_lines(world))
+    }
 }
 
 fn append_spline_lines(
@@ -517,7 +579,11 @@ fn append_spline_lines(
             });
         }
     };
-    let curve_color = if selected { SELECTED_CURVE_COLOR } else { CURVE_COLOR };
+    let curve_color = if selected {
+        SELECTED_CURVE_COLOR
+    } else {
+        CURVE_COLOR
+    };
     let samples: Vec<Vec3> = spline.samples().into_iter().map(world_point).collect();
     for pair in samples.windows(2) {
         segment(pair[0], pair[1], curve_color);
@@ -525,12 +591,20 @@ fn append_spline_lines(
     if !selected {
         return;
     }
-    let controls: Vec<Vec3> = spline.points.iter().map(|p| world_point(p.position)).collect();
+    let controls: Vec<Vec3> = spline
+        .points
+        .iter()
+        .map(|p| world_point(p.position))
+        .collect();
     for pair in controls.windows(2) {
         segment(pair[0], pair[1], CONTROL_POLYGON_COLOR);
     }
     if spline.closed && controls.len() > 2 {
-        segment(controls[controls.len() - 1], controls[0], CONTROL_POLYGON_COLOR);
+        segment(
+            controls[controls.len() - 1],
+            controls[0],
+            CONTROL_POLYGON_COLOR,
+        );
     }
     // Control points as small crosses, sized to the curve's own scale.
     let extent = controls
@@ -545,11 +619,21 @@ fn append_spline_lines(
             segment(*p - axis * r, *p + axis * r, SELECTED_CURVE_COLOR);
         }
     }
-    if matches!(spline.algorithm, CurveAlgorithm::Bezier | CurveAlgorithm::Hermite) {
+    if matches!(
+        spline.algorithm,
+        CurveAlgorithm::Bezier | CurveAlgorithm::Hermite
+    ) {
         for p in &spline.points {
             let at = Vec3::from_array(p.position);
-            for handle in [at - Vec3::from_array(p.arrive), at + Vec3::from_array(p.leave)] {
-                segment(world_point(p.position), world_point(handle.to_array()), TANGENT_COLOR);
+            for handle in [
+                at - Vec3::from_array(p.arrive),
+                at + Vec3::from_array(p.leave),
+            ] {
+                segment(
+                    world_point(p.position),
+                    world_point(handle.to_array()),
+                    TANGENT_COLOR,
+                );
             }
         }
     }
@@ -653,5 +737,37 @@ mod tests {
         append_spline_lines(&mut selected, &spline, glam::Mat4::IDENTITY, true);
         assert!(!plain.is_empty() && plain.len() % 2 == 0);
         assert!(selected.len() > plain.len());
+    }
+
+    #[test]
+    fn spline_lines_rebuild_only_when_a_spline_or_its_owner_changes() {
+        use pulsar_scene_model::{world_ext::SceneWorldExt, SpawnObject, Transform, Visibility};
+        let mut world = pulsar_scenedb::World::new();
+        let curve = world.spawn_object(SpawnObject::new("curve")).unwrap();
+        let bystander = world.spawn_object(SpawnObject::new("bystander")).unwrap();
+        let spline = pulsar_world_registry::attach_value(&mut world, curve, line()).unwrap();
+        let mut lines = SplineLines::new(&world);
+
+        let first = lines.poll(&world).expect("the first poll builds");
+        assert!(!first.is_empty());
+        assert!(lines.poll(&world).is_none(), "nothing changed");
+
+        world.get_mut::<Transform>(bystander).unwrap().position = [5.0, 0.0, 0.0];
+        assert!(lines.poll(&world).is_none(), "an unrelated object moved");
+
+        world.get_mut::<Transform>(curve).unwrap().position = [5.0, 0.0, 0.0];
+        let moved = lines.poll(&world).expect("the owner moved");
+        assert_ne!(moved[0].position, first[0].position);
+
+        world.get_mut::<SplineComponent>(spline).unwrap().points[1].position = [0.0, 0.0, 9.0];
+        assert!(lines.poll(&world).is_some(), "the curve changed");
+
+        world.get_mut::<Visibility>(curve).unwrap().visible = false;
+        assert_eq!(lines.poll(&world).map(|l| l.len()), Some(0), "hidden");
+        world.get_mut::<Visibility>(curve).unwrap().visible = true;
+        assert!(lines.poll(&world).is_some_and(|l| !l.is_empty()));
+
+        pulsar_scene_model::attachments::set_enabled(&mut world, spline, false);
+        assert_eq!(lines.poll(&world).map(|l| l.len()), Some(0), "disabled");
     }
 }

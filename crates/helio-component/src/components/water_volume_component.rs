@@ -1,20 +1,18 @@
 //! Water volume component (Phase D, Pulsar-Native#558) — heightfield-sim
 //! water rendering (waves, reflections, caustics, underwater fog).
 //!
-//! Helio already has full native support for this
-//! (`Scene::insert_water_volume`/`update_water_volume`/`remove_water_volume`,
-//! `WaterVolumeDescriptor`) — same shape as `ReflectionCaptureComponent`,
-//! the gap this closes is purely the author-facing `#[engine_class]`
-//! wrapper.
+//! The component authors a `size` centred on its owner rather than world
+//! AABB corners, so the owner's transform stays the only placement. It
+//! derives a `WaterVolumeSourceRow` in the owner's space
+//! (`environment_rows`); the renderer's environment join places it with the
+//! owner's transform and packs placed volumes into the leading rows of
+//! `"water_volumes"`, which the water simulation, surface and caustics read
+//! (Pulsar-Native#1035, Phase 4).
 //!
-//! `WaterVolumeDescriptor` authors `bounds_min`/`bounds_max` as absolute
-//! world-space AABB corners. That's redundant with the scene's own
-//! transform system and would desync the moment someone moves the owning
-//! object without also editing two raw coordinate fields by hand, so this
-//! component instead exposes `size` (centered on the owning object's
-//! position) and derives the AABB from `owner.position` every sync pass —
-//! matching how every other component in this crate treats the owning
-//! object's transform as authoritative, not a field to duplicate.
+//! The water pass simulates with pass-wide dynamics (`WaterSimPass`'s wave
+//! spring, damping, scale and wind setters). The per-volume `wave_spring`,
+//! `wave_damping`, `wave_scale` and wind fields are carried in the row but
+//! the simulation does not read them.
 //!
 //! Not covered here: `WaterHitboxDescriptor`. Read its own doc before
 //! assuming it belongs alongside this component — it explicitly records an
@@ -26,14 +24,9 @@
 //! is a different kind of integration than "one component, one purpose"
 //! placement. Deferred, not overlooked.
 
-use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
+use engine_class_derive::{engine_class, register_world_component};
 use helio_pass_water_sim::GpuWaterVolume;
-use pulsar_reflection::{
-    get_subsystem, ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner,
-};
 use serde::{Deserialize, Serialize};
-
-use crate::subsystems::PendingWorldWrites;
 
 pub const WATER_VOLUME_CLASS_NAME: &str = "WaterVolumeComponent";
 
@@ -235,144 +228,103 @@ impl Default for WaterVolumeComponent {
 }
 
 impl WaterVolumeComponent {
-    fn to_gpu(&self, owner: &RuntimeComponentOwner) -> GpuWaterVolume {
-        let [cx, cy, cz] = owner.position;
+    /// The water volume row for an unrotated, unscaled owner at the origin.
+    /// The renderer places it with the owner's transform.
+    pub fn local_gpu(&self) -> GpuWaterVolume {
         let [sx, sy, sz] = self.size;
         GpuWaterVolume {
-            bounds_min: [cx - sx * 0.5, cy - sy * 0.5, cz - sz * 0.5, 0.0],
-            bounds_max: [cx + sx * 0.5, cy + sy * 0.5, cz + sz * 0.5, cy + self.surface_height_offset],
-            wave_params: [self.wave_amplitude, self.wave_frequency, self.wave_speed, self.wave_steepness],
+            bounds_min: [-sx * 0.5, -sy * 0.5, -sz * 0.5, 0.0],
+            bounds_max: [sx * 0.5, sy * 0.5, sz * 0.5, self.surface_height_offset],
+            wave_params: [
+                self.wave_amplitude,
+                self.wave_frequency,
+                self.wave_speed,
+                self.wave_steepness,
+            ],
             wave_direction: [self.wave_direction_x, self.wave_direction_z, 0.0, 0.0],
-            water_color: [self.water_color[0], self.water_color[1], self.water_color[2], self.foam_threshold],
-            extinction: [self.extinction[0], self.extinction[1], self.extinction[2], self.foam_amount],
-            reflection_refraction: [self.reflection_strength, self.refraction_strength, self.fresnel_power, 0.0],
-            caustics_params: [self.caustics_enabled as u32 as f32, self.caustics_intensity, self.caustics_scale, self.caustics_speed],
+            water_color: [
+                self.water_color[0],
+                self.water_color[1],
+                self.water_color[2],
+                self.foam_threshold,
+            ],
+            extinction: [
+                self.extinction[0],
+                self.extinction[1],
+                self.extinction[2],
+                self.foam_amount,
+            ],
+            reflection_refraction: [
+                self.reflection_strength,
+                self.refraction_strength,
+                self.fresnel_power,
+                0.0,
+            ],
+            caustics_params: [
+                self.caustics_enabled as u32 as f32,
+                self.caustics_intensity,
+                self.caustics_scale,
+                self.caustics_speed,
+            ],
             fog_params: [self.fog_density, self.god_rays_intensity, 0.0, 0.0],
-            sim_params: [self.ior, self.caustics_intensity, self.fresnel_min, self.density],
+            sim_params: [
+                self.ior,
+                self.caustics_intensity,
+                self.fresnel_min,
+                self.density,
+            ],
             shadow_params: [self.shadow_rim, self.shadow_hitbox, self.shadow_ao, 0.0],
-            sun_direction: [self.sun_direction[0], self.sun_direction[1], self.sun_direction[2], 0.0],
-            ssr_params: [self.ssr_enabled as u32 as f32, self.ssr_steps.max(0) as f32, self.ssr_step_size, self.ssr_thickness],
+            sun_direction: [
+                self.sun_direction[0],
+                self.sun_direction[1],
+                self.sun_direction[2],
+                0.0,
+            ],
+            ssr_params: [
+                self.ssr_enabled as u32 as f32,
+                self.ssr_steps.max(0) as f32,
+                self.ssr_step_size,
+                self.ssr_thickness,
+            ],
             sim_dynamics: [self.wave_spring, self.wave_damping, 0.0, 0.0],
-            wind_params: [self.wind_direction_x, self.wind_direction_z, self.wind_strength, 0.0],
+            wind_params: [
+                self.wind_direction_x,
+                self.wind_direction_z,
+                self.wind_strength,
+                0.0,
+            ],
             _pad6: [0.0; 4],
         }
     }
 }
 
 #[register_world_component]
-#[register_runtime_behavior]
-impl ComponentRuntimeBehavior for WaterVolumeComponent {
-    const CLASS_NAME: &'static str = WATER_VOLUME_CLASS_NAME;
-
-    fn sync_component(
-        owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        component: &Self,
-        context: &mut dyn ComponentRuntimeContext,
-    ) {
-        // SceneDB-only: `helio_pass_water_sim::WaterVolumeComponent` is the
-        // only thing `WaterSimPass`/`DeferredLightPass` read. Queued via
-        // `PendingWorldWrites` -- see that type's doc for why `sync_component`
-        // can't `World::insert` directly (it runs under the sync pass's read
-        // lock).
-        let Some(entity) = context
-            .subsystems_mut()
-            .get_mut::<pulsar_scenedb::Entity>()
-            .copied()
-        else {
-            return;
-        };
-        let writes = get_subsystem!(context, PendingWorldWrites);
-        if !component.enabled {
-            writes.push(move |world| {
-                world.remove::<helio_pass_water_sim::WaterVolumeComponent>(entity);
-            });
-            return;
-        }
-        let gpu = component.to_gpu(owner);
-        let packed = helio_pass_water_sim::WaterVolumeComponent::from(gpu);
-        writes.push(move |world| {
-            world.insert(entity, packed);
-        });
-    }
-}
+impl WaterVolumeComponent {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine_subsystems::{Subsystem, SubsystemContext};
-    use pulsar_reflection::{apply_runtime_behavior_for_class, Subsystems};
-    use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
-
-    struct TestRuntimeContext {
-        project_root: PathBuf,
-        subsystems: Subsystems,
-        errors: Vec<String>,
-    }
-
-    impl ComponentRuntimeContext for TestRuntimeContext {
-        fn subsystems_mut(&mut self) -> &mut Subsystems {
-            &mut self.subsystems
-        }
-        fn project_root(&self) -> &Path {
-            &self.project_root
-        }
-        fn report_error(&mut self, message: String) {
-            self.errors.push(message);
-        }
-    }
-
-    fn owner<'a>(props: &'a HashMap<String, serde_json::Value>) -> RuntimeComponentOwner<'a> {
-        RuntimeComponentOwner {
-            scene_object_id: "lake",
-            position: [0.0, 0.0, 0.0],
-            rotation: [0.0; 3],
-            scale: [1.0; 3],
-            props,
-        }
-    }
 
     #[test]
-    fn runtime_behavior_has_the_reflected_component_name() {
+    fn registers_under_its_class_name() {
         assert_eq!(
-            <WaterVolumeComponent as ComponentRuntimeBehavior>::CLASS_NAME,
-            WATER_VOLUME_CLASS_NAME
+            pulsar_world_registry::component_id_for_class(WATER_VOLUME_CLASS_NAME),
+            Some(pulsar_scenedb::component_id::<WaterVolumeComponent>())
         );
     }
 
     #[test]
-    fn to_descriptor_centers_bounds_on_owner_position() {
-        let component = WaterVolumeComponent { size: [10.0, 4.0, 10.0], ..Default::default() };
-        let props = HashMap::new();
-        let mut o = owner(&props);
-        o.position = [5.0, 1.0, -5.0];
-
-        let descriptor = component.to_gpu(&o);
-
-        assert_eq!(&descriptor.bounds_min[0..3], &[0.0, -1.0, -10.0]);
-        assert_eq!(&descriptor.bounds_max[0..3], &[10.0, 3.0, 0.0]);
-        assert_eq!(descriptor.bounds_max[3], 1.0);
-    }
-
-    #[test]
-    fn disabling_a_never_inserted_volume_is_a_quiet_no_op() {
-        let mut subsystems = Subsystems::new();
-        let mut context = TestRuntimeContext {
-            project_root: PathBuf::from("."),
-            subsystems,
-            errors: Vec::new(),
+    fn the_local_row_is_centred_on_the_owner() {
+        let component = WaterVolumeComponent {
+            size: [10.0, 4.0, 10.0],
+            surface_height_offset: 1.0,
+            ..Default::default()
         };
-        let props = HashMap::new();
-        let disabled = WaterVolumeComponent { enabled: false, ..Default::default() };
 
-        assert!(apply_runtime_behavior_for_class(
-            WATER_VOLUME_CLASS_NAME,
-            &owner(&props),
-            0,
-            &serde_json::to_value(disabled).unwrap(),
-            &mut context,
-        ));
-        assert!(context.errors.is_empty());
+        let row = component.local_gpu();
+
+        assert_eq!(&row.bounds_min[0..3], &[-5.0, -2.0, -5.0]);
+        assert_eq!(&row.bounds_max[0..3], &[5.0, 2.0, 5.0]);
+        assert_eq!(row.bounds_max[3], 1.0);
     }
 }

@@ -1,6 +1,5 @@
 use engine_class_derive::engine_class;
 use serde_json::Value;
-use std::collections::HashMap;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Volumetrics", category_color = "#7EE787", default_collapsed = true)]
@@ -62,28 +61,5 @@ impl VolumetricLightProps {
         if let Some(v) = obj.get("contact_shadow_length").and_then(|v| v.as_f64()) {
             self.contact_shadow_length = v as f32;
         }
-    }
-
-    pub(crate) fn apply_to_scene_props(&self, out: &mut HashMap<String, Value>) {
-        out.insert(
-            "affects_volumetric_fog".to_string(),
-            Value::from(self.affects_volumetric_fog),
-        );
-        out.insert(
-            "volumetric_scattering_intensity".to_string(),
-            Value::from(self.volumetric_scattering_intensity),
-        );
-        out.insert(
-            "volumetric_shadow_intensity".to_string(),
-            Value::from(self.volumetric_shadow_intensity),
-        );
-        out.insert(
-            "fog_inscattering_intensity".to_string(),
-            Value::from(self.fog_inscattering_intensity),
-        );
-        out.insert(
-            "contact_shadow_length".to_string(),
-            Value::from(self.contact_shadow_length),
-        );
     }
 }

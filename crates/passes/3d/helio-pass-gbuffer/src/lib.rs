@@ -35,12 +35,10 @@ mod coordinate_spaces_frame_data;
 mod culled_batch_frame_data;
 mod indirect_draw;
 mod object_batch_frame_data;
-#[allow(deprecated)]
 pub use components::{
     MaterialComponent, MeshComponent, RenderGroupComponent, RenderGroupSceneBinding,
     SectionedObjectComponent, SectionedObjectSceneBinding, StaticObjectComponent,
-    SubLevelActorComponent, SubLevelActorSceneBinding, SubLevelIndex, SublevelComponent,
-    SublevelSceneBinding, DEFAULT_SUBLEVEL_INDEX,
+    SubLevelActorComponent, SubLevelActorSceneBinding, SubLevelIndex, DEFAULT_SUBLEVEL_INDEX,
 };
 pub use coordinate_spaces_frame_data::CoordinateSpacesFrameData;
 pub use culled_batch_frame_data::CulledBatchFrameData;

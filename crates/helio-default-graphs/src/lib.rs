@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+pub mod environment_join;
+pub mod scene_join;
+
 use helio::DebugDrawState;
 use helio::GraphRebuilder;
 use helio::PassBuildContext;
@@ -637,7 +640,7 @@ pub fn build_default_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGrap
         ctx.camera_buffer,
         ctx.config,
         ctx.debug_state,
-        ctx.camera_buffer,
+        ctx.debug_camera_buffer,
         ctx.cull_stats_buffer,
         ctx.owns_device,
         None,
@@ -693,7 +696,7 @@ pub fn build_default_graph_external_with_lighting_passes(
         ctx.camera_buffer,
         ctx.config,
         ctx.debug_state,
-        ctx.camera_buffer,
+        ctx.debug_camera_buffer,
         ctx.cull_stats_buffer,
         false,
         None,
@@ -716,7 +719,7 @@ pub fn build_default_graph_with_user_effects_with_context(
         ctx.camera_buffer,
         ctx.config,
         ctx.debug_state,
-        ctx.camera_buffer,
+        ctx.debug_camera_buffer,
         ctx.cull_stats_buffer,
         ctx.owns_device,
         None,

@@ -2,9 +2,9 @@
 //!
 //! Editor-facing twin of [`helio::Movability`]: a reflected enum the
 //! properties panel shows as a dropdown, with each variant's doc comment as
-//! its tooltip. The renderer never reads this field directly; the scene
-//! bridge projects it into the SceneDB [`helio::Movability`] component and
-//! the object row's movable flag, which is what passes key their caches on.
+//! its tooltip. It reaches the renderer as the movable flag of the mesh's
+//! derived draw row ([`super::StaticMeshDraw`]), which passes key their
+//! caches on; CPU checks read it through [`object_movability`].
 
 use pulsar_reflection::Reflectable;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -51,6 +51,32 @@ impl ObjectMovability {
     pub fn is_fixed(self) -> bool {
         !helio::Movability::from(self).can_move()
     }
+}
+
+/// What may change about `object` at runtime: the least mobile of a
+/// `helio::Movability` placed on the object itself and the movability its
+/// mesh and light instances author (Pulsar-Native#837). `None` when nothing
+/// authors one. Read from the authored values; nothing projects them.
+pub fn object_movability(
+    world: &pulsar_scenedb::World,
+    object: pulsar_scenedb::Entity,
+) -> Option<helio::Movability> {
+    let own = world.get::<helio::Movability>(object).copied();
+    let authored = pulsar_scene_model::attachments::instances(world, object)
+        .into_iter()
+        .filter_map(|instance| {
+            world
+                .get::<super::StaticMeshComponent>(instance)
+                .map(|mesh| helio::Movability::from(mesh.movability))
+                .or_else(|| {
+                    world
+                        .get::<super::LightComponent>(instance)
+                        .map(|light| helio::Movability::from(light.general.movability))
+                })
+        });
+    own.into_iter()
+        .chain(authored)
+        .min_by_key(|movability| *movability as u8)
 }
 
 impl From<ObjectMovability> for helio::Movability {

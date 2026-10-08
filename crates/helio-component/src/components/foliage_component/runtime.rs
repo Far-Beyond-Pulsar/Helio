@@ -1,13 +1,13 @@
-use engine_class_derive::{register_runtime_behavior, register_world_component};
-use pulsar_reflection::{
-    get_subsystem, ComponentRuntimeBehavior, ComponentRuntimeContext, LiveKeySet,
-    RuntimeComponentOwner,
-};
+//! Foliage reaches the foliage passes through its derived source row
+//! (`environment_rows::FoliageSourceRow`), built from the mappings here.
+
+use engine_class_derive::{register_world_component};
 
 use super::FoliageComponent;
-use crate::subsystems::PendingWorldWrites;
 
-fn gpu_type(component: &FoliageComponent) -> helio_pass_foliage_place::components::FoliageTypeComponent {
+pub(crate) fn gpu_type(
+    component: &FoliageComponent,
+) -> helio_pass_foliage_place::components::FoliageTypeComponent {
     use helio_pass_foliage_place::{pack_kind_and_flags, FoliageKind};
 
     let flags = u32::from(component.rendering.two_sided)
@@ -53,7 +53,7 @@ fn gpu_type(component: &FoliageComponent) -> helio_pass_foliage_place::component
     }
 }
 
-fn wind(component: &FoliageComponent) -> helio_pass_foliage_place::GpuWind {
+pub(crate) fn wind(component: &FoliageComponent) -> helio_pass_foliage_place::GpuWind {
     helio_pass_foliage_place::Wind {
         direction: glam::Vec3::from_array(component.wind.wind_direction),
         speed: if component.wind.wind_enabled {
@@ -70,87 +70,16 @@ fn wind(component: &FoliageComponent) -> helio_pass_foliage_place::GpuWind {
 }
 
 #[register_world_component]
-#[register_runtime_behavior]
-impl ComponentRuntimeBehavior for FoliageComponent {
-    const CLASS_NAME: &'static str = "FoliageComponent";
-
-    fn sync_component(
-        owner: &RuntimeComponentOwner,
-        component_index: usize,
-        component: &Self,
-        context: &mut dyn ComponentRuntimeContext,
-    ) {
-        get_subsystem!(context, LiveKeySet)
-            .insert(format!("{}:{component_index}", owner.scene_object_id));
-        let Some(entity) = context
-            .subsystems_mut()
-            .get_mut::<pulsar_scenedb::Entity>()
-            .copied()
-        else {
-            return;
-        };
-        let writes = get_subsystem!(context, PendingWorldWrites);
-        if !component.general.enabled {
-            writes.push(move |world| {
-                world.remove::<helio_pass_foliage_place::components::FoliageTypeComponent>(entity);
-                world.remove::<helio_pass_foliage_place::components::FoliageLayerComponent>(entity);
-                world.remove::<helio_pass_foliage_place::components::FoliageInteractorComponent>(
-                    entity,
-                );
-                world.remove::<helio_pass_foliage_place::components::FoliageWindComponent>(entity);
-            });
-            return;
-        }
-
-        let gpu_type = gpu_type(component);
-        let half = component.placement.layer_extent;
-        let [x, _y, z] = owner.position;
-        let gpu_layer = helio_pass_foliage_place::components::FoliageLayerComponent {
-            bounds_min: [x - half, component.placement.altitude_min, z - half, 0.0],
-            bounds_max: [
-                x + half,
-                component.placement.altitude_max,
-                z + half,
-                component.placement.has_infinite_extent as u32 as f32,
-            ],
-        };
-        let position = if component.interaction.interactor_enabled {
-            owner.position
-        } else {
-            [0.0, -100_000.0, 0.0]
-        };
-        let gpu_interactor = helio_pass_foliage_place::components::FoliageInteractorComponent {
-            position_radius: [
-                position[0],
-                position[1],
-                position[2],
-                if component.interaction.interactor_enabled {
-                    component.interaction.interactor_radius.max(0.0)
-                } else {
-                    0.0
-                },
-            ],
-            velocity: [0.0; 4],
-        };
-        let gpu_wind =
-            helio_pass_foliage_place::components::FoliageWindComponent::from(wind(component));
-        writes.push(move |world| {
-            world.insert(entity, gpu_type);
-            world.insert(entity, gpu_layer);
-            world.insert(entity, gpu_interactor);
-            world.insert(entity, gpu_wind);
-        });
-    }
-}
+impl FoliageComponent {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn runtime_behavior_has_the_reflected_component_name() {
+    fn registers_under_its_class_name() {
         assert_eq!(
-            <FoliageComponent as ComponentRuntimeBehavior>::CLASS_NAME,
-            "FoliageComponent"
+            pulsar_world_registry::component_id_for_class("FoliageComponent"),
+            Some(pulsar_scenedb::component_id::<FoliageComponent>())
         );
     }
 }

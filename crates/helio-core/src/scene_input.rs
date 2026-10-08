@@ -5,6 +5,12 @@ pub use pulsar_scenedb::gpu::{BufferHandle, BufferKey};
 use pulsar_scenedb::gpu::SceneGpuStore;
 use std::sync::Arc;
 
+/// The frontend's entity-generation buffer: one `u32` per entity index, the
+/// entity's current generation (SceneDB's GPU liveness mirror). The
+/// renderer publishes it under this key; consumers joining a row that
+/// records another entity's `(index, generation)` check it here.
+pub const ENTITY_GENERATIONS_KEY: BufferKey = BufferKey::of("world_entity_generations");
+
 /// Type-agnostic, read-only GPU buffers supplied by the frontend SceneDB.
 /// Buffer contents are interpreted by the pass that declared the key; core
 /// never needs to know the component type or layout.
@@ -47,6 +53,16 @@ impl SceneBufferProjection {
 
     pub fn contains(&self, key: BufferKey) -> bool {
         self.get(key).is_some()
+    }
+
+    /// Publish `handle` under `key`, replacing any buffer already there.
+    /// The frontend adds buffers SceneDB keeps outside its store registry
+    /// (the entity-generation mirror); scene derivations add their outputs.
+    pub fn insert(&mut self, key: BufferKey, handle: BufferHandle) {
+        match self.entries.iter_mut().find(|(candidate, _)| *candidate == key) {
+            Some((_, existing)) => *existing = handle,
+            None => self.entries.push((key, handle)),
+        }
     }
 
     /// Changes whenever SceneDB reports new contents (`content_generation`)

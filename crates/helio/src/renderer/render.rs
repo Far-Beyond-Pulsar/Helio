@@ -533,14 +533,17 @@ impl Renderer {
         let _graph_start = Instant::now();
         let scene_input = {
             helio_core::cpu_scope!("Helio: SceneInputAdapter::from_scene_db");
-            crate::renderer::input::SceneInputAdapter::from_scene_db(
+            let mut scene_input = crate::renderer::input::SceneInputAdapter::from_scene_db(
                 &self.scene_db,
                 &self.camera_buffer,
                 &self.camera_data,
                 self.camera_generation,
                 self.frame_count,
                 self.world_origin,
-            )
+            );
+            helio_core::cpu_scope!("Helio: scene derivations");
+            scene_input.run_derivations(&mut self.scene_derivations);
+            scene_input
         };
         {
             helio_core::cpu_scope!("Helio: RenderGraph execute");

@@ -509,6 +509,9 @@ pub struct FoliageGBufferPass {
 
     decision: FoliageFrameDecision,
     uploaded_generation: Option<u64>,
+    /// Whether any type row has a density; see
+    /// [`helio_pass_foliage_place::foliage_type_liveness`].
+    type_liveness: helio_core::SceneBufferLiveness,
 
     /// Quality preset. Drives the ring radius and the LOD ladder scale, and must match
     /// what `FoliagePlacePass` was configured with — the two independently apply the
@@ -805,6 +808,7 @@ impl FoliageGBufferPass {
             blades_per_tile: blades_per_tile.max(1),
             decision: decide_frame(None, None),
             uploaded_generation: None,
+            type_liveness: helio_pass_foliage_place::foliage_type_liveness(),
             quality: FoliageQuality::default(),
             lod_fade_band: 4.0,
             interaction_strength: 1.0,
@@ -1002,6 +1006,8 @@ impl RenderPass for FoliageGBufferPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let type_handle = ctx.scene_buffers.get(BufferKey::of("foliage_types"));
+        self.type_liveness.update(ctx.device, ctx.queue, type_handle);
+        let type_handle = type_handle.filter(|handle| self.type_liveness.maybe_live(handle));
         let wind_handle = ctx.scene_buffers.get(BufferKey::of("foliage_wind"));
         let tables = type_handle.map(|handle| FoliageTables {
             type_count: (handle.buffer.size() / std::mem::size_of::<GpuFoliageType>() as u64)

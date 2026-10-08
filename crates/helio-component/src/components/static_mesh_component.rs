@@ -1,13 +1,10 @@
 //! Static mesh component for mesh asset assignment.
 
 use engine_class_derive::{
-    engine_class, register_runtime_behavior, register_scene_props_applier, register_world_component,
+    engine_class, register_scene_props_applier, register_world_component,
 };
 use helio::PackedVertex;
-use pulsar_reflection::{
-    ComponentRuntimeBehavior, ComponentRuntimeContext, ReflectError, RuntimeComponentOwner,
-    ScenePropsProjector,
-};
+use pulsar_reflection::{ReflectError, ScenePropsProjector};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -20,7 +17,7 @@ pulsar_reflection::inventory::submit! {
     AssetComponentRegistration {
         asset_kind: plugin_editor_api::AssetKind::Mesh,
         class_name: "StaticMeshComponent",
-        data_field: "mesh_asset",
+        value_for: |path| Box::new(StaticMeshComponent::for_mesh_asset(path)),
     }
 }
 // Mat4/Quat/Vec3 used to build the transform passed to sync_mesh_object.
@@ -70,7 +67,7 @@ impl MeshAssetPath {
 /// mechanism this drives. Resolution: an empty path is
 /// `HandleId::ZERO` (no asset, opts out of interning, matches every other
 /// zero-value convention in this codebase); otherwise resolves the
-/// project-relative path exactly like `hydrate_static_mesh_component`
+/// project-relative path exactly like `decode_static_mesh_component`
 /// already does and defers to `mesh_cache::content_id_for_path` (native
 /// `.mesh` v2: a header read; anything else: a canonical-path + mtime/size
 /// memoized hash — see that fn's own doc for why this converges path
@@ -737,7 +734,7 @@ type RegisteredStaticMeshMaterialSlots = StaticMeshMaterialSlots;
 /// `scene_store` (Pulsar-Native#561 Phase D): opts this struct into
 /// `#[gpu]`-mirrored fields via `#[engine_class]`'s delegation to
 /// `pulsar_scenedb::SceneStore` -- see `vertices`/`indices` below, and
-/// `hydrate_static_mesh_component`'s doc for how they get populated. A
+/// `decode_static_mesh_component`'s doc for how they get populated. A
 /// `#[gpu] Vec<T>` field routes through SceneDB's variable-length codegen
 /// path, which implies no `Copy`/`Pod` requirement on this struct (see
 /// `engine_class_derive`'s `struct_has_gpu_vec_field` check) -- unlike
@@ -772,10 +769,10 @@ pub struct StaticMeshComponent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_material_override: Option<LegacyMaterialOverrideData>,
 
-    /// What may change about this mesh at runtime (Pulsar-Native#837). The
-    /// scene bridge projects it into SceneDB's `helio::Movability` and the
-    /// object row's movable flag; levels saved before it load as Static,
-    /// which is how their rows were already flagged.
+    /// What may change about this mesh at runtime (Pulsar-Native#837). It
+    /// sets the movable flag of the mesh's draw rows ([`super::StaticMeshDraw`])
+    /// and the object's [`super::object_movability`]; levels saved before it
+    /// load as Static, which is how their rows were already flagged.
     #[property]
     #[serde(default)]
     pub movability: super::ObjectMovability,
@@ -784,9 +781,9 @@ pub struct StaticMeshComponent {
     /// separate asset registry, the payload itself (per the governing rule:
     /// "it doesn't hold an int32 that points to the mesh, it holds the
     /// mesh"). Populated once, at hydrate time, by
-    /// `hydrate_static_mesh_component` -- never authored directly, never
-    /// touched by `sync_component` (which only ever sees `&World`, never
-    /// disk I/O). Never round-tripped through JSON: mesh geometry lives in
+    /// `decode_static_mesh_component` (or `property_written` when
+    /// `mesh_asset` changes) -- never authored directly. Never
+    /// round-tripped through JSON: mesh geometry lives in
     /// the asset file `mesh_asset` already names, re-derived at hydrate
     /// time, not duplicated into every saved scene.
     ///
@@ -824,12 +821,11 @@ pub struct StaticMeshComponent {
 
     /// Local-space bounding sphere (xyz = center, w = radius) computed once
     /// from `vertices`' actual positions at hydrate time -- see
-    /// `hydrate_static_mesh_component`. CPU-only (not `#[gpu]`-mirrored):
-    /// the only consumer is `sync_static_mesh_rows`, which transforms it by
-    /// each entity's world transform to build `StaticObjectComponent`'s
-    /// culling bounds. Not derived from `transform.scale` -- a thin mesh at
-    /// scale 1.0 and a cube at scale 1.0 have different real extents and
-    /// must not collapse to the same bound.
+    /// `decode_static_mesh_component`. Uploaded with the derived draw rows
+    /// ([`super::StaticMeshDraw`]); the renderer's scene join transforms it
+    /// by the owner's transform for culling. Not derived from
+    /// `transform.scale` -- a thin mesh at scale 1.0 and a cube at scale 1.0
+    /// have different real extents and must not collapse to the same bound.
     #[serde(skip)]
     pub bounds_local: [f32; 4],
 }
@@ -838,17 +834,10 @@ pub struct StaticMeshComponent {
 impl ScenePropsProjector for StaticMeshComponent {
     const CLASS_NAME: &'static str = "StaticMeshComponent";
 
-    fn apply_scene_props(props: &mut HashMap<String, Value>, component_data: Option<&Value>) {
+    /// Clears the keys this class's values once occupied in an object's
+    /// props (the level-file migration); the values live in the component.
+    fn apply_scene_props(props: &mut HashMap<String, Value>, _component_data: Option<&Value>) {
         props.remove("mesh_asset");
-        let Some(data) = component_data else { return };
-        if let Some(path) = data
-            .as_object()
-            .and_then(|o| o.get("mesh_asset"))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.trim().is_empty())
-        {
-            props.insert("mesh_asset".to_string(), Value::from(path));
-        }
     }
 }
 
@@ -856,15 +845,13 @@ impl ScenePropsProjector for StaticMeshComponent {
 /// disk, or the "no mesh" defaults ([`local_bounding_sphere`]'s own empty
 /// fallback) if the path is empty, unresolvable, or fails to load.
 ///
-/// Shared by [`hydrate_static_mesh_component`] (first attach) and
-/// [`refresh_static_mesh_gpu_mirror`] (a live `mesh_asset` edit made
+/// Shared by [`decode_static_mesh_component`] (first attach) and
+/// [`static_mesh_property_written`] (a live `mesh_asset` edit made
 /// *after* attach, via the properties panel) -- both need the exact same
 /// disk-load behavior, just triggered at different times. Resolves the
 /// project-relative path via `engine_state::get_project_path()` -- a
 /// global, context-free accessor, since neither caller's fixed signature
-/// (`&mut World, Entity, &Value` / `&mut World, Entity`) carries a
-/// `ComponentRuntimeContext` to pull a project root from the way
-/// `sync_component` does.
+/// (`&Value` / `&mut Self, Option<&str>`) carries a project root.
 fn load_mesh_geometry(mesh_asset: &str) -> ([f32; 4], crate::mesh_cache::MeshAssetUpload) {
     let mesh_asset = mesh_asset.trim();
     // Baseline fallback for "no mesh assigned" / "failed to load" -- matches
@@ -959,67 +946,57 @@ fn apply_legacy_material_override(component: &mut StaticMeshComponent) {
     }
 }
 
-/// Custom hydrate for `#[register_world_component(hydrate = ...)]`
-/// (Pulsar-Native#561 Phase D). Loads `mesh_asset`'s actual vertex/index
-/// data, once, right here at hydrate time -- not per render frame, and not
-/// through any Helio-specific code (`sync_component`'s dispatch only ever
-/// gets `&World`, deliberately, so it structurally can't do disk I/O; this
-/// is the one call site that already has `&mut World`).
+/// Load `component.mesh_asset`'s vertex/index data, sections and material
+/// slots into the component's own fields. Shared by [`decode_static_mesh_component`]
+/// (a value entering from a file or tool) and [`static_mesh_property_written`]
+/// (a live edit that changed `mesh_asset`).
 ///
-/// A missing or unloadable `mesh_asset` is not a hydrate failure -- mirrors
-/// `sync_component`'s existing "no mesh_asset" tolerance -- the component
-/// still hydrates, just with empty `vertices`/`indices` (a real, if
-/// invisible, entity, same as today's `insert_entity`-based path leaves an
-/// object with no mesh assigned).
-fn hydrate_static_mesh_component(
-    world: &mut pulsar_scenedb::World,
-    entity: pulsar_scenedb::Entity,
-    data: &serde_json::Value,
-) -> Result<(), String> {
-    let mut parsed: StaticMeshComponent =
-        serde_json::from_value(data.clone()).map_err(|error| error.to_string())?;
-    let (bounds_local, upload) = load_mesh_geometry(parsed.mesh_asset.as_str());
-    parsed.bounds_local = bounds_local;
-    parsed.vertices = upload.geometry.vertices;
-    parsed.indices = upload.geometry.indices;
-    parsed.material_slots =
-        reconcile_material_slots(&parsed.material_slots, &upload.material_slots);
-    apply_legacy_material_override(&mut parsed);
-    parsed.mesh_sections = upload.sections;
-    parsed.material_slot_metadata = upload.material_slots;
-
-    world.insert(entity, parsed);
-    Ok(())
-}
-
-/// `refresh_gpu_mirror` override (mirrors `LightComponent`'s Pulsar-Native#561
-/// fix -- see that component's `refresh_light_gpu_mirror` for the same shape).
-///
-/// The properties panel's live-edit path (`update_live_component_property`,
-/// `ui_level_editor`) sets `mesh_asset` straight onto the live component via
-/// its reflected setter and never re-hydrates, so a mesh picked *after* the
-/// component was first attached never reloaded `vertices`/`indices` -- those
-/// fields are `#[serde(skip)]` and only ever populated by
-/// [`hydrate_static_mesh_component`]'s disk load. This re-runs that same
-/// load from the CURRENT live `mesh_asset` whenever the generic refresh hook
-/// fires for this class.
-fn refresh_static_mesh_gpu_mirror(
-    world: &mut pulsar_scenedb::World,
-    entity: pulsar_scenedb::Entity,
-) {
-    let Some(mut component) = world.get::<StaticMeshComponent>(entity).cloned() else {
-        return;
-    };
+/// A missing or unloadable `mesh_asset` is not a failure: the component keeps
+/// empty `vertices`/`indices` (a real, if invisible, mesh), the same as an
+/// object with no mesh assigned.
+fn load_mesh_asset_into(component: &mut StaticMeshComponent) {
     let (bounds_local, upload) = load_mesh_geometry(component.mesh_asset.as_str());
     component.bounds_local = bounds_local;
     component.vertices = upload.geometry.vertices;
     component.indices = upload.geometry.indices;
     component.material_slots =
         reconcile_material_slots(&component.material_slots, &upload.material_slots);
-    apply_legacy_material_override(&mut component);
+    apply_legacy_material_override(component);
     component.mesh_sections = upload.sections;
     component.material_slot_metadata = upload.material_slots;
-    world.insert(entity, component);
+}
+
+impl StaticMeshComponent {
+    /// A component showing the mesh asset at the project-relative `path`,
+    /// its geometry loaded, as decoding `{"mesh_asset": path}` would give.
+    pub fn for_mesh_asset(path: &str) -> Self {
+        let mut component = Self {
+            mesh_asset: MeshAssetPath::new(path),
+            ..Default::default()
+        };
+        load_mesh_asset_into(&mut component);
+        component
+    }
+}
+
+/// `StaticMeshComponent`'s JSON boundary decoder (Pulsar-Native#561 Phase
+/// D). The serialized form references its mesh by `mesh_asset`; decoding
+/// loads that asset's data once, here, so the value that enters the world is
+/// complete. Its `#[gpu]` pools are then written by SceneDB's normal insert.
+fn decode_static_mesh_component(data: &serde_json::Value) -> Result<StaticMeshComponent, String> {
+    let mut component: StaticMeshComponent = pulsar_world_registry::decode_json(data)?;
+    load_mesh_asset_into(&mut component);
+    Ok(component)
+}
+
+/// `property_written` hook: a reflected write that changed `mesh_asset`
+/// (the properties panel's mesh picker, a script) loads the newly named
+/// asset under the same write guard, so SceneDB commits the new path and its
+/// geometry together. Writes to any other property load nothing.
+fn static_mesh_property_written(component: &mut StaticMeshComponent, property: Option<&str>) {
+    if matches!(property, None | Some("mesh_asset")) {
+        load_mesh_asset_into(component);
+    }
 }
 
 /// Local-space bounding sphere (xyz = center, w = radius) from a mesh's
@@ -1050,38 +1027,9 @@ fn local_bounding_sphere(vertices: &[PackedVertex]) -> [f32; 4] {
 }
 
 // Phase B4 (Pulsar-Native#555): the first component migrated onto
-// pulsar_world_registry's World bridge -- proves the pattern before B5
-// rolls it out to the rest. `#[register_world_component]` must be written
-// above `#[register_runtime_behavior]` (see that macro's own doc for why:
-// only the bottom attribute in the stack re-emits the impl block).
+// pulsar_world_registry's World bridge.
 #[register_world_component(
-    hydrate = hydrate_static_mesh_component,
-    refresh_gpu_mirror = refresh_static_mesh_gpu_mirror
+    decode = decode_static_mesh_component,
+    property_written = static_mesh_property_written
 )]
-#[register_runtime_behavior]
-impl ComponentRuntimeBehavior for StaticMeshComponent {
-    const CLASS_NAME: &'static str = "StaticMeshComponent";
-
-    fn sync_component(
-        _owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        _component: &Self,
-        _context: &mut dyn ComponentRuntimeContext,
-    ) {
-        // Deliberately empty (Pulsar-Native#561 Phase E cutover). This used
-        // to load `mesh_asset` itself and call `Renderer::scene_mut()
-        // .insert_entity(SceneEntity::mesh(upload))` -- a second, independent
-        // copy of the mesh data in Helio's own mesh pool, loaded from disk a
-        // second time every dirty pass, on top of what `hydrate_static_mesh_component`
-        // already does (loads the file once, populates this component's own
-        // `#[gpu] vertices`/`indices` fields, which SceneDB mirrors straight
-        // into the SAME pool `helio::Scene`'s `MeshPool` reads from -- see
-        // `mesh.rs`'s `rebind_static_pools`/`adopt_static_slice`). Resolving
-        // a `MeshId`/`ObjectDescriptor` for that already-GPU-resident data
-        // needs the entity's row (`entity.index()`) and the SceneDB-side
-        // `..._gpu_handle` accessors this trait's `&Self`-only signature has
-        // no way to reach -- that's `engine_backend`'s
-        // `HelioRenderer::sync_snapshot_components`, which already has
-        // `Entity`/`World` in scope for exactly this reason.
-    }
-}
+impl StaticMeshComponent {}

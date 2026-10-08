@@ -5,6 +5,8 @@
 
 pub mod asset_component;
 pub mod components;
+pub mod material_graph;
+pub mod material_textures;
 pub mod mesh_cache;
 mod motion_gate;
 mod static_move_watch;

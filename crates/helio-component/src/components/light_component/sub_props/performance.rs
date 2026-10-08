@@ -1,6 +1,5 @@
 use engine_class_derive::engine_class;
 use serde_json::Value;
-use std::collections::HashMap;
 
 use super::super::{MobileQualityLevel, ShadowCacheMode};
 
@@ -63,28 +62,5 @@ impl PerformanceLightProps {
         if let Some(v) = obj.get("per_view_visibility_mask").and_then(|v| v.as_u64()) {
             self.per_view_visibility_mask = v;
         }
-    }
-
-    pub(crate) fn apply_to_scene_props(&self, out: &mut HashMap<String, Value>) {
-        out.insert(
-            "mobile_quality_level".to_string(),
-            Value::from(self.mobile_quality_level as u64),
-        );
-        out.insert(
-            "ray_tracing_inclusion".to_string(),
-            Value::from(self.ray_tracing_inclusion),
-        );
-        out.insert(
-            "virtual_shadow_map_enabled".to_string(),
-            Value::from(self.virtual_shadow_map_enabled),
-        );
-        out.insert(
-            "shadow_cache_mode".to_string(),
-            Value::from(self.shadow_cache_mode as u64),
-        );
-        out.insert(
-            "per_view_visibility_mask".to_string(),
-            Value::from(self.per_view_visibility_mask),
-        );
     }
 }

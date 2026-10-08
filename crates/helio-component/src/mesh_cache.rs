@@ -722,6 +722,10 @@ pub fn import_model_to_native(
         }
     }
 
+    // Placed meshes naming this asset reload it (the level editor subscribes).
+    pulsar_events::publish_asset_updated(
+        pulsar_events::AssetUpdated::new(plugin_editor_api::AssetKind::Mesh).with_path(native),
+    );
     Ok(native.to_path_buf())
 }
 
@@ -810,5 +814,22 @@ mod tests {
             indices: vec![0, 2, 1],
         };
         assert_ne!(content_id_for_bytes(&a), content_id_for_bytes(&b));
+    }
+
+    #[test]
+    fn an_import_announces_the_written_mesh() {
+        let dir = std::env::temp_dir().join(format!("mesh-import-event-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../../assets/meshes/primitives/SM_Cube.fbx");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = std::sync::Arc::clone(&seen);
+        let _subscription = pulsar_events::subscribe_asset_updates(
+            Some(plugin_editor_api::AssetKind::Mesh),
+            move |event| record.lock().unwrap().push(event.path.clone()),
+        );
+        let native = import_model_to_native_default(&source, &dir).expect("the cube imports");
+        assert!(seen.lock().unwrap().contains(&Some(native.clone())), "{native:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

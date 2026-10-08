@@ -1,6 +1,5 @@
 use engine_class_derive::engine_class;
 use serde_json::Value;
-use std::collections::HashMap;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Rendering", category_color = "#FB7185", default_collapsed = true)]
@@ -88,35 +87,4 @@ impl RenderingFoliageProps {
         }
     }
 
-    pub(crate) fn apply_to_scene_props(&self, out: &mut HashMap<String, Value>) {
-        out.insert("two_sided".to_string(), Value::from(self.two_sided));
-        out.insert("casts_shadow".to_string(), Value::from(self.casts_shadow));
-        out.insert(
-            "lod_distance_0".to_string(),
-            Value::from(self.lod_distance_0),
-        );
-        out.insert(
-            "lod_distance_1".to_string(),
-            Value::from(self.lod_distance_1),
-        );
-        out.insert(
-            "lod_distance_2".to_string(),
-            Value::from(self.lod_distance_2),
-        );
-        out.insert(
-            "lod_distance_3".to_string(),
-            Value::from(self.lod_distance_3),
-        );
-        out.insert(
-            "base_color".to_string(),
-            serde_json::json!([
-                self.base_color[0],
-                self.base_color[1],
-                self.base_color[2],
-                self.base_color[3]
-            ]),
-        );
-        out.insert("roughness".to_string(), Value::from(self.roughness));
-        out.insert("metallic".to_string(), Value::from(self.metallic));
-    }
 }
