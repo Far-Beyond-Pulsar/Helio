@@ -79,8 +79,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 helio-core = { path = "crates/helio-core" }
 helio-mats = { path = "crates/helio-mats" }
 helio-bake-types = { path = "crates/helio-bake-types" }
-pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "1981d7ccf5607ffe816d6f123f09934ec06ad7c2", features = ["gpu"] }
-pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "1981d7ccf5607ffe816d6f123f09934ec06ad7c2" }
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "7d14a4c3e9612ff1afc94dfacb348f6405c29b6f", features = ["gpu"] }
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "7d14a4c3e9612ff1afc94dfacb348f6405c29b6f" }
 # Must stay pinned to the exact rev pulsar_scenedb's own Cargo.toml pins --
 # a different rev is a different SourceId and thus a second,
 # type-incompatible copy of this crate in the build (see helio-wasm's
