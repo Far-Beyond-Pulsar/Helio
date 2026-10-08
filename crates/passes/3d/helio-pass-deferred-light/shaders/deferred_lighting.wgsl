@@ -1363,37 +1363,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     var color         = lo_final + indirect;
     color        += emissive;               // emissive from G-buffer
     color        += sss_transmission;       // SSS rim glow
-
-    // ── Water caustics ────────────────────────────────────────────────────────
-    // Add caustics to surfaces below water
-    if arrayLength(&water_volumes) > 0u {
-        let vol = water_volumes[0]; // Use first water volume
-
-        // Check if this surface is below the water surface
-        if world_pos.y < vol.bounds_max.w {
-            // Check if caustics are enabled
-            if vol.caustics_params.x > 0.5 {
-                // Sample caustics texture based on world XZ position
-                let caustics_scale = vol.caustics_params.z;
-                let caustics_uv = world_pos.xz / caustics_scale;
-                let caustic_value = textureSampleLevel(water_caustics, caustics_sampler, caustics_uv, 0.0).r;
-
-                // Apply caustics intensity
-                let caustics_intensity = vol.caustics_params.y;
-                let caustics_color = vec3<f32>(0.7, 0.9, 1.0) * caustic_value * caustics_intensity;
-
-                // Add caustics to the final color
-                color += caustics_color;
-            }
-        }
-    }
+    // Water caustics are added by fs_reflection (additive, like reflections).
 
     // Tonemapping & bloom handled by PostProcessPass — write raw HDR linear.
     return vec4<f32>(color, alpha);
 }
 
-// Reflection composition is deliberately isolated from base lighting so neither
-// fragment entry point exceeds the WebGPU baseline of 16 sampled textures.
+// Reflection composition (and the additive water caustics) is deliberately
+// isolated from base lighting so neither fragment entry point exceeds the
+// WebGPU baseline of 16 sampled textures.
 // The normal path is additively blended over fs_main; SSR debug modes use the
 // companion replacement pipeline.
 @fragment
@@ -1471,5 +1449,22 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
     }
 
     let contribution = select(spec_ind * ao_combined, spec_ind, has_lightmap);
-    return vec4<f32>(contribution, 0.0);
+    return vec4<f32>(contribution + water_caustics_light(world_pos), 0.0);
+}
+
+// Light the first water volume's caustics add to a surface below its water
+// line. Additive, so it is composed with the reflections: base lighting is at
+// its sampled-texture budget.
+fn water_caustics_light(world_pos: vec3<f32>) -> vec3<f32> {
+    if arrayLength(&water_volumes) == 0u {
+        return vec3<f32>(0.0);
+    }
+    let vol = water_volumes[0];
+    if world_pos.y >= vol.bounds_max.w || vol.caustics_params.x <= 0.5 {
+        return vec3<f32>(0.0);
+    }
+    // Sampled at the world XZ position, `caustics_params.z` metres a tile.
+    let caustics_uv = world_pos.xz / vol.caustics_params.z;
+    let caustic_value = textureSampleLevel(water_caustics, caustics_sampler, caustics_uv, 0.0).r;
+    return vec3<f32>(0.7, 0.9, 1.0) * caustic_value * vol.caustics_params.y;
 }
