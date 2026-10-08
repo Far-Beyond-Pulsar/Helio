@@ -302,6 +302,11 @@ pub struct PassContext<'a> {
 }
 
 impl<'a> PassContext<'a> {
+    /// Whether GPU scope timestamps can be recorded on this graph.
+    pub fn gpu_scopes_enabled(&self) -> bool {
+        self.profiler.is_enabled() && self.profiler.gpu_timing_supported()
+    }
+
     /// Begin a named GPU subscope on a manually recorded command encoder.
     /// It shares the graph's timestamp query set and frame readback.
     /// Call outside an open render/compute pass, paired with `end_gpu_scope`.

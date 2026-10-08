@@ -1526,6 +1526,75 @@ impl PlanetRenderer {
         }
     }
 
+    /// Dispatch boundaries are the finest portable GPU timestamp granularity.
+    /// Separate compute passes allow encoder timestamps without requiring the
+    /// optional TIMESTAMP_QUERY_INSIDE_PASSES device feature. The untimed path
+    /// below keeps the original single compute pass.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_residency_detailed(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        ctx: &mut PassContext<'_>,
+        jobs: u32,
+        evictions: u32,
+        patches: u32,
+        block_patches: u32,
+    ) {
+        macro_rules! scope {
+            ($path:literal, $body:block) => {{
+                ctx.begin_gpu_scope(encoder, concat!("VoxelPlanet::residency::", $path));
+                $body
+                ctx.end_gpu_scope(encoder, concat!("VoxelPlanet::residency::", $path));
+            }};
+        }
+        macro_rules! dispatch {
+            ($path:literal, $pipeline:ident, $groups:expr) => {
+                scope!($path, {
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some(concat!("VoxelPlanet::residency::", $path)),
+                        ..Default::default()
+                    });
+                    pass.set_bind_group(0, &self.gen_group, &[]);
+                    Self::dispatch(&mut pass, &self.pipelines.$pipeline, $groups);
+                });
+            };
+        }
+        let wg = |n: u32| n.div_ceil(64);
+        if evictions > 0 || patches > 0 || block_patches > 0 {
+            scope!("maintenance", {
+                if evictions > 0 {
+                    dispatch!("maintenance::evict", evict, [wg(evictions), 1, 1]);
+                }
+                if patches > 0 || block_patches > 0 {
+                    scope!("maintenance::patch", {
+                        if patches > 0 {
+                            dispatch!("maintenance::patch::table", patch, [wg(patches), 1, 1]);
+                        }
+                        if block_patches > 0 {
+                            dispatch!("maintenance::patch::summary_blocks", patch_blocks, [wg(block_patches), 1, 1]);
+                        }
+                    });
+                }
+            });
+        }
+        if jobs > 0 {
+            let groups = [jobs.min(32_768), jobs.div_ceil(32_768), 1];
+            scope!("admission", {
+                dispatch!("admission::generate", generate, groups);
+                scope!("admission::allocation", {
+                    dispatch!("admission::allocation::count", count, [wg(jobs), 1, 1]);
+                    dispatch!("admission::allocation::refill", refill, [1, 1, 1]);
+                    dispatch!("admission::allocation::allocate", allocate, [wg(jobs), 1, 1]);
+                    dispatch!("admission::allocation::fixup", fixup, [1, 1, 1]);
+                });
+                scope!("admission::publication", {
+                    dispatch!("admission::publication::publish", publish, groups);
+                    dispatch!("admission::publication::level_suffix", level_suffix, [1, 1, 1]);
+                });
+            });
+        }
+    }
+
     /// Take the finished residency plan, whose work this frame uploads, and
     /// request the next one, which the worker plans while this frame is
     /// encoded and executed. Returns the work and the readback reserved for
@@ -1802,7 +1871,9 @@ impl PlanetRenderer {
         }
         let camera_group = &self.camera_group;
         begin_stage!("residency");
-        {
+        if let Some(ctx) = graph_context.as_deref_mut().filter(|ctx| ctx.gpu_scopes_enabled()) {
+            self.encode_residency_detailed(encoder, ctx, jobs, evictions, patches, block_patches);
+        } else {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_bind_group(0, &self.gen_group, &[]);
             let wg = |n: u32| n.div_ceil(64);
