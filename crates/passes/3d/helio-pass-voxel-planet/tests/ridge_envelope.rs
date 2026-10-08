@@ -72,11 +72,13 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
     let generation = include_str!("../shaders/generate.wgsl");
     // Execute the actual production gate and height invocation. An active
     // topology brush must only disable fraction metadata, not neighbor height.
+    // Generation evaluates the lane's own column (at = (i, j)) and lean
+    // lattice nodes at one interpreter call site.
     let gates = [
         "let display_base =",
         "let requested_relief =",
-        "let column = generation_column",
-        "let height = column.x",
+        "let display =",
+        "let field = generation_column",
     ]
     .map(|prefix| {
         generation
@@ -84,7 +86,8 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
             .find(|line| line.trim_start().starts_with(prefix))
             .unwrap()
     })
-    .join("\n");
+    .join("\n")
+        + "\nlet height = field.x;";
     let world_source = include_str!("../shaders/world.wgsl");
     let common_source = include_str!("../shaders/common.wgsl");
     let brush_start = common_source.find("struct FaceBrush").unwrap();
@@ -149,6 +152,7 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
             let brush=brushes[p.chart.y];
             let op=(brush.flags>>4u)&3u;
             let topology_flags=select(0u,1u,p.chart.w!=0u && brush.radius_half>=(1u<<level) && op<2u);
+            let at=vec2<i32>(i,j);
             {gates}
             answers[id.x*2u]=vec4<i32>(field_height(face,i,j,level),height,
                 i32(requested_relief),i32(display_base));

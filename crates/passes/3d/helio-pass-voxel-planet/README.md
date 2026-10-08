@@ -299,10 +299,19 @@ they are once its work is on the GPU. Steps:
    cell occupancy from their stored tops; Add/Remove columns and generated
    volumetric columns keep arbitrary mixed-brick occupancy. Cells within the
    program's `terrain_extent` of the heightfield top are evaluated in 3D
-   (the sign of `terrain_density` at the seamless `volume_point`); the band covers the
-   extent, and the column is marked `INFO_GENERATED` (`INFO_TOPOLOGY` is
-   only for edit cuts: a generated column keeps its natural surface, relief
-   and materials). Densities are signed
+   (the sign of `terrain_density` at the seamless `volume_point`) in two
+   passes: the first finds each lane's cells that differ from the
+   heightfield, the band loop evaluates those and one more on each side.
+   Only a column with such cells is generated volume: its band covers them
+   and it is marked `INFO_GENERATED` (`INFO_TOPOLOGY` is only for edit cuts:
+   a generated column keeps its natural surface, relief and materials).
+   A column whose cells all keep the heightfield's kinds (most of a cave
+   region's rock, ground too flat to lean) stays a heightfield column:
+   before, every column with an extent stored the band down to the cave
+   depth as bitmap bricks (now 44 % of them are generated at a cave and an
+   overhang site, `generated_volume_is_stored_only_where_cells_change`).
+   The column and its lean lattice nodes share one `generation_column` call
+   site (compilers inline every call). Densities are signed
    distances to the field height itself (mm, passed to `terrain_density`),
    not to the floor of the level's cell, so a coarse level folds the same
    surface the base level does. Lanes the overhangs fold take every cell and

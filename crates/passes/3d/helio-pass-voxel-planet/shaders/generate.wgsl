@@ -81,10 +81,11 @@ var<workgroup> g_list: array<FaceBrush, 64>;
 var<workgroup> g_edit_count: u32;
 // Field heights of the column's lean lattice nodes (`terrain::lean_height`).
 var<workgroup> g_lean: array<i32, 64>;
-// g_volume bits: generated volumetric terrain; brushes that set materials.
+// g_volume bits: some lane's cells differ from the heightfield (generated
+// volume); brushes that set materials; some lane may lean (overhangs: the
+// lean lattice is evaluated).
 const VOLUME_TERRAIN: u32 = 1u;
 const VOLUME_MATERIALS: u32 = 2u;
-// Some lane's surface leans (overhangs): the lattice is evaluated.
 const VOLUME_LEAN: u32 = 4u;
 
 const NO_DENSITY: i32 = -2147483647 - 1;
@@ -100,8 +101,6 @@ fn volume_crossing(solid: i32, air: i32) -> f32 {
     return f32(solid) / f32(solid - air);
 }
 
-// Q16 fraction of a cell whose surface lies `h` cells above its bottom (0:
-// the whole cell).
 // Bilinear height of the lean lattice at `xy` (Q8 level cells from node
 // (0, 0)), nodes 0..8 per axis (`terrain::lattice_bilinear`).
 fn lean_bilinear(xy: vec2<i32>, spacing: i32) -> i32 {
@@ -126,6 +125,16 @@ fn lean_height(p: vec3<i32>, i: i32, j: i32, k: i32, level: u32, height: i32, sp
     return lean_bilinear(xy + o, spacing) + height - lean_bilinear(xy, spacing);
 }
 
+// Density of generated cell `k` of column `(i, j)` (`terrain_density`), its
+// surface leaning when `leaning` (lattice spacing and first node).
+fn generated_density(p: vec3<i32>, face: u32, i: i32, j: i32, k: i32, level: u32, field_top: i32, height: i32, leaning: bool, spacing: i32, node: vec2<i32>) -> i32 {
+    var lean_h = height;
+    if leaning { lean_h = lean_height(p, i, j, k, level, height, spacing, node); }
+    return terrain_density(p, volume_point(face, i, j, k, level), level, field_top, height, lean_h, k);
+}
+
+// Q16 fraction of a cell whose surface lies `h` cells above its bottom (0:
+// the whole cell).
 fn cell_fraction(h: f32) -> u32 {
     if h >= 1.0 { return 0u; }
     return clamp(u32(h * 65536.0), 1u, 65535u);
@@ -183,7 +192,34 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let requested_relief = display_base && topology_flags == 0u;
     // Bit 16: the display height keeps unresolved ridges' mean (off only
     // for audits against the canonical field).
-    let column = generation_column(face, i, j, level, display_base && (frame.hints.w & 16u) != 0u);
+    let display = display_base && (frame.hints.w & 16u) != 0u;
+    let lean = terrain_lean(level);
+    // A leaning surface reads the field on a global lattice (nodes every
+    // `spacing` cells, shared by neighbouring columns): each lane evaluates
+    // one of the 8x8 nodes from `div_floor(8 ci - reach, spacing)`.
+    let lean_node = vec2<i32>(div_floor(ci * 8 - lean.x, max(lean.y, 1)), div_floor(cj * 8 - lean.x, max(lean.y, 1)));
+    let last = (world.grid.z >> level) - 1;
+    let node_cell = vec2<i32>(clamp((lean_node.x + x) * lean.y, 0, last), clamp((lean_node.y + y) * lean.y, 0, last));
+    // The lane's own column, then (when some lane may lean) its lattice
+    // node: one interpreter call site (compilers inline every call).
+    var column = vec2<i32>(0);
+    var extent = vec2<i32>(0);
+    var column_point = vec3<i32>(0);
+    for (var phase = 0u; phase < 2u; phase++) {
+        if phase == 0u || (atomicLoad(&g_volume) & VOLUME_LEAN) != 0u {
+            let at = select(vec2<i32>(i, j), node_cell, phase == 1u);
+            let field = generation_column(face, at.x, at.y, level, display);
+            if phase == 1u {
+                g_lean[li] = field.x;
+            } else {
+                column = field;
+                column_point = domain_point(face, i, j, level);
+                extent = terrain_extent(column_point, level);
+                if lean.x != 0 && extent.y > 0 { atomicOr(&g_volume, VOLUME_LEAN); }
+            }
+        }
+        workgroupBarrier();
+    }
     let height = column.x;
     let base_top = div_floor(height, world.grid.y);
     let remainder = u32(base_top) & ((1u << level) - 1u);
@@ -207,18 +243,31 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     atomicMin(&g_band[0], top - 1);
     atomicMax(&g_band[1], top);
     // Volumetric terrain (caves, overhangs): the program may change cells
-    // within its extent around the heightfield top; those cells are
-    // evaluated in 3D and the column keeps arbitrary occupancy.
-    let column_point = domain_point(face, i, j, level);
-    let extent = terrain_extent(column_point, level);
+    // within its extent around the heightfield top, evaluated in 3D. Only
+    // the cells it changes make generated volume: a column whose cells all
+    // keep the heightfield's kinds (most of a cave region's rock, ground too
+    // flat to lean) stays a heightfield column, with its band, relief and
+    // storage. Pass 1 finds the lane's changed cells; the band loop
+    // evaluates them and one more on each side (the generated surface's
+    // relief reads the densities around it).
     let field_top = base_top >> level;
-    if extent.x != 0 || extent.y != 0 {
-        atomicMin(&g_band[0], field_top - extent.x - 1);
-        atomicMax(&g_band[1], field_top + extent.y);
+    let leaning = lean.x != 0 && extent.y > 0;
+    var changed_lo = 0x7fffffff;
+    var changed_hi = -0x7fffffff;
+    for (var k = field_top - extent.x; k < field_top + extent.y; k++) {
+        if (generated_density(column_point, face, i, j, k, level, field_top, height, leaning, lean.y, lean_node) > 0) != (k < field_top) {
+            changed_lo = min(changed_lo, k);
+            changed_hi = max(changed_hi, k);
+        }
+    }
+    let changed = changed_lo <= changed_hi;
+    let eval_lo = select(0, max(changed_lo - 1, field_top - extent.x), changed);
+    let eval_hi = select(-1, min(changed_hi + 1, field_top + extent.y - 1), changed);
+    if changed {
+        atomicMin(&g_band[0], eval_lo - 1);
+        atomicMax(&g_band[1], eval_hi + 1);
         atomicOr(&g_volume, VOLUME_TERRAIN);
     }
-    let lean = terrain_lean(level);
-    if lean.x != 0 && extent.y > 0 { atomicOr(&g_volume, VOLUME_LEAN); }
     if job.edits != 0u {
         let count = edit_refs[job.edits - 1u];
         for (var e = li; e < count; e += 64u) {
@@ -256,17 +305,6 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let n_band = u32(k_hi - k_lo);
     let volume_bits = atomicLoad(&g_volume);
     let volumetric = (volume_bits & VOLUME_TERRAIN) != 0u;
-    // A leaning surface reads the field on a global lattice (nodes every
-    // `spacing` cells, shared by neighbouring columns): each lane evaluates
-    // one of the 8x8 nodes from `div_floor(8 ci - reach, spacing)`; the
-    // publication barrier below completes them before the band loop.
-    let lean_node = vec2<i32>(div_floor(ci * 8 - lean.x, max(lean.y, 1)), div_floor(cj * 8 - lean.x, max(lean.y, 1)));
-    if (volume_bits & VOLUME_LEAN) != 0u {
-        let last = (world.grid.z >> level) - 1;
-        let ni = clamp((lean_node.x + x) * lean.y, 0, last);
-        let nj = clamp((lean_node.y + y) * lean.y, 0, last);
-        g_lean[li] = generation_column(face, ni, nj, level, display_base && (frame.hints.w & 16u) != 0u).x;
-    }
     // Generated caves and overhangs keep the relief of the natural surface
     // they leave intact (their tops count down from the band top, which a
     // band of at most 32 bricks always fits).
@@ -317,10 +355,9 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         atomicStore(&g_words[li], 0u);
     }
     workgroupBarrier();
-    // Generated top of a volumetric lane: first air above its highest
-    // generated solid cell (overhang lips, cave openings; edits excluded).
-    var generated_top = top;
-    if extent.x != 0 || extent.y != 0 { generated_top = field_top - extent.x; }
+    // Generated top of a lane: first air above its highest solid cell before
+    // edits (overhang lips, cave openings).
+    var generated_top = k_lo * 8;
     // Caves or overhangs change this lane's top cell or the air above it:
     // its surface is no longer the relief surface.
     var surface_changed = false;
@@ -329,8 +366,9 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     var top_solid = NO_DENSITY;
     var top_air = NO_DENSITY;
     var top_fraction = 0u;
-    // Lanes the overhangs fold (their volume reaches above the surface).
-    let overhang_lane = extent.y > 0;
+    // Lanes the overhangs fold take every evaluated cell, and their relief,
+    // from the density.
+    let dense_lane = leaning && changed;
     let edit_count = workgroupUniformLoad(&g_edit_count);
     let ch = vec2<i32>(center_half(i, level), center_half(j, level));
     // The column's footprint in half cells, for culling brushes per brick.
@@ -341,24 +379,21 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         var kinds: array<u32, 8>;
         for (var z = 0u; z < 8u; z++) {
             let k = (k_lo + i32(b)) * 8 + i32(z);
-            var kind = terrain_kind(select(top, field_top, overhang_lane), k);
-            if k >= field_top - extent.x && k < field_top + extent.y {
+            var kind = terrain_kind(select(top, field_top, dense_lane), k);
+            if k >= eval_lo && k <= eval_hi {
                 // Overhangs fold the exact surface: their lanes take every
                 // cell, and their relief, from the density. Elsewhere (caves)
                 // a cell the volume leaves as the heightfield has it keeps the
                 // heightfield's kind (with relief, its ceil top cell).
-                var lean_h = height;
-                if overhang_lane && lean.x != 0 { lean_h = lean_height(column_point, i, j, k, level, height, lean.y, lean_node); }
-                let density = terrain_density(column_point, volume_point(face, i, j, k, level), level, field_top, height, lean_h, k);
+                let density = generated_density(column_point, face, i, j, k, level, field_top, height, leaning, lean.y, lean_node);
                 let dense = select(0u, 1u, density > 0);
                 if dense != terrain_kind(field_top, k) {
                     kind = dense;
                     if k >= top - 1 { surface_changed = true; }
-                } else if overhang_lane {
+                } else if dense_lane {
                     kind = dense;
                 }
                 if kind != 0u {
-                    generated_top = max(generated_top, k + 1);
                     top_solid = density;
                     top_air = NO_DENSITY;
                     top_fraction = 0u;
@@ -368,13 +403,13 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                     if requested_relief && t > 0.5 {
                         // The surface rises into this cell: solid, cut there.
                         kind = 1u;
-                        generated_top = max(generated_top, k + 1);
                         top_fraction = cell_fraction(t - 0.5);
                     } else {
                         top_fraction = cell_fraction(0.5 + t);
                     }
                 }
             }
+            if kind != 0u { generated_top = max(generated_top, k + 1); }
             kinds[z] = kind;
         }
         // The edit list in order, in chunks of 64 brushes: each lane culls
@@ -464,7 +499,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     }
     if volumetric && li < 16u { scratch[base * UNIT_WORDS + li] = atomicLoad(&g_words[li]); }
     if wide_relief && volumetric {
-        if surface_changed || overhang_lane { fraction = top_fraction; }
+        if surface_changed || dense_lane { fraction = top_fraction; }
         atomicOr(&g_fraction[li >> 1u], fraction << ((li & 1u) * 16u));
         workgroupBarrier();
         if li < 32u { scratch[(base + 1u) * UNIT_WORDS + li] = atomicLoad(&g_fraction[li]); }
