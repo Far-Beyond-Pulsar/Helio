@@ -448,7 +448,6 @@ fn reject_unsupported_geometry(world: &World) -> helio_core::Result<()> {
         "foliage_layers",
         "voxel_volumes",
         "vg_instances",
-        "sublevels",
     ] {
         if store
             .resolve_buffer_handle(helio_core::BufferKey::of(name))

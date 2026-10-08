@@ -2,7 +2,6 @@
 //!
 //! The gbuffer/cull passes project these rows into transient instance and
 //! coordinate-space inputs. No renderer-side group registry is authoritative.
-#![allow(deprecated)]
 use pulsar_scenedb::gpu::{BufferHandle, BufferKey, GpuMirrorHandle};
 use pulsar_scenedb_derive::SceneStore;
 use std::marker::PhantomData;
@@ -180,22 +179,6 @@ impl SubLevelActorComponent {
     pub fn is_enabled(&self) -> bool {
         self.flags & Self::FLAG_ENABLED != 0
     }
-}
-
-/// A movable SceneDB sublevel. The matrix is copied into the transient
-/// coordinate-space projection by the render bridge; it is not a renderer
-/// scene record.
-#[deprecated(
-    note = "legacy movable sublevel projection; use SubLevelIndex and SubLevelActorComponent"
-)]
-#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
-#[repr(C)]
-#[gpu(layout = packed, buffer = "sublevels")]
-pub struct SublevelComponent {
-    #[gpu]
-    pub group_mask: u64,
-    #[gpu]
-    pub placement: [[f32; 4]; 4],
 }
 
 /// The renderer consumes sectioned-object placement as a transient set of
@@ -410,7 +393,6 @@ binding!(
     SubLevelActorComponent,
     "sublevel_actors"
 );
-binding!(SublevelSceneBinding, SublevelComponent, "sublevels");
 binding!(
     SectionedObjectSceneBinding,
     SectionedObjectComponent,
@@ -425,10 +407,8 @@ mod tests {
         assert_eq!(std::mem::size_of::<MaterialComponent>(), 96);
         assert_eq!(std::mem::size_of::<RenderGroupComponent>(), 8);
         assert_eq!(std::mem::size_of::<SubLevelActorComponent>(), 72);
-        assert_eq!(std::mem::size_of::<SublevelComponent>(), 72);
         assert_eq!(std::mem::size_of::<SectionedObjectComponent>(), 32);
         assert_eq!(std::mem::align_of::<SubLevelActorComponent>(), 4);
-        assert_eq!(std::mem::align_of::<SublevelComponent>(), 8);
     }
 
     #[test]
@@ -442,26 +422,13 @@ mod tests {
 }
 #[cfg(test)]
 mod lifecycle_tests {
-    use super::{RenderGroupComponent, SublevelComponent};
+    use super::RenderGroupComponent;
     #[test]
-    fn group_and_sublevel_rows_have_independent_lifetimes() {
+    fn a_render_group_row_is_removed_with_its_value() {
         let mut world = pulsar_scenedb::World::new();
         let group = world.spawn();
-        let level = world.spawn();
         let g = RenderGroupComponent { group_mask: 1 };
-        let s = SublevelComponent {
-            group_mask: 1,
-            placement: [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [3.0, 4.0, 5.0, 1.0],
-            ],
-        };
         world.insert(group, g);
-        world.insert(level, s);
         assert_eq!(world.remove::<RenderGroupComponent>(group), Some(g));
-        assert!(world.get::<SublevelComponent>(level).is_some());
-        assert_eq!(world.remove::<SublevelComponent>(level), Some(s));
     }
 }
