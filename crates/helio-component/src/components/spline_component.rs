@@ -503,6 +503,80 @@ pub fn spline_debug_lines(world: &pulsar_scenedb::World) -> Vec<helio::DebugVert
     lines
 }
 
+/// The editor's spline lines, rebuilt only when what they show changed.
+///
+/// Reads SceneDB's change journal (its own cursors, so no other reader is
+/// affected) for spline values, attachment state, and the transforms,
+/// visibility and selection of spline owners. Edits to anything else do not
+/// rebuild the lines.
+pub struct SplineLines {
+    cursors: Vec<pulsar_scenedb::ChangeCursor>,
+    /// Spline instances and their owners at the last build.
+    watched: std::collections::HashSet<pulsar_scenedb::Entity>,
+    /// The world revision at the last poll; a smaller one means the world
+    /// was replaced, and the cursors with it.
+    revision: u64,
+    built: bool,
+    scratch: Vec<pulsar_scenedb::ComponentChange>,
+}
+
+impl SplineLines {
+    pub fn new(world: &pulsar_scenedb::World) -> Self {
+        use pulsar_scene_model::{attachments::ComponentOwner, Selected, Transform, Visibility};
+        Self {
+            cursors: vec![
+                world.open_change_cursor::<SplineComponent>(),
+                world.open_change_cursor::<ComponentOwner>(),
+                world.open_change_cursor::<Transform>(),
+                world.open_change_cursor::<Visibility>(),
+                world.open_change_cursor::<Selected>(),
+            ],
+            watched: Default::default(),
+            revision: world.revision(),
+            built: false,
+            scratch: Vec::new(),
+        }
+    }
+
+    /// The lines to draw, when they changed since the last poll.
+    pub fn poll(&mut self, world: &pulsar_scenedb::World) -> Option<Vec<helio::DebugVertex>> {
+        if world.revision() < self.revision {
+            *self = Self::new(world);
+        }
+        self.revision = world.revision();
+        let mut dirty = !self.built;
+        for (index, cursor) in self.cursors.iter_mut().enumerate() {
+            self.scratch.clear();
+            if world.read_changes(cursor, &mut self.scratch)
+                == pulsar_scenedb::ChangeRead::Overflowed
+            {
+                dirty = true;
+            }
+            // Any spline change counts; other kinds count on a watched entity
+            // or on a spline instance (one newly attached or re-enabled).
+            dirty |= self.scratch.iter().any(|change| {
+                index == 0
+                    || self.watched.contains(&change.entity)
+                    || world.get::<SplineComponent>(change.entity).is_some()
+            });
+        }
+        if !dirty {
+            return None;
+        }
+        self.built = true;
+        self.watched.clear();
+        for (instance, _) in world.query::<&SplineComponent>() {
+            self.watched.insert(instance);
+            if let Some(owner) =
+                world.get::<pulsar_scene_model::attachments::ComponentOwner>(instance)
+            {
+                self.watched.insert(owner.entity());
+            }
+        }
+        Some(spline_debug_lines(world))
+    }
+}
+
 fn append_spline_lines(
     lines: &mut Vec<helio::DebugVertex>,
     spline: &SplineComponent,
@@ -677,5 +751,37 @@ mod tests {
         append_spline_lines(&mut selected, &spline, glam::Mat4::IDENTITY, true);
         assert!(!plain.is_empty() && plain.len() % 2 == 0);
         assert!(selected.len() > plain.len());
+    }
+
+    #[test]
+    fn spline_lines_rebuild_only_when_a_spline_or_its_owner_changes() {
+        use pulsar_scene_model::{world_ext::SceneWorldExt, SpawnObject, Transform, Visibility};
+        let mut world = pulsar_scenedb::World::new();
+        let curve = world.spawn_object(SpawnObject::new("curve")).unwrap();
+        let bystander = world.spawn_object(SpawnObject::new("bystander")).unwrap();
+        let spline = pulsar_world_registry::attach_value(&mut world, curve, line()).unwrap();
+        let mut lines = SplineLines::new(&world);
+
+        let first = lines.poll(&world).expect("the first poll builds");
+        assert!(!first.is_empty());
+        assert!(lines.poll(&world).is_none(), "nothing changed");
+
+        world.get_mut::<Transform>(bystander).unwrap().position = [5.0, 0.0, 0.0];
+        assert!(lines.poll(&world).is_none(), "an unrelated object moved");
+
+        world.get_mut::<Transform>(curve).unwrap().position = [5.0, 0.0, 0.0];
+        let moved = lines.poll(&world).expect("the owner moved");
+        assert_ne!(moved[0].position, first[0].position);
+
+        world.get_mut::<SplineComponent>(spline).unwrap().points[1].position = [0.0, 0.0, 9.0];
+        assert!(lines.poll(&world).is_some(), "the curve changed");
+
+        world.get_mut::<Visibility>(curve).unwrap().visible = false;
+        assert_eq!(lines.poll(&world).map(|l| l.len()), Some(0), "hidden");
+        world.get_mut::<Visibility>(curve).unwrap().visible = true;
+        assert!(lines.poll(&world).is_some_and(|l| !l.is_empty()));
+
+        pulsar_scene_model::attachments::set_enabled(&mut world, spline, false);
+        assert_eq!(lines.poll(&world).map(|l| l.len()), Some(0), "disabled");
     }
 }
