@@ -627,3 +627,48 @@ fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
     assert_eq!(editor.renderer.renderer_config().tsr_quality, None);
     assert!(editor.renderer.find_pass::<helio_pass_tsr::TsrPass>().is_none());
 }
+
+/// Terrain under an atmosphere, from standing height to high above it, under
+/// a high sun and a low one in view: no black frame (a non-finite value
+/// spreading through temporal history, or a missing sky).
+#[test]
+fn terrain_under_an_atmosphere_is_lit_at_every_height() {
+    let Some(mut editor) = editor(320, 180) else { return };
+    editor.renderer.set_editor_mode(false);
+    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+    let radius = planet.grid().radius();
+    let validation = editor.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let dir = glam::DVec3::new(0.2, 1.0, 0.3);
+    let up = planet.surface_point(dir, 0.0).normalize();
+    // High, and low ahead of the camera (the sun's disk in view).
+    for (case, sun) in [("high", (up + up.any_orthonormal_vector() * 0.6).normalize().as_vec3()),
+        ("low", (up.any_orthonormal_vector() + up * 0.08).normalize().as_vec3())] {
+    editor.set_sky(sun, Some(helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], radius)));
+    for height in [2.0, 25.0, 300.0, 20_000.0] {
+        let eye = planet.surface_point(dir, height);
+        *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun, shadows: true, picks: None });
+        editor.renderer.set_world_origin(Some(eye));
+        let forward = (up.any_orthonormal_vector() - up * 0.2).normalize().as_vec3();
+        let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up.as_vec3(), std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.05, 40_000_000.0);
+        let started = std::time::Instant::now();
+        loop {
+            editor.render(&camera);
+            let settled = editor.renderer.find_pass::<PlanetPass>().unwrap().renderer().is_some_and(|r| r.settled());
+            if settled || started.elapsed().as_secs() > 120 { break; }
+        }
+        for _ in 0..8 { editor.render(&camera); }
+        let pixels = editor.rgba();
+        capture(&editor, &format!("terrain_{case}_{height}"), &pixels);
+        let mean = mean_rgb(&pixels);
+        eprintln!("TERRAIN_ATMOSPHERE {case} sun, {height} m: mean {mean:?}");
+        // Backlit ground under a low sun is dark, but the sky around the sun
+        // is not; under a high sun the lit ground fills the view.
+        let brightest = pixels.iter().map(|p| u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2])).max().unwrap();
+        assert!(brightest > 90, "{case} sun, {height} m: the view is black: {mean:?}");
+        if case == "high" {
+            assert!(mean.iter().sum::<f64>() > 60.0, "{height} m: sunlit terrain too dark: {mean:?}");
+        }
+    }
+    }
+    assert!(pollster::block_on(validation.pop()).is_none());
+}

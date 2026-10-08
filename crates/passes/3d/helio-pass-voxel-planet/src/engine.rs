@@ -104,6 +104,9 @@ pub struct Settings {
     pub job_budget: usize,
     /// End rising eye rays at the directional sky bound.
     pub horizon: bool,
+    /// Occlude the sky's ambient light by the terrain around each point
+    /// (`skylight` in surface.wgsl).
+    pub sky_occlusion: bool,
     /// Skip hash lookups of columns the summary blocks prove absent.
     pub residency_hints: bool,
     /// Diagnostics (`HELIO_VOXEL_DEBUG`): 1 colours pixels by level, brighter
@@ -142,6 +145,7 @@ impl Default for Settings {
             lod_dither: std::env::var("HELIO_VOXEL_LOD_DITHER").ok().and_then(|v| v.parse().ok()).unwrap_or(0.25),
             job_budget: 12_288,
             horizon: std::env::var_os("HELIO_VOXEL_NO_HORIZON").is_none(),
+            sky_occlusion: std::env::var_os("HELIO_VOXEL_NO_SKY_OCCLUSION").is_none(),
             residency_hints: true,
             debug_view: std::env::var("HELIO_VOXEL_DEBUG").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             coarse_relief: std::env::var("HELIO_VOXEL_COARSE_RELIEF").ok().is_none_or(|v| v != "0"),
@@ -404,6 +408,7 @@ struct Pipelines {
     shade: wgpu::ComputePipeline,
     climate: wgpu::ComputePipeline,
     sunlight: wgpu::ComputePipeline,
+    skylight: wgpu::ComputePipeline,
     gbuffer: wgpu::RenderPipeline,
 }
 
@@ -594,6 +599,7 @@ impl Pipelines {
             let generate = scope.spawn(|| compute(&gen_pl, &gen_module, "generate"));
             let shade = scope.spawn(|| compute(&trace_pl, &trace_module, "shade"));
             let sunlight = scope.spawn(|| compute(&trace_pl, &trace_module, "sunlight"));
+            let skylight = scope.spawn(|| compute(&trace_pl, &trace_module, "skylight"));
             let primary = scope.spawn(|| compute(&trace_pl, &trace_module, "primary"));
             let climate = scope.spawn(|| compute(&trace_pl, &trace_module, "climate"));
             let join = |h: std::thread::ScopedJoinHandle<'_, wgpu::ComputePipeline>| h.join().expect("pipeline compile thread");
@@ -619,6 +625,7 @@ impl Pipelines {
                 generate: join(generate),
                 shade: join(shade),
                 sunlight: join(sunlight),
+                skylight: join(skylight),
                 primary: join(primary),
                 climate: join(climate),
                 gbuffer,
@@ -1858,6 +1865,22 @@ impl PlanetRenderer {
         }
         if let Some(p) = &mut self.profiler {
             p.end_pass(encoder, "planet_shade");
+        }
+        if self.settings.sky_occlusion {
+            if let Some(p) = &mut self.profiler {
+                p.begin_pass(encoder, "planet_skylight");
+            }
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_bind_group(0, &trace_group, &[]);
+                pass.set_bind_group(1, camera_group, &[]);
+                Self::dispatch(&mut pass, &self.pipelines.skylight, [size[0].div_ceil(16), size[1].div_ceil(16), 1]);
+            }
+            if let Some(p) = &mut self.profiler {
+                p.end_pass(encoder, "planet_skylight");
+            }
+        }
+        if let Some(p) = &mut self.profiler {
             p.begin_pass(encoder, "planet_gbuffer");
         }
         {

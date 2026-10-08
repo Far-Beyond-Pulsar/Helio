@@ -1405,7 +1405,7 @@ fn main() {
         let timed: Vec<&&Sample> = list.iter().filter(|s| !s.terrain_gpu_ms.is_nan()).collect();
         let terrain: Vec<f64> = timed.iter().map(|s| s.terrain_gpu_ms).collect();
         let mut stage_p95 = serde_json::Map::new();
-        for key in ["planet_residency", "planet_primary", "planet_shade", "planet_gbuffer", "planet_sunlight"] {
+        for key in ["planet_residency", "planet_primary", "planet_shade", "planet_skylight", "planet_gbuffer", "planet_sunlight"] {
             let v: Vec<f64> = timed.iter().map(|s| s.stages.get(key).copied().unwrap_or(0.0)).collect();
             stage_p95.insert(key.into(), serde_json::json!(percentile(&v, 0.95)));
         }

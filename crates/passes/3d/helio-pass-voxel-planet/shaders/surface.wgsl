@@ -1185,3 +1185,106 @@ fn sunlight(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
     }
 }
 
+
+// Sky visibility: how much of the sky a terrain point sees through the
+// terrain around it, as ambient occlusion at terrain scale (valleys, cliff
+// feet, overhangs, caves). The corner term in `shade` covers single cells;
+// screen-space AO skips terrain. Rays are fixed, cosine-weighted around the
+// normal, and reach SKY_RANGE_CELLS cells of the hit's level, so occlusion
+// keeps its size in cells (a coarse level stands for a wider neighbourhood).
+// Below the local horizon an upward or side face sees ground, which the
+// sky's irradiance already holds (its lower hemisphere): those rays are not
+// cast. A face turned down (ceilings, overhangs) casts all of its rays.
+const SKY_RAYS: u32 = 8u;
+const SKY_RANGE_CELLS: f32 = 64.0;
+
+fn sky_visibility(s: SunSample) -> f32 {
+    if !s.valid || s.level < 0 { return 1.0; }
+    let dist = length(s.position);
+    let level = u32(s.level);
+    let lo = select(0.0, frame.lod.x * exp2(f32(s.level) - 1.0) * 1.001, s.level > 0);
+    let offset = clamp(dist, lo, frame.lod.x * exp2(f32(s.level)) * 0.999);
+    let cell = frame.layer.y * f32(1 << level);
+    let eps = cell * 0.02 + dist * 2e-6;
+    let range = SKY_RANGE_CELLS * cell;
+    var up = frame.eye.xyz;
+    if !is_plane() { up = normalize(frame.eye.xyz + s.position / frame.eye.w); }
+    let n = s.normal;
+    let ceiling = dot(n, up) < -0.25;
+    let t1 = normalize(select(cross(n, vec3<f32>(0.0, 0.0, 1.0)), cross(n, vec3<f32>(1.0, 0.0, 0.0)), abs(n.z) > 0.9));
+    let t2 = cross(n, t1);
+    // A filtered cell stands for a slope of small steps: its own steps do
+    // not occlude it (as for sunlight).
+    let skip = s.filtered * 2.0 * cell;
+    let origin = s.position + n * eps;
+    var total = 0.0;
+    var open = 0.0;
+    for (var i = 0u; i < SKY_RAYS; i++) {
+        let u = (f32(i) + 0.5) / f32(SKY_RAYS);
+        let phi = f32(i) * 2.39996323;
+        let sin_t = sqrt(u);
+        let dir = normalize((t1 * cos(phi) + t2 * sin(phi)) * sin_t + n * sqrt(1.0 - u));
+        if !ceiling && dot(dir, up) < 0.0 { continue; }
+        total += 1.0;
+        let hit = trace(make_ray(origin, dir), skip, range, offset, 1.0, 0.0);
+        if (hit.info & 3u) == ST_MISS {
+            open += 1.0;
+        } else {
+            // Distant occluders shade less: no hard edge at the range.
+            open += smoothstep(0.5, 1.0, hit.t / range);
+        }
+    }
+    return select(1.0, open / total, total > 0.0);
+}
+
+// One sky-visibility estimate per 2x2 block at the rotating representative,
+// shared across its surface as `sunlight` shares sun rays, multiplied into
+// the terrain's ambient occlusion before the GBuffer publishes it.
+@compute @workgroup_size(8, 8)
+fn skylight(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+    let screen = vec2<u32>(frame.screen.xy);
+    let origin = id.xy * 2u;
+    let inside = all(origin < screen);
+    let f = u32(frame.screen.z);
+    let own = lid.x + lid.y * 8u;
+    let rep = min(origin + vec2<u32>(f & 1u, (f >> 1u) & 1u), max(screen, vec2<u32>(1u)) - 1u);
+    var rv = 1.0;
+    var rs: SunSample;
+    rs.valid = false;
+    if inside {
+        rs = sun_sample(rep);
+        rv = sky_visibility(rs);
+    }
+    rep_vis[own] = rv;
+    rep_pos[own] = vec4<f32>(rs.position, select(-1.0, rs.footprint, rs.valid));
+    rep_nrm[own] = rs.normal;
+    rep_filtered[own] = rs.filtered;
+    workgroupBarrier();
+    if !inside || (frame.hints.w >> 8u) != 0u { return; }
+    for (var q = 0u; q < 4u; q++) {
+        let p = origin + vec2<u32>(q & 1u, q >> 1u);
+        if any(p >= screen) { continue; }
+        let index = pixel_index(p);
+        if (surfaces[index].flags & 3u) != ST_HIT { continue; }
+        var v = rv;
+        if any(p != rep) {
+            let qs = sun_sample(p);
+            let side = vec2<i32>(select(-1, 1, (q & 1u) != 0u), select(-1, 1, (q >> 1u) != 0u));
+            var found = false;
+            for (var c = 0u; c < 4u; c++) {
+                let n = vec2<i32>(lid.xy) + vec2<i32>(select(0, side.x, (c & 1u) != 0u), select(0, side.y, (c & 2u) != 0u));
+                if any(n < vec2<i32>(0)) || any(n > vec2<i32>(7)) { continue; }
+                let slot = u32(n.x) + u32(n.y) * 8u;
+                if on_rep_surface(slot, qs) {
+                    v = rep_vis[slot];
+                    found = true;
+                    break;
+                }
+            }
+            if !found { v = sky_visibility(qs); }
+        }
+        let packed = surfaces[index].albedo_ao;
+        let ao = f32(packed >> 24u) / 255.0 * v;
+        surfaces[index].albedo_ao = (packed & 0x00ffffffu) | (u32(ao * 255.0 + 0.5) << 24u);
+    }
+}
