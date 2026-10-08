@@ -1,5 +1,4 @@
 use serde_json::Value;
-use std::collections::HashMap;
 
 use super::FoliageComponent;
 
@@ -14,15 +13,5 @@ impl FoliageComponent {
             foliage.rendering.apply_from_component_data(obj);
         }
         foliage
-    }
-
-    pub fn to_scene_props(&self) -> HashMap<String, Value> {
-        let mut out = HashMap::new();
-        self.general.apply_to_scene_props(&mut out);
-        self.placement.apply_to_scene_props(&mut out);
-        self.wind.apply_to_scene_props(&mut out);
-        self.interaction.apply_to_scene_props(&mut out);
-        self.rendering.apply_to_scene_props(&mut out);
-        out
     }
 }

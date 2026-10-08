@@ -1,6 +1,5 @@
 use engine_class_derive::engine_class;
 use serde_json::Value;
-use std::collections::HashMap;
 
 use super::super::{light_type_to_gpu_u32, LightType};
 use crate::components::ObjectMovability;
@@ -89,34 +88,5 @@ impl GeneralLightProps {
         if let Some(v) = obj.get("lighting_channel_2").and_then(|v| v.as_bool()) {
             self.lighting_channel_2 = v;
         }
-    }
-
-    pub(crate) fn apply_to_scene_props(&self, out: &mut HashMap<String, Value>) {
-        out.insert("enabled".to_string(), Value::from(self.enabled));
-        out.insert("affects_world".to_string(), Value::from(self.affects_world));
-        out.insert(
-            "light_type".to_string(),
-            Value::from(self.light_type as u64),
-        );
-        out.insert(
-            "movability".to_string(),
-            Value::from(self.movability.name()),
-        );
-        out.insert(
-            "light_channels".to_string(),
-            Value::from(self.light_channels),
-        );
-        out.insert(
-            "lighting_channel_0".to_string(),
-            Value::from(self.lighting_channel_0),
-        );
-        out.insert(
-            "lighting_channel_1".to_string(),
-            Value::from(self.lighting_channel_1),
-        );
-        out.insert(
-            "lighting_channel_2".to_string(),
-            Value::from(self.lighting_channel_2),
-        );
     }
 }

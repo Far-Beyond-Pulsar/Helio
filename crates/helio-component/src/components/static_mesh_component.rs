@@ -834,17 +834,10 @@ pub struct StaticMeshComponent {
 impl ScenePropsProjector for StaticMeshComponent {
     const CLASS_NAME: &'static str = "StaticMeshComponent";
 
-    fn apply_scene_props(props: &mut HashMap<String, Value>, component_data: Option<&Value>) {
+    /// Clears the keys this class's values once occupied in an object's
+    /// props (the level-file migration); the values live in the component.
+    fn apply_scene_props(props: &mut HashMap<String, Value>, _component_data: Option<&Value>) {
         props.remove("mesh_asset");
-        let Some(data) = component_data else { return };
-        if let Some(path) = data
-            .as_object()
-            .and_then(|o| o.get("mesh_asset"))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.trim().is_empty())
-        {
-            props.insert("mesh_asset".to_string(), Value::from(path));
-        }
     }
 }
 

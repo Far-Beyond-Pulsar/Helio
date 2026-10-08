@@ -1,6 +1,5 @@
 use helio::GpuLight;
 use serde_json::Value;
-use std::collections::HashMap;
 
 use super::LightComponent;
 
@@ -111,19 +110,6 @@ impl LightComponent {
         light
     }
 
-    pub fn to_scene_props(&self) -> HashMap<String, Value> {
-        let mut out = HashMap::new();
-        self.general.apply_to_scene_props(&mut out);
-        self.intensity.apply_to_scene_props(&mut out);
-        self.color.apply_to_scene_props(&mut out);
-        self.attenuation.apply_to_scene_props(&mut out);
-        self.shadows.apply_to_scene_props(&mut out);
-        self.volumetrics.apply_to_scene_props(&mut out);
-        self.light_function.apply_to_scene_props(&mut out);
-        self.performance.apply_to_scene_props(&mut out);
-        self.advanced.apply_to_scene_props(&mut out);
-        out
-    }
 }
 
 #[cfg(test)]
@@ -146,11 +132,18 @@ mod tests {
 
         let gpu = light.to_gpu_mirror().to_helio_gpu_light();
 
-        // xyz is always the zeroed placeholder here -- HelioRenderer::
-        // rebuild_light_frame is the one place that overwrites it from the
-        // live Transform (see this fn's own doc).
+        // xyz is always the zeroed placeholder here: the scene join fills it
+        // from the owner's transform on the GPU (see this fn's own doc).
         assert_eq!(gpu.position_range, [0.0, 0.0, 0.0, 10.0]);
-        assert_eq!(gpu.color_intensity, [0.25, 0.5, 0.75, 42.0]);
+        // The default unit is lumens; a point light spreads them over the
+        // full sphere, so the shader gets candela.
+        let candela = 42.0 / (4.0 * std::f32::consts::PI);
+        assert_eq!(&gpu.color_intensity[..3], &[0.25, 0.5, 0.75]);
+        assert!((gpu.color_intensity[3] - candela).abs() < 1e-5);
+
+        light.intensity.intensity_units = super::super::IntensityUnits::Candelas;
+        let gpu = light.to_gpu_mirror().to_helio_gpu_light();
+        assert_eq!(gpu.color_intensity, [0.25, 0.5, 0.75, 42.0], "candela pass through");
     }
 
     #[test]

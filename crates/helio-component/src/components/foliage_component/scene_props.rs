@@ -9,7 +9,9 @@ use super::FoliageComponent;
 impl ScenePropsProjector for FoliageComponent {
     const CLASS_NAME: &'static str = "FoliageComponent";
 
-    fn apply_scene_props(props: &mut HashMap<String, Value>, component_data: Option<&Value>) {
+    /// Clears the keys this class's values once occupied in an object's
+    /// props (the level-file migration); the values live in the component.
+    fn apply_scene_props(props: &mut HashMap<String, Value>, _component_data: Option<&Value>) {
         for key in [
             "enabled",
             "density",
@@ -48,15 +50,6 @@ impl ScenePropsProjector for FoliageComponent {
             "metallic",
         ] {
             props.remove(key);
-        }
-
-        let Some(data) = component_data else {
-            return;
-        };
-
-        let foliage = FoliageComponent::from_component_data(data);
-        for (k, v) in foliage.to_scene_props() {
-            props.insert(k, v);
         }
     }
 }
