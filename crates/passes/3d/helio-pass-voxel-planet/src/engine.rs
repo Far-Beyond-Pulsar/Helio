@@ -121,9 +121,6 @@ pub struct Settings {
     /// height (unresolved ridges keep their mean mass). Disable to audit
     /// coarse tops against the canonical field. Set before generating.
     pub ridge_display: bool,
-    /// Reconstruct distant slope lighting from existing raw climate samples,
-    /// blending by pixel footprint independently of the current clipmap level.
-    pub far_relief: bool,
     /// Diagnostics: skip residency planning (no jobs, windows or evictions)
     /// so several renders see identical GPU state.
     pub freeze_residency: bool,
@@ -150,7 +147,6 @@ impl Default for Settings {
             debug_view: std::env::var("HELIO_VOXEL_DEBUG").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             coarse_relief: std::env::var("HELIO_VOXEL_COARSE_RELIEF").ok().is_none_or(|v| v != "0"),
             ridge_display: std::env::var("HELIO_VOXEL_RIDGE_DISPLAY").ok().is_none_or(|v| v != "0"),
-            far_relief: std::env::var("HELIO_VOXEL_FAR_RELIEF").ok().is_none_or(|v| v != "0"),
             freeze_residency: false,
             frame_override: None,
             table_snapshots: false,
@@ -411,7 +407,6 @@ struct Pipelines {
     horizon_blocks: wgpu::ComputePipeline,
     horizon_suffix: wgpu::ComputePipeline,
     shade: wgpu::ComputePipeline,
-    climate: wgpu::ComputePipeline,
     sunlight: wgpu::ComputePipeline,
     skylight: wgpu::ComputePipeline,
     gbuffer: wgpu::RenderPipeline,
@@ -466,7 +461,6 @@ impl Pipelines {
             storage(17, false),
             storage(18, false),
             storage(19, true),
-            storage(20, false),
         ];
         trace_entries.push(wgpu::BindGroupLayoutEntry {
             binding: 9,
@@ -606,7 +600,6 @@ impl Pipelines {
             let sunlight = scope.spawn(|| compute(&trace_pl, &trace_module, "sunlight"));
             let skylight = scope.spawn(|| compute(&trace_pl, &trace_module, "skylight"));
             let primary = scope.spawn(|| compute(&trace_pl, &trace_module, "primary"));
-            let climate = scope.spawn(|| compute(&trace_pl, &trace_module, "climate"));
             let join = |h: std::thread::ScopedJoinHandle<'_, wgpu::ComputePipeline>| h.join().expect("pipeline compile thread");
             Self {
                 plane,
@@ -632,7 +625,6 @@ impl Pipelines {
                 sunlight: join(sunlight),
                 skylight: join(skylight),
                 primary: join(primary),
-                climate: join(climate),
                 gbuffer,
                 gen_layout,
                 trace_layout,
@@ -795,9 +787,6 @@ struct Screen {
     size: [u32; 2],
     hits: wgpu::Buffer,
     surfaces: wgpu::Buffer,
-    /// Per pixel, the raw terrain height the climate pass sampled (far
-    /// relief derives slopes from neighbouring pixels).
-    climate: wgpu::Buffer,
     sun: wgpu::Texture,
     sun_view: wgpu::TextureView,
 }
@@ -832,17 +821,10 @@ impl Screen {
             view_formats: &[],
         });
         let sun_view = sun.create_view(&Default::default());
-        let climate = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("planet climate height"),
-            size: pixels * 4,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
         Self {
             size,
             hits,
             surfaces,
-            climate,
             sun,
             sun_view,
         }
@@ -1165,7 +1147,6 @@ impl PlanetRenderer {
             }
         });
         frame.detail = appearance.detail.map(clean);
-        frame.hints[2] = u32::from(self.settings.far_relief);
         frame.hints[3] = (if self.settings.coarse_relief { 8 } else { 0 }) | (if self.settings.ridge_display { 16 } else { 0 }) | (self.settings.debug_view << 8);
         for face in 0..6u8 {
             // A plane has one face; the others keep default frames.
@@ -1752,7 +1733,6 @@ impl PlanetRenderer {
                 wgpu::BindGroupEntry { binding: 17, resource: self.buffers.horizon_acc.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 18, resource: self.buffers.horizon.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 19, resource: self.buffers.live_blocks.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 20, resource: self.screen.climate.as_entire_binding() },
             ],
         });
         let render_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1855,12 +1835,6 @@ impl PlanetRenderer {
         if let Some(p) = &mut self.profiler {
             p.end_pass(encoder, "planet_primary");
             p.begin_pass(encoder, "planet_shade");
-        }
-        {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_bind_group(0, &trace_group, &[]);
-            pass.set_bind_group(1, camera_group, &[]);
-            Self::dispatch(&mut pass, &self.pipelines.climate, [size[0].div_ceil(16), size[1].div_ceil(16), 1]);
         }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());

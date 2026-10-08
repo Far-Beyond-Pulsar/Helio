@@ -183,103 +183,6 @@ fn broad_relief_has_the_authored_slope_across_grid_sizes() {
 }
 
 #[test]
-#[ignore = "known defect, identical at 3a70ffe1: at 0.3 m the far-relief normal of one L12 pixel is 0.58 rad off (whole 1.2 km cell steps in the stencil)"]
-fn raw_climate_relief_recovers_flattened_normals_with_identical_primary_hits() {
-    let Some(gpu) = gpu() else {
-        eprintln!("SKIP: no GPU adapter available for this rendering fixture");
-        return;
-    };
-    let target = Target::new(&gpu, [96, 54]);
-    for size in [0.1, 0.3, 1.0] {
-        let p = world(size);
-        let eye = DVec3::new(12.5, 64_000.0, 15.5);
-        let f = frame(&p, eye);
-        let mut r = PlanetRenderer::new(
-            &gpu.device,
-            &gpu.queue,
-            p.clone(),
-            Settings {
-                coarse_relief: false,
-                far_relief: false,
-                frame_override: Some(37),
-                ..Default::default()
-            },
-            target.size,
-        );
-        for n in 0..2000 {
-            target.render(&gpu, &mut r, &f, -Vec3::Y, n);
-            if r.settled() {
-                break;
-            }
-        }
-        assert!(
-            r.settled(),
-            "relief fixture failed to settle: {:?}",
-            r.stats()
-        );
-        r.settings_mut().freeze_residency = true;
-        target.render(&gpu, &mut r, &f, -Vec3::Y, 2001);
-        let hit_bytes = read_buffer(&gpu, r.hit_buffer(), 96 * 54 * 32);
-        let before = read_buffer(&gpu, r.surface_buffer(), 96 * 54 * 16);
-        r.settings_mut().far_relief = true;
-        target.render(&gpu, &mut r, &f, -Vec3::Y, 2002);
-        assert_eq!(
-            hit_bytes,
-            read_buffer(&gpu, r.hit_buffer(), 96 * 54 * 32),
-            "appearance toggle changed occupancy or depth"
-        );
-        let after = read_buffer(&gpu, r.surface_buffer(), 96 * 54 * 16);
-        let decoded_hits = hits(&gpu, &r);
-        let expected = authored_normal(p.grid());
-        let mut restored = 0;
-        for y in 18..36 {
-            for x in 34..62 {
-                let index = (x + y * 96) as usize;
-                let h = decoded_hits[index];
-                if h.status != 1 || h.level == 0 {
-                    continue;
-                }
-                let b = &before[index * 16..index * 16 + 16];
-                let a = &after[index * 16..index * 16 + 16];
-                let old = unpack_normal(u32::from_le_bytes(b[8..12].try_into().unwrap()));
-                if old.dot(Vec3::Y) < 0.99999 {
-                    continue;
-                }
-                let new = unpack_normal(u32::from_le_bytes(a[8..12].try_into().unwrap()));
-                // Only count candidates that passed the neighbourhood gate.
-                if new.dot(old) > 0.99999 {
-                    continue;
-                }
-                let error = new.dot(expected).clamp(-1.0, 1.0).acos();
-                assert!(error < 0.004, "normal error{error} size{size} xy({x},{y}) old{old:?} actual{new:?} expected{expected:?}");
-                assert_eq!(&a[0..7], &b[0..7], "relief changed distance/RGB");
-                assert_eq!(
-                    a[7], 255,
-                    "fully filtered authored voxels retained coarse AO"
-                );
-                // Bits 21..24 carry the shading filter weight (sunlight
-                // follows the displayed normal); everything else is fixed.
-                let flags = |s: &[u8]| u32::from_le_bytes(s[12..16].try_into().unwrap()) & !(7 << 21);
-                assert_eq!(flags(a), flags(b), "relief changed material/flags");
-                restored += 1;
-            }
-        }
-        assert!(
-            restored >= 24,
-            "fixture did not prove enough flattened pixels recovered: size{size}, count{restored}"
-        );
-        eprintln!("far-relief authored normals recovered{restored} pixels for{size}m; primary bytes identical");
-        r.settings_mut().far_relief = false;
-        target.render(&gpu, &mut r, &f, -Vec3::Y, 2003);
-        assert_eq!(
-            before,
-            read_buffer(&gpu, r.surface_buffer(), 96 * 54 * 16),
-            "disabling prototype did not restore default surface bytes"
-        );
-    }
-}
-
-#[test]
 fn paint_preserves_authored_relief_geometry_and_normals() {
     let Some(gpu) = gpu() else {
         eprintln!("SKIP: no GPU adapter available for this rendering fixture");
@@ -307,7 +210,6 @@ fn paint_preserves_authored_relief_geometry_and_normals() {
                 p.clone(),
                 Settings {
                     coarse_relief: true,
-                    far_relief: true,
                     frame_override: Some(37),
                     ..Default::default()
                 },
@@ -433,7 +335,6 @@ fn stored_coarse_heights_recover_authored_normal_without_raw_climate_queries() {
             Settings {
                 lod_pixels: 4.0,
                 coarse_relief: true,
-                far_relief: false,
                 frame_override: Some(37),
                 ..Default::default()
             },
@@ -506,7 +407,6 @@ fn pending_paint_preserves_unaffected_raw_relief_and_undo() {
             p.clone(),
             Settings {
                 coarse_relief: true,
-                far_relief: true,
                 job_budget: 256,
                 frame_override: Some(37),
                 ..Default::default()
@@ -682,7 +582,6 @@ fn distant_add_remove_cut_faces_keep_native_normals() {
                 p.clone(),
                 Settings {
                     coarse_relief: true,
-                    far_relief: true,
                     lod_pixels: if op == BrushOp::Remove { 0.5 } else { 0.125 },
                     lod_dither: 0.0,
                     horizon: false,

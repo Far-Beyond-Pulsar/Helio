@@ -170,9 +170,9 @@ the CPU raycast what the GPU draws.
   canonical field queries and level 0 remain unchanged. Levels 1 and above
   retain fractional radial tops unless Add/Remove edits change their geometry.
   Short low-level spans store exact base-layer tops in the existing byte header.
-  Paint retains that relief. Slope lighting and face detail follow the authored
-  pixel footprint, using existing raw climate samples rather than tracing finer
-  cells.
+  Paint retains that relief. Slope lighting and the material height come from
+  the stored exact surface (`ground_field`), never from tracing finer cells
+  or running the generator per pixel.
 - Heights are relative to the datum (the planet radius or the plane's y = 0)
   and may be negative: lowland and ocean basins sit below it. Nothing in the
   pipeline may clamp heights to the datum (see the band-top invariant below).
@@ -485,16 +485,27 @@ they are once its work is on the GPU. Steps:
   column at level 0 (0.8 m tiles under a low sun) and in-column differences
   of base-quantized heights at coarser levels, zero on treads metres long
   and spiking at risers (dark worms along contours and column borders).
-  Cost: +0.34 ms shade at 1196x729 (`surface_offsets_reconstruct_the_field_height`,
+  It also gives the material height (the exact height at the pixel), so
+  the screen-space climate pass and its far-relief normal (a second,
+  per-pixel-stencil normal with a known 0.58 rad defect at 0.3 m voxels)
+  are gone. Cost: +0.34 ms shade at 1196x729 (`surface_offsets_reconstruct_the_field_height`,
   `stored_sphere_normals_match_authored_macro_slopes_and_ignore_reuse_hint`).
   Natural ground at any size is lit
   partly with its slope's normal (step softness, appearance `detail.w`,
   0.7 on Earth), casts no step shadows, keeps AO soft and keeps turf on its
   risers: a staircase standing for a slope reads as voxel texture instead
-  of black contour lines and brown soil dashes on every step. Each resolved
-  voxel's colour also moves along its material's patch ramp by its own hash
-  (blades of different hue; weathered and fresh stone), so the ground reads
-  as made of voxels wherever its voxels are resolved. The natural top
+  of black contour lines and brown soil dashes on every step.
+- **Voxel mosaic at every distance** (Lay of the Land look). Each drawn
+  cell, a base voxel near the eye and an LOD cell beyond (1-2 pixels wide
+  at every level), takes its own brightness and its own place on its
+  material's patch ramp from a hash of its volume point (blades of
+  different hue; weathered and fresh stone), down to about half a pixel
+  (`mosaic_weight`); temporal reconstruction averages smaller cells. Keyed
+  to the base voxel it faded out as voxels shrank below a pixel, before the
+  coarser levels took over: a smooth band between voxel ground near the eye
+  and stepped ground far away. The pattern changes with the level (LOD
+  voxels are coarser); lighting stays the smooth ground's, so steps draw no
+  contour lines. The natural top
   of generated cave and overhang columns filters too; cave walls and edit
   cuts stay crisp (`natural_surface_hit`).
 - **Material slope at one scale.** Materials (rock, scree, snow, grass)
@@ -596,7 +607,7 @@ times come from timestamps.
 | `HELIO_VOXEL_FLIGHT_QUICK=1`, `_GROUND_ONLY=1`, `_CPU_PROBE=1` | Short timing probe, ground audits only, CPU per pass. |
 | `HELIO_VOXEL_PLAN_TRACE=<ms>` | Logs residency plan phases of frames taking over `<ms>` (10 if not a number). |
 | `HELIO_VOXEL_LOD_DITHER`, `HELIO_VOXEL_NO_HORIZON`, `HELIO_VOXEL_NO_FAILSAFE` | Override the dither width; disable the sky bound; disable its fail-safe (A/B timing). |
-| `HELIO_VOXEL_COARSE_RELIEF=0`, `HELIO_VOXEL_FAR_RELIEF=0`, `HELIO_VOXEL_RIDGE_DISPLAY=0` | Disable fractional radial tops, raw-climate slope lighting or ridge-envelope display heights for A/B comparisons. Set before loading terrain. |
+| `HELIO_VOXEL_COARSE_RELIEF=0`, `HELIO_VOXEL_RIDGE_DISPLAY=0` | Disable fractional radial tops or ridge-envelope display heights for A/B comparisons. Set before loading terrain. |
 
 Measuring pitfalls: synchronous readbacks (audits, probes, captures) idle
 the GPU and the driver drops its clock (frames right after them show 210 MHz

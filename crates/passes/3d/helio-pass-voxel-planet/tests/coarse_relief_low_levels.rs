@@ -492,40 +492,27 @@ fn authored_pixel_filter_hides_coarse_ao_grid_but_keeps_near_edges() {
     let altitude = 200.0;
     let eye = DVec3::new(0.0, 53.7 + altitude, 0.0);
     let mut reference: Option<Vec<u8>> = None;
-    let mut legacy_grid = 0;
     for level in [1, 5, 8] {
         let lod = lod_for(&p, size, fov, altitude, level);
         let (target, mut r, hs) = render(&gpu, p.clone(), eye, -Vec3::Y, size, fov, lod, true);
         assert!(hs.iter().all(|h| h.status == 1 && h.level == level));
         r.settings_mut().freeze_residency = true;
-        r.settings_mut().far_relief = false;
         target.render(&gpu, &mut r, &frame(&p, eye), -Vec3::Y, 2002);
-        let before = read_buffer(&gpu, r.surface_buffer(), 81 * 16);
-        let primary = read_buffer(&gpu, r.hit_buffer(), 81 * 32);
-        r.settings_mut().far_relief = true;
-        target.render(&gpu, &mut r, &frame(&p, eye), -Vec3::Y, 2003);
         let after = read_buffer(&gpu, r.surface_buffer(), 81 * 16);
-        assert_eq!(primary, read_buffer(&gpu, r.hit_buffer(), 81 * 32));
         for (index, s) in after.chunks_exact(16).enumerate() {
             assert_eq!(s[7], 255, "L{level} pixel{index} exposed a coarse edge/AO grid despite subpixel authored voxels");
-            assert_eq!(&s[8..12], &before[index * 16 + 8..index * 16 + 12]);
-            if before[index * 16 + 7] < 255 {
-                legacy_grid += 1;
-            }
+            // The pigment is each drawn cell's own (the voxel mosaic): only
+            // AO and the normal must not depend on the level.
             if let Some(ref bytes) = reference {
                 assert_eq!(
-                    &s[4..12],
-                    &bytes[index * 16 + 4..index * 16 + 12],
-                    "L{level} changed constant-field pigment/AO/normal at pixel{index}"
+                    &s[7..12],
+                    &bytes[index * 16 + 7..index * 16 + 12],
+                    "L{level} changed constant-field AO/normal at pixel{index}"
                 );
             }
         }
         reference.get_or_insert(after);
     }
-    assert!(
-        legacy_grid > 0,
-        "fixture did not expose the removed coarse AO grid"
-    );
     // At this footprint authored voxels cover >20px, so crisp near edges
     // must remain byte-identical and visibly present with either shader.
     let p = Arc::new(flat(Shape::Plane, 0.0));
@@ -565,19 +552,10 @@ fn authored_pixel_filter_hides_coarse_ao_grid_but_keeps_near_edges() {
     }
     r.settings_mut().residency_hints = true;
     r.settings_mut().freeze_residency = true;
-    r.settings_mut().far_relief = false;
     target.render(&gpu, &mut r, &frame(&p, near), -Vec3::Y, 2002);
-    let before = read_buffer(&gpu, r.surface_buffer(), 81 * 16);
-    r.settings_mut().far_relief = true;
-    target.render(&gpu, &mut r, &frame(&p, near), -Vec3::Y, 2003);
     let after = read_buffer(&gpu, r.surface_buffer(), 81 * 16);
-    assert_eq!(
-        before, after,
-        "authored pixel filtering changed resolved near voxels"
-    );
     assert!(
         after.chunks_exact(16).any(|s| s[7] < 255),
         "near voxel edges were erased"
     );
-    eprintln!("AO filter: {legacy_grid} fake coarse-grid samples removed across L1/L5/L8; near L0 edges byte-identical");
 }

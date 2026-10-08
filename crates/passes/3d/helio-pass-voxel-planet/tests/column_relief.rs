@@ -124,7 +124,6 @@ fn stored_material_slope_matches_field_and_exposes_rounded_classification() {
             p.clone(),
             Settings {
                 coarse_relief: true,
-                far_relief: false,
                 frame_override: Some(37),
                 ..Default::default()
             },
@@ -285,7 +284,6 @@ fn stored_sphere_normals_match_authored_macro_slopes_and_ignore_reuse_hint() {
                 Settings {
                     coarse_relief: true,
                     lod_pixels: 4.0,
-                    far_relief: false,
                     frame_override: Some(37),
                     ..Default::default()
                 },

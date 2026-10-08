@@ -18,7 +18,7 @@ fn grazing_soil_lip_filters_radial_coverage_and_preserves_protected_faces() {
         .split(';').next().unwrap();
     assert!(surface.contains("if axis < 2u && material_lip(material) != material {"));
     assert!(surface.contains("soil_coverage * (1.0 - appearance_w)"));
-    assert!(surface.contains("ground_material(p, column_surface(c, x, y), climate_height, material_depth, slope, material_layer)"));
+    assert!(surface.contains("ground_material(p, column_surface(c, x, y), ground.height, material_depth, slope, material_layer)"));
     let Some(gpu) = gpu() else { return };
     let source = format!(r#"
         struct Column {{info:u32, fit:u32}}
@@ -164,7 +164,7 @@ fn grazing_projection_uses_actual_support_and_preserves_edit_guards() {
     // Projected appearance is not an input to canonical classification or
     // the existing material-depth/layer selection.
     assert!(surface.contains("let top_material = code < 4u && smooth_w > 0.5;"));
-    assert!(surface.contains("ground_material(p, column_surface(c, x, y), climate_height, material_depth, slope, material_layer)"));
+    assert!(surface.contains("ground_material(p, column_surface(c, x, y), ground.height, material_depth, slope, material_layer)"));
     let Some(gpu) = gpu() else { return };
     let source = format!(r#"
         struct Column {{info:u32}}
@@ -245,11 +245,11 @@ fn grazing_projection_uses_actual_support_and_preserves_edit_guards() {
 }
 
 #[test]
-fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
+fn smooth_ground_uses_physical_chart_slope_and_continuous_support() {
     let Some(gpu) = gpu() else { return };
     let surface = include_str!("../shaders/surface.wgsl");
     let helpers = surface
-        .split("fn canonical_relief_confidence")
+        .split("fn detail_filter_weight")
         .nth(1)
         .unwrap()
         .split("// A natural riser")
@@ -284,26 +284,19 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
         override PLANE:bool=false;
         fn is_plane()->bool {{return PLANE;}}
         fn face_axis{axes}
-        fn canonical_relief_confidence{helpers}
+        fn detail_filter_weight{helpers}
         @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) id:vec3<u32>) {{
             if id.x>=arrayLength(&probes) {{return;}}
             let p=probes[id.x];
-            answers[id.x*13u]=vec4<f32>(0.0,
-                canonical_relief_confidence(p.params.z),canonical_relief_face_weight(0u,p.params.w,false),canonical_relief_face_weight(4u,p.params.w,false));
+            answers[id.x*13u]=vec4<f32>(0.0,0.0,
+                smooth_face_weight(0u,p.params.w,false),smooth_face_weight(4u,p.params.w,false));
             let base=detail_filter_weight(p.params.w);
             answers[id.x*13u+1u]=vec4<f32>(base,
-                base*canonical_relief_face_weight(0u,p.params.w*2.0,true),
-                base*canonical_relief_face_weight(0u,p.params.w*4.0,true),
-                base*canonical_relief_face_weight(0u,p.params.w*32.0,false));
-            let dithers=array<f32,4>(0.0,0.25,0.5,1.0);
-            var stencil:vec4<f32>;
-            for (var n=0u;n<4u;n++) {{
-                let distance=(p.params.w*10.0+1.0)/(1.0-0.5*dithers[n]);
-                stencil[n]=canonical_stencil_weight(distance,10.0,dithers[n]);
-            }}
-            answers[id.x*13u+2u]=stencil;
-            answers[id.x*13u+3u]=column_relief_gradient(u32(p.params.x),p.up.xyz,
-                vec2<f32>(p.up.w,p.gradient.w),p.params.y);
+                base*smooth_face_weight(0u,p.params.w*2.0,true),
+                base*smooth_face_weight(0u,p.params.w*4.0,true),
+                base*smooth_face_weight(0u,p.params.w*32.0,false));
+            answers[id.x*13u+3u]=vec4<f32>(chart_gradient(u32(p.params.x),p.up.xyz,
+                vec2<f32>(p.up.w,p.gradient.w),p.params.y),0.0);
             answers[id.x*13u+4u]=vec4<f32>(detail_filter_weight(1.5*appearance_projection(1.0,4u).x),
                 detail_filter_weight(1.5*appearance_projection(0.1,4u).x),detail_filter_weight(20.0*appearance_projection(0.1,0u).x),
                 detail_filter_weight(1.5*appearance_projection(0.1,6u).x));
@@ -507,7 +500,7 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                     "head-on support, incidence sign and unknown-face support changed");
                 assert_eq!(pair[6],[0.0,1.0,0.0,0.0],
                     "area support must retain resolved long faces and head-on/unknown support");
-                for component in 0..4 {
+                for component in 0..3 {
                     assert!((f64::from(pair[3][component])-expected_gradient[index][component]).abs()<2e-5,
                         "physical fallback gradient disagrees with independent chart finite differences: plane{plane} voxel{voxel} probe{index} component{component}: {:?} expected{:?}",
                         pair[3],expected_gradient[index]);
@@ -519,44 +512,17 @@ fn canonical_relief_uses_physical_chart_slope_and_continuous_support() {
                 }
                 assert_eq!(pair[1][3],0.0,
                     "oversized streamed fallback wall lost its geometric normal at probe{index}");
-                for (n, dither) in [0.0, 0.25, 0.5, 1.0].into_iter().enumerate() {
-                    let distance = (f64::from(probes[index][2][3]) * 10.0 + 1.0) / (1.0 - 0.5 * dither);
-                    // Independently enumerate both ends of compatible depth
-                    // and primary-dither intervals, rather than copying the
-                    // shader's selected-distance shortcut.
-                    let tolerance = (distance * 0.02).max(1.0);
-                    let mut nearest = f64::INFINITY;
-                    for depth in [distance - tolerance, distance + tolerance] {
-                        for noise in [0.0, 1.0] {
-                            nearest = nearest.min(depth * (1.0 + dither * (noise - 0.5)));
-                        }
-                    }
-                    let expected = smooth(10.0, 12.5, nearest);
-                    assert!((f64::from(pair[2][n]) - expected).abs() < 2e-5,
-                        "stencil support disagrees with primary bounds at probe{index} dither{dither}");
-                    if nearest <= 10.0 {
-                        assert_eq!(pair[2][n], 0.0, "L0-compatible stencil must not acquire canonical confidence");
-                    }
-                    if nearest >= 12.5 {
-                        assert_eq!(pair[2][n], 1.0, "fully coarse stencil must retain canonical relief");
-                    }
-                }
             }
             for (index, (a, e)) in actual.iter().zip(&expected).enumerate() {
                 // Materials no longer read a screen-space slope (one slope
                 // field at every level: `material_slope`).
-                for component in 1..4 {
+                for component in 2..4 {
                     assert!((a[component] as f64-e[component]).abs()<2e-5,"plane{plane} voxel{voxel} probe{index} component{component}: {:?} expected{:?}",a,e);
                 }
             }
-            assert_eq!(actual[1][1], 1.0);
-            assert!(
-                actual[2][1] > 0.9999,
-                "normal support jumped at old slope cutoff"
-            );
             assert_eq!(
                 actual[3][2], 0.0,
-                "resolved angular wall received canonical height normal"
+                "resolved angular wall received the smooth ground normal"
             );
             assert_eq!(actual[1][2], 1.0, "subpixel lower boundary must be fully averaged");
             assert_eq!(actual[7][2], 0.5, "one pixel must retain half the authored contrast");
