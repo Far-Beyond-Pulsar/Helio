@@ -95,7 +95,8 @@ var<workgroup> g_offset: array<atomic<u32>, 16>;
 // kept brushes compacted in list order (ballot bits, then ranks).
 var<workgroup> g_keep: array<atomic<u32>, 2>;
 var<workgroup> g_list: array<FaceBrush, 64>;
-var<workgroup> g_edit_count: u32;
+// The job's edit block counts (`EditCounts`: large, recent, baked).
+var<workgroup> g_edit_counts: vec3<u32>;
 // Field heights of the column's lean lattice nodes (`terrain::lean_height`).
 var<workgroup> g_lean: array<i32, 64>;
 // g_volume bits: some lane's cells differ from the heightfield (generated
@@ -171,21 +172,16 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let i = ci * 8 + x;
     let j = cj * 8 + y;
     if li == 0u {
-        var topology = false;
-        if job.edits != 0u {
-            let count = edit_refs[job.edits - 1u];
-            for (var e = 0u; e < count; e++) {
-                // Native publication lists are already level-filtered. Match
-                // apply_edits defensively; Paint retains the base geometry.
-                let b = brushes[edit_refs[job.edits + e]];
-                if b.radius_half >= (1u << level) && ((b.flags >> 4u) & 3u) < 2u {
-                    topology = true;
-                    break;
-                }
-            }
+        let n = edit_counts(job.edits);
+        // Baked cells may carve or fill; of the brushes, Paint keeps the
+        // base geometry.
+        var topology = n.baked != 0u;
+        for (var e = 0u; e < n.large + n.recent && !topology; e++) {
+            let b = edit_brush(job.edits, e);
+            topology = b.radius_half >= (1u << level) && ((b.flags >> 4u) & 3u) < 2u;
         }
         g_topology_flags = select(0u, INFO_TOPOLOGY, topology);
-        g_edit_count = select(0u, edit_refs[job.edits - 1u], job.edits != 0u);
+        g_edit_counts = vec3<u32>(n.large, n.recent, n.baked);
         atomicStore(&g_keep[0], 0u);
         atomicStore(&g_keep[1], 0u);
         atomicStore(&g_band[0], 0x7fffffff);
@@ -291,9 +287,17 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         atomicOr(&g_volume, VOLUME_TERRAIN);
     }
     if job.edits != 0u {
-        let count = edit_refs[job.edits - 1u];
-        for (var e = li; e < count; e += 64u) {
-            let b = brushes[edit_refs[job.edits + e]];
+        let n = edit_counts(job.edits);
+        // Baked bricks may hold air below the terrain or solid above it.
+        let base = job.edits + 2u + (n.large + n.recent) * 12u;
+        for (var e = li; e < n.baked; e += 64u) {
+            let bk = bitcast<i32>(edit_refs[base + e * 2u]);
+            atomicMin(&g_band[0], bk * 8 - 1);
+            atomicMax(&g_band[1], bk * 8 + 9);
+            atomicOr(&g_volume, VOLUME_MATERIALS);
+        }
+        for (var e = li; e < n.large + n.recent; e += 64u) {
+            let b = edit_brush(job.edits, e);
             if b.radius_half < (1u << level) { continue; }
             let shift = level + 1u;
             let lo = b.k_lo >> shift;
@@ -414,7 +418,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     // Lanes the overhangs fold take every evaluated cell, and their relief,
     // from the density.
     let dense_lane = leaning && changed;
-    let edit_count = workgroupUniformLoad(&g_edit_count);
+    let edit_counts = workgroupUniformLoad(&g_edit_counts);
     let ch = vec2<i32>(center_half(i, level), center_half(j, level));
     // The column's footprint in half cells, for culling brushes per brick.
     let half_cell = 1 << (level + 1u);
@@ -460,59 +464,72 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
             if kind != 0u { generated_top = max(generated_top, k + 1); }
             kinds[z] = kind;
         }
-        // The edit list in order, in chunks of 64 brushes: each lane culls
-        // one brush against this brick's box, the kept ones are compacted in
-        // list order and every lane applies them to its eight cells. Bricks
-        // no brush reaches cost one bounds test per brush, not per cell.
+        // The edits in order: the large brushes, the baked cells, then the
+        // recent brushes. Brushes go in chunks of 64: each lane culls one
+        // against this brick's box, the kept ones are compacted in order and
+        // every lane applies them to its eight cells. Bricks no brush
+        // reaches cost one bounds test per brush, not per cell.
         let brick_lo = ((k_lo + i32(b)) * 8) * half_cell;
         let brick_hi = brick_lo + 8 * half_cell;
-        for (var start = 0u; start < edit_count; start += 64u) {
-            let e = start + li;
-            var keep = false;
-            var brush: FaceBrush;
-            if e < edit_count {
-                brush = brushes[edit_refs[job.edits + e]];
-                let extent_half = brush.center.w + half_cell;
-                keep = brush.radius_half >= (1u << level)
-                    && brush.k_hi + half_cell >= brick_lo && brush.k_lo - half_cell < brick_hi
-                    && brush.center.x + extent_half >= foot_lo.x && brush.center.x - extent_half < foot_hi.x
-                    && brush.center.y + extent_half >= foot_lo.y && brush.center.y - extent_half < foot_hi.y;
-                if keep { atomicOr(&g_keep[li >> 5u], 1u << (li & 31u)); }
-            }
-            workgroupBarrier();
-            let m0 = atomicLoad(&g_keep[0]);
-            let m1 = atomicLoad(&g_keep[1]);
-            if keep {
-                var rank = countOneBits(m0 & ((1u << (li & 31u)) - 1u));
-                if li >= 32u { rank = countOneBits(m0) + countOneBits(m1 & ((1u << (li & 31u)) - 1u)); }
-                g_list[rank] = brush;
-            }
-            workgroupBarrier();
-            // Every lane has read the ballot; the next chunk starts after the
-            // closing barrier.
-            if li == 0u {
-                atomicStore(&g_keep[0], 0u);
-                atomicStore(&g_keep[1], 0u);
-            }
-            let kept = countOneBits(m0) + countOneBits(m1);
-            for (var z = 0u; z < 8u && kept != 0u; z++) {
-                let c = vec3<i32>(ch, center_half((k_lo + i32(b)) * 8 + i32(z), level));
-                var q = vec3<i32>(0);
-                var q_ready = false;
-                for (var n = 0u; n < kept; n++) {
-                    let bb = g_list[n];
-                    if c.z < bb.k_lo || c.z > bb.k_hi { continue; }
-                    if !q_ready && ((bb.flags >> 6u) & 3u) == 0u {
-                        q = volume_point_half(column_point, c.z);
-                        q_ready = true;
-                    }
-                    if !brush_contains(bb, c, q) { continue; }
-                    let op = (bb.flags >> 4u) & 3u;
-                    if op == 0u { kinds[z] = 0u; }
-                    else if op == 1u { kinds[z] = 1u; }
+        for (var part = 0u; part < 2u; part++) {
+            if part == 1u && edit_counts.z != 0u {
+                let n = EditCounts(edit_counts.x, edit_counts.y, edit_counts.z);
+                for (var z = 0u; z < 8u; z++) {
+                    let cell = baked_cell(job.edits, n, i, j, (k_lo + i32(b)) * 8 + i32(z)) & 3u;
+                    if cell == BAKED_AIR { kinds[z] = 0u; }
+                    else if cell == BAKED_SOLID { kinds[z] = 1u; }
                 }
             }
-            workgroupBarrier();
+            let first = select(0u, edit_counts.x, part == 1u);
+            let end = select(edit_counts.x, edit_counts.x + edit_counts.y, part == 1u);
+            for (var start = first; start < end; start += 64u) {
+                let e = start + li;
+                var keep = false;
+                var brush: FaceBrush;
+                if e < end {
+                    brush = edit_brush(job.edits, e);
+                    let extent_half = brush.center.w + half_cell;
+                    keep = brush.radius_half >= (1u << level)
+                        && brush.k_hi + half_cell >= brick_lo && brush.k_lo - half_cell < brick_hi
+                        && brush.center.x + extent_half >= foot_lo.x && brush.center.x - extent_half < foot_hi.x
+                        && brush.center.y + extent_half >= foot_lo.y && brush.center.y - extent_half < foot_hi.y;
+                    if keep { atomicOr(&g_keep[li >> 5u], 1u << (li & 31u)); }
+                }
+                workgroupBarrier();
+                let m0 = atomicLoad(&g_keep[0]);
+                let m1 = atomicLoad(&g_keep[1]);
+                if keep {
+                    var rank = countOneBits(m0 & ((1u << (li & 31u)) - 1u));
+                    if li >= 32u { rank = countOneBits(m0) + countOneBits(m1 & ((1u << (li & 31u)) - 1u)); }
+                    g_list[rank] = brush;
+                }
+                workgroupBarrier();
+                // Every lane has read the ballot; the next chunk starts after the
+                // closing barrier.
+                if li == 0u {
+                    atomicStore(&g_keep[0], 0u);
+                    atomicStore(&g_keep[1], 0u);
+                }
+                let kept = countOneBits(m0) + countOneBits(m1);
+                for (var z = 0u; z < 8u && kept != 0u; z++) {
+                    let c = vec3<i32>(ch, center_half((k_lo + i32(b)) * 8 + i32(z), level));
+                    var q = vec3<i32>(0);
+                    var q_ready = false;
+                    for (var n = 0u; n < kept; n++) {
+                        let bb = g_list[n];
+                        if c.z < bb.k_lo || c.z > bb.k_hi { continue; }
+                        if !q_ready && ((bb.flags >> 6u) & 3u) == 0u {
+                            q = volume_point_half(column_point, c.z);
+                            q_ready = true;
+                        }
+                        if !brush_contains(bb, c, q) { continue; }
+                        let op = (bb.flags >> 4u) & 3u;
+                        if op == 0u { kinds[z] = 0u; }
+                        else if op == 1u { kinds[z] = 1u; }
+                    }
+                }
+                workgroupBarrier();
+            }
         }
         for (var z = 0u; z < 8u; z++) {
             if kinds[z] != 0u {

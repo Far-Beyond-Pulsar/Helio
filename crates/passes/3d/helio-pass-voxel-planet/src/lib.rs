@@ -8,6 +8,7 @@
 //! * [`planet`] — canonical queries, materials and exact ray casts.
 //! * `engine` — Helio GBuffer pass with GPU-driven clipmap residency.
 pub mod column_index;
+pub mod edit_store;
 pub mod edits;
 pub mod grid;
 pub mod journal;

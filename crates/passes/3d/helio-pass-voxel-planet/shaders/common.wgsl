@@ -125,7 +125,8 @@ const MAX_PROBES: u32 = 64u;
 @group(0) @binding(2) var<storage, ACCESS> table: array<u32>;
 @group(0) @binding(3) var<storage, ACCESS> records: array<Column>;
 @group(0) @binding(4) var<storage, ACCESS> pool: array<u32>;
-@group(0) @binding(5) var<storage, read> brushes: array<FaceBrush>;
+// Baked brick slots (`edit_store::Brick`): 512 cells of 16 bits, 256 words.
+@group(0) @binding(5) var<storage, read> baked: array<u32>;
 @group(0) @binding(6) var<storage, read> edit_refs: array<u32>;
 @group(0) @binding(14) var<storage, ACCESS> level_tops: array<LEVEL_TOP>;
 // Direct-mapped summary blocks, 4 words per entry: [bi, bj, max occupied top
@@ -331,24 +332,93 @@ fn brush_contains(b: FaceBrush, c: vec3<i32>, q: vec3<i32>) -> bool {
     return sum.y < rr.y || (sum.y == rr.y && sum.x <= rr.x);
 }
 
-// Flags of the latest brush of the ordered edit list whose op is in
-// `ops` (bit per op) containing the level cell with half-cell centre `c` in
-// the column with domain point `p`, or NONE. Scanned from the end, so a
-// fresh stroke is found first.
+// A column's edit block (`residency::Residency::edit_list`; a column's or
+// job's `edits` is 1 + its offset in `edit_refs`): the counts of its large
+// and recent brushes and of its baked bricks, the brushes (12 words each,
+// large then recent), then (brick height, baked slot) pairs. Cells read
+// recent(baked(large(terrain))) (`planet::Edits`).
+struct EditCounts {
+    large: u32,
+    recent: u32,
+    baked: u32,
+}
+
+fn edit_counts(list: u32) -> EditCounts {
+    if list == 0u { return EditCounts(0u, 0u, 0u); }
+    return EditCounts(edit_refs[list - 1u], edit_refs[list], edit_refs[list + 1u]);
+}
+
+// Brush `e` of a block (large brushes first, then recent).
+fn edit_brush(list: u32, e: u32) -> FaceBrush {
+    let o = list + 2u + e * 12u;
+    return FaceBrush(
+        edit_refs[o],
+        edit_refs[o + 1u],
+        bitcast<i32>(edit_refs[o + 2u]),
+        bitcast<i32>(edit_refs[o + 3u]),
+        bitcast<vec4<i32>>(vec4<u32>(edit_refs[o + 4u], edit_refs[o + 5u], edit_refs[o + 6u], edit_refs[o + 7u])),
+        bitcast<vec4<i32>>(vec4<u32>(edit_refs[o + 8u], edit_refs[o + 9u], edit_refs[o + 10u], edit_refs[o + 11u])),
+    );
+}
+
+// `edit_store::CellEdit` states.
+const BAKED_AIR: u32 = 1u;
+const BAKED_SOLID: u32 = 2u;
+const BAKED_PAINT: u32 = 3u;
+
+// Baked edit (state in bits 0..2, material in 8..16; 0 unchanged) of level
+// cell (i, j, k) of the block's column.
+fn baked_cell(list: u32, n: EditCounts, i: i32, j: i32, k: i32) -> u32 {
+    let base = list + 2u + (n.large + n.recent) * 12u;
+    let bk = k >> 3u;
+    for (var e = 0u; e < n.baked; e++) {
+        if bitcast<i32>(edit_refs[base + e * 2u]) == bk {
+            let index = u32((i & 7) + 8 * ((j & 7) + 8 * (k & 7)));
+            let word = baked[edit_refs[base + e * 2u + 1u] * 256u + (index >> 1u)];
+            return (word >> ((index & 1u) * 16u)) & 0xffffu;
+        }
+    }
+    return 0u;
+}
+
+// Whether brush `b` with an op in `ops` (bit per op) contains the level
+// cell with half-cell centre `c` (volume point computed once into `q`).
+fn edit_matches(b: FaceBrush, level: u32, c: vec3<i32>, p: vec3<i32>, ops: u32, q: ptr<function, vec3<i32>>, q_ready: ptr<function, bool>) -> bool {
+    if b.radius_half < (1u << level) || ((ops >> ((b.flags >> 4u) & 3u)) & 1u) == 0u { return false; }
+    if c.z < b.k_lo || c.z > b.k_hi { return false; }
+    if !*q_ready && ((b.flags >> 6u) & 3u) == 0u {
+        *q = volume_point_half(p, c.z);
+        *q_ready = true;
+    }
+    return brush_contains(b, c, *q);
+}
+
+// Flags of the latest edit whose op is in `ops` that reached the level cell
+// with half-cell centre `c` in the column with domain point `p`, or NONE:
+// the recent brushes (latest first), then the cell's baked edit (as the
+// flags of the brush that left it), then the large brushes.
 fn latest_edit(list: u32, level: u32, c: vec3<i32>, p: vec3<i32>, ops: u32) -> u32 {
     if list == 0u { return NONE; }
+    let n = edit_counts(list);
     var q = vec3<i32>(0);
     var q_ready = false;
-    for (var e = edit_refs[list - 1u]; e > 0u; e--) {
-        let b = brushes[edit_refs[list + e - 1u]];
-        if b.radius_half < (1u << level) || ((ops >> ((b.flags >> 4u) & 3u)) & 1u) == 0u { continue; }
-        if c.z < b.k_lo || c.z > b.k_hi { continue; }
-        // The cell's volume point, once, when a ball needs it.
-        if !q_ready && ((b.flags >> 6u) & 3u) == 0u {
-            q = volume_point_half(p, c.z);
-            q_ready = true;
+    for (var e = n.large + n.recent; e > n.large; e--) {
+        let b = edit_brush(list, e - 1u);
+        if edit_matches(b, level, c, p, ops, &q, &q_ready) { return b.flags; }
+    }
+    let shift = level + 1u;
+    let cell = baked_cell(list, n, c.x >> shift, c.y >> shift, c.z >> shift);
+    switch cell & 3u {
+        case 1u: { return select(NONE, 0u, (ops & OPS_REMOVE) != 0u); }
+        case 2u: { return select(NONE, (1u << 4u) | (cell & 0xff00u), (ops & OPS_MATERIAL) != 0u); }
+        case 3u: {
+            if (ops & OPS_MATERIAL) != 0u { return (2u << 4u) | (cell & 0xff00u); }
         }
-        if brush_contains(b, c, q) { return b.flags; }
+        default: {}
+    }
+    for (var e = n.large; e > 0u; e--) {
+        let b = edit_brush(list, e - 1u);
+        if edit_matches(b, level, c, p, ops, &q, &q_ready) { return b.flags; }
     }
     return NONE;
 }

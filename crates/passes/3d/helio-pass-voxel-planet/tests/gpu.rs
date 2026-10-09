@@ -543,6 +543,61 @@ fn thousands_of_block_edits_render_exactly() {
     assert_eq!(mismatched, 0);
 }
 
+/// Edits sealed under a running renderer: a crater and a mound too large to
+/// bake (the mound applied over the baked blocks it covers), blocks baked
+/// between them, then undo of the recent ones. After each change the kept
+/// renderer matches canonical CPU ray casts exactly.
+#[test]
+fn sealed_edits_render_exactly_under_a_running_renderer() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 1, 0.52, 0.48);
+    let grid = *planet.grid();
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    let ground = planet.surface_point(dir, 0.0);
+    let block = |p: DVec3, op: BrushOp| {
+        let (cell, _) = grid.locate(p);
+        Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material: if op == BrushOp::Add { material::BRICK } else { 0 } }
+    };
+    let layer = |planet: &mut Planet, height: f64, every: i32| {
+        for x in -12i32..12 {
+            for z in -12..12 {
+                if (x + z).rem_euclid(every) == 0 {
+                    planet.apply(block(ground + side * (f64::from(x) * 0.1) + fwd * (f64::from(z) * 0.1) + up * height, BrushOp::Add)).unwrap();
+                }
+            }
+        }
+    };
+    let size = [320, 180];
+    let target = Target::new(&gpu, size);
+    let eye = ground + up * 9.0 - fwd * 7.0;
+    let forward = ((ground - up * 4.0) - eye).normalize().as_vec3();
+    let check = |planet: &Planet, kept: &mut Option<helio_pass_voxel_planet::engine::PlanetRenderer>| {
+        let planet = Arc::new(planet.clone());
+        let renderer = kept.get_or_insert_with(|| renderer(&gpu, planet.clone(), size));
+        let (compared, mismatched) = compare_view(&gpu, &target, renderer, &planet, eye, forward, size);
+        eprintln!("{} edits ({} large, {} recent): {mismatched}/{compared} mismatched", planet.edits().len(), planet.edits().large.len(), planet.edits().recent.len());
+        assert!(compared > 400);
+        assert_eq!(mismatched, 0);
+    };
+    let mut kept = None;
+    planet.apply(Brush { center: (ground - up).to_array(), radius: 6.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+    layer(&mut planet, -5.0, 3);
+    check(&planet, &mut kept);
+    planet.apply(Brush { center: (ground - up * 5.5 + side * 2.5).to_array(), radius: 4.0, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK }).unwrap();
+    layer(&mut planet, -3.5, 2);
+    layer(&mut planet, -2.5, 2);
+    assert_eq!(planet.edits().large.len(), 2, "both large brushes sealed");
+    assert!(!planet.edits().baked.is_empty());
+    check(&planet, &mut kept);
+    for _ in 0..40 {
+        planet.undo().unwrap();
+    }
+    check(&planet, &mut kept);
+}
+
 #[test]
 fn orbital_view_has_complete_coverage() {
     let Some(gpu) = gpu() else { return };

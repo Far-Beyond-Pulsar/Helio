@@ -24,6 +24,8 @@ pub struct Capacity {
     pub pool_units: u32,
     pub scratch_units: u32,
     pub edit_words: u32,
+    /// Baked brick slots (1 KB each) for resident columns' baked edits.
+    pub baked_bricks: u32,
     pub max_jobs: u32,
     pub max_evictions: u32,
 }
@@ -44,6 +46,7 @@ impl Default for Capacity {
             // column holds ~150 bricks at level 0 (a heightfield column 2-4).
             scratch_units: 1 << 20,
             edit_words: 4 << 20,
+            baked_bricks: 16_384,
             max_jobs: 16_384,
             max_evictions: 262_144,
         }
@@ -303,7 +306,8 @@ pub struct FrameWork {
     /// earlier value winning left an empty slot inside a probe run).
     pub table_writes: Vec<(u32, u32)>,
     pub edit_writes: Vec<(u32, Vec<u32>)>,
-    pub brush_writes: Vec<(u32, FaceBrush)>,
+    /// Baked bricks to upload into their slots.
+    pub baked_writes: Vec<(u32, std::sync::Arc<crate::edit_store::Brick>)>,
     /// Summary block table writes `(slot, bi, bj)`, each slot once with its
     /// final state; `bi = -1` releases a slot.
     pub block_inits: Vec<(u32, i32, i32)>,
@@ -404,6 +408,8 @@ pub struct Stats {
     pub reranked: usize,
     pub window_rebuild_ms: f64,
     pub edit_words: u32,
+    /// Baked brick slots in use.
+    pub baked_bricks: u32,
     pub table_load: f32,
 }
 
@@ -426,12 +432,17 @@ pub struct Residency {
     delayed_records: Vec<u32>,
     levels: Vec<Level>,
     edits: EditHeap,
-    /// GPU face-brush index for each (brush id, face entry).
-    brush_gpu: Vec<Vec<u32>>,
+    /// Free baked brick slots, the next unused one, and the slots each
+    /// column's edit block holds (by block base).
+    free_baked: Vec<u32>,
+    next_baked: u32,
+    block_baked: FxHashMap<u32, Vec<u32>>,
+    /// The planet's edit history and seals as last synced: brushes (to
+    /// regenerate an undone one's footprint), their prefix hashes, and the
+    /// bricks of each seal.
     synced: Vec<crate::edits::Brush>,
-    /// Prefix hashes of `synced` (see `EditLog::prefix_hash`).
     synced_hash: Vec<u64>,
-    next_brush: u32,
+    synced_seals: Vec<std::sync::Arc<[crate::edit_store::BrickKey]>>,
     urgent: Vec<u64>,
     /// Resident columns whose band is clipped to a window around the eye's
     /// layer, with the window centre (level cells).
@@ -492,10 +503,12 @@ impl Residency {
             delayed_records: Vec::new(),
             levels,
             edits: EditHeap::default(),
-            brush_gpu: Vec::new(),
+            free_baked: Vec::new(),
+            next_baked: 0,
+            block_baked: FxHashMap::default(),
             synced: Vec::new(),
             synced_hash: Vec::new(),
-            next_brush: 0,
+            synced_seals: Vec::new(),
             urgent: Vec::new(),
             clipped: FxHashMap::default(),
             stats: Stats::default(),
@@ -538,13 +551,31 @@ impl Residency {
 
     /// Sync the edit log: upload new face brushes and schedule regeneration
     /// of resident columns touched by new or undone brushes.
-    fn sync_edits(&mut self, planet: &Planet, work: &mut FrameWork) {
-        let log = planet.edits();
-        // Longest common prefix of the synced and current logs, found by
-        // prefix hash in O(log n); an unchanged log costs O(1) per frame.
-        let n = self.synced.len().min(log.len());
-        let same = |k: usize| k == 0 || self.synced_hash[k - 1] == log.prefix_hash((k - 1) as u32);
-        if n == self.synced.len() && n == log.len() && same(n) {
+    fn sync_edits(&mut self, planet: &Planet) {
+        let edits = planet.edits();
+        // Columns holding bricks of seals not synced yet (or synced and
+        // since replaced): a seal changes no base cell's result but shows its
+        // bricks at coarser levels.
+        let seals = &edits.sealed;
+        let same_seals = seals.len().min(self.synced_seals.len());
+        let common_seals = (0..same_seals).find(|&s| !std::sync::Arc::ptr_eq(&seals[s], &self.synced_seals[s])).unwrap_or(same_seals);
+        if common_seals < seals.len() || common_seals < self.synced_seals.len() {
+            for seal in self.synced_seals[common_seals..].iter().chain(&seals[common_seals..]) {
+                for key in seal.iter() {
+                    let column = pack(key0(key.face, u32::from(key.level), key.bi), key.bj as u32);
+                    if self.residents.contains_key(column) {
+                        self.urgent.push(column);
+                    }
+                }
+            }
+            self.synced_seals.truncate(common_seals);
+            self.synced_seals.extend_from_slice(&seals[common_seals..]);
+        }
+        // Longest common prefix of the synced and current histories, found
+        // by prefix hash in O(log n); an unchanged history costs O(1).
+        let n = self.synced.len().min(edits.len());
+        let same = |k: usize| k == 0 || self.synced_hash[k - 1] == edits.prefix_hash(k);
+        if n == self.synced.len() && n == edits.len() && same(n) {
             return;
         }
         let common = if same(n) {
@@ -562,28 +593,17 @@ impl Residency {
             lo
         };
         let mut touched = Vec::new();
-        for id in common..self.synced.len() {
-            // Undone brushes: their old footprint must be regenerated.
-            if let Ok(faces) = self.synced[id].resolve(&self.grid) {
+        // Undone brushes and new ones: their footprints regenerate.
+        for brush in self.synced[common..].iter().copied().chain((common..edits.len()).map(|i| edits.brush(i))) {
+            if let Ok(faces) = brush.resolve(&self.grid) {
                 touched.extend(faces);
             }
         }
-        self.brush_gpu.truncate(common);
         self.synced.truncate(common);
         self.synced_hash.truncate(common);
-        for id in common..log.len() {
-            let resolved = log.resolved(id as u32);
-            let mut indices = Vec::new();
-            for fb in &resolved.faces {
-                let index = self.next_brush;
-                self.next_brush += 1;
-                work.brush_writes.push((index, *fb));
-                indices.push(index);
-                touched.push(*fb);
-            }
-            self.brush_gpu.push(indices);
-            self.synced.push(resolved.brush);
-            self.synced_hash.push(resolved.prefix);
+        for i in common..edits.len() {
+            self.synced.push(edits.brush(i));
+            self.synced_hash.push(edits.prefix_hash(i + 1));
         }
         // Large footprints scan the residents instead of their rectangles.
         let mut scans: Vec<(u8, u32, i64, i64, i64, i64)> = Vec::new();
@@ -629,26 +649,67 @@ impl Residency {
         }
     }
 
+    /// A column's edit block (layout: `EditCounts` in common.wgsl): its
+    /// large and recent brushes inline and its baked bricks' slots, or none
+    /// when nothing edited it. Fails when the edit words or brick slots are
+    /// exhausted (the job waits).
     fn edit_list(&mut self, planet: &Planet, key: u64, work: &mut FrameWork) -> Result<Option<(u32, u32)>, ()> {
         let (face, level, ci, cj) = unpack(key);
         let span = i64::from(BRICK) << level;
         let i0 = i64::from(ci) * span;
         let j0 = i64::from(cj) * span;
-        let refs = planet.edits().query(face, i0, i0 + span - 1, j0, j0 + span - 1, level);
-        if refs.is_empty() {
+        let edits = planet.edits();
+        let brushes = |log: &crate::edits::EditLog| -> Vec<FaceBrush> {
+            log.query(face, i0, i0 + span - 1, j0, j0 + span - 1, level)
+                .into_iter()
+                .map(|(id, index)| log.resolved(id).faces[index as usize])
+                .collect()
+        };
+        let large = brushes(&edits.large);
+        let recent = brushes(&edits.recent);
+        let baked = edits.baked.column(face, level, ci, cj);
+        if large.is_empty() && recent.is_empty() && baked.is_empty() {
             return Ok(None);
         }
-        let mut words = Vec::with_capacity(refs.len() + 1);
-        words.push(refs.len() as u32);
-        for (id, index) in refs {
-            words.push(self.brush_gpu[id as usize][index as usize]);
+        let mut slots = Vec::with_capacity(baked.len());
+        for _ in 0..baked.len() {
+            let slot = match self.free_baked.pop() {
+                Some(slot) => slot,
+                None if self.next_baked < self.capacity.baked_bricks => {
+                    self.next_baked += 1;
+                    self.next_baked - 1
+                }
+                None => {
+                    self.free_baked.extend(slots);
+                    return Err(());
+                }
+            };
+            slots.push(slot);
         }
-        let block = self
-            .edits
-            .alloc(words.len() as u32, self.capacity.edit_words)
-            .ok_or(())?;
+        let mut words = Vec::with_capacity(3 + (large.len() + recent.len()) * 12 + baked.len() * 2);
+        words.extend([large.len() as u32, recent.len() as u32, baked.len() as u32]);
+        for fb in large.iter().chain(&recent) {
+            words.extend_from_slice(bytemuck::cast_slice(std::slice::from_ref(fb)));
+        }
+        for ((bk, brick), &slot) in baked.into_iter().zip(&slots) {
+            words.extend([bk as u32, slot]);
+            work.baked_writes.push((slot, brick));
+        }
+        let Some(block) = self.edits.alloc(words.len() as u32, self.capacity.edit_words) else {
+            self.free_baked.extend(slots);
+            return Err(());
+        };
         work.edit_writes.push((block.0, words));
+        self.block_baked.insert(block.0, slots);
         Ok(Some(block))
+    }
+
+    /// Free an edit block and its baked brick slots.
+    fn release_edits(&mut self, block: (u32, u32)) {
+        self.edits.release(block);
+        if let Some(slots) = self.block_baked.remove(&block.0) {
+            self.free_baked.extend(slots);
+        }
     }
 
     /// Reference every summary block of a column, or none when any tier's
@@ -717,7 +778,7 @@ impl Residency {
             work.evictions.push(res.record);
             self.delayed_records.push(res.record);
             if let Some(block) = res.edit_block {
-                self.edits.release(block);
+                self.release_edits(block);
             }
         }
     }
@@ -853,7 +914,7 @@ impl Residency {
         // Records evicted last frame are safe to reuse now.
         let delayed = std::mem::take(&mut self.delayed_records);
         self.free_records.extend(delayed);
-        self.sync_edits(planet, &mut work);
+        self.sync_edits(planet);
         self.follow_clipped(eye);
         let t_edits = started.elapsed();
         // Ask the planner for new windows when the view changed, then apply
@@ -926,7 +987,7 @@ impl Residency {
             // Still clipped, it is reported again with its new window.
             self.clipped.remove(&key);
             if let Some(old) = res.edit_block {
-                self.edits.release(old);
+                self.release_edits(old);
             }
             self.residents.get_mut(key).unwrap().edit_block = block;
             work.units += job_units(planet, key);
@@ -1023,6 +1084,7 @@ impl Residency {
         stats.jobs = work.jobs.len();
         stats.evictions = work.evictions.len();
         stats.edit_words = self.edits.top;
+        stats.baked_bricks = self.next_baked - self.free_baked.len() as u32;
         stats.table_load = self.residents.load();
         self.stats = stats;
         work.finish(self.residents.table());

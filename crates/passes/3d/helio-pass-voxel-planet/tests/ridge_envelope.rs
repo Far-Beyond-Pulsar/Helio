@@ -104,7 +104,13 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
         &common_source[start..start + common_source[start..].find("\n}").unwrap() + 2]
     };
     let contains = function("brush_contains");
-    let latest = function("latest_edit");
+    // The edit block readers: `EditCounts` through `latest_edit`, and the op
+    // masks.
+    let block_start = common_source.find("struct EditCounts").unwrap();
+    let block_end = common_source.find("fn latest_edit(").unwrap();
+    let edit_block = format!("{}{}", &common_source[block_start..block_end], function("latest_edit"));
+    let ops: String = common_source.lines().filter(|l| l.starts_with("const OPS_")).map(|l| format!("{l}
+")).collect();
     let noise_source = include_str!("../shaders/noise.wgsl");
     let landform_source = include_str!("../shaders/landform.wgsl");
     let source = format!(
@@ -128,11 +134,13 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
         @group(0) @binding(3) var<storage,read> probes:array<Probe>;
         @group(0) @binding(4) var<storage,read_write> answers:array<vec4<i32>>;
         {brush_struct}
-        @group(0) @binding(5) var<storage,read> brushes:array<FaceBrush>;
+        @group(0) @binding(5) var<storage,read> baked:array<u32>;
         @group(0) @binding(6) var<storage,read> edit_refs:array<u32>;
+        @group(0) @binding(7) var<storage,read> brushes:array<FaceBrush>;
         const NONE:u32=0xffffffffu;
+        {ops}
         {contains}
-        {latest}
+        {edit_block}
         // The brush's effect on a cell of kind `kind_in` (the probe lists hold one brush).
         fn applied(list:u32,level:u32,c:vec3<i32>,p:vec3<i32>,kind_in:u32)->u32 {{
             let flags=latest_edit(list,level,c,p,3u);
@@ -270,8 +278,10 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
                         center: [0, 0, 0, radius as i32],
                         ball: [0; 4],
                     });
+                    // An edit block of one recent brush.
                     let list = refs.len() as u32 + 1;
-                    refs.extend_from_slice(&[1, brush_index]);
+                    refs.extend_from_slice(&[0, 1, 0]);
+                    refs.extend_from_slice(bytemuck::cast_slice(std::slice::from_ref(brush_values.last().unwrap())));
                     probes.push(Probe {
                         cell: [i, j, level as i32, topology],
                         chart: [face, brush_index, 0, if topology == 0 { 0 } else { list }],
@@ -326,6 +336,13 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
                 contents: bytemuck::cast_slice(&brush_values),
                 usage: wgpu::BufferUsages::STORAGE,
             });
+        let baked_buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: &[0; 16],
+                usage: wgpu::BufferUsages::STORAGE,
+            });
         let refs_buffer = gpu
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -367,11 +384,15 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
-                        resource: brush_buffer.as_entire_binding(),
+                        resource: baked_buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 6,
                         resource: refs_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: brush_buffer.as_entire_binding(),
                     },
                 ],
             });

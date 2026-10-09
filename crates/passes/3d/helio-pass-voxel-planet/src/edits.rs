@@ -373,7 +373,7 @@ pub struct EditLog {
 }
 
 /// FNV-1a over a brush, continuing `seed`.
-fn brush_hash(seed: u64, brush: &Brush) -> u64 {
+pub(crate) fn brush_hash(seed: u64, brush: &Brush) -> u64 {
     let mut h = seed ^ 0xcbf2_9ce4_8422_2325;
     let mut eat = |v: u64| {
         for byte in v.to_le_bytes() {
