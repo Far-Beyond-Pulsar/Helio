@@ -1290,6 +1290,7 @@ fn main() {
             shape: if n % 3 == 0 { BrushShape::Cube } else { BrushShape::Sphere },
             op: if add { BrushOp::Add } else { BrushOp::Remove },
             material: if add { material::COBBLE } else { 0 },
+            height: 0.0,
         };
         let mut planet = (*flight.planet).clone();
         planet.apply(brush).unwrap();
@@ -1354,6 +1355,7 @@ fn main() {
             shape: BrushShape::Sphere,
             op: BrushOp::Remove,
             material: 0,
+            height: 0.0,
         })
         .unwrap();
     flight.planet = Arc::new(planet);
@@ -2055,7 +2057,7 @@ fn sculpt_stress(flight: &mut Flight, ground: DVec3, heading: f64) {
                 let surface = flight.planet.surface_point(point, 0.0);
                 let center = if op == BrushOp::Add { surface + up * radius } else { surface - up * radius * 0.3 };
                 planet
-                    .apply(Brush { center: center.to_array(), radius, shape, op, material: if op == BrushOp::Add { material::BRICK } else { 0 } })
+                    .apply(Brush { center: center.to_array(), radius, shape, op, material: if op == BrushOp::Add { material::BRICK } else { 0 }, height: 0.0 })
                     .unwrap();
                 stamp += 1;
             }

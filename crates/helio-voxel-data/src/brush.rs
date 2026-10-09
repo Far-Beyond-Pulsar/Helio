@@ -36,11 +36,22 @@ pub struct VoxelBrushEdit {
     /// table); ignored by `Remove`.
     #[serde(default)]
     pub material: u32,
+    /// Cube only: half height along the vertical, metres; 0 is a cube of
+    /// `radius`. A flat-topped box (flatten, smooth).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub height: f64,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 impl VoxelBrushEdit {
     /// Finite centre, positive finite radius.
     pub fn validate(&self) -> Result<(), String> {
+        if !(self.height.is_finite() && self.height >= 0.0) {
+            return Err("brush height must be finite and non-negative".into());
+        }
         if !self.center.iter().all(|v| v.is_finite()) || !(self.radius.is_finite() && self.radius > 0.0) {
             return Err("brush centre and radius must be finite, radius positive".into());
         }
@@ -103,6 +114,10 @@ fn edit_hash(seed: u64, edit: &VoxelBrushEdit) -> u64 {
     eat(edit.shape as u64);
     eat(edit.op as u64);
     eat(u64::from(edit.material));
+    // Boxes only: cubes and balls keep the hashes they always had.
+    if edit.height != 0.0 {
+        eat(edit.height.to_bits());
+    }
     h
 }
 
@@ -323,7 +338,7 @@ mod journal_tests {
     use super::*;
 
     fn edit(x: f64) -> VoxelBrushEdit {
-        VoxelBrushEdit { center: [x, 0.0, 0.0], radius: 1.0, shape: VoxelBrushShape::Sphere, op: VoxelBrushOp::Remove, material: 0 }
+        VoxelBrushEdit { center: [x, 0.0, 0.0], radius: 1.0, shape: VoxelBrushShape::Sphere, op: VoxelBrushOp::Remove, material: 0, height: 0.0 }
     }
 
     #[test]

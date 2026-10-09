@@ -276,6 +276,7 @@ fn l1_to_l5_adjacent_paint_columns_preserve_authored_geometry() {
             shape: BrushShape::Cube,
             op: BrushOp::Paint,
             material: 13,
+            height: 0.0,
         })
         .unwrap();
         let planet = Arc::new(p);

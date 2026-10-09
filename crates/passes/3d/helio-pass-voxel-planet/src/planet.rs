@@ -1033,7 +1033,7 @@ mod tests {
             }
             // Oblique rays agree with a cell walk through a carved hole.
             let centre = p.surface_point(DVec3::new(50.0, 0.0, 60.0), -0.45);
-            p.apply(Brush { center: centre.to_array(), radius: 0.45, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+            p.apply(Brush { center: centre.to_array(), radius: 0.45, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
             let eye = centre + DVec3::new(0.3, 30.0, 0.0);
             let hit = p.raycast(eye, centre - eye, 100.0).expect("hit");
             assert!(p.solid(hit.cell));
@@ -1080,11 +1080,11 @@ mod tests {
         let (face, i, j) = (4u8, g.cells() / 3, g.cells() / 5);
         let top = p.column_top(face, i, j, 0);
         let centre = g.cell_center(Cell::new(face, i, j, top - 1));
-        p.apply(Brush { center: centre.to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+        p.apply(Brush { center: centre.to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
         assert!(!p.solid(Cell::new(face, i, j, top - 1)));
         assert!(!p.solid(Cell::new(face, i, j, top - 9)));
         assert!(p.solid(Cell::new(face, i, j, top - 12)));
-        p.apply(Brush { center: centre.to_array(), radius: 0.25, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK }).unwrap();
+        p.apply(Brush { center: centre.to_array(), radius: 0.25, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
         assert!(p.solid(Cell::new(face, i, j, top - 1)));
         assert_eq!(p.material(Cell::new(face, i, j, top - 1)), material::BRICK);
         assert!(p.undo().is_some());
@@ -1098,7 +1098,7 @@ mod tests {
         let (face, i, j) = (2u8, g.cells() / 2 + 17, g.cells() / 2 - 40);
         let top = p.column_top(face, i, j, 0);
         let centre = g.cell_center(Cell::new(face, i, j, top - 5));
-        p.apply(Brush { center: centre.to_array(), radius: 0.45, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+        p.apply(Brush { center: centre.to_array(), radius: 0.45, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
         let up = centre.normalize();
         let eye = centre + up * 30.0 + up.any_orthonormal_vector() * 0.3;
         let hit = p.raycast(eye, centre - eye, 100.0).expect("hit");
@@ -1129,7 +1129,9 @@ mod tests {
             // Every 50th brush is too large to bake.
             let radius = if n % 50 == 7 { 4.0 } else { 0.05 + next() * 0.6 };
             let shape = if next() < 0.5 { BrushShape::Sphere } else { BrushShape::Cube };
-            let brush = Brush { center: g.cell_center(cell).to_array(), radius, shape, op: ops[(next() * 3.0) as usize], material: 1 + (next() * 20.0) as u32 };
+            // A third of the cubes are flat-topped boxes.
+            let height = if shape == BrushShape::Cube && next() < 0.33 { 0.05 + next() * 0.4 } else { 0.0 };
+            let brush = Brush { center: g.cell_center(cell).to_array(), radius, shape, op: ops[(next() * 3.0) as usize], material: 1 + (next() * 20.0) as u32, height };
             p.apply(brush).unwrap();
             applied.push(brush);
         }
@@ -1187,7 +1189,7 @@ mod tests {
             for j in j0..j0 + 16 {
                 for k in k_lo..top {
                     let centre = g.cell_center(Cell::new(face, i, j, k));
-                    p.apply(Brush { center: centre.to_array(), radius: g.voxel_size() * 0.3, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0 }).unwrap();
+                    p.apply(Brush { center: centre.to_array(), radius: g.voxel_size() * 0.3, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
                 }
             }
         }
@@ -1240,14 +1242,14 @@ mod scaling {
             while stamp < target {
                 let angle = stamp as f64 * 0.6 / 6.0;
                 let p = ground + (side * angle.cos() + ahead * angle.sin()) * 6.0;
-                planet.apply(Brush { center: (p - up * 0.3).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+                planet.apply(Brush { center: (p - up * 0.3).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
                 stamp += 1;
             }
             let aim = (ground + side * 6.0 - eye).normalize();
             let clone = time(&mut || { std::hint::black_box(planet.clone()); });
             let mut copy = planet.clone();
             let apply = time(&mut || {
-                copy.apply(Brush { center: (ground - up * 0.3).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+                copy.apply(Brush { center: (ground - up * 0.3).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
             });
             let raycast = time(&mut || { std::hint::black_box(planet.raycast(eye, aim, 200.0)); });
             let surface = time(&mut || { std::hint::black_box(planet.surface_point(ground + side * 6.0, 0.0)); });
@@ -1269,7 +1271,7 @@ mod scaling {
             while planet.edits().len() < n {
                 let k = planet.edits().len() as f64;
                 let p = DVec3::new((k * 7.31) % 900.0 - 450.0, 2.0, (k * 3.17) % 900.0 - 450.0);
-                planet.apply(Brush { center: p.to_array(), radius: 0.05, shape: BrushShape::Cube, op: BrushOp::Add, material: 13 }).unwrap();
+                planet.apply(Brush { center: p.to_array(), radius: 0.05, shape: BrushShape::Cube, op: BrushOp::Add, material: 13, height: 0.0 }).unwrap();
             }
             let per_edit = appending.elapsed().as_secs_f64() * 1e6 / (n - before) as f64;
             let t = std::time::Instant::now();

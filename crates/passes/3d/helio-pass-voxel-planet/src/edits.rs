@@ -45,6 +45,14 @@ pub struct Brush {
     pub op: BrushOp,
     #[serde(default)]
     pub material: u32,
+    /// Cube only: half height along the vertical (the radial axis), m; 0 is
+    /// a cube of `radius`. A flat-topped box (flatten, smooth).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub height: f64,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// A brush resolved for one face (GPU layout, `FaceBrush` in WGSL).
@@ -97,7 +105,9 @@ impl FaceBrush {
     /// 64-bit squares (`brush_contains` in WGSL).
     pub fn contains(&self, center_half: [i32; 3], point: impl FnOnce() -> IVec3) -> bool {
         if self.shape() == SHAPE_CUBE {
-            return (0..3).all(|axis| center_half[axis].wrapping_sub(self.center[axis]).unsigned_abs() <= self.radius_half);
+            // A box: the radius across, its own range vertically.
+            return (0..2).all(|axis| center_half[axis].wrapping_sub(self.center[axis]).unsigned_abs() <= self.radius_half)
+                && (self.k_lo..=self.k_hi).contains(&center_half[2]);
         }
         let q = point();
         let r = self.ball[3].unsigned_abs();
@@ -127,6 +137,9 @@ impl Brush {
         }
         if self.material > 255 {
             return Err("brush material must fit in 8 bits".into());
+        }
+        if !(self.height.is_finite() && self.height >= 0.0) {
+            return Err("brush height must be finite and non-negative".into());
         }
         let radius_half = (2.0 * self.radius / grid.voxel_size()).round();
         if radius_half > f64::from(MAX_RADIUS_HALF) {
@@ -163,11 +176,13 @@ impl Brush {
                 return Err("brush centre is outside the planet grid".into());
             }
             let r = radius_half as i32;
+            // A box's vertical half extent, in half cells (a cube's radius).
+            let h = if self.height > 0.0 { ((2.0 * self.height / grid.voxel_size()).round() as i32).clamp(1, MAX_RADIUS_HALF as i32) } else { r };
             out.push(FaceBrush {
                 flags: flags | u32::from(face),
                 radius_half,
-                k_lo: (half[2] as i32).saturating_sub(r),
-                k_hi: (half[2] as i32).saturating_add(r),
+                k_lo: (half[2] as i32).saturating_sub(h),
+                k_hi: (half[2] as i32).saturating_add(h),
                 center: [half[0] as i32, half[1] as i32, half[2] as i32, r],
                 ball: [0; 4],
             });
@@ -393,6 +408,10 @@ pub(crate) fn brush_hash(seed: u64, brush: &Brush) -> u64 {
     eat(brush.shape as u64);
     eat(brush.op as u64);
     eat(u64::from(brush.material));
+    // Boxes only: cubes and balls keep the hashes they always had.
+    if brush.height != 0.0 {
+        eat(brush.height.to_bits());
+    }
     h
 }
 
@@ -576,6 +595,7 @@ mod shared_log {
             shape: if k % 3 == 0 { BrushShape::Cube } else { BrushShape::Sphere },
             op: if k % 2 == 0 { BrushOp::Add } else { BrushOp::Remove },
             material: 13,
+            height: 0.0,
         };
         let mut a = EditLog::default();
         for k in 0..9_000 {

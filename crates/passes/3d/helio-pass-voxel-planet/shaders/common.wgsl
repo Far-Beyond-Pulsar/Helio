@@ -322,7 +322,8 @@ fn center_half(i: i32, level: u32) -> i32 {
 // centre `c`, balls its volume point `q`, with exact 64-bit squares.
 fn brush_contains(b: FaceBrush, c: vec3<i32>, q: vec3<i32>) -> bool {
     if ((b.flags >> 6u) & 3u) == 1u {
-        return all(vec3<u32>(abs(c - b.center.xyz)) <= vec3<u32>(b.radius_half));
+        // A box: the radius across, its own range vertically.
+        return all(vec2<u32>(abs(c.xy - b.center.xy)) <= vec2<u32>(b.radius_half)) && c.z >= b.k_lo && c.z <= b.k_hi;
     }
     let r = u32(abs(b.ball.w));
     let d = vec3<u32>(abs(q - b.ball.xyz));

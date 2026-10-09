@@ -78,6 +78,7 @@ pub fn planet_brush(edit: &VoxelBrushEdit) -> Brush {
             VoxelBrushOp::Paint => BrushOp::Paint,
         },
         material: edit.material,
+        height: edit.height,
     }
 }
 

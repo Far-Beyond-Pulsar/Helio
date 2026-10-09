@@ -199,6 +199,7 @@ fn paint_preserves_authored_relief_geometry_and_normals() {
                 shape: BrushShape::Cube,
                 op: BrushOp::Paint,
                 material: material::BRICK,
+                height: 0.0,
             })
             .unwrap();
         let painted = Arc::new(painted);
@@ -509,6 +510,7 @@ fn pending_paint_preserves_unaffected_raw_relief_and_undo() {
                 shape: BrushShape::Cube,
                 op: BrushOp::Paint,
                 material: material::BRICK,
+                height: 0.0,
             })
             .unwrap();
         // Residency plans run a frame ahead: the edit's jobs reach the GPU
@@ -572,6 +574,7 @@ fn distant_add_remove_cut_faces_keep_native_normals() {
                 shape: BrushShape::Cube,
                 op,
                 material: material::BRICK,
+                height: 0.0,
             })
             .unwrap();
             let p = Arc::new(p);

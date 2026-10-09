@@ -353,10 +353,10 @@ fn edits_propagate_to_gpu_generation() {
     let side = up.any_orthonormal_vector();
     let ground = planet.surface_point(dir, 0.0) + side * 4.0;
     planet
-        .apply(Brush { center: ground.to_array(), radius: 2.5, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 })
+        .apply(Brush { center: ground.to_array(), radius: 2.5, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 })
         .unwrap();
     planet
-        .apply(Brush { center: (ground + side * 3.0 + up * 1.5).to_array(), radius: 0.8, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK })
+        .apply(Brush { center: (ground + side * 3.0 + up * 1.5).to_array(), radius: 0.8, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK, height: 0.0 })
         .unwrap();
     let planet = Arc::new(planet);
     let forward = (side - up * 0.6).normalize().as_vec3();
@@ -364,6 +364,30 @@ fn edits_propagate_to_gpu_generation() {
     eprintln!("compared {compared}, mismatched {mismatched}");
     assert!(compared > 1000);
     assert!(mismatched * 1000 <= compared, "{mismatched}/{compared}");
+}
+
+/// Flat-topped boxes (what Flatten stamps): a slab removed above a level
+/// and one filled below it, across a hillside, render exactly.
+#[test]
+fn box_brushes_render_exactly() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 1, 0.52, 0.48);
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let ground = planet.surface_point(dir, 0.0);
+    for n in 0..6 {
+        let at = ground + side * (f64::from(n) * 2.5);
+        planet.apply(Brush { center: (at + up * 1.5).to_array(), radius: 1.3, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0, height: 1.5 }).unwrap();
+        planet.apply(Brush { center: (at - up * 0.75).to_array(), radius: 1.3, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK, height: 0.75 }).unwrap();
+    }
+    let planet = Arc::new(planet);
+    let eye = ground + up * 4.0 - side * 5.0 + up.cross(side) * 3.0;
+    let forward = ((ground + side * 6.0) - eye).normalize().as_vec3();
+    let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [320, 180]);
+    eprintln!("compared {compared}, mismatched {mismatched}");
+    assert!(compared > 1000);
+    assert_eq!(mismatched, 0);
 }
 
 /// Destruction to any depth: a 600 m shaft is far taller than a column's
@@ -381,7 +405,7 @@ fn a_deep_shaft_renders_exactly_at_any_depth() {
     let mut depth = -10.0;
     while depth < 600.0 {
         let center = ground - up * depth;
-        planet.apply(Brush { center: center.to_array(), radius: 2.0, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0 }).unwrap();
+        planet.apply(Brush { center: center.to_array(), radius: 2.0, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
         depth += 3.0;
     }
     let planet = Arc::new(planet);
@@ -455,7 +479,7 @@ fn a_planet_scale_crater_renders_exactly_on_its_floor() {
     let dir = land(&planet, 5, 0.33, 0.52);
     let ground = planet.surface_point(dir, 0.0);
     let up = planet.grid().up(ground);
-    planet.apply(Brush { center: ground.to_array(), radius: 3_000.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+    planet.apply(Brush { center: ground.to_array(), radius: 3_000.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
     let planet = Arc::new(planet);
     let eye = ground - up * (3_000.0 - 1.7);
     assert!(!planet.solid(planet.grid().locate(eye).0), "the eye is in the crater");
@@ -479,7 +503,7 @@ fn a_hollowed_core_renders_exactly_from_inside() {
     let Some(gpu) = gpu() else { return };
     let recipe = PlanetRecipe { radius_m: 3_000.0, terrain: helio_pass_voxel_planet::layers::TerrainLayers::earth().heightfield().source(7), ..Default::default() };
     let mut planet = Planet::new(recipe).unwrap();
-    planet.apply(Brush { center: [0.0; 3], radius: 1_500.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+    planet.apply(Brush { center: [0.0; 3], radius: 1_500.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
     let up = DVec3::new(0.3, 0.9, 0.2).normalize();
     let eye = up * (1_500.0 - 1.7);
     assert!(!planet.solid(planet.grid().locate(eye).0), "the eye is in the hollow");
@@ -510,7 +534,7 @@ fn thousands_of_block_edits_render_exactly() {
     let ground = planet.surface_point(dir, 0.0);
     let block = |p: DVec3, op: BrushOp| {
         let (cell, _) = grid.locate(p);
-        Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material: if op == BrushOp::Add { material::BRICK } else { 0 } }
+        Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material: if op == BrushOp::Add { material::BRICK } else { 0 }, height: 0.0 }
     };
     let at = |x: i32, y: i32, z: i32| ground + side * (f64::from(x) * 0.1) + fwd * (f64::from(z) * 0.1 + 6.0) + up * (f64::from(y) * 0.1 + 0.55);
     let started = std::time::Instant::now();
@@ -565,7 +589,7 @@ fn sealed_edits_render_exactly_under_a_running_renderer() {
     let ground = planet.surface_point(dir, 0.0);
     let block = |p: DVec3, op: BrushOp| {
         let (cell, _) = grid.locate(p);
-        Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material: if op == BrushOp::Add { material::BRICK } else { 0 } }
+        Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material: if op == BrushOp::Add { material::BRICK } else { 0 }, height: 0.0 }
     };
     let layer = |planet: &mut Planet, height: f64, every: i32| {
         for x in -12i32..12 {
@@ -589,10 +613,10 @@ fn sealed_edits_render_exactly_under_a_running_renderer() {
         assert_eq!(mismatched, 0);
     };
     let mut kept = None;
-    planet.apply(Brush { center: (ground - up).to_array(), radius: 6.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+    planet.apply(Brush { center: (ground - up).to_array(), radius: 6.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
     layer(&mut planet, -5.0, 3);
     check(&planet, &mut kept);
-    planet.apply(Brush { center: (ground - up * 5.5 + side * 2.5).to_array(), radius: 4.0, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK }).unwrap();
+    planet.apply(Brush { center: (ground - up * 5.5 + side * 2.5).to_array(), radius: 4.0, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
     layer(&mut planet, -3.5, 2);
     layer(&mut planet, -2.5, 2);
     assert_eq!(planet.edits().large.len(), 2, "both large brushes sealed");
@@ -625,10 +649,10 @@ fn the_baked_edit_pool_grows_with_destruction() {
     let ground = planet.surface_point(dir, 0.0);
     let block = |p: DVec3, op: BrushOp| {
         let (cell, _) = grid.locate(p);
-        Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material: if op == BrushOp::Add { material::BRICK } else { 0 } }
+        Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material: if op == BrushOp::Add { material::BRICK } else { 0 }, height: 0.0 }
     };
     // A carved pit (uniform air bricks inside) with checkered walls.
-    planet.apply(Brush { center: (ground - up * 2.0).to_array(), radius: 2.4, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0 }).unwrap();
+    planet.apply(Brush { center: (ground - up * 2.0).to_array(), radius: 2.4, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
     for y in 0..40 {
         for x in -30..30 {
             for z in [-30, 29] {
@@ -934,7 +958,7 @@ fn surface_offsets_reconstruct_the_field_height() {
     let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
     let dir = land(&planet, 4, 0.37, 0.61);
     let ground = planet.surface_point(dir, 0.0);
-    planet.apply(Brush { center: (ground + (ground.normalize().any_orthonormal_vector()) * 60.0).to_array(), radius: 40.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+    planet.apply(Brush { center: (ground + (ground.normalize().any_orthonormal_vector()) * 60.0).to_array(), radius: 40.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
     let planet = Arc::new(planet);
     let eye = planet.surface_point(dir, 30.0);
     let up = eye.normalize();

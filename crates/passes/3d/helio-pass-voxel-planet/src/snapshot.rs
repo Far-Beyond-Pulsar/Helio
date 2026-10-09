@@ -18,12 +18,13 @@
 //! * a checksum of everything before it.
 use crate::edit_store::{Brick, BrickKey, CellEdit, EditStore, BRICK_CELLS};
 use crate::edits::Brush;
-use crate::journal::{self, Entry, RECORD_BYTES};
+use crate::journal::{self, Entry};
 use crate::grid::Grid;
 use crate::planet::{Edits, Planet, PlanetRecipe};
 
 const MAGIC: [u8; 4] = *b"HVPS";
-const VERSION: u16 = 1;
+/// Version 2: journal records with the box height (version 1 still reads).
+const VERSION: u16 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SnapshotError {
@@ -65,6 +66,8 @@ pub struct Covers {
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
+    /// Journal record size of this snapshot's version.
+    record: usize,
 }
 
 impl<'a> Reader<'a> {
@@ -93,8 +96,9 @@ impl<'a> Reader<'a> {
     }
     fn brushes(&mut self) -> Result<Vec<Brush>, SnapshotError> {
         let n = self.u32()? as usize;
+        let record = self.record;
         (0..n)
-            .map(|index| match journal::decode(index, self.take(RECORD_BYTES)?) {
+            .map(|index| match journal::decode(index, self.take(record)?) {
                 Ok(Entry::Brush(brush)) => Ok(brush),
                 _ => Err(SnapshotError::Corrupt("brush record")),
             })
@@ -118,9 +122,9 @@ fn open<'a>(bytes: &'a [u8], grid: &Grid) -> Result<Reader<'a>, SnapshotError> {
         return Err(SnapshotError::NotASnapshot);
     }
     let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    if version != VERSION {
+    let Some(record) = (version <= VERSION).then(|| journal::record_bytes(version)).flatten() else {
         return Err(SnapshotError::UnsupportedVersion(version));
-    }
+    };
     let snapshot = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
     let planet = grid_fingerprint(grid);
     if snapshot != planet {
@@ -130,7 +134,7 @@ fn open<'a>(bytes: &'a [u8], grid: &Grid) -> Result<Reader<'a>, SnapshotError> {
     if u64::from_le_bytes(sum.try_into().unwrap()) != journal::fnv64(body) {
         return Err(SnapshotError::Corrupt("checksum"));
     }
-    Ok(Reader { bytes: body, at: 16 })
+    Ok(Reader { bytes: body, at: 16, record })
 }
 
 /// The history a snapshot written for `grid` holds, without loading it.
@@ -240,6 +244,7 @@ mod tests {
                 shape: if n % 2 == 0 { BrushShape::Sphere } else { BrushShape::Cube },
                 op: [BrushOp::Remove, BrushOp::Add, BrushOp::Paint][n as usize % 3],
                 material: 1 + (n as u32 % 9),
+                height: 0.0,
             };
             p.apply(brush).unwrap();
             applied.push(brush);

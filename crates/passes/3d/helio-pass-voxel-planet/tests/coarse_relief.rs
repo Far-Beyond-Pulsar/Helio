@@ -274,6 +274,7 @@ fn paint_preserves_unpainted_fractional_surface() {
             shape: BrushShape::Cube,
             op: BrushOp::Paint,
             material: 13,
+            height: 0.0,
         })
         .unwrap();
     let planet = Arc::new(planet);
