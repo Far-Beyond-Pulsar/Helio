@@ -284,6 +284,39 @@ pub fn resolve_slot_material(
     }
 }
 
+/// Whether `slot`'s material, as its mesh's draw last resolved it, is a
+/// shader graph that reads the frame clock (a `time` node), so the surface
+/// animates. Reads what deriving the draw compiled; loads, compiles and
+/// logs nothing.
+pub fn slot_reads_time(slot: &StaticMeshMaterialSlot) -> bool {
+    if slot.surface_override.is_some() {
+        return false;
+    }
+    let material_asset = slot.effective_material_asset();
+    if material_asset.trim().is_empty() {
+        return false;
+    }
+    let Some(project_root) = engine_state::get_project_path() else {
+        return false;
+    };
+    let path =
+        crate::subsystems::resolve_asset_path(std::path::Path::new(&project_root), material_asset);
+    let graph_file = if path.is_dir() {
+        path.join("shader_graph_save.json")
+    } else {
+        path
+    };
+    graph_material_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| {
+            let (_, compiled) = cache.get(&graph_file)?;
+            let (_, source) = compiled.as_ref().ok()?;
+            Some(source.contains("radiant_graph_time()"))
+        })
+        .unwrap_or(false)
+}
+
 fn graph_material_cache() -> &'static std::sync::Mutex<
     std::collections::HashMap<std::path::PathBuf, (u64, Result<(u64, String), String>)>,
 > {

@@ -286,12 +286,12 @@ pub fn spawn_sky(world: &mut World, tint: [f32; 3]) -> Entity {
 /// `helio::WaterVolumeDescriptor`/`.to_gpu()` pair reconstructed from the
 /// shader-documented layout, since neither survived the SceneDB migration.
 ///
-/// The heightfield simulation's own dynamics (wind, spring/damping, wave
-/// scale) are separate pass-owned GPU state, driven at runtime through
+/// The descriptor leaves the row's `sim_dynamics`/`wind_params` zero, so
+/// the heightfield simulation drives these volumes with the pass-wide
+/// dynamics set at runtime through
 /// `helio_pass_water_sim::WaterSimPass::set_wind`/`set_sim_dynamics`/
-/// `set_wave_scale`/`set_wave_speed` instead -- no shader in the pass reads
-/// this component's `sim_dynamics`/`wind_params` slots, so this descriptor
-/// only covers the fields that actually reach them.
+/// `set_wave_scale`/`set_wave_speed` (a row with its own spring simulates
+/// with its own instead).
 #[derive(Clone, Copy, Debug)]
 pub struct WaterVolumeDescriptor {
     pub bounds_min: [f32; 3],
@@ -457,8 +457,8 @@ pub fn spawn_water_volume(world: &mut World, descriptor: WaterVolumeDescriptor) 
 
 /// CPU-friendly description of one AABB water-displacement hitbox; packs into
 /// `helio_pass_water_sim::WaterHitboxComponent` per `hitbox.frag.wgsl`'s
-/// `GpuWaterHitbox` layout. Coordinates are in the water sim's own space: X/Z
-/// normalized to the pool's half-extent, Y relative to the water surface.
+/// `GpuWaterHitbox` layout. Coordinates are world space; the simulation
+/// maps the box into each water volume it overlaps.
 #[derive(Clone, Copy, Debug)]
 pub struct WaterHitboxDescriptor {
     pub old_min: [f32; 3],
@@ -714,12 +714,13 @@ pub fn update_light(world: &mut World, entity: Entity, light: GpuLight) {
 
 /// Spawn a corona particle emitter into `slot`.
 ///
-/// `slot` selects which of `helio_pass_corona`'s fixed `MAX_EMITTERS`
-/// particle ranges this emitter owns (`0..MAX_EMITTERS`, see that pass's
-/// module doc for why the layout is fixed rather than CPU-packed) — the
-/// caller is responsible for giving each simultaneously-live emitter its own
-/// slot. `emitter.particle_count`/`particle_offset` are overwritten to fit
-/// that slot; `spawn_cursor` is left at whatever `emitter` carries (normally
+/// `slot` selects the range of `helio_pass_corona`'s shared particle pool
+/// this emitter owns: `CORONA_MAX_PARTICLES_PER_EMITTER` particles from
+/// `slot` times that (the engine's environment join allocates ranges by
+/// each emitter's size instead; this demo has no join) — the caller is
+/// responsible for giving each simultaneously-live emitter its own slot.
+/// `emitter.particle_count`/`particle_offset` are overwritten to fit that
+/// slot; `spawn_cursor` is left at whatever `emitter` carries (normally
 /// `0` for a new emitter) since the pass owns advancing it from here via its
 /// own transient `spawn_cursor_buf`, never through this SceneDB row again.
 pub fn spawn_corona_emitter(

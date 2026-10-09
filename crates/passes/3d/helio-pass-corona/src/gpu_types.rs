@@ -4,14 +4,19 @@
 
 use bytemuck::{Pod, Zeroable};
 
-/// Maximum total particles across all emitters.
+/// The shared particle pool's capacity: every emitter's range is taken from
+/// it, and an allocation that does not fit is clamped (see the crate doc).
 pub const CORONA_MAX_PARTICLES: u32 = 1_048_576; // 2^20
 
-/// Maximum number of emitter slots.
+/// Emitter rows the pass reads.
 pub const CORONA_MAX_EMITTERS: u32 = 64;
 
-/// Maximum particles per individual emitter.
+/// Most particles one emitter may request.
 pub const CORONA_MAX_PARTICLES_PER_EMITTER: u32 = 262_144;
+
+/// Every emitter's range starts on a multiple of this many particles (the
+/// pass's scan block), so a block never holds two emitters' particles.
+pub const CORONA_RANGE_ALIGNMENT: u32 = 256;
 
 /// Per-particle GPU state (64 bytes).
 #[repr(C)]
@@ -27,7 +32,11 @@ pub struct GpuCoronaParticle {
     pub size_lifetime_age: [f32; 4],
 }
 
-/// Per-emitter GPU definition (256 bytes).
+/// Per-emitter GPU definition (240 bytes). `particle_offset` and
+/// `particle_count` are its range of the shared pool (offset a multiple of
+/// [`CORONA_RANGE_ALIGNMENT`]). The pass keeps the spawn cursor in its own
+/// buffer and reads `spawn_cursor` as the emitter's identity: when it or the
+/// range changes, the row's particles restart.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct GpuCoronaEmitter {

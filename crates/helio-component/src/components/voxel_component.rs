@@ -188,6 +188,8 @@ fn clone_payload_store(store: &VoxelPayloadStore) -> VoxelPayloadStore {
 /// A newly-created object describes a cubic 16³ voxel volume. Its editable
 /// voxel contents are SceneDB-owned data managed through the voxel data API;
 /// this component stores configuration and the SceneDB material-ID palette.
+/// The host's voxel mesh renderer draws it as a mesh placed by its object
+/// ([`super::voxel_mesh`]).
 #[engine_class(category = "Voxel", debug, serialize, deserialize)]
 #[category("Volume", category_color = "#8F8F8F")]
 #[category("Rendering", category_color = "#7C9DC9")]

@@ -21,6 +21,8 @@ helio-pass-corona = { path = "../passes/3d/helio-pass-corona" }
 helio-pass-flare = { path = "../passes/3d/helio-pass-flare" }
 helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
 helio-pass-decal = { path = "../passes/3d/helio-pass-decal" }
+helio-pass-sprite-batch = { path = "../passes/2d/helio-pass-sprite-batch" }
+helio-pass-sprite-cull = { path = "../passes/2d/helio-pass-sprite-cull" }
 helio-pass-debug-overlay = { path = "../passes/3d/helio-pass-debug-overlay" }
 helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
 helio-pass-fxaa = { path = "../passes/3d/helio-pass-fxaa" }

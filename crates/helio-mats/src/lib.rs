@@ -13,12 +13,10 @@
 //! `helio_pass_gbuffer::MaterialComponent`); this crate only defines the GPU
 //! row layout and shading/template machinery those components project into.
 
-pub mod graph_time;
 pub mod material;
 pub mod radiant;
 pub mod shader;
 
-pub use graph_time::graph_time_seconds;
 pub use material::{
     GpuMaterial, MaterialBindingConfig, MaterialBindingMode, MaterialTextureBindings,
     MaterialWorkflow, BINDLESS_MATERIAL_FEATURES, EXPANDED_MATERIAL_TEXTURE_RESERVE,

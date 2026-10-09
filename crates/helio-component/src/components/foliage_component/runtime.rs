@@ -63,8 +63,13 @@ pub(crate) fn gpu_type(
     }
 }
 
+/// The component's own wind. Its `_pad[0]` is 1 when the component opts
+/// out of the level's global wind (`use_global_wind` off): the environment
+/// join gives such a component's wind precedence over the global one. The
+/// wind clock (`time_prev_time`) is unused: the foliage passes read the
+/// renderer's frame clock.
 pub(crate) fn wind(component: &FoliageComponent) -> helio_pass_foliage_place::GpuWind {
-    helio_pass_foliage_place::Wind {
+    let mut wind = helio_pass_foliage_place::Wind {
         direction: glam::Vec3::from_array(component.wind.wind_direction),
         speed: if component.wind.wind_enabled {
             component.wind.wind_speed
@@ -76,7 +81,13 @@ pub(crate) fn wind(component: &FoliageComponent) -> helio_pass_foliage_place::Gp
         turbulence_scale: component.wind.turbulence_scale,
         ..Default::default()
     }
-    .to_gpu()
+    .to_gpu();
+    wind._pad[0] = if component.wind.use_global_wind {
+        0.0
+    } else {
+        1.0
+    };
+    wind
 }
 
 #[register_world_component]

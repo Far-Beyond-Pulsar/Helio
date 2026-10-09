@@ -19,6 +19,9 @@ pub const VOXEL_TERRAIN_GENERATOR_VERSION: u32 = 1;
 /// The streamed voxel terrain renderer, which draws every registered
 /// terrain generator.
 pub const VOXEL_TERRAIN_RENDERER: &str = "helio.voxel-terrain";
+/// The voxel object renderer: greedy-meshes a free-standing volume's chunks
+/// into an ordinary mesh draw placed by its owner.
+pub const VOXEL_MESH_RENDERER: &str = "helio.voxel-mesh";
 pub const MAX_VOXEL_GENERATOR_ID_BYTES: usize = 256;
 pub const MAX_VOXEL_GENERATOR_PARAMETERS_BYTES: usize = 1024 * 1024;
 

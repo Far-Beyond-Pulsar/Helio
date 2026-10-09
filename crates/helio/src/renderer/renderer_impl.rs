@@ -140,6 +140,11 @@ pub struct Renderer {
     pub(crate) enable_jitter: bool,
     pub(crate) camera_jitter_override: Option<[f32; 2]>,
     pub(crate) frame_delta_override: Option<f32>,
+    /// The frame clock animation reads (`PrepareContext::time`), in seconds.
+    pub(crate) frame_clock: f64,
+    /// How far the host's clock advances the frame clock each frame; `None`
+    /// follows the frame delta (wall time, or `frame_delta_override`).
+    pub(crate) frame_clock_delta: Option<f32>,
     /// A bake to run before the next frame. Its result is owned by the
     /// graph's `BakeInjectPass`, never by the renderer (Helio#256).
     #[cfg(feature = "bake")]
@@ -383,6 +388,32 @@ impl Renderer {
     pub fn set_frame_delta_override(&mut self, seconds: Option<f32>) {
         assert!(seconds.is_none_or(|v| v.is_finite() && v > 0.0));
         self.frame_delta_override = seconds;
+    }
+
+    /// Drive the frame clock animation reads (material graph `time`, foliage
+    /// wind, particles; `PrepareContext::time`) from the host's clock: each
+    /// frame advances it by `seconds`, until changed. `Some(0.0)` freezes it
+    /// (an editor viewport that is not realtime, a paused game); a game
+    /// passes its clock's delta every frame, so animation follows pause and
+    /// time dilation. `None` (the default) advances it by the frame delta:
+    /// wall time, or [`Self::set_frame_delta_override`].
+    pub fn set_frame_clock_delta(&mut self, seconds: Option<f32>) {
+        assert!(seconds.is_none_or(|v| v.is_finite() && v >= 0.0));
+        self.frame_clock_delta = seconds;
+    }
+
+    /// The frame clock (`PrepareContext::time`) as of the last frame, in
+    /// seconds.
+    pub fn frame_clock(&self) -> f64 {
+        self.frame_clock
+    }
+
+    /// Advance the frame clock for a frame whose delta is `delta_time` and
+    /// hand it to the graph.
+    pub(crate) fn advance_frame_clock(&mut self, delta_time: f32) {
+        let advance = self.frame_clock_delta.unwrap_or(delta_time);
+        self.frame_clock += f64::from(advance);
+        self.graph.set_frame_clock(self.frame_clock as f32, advance);
     }
 
     /// Set the renderer-wide debug visualization mode.
