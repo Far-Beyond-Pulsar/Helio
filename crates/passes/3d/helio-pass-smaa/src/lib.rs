@@ -35,7 +35,7 @@ pub struct SmaaPass {
     neighbor_bind_group: Option<wgpu::BindGroup>,
 
     /// Key for `edge_bind_group` / `neighbor_bind_group`: pointer to the pre_aa TextureView.
-    input_key: Option<usize>,
+    input_key: Option<wgpu::TextureView>,
 
     pub edge_texture: wgpu::Texture,
     pub edge_view: wgpu::TextureView,
@@ -298,14 +298,13 @@ impl RenderPass for SmaaPass {
 
         // ── Lazy bind group rebuild ───────────────────────────────────────────
         // Edge and neighbor bind groups reference the pre_aa view from frame resources.
-        // They are rebuilt whenever that view's pointer changes (e.g. after resize).
+        // They are rebuilt whenever that view's handle changes (e.g. after resize).
         let pre_aa = ctx.registry.read(helio_core::ResourceKey::new("pre_aa"), "SMAA").ok_or_else(|| {
             helio_core::Error::InvalidPassConfig(
                 "SmaaPass requires frame.pre_aa (published by the geometry pass)".to_string(),
             )
         })?;
-        let input_key = pre_aa as *const _ as usize;
-        if self.input_key != Some(input_key) {
+        if self.input_key.as_ref() != Some(pre_aa) {
             self.edge_bind_group = Some(Self::make_bg(
                 ctx.device,
                 &self.edge_bgl,
@@ -322,7 +321,7 @@ impl RenderPass for SmaaPass {
                 &self.linear_sampler,
                 &self.point_sampler,
             ));
-            self.input_key = Some(input_key);
+            self.input_key = Some(pre_aa.clone());
         }
         // Blend bind group references the internal edge_view; rebuilt in on_resize() when None.
         if self.blend_bind_group.is_none() {

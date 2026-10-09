@@ -71,7 +71,7 @@ pub struct ShadowCullPass {
 
     /// Lazy bind group, rebuilt when scene buffer pointers change.
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<(usize, usize, usize, usize, usize)>,
+    bind_group_key: Option<[wgpu::Buffer; 5]>,
 }
 
 impl ShadowCullPass {
@@ -292,14 +292,15 @@ impl RenderPass for ShadowCullPass {
         );
 
         // ── Lazy bind-group rebuild on GrowableBuffer reallocation ────────────
-        let sm_ptr = shadow_data.shadow_matrices as *const _ as usize;
-        let inst_ptr = batch.instances as *const _ as usize;
-        let src_ptr = batch.shadow_movable_indirect as *const _ as usize;
-        let fd_ptr = &*self.face_dirty_buf as *const _ as usize;
-        let cs_ptr = coord_data.coordinate_spaces as *const _ as usize;
-        let key = (sm_ptr, inst_ptr, src_ptr, fd_ptr, cs_ptr);
+        let key = [
+            shadow_data.shadow_matrices.clone(),
+            batch.instances.clone(),
+            batch.shadow_movable_indirect.clone(),
+            (*self.face_dirty_buf).clone(),
+            coord_data.coordinate_spaces.clone(),
+        ];
 
-        if self.bind_group_key != Some(key) {
+        if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ShadowCull BG"),
                 layout: &self.bgl,

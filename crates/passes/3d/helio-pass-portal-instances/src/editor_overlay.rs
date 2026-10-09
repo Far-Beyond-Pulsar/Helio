@@ -15,7 +15,7 @@ pub struct PortalEditorOverlayPass {
     pipeline: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<(usize, usize)>,
+    bind_group_key: Option<[wgpu::Buffer; 2]>,
     portal_count: u32,
     /// Active resolver-published view rows. `None` preserves legacy manual
     /// behavior for callers that do not provide projection counts.
@@ -240,11 +240,8 @@ impl RenderPass for PortalEditorOverlayPass {
             return Ok(());
         };
 
-        let key = (
-            ctx.camera as *const _ as usize,
-            &portal_views.buffer as *const _ as usize,
-        );
-        if self.bind_group_key != Some(key) {
+        let key = [ctx.camera.clone(), portal_views.buffer.clone()];
+        if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("PortalEditorOverlay BG"),
                 layout: &self.bgl,

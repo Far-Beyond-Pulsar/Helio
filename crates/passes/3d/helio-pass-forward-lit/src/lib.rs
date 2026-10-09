@@ -57,7 +57,16 @@ pub struct ForwardLitPass {
     bind_group_layout_0: wgpu::BindGroupLayout,
     bind_group_layout_1: wgpu::BindGroupLayout,
     bind_group_0: Option<wgpu::BindGroup>,
-    bind_group_0_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
+    bind_group_0_key: Option<(
+        wgpu::Buffer,
+        wgpu::Buffer,
+        wgpu::Buffer,
+        usize,
+        Option<wgpu::Buffer>,
+        Option<wgpu::Buffer>,
+        usize,
+        usize,
+    )>,
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_1_version: Option<(u64,u64)>,
     globals_buf: wgpu::Buffer,
@@ -503,38 +512,29 @@ impl RenderPass for ForwardLitPass {
             .map(|handle| &handle.buffer)
             .unwrap_or(batch.instances);
 
-        let camera_ptr = ctx.camera as *const _ as usize;
-        let instances_ptr = batch.instances as *const _ as usize;
-        let compacted_indices_ptr = culled.compacted_indices as *const _ as usize;
         // SceneDB epoch, not this frame's handle address: a reallocated
         // lights buffer can land at the same address.
         let lights_ptr = lights_handle.map_or(usize::MAX, |handle| handle.epoch as usize);
         let light_entity_indices_ptr = 0;
         // `None` (mirror not attached / no entity has a Transform yet) folds
-        // to 0, same as the `cluster` map-or-0 below -- distinct from any
+        // to 0, as a missing `cluster` below folds to `None` -- distinct from any
         // real buffer's address, so it still forces a rebind the moment a
         // real Transform buffer shows up.
         let transforms_ptr = 0;
 
         let cluster = ctx.registry.get::<helio_pass_light_cull::ClusterLightGrid<'_>>(helio_core::ResourceKey::new("cluster_light_grid"));
-        let tile_lists_ptr = cluster
-            .map(|c| c.tile_light_lists as *const _ as usize)
-            .unwrap_or(0);
-        let tile_counts_ptr = cluster
-            .map(|c| c.tile_light_counts as *const _ as usize)
-            .unwrap_or(0);
 
         let bg0_key = (
-            camera_ptr,
-            instances_ptr,
-            compacted_indices_ptr,
+            ctx.camera.clone(),
+            batch.instances.clone(),
+            culled.compacted_indices.clone(),
             lights_ptr,
-            tile_lists_ptr,
-            tile_counts_ptr,
+            cluster.map(|c| c.tile_light_lists.clone()),
+            cluster.map(|c| c.tile_light_counts.clone()),
             light_entity_indices_ptr,
             transforms_ptr,
         );
-        if self.bind_group_0_key != Some(bg0_key) {
+        if self.bind_group_0_key.as_ref() != Some(&bg0_key) {
             let cluster_ref = ctx.registry.get::<helio_pass_light_cull::ClusterLightGrid<'_>>(helio_core::ResourceKey::new("cluster_light_grid"));
             let fallback_buf = batch.instances; // fallback buffer for tile lists when cluster is absent
             let tile_lists = cluster_ref
@@ -552,7 +552,7 @@ impl RenderPass for ForwardLitPass {
             let transforms = fallback_buf;
             let light_entity_indices_buf = fallback_buf;
 
-            log::debug!("ForwardLit: rebuilding bind group 0 (buffer pointers changed)");
+            log::debug!("ForwardLit: rebuilding bind group 0 (buffers changed)");
             self.bind_group_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ForwardLit BG 0"),
                 layout: &self.bind_group_layout_0,

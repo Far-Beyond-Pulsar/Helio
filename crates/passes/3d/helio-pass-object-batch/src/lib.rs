@@ -398,7 +398,7 @@ pub struct ObjectBatchPass {
     /// `(scratch_capacity, static_objects buffer identity, materials buffer
     /// identity)` -- any change forces every bind group above to rebuild
     /// (cheap; not a hot-path cost next to the compute work itself).
-    bind_group_key: Option<(u32, Option<u64>, usize)>,
+    bind_group_key: Option<(u32, Option<u64>, wgpu::Buffer)>,
 
     readback: readback::RangeReadback,
 
@@ -1452,9 +1452,9 @@ impl RenderPass for ObjectBatchPass {
         let key = (
             self.scratch_capacity,
             static_objects_epoch,
-            materials_buf as *const _ as usize,
+            materials_buf.clone(),
         );
-        if grew || self.bind_group_key != Some(key) {
+        if grew || self.bind_group_key.as_ref() != Some(&key) {
             self.rebuild_bind_groups(ctx.device, &static_objects_buf, materials_buf);
             self.bind_group_key = Some(key);
         }

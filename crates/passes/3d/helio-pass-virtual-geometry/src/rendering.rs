@@ -28,7 +28,7 @@ pub struct VirtualGeometryPass {
     pub(crate) cull_pipeline: wgpu::ComputePipeline,
     pub(crate) cull_bgl: wgpu::BindGroupLayout,
     pub(crate) cull_bind_group: Option<wgpu::BindGroup>,
-    pub(crate) cull_bind_group_hiz_key: Option<(usize, usize)>,
+    pub(crate) cull_bind_group_hiz_key: Option<(wgpu::TextureView, wgpu::Sampler)>,
     pub(crate) cull_buf: wgpu::Buffer,
     pub(crate) opaque_draw_pipeline: wgpu::RenderPipeline,
     pub(crate) alpha_draw_pipeline: wgpu::RenderPipeline,
@@ -38,7 +38,7 @@ pub struct VirtualGeometryPass {
     pub(crate) draw_bgl_1: wgpu::BindGroupLayout,
     pub(crate) draw_bg_0: Option<wgpu::BindGroup>,
     pub(crate) draw_bg_1: Option<wgpu::BindGroup>,
-    pub(crate) bg1_version: Option<u64>,
+    pub(crate) bg1_version: Option<(u64, u64)>,
     pub(crate) globals_buf: wgpu::Buffer,
     pub(crate) meshlet_buf: wgpu::Buffer,
     pub(crate) object_buf: wgpu::Buffer,
@@ -958,9 +958,8 @@ impl RenderPass for VirtualGeometryPass {
         let Some(materials) = ctx.scene_buffers.get(BufferKey::of("materials")) else {
             return Ok(());
         };
-        if self.draw_bg_1.is_none()
-            || self.bg1_version != Some(material_textures.version)
-        {
+        let bg1_version = (material_textures.version, materials.epoch);
+        if self.draw_bg_1.is_none() || self.bg1_version != Some(bg1_version) {
             let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -982,7 +981,7 @@ impl RenderPass for VirtualGeometryPass {
                 layout: &self.draw_bgl_1,
                 entries: &entries,
             }));
-            self.bg1_version = Some(material_textures.version ^ materials.epoch);
+            self.bg1_version = Some(bg1_version);
         }
 
         let globals = VgGlobals {
@@ -1133,11 +1132,8 @@ impl RenderPass for VirtualGeometryPass {
             .registry
             .get::<&wgpu::Sampler>(helio_core::ResourceKey::new("hiz_sampler"))
             .expect("VirtualGeometry: 'hiz_sampler' not available");
-        let hiz_key = (
-            hiz_view as *const _ as usize,
-            hiz_sampler as *const _ as usize,
-        );
-        if self.cull_bind_group.is_none() || self.cull_bind_group_hiz_key != Some(hiz_key) {
+        let hiz_key = (hiz_view.clone(), hiz_sampler.clone());
+        if self.cull_bind_group.is_none() || self.cull_bind_group_hiz_key.as_ref() != Some(&hiz_key) {
             self.cull_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("VG Cull BG"),
                 layout: &self.cull_bgl,

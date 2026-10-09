@@ -36,8 +36,8 @@ pub struct DecalPass {
     bg_collect: Option<wgpu::BindGroup>,
     bg_apply: Option<wgpu::BindGroup>,
     bg_textures: Option<wgpu::BindGroup>,
-    bg_collect_key: Option<(usize, usize, usize, usize, usize, usize, u64)>,
-    bg_apply_key: Option<(usize, usize, usize, usize, usize, usize, u64)>,
+    bg_collect_key: Option<(wgpu::Buffer, wgpu::Buffer, [wgpu::TextureView; 4], u64)>,
+    bg_apply_key: Option<(wgpu::Buffer, wgpu::Buffer, [wgpu::TextureView; 4], u64)>,
     bg_textures_version: Option<u64>,
     globals_buf: wgpu::Buffer,
     temp_albedo: Option<(wgpu::Texture, wgpu::TextureView)>,
@@ -407,7 +407,7 @@ impl RenderPass for DecalPass {
             Some(g) => g,
             None => return Ok(()),
         };
-        let depth_view = match ctx.registry.read(helio_core::ResourceKey::new("hiz"), self.name()) {
+        let depth_view = match ctx.registry.read::<&wgpu::TextureView>(helio_core::ResourceKey::new("hiz"), self.name()) {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -423,23 +423,23 @@ impl RenderPass for DecalPass {
             .get(BufferKey::of("decals"))
             .map(|handle| &handle.buffer)
             .unwrap_or(&self.fallback_decals);
-        let camera_ptr = ctx.camera as *const _ as usize;
-        let decal_ptr = decals_buf as *const _ as usize;
         let (_, ta) = self.temp_albedo.as_ref().unwrap();
         let (_, tn) = self.temp_normal.as_ref().unwrap();
         let (_, to) = self.temp_orm.as_ref().unwrap();
         let (_, te) = self.temp_emissive.as_ref().unwrap();
 
         let ck = (
-            camera_ptr,
-            decal_ptr,
-            depth_view as *const _ as usize,
-            gb.views[0] as *const _ as usize,
-            gb.views[1] as *const _ as usize,
-            gb.views[2] as *const _ as usize,
+            ctx.camera.clone(),
+            decals_buf.clone(),
+            [
+                depth_view.clone(),
+                gb.views[0].clone(),
+                gb.views[1].clone(),
+                gb.views[2].clone(),
+            ],
             u64::from(self.last_w) | (u64::from(self.last_h) << 32),
         );
-        if self.bg_collect_key != Some(ck) || self.bg_collect.is_none() {
+        if self.bg_collect_key.as_ref() != Some(&ck) || self.bg_collect.is_none() {
             self.bg_collect = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Decal Collect BG"),
                 layout: &self.bgl_collect,
@@ -486,15 +486,12 @@ impl RenderPass for DecalPass {
         }
 
         let ak = (
-            camera_ptr,
-            decal_ptr,
-            ta as *const _ as usize,
-            tn as *const _ as usize,
-            to as *const _ as usize,
-            te as *const _ as usize,
+            ctx.camera.clone(),
+            decals_buf.clone(),
+            [ta.clone(), tn.clone(), to.clone(), te.clone()],
             u64::from(self.last_w) | (u64::from(self.last_h) << 32),
         );
-        if self.bg_apply_key != Some(ak) || self.bg_apply.is_none() {
+        if self.bg_apply_key.as_ref() != Some(&ak) || self.bg_apply.is_none() {
             self.bg_apply = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Decal Apply BG"),
                 layout: &self.bgl_apply,

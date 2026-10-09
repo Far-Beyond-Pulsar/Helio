@@ -18,12 +18,12 @@ pub struct PortalMaskPass {
     stamp_pipeline: wgpu::RenderPipeline,
     stamp_bgl: wgpu::BindGroupLayout,
     stamp_bind_group: Option<wgpu::BindGroup>,
-    stamp_bind_group_key: Option<(usize, usize)>,
+    stamp_bind_group_key: Option<[wgpu::Buffer; 2]>,
 
     reset_pipeline: wgpu::RenderPipeline,
     reset_bgl: wgpu::BindGroupLayout,
     reset_bind_group: Option<wgpu::BindGroup>,
-    reset_bind_group_key: Option<usize>,
+    reset_bind_group_key: Option<wgpu::TextureView>,
 
     portal_count: u32,
     /// Active resolver-published view rows. `None` preserves legacy manual
@@ -268,11 +268,8 @@ impl RenderPass for PortalMaskPass {
         };
 
         // ── Sub-pass 1: stamp ────────────────────────────────────────────
-        let stamp_key = (
-            ctx.camera as *const _ as usize,
-            &portal_views.buffer as *const _ as usize,
-        );
-        if self.stamp_bind_group_key != Some(stamp_key) {
+        let stamp_key = [ctx.camera.clone(), portal_views.buffer.clone()];
+        if self.stamp_bind_group_key.as_ref() != Some(&stamp_key) {
             self.stamp_bind_group =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("PortalMask Stamp BG"),
@@ -328,8 +325,7 @@ impl RenderPass for PortalMaskPass {
         }
 
         // ── Sub-pass 2: reset ────────────────────────────────────────────
-        let reset_key = mask_view as *const _ as usize;
-        if self.reset_bind_group_key != Some(reset_key) {
+        if self.reset_bind_group_key.as_ref() != Some(mask_view) {
             self.reset_bind_group =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("PortalMask Reset BG"),
@@ -339,7 +335,7 @@ impl RenderPass for PortalMaskPass {
                         resource: wgpu::BindingResource::TextureView(mask_view),
                     }],
                 }));
-            self.reset_bind_group_key = Some(reset_key);
+            self.reset_bind_group_key = Some(mask_view.clone());
         }
 
         {
