@@ -55,7 +55,8 @@ The cathedral capture accepts `HLFS_RT=1 HLFS_PRESAMPLED=1` to exercise this pre
 
 ## SceneDB RT integration
 
-The frontend owns `SceneDbRayTracing`. After flushing the World's GPU mirror,
+The frontend owns `helio_default_graphs::ray_tracing::SceneDbRayTracing`; this
+crate reads no World. After flushing the World's GPU mirror,
 call `acceleration.prepare(&world)` and publish its TLAS with
 `renderer.set_ray_tracing_frame(Some(tlas))` before each render. The renderer
 provides it through `RenderEnvironment`; publication expires after that frame.

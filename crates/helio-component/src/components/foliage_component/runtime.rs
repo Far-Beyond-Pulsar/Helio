@@ -16,6 +16,13 @@ pub(crate) fn gpu_type(
             * helio_pass_foliage_place::FOLIAGE_FLAG_CASTS_SHADOW
         | u32::from(component.interaction.receives_interaction)
             * helio_pass_foliage_place::FOLIAGE_FLAG_RECEIVES_INTERACTION;
+    let [red, green, blue, _] = component.rendering.base_color;
+    let [base_color, roughness_metallic] = helio_pass_foliage_place::FoliageMaterial {
+        base_color: [red, green, blue],
+        roughness: component.rendering.roughness,
+        metallic: component.rendering.metallic,
+    }
+    .pack();
     helio_pass_foliage_place::components::FoliageTypeComponent {
         density: component.general.density,
         height_range: [
@@ -43,13 +50,16 @@ pub(crate) fn gpu_type(
             component.wind.leaf_jitter,
         ],
         interaction_stiffness: component.wind.interaction_stiffness,
-        // Material projections remain a separate scene domain. Slot zero is the
-        // stable default until foliage materials receive their own SceneDB column.
+        // The authored colour, roughness and metallic travel in the row itself
+        // (`base_color`, `roughness_metallic`). Slot zero stays the default until
+        // foliage resolves materials through the material table.
         material_id: 0u32,
         density_layer: component.general.density_layer as u32,
         kind_and_flags: pack_kind_and_flags(FoliageKind::Blade, flags),
         mesh_or_impostor_id: u32::MAX,
-        _pad: [0; 3],
+        base_color,
+        roughness_metallic,
+        _pad: 0,
     }
 }
 

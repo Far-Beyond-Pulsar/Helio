@@ -381,7 +381,10 @@ pub fn populate(world: &mut World) {
         } else {
             colour.map(|c| 0.04 + 0.76 * c)
         };
-        world.insert(material, helio_pass_hlfs::RayTransmission(transmission));
+        world.insert(
+            material,
+            helio_default_graphs::ray_tracing::RayTransmission(transmission),
+        );
         let mesh = spawn_mesh(
             world,
             MeshUpload {

@@ -101,9 +101,9 @@ struct FoliageType {
     density_layer:         u32,
     kind_and_flags:        u32,
     mesh_or_impostor_id:   u32,
+    base_color:            u32,
+    roughness_metallic:    u32,
     _pad0:                 u32,
-    _pad1:                 u32,
-    _pad2:                 u32,
 }
 
 /// Mirrors `crate::GpuFoliageTile` (Rust, 32 bytes).

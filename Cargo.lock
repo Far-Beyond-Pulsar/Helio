@@ -1619,6 +1619,7 @@ dependencies = [
  "glam 0.33.5",
  "helio",
  "helio-core",
+ "helio-mats",
  "helio-pass-billboard",
  "helio-pass-corona",
  "helio-pass-debug-overlay",
@@ -1660,6 +1661,7 @@ dependencies = [
  "pollster 0.4.0",
  "pulsar_scenedb",
  "serde_json",
+ "twox-hash",
  "wgpu",
 ]
 
@@ -1872,6 +1874,7 @@ dependencies = [
  "glam 0.33.5",
  "half",
  "helio-core",
+ "helio-default-graphs",
  "helio-mats",
  "helio-pass-forward-lit",
  "helio-pass-gbuffer",
@@ -1881,7 +1884,6 @@ dependencies = [
  "naga",
  "pollster 0.4.0",
  "pulsar_scenedb",
- "twox-hash",
  "wgpu",
 ]
 
@@ -2015,6 +2017,7 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "log",
+ "pollster 0.4.0",
  "wgpu",
 ]
 
