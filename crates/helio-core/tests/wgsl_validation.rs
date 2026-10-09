@@ -27,6 +27,7 @@ const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_pass_hiz::HIZ_SNIPPET,
     helio_mats::PBR_EVAL_SNIPPET,
     helio_pass_foliage_place::WIND_SNIPPET,
+    helio_pass_sky::atmosphere::ATMOSPHERE_SNIPPET,
 ];
 
 use naga::valid::{Capabilities, ValidationFlags, Validator};

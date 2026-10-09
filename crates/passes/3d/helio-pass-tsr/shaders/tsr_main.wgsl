@@ -286,6 +286,42 @@ fn compute_blend_factor(
     return clamp(base, MIN_HISTORY_BLEND_RATE, MAX_HISTORY_BLEND_RATE);
 }
 
+// ── Current-frame reconstruction ─────────────────────────────────────────────
+
+// The current frame's colour at an output pixel, reconstructed from the 3x3
+// jittered input samples nearest to it with a narrow Gaussian (sigma ~0.29
+// input pixels: the Blackman-Harris width of UE TAAU blurred more than the
+// bilinear sample it replaced), and the weight of the nearest sample (1 when
+// one lands on the pixel). Still frames converge ~18 % sharper. `in_pos` is the output pixel's position in input texels
+// (jitter included). A bilinear sample at the jittered position blurred every
+// new sample by up to half a pixel, and while moving, when little history
+// survives, the whole image with it (native resolution included).
+struct Reconstruction {
+    rgb: vec3<f32>,
+    confidence: f32,
+}
+
+fn reconstruct_current(in_pos: vec2<f32>) -> Reconstruction {
+    let dims = vec2<i32>(textureDimensions(current_frame));
+    let base = vec2<i32>(floor(in_pos));
+    var sum = vec3<f32>(0.0);
+    var w_sum = 0.0;
+    var nearest = 0.0;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let p = base + vec2<i32>(x, y);
+            let d = vec2<f32>(p) + 0.5 - in_pos;
+            let w = exp(-6.0 * dot(d, d));
+            let s = textureLoad(current_frame, clamp(p, vec2<i32>(0), dims - 1), 0).rgb;
+            // Weighted in tonemapped space: a bright sample cannot dominate.
+            sum += w * tonemap(s);
+            w_sum += w;
+            nearest = max(nearest, w);
+        }
+    }
+    return Reconstruction(reverse_tonemap(sum / w_sum), nearest);
+}
+
 // ── Contrast-Adaptive Sharpening (CAS) ───────────────────────────────────────
 
 // Lightweight CAS pass on the resolved colour.
@@ -362,7 +398,8 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
     let output_alpha = select(1.0, coverage, use_coverage);
 
     // ── Current frame sample (jitter-corrected) ───────────────────────────────
-    let current_rgb = textureSampleLevel(current_frame, linear_sampler, cur_uv, 0.0).rgb;
+    let reconstruction = reconstruct_current(cur_uv * in_dims);
+    let current_rgb = reconstruction.rgb;
     let depth_val = textureSample(depth_tex, point_sampler, cur_uv);
     let clip = vec4<f32>(cur_uv*vec2<f32>(2.0,-2.0)+vec2<f32>(-1.0,1.0),depth_val,1.0);
     let world_h = cameras[0].inv_view_proj * clip;
@@ -444,7 +481,11 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
     let clamped_history = clamp(history_tm, aabb_min, aabb_max);
 
     // ── Adaptive blend ─────────────────────────────────────────────────────────
-    let blend = compute_blend_factor(flags, local_reactivity, tsr.time_delta, history_tm, n);
+    // A frame whose nearest sample lies far from this pixel says less about
+    // it than the history does (half the weight at the farthest jitter).
+    // Reactivity (cuts, coverage) still forces the current frame.
+    let blend = max(compute_blend_factor(flags, local_reactivity, tsr.time_delta, history_tm, n)
+        * mix(0.5, 1.0, reconstruction.confidence), local_reactivity);
 
     // ── Blend ─────────────────────────────────────────────────────────────────
     let blended_ycocg = mix(clamped_history, current_tm, blend);

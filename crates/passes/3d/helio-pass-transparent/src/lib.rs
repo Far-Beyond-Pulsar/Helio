@@ -460,7 +460,7 @@ impl RenderPass for TransparentPass {
             return Ok(());
         };
         let draw_count = batch.draw_count;
-        log::info!(
+        log::trace!(
             "[TransparentPass] execute: draw_count={}, transparent_ranges={:?}",
             draw_count,
             batch.transparent_ranges

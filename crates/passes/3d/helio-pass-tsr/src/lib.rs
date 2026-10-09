@@ -139,6 +139,22 @@ struct TsrUniform {
     previous_view: [f32; 16],
 }
 
+// Express previous view-space depth in the current floating origin. Current
+// local points are old local points minus origin_shift, so compose V * T(shift).
+// Matrices use column-major GPU layout; only the translation column changes.
+// Compose in f64, matching the renderer's previous-projection rebasing.
+fn rebase_previous_view(previous: [f32; 16], origin_shift: [f64; 3]) -> [f32; 16] {
+    assert!(origin_shift.iter().all(|v| v.is_finite()), "camera origin shift must be finite");
+    let mut rebased = previous;
+    for row in 0..4 {
+        rebased[12 + row] = (f64::from(previous[row]) * origin_shift[0]
+            + f64::from(previous[4 + row]) * origin_shift[1]
+            + f64::from(previous[8 + row]) * origin_shift[2]
+            + f64::from(previous[12 + row])) as f32;
+    }
+    rebased
+}
+
 // ── Pass ──────────────────────────────────────────────────────────────────────
 
 /// Temporal Super-Resolution pass.
@@ -193,6 +209,8 @@ pub struct TsrPass {
     first_frame: bool,
     previous_jitter_uv: [f32; 2],
     previous_view: [f32; 16],
+    previous_world_origin: Option<[f64; 3]>,
+    previous_view_id: Option<u32>,
     /// Blend bias toward current frame (`0` = full history, `1` = no history).
     reactivity: f32,
 
@@ -407,6 +425,8 @@ impl TsrPass {
             first_frame: true,
             previous_jitter_uv: [0.0; 2],
             previous_view: [0.0; 16],
+            previous_world_origin: None,
+            previous_view_id: None,
             reactivity: 0.0,
             quality,
         }
@@ -655,11 +675,23 @@ impl RenderPass for TsrPass {
             ndc[0] * ctx.width as f32 * 0.5,
             ndc[1] * ctx.height as f32 * 0.5,
         ];
-        let reset = if self.first_frame {
-            self.first_frame = false;
-            1u32
+        let world_origin = ctx.world_origin.map(|origin| origin.to_array());
+        let view_id = ndc[3].to_bits();
+        let coordinate_mode_changed = self.previous_world_origin.is_some() != world_origin.is_some();
+        let view_changed = self.previous_view_id.is_some_and(|previous| previous != view_id);
+        let reset = u32::from(self.first_frame || coordinate_mode_changed || view_changed);
+        self.first_frame = false;
+        let previous_view = if reset != 0 {
+            ctx.camera_data.view
         } else {
-            0u32
+            match (self.previous_world_origin, world_origin) {
+                (Some(previous), Some(current)) => rebase_previous_view(self.previous_view, [
+                    current[0] - previous[0],
+                    current[1] - previous[1],
+                    current[2] - previous[2],
+                ]),
+                _ => self.previous_view,
+            }
         };
 
         let u = TsrUniform {
@@ -669,13 +701,17 @@ impl RenderPass for TsrPass {
             time_delta: ctx.delta_time.max(0.0),
             tap_radius: self.quality.tap_radius(),
             previous_jitter_uv: self.previous_jitter_uv,
-            previous_view: self.previous_view,
+            previous_view,
         };
 
         ctx.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
         self.previous_jitter_uv = [ndc[0] * 0.5, -ndc[1] * 0.5];
+        // Retain the raw matrix and its origin, not this frame's rebased
+        // history matrix, so successive shifts are never applied twice.
         self.previous_view = ctx.camera_data.view;
+        self.previous_world_origin = world_origin;
+        self.previous_view_id = Some(view_id);
         Ok(())
     }
 

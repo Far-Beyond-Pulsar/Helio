@@ -1,4 +1,5 @@
 //!use pbr_eval
+//!use atmosphere
 
 //! Deferred lighting pass.
 //!
@@ -64,9 +65,6 @@ struct Globals {
     enable_env_reflections: u32,
     _pad_0: u32,
     _pad_1: u32,
-    // Hemisphere ambient axis (xyz) and ground-bounce colour (rgb).
-    ambient_up:        vec4<f32>,
-    ambient_ground:    vec4<f32>,
 }
 
 /// GpuLight (64 bytes, matches libhelio::GpuLight)
@@ -153,6 +151,13 @@ struct ShadowCasterCounts {
     _pad:                 u32,
 }
 @group(0) @binding(8) var<storage, read> shadow_caster_counts: ShadowCasterCounts;
+
+// The atmosphere resolved this frame (helio-pass-sky's AtmospherePass), or
+// a zeroed frame (planet.w = 0) without one. A uniform: the fragment stage
+// is at its storage-buffer limit. The sun reaches surfaces through the air
+// between them and space, and the sky lights them; the air between them and
+// the eye is the atmosphere composite's.
+@group(0) @binding(9) var<uniform> atmosphere: AtmosphereFrame;
 
 // min(dynamic, static) shadow comparison, skipping an atlas with no casters.
 fn compare_shadow_atlases(uv: vec2<f32>, layer: u32, depth_ref: f32) -> f32 {
@@ -804,7 +809,10 @@ fn pbr_direct_light(
 
     if light.light_type == 0u {  // Directional light
         L        = normalize(-light.direction_outer.xyz);
-        radiance = light.color_intensity.xyz * light.color_intensity.w;
+        // A distant light crosses the atmosphere, if any, to reach the point.
+        let through = atmosphere_transmittance_towards(
+            atmosphere, (world_pos - cameras[0].position_near.xyz) * 0.001, L);
+        radiance = light.color_intensity.xyz * light.color_intensity.w * through;
     } else {  // Point or spot light
         let to_light = light.position_range.xyz - world_pos;
         let dist     = length(to_light);
@@ -1312,10 +1320,17 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // When RC GI is active it replaces the hemisphere fallback with physically-
     // based global illumination.  When inactive the hemisphere ambient is used.
 
-    let sky_color      = globals.ambient_color.rgb * globals.ambient_intensity;
-    let ground_color   = globals.ambient_ground.rgb * globals.ambient_intensity;
-    let hemi_t         = dot(N, globals.ambient_up.xyz) * 0.5 + 0.5;
-    let hemi           = mix(ground_color, sky_color, hemi_t) * albedo;
+    // With an atmosphere the sky itself is the ambient light: its radiance,
+    // ground included, cosine-convolved at the eye.
+    var hemi: vec3<f32>;
+    if atmosphere.planet.w > 0.5 {
+        hemi = atmosphere_sky_irradiance(atmosphere, N) * albedo;
+    } else {
+        let sky_color    = globals.ambient_color.rgb * globals.ambient_intensity;
+        let ground_color = sky_color * 0.15;
+        let hemi_t       = N.y * 0.5 + 0.5;
+        hemi             = mix(ground_color, sky_color, hemi_t) * albedo;
+    }
 
     // RC weight: 0 = no RC data, 1 = full RC coverage
     let rc_weight      = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
@@ -1348,37 +1363,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     var color         = lo_final + indirect;
     color        += emissive;               // emissive from G-buffer
     color        += sss_transmission;       // SSS rim glow
-
-    // ── Water caustics ────────────────────────────────────────────────────────
-    // Add caustics to surfaces below water
-    if arrayLength(&water_volumes) > 0u {
-        let vol = water_volumes[0]; // Use first water volume
-
-        // Check if this surface is below the water surface
-        if world_pos.y < vol.bounds_max.w {
-            // Check if caustics are enabled
-            if vol.caustics_params.x > 0.5 {
-                // Sample caustics texture based on world XZ position
-                let caustics_scale = vol.caustics_params.z;
-                let caustics_uv = world_pos.xz / caustics_scale;
-                let caustic_value = textureSampleLevel(water_caustics, caustics_sampler, caustics_uv, 0.0).r;
-
-                // Apply caustics intensity
-                let caustics_intensity = vol.caustics_params.y;
-                let caustics_color = vec3<f32>(0.7, 0.9, 1.0) * caustic_value * caustics_intensity;
-
-                // Add caustics to the final color
-                color += caustics_color;
-            }
-        }
-    }
+    // Water caustics are added by fs_reflection (additive, like reflections).
 
     // Tonemapping & bloom handled by PostProcessPass — write raw HDR linear.
     return vec4<f32>(color, alpha);
 }
 
-// Reflection composition is deliberately isolated from base lighting so neither
-// fragment entry point exceeds the WebGPU baseline of 16 sampled textures.
+// Reflection composition (and the additive water caustics) is deliberately
+// isolated from base lighting so neither fragment entry point exceeds the
+// WebGPU baseline of 16 sampled textures.
 // The normal path is additively blended over fs_main; SSR debug modes use the
 // companion replacement pipeline.
 @fragment
@@ -1456,5 +1449,22 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
     }
 
     let contribution = select(spec_ind * ao_combined, spec_ind, has_lightmap);
-    return vec4<f32>(contribution, 0.0);
+    return vec4<f32>(contribution + water_caustics_light(world_pos), 0.0);
+}
+
+// Light the first water volume's caustics add to a surface below its water
+// line. Additive, so it is composed with the reflections: base lighting is at
+// its sampled-texture budget.
+fn water_caustics_light(world_pos: vec3<f32>) -> vec3<f32> {
+    if arrayLength(&water_volumes) == 0u {
+        return vec3<f32>(0.0);
+    }
+    let vol = water_volumes[0];
+    if world_pos.y >= vol.bounds_max.w || vol.caustics_params.x <= 0.5 {
+        return vec3<f32>(0.0);
+    }
+    // Sampled at the world XZ position, `caustics_params.z` metres a tile.
+    let caustics_uv = world_pos.xz / vol.caustics_params.z;
+    let caustic_value = textureSampleLevel(water_caustics, caustics_sampler, caustics_uv, 0.0).r;
+    return vec3<f32>(0.7, 0.9, 1.0) * caustic_value * vol.caustics_params.y;
 }

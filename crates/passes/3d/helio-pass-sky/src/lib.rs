@@ -20,9 +20,11 @@ use helio_core::{
 };
 use pulsar_scenedb::gpu::{BufferKey, GpuMirrorHandle};
 
+pub mod atmosphere;
 pub mod components;
 pub mod gpu_types;
-pub use components::{AtmosphereComponent, CloudscapeComponent, SkyComponent};
+pub use atmosphere::{AtmosphereComponent, AtmosphereCompositePass, AtmospherePass};
+pub use components::SkyComponent;
 pub use gpu_types::*;
 
 pub const VOLUME_SIZE: wgpu::Extent3d = wgpu::Extent3d {
@@ -268,7 +270,6 @@ pub struct CloudFrameUniform {
 pub struct SkyPass {
     /// A renderer backend may request the ordinary sky when no authored
     /// SceneDB sky row is present (for example, a generated outdoor world).
-    fallback_sky_enabled: bool,
     // ── Legacy simulation / volume ──────────────────────────────────────────
     sim_pipeline: wgpu::ComputePipeline,
     render_pipeline: wgpu::RenderPipeline,
@@ -405,11 +406,6 @@ fn texture_2d(
 }
 
 impl SkyPass {
-    /// Use the pass-owned atmosphere only when the scene has no sky row.
-    pub fn set_fallback_sky_enabled(&mut self, enabled: bool) {
-        self.fallback_sky_enabled = enabled;
-    }
-
     /// Creates the sky pass with a camera buffer (preferred for unified sky+clouds).
     pub fn new(
         device: &wgpu::Device,
@@ -736,7 +732,7 @@ impl SkyPass {
         });
         let sky_lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Sky LUT Sampler (Unified)"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
@@ -744,8 +740,18 @@ impl SkyPass {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
-        let sky_lut_module = helio_core::shader::module(device, "Sky LUT Shader (Unified)", helio_core::include_wgsl!("shaders/sky_lut.wgsl"));
-        let sky_module = helio_core::shader::module(device, "Sky Composite Shader (Unified)", helio_core::include_wgsl!("shaders/sky.wgsl"));
+        let sky_lut_module = helio_core::shader::module_with(
+            device,
+            "Sky LUT Shader (Unified)",
+            helio_core::include_wgsl!("shaders/sky_lut.wgsl"),
+            &[],
+        );
+        let sky_module = helio_core::shader::module_with(
+            device,
+            "Sky Composite Shader (Unified)",
+            helio_core::include_wgsl!("shaders/sky.wgsl"),
+            &[],
+        );
         // Sky LUT BGLs: camera storage + sky uniforms
         let sky_lut_bgl0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sky LUT BGL0 (Unified)"),
@@ -1637,7 +1643,6 @@ impl SkyPass {
             height,
             allocated_divisor: config.divisor,
             use_high_perf: true,
-            fallback_sky_enabled: false,
             sky_uniform_buf,
             sky_lut_pipeline,
             sky_lut_bgl0,
@@ -1938,18 +1943,12 @@ impl RenderPass for SkyPass {
         );
 
         // Upload sky uniforms (Nishita atmosphere + cloud overlay params)
-        if self.fallback_sky_enabled
-            || ctx
+        if ctx
                 .registry
                 .get::<crate::SkyContext>(helio_core::ResourceKey::new("sky"))
                 .map_or(false, |sky| sky.has_sky)
         {
             let mut sky_uniforms = ShaderSkyUniforms::earth_like();
-            if self.fallback_sky_enabled {
-                sky_uniforms.exposure = 1.0;
-                sky_uniforms.earth_radius = 6371.0;
-                sky_uniforms.atm_radius = 6431.0;
-            }
             if let Some(clouds) = ctx
                 .registry
                 .get::<crate::SkyContext>(helio_core::ResourceKey::new("sky"))
@@ -1992,18 +1991,11 @@ impl RenderPass for SkyPass {
         // this can't be a one-time construction-time resolution. Falls back
         // to `self.sky_uniform_buf` (this pass's own CPU-driven uniforms)
         // when no `SkyComponent` has ever been inserted.
-        // SceneDB registers a GPU buffer even before an authored sky row
-        // exists. An enabled fallback must use its own valid uniforms rather
-        // than bind that empty buffer and render a black atmosphere.
-        let scene_sky_buf = (!self.fallback_sky_enabled)
-            .then(|| ctx.scene_buffers.get(BufferKey::of("sky_components")))
-            .flatten()
-            .map(|handle| &handle.buffer);
+        let scene_sky_buf = ctx.scene_buffers.get(BufferKey::of("sky_components")).map(|handle| &handle.buffer);
         let scene_sky_key = scene_sky_buf.map_or(0, |b| b as *const _ as usize);
         // SceneDB atmosphere rows do not publish the retired SkyActor context.
         // Empty/deleted rows are rejected in the shaders before integration.
-        let has_sky = self.fallback_sky_enabled
-            || scene_sky_buf.is_some()
+        let has_sky = scene_sky_buf.is_some()
             || ctx
                 .registry
                 .get::<crate::SkyContext>(helio_core::ResourceKey::new("sky"))

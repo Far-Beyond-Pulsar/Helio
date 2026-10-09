@@ -3,6 +3,7 @@
 use crate::edits::{apply, center_half, Brush, EditLog, FaceBrush};
 use crate::grid::{face_axes, Cell, Grid, Shape};
 use crate::terrain::{self, material, TerrainField, TerrainSource, HEIGHT_ONE};
+
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -40,6 +41,25 @@ impl Default for PlanetRecipe {
 }
 
 impl PlanetRecipe {
+    /// Fingerprint of the ground this recipe makes (form, voxel size,
+    /// generator, seed and settings, the settings compared as JSON values):
+    /// edits belong to it (`VoxelEditJournal::made_on`).
+    pub fn fingerprint(&self) -> u64 {
+        let settings: serde_json::Value = serde_json::from_str(&self.terrain.settings).unwrap_or(serde_json::Value::Null);
+        // Only the size the shape uses.
+        let (radius, plane) = match self.shape {
+            Shape::Sphere => (self.radius_m, 0.0),
+            _ => (0.0, self.plane_size_m),
+        };
+        let key = serde_json::json!([self.version, self.shape, radius, plane, self.voxel_size_m,
+            self.terrain.generator, self.terrain.version, self.terrain.seed, settings]);
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for byte in key.to_string().bytes() {
+            h = (h ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
+        }
+        // 0 means "no terrain yet".
+        h.max(1)
+    }
     pub fn from_json(json: &str) -> Result<Self, String> {
         if json.trim().is_empty() {
             return Ok(Self::default());
@@ -56,6 +76,13 @@ impl PlanetRecipe {
 }
 
 /// Result of an exact ray cast on the base grid.
+/// The base column a ray walk is in (`Planet::kind_in`).
+struct RayColumn {
+    key: (u8, i32, i32),
+    height: i32,
+    brushes: Vec<FaceBrush>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RayHit {
     pub cell: Cell,
@@ -95,7 +122,15 @@ impl Clone for Planet {
 }
 
 impl Planet {
-    pub fn new(recipe: PlanetRecipe) -> Result<Self, String> {
+    pub fn new(mut recipe: PlanetRecipe) -> Result<Self, String> {
+        // Name the registered generator version (0 accepts it), so saved
+        // edits record the terrain they were made against.
+        if recipe.terrain.version == 0 {
+            recipe.terrain.version = terrain::find(&recipe.terrain.generator, 0)
+                .ok_or_else(|| format!("unknown terrain generator {}", recipe.terrain.generator))?
+                .info()
+                .version;
+        }
         let grid = match recipe.shape {
             Shape::Sphere => Grid::new(recipe.radius_m, recipe.voxel_size_m)?,
             shape => Grid::plane(shape, recipe.plane_size_m, recipe.voxel_size_m)?,
@@ -156,11 +191,16 @@ impl Planet {
     }
     /// Radius below which every cell is solid (terrain and removals).
     pub fn inner_radius(&self) -> f64 {
-        (self.grid.radius() + self.min_terrain_height() - self.grid.voxel_size() * 4.0).min(self.edit_bottom)
+        let caves = f64::from(self.field.volume_bounds().0) / f64::from(HEIGHT_ONE);
+        (self.grid.radius() + self.min_terrain_height() - caves - self.grid.voxel_size() * 4.0).min(self.edit_bottom)
     }
     /// Outer radius that bounds every solid cell (terrain and additions).
     pub fn outer_radius(&self) -> f64 {
-        (self.grid.radius() + self.max_terrain_height() + self.grid.voxel_size() * 4.0).max(self.edit_top + self.grid.voxel_size())
+        (self.grid.radius() + self.max_terrain_height() + self.overhang_height() + self.grid.voxel_size() * 4.0).max(self.edit_top + self.grid.voxel_size())
+    }
+    /// Largest rise (m) of generated overhangs over the heightfield.
+    pub fn overhang_height(&self) -> f64 {
+        f64::from(self.field.volume_bounds().1) / f64::from(HEIGHT_ONE)
     }
     /// Band-limited surface height of a level column, in height units.
     pub fn column_height(&self, face: u8, i: i32, j: i32, level: u32) -> i32 {
@@ -197,10 +237,51 @@ impl Planet {
     /// Canonical `(kind, material)` of a level cell: kind 0 air, 1 solid.
     /// Material 0 on a solid cell means "terrain rule".
     pub fn sample_kind(&self, level: u32, face: u8, i: i32, j: i32, k: i32) -> (u32, u32) {
-        let top = self.column_top(face, i, j, level);
-        let kind = terrain::terrain_kind(top, k);
+        let height = self.column_height(face, i, j, level);
+        let kind = terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, height);
         let center = [center_half(i, level), center_half(j, level), center_half(k, level)];
-        apply(self.face_brushes(face, i, j, level).into_iter(), center, kind, 0)
+        apply(self.face_brushes(face, i, j, level).into_iter(), center, || self.grid.volume_point(face, i, j, k, level), kind, 0)
+    }
+    /// [`Self::kind`] for cells walked by a ray: the column's top and
+    /// brushes are looked up once per column, not per cell.
+    fn kind_in(&self, column: &mut Option<RayColumn>, cell: Cell) -> u32 {
+        let key = (cell.face, cell.i, cell.j);
+        if column.as_ref().is_none_or(|c| c.key != key) {
+            *column = Some(RayColumn {
+                key,
+                height: self.column_height(cell.face, cell.i, cell.j, 0),
+                brushes: self.face_brushes(cell.face, cell.i, cell.j, 0),
+            });
+        }
+        let c = column.as_ref().expect("filled above");
+        let kind = terrain::generated_kind(&self.grid, &*self.field, cell.face, cell.i, cell.j, cell.k, 0, c.height);
+        if c.brushes.is_empty() {
+            return kind;
+        }
+        let center = [center_half(cell.i, 0), center_half(cell.j, 0), center_half(cell.k, 0)];
+        apply(c.brushes.iter().copied(), center, || self.grid.volume_point(cell.face, cell.i, cell.j, cell.k, 0), kind, 0).0
+    }
+    /// Slope (eighths of a cell per cell) that classifies the materials of
+    /// base column (i, j), whatever level draws it: central differences of
+    /// level-4 heights two cells (3.2 m) each way, in base layers (as the
+    /// shader reads them from level-4 columns' relief).
+    ///
+    /// Block slopes of level-4 cells are interpolated between their centres
+    /// (in 32nds, truncated as the shader does).
+    pub fn material_slope(&self, face: u8, i: i32, j: i32) -> i32 {
+        const LEVEL: u32 = 4;
+        // Central differences two level-4 cells each way, in base layers
+        // (Q16 level-4 cells in the shader).
+        let block = |mi: i32, mj: i32| {
+            let top = |x: i32, y: i32| terrain::top_cells(&self.grid, self.column_height(face, x, y, LEVEL), 0);
+            let di = (top(mi + 2, mj) - top(mi - 2, mj)).abs();
+            let dj = (top(mi, mj + 2) - top(mi, mj - 2)).abs();
+            (di.max(dj) << (16 - LEVEL)) / 32_768
+        };
+        let (ri, rj) = (i * 2 + 1 - 16, j * 2 + 1 - 16);
+        let (ai, aj) = (ri >> 5, rj >> 5);
+        let (wi, wj) = (ri - (ai << 5), rj - (aj << 5));
+        ((32 - wi) * (32 - wj) * block(ai, aj) + wi * (32 - wj) * block(ai + 1, aj) + (32 - wi) * wj * block(ai, aj + 1) + wi * wj * block(ai + 1, aj + 1)) >> 10
     }
     /// Canonical kind at a base cell.
     pub fn kind(&self, cell: Cell) -> u32 {
@@ -216,14 +297,18 @@ impl Planet {
             0 => material::AIR,
             _ if material != 0 => material,
             _ => {
-                let top = self.column_top(cell.face, cell.i, cell.j, 0);
-                // Slope is measured inside the cell's 8x8 column block, which
-                // is exactly what the GPU shading pass has resident.
-                let (bi, bj) = (cell.i & !7, cell.j & !7);
-                let slope = terrain::block_slope(|x, y| self.column_top(cell.face, bi + x, bj + y, 0), cell.i & 7, cell.j & 7);
+                let slope = self.material_slope(cell.face, cell.i, cell.j);
                 let p = self.grid.domain_point(cell.face, cell.i, cell.j, 0);
-                let top_height = top * self.grid.layer_mm() as i32;
-                self.field.ground_material(p, top_height, top - 1 - cell.k, slope, cell.k) & material::ID
+                // Materials vary in 3D (`shade` samples the cell's volume
+                // point): a cliff's voxels are not one column's colour.
+                let q = self.grid.volume_point(cell.face, cell.i, cell.j, cell.k, 0);
+                let top_height = self.column_height(cell.face, cell.i, cell.j, 0);
+                // Depth counts from the generated top: overhangs and the
+                // rock around caves lie below it.
+                let generated = terrain::generated_top(&self.grid, &*self.field, cell.face, cell.i, cell.j, 0, top_height);
+                let depth = (generated - 1 - cell.k).max(0);
+                let surface = self.field.surface(p, self.grid.level_offset(), top_height) & 0xff;
+                self.field.ground_material(q, surface, top_height, depth, slope, cell.k) & material::ID
             }
         }
     }
@@ -259,12 +344,13 @@ impl Planet {
         let (mut cell, _) = grid.locate(origin + d * (t + eps));
         let mut previous = cell;
         let mut normal = -d;
+        let mut column = None;
         let n = grid.cells();
         for _ in 0..4_000_000 {
             if t > limit {
                 return None;
             }
-            if stop(self.kind(cell)) {
+            if stop(self.kind_in(&mut column, cell)) {
                 return Some(RayHit {
                     cell,
                     previous,
@@ -281,9 +367,13 @@ impl Planet {
                     let m = u * angle.cos() - fn_ * angle.sin();
                     let dm = d.dot(m);
                     // Leaving through the upper plane needs dm > 0, lower dm < 0.
+                    // That exit plane is never behind the ray: a crossing
+                    // rounded behind `t` (grazing planes, 6e6 m origins) is
+                    // taken now, not dropped (a dropped crossing left the
+                    // index stale for the rest of the ray).
                     if (dir == 1 && dm > 0.0) || (dir == -1 && dm < 0.0) {
                         let hit = -origin.dot(m) / dm;
-                        if hit > t - eps && hit < best {
+                        if hit < best {
                             best = hit;
                             step = (axis, dir, -m * f64::from(dir));
                         }
@@ -299,7 +389,9 @@ impl Planet {
             if disc_lo >= 0.0 {
                 let root = disc_lo.sqrt();
                 let enter = if b < 0.0 { c_lo / (-b + root) } else { -b - root };
-                if enter > t - eps && b + enter < 0.0 {
+                // Descending (before the perigee at -b): the lower layer
+                // crossing is the exit, wherever rounding puts it.
+                if b + t < 0.0 && b + enter < 0.0 {
                     radial = Some((enter, -1));
                 }
             }
@@ -389,12 +481,13 @@ impl Planet {
         let mut t = t0;
         let mut previous = cell_of(idx);
         let mut normal = -d;
+        let mut column = None;
         for _ in 0..4_000_000 {
             if t > t1 {
                 return None;
             }
             let cell = cell_of(idx);
-            if stop(self.kind(cell)) {
+            if stop(self.kind_in(&mut column, cell)) {
                 return Some(RayHit { cell, previous, distance: t, normal });
             }
             let axis = if next[0] <= next[1] && next[0] <= next[2] { 0 } else if next[1] <= next[2] { 1 } else { 2 };
@@ -416,13 +509,30 @@ impl Planet {
     /// A point `clearance` metres above the solid surface over `p` (a
     /// direction or any point above the ground point on a planet; any point
     /// on a plane).
+    ///
+    /// Walks the base column under `p` down from the highest layer that can
+    /// be solid there (its generated top, or the top of an Add brush over
+    /// it), with the column's brushes queried once: a few cells, not a ray
+    /// from the world's outer radius through the edit index cell by cell.
     pub fn surface_point(&self, p: DVec3, clearance: f64) -> DVec3 {
-        let up = self.grid.up(p);
-        let top = self.grid.at_radial(p, self.outer_radius() + 1.0);
-        match self.raycast(top, -up, f64::INFINITY) {
-            Some(hit) => top - up * (hit.distance - clearance),
-            None => self.grid.at_radial(p, self.grid.radius() + clearance),
+        let g = &self.grid;
+        let (cell, _) = g.locate(g.at_radial(p, g.radius()));
+        let (face, i, j) = (cell.face, cell.i, cell.j);
+        let height = self.column_height(face, i, j, 0);
+        let brushes = self.face_brushes(face, i, j, 0);
+        let added = brushes.iter().filter(|b| b.op() == 1).map(|b| b.k_hi.div_euclid(2) + 1).max().unwrap_or(i32::MIN);
+        let mut k = terrain::generated_top(g, &*self.field, face, i, j, 0, height).max(added);
+        let floor = ((self.inner_radius() - g.radius()) / g.voxel_size()).floor() as i32;
+        while k > floor {
+            let below = k - 1;
+            let kind = terrain::generated_kind(g, &*self.field, face, i, j, below, 0, height);
+            let center = [center_half(i, 0), center_half(j, 0), center_half(below, 0)];
+            if apply(brushes.iter().copied(), center, || g.volume_point(face, i, j, below, 0), kind, 0).0 == 1 {
+                break;
+            }
+            k = below;
         }
+        g.at_radial(p, g.layer_radius(f64::from(k)) + clearance)
     }
     /// Distance from `eye` to the nearest possible solid cell, conservative.
     pub fn air_clearance(&self, eye: DVec3) -> f64 {
@@ -433,7 +543,7 @@ impl Planet {
         }
         let (cell, _) = self.grid.locate(eye);
         let top = self.column_top(cell.face, cell.i, cell.j, 0);
-        (f64::from(cell.k - top) * self.grid.voxel_size()).max(0.0)
+        (f64::from(cell.k - top) * self.grid.voxel_size() - self.overhang_height()).max(0.0)
     }
     /// Height of `eye` above the generated ground directly below it (its
     /// column's top along the local vertical; edits are not considered).
@@ -441,7 +551,8 @@ impl Planet {
     /// all terrain: it is the altitude a camera or vehicle moves by.
     pub fn ground_height(&self, eye: DVec3) -> f64 {
         let (cell, _) = self.grid.locate(eye);
-        let top = self.column_top(cell.face, cell.i, cell.j, 0);
+        // The generated top: overhang lips and cave mouths included.
+        let top = terrain::generated_top(&self.grid, &*self.field, cell.face, cell.i, cell.j, 0, self.column_height(cell.face, cell.i, cell.j, 0));
         self.grid.height(eye) - f64::from(top) * self.grid.voxel_size()
     }
     /// Radial coordinate bounding the solid cells whose ground point lies
@@ -466,9 +577,11 @@ impl Planet {
         // Smallest ground width of a base cell (equal-angle cube cells
         // shrink to 1/sqrt(2) of the centre width towards face edges).
         let base = if g.is_plane() { g.voxel_size() } else { g.delta() * g.radius() * 0.7 };
-        // Coarsest level still resolving the region in a few cells.
+        // Coarsest level still resolving the region in a few cells. Field
+        // queries exist at any level, beyond the world's resident ones (a
+        // small plane has few): the region stays a few columns wide.
         let mut level = 0;
-        while level + 1 < g.levels() && base * f64::from(1u32 << (level + 1)) * 3.0 < radius {
+        while level + 1 < 24 && base * f64::from(1u32 << (level + 1)) * 3.0 < radius {
             level += 1;
         }
         let reach = (radius / (base * f64::from(1u32 << level))).ceil() as i32 + 1;
@@ -502,7 +615,7 @@ impl Planet {
                 heap.push((OrdF64(bound(l - 1, a * 2 + da, b * 2 + db)), l - 1, a * 2 + da, b * 2 + db));
             }
         };
-        let terrain = g.radius() + top + g.voxel_size() * 4.0;
+        let terrain = g.radius() + top + self.overhang_height() + g.voxel_size() * 4.0;
         terrain.max(self.edit_top + g.voxel_size()).min(global)
     }
 }
@@ -529,6 +642,13 @@ mod tests {
 
     fn planet() -> Planet {
         Planet::new(PlanetRecipe::default()).unwrap()
+    }
+
+    /// Earth without caves and overhangs: a pure heightfield, for
+    /// column-top invariants.
+    fn heightfield(recipe: PlanetRecipe) -> Planet {
+        let terrain = crate::layers::TerrainLayers::earth().heightfield().source(TerrainSource::default().seed);
+        Planet::new(PlanetRecipe { terrain, ..recipe }).unwrap()
     }
 
     /// Diagnostic: surface material shares of a mountain flank as each
@@ -577,7 +697,7 @@ mod tests {
                 Some((i, j)) => g.domain_point(2, i, j, 0),
                 None => g.domain_point(2, a, b, level),
             };
-            p.field().ground_material(q, (top << level) * g.layer_mm() as i32, 0, slope, (top - 1) << level)
+            p.field().ground_material(q, 0, (top << level) * g.layer_mm() as i32, 0, slope, (top - 1) << level)
         };
         let samples = 6000;
         let span = 40_000.0 / (g.delta() * g.radius());
@@ -636,7 +756,7 @@ mod tests {
 
     #[test]
     fn ground_height_is_altitude_above_the_column_below() {
-        let p = planet();
+        let p = heightfield(PlanetRecipe::default());
         for dir in [DVec3::new(0.1, 1.0, 0.2), DVec3::new(0.9, 0.4, -0.3), DVec3::new(-0.2, -0.7, 0.8)] {
             for h in [0.5, 12.0, 3000.0] {
                 let eye = p.surface_point(dir, h);
@@ -650,7 +770,7 @@ mod tests {
 
     #[test]
     fn terrain_bounds_hold_for_sampled_cells() {
-        let flat = TerrainSource { generator: crate::landform::FLAT_ID.into(), settings: r#"{"height_m": 3.3}"#.into(), ..Default::default() };
+        let flat = crate::layers::TerrainLayers::flat_at(3.3).source(7);
         for (terrain, voxel) in [(TerrainSource::default(), 0.1), (TerrainSource::default(), 0.3), (TerrainSource::default(), 1.0), (flat, 0.1)] {
             let p = Planet::new(PlanetRecipe { voxel_size_m: voxel, terrain: terrain.clone(), ..Default::default() }).unwrap();
             let worst = terrain::check_field(&p, 6_000).unwrap_or_else(|e| panic!("{} at {voxel} m: {e}", terrain.generator));
@@ -659,7 +779,7 @@ mod tests {
     }
 
     fn plane(shape: Shape) -> Planet {
-        Planet::new(PlanetRecipe { shape, plane_size_m: 3_000.0, ..Default::default() }).unwrap()
+        heightfield(PlanetRecipe { shape, plane_size_m: 3_000.0, ..Default::default() })
     }
 
     #[test]
@@ -693,9 +813,21 @@ mod tests {
         }
     }
 
+    /// A point placed above the ground reads that height, wherever the
+    /// ground is (overhang lips and cave mouths included).
+    #[test]
+    fn ground_height_is_height_above_the_generated_ground() {
+        let p = planet();
+        for dir in [DVec3::Y, DVec3::new(0.3, 1.0, -0.2), DVec3::new(-0.7, 0.2, 0.68), DVec3::new(0.1, -0.4, 0.9)] {
+            let eye = p.surface_point(dir.normalize(), 2.0);
+            let h = p.ground_height(eye);
+            assert!((h - 2.0).abs() < 0.2, "{dir}: {h}");
+        }
+    }
+
     #[test]
     fn raycast_down_hits_the_column_top() {
-        let p = planet();
+        let p = heightfield(PlanetRecipe::default());
         let g = *p.grid();
         for &(face, fi, fj) in &[(4u8, 0.31, 0.62), (0, 0.9, 0.1), (3, 0.5, 0.5)] {
             let i = (f64::from(g.cells()) * fi) as i32;
@@ -749,6 +881,47 @@ mod tests {
 mod scaling {
     use super::*;
     use crate::edits::{BrushOp, BrushShape};
+
+    /// Cost of what sculpting does per stamp, as edits pile up in one area
+    /// (editor strokes): copy the world, apply a stamp, cast the editor's
+    /// aim ray, find the ground. Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn sculpt_query_costs() {
+        let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+        let ground = planet.surface_point(DVec3::new(0.3, 1.0, 0.2), 0.0);
+        let up = ground.normalize();
+        let side = up.any_orthonormal_vector();
+        let ahead = up.cross(side);
+        let eye = ground + up * 8.0;
+        let time = |f: &mut dyn FnMut()| {
+            let t = std::time::Instant::now();
+            for _ in 0..20 {
+                f();
+            }
+            t.elapsed().as_secs_f64() * 1000.0 / 20.0
+        };
+        let mut stamp = 0usize;
+        for target in [0usize, 100, 400, 1000, 2000] {
+            while stamp < target {
+                let angle = stamp as f64 * 0.6 / 6.0;
+                let p = ground + (side * angle.cos() + ahead * angle.sin()) * 6.0;
+                planet.apply(Brush { center: (p - up * 0.3).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+                stamp += 1;
+            }
+            let aim = (ground + side * 6.0 - eye).normalize();
+            let clone = time(&mut || { std::hint::black_box(planet.clone()); });
+            let mut copy = planet.clone();
+            let apply = time(&mut || {
+                copy.apply(Brush { center: (ground - up * 0.3).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+            });
+            let raycast = time(&mut || { std::hint::black_box(planet.raycast(eye, aim, 200.0)); });
+            let surface = time(&mut || { std::hint::black_box(planet.surface_point(ground + side * 6.0, 0.0)); });
+            let (cell, _) = planet.grid().locate(ground + side * 6.0 - up * 0.5);
+            let solid = time(&mut || { std::hint::black_box(planet.solid(cell)); });
+            eprintln!("SCULPT_COST {stamp:5} edits: clone {clone:.3} ms, apply {apply:.3} ms, aim raycast {raycast:.3} ms, surface_point {surface:.3} ms, solid {solid:.4} ms");
+        }
+    }
 
     /// Cost of copying a world with many edits (what a shared world pays per
     /// appended edit). Run with `--ignored --nocapture`.

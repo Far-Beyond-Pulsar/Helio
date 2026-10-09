@@ -14,6 +14,8 @@ pub struct WindowRequest {
     pub eye: DVec3,
     /// Level-0 range (metres).
     pub lod0: f64,
+    /// Relative width of the traversal's stochastic level transition.
+    pub lod_dither: f64,
     /// Radius bounding every solid cell.
     pub outer_radius: f64,
     /// The world, for local terrain bounds (none: the global bound only).
@@ -55,10 +57,31 @@ struct LevelState {
 pub struct WindowPlanner {
     grid: Grid,
     levels: Vec<LevelState>,
+    lod_dither: Option<f64>,
 }
 
 fn pack(k0: u32, k1: u32) -> u64 {
     u64::from(k0) | (u64::from(k1) << 32)
+}
+
+/// The same finite selection range is used by tracing and window planning.
+pub(crate) fn sanitize_lod_dither(value: f64) -> f64 {
+    if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.25 }
+}
+
+/// Whether the column nearest a plane window's centre inside block
+/// `[x0, x1] x [y0, y1]` (clipped to the scan bounds) is within `limit`.
+#[allow(clippy::too_many_arguments)]
+fn plane_block_in_circle(ci: f64, cj: f64, x0: i32, x1: i32, y0: i32, y1: i32,
+    lo_i: i32, hi_i: i32, lo_j: i32, hi_j: i32, limit: f64) -> bool {
+    if x0.max(lo_i) > x1.min(hi_i) || y0.max(lo_j) > y1.min(hi_j) { return false; }
+    let x = (ci.floor() as i32).clamp(x0.max(lo_i), x1.min(hi_i));
+    let y = (cj.floor() as i32).clamp(y0.max(lo_j), y1.min(hi_j));
+    (f64::from(x) + 0.5 - ci).hypot(f64::from(y) + 0.5 - cj) <= limit
+}
+
+fn column_in_circle(dn: f64, da: f64, db: f64, ta: f64, tb: f64, cos_limit: f64) -> bool {
+    (dn + ta * da + tb * db) / (1.0 + ta * ta + tb * tb).sqrt() >= cos_limit
 }
 
 impl WindowPlanner {
@@ -66,6 +89,7 @@ impl WindowPlanner {
         Self {
             grid,
             levels: (0..grid.levels()).map(|_| LevelState::default()).collect(),
+            lod_dither: None,
         }
     }
 
@@ -84,11 +108,22 @@ impl WindowPlanner {
         let hi_j = ((cj + reach).ceil() as i32).min(cols - 1);
         let limit = radius / col + 0.75;
         let mut out = Vec::new();
-        for y in lo_j..=hi_j {
-            for x in lo_i..=hi_i {
-                let d = (f64::from(x) + 0.5 - ci).hypot(f64::from(y) + 0.5 - cj);
-                if d <= limit {
-                    out.push(((d / limit.max(1e-12)) as f32, pack(key0(PLANE_FACE, level, x), y as u32)));
+        if lo_i > hi_i || lo_j > hi_j { return out; }
+        // Traversal admits complete tier-1 blocks. Expand only blocks that
+        // intersect the original column-centre circle: partial boundary
+        // blocks would otherwise stay unusable even after settling.
+        for bj in lo_j / 4..=hi_j / 4 {
+            let (y0, y1) = (bj * 4, (bj * 4 + 3).min(cols - 1));
+            for bi in lo_i / 4..=hi_i / 4 {
+                let (x0, x1) = (bi * 4, (bi * 4 + 3).min(cols - 1));
+                if !plane_block_in_circle(ci, cj, x0, x1, y0, y1, lo_i, hi_i, lo_j, hi_j, limit) { continue; }
+                // One priority per block also keeps admission grouped.
+                let priority = ((f64::from(x0 + x1 + 1) * 0.5 - ci)
+                    .hypot(f64::from(y0 + y1 + 1) * 0.5 - cj) / limit.max(1e-12)) as f32;
+                for y in y0..=y1 {
+                    for x in x0..=x1 {
+                        out.push((priority, pack(key0(PLANE_FACE, level, x), y as u32)));
+                    }
                 }
             }
         }
@@ -129,20 +164,44 @@ impl WindowPlanner {
             if lo_i > hi_i || lo_j > hi_j {
                 continue;
             }
-            let tan_i: Vec<f64> = (lo_i..=hi_i)
+            let block_lo_i = lo_i & !3;
+            let block_hi_i = (hi_i | 3).min(cols - 1);
+            let block_lo_j = lo_j & !3;
+            let block_hi_j = (hi_j | 3).min(cols - 1);
+            let tan_i: Vec<f64> = (block_lo_i..=block_hi_i)
+                .map(|c| grid.angle((f64::from(c) + 0.5) * f64::from(col_cells)).tan())
+                .collect();
+            let tan_j: Vec<f64> = (block_lo_j..=block_hi_j)
                 .map(|c| grid.angle((f64::from(c) + 0.5) * f64::from(col_cells)).tan())
                 .collect();
             let (da, db) = (dir.dot(a), dir.dot(b));
-            for cj in lo_j..=hi_j {
-                let tb = grid.angle((f64::from(cj) + 0.5) * f64::from(col_cells)).tan();
-                for (x, &ta) in tan_i.iter().enumerate() {
-                    let cos = (dn + ta * da + tb * db) / (1.0 + ta * ta + tb * tb).sqrt();
-                    if cos < cos_limit {
-                        continue;
+            // Whole tier-1 blocks, as on a plane: every block with a column
+            // centre inside the circle is wanted complete.
+            for bj in lo_j / 4..=hi_j / 4 {
+                let (y0, y1) = (bj * 4, (bj * 4 + 3).min(cols - 1));
+                for bi in lo_i / 4..=hi_i / 4 {
+                    let (x0, x1) = (bi * 4, (bi * 4 + 3).min(cols - 1));
+                    let mut intersects = false;
+                    'columns: for y in y0.max(lo_j)..=y1.min(hi_j) {
+                        let tb = tan_j[(y - block_lo_j) as usize];
+                        for x in x0.max(lo_i)..=x1.min(hi_i) {
+                            let ta = tan_i[(x - block_lo_i) as usize];
+                            if column_in_circle(dn, da, db, ta, tb, cos_limit) {
+                                intersects = true;
+                                break 'columns;
+                            }
+                        }
                     }
-                    let angle = cos.clamp(-1.0, 1.0).acos();
-                    let key = pack(key0(face, level, lo_i + x as i32), cj as u32);
-                    out.push(((angle / theta.max(1e-12)) as f32, key));
+                    if !intersects { continue; }
+                    let ta = grid.angle(f64::from(x0 + x1 + 1) * 0.5 * f64::from(col_cells)).tan();
+                    let tb = grid.angle(f64::from(y0 + y1 + 1) * 0.5 * f64::from(col_cells)).tan();
+                    let cos = (dn + ta * da + tb * db) / (1.0 + ta * ta + tb * tb).sqrt();
+                    let priority = (cos.clamp(-1.0, 1.0).acos() / theta.max(1e-12)) as f32;
+                    for y in y0..=y1 {
+                        for x in x0..=x1 {
+                            out.push((priority, pack(key0(face, level, x), y as u32)));
+                        }
+                    }
                 }
             }
         }
@@ -188,8 +247,14 @@ impl WindowPlanner {
         let eye = request.eye;
         // Window centre: the eye direction on a sphere, its ground point on a plane.
         let dir = if grid.is_plane() { DVec3::new(eye.x, 0.0, eye.z) } else { eye.normalize() };
-        let height = (grid.radial(eye) - r0).max(0.0);
-        let peak = request.outer_radius - r0;
+        let dither = sanitize_lod_dither(request.lod_dither);
+        // A dither change moves every level's reach: rescan all of them.
+        let dither_changed = self.lod_dither != Some(dither);
+        self.lod_dither = Some(dither);
+        // Below-datum terrain still has a horizon. Use the datum sphere as
+        // the conservative radius, with nonnegative clearance and peak.
+        let height = (grid.radial(eye) - r0.min(request.outer_radius)).max(0.0);
+        let peak = (request.outer_radius - r0).max(0.0);
         // Farthest terrain that can rise above the horizon (none on a plane).
         let horizon = if grid.is_plane() {
             f64::INFINITY
@@ -202,8 +267,16 @@ impl WindowPlanner {
             ..Default::default()
         };
         for level in 0..grid.levels() {
-            let reach = request.lod0 * f64::from(1u32 << level) * 1.05;
-            let inner = if level == 0 { 0.0 } else { request.lod0 * f64::from(1u32 << (level - 1)) };
+            let nominal = request.lod0 * f64::from(1u32 << level);
+            // Traversal selects levels at t * (1 + d * (hash - 0.5)): a level
+            // can be chosen out to nominal / (1 - d/2), and the next one can
+            // start correspondingly early. A window ending at 1.05x nominal
+            // left the dithered outer band to fall back to coarser levels.
+            let selected_reach = nominal / (1.0 - dither * 0.5);
+            let reach = (nominal * 1.05).max(selected_reach);
+            let inner = if level == 0 { 0.0 } else {
+                request.lod0 * f64::from(1u32 << (level - 1)) / (1.0 + dither * 0.5)
+            };
             // Height over the highest terrain the level's window can hold:
             // over a meadow far below, fine levels are not needed at all.
             let altitude = grid.radial(eye) - self.local_outer(request, level, reach);
@@ -226,14 +299,24 @@ impl WindowPlanner {
             let col = grid.level_size(level) * f64::from(BRICK);
             // The direct-mapped summary tables bound the window diameter.
             let cap = col * f64::from(max_window_columns() / 2 - 2) * 0.8;
+            // Recentring tolerates a three-column displacement (on a sphere a
+            // chord: converted to a conservative arc). The scan admits centres
+            // 0.75 columns further out and whole blocks; the slack covers the
+            // rest of the centre hysteresis.
+            let drift = if grid.is_plane() { col * 3.0 } else {
+                2.0 * r0 * (col * 3.0 / (2.0 * r0)).min(1.0).asin()
+            };
+            let tangential_col = grid.delta() * f64::from(BRICK << level) * if grid.is_plane() { 1.0 } else { r0 };
+            let slack = tangential_col * 0.25 + col * 0.25;
+            let pad = (col * 2.0).max(drift + slack - (reach - selected_reach));
             let radius = if level == top_level {
                 // The coarsest level covers the whole world.
                 if grid.is_plane() { f64::from(grid.cells()) * grid.voxel_size() * 1.5 } else { r0 * 4.0 }
             } else {
-                ((reach * reach - altitude.max(0.0).powi(2)).max(0.0).sqrt().min(horizon) + col * 2.0).min(cap)
+                ((reach * reach - altitude.max(0.0).powi(2)).max(0.0).sqrt().min(horizon) + pad).min(cap)
             };
             let moved = if grid.is_plane() { state.center.distance(dir) } else { state.center.distance(dir) * r0 };
-            if state.active && moved <= col * 3.0 && (radius - state.radius).abs() <= state.radius * 0.08 + col {
+            if state.active && !dither_changed && moved <= col * 3.0 && (radius - state.radius).abs() <= state.radius * 0.08 + col {
                 continue;
             }
             let scanned = self.scan(level, dir, radius);
@@ -311,6 +394,47 @@ impl Drop for WindowWorker {
         self.requests = None;
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planet::{Planet, PlanetRecipe};
+
+    /// Traversal uses a level only inside complete 4x4-column blocks, so
+    /// every wanted column brings its whole block (clipped to the face).
+    fn assert_complete_blocks(grid: Grid, update: &WindowUpdate) {
+        for diff in &update.levels {
+            let wanted: FxHashSet<u64> = diff.adds.iter().map(|(_, key)| *key).collect();
+            assert_eq!(wanted.len(), diff.adds.len(), "a column must be wanted once");
+            for &key in &wanted {
+                let k0 = key as u32;
+                let (face, level, i, j) = (((k0 >> 24) & 7) as u8, k0 >> 27, (k0 & 0xff_ffff) as i32, (key >> 32) as i32);
+                let cols = grid.cells() / (BRICK << level);
+                for y in (j & !3)..=((j | 3).min(cols - 1)) {
+                    for x in (i & !3)..=((i | 3).min(cols - 1)) {
+                        assert!(wanted.contains(&pack(key0(face, level, x), y as u32)),
+                            "L{level} column ({i},{j}) wanted without ({x},{y}) of its block");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn windows_want_complete_blocks_on_spheres_and_planes() {
+        for recipe in [PlanetRecipe::default(), PlanetRecipe { shape: crate::grid::Shape::Plane, plane_size_m: 3_000.0, ..Default::default() }] {
+            let planet = std::sync::Arc::new(Planet::new(recipe).unwrap());
+            let grid = *planet.grid();
+            let ground = planet.surface_point(grid.direction(2, 3e7, 4e7), 1.8);
+            let ground = if grid.is_plane() { planet.surface_point(DVec3::new(37.3, 0.0, -81.9), 1.8) } else { ground };
+            for (eye, lod0) in [(ground, 9.0), (ground + grid.up(ground) * 400.0, 31.0)] {
+                let request = WindowRequest { eye, lod0, lod_dither: 0.25, outer_radius: planet.outer_radius(), planet: Some(planet.clone()), serial: 1 };
+                let mut fresh = WindowPlanner::new(grid);
+                assert_complete_blocks(grid, &fresh.update(&request));
+            }
         }
     }
 }

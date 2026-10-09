@@ -8,6 +8,7 @@ use crate::edits::FaceBrush;
 use crate::grid::{Grid, BRICK};
 use crate::windows::{LevelDiff, WindowPlanner, WindowRequest, WindowUpdate, WindowWorker};
 use std::collections::VecDeque;
+use std::sync::mpsc;
 use crate::planet::Planet;
 use bytemuck::{Pod, Zeroable};
 use glam::DVec3;
@@ -30,10 +31,18 @@ pub struct Capacity {
 impl Default for Capacity {
     fn default() -> Self {
         Self {
-            table_bits: 22,
+            // 8M slots: probe runs stay far below the GPU's 64-slot limit at
+            // the record cap (at 4M slots and 2.5M+ columns they exceeded it,
+            // hiding columns from the traversal).
+            table_bits: 23,
             records: 3_000_000,
-            pool_units: 4 << 20,
-            scratch_units: 1 << 18,
+            // 512 MB. A 2560x1440 ground view used 99% of 4M units without
+            // caves (1.65M columns; coarse relief columns take 3 units), and
+            // cave walls are mixed bricks.
+            pool_units: 8 << 20,
+            // Every band brick of a frame's jobs before compaction: a cave
+            // column holds ~150 bricks at level 0 (a heightfield column 2-4).
+            scratch_units: 1 << 20,
             edit_words: 4 << 20,
             max_jobs: 16_384,
             max_evictions: 262_144,
@@ -55,6 +64,14 @@ pub struct Job {
 /// First key word of a level column: its (never negative) column index in
 /// 24 bits, the face and the level. 2^24 columns cover a 0.1 m Earth face
 /// (1.25e7 columns) and an infinite plane (2^24).
+/// Readback status of a column published with a band clipped to the window
+/// around the eye (`STATUS_CLIPPED` in generate.wgsl); its word is the
+/// window centre in level cells.
+pub const STATUS_CLIPPED: u32 = 5;
+/// Level cells the eye may move vertically before a clipped band is
+/// regenerated: a quarter of its 256-brick window.
+const CLIP_SLACK: i64 = 256 * 8 / 4;
+
 pub fn key0(face: u8, level: u32, ci: i32) -> u32 {
     debug_assert!((0..1 << 24).contains(&ci), "column index {ci} outside 24 bits");
     (ci as u32 & 0xff_ffff) | (u32::from(face) << 24) | (level << 27)
@@ -175,6 +192,17 @@ impl PendingQueue {
         self.at.clear();
         self.lowest = self.buckets.len();
     }
+    /// Move a queued column to `bucket` (no-op if it is not queued).
+    fn set_bucket(&mut self, key: u64, bucket: usize) {
+        if self.at.get(&key).is_some_and(|(b, _)| usize::from(*b) != bucket) {
+            self.remove(key);
+            self.insert(key, bucket);
+        }
+    }
+    /// Every queued column, nearest bucket first.
+    fn snapshot(&self) -> Vec<u64> {
+        self.buckets.iter().flatten().copied().collect()
+    }
 }
 
 #[derive(Default)]
@@ -186,6 +214,10 @@ struct Level {
     radius: f64,
     /// Wanted but not yet issued columns.
     pending: PendingQueue,
+    /// Eye ground point the pending priorities are ranked against, and the
+    /// queued columns still to be re-ranked against it.
+    ranked_at: Option<DVec3>,
+    rerank: Vec<u64>,
 }
 
 enum Planner {
@@ -221,19 +253,140 @@ impl EditHeap {
     }
 }
 
+/// Generation work one frame may issue: predicted GPU work ([`job_units`])
+/// and a cap on the job count (the job and readback buffers).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JobBudget {
+    pub units: f64,
+    pub jobs: usize,
+}
+
+impl JobBudget {
+    /// Up to `jobs` jobs, whatever their work.
+    pub fn jobs(jobs: usize) -> Self {
+        Self { units: f64::INFINITY, jobs }
+    }
+    fn allows(&self, work: &FrameWork) -> bool {
+        work.units < self.units && work.jobs.len() < self.jobs
+    }
+}
+
+/// GPU generation work of one level cell a column's lanes evaluate through
+/// the volume (caves, overhangs), in heightfield columns. Fitted on a
+/// mountain flight (2,875 frames, generate GPU time against the jobs and
+/// their volume cells): 0.70 us a heightfield column, 0.060 us a cell.
+pub const UNITS_PER_VOLUME_CELL: f64 = 0.085;
+
+/// Predicted GPU work of generating column `key`, in heightfield columns:
+/// one, plus the volume cells its lanes evaluate (the field's extent at the
+/// column's centre; `terrain_extent` in WGSL). A cave or overhang column at
+/// a fine level evaluates hundreds of cells a lane and costs tens of times a
+/// heightfield column: counting jobs alone let such runs take 100+ ms.
+pub fn job_units(planet: &Planet, key: u64) -> f64 {
+    let (face, level, ci, cj) = unpack(key);
+    let half = BRICK as i32 / 2;
+    let p = planet.grid().domain_point(face, ci * BRICK as i32 + half, cj * BRICK as i32 + half, level);
+    let (below, above) = planet.field().extent(p, level);
+    1.0 + f64::from(below.max(0) + above.max(0)) * UNITS_PER_VOLUME_CELL
+}
+
 /// Work produced for one frame.
 #[derive(Default)]
 pub struct FrameWork {
     pub jobs: Vec<Job>,
-    pub job_keys: Vec<u64>,
+    /// Predicted GPU work of the jobs ([`job_units`]).
+    pub units: f64,
     pub evictions: Vec<u32>,
+    /// Column table patches `(slot, record)`. The GPU applies them in
+    /// parallel, so `plan` returns each slot once with its final value
+    /// (backward-shift deletion rewrites a slot several times per frame; an
+    /// earlier value winning left an empty slot inside a probe run).
     pub table_writes: Vec<(u32, u32)>,
     pub edit_writes: Vec<(u32, Vec<u32>)>,
     pub brush_writes: Vec<(u32, FaceBrush)>,
-    /// Summary block table writes `(slot, bi, bj)` in order; `bi = -1`
-    /// releases a slot.
+    /// Summary block table writes `(slot, bi, bj)`, each slot once with its
+    /// final state; `bi = -1` releases a slot.
     pub block_inits: Vec<(u32, i32, i32)>,
-    pub full_table: bool,
+}
+
+impl FrameWork {
+    /// Reduce the patch lists to one final write per slot (see the fields).
+    fn finish(&mut self, table: &[u32]) {
+        let mut sent = rustc_hash::FxHashSet::default();
+        self.table_writes.retain(|(slot, _)| sent.insert(*slot));
+        for (slot, value) in &mut self.table_writes {
+            *value = table[*slot as usize];
+        }
+        let mut last = FxHashMap::default();
+        for (index, (slot, _, _)) in self.block_inits.iter().enumerate() {
+            last.insert(*slot, index);
+        }
+        let mut index = 0;
+        self.block_inits.retain(|(slot, _, _)| {
+            index += 1;
+            last[slot] == index - 1
+        });
+    }
+}
+
+/// What [`Residency::fallback_distances`] needs, detached from the residency
+/// so the render thread can evaluate it for any eye while the residency
+/// worker plans the next frame.
+#[derive(Clone)]
+pub struct Coverage {
+    grid: Grid,
+    levels: Vec<LevelCoverage>,
+}
+
+#[derive(Clone, Default)]
+struct LevelCoverage {
+    /// No guaranteed coverage (inactive, catching up, urgent regenerations
+    /// or too many pending columns to list).
+    none: bool,
+    center: DVec3,
+    /// Window radius less 1.5 columns (metres).
+    reach: f64,
+    /// Column ground width (metres).
+    col: f64,
+    /// Ground points of the pending columns.
+    pending: Vec<DVec3>,
+}
+
+impl Coverage {
+    /// No level has guaranteed coverage (before the first plan).
+    pub fn none(grid: Grid) -> Self {
+        let level = LevelCoverage { none: true, ..Default::default() };
+        Self { grid, levels: vec![level; grid.levels() as usize] }
+    }
+
+    /// See [`Residency::fallback_distances`].
+    pub fn fallback_distances(&self, eye: DVec3) -> Vec<f64> {
+        let grid = self.grid;
+        let ground = if grid.is_plane() { DVec3::new(eye.x, 0.0, eye.z) } else { eye.normalize() };
+        self.levels
+            .iter()
+            .map(|l| {
+                if l.none {
+                    return 0.0;
+                }
+                let mut distance = l.reach - grid.ground_distance(l.center, ground);
+                for p in &l.pending {
+                    // Traversal uses only complete 4x4-column blocks while a
+                    // level streams in: a pending column makes its whole
+                    // block (within its diagonal, 5.7 columns) fall back.
+                    distance = distance.min(grid.ground_distance(*p, eye) - l.col * 6.0);
+                }
+                distance.max(0.0)
+            })
+            .collect()
+    }
+}
+
+/// Ground point of a column's centre.
+fn column_ground(grid: &Grid, key: u64) -> DVec3 {
+    let (face, level, ci, cj) = unpack(key);
+    let size = f64::from(BRICK << level);
+    grid.ground_point(face, (f64::from(ci) + 0.5) * size, (f64::from(cj) + 0.5) * size)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -245,6 +398,10 @@ pub struct Stats {
     pub jobs: usize,
     pub evictions: usize,
     pub requeued: usize,
+    /// Columns skipped because the GPU lookup could not reach their slot.
+    pub table_refused: usize,
+    /// Pending columns re-ranked against a moved eye (cumulative).
+    pub reranked: usize,
     pub window_rebuild_ms: f64,
     pub edit_words: u32,
     pub table_load: f32,
@@ -276,6 +433,9 @@ pub struct Residency {
     synced_hash: Vec<u64>,
     next_brush: u32,
     urgent: Vec<u64>,
+    /// Resident columns whose band is clipped to a window around the eye's
+    /// layer, with the window centre (level cells).
+    clipped: FxHashMap<u64, i32>,
     pub stats: Stats,
     frame: u32,
     planner: Planner,
@@ -291,6 +451,8 @@ pub struct Residency {
     /// CPU time per `plan` for applying diffs and admitting columns; `None`
     /// is unbounded (deterministic, for tests).
     cpu_budget: Option<std::time::Duration>,
+    /// Traversal level-transition dither (see `set_lod_dither`).
+    lod_dither: f64,
 }
 
 /// A window diff being applied: removes first, then (for a level switched
@@ -335,6 +497,7 @@ impl Residency {
             synced_hash: Vec::new(),
             next_brush: 0,
             urgent: Vec::new(),
+            clipped: FxHashMap::default(),
             stats: Stats::default(),
             frame: 0,
             planner,
@@ -344,6 +507,7 @@ impl Residency {
             diffs: VecDeque::new(),
             catching_up: vec![0; grid.levels() as usize],
             cpu_budget: None,
+            lod_dither: 0.25,
         }
     }
 
@@ -421,8 +585,10 @@ impl Residency {
             self.synced.push(resolved.brush);
             self.synced_hash.push(resolved.prefix);
         }
+        // Large footprints scan the residents instead of their rectangles.
+        let mut scans: Vec<(u8, u32, i64, i64, i64, i64)> = Vec::new();
         for fb in touched {
-            let r_cells = i64::from(fb.radius_half) / 2 + 1;
+            let r_cells = fb.extent_cells();
             let ci = i64::from(fb.center[0]) / 2;
             let cj = i64::from(fb.center[1]) / 2;
             for level in 0..self.grid.levels() {
@@ -430,9 +596,16 @@ impl Residency {
                     continue;
                 }
                 let col = i64::from(BRICK) << level;
-                let (i0, i1) = ((ci - r_cells).div_euclid(col), (ci + r_cells).div_euclid(col));
-                let (j0, j1) = ((cj - r_cells).div_euclid(col), (cj + r_cells).div_euclid(col));
+                // A brush reaching past its face's edge (a planet-scale ball
+                // is resolved on every face) touches only that face's columns.
+                let last = i64::from(self.grid.cells()) / col - 1;
+                let (i0, i1) = ((ci - r_cells).div_euclid(col).max(0), (ci + r_cells).div_euclid(col).min(last));
+                let (j0, j1) = ((cj - r_cells).div_euclid(col).max(0), (cj + r_cells).div_euclid(col).min(last));
+                if i0 > i1 || j0 > j1 {
+                    continue;
+                }
                 if (i1 - i0 + 1) * (j1 - j0 + 1) > 1 << 16 {
+                    scans.push((fb.face(), level, i0, i1, j0, j1));
                     continue;
                 }
                 for a in i0..=i1 {
@@ -442,6 +615,15 @@ impl Residency {
                             self.urgent.push(key);
                         }
                     }
+                }
+            }
+        }
+        if !scans.is_empty() {
+            for (key, _) in self.residents.iter() {
+                let (face, level, ci, cj) = unpack(key);
+                let (ci, cj) = (i64::from(ci), i64::from(cj));
+                if scans.iter().any(|&(f, l, i0, i1, j0, j1)| f == face && l == level && (i0..=i1).contains(&ci) && (j0..=j1).contains(&cj)) {
+                    self.urgent.push(key);
                 }
             }
         }
@@ -530,6 +712,7 @@ impl Residency {
             Some(false) => self.block_conflicts -= 1,
             None => {}
         }
+        self.clipped.remove(&key);
         if let Some(res) = self.residents.remove(key, &mut work.table_writes) {
             work.evictions.push(res.record);
             self.delayed_records.push(res.record);
@@ -545,15 +728,27 @@ impl Residency {
         self.cpu_budget = budget;
     }
 
+    /// Width of the traversal's stochastic level transition; windows cover
+    /// the whole band in which a level can be selected.
+    pub fn set_lod_dither(&mut self, dither: f64) {
+        self.lod_dither = dither;
+    }
+
     /// Queue a window diff; [`Self::apply_queued`] applies it in order.
     fn apply(&mut self, update: WindowUpdate) {
         for diff in update.levels {
             let level = diff.level as usize;
             // The window metadata changes at once; the level is marked as
             // catching up (no guaranteed coverage) until its ops are done.
-            self.levels[level].active = diff.active;
-            self.levels[level].center = diff.center;
-            self.levels[level].radius = diff.radius;
+            let l = &mut self.levels[level];
+            l.active = diff.active;
+            l.center = diff.center;
+            l.radius = diff.radius;
+            // The planner ranks adds by distance from the window centre (the
+            // eye's ground point when it planned).
+            if l.pending.is_empty() && l.rerank.is_empty() {
+                l.ranked_at = Some(diff.center);
+            }
             self.catching_up[level] += 1;
             self.diffs.push_back(QueuedDiff { diff, removed: 0, cleared: false, added: 0 });
         }
@@ -582,7 +777,10 @@ impl Residency {
                 }
             }
             if !queued.diff.active && !queued.cleared {
-                self.levels[level].pending.clear();
+                let l = &mut self.levels[level];
+                l.pending.clear();
+                l.rerank.clear();
+                l.ranked_at = None;
                 queued.cleared = true;
             }
             while queued.added < queued.diff.adds.len() {
@@ -603,9 +801,50 @@ impl Residency {
         }
     }
 
-    /// Plan one frame. `lod0` is the level-0 distance, `budget` the maximum
-    /// number of column jobs.
-    pub fn plan(&mut self, planet: &std::sync::Arc<Planet>, eye: DVec3, lod0: f64, budget: usize) -> FrameWork {
+    /// Re-rank pending columns against the current eye. Priorities are set
+    /// when a window is planned; once admission lags (fast flight at high
+    /// resolution) the eye moves on and columns it now flies over still wait
+    /// behind ones it has left. When the eye has moved 1/16 of a level's
+    /// radius from where its queue was ranked, every queued column is
+    /// re-bucketed by its distance from the eye, a bounded number per frame
+    /// (farthest-ranked first: the leading edge of the window).
+    fn rerank(&mut self, eye: DVec3, out_of_time: &impl Fn() -> bool) {
+        const PER_FRAME: usize = 32_768;
+        let grid = self.grid;
+        let ground = if grid.is_plane() { DVec3::new(eye.x, 0.0, eye.z) } else { eye.normalize() };
+        let mut done = 0;
+        for l in &mut self.levels {
+            if !l.active || l.radius <= 0.0 {
+                continue;
+            }
+            // Normalized like the planner's priorities (the angular radius
+            // is capped at pi on a sphere).
+            let radius = if grid.is_plane() { l.radius } else { l.radius.min(std::f64::consts::PI * grid.radius()) };
+            if l.rerank.is_empty() {
+                let drift = l.ranked_at.map_or(f64::INFINITY, |at| grid.ground_distance(at, ground));
+                if l.pending.len() < 64 || drift < radius / 16.0 {
+                    continue;
+                }
+                l.rerank = l.pending.snapshot();
+                l.ranked_at = Some(ground);
+            }
+            let ranked_at = l.ranked_at.unwrap_or(ground);
+            while let Some(key) = l.rerank.pop() {
+                let distance = grid.ground_distance(column_ground(&grid, key), ranked_at);
+                l.pending.set_bucket(key, PendingQueue::bucket((distance / radius) as f32));
+                done += 1;
+                if done % 256 == 0 && (done >= PER_FRAME || out_of_time()) {
+                    self.stats.reranked += done;
+                    return;
+                }
+            }
+        }
+        self.stats.reranked += done;
+    }
+
+    /// Plan one frame. `lod0` is the level-0 distance, `budget` the work and
+    /// jobs it may issue.
+    pub fn plan(&mut self, planet: &std::sync::Arc<Planet>, eye: DVec3, lod0: f64, budget: JobBudget) -> FrameWork {
         self.frame = self.frame.wrapping_add(1);
         let started = std::time::Instant::now();
         let budget_time = self.cpu_budget;
@@ -615,12 +854,14 @@ impl Residency {
         let delayed = std::mem::take(&mut self.delayed_records);
         self.free_records.extend(delayed);
         self.sync_edits(planet, &mut work);
+        self.follow_clipped(eye);
         let t_edits = started.elapsed();
         // Ask the planner for new windows when the view changed, then apply
         // every diff that is ready (the worker always plans the latest view).
         let request = WindowRequest {
             eye,
             lod0,
+            lod_dither: self.lod_dither,
             outer_radius: planet.outer_radius(),
             planet: Some(planet.clone()),
             serial: self.requested + 1,
@@ -628,9 +869,18 @@ impl Residency {
         let changed = self.last_request.as_ref().is_none_or(|last| {
             last.eye.distance(eye) > self.grid.voxel_size() * 2.0
                 || (last.lod0 - lod0).abs() > lod0 * 0.01
+                || last.lod_dither != request.lod_dither
                 || last.outer_radius != request.outer_radius
         });
-        if changed {
+        // Coalesce: no new plan while the last one is outstanding or its
+        // diffs are still being applied. The planner diffs against the last
+        // window it sent, so the next diff spans all motion since then. A
+        // request per moved frame queued every intermediate window instead;
+        // at speed (and at high resolution, with ~4x larger diffs) the queue
+        // grew without bound (1000+ level diffs, evictions and admission
+        // lagging further every frame: refinement stopped).
+        let ready = self.applied == self.requested && self.diffs.len() < self.levels.len();
+        if changed && ready {
             self.requested = request.serial;
             self.last_request = Some(request.clone());
             match &mut self.planner {
@@ -656,6 +906,7 @@ impl Residency {
         let share = if self.levels.iter().all(|l| l.pending.is_empty()) { 1.0 } else { 0.6 };
         let apply_out_of_time = move || budget_time.is_some_and(|b| started.elapsed() >= b.mul_f64(share));
         self.apply_queued(&mut work, &apply_out_of_time);
+        self.rerank(eye, &apply_out_of_time);
         let t_apply = started.elapsed();
         // Urgent edit regenerations first.
         let mut urgent = std::mem::take(&mut self.urgent);
@@ -663,7 +914,7 @@ impl Residency {
         urgent.dedup();
         let mut deferred_urgent = Vec::new();
         for key in urgent {
-            if work.jobs.len() >= budget {
+            if !budget.allows(&work) {
                 deferred_urgent.push(key);
                 continue;
             }
@@ -672,10 +923,13 @@ impl Residency {
                 deferred_urgent.push(key);
                 continue;
             };
+            // Still clipped, it is reported again with its new window.
+            self.clipped.remove(&key);
             if let Some(old) = res.edit_block {
                 self.edits.release(old);
             }
             self.residents.get_mut(key).unwrap().edit_block = block;
+            work.units += job_units(planet, key);
             work.jobs.push(Job {
                 key0: key as u32,
                 key1: (key >> 32) as u32,
@@ -684,7 +938,6 @@ impl Residency {
                 flags: 1,
                 pad: [0; 3],
             });
-            work.job_keys.push(key);
         }
         self.urgent = deferred_urgent;
         // Merge pending windows by normalized distance; the coarsest level
@@ -694,7 +947,7 @@ impl Residency {
         // blocks, table): bounded by time as well as by the GPU budget, and
         // resumes next frame.
         let mut steps = 0u32;
-        while work.jobs.len() < budget {
+        while budget.allows(&work) {
             steps += 1;
             if steps % 64 == 0 && out_of_time() {
                 break;
@@ -712,6 +965,11 @@ impl Residency {
             let Some((_, index)) = best else { break };
             let (key, bucket) = self.levels[index].pending.pop().unwrap();
             if self.residents.contains_key(key) {
+                continue;
+            }
+            if !self.residents.can_insert(key) {
+                // Unreachable for the GPU lookup: leave it to coarser levels.
+                self.stats.table_refused += 1;
                 continue;
             }
             let requeue = |this: &mut Self| {
@@ -734,6 +992,7 @@ impl Residency {
             }
             let slot = self.residents.insert(key, Resident { record, slot: 0, edit_block: block, blocks });
             work.table_writes.push((slot, record));
+            work.units += job_units(planet, key);
             work.jobs.push(Job {
                 key0: key as u32,
                 key1: (key >> 32) as u32,
@@ -742,7 +1001,6 @@ impl Residency {
                 flags: 0,
                 pad: [0; 3],
             });
-            work.job_keys.push(key);
         }
         let trace_ms: Option<f64> = std::env::var("HELIO_VOXEL_PLAN_TRACE").ok().map(|v| v.parse().unwrap_or(10.0));
         if trace_ms.is_some_and(|ms| started.elapsed().as_secs_f64() * 1e3 > ms) {
@@ -767,18 +1025,45 @@ impl Residency {
         stats.edit_words = self.edits.top;
         stats.table_load = self.residents.load();
         self.stats = stats;
+        work.finish(self.residents.table());
         work
     }
 
-    /// Re-queue columns whose jobs could not complete (scratch/pool pressure).
-    pub fn requeue(&mut self, keys: impl IntoIterator<Item = (u64, u32)>) {
+    /// Plan one background frame (see [`ResidencyWorker`]).
+    fn plan_request(&mut self, request: PlanRequest) -> PlanResult {
+        let started = std::time::Instant::now();
+        self.requeue(request.failed);
+        self.set_cpu_budget(Some(request.cpu_budget));
+        self.set_lod_dither(request.lod_dither);
+        let work = self.plan(&request.planet, request.eye, request.lod0, request.budget);
+        PlanResult {
+            work,
+            stats: self.stats,
+            coverage: self.coverage(),
+            idle: self.idle(),
+            blocks_exact: self.blocks_exact(),
+            live_blocks: self.take_live_blocks().map(<[u32]>::to_vec),
+            live_block_count: self.live_block_count(),
+            queued_diffs: self.queued_diffs(),
+            queued_ops: self.queued_ops(),
+            queued_adds: self.queued_adds(),
+            table: request.table.then(|| self.table().to_vec()),
+            probe: request.probe.then(|| self.table_probe_stats(crate::column_index::MAX_PROBES)),
+            plan_ms: started.elapsed().as_secs_f64() * 1000.0,
+        }
+    }
+
+    /// Re-queue columns whose jobs could not complete (scratch/pool
+    /// pressure), and note columns published with a clipped band
+    /// ([`STATUS_CLIPPED`], with their window centre).
+    pub fn requeue(&mut self, keys: impl IntoIterator<Item = (u64, u32, i32)>) {
         let mut count = 0;
-        for (key, status) in keys {
-            if status == 1 {
-                // Band overflow: stays unpublished; coarser levels cover it.
+        for (key, status, word) in keys {
+            if !self.residents.contains_key(key) {
                 continue;
             }
-            if !self.residents.contains_key(key) {
+            if status == STATUS_CLIPPED {
+                self.clipped.insert(key, word);
                 continue;
             }
             self.urgent.push(key);
@@ -787,8 +1072,48 @@ impl Residency {
         self.stats.requeued += count;
     }
 
+    /// Clipped bands follow the eye vertically: a column whose window centre
+    /// is more than a quarter window from the eye's layer at its level is
+    /// regenerated around the current eye.
+    fn follow_clipped(&mut self, eye: DVec3) {
+        if self.clipped.is_empty() {
+            return;
+        }
+        let grid = &self.grid;
+        let layer = ((grid.radial(eye) - grid.radius()) / grid.voxel_size()).floor() as i64;
+        let stale: Vec<u64> = self
+            .clipped
+            .iter()
+            .filter(|(key, centre)| ((layer >> unpack(**key).1) - i64::from(**centre)).abs() > CLIP_SLACK)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in stale {
+            self.clipped.remove(&key);
+            self.urgent.push(key);
+        }
+    }
+
+    /// Resident columns with a clipped band.
+    pub fn clipped_columns(&self) -> usize {
+        self.clipped.len()
+    }
+
     /// Every pending window column has been issued.
     /// Live tier-1 summary block slots, when they changed since the last call.
+    pub fn table_probe_stats(&self, limit: u32) -> (u32, usize) {
+        self.residents.probe_stats(limit)
+    }
+    pub fn queued_diffs(&self) -> usize {
+        self.diffs.len()
+    }
+    /// Window diff operations (removes and adds) not applied yet.
+    pub fn queued_ops(&self) -> usize {
+        self.diffs.iter().map(|q| q.diff.removes.len() - q.removed + q.diff.adds.len() - q.added).sum()
+    }
+    /// Columns queued diffs will add (wanted, not pending yet).
+    pub fn queued_adds(&self) -> usize {
+        self.diffs.iter().map(|q| q.diff.adds.len() - q.added).sum()
+    }
     pub fn take_live_blocks(&mut self) -> Option<&[u32]> {
         std::mem::take(&mut self.live_dirty).then_some(self.live_tier1.as_slice())
     }
@@ -807,35 +1132,34 @@ impl Residency {
     /// never fall back to a coarser level: bounded by the (possibly lagging)
     /// window and by the nearest pending column. Inactive levels give 0.
     pub fn fallback_distances(&self, eye: DVec3) -> Vec<f64> {
+        self.coverage().fallback_distances(eye)
+    }
+
+    /// The state [`Self::fallback_distances`] depends on.
+    pub fn coverage(&self) -> Coverage {
         let grid = self.grid;
-        let ground = |p: DVec3| if grid.is_plane() { DVec3::new(p.x, 0.0, p.z) } else { p.normalize() };
         let urgent: rustc_hash::FxHashSet<u32> = self.urgent.iter().map(|k| unpack(*k).1).collect();
-        self.levels
+        let levels = self
+            .levels
             .iter()
             .enumerate()
             .map(|(level, l)| {
-                if !l.active || urgent.contains(&(level as u32)) || self.catching_up[level] > 0 {
-                    return 0.0;
+                if !l.active || urgent.contains(&(level as u32)) || self.catching_up[level] > 0 || l.pending.len() > 4096 {
+                    return LevelCoverage { none: true, ..Default::default() };
                 }
                 // A column's ground width (the index-angle span on a sphere
                 // bounds its true size).
                 let col = grid.delta() * f64::from(BRICK << level) * if grid.is_plane() { 1.0 } else { grid.radius() };
-                let mut distance = l.radius - col * 1.5 - grid.ground_distance(l.center, ground(eye));
-                if l.pending.len() > 4096 {
-                    return 0.0;
+                LevelCoverage {
+                    none: false,
+                    center: l.center,
+                    reach: l.radius - col * 1.5,
+                    col,
+                    pending: l.pending.keys().map(|key| column_ground(&grid, *key)).collect(),
                 }
-                for key in l.pending.keys() {
-                    let (face, lv, ci, cj) = unpack(*key);
-                    let size = f64::from(BRICK << lv);
-                    let p = grid.ground_point(face, (f64::from(ci) + 0.5) * size, (f64::from(cj) + 0.5) * size);
-                    // Traversal uses only complete 4x4-column blocks while a
-                    // level streams in: a pending column makes its whole
-                    // block (within its diagonal, 5.7 columns) fall back.
-                    distance = distance.min(grid.ground_distance(p, eye) - col * 6.0);
-                }
-                distance.max(0.0)
             })
-            .collect()
+            .collect();
+        Coverage { grid, levels }
     }
 
     pub fn idle(&self) -> bool {
@@ -843,6 +1167,143 @@ impl Residency {
             && self.applied == self.requested
             && self.diffs.is_empty()
             && self.levels.iter().all(|l| l.pending.is_empty())
+    }
+}
+
+/// Input of one background plan.
+pub struct PlanRequest {
+    pub planet: std::sync::Arc<Planet>,
+    pub eye: DVec3,
+    pub lod0: f64,
+    /// Traversal level-transition dither (`Residency::set_lod_dither`).
+    pub lod_dither: f64,
+    /// Work and jobs the plan may issue.
+    pub budget: JobBudget,
+    /// CPU time for diffs, re-ranking and admission.
+    pub cpu_budget: std::time::Duration,
+    /// Job outcomes read back since the last request (key, status, word; see
+    /// [`Residency::requeue`]).
+    pub failed: Vec<(u64, u32, i32)>,
+    /// Diagnostics: also return a copy of the column table.
+    pub table: bool,
+    /// Diagnostics: also scan the table's probe runs.
+    pub probe: bool,
+}
+
+/// One plan's work and the residency state right after it, which is what
+/// the GPU holds once `work` is uploaded.
+pub struct PlanResult {
+    pub work: FrameWork,
+    pub stats: Stats,
+    pub coverage: Coverage,
+    pub idle: bool,
+    pub blocks_exact: bool,
+    /// Live tier-1 summary block slots, when they changed.
+    pub live_blocks: Option<Vec<u32>>,
+    pub live_block_count: usize,
+    pub queued_diffs: usize,
+    pub queued_ops: usize,
+    pub queued_adds: usize,
+    pub table: Option<Vec<u32>>,
+    /// Longest probe run and entries beyond the GPU probe limit.
+    pub probe: Option<(u32, usize)>,
+    /// CPU time of the plan on the worker (ms).
+    pub plan_ms: f64,
+}
+
+impl PlanResult {
+    /// The state before the first plan: nothing resident, nothing covered.
+    pub fn initial(grid: Grid) -> Self {
+        Self {
+            work: FrameWork::default(),
+            stats: Stats::default(),
+            coverage: Coverage::none(grid),
+            idle: false,
+            blocks_exact: true,
+            live_blocks: None,
+            live_block_count: 0,
+            queued_diffs: 0,
+            queued_ops: 0,
+            queued_adds: 0,
+            table: None,
+            probe: None,
+            plan_ms: 0.0,
+        }
+    }
+}
+
+/// Residency on its own thread. Admission costs ~2 us of CPU per column
+/// (hash table, summary blocks, edit query: mostly cache misses), and fast
+/// flight at high resolution wants 100k+ new columns per second; on the
+/// render thread it took 1.5-4 ms of every frame and still lagged. The
+/// render thread submits one request per frame and uploads each result in
+/// the frame after: at most one plan is in flight, and results are uploaded
+/// in order, exactly once, as `Residency::plan` would have been called.
+pub struct ResidencyWorker {
+    requests: Option<mpsc::Sender<PlanRequest>>,
+    results: std::sync::Mutex<mpsc::Receiver<PlanResult>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    in_flight: bool,
+}
+
+impl ResidencyWorker {
+    pub fn start(grid: Grid, capacity: Capacity) -> Self {
+        let (request_tx, request_rx) = mpsc::channel::<PlanRequest>();
+        let (result_tx, result_rx) = mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("voxel-planet-residency".into())
+            .spawn(move || {
+                let mut residency = Residency::with_worker(grid, capacity);
+                while let Ok(request) = request_rx.recv() {
+                    if result_tx.send(residency.plan_request(request)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("spawn residency worker");
+        Self { requests: Some(request_tx), results: std::sync::Mutex::new(result_rx), thread: Some(thread), in_flight: false }
+    }
+
+    /// Start a plan; none may be in flight.
+    pub fn submit(&mut self, request: PlanRequest) {
+        debug_assert!(!self.in_flight, "one plan at a time");
+        if let Some(tx) = &self.requests {
+            self.in_flight = tx.send(request).is_ok();
+        }
+    }
+
+    /// The in-flight plan's result, if it is done.
+    pub fn try_take(&mut self) -> Option<PlanResult> {
+        if !self.in_flight {
+            return None;
+        }
+        let results = self.results.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match results.try_recv() {
+            Ok(result) => {
+                self.in_flight = false;
+                Some(result)
+            }
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                eprintln!("voxel planet residency worker stopped; terrain no longer streams");
+                self.requests = None;
+                self.in_flight = false;
+                None
+            }
+        }
+    }
+
+    pub fn in_flight(&self) -> bool {
+        self.in_flight
+    }
+}
+
+impl Drop for ResidencyWorker {
+    fn drop(&mut self) {
+        self.requests = None;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -882,7 +1343,7 @@ mod tests {
         let settle = |r: &mut Residency, eye: DVec3, worst: &mut f64| {
             for _ in 0..20_000 {
                 let started = std::time::Instant::now();
-                r.plan(&planet, eye, lod0, 100_000);
+                r.plan(&planet, eye, lod0, JobBudget::jobs(100_000));
                 *worst = worst.max(started.elapsed().as_secs_f64() * 1000.0);
                 if r.idle() {
                     return;
@@ -926,7 +1387,7 @@ mod tests {
             let mut residency = Residency::new(grid, Capacity::default());
             let mut total = 0;
             for _ in 0..1000 {
-                let work = residency.plan(&planet, eye, lod0, 100_000);
+                let work = residency.plan(&planet, eye, lod0, JobBudget::jobs(100_000));
                 total += work.jobs.len();
                 if residency.idle() {
                     break;
@@ -937,10 +1398,60 @@ mod tests {
             assert!(total < 1_900_000, "{total}");
             assert_eq!(total, residency.residents.len());
             // A repeated plan at the same pose issues no work.
-            let work = residency.plan(&planet, eye, lod0, 100_000);
+            let work = residency.plan(&planet, eye, lod0, JobBudget::jobs(100_000));
             assert!(work.jobs.is_empty() && work.evictions.is_empty());
             eprintln!("resident columns {}", residency.residents.len());
         }
+    }
+
+    /// When admission lags and the eye moves on, the next column issued is
+    /// one under the eye, not one near where the window was planned.
+    #[test]
+    fn pending_columns_are_reranked_against_the_moved_eye() {
+        let planet = std::sync::Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+        let grid = *planet.grid();
+        let lod0 = Residency::lod_distance(&grid, (22.5f64).to_radians().tan(), 1080, 1.0);
+        let ground = planet.surface_point(grid.direction(2, 3e7, 4e7), 1.8);
+        let mut r = Residency::new(grid, Capacity::default());
+        // Nothing is issued (budget 0): every wanted column stays pending.
+        r.plan(&planet, ground, lod0, JobBudget::jobs(0));
+        let radius = r.levels[0].radius;
+        assert!(r.levels[0].pending.len() > 10_000, "{}", r.levels[0].pending.len());
+        let east = ground.normalize().any_orthonormal_vector();
+        let eye = planet.surface_point(ground + east * radius * 0.4, 1.8);
+        for _ in 0..64 {
+            r.plan(&planet, eye, lod0, JobBudget::jobs(0));
+        }
+        assert!(r.levels[0].rerank.is_empty() && r.stats.reranked > 0);
+        let (key, _) = r.levels[0].pending.pop().unwrap();
+        let distance = grid.ground_distance(column_ground(&grid, key), eye.normalize());
+        assert!(distance < radius / 32.0, "next column {distance:.1} m from the eye (radius {radius:.1} m)");
+    }
+
+    /// A plan stops at its work budget, counted in predicted units, and at
+    /// its job cap.
+    #[test]
+    fn plans_stop_at_their_work_budget() {
+        let planet = std::sync::Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+        let grid = *planet.grid();
+        let lod0 = Residency::lod_distance(&grid, (22.5f64).to_radians().tan(), 1080, 1.0);
+        let eye = planet.surface_point(grid.direction(2, 3e7, 4e7), 1.8);
+        let mut r = Residency::new(grid, Capacity::default());
+        let mut units = Vec::new();
+        for _ in 0..8 {
+            let work = r.plan(&planet, eye, lod0, JobBudget { units: 500.0, jobs: 100_000 });
+            assert!(!work.jobs.is_empty());
+            let issued: f64 = work.jobs.iter().map(|j| job_units(&planet, pack(j.key0, j.key1))).sum();
+            assert!((issued - work.units).abs() < 1e-6, "units are the jobs' units");
+            // At most one job past the budget (the one that crossed it).
+            let last = job_units(&planet, pack(work.jobs.last().unwrap().key0, work.jobs.last().unwrap().key1));
+            assert!(work.units < 500.0 + last, "{} units", work.units);
+            units.extend(work.jobs.iter().map(|j| job_units(&planet, pack(j.key0, j.key1))));
+        }
+        assert!(units.iter().all(|&u| u >= 1.0), "a column costs at least a heightfield column");
+        // The job cap holds whatever the units.
+        let work = r.plan(&planet, eye, lod0, JobBudget { units: f64::INFINITY, jobs: 7 });
+        assert!(work.jobs.len() <= 7);
     }
 
     #[test]
@@ -950,7 +1461,7 @@ mod tests {
         let mut residency = Residency::new(grid, Capacity { table_bits: 20, ..Default::default() });
         let mut eye = planet.surface_point(grid.direction(0, 3e7, 4e7), 2.0);
         for step in 0..40 {
-            let _ = residency.plan(&planet, eye, 120.0, 20_000);
+            let _ = residency.plan(&planet, eye, 120.0, JobBudget::jobs(20_000));
             eye = planet.surface_point(eye + DVec3::new(0.0, 0.0, 70.0 * f64::from(step % 3)), 2.0);
         }
         table_is_exact(&residency);

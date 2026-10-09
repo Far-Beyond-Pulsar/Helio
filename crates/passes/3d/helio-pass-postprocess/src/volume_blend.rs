@@ -14,6 +14,8 @@ pub struct PostProcessVolumeBlendPass {
     resolved: wgpu::Buffer,
     fallback_pp_volumes: wgpu::Buffer,
     fallback_cameras: wgpu::Buffer,
+    /// `WorldOrigin` (hi, lo): volumes are tested in the frame's coordinates.
+    origin: wgpu::Buffer,
     bind_group: Option<wgpu::BindGroup>,
     bind_group_key: Option<[wgpu::Buffer; 3]>,
     /// Published as `"dof_maybe_active"`; see [`DOF_MAYBE_ACTIVE`].
@@ -234,6 +236,7 @@ impl PostProcessVolumeBlendPass {
                 entry(15, wgpu::BufferBindingType::Storage { read_only: true }),
                 entry(16, wgpu::BufferBindingType::Storage { read_only: false }),
                 entry(20, wgpu::BufferBindingType::Storage { read_only: true }),
+                entry(22, wgpu::BufferBindingType::Uniform),
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -252,6 +255,7 @@ impl PostProcessVolumeBlendPass {
         let size = std::mem::size_of::<crate::GpuPostProcessUniforms>() as u64;
         Self {
             pipeline, bgl, defaults, default_settings: settings.clone(),
+            origin: buffer("PostProcess World Origin", 32, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
             blend_output_buf: buffer("PostProcess Resolve Storage", size, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC),
             resolved: buffer("PostProcess Resolved Uniforms", size, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC),
             fallback_pp_volumes: buffer("PostProcess Empty Volumes", std::mem::size_of::<crate::GpuPostProcessVolume>() as u64, wgpu::BufferUsages::STORAGE),
@@ -310,6 +314,11 @@ impl RenderPass for PostProcessVolumeBlendPass {
         self.bloom.update(ctx, cameras, volumes);
         self.auto_exposure.update(ctx, cameras, volumes);
         self.fog.update(ctx, cameras, volumes);
+        let origin = ctx.world_origin.unwrap_or_default();
+        let hi = origin.as_vec3();
+        let lo = (origin - hi.as_dvec3()).as_vec3();
+        let words = [hi.x, hi.y, hi.z, 0.0, lo.x, lo.y, lo.z, 0.0];
+        ctx.write_buffer(&self.origin, 0, bytemuck::cast_slice(&words));
         Ok(())
     }
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
@@ -325,6 +334,7 @@ impl RenderPass for PostProcessVolumeBlendPass {
                     wgpu::BindGroupEntry { binding: 15, resource: volumes.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 16, resource: self.blend_output_buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 20, resource: cameras.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 22, resource: self.origin.as_entire_binding() },
                 ],
             }));
             self.bind_group_key = Some(key);

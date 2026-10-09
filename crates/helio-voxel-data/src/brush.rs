@@ -56,11 +56,17 @@ const JOURNAL_CHUNK: usize = 1024;
 /// Copies share structure (edits live in shared chunks), and every edit
 /// records a hash of the journal up to it, so the scene projection can hand
 /// the journal to renderers every frame and they can tell in O(1) whether
-/// it changed or only grew. Serialized as a plain list of edits.
+/// it changed or only grew.
+///
+/// Edits belong to the terrain they were made on: `terrain` is that
+/// terrain's fingerprint (form, voxel size, generator, seed and settings;
+/// 0 before any). Another terrain starts with no edits ([`Self::made_on`]).
+/// Serialized as `{"terrain": .., "edits": [..]}`.
 #[derive(Clone, Default)]
 pub struct VoxelEditJournal {
     chunks: Vec<std::sync::Arc<Vec<(VoxelBrushEdit, u64)>>>,
     len: usize,
+    terrain: u64,
 }
 
 /// FNV-1a over an edit, continuing `seed`.
@@ -126,20 +132,39 @@ impl VoxelEditJournal {
     }
     /// Whether `prefix` is this journal's beginning (O(1), by hash).
     pub fn starts_with(&self, prefix: &VoxelEditJournal) -> bool {
-        prefix.len <= self.len && self.prefix_hash(prefix.len) == prefix.prefix_hash(prefix.len)
+        prefix.terrain == self.terrain && prefix.len <= self.len && self.prefix_hash(prefix.len) == prefix.prefix_hash(prefix.len)
+    }
+    /// Fingerprint of the terrain the edits were made on (0: none yet).
+    pub fn terrain(&self) -> u64 {
+        self.terrain
+    }
+    /// Make the journal belong to `terrain`: edits made on another terrain
+    /// are dropped (they would land on ground that is not there); a journal
+    /// with no terrain yet adopts it. Returns how many edits were dropped.
+    pub fn made_on(&mut self, terrain: u64) -> usize {
+        if self.terrain == terrain {
+            return 0;
+        }
+        if self.terrain == 0 {
+            self.terrain = terrain;
+            return 0;
+        }
+        let dropped = self.len;
+        *self = Self { terrain, ..Self::default() };
+        dropped
     }
 }
 
 impl PartialEq for VoxelEditJournal {
     /// Equal length and equal prefix hash (O(1)).
     fn eq(&self, other: &Self) -> bool {
-        self.len == other.len && self.prefix_hash(self.len) == other.prefix_hash(other.len)
+        self.terrain == other.terrain && self.len == other.len && self.prefix_hash(self.len) == other.prefix_hash(other.len)
     }
 }
 
 impl std::fmt::Debug for VoxelEditJournal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VoxelEditJournal").field("len", &self.len).finish()
+        f.debug_struct("VoxelEditJournal").field("terrain", &self.terrain).field("len", &self.len).finish()
     }
 }
 
@@ -157,15 +182,28 @@ impl Extend<VoxelBrushEdit> for VoxelEditJournal {
     }
 }
 
+/// The saved form of a [`VoxelEditJournal`].
+#[derive(Serialize, Deserialize)]
+struct SavedJournal<E> {
+    #[serde(default)]
+    terrain: u64,
+    #[serde(default)]
+    edits: E,
+}
+
 impl Serialize for VoxelEditJournal {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_seq(self.iter())
+        let edits: Vec<&VoxelBrushEdit> = self.iter().collect();
+        SavedJournal { terrain: self.terrain, edits }.serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for VoxelEditJournal {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(Vec::<VoxelBrushEdit>::deserialize(deserializer)?.into_iter().collect())
+        let saved = SavedJournal::<Vec<VoxelBrushEdit>>::deserialize(deserializer)?;
+        let mut journal: Self = saved.edits.into_iter().collect();
+        journal.terrain = saved.terrain;
+        Ok(journal)
     }
 }
 
@@ -178,7 +216,7 @@ mod journal_tests {
     }
 
     #[test]
-    fn journals_compare_by_prefix_and_serialize_as_lists() {
+    fn journals_compare_by_prefix_and_serialize_with_their_terrain() {
         let a: VoxelEditJournal = (0..3000).map(|k| edit(k as f64)).collect();
         let mut b = a.clone();
         b.push(edit(-1.0));
@@ -191,9 +229,20 @@ mod journal_tests {
         assert_eq!(a.get(2999), Some(&edit(2999.0)));
         assert_eq!(a.iter_from(2998).count(), 2);
 
+        let mut a = a;
+        assert_eq!(a.made_on(6), 0, "a journal without a terrain adopts the first");
+        assert_eq!((a.terrain(), a.len()), (6, 3000));
+        assert_eq!(a.made_on(7), 3000, "edits made on another terrain are dropped");
+        assert!(a.is_empty() && a.terrain() == 7);
+        a.extend((0..3).map(|k| edit(k as f64)));
+        assert_eq!(a.made_on(7), 0);
         let json = serde_json::to_value(&a).unwrap();
-        assert!(json.is_array() && json.as_array().unwrap().len() == 3000);
+        assert_eq!(json["terrain"], 7);
+        assert_eq!(json["edits"].as_array().unwrap().len(), 3);
         let back: VoxelEditJournal = serde_json::from_value(json).unwrap();
         assert_eq!(back, a);
+        let mut other = back.clone();
+        other.made_on(8);
+        assert!(!other.starts_with(&back) && other != back);
     }
 }

@@ -28,6 +28,7 @@ pollster = { workspace = true }
 helio-mats = { workspace = true }
 helio-pass-hiz = { workspace = true }
 helio-pass-foliage-place = { workspace = true }
+helio-pass-sky = { workspace = true }
 
 [features]
 default = ["profiling", "shader-hot-reload"]

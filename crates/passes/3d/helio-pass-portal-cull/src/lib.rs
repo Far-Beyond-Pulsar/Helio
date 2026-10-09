@@ -328,7 +328,7 @@ impl RenderPass for PortalCullPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         if ctx.frame_num < 3 || ctx.frame_num % 120 == 0 {
-            log::info!(
+            log::trace!(
                 "[PortalCull] frame={} draw_count={} chain_count={}",
                 ctx.frame_num,
                 self.draw_count,

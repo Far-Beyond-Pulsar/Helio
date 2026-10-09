@@ -244,6 +244,10 @@ struct CameraPostProcessComponent {
 @group(0) @binding(14) var<storage, read>      pp_custom:    array<vec4<f32>>;
 @group(0) @binding(15) var<storage, read>      pp_volumes:   array<GpuPostProcessVolume>;
 @group(0) @binding(16) var<storage, read_write> blend_output: GpuPostProcessUniforms;
+// The frame's world origin (camera-relative frames place the camera at it),
+// split into an f32 and its remainder: volume bounds are world positions.
+struct WorldOrigin { hi: vec4<f32>, lo: vec4<f32> }
+@group(0) @binding(22) var<uniform> world_origin: WorldOrigin;
 // Scene-linear lens response (fs_uber only), published by LensFlarePass at
 // reduced resolution from the same pre-exposure image. Participating media are
 // already composited into hdr_input by FogCompositePass. Bound to a 1x1 black
@@ -476,7 +480,10 @@ fn cs_volume_blend(@builtin(local_invocation_index) lid: u32) {
     var bounded_fog = false;
     let position = cameras[0].position_near.xyz;
     for (var n = 0u; n < count; n++) {
-        let v = pp_volumes[active_rows[n]];
+        // Bounds into the frame's coordinates; the large terms cancel first.
+        var v = pp_volumes[active_rows[n]];
+        v.bounds_min = vec4<f32>((v.bounds_min.xyz - world_origin.hi.xyz) - world_origin.lo.xyz, v.bounds_min.w);
+        v.bounds_max = vec4<f32>((v.bounds_max.xyz - world_origin.hi.xyz) - world_origin.lo.xyz, v.bounds_max.w);
         let weight = volume_weight(position, v);
         if weight > 0.0 { result = blend_settings(result, v.settings, weight, v.override_mask); }
         if v.unbound != 0u {

@@ -3,8 +3,10 @@
 Destructible voxel worlds for Helio: Earth-sized cube-sphere planets, finite
 planes and effectively infinite planes, built from exact voxels of 0.1 m to
 1 m, fully editable, and rendered by tracing every pixel through a GPU-driven
-clipmap. There is no smooth or meshed terrain and no enlarged-block LOD: every
-visible surface is a real cell of the canonical grid at some level.
+clipmap. Near geometry and gameplay use the authored voxel grid. Distant
+columns without geometry edits retain fractional radial height and filtered
+slope lighting so sub-pixel terrain keeps its relief without tracing every
+tiny voxel.
 
 This document maps the system for people who will work on it: what each part
 does, how a frame flows, which invariants hold it together, why things are
@@ -26,19 +28,30 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
 
 ## Goals and non-goals
 
-- Crisp voxels at every distance: near cells are cubes; far cells are the
-  same field sampled at a coarser level, shaded with filtered appearance so
-  sub-pixel cells do not alias. No meshes, no smooth LOD surface.
+- Crisp near voxels and stable distant relief: filter sub-pixel detail while
+  preserving visible landforms, materials and edits, without visible LOD steps.
 - One world, two consumers: the CPU (collision, ray casts, edits, gameplay
   queries) and the GPU (streaming, rendering) evaluate the same integer field
-  and the same edits and agree to the bit.
+  and the same edits. Field evaluations agree to the bit; distant rendering
+  filters their appearance without changing the authored world.
 - Space to ground in seconds: a camera can fall from orbit to walking height
   at the editor's altitude-proportional speed while residency keeps up.
-- Destruction at scale: tens of thousands of edits stay exact and cheap.
+- Volumetric worlds: generated caves and overhangs, not only heightfields.
+  Heightmaps are one input among others. A terrain program adds 3D terms
+  around its surface (`terrain_extent`, `terrain_density`); the built-in
+  generator carves a cave network (tunnels and caverns under a rock cover,
+  open to the surface at entrances) and leans steep ground over into
+  overhangs (a continuous deformation of the heightfield: nothing floats),
+  and erosion octaves carve branching gullies down its slopes. Caves may
+  reach any depth (see clipped bands below).
+- Destruction at any scale, up to the entire planet: digs of any depth,
+  sphere brushes hundreds of kilometres wide, a hollowed core. Tens of
+  thousands of edits stay exact and cheap; every regenerated column replays
+  its whole brush list.
 - Budgets (RTX 3060, 1080p Quality, i.e. 1440x810 internal): terrain GPU
   p95 <= 5 ms, no CPU frame stalls, terrain GPU memory <= 1 GiB.
-- Non-goals (for now): caves in generated terrain (edits make caves),
-  translucent water, meshes inside the voxel pass, multiple worlds per pass.
+- Non-goals (for now): translucent water, meshes inside the voxel pass,
+  multiple worlds per pass.
 
 ## Crate map
 
@@ -47,7 +60,8 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
 | `src/grid.rs` | The canonical grid: equal-angle cube sphere (or plane), cells, levels, faces, exact cell walking maths. |
 | `src/noise.rs`, `shaders/noise.wgsl` | Bit-exact integer noise (Q16 and fine Q24). The only noise terrain may use. |
 | `src/terrain.rs` | Pluggable generators: `TerrainGenerator` -> `TerrainField` (CPU) + `TerrainProgram` (WGSL). Registry, material ids, `check_field`. |
-| `src/landform.rs`, `shaders/landform.wgsl`, `shaders/flat.wgsl` | Built-in generators `helio.landform` and `helio.flat`. |
+| `src/layers.rs` | The built-in generator `helio.terrain`: ordered layer stacks (`TerrainLayers`), presets (Earth, moon, flat), validation and compilation. |
+| `src/landform.rs`, `shaders/landform.wgsl` | The stack interpreter (CPU and WGSL): octaves, layer composition, craters, erosion, caves, overhangs and material styles. |
 | `src/edits.rs` | Brushes (sphere/cube, remove/add/paint), per-face integer resolution, the shared `EditLog` and its tile index. |
 | `src/journal.rs` | Binary append-only edit journal (save/replay with recipe fingerprint and checksums). |
 | `src/planet.rs` | `PlanetRecipe` + `Planet`: canonical queries (`kind`, `material`, `solid`), exact ray casts, `surface_point`, `air_clearance`, `ground_height`. |
@@ -59,7 +73,7 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
 | `shaders/common.wgsl` | GPU residency structures: column records, hash lookup, summary blocks. |
 | `shaders/generate.wgsl` | GPU column generation, brick-run allocation and publication (evict -> generate -> count -> refill -> allocate -> fixup -> publish). |
 | `shaders/horizon.wgsl` | Directional sky bound: per azimuth sector and distance bucket, the elevation that clears all terrain. |
-| `shaders/trace.wgsl` | Exact hierarchical traversal of the canonical grid. |
+| `shaders/trace.wgsl` | Hierarchical grid traversal with authored radial tops for unedited distant columns. |
 | `shaders/surface.wgsl` | Primary rays, shading (materials, filtered appearance, AO), traced sunlight. |
 | `shaders/gbuffer.wgsl`, `shaders/view.wgsl` | GBuffer publication (depth-tested against meshes) and shared view helpers. |
 | `tests/gpu.rs` | GPU correctness tests (see [Tests](#tests)). |
@@ -105,10 +119,60 @@ the CPU raycast what the GPU draws.
   `noise_fine` / `mul_fine` (Q24 with 12-bit limbs) exist because Q16 noise at
   continent wavelengths is constant over metres and steps by one unit; scaled
   by kilometres of relief that became long straight terraces.
+- The noise domain is a sphere at the planet's radius (planes: the
+  horizontal position), in 1.25 cm units: domain distance is physical
+  distance, the field is smooth across cube edges, and tangent directions
+  (slopes, gullies, later flow) are defined everywhere. Integer
+  `sphere_point` straightens the equal-angle cube coordinates with a tan
+  polynomial and normalizes them (Q30 Newton reciprocal square root, exact
+  64-bit products); the eighth-cell unit keeps its rounding far below a
+  layer of height on steep slopes.
+- Every world is an ordered layer stack (`layers.rs`): Warp, Continents,
+  Mountains, Hills, Roughness, Erosion, Craters, Basins, Plateau, each with
+  a mask (everywhere, land, above deep sea), plus caves, overhangs and a
+  material style (Earthlike, Lunar, Layered). Planet, moon or plane is a
+  game decision: the stack is data (presets `earth`, `moon`, `flat`, or one
+  a game builds from a seed), compiled to one octave table sorted coarse to
+  fine with each octave tagged with its layer. One interpreter runs it on
+  CPU and GPU, so changing layers never recompiles shaders. Octaves
+  accumulate per layer; the layers then compose in stack order (Basins
+  flatten what precedes them). Bounds (`bound_margins`, `height_range`)
+  derive from the layers, so any stack keeps `check_field`. A layer added
+  or switched to another kind starts from that kind's defaults
+  (`Layer::new`; the presets are made of them). The octave table holds 64
+  (6 for the warp); cost follows the octaves used.
+- Earth: continents, mountain ranges with erosion, hills from 140 m over
+  9 km down to ~30 m knolls over a kilometre (five octaves at persistence
+  0.6: the land near the eye has shape) and metre-scale roughness. Low basins get mud patches of a few metres (single-cell mud
+  and sand specks read as noise that hid the ground's shape). The snowline
+  wanders a sixth of its height over ~1.6 km above a rock band a sixth as
+  tall, so meadows climb and no ruler-straight snow edge runs along a range.
+- Craters: one candidate per cell of a 3D lattice per size, kept with the
+  layer's density when within half a cell of the surface, so they are
+  seamless across cube edges; parabolic bowl, smooth-min rim, ejecta to twice
+  the radius. Large craters keep full-precision offsets (exact 64-bit
+  squares): rounding them moved their steep walls by centimetres between
+  columns.
+- The stack carries analytic gradients (`noise_fine_grad`, chain rule through
+  the domain warp) when an erosion octave is resolved. Each erosion octave
+  lays stripes across the downhill direction of the coarser terrain on its
+  own 3D lattice (random phase per corner, trilinear fade); its gradient
+  steers the finer octaves, so gullies branch. Only strictly coarser octaves
+  steer it, so every level that resolves it computes it alike. The phase
+  turns up to 2 sqrt(3) STRIPES times across a cell, so the steering field
+  is continuous (crest sign flips and clamp edges softened) and kept in
+  Q30 unit vectors: a 1e-5 direction error is centimetres of height.
 - Detail finer than a level's footprint is omitted at that level: coarse
-  levels are band-limited point samples of the same field, not a separate
-  smooth approximation. That is why LOD transitions never change the shape of
-  the land, only its resolution.
+  levels are band-limited point samples of the same field. Display
+  generation retains the conditional mean of the display layer's (the first
+  Mountains layer's) unresolved ridges, rather than dropping their mountain
+  height. This lookup is baked once per stack;
+  canonical field queries and level 0 remain unchanged. Levels 1 and above
+  retain fractional radial tops unless Add/Remove edits change their geometry.
+  Short low-level spans store exact base-layer tops in the existing byte header.
+  Paint retains that relief. Slope lighting and the material height come from
+  the stored exact surface (`ground_field`), never from tracing finer cells
+  or running the generator per pixel.
 - Heights are relative to the datum (the planet radius or the plane's y = 0)
   and may be negative: lowland and ocean basins sit below it. Nothing in the
   pipeline may clamp heights to the datum (see the band-top invariant below).
@@ -129,6 +193,46 @@ common prefix of its synced log and the current one by binary search on
 prefix hashes (O(1) when unchanged). The finest index tile is one column (8
 cells), which keeps dense block edits (buildings) cheap to query.
 
+Edit cost does not grow with the brushes piled on one spot (sculpting):
+
+- Generation culls a column's list per brick: the workgroup loads it in
+  chunks of 64, keeps the brushes whose box reaches the brick (in list order,
+  by ballot and rank) and applies only those to the brick's cells.
+- Shading never replays the list for occupancy (the bricks have it). A hit
+  in a column with Add or Paint brushes (`INFO_EDIT_MATERIALS`) takes its
+  material from the latest Add or Paint containing the cell, scanning from
+  the end; a later Remove containing it would have left air.
+- `Planet::surface_point` walks the column under the point down from its
+  highest possibly solid layer (generated top, Add brush tops) with the
+  column's brushes queried once, instead of a ray from the outer radius
+  through the edit index cell by cell (426 ms at 2000 brushes before).
+
+**Natural surface of edited columns.** A column a brush touches keeps its
+natural per-cell tops: counted up from the band base, or, when a deep dig
+lowered the base more than a byte below them, down from the band top
+(`INFO_TOPS_DOWN`, as generated volume does). Before, a pit deeper than
+about 25 m lost them: its whole brush footprint showed contour ripples and
+a dark outline, and its walls grass streaks (the cut detection read
+garbage). Such columns keep no relief, so their surface offsets count level
+cells (`column_surface_offset`). In edited and generated columns the
+natural ground is the top cell, the risers of steps down to neighbours (air
+side above the neighbour's top) and ledge lips within two cells of the top;
+cave walls, ceilings and dug faces are not.
+
+**Picks.** A tool asks the pass for the terrain hit under a view point
+(`PlanetFrame::picks`): the pass copies that pixel's primary hit to a small
+readback ring, and the answer (distance along the pixel's ray and the size of
+the cell that drew it) arrives a few frames later. The editor's brush walks
+the exact base grid only a few cells around it: a CPU walk from the eye
+through 0.1 m cells took seconds to reach a mountain 20 km away and tens of
+seconds near the horizon. Ray walks look a column's top and brushes up once
+per column.
+
+Sculpting stress (`HELIO_VOXEL_FLIGHT_SCULPT=1`, three stamps a frame on one
+ring): brush CPU per frame 397 / 590 / 1704 ms -> 0.4 / 1.8 / 4.8 ms (dig r1,
+dig r4, build r1), terrain GPU 49 / 76 / 134 ms at 720p -> 13 / 16 / 21 ms at
+1440p.
+
 ### Planet
 
 `Planet` = recipe + field + edit log. It answers the canonical questions:
@@ -146,13 +250,29 @@ publishes a `PlanetFrame` (eye in f64 world metres, planet, sun) into a shared
 mailbox; frames are camera-relative (the renderer's world origin is the eye),
 so all GPU positions are small.
 
-### CPU: `Residency::plan` (render thread)
+Helio's sky pass accepts a `PlanetarySky` with the f64 eye, planet radius
+and sun direction. Its lookup follows the radial horizon, including from
+orbit; an authored scene sky takes precedence. `ambient_radiance` supplies
+dim diffuse light on the night side; set it to zero for solar-only lighting.
+
+### CPU: `Residency::plan` (residency worker thread)
+
+The residency lives on its own thread (`ResidencyWorker`). Each frame the
+render thread takes the finished plan, uploads its work and submits the
+next request (eye, level-0 distance, job budget, CPU budget, job failures
+read back). The worker plans while the frame is encoded and executed. At
+most one plan is in flight and each result is uploaded once, in order, so
+the GPU sees exactly the sequence of `plan` calls. A result that is not
+ready when the next frame starts is uploaded a frame later (`late_plans`).
+With the result come the stats, the
+summary block list and the `Coverage` that `fallback_distances` needs, as
+they are once its work is on the GPU. Steps:
 
 1. **Edit sync.** New or undone brushes since the last frame are found by
    prefix hash; new face brushes are uploaded; resident columns they touch
    are queued as urgent regenerations.
-2. **Windows.** When the eye moved, a `WindowRequest` goes to the window
-   worker thread, which computes each level's wanted disc of columns and
+2. **Windows.** When the eye moved and the previous plan has been applied,
+   a `WindowRequest` goes to the window worker thread, which computes each level's wanted disc of columns and
    returns add/remove diffs. Level 0 covers the level-0 distance (cells about
    a pixel wide at its edge), each coarser level twice the distance. A level
    is on only if terrain within its reach can be nearer than that distance:
@@ -160,16 +280,22 @@ so all GPU positions are small.
    (`Planet::local_outer_radius`), so over a meadow 1 km below the fine
    levels are off instead of streaming columns under a tenth of a pixel.
 3. **Diff application.** Diffs are queued and applied in order within the
-   frame's CPU budget (1.5-3 ms moving by backlog, 4 ms still): removes evict residents,
+   plan's CPU budget (60 % of the frame interval, at least 1.5 ms moving or 4 ms
+   still, at most 12 ms): removes evict residents,
    a switched-off level clears its queue, adds become pending in a priority
    bucket. Diffs get at most 60 % of the budget while columns wait. A level
    with unapplied diffs is *catching up*: its `fallback_distances` entry is 0
    (no guaranteed coverage).
-4. **Admission.** Pending columns are issued nearest-first (the coarsest level
+4. **Re-ranking.** Priorities are distances from the eye when the window
+   was planned. Once the eye has moved 1/16 of a level's radius from where
+   its queue was ranked, the queued columns are re-bucketed by distance from
+   the current eye, up to 32k per plan, farthest-ranked first.
+5. **Admission.** Pending columns are issued nearest-first (the coarsest level
    always first, for global coverage) until the GPU job budget (from the
    measured GPU cost per job) or the CPU budget runs out: allocate a record,
    build its edit-reference list, reference its summary blocks, insert it in
-   the hash table. Everything issued this frame is one GPU patch.
+   the hash table. Everything issued by one plan is one GPU patch, with each
+   table and summary block slot once, at its final value.
 
 ### GPU
 
@@ -180,6 +306,42 @@ so all GPU positions are small.
    above, mixed bricks in between), allocate a brick run of the right size
    class, write mixed bricks, publish the record, and raise the column's
    summary-block tops and the level's top. Evicted runs return to free lists.
+   Failed jobs (scratch or pool full) append their keys to a failure list
+   that the CPU reads back and retries. Natural columns reconstruct exact
+   cell occupancy from their stored tops; Add/Remove columns and generated
+   volumetric columns keep arbitrary mixed-brick occupancy. Cells within the
+   program's `terrain_extent` of the heightfield top are evaluated in 3D
+   (the sign of `terrain_density` at the seamless `volume_point`) in two
+   passes: the first finds each lane's cells that differ from the
+   heightfield, the band loop evaluates those and one more on each side.
+   Only a column with such cells is generated volume: its band covers them
+   and it is marked `INFO_GENERATED` (`INFO_TOPOLOGY` is only for edit cuts:
+   a generated column keeps its natural surface, relief and materials).
+   A column whose cells all keep the heightfield's kinds (most of a cave
+   region's rock, ground too flat to lean) stays a heightfield column:
+   before, every column with an extent stored the band down to the cave
+   depth as bitmap bricks (now 44 % of them are generated at a cave and an
+   overhang site, `generated_volume_is_stored_only_where_cells_change`).
+   The column and its lean lattice nodes share one `generation_column` call
+   site (compilers inline every call). Densities are signed
+   distances to the field height itself (mm, passed to `terrain_density`),
+   not to the floor of the level's cell, so a coarse level folds the same
+   surface the base level does. Lanes the overhangs fold take every cell and
+   their relief from the density: the top cell's fraction is the zero
+   crossing between the highest solid cell's centre and the air cell above,
+   and a crossing in the upper half of that air cell makes it the solid
+   partial top cell, as in a heightfield. Elsewhere a cell the volume leaves
+   as the heightfield has it keeps the heightfield's kind and relief. Before,
+   lanes whose surface the volume changed lost their relief: overhang
+   regions (about a third of Earth's land) showed whole-cell ledges at every
+   coarse level, drawn as grey and brown patches that became grass on
+   approach.
+   Its header stores each cell's generated top (first air above the highest
+   generated solid cell, counted down from the band top; `INFO_GENERATED`),
+   so material depth counts from the real surface:
+   overhang lips are turf, cave walls, floors and ceilings are rock. Side
+   faces measure from the air-side cell's top (a cave wall lies far below
+   it, a natural riser does not).
 3. **Horizon** (`horizon.wgsl`): the directional sky bound. Resident summary
    blocks are binned by azimuth sector and distance bucket around the eye;
    each bucket stores the lowest elevation that clears it.
@@ -210,10 +372,57 @@ so all GPU positions are small.
   claimed ~30 m of air, rays stepped cell by cell through it (137 steps per
   ray instead of 6) and columns stored empty bricks. Tops are allowed to be
   loose only by the 3-bit `gap` (<= 7 cells).
+- **Demand stays inside capacity; nothing stalls at a limit.** Resident
+  columns grow with the pixel count: at 1440p a ground view holds ~1.7M
+  columns and 80% of the pool, the editor viewport ~2.8M (the record cap was
+  3M). Once records or pool units ran out, admission stopped and the view
+  stayed coarse. Admission is CPU-bound (~2 us per column) while churn grows with resolution squared times speed: at 1440p flying 90 m/s
+  near the ground the windows churn ~100k columns/s, and at 25 km altitude
+  and 25 km/s about as many. Above 85% of records or pool, or with over 10%
+  of the wanted columns outstanding while moving (pending or to be added by
+  queued diffs; a still camera is loading, not churning), the
+  level-0 distance shrinks in 10-25% steps (`lod_pressure` in the stats;
+  churn falls with its square, cells get slightly wider on screen); below
+  65% and 2% it recovers in 5% steps.
+- **Residency plans run one frame ahead, off the render thread.**
+  Admission on the render thread took 1.5-4 ms of every frame and still
+  managed only ~1500-3000 columns per frame. `ResidencyWorker` keeps one
+  plan in flight: frame N uploads the plan requested in frame N-1. Ordering
+  invariants carry over unchanged because results are uploaded in request
+  order, once each: records evicted by one plan are reused only by the next,
+  and table patches are final values computed on the worker. Everything the
+  render thread reads about residency (stats, `Coverage`, `blocks_exact`,
+  live blocks, diagnostics' table copy) comes with the result, so it matches
+  the GPU state, not the worker's newer state. The plan's job readback is
+  reserved when it is requested. `freeze_residency` neither takes nor
+  requests a plan. A still, idle view requests no plans, so `settled()`
+  becomes true.
+- **Pending priorities follow the eye.** A window's adds are ranked by
+  distance from where it was planned. With admission lagging at speed, the
+  eye flew over columns queued as far while columns it had left were issued
+  first. A level whose queue was ranked 1/16 of its radius from the current
+  eye is re-ranked, in bounded chunks.
+- **Window plans are coalesced.** A new plan is requested only after the
+  previous one has been applied; the worker diffs against the last window it
+  sent, so one diff spans all motion since. A request per moved frame queued
+  every intermediate window: climbing at 1440p the queue reached 3000+ level
+  diffs, eviction and admission fell further behind every frame and the view
+  stayed coarse (100% of terrain pixels enlarged, up to 465 px).
+- **Every job outcome reaches the CPU.** Failed jobs are appended to a GPU
+  list that is copied to a readback with the allocator counters; with no free
+  readback the frame issues no jobs. Results used to be copied only when a
+  readback slot was free and otherwise assumed successful, so a failed column
+  stayed resident on the CPU, unpublished on the GPU, and was never retried.
+- **Pool pages return to the free stack.** Size classes take whole pages; a
+  per-page free-run count lets `allocator_recycle.wgsl` (run under pool
+  pressure, at most every 60 frames) give wholly free pages back, so terrain
+  that changes character no longer strands pages in classes it stopped using.
 - **Exact traversal, conservative accelerations.** The sky bound, summary
   blocks and residency hints may only skip space proven empty; tests compare
   renders with and without each acceleration.
-- **Hash table.** Linear probing, `slot_hash(key0, key1)`, at most
+- **Hash table.** 8M slots (at 4M slots and 2.5M+ columns probe runs passed
+  the GPU limit). A column is only inserted within the GPU's probe limit of
+  its home slot (`ColumnIndex::can_insert`). Linear probing, `slot_hash(key0, key1)`, at most
   `MAX_PROBES = 64` probes on the GPU. The CPU uses the same table for its own
   lookups (`ColumnIndex`); deletion is backward shift (no tombstones), so
   probe runs never degrade and the table never needs a rehash. Every slot
@@ -236,9 +445,8 @@ so all GPU positions are small.
   frames late and repeat until a newer sample completes, so each sample is
   used once with the job count of the frame it measured (dividing by the
   last frame's jobs overestimated the cost 2-7x). Measured: ~0.22 us per
-  column on an RTX 3060, ~6500 jobs per moving frame. The CPU budget for
-  diffs and admission grows from 1.5 to 3 ms while moving as the backlog
-  reaches 20k columns.
+  column on an RTX 3060, ~6500 jobs per moving frame. The residency
+  worker's CPU budget is 60% of the frame interval (1.5-12 ms).
 - **Pending queues are exact.** Each level's pending columns sit in
   priority buckets with a position index, so a window moving at speed
   removes columns in O(1). A lazy heap kept millions of stale entries and
@@ -251,24 +459,122 @@ so all GPU positions are small.
   stay in the GPU bounds where correctness depends on them). Being
   optimistic here only makes a coarser level draw that terrain.
 - **No frame does unbounded CPU work.** Window diffs and admission are
-  time-budgeted; nothing rehashes or reallocates in bulk on the render
+  time-budgeted on the residency worker (a late plan costs a frame without
+  uploads); nothing rehashes or reallocates in bulk there or on the render
   thread (a 1M-entry `HashMap` doubling cost 70 ms; a table rehash 70-90 ms).
   If you add per-column CPU work, keep it inside the budgeted loops.
 - **Stable LOD dither.** The level-transition threshold is hashed per column,
   not per frame, so a moving camera sees each column change level once
   instead of flickering between two levels while TAA history is rejected.
+- **A level switch is not a surface.** When a ray changes level, the new
+  level may already be solid at the cursor although the ray has only crossed
+  air at the old one. `trace.wgsl` keeps walking the current level there
+  (`level_contains_solid`) instead of publishing an interior hit with the
+  last, unrelated face normal. Without that check, moving cameras saw grey
+  patches sweep across the terrain in waves along transition rings.
 - **Camera-relative frames.** All GPU positions are relative to the eye.
   Anything defined in world space (overlays, billboards, SceneDB rows) must
   be rebased by `PrepareContext::world_origin`. Rays toward the far plane must
   be built as `far.xyz - far.w * eye` (homogeneous): with near 5 cm and far
   40 000 km the far plane is at f32 infinity and dividing by `w` gives NaN.
 - **Filtered appearance** (after "Filtered appearance for voxels", HPG 2023):
-  cells about a pixel wide are shaded with the column's macro normal and show
+  cells about a pixel wide are shaded with the ground's smooth normal and show
   surface material on risers, so distant terrain has no contour lines; cells
   several pixels wide keep crisp faces. The blend follows the pixel
-  footprint, so level changes show no seam.
-- **Band overflow.** A column taller than `MAX_BAND` bricks is not published;
-  coarser levels cover it.
+  footprint, so level changes show no seam. Base voxel steps fade from 2
+  pixels down by the size their faces project to (`step_filter_weight`: a
+  riser seen from above is a fraction of a voxel tall on screen).
+- **Smooth surface model.** Every column stores, per cell, the exact surface
+  below voxel precision: a surface offset (one byte, 1/128 of a base cell,
+  `column_surface_offset`) over its stored height (level-0 top or relief
+  base-cell top), from the generator's exact height or, at level 0, a
+  density surface's zero crossing; coarser density surfaces keep it in their
+  Q16 relief fractions. Occupancy, relief and materials never read it. The
+  smooth normal (`relief_field_gradient`) is its central differences one
+  cell each way at the four cell centres around the pixel's base cell,
+  interpolated bilinearly across cells and columns, at every level. The
+  per-column stencils it replaced lit a voxel staircase: one secant per 8x8
+  column at level 0 (0.8 m tiles under a low sun) and in-column differences
+  of base-quantized heights at coarser levels, zero on treads metres long
+  and spiking at risers (dark worms along contours and column borders).
+  It also gives the material height (the exact height at the pixel), so
+  the screen-space climate pass and its far-relief normal (a second,
+  per-pixel-stencil normal with a known 0.58 rad defect at 0.3 m voxels)
+  are gone. Cost: +0.34 ms shade at 1196x729 (`surface_offsets_reconstruct_the_field_height`,
+  `stored_sphere_normals_match_authored_macro_slopes_and_ignore_reuse_hint`).
+  Natural ground at any size is lit
+  partly with its slope's normal (step softness, appearance `detail.w`,
+  0.7 on Earth), casts no step shadows, keeps AO soft and keeps turf on its
+  risers: a staircase standing for a slope reads as voxel texture instead
+  of black contour lines and brown soil dashes on every step.
+- **Voxel mosaic at every distance** (Lay of the Land look). Each drawn
+  cell, a base voxel near the eye and an LOD cell beyond (1-2 pixels wide
+  at every level), takes its own brightness and its own place on its
+  material's patch ramp from a hash of its volume point (blades of
+  different hue; weathered and fresh stone), down to about half a pixel
+  (`mosaic_weight`); temporal reconstruction averages smaller cells. Keyed
+  to the base voxel it faded out as voxels shrank below a pixel, before the
+  coarser levels took over: a smooth band between voxel ground near the eye
+  and stepped ground far away. The pattern changes with the level (LOD
+  voxels are coarser); lighting stays the smooth ground's, so steps draw no
+  contour lines. The natural top
+  of generated cave and overhang columns filters too; cave walls and edit
+  cuts stay crisp (`natural_surface_hit`).
+- **Material slope at one scale.** Materials (rock, scree, snow, grass)
+  classify a slope measured the same way whatever level draws the pixel:
+  central differences of relief heights 3.2 m each way (two level-4 cells,
+  one level-5 cell), interpolated between cell centres; levels 4 and finer
+  read level-4 columns, level 5 its own, coarser levels their own cells
+  (`material_slope` in surface.wgsl and planet.rs). Coarse levels used to
+  mix in a two-cell local derivative and a screen-space gradient, steeper
+  over roughness: hillsides turned to rock and scree far away. Each level used to
+  measure across its own 8-cell block (0.7 m at level 0, 11 m at level 4):
+  rock and snow changed as the camera approached, and the 0.1 m steps of
+  level 0 flickered across the thresholds (a rock riser on every step of a
+  snowfield). Forced-coarser views of one flank now keep their rock share
+  within 18-24 % (it was 34 % at the finest levels, 19 % at the coarsest).
+- **Overhang amplitude** grows from 0 at an overhang region's edge (less the
+  two level cells a level cannot resolve). It used to jump from 0 to two
+  cells there, a step seam along every region border.
+- **Overhangs lean the heightfield.** A cell is solid where it lies below
+  the field's height at a horizontally displaced point,
+  `z < H(x + W(x, z))`: `W` (`terrain_lean_offset`) varies with height at
+  the ledge spacing and eight times more slowly across the ground, so for
+  each height the map `x -> x + W` stays invertible and the solid is a
+  continuous deformation of the heightfield's (no floating rock, no tears).
+  Steep ground bends over into ledges; flat ground is unchanged. The engine
+  evaluates the field on a global lattice per level (`terrain_lean`: nodes
+  every `spacing` cells within `reach` of the column; generation's 64 lanes
+  evaluate the 8x8 nodes once per column) and passes the bilinear height at
+  the displaced point plus the column's own detail off the lattice
+  (`terrain::lean_height`); CPU and GPU agree to the bit
+  (`overhang_view_matches_canonical_cpu_ray_casts`,
+  `overhangs_lean_steep_ground_without_floating_rock`). The earlier overhangs
+  added a 3D noise to the height and left floating pieces and tears.
+- **Caves** are a network under a rock cover: tunnels narrow to nothing over
+  two radii towards the cover and the cave depth, caverns raise their
+  threshold as they close, and the cover opens only in entrance zones
+  (`caves_open_to_the_surface_only_at_entrances`,
+  `caves_leave_no_floating_rock`).
+- **Clipped bands.** A column stores one band of at most `MAX_BAND` (256)
+  bricks, with solid ground below and air above. A taller one (a deep dig,
+  deep caves, a crater wall) keeps the 256 bricks around the eye's layer at
+  its level and is flagged clipped below and/or above (`INFO_CLIP_*`): rays
+  beyond a clipped side continue at the next coarser level, whose window
+  reaches twice as far (never refining into it), and summary and level tops
+  keep the unclipped top. Generation reports clipped columns with their
+  window centre (`STATUS_CLIPPED`); residency regenerates them when the eye
+  moves a quarter window vertically (`follow_clipped`). Columns used to be
+  left unpublished instead, so deep holes showed only at coarse levels.
+- **Brushes.** Cubes are tested in each face's half-cell index space (a
+  one-block cube is exactly one cell, aligned with the ground); spheres are
+  balls in the seamless volume space (`Grid::volume_point`), round at any
+  size and depth, the planet's centre included (a ball around the core
+  resolves onto every face). Both use exact 64-bit squares, up to 2^29 half
+  cells of radius. A face brush carries its horizontal culling extent and
+  the half-cell heights it can touch (band bounds). Jobs whose bands outgrow
+  the generation scratch are retried with a smaller job budget
+  (`scratch_retries`).
 
 ## Measuring
 
@@ -297,12 +603,23 @@ times come from timestamps.
 | `HELIO_VOXEL_FLIGHT_BLOCKY=1` | Logs the share of terrain pixels drawn by a coarser-than-base level with cells wider than 2 and 4 px (by design at most ~2.2 px; wider means a finer level is still loading). Cruise and replay always log it. |
 | `HELIO_VOXEL_FLIGHT_TRIP_FROM=<km>`, `_TRIP_FPS=<n>`, `_TRIP_EVERY=<frames>` | Trip start on the flank of the nearest summit (rock, scree, snow); flight frames per second (120; the editor runs near 60); capture cadence. |
 | `HELIO_VOXEL_FLIGHT_LODCMP=<km>` | One view over a flank rendered with levels forced progressively coarser: surface colour shares must not change (they stay within 3 %). |
+| `HELIO_VOXEL_FLIGHT_LONG=<s>` | Sustained heavy travel (dives from 25 km to 30 m and climbs, turning, at 2-3x editor speed), then a stop: logs pool, table probe runs, queued diffs, `lod_pressure` and enlarged blocks. Run it at the editor's resolution (e.g. `2560 1440`); at 720p demand is 4x lower and capacity limits never show. |
 | `HELIO_VOXEL_FLIGHT_CRUISE=<m>`, `_CRUISE_SECS=<s>` | Level flight at that height at the editor's speed for 20 s, then a stop: residency lag while moving and time to converge. |
 | `HELIO_VOXEL_FLIGHT_REPLAY=<engine.log>`, `_REPLAY_FROM/_TO=<s of day>`, `_REPLAY_DEG` | Replays the altitude timeline of a Pulsar editor session logged with `PULSAR_VOXEL_STATS=1`. |
 | `HELIO_VOXEL_FLIGHT_SUN=x,y,z` | Sun direction (the editor's default Sun is straight up). |
+| `HELIO_VOXEL_FLIGHT_VIEWS=h:pitch,...` | Settles and captures views `h` metres above the ground site (`view_<h>_<pitch>.png`); with `_VIEWS_CAVES=1` above the nearest cave or overhang region, with `_VIEWS_OVERHANGS=1` above the nearest hillside of an overhang region. |
+| `HELIO_VOXEL_FLIGHT_SCULPT=1` | Sculpting stress: dig r1, dig r4 and build r1 strokes stamped three (two) times a frame on one ring; logs brush CPU, frame time and generation cost per stroke. |
+| `HELIO_VOXEL_FLIGHT_HEIGHTFIELD=1` | The Earth stack without caves and overhangs. |
+| `HELIO_VOXEL_FLIGHT_SEED=<n>` | The Earth stack with another seed (7). |
+| `HELIO_VOXEL_FLIGHT_PRESET=earth\|moon\|desert`, `_NO_CAVES`, `_NO_OVERHANGS`, `_GRAIN=scale_m,octaves,ratio` | The layer stack; without caves or overhangs; an extra roughness layer. |
+| `HELIO_VOXEL_FLIGHT_VIEWS_AHEAD=<m>,<right m>`, `_LOD_PIXELS=<f>` | `VIEWS` from a site moved along the view heading; the renderer's `lod_pixels` (2: every level one step finer). `VIEWS` and `LODCMP` (with `_VIEWS_POLE`: the pole's hills at 60 and 300 m) skip the ground audits. |
+| `HELIO_VOXEL_FLIGHT_VIEWS_POLE=<rad>`, `_VIEWS_MOUNTAIN=<km>` | `VIEWS` from the north pole (Pulsar's example spawn) along a bearing, or from the flank of the nearest summit facing it. |
+| `HELIO_VOXEL_FLIGHT_LOOK=exposure,contrast,saturation` | A camera post-process with an outdoor look (ACES tone map and a grade), as the Pulsar example level has. |
+| `HELIO_VOXEL_DEBUG=<n>` | Debug shading: 1 level colours (brighter where filtered), 2 the same lit from the vertical (only sun shadows stay dark), 3 the level the distance asks for, 4 column kinds (generated volume red, edit topology orange, relief green, plain blue), 5 faces and burial (red sides, blue undersides, green where material depth > 0). |
 | `HELIO_VOXEL_FLIGHT_QUICK=1`, `_GROUND_ONLY=1`, `_CPU_PROBE=1` | Short timing probe, ground audits only, CPU per pass. |
 | `HELIO_VOXEL_PLAN_TRACE=<ms>` | Logs residency plan phases of frames taking over `<ms>` (10 if not a number). |
 | `HELIO_VOXEL_LOD_DITHER`, `HELIO_VOXEL_NO_HORIZON`, `HELIO_VOXEL_NO_FAILSAFE` | Override the dither width; disable the sky bound; disable its fail-safe (A/B timing). |
+| `HELIO_VOXEL_COARSE_RELIEF=0`, `HELIO_VOXEL_RIDGE_DISPLAY=0` | Disable fractional radial tops or ridge-envelope display heights for A/B comparisons. Set before loading terrain. |
 
 Measuring pitfalls: synchronous readbacks (audits, probes, captures) idle
 the GPU and the driver drops its clock (frames right after them show 210 MHz
@@ -335,26 +652,88 @@ voxel_pass_graph` (the pass inside the deferred graph, editor overlays).
   the GPU table equals the CPU table every frame while moving; the local
   terrain bound holds for sampled columns and is local over lowland.
 - Graph: settles, resizes and drops the source in the deferred graph; editor
-  overlays stay in world space in camera-relative frames.
+  overlays stay in world space in camera-relative frames; the planetary sky
+  follows the eye and sun, has no wedges from orbit and keeps a dim shadowed
+  hemisphere; appearance edits show in one frame without rebuilding residency.
+- Appearance and relief (one file each): `grey_patch` (level transitions
+  enter the surface, not subsoil; alpine features survive distance),
+  `coarse_relief*`, `column_relief`, `raw_sphere_relief`, `far_relief`,
+  `mixed_brick_range` (fractional tops, heightfield columns, paint and
+  edits), `ridge_envelope` (display generation keeps ridge mass; canonical
+  queries stay exact), `coherent_relief`, `material_filter`, `face_local_uv`,
+  `shadow_receiver` (filtered materials, slopes, soil lips, grazing faces and
+  shadow origins). Windows want complete 4x4 blocks
+  (`windows::tests`). Two far-relief checks are `#[ignore]`d as known defects
+  present before this layout too: one L12 pixel's relief normal at 0.3 m, and
+  one pixel's material id under raw sphere relief.
 
 ## Extending
 
 **A terrain generator.** Implement `TerrainGenerator` (id, version, info with
 an optional settings-component name) returning a `TerrainField` and its
 `TerrainProgram` (WGSL defining `TerrainConstants`, `terrain_height`,
-`ground_material`, plus the constants' bytes). Use only the integer noise
-library. Register it with `terrain::register`. Add a test calling
+`ground_material`, plus the constants' bytes). A program may also define
+`terrain_surface(p, level, height) -> u32`: an 8-bit surface word per column
+cell, computed once when the column is generated and stored with it (one
+pool unit per column, only for programs that define it), passed to
+`ground_material`. It carries what materials need besides height (Earthlike
+style: the erosion term, so gully floors fill with gravel and rock shows on
+the ribs; Lunar: fresh ejecta and basins); shading never runs the generator
+per pixel. Volumetric generators also
+define `terrain_extent` and `terrain_density` (and `TerrainField::extent`,
+`density`, `volume_bounds`), and leaning ones `terrain_lean` and
+`terrain_lean_offset` (`TerrainField::lean`, `lean_offset`; the engine passes
+the leaning height to `terrain_density` as `lean_height`). A density is the signed distance from the cell
+centre to the surface (256 per level cell, positive inside solid; the cell is
+solid where it is positive): combine terms as constructive solid geometry on
+distances (intersection: minimum, union: maximum), and make every cut a
+term (the built-in caves' region edge, depth floor and cavern cover are),
+so the field is a distance on both sides of every surface. Smooth surfaces
+interpolate it between cell centres (`densities_are_signed_distances_to_the_surface`
+holds the built-in field within 1.6 cells across every crossing). Keep the extent tight, since every cell in it is
+evaluated per job and the band holds at most 256 bricks. Return an empty
+extent at levels that cannot show a feature (the stack resolves tunnels while
+their radius spans a cell, covered caverns while a cell fits in the cover):
+volumetric columns lose relief and filtered shading. Use only the integer noise
+library. One version of each generator is registered; saved edits record
+it, so bump it when a released generator changes its output (in-development
+changes replace the output in place). Register it with `terrain::register`. Add a test calling
 `engine::verify_field` for every shape and `terrain::check_field`. Changing
 settings rebuilds the world without recompiling shaders; pipelines are keyed
-by program.
+by program. A new program compiles on a worker thread (`PlanetPass`; the
+large pipelines in parallel, ~12 s in a row cold) while the previous terrain
+stays on screen, so neither a host's start nor a terrain change freezes it.
 
-**A material.** Add the id to `terrain::material` and `world.wgsl`, its
-colour to `palette` in `surface.wgsl`, and to editor-facing enums (Pulsar's
-`VoxelTerrainMaterial`).
+**Materials.** Shading knows a material only through its
+`MaterialAppearance` (16 per world): colour and roughness, optional
+world-space patch colours (turf), a lip material on the sides of its surface
+cells (soil under turf), the material and share of its single-voxel flecks,
+and the host a filtered speck blends into. No material id is special to the
+renderer. A terrain program may report display-only blends for the shaded
+cell through the appearance channel (`common.wgsl`): a coverage between two
+materials, a mix of four, and the material whose flecks are averaged.
+The Earthlike style uses them for snow edges and stone bands; canonical ids
+never change.
 
-**A brush shape.** Extend `BrushShape`, its per-face resolution in
-`edits.rs`, the containment test in both `edits.rs` and `generate.wgsl`
-(`apply_edits`), and the band bounds from brushes in `generate.wgsl`.
+**Material rules.** A stack picks materials by style: Earthlike (meadows,
+dry lands, outcrops, strata, snow, with display filtering), Lunar, Layered,
+or Rules: an ordered list of up to 16 `MaterialRule`s, each a material and
+conditions that must all hold (column height, slope, depth below the top,
+moisture, the erosion surface word, noise patches with a size and share,
+strata bands, single-cell specks); the first that holds wins, else `rock`.
+Rules are uniform data (`PackedRule`), so a game's biomes change without
+recompiling shaders (`TerrainLayers::desert` is built from rules only).
+
+**Appearance.** `PlanetPass::set_appearance` updates the material table
+and detail without rebuilding terrain. RGB is sRGB; roughness is linear.
+When it returns `true`, reset temporal colour history to show the change in
+an idle viewport.
+Unedited Earthlike rock has a world-space weathered surface coating;
+canonical material ids, underlying strata and explicit paint are unchanged.
+
+**A brush shape.** Extend `BrushShape`, its per-face resolution (culling
+extent, height bounds) in `edits.rs`, and the containment test in both
+`FaceBrush::contains` and `brush_contains` (`common.wgsl`).
 
 **GPU work per column.** Put it in `generate.wgsl`; keep CPU admission cheap
 and inside the budgeted loop in `Residency::plan`.

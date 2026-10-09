@@ -1,12 +1,11 @@
 //! SceneDB World registration for voxel authoring components.
 //!
-//! These behaviors intentionally do not invoke rendering or generation. A
-//! future voxel backend can observe the typed SceneDB rows and consume
-//! revisioned external updates without coupling component hydration to a pass.
+//! Registration never invokes rendering or generation: the voxel backend
+//! reads the terrain and layer instances when it projects the scene.
 
 use engine_class_derive::{register_component_runtime, register_world_component};
 
-use super::{TerrainEventsEventWriterExt as _, VoxelComponent, VoxelFlatTerrainComponent, VoxelLandformComponent, VoxelTerrainComponent};
+use super::{TerrainEventsEventWriterExt as _, VoxelComponent, VoxelTerrainComponent, VoxelTerrainLayersComponent};
 
 // Component callbacks borrow the authoritative terrain row from SceneDB.
 // The pending event list is transient transport state populated only after a
@@ -74,11 +73,9 @@ impl VoxelComponent {}
 #[register_world_component]
 impl VoxelTerrainComponent {}
 
+// Settings of the terrain on the same object, read when it is projected.
 #[register_world_component]
-impl VoxelLandformComponent {}
-
-#[register_world_component]
-impl VoxelFlatTerrainComponent {}
+impl VoxelTerrainLayersComponent {}
 
 // Reported unfinished (Pulsar-Native#1035, Phase 4; tracked in #1056): the
 // properties card shows the reason and issue, and attaching one logs them once.

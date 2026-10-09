@@ -72,6 +72,7 @@ image.workspace = true
 helio-voxel-data.workspace = true
 helio-asset-compat = { workspace = true }
 helio-pass-postprocess = { workspace = true }
+helio-pass-sky = { workspace = true }
 helio-pass-volumetric-fog = { workspace = true }
 helio-pass-water-sim = { workspace = true }
 # CPU voxel worlds (generators, exact cells, ray casts) for the terrain

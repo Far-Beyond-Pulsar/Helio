@@ -10,7 +10,10 @@
 //! [`VoxelTerrainComponent`]: `get_block`, `set_block`, `fill_sphere`,
 //! `fill_cube`, `raycast_distance` and `voxel_size`. Material ids are the
 //! engine terrain materials (`helio_pass_voxel_planet::terrain::material`);
-//! 0 is air.
+//! 0 is air. They shape the built-in generator's layer stack through
+//! [`VoxelTerrainLayersComponent`]: `use_preset`, `add_layer`,
+//! `remove_layer`, `layer_count` and the per-layer setters; the world
+//! rebuilds from the changed settings.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -25,7 +28,18 @@ use helio_voxel_data::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditJ
 use pulsar_scene_model::components::Transform;
 use pulsar_scenedb::{Entity, World};
 
-use super::{BlockData, BlockMaterialChange, VoxelTerrainComponent, VoxelWorldShape};
+use super::{
+    BlockData, BlockMaterialChange, VoxelLayerKind, VoxelTerrainComponent, VoxelTerrainLayer,
+    VoxelTerrainLayersComponent, VoxelTerrainStack, VoxelWorldShape,
+};
+
+/// Base colour (linear 0..1 sRGB-encoded components, as authored) of material
+/// `id` in the built-in appearance, for editor palettes.
+pub fn material_colour(id: u32) -> [f32; 3] {
+    let table = helio_pass_voxel_planet::terrain::TerrainAppearance::default();
+    let colour = table.materials.get(id as usize).map_or([0.5; 4], |m| m.colour);
+    [colour[0], colour[1], colour[2]]
+}
 
 /// The world of a terrain form and generator.
 pub fn world_recipe(
@@ -301,7 +315,7 @@ fn affected_block_centres(
                         helio_pass_voxel_planet::edits::center_half(j, 0),
                         helio_pass_voxel_planet::edits::center_half(k, 0),
                     ];
-                    if !face_brush.contains(sample) {
+                    if !face_brush.contains(sample, || grid.volume_point(face_brush.face(), i, j, k, 0)) {
                         continue;
                     }
                     let position = grid.position(
@@ -493,5 +507,95 @@ impl VoxelTerrainComponent {
     #[world_method(pure, category = "Voxel")]
     fn voxel_size(world: &World, entity: Entity) -> Result<f64, String> {
         Ok(terrain_world(world, entity)?.grid().voxel_size())
+    }
+}
+
+/// The layers instance `entity` names: the instance itself, or the first
+/// layers instance of its owner object (a sibling component or the object).
+fn layers_instance(world: &World, entity: Entity) -> Result<Entity, String> {
+    if world.get::<VoxelTerrainLayersComponent>(entity).is_some() {
+        return Ok(entity);
+    }
+    let owner = pulsar_scene_model::attachments::owner_of(world, entity).unwrap_or(entity);
+    pulsar_world_registry::instances::resolve_instance(world, owner, "VoxelTerrainLayersComponent", 0)
+        .ok_or_else(|| "the object has no terrain layers".into())
+}
+
+fn layers_mut(world: &mut World, entity: Entity) -> Result<pulsar_scenedb::Mut<'_, VoxelTerrainLayersComponent>, String> {
+    let instance = layers_instance(world, entity)?;
+    world.get_mut::<VoxelTerrainLayersComponent>(instance).ok_or_else(|| "the object has no terrain layers".into())
+}
+
+fn layer_mut(stack: &mut VoxelTerrainStack, index: u32) -> Result<&mut VoxelTerrainLayer, String> {
+    let count = stack.layers.len();
+    stack.layers.get_mut(index as usize).ok_or_else(|| format!("layer {index} out of {count}"))
+}
+
+// Scripting surface of the layer stack: a game shapes (or randomizes) its
+// worlds by changing layers; the terrain rebuilds from the new settings.
+#[pulsar_scenedb::component_methods]
+impl VoxelTerrainLayersComponent {
+    /// Replace the stack with a preset: "earth", "moon", "desert" or "flat"
+    /// (`VoxelTerrainStack::PRESETS`).
+    #[world_method(category = "Voxel")]
+    fn use_preset(world: &mut World, entity: Entity, name: String) -> Result<(), String> {
+        let preset = VoxelTerrainStack::preset(&name)
+            .ok_or_else(|| format!("unknown terrain preset {name:?} ({})", VoxelTerrainStack::PRESETS.join(", ")))?;
+        layers_mut(world, entity)?.stack = preset;
+        Ok(())
+    }
+
+    /// Number of layers in the stack (enabled or not).
+    #[world_method(pure, category = "Voxel")]
+    fn layer_count(world: &World, entity: Entity) -> Result<u32, String> {
+        let instance = layers_instance(world, entity)?;
+        let stack = world.get::<VoxelTerrainLayersComponent>(instance).ok_or("the object has no terrain layers")?;
+        Ok(stack.stack.layers.len() as u32)
+    }
+
+    /// Append a layer of `kind` (Hills, Mountains, Craters, ...) with its
+    /// default parameters; returns its index.
+    #[world_method(category = "Voxel")]
+    fn add_layer(world: &mut World, entity: Entity, kind: String) -> Result<u32, String> {
+        let kind: VoxelLayerKind = serde_json::from_value(serde_json::Value::String(kind.clone()))
+            .map_err(|_| format!("unknown layer kind {kind:?}"))?;
+        let mut component = layers_mut(world, entity)?;
+        component.stack.layers.push(VoxelTerrainLayer::new(kind));
+        Ok(component.stack.layers.len() as u32 - 1)
+    }
+
+    #[world_method(category = "Voxel")]
+    fn remove_layer(world: &mut World, entity: Entity, index: u32) -> Result<(), String> {
+        let mut component = layers_mut(world, entity)?;
+        layer_mut(&mut component.stack, index)?;
+        component.stack.layers.remove(index as usize);
+        Ok(())
+    }
+
+    #[world_method(category = "Voxel")]
+    fn set_layer_enabled(world: &mut World, entity: Entity, index: u32, enabled: bool) -> Result<(), String> {
+        layer_mut(&mut layers_mut(world, entity)?.stack, index)?.enabled = enabled;
+        Ok(())
+    }
+
+    /// The layer's main height in metres (amplitude, depth or plateau height).
+    #[world_method(category = "Voxel")]
+    fn set_layer_height(world: &mut World, entity: Entity, index: u32, height_m: f64) -> Result<(), String> {
+        layer_mut(&mut layers_mut(world, entity)?.stack, index)?.height_m = height_m;
+        Ok(())
+    }
+
+    /// The layer's scale in kilometres (first wavelength or largest feature).
+    #[world_method(category = "Voxel")]
+    fn set_layer_scale(world: &mut World, entity: Entity, index: u32, scale_km: f64) -> Result<(), String> {
+        layer_mut(&mut layers_mut(world, entity)?.stack, index)?.scale_km = scale_km;
+        Ok(())
+    }
+
+    /// The share of the surface the layer covers (regions, basins, craters).
+    #[world_method(category = "Voxel")]
+    fn set_layer_coverage(world: &mut World, entity: Entity, index: u32, coverage: f64) -> Result<(), String> {
+        layer_mut(&mut layers_mut(world, entity)?.stack, index)?.coverage = coverage;
+        Ok(())
     }
 }
