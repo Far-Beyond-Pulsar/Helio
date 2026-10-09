@@ -3,7 +3,7 @@
 //! the optical model and the `postprocess_uniforms` -> `lens_output` contract.
 
 use helio_core::graph::ResourceBuilder;
-use helio_core::{PassContext, RenderPass, ResourceKey, Result as HelioResult};
+use helio_core::{CommandRecorder, PassContext, RenderPass, ResourceKey, Result as HelioResult};
 
 pub mod gpu_types;
 pub use gpu_types::*;
@@ -348,15 +348,15 @@ impl LensFlarePass {
 
     /// This frame's filtered source image (pyramid level 0) becomes next
     /// frame's reprojected history.
-    fn store_history(&self, encoder: &mut wgpu::CommandEncoder) {
-        encoder.copy_texture_to_texture(
+    fn store_history(&self, cmds: &mut CommandRecorder<'_>) {
+        cmds.copy_texture_to_texture(
             self.bright.texture.as_image_copy(),
             self.history.as_image_copy(),
             self.history.size(),
         );
     }
 
-    fn clear(&self, encoder: &mut wgpu::CommandEncoder) {
+    fn clear(&self, cmds: &mut CommandRecorder<'_>) {
         let attachments = [Some(wgpu::RenderPassColorAttachment {
             view: &self.output.view, resolve_target: None, depth_slice: None,
             ops: wgpu::Operations {
@@ -365,7 +365,7 @@ impl LensFlarePass {
             },
         })];
         // Fast clear guarantees no stale response when disabled or resources vanish.
-        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let _pass = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Lens clear"), color_attachments: &attachments,
             depth_stencil_attachment: None, timestamp_writes: None,
             occlusion_query_set: None, multiview_mask: None,
@@ -375,13 +375,13 @@ impl LensFlarePass {
     fn record(
         &mut self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        cmds: &mut CommandRecorder<'_>,
         input: Option<&wgpu::TextureView>,
         pp: Option<&wgpu::Buffer>,
         optics: OpticsInputs<'_>,
     ) {
         if let Some(upload) = self.dirt_upload.take() {
-            encoder.copy_buffer_to_texture(
+            cmds.copy_buffer_to_texture(
                 wgpu::TexelCopyBufferInfo {
                     buffer: &upload,
                     layout: wgpu::TexelCopyBufferLayout {
@@ -395,7 +395,7 @@ impl LensFlarePass {
         if let Some(input) = input {
             self.resize(device, input.texture().width(), input.texture().height());
         }
-        self.clear(encoder);
+        self.clear(cmds);
         // Old PP buffers fail closed without an out-of-bounds uniform binding.
         let (Some(input), Some(pp)) = (input, pp.filter(|b| {
             b.size() >= POSTPROCESS_BINDING_SIZE && b.usage().contains(wgpu::BufferUsages::UNIFORM)
@@ -467,7 +467,7 @@ impl LensFlarePass {
         }
         let (_, control, steps, optics_group, temporal_group) = self.bindings.as_ref().unwrap();
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Lens enable dispatch"), timestamp_writes: None,
             });
             pass.set_pipeline(&self.control);
@@ -478,7 +478,7 @@ impl LensFlarePass {
         {
             // Classify scene lights into analytic lens sources. One workgroup;
             // it writes an empty list when the lens or light sources are off.
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Lens light sources"), timestamp_writes: None,
             });
             pass.set_pipeline(&self.sources_pipeline);
@@ -495,7 +495,7 @@ impl LensFlarePass {
             } else {
                 (&self.response, 0, "Lens optical response")
             };
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(label), timestamp_writes: None,
             });
             pass.set_pipeline(pipeline);
@@ -508,7 +508,7 @@ impl LensFlarePass {
             if step == 0 {
                 // Blend this frame's extracted light with the reprojected
                 // history into pyramid level 0, then keep it as next history.
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Lens temporal source"), timestamp_writes: None,
                 });
                 pass.set_pipeline(&self.temporal);
@@ -516,7 +516,7 @@ impl LensFlarePass {
                 pass.set_bind_group(1, optics_group, &[]);
                 pass.dispatch_workgroups_indirect(&self.dispatch, 0);
                 drop(pass);
-                self.store_history(encoder);
+                self.store_history(cmds);
             }
         }
     }
@@ -658,7 +658,7 @@ impl RenderPass for LensFlarePass {
         };
         // Must follow fog/TSR on the graphics encoder. The separate compute
         // encoder is submitted BEFORE graphics and would sample stale HDR.
-        self.record(ctx.device, unsafe { &mut *ctx.encoder_ptr }, input, pp, optics);
+        self.record(ctx.device, &mut ctx.graphics_cmds(), input, pp, optics);
         Ok(())
     }
 }

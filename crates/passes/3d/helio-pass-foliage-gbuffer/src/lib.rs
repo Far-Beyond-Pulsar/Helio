@@ -1099,14 +1099,14 @@ impl RenderPass for FoliageGBufferPass {
                 "[foliage][raster] frame={} enabled={} render_pass_open={}",
                 ctx.frame_num,
                 self.decision.enabled,
-                ctx.active_render_pass_ptr().is_some(),
+                ctx.render_cmds().is_some(),
             );
         }
         if !self.decision.enabled {
             // Zero recorded commands. Not four empty draws — nothing.
             return Ok(());
         }
-        let Some(pass_ptr) = ctx.active_render_pass_ptr() else {
+        let Some(mut pass) = ctx.render_cmds() else {
             // The executor did not open our render pass, which means
             // `render_pass_descriptor` returned `None` (no G-buffer). Nothing to draw
             // into; not an error.
@@ -1204,7 +1204,6 @@ impl RenderPass for FoliageGBufferPass {
         }
 
         // ── Four draws, one per LOD ───────────────────────────────────────────
-        let pass = unsafe { &mut *pass_ptr };
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         for lod in 0..self.decision.draw_count {

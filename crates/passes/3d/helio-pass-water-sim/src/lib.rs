@@ -2,7 +2,7 @@ pub mod pipeline;
 pub mod simulation;
 
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::f32::consts::PI;
 use wgpu::util::DeviceExt;
 
@@ -536,7 +536,7 @@ impl WaterSimPass {
     }
 
     /// Clears every simulation layer back to the zeroed startup state.
-    fn reset_simulation(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    fn reset_simulation(&mut self, encoder: &mut CommandRecorder<'_>) {
         for view in self.sim_layer_views_a.iter().chain(&self.sim_layer_views_b) {
             encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("WaterSim Reset"),
@@ -773,7 +773,7 @@ impl RenderPass for WaterSimPass {
             .get(BufferKey::of("water_volumes"))
             .is_some_and(|handle| self.volume_liveness.maybe_live(handle));
         if sim_live && !self.sim_live {
-            self.reset_simulation(unsafe { &mut *ctx.encoder_ptr });
+            self.reset_simulation(&mut ctx.graphics_cmds());
         }
         self.sim_live = sim_live;
         let volume_count = if sim_live { MAX_SIM_VOLUMES } else { 0 };
@@ -877,7 +877,7 @@ impl RenderPass for WaterSimPass {
             // Remember where every body was applied.
             if hitboxes_buf.usage().contains(wgpu::BufferUsages::COPY_SRC) {
                 let size = hitboxes_buf.size().min(self.hitbox_prev_buf.size());
-                unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
+                ctx.graphics_cmds().copy_buffer_to_buffer(
                     hitboxes_buf,
                     0,
                     &self.hitbox_prev_buf,
@@ -1093,7 +1093,7 @@ impl RenderPass for WaterSimPass {
 
         // ---- Consolidate: copy any layers still on tex_b to tex_a --------
         // After simulation, ensure all layers are on tex_a for rendering.
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let mut encoder = ctx.graphics_cmds();
         for layer in 0..total_layers as usize {
             if !self.front_per_layer[layer] {
                 encoder.copy_texture_to_texture(
@@ -1357,7 +1357,8 @@ impl RenderPass for WaterSimPass {
                 // volume index for per-volume parameter lookups and sim
                 // texture layer selection.
                 {
-                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                    let mut cmds = ctx.graphics_cmds();
+                    let mut pass = cmds.begin_render_pass(
                         &wgpu::RenderPassDescriptor {
                             label: Some("Water Surface"),
                             color_attachments: &color_attachments,
@@ -1451,7 +1452,8 @@ impl RenderPass for WaterSimPass {
                             store: wgpu::StoreOp::Store,
                         },
                     })];
-                    let mut tint_pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                    let mut cmds = ctx.graphics_cmds();
+                    let mut tint_pass = cmds.begin_render_pass(
                         &wgpu::RenderPassDescriptor {
                             label: Some("Water Underwater Tint"),
                             color_attachments: &tint_attachments,
@@ -1493,7 +1495,7 @@ impl RenderPass for WaterSimPass {
                             store: wgpu::StoreOp::Store,
                         },
                     })];
-                    let mut blit_pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                    let mut blit_pass = cmds.begin_render_pass(
                         &wgpu::RenderPassDescriptor {
                             label: Some("Water Tint Blit Back"),
                             color_attachments: &blit_attachments,

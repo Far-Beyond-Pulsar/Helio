@@ -228,7 +228,8 @@ impl Profiler {
     /// - `name`: Pass name for debugging
     pub fn begin_gpu_pass(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         if self.enabled {
-            self.gpu.begin_pass(encoder, name);
+            self.gpu
+                .begin_pass(&mut crate::cmd::CommandRecorder::from_encoder(encoder), name);
         }
     }
 
@@ -248,14 +249,18 @@ impl Profiler {
     /// - `name`: Pass name for debugging
     pub fn end_gpu_pass(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         if self.enabled {
-            self.gpu.end_pass(encoder, name);
+            self.gpu
+                .end_pass(&mut crate::cmd::CommandRecorder::from_encoder(encoder), name);
         }
     }
 
     /// Resolve GPU timestamp queries to buffer (call after submitting command buffer)
     pub fn resolve_gpu_queries(&mut self, encoder: &mut wgpu::CommandEncoder, frame_index: u64) {
         if self.enabled {
-            self.gpu.resolve_queries(encoder, frame_index);
+            self.gpu.resolve_queries(
+                &mut crate::cmd::CommandRecorder::from_encoder(encoder),
+                frame_index,
+            );
         }
     }
 

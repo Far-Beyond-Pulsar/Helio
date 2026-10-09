@@ -574,6 +574,7 @@ impl RenderPass for ShadowPass {
             }
             updates += layers;
             texels += cost;
+            let mut cmds = ctx.graphics_cmds();
             for is_static in [true, false] {
                 let dynamic_offset = ((face + if static_dirty { 0 } else { MAX_SHADOW_FACES })
                     as u64
@@ -583,7 +584,7 @@ impl RenderPass for ShadowPass {
                 } else {
                     &self.face_views[0]
                 };
-                let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                let mut pass = cmds.begin_render_pass(
                     &wgpu::RenderPassDescriptor {
                         label: Some("Budgeted shadow tile"),
                         color_attachments: &[],
@@ -650,7 +651,7 @@ impl RenderPass for ShadowPass {
                     let materials = ctx.scene_buffers.get(BufferKey::of("materials"));
                     self.transmittance.render_face(
                         ctx.device,
-                        unsafe { &mut *ctx.encoder_ptr },
+                        &mut cmds,
                         materials.map(|m| &m.buffer),
                         bg,
                         0,
@@ -671,8 +672,7 @@ impl RenderPass for ShadowPass {
                 }
             }
             // Activate the matrix only after its matching depth has been rendered.
-            let encoder = unsafe { &mut *ctx.encoder_ptr };
-            encoder.copy_buffer_to_buffer(
+            cmds.copy_buffer_to_buffer(
                 desired,
                 face as u64 * 96,
                 data.shadow_matrices,
@@ -684,8 +684,8 @@ impl RenderPass for ShadowPass {
                 face as u64 * 96 + 92,
                 bytemuck::bytes_of(&2u32),
             );
-            encoder.clear_buffer(&self.face_dirty_buf, face as u64 * 4, Some(4));
-            encoder.clear_buffer(&self.face_geom_count_buf, face as u64 * 4, Some(4));
+            cmds.clear_buffer(&self.face_dirty_buf, face as u64 * 4, Some(4));
+            cmds.clear_buffer(&self.face_geom_count_buf, face as u64 * 4, Some(4));
             self.face_static_gen[face] = batch.shadow_static_generation;
             self.face_light_gen[face] = data.per_caster_dirty_gen[face / 6];
             self.face_last_update[face] = self.schedule_frame;

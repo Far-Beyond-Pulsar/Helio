@@ -383,8 +383,8 @@ impl RenderPass for SsrPass {
                 }
 
                 // RT path
-                let cpass = unsafe { &mut *ctx.encoder_ptr };
-                let mut pass = cpass.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut cmds = ctx.graphics_cmds();
+                let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("SSR Hybrid Trace"),
                     timestamp_writes: None,
                 });
@@ -399,8 +399,8 @@ impl RenderPass for SsrPass {
         }
 
         // ── Default: Hi-Z only ──────────────────────────────────────────
-        let cpass = unsafe { &mut *ctx.encoder_ptr };
-        let mut pass = cpass.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        let mut cmds = ctx.graphics_cmds();
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("SSR Trace"),
             timestamp_writes: None,
         });

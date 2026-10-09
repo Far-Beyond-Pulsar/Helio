@@ -73,7 +73,7 @@ impl RenderPass for PerfOverlayAnalyzerPass {
         };
 
         if shared.runtime.lock().unwrap().frame_num != ctx.frame_num {
-            unsafe { &mut *ctx.compute_encoder_ptr }.clear_buffer(
+            ctx.compute_cmds().clear_buffer(
                 &shared.pass_overdraw_buf,
                 0,
                 None,
@@ -254,7 +254,7 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
                     .get(helio_core::BufferKey::of("scene_lights"))
                     .map(|handle| &handle.buffer)
                     .unwrap_or(ctx.camera);
-                profiler.profile_next(ctx.device, unsafe { &mut *ctx.encoder_ptr }, lights_buf);
+                profiler.profile_next(ctx.device, &mut ctx.graphics_cmds(), lights_buf);
 
                 profiler.read_current_sample_blocking(ctx.device, ctx.owns_device);
             }
@@ -296,7 +296,7 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
             });
 
             if shared.runtime.lock().unwrap().frame_num != ctx.frame_num {
-                unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&shared.shader_cost_buf, 0, None);
+                ctx.graphics_cmds().clear_buffer(&shared.shader_cost_buf, 0, None);
                 shared.runtime.lock().unwrap().frame_num = ctx.frame_num;
             }
 

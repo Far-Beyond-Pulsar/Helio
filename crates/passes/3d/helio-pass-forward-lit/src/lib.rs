@@ -629,7 +629,7 @@ impl RenderPass for ForwardLitPass {
         }
 
         let indirect = culled.indirect;
-        let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        let mut pass = ctx.render_cmds().unwrap();
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, vertices.slice(..));
@@ -650,7 +650,7 @@ impl RenderPass for ForwardLitPass {
                 self.get_or_create_pipeline(&ctx.device, key, "", self.render_all_opaque);
             pass.set_pipeline(pipeline);
             helio_pass_gbuffer::multi_draw_indexed_indirect(
-                pass,
+                &mut pass,
                 indirect,
                 0,
                 draw_count,
@@ -682,7 +682,7 @@ impl RenderPass for ForwardLitPass {
                     batch.forward_range_count_slot(range)
                 };
                 helio_pass_gbuffer::multi_draw_indexed_indirect(
-                    pass, indirect, start, count, gpu_count,
+                    &mut pass, indirect, start, count, gpu_count,
                 );
             }
         }

@@ -1247,7 +1247,7 @@ impl RenderPass for DeferredLightPass {
             self.bind_group_0_key = Some(key_0);
         }
 
-        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        let mut rp = ctx.render_cmds().unwrap();
         rp.set_pipeline(&self.pipeline);
         rp.set_bind_group(0, &self.bind_group_0, &[]);
         rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);

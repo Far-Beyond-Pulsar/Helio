@@ -27,7 +27,7 @@ pub const DRAW_INDEXED_INDIRECT_STRIDE: u64 = 20;
 /// with `count` as its maximum; without it, one `multi_draw_indexed_indirect`;
 /// on wasm32, which has no multi-draw, one `draw_indexed_indirect` per entry.
 pub fn multi_draw_indexed_indirect(
-    pass: &mut wgpu::RenderPass<'_>,
+    pass: &mut helio_core::RenderCmds<'_>,
     indirect: &wgpu::Buffer,
     first: u32,
     count: u32,

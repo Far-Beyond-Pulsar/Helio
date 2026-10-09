@@ -228,7 +228,7 @@ impl RenderPass for DepthPrepassPass {
         }
         let indirect = culled.indirect;
 
-        let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        let mut pass = ctx.render_cmds().unwrap();
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, vertices.buffer.slice(..));
@@ -237,7 +237,7 @@ impl RenderPass for DepthPrepassPass {
             wgpu::IndexFormat::Uint32,
         );
         helio_pass_gbuffer::multi_draw_indexed_indirect(
-            pass,
+            &mut pass,
             indirect,
             0,
             draw_count,

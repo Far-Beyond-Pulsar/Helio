@@ -383,8 +383,9 @@ impl RenderPass for LightCullPass {
             // No active movable lights via either source: clear light
             // lists/counts to avoid stale data usage. Static/stationary
             // lights are baked and don't need runtime culling.
-            unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.tile_light_lists, 0, None);
-            unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.tile_light_counts, 0, None);
+            let mut cmds = ctx.graphics_cmds();
+            cmds.clear_buffer(&self.tile_light_lists, 0, None);
+            cmds.clear_buffer(&self.tile_light_counts, 0, None);
             self.cull_cache_key = None; // Invalidate cache
             self.compact_key = None;
             self.compact_bind_group = None;
@@ -423,10 +424,10 @@ impl RenderPass for LightCullPass {
                     ],
                 }));
             }
-            let encoder = unsafe { &mut *ctx.encoder_ptr };
-            encoder.clear_buffer(&self.active_indices, 0, Some(4));
+            let mut cmds = ctx.graphics_cmds();
+            cmds.clear_buffer(&self.active_indices, 0, Some(4));
             if movable_light_count > 0 {
-                let mut compact = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut compact = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("LightCull Compact"),
                     timestamp_writes: None,
                 });
@@ -508,11 +509,11 @@ impl RenderPass for LightCullPass {
         // Each workgroup has 256 threads, each thread handles one tile.
         let workgroups = total_tiles.div_ceil(256);
 
-        let mut pass =
-            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("LightCull"),
-                timestamp_writes: None,
-            });
+        let mut cmds = ctx.graphics_cmds();
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("LightCull"),
+            timestamp_writes: None,
+        });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.dispatch_workgroups(workgroups, 1, 1);

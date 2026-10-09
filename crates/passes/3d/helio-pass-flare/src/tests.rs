@@ -150,7 +150,7 @@ fn run_with(
         mapped_at_creation: false,
     });
     let mut encoder = device.create_command_encoder(&Default::default());
-    pass.record(device, &mut encoder, input, pp, optics);
+    pass.record(device, &mut CommandRecorder::from_encoder(&mut encoder), input, pp, optics);
     encoder.copy_texture_to_buffer(
         pass.output.texture.as_image_copy(),
         wgpu::TexelCopyBufferInfo {

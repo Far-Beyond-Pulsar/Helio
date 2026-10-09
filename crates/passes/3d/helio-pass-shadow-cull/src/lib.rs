@@ -285,7 +285,8 @@ impl RenderPass for ShadowCullPass {
         }
 
         // ── Reset face counters to zero ───────────────────────────────────────
-        unsafe { &mut *ctx.encoder_ptr }.clear_buffer(
+        let mut cmds = ctx.graphics_cmds();
+        cmds.clear_buffer(
             &self.face_counts_buf,
             0,
             Some((MAX_FACES as u64) * 4u64),
@@ -345,11 +346,10 @@ impl RenderPass for ShadowCullPass {
         let bg = self.bind_group.as_ref().unwrap();
 
         let wg = movable_count.div_ceil(WORKGROUP_SIZE);
-        let mut pass =
-            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ShadowCull"),
-                timestamp_writes: None,
-            });
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("ShadowCull"),
+            timestamp_writes: None,
+        });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bg, &[]);
         pass.dispatch_workgroups(wg, 1, 1);

@@ -800,18 +800,20 @@ impl RenderPass for SdfPass {
         }
 
         if !self.gpu_passes_clean {
-            unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
+            let mut cmds = ctx.graphics_cmds();
+            cmds.copy_buffer_to_buffer(
                 &self.eval_indirect_template_buffer,
                 0,
                 &self.eval_indirect_buffer,
                 0,
                 self.level_count as u64 * 3 * 4,
             );
-            unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.dirty_flags_buffer, 0, None);
-            unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.dirty_bricks_buffer, 0, None);
+            cmds.clear_buffer(&self.dirty_flags_buffer, 0, None);
+            cmds.clear_buffer(&self.dirty_bricks_buffer, 0, None);
 
+            let mut compute = ctx.compute_cmds();
             {
-                let mut cpass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut cpass = compute.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("SDF Scroll"),
                     timestamp_writes: None,
                 });
@@ -822,7 +824,7 @@ impl RenderPass for SdfPass {
 
             {
                 let wgs_x = self.bricks_per_level / 64;
-                let mut cpass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut cpass = compute.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("SDF Classify"),
                     timestamp_writes: None,
                 });
@@ -832,7 +834,7 @@ impl RenderPass for SdfPass {
             }
 
             {
-                let mut cpass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut cpass = compute.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("SDF Evaluate"),
                     timestamp_writes: None,
                 });
@@ -889,7 +891,8 @@ impl RenderPass for SdfPass {
                 multiview_mask: None,
             };
 
-            let mut rpass = ctx.begin_render_pass(&desc);
+            let mut cmds = ctx.graphics_cmds();
+            let mut rpass = cmds.begin_render_pass(&desc);
             rpass.set_pipeline(&self.march_pipeline);
             rpass.set_bind_group(0, self.march_bg.as_ref().unwrap(), &[]);
             rpass.draw(0..3, 0..1);

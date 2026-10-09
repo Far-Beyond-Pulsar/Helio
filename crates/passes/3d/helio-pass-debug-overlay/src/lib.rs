@@ -712,7 +712,8 @@ impl RenderPass for DebugOverlayPass {
             occlusion_query_set: None,
             multiview_mask: None,
         };
-        let mut rp = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&desc);
+        let mut cmds = ctx.graphics_cmds();
+        let mut rp = cmds.begin_render_pass(&desc);
         rp.set_pipeline(&self.pipeline);
         rp.set_bind_group(0, bg, &[]);
         rp.draw(0..3, 0..1);
