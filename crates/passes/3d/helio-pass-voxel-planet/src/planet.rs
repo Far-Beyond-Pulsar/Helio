@@ -12,6 +12,10 @@ use std::sync::{Arc, Mutex};
 
 pub const RECIPE_VERSION: u32 = 2;
 pub const EARTH_RADIUS: f64 = 6_371_000.0;
+/// Base cells [`Planet::raycast_near`] walks exactly: a window around a
+/// renderer hit drawn with cells up to ~34 m (a 0.1 m grid), a millisecond
+/// or two.
+pub const EXACT_WALK_CELLS: f64 = 2048.0;
 
 /// Serialized authoring recipe: the world's form and its terrain generator.
 /// Edits are stored separately (see `journal`).
@@ -769,18 +773,24 @@ impl Planet {
     /// coarse to fine, so the cost does not grow with how far the window
     /// spans in base cells.
     ///
-    /// The window is marched at `level` (half-cell steps), then narrowed to
-    /// a few cells around the first solid sample two levels finer at a time;
-    /// at most a few hundred base cells are walked exactly. Where a finer
-    /// level has no surface in the window (a coarse cell solid over a thin
-    /// fine feature), the coarser hit is returned: the surface drawn there.
+    /// A window of up to [`EXACT_WALK_CELLS`] base cells (every brush within
+    /// a few kilometres) is walked exactly. A longer one is marched at
+    /// `level` (half-cell steps), then narrowed to a few cells around the
+    /// first solid sample two levels finer at a time, until it is short
+    /// enough to walk. Coarse levels do not show brushes smaller than their
+    /// cells: where a finer level finds air in the narrowed window (rock
+    /// carved away), its march goes on to the window's end. Where none is
+    /// found, the coarser hit is returned: the surface drawn there.
     /// From orbit a window spans kilometres: walked cell by cell it took
     /// hundreds of milliseconds per brush stamp.
     pub fn raycast_near(&self, origin: DVec3, direction: DVec3, near: f64, far: f64, level: u32) -> Option<RayHit> {
-        const EXACT_CELLS: f64 = 256.0;
+        /// Samples one level's march may take before it settles for the
+        /// coarser hit.
+        const MARCH_SAMPLES: usize = 4096;
         let g = &self.grid;
         let d = direction.normalize();
         let s = g.voxel_size();
+        let near = near.max(0.0);
         let exact = |lo: f64, hi: f64| {
             self.raycast(origin + d * lo, d, hi - lo).map(|mut hit| {
                 hit.distance += lo;
@@ -790,26 +800,36 @@ impl Planet {
         // The kind of the level cell around the sample (a coarse cell can
         // reach past the terrain's shell: the point alone does not decide).
         let solid_at = |t: f64, l: u32| {
-            let (c, _) = g.locate(origin + d * t);
-            self.sample_kind(l, c.face, c.i >> l, c.j >> l, c.k >> l).0 == 1
+            let c = g.locate(origin + d * t).0.at_level(l);
+            self.sample_kind(l, c.face, c.i, c.j, c.k).0 == 1
         };
-        let (mut lo, mut hi) = (near.max(0.0), far);
+        let march = |lo: f64, hi: f64, l: u32| {
+            let step = s * f64::from(1u32 << l) * 0.5;
+            let steps = (((hi - lo) / step).ceil() as usize).min(MARCH_SAMPLES);
+            (0..=steps).map(|n| (lo + step * n as f64).min(hi)).find(|&t| solid_at(t, l))
+        };
+        let short = |lo: f64, hi: f64| (hi - lo) / s <= EXACT_WALK_CELLS;
+        let (mut lo, mut hi) = (near, far);
         let mut l = level.min(g.levels().saturating_sub(1));
         let mut coarse: Option<f64> = None;
         loop {
-            if l == 0 || (hi - lo) / s <= EXACT_CELLS {
+            if l == 0 || short(lo, hi) {
                 if let Some(hit) = exact(lo, hi) {
                     return Some(hit);
                 }
+                // Carved past the coarse surface: on to the window's end.
+                if hi < far && short(hi, far) {
+                    if let Some(hit) = exact(hi, far) {
+                        return Some(hit);
+                    }
+                }
                 break;
             }
-            let cell = s * f64::from(1u32 << l);
-            let step = cell * 0.5;
-            let steps = ((hi - lo) / step).ceil() as usize;
-            let found = (0..=steps).map(|n| lo + step * n as f64).find(|&t| solid_at(t.min(hi), l));
+            let found = march(lo, hi, l).or_else(|| if hi < far { march(hi, far, l) } else { None });
             let Some(t) = found else { break };
+            let cell = s * f64::from(1u32 << l);
             coarse = Some(t);
-            (lo, hi) = ((t - step - cell).max(near.max(0.0)), (t + cell).min(far));
+            (lo, hi) = ((t - cell * 1.5).max(near), (t + cell).min(far));
             l = l.saturating_sub(2);
         }
         // The surface the coarser level drew.
@@ -1199,6 +1219,20 @@ mod tests {
             }
         }
         assert!(exact_matches >= 8, "{exact_matches} of 12 exact");
+
+        // A pit dug with a brush too small for the level that drew the view:
+        // the coarse surface is rock that is no longer there.
+        let mut p = p;
+        let ground = p.surface_point(DVec3::new(0.3, 1.0, 0.1).normalize(), 0.0);
+        let up = ground.normalize();
+        p.apply(Brush { center: (ground - up * 10.0).to_array(), radius: 30.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        let eye = ground + up * 20_000.0;
+        let exact = p.raycast(eye, -up, 30_000.0).expect("the pit's floor");
+        assert!(exact.distance > 20_030.0, "{}", exact.distance);
+        let level = 10;
+        let margin = g.voxel_size() * f64::from(1u32 << level) * 3.0 + 1.0;
+        let hit = p.raycast_near(eye, -up, 20_000.0 - margin, 20_000.0 + margin, level).expect("a hit near");
+        assert_eq!(hit.cell, exact.cell, "{} vs {}", hit.distance, exact.distance);
     }
 
     /// In a dug pit the camera's altitude is its height above the pit's

@@ -263,23 +263,6 @@ pub fn journals_to_compact(world: &World) -> Vec<(Entity, PlanetRecipe, VoxelEdi
         .collect()
 }
 
-/// Fold the old edits of every terrain in `world` into their journals'
-/// bases (a level about to be saved), keeping the latest
-/// [`LISTED_EDITS`] of each listed. Returns the edits folded.
-pub fn compact_terrain_journals(world: &mut World) -> Result<usize, String> {
-    let mut folded = 0;
-    for (entity, recipe, edits) in journals_to_compact(world) {
-        let Some(base) = compact_journal(recipe, &edits, LISTED_EDITS)? else { continue };
-        let brushes = base.brushes - edits.base_len();
-        if let Some(mut component) = world.get_mut::<VoxelTerrainComponent>(entity) {
-            if component.edits.compact(base) {
-                folded += brushes;
-            }
-        }
-    }
-    Ok(folded)
-}
-
 /// Append edits to a terrain's journal after checking that each applies.
 pub fn append_edits(
     world: &mut World,
