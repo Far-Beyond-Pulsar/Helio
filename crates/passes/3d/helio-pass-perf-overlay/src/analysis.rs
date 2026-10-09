@@ -1,21 +1,28 @@
 use crate::rendering::PerfOverlayShared;
 use crate::{ColorCompareParams, ComputeCostParams, PerfOverlayMode};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{CachedBindGroup, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::{Arc, Mutex};
 
 // ── Analyzer Pass ───────────────────────────────────────────────────────────────
 
 pub struct PerfOverlayAnalyzerPass {
     pub(crate) shared: Arc<Mutex<PerfOverlayShared>>,
+    color_compare_bg: CachedBindGroup,
+    blit_bg: CachedBindGroup,
 }
 
 pub struct PerfOverlayCostAnalyzerPass {
     pub(crate) shared: Arc<Mutex<PerfOverlayShared>>,
+    cost_compute_bg: CachedBindGroup,
 }
 
 impl PerfOverlayAnalyzerPass {
     pub fn new(shared: Arc<Mutex<PerfOverlayShared>>) -> Self {
-        Self { shared }
+        Self {
+            shared,
+            color_compare_bg: CachedBindGroup::new(),
+            blit_bg: CachedBindGroup::new(),
+        }
     }
 }
 
@@ -78,7 +85,7 @@ impl RenderPass for PerfOverlayAnalyzerPass {
 
         let mut runtime = shared.runtime.lock().unwrap();
         if runtime.snapshot_valid {
-            let color_compare_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let color_compare_bg = self.color_compare_bg.get_or_create(ctx.device, &wgpu::BindGroupDescriptor {
                 label: Some("PerfOverlay Color Compare BG"),
                 layout: &shared.color_compare_bgl,
                 entries: &[
@@ -108,7 +115,7 @@ impl RenderPass for PerfOverlayAnalyzerPass {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&shared.color_compare_pipeline);
-            pass.set_bind_group(0, &color_compare_bg, &[]);
+            pass.set_bind_group(0, color_compare_bg, &[]);
             let dispatch_x = shared.internal_width.div_ceil(16);
             let dispatch_y = shared.internal_height.div_ceil(16);
             pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
@@ -117,7 +124,7 @@ impl RenderPass for PerfOverlayAnalyzerPass {
         }
         drop(runtime);
 
-        let blit_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let blit_bg = self.blit_bg.get_or_create(ctx.device, &wgpu::BindGroupDescriptor {
             label: Some("PerfOverlay Blit BG"),
             layout: &shared.blit_bgl,
             entries: &[
@@ -137,7 +144,7 @@ impl RenderPass for PerfOverlayAnalyzerPass {
             timestamp_writes: None,
         });
         pass.set_pipeline(&shared.blit_pipeline);
-        pass.set_bind_group(0, &blit_bg, &[]);
+        pass.set_bind_group(0, blit_bg, &[]);
         let dispatch_x = shared.internal_width.div_ceil(16);
         let dispatch_y = shared.internal_height.div_ceil(16);
         pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
@@ -154,7 +161,10 @@ impl RenderPass for PerfOverlayAnalyzerPass {
 
 impl PerfOverlayCostAnalyzerPass {
     pub fn new(shared: Arc<Mutex<PerfOverlayShared>>) -> Self {
-        Self { shared }
+        Self {
+            shared,
+            cost_compute_bg: CachedBindGroup::new(),
+        }
     }
 }
 
@@ -254,7 +264,7 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
             ctx.registry.get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer")),
             ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")),
         ) {
-            let cost_compute_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let cost_compute_bg = self.cost_compute_bg.get_or_create(ctx.device, &wgpu::BindGroupDescriptor {
                 label: Some("PerfOverlay Cost Compute BG"),
                 layout: &shared.cost_compute_bgl,
                 entries: &[
@@ -295,7 +305,7 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&shared.cost_compute_pipeline);
-            pass.set_bind_group(0, &cost_compute_bg, &[]);
+            pass.set_bind_group(0, cost_compute_bg, &[]);
             let dispatch_x = shared.internal_width.div_ceil(16);
             let dispatch_y = shared.internal_height.div_ceil(16);
             pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);

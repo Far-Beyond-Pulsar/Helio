@@ -859,6 +859,8 @@ pub struct PlanetRenderer {
     planet: Arc<Planet>,
     settings: Settings,
     gen_group: wgpu::BindGroup,
+    trace_group: helio_core::CachedBindGroup,
+    render_group: helio_core::CachedBindGroup,
     camera_buffer: wgpu::Buffer,
     camera_group: wgpu::BindGroup,
     /// Last local projection and precise eye, for motion in the shared GBuffer.
@@ -979,6 +981,8 @@ impl PlanetRenderer {
             planet,
             settings,
             gen_group,
+            trace_group: Default::default(),
+            render_group: Default::default(),
             camera_buffer,
             camera_group,
             camera_history: None,
@@ -1840,7 +1844,9 @@ impl PlanetRenderer {
         local_camera.prev_view_proj = previous.to_cols_array();
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&local_camera));
         self.camera_history = Some((frame_num, view_id, frame.eye, view_proj));
-        let trace_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        // Reused while the planet's buffers, the screen targets and the
+        // depth view stay the same resources.
+        let trace_group = self.trace_group.get_or_create(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("planet trace"),
             layout: &self.pipelines.trace_layout,
             entries: &[
@@ -1862,15 +1868,15 @@ impl PlanetRenderer {
                 wgpu::BindGroupEntry { binding: 18, resource: self.buffers.horizon.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 19, resource: self.buffers.live_blocks.as_entire_binding() },
             ],
-        });
-        let render_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        }).clone();
+        let render_group = self.render_group.get_or_create(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("planet gbuffer"),
             layout: &self.pipelines.render_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: self.buffers.frame.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 8, resource: self.screen.surfaces.as_entire_binding() },
             ],
-        });
+        }).clone();
         // Before the timed residency stage: its time measures job cost.
         if self.pool_pressure && frame_num >= self.last_recycle + RECYCLE_INTERVAL {
             self.pool_pressure = false;

@@ -66,7 +66,7 @@ pub use directives::{parse as parse_directives, PipelineDirectives};
 pub use reflection::{
     create_bind_group_layouts, create_pipeline_layout, create_reflected_bind_groups,
     create_reflected_bind_groups_with_layouts, create_reflected_pipeline, layout_entries,
-    reuse_or_create_reflected_bind_groups, CachedReflectedGroup,
+    reuse_or_create_reflected_bind_groups, CachedBindGroup, CachedReflectedGroup,
     populate_bind_group_entries, reflect, BindingKind, ReflectedBinding, ReflectedLayout,
     ReflectedPipeline, ReflectedShader, ReflectionError,
 };
