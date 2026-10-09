@@ -860,7 +860,8 @@ impl RenderPass for CoronaPass {
         self.max_particles = DEFAULT_MAX_PARTICLES;
 
         let uniforms = CoronaUniforms {
-            delta_time: ctx.delta_time,
+            // The host-driven frame clock: particles freeze with it.
+            delta_time: ctx.time_delta,
             total_particles: self.max_particles,
             emitter_count: self.emitter_count,
             frame_count: ctx.frame_num as u32,

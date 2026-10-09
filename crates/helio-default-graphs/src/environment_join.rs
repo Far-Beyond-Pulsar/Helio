@@ -19,6 +19,7 @@
 //! | `camera_post_process` | `"camera_postprocess"` | attached, enabled, owner current (visibility does not apply) |
 //! | `water_volumes` | `"water_volumes"`, packed into [`MAX_WATER_VOLUMES`] rows | as for volumes; the surface height follows the owner's Y |
 //! | `foliage` | `"foliage_types"`, `"foliage_layers"`, `"foliage_wind"`, each packed | attached, enabled, owner current and visible, with a density |
+//! | `wind` | `"foliage_wind"`, over the foliage components' own wind | attached, enabled, owner current (visibility does not apply); a foliage component that opts out of the global wind takes precedence |
 //! | `atmospheres` | `"atmospheres"` | attached, enabled, owner current (visibility does not apply); a planet placed at its owner is centred on the owner's position |
 //! | `decals` | `"decals"`, packed into [`MAX_DECALS`] rows | attached, enabled, owner current and visible, with a non-zero box; the transform maps world space into the owner-placed box |
 //! | `corona_emitters` | `"corona_emitters"`, packed into [`MAX_CORONA_EMITTERS`] rows | attached, enabled, owner current and visible, requesting particles; placed at the owner's transform, with a range of the Corona particle pool |
@@ -94,6 +95,13 @@ const CORONA_COUNT_WORD: u32 = 46;
 /// Rows the water passes read (`helio_pass_water_sim::MAX_SIM_VOLUMES`):
 /// placed water volumes beyond these are not drawn.
 pub const MAX_WATER_VOLUMES: u32 = helio_pass_water_sim::MAX_SIM_VOLUMES;
+/// `GlobalWindSourceRow`: the foliage wind row (12 words), marked global.
+pub const WIND_SOURCE_ROW_BYTES: u64 = 12 * 4;
+/// The wind row's `_pad[0]`: 1 in a global wind's row.
+const GLOBAL_WIND_MARK_WORD: u32 = 10;
+/// A foliage source row's wind `_pad[0]` (28 + 10): 1 when the component
+/// opts out of the global wind.
+const FOLIAGE_OWN_WIND_WORD: u32 = 38;
 /// Foliage types the join publishes. Placement draws each candidate's type
 /// from the live leading rows, so the table's capacity costs only a short
 /// per-workgroup scan.
@@ -139,6 +147,7 @@ pub struct EnvironmentJoinKeys {
     pub atmospheres: BufferKey,
     pub decals: BufferKey,
     pub corona_emitters: BufferKey,
+    pub wind: BufferKey,
 }
 
 /// The source buffers, in [`EnvironmentJoinKeys`] order.
@@ -153,10 +162,11 @@ enum Source {
     Atmospheres,
     Decals,
     CoronaEmitters,
+    Wind,
 }
 
 impl Source {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::GlobalFog,
         Self::LocalFog,
         Self::PostProcessVolumes,
@@ -166,6 +176,7 @@ impl Source {
         Self::Atmospheres,
         Self::Decals,
         Self::CoronaEmitters,
+        Self::Wind,
     ];
 
     fn key(self, keys: &EnvironmentJoinKeys) -> BufferKey {
@@ -179,6 +190,7 @@ impl Source {
             Self::Atmospheres => keys.atmospheres,
             Self::Decals => keys.decals,
             Self::CoronaEmitters => keys.corona_emitters,
+            Self::Wind => keys.wind,
         }
     }
 
@@ -193,6 +205,7 @@ impl Source {
             Self::Atmospheres => ATMOSPHERE_SOURCE_ROW_BYTES,
             Self::Decals => DECAL_SOURCE_ROW_BYTES,
             Self::CoronaEmitters => CORONA_EMITTER_SOURCE_ROW_BYTES,
+            Self::Wind => WIND_SOURCE_ROW_BYTES,
         }
     }
 }
@@ -230,6 +243,8 @@ struct Spec {
     /// A source word (from the start of the row) that must be non-zero for
     /// the row to be placed, or [`NO_GATE_WORD`].
     gate_word: u32,
+    /// Sources written over this one (see [`Spec::over`]).
+    layers: Vec<Spec>,
 }
 
 impl Spec {
@@ -250,6 +265,7 @@ impl Spec {
             source_offset: 0,
             copy_words: 0,
             gate_word: NO_GATE_WORD,
+            layers: Vec::new(),
         }
     }
 
@@ -272,6 +288,21 @@ impl Spec {
         Self { gate_word, ..self }
     }
 
+    /// Also write `layer`'s placed rows into this table, after this spec's
+    /// own and any earlier layer's: a packed table's leading rows then hold
+    /// the last source that placed any, so later layers take precedence.
+    /// `layer` keeps its own source, slice, gate and flags; its key and
+    /// capacity are this table's.
+    fn over(mut self, layer: Spec) -> Self {
+        self.layers.push(Spec {
+            key: self.key,
+            capacity: self.capacity,
+            output_words: self.output_words,
+            ..layer
+        });
+        self
+    }
+
     fn reads_transforms(&self) -> bool {
         self.flags & (SPATIAL | LAYER | CENTERED | DECAL | EMITTER) != 0
     }
@@ -285,6 +316,10 @@ impl Spec {
 struct Table {
     spec: Spec,
     uniforms: wgpu::Buffer,
+    /// Further sources written into the same rows after the table's own,
+    /// in order, each over the last where it places a row (see
+    /// [`Spec::over`]); each with its own uniforms.
+    layers: Vec<(Spec, wgpu::Buffer)>,
     buffer: wgpu::Buffer,
     rows: u32,
     epoch: u64,
@@ -293,15 +328,26 @@ struct Table {
 }
 
 impl Table {
-    fn new(device: &wgpu::Device, spec: Spec) -> Self {
+    fn new(device: &wgpu::Device, mut spec: Spec) -> Self {
         let rows = spec.capacity.unwrap_or(1);
-        Self {
-            uniforms: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(spec.label),
+        let uniforms = |label| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
                 size: std::mem::size_of::<Uniforms>() as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
-            }),
+            })
+        };
+        let layers = std::mem::take(&mut spec.layers)
+            .into_iter()
+            .map(|layer| {
+                let buffer = uniforms(layer.label);
+                (layer, buffer)
+            })
+            .collect();
+        Self {
+            uniforms: uniforms(spec.label),
+            layers,
             buffer: allocate(device, spec.label, spec.output_row_bytes(), rows),
             rows,
             epoch: 0,
@@ -420,7 +466,10 @@ impl EnvironmentJoin {
             .packed(MAX_FOLIAGE_LAYERS)
             .slice(24, 0)
             .gated_on(0),
-            // The foliage passes read the first wind row.
+            // The foliage passes read one wind row: the first foliage
+            // component's own wind, under the level's global wind, under
+            // the first foliage component that opts out of the global wind
+            // (its wind's `_pad[0]`, source word 38).
             Spec::new(
                 "Environment Join Foliage Wind",
                 FOLIAGE_WIND_KEY,
@@ -430,7 +479,28 @@ impl EnvironmentJoin {
             )
             .packed(1)
             .slice(28, 12)
-            .gated_on(0),
+            .gated_on(0)
+            .over(
+                Spec::new(
+                    "Environment Join Global Wind",
+                    FOLIAGE_WIND_KEY,
+                    Source::Wind,
+                    12,
+                    0,
+                )
+                .gated_on(GLOBAL_WIND_MARK_WORD),
+            )
+            .over(
+                Spec::new(
+                    "Environment Join Foliage Own Wind",
+                    FOLIAGE_WIND_KEY,
+                    Source::Foliage,
+                    12,
+                    GATE_HIDDEN,
+                )
+                .slice(28, 12)
+                .gated_on(FOLIAGE_OWN_WIND_WORD),
+            ),
             Spec::new(
                 "Environment Join Atmospheres",
                 ATMOSPHERES_KEY,
@@ -563,22 +633,46 @@ impl SceneDerivation for EnvironmentJoin {
                 grew = true;
             }
             // Transforms only matter to tables placed from them.
-            let placed_from = transforms.filter(|_| spec.reads_transforms());
-            let inputs_now = signature(
-                &[owners, generations, hidden, placed_from, source],
-                table.epoch,
+            let reads_transforms = spec.reads_transforms()
+                || table
+                    .layers
+                    .iter()
+                    .any(|(layer, _)| layer.reads_transforms());
+            let placed_from = transforms.filter(|_| reads_transforms);
+            let mut table_inputs = vec![owners, generations, hidden, placed_from, source];
+            table_inputs.extend(
+                table
+                    .layers
+                    .iter()
+                    .map(|(layer, _)| sources[layer.source as usize]),
             );
+            let inputs_now = signature(&table_inputs, table.epoch);
             if !grew && table.last_inputs == Some(inputs_now) {
                 continue;
             }
             table.last_inputs = Some(inputs_now);
             encoder.clear_buffer(&table.buffer, 0, None);
-            let placeable = !spec.reads_transforms() || transforms.is_some();
-            if let (Some(owners), Some(generations), Some(source), true) =
-                (owners, generations, source, placeable)
-            {
+            // The table's own source, then each layer over it in order.
+            let passes = std::iter::once((&table.spec, &table.uniforms)).chain(
+                table
+                    .layers
+                    .iter()
+                    .map(|(layer, uniforms)| (layer, uniforms)),
+            );
+            for (spec, uniforms) in passes {
+                let source_row_bytes = spec.source.row_bytes();
+                let source = sources[spec.source as usize];
+                let rows = source.map_or(0, |s| {
+                    (s.buffer.size() / source_row_bytes).min(u64::from(u32::MAX)) as u32
+                });
+                let placeable = !spec.reads_transforms() || transforms.is_some();
+                let (Some(owners), Some(generations), Some(source), true) =
+                    (owners, generations, source, placeable)
+                else {
+                    continue;
+                };
                 ctx.queue.write_buffer(
-                    &table.uniforms,
+                    uniforms,
                     0,
                     bytemuck::bytes_of(&Uniforms {
                         rows: if spec.capacity.is_some() {
@@ -607,7 +701,7 @@ impl SceneDerivation for EnvironmentJoin {
                     label: Some(spec.label),
                     layout: &layout,
                     entries: &[
-                        entry(0, &table.uniforms),
+                        entry(0, uniforms),
                         entry(1, &owners.buffer),
                         entry(2, &generations.buffer),
                         entry(3, hidden.map_or(&self.empty, |h| &h.buffer)),

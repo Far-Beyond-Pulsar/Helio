@@ -276,18 +276,20 @@ pub struct FoliageGlobals {
     pub frame: u32,
     /// `FLAG_*` bits.
     pub flags: u32,
-    /// xyz unused (the camera position comes from the camera uniform), **w = resident
-    /// ring radius in metres** — the input to the scale-in factor.
+    /// xy = the wind clock: the frame clock `t` and the previous frame's `t - dt`
+    /// (`PrepareContext::time`, `time_delta`; host-driven, so wind stops with a frozen
+    /// or paused clock), z unused (the camera position comes from the camera uniform),
+    /// **w = resident ring radius in metres** — the input to the scale-in factor.
     ///
     /// A `vec4` rather than a bare `f32`, because that is what the WGSL side declares and
     /// WGSL gives a `vec4<f32>` 16-byte alignment. This field is where an earlier version
     /// of this struct went wrong: it had four consecutive scalars here
     /// (`ring_radius`, `blades_per_tile`, `lod_quality_scale`, `scale_in_band`) against
-    /// the shader's single `vec4`, so `camera_ring.w` read back whatever was in
+    /// the shader's single `vec4`, so `clock_ring.w` read back whatever was in
     /// `scale_in_band` — a couple of metres — and every blade's `scale_in` evaluated to
     /// zero. Zero scale-in means zero height, so all 236 000 blades rendered as
     /// degenerate strips: no error, no warning, just bare ground.
-    pub camera_ring: [f32; 4],
+    pub clock_ring: [f32; 4],
     /// xy = interaction field world-XZ origin, z = extent in metres, w = `1/extent`.
     pub interaction_field: [f32; 4],
     /// `FoliageQuality::lod_distance_scale`, already sanitised here so the shader does
@@ -1061,7 +1063,12 @@ impl RenderPass for FoliageGBufferPass {
             } else {
                 0
             },
-            camera_ring: [0.0, 0.0, 0.0, self.quality.ring_radius()],
+            clock_ring: [
+                ctx.time,
+                ctx.time - ctx.time_delta,
+                0.0,
+                self.quality.ring_radius(),
+            ],
             // Sanitised here so the shader does not have to repeat
             // `select_blade_lod`'s defensive branch on every vertex.
             lod_quality_scale: {

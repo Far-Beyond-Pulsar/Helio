@@ -30,6 +30,7 @@ impl ScenePropsProjector for FoliageComponent {
             "branch_flutter",
             "leaf_jitter",
             "interaction_stiffness",
+            "use_global_wind",
             "wind_enabled",
             "wind_direction",
             "wind_speed",

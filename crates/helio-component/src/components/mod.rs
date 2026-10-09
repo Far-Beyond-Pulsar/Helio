@@ -21,6 +21,7 @@ pub mod voxel_generator_editor;
 pub mod voxel_stack_editor;
 pub mod voxel_world;
 mod water_volume_component;
+mod wind_component;
 
 pub use foliage_component::*;
 pub use atmosphere_component::*;
@@ -41,3 +42,4 @@ pub use static_mesh_draw::*;
 pub use environment_rows::*;
 pub use voxel_component::*;
 pub use water_volume_component::*;
+pub use wind_component::*;

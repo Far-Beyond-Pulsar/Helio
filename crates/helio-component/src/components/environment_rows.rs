@@ -1,5 +1,5 @@
 //! The rows fog volumes, post-process volumes, camera post-process
-//! settings, water volumes, foliage, atmospheres, decals and particle emitters cast, as the renderer's environment join reads them
+//! settings, water volumes, foliage, the global wind, atmospheres, decals and particle emitters cast, as the renderer's environment join reads them
 //! (Pulsar-Native#1035, Phase 4).
 //!
 //! Each is a second GPU registration on its authored component: SceneDB
@@ -24,6 +24,7 @@
 //! | [`FoliageSourceRow`] | 24 type + 4 layer + 12 wind | `helio_pass_foliage_place`'s `FoliageTypeComponent` (24), `FoliageLayerComponent` (8) and `FoliageWindComponent` (12), each packed |
 //! | [`AtmosphereSourceRow`] | 4 centre + 16 media + 4 ground + 4 shell: the row, its centre in the owner's space | `helio_pass_sky::AtmosphereComponent` (28) |
 //! | [`DecalSourceRow`] | 4 size + 32: the row, its transform left to the join | `helio_pass_decal::DecalComponent` (32), packed into its leading rows |
+//! | [`GlobalWindSourceRow`] | 12: the wind row, marked global | `helio_pass_foliage_place`'s `FoliageWindComponent` (12), over the foliage components' own wind |
 //! | [`CoronaEmitterSourceRow`] | 60: the row, its transform and pool range left to the join (word 46: the requested range) | `helio_pass_corona::CoronaEmitterComponent` (60), packed into its leading rows |
 
 use pulsar_scenedb::gpu::GpuMirrorHandle;
@@ -31,7 +32,7 @@ use pulsar_scenedb_derive::SceneStore;
 
 use super::{
     AtmosphereComponent, CameraPostProcessComponent, DecalComponent, FoliageComponent, GlobalFogComponent, LocalFogVolumeComponent,
-    ParticleEmitterComponent, PostProcessVolumeComponent, WaterVolumeComponent,
+    ParticleEmitterComponent, PostProcessVolumeComponent, WaterVolumeComponent, WindComponent,
 };
 
 pub const GLOBAL_FOG_SOURCES_BUFFER: &str = "global_fog_sources";
@@ -43,6 +44,25 @@ pub const FOLIAGE_SOURCES_BUFFER: &str = "foliage_sources";
 pub const ATMOSPHERE_SOURCES_BUFFER: &str = "atmosphere_sources";
 pub const DECAL_SOURCES_BUFFER: &str = "decal_sources";
 pub const CORONA_EMITTER_SOURCES_BUFFER: &str = "corona_emitter_sources";
+pub const WIND_SOURCES_BUFFER: &str = "wind_sources";
+
+/// The level's global wind: the foliage passes' wind row
+/// (`helio_pass_foliage_place::GpuWind`, bit for bit: direction and speed,
+/// gusts, an unused clock and the global mark in word 10). A disabled
+/// wind's row is zero, which the join skips.
+#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+#[gpu(layout = packed, buffer = "wind_sources")]
+pub struct GlobalWindSourceRow {
+    #[gpu]
+    pub wind: [f32; 12],
+}
+
+impl GlobalWindSourceRow {
+    pub fn of(wind: &WindComponent) -> Self {
+        read(bytemuck::bytes_of(&wind.to_row()))
+    }
+}
 
 /// A particle emitter: the Corona pass row
 /// (`helio_pass_corona::GpuCoronaEmitter`, bit for bit) with a zero
@@ -257,9 +277,11 @@ impl WaterVolumeSourceRow {
 /// with a density).
 ///
 /// The layer is a world-aligned square centred on the owner. The foliage
-/// passes grow every type in every layer and read the first wind row only,
-/// so with several foliage components their types share their layers and
-/// the first component's wind applies to all of them.
+/// passes grow every type in every layer and read one wind row: the first
+/// component that opts out of the global wind (its wind's `_pad[0]`, word
+/// 38 of this row, is 1), else the level's global wind, else the first
+/// component's own wind. So with several foliage components their types
+/// share their layers and one wind applies to all of them.
 #[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 #[gpu(layout = packed, buffer = "foliage_sources")]
@@ -428,6 +450,12 @@ derived_row!(
     atmosphere_clear
 );
 derived_row!(
+    WindComponent,
+    GlobalWindSourceRow,
+    wind_dispatch,
+    wind_clear
+);
+derived_row!(
     ParticleEmitterComponent,
     CoronaEmitterSourceRow,
     particle_emitter_dispatch,
@@ -510,6 +538,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<AtmosphereSourceRow>(), 28 * 4);
         assert_eq!(std::mem::size_of::<DecalSourceRow>(), 36 * 4);
         assert_eq!(std::mem::size_of::<CoronaEmitterSourceRow>(), 60 * 4);
+        assert_eq!(std::mem::size_of::<GlobalWindSourceRow>(), 12 * 4);
         assert_eq!(
             std::mem::size_of::<helio_pass_corona::GpuCoronaEmitter>(),
             60 * 4
