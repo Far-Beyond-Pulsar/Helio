@@ -91,7 +91,7 @@ pub fn load_mesh_asset_upload(path: &Path) -> Option<crate::mesh_cache::MeshAsse
     // source model. Load it directly — no conversion or options (issues #391/#409).
     if path.extension().and_then(|e| e.to_str()) == Some("mesh") {
         let bytes = std::fs::read(path).ok()?;
-        let (asset, id) = crate::mesh_cache::decode_asset(&bytes)?;
+        let (mut asset, id) = crate::mesh_cache::decode_asset(&bytes)?;
 
         // Content-id provenance (Pulsar-Native#658): prime the memoization
         // cache now, from the id `decode` just produced (read directly for
@@ -116,6 +116,9 @@ pub fn load_mesh_asset_upload(path: &Path) -> Option<crate::mesh_cache::MeshAsse
             }
         }
 
+        // Meshes baked before UV fallback existed still show UV materials
+        // (applied after the backfill so the file's stored bytes stay as baked).
+        crate::mesh_cache::ensure_uv0(&mut asset.geometry);
         return Some(asset);
     }
 

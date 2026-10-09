@@ -66,6 +66,13 @@ pub struct MeshMaterialSlot {
     pub name: String,
     #[serde(default)]
     pub surface: ImportedSurfaceMaterial,
+    /// Default material assigned to this slot on the asset itself (a `.mat`
+    /// file or shader-graph folder, project-relative). Placed
+    /// `StaticMeshComponent`s inherit it for every slot they do not
+    /// override; empty means "use the imported surface". Authored in the
+    /// mesh viewer via [`set_default_materials`].
+    #[serde(default)]
+    pub material_asset: String,
 }
 
 /// FBX/OBJ/glTF scalar material data retained by native mesh imports. Texture
@@ -634,6 +641,7 @@ pub(crate) fn mesh_asset_from_converted_scene(
         .map(|index| MeshMaterialSlot {
             source_material: Some(index as u32),
             name: format!("Material {}", index + 1),
+            material_asset: String::new(),
             surface: scene.materials.get(index).map(|material| ImportedSurfaceMaterial {
                 base_color: material.gpu.base_color,
                 roughness: material.gpu.roughness_metallic[0],
@@ -656,6 +664,7 @@ pub(crate) fn mesh_asset_from_converted_scene(
                     source_material: None,
                     name: format!("Material {}", index + 1),
                     surface: ImportedSurfaceMaterial::default(),
+                    material_asset: String::new(),
                 });
                 index
             },
@@ -671,14 +680,70 @@ pub(crate) fn mesh_asset_from_converted_scene(
         });
     }
 
+    let mut geometry = MeshUpload {
+        vertices: sectioned.vertices,
+        indices,
+    };
+    ensure_uv0(&mut geometry);
     Some(MeshAssetUpload {
-        geometry: MeshUpload {
-            vertices: sectioned.vertices,
-            indices,
-        },
+        geometry,
         sections,
         material_slots,
     })
+}
+
+fn unpack_snorm4x8(packed: u32) -> [f32; 3] {
+    let channel = |shift: u32| ((packed >> shift) as u8 as i8 as f32 / 127.0).max(-1.0);
+    [channel(0), channel(8), channel(16)]
+}
+
+/// Give a mesh that carries no UV layer a deterministic box projection.
+///
+/// Source models without UVs import with every `tex_coords0` at (0, 0), so
+/// any UV-driven material (a shader graph's texture or `rainbow` node)
+/// evaluates at a single point and paints the whole mesh one flat colour.
+/// Each vertex projects onto the plane its normal faces most, in object-space
+/// units, so such meshes still show their materials (tiling once per unit).
+/// Meshes with real UVs are untouched. Idempotent.
+pub fn ensure_uv0(mesh: &mut MeshUpload) {
+    if mesh.vertices.is_empty() || mesh.vertices.iter().any(|v| v.tex_coords0 != [0.0, 0.0]) {
+        return;
+    }
+    for vertex in &mut mesh.vertices {
+        let n = unpack_snorm4x8(vertex.normal);
+        let (ax, ay, az) = (n[0].abs(), n[1].abs(), n[2].abs());
+        let p = vertex.position;
+        vertex.tex_coords0 = if ax >= ay && ax >= az {
+            [p[2], p[1]]
+        } else if ay >= az {
+            [p[0], p[2]]
+        } else {
+            [p[0], p[1]]
+        };
+    }
+}
+
+/// Rewrite the default material assignment of the native `.mesh` at `path`:
+/// `materials[i]` is the project-relative material asset for slot `i` (empty
+/// clears it). Geometry and content id are untouched, so placed meshes keep
+/// their shared GPU geometry; a mesh `AssetUpdated` is published so open
+/// levels re-resolve their slots.
+pub fn set_default_materials(path: &Path, materials: &[String]) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let (mut asset, id) =
+        decode_asset(&bytes).ok_or_else(|| format!("{} is not a valid .mesh", path.display()))?;
+    for (slot, material) in asset.material_slots.iter_mut().zip(materials) {
+        slot.material_asset = material.trim().to_owned();
+    }
+    let tmp = path.with_extension("mesh.tmp");
+    std::fs::write(&tmp, encode_asset(&asset, id))
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    prime_content_id_cache(path, id);
+    pulsar_events::publish_asset_updated(
+        pulsar_events::AssetUpdated::new(plugin_editor_api::AssetKind::Mesh).with_path(path),
+    );
+    Ok(())
 }
 
 /// Import `source` into an engine-native `.mesh` asset at `native`, converting
@@ -830,6 +895,52 @@ mod tests {
         );
         let native = import_model_to_native_default(&source, &dir).expect("the cube imports");
         assert!(seen.lock().unwrap().contains(&Some(native.clone())), "{native:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn uv_less_meshes_get_a_box_projection_and_real_uvs_are_kept() {
+        let vertex = |position: [f32; 3], normal: [f32; 3], uv: [f32; 2]| {
+            PackedVertex::from_components(position, normal, uv, [1.0, 0.0, 0.0], 1.0)
+        };
+        let mut bare = MeshUpload {
+            vertices: vec![
+                vertex([1.0, 2.0, 3.0], [0.0, 1.0, 0.0], [0.0; 2]),
+                vertex([4.0, 5.0, 6.0], [0.0, 0.0, 1.0], [0.0; 2]),
+            ],
+            indices: vec![0, 1, 0],
+        };
+        ensure_uv0(&mut bare);
+        assert_eq!(bare.vertices[0].tex_coords0, [1.0, 3.0]);
+        assert_eq!(bare.vertices[1].tex_coords0, [4.0, 5.0]);
+
+        let mut authored = MeshUpload {
+            vertices: vec![vertex([1.0, 2.0, 3.0], [0.0, 1.0, 0.0], [0.25, 0.5])],
+            indices: vec![0],
+        };
+        ensure_uv0(&mut authored);
+        assert_eq!(authored.vertices[0].tex_coords0, [0.25, 0.5]);
+    }
+
+    #[test]
+    fn default_materials_rewrite_metadata_and_keep_geometry_identity() {
+        let dir = std::env::temp_dir().join(format!("mesh-default-mat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("m.mesh");
+        let asset = MeshAssetUpload {
+            geometry: MeshUpload {
+                vertices: vec![PackedVertex::zeroed(); 3],
+                indices: vec![0, 1, 2],
+            },
+            sections: vec![MeshSection { first_index: 0, index_count: 3, material_slot: 0 }],
+            material_slots: vec![MeshMaterialSlot::default()],
+        };
+        std::fs::write(&path, encode_asset(&asset, 7)).unwrap();
+        set_default_materials(&path, &["materials/A.mat".to_owned()]).unwrap();
+        let (decoded, id) = decode_asset(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(id, 7);
+        assert_eq!(decoded.material_slots[0].material_asset, "materials/A.mat");
+        assert_eq!(decoded.geometry.indices, vec![0, 1, 2]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
