@@ -1051,6 +1051,8 @@ impl Residency {
                 || (last.lod0 - lod0).abs() > lod0 * 0.01
                 || last.lod_dither != request.lod_dither
                 || last.outer_radius != request.outer_radius
+                // Edits move the terrain bounds that turn levels on.
+                || last.planet.as_ref().map(|p| p.edits().hash()) != request.planet.as_ref().map(|p| p.edits().hash())
         });
         // Coalesce: no new plan while the last one is outstanding or its
         // diffs are still being applied. The planner diffs against the last

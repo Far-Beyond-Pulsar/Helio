@@ -50,8 +50,8 @@ struct LevelState {
     radius: f64,
     wanted: FxHashSet<u64>,
     /// Last local terrain bound: where, over what ground radius, the bound,
-    /// and the world's outer radius then (edits change it).
-    bound: Option<(DVec3, f64, f64, f64)>,
+    /// the world's outer radius and its edits' hash then (both move it).
+    bound: Option<(DVec3, f64, f64, f64, u64)>,
 }
 
 pub struct WindowPlanner {
@@ -228,12 +228,15 @@ impl WindowPlanner {
         }
         let eye = request.eye;
         let state = &mut self.levels[level as usize];
-        let stale = state.bound.is_none_or(|(at, radius, _, outer)| {
-            grid.ground_distance(at, eye) > radius - reach || outer != request.outer_radius
+        // Edits move the bound (a dig lowers it): it is recomputed when
+        // they change, not only when the eye moves.
+        let edits = planet.edits().hash();
+        let stale = state.bound.is_none_or(|(at, radius, _, outer, hash)| {
+            grid.ground_distance(at, eye) > radius - reach || outer != request.outer_radius || hash != edits
         });
         if stale {
             let radius = reach * 1.2;
-            state.bound = Some((eye, radius, planet.local_outer_radius(eye, radius), request.outer_radius));
+            state.bound = Some((eye, radius, planet.local_outer_radius(eye, radius), request.outer_radius, edits));
         }
         state.bound.unwrap().2.min(request.outer_radius)
     }

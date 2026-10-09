@@ -16,6 +16,8 @@ pub const EARTH_RADIUS: f64 = 6_371_000.0;
 /// renderer hit drawn with cells up to ~34 m (a 0.1 m grid), a millisecond
 /// or two.
 pub const EXACT_WALK_CELLS: f64 = 2048.0;
+/// Level cells [`Planet::edited_top`] walks down at most.
+pub const EDITED_TOP_REACH: i32 = 4096;
 
 /// Serialized authoring recipe: the world's form and its terrain generator.
 /// Edits are stored separately (see `journal`).
@@ -82,9 +84,10 @@ impl PlanetRecipe {
 }
 
 /// Result of an exact ray cast on the base grid.
-/// The base column a ray walk is in (`Planet::kind_in`).
+/// The level column a walk is in (`Planet::kind_at`): its field height and
+/// brushes, looked up once.
 struct RayColumn {
-    key: (u8, i32, i32),
+    key: (u8, i32, i32, u32),
     height: i32,
     large: Vec<FaceBrush>,
     recent: Vec<FaceBrush>,
@@ -486,23 +489,28 @@ impl Planet {
     /// [`Self::kind`] for cells walked by a ray: the column's top and
     /// brushes are looked up once per column, not per cell.
     fn kind_in(&self, column: &mut Option<RayColumn>, cell: Cell) -> u32 {
-        let key = (cell.face, cell.i, cell.j);
+        self.kind_at(column, 0, cell.face, cell.i, cell.j, cell.k)
+    }
+    /// Canonical kind of level cell `(i, j, k)` (as [`Self::sample_kind`]),
+    /// for walks: the column's height and brushes are looked up once per
+    /// column. The last edit that removes or adds at the cell decides its
+    /// kind (paint keeps it), so the field is sampled only where none does:
+    /// a walk down a dug pit or tunnel crosses carved cells without
+    /// evaluating the rock (and its caves) above them.
+    fn kind_at(&self, column: &mut Option<RayColumn>, level: u32, face: u8, i: i32, j: i32, k: i32) -> u32 {
+        let key = (face, i, j, level);
         if column.as_ref().is_none_or(|c| c.key != key) {
             *column = Some(RayColumn {
                 key,
-                height: self.column_height(cell.face, cell.i, cell.j, 0),
-                large: Self::face_brushes(&self.edits.large, cell.face, cell.i, cell.j, 0),
-                recent: Self::face_brushes(&self.edits.recent, cell.face, cell.i, cell.j, 0),
+                height: self.column_height(face, i, j, level),
+                large: Self::face_brushes(&self.edits.large, face, i, j, level),
+                recent: Self::face_brushes(&self.edits.recent, face, i, j, level),
             });
         }
         let c = column.as_ref().expect("filled above");
-        // The last edit that removes or adds at the cell decides its kind
-        // (paint keeps it), so the field is sampled only where none does:
-        // a walk down a dug pit or tunnel crosses carved cells without
-        // evaluating the rock (and its caves) above them.
-        let center = [center_half(cell.i, 0), center_half(cell.j, 0), center_half(cell.k, 0)];
+        let center = [center_half(i, level), center_half(j, level), center_half(k, level)];
         let mut q = None;
-        let point = || self.grid.volume_point(cell.face, cell.i, cell.j, cell.k, 0);
+        let point = || self.grid.volume_point(face, i, j, k, level);
         let mut decided = |brushes: &[FaceBrush]| {
             brushes
                 .iter()
@@ -513,7 +521,7 @@ impl Planet {
         if let Some(kind) = decided(&c.recent) {
             return kind;
         }
-        match self.edits.baked.cell(cell.face, 0, cell.i, cell.j, cell.k).state() {
+        match self.edits.baked.cell(face, level, i, j, k).state() {
             1 => return 0,
             crate::edit_store::CellEdit::SOLID => return 1,
             _ => {}
@@ -521,7 +529,56 @@ impl Planet {
         if let Some(kind) = decided(&c.large) {
             return kind;
         }
-        terrain::generated_kind(&self.grid, &*self.field, cell.face, cell.i, cell.j, cell.k, 0, c.height)
+        terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, c.height)
+    }
+    /// First air layer above the highest solid cell of level column
+    /// `(i, j)` with its edits (level cells), or `None` when no edit reaches
+    /// the column (its generated top stands).
+    ///
+    /// Walks down from the highest layer anything can be solid at (the
+    /// generated top, an Add brush's top, a baked solid cell) with a stride
+    /// growing with the distance walked (a step per 1/16 of it), refined to
+    /// the exact layer below the last air sample; a solid slab thinner than
+    /// the stride there can be stepped over, which only makes the answer
+    /// low. Removal reaching deeper than [`EDITED_TOP_REACH`] cells below
+    /// that start answers the lowest air walked.
+    pub fn edited_top(&self, face: u8, i: i32, j: i32, level: u32) -> Option<i32> {
+        let large = Self::face_brushes(&self.edits.large, face, i, j, level);
+        let recent = Self::face_brushes(&self.edits.recent, face, i, j, level);
+        let column_key = ColumnKey { face, level: level as u8, ci: i.div_euclid(crate::grid::BRICK), cj: j.div_euclid(crate::grid::BRICK) };
+        let baked = self.edits.baked.column(&column_key).is_some();
+        if large.is_empty() && recent.is_empty() && !baked {
+            return None;
+        }
+        let g = &self.grid;
+        let height = self.column_height(face, i, j, level);
+        let generated = terrain::generated_top(g, &*self.field, face, i, j, level, height);
+        let shift = level + 1;
+        let added = large.iter().chain(&recent).filter(|b| b.op() == 1).map(|b| (b.k_hi >> shift) + 1).max().unwrap_or(i32::MIN);
+        let baked_top = self.edits.baked.solid_top(face, level, i, j).unwrap_or(i32::MIN);
+        let start = generated.max(added).max(baked_top);
+        let floor = (((self.inner_radius() - g.radius()) / g.voxel_size()).floor() as i32) >> level;
+        let mut column = Some(RayColumn { key: (face, i, j, level), height, large, recent });
+        let mut solid = |k: i32| self.kind_at(&mut column, level, face, i, j, k) == 1;
+        let (mut air, mut k) = (start, start - 1);
+        while k >= floor && start - k <= EDITED_TOP_REACH {
+            if solid(k) {
+                // Air at `air`, solid at `k`: the topmost solid layer between.
+                let mut lo = k;
+                while air - lo > 1 {
+                    let mid = (air + lo) / 2;
+                    if solid(mid) {
+                        lo = mid;
+                    } else {
+                        air = mid;
+                    }
+                }
+                return Some(lo + 1);
+            }
+            air = k;
+            k -= 1 + (start - k) / 16;
+        }
+        Some(air)
     }
     /// Slope (eighths of a cell per cell) that classifies the materials of
     /// base column (i, j), whatever level draws it: central differences of
@@ -873,7 +930,60 @@ impl Planet {
         }
         let (cell, _) = self.grid.locate(eye);
         let top = self.column_top(cell.face, cell.i, cell.j, 0);
-        (f64::from(cell.k - top) * self.grid.voxel_size() - self.overhang_height()).max(0.0)
+        let ground = (f64::from(cell.k - top) * self.grid.voxel_size() - self.overhang_height()).max(0.0);
+        // Additions stand above the generated ground: a near plane a
+        // quarter of the height over it clipped a wall built beside the eye.
+        self.addition_clearance(eye, cell, ground)
+    }
+    /// `limit`, or less where an addition (an Add brush or a baked solid
+    /// cell) may lie within `limit` of `eye`, conservatively.
+    fn addition_clearance(&self, eye: DVec3, cell: Cell, limit: f64) -> f64 {
+        let g = &self.grid;
+        if limit <= 0.0 || self.edit_top < g.radial(eye) - limit {
+            return limit;
+        }
+        let base = if g.is_plane() { g.voxel_size() } else { g.delta() * g.radius() * 0.7 };
+        let reach = (limit / base).ceil() as i64 + 1;
+        let (i, j) = (i64::from(cell.i), i64::from(cell.j));
+        let mut clearance = limit;
+        for log in [&self.edits.large, &self.edits.recent] {
+            for (id, index) in log.query(cell.face, i - reach, i + reach, j - reach, j + reach, 0) {
+                if log.resolved(id).faces[index as usize].op() != 1 {
+                    continue;
+                }
+                let brush = &log.resolved(id).brush;
+                // A box's farthest corner bounds it whatever its frame.
+                let extent = match brush.shape {
+                    crate::edits::BrushShape::Sphere => brush.radius,
+                    crate::edits::BrushShape::Cube => {
+                        let half_height = if brush.height > 0.0 { brush.height } else { brush.radius };
+                        (2.0 * brush.radius * brush.radius + half_height * half_height).sqrt()
+                    }
+                };
+                let distance = (eye.distance(DVec3::from_array(brush.center)) - extent).max(0.0);
+                clearance = clearance.min(distance);
+            }
+        }
+        // Baked additions: the highest solid cell of every store column in
+        // reach (base columns while few, else the coarsest level that keeps
+        // them few, whose cells are majorities of their children).
+        let mut level = 0;
+        while ((reach >> level) * 2 / 8 + 1).pow(2) > 1024 {
+            level += 1;
+        }
+        let columns = (reach >> level) / 8 + 1;
+        let (ci, cj) = (i64::from(cell.i >> level) / 8, i64::from(cell.j >> level) / 8);
+        let height = g.height(eye);
+        for a in ci - columns..=ci + columns {
+            for b in cj - columns..=cj + columns {
+                let key = ColumnKey { face: cell.face, level: level as u8, ci: a as i32, cj: b as i32 };
+                let Some(column) = self.edits.baked.column(&key) else { continue };
+                let Some(&(bk, _)) = column.last() else { continue };
+                let top = f64::from((bk + 1) * crate::grid::BRICK) * g.level_size(level);
+                clearance = clearance.min((height - top).max(0.0));
+            }
+        }
+        clearance
     }
     /// Height of `eye` above the ground directly below it, along the local
     /// vertical: the generated ground's top over open terrain, and the floor
@@ -960,10 +1070,14 @@ impl Planet {
         }
         let margins = self.field.bound_margins();
         // Highest surface (metres above the datum) any column inside a
-        // level column can reach.
+        // level column can reach: its generated top, or where edits reach
+        // it, its edited top. A dig lowers the bound to its floor, so an eye
+        // inside it turns levels on by its height over that floor, not by
+        // the rock that was there; an addition raises it only where it is.
         let bound = |l: u32, a: i32, b: i32| {
             let margin = if l == 0 { 0 } else { margins[l as usize].min(4) };
-            f64::from(self.column_top(cell.face, a, b, l) + margin) * g.level_size(l)
+            let top = self.edited_top(cell.face, a, b, l).unwrap_or_else(|| self.column_top(cell.face, a, b, l));
+            f64::from(top + margin) * g.level_size(l)
         };
         let mut heap = std::collections::BinaryHeap::new();
         for a in ci - reach..=ci + reach {
@@ -982,8 +1096,7 @@ impl Planet {
                 heap.push((OrdF64(bound(l - 1, a * 2 + da, b * 2 + db)), l - 1, a * 2 + da, b * 2 + db));
             }
         };
-        let terrain = g.radius() + top + self.overhang_height() + g.voxel_size() * 4.0;
-        terrain.max(self.edit_top + g.voxel_size()).min(global)
+        (g.radius() + top + self.overhang_height() + g.voxel_size() * 4.0).min(global)
     }
 }
 
@@ -1233,6 +1346,60 @@ mod tests {
         let margin = g.voxel_size() * f64::from(1u32 << level) * 3.0 + 1.0;
         let hit = p.raycast_near(eye, -up, 20_000.0 - margin, 20_000.0 + margin, level).expect("a hit near");
         assert_eq!(hit.cell, exact.cell, "{} vs {}", hit.distance, exact.distance);
+    }
+
+    /// Level selection measures the eye's height over the terrain as
+    /// edited: inside a dig, over its floor; additions count only where
+    /// they are.
+    #[test]
+    fn local_bounds_follow_edits() {
+        let mut p = heightfield(PlanetRecipe::default());
+        let g = *p.grid();
+        let up = DVec3::new(0.2, 1.0, -0.1).normalize();
+        let ground = g.radial(p.surface_point(up, 0.0));
+        let untouched = p.local_outer_radius(g.at_radial(up, ground - 250.0), 30.0);
+        assert!(untouched > ground - 1.0, "rock over the eye: {} m", untouched - ground);
+        // A ball 400 m wide whose floor is 300 m below the ground.
+        let floor = ground - 300.0;
+        p.apply(Brush { center: g.at_radial(up, floor + 200.0).to_array(), radius: 200.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        let eye = g.at_radial(up, floor + 50.0);
+        // Within the bound's tolerance over flat ground (coarse cells and
+        // their margins where the split budget ends), far below the rock.
+        let bound = p.local_outer_radius(eye, 30.0);
+        assert!(bound > floor && bound < floor + 45.0, "the dig's floor bounds the eye's region: {} m over it", bound - floor);
+        // An addition far away leaves the bound; one in the region raises it.
+        let side = up.any_orthonormal_vector();
+        let far = p.surface_point((up + side * 0.01).normalize(), 0.0);
+        p.apply(Brush { center: (far + far.normalize() * 500.0).to_array(), radius: 600.0, shape: BrushShape::Sphere, op: BrushOp::Add, material: 3, height: 0.0 }).unwrap();
+        assert!((p.local_outer_radius(eye, 30.0) - bound).abs() < 1e-6);
+        p.apply(Brush { center: g.at_radial(up, floor + 20.0).to_array(), radius: 15.0, shape: BrushShape::Sphere, op: BrushOp::Add, material: 3, height: 0.0 }).unwrap();
+        let raised = p.local_outer_radius(eye, 30.0);
+        assert!(raised > floor + 34.0 && raised > bound && raised < floor + 90.0, "a hill in the dig: {} m over the floor", raised - floor);
+    }
+
+    /// The near plane's clearance sees what was built beside the eye.
+    #[test]
+    fn air_clearance_counts_additions() {
+        let mut p = heightfield(PlanetRecipe::default());
+        let g = *p.grid();
+        let up = DVec3::new(-0.3, 1.0, 0.4).normalize();
+        let eye = p.surface_point(up, 40.0);
+        assert!(p.air_clearance(eye) > 30.0);
+        let side = up.any_orthonormal_vector();
+        let wall = eye + side * 8.0;
+        p.apply(Brush { center: wall.to_array(), radius: 6.0, shape: BrushShape::Sphere, op: BrushOp::Add, material: 3, height: 0.0 }).unwrap();
+        let near = p.air_clearance(eye);
+        assert!(near <= 2.0 + 1e-9, "a ball 2 m away: {near} m");
+        // Sealed into the store, small additions still count.
+        let mut q = heightfield(PlanetRecipe::default());
+        for n in 0..(crate::planet::RECENT_BRUSHES + crate::planet::SEAL_BATCH) as i32 {
+            let at = wall + up * (f64::from(n) * 0.3 - 6.0);
+            q.apply(Brush { center: at.to_array(), radius: 0.3, shape: BrushShape::Cube, op: BrushOp::Add, material: 3, height: 0.0 }).unwrap();
+        }
+        assert!(q.edits().sealed_len() > 0);
+        let near = q.air_clearance(eye);
+        assert!(near <= 8.0, "a sealed column 8 m away: {near} m");
+        let _ = g;
     }
 
     /// In a dug pit the camera's altitude is its height above the pit's
