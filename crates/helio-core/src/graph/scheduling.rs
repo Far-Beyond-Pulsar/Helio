@@ -176,15 +176,34 @@ pub(crate) fn compute_parallel_layers(
     result
 }
 
+/// Whether `execute_with_registry` records independent dependency layers on
+/// the worker pool. The one switch both the executor and chain detection read,
+/// so fusion is only given up for parallel recording that actually happens.
+///
+/// The persistent worker-pool path is not safe to enter from every
+/// host/example yet: its per-wave rendezvous can wait forever when a worker is
+/// inside a backend call that does not return to the pool. Keep graph
+/// correctness and profiling available through the serial executor until the
+/// worker protocol is replaced with a completion primitive that cannot block
+/// the render caller (Helio#309).
+pub(crate) const PARALLEL_RECORDING: bool = false;
+
+/// Whether fused chains must be dropped to record `layers` on workers. Only
+/// when parallel recording is on and some layer holds independent work.
+fn fusion_yields_to_parallel_recording(parallel_recording: bool, layers: &[Vec<usize>]) -> bool {
+    parallel_recording && layers.iter().any(|layer| layer.len() > 1)
+}
+
 impl RenderGraph {
     /// Fused render passes and worker recording are deliberately exclusive
     /// scheduling modes. A fused chain keeps one encoder/render pass alive;
     /// trying to interleave an unrelated worker encoder around that lifetime
-    /// is invalid wgpu usage. When the dependency graph has real independent
-    /// work, prefer valid parallel command buffers and record the would-be
-    /// chain members as ordinary standalone passes.
+    /// is invalid wgpu usage. When the graph records in parallel and the
+    /// dependency graph has real independent work, prefer valid parallel
+    /// command buffers and record the would-be chain members as ordinary
+    /// standalone passes. With serial recording the chains are kept.
     pub(crate) fn prefer_parallel_recording_over_fusion(&mut self) {
-        if self.parallel_layers.iter().any(|layer| layer.len() > 1) {
+        if fusion_yields_to_parallel_recording(PARALLEL_RECORDING, &self.parallel_layers) {
             self.subpass_chains.clear();
         }
     }
@@ -244,7 +263,10 @@ impl RenderGraph {
 
 #[cfg(test)]
 mod chain_tests {
-    use super::{compute_chains, compute_parallel_layers};
+    use super::{
+        compute_chains, compute_parallel_layers, fusion_yields_to_parallel_recording,
+        PARALLEL_RECORDING,
+    };
 
     fn sig(ids: &[usize]) -> Option<Vec<usize>> {
         Some(ids.to_vec())
@@ -402,7 +424,35 @@ mod chain_tests {
         let reads = vec![vec![], vec!["a"], vec![]];
         let layers = compute_parallel_layers(&writes, &reads);
         assert_eq!(layers, vec![vec![0, 2], vec![1]]);
+        assert!(fusion_yields_to_parallel_recording(true, &layers));
+    }
+
+    #[test]
+    fn serial_recording_keeps_chains_beside_independent_work() {
+        // Passes 0 and 1 fuse; pass 2 is independent, so layer 0 holds two
+        // passes. Only a parallel recorder has a reason to drop the chain.
+        let writes = vec![vec!["a"], vec!["b"], vec!["c"]];
+        let reads = vec![vec![], vec!["a"], vec![]];
+        let transparent = vec![false, false, false];
+        let attachments = vec![sig(&[1]), sig(&[1]), sig(&[2])];
+        let layers = compute_parallel_layers(&writes, &reads);
         assert!(layers.iter().any(|layer| layer.len() > 1));
+        assert_eq!(
+            compute_chains(&writes, &reads, &transparent, &attachments),
+            vec![0..2]
+        );
+        assert!(!fusion_yields_to_parallel_recording(false, &layers));
+        // The executor records serially today, so the chain must survive.
+        assert_eq!(
+            fusion_yields_to_parallel_recording(PARALLEL_RECORDING, &layers),
+            PARALLEL_RECORDING
+        );
+    }
+
+    #[test]
+    fn single_pass_layers_keep_chains_even_with_parallel_recording() {
+        let layers = vec![vec![0], vec![1], vec![2]];
+        assert!(!fusion_yields_to_parallel_recording(true, &layers));
     }
 
     #[test]
