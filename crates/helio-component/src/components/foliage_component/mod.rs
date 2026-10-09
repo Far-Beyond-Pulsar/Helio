@@ -1,6 +1,6 @@
 mod component;
 mod mapping;
-mod runtime;
+pub(crate) mod runtime;
 mod scene_props;
 mod sub_props;
 

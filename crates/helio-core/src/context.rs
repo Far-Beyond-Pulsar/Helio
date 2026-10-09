@@ -306,6 +306,23 @@ pub struct PassContext<'a> {
 }
 
 impl<'a> PassContext<'a> {
+    /// Whether GPU scope timestamps can be recorded on this graph.
+    pub fn gpu_scopes_enabled(&self) -> bool {
+        self.profiler.is_enabled() && self.profiler.gpu_timing_supported()
+    }
+
+    /// Begin a named GPU subscope on a manually recorded command encoder.
+    /// It shares the graph's timestamp query set and frame readback.
+    /// Call outside an open render/compute pass, paired with `end_gpu_scope`.
+    pub fn begin_gpu_scope(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
+        self.profiler.begin_gpu_pass(encoder, name);
+    }
+
+    /// End a GPU subscope on the encoder on which it began.
+    pub fn end_gpu_scope(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
+        self.profiler.end_gpu_pass(encoder, name);
+    }
+
     /// Returns an executor-created reflected bind group by group index.
     pub fn reflected_bind_group(&self, group: usize) -> Option<&wgpu::BindGroup> {
         self.reflected_bind_groups.get(group)

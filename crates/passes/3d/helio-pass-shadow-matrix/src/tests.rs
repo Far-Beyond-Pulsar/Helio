@@ -38,6 +38,14 @@ fn production_shadow_shaders_validate() {
                 source
             );
         }
+        if source.contains("//!use atmosphere") {
+            source = format!(
+                "{}\n{}",
+                std::fs::read_to_string(root.join("helio-pass-sky/src/shaders/atmosphere_common.wgsl"))
+                    .unwrap(),
+                source
+            );
+        }
         validate(path, &helio_core::shader::resolve(&source));
     }
     let prefix = "const USE_RAY_TRANSMISSION:bool=false; const USE_TILE_PRESAMPLING:bool=false; alias Visibility=f32; alias VisibilityCache=vec4f; fn visibility_nonzero(v:f32)->bool{return v>0.0;} fn visibility_missing(v:f32)->bool{return v<0.0;} fn visibility_from_rgb(v:vec3f)->f32{return v.x;}";

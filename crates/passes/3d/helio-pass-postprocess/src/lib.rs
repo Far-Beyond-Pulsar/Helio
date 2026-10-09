@@ -45,8 +45,6 @@ pub use lut_builder::LutBuilder;
 #[cfg(test)]
 mod exposure_tests;
 
-const BASE_SHADER_SRC: &str = include_str!("../shaders/postprocess.wgsl");
-
 const BLOOM_MIPS: u32 = 5;
 const WG_BLOOM: u32 = 8;
 const WG_EXPOSURE_X: u32 = 16;
@@ -259,14 +257,7 @@ impl PostProcessPass {
             .unwrap_or_default();
 
         let initial_src = Self::build_shader_source(&initial_entries);
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("PostProcess Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                helio_core::shader::resolve(&initial_src)
-                    .into_owned()
-                    .into(),
-            ),
-        });
+        let shader = helio_core::shader::module(device, "PostProcess Shader", &initial_src);
 
         let avg_luminance_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PostProcess Avg Luminance"),
@@ -794,7 +785,12 @@ impl PostProcessPass {
     /// - A bare expression body (new API via `add_user_effect`)
     ///   → wrapped in a generated `fn` and placed at module scope; a call emitted at the marker.
     fn build_shader_source(entries: &[UserEffectEntry]) -> String {
-        let base = BASE_SHADER_SRC;
+        // Fetched as text: user effects are spliced into it below, so it is
+        // not handed to `module` as an `include_wgsl!` whole.
+        let base = helio_core::shader::source_text(
+            "PostProcess Shader",
+            helio_core::include_wgsl!("../shaders/postprocess.wgsl"),
+        );
         let mut result = base.to_string();
 
         // Collect module-scope definitions and per-position calls.
@@ -853,12 +849,7 @@ impl PostProcessPass {
         if self.cached_shader_source.as_deref() == Some(&source) {
             return; // identical — skip rebuild
         }
-        let shader_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("PostProcess Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                helio_core::shader::resolve(&source).into_owned().into(),
-            ),
-        });
+        let shader_mod = helio_core::shader::module(device, "PostProcess Shader", &source);
         self.uber_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("PostProcess Uber"),
             layout: Some(&self.uber_pl),

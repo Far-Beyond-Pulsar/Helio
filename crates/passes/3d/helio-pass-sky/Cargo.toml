@@ -2,7 +2,7 @@
 name = "helio-pass-sky"
 version = "0.1.0"
 edition = "2021"
-description = "Helio unified sky and volumetric clouds pass"
+description = "Helio atmosphere (sky) passes"
 license = "MIT OR Apache-2.0"
 
 [features]

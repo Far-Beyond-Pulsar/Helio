@@ -521,11 +521,11 @@ pub const fn pack_kind_and_flags(kind: FoliageKind, flags: u32) -> u32 {
 /// # Why 96 and not 64
 ///
 /// The plan's §4.3 heads this struct "64 bytes", but its own field list sums to **84** —
-/// the header was simply wrong, and the fields are what matter. Rounding up to 96 leaves
-/// 12 bytes of tail padding in [`GpuFoliageType::_pad`], which is **deliberate and meant
-/// to be spent**: §4.3 is a first draft of what a foliage type needs, and this table will
-/// grow. Fill the padding before widening the struct, and when it runs out grow to 128
-/// rather than reintroducing packing.
+/// the header was simply wrong, and the fields are what matter. Rounding up to 96 left
+/// 12 bytes of tail padding, which was **deliberate and meant to be spent**: §4.3 is a
+/// first draft of what a foliage type needs, and this table will grow. The authored
+/// material ([`FoliageMaterial`]) spent eight of them; four remain in
+/// [`GpuFoliageType::_pad`]. When they run out, grow to 128 rather than packing more.
 ///
 /// The earlier draft of this type hit 64 bytes by storing `height_range`, `width_range`,
 /// `slope_range` and `lod_distances` as `f16` pairs. That bought about two kilobytes —
@@ -538,6 +538,13 @@ pub const fn pack_kind_and_flags(kind: FoliageKind, flags: u32) -> u32 {
 /// one range here that can carry planetary magnitudes, and it must never be narrowed. At
 /// 10 km, `f16` resolution is ±8 m — enough to move a treeline visibly. If a future
 /// packing pass ever comes back to this struct, this is the field to leave alone.
+///
+/// The material words are the one packed exception, and a safe one. They are only
+/// written into G-buffer targets that are 8-bit unorm themselves (albedo and ORM), so
+/// an 8-bit colour and 16-bit roughness/metallic lose nothing the frame keeps, and the
+/// decode is WGSL's exactly specified `unpack4x8unorm`/`unpack2x16unorm` (`x / 255`,
+/// `x / 65535`), mirrored by [`FoliageMaterial::unpack`]. Stored unpacked they would
+/// need 20 bytes, more than the headroom had.
 ///
 /// # WGSL mirroring — every field is a scalar
 ///
@@ -570,7 +577,9 @@ pub const fn pack_kind_and_flags(kind: FoliageKind, flags: u32) -> u32 {
 /// 72..76  density_layer:         u32
 /// 76..80  kind_and_flags:        u32
 /// 80..84  mesh_or_impostor_id:   u32
-/// 84..96  _pad:                  u32 × 3    reserved headroom, spend before widening
+/// 84..88  base_color:            u32        RGBA8 unorm, 0 = no authored material
+/// 88..92  roughness_metallic:    u32        unorm16 × 2, roughness in the low half
+/// 92..96  _pad:                  u32        reserved headroom, spend before widening
 /// ```
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -631,15 +640,63 @@ pub struct GpuFoliageType {
     /// otherwise. Overloading one slot costs nothing: no type is ever both.
     pub mesh_or_impostor_id: u32,
 
+    /// Authored linear base colour, RGBA8 unorm with red in the low byte (WGSL
+    /// `unpack4x8unorm`). An authored material always writes alpha 255, so **zero
+    /// means "no authored material"** and the G-buffer pass shades the blade with its
+    /// procedural colour. Write with [`GpuFoliageType::set_material`].
+    pub base_color: u32,
+
+    /// Authored roughness (low half) and metallic (high half) as unorm16 (WGSL
+    /// `unpack2x16unorm`). Read only when [`GpuFoliageType::base_color`] is non-zero.
+    pub roughness_metallic: u32,
+
     /// Reserved headroom. **Must be written as zero.**
     ///
     /// This padding exists to be spent. §4.3 is a first draft of what a foliage type
     /// needs — `wpo_extent`, a cull-distance override and an impostor transition band are
-    /// all plausible next fields — and three spare slots mean the next one lands without
+    /// all plausible next fields — and a spare slot means the next one lands without
     /// touching the size assert, the WGSL struct's tail, or anything that reads this
     /// table. Zeroing it is what makes that safe: a future build can then tell "this
     /// field was left at its default" from "this data predates the field".
-    pub _pad: [u32; 3],
+    pub _pad: u32,
+}
+
+/// A foliage type's authored surface: linear base colour, roughness and metallic.
+///
+/// Stored in [`GpuFoliageType::base_color`] and
+/// [`GpuFoliageType::roughness_metallic`]; see the note on packing there. Every
+/// blade of the type takes this colour, varied by its per-blade tint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FoliageMaterial {
+    /// Linear RGB, `0.0..=1.0`.
+    pub base_color: [f32; 3],
+    /// `0.0` smooth to `1.0` rough.
+    pub roughness: f32,
+    /// `0.0` dielectric to `1.0` metal.
+    pub metallic: f32,
+}
+
+impl FoliageMaterial {
+    /// The `[base_color, roughness_metallic]` row words. Out-of-range and non-finite
+    /// inputs clamp as [`pack_unorm8`] and [`pack_unorm16`] do. The alpha byte is
+    /// always 255, so the colour word is never zero.
+    pub fn pack(&self) -> [u32; 2] {
+        let [r, g, b] = self.base_color.map(|c| u32::from(pack_unorm8(c)));
+        [
+            r | g << 8 | b << 16 | 0xff << 24,
+            u32::from(pack_unorm16(self.roughness)) | u32::from(pack_unorm16(self.metallic)) << 16,
+        ]
+    }
+
+    /// Decodes the row words exactly as `foliage_gbuffer.wgsl` does. `None` when the
+    /// colour word is zero: the type has no authored material.
+    pub fn unpack([base_color, roughness_metallic]: [u32; 2]) -> Option<Self> {
+        (base_color != 0).then(|| Self {
+            base_color: [0, 8, 16].map(|shift| unpack_unorm8((base_color >> shift) as u8)),
+            roughness: unpack_unorm16(roughness_metallic as u16),
+            metallic: unpack_unorm16((roughness_metallic >> 16) as u16),
+        })
+    }
 }
 
 impl GpuFoliageType {
@@ -720,6 +777,18 @@ impl GpuFoliageType {
     pub fn set_kind_and_flags(&mut self, kind: FoliageKind, flags: u32) {
         self.kind_and_flags = pack_kind_and_flags(kind, flags);
     }
+
+    /// The authored material, or `None` when blades shade procedurally.
+    #[inline]
+    pub fn material(&self) -> Option<FoliageMaterial> {
+        FoliageMaterial::unpack([self.base_color, self.roughness_metallic])
+    }
+
+    /// Set the authored material; `None` returns the type to procedural shading.
+    #[inline]
+    pub fn set_material(&mut self, material: Option<FoliageMaterial>) {
+        [self.base_color, self.roughness_metallic] = material.map_or([0; 2], |m| m.pack());
+    }
 }
 
 impl Default for GpuFoliageType {
@@ -744,7 +813,9 @@ impl Default for GpuFoliageType {
                 FOLIAGE_FLAG_TWO_SIDED | FOLIAGE_FLAG_RECEIVES_INTERACTION,
             ),
             mesh_or_impostor_id: 0,
-            _pad: [0; 3],
+            base_color: 0,
+            roughness_metallic: 0,
+            _pad: 0,
         }
     }
 }
@@ -853,11 +924,16 @@ mod tests {
             offset_of(&value.mesh_or_impostor_id as *const u32 as *const u8),
             80
         );
-        assert_eq!(offset_of(value._pad.as_ptr() as *const u8), 84);
+        assert_eq!(offset_of(&value.base_color as *const u32 as *const u8), 84);
+        assert_eq!(
+            offset_of(&value.roughness_metallic as *const u32 as *const u8),
+            88
+        );
+        assert_eq!(offset_of(&value._pad as *const u32 as *const u8), 92);
 
-        // 12 bytes of deliberate tail headroom. If this shrinks to zero, grow the struct
-        // to 128 rather than reintroducing packing.
-        assert_eq!(std::mem::size_of::<GpuFoliageType>() - 84, 12);
+        // 4 bytes of deliberate tail headroom. If this shrinks to zero, grow the struct
+        // to 128 rather than packing more.
+        assert_eq!(std::mem::size_of::<GpuFoliageType>() - 92, 4);
     }
 
     #[test]
@@ -904,6 +980,45 @@ mod tests {
                 "offset {offset} is vec3/vec4-aligned in WGSL"
             );
         }
+    }
+
+    #[test]
+    fn foliage_material_round_trips_and_zero_means_procedural() {
+        let mut ty = GpuFoliageType::default();
+        assert_eq!(ty.material(), None, "the default type shades procedurally");
+        assert_eq!(GpuFoliageType::zeroed().material(), None);
+
+        let material = FoliageMaterial {
+            base_color: [1.0, 0.0, 0.2],
+            roughness: 0.85,
+            metallic: 0.0,
+        };
+        ty.set_material(Some(material));
+        // Red in the low byte, alpha forced to 255: what `unpack4x8unorm` reads.
+        assert_eq!(ty.base_color, 0xff33_00ff);
+        assert_eq!(
+            ty.roughness_metallic & 0xffff,
+            u32::from(pack_unorm16(0.85))
+        );
+        assert_eq!(ty.roughness_metallic >> 16, 0);
+        let decoded = ty.material().unwrap();
+        for (got, want) in decoded.base_color.iter().zip(material.base_color) {
+            assert!((got - want).abs() <= 0.5 / 255.0);
+        }
+        assert!((decoded.roughness - 0.85).abs() <= 0.5 / 65535.0);
+        assert_eq!(decoded.metallic, 0.0);
+
+        // Black is a real colour, not "unset".
+        ty.set_material(Some(FoliageMaterial {
+            base_color: [0.0; 3],
+            roughness: 0.0,
+            metallic: 1.0,
+        }));
+        assert_eq!(ty.material().unwrap().base_color, [0.0; 3]);
+        assert_eq!(ty.material().unwrap().metallic, 1.0);
+
+        ty.set_material(None);
+        assert_eq!((ty.base_color, ty.roughness_metallic), (0, 0));
     }
 
     #[test]

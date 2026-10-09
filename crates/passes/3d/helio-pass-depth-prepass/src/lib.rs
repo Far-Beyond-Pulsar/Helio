@@ -22,10 +22,7 @@ impl DepthPrepassPass {
     ///
     /// * `depth_format` – format of the depth attachment (e.g. `Depth32Float`)
     pub fn new(device: &wgpu::Device, depth_format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("DepthPrepass Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/depth_prepass.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "DepthPrepass Shader", helio_core::include_wgsl!("../shaders/depth_prepass.wgsl"));
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("DepthPrepass BGL"),

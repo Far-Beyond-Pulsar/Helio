@@ -1,6 +1,5 @@
 use engine_class_derive::engine_class;
 use serde_json::Value;
-use std::collections::HashMap;
 
 /// `#[gpu(as = u32, with = ...)]` target for `cast_shadows` -- encodes the
 /// "does this light request shadows at all" flag as `helio::GpuLight::
@@ -129,53 +128,6 @@ impl ShadowLightProps {
         {
             self.contact_shadow_non_shadow_casting_intensity = v as f32;
         }
-    }
-
-    pub(crate) fn apply_to_scene_props(&self, out: &mut HashMap<String, Value>) {
-        out.insert("cast_shadows".to_string(), Value::from(self.cast_shadows));
-        out.insert(
-            "cast_static_shadows".to_string(),
-            Value::from(self.cast_static_shadows),
-        );
-        out.insert(
-            "cast_dynamic_shadows".to_string(),
-            Value::from(self.cast_dynamic_shadows),
-        );
-        out.insert(
-            "cast_volumetric_shadow".to_string(),
-            Value::from(self.cast_volumetric_shadow),
-        );
-        out.insert(
-            "cast_contact_shadows".to_string(),
-            Value::from(self.cast_contact_shadows),
-        );
-        out.insert("shadow_priority".into(), Value::from(self.shadow_priority));
-        out.insert("shadow_max_resolution".into(), Value::from(self.shadow_max_resolution));
-        out.insert("shadow_bias".to_string(), Value::from(self.shadow_bias));
-        out.insert(
-            "shadow_normal_bias".to_string(),
-            Value::from(self.shadow_normal_bias),
-        );
-        out.insert(
-            "shadow_slope_bias".to_string(),
-            Value::from(self.shadow_slope_bias),
-        );
-        out.insert(
-            "shadow_filter_sharpen".to_string(),
-            Value::from(self.shadow_filter_sharpen),
-        );
-        out.insert(
-            "shadow_softness".to_string(),
-            Value::from(self.shadow_softness),
-        );
-        out.insert(
-            "shadow_resolution_scale".to_string(),
-            Value::from(self.shadow_resolution_scale),
-        );
-        out.insert(
-            "contact_shadow_non_shadow_casting_intensity".to_string(),
-            Value::from(self.contact_shadow_non_shadow_casting_intensity),
-        );
     }
 }
 

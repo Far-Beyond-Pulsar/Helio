@@ -23,23 +23,22 @@
 //!   target via a multiply blend (`ambient + radiance`, `Dst * Zero` — no
 //!   framebuffer read needed).
 //!
-//! # Algorithm notes (see `shaders/rc_cascade.wgsl` for the line-by-line
-//! port of the reference's merge/raymarch)
+//! # Algorithm notes (see `shaders/rc_cascade.wgsl` for the merge/raymarch)
 //!
 //! Cascade *N* has `spacing_base^N` probes per axis (`spacing_base =
 //! sqrt(base_ray_count)`) each casting `base_ray_count^(N+1)` rays over an
 //! interval that starts where cascade *N-1*'s interval ends (so consecutive
-//! cascades tile the ray-length axis without gaps or overlaps beyond the
-//! configured `interval_overlap`). Every level is stored at the *same*
-//! fixed texture resolution (`scene_size`) regardless of its actual probe
-//! count, by tiling angularly-different "ray buckets" across the texel
-//! budget a coarser level's sparser probe grid frees up — this is what
-//! keeps a single fixed-size compute dispatch valid for every cascade
-//! level. Merging (mixing in the next-coarser cascade's radiance wherever a
-//! level's own raymarch found nothing, i.e. cascade N is behind/inside an
-//! occluder as seen from N-1) is what turns N independent ray-interval
-//! samples into an approximation of full 2D global illumination —
-//! light bounces around corners via however many cascade levels exist.
+//! cascades tile the ray-length axis without gaps or overlaps). Every level
+//! is stored at the *same* fixed texture resolution (`scene_size`)
+//! regardless of its actual probe count, by tiling angularly-different "ray
+//! buckets" across the texel budget a coarser level's sparser probe grid
+//! frees up — this is what keeps a single fixed-size compute dispatch valid
+//! for every cascade level. Merging (mixing in the next-coarser cascade's radiance wherever a
+//! level's own raymarch found nothing) is what turns N independent
+//! ray-interval samples into full-length rays. Each ray merges the four
+//! surrounding coarser probes separately, along a ray that ends at that
+//! probe's interval start, then weights them bilinearly (the "bilinear
+//! fix"), so a coarser probe behind an occluder contributes nothing.
 //!
 //! The distance field raymarch (`raymarch()` in `rc_cascade.wgsl`) sphere-
 //! traces: at each step it jumps by the distance-to-nearest-occluder rather
@@ -86,7 +85,6 @@ pub struct RadianceCascadesConfig {
     /// matches the reference's default.
     pub base_pixels_between_probes: f32,
     pub max_emitters: u32,
-    pub interval_overlap: f32,
 }
 
 impl Default for RadianceCascadesConfig {
@@ -97,7 +95,6 @@ impl Default for RadianceCascadesConfig {
             base_ray_count: 4.0,
             base_pixels_between_probes: 1.0,
             max_emitters: 64,
-            interval_overlap: 0.1,
         }
     }
 }
@@ -140,7 +137,7 @@ struct CascadeUniforms {
     base_pixels_between_probes: f32,
     cascade_interval: f32,
     ray_interval: f32,
-    interval_overlap: f32,
+    _pad2: f32,
     is_top_cascade: f32,
     scene_size: [f32; 2],
     _pad0: f32,
@@ -335,10 +332,7 @@ impl RadianceCascades2DPass {
         });
 
         // ── Scene build ───────────────────────────────────────────────────
-        let scene_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("RC Scene Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/rc_scene.wgsl").into()),
-        });
+        let scene_shader = helio_core::shader::module(device, "RC Scene Shader", helio_core::include_wgsl!("../shaders/rc_scene.wgsl"));
         let scene_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("RC Scene BGL"),
             entries: &[
@@ -391,10 +385,7 @@ impl RadianceCascades2DPass {
         });
 
         // ── Jump-flood seed + step ──────────────────────────────────────
-        let jfa_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("RC JFA Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/rc_jfa.wgsl").into()),
-        });
+        let jfa_shader = helio_core::shader::module(device, "RC JFA Shader", helio_core::include_wgsl!("../shaders/rc_jfa.wgsl"));
         let jfa_dims_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("RC Dims Uniform"),
             size: std::mem::size_of::<DimsUniform>() as u64,
@@ -533,10 +524,7 @@ impl RadianceCascades2DPass {
         };
 
         // ── Distance field ──────────────────────────────────────────────
-        let dist_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("RC Distance Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/rc_distance.wgsl").into()),
-        });
+        let dist_shader = helio_core::shader::module(device, "RC Distance Shader", helio_core::include_wgsl!("../shaders/rc_distance.wgsl"));
         let dist_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("RC Distance BGL"),
             entries: &[
@@ -578,10 +566,7 @@ impl RadianceCascades2DPass {
         });
 
         // ── Cascades ────────────────────────────────────────────────────
-        let cascade_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("RC Cascade Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/rc_cascade.wgsl").into()),
-        });
+        let cascade_shader = helio_core::shader::module(device, "RC Cascade Shader", helio_core::include_wgsl!("../shaders/rc_cascade.wgsl"));
         let cascade_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("RC Cascade BGL"),
             entries: &[
@@ -639,7 +624,7 @@ impl RadianceCascades2DPass {
                 base_pixels_between_probes: config.base_pixels_between_probes,
                 cascade_interval: 1.0,
                 ray_interval: 1.0,
-                interval_overlap: config.interval_overlap,
+                _pad2: 0.0,
                 is_top_cascade: if is_top { 1.0 } else { 0.0 },
                 scene_size: [scene_w as f32, scene_h as f32],
                 _pad0: 0.0,
@@ -856,10 +841,7 @@ impl RadianceCascadesCompositePass {
         ambient: [f32; 3],
         exposure: f32,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("RC Composite Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/rc_composite.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "RC Composite Shader", helio_core::include_wgsl!("../shaders/rc_composite.wgsl"));
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("RC Composite BGL"),
             entries: &[

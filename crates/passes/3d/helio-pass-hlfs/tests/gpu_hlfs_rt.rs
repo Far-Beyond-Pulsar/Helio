@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 mod support;
 use helio_core::{BlasGeometry, TlasInstanceInput};
+use helio_default_graphs::ray_tracing::{RayTransmission, SceneDbRayTracing};
 use helio_pass_hlfs::{HlfsConfig, HlfsDebugMode, HlfsMode, HlfsPass};
 use support::{mean, point, Fixture};
 use wgpu::util::DeviceExt;
@@ -1442,10 +1443,9 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
                 Arc::new(store),
                 f.queue.clone(),
             ));
-        let mut acceleration =
-            helio_pass_hlfs::SceneDbRayTracing::new(f.device.clone(), f.queue.clone());
+        let mut acceleration = SceneDbRayTracing::new(f.device.clone(), f.queue.clone());
         let render = |f: &mut Fixture,
-                      acceleration: &mut helio_pass_hlfs::SceneDbRayTracing,
+                      acceleration: &mut SceneDbRayTracing,
                       db: &pulsar_scenedb::SceneDb| {
             db.world.flush_gpu_mirror(&f.queue);
             acceleration.prepare(&db.world).unwrap();
@@ -1507,7 +1507,7 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
             "SceneDB offscreen caster missing: {shadow}/{clear}"
         );
         db.world.get_mut::<MaterialComponent>(material).unwrap().flags |= helio_mats::FLAG_ALPHA_BLEND;
-        db.world.insert(material, helio_pass_hlfs::RayTransmission([1.0; 3]));
+        db.world.insert(material, RayTransmission([1.0; 3]));
         assert!((render(&mut f, &mut acceleration, &db) / clear - 1.0).abs() < 0.01);
         // One mesh may simultaneously use both acceleration opacity classes.
         let opaque_material = db.world.spawn();
@@ -1520,13 +1520,13 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
         assert!(render(&mut f, &mut acceleration, &db) < clear * 0.01, "opaque mesh variant must block through clear glass");
         db.world.despawn(opaque_object);
         assert!((render(&mut f, &mut acceleration, &db) / clear - 1.0).abs() < 0.01, "opaque variant removal must preserve the glass variant");
-        db.world.insert(material, helio_pass_hlfs::RayTransmission([0.25; 3]));
+        db.world.insert(material, RayTransmission([0.25; 3]));
         assert!((render(&mut f, &mut acceleration, &db) / clear - 0.25).abs() < 0.015);
-        db.world.insert(material, helio_pass_hlfs::RayTransmission([f32::NAN; 3]));
+        db.world.insert(material, RayTransmission([f32::NAN; 3]));
         db.world.flush_gpu_mirror(&f.queue);
         assert!(acceleration.prepare(&db.world).is_err());
         assert!(acceleration.transmission().is_none());
-        db.world.remove::<helio_pass_hlfs::RayTransmission>(material);
+        db.world.remove::<RayTransmission>(material);
         db.world.get_mut::<MaterialComponent>(material).unwrap().flags &= !helio_mats::FLAG_ALPHA_BLEND;
         assert!(render(&mut f, &mut acceleration, &db) < clear * 0.2);
         {
@@ -1602,10 +1602,9 @@ fn non_deforming_meshes_reuse_their_blas_until_marked_dynamic() {
                 Arc::new(store),
                 f.queue.clone(),
             ));
-        let mut acceleration =
-            helio_pass_hlfs::SceneDbRayTracing::new(f.device.clone(), f.queue.clone());
+        let mut acceleration = SceneDbRayTracing::new(f.device.clone(), f.queue.clone());
         let render = |f: &mut Fixture,
-                      acceleration: &mut helio_pass_hlfs::SceneDbRayTracing,
+                      acceleration: &mut SceneDbRayTracing,
                       db: &pulsar_scenedb::SceneDb| {
             db.world.flush_gpu_mirror(&f.queue);
             acceleration.prepare(&db.world).unwrap();

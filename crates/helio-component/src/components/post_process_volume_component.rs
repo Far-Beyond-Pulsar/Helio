@@ -1,19 +1,16 @@
-//! Reflected camera/volume post-process authoring. Runtime writes the pass's
-//! SceneDB component through PendingWorldWrites. Spatial volume bounds use the
-//! owner's position; camera settings reuse PostProcessSettingsProps.
+//! Reflected camera/volume post-process authoring. A volume reaches the
+//! post-process resolve as its derived row ([`super::environment_rows`]),
+//! placed by the graph's environment join with the owner's transform; camera
+//! settings reuse PostProcessSettingsProps.
 
-use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
-use crate::subsystems::PendingWorldWrites;
+use engine_class_derive::{engine_class, register_world_component};
 use helio_pass_postprocess::{HdrOutputMode as HelioHdrOutputMode, TonemapOperator as HelioTonemapOperator};
 use super::lens_flare_props::LensFlareProps;
 use helio_pass_postprocess::{
     ExposureMode as HelioExposureMode, FogMode as HelioFogMode, PostProcessSettings,
     PostProcessVolumeDescriptor,
 };
-use pulsar_reflection::{
-    get_subsystem, ComponentRuntimeBehavior, ComponentRuntimeContext, Reflectable,
-    RuntimeComponentOwner,
-};
+use pulsar_reflection::Reflectable;
 use serde::{Deserialize, Serialize};
 
 
@@ -682,156 +679,22 @@ impl PostProcessSettingsProps {
 }
 
 impl PostProcessVolumeComponent {
-    fn to_descriptor(&self, owner: &RuntimeComponentOwner) -> PostProcessVolumeDescriptor {
-        let [cx, cy, cz] = owner.position;
+    /// The volume as a pass descriptor centred on the origin, unscaled: the
+    /// environment join places it with the owner's transform.
+    pub fn local_descriptor(&self) -> PostProcessVolumeDescriptor {
         let [sx, sy, sz] = self.size;
-        let settings = self.settings.to_settings();
-
         PostProcessVolumeDescriptor {
-            bounds_min: [cx - sx * 0.5, cy - sy * 0.5, cz - sz * 0.5],
-            bounds_max: [cx + sx * 0.5, cy + sy * 0.5, cz + sz * 0.5],
+            bounds_min: [-sx * 0.5, -sy * 0.5, -sz * 0.5],
+            bounds_max: [sx * 0.5, sy * 0.5, sz * 0.5],
             priority: self.priority,
             blend_radius: self.blend_radius,
             blend_weight: self.blend_weight,
             unbound: self.unbound,
             override_mask: self.overrides.mask(),
-            settings,
+            settings: self.settings.to_settings(),
         }
     }
 }
 
 #[register_world_component]
-#[register_runtime_behavior]
-impl ComponentRuntimeBehavior for PostProcessVolumeComponent {
-    const CLASS_NAME: &'static str = POST_PROCESS_VOLUME_CLASS_NAME;
-
-    fn sync_component(
-        owner: &RuntimeComponentOwner,
-        _component_index: usize,
-        component: &Self,
-        context: &mut dyn ComponentRuntimeContext,
-    ) {
-        // Post-process volumes are SceneDB-only:
-        // `helio_pass_postprocess::PostProcessVolumeComponent` is the only
-        // thing `PostProcessVolumeBlendPass` reads (no Renderer method, no
-        // Helio-owned CPU arena exists any more). `sync_component` runs
-        // under the sync pass's read lock, so it can't `World::insert`
-        // directly -- it queues the write in `PendingWorldWrites` instead;
-        // `engine_backend` applies every queued write under its own short
-        // Phase 2 write lock later this same pass. See that type's doc.
-        let Some(entity) = context
-            .subsystems_mut()
-            .get_mut::<pulsar_scenedb::Entity>()
-            .copied()
-        else {
-            // No entity yet for this object (very first sync pass or two) --
-            // nothing to author onto; the next sync pass tries again.
-            return;
-        };
-        let writes = get_subsystem!(context, PendingWorldWrites);
-        if !component.enabled {
-            writes.push(move |world| {
-                world.remove::<helio_pass_postprocess::PostProcessVolumeComponent>(entity);
-            });
-            return;
-        }
-        let gpu = component.to_descriptor(owner).to_gpu();
-        let packed = helio_pass_postprocess::PostProcessVolumeComponent::from(gpu);
-        writes.push(move |world| {
-            world.insert(entity, packed);
-        });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use engine_subsystems::{Subsystem, SubsystemContext};
-    use pulsar_reflection::{apply_runtime_behavior_for_class, Subsystems};
-    use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
-
-    struct TestRuntimeContext {
-        project_root: PathBuf,
-        subsystems: Subsystems,
-        errors: Vec<String>,
-    }
-
-    impl ComponentRuntimeContext for TestRuntimeContext {
-        fn subsystems_mut(&mut self) -> &mut Subsystems {
-            &mut self.subsystems
-        }
-        fn project_root(&self) -> &Path {
-            &self.project_root
-        }
-        fn report_error(&mut self, message: String) {
-            self.errors.push(message);
-        }
-    }
-
-    fn owner<'a>(props: &'a HashMap<String, serde_json::Value>) -> RuntimeComponentOwner<'a> {
-        RuntimeComponentOwner {
-            scene_object_id: "volume",
-            position: [0.0, 0.0, 0.0],
-            rotation: [0.0; 3],
-            scale: [1.0; 3],
-            props,
-        }
-    }
-
-    #[test]
-    fn runtime_behavior_has_the_reflected_component_name() {
-        assert_eq!(
-            <PostProcessVolumeComponent as ComponentRuntimeBehavior>::CLASS_NAME,
-            POST_PROCESS_VOLUME_CLASS_NAME
-        );
-    }
-
-    #[test]
-    fn to_descriptor_centers_bounds_on_owner_position_and_maps_settings() {
-        let component = PostProcessVolumeComponent {
-            size: [10.0, 20.0, 10.0],
-            settings: PostProcessSettingsProps {
-                bloom_enabled: true,
-                bloom_intensity: 0.75,
-                tonemap_operator: TonemapOperator::Aces,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let props = HashMap::new();
-        let mut o = owner(&props);
-        o.position = [1.0, 2.0, 3.0];
-
-        let descriptor = component.to_descriptor(&o);
-
-        assert_eq!(descriptor.bounds_min, [-4.0, -8.0, -2.0]);
-        assert_eq!(descriptor.bounds_max, [6.0, 12.0, 8.0]);
-        assert!(descriptor.settings.bloom_enabled);
-        assert_eq!(descriptor.settings.bloom_intensity, 0.75);
-        assert_eq!(descriptor.settings.tonemap_operator, HelioTonemapOperator::Aces);
-        assert_eq!(descriptor.settings.lut_generation, 0);
-        assert_eq!(descriptor.settings.lut_platform, 0);
-    }
-
-    #[test]
-    fn disabling_a_never_inserted_volume_is_a_quiet_no_op() {
-        let mut subsystems = Subsystems::new();
-        let mut context = TestRuntimeContext {
-            project_root: PathBuf::from("."),
-            subsystems,
-            errors: Vec::new(),
-        };
-        let props = HashMap::new();
-        let disabled = PostProcessVolumeComponent { enabled: false, ..Default::default() };
-
-        assert!(apply_runtime_behavior_for_class(
-            POST_PROCESS_VOLUME_CLASS_NAME,
-            &owner(&props),
-            0,
-            &serde_json::to_value(disabled).unwrap(),
-            &mut context,
-        ));
-        assert!(context.errors.is_empty());
-    }
-}
+impl PostProcessVolumeComponent {}

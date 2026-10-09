@@ -58,12 +58,7 @@ pub struct IndirectDispatchPass {
 
 impl IndirectDispatchPass {
     pub fn new(device: &wgpu::Device, cull_stats_buf: wgpu::Buffer) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("IndirectDispatch Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/indirect_dispatch.wgsl").into(),
-            ),
-        });
+        let shader = helio_core::shader::module(device, "IndirectDispatch Shader", helio_core::include_wgsl!("../shaders/indirect_dispatch.wgsl"));
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("CullUniforms"),

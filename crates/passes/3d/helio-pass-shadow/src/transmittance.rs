@@ -118,12 +118,7 @@ impl Transmittance {
             ],
         });
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shadow/Transmittance"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/shadow_transmittance.wgsl").into(),
-            ),
-        });
+        let shader = helio_core::shader::module(device, "Shadow/Transmittance", helio_core::include_wgsl!("../shaders/shadow_transmittance.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow/Transmittance PL"),
             bind_group_layouts: &[Some(bgl_0), Some(&bgl_1)],

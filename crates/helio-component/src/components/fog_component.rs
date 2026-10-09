@@ -1,8 +1,8 @@
-//! Physical media authoring. Pass-owned SceneDB rows are the runtime authority.
-use engine_class_derive::{engine_class, register_runtime_behavior, register_world_component};
-use pulsar_reflection::{get_subsystem, ComponentRuntimeBehavior, ComponentRuntimeContext, RuntimeComponentOwner};
-use helio_pass_volumetric_fog::{GlobalFogComponent as GlobalMedium, LocalFogVolumeComponent as LocalMedium};
-use crate::subsystems::PendingWorldWrites;
+//! Physical media authoring. The authored values reach the volumetric fog
+//! pass through their derived rows ([`super::environment_rows`]) and the
+//! graph's environment join; nothing here writes pass rows.
+use engine_class_derive::{engine_class, register_world_component};
+use helio_pass_volumetric_fog::GlobalFogComponent as GlobalMedium;
 use super::FogMode;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
@@ -73,7 +73,8 @@ impl Default for GlobalFogComponent {
 pub struct LocalFogVolumeComponent {
     #[property(category = "Medium")]
     pub enabled: bool,
-    /// Full local extent in metres. Owner scale/rotation produce a world AABB.
+    /// Full local extent in metres. The owner's scale and rotation produce
+    /// the world AABB (the environment join, on the GPU).
     #[property(category = "Volume")]
     pub size: [f32; 3],
     /// Inward fade from the world AABB boundary, in metres.
@@ -88,58 +89,8 @@ impl Default for LocalFogVolumeComponent {
     fn default() -> Self { Self { enabled: true, size: [10.0; 3], edge_fade: 0.0, medium: MediumProps::default() } }
 }
 
-impl LocalFogVolumeComponent {
-    pub fn to_medium(&self, owner: &RuntimeComponentOwner) -> LocalMedium {
-        // Same Euler convention as the engine's scene transforms (degrees, XYZ).
-        let rotation = glam::Mat3::from_quat(glam::Quat::from_euler(
-            glam::EulerRot::XYZ,
-            owner.rotation[0].to_radians(), owner.rotation[1].to_radians(), owner.rotation[2].to_radians(),
-        ));
-        let half = (glam::Vec3::from_array(self.size) * glam::Vec3::from_array(owner.scale)).abs() * 0.5;
-        let extent = rotation.x_axis.abs() * half.x + rotation.y_axis.abs() * half.y + rotation.z_axis.abs() * half.z;
-        let center = glam::Vec3::from_array(owner.position);
-        let mut local = LocalMedium::new((center - extent).to_array(), (center + extent).to_array(), self.medium.to_medium());
-        local.edge_fade = self.edge_fade.max(0.0);
-        local
-    }
-}
+#[register_world_component]
+impl GlobalFogComponent {}
 
-fn remove_global(world: &mut pulsar_scenedb::World, entity: pulsar_scenedb::Entity) {
-    world.remove::<GlobalFogComponent>(entity);
-    world.remove::<GlobalMedium>(entity);
-}
-
-fn remove_local(world: &mut pulsar_scenedb::World, entity: pulsar_scenedb::Entity) {
-    world.remove::<LocalFogVolumeComponent>(entity);
-    world.remove::<LocalMedium>(entity);
-}
-
-#[register_world_component(remove = remove_global)]
-#[register_runtime_behavior]
-impl ComponentRuntimeBehavior for GlobalFogComponent {
-    const CLASS_NAME: &'static str = "GlobalFogComponent";
-    fn sync_component(_owner: &RuntimeComponentOwner, _index: usize, component: &Self, context: &mut dyn ComponentRuntimeContext) {
-        let Some(entity) = context.subsystems_mut().get_mut::<pulsar_scenedb::Entity>().copied() else { return; };
-        let writes = get_subsystem!(context, PendingWorldWrites);
-        let medium = component.enabled.then(|| component.medium.to_medium());
-        writes.push(move |world| {
-            if let Some(medium) = medium { world.insert(entity, medium); }
-            else { world.remove::<GlobalMedium>(entity); }
-        });
-    }
-}
-
-#[register_world_component(remove = remove_local)]
-#[register_runtime_behavior]
-impl ComponentRuntimeBehavior for LocalFogVolumeComponent {
-    const CLASS_NAME: &'static str = "LocalFogVolumeComponent";
-    fn sync_component(owner: &RuntimeComponentOwner, _index: usize, component: &Self, context: &mut dyn ComponentRuntimeContext) {
-        let Some(entity) = context.subsystems_mut().get_mut::<pulsar_scenedb::Entity>().copied() else { return; };
-        let writes = get_subsystem!(context, PendingWorldWrites);
-        let medium = component.enabled.then(|| component.to_medium(owner));
-        writes.push(move |world| {
-            if let Some(medium) = medium { world.insert(entity, medium); }
-            else { world.remove::<LocalMedium>(entity); }
-        });
-    }
-}
+#[register_world_component]
+impl LocalFogVolumeComponent {}

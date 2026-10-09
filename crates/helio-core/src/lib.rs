@@ -404,6 +404,7 @@ pub mod registry;
 pub mod render_environment;
 pub mod resource_keys;
 pub mod scene_input;
+pub mod scene_derivation;
 pub mod scene_liveness;
 pub mod shader;
 pub mod temporal;
@@ -469,12 +470,18 @@ pub use graph::{
     BindingOverrideBuilder, DebugPassInfo, DebugResourceInfo, FinishSegment, FrameDebugData,
     GraphTimelineData, GraphTimelinePass, PipelineFormatCache, PipelineFormatKey,
     PipelineFormatSet, PipelineHandle, PipelineRecipeBuilder, PipelineRegistry, RenderGraph,
+    PassIdentity, SwapPlan, SwapPolicy,
 };
 pub use profiling::{
     FocusedTiming, FocusedTimingGroup, FocusedTimingReport, GpuTimingAvailability, Profiler,
     RenderPassTiming, RenderTimingSnapshot,
 };
-pub use scene_input::{BufferHandle, BufferKey, SceneBufferProjection, SceneInput};
+pub use scene_input::{
+    BufferHandle, BufferKey, SceneBufferProjection, SceneInput, ENTITY_GENERATIONS_KEY,
+};
+pub use scene_derivation::{
+    run_scene_derivations, SceneDerivation, SceneDerivationContext, SceneDerivationOutput,
+};
 pub use scene_liveness::SceneBufferLiveness;
 pub use frame_demands::{is_demanded, FrameDemands, FRAME_DEMANDS};
 pub use shader::{populate_bind_group_entries, ReflectedShader};

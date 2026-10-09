@@ -74,12 +74,7 @@ impl SpriteSimulatePass {
     ) -> Self {
         let slot_count = initial_velocities.len() as u32;
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Sprite Simulate Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/sprite_simulate.wgsl").into(),
-            ),
-        });
+        let shader = helio_core::shader::module(device, "Sprite Simulate Shader", helio_core::include_wgsl!("../shaders/sprite_simulate.wgsl"));
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Sprite Simulate BGL"),

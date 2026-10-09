@@ -1,6 +1,5 @@
 use engine_class_derive::engine_class;
 use serde_json::Value;
-use std::collections::HashMap;
 
 use super::super::{light_type_to_gpu_u32, LightType};
 use crate::components::ObjectMovability;
@@ -8,7 +7,10 @@ use crate::components::ObjectMovability;
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("General", category_color = "#F4C542")]
 pub struct GeneralLightProps {
+    /// Uploaded as 0/1: a disabled light keeps its GPU row, marked absent,
+    /// so its presence is data rather than whether a row exists.
     #[property(category = "General")]
+    #[gpu(as = u32, with = enabled_to_gpu_u32)]
     pub enabled: bool,
     #[property(category = "General")]
     pub affects_world: bool,
@@ -17,8 +19,8 @@ pub struct GeneralLightProps {
     #[property(category = "General")]
     #[gpu(as = u32, with = light_type_to_gpu_u32)]
     pub light_type: LightType,
-    /// See [`ObjectMovability`] (Pulsar-Native#837); projected into SceneDB's
-    /// `helio::Movability` on the light entity.
+    /// See [`ObjectMovability`] (Pulsar-Native#837); read through
+    /// [`crate::components::object_movability`].
     #[property(category = "General")]
     #[serde(default)]
     pub movability: ObjectMovability,
@@ -45,6 +47,10 @@ impl Default for GeneralLightProps {
             lighting_channel_2: false,
         }
     }
+}
+
+fn enabled_to_gpu_u32(enabled: bool) -> u32 {
+    u32::from(enabled)
 }
 
 impl GeneralLightProps {
@@ -82,34 +88,5 @@ impl GeneralLightProps {
         if let Some(v) = obj.get("lighting_channel_2").and_then(|v| v.as_bool()) {
             self.lighting_channel_2 = v;
         }
-    }
-
-    pub(crate) fn apply_to_scene_props(&self, out: &mut HashMap<String, Value>) {
-        out.insert("enabled".to_string(), Value::from(self.enabled));
-        out.insert("affects_world".to_string(), Value::from(self.affects_world));
-        out.insert(
-            "light_type".to_string(),
-            Value::from(self.light_type as u64),
-        );
-        out.insert(
-            "movability".to_string(),
-            Value::from(self.movability.name()),
-        );
-        out.insert(
-            "light_channels".to_string(),
-            Value::from(self.light_channels),
-        );
-        out.insert(
-            "lighting_channel_0".to_string(),
-            Value::from(self.lighting_channel_0),
-        );
-        out.insert(
-            "lighting_channel_1".to_string(),
-            Value::from(self.lighting_channel_1),
-        );
-        out.insert(
-            "lighting_channel_2".to_string(),
-            Value::from(self.lighting_channel_2),
-        );
     }
 }

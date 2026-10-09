@@ -15,10 +15,10 @@ mod v3_demo_common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
-    Renderer, RendererConfig,
+    Renderer, RendererBuilder, RendererConfig,
 };
 use v3_demo_common::{
-    build_default_renderer, cube_mesh, directional_light, make_material,
+    cube_mesh, directional_light, make_material, scene_db_handle,
     new_scene_db_with_gpu_mirror, point_light, spawn_light, spawn_material,
     spawn_mesh, spawn_object_with_movability,
 };
@@ -33,7 +33,164 @@ use winit::{
 };
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+
+const BRICK_TEX_SIZE: u32 = 512;
+
+struct RgbaImage {
+    size: u32,
+    mips: Vec<Vec<u8>>,
+}
+
+fn hash2(x: u32, y: u32) -> f32 {
+    let mut h = x.wrapping_mul(374761393) ^ y.wrapping_mul(668265263);
+    h = (h ^ (h >> 13)).wrapping_mul(1274126177);
+    ((h ^ (h >> 16)) & 0xffff) as f32 / 65535.0
+}
+
+fn box_downsample(src: &[u8], size: u32) -> Vec<u8> {
+    let half = size / 2;
+    let mut out = vec![0u8; (half * half * 4) as usize];
+    for y in 0..half {
+        for x in 0..half {
+            for c in 0..4 {
+                let mut sum = 0u32;
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    sum += src[(((y * 2 + dy) * size + x * 2 + dx) * 4 + c) as usize] as u32;
+                }
+                out[((y * half + x) * 4 + c) as usize] = ((sum + 2) / 4) as u8;
+            }
+        }
+    }
+    out
+}
+
+fn build_mips(base: Vec<u8>) -> RgbaImage {
+    let mut mips = vec![base];
+    let mut size = BRICK_TEX_SIZE;
+    while size > 1 {
+        let next = box_downsample(mips.last().unwrap(), size);
+        mips.push(next);
+        size /= 2;
+    }
+    RgbaImage { size: BRICK_TEX_SIZE, mips }
+}
+
+/// Procedural running-bond brick pattern: (sRGB albedo, tangent-space GL normal map).
+fn generate_brick_textures() -> (RgbaImage, RgbaImage) {
+    let n = BRICK_TEX_SIZE as i32;
+    let rows = 8;
+    let per_row = 4;
+    let (brick_h, brick_w) = (n / rows, n / per_row);
+    let mortar = 6.0f32;
+    let bevel = 5.0f32;
+
+    let mut height = vec![0.0f32; (n * n) as usize];
+    let mut albedo = vec![0u8; (n * n * 4) as usize];
+    for y in 0..n {
+        let row = y / brick_h;
+        let x_shift = if row % 2 == 1 { brick_w / 2 } else { 0 };
+        for x in 0..n {
+            let sx = (x + x_shift) % n;
+            let col = sx / brick_w;
+            let lx = (sx % brick_w) as f32;
+            let ly = (y % brick_h) as f32;
+            // Distance to the nearest brick edge, in texels.
+            let d = lx
+                .min(brick_w as f32 - 1.0 - lx)
+                .min(ly)
+                .min(brick_h as f32 - 1.0 - ly);
+            let inside = ((d - mortar * 0.5) / bevel).clamp(0.0, 1.0);
+            let grain = hash2(x as u32 / 2, y as u32 / 2) * 0.06 + hash2(x as u32, y as u32) * 0.03;
+            let h = inside.sqrt() * 0.9 + grain * inside;
+            height[(y * n + x) as usize] = if inside > 0.0 { h } else { grain * 0.3 };
+
+            let id = (row * per_row + col) as u32;
+            let tone = 0.75 + 0.5 * hash2(id, 7);
+            let speckle = 0.9 + 0.2 * hash2(x as u32, y as u32 + 91);
+            let (r, g, b) = if inside > 0.0 {
+                (0.55 * tone, 0.22 * tone, 0.16 * tone)
+            } else {
+                (0.55, 0.53, 0.48)
+            };
+            let to_srgb = |v: f32| ((v * speckle).clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0) as u8;
+            let i = ((y * n + x) * 4) as usize;
+            albedo[i..i + 4].copy_from_slice(&[to_srgb(r), to_srgb(g), to_srgb(b), 255]);
+        }
+    }
+
+    let at = |x: i32, y: i32| height[(y.rem_euclid(n) * n + x.rem_euclid(n)) as usize];
+    let strength = 6.0f32;
+    let mut normal = vec![0u8; (n * n * 4) as usize];
+    for y in 0..n {
+        for x in 0..n {
+            let dx = (at(x + 1, y) - at(x - 1, y)) * 0.5 * strength;
+            // Image rows run downward; GL convention wants +Y up.
+            let dy = (at(x, y + 1) - at(x, y - 1)) * 0.5 * strength;
+            let v = glam::Vec3::new(-dx, dy, 1.0).normalize();
+            let i = ((y * n + x) * 4) as usize;
+            for c in 0..3 {
+                normal[i + c] = ((v[c] * 0.5 + 0.5) * 255.0).round() as u8;
+            }
+            normal[i + 3] = 255;
+        }
+    }
+    (build_mips(albedo), build_mips(normal))
+}
+
+fn upload_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    store: &mut pulsar_scenedb::gpu::TextureStore,
+    image: &RgbaImage,
+    srgb: bool,
+) -> u32 {
+    let slot = store
+        .register(
+            device,
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("procedural brick"),
+                size: wgpu::Extent3d {
+                    width: image.size,
+                    height: image.size,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: image.mips.len() as u32,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: if srgb {
+                    wgpu::TextureFormat::Rgba8UnormSrgb
+                } else {
+                    wgpu::TextureFormat::Rgba8Unorm
+                },
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            &image.mips[0],
+        )
+        .expect("register brick texture");
+    let texture = store.texture(slot).expect("registered texture");
+    for (level, data) in image.mips.iter().enumerate().skip(1) {
+        let size = (image.size >> level).max(1);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: level as u32,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size * 4),
+                rows_per_image: Some(size),
+            },
+            wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        );
+    }
+    slot
+}
 
 fn main() {
     env_logger::init();
@@ -150,8 +307,36 @@ impl ApplicationHandler for App {
 
         let config = RendererConfig::new(size.width, size.height, surface_format);
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
-        let mut renderer = build_default_renderer(&scene_db, device.clone(), queue.clone(), config);
+        let mut texture_store = pulsar_scenedb::gpu::TextureStore::new(2);
+        let (brick_albedo, brick_normal) = generate_brick_textures();
+        let brick_base = upload_texture(&device, &queue, &mut texture_store, &brick_albedo, true);
+        let brick_nrm = upload_texture(&device, &queue, &mut texture_store, &brick_normal, false);
+        let scene_handle = scene_db_handle(&scene_db)
+            .with_texture_store(Arc::new(RwLock::new(texture_store)))
+            .unwrap();
+        let mut renderer = RendererBuilder::new(config, scene_handle)
+            .with_external_device()
+            .with_pass_build_context(Box::new(
+                helio_default_graphs::build_default_graph_external_with_context,
+            ))
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
         renderer.set_editor_mode(true);
+        renderer.set_material_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Brick repeat trilinear sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 8,
+            ..Default::default()
+        });
 
         let palette = [
             [0.91, 0.18, 0.18, 1.0],
@@ -169,13 +354,13 @@ impl ApplicationHandler for App {
         let materials: Vec<_> = palette
             .iter()
             .map(|&color| {
-                spawn_material(&mut scene_db.world, make_material(
-                    color,
-                    0.5,
-                    0.1,
-                    [0.0, 0.0, 0.0],
-                    0.0,
-                ))
+                // Soft tint multiplied over the brick albedo.
+                let tint = color.map(|c| 0.6 + 0.4 * c);
+                let mut material = make_material([tint[0], tint[1], tint[2], 1.0], 0.8, 0.0, [0.0; 3], 0.0);
+                material.tex_base_color = brick_base;
+                material.tex_normal = brick_nrm;
+                material.flags |= helio_mats::FLAG_HAS_NORMAL_MAP;
+                spawn_material(&mut scene_db.world, material)
             })
             .collect();
 

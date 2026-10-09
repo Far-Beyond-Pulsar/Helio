@@ -25,6 +25,7 @@ helio-pass-billboard = { workspace = true }
 helio-pass-corona = { workspace = true }
 helio-mats = { workspace = true }
 helio-pass-forward-lit = { workspace = true }
+helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
 helio-pass-object-batch = { workspace = true }
 helio-pass-gbuffer = { workspace = true }
 helio-pass-shadow-matrix = { workspace = true }
@@ -68,9 +69,12 @@ meshopt = "0.6.2"
 pulsar_scenedb = { workspace = true }
 
 [features]
-default = ["profiling"]
+default = ["profiling", "shader-hot-reload"]
 profiling = ["helio-core/profiling"]
 bake = ["helio-bake", "uuid"]
+# Edit a `.wgsl` file while the app runs and the render graph is rebuilt with
+# the new source. On by default (see helio-core); compiled out on wasm32.
+shader-hot-reload = ["helio-core/shader-hot-reload"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1"

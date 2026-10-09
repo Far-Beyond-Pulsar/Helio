@@ -28,7 +28,7 @@ struct Globals {
     // rebuilt dense array whose entry `i` needs `light_entity_indices[i]`
     // to find its real entity. See `light_entity_indices`'s binding doc.
     light_mode_direct_index: u32,
-    _pad0: u32,
+    time: f32, // RADIANT_GLOBALS_TIME: seconds since start, for graph time nodes
     _pad1: u32,
     _pad2: u32,
 }
@@ -378,7 +378,7 @@ const LIGHT_LOCAL_FORWARD: vec3<f32> = vec3<f32>(0.0, 0.0, -1.0);
 
 // Matches `Quat::from_euler(EulerRot::YXZ, rotation[1].to_radians(),
 // rotation[0].to_radians(), rotation[2].to_radians())`, the exact call
-// `HelioRenderer::rebuild_static_mesh_frame` (engine_backend) uses for
+// Pulsar's `Transform` composition (`pulsar_scene_model`) uses for
 // this same `Transform.rotation` field -- `rotation = [pitch_x, yaw_y,
 // roll_z]` in degrees. Composition order (glam's own `from_euler`
 // definition for this enum variant) is Y * X * Z: a vector is rotated by

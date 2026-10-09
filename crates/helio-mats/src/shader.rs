@@ -23,7 +23,7 @@ pub const PBR_MARKER: &str = "//!use pbr_eval";
 /// marker mechanism, but this is the snippet form for anything that wants
 /// to go through `resolve_with`/`module_with` instead.
 pub const PBR_EVAL_SNIPPET: helio_core::shader::ShaderSnippet =
-    helio_core::shader::ShaderSnippet::new(PBR_MARKER, PBR_EVAL);
+    helio_core::wgsl_snippet!(PBR_MARKER, "../shaders/pbr_eval.wgsl");
 
 /// Replace native material binding arrays with baseline-WebGPU bindings.
 ///
@@ -68,10 +68,25 @@ pub fn apply_webgpu_material_bindings(src: &str, max_textures: usize) -> String 
     }
     sample_switch.push_str("        default: { return fallback; }\n    }");
 
-    source.replace(
+    let mut source = source.replace(
         "return textureSample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], uv);",
         &sample_switch,
-    )
+    );
+    // Blueprint graphs bind TextureSrc assets to fixed SceneDB texture slots
+    // at compile time. Lower those constant indices to the same individual
+    // bindings used by the WebGPU fallback path.
+    for index in 0..max_textures {
+        source = source
+            .replace(
+                &format!("scene_textures[{index}u]"),
+                &format!("scene_texture_{index}"),
+            )
+            .replace(
+                &format!("scene_samplers[{index}u]"),
+                &format!("scene_sampler_{index}"),
+            );
+    }
+    source
 }
 
 /// Replace the decal pass's scene binding arrays with baseline-WebGPU bindings.

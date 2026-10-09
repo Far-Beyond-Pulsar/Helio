@@ -32,7 +32,7 @@ use helio_pass_foliage_place::components::{
     FoliageInteractorComponent, FoliageLayerComponent, FoliageTypeComponent, FoliageWindComponent,
 };
 use helio_pass_foliage_place::{
-    pack_kind_and_flags, FoliageKind, GpuFoliageLayer, GpuFoliageType,
+    pack_kind_and_flags, FoliageKind, FoliageMaterial, GpuFoliageLayer, GpuFoliageType,
     FOLIAGE_FLAG_RECEIVES_INTERACTION, FOLIAGE_FLAG_TWO_SIDED,
 };
 use pulsar_scenedb::{Entity, SceneDb};
@@ -471,8 +471,8 @@ impl ApplicationHandler for App {
         #[cfg(target_arch = "wasm32")]
         let xr_active = false;
 
-        // Indoors, but the sky still drives ambient. `SkyPass` is in every graph and reads
-        // this row from SceneDB each frame, so it can be spawned at any time.
+        // Indoors, but the sky still drives ambient. `AtmospherePass` is in every graph
+        // and reads this row from SceneDB each frame, so it can be spawned at any time.
         spawn_sky(&mut scene_db.world, [0.05, 0.07, 0.11]);
 
         // ── Ground ───────────────────────────────────────────────────────────
@@ -526,7 +526,7 @@ impl ApplicationHandler for App {
             make_material([0.28, 0.46, 0.14, 1.0], 0.85, 0.0, [0.0, 0.0, 0.0], 0.0),
         );
 
-        let grass = GpuFoliageType {
+        let mut grass = GpuFoliageType {
             density: blades_per_m2,
             height_range: [0.18, 0.5],
             width_range: [0.012, 0.03],
@@ -546,8 +546,16 @@ impl ApplicationHandler for App {
                 FOLIAGE_FLAG_TWO_SIDED | FOLIAGE_FLAG_RECEIVES_INTERACTION,
             ),
             mesh_or_impostor_id: 0,
-            _pad: [0; 3],
+            base_color: 0,
+            roughness_metallic: 0,
+            _pad: 0,
         };
+        // The same surface as `grass_mat`, carried by the type row itself.
+        grass.set_material(Some(FoliageMaterial {
+            base_color: [0.28, 0.46, 0.14],
+            roughness: 0.85,
+            metallic: 0.0,
+        }));
         let grass: FoliageTypeComponent = grass.into();
         let layer: FoliageLayerComponent = GpuFoliageLayer {
             bounds_min: [-FIELD_HALF_EXTENT, -1.0, -FIELD_HALF_EXTENT, 0.0],

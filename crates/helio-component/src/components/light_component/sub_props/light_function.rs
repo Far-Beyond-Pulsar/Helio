@@ -1,6 +1,5 @@
 use engine_class_derive::engine_class;
 use serde_json::Value;
-use std::collections::HashMap;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Light Function", category_color = "#22D3EE", default_collapsed = true)]
@@ -54,26 +53,4 @@ impl LightFunctionProps {
         }
     }
 
-    pub(crate) fn apply_to_scene_props(&self, out: &mut HashMap<String, Value>) {
-        out.insert(
-            "light_function_material".to_string(),
-            Value::from(self.light_function_material.clone()),
-        );
-        out.insert(
-            "light_function_scale".to_string(),
-            serde_json::json!([
-                self.light_function_scale[0],
-                self.light_function_scale[1],
-                self.light_function_scale[2]
-            ]),
-        );
-        out.insert(
-            "light_function_fade_distance".to_string(),
-            Value::from(self.light_function_fade_distance),
-        );
-        out.insert(
-            "light_function_disabled_brightness".to_string(),
-            Value::from(self.light_function_disabled_brightness),
-        );
-    }
 }

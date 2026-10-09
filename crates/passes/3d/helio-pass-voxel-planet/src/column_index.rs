@@ -8,6 +8,10 @@
 //! reallocates in bulk: a general hash map of ~1M residents doubled its
 //! capacity in one frame (10-70 ms stalls while leaving the ground).
 //!
+//! The GPU gives up after `MAX_PROBES` slots, so a column is only inserted
+//! where it lies within that many slots of its home ([`ColumnIndex::can_insert`]);
+//! backward-shift deletion only ever moves entries closer to home.
+//!
 //! Deletion is backward-shift (Knuth's algorithm R) instead of tombstones, so
 //! probe runs never degrade and the table never needs a rebuild. Every slot
 //! write is returned to the caller for the frame's GPU table patch.
@@ -33,6 +37,8 @@ struct Entry {
 }
 
 const CHUNK_BITS: u32 = 16;
+/// Longest probe run of the GPU lookup (`MAX_PROBES` in common.wgsl).
+pub const MAX_PROBES: u32 = 64;
 
 pub struct ColumnIndex {
     table: Vec<u32>,
@@ -109,6 +115,13 @@ impl ColumnIndex {
         Some(&mut self.entry_mut(record).resident)
     }
 
+    /// Whether `key` would land within `MAX_PROBES` slots of its home (a
+    /// column placed farther is invisible to the GPU lookup).
+    pub fn can_insert(&self, key: u64) -> bool {
+        let home = self.home(key);
+        (0..MAX_PROBES).any(|d| self.table[((home + d) & self.mask) as usize] == NONE)
+    }
+
     /// Insert a column that is not resident; returns its slot (the caller
     /// writes `(slot, record)` to the GPU table).
     pub fn insert(&mut self, key: u64, mut resident: Resident) -> u32 {
@@ -152,6 +165,20 @@ impl ColumnIndex {
         writes.push((gap, NONE));
         self.len -= 1;
         Some(removed)
+    }
+
+    /// Longest probe distance from a home slot, and how many entries lie at
+    /// least `limit` probes away (scans the table; diagnostics).
+    pub fn probe_stats(&self, limit: u32) -> (u32, usize) {
+        let (mut longest, mut beyond) = (0, 0);
+        for (slot, &record) in self.table.iter().enumerate() {
+            if record != NONE {
+                let d = (slot as u32).wrapping_sub(self.home(self.entry(record).key)) & self.mask;
+                longest = longest.max(d);
+                beyond += usize::from(d >= limit);
+            }
+        }
+        (longest, beyond)
     }
 
     /// Resident columns (scans the table; for tests and diagnostics).

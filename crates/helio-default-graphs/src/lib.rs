@@ -1,5 +1,10 @@
 use std::sync::Arc;
 
+mod background;
+pub mod environment_join;
+pub mod ray_tracing;
+pub mod scene_join;
+
 use helio::DebugDrawState;
 use helio::GraphRebuilder;
 use helio::PassBuildContext;
@@ -37,7 +42,9 @@ use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_dirty::ShadowDirtyPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
-use helio_pass_sky::SkyPass;
+use helio_pass_sky::{AtmosphereCompositePass, AtmospherePass};
+
+use background::BackgroundPass;
 use helio_pass_ssr::SsrPass;
 use helio_pass_tsr::TsrPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
@@ -126,54 +133,79 @@ fn declare_common_external_inputs(graph: &mut RenderGraph) {
     graph.declare_external_input("corona_emitters");
 }
 
-/// Where a graph composites the sky into `pre_aa`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SkyPlacement {
-    /// With the early passes, shading every pixel before any geometry
-    /// exists. Forward graphs need this: their geometry draws over the sky.
-    BeforeGeometry,
-    /// The caller adds it with [`add_sky_pass`] after every opaque depth
-    /// writer, depth tested so only uncovered pixels are shaded.
-    Deferred,
-}
-
-/// Picks the sky placement for a deferred graph. Deferred lighting
-/// overwrites every covered pixel, so the sky only needs the pixels no
-/// geometry reached; drawing it after the G-buffer with a depth test skips
-/// the covered ones instead of shading and then discarding them.
+/// Which of this crate's passes shader hot reload may swap on their own
+/// (see [`helio_core::SwapPolicy`] for what a swap does and why a policy is
+/// needed).
 ///
-/// SSR and planar reflections sample `pre_aa` between the G-buffer and
-/// lighting and would see black instead of sky there, and the XR multiview
-/// depth target cannot back this pass's single-view attachment, so those
-/// configurations keep the original order.
-fn deferred_sky_placement(config: &RendererConfig) -> SkyPlacement {
-    let reflections = helio_core::REFLECTIONS_SUPPORTED
-        && (config.enable_ssr || config.enable_planar_reflections);
-    if reflections || config.enable_xr {
-        SkyPlacement::BeforeGeometry
-    } else {
-        SkyPlacement::Deferred
-    }
-}
-
-fn add_sky_pass(
-    graph: &mut RenderGraph,
-    device: &Arc<wgpu::Device>,
-    camera_buf: &wgpu::Buffer,
-    config: &RendererConfig,
-    scene_db: &helio::SceneDbHandle,
-    depth_tested: bool,
-) {
-    let sky_pass = SkyPass::new_with_camera_and_size_and_scene_db(
-        device,
-        camera_buf,
-        config.surface_format,
-        config.internal_width(),
-        config.internal_height(),
-        Some(scene_db.clone()),
-    )
-    .with_depth_test(depth_tested);
-    graph.add_pass(Box::new(sky_pass));
+/// Derived by auditing every constructor call in this file for handles the
+/// builder creates and shares between passes. Those passes form a group and
+/// are swapped together:
+///
+/// * shadows: `ShadowMatrixPass` + `ShadowDirtyPass` (dirty-flag buffer),
+///   `ShadowDirtyPass` + `ShadowPass` (face dirty and geometry count buffers)
+/// * `HiZBuildPass` + `OcclusionCullPass` (Hi-Z sampler)
+/// * `PortalCullPass` + `PortalInstancePass` (portal output buffers)
+/// * `FoliagePlacePass` + `FoliageGBufferPass` (blade arena, tile table,
+///   visible blades, indirect buffer)
+/// * every perf-overlay pass (one shared `PerfOverlayShared`)
+///
+/// Everything else listed as independent takes only renderer-owned handles
+/// (camera, debug camera and cull-stats buffers, debug-draw state, SceneDB,
+/// the debug-overlay state) and plain configuration; those are the same objects
+/// in the live and the replacement graph. `GBufferPass`, `ForwardLitPass`
+/// and `TransparentPass` are left out on purpose: they build part of their
+/// WGSL at runtime and keep material/template registrations, so edits to them
+/// rebuild the whole graph. So are passes from the application's voxel,
+/// lighting and final-pass factories, which this crate cannot vouch for.
+///
+/// Dropping the replacement's unswapped passes has no side effects beyond the
+/// ones a resize already has: none of these constructors spawns a thread,
+/// registers into a global or shared registry, or writes a file, and the
+/// replacement graph's pipeline cache has no persistence path.
+fn default_swap_policy() -> helio_core::SwapPolicy {
+    use helio_core::graph::type_name_of as name;
+    helio_core::SwapPolicy::new()
+        .independent::<ObjectBatchPass>()
+        .independent::<IndirectDispatchPass>()
+        .independent::<BackgroundPass>()
+        .independent::<AtmospherePass>()
+        .independent::<AtmosphereCompositePass>()
+        .independent::<LightCullPass>()
+        .independent::<DecalPass>()
+        .independent::<SsrPass>()
+        .independent::<helio_pass_ssr::SsrCompositePass>()
+        .independent::<PlanarReflectionPass>()
+        .independent::<DeferredLightPass>()
+        .independent::<HlfsPass>()
+        .independent::<VirtualGeometryPass>()
+        .independent::<PortalMaskPass>()
+        .independent::<PortalEditorOverlayPass>()
+        .independent::<BillboardPass>()
+        .independent::<CoronaPass>()
+        .independent::<WaterSimPass>()
+        .independent::<helio::DebugDrawPass>()
+        .independent::<DebugOverlayPass>()
+        .independent::<PostProcessVolumeBlendPass>()
+        .independent::<VolumetricFogPass>()
+        .independent::<FogCompositePass>()
+        .independent::<TsrPass>()
+        .independent::<FxaaPass>()
+        .independent::<LensFlarePass>()
+        .independent::<PostProcessPass>()
+        .independent::<DofPass>()
+        .group_types(&[
+            name::<ShadowMatrixPass>(),
+            name::<ShadowDirtyPass>(),
+            name::<ShadowPass>(),
+        ])
+        .group_types(&[name::<HiZBuildPass>(), name::<OcclusionCullPass>()])
+        .group_types(&[name::<PortalCullPass>(), name::<PortalInstancePass>()])
+        .group_types(&[name::<FoliagePlacePass>(), name::<FoliageGBufferPass>()])
+        .group_types(&[
+            name::<PerfOverlayAnalyzerPass>(),
+            name::<PerfOverlayCostAnalyzerPass>(),
+            name::<PerfOverlayPass>(),
+        ])
 }
 
 fn add_common_early_passes(
@@ -186,7 +218,6 @@ fn add_common_early_passes(
     w: u32,
     h: u32,
     scene_db: helio::SceneDbHandle,
-    sky: SkyPlacement,
 ) -> Arc<std::sync::Mutex<PerfOverlayShared>> {
     let lights_buf = scene_buffer_or_dummy(
         &scene_db,
@@ -218,6 +249,10 @@ fn add_common_early_passes(
     // for readability, matching its role as the scene's sole GPU-driven
     // object-batch producer.
     graph.add_pass(Box::new(ObjectBatchPass::new(device)));
+    // Atmosphere LUTs and the resolved frame (sun, planet, sky irradiance)
+    // that lighting and the composite read; idle without an
+    // `AtmosphereComponent` row.
+    graph.add_pass(Box::new(AtmospherePass::new(device)));
 
     let hiz_pass = HiZBuildPass::new(device, queue, w, h);
     let hiz_sampler = Arc::clone(&hiz_pass.hiz_sampler);
@@ -256,9 +291,9 @@ fn add_common_early_passes(
         device, queue, face_dirty_buf, face_geom_count_buf, shadow_atlas_size,
     )));
 
-    if sky == SkyPlacement::BeforeGeometry {
-        add_sky_pass(graph, device, camera_buf, config, &scene_db, false);
-    }
+    // The black background the sky (the atmosphere composite) and every
+    // lighting pass draw over.
+    graph.add_pass(Box::new(BackgroundPass::new(config.surface_format)));
 
     graph.add_pass(Box::new(IndirectDispatchPass::new(
         device,
@@ -411,6 +446,10 @@ fn add_late_passes(
     h: u32,
     _scene_db: helio::SceneDbHandle,
 ) {
+    // The atmosphere over everything lit: the sky where nothing was drawn,
+    // aerial perspective over geometry. Before the overlays (billboards,
+    // coronas, debug draw), which are not seen through the air.
+    graph.add_pass(Box::new(AtmosphereCompositePass::new(device, config.surface_format)));
     let lights_buf = scene_buffer_or_dummy(
         &_scene_db,
         device,
@@ -552,7 +591,7 @@ pub fn build_default_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGrap
         ctx.camera_buffer,
         ctx.config,
         ctx.debug_state,
-        ctx.camera_buffer,
+        ctx.debug_camera_buffer,
         ctx.cull_stats_buffer,
         ctx.owns_device,
         None,
@@ -608,7 +647,7 @@ pub fn build_default_graph_external_with_lighting_passes(
         ctx.camera_buffer,
         ctx.config,
         ctx.debug_state,
-        ctx.camera_buffer,
+        ctx.debug_camera_buffer,
         ctx.cull_stats_buffer,
         false,
         None,
@@ -631,7 +670,7 @@ pub fn build_default_graph_with_user_effects_with_context(
         ctx.camera_buffer,
         ctx.config,
         ctx.debug_state,
-        ctx.camera_buffer,
+        ctx.debug_camera_buffer,
         ctx.cull_stats_buffer,
         ctx.owns_device,
         None,
@@ -819,7 +858,6 @@ fn build_default_graph_internal(
     // PostProcessPass tone maps once; a display-format target would clamp
     // emitters at 1.0 so nothing could bloom or flare.
     let lighting_config = RendererConfig { surface_format: FOGGED_HDR_FORMAT, ..config };
-    let sky_placement = deferred_sky_placement(&config);
     let perf = add_common_early_passes(
         &mut graph,
         device,
@@ -830,7 +868,6 @@ fn build_default_graph_internal(
         iw,
         ih,
         scene_db.clone(),
-        sky_placement,
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
@@ -875,10 +912,6 @@ fn build_default_graph_internal(
             camera_buf,
             config.surface_format,
         )));
-    }
-
-    if sky_placement == SkyPlacement::Deferred {
-        add_sky_pass(&mut graph, device, camera_buf, &lighting_config, &scene_db, true);
     }
 
     let mut deferred_light_pass =
@@ -994,6 +1027,7 @@ fn build_default_graph_internal(
             )
         },
     );
+    graph.set_swap_policy(default_swap_policy());
     graph.set_graph_data(rebuilder);
 
     graph
@@ -1087,7 +1121,6 @@ fn build_fxaa_graph_internal(
     // PostProcessPass tone maps once; a display-format target would clamp
     // emitters at 1.0 so nothing could bloom or flare.
     let lighting_config = RendererConfig { surface_format: FOGGED_HDR_FORMAT, ..config };
-    let sky_placement = deferred_sky_placement(&config);
     let perf = add_common_early_passes(
         &mut graph,
         device,
@@ -1098,7 +1131,6 @@ fn build_fxaa_graph_internal(
         iw,
         ih,
         scene_db.clone(),
-        sky_placement,
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
@@ -1125,10 +1157,6 @@ fn build_fxaa_graph_internal(
             camera_buf,
             config.surface_format,
         )));
-    }
-
-    if sky_placement == SkyPlacement::Deferred {
-        add_sky_pass(&mut graph, device, camera_buf, &lighting_config, &scene_db, true);
     }
 
     let mut deferred_light_pass =
@@ -1214,6 +1242,7 @@ fn build_fxaa_graph_internal(
             )
         },
     );
+    graph.set_swap_policy(default_swap_policy());
     graph.set_graph_data(rebuilder);
 
     graph
@@ -1247,7 +1276,6 @@ fn build_hlfs_graph_internal(
         iw,
         ih,
         scene_db.clone(),
-        SkyPlacement::BeforeGeometry,
     );
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
@@ -1348,6 +1376,7 @@ fn build_hlfs_graph_internal(
             )
         },
     );
+    graph.set_swap_policy(default_swap_policy());
     graph.set_graph_data(rebuilder);
 
     graph
@@ -1490,7 +1519,6 @@ fn build_fxaa_hlfs_graph_internal(
         w,
         h,
         scene_db.clone(),
-        SkyPlacement::BeforeGeometry,
     );
 
     add_geometry_passes(&mut graph, device, camera_buf, &config, &perf, scene_db.clone());
@@ -1573,6 +1601,7 @@ fn build_fxaa_hlfs_graph_internal(
             )
         },
     );
+    graph.set_swap_policy(default_swap_policy());
     graph.set_graph_data(rebuilder);
 
     graph
@@ -1774,7 +1803,6 @@ fn build_forward_graph_internal(
         iw,
         ih,
         scene_db.clone(),
-        SkyPlacement::BeforeGeometry,
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
@@ -1847,6 +1875,7 @@ fn build_forward_graph_internal(
             )
         },
     );
+    graph.set_swap_policy(default_swap_policy());
     graph.set_graph_data(rebuilder);
 
     graph

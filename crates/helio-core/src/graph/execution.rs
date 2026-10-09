@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 
 use super::resource_lifetime::ResourceLifetime;
-use super::scheduling::{compute_parallel_layers, CachedPass, PrePassAction};
+use super::scheduling::{compute_parallel_layers, CachedPass, PrePassAction, PARALLEL_RECORDING};
 use super::{DebugPassInfo, DebugResourceInfo, FrameDebugData};
 
 /// Maximum number of resident render workers. Bounded so a flamegraph records
@@ -525,6 +525,10 @@ pub struct RenderGraph {
     /// Opaque storage for cross-crate data (e.g. a GraphRebuilder).
     /// Set by graph builders, consumed by the Renderer on construction.
     graph_data: Option<Box<dyn std::any::Any + Send + Sync>>,
+    /// Which pass types a graph builder allows to be swapped selectively.
+    /// Kept apart from `graph_data` (which holds a single value, the
+    /// rebuilder) so a builder can set both. See [`SwapPolicy`].
+    swap_policy: Option<crate::graph::SwapPolicy>,
     /// Resource names registered via [`declare_external_input`](Self::declare_external_input) —
     /// resources supplied by the host rather than written by any pass in the
     /// graph. `validate_dependencies` treats every name in this set as
@@ -542,6 +546,44 @@ pub struct RenderGraph {
 /// A failed or unavailable GPU timestamp query must not retain one profiler
 /// (and its query resources) forever when the host never polls the device.
 const MAX_PENDING_WORKER_PROFILERS: usize = 64;
+
+/// Everything about a pass that the locked schedule was computed from. Two
+/// passes with equal interfaces can trade places without re-locking the graph
+/// (see [`RenderGraph::swap_passes_from`]).
+#[derive(PartialEq)]
+struct PassInterface {
+    reads: &'static [&'static str],
+    writes: &'static [&'static str],
+    resources: Vec<crate::graph::ResourceDecl>,
+    aliases: Vec<(&'static str, &'static str)>,
+    chain_transparent: bool,
+    requires_ray_tracing: bool,
+    requires_camera_jitter: bool,
+    initializes_target: bool,
+    debug_views: Vec<(&'static str, u32)>,
+}
+
+impl PassInterface {
+    fn of(pass: &dyn RenderPass) -> Self {
+        let mut builder = crate::graph::ResourceBuilder::new();
+        pass.declare_resources(&mut builder);
+        Self {
+            reads: pass.reads(),
+            writes: pass.writes(),
+            resources: builder.declarations().to_vec(),
+            aliases: builder.published_aliases.clone(),
+            chain_transparent: pass.chain_transparent(),
+            requires_ray_tracing: pass.requires_ray_tracing(),
+            requires_camera_jitter: pass.requires_camera_jitter(),
+            initializes_target: pass.initializes_target(),
+            debug_views: pass
+                .debug_views()
+                .iter()
+                .map(|view| (view.name, view.debug_mode))
+                .collect(),
+        }
+    }
+}
 impl RenderGraph {
     pub fn requires_ray_tracing(&self) -> bool {
         self.passes.iter().any(|pass| pass.requires_ray_tracing())
@@ -622,6 +664,7 @@ impl RenderGraph {
             frame_demands: crate::FrameDemands::default(),
             resize_pending: false,
             graph_data: None,
+            swap_policy: None,
             external_inputs: std::collections::HashSet::new(),
             pending_worker_profilers: Vec::new(),
             frame_storage: RenderFrameStorage::new(),
@@ -734,6 +777,31 @@ impl RenderGraph {
     /// Take the stored opaque data, if it matches type `T`.
     pub fn take_graph_data<T: Send + Sync + 'static>(&mut self) -> Option<T> {
         self.graph_data.take().map(|b| *b.downcast::<T>().unwrap())
+    }
+
+    /// Declares which pass types of this graph may be swapped on their own or
+    /// together when only some passes need replacing (shader hot reload). A
+    /// graph without a policy is always rebuilt whole.
+    pub fn set_swap_policy(&mut self, policy: crate::graph::SwapPolicy) {
+        self.swap_policy = Some(policy);
+    }
+
+    /// The policy set by [`set_swap_policy`](Self::set_swap_policy), if any.
+    pub fn swap_policy(&self) -> Option<&crate::graph::SwapPolicy> {
+        self.swap_policy.as_ref()
+    }
+
+    /// Identity of every pass in execution-list order, for matching this
+    /// graph's passes against another graph's.
+    pub fn pass_identities(&self) -> Vec<crate::graph::PassIdentity> {
+        self.passes
+            .iter()
+            .map(|pass| crate::graph::PassIdentity {
+                type_id: pass.as_any().type_id(),
+                name: pass.name(),
+                type_name: pass.type_name(),
+            })
+            .collect()
     }
 
     pub fn set_render_size(&mut self, width: u32, height: u32) {
@@ -916,8 +984,19 @@ impl RenderGraph {
     }
 
     /// Replace the pass at `index` with a new one.
+    ///
+    /// On a locked graph this re-locks it, which recreates every pooled
+    /// texture and the reflected pipelines of every pass; only the replaced
+    /// pass gets `on_resize`. Callers that need the rest of the graph left
+    /// exactly as it is (shader hot reload) use
+    /// [`swap_passes_from`](Self::swap_passes_from) instead.
     pub fn replace_pass_at(&mut self, index: usize, pass: Box<dyn RenderPass>) {
         if index < self.passes.len() {
+            // Pipelines in the cache are keyed by pass name, so neither the
+            // old nor the new pass may be handed the other's.
+            self.pipeline_cache
+                .invalidate_pass(self.passes[index].name());
+            self.pipeline_cache.invalidate_pass(pass.name());
             self.passes[index] = pass;
             // Replacing one type can also expose a later instance of the old
             // type. Rebuild the first-instance map rather than patching one key.
@@ -942,6 +1021,109 @@ impl RenderGraph {
                 self.resize_pending = true;
             }
         }
+    }
+
+    /// Checks whether `picks` (`(index in self, index in replacement)`) can be
+    /// swapped in with [`swap_passes_from`](Self::swap_passes_from), without
+    /// changing anything. The error says why not.
+    ///
+    /// A swap leaves the schedule, the pooled textures and every other pass
+    /// alone, so it is only sound when the incoming pass has the same shape as
+    /// the one it replaces: same type and name, same declared reads, writes,
+    /// resources and chaining behaviour. A change of shader text cannot alter
+    /// those (they come from Rust code and configuration); one that does is
+    /// refused rather than risking a stale schedule.
+    pub fn check_swap(
+        &self,
+        replacement: &RenderGraph,
+        picks: &[(usize, usize)],
+    ) -> std::result::Result<(), String> {
+        if !self.locked || !replacement.locked {
+            return Err("a graph is not locked".into());
+        }
+        if self.gpu_render_bundles.iter().any(Option::is_some) {
+            // A prebuilt bundle bakes in pipelines and the bindings earlier
+            // passes published; rebuilding it needs the whole schedule.
+            return Err("the graph has prebuilt render bundles".into());
+        }
+        if self.pass_cache.len() != self.passes.len()
+            || self.pipeline_registries.len() != self.passes.len()
+            || self.reflected_pipelines.len() != self.passes.len()
+            || replacement.reflected_pipelines.len() != replacement.passes.len()
+        {
+            return Err("the graph's per-pass tables are out of step with its passes".into());
+        }
+        let mut seen_live = std::collections::HashSet::new();
+        let mut seen_new = std::collections::HashSet::new();
+        for &(live, new) in picks {
+            if !seen_live.insert(live) || !seen_new.insert(new) {
+                return Err("a pass was picked twice".into());
+            }
+            let (Some(old), Some(fresh)) = (self.passes.get(live), replacement.passes.get(new))
+            else {
+                return Err(format!("pass index {live}/{new} is out of range"));
+            };
+            if old.as_any().type_id() != fresh.as_any().type_id() || old.name() != fresh.name() {
+                return Err(format!(
+                    "pass '{}' is not the same pass as '{}'",
+                    old.name(),
+                    fresh.name()
+                ));
+            }
+            if PassInterface::of(&**old) != PassInterface::of(&**fresh) {
+                return Err(format!(
+                    "pass '{}' declares different resources or scheduling after the edit",
+                    old.name()
+                ));
+            }
+            if self.reflected_pipelines[live].is_some() != replacement.reflected_pipelines[new].is_some()
+            {
+                return Err(format!("pass '{}' changed its reflected bindings", old.name()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Moves the passes `picks` selects out of `replacement` into this graph,
+    /// leaving every other pass of this graph, its pooled textures and its
+    /// schedule untouched.
+    ///
+    /// Each incoming pass takes over what its predecessor opted to pass on
+    /// ([`RenderPass::inherit_persistent_state`]), and brings along the
+    /// reflected pipeline the replacement built for it. The graph's pipeline
+    /// cache entries for the swapped pass are invalidated and its recipes
+    /// re-declared from the new instance.
+    ///
+    /// Validated by [`check_swap`](Self::check_swap) first: on `Err` nothing
+    /// has changed and `replacement` is intact. On `Ok`, `replacement` has been
+    /// emptied of passes and should be dropped.
+    pub fn swap_passes_from(
+        &mut self,
+        replacement: &mut RenderGraph,
+        picks: &[(usize, usize)],
+    ) -> std::result::Result<(), String> {
+        self.check_swap(replacement, picks)?;
+
+        let mut incoming: Vec<Option<Box<dyn RenderPass>>> =
+            std::mem::take(&mut replacement.passes)
+                .into_iter()
+                .map(Some)
+                .collect();
+        for &(live, new) in picks {
+            let mut fresh = incoming[new].take().expect("check_swap rejects repeated picks");
+            if fresh.inherit_persistent_state(&mut *self.passes[live]) {
+                fresh.on_resize(&self.device, self.internal_w, self.internal_h);
+            }
+            self.pipeline_cache.invalidate_pass(self.passes[live].name());
+            self.passes[live] = fresh;
+            self.pipeline_registries[live] = self.pipeline_registry_for(&*self.passes[live]);
+            self.reflected_pipelines[live] = replacement.reflected_pipelines[new].take();
+            if let Some(cache) = self.reflected_group_cache.get_mut(live) {
+                // Keyed by layout, which the new pipeline owns.
+                cache.clear();
+            }
+        }
+        Ok(())
     }
 
     pub fn iter_passes_mut<T: RenderPass + 'static>(&mut self) -> impl Iterator<Item = &mut T> {
@@ -1537,13 +1719,9 @@ impl RenderGraph {
         };
         let resized_this_frame = self.resize_pending;
 
-        // The persistent worker-pool path is not safe to enter from every
-        // host/example yet: its per-wave rendezvous can wait forever when a
-        // worker is inside a backend call that does not return to the pool.
-        // Keep graph correctness and profiling available through the serial
-        // executor until the worker protocol is replaced with a completion
-        // primitive that cannot block the render caller.
-        let use_parallel_recording = false;
+        // Chain detection read the same switch, so fused chains exist only
+        // when this records serially (see `PARALLEL_RECORDING`).
+        let use_parallel_recording = PARALLEL_RECORDING;
         let (parallel_command_buffers, parallel_cpu_timings, mut worker_profilers) =
             if use_parallel_recording {
                 self.execute_parallel_layers(
@@ -2213,42 +2391,49 @@ impl RenderGraph {
 
     /// Finalize the graph after all passes have been added.
     fn prepare_pipeline_registries(&mut self) {
+        let registries: Vec<PipelineRegistry> = self
+            .passes
+            .iter()
+            .map(|pass| self.pipeline_registry_for(&**pass))
+            .collect();
+        self.pipeline_registries = registries;
+    }
+
+    /// Declares `pass`'s pipeline recipes, schedules every format variant the
+    /// host enumerated, and returns the registry of the ones that are ready.
+    fn pipeline_registry_for(&self, pass: &dyn RenderPass) -> PipelineRegistry {
         let device = self.device.clone();
-        let mut registries = Vec::with_capacity(self.passes.len());
-        for pass in &self.passes {
-            let mut declarations = crate::graph::PipelineRecipeBuilder::new();
-            pass.declare_pipelines(&mut declarations);
-            let mut registry = PipelineRegistry::new();
-            for recipe in declarations.into_recipes() {
-                let key_for_builder = recipe.key.clone();
-                let build = Arc::clone(&recipe.build);
-                for formats in &self.pipeline_formats {
-                    if formats.color_formats.len() != recipe.key.color_formats.len() {
-                        continue;
-                    }
-                    let variant_key = recipe.key.with_formats(formats);
-                    let variant_for_builder = variant_key.clone();
-                    let build = Arc::clone(&build);
-                    let device = device.clone();
-                    self.pipeline_cache
-                        .try_get_or_schedule(variant_key, move |driver_cache| {
-                            build(&device, &variant_for_builder, driver_cache)
-                        });
+        let mut declarations = crate::graph::PipelineRecipeBuilder::new();
+        pass.declare_pipelines(&mut declarations);
+        let mut registry = PipelineRegistry::new();
+        for recipe in declarations.into_recipes() {
+            let key_for_builder = recipe.key.clone();
+            let build = Arc::clone(&recipe.build);
+            for formats in &self.pipeline_formats {
+                if formats.color_formats.len() != recipe.key.color_formats.len() {
+                    continue;
                 }
+                let variant_key = recipe.key.with_formats(formats);
+                let variant_for_builder = variant_key.clone();
                 let build = Arc::clone(&build);
                 let device = device.clone();
-                if let Some(pipeline) = self
-                    .pipeline_cache
-                    .try_get_or_schedule(recipe.key, move |driver_cache| {
-                        build(&device, &key_for_builder, driver_cache)
-                    })
-                {
-                    registry.insert(recipe.handle, pipeline);
-                }
+                self.pipeline_cache
+                    .try_get_or_schedule(variant_key, move |driver_cache| {
+                        build(&device, &variant_for_builder, driver_cache)
+                    });
             }
-            registries.push(registry);
+            let build = Arc::clone(&build);
+            let device = device.clone();
+            if let Some(pipeline) = self
+                .pipeline_cache
+                .try_get_or_schedule(recipe.key, move |driver_cache| {
+                    build(&device, &key_for_builder, driver_cache)
+                })
+            {
+                registry.insert(recipe.handle, pipeline);
+            }
         }
-        self.pipeline_registries = registries;
+        registry
     }
 
     /// Finalize the graph after all passes have been added.

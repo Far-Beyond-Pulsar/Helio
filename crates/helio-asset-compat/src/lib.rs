@@ -17,17 +17,17 @@ mod texture_loader;
 use std::io::Cursor;
 use std::path::PathBuf;
 
-pub use camera_converter::{extract_camera_data, CameraData};
+pub use camera_converter::{CameraData, extract_camera_data};
 pub use ies::{IesError, IesProfile};
 pub use light_converter::convert_light;
 pub use lut::{CubeLut, LutError};
 pub use material_converter::{
-    convert_material, upload_scene_materials, ConvertedMaterial, ConvertedMaterialTextures,
-    ConvertedTextureRef,
+    ConvertedMaterial, ConvertedMaterialTextures, ConvertedTextureRef, convert_material,
+    upload_scene_materials,
 };
 pub use mesh_converter::{convert_primitive, convert_vertex};
 pub use scene_converter::{
-    convert_scene, ConvertedMesh, ConvertedMeshSection, ConvertedScene, ConvertedSectionedMesh,
+    ConvertedMesh, ConvertedMeshSection, ConvertedScene, ConvertedSectionedMesh, convert_scene,
 };
 
 use std::path::Path;
@@ -93,7 +93,7 @@ impl LoadConfig {
             .unwrap_or(1.0) as f32;
         Self {
             flip_uv_y: values.bool_or(keys::FLIP_UV_V, false),
-            merge_meshes: false,
+            merge_meshes: values.bool_or("merge_meshes", false),
             import_scale: glam::Vec3::splat(scale),
         }
     }
@@ -283,7 +283,6 @@ pub fn load_scene_bytes_with_config(
     convert_scene(&solid_scene, &conversion_base_dir, &config)
 }
 
-
 /// Result type for asset loading operations
 pub type Result<T> = std::result::Result<T, AssetError>;
 
@@ -305,7 +304,7 @@ pub enum AssetError {
 
 #[cfg(test)]
 mod configurator_tests {
-    use super::{options_schema_for_extension, LoadConfig, OptionValue, OptionValues};
+    use super::{LoadConfig, OptionValue, OptionValues, options_schema_for_extension};
     use solid_rs::configurator::keys;
 
     #[test]

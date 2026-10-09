@@ -9,7 +9,9 @@ use super::LightComponent;
 impl ScenePropsProjector for LightComponent {
     const CLASS_NAME: &'static str = "LightComponent";
 
-    fn apply_scene_props(props: &mut HashMap<String, Value>, component_data: Option<&Value>) {
+    /// Clears the keys this class's values once occupied in an object's
+    /// props (the level-file migration); the values live in the component.
+    fn apply_scene_props(props: &mut HashMap<String, Value>, _component_data: Option<&Value>) {
         for key in [
             "enabled",
             "affects_world",
@@ -75,15 +77,6 @@ impl ScenePropsProjector for LightComponent {
             "diffuse_scale",
         ] {
             props.remove(key);
-        }
-
-        let Some(data) = component_data else {
-            return;
-        };
-
-        let light = LightComponent::from_component_data(data);
-        for (k, v) in light.to_scene_props() {
-            props.insert(k, v);
         }
     }
 }

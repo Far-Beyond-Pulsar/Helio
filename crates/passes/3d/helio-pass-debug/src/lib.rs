@@ -60,10 +60,7 @@ impl DebugPass {
         target_format: wgpu::TextureFormat,
         depth_test: bool,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Debug Draw Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/debug_draw.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "Debug Draw Shader", helio_core::include_wgsl!("../shaders/debug_draw.wgsl"));
 
         // Group 0: camera uniform (binding 0)
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

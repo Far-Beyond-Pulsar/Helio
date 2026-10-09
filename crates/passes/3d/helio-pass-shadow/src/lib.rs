@@ -116,15 +116,9 @@ impl ShadowPass {
     ) -> Self {
         let atlas_layers = 1;
         // ── Shader ────────────────────────────────────────────────────────────
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shadow"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shadow.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "Shadow", helio_core::include_wgsl!("../shaders/shadow.wgsl"));
 
-        let clear_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shadow/DepthClear"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/depth_clear.wgsl").into()),
-        });
+        let clear_shader = helio_core::shader::module(device, "Shadow/DepthClear", helio_core::include_wgsl!("../shaders/depth_clear.wgsl"));
 
         // ── Bind Group Layout 0 ───────────────────────────────────────────────
         let bgl_0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

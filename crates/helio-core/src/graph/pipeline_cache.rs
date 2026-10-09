@@ -102,6 +102,22 @@ mod binding_tests {
     }
 
     #[test]
+    fn invalidating_a_pass_cancels_its_pending_builds_only() {
+        let cache = PipelineFormatCache::new();
+        let mine = PipelineFormatKey::new("swapped_pass", [wgpu::TextureFormat::Rgba8Unorm], None);
+        let other = PipelineFormatKey::new("other_pass", [wgpu::TextureFormat::Rgba8Unorm], None);
+        cache.pending.lock().unwrap().insert(mine.clone());
+        cache.pending.lock().unwrap().insert(other.clone());
+        assert_eq!(super::pass_epoch(&cache.pass_epochs, "swapped_pass"), 0);
+
+        assert_eq!(cache.invalidate_pass("swapped_pass"), 0);
+        assert!(!cache.is_pending(&mine));
+        assert!(cache.is_pending(&other));
+        assert_eq!(super::pass_epoch(&cache.pass_epochs, "swapped_pass"), 1);
+        assert_eq!(super::pass_epoch(&cache.pass_epochs, "other_pass"), 0);
+    }
+
+    #[test]
     fn pipeline_cache_is_safe_to_share_with_recording_workers() {
         assert_sync::<PipelineFormatCache>();
     }
@@ -278,9 +294,22 @@ pub struct PipelineFormatCache {
     /// when independent recording workers request the same variant together.
     build_lock: Arc<Mutex<()>>,
     pending: Arc<Mutex<HashSet<PipelineFormatKey>>>,
+    /// Bumped by [`PipelineFormatCache::invalidate_pass`]. A background build
+    /// remembers the epoch it was scheduled under and discards its result if
+    /// the pass was invalidated meanwhile, so a stale pipeline never lands.
+    pass_epochs: Arc<Mutex<HashMap<&'static str, u64>>>,
     workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
     driver_cache: Option<Arc<wgpu::PipelineCache>>,
     persistent_path: Option<std::path::PathBuf>,
+}
+
+fn pass_epoch(epochs: &Mutex<HashMap<&'static str, u64>>, pass: &'static str) -> u64 {
+    epochs
+        .lock()
+        .expect("pipeline epoch lock poisoned")
+        .get(pass)
+        .copied()
+        .unwrap_or(0)
 }
 
 const MAX_PIPELINE_VARIANTS: usize = 512;
@@ -314,6 +343,7 @@ impl PipelineFormatCache {
             entries: Arc::new(RwLock::new(HashMap::new())),
             build_lock: Arc::new(Mutex::new(())),
             pending: Arc::new(Mutex::new(HashSet::new())),
+            pass_epochs: Arc::new(Mutex::new(HashMap::new())),
             workers: Mutex::new(Vec::new()),
             driver_cache,
             persistent_path: Some(path),
@@ -448,33 +478,43 @@ impl PipelineFormatCache {
         let entries = Arc::clone(&self.entries);
         let build_lock = Arc::clone(&self.build_lock);
         let pending = Arc::clone(&self.pending);
+        let epochs = Arc::clone(&self.pass_epochs);
         let driver_cache = self.driver_cache.clone();
         let pass_name = key.pass;
+        let epoch = pass_epoch(&epochs, pass_name);
         let worker = std::thread::spawn(move || {
             let _build_guard = build_lock.lock().expect("pipeline build lock poisoned");
-            if !entries
-                .read()
-                .expect("pipeline cache poisoned")
-                .contains_key(&key)
+            let is_stale = || pass_epoch(&epochs, pass_name) != epoch;
+            if !is_stale()
+                && !entries
+                    .read()
+                    .expect("pipeline cache poisoned")
+                    .contains_key(&key)
             {
                 let pipeline = Arc::new(build(driver_cache.as_deref()));
-                entries
-                    .write()
-                    .expect("pipeline cache poisoned")
-                    .insert(key.clone(), pipeline);
                 let mut entries = entries.write().expect("pipeline cache poisoned");
-                while entries.len() > MAX_PIPELINE_VARIANTS {
-                    if let Some(old_key) = entries.keys().next().cloned() {
-                        entries.remove(&old_key);
-                    } else {
-                        break;
+                // Checked under the write lock: `invalidate_pass` bumps the
+                // epoch before it takes this lock to purge, so a build either
+                // sees the new epoch here or is purged right after inserting.
+                if !is_stale() {
+                    entries.insert(key.clone(), pipeline);
+                    while entries.len() > MAX_PIPELINE_VARIANTS {
+                        if let Some(old_key) = entries.keys().next().cloned() {
+                            entries.remove(&old_key);
+                        } else {
+                            break;
+                        }
                     }
                 }
             }
-            pending
-                .lock()
-                .expect("pipeline pending lock poisoned")
-                .remove(&key);
+            // After an invalidation the pending marker was already cleared
+            // (and may belong to a newer build of the same key).
+            if !is_stale() {
+                pending
+                    .lock()
+                    .expect("pipeline pending lock poisoned")
+                    .remove(&key);
+            }
         });
         self.workers
             .lock()
@@ -517,6 +557,32 @@ impl PipelineFormatCache {
             .write()
             .expect("pipeline cache poisoned")
             .clear();
+    }
+
+    /// Drops every cached pipeline owned by the pass named `name` and makes
+    /// builds of it that are still pending discard their result, so the next
+    /// request builds from the pass's current recipe. Other passes' entries are
+    /// untouched. Returns how many cached pipelines were removed.
+    ///
+    /// For a pass swapped in place (shader hot reload): its pipelines are keyed
+    /// by pass name, so without this the new instance would be handed the old
+    /// instance's pipelines.
+    pub fn invalidate_pass(&self, name: &'static str) -> usize {
+        // Bump first: see the epoch check in `try_get_or_schedule`.
+        *self
+            .pass_epochs
+            .lock()
+            .expect("pipeline epoch lock poisoned")
+            .entry(name)
+            .or_insert(0) += 1;
+        self.pending
+            .lock()
+            .expect("pipeline pending lock poisoned")
+            .retain(|key| key.pass != name);
+        let mut entries = self.entries.write().expect("pipeline cache poisoned");
+        let before = entries.len();
+        entries.retain(|key, _| key.pass != name);
+        before - entries.len()
     }
 
     /// Number of distinct pipeline variants currently cached (debug/profiling).

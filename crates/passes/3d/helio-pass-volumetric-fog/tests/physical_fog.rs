@@ -131,7 +131,7 @@ fn gpu_numerics_thin_limit_dense_limit_history_and_cube_faces() {
         &[0; 512],
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
     );
-    let globals = buffer(&device, &[0; 64], wgpu::BufferUsages::UNIFORM);
+    let globals = buffer(&device, &[0; helio_pass_volumetric_fog::FOG_GLOBALS_BYTES], wgpu::BufferUsages::UNIFORM);
     let indices = buffer(&device, &[0; 1920], wgpu::BufferUsages::STORAGE);
     let bg = group(
         &device,
@@ -317,7 +317,8 @@ fn native_media_world_space_overlap_transmittance_quality_edits_and_tombstones()
     let uniform = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
     let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC;
     let fog = buffer(&device, &[0; 64], uniform);
-    let mut global_bytes = [0u32; 16];
+    // FogGlobals: world origin (the last vec4) zero, world space.
+    let mut global_bytes = [0u32; helio_pass_volumetric_fog::FOG_GLOBALS_BYTES / 4];
     global_bytes[7] = 0.1f32.to_bits();
     global_bytes[12..16].copy_from_slice(&[192, 108, 128, 1]);
     let globals = buffer(&device, bytemuck::cast_slice(&global_bytes), uniform);
@@ -536,7 +537,7 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
         ..Default::default()
     });
     let fog = buffer(&device, &[0; 64], wgpu::BufferUsages::UNIFORM);
-    let globals = buffer(&device, &[0; 64], wgpu::BufferUsages::UNIFORM);
+    let globals = buffer(&device, &[0; helio_pass_volumetric_fog::FOG_GLOBALS_BYTES], wgpu::BufferUsages::UNIFORM);
     let indices = buffer(&device, &[0; 1920], storage);
     let volumes = buffer(
         &device,

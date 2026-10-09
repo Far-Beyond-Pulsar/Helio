@@ -22,7 +22,7 @@ struct App { scene:Scene,state:Option<State> }
 struct State {
     window:Arc<Window>,surface:wgpu::Surface<'static>,config:wgpu::SurfaceConfiguration,
     device:Arc<wgpu::Device>,queue:Arc<wgpu::Queue>,renderer:Renderer,scene_db:SceneDb,
-    acceleration:Option<helio_pass_hlfs::SceneDbRayTracing>,keys:HashSet<KeyCode>,last:Instant,
+    acceleration:Option<helio_default_graphs::ray_tracing::SceneDbRayTracing>,keys:HashSet<KeyCode>,last:Instant,
     angle:f32,distance:f32,height:f32,elapsed:f32,
 }
 impl ApplicationHandler for App {
@@ -66,7 +66,7 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.05,0.05,0.08],1.0);
         let acceleration=if rt {
             crate::hlfs_capture::enable_ray_shadows(&mut scene_db.world);
-            Some(helio_pass_hlfs::SceneDbRayTracing::new(device.clone(),queue.clone()))
+            Some(helio_default_graphs::ray_tracing::SceneDbRayTracing::new(device.clone(),queue.clone()))
         }else{None};
         let offset=(self.scene.camera)(0.0,config.width as f32/config.height as f32).position-self.scene.orbit_target;
         self.state=Some(State{window,surface,config,device,queue,renderer,scene_db,acceleration,keys:HashSet::new(),last:Instant::now(),

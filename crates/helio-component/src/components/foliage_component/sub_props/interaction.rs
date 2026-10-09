@@ -1,6 +1,5 @@
 use engine_class_derive::engine_class;
 use serde_json::Value;
-use std::collections::HashMap;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Interaction", category_color = "#A78BFA", default_collapsed = true)]
@@ -38,20 +37,5 @@ impl InteractionFoliageProps {
         if let Some(v) = obj.get("interactor_radius").and_then(|v| v.as_f64()) {
             self.interactor_radius = v as f32;
         }
-    }
-
-    pub(crate) fn apply_to_scene_props(&self, out: &mut HashMap<String, Value>) {
-        out.insert(
-            "receives_interaction".to_string(),
-            Value::from(self.receives_interaction),
-        );
-        out.insert(
-            "interactor_enabled".to_string(),
-            Value::from(self.interactor_enabled),
-        );
-        out.insert(
-            "interactor_radius".to_string(),
-            Value::from(self.interactor_radius),
-        );
     }
 }

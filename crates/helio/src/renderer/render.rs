@@ -115,6 +115,11 @@ impl Renderer {
             self.poll_cull_stats_readback();
         }
 
+        // Before the resize drain: a pending resize rebuilds from the latest
+        // shader sources anyway, so a reload on the same frame costs nothing.
+        #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+        self.poll_shader_reload();
+
         if let Some((w, h)) = self.pending_resize.take() {
             helio_core::cpu_scope!("Helio: apply_resize_now");
             self.apply_resize_now(w, h);
@@ -270,7 +275,6 @@ impl Renderer {
         self.graph.set_editor_mode(self.editor_mode);
 
         if let Ok(mut state) = self.debug_state.lock() {
-            state.camera_position = camera.position;
             state.world_origin = self.world_origin;
         }
         // SceneDB owns texture residency. Retain descriptor views by GPU handle
@@ -375,8 +379,6 @@ impl Renderer {
                 clear_color: self.clear_color,
                 ambient_color: self.ambient_color,
                 ambient_intensity: self.ambient_intensity,
-                ambient_up: self.ambient_up,
-                ambient_ground: self.ambient_ground.unwrap_or(self.ambient_color.map(|c| c * 0.15)),
                 tlas: self.ray_frame.tlas(self.frame_count),
             },
             "Renderer",
@@ -528,14 +530,17 @@ impl Renderer {
         let _graph_start = Instant::now();
         let scene_input = {
             helio_core::cpu_scope!("Helio: SceneInputAdapter::from_scene_db");
-            crate::renderer::input::SceneInputAdapter::from_scene_db(
+            let mut scene_input = crate::renderer::input::SceneInputAdapter::from_scene_db(
                 &self.scene_db,
                 &self.camera_buffer,
                 &self.camera_data,
                 self.camera_generation,
                 self.frame_count,
                 self.world_origin,
-            )
+            );
+            helio_core::cpu_scope!("Helio: scene derivations");
+            scene_input.run_derivations(&mut self.scene_derivations);
+            scene_input
         };
         {
             helio_core::cpu_scope!("Helio: RenderGraph execute");
@@ -887,12 +892,8 @@ impl Renderer {
             ));
         }
         if self.xr_mirror_pipeline.is_none() {
-            let module = self
-                .device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("XR Mirror Shader"),
-                    source: wgpu::ShaderSource::Wgsl(XR_MIRROR_WGSL.into()),
-                });
+            let module =
+                helio_core::shader::module(&self.device, "XR Mirror Shader", XR_MIRROR_WGSL);
             self.xr_mirror_pipeline = Some(self.device.create_render_pipeline(
                 &wgpu::RenderPipelineDescriptor {
                     label: Some("XR Mirror Pipeline"),

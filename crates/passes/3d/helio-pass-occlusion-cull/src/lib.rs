@@ -135,10 +135,7 @@ impl OcclusionCullPass {
         screen_height: u32,
         cull_stats_buf: wgpu::Buffer,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("OcclusionCull Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/occlusion_cull.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "OcclusionCull Shader", helio_core::include_wgsl!("../shaders/occlusion_cull.wgsl"));
 
         let cull_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("OcclusionCull CullParams"),

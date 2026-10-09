@@ -543,12 +543,20 @@ fn cs_response(@builtin(global_invocation_id) id: vec3<u32>) {
                 // Output-texel area of the ghost disk: its energy is spread
                 // over exactly the area the image path would cover.
                 let area = iris_area() * (r * width) * (r * width) * squeeze.x * squeeze.y;
-                var c = vec3(0.0);
-                for (var ch = 0u; ch < 3u; ch++) {
-                    let rc = r * (1.0 + rim_fringe * profile.w * (1.0 - WAVELENGTH[ch]) * 2.0);
-                    let disk = iris_disk(d, rc, texel);
-                    c[ch] = disk.x * rim_profile(disk.y);
-                }
+                // Spell out the channels: FXC cannot safely lower dynamic
+                // writes to a vector component inside this three-iteration
+                // loop and may reject the entire compute pipeline.
+                let red_radius = r * (1.0 + rim_fringe * profile.w * (1.0 - WAVELENGTH.r) * 2.0);
+                let green_radius = r * (1.0 + rim_fringe * profile.w * (1.0 - WAVELENGTH.g) * 2.0);
+                let blue_radius = r * (1.0 + rim_fringe * profile.w * (1.0 - WAVELENGTH.b) * 2.0);
+                let red_disk = iris_disk(d, red_radius, texel);
+                let green_disk = iris_disk(d, green_radius, texel);
+                let blue_disk = iris_disk(d, blue_radius, texel);
+                let c = vec3(
+                    red_disk.x * rim_profile(red_disk.y),
+                    green_disk.x * rim_profile(green_disk.y),
+                    blue_disk.x * rim_profile(blue_disk.y),
+                );
                 response += c * src.energy * src.weight * reflect / max(area, 1e-6);
             }
         }
@@ -643,11 +651,13 @@ fn cs_response(@builtin(global_invocation_id) id: vec3<u32>) {
                 let along = abs(dot(d, dir));
                 let across = abs(dot(d, vec2(-dir.y, dir.x)));
                 let line = exp(-across * across / (2.0 * texel * texel));
-                for (var ch = 0u; ch < 3u; ch++) {
-                    let t = along / max(length_uv * WAVELENGTH[ch], 1e-5);
-                    let envelope = select(0.0, pow(1.0 - t, 3.0) / (0.05 + t), t < 1.0);
-                    spikes[ch] += line * envelope;
-                }
+                let red_t = along / max(length_uv * WAVELENGTH.r, 1e-5);
+                let green_t = along / max(length_uv * WAVELENGTH.g, 1e-5);
+                let blue_t = along / max(length_uv * WAVELENGTH.b, 1e-5);
+                let red_envelope = select(0.0, pow(1.0 - red_t, 3.0) / (0.05 + red_t), red_t < 1.0);
+                let green_envelope = select(0.0, pow(1.0 - green_t, 3.0) / (0.05 + green_t), green_t < 1.0);
+                let blue_envelope = select(0.0, pow(1.0 - blue_t, 3.0) / (0.05 + blue_t), blue_t < 1.0);
+                spikes += line * vec3(red_envelope, green_envelope, blue_envelope);
             }
             // Same normalisation as the image path's tap weights, per texel.
             let norm = 0.12 * gain(pp.lens.starburst_intensity) / (f32(lines) * 2.0 * length_uv * width * 3.0);

@@ -96,12 +96,13 @@ impl VirtualGeometryPass {
         budget: VirtualGeometryBudget,
     ) -> Self {
         let material_binding = helio_mats::MaterialBindingConfig::for_device(device);
-        let cull_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("VG Cull Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/vg_cull.wgsl").into()),
-        });
+        let cull_shader = helio_core::shader::module(device, "VG Cull Shader", helio_core::include_wgsl!("../shaders/vg_cull.wgsl"));
         let draw_shader_source = {
-            let s = include_str!("../shaders/vg_gbuffer.wgsl")
+            let text = helio_core::shader::source_text(
+                "VG GBuffer Shader",
+                helio_core::include_wgsl!("../shaders/vg_gbuffer.wgsl"),
+            );
+            let s = text
                 .replace(
                     "binding_array<texture_2d<f32>, 256>",
                     &format!(
@@ -119,10 +120,8 @@ impl VirtualGeometryPass {
                 helio_mats::apply_webgpu_material_bindings(&s, material_binding.max_textures)
             }
         };
-        let draw_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("VG GBuffer Shader"),
-            source: wgpu::ShaderSource::Wgsl(draw_shader_source.clone().into()),
-        });
+        let draw_shader =
+            helio_core::shader::module(device, "VG GBuffer Shader", &draw_shader_source);
 
         let meshlet_buf = Self::make_meshlet_buf(device, INITIAL_MESHLETS);
         let object_buf = Self::make_object_buf(device, INITIAL_OBJECTS);

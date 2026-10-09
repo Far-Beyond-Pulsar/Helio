@@ -138,10 +138,7 @@ pub struct PortalCullPass {
 
 impl PortalCullPass {
     pub fn new(device: &wgpu::Device) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("PortalCull Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/portal_cull.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "PortalCull Shader", helio_core::include_wgsl!("../shaders/portal_cull.wgsl"));
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PortalCull Uniforms"),
@@ -331,7 +328,7 @@ impl RenderPass for PortalCullPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         if ctx.frame_num < 3 || ctx.frame_num % 120 == 0 {
-            log::info!(
+            log::trace!(
                 "[PortalCull] frame={} draw_count={} chain_count={}",
                 ctx.frame_num,
                 self.draw_count,

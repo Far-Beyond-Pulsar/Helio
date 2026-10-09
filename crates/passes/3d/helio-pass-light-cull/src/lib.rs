@@ -90,10 +90,7 @@ impl LightCullPass {
             .checked_mul(num_tiles_y)
             .expect("tile grid overflow: viewport dimensions too large");
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("LightCull Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/light_cull.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "LightCull Shader", helio_core::include_wgsl!("../shaders/light_cull.wgsl"));
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("LightCull BGL"),

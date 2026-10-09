@@ -431,10 +431,7 @@ pub struct ObjectBatchPass {
 
 impl ObjectBatchPass {
     pub fn new(device: &wgpu::Device) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("ObjectBatch Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/object_batch.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "ObjectBatch Shader", helio_core::include_wgsl!("../shaders/object_batch.wgsl"));
 
         let cs = wgpu::ShaderStages::COMPUTE;
         let bgls = BindGroupLayouts {
@@ -1365,6 +1362,7 @@ impl RenderPass for ObjectBatchPass {
 
     fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
         builder.write_buffer("object_batch");
+        builder.write_buffer(helio_core::resource_keys::DEPTH_DRAW_SIGNATURE);
     }
 
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
@@ -1407,6 +1405,14 @@ impl RenderPass for ObjectBatchPass {
             })
         };
         frame.write(helio_core::ResourceKey::new("object_batch"), data, "ObjectBatch");
+        // Culling and the GBuffer draw from these read-back counts, so they --
+        // not the SceneDB upload -- decide when the scene starts (or stops)
+        // reaching depth.
+        helio_core::resource_keys::fold_depth_draw_signature(
+            frame,
+            (u64::from(draw_count) << 32) | u64::from(self.instance_count()),
+            "ObjectBatch",
+        );
         // `[static, movable, transmissive]` shadow-caster counts, written on
         // the GPU this frame (unlike the `*_draw_count` fields above, which
         // trail by the readback latency). Lets shadow consumers skip an atlas

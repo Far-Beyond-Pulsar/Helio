@@ -332,10 +332,7 @@ impl DebugOverlayPass {
             ..Default::default()
         });
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("DebugOverlay Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/debug_overlay.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(device, "DebugOverlay Shader", helio_core::include_wgsl!("../shaders/debug_overlay.wgsl"));
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("DebugOverlay BGL"),

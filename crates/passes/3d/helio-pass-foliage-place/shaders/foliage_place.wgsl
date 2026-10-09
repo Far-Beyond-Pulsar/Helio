@@ -101,9 +101,9 @@ struct FoliageType {
     density_layer:         u32,
     kind_and_flags:        u32,
     mesh_or_impostor_id:   u32,
+    base_color:            u32,
+    roughness_metallic:    u32,
     _pad0:                 u32,
-    _pad1:                 u32,
-    _pad2:                 u32,
 }
 
 /// Mirrors `crate::GpuFoliageTile` (Rust, 32 bytes).
@@ -149,6 +149,7 @@ struct BladeInstance {
 var<workgroup> wg_scan: array<u32, WG_SIZE>;
 var<workgroup> wg_base: u32;
 var<workgroup> wg_center_y: f32;
+var<workgroup> wg_live_types: atomic<u32>;
 
 // ── Hash, transcribed from crate::placement ────────────────────────
 
@@ -321,6 +322,7 @@ fn cs_place(
         }
         wg_center_y = (y_min + y_max) * 0.5;
         wg_base = 0u;
+        atomicStore(&wg_live_types, 0u);
         if valid {
             tiles[slot].bounds_center_y = (y_min + y_max) * 0.5;
             tiles[slot].bounds_half_y = (y_max - y_min) * 0.5 + place.max_foliage_height;
@@ -331,10 +333,22 @@ fn cs_place(
     workgroupBarrier();
     let center_y = wg_center_y;
 
+    // Types are drawn uniformly from the leading rows up to the last one with a
+    // density, not from the whole table: a publisher that keeps a fixed-capacity,
+    // packed table (live types first, zero rows after) would otherwise dilute every
+    // type's density by the empty rows.
+    let type_rows = min(place.type_count, arrayLength(&types));
+    for (var row = lane; row < type_rows; row = row + WG_SIZE) {
+        if types[row].density > 0.0 {
+            atomicMax(&wg_live_types, row + 1u);
+        }
+    }
+    workgroupBarrier();
+
     let grid = max(place.candidate_grid, 1u);
     let cells = grid * grid;
     let inv_grid = 1.0 / f32(grid);
-    let type_limit = max(min(place.type_count, arrayLength(&types)), 1u);
+    let type_limit = max(atomicLoad(&wg_live_types), 1u);
 
     // `cells` comes from the uniform buffer, so this loop and every barrier inside it are
     // in uniform control flow for the whole workgroup.

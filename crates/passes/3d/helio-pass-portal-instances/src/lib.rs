@@ -82,10 +82,7 @@ impl PortalInstancePass {
 
         let shader_source = portal_shader_source(material_binding);
 
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("PortalInstance Shader"),
-            source: wgpu::ShaderSource::Wgsl(shader_source),
-        });
+        let shader = helio_core::shader::module(device, "PortalInstance Shader", &*shader_source);
 
         let screen_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PortalInstance/ScreenSize"),
@@ -277,12 +274,15 @@ impl PortalInstancePass {
 }
 
 fn portal_shader_source(material_binding: helio_mats::MaterialBindingConfig) -> Cow<'static, str> {
-    let source = include_str!("../shaders/gbuffer_portal.wgsl");
+    let source = helio_core::shader::source_text(
+        "PortalInstance Shader",
+        helio_core::include_wgsl!("../shaders/gbuffer_portal.wgsl"),
+    );
     if material_binding.uses_binding_arrays() {
-        Cow::Borrowed(source)
+        source
     } else {
         Cow::Owned(helio_mats::apply_webgpu_material_bindings(
-            source,
+            &source,
             material_binding.max_textures,
         ))
     }
@@ -448,7 +448,7 @@ impl RenderPass for PortalInstancePass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         if ctx.frame_num < 3 || ctx.frame_num.is_multiple_of(120) {
-            log::info!(
+            log::trace!(
                 "[PortalInstance] frame={} draw_count={} render_pass_open={}",
                 ctx.frame_num,
                 self.draw_count,

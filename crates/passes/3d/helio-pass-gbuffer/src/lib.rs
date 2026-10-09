@@ -35,12 +35,10 @@ mod coordinate_spaces_frame_data;
 mod culled_batch_frame_data;
 mod indirect_draw;
 mod object_batch_frame_data;
-#[allow(deprecated)]
 pub use components::{
     MaterialComponent, MeshComponent, RenderGroupComponent, RenderGroupSceneBinding,
     SectionedObjectComponent, SectionedObjectSceneBinding, StaticObjectComponent,
-    SubLevelActorComponent, SubLevelActorSceneBinding, SubLevelIndex, SublevelComponent,
-    SublevelSceneBinding, DEFAULT_SUBLEVEL_INDEX,
+    SubLevelActorComponent, SubLevelActorSceneBinding, SubLevelIndex, DEFAULT_SUBLEVEL_INDEX,
 };
 pub use coordinate_spaces_frame_data::CoordinateSpacesFrameData;
 pub use culled_batch_frame_data::CulledBatchFrameData;
@@ -71,7 +69,9 @@ pub struct GBufferGlobals {
     pub debug_mode: u32,
     pub screen_width: f32,
     pub screen_height: f32,
-    pub _pad0: u32,
+    /// Seconds since start ([`helio_mats::graph_time_seconds`]): the
+    /// shader-graph `time` node.
+    pub time: f32,
 }
 
 // ── Pass struct ───────────────────────────────────────────────────────────────
@@ -637,7 +637,7 @@ impl RenderPass for GBufferPass {
             debug_mode: self.debug_mode,
             screen_width: ctx.width as f32,
             screen_height: ctx.height as f32,
-            _pad0: 0,
+            time: helio_mats::graph_time_seconds(),
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())
@@ -908,6 +908,13 @@ impl GBufferPass {
         graph_wgsl: &str,
     ) -> &wgpu::RenderPipeline {
         if !self.pipelines.contains_key(&key) {
+            let registered_graph;
+            let graph_wgsl = if graph_wgsl.is_empty() && key.graph_hash != 0 {
+                registered_graph = helio_mats::graph_source(key.graph_hash);
+                registered_graph.as_deref().unwrap_or("")
+            } else {
+                graph_wgsl
+            };
             // The renderer only ever hands us a shared registry when a
             // caller actually registers custom (id >= 5) templates; nothing
             // wires that up yet (see `template_registry`'s doc). Rather than

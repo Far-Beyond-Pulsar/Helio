@@ -43,7 +43,7 @@ pub const HIZ: &str = include_str!("../shaders/hiz_trace.wgsl");
 /// `helio_core::shader::resolve_with`/`module_with` by any shader opting in
 /// via [`HIZ_MARKER`] — `helio-core` itself never names this snippet.
 pub const HIZ_SNIPPET: helio_core::shader::ShaderSnippet =
-    helio_core::shader::ShaderSnippet::new(HIZ_MARKER, HIZ);
+    helio_core::wgsl_snippet!(HIZ_MARKER, "../shaders/hiz_trace.wgsl");
 const WORKGROUP_SIZE: u32 = 8;
 const MAX_MIP_LEVELS: u32 = 12;
 
@@ -92,13 +92,61 @@ pub struct HiZBuildPass {
     width: u32,
     height: u32,
 
-    // What the max pyramid was last built for: `(camera_generation, SceneDB
-    // content signature)`. Reused only while both hold -- a still camera over
-    // a changing scene (an object moving out from behind an occluder) must
-    // rebuild, or occlusion culling keeps hiding what is now visible.
-    prev_view_key: (u64, u64),
-    /// Whether this is the first frame (forces a full rebuild regardless of generation).
-    first_frame: bool,
+    /// Which depth the max pyramid holds and which depth the next copy reads.
+    max_source: PyramidSource,
+}
+
+/// What a frame's depth was drawn from: everything the CPU knows that decides
+/// which geometry reached it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct DepthInputs {
+    camera_generation: u64,
+    /// `SceneBufferProjection::content_signature`.
+    scene_signature: u64,
+    /// `helio_core::resource_keys::depth_draw_signature`, 0 when no pass
+    /// publishes one.
+    draw_signature: u64,
+}
+
+/// Reuse bookkeeping for the max pyramid.
+///
+/// The pyramid is built from the depth texture as it stands when HiZBuild
+/// runs, which is ahead of this frame's geometry: it holds the PREVIOUS
+/// frame's depth. So a pyramid is tagged with the inputs of the frame that
+/// drew that depth, not the frame that copied it, and is reused only while the
+/// current frame's inputs equal that tag -- i.e. only while the depth it came
+/// from is exactly what this frame would draw again.
+///
+/// Tagging with the copying frame's inputs instead (the old behaviour) froze
+/// any pyramid built just after a change: with the camera at rest, the
+/// pyramid built on frame 0 from a depth buffer nothing had drawn into yet
+/// was reused forever and occlusion culling hid every object.
+#[derive(Clone, Copy, Debug, Default)]
+struct PyramidSource {
+    /// Inputs of the depth the pyramid was built from; `None` when unknown
+    /// (never built, or built from a depth no tracked frame drew).
+    built_from: Option<DepthInputs>,
+    /// Inputs of the frame that last ran: what the depth texture holds now.
+    depth_holds: Option<DepthInputs>,
+}
+
+impl PyramidSource {
+    /// Starts a frame drawn from `current`. Returns whether the pyramid must
+    /// be rebuilt from the depth texture this frame.
+    fn begin_frame(&mut self, current: DepthInputs) -> bool {
+        let rebuild = self.built_from != Some(current);
+        if rebuild {
+            self.built_from = self.depth_holds;
+        }
+        self.depth_holds = Some(current);
+        rebuild
+    }
+
+    /// The depth texture was reallocated: neither it nor the pyramid holds
+    /// anything a tracked frame drew.
+    fn invalidate(&mut self) {
+        *self = Self::default();
+    }
 }
 
 impl HiZBuildPass {
@@ -115,10 +163,7 @@ impl HiZBuildPass {
         }));
 
         // Phase 2: mip-chain downsampling pipeline
-        let mip_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("HiZ Build Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/hiz_build.wgsl").into()),
-        });
+        let mip_shader = helio_core::shader::module(device, "HiZ Build Shader", helio_core::include_wgsl!("../shaders/hiz_build.wgsl"));
 
         let mip_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("HiZ Mip BGL"),
@@ -190,12 +235,7 @@ impl HiZBuildPass {
                  culling and SSR use a conservative far-depth fallback"
             );
         }
-        let fallback_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("HiZ Far Depth Fallback Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/hiz_far_depth_fallback.wgsl").into(),
-            ),
-        });
+        let fallback_shader = helio_core::shader::module(device, "HiZ Far Depth Fallback Shader", helio_core::include_wgsl!("../shaders/hiz_far_depth_fallback.wgsl"));
         let fallback_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("HiZ Far Depth Fallback BGL"),
             entries: &[
@@ -262,8 +302,7 @@ impl HiZBuildPass {
             mip_views: Vec::new(),
             width,
             height,
-            prev_view_key: (0, 0),
-            first_frame: true,
+            max_source: PyramidSource::default(),
         }
     }
 
@@ -391,7 +430,9 @@ impl RenderPass for HiZBuildPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["depth"]
+        // The signature orders this pass after every depth-draw producer, so
+        // `execute` sees this frame's value.
+        &["depth", helio_core::resource_keys::DEPTH_DRAW_SIGNATURE]
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -429,7 +470,7 @@ impl RenderPass for HiZBuildPass {
         self.min_mip_views.clear();
         self.min_mip_bind_groups.clear();
         self.fallback_bind_group = None;
-        self.first_frame = true;
+        self.max_source.invalidate();
     }
 
     fn render_pass_descriptor<'a>(
@@ -454,7 +495,7 @@ impl RenderPass for HiZBuildPass {
                 self.height,
                 "HiZ Mip Uniform",
             );
-            self.first_frame = true;
+            self.max_source.invalidate();
         }
         Ok(())
     }
@@ -584,8 +625,14 @@ impl RenderPass for HiZBuildPass {
         // copy feeds both pyramids, so it is needed only when one of them is
         // rebuilt this frame.
         let min_wanted = helio_core::is_demanded(ctx.registry, "hiz_min");
-        let view_key = (ctx.camera_generation, ctx.scene_buffers.content_signature());
-        let max_rebuild = self.first_frame || view_key != self.prev_view_key;
+        let max_rebuild = self.max_source.begin_frame(DepthInputs {
+            camera_generation: ctx.camera_generation,
+            scene_signature: ctx.scene_buffers.content_signature(),
+            draw_signature: ctx
+                .registry
+                .get(helio_core::resource_keys::depth_draw_signature())
+                .unwrap_or(0),
+        });
 
         if self.depth_copy_supported && (min_wanted || max_rebuild) {
             let depth_texture = ctx
@@ -654,7 +701,7 @@ impl RenderPass for HiZBuildPass {
         }
 
         // ── Min pyramid: rebuilt every frame ─────────────────────────────────
-        // Deliberately outside the camera-static early-out below. That optimization
+        // Deliberately outside the max pyramid's reuse early-out below. That optimization
         // is sound for the max chain because its consumer (occlusion culling) is
         // temporal by design and tolerates a frame-stale pyramid. SSR is not: it
         // reflects the *current* frame, and a static camera does not imply static
@@ -664,13 +711,11 @@ impl RenderPass for HiZBuildPass {
             self.build_min_pyramid(ctx);
         }
 
-        // ── HiZ reuse: skip the rebuild while camera and scene are unchanged ──
+        // ── HiZ reuse: skip the rebuild while the pyramid already holds the
+        // depth this frame would draw (see `PyramidSource`) ──────────────────
         if !max_rebuild {
             return Ok(());
         }
-
-        self.first_frame = false;
-        self.prev_view_key = view_key;
 
         if self.depth_copy_supported {
             encoder.copy_buffer_to_texture(
@@ -721,5 +766,69 @@ impl RenderPass for HiZBuildPass {
         // We only need to publish the sampler (not owned by the graph).
         let hiz_sampler: &'a wgpu::Sampler = unsafe { std::mem::transmute(&*self.hiz_sampler) };
         frame.write(helio_core::ResourceKey::new("hiz_sampler"), hiz_sampler, "HiZBuild");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DepthInputs, PyramidSource};
+
+    fn inputs(camera_generation: u64, scene_signature: u64, draw_signature: u64) -> DepthInputs {
+        DepthInputs { camera_generation, scene_signature, draw_signature }
+    }
+
+    /// Runs `frames` frames at `current`, returning which of them rebuilt.
+    fn run(source: &mut PyramidSource, current: DepthInputs, frames: usize) -> Vec<bool> {
+        (0..frames).map(|_| source.begin_frame(current)).collect()
+    }
+
+    #[test]
+    fn static_view_rebuilds_until_the_pyramid_holds_its_own_depth() {
+        let mut source = PyramidSource::default();
+        // Frame 0 copies a depth nothing drew; frame 1 copies frame 0's.
+        assert_eq!(run(&mut source, inputs(1, 7, 3), 4), [true, true, false, false]);
+    }
+
+    /// Objects present before the first frame, camera never moves: the draw
+    /// counts reach the CPU frames after the upload, so the first frames draw
+    /// nothing. The pyramid built from those empty depths must not outlive
+    /// the frame whose draws finally reach depth.
+    #[test]
+    fn late_draws_under_a_static_camera_rebuild_the_pyramid() {
+        let mut source = PyramidSource::default();
+        let nothing_drawn = inputs(1, 7, 0);
+        let drawn = inputs(1, 7, 42);
+        assert_eq!(run(&mut source, nothing_drawn, 5), [true, true, false, false, false]);
+        // First frame drawing the scene still copies the previous, empty
+        // depth; the next copies the drawn one; then it is reused.
+        assert_eq!(run(&mut source, drawn, 5), [true, true, false, false, false]);
+    }
+
+    /// A change is seen by the frame that copies the depth drawn BEFORE it,
+    /// so that rebuild alone is stale: the pyramid must rebuild once more
+    /// from the first depth drawn after the change.
+    #[test]
+    fn a_change_rebuilds_from_the_first_depth_drawn_after_it() {
+        for changed in [inputs(2, 7, 42), inputs(1, 8, 42), inputs(1, 7, 43)] {
+            let mut source = PyramidSource::default();
+            run(&mut source, inputs(1, 7, 42), 4);
+            assert_eq!(run(&mut source, changed, 4), [true, true, false, false], "{changed:?}");
+        }
+    }
+
+    #[test]
+    fn a_moving_camera_rebuilds_every_frame() {
+        let mut source = PyramidSource::default();
+        for camera in 0..6 {
+            assert!(source.begin_frame(inputs(camera, 7, 42)));
+        }
+    }
+
+    #[test]
+    fn invalidation_forgets_the_depth_texture() {
+        let mut source = PyramidSource::default();
+        run(&mut source, inputs(1, 7, 42), 4);
+        source.invalidate();
+        assert_eq!(run(&mut source, inputs(1, 7, 42), 3), [true, true, false]);
     }
 }

@@ -6,7 +6,6 @@ use std::time::Instant;
 use web_time::Instant;
 
 use helio_core::{RenderFrameInputs, RenderGraph, RenderPass};
-use helio_pass_sky::{CloudQuality, CloudRenderMode, CloudResolution, SkyPass};
 
 use super::builder::SceneDbHandle;
 use super::config::{RenderMode, RendererConfig};
@@ -74,6 +73,10 @@ pub struct Renderer {
     pub(crate) prev_view_proj: glam::Mat4,
     /// World origin used to express the previous local camera projection.
     pub(crate) previous_world_origin: Option<glam::DVec3>,
+    /// GPU work deriving drawable scene buffers from the frontend's authored
+    /// ones, run each frame between the SceneDB snapshot and the graph. See
+    /// `helio_core::scene_derivation`.
+    pub(crate) scene_derivations: Vec<Box<dyn helio_core::SceneDerivation>>,
     pub(crate) world_origin: Option<glam::DVec3>,
     pub(crate) depth_texture: wgpu::Texture,
     pub(crate) depth_view: wgpu::TextureView,
@@ -88,8 +91,6 @@ pub struct Renderer {
     pub(crate) material_bindings: MaterialBindingResources,
     pub(crate) ambient_color: [f32; 3],
     pub(crate) ambient_intensity: f32,
-    pub(crate) ambient_up: [f32; 3],
-    pub(crate) ambient_ground: Option<[f32; 3]>,
     pub(crate) clear_color: [f32; 4],
     /// The configuration the current graph was built from: the recipe a
     /// rebuild (resize, a config change) hands the graph builder, so the new
@@ -111,8 +112,6 @@ pub struct Renderer {
     pub(crate) portal_projection_counts: Option<(u32, u32)>,
     /// TSR quality preset, preserved across graph rebuilds.
     pub(crate) tsr_quality: Option<helio_pass_tsr::TsrQuality>,
-    /// Outdoor fallback sky state must survive graph rebuilds triggered by resize or TSR.
-    pub(crate) fallback_sky_enabled: bool,
     pub(crate) debug_mode: u32,
     pub(crate) editor_mode: bool,
     pub(crate) debug_state: Arc<Mutex<DebugDrawState>>,
@@ -155,6 +154,9 @@ pub struct Renderer {
     pub(crate) clear_target_next_frame: bool,
     pub(crate) graph_rebuilder: Option<GraphRebuilder>,
     pub(crate) graph_rebuild_hook: Option<GraphRebuildHook>,
+    /// Shader hot-reload bookkeeping (see `shader_reload.rs`).
+    #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
+    pub(crate) shader_reload: super::shader_reload::ShaderReloadState,
     /// Frontend-owned SceneDB GPU projection. The CPU SceneDB remains outside
     /// Helio and is flushed by its owner at the frame boundary.
     pub(crate) scene_db: SceneDbHandle,
@@ -548,43 +550,6 @@ impl Renderer {
         self.graph.set_frame_inputs(&inputs);
     }
 
-    /// Select the cloud representation used by the default sky pass.
-    ///
-    /// This is intentionally a no-op when a custom graph does not contain a
-    /// sky pass, which keeps the renderer facade usable with stripped graphs.
-    pub fn set_cloud_render_mode(&mut self, mode: CloudRenderMode) {
-        if let Some(pass) = self.find_pass_mut::<SkyPass>() {
-            pass.set_cloud_mode(mode);
-            pass.reset_history();
-        }
-    }
-
-    /// Use the default sky when a scene has no authored sky component.
-    pub fn set_fallback_sky_enabled(&mut self, enabled: bool) {
-        self.fallback_sky_enabled = enabled;
-        if let Some(pass) = self.find_pass_mut::<SkyPass>() {
-            pass.set_fallback_sky_enabled(enabled);
-        }
-    }
-
-    /// Select the cloud detail tier. Higher tiers add density detail and
-    /// lighting samples; the tier is independent from render resolution.
-    pub fn set_cloud_quality(&mut self, quality: CloudQuality) {
-        if let Some(pass) = self.find_pass_mut::<SkyPass>() {
-            pass.set_cloud_quality(quality);
-            pass.reset_history();
-        }
-    }
-
-    /// Select the cloud render resolution (full, half, quarter, or eighth
-    /// resolution per axis). The pass reallocates its temporal targets at the
-    /// next frame boundary and invalidates history safely.
-    pub fn set_cloud_resolution(&mut self, resolution: CloudResolution) {
-        if let Some(pass) = self.find_pass_mut::<SkyPass>() {
-            pass.set_cloud_resolution(resolution);
-        }
-    }
-
     /// Access the gbuffer template registry (preserved across graph rebuilds).
     /// Register custom surface templates here instead of through the pass
     /// directly to ensure they survive window resize.
@@ -619,16 +584,6 @@ impl Renderer {
     pub fn set_ambient(&mut self, color: [f32; 3], intensity: f32) {
         self.ambient_color = color;
         self.ambient_intensity = intensity;
-    }
-
-    /// Orient the hemisphere ambient: `up` is the axis the sky colour lights
-    /// (normalized here), `ground` the bounce colour for normals facing away
-    /// (`None` keeps the default, 15% of the sky colour). Hosts rendering a
-    /// planet set `up` to the local vertical at the camera.
-    pub fn set_ambient_hemisphere(&mut self, up: [f32; 3], ground: Option<[f32; 3]>) {
-        let up = glam::Vec3::from(up).try_normalize().unwrap_or(glam::Vec3::Y);
-        self.ambient_up = up.to_array();
-        self.ambient_ground = ground;
     }
 
     pub fn set_graph(&mut self, mut graph: RenderGraph) {
@@ -738,6 +693,7 @@ impl Renderer {
             surface_format: self.surface_format,
             debug_mode: self.debug_mode,
             render_scale: self.render_scale,
+            tsr_quality: self.tsr_quality,
             render_mode: self.render_mode,
             enable_xr: self.enable_xr,
             ..self.graph_config

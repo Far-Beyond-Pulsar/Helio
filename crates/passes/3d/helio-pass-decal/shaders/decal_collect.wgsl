@@ -158,7 +158,10 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
             rn = vec4<f32>(blend_nrm(wn, fnrm, opa), en.a);
         }
         if d.decal_type == DT_EM || d.decal_type == DT_AL {
-            let de = vec4<f32>(tint.rgb * opa, ee.a);
+            // Weighted by the decal's own opacity: the surface's emissive
+            // alpha says nothing about the decal (it gated non-emissive
+            // surfaces out entirely).
+            let de = vec4<f32>(tint.rgb, opa);
             re = select(blend_over(re, de), blend_add(re, de), d.blend_mode == BADD);
         }
         if d.decal_type == DT_AL && (d.blend_mode == BT || d.blend_mode == BA) {

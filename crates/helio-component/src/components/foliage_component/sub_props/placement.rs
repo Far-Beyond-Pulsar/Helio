@@ -1,6 +1,5 @@
 use engine_class_derive::engine_class;
 use serde_json::Value;
-use std::collections::HashMap;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Placement", category_color = "#6EC5FF")]
@@ -88,27 +87,5 @@ impl PlacementFoliageProps {
         if let Some(v) = obj.get("has_infinite_extent").and_then(|v| v.as_bool()) {
             self.has_infinite_extent = v;
         }
-    }
-
-    pub(crate) fn apply_to_scene_props(&self, out: &mut HashMap<String, Value>) {
-        out.insert("height_min".to_string(), Value::from(self.height_min));
-        out.insert("height_max".to_string(), Value::from(self.height_max));
-        out.insert("width_min".to_string(), Value::from(self.width_min));
-        out.insert("width_max".to_string(), Value::from(self.width_max));
-        out.insert(
-            "slope_min_degrees".to_string(),
-            Value::from(self.slope_min_degrees),
-        );
-        out.insert(
-            "slope_max_degrees".to_string(),
-            Value::from(self.slope_max_degrees),
-        );
-        out.insert("altitude_min".to_string(), Value::from(self.altitude_min));
-        out.insert("altitude_max".to_string(), Value::from(self.altitude_max));
-        out.insert("layer_extent".to_string(), Value::from(self.layer_extent));
-        out.insert(
-            "has_infinite_extent".to_string(),
-            Value::from(self.has_infinite_extent),
-        );
     }
 }

@@ -6,6 +6,7 @@ mod pipeline_cache;
 mod resource;
 mod resource_lifetime;
 mod scheduling;
+mod swap;
 
 pub use attachments::{
     attachment_format, resolve_attachment_view, AttachmentSlot, ColorAttachmentIntent,
@@ -18,6 +19,10 @@ pub use executor::{
 pub use pipeline_cache::{
     BindingOverrideBuilder, PipelineFormatCache, PipelineFormatKey, PipelineFormatSet,
     PipelineHandle, PipelineRecipeBuilder, PipelineRegistry,
+};
+pub use swap::{
+    align_pass_sequences, plan_selective_swap, type_in_crate, type_name_of, PassIdentity,
+    SwapPlan, SwapPolicy,
 };
 pub use resource::{
     GraphTexture, GraphTexturePool, ResSize, ResourceAccess, ResourceAllocator, ResourceBuilder,

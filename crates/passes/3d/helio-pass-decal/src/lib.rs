@@ -72,14 +72,8 @@ impl DecalPass {
     ) -> Self {
         let material_binding = helio_mats::MaterialBindingConfig::for_device(device);
         let collect_src = decal_collect_source(material_binding);
-        let collect_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Decal Collect"),
-            source: wgpu::ShaderSource::Wgsl(collect_src.into()),
-        });
-        let apply_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Decal Apply"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/decal_apply.wgsl").into()),
-        });
+        let collect_mod = helio_core::shader::module(device, "Decal Collect", &collect_src);
+        let apply_mod = helio_core::shader::module(device, "Decal Apply", helio_core::include_wgsl!("../shaders/decal_apply.wgsl"));
         let fallback_decals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Decal Fallback Decals"),
             size: std::mem::size_of::<crate::GpuDecal>() as u64,
@@ -282,7 +276,13 @@ fn make_temp(
 /// elsewhere the declared length is resized to match the selected material tier — the BGL and
 /// the shader must agree exactly or `create_bind_group` fails validation.
 fn decal_collect_source(material_binding: helio_mats::MaterialBindingConfig) -> String {
-    let src = include_str!("../shaders/decal_collect.wgsl");
+    // Rewritten below, so fetched as text (hot reload applies the rewrite to
+    // the edited file) rather than handed to `module` as an `include_wgsl!`.
+    let text = helio_core::shader::source_text(
+        "Decal Collect",
+        helio_core::include_wgsl!("../shaders/decal_collect.wgsl"),
+    );
+    let src: &str = &text;
     if material_binding.uses_binding_arrays() {
         src.replace(
             "binding_array<texture_2d<f32>, 256>",

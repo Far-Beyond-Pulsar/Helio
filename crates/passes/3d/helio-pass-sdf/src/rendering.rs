@@ -220,10 +220,7 @@ impl SdfPass {
             buf
         };
 
-        let scroll_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("SDF Scroll"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sdf_scroll.wgsl").into()),
-        });
+        let scroll_shader = helio_core::shader::module(device, "SDF Scroll", helio_core::include_wgsl!("../shaders/sdf_scroll.wgsl"));
         let scroll_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("SDF Scroll Pipeline"),
             layout: None,
@@ -233,10 +230,7 @@ impl SdfPass {
             cache: None,
         });
 
-        let classify_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("SDF Classify"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sdf_classify.wgsl").into()),
-        });
+        let classify_shader = helio_core::shader::module(device, "SDF Classify", helio_core::include_wgsl!("../shaders/sdf_classify.wgsl"));
         let classify_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("SDF Classify Pipeline"),
             layout: None,
@@ -246,10 +240,7 @@ impl SdfPass {
             cache: None,
         });
 
-        let eval_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("SDF Evaluate"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sdf_evaluate.wgsl").into()),
-        });
+        let eval_shader = helio_core::shader::module(device, "SDF Evaluate", helio_core::include_wgsl!("../shaders/sdf_evaluate.wgsl"));
         let eval_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("SDF Evaluate Pipeline"),
             layout: None,
@@ -286,10 +277,7 @@ impl SdfPass {
             &terrain_params_buffer,
         );
 
-        let march_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("SDF Ray March"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sdf_ray_march.wgsl").into()),
-        });
+        let march_shader = helio_core::shader::module(device, "SDF Ray March", helio_core::include_wgsl!("../shaders/sdf_ray_march.wgsl"));
 
         let march_bgl = Self::build_march_bgl(device, level_count as usize);
         let march_pipeline_layout =

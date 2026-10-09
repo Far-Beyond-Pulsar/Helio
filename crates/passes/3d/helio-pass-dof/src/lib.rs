@@ -19,11 +19,6 @@ mod bokeh_shape;
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
-const COC_SHADER_SRC: &str = include_str!("../shaders/dof_coc.wgsl");
-const GATHER_SHADER_SRC: &str = include_str!("../shaders/dof_gather.wgsl");
-const COMPOSITE_SHADER_SRC: &str = include_str!("../shaders/dof_composite.wgsl");
-const ARGS_SHADER_SRC: &str = include_str!("../shaders/dof_args.wgsl");
-
 const WG_COC: u32 = 16;
 const WG_GATHER: u32 = 8;
 
@@ -191,30 +186,9 @@ impl DofPass {
         });
 
         // ── Shaders ─────────────────────────────────────────────────────
-        let coc_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("DOF CoC Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                helio_core::shader::resolve(COC_SHADER_SRC)
-                    .into_owned()
-                    .into(),
-            ),
-        });
-        let gather_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("DOF Gather Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                helio_core::shader::resolve(GATHER_SHADER_SRC)
-                    .into_owned()
-                    .into(),
-            ),
-        });
-        let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("DOF Composite Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                helio_core::shader::resolve(COMPOSITE_SHADER_SRC)
-                    .into_owned()
-                    .into(),
-            ),
-        });
+        let coc_shader = helio_core::shader::module(device, "DOF CoC Shader", helio_core::include_wgsl!("../shaders/dof_coc.wgsl"));
+        let gather_shader = helio_core::shader::module(device, "DOF Gather Shader", helio_core::include_wgsl!("../shaders/dof_gather.wgsl"));
+        let composite_shader = helio_core::shader::module(device, "DOF Composite Shader", helio_core::include_wgsl!("../shaders/dof_composite.wgsl"));
 
         // ── Bind group layouts ──────────────────────────────────────────
         /// Uniform buffer binding for the DOF block of GpuPostProcessUniforms.
@@ -463,14 +437,7 @@ impl DofPass {
             cache: None,
         });
 
-        let args_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("DOF Args Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                helio_core::shader::resolve(ARGS_SHADER_SRC)
-                    .into_owned()
-                    .into(),
-            ),
-        });
+        let args_shader = helio_core::shader::module(device, "DOF Args Shader", helio_core::include_wgsl!("../shaders/dof_args.wgsl"));
         let args_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("DOF Args BGL"),
             entries: &[

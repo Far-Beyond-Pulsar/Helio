@@ -125,6 +125,8 @@ Building the web version is its own small tool rather than a shell script. Runni
 
 ## Building pipelines with the render graph
 
+For current graph APIs and a composition walkthrough, see [Composing a custom Helio pass pipeline](docs/custom-pass-pipeline.md).
+
 A render graph is an ordered set of passes, each declaring the named resources it reads and produces, and the graph validates that dependency structure, manages the transient textures and barriers between passes, and rebuilds itself when the window changes size. Most of the time you never construct one directly, because a builder does it: `build_default_graph` gives you the full deferred pipeline, and `build_default_graph_with_user_effects` gives you the same thing with a slot for injected post-process WGSL.
 
 When you do want something bespoke, you build the graph yourself, and it reads the same whether it ends up on a desktop or in a browser.
@@ -261,6 +263,10 @@ scene.insert_actor(helio::SceneActor::post_process_volume(PostProcessVolumeDescr
 For a real, non-trivial example, `crates/helio-web-demos/examples-wasm/vhs_effects.wgsl` is a complete camcorder shader with chromatic aberration, YIQ chroma drift, tracking noise, a head-switching bar at the bottom of frame, grain, and flicker.
 
 ## Writing your own render passes
+
+For the current `RenderPass` descriptor, resource declaration, execution, and SceneDB APIs, see [Creating a custom Helio render pass](docs/custom-render-pass.md).
+
+The example below documents the older slot-based API; new passes should follow the current guide above.
 
 If you need to do something the existing passes do not, you write your own. A pass is any struct that implements the `RenderPass` trait from `helio-core`. It gives itself a name, tells the graph which resources it reads and writes, and does its work in `execute`, where it records GPU commands and reads scene data straight out of the context with no copies. There is an optional `prepare` step for per-frame uploads and resizing.
 

@@ -57,6 +57,36 @@ impl RadiantTemplate {
             src.replace("// RADIANT_OVERRIDE_SURFACE\n", "")
                 .replace("// RADIANT_OVERRIDE_END\n", "")
         } else {
+            // Graph materials carry module-scope declarations separately from
+            // the surface assignments injected into radiant_eval_surface.
+            // PSGC emits a complete fragment module; the runtime adapter turns
+            // that into this small two-part representation.
+            let (graph_declarations, graph_body) = graph_wgsl
+                .split_once("\n/*RADIANT_GRAPH_BODY*/\n")
+                .map(|(declarations, body)| {
+                    (
+                        declarations
+                            .strip_prefix("/*RADIANT_GRAPH_DECLARATIONS*/\n")
+                            .unwrap_or(declarations),
+                        body,
+                    )
+                })
+                .unwrap_or(("", graph_wgsl));
+            // Graph `time` nodes read `radiant_graph_time()`. A template whose
+            // `Globals` carries the shared clock (tagged `RADIANT_GLOBALS_TIME`)
+            // reads it from there; any other template is frozen at 0, which is
+            // always valid WGSL, rather than failing to compile.
+            let time_fn = if src.contains("RADIANT_GLOBALS_TIME") {
+                "fn radiant_graph_time() -> f32 { return globals.time; }\n"
+            } else {
+                "fn radiant_graph_time() -> f32 { return 0.0; }\n"
+            };
+            let graph_declarations = format!("{time_fn}{graph_declarations}");
+            let src = if let Some(at) = src.find("fn radiant_eval_surface") {
+                format!("{}{}\n{}", &src[..at], graph_declarations, &src[at..])
+            } else {
+                src
+            };
             // Graph present: replace everything from OVERRIDE_SURFACE to OVERRIDE_END
             // with the graph's override code
             let override_start = "// RADIANT_OVERRIDE_SURFACE";
@@ -65,7 +95,7 @@ impl RadiantTemplate {
                 if let Some(end) = src.find(override_end) {
                     let before = &src[..start];
                     let after = &src[end + override_end.len()..];
-                    format!("{}{}\n{}", before, graph_wgsl, after)
+                    format!("{}{}\n{}", before, graph_body, after)
                 } else {
                     src
                 }
@@ -227,8 +257,13 @@ impl RadiantTemplateRegistry {
     /// Override an existing class with a new WGSL source (used by TransparentPass
     /// to replace the default gbuffer base with its own transparent base shader).
     pub fn override_class(&mut self, class: u32, name: &str, wgsl_source: &str) {
-        self.templates
-            .insert(class, RadiantTemplate { name: Arc::from(name), wgsl_source: Arc::from(wgsl_source) });
+        self.templates.insert(
+            class,
+            RadiantTemplate {
+                name: Arc::from(name),
+                wgsl_source: Arc::from(wgsl_source),
+            },
+        );
     }
 
     /// Load a template from a WGSL file on disk. The template should contain
