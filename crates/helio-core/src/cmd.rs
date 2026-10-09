@@ -80,7 +80,6 @@ impl<'a> RenderCmds<'a> {
     }
 
     /// The graph-opened pass of a recorded unit.
-    #[allow(dead_code)] // the recording cache's
     pub(crate) fn recorded_active(stream: NonNull<Stream>) -> RenderCmds<'a> {
         RenderCmds {
             inner: RenderInner::Recorded {
@@ -614,7 +613,6 @@ impl<'a> CommandRecorder<'a> {
     }
 
     /// For the graph: a recorder over one of a unit's recorded streams.
-    #[allow(dead_code)] // the recording cache's
     pub(crate) fn from_stream(stream: NonNull<Stream>) -> CommandRecorder<'a> {
         CommandRecorder {
             inner: RecorderInner::Recorded(stream, PhantomData),

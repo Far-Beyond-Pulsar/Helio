@@ -513,6 +513,14 @@ impl Renderer {
         self.graph.finish_breakdown()
     }
 
+    /// Which passes the recording cache resubmitted or re-encoded, and why;
+    /// see [`helio_core::RenderGraph::set_recording_cache`]. The cache is
+    /// switched on with the `HELIO_RECORDING_CACHE` environment variable, so
+    /// rebuilt graphs keep it.
+    pub fn recording_cache_stats(&self) -> helio_core::RecordingCacheStats {
+        self.graph.recording_cache_stats()
+    }
+
     pub fn add_pass(&mut self, pass: Box<dyn helio_core::RenderPass>) {
         self.graph.add_pass(pass);
     }

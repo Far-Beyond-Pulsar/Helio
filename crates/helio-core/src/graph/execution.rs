@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 
+use super::recording_cache::{self, CachedRecording, Encoded, UnitCache};
 use super::resource_lifetime::ResourceLifetime;
+use crate::cmd_ir::Cmd;
+use crate::context::RecordedStreams;
 use super::scheduling::{compute_parallel_layers, CachedPass, PrePassAction, PARALLEL_RECORDING};
 use super::{DebugPassInfo, DebugResourceInfo, FrameDebugData};
 
@@ -137,6 +140,17 @@ impl Drop for ParallelRenderPool {
             let _ = handle.join();
         }
     }
+}
+
+/// One command buffer of a frame's submission, in submission order.
+enum FrameBuffer {
+    Once(wgpu::CommandBuffer),
+    /// A unit's cached recording (see `recording_cache`): its pass, the
+    /// variant, and which of its two streams.
+    Cached { pass: usize, variant: usize, compute: bool },
+    /// A reusable command buffer encoded this frame but not cached, kept in
+    /// the frame's `frame_reusable` list.
+    Uncached(usize),
 }
 
 /// How long `CommandEncoder::finish` took for one run of passes, recorded
@@ -386,6 +400,7 @@ fn run_parallel_work_item(job: &ParallelWorkItem) -> crate::Result<ParallelWorke
             subpass_count: 0,
             active_render_pass: Some(&mut render_pass as *mut _ as *mut _),
             active_compute_pass: None,
+            recorded: None,
             pipeline_cache,
             pipelines: pipeline_registry,
             reflected_bind_groups,
@@ -420,6 +435,7 @@ fn run_parallel_work_item(job: &ParallelWorkItem) -> crate::Result<ParallelWorke
             subpass_count: 0,
             active_render_pass: None,
             active_compute_pass: None,
+            recorded: None,
             pipeline_cache,
             pipelines: pipeline_registry,
             reflected_bind_groups,
@@ -506,6 +522,14 @@ pub struct RenderGraph {
     finish_breakdown_enabled: bool,
     /// The last frame's segments while `finish_breakdown_enabled`.
     finish_breakdown: Vec<FinishSegment>,
+    /// Per pass, its recording-cache state (see `recording_cache`). Reset
+    /// whenever the graph is rebuilt.
+    unit_caches: Vec<UnitCache>,
+    recording_cache_enabled: bool,
+    /// Set once the backend turned out unable to resubmit command buffers.
+    recording_cache_unsupported: bool,
+    recording_cache_active: bool,
+    recording_cache_inactive_reason: Option<&'static str>,
     chain_membership: Vec<bool>,
     /// Previous frame's chain membership, used to detect which passes changed
     /// so only their bundles (and everything after) need rebuilding.
@@ -658,6 +682,11 @@ impl RenderGraph {
             finish_breakdown_enabled: std::env::var_os(FINISH_BREAKDOWN_ENV)
                 .is_some_and(|value| value != "0"),
             finish_breakdown: Vec::new(),
+            unit_caches: Vec::new(),
+            recording_cache_enabled: recording_cache::enabled_by_env(),
+            recording_cache_unsupported: false,
+            recording_cache_active: false,
+            recording_cache_inactive_reason: None,
             chain_membership: Vec::new(),
             prev_chain_membership: Vec::new(),
             chain_generation: 0,
@@ -720,6 +749,61 @@ impl RenderGraph {
     /// [`Self::set_finish_breakdown`] is on.
     pub fn finish_breakdown(&self) -> &[FinishSegment] {
         &self.finish_breakdown
+    }
+
+    /// Record each cacheable pass once and resubmit its command buffers while
+    /// it records the same commands (see `recording_cache`). Also switched on
+    /// by the `HELIO_RECORDING_CACHE` environment variable.
+    pub fn set_recording_cache(&mut self, enabled: bool) {
+        self.recording_cache_enabled = enabled;
+        if !enabled {
+            self.reset_recording_cache();
+        }
+    }
+
+    /// Which passes the recording cache hit or missed, and why.
+    pub fn recording_cache_stats(&self) -> recording_cache::RecordingCacheStats {
+        recording_cache::RecordingCacheStats {
+            active: self.recording_cache_active,
+            inactive_reason: self.recording_cache_inactive_reason,
+            units: self
+                .unit_caches
+                .iter()
+                .zip(&self.passes)
+                .filter(|(unit, _)| unit.hits + unit.misses > 0 || unit.uncacheable.is_some())
+                .map(|(unit, pass)| recording_cache::UnitCacheStats {
+                    pass: pass.name(),
+                    hits: unit.hits,
+                    misses: unit.misses,
+                    cached_variants: unit.variants.len(),
+                    uncacheable: unit.uncacheable,
+                    last_miss: unit.last_miss.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    fn reset_recording_cache(&mut self) {
+        self.unit_caches = (0..self.passes.len()).map(|_| UnitCache::default()).collect();
+    }
+
+    /// Whether this frame can use the recording cache, or why not.
+    fn recording_cache_decision(
+        &self,
+        finish_breakdown: bool,
+        parallel_recording: bool,
+    ) -> std::result::Result<(), &'static str> {
+        if !self.recording_cache_enabled {
+            Err("switched off")
+        } else if self.recording_cache_unsupported {
+            Err(recording_cache::BACKEND_UNSUPPORTED)
+        } else if finish_breakdown {
+            Err("the finish breakdown is on")
+        } else if parallel_recording {
+            Err("parallel recording is on")
+        } else {
+            Ok(())
+        }
     }
 
     /// Enables the driver-validated persistent pipeline cache. Must be called
@@ -1795,9 +1879,11 @@ impl RenderGraph {
         let (finish_reply_tx, finish_reply_rx) = mpsc::channel::<FinishReply>();
         #[cfg(not(target_arch = "wasm32"))]
         let mut finishes_in_flight = 0usize;
-        let mut compute_segments: Vec<wgpu::CommandBuffer> = Vec::new();
+        let mut compute_segments: Vec<FrameBuffer> = Vec::new();
         // Indexed by segment; `None` while its finish is still in flight.
-        let mut graphics_segments: Vec<Option<wgpu::CommandBuffer>> = Vec::new();
+        let mut graphics_segments: Vec<Option<FrameBuffer>> = Vec::new();
+        // Reusable command buffers encoded this frame but not cached.
+        let mut frame_reusable: Vec<wgpu::ReusableCommandBuffer> = Vec::new();
         let mut segment_passes: Vec<&'static str> = Vec::new();
         let mut segment_recording = std::time::Duration::ZERO;
         let new_encoder = |label: &'static str| {
@@ -1827,10 +1913,10 @@ impl RenderGraph {
                             ))
                         });
                         let start = std::time::Instant::now();
-                        compute_segments.push(done_compute.finish());
+                        compute_segments.push(FrameBuffer::Once(done_compute.finish()));
                         let compute = start.elapsed();
                         let start = std::time::Instant::now();
-                        graphics_segments[index] = Some(done_graphics.finish());
+                        graphics_segments[index] = Some(FrameBuffer::Once(done_graphics.finish()));
                         let graphics = start.elapsed();
                         self.finish_breakdown.push(FinishSegment {
                             passes,
@@ -1848,7 +1934,8 @@ impl RenderGraph {
                         let unsent = Some(done_graphics);
                         match unsent {
                             Some(done_graphics) => {
-                                graphics_segments[index] = Some(done_graphics.finish());
+                                graphics_segments[index] =
+                                    Some(FrameBuffer::Once(done_graphics.finish()));
                             }
                             None => {
                                 #[cfg(not(target_arch = "wasm32"))]
@@ -1869,6 +1956,20 @@ impl RenderGraph {
 
         self.profiler
             .begin_gpu_pass(&mut encoder, "__graph_graphics");
+
+        if self.unit_caches.len() != self.passes.len() {
+            self.reset_recording_cache();
+        }
+        let recording_cache_decision =
+            self.recording_cache_decision(finish_breakdown, use_parallel_recording);
+        let use_recording_cache = recording_cache_decision.is_ok();
+        self.recording_cache_active = use_recording_cache;
+        self.recording_cache_inactive_reason = recording_cache_decision.err();
+        if use_recording_cache {
+            for unit in &mut self.unit_caches {
+                unit.evict_stale(self.frame_count);
+            }
+        }
 
         if !use_parallel_recording {
             // Every pass declares the optional resources it will read before
@@ -1969,6 +2070,7 @@ impl RenderGraph {
                             subpass_count: 0,
                             active_render_pass: None,
                             active_compute_pass: None,
+                            recorded: None,
                             pipeline_cache: &self.pipeline_cache,
                             pipelines: &self.pipeline_registries[pass_index],
                             reflected_bind_groups: &reflected_groups[pass_index],
@@ -2039,6 +2141,213 @@ impl RenderGraph {
                             }
                         }
                     }
+                }
+
+                // Recording cache: this pass records into streams; when they
+                // match a cached recording, its command buffers are submitted
+                // again instead of encoding the pass (see `recording_cache`).
+                if use_recording_cache
+                    && !self.chain_membership.get(pass_index).copied().unwrap_or(false)
+                    && self
+                        .pass_cache
+                        .get(pass_index)
+                        .and_then(|cached| cached.as_ref())
+                        .map_or(true, |cached| cached.chain_range.is_empty())
+                    && pass.supports_recording_cache()
+                    && self.unit_caches[pass_index].uncacheable.is_none()
+                {
+                    let pass_name = pass.name();
+                    let execute_start = std::time::Instant::now();
+                    // The pass gets command buffers of its own, so whatever was
+                    // recorded before it is submitted before them.
+                    segment_passes.pop();
+                    close_chain!();
+                    cut_segment!();
+                    let done_compute =
+                        std::mem::replace(&mut compute_encoder, new_encoder("Compute Graph"));
+                    compute_segments.push(FrameBuffer::Once(done_compute.finish()));
+
+                    let unit = &mut self.unit_caches[pass_index];
+                    let mut graphics = std::mem::take(&mut unit.scratch_graphics);
+                    let mut compute = std::mem::take(&mut unit.scratch_compute);
+                    graphics.clear();
+                    compute.clear();
+                    let desc = pass.render_pass_descriptor_with_pool_and_storage(
+                        target,
+                        depth,
+                        &*registry,
+                        &self.pool,
+                        &mut self.frame_storage,
+                    );
+                    let render_pass_open = desc.is_some();
+                    let graphics_stream = std::ptr::NonNull::from(&mut graphics);
+                    let compute_stream = std::ptr::NonNull::from(&mut compute);
+                    // The graph's own commands go through the same pointer the
+                    // pass's handles use; no handle is alive at these points.
+                    let push = |cmd: Cmd| unsafe { (*graphics_stream.as_ptr()).push(cmd) };
+                    // GPU timing as the direct path writes it. The profiler's
+                    // query indices restart every frame, so a frame of the
+                    // same shape records the same timestamps and still hits.
+                    self.profiler.begin_gpu_pass_cmds(
+                        &mut crate::cmd::CommandRecorder::from_stream(graphics_stream),
+                        pass_name,
+                    );
+                    self.profiler.begin_gpu_pass_cmds(
+                        &mut crate::cmd::CommandRecorder::from_stream(compute_stream),
+                        pass_name,
+                    );
+                    if let Some(desc) = desc {
+                        // The same attachments the direct path opens: the
+                        // graph's store ops and the XR multiview mask.
+                        let mut captured = crate::cmd_ir::RenderPassDesc::capture(&desc);
+                        if let Some(cached) = self.pass_cache.get(pass_index).and_then(|c| c.as_ref()) {
+                            for (i, attachment) in captured.color.iter_mut().enumerate() {
+                                if let (Some(store), Some(attachment)) =
+                                    (cached.store_ops.get(i).copied().flatten(), attachment.as_mut())
+                                {
+                                    attachment.ops.store = store;
+                                }
+                            }
+                        }
+                        if self.xr_active {
+                            captured.multiview_mask = Some(std::num::NonZeroU32::new(0b11).unwrap());
+                        }
+                        push(Cmd::BeginRenderPass(Box::new(captured)));
+                    }
+                    {
+                        let mut ctx = PassContext {
+                            encoder_ptr: std::ptr::null_mut(),
+                            queue: scene.queue(),
+                            compute_encoder_ptr: std::ptr::null_mut(),
+                            target,
+                            depth,
+                            camera: scene.camera(),
+                            camera_data: scene.camera_data(),
+                            camera_generation: scene.camera_generation(),
+                            scene_buffers: scene.scene_buffers(),
+                            profiler: &mut self.profiler,
+                            frame_num: scene.frame_count(),
+                            width: self.internal_w,
+                            height: self.internal_h,
+                            device: scene.device(),
+                            registry: &*registry,
+                            owns_device: self.owns_device,
+                            resource_pool: &self.pool,
+                            subpass_index: 0,
+                            subpass_count: 0,
+                            active_render_pass: None,
+                            active_compute_pass: None,
+                            recorded: Some(RecordedStreams {
+                                graphics: graphics_stream,
+                                compute: compute_stream,
+                                render_pass_open,
+                            }),
+                            pipeline_cache: &self.pipeline_cache,
+                            pipelines: &self.pipeline_registries[pass_index],
+                            reflected_bind_groups: &reflected_groups[pass_index],
+                            reflected_pipeline: self.reflected_pipelines[pass_index].as_ref(),
+                            #[cfg(debug_assertions)]
+                            chain_transparent: false,
+                        };
+                        ctx.apply_reflected_bind_groups();
+                        #[cfg(not(target_arch = "wasm32"))]
+                        profiling::profile_scope!(pass.name());
+                        pass.execute(&mut ctx)?;
+                    }
+                    if render_pass_open {
+                        push(Cmd::EndRenderPass);
+                    }
+                    self.profiler.end_gpu_pass_cmds(
+                        &mut crate::cmd::CommandRecorder::from_stream(compute_stream),
+                        pass_name,
+                    );
+                    self.profiler.end_gpu_pass_cmds(
+                        &mut crate::cmd::CommandRecorder::from_stream(graphics_stream),
+                        pass_name,
+                    );
+
+                    let frame = self.frame_count;
+                    let unit = &mut self.unit_caches[pass_index];
+                    let cached = |variant: usize, compute: bool| FrameBuffer::Cached {
+                        pass: pass_index,
+                        variant,
+                        compute,
+                    };
+                    let (compute_buffer, graphics_buffer) =
+                        if let Some(variant) = unit.find(&compute, &graphics) {
+                            unit.hits += 1;
+                            let recording = &mut unit.variants[variant];
+                            recording.last_used = frame;
+                            let has = (recording.compute.is_some(), recording.graphics.is_some());
+                            // Keep the allocations for the next frame.
+                            graphics.clear();
+                            compute.clear();
+                            unit.scratch_graphics = graphics;
+                            unit.scratch_compute = compute;
+                            (has.0.then(|| cached(variant, true)), has.1.then(|| cached(variant, false)))
+                        } else {
+                            unit.misses += 1;
+                            unit.last_miss = Some(unit.describe_miss(&compute, &graphics));
+                            let device = scene.device();
+                            let encoded_compute = recording_cache::encode_stream(
+                                device,
+                                &compute,
+                                "Helio Cached Compute Unit",
+                            );
+                            let encoded_graphics = recording_cache::encode_stream(
+                                device,
+                                &graphics,
+                                "Helio Cached Graphics Unit",
+                            );
+                            let once = [&encoded_compute, &encoded_graphics]
+                                .into_iter()
+                                .find_map(|encoded| match encoded {
+                                    Some(Encoded::Once(_, reason)) => Some(*reason),
+                                    _ => None,
+                                });
+                            if let Some(reason) = once {
+                                // Submit this frame's encoding once; record the
+                                // pass straight into wgpu from now on.
+                                if reason == recording_cache::BACKEND_UNSUPPORTED {
+                                    self.recording_cache_unsupported = true;
+                                } else {
+                                    unit.uncacheable = Some(reason);
+                                }
+                                let mut submit_once = |encoded: Option<Encoded>| {
+                                    encoded.map(|encoded| match encoded {
+                                        Encoded::Once(buffer, _) => FrameBuffer::Once(buffer),
+                                        Encoded::Reusable(buffer) => {
+                                            frame_reusable.push(buffer);
+                                            FrameBuffer::Uncached(frame_reusable.len() - 1)
+                                        }
+                                    })
+                                };
+                                (submit_once(encoded_compute), submit_once(encoded_graphics))
+                            } else {
+                                let reusable = |encoded: Option<Encoded>| match encoded {
+                                    Some(Encoded::Reusable(buffer)) => Some(buffer),
+                                    _ => None,
+                                };
+                                let compute_buffer = reusable(encoded_compute);
+                                let graphics_buffer = reusable(encoded_graphics);
+                                let has = (compute_buffer.is_some(), graphics_buffer.is_some());
+                                let variant = unit.insert(CachedRecording {
+                                    compute_cmds: compute,
+                                    graphics_cmds: graphics,
+                                    compute: compute_buffer,
+                                    graphics: graphics_buffer,
+                                    last_used: frame,
+                                });
+                                (has.0.then(|| cached(variant, true)), has.1.then(|| cached(variant, false)))
+                            }
+                        };
+                    compute_segments.extend(compute_buffer);
+                    graphics_segments.extend(graphics_buffer.map(Some));
+
+                    pass.publish(registry);
+                    self.profiler
+                        .record_external_cpu_timing(pass_name, execute_start.elapsed());
+                    continue;
                 }
 
                 // execute()
@@ -2136,6 +2445,7 @@ impl RenderGraph {
                                 .as_mut()
                                 .map(|rp| &mut **rp as *mut _ as *mut _),
                             active_compute_pass: None,
+                            recorded: None,
                             pipeline_cache: &self.pipeline_cache,
                             pipelines: &self.pipeline_registries[pass_index],
                             reflected_bind_groups: &reflected_groups[pass_index],
@@ -2208,6 +2518,7 @@ impl RenderGraph {
                                 subpass_count: 0,
                                 active_render_pass: Some(&mut rp as *mut _ as *mut _),
                                 active_compute_pass: None,
+                                recorded: None,
                                 pipeline_cache: &self.pipeline_cache,
                                 pipelines: &self.pipeline_registries[pass_index],
                                 reflected_bind_groups: &reflected_groups[pass_index],
@@ -2264,6 +2575,7 @@ impl RenderGraph {
                         subpass_count: 0,
                         active_render_pass: None,
                         active_compute_pass: None,
+                        recorded: None,
                         pipeline_cache: &self.pipeline_cache,
                         pipelines: &self.pipeline_registries[pass_index],
                         reflected_bind_groups: &reflected_groups[pass_index],
@@ -2341,7 +2653,9 @@ impl RenderGraph {
                 for _ in 0..finishes_in_flight {
                     match finish_reply_rx.recv() {
                         Ok((COMPUTE_SEGMENT, Ok(buffer))) => compute_last = Some(buffer),
-                        Ok((index, Ok(buffer))) => graphics_segments[index] = Some(buffer),
+                        Ok((index, Ok(buffer))) => {
+                            graphics_segments[index] = Some(FrameBuffer::Once(buffer))
+                        }
                         Ok((_, Err(payload))) => {
                             first_panic.get_or_insert(payload);
                         }
@@ -2353,19 +2667,29 @@ impl RenderGraph {
                 }
             }
             let mut command_buffers = compute_segments;
-            command_buffers.extend(compute_last);
+            command_buffers.extend(compute_last.map(FrameBuffer::Once));
             command_buffers.extend(graphics_segments.into_iter().map(|segment| {
                 segment.expect("every graphics segment is finished before submit")
             }));
-            command_buffers.push(graphics_last);
+            command_buffers.push(FrameBuffer::Once(graphics_last));
             command_buffers
         };
         let mut command_buffers = command_buffers;
-        command_buffers.extend(parallel_command_buffers);
+        command_buffers.extend(parallel_command_buffers.into_iter().map(FrameBuffer::Once));
         let submission_index = {
             #[cfg(not(target_arch = "wasm32"))]
             profiling::profile_scope!("RenderGraph: queue.submit (graph)");
-            scene.queue().submit(command_buffers)
+            let unit_caches = &self.unit_caches;
+            let items = command_buffers.into_iter().map(|buffer| match buffer {
+                FrameBuffer::Once(buffer) => wgpu::SubmitItem::Once(buffer),
+                FrameBuffer::Cached { pass, variant, compute } => {
+                    let recording = &unit_caches[pass].variants[variant];
+                    let buffer = if compute { &recording.compute } else { &recording.graphics };
+                    wgpu::SubmitItem::Reusable(buffer.as_ref().expect("cached stream is not empty"))
+                }
+                FrameBuffer::Uncached(index) => wgpu::SubmitItem::Reusable(&frame_reusable[index]),
+            });
+            scene.queue().submit_mixed(items)
         };
         {
             #[cfg(not(target_arch = "wasm32"))]
@@ -2659,6 +2983,7 @@ impl RenderGraph {
                 })
             })
             .collect();
+        self.reset_recording_cache();
 
         self.rebuild_gpu_render_bundles_incremental();
 

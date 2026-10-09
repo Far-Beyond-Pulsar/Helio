@@ -3,6 +3,7 @@ mod barriers;
 mod execution;
 mod executor;
 mod pipeline_cache;
+mod recording_cache;
 mod resource;
 mod resource_lifetime;
 mod scheduling;
@@ -16,6 +17,7 @@ pub use executor::{
     DebugPassInfo, DebugResourceInfo, FinishSegment, FrameDebugData, GraphTimelineData,
     GraphTimelinePass, RenderGraph,
 };
+pub use recording_cache::{RecordingCacheStats, UnitCacheStats};
 pub use pipeline_cache::{
     BindingOverrideBuilder, PipelineFormatCache, PipelineFormatKey, PipelineFormatSet,
     PipelineHandle, PipelineRecipeBuilder, PipelineRegistry,

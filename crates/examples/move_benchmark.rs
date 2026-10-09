@@ -40,6 +40,7 @@
 //! move_benchmark --graph default --editor   # Pulsar-Native editor viewport graph
 //!                                            # (add --no-ray-query on lavapipe)
 //! move_benchmark --finish-breakdown          # fill the `finish` column (Helio#330)
+//! move_benchmark --dump-frame out            # write each row's last frame to out/
 //! ```
 //!
 //! `--finish-breakdown` sets `HELIO_FINISH_BREAKDOWN`, which makes the graph
@@ -139,6 +140,8 @@ struct Args {
     editor: bool,
     no_ray_query: bool,
     finish_breakdown: bool,
+    /// Directory to write each row's last frame into (`--dump-frame`).
+    dump_frame: Option<String>,
     mesh_movability: Option<helio::Movability>,
 }
 
@@ -159,6 +162,7 @@ fn parse_args() -> Args {
         editor: false,
         no_ray_query: false,
         finish_breakdown: false,
+        dump_frame: None,
         mesh_movability: None,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
@@ -221,6 +225,11 @@ fn parse_args() -> Args {
             "--editor" => {
                 args.editor = true;
                 i += 1;
+                continue;
+            }
+            "--dump-frame" => {
+                args.dump_frame = Some(value);
+                i += 2;
                 continue;
             }
             "--finish-breakdown" => {
@@ -515,6 +524,7 @@ struct Bench {
     scene_db: SceneDb,
     renderer: Renderer,
     acceleration: Option<helio_default_graphs::ray_tracing::SceneDbRayTracing>,
+    target: wgpu::Texture,
     view: wgpu::TextureView,
     scene: BenchScene,
     /// Every light and its authored position, for `move_lights`.
@@ -566,6 +576,75 @@ impl Bench {
             .expect("device poll");
         timing.gpu = ms(t);
         timing
+    }
+
+    /// Writes the last rendered frame's pixels to `path`, tightly packed rows
+    /// of the target's format, for comparing two runs byte for byte.
+    fn dump_frame(&self, path: &str) {
+        let bytes_per_pixel = self.target.format().block_copy_size(None).expect("plain color format");
+        let row = WIDTH * bytes_per_pixel;
+        let padded = row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("move_benchmark frame dump"),
+            size: u64::from(padded * HEIGHT),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            self.target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: None,
+                },
+            },
+            self.target.size(),
+        );
+        self.queue.submit([encoder.finish()]);
+        staging.slice(..).map_async(wgpu::MapMode::Read, |result| result.expect("map frame dump"));
+        self.device.poll(wgpu::PollType::wait_indefinitely()).expect("device poll");
+        let mapped = staging.slice(..).get_mapped_range().expect("mapped frame dump");
+        let pixels: Vec<u8> = mapped
+            .chunks(padded as usize)
+            .flat_map(|line| &line[..row as usize])
+            .copied()
+            .collect();
+        std::fs::write(path, pixels).expect("write frame dump");
+    }
+
+    /// The recording cache's hit rate so far and the passes that miss, when
+    /// `HELIO_RECORDING_CACHE` switched it on.
+    fn recording_cache_summary(&self) -> Option<String> {
+        let stats = self.renderer.recording_cache_stats();
+        if !stats.active {
+            return stats.inactive_reason.map(|reason| format!("recording cache inactive: {reason}"));
+        }
+        let hits: u64 = stats.units.iter().map(|u| u.hits).sum();
+        let total: u64 = stats.units.iter().map(|u| u.hits + u.misses).sum();
+        let mut missing: Vec<_> = stats
+            .units
+            .iter()
+            .filter(|u| u.misses > 1 || u.uncacheable.is_some())
+            .map(|u| match u.uncacheable {
+                Some(reason) => format!("{} (uncacheable: {reason})", u.pass),
+                None => format!(
+                    "{} ({}/{} missed; {})",
+                    u.pass,
+                    u.misses,
+                    u.hits + u.misses,
+                    u.last_miss.as_deref().unwrap_or("-")
+                ),
+            })
+            .collect();
+        missing.sort();
+        Some(format!(
+            "recording cache: {hits}/{total} pass-frames hit ({:.0}%)\n  {}",
+            100.0 * hits as f64 / total.max(1) as f64,
+            missing.join("\n  ")
+        ))
     }
 }
 
@@ -717,7 +796,7 @@ fn build_bench(
             (entity, [gpu.position_range[0], gpu.position_range[1], gpu.position_range[2]])
         })
         .collect();
-    Bench { device: device.clone(), queue: queue.clone(), scene_db, renderer, acceleration, view, scene, lights }
+    Bench { device: device.clone(), queue: queue.clone(), scene_db, renderer, acceleration, target: texture, view, scene, lights }
 }
 
 fn main() {
@@ -780,6 +859,13 @@ fn main() {
                         timing
                     })
                     .collect();
+                if let Some(dir) = &args.dump_frame {
+                    std::fs::create_dir_all(dir).expect("create --dump-frame directory");
+                    bench.dump_frame(&format!("{dir}/{}_{size}_{}.rgba", args.scene, workload.label()));
+                }
+                if let Some(summary) = bench.recording_cache_summary() {
+                    eprintln!("{} {} {}: {summary}", args.scene, size, workload.label());
+                }
                 let median = |values: &mut Vec<f64>| {
                     values.sort_by(|a, b| a.partial_cmp(b).unwrap());
                     percentile(values, 0.5)
