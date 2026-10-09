@@ -26,7 +26,8 @@ struct JoinUniforms {
     /// `write_emitter_transform` and `cs_compact_rows`); bit 7: a water
     /// row, whose `sun_direction` is the scene's sun (see `write_sun`);
     /// bit 8: the global wind over the water rows (see `write_water_wind`);
-    /// bit 9: a water hitbox (see `write_hitbox`).
+    /// bit 9: a water hitbox (see `write_hitbox`); bit 10: a 2D sprite (see
+    /// `write_sprite_placement`).
     flags: u32,
     /// Output rows `cs_compact_rows` may fill.
     capacity: u32,
@@ -54,6 +55,7 @@ const EMITTER: u32 = 64u;
 const SUN: u32 = 128u;
 const WATER_WIND: u32 = 256u;
 const HITBOX: u32 = 512u;
+const SPRITE: u32 = 1024u;
 // `helio_pass_water_sim::GpuWaterVolume`: `sun_direction` and `wind_params`
 // (`w`: the volume opts out of the global wind).
 const WATER_SUN_WORD: u32 = 44u;
@@ -124,7 +126,7 @@ fn placed(row: u32) -> bool {
     if (u.flags & GATE_HIDDEN) != 0u && index < arrayLength(&hidden) && hidden[index] != 0u {
         return false;
     }
-    if (u.flags & (SPATIAL | LAYER | CENTERED | DECAL | EMITTER | HITBOX)) != 0u && index >= arrayLength(&transforms) {
+    if (u.flags & (SPATIAL | LAYER | CENTERED | DECAL | EMITTER | HITBOX | SPRITE)) != 0u && index >= arrayLength(&transforms) {
         return false;
     }
     if (u.flags & DECAL) != 0u && any(source_size(row) == vec3<f32>(0.0)) {
@@ -332,6 +334,20 @@ fn write_hitbox(row: u32, output: u32) {
     rows_out[output + 18u] = bitcast<u32>(f32(row + 1u));
 }
 
+/// A 2D sprite (`helio_pass_sprite_batch::SpriteComponent`): at its owner's
+/// X and Y, turned by its roll (rotation about Z) and its size scaled by
+/// its X and Y scale. The owner's Z and other rotations do not apply.
+fn write_sprite_placement(row: u32, output: u32) {
+    let t = transforms[owners[row].owner_index];
+    let scale = abs(object_scale(t));
+    let roll = t.rotation[2] * 0.017453292519943295;
+    rows_out[output] = bitcast<u32>(t.position[0]);
+    rows_out[output + 1u] = bitcast<u32>(t.position[1]);
+    rows_out[output + 2u] = bitcast<u32>(bitcast<f32>(rows_out[output + 2u]) * scale.x);
+    rows_out[output + 3u] = bitcast<u32>(bitcast<f32>(rows_out[output + 3u]) * scale.y);
+    rows_out[output + 4u] = bitcast<u32>(bitcast<f32>(rows_out[output + 4u]) + roll);
+}
+
 /// Writes placed source `row` as output row `slot`.
 fn write_row(row: u32, slot: u32) {
     let source = source_base(row);
@@ -402,6 +418,9 @@ fn write_row(row: u32, slot: u32) {
     }
     if (u.flags & SUN) != 0u {
         write_sun(output);
+    }
+    if (u.flags & SPRITE) != 0u {
+        write_sprite_placement(row, output);
     }
     if (u.flags & CENTERED) != 0u && sources[source + 3u] == PLACEMENT_CENTER {
         let center = object_position(transforms[owners[row].owner_index]);

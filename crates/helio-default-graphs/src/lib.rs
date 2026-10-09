@@ -47,6 +47,8 @@ use helio_pass_sky::{AtmosphereCompositePass, AtmospherePass};
 use background::BackgroundPass;
 use helio_pass_ssr::SsrPass;
 use helio_pass_tsr::TsrPass;
+use helio_pass_sprite_batch::SpriteBatchPass;
+use helio_pass_sprite_cull::SpriteCullPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_volumetric_fog::VolumetricFogPass;
 use helio_pass_water_sim::WaterSimPass;
@@ -149,6 +151,7 @@ fn declare_common_external_inputs(graph: &mut RenderGraph) {
 /// * `FoliagePlacePass` + `FoliageGBufferPass` (blade arena, tile table,
 ///   visible blades, indirect buffer)
 /// * every perf-overlay pass (one shared `PerfOverlayShared`)
+/// * `SpriteCullPass` + `SpriteBatchPass` (draw order and indirect buffers)
 ///
 /// Everything else listed as independent takes only renderer-owned handles
 /// (camera, debug camera and cull-stats buffers, debug-draw state, SceneDB,
@@ -208,6 +211,46 @@ fn default_swap_policy() -> helio_core::SwapPolicy {
             name::<PerfOverlayCostAnalyzerPass>(),
             name::<PerfOverlayPass>(),
         ])
+        .group_types(&[name::<SpriteCullPass>(), name::<SpriteBatchPass>()])
+}
+
+/// Most sprites the 2D overlay draws at once.
+const MAX_VISIBLE_SPRITES: u32 = 16_384;
+
+/// The scene's 2D sprites (Pulsar-Native#1060), drawn over the final image
+/// after post-processing: culled and sorted by their Z index on the GPU,
+/// then drawn by their own orthographic camera (1 unit = 1 output pixel,
+/// origin at the centre), so the 3D camera does not move them. Both passes record
+/// nothing while the scene holds no sprite.
+fn add_sprite_overlay_passes(
+    graph: &mut RenderGraph,
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    config: &RendererConfig,
+) {
+    // The output's pixels: the graph prepares passes at the internal
+    // resolution, but the overlay draws over the full-resolution image.
+    let half = [config.width as f32 * 0.5, config.height as f32 * 0.5];
+    let mut batch = SpriteBatchPass::scene_overlay(
+        device,
+        queue,
+        config.surface_format,
+        helio_mats::MaterialBindingConfig::for_device(device),
+    );
+    batch.set_camera([0.0, 0.0], Some(half));
+    let mut cull = SpriteCullPass::new(
+        device,
+        queue,
+        batch.instances_buffer(),
+        batch.alive_buffer(),
+        1,
+        MAX_VISIBLE_SPRITES,
+    )
+    .skip_while_empty();
+    cull.set_view_rect([0.0, 0.0], half);
+    batch.use_gpu_culling(cull.draw_order_buf.clone(), cull.indirect_buf.clone());
+    graph.add_pass(Box::new(cull));
+    graph.add_pass(Box::new(batch));
 }
 
 fn add_common_early_passes(
@@ -559,6 +602,9 @@ fn add_final_passes(
     debug_camera_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) {
+    // Game content over the final image, under the editor's overlays.
+    add_sprite_overlay_passes(graph, device, queue, config);
+
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
 
     let mut perf_overlay_pass =

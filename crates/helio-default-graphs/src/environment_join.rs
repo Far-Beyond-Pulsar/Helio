@@ -23,6 +23,7 @@
 //! | `atmospheres` | `"atmospheres"` | attached, enabled, owner current (visibility does not apply); a planet placed at its owner is centred on the owner's position |
 //! | `decals` | `"decals"`, packed into [`MAX_DECALS`] rows | attached, enabled, owner current and visible, with a non-zero box; the transform maps world space into the owner-placed box |
 //! | `corona_emitters` | `"corona_emitters"`, packed into [`MAX_CORONA_EMITTERS`] rows | attached, enabled, owner current and visible, requesting particles; placed at the owner's transform, with a range of the Corona particle pool |
+//! | `sprites` | `"sprite_instances"` | attached, enabled, owner current and visible, with a size; at the owner's X and Y (2D), turned by its roll, scaled by its X and Y scale |
 //! | `water_hitboxes` | `"water_hitboxes"`, packed into [`MAX_WATER_HITBOXES`] rows | attached, enabled, owner current, interacting (word 2), its owner holding a mesh (visibility does not apply); bounded by the owner's meshes |
 //!
 //! Particle emitters share the Corona pass's particle pool
@@ -119,6 +120,11 @@ pub const WATER_HITBOX_SOURCE_ROW_BYTES: u64 = 4 * 4;
 pub const MAX_WATER_HITBOXES: u32 = helio_pass_water_sim::MAX_WATER_HITBOXES;
 /// A water hitbox source row's interaction word.
 const WATER_HITBOX_GATE_WORD: u32 = 2;
+/// `SpriteSourceRow`: the sprite passes' row
+/// (`helio_pass_sprite_batch::SpriteComponent`, 20 words) at the 2D origin.
+pub const SPRITE_SOURCE_ROW_BYTES: u64 = 20 * 4;
+/// A sprite source row's width word: zero for a disabled sprite.
+const SPRITE_SIZE_WORD: u32 = 2;
 /// Rows the water passes read (`helio_pass_water_sim::MAX_SIM_VOLUMES`):
 /// placed water volumes beyond these are not drawn.
 pub const MAX_WATER_VOLUMES: u32 = helio_pass_water_sim::MAX_SIM_VOLUMES;
@@ -152,6 +158,7 @@ pub const ATMOSPHERES_KEY: BufferKey = BufferKey::of("atmospheres");
 pub const DECALS_KEY: BufferKey = BufferKey::of("decals");
 pub const CORONA_EMITTERS_KEY: BufferKey = BufferKey::of("corona_emitters");
 pub const WATER_HITBOXES_KEY: BufferKey = BufferKey::of("water_hitboxes");
+pub const SPRITES_KEY: BufferKey = BufferKey::of("sprite_instances");
 
 const WORKGROUP: u32 = 64;
 const SPATIAL: u32 = 1;
@@ -164,6 +171,7 @@ const EMITTER: u32 = 64;
 const SUN: u32 = 128;
 const WATER_WIND: u32 = 256;
 const HITBOX: u32 = 512;
+const SPRITE: u32 = 1024;
 const NO_GATE_WORD: u32 = u32::MAX;
 
 /// Where the frontend's rows live.
@@ -188,6 +196,8 @@ pub struct EnvironmentJoinKeys {
     /// Mesh instances' local bounding spheres (`[centre, radius]`), keyed
     /// by the instance like the owner rows: the scene join's `mesh_bounds`.
     pub mesh_bounds: BufferKey,
+    /// 2D sprites.
+    pub sprites: BufferKey,
 }
 
 /// The source buffers, in [`EnvironmentJoinKeys`] order.
@@ -204,10 +214,11 @@ enum Source {
     CoronaEmitters,
     Wind,
     WaterHitboxes,
+    Sprites,
 }
 
 impl Source {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::GlobalFog,
         Self::LocalFog,
         Self::PostProcessVolumes,
@@ -219,6 +230,7 @@ impl Source {
         Self::CoronaEmitters,
         Self::Wind,
         Self::WaterHitboxes,
+        Self::Sprites,
     ];
 
     fn key(self, keys: &EnvironmentJoinKeys) -> BufferKey {
@@ -234,6 +246,7 @@ impl Source {
             Self::CoronaEmitters => keys.corona_emitters,
             Self::Wind => keys.wind,
             Self::WaterHitboxes => keys.water_hitboxes,
+            Self::Sprites => keys.sprites,
         }
     }
 
@@ -250,6 +263,7 @@ impl Source {
             Self::CoronaEmitters => CORONA_EMITTER_SOURCE_ROW_BYTES,
             Self::Wind => WIND_SOURCE_ROW_BYTES,
             Self::WaterHitboxes => WATER_HITBOX_SOURCE_ROW_BYTES,
+            Self::Sprites => SPRITE_SOURCE_ROW_BYTES,
         }
     }
 }
@@ -356,7 +370,7 @@ impl Spec {
     }
 
     fn reads_transforms(&self) -> bool {
-        self.flags & (SPATIAL | LAYER | CENTERED | DECAL | EMITTER | HITBOX) != 0
+        self.flags & (SPATIAL | LAYER | CENTERED | DECAL | EMITTER | HITBOX | SPRITE) != 0
     }
 
     fn output_row_bytes(&self) -> u64 {
@@ -603,6 +617,15 @@ impl EnvironmentJoin {
             )
             .packed(MAX_WATER_HITBOXES)
             .gated_on(WATER_HITBOX_GATE_WORD),
+            // The sprite passes cull every row; each keeps its source row.
+            Spec::new(
+                "Environment Join Sprites",
+                SPRITES_KEY,
+                Source::Sprites,
+                20,
+                GATE_HIDDEN | SPRITE,
+            )
+            .gated_on(SPRITE_SIZE_WORD),
         ];
         Self {
             keys,

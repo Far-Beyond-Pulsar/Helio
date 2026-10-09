@@ -27,6 +27,15 @@
 //! indexed through a separate `draw_order` array), not
 //! `VertexStepMode::Instance` — see the shader's module doc comment for why.
 //!
+//! # Scene overlay
+//!
+//! [`SpriteBatchPass::scene_overlay`] draws a scene's authored 2D sprites
+//! (SceneDB's `"sprite_instances"`, each row's image a slot of the scene's
+//! bindless texture table) over whatever the target already holds: the
+//! default graphs' final 2D overlay, after post-processing. It keeps its own
+//! orthographic camera, so the 3D camera does not move it, and it records
+//! no draw while the scene holds no sprite.
+//!
 //! This pass has no dependency on `helio` / `helio-default-graphs` — it only
 //! needs `helio-core` (for the [`RenderPass`] trait and graph plumbing) and
 //! `helio-core` (for [`ResourceRegistry`](helio_core::ResourceRegistry)), matching
@@ -289,6 +298,20 @@ pub struct SpriteBatchPass {
     camera_half_extent: Option<[f32; 2]>,
     camera_center: [f32; 2],
     clear_color: Option<wgpu::Color>,
+    /// Set by [`SpriteBatchPass::scene_overlay`].
+    scene_overlay: Option<SceneOverlay>,
+}
+
+/// The scene overlay variant's own state: a pipeline sampling the scene's
+/// texture table (group 1) and whether the scene holds a sprite.
+struct SceneOverlay {
+    pipeline: wgpu::RenderPipeline,
+    textures_bgl: wgpu::BindGroupLayout,
+    textures_bg: Option<wgpu::BindGroup>,
+    textures_version: Option<u64>,
+    material_binding: helio_mats::MaterialBindingConfig,
+    liveness: helio_core::SceneBufferLiveness,
+    live: bool,
 }
 
 /// Outputs of a paired `helio-pass-sprite-cull` `SpriteCullPass`, wired in
@@ -516,7 +539,76 @@ impl SpriteBatchPass {
             camera_half_extent: None,
             camera_center: [0.0, 0.0],
             clear_color: Some(wgpu::Color::BLACK),
+            scene_overlay: None,
         }
+    }
+
+    /// The scene's authored 2D sprites as an overlay (see the module doc):
+    /// draws SceneDB's `"sprite_instances"` over the target without
+    /// clearing it, each sprite's image sampled from the scene's texture
+    /// table (`material_binding` must be the renderer's). Pair it with a
+    /// `SpriteCullPass` built with `follow_target`, wired in through
+    /// [`use_gpu_culling`](Self::use_gpu_culling).
+    pub fn scene_overlay(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+        material_binding: helio_mats::MaterialBindingConfig,
+    ) -> Self {
+        let mut pass = Self::new(device, queue, surface_format);
+        pass.clear_color = None;
+        let mut entries = Vec::new();
+        material_binding.append_layout_entries(&mut entries, 0, wgpu::ShaderStages::FRAGMENT);
+        let textures_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Sprite Scene Textures BGL"),
+            entries: &entries,
+        });
+        let source = scene_overlay_source(material_binding);
+        let shader = helio_core::shader::module(device, "Sprite Scene Shader", &source);
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Sprite Scene PL"),
+            bind_group_layouts: &[Some(&pass.bgl), Some(&textures_bgl)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Sprite Scene Pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(quad_vertex_layout())],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        pass.scene_overlay = Some(SceneOverlay {
+            pipeline,
+            textures_bgl,
+            textures_bg: None,
+            textures_version: None,
+            material_binding,
+            liveness: Default::default(),
+            live: false,
+        });
+        pass
     }
 
     fn mark_data_dirty(&mut self, slot: usize) {
@@ -823,6 +915,52 @@ impl SpriteBatchPass {
     }
 }
 
+/// The quad's vertex buffer layout (position, UV).
+fn quad_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<QuadVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &[
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: 8,
+                shader_location: 1,
+            },
+        ],
+    }
+}
+
+/// The scene overlay shader, resized to this platform's texture table, as
+/// the decal pass does: the 256-entry native table resized to the material
+/// tier, or individual bindings where `binding_array` is unavailable.
+fn scene_overlay_source(material_binding: helio_mats::MaterialBindingConfig) -> String {
+    let text = helio_core::shader::source_text(
+        "Sprite Scene",
+        helio_core::include_wgsl!("../shaders/sprite_scene.wgsl"),
+    );
+    let src: &str = &text;
+    if material_binding.uses_binding_arrays() {
+        src.replace(
+            "binding_array<texture_2d<f32>, 256>",
+            &format!(
+                "binding_array<texture_2d<f32>, {}>",
+                material_binding.max_textures
+            ),
+        )
+        .replace(
+            "binding_array<sampler, 256>",
+            &format!("binding_array<sampler, {}>", material_binding.max_textures),
+        )
+    } else {
+        helio_mats::apply_webgpu_decal_bindings(src, material_binding.max_textures)
+    }
+}
+
 fn create_atlas_array_texture(
     device: &wgpu::Device,
     width: u32,
@@ -864,6 +1002,9 @@ impl RenderPass for SpriteBatchPass {
         // every other executor-managed pass: the descriptor only needs to live
         // for this frame's `execute()` call, and the executor drops it before
         // the next `render_pass_descriptor()`.
+        if self.scene_overlay.as_ref().is_some_and(|overlay| !overlay.live) {
+            return None;
+        }
         let load = match self.clear_color {
             Some(color) => wgpu::LoadOp::Clear(color),
             None => wgpu::LoadOp::Load,
@@ -888,7 +1029,18 @@ impl RenderPass for SpriteBatchPass {
         })
     }
 
+    fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
+        if self.scene_overlay.is_some() {
+            builder.read("material_textures");
+        }
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
+        if let Some(overlay) = self.scene_overlay.as_mut() {
+            let sprites = ctx.scene_buffers.get(BufferKey::of("sprite_instances"));
+            overlay.liveness.update(ctx.device, ctx.queue, sprites);
+            overlay.live = sprites.is_some_and(|handle| overlay.liveness.maybe_live(handle));
+        }
         if ctx.width != self.last_width || ctx.height != self.last_height {
             self.last_width = ctx.width;
             self.last_height = ctx.height;
@@ -1011,7 +1163,34 @@ impl RenderPass for SpriteBatchPass {
             return Ok(());
         };
         let rp = unsafe { &mut *rp_ptr };
-        rp.set_pipeline(&self.pipeline);
+        if let Some(overlay) = self.scene_overlay.as_mut() {
+            // The scene's texture table, published per frame by the renderer.
+            let Some(textures) = ctx.registry.read::<helio_mats::MaterialTextureBindings<'_>>(
+                helio_core::resource_keys::material_textures(),
+                "SpriteBatch",
+            ) else {
+                return Ok(());
+            };
+            if overlay.textures_version != Some(textures.version) || overlay.textures_bg.is_none() {
+                let mut entries = Vec::new();
+                overlay.material_binding.append_bind_group_entries(
+                    &mut entries,
+                    0,
+                    textures.texture_views,
+                    textures.samplers,
+                );
+                overlay.textures_bg = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Sprite Scene Textures BG"),
+                    layout: &overlay.textures_bgl,
+                    entries: &entries,
+                }));
+                overlay.textures_version = Some(textures.version);
+            }
+            rp.set_pipeline(&overlay.pipeline);
+            rp.set_bind_group(1, overlay.textures_bg.as_ref().unwrap(), &[]);
+        } else {
+            rp.set_pipeline(&self.pipeline);
+        }
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         rp.set_vertex_buffer(0, self.quad_vertex_buf.slice(..));
         rp.set_index_buffer(self.quad_index_buf.slice(..), wgpu::IndexFormat::Uint16);

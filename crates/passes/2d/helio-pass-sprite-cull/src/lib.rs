@@ -112,6 +112,17 @@ pub struct SpriteCullPass {
     view_min: [f32; 2],
     view_max: [f32; 2],
     view_dirty: bool,
+    /// The view's centre when the view rect follows the render target
+    /// (1 unit = 1 pixel, as `SpriteBatchPass` frames it by default); see
+    /// [`SpriteCullPass::follow_target`].
+    follow_target: Option<[f32; 2]>,
+    target_size: (u32, u32),
+    /// Whether the scene's `"sprite_instances"` rows may hold a sprite; a
+    /// pass built with [`SpriteCullPass::skip_while_empty`] culls only
+    /// then, so an overlay over a scene without sprites records nothing.
+    skip_while_empty: bool,
+    liveness: helio_core::SceneBufferLiveness,
+    live: bool,
 
     prepare_pipeline: wgpu::ComputePipeline,
     prepare_bind_group: wgpu::BindGroup,
@@ -522,6 +533,11 @@ impl SpriteCullPass {
             view_min: [0.0, 0.0],
             view_max: [0.0, 0.0],
             view_dirty: true,
+            follow_target: None,
+            target_size: (0, 0),
+            skip_while_empty: false,
+            liveness: Default::default(),
+            live: true,
             prepare_pipeline,
             prepare_bind_group,
             hist_pipeline,
@@ -560,9 +576,28 @@ impl SpriteCullPass {
     /// callers using `half_extent: None` on the batch pass must resize this
     /// to match themselves.
     pub fn set_view_rect(&mut self, center: [f32; 2], half_extent: [f32; 2]) {
+        self.follow_target = None;
         self.view_min = [center[0] - half_extent[0], center[1] - half_extent[1]];
         self.view_max = [center[0] + half_extent[0], center[1] + half_extent[1]];
         self.view_dirty = true;
+    }
+
+    /// Culls against a view rect centred on `center` that follows the
+    /// render size the pass is prepared with, 1 unit = 1 pixel: the paired
+    /// batch pass's default framing (`SpriteBatchPass::set_camera(center,
+    /// None)`).
+    pub fn follow_target(mut self, center: [f32; 2]) -> Self {
+        self.follow_target = Some(center);
+        self.target_size = (0, 0);
+        self
+    }
+
+    /// Records nothing while the scene's `"sprite_instances"` hold no
+    /// sprite (or the scene has none): only the draw's instance count is
+    /// reset, so the paired batch pass draws nothing.
+    pub fn skip_while_empty(mut self) -> Self {
+        self.skip_while_empty = true;
+        self
     }
 }
 
@@ -622,6 +657,19 @@ impl RenderPass for SpriteCullPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
         let scene = ctx.scene_buffers.get(pulsar_scenedb::gpu::BufferKey::of("sprite_instances"));
+        if self.skip_while_empty {
+            self.liveness.update(ctx.device, ctx.queue, scene);
+            self.live = scene.is_some_and(|handle| self.liveness.maybe_live(handle));
+        }
+        if let Some(center) = self.follow_target {
+            if self.target_size != (ctx.width, ctx.height) {
+                self.target_size = (ctx.width, ctx.height);
+                let half = [ctx.width as f32 * 0.5, ctx.height as f32 * 0.5];
+                self.view_min = [center[0] - half[0], center[1] - half[1]];
+                self.view_max = [center[0] + half[0], center[1] + half[1]];
+                self.view_dirty = true;
+            }
+        }
         let epoch = scene.map(|handle| handle.epoch);
         if self.scene_instances_epoch != epoch {
             self.scene_instances_epoch = epoch;
@@ -652,6 +700,15 @@ impl RenderPass for SpriteCullPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
+        if !self.live {
+            // Nothing to draw: only the draw's instance count is reset.
+            unsafe { &mut *ctx.encoder_ptr }.clear_buffer(
+                &self.indirect_buf,
+                INDIRECT_INSTANCE_COUNT_OFFSET,
+                Some(4),
+            );
+            return Ok(());
+        }
         self.record(unsafe { &mut *ctx.encoder_ptr });
         Ok(())
     }

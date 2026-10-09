@@ -1,5 +1,5 @@
 //! The rows fog volumes, post-process volumes, camera post-process
-//! settings, water volumes, foliage, the global wind, atmospheres, decals and particle emitters cast, as the renderer's environment join reads them
+//! settings, water volumes, foliage, the global wind, atmospheres, decals, particle emitters and 2D sprites cast, as the renderer's environment join reads them
 //! (Pulsar-Native#1035, Phase 4).
 //!
 //! Each is a second GPU registration on its authored component: SceneDB
@@ -26,13 +26,14 @@
 //! | [`DecalSourceRow`] | 4 size + 32: the row, its transform left to the join | `helio_pass_decal::DecalComponent` (32), packed into its leading rows |
 //! | [`GlobalWindSourceRow`] | 12: the wind row, marked global | `helio_pass_foliage_place`'s `FoliageWindComponent` (12), over the foliage components' own wind |
 //! | [`CoronaEmitterSourceRow`] | 60: the row, its transform and pool range left to the join (word 46: the requested range) | `helio_pass_corona::CoronaEmitterComponent` (60), packed into its leading rows |
+//! | [`SpriteSourceRow`] | 20: the row, its 2D position left to the join | `helio_pass_sprite_batch::SpriteComponent` (20) |
 
 use pulsar_scenedb::gpu::GpuMirrorHandle;
 use pulsar_scenedb_derive::SceneStore;
 
 use super::{
     AtmosphereComponent, CameraPostProcessComponent, DecalComponent, FoliageComponent, GlobalFogComponent, LocalFogVolumeComponent,
-    ParticleEmitterComponent, PostProcessVolumeComponent, WaterVolumeComponent, WindComponent,
+    ParticleEmitterComponent, PostProcessVolumeComponent, SpriteComponent, WaterVolumeComponent, WindComponent,
 };
 
 pub const GLOBAL_FOG_SOURCES_BUFFER: &str = "global_fog_sources";
@@ -45,6 +46,31 @@ pub const ATMOSPHERE_SOURCES_BUFFER: &str = "atmosphere_sources";
 pub const DECAL_SOURCES_BUFFER: &str = "decal_sources";
 pub const CORONA_EMITTER_SOURCES_BUFFER: &str = "corona_emitter_sources";
 pub const WIND_SOURCES_BUFFER: &str = "wind_sources";
+pub const SPRITE_SOURCES_BUFFER: &str = "sprite_sources";
+
+/// A 2D sprite: the sprite passes' row
+/// (`helio_pass_sprite_batch::SpriteComponent`, bit for bit) at the 2D
+/// origin, which the join moves to its owner's X and Y, turns by the
+/// owner's roll and scales by its X and Y scale. Its image is registered in
+/// the scene's texture store as the row is derived (its slot in
+/// `atlas_layer`). A disabled sprite's row is zero, which the join skips.
+#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+#[gpu(layout = packed, buffer = "sprite_sources")]
+pub struct SpriteSourceRow {
+    /// Position, size, rotation, depth, padding, UV rectangle and tint.
+    #[gpu]
+    pub sprite: [f32; 16],
+    /// The image's texture store slot and padding.
+    #[gpu]
+    pub texture: [u32; 4],
+}
+
+impl SpriteSourceRow {
+    pub fn of(sprite: &SpriteComponent, texture_slot: u32) -> Self {
+        read(bytemuck::bytes_of(&sprite.to_row(texture_slot)))
+    }
+}
 
 /// The level's global wind: the foliage passes' wind row
 /// (`helio_pass_foliage_place::GpuWind`, bit for bit: direction and speed,
@@ -480,6 +506,13 @@ fn decal_dispatch(mirror: &GpuMirrorHandle, row: u32, data: *const (), is_new_in
 /// absolute), or `u32::MAX` (the tint alone) for none or one that does not
 /// load.
 fn decal_texture_slot(path: &str, mirror: &GpuMirrorHandle) -> u32 {
+    asset_texture_slot("decal", path, mirror)
+}
+
+/// The scene texture store slot of the image at `path` (project-relative,
+/// or absolute), registering it; `u32::MAX` for none or one that does not
+/// load (`what` names the user in the warning).
+fn asset_texture_slot(what: &str, path: &str, mirror: &GpuMirrorHandle) -> u32 {
     if path.is_empty() {
         return u32::MAX;
     }
@@ -492,9 +525,46 @@ fn decal_texture_slot(path: &str, mirror: &GpuMirrorHandle) -> u32 {
     match crate::material_textures::register_graph_texture(&resolved, mirror) {
         Ok(slot) => slot,
         Err(error) => {
-            tracing::warn!("decal texture '{}': {error}", resolved.display());
+            tracing::warn!("{what} texture '{}': {error}", resolved.display());
             u32::MAX
         }
+    }
+}
+
+// A sprite's image is registered in the scene's texture store as its row is
+// derived, so the row carries its bindless slot.
+fn sprite_dispatch(mirror: &GpuMirrorHandle, row: u32, data: *const (), is_new_insert: bool) {
+    // SAFETY: SceneDB reaches this only through `SpriteComponent`'s own
+    // `ComponentId`, with a pointer to a live value.
+    let sprite = unsafe { &*(data as *const SpriteComponent) };
+    let slot = if sprite.enabled {
+        asset_texture_slot("sprite", &sprite.texture, mirror)
+    } else {
+        u32::MAX
+    };
+    pulsar_scenedb::gpu::write_derived_row(
+        mirror,
+        row,
+        &SpriteSourceRow::of(sprite, slot),
+        is_new_insert,
+    );
+}
+
+fn sprite_clear(mirror: &GpuMirrorHandle, row: u32) {
+    pulsar_scenedb::gpu::clear_derived_row::<SpriteSourceRow>(mirror, row);
+}
+
+pulsar_scenedb::pulsar_reflection::inventory::submit! {
+    pulsar_scenedb::gpu::GpuMirrorRegistration {
+        component_id: pulsar_scenedb::component_id::<SpriteComponent>,
+        dispatch: sprite_dispatch,
+    }
+}
+
+pulsar_scenedb::pulsar_reflection::inventory::submit! {
+    pulsar_scenedb::gpu::GpuClearRegistration {
+        component_id: pulsar_scenedb::component_id::<SpriteComponent>,
+        clear: sprite_clear,
     }
 }
 
@@ -539,6 +609,11 @@ mod tests {
         assert_eq!(std::mem::size_of::<DecalSourceRow>(), 36 * 4);
         assert_eq!(std::mem::size_of::<CoronaEmitterSourceRow>(), 60 * 4);
         assert_eq!(std::mem::size_of::<GlobalWindSourceRow>(), 12 * 4);
+        assert_eq!(std::mem::size_of::<SpriteSourceRow>(), 20 * 4);
+        assert_eq!(
+            std::mem::size_of::<helio_pass_sprite_batch::SpriteComponent>(),
+            20 * 4
+        );
         assert_eq!(
             std::mem::size_of::<helio_pass_corona::GpuCoronaEmitter>(),
             60 * 4
