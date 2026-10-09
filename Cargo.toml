@@ -37,7 +37,9 @@ exclude = [
 resolver = "2"
 
 [workspace.dependencies]
-wgpu = { version = "30.0.0", default-features = true, features = ["vulkan", "vulkan-portability", "metal", "dx12", "gles", "webgpu", "wgsl"] }
+# DX12 compiles shaders with DXC, linked statically: wgpu's fallback, FXC,
+# takes minutes on the renderer's pipelines (and is unmaintained).
+wgpu = { version = "30.0.0", default-features = true, features = ["vulkan", "vulkan-portability", "metal", "dx12", "static-dxc", "gles", "webgpu", "wgsl"] }
 blade-graphics = { git = "https://github.com/tristanpoland/blade", rev = "d85bd14a78ed7729abc298906e87332257674a02" }
 blade-macros =   { git = "https://github.com/tristanpoland/blade", rev = "d85bd14a78ed7729abc298906e87332257674a02" }
 bytemuck = { version = "1", features = ["derive"] }
