@@ -11,7 +11,6 @@ fn unfinished_components_declare_why_and_their_issue() {
         ("LODComponent", 1053),
         ("ReflectionCaptureComponent", 1054),
         ("PortalComponent", 1055),
-        ("VoxelComponent", 1056),
     ] {
         let unfinished = pulsar_world_registry::unfinished_component(class)
             .unwrap_or_else(|| panic!("{class} is not declared unfinished"));
@@ -32,6 +31,8 @@ fn unfinished_components_declare_why_and_their_issue() {
         "WaterVolumeComponent",
         "FoliageComponent",
         "VoxelTerrainComponent",
+        // Drawn as a mesh since #1056.
+        "VoxelComponent",
     ] {
         assert!(
             pulsar_world_registry::unfinished_component(class).is_none(),
