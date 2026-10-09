@@ -605,6 +605,19 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         false
     }
 
+    /// Whether the graph's recording cache may record this pass once and
+    /// resubmit the recording while it records identical commands
+    /// (see `graph::recording_cache`).
+    ///
+    /// Return `false` for a pass whose resubmitted commands could race
+    /// something outside the command stream, such as a copy into a buffer it
+    /// then maps asynchronously.
+    ///
+    /// Default `true`.
+    fn supports_recording_cache(&self) -> bool {
+        true
+    }
+
     /// Optionally prepares per-frame data before GPU execution.
     ///
     /// Called once per frame **before** `execute()`. Use this to upload per-frame uniforms

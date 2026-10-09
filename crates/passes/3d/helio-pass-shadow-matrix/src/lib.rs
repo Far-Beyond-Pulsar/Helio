@@ -550,6 +550,12 @@ impl RenderPass for ShadowMatrixPass {
         self.frame += 1;
         Ok(())
     }
+    fn supports_recording_cache(&self) -> bool {
+        // Copies its caster table into a MAP_READ staging buffer that it
+        // maps asynchronously; replaying a cached copy can race the map.
+        false
+    }
+
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let mut cmds = ctx.graphics_cmds();
         if self.rows == 0 {

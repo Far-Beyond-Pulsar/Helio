@@ -254,6 +254,20 @@ impl Profiler {
         }
     }
 
+    /// [`Self::begin_gpu_pass`] on a pass's command stream.
+    pub(crate) fn begin_gpu_pass_cmds(&mut self, cmds: &mut crate::cmd::CommandRecorder<'_>, name: &'static str) {
+        if self.enabled {
+            self.gpu.begin_pass(cmds, name);
+        }
+    }
+
+    /// [`Self::end_gpu_pass`] on a pass's command stream.
+    pub(crate) fn end_gpu_pass_cmds(&mut self, cmds: &mut crate::cmd::CommandRecorder<'_>, name: &'static str) {
+        if self.enabled {
+            self.gpu.end_pass(cmds, name);
+        }
+    }
+
     /// Resolve GPU timestamp queries to buffer (call after submitting command buffer)
     pub fn resolve_gpu_queries(&mut self, encoder: &mut wgpu::CommandEncoder, frame_index: u64) {
         if self.enabled {

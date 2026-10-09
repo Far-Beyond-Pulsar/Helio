@@ -102,6 +102,17 @@
 //! ```
 
 use crate::cmd::{CommandRecorder, ComputeCmds, RenderCmds};
+use crate::cmd_ir::Stream;
+use std::ptr::NonNull;
+
+/// A recorded pass's streams (see `graph::recording_cache`).
+#[derive(Clone, Copy)]
+pub(crate) struct RecordedStreams {
+    pub(crate) graphics: NonNull<Stream>,
+    pub(crate) compute: NonNull<Stream>,
+    /// Whether the graph opened a render pass for this pass on `graphics`.
+    pub(crate) render_pass_open: bool,
+}
 use crate::graph::PipelineRegistry;
 use crate::{Profiler, SceneBufferProjection};
 use crate::GpuCameraUniforms;
@@ -276,6 +287,9 @@ pub struct PassContext<'a> {
     pub(crate) active_render_pass: Option<*mut wgpu::RenderPass<'static>>,
     /// Active compute pass, or None if not in a compute pass.
     pub(crate) active_compute_pass: Option<*mut wgpu::ComputePass<'static>>,
+    /// Set when the graph's recording cache records this pass: its handles
+    /// then append to these streams instead of encoding into wgpu.
+    pub(crate) recorded: Option<RecordedStreams>,
 
     /// Dynamic-rendering pipeline cache, keyed by runtime attachment
     /// formats (see [`crate::graph::PipelineFormatCache`]). Passes that
@@ -314,12 +328,12 @@ impl<'a> PassContext<'a> {
     /// It shares the graph's timestamp query set and frame readback.
     /// Call outside an open render/compute pass, paired with `end_gpu_scope`.
     pub fn begin_gpu_scope(&mut self, cmds: &mut CommandRecorder<'_>, name: &'static str) {
-        self.profiler.begin_gpu_pass(cmds.encoder(), name);
+        self.profiler.begin_gpu_pass_cmds(cmds, name);
     }
 
     /// End a GPU subscope on the stream on which it began.
     pub fn end_gpu_scope(&mut self, cmds: &mut CommandRecorder<'_>, name: &'static str) {
-        self.profiler.end_gpu_pass(cmds.encoder(), name);
+        self.profiler.end_gpu_pass_cmds(cmds, name);
     }
 
     /// Returns an executor-created reflected bind group by group index.
@@ -358,6 +372,14 @@ impl<'a> PassContext<'a> {
     /// This is a no-op for self-managed/manual passes and for passes that did
     /// not opt into reflection.
     pub fn apply_reflected_bind_groups(&mut self) {
+        if self.recorded.is_some() {
+            if let Some(mut pass) = self.render_cmds() {
+                for (group, bind_group) in self.reflected_bind_groups.iter().enumerate() {
+                    pass.set_bind_group(group as u32, bind_group, &[]);
+                }
+            }
+            return;
+        }
         if let Some(ptr) = self.active_render_pass {
             // The executor establishes this pointer immediately before the
             // callback and keeps the render pass alive until it returns.
@@ -388,9 +410,13 @@ impl<'a> PassContext<'a> {
                  chain_transparent passes must only use the compute stream"
             );
         }
+        if let Some(recorded) = self.recorded {
+            return recorded
+                .render_pass_open
+                .then(|| RenderCmds::recorded_active(recorded.graphics));
+        }
         let pass = std::ptr::NonNull::new(self.active_render_pass?)?;
-        // SAFETY: the graph keeps the pass open until `execute()` returns.
-        Some(unsafe { RenderCmds::from_active(pass) })
+        Some(RenderCmds::from_active(pass))
     }
 
     /// The graphics stream, in graph order: copies, clears, queries and
@@ -407,15 +433,19 @@ impl<'a> PassContext<'a> {
                  chain_transparent passes must only use the compute stream"
             );
         }
-        // SAFETY: the encoder lives until `execute()` returns.
-        unsafe { CommandRecorder::from_ptr(self.encoder_ptr) }
+        match self.recorded {
+            Some(recorded) => CommandRecorder::from_stream(recorded.graphics),
+            None => CommandRecorder::from_ptr(self.encoder_ptr),
+        }
     }
 
     /// The pre-graphics compute stream, submitted before all graphics work
     /// regardless of this pass's place in the graph.
     pub fn compute_cmds(&self) -> CommandRecorder<'a> {
-        // SAFETY: the encoder lives until `execute()` returns.
-        unsafe { CommandRecorder::from_ptr(self.compute_encoder_ptr) }
+        match self.recorded {
+            Some(recorded) => CommandRecorder::from_stream(recorded.compute),
+            None => CommandRecorder::from_ptr(self.compute_encoder_ptr),
+        }
     }
 }
 
@@ -483,6 +513,9 @@ impl<'a> PassContext<'a> {
                  (ctx.begin_compute_pass / ctx.compute_encoder_ptr)"
             );
         }
+        if let Some(recorded) = self.recorded {
+            return RenderCmds::begin_recorded(recorded.graphics, desc);
+        }
         // SAFETY: the encoder lives until `execute()` returns.
         RenderCmds::from_wgpu(unsafe { (*self.encoder_ptr).begin_render_pass(desc) })
     }
@@ -536,6 +569,9 @@ impl<'a> PassContext<'a> {
     ) -> ComputeCmds<'b> {
         // Uses the separate compute encoder so compute work never conflicts with
         // an active render pass on the render encoder (migrated path).
+        if let Some(recorded) = self.recorded {
+            return ComputeCmds::begin_recorded(recorded.compute, desc);
+        }
         ComputeCmds::from_wgpu(unsafe { (*self.compute_encoder_ptr).begin_compute_pass(desc) })
     }
 
@@ -551,6 +587,9 @@ impl<'a> PassContext<'a> {
         #[cfg(debug_assertions)]
         assert!(!self.chain_transparent,
             "chain-transparent passes cannot use graphics-stream compute");
+        if let Some(recorded) = self.recorded {
+            return ComputeCmds::begin_recorded(recorded.graphics, desc);
+        }
         ComputeCmds::from_wgpu(unsafe { (*self.encoder_ptr).begin_compute_pass(desc) })
     }
 }
