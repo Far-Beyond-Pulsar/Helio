@@ -1,12 +1,13 @@
 //! Canonical editable voxel world (a planet or a plane): recipe, exact cell
 //! queries and ray casts.
-use crate::edit_store::{BrickKey, EditStore};
+use crate::edit_store::{ColumnKey, EditStore, StoreUndo};
 use crate::edits::{apply, center_half, Brush, EditLog, FaceBrush};
 use crate::grid::{face_axes, Cell, Grid, Shape};
 use crate::terrain::{self, material, TerrainField, TerrainSource, HEIGHT_ONE};
 
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 pub const RECIPE_VERSION: u32 = 2;
@@ -85,13 +86,18 @@ struct RayColumn {
     recent: Vec<FaceBrush>,
 }
 
-/// Brushes kept exact and undoable before the oldest are sealed.
+/// Brushes kept exact before the oldest are sealed.
 pub const RECENT_BRUSHES: usize = 256;
 /// Brushes sealed at a time.
 const SEAL_BATCH: usize = 64;
 /// Largest brush baked into cells, radius in half base cells (32 cells):
 /// larger ones would bake millions of cells and stay analytic.
 pub const BAKE_RADIUS_HALF: u32 = 64;
+/// Seals kept undoable (the latest `UNDO_SEALS * SEAL_BATCH` sealed
+/// brushes undo without rebuilding the world).
+const UNDO_SEALS: usize = 32;
+/// Baked column changes kept for renderers to catch up with.
+const CHANGES_KEPT: usize = 256;
 
 /// A world's edits in three layers, applied to the terrain in this order
 /// (see `edit_store`):
@@ -100,70 +106,130 @@ pub const BAKE_RADIUS_HALF: u32 = 64;
 /// 2. `baked`: every other sealed brush, as baked cell edits (with coarser
 ///    levels built from the base level, so accumulated small edits show at
 ///    any distance);
-/// 3. `recent`: the latest brushes, exact and undoable.
+/// 3. `recent`: the latest brushes, exact.
 ///
 /// Sealing keeps the order exact: a small brush bakes on top of the store;
 /// a large one is applied to the cells already baked (it came after them)
 /// and joins `large`, which is applied under the store. Every cell then
 /// reads `recent(baked(large(terrain)))`, the brushes in their order.
+///
+/// Memory is bounded by the edits' effect, not their count: sealed brushes
+/// leave only their baked cells (and large ones their analytic record), a
+/// hash of the history, and for the latest seals what they replaced, so
+/// they can be undone.
 #[derive(Clone, Default)]
 pub struct Edits {
     pub large: EditLog,
     pub baked: EditStore,
     pub recent: EditLog,
-    /// Bricks changed by each seal (every level), in order: renderers
-    /// regenerate the columns holding them.
-    pub sealed: Vec<Arc<[BrickKey]>>,
-    /// Every applied brush in order with the hash of the history up to it
-    /// (`edits::brush_hash`), in shared chunks: the journal, and how a
-    /// renderer finds what changed.
-    history: Vec<Arc<Vec<(Brush, u64)>>>,
-    count: usize,
+    /// History hash after each recent brush.
+    recent_hash: Vec<u64>,
+    /// Brushes sealed and the history hash after them: the baked state.
+    sealed_count: usize,
+    sealed_hash: u64,
+    undo_seals: VecDeque<SealUndo>,
+    changes: VecDeque<BakedChange>,
 }
 
-/// Brushes per shared history chunk.
-const HISTORY_CHUNK: usize = 4096;
+/// A seal and what it replaced, to undo it.
+#[derive(Clone)]
+struct SealUndo {
+    brushes: Vec<(Brush, u64)>,
+    store: StoreUndo,
+    large_len: usize,
+    before: (usize, u64),
+}
+
+/// Baked columns a seal or its undo changed, between two baked states
+/// (sealed brush count, history hash).
+#[derive(Clone)]
+pub struct BakedChange {
+    pub before: (usize, u64),
+    pub after: (usize, u64),
+    pub columns: Arc<[ColumnKey]>,
+}
 
 impl Edits {
     /// Brushes applied (every layer).
     pub fn len(&self) -> usize {
-        self.count
+        self.sealed_count + self.recent_hash.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.count == 0
+        self.len() == 0
     }
-    /// Every applied brush in order.
-    pub fn brushes(&self) -> impl Iterator<Item = &Brush> {
-        self.history.iter().flat_map(|chunk| chunk.iter()).map(|(brush, _)| brush)
+    /// Brushes sealed (the first `sealed_len` of the history).
+    pub fn sealed_len(&self) -> usize {
+        self.sealed_count
     }
-    /// Brush `index` of the history.
-    pub fn brush(&self, index: usize) -> Brush {
-        self.history[index / HISTORY_CHUNK][index % HISTORY_CHUNK].0
+    /// Brushes [`Planet::undo`] can still remove.
+    pub fn undoable(&self) -> usize {
+        self.recent_hash.len() + self.undo_seals.iter().map(|u| u.brushes.len()).sum::<usize>()
     }
-    /// Hash of the first `n` brushes: equal hashes, equal histories up to
-    /// there.
-    pub fn prefix_hash(&self, n: usize) -> u64 {
-        if n == 0 {
-            return 0;
+    /// Hash of the whole history: equal hashes, equal edits.
+    pub fn hash(&self) -> u64 {
+        self.recent_hash.last().copied().unwrap_or(self.sealed_hash)
+    }
+    /// Hash of the first `n` brushes, for `n` from [`Self::sealed_len`] to
+    /// [`Self::len`] (only the sealed brushes' total is kept).
+    pub fn prefix_hash(&self, n: usize) -> Option<u64> {
+        match n.checked_sub(self.sealed_count)? {
+            0 => Some(self.sealed_hash),
+            r => self.recent_hash.get(r - 1).copied(),
         }
-        self.history[(n - 1) / HISTORY_CHUNK][(n - 1) % HISTORY_CHUNK].1
     }
-    fn record(&mut self, brush: Brush) {
-        let hash = crate::edits::brush_hash(self.prefix_hash(self.count), &brush);
-        if self.history.last().is_none_or(|c| c.len() >= HISTORY_CHUNK) {
-            self.history.push(Arc::new(Vec::with_capacity(HISTORY_CHUNK)));
-        }
-        Arc::make_mut(self.history.last_mut().expect("pushed above")).push((brush, hash));
-        self.count += 1;
+    /// Brush `index` of the history, while it is recent.
+    pub fn brush(&self, index: usize) -> Option<Brush> {
+        let r = index.checked_sub(self.sealed_count)?;
+        (r < self.recent.len()).then(|| self.recent.resolved(r as u32).brush)
     }
-    fn forget_last(&mut self) {
-        if let Some(chunk) = self.history.last_mut() {
-            Arc::make_mut(chunk).pop();
-            if chunk.is_empty() {
-                self.history.pop();
-            }
-            self.count -= 1;
+    /// The baked state: brushes sealed and the history hash after them.
+    /// The baked store is a function of it.
+    pub fn baked_state(&self) -> (usize, u64) {
+        (self.sealed_count, self.sealed_hash)
+    }
+    /// Baked columns changed since baked state `state`, or `None` when that
+    /// state is not in the kept changes (long ago, or another history).
+    pub fn baked_changes_since(&self, state: (usize, u64)) -> Option<Vec<ColumnKey>> {
+        if state == self.baked_state() {
+            return Some(Vec::new());
         }
+        let start = self.changes.iter().rposition(|c| c.before == state)?;
+        Some(self.changes.range(start..).flat_map(|c| c.columns.iter().copied()).collect())
+    }
+    fn record(&mut self, brush: &Brush) {
+        self.recent_hash.push(crate::edits::brush_hash(self.hash(), brush));
+    }
+    fn changed(&mut self, before: (usize, u64), columns: impl Iterator<Item = ColumnKey>) {
+        let after = self.baked_state();
+        self.changes.push_back(BakedChange { before, after, columns: columns.collect() });
+        if self.changes.len() > CHANGES_KEPT {
+            self.changes.pop_front();
+        }
+    }
+    /// Edits from their layers (a snapshot): `large` and `baked` hold the
+    /// first `sealed.0` brushes of a history with hash `sealed.1`, `recent`
+    /// the rest. Nothing of it is undoable.
+    pub(crate) fn from_parts(grid: &Grid, large: &[Brush], baked: EditStore, sealed: (usize, u64), recent: &[Brush]) -> Result<Self, String> {
+        let mut edits = Edits {
+            large: Self::log(grid, large.iter().copied())?,
+            baked,
+            recent: Self::log(grid, recent.iter().copied())?,
+            sealed_count: sealed.0,
+            sealed_hash: sealed.1,
+            ..Default::default()
+        };
+        for brush in recent {
+            edits.record(brush);
+        }
+        Ok(edits)
+    }
+    /// A recent log holding `brushes`.
+    fn log(grid: &Grid, brushes: impl Iterator<Item = Brush>) -> Result<EditLog, String> {
+        let mut log = EditLog::default();
+        for brush in brushes {
+            log.push(grid, brush)?;
+        }
+        Ok(log)
     }
 }
 
@@ -244,13 +310,25 @@ impl Planet {
     pub fn edits(&self) -> &Edits {
         &self.edits
     }
+    /// Conservative radial bounds of the edits: the top of every addition
+    /// and the bottom of every removal.
+    pub(crate) fn edit_bounds(&self) -> (f64, f64) {
+        (self.edit_top, self.edit_bottom)
+    }
+    /// Replace the edits (a loaded snapshot) with their bounds.
+    pub(crate) fn restore_edits(&mut self, edits: Edits, (top, bottom): (f64, f64)) {
+        self.edits = edits;
+        self.edit_top = top;
+        self.edit_bottom = bottom;
+        self.revision += 1;
+    }
     /// Increments with every applied or undone edit.
     pub fn revision(&self) -> u64 {
         self.revision
     }
     pub fn apply(&mut self, brush: Brush) -> Result<u32, String> {
         self.edits.recent.push(&self.grid, brush)?;
-        self.edits.record(brush);
+        self.edits.record(&brush);
         let id = (self.edits.len() - 1) as u32;
         if self.edits.recent.len() > RECENT_BRUSHES {
             self.seal(SEAL_BATCH)?;
@@ -266,11 +344,15 @@ impl Planet {
         self.revision += 1;
         Ok(id)
     }
-    /// Undo the latest brush (only recent brushes are undoable; `None`
-    /// once they are sealed).
+    /// Undo the latest brush: a recent one, or one of the latest sealed ones
+    /// (its seal is undone first); `None` past them
+    /// ([`Edits::undoable`]).
     pub fn undo(&mut self) -> Option<Brush> {
+        if self.edits.recent.is_empty() {
+            self.unseal()?;
+        }
         let brush = self.edits.recent.pop()?;
-        self.edits.forget_last();
+        self.edits.recent_hash.pop();
         self.revision += 1;
         Some(brush)
     }
@@ -279,28 +361,56 @@ impl Planet {
     fn seal(&mut self, n: usize) -> Result<(), String> {
         let brushes: Vec<Brush> = self.edits.recent.brushes().copied().collect();
         let n = n.min(brushes.len());
+        let before = self.edits.baked_state();
+        let large_len = self.edits.large.len();
+        let resolved: Vec<Vec<FaceBrush>> = brushes[..n].iter().map(|b| b.resolve(&self.grid)).collect::<Result<_, _>>()?;
+        let edits = &mut self.edits;
+        edits.baked.begin_record();
         let mut changed = Vec::new();
-        for brush in &brushes[..n] {
-            let faces = brush.resolve(&self.grid)?;
+        for (brush, faces) in brushes[..n].iter().zip(&resolved) {
             if faces.iter().all(|fb| fb.radius_half <= BAKE_RADIUS_HALF) {
-                for fb in &faces {
-                    changed.extend(self.edits.baked.bake(&self.grid, fb, brush.op));
+                for fb in faces {
+                    changed.extend(edits.baked.bake(&self.grid, fb, brush.op));
                 }
             } else {
-                for fb in &faces {
-                    changed.extend(self.edits.baked.apply_over(&self.grid, fb, brush.op));
+                for fb in faces {
+                    changed.extend(edits.baked.apply_over(&self.grid, fb, brush.op));
                 }
-                self.edits.large.push(&self.grid, *brush)?;
+                edits.large.push(&self.grid, *brush).expect("resolved above");
             }
         }
-        let mut recent = EditLog::default();
-        for brush in &brushes[n..] {
-            recent.push(&self.grid, *brush)?;
+        edits.baked.rebuild_coarse(changed, self.grid.levels());
+        let store = edits.baked.end_record();
+        let hashes: Vec<u64> = edits.recent_hash.drain(..n).collect();
+        edits.sealed_count += n;
+        edits.sealed_hash = *hashes.last().unwrap_or(&edits.sealed_hash);
+        edits.recent = Edits::log(&self.grid, brushes[n..].iter().copied())?;
+        let columns: Vec<ColumnKey> = store.columns().collect();
+        edits.undo_seals.push_back(SealUndo { brushes: brushes[..n].iter().copied().zip(hashes).collect(), store, large_len, before });
+        if edits.undo_seals.len() > UNDO_SEALS {
+            edits.undo_seals.pop_front();
         }
-        self.edits.recent = recent;
-        let changed = self.edits.baked.rebuild_coarse(changed, self.grid.levels());
-        self.edits.sealed.push(changed.into());
+        edits.changed(before, columns.into_iter());
         Ok(())
+    }
+
+    /// Undo the latest seal: its bricks and large brushes go back, its
+    /// brushes become recent again.
+    fn unseal(&mut self) -> Option<()> {
+        let undo = self.edits.undo_seals.pop_back()?;
+        let edits = &mut self.edits;
+        let before = edits.baked_state();
+        let columns: Vec<ColumnKey> = undo.store.columns().collect();
+        edits.baked.restore(undo.store);
+        while edits.large.len() > undo.large_len {
+            edits.large.pop();
+        }
+        let recent: Vec<Brush> = edits.recent.brushes().copied().collect();
+        edits.recent = Edits::log(&self.grid, undo.brushes.iter().map(|(b, _)| *b).chain(recent)).expect("brushes resolved when applied");
+        edits.recent_hash.splice(0..0, undo.brushes.iter().map(|(_, h)| *h));
+        (edits.sealed_count, edits.sealed_hash) = undo.before;
+        edits.changed(before, columns.into_iter());
+        Some(())
     }
     /// Conservative bound on terrain surface height above the datum (m).
     pub fn max_terrain_height(&self) -> f64 {
@@ -1013,17 +1123,34 @@ mod tests {
             (seed >> 33) as f64 / (1u64 << 31) as f64
         };
         let ops = [BrushOp::Remove, BrushOp::Add, BrushOp::Paint];
+        let mut applied = Vec::new();
         for n in 0..(RECENT_BRUSHES * 3 + 37) {
             let cell = Cell::new(face, i0 + (next() * 40.0) as i32, j0 + (next() * 40.0) as i32, top - 16 + (next() * 24.0) as i32);
             // Every 50th brush is too large to bake.
             let radius = if n % 50 == 7 { 4.0 } else { 0.05 + next() * 0.6 };
             let shape = if next() < 0.5 { BrushShape::Sphere } else { BrushShape::Cube };
-            p.apply(Brush { center: g.cell_center(cell).to_array(), radius, shape, op: ops[(next() * 3.0) as usize], material: 1 + (next() * 20.0) as u32 }).unwrap();
+            let brush = Brush { center: g.cell_center(cell).to_array(), radius, shape, op: ops[(next() * 3.0) as usize], material: 1 + (next() * 20.0) as u32 };
+            p.apply(brush).unwrap();
+            applied.push(brush);
         }
         let edits = p.edits();
         assert!(!edits.baked.is_empty() && !edits.large.is_empty() && edits.recent.len() <= RECENT_BRUSHES);
-        let faces: Vec<FaceBrush> = edits
-            .brushes()
+        check_replay(&p, &applied, face, i0, j0, top);
+        // Undo past several seals: they come undone, exactly.
+        for _ in 0..400 {
+            p.undo().expect("within the undoable brushes");
+        }
+        applied.truncate(applied.len() - 400);
+        assert_eq!(p.edits().hash(), crate::edits::history_hash(&applied));
+        check_replay(&p, &applied, face, i0, j0, top);
+    }
+
+    /// Every level-0 cell of a 40x40x40 block reads what `applied` replayed
+    /// in order over the terrain gives.
+    fn check_replay(p: &Planet, applied: &[Brush], face: u8, i0: i32, j0: i32, top: i32) {
+        let g = *p.grid();
+        let faces: Vec<FaceBrush> = applied
+            .iter()
             .flat_map(|b| b.resolve(&g).unwrap())
             .filter(|fb| fb.face() == face)
             .collect();

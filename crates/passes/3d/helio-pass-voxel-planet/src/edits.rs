@@ -373,6 +373,12 @@ pub struct EditLog {
 }
 
 /// FNV-1a over a brush, continuing `seed`.
+/// Hash of a brush history (what [`crate::planet::Edits::hash`] reports
+/// for a world with exactly these brushes applied in order).
+pub fn history_hash<'a>(brushes: impl IntoIterator<Item = &'a Brush>) -> u64 {
+    brushes.into_iter().fold(0, |hash, brush| brush_hash(hash, brush))
+}
+
 pub(crate) fn brush_hash(seed: u64, brush: &Brush) -> u64 {
     let mut h = seed ^ 0xcbf2_9ce4_8422_2325;
     let mut eat = |v: u64| {

@@ -545,7 +545,7 @@ fn thousands_of_block_edits_render_exactly() {
 
 /// Edits sealed under a running renderer: a crater and a mound too large to
 /// bake (the mound applied over the baked blocks it covers), blocks baked
-/// between them, then undo of the recent ones. After each change the kept
+/// between them, then undo across seals. After each change the kept
 /// renderer matches canonical CPU ray casts exactly.
 #[test]
 fn sealed_edits_render_exactly_under_a_running_renderer() {
@@ -592,9 +592,12 @@ fn sealed_edits_render_exactly_under_a_running_renderer() {
     assert_eq!(planet.edits().large.len(), 2, "both large brushes sealed");
     assert!(!planet.edits().baked.is_empty());
     check(&planet, &mut kept);
-    for _ in 0..40 {
+    // Undo across seals: their bricks and large brushes come back undone.
+    let sealed = planet.edits().sealed_len();
+    for _ in 0..300 {
         planet.undo().unwrap();
     }
+    assert!(planet.edits().sealed_len() < sealed);
     check(&planet, &mut kept);
 }
 

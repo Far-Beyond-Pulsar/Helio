@@ -67,7 +67,7 @@ pub fn recipe_fingerprint(recipe: &PlanetRecipe) -> u64 {
     fnv64(recipe.to_json().as_bytes())
 }
 
-fn fnv64(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv64(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3))
 }
 
@@ -113,7 +113,7 @@ pub fn encode(seq: u32, entry: &Entry) -> [u8; RECORD_BYTES] {
     out
 }
 
-fn decode(index: usize, r: &[u8]) -> Result<Entry, JournalError> {
+pub(crate) fn decode(index: usize, r: &[u8]) -> Result<Entry, JournalError> {
     let corrupt = |reason| JournalError::Corrupt { index, reason };
     let u32_at = |at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
     let f64_at = |at: usize| f64::from_le_bytes(r[at..at + 8].try_into().unwrap());
@@ -214,16 +214,6 @@ impl Writer {
 }
 
 impl Planet {
-    /// Compact journal of the current edit state: one record per remaining
-    /// brush, in order (undone brushes are gone).
-    pub fn journal(&self) -> Vec<u8> {
-        let mut writer = Writer::new(self.recipe());
-        for brush in self.edits().brushes() {
-            writer.push(&Entry::Brush(*brush));
-        }
-        writer.into_bytes()
-    }
-
     /// Apply journal entries in order. On a rejected entry the planet keeps
     /// the entries before it.
     pub fn replay(&mut self, entries: &[Entry]) -> Result<(), JournalError> {
@@ -288,11 +278,8 @@ mod tests {
             }
         }
         let b = Planet::from_journal(PlanetRecipe::default(), writer.bytes()).unwrap();
-        assert_eq!(a.edits().brushes().collect::<Vec<_>>(), b.edits().brushes().collect::<Vec<_>>());
-        // The compact journal holds the same remaining brushes.
-        let compact = Planet::from_journal(PlanetRecipe::default(), &a.journal()).unwrap();
-        assert_eq!(a.edits().brushes().collect::<Vec<_>>(), compact.edits().brushes().collect::<Vec<_>>());
-        assert_eq!(a.journal().len(), HEADER_BYTES + RECORD_BYTES * a.edits().len());
+        assert_eq!(a.edits().recent.brushes().collect::<Vec<_>>(), b.edits().recent.brushes().collect::<Vec<_>>());
+        assert_eq!((a.edits().len(), a.edits().hash()), (b.edits().len(), b.edits().hash()));
     }
 
     #[test]

@@ -437,12 +437,14 @@ pub struct Residency {
     free_baked: Vec<u32>,
     next_baked: u32,
     block_baked: FxHashMap<u32, Vec<u32>>,
-    /// The planet's edit history and seals as last synced: brushes (to
-    /// regenerate an undone one's footprint), their prefix hashes, and the
-    /// bricks of each seal.
-    synced: Vec<crate::edits::Brush>,
-    synced_hash: Vec<u64>,
-    synced_seals: Vec<std::sync::Arc<[crate::edit_store::BrickKey]>>,
+    /// The planet's edits as last synced: the baked state (`Edits::baked_state`)
+    /// and the recent brushes from history index `synced_start` (whose
+    /// prefix hash is `synced_start_hash`), each with the history hash after
+    /// it, to regenerate an undone one's footprint.
+    synced_baked: (usize, u64),
+    synced_start: usize,
+    synced_start_hash: u64,
+    synced: Vec<(crate::edits::Brush, u64)>,
     urgent: Vec<u64>,
     /// Resident columns whose band is clipped to a window around the eye's
     /// layer, with the window centre (level cells).
@@ -506,9 +508,10 @@ impl Residency {
             free_baked: Vec::new(),
             next_baked: 0,
             block_baked: FxHashMap::default(),
+            synced_baked: (0, 0),
+            synced_start: 0,
+            synced_start_hash: 0,
             synced: Vec::new(),
-            synced_hash: Vec::new(),
-            synced_seals: Vec::new(),
             urgent: Vec::new(),
             clipped: FxHashMap::default(),
             stats: Stats::default(),
@@ -553,58 +556,61 @@ impl Residency {
     /// of resident columns touched by new or undone brushes.
     fn sync_edits(&mut self, planet: &Planet) {
         let edits = planet.edits();
-        // Columns holding bricks of seals not synced yet (or synced and
-        // since replaced): a seal changes no base cell's result but shows its
-        // bricks at coarser levels.
-        let seals = &edits.sealed;
-        let same_seals = seals.len().min(self.synced_seals.len());
-        let common_seals = (0..same_seals).find(|&s| !std::sync::Arc::ptr_eq(&seals[s], &self.synced_seals[s])).unwrap_or(same_seals);
-        if common_seals < seals.len() || common_seals < self.synced_seals.len() {
-            for seal in self.synced_seals[common_seals..].iter().chain(&seals[common_seals..]) {
-                for key in seal.iter() {
-                    let column = pack(key0(key.face, u32::from(key.level), key.bi), key.bj as u32);
-                    if self.residents.contains_key(column) {
-                        self.urgent.push(column);
+        let (c0, c1) = (edits.sealed_len(), edits.len());
+        let (s0, s1) = (self.synced_start, self.synced_start + self.synced.len());
+        let synced_hash = |k: usize| if k == s0 { self.synced_start_hash } else { self.synced[k - s0 - 1].1 };
+        if edits.baked_state() == self.synced_baked && (s0, s1) == (c0, c1) && edits.hash() == synced_hash(s1) {
+            return;
+        }
+        // Everything resident regenerates when the change cannot be told:
+        // another history, or one that moved on further than kept.
+        let mut refresh = false;
+        match edits.baked_changes_since(self.synced_baked) {
+            Some(columns) => {
+                for c in columns {
+                    let key = pack(key0(c.face, u32::from(c.level), c.ci), c.cj as u32);
+                    if self.residents.contains_key(key) {
+                        self.urgent.push(key);
                     }
                 }
             }
-            self.synced_seals.truncate(common_seals);
-            self.synced_seals.extend_from_slice(&seals[common_seals..]);
+            None => refresh = true,
         }
-        // Longest common prefix of the synced and current histories, found
-        // by prefix hash in O(log n); an unchanged history costs O(1).
-        let n = self.synced.len().min(edits.len());
-        let same = |k: usize| k == 0 || self.synced_hash[k - 1] == edits.prefix_hash(k);
-        if n == self.synced.len() && n == edits.len() && same(n) {
-            return;
-        }
-        let common = if same(n) {
-            n
-        } else {
-            let (mut lo, mut hi) = (0, n);
-            while lo < hi {
-                let mid = (lo + hi + 1) / 2;
+        // Recent brushes: the longest common prefix of the synced and current
+        // windows, by prefix hash in O(log n). Undone brushes and new ones
+        // regenerate their footprints; ones sealed since changed only baked
+        // columns (above).
+        let same = |k: usize| edits.prefix_hash(k) == Some(synced_hash(k));
+        let (lo, hi) = (s0.max(c0), s1.min(c1));
+        let mut touched = Vec::new();
+        if !refresh && lo <= hi && same(lo) {
+            let (mut common, mut top) = (lo, hi);
+            while common < top {
+                let mid = (common + top + 1) / 2;
                 if same(mid) {
-                    lo = mid;
+                    common = mid;
                 } else {
-                    hi = mid - 1;
+                    top = mid - 1;
                 }
             }
-            lo
-        };
-        let mut touched = Vec::new();
-        // Undone brushes and new ones: their footprints regenerate.
-        for brush in self.synced[common..].iter().copied().chain((common..edits.len()).map(|i| edits.brush(i))) {
-            if let Ok(faces) = brush.resolve(&self.grid) {
-                touched.extend(faces);
+            let undone = self.synced[common - s0..].iter().map(|(b, _)| *b);
+            let added = (common..c1).filter_map(|i| edits.brush(i));
+            for brush in undone.chain(added) {
+                if let Ok(faces) = brush.resolve(&self.grid) {
+                    touched.extend(faces);
+                }
             }
+        } else {
+            refresh = true;
         }
-        self.synced.truncate(common);
-        self.synced_hash.truncate(common);
-        for i in common..edits.len() {
-            self.synced.push(edits.brush(i));
-            self.synced_hash.push(edits.prefix_hash(i + 1));
+        if refresh {
+            let keys: Vec<u64> = self.residents.iter().map(|(key, _)| key).collect();
+            self.urgent.extend(keys);
         }
+        self.synced_baked = edits.baked_state();
+        self.synced_start = c0;
+        self.synced_start_hash = edits.prefix_hash(c0).expect("the sealed prefix is kept");
+        self.synced = (c0..c1).filter_map(|i| Some((edits.brush(i)?, edits.prefix_hash(i + 1)?))).collect();
         // Large footprints scan the residents instead of their rectangles.
         let mut scans: Vec<(u8, u32, i64, i64, i64, i64)> = Vec::new();
         for fb in touched {
@@ -667,7 +673,11 @@ impl Residency {
         };
         let large = brushes(&edits.large);
         let recent = brushes(&edits.recent);
-        let baked = edits.baked.column(face, level, ci, cj);
+        let baked: Vec<(i32, std::sync::Arc<crate::edit_store::Brick>)> = edits
+            .baked
+            .column(&crate::edit_store::ColumnKey { face, level: level as u8, ci, cj })
+            .map(|column| column.to_vec())
+            .unwrap_or_default();
         if large.is_empty() && recent.is_empty() && baked.is_empty() {
             return Ok(None);
         }

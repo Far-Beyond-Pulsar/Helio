@@ -10,6 +10,7 @@
 pub mod column_index;
 pub mod edit_store;
 pub mod edits;
+pub mod snapshot;
 pub mod grid;
 pub mod journal;
 pub mod landform;

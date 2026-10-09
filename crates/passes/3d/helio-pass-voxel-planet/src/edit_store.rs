@@ -13,9 +13,11 @@
 //! thousands of small digs) shows at every distance, where a point sample
 //! of each brush would omit brushes smaller than the level's cells.
 //!
-//! Bricks are sharded and shared copy-on-write: copying a store (what a
-//! renderer does to publish an edited world) copies shard pointers, and an
-//! edit copies only the shards and bricks it touches.
+//! Bricks are stored by column (a renderer column's bricks are one lookup)
+//! in shards shared copy-on-write: copying a store (what a renderer does to
+//! publish an edited world) copies shard pointers, and an edit copies only
+//! the shards, columns and bricks it touches. A recorded change keeps the
+//! columns it replaced, which is how sealing is undone.
 use crate::edits::{BrushOp, FaceBrush};
 use crate::grid::{Grid, BRICK};
 use rustc_hash::FxHashMap;
@@ -150,29 +152,62 @@ impl BrickKey {
     pub fn parent(self) -> Self {
         Self { face: self.face, level: self.level + 1, bi: self.bi.div_euclid(2), bj: self.bj.div_euclid(2), bk: self.bk.div_euclid(2) }
     }
+    /// The column holding this brick.
+    pub fn column(self) -> ColumnKey {
+        ColumnKey { face: self.face, level: self.level, ci: self.bi, cj: self.bj }
+    }
 }
+
+/// A column of bricks: face, level and brick coordinates across the face.
+/// At every level a renderer's column is exactly one brick column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ColumnKey {
+    pub face: u8,
+    pub level: u8,
+    pub ci: i32,
+    pub cj: i32,
+}
+
+/// A column's stored bricks by height (`bk`), sorted.
+pub type Column = Vec<(i32, Arc<Brick>)>;
 
 const SHARDS: usize = 64;
 
-fn shard_of(key: &BrickKey) -> usize {
-    // Neighbouring bricks land in different shards, a whole column's in one.
-    let h = (key.bi as u32).wrapping_mul(0x9e37_79b1) ^ (key.bj as u32).wrapping_mul(0x85eb_ca77) ^ (u32::from(key.level) << 3 | u32::from(key.face));
+fn shard_of(key: &ColumnKey) -> usize {
+    // Neighbouring columns land in different shards.
+    let h = (key.ci as u32).wrapping_mul(0x9e37_79b1) ^ (key.cj as u32).wrapping_mul(0x85eb_ca77) ^ (u32::from(key.level) << 3 | u32::from(key.face));
     (h.rotate_left(7) as usize) % SHARDS
 }
 
-type Shard = FxHashMap<BrickKey, Arc<Brick>>;
+type Shard = FxHashMap<ColumnKey, Arc<Column>>;
+
+/// The columns a recorded change replaced and what they held before it
+/// (`None`: absent). Restoring them undoes the change exactly.
+#[derive(Clone, Default)]
+pub struct StoreUndo {
+    columns: Vec<(ColumnKey, Option<Arc<Column>>)>,
+}
+
+impl StoreUndo {
+    pub fn columns(&self) -> impl Iterator<Item = ColumnKey> + '_ {
+        self.columns.iter().map(|(key, _)| *key)
+    }
+}
 
 /// Sparse baked edits of every level (see the module doc).
 #[derive(Clone)]
 pub struct EditStore {
     shards: Vec<Arc<Shard>>,
-    /// Bricks stored per level (diagnostics).
+    /// Bricks stored per level.
     counts: Vec<usize>,
+    /// While recording: each changed column's contents before its first
+    /// change.
+    recording: Option<FxHashMap<ColumnKey, Option<Arc<Column>>>>,
 }
 
 impl Default for EditStore {
     fn default() -> Self {
-        Self { shards: (0..SHARDS).map(|_| Arc::new(Shard::default())).collect(), counts: Vec::new() }
+        Self { shards: (0..SHARDS).map(|_| Arc::new(Shard::default())).collect(), counts: Vec::new(), recording: None }
     }
 }
 
@@ -184,31 +219,80 @@ impl EditStore {
     pub fn brick_counts(&self) -> &[usize] {
         &self.counts
     }
-    pub fn brick(&self, key: &BrickKey) -> Option<&Arc<Brick>> {
+    /// A column's stored bricks by height, if any.
+    pub fn column(&self, key: &ColumnKey) -> Option<&Arc<Column>> {
         self.shards[shard_of(key)].get(key)
+    }
+    pub fn brick(&self, key: &BrickKey) -> Option<&Arc<Brick>> {
+        let column = self.column(&key.column())?;
+        column.binary_search_by_key(&key.bk, |(bk, _)| *bk).ok().map(|at| &column[at].1)
     }
     /// The baked edit of a level cell.
     pub fn cell(&self, face: u8, level: u32, i: i32, j: i32, k: i32) -> CellEdit {
         self.brick(&BrickKey::of_cell(face, level, i, j, k)).map_or(CellEdit::UNCHANGED, |b| b.cells[Brick::index(i, j, k)])
     }
+    /// Every stored brick (any order).
+    pub fn bricks(&self) -> impl Iterator<Item = (BrickKey, &Arc<Brick>)> + '_ {
+        self.shards.iter().flat_map(|shard| shard.iter()).flat_map(|(c, column)| {
+            column.iter().map(move |(bk, brick)| (BrickKey { face: c.face, level: c.level, bi: c.ci, bj: c.cj, bk: *bk }, brick))
+        })
+    }
 
-    fn set(&mut self, key: BrickKey, brick: Option<Brick>) {
-        let shard = Arc::make_mut(&mut self.shards[shard_of(&key)]);
+    /// Store a brick (`None` or an unchanged brick removes it).
+    pub fn set(&mut self, key: BrickKey, brick: Option<Brick>) {
+        let column_key = key.column();
+        let shard = Arc::make_mut(&mut self.shards[shard_of(&column_key)]);
+        if let Some(recording) = &mut self.recording {
+            recording.entry(column_key).or_insert_with(|| shard.get(&column_key).cloned());
+        }
         let level = key.level as usize;
         if self.counts.len() <= level {
             self.counts.resize(level + 1, 0);
         }
-        match brick.filter(|b| !b.is_unchanged()) {
-            Some(b) => {
-                if shard.insert(key, Arc::new(b)).is_none() {
-                    self.counts[level] += 1;
-                }
+        let brick = brick.filter(|b| !b.is_unchanged());
+        let column = Arc::make_mut(shard.entry(column_key).or_default());
+        match (column.binary_search_by_key(&key.bk, |(bk, _)| *bk), brick) {
+            (Ok(at), Some(b)) => column[at].1 = Arc::new(b),
+            (Err(at), Some(b)) => {
+                column.insert(at, (key.bk, Arc::new(b)));
+                self.counts[level] += 1;
             }
-            None => {
-                if shard.remove(&key).is_some() {
-                    self.counts[level] -= 1;
-                }
+            (Ok(at), None) => {
+                column.remove(at);
+                self.counts[level] -= 1;
             }
+            (Err(_), None) => {}
+        }
+        if column.is_empty() {
+            shard.remove(&column_key);
+        }
+    }
+
+    /// Record the columns every change replaces until [`Self::end_record`].
+    pub fn begin_record(&mut self) {
+        self.recording = Some(FxHashMap::default());
+    }
+    /// What changed since [`Self::begin_record`], to undo it with
+    /// [`Self::restore`].
+    pub fn end_record(&mut self) -> StoreUndo {
+        let mut columns: Vec<_> = self.recording.take().unwrap_or_default().into_iter().collect();
+        columns.sort_unstable_by_key(|(key, _)| *key);
+        StoreUndo { columns }
+    }
+    /// Put back the columns a recorded change replaced.
+    pub fn restore(&mut self, undo: StoreUndo) {
+        for (key, before) in undo.columns {
+            let level = key.level as usize;
+            let shard = Arc::make_mut(&mut self.shards[shard_of(&key)]);
+            let now = match &before {
+                Some(column) => shard.insert(key, Arc::clone(column)),
+                None => shard.remove(&key),
+            };
+            let (now, before) = (now.map_or(0, |c| c.len()), before.map_or(0, |c| c.len()));
+            if self.counts.len() <= level {
+                self.counts.resize(level + 1, 0);
+            }
+            self.counts[level] = self.counts[level] + before - now;
         }
     }
 
@@ -255,41 +339,52 @@ impl EditStore {
         let face = fb.face();
         let material = fb.material();
         let r = fb.extent_cells();
+        let b = i64::from(BRICK);
         let ci = i64::from(fb.center[0]) / 2;
         let cj = i64::from(fb.center[1]) / 2;
+        let (ci0, ci1) = ((ci - r).div_euclid(b), (ci + r).div_euclid(b));
+        let (cj0, cj1) = ((cj - r).div_euclid(b), (cj + r).div_euclid(b));
         let (k0, k1) = (i64::from(fb.k_lo) / 2 - 1, i64::from(fb.k_hi) / 2 + 1);
-        let in_range = |key: &BrickKey| {
-            let b = i64::from(BRICK);
-            key.face == face
-                && key.level == 0
-                && i64::from(key.bi) * b <= ci + r
-                && i64::from(key.bi) * b + b > ci - r
-                && i64::from(key.bj) * b <= cj + r
-                && i64::from(key.bj) * b + b > cj - r
-                && i64::from(key.bk) * b <= k1
-                && i64::from(key.bk) * b + b > k0
+        let in_range = |c: &ColumnKey| c.face == face && c.level == 0 && (ci0..=ci1).contains(&i64::from(c.ci)) && (cj0..=cj1).contains(&i64::from(c.cj));
+        // The stored columns in the brush's rectangle: looked up when the
+        // rectangle is smaller than the store, else found by a scan.
+        let stored: usize = self.shards.iter().map(|s| s.len()).sum();
+        let area = (ci1 - ci0 + 1).saturating_mul(cj1 - cj0 + 1);
+        let columns: Vec<ColumnKey> = if (area as u64) < stored as u64 {
+            (ci0..=ci1)
+                .flat_map(|i| (cj0..=cj1).map(move |j| ColumnKey { face, level: 0, ci: i as i32, cj: j as i32 }))
+                .filter(|c| self.column(c).is_some())
+                .collect()
+        } else {
+            self.shards.iter().flat_map(|s| s.keys().copied()).filter(in_range).collect()
         };
-        let keys: Vec<BrickKey> = self.shards.iter().flat_map(|s| s.keys().copied()).filter(in_range).collect();
         let mut changed = Vec::new();
-        for key in keys {
-            let mut brick = (**self.brick(&key).expect("listed")).clone();
-            let mut any = false;
-            for z in 0..BRICK {
-                for y in 0..BRICK {
-                    for x in 0..BRICK {
-                        let (i, j, k) = (key.bi * BRICK + x, key.bj * BRICK + y, key.bk * BRICK + z);
-                        let center = [crate::edits::center_half(i, 0), crate::edits::center_half(j, 0), crate::edits::center_half(k, 0)];
-                        if fb.contains(center, || grid.volume_point(face, i, j, k, 0)) {
-                            let cell = &mut brick.cells[Brick::index(i, j, k)];
-                            *cell = cell.then(op, material);
-                            any = true;
+        for column in columns {
+            let bricks: Vec<(i32, Arc<Brick>)> = self
+                .column(&column)
+                .map(|c| c.iter().filter(|(bk, _)| i64::from(*bk) * b <= k1 && i64::from(*bk) * b + b > k0).cloned().collect())
+                .unwrap_or_default();
+            for (bk, stored) in bricks {
+                let key = BrickKey { face, level: 0, bi: column.ci, bj: column.cj, bk };
+                let mut brick = (*stored).clone();
+                let mut any = false;
+                for z in 0..BRICK {
+                    for y in 0..BRICK {
+                        for x in 0..BRICK {
+                            let (i, j, k) = (key.bi * BRICK + x, key.bj * BRICK + y, key.bk * BRICK + z);
+                            let center = [crate::edits::center_half(i, 0), crate::edits::center_half(j, 0), crate::edits::center_half(k, 0)];
+                            if fb.contains(center, || grid.volume_point(face, i, j, k, 0)) {
+                                let cell = &mut brick.cells[Brick::index(i, j, k)];
+                                *cell = cell.then(op, material);
+                                any = true;
+                            }
                         }
                     }
                 }
-            }
-            if any {
-                self.set(key, Some(brick));
-                changed.push(key);
+                if any {
+                    self.set(key, Some(brick));
+                    changed.push(key);
+                }
             }
         }
         changed
@@ -342,26 +437,13 @@ impl EditStore {
         out
     }
 
-    /// Every stored brick of a column (face, level, column ci, cj), by
-    /// height.
     /// One above the highest baked solid cell of level column (i, j), if
     /// any.
     pub fn solid_top(&self, face: u8, level: u32, i: i32, j: i32) -> Option<i32> {
-        let b = BRICK as i32;
-        self.column(face, level, i.div_euclid(b), j.div_euclid(b)).into_iter().rev().find_map(|(bk, brick)| {
-            (0..b).rev().find(|&z| brick.cells[Brick::index(i, j, z)].state() == CellEdit::SOLID).map(|z| bk * b + z + 1)
+        let key = ColumnKey { face, level: level as u8, ci: i.div_euclid(BRICK), cj: j.div_euclid(BRICK) };
+        self.column(&key)?.iter().rev().find_map(|(bk, brick)| {
+            (0..BRICK).rev().find(|&z| brick.cells[Brick::index(i, j, z)].state() == CellEdit::SOLID).map(|z| bk * BRICK + z + 1)
         })
-    }
-
-    pub fn column(&self, face: u8, level: u32, ci: i32, cj: i32) -> Vec<(i32, Arc<Brick>)> {
-        let probe = BrickKey { face, level: level as u8, bi: ci, bj: cj, bk: 0 };
-        let mut out: Vec<(i32, Arc<Brick>)> = self.shards[shard_of(&probe)]
-            .iter()
-            .filter(|(k, _)| k.face == face && u32::from(k.level) == level && k.bi == ci && k.bj == cj)
-            .map(|(k, b)| (k.bk, Arc::clone(b)))
-            .collect();
-        out.sort_unstable_by_key(|(bk, _)| *bk);
-        out
     }
 }
 
