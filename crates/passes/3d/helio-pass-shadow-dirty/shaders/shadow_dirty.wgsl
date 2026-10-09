@@ -1,27 +1,4 @@
-/// Per-face shadow dirty detection compute shader.
-///
-/// Runs once per frame AFTER ShadowMatrixPass has updated shadow VP matrices.
-/// One thread per movable shadow-caster draw call.
-///
-/// Algorithm:
-///   1. Thread i reads `movable_draws[i].first_instance` to get the instance index.
-///   2. Reads current world-space position from `instances[inst_idx].transform` column 3.
-///   3. Compares against `prev_positions[i].xyz` (stored from last frame).
-///   4. If the object moved more than EPSILON:
-///      For each active shadow face, extract 6 frustum planes from the VP matrix
-///      (Gribb-Hartmann), and sphere-test the object's bounding sphere.
-///      Any face that sees the moved object gets `face_dirty[face] = 1` (atomicOr).
-///      Additionally writes `face_geom_count[face] = movable_draw_count` so
-///      ShadowPass can use multi_draw_indexed_indirect_count with a GPU count.
-///   5. Updates `prev_positions[i]` with the current position for next frame.
-///
-/// The zeroing of `face_dirty` and `face_geom_count` each frame is done by
-/// command-encoder buffer clears before this dispatch. This is intentionally
-/// not done by invocation 0: WGSL has no device-wide workgroup barrier.
-
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-const MAX_FACES: u32 = 256u;
+const MAX_FACES: u32 = 1536u;
 
 /// Minimum world-space displacement (metres) that counts as a "move".
 /// Set to ~0.1 mm — below floating point noise threshold at scene scale.
@@ -56,6 +33,8 @@ struct DrawIndexedIndirect {
 /// Must match GpuShadowMatrix in shadow_matrices.wgsl / libhelio (64 bytes).
 struct GpuShadowMatrix {
     mat: mat4x4f,
+    atlas: vec4f,
+    policy: vec4u,
 }
 
 struct ShadowDirtyUniforms {
@@ -72,16 +51,19 @@ struct ShadowDirtyUniforms {
 
 @group(0) @binding(0) var<storage, read>         instances:      array<GpuInstance>;
 @group(0) @binding(1) var<storage, read>          movable_draws:  array<DrawIndexedIndirect>;
-@group(0) @binding(2) var<storage, read_write>    prev_positions: array<vec4f>;
+@group(0) @binding(2) var<storage, read_write>    prev_positions: array<Previous>;
 @group(0) @binding(3) var<storage, read>          shadow_mats:    array<GpuShadowMatrix>;
 /// Per-face dirty flag (0 = clean, 1 = dirty). Also used as clear-draw count by ShadowPass.
 @group(0) @binding(4) var<storage, read_write>    face_dirty:     array<atomic<u32>>;
 /// Per-face geometry draw count written to drive multi_draw_indexed_indirect_count.
 /// 0 = clean face (no draws), movable_draw_count = dirty face (draw all movable casters).
-@group(0) @binding(5) var<storage, read_write>    face_geom_count: array<u32>;
+@group(0) @binding(5) var<storage, read_write>    face_geom_count: array<atomic<u32>>;
 @group(0) @binding(6) var<uniform>                uniforms:       ShadowDirtyUniforms;
 /// Per-caster flags written by ShadowMatrixPass when a light matrix changes.
 @group(0) @binding(7) var<storage, read_write>     light_dirty:    array<atomic<u32>>;
+
+struct Previous { bounds:vec4f, hash:vec4u }
+@group(0) @binding(8) var<storage,read> spaces:array<mat4x4f>;
 
 // ── Frustum helpers (Gribb-Hartmann) ─────────────────────────────────────────
 
@@ -114,7 +96,7 @@ fn sphere_vs_frustum(center: vec3f, radius: f32, planes: array<vec4f, 6>) -> boo
         let p = planes[i];
         // Signed distance from center to plane (positive = inside half-space).
         let dist = dot(p.xyz, center) + p.w;
-        if dist < -radius {
+        if dist < -radius*length(p.xyz) {
             return false;  // entirely outside this plane → not in frustum
         }
     }
@@ -123,83 +105,50 @@ fn sphere_vs_frustum(center: vec3f, radius: f32, planes: array<vec4f, 6>) -> boo
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-@compute @workgroup_size(64, 1, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let tid = gid.x;
 
-    let movable_count = uniforms.movable_draw_count;
-    let face_count    = min(uniforms.face_count, MAX_FACES);
-    let force_all     = uniforms.force_dirty_all;
-
-    // A moving light changes every face frustum for that caster. Consume the
-    // matrix pass's per-caster flag and dirty all six allocated face slots so
-    // ShadowCullPass rebuilds its compacted indirect lists before rendering.
-    if tid == 0u {
-        let caster_count = (face_count + 5u) / 6u;
-        for (var caster = 0u; caster < caster_count; caster++) {
-            if atomicExchange(&light_dirty[caster], 0u) != 0u {
-                let first_face = caster * 6u;
-                let last_face = min(first_face + 6u, face_count);
-                for (var face = first_face; face < last_face; face++) {
-                    atomicStore(&face_dirty[face], 1u);
-                    face_geom_count[face] = movable_count;
-                }
+fn hash_matrix(m:mat4x4f,h:u32)->u32 {
+    var result=h;
+    for(var c=0u;c<4u;c++){for(var r=0u;r<4u;r++){result=(result^bitcast<u32>(m[c][r]))*16777619u;}}
+    return result;
+}
+fn dirty(face:u32) {
+    atomicStore(&face_dirty[face],1u);
+    atomicStore(&face_geom_count[face],uniforms.movable_draw_count);
+}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid:vec3u) {
+    let tid=gid.x;let count=min(uniforms.face_count,arrayLength(&shadow_mats));
+    if tid==0u {
+        for(var caster=0u;caster<(count+5u)/6u;caster++) {
+            let moved=atomicExchange(&light_dirty[caster],0u)!=0u;
+            if moved || uniforms.force_dirty_all!=0u {
+                for(var f=caster*6u;f<min(caster*6u+6u,count);f++){dirty(f);}
             }
         }
     }
-
-    // force_dirty_all: topology changed (movable count changed) — dirty every face.
-    if force_all != 0u {
-        if tid == 0u {
-            for (var f = 0u; f < face_count; f++) {
-                atomicStore(&face_dirty[f], 1u);
-                face_geom_count[f] = movable_count;
-            }
-        }
-        // Also update prev_positions for every draw call so next frame is baseline.
-        if tid < movable_count {
-            let inst_idx  = movable_draws[tid].first_instance;
-            let inst      = instances[inst_idx];
-            let curr_pos  = vec3f(inst.transform[3][0], inst.transform[3][1], inst.transform[3][2]);
-            prev_positions[tid] = vec4f(curr_pos, 0.0);
-        }
-        return;
+    if tid>=min(uniforms.movable_draw_count,arrayLength(&movable_draws)) || tid>=arrayLength(&prev_positions) {return;}
+    let draw=movable_draws[tid];var hash=draw.instance_count^draw.index_count^draw.first_instance;
+    var lo=vec3f(3e38);var hi=vec3f(-3e38);
+    for(var i=0u;i<draw.instance_count;i++) {
+        let inst=instances[draw.first_instance+i];
+        let space=spaces[(inst.flags>>8u)&255u];
+        hash=hash_matrix(space*inst.transform,hash);
+        hash=(hash^inst.flags^inst.mesh_id^inst.material_id)*16777619u;
+        // Bounds are world-relative to the instance's coordinate space.
+        let center=(space*vec4f(inst.bounds.xyz,1)).xyz;
+        let radius=inst.bounds.w*max(length(space[0].xyz),max(length(space[1].xyz),length(space[2].xyz)));
+        lo=min(lo,center-vec3f(radius));hi=max(hi,center+vec3f(radius));
     }
-
-    // Per-draw-call dirty detection.
-    if tid >= movable_count {
-        return;
-    }
-
-    // Look up the actual instance this draw call refers to.
-    let inst_idx = movable_draws[tid].first_instance;
-    let inst     = instances[inst_idx];
-
-    // World-space position = translation column of the model matrix.
-    let curr_pos = vec3f(inst.transform[3][0], inst.transform[3][1], inst.transform[3][2]);
-    let radius   = inst.bounds.w;
-
-    // Compare against previous frame's position.
-    let prev_pos = prev_positions[tid].xyz;
-    let delta    = abs(curr_pos - prev_pos);
-    let moved    = delta.x > MOVE_EPSILON || delta.y > MOVE_EPSILON || delta.z > MOVE_EPSILON;
-
-    // Always update the stored position (even if unchanged, cost is one write).
-    prev_positions[tid] = vec4f(curr_pos, 0.0);
-
-    if !moved {
-        return;
-    }
-
-    // Object moved → test its bounding sphere against every active shadow face.
-    for (var face = 0u; face < face_count; face++) {
-        let planes = extract_frustum_planes(shadow_mats[face].mat);
-        if sphere_vs_frustum(curr_pos, radius, planes) {
-            // Mark face dirty and set geometry draw count.
-            atomicOr(&face_dirty[face], 1u);
-            // Non-atomic write of movable_count — multiple threads may race on the
-            // same face, but they all write the identical value so it is safe.
-            face_geom_count[face] = movable_count;
-        }
+    var bounds=vec4f(0);
+    if draw.instance_count>0u {bounds=vec4f((lo+hi)*0.5,length(hi-lo)*0.5);}
+    let previous=prev_positions[tid];
+    prev_positions[tid]=Previous(bounds,vec4u(hash,0,0,0));
+    if previous.hash.x==hash && all(previous.bounds==bounds) {return;}
+    // Test both positions: moving OUT of a tile must erase the old silhouette.
+    for(var f=0u;f<count;f++) {
+        if shadow_mats[f].atlas.z==0.0 {continue;}
+        let planes=extract_frustum_planes(shadow_mats[f].mat);
+        if uniforms.force_dirty_all!=0u || sphere_vs_frustum(bounds.xyz,bounds.w,planes)
+            || sphere_vs_frustum(previous.bounds.xyz,previous.bounds.w,planes) {dirty(f);}
     }
 }

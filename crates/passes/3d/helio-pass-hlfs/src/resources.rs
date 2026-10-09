@@ -309,7 +309,7 @@ impl Fallbacks {
             }),
             empty_shadow_matrices: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("HLFS empty shadow matrices"),
-                size: 64,
+                size: 96,
                 usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             }),

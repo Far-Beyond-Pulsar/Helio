@@ -236,9 +236,12 @@ fn create_indirect_buf(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("IndirectDispatch Indirect"),
         size: (capacity as u64 * 20).max(4),
+        // COPY_SRC: `OcclusionCullPass::record_range_compaction` copies this
+        // list into its own `compacted_indirect_buf` before compacting ranges.
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::INDIRECT
-            | wgpu::BufferUsages::COPY_DST,
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     })
 }

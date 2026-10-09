@@ -1,11 +1,12 @@
-//! Hi-Z occlusion-culling pass.
+//! Hi-Z occlusion-culling and visible-range compaction pass.
 //!
 //! Runs AFTER IndirectDispatchPass (frustum cull) each frame, using the PREVIOUS
 //! frame's Hi-Z pyramid (temporal approach). One workgroup per draw-call group
 //! cooperatively Hi-Z-tests each instance that already survived frustum culling
 //! (read from `compacted_indices`) and compacts real survivors into
-//! `compacted_indices_2`, writing the final per-group visible count into
-//! `indirect[slot * 5 + 1]`. Downstream draws must read `compacted_indices_2`.
+//! `compacted_indices_2`, updating the source indirect instance counts. A
+//! second GPU dispatch packs non-empty indirect draw records inside each
+//! material range and writes survivor counts for indirect-count rendering.
 //!
 //! The first frame that actually has live instances has no Hi-Z pyramid yet,
 //! so instead of testing anything it copies `compacted_indices` straight
@@ -56,6 +57,11 @@ const MIN_CAPACITY: u32 = 256;
 pub struct OcclusionCullPass {
     pipeline: wgpu::ComputePipeline,
     bgl: wgpu::BindGroupLayout,
+    range_compact_pipeline: wgpu::ComputePipeline,
+    range_compact_bgl: wgpu::BindGroupLayout,
+    range_compact_params: wgpu::Buffer,
+    range_compact_bind_group: Option<wgpu::BindGroup>,
+    range_compact_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
     cull_params_buf: wgpu::Buffer,
     hiz_sampler: Arc<wgpu::Sampler>,
     cull_stats_buf: wgpu::Buffer,
@@ -64,6 +70,8 @@ pub struct OcclusionCullPass {
     /// occlusion) surviving instance slots, one `u32` per live instance
     /// (worst case).
     compacted_indices_2_buf: wgpu::Buffer,
+    /// Packed indirect records consumed by render passes after occlusion.
+    compacted_indirect_buf: wgpu::Buffer,
     instance_capacity: u32,
 
     /// The baked PVS bitfield on the GPU (Helio#256), uploaded once per bake
@@ -288,15 +296,70 @@ impl OcclusionCullPass {
             cache: None,
         });
 
+        let range_compact_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("OcclusionCull RangeCompaction BGL"),
+            entries: &[
+                storage_layout_entry(0, true),
+                storage_layout_entry(1, false),
+                storage_layout_entry(2, true),
+                storage_layout_entry(3, true),
+                storage_layout_entry(4, true),
+                storage_layout_entry(5, true),
+                storage_layout_entry(6, false),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let compact_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("OcclusionCull RangeCompaction Shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/compact_ranges.wgsl").into(),
+            ),
+        });
+        let compact_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("OcclusionCull RangeCompaction PL"),
+            bind_group_layouts: &[Some(&range_compact_bgl)],
+            immediate_size: 0,
+        });
+        let range_compact_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("OcclusionCull RangeCompaction Pipeline"),
+            layout: Some(&compact_layout),
+            module: &compact_shader,
+            entry_point: Some("compact_ranges"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let range_compact_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("OcclusionCull RangeCompaction Params"),
+            size: 768,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let compacted_indices_2_buf = create_compacted_indices_2_buf(device, MIN_CAPACITY);
+        let compacted_indirect_buf = create_compacted_indirect_buf(device, MIN_CAPACITY);
 
         Self {
             pipeline,
             bgl,
+            range_compact_pipeline,
+            range_compact_bgl,
+            range_compact_params,
+            range_compact_bind_group: None,
+            range_compact_key: None,
             cull_params_buf,
             hiz_sampler,
             cull_stats_buf,
             compacted_indices_2_buf,
+            compacted_indirect_buf,
             instance_capacity: MIN_CAPACITY,
             pvs_buf,
             pvs_grid: None,
@@ -318,7 +381,66 @@ impl OcclusionCullPass {
         self.instance_capacity = instance_count.next_power_of_two().max(MIN_CAPACITY);
         self.compacted_indices_2_buf =
             create_compacted_indices_2_buf(device, self.instance_capacity);
+        self.compacted_indirect_buf = create_compacted_indirect_buf(device, self.instance_capacity);
         true
+    }
+
+    fn record_range_compaction(
+        &mut self,
+        ctx: &mut PassContext,
+        batch: &helio_pass_gbuffer::ObjectBatchFrameData<'_>,
+        source_indirect: &wgpu::Buffer,
+        draw_count: u32,
+    ) {
+        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let bytes = (draw_count as u64 * 20).max(4);
+        encoder.copy_buffer_to_buffer(source_indirect, 0, &self.compacted_indirect_buf, 0, bytes);
+
+        // Legacy/test frames can have no GPU range slots; preserve the
+        // copied list unchanged in that case.
+        let slots = batch.range_slot_capacity;
+        if slots == 0 {
+            return;
+        }
+        let key = (
+            source_indirect as *const _ as usize,
+            batch.range_counts_gpu as *const _ as usize,
+            batch.opaque_ranges_gpu as *const _ as usize,
+            batch.transparent_ranges_gpu as *const _ as usize,
+            batch.forward_ranges_gpu as *const _ as usize,
+            batch.draw_counts_gpu as *const _ as usize,
+            &self.compacted_indirect_buf as *const _ as usize,
+        );
+        if self.range_compact_key != Some(key) {
+            self.range_compact_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("OcclusionCull RangeCompaction BG"),
+                layout: &self.range_compact_bgl,
+                entries: &[
+                    buffer_entry(0, source_indirect),
+                    buffer_entry(1, &self.compacted_indirect_buf),
+                    buffer_entry(2, batch.range_counts_gpu),
+                    buffer_entry(3, batch.opaque_ranges_gpu),
+                    buffer_entry(4, batch.transparent_ranges_gpu),
+                    buffer_entry(5, batch.forward_ranges_gpu),
+                    buffer_entry(6, batch.draw_counts_gpu),
+                    uniform_range_entry(7, &self.range_compact_params, 8),
+                ],
+            }));
+            self.range_compact_key = Some(key);
+        }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("OcclusionCull RangeCompaction"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.range_compact_pipeline);
+        for bucket in 0..3u32 {
+            pass.set_bind_group(
+                0,
+                self.range_compact_bind_group.as_ref().unwrap(),
+                &[bucket * 256],
+            );
+            pass.dispatch_workgroups_indirect(batch.range_counts_gpu, 16 + bucket as u64 * 12);
+        }
     }
 
     /// Update internal-resolution dimensions used by cull uniforms.
@@ -389,6 +511,48 @@ fn create_compacted_indices_2_buf(device: &wgpu::Device, capacity: u32) -> wgpu:
     })
 }
 
+fn create_compacted_indirect_buf(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("OcclusionCull CompactedIndirect"),
+        size: (capacity as u64 * 20).max(20),
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::INDIRECT
+            | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn storage_layout_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+fn buffer_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
+    }
+}
+
+fn uniform_range_entry(binding: u32, buffer: &wgpu::Buffer, size: u64) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer,
+            offset: 0,
+            size: std::num::NonZeroU64::new(size),
+        }),
+    }
+}
+
 impl RenderPass for OcclusionCullPass {
     fn name(&self) -> &'static str {
         "OcclusionCull"
@@ -409,11 +573,8 @@ impl RenderPass for OcclusionCullPass {
     }
 
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
-        // `indirect_dispatch.indirect` is mutated IN PLACE by this pass
-        // (its `instance_count` field, refined from frustum-only down to
-        // frustum+occlusion survivors) -- there is no separate owned
-        // `indirect` buffer here, so `culled_batch` simply republishes the
-        // same buffer reference `indirect_dispatch` already holds.
+        // The source indirect records are refined by Hi-Z, then copied and
+        // compacted into this pass's output buffer for downstream geometry.
         //
         // Plain (non-panicking) lookup: this is legitimately optional (a
         // graph that omits `IndirectDispatchPass`, e.g. a focused test
@@ -421,13 +582,14 @@ impl RenderPass for OcclusionCullPass {
         // below already handles absence gracefully, but `frame.read()`
         // falls through to a debug-only panic on a missing key before ever
         // returning `None`, defeating that.
-        let Some(indirect_dispatch) = frame.get::<helio_pass_indirect_dispatch::IndirectDispatchFrameData<'a>>(helio_core::ResourceKey::new("indirect_dispatch")) else {
+        let Some(_indirect_dispatch) = frame.get::<helio_pass_indirect_dispatch::IndirectDispatchFrameData<'a>>(helio_core::ResourceKey::new("indirect_dispatch")) else {
             return;
         };
         let compacted_indices: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.compacted_indices_2_buf) };
+        let indirect: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.compacted_indirect_buf) };
         frame.write(helio_core::ResourceKey::new("culled_batch"), 
             crate::CulledBatchFrameData {
-                indirect: indirect_dispatch.indirect,
+                indirect,
                 compacted_indices,
             },
             "OcclusionCull",
@@ -459,6 +621,15 @@ impl RenderPass for OcclusionCullPass {
 
         let batch = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"));
         let draw_count = batch.map(|b| b.draw_count).unwrap_or(0);
+        let range_slots = batch.map(|b| b.range_slot_capacity).unwrap_or(0);
+        for bucket in 0..3u32 {
+            let params = [range_slots, bucket];
+            ctx.queue.write_buffer(
+                &self.range_compact_params,
+                bucket as u64 * 256,
+                bytemuck::cast_slice(&params),
+            );
+        }
         self.ensure_capacity(ctx.device, batch.map(|b| b.instance_count).unwrap_or(0));
 
         // `baked_pvs` is optional: published by helio-bake's BakeInjectPass
@@ -525,6 +696,7 @@ impl RenderPass for OcclusionCullPass {
             if batch.instance_count > 0 {
                 self.hiz_warmed_up = true;
             }
+            self.record_range_compaction(ctx, &batch, indirect_dispatch.indirect, draw_count);
             return Ok(());
         }
 
@@ -607,6 +779,7 @@ impl RenderPass for OcclusionCullPass {
 
         // One workgroup per draw-call group — its 64 lanes cooperatively
         // Hi-Z-test and compact that group's frustum survivors.
+        {
         let mut pass =
             unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("OcclusionCull"),
@@ -615,6 +788,8 @@ impl RenderPass for OcclusionCullPass {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.dispatch_workgroups(draw_count, 1, 1);
+        }
+        self.record_range_compaction(ctx, &batch, indirect_dispatch.indirect, draw_count);
         Ok(())
     }
 }

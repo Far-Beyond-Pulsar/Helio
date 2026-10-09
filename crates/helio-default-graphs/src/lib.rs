@@ -38,7 +38,7 @@ use helio_pass_postprocess::{
     FogCompositePass, PostProcessPass, PostProcessVolumeBlendPass, FOGGED_HDR, FOGGED_HDR_FORMAT,
 };
 use helio_pass_shadow::ShadowPass;
-use helio_pass_shadow_cull::ShadowCullPass;
+
 use helio_pass_shadow_dirty::ShadowDirtyPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
@@ -144,8 +144,7 @@ fn declare_common_external_inputs(graph: &mut RenderGraph) {
 /// are swapped together:
 ///
 /// * shadows: `ShadowMatrixPass` + `ShadowDirtyPass` (dirty-flag buffer),
-///   `ShadowDirtyPass` + `ShadowCullPass` + `ShadowPass` (face dirty, geometry
-///   count, indirect and count buffers)
+///   `ShadowDirtyPass` + `ShadowPass` (face dirty and geometry count buffers)
 /// * `HiZBuildPass` + `OcclusionCullPass` (Hi-Z sampler)
 /// * `PortalCullPass` + `PortalInstancePass` (portal output buffers)
 /// * `FoliagePlacePass` + `FoliageGBufferPass` (blade arena, tile table,
@@ -200,7 +199,6 @@ fn default_swap_policy() -> helio_core::SwapPolicy {
         .group_types(&[
             name::<ShadowMatrixPass>(),
             name::<ShadowDirtyPass>(),
-            name::<ShadowCullPass>(),
             name::<ShadowPass>(),
         ])
         .group_types(&[name::<HiZBuildPass>(), name::<OcclusionCullPass>()])
@@ -275,7 +273,9 @@ fn add_common_early_passes(
     // matrix per atlas face, rounded up to whole 6-face caster slots. (This was
     // a SceneDB lookup of a key nothing registers: a 64-byte dummy that held
     // one matrix, with nothing publishing it, so no raster shadow rendered.)
-    let shadow_face_slots = config.shadow_face_capacity.max(6).div_ceil(6) * 6;
+    let shadow_face_slots = helio_pass_shadow_matrix::MAX_SHADOW_FACES as u32;
+    let shadow_budget = config.shadow_budget.validate().expect("invalid renderer shadow budget");
+    let shadow_atlas_size = shadow_budget.atlas_size(device.limits().max_texture_dimension_2d);
     let shadow_matrices_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Shadow Matrices"),
         size: u64::from(shadow_face_slots)
@@ -302,7 +302,7 @@ fn add_common_early_passes(
 
     let shadow_dirty_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Shadow Dirty Flags"),
-        size: 42 * 4,
+        size: helio_pass_shadow_matrix::MAX_SHADOW_CASTERS as u64 * 4,
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
             | wgpu::BufferUsages::COPY_DST,
@@ -310,7 +310,7 @@ fn add_common_early_passes(
     }));
     let shadow_hashes_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Shadow Hashes"),
-        size: 42 * 4,
+        size: helio_pass_shadow_matrix::MAX_SHADOW_CASTERS as u64 * 4,
         usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
@@ -322,28 +322,16 @@ fn add_common_early_passes(
         camera_buf,
         &shadow_dirty_buf,
         &shadow_hashes_buf,
-        config.shadow_atlas_size,
-    )));
+        shadow_atlas_size,
+    ).with_budget(shadow_budget, h)));
 
     let shadow_dirty_pass = ShadowDirtyPass::new(device, Arc::clone(&shadow_dirty_buf));
     let face_dirty_buf = Arc::clone(&shadow_dirty_pass.face_dirty_buf);
     let face_geom_count_buf = Arc::clone(&shadow_dirty_pass.face_geom_count_buf);
     graph.add_pass(Box::new(shadow_dirty_pass));
 
-    let shadow_cull_pass = ShadowCullPass::new(device, Arc::clone(&face_dirty_buf));
-    let face_cull_indirect = Arc::clone(&shadow_cull_pass.face_indirect_buf);
-    let face_cull_counts = Arc::clone(&shadow_cull_pass.face_counts_buf);
-    graph.add_pass(Box::new(shadow_cull_pass));
-
-    graph.add_pass(Box::new(ShadowPass::new(
-        device,
-        queue,
-        face_dirty_buf,
-        face_geom_count_buf,
-        face_cull_indirect,
-        face_cull_counts,
-        config.shadow_atlas_size,
-        config.shadow_face_capacity,
+    graph.add_pass(Box::new(ShadowPass::new_tiled(
+        device, queue, face_dirty_buf, face_geom_count_buf, shadow_atlas_size,
     )));
 
     // The black background the sky (the atmosphere composite) and every

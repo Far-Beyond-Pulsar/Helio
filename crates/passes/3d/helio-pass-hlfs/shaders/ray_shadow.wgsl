@@ -6,7 +6,8 @@ struct RayTransmissionData { header: vec4<u32>, rows: array<vec4<f32>> };
 fn shadow_factor_from_receiver(id: u32, origin: vec3<f32>, position: vec3<f32>, normal: vec3<f32>, pixel: vec2<f32>, frame: u32) -> Visibility {
     let light=lights[id];
     let cast_shadow=select(light.shadow_index!=INVALID_LIGHT,(light._pad&2u)!=0u,(light._pad&1u)!=0u);
-    if !cast_shadow { return Visibility(1.0); }
+    let caster_mask=select(1u,0u,(light._pad&16u)!=0u)|select(2u,0u,(light._pad&32u)!=0u);
+    if !cast_shadow || caster_mask==0u { return Visibility(1.0); }
 
     let inc=incident(light,origin);
     var distance=globals.ray_settings.x;
@@ -15,7 +16,7 @@ fn shadow_factor_from_receiver(id: u32, origin: vec3<f32>, position: vec3<f32>, 
     var query: ray_query;
     if !USE_RAY_TRANSMISSION {
         // Preserve the opaque-only early-termination path.
-        rayQueryInitialize(&query,acc_struct,RayDesc(0x05u,0xffu,0.0001,distance,origin,inc.direction));
+        rayQueryInitialize(&query,acc_struct,RayDesc(0x05u,caster_mask,0.0001,distance,origin,inc.direction));
         while rayQueryProceed(&query) {}
         return Visibility(select(0.0,1.0,rayQueryGetCommittedIntersection(&query).kind==RAY_QUERY_INTERSECTION_NONE));
     }
@@ -24,7 +25,7 @@ fn shadow_factor_from_receiver(id: u32, origin: vec3<f32>, position: vec3<f32>, 
     // candidate triangle is a thin sheet; reject it after accumulating tint so
     // traversal keeps visiting candidates in its unspecified order.
     var throughput=vec3<f32>(1.0);
-    rayQueryInitialize(&query,acc_struct,RayDesc(select(0x02u,0x04u,(ray_transmission.header.x&1u)!=0u),0xffu,0.0001,distance,origin,inc.direction));
+    rayQueryInitialize(&query,acc_struct,RayDesc(select(0x02u,0x04u,(ray_transmission.header.x&1u)!=0u),caster_mask,0.0001,distance,origin,inc.direction));
     while rayQueryProceed(&query) {
         let hit=rayQueryGetCandidateIntersection(&query);
         if hit.instance_index>=min(ray_transmission.header.y,arrayLength(&ray_transmission.rows)) {

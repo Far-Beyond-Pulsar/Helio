@@ -92,7 +92,23 @@ fn create_draw_counts_buffer(device: &wgpu::Device, slots: usize) -> wgpu::Buffe
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("ObjBatch DrawCounts"),
         size: (slots * 4) as u64,
-        usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::INDIRECT
+            | wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn create_range_count_buffer(device: &wgpu::Device) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("ObjBatch RangeCount"),
+        // Four count words followed by one 12-byte dispatch argument for
+        // each of the opaque, transparent, and forward range tables.
+        size: 13 * 4,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::INDIRECT,
         mapped_at_creation: false,
     })
 }
@@ -270,7 +286,6 @@ struct ScratchBuffers {
     opaque_ranges: wgpu::Buffer,
     transparent_ranges: wgpu::Buffer,
     forward_ranges: wgpu::Buffer,
-    range_bucket_counts: wgpu::Buffer,
     shadow_static_indirect: wgpu::Buffer,
     shadow_movable_indirect: wgpu::Buffer,
     /// Static transparent-only casters, drawn into the coloured
@@ -310,13 +325,15 @@ impl ScratchBuffers {
             group_graph_hash_lo: create_storage_buffer(device, "ObjBatch GroupHashLo", n * 4),
             group_graph_hash_hi: create_storage_buffer(device, "ObjBatch GroupHashHi", n * 4),
             group_shading: create_storage_buffer(device, "ObjBatch GroupShading", n * 4),
-            local_range_rank: create_storage_buffer(device, "ObjBatch LocalRangeRank", n * 4),
+            // Three packed prefix ranks per draw group (opaque, transparent,
+            // forward), so every material-range table has deterministic order.
+            local_range_rank: create_storage_buffer(device, "ObjBatch LocalRangeRank", n * 12),
             block_range_totals: create_storage_buffer(
                 device,
                 "ObjBatch BlockRangeTotals",
-                blocks * 4,
+                blocks * 12,
             ),
-            range_count: create_storage_buffer(device, "ObjBatch RangeCount", 16),
+            range_count: create_range_count_buffer(device),
             opaque_ranges: create_storage_buffer(device, "ObjBatch OpaqueRanges", n * RANGE_BYTES),
             transparent_ranges: create_storage_buffer(
                 device,
@@ -328,7 +345,6 @@ impl ScratchBuffers {
                 "ObjBatch ForwardRanges",
                 n * RANGE_BYTES,
             ),
-            range_bucket_counts: create_storage_buffer(device, "ObjBatch RangeBucketCounts", 16),
             shadow_static_indirect: create_indirect_buffer(
                 device,
                 "ObjBatch ShadowStaticIndirect",
@@ -410,9 +426,7 @@ pub struct ObjectBatchPass {
     /// device lacks `MULTI_DRAW_INDIRECT_COUNT`. Layout documented on
     /// [`helio_pass_gbuffer::ObjectBatchFrameData::draw_counts`].
     draw_counts: Option<wgpu::Buffer>,
-    /// What `draw_counts` holds, so it is rewritten only when a readback
-    /// changes it.
-    draw_counts_cpu: Vec<u32>,
+    supports_multi_draw_count: bool,
 }
 
 impl ObjectBatchPass {
@@ -761,47 +775,14 @@ impl ObjectBatchPass {
             settled: false,
             skip_this_frame: false,
             fallback_buf,
-            draw_counts: device
+            draw_counts: Some(create_draw_counts_buffer(
+                device,
+                (MIN_SCRATCH_CAPACITY as usize * 3 + 4).max(MIN_DRAW_COUNT_SLOTS),
+            )),
+            supports_multi_draw_count: device
                 .features()
-                .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT)
-                .then(|| create_draw_counts_buffer(device, MIN_DRAW_COUNT_SLOTS)),
-            draw_counts_cpu: Vec::new(),
+                .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
         }
-    }
-
-    /// Mirror the counts the last readback produced into `draw_counts`.
-    /// Called after every readback poll, so the published ranges and the
-    /// counts consumers draw with always come from the same readback.
-    fn sync_draw_counts(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
-        let Some(buffer) = self.draw_counts.as_ref() else {
-            return;
-        };
-        let (draw_count, shadow_static, shadow_movable) = self.readback.counts();
-        let mut counts = Vec::with_capacity(self.draw_counts_cpu.len().max(4));
-        counts.extend([
-            draw_count,
-            shadow_static,
-            shadow_movable,
-            self.readback.shadow_transmissive(),
-        ]);
-        for ranges in [
-            self.readback.opaque(),
-            self.readback.transparent(),
-            self.readback.forward(),
-        ] {
-            counts.extend(ranges.iter().map(|&(_, _, _, count)| count));
-        }
-        if counts == self.draw_counts_cpu {
-            return;
-        }
-        let needed = (counts.len() * 4) as u64;
-        if buffer.size() < needed {
-            let slots = counts.len().next_power_of_two().max(MIN_DRAW_COUNT_SLOTS);
-            self.draw_counts = Some(create_draw_counts_buffer(device, slots));
-        }
-        let buffer = self.draw_counts.as_ref().expect("checked above");
-        helio_core::upload::write_buffer(queue, buffer, 0, bytemuck::cast_slice(&counts));
-        self.draw_counts_cpu = counts;
     }
 
     /// Grows every scratch buffer to at least `needed` rows, next-power-of-
@@ -816,6 +797,14 @@ impl ObjectBatchPass {
         }
         let new_capacity = needed.next_power_of_two().max(MIN_SCRATCH_CAPACITY);
         self.scratch = ScratchBuffers::new(device, new_capacity);
+        let needed_count_slots = new_capacity as usize * 3 + 4;
+        if self
+            .draw_counts
+            .as_ref()
+            .is_none_or(|buffer| buffer.size() < (needed_count_slots * 4) as u64)
+        {
+            self.draw_counts = Some(create_draw_counts_buffer(device, needed_count_slots));
+        }
         self.draw_calls_out = create_storage_buffer(
             device,
             "ObjBatch DrawCalls",
@@ -1032,7 +1021,7 @@ impl ObjectBatchPass {
                 bg_entry(7, &s.opaque_ranges),
                 bg_entry(8, &s.transparent_ranges),
                 bg_entry(9, &s.forward_ranges),
-                bg_entry(10, &s.range_bucket_counts),
+                bg_entry(10, self.draw_counts.as_ref().expect("draw-count buffer")),
             ],
         }));
 
@@ -1060,7 +1049,6 @@ impl ObjectBatchPass {
         encoder.clear_buffer(&self.scratch.gather_count, 0, None);
         encoder.clear_buffer(&self.scratch.group_count, 0, None);
         encoder.clear_buffer(&self.scratch.range_count, 0, None);
-        encoder.clear_buffer(&self.scratch.range_bucket_counts, 0, None);
         encoder.clear_buffer(&self.scratch.shadow_counts, 0, None);
 
         {
@@ -1213,6 +1201,10 @@ impl ObjectBatchPass {
             pass.set_bind_group(0, self.shadow_partition_bg.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups_indirect(&self.scratch.dispatch_args, 0);
         }
+        if let Some(draw_counts) = self.draw_counts.as_ref() {
+            encoder.copy_buffer_to_buffer(&self.scratch.group_count, 0, draw_counts, 0, 4);
+            encoder.copy_buffer_to_buffer(&self.scratch.shadow_counts, 0, draw_counts, 4, 12);
+        }
     }
 
     /// GPU-produced, sorted-order instance buffer -- same shape as
@@ -1259,7 +1251,7 @@ impl ObjectBatchPass {
         &self.scratch.group_count
     }
     pub fn range_bucket_counts_buffer(&self) -> &wgpu::Buffer {
-        &self.scratch.range_bucket_counts
+        &self.scratch.range_count
     }
     pub fn shadow_counts_buffer(&self) -> &wgpu::Buffer {
         &self.scratch.shadow_counts
@@ -1349,8 +1341,8 @@ impl ObjectBatchPass {
     /// `prepare()` performs each frame, for tests driving the pass outside a
     /// `RenderGraph` (pair with [`Self::run_once_for_testing`]).
     pub fn poll_readback_for_testing(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
-        self.readback.poll_and_kick_off(device, queue, &self.scratch);
-        self.sync_draw_counts(device, queue);
+        self.readback
+            .poll_and_kick_off(device, queue, &self.scratch, true);
     }
 }
 
@@ -1394,6 +1386,11 @@ impl RenderPass for ObjectBatchPass {
                 opaque_ranges: self.opaque_ranges(),
                 transparent_ranges: self.transparent_ranges(),
                 forward_ranges: self.forward_ranges(),
+                opaque_ranges_gpu: &self.scratch.opaque_ranges,
+                transparent_ranges_gpu: &self.scratch.transparent_ranges,
+                forward_ranges_gpu: &self.scratch.forward_ranges,
+                range_counts_gpu: &self.scratch.range_count,
+                draw_counts_gpu: self.draw_counts.as_ref().expect("draw-count buffer"),
                 shadow_static_indirect: &self.scratch.shadow_static_indirect,
                 shadow_static_draw_count,
                 shadow_movable_indirect: &self.scratch.shadow_movable_indirect,
@@ -1401,7 +1398,10 @@ impl RenderPass for ObjectBatchPass {
                 shadow_transmissive_indirect: &self.scratch.shadow_transmissive_indirect,
                 shadow_transmissive_draw_count: self.readback.shadow_transmissive(),
                 shadow_static_generation: self.shadow_static_generation(),
-                draw_counts: self.draw_counts.as_ref(),
+                draw_counts: self
+                    .supports_multi_draw_count
+                    .then(|| self.draw_counts.as_ref().expect("draw-count buffer")),
+                range_slot_capacity: self.scratch_capacity,
             })
         };
         frame.write(helio_core::ResourceKey::new("object_batch"), data, "ObjectBatch");
@@ -1500,8 +1500,7 @@ impl RenderPass for ObjectBatchPass {
         }
 
         self.readback
-            .poll_and_kick_off(ctx.device, ctx.queue, &self.scratch);
-        self.sync_draw_counts(ctx.device, ctx.queue);
+            .poll_and_kick_off(ctx.device, ctx.queue, &self.scratch, !self.skip_this_frame);
         Ok(())
     }
 

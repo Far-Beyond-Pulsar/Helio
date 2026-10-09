@@ -129,6 +129,19 @@ const _: () = assert!(std::mem::size_of::<GpuLight>() == 128);
 const _: () = assert!(std::mem::size_of::<GpuLight>() % 16 == 0);
 
 impl GpuLight {
+    /// Encode author policy without changing the 128-byte GPU light ABI.
+    /// Priority is quantized in sixteenths; zero encoding means the default 1.
+    pub fn shadow_policy_bits(priority: f32, max_resolution: u32, static_shadows: bool, dynamic_shadows: bool, contact_shadows: bool) -> u32 {
+        let priority = if priority.is_finite() { (priority.clamp(0.0625, 15.9375) * 16.0).round() as u32 } else { 16 };
+        let resolution = max_resolution.clamp(128, 2048).ilog2();
+        (u32::from(!static_shadows) << 4) | (u32::from(!dynamic_shadows) << 5)
+            | (u32::from(!contact_shadows) << 6) | (priority << 8) | (resolution << 16)
+    }
+
+    pub fn set_shadow_policy(&mut self, priority: f32, max_resolution: u32, static_shadows: bool, dynamic_shadows: bool, contact_shadows: bool) {
+        self._pad = (self._pad & 15) | Self::shadow_policy_bits(priority, max_resolution, static_shadows, dynamic_shadows, contact_shadows);
+    }
+
     /// Set ray-traced shadow intent independently of shadow-map allocation.
     /// External GPU light writers must encode the same low two bits in `_pad`.
     pub fn set_ray_traced_shadows(&mut self, enabled: bool) {

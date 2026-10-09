@@ -1,5 +1,5 @@
-//! The final, fully-culled (frustum + Hi-Z occlusion) indirect draw args and
-//! compacted instance indices -- what every pass that actually issues
+//! The final, fully-culled (frustum + Hi-Z occlusion), per-range-compacted
+//! indirect draw args and compacted instance indices -- what every pass that actually issues
 //! `multi_draw_indexed_indirect` calls (`helio-pass-gbuffer`, `helio-pass-
 //! shadow` and its `-cull`/`-dirty` siblings, `helio-pass-transparent`,
 //! `helio-pass-forward-lit`, `helio-pass-depth-prepass`, `helio-pass-
@@ -13,8 +13,9 @@
 //! would be a dependency cycle.
 #[derive(Clone, Copy)]
 pub struct CulledBatchFrameData<'a> {
-    /// Per-group indirect draw args, `instance_count` replaced with each
-    /// group's final (frustum + occlusion) surviving count.
+    /// Per-range packed indirect args for groups with at least one surviving
+    /// instance. Unused tail slots have zero `instance_count` for non-count
+    /// multi-draw fallbacks.
     pub indirect: &'a wgpu::Buffer,
     /// Final surviving instance slots, packed per draw-call group -- index
     /// `instances` (from [`crate::ObjectBatchFrameData`]) through this.

@@ -57,7 +57,7 @@ pub const MESH_FLAGS_ROW_BYTES: u64 = 4;
 /// One mesh section: draw range, material class and graph hash, then a
 /// `helio_mats::GpuMaterial`.
 pub const MESH_SECTION_ROW_BYTES: u64 = 128;
-/// A `GpuLight` in light space, its padding word carrying `enabled`.
+/// A `GpuLight` in light space, bit 31 of its `_pad` word carrying `enabled`.
 pub const LIGHT_SOURCE_ROW_BYTES: u64 = 128;
 
 const OBJECT_ROW_BYTES: u64 = 236;
