@@ -33,7 +33,7 @@ struct Globals {
     // rebuilt dense array needing `light_entity_indices[i]`. See that
     // binding's doc.
     light_mode_direct_index: u32,
-    _pad0: u32,
+    time: f32, // RADIANT_GLOBALS_TIME: seconds since start, for graph time nodes
     _pad1: u32,
     _pad2: u32,
 }

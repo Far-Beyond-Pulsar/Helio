@@ -405,7 +405,7 @@ fn enable_ray_shadows(world: &mut World, objects: &[Entity]) {
             .find(|(entity, _)| entity.index() == material_slot)
             .is_some_and(|(entity, (m,))| {
                 m.flags & helio_mats::FLAG_ALPHA_BLEND != 0
-                    && world.get::<helio_pass_hlfs::RayTransmission>(entity).is_none()
+                    && world.get::<helio_default_graphs::ray_tracing::RayTransmission>(entity).is_none()
             });
         if !blended {
             world.get_mut::<StaticObjectComponent>(id).unwrap().flags |=
@@ -497,7 +497,7 @@ struct Bench {
     queue: Arc<wgpu::Queue>,
     scene_db: SceneDb,
     renderer: Renderer,
-    acceleration: Option<helio_pass_hlfs::SceneDbRayTracing>,
+    acceleration: Option<helio_default_graphs::ray_tracing::SceneDbRayTracing>,
     view: wgpu::TextureView,
     scene: BenchScene,
     /// Every light and its authored position, for `move_lights`.
@@ -673,7 +673,7 @@ fn build_bench(
                 },
             );
         }
-        helio_pass_hlfs::SceneDbRayTracing::new(device.clone(), queue.clone())
+        helio_default_graphs::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone())
     });
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("move_benchmark target"),

@@ -37,7 +37,7 @@ struct Globals {
     debug_mode: u32,
     screen_width: f32,
     screen_height: f32,
-    _pad0: u32,
+    time: f32, // RADIANT_GLOBALS_TIME: seconds since start, for graph time nodes
 }
 
 /// GPU material (112 bytes, matches libhelio::GpuMaterial)

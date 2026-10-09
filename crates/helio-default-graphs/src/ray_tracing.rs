@@ -1,5 +1,9 @@
 //! Frontend-owned acceleration projection of SceneDB's static shadow casters.
 //! No renderer-owned scene table or GPU readback is involved.
+//!
+//! A host adapter: it reads a CPU `World` through change cursors, so it lives
+//! with the frontend graphs. `helio_pass_hlfs` consumes only the TLAS and
+//! transmission rows the renderer publishes (Pulsar-Native#1066).
 use helio_core::{BlasGeometry, BlasManager, Movability, TlasInstanceInput, TlasManager};
 use helio_pass_gbuffer::{
     MaterialComponent, MeshComponent, RenderGroupComponent, StaticObjectComponent,

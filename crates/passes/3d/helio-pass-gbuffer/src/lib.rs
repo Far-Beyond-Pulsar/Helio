@@ -69,7 +69,9 @@ pub struct GBufferGlobals {
     pub debug_mode: u32,
     pub screen_width: f32,
     pub screen_height: f32,
-    pub _pad0: u32,
+    /// Seconds since start ([`helio_mats::graph_time_seconds`]): the
+    /// shader-graph `time` node.
+    pub time: f32,
 }
 
 // ── Pass struct ───────────────────────────────────────────────────────────────
@@ -635,7 +637,7 @@ impl RenderPass for GBufferPass {
             debug_mode: self.debug_mode,
             screen_width: ctx.width as f32,
             screen_height: ctx.height as f32,
-            _pad0: 0,
+            time: helio_mats::graph_time_seconds(),
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())

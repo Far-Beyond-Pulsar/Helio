@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 
 use super::resource_lifetime::ResourceLifetime;
-use super::scheduling::{compute_parallel_layers, CachedPass, PrePassAction};
+use super::scheduling::{compute_parallel_layers, CachedPass, PrePassAction, PARALLEL_RECORDING};
 use super::{DebugPassInfo, DebugResourceInfo, FrameDebugData};
 
 /// Maximum number of resident render workers. Bounded so a flamegraph records
@@ -1717,13 +1717,9 @@ impl RenderGraph {
         };
         let resized_this_frame = self.resize_pending;
 
-        // The persistent worker-pool path is not safe to enter from every
-        // host/example yet: its per-wave rendezvous can wait forever when a
-        // worker is inside a backend call that does not return to the pool.
-        // Keep graph correctness and profiling available through the serial
-        // executor until the worker protocol is replaced with a completion
-        // primitive that cannot block the render caller.
-        let use_parallel_recording = false;
+        // Chain detection read the same switch, so fused chains exist only
+        // when this records serially (see `PARALLEL_RECORDING`).
+        let use_parallel_recording = PARALLEL_RECORDING;
         let (parallel_command_buffers, parallel_cpu_timings, mut worker_profilers) =
             if use_parallel_recording {
                 self.execute_parallel_layers(

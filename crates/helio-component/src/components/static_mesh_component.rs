@@ -127,6 +127,23 @@ pub struct StaticMeshMaterialSlot {
     pub imported_surface: crate::mesh_cache::ImportedSurfaceMaterial,
     #[serde(default)]
     pub surface_override: Option<crate::mesh_cache::ImportedSurfaceMaterial>,
+    /// The mesh asset's own default material for this slot (authored in the
+    /// mesh viewer). Refreshed from the asset whenever it loads and never
+    /// saved with the level; an empty `material_asset` inherits it.
+    #[serde(skip)]
+    pub mesh_default_material: String,
+}
+
+impl StaticMeshMaterialSlot {
+    /// The material asset this slot draws with: its own assignment, else the
+    /// mesh asset's default for the slot (empty: the imported surface).
+    pub fn effective_material_asset(&self) -> &str {
+        if self.material_asset.trim().is_empty() {
+            &self.mesh_default_material
+        } else {
+            &self.material_asset
+        }
+    }
 }
 
 /// Temporary persistence adapter for levels authored with the deprecated
@@ -426,6 +443,8 @@ struct MaterialSlotPickerRow {
     key: (Option<u32>, usize),
     name: String,
     path: String,
+    /// The mesh asset's default for this slot, shown while `path` is empty.
+    inherited: String,
     picker: gpui::Entity<ui_common::asset_picker::MeshAssetPicker>,
 }
 
@@ -508,6 +527,7 @@ impl StaticMeshMaterialSlotsEditor {
                     slot.name.clone()
                 },
                 path: slot.material_asset.clone(),
+                inherited: slot.mesh_default_material.clone(),
                 picker,
             });
         }
@@ -617,6 +637,7 @@ impl StaticMeshMaterialSlotsEditor {
         }
         self.value = value.clone();
         for (row, slot) in self.rows.iter_mut().zip(&value.slots) {
+            row.inherited = slot.mesh_default_material.clone();
             if row.path != slot.material_asset {
                 row.path = slot.material_asset.clone();
                 row.picker.update(cx, |picker, _| {
@@ -655,14 +676,20 @@ impl gpui::Render for StaticMeshMaterialSlotsEditor {
         for (index, row) in self.rows.iter().enumerate() {
             let picker = row.picker.clone();
             let row_key = row.key;
-            let display = if row.path.is_empty() {
-                "Use imported material".to_owned()
+            let shown = if row.path.is_empty() {
+                &row.inherited
             } else {
-                std::path::Path::new(&row.path)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or(&row.path)
-                    .to_owned()
+                &row.path
+            };
+            let file_name = std::path::Path::new(shown)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(shown)
+                .to_owned();
+            let display = match (row.path.is_empty(), shown.is_empty()) {
+                (true, true) => "Use imported material".to_owned(),
+                (true, false) => format!("{file_name} (mesh default)"),
+                _ => file_name,
             };
             rows = rows.child(
                 h_flex()
@@ -930,6 +957,7 @@ fn reconcile_material_slots(
                     .unwrap_or_default(),
                 imported_surface: source.surface,
                 surface_override: previous.and_then(|slot| slot.surface_override),
+                mesh_default_material: source.material_asset.clone(),
             }
         })
         .collect();
