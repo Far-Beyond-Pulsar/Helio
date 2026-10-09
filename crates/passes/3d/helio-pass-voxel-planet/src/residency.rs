@@ -253,10 +253,49 @@ impl EditHeap {
     }
 }
 
+/// Generation work one frame may issue: predicted GPU work ([`job_units`])
+/// and a cap on the job count (the job and readback buffers).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct JobBudget {
+    pub units: f64,
+    pub jobs: usize,
+}
+
+impl JobBudget {
+    /// Up to `jobs` jobs, whatever their work.
+    pub fn jobs(jobs: usize) -> Self {
+        Self { units: f64::INFINITY, jobs }
+    }
+    fn allows(&self, work: &FrameWork) -> bool {
+        work.units < self.units && work.jobs.len() < self.jobs
+    }
+}
+
+/// GPU generation work of one level cell a column's lanes evaluate through
+/// the volume (caves, overhangs), in heightfield columns. Fitted on a
+/// mountain flight (2,875 frames, generate GPU time against the jobs and
+/// their volume cells): 0.70 us a heightfield column, 0.060 us a cell.
+pub const UNITS_PER_VOLUME_CELL: f64 = 0.085;
+
+/// Predicted GPU work of generating column `key`, in heightfield columns:
+/// one, plus the volume cells its lanes evaluate (the field's extent at the
+/// column's centre; `terrain_extent` in WGSL). A cave or overhang column at
+/// a fine level evaluates hundreds of cells a lane and costs tens of times a
+/// heightfield column: counting jobs alone let such runs take 100+ ms.
+pub fn job_units(planet: &Planet, key: u64) -> f64 {
+    let (face, level, ci, cj) = unpack(key);
+    let half = BRICK as i32 / 2;
+    let p = planet.grid().domain_point(face, ci * BRICK as i32 + half, cj * BRICK as i32 + half, level);
+    let (below, above) = planet.field().extent(p, level);
+    1.0 + f64::from(below.max(0) + above.max(0)) * UNITS_PER_VOLUME_CELL
+}
+
 /// Work produced for one frame.
 #[derive(Default)]
 pub struct FrameWork {
     pub jobs: Vec<Job>,
+    /// Predicted GPU work of the jobs ([`job_units`]).
+    pub units: f64,
     pub evictions: Vec<u32>,
     /// Column table patches `(slot, record)`. The GPU applies them in
     /// parallel, so `plan` returns each slot once with its final value
@@ -803,9 +842,9 @@ impl Residency {
         self.stats.reranked += done;
     }
 
-    /// Plan one frame. `lod0` is the level-0 distance, `budget` the maximum
-    /// number of column jobs.
-    pub fn plan(&mut self, planet: &std::sync::Arc<Planet>, eye: DVec3, lod0: f64, budget: usize) -> FrameWork {
+    /// Plan one frame. `lod0` is the level-0 distance, `budget` the work and
+    /// jobs it may issue.
+    pub fn plan(&mut self, planet: &std::sync::Arc<Planet>, eye: DVec3, lod0: f64, budget: JobBudget) -> FrameWork {
         self.frame = self.frame.wrapping_add(1);
         let started = std::time::Instant::now();
         let budget_time = self.cpu_budget;
@@ -875,7 +914,7 @@ impl Residency {
         urgent.dedup();
         let mut deferred_urgent = Vec::new();
         for key in urgent {
-            if work.jobs.len() >= budget {
+            if !budget.allows(&work) {
                 deferred_urgent.push(key);
                 continue;
             }
@@ -890,6 +929,7 @@ impl Residency {
                 self.edits.release(old);
             }
             self.residents.get_mut(key).unwrap().edit_block = block;
+            work.units += job_units(planet, key);
             work.jobs.push(Job {
                 key0: key as u32,
                 key1: (key >> 32) as u32,
@@ -907,7 +947,7 @@ impl Residency {
         // blocks, table): bounded by time as well as by the GPU budget, and
         // resumes next frame.
         let mut steps = 0u32;
-        while work.jobs.len() < budget {
+        while budget.allows(&work) {
             steps += 1;
             if steps % 64 == 0 && out_of_time() {
                 break;
@@ -952,6 +992,7 @@ impl Residency {
             }
             let slot = self.residents.insert(key, Resident { record, slot: 0, edit_block: block, blocks });
             work.table_writes.push((slot, record));
+            work.units += job_units(planet, key);
             work.jobs.push(Job {
                 key0: key as u32,
                 key1: (key >> 32) as u32,
@@ -1136,8 +1177,8 @@ pub struct PlanRequest {
     pub lod0: f64,
     /// Traversal level-transition dither (`Residency::set_lod_dither`).
     pub lod_dither: f64,
-    /// Maximum column jobs.
-    pub budget: usize,
+    /// Work and jobs the plan may issue.
+    pub budget: JobBudget,
     /// CPU time for diffs, re-ranking and admission.
     pub cpu_budget: std::time::Duration,
     /// Job outcomes read back since the last request (key, status, word; see
@@ -1302,7 +1343,7 @@ mod tests {
         let settle = |r: &mut Residency, eye: DVec3, worst: &mut f64| {
             for _ in 0..20_000 {
                 let started = std::time::Instant::now();
-                r.plan(&planet, eye, lod0, 100_000);
+                r.plan(&planet, eye, lod0, JobBudget::jobs(100_000));
                 *worst = worst.max(started.elapsed().as_secs_f64() * 1000.0);
                 if r.idle() {
                     return;
@@ -1346,7 +1387,7 @@ mod tests {
             let mut residency = Residency::new(grid, Capacity::default());
             let mut total = 0;
             for _ in 0..1000 {
-                let work = residency.plan(&planet, eye, lod0, 100_000);
+                let work = residency.plan(&planet, eye, lod0, JobBudget::jobs(100_000));
                 total += work.jobs.len();
                 if residency.idle() {
                     break;
@@ -1357,7 +1398,7 @@ mod tests {
             assert!(total < 1_900_000, "{total}");
             assert_eq!(total, residency.residents.len());
             // A repeated plan at the same pose issues no work.
-            let work = residency.plan(&planet, eye, lod0, 100_000);
+            let work = residency.plan(&planet, eye, lod0, JobBudget::jobs(100_000));
             assert!(work.jobs.is_empty() && work.evictions.is_empty());
             eprintln!("resident columns {}", residency.residents.len());
         }
@@ -1373,18 +1414,44 @@ mod tests {
         let ground = planet.surface_point(grid.direction(2, 3e7, 4e7), 1.8);
         let mut r = Residency::new(grid, Capacity::default());
         // Nothing is issued (budget 0): every wanted column stays pending.
-        r.plan(&planet, ground, lod0, 0);
+        r.plan(&planet, ground, lod0, JobBudget::jobs(0));
         let radius = r.levels[0].radius;
         assert!(r.levels[0].pending.len() > 10_000, "{}", r.levels[0].pending.len());
         let east = ground.normalize().any_orthonormal_vector();
         let eye = planet.surface_point(ground + east * radius * 0.4, 1.8);
         for _ in 0..64 {
-            r.plan(&planet, eye, lod0, 0);
+            r.plan(&planet, eye, lod0, JobBudget::jobs(0));
         }
         assert!(r.levels[0].rerank.is_empty() && r.stats.reranked > 0);
         let (key, _) = r.levels[0].pending.pop().unwrap();
         let distance = grid.ground_distance(column_ground(&grid, key), eye.normalize());
         assert!(distance < radius / 32.0, "next column {distance:.1} m from the eye (radius {radius:.1} m)");
+    }
+
+    /// A plan stops at its work budget, counted in predicted units, and at
+    /// its job cap.
+    #[test]
+    fn plans_stop_at_their_work_budget() {
+        let planet = std::sync::Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
+        let grid = *planet.grid();
+        let lod0 = Residency::lod_distance(&grid, (22.5f64).to_radians().tan(), 1080, 1.0);
+        let eye = planet.surface_point(grid.direction(2, 3e7, 4e7), 1.8);
+        let mut r = Residency::new(grid, Capacity::default());
+        let mut units = Vec::new();
+        for _ in 0..8 {
+            let work = r.plan(&planet, eye, lod0, JobBudget { units: 500.0, jobs: 100_000 });
+            assert!(!work.jobs.is_empty());
+            let issued: f64 = work.jobs.iter().map(|j| job_units(&planet, pack(j.key0, j.key1))).sum();
+            assert!((issued - work.units).abs() < 1e-6, "units are the jobs' units");
+            // At most one job past the budget (the one that crossed it).
+            let last = job_units(&planet, pack(work.jobs.last().unwrap().key0, work.jobs.last().unwrap().key1));
+            assert!(work.units < 500.0 + last, "{} units", work.units);
+            units.extend(work.jobs.iter().map(|j| job_units(&planet, pack(j.key0, j.key1))));
+        }
+        assert!(units.iter().all(|&u| u >= 1.0), "a column costs at least a heightfield column");
+        // The job cap holds whatever the units.
+        let work = r.plan(&planet, eye, lod0, JobBudget { units: f64::INFINITY, jobs: 7 });
+        assert!(work.jobs.len() <= 7);
     }
 
     #[test]
@@ -1394,7 +1461,7 @@ mod tests {
         let mut residency = Residency::new(grid, Capacity { table_bits: 20, ..Default::default() });
         let mut eye = planet.surface_point(grid.direction(0, 3e7, 4e7), 2.0);
         for step in 0..40 {
-            let _ = residency.plan(&planet, eye, 120.0, 20_000);
+            let _ = residency.plan(&planet, eye, 120.0, JobBudget::jobs(20_000));
             eye = planet.surface_point(eye + DVec3::new(0.0, 0.0, 70.0 * f64::from(step % 3)), 2.0);
         }
         table_is_exact(&residency);

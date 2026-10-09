@@ -335,10 +335,13 @@ impl Flight {
         let stats = self.pass().stats().unwrap_or_default();
         let clocks = self.clocks.read();
         let row = format!(
-            "{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.1},{},{}",
+            "{},{},{},{:.1},{:.1},{:.3},{},{},{},{},{:.4},{:.4},{:.4},{:.1},{},{}",
             stats.resident_columns,
             stats.pending_columns,
             stats.jobs,
+            stats.units,
+            stats.unit_budget,
+            stats.us_per_unit,
             stats.evictions,
             stats.failed_jobs,
             stats.active_levels,
@@ -383,7 +386,8 @@ impl Flight {
                 for (name, ms) in timings {
                     *stages.entry(name).or_insert(0.0) += ms;
                 }
-                sample.terrain_gpu_ms = stages.values().sum();
+                // `planet_generate` is timed inside `planet_residency`.
+                sample.terrain_gpu_ms = stages.iter().filter(|(name, _)| **name != "planet_generate").map(|(_, ms)| ms).sum();
                 sample.stages = stages;
             }
         }
@@ -391,7 +395,7 @@ impl Flight {
 
     /// Write frames.csv (after the flight: GPU timings arrive late).
     fn write_csv(&mut self) {
-        writeln!(self.csv, "frame,stage,altitude_m,sync_ms,cpu_submit_ms,gpu_wait_ms,terrain_gpu_ms,residency_ms,primary_ms,shade_ms,gbuffer_ms,sunlight_ms,resident,pending,jobs,evictions,failed,active_levels,finest_level,plan_cpu_ms,upload_cpu_ms,encode_cpu_ms,logical_mib,gpu_clock_mhz,mem_clock_mhz").unwrap();
+        writeln!(self.csv, "frame,stage,altitude_m,sync_ms,cpu_submit_ms,gpu_wait_ms,terrain_gpu_ms,residency_ms,generate_ms,primary_ms,shade_ms,gbuffer_ms,sunlight_ms,resident,pending,jobs,units,unit_budget,us_per_unit,evictions,failed,active_levels,finest_level,plan_cpu_ms,upload_cpu_ms,encode_cpu_ms,logical_mib,gpu_clock_mhz,mem_clock_mhz").unwrap();
         for (index, s) in self.samples.iter().enumerate() {
             if s.terrain_gpu_ms.is_nan() {
                 continue;
@@ -399,7 +403,7 @@ impl Flight {
             let get = |n: &str| s.stages.get(n).copied().unwrap_or(0.0);
             writeln!(
                 self.csv,
-                "{index},{},{:.3},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{}",
+                "{index},{},{:.3},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{}",
                 s.stage,
                 s.altitude,
                 s.sync_ms,
@@ -407,6 +411,7 @@ impl Flight {
                 s.sync_ms - s.submit_ms,
                 s.terrain_gpu_ms,
                 get("planet_residency"),
+                get("planet_generate"),
                 get("planet_primary"),
                 get("planet_shade"),
                 get("planet_gbuffer"),
@@ -1405,7 +1410,7 @@ fn main() {
         let timed: Vec<&&Sample> = list.iter().filter(|s| !s.terrain_gpu_ms.is_nan()).collect();
         let terrain: Vec<f64> = timed.iter().map(|s| s.terrain_gpu_ms).collect();
         let mut stage_p95 = serde_json::Map::new();
-        for key in ["planet_residency", "planet_primary", "planet_shade", "planet_skylight", "planet_gbuffer", "planet_sunlight"] {
+        for key in ["planet_residency", "planet_generate", "planet_primary", "planet_shade", "planet_skylight", "planet_gbuffer", "planet_sunlight"] {
             let v: Vec<f64> = timed.iter().map(|s| s.stages.get(key).copied().unwrap_or(0.0)).collect();
             stage_p95.insert(key.into(), serde_json::json!(percentile(&v, 0.95)));
         }
@@ -1803,8 +1808,8 @@ fn cruise(flight: &mut Flight, height: f64) {
         if frame % 30 == 0 {
             let (a, b, w) = blocky(flight);
             eprintln!(
-                "CRUISE {stage} t {t:6.2} speed {speed:6.0} resident {} pending {} jobs {} budget {} us/job {:.3} plan {:.2} upload {:.2} blocky>2px {:.2}% >4px {:.2}% widest {w:.1}",
-                stats.resident_columns, stats.pending_columns, stats.jobs, stats.job_budget, stats.us_per_job, stats.plan_cpu_ms, stats.upload_cpu_ms, a * 100.0, b * 100.0
+                "CRUISE {stage} t {t:6.2} speed {speed:6.0} resident {} pending {} jobs {} units {:.0} budget {:.0} us/unit {:.3} plan {:.2} upload {:.2} blocky>2px {:.2}% >4px {:.2}% widest {w:.1}",
+                stats.resident_columns, stats.pending_columns, stats.jobs, stats.units, stats.unit_budget, stats.us_per_unit, stats.plan_cpu_ms, stats.upload_cpu_ms, a * 100.0, b * 100.0
             );
         }
         if frame % capture_every == 0 {
@@ -1866,8 +1871,8 @@ fn long_route(flight: &mut Flight, secs: f64) {
         let (longest, beyond, diffs) = flight.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap().residency_health();
         let (a, b, w) = blocky(flight);
         eprintln!(
-            "LONG {stage} t {t:6.1} h {height:8.0} v {speed:7.0} resident {} pending {} diffs {diffs} jobs {} budget {} failed {} free_pages {}/{} free_units {:.0}% recycles {} lod_pressure {:.2} probe {longest} beyond64 {beyond} plan {:.2} late {} reranked {} blocky>2px {:.2}% >4px {:.2}% widest {w:.1}",
-            stats.resident_columns, stats.pending_columns, stats.jobs, stats.job_budget, stats.failed_jobs, stats.free_pages, stats.pool_pages, stats.free_units as f64 / (f64::from(stats.pool_pages) * 512.0) * 100.0, stats.recycles, stats.lod_pressure, stats.plan_cpu_ms, stats.late_plans, stats.reranked, a * 100.0, b * 100.0
+            "LONG {stage} t {t:6.1} h {height:8.0} v {speed:7.0} resident {} pending {} diffs {diffs} jobs {} units {:.0} budget {:.0} failed {} free_pages {}/{} free_units {:.0}% recycles {} lod_pressure {:.2} probe {longest} beyond64 {beyond} plan {:.2} late {} reranked {} blocky>2px {:.2}% >4px {:.2}% widest {w:.1}",
+            stats.resident_columns, stats.pending_columns, stats.jobs, stats.units, stats.unit_budget, stats.failed_jobs, stats.free_pages, stats.pool_pages, stats.free_units as f64 / (f64::from(stats.pool_pages) * 512.0) * 100.0, stats.recycles, stats.lod_pressure, stats.plan_cpu_ms, stats.late_plans, stats.reranked, a * 100.0, b * 100.0
         );
         b
     };
@@ -2066,13 +2071,13 @@ fn sculpt_stress(flight: &mut Flight, ground: DVec3, heading: f64) {
         let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
         let stats = flight.pass().stats().unwrap();
         eprintln!(
-            "SCULPT {stage}: {} stamps (total edits {}), frame wall mean {:.2} p95 {:.2} ms, apply mean {:.3} ms, settle {settle_frames} frames {settle_ms:.0} ms, us/job {:.2}",
+            "SCULPT {stage}: {} stamps (total edits {}), frame wall mean {:.2} p95 {:.2} ms, apply mean {:.3} ms, settle {settle_frames} frames {settle_ms:.0} ms, us/unit {:.2}",
             stamp,
             flight.planet.edits().len(),
             mean(&wall),
             percentile(&wall, 0.95),
             mean(&apply),
-            stats.us_per_job,
+            stats.us_per_unit,
         );
     }
     flight.capture("sculpt");

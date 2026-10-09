@@ -1,7 +1,7 @@
 //! Helio integration: GPU residency, exact traversal and GBuffer output.
 use crate::grid::Cell;
 use crate::planet::Planet;
-use crate::residency::{Capacity, FrameWork, PlanRequest, PlanResult, Residency, ResidencyWorker, NONE};
+use crate::residency::{Capacity, FrameWork, JobBudget, PlanRequest, PlanResult, Residency, ResidencyWorker, NONE};
 use crate::terrain::TerrainProgram;
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, IVec4, Mat4, Vec3, Vec4};
@@ -100,7 +100,8 @@ pub struct Settings {
     pub lod_pixels: f32,
     /// Relative width of the stochastic level transition.
     pub lod_dither: f32,
-    /// Column jobs per frame.
+    /// Most column jobs a frame (the job and readback buffers); the GPU
+    /// work itself is budgeted in work units (`PlanetStats::unit_budget`).
     pub job_budget: usize,
     /// End rising eye rays at the directional sky bound.
     pub horizon: bool,
@@ -228,10 +229,12 @@ pub struct PlanetStats {
     pub window_rebuild_ms: f64,
     pub lod0_distance: f64,
     pub logical_bytes: u64,
-    /// Measured GPU generation cost per column job (microseconds) and this
-    /// frame's job budget.
-    pub us_per_job: f64,
-    pub job_budget: usize,
+    /// Measured GPU generation cost per work unit (microseconds; a unit is
+    /// a heightfield column, `residency::job_units`), the plan's unit budget
+    /// and the units this frame's jobs carry.
+    pub us_per_unit: f64,
+    pub unit_budget: f64,
+    pub units: f64,
 }
 
 /// Copy of the allocator counters and the failed jobs since the last copy.
@@ -867,20 +870,19 @@ pub struct PlanetRenderer {
     sun_active: bool,
     profiler: Option<helio_core::profiling::GpuProfiler>,
     initial_complete: bool,
-    /// Marginal GPU generation cost per column job (ms), fitted with the
-    /// fixed per-frame residency work over `cost_samples`, and last job count.
-    ms_per_job: f64,
-    /// Recent (jobs, residency GPU ms) samples: generation costs a fixed part
-    /// (table patches, evictions, allocation, publication setup) plus a
-    /// marginal part per job. Dividing all of it by the jobs inflated the
-    /// per-job cost 3-5x exactly while flying (few jobs, many evictions), so
-    /// the budget spiralled down to its floor: ~300 jobs a frame, 100k
-    /// columns pending and coarser LOD until the camera stopped.
+    /// GPU generation cost per work unit (ms, `unit_cost`).
+    ms_per_unit: f64,
+    /// Recent (work units, generate GPU ms) of frames that generated: the
+    /// `generate` dispatch alone, timed on its own. The residency stage's
+    /// other work (evictions, table patches, allocation, publication) does
+    /// not scale with the jobs, and a cave column costs tens of times a
+    /// heightfield one: a regression of residency time over job counts swung
+    /// from 0.1 to 50 us a job (12k-job frames, 100-250 ms generation
+    /// spikes, then 256-job crawls).
     cost_samples: std::collections::VecDeque<(f64, f64)>,
-    last_jobs: usize,
-    /// Jobs issued per recent frame number, and the frame whose timestamps
-    /// last updated `ms_per_job`.
-    frame_jobs: std::collections::VecDeque<(u64, usize)>,
+    /// Work units issued per recent frame number, and the frame whose
+    /// timestamps last updated `ms_per_unit`.
+    frame_units: std::collections::VecDeque<(u64, f64)>,
     costed_frame: Option<u64>,
     /// Divides the level-0 distance while demand exceeds the record or pool
     /// capacity (>= 1; see `update_lod_pressure`).
@@ -1004,8 +1006,8 @@ impl PlanetRenderer {
             // streamed 3x slower than the harness, which enabled profiling).
             profiler: timestamps_supported(device).then(|| helio_core::profiling::GpuProfiler::new(device, queue)),
             initial_complete: false,
-            ms_per_job: 0.0013,
-            frame_jobs: std::collections::VecDeque::new(),
+            ms_per_unit: 0.0013,
+            frame_units: std::collections::VecDeque::new(),
             costed_frame: None,
             cost_samples: std::collections::VecDeque::new(),
             pool_pressure: false,
@@ -1014,7 +1016,6 @@ impl PlanetRenderer {
             pressure_failed_jobs: 0,
             scratch_scale: 1.0,
             last_pressure_update: 0,
-            last_jobs: 0,
             last_eye: None,
             last_frame_num: 0,
             pipelines,
@@ -1532,7 +1533,7 @@ impl PlanetRenderer {
     /// below keeps the original single compute pass.
     #[allow(clippy::too_many_arguments)]
     fn encode_residency_detailed(
-        &self,
+        &mut self,
         encoder: &mut wgpu::CommandEncoder,
         ctx: &mut PassContext<'_>,
         jobs: u32,
@@ -1580,7 +1581,13 @@ impl PlanetRenderer {
         if jobs > 0 {
             let groups = [jobs.min(32_768), jobs.div_ceil(32_768), 1];
             scope!("admission", {
+                if let Some(p) = &mut self.profiler {
+                    p.begin_pass(encoder, "planet_generate");
+                }
                 dispatch!("admission::generate", generate, groups);
+                if let Some(p) = &mut self.profiler {
+                    p.end_pass(encoder, "planet_generate");
+                }
                 scope!("admission::allocation", {
                     dispatch!("admission::allocation::count", count, [wg(jobs), 1, 1]);
                     dispatch!("admission::allocation::refill", refill, [1, 1, 1]);
@@ -1617,16 +1624,17 @@ impl PlanetRenderer {
             // job cost. Every job's outcome must reach the CPU (a failure the
             // CPU never sees leaves a resident hole that is never retried):
             // without a free readback to reserve, the plan issues no jobs.
-            let target_ms = if moving { 1.5 } else { 6.0 };
+            let target_ms = if moving { 3.0 } else { 12.0 };
             let free = self.readbacks.iter().position(|r| r.stage == 0);
-            // Jobs buy generation time at their marginal cost (the fixed
-            // per-frame work is paid anyway); the floor keeps a budget while
-            // the fit has no samples; only scratch pressure lowers it.
-            let floor = ((256.0 * self.scratch_scale) as usize).max(16);
-            let budget = free.map_or(0, |_| {
-                ((target_ms / self.ms_per_job.max(1e-5) * self.scratch_scale) as usize)
-                    .clamp(floor, self.settings.job_budget.min(self.settings.capacity.max_jobs as usize))
-            });
+            // Work buys generation time at its measured cost (`unit_cost`);
+            // the floor (a few cave columns or a few dozen heightfield ones)
+            // keeps refinement going whatever the estimate; only scratch
+            // pressure lowers it. The job count only caps the buffers.
+            let units = (target_ms / self.ms_per_unit.max(1e-5) * self.scratch_scale).max(32.0 * self.scratch_scale);
+            let budget = JobBudget {
+                units: if free.is_some() { units } else { 0.0 },
+                jobs: self.settings.job_budget.min(self.settings.capacity.max_jobs as usize),
+            };
             if let Some(index) = free {
                 self.readbacks[index].stage = 3;
                 self.plan_readback = Some(index);
@@ -1634,7 +1642,7 @@ impl PlanetRenderer {
             // Most of the time until the next frame takes the result (a late
             // result costs a frame without uploads).
             let cpu_ms = (self.frame_ms * 0.6).clamp(if moving { 1.5 } else { 4.0 }, 12.0);
-            self.stats.job_budget = budget;
+            self.stats.unit_budget = budget.units;
             self.residency.submit(PlanRequest {
                 planet: self.planet.clone(),
                 eye,
@@ -1720,23 +1728,23 @@ impl PlanetRenderer {
             // until a newer one completes: each sample is used once, with the
             // job count of the frame it measured. (Dividing by the last
             // frame's jobs overestimated the cost 2-7x, most in the editor.)
-            let residency: f64 = p
+            let generate: f64 = p
                 .read_timestamps_deferred()
                 .iter()
-                .filter(|t| t.name == "planet_residency")
+                .filter(|t| t.name == "planet_generate")
                 .map(|t| t.duration_ns as f64 / 1.0e6)
                 .sum();
             let completed = p.last_completed_frame();
             if completed.is_some() && completed != self.costed_frame {
                 self.costed_frame = completed;
-                let jobs = self.frame_jobs.iter().find(|(f, _)| Some(*f) == completed).map_or(0, |(_, j)| *j);
-                if residency > 0.0 {
-                    if self.cost_samples.len() == 64 {
+                let units = self.frame_units.iter().find(|(f, _)| Some(*f) == completed).map_or(0.0, |(_, u)| *u);
+                if units > 0.0 && generate > 0.0 {
+                    if self.cost_samples.len() == 32 {
                         self.cost_samples.pop_front();
                     }
-                    self.cost_samples.push_back((jobs as f64, residency));
-                    if let Some(marginal) = marginal_cost(&self.cost_samples) {
-                        self.ms_per_job = marginal;
+                    self.cost_samples.push_back((units, generate));
+                    if let Some(cost) = unit_cost(&self.cost_samples) {
+                        self.ms_per_unit = cost;
                     }
                 }
             }
@@ -1774,12 +1782,12 @@ impl PlanetRenderer {
         } else {
             self.exchange_plan(frame.eye, lod0, moving)
         };
-        self.last_jobs = work.jobs.len();
-        self.stats.us_per_job = self.ms_per_job * 1000.0;
-        if self.frame_jobs.len() == 16 {
-            self.frame_jobs.pop_front();
+        self.stats.us_per_unit = self.ms_per_unit * 1000.0;
+        self.stats.units = work.units;
+        if self.frame_units.len() == 16 {
+            self.frame_units.pop_front();
         }
-        self.frame_jobs.push_back((frame_num, work.jobs.len()));
+        self.frame_units.push_back((frame_num, work.units));
         let uploading = std::time::Instant::now();
         let (patches, block_patches) = self.upload(&work);
         if let Some(live) = self.plan.live_blocks.take() {
@@ -1869,7 +1877,6 @@ impl PlanetRenderer {
             self.last_recycle = frame_num;
             self.recycle_pages(encoder);
         }
-        let camera_group = &self.camera_group;
         begin_stage!("residency");
         if let Some(ctx) = graph_context.as_deref_mut().filter(|ctx| ctx.gpu_scopes_enabled()) {
             self.encode_residency_detailed(encoder, ctx, jobs, evictions, patches, block_patches);
@@ -1890,8 +1897,22 @@ impl PlanetRenderer {
                 pass.dispatch_workgroups(wg(block_patches), 1, 1);
             }
             if jobs > 0 {
+                // Generation in its own pass: its timestamps size the budget.
+                drop(pass);
                 let groups = [jobs.min(32_768), jobs.div_ceil(32_768), 1];
-                Self::dispatch(&mut pass, &self.pipelines.generate, groups);
+                if let Some(p) = &mut self.profiler {
+                    p.begin_pass(encoder, "planet_generate");
+                }
+                {
+                    let mut pass = encoder.begin_compute_pass(&Default::default());
+                    pass.set_bind_group(0, &self.gen_group, &[]);
+                    Self::dispatch(&mut pass, &self.pipelines.generate, groups);
+                }
+                if let Some(p) = &mut self.profiler {
+                    p.end_pass(encoder, "planet_generate");
+                }
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_bind_group(0, &self.gen_group, &[]);
                 Self::dispatch(&mut pass, &self.pipelines.count, [wg(jobs), 1, 1]);
                 Self::dispatch(&mut pass, &self.pipelines.refill, [1, 1, 1]);
                 Self::dispatch(&mut pass, &self.pipelines.allocate, [wg(jobs), 1, 1]);
@@ -1901,6 +1922,7 @@ impl PlanetRenderer {
             }
         }
         end_stage!("residency");
+        let camera_group = &self.camera_group;
         // Allocator counters and this frame's failed jobs (into the readback
         // reserved when the plan was requested; without a free one its job
         // budget was 0), then the failure list restarts. Counters alone are
@@ -2541,52 +2563,42 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
     Ok(())
 }
 
-/// Marginal cost (ms per job) of the generation work in `samples` (jobs, ms):
-/// a least-squares fit `ms = fixed + marginal * jobs`, at most the average
-/// cost (a fixed part is never negative), which is also the answer while the
-/// job counts vary too little to separate the parts. An unbounded fit read
-/// 50 us a job once (startup frames with many jobs also carried uploads):
-/// the budget fell to its floor, every frame then had the same job count,
-/// and the estimate could never recover. Bounded to 0.1-50 us a job.
-fn marginal_cost(samples: &std::collections::VecDeque<(f64, f64)>) -> Option<f64> {
-    let jobs: f64 = samples.iter().map(|s| s.0).sum();
-    if samples.len() < 8 || jobs < 256.0 {
+/// GPU generation cost per work unit (ms) from recent (units, generate ms)
+/// samples: the window's time over its units, raised at once to the latest
+/// frame's when that one cost more a unit (work the unit model misjudges
+/// must shrink the next budget now, not after the window averaged it in).
+fn unit_cost(samples: &std::collections::VecDeque<(f64, f64)>) -> Option<f64> {
+    let units: f64 = samples.iter().map(|s| s.0).sum();
+    if samples.len() < 4 || units < 256.0 {
         return None;
     }
-    let average = samples.iter().map(|s| s.1).sum::<f64>() / jobs;
-    let n = samples.len() as f64;
-    let (mx, my) = samples.iter().fold((0.0, 0.0), |(x, y), (a, b)| (x + a / n, y + b / n));
-    let (sxx, sxy) = samples.iter().fold((0.0, 0.0), |(xx, xy), (a, b)| (xx + (a - mx) * (a - mx), xy + (a - mx) * (b - my)));
-    // Job counts must vary (by a few hundred) to separate the fixed part.
-    let marginal = if sxx / n >= 100.0 * 100.0 { (sxy / sxx).min(average) } else { average };
-    Some(marginal.clamp(1.0e-4, 0.05))
+    let average = samples.iter().map(|s| s.1).sum::<f64>() / units;
+    let latest = samples.back().filter(|s| s.0 >= 64.0).map_or(0.0, |s| s.1 / s.0);
+    Some(average.max(latest).clamp(1.0e-4, 0.05))
 }
 
 #[cfg(test)]
 mod cost_tests {
-    use super::marginal_cost;
+    use super::unit_cost;
+    use std::collections::VecDeque;
 
-    /// The generation budget's per-job cost is the marginal one: a large
-    /// fixed part (evictions, table work) does not inflate it, whatever the
-    /// job counts.
     #[test]
-    fn marginal_cost_separates_fixed_work() {
-        let samples: std::collections::VecDeque<(f64, f64)> =
-            [300.0, 2000.0, 450.0, 5000.0, 320.0, 1200.0, 4100.0, 800.0].iter().map(|&j| (j, 3.0 + 0.001 * j)).collect();
-        let marginal = marginal_cost(&samples).unwrap();
-        assert!((marginal - 0.001).abs() < 1e-9, "{marginal}");
-        // The old estimate (all time over the jobs) at 300 jobs: 11x too high.
-        assert!((3.0 + 0.3) / 300.0 > 10.0 * marginal);
-        // Job counts that barely vary cannot separate the parts: the average.
-        let flat: std::collections::VecDeque<(f64, f64)> = (0..16).map(|i| (300.0 + f64::from(i), 3.3)).collect();
-        assert!((marginal_cost(&flat).unwrap() - 3.3 / 307.5).abs() < 1e-6);
-        // A fit steeper than the average (time growing faster than the job
-        // count, from work that merely coincides with big frames) is capped
-        // there, so it can never pin the budget to its floor.
-        let skewed: std::collections::VecDeque<(f64, f64)> =
-            [256.0, 256.0, 256.0, 256.0, 9000.0, 12000.0, 256.0, 256.0].iter().map(|&j| (j, if j > 1000.0 { j * 0.01 } else { 0.3 })).collect();
-        let marginal = marginal_cost(&skewed).unwrap();
-        let average = skewed.iter().map(|s| s.1).sum::<f64>() / skewed.iter().map(|s| s.0).sum::<f64>();
-        assert!(marginal <= average + 1e-12, "{marginal} > {average}");
+    fn unit_cost_is_the_window_average_raised_by_a_costlier_latest_frame() {
+        // Too few jobs to judge.
+        assert!(unit_cost(&VecDeque::from([(10.0, 0.01); 8])).is_none());
+        // Steady heightfield columns: 1 us a unit.
+        let mut samples: VecDeque<(f64, f64)> = (0..8).map(|i| (1000.0 + 100.0 * f64::from(i), (1000.0 + 100.0 * f64::from(i)) * 0.001)).collect();
+        assert!((unit_cost(&samples).unwrap() - 0.001).abs() < 1e-9);
+        // A frame the unit model underestimated (4 us a unit) raises it at once.
+        samples.push_back((1000.0, 4.0));
+        assert!((unit_cost(&samples).unwrap() - 0.004).abs() < 1e-9);
+        // A cheap frame afterwards keeps the window's (raised) average.
+        samples.push_back((1000.0, 0.5));
+        let cost = unit_cost(&samples).unwrap();
+        let average = samples.iter().map(|s| s.1).sum::<f64>() / samples.iter().map(|s| s.0).sum::<f64>();
+        assert!((cost - average).abs() < 1e-12 && cost > 0.001);
+        // A handful of units cannot raise it on their own.
+        samples.push_back((8.0, 0.2));
+        assert!(unit_cost(&samples).unwrap() < 0.01);
     }
 }
