@@ -601,6 +601,54 @@ fn sealed_edits_render_exactly_under_a_running_renderer() {
     check(&planet, &mut kept);
 }
 
+/// Destruction outgrowing the baked edit pool: walls of single blocks
+/// (each brick a mix, so each takes a pool slot) under a pool budget that
+/// starts at 64 slots. The pool grows, uniform bricks take none, and the
+/// view matches CPU ray casts exactly.
+#[test]
+fn the_baked_edit_pool_grows_with_destruction() {
+    use helio_pass_voxel_planet::engine::{PlanetRenderer, Settings};
+    use helio_pass_voxel_planet::residency::Capacity;
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 1, 0.52, 0.48);
+    let grid = *planet.grid();
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    let ground = planet.surface_point(dir, 0.0);
+    let block = |p: DVec3, op: BrushOp| {
+        let (cell, _) = grid.locate(p);
+        Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material: if op == BrushOp::Add { material::BRICK } else { 0 } }
+    };
+    // A carved pit (uniform air bricks inside) with checkered walls.
+    planet.apply(Brush { center: (ground - up * 2.0).to_array(), radius: 2.4, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0 }).unwrap();
+    for y in 0..40 {
+        for x in -30..30 {
+            for z in [-30, 29] {
+                if (x + y) % 2 == 0 {
+                    planet.apply(block(ground + side * (f64::from(x) * 0.1) + fwd * (f64::from(z) * 0.1) + up * (f64::from(y) * 0.1 + 0.55), BrushOp::Add)).unwrap();
+                    planet.apply(block(ground + fwd * (f64::from(x) * 0.1) + side * (f64::from(z) * 0.1) + up * (f64::from(y) * 0.1 + 0.55), BrushOp::Add)).unwrap();
+                }
+            }
+        }
+    }
+    let planet = Arc::new(planet);
+    assert!(planet.edits().sealed_len() > 4000);
+    let size = [320, 180];
+    let settings = Settings { capacity: Capacity { baked_bricks: 2048, ..Capacity::default() }, ..Settings::default() };
+    let mut renderer = PlanetRenderer::new(&gpu.device, &gpu.queue, planet.clone(), settings, size);
+    let target = Target::new(&gpu, size);
+    let eye = ground - fwd * 5.0 + up * 6.0 - side * 2.0;
+    let forward = ((ground + fwd * 1.0) - eye).normalize().as_vec3();
+    let (compared, mismatched) = compare_view(&gpu, &target, &mut renderer, &planet, eye, forward, size);
+    let stats = renderer.stats();
+    eprintln!("baked bricks {} in a pool of {}, {} edit words; {mismatched}/{compared} mismatched", stats.baked_bricks, stats.baked_pool, stats.edit_words);
+    assert!(stats.baked_pool > 64 && stats.baked_bricks > 64, "the pool grew");
+    assert!(compared > 400);
+    assert_eq!(mismatched, 0);
+}
+
 #[test]
 fn orbital_view_has_complete_coverage() {
     let Some(gpu) = gpu() else { return };

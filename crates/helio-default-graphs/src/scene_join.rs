@@ -66,6 +66,24 @@ const LIGHT_ROW_BYTES: u64 = 128;
 const BILLBOARD_ROW_BYTES: u64 = 48;
 const WORKGROUP: u32 = 64;
 
+/// A join shader as compiled: the shared join declarations, then `source`.
+pub fn join_source(source: &str) -> String {
+    format!("{}\n{source}", include_str!("../shaders/scene_join_common.wgsl"))
+}
+
+/// The scene and environment join shaders as compiled (shader validation
+/// without a device).
+pub fn validation_sources() -> Vec<(String, String)> {
+    [
+        ("scene_join_meshes.wgsl", include_str!("../shaders/scene_join_meshes.wgsl")),
+        ("scene_join_lights.wgsl", include_str!("../shaders/scene_join_lights.wgsl")),
+        ("environment_join.wgsl", include_str!("../shaders/environment_join.wgsl")),
+    ]
+    .into_iter()
+    .map(|(name, source)| (name.to_string(), join_source(source)))
+    .collect()
+}
+
 /// Where the frontend's authored rows live. See the module doc for what
 /// each holds.
 #[derive(Clone, Copy, Debug)]
@@ -183,11 +201,10 @@ impl SceneJoin {
     /// `billboards`: also publish a billboard per placed light (editor
     /// light icons).
     pub fn new(device: &wgpu::Device, keys: SceneJoinKeys, billboards: bool) -> Self {
-        let common = include_str!("../shaders/scene_join_common.wgsl");
         let pipeline = |label: &str, source: &str, entry: &str| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(label),
-                source: wgpu::ShaderSource::Wgsl(format!("{common}\n{source}").into()),
+                source: wgpu::ShaderSource::Wgsl(join_source(source).into()),
             });
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(label),

@@ -63,23 +63,35 @@ fn collect_wgsl(dir: &Path, out: &mut Vec<PathBuf>) {
 /// fragment that gets string-concatenated into a host shader before compiling
 /// (e.g. `vhs_effects.wgsl`, pulled in as `VHS_SHADER_SNIPPET`), so it refers to
 /// bindings it does not declare and cannot validate on its own.
-fn is_fragment(path: &Path, source: &str) -> bool {
-    // These files are entry-point-bearing pieces assembled with shared pass
-    // declarations. Keep this implementation detail in the validator rather
-    // than adding test-only comments to production shader sources.
+fn is_fragment(source: &str) -> bool {
+    !(source.contains("@vertex") || source.contains("@fragment") || source.contains("@compute"))
+}
+
+/// An entry-point-bearing piece its crate assembles with shared declarations
+/// (or a terrain program, or a row stride): validated as composed, by
+/// `composed_shaders_parse_and_validate` or by its pass, not on its own.
+/// Keep this implementation detail in the validator rather than adding
+/// test-only comments to production shader sources.
+fn is_composed(path: &Path) -> bool {
     const COMPOSED: &[&str] = &[
         "helio-pass-hlfs/shaders/composite.wgsl",
         "helio-pass-hlfs/shaders/light_grid.wgsl",
         "helio-pass-hlfs/shaders/sample.wgsl",
         "helio-pass-hlfs/shaders/spatial.wgsl",
         "helio-pass-hlfs/shaders/temporal.wgsl",
-        "helio-pass-transparent/shaders/transparent_base.wgsl",
+        "helio-default-graphs/shaders/scene_join_meshes.wgsl",
+        "helio-default-graphs/shaders/scene_join_lights.wgsl",
+        "helio-default-graphs/shaders/environment_join.wgsl",
+        "helio-pass-volumetric-fog/shaders/volumetric_fog.wgsl",
+        "helio-pass-voxel-planet/shaders/generate.wgsl",
+        "helio-pass-voxel-planet/shaders/horizon.wgsl",
+        "helio-pass-voxel-planet/shaders/surface.wgsl",
+        "helio-pass-voxel-planet/shaders/gbuffer.wgsl",
+        "helio-pass-voxel-planet/shaders/trace.wgsl",
+        "helio-pass-voxel-planet/shaders/view.wgsl",
     ];
     let normalized = path.to_string_lossy().replace('\\', "/");
     COMPOSED.iter().any(|suffix| normalized.ends_with(suffix))
-        || !(source.contains("@vertex")
-            || source.contains("@fragment")
-            || source.contains("@compute"))
 }
 
 /// Maps a line number in resolved source back to the original file, so a
@@ -119,7 +131,10 @@ fn every_wgsl_shader_parses_and_validates() {
         let rel = path.strip_prefix(&root).unwrap_or(path);
         let source = std::fs::read_to_string(path).expect("shader should be readable");
 
-        if is_fragment(path, &source) {
+        if is_composed(path) {
+            continue;
+        }
+        if is_fragment(&source) {
             skipped.push(rel.display().to_string());
             continue;
         }
@@ -167,4 +182,35 @@ fn every_wgsl_shader_parses_and_validates() {
         skipped.len(),
         skipped.join("\n")
     );
+}
+
+/// Shaders their crates assemble from pieces (shared declarations, the
+/// terrain program, row strides), validated exactly as each crate compiles
+/// them.
+#[test]
+fn composed_shaders_parse_and_validate() {
+    let mut sources = helio_pass_voxel_planet::engine::validation_sources();
+    sources.extend(helio_default_graphs::scene_join::validation_sources());
+    sources.push(("volumetric_fog.wgsl".into(), helio_pass_volumetric_fog::shader_source()));
+    let failures: Vec<String> = sources
+        .iter()
+        .filter_map(|(name, source)| {
+            let source = helio_core::shader::resolve_with(source, SNIPPETS);
+            let module = match naga::front::wgsl::parse_str(&source) {
+                Ok(module) => module,
+                Err(e) => return Some(format!("{name}:
+{}", e.emit_to_string(&source))),
+            };
+            Validator::new(ValidationFlags::all(), Capabilities::all())
+                .validate(&module)
+                .err()
+                .map(|e| format!("{name}: {e:?}"))
+        })
+        .collect();
+    assert!(sources.len() >= 10, "{} composed shaders", sources.len());
+    assert!(failures.is_empty(), "{} composed shaders failed:
+
+{}", failures.len(), failures.join("
+
+"));
 }

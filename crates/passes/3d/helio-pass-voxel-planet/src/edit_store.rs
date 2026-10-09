@@ -133,6 +133,12 @@ impl Brick {
     pub fn is_unchanged(&self) -> bool {
         self.cells.iter().all(|c| c.is_unchanged())
     }
+    /// The edit every cell holds, if they all hold the same (the inside of
+    /// a carved or filled region).
+    pub fn uniform(&self) -> Option<CellEdit> {
+        let first = self.cells[0];
+        self.cells.iter().all(|c| *c == first).then_some(first)
+    }
 }
 
 /// A brick: face, level and brick coordinates (cell index divided by 8).

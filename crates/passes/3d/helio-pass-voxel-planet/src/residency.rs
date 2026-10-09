@@ -12,10 +12,14 @@ use std::sync::mpsc;
 use crate::planet::Planet;
 use bytemuck::{Pod, Zeroable};
 use glam::DVec3;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 pub const NONE: u32 = u32::MAX;
 pub const TOMBSTONE: u32 = u32::MAX - 1;
+
+/// Flag of a baked brick stored in its edit block: every cell holds the
+/// edit in the low 16 bits (`baked_cell` in common.wgsl).
+pub const BAKED_UNIFORM: u32 = 0x8000_0000;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Capacity {
@@ -24,7 +28,9 @@ pub struct Capacity {
     pub pool_units: u32,
     pub scratch_units: u32,
     pub edit_words: u32,
-    /// Baked brick slots (1 KB each) for resident columns' baked edits.
+    /// Budget of baked brick slots (1 KB each) for resident columns'
+    /// baked edits; the GPU pool grows to it as needed. Uniform bricks
+    /// (the inside of carved or filled regions) take no slot.
     pub baked_bricks: u32,
     pub max_jobs: u32,
     pub max_evictions: u32,
@@ -46,7 +52,8 @@ impl Default for Capacity {
             // column holds ~150 bricks at level 0 (a heightfield column 2-4).
             scratch_units: 1 << 20,
             edit_words: 4 << 20,
-            baked_bricks: 16_384,
+            // 128 MB.
+            baked_bricks: 131_072,
             max_jobs: 16_384,
             max_evictions: 262_144,
         }
@@ -228,31 +235,46 @@ enum Planner {
     Worker(WindowWorker),
 }
 
-/// Power-of-two block allocator for edit-reference lists.
+/// Buddy allocator for edit blocks over the edit-reference buffer: blocks
+/// of power-of-two words, split on demand and merged with their free buddy
+/// on release, so blocks of every size keep fitting as columns come and go
+/// (per-size free lists that never merge fragmented the buffer until edit
+/// blocks stopped fitting and their columns waited forever).
 #[derive(Default)]
 struct EditHeap {
-    top: u32,
-    free: Vec<Vec<u32>>,
+    /// Free block bases by order (block of `1 << order` words).
+    free: Vec<FxHashSet<u32>>,
+    /// Words in allocated blocks.
+    live: u32,
 }
 
 impl EditHeap {
+    /// A block of at least `words` words within `capacity` (rounded down to
+    /// a power of two): (base, order).
     fn alloc(&mut self, words: u32, capacity: u32) -> Option<(u32, u32)> {
-        let class = words.max(1).next_power_of_two().trailing_zeros();
-        if self.free.len() <= class as usize {
-            self.free.resize(class as usize + 1, Vec::new());
+        if self.free.is_empty() {
+            let top = 31 - capacity.max(1).leading_zeros();
+            self.free = (0..=top).map(|_| FxHashSet::default()).collect();
+            self.free[top as usize].insert(0);
         }
-        if let Some(base) = self.free[class as usize].pop() {
-            return Some((base, class));
+        let order = words.max(1).next_power_of_two().trailing_zeros();
+        let from = (order as usize..self.free.len()).find(|&o| !self.free[o].is_empty())?;
+        let base = *self.free[from].iter().next().expect("non-empty");
+        self.free[from].remove(&base);
+        // Split down, freeing each upper half.
+        for o in (order as usize..from).rev() {
+            self.free[o].insert(base + (1 << o));
         }
-        let size = 1u32 << class;
-        (self.top + size <= capacity).then(|| {
-            let base = self.top;
-            self.top += size;
-            (base, class)
-        })
+        self.live += 1 << order;
+        Some((base, order))
     }
-    fn release(&mut self, block: (u32, u32)) {
-        self.free[block.1 as usize].push(block.0);
+    fn release(&mut self, (mut base, mut order): (u32, u32)) {
+        self.live -= 1 << order;
+        while (order as usize) + 1 < self.free.len() && self.free[order as usize].remove(&(base ^ (1 << order))) {
+            base &= !(1 << order);
+            order += 1;
+        }
+        self.free[order as usize].insert(base);
     }
 }
 
@@ -306,8 +328,10 @@ pub struct FrameWork {
     /// earlier value winning left an empty slot inside a probe run).
     pub table_writes: Vec<(u32, u32)>,
     pub edit_writes: Vec<(u32, Vec<u32>)>,
-    /// Baked bricks to upload into their slots.
+    /// Baked bricks to upload into their slots, and the slots the pool
+    /// must hold (its high-water mark).
     pub baked_writes: Vec<(u32, std::sync::Arc<crate::edit_store::Brick>)>,
+    pub baked_slots: u32,
     /// Summary block table writes `(slot, bi, bj)`, each slot once with its
     /// final state; `bi = -1` releases a slot.
     pub block_inits: Vec<(u32, i32, i32)>,
@@ -408,8 +432,10 @@ pub struct Stats {
     pub reranked: usize,
     pub window_rebuild_ms: f64,
     pub edit_words: u32,
-    /// Baked brick slots in use.
+    /// Baked brick slots in use and their budget; edit words' budget.
     pub baked_bricks: u32,
+    pub baked_capacity: u32,
+    pub edit_capacity: u32,
     pub table_load: f32,
 }
 
@@ -681,8 +707,10 @@ impl Residency {
         if large.is_empty() && recent.is_empty() && baked.is_empty() {
             return Ok(None);
         }
+        // A uniform brick is stored in its block (`BAKED_UNIFORM`), the
+        // others in pool slots.
         let mut slots = Vec::with_capacity(baked.len());
-        for _ in 0..baked.len() {
+        for _ in baked.iter().filter(|(_, brick)| brick.uniform().is_none()) {
             let slot = match self.free_baked.pop() {
                 Some(slot) => slot,
                 None if self.next_baked < self.capacity.baked_bricks => {
@@ -701,10 +729,18 @@ impl Residency {
         for fb in large.iter().chain(&recent) {
             words.extend_from_slice(bytemuck::cast_slice(std::slice::from_ref(fb)));
         }
-        for ((bk, brick), &slot) in baked.into_iter().zip(&slots) {
-            words.extend([bk as u32, slot]);
-            work.baked_writes.push((slot, brick));
+        let mut pooled = slots.iter();
+        for (bk, brick) in baked {
+            match brick.uniform() {
+                Some(cell) => words.extend([bk as u32, BAKED_UNIFORM | u32::from(cell.0)]),
+                None => {
+                    let slot = *pooled.next().expect("a slot per pooled brick");
+                    words.extend([bk as u32, slot]);
+                    work.baked_writes.push((slot, brick));
+                }
+            }
         }
+        work.baked_slots = work.baked_slots.max(self.next_baked);
         let Some(block) = self.edits.alloc(words.len() as u32, self.capacity.edit_words) else {
             self.free_baked.extend(slots);
             return Err(());
@@ -1093,8 +1129,10 @@ impl Residency {
         stats.finest_level = self.levels.iter().position(|l| l.active).unwrap_or(0) as u32;
         stats.jobs = work.jobs.len();
         stats.evictions = work.evictions.len();
-        stats.edit_words = self.edits.top;
+        stats.edit_words = self.edits.live;
         stats.baked_bricks = self.next_baked - self.free_baked.len() as u32;
+        stats.baked_capacity = self.capacity.baked_bricks;
+        stats.edit_capacity = self.capacity.edit_words;
         stats.table_load = self.residents.load();
         self.stats = stats;
         work.finish(self.residents.table());
@@ -1382,6 +1420,47 @@ impl Drop for ResidencyWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_blocks_never_overlap_and_free_space_merges_back() {
+        const CAPACITY: u32 = 1 << 16;
+        let mut heap = EditHeap::default();
+        let mut seed = 0x2545_f491u64;
+        let mut next = move |n: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % u64::from(n)) as u32
+        };
+        let mut live: Vec<(u32, u32)> = Vec::new();
+        let mut owner = vec![false; CAPACITY as usize];
+        for round in 0..20_000 {
+            if live.is_empty() || next(3) != 0 {
+                // Edit blocks: a few words to a few hundred.
+                let words = 3 + next(if round % 50 == 0 { 2000 } else { 120 });
+                let Some(block) = heap.alloc(words, CAPACITY) else { continue };
+                let (base, order) = block;
+                assert!(base + (1 << order) <= CAPACITY && (1 << order) >= words);
+                for w in base..base + (1 << order) {
+                    assert!(!owner[w as usize], "word {w} allocated twice");
+                    owner[w as usize] = true;
+                }
+                live.push(block);
+            } else {
+                let block = live.swap_remove(next(live.len() as u32) as usize);
+                for w in block.0..block.0 + (1 << block.1) {
+                    owner[w as usize] = false;
+                }
+                heap.release(block);
+            }
+            assert_eq!(heap.live, live.iter().map(|b| 1 << b.1).sum::<u32>());
+        }
+        for block in live.drain(..) {
+            heap.release(block);
+        }
+        assert_eq!(heap.live, 0);
+        assert_eq!(heap.alloc(CAPACITY, CAPACITY), Some((0, 16)), "every block merged back");
+    }
     use crate::planet::PlanetRecipe;
 
     /// The GPU hash table holds exactly the residents, each found by linear

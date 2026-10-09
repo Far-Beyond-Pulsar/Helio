@@ -456,11 +456,9 @@ pub struct EnvironmentJoin {
 
 impl EnvironmentJoin {
     pub fn new(device: &wgpu::Device, keys: EnvironmentJoinKeys) -> Self {
-        let common = include_str!("../shaders/scene_join_common.wgsl");
-        let source = include_str!("../shaders/environment_join.wgsl");
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Environment Join"),
-            source: wgpu::ShaderSource::Wgsl(format!("{common}\n{source}").into()),
+            source: wgpu::ShaderSource::Wgsl(crate::scene_join::join_source(include_str!("../shaders/environment_join.wgsl")).into()),
         });
         let pipeline = |entry_point| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {

@@ -373,8 +373,11 @@ fn baked_cell(list: u32, n: EditCounts, i: i32, j: i32, k: i32) -> u32 {
     let bk = k >> 3u;
     for (var e = 0u; e < n.baked; e++) {
         if bitcast<i32>(edit_refs[base + e * 2u]) == bk {
+            // A uniform brick: its edit, no slot (`residency::BAKED_UNIFORM`).
+            let slot = edit_refs[base + e * 2u + 1u];
+            if (slot & 0x80000000u) != 0u { return slot & 0xffffu; }
             let index = u32((i & 7) + 8 * ((j & 7) + 8 * (k & 7)));
-            let word = baked[edit_refs[base + e * 2u + 1u] * 256u + (index >> 1u)];
+            let word = baked[slot * 256u + (index >> 1u)];
             return (word >> ((index & 1u) * 16u)) & 0xffffu;
         }
     }

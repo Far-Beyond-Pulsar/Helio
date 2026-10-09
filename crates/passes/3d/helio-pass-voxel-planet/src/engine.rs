@@ -235,6 +235,11 @@ pub struct PlanetStats {
     pub us_per_unit: f64,
     pub unit_budget: f64,
     pub units: f64,
+    /// Edit data on the GPU: baked brick slots in use and the pool's slots,
+    /// and edit block words in use.
+    pub baked_bricks: u32,
+    pub baked_pool: u32,
+    pub edit_words: u32,
 }
 
 /// Copy of the allocator counters and the failed jobs since the last copy.
@@ -324,6 +329,40 @@ fn terrain_bytes(program: &TerrainProgram) -> Vec<u8> {
     let mut bytes = program.constants.clone();
     bytes.resize(bytes.len().max(16).next_multiple_of(16), 0);
     bytes
+}
+
+/// The pass's composed shaders as compiled for a world form and terrain
+/// program: generation, trace and gbuffer.
+pub fn shader_sources(plane: bool, program: &TerrainProgram) -> [(&'static str, String); 3] {
+    let view = include_str!("../shaders/view.wgsl");
+    [
+        ("planet generation", source("read_write", &[include_str!("../shaders/generate.wgsl")], plane, program)),
+        (
+            "planet trace",
+            source(
+                "read_write",
+                &[view, include_str!("../shaders/horizon.wgsl"), include_str!("../shaders/trace.wgsl"), include_str!("../shaders/surface.wgsl")],
+                plane,
+                program,
+            ),
+        ),
+        ("planet gbuffer", source("read", &[view, include_str!("../shaders/gbuffer.wgsl")], plane, program)),
+    ]
+}
+
+/// [`shader_sources`] for both world forms with the Earth terrain program
+/// (shader validation without a device).
+pub fn validation_sources() -> Vec<(String, String)> {
+    let grid = crate::grid::Grid::new(6_371_000.0, 0.1).expect("Earth grid");
+    let field = crate::layers::TerrainLayers::earth().field(&grid, 1).expect("Earth terrain");
+    let program = crate::terrain::TerrainField::program(&field);
+    [false, true]
+        .into_iter()
+        .flat_map(|plane| {
+            let form = if plane { "plane" } else { "sphere" };
+            shader_sources(plane, &program).map(|(label, source)| (format!("{label} ({form})"), source))
+        })
+        .collect()
 }
 
 /// Shader source: the noise library, world helpers and the terrain program,
@@ -500,18 +539,10 @@ impl Pipelines {
         // Composed from several files plus the terrain program in Rust, so it
         // goes through `module` as plain text (not hot reloadable).
         let module = |label: &str, src: String| helio_core::shader::module(device, label, &src);
-        let gen_module = module("planet generation", source("read_write", &[include_str!("../shaders/generate.wgsl")], plane, program));
-        let trace_src = [
-            include_str!("../shaders/view.wgsl"),
-            include_str!("../shaders/horizon.wgsl"),
-            include_str!("../shaders/trace.wgsl"),
-            include_str!("../shaders/surface.wgsl"),
-        ];
-        let trace_module = module("planet trace", source("read_write", &trace_src, plane, program));
-        let render_module = module(
-            "planet gbuffer",
-            source("read", &[include_str!("../shaders/view.wgsl"), include_str!("../shaders/gbuffer.wgsl")], plane, program),
-        );
+        let [(_, gen_src), (_, trace_src), (_, render_src)] = shader_sources(plane, program);
+        let gen_module = module("planet generation", gen_src);
+        let trace_module = module("planet trace", trace_src);
+        let render_module = module("planet gbuffer", render_src);
         let recycle_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("planet pool recycling"),
             entries: &[storage(0, false), storage(1, false), storage(2, true), storage(3, false), storage(4, false), storage(5, false)],
@@ -645,8 +676,10 @@ struct Buffers {
     table: wgpu::Buffer,
     records: wgpu::Buffer,
     pool: wgpu::Buffer,
-    /// Baked brick slots (`Capacity::baked_bricks`, `BAKED_BRICK_BYTES` each).
+    /// Baked brick slots (`BAKED_BRICK_BYTES` each), grown to the
+    /// residency's high-water mark up to `Capacity::baked_bricks`.
     baked: wgpu::Buffer,
+    baked_slots: u32,
     edit_refs: wgpu::Buffer,
     jobs: wgpu::Buffer,
     job_out: wgpu::Buffer,
@@ -717,7 +750,9 @@ impl Buffers {
             st | wgpu::BufferUsages::COPY_SRC,
         );
         let live_blocks = make("planet live summary blocks", 65_536 * 4, st);
-        let baked = make("planet baked edits", u64::from(cap.baked_bricks) * BAKED_BRICK_BYTES, st);
+        // A thirtieth of the budget to start; it grows with destruction.
+        let baked_slots = (cap.baked_bricks / 32).max(64).min(cap.baked_bricks);
+        let baked = make("planet baked edits", u64::from(baked_slots) * BAKED_BRICK_BYTES, st | wgpu::BufferUsages::COPY_SRC);
         let table_init = vec![NONE; 1 << cap.table_bits];
         bytes += (table_init.len() * 4) as u64;
         let table = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -762,6 +797,7 @@ impl Buffers {
             records,
             pool,
             baked,
+            baked_slots,
             edit_refs,
             jobs,
             job_out,
@@ -1259,6 +1295,9 @@ impl PlanetRenderer {
     /// Upload this frame's residency changes. Returns (table patches,
     /// summary block patches) appended after the eviction list.
     fn upload(&mut self, work: &FrameWork) -> (u32, u32) {
+        if work.baked_slots > self.buffers.baked_slots {
+            self.grow_baked(work.baked_slots);
+        }
         for (slot, brick) in &work.baked_writes {
             let cells: Vec<u16> = brick.cells.iter().map(|c| c.0).collect();
             self.queue.write_buffer(&self.buffers.baked, u64::from(*slot) * BAKED_BRICK_BYTES, bytemuck::cast_slice(&cells));
@@ -1293,6 +1332,25 @@ impl PlanetRenderer {
             self.queue.write_buffer(&self.buffers.evictions, 0, bytemuck::cast_slice(&words));
         }
         (work.table_writes.len() as u32, work.block_inits.len() as u32)
+    }
+
+    /// Grow the baked brick pool to hold `needed` slots (doubling, within
+    /// the budget), keeping the bricks already uploaded.
+    fn grow_baked(&mut self, needed: u32) {
+        let slots = needed.next_power_of_two().max(self.buffers.baked_slots * 2).min(self.settings.capacity.baked_bricks.max(needed));
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("planet baked edits"),
+            size: u64::from(slots) * BAKED_BRICK_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(&self.buffers.baked, 0, &buffer, 0, u64::from(self.buffers.baked_slots) * BAKED_BRICK_BYTES);
+        self.queue.submit([encoder.finish()]);
+        self.buffers.bytes += u64::from(slots - self.buffers.baked_slots) * BAKED_BRICK_BYTES;
+        self.buffers.baked = buffer;
+        self.buffers.baked_slots = slots;
+        self.gen_group = Self::gen_group(&self.device, &self.pipelines, &self.buffers);
     }
 
     /// Copy the hits under this frame's pick requests for readback.
@@ -1438,6 +1496,10 @@ impl PlanetRenderer {
         let records = (rs.resident_columns + rs.pending_columns) as f64 / f64::from(cap.records);
         // `free_units` is 0 until the first allocator readback.
         let pool = if self.stats.free_units == 0 { 0.0 } else { 1.0 - self.stats.free_units as f64 / f64::from(cap.pool_units) };
+        // Edit data counts as pool: baked brick slots and edit block words
+        // (a destroyed region's columns hold more of both).
+        let edits = (f64::from(rs.baked_bricks) / f64::from(cap.baked_bricks.max(1))).max(f64::from(rs.edit_words) / f64::from(cap.edit_words.max(1)));
+        let pool = pool.max(edits);
         // No free page and jobs waiting to retry: the free units left belong
         // to other size classes, so the pool is full for the columns wanted
         // (counting units alone left a fragmented pool failing forever).
@@ -2019,6 +2081,9 @@ impl PlanetRenderer {
         self.stats.window_rebuild_ms = rs.window_rebuild_ms;
         self.stats.table_refused = rs.table_refused;
         self.stats.reranked = rs.reranked;
+        self.stats.baked_bricks = rs.baked_bricks;
+        self.stats.baked_pool = self.buffers.baked_slots;
+        self.stats.edit_words = rs.edit_words;
         self.stats.lod0_distance = lod0;
         self.stats.pool_pages = self.settings.capacity.pool_units / 512;
         self.stats.logical_bytes = self.buffers.bytes + u64::from(size[0]) * u64::from(size[1]) * (32 + 16 + 8 + 4);
