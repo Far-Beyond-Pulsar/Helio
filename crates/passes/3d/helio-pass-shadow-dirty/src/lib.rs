@@ -414,7 +414,7 @@ impl RenderPass for ShadowDirtyPass {
         // Reset the complete output arrays before dispatch. Doing this as
         // encoder commands avoids the cross-workgroup race that occurs when
         // invocation zero clears storage while other workgroups write it.
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let mut cmds = ctx.graphics_cmds();
         // Pending dirty bits survive until ShadowPass services their tile.
 
         // Dispatch enough threads to cover all movable draw calls.
@@ -423,7 +423,7 @@ impl RenderPass for ShadowDirtyPass {
         let thread_count = movable_draw_count.max(1);
         let workgroups = thread_count.div_ceil(WORKGROUP_SIZE);
 
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("ShadowDirty"),
             timestamp_writes: None,
         });

@@ -779,7 +779,8 @@ impl RenderPass for VolumetricFogPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         if !self.fallback_shadow_cleared {
-            let _clear = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut cmds = ctx.graphics_cmds();
+            let _clear = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Fog Empty Shadow Atlas clear"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -1050,11 +1051,11 @@ impl RenderPass for VolumetricFogPass {
             return Ok(());
         };
 
-        let ce = ctx.encoder_ptr;
+        let mut cmds = ctx.graphics_cmds();
 
         // Optional legacy adapter. Native world media require no PP resources.
         if let Some(postprocess_buf) = postprocess_buf {
-            unsafe { &mut *ce }.copy_buffer_to_buffer(
+            cmds.copy_buffer_to_buffer(
                 postprocess_buf,
                 304,
                 &self.fog_uniform_buf,
@@ -1062,14 +1063,14 @@ impl RenderPass for VolumetricFogPass {
                 64,
             );
         } else {
-            unsafe { &mut *ce }.clear_buffer(&self.fog_uniform_buf, 0, None);
+            cmds.clear_buffer(&self.fog_uniform_buf, 0, None);
         }
 
         if let Some(query) = &self.timing_query {
-            unsafe { &mut *ce }.write_timestamp(query, 0);
+            cmds.write_timestamp(query, 0);
         }
         {
-            let mut pass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Fog SceneDB Resolve"),
                 timestamp_writes: None,
             });
@@ -1077,7 +1078,7 @@ impl RenderPass for VolumetricFogPass {
             pass.set_bind_group(0, self.resolve_bg.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(1, 1, 1);
         }
-        unsafe { &mut *ce }.copy_buffer_to_buffer(
+        cmds.copy_buffer_to_buffer(
             &self.resolved_fog_buf,
             0,
             &self.fog_uniform_buf,
@@ -1085,7 +1086,7 @@ impl RenderPass for VolumetricFogPass {
             64,
         );
         {
-            let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut cpass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Volumetric Fog Classify"),
                 timestamp_writes: None,
             });
@@ -1098,9 +1099,9 @@ impl RenderPass for VolumetricFogPass {
         // the image through rather than sampling an identity grid per pixel.
         // Inject and integrate are dispatched with zero groups in that case,
         // so nothing below reads the zeroed range.
-        unsafe { &mut *ce }.copy_buffer_to_buffer(&self.indirect_buf, 36, &self.fog_uniform_buf, 20, 4);
+        cmds.copy_buffer_to_buffer(&self.indirect_buf, 36, &self.fog_uniform_buf, 20, 4);
         {
-            let mut pass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Fog Cluster Lights"),
                 timestamp_writes: None,
             });
@@ -1109,10 +1110,10 @@ impl RenderPass for VolumetricFogPass {
             pass.dispatch_workgroups_indirect(&self.indirect_buf, 12);
         }
         if let Some(query) = &self.timing_query {
-            unsafe { &mut *ce }.write_timestamp(query, 1);
+            cmds.write_timestamp(query, 1);
         }
         {
-            let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut cpass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Volumetric Fog Inject"),
                 timestamp_writes: None,
             });
@@ -1122,12 +1123,12 @@ impl RenderPass for VolumetricFogPass {
         }
 
         if let Some(query) = &self.timing_query {
-            unsafe { &mut *ce }.write_timestamp(query, 2);
+            cmds.write_timestamp(query, 2);
         }
         {
             // One thread per (x,y) column — each marches all FROXEL_D slices, so
             // z is 1 here, not FROXEL_D.
-            let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut cpass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Volumetric Fog Integrate"),
                 timestamp_writes: None,
             });
@@ -1145,7 +1146,7 @@ impl RenderPass for VolumetricFogPass {
         }
 
         if let Some(query) = &self.timing_query {
-            unsafe { &mut *ce }.write_timestamp(query, 3);
+            cmds.write_timestamp(query, 3);
         }
         // History is only meaningful once a grid has actually been written.
         self.history_valid = true;

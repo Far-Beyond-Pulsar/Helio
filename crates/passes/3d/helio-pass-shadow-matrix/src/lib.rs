@@ -1,6 +1,6 @@
 //! GPU shadow allocation with a bounded asynchronous residency commit.
 use bytemuck::{Pod, Zeroable};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 pub mod gpu_types;
 pub use gpu_types::*;
 pub mod budget;
@@ -360,8 +360,8 @@ impl ShadowMatrixPass {
             }
         }
     }
-    fn dispatch(&self, encoder: &mut wgpu::CommandEncoder, index: usize, groups: u32) {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+    fn dispatch(&self, cmds: &mut CommandRecorder<'_>, index: usize, groups: u32) {
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Shadow residency"),
             timestamp_writes: None,
         });
@@ -551,23 +551,23 @@ impl RenderPass for ShadowMatrixPass {
         Ok(())
     }
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let mut cmds = ctx.graphics_cmds();
         if self.rows == 0 {
             return Ok(());
         }
         if self.commit {
-            self.dispatch(encoder, 3, self.rows.div_ceil(64));
+            self.dispatch(&mut cmds, 3, self.rows.div_ceil(64));
             self.commit = false;
         }
         if self.rebuild && matches!(self.readback, Readback::Idle) {
-            self.dispatch(encoder, 0, self.rows.div_ceil(64));
-            self.dispatch(encoder, 1, 1);
-            self.dispatch(encoder, 2, 1);
-            encoder.copy_buffer_to_buffer(&self.proposed, 0, &self.staging, 0, TABLE_BYTES);
+            self.dispatch(&mut cmds, 0, self.rows.div_ceil(64));
+            self.dispatch(&mut cmds, 1, 1);
+            self.dispatch(&mut cmds, 2, 1);
+            cmds.copy_buffer_to_buffer(&self.proposed, 0, &self.staging, 0, TABLE_BYTES);
             self.readback = Readback::Copied(self.nonce);
             self.rebuild = false;
         }
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Shadow matrices"),
             timestamp_writes: None,
         });

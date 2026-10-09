@@ -488,8 +488,8 @@ impl RenderPass for AtmospherePass {
             }));
             self.shared_key = Some(key);
         }
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Atmosphere"), timestamp_writes: None });
+        let mut cmds = ctx.graphics_cmds();
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("Atmosphere"), timestamp_writes: None });
         pass.set_bind_group(0, self.shared_group.as_ref(), &[]);
         pass.set_pipeline(&self.resolve);
         pass.dispatch_workgroups(1, 1, 1);
@@ -521,7 +521,7 @@ impl RenderPass for AtmospherePass {
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             });
-            encoder.copy_buffer_to_buffer(&self.frame, 0, &staging, 0, 64);
+            cmds.copy_buffer_to_buffer(&self.frame, 0, &staging, 0, 64);
             trace.push((self.frame_index, staging));
         }
         Ok(())
@@ -701,7 +701,7 @@ impl RenderPass for AtmosphereCompositePass {
         if !self.active {
             return Ok(());
         }
-        let Some(pass) = ctx.active_render_pass_ptr() else { return Ok(()) };
+        let Some(mut pass) = ctx.render_cmds() else { return Ok(()) };
         let registry = ctx.registry;
         let (Some(frame), Some(transmittance), Some(multi_scattering), Some(sky_view), Some(aerial)) = (
             registry.get::<&wgpu::Buffer>(ResourceKey::new(ATMOSPHERE_FRAME)),
@@ -730,7 +730,6 @@ impl RenderPass for AtmosphereCompositePass {
             }));
             self.key = Some(key);
         }
-        let pass = unsafe { &mut *pass };
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.group.as_ref(), &[]);
         pass.draw(0..3, 0..1);

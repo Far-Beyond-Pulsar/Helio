@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use helio_core::ResourceRegistry;
 
 /// Marker opting a shader into [`HIZ`]. Must appear in the source.
@@ -309,12 +309,10 @@ impl HiZBuildPass {
     /// Builds the min-depth pyramid consumed by SsrPass after mip 0 is seeded.
     ///
     /// Assumes `min_mip_views` / `min_mip_bind_groups` are already populated.
-    fn build_min_pyramid(&mut self, ctx: &mut PassContext) {
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
-
+    fn build_min_pyramid(&mut self, cmds: &mut CommandRecorder<'_>) {
         // Levels 1+ via MIN-reduction.
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("HiZ Min MipChain"),
                 timestamp_writes: None,
             });
@@ -618,7 +616,7 @@ impl RenderPass for HiZBuildPass {
             bytes_per_row: Some(self.depth_copy_bytes_per_row),
             rows_per_image: Some(self.height.max(1)),
         };
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let mut cmds = ctx.graphics_cmds();
 
         // The min pyramid is optional: only SSR and WaterSim's reflections
         // read it, and they declare that before the frame executes. The depth
@@ -639,7 +637,7 @@ impl RenderPass for HiZBuildPass {
                 .registry
                 .get::<&wgpu::Texture>(helio_core::ResourceKey::new("depth_texture"))
                 .expect("Renderer must publish the active depth texture for HiZ");
-            encoder.copy_texture_to_buffer(
+            cmds.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
                     texture: depth_texture,
                     mip_level: 0,
@@ -653,7 +651,7 @@ impl RenderPass for HiZBuildPass {
                 copy_extent,
             );
             if min_wanted {
-                encoder.copy_buffer_to_texture(
+                cmds.copy_buffer_to_texture(
                     wgpu::TexelCopyBufferInfo {
                         buffer: &self.depth_copy_buffer,
                         layout: copy_layout,
@@ -687,7 +685,7 @@ impl RenderPass for HiZBuildPass {
                         ],
                     }));
             }
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("HiZ Far Depth Fallback"),
                 timestamp_writes: None,
             });
@@ -708,7 +706,7 @@ impl RenderPass for HiZBuildPass {
         // depth — anything that moves while the camera holds still would otherwise
         // reflect a frozen pyramid.
         if min_wanted {
-            self.build_min_pyramid(ctx);
+            self.build_min_pyramid(&mut cmds);
         }
 
         // ── HiZ reuse: skip the rebuild while the pyramid already holds the
@@ -718,7 +716,7 @@ impl RenderPass for HiZBuildPass {
         }
 
         if self.depth_copy_supported {
-            encoder.copy_buffer_to_texture(
+            cmds.copy_buffer_to_texture(
                 wgpu::TexelCopyBufferInfo {
                     buffer: &self.depth_copy_buffer,
                     layout: copy_layout,
@@ -735,7 +733,7 @@ impl RenderPass for HiZBuildPass {
 
         // Phase 2: build the remaining mip levels via MAX-reduction
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("HiZ MipChain"),
                 timestamp_writes: None,
             });

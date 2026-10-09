@@ -1112,12 +1112,12 @@ impl RenderPass for FoliagePlacePass {
             return Ok(());
         };
 
-        // `ctx.encoder_ptr`, not `ctx.compute_encoder_ptr`: the two encoders are submitted
-        // as [compute, render], so anything recorded on the compute encoder runs before
-        // *all* render-encoder work and would therefore Hi-Z-test against the previous
+        // `ctx.graphics_cmds()`, not `ctx.compute_cmds()`: the two streams are submitted
+        // as [compute, graphics], so anything recorded on the compute stream runs before
+        // *all* graphics work and would therefore Hi-Z-test against the previous
         // frame's pyramid. This pass does not declare `chain_transparent` for the same
         // reason. See the plan's §6.2 [audit].
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let mut encoder = ctx.graphics_cmds();
 
         // Visible counts are per-frame; the overflow counters are too, so a single bad
         // frame does not look like a permanent budget failure.

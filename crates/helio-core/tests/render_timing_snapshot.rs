@@ -89,15 +89,15 @@ fn deferred_readback_attributes_work_after_an_external_poll() {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Forced Slow Pass Timing Encoder"),
         });
-        profiler.begin_pass(&mut encoder, "ForcedSlowPass");
+        profiler.begin_pass(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), "ForcedSlowPass");
         {
             let _pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Forced Slow Pass"),
                 timestamp_writes: None,
             });
         }
-        profiler.end_pass(&mut encoder, "ForcedSlowPass");
-        profiler.resolve_queries(&mut encoder, 17);
+        profiler.end_pass(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), "ForcedSlowPass");
+        profiler.resolve_queries(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), 17);
         queue.submit([encoder.finish()]);
 
         // The Helio-owned method only queues map_async. It returns before any

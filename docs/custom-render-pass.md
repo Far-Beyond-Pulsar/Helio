@@ -20,7 +20,7 @@ pub struct TintPass {
 impl RenderPass for TintPass {
     fn name(&self) -> &'static str { "Tint" }
 
-    // The executor opens this pass and provides ctx.active_render_pass_ptr().
+    // The executor opens this pass and provides it through ctx.render_cmds().
     fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         target: &'a wgpu::TextureView,
@@ -55,7 +55,7 @@ impl RenderPass for TintPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
         // A descriptor-backed graphics pass records into the executor's pass.
-        let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        let mut pass = ctx.render_cmds().unwrap();
         pass.set_pipeline(&self.pipeline);
         pass.draw(0..3, 0..1); // e.g. a full-screen triangle
         Ok(())
@@ -65,7 +65,7 @@ impl RenderPass for TintPass {
 
 The example omits pipeline construction and its matching WGSL. Its pipeline must use the color format and attachment state expected by the graph/host. Use the `*_with_storage` descriptor hook when the descriptor contains temporary slices; `RenderFrameStorage::retain_boxed_slice` keeps those slices alive for the executor. The older `render_pass_descriptor` hook is suitable when the descriptor can borrow all of its data from `self` and the supplied views.
 
-For graphics work, returning a descriptor is the preferred route: Helio owns the render-pass lifetime and can apply pass chaining and store-op handling. In that route, `execute` records through `ctx.active_render_pass_ptr()`; that accessor is unsafe to dereference because the executor owns the pass lifetime. If the descriptor returns `None`, `execute` may open its own pass with `ctx.begin_render_pass` or `ctx.begin_compute_pass`. That self-managed route remains supported, but cannot participate in executor-managed render-pass chaining. A compute-only pass normally returns `None` for the graphics descriptor.
+For graphics work, returning a descriptor is the preferred route: Helio owns the render-pass lifetime and can apply pass chaining and store-op handling. In that route, `execute` records through `ctx.render_cmds()`, a `RenderCmds` handle to the pass the executor owns; the pass stays open after the handle is dropped. If the descriptor returns `None`, `execute` may open its own pass with `ctx.begin_render_pass` or `ctx.begin_compute_pass`, which return `RenderCmds` / `ComputeCmds` handles that end the pass when dropped. Copies, clears and queries go through `ctx.graphics_cmds()` or `ctx.compute_cmds()`, which return a `CommandRecorder` for that command stream. That self-managed route remains supported, but cannot participate in executor-managed render-pass chaining. A compute-only pass normally returns `None` for the graphics descriptor.
 
 `execute` is required. `prepare`, `on_resize`, and the descriptor have defaults in the trait, though graphics passes should deliberately choose their descriptor route. `prepare` may return a Helio `Result` error. Implement `on_resize` only when the pass owns resources that depend on the render size; otherwise the default no-op is correct.
 

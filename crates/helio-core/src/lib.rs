@@ -391,6 +391,7 @@ pub mod acceleration;
 pub mod actor;
 pub mod asset_types;
 pub mod camera;
+pub mod cmd;
 pub mod context;
 pub mod entity;
 pub mod error;
@@ -452,6 +453,7 @@ macro_rules! cpu_scope {
 // crate, never here.
 pub use asset_types::{MeshUpload, PackedVertex, SectionedMeshUpload};
 pub use camera::GpuCameraUniforms;
+pub use cmd::{CommandRecorder, ComputeCmds, RenderCmds};
 pub use movability::Movability;
 pub use registry::{ResourceKey, ResourceRegistry, Tracked, ViewGroup};
 pub use render_environment::RenderEnvironment;

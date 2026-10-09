@@ -50,7 +50,7 @@ high quality; explicit counts are clamped to 1–32.
 ## Producer and consumer contract
 
 Declare/read `shadow_matrices`, `shadow_atlas`, and optional
-`postprocess_uniforms`. Record all fog work on `ctx.encoder_ptr`, after current
+`postprocess_uniforms`. Record all fog work on `ctx.graphics_cmds()`, after current
 shadows, with `chain_transparent=false`. The pass declares these dependencies
 for the graph's parallel scheduler as well.
 

@@ -767,7 +767,7 @@ impl RenderPass for RadianceCascades2DPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let mut encoder = ctx.graphics_cmds();
         let wg_x = dispatch_count(self.scene_w);
         let wg_y = dispatch_count(self.scene_h);
 
@@ -981,10 +981,9 @@ impl RenderPass for RadianceCascadesCompositePass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        let Some(rp_ptr) = ctx.active_render_pass_ptr() else {
+        let Some(mut rp) = ctx.render_cmds() else {
             return Ok(());
         };
-        let rp = unsafe { &mut *rp_ptr };
         rp.set_pipeline(&self.pipeline);
         rp.set_bind_group(0, &self.bind_group, &[]);
         rp.draw(0..3, 0..1);

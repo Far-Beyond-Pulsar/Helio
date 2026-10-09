@@ -179,10 +179,9 @@ impl RenderPass for DemoPass {
             return Ok(()); // background miss: preserve the frame, skip this draw
         };
 
-        let Some(rp_ptr) = ctx.active_render_pass_ptr() else {
+        let Some(mut rp) = ctx.render_cmds() else {
             return Ok(()); // no open render pass this frame — nothing to draw into
         };
-        let rp = unsafe { &mut *rp_ptr };
         rp.set_pipeline(&pipeline);
         rp.draw(0..3, 0..1);
         Ok(())

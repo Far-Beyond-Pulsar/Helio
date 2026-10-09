@@ -1159,10 +1159,9 @@ impl RenderPass for SpriteBatchPass {
             }));
         }
 
-        let Some(rp_ptr) = ctx.active_render_pass_ptr() else {
+        let Some(mut rp) = ctx.render_cmds() else {
             return Ok(());
         };
-        let rp = unsafe { &mut *rp_ptr };
         if let Some(overlay) = self.scene_overlay.as_mut() {
             // The scene's texture table, published per frame by the renderer.
             let Some(textures) = ctx.registry.read::<helio_mats::MaterialTextureBindings<'_>>(

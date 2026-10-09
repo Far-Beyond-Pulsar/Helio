@@ -19,7 +19,7 @@
 //! step, tracked apart from this crate.
 
 use bytemuck::{Pod, Zeroable};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use helio_pass_gbuffer::StaticObjectComponent;
 use pulsar_scenedb::gpu::BufferKey;
 
@@ -1045,14 +1045,14 @@ impl ObjectBatchPass {
     /// integrated `execute()` and [`Self::run_once_for_testing`] -- same
     /// "test records identically to the real path" discipline `helio-pass-
     /// sprite-cull`'s `record`/`run_once_for_testing` split uses.
-    fn record(&self, encoder: &mut wgpu::CommandEncoder, capacity: u32) {
-        encoder.clear_buffer(&self.scratch.gather_count, 0, None);
-        encoder.clear_buffer(&self.scratch.group_count, 0, None);
-        encoder.clear_buffer(&self.scratch.range_count, 0, None);
-        encoder.clear_buffer(&self.scratch.shadow_counts, 0, None);
+    fn record(&self, cmds: &mut CommandRecorder<'_>, capacity: u32) {
+        cmds.clear_buffer(&self.scratch.gather_count, 0, None);
+        cmds.clear_buffer(&self.scratch.group_count, 0, None);
+        cmds.clear_buffer(&self.scratch.range_count, 0, None);
+        cmds.clear_buffer(&self.scratch.shadow_counts, 0, None);
 
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ObjBatch Gather"),
                 timestamp_writes: None,
             });
@@ -1061,7 +1061,7 @@ impl ObjectBatchPass {
             pass.dispatch_workgroups(capacity.div_ceil(WG).max(1), 1, 1);
         }
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ObjBatch Prepare"),
                 timestamp_writes: None,
             });
@@ -1074,7 +1074,7 @@ impl ObjectBatchPass {
         let scatter_bgs = self.scatter_bgs.as_ref().unwrap();
         for i in 0..SORT_BITS {
             {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("ObjBatch Histogram"),
                     timestamp_writes: None,
                 });
@@ -1083,7 +1083,7 @@ impl ObjectBatchPass {
                 pass.dispatch_workgroups_indirect(&self.scratch.dispatch_args, 0);
             }
             {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("ObjBatch Scan"),
                     timestamp_writes: None,
                 });
@@ -1092,7 +1092,7 @@ impl ObjectBatchPass {
                 pass.dispatch_workgroups(1, 1, 1);
             }
             {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("ObjBatch Scatter"),
                     timestamp_writes: None,
                 });
@@ -1103,7 +1103,7 @@ impl ObjectBatchPass {
         }
 
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ObjBatch FinalGather"),
                 timestamp_writes: None,
             });
@@ -1112,7 +1112,7 @@ impl ObjectBatchPass {
             pass.dispatch_workgroups_indirect(&self.scratch.dispatch_args, 0);
         }
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ObjBatch GroupLocalScan"),
                 timestamp_writes: None,
             });
@@ -1121,7 +1121,7 @@ impl ObjectBatchPass {
             pass.dispatch_workgroups_indirect(&self.scratch.dispatch_args, 0);
         }
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ObjBatch GroupBlockScan"),
                 timestamp_writes: None,
             });
@@ -1130,7 +1130,7 @@ impl ObjectBatchPass {
             pass.dispatch_workgroups(1, 1, 1);
         }
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ObjBatch GroupWrite"),
                 timestamp_writes: None,
             });
@@ -1139,7 +1139,7 @@ impl ObjectBatchPass {
             pass.dispatch_workgroups_indirect(&self.scratch.dispatch_args, 0);
         }
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ObjBatch GroupWriteSentinel"),
                 timestamp_writes: None,
             });
@@ -1148,7 +1148,7 @@ impl ObjectBatchPass {
             pass.dispatch_workgroups(1, 1, 1);
         }
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ObjBatch PrepareGroups"),
                 timestamp_writes: None,
             });
@@ -1157,7 +1157,7 @@ impl ObjectBatchPass {
             pass.dispatch_workgroups(1, 1, 1);
         }
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ObjBatch BuildDrawCalls"),
                 timestamp_writes: None,
             });
@@ -1166,7 +1166,7 @@ impl ObjectBatchPass {
             pass.dispatch_workgroups_indirect(&self.scratch.dispatch_args_groups, 0);
         }
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ObjBatch RangeLocalScan"),
                 timestamp_writes: None,
             });
@@ -1175,7 +1175,7 @@ impl ObjectBatchPass {
             pass.dispatch_workgroups_indirect(&self.scratch.dispatch_args_groups, 0);
         }
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ObjBatch RangeBlockScan"),
                 timestamp_writes: None,
             });
@@ -1184,7 +1184,7 @@ impl ObjectBatchPass {
             pass.dispatch_workgroups(1, 1, 1);
         }
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ObjBatch RangeWrite"),
                 timestamp_writes: None,
             });
@@ -1193,7 +1193,7 @@ impl ObjectBatchPass {
             pass.dispatch_workgroups_indirect(&self.scratch.dispatch_args_groups, 0);
         }
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ObjBatch ShadowPartition"),
                 timestamp_writes: None,
             });
@@ -1202,8 +1202,8 @@ impl ObjectBatchPass {
             pass.dispatch_workgroups_indirect(&self.scratch.dispatch_args, 0);
         }
         if let Some(draw_counts) = self.draw_counts.as_ref() {
-            encoder.copy_buffer_to_buffer(&self.scratch.group_count, 0, draw_counts, 0, 4);
-            encoder.copy_buffer_to_buffer(&self.scratch.shadow_counts, 0, draw_counts, 4, 12);
+            cmds.copy_buffer_to_buffer(&self.scratch.group_count, 0, draw_counts, 0, 4);
+            cmds.copy_buffer_to_buffer(&self.scratch.shadow_counts, 0, draw_counts, 4, 12);
         }
     }
 
@@ -1332,7 +1332,7 @@ impl ObjectBatchPass {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ObjBatch Test Encoder"),
         });
-        self.record(&mut encoder, capacity);
+        self.record(&mut CommandRecorder::from_encoder(&mut encoder), capacity);
         queue.submit([encoder.finish()]);
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
     }
@@ -1517,7 +1517,7 @@ impl RenderPass for ObjectBatchPass {
                 })
                 .unwrap_or(0)
         };
-        self.record(unsafe { &mut *ctx.encoder_ptr }, capacity);
+        self.record(&mut ctx.graphics_cmds(), capacity);
         Ok(())
     }
 }

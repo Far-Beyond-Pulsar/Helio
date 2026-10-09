@@ -1,5 +1,5 @@
 //! Execute production WGSL and the real pass, not a CPU copy of its equations.
-use helio_core::{GpuCameraUniforms, SceneBufferProjection, SceneInput};
+use helio_core::{CommandRecorder, GpuCameraUniforms, SceneBufferProjection, SceneInput};
 use helio_pass_volumetric_fog::{
     GlobalFogComponent, LocalFogVolumeComponent, VolumetricFogPass, VolumetricFogSettingsComponent,
 };
@@ -76,8 +76,8 @@ fn group(
             .collect::<Vec<_>>(),
     })
 }
-fn run(encoder: &mut wgpu::CommandEncoder, pipeline: &wgpu::ComputePipeline, bg: &wgpu::BindGroup) {
-    let mut pass = encoder.begin_compute_pass(&Default::default());
+fn run(cmds: &mut CommandRecorder<'_>, pipeline: &wgpu::ComputePipeline, bg: &wgpu::BindGroup) {
+    let mut pass = cmds.begin_compute_pass(&Default::default());
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, bg, &[]);
     pass.dispatch_workgroups(1, 1, 1);
@@ -139,7 +139,7 @@ fn gpu_numerics_thin_limit_dense_limit_history_and_cube_faces() {
         &[(2, &globals), (12, &indices), (20, &output)],
     );
     let mut encoder = device.create_command_encoder(&Default::default());
-    run(&mut encoder, &pipeline, &bg);
+    run(&mut CommandRecorder::from_encoder(&mut encoder), &pipeline, &bg);
     queue.submit([encoder.finish()]);
     let values = floats(&read(&device, &queue, &output));
     for v in values[..48].as_chunks::<4>().0 {
@@ -386,10 +386,10 @@ fn native_media_world_space_overlap_transmittance_quality_edits_and_tombstones()
         );
         let mut encoder = device.create_command_encoder(&Default::default());
         encoder.clear_buffer(&fog, 0, None);
-        run(&mut encoder, &resolve, &resolve_bg);
+        run(&mut CommandRecorder::from_encoder(&mut encoder), &resolve, &resolve_bg);
         encoder.copy_buffer_to_buffer(&resolved, 0, &fog, 0, 64);
-        run(&mut encoder, &classify, &classify_bg);
-        run(&mut encoder, &probe, &probe_bg);
+        run(&mut CommandRecorder::from_encoder(&mut encoder), &classify, &classify_bg);
+        run(&mut CommandRecorder::from_encoder(&mut encoder), &probe, &probe_bg);
         queue.submit([encoder.finish()]);
         (
             floats(&read(&device, &queue, &output)),
@@ -598,7 +598,7 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
         entries: &entries,
     });
     let mut encoder = device.create_command_encoder(&Default::default());
-    run(&mut encoder, &producer, &producer_bg);
+    run(&mut CommandRecorder::from_encoder(&mut encoder), &producer, &producer_bg);
     for face in 0..6 {
         let face_view = atlas.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2),
@@ -622,7 +622,7 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
             multiview_mask: None,
         });
     }
-    run(&mut encoder, &probe, &bg);
+    run(&mut CommandRecorder::from_encoder(&mut encoder), &probe, &bg);
     queue.submit([encoder.finish()]);
     let values = floats(&read(&device, &queue, &output));
     for (face, v) in values.as_chunks::<4>().0.iter().enumerate() {
@@ -714,8 +714,8 @@ impl helio_core::RenderPass for ShadowProducer {
         );
     }
     fn execute(&mut self, ctx: &mut helio_core::PassContext) -> helio_core::Result<()> {
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
-        run(encoder, &self.pipeline, &self.bg);
+        let mut cmds = ctx.graphics_cmds();
+        run(&mut cmds, &self.pipeline, &self.bg);
         for layer in 0..6 {
             let view = self.atlas.create_view(&wgpu::TextureViewDescriptor {
                 dimension: Some(wgpu::TextureViewDimension::D2),
@@ -723,7 +723,7 @@ impl helio_core::RenderPass for ShadowProducer {
                 array_layer_count: Some(1),
                 ..Default::default()
             });
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let _pass = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -773,7 +773,7 @@ impl helio_core::RenderPass for ReadFog {
                 },
             ],
         });
-        run(unsafe { &mut *ctx.encoder_ptr }, &self.pipeline, &bg);
+        run(&mut ctx.graphics_cmds(), &self.pipeline, &bg);
         Ok(())
     }
 }

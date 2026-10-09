@@ -196,10 +196,11 @@ impl Gpu {
             bytemuck::bytes_of(&self.params),
         );
         let mut e = self.device.create_command_encoder(&Default::default());
+        let mut cmds = CommandRecorder::from_encoder(&mut e);
         self.pass
-            .dispatch(&mut e, 0, self.params.row_count.div_ceil(64));
-        self.pass.dispatch(&mut e, 1, 1);
-        self.pass.dispatch(&mut e, 2, 1);
+            .dispatch(&mut cmds, 0, self.params.row_count.div_ceil(64));
+        self.pass.dispatch(&mut cmds, 1, 1);
+        self.pass.dispatch(&mut cmds, 2, 1);
         self.queue.submit([e.finish()]);
         bytemuck::pod_read_unaligned(&self.read(&self.pass.proposed))
     }
@@ -207,8 +208,11 @@ impl Gpu {
         self.queue
             .write_buffer(&self.pass.committed, 0, bytemuck::bytes_of(table));
         let mut e = self.device.create_command_encoder(&Default::default());
-        self.pass
-            .dispatch(&mut e, 3, self.params.row_count.div_ceil(64));
+        self.pass.dispatch(
+            &mut CommandRecorder::from_encoder(&mut e),
+            3,
+            self.params.row_count.div_ceil(64),
+        );
         self.queue.submit([e.finish()]);
         bytemuck::cast_slice::<u8, u32>(&self.read(&self.lights)).to_vec()
     }

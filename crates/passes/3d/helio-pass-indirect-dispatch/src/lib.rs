@@ -388,11 +388,11 @@ impl RenderPass for IndirectDispatchPass {
         // O(1) CPU: one dispatch, GPU culls all draw calls in parallel. One
         // workgroup per draw-call group — its 64 lanes cooperatively compact
         // that group's surviving instances (see indirect_dispatch.wgsl).
-        let mut pass =
-            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("IndirectDispatch"),
-                timestamp_writes: None,
-            });
+        let mut cmds = ctx.graphics_cmds();
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("IndirectDispatch"),
+            timestamp_writes: None,
+        });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.dispatch_workgroups(draw_count, 1, 1);

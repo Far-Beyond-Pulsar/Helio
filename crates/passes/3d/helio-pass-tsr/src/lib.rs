@@ -770,8 +770,9 @@ impl RenderPass for TsrPass {
         }
 
         // ── 2. TSR resolve → output_view ──────────────────────────────────────
+        let mut cmds = ctx.graphics_cmds();
         if let Some(query) = &self.timing_query {
-            unsafe { &mut *ctx.encoder_ptr }.write_timestamp(query, 0);
+            cmds.write_timestamp(query, 0);
         }
         {
             let attachments = [Some(wgpu::RenderPassColorAttachment {
@@ -786,25 +787,24 @@ impl RenderPass for TsrPass {
                 view: &self.output_depth_view, resolve_target: None, depth_slice: None,
                 ops: wgpu::Operations {load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store},
             })];
-            let mut pass =
-                unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("TSR Resolve"),
-                    color_attachments: &attachments,
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
+            let mut pass = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("TSR Resolve"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
         }
         if let Some(query) = &self.timing_query {
-            unsafe { &mut *ctx.encoder_ptr }.write_timestamp(query, 1);
+            cmds.write_timestamp(query, 1);
         }
 
         // ── 3. Copy output to history ─────────────────────────────────────────
-        unsafe { &mut *ctx.encoder_ptr }.copy_texture_to_texture(
+        cmds.copy_texture_to_texture(
             self.output_texture.as_image_copy(),
             self.history_texture.as_image_copy(),
             wgpu::Extent3d {
@@ -814,12 +814,12 @@ impl RenderPass for TsrPass {
             },
         );
 
-        unsafe { &mut *ctx.encoder_ptr }.copy_texture_to_texture(
+        cmds.copy_texture_to_texture(
             self.output_depth.as_image_copy(), self.history_depth.as_image_copy(),
             wgpu::Extent3d {width:self.output_width,height:self.output_height,depth_or_array_layers:1},
         );
         if let Some(query) = &self.timing_query {
-            unsafe { &mut *ctx.encoder_ptr }.write_timestamp(query, 2);
+            cmds.write_timestamp(query, 2);
         }
 
         // ── 4. Blit output_view → ctx.target ──────────────────────────────────
@@ -833,22 +833,21 @@ impl RenderPass for TsrPass {
                     store: wgpu::StoreOp::Store,
                 },
             })];
-            let mut pass =
-                unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("TSR Blit"),
-                    color_attachments: &attachments,
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
+            let mut pass = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("TSR Blit"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
             pass.set_pipeline(&self.blit_pipeline);
             pass.set_bind_group(0, &self.blit_bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
 
         if let Some(query) = &self.timing_query {
-            unsafe { &mut *ctx.encoder_ptr }.write_timestamp(query, 3);
+            cmds.write_timestamp(query, 3);
         }
 
         Ok(())

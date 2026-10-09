@@ -13,10 +13,11 @@ breakdown failed to explain the GPU frame duration. It was unsafe to conclude
 that the missing time belonged to SceneDB/CDB, presentation, or fog.
 
 The graph placed pass markers on `compute_encoder`, but passes including
-LightCull invoke `begin_compute_pass` through `ctx.encoder_ptr`, which points
-to the graphics encoder. A shader being compute work does not imply it is
-recorded in the command buffer named Compute Graph. The measurement therefore
-bracketed an almost-empty command stream instead of the expensive dispatch.
+LightCull invoke `begin_compute_pass` through the context's graphics encoder
+(today `ctx.graphics_cmds()`), not the compute one. A shader being compute
+work does not imply it is recorded in the command buffer named Compute
+Graph. The measurement therefore bracketed an almost-empty command stream
+instead of the expensive dispatch.
 Sharing a query set across these sequential encoders was not established as
 the cause; the placement of its markers was the demonstrated bug.
 

@@ -768,7 +768,7 @@ impl RenderPass for GBufferPass {
 
         let indirect = culled.indirect;
 
-        let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        let mut pass = ctx.render_cmds().unwrap();
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, vertices.slice(..));
@@ -788,7 +788,7 @@ impl RenderPass for GBufferPass {
             };
             let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
             pass.set_pipeline(pipeline);
-            multi_draw_indexed_indirect(pass, indirect, 0, draw_count, batch.all_draws_count_slot());
+            multi_draw_indexed_indirect(&mut pass, indirect, 0, draw_count, batch.all_draws_count_slot());
         } else {
             for (range, &(class, graph_hash, start, count)) in ranges.iter().enumerate() {
                 if count == 0 {
@@ -802,7 +802,7 @@ impl RenderPass for GBufferPass {
                 let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
                 pass.set_pipeline(pipeline);
                 multi_draw_indexed_indirect(
-                    pass,
+                    &mut pass,
                     indirect,
                     start,
                     count,
