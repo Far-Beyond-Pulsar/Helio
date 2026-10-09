@@ -40,6 +40,18 @@ const LAYER_HILLS: u32 = 4u;
 const LAYER_CRATERS: u32 = 7u;
 const LAYER_BASINS: u32 = 8u;
 const LAYER_PLATEAU: u32 = 9u;
+const LAYER_CLIFFS: u32 = 10u;
+
+// `landform::terrace`: terraces of `step` height units, rising over the last
+// `riser_q10` / 1024 of each step.
+fn landform_terrace(h: i32, step: i32, riser_q10: i32) -> i32 {
+    var q = h / step;
+    if h % step < 0 { q -= 1; }
+    let f = h - q * step;
+    let riser = max((step * riser_q10) >> 10u, 1);
+    let t = (max(f - (step - riser), 0) << 10u) / riser;
+    return q * step + ((min(t, 1024) * step) >> 10u);
+}
 
 const SEED_CAVE_REGION: u32 = 0xA511E9B3u;
 const SEED_TUNNEL_A: u32 = 0x63D83595u;
@@ -611,6 +623,12 @@ fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
             continue;
         } else if layer.kind == LAYER_PLATEAU {
             x = layer.a;
+        } else if (layer.kind & 0xffffu) == LAYER_CLIFFS {
+            // Escarpments: inside their regions, terraces of what lies below
+            // them in the stack.
+            let m = landform_masked(layer.mask, clamp((lf_value[l] - layer.b) * 4, 0, FINE_ONE), lw);
+            h += mul_fine(landform_terrace(h, layer.a, i32(layer.kind >> 16u)) - h, m);
+            continue;
         } else if layer.kind >= LAYER_HILLS && layer.kind <= LAYER_CRATERS {
             x = lf_value[l];
         }

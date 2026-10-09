@@ -19,6 +19,9 @@ fn terrain_programs_are_bit_identical_to_cpu() {
     let mut deep = TerrainLayers::earth();
     deep.caves.depth_m = 900.0;
     let deep = deep.source(7);
+    let mut cliffs = TerrainLayers::earth();
+    cliffs.layers.push(helio_pass_voxel_planet::layers::Layer { coverage: 0.6, ..helio_pass_voxel_planet::layers::Layer::new(helio_pass_voxel_planet::layers::LayerKind::Cliffs) });
+    let cliffs = cliffs.source(7);
     for (shape, size, terrain) in [
         (Shape::Sphere, 0.1, TerrainSource::default()),
         (Shape::Sphere, 0.3, TerrainSource::default()),
@@ -35,6 +38,9 @@ fn terrain_programs_are_bit_identical_to_cpu() {
         (Shape::Sphere, 0.1, desert.clone()),
         (Shape::Plane, 0.3, desert),
         (Shape::Sphere, 0.1, deep),
+        (Shape::Sphere, 0.1, cliffs.clone()),
+        (Shape::Plane, 0.3, cliffs.clone()),
+        (Shape::InfinitePlane, 1.0, cliffs),
     ] {
         let planet = Planet::new(PlanetRecipe { shape, voxel_size_m: size, plane_size_m: 5_000.0, terrain: terrain.clone(), ..Default::default() }).unwrap();
         helio_pass_voxel_planet::engine::verify_field(&gpu.device, &gpu.queue, &planet, 20_000)
