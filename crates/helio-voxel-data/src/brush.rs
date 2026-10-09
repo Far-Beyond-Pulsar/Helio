@@ -388,6 +388,13 @@ mod journal_tests {
     }
 
     #[test]
+    fn saved_edits_load_bit_exact() {
+        let j: VoxelEditJournal = (0..2000).map(|k| edit(k as f64 * 0.1 + 1.0 / 3.0)).collect();
+        let back: VoxelEditJournal = serde_json::from_str(&serde_json::to_string(&j).unwrap()).unwrap();
+        assert_eq!(back, j, "every edit's bits (the journal hash) survive saving");
+    }
+
+    #[test]
     fn base64_round_trips() {
         for len in 0..40 {
             let bytes: Vec<u8> = (0..len).map(|k| (k * 37 + 11) as u8).collect();
