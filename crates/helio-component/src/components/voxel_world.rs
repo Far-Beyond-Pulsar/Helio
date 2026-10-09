@@ -418,6 +418,7 @@ pub fn block_edit(planet: &Planet, p: DVec3, material: u32) -> VoxelBrushEdit {
             VoxelBrushOp::Add
         },
         material,
+        height: 0.0,
     }
 }
 
@@ -441,6 +442,7 @@ pub fn shape_edit(
             VoxelBrushOp::Add
         },
         material,
+        height: 0.0,
     })
 }
 
@@ -685,6 +687,7 @@ mod journal_tests {
             shape: if n % 2 == 0 { VoxelBrushShape::Sphere } else { VoxelBrushShape::Cube },
             op: [VoxelBrushOp::Remove, VoxelBrushOp::Add, VoxelBrushOp::Paint][n % 3],
             material: 1 + (n % 9) as u32,
+            height: 0.0,
         };
         let full: VoxelEditJournal = (0..LISTED_EDITS + 900).map(edit).collect();
         let replayed = journal_planet(recipe.clone(), &full).unwrap();
