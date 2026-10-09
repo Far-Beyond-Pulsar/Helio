@@ -35,10 +35,10 @@ pub(crate) const CASCADE_COUNT: usize = 3;
 pub const MAX_SIM_VOLUMES: u32 = 8;
 /// Fixed capacity for the `"water_hitboxes"` SceneDB buffer, mirroring
 /// `MAX_SIM_VOLUMES` above: this pass always reads exactly this many rows
-/// (zeroed/absent hitboxes are inert -- a degenerate zero-extent AABB
-/// displaces nothing), so no per-frame CPU count of live hitboxes is ever
-/// needed to drive this pass's dispatch/draw bounds.
-pub(crate) const MAX_WATER_HITBOXES: u32 = 32;
+/// (zeroed/absent hitboxes are inert -- a zero strength displaces
+/// nothing), so no per-frame CPU count of live hitboxes is ever needed to
+/// drive this pass's dispatch/draw bounds.
+pub const MAX_WATER_HITBOXES: u32 = 32;
 pub(crate) const CASCADE_PATCH_SIZES: [f32; 3] = [30.0, 90.0, 270.0];
 /// One simulation step, in seconds of the renderer's frame clock: the
 /// simulation steps at a fixed 120 Hz, so a 60 Hz frame takes two steps and
@@ -384,6 +384,10 @@ pub struct WaterSimPass {
     pub(crate) update_bufs: [wgpu::Buffer; 3],
     pub(crate) normal_bufs: [wgpu::Buffer; 3],
     pub(crate) hitbox_count_buf: wgpu::Buffer,
+    /// The hitbox rows as of the last frame that applied them: a row that
+    /// still holds the same body displaces from where it was then, so a
+    /// body that stops moving stops displacing water.
+    pub(crate) hitbox_prev_buf: wgpu::Buffer,
 
     pub(crate) pending_drops: std::collections::VecDeque<simulation::DropUniform>,
     pub(crate) drop_staged: bool,
@@ -413,7 +417,7 @@ pub struct WaterSimPass {
     pub(crate) normal_bg_keys: Vec<Option<usize>>,
 
     pub(crate) hitbox_bg: Option<wgpu::BindGroup>,
-    pub(crate) hitbox_bg_key: Option<(usize, usize)>,
+    pub(crate) hitbox_bg_key: Option<(usize, usize, usize)>,
     pub(crate) drop_bg: Option<wgpu::BindGroup>,
     pub(crate) drop_bg_key: Option<usize>,
     pub(crate) update_bgs: Vec<Option<wgpu::BindGroup>>,
@@ -550,6 +554,8 @@ impl WaterSimPass {
             });
         }
         self.front_per_layer.iter_mut().for_each(|front| *front = true);
+        // Bodies already in the water push it once as it starts.
+        encoder.clear_buffer(&self.hitbox_prev_buf, 0, None);
     }
 
     pub fn resize_internal(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -784,9 +790,16 @@ impl RenderPass for WaterSimPass {
             }
         };
 
-        // ---- 1. Hitbox displacement (cascade 0 for all volumes) ------------
-        if hitbox_count > 0 {
-            if let Some(hitboxes_buf) = water_hitboxes_buf {
+        // ---- 1. Hitbox displacement (cascade 0 of each volume) -------------
+        // World-space boxes, mapped into each volume's sim space by the
+        // shader (the draw's instance is the volume). Applied once per frame
+        // that steps the simulation, then remembered as the previous rows.
+        if let (true, Some(hitboxes_buf), Some(vols_buf)) = (
+            hitbox_count > 0 && volume_count > 0 && self.steps_this_frame > 0,
+            water_hitboxes_buf,
+            water_volumes_buf,
+        ) {
+            {
                 for vol_idx in 0..volume_count {
                     let layer = (vol_idx * CASCADE_COUNT as u32) as usize;
                     let src = layer_view(layer, self.front_per_layer[layer]);
@@ -798,7 +811,7 @@ impl RenderPass for WaterSimPass {
 
                     let src_key = src as *const wgpu::TextureView as usize;
                     let hitboxes_key = hitboxes_buf as *const wgpu::Buffer as usize;
-                    let new_key = (src_key, hitboxes_key);
+                    let new_key = (src_key, hitboxes_key, vols_buf as *const wgpu::Buffer as usize);
                     if self.hitbox_bg_key != Some(new_key) {
                         self.hitbox_bg =
                             Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -820,6 +833,14 @@ impl RenderPass for WaterSimPass {
                                     wgpu::BindGroupEntry {
                                         binding: 3,
                                         resource: hitboxes_buf.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 4,
+                                        resource: self.hitbox_prev_buf.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 5,
+                                        resource: vols_buf.as_entire_binding(),
                                     },
                                 ],
                             }));
@@ -847,10 +868,21 @@ impl RenderPass for WaterSimPass {
                     let mut pass = ctx.begin_render_pass(&desc);
                     pass.set_pipeline(&self.hitbox_pipeline);
                     pass.set_bind_group(0, bg, &[]);
-                    pass.draw(0..6, 0..1);
+                    pass.draw(0..6, vol_idx..vol_idx + 1);
                     drop(pass);
                     self.front_per_layer[layer] = !self.front_per_layer[layer];
                 }
+            }
+            // Remember where every body was applied.
+            if hitboxes_buf.usage().contains(wgpu::BufferUsages::COPY_SRC) {
+                let size = hitboxes_buf.size().min(self.hitbox_prev_buf.size());
+                unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
+                    hitboxes_buf,
+                    0,
+                    &self.hitbox_prev_buf,
+                    0,
+                    size,
+                );
             }
         }
 

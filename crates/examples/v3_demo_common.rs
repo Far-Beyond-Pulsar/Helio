@@ -457,8 +457,8 @@ pub fn spawn_water_volume(world: &mut World, descriptor: WaterVolumeDescriptor) 
 
 /// CPU-friendly description of one AABB water-displacement hitbox; packs into
 /// `helio_pass_water_sim::WaterHitboxComponent` per `hitbox.frag.wgsl`'s
-/// `GpuWaterHitbox` layout. Coordinates are in the water sim's own space: X/Z
-/// normalized to the pool's half-extent, Y relative to the water surface.
+/// `GpuWaterHitbox` layout. Coordinates are world space; the simulation
+/// maps the box into each water volume it overlaps.
 #[derive(Clone, Copy, Debug)]
 pub struct WaterHitboxDescriptor {
     pub old_min: [f32; 3],

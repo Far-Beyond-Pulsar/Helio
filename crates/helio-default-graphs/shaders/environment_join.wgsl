@@ -25,7 +25,8 @@ struct JoinUniforms {
     /// `write_decal_transform`); bit 6: a particle emitter (see
     /// `write_emitter_transform` and `cs_compact_rows`); bit 7: a water
     /// row, whose `sun_direction` is the scene's sun (see `write_sun`);
-    /// bit 8: the global wind over the water rows (see `write_water_wind`).
+    /// bit 8: the global wind over the water rows (see `write_water_wind`);
+    /// bit 9: a water hitbox (see `write_hitbox`).
     flags: u32,
     /// Output rows `cs_compact_rows` may fill.
     capacity: u32,
@@ -52,6 +53,7 @@ const DECAL: u32 = 32u;
 const EMITTER: u32 = 64u;
 const SUN: u32 = 128u;
 const WATER_WIND: u32 = 256u;
+const HITBOX: u32 = 512u;
 // `helio_pass_water_sim::GpuWaterVolume`: `sun_direction` and `wind_params`
 // (`w`: the volume opts out of the global wind).
 const WATER_SUN_WORD: u32 = 44u;
@@ -82,6 +84,8 @@ const WORKGROUP: u32 = 64u;
 @group(0) @binding(5) var<storage, read> sources: array<u32>;
 @group(0) @binding(6) var<storage, read_write> rows_out: array<u32>;
 @group(0) @binding(7) var<storage, read> lights: array<u32>;
+// Mesh instances' local bounding spheres, keyed like `owners`.
+@group(0) @binding(8) var<storage, read> mesh_bounds: array<vec4<f32>>;
 
 fn source_base(row: u32) -> u32 {
     return row * u.source_words + u.source_offset;
@@ -120,13 +124,17 @@ fn placed(row: u32) -> bool {
     if (u.flags & GATE_HIDDEN) != 0u && index < arrayLength(&hidden) && hidden[index] != 0u {
         return false;
     }
-    if (u.flags & (SPATIAL | LAYER | CENTERED | DECAL | EMITTER)) != 0u && index >= arrayLength(&transforms) {
+    if (u.flags & (SPATIAL | LAYER | CENTERED | DECAL | EMITTER | HITBOX)) != 0u && index >= arrayLength(&transforms) {
         return false;
     }
     if (u.flags & DECAL) != 0u && any(source_size(row) == vec3<f32>(0.0)) {
         return false;
     }
     if (u.flags & SPATIAL) != 0u && all(source_size(row) == vec3<f32>(0.0)) {
+        return false;
+    }
+    // A body whose owner holds no mesh has nothing to bound.
+    if (u.flags & HITBOX) != 0u && body_bounds(row).lo.w == 0.0 {
         return false;
     }
     return true;
@@ -267,6 +275,63 @@ fn write_water_wind(row: u32) {
     }
 }
 
+/// A body's world bounds: the AABB of the bounding spheres of every mesh
+/// its owner holds (attached and enabled), placed by the owner's
+/// transform. `w` of `lo` is 1 when the owner holds any.
+struct BodyBounds {
+    lo: vec4<f32>,
+    hi: vec3<f32>,
+}
+
+fn body_bounds(row: u32) -> BodyBounds {
+    let body = owners[row];
+    let t = transforms[body.owner_index];
+    let r = object_rotation(t);
+    let scale = object_scale(t);
+    let position = object_position(t);
+    let largest_scale = max(abs(scale.x), max(abs(scale.y), abs(scale.z)));
+    var lo = vec3<f32>(3.0e38);
+    var hi = vec3<f32>(-3.0e38);
+    var found = 0.0;
+    let instances = min(arrayLength(&mesh_bounds), arrayLength(&owners));
+    for (var i = 0u; i < instances; i++) {
+        let sphere = mesh_bounds[i];
+        let mesh = owners[i];
+        if sphere.w <= 0.0 || mesh.enabled == 0u || mesh.owner_index != body.owner_index
+            || mesh.owner_generation != body.owner_generation {
+            continue;
+        }
+        let center = position + r * (sphere.xyz * scale);
+        let radius = sphere.w * largest_scale;
+        lo = min(lo, center - vec3<f32>(radius));
+        hi = max(hi, center + vec3<f32>(radius));
+        found = 1.0;
+    }
+    return BodyBounds(vec4<f32>(lo, found), hi);
+}
+
+/// A water hitbox (`helio_pass_water_sim::GpuWaterHitbox`, 20 words): the
+/// body's new bounds are its `body_bounds`; its old bounds an empty box at
+/// their centre (the simulation replaces them with where the body was last
+/// applied while the row holds the same body); `params` the source's edge
+/// softness and strength and the body's identity (source row + 1).
+fn write_hitbox(row: u32, output: u32) {
+    let bounds = body_bounds(row);
+    let lo = bounds.lo.xyz;
+    let hi = bounds.hi;
+    let center = (lo + hi) * 0.5;
+    let source = source_base(row);
+    for (var i = 0u; i < 3u; i++) {
+        rows_out[output + i] = bitcast<u32>(center[i]);
+        rows_out[output + 4u + i] = bitcast<u32>(center[i]);
+        rows_out[output + 8u + i] = bitcast<u32>(lo[i]);
+        rows_out[output + 12u + i] = bitcast<u32>(hi[i]);
+    }
+    rows_out[output + 16u] = sources[source];
+    rows_out[output + 17u] = sources[source + 1u];
+    rows_out[output + 18u] = bitcast<u32>(f32(row + 1u));
+}
+
 /// Writes placed source `row` as output row `slot`.
 fn write_row(row: u32, slot: u32) {
     let source = source_base(row);
@@ -283,6 +348,10 @@ fn write_row(row: u32, slot: u32) {
     }
     if (u.flags & LAYER) != 0u {
         write_layer(row, output);
+        return;
+    }
+    if (u.flags & HITBOX) != 0u {
+        write_hitbox(row, output);
         return;
     }
     var source_header = 0u;

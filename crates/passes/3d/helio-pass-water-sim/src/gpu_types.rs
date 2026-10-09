@@ -162,9 +162,12 @@ const _: () = assert!(
 
 /// GPU-side AABB hitbox that displaces the water heightfield simulation.
 ///
-/// Each hitbox records where an object *was* (old bounds) and where it *is* (new bounds).
-/// The simulation shader displaces water upward where the hitbox moved away and
-/// downward where it moved to, producing realistic wave entry effects.
+/// Each hitbox records where an object *was* (old bounds) and where it *is* (new bounds),
+/// world space. The simulation shader displaces water upward where the hitbox moved away and
+/// downward where it moved to, producing realistic wave entry effects, in every water
+/// volume the box overlaps. The pass remembers the rows it applied last: while a row
+/// holds the same object (`params.z`), its old bounds are the ones it had then, so an
+/// object at rest displaces nothing.
 ///
 /// # Memory Layout
 /// - Total size: 80 bytes (5 × vec4<f32>)
@@ -186,9 +189,11 @@ pub struct GpuWaterHitbox {
     pub new_min: [f32; 4],
     /// Current frame AABB maximum (xyz) + padding
     pub new_max: [f32; 4],
-    /// (edge_softness, strength, padding, padding)
-    /// - edge_softness: controls Gaussian falloff at AABB edges (0.5 = sharp, 2.0 = very soft)
-    /// - strength: displacement multiplier (default 1.0)
+    /// (edge_softness, strength, identity, padding)
+    /// - edge_softness: how far, in metres, the falloff extends past the AABB edges
+    /// - strength: displacement multiplier (default 1.0; 0 = inert row)
+    /// - identity: which object the row holds (the environment join writes its
+    ///   source row + 1); a change starts from this row's own old bounds
     pub params: [f32; 4],
 }
 

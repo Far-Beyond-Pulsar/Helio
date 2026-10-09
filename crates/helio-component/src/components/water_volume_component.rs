@@ -18,15 +18,9 @@
 //! that lights the water is the scene's directional light (one per level),
 //! which the join writes into the row; volumes do not author their own.
 //!
-//! Not covered here: `WaterHitboxDescriptor`. Read its own doc before
-//! assuming it belongs alongside this component — it explicitly records an
-//! object's *previous* AABB and *current* AABB from frame to frame (`old_min`/
-//! `old_max`/`new_min`/`new_max`) to drive splash displacement. That's
-//! per-frame runtime state computed from something else's movement, not
-//! data a level designer authors once and places — it needs to be driven by
-//! physics/movement code reacting to objects entering a water volume, which
-//! is a different kind of integration than "one component, one purpose"
-//! placement. Deferred, not overlooked.
+//! Objects push the water through the simulation's hitboxes, which the
+//! environment join derives from physics bodies on the `WaterSim` collision
+//! channel (Pulsar-Native#1080), not from this component.
 
 use engine_class_derive::{engine_class, register_world_component};
 use helio_pass_water_sim::GpuWaterVolume;

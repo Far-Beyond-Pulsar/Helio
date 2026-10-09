@@ -106,27 +106,17 @@ fn initial_ball_velocity() -> glam::Vec3 {
 
 /// Build a WaterHitboxDescriptor for a sphere at `new_pos` (previously at `old_pos`).
 ///
-/// The hitbox coordinate system is: X/Z normalized to [-1,1] over the pool half-extent,
-/// Y is relative to the water surface (0 = surface, negative = submerged).
+/// Hitboxes are world-space boxes; the simulation maps them into each water
+/// volume it overlaps.
 fn ball_aabb(
     old_pos: glam::Vec3,
     new_pos: glam::Vec3,
     radius: f32,
-    surface_y: f32,
-    pool_half_xz: f32,
+    _surface_y: f32,
+    _pool_half_xz: f32,
 ) -> WaterHitboxDescriptor {
     let to_sim = |p: glam::Vec3| -> ([f32; 3], [f32; 3]) {
-        let mn = [
-            (p.x - radius) / pool_half_xz,
-            (p.y - radius) - surface_y,
-            (p.z - radius) / pool_half_xz,
-        ];
-        let mx = [
-            (p.x + radius) / pool_half_xz,
-            (p.y + radius) - surface_y,
-            (p.z + radius) / pool_half_xz,
-        ];
-        (mn, mx)
+        ((p - glam::Vec3::splat(radius)).to_array(), (p + glam::Vec3::splat(radius)).to_array())
     };
     let (old_min, old_max) = to_sim(old_pos);
     let (new_min, new_max) = to_sim(new_pos);

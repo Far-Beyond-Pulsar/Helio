@@ -1,7 +1,7 @@
 use crate::simulation::{DeltaUniform, DropUniform, HitboxCountUniform};
 use crate::{
     make_caustics_grid, make_static_box_mesh, make_top_grid, vec4_vbl, WaterSimPass, BLIT_WGSL,
-    CASCADE_COUNT, MAX_SIM_VOLUMES, SIM_SIZE,
+    CASCADE_COUNT, MAX_SIM_VOLUMES, MAX_WATER_HITBOXES, SIM_SIZE,
 };
 use wgpu::util::DeviceExt;
 
@@ -126,6 +126,28 @@ impl WaterSimPass {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // The previous frame's hitbox rows (`hitbox_prev_buf`).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // The water volumes, mapping world boxes into each one.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -310,6 +332,13 @@ impl WaterSimPass {
             "WaterSim Hitbox Count",
             std::mem::size_of::<HitboxCountUniform>(),
         );
+        let hitbox_prev_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("WaterSim Previous Hitboxes"),
+            size: u64::from(MAX_WATER_HITBOXES)
+                * std::mem::size_of::<crate::GpuWaterHitbox>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let caustics_render_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -846,6 +875,7 @@ impl WaterSimPass {
                     panic!("CASCADE_COUNT doesn't match expected size")
                 }),
             hitbox_count_buf,
+            hitbox_prev_buf,
             pending_drops: std::collections::VecDeque::new(),
             drop_staged: false,
             static_box_vbuf,
