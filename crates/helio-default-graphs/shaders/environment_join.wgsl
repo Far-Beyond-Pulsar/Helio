@@ -1,6 +1,6 @@
 // Environment join: one source row per component instance (fog volumes,
 // post-process volumes, camera post-process baselines, water volumes,
-// foliage, atmospheres, decals; see `environment_join.rs`). A placed row is copied into its pass's buffer; a
+// foliage, atmospheres, decals, particle emitters; see `environment_join.rs`). A placed row is copied into its pass's buffer; a
 // spatial row gets its world AABB from the owner's transform first. Every
 // other output row stays zero, which each pass treats as inert (`enabled`
 // 0, `blend_weight` 0, zero extent).
@@ -22,7 +22,8 @@ struct JoinUniforms {
     /// foliage layer (see `write_layer`); bit 4: an atmosphere, whose
     /// centre (words 0..2) moves to the owner's position when its
     /// placement (word 3) is `PLACEMENT_CENTER`; bit 5: a decal (see
-    /// `write_decal_transform`).
+    /// `write_decal_transform`); bit 6: a particle emitter (see
+    /// `write_emitter_transform` and `cs_compact_rows`).
     flags: u32,
     /// Output rows `cs_compact_rows` may fill.
     capacity: u32,
@@ -33,6 +34,11 @@ struct JoinUniforms {
     /// A source word (from the row's start) that must be non-zero for the
     /// row to be placed; `NO_GATE_WORD` for none.
     gate_word: u32,
+    /// Particles the emitter ranges are allocated from.
+    pool: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 const SPATIAL: u32 = 1u;
@@ -41,6 +47,15 @@ const SURFACE: u32 = 4u;
 const LAYER: u32 = 8u;
 const CENTERED: u32 = 16u;
 const DECAL: u32 = 32u;
+const EMITTER: u32 = 64u;
+// `helio_pass_corona::GpuCoronaEmitter`: `particle_offset`, `particle_count`
+// (the requested range in the source row) and `spawn_cursor`, which the
+// pass reads as the emitter's identity.
+const EMITTER_OFFSET_WORD: u32 = 45u;
+const EMITTER_COUNT_WORD: u32 = 46u;
+const EMITTER_IDENTITY_WORD: u32 = 47u;
+// `helio_pass_corona::CORONA_RANGE_ALIGNMENT`.
+const EMITTER_RANGE_ALIGNMENT: u32 = 256u;
 // `helio_pass_sky::atmosphere::placement::CENTER`.
 const PLACEMENT_CENTER: u32 = 1u;
 const NO_GATE_WORD: u32 = 0xffffffffu;
@@ -91,7 +106,7 @@ fn placed(row: u32) -> bool {
     if (u.flags & GATE_HIDDEN) != 0u && index < arrayLength(&hidden) && hidden[index] != 0u {
         return false;
     }
-    if (u.flags & (SPATIAL | LAYER | CENTERED | DECAL)) != 0u && index >= arrayLength(&transforms) {
+    if (u.flags & (SPATIAL | LAYER | CENTERED | DECAL | EMITTER)) != 0u && index >= arrayLength(&transforms) {
         return false;
     }
     if (u.flags & DECAL) != 0u && any(source_size(row) == vec3<f32>(0.0)) {
@@ -142,6 +157,50 @@ fn write_decal_transform(row: u32, output: u32) {
         rows_out[output + i * 4u + 3u] = 0u;
     }
     rows_out[output + 15u] = bitcast<u32>(1.0);
+}
+
+/// A particle emitter's transform (`mat4x4`, column-major, words 0..15 of
+/// the output row): its owner's, so particles spawn at the owner.
+fn write_emitter_transform(row: u32, output: u32) {
+    let t = transforms[owners[row].owner_index];
+    let r = object_rotation(t);
+    let scale = object_scale(t);
+    let center = object_position(t);
+    for (var i = 0u; i < 3u; i++) {
+        let axis = r[i] * scale[i];
+        for (var j = 0u; j < 3u; j++) {
+            rows_out[output + i * 4u + j] = bitcast<u32>(axis[j]);
+        }
+        rows_out[output + i * 4u + 3u] = 0u;
+        rows_out[output + 12u + i] = bitcast<u32>(center[i]);
+    }
+    rows_out[output + 15u] = bitcast<u32>(1.0);
+}
+
+/// The pool particles source `row` takes: its request, rounded up to the
+/// range alignment so the next range starts on it.
+fn emitter_request(row: u32) -> u32 {
+    let requested = sources[row * u.source_words + EMITTER_COUNT_WORD];
+    return (requested + EMITTER_RANGE_ALIGNMENT - 1u) / EMITTER_RANGE_ALIGNMENT * EMITTER_RANGE_ALIGNMENT;
+}
+
+/// Gives output row `slot` (from source `row`) the pool range starting at
+/// `offset`: its request, clamped to what is left of the pool (none past
+/// its end), and the emitter's identity (its source row + 1): when another
+/// emitter takes the slot, the pass restarts the slot's particles.
+fn write_emitter_range(row: u32, slot: u32, offset: u32) {
+    let output = slot * u.output_words;
+    if output + u.output_words > arrayLength(&rows_out) {
+        return;
+    }
+    let requested = sources[row * u.source_words + EMITTER_COUNT_WORD];
+    var count = 0u;
+    if offset < u.pool {
+        count = min(requested, u.pool - offset);
+    }
+    rows_out[output + EMITTER_OFFSET_WORD] = min(offset, u.pool);
+    rows_out[output + EMITTER_COUNT_WORD] = count;
+    rows_out[output + EMITTER_IDENTITY_WORD] = row + 1u;
 }
 
 /// Writes placed source `row` as output row `slot`.
@@ -198,6 +257,9 @@ fn write_row(row: u32, slot: u32) {
     if (u.flags & DECAL) != 0u {
         write_decal_transform(row, output);
     }
+    if (u.flags & EMITTER) != 0u {
+        write_emitter_transform(row, output);
+    }
     if (u.flags & CENTERED) != 0u && sources[source + 3u] == PLACEMENT_CENTER {
         let center = object_position(transforms[owners[row].owner_index]);
         rows_out[output] = bitcast<u32>(bitcast<f32>(sources[source]) + center.x);
@@ -216,15 +278,21 @@ fn cs_join_rows(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 var<workgroup> wg_placed: array<u32, 64>;
 var<workgroup> wg_base: u32;
+var<workgroup> wg_request: array<u32, 64>;
+var<workgroup> wg_pool_base: u32;
 
 /// One workgroup walks the source rows in order, 64 at a time; each placed
 /// row takes the next output slot until `capacity` is reached. The order is
 /// the source row order, so a volume keeps its slot from frame to frame
-/// while the rows before it are unchanged.
+/// while the rows before it are unchanged. Particle emitters also take the
+/// next range of the particle pool (a prefix sum of the slotted rows'
+/// requests), so their ranges are contiguous, disjoint and stable the same
+/// way.
 @compute @workgroup_size(64)
 fn cs_compact_rows(@builtin(local_invocation_index) lid: u32) {
     if lid == 0u {
         wg_base = 0u;
+        wg_pool_base = 0u;
     }
     workgroupBarrier();
     let chunks = (u.rows + WORKGROUP - 1u) / WORKGROUP;
@@ -238,13 +306,29 @@ fn cs_compact_rows(@builtin(local_invocation_index) lid: u32) {
             before += wg_placed[i];
         }
         let base = wg_base;
-        workgroupBarrier();
         let slot = base + before;
-        if keep && slot < u.capacity {
+        let slotted = keep && slot < u.capacity;
+        var request = 0u;
+        if slotted && (u.flags & EMITTER) != 0u {
+            request = emitter_request(row);
+        }
+        wg_request[lid] = request;
+        workgroupBarrier();
+        var pool_before = 0u;
+        for (var i = 0u; i < lid; i++) {
+            pool_before += wg_request[i];
+        }
+        let pool_base = wg_pool_base;
+        workgroupBarrier();
+        if slotted {
             write_row(row, slot);
+            if (u.flags & EMITTER) != 0u {
+                write_emitter_range(row, slot, pool_base + pool_before);
+            }
         }
         if lid == WORKGROUP - 1u {
             wg_base = slot + wg_placed[lid];
+            wg_pool_base = pool_base + pool_before + request;
         }
         workgroupBarrier();
     }

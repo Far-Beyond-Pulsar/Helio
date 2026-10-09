@@ -1,5 +1,5 @@
 //! The rows fog volumes, post-process volumes, camera post-process
-//! settings, water volumes, foliage, atmospheres and decals cast, as the renderer's environment join reads them
+//! settings, water volumes, foliage, atmospheres, decals and particle emitters cast, as the renderer's environment join reads them
 //! (Pulsar-Native#1035, Phase 4).
 //!
 //! Each is a second GPU registration on its authored component: SceneDB
@@ -24,13 +24,14 @@
 //! | [`FoliageSourceRow`] | 24 type + 4 layer + 12 wind | `helio_pass_foliage_place`'s `FoliageTypeComponent` (24), `FoliageLayerComponent` (8) and `FoliageWindComponent` (12), each packed |
 //! | [`AtmosphereSourceRow`] | 4 centre + 16 media + 4 ground + 4 shell: the row, its centre in the owner's space | `helio_pass_sky::AtmosphereComponent` (28) |
 //! | [`DecalSourceRow`] | 4 size + 32: the row, its transform left to the join | `helio_pass_decal::DecalComponent` (32), packed into its leading rows |
+//! | [`CoronaEmitterSourceRow`] | 60: the row, its transform and pool range left to the join (word 46: the requested range) | `helio_pass_corona::CoronaEmitterComponent` (60), packed into its leading rows |
 
 use pulsar_scenedb::gpu::GpuMirrorHandle;
 use pulsar_scenedb_derive::SceneStore;
 
 use super::{
     AtmosphereComponent, CameraPostProcessComponent, DecalComponent, FoliageComponent, GlobalFogComponent, LocalFogVolumeComponent,
-    PostProcessVolumeComponent, WaterVolumeComponent,
+    ParticleEmitterComponent, PostProcessVolumeComponent, WaterVolumeComponent,
 };
 
 pub const GLOBAL_FOG_SOURCES_BUFFER: &str = "global_fog_sources";
@@ -41,6 +42,41 @@ pub const WATER_VOLUME_SOURCES_BUFFER: &str = "water_volume_sources";
 pub const FOLIAGE_SOURCES_BUFFER: &str = "foliage_sources";
 pub const ATMOSPHERE_SOURCES_BUFFER: &str = "atmosphere_sources";
 pub const DECAL_SOURCES_BUFFER: &str = "decal_sources";
+pub const CORONA_EMITTER_SOURCES_BUFFER: &str = "corona_emitter_sources";
+
+/// A particle emitter: the Corona pass row
+/// (`helio_pass_corona::GpuCoronaEmitter`, bit for bit) with a zero
+/// transform, which the join replaces with the owner's, and the requested
+/// pool range in `particle_count` (word 46), which the join replaces with
+/// the allocated range (`particle_offset`, word 45). A disabled emitter's
+/// row is zero, which the join skips.
+#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+#[gpu(layout = packed, buffer = "corona_emitter_sources")]
+pub struct CoronaEmitterSourceRow {
+    /// The pass row's transform: zero here, the join's to write.
+    #[gpu]
+    pub transform: [f32; 16],
+    /// Emission (rate, lifetime and its variation, gravity), start and end
+    /// size, start and end colour.
+    #[gpu]
+    pub params: [f32; 16],
+    /// Velocity, its variation, shape (type, radius, -, active).
+    #[gpu]
+    pub motion: [f32; 12],
+    /// Sprite, particle offset (the join's), requested particles, spawn
+    /// cursor (unused: the pass keeps its own).
+    #[gpu]
+    pub range: [u32; 4],
+    #[gpu]
+    pub reserved: [f32; 12],
+}
+
+impl CoronaEmitterSourceRow {
+    pub fn of(emitter: &ParticleEmitterComponent) -> Self {
+        read(bytemuck::bytes_of(&emitter.to_row()))
+    }
+}
 
 /// A decal: its box's local size (`xyz`, full extent before the owner's
 /// scale), then the decal pass row with a zero transform, which the join
@@ -391,6 +427,12 @@ derived_row!(
     atmosphere_dispatch,
     atmosphere_clear
 );
+derived_row!(
+    ParticleEmitterComponent,
+    CoronaEmitterSourceRow,
+    particle_emitter_dispatch,
+    particle_emitter_clear
+);
 // A decal's image is registered in the scene's texture store as its row is
 // derived, so the row carries its bindless slot.
 fn decal_dispatch(mirror: &GpuMirrorHandle, row: u32, data: *const (), is_new_insert: bool) {
@@ -467,6 +509,11 @@ mod tests {
         assert_eq!(std::mem::size_of::<FoliageSourceRow>(), 40 * 4);
         assert_eq!(std::mem::size_of::<AtmosphereSourceRow>(), 28 * 4);
         assert_eq!(std::mem::size_of::<DecalSourceRow>(), 36 * 4);
+        assert_eq!(std::mem::size_of::<CoronaEmitterSourceRow>(), 60 * 4);
+        assert_eq!(
+            std::mem::size_of::<helio_pass_corona::GpuCoronaEmitter>(),
+            60 * 4
+        );
         assert_eq!(
             std::mem::size_of::<helio_pass_decal::DecalComponent>(),
             32 * 4
@@ -537,6 +584,18 @@ mod tests {
         );
         decal.enabled = false;
         let row = DecalSourceRow::of(&decal, u32::MAX);
+        assert!(bytemuck::bytes_of(&row).iter().all(|byte| *byte == 0));
+
+        let emitter = ParticleEmitterComponent {
+            max_particles: 300,
+            ..Default::default()
+        };
+        // The join's gate word (the requested range) and the range itself.
+        assert_eq!(CoronaEmitterSourceRow::of(&emitter).range[2], 300);
+        let row = CoronaEmitterSourceRow::of(&ParticleEmitterComponent {
+            enabled: false,
+            ..emitter
+        });
         assert!(bytemuck::bytes_of(&row).iter().all(|byte| *byte == 0));
 
         let mut atmosphere = AtmosphereComponent::default();

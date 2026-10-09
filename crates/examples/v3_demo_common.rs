@@ -714,12 +714,13 @@ pub fn update_light(world: &mut World, entity: Entity, light: GpuLight) {
 
 /// Spawn a corona particle emitter into `slot`.
 ///
-/// `slot` selects which of `helio_pass_corona`'s fixed `MAX_EMITTERS`
-/// particle ranges this emitter owns (`0..MAX_EMITTERS`, see that pass's
-/// module doc for why the layout is fixed rather than CPU-packed) — the
-/// caller is responsible for giving each simultaneously-live emitter its own
-/// slot. `emitter.particle_count`/`particle_offset` are overwritten to fit
-/// that slot; `spawn_cursor` is left at whatever `emitter` carries (normally
+/// `slot` selects the range of `helio_pass_corona`'s shared particle pool
+/// this emitter owns: `CORONA_MAX_PARTICLES_PER_EMITTER` particles from
+/// `slot` times that (the engine's environment join allocates ranges by
+/// each emitter's size instead; this demo has no join) — the caller is
+/// responsible for giving each simultaneously-live emitter its own slot.
+/// `emitter.particle_count`/`particle_offset` are overwritten to fit that
+/// slot; `spawn_cursor` is left at whatever `emitter` carries (normally
 /// `0` for a new emitter) since the pass owns advancing it from here via its
 /// own transient `spawn_cursor_buf`, never through this SceneDB row again.
 pub fn spawn_corona_emitter(

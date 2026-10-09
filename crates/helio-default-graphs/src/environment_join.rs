@@ -1,7 +1,8 @@
 //! The environment join: the frontend's authored fog volumes, post-process
 //! volumes, camera post-process baselines, water volumes, foliage,
-//! atmospheres and decals to the rows the volumetric fog, post-process,
-//! water, foliage, sky and decal passes read, on the GPU (Pulsar-Native#1035, Phase 4).
+//! atmospheres, decals and particle emitters to the rows the volumetric fog,
+//! post-process, water, foliage, sky, decal and Corona passes read, on the
+//! GPU (Pulsar-Native#1035, Phase 4).
 //!
 //! The same contract as [`crate::scene_join`]: each component instance
 //! derives a source row in its own space (`helio_component`'s
@@ -20,6 +21,17 @@
 //! | `foliage` | `"foliage_types"`, `"foliage_layers"`, `"foliage_wind"`, each packed | attached, enabled, owner current and visible, with a density |
 //! | `atmospheres` | `"atmospheres"` | attached, enabled, owner current (visibility does not apply); a planet placed at its owner is centred on the owner's position |
 //! | `decals` | `"decals"`, packed into [`MAX_DECALS`] rows | attached, enabled, owner current and visible, with a non-zero box; the transform maps world space into the owner-placed box |
+//! | `corona_emitters` | `"corona_emitters"`, packed into [`MAX_CORONA_EMITTERS`] rows | attached, enabled, owner current and visible, requesting particles; placed at the owner's transform, with a range of the Corona particle pool |
+//!
+//! Particle emitters share the Corona pass's particle pool
+//! ([`CORONA_POOL_PARTICLES`]): as the join packs them it gives each, in
+//! row order, the next contiguous range of the size it requests (rounded up
+//! to [`CORONA_RANGE_ALIGNMENT`]), a prefix sum on the GPU.
+//! A range that does not fit is clamped to what is left of the pool, so an
+//! emitter past the end of a full pool has none and draws nothing. Each row
+//! also carries its emitter's identity (its source row + 1, in the
+//! `spawn_cursor` word, which the pass keeps itself): the pass restarts a
+//! row's particles when another emitter takes it.
 //!
 //! Every other row is zero, which each pass treats as inert. A volume's
 //! bounds follow its owner's position, rotation and scale; a foliage layer is
@@ -65,6 +77,20 @@ pub const DECAL_SOURCE_ROW_BYTES: u64 = 36 * 4;
 /// Rows the decal pass reads (`helio_pass_decal::MAX_DECALS`): placed decals
 /// beyond these are not drawn.
 pub const MAX_DECALS: u32 = helio_pass_decal::MAX_DECALS;
+/// `CoronaEmitterSourceRow`: the `helio_pass_corona` emitter row (60 words)
+/// with its transform and particle offset left to the join and the
+/// requested particles in `particle_count`.
+pub const CORONA_EMITTER_SOURCE_ROW_BYTES: u64 = 60 * 4;
+/// Emitter rows the Corona pass reads: placed emitters beyond these are not
+/// drawn.
+pub const MAX_CORONA_EMITTERS: u32 = helio_pass_corona::CORONA_MAX_EMITTERS;
+/// The Corona particle pool the join allocates emitter ranges from.
+pub const CORONA_POOL_PARTICLES: u32 = helio_pass_corona::CORONA_MAX_PARTICLES;
+/// Every emitter range starts on a multiple of this.
+pub const CORONA_RANGE_ALIGNMENT: u32 = helio_pass_corona::CORONA_RANGE_ALIGNMENT;
+/// `particle_count`: the requested range in the source, the allocated one
+/// out (`environment_join.wgsl`'s `EMITTER_COUNT_WORD`).
+const CORONA_COUNT_WORD: u32 = 46;
 /// Rows the water passes read (`helio_pass_water_sim::MAX_SIM_VOLUMES`):
 /// placed water volumes beyond these are not drawn.
 pub const MAX_WATER_VOLUMES: u32 = helio_pass_water_sim::MAX_SIM_VOLUMES;
@@ -85,6 +111,7 @@ pub const FOLIAGE_LAYERS_KEY: BufferKey = BufferKey::of("foliage_layers");
 pub const FOLIAGE_WIND_KEY: BufferKey = BufferKey::of("foliage_wind");
 pub const ATMOSPHERES_KEY: BufferKey = BufferKey::of("atmospheres");
 pub const DECALS_KEY: BufferKey = BufferKey::of("decals");
+pub const CORONA_EMITTERS_KEY: BufferKey = BufferKey::of("corona_emitters");
 
 const WORKGROUP: u32 = 64;
 const SPATIAL: u32 = 1;
@@ -93,6 +120,7 @@ const SURFACE: u32 = 4;
 const LAYER: u32 = 8;
 const CENTERED: u32 = 16;
 const DECAL: u32 = 32;
+const EMITTER: u32 = 64;
 const NO_GATE_WORD: u32 = u32::MAX;
 
 /// Where the frontend's rows live.
@@ -110,6 +138,7 @@ pub struct EnvironmentJoinKeys {
     pub foliage: BufferKey,
     pub atmospheres: BufferKey,
     pub decals: BufferKey,
+    pub corona_emitters: BufferKey,
 }
 
 /// The source buffers, in [`EnvironmentJoinKeys`] order.
@@ -123,10 +152,11 @@ enum Source {
     Foliage,
     Atmospheres,
     Decals,
+    CoronaEmitters,
 }
 
 impl Source {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::GlobalFog,
         Self::LocalFog,
         Self::PostProcessVolumes,
@@ -135,6 +165,7 @@ impl Source {
         Self::Foliage,
         Self::Atmospheres,
         Self::Decals,
+        Self::CoronaEmitters,
     ];
 
     fn key(self, keys: &EnvironmentJoinKeys) -> BufferKey {
@@ -147,6 +178,7 @@ impl Source {
             Self::Foliage => keys.foliage,
             Self::Atmospheres => keys.atmospheres,
             Self::Decals => keys.decals,
+            Self::CoronaEmitters => keys.corona_emitters,
         }
     }
 
@@ -160,6 +192,7 @@ impl Source {
             Self::Foliage => FOLIAGE_SOURCE_ROW_BYTES,
             Self::Atmospheres => ATMOSPHERE_SOURCE_ROW_BYTES,
             Self::Decals => DECAL_SOURCE_ROW_BYTES,
+            Self::CoronaEmitters => CORONA_EMITTER_SOURCE_ROW_BYTES,
         }
     }
 }
@@ -175,6 +208,9 @@ struct Uniforms {
     source_offset: u32,
     copy_words: u32,
     gate_word: u32,
+    /// Particles the emitter ranges are allocated from (`EMITTER` tables).
+    pool: u32,
+    _pad: [u32; 3],
 }
 
 /// What one pass buffer is made from.
@@ -237,7 +273,7 @@ impl Spec {
     }
 
     fn reads_transforms(&self) -> bool {
-        self.flags & (SPATIAL | LAYER | CENTERED | DECAL) != 0
+        self.flags & (SPATIAL | LAYER | CENTERED | DECAL | EMITTER) != 0
     }
 
     fn output_row_bytes(&self) -> u64 {
@@ -411,6 +447,17 @@ impl EnvironmentJoin {
                 GATE_HIDDEN | DECAL,
             )
             .packed(MAX_DECALS),
+            // The pass reads a fixed number of rows; each placed emitter
+            // takes the next range of the particle pool.
+            Spec::new(
+                "Environment Join Corona Emitters",
+                CORONA_EMITTERS_KEY,
+                Source::CoronaEmitters,
+                60,
+                GATE_HIDDEN | EMITTER,
+            )
+            .packed(MAX_CORONA_EMITTERS)
+            .gated_on(CORONA_COUNT_WORD),
         ];
         Self {
             keys,
@@ -546,6 +593,8 @@ impl SceneDerivation for EnvironmentJoin {
                         source_offset: spec.source_offset,
                         copy_words: spec.copy_words,
                         gate_word: spec.gate_word,
+                        pool: CORONA_POOL_PARTICLES,
+                        _pad: [0; 3],
                     }),
                 );
                 let (pipeline, workgroups) = match spec.capacity {
