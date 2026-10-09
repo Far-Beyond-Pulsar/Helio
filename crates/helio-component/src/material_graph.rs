@@ -92,7 +92,8 @@ fn adapt_graph_wgsl(generated: &str) -> Result<String, String> {
         source.replace_range(start..end, "");
     }
     source = source.replace("@group(0) @binding(0) var<uniform> uniforms: Uniforms;", "");
-    source = source.replace("uniforms.time", "0.0");
+    // Time comes from the host: Radiant defines `radiant_graph_time()` per template.
+    source = source.replace("uniforms.time", "radiant_graph_time()");
     source = source.replace("FragmentOutput", "PulsarGraphOutput");
     for location in 0..8 {
         source = source.replace(&format!("@location({location}) "), "");
