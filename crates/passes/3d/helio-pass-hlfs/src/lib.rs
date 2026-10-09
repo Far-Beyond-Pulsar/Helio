@@ -19,11 +19,9 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result};
 mod bindings;
 mod pipelines;
 mod resources;
-mod scene;
 use bindings::{ExternalBindings, Inputs, InternalBindings};
 use pipelines::Pipelines;
 use resources::{Fallbacks, Targets, COARSE_TILE_SIZE, TILE_SIZE};
-pub use scene::{RayTransmission, SceneDbRayTracing};
 
 /// Visibility evaluation used by the shared HLFS pipeline.
 ///

@@ -312,7 +312,7 @@ pub fn populate(world: &mut World) {
         let transmission = if std::env::var_os("HLFS_CLEAR_GLASS").is_some() {
             [1.0; 3]
         } else { colour.map(|c| 0.04 + 0.76 * c) };
-        world.insert(material, helio_pass_hlfs::RayTransmission(transmission));
+        world.insert(material, helio_default_graphs::ray_tracing::RayTransmission(transmission));
         let mesh = spawn_mesh(world,
             MeshUpload { vertices: mesh.vertices, indices: mesh.indices });
         spawn_object(world, mesh, material, Mat4::IDENTITY, 160.)

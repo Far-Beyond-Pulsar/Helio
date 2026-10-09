@@ -149,7 +149,7 @@ struct AppState {
     debug_overlay_enabled: bool,
 
     scene_db: SceneDb,
-    acceleration: Option<helio_pass_hlfs::SceneDbRayTracing>,
+    acceleration: Option<helio_default_graphs::ray_tracing::SceneDbRayTracing>,
 
     // Scene state
     chandelier_light_ids: Vec<Entity>,
@@ -275,7 +275,7 @@ impl ApplicationHandler for App {
             });
             eprintln!("Interactive HLFS configuration: {:?}",
                 renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>().unwrap().config());
-            Some(helio_pass_hlfs::SceneDbRayTracing::new(device.clone(), queue.clone()))
+            Some(helio_default_graphs::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone()))
         } else { None };
         renderer.set_ambient([0.10, 0.09, 0.085], 1.0);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);

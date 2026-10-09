@@ -11,7 +11,7 @@ pub mod architectural_materials;
 pub fn warm_up_cathedral(
     scene_db: &SceneDb,
     renderer: &mut Renderer,
-    acceleration: Option<&helio_pass_hlfs::SceneDbRayTracing>,
+    acceleration: Option<&helio_default_graphs::ray_tracing::SceneDbRayTracing>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     camera: &Camera,
@@ -160,7 +160,7 @@ pub fn run_scene_animated(
             enable_ray_shadows(&mut scene_db.world);
         }
         let mut acceleration =
-            helio_pass_hlfs::SceneDbRayTracing::new(device.clone(), queue.clone());
+            helio_default_graphs::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone());
         let mut scene_handle=crate::v3_demo_common::scene_db_handle(&scene_db);
         let architectural_store = architectural_materials::load(&device, &queue, &mut scene_db.world);
         let has_architectural_textures = architectural_store.is_some();
@@ -723,7 +723,7 @@ pub fn enable_ray_shadows(world: &mut World) {
             .any(|(entity, (material,))| {
                 entity.index() == object.material_slot
                     && material.flags & helio_mats::FLAG_ALPHA_BLEND != 0
-                    && world.get::<helio_pass_hlfs::RayTransmission>(entity).is_none()
+                    && world.get::<helio_default_graphs::ray_tracing::RayTransmission>(entity).is_none()
             });
         // Display alpha alone is not a transmission model.
         if !transparent {
