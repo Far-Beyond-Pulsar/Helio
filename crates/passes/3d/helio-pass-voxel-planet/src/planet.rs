@@ -764,6 +764,62 @@ impl Planet {
     pub fn raycast(&self, origin: DVec3, direction: DVec3, max_distance: f64) -> Option<RayHit> {
         self.raycast_with(origin, direction, max_distance, |kind| kind == 1)
     }
+    /// The first solid cell along the ray between distances `near` and
+    /// `far`, where a renderer drew the surface with `level` cells: found
+    /// coarse to fine, so the cost does not grow with how far the window
+    /// spans in base cells.
+    ///
+    /// The window is marched at `level` (half-cell steps), then narrowed to
+    /// a few cells around the first solid sample two levels finer at a time;
+    /// at most a few hundred base cells are walked exactly. Where a finer
+    /// level has no surface in the window (a coarse cell solid over a thin
+    /// fine feature), the coarser hit is returned: the surface drawn there.
+    /// From orbit a window spans kilometres: walked cell by cell it took
+    /// hundreds of milliseconds per brush stamp.
+    pub fn raycast_near(&self, origin: DVec3, direction: DVec3, near: f64, far: f64, level: u32) -> Option<RayHit> {
+        const EXACT_CELLS: f64 = 256.0;
+        let g = &self.grid;
+        let d = direction.normalize();
+        let s = g.voxel_size();
+        let exact = |lo: f64, hi: f64| {
+            self.raycast(origin + d * lo, d, hi - lo).map(|mut hit| {
+                hit.distance += lo;
+                hit
+            })
+        };
+        let solid_at = |t: f64, l: u32| {
+            let p = origin + d * t;
+            if g.radial(p) > self.outer_radius() || g.radial(p) < self.inner_radius() {
+                return false;
+            }
+            let (c, _) = g.locate(p);
+            self.sample_kind(l, c.face, c.i >> l, c.j >> l, c.k >> l).0 == 1
+        };
+        let (mut lo, mut hi) = (near.max(0.0), far);
+        let mut l = level.min(g.levels().saturating_sub(1));
+        let mut coarse: Option<f64> = None;
+        loop {
+            if l == 0 || (hi - lo) / s <= EXACT_CELLS {
+                if let Some(hit) = exact(lo, hi) {
+                    return Some(hit);
+                }
+                break;
+            }
+            let cell = s * f64::from(1u32 << l);
+            let step = cell * 0.5;
+            let steps = ((hi - lo) / step).ceil() as usize;
+            let found = (0..=steps).map(|n| lo + step * n as f64).find(|&t| solid_at(t.min(hi), l));
+            let Some(t) = found else { break };
+            coarse = Some(t);
+            (lo, hi) = ((t - step - cell).max(near.max(0.0)), (t + cell).min(far));
+            l = l.saturating_sub(2);
+        }
+        // The surface the coarser level drew.
+        let t = coarse?;
+        let (cell, _) = g.locate(origin + d * t);
+        let (previous, _) = g.locate(origin + d * (t - s));
+        Some(RayHit { cell, previous, distance: t, normal: -d })
+    }
     /// A point `clearance` metres above the solid surface over `p` (a
     /// direction or any point above the ground point on a planet; any point
     /// on a plane).
@@ -1116,6 +1172,35 @@ mod tests {
             let h = p.ground_height(eye);
             assert!((h - 2.0).abs() < 0.2, "{dir}: {h}");
         }
+    }
+
+    /// A window around a coarse renderer hit, searched coarse to fine:
+    /// the exact walk's hit wherever the levels agree, and a bounded cost
+    /// for a window kilometres long (a brush from orbit).
+    #[test]
+    fn raycast_near_finds_the_exact_hit_coarse_to_fine() {
+        let p = heightfield(PlanetRecipe::default());
+        let g = *p.grid();
+        let mut exact_matches = 0;
+        for (n, dir) in [DVec3::new(0.1, 1.0, 0.2), DVec3::new(0.9, 0.4, -0.3), DVec3::new(-0.2, -0.7, 0.8), DVec3::new(0.5, 0.5, 0.7)].into_iter().enumerate() {
+            let ground = p.surface_point(dir.normalize(), 0.0);
+            let up = ground.normalize();
+            let side = up.any_orthonormal_vector();
+            for (height, level) in [(30.0, 3u32), (2_000.0, 8), (300_000.0, 13)] {
+                let eye = ground + (up * 1.0 + side * 0.4 * (n as f64 + 1.0)).normalize() * height;
+                let d = (ground - eye).normalize();
+                let exact = p.raycast(eye, d, height * 2.0).expect("an exact hit");
+                let cell = g.voxel_size() * f64::from(1u32 << level);
+                let margin = cell * 3.0 + 1.0;
+                let started = std::time::Instant::now();
+                let hit = p.raycast_near(eye, d, exact.distance - margin, exact.distance + margin, level).expect("a hit near");
+                let ms = started.elapsed().as_secs_f64() * 1e3;
+                assert!(ms < 50.0, "{height} m: {ms:.1} ms");
+                assert!((hit.distance - exact.distance).abs() <= cell * 2.0, "{height} m: {} vs {}", hit.distance, exact.distance);
+                exact_matches += usize::from(hit.cell == exact.cell);
+            }
+        }
+        assert!(exact_matches >= 8, "{exact_matches} of 12 exact");
     }
 
     /// In a dug pit the camera's altitude is its height above the pit's
