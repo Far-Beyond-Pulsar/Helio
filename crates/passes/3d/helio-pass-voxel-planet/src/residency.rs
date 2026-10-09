@@ -32,6 +32,9 @@ pub struct Capacity {
     /// baked edits; the GPU pool grows to it as needed. Uniform bricks
     /// (the inside of carved or filled regions) take no slot.
     pub baked_bricks: u32,
+    /// Budget of face brushes (48 bytes each) the resident columns'
+    /// blocks reference, shared; the GPU table grows to it as needed.
+    pub brushes: u32,
     pub max_jobs: u32,
     pub max_evictions: u32,
 }
@@ -54,6 +57,8 @@ impl Default for Capacity {
             edit_words: 4 << 20,
             // 128 MB.
             baked_bricks: 131_072,
+            // 12 MB.
+            brushes: 262_144,
             max_jobs: 16_384,
             max_evictions: 262_144,
         }
@@ -332,6 +337,10 @@ pub struct FrameWork {
     /// must hold (its high-water mark).
     pub baked_writes: Vec<(u32, std::sync::Arc<crate::edit_store::Brick>)>,
     pub baked_slots: u32,
+    /// Face brushes to upload into the shared table, and the slots the
+    /// table must hold.
+    pub brush_writes: Vec<(u32, FaceBrush)>,
+    pub brush_slots: u32,
     /// Summary block table writes `(slot, bi, bj)`, each slot once with its
     /// final state; `bi = -1` releases a slot.
     pub block_inits: Vec<(u32, i32, i32)>,
@@ -436,6 +445,8 @@ pub struct Stats {
     pub baked_bricks: u32,
     pub baked_capacity: u32,
     pub edit_capacity: u32,
+    /// Distinct face brushes the resident blocks reference.
+    pub brushes: u32,
     pub table_load: f32,
 }
 
@@ -463,6 +474,13 @@ pub struct Residency {
     free_baked: Vec<u32>,
     next_baked: u32,
     block_baked: FxHashMap<u32, Vec<u32>>,
+    /// The shared brush table: each distinct face brush's slot and how many
+    /// blocks reference it, free slots, the next unused one, and the slots
+    /// each block references (by block base).
+    brush_slots: FxHashMap<[u32; 12], (u32, u32)>,
+    free_brushes: Vec<u32>,
+    next_brush: u32,
+    block_brushes: FxHashMap<u32, Vec<[u32; 12]>>,
     /// The planet's edits as last synced: the baked state (`Edits::baked_state`)
     /// and the recent brushes from history index `synced_start` (whose
     /// prefix hash is `synced_start_hash`), each with the history hash after
@@ -534,6 +552,10 @@ impl Residency {
             free_baked: Vec::new(),
             next_baked: 0,
             block_baked: FxHashMap::default(),
+            brush_slots: FxHashMap::default(),
+            free_brushes: Vec::new(),
+            next_brush: 0,
+            block_brushes: FxHashMap::default(),
             synced_baked: (0, 0),
             synced_start: 0,
             synced_start_hash: 0,
@@ -682,9 +704,12 @@ impl Residency {
     }
 
     /// A column's edit block (layout: `EditCounts` in common.wgsl): its
-    /// large and recent brushes inline and its baked bricks' slots, or none
-    /// when nothing edited it. Fails when the edit words or brick slots are
-    /// exhausted (the job waits).
+    /// large and recent brushes' slots in the shared brush table and its
+    /// baked bricks' slots, or none when nothing edited it. Fails when the
+    /// edit words, brush slots or brick slots are exhausted (the job waits).
+    /// A brush covering many columns is stored once, not in every block:
+    /// inline brushes (12 words each) in every column of a heavily sculpted
+    /// area filled the edit buffer, and its columns stopped regenerating.
     fn edit_list(&mut self, planet: &Planet, key: u64, work: &mut FrameWork) -> Result<Option<(u32, u32)>, ()> {
         let (face, level, ci, cj) = unpack(key);
         let span = i64::from(BRICK) << level;
@@ -724,10 +749,20 @@ impl Residency {
             };
             slots.push(slot);
         }
-        let mut words = Vec::with_capacity(3 + (large.len() + recent.len()) * 12 + baked.len() * 2);
+        let mut words = Vec::with_capacity(3 + large.len() + recent.len() + baked.len() * 2);
         words.extend([large.len() as u32, recent.len() as u32, baked.len() as u32]);
+        let mut keys = Vec::with_capacity(large.len() + recent.len());
         for fb in large.iter().chain(&recent) {
-            words.extend_from_slice(bytemuck::cast_slice(std::slice::from_ref(fb)));
+            let key: [u32; 12] = bytemuck::cast(*fb);
+            let Some(slot) = self.acquire_brush(key, fb, work) else {
+                self.free_baked.extend(slots);
+                for key in keys {
+                    self.release_brush(&key);
+                }
+                return Err(());
+            };
+            words.push(slot);
+            keys.push(key);
         }
         let mut pooled = slots.iter();
         for (bk, brick) in baked {
@@ -743,18 +778,56 @@ impl Residency {
         work.baked_slots = work.baked_slots.max(self.next_baked);
         let Some(block) = self.edits.alloc(words.len() as u32, self.capacity.edit_words) else {
             self.free_baked.extend(slots);
+            for key in keys {
+                self.release_brush(&key);
+            }
             return Err(());
         };
         work.edit_writes.push((block.0, words));
+        work.brush_slots = work.brush_slots.max(self.next_brush);
         self.block_baked.insert(block.0, slots);
+        self.block_brushes.insert(block.0, keys);
         Ok(Some(block))
     }
 
-    /// Free an edit block and its baked brick slots.
+    /// A slot of the shared brush table holding `fb`, counted once more:
+    /// its existing slot, or a new one (uploaded this frame).
+    fn acquire_brush(&mut self, key: [u32; 12], fb: &FaceBrush, work: &mut FrameWork) -> Option<u32> {
+        if let Some((slot, refs)) = self.brush_slots.get_mut(&key) {
+            *refs += 1;
+            return Some(*slot);
+        }
+        let slot = match self.free_brushes.pop() {
+            Some(slot) => slot,
+            None if self.next_brush < self.capacity.brushes => {
+                self.next_brush += 1;
+                self.next_brush - 1
+            }
+            None => return None,
+        };
+        self.brush_slots.insert(key, (slot, 1));
+        work.brush_writes.push((slot, *fb));
+        Some(slot)
+    }
+
+    fn release_brush(&mut self, key: &[u32; 12]) {
+        if let Some((slot, refs)) = self.brush_slots.get_mut(key) {
+            *refs -= 1;
+            if *refs == 0 {
+                self.free_brushes.push(*slot);
+                self.brush_slots.remove(key);
+            }
+        }
+    }
+
+    /// Free an edit block, its baked brick slots and its brush references.
     fn release_edits(&mut self, block: (u32, u32)) {
         self.edits.release(block);
         if let Some(slots) = self.block_baked.remove(&block.0) {
             self.free_baked.extend(slots);
+        }
+        for key in self.block_brushes.remove(&block.0).unwrap_or_default() {
+            self.release_brush(&key);
         }
     }
 
@@ -1133,6 +1206,7 @@ impl Residency {
         stats.baked_bricks = self.next_baked - self.free_baked.len() as u32;
         stats.baked_capacity = self.capacity.baked_bricks;
         stats.edit_capacity = self.capacity.edit_words;
+        stats.brushes = self.brush_slots.len() as u32;
         stats.table_load = self.residents.load();
         self.stats = stats;
         work.finish(self.residents.table());

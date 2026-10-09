@@ -86,16 +86,20 @@ struct RayColumn {
     recent: Vec<FaceBrush>,
 }
 
-/// Brushes kept exact before the oldest are sealed.
-pub const RECENT_BRUSHES: usize = 256;
+/// Brushes kept exact before the oldest are sealed. Recent brushes draw
+/// only at levels whose cells they span; sealed ones bake into cells whose
+/// coarser levels show accumulated sculpting from any height, so the window
+/// is short: a long recent window let a heavily dug area vanish from a few
+/// hundred metres up.
+pub const RECENT_BRUSHES: usize = 64;
 /// Brushes sealed at a time.
-const SEAL_BATCH: usize = 64;
+const SEAL_BATCH: usize = 16;
 /// Largest brush baked into cells, radius in half base cells (32 cells):
 /// larger ones would bake millions of cells and stay analytic.
 pub const BAKE_RADIUS_HALF: u32 = 64;
 /// Seals kept undoable (the latest `UNDO_SEALS * SEAL_BATCH` sealed
 /// brushes undo without rebuilding the world).
-const UNDO_SEALS: usize = 32;
+const UNDO_SEALS: usize = 128;
 /// Baked column changes kept for renderers to catch up with.
 const CHANGES_KEPT: usize = 256;
 
@@ -1124,7 +1128,7 @@ mod tests {
         };
         let ops = [BrushOp::Remove, BrushOp::Add, BrushOp::Paint];
         let mut applied = Vec::new();
-        for n in 0..(RECENT_BRUSHES * 3 + 37) {
+        for n in 0..805 {
             let cell = Cell::new(face, i0 + (next() * 40.0) as i32, j0 + (next() * 40.0) as i32, top - 16 + (next() * 24.0) as i32);
             // Every 50th brush is too large to bake.
             let radius = if n % 50 == 7 { 4.0 } else { 0.05 + next() * 0.6 };
@@ -1139,8 +1143,9 @@ mod tests {
         assert!(!edits.baked.is_empty() && !edits.large.is_empty() && edits.recent.len() <= RECENT_BRUSHES);
         check_replay(&p, &applied, face, i0, j0, top);
         // Undo past several seals: they come undone, exactly.
-        for _ in 0..400 {
-            p.undo().expect("within the undoable brushes");
+        assert!(p.edits().undoable() >= 400, "{} undoable", p.edits().undoable());
+        for n in 0..400 {
+            p.undo().unwrap_or_else(|| panic!("undo {n} of 400: {} undoable, {} recent, {} sealed", p.edits().undoable(), p.edits().recent.len(), p.edits().sealed_len()));
         }
         applied.truncate(applied.len() - 400);
         assert_eq!(p.edits().hash(), crate::edits::history_hash(&applied));

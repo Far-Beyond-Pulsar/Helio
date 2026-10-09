@@ -136,7 +136,7 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
         {brush_struct}
         @group(0) @binding(5) var<storage,read> baked:array<u32>;
         @group(0) @binding(6) var<storage,read> edit_refs:array<u32>;
-        @group(0) @binding(7) var<storage,read> brushes:array<FaceBrush>;
+        @group(0) @binding(20) var<storage,read> brushes:array<FaceBrush>;
         const NONE:u32=0xffffffffu;
         {ops}
         {contains}
@@ -278,10 +278,9 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
                         center: [0, 0, 0, radius as i32],
                         ball: [0; 4],
                     });
-                    // An edit block of one recent brush.
+                    // An edit block of one recent brush (its table slot).
                     let list = refs.len() as u32 + 1;
-                    refs.extend_from_slice(&[0, 1, 0]);
-                    refs.extend_from_slice(bytemuck::cast_slice(std::slice::from_ref(brush_values.last().unwrap())));
+                    refs.extend_from_slice(&[0, 1, 0, brush_index]);
                     probes.push(Probe {
                         cell: [i, j, level as i32, topology],
                         chart: [face, brush_index, 0, if topology == 0 { 0 } else { list }],
@@ -391,7 +390,7 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
                         resource: refs_buffer.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 7,
+                        binding: 20,
                         resource: brush_buffer.as_entire_binding(),
                     },
                 ],

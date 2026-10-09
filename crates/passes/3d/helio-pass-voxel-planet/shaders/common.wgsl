@@ -128,6 +128,8 @@ const MAX_PROBES: u32 = 64u;
 // Baked brick slots (`edit_store::Brick`): 512 cells of 16 bits, 256 words.
 @group(0) @binding(5) var<storage, read> baked: array<u32>;
 @group(0) @binding(6) var<storage, read> edit_refs: array<u32>;
+// The face brushes edit blocks reference (`residency` brush table).
+@group(0) @binding(20) var<storage, read> brushes: array<FaceBrush>;
 @group(0) @binding(14) var<storage, ACCESS> level_tops: array<LEVEL_TOP>;
 // Direct-mapped summary blocks, 4 words per entry: [bi, bj, max occupied top
 // (level cells), published columns].
@@ -335,9 +337,9 @@ fn brush_contains(b: FaceBrush, c: vec3<i32>, q: vec3<i32>) -> bool {
 
 // A column's edit block (`residency::Residency::edit_list`; a column's or
 // job's `edits` is 1 + its offset in `edit_refs`): the counts of its large
-// and recent brushes and of its baked bricks, the brushes (12 words each,
-// large then recent), then (brick height, baked slot) pairs. Cells read
-// recent(baked(large(terrain))) (`planet::Edits`).
+// and recent brushes and of its baked bricks, the brushes' slots in
+// `brushes` (large then recent), then (brick height, baked slot) pairs.
+// Cells read recent(baked(large(terrain))) (`planet::Edits`).
 struct EditCounts {
     large: u32,
     recent: u32,
@@ -351,15 +353,7 @@ fn edit_counts(list: u32) -> EditCounts {
 
 // Brush `e` of a block (large brushes first, then recent).
 fn edit_brush(list: u32, e: u32) -> FaceBrush {
-    let o = list + 2u + e * 12u;
-    return FaceBrush(
-        edit_refs[o],
-        edit_refs[o + 1u],
-        bitcast<i32>(edit_refs[o + 2u]),
-        bitcast<i32>(edit_refs[o + 3u]),
-        bitcast<vec4<i32>>(vec4<u32>(edit_refs[o + 4u], edit_refs[o + 5u], edit_refs[o + 6u], edit_refs[o + 7u])),
-        bitcast<vec4<i32>>(vec4<u32>(edit_refs[o + 8u], edit_refs[o + 9u], edit_refs[o + 10u], edit_refs[o + 11u])),
-    );
+    return brushes[edit_refs[list + 2u + e]];
 }
 
 // `edit_store::CellEdit` states.
@@ -370,7 +364,7 @@ const BAKED_PAINT: u32 = 3u;
 // Baked edit (state in bits 0..2, material in 8..16; 0 unchanged) of level
 // cell (i, j, k) of the block's column.
 fn baked_cell(list: u32, n: EditCounts, i: i32, j: i32, k: i32) -> u32 {
-    let base = list + 2u + (n.large + n.recent) * 12u;
+    let base = list + 2u + n.large + n.recent;
     let bk = k >> 3u;
     for (var e = 0u; e < n.baked; e++) {
         if bitcast<i32>(edit_refs[base + e * 2u]) == bk {

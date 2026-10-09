@@ -289,7 +289,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     if job.edits != 0u {
         let n = edit_counts(job.edits);
         // Baked bricks may hold air below the terrain or solid above it.
-        let base = job.edits + 2u + (n.large + n.recent) * 12u;
+        let base = job.edits + 2u + n.large + n.recent;
         for (var e = li; e < n.baked; e += 64u) {
             let bk = bitcast<i32>(edit_refs[base + e * 2u]);
             atomicMin(&g_band[0], bk * 8 - 1);

@@ -390,6 +390,69 @@ fn box_brushes_render_exactly() {
     assert_eq!(mismatched, 0);
 }
 
+/// Heavy sculpting (a spiral of over a thousand digs, as an editor stroke
+/// leaves) seen from rising altitudes: the pit shows at every height where
+/// it spans at least a few cells of the level drawing it, the columns over
+/// it all generate (no pending or loading rays), and the edit data stays
+/// small.
+#[test]
+fn heavy_sculpting_shows_from_altitude() {
+    let Some(gpu) = gpu() else { return };
+    let plain = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&plain, 1, 0.52, 0.48);
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let ahead = up.cross(side);
+    let ground = plain.surface_point(dir, 0.0);
+    let mut planet = plain.clone();
+    let mut digs = 0;
+    for n in 0..1_200 {
+        let a = f64::from(n) * 0.11;
+        let r = 2.0 + f64::from(n) * 0.032;
+        let at = ground + (side * a.cos() + ahead * a.sin()) * r;
+        let surface = planet.surface_point(at, 0.0);
+        planet.apply(Brush { center: (surface - up * 0.8).to_array(), radius: 2.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        digs += 1;
+    }
+    let (planet, plain) = (Arc::new(planet), Arc::new(plain));
+    eprintln!("{digs} digs, {} sealed", planet.edits().sealed_len());
+    let size = [256, 256];
+    let target = Target::new(&gpu, size);
+    let mut edited = renderer(&gpu, planet.clone(), size);
+    let mut untouched = renderer(&gpu, plain.clone(), size);
+    let down = (-up).as_vec3();
+    let mut report = Vec::new();
+    for height in [60.0, 300.0, 900.0, 2_500.0] {
+        let eye = ground + up * height;
+        let depth = |renderer: &mut helio_pass_voxel_planet::engine::PlanetRenderer, planet: &Arc<Planet>| {
+            let frame = frame(planet, eye);
+            settle(&gpu, &target, renderer, &frame, down);
+            let hits = hits(&gpu, renderer);
+            // The mean depth over the central 9x9 pixels (the pit's middle).
+            let mut sum = 0.0;
+            for y in 124..133 {
+                for x in 124..133 {
+                    sum += f64::from(hits[(y * size[0] + x) as usize].t);
+                }
+            }
+            sum / 81.0
+        };
+        let a = depth(&mut edited, &planet);
+        let b = depth(&mut untouched, &plain);
+        let stats = edited.stats();
+        eprintln!(
+            "height {height:>6} m: pit {:.2} m deep (level {}), pending {}, failed {}, edit words {}, baked {} of {}, pressure {:.2}",
+            a - b, stats.finest_level, stats.pending_columns, stats.failed_jobs, stats.edit_words, stats.baked_bricks, stats.baked_pool, stats.lod_pressure
+        );
+        report.push((height, a - b, stats));
+    }
+    for (height, pit, stats) in &report {
+        assert_eq!(stats.pending_columns, 0, "{height} m: columns left pending");
+        assert!(stats.edit_words < 1 << 20, "{height} m: {} edit words", stats.edit_words);
+        assert!(*pit > 0.5, "{height} m: the pit does not show ({pit:.2} m)");
+    }
+}
+
 /// Destruction to any depth: a 600 m shaft is far taller than a column's
 /// 256-brick band at the fine levels, which keep a window around the eye
 /// (clipped bands) and use coarser levels beyond it. At the bottom and after
