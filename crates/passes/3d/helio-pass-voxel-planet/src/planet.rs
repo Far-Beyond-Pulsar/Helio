@@ -787,12 +787,10 @@ impl Planet {
                 hit
             })
         };
+        // The kind of the level cell around the sample (a coarse cell can
+        // reach past the terrain's shell: the point alone does not decide).
         let solid_at = |t: f64, l: u32| {
-            let p = origin + d * t;
-            if g.radial(p) > self.outer_radius() || g.radial(p) < self.inner_radius() {
-                return false;
-            }
-            let (c, _) = g.locate(p);
+            let (c, _) = g.locate(origin + d * t);
             self.sample_kind(l, c.face, c.i >> l, c.j >> l, c.k >> l).0 == 1
         };
         let (mut lo, mut hi) = (near.max(0.0), far);
