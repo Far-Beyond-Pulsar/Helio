@@ -112,10 +112,18 @@ pub struct PostProcessPass {
 
     compute_main_bg: Option<wgpu::BindGroup>,
     render_main_bg: Option<wgpu::BindGroup>,
-    main_bg_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
+    main_bg_key: Option<(
+        wgpu::TextureView,
+        wgpu::TextureView,
+        wgpu::Buffer,
+        wgpu::Buffer,
+        Option<wgpu::TextureView>,
+        Option<wgpu::TextureView>,
+        Option<wgpu::TextureView>,
+    )>,
 
     // Bloom BGs
-    bloom_extract_bg: Option<(usize, wgpu::BindGroup)>,
+    bloom_extract_bg: Option<(wgpu::TextureView, wgpu::BindGroup)>,
     bloom_down_bgs: Vec<wgpu::BindGroup>,
     /// One per upsample level, `[i]` writing `bloom_sums[i]`.
     bloom_upsample_bgs: Vec<wgpu::BindGroup>,
@@ -1383,7 +1391,7 @@ impl PostProcessPass {
         if input_size != self.analysis_size {
             self.resize_analysis(ctx.device, input_size.0, input_size.1);
         }
-        let postprocess_buf = match ctx.registry.get(helio_core::ResourceKey::new("postprocess_uniforms")) {
+        let postprocess_buf = match ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("postprocess_uniforms")) {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -1394,20 +1402,20 @@ impl PostProcessPass {
         // binds the 1x1 black fallback. Part of the key so that a lens pass
         // being added, removed, or resized rebuilds the group instead of
         // leaving b17 pointing at a stale view.
-        let lens_view = ctx.registry.get(helio_core::ResourceKey::new("lens_output"));
-        let velocity_view = ctx.registry.get(helio_core::ResourceKey::new("gbuffer_velocity"));
-        let lut_view = ctx.registry.get(helio_core::ResourceKey::new("color_grading_lut"));
+        let lens_view = ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("lens_output"));
+        let velocity_view = ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("gbuffer_velocity"));
+        let lut_view = ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("color_grading_lut"));
 
         let bg_key = (
-            pre_aa_view as *const _ as usize,
-            ctx.depth as *const _ as usize,
-            camera_buf as *const _ as usize,
-            postprocess_buf as *const _ as usize,
-            lens_view.map_or(0, |v| v as *const _ as usize),
-            velocity_view.map_or(0, |v| v as *const _ as usize),
-            lut_view.map_or(0, |v| v as *const _ as usize),
+            pre_aa_view.clone(),
+            ctx.depth.clone(),
+            camera_buf.clone(),
+            postprocess_buf.clone(),
+            lens_view.cloned(),
+            velocity_view.cloned(),
+            lut_view.cloned(),
         );
-        if self.main_bg_key != Some(bg_key) {
+        if self.main_bg_key.as_ref() != Some(&bg_key) {
             self.rebuild_bind_groups(
                 ctx.device,
                 postprocess_buf,
@@ -1422,8 +1430,7 @@ impl PostProcessPass {
         }
 
         // Bloom extract BG
-        let hdr_ptr = pre_aa_view as *const _ as usize;
-        if self.bloom_extract_bg.as_ref().map(|(k, _)| *k) != Some(hdr_ptr) {
+        if self.bloom_extract_bg.as_ref().map(|(k, _)| k) != Some(pre_aa_view) {
             let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("PostProcess Bloom Extract BG"),
                 layout: &self.bloom_compute_bgl,
@@ -1438,7 +1445,7 @@ impl PostProcessPass {
                     },
                 ],
             });
-            self.bloom_extract_bg = Some((hdr_ptr, bg));
+            self.bloom_extract_bg = Some((pre_aa_view.clone(), bg));
         }
 
         let compute_bg = self.compute_main_bg.as_ref().unwrap();
@@ -1447,7 +1454,7 @@ impl PostProcessPass {
         // Exposure and bloom read this frame's HDR input. GBuffer, HLFS and
         // TSR record to the graphics encoder, so these dependent dispatches
         // must follow them on that same encoder.
-        let ce = ctx.encoder_ptr;
+        let mut cmds = ctx.graphics_cmds();
 
         // 0. Volume blending now runs in PostProcessVolumeBlendPass, scheduled
         //    ahead of this pass — see volume_blend.rs. It cannot happen here:
@@ -1468,10 +1475,10 @@ impl PostProcessPass {
             self.exposure_history = false;
         }
         if let Some(query) = &self.compute_timing_query {
-            unsafe { &mut *ce }.write_timestamp(query, 0);
+            cmds.write_timestamp(query, 0);
         }
         if metering {
-            let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut cpass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("PostProcess Exposure"),
                 timestamp_writes: None,
             });
@@ -1481,7 +1488,7 @@ impl PostProcessPass {
             cpass.dispatch_workgroups(gx, gy, 1);
         }
         if metering {
-            let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut cpass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("PostProcess Exposure Reduce"),
                 timestamp_writes: None,
             });
@@ -1490,7 +1497,7 @@ impl PostProcessPass {
             cpass.dispatch_workgroups(1, 1, 1);
         }
         if metering {
-            let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut cpass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("PostProcess Exposure Adapt"),
                 timestamp_writes: None,
             });
@@ -1499,7 +1506,7 @@ impl PostProcessPass {
             cpass.dispatch_workgroups(1, 1, 1);
         }
         if let Some(query) = &self.compute_timing_query {
-            unsafe { &mut *ce }.write_timestamp(query, 1);
+            cmds.write_timestamp(query, 1);
         }
 
         // 2. Bloom, unless no settings source can enable it this frame: then
@@ -1514,11 +1521,10 @@ impl PostProcessPass {
         if self.bloom_active && bloom_maybe_active {
             // 2a. Bloom extract: HDR → mip 0
             {
-                let mut cpass =
-                    unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("PostProcess Bloom Extract"),
-                        timestamp_writes: None,
-                    });
+                let mut cpass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("PostProcess Bloom Extract"),
+                    timestamp_writes: None,
+                });
                 cpass.set_pipeline(&self.bloom_extract_pipeline);
                 cpass.set_bind_group(0, compute_bg, &[]);
                 cpass.set_bind_group(1, extract_bg, &[]);
@@ -1533,11 +1539,10 @@ impl PostProcessPass {
             // 2b. Bloom downsample
             for i in 0..(BLOOM_MIPS as usize - 1) {
                 let (mw, mh) = self.mip_dims(i as u32 + 1);
-                let mut cpass =
-                    unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some(&format!("PostProcess Bloom Down mip{}", i + 1)),
-                        timestamp_writes: None,
-                    });
+                let mut cpass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(&format!("PostProcess Bloom Down mip{}", i + 1)),
+                    timestamp_writes: None,
+                });
                 cpass.set_pipeline(&self.bloom_down_pipeline);
                 cpass.set_bind_group(0, compute_bg, &[]);
                 cpass.set_bind_group(1, &self.bloom_down_bgs[i], &[]);
@@ -1552,11 +1557,10 @@ impl PostProcessPass {
             // pass samples one texture that holds every mip.
             for i in (0..self.bloom_sums.len()).rev() {
                 let (mw, mh) = self.mip_dims(i as u32);
-                let mut cpass =
-                    unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("PostProcess Bloom Upsample"),
-                        timestamp_writes: None,
-                    });
+                let mut cpass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("PostProcess Bloom Upsample"),
+                    timestamp_writes: None,
+                });
                 cpass.set_pipeline(&self.bloom_upsample_pipeline);
                 cpass.set_bind_group(0, compute_bg, &[]);
                 cpass.set_bind_group(2, &self.bloom_upsample_bgs[i], &[]);
@@ -1577,35 +1581,34 @@ impl PostProcessPass {
             ctx.target
         };
         if let Some(query) = &self.uber_timing_query {
-            unsafe { &mut *ctx.encoder_ptr }.write_timestamp(query, 0);
+            cmds.write_timestamp(query, 0);
         }
         if let Some(query) = &self.compute_timing_query {
-            unsafe { &mut *ce }.write_timestamp(query, 2);
+            cmds.write_timestamp(query, 2);
         }
         {
-            let mut pass =
-                unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("PostProcess Uber"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: target,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
+            let mut pass = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("PostProcess Uber"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
             pass.set_pipeline(&self.uber_pipeline);
             pass.set_bind_group(0, render_bg, &[]);
             pass.draw(0..3, 0..1);
         }
         if let Some(query) = &self.uber_timing_query {
-            unsafe { &mut *ctx.encoder_ptr }.write_timestamp(query, 1);
+            cmds.write_timestamp(query, 1);
         }
 
         Ok(())

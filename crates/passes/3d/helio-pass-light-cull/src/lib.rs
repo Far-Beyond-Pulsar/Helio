@@ -63,13 +63,13 @@ pub struct LightCullPass {
     /// Storage buffer: one u32 count per tile.
     /// Size: num_tiles * 4 bytes.
     pub tile_light_counts: wgpu::Buffer,
-    /// Cached bind group, rebuilt when camera or lights buffer pointer changes.
+    /// Cached bind group, rebuilt when camera or lights buffer changes.
     bind_group: Option<wgpu::BindGroup>,
-    /// Key: (camera_ptr, lights buffer epoch, light_entity_indices_ptr,
-    /// transforms_ptr) — used to skip needless bind-group rebuilds. The
+    /// Key: (camera, lights buffer epoch, light_entity_indices,
+    /// transforms) — used to skip needless bind-group rebuilds. The
     /// lights buffer is keyed by its SceneDB epoch, not by the address of
     /// this frame's handle, which a reallocated buffer can reuse.
-    bind_group_key: Option<(usize, u64, usize, usize)>,
+    bind_group_key: Option<(wgpu::Buffer, u64, wgpu::Buffer, wgpu::Buffer)>,
     /// Light culling cache key: (camera_generation, lights buffer (epoch,
     /// content generation), light count, use_direct_index) — used to skip
     /// culling compute when nothing the shader reads has changed. The
@@ -383,8 +383,9 @@ impl RenderPass for LightCullPass {
             // No active movable lights via either source: clear light
             // lists/counts to avoid stale data usage. Static/stationary
             // lights are baked and don't need runtime culling.
-            unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.tile_light_lists, 0, None);
-            unsafe { &mut *ctx.encoder_ptr }.clear_buffer(&self.tile_light_counts, 0, None);
+            let mut cmds = ctx.graphics_cmds();
+            cmds.clear_buffer(&self.tile_light_lists, 0, None);
+            cmds.clear_buffer(&self.tile_light_counts, 0, None);
             self.cull_cache_key = None; // Invalidate cache
             self.compact_key = None;
             self.compact_bind_group = None;
@@ -423,10 +424,10 @@ impl RenderPass for LightCullPass {
                     ],
                 }));
             }
-            let encoder = unsafe { &mut *ctx.encoder_ptr };
-            encoder.clear_buffer(&self.active_indices, 0, Some(4));
+            let mut cmds = ctx.graphics_cmds();
+            cmds.clear_buffer(&self.active_indices, 0, Some(4));
             if movable_light_count > 0 {
-                let mut compact = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                let mut compact = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("LightCull Compact"),
                     timestamp_writes: None,
                 });
@@ -458,18 +459,15 @@ impl RenderPass for LightCullPass {
         // Update cache key
         self.cull_cache_key = Some(cache_key);
 
-        let camera_ptr = ctx.camera as *const _ as usize;
         let lights_epoch = scene_lights_handle.map_or(u64::MAX, |h| h.epoch);
-        let light_entity_indices_ptr = light_entity_indices_buf as *const _ as usize;
-        let transforms_ptr = transforms_buf as *const _ as usize;
         let key = (
-            camera_ptr,
+            ctx.camera.clone(),
             lights_epoch,
-            light_entity_indices_ptr,
-            transforms_ptr,
+            light_entity_indices_buf.clone(),
+            transforms_buf.clone(),
         );
 
-        if self.bind_group_key != Some(key) {
+        if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("LightCull BG"),
                 layout: &self.bgl,
@@ -511,11 +509,11 @@ impl RenderPass for LightCullPass {
         // Each workgroup has 256 threads, each thread handles one tile.
         let workgroups = total_tiles.div_ceil(256);
 
-        let mut pass =
-            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("LightCull"),
-                timestamp_writes: None,
-            });
+        let mut cmds = ctx.graphics_cmds();
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("LightCull"),
+            timestamp_writes: None,
+        });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.dispatch_workgroups(workgroups, 1, 1);

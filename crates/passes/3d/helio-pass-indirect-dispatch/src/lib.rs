@@ -51,7 +51,7 @@ pub struct IndirectDispatchPass {
     /// (GrowableBuffers reallocate on resize, invalidating old bind groups).
     bind_group: Option<wgpu::BindGroup>,
     /// Tuple of raw buffer pointers used as a staleness key.
-    bind_group_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
+    bind_group_key: Option<[wgpu::Buffer; 8]>,
     /// Draw count uploaded in `prepare()`, used in `execute()`.
     draw_count: u32,
 }
@@ -328,18 +328,18 @@ impl RenderPass for IndirectDispatchPass {
             return Ok(());
         };
 
-        // Rebuild bind group if any source buffer has reallocated (pointer changed).
-        let key = (
-            ctx.camera as *const wgpu::Buffer as usize,
-            batch.instances as *const wgpu::Buffer as usize,
-            batch.draw_calls as *const wgpu::Buffer as usize,
-            batch.aabbs as *const wgpu::Buffer as usize,
-            &self.indirect_buf as *const wgpu::Buffer as usize,
-            &self.cull_stats_buf as *const wgpu::Buffer as usize,
-            &self.compacted_indices_buf as *const wgpu::Buffer as usize,
-            coord_data.coordinate_spaces as *const wgpu::Buffer as usize,
-        );
-        if self.bind_group_key != Some(key) {
+        // Rebuild bind group if any source buffer has reallocated (handle changed).
+        let key = [
+            ctx.camera.clone(),
+            batch.instances.clone(),
+            batch.draw_calls.clone(),
+            batch.aabbs.clone(),
+            self.indirect_buf.clone(),
+            self.cull_stats_buf.clone(),
+            self.compacted_indices_buf.clone(),
+            coord_data.coordinate_spaces.clone(),
+        ];
+        if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("IndirectDispatch BG"),
                 layout: &self.bind_group_layout,
@@ -388,11 +388,11 @@ impl RenderPass for IndirectDispatchPass {
         // O(1) CPU: one dispatch, GPU culls all draw calls in parallel. One
         // workgroup per draw-call group — its 64 lanes cooperatively compact
         // that group's surviving instances (see indirect_dispatch.wgsl).
-        let mut pass =
-            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("IndirectDispatch"),
-                timestamp_writes: None,
-            });
+        let mut cmds = ctx.graphics_cmds();
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("IndirectDispatch"),
+            timestamp_writes: None,
+        });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.dispatch_workgroups(draw_count, 1, 1);

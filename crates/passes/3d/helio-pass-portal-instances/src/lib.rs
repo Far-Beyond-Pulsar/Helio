@@ -48,7 +48,7 @@ struct ScreenSize {
     _pad1: f32,
 }
 
-type PortalBindGroupKey = (usize, usize, usize, usize, usize, usize, usize, usize, usize);
+type PortalBindGroupKey = ([wgpu::Buffer; 8], wgpu::TextureView);
 
 pub struct PortalInstancePass {
     material_binding: helio_mats::MaterialBindingConfig,
@@ -452,13 +452,13 @@ impl RenderPass for PortalInstancePass {
                 "[PortalInstance] frame={} draw_count={} render_pass_open={}",
                 ctx.frame_num,
                 self.draw_count,
-                ctx.active_render_pass_ptr().is_some(),
+                ctx.render_cmds().is_some(),
             );
         }
         if self.draw_count == 0 {
             return Ok(());
         }
-        let Some(pass_ptr) = ctx.active_render_pass_ptr() else {
+        let Some(mut pass) = ctx.render_cmds() else {
             log::warn!(
                 "[PortalInstance] frame={} no active render pass — G-buffer chain not fused/opened",
                 ctx.frame_num
@@ -506,17 +506,19 @@ impl RenderPass for PortalInstancePass {
 
         // ── Bind group 0 ──────────────────────────────────────────────────
         let key = (
-            ctx.camera as *const _ as usize,
-            batch.instances as *const _ as usize,
-            coord_data.coordinate_spaces as *const _ as usize,
-            &portal_views.buffer as *const _ as usize,
-            &portal_chain_handles.buffer as *const _ as usize,
-            &portal_chain_portals.buffer as *const _ as usize,
-            &*self.portal_compacted_indices_buf as *const _ as usize,
-            &*self.portal_compacted_chains_buf as *const _ as usize,
-            portal_mask_view as *const _ as usize,
+            [
+                ctx.camera.clone(),
+                batch.instances.clone(),
+                coord_data.coordinate_spaces.clone(),
+                portal_views.buffer.clone(),
+                portal_chain_handles.buffer.clone(),
+                portal_chain_portals.buffer.clone(),
+                (*self.portal_compacted_indices_buf).clone(),
+                (*self.portal_compacted_chains_buf).clone(),
+            ],
+            portal_mask_view.clone(),
         );
-        if self.bind_group_0_key != Some(key) {
+        if self.bind_group_0_key.as_ref() != Some(&key) {
             self.bind_group_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("PortalInstance BG 0"),
                 layout: &self.bind_group_layout_0,
@@ -621,7 +623,6 @@ impl RenderPass for PortalInstancePass {
         let vertices = &vertices_handle.buffer;
         let indices = &indices_handle.buffer;
 
-        let pass = unsafe { &mut *pass_ptr };
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -636,7 +637,7 @@ impl RenderPass for PortalInstancePass {
         // clamps it to this maximum, matching the capacity clamp here.
         let indirect_draw_count = self.draw_count.min(PORTAL_DRAW_CAPACITY);
         helio_pass_gbuffer::multi_draw_indexed_indirect(
-            pass,
+            &mut pass,
             &self.portal_indirect_buf,
             0,
             indirect_draw_count,

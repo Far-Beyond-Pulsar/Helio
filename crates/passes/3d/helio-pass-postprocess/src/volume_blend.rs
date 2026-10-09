@@ -340,14 +340,14 @@ impl RenderPass for PostProcessVolumeBlendPass {
             self.bind_group_key = Some(key);
         }
         // Record with the fog consumers to preserve producer/copy/consumer order.
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let mut cmds = ctx.graphics_cmds();
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("PostProcess Resolve"), timestamp_writes: None });
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("PostProcess Resolve"), timestamp_writes: None });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(1, 1, 1);
         }
-        encoder.copy_buffer_to_buffer(&self.blend_output_buf, 0, &self.resolved, 0, std::mem::size_of::<crate::GpuPostProcessUniforms>() as u64);
+        cmds.copy_buffer_to_buffer(&self.blend_output_buf, 0, &self.resolved, 0, std::mem::size_of::<crate::GpuPostProcessUniforms>() as u64);
         Ok(())
     }
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {

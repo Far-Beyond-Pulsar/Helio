@@ -61,7 +61,7 @@ pub struct OcclusionCullPass {
     range_compact_bgl: wgpu::BindGroupLayout,
     range_compact_params: wgpu::Buffer,
     range_compact_bind_group: Option<wgpu::BindGroup>,
-    range_compact_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
+    range_compact_key: Option<[wgpu::Buffer; 7]>,
     cull_params_buf: wgpu::Buffer,
     hiz_sampler: Arc<wgpu::Sampler>,
     cull_stats_buf: wgpu::Buffer,
@@ -105,20 +105,9 @@ pub struct OcclusionCullPass {
     /// `draw_count > 0`, guaranteeing real geometry lands in depth before
     /// Hi-Z testing ever reads from it.
     hiz_warmed_up: bool,
-    /// (camera, instances, draw_calls, indirect, hiz_view, pvs_buf,
-    /// cull_stats_buf, compacted_indices, compacted_indices_2, coordinate_spaces)
-    bind_group_key: Option<(
-        usize,
-        usize,
-        usize,
-        usize,
-        usize,
-        usize,
-        usize,
-        usize,
-        usize,
-        usize,
-    )>,
+    /// ([camera, instances, draw_calls, indirect, pvs_buf, cull_stats_buf,
+    /// compacted_indices, compacted_indices_2, coordinate_spaces], hiz_view)
+    bind_group_key: Option<([wgpu::Buffer; 9], wgpu::TextureView)>,
     screen_width: u32,
     screen_height: u32,
 }
@@ -392,9 +381,9 @@ impl OcclusionCullPass {
         source_indirect: &wgpu::Buffer,
         draw_count: u32,
     ) {
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let mut cmds = ctx.graphics_cmds();
         let bytes = (draw_count as u64 * 20).max(4);
-        encoder.copy_buffer_to_buffer(source_indirect, 0, &self.compacted_indirect_buf, 0, bytes);
+        cmds.copy_buffer_to_buffer(source_indirect, 0, &self.compacted_indirect_buf, 0, bytes);
 
         // Legacy/test frames can have no GPU range slots; preserve the
         // copied list unchanged in that case.
@@ -402,16 +391,16 @@ impl OcclusionCullPass {
         if slots == 0 {
             return;
         }
-        let key = (
-            source_indirect as *const _ as usize,
-            batch.range_counts_gpu as *const _ as usize,
-            batch.opaque_ranges_gpu as *const _ as usize,
-            batch.transparent_ranges_gpu as *const _ as usize,
-            batch.forward_ranges_gpu as *const _ as usize,
-            batch.draw_counts_gpu as *const _ as usize,
-            &self.compacted_indirect_buf as *const _ as usize,
-        );
-        if self.range_compact_key != Some(key) {
+        let key = [
+            source_indirect.clone(),
+            batch.range_counts_gpu.clone(),
+            batch.opaque_ranges_gpu.clone(),
+            batch.transparent_ranges_gpu.clone(),
+            batch.forward_ranges_gpu.clone(),
+            batch.draw_counts_gpu.clone(),
+            self.compacted_indirect_buf.clone(),
+        ];
+        if self.range_compact_key.as_ref() != Some(&key) {
             self.range_compact_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("OcclusionCull RangeCompaction BG"),
                 layout: &self.range_compact_bgl,
@@ -428,7 +417,7 @@ impl OcclusionCullPass {
             }));
             self.range_compact_key = Some(key);
         }
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("OcclusionCull RangeCompaction"),
             timestamp_writes: None,
         });
@@ -676,7 +665,7 @@ impl RenderPass for OcclusionCullPass {
         if !self.hiz_warmed_up {
             let instance_count = batch.instance_count as u64;
             if instance_count > 0 {
-                unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
+                ctx.graphics_cmds().copy_buffer_to_buffer(
                     indirect_dispatch.compacted_indices,
                     0,
                     &self.compacted_indices_2_buf,
@@ -700,7 +689,7 @@ impl RenderPass for OcclusionCullPass {
             return Ok(());
         }
 
-        // Lazy bind-group rebuild: rebuild whenever any buffer pointer or the
+        // Lazy bind-group rebuild: rebuild whenever any buffer or the
         // HiZ texture view changes (e.g. scene grows, graph reallocates on resize).
         let hiz_view =
             ctx.registry.read_texture_view(helio_core::ResourceKey::new("hiz"), "OcclusionCull").expect(
@@ -708,18 +697,20 @@ impl RenderPass for OcclusionCullPass {
             );
 
         let key = (
-            ctx.camera as *const _ as usize,
-            batch.instances as *const _ as usize,
-            batch.draw_calls as *const _ as usize,
-            indirect_dispatch.indirect as *const _ as usize,
-            hiz_view as *const _ as usize,
-            &self.pvs_buf as *const _ as usize,
-            &self.cull_stats_buf as *const _ as usize,
-            indirect_dispatch.compacted_indices as *const _ as usize,
-            &self.compacted_indices_2_buf as *const _ as usize,
-            coord_data.coordinate_spaces as *const _ as usize,
+            [
+                ctx.camera.clone(),
+                batch.instances.clone(),
+                batch.draw_calls.clone(),
+                indirect_dispatch.indirect.clone(),
+                self.pvs_buf.clone(),
+                self.cull_stats_buf.clone(),
+                indirect_dispatch.compacted_indices.clone(),
+                self.compacted_indices_2_buf.clone(),
+                coord_data.coordinate_spaces.clone(),
+            ],
+            hiz_view.clone(),
         );
-        if self.bind_group_key != Some(key) {
+        if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("OcclusionCull BG"),
                 layout: &self.bgl,
@@ -780,11 +771,11 @@ impl RenderPass for OcclusionCullPass {
         // One workgroup per draw-call group — its 64 lanes cooperatively
         // Hi-Z-test and compact that group's frustum survivors.
         {
-        let mut pass =
-            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("OcclusionCull"),
-                timestamp_writes: None,
-            });
+        let mut cmds = ctx.graphics_cmds();
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("OcclusionCull"),
+            timestamp_writes: None,
+        });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.dispatch_workgroups(draw_count, 1, 1);

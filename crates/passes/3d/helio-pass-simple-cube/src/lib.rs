@@ -87,7 +87,7 @@ pub struct SimpleCubePass {
     pipeline: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<usize>,
+    bind_group_key: Option<wgpu::Buffer>,
     vertex_buf: wgpu::Buffer,
     index_buf: wgpu::Buffer,
     #[allow(dead_code)]
@@ -251,9 +251,8 @@ impl RenderPass for SimpleCubePass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        // Rebuild camera bind group when the camera buffer pointer changes.
-        let camera_ptr = ctx.camera as *const _ as usize;
-        if self.bind_group_key != Some(camera_ptr) {
+        // Rebuild camera bind group when the camera buffer changes.
+        if self.bind_group_key.as_ref() != Some(ctx.camera) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("SimpleCube BG"),
                 layout: &self.bgl,
@@ -262,10 +261,10 @@ impl RenderPass for SimpleCubePass {
                     resource: ctx.camera.as_entire_binding(),
                 }],
             }));
-            self.bind_group_key = Some(camera_ptr);
+            self.bind_group_key = Some(ctx.camera.clone());
         }
 
-        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        let mut rp = ctx.render_cmds().unwrap();
         rp.set_pipeline(&self.pipeline);
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         rp.set_vertex_buffer(0, self.vertex_buf.slice(..));

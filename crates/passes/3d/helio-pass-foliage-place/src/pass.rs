@@ -90,9 +90,9 @@ pub struct FoliagePlacePass {
 
     cull_bgl: wgpu::BindGroupLayout,
     place_bind_group: Option<wgpu::BindGroup>,
-    place_bind_group_key: Option<(usize, usize, usize)>,
+    place_bind_group_key: Option<(wgpu::Buffer, wgpu::Buffer, wgpu::TextureView)>,
     cull_bind_group: Option<wgpu::BindGroup>,
-    cull_bind_group_key: Option<(usize, usize, usize, usize)>,
+    cull_bind_group_key: Option<(wgpu::Buffer, wgpu::TextureView, wgpu::Sampler, wgpu::Buffer)>,
 
     placeholder_hiz: wgpu::TextureView,
     placeholder_hiz_sampler: wgpu::Sampler,
@@ -999,11 +999,11 @@ impl RenderPass for FoliagePlacePass {
             .map(|h| &h.buffer)
             .unwrap_or(&self.placeholder_layer);
         let place_key = (
-            type_buffer as *const _ as usize,
-            layer_buffer as *const _ as usize,
-            &self.placeholder_terrain as *const _ as usize,
+            type_buffer.clone(),
+            layer_buffer.clone(),
+            self.placeholder_terrain.clone(),
         );
-        if self.place_bind_group_key != Some(place_key) {
+        if self.place_bind_group_key.as_ref() != Some(&place_key) {
             self.place_bind_group =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Foliage Place BG"),
@@ -1050,12 +1050,12 @@ impl RenderPass for FoliagePlacePass {
             self.place_bind_group_key = Some(place_key);
         }
         let key = (
-            ctx.camera as *const _ as usize,
-            hiz_view as *const _ as usize,
-            hiz_sampler as *const _ as usize,
-            type_buffer as *const _ as usize,
+            ctx.camera.clone(),
+            hiz_view.clone(),
+            hiz_sampler.clone(),
+            type_buffer.clone(),
         );
-        if self.cull_bind_group_key != Some(key) {
+        if self.cull_bind_group_key.as_ref() != Some(&key) {
             self.cull_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Foliage Cull BG"),
                 layout: &self.cull_bgl,
@@ -1112,12 +1112,12 @@ impl RenderPass for FoliagePlacePass {
             return Ok(());
         };
 
-        // `ctx.encoder_ptr`, not `ctx.compute_encoder_ptr`: the two encoders are submitted
-        // as [compute, render], so anything recorded on the compute encoder runs before
-        // *all* render-encoder work and would therefore Hi-Z-test against the previous
+        // `ctx.graphics_cmds()`, not `ctx.compute_cmds()`: the two streams are submitted
+        // as [compute, graphics], so anything recorded on the compute stream runs before
+        // *all* graphics work and would therefore Hi-Z-test against the previous
         // frame's pyramid. This pass does not declare `chain_transparent` for the same
         // reason. See the plan's §6.2 [audit].
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let mut encoder = ctx.graphics_cmds();
 
         // Visible counts are per-frame; the overflow counters are too, so a single bad
         // frame does not look like a permanent budget failure.

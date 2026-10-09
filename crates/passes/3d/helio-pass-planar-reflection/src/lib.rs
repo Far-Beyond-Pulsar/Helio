@@ -19,7 +19,7 @@ pub struct PlanarReflectionPass {
     bgl_1: wgpu::BindGroupLayout,
     bg_0: wgpu::BindGroup,
     bg_1: Option<wgpu::BindGroup>,
-    bg_1_key: Option<(usize, usize, usize, usize)>,
+    bg_1_key: Option<[wgpu::TextureView; 4]>,
     linear_sampler: wgpu::Sampler,
     globals_buf: wgpu::Buffer,
     width: u32,
@@ -173,7 +173,7 @@ impl RenderPass for PlanarReflectionPass {
             None => return Ok(()),
         };
         let depth_view = ctx.depth;
-        let pre_aa_view = match ctx.registry.get(helio_core::ResourceKey::new("pre_aa")) {
+        let pre_aa_view = match ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("pre_aa")) {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -182,14 +182,14 @@ impl RenderPass for PlanarReflectionPass {
             None => return Ok(()),
         };
 
-        let key = (
-            gbuffer.views[1] as *const _ as usize,
-            depth_view as *const _ as usize,
-            pre_aa_view as *const _ as usize,
-            planar_tex as *const _ as usize,
-        );
+        let key = [
+            gbuffer.views[1].clone(),
+            depth_view.clone(),
+            pre_aa_view.clone(),
+            planar_tex.clone(),
+        ];
 
-        if self.bg_1_key != Some(key) {
+        if self.bg_1_key.as_ref() != Some(&key) {
             self.bg_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Planar BG1"),
                 layout: &self.bgl_1,
@@ -213,8 +213,8 @@ impl RenderPass for PlanarReflectionPass {
             self.bg_1_key = Some(key);
         }
 
-        let cpass = unsafe { &mut *ctx.compute_encoder_ptr };
-        let mut pass = cpass.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        let mut cmds = ctx.compute_cmds();
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("Planar Reflection Trace"),
             timestamp_writes: None,
         });

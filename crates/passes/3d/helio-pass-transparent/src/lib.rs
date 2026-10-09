@@ -71,10 +71,10 @@ pub struct TransparentPass {
     /// across frames, so this can't be built once at construction time (see
     /// `bind_group_key`).
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<(usize, usize)>,
+    bind_group_key: Option<[wgpu::Buffer; 2]>,
     bind_group_layout_1: wgpu::BindGroupLayout,
     bind_group_1: Option<wgpu::BindGroup>,
-    bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize)>,
+    bind_group_1_key: Option<(usize, usize, Option<wgpu::Buffer>, Option<wgpu::Buffer>, usize, usize)>,
     globals_buf: wgpu::Buffer,
     surface_format: wgpu::TextureFormat,
     pre_aa_target: bool,
@@ -501,22 +501,16 @@ impl RenderPass for TransparentPass {
         // lights buffer can land at the same address.
         let lights_ptr = lights_handle.map_or(usize::MAX, |handle| handle.epoch as usize);
         let light_entity_indices_ptr = 0;
-        let tile_lists_ptr = cluster
-            .map(|c| c.tile_light_lists as *const _ as usize)
-            .unwrap_or(0);
-        let tile_counts_ptr = cluster
-            .map(|c| c.tile_light_counts as *const _ as usize)
-            .unwrap_or(0);
         let transforms_ptr = 0;
         let bg1_key = (
             lights_ptr,
             light_entity_indices_ptr,
-            tile_lists_ptr,
-            tile_counts_ptr,
+            cluster.map(|c| c.tile_light_lists.clone()),
+            cluster.map(|c| c.tile_light_counts.clone()),
             transforms_ptr,
             materials_handle.epoch as usize,
         );
-        if self.bind_group_1_key != Some(bg1_key) {
+        if self.bind_group_1_key.as_ref() != Some(&bg1_key) {
             let fallback = batch.instances;
             let tile_lists = cluster.map(|c| c.tile_light_lists).unwrap_or(fallback);
             let tile_counts = cluster.map(|c| c.tile_light_counts).unwrap_or(fallback);
@@ -560,13 +554,11 @@ impl RenderPass for TransparentPass {
         }
 
         // Rebuild bind group 0 (camera + globals + instances) when buffer
-        // pointers change -- `batch.instances` is a `GrowableBuffer` that can
+        // handles change -- `batch.instances` is a `GrowableBuffer` that can
         // reallocate across frames as the scene grows, so this can't be
         // built once at construction time (mirrors `bind_group_1`'s pattern).
-        let camera_ptr = ctx.camera as *const _ as usize;
-        let instances_ptr = batch.instances as *const _ as usize;
-        let bg0_key = (camera_ptr, instances_ptr);
-        if self.bind_group_key != Some(bg0_key) {
+        let bg0_key = [ctx.camera.clone(), batch.instances.clone()];
+        if self.bind_group_key.as_ref() != Some(&bg0_key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Transparent BG 0"),
                 layout: &self.bind_group_layout_0,
@@ -607,7 +599,7 @@ impl RenderPass for TransparentPass {
             self.fog_key = Some(fog_key);
         }
         let indirect = culled.indirect;
-        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        let mut rp = ctx.render_cmds().unwrap();
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
         rp.set_bind_group(2, self.fog_group.as_ref().unwrap(), &[]);
@@ -627,7 +619,7 @@ impl RenderPass for TransparentPass {
             let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
             rp.set_pipeline(pipeline);
             helio_pass_gbuffer::multi_draw_indexed_indirect(
-                rp,
+                &mut rp,
                 indirect,
                 start,
                 count,

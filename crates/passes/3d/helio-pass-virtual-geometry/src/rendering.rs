@@ -5,7 +5,7 @@ use crate::{
 };
 use helio_core::graph::ResourceBuilder;
 use helio_core::{
-    DebugViewDescriptor, PassContext, PrepareContext, RenderPass,
+    DebugViewDescriptor, PassContext, PrepareContext, RenderCmds, RenderPass,
     Result as HelioResult,
 };
 use helio_pass_object_batch::GpuInstanceData;
@@ -28,7 +28,7 @@ pub struct VirtualGeometryPass {
     pub(crate) cull_pipeline: wgpu::ComputePipeline,
     pub(crate) cull_bgl: wgpu::BindGroupLayout,
     pub(crate) cull_bind_group: Option<wgpu::BindGroup>,
-    pub(crate) cull_bind_group_hiz_key: Option<(usize, usize)>,
+    pub(crate) cull_bind_group_hiz_key: Option<(wgpu::TextureView, wgpu::Sampler)>,
     pub(crate) cull_buf: wgpu::Buffer,
     pub(crate) opaque_draw_pipeline: wgpu::RenderPipeline,
     pub(crate) alpha_draw_pipeline: wgpu::RenderPipeline,
@@ -38,7 +38,7 @@ pub struct VirtualGeometryPass {
     pub(crate) draw_bgl_1: wgpu::BindGroupLayout,
     pub(crate) draw_bg_0: Option<wgpu::BindGroup>,
     pub(crate) draw_bg_1: Option<wgpu::BindGroup>,
-    pub(crate) bg1_version: Option<u64>,
+    pub(crate) bg1_version: Option<(u64, u64)>,
     pub(crate) globals_buf: wgpu::Buffer,
     pub(crate) meshlet_buf: wgpu::Buffer,
     pub(crate) object_buf: wgpu::Buffer,
@@ -958,9 +958,8 @@ impl RenderPass for VirtualGeometryPass {
         let Some(materials) = ctx.scene_buffers.get(BufferKey::of("materials")) else {
             return Ok(());
         };
-        if self.draw_bg_1.is_none()
-            || self.bg1_version != Some(material_textures.version)
-        {
+        let bg1_version = (material_textures.version, materials.epoch);
+        if self.draw_bg_1.is_none() || self.bg1_version != Some(bg1_version) {
             let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -982,7 +981,7 @@ impl RenderPass for VirtualGeometryPass {
                 layout: &self.draw_bgl_1,
                 entries: &entries,
             }));
-            self.bg1_version = Some(material_textures.version ^ materials.epoch);
+            self.bg1_version = Some(bg1_version);
         }
 
         let globals = VgGlobals {
@@ -1133,11 +1132,8 @@ impl RenderPass for VirtualGeometryPass {
             .registry
             .get::<&wgpu::Sampler>(helio_core::ResourceKey::new("hiz_sampler"))
             .expect("VirtualGeometry: 'hiz_sampler' not available");
-        let hiz_key = (
-            hiz_view as *const _ as usize,
-            hiz_sampler as *const _ as usize,
-        );
-        if self.cull_bind_group.is_none() || self.cull_bind_group_hiz_key != Some(hiz_key) {
+        let hiz_key = (hiz_view.clone(), hiz_sampler.clone());
+        if self.cull_bind_group.is_none() || self.cull_bind_group_hiz_key.as_ref() != Some(&hiz_key) {
             self.cull_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("VG Cull BG"),
                 layout: &self.cull_bgl,
@@ -1221,18 +1217,17 @@ impl RenderPass for VirtualGeometryPass {
 
         let max_draw_count = self.last_max_draw_count;
 
-        unsafe { &mut *ctx.compute_encoder_ptr }.clear_buffer(&self.draw_count_buf, 0, None);
+        let mut cmds = ctx.compute_cmds();
+        cmds.clear_buffer(&self.draw_count_buf, 0, None);
         if !self.use_count_indirect {
-            unsafe { &mut *ctx.compute_encoder_ptr }.clear_buffer(&self.indirect_buf, 0, None);
+            cmds.clear_buffer(&self.indirect_buf, 0, None);
         }
 
         {
-            let mut cpass = unsafe { &mut *ctx.compute_encoder_ptr }.begin_compute_pass(
-                &wgpu::ComputePassDescriptor {
-                    label: Some("VG Object Select"),
-                    timestamp_writes: None,
-                },
-            );
+            let mut cpass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("VG Object Select"),
+                timestamp_writes: None,
+            });
             cpass.set_pipeline(&self.select_pipeline);
             cpass.set_bind_group(0, cull_bg, &[]);
             let object_workgroups = self
@@ -1246,12 +1241,10 @@ impl RenderPass for VirtualGeometryPass {
         }
 
         {
-            let mut cpass = unsafe { &mut *ctx.compute_encoder_ptr }.begin_compute_pass(
-                &wgpu::ComputePassDescriptor {
-                    label: Some("VG Meshlet Cull"),
-                    timestamp_writes: None,
-                },
-            );
+            let mut cpass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("VG Meshlet Cull"),
+                timestamp_writes: None,
+            });
             cpass.set_pipeline(&self.cull_pipeline);
             cpass.set_bind_group(0, cull_bg, &[]);
             cpass.dispatch_workgroups(
@@ -1262,7 +1255,7 @@ impl RenderPass for VirtualGeometryPass {
         }
 
         if self.debug_mode == 21 && matches!(self.debug_readback_state, DebugReadbackState::Idle) {
-            unsafe { &mut *ctx.compute_encoder_ptr }.copy_buffer_to_buffer(
+            cmds.copy_buffer_to_buffer(
                 &self.draw_count_buf,
                 0,
                 &self.debug_readback_buf,
@@ -1277,14 +1270,12 @@ impl RenderPass for VirtualGeometryPass {
             // graph without a G-buffer): VirtualGeometry has no target to write
             // to. Skip rather than panic so a forward graph containing VG
             // objects degrades to "not rendered" instead of crashing the frame.
-            let Some(active) = ctx.active_render_pass_ptr() else {
+            let Some(mut rpass) = ctx.render_cmds() else {
                 log::warn!(
                     "VirtualGeometryPass: no active render pass (forward graph without G-buffer); skipping VG draw"
                 );
                 return Ok(());
             };
-            let rpass = unsafe { &mut *active };
-
             rpass.set_bind_group(0, draw_bg0, &[]);
             rpass.set_bind_group(1, draw_bg1, &[]);
             rpass.set_vertex_buffer(0, vertices.slice(..));
@@ -1295,7 +1286,7 @@ impl RenderPass for VirtualGeometryPass {
 
             let opaque_capacity = max_draw_count / 2;
 
-            let draw_region = |rpass: &mut wgpu::RenderPass<'_>,
+            let draw_region = |rpass: &mut RenderCmds<'_>,
                                pipeline: &wgpu::RenderPipeline,
                                first_slot: u32,
                                count: u32,
@@ -1323,9 +1314,9 @@ impl RenderPass for VirtualGeometryPass {
                     } else {
                         &self.lod_debug_pipeline
                     };
-                    draw_region(rpass, pipeline, 0, opaque_capacity, 0);
+                    draw_region(&mut rpass, pipeline, 0, opaque_capacity, 0);
                     draw_region(
-                        rpass,
+                        &mut rpass,
                         pipeline,
                         opaque_capacity,
                         max_draw_count - opaque_capacity,
@@ -1333,9 +1324,9 @@ impl RenderPass for VirtualGeometryPass {
                     );
                 }
                 _ => {
-                    draw_region(rpass, &self.opaque_draw_pipeline, 0, opaque_capacity, 0);
+                    draw_region(&mut rpass, &self.opaque_draw_pipeline, 0, opaque_capacity, 0);
                     draw_region(
-                        rpass,
+                        &mut rpass,
                         &self.alpha_draw_pipeline,
                         opaque_capacity,
                         max_draw_count - opaque_capacity,

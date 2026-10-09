@@ -14,7 +14,7 @@ pub struct DepthPrepassPass {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<(usize, usize, usize)>,
+    bind_group_key: Option<[wgpu::Buffer; 3]>,
 }
 
 impl DepthPrepassPass {
@@ -199,12 +199,13 @@ impl RenderPass for DepthPrepassPass {
             })?;
 
         // Extract before the mutable encoder borrow.
-        let camera_ptr = ctx.camera as *const _ as usize;
-        let instances_ptr = batch.instances as *const _ as usize;
-        let compacted_indices_ptr = culled.compacted_indices as *const _ as usize;
-        let key = (camera_ptr, instances_ptr, compacted_indices_ptr);
-        if self.bind_group_key != Some(key) {
-            log::debug!("DepthPrepass: rebuilding bind group (buffer pointers changed)");
+        let key = [
+            ctx.camera.clone(),
+            batch.instances.clone(),
+            culled.compacted_indices.clone(),
+        ];
+        if self.bind_group_key.as_ref() != Some(&key) {
+            log::debug!("DepthPrepass: rebuilding bind group (buffers changed)");
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("DepthPrepass BG"),
                 layout: &self.bind_group_layout,
@@ -227,7 +228,7 @@ impl RenderPass for DepthPrepassPass {
         }
         let indirect = culled.indirect;
 
-        let pass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        let mut pass = ctx.render_cmds().unwrap();
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, vertices.buffer.slice(..));
@@ -236,7 +237,7 @@ impl RenderPass for DepthPrepassPass {
             wgpu::IndexFormat::Uint32,
         );
         helio_pass_gbuffer::multi_draw_indexed_indirect(
-            pass,
+            &mut pass,
             indirect,
             0,
             draw_count,

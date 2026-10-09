@@ -15,7 +15,7 @@ pub struct PortalEditorOverlayPass {
     pipeline: wgpu::RenderPipeline,
     bgl: wgpu::BindGroupLayout,
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<(usize, usize)>,
+    bind_group_key: Option<[wgpu::Buffer; 2]>,
     portal_count: u32,
     /// Active resolver-published view rows. `None` preserves legacy manual
     /// behavior for callers that do not provide projection counts.
@@ -233,18 +233,15 @@ impl RenderPass for PortalEditorOverlayPass {
         if !self.editor_mode || self.portal_count == 0 {
             return Ok(());
         }
-        let Some(pass_ptr) = ctx.active_render_pass_ptr() else {
+        let Some(mut pass) = ctx.render_cmds() else {
             return Ok(());
         };
         let Some(portal_views) = ctx.scene_buffers.get(BufferKey::of("portal_views")) else {
             return Ok(());
         };
 
-        let key = (
-            ctx.camera as *const _ as usize,
-            &portal_views.buffer as *const _ as usize,
-        );
-        if self.bind_group_key != Some(key) {
+        let key = [ctx.camera.clone(), portal_views.buffer.clone()];
+        if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("PortalEditorOverlay BG"),
                 layout: &self.bgl,
@@ -262,7 +259,6 @@ impl RenderPass for PortalEditorOverlayPass {
             self.bind_group_key = Some(key);
         }
 
-        let pass = unsafe { &mut *pass_ptr };
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.draw(0..6, 0..self.portal_count);

@@ -98,6 +98,12 @@ pub struct RadianceCascadesPass {
     /// RT only: textures the trace reads that must not alias what it writes
     /// in the same dispatch (Helio#304).
     rt_targets: Option<RtTargets>,
+    /// RT only: the trace's group, one per history read side, since the
+    /// history pair swaps every frame.
+    rt_groups: [helio_core::CachedBindGroup; 2],
+    /// RT only: the view of `rc_cascades` the trace writes, kept while the
+    /// pool hands back the same texture.
+    cascade_view: Option<(wgpu::Texture, wgpu::TextureView)>,
 }
 
 /// History ping-pong and the parent-cascade input for the RT trace. Reading
@@ -150,6 +156,7 @@ struct LiveLightCompaction {
     bgl: wgpu::BindGroupLayout,
     params_buf: wgpu::Buffer,
     live_buf: wgpu::Buffer,
+    group: helio_core::CachedBindGroup,
     /// `(epoch, content_generation, row_capacity)` the list was built from.
     key: Option<(u64, u64, u32)>,
     /// Set by `prepare` when `key` is stale.
@@ -374,6 +381,7 @@ impl LiveLightCompaction {
             bgl,
             params_buf,
             live_buf: Self::live_buffer(device, 1),
+            group: Default::default(),
             key: None,
             pending: None,
         }
@@ -408,10 +416,10 @@ impl LiveLightCompaction {
     fn record(&mut self, ctx: &mut PassContext, lights_buf: &wgpu::Buffer) {
         let Some(key) = self.pending.take() else { return };
         let rows = key.2;
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
-        encoder.clear_buffer(&self.live_buf, 0, Some(4));
+        let mut cmds = ctx.graphics_cmds();
+        cmds.clear_buffer(&self.live_buf, 0, Some(4));
         if rows > 0 {
-            let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let bind_group = self.group.get_or_create(ctx.device, &wgpu::BindGroupDescriptor {
                 label: Some("RC Live Lights BG"),
                 layout: &self.bgl,
                 entries: &[
@@ -420,12 +428,12 @@ impl LiveLightCompaction {
                     wgpu::BindGroupEntry { binding: 2, resource: self.params_buf.as_entire_binding() },
                 ],
             });
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("RC Live Lights"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_bind_group(0, bind_group, &[]);
             pass.dispatch_workgroups(rows.div_ceil(256), 1, 1);
         }
         self.key = Some(key);
@@ -664,6 +672,8 @@ impl RadianceCascadesPass {
             use_rt,
             compact,
             rt_targets,
+            rt_groups: Default::default(),
+            cascade_view: None,
         }
     }
 
@@ -688,7 +698,7 @@ impl RadianceCascadesPass {
     /// other history texture and the parent placeholder, so no texture is
     /// both read and stored in the dispatch (Helio#304).
     fn trace_bind_group(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         cascade_out: &wgpu::TextureView,
         tlas: &wgpu::Tlas,
@@ -718,11 +728,16 @@ impl RadianceCascadesPass {
                     .as_entire_binding(),
             },
         ];
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("RC Trace BG"),
-            layout: self.rt_bgl.as_ref().expect("RT layout"),
-            entries: &entries,
-        })
+        self.rt_groups[targets.read]
+            .get_or_create(
+                device,
+                &wgpu::BindGroupDescriptor {
+                    label: Some("RC Trace BG"),
+                    layout: self.rt_bgl.as_ref().expect("RT layout"),
+                    entries: &entries,
+                },
+            )
+            .clone()
     }
 }
 
@@ -889,7 +904,8 @@ impl RadianceCascadesPass {
             label: Some("RadianceCascades (Fallback)"),
             timestamp_writes: None,
         };
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&desc);
+        let mut cmds = ctx.graphics_cmds();
+        let mut pass = cmds.begin_compute_pass(&desc);
         pass.set_pipeline(&self.fb_pipeline);
         pass.set_bind_group(0, self.fb_bind_group.as_ref().unwrap(), &[]);
         pass.dispatch_workgroups(wg_x, wg_y, 1);
@@ -897,8 +913,6 @@ impl RadianceCascadesPass {
     }
 
     fn execute_rt(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let rt_bgl = self.rt_bgl.as_ref().unwrap();
-        let rt_pipeline = self.rt_pipeline.as_ref().unwrap();
 
         let cascade_out = ctx
             .resource_pool
@@ -908,7 +922,14 @@ impl RadianceCascadesPass {
                     "RadianceCascades: missing rc_cascades texture".into(),
                 )
             })?;
-        let cascade_out_view = cascade_out.create_view(&wgpu::TextureViewDescriptor::default());
+        let cascade_out_view = match &self.cascade_view {
+            Some((texture, view)) if texture == cascade_out => view.clone(),
+            _ => {
+                let view = cascade_out.create_view(&wgpu::TextureViewDescriptor::default());
+                self.cascade_view = Some((cascade_out.clone(), view.clone()));
+                view
+            }
+        };
 
         let lights_buf = ctx
             .scene_buffers
@@ -929,6 +950,7 @@ impl RadianceCascadesPass {
         };
 
         let bind_group = self.trace_bind_group(ctx.device, &cascade_out_view, tlas, lights_buf);
+        let rt_pipeline = self.rt_pipeline.as_ref().unwrap();
 
         let wg_x = ATLAS_W.div_ceil(WORKGROUP_SIZE_X);
         let wg_y = ATLAS_H.div_ceil(WORKGROUP_SIZE_Y);
@@ -937,7 +959,8 @@ impl RadianceCascadesPass {
             label: Some("RadianceCascades (RT)"),
             timestamp_writes: None,
         };
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&desc);
+        let mut cmds = ctx.graphics_cmds();
+        let mut pass = cmds.begin_compute_pass(&desc);
         pass.set_pipeline(rt_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(wg_x, wg_y, 1);

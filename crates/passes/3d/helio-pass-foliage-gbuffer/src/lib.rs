@@ -500,7 +500,7 @@ pub struct FoliageGBufferPass {
     placeholder_sampler: wgpu::Sampler,
 
     bind_group_0: Option<wgpu::BindGroup>,
-    bind_group_0_key: Option<(usize, usize, usize, usize, usize)>,
+    bind_group_0_key: Option<(wgpu::Buffer, wgpu::TextureView, wgpu::Sampler, wgpu::Buffer, wgpu::Buffer)>,
     bind_group_1: wgpu::BindGroup,
 
     /// Elements per `visible_blades` region. See [`visible_region_offset`].
@@ -1099,14 +1099,14 @@ impl RenderPass for FoliageGBufferPass {
                 "[foliage][raster] frame={} enabled={} render_pass_open={}",
                 ctx.frame_num,
                 self.decision.enabled,
-                ctx.active_render_pass_ptr().is_some(),
+                ctx.render_cmds().is_some(),
             );
         }
         if !self.decision.enabled {
             // Zero recorded commands. Not four empty draws — nothing.
             return Ok(());
         }
-        let Some(pass_ptr) = ctx.active_render_pass_ptr() else {
+        let Some(mut pass) = ctx.render_cmds() else {
             // The executor did not open our render pass, which means
             // `render_pass_descriptor` returned `None` (no G-buffer). Nothing to draw
             // into; not an error.
@@ -1143,13 +1143,13 @@ impl RenderPass for FoliageGBufferPass {
                 .map(|h| &h.buffer)
                 .unwrap_or(&self.placeholder_type);
             let key = (
-                ctx.camera as *const _ as usize,
-                interaction_view as *const wgpu::TextureView as usize,
-                interaction_sampler as *const wgpu::Sampler as usize,
-                wind_buffer as *const _ as usize,
-                type_buffer as *const _ as usize,
+                ctx.camera.clone(),
+                interaction_view.clone(),
+                interaction_sampler.clone(),
+                wind_buffer.clone(),
+                type_buffer.clone(),
             );
-            let rebuilt = if self.bind_group_0_key != Some(key) {
+            let rebuilt = if self.bind_group_0_key.as_ref() != Some(&key) {
                 log::debug!("FoliageGBuffer: rebuilding bind group 0");
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("FoliageGBuffer BG 0"),
@@ -1204,7 +1204,6 @@ impl RenderPass for FoliageGBufferPass {
         }
 
         // ── Four draws, one per LOD ───────────────────────────────────────────
-        let pass = unsafe { &mut *pass_ptr };
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         for lod in 0..self.decision.draw_count {

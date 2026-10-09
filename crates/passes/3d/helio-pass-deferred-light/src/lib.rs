@@ -89,10 +89,10 @@ pub struct DeferredLightPass {
     /// address key can match a new view allocated where a freed one was
     /// (a recreated voxel renderer's sun texture read stale shadows).
     bind_group_1_key: Option<Vec<wgpu::TextureView>>,
-    bind_group_2_key: Option<[usize; 12]>,
-    bind_group_3_key: Option<(usize, usize)>,
+    bind_group_2_key: Option<(usize, [wgpu::TextureView; 6], [wgpu::Sampler; 4], wgpu::Buffer)>,
+    bind_group_3_key: Option<[wgpu::Buffer; 2]>,
     reflection_bind_group_1_key: Option<Vec<wgpu::TextureView>>,
-    reflection_bind_group_2_key: Option<[usize; 9]>,
+    reflection_bind_group_2_key: Option<([wgpu::TextureView; 5], [wgpu::Sampler; 2], [wgpu::Buffer; 2])>,
     fallback_tile_lists: wgpu::Buffer,
     fallback_tile_counts: wgpu::Buffer,
     pre_aa_format: wgpu::TextureFormat,
@@ -1077,23 +1077,27 @@ impl RenderPass for DeferredLightPass {
             .registry.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::resource_keys::shadow_matrices())
             .map(|s| s.shadow_matrices)
             .unwrap_or(ctx.camera);
-        let scene_key = [
+        let scene_key = (
             // SceneDB epoch, not this frame's handle address: a reallocated
             // lights buffer can land at the same address.
             lights_handle.map_or(usize::MAX, |handle| handle.epoch as usize),
-            shadow_view as *const _ as usize,
-            shadow_sampler as *const _ as usize,
-            shadow_matrices_buf as *const _ as usize,
-            rc_view as *const _ as usize,
-            &self.shadow_depth_sampler as *const _ as usize,
-            static_shadow_view as *const _ as usize,
-            lightmap_view as *const _ as usize,
-            lightmap_sampler as *const _ as usize,
-            ies_view as *const _ as usize,
-            &self.ies_sampler as *const _ as usize,
-            transmittance_view as *const _ as usize,
-        ];
-        if self.bind_group_2_key != Some(scene_key) {
+            [
+                shadow_view.clone(),
+                rc_view.clone(),
+                static_shadow_view.clone(),
+                lightmap_view.clone(),
+                ies_view.clone(),
+                transmittance_view.clone(),
+            ],
+            [
+                shadow_sampler.clone(),
+                self.shadow_depth_sampler.clone(),
+                lightmap_sampler.clone(),
+                self.ies_sampler.clone(),
+            ],
+            shadow_matrices_buf.clone(),
+        );
+        if self.bind_group_2_key.as_ref() != Some(&scene_key) {
             self.bind_group_2 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("DeferredLight BG2"),
                 layout: &self.bgl_2,
@@ -1148,18 +1152,18 @@ impl RenderPass for DeferredLightPass {
             self.bind_group_2_key = Some(scene_key);
         }
 
-        let reflection_scene_key = [
-            env_view as *const _ as usize,
-            rc_view as *const _ as usize,
-            env_sampler as *const _ as usize,
-            ssr_view as *const _ as usize,
-            reflection_captures_buf as *const _ as usize,
-            planar_view as *const _ as usize,
-            caustics_view as *const _ as usize,
-            &self.caustics_sampler as *const _ as usize,
-            water_volumes as *const _ as usize,
-        ];
-        if self.reflection_bind_group_2_key != Some(reflection_scene_key) {
+        let reflection_scene_key = (
+            [
+                env_view.clone(),
+                rc_view.clone(),
+                ssr_view.clone(),
+                planar_view.clone(),
+                caustics_view.clone(),
+            ],
+            [env_sampler.clone(), self.caustics_sampler.clone()],
+            [reflection_captures_buf.clone(), water_volumes.clone()],
+        );
+        if self.reflection_bind_group_2_key.as_ref() != Some(&reflection_scene_key) {
             self.reflection_bind_group_2 =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("DeferredReflection BG2"),
@@ -1198,11 +1202,8 @@ impl RenderPass for DeferredLightPass {
         let tile_counts = ctx
             .registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts"))
             .unwrap_or(&self.fallback_tile_counts);
-        let tile_key = (
-            tile_lists as *const _ as usize,
-            tile_counts as *const _ as usize,
-        );
-        if self.bind_group_3_key != Some(tile_key) {
+        let tile_key = [tile_lists.clone(), tile_counts.clone()];
+        if self.bind_group_3_key.as_ref() != Some(&tile_key) {
             self.bind_group_3 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("DeferredLight BG3"),
                 layout: &self.bgl_3,
@@ -1246,7 +1247,7 @@ impl RenderPass for DeferredLightPass {
             self.bind_group_0_key = Some(key_0);
         }
 
-        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        let mut rp = ctx.render_cmds().unwrap();
         rp.set_pipeline(&self.pipeline);
         rp.set_bind_group(0, &self.bind_group_0, &[]);
         rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);

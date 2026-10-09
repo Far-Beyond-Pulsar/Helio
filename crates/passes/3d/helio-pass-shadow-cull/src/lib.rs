@@ -71,7 +71,7 @@ pub struct ShadowCullPass {
 
     /// Lazy bind group, rebuilt when scene buffer pointers change.
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<(usize, usize, usize, usize, usize)>,
+    bind_group_key: Option<[wgpu::Buffer; 5]>,
 }
 
 impl ShadowCullPass {
@@ -285,21 +285,23 @@ impl RenderPass for ShadowCullPass {
         }
 
         // ── Reset face counters to zero ───────────────────────────────────────
-        unsafe { &mut *ctx.encoder_ptr }.clear_buffer(
+        let mut cmds = ctx.graphics_cmds();
+        cmds.clear_buffer(
             &self.face_counts_buf,
             0,
             Some((MAX_FACES as u64) * 4u64),
         );
 
         // ── Lazy bind-group rebuild on GrowableBuffer reallocation ────────────
-        let sm_ptr = shadow_data.shadow_matrices as *const _ as usize;
-        let inst_ptr = batch.instances as *const _ as usize;
-        let src_ptr = batch.shadow_movable_indirect as *const _ as usize;
-        let fd_ptr = &*self.face_dirty_buf as *const _ as usize;
-        let cs_ptr = coord_data.coordinate_spaces as *const _ as usize;
-        let key = (sm_ptr, inst_ptr, src_ptr, fd_ptr, cs_ptr);
+        let key = [
+            shadow_data.shadow_matrices.clone(),
+            batch.instances.clone(),
+            batch.shadow_movable_indirect.clone(),
+            (*self.face_dirty_buf).clone(),
+            coord_data.coordinate_spaces.clone(),
+        ];
 
-        if self.bind_group_key != Some(key) {
+        if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ShadowCull BG"),
                 layout: &self.bgl,
@@ -344,11 +346,10 @@ impl RenderPass for ShadowCullPass {
         let bg = self.bind_group.as_ref().unwrap();
 
         let wg = movable_count.div_ceil(WORKGROUP_SIZE);
-        let mut pass =
-            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("ShadowCull"),
-                timestamp_writes: None,
-            });
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("ShadowCull"),
+            timestamp_writes: None,
+        });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bg, &[]);
         pass.dispatch_workgroups(wg, 1, 1);

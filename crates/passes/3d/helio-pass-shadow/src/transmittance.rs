@@ -8,6 +8,8 @@
 //! and volumetric fog multiply a light by rgb for receivers behind that
 //! depth, so sunlight through a window arrives coloured.
 
+use helio_core::{CommandRecorder, RenderCmds};
+
 /// Graph key under which the transmittance array view is published.
 pub const TRANSMITTANCE_KEY: &str = "shadow_transmittance";
 pub const TRANSMITTANCE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -23,7 +25,7 @@ pub(crate) struct Transmittance {
     /// does not is all zero (textures start zeroed, and emptied faces are
     /// cleared once), so re-rendering it with no translucent caster is skipped.
     bg_1: Option<wgpu::BindGroup>,
-    bg_1_key: Option<(wgpu::Buffer, usize)>,
+    bg_1_key: Option<(wgpu::Buffer, wgpu::TextureView)>,
 }
 
 impl Transmittance {
@@ -230,9 +232,9 @@ impl Transmittance {
 
     fn clear_face<'e>(
         face_view: &wgpu::TextureView,
-        encoder: &'e mut wgpu::CommandEncoder,
-    ) -> wgpu::RenderPass<'e> {
-        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        cmds: &'e mut CommandRecorder<'_>,
+    ) -> RenderCmds<'e> {
+        cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Shadow/Transmittance"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: face_view,
@@ -256,7 +258,7 @@ impl Transmittance {
     pub(crate) fn render_face(
         &mut self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        cmds: &mut CommandRecorder<'_>,
         materials: Option<&wgpu::Buffer>,
         bg_0: &wgpu::BindGroup,
         face: usize,
@@ -274,7 +276,7 @@ impl Transmittance {
         }
         // Clear only this tile; other cached transmissions share the layer.
         {
-            let mut pass = Self::clear_face(&self.face_views[face], encoder);
+            let mut pass = Self::clear_face(&self.face_views[face], cmds);
             if let Some([x, y, size]) = tile {
                 pass.set_viewport(
                     (x / 2) as f32,
@@ -293,7 +295,7 @@ impl Transmittance {
         let (Some(materials), true) = (materials, draw_count > 0) else {
             return;
         };
-        let key = (materials.clone(), static_depth as *const _ as usize);
+        let key = (materials.clone(), static_depth.clone());
         if self.bg_1_key.as_ref() != Some(&key) {
             self.bg_1 = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Shadow/Transmittance BG 1"),
@@ -315,7 +317,7 @@ impl Transmittance {
             }));
             self.bg_1_key = Some(key);
         }
-        let mut pass = Self::clear_face(&self.face_views[face], encoder);
+        let mut pass = Self::clear_face(&self.face_views[face], cmds);
         if let Some([x, y, size]) = tile {
             pass.set_viewport(
                 (x / 2) as f32,

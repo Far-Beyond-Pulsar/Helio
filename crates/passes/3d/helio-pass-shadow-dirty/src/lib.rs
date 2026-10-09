@@ -57,7 +57,7 @@ pub struct ShadowDirtyPass {
     /// Bind group (lazy; rebuilt whenever the `instances` or `shadow_mats` buffer
     /// pointer changes due to `GrowableBuffer` reallocation).
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<(usize, usize, usize, usize, usize)>,
+    bind_group_key: Option<[wgpu::Buffer; 5]>,
 
     /// `movable_draw_count` seen last frame; used to detect topology changes.
     last_movable_draw_count: u32,
@@ -347,21 +347,18 @@ impl RenderPass for ShadowDirtyPass {
         }
 
         // ── Lazy bind group rebuild on GrowableBuffer reallocation ─────────────
-        let inst_ptr = batch.instances as *const _ as usize;
-        let mov_ptr = batch.shadow_movable_indirect as *const _ as usize;
-        let sm_ptr = shadow_data
-            .desired_matrices
-            .unwrap_or(shadow_data.shadow_matrices) as *const _ as usize;
-        let ld_ptr = &*self.light_dirty_buf as *const _ as usize;
-        let key = (
-            inst_ptr,
-            mov_ptr,
-            sm_ptr,
-            ld_ptr,
-            coords.coordinate_spaces as *const _ as usize,
-        );
+        let key = [
+            batch.instances.clone(),
+            batch.shadow_movable_indirect.clone(),
+            shadow_data
+                .desired_matrices
+                .unwrap_or(shadow_data.shadow_matrices)
+                .clone(),
+            (*self.light_dirty_buf).clone(),
+            coords.coordinate_spaces.clone(),
+        ];
 
-        if self.bind_group_key != Some(key) {
+        if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(
                 ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("ShadowDirty BG"),
@@ -417,7 +414,7 @@ impl RenderPass for ShadowDirtyPass {
         // Reset the complete output arrays before dispatch. Doing this as
         // encoder commands avoids the cross-workgroup race that occurs when
         // invocation zero clears storage while other workgroups write it.
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let mut cmds = ctx.graphics_cmds();
         // Pending dirty bits survive until ShadowPass services their tile.
 
         // Dispatch enough threads to cover all movable draw calls.
@@ -426,7 +423,7 @@ impl RenderPass for ShadowDirtyPass {
         let thread_count = movable_draw_count.max(1);
         let workgroups = thread_count.div_ceil(WORKGROUP_SIZE);
 
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("ShadowDirty"),
             timestamp_writes: None,
         });

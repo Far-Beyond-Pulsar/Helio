@@ -5,7 +5,7 @@
 //! O(1) CPU execution — single `draw(0..vertex_count, 0..1)`.
 
 use bytemuck::{Pod, Zeroable};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderCmds, RenderPass, Result as HelioResult};
 
 const MAX_DEBUG_VERTS: u32 = 65536;
 const MAX_DEBUG_TRIS: u32 = 65536;
@@ -39,7 +39,7 @@ pub struct DebugPass {
     bgl: wgpu::BindGroupLayout,
     camera_buf: wgpu::Buffer,
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<usize>,
+    bind_group_key: Option<wgpu::Buffer>,
     vertex_buf: wgpu::Buffer,
     pub vertex_count: u32,
     /// Separate buffer for filled triangles (TriangleList topology).
@@ -369,7 +369,7 @@ impl DebugPass {
 
 impl DebugPass {
     /// Common draw commands for both execute paths.
-    fn draw_commands(&self, rp: &mut wgpu::RenderPass) {
+    fn draw_commands(&self, rp: &mut RenderCmds<'_>) {
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
 
         if self.vertex_count > 0 {
@@ -395,8 +395,7 @@ impl DebugPass {
 
     /// Ensure bind group is current for the camera buffer.
     fn ensure_bind_group(&mut self, device: &wgpu::Device) {
-        let camera_key = &self.camera_buf as *const _ as usize;
-        if self.bind_group_key != Some(camera_key) {
+        if self.bind_group_key.as_ref() != Some(&self.camera_buf) {
             self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Debug Draw BG"),
                 layout: &self.bgl,
@@ -405,7 +404,7 @@ impl DebugPass {
                     resource: self.camera_buf.as_entire_binding(),
                 }],
             }));
-            self.bind_group_key = Some(camera_key);
+            self.bind_group_key = Some(self.camera_buf.clone());
         }
     }
 
@@ -458,7 +457,8 @@ impl DebugPass {
             multiview_mask: None,
         };
 
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&desc);
+        let mut cmds = ctx.graphics_cmds();
+        let mut pass = cmds.begin_render_pass(&desc);
         self.draw_commands(&mut pass);
         Ok(())
     }
@@ -522,8 +522,8 @@ impl RenderPass for DebugPass {
             return Ok(());
         }
         self.ensure_bind_group(ctx.device);
-        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
-        self.draw_commands(rp);
+        let mut rp = ctx.render_cmds().unwrap();
+        self.draw_commands(&mut rp);
         Ok(())
     }
 }

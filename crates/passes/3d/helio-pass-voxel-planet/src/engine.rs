@@ -5,7 +5,7 @@ use crate::residency::{Capacity, FrameWork, JobBudget, PlanRequest, PlanResult, 
 use crate::terrain::TerrainProgram;
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, IVec4, Mat4, Vec3, Vec4};
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{CommandRecorder, ComputeCmds, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use wgpu::util::DeviceExt;
@@ -907,6 +907,8 @@ pub struct PlanetRenderer {
     planet: Arc<Planet>,
     settings: Settings,
     gen_group: wgpu::BindGroup,
+    trace_group: helio_core::CachedBindGroup,
+    render_group: helio_core::CachedBindGroup,
     camera_buffer: wgpu::Buffer,
     camera_group: wgpu::BindGroup,
     /// Last local projection and precise eye, for motion in the shared GBuffer.
@@ -1027,6 +1029,8 @@ impl PlanetRenderer {
             planet,
             settings,
             gen_group,
+            trace_group: Default::default(),
+            render_group: Default::default(),
             camera_buffer,
             camera_group,
             camera_history: None,
@@ -1394,7 +1398,7 @@ impl PlanetRenderer {
     }
 
     /// Copy the hits under this frame's pick requests for readback.
-    fn copy_picks(slots: &mut [PickSlot], hits: &wgpu::Buffer, encoder: &mut wgpu::CommandEncoder, picks: &SharedPicks, size: [u32; 2]) {
+    fn copy_picks(slots: &mut [PickSlot], hits: &wgpu::Buffer, encoder: &mut CommandRecorder<'_>, picks: &SharedPicks, size: [u32; 2]) {
         let Some(slot) = slots.iter_mut().find(|slot| slot.stage == 0) else { return };
         let requests: Vec<PickRequest> = {
             let Ok(mut shared) = picks.lock() else { return };
@@ -1568,7 +1572,7 @@ impl PlanetRenderer {
 
     /// Return wholly free pool pages from their size classes to the free
     /// page stack (allocator_recycle.wgsl).
-    fn recycle_pages(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    fn recycle_pages(&mut self, encoder: &mut CommandRecorder<'_>) {
         let b = &mut self.buffers;
         let compacted = b.compacted_runs.get_or_insert_with(|| {
             self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1601,7 +1605,7 @@ impl PlanetRenderer {
         self.stats.recycles += 1;
     }
 
-    fn dispatch(pass: &mut wgpu::ComputePass<'_>, pipeline: &wgpu::ComputePipeline, groups: [u32; 3]) {
+    fn dispatch(pass: &mut ComputeCmds<'_>, pipeline: &wgpu::ComputePipeline, groups: [u32; 3]) {
         if groups.iter().all(|g| *g > 0) {
             pass.set_pipeline(pipeline);
             pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
@@ -1615,7 +1619,7 @@ impl PlanetRenderer {
     #[allow(clippy::too_many_arguments)]
     fn encode_residency_detailed(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut CommandRecorder<'_>,
         ctx: &mut PassContext<'_>,
         jobs: u32,
         evictions: u32,
@@ -1767,7 +1771,16 @@ impl PlanetRenderer {
         depth: &wgpu::TextureView,
         frame_num: u64,
     ) {
-        self.encode_profiled(encoder, camera_data, frame, size, gbuffer, depth, frame_num, None);
+        self.encode_profiled(
+            &mut CommandRecorder::from_encoder(encoder),
+            camera_data,
+            frame,
+            size,
+            gbuffer,
+            depth,
+            frame_num,
+            None,
+        );
     }
 
     // Graph scopes share the enclosing VoxelPlanet pass's query set/readback.
@@ -1775,7 +1788,7 @@ impl PlanetRenderer {
     #[allow(clippy::too_many_arguments)]
     fn encode_profiled(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut CommandRecorder<'_>,
         camera_data: &helio_core::GpuCameraUniforms,
         frame: &PlanetFrame,
         size: [u32; 2],
@@ -1921,7 +1934,9 @@ impl PlanetRenderer {
         local_camera.prev_view_proj = previous.to_cols_array();
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&local_camera));
         self.camera_history = Some((frame_num, view_id, frame.eye, view_proj));
-        let trace_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        // Reused while the planet's buffers, the screen targets and the
+        // depth view stay the same resources.
+        let trace_group = self.trace_group.get_or_create(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("planet trace"),
             layout: &self.pipelines.trace_layout,
             entries: &[
@@ -1944,15 +1959,15 @@ impl PlanetRenderer {
                 wgpu::BindGroupEntry { binding: 18, resource: self.buffers.horizon.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 19, resource: self.buffers.live_blocks.as_entire_binding() },
             ],
-        });
-        let render_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        }).clone();
+        let render_group = self.render_group.get_or_create(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("planet gbuffer"),
             layout: &self.pipelines.render_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: self.buffers.frame.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 8, resource: self.screen.surfaces.as_entire_binding() },
             ],
-        });
+        }).clone();
         // Before the timed residency stage: its time measures job cost.
         if self.pool_pressure && frame_num >= self.last_recycle + RECYCLE_INTERVAL {
             self.pool_pressure = false;
@@ -2413,9 +2428,9 @@ impl RenderPass for PlanetPass {
             view!("gbuffer_extra"),
             view!("gbuffer_velocity"),
         ];
-        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        let mut encoder = ctx.graphics_cmds();
         renderer.encode_profiled(
-            encoder,
+            &mut encoder,
             ctx.camera_data,
             &frame,
             [ctx.width, ctx.height],

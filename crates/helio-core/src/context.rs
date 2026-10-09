@@ -101,6 +101,7 @@
 //! }
 //! ```
 
+use crate::cmd::{CommandRecorder, ComputeCmds, RenderCmds};
 use crate::graph::PipelineRegistry;
 use crate::{Profiler, SceneBufferProjection};
 use crate::GpuCameraUniforms;
@@ -191,24 +192,22 @@ use crate::GpuCameraUniforms;
 /// ```
 pub struct PassContext<'a> {
     /// When `true`, the pass declared `chain_transparent()` and MUST NOT touch
-    /// the render encoder (`encoder_ptr` / `active_render_pass`).  In debug
-    /// builds, attempting to call `begin_render_pass()` or dereferencing
-    /// `active_render_pass_ptr()` will panic.
+    /// the graphics stream or the chain's render pass. In debug builds,
+    /// `begin_render_pass()`, `render_cmds()` and `graphics_cmds()` panic.
     #[cfg(debug_assertions)]
     pub(crate) chain_transparent: bool,
 
-    /// Command encoder for non-render-pass GPU ops (buffer clears, copies).
-    /// Passes do NOT call begin_render_pass on this — the executor does that.
-    /// Access via `unsafe { &mut *ctx.encoder_ptr }`.
-    pub encoder_ptr: *mut wgpu::CommandEncoder,
+    /// The graphics stream's encoder. Passes record into it through
+    /// [`Self::graphics_cmds`].
+    pub(crate) encoder_ptr: *mut wgpu::CommandEncoder,
 
     /// Queue for small pass-owned uploads during execute(). Prefer encoding
     /// copies for frame data; this is for sparse control values only.
     pub queue: &'a wgpu::Queue,
 
-    /// Separate compute encoder for compute dispatches (always available, even
-    /// during a render pass on the render encoder).  Access via unsafe.
-    pub compute_encoder_ptr: *mut wgpu::CommandEncoder,
+    /// The pre-graphics compute stream's encoder. Passes record into it
+    /// through [`Self::compute_cmds`].
+    pub(crate) compute_encoder_ptr: *mut wgpu::CommandEncoder,
 
     /// Color render target (main framebuffer or offscreen texture).
     pub target: &'a wgpu::TextureView,
@@ -274,9 +273,9 @@ pub struct PassContext<'a> {
     /// Active render pass, or None if not in a render pass.
     /// Set by the executor BEFORE calling execute(). The pass draws into
     /// this instead of calling begin_render_pass().
-    pub active_render_pass: Option<*mut wgpu::RenderPass<'static>>,
+    pub(crate) active_render_pass: Option<*mut wgpu::RenderPass<'static>>,
     /// Active compute pass, or None if not in a compute pass.
-    pub active_compute_pass: Option<*mut wgpu::ComputePass<'static>>,
+    pub(crate) active_compute_pass: Option<*mut wgpu::ComputePass<'static>>,
 
     /// Dynamic-rendering pipeline cache, keyed by runtime attachment
     /// formats (see [`crate::graph::PipelineFormatCache`]). Passes that
@@ -311,16 +310,16 @@ impl<'a> PassContext<'a> {
         self.profiler.is_enabled() && self.profiler.gpu_timing_supported()
     }
 
-    /// Begin a named GPU subscope on a manually recorded command encoder.
+    /// Begin a named GPU subscope on a command stream.
     /// It shares the graph's timestamp query set and frame readback.
     /// Call outside an open render/compute pass, paired with `end_gpu_scope`.
-    pub fn begin_gpu_scope(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
-        self.profiler.begin_gpu_pass(encoder, name);
+    pub fn begin_gpu_scope(&mut self, cmds: &mut CommandRecorder<'_>, name: &'static str) {
+        self.profiler.begin_gpu_pass(cmds.encoder(), name);
     }
 
-    /// End a GPU subscope on the encoder on which it began.
-    pub fn end_gpu_scope(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
-        self.profiler.end_gpu_pass(encoder, name);
+    /// End a GPU subscope on the stream on which it began.
+    pub fn end_gpu_scope(&mut self, cmds: &mut CommandRecorder<'_>, name: &'static str) {
+        self.profiler.end_gpu_pass(cmds.encoder(), name);
     }
 
     /// Returns an executor-created reflected bind group by group index.
@@ -374,30 +373,49 @@ impl<'a> PassContext<'a> {
             }
         }
     }
-    /// Returns a raw pointer to the active render pass, if any.
-    /// Cast to a reference in the pass: `let rp = unsafe { &mut *ctx.active_render_pass()? };`
+    /// The render pass the graph opened for this pass (or its fused chain):
+    /// `Some` when the pass returned a render-pass descriptor.
     ///
     /// # Panics (debug builds only)
     ///
-    /// Panics if the pass declared `chain_transparent() == true` but still
-    /// tries to access the render encoder — this would corrupt the chain's
-    /// open render pass.
-    #[inline]
-    pub fn active_render_pass_ptr(&self) -> Option<*mut wgpu::RenderPass<'static>> {
+    /// Panics if the pass declared `chain_transparent() == true`: recording
+    /// into the chain's render pass would corrupt it.
+    pub fn render_cmds(&self) -> Option<RenderCmds<'a>> {
         #[cfg(debug_assertions)]
         if self.chain_transparent && self.active_render_pass.is_some() {
             panic!(
-                "chain_transparent pass tried to access active_render_pass_ptr(); \
-                 chain_transparent passes must only use the compute encoder"
+                "chain_transparent pass tried to record into the chain's render pass; \
+                 chain_transparent passes must only use the compute stream"
             );
         }
-        self.active_render_pass
+        let pass = std::ptr::NonNull::new(self.active_render_pass?)?;
+        // SAFETY: the graph keeps the pass open until `execute()` returns.
+        Some(unsafe { RenderCmds::from_active(pass) })
     }
 
-    /// Returns a raw pointer to the active compute pass, if any.
-    #[inline]
-    pub fn active_compute_pass_ptr(&self) -> Option<*mut wgpu::ComputePass<'static>> {
-        self.active_compute_pass
+    /// The graphics stream, in graph order: copies, clears, queries and
+    /// self-managed passes that must see this frame's earlier graphics work.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if the pass declared `chain_transparent() == true`.
+    pub fn graphics_cmds(&self) -> CommandRecorder<'a> {
+        #[cfg(debug_assertions)]
+        if self.chain_transparent {
+            panic!(
+                "chain_transparent pass tried to record on the graphics stream; \
+                 chain_transparent passes must only use the compute stream"
+            );
+        }
+        // SAFETY: the encoder lives until `execute()` returns.
+        unsafe { CommandRecorder::from_ptr(self.encoder_ptr) }
+    }
+
+    /// The pre-graphics compute stream, submitted before all graphics work
+    /// regardless of this pass's place in the graph.
+    pub fn compute_cmds(&self) -> CommandRecorder<'a> {
+        // SAFETY: the encoder lives until `execute()` returns.
+        unsafe { CommandRecorder::from_ptr(self.compute_encoder_ptr) }
     }
 }
 
@@ -456,7 +474,7 @@ impl<'a> PassContext<'a> {
     pub fn begin_render_pass<'b>(
         &'b mut self,
         desc: &'b wgpu::RenderPassDescriptor<'b>,
-    ) -> wgpu::RenderPass<'b> {
+    ) -> RenderCmds<'b> {
         #[cfg(debug_assertions)]
         if self.chain_transparent {
             panic!(
@@ -465,8 +483,8 @@ impl<'a> PassContext<'a> {
                  (ctx.begin_compute_pass / ctx.compute_encoder_ptr)"
             );
         }
-        // TODO: GPU profiling with begin/end_gpu_pass (needs lifetime fixes)
-        unsafe { (*self.encoder_ptr).begin_render_pass(desc) }
+        // SAFETY: the encoder lives until `execute()` returns.
+        RenderCmds::from_wgpu(unsafe { (*self.encoder_ptr).begin_render_pass(desc) })
     }
 
     /// Begins a compute pass on the separate, pre-graphics command stream.
@@ -515,10 +533,10 @@ impl<'a> PassContext<'a> {
     pub fn begin_compute_pass<'b>(
         &'b mut self,
         desc: &'b wgpu::ComputePassDescriptor<'b>,
-    ) -> wgpu::ComputePass<'b> {
+    ) -> ComputeCmds<'b> {
         // Uses the separate compute encoder so compute work never conflicts with
         // an active render pass on the render encoder (migrated path).
-        unsafe { (*self.compute_encoder_ptr).begin_compute_pass(desc) }
+        ComputeCmds::from_wgpu(unsafe { (*self.compute_encoder_ptr).begin_compute_pass(desc) })
     }
 
     /// Records compute in graph order on the graphics command stream.
@@ -527,13 +545,13 @@ impl<'a> PassContext<'a> {
     pub fn begin_graphics_compute_pass<'b>(
         &'b mut self,
         desc: &'b wgpu::ComputePassDescriptor<'b>,
-    ) -> wgpu::ComputePass<'b> {
+    ) -> ComputeCmds<'b> {
         assert!(self.active_render_pass.is_none(),
             "graphics-stream compute cannot run inside a render pass");
         #[cfg(debug_assertions)]
         assert!(!self.chain_transparent,
             "chain-transparent passes cannot use graphics-stream compute");
-        unsafe { (*self.encoder_ptr).begin_compute_pass(desc) }
+        ComputeCmds::from_wgpu(unsafe { (*self.encoder_ptr).begin_compute_pass(desc) })
     }
 }
 

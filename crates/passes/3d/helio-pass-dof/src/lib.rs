@@ -63,9 +63,9 @@ pub struct DofPass {
     composite_bg: Option<wgpu::BindGroup>,
 
     // Cached keys for lazy rebuild
-    bg_key_coc: Option<(usize, usize)>,
-    bg_key_gather: Option<(usize, usize, usize, usize, usize, usize)>,
-    bg_key_composite: Option<(usize, usize, usize, usize, usize)>,
+    bg_key_coc: Option<(wgpu::TextureView, wgpu::Buffer)>,
+    bg_key_gather: Option<(wgpu::TextureView, wgpu::Buffer)>,
+    bg_key_composite: Option<wgpu::TextureView>,
 
     // Tiny uniform buffer holding a copy of the DOF block from the shared
     // postprocess_uniforms buffer. Contents are refreshed via GPU copy in execute().
@@ -749,7 +749,7 @@ impl RenderPass for DofPass {
         if ctx.registry.get::<bool>(helio_core::ResourceKey::new("dof_maybe_active")) == Some(false) {
             return Ok(());
         }
-        let src_view = match ctx.registry.get(helio_core::ResourceKey::new("pre_dof")) {
+        let src_view = match ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("pre_dof")) {
             Some(v) => v,
             None => match ctx.registry.get(helio_core::ResourceKey::new("pre_aa")) {
                 Some(v) => v,
@@ -763,32 +763,21 @@ impl RenderPass for DofPass {
         let camera_buf = ctx.camera;
 
         // ── Lazy rebuild bind groups ────────────────────────────────────
-        let coc_key = (
-            depth_view as *const _ as usize,
-            camera_buf as *const _ as usize,
-        );
-        if self.bg_key_coc != Some(coc_key) {
+        let coc_key = (depth_view.clone(), camera_buf.clone());
+        if self.bg_key_coc.as_ref() != Some(&coc_key) {
             self.rebuild_coc_bg(ctx.device, depth_view, camera_buf);
             self.bg_key_coc = Some(coc_key);
         }
 
-        let gather_key = (
-            src_view as *const _ as usize,
-            camera_buf as *const _ as usize,
-            0,
-            0,
-            0,
-            0,
-        );
-        if self.bg_key_gather != Some(gather_key) {
+        let gather_key = (src_view.clone(), camera_buf.clone());
+        if self.bg_key_gather.as_ref() != Some(&gather_key) {
             self.rebuild_gather_bg(ctx.device, src_view, camera_buf);
             self.bg_key_gather = Some(gather_key);
         }
 
-        let composite_key = (src_view as *const _ as usize, 0, 0, 0, 0);
-        if self.bg_key_composite != Some(composite_key) {
+        if self.bg_key_composite.as_ref() != Some(src_view) {
             self.rebuild_composite_bg(ctx.device, src_view);
-            self.bg_key_composite = Some(composite_key);
+            self.bg_key_composite = Some(src_view.clone());
         }
 
         // ── Copy DOF block before dispatches ────────────────────────────
@@ -798,8 +787,8 @@ impl RenderPass for DofPass {
         // compute encoder first, so these dispatches must follow them on the
         // graphics encoder, or they would see the previous frame's image.
         {
-            let ce = ctx.encoder_ptr;
-            unsafe { &mut *ce }.copy_buffer_to_buffer(
+            let mut cmds = ctx.graphics_cmds();
+            cmds.copy_buffer_to_buffer(
                 pp_buf,
                 DOF_BLOCK_OFFSET,
                 &self.dof_block_buf,
@@ -810,8 +799,8 @@ impl RenderPass for DofPass {
 
         // ── Indirect arguments: zero workgroups while DOF is disabled ───
         {
-            let ce = ctx.encoder_ptr;
-            let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut cmds = ctx.graphics_cmds();
+            let mut cpass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("DOF Args"),
                 timestamp_writes: None,
             });
@@ -822,8 +811,8 @@ impl RenderPass for DofPass {
 
         // ── Pass 1: CoC pre-pass ────────────────────────────────────────
         {
-            let ce = ctx.encoder_ptr;
-            let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut cmds = ctx.graphics_cmds();
+            let mut cpass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("DOF CoC"),
                 timestamp_writes: None,
             });
@@ -834,8 +823,8 @@ impl RenderPass for DofPass {
 
         // ── Pass 2: Gather ─────────────────────────────────────────────
         {
-            let ce = ctx.encoder_ptr;
-            let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            let mut cmds = ctx.graphics_cmds();
+            let mut cpass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("DOF Gather"),
                 timestamp_writes: None,
             });
@@ -855,15 +844,15 @@ impl RenderPass for DofPass {
                     store: wgpu::StoreOp::Store,
                 },
             })];
-            let mut pass =
-                unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("DOF Composite"),
-                    color_attachments: &attachments,
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
+            let mut cmds = ctx.graphics_cmds();
+            let mut pass = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("DOF Composite"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
             pass.set_pipeline(&self.composite_pipeline);
             pass.set_bind_group(0, self.composite_bg.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);

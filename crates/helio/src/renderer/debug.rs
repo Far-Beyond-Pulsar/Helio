@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use bytemuck::{Pod, Zeroable};
 
-use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_core::{PassContext, PrepareContext, RenderCmds, RenderPass, Result as HelioResult};
 
 use super::renderer_impl::Renderer;
 
@@ -251,7 +251,7 @@ pub struct DebugPass {
     bgl: wgpu::BindGroupLayout,
     camera_buf: wgpu::Buffer,
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<usize>,
+    bind_group_key: Option<wgpu::Buffer>,
     vertex_buf: wgpu::Buffer,
     pub vertex_count: u32,
     tri_buf: wgpu::Buffer,
@@ -567,7 +567,7 @@ impl DebugPass {
 }
 
 impl DebugPass {
-    fn draw_commands(&self, rp: &mut wgpu::RenderPass) {
+    fn draw_commands(&self, rp: &mut RenderCmds<'_>) {
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
 
         if self.vertex_count > 0 {
@@ -592,8 +592,7 @@ impl DebugPass {
     }
 
     fn ensure_bind_group(&mut self, device: &wgpu::Device) {
-        let camera_key = &self.camera_buf as *const _ as usize;
-        if self.bind_group_key != Some(camera_key) {
+        if self.bind_group_key.as_ref() != Some(&self.camera_buf) {
             self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Debug Draw BG"),
                 layout: &self.bgl,
@@ -602,7 +601,7 @@ impl DebugPass {
                     resource: self.camera_buf.as_entire_binding(),
                 }],
             }));
-            self.bind_group_key = Some(camera_key);
+            self.bind_group_key = Some(self.camera_buf.clone());
         }
     }
 
@@ -657,7 +656,8 @@ impl DebugPass {
             multiview_mask: None,
         };
 
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&desc);
+        let mut cmds = ctx.graphics_cmds();
+        let mut pass = cmds.begin_render_pass(&desc);
         self.draw_commands(&mut pass);
         Ok(())
     }
@@ -746,14 +746,13 @@ impl RenderPass for DebugPass {
             return Ok(());
         }
         self.ensure_bind_group(ctx.device);
-        let Some(rp_ptr) = ctx.active_render_pass_ptr() else {
+        let Some(mut rp) = ctx.render_cmds() else {
             // A parallel worker can legitimately reach an empty/omitted
             // render pass when the debug targets are unavailable for this
             // frame. Treat it as a no-op instead of poisoning the worker.
             return Ok(());
         };
-        let rp = unsafe { &mut *rp_ptr };
-        self.draw_commands(rp);
+        self.draw_commands(&mut rp);
         Ok(())
     }
 }
@@ -906,10 +905,9 @@ impl DebugDrawPass {
     }
 
     fn draw_infinite_grid(&self, ctx: &mut PassContext) {
-        let Some(rp_ptr) = ctx.active_render_pass_ptr() else {
+        let Some(mut rp) = ctx.render_cmds() else {
             return;
         };
-        let rp = unsafe { &mut *rp_ptr };
         rp.set_pipeline(&self.grid_pipeline);
         rp.set_bind_group(0, &self.grid_bind_group, &[]);
         rp.draw(0..3, 0..1);
