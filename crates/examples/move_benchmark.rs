@@ -558,7 +558,7 @@ impl Bench {
             .finish_breakdown()
             .iter()
             .map(|segment| (segment.compute + segment.graphics).as_secs_f64() * 1000.0)
-            .sum();
+            .fold(0.0, |sum, ms| sum + ms);
 
         let t = Instant::now();
         self.device
