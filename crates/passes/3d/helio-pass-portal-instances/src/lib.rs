@@ -48,7 +48,7 @@ struct ScreenSize {
     _pad1: f32,
 }
 
-type PortalBindGroupKey = (usize, usize, usize, usize, usize, usize, usize, usize, usize);
+type PortalBindGroupKey = ([wgpu::Buffer; 8], wgpu::TextureView);
 
 pub struct PortalInstancePass {
     material_binding: helio_mats::MaterialBindingConfig,
@@ -506,17 +506,19 @@ impl RenderPass for PortalInstancePass {
 
         // ── Bind group 0 ──────────────────────────────────────────────────
         let key = (
-            ctx.camera as *const _ as usize,
-            batch.instances as *const _ as usize,
-            coord_data.coordinate_spaces as *const _ as usize,
-            &portal_views.buffer as *const _ as usize,
-            &portal_chain_handles.buffer as *const _ as usize,
-            &portal_chain_portals.buffer as *const _ as usize,
-            &*self.portal_compacted_indices_buf as *const _ as usize,
-            &*self.portal_compacted_chains_buf as *const _ as usize,
-            portal_mask_view as *const _ as usize,
+            [
+                ctx.camera.clone(),
+                batch.instances.clone(),
+                coord_data.coordinate_spaces.clone(),
+                portal_views.buffer.clone(),
+                portal_chain_handles.buffer.clone(),
+                portal_chain_portals.buffer.clone(),
+                (*self.portal_compacted_indices_buf).clone(),
+                (*self.portal_compacted_chains_buf).clone(),
+            ],
+            portal_mask_view.clone(),
         );
-        if self.bind_group_0_key != Some(key) {
+        if self.bind_group_0_key.as_ref() != Some(&key) {
             self.bind_group_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("PortalInstance BG 0"),
                 layout: &self.bind_group_layout_0,

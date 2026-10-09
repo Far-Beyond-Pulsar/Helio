@@ -500,7 +500,7 @@ pub struct FoliageGBufferPass {
     placeholder_sampler: wgpu::Sampler,
 
     bind_group_0: Option<wgpu::BindGroup>,
-    bind_group_0_key: Option<(usize, usize, usize, usize, usize)>,
+    bind_group_0_key: Option<(wgpu::Buffer, wgpu::TextureView, wgpu::Sampler, wgpu::Buffer, wgpu::Buffer)>,
     bind_group_1: wgpu::BindGroup,
 
     /// Elements per `visible_blades` region. See [`visible_region_offset`].
@@ -1143,13 +1143,13 @@ impl RenderPass for FoliageGBufferPass {
                 .map(|h| &h.buffer)
                 .unwrap_or(&self.placeholder_type);
             let key = (
-                ctx.camera as *const _ as usize,
-                interaction_view as *const wgpu::TextureView as usize,
-                interaction_sampler as *const wgpu::Sampler as usize,
-                wind_buffer as *const _ as usize,
-                type_buffer as *const _ as usize,
+                ctx.camera.clone(),
+                interaction_view.clone(),
+                interaction_sampler.clone(),
+                wind_buffer.clone(),
+                type_buffer.clone(),
             );
-            let rebuilt = if self.bind_group_0_key != Some(key) {
+            let rebuilt = if self.bind_group_0_key.as_ref() != Some(&key) {
                 log::debug!("FoliageGBuffer: rebuilding bind group 0");
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("FoliageGBuffer BG 0"),

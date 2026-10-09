@@ -112,10 +112,18 @@ pub struct PostProcessPass {
 
     compute_main_bg: Option<wgpu::BindGroup>,
     render_main_bg: Option<wgpu::BindGroup>,
-    main_bg_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
+    main_bg_key: Option<(
+        wgpu::TextureView,
+        wgpu::TextureView,
+        wgpu::Buffer,
+        wgpu::Buffer,
+        Option<wgpu::TextureView>,
+        Option<wgpu::TextureView>,
+        Option<wgpu::TextureView>,
+    )>,
 
     // Bloom BGs
-    bloom_extract_bg: Option<(usize, wgpu::BindGroup)>,
+    bloom_extract_bg: Option<(wgpu::TextureView, wgpu::BindGroup)>,
     bloom_down_bgs: Vec<wgpu::BindGroup>,
     /// One per upsample level, `[i]` writing `bloom_sums[i]`.
     bloom_upsample_bgs: Vec<wgpu::BindGroup>,
@@ -1383,7 +1391,7 @@ impl PostProcessPass {
         if input_size != self.analysis_size {
             self.resize_analysis(ctx.device, input_size.0, input_size.1);
         }
-        let postprocess_buf = match ctx.registry.get(helio_core::ResourceKey::new("postprocess_uniforms")) {
+        let postprocess_buf = match ctx.registry.get::<&wgpu::Buffer>(helio_core::ResourceKey::new("postprocess_uniforms")) {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -1394,20 +1402,20 @@ impl PostProcessPass {
         // binds the 1x1 black fallback. Part of the key so that a lens pass
         // being added, removed, or resized rebuilds the group instead of
         // leaving b17 pointing at a stale view.
-        let lens_view = ctx.registry.get(helio_core::ResourceKey::new("lens_output"));
-        let velocity_view = ctx.registry.get(helio_core::ResourceKey::new("gbuffer_velocity"));
-        let lut_view = ctx.registry.get(helio_core::ResourceKey::new("color_grading_lut"));
+        let lens_view = ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("lens_output"));
+        let velocity_view = ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("gbuffer_velocity"));
+        let lut_view = ctx.registry.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("color_grading_lut"));
 
         let bg_key = (
-            pre_aa_view as *const _ as usize,
-            ctx.depth as *const _ as usize,
-            camera_buf as *const _ as usize,
-            postprocess_buf as *const _ as usize,
-            lens_view.map_or(0, |v| v as *const _ as usize),
-            velocity_view.map_or(0, |v| v as *const _ as usize),
-            lut_view.map_or(0, |v| v as *const _ as usize),
+            pre_aa_view.clone(),
+            ctx.depth.clone(),
+            camera_buf.clone(),
+            postprocess_buf.clone(),
+            lens_view.cloned(),
+            velocity_view.cloned(),
+            lut_view.cloned(),
         );
-        if self.main_bg_key != Some(bg_key) {
+        if self.main_bg_key.as_ref() != Some(&bg_key) {
             self.rebuild_bind_groups(
                 ctx.device,
                 postprocess_buf,
@@ -1422,8 +1430,7 @@ impl PostProcessPass {
         }
 
         // Bloom extract BG
-        let hdr_ptr = pre_aa_view as *const _ as usize;
-        if self.bloom_extract_bg.as_ref().map(|(k, _)| *k) != Some(hdr_ptr) {
+        if self.bloom_extract_bg.as_ref().map(|(k, _)| k) != Some(pre_aa_view) {
             let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("PostProcess Bloom Extract BG"),
                 layout: &self.bloom_compute_bgl,
@@ -1438,7 +1445,7 @@ impl PostProcessPass {
                     },
                 ],
             });
-            self.bloom_extract_bg = Some((hdr_ptr, bg));
+            self.bloom_extract_bg = Some((pre_aa_view.clone(), bg));
         }
 
         let compute_bg = self.compute_main_bg.as_ref().unwrap();

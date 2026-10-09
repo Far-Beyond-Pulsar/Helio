@@ -508,3 +508,48 @@ fn gpu_tile_sampling_fades_and_honors_author_policy() {
     let values: &[f32] = bytemuck::cast_slice(&values);
     assert_eq!(values, &[0., 0., 0.5, 0.5, 1., 1., 0., 1., 1., 0., 1., 1.]);
 }
+
+/// Helio#330 (from #303): with a real camera, equal lights rank by how near
+/// they are. The nearest win the budget, resolution never grows with distance,
+/// and lights behind the camera get nothing however large they are.
+#[test]
+fn gpu_ranking_prefers_the_lights_nearest_the_camera() {
+    let mut gpu = Gpu::new(320, 64);
+    let view = glam::Mat4::look_at_rh(glam::Vec3::ZERO, glam::Vec3::NEG_Z, glam::Vec3::Y);
+    let projection = glam::Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 200.0);
+    let view_proj = projection * view;
+    gpu.params.view_proj = view_proj.to_cols_array();
+    gpu.params.inv_view_proj = view_proj.inverse().to_cols_array();
+    let mut rows = vec![[0u32; 32]; 320];
+    // Row i sits 2 + i/4 units in front of the camera, on the view axis.
+    for (i, row) in rows.iter_mut().take(300).enumerate() {
+        *row = light(0., 1.0, 2);
+        row[1] = 0f32.to_bits();
+        row[2] = (-(2.0 + i as f32 * 0.25)).to_bits();
+    }
+    // Larger than any of them, but wholly behind the camera: their range
+    // ends before the near plane, so nothing they shadow is on screen.
+    for row in rows.iter_mut().skip(300) {
+        *row = light(0., 4.0, 2);
+        row[2] = 6f32.to_bits();
+    }
+    let table = gpu.run(&rows, &ResidencyTable::default());
+    let mut residents: Vec<_> = table.residents.iter().filter(|r| r.owner > 0).collect();
+    assert_eq!(residents.len(), 64, "the budget is used in full");
+    residents.sort_by_key(|r| r.owner);
+    let owners: Vec<u32> = residents.iter().map(|r| r.owner).collect();
+    assert_eq!(owners, (1..=64).collect::<Vec<u32>>(), "the 64 nearest lights win");
+    for pair in residents.windows(2) {
+        assert!(
+            pair[0].resolution >= pair[1].resolution,
+            "a farther light never gets more resolution: {:?} then {:?}",
+            (pair[0].owner, pair[0].resolution),
+            (pair[1].owner, pair[1].resolution),
+        );
+    }
+    assert!(
+        residents[0].resolution > residents[63].resolution,
+        "resolution follows screen coverage"
+    );
+    no_overlap(&table, 2048);
+}

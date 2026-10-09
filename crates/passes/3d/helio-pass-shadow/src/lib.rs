@@ -47,7 +47,7 @@ pub struct ShadowPass {
     // ── Dynamic shadow atlas (Movable objects only) ───────────────────────────
     face_views: Box<[wgpu::TextureView]>,
     bg_0: Option<wgpu::BindGroup>,
-    bg_0_key: Option<(usize, usize, usize)>,
+    bg_0_key: Option<[wgpu::Buffer; 3]>,
 
     // ── Static shadow atlas (Static/Stationary objects only) ─────────────────
     static_face_views: Box<[wgpu::TextureView]>,
@@ -480,12 +480,12 @@ impl RenderPass for ShadowPass {
             return Ok(());
         };
         let desired = data.desired_matrices.unwrap_or(data.shadow_matrices);
-        let key = (
-            desired as *const _ as usize,
-            batch.instances as *const _ as usize,
-            coords.coordinate_spaces as *const _ as usize,
-        );
-        if self.bg_0_key != Some(key) {
+        let key = [
+            desired.clone(),
+            batch.instances.clone(),
+            coords.coordinate_spaces.clone(),
+        ];
+        if self.bg_0_key.as_ref() != Some(&key) {
             self.bg_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Shadow tiles"),
                 layout: &self.bgl_0,

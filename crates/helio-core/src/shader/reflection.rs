@@ -314,6 +314,8 @@ enum BindingIdentity {
     Samplers(Vec<wgpu::Sampler>),
     TextureView(wgpu::TextureView),
     TextureViews(Vec<wgpu::TextureView>),
+    AccelerationStructure(wgpu::Tlas),
+    AccelerationStructures(Vec<wgpu::Tlas>),
 }
 
 /// `None` for a resource kind without a known identity; such a group is
@@ -336,9 +338,66 @@ fn binding_identity(entry: &wgpu::BindGroupEntry<'_>) -> Option<(u32, BindingIde
         wgpu::BindingResource::TextureViewArray(views) => {
             BindingIdentity::TextureViews(views.iter().map(|v| (*v).clone()).collect())
         }
+        wgpu::BindingResource::AccelerationStructure(tlas) => {
+            BindingIdentity::AccelerationStructure((*tlas).clone())
+        }
+        wgpu::BindingResource::AccelerationStructureArray(tlases) => {
+            BindingIdentity::AccelerationStructures(tlases.iter().map(|t| (*t).clone()).collect())
+        }
         _ => return None,
     };
     Some((entry.binding, identity))
+}
+
+/// A bind group kept across frames by a pass, rebuilt only when its layout
+/// or a resource it binds changes. Resources compare by identity, so a
+/// buffer SceneDB reallocated, or a view recreated on resize, is a change
+/// even when it sits at the same address as the old one.
+///
+/// ```ignore
+/// let group = self.lighting_group.get_or_create(&ctx.device, &wgpu::BindGroupDescriptor { .. });
+/// pass.set_bind_group(0, group, &[]);
+/// ```
+#[derive(Default)]
+pub struct CachedBindGroup {
+    cached: Option<(wgpu::BindGroupLayout, Option<Vec<(u32, BindingIdentity)>>, wgpu::BindGroup)>,
+}
+
+impl CachedBindGroup {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The group `desc` describes: last call's, if it had the same layout
+    /// and bound the same resources, otherwise a new one. A group binding a
+    /// resource kind without an identity (an external texture) is never
+    /// reused.
+    pub fn get_or_create(
+        &mut self,
+        device: &wgpu::Device,
+        desc: &wgpu::BindGroupDescriptor<'_>,
+    ) -> &wgpu::BindGroup {
+        let key: Option<Vec<_>> = desc.entries.iter().map(binding_identity).collect();
+        let reusable = matches!(
+            (&self.cached, &key),
+            (Some((layout, Some(cached), _)), Some(key)) if layout == desc.layout && cached == key
+        );
+        if !reusable {
+            let group = device.create_bind_group(desc);
+            self.cached = Some((desc.layout.clone(), key, group));
+        }
+        &self.cached.as_ref().expect("filled above").2
+    }
+
+    /// The group from the last [`Self::get_or_create`], if any.
+    pub fn get(&self) -> Option<&wgpu::BindGroup> {
+        self.cached.as_ref().map(|(_, _, group)| group)
+    }
+
+    /// Drop the group, so the next call rebuilds it.
+    pub fn clear(&mut self) {
+        self.cached = None;
+    }
 }
 
 /// A reflected bind group kept across frames, with what it was built from.

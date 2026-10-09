@@ -23,7 +23,7 @@ pub(crate) struct Transmittance {
     /// does not is all zero (textures start zeroed, and emptied faces are
     /// cleared once), so re-rendering it with no translucent caster is skipped.
     bg_1: Option<wgpu::BindGroup>,
-    bg_1_key: Option<(wgpu::Buffer, usize)>,
+    bg_1_key: Option<(wgpu::Buffer, wgpu::TextureView)>,
 }
 
 impl Transmittance {
@@ -293,7 +293,7 @@ impl Transmittance {
         let (Some(materials), true) = (materials, draw_count > 0) else {
             return;
         };
-        let key = (materials.clone(), static_depth as *const _ as usize);
+        let key = (materials.clone(), static_depth.clone());
         if self.bg_1_key.as_ref() != Some(&key) {
             self.bg_1 = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Shadow/Transmittance BG 1"),

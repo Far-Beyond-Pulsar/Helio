@@ -342,11 +342,11 @@ impl SdfPass {
             atlas_buffers,
             level_params_buffers,
             scroll_bg: None,
-            scroll_bg_camera_key: 0,
+            scroll_bg_camera_key: None,
             classify_bg,
             eval_bgs,
             march_bg: None,
-            march_bg_camera_key: 0,
+            march_bg_camera_key: None,
             edit_list: SdfEditList::new(),
             terrain_config: terrain,
             last_gen: u64::MAX,
@@ -744,7 +744,7 @@ impl RenderPass for SdfPass {
                 &self.terrain_params_buffer,
             );
             self.march_bg = None;
-            self.march_bg_camera_key = 0;
+            self.march_bg_camera_key = None;
             self.bindings_dirty = false;
         }
 
@@ -774,8 +774,7 @@ impl RenderPass for SdfPass {
             return Ok(());
         }
 
-        let camera_ptr = ctx.camera as *const _ as usize;
-        if self.scroll_bg_camera_key != camera_ptr || self.scroll_bg.is_none() {
+        if self.scroll_bg_camera_key.as_ref() != Some(ctx.camera) || self.scroll_bg.is_none() {
             let scroll_bgl = self.scroll_pipeline.get_bind_group_layout(0);
             self.scroll_bg = Some(Self::build_scroll_bg(
                 ctx.device,
@@ -785,9 +784,9 @@ impl RenderPass for SdfPass {
                 &self.scroll_state_buffer,
                 &self.dirty_flags_buffer,
             ));
-            self.scroll_bg_camera_key = camera_ptr;
+            self.scroll_bg_camera_key = Some(ctx.camera.clone());
         }
-        if self.march_bg_camera_key != camera_ptr || self.march_bg.is_none() {
+        if self.march_bg_camera_key.as_ref() != Some(ctx.camera) || self.march_bg.is_none() {
             self.march_bg = Some(Self::build_march_bg(
                 ctx.device,
                 &self.march_bgl,
@@ -797,7 +796,7 @@ impl RenderPass for SdfPass {
                 &self.atlas_buffers,
                 &self.all_brick_indices_buffer,
             ));
-            self.march_bg_camera_key = camera_ptr;
+            self.march_bg_camera_key = Some(ctx.camera.clone());
         }
 
         if !self.gpu_passes_clean {

@@ -93,7 +93,7 @@ pub struct GBufferPass {
     bind_group_layout_1: wgpu::BindGroupLayout,
     /// Group 0: camera + globals + instance_data. Rebuilt when buffer pointers change.
     bind_group_0: Option<wgpu::BindGroup>,
-    bind_group_0_key: Option<(usize, usize, usize, usize)>,
+    bind_group_0_key: Option<[wgpu::Buffer; 5]>,
     /// Group 1: materials + material_textures + bindless texture arrays.
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_1_version: Option<(u64,u64)>,
@@ -672,10 +672,7 @@ impl RenderPass for GBufferPass {
         let vertices = &vertices_handle.buffer;
         let indices = &indices_handle.buffer;
 
-        // Rebuild bind group 0 when camera or instances buffer pointers change (GrowableBuffer realloc).
-        let camera_ptr = ctx.camera as *const _ as usize;
-        let instances_ptr = batch.instances as *const _ as usize;
-        let compacted_indices_ptr = culled.compacted_indices as *const _ as usize;
+        // Rebuild bind group 0 when camera or instances buffers change (GrowableBuffer realloc).
         let coord_spaces = ctx.registry.get::<crate::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces());
         let coordinate_spaces_buf = coord_spaces
             .map(|c| c.coordinate_spaces)
@@ -683,15 +680,15 @@ impl RenderPass for GBufferPass {
         let coordinate_spaces_prev_buf = coord_spaces
             .map(|c| c.coordinate_spaces_prev)
             .unwrap_or(ctx.camera);
-        let coordinate_spaces_ptr = coordinate_spaces_buf as *const _ as usize;
-        let key = (
-            camera_ptr,
-            instances_ptr,
-            compacted_indices_ptr,
-            coordinate_spaces_ptr,
-        );
-        if self.bind_group_0_key != Some(key) {
-            log::debug!("GBuffer: rebuilding bind group 0 (buffer pointers changed)");
+        let key = [
+            ctx.camera.clone(),
+            batch.instances.clone(),
+            culled.compacted_indices.clone(),
+            coordinate_spaces_buf.clone(),
+            coordinate_spaces_prev_buf.clone(),
+        ];
+        if self.bind_group_0_key.as_ref() != Some(&key) {
+            log::debug!("GBuffer: rebuilding bind group 0 (buffers changed)");
             self.bind_group_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("GBuffer BG 0"),
                 layout: &self.bind_group_layout_0,

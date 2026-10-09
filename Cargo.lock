@@ -1649,6 +1649,8 @@ dependencies = [
  "helio-pass-shadow-matrix",
  "helio-pass-simple-cube",
  "helio-pass-sky",
+ "helio-pass-sprite-batch",
+ "helio-pass-sprite-cull",
  "helio-pass-ssr",
  "helio-pass-transparent",
  "helio-pass-tsr",
@@ -2118,6 +2120,7 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
+ "helio-mats",
  "log",
  "pulsar_reflection",
  "pulsar_scenedb",
@@ -3981,7 +3984,7 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=a98ff98e1b446e0f44f4200c005faa0c1f2842b2#a98ff98e1b446e0f44f4200c005faa0c1f2842b2"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=685b1b0aa212b64912549efd583c93480bea027f#685b1b0aa212b64912549efd583c93480bea027f"
 dependencies = [
  "ahash",
  "profiling 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/Pulsar-Profiling?rev=12424a5f75166332f9f1d2741281f6fc4847b44d)",
@@ -3997,7 +4000,7 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb_derive"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=a98ff98e1b446e0f44f4200c005faa0c1f2842b2#a98ff98e1b446e0f44f4200c005faa0c1f2842b2"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=685b1b0aa212b64912549efd583c93480bea027f#685b1b0aa212b64912549efd583c93480bea027f"
 dependencies = [
  "proc-macro2",
  "pulsar_reflection_codegen",

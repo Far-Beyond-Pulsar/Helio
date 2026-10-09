@@ -127,7 +127,7 @@ pub struct PortalCullPass {
     bind_group: Option<wgpu::BindGroup>,
     /// (camera, instances, draw_calls, coordinate_spaces, portal_views,
     /// chain_handles, chain_portals, compacted_chains)
-    bind_group_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
+    bind_group_key: Option<[wgpu::Buffer; 8]>,
 
     draw_count: u32,
     chain_count: u32,
@@ -360,17 +360,17 @@ impl RenderPass for PortalCullPass {
             return Ok(());
         };
 
-        let key = (
-            ctx.camera as *const wgpu::Buffer as usize,
-            batch.instances as *const wgpu::Buffer as usize,
-            batch.draw_calls as *const wgpu::Buffer as usize,
-            coord_data.coordinate_spaces as *const wgpu::Buffer as usize,
-            &portal_views.buffer as *const wgpu::Buffer as usize,
-            &portal_chain_handles.buffer as *const wgpu::Buffer as usize,
-            &portal_chain_portals.buffer as *const wgpu::Buffer as usize,
-            &*self.portal_compacted_chains_buf as *const wgpu::Buffer as usize,
-        );
-        if self.bind_group_key != Some(key) {
+        let key = [
+            ctx.camera.clone(),
+            batch.instances.clone(),
+            batch.draw_calls.clone(),
+            coord_data.coordinate_spaces.clone(),
+            portal_views.buffer.clone(),
+            portal_chain_handles.buffer.clone(),
+            portal_chain_portals.buffer.clone(),
+            (*self.portal_compacted_chains_buf).clone(),
+        ];
+        if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("PortalCull BG"),
                 layout: &self.bind_group_layout,

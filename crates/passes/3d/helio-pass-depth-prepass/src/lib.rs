@@ -14,7 +14,7 @@ pub struct DepthPrepassPass {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<(usize, usize, usize)>,
+    bind_group_key: Option<[wgpu::Buffer; 3]>,
 }
 
 impl DepthPrepassPass {
@@ -199,12 +199,13 @@ impl RenderPass for DepthPrepassPass {
             })?;
 
         // Extract before the mutable encoder borrow.
-        let camera_ptr = ctx.camera as *const _ as usize;
-        let instances_ptr = batch.instances as *const _ as usize;
-        let compacted_indices_ptr = culled.compacted_indices as *const _ as usize;
-        let key = (camera_ptr, instances_ptr, compacted_indices_ptr);
-        if self.bind_group_key != Some(key) {
-            log::debug!("DepthPrepass: rebuilding bind group (buffer pointers changed)");
+        let key = [
+            ctx.camera.clone(),
+            batch.instances.clone(),
+            culled.compacted_indices.clone(),
+        ];
+        if self.bind_group_key.as_ref() != Some(&key) {
+            log::debug!("DepthPrepass: rebuilding bind group (buffers changed)");
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("DepthPrepass BG"),
                 layout: &self.bind_group_layout,

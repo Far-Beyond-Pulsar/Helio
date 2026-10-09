@@ -137,10 +137,10 @@ pub struct CoronaPass {
     particle_view: wgpu::TextureView,
     particle_sampler: wgpu::Sampler,
 
-    // ── Bind groups (rebuilt when camera or particle buffer pointer changes) ─
+    // ── Bind groups (rebuilt when camera, particle or emitter buffer changes) ─
     compute_bg: Option<wgpu::BindGroup>,
     render_bg: Option<wgpu::BindGroup>,
-    bg_key: Option<(usize, usize)>, // (particle_buf ptr, camera_buf ptr)
+    bg_key: Option<[wgpu::Buffer; 3]>, // (particle_buf, emitter_buf, camera_buf)
 
     // ── State ────────────────────────────────────────────────────────────────
     max_particles: u32,
@@ -419,8 +419,7 @@ impl CoronaPass {
 
         // ── Initial bind group ───────────────────────────────────────────────
 
-        let camera_ptr = camera_buf as *const _ as usize;
-        let part_ptr = &particle_buf as *const _ as usize;
+        let bg_key = Some([particle_buf.clone(), emitter_buf.clone(), camera_buf.clone()]);
 
         let compute_bg = Some(Self::build_bg(
             device,
@@ -494,7 +493,7 @@ impl CoronaPass {
             particle_sampler,
             compute_bg,
             render_bg,
-            bg_key: Some((part_ptr, camera_ptr)),
+            bg_key,
             max_particles: DEFAULT_MAX_PARTICLES,
             emitter_count: 0,
             max_sort_steps,
@@ -924,19 +923,16 @@ impl RenderPass for CoronaPass {
             return Ok(());
         }
 
-        // ── Bind group rebuild when buffer pointers change ────────────────────
+        // ── Bind group rebuild when buffers change ────────────────────────────
 
-        let part_ptr = &self.particle_buf as *const _ as usize;
-        let camera_ptr = ctx.camera as *const _ as usize;
         let emitter_buf = ctx
             .scene_buffers
             .get(BufferKey::of("corona_emitters"))
             .map(|handle| &handle.buffer)
             .unwrap_or(&self.emitter_buf);
-        let emitter_ptr = emitter_buf as *const _ as usize;
-        let key = (part_ptr ^ emitter_ptr, camera_ptr);
+        let key = [self.particle_buf.clone(), emitter_buf.clone(), ctx.camera.clone()];
 
-        if self.bg_key != Some(key) {
+        if self.bg_key.as_ref() != Some(&key) {
             self.compute_bg = Some(Self::build_bg(
                 ctx.device,
                 &self.compute_bgl,

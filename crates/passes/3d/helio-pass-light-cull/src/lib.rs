@@ -63,13 +63,13 @@ pub struct LightCullPass {
     /// Storage buffer: one u32 count per tile.
     /// Size: num_tiles * 4 bytes.
     pub tile_light_counts: wgpu::Buffer,
-    /// Cached bind group, rebuilt when camera or lights buffer pointer changes.
+    /// Cached bind group, rebuilt when camera or lights buffer changes.
     bind_group: Option<wgpu::BindGroup>,
-    /// Key: (camera_ptr, lights buffer epoch, light_entity_indices_ptr,
-    /// transforms_ptr) — used to skip needless bind-group rebuilds. The
+    /// Key: (camera, lights buffer epoch, light_entity_indices,
+    /// transforms) — used to skip needless bind-group rebuilds. The
     /// lights buffer is keyed by its SceneDB epoch, not by the address of
     /// this frame's handle, which a reallocated buffer can reuse.
-    bind_group_key: Option<(usize, u64, usize, usize)>,
+    bind_group_key: Option<(wgpu::Buffer, u64, wgpu::Buffer, wgpu::Buffer)>,
     /// Light culling cache key: (camera_generation, lights buffer (epoch,
     /// content generation), light count, use_direct_index) — used to skip
     /// culling compute when nothing the shader reads has changed. The
@@ -458,18 +458,15 @@ impl RenderPass for LightCullPass {
         // Update cache key
         self.cull_cache_key = Some(cache_key);
 
-        let camera_ptr = ctx.camera as *const _ as usize;
         let lights_epoch = scene_lights_handle.map_or(u64::MAX, |h| h.epoch);
-        let light_entity_indices_ptr = light_entity_indices_buf as *const _ as usize;
-        let transforms_ptr = transforms_buf as *const _ as usize;
         let key = (
-            camera_ptr,
+            ctx.camera.clone(),
             lights_epoch,
-            light_entity_indices_ptr,
-            transforms_ptr,
+            light_entity_indices_buf.clone(),
+            transforms_buf.clone(),
         );
 
-        if self.bind_group_key != Some(key) {
+        if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("LightCull BG"),
                 layout: &self.bgl,

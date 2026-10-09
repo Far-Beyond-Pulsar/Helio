@@ -39,7 +39,7 @@ pub struct DebugPass {
     bgl: wgpu::BindGroupLayout,
     camera_buf: wgpu::Buffer,
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<usize>,
+    bind_group_key: Option<wgpu::Buffer>,
     vertex_buf: wgpu::Buffer,
     pub vertex_count: u32,
     /// Separate buffer for filled triangles (TriangleList topology).
@@ -395,8 +395,7 @@ impl DebugPass {
 
     /// Ensure bind group is current for the camera buffer.
     fn ensure_bind_group(&mut self, device: &wgpu::Device) {
-        let camera_key = &self.camera_buf as *const _ as usize;
-        if self.bind_group_key != Some(camera_key) {
+        if self.bind_group_key.as_ref() != Some(&self.camera_buf) {
             self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Debug Draw BG"),
                 layout: &self.bgl,
@@ -405,7 +404,7 @@ impl DebugPass {
                     resource: self.camera_buf.as_entire_binding(),
                 }],
             }));
-            self.bind_group_key = Some(camera_key);
+            self.bind_group_key = Some(self.camera_buf.clone());
         }
     }
 
