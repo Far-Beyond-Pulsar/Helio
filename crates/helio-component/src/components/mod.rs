@@ -1,6 +1,7 @@
 mod foliage_component;
 mod atmosphere_component;
 mod camera_post_process_component;
+mod decal_component;
 mod environment_rows;
 mod fog_component;
 mod lens_flare_props;
@@ -23,6 +24,7 @@ mod water_volume_component;
 pub use foliage_component::*;
 pub use atmosphere_component::*;
 pub use camera_post_process_component::*;
+pub use decal_component::*;
 pub use fog_component::*;
 pub use lens_flare_props::*;
 pub use light_component::*;

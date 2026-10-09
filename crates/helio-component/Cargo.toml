@@ -71,6 +71,7 @@ psgc.workspace = true
 image.workspace = true
 helio-voxel-data.workspace = true
 helio-asset-compat = { workspace = true }
+helio-pass-decal = { workspace = true }
 helio-pass-postprocess = { workspace = true }
 helio-pass-sky = { workspace = true }
 helio-pass-volumetric-fog = { workspace = true }
