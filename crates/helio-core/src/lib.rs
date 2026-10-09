@@ -392,6 +392,7 @@ pub mod actor;
 pub mod asset_types;
 pub mod camera;
 pub mod cmd;
+pub(crate) mod cmd_ir;
 pub mod context;
 pub mod entity;
 pub mod error;

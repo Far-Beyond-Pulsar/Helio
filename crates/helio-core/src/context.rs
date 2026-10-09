@@ -314,12 +314,12 @@ impl<'a> PassContext<'a> {
     /// It shares the graph's timestamp query set and frame readback.
     /// Call outside an open render/compute pass, paired with `end_gpu_scope`.
     pub fn begin_gpu_scope(&mut self, cmds: &mut CommandRecorder<'_>, name: &'static str) {
-        self.profiler.begin_gpu_pass(cmds.encoder(), name);
+        self.profiler.begin_gpu_pass_cmds(cmds, name);
     }
 
     /// End a GPU subscope on the stream on which it began.
     pub fn end_gpu_scope(&mut self, cmds: &mut CommandRecorder<'_>, name: &'static str) {
-        self.profiler.end_gpu_pass(cmds.encoder(), name);
+        self.profiler.end_gpu_pass_cmds(cmds, name);
     }
 
     /// Returns an executor-created reflected bind group by group index.
@@ -389,8 +389,7 @@ impl<'a> PassContext<'a> {
             );
         }
         let pass = std::ptr::NonNull::new(self.active_render_pass?)?;
-        // SAFETY: the graph keeps the pass open until `execute()` returns.
-        Some(unsafe { RenderCmds::from_active(pass) })
+        Some(RenderCmds::from_active(pass))
     }
 
     /// The graphics stream, in graph order: copies, clears, queries and
@@ -407,15 +406,13 @@ impl<'a> PassContext<'a> {
                  chain_transparent passes must only use the compute stream"
             );
         }
-        // SAFETY: the encoder lives until `execute()` returns.
-        unsafe { CommandRecorder::from_ptr(self.encoder_ptr) }
+        CommandRecorder::from_ptr(self.encoder_ptr)
     }
 
     /// The pre-graphics compute stream, submitted before all graphics work
     /// regardless of this pass's place in the graph.
     pub fn compute_cmds(&self) -> CommandRecorder<'a> {
-        // SAFETY: the encoder lives until `execute()` returns.
-        unsafe { CommandRecorder::from_ptr(self.compute_encoder_ptr) }
+        CommandRecorder::from_ptr(self.compute_encoder_ptr)
     }
 }
 

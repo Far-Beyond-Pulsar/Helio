@@ -3,15 +3,19 @@
 //! Passes record GPU work through [`CommandRecorder`], [`RenderCmds`] and
 //! [`ComputeCmds`] instead of touching `wgpu::CommandEncoder`,
 //! `wgpu::RenderPass` or `wgpu::ComputePass` directly. Method names and
-//! signatures match wgpu's, so moving a pass over is a type swap.
-//!
-//! Today every command is encoded straight into wgpu. Owning the type the
-//! commands go through is what later lets the graph record a frame once and
-//! resubmit it while nothing it depends on changes: the core then decides what
-//! a command does, and passes cannot tell.
+//! signatures match wgpu's, so moving a pass over is a type swap. Because every
+//! command goes through a core-owned type, the core decides what a command
+//! does, and passes cannot tell.
 //!
 //! wgpu keeps owning resources, pipelines, bind groups and shaders: commands
 //! take `&wgpu::Buffer`, `&wgpu::BindGroup` and friends as before.
+//!
+//! # Backends
+//!
+//! * **wgpu**: the command is encoded straight into a wgpu encoder or pass.
+//! * **recorded**: the command is appended to a [`crate::cmd_ir`] stream, which
+//!   the graph can compare with an earlier frame's and encode later. This is
+//!   what lets a frame be recorded once and resubmitted.
 //!
 //! # Handles
 //!
@@ -26,65 +30,130 @@ use std::marker::PhantomData;
 use std::ops::Range;
 use std::ptr::NonNull;
 
-/// Records into a render pass: the one the graph opened for the current pass
-/// or fused chain ([`PassContext::render_cmds`](crate::PassContext::render_cmds)),
-/// or one opened with [`CommandRecorder::begin_render_pass`].
+use crate::cmd_ir::{self, Cmd, Stream};
+
+/// Records into a render pass: the graph-opened pass of the current pass or
+/// fused chain ([`PassContext::render_cmds`](crate::PassContext::render_cmds)),
+/// or a self-managed one from [`CommandRecorder::begin_render_pass`].
 pub struct RenderCmds<'a> {
     inner: RenderInner<'a>,
 }
 
 enum RenderInner<'a> {
-    /// The pass the graph opened; it stays open after this handle is dropped.
+    /// The pass the graph opened. It outlives `execute()`.
     Active(NonNull<wgpu::RenderPass<'static>>, PhantomData<&'a mut ()>),
-    /// A pass this handle owns; it ends when the handle is dropped.
+    /// A pass this recorder opened itself; ends when dropped.
     Owned(wgpu::RenderPass<'a>),
+    /// Appends to a recorded stream. `owned` passes record their own end when
+    /// dropped; the graph ends the passes it opened.
+    Recorded {
+        stream: NonNull<Stream>,
+        owned: bool,
+        _marker: PhantomData<&'a mut ()>,
+    },
+}
+
+/// Encodes `$wgpu` into the wgpu pass, or appends `$cmd` to the recorded
+/// stream. Exactly one of the two is evaluated.
+macro_rules! render {
+    ($self:ident, |$p:ident| $wgpu:expr, $cmd:expr) => {
+        match &mut $self.inner {
+            // SAFETY: the graph keeps the pass alive and unaliased for the
+            // duration of `execute()`; see the module docs.
+            RenderInner::Active(ptr, _) => {
+                let $p = unsafe { ptr.as_mut() };
+                $wgpu
+            }
+            RenderInner::Owned($p) => $wgpu,
+            // SAFETY: the stream belongs to the unit being recorded and
+            // outlives `execute()`; one handle records into it at a time.
+            RenderInner::Recorded { stream, .. } => unsafe { stream.as_mut() }.push($cmd),
+        }
+    };
 }
 
 impl<'a> RenderCmds<'a> {
-    /// # Safety
-    ///
-    /// `pass` must stay open and unaliased for `'a`.
-    pub(crate) unsafe fn from_active(pass: NonNull<wgpu::RenderPass<'static>>) -> Self {
-        Self {
-            inner: RenderInner::Active(pass, PhantomData),
+    pub(crate) fn from_active(ptr: NonNull<wgpu::RenderPass<'static>>) -> RenderCmds<'a> {
+        RenderCmds {
+            inner: RenderInner::Active(ptr, PhantomData),
         }
     }
 
-    /// Wraps a render pass opened on a plain wgpu encoder (tests, offline
-    /// tools). Graph passes get theirs from the context.
-    pub fn from_wgpu(pass: wgpu::RenderPass<'a>) -> Self {
-        Self {
+    /// The graph-opened pass of a recorded unit.
+    #[allow(dead_code)] // the recording cache's
+    pub(crate) fn recorded_active(stream: NonNull<Stream>) -> RenderCmds<'a> {
+        RenderCmds {
+            inner: RenderInner::Recorded {
+                stream,
+                owned: false,
+                _marker: PhantomData,
+            },
+        }
+    }
+
+    /// Opens a pass on a recorded stream; its end is recorded on drop.
+    pub(crate) fn begin_recorded(
+        mut stream: NonNull<Stream>,
+        desc: &wgpu::RenderPassDescriptor<'_>,
+    ) -> RenderCmds<'a> {
+        // SAFETY: see `render!`.
+        unsafe { stream.as_mut() }.push(Cmd::BeginRenderPass(Box::new(
+            cmd_ir::RenderPassDesc::capture(desc),
+        )));
+        RenderCmds {
+            inner: RenderInner::Recorded {
+                stream,
+                owned: true,
+                _marker: PhantomData,
+            },
+        }
+    }
+
+    /// Wraps a render pass the caller opened on a plain wgpu encoder (tests,
+    /// offline tools). Graph passes get theirs from the context.
+    pub fn from_wgpu(pass: wgpu::RenderPass<'a>) -> RenderCmds<'a> {
+        RenderCmds {
             inner: RenderInner::Owned(pass),
         }
     }
 
-    fn pass(&mut self) -> &mut wgpu::RenderPass<'a> {
-        match &mut self.inner {
-            // SAFETY: `from_active`'s contract; the pointer is only narrowed
-            // from `'static` to `'a`.
-            RenderInner::Active(pass, _) => unsafe {
-                &mut *(pass.as_ptr() as *mut wgpu::RenderPass<'a>)
-            },
-            RenderInner::Owned(pass) => pass,
-        }
-    }
-
     pub fn set_pipeline(&mut self, pipeline: &wgpu::RenderPipeline) {
-        self.pass().set_pipeline(pipeline);
+        render!(
+            self,
+            |p| p.set_pipeline(pipeline),
+            Cmd::SetRenderPipeline(pipeline.clone())
+        )
     }
 
-    pub fn set_bind_group<'b, BG>(&mut self, index: u32, bind_group: BG, offsets: &[u32])
-    where
+    pub fn set_bind_group<'b, BG>(
+        &mut self,
+        index: u32,
+        bind_group: BG,
+        offsets: &[wgpu::DynamicOffset],
+    ) where
         Option<&'b wgpu::BindGroup>: From<BG>,
     {
-        self.pass().set_bind_group(index, bind_group, offsets);
+        render!(self, |p| p.set_bind_group(index, bind_group, offsets), {
+            let group: Option<&wgpu::BindGroup> = bind_group.into();
+            Cmd::SetBindGroup {
+                index,
+                group: group.cloned(),
+                offsets: offsets.to_vec(),
+            }
+        })
     }
 
     pub fn set_vertex_buffer<'b, B>(&mut self, slot: u32, buffer_slice: B)
     where
         Option<wgpu::BufferSlice<'b>>: From<B>,
     {
-        self.pass().set_vertex_buffer(slot, buffer_slice);
+        render!(self, |p| p.set_vertex_buffer(slot, buffer_slice), {
+            let slice: Option<wgpu::BufferSlice<'_>> = buffer_slice.into();
+            Cmd::SetVertexBuffer {
+                slot,
+                buffer: slice.map(|s| (s.buffer().clone(), s.offset(), s.size())),
+            }
+        })
     }
 
     pub fn set_index_buffer(
@@ -92,43 +161,104 @@ impl<'a> RenderCmds<'a> {
         buffer_slice: wgpu::BufferSlice<'_>,
         index_format: wgpu::IndexFormat,
     ) {
-        self.pass().set_index_buffer(buffer_slice, index_format);
+        render!(
+            self,
+            |p| p.set_index_buffer(buffer_slice, index_format),
+            Cmd::SetIndexBuffer {
+                buffer: buffer_slice.buffer().clone(),
+                offset: buffer_slice.offset(),
+                size: buffer_slice.size(),
+                format: index_format,
+            }
+        )
     }
 
     pub fn set_viewport(&mut self, x: f32, y: f32, w: f32, h: f32, min_depth: f32, max_depth: f32) {
-        self.pass().set_viewport(x, y, w, h, min_depth, max_depth);
+        render!(
+            self,
+            |p| p.set_viewport(x, y, w, h, min_depth, max_depth),
+            Cmd::SetViewport([x, y, w, h, min_depth, max_depth])
+        )
     }
 
     pub fn set_scissor_rect(&mut self, x: u32, y: u32, width: u32, height: u32) {
-        self.pass().set_scissor_rect(x, y, width, height);
+        render!(
+            self,
+            |p| p.set_scissor_rect(x, y, width, height),
+            Cmd::SetScissorRect([x, y, width, height])
+        )
     }
 
     pub fn set_stencil_reference(&mut self, reference: u32) {
-        self.pass().set_stencil_reference(reference);
+        render!(
+            self,
+            |p| p.set_stencil_reference(reference),
+            Cmd::SetStencilReference(reference)
+        )
     }
 
     pub fn set_blend_constant(&mut self, color: wgpu::Color) {
-        self.pass().set_blend_constant(color);
+        render!(
+            self,
+            |p| p.set_blend_constant(color),
+            Cmd::SetBlendConstant(color)
+        )
     }
 
     pub fn set_immediates(&mut self, offset: u32, data: &[u8]) {
-        self.pass().set_immediates(offset, data);
+        render!(
+            self,
+            |p| p.set_immediates(offset, data),
+            Cmd::SetImmediates {
+                offset,
+                data: data.to_vec(),
+            }
+        )
     }
 
     pub fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
-        self.pass().draw(vertices, instances);
+        render!(
+            self,
+            |p| p.draw(vertices, instances),
+            Cmd::Draw {
+                vertices,
+                instances,
+            }
+        )
     }
 
     pub fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
-        self.pass().draw_indexed(indices, base_vertex, instances);
+        render!(
+            self,
+            |p| p.draw_indexed(indices, base_vertex, instances),
+            Cmd::DrawIndexed {
+                indices,
+                base_vertex,
+                instances,
+            }
+        )
     }
 
     pub fn draw_indirect(&mut self, indirect_buffer: &wgpu::Buffer, indirect_offset: u64) {
-        self.pass().draw_indirect(indirect_buffer, indirect_offset);
+        render!(
+            self,
+            |p| p.draw_indirect(indirect_buffer, indirect_offset),
+            Cmd::DrawIndirect {
+                buffer: indirect_buffer.clone(),
+                offset: indirect_offset,
+            }
+        )
     }
 
     pub fn draw_indexed_indirect(&mut self, indirect_buffer: &wgpu::Buffer, indirect_offset: u64) {
-        self.pass().draw_indexed_indirect(indirect_buffer, indirect_offset);
+        render!(
+            self,
+            |p| p.draw_indexed_indirect(indirect_buffer, indirect_offset),
+            Cmd::DrawIndexedIndirect {
+                buffer: indirect_buffer.clone(),
+                offset: indirect_offset,
+            }
+        )
     }
 
     pub fn multi_draw_indirect(
@@ -137,8 +267,15 @@ impl<'a> RenderCmds<'a> {
         indirect_offset: u64,
         count: u32,
     ) {
-        self.pass()
-            .multi_draw_indirect(indirect_buffer, indirect_offset, count);
+        render!(
+            self,
+            |p| p.multi_draw_indirect(indirect_buffer, indirect_offset, count),
+            Cmd::MultiDrawIndirect {
+                buffer: indirect_buffer.clone(),
+                offset: indirect_offset,
+                count,
+            }
+        )
     }
 
     pub fn multi_draw_indexed_indirect(
@@ -147,8 +284,15 @@ impl<'a> RenderCmds<'a> {
         indirect_offset: u64,
         count: u32,
     ) {
-        self.pass()
-            .multi_draw_indexed_indirect(indirect_buffer, indirect_offset, count);
+        render!(
+            self,
+            |p| p.multi_draw_indexed_indirect(indirect_buffer, indirect_offset, count),
+            Cmd::MultiDrawIndexedIndirect {
+                buffer: indirect_buffer.clone(),
+                offset: indirect_offset,
+                count,
+            }
+        )
     }
 
     pub fn multi_draw_indirect_count(
@@ -159,13 +303,23 @@ impl<'a> RenderCmds<'a> {
         count_offset: u64,
         max_count: u32,
     ) {
-        self.pass().multi_draw_indirect_count(
-            indirect_buffer,
-            indirect_offset,
-            count_buffer,
-            count_offset,
-            max_count,
-        );
+        render!(
+            self,
+            |p| p.multi_draw_indirect_count(
+                indirect_buffer,
+                indirect_offset,
+                count_buffer,
+                count_offset,
+                max_count
+            ),
+            Cmd::MultiDrawIndirectCount {
+                buffer: indirect_buffer.clone(),
+                offset: indirect_offset,
+                count_buffer: count_buffer.clone(),
+                count_offset,
+                max_count,
+            }
+        )
     }
 
     pub fn multi_draw_indexed_indirect_count(
@@ -176,69 +330,176 @@ impl<'a> RenderCmds<'a> {
         count_offset: u64,
         max_count: u32,
     ) {
-        self.pass().multi_draw_indexed_indirect_count(
-            indirect_buffer,
-            indirect_offset,
-            count_buffer,
-            count_offset,
-            max_count,
-        );
+        render!(
+            self,
+            |p| p.multi_draw_indexed_indirect_count(
+                indirect_buffer,
+                indirect_offset,
+                count_buffer,
+                count_offset,
+                max_count
+            ),
+            Cmd::MultiDrawIndexedIndirectCount {
+                buffer: indirect_buffer.clone(),
+                offset: indirect_offset,
+                count_buffer: count_buffer.clone(),
+                count_offset,
+                max_count,
+            }
+        )
     }
 
-    pub fn execute_bundles<'b, I: IntoIterator<Item = &'b wgpu::RenderBundle>>(
-        &mut self,
-        bundles: I,
-    ) {
-        self.pass().execute_bundles(bundles);
+    /// Replays pre-recorded render bundles. Only the graph's own bundle path
+    /// should need this.
+    pub fn execute_bundles<'b, I: IntoIterator<Item = &'b wgpu::RenderBundle>>(&mut self, bundles: I) {
+        render!(
+            self,
+            |p| p.execute_bundles(bundles),
+            Cmd::ExecuteBundles(bundles.into_iter().cloned().collect())
+        )
     }
 
     pub fn write_timestamp(&mut self, query_set: &wgpu::QuerySet, query_index: u32) {
-        self.pass().write_timestamp(query_set, query_index);
+        render!(
+            self,
+            |p| p.write_timestamp(query_set, query_index),
+            Cmd::WriteTimestamp {
+                set: query_set.clone(),
+                index: query_index,
+            }
+        )
     }
 
     pub fn insert_debug_marker(&mut self, label: &str) {
-        self.pass().insert_debug_marker(label);
+        render!(
+            self,
+            |p| p.insert_debug_marker(label),
+            Cmd::InsertDebugMarker(cmd_ir::Label::new(Some(label)))
+        )
     }
 
     pub fn push_debug_group(&mut self, label: &str) {
-        self.pass().push_debug_group(label);
+        render!(
+            self,
+            |p| p.push_debug_group(label),
+            Cmd::PushDebugGroup(cmd_ir::Label::new(Some(label)))
+        )
     }
 
     pub fn pop_debug_group(&mut self) {
-        self.pass().pop_debug_group();
+        render!(self, |p| p.pop_debug_group(), Cmd::PopDebugGroup)
     }
 }
 
-/// Records into a compute pass opened with
-/// [`CommandRecorder::begin_compute_pass`] or the context's helpers.
+impl Drop for RenderCmds<'_> {
+    fn drop(&mut self) {
+        if let RenderInner::Recorded {
+            stream,
+            owned: true,
+            ..
+        } = &mut self.inner
+        {
+            // SAFETY: see `render!`.
+            unsafe { stream.as_mut() }.push(Cmd::EndRenderPass);
+        }
+    }
+}
+
+/// Records into a compute pass. Ends when dropped.
 pub struct ComputeCmds<'a> {
-    pass: wgpu::ComputePass<'a>,
+    inner: ComputeInner<'a>,
+}
+
+enum ComputeInner<'a> {
+    Owned(wgpu::ComputePass<'a>),
+    Recorded {
+        stream: NonNull<Stream>,
+        _marker: PhantomData<&'a mut ()>,
+    },
+}
+
+/// Encodes `$wgpu` into the wgpu pass, or appends `$cmd` to the recorded
+/// stream. Exactly one of the two is evaluated.
+macro_rules! compute {
+    ($self:ident, |$p:ident| $wgpu:expr, $cmd:expr) => {
+        match &mut $self.inner {
+            ComputeInner::Owned($p) => $wgpu,
+            // SAFETY: see `render!`.
+            ComputeInner::Recorded { stream, .. } => unsafe { stream.as_mut() }.push($cmd),
+        }
+    };
 }
 
 impl<'a> ComputeCmds<'a> {
-    /// Wraps a compute pass opened on a plain wgpu encoder (tests, offline
-    /// tools).
-    pub fn from_wgpu(pass: wgpu::ComputePass<'a>) -> Self {
-        Self { pass }
+    /// Opens a pass on a recorded stream; its end is recorded on drop.
+    pub(crate) fn begin_recorded(
+        mut stream: NonNull<Stream>,
+        desc: &wgpu::ComputePassDescriptor<'_>,
+    ) -> ComputeCmds<'a> {
+        // SAFETY: see `render!`.
+        unsafe { stream.as_mut() }.push(Cmd::BeginComputePass(
+            cmd_ir::ComputePassDesc::capture(desc),
+        ));
+        ComputeCmds {
+            inner: ComputeInner::Recorded {
+                stream,
+                _marker: PhantomData,
+            },
+        }
+    }
+
+    /// Wraps a compute pass the caller opened on a plain wgpu encoder (tests,
+    /// offline tools). Graph passes open theirs through the context or a
+    /// [`CommandRecorder`].
+    pub fn from_wgpu(pass: wgpu::ComputePass<'a>) -> ComputeCmds<'a> {
+        ComputeCmds {
+            inner: ComputeInner::Owned(pass),
+        }
     }
 
     pub fn set_pipeline(&mut self, pipeline: &wgpu::ComputePipeline) {
-        self.pass.set_pipeline(pipeline);
+        compute!(
+            self,
+            |p| p.set_pipeline(pipeline),
+            Cmd::SetComputePipeline(pipeline.clone())
+        )
     }
 
-    pub fn set_bind_group<'b, BG>(&mut self, index: u32, bind_group: BG, offsets: &[u32])
-    where
+    pub fn set_bind_group<'b, BG>(
+        &mut self,
+        index: u32,
+        bind_group: BG,
+        offsets: &[wgpu::DynamicOffset],
+    ) where
         Option<&'b wgpu::BindGroup>: From<BG>,
     {
-        self.pass.set_bind_group(index, bind_group, offsets);
+        compute!(self, |p| p.set_bind_group(index, bind_group, offsets), {
+            let group: Option<&wgpu::BindGroup> = bind_group.into();
+            Cmd::SetBindGroup {
+                index,
+                group: group.cloned(),
+                offsets: offsets.to_vec(),
+            }
+        })
     }
 
     pub fn set_immediates(&mut self, offset: u32, data: &[u8]) {
-        self.pass.set_immediates(offset, data);
+        compute!(
+            self,
+            |p| p.set_immediates(offset, data),
+            Cmd::SetImmediates {
+                offset,
+                data: data.to_vec(),
+            }
+        )
     }
 
     pub fn dispatch_workgroups(&mut self, x: u32, y: u32, z: u32) {
-        self.pass.dispatch_workgroups(x, y, z);
+        compute!(
+            self,
+            |p| p.dispatch_workgroups(x, y, z),
+            Cmd::Dispatch([x, y, z])
+        )
     }
 
     pub fn dispatch_workgroups_indirect(
@@ -246,64 +507,147 @@ impl<'a> ComputeCmds<'a> {
         indirect_buffer: &wgpu::Buffer,
         indirect_offset: u64,
     ) {
-        self.pass
-            .dispatch_workgroups_indirect(indirect_buffer, indirect_offset);
+        compute!(
+            self,
+            |p| p.dispatch_workgroups_indirect(indirect_buffer, indirect_offset),
+            Cmd::DispatchIndirect {
+                buffer: indirect_buffer.clone(),
+                offset: indirect_offset,
+            }
+        )
     }
 
     pub fn write_timestamp(&mut self, query_set: &wgpu::QuerySet, query_index: u32) {
-        self.pass.write_timestamp(query_set, query_index);
+        compute!(
+            self,
+            |p| p.write_timestamp(query_set, query_index),
+            Cmd::WriteTimestamp {
+                set: query_set.clone(),
+                index: query_index,
+            }
+        )
     }
 
     pub fn insert_debug_marker(&mut self, label: &str) {
-        self.pass.insert_debug_marker(label);
+        compute!(
+            self,
+            |p| p.insert_debug_marker(label),
+            Cmd::InsertDebugMarker(cmd_ir::Label::new(Some(label)))
+        )
     }
 
     pub fn push_debug_group(&mut self, label: &str) {
-        self.pass.push_debug_group(label);
+        compute!(
+            self,
+            |p| p.push_debug_group(label),
+            Cmd::PushDebugGroup(cmd_ir::Label::new(Some(label)))
+        )
     }
 
     pub fn pop_debug_group(&mut self) {
-        self.pass.pop_debug_group();
+        compute!(self, |p| p.pop_debug_group(), Cmd::PopDebugGroup)
     }
 }
 
-/// Records encoder-level commands (copies, clears, queries) and opens passes
-/// on one of the graph's command streams.
+impl Drop for ComputeCmds<'_> {
+    fn drop(&mut self) {
+        if let ComputeInner::Recorded { stream, .. } = &mut self.inner {
+            // SAFETY: see `render!`.
+            unsafe { stream.as_mut() }.push(Cmd::EndComputePass);
+        }
+    }
+}
+
+/// A command stream: opens render and compute passes and records transfers.
+/// The replacement for `&mut wgpu::CommandEncoder` in pass code.
+///
+/// Get one from [`PassContext::graphics_cmds`](crate::PassContext::graphics_cmds)
+/// (the graphics stream, in graph order) or
+/// [`PassContext::compute_cmds`](crate::PassContext::compute_cmds) (the
+/// pre-graphics compute stream). Helpers that used to take
+/// `&mut wgpu::CommandEncoder` take `&mut CommandRecorder<'_>`.
 pub struct CommandRecorder<'a> {
-    encoder: NonNull<wgpu::CommandEncoder>,
-    _marker: PhantomData<&'a mut wgpu::CommandEncoder>,
+    inner: RecorderInner<'a>,
+}
+
+enum RecorderInner<'a> {
+    Wgpu(NonNull<wgpu::CommandEncoder>, PhantomData<&'a mut wgpu::CommandEncoder>),
+    Recorded(NonNull<Stream>, PhantomData<&'a mut ()>),
+}
+
+/// Encodes `$wgpu` into the wgpu encoder, or appends `$cmd` to the recorded
+/// stream. Exactly one of the two is evaluated.
+macro_rules! encoder {
+    ($self:ident, |$e:ident| $wgpu:expr, $cmd:expr) => {
+        match &mut $self.inner {
+            // SAFETY: the pointer comes from a live `&mut CommandEncoder` (the
+            // graph's stream, or the caller of `from_encoder`) that this
+            // recorder borrows exclusively.
+            RecorderInner::Wgpu(ptr, _) => {
+                let $e = unsafe { ptr.as_mut() };
+                $wgpu
+            }
+            // SAFETY: see `render!`.
+            RecorderInner::Recorded(stream, _) => unsafe { stream.as_mut() }.push($cmd),
+        }
+    };
 }
 
 impl<'a> CommandRecorder<'a> {
-    /// Records into a plain wgpu encoder (tests, offline tools).
-    pub fn from_encoder(encoder: &'a mut wgpu::CommandEncoder) -> Self {
-        Self {
-            encoder: NonNull::from(encoder),
-            _marker: PhantomData,
+    /// Records into a plain wgpu encoder: for tests, offline tools and
+    /// anything outside a graph frame. Graph passes use the context.
+    pub fn from_encoder(encoder: &'a mut wgpu::CommandEncoder) -> CommandRecorder<'a> {
+        CommandRecorder {
+            inner: RecorderInner::Wgpu(NonNull::from(encoder), PhantomData),
         }
     }
 
-    /// # Safety
-    ///
-    /// `encoder` must be valid, and not otherwise used, for `'a`.
-    pub(crate) unsafe fn from_ptr(encoder: *mut wgpu::CommandEncoder) -> Self {
-        Self {
-            encoder: NonNull::new(encoder).expect("graph command stream"),
-            _marker: PhantomData,
+    /// For the graph: a recorder over one of its wgpu streams that does not
+    /// borrow the context.
+    pub(crate) fn from_ptr(ptr: *mut wgpu::CommandEncoder) -> CommandRecorder<'a> {
+        CommandRecorder {
+            inner: RecorderInner::Wgpu(
+                NonNull::new(ptr).expect("graph command stream pointer is null"),
+                PhantomData,
+            ),
         }
     }
 
-    pub(crate) fn encoder(&mut self) -> &mut wgpu::CommandEncoder {
-        // SAFETY: the constructors' contracts.
-        unsafe { self.encoder.as_mut() }
+    /// For the graph: a recorder over one of a unit's recorded streams.
+    #[allow(dead_code)] // the recording cache's
+    pub(crate) fn from_stream(stream: NonNull<Stream>) -> CommandRecorder<'a> {
+        CommandRecorder {
+            inner: RecorderInner::Recorded(stream, PhantomData),
+        }
     }
 
-    pub fn begin_render_pass(&mut self, desc: &wgpu::RenderPassDescriptor<'_>) -> RenderCmds<'_> {
-        RenderCmds::from_wgpu(self.encoder().begin_render_pass(desc))
+    /// Opens a self-managed render pass (for a pass whose
+    /// `render_pass_descriptor` returns `None`). Ends when dropped.
+    pub fn begin_render_pass<'b>(
+        &'b mut self,
+        desc: &wgpu::RenderPassDescriptor<'_>,
+    ) -> RenderCmds<'b> {
+        match &mut self.inner {
+            // SAFETY: see `encoder!`.
+            RecorderInner::Wgpu(ptr, _) => {
+                RenderCmds::from_wgpu(unsafe { ptr.as_mut() }.begin_render_pass(desc))
+            }
+            RecorderInner::Recorded(stream, _) => RenderCmds::begin_recorded(*stream, desc),
+        }
     }
 
-    pub fn begin_compute_pass(&mut self, desc: &wgpu::ComputePassDescriptor<'_>) -> ComputeCmds<'_> {
-        ComputeCmds::from_wgpu(self.encoder().begin_compute_pass(desc))
+    /// Opens a compute pass on this stream. Ends when dropped.
+    pub fn begin_compute_pass<'b>(
+        &'b mut self,
+        desc: &wgpu::ComputePassDescriptor<'_>,
+    ) -> ComputeCmds<'b> {
+        match &mut self.inner {
+            // SAFETY: see `encoder!`.
+            RecorderInner::Wgpu(ptr, _) => {
+                ComputeCmds::from_wgpu(unsafe { ptr.as_mut() }.begin_compute_pass(desc))
+            }
+            RecorderInner::Recorded(stream, _) => ComputeCmds::begin_recorded(*stream, desc),
+        }
     }
 
     pub fn copy_buffer_to_buffer(
@@ -314,13 +658,24 @@ impl<'a> CommandRecorder<'a> {
         destination_offset: u64,
         copy_size: impl Into<Option<u64>>,
     ) {
-        self.encoder().copy_buffer_to_buffer(
-            source,
-            source_offset,
-            destination,
-            destination_offset,
-            copy_size,
-        );
+        let copy_size = copy_size.into();
+        encoder!(
+            self,
+            |e| e.copy_buffer_to_buffer(
+                source,
+                source_offset,
+                destination,
+                destination_offset,
+                copy_size
+            ),
+            Cmd::CopyBufferToBuffer {
+                src: source.clone(),
+                src_offset: source_offset,
+                dst: destination.clone(),
+                dst_offset: destination_offset,
+                size: copy_size,
+            }
+        )
     }
 
     pub fn copy_buffer_to_texture(
@@ -329,8 +684,15 @@ impl<'a> CommandRecorder<'a> {
         destination: wgpu::TexelCopyTextureInfo<'_>,
         copy_size: wgpu::Extent3d,
     ) {
-        self.encoder()
-            .copy_buffer_to_texture(source, destination, copy_size);
+        encoder!(
+            self,
+            |e| e.copy_buffer_to_texture(source, destination, copy_size),
+            Cmd::CopyBufferToTexture {
+                src: cmd_ir::BufferCopy::capture(&source),
+                dst: cmd_ir::TextureCopy::capture(&destination),
+                size: copy_size,
+            }
+        )
     }
 
     pub fn copy_texture_to_buffer(
@@ -339,8 +701,15 @@ impl<'a> CommandRecorder<'a> {
         destination: wgpu::TexelCopyBufferInfo<'_>,
         copy_size: wgpu::Extent3d,
     ) {
-        self.encoder()
-            .copy_texture_to_buffer(source, destination, copy_size);
+        encoder!(
+            self,
+            |e| e.copy_texture_to_buffer(source, destination, copy_size),
+            Cmd::CopyTextureToBuffer {
+                src: cmd_ir::TextureCopy::capture(&source),
+                dst: cmd_ir::BufferCopy::capture(&destination),
+                size: copy_size,
+            }
+        )
     }
 
     pub fn copy_texture_to_texture(
@@ -349,12 +718,27 @@ impl<'a> CommandRecorder<'a> {
         destination: wgpu::TexelCopyTextureInfo<'_>,
         copy_size: wgpu::Extent3d,
     ) {
-        self.encoder()
-            .copy_texture_to_texture(source, destination, copy_size);
+        encoder!(
+            self,
+            |e| e.copy_texture_to_texture(source, destination, copy_size),
+            Cmd::CopyTextureToTexture {
+                src: cmd_ir::TextureCopy::capture(&source),
+                dst: cmd_ir::TextureCopy::capture(&destination),
+                size: copy_size,
+            }
+        )
     }
 
     pub fn clear_buffer(&mut self, buffer: &wgpu::Buffer, offset: u64, size: Option<u64>) {
-        self.encoder().clear_buffer(buffer, offset, size);
+        encoder!(
+            self,
+            |e| e.clear_buffer(buffer, offset, size),
+            Cmd::ClearBuffer {
+                buffer: buffer.clone(),
+                offset,
+                size,
+            }
+        )
     }
 
     pub fn clear_texture(
@@ -362,11 +746,25 @@ impl<'a> CommandRecorder<'a> {
         texture: &wgpu::Texture,
         subresource_range: &wgpu::ImageSubresourceRange,
     ) {
-        self.encoder().clear_texture(texture, subresource_range);
+        encoder!(
+            self,
+            |e| e.clear_texture(texture, subresource_range),
+            Cmd::ClearTexture {
+                texture: texture.clone(),
+                range: *subresource_range,
+            }
+        )
     }
 
     pub fn write_timestamp(&mut self, query_set: &wgpu::QuerySet, query_index: u32) {
-        self.encoder().write_timestamp(query_set, query_index);
+        encoder!(
+            self,
+            |e| e.write_timestamp(query_set, query_index),
+            Cmd::WriteTimestamp {
+                set: query_set.clone(),
+                index: query_index,
+            }
+        )
     }
 
     pub fn resolve_query_set(
@@ -376,27 +774,243 @@ impl<'a> CommandRecorder<'a> {
         destination: &wgpu::Buffer,
         destination_offset: u64,
     ) {
-        self.encoder()
-            .resolve_query_set(query_set, query_range, destination, destination_offset);
-    }
-
-    pub fn build_acceleration_structures<'b>(
-        &mut self,
-        blas: impl IntoIterator<Item = &'b wgpu::BlasBuildEntry<'b>>,
-        tlas: impl IntoIterator<Item = &'b wgpu::Tlas>,
-    ) {
-        self.encoder().build_acceleration_structures(blas, tlas);
+        encoder!(
+            self,
+            |e| e.resolve_query_set(
+                query_set,
+                query_range,
+                destination,
+                destination_offset
+            ),
+            Cmd::ResolveQuerySet {
+                set: query_set.clone(),
+                range: query_range,
+                dst: destination.clone(),
+                offset: destination_offset,
+            }
+        )
     }
 
     pub fn insert_debug_marker(&mut self, label: &str) {
-        self.encoder().insert_debug_marker(label);
+        encoder!(
+            self,
+            |e| e.insert_debug_marker(label),
+            Cmd::InsertDebugMarker(cmd_ir::Label::new(Some(label)))
+        )
     }
 
     pub fn push_debug_group(&mut self, label: &str) {
-        self.encoder().push_debug_group(label);
+        encoder!(
+            self,
+            |e| e.push_debug_group(label),
+            Cmd::PushDebugGroup(cmd_ir::Label::new(Some(label)))
+        )
     }
 
     pub fn pop_debug_group(&mut self) {
-        self.encoder().pop_debug_group();
+        encoder!(self, |e| e.pop_debug_group(), Cmd::PopDebugGroup)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const COMPUTE: &str = r#"
+@group(0) @binding(0) var<storage, read_write> counter: atomic<u32>;
+@compute @workgroup_size(1)
+fn main() { atomicAdd(&counter, 1u); }
+"#;
+
+    const RENDER: &str = r#"
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+    let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment
+fn fs() -> @location(0) vec4f { return vec4f(0.0, 1.0, 0.0, 1.0); }
+"#;
+
+    const SIZE: u32 = 4;
+    const ROW: u64 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as u64;
+
+    struct Work {
+        counter: wgpu::Buffer,
+        group: wgpu::BindGroup,
+        compute: wgpu::ComputePipeline,
+        render: wgpu::RenderPipeline,
+        target: wgpu::Texture,
+        view: wgpu::TextureView,
+        out: wgpu::Buffer,
+    }
+
+    fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::default();
+            let adapter = instance.request_adapter(&Default::default()).await.ok()?;
+            adapter.request_device(&Default::default()).await.ok()
+        })
+    }
+
+    fn work(device: &wgpu::Device) -> Work {
+        let counter = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(COMPUTE.into()),
+        });
+        let compute = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: None,
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &compute.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: counter.as_entire_binding() }],
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(RENDER.into()),
+        });
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let render = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(format.into())],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let out = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: ROW + ROW * SIZE as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        Work { counter, group, compute, render, target, view, out }
+    }
+
+    /// A clear, a compute pass, a scissored render pass and two copies.
+    fn record(cmds: &mut CommandRecorder<'_>, w: &Work) {
+        cmds.clear_buffer(&w.counter, 0, None);
+        {
+            let mut pass = cmds.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&w.compute);
+            pass.set_bind_group(0, &w.group, &[]);
+            pass.dispatch_workgroups(5, 1, 1);
+        }
+        {
+            let attachments = [Some(wgpu::RenderPassColorAttachment {
+                view: &w.view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::RED),
+                    store: wgpu::StoreOp::Store,
+                },
+            })];
+            let mut pass = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cmd ir test"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&w.render);
+            pass.set_scissor_rect(0, 0, SIZE / 2, SIZE);
+            pass.draw(0..3, 0..1);
+        }
+        cmds.copy_buffer_to_buffer(&w.counter, 0, &w.out, 0, 4);
+        cmds.copy_texture_to_buffer(
+            w.target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &w.out,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: ROW,
+                    bytes_per_row: Some(ROW as u32),
+                    rows_per_image: None,
+                },
+            },
+            wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        );
+    }
+
+    fn run(device: &wgpu::Device, queue: &wgpu::Queue, w: &Work, encoder: wgpu::CommandEncoder) -> Vec<u8> {
+        queue.submit([encoder.finish()]);
+        let slice = w.out.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let bytes = slice.get_mapped_range().unwrap().to_vec();
+        w.out.unmap();
+        bytes
+    }
+
+    #[test]
+    fn a_recorded_stream_encodes_to_the_same_work_as_direct_recording() {
+        let Some((device, queue)) = device() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let w = work(&device);
+
+        let mut encoder = device.create_command_encoder(&Default::default());
+        record(&mut CommandRecorder::from_encoder(&mut encoder), &w);
+        let direct = run(&device, &queue, &w, encoder);
+
+        let mut stream = Stream::new();
+        record(&mut CommandRecorder::from_stream(NonNull::from(&mut stream)), &w);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        cmd_ir::encode(&stream, &mut encoder);
+        let replayed = run(&device, &queue, &w, encoder);
+
+        assert_eq!(&direct[..4], &5u32.to_le_bytes(), "five dispatches counted");
+        let pixel = |x: u64, y: u64| &direct[(ROW + y * ROW + x * 4) as usize..][..4];
+        assert_eq!(pixel(0, 0), &[0, 255, 0, 255], "scissored draw covers the left half");
+        assert_eq!(pixel(3, 3), &[255, 0, 0, 255], "the clear shows on the right");
+        assert_eq!(direct, replayed, "replaying the stream does the same work");
+
+        // The same commands against the same objects compare equal, so a
+        // cache can tell an unchanged frame from a changed one.
+        let mut again = Stream::new();
+        record(&mut CommandRecorder::from_stream(NonNull::from(&mut again)), &w);
+        assert_eq!(stream, again);
+        let other = work(&device);
+        let mut changed = Stream::new();
+        record(&mut CommandRecorder::from_stream(NonNull::from(&mut changed)), &other);
+        assert_ne!(stream, changed, "different objects are different commands");
     }
 }
