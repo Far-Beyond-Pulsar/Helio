@@ -1,7 +1,7 @@
 //! The environment join: the frontend's authored fog volumes, post-process
-//! volumes, camera post-process baselines, water volumes, foliage and
-//! atmospheres to the rows the volumetric fog, post-process, water, foliage
-//! and sky passes read, on the GPU (Pulsar-Native#1035, Phase 4).
+//! volumes, camera post-process baselines, water volumes, foliage,
+//! atmospheres and decals to the rows the volumetric fog, post-process,
+//! water, foliage, sky and decal passes read, on the GPU (Pulsar-Native#1035, Phase 4).
 //!
 //! The same contract as [`crate::scene_join`]: each component instance
 //! derives a source row in its own space (`helio_component`'s
@@ -19,6 +19,7 @@
 //! | `water_volumes` | `"water_volumes"`, packed into [`MAX_WATER_VOLUMES`] rows | as for volumes; the surface height follows the owner's Y |
 //! | `foliage` | `"foliage_types"`, `"foliage_layers"`, `"foliage_wind"`, each packed | attached, enabled, owner current and visible, with a density |
 //! | `atmospheres` | `"atmospheres"` | attached, enabled, owner current (visibility does not apply); a planet placed at its owner is centred on the owner's position |
+//! | `decals` | `"decals"`, packed into [`MAX_DECALS`] rows | attached, enabled, owner current and visible, with a non-zero box; the transform maps world space into the owner-placed box |
 //!
 //! Every other row is zero, which each pass treats as inert. A volume's
 //! bounds follow its owner's position, rotation and scale; a foliage layer is
@@ -58,6 +59,12 @@ pub const FOLIAGE_SOURCE_ROW_BYTES: u64 = 40 * 4;
 /// `AtmosphereSourceRow`: the `helio_pass_sky::AtmosphereComponent` pass
 /// row, its centre in the owner's space.
 pub const ATMOSPHERE_SOURCE_ROW_BYTES: u64 = 28 * 4;
+/// `DecalSourceRow`: local size vec4, then the `helio_pass_decal`
+/// `DecalComponent` row (32 words) with its transform left to the join.
+pub const DECAL_SOURCE_ROW_BYTES: u64 = 36 * 4;
+/// Rows the decal pass reads (`helio_pass_decal::MAX_DECALS`): placed decals
+/// beyond these are not drawn.
+pub const MAX_DECALS: u32 = helio_pass_decal::MAX_DECALS;
 /// Rows the water passes read (`helio_pass_water_sim::MAX_SIM_VOLUMES`):
 /// placed water volumes beyond these are not drawn.
 pub const MAX_WATER_VOLUMES: u32 = helio_pass_water_sim::MAX_SIM_VOLUMES;
@@ -77,6 +84,7 @@ pub const FOLIAGE_TYPES_KEY: BufferKey = BufferKey::of("foliage_types");
 pub const FOLIAGE_LAYERS_KEY: BufferKey = BufferKey::of("foliage_layers");
 pub const FOLIAGE_WIND_KEY: BufferKey = BufferKey::of("foliage_wind");
 pub const ATMOSPHERES_KEY: BufferKey = BufferKey::of("atmospheres");
+pub const DECALS_KEY: BufferKey = BufferKey::of("decals");
 
 const WORKGROUP: u32 = 64;
 const SPATIAL: u32 = 1;
@@ -84,6 +92,7 @@ const GATE_HIDDEN: u32 = 2;
 const SURFACE: u32 = 4;
 const LAYER: u32 = 8;
 const CENTERED: u32 = 16;
+const DECAL: u32 = 32;
 const NO_GATE_WORD: u32 = u32::MAX;
 
 /// Where the frontend's rows live.
@@ -100,6 +109,7 @@ pub struct EnvironmentJoinKeys {
     pub water_volumes: BufferKey,
     pub foliage: BufferKey,
     pub atmospheres: BufferKey,
+    pub decals: BufferKey,
 }
 
 /// The source buffers, in [`EnvironmentJoinKeys`] order.
@@ -112,10 +122,11 @@ enum Source {
     WaterVolumes,
     Foliage,
     Atmospheres,
+    Decals,
 }
 
 impl Source {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::GlobalFog,
         Self::LocalFog,
         Self::PostProcessVolumes,
@@ -123,6 +134,7 @@ impl Source {
         Self::WaterVolumes,
         Self::Foliage,
         Self::Atmospheres,
+        Self::Decals,
     ];
 
     fn key(self, keys: &EnvironmentJoinKeys) -> BufferKey {
@@ -134,6 +146,7 @@ impl Source {
             Self::WaterVolumes => keys.water_volumes,
             Self::Foliage => keys.foliage,
             Self::Atmospheres => keys.atmospheres,
+            Self::Decals => keys.decals,
         }
     }
 
@@ -146,6 +159,7 @@ impl Source {
             Self::WaterVolumes => WATER_VOLUME_SOURCE_ROW_BYTES,
             Self::Foliage => FOLIAGE_SOURCE_ROW_BYTES,
             Self::Atmospheres => ATMOSPHERE_SOURCE_ROW_BYTES,
+            Self::Decals => DECAL_SOURCE_ROW_BYTES,
         }
     }
 }
@@ -223,7 +237,7 @@ impl Spec {
     }
 
     fn reads_transforms(&self) -> bool {
-        self.flags & (SPATIAL | LAYER | CENTERED) != 0
+        self.flags & (SPATIAL | LAYER | CENTERED | DECAL) != 0
     }
 
     fn output_row_bytes(&self) -> u64 {
@@ -388,6 +402,15 @@ impl EnvironmentJoin {
                 28,
                 CENTERED,
             ),
+            // The pass walks a fixed number of rows.
+            Spec::new(
+                "Environment Join Decals",
+                DECALS_KEY,
+                Source::Decals,
+                32,
+                GATE_HIDDEN | DECAL,
+            )
+            .packed(MAX_DECALS),
         ];
         Self {
             keys,

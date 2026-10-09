@@ -1,6 +1,6 @@
 // Environment join: one source row per component instance (fog volumes,
 // post-process volumes, camera post-process baselines, water volumes,
-// foliage, atmospheres; see `environment_join.rs`). A placed row is copied into its pass's buffer; a
+// foliage, atmospheres, decals; see `environment_join.rs`). A placed row is copied into its pass's buffer; a
 // spatial row gets its world AABB from the owner's transform first. Every
 // other output row stays zero, which each pass treats as inert (`enabled`
 // 0, `blend_weight` 0, zero extent).
@@ -21,7 +21,8 @@ struct JoinUniforms {
     /// size's `w`, scaled like the box (a water surface height); bit 3: a
     /// foliage layer (see `write_layer`); bit 4: an atmosphere, whose
     /// centre (words 0..2) moves to the owner's position when its
-    /// placement (word 3) is `PLACEMENT_CENTER`.
+    /// placement (word 3) is `PLACEMENT_CENTER`; bit 5: a decal (see
+    /// `write_decal_transform`).
     flags: u32,
     /// Output rows `cs_compact_rows` may fill.
     capacity: u32,
@@ -39,6 +40,7 @@ const GATE_HIDDEN: u32 = 2u;
 const SURFACE: u32 = 4u;
 const LAYER: u32 = 8u;
 const CENTERED: u32 = 16u;
+const DECAL: u32 = 32u;
 // `helio_pass_sky::atmosphere::placement::CENTER`.
 const PLACEMENT_CENTER: u32 = 1u;
 const NO_GATE_WORD: u32 = 0xffffffffu;
@@ -89,7 +91,10 @@ fn placed(row: u32) -> bool {
     if (u.flags & GATE_HIDDEN) != 0u && index < arrayLength(&hidden) && hidden[index] != 0u {
         return false;
     }
-    if (u.flags & (SPATIAL | LAYER | CENTERED)) != 0u && index >= arrayLength(&transforms) {
+    if (u.flags & (SPATIAL | LAYER | CENTERED | DECAL)) != 0u && index >= arrayLength(&transforms) {
+        return false;
+    }
+    if (u.flags & DECAL) != 0u && any(source_size(row) == vec3<f32>(0.0)) {
         return false;
     }
     if (u.flags & SPATIAL) != 0u && all(source_size(row) == vec3<f32>(0.0)) {
@@ -116,6 +121,27 @@ fn write_layer(row: u32, output: u32) {
     rows_out[output + 5u] = sources[source + 3u];
     rows_out[output + 6u] = bitcast<u32>(center.z + half * scale.z);
     rows_out[output + 7u] = sources[source + 1u];
+}
+
+/// A decal's world-to-decal transform (`mat4x4`, column-major, words 0..15
+/// of the output row): world space into the owner-placed box, whose full
+/// local extent is the source size, so the box spans -1..1 on each axis.
+/// Row `i` of the matrix is the box's world axis `i` over its world half
+/// extent; the translation takes the owner's position to the origin.
+fn write_decal_transform(row: u32, output: u32) {
+    let t = transforms[owners[row].owner_index];
+    let r = object_rotation(t);
+    let half = source_size(row) * object_scale(t) * 0.5;
+    let center = object_position(t);
+    for (var i = 0u; i < 3u; i++) {
+        let axis = r[i] / half[i];
+        for (var j = 0u; j < 3u; j++) {
+            rows_out[output + j * 4u + i] = bitcast<u32>(axis[j]);
+        }
+        rows_out[output + 12u + i] = bitcast<u32>(-dot(axis, center));
+        rows_out[output + i * 4u + 3u] = 0u;
+    }
+    rows_out[output + 15u] = bitcast<u32>(1.0);
 }
 
 /// Writes placed source `row` as output row `slot`.
@@ -156,6 +182,9 @@ fn write_row(row: u32, slot: u32) {
         source_header = 4u;
         output_header = 8u;
     }
+    if (u.flags & DECAL) != 0u {
+        source_header = 4u;
+    }
     var count = min(
         u.source_words - u.source_offset - source_header,
         u.output_words - output_header,
@@ -165,6 +194,9 @@ fn write_row(row: u32, slot: u32) {
     }
     for (var word = 0u; word < count; word++) {
         rows_out[output + output_header + word] = sources[source + source_header + word];
+    }
+    if (u.flags & DECAL) != 0u {
+        write_decal_transform(row, output);
     }
     if (u.flags & CENTERED) != 0u && sources[source + 3u] == PLACEMENT_CENTER {
         let center = object_position(transforms[owners[row].owner_index]);

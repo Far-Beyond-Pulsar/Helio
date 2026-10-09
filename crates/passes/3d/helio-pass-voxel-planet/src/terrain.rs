@@ -498,9 +498,13 @@ pub fn lean_height(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i
         let (ni, nj) = (((node_i + n) * spacing).clamp(0, last), ((node_j + m) * spacing).clamp(0, last));
         lattice_height(grid, field, face, ni, nj, level)
     };
-    let sample = |x: i32, y: i32| lattice_bilinear(x - node_i * spacing * 256, y - node_j * spacing * 256, spacing, &node);
-    let (x, y) = (i * 256 + 128, j * 256 + 128);
-    sample(x + ox, y + oy).wrapping_add(height).wrapping_sub(sample(x, y))
+    // Q8 cell positions overflow i32 at planet-scale indices. The GPU mirror
+    // computes them in wrapping i32 and only the small difference from the
+    // lattice origin matters, so wrap here too: bit-identical, never a panic.
+    let origin = |n: i32| n.wrapping_mul(spacing).wrapping_mul(256);
+    let sample = |x: i32, y: i32| lattice_bilinear(x.wrapping_sub(origin(node_i)), y.wrapping_sub(origin(node_j)), spacing, &node);
+    let (x, y) = (i.wrapping_mul(256).wrapping_add(128), j.wrapping_mul(256).wrapping_add(128));
+    sample(x.wrapping_add(ox), y.wrapping_add(oy)).wrapping_add(height).wrapping_sub(sample(x, y))
 }
 
 /// First node of the lean lattice a column of 8x8 cells reads: the nodes

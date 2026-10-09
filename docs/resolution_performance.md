@@ -99,6 +99,10 @@ Frame diff: bit-identical in all 9 scene/resolution runs.
 
 ### 2. Sky: shade only pixels no geometry covered
 
+(Since retired with SkyPass itself, Pulsar-Native #1057: the sky is the
+atmosphere composite, which already shades only uncovered pixels, drawn over
+a black background cleared before geometry.)
+
 This is the cross-pass overdraw case. SkyPass ran with the early passes and
 shaded the atmosphere and cloud layer for every pixel of `pre_aa` before any
 geometry existed. DeferredLightPass then overwrote every covered pixel.

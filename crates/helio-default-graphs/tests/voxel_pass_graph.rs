@@ -55,7 +55,6 @@ fn planet_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         let gpu_context = EngineGpuContext::new(Arc::clone(&device), Arc::clone(&queue));
         let mut gpu_store =
             SceneGpuStore::new(&gpu_context, SceneGpuConfig { classes: Vec::new(), tombstone_headroom: 0, max_cells_metadata: 0 });
-        helio_pass_sky::SkyComponent::register_gpu_columns_growable(&mut gpu_store, 4, &device);
         helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, &device);
         helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
         helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
@@ -210,7 +209,6 @@ fn editor(width: u32, height: u32) -> Option<Editor> {
     let gpu_context = EngineGpuContext::new(Arc::clone(&device), Arc::clone(&queue));
     let mut gpu_store =
         SceneGpuStore::new(&gpu_context, SceneGpuConfig { classes: Vec::new(), tombstone_headroom: 0, max_cells_metadata: 0 });
-    helio_pass_sky::SkyComponent::register_gpu_columns_growable(&mut gpu_store, 4, &device);
     helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, &device);
     helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
     helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);

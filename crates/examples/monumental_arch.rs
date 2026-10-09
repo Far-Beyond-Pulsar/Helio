@@ -52,9 +52,8 @@ pub fn populate(world: &mut World) -> (Vec<Entity>,Vec<Entity>) {
     settings.fog_scattering_anisotropy = 0.3;
     set_camera_postprocess(world, 0, &settings);
     let environment = world.spawn();
-    let mut atmosphere = helio_pass_sky::SkyComponent::default();
-    atmosphere.sun_direction = Vec3::new(0.5, 0.75, 0.4).normalize().to_array();
-    world.insert(environment, atmosphere);
+    // Earth's air; its sun is the scene's directional light.
+    world.insert(environment, helio_pass_sky::AtmosphereComponent::earth());
     let mut meshes: Vec<Mesh>=(0..7).map(|_|Mesh::default()).collect();
     // Four piers preserve both intersecting passages down to the plaza.
     for side in [-1.0,1.0] {
