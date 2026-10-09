@@ -8,3 +8,6 @@ helio-core = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }
