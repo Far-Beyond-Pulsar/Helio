@@ -9,10 +9,14 @@
 //! `"water_volumes"`, which the water simulation, surface and caustics read
 //! (Pulsar-Native#1035, Phase 4).
 //!
-//! The water pass simulates with pass-wide dynamics (`WaterSimPass`'s wave
-//! spring, damping, scale and wind setters). The per-volume `wave_spring`,
-//! `wave_damping`, `wave_scale` and wind fields are carried in the row but
-//! the simulation does not read them.
+//! The water simulation reads each volume's own dynamics from its row: wave
+//! spring, damping and scale, its wave speed and its wind. The wind is the
+//! level's global wind (`WindComponent`, placed over the row by the join)
+//! unless the volume opts out (`use_global_wind` off), and the simulation
+//! advances on the renderer's frame clock, so water freezes with a paused
+//! game or a viewport whose Realtime is off (Pulsar-Native#1065). The sun
+//! that lights the water is the scene's directional light (one per level),
+//! which the join writes into the row; volumes do not author their own.
 //!
 //! Not covered here: `WaterHitboxDescriptor`. Read its own doc before
 //! assuming it belongs alongside this component — it explicitly records an
@@ -40,7 +44,7 @@ pub const WATER_VOLUME_CLASS_NAME: &str = "WaterVolumeComponent";
 #[category("Caustics", category_color = "#C79A3E")]
 #[category("Underwater", category_color = "#7C6FD1")]
 #[category("Shadow", category_color = "#7C6FD1")]
-#[category("Lighting", category_color = "#D18F6F")]
+#[serde(default)]
 pub struct WaterVolumeComponent {
     #[property]
     pub enabled: bool,
@@ -93,6 +97,11 @@ pub struct WaterVolumeComponent {
     pub wave_scale: f32,
 
     // ── Wind ────────────────────────────────────────────────────────────
+    /// Blow in the level's global wind (World Settings). Off: this volume's
+    /// own wind (below) applies instead. A level without a global wind uses
+    /// each volume's own wind.
+    #[property(category = "Wind")]
+    pub use_global_wind: bool,
     /// Wind direction X, world XZ space. `[0, 0]` (both X and Z) = calm
     /// water. Same `[f32; 2]`-isn't-`Reflectable` reasoning as
     /// `wave_direction_x`/`_z` above.
@@ -172,12 +181,6 @@ pub struct WaterVolumeComponent {
     pub shadow_hitbox: f32,
     #[property(min = 0.0, max = 5.0, step = 0.05, category = "Shadow")]
     pub shadow_ao: f32,
-
-    // ── Lighting ────────────────────────────────────────────────────────
-    /// Sun / dominant directional light direction, world space. Need not be
-    /// normalized.
-    #[property(category = "Lighting")]
-    pub sun_direction: [f32; 3],
 }
 
 impl Default for WaterVolumeComponent {
@@ -196,6 +199,7 @@ impl Default for WaterVolumeComponent {
             wave_spring: 1.2,
             wave_damping: 0.985,
             wave_scale: 1.0,
+            use_global_wind: true,
             wind_direction_x: 0.0,
             wind_direction_z: 0.0,
             wind_strength: 0.0,
@@ -222,14 +226,17 @@ impl Default for WaterVolumeComponent {
             shadow_rim: 1.0,
             shadow_hitbox: 0.0,
             shadow_ao: 1.0,
-            sun_direction: [0.5, 1.0, 0.5],
         }
     }
 }
 
 impl WaterVolumeComponent {
     /// The water volume row for an unrotated, unscaled owner at the origin.
-    /// The renderer places it with the owner's transform.
+    /// The renderer places it with the owner's transform and writes the
+    /// scene's sun into `sun_direction` (zero here) and, unless the volume
+    /// opts out, the global wind into `wind_params`. `sim_dynamics` is
+    /// (spring, damping, wave scale, 0); `wind_params.w` is 1 when the
+    /// volume opts out of the global wind.
     pub fn local_gpu(&self) -> GpuWaterVolume {
         let [sx, sy, sz] = self.size;
         GpuWaterVolume {
@@ -274,24 +281,19 @@ impl WaterVolumeComponent {
                 self.density,
             ],
             shadow_params: [self.shadow_rim, self.shadow_hitbox, self.shadow_ao, 0.0],
-            sun_direction: [
-                self.sun_direction[0],
-                self.sun_direction[1],
-                self.sun_direction[2],
-                0.0,
-            ],
+            sun_direction: [0.0; 4],
             ssr_params: [
                 self.ssr_enabled as u32 as f32,
                 self.ssr_steps.max(0) as f32,
                 self.ssr_step_size,
                 self.ssr_thickness,
             ],
-            sim_dynamics: [self.wave_spring, self.wave_damping, 0.0, 0.0],
+            sim_dynamics: [self.wave_spring, self.wave_damping, self.wave_scale, 0.0],
             wind_params: [
                 self.wind_direction_x,
                 self.wind_direction_z,
                 self.wind_strength,
-                0.0,
+                if self.use_global_wind { 0.0 } else { 1.0 },
             ],
             _pad6: [0.0; 4],
         }
@@ -326,5 +328,37 @@ mod tests {
         assert_eq!(&row.bounds_min[0..3], &[-5.0, -2.0, -5.0]);
         assert_eq!(&row.bounds_max[0..3], &[5.0, 2.0, 5.0]);
         assert_eq!(row.bounds_max[3], 1.0);
+    }
+
+    #[test]
+    fn the_row_carries_the_volumes_own_dynamics() {
+        let component = WaterVolumeComponent {
+            wave_spring: 1.5,
+            wave_damping: 0.9,
+            wave_scale: 2.5,
+            wind_direction_x: 1.0,
+            wind_direction_z: -1.0,
+            wind_strength: 3.0,
+            ..Default::default()
+        };
+        let row = component.local_gpu();
+        assert_eq!(row.sim_dynamics, [1.5, 0.9, 2.5, 0.0]);
+        assert_eq!(row.wind_params, [1.0, -1.0, 3.0, 0.0]);
+        assert_eq!(row.sun_direction, [0.0; 4], "the join writes the sun");
+        let own = WaterVolumeComponent {
+            use_global_wind: false,
+            ..component
+        };
+        assert_eq!(own.local_gpu().wind_params[3], 1.0);
+    }
+
+    #[test]
+    fn levels_saved_with_an_authored_sun_still_load() {
+        let mut saved = serde_json::to_value(WaterVolumeComponent::default()).unwrap();
+        let fields = saved.as_object_mut().unwrap();
+        fields.remove("use_global_wind");
+        fields.insert("sun_direction".into(), serde_json::json!([0.5, 1.0, 0.5]));
+        let loaded: WaterVolumeComponent = serde_json::from_value(saved).unwrap();
+        assert!(loaded.use_global_wind);
     }
 }

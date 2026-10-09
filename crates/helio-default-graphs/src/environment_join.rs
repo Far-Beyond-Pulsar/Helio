@@ -17,9 +17,9 @@
 //! | `local_fog` | `"local_fog_media"` | as above; bounds = the owner-oriented box's world AABB |
 //! | `post_process_volumes` | `"post_process_volumes"` | as above; bounds as above |
 //! | `camera_post_process` | `"camera_postprocess"` | attached, enabled, owner current (visibility does not apply) |
-//! | `water_volumes` | `"water_volumes"`, packed into [`MAX_WATER_VOLUMES`] rows | as for volumes; the surface height follows the owner's Y |
+//! | `water_volumes` | `"water_volumes"`, packed into [`MAX_WATER_VOLUMES`] rows | as for volumes; the surface height follows the owner's Y; the sun is the scene's first directional light |
 //! | `foliage` | `"foliage_types"`, `"foliage_layers"`, `"foliage_wind"`, each packed | attached, enabled, owner current and visible, with a density |
-//! | `wind` | `"foliage_wind"`, over the foliage components' own wind | attached, enabled, owner current (visibility does not apply); a foliage component that opts out of the global wind takes precedence |
+//! | `wind` | `"foliage_wind"`, over the foliage components' own wind; the wind of every placed `"water_volumes"` row that does not opt out | attached, enabled, owner current (visibility does not apply); a foliage component that opts out of the global wind takes precedence |
 //! | `atmospheres` | `"atmospheres"` | attached, enabled, owner current (visibility does not apply); a planet placed at its owner is centred on the owner's position |
 //! | `decals` | `"decals"`, packed into [`MAX_DECALS`] rows | attached, enabled, owner current and visible, with a non-zero box; the transform maps world space into the owner-placed box |
 //! | `corona_emitters` | `"corona_emitters"`, packed into [`MAX_CORONA_EMITTERS`] rows | attached, enabled, owner current and visible, requesting particles; placed at the owner's transform, with a range of the Corona particle pool |
@@ -33,6 +33,13 @@
 //! also carries its emitter's identity (its source row + 1, in the
 //! `spawn_cursor` word, which the pass keeps itself): the pass restarts a
 //! row's particles when another emitter takes it.
+//!
+//! A water row's sun (`sun_direction`, toward the sun, `w` 1) is the first
+//! directional light with any intensity in the scene join's
+//! `"scene_lights"` ([`LIGHTS_KEY`]), as the sky's atmosphere picks its sun;
+//! straight up with `w` 0 when the scene has none. A water row's wind is
+//! the level's global wind unless the volume opts out (`wind_params.w`):
+//! its direction's XZ and [`WATER_WIND_STRENGTH_PER_SPEED`] times its speed.
 //!
 //! Every other row is zero, which each pass treats as inert. A volume's
 //! bounds follow its owner's position, rotation and scale; a foliage layer is
@@ -50,7 +57,7 @@ pub use helio_core::{
 };
 
 use crate::scene_join::{
-    GENERATION_ROW_BYTES, HIDDEN_ROW_BYTES, OWNER_ROW_BYTES, TRANSFORM_ROW_BYTES,
+    GENERATION_ROW_BYTES, HIDDEN_ROW_BYTES, LIGHTS_KEY, OWNER_ROW_BYTES, TRANSFORM_ROW_BYTES,
 };
 
 /// `GlobalFogSourceRow`: the `GlobalFogComponent` pass row (16 words).
@@ -97,6 +104,10 @@ const CORONA_COUNT_WORD: u32 = 46;
 pub const MAX_WATER_VOLUMES: u32 = helio_pass_water_sim::MAX_SIM_VOLUMES;
 /// `GlobalWindSourceRow`: the foliage wind row (12 words), marked global.
 pub const WIND_SOURCE_ROW_BYTES: u64 = 12 * 4;
+/// A water row's wind strength per m/s of the global wind's speed
+/// (`environment_join.wgsl`'s `WATER_WIND_PER_SPEED`): a 2 m/s breeze makes
+/// gentle ripples (1), 10 m/s a choppy surface (5).
+pub const WATER_WIND_STRENGTH_PER_SPEED: f32 = 0.5;
 /// The wind row's `_pad[0]`: 1 in a global wind's row.
 const GLOBAL_WIND_MARK_WORD: u32 = 10;
 /// A foliage source row's wind `_pad[0]` (28 + 10): 1 when the component
@@ -129,6 +140,8 @@ const LAYER: u32 = 8;
 const CENTERED: u32 = 16;
 const DECAL: u32 = 32;
 const EMITTER: u32 = 64;
+const SUN: u32 = 128;
+const WATER_WIND: u32 = 256;
 const NO_GATE_WORD: u32 = u32::MAX;
 
 /// Where the frontend's rows live.
@@ -303,6 +316,10 @@ impl Spec {
         self
     }
 
+    fn reads_lights(&self) -> bool {
+        self.flags & SUN != 0
+    }
+
     fn reads_transforms(&self) -> bool {
         self.flags & (SPATIAL | LAYER | CENTERED | DECAL | EMITTER) != 0
     }
@@ -436,14 +453,26 @@ impl EnvironmentJoin {
                 152,
                 0,
             ),
+            // Each placed volume takes the scene's sun, and the level's
+            // global wind unless it opts out (its `wind_params.w`).
             Spec::new(
                 "Environment Join Water Volumes",
                 WATER_VOLUMES_KEY,
                 Source::WaterVolumes,
                 64,
-                volume | SURFACE,
+                volume | SURFACE | SUN,
             )
-            .packed(MAX_WATER_VOLUMES),
+            .packed(MAX_WATER_VOLUMES)
+            .over(
+                Spec::new(
+                    "Environment Join Water Global Wind",
+                    WATER_VOLUMES_KEY,
+                    Source::Wind,
+                    64,
+                    WATER_WIND,
+                )
+                .gated_on(GLOBAL_WIND_MARK_WORD),
+            ),
             // One foliage source row feeds three tables; each takes the rows
             // whose type has a density (word 0).
             Spec::new(
@@ -612,6 +641,9 @@ impl SceneDerivation for EnvironmentJoin {
         let generations = self.input(inputs, keys.generations, GENERATION_ROW_BYTES);
         let hidden = self.input(inputs, keys.hidden, HIDDEN_ROW_BYTES);
         let transforms = self.input(inputs, keys.transforms, TRANSFORM_ROW_BYTES);
+        // The scene join's light rows, for the water's sun. Its output, so
+        // its row size is the pass's, not a frontend layout.
+        let lights = inputs.get(LIGHTS_KEY);
         let sources: Vec<Option<&BufferHandle>> = Source::ALL
             .iter()
             .map(|source| self.input(inputs, source.key(&keys), source.row_bytes()))
@@ -639,7 +671,8 @@ impl SceneDerivation for EnvironmentJoin {
                     .iter()
                     .any(|(layer, _)| layer.reads_transforms());
             let placed_from = transforms.filter(|_| reads_transforms);
-            let mut table_inputs = vec![owners, generations, hidden, placed_from, source];
+            let lit_by = lights.filter(|_| spec.reads_lights());
+            let mut table_inputs = vec![owners, generations, hidden, placed_from, lit_by, source];
             table_inputs.extend(
                 table
                     .layers
@@ -708,6 +741,7 @@ impl SceneDerivation for EnvironmentJoin {
                         entry(4, transforms.map_or(&self.empty, |h| &h.buffer)),
                         entry(5, &source.buffer),
                         entry(6, &table.buffer),
+                        entry(7, lights.map_or(&self.empty, |h| &h.buffer)),
                     ],
                 });
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

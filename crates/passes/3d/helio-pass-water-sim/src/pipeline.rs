@@ -52,6 +52,49 @@ impl WaterSimPass {
             ],
         });
 
+        // The update step also reads each volume's row for its own dynamics.
+        let update_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("WaterSim Update BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
         let hitbox_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("WaterSim Hitbox BGL"),
             entries: &[
@@ -99,6 +142,11 @@ impl WaterSimPass {
             bind_group_layouts: &[Some(&sim_bgl)],
             immediate_size: 0,
         });
+        let update_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("WaterSim Update PL"),
+            bind_group_layouts: &[Some(&update_bgl)],
+            immediate_size: 0,
+        });
         let hitbox_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("WaterSim Hitbox PL"),
             bind_group_layouts: &[Some(&hitbox_bgl)],
@@ -138,7 +186,7 @@ impl WaterSimPass {
             };
 
         let drop_pipeline = make_sim_pipeline("WaterSim Drop", &sim_pl, &drop_frag);
-        let update_pipeline = make_sim_pipeline("WaterSim Update", &sim_pl, &update_frag);
+        let update_pipeline = make_sim_pipeline("WaterSim Update", &update_pl, &update_frag);
         let normal_pipeline = make_sim_pipeline("WaterSim Normal", &sim_pl, &normal_frag);
         let hitbox_pipeline = make_sim_pipeline("WaterSim Hitbox", &hitbox_pl, &hitbox_frag);
 
@@ -770,6 +818,7 @@ impl WaterSimPass {
 
         Self {
             sim_bgl,
+            update_bgl,
             hitbox_bgl,
             drop_pipeline,
             update_pipeline,
@@ -863,6 +912,8 @@ impl WaterSimPass {
             wave_scale: 1.0,
             wave_speed: 1.0,
             sim_time: 0.0,
+            step_clock: 0.0,
+            steps_this_frame: 0,
         }
     }
 }

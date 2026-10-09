@@ -40,6 +40,13 @@ pub const MAX_SIM_VOLUMES: u32 = 8;
 /// needed to drive this pass's dispatch/draw bounds.
 pub(crate) const MAX_WATER_HITBOXES: u32 = 32;
 pub(crate) const CASCADE_PATCH_SIZES: [f32; 3] = [30.0, 90.0, 270.0];
+/// One simulation step, in seconds of the renderer's frame clock: the
+/// simulation steps at a fixed 120 Hz, so a 60 Hz frame takes two steps and
+/// a frame whose clock did not advance (a paused game, a viewport whose
+/// Realtime is off) takes none.
+pub(crate) const SIM_STEP_SECONDS: f32 = 1.0 / 120.0;
+/// Steps one frame takes at most, so a long frame does not stall the next.
+pub(crate) const MAX_SIM_STEPS_PER_FRAME: u32 = 8;
 
 // ---- Clipmap ring structure --------------------------------------------------------
 
@@ -353,6 +360,7 @@ fn vec4_vbl() -> wgpu::VertexBufferLayout<'static> {
 
 pub struct WaterSimPass {
     pub(crate) sim_bgl: wgpu::BindGroupLayout,
+    pub(crate) update_bgl: wgpu::BindGroupLayout,
     pub(crate) hitbox_bgl: wgpu::BindGroupLayout,
 
     pub(crate) drop_pipeline: wgpu::RenderPipeline,
@@ -409,7 +417,7 @@ pub struct WaterSimPass {
     pub(crate) drop_bg: Option<wgpu::BindGroup>,
     pub(crate) drop_bg_key: Option<usize>,
     pub(crate) update_bgs: Vec<Option<wgpu::BindGroup>>,
-    pub(crate) update_bg_keys: Vec<Option<usize>>,
+    pub(crate) update_bg_keys: Vec<Option<(usize, usize)>>,
     pub(crate) underwater_tint_bg: Option<wgpu::BindGroup>,
     pub(crate) underwater_tint_bg_key: Option<(usize, usize, usize)>,
 
@@ -453,6 +461,8 @@ pub struct WaterSimPass {
     pub(crate) underwater_tint_bgl: wgpu::BindGroupLayout,
     pub(crate) underwater_tint_pipeline: wgpu::RenderPipeline,
 
+    /// Pass-wide dynamics, for rows that leave their own at zero (see
+    /// [`GpuWaterVolume::sim_dynamics`]).
     pub(crate) wave_spring: f32,
     pub(crate) wave_damping: f32,
 
@@ -460,17 +470,26 @@ pub struct WaterSimPass {
     pub(crate) wind_strength: f32,
     pub(crate) wave_scale: f32,
     pub(crate) wave_speed: f32,
+    /// Simulated seconds: the frame clock's advance, in whole steps.
     pub(crate) sim_time: f32,
+    /// Frame clock time not yet simulated (less than one step).
+    pub(crate) step_clock: f32,
+    /// Simulation steps this frame takes ([`SIM_STEP_SECONDS`] each).
+    pub(crate) steps_this_frame: u32,
 }
 
 // ---- Public API ----------------------------------------------------------------
 
 impl WaterSimPass {
+    /// Pass-wide spring and damping, for volumes whose row leaves its own
+    /// dynamics at zero (hosts that write pass rows themselves). A volume
+    /// with its own (`sim_dynamics.x` > 0) simulates with those.
     pub fn set_sim_dynamics(&mut self, spring: f32, damping: f32) {
         self.wave_spring = spring.clamp(0.1, 2.0);
         self.wave_damping = damping.clamp(0.0, 1.0);
     }
 
+    /// Pass-wide wind; see [`Self::set_sim_dynamics`].
     pub fn set_wind(&mut self, direction: [f32; 2], strength: f32) {
         let len = (direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
         self.wind_direction = if len > 1e-6 {
@@ -481,12 +500,23 @@ impl WaterSimPass {
         self.wind_strength = strength.max(0.0);
     }
 
+    /// Pass-wide wave scale; see [`Self::set_sim_dynamics`].
     pub fn set_wave_scale(&mut self, scale: f32) {
         self.wave_scale = scale.max(0.01);
     }
 
+    /// Pass-wide wave speed; see [`Self::set_sim_dynamics`].
     pub fn set_wave_speed(&mut self, speed: f32) {
         self.wave_speed = speed.max(0.0);
+    }
+
+    /// The simulation's height field as of the last frame: one array layer
+    /// per volume row and cascade (layer `volume * 3 + cascade`), RGBA16F
+    /// (R = height, G = velocity, B/A = normal XZ), `COPY_SRC`. Cascade `c`
+    /// tiles world XZ every `[30, 90, 270][c]` metres. Read-only
+    /// diagnostics, for tests that read the simulation back.
+    pub fn sim_texture(&self) -> &wgpu::Texture {
+        &self.sim_tex_a
     }
 
     pub fn add_drop(&mut self, center_x: f32, center_z: f32, radius: f32, strength: f32) {
@@ -661,8 +691,13 @@ impl RenderPass for WaterSimPass {
             ctx.queue,
             ctx.scene_buffers.get(BufferKey::of("water_volumes")),
         );
-        self.sim_time += self.wave_speed / 60.0;
-        let step_dt = 1.0 / 120.0;
+        // Fixed steps on the host's frame clock: none while it is frozen.
+        self.step_clock += ctx.time_delta.max(0.0);
+        let steps = ((self.step_clock / SIM_STEP_SECONDS) + 1e-3).floor().max(0.0) as u32;
+        self.steps_this_frame = steps.min(MAX_SIM_STEPS_PER_FRAME);
+        self.step_clock = (self.step_clock - steps as f32 * SIM_STEP_SECONDS).clamp(0.0, SIM_STEP_SECONDS);
+        self.sim_time += self.steps_this_frame as f32 * SIM_STEP_SECONDS;
+        let step_dt = SIM_STEP_SECONDS;
         for ci in 0..CASCADE_COUNT {
             let delta = simulation::DeltaUniform {
                 delta: [1.0 / SIM_SIZE as f32, 1.0 / SIM_SIZE as f32],
@@ -675,6 +710,8 @@ impl RenderPass for WaterSimPass {
                 time_step: step_dt,
                 cascade_patch_size: CASCADE_PATCH_SIZES[ci],
                 cascade_id: ci as u32,
+                wave_speed: self.wave_speed,
+                _pad: [0.0; 3],
             };
             ctx.write_buffer(&self.update_bufs[ci], 0, bytemuck::bytes_of(&delta));
             ctx.write_buffer(&self.normal_bufs[ci], 0, bytemuck::bytes_of(&delta));
@@ -879,14 +916,18 @@ impl RenderPass for WaterSimPass {
         }
 
         // ---- 3 & 4. Cascade wave propagation + normal recomputation --------
-        if volume_count > 0 || hitbox_count > 0 {
+        // One propagation step per simulation step this frame; none (and no
+        // normal pass, which would only recompute the same normals) while
+        // the frame clock is frozen.
+        let steps = self.steps_this_frame;
+        if let (Some(vols_buf), true) = (water_volumes_buf, steps > 0) {
             for vol_idx in 0..volume_count {
                 let base = (vol_idx * CASCADE_COUNT as u32) as usize;
                 for ci in 0..CASCADE_COUNT {
                     let layer = base + ci;
 
-                    // ---- 3. Wave propagation (2 steps per layer) ----------------------
-                    for i in 0..2u32 {
+                    // ---- 3. Wave propagation (`steps` per layer) ---------------------
+                    for i in 0..steps {
                         let src = layer_view(layer, self.front_per_layer[layer]);
                         let dst = if self.front_per_layer[layer] {
                             &self.sim_layer_views_b[layer]
@@ -895,12 +936,13 @@ impl RenderPass for WaterSimPass {
                         };
 
                         let src_key = src as *const wgpu::TextureView as usize;
+                        let update_key = (src_key, vols_buf as *const wgpu::Buffer as usize);
                         let bg_label = format!("WaterSim Update BG V{} C{}", vol_idx, ci);
-                        if self.update_bg_keys[layer] != Some(src_key) {
+                        if self.update_bg_keys[layer] != Some(update_key) {
                             self.update_bgs[layer] =
                                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                                     label: Some(&bg_label),
-                                    layout: &self.sim_bgl,
+                                    layout: &self.update_bgl,
                                     entries: &[
                                         wgpu::BindGroupEntry {
                                             binding: 0,
@@ -914,9 +956,13 @@ impl RenderPass for WaterSimPass {
                                             binding: 2,
                                             resource: self.update_bufs[ci].as_entire_binding(),
                                         },
+                                        wgpu::BindGroupEntry {
+                                            binding: 3,
+                                            resource: vols_buf.as_entire_binding(),
+                                        },
                                     ],
                                 }));
-                            self.update_bg_keys[layer] = Some(src_key);
+                            self.update_bg_keys[layer] = Some(update_key);
                         }
                         let bg = self.update_bgs[layer].as_ref().unwrap();
 
@@ -941,7 +987,8 @@ impl RenderPass for WaterSimPass {
                         let mut pass = ctx.begin_render_pass(&desc);
                         pass.set_pipeline(&self.update_pipeline);
                         pass.set_bind_group(0, bg, &[]);
-                        pass.draw(0..6, 0..1);
+                        // The instance is the volume whose row it reads.
+                        pass.draw(0..6, vol_idx..vol_idx + 1);
                         drop(pass);
                         self.front_per_layer[layer] = !self.front_per_layer[layer];
                     }

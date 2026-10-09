@@ -286,12 +286,12 @@ pub fn spawn_sky(world: &mut World, tint: [f32; 3]) -> Entity {
 /// `helio::WaterVolumeDescriptor`/`.to_gpu()` pair reconstructed from the
 /// shader-documented layout, since neither survived the SceneDB migration.
 ///
-/// The heightfield simulation's own dynamics (wind, spring/damping, wave
-/// scale) are separate pass-owned GPU state, driven at runtime through
+/// The descriptor leaves the row's `sim_dynamics`/`wind_params` zero, so
+/// the heightfield simulation drives these volumes with the pass-wide
+/// dynamics set at runtime through
 /// `helio_pass_water_sim::WaterSimPass::set_wind`/`set_sim_dynamics`/
-/// `set_wave_scale`/`set_wave_speed` instead -- no shader in the pass reads
-/// this component's `sim_dynamics`/`wind_params` slots, so this descriptor
-/// only covers the fields that actually reach them.
+/// `set_wave_scale`/`set_wave_speed` (a row with its own spring simulates
+/// with its own instead).
 #[derive(Clone, Copy, Debug)]
 pub struct WaterVolumeDescriptor {
     pub bounds_min: [f32; 3],

@@ -23,7 +23,9 @@ struct JoinUniforms {
     /// centre (words 0..2) moves to the owner's position when its
     /// placement (word 3) is `PLACEMENT_CENTER`; bit 5: a decal (see
     /// `write_decal_transform`); bit 6: a particle emitter (see
-    /// `write_emitter_transform` and `cs_compact_rows`).
+    /// `write_emitter_transform` and `cs_compact_rows`); bit 7: a water
+    /// row, whose `sun_direction` is the scene's sun (see `write_sun`);
+    /// bit 8: the global wind over the water rows (see `write_water_wind`).
     flags: u32,
     /// Output rows `cs_compact_rows` may fill.
     capacity: u32,
@@ -48,6 +50,17 @@ const LAYER: u32 = 8u;
 const CENTERED: u32 = 16u;
 const DECAL: u32 = 32u;
 const EMITTER: u32 = 64u;
+const SUN: u32 = 128u;
+const WATER_WIND: u32 = 256u;
+// `helio_pass_water_sim::GpuWaterVolume`: `sun_direction` and `wind_params`
+// (`w`: the volume opts out of the global wind).
+const WATER_SUN_WORD: u32 = 44u;
+const WATER_WIND_WORD: u32 = 56u;
+const WATER_OWN_WIND_WORD: u32 = 59u;
+// `environment_join.rs`'s `WATER_WIND_STRENGTH_PER_SPEED`.
+const WATER_WIND_PER_SPEED: f32 = 0.5;
+// `scene_lights` rows (`helio_pass_forward_lit::GpuLight`): 32 words.
+const LIGHT_ROW_WORDS: u32 = 32u;
 // `helio_pass_corona::GpuCoronaEmitter`: `particle_offset`, `particle_count`
 // (the requested range in the source row) and `spawn_cursor`, which the
 // pass reads as the emitter's identity.
@@ -68,6 +81,7 @@ const WORKGROUP: u32 = 64u;
 @group(0) @binding(4) var<storage, read> transforms: array<ObjectTransform>;
 @group(0) @binding(5) var<storage, read> sources: array<u32>;
 @group(0) @binding(6) var<storage, read_write> rows_out: array<u32>;
+@group(0) @binding(7) var<storage, read> lights: array<u32>;
 
 fn source_base(row: u32) -> u32 {
     return row * u.source_words + u.source_offset;
@@ -203,11 +217,68 @@ fn write_emitter_range(row: u32, slot: u32, offset: u32) {
     rows_out[output + EMITTER_IDENTITY_WORD] = row + 1u;
 }
 
+/// A water row's sun: the direction toward the scene's first directional
+/// light with any intensity (`direction_outer` is the direction the light
+/// travels), as the sky's atmosphere picks its sun; `w` is 1. Straight up
+/// with `w` 0 when the scene has none.
+fn write_sun(output: u32) {
+    var sun = vec4<f32>(0.0, 1.0, 0.0, 0.0);
+    let rows = arrayLength(&lights) / LIGHT_ROW_WORDS;
+    for (var i = 0u; i < rows; i++) {
+        let base = i * LIGHT_ROW_WORDS;
+        let intensity = bitcast<f32>(lights[base + 11u]);
+        let light_type = lights[base + 13u];
+        let direction = vec3<f32>(
+            bitcast<f32>(lights[base + 4u]),
+            bitcast<f32>(lights[base + 5u]),
+            bitcast<f32>(lights[base + 6u]),
+        );
+        if light_type == 0u && intensity > 0.0 && dot(direction, direction) > 0.0 {
+            sun = vec4<f32>(-normalize(direction), 1.0);
+            break;
+        }
+    }
+    for (var i = 0u; i < 4u; i++) {
+        rows_out[output + WATER_SUN_WORD + i] = bitcast<u32>(sun[i]);
+    }
+}
+
+/// The global wind (source `row`, a foliage wind row: normalised direction
+/// and speed) as the wind of every placed water row that does not opt out
+/// of it: its direction's XZ, and a strength proportional to its speed.
+fn write_water_wind(row: u32) {
+    let source = row * u.source_words;
+    let direction = vec2<f32>(bitcast<f32>(sources[source]), bitcast<f32>(sources[source + 2u]));
+    let speed = max(bitcast<f32>(sources[source + 3u]), 0.0);
+    let slots = min(u.capacity, arrayLength(&rows_out) / u.output_words);
+    for (var slot = 0u; slot < slots; slot++) {
+        let output = slot * u.output_words;
+        // An unplaced row is zero; a placed one has a non-empty box.
+        var placed_volume = false;
+        for (var i = 0u; i < 3u; i++) {
+            placed_volume = placed_volume || rows_out[output + i] != rows_out[output + 4u + i];
+        }
+        if !placed_volume || bitcast<f32>(rows_out[output + WATER_OWN_WIND_WORD]) != 0.0 {
+            continue;
+        }
+        rows_out[output + WATER_WIND_WORD] = bitcast<u32>(direction.x);
+        rows_out[output + WATER_WIND_WORD + 1u] = bitcast<u32>(direction.y);
+        rows_out[output + WATER_WIND_WORD + 2u] = bitcast<u32>(speed * WATER_WIND_PER_SPEED);
+    }
+}
+
 /// Writes placed source `row` as output row `slot`.
 fn write_row(row: u32, slot: u32) {
     let source = source_base(row);
     let output = slot * u.output_words;
     if output + u.output_words > arrayLength(&rows_out) {
+        return;
+    }
+    if (u.flags & WATER_WIND) != 0u {
+        // The first placed global wind (a level has one).
+        if slot == 0u {
+            write_water_wind(row);
+        }
         return;
     }
     if (u.flags & LAYER) != 0u {
@@ -259,6 +330,9 @@ fn write_row(row: u32, slot: u32) {
     }
     if (u.flags & EMITTER) != 0u {
         write_emitter_transform(row, output);
+    }
+    if (u.flags & SUN) != 0u {
+        write_sun(output);
     }
     if (u.flags & CENTERED) != 0u && sources[source + 3u] == PLACEMENT_CENTER {
         let center = object_position(transforms[owners[row].owner_index]);
