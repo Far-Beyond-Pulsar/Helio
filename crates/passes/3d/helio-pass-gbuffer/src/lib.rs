@@ -93,7 +93,7 @@ pub struct GBufferPass {
     bind_group_layout_1: wgpu::BindGroupLayout,
     /// Group 0: camera + globals + instance_data. Rebuilt when buffer pointers change.
     bind_group_0: Option<wgpu::BindGroup>,
-    bind_group_0_key: Option<[wgpu::Buffer; 4]>,
+    bind_group_0_key: Option<[wgpu::Buffer; 5]>,
     /// Group 1: materials + material_textures + bindless texture arrays.
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_1_version: Option<(u64,u64)>,
@@ -685,6 +685,7 @@ impl RenderPass for GBufferPass {
             batch.instances.clone(),
             culled.compacted_indices.clone(),
             coordinate_spaces_buf.clone(),
+            coordinate_spaces_prev_buf.clone(),
         ];
         if self.bind_group_0_key.as_ref() != Some(&key) {
             log::debug!("GBuffer: rebuilding bind group 0 (buffers changed)");

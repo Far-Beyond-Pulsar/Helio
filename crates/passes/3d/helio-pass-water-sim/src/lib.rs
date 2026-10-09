@@ -411,8 +411,7 @@ pub struct WaterSimPass {
 
     pub(crate) caustics_render_bgl: wgpu::BindGroupLayout,
     pub(crate) render_bgl: wgpu::BindGroupLayout,
-    pub(crate) render_bg: Option<wgpu::BindGroup>,
-    pub(crate) render_bg_key: Option<(wgpu::Buffer, [wgpu::TextureView; 4])>,
+    pub(crate) render_bg: helio_core::CachedBindGroup,
     pub(crate) normal_bgs: Vec<Option<wgpu::BindGroup>>,
     pub(crate) normal_bg_keys: Vec<Option<wgpu::TextureView>>,
 
@@ -424,8 +423,7 @@ pub struct WaterSimPass {
     /// Two per layer, indexed `layer * 2 + front`: one for each ping-pong source.
     pub(crate) update_bgs: Vec<Option<wgpu::BindGroup>>,
     pub(crate) update_bg_keys: Vec<Option<(wgpu::TextureView, wgpu::Buffer)>>,
-    pub(crate) underwater_tint_bg: Option<wgpu::BindGroup>,
-    pub(crate) underwater_tint_bg_key: Option<(wgpu::Buffer, wgpu::TextureView, wgpu::TextureView)>,
+    pub(crate) underwater_tint_bg: helio_core::CachedBindGroup,
 
     pub(crate) caustics_pipeline: wgpu::RenderPipeline,
     pub(crate) surface_pipeline: wgpu::RenderPipeline,
@@ -597,8 +595,7 @@ impl WaterSimPass {
         self.internal_height = height;
 
         self.water_output_view = None;
-        self.render_bg = None;
-        self.render_bg_key = None;
+        self.render_bg.clear();
         self.blit_bg = None;
         self.blit_bg_key = None;
     }
@@ -1274,18 +1271,9 @@ impl RenderPass for WaterSimPass {
                     }
                 };
 
-                let new_key = (
-                    vols_buf.clone(),
-                    [
-                        self.sim_array_view_a.clone(),
-                        scene_view.clone(),
-                        gbuffer_normal_view.clone(),
-                        depth_view.clone(),
-                    ],
-                );
-                if self.render_bg_key.as_ref() != Some(&new_key) {
-                    self.render_bg =
-                        Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                // Rebuilt whenever anything it binds changes.
+                let render_bg = self.render_bg
+                    .get_or_create(ctx.device, &wgpu::BindGroupDescriptor {
                             label: Some("Water Render BG"),
                             layout: &self.render_bgl,
                             entries: &[
@@ -1346,10 +1334,8 @@ impl RenderPass for WaterSimPass {
                                     resource: wgpu::BindingResource::TextureView(&hiz_min_view),
                                 },
                             ],
-                        }));
-                    self.render_bg_key = Some(new_key);
-                }
-                let render_bg = self.render_bg.as_ref().unwrap();
+                        })
+                    .clone();
 
                 let depth_attachment = wgpu::RenderPassDepthStencilAttachment {
                     view: depth_view,
@@ -1382,7 +1368,7 @@ impl RenderPass for WaterSimPass {
                         },
                     );
                     pass.set_pipeline(&self.surface_pipeline);
-                    pass.set_bind_group(0, render_bg, &[]);
+                    pass.set_bind_group(0, &render_bg, &[]);
                     // Top face: instance_count = water_volume_count
                     pass.set_vertex_buffer(0, self.top_vbuf.slice(..));
                     pass.set_index_buffer(self.top_ibuf.slice(..), wgpu::IndexFormat::Uint32);
@@ -1399,14 +1385,9 @@ impl RenderPass for WaterSimPass {
 
                 // 3. Underwater effect
                 {
-                    let new_tint_key = (
-                        vols_buf.clone(),
-                        water_output_view.clone(),
-                        depth_view.clone(),
-                    );
-                    if self.underwater_tint_bg_key.as_ref() != Some(&new_tint_key) {
-                        self.underwater_tint_bg =
-                            Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    // Rebuilt whenever anything it binds changes.
+                    let tint_bg = self.underwater_tint_bg
+                        .get_or_create(ctx.device, &wgpu::BindGroupDescriptor {
                                 label: Some("Water Underwater Tint BG"),
                                 layout: &self.underwater_tint_bgl,
                                 entries: &[
@@ -1459,10 +1440,8 @@ impl RenderPass for WaterSimPass {
                                         ),
                                     },
                                 ],
-                            }));
-                        self.underwater_tint_bg_key = Some(new_tint_key);
-                    }
-                    let tint_bg = self.underwater_tint_bg.as_ref().unwrap();
+                            })
+                        .clone();
                     let tint_attachments = [Some(wgpu::RenderPassColorAttachment {
                         view: &self.tint_scratch_view,
                         resolve_target: None,
@@ -1483,7 +1462,7 @@ impl RenderPass for WaterSimPass {
                         },
                     );
                     tint_pass.set_pipeline(&self.underwater_tint_pipeline);
-                    tint_pass.set_bind_group(0, tint_bg, &[]);
+                    tint_pass.set_bind_group(0, &tint_bg, &[]);
                     tint_pass.draw(0..3, 0..1);
                     drop(tint_pass);
 

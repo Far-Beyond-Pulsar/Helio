@@ -33,11 +33,9 @@ pub struct DecalPass {
     bgl_collect: wgpu::BindGroupLayout,
     bgl_apply: wgpu::BindGroupLayout,
     bgl_textures: wgpu::BindGroupLayout,
-    bg_collect: Option<wgpu::BindGroup>,
-    bg_apply: Option<wgpu::BindGroup>,
+    bg_collect: helio_core::CachedBindGroup,
+    bg_apply: helio_core::CachedBindGroup,
     bg_textures: Option<wgpu::BindGroup>,
-    bg_collect_key: Option<(wgpu::Buffer, wgpu::Buffer, [wgpu::TextureView; 4], u64)>,
-    bg_apply_key: Option<(wgpu::Buffer, wgpu::Buffer, [wgpu::TextureView; 4], u64)>,
     bg_textures_version: Option<u64>,
     globals_buf: wgpu::Buffer,
     temp_albedo: Option<(wgpu::Texture, wgpu::TextureView)>,
@@ -190,11 +188,9 @@ impl DecalPass {
             bgl_collect,
             bgl_apply,
             bgl_textures,
-            bg_collect: None,
-            bg_apply: None,
+            bg_collect: Default::default(),
+            bg_apply: Default::default(),
             bg_textures: None,
-            bg_collect_key: None,
-            bg_apply_key: None,
             bg_textures_version: None,
             globals_buf,
             temp_albedo: None,
@@ -244,8 +240,8 @@ impl DecalPass {
             "DecalTemp_Emissive",
             size,
         ));
-        self.bg_collect = None;
-        self.bg_apply = None;
+        self.bg_collect.clear();
+        self.bg_apply.clear();
     }
 }
 
@@ -428,19 +424,10 @@ impl RenderPass for DecalPass {
         let (_, to) = self.temp_orm.as_ref().unwrap();
         let (_, te) = self.temp_emissive.as_ref().unwrap();
 
-        let ck = (
-            ctx.camera.clone(),
-            decals_buf.clone(),
-            [
-                depth_view.clone(),
-                gb.views[0].clone(),
-                gb.views[1].clone(),
-                gb.views[2].clone(),
-            ],
-            u64::from(self.last_w) | (u64::from(self.last_h) << 32),
-        );
-        if self.bg_collect_key.as_ref() != Some(&ck) || self.bg_collect.is_none() {
-            self.bg_collect = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        // Rebuilt whenever anything it binds changes (helio_core::CachedBindGroup).
+        self.bg_collect.get_or_create(
+            ctx.device,
+            &wgpu::BindGroupDescriptor {
                 label: Some("Decal Collect BG"),
                 layout: &self.bgl_collect,
                 entries: &[
@@ -457,9 +444,8 @@ impl RenderPass for DecalPass {
                     bind_tex(10, to),
                     bind_tex(11, te),
                 ],
-            }));
-            self.bg_collect_key = Some(ck);
-        }
+            },
+        );
 
         // Rebuild the texture table only when the scene's texture set changes.
         let tex_version = material_textures.version;
@@ -480,19 +466,14 @@ impl RenderPass for DecalPass {
                     timestamp_writes: None,
                 });
             cp.set_pipeline(&self.collect_pipeline);
-            cp.set_bind_group(0, self.bg_collect.as_ref().unwrap(), &[]);
+            cp.set_bind_group(0, self.bg_collect.get().unwrap(), &[]);
             cp.set_bind_group(1, self.bg_textures.as_ref().unwrap(), &[]);
             cp.dispatch_workgroups(ctx.width.div_ceil(16), ctx.height.div_ceil(16), 1);
         }
 
-        let ak = (
-            ctx.camera.clone(),
-            decals_buf.clone(),
-            [ta.clone(), tn.clone(), to.clone(), te.clone()],
-            u64::from(self.last_w) | (u64::from(self.last_h) << 32),
-        );
-        if self.bg_apply_key.as_ref() != Some(&ak) || self.bg_apply.is_none() {
-            self.bg_apply = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        self.bg_apply.get_or_create(
+            ctx.device,
+            &wgpu::BindGroupDescriptor {
                 label: Some("Decal Apply BG"),
                 layout: &self.bgl_apply,
                 entries: &[
@@ -508,9 +489,8 @@ impl RenderPass for DecalPass {
                     bind_tex(9, gb.views[2]),
                     bind_tex(10, gb.views[3]),
                 ],
-            }));
-            self.bg_apply_key = Some(ak);
-        }
+            },
+        );
 
         {
             let mut cp =
@@ -519,7 +499,7 @@ impl RenderPass for DecalPass {
                     timestamp_writes: None,
                 });
             cp.set_pipeline(&self.apply_pipeline);
-            cp.set_bind_group(0, self.bg_apply.as_ref().unwrap(), &[]);
+            cp.set_bind_group(0, self.bg_apply.get().unwrap(), &[]);
             cp.dispatch_workgroups(ctx.width.div_ceil(16), ctx.height.div_ceil(16), 1);
         }
 
