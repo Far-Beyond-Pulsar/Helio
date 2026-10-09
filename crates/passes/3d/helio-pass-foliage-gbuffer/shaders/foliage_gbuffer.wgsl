@@ -33,8 +33,9 @@
 //
 // ── Motion vectors ──────────────────────────────────────────────────────────
 //
-// `helio_wind_offset` is evaluated TWICE per vertex, at `wind.time_prev_time.x` and at
-// `wind.time_prev_time.y`, producing a current and a previous world position. That pair
+// `helio_wind_offset` is evaluated TWICE per vertex, at `globals.clock_ring.x` and at
+// `globals.clock_ring.y` (the frame clock and its previous value; the wind row's own
+// `time_prev_time` is unused), producing a current and a previous world position. That pair
 // is the whole reason `time` is an explicit parameter of the wind model and the whole
 // reason the uniform carries two timestamps. Without it every blade reports zero motion,
 // TAA reprojects moving grass onto the history texel of whatever was behind it, and the
@@ -97,9 +98,10 @@ struct FoliageGlobals {
     frame: u32,
     /// `FOLIAGE_FLAG_*` bits.
     flags: u32,
-    /// xyz unused (the camera position comes from `camera`), w = resident ring radius
-    /// in metres — the input to the scale-in factor.
-    camera_ring: vec4<f32>,
+    /// xy = the wind clock (the frame clock t, and t - dt), z unused (the camera
+    /// position comes from `camera`), w = resident ring radius in metres — the input
+    /// to the scale-in factor.
+    clock_ring: vec4<f32>,
     /// xy = interaction field world-XZ origin, z = extent in metres, w = 1/extent.
     interaction_field: vec4<f32>,
     /// `FoliageQuality::lod_distance_scale`, already sanitised on the CPU.
@@ -494,7 +496,7 @@ fn vs_main(
     let camera_pos = cameras[0].position_near.xyz;
     let distance_to_camera = distance(root, camera_pos);
     let scale_in = foliage_scale_in_factor(
-        globals.camera_ring.w - distance_to_camera,
+        globals.clock_ring.w - distance_to_camera,
         globals.scale_in_band,
     );
     let fade = foliage_cross_fade(
@@ -563,10 +565,10 @@ fn vs_main(
     let response = vec3<f32>(ty.wind_trunk, ty.wind_branch, ty.wind_leaf);
     let seed = blade.packed_tint_seed >> 16u;
     let wind_now = helio_wind_offset(
-        wind, world_base, root, v.height_frac, seed, response, wind.time_prev_time.x,
+        wind, world_base, root, v.height_frac, seed, response, globals.clock_ring.x,
     );
     let wind_prev = helio_wind_offset(
-        wind, world_base, root, v.height_frac, seed, response, wind.time_prev_time.y,
+        wind, world_base, root, v.height_frac, seed, response, globals.clock_ring.y,
     );
 
     // The interaction bend is added to both positions, so it currently contributes no

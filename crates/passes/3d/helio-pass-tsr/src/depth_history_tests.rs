@@ -425,6 +425,8 @@ fn run_depth_history_fixture(translated_origin: bool) {
                     height: 8,
                     frame_num: 0,
                     delta_time: time_delta,
+                    time: 0.0,
+                    time_delta: 0.0,
                     world_origin: previous_origin,
                 })
                 .unwrap();
@@ -456,6 +458,8 @@ fn run_depth_history_fixture(translated_origin: bool) {
                     height: 8,
                     frame_num: 1,
                     delta_time: time_delta,
+                    time: 0.0,
+                    time_delta: 0.0,
                     world_origin: next_origin,
                 })
                 .unwrap();
@@ -482,6 +486,8 @@ fn run_depth_history_fixture(translated_origin: bool) {
                         height: 8,
                         frame_num: 2,
                         delta_time: time_delta,
+                        time: 0.0,
+                        time_delta: 0.0,
                         world_origin: Some(final_origin.into()),
                     })
                     .unwrap();
@@ -525,6 +531,8 @@ fn run_depth_history_fixture(translated_origin: bool) {
                         height: 8,
                         frame_num: 2,
                         delta_time: time_delta,
+                        time: 0.0,
+                        time_delta: 0.0,
                         world_origin: next_origin,
                     })
                     .unwrap();

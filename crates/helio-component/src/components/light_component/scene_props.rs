@@ -53,6 +53,8 @@ impl ScenePropsProjector for LightComponent {
             "shadow_filter_sharpen",
             "shadow_softness",
             "shadow_resolution_scale",
+            "shadow_priority",
+            "shadow_max_resolution",
             "contact_shadow_non_shadow_casting_intensity",
             "affects_volumetric_fog",
             "volumetric_scattering_intensity",

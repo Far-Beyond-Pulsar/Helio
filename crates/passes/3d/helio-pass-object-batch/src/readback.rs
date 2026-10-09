@@ -199,6 +199,7 @@ impl RangeReadback {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         scratch: &ScratchBuffers,
+        kick_off_copy: bool,
     ) {
         device.poll(wgpu::PollType::Poll).ok();
 
@@ -292,6 +293,10 @@ impl RangeReadback {
         // have to be more than `GENERATIONS` frames behind -- this frame
         // just skips kicking off a new copy rather than stomping on a
         // buffer still being read).
+        if !kick_off_copy {
+            return;
+        }
+
         let slot = self.next;
         self.next = (self.next + 1) % self.gens.len().max(1);
         if self.gens[slot].pending.is_some() {
@@ -305,7 +310,7 @@ impl RangeReadback {
             let gen = &self.gens[slot];
             encoder.copy_buffer_to_buffer(&scratch.group_count, 0, &gen.counts_staging, 0, 4);
             encoder.copy_buffer_to_buffer(
-                &scratch.range_bucket_counts,
+                &scratch.range_count,
                 0,
                 &gen.counts_staging,
                 4,

@@ -73,6 +73,18 @@ fn default_graph_retains_the_bindless_material_tier_when_supported() {
     });
 }
 
+#[test]
+fn budgeted_shadows_render_hundreds_of_requests_across_frames() {
+    pollster::block_on(async {
+        let instance=wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter=request_test_adapter(&instance).await.expect("GPU required for shadow integration");
+        let features=wgpu::Features::INDIRECT_FIRST_INSTANCE | BINDLESS_MATERIAL_FEATURES;
+        let limits=required_wgpu_limits(adapter.limits());
+        let expected=MAX_MATERIAL_TEXTURES.min(limits.max_sampled_textures_per_shader_stage as usize).min(limits.max_samplers_per_shader_stage as usize);
+        run_default_graph(adapter,features,limits,MaterialBindingMode::BindingArray,expected,"Budgeted shadows").await;
+    });
+}
+
 async fn run_default_graph(
     adapter: wgpu::Adapter,
     required_features: wgpu::Features,
@@ -101,7 +113,14 @@ async fn run_default_graph(
     assert_eq!(binding.mode, expected_mode);
     assert_eq!(binding.max_textures, expected_max_textures);
 
-    let scene_db = scene_db_with_gpu_mirror(&device, &queue);
+    let mut scene_db = scene_db_with_gpu_mirror(&device, &queue);
+    if label=="Budgeted shadows" {
+        for i in 0..200 {
+            let entity=scene_db.world.spawn();
+            let light=helio_pass_forward_lit::GpuLight {position_range:[(i%20) as f32*0.2-2.0,1.0,(i/20) as f32*0.2,3.0],direction_outer:[0.0,-1.0,0.0,0.7],shadow_index:0,light_type:2,..Default::default()};
+            scene_db.world.insert(entity,helio_pass_forward_lit::LightComponent::from(light));
+        }
+    }
     let config = RendererConfig::new(32, 32, wgpu::TextureFormat::Rgba8Unorm);
     let mut renderer = RendererBuilder::new(
         config,
@@ -116,6 +135,9 @@ async fn run_default_graph(
         config.height,
         config.surface_format,
     );
+    let construction_error = validation_scope.pop().await;
+    assert!(construction_error.is_none(), "graph construction: {construction_error:?}");
+    let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     scene_db.world.flush_gpu_mirror(&queue);
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Limited Native Render Target"),
@@ -146,6 +168,20 @@ async fn run_default_graph(
         .render(&camera, &target_view)
         .expect("the complete selected-tier default graph must render");
 
+    if label=="Budgeted shadows" {
+        for _ in 0..16 {
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            renderer.render(&camera,&target_view).expect("budgeted shadow frame");
+            let (updates,texels)=renderer.find_pass::<helio_pass_shadow::ShadowPass>().unwrap().last_update_work();
+            assert!(updates<=config.shadow_budget.updates_per_frame);
+            assert!(texels<=config.shadow_budget.update_texels_per_frame);
+        }
+    }
+
+    if label=="Budgeted shadows" {
+        let residency=renderer.find_pass::<helio_pass_shadow_matrix::ShadowMatrixPass>().unwrap().residency();
+        assert!(residency.residents.iter().filter(|r|r.owner!=0 && r.tiles.iter().any(|t|t.size>0)).count()>42);
+    }
     let resized_target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Limited Native Resized Render Target"),
         size: wgpu::Extent3d {

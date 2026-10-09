@@ -10,9 +10,11 @@
 //! which the scene join applies on the GPU together with the owner's
 //! visibility and the instance's enabled state.
 //!
-//! Layout: `helio::GpuLight` field for field, except that the slot GpuLight
-//! keeps as padding carries the authored `general.enabled` flag. The join
-//! writes it back to zero in its output.
+//! Layout: `helio::GpuLight` field for field, except that bit 31 of
+//! `GpuLight::_pad` (which carries the light's shadow intent and policy bits,
+//! see `GpuLight::shadow_policy_bits`, and leaves bit 31 unused) holds the
+//! authored `general.enabled` flag. The join clears that bit in its output
+//! and keeps the rest.
 
 use pulsar_scenedb::gpu::GpuMirrorHandle;
 use pulsar_scenedb_derive::SceneStore;
@@ -22,6 +24,9 @@ use pulsar_world_registry::GpuMirrored;
 
 /// Buffer the rows register under; keyed by the light instance entity.
 pub const LIGHT_SOURCES_BUFFER: &str = "light_sources";
+
+/// Bit of [`LightSourceRow::enabled`] set when the authored light is enabled.
+pub const LIGHT_SOURCE_ENABLED_BIT: u32 = 1 << 31;
 
 #[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
@@ -39,7 +44,8 @@ pub struct LightSourceRow {
     pub light_type: u32,
     #[gpu]
     pub inner_angle: f32,
-    /// 1 when the authored light is enabled, 0 when not (`GpuLight::_pad`).
+    /// `GpuLight::_pad`: the light's shadow policy bits, with
+    /// [`LIGHT_SOURCE_ENABLED_BIT`] set when the authored light is enabled.
     #[gpu]
     pub enabled: u32,
     #[gpu]
@@ -79,7 +85,8 @@ pub struct LightSourceRow {
 impl LightSourceRow {
     pub fn of(light: &LightComponent) -> Self {
         let mut row: Self = bytemuck::cast(light.to_gpu_mirror().to_helio_gpu_light());
-        row.enabled = u32::from(light.general.enabled);
+        row.enabled = (row.enabled & !LIGHT_SOURCE_ENABLED_BIT)
+            | if light.general.enabled { LIGHT_SOURCE_ENABLED_BIT } else { 0 };
         row
     }
 }
@@ -122,11 +129,12 @@ mod tests {
         let mut light = LightComponent::default();
         light.general.enabled = true;
         let row = LightSourceRow::of(&light);
-        assert_eq!(row.enabled, 1);
+        assert_eq!(row.enabled & LIGHT_SOURCE_ENABLED_BIT, LIGHT_SOURCE_ENABLED_BIT);
         let mut expected = light.to_gpu_mirror().to_helio_gpu_light();
-        expected._pad = 1;
+        assert_eq!(expected._pad & LIGHT_SOURCE_ENABLED_BIT, 0, "policy bits leave bit 31 free");
+        expected._pad |= LIGHT_SOURCE_ENABLED_BIT;
         assert_eq!(bytemuck::bytes_of(&row), bytemuck::bytes_of(&expected));
         light.general.enabled = false;
-        assert_eq!(LightSourceRow::of(&light).enabled, 0);
+        assert_eq!(LightSourceRow::of(&light).enabled & LIGHT_SOURCE_ENABLED_BIT, 0);
     }
 }

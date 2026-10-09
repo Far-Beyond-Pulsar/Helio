@@ -57,7 +57,26 @@ impl MeshAssetPath {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Names geometry generated at runtime (not an asset file) by its
+    /// content id, so it interns like an asset's: equal content shares one
+    /// GPU copy, and a changed shape is a new id. Never loaded from disk.
+    pub fn generated(content_id: u128) -> Self {
+        Self(format!("{GENERATED_MESH_PREFIX}{content_id:032x}"))
+    }
+
+    /// The content id of a [`Self::generated`] path.
+    pub fn generated_content_id(&self) -> Option<u128> {
+        let hex = self.0.strip_prefix(GENERATED_MESH_PREFIX)?;
+        (hex.len() == 32)
+            .then(|| u128::from_str_radix(hex, 16).ok())
+            .flatten()
+            .filter(|id| *id != 0)
+    }
 }
+
+/// Prefix of [`MeshAssetPath::generated`] paths.
+const GENERATED_MESH_PREFIX: &str = "generated-mesh:";
 
 /// SceneDB's content-identity seam (Pulsar-Native#632/#659): lets
 /// `vertices`/`indices` intern their GPU-resident geometry by content
@@ -76,11 +95,15 @@ impl MeshAssetPath {
 /// `HandleId::ZERO` — a dangling/unresolvable reference behaves like "no
 /// asset" for interning purposes rather than panicking or erroring; the
 /// existing hydrate-time tolerance for a missing mesh already covers the
-/// user-visible side of this (empty `vertices`/`indices`).
+/// user-visible side of this (empty `vertices`/`indices`). A
+/// [`MeshAssetPath::generated`] path carries its id itself.
 impl pulsar_scenedb::handle_ledger::ContentAddressed for MeshAssetPath {
     fn content_id(&self) -> pulsar_scenedb::handle_ledger::HandleId {
         use pulsar_scenedb::handle_ledger::HandleId;
 
+        if let Some(id) = self.generated_content_id() {
+            return HandleId(id);
+        }
         let path = self.0.trim();
         if path.is_empty() {
             return HandleId::ZERO;

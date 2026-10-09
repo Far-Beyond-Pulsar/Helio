@@ -366,6 +366,7 @@ fn run_parallel_work_item(job: &ParallelWorkItem) -> crate::Result<ParallelWorke
         let mut render_pass = encoder.begin_render_pass(&standalone_desc);
         let mut ctx = PassContext {
             encoder_ptr,
+            queue: worker_queue,
             compute_encoder_ptr: &mut compute_encoder,
             target,
             depth,
@@ -399,6 +400,7 @@ fn run_parallel_work_item(job: &ParallelWorkItem) -> crate::Result<ParallelWorke
     } else {
         let mut ctx = PassContext {
             encoder_ptr: &mut encoder,
+            queue: worker_queue,
             compute_encoder_ptr: &mut compute_encoder,
             target,
             depth,
@@ -476,6 +478,9 @@ pub struct RenderGraph {
     pub(crate) output_w: u32,
     pub(crate) output_h: u32,
     delta_time: f32,
+    /// The frame clock and its advance this frame (`PrepareContext::time`).
+    frame_time: f32,
+    frame_time_delta: f32,
     owns_device: bool,
     gpu_render_bundles: Vec<Option<wgpu::RenderBundle>>,
     resources_allocated: bool,
@@ -638,6 +643,8 @@ impl RenderGraph {
             output_w: 0,
             output_h: 0,
             delta_time: 0.0,
+            frame_time: 0.0,
+            frame_time_delta: 0.0,
             owns_device: true,
             gpu_render_bundles: Vec::new(),
             resources_allocated: false,
@@ -680,6 +687,13 @@ impl RenderGraph {
 
     pub fn set_delta_time(&mut self, dt: f32) {
         self.delta_time = dt;
+    }
+
+    /// Set the frame clock animation reads (`PrepareContext::time`) and how
+    /// far it advanced since the previous frame (`time_delta`).
+    pub fn set_frame_clock(&mut self, time: f32, delta: f32) {
+        self.frame_time = time;
+        self.frame_time_delta = delta;
     }
 
     /// Record how long encoder finishing takes per pass, readable afterwards
@@ -1424,6 +1438,7 @@ impl RenderGraph {
         let internal_w = self.internal_w;
         let internal_h = self.internal_h;
         let delta_time = self.delta_time;
+        let (frame_time, frame_time_delta) = (self.frame_time, self.frame_time_delta);
         let owns_device = self.owns_device;
         let reflected_pipelines = &self.reflected_pipelines;
         let (passes, pre_pass_actions) = (&mut self.passes, &self.pre_pass_actions);
@@ -1466,6 +1481,8 @@ impl RenderGraph {
                         width: internal_w,
                         height: internal_h,
                         delta_time,
+                        time: frame_time,
+                        time_delta: frame_time_delta,
                         world_origin: scene.world_origin(),
                     };
                     // Name formatted only while recording; `prepare` often does
@@ -1872,6 +1889,8 @@ impl RenderGraph {
                     width: self.internal_w,
                     height: self.internal_h,
                     delta_time: self.delta_time,
+                    time: self.frame_time,
+                    time_delta: self.frame_time_delta,
                     world_origin: scene.world_origin(),
                 };
                 pass.declare_frame_demands(&plan_ctx, &mut self.frame_demands);
@@ -1930,6 +1949,7 @@ impl RenderGraph {
                         self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
                         let mut ctx = PassContext {
                             encoder_ptr: &mut encoder as *mut _,
+                            queue: scene.queue(),
                             compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
                             target,
                             depth,
@@ -1987,6 +2007,8 @@ impl RenderGraph {
                         width: self.internal_w,
                         height: self.internal_h,
                         delta_time: self.delta_time,
+                        time: self.frame_time,
+                        time_delta: self.frame_time_delta,
                         world_origin: scene.world_origin(),
                     };
                     #[cfg(not(target_arch = "wasm32"))]
@@ -2092,6 +2114,7 @@ impl RenderGraph {
 
                         let mut ctx = PassContext {
                             encoder_ptr: std::ptr::addr_of_mut!(encoder),
+                            queue: scene.queue(),
                             compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
                             target,
                             depth,
@@ -2165,6 +2188,7 @@ impl RenderGraph {
                         {
                             let mut ctx = PassContext {
                                 encoder_ptr: std::ptr::addr_of_mut!(encoder),
+                                queue: scene.queue(),
                                 compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
                                 target,
                                 depth,
@@ -2220,6 +2244,7 @@ impl RenderGraph {
 
                     let mut ctx = PassContext {
                         encoder_ptr: std::ptr::addr_of_mut!(encoder),
+                        queue: scene.queue(),
                         compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
                         target,
                         depth,

@@ -5,8 +5,9 @@
 // written alongside when enabled.
 
 /// `helio::GpuLight` (128 bytes): three vec4s, then 20 scalar words.
-/// Word 3 of `rest` is `_pad` in the output and the authored `enabled` flag
-/// in the input (`helio_component::LightSourceRow`).
+/// Word 3 of `rest` is `_pad` (the shadow intent and policy bits). In the
+/// input (`helio_component::LightSourceRow`) its bit 31, which `_pad` leaves
+/// unused, is the authored `enabled` flag; the output clears it.
 struct Light {
     position_range: array<f32, 4>,
     direction_outer: array<f32, 4>,
@@ -38,6 +39,7 @@ struct LightJoinUniforms {
 @group(0) @binding(7) var<storage, read_write> billboards_out: array<Billboard>;
 
 const ENABLED_WORD: u32 = 3u;
+const ENABLED_BIT: u32 = 0x80000000u;
 
 @compute @workgroup_size(64)
 fn cs_join_lights(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -46,7 +48,7 @@ fn cs_join_lights(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     var light = sources[row];
-    if light.rest[ENABLED_WORD] == 0u {
+    if (light.rest[ENABLED_WORD] & ENABLED_BIT) == 0u {
         return;
     }
     let owner = owners[row];
@@ -72,7 +74,7 @@ fn cs_join_lights(@builtin(global_invocation_id) gid: vec3<u32>) {
     light.direction_outer[0] = direction.x;
     light.direction_outer[1] = direction.y;
     light.direction_outer[2] = direction.z;
-    light.rest[ENABLED_WORD] = 0u;
+    light.rest[ENABLED_WORD] = light.rest[ENABLED_WORD] & ~ENABLED_BIT;
     lights_out[row] = light;
     if u.billboards != 0u && row < arrayLength(&billboards_out) {
         billboards_out[row] = Billboard(

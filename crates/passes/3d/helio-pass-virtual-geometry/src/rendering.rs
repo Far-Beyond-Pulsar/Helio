@@ -1301,26 +1301,19 @@ impl RenderPass for VirtualGeometryPass {
                                count: u32,
                                counter_byte: u64| {
                 rpass.set_pipeline(pipeline);
-                if self.use_count_indirect {
-                    rpass.multi_draw_indexed_indirect_count(
-                        &self.indirect_buf,
-                        first_slot as u64 * 20,
-                        &self.draw_count_buf,
-                        counter_byte,
-                        count,
-                    );
-                } else {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    rpass.multi_draw_indexed_indirect(
-                        &self.indirect_buf,
-                        first_slot as u64 * 20,
-                        count,
-                    );
-                    #[cfg(target_arch = "wasm32")]
-                    for i in first_slot..first_slot + count {
-                        rpass.draw_indexed_indirect(&self.indirect_buf, i as u64 * 20);
-                    }
-                }
+                let gpu_count = self.use_count_indirect.then_some(
+                    helio_pass_gbuffer::GpuDrawCount {
+                        buffer: &self.draw_count_buf,
+                        offset: counter_byte,
+                    },
+                );
+                helio_pass_gbuffer::multi_draw_indexed_indirect(
+                    rpass,
+                    &self.indirect_buf,
+                    first_slot,
+                    count,
+                    gpu_count,
+                );
             };
 
             match self.debug_mode {

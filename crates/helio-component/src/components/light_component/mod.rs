@@ -7,5 +7,5 @@ mod sub_props;
 mod types;
 
 pub use component::{LightComponent, LightComponentGpuMirror};
-pub use source_row::{LightSourceRow, LIGHT_SOURCES_BUFFER};
+pub use source_row::{LightSourceRow, LIGHT_SOURCES_BUFFER, LIGHT_SOURCE_ENABLED_BIT};
 pub use types::{light_type_to_gpu_u32, IntensityUnits, LightType, MobileQualityLevel, ShadowCacheMode};

@@ -787,7 +787,6 @@ impl RenderPass for DeferredLightPass {
             "shadow_caster_counts",
             ATMOSPHERE_FRAME,
             "ssao",
-            "sky_lut",
             "tile_light_lists",
             "tile_light_counts",
             "render_environment",
@@ -879,11 +878,9 @@ impl RenderPass for DeferredLightPass {
         storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let pre_aa_view = resources.read(helio_core::ResourceKey::new("pre_aa"), "DeferredLight")?;
-        let load_op = if resources.get::<&wgpu::TextureView>(helio_core::ResourceKey::new("sky_lut")).is_some() {
-            wgpu::LoadOp::Load
-        } else {
-            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
-        };
+        // Loaded: the graph's background pass has cleared `pre_aa`, and
+        // reflections may have sampled it, before lighting covers it.
+        let load_op = wgpu::LoadOp::Load;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: pre_aa_view,

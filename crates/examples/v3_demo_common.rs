@@ -41,7 +41,7 @@ pub fn new_scene_db_with_gpu_mirror_and(
         max_cells_metadata: 0,
     };
     let mut gpu_store = pulsar_scenedb::gpu::SceneGpuStore::new(&ctx, gpu_cfg);
-    helio_pass_sky::SkyComponent::register_gpu_columns_growable(&mut gpu_store, 4, device);
+    helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, device);
     helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
     helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
     helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
@@ -262,11 +262,17 @@ pub fn spot_light(
 pub use helio_pass_forward_lit::LightComponent;
 pub use helio_pass_gbuffer::{MeshComponent, StaticObjectComponent};
 
-/// Insert the environment row consumed by the sky pass. Sky configuration is
-/// scene content too: the renderer only receives the keyed SceneDB buffer.
+/// Insert the scene's atmosphere: Earth's air, its Rayleigh scattering
+/// tinted towards `tint` (each channel scaled by `tint` over its largest
+/// channel). The sky is scene content too: the renderer only receives the
+/// keyed SceneDB buffer, and the scene's first directional light is its sun;
+/// without one the sky is black.
 pub fn spawn_sky(world: &mut World, tint: [f32; 3]) -> Entity {
-    let mut sky = helio_pass_sky::SkyComponent::default();
-    sky.rayleigh_scatter = tint;
+    let mut sky = helio_pass_sky::AtmosphereComponent::earth();
+    let peak = tint[0].max(tint[1]).max(tint[2]).max(f32::EPSILON);
+    for (scattering, channel) in sky.rayleigh_scattering.iter_mut().zip(tint) {
+        *scattering *= channel / peak;
+    }
     let entity = world.spawn();
     world.insert(entity, sky);
     entity
@@ -280,12 +286,12 @@ pub fn spawn_sky(world: &mut World, tint: [f32; 3]) -> Entity {
 /// `helio::WaterVolumeDescriptor`/`.to_gpu()` pair reconstructed from the
 /// shader-documented layout, since neither survived the SceneDB migration.
 ///
-/// The heightfield simulation's own dynamics (wind, spring/damping, wave
-/// scale) are separate pass-owned GPU state, driven at runtime through
+/// The descriptor leaves the row's `sim_dynamics`/`wind_params` zero, so
+/// the heightfield simulation drives these volumes with the pass-wide
+/// dynamics set at runtime through
 /// `helio_pass_water_sim::WaterSimPass::set_wind`/`set_sim_dynamics`/
-/// `set_wave_scale`/`set_wave_speed` instead -- no shader in the pass reads
-/// this component's `sim_dynamics`/`wind_params` slots, so this descriptor
-/// only covers the fields that actually reach them.
+/// `set_wave_scale`/`set_wave_speed` (a row with its own spring simulates
+/// with its own instead).
 #[derive(Clone, Copy, Debug)]
 pub struct WaterVolumeDescriptor {
     pub bounds_min: [f32; 3],
@@ -451,8 +457,8 @@ pub fn spawn_water_volume(world: &mut World, descriptor: WaterVolumeDescriptor) 
 
 /// CPU-friendly description of one AABB water-displacement hitbox; packs into
 /// `helio_pass_water_sim::WaterHitboxComponent` per `hitbox.frag.wgsl`'s
-/// `GpuWaterHitbox` layout. Coordinates are in the water sim's own space: X/Z
-/// normalized to the pool's half-extent, Y relative to the water surface.
+/// `GpuWaterHitbox` layout. Coordinates are world space; the simulation
+/// maps the box into each water volume it overlaps.
 #[derive(Clone, Copy, Debug)]
 pub struct WaterHitboxDescriptor {
     pub old_min: [f32; 3],
@@ -549,27 +555,12 @@ pub fn spawn_reflection_capture_box(
     entity
 }
 
-/// Spawn the sky/atmosphere row shared by the indoor-cathedral demo family:
-/// no direct sunlight (an indoor ambient tint standing in for the removed
-/// `SkyActor::indoor(..).with_clouds(..)` builder) with a moody volumetric
-/// cloud layer overhead for the radiance-cascades GI bounce to pick up.
+/// Spawn the atmosphere shared by the indoor-cathedral demo family: a dim,
+/// blue-tinted air for the radiance-cascades GI bounce to pick up. (Its
+/// cloud layer went with the procedural sky pass; clouds will return as
+/// part of the atmosphere.)
 pub fn spawn_indoor_cathedral_sky(world: &mut World) -> Entity {
-    let sky = helio_pass_sky::SkyComponent {
-        rayleigh_scatter: [0.05, 0.05, 0.1],
-        clouds_enabled: 1,
-        cloud_coverage: 0.7,
-        cloud_density: 0.8,
-        cloud_base: 1200.0,
-        cloud_top: 1800.0,
-        cloud_wind_x: 0.8,
-        cloud_wind_z: 0.2,
-        cloud_speed: 1.3,
-        skylight_intensity: 0.25,
-        ..Default::default()
-    };
-    let entity = world.spawn();
-    world.insert(entity, sky);
-    entity
+    spawn_sky(world, [0.05, 0.05, 0.1])
 }
 
 /// Insert a mesh payload into SceneDB's shared geometry pools and return its
@@ -723,12 +714,13 @@ pub fn update_light(world: &mut World, entity: Entity, light: GpuLight) {
 
 /// Spawn a corona particle emitter into `slot`.
 ///
-/// `slot` selects which of `helio_pass_corona`'s fixed `MAX_EMITTERS`
-/// particle ranges this emitter owns (`0..MAX_EMITTERS`, see that pass's
-/// module doc for why the layout is fixed rather than CPU-packed) — the
-/// caller is responsible for giving each simultaneously-live emitter its own
-/// slot. `emitter.particle_count`/`particle_offset` are overwritten to fit
-/// that slot; `spawn_cursor` is left at whatever `emitter` carries (normally
+/// `slot` selects the range of `helio_pass_corona`'s shared particle pool
+/// this emitter owns: `CORONA_MAX_PARTICLES_PER_EMITTER` particles from
+/// `slot` times that (the engine's environment join allocates ranges by
+/// each emitter's size instead; this demo has no join) — the caller is
+/// responsible for giving each simultaneously-live emitter its own slot.
+/// `emitter.particle_count`/`particle_offset` are overwritten to fit that
+/// slot; `spawn_cursor` is left at whatever `emitter` carries (normally
 /// `0` for a new emitter) since the pass owns advancing it from here via its
 /// own transient `spawn_cursor_buf`, never through this SceneDB row again.
 pub fn spawn_corona_emitter(

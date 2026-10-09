@@ -250,24 +250,12 @@ impl ApplicationHandler for App {
 
         // ── Sky ────────────────────────────────────────────────────────────
         // `ambient_color` from the removed `SkyActor` builder is now the
-        // renderer's own ambient term (`set_ambient`, below); `sky_color`
-        // maps onto `rayleigh_scatter`, same approximation used by every
-        // other migrated demo's sky.
-        let sky = helio_pass_sky::SkyComponent {
-            rayleigh_scatter: [0.6, 0.7, 1.0],
-            clouds_enabled: 1,
-            cloud_coverage: 0.3,
-            cloud_density: 0.4,
-            cloud_base: 500.0,
-            cloud_top: 800.0,
-            cloud_wind_x: 0.3,
-            cloud_wind_z: 0.1,
-            cloud_speed: 2.0,
-            skylight_intensity: 0.5,
-            ..Default::default()
-        };
+        // renderer's own ambient term (`set_ambient`, below). The sky is
+        // Earth's air, lit by the directional light below.
         let sky_entity = scene_db.world.spawn();
-        scene_db.world.insert(sky_entity, sky);
+        scene_db
+            .world
+            .insert(sky_entity, helio_pass_sky::AtmosphereComponent::earth());
 
         // ── Lights ─────────────────────────────────────────────────────────
         spawn_light(

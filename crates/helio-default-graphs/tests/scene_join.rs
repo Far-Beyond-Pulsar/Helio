@@ -273,7 +273,8 @@ fn base_scene() -> Scene {
         color_intensity: [1.0, 0.5, 0.25, 100.0],
         ..Default::default()
     };
-    light._pad = 1;
+    // Enabled (bit 31) plus a shadow policy (priority 1.0, in sixteenths).
+    light._pad = (1 << 31) | (16 << 8);
     scene.put(
         KEYS.light_sources,
         &[
@@ -412,8 +413,9 @@ fn placed_instances_are_joined_with_their_owner_and_nothing_else_is() {
         "light direction"
     );
     assert_eq!(
-        light._pad, 0,
-        "the enabled flag does not leak into the output"
+        light._pad,
+        16 << 8,
+        "the enabled flag does not leak into the output; the shadow policy does"
     );
     assert_eq!(
         lights[1].color_intensity, [0.0; 4],

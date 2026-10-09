@@ -92,6 +92,7 @@ pub struct SceneDbRayTracing {
     cursors: Option<Cursors>,
     /// TLAS instances and the caster that owns each, in the same order.
     instances: Vec<TlasInstanceInput>,
+    shadow_masks: Vec<u8>,
     casters: Vec<(Entity, CasterKey)>,
     caster_slots: HashMap<Entity, usize>,
     changes: Vec<ComponentChange>,
@@ -110,6 +111,7 @@ impl SceneDbRayTracing {
             next_geometry_id: 0,
             cursors: None,
             instances: Vec::new(),
+            shadow_masks: Vec::new(),
             casters: Vec::new(),
             caster_slots: HashMap::new(),
             changes: Vec::new(),
@@ -212,7 +214,7 @@ impl SceneDbRayTracing {
                     label: Some("SceneDB RT acceleration update"),
                 });
             self.tlas
-                .build(&mut encoder, &self.instances, &self.blas)
+                .build_masked(&mut encoder, &self.instances, &self.blas, &self.shadow_masks)
                 .map_err(|e| rt_error(&e.to_string()))?;
             self.queue.submit([encoder.finish()]);
         }
@@ -398,8 +400,9 @@ impl SceneDbRayTracing {
         }
         self.blas.retain(|id| live.contains(&id));
         self.geometry_ids.retain(|_, id| live.contains(id));
+        self.shadow_masks = self.casters.iter().map(|(_,key)| if key.flags & helio_pass_object_batch::INSTANCE_FLAG_MOVABLE != 0 {2} else {1}).collect();
         self.tlas
-            .build(&mut encoder, &instances, &self.blas)
+            .build_masked(&mut encoder, &instances, &self.blas, &self.shadow_masks)
             .map_err(|e| error(&e.to_string()))?;
         if has_transmission {
             let size = ((transmission_rows.len() + 1) * 16).max(32) as u64;

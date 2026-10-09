@@ -471,8 +471,8 @@ impl ApplicationHandler for App {
         #[cfg(target_arch = "wasm32")]
         let xr_active = false;
 
-        // Indoors, but the sky still drives ambient. `SkyPass` is in every graph and reads
-        // this row from SceneDB each frame, so it can be spawned at any time.
+        // Indoors, but the sky still drives ambient. `AtmospherePass` is in every graph
+        // and reads this row from SceneDB each frame, so it can be spawned at any time.
         spawn_sky(&mut scene_db.world, [0.05, 0.07, 0.11]);
 
         // ── Ground ───────────────────────────────────────────────────────────

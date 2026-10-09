@@ -59,6 +59,10 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let inst = instances[i];
+    // A scene row without a sprite behind it is zero.
+    if uniforms.scene_mode != 0u && (inst.size.x <= 0.0 || inst.size.y <= 0.0) {
+        return;
+    }
     // Circle-vs-AABB: clamp the sprite's center into the view rect, then
     // compare the distance to that clamped point against the sprite's
     // bounding radius (half the quad's diagonal — conservative at any

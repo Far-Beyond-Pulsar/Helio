@@ -25,7 +25,7 @@ fn foliage_globals_field_offsets_match_the_wgsl_mirror() {
     assert_eq!(std::mem::offset_of!(FoliageGlobals, flags), 12);
     // The two vec4s must land on 16-byte boundaries or WGSL inserts padding the Rust
     // side does not have.
-    assert_eq!(std::mem::offset_of!(FoliageGlobals, camera_ring), 16);
+    assert_eq!(std::mem::offset_of!(FoliageGlobals, clock_ring), 16);
     assert_eq!(std::mem::offset_of!(FoliageGlobals, interaction_field), 32);
     assert_eq!(std::mem::offset_of!(FoliageGlobals, lod_quality_scale), 48);
     assert_eq!(std::mem::offset_of!(FoliageGlobals, scale_in_band), 52);

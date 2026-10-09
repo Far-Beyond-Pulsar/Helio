@@ -6,7 +6,6 @@ use std::time::Instant;
 use web_time::Instant;
 
 use helio_core::{RenderFrameInputs, RenderGraph, RenderPass};
-use helio_pass_sky::{CloudQuality, CloudRenderMode, CloudResolution, SkyPass};
 
 use super::builder::SceneDbHandle;
 use super::config::{RenderMode, RendererConfig};
@@ -141,6 +140,11 @@ pub struct Renderer {
     pub(crate) enable_jitter: bool,
     pub(crate) camera_jitter_override: Option<[f32; 2]>,
     pub(crate) frame_delta_override: Option<f32>,
+    /// The frame clock animation reads (`PrepareContext::time`), in seconds.
+    pub(crate) frame_clock: f64,
+    /// How far the host's clock advances the frame clock each frame; `None`
+    /// follows the frame delta (wall time, or `frame_delta_override`).
+    pub(crate) frame_clock_delta: Option<f32>,
     /// A bake to run before the next frame. Its result is owned by the
     /// graph's `BakeInjectPass`, never by the renderer (Helio#256).
     #[cfg(feature = "bake")]
@@ -386,6 +390,32 @@ impl Renderer {
         self.frame_delta_override = seconds;
     }
 
+    /// Drive the frame clock animation reads (material graph `time`, foliage
+    /// wind, particles; `PrepareContext::time`) from the host's clock: each
+    /// frame advances it by `seconds`, until changed. `Some(0.0)` freezes it
+    /// (an editor viewport that is not realtime, a paused game); a game
+    /// passes its clock's delta every frame, so animation follows pause and
+    /// time dilation. `None` (the default) advances it by the frame delta:
+    /// wall time, or [`Self::set_frame_delta_override`].
+    pub fn set_frame_clock_delta(&mut self, seconds: Option<f32>) {
+        assert!(seconds.is_none_or(|v| v.is_finite() && v >= 0.0));
+        self.frame_clock_delta = seconds;
+    }
+
+    /// The frame clock (`PrepareContext::time`) as of the last frame, in
+    /// seconds.
+    pub fn frame_clock(&self) -> f64 {
+        self.frame_clock
+    }
+
+    /// Advance the frame clock for a frame whose delta is `delta_time` and
+    /// hand it to the graph.
+    pub(crate) fn advance_frame_clock(&mut self, delta_time: f32) {
+        let advance = self.frame_clock_delta.unwrap_or(delta_time);
+        self.frame_clock += f64::from(advance);
+        self.graph.set_frame_clock(self.frame_clock as f32, advance);
+    }
+
     /// Set the renderer-wide debug visualization mode.
     pub fn set_debug_mode(&mut self, mode: u32) {
         self.debug_mode = mode;
@@ -549,35 +579,6 @@ impl Renderer {
                 .map(|(view_count, chain_count)| [view_count, chain_count]),
         };
         self.graph.set_frame_inputs(&inputs);
-    }
-
-    /// Select the cloud representation used by the default sky pass.
-    ///
-    /// This is intentionally a no-op when a custom graph does not contain a
-    /// sky pass, which keeps the renderer facade usable with stripped graphs.
-    pub fn set_cloud_render_mode(&mut self, mode: CloudRenderMode) {
-        if let Some(pass) = self.find_pass_mut::<SkyPass>() {
-            pass.set_cloud_mode(mode);
-            pass.reset_history();
-        }
-    }
-
-    /// Select the cloud detail tier. Higher tiers add density detail and
-    /// lighting samples; the tier is independent from render resolution.
-    pub fn set_cloud_quality(&mut self, quality: CloudQuality) {
-        if let Some(pass) = self.find_pass_mut::<SkyPass>() {
-            pass.set_cloud_quality(quality);
-            pass.reset_history();
-        }
-    }
-
-    /// Select the cloud render resolution (full, half, quarter, or eighth
-    /// resolution per axis). The pass reallocates its temporal targets at the
-    /// next frame boundary and invalidates history safely.
-    pub fn set_cloud_resolution(&mut self, resolution: CloudResolution) {
-        if let Some(pass) = self.find_pass_mut::<SkyPass>() {
-            pass.set_cloud_resolution(resolution);
-        }
     }
 
     /// Access the gbuffer template registry (preserved across graph rebuilds).

@@ -202,6 +202,10 @@ pub struct PassContext<'a> {
     /// Access via `unsafe { &mut *ctx.encoder_ptr }`.
     pub encoder_ptr: *mut wgpu::CommandEncoder,
 
+    /// Queue for small pass-owned uploads during execute(). Prefer encoding
+    /// copies for frame data; this is for sparse control values only.
+    pub queue: &'a wgpu::Queue,
+
     /// Separate compute encoder for compute dispatches (always available, even
     /// during a render pass on the render encoder).  Access via unsafe.
     pub compute_encoder_ptr: *mut wgpu::CommandEncoder,
@@ -677,6 +681,22 @@ pub struct PrepareContext<'a> {
     /// than hard-coding `0.016`.  Returns `0.0` if the host has not yet
     /// called `set_delta_time()`.
     pub delta_time: f32,
+
+    /// The frame clock animation reads, in seconds: material graph `time`
+    /// nodes, foliage wind, particle simulation (Pulsar-Native#1109).
+    ///
+    /// Host-driven: it advances by [`Self::time_delta`] each frame, which
+    /// the host sets (`Renderer::set_frame_clock_delta`) from its own clock
+    /// (wall time in an editor viewport, the game clock while playing, so it
+    /// follows pause and time dilation, or nothing at all to freeze it).
+    /// Unlike [`Self::delta_time`], which temporal filters need even while
+    /// the scene is frozen, it stops when the host's clock stops. Set by
+    /// `RenderGraph::set_frame_clock()`.
+    pub time: f32,
+
+    /// How far [`Self::time`] advanced since the previous frame (0 while the
+    /// host's clock is paused or frozen).
+    pub time_delta: f32,
 
     /// World position of the frame's coordinate origin for camera-relative
     /// frames (`SceneInput::world_origin`). Passes that consume world-space
