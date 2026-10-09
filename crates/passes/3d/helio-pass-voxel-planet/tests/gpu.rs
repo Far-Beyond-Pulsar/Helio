@@ -179,7 +179,7 @@ fn cave_view_matches_canonical_cpu_ray_casts() {
     let Some(gpu) = gpu() else { return };
     let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
     let (eye, forward) = find_cave(&planet).expect("a cave near the test site");
-    eprintln!("cave eye {} m below its column top", -planet.ground_height(eye));
+    eprintln!("cave eye {} m over the cave floor", planet.ground_height(eye));
     let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [320, 180]);
     eprintln!("compared {compared}, mismatched {mismatched}");
     assert!(compared > 1000);
@@ -240,7 +240,7 @@ fn overhang_view_matches_canonical_cpu_ray_casts() {
     stack.caves.enabled = false;
     let planet = Arc::new(Planet::new(PlanetRecipe { terrain: stack.source(7), ..Default::default() }).unwrap());
     let (eye, forward) = find_overhang(&planet).expect("an overhang near the test site");
-    eprintln!("overhang eye {} m off its column top", planet.ground_height(eye));
+    eprintln!("overhang eye {} m over the ground below", planet.ground_height(eye));
     let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [320, 180]);
     eprintln!("compared {compared}, mismatched {mismatched}");
     assert!(compared > 1000);
@@ -256,7 +256,7 @@ fn deep_cave_view_matches_canonical_cpu_ray_casts() {
     stack.caves.depth_m = 800.0;
     let planet = Arc::new(Planet::new(PlanetRecipe { terrain: stack.source(7), ..Default::default() }).unwrap());
     let (eye, forward) = find_cave(&planet).expect("a cave near the test site");
-    eprintln!("cave eye {} m below its column top", -planet.ground_height(eye));
+    eprintln!("cave eye {} m over the cave floor", planet.ground_height(eye));
     let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [320, 180]);
     eprintln!("compared {compared}, mismatched {mismatched}");
     assert!(compared > 1000);

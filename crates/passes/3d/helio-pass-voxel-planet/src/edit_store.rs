@@ -30,7 +30,7 @@ pub struct CellEdit(pub u16);
 impl CellEdit {
     pub const UNCHANGED: Self = Self(0);
     pub const AIR: Self = Self(1);
-    const SOLID: u16 = 2;
+    pub(crate) const SOLID: u16 = 2;
     const PAINT: u16 = 3;
 
     pub fn solid(material: u32) -> Self {
