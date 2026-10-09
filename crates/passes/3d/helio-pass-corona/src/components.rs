@@ -57,5 +57,7 @@ mod tests {
             std::mem::size_of::<crate::GpuCoronaEmitter>()
         );
         assert_eq!(std::mem::align_of::<CoronaEmitterComponent>(), 4);
+        // corona.wgsl's `EmitterDef`.
+        assert_eq!(std::mem::size_of::<crate::GpuCoronaEmitter>(), 240);
     }
 }

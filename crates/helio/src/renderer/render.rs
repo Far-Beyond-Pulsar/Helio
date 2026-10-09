@@ -175,6 +175,7 @@ impl Renderer {
         self.frame_times[self.frame_times_cursor] = dt;
         self.frame_times_cursor = (self.frame_times_cursor + 1) % self.frame_times.len();
         self.graph.set_delta_time(self.delta_time);
+        self.advance_frame_clock(self.delta_time);
 
         let internal_w = (((self.output_width as f32) * self.render_scale).ceil() as u32).max(1);
         let internal_h = (((self.output_height as f32) * self.render_scale).ceil() as u32).max(1);
@@ -630,6 +631,7 @@ impl Renderer {
         self.frame_times[self.frame_times_cursor] = dt;
         self.frame_times_cursor = (self.frame_times_cursor + 1) % self.frame_times.len();
         self.graph.set_delta_time(dt);
+        self.advance_frame_clock(dt);
 
         // ── 1. Pump session events, drive the state machine, and run the frame
         // ──    lifecycle. Per the OpenXR frame-submission rules, EVERY

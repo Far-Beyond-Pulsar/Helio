@@ -3,6 +3,7 @@ use serde_json::Value;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Wind", category_color = "#7EE787")]
+#[serde(default)]
 pub struct WindFoliageProps {
     /// Per-band wind gain: trunk sway.
     #[property(min = 0.0, max = 2.0, step = 0.01, category = "Wind")]
@@ -16,7 +17,12 @@ pub struct WindFoliageProps {
     /// How fast a bent plant recovers. Larger is stiffer.
     #[property(min = 0.0, max = 100.0, step = 0.1, category = "Wind")]
     pub interaction_stiffness: f32,
-    /// When true this component drives the scene's global wind.
+    /// Sway in the level's global wind (World Settings), scaled per band
+    /// above. Off: this component's own wind (below) applies instead. A
+    /// level without a global wind uses the components' own wind.
+    #[property(category = "Wind")]
+    pub use_global_wind: bool,
+    /// Whether this component's own wind blows (speed 0 when off).
     #[property(category = "Wind")]
     pub wind_enabled: bool,
     /// World-space wind direction (need not be normalised).
@@ -43,6 +49,7 @@ impl Default for WindFoliageProps {
             branch_flutter: 0.35,
             leaf_jitter: 1.0,
             interaction_stiffness: 6.0,
+            use_global_wind: true,
             wind_enabled: true,
             wind_direction: [1.0, 0.0, 0.35],
             wind_speed: 2.0,
@@ -66,6 +73,9 @@ impl WindFoliageProps {
         }
         if let Some(v) = obj.get("interaction_stiffness").and_then(|v| v.as_f64()) {
             self.interaction_stiffness = v as f32;
+        }
+        if let Some(v) = obj.get("use_global_wind").and_then(|v| v.as_bool()) {
+            self.use_global_wind = v;
         }
         if let Some(v) = obj.get("wind_enabled").and_then(|v| v.as_bool()) {
             self.wind_enabled = v;

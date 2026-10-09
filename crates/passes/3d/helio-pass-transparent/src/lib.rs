@@ -39,7 +39,7 @@ struct TransparentGlobals {
     // rebuilt dense array needing `light_entity_indices[light_idx]`. See
     // `transparent_base.wgsl`'s `light_entity_indices` binding doc.
     light_mode_direct_index: u32,
-    /// Seconds since start ([`helio_mats::graph_time_seconds`]): the
+    /// The host-driven frame clock (`PrepareContext::time`): the
     /// shader-graph `time` node.
     time: f32,
     _pad1: u32,
@@ -392,7 +392,7 @@ impl RenderPass for TransparentPass {
                 screen_width: ctx.width as f32,
                 screen_height: ctx.height as f32,
                 light_mode_direct_index: use_direct_index as u32,
-                time: helio_mats::graph_time_seconds(),
+                time: ctx.time,
                 _pad1: 0,
                 _pad2: 0,
             }),

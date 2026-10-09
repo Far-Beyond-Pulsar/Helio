@@ -35,7 +35,7 @@ pub use edits::{VoxelEditError, VoxelSampleEdit};
 pub use generation::{
     VoxelChunkGenerator, VoxelGeneratorDescriptor, VoxelGeneratorRegistry,
     MAX_VOXEL_GENERATOR_ID_BYTES, MAX_VOXEL_GENERATOR_PARAMETERS_BYTES, VOXEL_TERRAIN_GENERATOR,
-    VOXEL_TERRAIN_GENERATOR_VERSION, VOXEL_TERRAIN_RENDERER,
+    VOXEL_MESH_RENDERER, VOXEL_TERRAIN_GENERATOR_VERSION, VOXEL_TERRAIN_RENDERER,
 };
 pub use generation_worker::{
     VoxelGenerationAdmissionError, VoxelGenerationClose, VoxelGenerationJob, VoxelGenerationLimits,

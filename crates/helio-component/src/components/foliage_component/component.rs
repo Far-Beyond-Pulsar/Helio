@@ -9,7 +9,7 @@ use super::sub_props::{
 ///
 /// Registers a foliage type with the helio scene, grows it inside a square layer
 /// centred on the owner object, pushes grass aside with a follower interactor and
-/// optionally drives the scene's global wind. Placement, culling and LOD selection
+/// sways in the level's global wind (or its own). Placement, culling and LOD selection
 /// all happen on the GPU.
 #[engine_class(category = "Rendering", default, clone, debug, serialize, deserialize)]
 #[category("General", category_color = "#F4C542")]

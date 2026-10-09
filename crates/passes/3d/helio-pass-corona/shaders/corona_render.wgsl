@@ -92,7 +92,8 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
         + right * corner.x * size
         + up * corner.y * size;
 
-    let emitter_idx = min(u32(p.velocity.w + 0.5), uniforms.emitter_count - 1u);
+    // The particle's tag: its emitter row + 64 × epoch (corona.wgsl).
+    let emitter_idx = min(u32(p.velocity.w + 0.5) % 64u, uniforms.emitter_count - 1u);
     let tex_raw = emitters[emitter_idx].texture_index;
     let sprite = select(u32(tex_raw) % 16u, 0u, tex_raw < 0);
 

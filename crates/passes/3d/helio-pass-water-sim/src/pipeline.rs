@@ -1,7 +1,7 @@
 use crate::simulation::{DeltaUniform, DropUniform, HitboxCountUniform};
 use crate::{
     make_caustics_grid, make_static_box_mesh, make_top_grid, vec4_vbl, WaterSimPass, BLIT_WGSL,
-    CASCADE_COUNT, MAX_SIM_VOLUMES, SIM_SIZE,
+    CASCADE_COUNT, MAX_SIM_VOLUMES, MAX_WATER_HITBOXES, SIM_SIZE,
 };
 use wgpu::util::DeviceExt;
 
@@ -52,8 +52,9 @@ impl WaterSimPass {
             ],
         });
 
-        let hitbox_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("WaterSim Hitbox BGL"),
+        // The update step also reads each volume's row for its own dynamics.
+        let update_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("WaterSim Update BGL"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -94,9 +95,78 @@ impl WaterSimPass {
             ],
         });
 
+        let hitbox_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("WaterSim Hitbox BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // The previous frame's hitbox rows (`hitbox_prev_buf`).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // The water volumes, mapping world boxes into each one.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
         let sim_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("WaterSim PL"),
             bind_group_layouts: &[Some(&sim_bgl)],
+            immediate_size: 0,
+        });
+        let update_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("WaterSim Update PL"),
+            bind_group_layouts: &[Some(&update_bgl)],
             immediate_size: 0,
         });
         let hitbox_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -138,7 +208,7 @@ impl WaterSimPass {
             };
 
         let drop_pipeline = make_sim_pipeline("WaterSim Drop", &sim_pl, &drop_frag);
-        let update_pipeline = make_sim_pipeline("WaterSim Update", &sim_pl, &update_frag);
+        let update_pipeline = make_sim_pipeline("WaterSim Update", &update_pl, &update_frag);
         let normal_pipeline = make_sim_pipeline("WaterSim Normal", &sim_pl, &normal_frag);
         let hitbox_pipeline = make_sim_pipeline("WaterSim Hitbox", &hitbox_pl, &hitbox_frag);
 
@@ -262,6 +332,13 @@ impl WaterSimPass {
             "WaterSim Hitbox Count",
             std::mem::size_of::<HitboxCountUniform>(),
         );
+        let hitbox_prev_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("WaterSim Previous Hitboxes"),
+            size: u64::from(MAX_WATER_HITBOXES)
+                * std::mem::size_of::<crate::GpuWaterHitbox>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let caustics_render_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -770,6 +847,7 @@ impl WaterSimPass {
 
         Self {
             sim_bgl,
+            update_bgl,
             hitbox_bgl,
             drop_pipeline,
             update_pipeline,
@@ -797,6 +875,7 @@ impl WaterSimPass {
                     panic!("CASCADE_COUNT doesn't match expected size")
                 }),
             hitbox_count_buf,
+            hitbox_prev_buf,
             pending_drops: std::collections::VecDeque::new(),
             drop_staged: false,
             static_box_vbuf,
@@ -863,6 +942,8 @@ impl WaterSimPass {
             wave_scale: 1.0,
             wave_speed: 1.0,
             sim_time: 0.0,
+            step_clock: 0.0,
+            steps_this_frame: 0,
         }
     }
 }

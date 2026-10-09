@@ -1,7 +1,8 @@
 //! The environment join: the frontend's authored fog volumes, post-process
 //! volumes, camera post-process baselines, water volumes, foliage,
-//! atmospheres and decals to the rows the volumetric fog, post-process,
-//! water, foliage, sky and decal passes read, on the GPU (Pulsar-Native#1035, Phase 4).
+//! atmospheres, decals and particle emitters to the rows the volumetric fog,
+//! post-process, water, foliage, sky, decal and Corona passes read, on the
+//! GPU (Pulsar-Native#1035, Phase 4).
 //!
 //! The same contract as [`crate::scene_join`]: each component instance
 //! derives a source row in its own space (`helio_component`'s
@@ -16,10 +17,40 @@
 //! | `local_fog` | `"local_fog_media"` | as above; bounds = the owner-oriented box's world AABB |
 //! | `post_process_volumes` | `"post_process_volumes"` | as above; bounds as above |
 //! | `camera_post_process` | `"camera_postprocess"` | attached, enabled, owner current (visibility does not apply) |
-//! | `water_volumes` | `"water_volumes"`, packed into [`MAX_WATER_VOLUMES`] rows | as for volumes; the surface height follows the owner's Y |
+//! | `water_volumes` | `"water_volumes"`, packed into [`MAX_WATER_VOLUMES`] rows | as for volumes; the surface height follows the owner's Y; the sun is the scene's first directional light |
 //! | `foliage` | `"foliage_types"`, `"foliage_layers"`, `"foliage_wind"`, each packed | attached, enabled, owner current and visible, with a density |
+//! | `wind` | `"foliage_wind"`, over the foliage components' own wind; the wind of every placed `"water_volumes"` row that does not opt out | attached, enabled, owner current (visibility does not apply); a foliage component that opts out of the global wind takes precedence |
 //! | `atmospheres` | `"atmospheres"` | attached, enabled, owner current (visibility does not apply); a planet placed at its owner is centred on the owner's position |
 //! | `decals` | `"decals"`, packed into [`MAX_DECALS`] rows | attached, enabled, owner current and visible, with a non-zero box; the transform maps world space into the owner-placed box |
+//! | `corona_emitters` | `"corona_emitters"`, packed into [`MAX_CORONA_EMITTERS`] rows | attached, enabled, owner current and visible, requesting particles; placed at the owner's transform, with a range of the Corona particle pool |
+//! | `sprites` | `"sprite_instances"` | attached, enabled, owner current and visible, with a size; at the owner's X and Y (2D), turned by its roll, scaled by its X and Y scale |
+//! | `water_hitboxes` | `"water_hitboxes"`, packed into [`MAX_WATER_HITBOXES`] rows | attached, enabled, owner current, interacting (word 2), its owner holding a mesh (visibility does not apply); bounded by the owner's meshes |
+//!
+//! Particle emitters share the Corona pass's particle pool
+//! ([`CORONA_POOL_PARTICLES`]): as the join packs them it gives each, in
+//! row order, the next contiguous range of the size it requests (rounded up
+//! to [`CORONA_RANGE_ALIGNMENT`]), a prefix sum on the GPU.
+//! A range that does not fit is clamped to what is left of the pool, so an
+//! emitter past the end of a full pool has none and draws nothing. Each row
+//! also carries its emitter's identity (its source row + 1, in the
+//! `spawn_cursor` word, which the pass keeps itself): the pass restarts a
+//! row's particles when another emitter takes it.
+//!
+//! A water row's sun (`sun_direction`, toward the sun, `w` 1) is the first
+//! directional light with any intensity in the scene join's
+//! `"scene_lights"` ([`LIGHTS_KEY`]), as the sky's atmosphere picks its sun;
+//! straight up with `w` 0 when the scene has none. A water row's wind is
+//! the level's global wind unless the volume opts out (`wind_params.w`):
+//! its direction's XZ and [`WATER_WIND_STRENGTH_PER_SPEED`] times its speed.
+//!
+//! A water hitbox is a body that pushes simulated water (Pulsar-Native
+//! #1080): its new bounds are the world AABB of the bounding spheres of the
+//! meshes its owner holds (`mesh_bounds`, at the owner's transform), its old
+//! bounds an empty box at their centre, and `params` the source row's edge
+//! softness and strength with the body's identity (its source row + 1) in
+//! `z`. The water simulation keeps the rows it applied last and displaces
+//! from a body's previous bounds while the row holds the same body, so the
+//! join keeps no history.
 //!
 //! Every other row is zero, which each pass treats as inert. A volume's
 //! bounds follow its owner's position, rotation and scale; a foliage layer is
@@ -37,7 +68,8 @@ pub use helio_core::{
 };
 
 use crate::scene_join::{
-    GENERATION_ROW_BYTES, HIDDEN_ROW_BYTES, OWNER_ROW_BYTES, TRANSFORM_ROW_BYTES,
+    GENERATION_ROW_BYTES, HIDDEN_ROW_BYTES, LIGHTS_KEY, MESH_BOUNDS_ROW_BYTES, OWNER_ROW_BYTES,
+    TRANSFORM_ROW_BYTES,
 };
 
 /// `GlobalFogSourceRow`: the `GlobalFogComponent` pass row (16 words).
@@ -65,9 +97,48 @@ pub const DECAL_SOURCE_ROW_BYTES: u64 = 36 * 4;
 /// Rows the decal pass reads (`helio_pass_decal::MAX_DECALS`): placed decals
 /// beyond these are not drawn.
 pub const MAX_DECALS: u32 = helio_pass_decal::MAX_DECALS;
+/// `CoronaEmitterSourceRow`: the `helio_pass_corona` emitter row (60 words)
+/// with its transform and particle offset left to the join and the
+/// requested particles in `particle_count`.
+pub const CORONA_EMITTER_SOURCE_ROW_BYTES: u64 = 60 * 4;
+/// Emitter rows the Corona pass reads: placed emitters beyond these are not
+/// drawn.
+pub const MAX_CORONA_EMITTERS: u32 = helio_pass_corona::CORONA_MAX_EMITTERS;
+/// The Corona particle pool the join allocates emitter ranges from.
+pub const CORONA_POOL_PARTICLES: u32 = helio_pass_corona::CORONA_MAX_PARTICLES;
+/// Every emitter range starts on a multiple of this.
+pub const CORONA_RANGE_ALIGNMENT: u32 = helio_pass_corona::CORONA_RANGE_ALIGNMENT;
+/// `particle_count`: the requested range in the source, the allocated one
+/// out (`environment_join.wgsl`'s `EMITTER_COUNT_WORD`).
+const CORONA_COUNT_WORD: u32 = 46;
+/// A water hitbox source row (`pulsar_physics::WaterHitboxSourceRow` in
+/// Pulsar): edge softness in metres, strength, non-zero when the body
+/// interacts with water, and a zero word.
+pub const WATER_HITBOX_SOURCE_ROW_BYTES: u64 = 4 * 4;
+/// The water simulation's hitbox rows (`helio_pass_water_sim::
+/// MAX_WATER_HITBOXES`): interacting bodies beyond these push no water.
+pub const MAX_WATER_HITBOXES: u32 = helio_pass_water_sim::MAX_WATER_HITBOXES;
+/// A water hitbox source row's interaction word.
+const WATER_HITBOX_GATE_WORD: u32 = 2;
+/// `SpriteSourceRow`: the sprite passes' row
+/// (`helio_pass_sprite_batch::SpriteComponent`, 20 words) at the 2D origin.
+pub const SPRITE_SOURCE_ROW_BYTES: u64 = 20 * 4;
+/// A sprite source row's width word: zero for a disabled sprite.
+const SPRITE_SIZE_WORD: u32 = 2;
 /// Rows the water passes read (`helio_pass_water_sim::MAX_SIM_VOLUMES`):
 /// placed water volumes beyond these are not drawn.
 pub const MAX_WATER_VOLUMES: u32 = helio_pass_water_sim::MAX_SIM_VOLUMES;
+/// `GlobalWindSourceRow`: the foliage wind row (12 words), marked global.
+pub const WIND_SOURCE_ROW_BYTES: u64 = 12 * 4;
+/// A water row's wind strength per m/s of the global wind's speed
+/// (`environment_join.wgsl`'s `WATER_WIND_PER_SPEED`): a 2 m/s breeze makes
+/// gentle ripples (1), 10 m/s a choppy surface (5).
+pub const WATER_WIND_STRENGTH_PER_SPEED: f32 = 0.5;
+/// The wind row's `_pad[0]`: 1 in a global wind's row.
+const GLOBAL_WIND_MARK_WORD: u32 = 10;
+/// A foliage source row's wind `_pad[0]` (28 + 10): 1 when the component
+/// opts out of the global wind.
+const FOLIAGE_OWN_WIND_WORD: u32 = 38;
 /// Foliage types the join publishes. Placement draws each candidate's type
 /// from the live leading rows, so the table's capacity costs only a short
 /// per-workgroup scan.
@@ -85,6 +156,9 @@ pub const FOLIAGE_LAYERS_KEY: BufferKey = BufferKey::of("foliage_layers");
 pub const FOLIAGE_WIND_KEY: BufferKey = BufferKey::of("foliage_wind");
 pub const ATMOSPHERES_KEY: BufferKey = BufferKey::of("atmospheres");
 pub const DECALS_KEY: BufferKey = BufferKey::of("decals");
+pub const CORONA_EMITTERS_KEY: BufferKey = BufferKey::of("corona_emitters");
+pub const WATER_HITBOXES_KEY: BufferKey = BufferKey::of("water_hitboxes");
+pub const SPRITES_KEY: BufferKey = BufferKey::of("sprite_instances");
 
 const WORKGROUP: u32 = 64;
 const SPATIAL: u32 = 1;
@@ -93,6 +167,11 @@ const SURFACE: u32 = 4;
 const LAYER: u32 = 8;
 const CENTERED: u32 = 16;
 const DECAL: u32 = 32;
+const EMITTER: u32 = 64;
+const SUN: u32 = 128;
+const WATER_WIND: u32 = 256;
+const HITBOX: u32 = 512;
+const SPRITE: u32 = 1024;
 const NO_GATE_WORD: u32 = u32::MAX;
 
 /// Where the frontend's rows live.
@@ -110,6 +189,15 @@ pub struct EnvironmentJoinKeys {
     pub foliage: BufferKey,
     pub atmospheres: BufferKey,
     pub decals: BufferKey,
+    pub corona_emitters: BufferKey,
+    pub wind: BufferKey,
+    /// Bodies that push simulated water (their source rows).
+    pub water_hitboxes: BufferKey,
+    /// Mesh instances' local bounding spheres (`[centre, radius]`), keyed
+    /// by the instance like the owner rows: the scene join's `mesh_bounds`.
+    pub mesh_bounds: BufferKey,
+    /// 2D sprites.
+    pub sprites: BufferKey,
 }
 
 /// The source buffers, in [`EnvironmentJoinKeys`] order.
@@ -123,10 +211,14 @@ enum Source {
     Foliage,
     Atmospheres,
     Decals,
+    CoronaEmitters,
+    Wind,
+    WaterHitboxes,
+    Sprites,
 }
 
 impl Source {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 12] = [
         Self::GlobalFog,
         Self::LocalFog,
         Self::PostProcessVolumes,
@@ -135,6 +227,10 @@ impl Source {
         Self::Foliage,
         Self::Atmospheres,
         Self::Decals,
+        Self::CoronaEmitters,
+        Self::Wind,
+        Self::WaterHitboxes,
+        Self::Sprites,
     ];
 
     fn key(self, keys: &EnvironmentJoinKeys) -> BufferKey {
@@ -147,6 +243,10 @@ impl Source {
             Self::Foliage => keys.foliage,
             Self::Atmospheres => keys.atmospheres,
             Self::Decals => keys.decals,
+            Self::CoronaEmitters => keys.corona_emitters,
+            Self::Wind => keys.wind,
+            Self::WaterHitboxes => keys.water_hitboxes,
+            Self::Sprites => keys.sprites,
         }
     }
 
@@ -160,6 +260,10 @@ impl Source {
             Self::Foliage => FOLIAGE_SOURCE_ROW_BYTES,
             Self::Atmospheres => ATMOSPHERE_SOURCE_ROW_BYTES,
             Self::Decals => DECAL_SOURCE_ROW_BYTES,
+            Self::CoronaEmitters => CORONA_EMITTER_SOURCE_ROW_BYTES,
+            Self::Wind => WIND_SOURCE_ROW_BYTES,
+            Self::WaterHitboxes => WATER_HITBOX_SOURCE_ROW_BYTES,
+            Self::Sprites => SPRITE_SOURCE_ROW_BYTES,
         }
     }
 }
@@ -175,6 +279,9 @@ struct Uniforms {
     source_offset: u32,
     copy_words: u32,
     gate_word: u32,
+    /// Particles the emitter ranges are allocated from (`EMITTER` tables).
+    pool: u32,
+    _pad: [u32; 3],
 }
 
 /// What one pass buffer is made from.
@@ -194,6 +301,8 @@ struct Spec {
     /// A source word (from the start of the row) that must be non-zero for
     /// the row to be placed, or [`NO_GATE_WORD`].
     gate_word: u32,
+    /// Sources written over this one (see [`Spec::over`]).
+    layers: Vec<Spec>,
 }
 
 impl Spec {
@@ -214,6 +323,7 @@ impl Spec {
             source_offset: 0,
             copy_words: 0,
             gate_word: NO_GATE_WORD,
+            layers: Vec::new(),
         }
     }
 
@@ -236,8 +346,31 @@ impl Spec {
         Self { gate_word, ..self }
     }
 
+    /// Also write `layer`'s placed rows into this table, after this spec's
+    /// own and any earlier layer's: a packed table's leading rows then hold
+    /// the last source that placed any, so later layers take precedence.
+    /// `layer` keeps its own source, slice, gate and flags; its key and
+    /// capacity are this table's.
+    fn over(mut self, layer: Spec) -> Self {
+        self.layers.push(Spec {
+            key: self.key,
+            capacity: self.capacity,
+            output_words: self.output_words,
+            ..layer
+        });
+        self
+    }
+
+    fn reads_lights(&self) -> bool {
+        self.flags & SUN != 0
+    }
+
+    fn reads_mesh_bounds(&self) -> bool {
+        self.flags & HITBOX != 0
+    }
+
     fn reads_transforms(&self) -> bool {
-        self.flags & (SPATIAL | LAYER | CENTERED | DECAL) != 0
+        self.flags & (SPATIAL | LAYER | CENTERED | DECAL | EMITTER | HITBOX | SPRITE) != 0
     }
 
     fn output_row_bytes(&self) -> u64 {
@@ -249,6 +382,10 @@ impl Spec {
 struct Table {
     spec: Spec,
     uniforms: wgpu::Buffer,
+    /// Further sources written into the same rows after the table's own,
+    /// in order, each over the last where it places a row (see
+    /// [`Spec::over`]); each with its own uniforms.
+    layers: Vec<(Spec, wgpu::Buffer)>,
     buffer: wgpu::Buffer,
     rows: u32,
     epoch: u64,
@@ -257,15 +394,26 @@ struct Table {
 }
 
 impl Table {
-    fn new(device: &wgpu::Device, spec: Spec) -> Self {
+    fn new(device: &wgpu::Device, mut spec: Spec) -> Self {
         let rows = spec.capacity.unwrap_or(1);
-        Self {
-            uniforms: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(spec.label),
+        let uniforms = |label| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
                 size: std::mem::size_of::<Uniforms>() as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
-            }),
+            })
+        };
+        let layers = std::mem::take(&mut spec.layers)
+            .into_iter()
+            .map(|layer| {
+                let buffer = uniforms(layer.label);
+                (layer, buffer)
+            })
+            .collect();
+        Self {
+            uniforms: uniforms(spec.label),
+            layers,
             buffer: allocate(device, spec.label, spec.output_row_bytes(), rows),
             rows,
             epoch: 0,
@@ -354,14 +502,26 @@ impl EnvironmentJoin {
                 152,
                 0,
             ),
+            // Each placed volume takes the scene's sun, and the level's
+            // global wind unless it opts out (its `wind_params.w`).
             Spec::new(
                 "Environment Join Water Volumes",
                 WATER_VOLUMES_KEY,
                 Source::WaterVolumes,
                 64,
-                volume | SURFACE,
+                volume | SURFACE | SUN,
             )
-            .packed(MAX_WATER_VOLUMES),
+            .packed(MAX_WATER_VOLUMES)
+            .over(
+                Spec::new(
+                    "Environment Join Water Global Wind",
+                    WATER_VOLUMES_KEY,
+                    Source::Wind,
+                    64,
+                    WATER_WIND,
+                )
+                .gated_on(GLOBAL_WIND_MARK_WORD),
+            ),
             // One foliage source row feeds three tables; each takes the rows
             // whose type has a density (word 0).
             Spec::new(
@@ -384,7 +544,10 @@ impl EnvironmentJoin {
             .packed(MAX_FOLIAGE_LAYERS)
             .slice(24, 0)
             .gated_on(0),
-            // The foliage passes read the first wind row.
+            // The foliage passes read one wind row: the first foliage
+            // component's own wind, under the level's global wind, under
+            // the first foliage component that opts out of the global wind
+            // (its wind's `_pad[0]`, source word 38).
             Spec::new(
                 "Environment Join Foliage Wind",
                 FOLIAGE_WIND_KEY,
@@ -394,7 +557,28 @@ impl EnvironmentJoin {
             )
             .packed(1)
             .slice(28, 12)
-            .gated_on(0),
+            .gated_on(0)
+            .over(
+                Spec::new(
+                    "Environment Join Global Wind",
+                    FOLIAGE_WIND_KEY,
+                    Source::Wind,
+                    12,
+                    0,
+                )
+                .gated_on(GLOBAL_WIND_MARK_WORD),
+            )
+            .over(
+                Spec::new(
+                    "Environment Join Foliage Own Wind",
+                    FOLIAGE_WIND_KEY,
+                    Source::Foliage,
+                    12,
+                    GATE_HIDDEN,
+                )
+                .slice(28, 12)
+                .gated_on(FOLIAGE_OWN_WIND_WORD),
+            ),
             Spec::new(
                 "Environment Join Atmospheres",
                 ATMOSPHERES_KEY,
@@ -411,6 +595,37 @@ impl EnvironmentJoin {
                 GATE_HIDDEN | DECAL,
             )
             .packed(MAX_DECALS),
+            // The pass reads a fixed number of rows; each placed emitter
+            // takes the next range of the particle pool.
+            Spec::new(
+                "Environment Join Corona Emitters",
+                CORONA_EMITTERS_KEY,
+                Source::CoronaEmitters,
+                60,
+                GATE_HIDDEN | EMITTER,
+            )
+            .packed(MAX_CORONA_EMITTERS)
+            .gated_on(CORONA_COUNT_WORD),
+            // The simulation reads a fixed number of rows; each placed body
+            // is bounded by its owner's meshes.
+            Spec::new(
+                "Environment Join Water Hitboxes",
+                WATER_HITBOXES_KEY,
+                Source::WaterHitboxes,
+                20,
+                HITBOX,
+            )
+            .packed(MAX_WATER_HITBOXES)
+            .gated_on(WATER_HITBOX_GATE_WORD),
+            // The sprite passes cull every row; each keeps its source row.
+            Spec::new(
+                "Environment Join Sprites",
+                SPRITES_KEY,
+                Source::Sprites,
+                20,
+                GATE_HIDDEN | SPRITE,
+            )
+            .gated_on(SPRITE_SIZE_WORD),
         ];
         Self {
             keys,
@@ -495,6 +710,10 @@ impl SceneDerivation for EnvironmentJoin {
         let generations = self.input(inputs, keys.generations, GENERATION_ROW_BYTES);
         let hidden = self.input(inputs, keys.hidden, HIDDEN_ROW_BYTES);
         let transforms = self.input(inputs, keys.transforms, TRANSFORM_ROW_BYTES);
+        // The scene join's light rows, for the water's sun. Its output, so
+        // its row size is the pass's, not a frontend layout.
+        let lights = inputs.get(LIGHTS_KEY);
+        let mesh_bounds = self.input(inputs, keys.mesh_bounds, MESH_BOUNDS_ROW_BYTES);
         let sources: Vec<Option<&BufferHandle>> = Source::ALL
             .iter()
             .map(|source| self.input(inputs, source.key(&keys), source.row_bytes()))
@@ -516,22 +735,56 @@ impl SceneDerivation for EnvironmentJoin {
                 grew = true;
             }
             // Transforms only matter to tables placed from them.
-            let placed_from = transforms.filter(|_| spec.reads_transforms());
-            let inputs_now = signature(
-                &[owners, generations, hidden, placed_from, source],
-                table.epoch,
+            let reads_transforms = spec.reads_transforms()
+                || table
+                    .layers
+                    .iter()
+                    .any(|(layer, _)| layer.reads_transforms());
+            let placed_from = transforms.filter(|_| reads_transforms);
+            let lit_by = lights.filter(|_| spec.reads_lights());
+            let bounded_by = mesh_bounds.filter(|_| spec.reads_mesh_bounds());
+            let mut table_inputs = vec![
+                owners,
+                generations,
+                hidden,
+                placed_from,
+                lit_by,
+                bounded_by,
+                source,
+            ];
+            table_inputs.extend(
+                table
+                    .layers
+                    .iter()
+                    .map(|(layer, _)| sources[layer.source as usize]),
             );
+            let inputs_now = signature(&table_inputs, table.epoch);
             if !grew && table.last_inputs == Some(inputs_now) {
                 continue;
             }
             table.last_inputs = Some(inputs_now);
             encoder.clear_buffer(&table.buffer, 0, None);
-            let placeable = !spec.reads_transforms() || transforms.is_some();
-            if let (Some(owners), Some(generations), Some(source), true) =
-                (owners, generations, source, placeable)
-            {
+            // The table's own source, then each layer over it in order.
+            let passes = std::iter::once((&table.spec, &table.uniforms)).chain(
+                table
+                    .layers
+                    .iter()
+                    .map(|(layer, uniforms)| (layer, uniforms)),
+            );
+            for (spec, uniforms) in passes {
+                let source_row_bytes = spec.source.row_bytes();
+                let source = sources[spec.source as usize];
+                let rows = source.map_or(0, |s| {
+                    (s.buffer.size() / source_row_bytes).min(u64::from(u32::MAX)) as u32
+                });
+                let placeable = !spec.reads_transforms() || transforms.is_some();
+                let (Some(owners), Some(generations), Some(source), true) =
+                    (owners, generations, source, placeable)
+                else {
+                    continue;
+                };
                 ctx.queue.write_buffer(
-                    &table.uniforms,
+                    uniforms,
                     0,
                     bytemuck::bytes_of(&Uniforms {
                         rows: if spec.capacity.is_some() {
@@ -546,6 +799,8 @@ impl SceneDerivation for EnvironmentJoin {
                         source_offset: spec.source_offset,
                         copy_words: spec.copy_words,
                         gate_word: spec.gate_word,
+                        pool: CORONA_POOL_PARTICLES,
+                        _pad: [0; 3],
                     }),
                 );
                 let (pipeline, workgroups) = match spec.capacity {
@@ -558,13 +813,15 @@ impl SceneDerivation for EnvironmentJoin {
                     label: Some(spec.label),
                     layout: &layout,
                     entries: &[
-                        entry(0, &table.uniforms),
+                        entry(0, uniforms),
                         entry(1, &owners.buffer),
                         entry(2, &generations.buffer),
                         entry(3, hidden.map_or(&self.empty, |h| &h.buffer)),
                         entry(4, transforms.map_or(&self.empty, |h| &h.buffer)),
                         entry(5, &source.buffer),
                         entry(6, &table.buffer),
+                        entry(7, lights.map_or(&self.empty, |h| &h.buffer)),
+                        entry(8, mesh_bounds.map_or(&self.empty, |h| &h.buffer)),
                     ],
                 });
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
