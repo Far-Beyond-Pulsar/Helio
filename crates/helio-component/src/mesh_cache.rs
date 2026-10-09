@@ -746,6 +746,23 @@ pub fn set_default_materials(path: &Path, materials: &[String]) -> Result<(), St
     Ok(())
 }
 
+/// A reimport rewrites the `.mesh`; keep the default materials authored on
+/// the previous version. Slots match by source material index, then by name.
+fn carry_over_default_materials(native: &Path, upload: &mut MeshAssetUpload) {
+    let Some((previous, _)) = std::fs::read(native).ok().and_then(|b| decode_asset(&b)) else {
+        return;
+    };
+    for slot in &mut upload.material_slots {
+        let old = previous.material_slots.iter().find(|old| {
+            (slot.source_material.is_some() && old.source_material == slot.source_material)
+                || (!slot.name.is_empty() && old.name == slot.name)
+        });
+        if let Some(old) = old {
+            slot.material_asset = old.material_asset.clone();
+        }
+    }
+}
+
 /// Import `source` into an engine-native `.mesh` asset at `native`, converting
 /// with `values`. The source file is **not** copied into the project. Persists
 /// the chosen options (keyed by the native path) for reimport. Returns the
@@ -763,8 +780,9 @@ pub fn import_model_to_native(
     let scene = helio_asset_compat::load_scene_file_with_values(source, &ov)
         .map_err(|e| format!("import conversion failed: {e}"))?;
 
-    let upload = mesh_asset_from_converted_scene(scene)
+    let mut upload = mesh_asset_from_converted_scene(scene)
         .ok_or_else(|| "model contained no sectioned mesh geometry".to_string())?;
+    carry_over_default_materials(native, &mut upload);
     let content_id = content_id_for_bytes(&upload.geometry);
     std::fs::write(native, encode_asset(&upload, content_id))
         .map_err(|e| format!("failed to write native mesh {}: {e}", native.display()))?;
