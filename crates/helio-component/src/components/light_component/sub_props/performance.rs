@@ -5,6 +5,8 @@ use super::super::{MobileQualityLevel, ShadowCacheMode};
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Performance", category_color = "#FB7185", default_collapsed = true)]
+// Fields added later load from levels saved before them.
+#[serde(default)]
 pub struct PerformanceLightProps {
     #[property(category = "Performance")]
     pub mobile_quality_level: MobileQualityLevel,

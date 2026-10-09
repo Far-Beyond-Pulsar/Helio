@@ -3,6 +3,8 @@ use serde_json::Value;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Attenuation", category_color = "#6EC5FF")]
+// Fields added later load from levels saved before them.
+#[serde(default)]
 pub struct AttenuationLightProps {
     #[property(min = 0.0, max = 5000.0, step = 1.0, category = "Attenuation")]
     #[gpu]

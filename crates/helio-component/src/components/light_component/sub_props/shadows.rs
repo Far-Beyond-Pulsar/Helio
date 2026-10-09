@@ -22,6 +22,8 @@ pub fn cast_shadows_to_shadow_request(cast_shadows: bool) -> u32 {
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Shadows", category_color = "#A78BFA", default_collapsed = true)]
+// Fields added later load from levels saved before them.
+#[serde(default)]
 pub struct ShadowLightProps {
     #[property(category = "Shadows")]
     #[gpu(as = u32, with = cast_shadows_to_shadow_request)]
