@@ -159,9 +159,11 @@ struct FoliageType {
     density_layer: u32,
     kind_and_flags: u32,
     mesh_or_impostor_id: u32,
+    // Authored material: RGBA8 unorm colour (0 = none, shade procedurally) and
+    // roughness/metallic as unorm16 x 2. See `FoliageMaterial`.
+    base_color: u32,
+    roughness_metallic: u32,
     pad0: u32,
-    pad1: u32,
-    pad2: u32,
 }
 
 /// Mirror of `helio_pass_foliage_place::GpuBladeInstance` (16 bytes).
@@ -432,6 +434,9 @@ struct VertexOutput {
     @location(5) @interpolate(flat) seed: u32,
     /// LOD this instance was drawn at, for the `FOLIAGE_FLAG_DEBUG_LOD` view.
     @location(6) @interpolate(flat) lod: u32,
+    /// The type's packed `base_color` and `roughness_metallic` words. Flat: the whole
+    /// blade is one material.
+    @location(7) @interpolate(flat) material: vec2<u32>,
 }
 
 @vertex
@@ -586,6 +591,7 @@ fn vs_main(
     out.fade = dither_fade;
     out.seed = seed;
     out.lod = lod_info.lod;
+    out.material = vec2<u32>(ty.base_color, ty.roughness_metallic);
     return out;
 }
 
@@ -608,6 +614,9 @@ struct FoliageGBufferOutput {
 /// Grass is a dielectric; 0.04 is the standard non-metal F0, packed into the spare alpha
 /// channels exactly the way `gbuffer.wgsl` does.
 const FOLIAGE_F0: f32 = 0.04;
+
+/// Roughness of a type with no authored material.
+const FOLIAGE_ROUGHNESS: f32 = 0.75;
 
 /// Screen-space motion in pixels per frame.
 ///
@@ -642,15 +651,26 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fo
 
     // ── Shading ───────────────────────────────────────────────────────────────
     //
-    // Procedural, not textured. This pass binds no material table and samples no
-    // textures: card cutout atlases and the bindless material path arrive with the
-    // impostor work in phase 5, and pulling `helio-pass-gbuffer`'s bindless material
-    // bind group in now would make this crate depend on another pass crate for
-    // infrastructure — the exact coupling the TODO on `create_material_bgl` asks not to
-    // spread.
-    let base = vec3<f32>(0.055, 0.115, 0.030);
-    let tip = vec3<f32>(0.180, 0.320, 0.075);
-    var albedo = mix(base, tip, input.height_frac);
+    // Not textured. This pass binds no material table and samples no textures: card
+    // cutout atlases and the bindless material path arrive with the impostor work in
+    // phase 5, and pulling `helio-pass-gbuffer`'s bindless material bind group in now
+    // would make this crate depend on another pass crate for infrastructure — the
+    // exact coupling the TODO on `create_material_bgl` asks not to spread. The type
+    // row carries an authored colour, roughness and metallic instead; a type without
+    // one gets the procedural root-to-tip green.
+    var albedo: vec3<f32>;
+    var roughness = FOLIAGE_ROUGHNESS;
+    var metallic = 0.0;
+    if input.material.x != 0u {
+        albedo = unpack4x8unorm(input.material.x).rgb;
+        let roughness_metallic = unpack2x16unorm(input.material.y);
+        roughness = roughness_metallic.x;
+        metallic = roughness_metallic.y;
+    } else {
+        let base = vec3<f32>(0.055, 0.115, 0.030);
+        let tip = vec3<f32>(0.180, 0.320, 0.075);
+        albedo = mix(base, tip, input.height_frac);
+    }
     // Per-blade variation. Without it a field of grass is one flat colour and reads as
     // carpet no matter how good the geometry is.
     albedo *= vec3<f32>(
@@ -685,10 +705,12 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fo
         albedo = lod_colour;
     }
 
+    // Metallic workflow, as `gbuffer.wgsl` resolves it: F0 = mix(0.04, albedo, metallic).
+    let f0 = mix(vec3<f32>(FOLIAGE_F0), albedo, metallic);
     out.albedo = vec4<f32>(albedo, 1.0);
-    out.normal = vec4<f32>(normal, FOLIAGE_F0);
-    out.orm = vec4<f32>(ao, 0.75, 0.0, FOLIAGE_F0);
-    out.emissive = vec4<f32>(0.0, 0.0, 0.0, FOLIAGE_F0);
+    out.normal = vec4<f32>(normal, f0.r);
+    out.orm = vec4<f32>(ao, roughness, metallic, f0.g);
+    out.emissive = vec4<f32>(0.0, 0.0, 0.0, f0.b);
     out.velocity = vec4<f32>(foliage_velocity(input.clip_position.xy, input.prev_clip_position),0.0,0.0);
     return out;
 }

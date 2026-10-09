@@ -32,7 +32,11 @@ pub struct FoliageTypeComponent {
     #[gpu]
     pub mesh_or_impostor_id: u32,
     #[gpu]
-    pub _pad: [u32; 3],
+    pub base_color: u32,
+    #[gpu]
+    pub roughness_metallic: u32,
+    #[gpu]
+    pub _pad: u32,
 }
 
 #[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
