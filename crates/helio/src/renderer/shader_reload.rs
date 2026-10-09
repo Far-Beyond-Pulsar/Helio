@@ -254,9 +254,6 @@ impl Renderer {
         if let Some(hook) = &self.graph_rebuild_hook {
             hook(graph, &self.device);
         }
-        if let Some(sky) = graph.find_pass_mut::<helio_pass_sky::SkyPass>() {
-            sky.set_fallback_sky_enabled(self.fallback_sky_enabled);
-        }
     }
 
     /// Keeps the previous graph and puts the files of `batch` back to the text

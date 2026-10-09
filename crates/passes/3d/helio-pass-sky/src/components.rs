@@ -67,13 +67,6 @@ pub struct SkyComponent {
     pub cloud_resolution: u32,
 }
 
-/// Atmosphere and cloud settings are intentionally one SceneDB row.  Helio's
-/// former `SkyActor` treated these as a singleton resource, while the scene
-/// contract requires every authored value to have an entity owner.  These
-/// aliases keep the domain vocabulary explicit without introducing parallel
-/// storage or duplicate GPU columns.
-pub type AtmosphereComponent = SkyComponent;
-pub type CloudscapeComponent = SkyComponent;
 
 impl Default for SkyComponent {
     fn default() -> Self {

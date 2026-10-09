@@ -104,7 +104,14 @@ struct FogGlobals {
     _pad: f32,
     grid: [u32; 3],
     enabled: u32,
+    /// The frame's world origin (camera-relative frames): media are authored
+    /// in world space, samples are taken in the frame's coordinates.
+    world_origin: [f32; 4],
 }
+
+/// Bytes of the pass's globals uniform (binding 2), for callers that bind
+/// the fog shader directly.
+pub const FOG_GLOBALS_BYTES: usize = std::mem::size_of::<FogGlobals>();
 
 pub struct VolumetricFogPass {
     /// Whether this frame can contribute fog. The graph owns the pass even when
@@ -763,6 +770,7 @@ impl RenderPass for VolumetricFogPass {
             _pad: 0.0,
             grid: self.grid,
             enabled: self.active as u32,
+            world_origin: ctx.world_origin.map_or([0.0; 4], |o| [o.x as f32, o.y as f32, o.z as f32, 0.0]),
         };
         ctx.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));

@@ -100,8 +100,8 @@ const DEPTH_STEPS: u32 = 4u;
 // Ray–sphere intersection. Returns (t_near, t_far). Both negative = miss.
 fn ray_sphere(ro: vec3<f32>, rd: vec3<f32>, r: f32) -> vec2<f32> {
     let b   = dot(ro, rd);
-    let c   = dot(ro, ro) - r * r;
-    let disc = b * b - c;
+    let perpendicular = cross(ro, rd);
+    let disc = r * r - dot(perpendicular, perpendicular);
     if disc < 0.0 { return vec2<f32>(-1.0, -1.0); }
     let s = sqrt(disc);
     return vec2<f32>(-b - s, -b + s);
@@ -149,7 +149,10 @@ fn sample_sky_lut(ray_dir: vec3<f32>) -> vec3<f32> {
     // V is inverted: NDC y=+1 (top of framebuffer) → texture row 0 → sin_elev=+1,
     // so v=0 corresponds to sin_elev=+1 (looking up), v=1 to sin_elev=-1 (below horizon).
     let v = 1.0 - (sin_elev * 0.5 + 0.5);
-    return textureSample(sky_lut, sky_sampler, vec2<f32>(u, v)).rgb;
+    let uv = vec2<f32>(u, v);
+    // This LUT has no mip chain. Explicit LOD also avoids seam derivatives
+    // selecting inconsistent samples along the azimuth wrap.
+    return textureSampleLevel(sky_lut, sky_sampler, uv, 0.0).rgb;
 }
 
 
@@ -343,7 +346,7 @@ fn aces_approx(v: vec3<f32>) -> vec3<f32> {
 // Fragment shader
 // ──────────────────────────────────────────────────────────────────────────────
 
-// A far-plane inverse VP can have w=0 (and a planetary camera position loses
+// A far-plane inverse VP can have w=0 (and a camera far from the origin loses
 // metres in f32). Perspective sky rays need only projection scale and rotation.
 fn sky_camera_ray(ndc: vec2<f32>) -> vec3<f32> {
     let camera = cameras[0];
@@ -363,15 +366,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let camera_pos = cameras[0].position_near.xyz;
     let ray_dir = sky_camera_ray(in.ndc_xy);
 
-    // Atmosphere: sample the pre-baked sky-view LUT immediately.  sampling
-    // must occur under uniform control flow, so we do it before any
-    // non-uniform branch/early-return.
-    var sky_col = sample_sky_lut(ray_dir);
     // Registered buffers may contain an empty or deleted environment row.
     if sky.earth_radius <= 0.0 || sky.atm_radius <= sky.earth_radius
         || sky.rayleigh_h_scale <= 0.0 || sky.mie_h_scale <= 0.0 {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
+
+    var sky_col = sample_sky_lut(ray_dir);
 
     // Below horizon: preserve sunset colors with gradual darkening to night.
     if ray_dir.y < 0.0 {
@@ -400,6 +401,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         sky_col = trace_clouds(cameras[0].position_near.xyz, ray_dir, sky_col);
     }
 
-    let final_col = aces_approx(sky_col * sky.exposure);
-    return vec4<f32>(final_col, 1.0);
+    return vec4<f32>(aces_approx(sky_col * sky.exposure), 1.0);
 }

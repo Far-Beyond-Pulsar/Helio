@@ -91,9 +91,9 @@ impl Target {
         let f = forward.normalize();
         let right = f.cross(up_hint).normalize();
         let up = right.cross(f);
-        let view = Mat4::look_to_rh(Vec3::ZERO, f, up);
+        let view = glam::camera::rh::view::look_to_mat4(Vec3::ZERO, f, up);
         let aspect = self.size[0] as f32 / self.size[1] as f32;
-        let proj = Mat4::perspective_rh(self.fov_y, aspect, 0.05, 30_000_000.0);
+        let proj = glam::camera::rh::proj::directx::perspective(self.fov_y, aspect, 0.05, 30_000_000.0);
         helio_core::GpuCameraUniforms::new(view, proj, Vec3::ZERO, 0.05, 30_000_000.0, 0, [0.0, 0.0], proj * view)
     }
 
@@ -152,7 +152,7 @@ pub fn renderer(gpu: &Gpu, planet: Arc<Planet>, size: [u32; 2]) -> PlanetRendere
 }
 
 pub fn frame(planet: &Arc<Planet>, eye: DVec3) -> PlanetFrame {
-    PlanetFrame { eye, planet: planet.clone(), sun: Vec3::new(0.3, 0.8, 0.4), shadows: false }
+    PlanetFrame { eye, planet: planet.clone(), sun: Vec3::new(0.3, 0.8, 0.4), shadows: false, picks: None }
 }
 
 /// Decoded primary hit.
@@ -238,4 +238,38 @@ pub fn land(planet: &Planet, face: u8, fi: f64, fj: f64) -> DVec3 {
         }
     }
     panic!("no land found");
+}
+
+/// A land column whose face fractions lie in `[lo, hi)` on both axes.
+pub fn land_within(planet: &Planet, face: u8, lo: f64, hi: f64) -> DVec3 {
+    let grid = planet.grid();
+    let n = f64::from(grid.cells());
+    for step in 0..1600 {
+        let a = lo + (hi - lo) * f64::from(step % 40) / 40.0;
+        let b = lo + (hi - lo) * f64::from(step / 40) / 40.0;
+        let (i, j) = ((a * n) as i32, (b * n) as i32);
+        if planet.column_top(face, i, j, 0) > 40 {
+            return grid.direction(face, f64::from(i) + 0.5, f64::from(j) + 0.5);
+        }
+    }
+    panic!("no land found in [{lo}, {hi})");
+}
+
+/// The highest of a coarse sample of columns: a mountain peak.
+pub fn peak(planet: &Planet) -> DVec3 {
+    let grid = planet.grid();
+    let n = grid.cells();
+    let mut best = (i32::MIN, 0u8, 0, 0);
+    for face in 0..6u8 {
+        for a in 0..120 {
+            for b in 0..120 {
+                let (i, j) = (n / 120 * a + n / 240, n / 120 * b + n / 240);
+                let h = planet.column_height(face, i, j, 0);
+                if h > best.0 {
+                    best = (h, face, i, j);
+                }
+            }
+        }
+    }
+    grid.direction(best.1, f64::from(best.2) + 0.5, f64::from(best.3) + 0.5)
 }

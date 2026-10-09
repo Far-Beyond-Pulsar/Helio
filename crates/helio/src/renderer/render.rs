@@ -275,7 +275,6 @@ impl Renderer {
         self.graph.set_editor_mode(self.editor_mode);
 
         if let Ok(mut state) = self.debug_state.lock() {
-            state.camera_position = camera.position;
             state.world_origin = self.world_origin;
         }
         // SceneDB owns texture residency. Retain descriptor views by GPU handle
@@ -380,8 +379,6 @@ impl Renderer {
                 clear_color: self.clear_color,
                 ambient_color: self.ambient_color,
                 ambient_intensity: self.ambient_intensity,
-                ambient_up: self.ambient_up,
-                ambient_ground: self.ambient_ground.unwrap_or(self.ambient_color.map(|c| c * 0.15)),
                 tlas: self.ray_frame.tlas(self.frame_count),
             },
             "Renderer",

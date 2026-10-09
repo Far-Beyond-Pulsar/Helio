@@ -1,6 +1,6 @@
 // Environment join: one source row per component instance (fog volumes,
 // post-process volumes, camera post-process baselines, water volumes,
-// foliage; see `environment_join.rs`). A placed row is copied into its pass's buffer; a
+// foliage, atmospheres; see `environment_join.rs`). A placed row is copied into its pass's buffer; a
 // spatial row gets its world AABB from the owner's transform first. Every
 // other output row stays zero, which each pass treats as inert (`enabled`
 // 0, `blend_weight` 0, zero extent).
@@ -19,7 +19,9 @@ struct JoinUniforms {
     /// AABB min/max vec4s); bit 1: a hidden owner turns the row off;
     /// bit 2: the output's `bounds_max.w` is the owner's Y plus the source
     /// size's `w`, scaled like the box (a water surface height); bit 3: a
-    /// foliage layer (see `write_layer`).
+    /// foliage layer (see `write_layer`); bit 4: an atmosphere, whose
+    /// centre (words 0..2) moves to the owner's position when its
+    /// placement (word 3) is `PLACEMENT_CENTER`.
     flags: u32,
     /// Output rows `cs_compact_rows` may fill.
     capacity: u32,
@@ -36,6 +38,9 @@ const SPATIAL: u32 = 1u;
 const GATE_HIDDEN: u32 = 2u;
 const SURFACE: u32 = 4u;
 const LAYER: u32 = 8u;
+const CENTERED: u32 = 16u;
+// `helio_pass_sky::atmosphere::placement::CENTER`.
+const PLACEMENT_CENTER: u32 = 1u;
 const NO_GATE_WORD: u32 = 0xffffffffu;
 const WORKGROUP: u32 = 64u;
 
@@ -84,7 +89,7 @@ fn placed(row: u32) -> bool {
     if (u.flags & GATE_HIDDEN) != 0u && index < arrayLength(&hidden) && hidden[index] != 0u {
         return false;
     }
-    if (u.flags & (SPATIAL | LAYER)) != 0u && index >= arrayLength(&transforms) {
+    if (u.flags & (SPATIAL | LAYER | CENTERED)) != 0u && index >= arrayLength(&transforms) {
         return false;
     }
     if (u.flags & SPATIAL) != 0u && all(source_size(row) == vec3<f32>(0.0)) {
@@ -160,6 +165,12 @@ fn write_row(row: u32, slot: u32) {
     }
     for (var word = 0u; word < count; word++) {
         rows_out[output + output_header + word] = sources[source + source_header + word];
+    }
+    if (u.flags & CENTERED) != 0u && sources[source + 3u] == PLACEMENT_CENTER {
+        let center = object_position(transforms[owners[row].owner_index]);
+        rows_out[output] = bitcast<u32>(bitcast<f32>(sources[source]) + center.x);
+        rows_out[output + 1u] = bitcast<u32>(bitcast<f32>(sources[source + 1u]) + center.y);
+        rows_out[output + 2u] = bitcast<u32>(bitcast<f32>(sources[source + 2u]) + center.z);
     }
 }
 

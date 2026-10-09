@@ -448,7 +448,7 @@ impl RenderPass for PortalInstancePass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         if ctx.frame_num < 3 || ctx.frame_num.is_multiple_of(120) {
-            log::info!(
+            log::trace!(
                 "[PortalInstance] frame={} draw_count={} render_pass_open={}",
                 ctx.frame_num,
                 self.draw_count,

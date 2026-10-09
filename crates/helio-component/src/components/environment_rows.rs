@@ -1,5 +1,5 @@
 //! The rows fog volumes, post-process volumes, camera post-process
-//! settings, water volumes and foliage cast, as the renderer's environment join reads them
+//! settings, water volumes, foliage and atmospheres cast, as the renderer's environment join reads them
 //! (Pulsar-Native#1035, Phase 4).
 //!
 //! Each is a second GPU registration on its authored component: SceneDB
@@ -22,12 +22,13 @@
 //! | [`CameraPostProcessSourceRow`] | 152: the row | `helio_pass_postprocess::CameraPostProcessComponent` (152) |
 //! | [`WaterVolumeSourceRow`] | 4 size + 56: the row after its bounds | `helio_pass_water_sim::WaterVolumeComponent` (8 bounds + 56), packed into its leading rows |
 //! | [`FoliageSourceRow`] | 24 type + 4 layer + 12 wind | `helio_pass_foliage_place`'s `FoliageTypeComponent` (24), `FoliageLayerComponent` (8) and `FoliageWindComponent` (12), each packed |
+//! | [`AtmosphereSourceRow`] | 4 centre + 16 media + 4 ground + 4 shell: the row, its centre in the owner's space | `helio_pass_sky::AtmosphereComponent` (28) |
 
 use pulsar_scenedb::gpu::GpuMirrorHandle;
 use pulsar_scenedb_derive::SceneStore;
 
 use super::{
-    CameraPostProcessComponent, FoliageComponent, GlobalFogComponent, LocalFogVolumeComponent,
+    AtmosphereComponent, CameraPostProcessComponent, FoliageComponent, GlobalFogComponent, LocalFogVolumeComponent,
     PostProcessVolumeComponent, WaterVolumeComponent,
 };
 
@@ -37,6 +38,35 @@ pub const POST_PROCESS_VOLUME_SOURCES_BUFFER: &str = "post_process_volume_source
 pub const CAMERA_POST_PROCESS_SOURCES_BUFFER: &str = "camera_postprocess_sources";
 pub const WATER_VOLUME_SOURCES_BUFFER: &str = "water_volume_sources";
 pub const FOLIAGE_SOURCES_BUFFER: &str = "foliage_sources";
+pub const ATMOSPHERE_SOURCES_BUFFER: &str = "atmosphere_sources";
+
+/// An atmosphere (`helio_pass_sky::AtmosphereComponent` pass row, bit for
+/// bit): its centre and placement (`center`; the centre in the owner's
+/// space, zero: the join adds the owner's position to a planet placed at its
+/// owner), Rayleigh and Mie scattering, Mie and ozone absorption (`media`),
+/// ground albedo and ozone width (`ground`), and planet and atmosphere
+/// radii, sun size and enabled flag (`shell`; `enabled` 0 when the authored
+/// component is disabled). The placement and enabled words are `u32`s, kept
+/// as bits.
+#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+#[gpu(layout = packed, buffer = "atmosphere_sources")]
+pub struct AtmosphereSourceRow {
+    #[gpu]
+    pub center: [f32; 4],
+    #[gpu]
+    pub media: [f32; 16],
+    #[gpu]
+    pub ground: [f32; 4],
+    #[gpu]
+    pub shell: [f32; 4],
+}
+
+impl AtmosphereSourceRow {
+    pub fn of(atmosphere: &AtmosphereComponent) -> Self {
+        read(bytemuck::bytes_of(&atmosphere.to_row()))
+    }
+}
 
 /// A global fog medium (`GlobalFogComponent` pass row, bit for bit;
 /// `enabled` 0 when the authored component is disabled).
@@ -317,6 +347,12 @@ derived_row!(
     foliage_clear
 );
 derived_row!(
+    AtmosphereComponent,
+    AtmosphereSourceRow,
+    atmosphere_dispatch,
+    atmosphere_clear
+);
+derived_row!(
     WaterVolumeComponent,
     WaterVolumeSourceRow,
     water_volume_dispatch,
@@ -335,6 +371,11 @@ mod tests {
         assert_eq!(std::mem::size_of::<CameraPostProcessSourceRow>(), 152 * 4);
         assert_eq!(std::mem::size_of::<WaterVolumeSourceRow>(), 60 * 4);
         assert_eq!(std::mem::size_of::<FoliageSourceRow>(), 40 * 4);
+        assert_eq!(std::mem::size_of::<AtmosphereSourceRow>(), 28 * 4);
+        assert_eq!(
+            std::mem::size_of::<helio_pass_sky::AtmosphereComponent>(),
+            28 * 4
+        );
         assert_eq!(
             std::mem::size_of::<helio_pass_foliage_place::components::FoliageTypeComponent>(),
             24 * 4
@@ -389,6 +430,27 @@ mod tests {
         water.enabled = false;
         let row = WaterVolumeSourceRow::of(&water);
         assert!(bytemuck::bytes_of(&row).iter().all(|byte| *byte == 0));
+
+        let mut atmosphere = AtmosphereComponent::default();
+        assert_eq!(AtmosphereSourceRow::of(&atmosphere).shell[3].to_bits(), 1);
+        atmosphere.enabled = false;
+        assert_eq!(AtmosphereSourceRow::of(&atmosphere).shell[3].to_bits(), 0);
+    }
+
+    #[test]
+    fn an_atmosphere_row_is_the_pass_row_in_its_owners_space() {
+        let atmosphere = AtmosphereComponent {
+            placement: super::super::AtmospherePlacement::PlanetAtOwner,
+            planet_radius_km: 6360.0,
+            ..Default::default()
+        };
+        let row = AtmosphereSourceRow::of(&atmosphere);
+        assert_eq!(
+            bytemuck::bytes_of(&row),
+            bytemuck::bytes_of(&atmosphere.to_row())
+        );
+        assert_eq!(&row.center[..3], &[0.0; 3], "the join adds the owner's position");
+        assert_eq!(row.center[3].to_bits(), helio_pass_sky::atmosphere::placement::CENTER);
     }
 
     #[test]

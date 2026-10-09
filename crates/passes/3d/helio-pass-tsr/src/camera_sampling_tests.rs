@@ -134,7 +134,10 @@ fn prepare_uploads_the_actual_camera_sample_and_supplied_frame_time() {
         assert_eq!(words[4], time.to_bits());
         assert_eq!(words[6], previous_uv[0].to_bits());
         assert_eq!(words[7], previous_uv[1].to_bits());
-        assert_eq!(&words[8..24], &previous_view.map(f32::to_bits));
+        // Reset uses the current view; subsequent unchanged-origin frames
+        // upload the preceding raw view exactly.
+        let expected_view = if index == 0 { camera.view } else { previous_view };
+        assert_eq!(&words[8..24], &expected_view.map(f32::to_bits));
         previous_view = camera.view;
         previous_uv = [camera.jitter_frame[0] * 0.5, -camera.jitter_frame[1] * 0.5];
         drop(data);

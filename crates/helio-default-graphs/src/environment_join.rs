@@ -1,7 +1,7 @@
 //! The environment join: the frontend's authored fog volumes, post-process
-//! volumes, camera post-process baselines, water volumes and foliage to the
-//! rows the volumetric fog, post-process, water and foliage passes read, on
-//! the GPU (Pulsar-Native#1035, Phase 4).
+//! volumes, camera post-process baselines, water volumes, foliage and
+//! atmospheres to the rows the volumetric fog, post-process, water, foliage
+//! and sky passes read, on the GPU (Pulsar-Native#1035, Phase 4).
 //!
 //! The same contract as [`crate::scene_join`]: each component instance
 //! derives a source row in its own space (`helio_component`'s
@@ -18,6 +18,7 @@
 //! | `camera_post_process` | `"camera_postprocess"` | attached, enabled, owner current (visibility does not apply) |
 //! | `water_volumes` | `"water_volumes"`, packed into [`MAX_WATER_VOLUMES`] rows | as for volumes; the surface height follows the owner's Y |
 //! | `foliage` | `"foliage_types"`, `"foliage_layers"`, `"foliage_wind"`, each packed | attached, enabled, owner current and visible, with a density |
+//! | `atmospheres` | `"atmospheres"` | attached, enabled, owner current (visibility does not apply); a planet placed at its owner is centred on the owner's position |
 //!
 //! Every other row is zero, which each pass treats as inert. A volume's
 //! bounds follow its owner's position, rotation and scale; a foliage layer is
@@ -54,6 +55,9 @@ pub const WATER_VOLUME_SOURCE_ROW_BYTES: u64 = 60 * 4;
 /// the layer (half extent, infinite flag, altitude min and max) and the
 /// wind row (12 words).
 pub const FOLIAGE_SOURCE_ROW_BYTES: u64 = 40 * 4;
+/// `AtmosphereSourceRow`: the `helio_pass_sky::AtmosphereComponent` pass
+/// row, its centre in the owner's space.
+pub const ATMOSPHERE_SOURCE_ROW_BYTES: u64 = 28 * 4;
 /// Rows the water passes read (`helio_pass_water_sim::MAX_SIM_VOLUMES`):
 /// placed water volumes beyond these are not drawn.
 pub const MAX_WATER_VOLUMES: u32 = helio_pass_water_sim::MAX_SIM_VOLUMES;
@@ -72,12 +76,14 @@ pub const WATER_VOLUMES_KEY: BufferKey = BufferKey::of("water_volumes");
 pub const FOLIAGE_TYPES_KEY: BufferKey = BufferKey::of("foliage_types");
 pub const FOLIAGE_LAYERS_KEY: BufferKey = BufferKey::of("foliage_layers");
 pub const FOLIAGE_WIND_KEY: BufferKey = BufferKey::of("foliage_wind");
+pub const ATMOSPHERES_KEY: BufferKey = BufferKey::of("atmospheres");
 
 const WORKGROUP: u32 = 64;
 const SPATIAL: u32 = 1;
 const GATE_HIDDEN: u32 = 2;
 const SURFACE: u32 = 4;
 const LAYER: u32 = 8;
+const CENTERED: u32 = 16;
 const NO_GATE_WORD: u32 = u32::MAX;
 
 /// Where the frontend's rows live.
@@ -93,6 +99,7 @@ pub struct EnvironmentJoinKeys {
     pub camera_post_process: BufferKey,
     pub water_volumes: BufferKey,
     pub foliage: BufferKey,
+    pub atmospheres: BufferKey,
 }
 
 /// The source buffers, in [`EnvironmentJoinKeys`] order.
@@ -104,16 +111,18 @@ enum Source {
     CameraPostProcess,
     WaterVolumes,
     Foliage,
+    Atmospheres,
 }
 
 impl Source {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::GlobalFog,
         Self::LocalFog,
         Self::PostProcessVolumes,
         Self::CameraPostProcess,
         Self::WaterVolumes,
         Self::Foliage,
+        Self::Atmospheres,
     ];
 
     fn key(self, keys: &EnvironmentJoinKeys) -> BufferKey {
@@ -124,6 +133,7 @@ impl Source {
             Self::CameraPostProcess => keys.camera_post_process,
             Self::WaterVolumes => keys.water_volumes,
             Self::Foliage => keys.foliage,
+            Self::Atmospheres => keys.atmospheres,
         }
     }
 
@@ -135,6 +145,7 @@ impl Source {
             Self::CameraPostProcess => CAMERA_POST_PROCESS_SOURCE_ROW_BYTES,
             Self::WaterVolumes => WATER_VOLUME_SOURCE_ROW_BYTES,
             Self::Foliage => FOLIAGE_SOURCE_ROW_BYTES,
+            Self::Atmospheres => ATMOSPHERE_SOURCE_ROW_BYTES,
         }
     }
 }
@@ -212,7 +223,7 @@ impl Spec {
     }
 
     fn reads_transforms(&self) -> bool {
-        self.flags & (SPATIAL | LAYER) != 0
+        self.flags & (SPATIAL | LAYER | CENTERED) != 0
     }
 
     fn output_row_bytes(&self) -> u64 {
@@ -370,6 +381,13 @@ impl EnvironmentJoin {
             .packed(1)
             .slice(28, 12)
             .gated_on(0),
+            Spec::new(
+                "Environment Join Atmospheres",
+                ATMOSPHERES_KEY,
+                Source::Atmospheres,
+                28,
+                CENTERED,
+            ),
         ];
         Self {
             keys,

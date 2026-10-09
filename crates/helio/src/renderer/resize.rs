@@ -108,9 +108,6 @@ impl Renderer {
         if let Some(hook) = &self.graph_rebuild_hook {
             hook(&mut self.graph, &self.device);
         }
-        if let Some(sky) = self.graph.find_pass_mut::<helio_pass_sky::SkyPass>() {
-            sky.set_fallback_sky_enabled(self.fallback_sky_enabled);
-        }
     }
 
     pub fn set_render_scale(&mut self, scale: f32) {

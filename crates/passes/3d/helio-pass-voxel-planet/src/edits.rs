@@ -1,19 +1,25 @@
 //! Ordered destruction/construction brushes and their spatial index.
 //!
-//! A brush is authored in planet-centred metres. For evaluation it is
-//! resolved per cube face into integer half-cell coordinates, so CPU queries
-//! and GPU generation apply the exact same integer containment test. Later
-//! brushes override earlier ones. At LOD level `L` a brush whose radius is
-//! below half a level cell is omitted (it is smaller than the point sample).
+//! A brush is authored in planet-centred metres and resolved per cube face
+//! for culling. Cubes are tested in the face's integer half-cell index
+//! space (one-block cubes are exactly one cell, aligned with the ground);
+//! spheres are balls in the seamless integer volume space
+//! ([`Grid::volume_point`]), so they are round at any size and depth, the
+//! planet's core included. CPU queries and GPU generation apply the exact
+//! same integer tests. Later brushes override earlier ones. At LOD level `L`
+//! a brush whose radius is below half a level cell is omitted (it is smaller
+//! than the point sample).
 use crate::grid::{face_axes, Grid};
 use bytemuck::{Pod, Zeroable};
-use glam::DVec3;
+use glam::{DVec3, IVec3};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
-/// Largest brush radius in half cells; keeps the squared test within u32.
-pub const MAX_RADIUS_HALF: u32 = 37_000;
+/// Largest brush radius in half cells (54 000 km at 0.1 m voxels): the
+/// containment test squares offsets exactly in 64 bits, and band bounds
+/// (centre plus radius) stay within i32.
+pub const MAX_RADIUS_HALF: u32 = 1 << 29;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrushShape {
@@ -41,17 +47,29 @@ pub struct Brush {
     pub material: u32,
 }
 
-/// A brush resolved into one face's integer index space (GPU layout).
+/// A brush resolved for one face (GPU layout, `FaceBrush` in WGSL).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct FaceBrush {
-    /// Face in bits 0..3; op in 4..6; shape in 6..8; material in 8..16.
+    /// Face in bits 0..3; op in 4..6; shape in 6..8 (0 ball, 1 cube);
+    /// material in 8..16.
     pub flags: u32,
+    /// Radius in half base cells: the levels it applies at, and the cube's
+    /// half size.
     pub radius_half: u32,
-    pub pad: [u32; 2],
-    /// Centre in half base cells (i, j, k).
+    /// Lowest and highest half-cell heights it can touch (band bounds).
+    pub k_lo: i32,
+    pub k_hi: i32,
+    /// Index-space centre (half base cells i, j, k) and horizontal half
+    /// extent (half cells) on this face, for culling.
     pub center: [i32; 4],
+    /// Ball: volume-space centre and radius ([`Grid::volume_point`] units).
+    pub ball: [i32; 4],
 }
+
+/// Shape codes of [`FaceBrush::flags`].
+pub const SHAPE_BALL: u32 = 0;
+pub const SHAPE_CUBE: u32 = 1;
 
 impl FaceBrush {
     pub fn face(&self) -> u8 {
@@ -67,18 +85,31 @@ impl FaceBrush {
     pub fn active(&self, level: u32) -> bool {
         self.radius_half >= (1u32 << level)
     }
-    /// Exact containment of a level cell centre given in half cells.
-    pub fn contains(&self, center_half: [i32; 3]) -> bool {
-        let r = self.radius_half;
-        let mut sum = 0u32;
-        for axis in 0..3 {
-            let d = center_half[axis].wrapping_sub(self.center[axis]).unsigned_abs();
+    pub fn shape(&self) -> u32 {
+        (self.flags >> 6) & 3
+    }
+    /// Horizontal half extent on this face, in base cells (culling).
+    pub fn extent_cells(&self) -> i64 {
+        i64::from(self.center[3]) / 2 + 1
+    }
+    /// Exact containment of a level cell centre: `center_half` in half cells
+    /// (cubes), `point` its volume point (balls, computed on demand); exact
+    /// 64-bit squares (`brush_contains` in WGSL).
+    pub fn contains(&self, center_half: [i32; 3], point: impl FnOnce() -> IVec3) -> bool {
+        if self.shape() == SHAPE_CUBE {
+            return (0..3).all(|axis| center_half[axis].wrapping_sub(self.center[axis]).unsigned_abs() <= self.radius_half);
+        }
+        let q = point();
+        let r = self.ball[3].unsigned_abs();
+        let mut sum = 0u64;
+        for (v, c) in [q.x, q.y, q.z].into_iter().zip(self.ball) {
+            let d = v.wrapping_sub(c).unsigned_abs();
             if d > r {
                 return false;
             }
-            sum = sum.wrapping_add(d.wrapping_mul(d));
+            sum += u64::from(d) * u64::from(d);
         }
-        (self.flags >> 6) & 3 == 1 || sum <= r.wrapping_mul(r)
+        sum <= u64::from(r) * u64::from(r)
     }
 }
 
@@ -107,17 +138,12 @@ impl Brush {
         }
         let radius_half = (radius_half as u32).max(1);
         let center = DVec3::from_array(self.center);
+        if self.shape == BrushShape::Sphere {
+            return self.resolve_ball(grid, radius_half);
+        }
         let n = f64::from(grid.cells());
         let margin = f64::from(radius_half) / 2.0 + 2.0;
-        let op = match self.op {
-            BrushOp::Remove => 0u32,
-            BrushOp::Add => 1,
-            BrushOp::Paint => 2,
-        };
-        let shape = match self.shape {
-            BrushShape::Sphere => 0u32,
-            BrushShape::Cube => 1,
-        };
+        let flags = self.op_flags(SHAPE_CUBE);
         let mut out = Vec::new();
         for &face in grid.faces() {
             let [nrm, _, _] = face_axes(face);
@@ -136,12 +162,103 @@ impl Brush {
             if half.iter().any(|v| v.abs() > 2.0e9) {
                 return Err("brush centre is outside the planet grid".into());
             }
+            let r = radius_half as i32;
             out.push(FaceBrush {
-                flags: u32::from(face) | (op << 4) | (shape << 6) | (self.material << 8),
+                flags: flags | u32::from(face),
                 radius_half,
-                pad: [0; 2],
-                center: [half[0] as i32, half[1] as i32, half[2] as i32, 0],
+                k_lo: (half[2] as i32).saturating_sub(r),
+                k_hi: (half[2] as i32).saturating_add(r),
+                center: [half[0] as i32, half[1] as i32, half[2] as i32, r],
+                ball: [0; 4],
             });
+        }
+        if out.is_empty() {
+            return Err("brush does not intersect the voxel grid".into());
+        }
+        Ok(out)
+    }
+
+    fn op_flags(&self, shape: u32) -> u32 {
+        let op = match self.op {
+            BrushOp::Remove => 0u32,
+            BrushOp::Add => 1,
+            BrushOp::Paint => 2,
+        };
+        (op << 4) | (shape << 6) | (self.material << 8)
+    }
+
+    /// A sphere as a ball in volume space, centred on the volume point of
+    /// the base cell holding its centre (the planet's centre for a ball
+    /// around the core), on every face it can reach.
+    fn resolve_ball(&self, grid: &Grid, radius_half: u32) -> Result<Vec<FaceBrush>, String> {
+        let s = grid.voxel_size();
+        let center = DVec3::from_array(self.center);
+        let flags = self.op_flags(SHAPE_BALL);
+        // Volume units per metre: the domain sphere's radius over the
+        // planet's (sphere), 1.25 cm units (plane).
+        let units = if grid.is_plane() { 1.0 / crate::grid::DOMAIN_UNIT } else { f64::from(grid.sphere_constants()[2]) / grid.radius() };
+        let r_units = self.radius * units;
+        if r_units >= f64::from(i32::MAX) / 2.0 {
+            return Err("brush radius exceeds the volume space".into());
+        }
+        let radius_layers = self.radius / s;
+        let (ball_centre, centre_layer) = if !grid.is_plane() && center.length() < s {
+            (IVec3::ZERO, -(grid.radius() / s))
+        } else {
+            let (cell, coords) = grid.locate(center);
+            (grid.volume_point(cell.face, cell.i, cell.j, cell.k, 0), coords[2])
+        };
+        let ball = [ball_centre.x, ball_centre.y, ball_centre.z, r_units.round() as i32];
+        // Heights it can touch, in half cells (two layers of margin; the
+        // volume radius of a cell is exact up to rounding).
+        let half = |layers: f64| (layers * 2.0).clamp(-2.0e9, 2.0e9) as i32;
+        let k_lo = half(centre_layer - radius_layers - 2.0);
+        let k_hi = half(centre_layer + radius_layers + 2.0);
+        let n = grid.cells();
+        let whole = |face: u8| FaceBrush { flags: flags | u32::from(face), radius_half, k_lo, k_hi, center: [n, n, 0, n + 16], ball };
+        if grid.is_plane() {
+            let (cell, _) = grid.locate(center);
+            let extent = radius_half.saturating_add(4).min(i32::MAX as u32) as i32;
+            return Ok(vec![FaceBrush {
+                flags: flags | u32::from(crate::grid::PLANE_FACE),
+                radius_half,
+                k_lo,
+                k_hi,
+                center: [cell.i * 2 + 1, cell.j * 2 + 1, cell.k * 2 + 1, extent],
+                ball,
+            }]);
+        }
+        // Angular radius of the ball seen from the planet's centre (all
+        // directions when it holds the centre).
+        let len = center.length();
+        let theta = if len > self.radius { (self.radius / len).asin() } else { std::f64::consts::PI };
+        // A face's pyramid reaches 54.74 degrees from its normal.
+        let corner = (1.0f64 / 3.0f64.sqrt()).acos();
+        let mut out = Vec::new();
+        for &face in grid.faces() {
+            let [nrm, _, _] = face_axes(face);
+            let angle = if len > 0.0 { (center.dot(nrm) / len).clamp(-1.0, 1.0).acos() } else { 0.0 };
+            if theta < std::f64::consts::PI && angle > corner + theta + 0.01 {
+                continue;
+            }
+            // An equal-angle coordinate moves at most 1 / cos(a) times as
+            // fast as the great-circle angle, a the angle from the face's
+            // normal: a rectangle around the centre's coordinates, or the
+            // whole face for wide balls far off the face's axis.
+            match grid.face_coords(face, center) {
+                Some(c) if theta < 0.5 && angle + theta < 1.3 => {
+                    let cells = theta / (angle + theta).cos() / grid.delta() + 4.0;
+                    out.push(FaceBrush {
+                        flags: flags | u32::from(face),
+                        radius_half,
+                        k_lo,
+                        k_hi,
+                        center: [(c[0] * 2.0).round() as i32, (c[1] * 2.0).round() as i32, (c[2] * 2.0).round() as i32, (cells * 2.0).min(f64::from(n) * 2.0 + 32.0) as i32],
+                        ball,
+                    });
+                }
+                _ => out.push(whole(face)),
+            }
         }
         if out.is_empty() {
             return Err("brush does not intersect the voxel grid".into());
@@ -292,9 +409,9 @@ impl EditLog {
         self.resolved(id).prefix
     }
     fn tiles_of(face_brush: &FaceBrush) -> (u32, i64, i64, i64, i64) {
-        let g = bucket_of(face_brush.radius_half);
+        let g = bucket_of(face_brush.center[3].max(0) as u32);
         let t = tile(g);
-        let r = i64::from(face_brush.radius_half) / 2 + 1;
+        let r = face_brush.extent_cells();
         let ci = i64::from(face_brush.center[0]) / 2;
         let cj = i64::from(face_brush.center[1]) / 2;
         (
@@ -384,7 +501,7 @@ impl EditLog {
                 if fb.face() != face || !fb.active(level) {
                     continue;
                 }
-                let r = i64::from(fb.radius_half) / 2 + 1;
+                let r = fb.extent_cells();
                 let ci = i64::from(fb.center[0]) / 2;
                 let cj = i64::from(fb.center[1]) / 2;
                 if ci + r < i0 || ci - r > i1 || cj + r < j0 || cj - r > j1 {
@@ -399,9 +516,11 @@ impl EditLog {
 
 /// Apply ordered brushes to a canonical terrain `(kind, material)` at a level
 /// cell centre. Kind: 0 air, 1 solid.
-pub fn apply(brushes: impl Iterator<Item = FaceBrush>, center: [i32; 3], mut kind: u32, mut material: u32) -> (u32, u32) {
+/// `point` is the cell's volume point (computed once, when a ball needs it).
+pub fn apply(brushes: impl Iterator<Item = FaceBrush>, center: [i32; 3], point: impl Fn() -> IVec3, mut kind: u32, mut material: u32) -> (u32, u32) {
+    let mut q = None;
     for b in brushes {
-        if !b.contains(center) {
+        if !b.contains(center, || *q.get_or_insert_with(&point)) {
             continue;
         }
         match b.op() {

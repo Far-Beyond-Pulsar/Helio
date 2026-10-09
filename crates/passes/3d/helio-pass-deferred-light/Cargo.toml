@@ -11,6 +11,7 @@ helio-core  = { workspace = true }
 helio-mats  = { workspace = true }
 helio-pass-shadow-matrix = { workspace = true }
 helio-pass-radiance-cascades = { workspace = true }
+helio-pass-sky = { workspace = true }
 wgpu      = { workspace = true }
 bytemuck  = { workspace = true, features = ["derive"] }
 pulsar_scenedb = { workspace = true }
