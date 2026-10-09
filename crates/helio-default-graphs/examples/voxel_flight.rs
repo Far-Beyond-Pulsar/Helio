@@ -182,7 +182,6 @@ impl Flight {
             &context,
             SceneGpuConfig { classes: vec![], tombstone_headroom: 0, max_cells_metadata: 0 },
         );
-        helio_pass_sky::SkyComponent::register_gpu_columns_growable(&mut store, 4, &device);
         helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(&mut store, 4, &device);
         helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut store, 16, &device);
         helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut store, 16, &device);
