@@ -72,9 +72,17 @@ impl RadiantTemplate {
                     )
                 })
                 .unwrap_or(("", graph_wgsl));
-            let src = if graph_declarations.is_empty() {
-                src
-            } else if let Some(at) = src.find("fn radiant_eval_surface") {
+            // Graph `time` nodes read `radiant_graph_time()`. A template whose
+            // `Globals` carries the shared clock (tagged `RADIANT_GLOBALS_TIME`)
+            // reads it from there; any other template is frozen at 0, which is
+            // always valid WGSL, rather than failing to compile.
+            let time_fn = if src.contains("RADIANT_GLOBALS_TIME") {
+                "fn radiant_graph_time() -> f32 { return globals.time; }\n"
+            } else {
+                "fn radiant_graph_time() -> f32 { return 0.0; }\n"
+            };
+            let graph_declarations = format!("{time_fn}{graph_declarations}");
+            let src = if let Some(at) = src.find("fn radiant_eval_surface") {
                 format!("{}{}\n{}", &src[..at], graph_declarations, &src[at..])
             } else {
                 src

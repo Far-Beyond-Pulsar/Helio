@@ -35,7 +35,9 @@ struct ForwardLitGlobals {
     /// whatever entity `light_entity_indices[i]` names, not entity `i`
     /// itself. See `light_entity_indices`'s binding doc in the shader.
     light_mode_direct_index: u32,
-    _pad0: u32,
+    /// Seconds since start ([`helio_mats::graph_time_seconds`]): the
+    /// shader-graph `time` node.
+    time: f32,
     _pad1: u32,
     _pad2: u32,
 }
@@ -450,7 +452,7 @@ impl RenderPass for ForwardLitPass {
             screen_width: ctx.width as f32,
             screen_height: ctx.height as f32,
             light_mode_direct_index: use_direct_index as u32,
-            _pad0: 0,
+            time: helio_mats::graph_time_seconds(),
             _pad1: 0,
             _pad2: 0,
         };

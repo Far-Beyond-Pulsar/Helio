@@ -28,7 +28,7 @@ struct Globals {
     // rebuilt dense array whose entry `i` needs `light_entity_indices[i]`
     // to find its real entity. See `light_entity_indices`'s binding doc.
     light_mode_direct_index: u32,
-    _pad0: u32,
+    time: f32, // RADIANT_GLOBALS_TIME: seconds since start, for graph time nodes
     _pad1: u32,
     _pad2: u32,
 }

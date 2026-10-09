@@ -215,7 +215,9 @@ pub fn resolve_slot_material(
             graph_hash: 0,
         };
     }
-    if slot.material_asset.trim().is_empty() {
+    // The slot's own assignment, else the mesh asset's default for it.
+    let material_asset = slot.effective_material_asset();
+    if material_asset.trim().is_empty() {
         return imported();
     }
     let Some(project_root) = engine_state::get_project_path() else {
@@ -223,7 +225,7 @@ pub fn resolve_slot_material(
     };
     let path = crate::subsystems::resolve_asset_path(
         std::path::Path::new(&project_root),
-        &slot.material_asset,
+        material_asset,
     );
     let graph_file = if path.is_dir() {
         Some(path.join("shader_graph_save.json"))
@@ -348,4 +350,22 @@ fn graph_material_source(
         cache.insert(path.to_path_buf(), (fingerprint, result.clone()));
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_slot_inherits_the_mesh_default_until_it_assigns_its_own() {
+        let mut slot = StaticMeshMaterialSlot {
+            mesh_default_material: "materials/Default.mat".into(),
+            ..Default::default()
+        };
+        assert_eq!(slot.effective_material_asset(), "materials/Default.mat");
+        slot.material_asset = "materials/Mine.mat".into();
+        assert_eq!(slot.effective_material_asset(), "materials/Mine.mat");
+        slot.material_asset = "  ".into();
+        assert_eq!(slot.effective_material_asset(), "materials/Default.mat");
+    }
 }
