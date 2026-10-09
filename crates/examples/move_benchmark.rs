@@ -25,6 +25,8 @@
 //! * `rt_gpu`  -- blocking wait for the acceleration-structure build it
 //!                submitted (RT mode only).
 //! * `render`  -- `Renderer::render` CPU recording and submission.
+//! * `finish`  -- the part of `render` spent in `CommandEncoder::finish`
+//!                (with `--finish-breakdown` only; see below).
 //! * `gpu`     -- blocking wait for the frame to finish on the device.
 //!
 //! Usage (all flags optional):
@@ -37,7 +39,13 @@
 //! move_benchmark --lights 10000 --despawn-lights 9000   # sparse light rows (#838)
 //! move_benchmark --graph default --editor   # Pulsar-Native editor viewport graph
 //!                                            # (add --no-ray-query on lavapipe)
+//! move_benchmark --finish-breakdown          # fill the `finish` column (Helio#330)
 //! ```
+//!
+//! `--finish-breakdown` sets `HELIO_FINISH_BREAKDOWN`, which makes the graph
+//! finish its encoders inline instead of on its finish pool so each finish
+//! can be timed. `render` is then slower than without it; compare `finish`
+//! only against other `--finish-breakdown` runs.
 //!
 //! No window or surface is created. On a machine without a GPU, Mesa's
 //! lavapipe works: `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`.
@@ -130,6 +138,7 @@ struct Args {
     graph: String,
     editor: bool,
     no_ray_query: bool,
+    finish_breakdown: bool,
     mesh_movability: Option<helio::Movability>,
 }
 
@@ -149,6 +158,7 @@ fn parse_args() -> Args {
         graph: "hlfs".into(),
         editor: false,
         no_ray_query: false,
+        finish_breakdown: false,
         mesh_movability: None,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
@@ -210,6 +220,11 @@ fn parse_args() -> Args {
             }
             "--editor" => {
                 args.editor = true;
+                i += 1;
+                continue;
+            }
+            "--finish-breakdown" => {
+                args.finish_breakdown = true;
                 i += 1;
                 continue;
             }
@@ -479,6 +494,8 @@ struct FrameTiming {
     rt: f64,
     rt_gpu: f64,
     render: f64,
+    /// Inside `render`, so not added to `total`.
+    finish: f64,
     gpu: f64,
 }
 
@@ -536,6 +553,12 @@ impl Bench {
         let t = Instant::now();
         self.renderer.render(&self.scene.camera, &self.view).expect("render");
         timing.render = ms(t);
+        timing.finish = self
+            .renderer
+            .finish_breakdown()
+            .iter()
+            .map(|segment| (segment.compute + segment.graphics).as_secs_f64() * 1000.0)
+            .sum();
 
         let t = Instant::now();
         self.device
@@ -700,6 +723,9 @@ fn build_bench(
 fn main() {
     env_logger::init();
     let args = parse_args();
+    if args.finish_breakdown {
+        std::env::set_var("HELIO_FINISH_BREAKDOWN", "1");
+    }
     let (device, queue, info) = pollster::block_on(device(args.no_ray_query));
     eprintln!("adapter: {} ({:?}, {:?})", info.name, info.device_type, info.backend);
     let rt_supported = device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
@@ -794,14 +820,14 @@ fn report(args: &Args, info: &wgpu::AdapterInfo, rows: &[Row]) {
         info.name, info.backend, args.graph, if args.editor { " (editor mode)" } else { "" },
         args.mesh_movability.map_or("unset".to_string(), |m| format!("{m:?}")), WIDTH, HEIGHT, args.frames
     ));
-    table.push_str("| scene | objects | tris | lights | mode | workload | update | flush | rt | rt_gpu | render | gpu | total | total p95 |\n");
-    table.push_str("|---|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
-    let mut csv = String::from("scene,objects,triangles,lights,mode,workload,frame,update_ms,flush_ms,rt_ms,rt_gpu_ms,render_ms,gpu_ms,total_ms\n");
+    table.push_str("| scene | objects | tris | lights | mode | workload | update | flush | rt | rt_gpu | render | finish | gpu | total | total p95 |\n");
+    table.push_str("|---|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    let mut csv = String::from("scene,objects,triangles,lights,mode,workload,frame,update_ms,flush_ms,rt_ms,rt_gpu_ms,render_ms,finish_ms,gpu_ms,total_ms\n");
     for row in rows {
         let mut totals: Vec<f64> = row.frames.iter().map(FrameTiming::total).collect();
         totals.sort_by(|a, b| a.partial_cmp(b).unwrap());
         table.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} |\n",
+            "| {} | {} | {} | {} | {} | {} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} |\n",
             row.scene,
             row.objects,
             row.triangles,
@@ -813,13 +839,14 @@ fn report(args: &Args, info: &wgpu::AdapterInfo, rows: &[Row]) {
             median_of(&row.frames, |f| f.rt),
             median_of(&row.frames, |f| f.rt_gpu),
             median_of(&row.frames, |f| f.render),
+            median_of(&row.frames, |f| f.finish),
             median_of(&row.frames, |f| f.gpu),
             percentile(&totals, 0.5),
             percentile(&totals, 0.95),
         ));
         for (i, f) in row.frames.iter().enumerate() {
             csv.push_str(&format!(
-                "{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
+                "{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}\n",
                 row.scene,
                 row.objects,
                 row.triangles,
@@ -832,6 +859,7 @@ fn report(args: &Args, info: &wgpu::AdapterInfo, rows: &[Row]) {
                 f.rt,
                 f.rt_gpu,
                 f.render,
+                f.finish,
                 f.gpu,
                 f.total()
             ));
