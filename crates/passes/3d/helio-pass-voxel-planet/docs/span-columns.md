@@ -97,13 +97,15 @@ rock at every level.
 
 ### Vertical windows: the clipmap is 3D
 
-Each level describes its columns over a vertical window around the eye
-(the level's reach above and below, in level cells: about the same number of
-cells at every level). Spans outside it are not stored; rays leaving a
-column's window continue at the coarser level, whose window is twice as
-tall. Together the levels form a 3D clipmap of nested boxes. A column is
-regenerated when the eye leaves the middle half of its window (today's
-`follow_clipped`, generalized).
+Each level describes its columns over a vertical window of 2048 cells.
+Spans outside it are not stored; rays leaving a column's window continue at
+the coarser level, whose window is twice as tall. *Revised 2026-10-10:* the
+window covers a column's whole candidate range when it fits (nearly every
+column), wherever the eye is; only taller columns take the cells around the
+eye's layer within their range and are regenerated when the eye nears a
+side they clip. Windows centred on the eye for every column made fast
+vertical movement regenerate every level and left columns under a high eye
+without their ground (`docs/aaa-architecture.md`).
 
 ### Level selection sees edits
 

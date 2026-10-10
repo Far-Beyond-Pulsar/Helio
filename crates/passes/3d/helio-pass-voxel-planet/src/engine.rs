@@ -1511,8 +1511,9 @@ impl PlanetRenderer {
             self.scratch_scale = (self.scratch_scale * 1.1).min(1.0);
         }
         self.stats.scratch_retries += scratch;
-        self.stats.failed_jobs += failed.iter().filter(|(_, s, _)| *s != crate::residency::STATUS_CLIPPED && *s != 2).count();
-        self.stats.clipped_columns += failed.iter().filter(|(_, s, _)| *s == crate::residency::STATUS_CLIPPED).count();
+        let clipped = |s: u32| crate::residency::clipped_sides(s).is_some();
+        self.stats.failed_jobs += failed.iter().filter(|(_, s, _)| !clipped(*s) && *s != 2).count();
+        self.stats.clipped_columns += failed.iter().filter(|(_, s, _)| clipped(*s)).count();
         self.failed.extend(failed);
         // Start mapping readbacks encoded in earlier frames.
         for r in &mut self.readbacks {

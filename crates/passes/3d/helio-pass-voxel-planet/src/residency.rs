@@ -79,13 +79,22 @@ pub struct Job {
 /// First key word of a level column: its (never negative) column index in
 /// 24 bits, the face and the level. 2^24 columns cover a 0.1 m Earth face
 /// (1.25e7 columns) and an infinite plane (2^24).
-/// Readback status of a column published with a band clipped to the window
-/// around the eye (`STATUS_CLIPPED` in generate.wgsl); its word is the
-/// window centre in level cells.
+/// Readback statuses of a column published clipped to its window
+/// (`STATUS_CLIPPED` in generate.wgsl): `STATUS_CLIPPED` + 0 below, + 1
+/// above, + 2 both; its word is the window's bottom in level cells.
 pub const STATUS_CLIPPED: u32 = 5;
-/// Level cells the eye may move vertically before a clipped band is
-/// regenerated: a quarter of its 256-brick window.
-const CLIP_SLACK: i64 = 256 * 8 / 4;
+/// The sides a readback status clips (below, above), if it is a clipped
+/// column's.
+pub fn clipped_sides(status: u32) -> Option<(bool, bool)> {
+    let sides = status.checked_sub(STATUS_CLIPPED).filter(|s| *s < 3)? + 1;
+    Some((sides & 1 != 0, sides & 2 != 0))
+}
+/// Level cells of a column's window (`2 * WINDOW_CELLS` in generate.wgsl).
+const WINDOW_LAYERS: i64 = 2048;
+/// Level cells a clipped side must stay away from the eye: a column is
+/// regenerated when the eye comes nearer (rays at its level reach a quarter
+/// window at most past the eye).
+const CLIP_SLACK: i64 = WINDOW_LAYERS / 4;
 
 pub fn key0(face: u8, level: u32, ci: i32) -> u32 {
     debug_assert!((0..1 << 24).contains(&ci), "column index {ci} outside 24 bits");
@@ -500,9 +509,9 @@ pub struct Residency {
     synced_start_hash: u64,
     synced: Vec<(crate::edits::Brush, u64)>,
     urgent: Vec<u64>,
-    /// Resident columns whose band is clipped to a window around the eye's
-    /// layer, with the window centre (level cells).
-    clipped: FxHashMap<u64, i32>,
+    /// Resident columns clipped to their window: its bottom and the sides
+    /// it clips (below, above).
+    clipped: FxHashMap<u64, (i32, bool, bool)>,
     pub stats: Stats,
     frame: u32,
     planner: Planner,
@@ -1279,16 +1288,16 @@ impl Residency {
     }
 
     /// Re-queue columns whose jobs could not complete (scratch/pool
-    /// pressure), and note columns published with a clipped band
-    /// ([`STATUS_CLIPPED`], with their window centre).
+    /// pressure), and note columns published clipped to their window
+    /// ([`clipped_sides`], with its bottom).
     pub fn requeue(&mut self, keys: impl IntoIterator<Item = (u64, u32, i32)>) {
         let mut count = 0;
         for (key, status, word) in keys {
             if !self.residents.contains_key(key) {
                 continue;
             }
-            if status == STATUS_CLIPPED {
-                self.clipped.insert(key, word);
+            if let Some((below, above)) = clipped_sides(status) {
+                self.clipped.insert(key, (word, below, above));
                 continue;
             }
             self.urgent.push(key);
@@ -1297,9 +1306,10 @@ impl Residency {
         self.stats.requeued += count;
     }
 
-    /// Clipped bands follow the eye vertically: a column whose window centre
-    /// is more than a quarter window from the eye's layer at its level is
-    /// regenerated around the current eye.
+    /// Clipped windows follow the eye vertically: a column is regenerated
+    /// when the eye's layer at its level comes within a quarter window of a
+    /// side it clips. An eye far above a column whose window holds its ground
+    /// (clipped below, deep under it) leaves it alone.
     fn follow_clipped(&mut self, eye: DVec3) {
         if self.clipped.is_empty() {
             return;
@@ -1309,7 +1319,11 @@ impl Residency {
         let stale: Vec<u64> = self
             .clipped
             .iter()
-            .filter(|(key, centre)| ((layer >> unpack(**key).1) - i64::from(**centre)).abs() > CLIP_SLACK)
+            .filter(|(key, (lo, below, above))| {
+                let e = layer >> unpack(**key).1;
+                let lo = i64::from(*lo);
+                (*below && e - lo < CLIP_SLACK) || (*above && lo + WINDOW_LAYERS - e < CLIP_SLACK)
+            })
             .map(|(key, _)| *key)
             .collect();
         for key in stale {

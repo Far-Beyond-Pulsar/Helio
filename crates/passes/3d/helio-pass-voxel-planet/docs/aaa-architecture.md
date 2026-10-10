@@ -30,6 +30,34 @@ From the editor flamegraph of 2026-10-09 (inside a 400-brush dig):
 | TSR | 1.1 ms | 1.1 ms |
 | residency / generate | 0 (still) | 7-18 ms spikes (edit lists) |
 
+Gate flight (`voxel_flight`, 1920x1080, RTX 3060), 2026-10-10 baseline,
+mean GPU ms per stage:
+
+| Scenario | primary | shade | sunlight | terrain GPU |
+|---|---|---|---|---|
+| ground, warm | 3.2 | 4.3 | 1.4 | 10.3 |
+| walk / run | 3.3-3.8 | 3.7-3.9 | 1.1-1.3 | 9.7-10.3 |
+| vehicle (fast, low) | 7.9 | 3.4 | 1.1 | 14.8 |
+| ascent to orbit | 1.4-5 | 4.4 | 0.3-1.5 | 8.8 |
+| **descent from orbit** | **54** | 4.0 | **19** | **82** |
+| **arrival (settled)** | **50** | 3.9 | **17** | **84** |
+| altitude reversals | 7.8 | 4.9 | 8.6 | 23 |
+| mountain walk | 12 | 2.9 | 1.6 | 23 |
+| dig | 3.2 | 5.1 | 1.7 | 11.4 |
+
+Gates failing: terrain GPU p95 <= 5 ms (60), warm sync p95 (84 ms),
+movement sync p99 (86 ms), arrival settles <= 250 ms (1116 ms), near-field
+exact cell agreement (4 of 294,608 cells).
+
+**Descent and arrival.** At the same place and height, rays cost 3-4 ms
+going up and 50 ms after coming down: the arrival audit has 93 column
+lookups and 120 steps per ray (2-5 and 10-15 elsewhere). Column windows
+were centred on the eye's layer when generated: under an eye far above,
+a column's ground lay below its window (clipped below, no heightfield
+fast path), rays fell back level by level, and every level regenerated each
+time the eye moved a quarter window. Fixed by anchoring windows on the
+column's content (below).
+
 ## Subsystems: what we have, what the best known systems do, decision
 
 References: research notes of 2026-10-10 (Dreams, Claybook, HashDAG,
@@ -48,6 +76,11 @@ and Claybook keep mips of occupancy.
 spans: far denser than any octree for a planet's surface), **replace the
 inside of mixed bricks** with a two-level occupancy bitmask (a 2^3 mask of
 4^3 sub-blocks and 64-bit masks), shared by primary, sun and sky rays.
+**Windows follow content, not the eye** (done): generation measures a
+column's candidate range first; when it fits 2048 cells (nearly always) the
+window covers it wherever the eye is; only taller columns take the cells
+around the eye within their range, and regenerate when the eye nears a side
+they clip.
 
 ### 2. Generation
 

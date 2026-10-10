@@ -23,8 +23,8 @@ struct JobOut {
     run: u32,
     units: u32,    // header and span area units, before the bricks
     top: i32,      // first air layer above every solid cell (clipped above: the window top)
-    centre: i32,   // clipped windows: the eye layer the window is centred on
-    lo: i32,       // clipped below: the window bottom
+    pad2: u32,
+    lo: i32,       // the window's bottom (level cells)
     summary: i32,  // bound of every solid cell, clipped or not (summary tops)
     n_eval: u32,   // bricks evaluated (in scratch after the header area)
     header: u32,   // header units
@@ -55,7 +55,8 @@ const SPAN_UNITS_MAX: u32 = 16u;
 // with the gaps and the trimmed ends of brick spans a column has at most 31
 // spans.
 const MAX_INTERVALS: u32 = 7u;
-// Readback status of a published clipped column (with its window centre).
+// Readback status of a published column clipped below (5), above (6) or
+// both (7), with its window's bottom (`residency::STATUS_CLIPPED`).
 const STATUS_CLIPPED: u32 = 5u;
 
 @group(0) @binding(7) var<storage, read> jobs: array<Job>;
@@ -88,7 +89,6 @@ struct Plan {
     floor: i32,
     eval: u32,
     base: u32,
-    centre: i32,
     summary: i32,
     iv: array<vec2<i32>, 8>,
 }
@@ -110,6 +110,11 @@ var<workgroup> g_cand_clip: atomic<u32>;
 // Above every solid cell of the column (each lane's brush sweep): its
 // summary top, and whether solid lies above the window at all.
 var<workgroup> g_bound: atomic<i32>;
+// The column's candidates, lowest and highest layer (stage 0 of the marking,
+// `p_measure`): the window is chosen from them.
+var<workgroup> g_range: array<atomic<i32>, 2>;
+var<private> p_measure: bool;
+var<private> p_range: vec2<i32>;
 var<workgroup> g_plan: Plan;
 // Per merged interval: lane summary bits (some solid 1, some air 2, not
 // solid-below-air 4, tops not the natural ones 8, a top over a byte 16), the
@@ -260,33 +265,54 @@ fn brush_crossings(b: FaceBrush, p: vec3<i32>, ch: vec2<i32>, level: u32) -> Cro
     return out;
 }
 
-// The column's window: `[w.x, w.y)` level cells and the planet's centre
-// (`w.z`, whole bricks; a lane's radial line ends there, below it the line
-// runs out through the antipode). A window of 2 * WINDOW_CELLS around the
-// eye's layer, from the centre up at most; the coarsest level, the coverage
-// every ray falls back to, from the centre up (a planet's radius is a few
-// hundred of its cells), or around the datum on a plane.
-fn column_window(level: u32) -> vec3<i32> {
+// The planet's centre at `level` (whole bricks): a lane's radial line ends
+// there, below it the line runs out through the antipode.
+fn column_floor(level: u32) -> i32 {
+    if is_plane() { return NO_LAYER; }
     // Volume points reach zero at the planet's centre: (1 + ratio) = 0,
     // the ratio being h * scale.y >> scale.z in Q30 (half layers h).
-    var floor = NO_LAYER;
-    if !is_plane() {
-        let core_half = -i32(round(exp2(30.0 + f32(world.scale.z)) / f32(world.scale.y)));
-        floor = ((core_half >> (level + 1u)) >> 3u) << 3u;
-    }
+    let core_half = -i32(round(exp2(30.0 + f32(world.scale.z)) / f32(world.scale.y)));
+    return ((core_half >> (level + 1u)) >> 3u) << 3u;
+}
+
+// The column's window: `[w.x, w.y)` level cells, and its floor (`w.z`,
+// `column_floor`). A column describes 2 * WINDOW_CELLS cells: all of its
+// candidates `range` when they fit, wherever the eye is, so open ground, a
+// dig or a crater wall never depend on the eye's height; a taller one (a
+// crater kilometres deep at a fine level) describes the cells around the
+// eye's layer within its candidates and follows the eye on the sides it
+// clips. Windows around the eye's layer for every column left the ground
+// of columns under a high eye clipped below: rays fell back level by level
+// and every level regenerated each time the eye moved a quarter window (a
+// descent from orbit cost 50 ms of primary rays). The coarsest level, the
+// coverage every ray falls back to, runs from the centre up (a planet's
+// radius is a few hundred of its cells), or around the datum on a plane.
+fn column_window(level: u32, range: vec2<i32>) -> vec3<i32> {
+    let floor = column_floor(level);
+    let span = 2 * WINDOW_CELLS;
     var lo = (((frame.layer_i.x >> level) - WINDOW_CELLS) >> 3u) << 3u;
+    if range.x < range.y {
+        let a = (range.x >> 3u) << 3u;
+        let b = ((range.y + 7) >> 3u) << 3u;
+        if b - a <= span { lo = a; } else { lo = clamp(lo, a, b - span); }
+    }
     if level + 1u >= u32(frame.layer_i.z) {
         lo = select(floor, -WINDOW_CELLS, is_plane());
     }
     lo = max(lo, floor);
-    return vec3<i32>(lo, lo + 2 * WINDOW_CELLS, floor);
+    return vec3<i32>(lo, lo + span, floor);
 }
 
 // Mark the window's bricks a candidate interval `[iv.x, iv.y)` reaches;
 // parts past the window clip its side, parts below the centre are no space.
+// While measuring (`p_measure`), only extend the lane's candidate range.
 fn mark_candidate(iv: vec2<i32>, w: vec3<i32>) {
     let lo = max(iv.x, w.z);
     if iv.y <= lo { return; }
+    if p_measure {
+        p_range = vec2<i32>(min(p_range.x, lo), max(p_range.y, iv.y));
+        return;
+    }
     if lo < w.x { atomicOr(&g_cand_clip, INFO_CLIP_BELOW); }
     if iv.y > w.y { atomicOr(&g_cand_clip, INFO_CLIP_ABOVE); }
     let a = (max(lo, w.x) - w.x) >> 3u;
@@ -324,6 +350,8 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         atomicStore(&g_keep[1], 0u);
         atomicStore(&g_cand_clip, 0u);
         atomicStore(&g_bound, -0x7fffffff);
+        atomicStore(&g_range[0], 0x7fffffff);
+        atomicStore(&g_range[1], -0x7fffffff);
         atomicStore(&g_natural[0], 0x7fffffff);
         atomicStore(&g_natural[1], -0x7fffffff);
         atomicStore(&g_natural[2], -0x7fffffff);
@@ -425,126 +453,141 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         t_lo = min(t_lo, eval_lo - 1);
         t_hi = max(t_hi, eval_hi + 2);
     }
-    let window = column_window(level);
-    mark_candidate(vec2<i32>(t_lo, t_hi), window);
-    // The lane's highest solid layer + 1, from its ground (and the volume's
-    // evaluated cells), raised by baked bricks and the brushes below.
-    var lane_bound = select(top, max(top, eval_hi + 1), changed);
     let ch = vec2<i32>(center_half(i, level), center_half(j, level));
     let edit_counts = workgroupUniformLoad(&g_edit_counts);
     let n_brushes = edit_counts.x + edit_counts.y;
+    let baked_base = job.edits + 2u + n_brushes;
     if job.edits != 0u {
-        // Baked bricks: each a candidate.
-        let baked_base = job.edits + 2u + n_brushes;
-        for (var e = li; e < edit_counts.z; e += 64u) {
-            let bk = bitcast<i32>(edit_refs[baked_base + e * 2u]);
-            mark_candidate(vec2<i32>(bk * 8, bk * 8 + 8), window);
-            atomicMax(&g_bound, bk * 8 + 8);
-            atomicOr(&g_volume, VOLUME_MATERIALS);
-        }
         for (var e = li; e < n_brushes; e += 64u) {
             let b = edit_brush(job.edits, e);
             // Shading reads brush materials only where some brush sets one.
             if b.radius_half >= (1u << level) && ((b.flags >> 4u) & 3u) != 0u { atomicOr(&g_volume, VOLUME_MATERIALS); }
         }
     }
-    // Brush surfaces: each lane runs the brushes over its own line in order,
-    // as a union of solid intervals from its heightfield ground (a Remove
-    // subtracts, an Add unites), and offers the ends of what remains. A
-    // brush's surface buried in air another one dug out (hundreds of
-    // overlapping strokes of a planet-scale brush) costs nothing; offering
-    // every brush's crossings overflowed the candidates into one interval
-    // from the deepest to the highest, evaluated cell by cell. Crossings are
-    // exact to their margin, so a brush end landing within two margins of
-    // the set's boundaries (abutting boxes, a thin sliver between two digs)
-    // is offered as well. Baked bricks and the terrain's evaluated volume
-    // are candidates of their own.
-    if n_brushes != 0u {
-        var solid: array<vec2<i32>, 8>;
-        var count = 1u;
-        solid[0] = vec2<i32>(-0x3fffffff, top);
-        var margin = 1;
-        var overflow = false;
-        var lo_all = 0x7fffffff;
-        var hi_all = -0x7fffffff;
-        for (var e = 0u; e < n_brushes; e++) {
-            let b = edit_brush(job.edits, e);
-            let op = (b.flags >> 4u) & 3u;
-            if b.radius_half < (1u << level) || op == 2u { continue; }
-            let crossing = brush_crossings(b, column_point, ch, level);
-            if !crossing.hit { continue; }
-            margin = max(margin, crossing.margin);
-            let range = vec2<i32>(crossing.lo, crossing.hi + 1);
-            lo_all = min(lo_all, range.x);
-            hi_all = max(hi_all, range.y);
-            if overflow { continue; }
-            for (var q = 0u; q < count; q++) {
-                let near = 2 * crossing.margin;
-                for (var end = 0u; end < 2u; end++) {
-                    let x = select(range.x, range.y, end == 1u);
-                    if abs(x - solid[q].x) <= near || abs(x - solid[q].y) <= near {
-                        mark_candidate(vec2<i32>(x - near, x + near + 1), window);
-                    }
-                }
+    // The candidates are offered twice: stage 0 measures their range, from
+    // which the window is chosen (`column_window`); stage 1 marks them in it.
+    var window = vec3<i32>(0, 0, column_floor(level));
+    var lane_bound = 0;
+    p_range = vec2<i32>(0x7fffffff, -0x7fffffff);
+    for (var stage = 0u; stage < 2u; stage++) {
+        p_measure = stage == 0u;
+        // The lane's highest solid layer + 1, from its ground (and the
+        // volume's evaluated cells), raised by baked bricks and the brushes
+        // below.
+        lane_bound = select(top, max(top, eval_hi + 1), changed);
+        mark_candidate(vec2<i32>(t_lo, t_hi), window);
+        if job.edits != 0u {
+            // Baked bricks: each a candidate.
+            for (var e = li; e < edit_counts.z; e += 64u) {
+                let bk = bitcast<i32>(edit_refs[baked_base + e * 2u]);
+                mark_candidate(vec2<i32>(bk * 8, bk * 8 + 8), window);
+                atomicMax(&g_bound, bk * 8 + 8);
+                atomicOr(&g_volume, VOLUME_MATERIALS);
             }
-            var next: array<vec2<i32>, 8>;
-            var m = 0u;
-            if op == 0u {
+        }
+        // Brush surfaces: each lane runs the brushes over its own line in order,
+        // as a union of solid intervals from its heightfield ground (a Remove
+        // subtracts, an Add unites), and offers the ends of what remains. A
+        // brush's surface buried in air another one dug out (hundreds of
+        // overlapping strokes of a planet-scale brush) costs nothing; offering
+        // every brush's crossings overflowed the candidates into one interval
+        // from the deepest to the highest, evaluated cell by cell. Crossings are
+        // exact to their margin, so a brush end landing within two margins of
+        // the set's boundaries (abutting boxes, a thin sliver between two digs)
+        // is offered as well. Baked bricks and the terrain's evaluated volume
+        // are candidates of their own.
+        if n_brushes != 0u {
+            var solid: array<vec2<i32>, 8>;
+            var count = 1u;
+            solid[0] = vec2<i32>(-0x3fffffff, top);
+            var margin = 1;
+            var overflow = false;
+            var lo_all = 0x7fffffff;
+            var hi_all = -0x7fffffff;
+            for (var e = 0u; e < n_brushes; e++) {
+                let b = edit_brush(job.edits, e);
+                let op = (b.flags >> 4u) & 3u;
+                if b.radius_half < (1u << level) || op == 2u { continue; }
+                let crossing = brush_crossings(b, column_point, ch, level);
+                if !crossing.hit { continue; }
+                margin = max(margin, crossing.margin);
+                let range = vec2<i32>(crossing.lo, crossing.hi + 1);
+                lo_all = min(lo_all, range.x);
+                hi_all = max(hi_all, range.y);
+                if overflow { continue; }
                 for (var q = 0u; q < count; q++) {
-                    let piece = solid[q];
-                    if piece.y <= range.x || piece.x >= range.y {
-                        if m < 8u { next[m] = piece; }
-                        m += 1u;
-                        continue;
-                    }
-                    if piece.x < range.x {
-                        if m < 8u { next[m] = vec2<i32>(piece.x, range.x); }
-                        m += 1u;
-                    }
-                    if piece.y > range.y {
-                        if m < 8u { next[m] = vec2<i32>(range.y, piece.y); }
-                        m += 1u;
+                    let near = 2 * crossing.margin;
+                    for (var end = 0u; end < 2u; end++) {
+                        let x = select(range.x, range.y, end == 1u);
+                        if abs(x - solid[q].x) <= near || abs(x - solid[q].y) <= near {
+                            mark_candidate(vec2<i32>(x - near, x + near + 1), window);
+                        }
                     }
                 }
+                var next: array<vec2<i32>, 8>;
+                var m = 0u;
+                if op == 0u {
+                    for (var q = 0u; q < count; q++) {
+                        let piece = solid[q];
+                        if piece.y <= range.x || piece.x >= range.y {
+                            if m < 8u { next[m] = piece; }
+                            m += 1u;
+                            continue;
+                        }
+                        if piece.x < range.x {
+                            if m < 8u { next[m] = vec2<i32>(piece.x, range.x); }
+                            m += 1u;
+                        }
+                        if piece.y > range.y {
+                            if m < 8u { next[m] = vec2<i32>(range.y, piece.y); }
+                            m += 1u;
+                        }
+                    }
+                } else {
+                    var merged = range;
+                    for (var q = 0u; q < count; q++) {
+                        let piece = solid[q];
+                        if piece.y < merged.x || piece.x > merged.y {
+                            if m < 8u { next[m] = piece; }
+                            m += 1u;
+                        } else {
+                            merged = vec2<i32>(min(merged.x, piece.x), max(merged.y, piece.y));
+                        }
+                    }
+                    if m < 8u { next[m] = merged; }
+                    m += 1u;
+                }
+                if m > 8u {
+                    overflow = true;
+                    continue;
+                }
+                solid = next;
+                count = m;
+            }
+            if overflow {
+                mark_candidate(vec2<i32>(lo_all - margin, hi_all + margin + 1), window);
+                lane_bound = max(lane_bound, hi_all + margin + 1);
             } else {
-                var merged = range;
-                for (var q = 0u; q < count; q++) {
-                    let piece = solid[q];
-                    if piece.y < merged.x || piece.x > merged.y {
-                        if m < 8u { next[m] = piece; }
-                        m += 1u;
-                    } else {
-                        merged = vec2<i32>(min(merged.x, piece.x), max(merged.y, piece.y));
-                    }
-                }
-                if m < 8u { next[m] = merged; }
-                m += 1u;
+                lane_bound = -0x7fffffff;
+                for (var q = 0u; q < count; q++) { lane_bound = max(lane_bound, solid[q].y + margin + 1); }
+                if changed { lane_bound = max(lane_bound, eval_hi + 1); }
             }
-            if m > 8u {
-                overflow = true;
-                continue;
+            for (var q = 0u; q < count; q++) {
+                if solid[q].x > -0x3fffffff { mark_candidate(vec2<i32>(solid[q].x - margin, solid[q].x + margin + 1), window); }
+                mark_candidate(vec2<i32>(solid[q].y - margin, solid[q].y + margin + 1), window);
             }
-            solid = next;
-            count = m;
         }
-        if overflow {
-            mark_candidate(vec2<i32>(lo_all - margin, hi_all + margin + 1), window);
-            lane_bound = max(lane_bound, hi_all + margin + 1);
-        } else {
-            lane_bound = -0x7fffffff;
-            for (var q = 0u; q < count; q++) { lane_bound = max(lane_bound, solid[q].y + margin + 1); }
-            if changed { lane_bound = max(lane_bound, eval_hi + 1); }
-        }
-        for (var q = 0u; q < count; q++) {
-            if solid[q].x > -0x3fffffff { mark_candidate(vec2<i32>(solid[q].x - margin, solid[q].x + margin + 1), window); }
-            mark_candidate(vec2<i32>(solid[q].y - margin, solid[q].y + margin + 1), window);
+        if stage == 0u {
+            atomicMin(&g_range[0], p_range.x);
+            atomicMax(&g_range[1], p_range.y);
+            workgroupBarrier();
+            window = column_window(level, vec2<i32>(atomicLoad(&g_range[0]), atomicLoad(&g_range[1])));
         }
     }
     atomicMax(&g_bound, lane_bound);
     workgroupBarrier();
     // Lane 0 turns the candidate bricks into intervals (runs at most a brick
     // apart merged) and reserves the scratch.
-    let centre = frame.layer_i.x >> level;
     if li == 0u {
         var plan: Plan;
         var runs: array<vec2<i32>, 128>;
@@ -603,7 +646,6 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         plan.w_lo = w_lo;
         plan.w_hi = w_hi;
         plan.eval = eval;
-        plan.centre = centre;
         plan.summary = summary;
         let need = i32(HEADER_UNITS_MAX + eval + SPAN_UNITS_MAX);
         let base = atomicAdd(&alloc[A_SCRATCH], need);
@@ -804,7 +846,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     // Between intervals no lane changes state: each lane's kind at one cell
     // of a gap is its kind throughout it.
     for (var g = 0u; g <= plan.n; g++) {
-        var k = centre;
+        var k = plan.w_lo + WINDOW_CELLS;
         var empty = false;
         if plan.n != 0u {
             if g == 0u {
@@ -1088,7 +1130,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         out.scratch = plan.base;
         out.units = header_units + span_units;
         out.top = top_out;
-        out.centre = centre;
+        out.pad2 = 0u;
         out.lo = plan.w_lo;
         out.summary = max(plan.summary, top_out);
         out.n_eval = plan.eval;
@@ -1294,15 +1336,17 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         c.edits = job.edits;
         records[job.record] = c;
         atomicMax(&level_tops[level], top_cell << level);
-        // Clipped columns are reported with their window centre, so the CPU
-        // can regenerate them when the eye leaves the window.
-        if (o.info & (INFO_CLIP_BELOW | INFO_CLIP_ABOVE)) != 0u {
+        // Clipped columns are reported with their window's bottom and the
+        // sides they clip, so the CPU regenerates them when the eye nears
+        // a clipped side.
+        let sides = select(0u, 1u, (o.info & INFO_CLIP_BELOW) != 0u) | select(0u, 2u, (o.info & INFO_CLIP_ABOVE) != 0u);
+        if sides != 0u {
             let at = u32(atomicAdd(&alloc[A_FAILS], 1)) * 4u;
             if at + 3u < arrayLength(&failures) {
                 failures[at] = job.key0;
                 failures[at + 1u] = job.key1;
-                failures[at + 2u] = STATUS_CLIPPED;
-                failures[at + 3u] = bitcast<u32>(o.centre);
+                failures[at + 2u] = STATUS_CLIPPED + sides - 1u;
+                failures[at + 3u] = bitcast<u32>(o.lo);
             }
         }
     }

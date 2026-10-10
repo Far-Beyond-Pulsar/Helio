@@ -548,6 +548,28 @@ fn picks_report_the_terrain_hit_under_the_view() {
     assert!(exact >= 3, "{exact} picks drawn at level 0");
 }
 
+/// Residency settles over a dig seen from above (the gate flight's crater
+/// view: a 60 m ball removed at the ground, the eye 150 m over it). Columns
+/// clipped to their window regenerate only when the eye nears a side they
+/// clip.
+#[test]
+fn residency_settles_over_a_dig_seen_from_above() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let ground = planet.surface_point(land(&planet, 2, 0.47, 0.53), 0.0);
+    let up = ground.normalize();
+    planet.apply(Brush { center: ground.to_array(), radius: 60.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    let planet = Arc::new(planet);
+    let eye = ground + up * 150.0 + up.any_orthonormal_vector() * 40.0;
+    let forward = (ground - up * 20.0 - eye).normalize().as_vec3();
+    let size = [320, 180];
+    let target = Target::new(&gpu, size);
+    let mut r = renderer(&gpu, planet.clone(), size);
+    let frames = settle(&gpu, &target, &mut r, &frame(&planet, eye), forward);
+    eprintln!("settled in {frames} frames: {:?}", r.stats());
+    assert!(r.settled(), "residency did not settle in {frames} frames: {:?}", r.stats());
+}
+
 /// Planet-scale brushes: a sphere of 3 km radius (64-bit containment; the
 /// old 32-bit test capped brushes at 1.85 km) leaves a crater 3 km deep. On
 /// its floor, GPU hits match canonical CPU ray casts.

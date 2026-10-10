@@ -613,14 +613,22 @@ they are once its work is on the GPU. Steps:
   (`caves_open_to_the_surface_only_at_entrances`,
   `caves_leave_no_floating_rock`).
 - **Vertical windows.** A column describes a window of 2048 of its level's
-  cells around the eye's layer at most; the levels' windows nest into a 3D
-  clipmap. Spans past the window are not stored and the record is flagged
-  clipped below and/or above (`INFO_CLIP_*`): rays beyond a clipped side
-  continue at the next coarser level, whose window reaches twice as far
-  (never refining into it), and summary and level tops keep the unclipped
-  bound. Generation reports clipped columns with their window centre
-  (`STATUS_CLIPPED`); residency regenerates them when the eye moves a
-  quarter window vertically (`follow_clipped`). The coarsest level, the
+  cells. Generation first measures the range of the column's candidates:
+  when they fit, the window covers them all wherever the eye is (open
+  ground, a dig, a crater wall: nothing clipped, nothing regenerated as the
+  eye climbs or descends); a taller column (a crater kilometres deep at a
+  fine level) describes the cells around the eye's layer within that range.
+  Spans past the window are not stored and the record is flagged clipped
+  below and/or above (`INFO_CLIP_*`): rays beyond a clipped side continue at
+  the next coarser level, whose window reaches twice as far (never refining
+  into it), and summary and level tops keep the unclipped bound. Generation
+  reports clipped columns with their window's bottom and clipped sides
+  (`clipped_sides`); residency regenerates one when the eye comes within a
+  quarter window of a side it clips (`follow_clipped`). Windows around the
+  eye's layer for every column left the ground of columns under a high eye
+  clipped below: descending from orbit, rays fell back level by level (50
+  ms of primary rays) and every level regenerated each time the eye moved a
+  quarter window. The coarsest level, the
   coverage every ray falls back to, is never clipped: its columns describe
   their whole radial line (a few dozen bricks), so a bite thousands of
   kilometres deep shows from orbit instead of loading. A column begins at
