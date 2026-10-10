@@ -77,6 +77,32 @@ pub fn recommended_instance_flags() -> wgpu::InstanceFlags {
     .with_env()
 }
 
+/// The adapter's features minus those its driver advertises but can't run
+/// Helio's pipelines with. Pass this, rather than `adapter.features()`, to
+/// [`required_wgpu_features`] and [`required_experimental_features`].
+///
+/// Software Vulkan (lavapipe / llvmpipe, and CPU adapters in general)
+/// reports `EXPERIMENTAL_RAY_QUERY`, but its shader compiler crashes building
+/// the radiance-cascades ray-query pipeline and the device is lost
+/// (Pulsar-Native#840). Without the feature the default graph uses its
+/// non-ray-traced fallbacks.
+pub fn usable_adapter_features(adapter: &wgpu::Adapter) -> wgpu::Features {
+    let mut features = adapter.features();
+    if !ray_queries_usable(&adapter.get_info()) {
+        features.remove(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+    }
+    features
+}
+
+/// Whether ray queries on this adapter run Helio's ray-query pipelines.
+pub fn ray_queries_usable(info: &wgpu::AdapterInfo) -> bool {
+    let software = |text: &str| {
+        let text = text.to_ascii_lowercase();
+        text.contains("llvmpipe") || text.contains("lavapipe")
+    };
+    !(info.device_type == wgpu::DeviceType::Cpu || software(&info.name) || software(&info.driver))
+}
+
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
     let required = wgpu::Features::INDIRECT_FIRST_INSTANCE;
     let mut optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
@@ -138,8 +164,26 @@ pub fn required_experimental_features(
 
 #[cfg(test)]
 mod tests {
-    use super::{required_wgpu_features, RendererConfig};
+    use super::{ray_queries_usable, required_wgpu_features, RendererConfig};
     use helio_mats::BINDLESS_MATERIAL_FEATURES;
+
+    fn adapter(name: &str, driver: &str, device_type: wgpu::DeviceType) -> wgpu::AdapterInfo {
+        wgpu::AdapterInfo {
+            name: name.into(),
+            driver: driver.into(),
+            device_type,
+            ..wgpu::AdapterInfo::new(wgpu::DeviceType::Other, wgpu::Backend::Vulkan)
+        }
+    }
+
+    #[test]
+    fn software_vulkan_gets_no_ray_queries() {
+        use wgpu::DeviceType::{Cpu, DiscreteGpu, IntegratedGpu};
+        assert!(!ray_queries_usable(&adapter("llvmpipe (LLVM 20.1.2, 256 bits)", "llvmpipe", Cpu)));
+        assert!(!ray_queries_usable(&adapter("lavapipe", "", IntegratedGpu)));
+        assert!(!ray_queries_usable(&adapter("Some CPU device", "", Cpu)));
+        assert!(ray_queries_usable(&adapter("NVIDIA GeForce RTX 4080", "NVIDIA", DiscreteGpu)));
+    }
 
     #[test]
     fn indirect_first_instance_is_required_even_when_adapter_does_not_report_it() {

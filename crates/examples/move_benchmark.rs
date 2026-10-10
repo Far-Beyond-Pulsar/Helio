@@ -38,7 +38,7 @@
 //! move_benchmark --mesh-movability static     # tag every mesh entity (none|static|stationary|movable|dynamic)
 //! move_benchmark --lights 10000 --despawn-lights 9000   # sparse light rows (#838)
 //! move_benchmark --graph default --editor   # Pulsar-Native editor viewport graph
-//!                                            # (add --no-ray-query on lavapipe)
+//! move_benchmark --no-ray-query              # ray-query fallbacks on a GPU too
 //! move_benchmark --finish-breakdown          # fill the `finish` column (Helio#330)
 //! move_benchmark --dump-frame out            # write each row's last frame to out/
 //! ```
@@ -691,18 +691,19 @@ async fn device(no_ray_query: bool) -> (Arc<wgpu::Device>, Arc<wgpu::Queue>, wgp
         .await
         .expect("no wgpu adapter; on a GPU-less machine set VK_ICD_FILENAMES to lavapipe");
     let info = adapter.get_info();
+    let mut features = helio::usable_adapter_features(&adapter);
+    if no_ray_query {
+        features.remove(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+    }
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("move_benchmark"),
-            // lavapipe's compiler crashes on the radiance-cascades ray-query
-            // pipeline; `--no-ray-query` runs the default graph on its fallback.
-            required_features: helio::required_wgpu_features(if no_ray_query {
-                adapter.features() - wgpu::Features::EXPERIMENTAL_RAY_QUERY
-            } else {
-                adapter.features()
-            }),
+            // Software Vulkan (lavapipe) drops ray queries on its own (see
+            // `usable_adapter_features`); `--no-ray-query` also drops them on
+            // a GPU, to run the default graph on its fallback.
+            required_features: helio::required_wgpu_features(features),
             required_limits: helio::required_wgpu_limits(adapter.limits()),
-            experimental_features: helio::required_experimental_features(adapter.features()),
+            experimental_features: helio::required_experimental_features(features),
             ..Default::default()
         })
         .await

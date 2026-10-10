@@ -1346,7 +1346,7 @@ impl ObjectBatchPass {
     /// `RenderGraph` (pair with [`Self::run_once_for_testing`]).
     pub fn poll_readback_for_testing(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         self.readback
-            .poll_and_kick_off(device, queue, &self.scratch, true);
+            .poll_and_kick_off(device, queue, &self.scratch, true, true);
     }
 }
 
@@ -1510,7 +1510,13 @@ impl RenderPass for ObjectBatchPass {
         }
 
         self.readback
-            .poll_and_kick_off(ctx.device, ctx.queue, &self.scratch, !self.skip_this_frame);
+            .poll_and_kick_off(
+                ctx.device,
+                ctx.queue,
+                &self.scratch,
+                !self.skip_this_frame,
+                ctx.owns_device,
+            );
         Ok(())
     }
 

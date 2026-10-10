@@ -18,7 +18,11 @@ fn sparse_light_ids_reach_every_tile_and_deleted_lights_disappear() {
         }).await.unwrap();
         device.on_uncaptured_error(std::sync::Arc::new(|error| panic!("{error:?}")));
         let pass = LightCullPass::new(&device, 32, 32);
-        let high = 2_000_003u32;
+        // Above the demo's two million slots where the adapter can bind that
+        // many lights (128 B each); otherwise the highest ID it can bind, still
+        // far past any dense range (lavapipe binds 128 MB: about a million).
+        let max_lights = adapter.limits().max_storage_buffer_binding_size as u64 / 128;
+        let high = 2_000_003u32.min((max_lights - 2) as u32);
         let buffer = |label, size, usage| device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label), size, usage, mapped_at_creation: false,
         });

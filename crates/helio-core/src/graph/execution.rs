@@ -1496,6 +1496,7 @@ impl RenderGraph {
                     time: self.frame_time,
                     time_delta: self.frame_time_delta,
                     world_origin: scene.world_origin(),
+                    owns_device: self.owns_device,
                 };
                 pass.declare_frame_demands(&plan_ctx, &mut self.frame_demands);
             }
@@ -1551,6 +1552,7 @@ impl RenderGraph {
                             time: self.frame_time,
                             time_delta: self.frame_time_delta,
                             world_origin: scene.world_origin(),
+                            owns_device: self.owns_device,
                         };
                         #[cfg(not(target_arch = "wasm32"))]
                         let _prepare_scope = profiling::is_profiling_enabled().then(|| {

@@ -59,11 +59,13 @@ fn whole_frame_timestamp_spans_both_encoders_and_nested_scopes() {
         assert_eq!(snapshot.query_overflows, 0);
         assert_eq!(profiler.gpu_frame_ms(), Some(outer as f32 / 1_000_000.0));
         assert_eq!(snapshot.total_gpu_ms, profiler.gpu_frame_ms());
-        assert_eq!(
-            snapshot.passes.len(),
-            1,
-            "the outer scope is not a render pass"
-        );
+        // The envelope is kept in the snapshot (it explains queue
+        // backpressure), but as a GPU-only scope after the graph's passes,
+        // not as a pass with CPU time.
+        let names: Vec<&str> = snapshot.passes.iter().map(|p| p.name).collect();
+        assert_eq!(names, ["inner", "__graph_frame"]);
         assert_eq!(snapshot.passes[0].gpu_ms, Some(inner as f32 / 1_000_000.0));
+        assert_eq!(snapshot.passes[1].cpu_ms, None, "the outer scope is not a render pass");
+        assert_eq!(snapshot.passes[1].gpu_ms, Some(outer as f32 / 1_000_000.0));
     });
 }

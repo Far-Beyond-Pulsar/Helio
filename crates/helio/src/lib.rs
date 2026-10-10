@@ -28,8 +28,8 @@ pub use helio_core::{MeshUpload, PackedVertex, SectionedMeshUpload};
 pub use material::{TextureSamplerDesc, TextureTransform, TextureUpload, MAX_TEXTURES};
 pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridge};
 pub use renderer::{
-    recommended_instance_flags, required_experimental_features, required_wgpu_features,
-    required_wgpu_limits,
+    ray_queries_usable, recommended_instance_flags, required_experimental_features,
+    required_wgpu_features, required_wgpu_limits, usable_adapter_features,
     BillboardInstance, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex, GiConfig,
     GraphRebuilder,
     PassBuildContext, PassGraphBuilderFn, PerfOverlayMode, RenderMode, Renderer,

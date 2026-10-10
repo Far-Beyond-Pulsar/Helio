@@ -336,8 +336,17 @@ mod tests {
     fn differing_sequences_are_refused() {
         let mut shorter = graph();
         shorter.remove(1);
-        assert!(align_pass_sequences(&graph(), &shorter).is_err());
+        // The live graph having a pass whose type the replacement lacks is
+        // tolerated (see `live_only_pass_types_are_tolerated`); the rebuilt
+        // graph having one the live graph lacks is not.
+        let (mapping, extras) = align_pass_sequences(&graph(), &shorter).unwrap();
+        assert_eq!((mapping, extras), (vec![0, 2, 3], vec![1]));
         assert!(align_pass_sequences(&shorter, &graph()).is_err());
+        // A pass of a type the replacement still has, missing from its slot,
+        // is a different sequence.
+        let mut repeated = graph();
+        repeated.insert(2, id::<B>("B", "crate_b::B"));
+        assert!(align_pass_sequences(&repeated, &graph()).is_err());
         let mut swapped = graph();
         swapped.swap(0, 1);
         assert!(align_pass_sequences(&graph(), &swapped).is_err());
