@@ -460,12 +460,13 @@ impl RenderPass for TransparentPass {
             return Ok(());
         };
         let draw_count = batch.draw_count;
-        log::trace!(
-            "[TransparentPass] execute: draw_count={}, transparent_ranges={:?}",
-            draw_count,
-            batch.transparent_ranges
-        );
-        if draw_count == 0 || batch.transparent_ranges.is_empty() {
+        let segments = culled.segments;
+        if draw_count == 0
+            || segments
+                .in_bucket(helio_pass_gbuffer::ShadingBucket::Transparent)
+                .next()
+                .is_none()
+        {
             return Ok(());
         }
 
@@ -598,7 +599,6 @@ impl RenderPass for TransparentPass {
             }));
             self.fog_key = Some(fog_key);
         }
-        let indirect = culled.indirect;
         let mut rp = ctx.render_cmds().unwrap();
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
@@ -606,25 +606,16 @@ impl RenderPass for TransparentPass {
         rp.set_vertex_buffer(0, vertices.slice(..));
         rp.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
 
-        let ranges = batch.transparent_ranges;
-        for (range, &(class, graph_hash, start, count)) in ranges.iter().enumerate() {
-            if count == 0 {
-                continue;
-            }
+        // One draw per transparent material segment (see `DrawSegments`).
+        for (index, segment) in segments.in_bucket(helio_pass_gbuffer::ShadingBucket::Transparent) {
             let key = RadiantShaderKey {
-                template_id: class,
-                graph_hash,
+                template_id: segment.material_class,
+                graph_hash: segment.graph_hash,
                 feature_flags: 0,
             };
             let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
             rp.set_pipeline(pipeline);
-            helio_pass_gbuffer::multi_draw_indexed_indirect(
-                &mut rp,
-                indirect,
-                start,
-                count,
-                batch.transparent_range_count_slot(range),
-            );
+            segments.draw(&mut rp, index);
         }
         Ok(())
     }

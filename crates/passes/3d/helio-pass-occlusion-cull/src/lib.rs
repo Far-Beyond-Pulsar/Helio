@@ -21,6 +21,7 @@ use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 pub use helio_pass_gbuffer::CulledBatchFrameData;
+use helio_pass_gbuffer::{DrawSegment, ShadingBucket};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -54,6 +55,228 @@ struct PvsGrid {
 /// this floor -- matches `ObjectBatchPass`'s own `MIN_SCRATCH_CAPACITY` idiom.
 const MIN_CAPACITY: u32 = 256;
 
+/// Smallest draw segment, in indirect records.
+const MIN_SEGMENT_CAPACITY: u32 = 64;
+/// A material key absent from the range tables this many frames loses its
+/// segment. Editing a material graph makes a new key, so keys must expire.
+const SEGMENT_EVICT_FRAMES: u64 = 300;
+
+/// `compact_ranges.wgsl`'s `RangeCapacity`.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct RangeCompactParams {
+    slots: u32,
+    bucket: u32,
+    segment_count: u32,
+    _pad: u32,
+}
+
+/// `compact_ranges.wgsl`'s `Segment`.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuSegment {
+    material_class: u32,
+    graph_hash_lo: u32,
+    graph_hash_hi: u32,
+    bucket: u32,
+    first: u32,
+    capacity: u32,
+    _pad: [u32; 2],
+}
+
+/// Room for a key with `groups` draw groups before culling: twice that,
+/// rounded up, so a key grows a while before its segment must.
+fn segment_capacity(groups: u32) -> u32 {
+    groups
+        .saturating_mul(2)
+        .next_power_of_two()
+        .max(MIN_SEGMENT_CAPACITY)
+}
+
+/// The material keys that have draw segments, and where each segment lies.
+#[derive(Default)]
+struct SegmentKeys {
+    segments: Vec<DrawSegment>,
+    /// Frame each segment's key was last in the range tables.
+    last_seen: Vec<u64>,
+    frame: u64,
+}
+
+type RangeTuple = (u32, u64, u32, u32);
+
+impl SegmentKeys {
+    /// Adds the keys in this frame's (read-back) range tables, grows segments
+    /// they outgrew and drops keys unseen for `SEGMENT_EVICT_FRAMES`. Returns
+    /// whether any segment moved, so the table is re-uploaded only then and
+    /// unchanged frames record the same commands.
+    fn observe(&mut self, tables: [(ShadingBucket, &[RangeTuple]); 3]) -> bool {
+        self.frame += 1;
+
+        // A key's groups before culling bound its survivors. One key can span
+        // several ranges, so sum them.
+        let mut groups: Vec<((u32, u64, ShadingBucket), u32)> = Vec::new();
+        for (bucket, ranges) in tables {
+            for &(class, hash, _start, count) in ranges {
+                let key = (class, hash, bucket);
+                match groups.iter_mut().find(|(k, _)| *k == key) {
+                    Some((_, total)) => *total += count,
+                    None => groups.push((key, count)),
+                }
+            }
+        }
+
+        let mut changed = false;
+        for (key, count) in groups {
+            let existing = self
+                .segments
+                .iter()
+                .position(|s| (s.material_class, s.graph_hash, s.bucket) == key);
+            match existing {
+                Some(index) => {
+                    self.last_seen[index] = self.frame;
+                    if count > self.segments[index].capacity {
+                        self.segments[index].capacity = segment_capacity(count);
+                        changed = true;
+                    }
+                }
+                None => {
+                    self.segments.push(DrawSegment {
+                        material_class: key.0,
+                        graph_hash: key.1,
+                        bucket: key.2,
+                        first: 0,
+                        capacity: segment_capacity(count),
+                    });
+                    self.last_seen.push(self.frame);
+                    changed = true;
+                }
+            }
+        }
+        let frame = self.frame;
+        let live = |seen: &u64| frame - seen <= SEGMENT_EVICT_FRAMES;
+        let mut keep = self.last_seen.iter().map(live).collect::<Vec<_>>().into_iter();
+        let before = self.segments.len();
+        self.segments.retain(|_| keep.next().unwrap());
+        self.last_seen.retain(live);
+        changed |= self.segments.len() != before;
+
+        if changed {
+            let mut first = 0u32;
+            for segment in &mut self.segments {
+                segment.first = first;
+                first += segment.capacity;
+            }
+        }
+        changed
+    }
+
+    /// Indirect records all segments take.
+    fn records(&self) -> u32 {
+        self.segments.last().map_or(0, |s| s.first + s.capacity)
+    }
+}
+
+/// Per-material draw segments (see `helio_pass_gbuffer::DrawSegments`): the
+/// keys, the table's GPU copy, and the buffers range compaction fills.
+struct SegmentTable {
+    keys: SegmentKeys,
+    /// `GpuSegment` rows; sized to a power of two of segments.
+    table_buf: wgpu::Buffer,
+    indirect_buf: wgpu::Buffer,
+    counts_buf: wgpu::Buffer,
+    /// Indirect records `indirect_buf` holds.
+    record_capacity: u32,
+    /// Whether draws can read `counts_buf` (`MULTI_DRAW_INDIRECT_COUNT`).
+    counts_supported: bool,
+}
+
+impl SegmentTable {
+    fn new(device: &wgpu::Device) -> Self {
+        Self {
+            keys: SegmentKeys::default(),
+            table_buf: create_segment_buf(device, "OcclusionCull Segment Table", 32, false),
+            indirect_buf: create_segment_buf(device, "OcclusionCull Segment Indirect", 20, true),
+            counts_buf: create_segment_buf(device, "OcclusionCull Segment Counts", 4, true),
+            record_capacity: 1,
+            counts_supported: false,
+        }
+    }
+
+    fn segments(&self) -> &[DrawSegment] {
+        &self.keys.segments
+    }
+
+    /// Follows `batch`'s range tables (see [`SegmentKeys::observe`]) and
+    /// uploads the table when it changed.
+    fn update(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        batch: &helio_pass_gbuffer::ObjectBatchFrameData<'_>,
+    ) {
+        self.counts_supported = batch.draw_counts.is_some();
+        let changed = self.keys.observe([
+            (ShadingBucket::Opaque, batch.opaque_ranges),
+            (ShadingBucket::Transparent, batch.transparent_ranges),
+            (ShadingBucket::Forward, batch.forward_ranges),
+        ]);
+        if !changed {
+            return;
+        }
+
+        let records = self.keys.records();
+        if records > self.record_capacity {
+            self.record_capacity = records.next_power_of_two();
+            self.indirect_buf = create_segment_buf(
+                device,
+                "OcclusionCull Segment Indirect",
+                self.record_capacity as u64 * 20,
+                true,
+            );
+        }
+        let count_bytes = (self.keys.segments.len().max(1) as u64 * 4).next_power_of_two();
+        if count_bytes > self.counts_buf.size() {
+            self.counts_buf =
+                create_segment_buf(device, "OcclusionCull Segment Counts", count_bytes, true);
+        }
+        let rows: Vec<GpuSegment> = self
+            .keys
+            .segments
+            .iter()
+            .map(|s| GpuSegment {
+                material_class: s.material_class,
+                graph_hash_lo: s.graph_hash as u32,
+                graph_hash_hi: (s.graph_hash >> 32) as u32,
+                bucket: s.bucket as u32,
+                first: s.first,
+                capacity: s.capacity,
+                _pad: [0; 2],
+            })
+            .collect();
+        let table_bytes = (rows.len().max(1) as u64 * 32).next_power_of_two();
+        if table_bytes > self.table_buf.size() {
+            self.table_buf =
+                create_segment_buf(device, "OcclusionCull Segment Table", table_bytes, false);
+        }
+        if !rows.is_empty() {
+            queue.write_buffer(&self.table_buf, 0, bytemuck::cast_slice(&rows));
+        }
+    }
+}
+
+fn create_segment_buf(device: &wgpu::Device, label: &str, size: u64, indirect: bool) -> wgpu::Buffer {
+    let mut usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+    if indirect {
+        usage |= wgpu::BufferUsages::INDIRECT;
+    }
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: size.max(32),
+        usage,
+        mapped_at_creation: false,
+    })
+}
+
 pub struct OcclusionCullPass {
     pipeline: wgpu::ComputePipeline,
     bgl: wgpu::BindGroupLayout,
@@ -61,7 +284,8 @@ pub struct OcclusionCullPass {
     range_compact_bgl: wgpu::BindGroupLayout,
     range_compact_params: wgpu::Buffer,
     range_compact_bind_group: Option<wgpu::BindGroup>,
-    range_compact_key: Option<[wgpu::Buffer; 7]>,
+    range_compact_key: Option<[wgpu::Buffer; 10]>,
+    segments: SegmentTable,
     cull_params_buf: wgpu::Buffer,
     hiz_sampler: Arc<wgpu::Sampler>,
     cull_stats_buf: wgpu::Buffer,
@@ -305,6 +529,9 @@ impl OcclusionCullPass {
                     },
                     count: None,
                 },
+                storage_layout_entry(8, true),
+                storage_layout_entry(9, false),
+                storage_layout_entry(10, false),
             ],
         });
         let compact_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -344,6 +571,7 @@ impl OcclusionCullPass {
             range_compact_params,
             range_compact_bind_group: None,
             range_compact_key: None,
+            segments: SegmentTable::new(device),
             cull_params_buf,
             hiz_sampler,
             cull_stats_buf,
@@ -399,6 +627,9 @@ impl OcclusionCullPass {
             batch.forward_ranges_gpu.clone(),
             batch.draw_counts_gpu.clone(),
             self.compacted_indirect_buf.clone(),
+            self.segments.table_buf.clone(),
+            self.segments.indirect_buf.clone(),
+            self.segments.counts_buf.clone(),
         ];
         if self.range_compact_key.as_ref() != Some(&key) {
             self.range_compact_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -412,7 +643,14 @@ impl OcclusionCullPass {
                     buffer_entry(4, batch.transparent_ranges_gpu),
                     buffer_entry(5, batch.forward_ranges_gpu),
                     buffer_entry(6, batch.draw_counts_gpu),
-                    uniform_range_entry(7, &self.range_compact_params, 8),
+                    uniform_range_entry(
+                        7,
+                        &self.range_compact_params,
+                        std::mem::size_of::<RangeCompactParams>() as u64,
+                    ),
+                    buffer_entry(8, &self.segments.table_buf),
+                    buffer_entry(9, &self.segments.indirect_buf),
+                    buffer_entry(10, &self.segments.counts_buf),
                 ],
             }));
             self.range_compact_key = Some(key);
@@ -576,10 +814,17 @@ impl RenderPass for OcclusionCullPass {
         };
         let compacted_indices: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.compacted_indices_2_buf) };
         let indirect: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.compacted_indirect_buf) };
+        // Same frame-scoped lifetime bridge as the buffers above.
+        let segments: &'a SegmentTable = unsafe { std::mem::transmute(&self.segments) };
         frame.write(helio_core::ResourceKey::new("culled_batch"), 
             crate::CulledBatchFrameData {
                 indirect,
                 compacted_indices,
+                segments: helio_pass_gbuffer::DrawSegments {
+                    indirect: &segments.indirect_buf,
+                    counts: segments.counts_supported.then_some(&segments.counts_buf),
+                    segments: segments.segments(),
+                },
             },
             "OcclusionCull",
         );
@@ -611,12 +856,20 @@ impl RenderPass for OcclusionCullPass {
         let batch = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"));
         let draw_count = batch.map(|b| b.draw_count).unwrap_or(0);
         let range_slots = batch.map(|b| b.range_slot_capacity).unwrap_or(0);
+        if let Some(batch) = batch.as_ref() {
+            self.segments.update(ctx.device, ctx.queue, batch);
+        }
         for bucket in 0..3u32 {
-            let params = [range_slots, bucket];
+            let params = RangeCompactParams {
+                slots: range_slots,
+                bucket,
+                segment_count: self.segments.segments().len() as u32,
+                _pad: 0,
+            };
             ctx.queue.write_buffer(
                 &self.range_compact_params,
                 bucket as u64 * 256,
-                bytemuck::cast_slice(&params),
+                bytemuck::bytes_of(&params),
             );
         }
         self.ensure_capacity(ctx.device, batch.map(|b| b.instance_count).unwrap_or(0));
@@ -651,6 +904,13 @@ impl RenderPass for OcclusionCullPass {
         let Some(coord_data) = ctx.registry.get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(helio_core::resource_keys::coordinate_spaces()) else {
             return Ok(());
         };
+        // This frame's segments start empty: counts at zero, and records past
+        // each count with zero `instance_count` for non-count draws.
+        if !self.segments.segments().is_empty() {
+            let mut cmds = ctx.graphics_cmds();
+            cmds.clear_buffer(&self.segments.counts_buf, 0, None);
+            cmds.clear_buffer(&self.segments.indirect_buf, 0, None);
+        }
         let draw_count = batch.draw_count;
         if draw_count == 0 {
             return Ok(());
@@ -788,4 +1048,68 @@ impl RenderPass for OcclusionCullPass {
 fn mip_levels(w: u32, h: u32) -> u32 {
     let max_dim = w.max(h);
     (u32::BITS - max_dim.leading_zeros()).max(1)
+}
+
+#[cfg(test)]
+mod segment_tests {
+    use super::{segment_capacity, SegmentKeys, ShadingBucket, SEGMENT_EVICT_FRAMES};
+
+    fn observe(keys: &mut SegmentKeys, opaque: &[(u32, u64, u32, u32)]) -> bool {
+        keys.observe([
+            (ShadingBucket::Opaque, opaque),
+            (ShadingBucket::Transparent, &[]),
+            (ShadingBucket::Forward, &[]),
+        ])
+    }
+
+    #[test]
+    fn keys_sharing_ranges_get_one_segment_sized_for_their_sum() {
+        let mut keys = SegmentKeys::default();
+        // Class 7 spans two ranges; class 3 one.
+        assert!(observe(&mut keys, &[(7, 1, 0, 40), (3, 0, 40, 5), (7, 1, 45, 30)]));
+        let segments = &keys.segments;
+        assert_eq!(segments.len(), 2);
+        assert_eq!((segments[0].material_class, segments[0].capacity), (7, segment_capacity(70)));
+        assert_eq!(segments[0].first, 0);
+        assert_eq!(segments[1].material_class, 3);
+        assert_eq!(segments[1].first, segments[0].capacity);
+    }
+
+    #[test]
+    fn an_unchanged_frame_moves_nothing_even_if_the_layout_shifts() {
+        let mut keys = SegmentKeys::default();
+        observe(&mut keys, &[(7, 0, 0, 10), (3, 0, 10, 10)]);
+        let before = keys.segments.clone();
+        // Same keys, different starts and order, counts within capacity.
+        assert!(!observe(&mut keys, &[(3, 0, 0, 20), (7, 0, 20, 1)]));
+        assert_eq!(keys.segments, before);
+    }
+
+    #[test]
+    fn a_key_that_outgrows_its_segment_grows_and_later_ones_move() {
+        let mut keys = SegmentKeys::default();
+        observe(&mut keys, &[(7, 0, 0, 10), (3, 0, 10, 10)]);
+        let capacity = keys.segments[0].capacity;
+        assert!(observe(&mut keys, &[(7, 0, 0, capacity + 1), (3, 0, 0, 10)]));
+        assert_eq!(keys.segments[0].capacity, segment_capacity(capacity + 1));
+        assert_eq!(keys.segments[1].first, keys.segments[0].capacity);
+    }
+
+    #[test]
+    fn unseen_keys_expire_and_buckets_are_separate_keys() {
+        let mut keys = SegmentKeys::default();
+        keys.observe([
+            (ShadingBucket::Opaque, &[(1, 0, 0, 1)]),
+            (ShadingBucket::Transparent, &[(1, 0, 1, 1)]),
+            (ShadingBucket::Forward, &[]),
+        ]);
+        assert_eq!(keys.segments.len(), 2, "same material in two buckets: two segments");
+        for _ in 0..SEGMENT_EVICT_FRAMES {
+            assert!(!observe(&mut keys, &[(1, 0, 0, 1)]));
+        }
+        assert!(observe(&mut keys, &[(1, 0, 0, 1)]), "the transparent key expires");
+        assert_eq!(keys.segments.len(), 1);
+        assert_eq!(keys.segments[0].bucket, ShadingBucket::Opaque);
+        assert_eq!(keys.segments[0].first, 0);
+    }
 }

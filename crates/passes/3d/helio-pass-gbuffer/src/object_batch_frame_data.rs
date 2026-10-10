@@ -21,12 +21,11 @@
 //! the existing shape rather than a new pattern.
 //!
 //! `opaque_ranges`/`transparent_ranges`/`forward_ranges` are a small,
-//! bounded, ASYNC (one-frame-latency) CPU readback -- see `helio-pass-
-//! object-batch`'s `readback` module doc for why that's the correct
-//! tradeoff for exactly this one piece of the pipeline's output (PSO
-//! selection needs `(start, count)` as plain `u32`s on the CPU before
-//! `multi_draw_indexed_indirect` can be recorded; nothing else here is a
-//! CPU readback of any kind).
+//! bounded, ASYNC CPU readback that trails the GPU by two or more frames (see
+//! `helio-pass-object-batch`'s `readback` module doc). Draw passes don't take
+//! offsets from them: they only tell `helio-pass-occlusion-cull` which
+//! material keys exist, and it gives each key a fixed draw segment the GPU
+//! fills in the same frame (see [`crate::DrawSegments`]).
 #[derive(Clone, Copy)]
 pub struct ObjectBatchFrameData<'a> {
     /// Sorted-order instance data (`helio_pass_object_batch::GpuInstanceData` layout).
@@ -47,8 +46,9 @@ pub struct ObjectBatchFrameData<'a> {
     /// Live instance count this frame (== `instances`'s valid prefix length).
     pub instance_count: u32,
     /// `(material_class, graph_hash, start, count)` ranges over `draw_calls`
-    /// -- `start`/`count` index `draw_calls`/`indirect` directly, not
-    /// `instances`. One `multi_draw_indexed_indirect` call per range.
+    /// as read back, frames late -- `start`/`count` index `draw_calls`/
+    /// `indirect` directly, not `instances`. Used to find the material keys
+    /// present; draws use [`crate::DrawSegments`].
     pub opaque_ranges: &'a [(u32, u64, u32, u32)],
     pub transparent_ranges: &'a [(u32, u64, u32, u32)],
     pub forward_ranges: &'a [(u32, u64, u32, u32)],

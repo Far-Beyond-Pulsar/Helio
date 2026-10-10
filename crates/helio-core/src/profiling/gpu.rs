@@ -503,18 +503,6 @@ impl GpuProfiler {
         &self.last_timings
     }
 
-    /// Merges samples recorded by another profiler that used the same device
-    /// and queue. Worker command streams have independent query sets, so their
-    /// readback must be folded into the graph-owned profiler after completion.
-    pub(crate) fn merge_external_timings(&mut self, samples: &[GpuTimestamp]) {
-        if samples.is_empty() {
-            return;
-        }
-        let mut merged = self.last_timings.clone();
-        merged.extend_from_slice(samples);
-        self.last_timings = aggregate_timings(merged);
-    }
-
     pub const fn supported(&self) -> bool {
         self.query_set.is_some()
     }

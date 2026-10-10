@@ -20,4 +20,7 @@ pub struct CulledBatchFrameData<'a> {
     /// Final surviving instance slots, packed per draw-call group -- index
     /// `instances` (from [`crate::ObjectBatchFrameData`]) through this.
     pub compacted_indices: &'a wgpu::Buffer,
+    /// The same surviving draws, packed per material key at fixed offsets:
+    /// what passes drawing one pipeline per material use.
+    pub segments: crate::DrawSegments<'a>,
 }

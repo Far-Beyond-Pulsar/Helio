@@ -33,6 +33,7 @@ use wgpu::util::DeviceExt;
 pub mod components;
 mod coordinate_spaces_frame_data;
 mod culled_batch_frame_data;
+mod draw_segments;
 mod indirect_draw;
 mod object_batch_frame_data;
 pub use components::{
@@ -42,6 +43,7 @@ pub use components::{
 };
 pub use coordinate_spaces_frame_data::CoordinateSpacesFrameData;
 pub use culled_batch_frame_data::CulledBatchFrameData;
+pub use draw_segments::{DrawSegment, DrawSegments, ShadingBucket};
 pub use indirect_draw::{multi_draw_indexed_indirect, GpuDrawCount, DRAW_INDEXED_INDIRECT_STRIDE};
 pub use object_batch_frame_data::ObjectBatchFrameData;
 use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey};
@@ -777,10 +779,12 @@ impl RenderPass for GBufferPass {
             wgpu::IndexFormat::Uint32,
         );
 
-        let ranges = batch.opaque_ranges;
-        if ranges.is_empty() {
-            // Fallback: no ranges (e.g. legacy mode without material_class data).
-            // Use the default PBR pipeline and draw everything in one batch.
+        // One draw per material segment, at its fixed offset with this
+        // frame's GPU count (see `DrawSegments`).
+        let segments = culled.segments;
+        if segments.is_empty() {
+            // No material key read back yet (the first frames): draw every
+            // group with the default PBR pipeline.
             let key = RadiantShaderKey {
                 template_id: 0,
                 graph_hash: 0,
@@ -790,24 +794,15 @@ impl RenderPass for GBufferPass {
             pass.set_pipeline(pipeline);
             multi_draw_indexed_indirect(&mut pass, indirect, 0, draw_count, batch.all_draws_count_slot());
         } else {
-            for (range, &(class, graph_hash, start, count)) in ranges.iter().enumerate() {
-                if count == 0 {
-                    continue;
-                }
+            for (index, segment) in segments.in_bucket(crate::ShadingBucket::Opaque) {
                 let key = RadiantShaderKey {
-                    template_id: class,
-                    graph_hash,
+                    template_id: segment.material_class,
+                    graph_hash: segment.graph_hash,
                     feature_flags: 0,
                 };
                 let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
                 pass.set_pipeline(pipeline);
-                multi_draw_indexed_indirect(
-                    &mut pass,
-                    indirect,
-                    start,
-                    count,
-                    batch.opaque_range_count_slot(range),
-                );
+                segments.draw(&mut pass, index);
             }
         }
         Ok(())
