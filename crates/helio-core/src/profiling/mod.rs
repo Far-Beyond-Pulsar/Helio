@@ -327,20 +327,6 @@ impl Profiler {
         self.cpu.record_external(name, duration);
     }
 
-    /// Fold GPU samples from a worker-local profiler into this graph profiler.
-    /// The worker query set is intentionally separate because wgpu query sets
-    /// and encoders are not safely shared while recording on scoped threads.
-    pub(crate) fn merge_external_gpu_timings(&mut self, samples: &[GpuTimestamp]) {
-        self.gpu.merge_external_timings(samples);
-    }
-
-    /// True once this profiler has completed at least one asynchronous GPU
-    /// readback. Used by externally-owned devices to retain worker profilers
-    /// until the host's poll cadence has delivered their mappings.
-    pub(crate) fn has_completed_gpu_timings(&self) -> bool {
-        self.gpu.last_completed_frame().is_some()
-    }
-
     pub(crate) const fn gpu_timing_supported(&self) -> bool {
         self.gpu.supported()
     }

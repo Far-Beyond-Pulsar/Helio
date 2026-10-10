@@ -1266,9 +1266,9 @@ impl ObjectBatchPass {
         &self.scratch.forward_ranges
     }
 
-    /// Last-completed-frame's opaque/transparent/forward range tables --
-    /// one frame of latency behind the GPU work that produced them (see
-    /// `readback` module doc). Empty until the first successful readback.
+    /// The last harvested opaque/transparent/forward range tables, two or
+    /// more frames behind the GPU work that produced them (see the `readback`
+    /// module doc). Empty until the first successful readback.
     pub fn opaque_ranges(&self) -> &[RangeTuple] {
         self.readback.opaque()
     }
