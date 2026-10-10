@@ -54,10 +54,12 @@ enum Behaviour {
     /// A copy on every 4th frame only, like a readback state machine.
     /// Predicted: 2 misses.
     EveryFourth,
-    /// A new bind group every frame. Predicted: every frame misses.
+    /// A new bind group every frame. Predicted: every frame it is cached
+    /// misses, so it backs off.
     Rebuild,
     /// Dispatch size cycles through 7 values, more than the 4 variants a unit
-    /// keeps. Predicted: every frame misses (LRU thrash).
+    /// keeps. Predicted: every frame it is cached misses (LRU thrash), so
+    /// it backs off.
     Cycle7,
     /// Uploads the frame index in `prepare` and copies it in `execute`.
     /// Commands are identical every frame. Predicted: 1 miss.
@@ -527,15 +529,16 @@ fn print_stats(label: &str, stats: &helio_core::RecordingCacheStats) {
         stats.inactive_reason.unwrap_or("")
     );
     eprintln!(
-        "{:<14} {:>6} {:>7} {:>9}  last miss",
-        "pass", "hits", "misses", "variants"
+        "{:<14} {:>6} {:>7} {:>8} {:>9}  last miss",
+        "pass", "hits", "misses", "bypassed", "variants"
     );
     for unit in &stats.units {
         eprintln!(
-            "{:<14} {:>6} {:>7} {:>9}  {}{}",
+            "{:<14} {:>6} {:>7} {:>8} {:>9}  {}{}",
             unit.pass,
             unit.hits,
             unit.misses,
+            unit.bypassed,
             unit.cached_variants,
             unit.uncacheable
                 .map(|r| format!("[uncacheable: {r}] "))
@@ -620,7 +623,7 @@ fn recording_cache_hits_match_each_pass_behaviour_and_replays_execute() {
                 let u = unit(&result.stats, name);
                 assert_eq!(u.uncacheable, None, "{label}: {name} must be cacheable");
                 assert_eq!(
-                    u.hits + u.misses,
+                    u.hits + u.misses + u.bypassed,
                     frames,
                     "{label}: {name} counts every frame"
                 );
@@ -635,8 +638,18 @@ fn recording_cache_hits_match_each_pass_behaviour_and_replays_execute() {
             check("EveryFourth", 2);
             check("UploadCopy", 1);
             check("StressDraw", 1);
-            check("Rebuild", frames);
-            check("Cycle7", frames);
+            // A unit that misses 8 frames in a row is recorded directly for
+            // the next 64, then tried again: 120 frames are 8 misses, 64
+            // direct, 8 misses and 40 direct.
+            check("Rebuild", 16);
+            check("Cycle7", 16);
+            for name in ["Rebuild", "Cycle7"] {
+                assert_eq!(
+                    unit(&result.stats, name).bypassed,
+                    104,
+                    "{label}: {name} backs off"
+                );
+            }
         }
     });
 }

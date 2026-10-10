@@ -615,31 +615,38 @@ impl Bench {
         std::fs::write(path, pixels).expect("write frame dump");
     }
 
-    /// The recording cache's hit rate so far and the passes that miss, when
-    /// `HELIO_RECORDING_CACHE` switched it on.
+    /// The recording cache's hit rate so far and the passes that miss or are
+    /// recorded directly (`HELIO_RECORDING_CACHE=0` switches it off).
     fn recording_cache_summary(&self) -> Option<String> {
         let stats = self.renderer.recording_cache_stats();
         if !stats.active {
             return stats.inactive_reason.map(|reason| format!("recording cache inactive: {reason}"));
         }
         let hits: u64 = stats.units.iter().map(|u| u.hits).sum();
-        let total: u64 = stats.units.iter().map(|u| u.hits + u.misses).sum();
+        let total: u64 = stats.units.iter().map(|u| u.hits + u.misses + u.bypassed).sum();
         let mut missing: Vec<_> = stats
             .units
             .iter()
-            .filter(|u| u.misses > 1 || u.uncacheable.is_some())
+            .filter(|u| u.misses > 1 || u.bypassed > 0 || u.uncacheable.is_some())
             .map(|u| match u.uncacheable {
                 Some(reason) => format!("{} (uncacheable: {reason})", u.pass),
                 None => format!(
-                    "{} ({}/{} missed; {})",
+                    "{} ({}/{} missed, {} backed off; {})",
                     u.pass,
                     u.misses,
-                    u.hits + u.misses,
+                    u.hits + u.misses + u.bypassed,
+                    u.bypassed,
                     u.last_miss.as_deref().unwrap_or("-")
                 ),
             })
             .collect();
         missing.sort();
+        missing.extend(
+            stats
+                .direct
+                .iter()
+                .map(|(pass, reason)| format!("{pass} (recorded directly: {reason})")),
+        );
         Some(format!(
             "recording cache: {hits}/{total} pass-frames hit ({:.0}%)\n  {}",
             100.0 * hits as f64 / total.max(1) as f64,

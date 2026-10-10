@@ -514,9 +514,9 @@ impl Renderer {
     }
 
     /// Which passes the recording cache resubmitted or re-encoded, and why;
-    /// see [`helio_core::RenderGraph::set_recording_cache`]. The cache is
-    /// switched on with the `HELIO_RECORDING_CACHE` environment variable, so
-    /// rebuilt graphs keep it.
+    /// see [`helio_core::RenderGraph::set_recording_cache`]. The cache is on
+    /// by default; `HELIO_RECORDING_CACHE=0` switches it off for every graph,
+    /// rebuilt ones included.
     pub fn recording_cache_stats(&self) -> helio_core::RecordingCacheStats {
         self.graph.recording_cache_stats()
     }
