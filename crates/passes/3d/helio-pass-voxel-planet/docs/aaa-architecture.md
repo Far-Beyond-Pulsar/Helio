@@ -49,6 +49,11 @@ Gates failing: terrain GPU p95 <= 5 ms (60), warm sync p95 (84 ms),
 movement sync p99 (86 ms), arrival settles <= 250 ms (1116 ms), near-field
 exact cell agreement (4 of 294,608 cells).
 
+After content windows (`f7103991`): descent primary 5.6 ms, sunlight 1.2
+ms, terrain 14.6 ms; arrival settles in 5 ms; warm sync p95 15.4 ms (gate
+passes). Still failing: terrain GPU p95 21.9 ms, movement sync p99 26.9 ms,
+near-field cell agreement (4 cells).
+
 **Descent and arrival.** At the same place and height, rays cost 3-4 ms
 going up and 50 ms after coming down: the arrival audit has 93 column
 lookups and 120 steps per ray (2-5 and 10-15 elsewhere). Column windows
@@ -89,10 +94,17 @@ CPU mirror for exactness; adaptive unit budget.
 *Best known:* produce once, cache, budget by time (GigaVoxels, Lumen);
 everything a pixel needs per frame is produced with the data (Teardown's
 palette, per-vertex AO of meshed voxel engines, Lumen's surface cache).
-*Decision:* **keep** exact GPU generation; **move shading inputs into
-generation**: per lane the ground gradient and surface material, per brick
-face the corner occlusion, so shading reads one column instead of up to 20
-hash lookups and noise per pixel. Budget generation by measured GPU time.
+*Measured:* a mountain view loaded for ~1,000 frames (17 s) where the same
+view without caves took 125: each lane evaluated three cave noises at
+every cell down to the cave depth (1,200 cells at 0.1 m).
+*Decision:* **keep** exact GPU generation. **Interval evaluation of the
+volume** (done, the same idea as Keeter's interval arithmetic and Dreams'
+culling): the scan steps over rock caves cannot reach by a tested slope
+bound of the noise, and keeps changed cells as runs; exact (no mismatch in
+cave and overhang audits); mountain load 994 -> 335 frames. Next: the same
+for the overhang band. **Move shading inputs into generation** where the
+shading measurements below justify it. Budget generation by measured GPU
+time.
 
 ### 3. Edits
 
@@ -117,13 +129,26 @@ visibility buffer.
 
 ### 5. Shading
 
-*Have:* 3.5-4 ms per frame at any view: per pixel the ground field (4
-column lookups, 12 heights), material slope, procedural material noise and
-8 occupancy lookups for corner AO.
-*Best known:* read cached per-voxel attributes (Teardown palette; Lumen
-surface cache 2.4 vs 11.5 ms evaluating per hit).
-*Decision:* **replace** per-pixel reconstruction with generated attributes
-(2); keep procedural albedo detail (cheap hashes) and filtering.
+*Have:* 4.3 ms per frame at 1080p at any view: per pixel the ground field
+(12 heights of up to 4 columns), the material slope (16 heights of a coarser
+level's columns), procedural material rules and 8 occupancy lookups for
+corner AO.
+*Measured (2026-10-10, ground view, 4.26 ms):* without the material rules
+-1.6 ms, without the ground field -1.1, without the material slope -0.85,
+without the AO lookups -0.35. Removing the neighbour-column hash lookups
+alone changes nothing: the cost is decoding heights (top byte, relief
+fraction, surface offset: three loads and branches each, ~28 per pixel).
+Computing gradients and slopes at generation needs a ring of field
+evaluations around each column: measured +55% generation cost (mountain
+load 335 -> 486 frames), rejected.
+*Best known:* read cached per-texel attributes (Unreal's runtime virtual
+textures for landscapes, Lumen's surface cache 2.4 vs 11.5 ms evaluating
+materials per hit).
+*Decision:* **one 32-bit word per lane** for the surface (exact height,
+fraction and surface word) replacing the tops, relief, surface and offset
+units at about the same memory; shading and traversal read one load per
+lane. Then cache view-independent material inputs per lane if the material
+rules still dominate.
 
 ### 6. Sunlight
 
