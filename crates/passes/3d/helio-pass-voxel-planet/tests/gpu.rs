@@ -499,49 +499,53 @@ fn picks_report_the_terrain_hit_under_the_view() {
     let Some(gpu) = gpu() else { return };
     let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
     let ground = planet.surface_point(land(&planet, 2, 0.47, 0.53), 0.0);
-    let eye = planet.surface_point(ground, 60.0);
-    let up = planet.grid().up(eye);
-    let forward = (up.any_orthonormal_vector() - up * 0.15).normalize().as_vec3();
     let size = [256, 144];
     let target = Target::new(&gpu, size);
-    let mut renderer = renderer(&gpu, planet.clone(), size);
-    let picks: SharedPicks = Default::default();
-    let mut frame = frame(&planet, eye);
-    frame.picks = Some(picks.clone());
-    let frames = settle(&gpu, &target, &mut renderer, &frame, forward);
-    let camera = target.camera(forward, up.as_vec3());
-    // Pixels from just below the horizon to the bottom, and one in the sky.
-    let pixels = [(128u32, 2u32), (128, 70), (40, 80), (200, 100), (128, 143)];
-    picks.lock().unwrap().requests.extend(pixels.iter().enumerate().map(|(n, &(x, y))| PickRequest {
-        id: n as u64,
-        uv: [(x as f32 + 0.5) / size[0] as f32, (y as f32 + 0.5) / size[1] as f32],
-    }));
-    for n in 0..4 {
-        target.render(&gpu, &mut renderer, &frame, forward, (frames + n) as u64);
-    }
-    let results = std::mem::take(&mut picks.lock().unwrap().results);
-    assert_eq!(results.len(), pixels.len(), "every request is answered");
     let mut exact = 0;
-    for result in results {
-        let (x, y) = pixels[result.id as usize];
-        let dir = pixel_dir(&target, &camera, x, y);
-        let cpu = planet.raycast(eye, dir, 100_000.0);
-        eprintln!("pick {x},{y}: {:?} cpu {:?}", result.hit, cpu.map(|c| c.distance));
-        match (result.hit, cpu) {
-            (Some(hit), Some(cpu)) => {
-                let cell_m = planet.grid().level_size(hit.level);
-                assert!((hit.distance - cpu.distance).abs() <= cell_m * 2.0 + 0.5, "pixel {x},{y}: {hit:?} vs {}", cpu.distance);
-                let drawn = planet.drawn_hit(eye, dir, hit.distance, hit.cell, hit.level, hit.entered);
-                if hit.level == 0 {
-                    exact += 1;
-                    assert_eq!((drawn.cell, drawn.previous), (cpu.cell, cpu.previous), "pixel {x},{y}");
+    // From 60 m over the ground towards the horizon (coarse levels), and
+    // 2 m over it looking down (level 0).
+    for (height, pitch) in [(60.0, 0.15f64), (2.0, 2.0)] {
+        let eye = planet.surface_point(ground, height);
+        let up = planet.grid().up(eye);
+        let forward = (up.any_orthonormal_vector() - up * pitch).normalize().as_vec3();
+        let mut renderer = renderer(&gpu, planet.clone(), size);
+        let picks: SharedPicks = Default::default();
+        let mut frame = frame(&planet, eye);
+        frame.picks = Some(picks.clone());
+        let frames = settle(&gpu, &target, &mut renderer, &frame, forward);
+        let camera = target.camera(forward, up.as_vec3());
+        // Pixels from just below the horizon to the bottom, and one in the sky.
+        let pixels = [(128u32, 2u32), (128, 70), (40, 80), (200, 100), (128, 143)];
+        picks.lock().unwrap().requests.extend(pixels.iter().enumerate().map(|(n, &(x, y))| PickRequest {
+            id: n as u64,
+            uv: [(x as f32 + 0.5) / size[0] as f32, (y as f32 + 0.5) / size[1] as f32],
+        }));
+        for n in 0..4 {
+            target.render(&gpu, &mut renderer, &frame, forward, (frames + n) as u64);
+        }
+        let results = std::mem::take(&mut picks.lock().unwrap().results);
+        assert_eq!(results.len(), pixels.len(), "every request is answered");
+        for result in results {
+            let (x, y) = pixels[result.id as usize];
+            let dir = pixel_dir(&target, &camera, x, y);
+            let cpu = planet.raycast(eye, dir, 100_000.0);
+            eprintln!("pick {x},{y} from {height} m: {:?} cpu {:?}", result.hit, cpu.map(|c| c.distance));
+            match (result.hit, cpu) {
+                (Some(hit), Some(cpu)) => {
+                    let cell_m = planet.grid().level_size(hit.level);
+                    assert!((hit.distance - cpu.distance).abs() <= cell_m * 2.0 + 0.5, "pixel {x},{y}: {hit:?} vs {}", cpu.distance);
+                    let drawn = planet.drawn_hit(eye, dir, hit.distance, hit.cell, hit.level, hit.entered);
+                    if hit.level == 0 {
+                        exact += 1;
+                        assert_eq!((drawn.cell, drawn.previous), (cpu.cell, cpu.previous), "pixel {x},{y}");
+                    }
                 }
+                (None, None) => {}
+                (hit, cpu) => panic!("pixel {x},{y}: pick {hit:?}, cpu {cpu:?}"),
             }
-            (None, None) => {}
-            (hit, cpu) => panic!("pixel {x},{y}: pick {hit:?}, cpu {cpu:?}"),
         }
     }
-    assert!(exact >= 2, "{exact} picks drawn at level 0");
+    assert!(exact >= 3, "{exact} picks drawn at level 0");
 }
 
 /// Planet-scale brushes: a sphere of 3 km radius (64-bit containment; the

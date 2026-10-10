@@ -88,10 +88,6 @@ impl Cell {
     pub const fn new(face: u8, i: i32, j: i32, k: i32) -> Self {
         Self { face, i, j, k }
     }
-    /// The containing cell at `level` (floor division on every axis).
-    pub fn at_level(self, level: u32) -> Self {
-        Self::new(self.face, self.i >> level, self.j >> level, self.k >> level)
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
