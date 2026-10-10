@@ -140,6 +140,9 @@ pub struct CoronaPass {
     // ── Bind groups (rebuilt when camera, particle or emitter buffer changes) ─
     compute_bg: Option<wgpu::BindGroup>,
     render_bg: Option<wgpu::BindGroup>,
+    /// The particle slots `vs_main` indexes `compact_buf` with
+    /// (`helio_pass_gbuffer::draw_slots`).
+    draw_slots: wgpu::Buffer,
     bg_key: Option<[wgpu::Buffer; 3]>, // (particle_buf, emitter_buf, camera_buf)
 
     // ── State ────────────────────────────────────────────────────────────────
@@ -230,6 +233,9 @@ impl CoronaPass {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
+        let draw_slots = helio_pass_gbuffer::DrawSlots::default()
+            .buffer(device, DEFAULT_MAX_PARTICLES as u32)
+            .clone();
 
         let emitter_alive_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Corona Emitter Alive"),
@@ -381,7 +387,7 @@ impl CoronaPass {
                 module: &render_shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[],
+                buffers: &[Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &render_shader,
@@ -493,6 +499,7 @@ impl CoronaPass {
             particle_sampler,
             compute_bg,
             render_bg,
+            draw_slots,
             bg_key,
             max_particles: DEFAULT_MAX_PARTICLES,
             emitter_count: 0,
@@ -1133,6 +1140,7 @@ impl RenderPass for CoronaPass {
         let mut rp = ctx.render_cmds().unwrap();
         rp.set_pipeline(&self.render_pipeline);
         rp.set_bind_group(0, render_bg, &[]);
+        rp.set_vertex_buffer(0, self.draw_slots.slice(..));
 
         // One draw_indirect per emitter — each draws only its alive, sorted particles.
         let stride = std::mem::size_of::<crate::GpuCoronaDrawIndirect>() as u64;

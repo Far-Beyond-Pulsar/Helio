@@ -1556,6 +1556,10 @@ mod tests {
     #[test]
     fn output_struct_sizes_match_wgsl() {
         assert_eq!(INSTANCE_BYTES, 208);
+        assert_eq!(
+            helio_pass_gbuffer::draw_slots::INSTANCE_BYTES,
+            std::mem::size_of::<GpuInstanceData>() as u64
+        );
         assert_eq!(AABB_BYTES, 32);
         assert_eq!(DRAW_CALL_BYTES, 20);
         assert_eq!(RANGE_BYTES, 20);

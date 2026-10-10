@@ -43,6 +43,8 @@ struct ForwardLitGlobals {
 }
 
 pub struct ForwardLitPass {
+    /// The draw slots the vertex shader reads (see `helio_pass_gbuffer::DrawSlots`).
+    draw_slots: helio_pass_gbuffer::DrawSlots,
     material_binding: helio_mats::MaterialBindingConfig,
     pipelines: HashMap<RadiantShaderKey, wgpu::RenderPipeline>,
     shader_cache: RadiantShaderCache,
@@ -217,6 +219,7 @@ impl ForwardLitPass {
         };
 
         Self {
+            draw_slots: Default::default(),
             material_binding,
             pipelines: HashMap::new(),
             shader_cache: RadiantShaderCache::new(),
@@ -317,7 +320,7 @@ impl ForwardLitPass {
                                 shader_location: 4,
                             },
                         ],
-                    })],
+                    }), Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module,
@@ -628,10 +631,19 @@ impl RenderPass for ForwardLitPass {
         }
 
         let indirect = culled.indirect;
+        // The slot indexes `compacted_indices`.
+        let slots = self
+            .draw_slots
+            .buffer(
+                &ctx.device,
+                helio_pass_gbuffer::DrawSlots::len_of(culled.compacted_indices.size(), 4),
+            )
+            .clone();
         let mut pass = ctx.render_cmds().unwrap();
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.set_vertex_buffer(1, slots.slice(..));
         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
 
         // One draw per material segment of the bucket this pass renders (see

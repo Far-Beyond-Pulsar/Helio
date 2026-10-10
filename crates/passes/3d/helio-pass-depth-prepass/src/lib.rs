@@ -11,6 +11,8 @@
 use helio_core::{BufferKey, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 pub struct DepthPrepassPass {
+    /// The draw slots the vertex shader reads (see `helio_pass_gbuffer::DrawSlots`).
+    draw_slots: helio_pass_gbuffer::DrawSlots,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: Option<wgpu::BindGroup>,
@@ -99,7 +101,7 @@ impl DepthPrepassPass {
                             shader_location: 2,
                         },
                     ],
-                })],
+                }), Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
             },
             // Depth-only: no fragment stage, no color outputs.
             fragment: None,
@@ -121,6 +123,7 @@ impl DepthPrepassPass {
         });
 
         Self {
+            draw_slots: Default::default(),
             pipeline,
             bind_group_layout,
             bind_group: None,
@@ -227,11 +230,20 @@ impl RenderPass for DepthPrepassPass {
             self.bind_group_key = Some(key);
         }
         let indirect = culled.indirect;
+        // The slot indexes `compacted_indices`.
+        let slots = self
+            .draw_slots
+            .buffer(
+                &ctx.device,
+                helio_pass_gbuffer::DrawSlots::len_of(culled.compacted_indices.size(), 4),
+            )
+            .clone();
 
         let mut pass = ctx.render_cmds().unwrap();
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, vertices.buffer.slice(..));
+        pass.set_vertex_buffer(1, slots.slice(..));
         pass.set_index_buffer(
             indices.buffer.slice(..),
             wgpu::IndexFormat::Uint32,

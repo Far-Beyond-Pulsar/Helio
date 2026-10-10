@@ -34,6 +34,7 @@ pub mod components;
 mod coordinate_spaces_frame_data;
 mod culled_batch_frame_data;
 mod draw_segments;
+pub mod draw_slots;
 mod indirect_draw;
 mod object_batch_frame_data;
 pub use components::{
@@ -44,6 +45,7 @@ pub use components::{
 pub use coordinate_spaces_frame_data::CoordinateSpacesFrameData;
 pub use culled_batch_frame_data::CulledBatchFrameData;
 pub use draw_segments::{DrawSegment, DrawSegments, ShadingBucket};
+pub use draw_slots::{DrawSlots, DRAW_SLOT_LAYOUT, DRAW_SLOT_LOCATION};
 pub use indirect_draw::{multi_draw_indexed_indirect, GpuDrawCount, DRAW_INDEXED_INDIRECT_STRIDE};
 pub use object_batch_frame_data::{IndirectDispatchArgs, ObjectBatchFrameData};
 use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey};
@@ -79,6 +81,8 @@ pub struct GBufferGlobals {
 // ── Pass struct ───────────────────────────────────────────────────────────────
 
 pub struct GBufferPass {
+    /// The draw slots the vertex shader reads (see [`DrawSlots`]).
+    draw_slots: DrawSlots,
     timing_query: Option<wgpu::QuerySet>,
     material_binding: helio_mats::MaterialBindingConfig,
     pipelines: HashMap<RadiantShaderKey, wgpu::RenderPipeline>,
@@ -277,6 +281,7 @@ impl GBufferPass {
         });
 
         Self {
+            draw_slots: DrawSlots::default(),
             timing_query: None,
             material_binding,
             pipelines: HashMap::new(),
@@ -769,11 +774,17 @@ impl RenderPass for GBufferPass {
         }
 
         let indirect = culled.indirect;
+        // The slot indexes `compacted_indices`.
+        let slots = self
+            .draw_slots
+            .buffer(&ctx.device, DrawSlots::len_of(culled.compacted_indices.size(), 4))
+            .clone();
 
         let mut pass = ctx.render_cmds().unwrap();
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.set_vertex_buffer(1, slots.slice(..));
         pass.set_index_buffer(
             indices.slice(..),
             wgpu::IndexFormat::Uint32,
@@ -1000,7 +1011,7 @@ impl GBufferPass {
                                 shader_location: 4,
                             },
                         ],
-                    })],
+                    }), Some(crate::DRAW_SLOT_LAYOUT)],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module,

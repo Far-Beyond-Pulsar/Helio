@@ -117,7 +117,7 @@ struct LightmapAtlasRegion {
 @group(0) @binding(3) var<storage, read>    lightmap_atlas_regions: array<LightmapAtlasRegion>;
 // Per-draw-call-group compacted original instance slots, surviving both
 // frustum culling (IndirectDispatchPass) and Hi-Z occlusion culling
-// (OcclusionCullPass). `instance_index` on an indirect draw ranges over the
+// (OcclusionCullPass). The draw slot (`@location(15)`) ranges over the
 // group's now-possibly-smaller compacted count, so it must be redirected
 // through this buffer before indexing `instance_data` — it no longer equals
 // the instance's real slot directly.
@@ -160,8 +160,10 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
     return unpack4x8snorm(packed).xyz;
 }
 
+// `slot` is per-instance vertex data, which every backend offsets by the
+// indirect draw's `first_instance` (`helio_pass_gbuffer::draw_slots`).
 @vertex
-fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
+fn vs_main(v: Vertex, @location(15) slot: u32) -> VertexOutput {
     let inst       = instance_data[compacted_indices[slot]];
 
     // Coordinate space: world space (slot 0, identity) for the overwhelming

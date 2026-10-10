@@ -75,6 +75,7 @@ pub struct ShadowPass {
     /// False on macOS Metal, WASM, and older Vulkan/DX12.  When false the ObjectDirty path
     /// falls back to a full LoadOp::Clear + multi_draw_indexed_indirect (no per-face GPU culling).
     supports_multi_draw_count: bool,
+    draw_slots: helio_pass_gbuffer::DrawSlots,
 }
 
 impl ShadowPass {
@@ -207,7 +208,7 @@ impl ShadowPass {
                         offset: 0,
                         shader_location: 0,
                     }],
-                })],
+                }), Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
             },
             // Depth-only: no colour outputs, no fragment shader.
             // The GPU writes depth from the vertex clip position automatically.
@@ -370,6 +371,7 @@ impl ShadowPass {
             supports_multi_draw_count: device
                 .features()
                 .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
+            draw_slots: Default::default(),
         }
     }
 
@@ -561,6 +563,16 @@ impl RenderPass for ShadowPass {
         candidates.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.0.cmp(&b.0)));
         let mut updates = 0u32;
         let mut texels = 0u32;
+        let slots = self
+            .draw_slots
+            .buffer(
+                &ctx.device,
+                helio_pass_gbuffer::DrawSlots::len_of(
+                    batch.instances.size(),
+                    helio_pass_gbuffer::draw_slots::INSTANCE_BYTES,
+                ),
+            )
+            .clone();
         let bg = self.bg_0.as_ref().unwrap();
         for (face, static_dirty, _) in candidates {
             let r = &residency.residents[face / 6];
@@ -618,6 +630,7 @@ impl RenderPass for ShadowPass {
                     pass.set_pipeline(&self.pipeline);
                     pass.set_bind_group(0, bg, &[dynamic_offset]);
                     pass.set_vertex_buffer(0, vertices.buffer.slice(..));
+                    pass.set_vertex_buffer(1, slots.slice(..));
                     pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
                     // With GPU counts, every list is bounded by its capacity
                     // and drawn to this frame's live count, so a caster
@@ -676,6 +689,7 @@ impl RenderPass for ShadowPass {
                         },
                         batch.shadow_transmissive_draws().1,
                         &vertices.buffer,
+                        &slots,
                         &indices.buffer,
                         Some([tile.x, tile.y, tile.size]),
                     );
