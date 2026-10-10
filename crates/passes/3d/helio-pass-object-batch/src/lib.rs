@@ -29,6 +29,9 @@ pub use gpu_types::*;
 
 const WG: u32 = 256;
 const SORT_BITS: usize = 32;
+/// Byte offset of the one-workgroup-per-group dispatch size in
+/// `dispatch_args_groups` (see `cs_prepare_groups`).
+const GROUP_DISPATCH_OFFSET: u64 = 12;
 /// Below this many rows, scratch buffers still allocate at this floor --
 /// avoids reallocating on every single insert/remove around a tiny live
 /// count, matching `GrowableBuffer`'s own "small initial capacity" idiom
@@ -320,7 +323,8 @@ impl ScratchBuffers {
             ),
             group_count: create_storage_buffer(device, "ObjBatch GroupCount", 16),
             group_starts: create_storage_buffer(device, "ObjBatch GroupStarts", (n + 1) * 4),
-            dispatch_args_groups: create_dual_buffer(device, "ObjBatch DispatchArgsGroups", 12),
+            // Two dispatch sizes: `cs_prepare_groups` documents both.
+            dispatch_args_groups: create_dual_buffer(device, "ObjBatch DispatchArgsGroups", 24),
             group_material_class: create_storage_buffer(device, "ObjBatch GroupClass", n * 4),
             group_graph_hash_lo: create_storage_buffer(device, "ObjBatch GroupHashLo", n * 4),
             group_graph_hash_hi: create_storage_buffer(device, "ObjBatch GroupHashHi", n * 4),
@@ -1381,8 +1385,13 @@ impl RenderPass for ObjectBatchPass {
                 aabbs: &self.scratch.aabbs_out,
                 draw_calls: &self.draw_calls_out,
                 indirect: &self.indirect_out,
-                draw_count,
-                instance_count: self.instance_count(),
+                readback_draw_count: draw_count,
+                readback_instance_count: self.instance_count(),
+                group_capacity: self.scratch_capacity,
+                group_dispatch: helio_pass_gbuffer::IndirectDispatchArgs {
+                    buffer: &self.scratch.dispatch_args_groups,
+                    offset: GROUP_DISPATCH_OFFSET,
+                },
                 opaque_ranges: self.opaque_ranges(),
                 transparent_ranges: self.transparent_ranges(),
                 forward_ranges: self.forward_ranges(),
@@ -1405,9 +1414,10 @@ impl RenderPass for ObjectBatchPass {
             })
         };
         frame.write(helio_core::ResourceKey::new("object_batch"), data, "ObjectBatch");
-        // Culling and the GBuffer draw from these read-back counts, so they --
-        // not the SceneDB upload -- decide when the scene starts (or stops)
-        // reaching depth.
+        // Culling and drawing follow this frame's GPU counts, but a few
+        // fallbacks still follow these read-back ones (Hi-Z warm-up, draws
+        // without `MULTI_DRAW_INDIRECT_COUNT`), so depth can also change when
+        // they do.
         helio_core::resource_keys::fold_depth_draw_signature(
             frame,
             (u64::from(draw_count) << 32) | u64::from(self.instance_count()),

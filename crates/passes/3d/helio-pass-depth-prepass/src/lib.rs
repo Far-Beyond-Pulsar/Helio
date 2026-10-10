@@ -177,8 +177,8 @@ impl RenderPass for DepthPrepassPass {
             return Ok(());
         };
         // O(1): single multi_draw_indexed_indirect — no CPU loop over draw calls.
-        let draw_count = batch.draw_count;
-        if draw_count == 0 {
+        let (max_draws, draw_count) = batch.all_draws();
+        if max_draws == 0 {
             return Ok(());
         }
         let vertices = ctx
@@ -240,8 +240,8 @@ impl RenderPass for DepthPrepassPass {
             &mut pass,
             indirect,
             0,
+            max_draws,
             draw_count,
-            batch.all_draws_count_slot(),
         );
         Ok(())
     }

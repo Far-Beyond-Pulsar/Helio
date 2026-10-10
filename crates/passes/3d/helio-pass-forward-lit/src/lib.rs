@@ -476,9 +476,8 @@ impl RenderPass for ForwardLitPass {
         let Some(culled) = ctx.registry.get::<helio_pass_gbuffer::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
             return Ok(());
         };
-        let draw_count = batch.draw_count;
-
-        if draw_count == 0 {
+        let (max_draws, draw_count) = batch.all_draws();
+        if max_draws == 0 {
             return Ok(());
         }
         let Some(material_textures) = ctx.registry.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures(), "ForwardLit") else {
@@ -658,8 +657,8 @@ impl RenderPass for ForwardLitPass {
                 &mut pass,
                 indirect,
                 0,
+                max_draws,
                 draw_count,
-                batch.all_draws_count_slot(),
             );
         } else {
             for (index, segment) in segments.in_bucket(bucket) {

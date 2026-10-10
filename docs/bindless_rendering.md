@@ -70,8 +70,26 @@ commands stay the same frame to frame and the recording cache keeps hitting.
 Shadow, DepthPrepass and PortalInstances draw every group with one pipeline
 and don't use ranges.
 
-Object Batch's readback still provides the live group and instance counts
-that size the culling dispatches; those trail the GPU by the same frames.
+Culling doesn't wait for the readback either. Object Batch writes, on the
+GPU, a dispatch size of one workgroup per live draw group
+(`ObjectBatchFrameData::group_dispatch`), and the frustum and occlusion culls
+dispatch indirectly from it. Their buffers are sized from `group_capacity`,
+which follows the SceneDB row count on the CPU. Draws over every group read
+the GPU count with `group_capacity` as the bound. So an object spawned or
+despawned between frames is culled and drawn, or gone, in the very next
+frame (`crates/examples/tests/objects_cull_same_frame.rs`).
+
+Object Batch's read-back group and instance counts, which trail the GPU by
+the same frames, are still used where there is no GPU count:
+
+- draws on devices without `MULTI_DRAW_INDIRECT_COUNT` (and on WebGPU), which
+  need a CPU bound and use the read-back count, so new groups appear there
+  once it catches up;
+- Hi-Z warm-up, which keeps occlusion testing off until the readback
+  confirms that real instances have been drawn into depth;
+- the shadow passes (`ShadowCull`, `ShadowDirty`, the shadow atlas draws) and
+  the portal passes, which size their work from the read-back shadow and
+  draw counts.
 
 ## GPU-driven draw encoding (Helio #306)
 

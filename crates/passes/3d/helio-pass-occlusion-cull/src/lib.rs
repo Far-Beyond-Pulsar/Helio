@@ -28,7 +28,8 @@ use helio_pass_gbuffer::{DrawSegment, ShadingBucket};
 struct CullParams {
     screen_width: u32,
     screen_height: u32,
-    draw_count: u32,
+    /// Rows `draw_calls` holds; the dispatch itself covers the live groups.
+    draw_capacity: u32,
     hiz_mip_count: u32,
     /// Baked PVS grid (`occlusion_cull.wgsl` documents the layout); 0 = none.
     pvs_available: u32,
@@ -188,6 +189,8 @@ struct SegmentTable {
     record_capacity: u32,
     /// Whether draws can read `counts_buf` (`MULTI_DRAW_INDIRECT_COUNT`).
     counts_supported: bool,
+    /// Bumped whenever the table changes.
+    generation: u64,
 }
 
 impl SegmentTable {
@@ -199,6 +202,7 @@ impl SegmentTable {
             counts_buf: create_segment_buf(device, "OcclusionCull Segment Counts", 4, true),
             record_capacity: 1,
             counts_supported: false,
+            generation: 0,
         }
     }
 
@@ -223,6 +227,7 @@ impl SegmentTable {
         if !changed {
             return;
         }
+        self.generation += 1;
 
         let records = self.keys.records();
         if records > self.record_capacity {
@@ -308,12 +313,14 @@ pub struct OcclusionCullPass {
     bind_group: Option<wgpu::BindGroup>,
     /// True once this pass has actually run its real Hi-Z test against a
     /// depth buffer built from a frame that drew real geometry. `frame_num
-    /// == 0` is NOT an equivalent condition: `batch.draw_count` comes from
-    /// `ObjectBatchPass`'s own async GPU->CPU readback of its compute
-    /// results, which lags a frame behind the GPU work that produced it --
-    /// on frame 0 it reads 0 regardless of how many objects were actually
-    /// spawned, so `execute()`'s `draw_count == 0` early-out fires before
-    /// the frame-0 bypass below ever runs. The bypass then never executes,
+    /// == 0` is NOT an equivalent condition. The dispatches follow the GPU's
+    /// live group count, but only `ObjectBatchPass`'s async readback tells
+    /// the CPU that instances exist, frames later, so the bypass below runs
+    /// until `batch.readback_instance_count` is non-zero: by then the frames
+    /// the readback describes have drawn real geometry into depth.
+    ///
+    /// History: this pass used to early-out while the read-back draw count
+    /// was 0, which on frame 0 it always is. The bypass then never executed,
     /// `compacted_indices_2_buf` stays zeroed, and the very first real
     /// dispatch (frame 1) Hi-Z-tests against a pyramid built from frame 0's
     /// EMPTY depth buffer (nothing was drawn, so nothing was written to
@@ -588,14 +595,15 @@ impl OcclusionCullPass {
         }
     }
 
-    /// Grows `compacted_indices_2_buf` to at least `instance_count` rows
-    /// (next-power-of-two, floor `MIN_CAPACITY`). Returns `true` if it
-    /// reallocated (the caller must then rebuild the bind group).
-    fn ensure_capacity(&mut self, device: &wgpu::Device, instance_count: u32) -> bool {
-        if instance_count <= self.instance_capacity {
+    /// Grows `compacted_indices_2_buf` and `compacted_indirect_buf` to at
+    /// least `capacity` rows (next-power-of-two, floor `MIN_CAPACITY`).
+    /// Returns `true` if they reallocated (the caller must then rebuild the
+    /// bind group).
+    fn ensure_capacity(&mut self, device: &wgpu::Device, capacity: u32) -> bool {
+        if capacity <= self.instance_capacity {
             return false;
         }
-        self.instance_capacity = instance_count.next_power_of_two().max(MIN_CAPACITY);
+        self.instance_capacity = capacity.next_power_of_two().max(MIN_CAPACITY);
         self.compacted_indices_2_buf =
             create_compacted_indices_2_buf(device, self.instance_capacity);
         self.compacted_indirect_buf = create_compacted_indirect_buf(device, self.instance_capacity);
@@ -607,10 +615,10 @@ impl OcclusionCullPass {
         ctx: &mut PassContext,
         batch: &helio_pass_gbuffer::ObjectBatchFrameData<'_>,
         source_indirect: &wgpu::Buffer,
-        draw_count: u32,
     ) {
         let mut cmds = ctx.graphics_cmds();
-        let bytes = (draw_count as u64 * 20).max(4);
+        // Every group the GPU can produce; the live count is GPU-only.
+        let bytes = source_indirect.size().min(self.compacted_indirect_buf.size());
         cmds.copy_buffer_to_buffer(source_indirect, 0, &self.compacted_indirect_buf, 0, bytes);
 
         // Legacy/test frames can have no GPU range slots; preserve the
@@ -797,6 +805,7 @@ impl RenderPass for OcclusionCullPass {
         builder.read("object_batch");
         builder.read("indirect_dispatch");
         builder.write_buffer("culled_batch");
+        builder.write_buffer(helio_core::resource_keys::DEPTH_DRAW_SIGNATURE);
     }
 
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
@@ -828,6 +837,13 @@ impl RenderPass for OcclusionCullPass {
             },
             "OcclusionCull",
         );
+        // Draws switch pipelines and offsets when the table changes, so
+        // depth can change with it while nothing else does.
+        helio_core::resource_keys::fold_depth_draw_signature(
+            frame,
+            segments.generation,
+            "OcclusionCull",
+        );
     }
 
     fn render_pass_descriptor<'a>(
@@ -854,7 +870,7 @@ impl RenderPass for OcclusionCullPass {
         }
 
         let batch = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"));
-        let draw_count = batch.map(|b| b.draw_count).unwrap_or(0);
+        let draw_capacity = batch.map(|b| b.group_capacity).unwrap_or(0);
         let range_slots = batch.map(|b| b.range_slot_capacity).unwrap_or(0);
         if let Some(batch) = batch.as_ref() {
             self.segments.update(ctx.device, ctx.queue, batch);
@@ -872,7 +888,9 @@ impl RenderPass for OcclusionCullPass {
                 bytemuck::bytes_of(&params),
             );
         }
-        self.ensure_capacity(ctx.device, batch.map(|b| b.instance_count).unwrap_or(0));
+        // Sized for every group and instance the GPU can produce this frame:
+        // the live counts only exist on the GPU.
+        self.ensure_capacity(ctx.device, draw_capacity);
 
         // `baked_pvs` is optional: published by helio-bake's BakeInjectPass
         // only after a bake that included a PVS (`BakeConfig::with_pvs`).
@@ -881,7 +899,7 @@ impl RenderPass for OcclusionCullPass {
         let p = CullParams {
             screen_width: self.screen_width,
             screen_height: self.screen_height,
-            draw_count,
+            draw_capacity,
             hiz_mip_count: mip_levels(self.screen_width, self.screen_height),
             pvs_available: pvs.is_some() as u32,
             pvs_grid: pvs.map_or([0; 3], |p| p.grid),
@@ -911,11 +929,6 @@ impl RenderPass for OcclusionCullPass {
             cmds.clear_buffer(&self.segments.counts_buf, 0, None);
             cmds.clear_buffer(&self.segments.indirect_buf, 0, None);
         }
-        let draw_count = batch.draw_count;
-        if draw_count == 0 {
-            return Ok(());
-        }
-
         // Temporal Hi-Z: the first frame with real instances has no valid
         // pyramid yet (see `hiz_warmed_up`'s doc for why this is NOT the
         // same as `frame_num == 0`) — skip real occlusion testing, but
@@ -923,29 +936,28 @@ impl RenderPass for OcclusionCullPass {
         // frustum-culled list through unchanged instead of leaving it
         // stale/uninitialized.
         if !self.hiz_warmed_up {
-            let instance_count = batch.instance_count as u64;
-            if instance_count > 0 {
-                ctx.graphics_cmds().copy_buffer_to_buffer(
-                    indirect_dispatch.compacted_indices,
-                    0,
-                    &self.compacted_indices_2_buf,
-                    0,
-                    instance_count * 4,
-                );
-            }
-            // Only declare Hi-Z warmed up once real instances actually got
-            // copied through this frame -- that's what guarantees GBuffer
-            // has real geometry to write into depth this frame, which is
-            // the one thing frame N+1's Hi-Z pyramid actually needs to be
-            // valid. If `instance_count` was 0 here (draw_count > 0 but no
-            // live instances yet -- shouldn't normally happen, but this
-            // must not gamble on it), stay un-warmed and retry the bypass
-            // next frame instead of moving on to a real test with nothing
-            // real backing it either.
-            if batch.instance_count > 0 {
+            // The live instance count is GPU-only: copy the whole list.
+            let bytes = indirect_dispatch
+                .compacted_indices
+                .size()
+                .min(self.compacted_indices_2_buf.size());
+            ctx.graphics_cmds().copy_buffer_to_buffer(
+                indirect_dispatch.compacted_indices,
+                0,
+                &self.compacted_indices_2_buf,
+                0,
+                bytes,
+            );
+            // Only declare Hi-Z warmed up once the readback confirms real
+            // instances -- that's what guarantees GBuffer has drawn real
+            // geometry into depth, which is the one thing the next frame's
+            // Hi-Z pyramid actually needs to be valid. Until then, stay
+            // un-warmed and retry the bypass next frame instead of moving on
+            // to a real test with nothing real backing it.
+            if batch.readback_instance_count > 0 {
                 self.hiz_warmed_up = true;
             }
-            self.record_range_compaction(ctx, &batch, indirect_dispatch.indirect, draw_count);
+            self.record_range_compaction(ctx, &batch, indirect_dispatch.indirect);
             return Ok(());
         }
 
@@ -1028,8 +1040,9 @@ impl RenderPass for OcclusionCullPass {
             self.bind_group_key = Some(key);
         }
 
-        // One workgroup per draw-call group — its 64 lanes cooperatively
-        // Hi-Z-test and compact that group's frustum survivors.
+        // One workgroup per live draw-call group, counted on the GPU this
+        // frame — its 64 lanes cooperatively Hi-Z-test and compact that
+        // group's frustum survivors.
         {
         let mut cmds = ctx.graphics_cmds();
         let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -1038,9 +1051,9 @@ impl RenderPass for OcclusionCullPass {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
-        pass.dispatch_workgroups(draw_count, 1, 1);
+        pass.dispatch_workgroups_indirect(batch.group_dispatch.buffer, batch.group_dispatch.offset);
         }
-        self.record_range_compaction(ctx, &batch, indirect_dispatch.indirect, draw_count);
+        self.record_range_compaction(ctx, &batch, indirect_dispatch.indirect);
         Ok(())
     }
 }

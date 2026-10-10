@@ -435,7 +435,7 @@ impl RenderPass for PortalInstancePass {
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         self.draw_count = ctx.registry
             .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"))
-            .map(|b| b.draw_count).unwrap_or(0);
+            .map(|b| b.readback_draw_count).unwrap_or(0);
         let screen = ScreenSize {
             width: ctx.width as f32,
             height: ctx.height as f32,

@@ -459,13 +459,11 @@ impl RenderPass for TransparentPass {
         let Some(culled) = ctx.registry.get::<helio_pass_occlusion_cull::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
             return Ok(());
         };
-        let draw_count = batch.draw_count;
         let segments = culled.segments;
-        if draw_count == 0
-            || segments
-                .in_bucket(helio_pass_gbuffer::ShadingBucket::Transparent)
-                .next()
-                .is_none()
+        if segments
+            .in_bucket(helio_pass_gbuffer::ShadingBucket::Transparent)
+            .next()
+            .is_none()
         {
             return Ok(());
         }

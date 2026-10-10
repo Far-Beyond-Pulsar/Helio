@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 use helio_core::{PassContext, RenderGraph, RenderPass, ResourceKey, ResourceRegistry, Result as HelioResult};
-use helio_pass_gbuffer::{CoordinateSpacesFrameData, ObjectBatchFrameData};
+use helio_pass_gbuffer::{CoordinateSpacesFrameData, IndirectDispatchArgs, ObjectBatchFrameData};
 use helio_pass_hiz::HiZBuildPass;
 use helio_pass_indirect_dispatch::IndirectDispatchFrameData;
 use helio_pass_object_batch::{
@@ -57,6 +57,8 @@ struct SceneInjectorPass {
     compacted_indices: Arc<wgpu::Buffer>,
     coordinate_spaces: Arc<wgpu::Buffer>,
     depth_texture: Arc<wgpu::Texture>,
+    /// `(draw_count, 1, 1)`: what `ObjectBatchPass` writes on the GPU.
+    group_dispatch: Arc<wgpu::Buffer>,
     draw_count: u32,
     instance_count: u32,
 }
@@ -109,6 +111,8 @@ impl RenderPass for SceneInjectorPass {
             unsafe { std::mem::transmute(&*self.coordinate_spaces) };
         let depth_texture: &'a wgpu::Texture =
             unsafe { std::mem::transmute(&*self.depth_texture) };
+        let group_dispatch: &'a wgpu::Buffer =
+            unsafe { std::mem::transmute(&*self.group_dispatch) };
 
         frame.write(
             ResourceKey::new("object_batch"),
@@ -117,8 +121,13 @@ impl RenderPass for SceneInjectorPass {
                 aabbs: instances, // unused by OcclusionCullPass; any valid buffer satisfies the type
                 draw_calls,
                 indirect,
-                draw_count: self.draw_count,
-                instance_count: self.instance_count,
+                group_capacity: self.draw_count,
+                group_dispatch: IndirectDispatchArgs {
+                    buffer: group_dispatch,
+                    offset: 0,
+                },
+                readback_draw_count: self.draw_count,
+                readback_instance_count: self.instance_count,
                 opaque_ranges: &[],
                 transparent_ranges: &[],
                 forward_ranges: &[],
@@ -350,6 +359,11 @@ fn front_object_survives_behind_object_culled_always_visible_overrides() {
             compacted_indices: compacted_indices_buf,
             coordinate_spaces: coordinate_spaces_buf,
             depth_texture,
+            group_dispatch: Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Test Group Dispatch"),
+                contents: bytemuck::cast_slice(&[3u32, 1, 1]),
+                usage: wgpu::BufferUsages::INDIRECT,
+            })),
             draw_count: 3,
             instance_count: 3,
         };
