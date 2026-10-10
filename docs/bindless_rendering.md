@@ -79,17 +79,36 @@ the GPU count with `group_capacity` as the bound. So an object spawned or
 despawned between frames is culled and drawn, or gone, in the very next
 frame (`crates/examples/tests/objects_cull_same_frame.rs`).
 
-Object Batch's read-back group and instance counts, which trail the GPU by
-the same frames, are still used where there is no GPU count:
+The shadow and portal passes work the same way, reading the live counts
+Object Batch writes to `draw_counts_gpu` each frame (word 0 the group count,
+words 1 to 3 the static, movable and transmissive shadow-caster counts):
+
+- `ShadowDirty` covers every movable draw the batch can produce and reads the
+  live movable count on the GPU. It keeps the count it last saw in a GPU
+  buffer and dirties every shadow face when it changes, so a movable caster
+  spawned or despawned between frames casts, or stops casting, its shadow in
+  the very next frame (`crates/examples/tests/movable_shadows_same_frame.rs`).
+- The shadow atlas draws read the GPU counts, bounded by `group_capacity`.
+- `PortalCull` dispatches every group up to its 512-group limit, culls those
+  below the live count, and zeroes the records past it, so a despawned
+  group's portal copies are not drawn from stale records. `PortalInstance`
+  draws with the GPU count.
+
+Object Batch's read-back counts, which trail the GPU by the same frames, are
+still used where there is no GPU count or the CPU has to decide:
 
 - draws on devices without `MULTI_DRAW_INDIRECT_COUNT` (and on WebGPU), which
   need a CPU bound and use the read-back count, so new groups appear there
   once it catches up;
 - Hi-Z warm-up, which keeps occlusion testing off until the readback
   confirms that real instances have been drawn into depth;
-- the shadow passes (`ShadowCull`, `ShadowDirty`, the shadow atlas draws) and
-  the portal passes, which size their work from the read-back shadow and
-  draw counts.
+- the static shadow layer. The shadow pass caches it per face and re-renders
+  a face, within a per-frame budget the CPU schedules, when its light changes
+  or when the static (or transmissive) caster count read back changes
+  (`shadow_static_generation`). A static object placed or removed therefore
+  updates the static layer a couple of frames late. SceneDB's change signal
+  can't stand in for it, since it also changes whenever a movable object
+  moves, which would invalidate the static cache every frame.
 
 ## GPU-driven draw encoding (Helio #306)
 

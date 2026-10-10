@@ -433,9 +433,11 @@ impl RenderPass for PortalInstancePass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // The most groups to draw; with GPU counts the draw reads this
+        // frame's live count (see `execute`).
         self.draw_count = ctx.registry
             .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"))
-            .map(|b| b.readback_draw_count).unwrap_or(0);
+            .map(|b| b.all_draws().0).unwrap_or(0);
         let screen = ScreenSize {
             width: ctx.width as f32,
             height: ctx.height as f32,
@@ -633,15 +635,16 @@ impl RenderPass for PortalInstancePass {
         // as the plain non-portal G-buffer pass — every chain's surviving
         // instances for a given group are already merged into that group's
         // single indirect command by PortalCullPass's `finalize` step.
-        // The GPU count is the batch's `draw_count`; the `_count` draw
+        // The GPU count is this frame's live group count; the `_count` draw
         // clamps it to this maximum, matching the capacity clamp here.
+        let (_, draw_count) = batch.all_draws();
         let indirect_draw_count = self.draw_count.min(PORTAL_DRAW_CAPACITY);
         helio_pass_gbuffer::multi_draw_indexed_indirect(
             &mut pass,
             &self.portal_indirect_buf,
             0,
             indirect_draw_count,
-            batch.all_draws_count_slot(),
+            draw_count,
         );
         Ok(())
     }

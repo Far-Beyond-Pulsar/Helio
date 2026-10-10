@@ -20,8 +20,10 @@
 //! The counts don't size the main view's culling: the frustum and occlusion
 //! culls dispatch one workgroup per live group from a size the GPU writes the
 //! same frame (`ObjectBatchFrameData::group_dispatch`), and draws read the GPU
-//! count. The read-back counts remain for what has no GPU count: the shadow
-//! and portal passes, Hi-Z warm-up, and draws on devices without
+//! count; the shadow and portal passes read the GPU counts too. The read-back
+//! counts remain for what has no GPU count or is a CPU decision: Hi-Z warm-up,
+//! the shadow pass's static-layer cache invalidation
+//! (`shadow_static_generation`), and draws on devices without
 //! `MULTI_DRAW_INDIRECT_COUNT`.
 //!
 //! This is emphatically NOT a readback of per-instance data: `instances`/

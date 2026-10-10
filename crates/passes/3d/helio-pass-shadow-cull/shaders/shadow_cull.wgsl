@@ -38,10 +38,10 @@ struct DrawIndexedIndirect {
 }
 
 struct CullUniforms {
-    instance_count: u32,
     max_draws_per_face: u32,
     _pad0: u32,
     _pad1: u32,
+    _pad2: u32,
 }
 
 @group(0) @binding(0) var<uniform>             uniforms:         CullUniforms;
@@ -57,6 +57,9 @@ struct CullUniforms {
 // groups spanning multiple objects), so mapping through that instance's own
 // space is the same approximation applied one level up.
 @group(0) @binding(7) var<storage, read>       coordinate_spaces: array<mat4x4<f32>>;
+// Object Batch's GPU counts, written this frame; word 2 is the movable
+// shadow-caster count (`ObjectBatchFrameData::draw_counts_gpu`).
+@group(0) @binding(8) var<storage, read>       batch_counts:     array<u32>;
 
 fn normalize_plane(p: vec4<f32>) -> vec4<f32> {
     let len = length(p.xyz);
@@ -88,7 +91,7 @@ fn sphere_in_frustum(vp: mat4x4<f32>, center: vec3<f32>, radius: f32) -> bool {
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let draw_idx = gid.x;
-    if draw_idx >= uniforms.instance_count { return; }
+    if draw_idx >= batch_counts[2] { return; }
 
     let draw = src_indirect[draw_idx];
     let inst = instances[draw.first_instance];
