@@ -1401,11 +1401,11 @@ impl RenderPass for ObjectBatchPass {
                 range_counts_gpu: &self.scratch.range_count,
                 draw_counts_gpu: self.draw_counts.as_ref().expect("draw-count buffer"),
                 shadow_static_indirect: &self.scratch.shadow_static_indirect,
-                shadow_static_draw_count,
+                readback_shadow_static_draw_count: shadow_static_draw_count,
                 shadow_movable_indirect: &self.scratch.shadow_movable_indirect,
-                shadow_movable_draw_count,
+                readback_shadow_movable_draw_count: shadow_movable_draw_count,
                 shadow_transmissive_indirect: &self.scratch.shadow_transmissive_indirect,
-                shadow_transmissive_draw_count: self.readback.shadow_transmissive(),
+                readback_shadow_transmissive_draw_count: self.readback.shadow_transmissive(),
                 shadow_static_generation: self.shadow_static_generation(),
                 draw_counts: self
                     .supports_multi_draw_count
@@ -1424,9 +1424,9 @@ impl RenderPass for ObjectBatchPass {
             "ObjectBatch",
         );
         // `[static, movable, transmissive]` shadow-caster counts, written on
-        // the GPU this frame (unlike the `*_draw_count` fields above, which
-        // trail by the readback latency). Lets shadow consumers skip an atlas
-        // that holds no casters.
+        // the GPU this frame (unlike the `readback_shadow_*` fields above,
+        // which trail by the readback latency). Lets shadow consumers skip an
+        // atlas that holds no casters.
         let counts: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.scratch.shadow_counts) };
         frame.write_buffer(helio_core::ResourceKey::new("shadow_caster_counts"), counts, "ObjectBatch");
     }

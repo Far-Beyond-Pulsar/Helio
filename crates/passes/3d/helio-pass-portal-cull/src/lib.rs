@@ -93,7 +93,9 @@ pub const PORTAL_GROUP_CHAIN_CAPACITY: u32 = 1024;
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CullUniforms {
     frustum_planes: [[f32; 4]; 6],
-    draw_count: u32,
+    /// Draw groups dispatched: every group the batch can produce, up to
+    /// `PORTAL_DRAW_CAPACITY`. The live count is read on the GPU.
+    draw_capacity: u32,
     chain_count: u32,
     group_capacity: u32,
     _pad: u32,
@@ -117,19 +119,17 @@ pub struct PortalCullPass {
     pub portal_compacted_chains_buf: Arc<wgpu::Buffer>,
 
     /// Per-draw-group selected-instance totals (across all chains
-    /// combined), zeroed every frame by the CPU. Doubles as the atomic
-    /// counter `select` claims write slots from and the diagnostic readback
-    /// confirming the cull selects content.
+    /// combined), zeroed every frame by the CPU: the atomic counter
+    /// `select` claims write slots from.
     portal_stats_buf: wgpu::Buffer,
-    portal_stats_staging: wgpu::Buffer,
-    copy_pending: bool,
 
     bind_group: Option<wgpu::BindGroup>,
     /// (camera, instances, draw_calls, coordinate_spaces, portal_views,
-    /// chain_handles, chain_portals, compacted_chains)
-    bind_group_key: Option<[wgpu::Buffer; 8]>,
+    /// chain_handles, chain_portals, compacted_chains, batch GPU counts)
+    bind_group_key: Option<[wgpu::Buffer; 9]>,
 
-    draw_count: u32,
+    /// Draw groups dispatched this frame (see `CullUniforms::draw_capacity`).
+    draw_capacity: u32,
     chain_count: u32,
     /// Active resolver-published rows. `None` preserves the legacy manual
     /// path, which historically used the whole growable buffer.
@@ -177,12 +177,6 @@ impl PortalCullPass {
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let portal_stats_staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("PortalCull/StatsStaging"),
-            size: (PORTAL_DRAW_CAPACITY as u64) * 4,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PortalCull BGL"),
@@ -208,6 +202,7 @@ impl PortalCullPass {
                 storage_entry(9, true),   // portal chain VarLenHandle table
                 storage_entry(10, false), // portal_compacted_chains
                 storage_entry(11, true),  // portal chain u32 payload pool
+                storage_entry(12, true),  // Object Batch's GPU counts
             ],
         });
 
@@ -243,11 +238,9 @@ impl PortalCullPass {
             portal_compacted_indices_buf,
             portal_compacted_chains_buf,
             portal_stats_buf,
-            portal_stats_staging,
-            copy_pending: false,
             bind_group: None,
             bind_group_key: None,
-            draw_count: 0,
+            draw_capacity: 0,
             chain_count: 0,
             active_chain_count: None,
         }
@@ -296,9 +289,12 @@ impl RenderPass for PortalCullPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.draw_count = ctx
+        // Every group the batch can produce this frame, so a group spawned
+        // this frame is culled this frame; the live count is read on the GPU.
+        self.draw_capacity = ctx
             .registry
-            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")).map(|b| b.readback_draw_count)
+            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"))
+            .map(|b| b.group_capacity.min(PORTAL_DRAW_CAPACITY))
             .unwrap_or(0);
         // A growable SceneDB buffer reports reserved capacity, not the number
         // of live rows. Never turn that capacity into dispatch work: doing so
@@ -310,16 +306,15 @@ impl RenderPass for PortalCullPass {
 
         let uniforms = CullUniforms {
             frustum_planes: planes,
-            draw_count: self.draw_count,
+            draw_capacity: self.draw_capacity,
             chain_count: self.chain_count,
             group_capacity: PORTAL_GROUP_CHAIN_CAPACITY,
             _pad: 0,
         };
         ctx.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
-        // Zero the per-group stats/counters before this frame's dispatch —
-        // `select` uses these as its live atomic claim counters, and the
-        // readback below needs exactly this frame's totals.
+        // Zero the per-group counters before this frame's dispatch — `select`
+        // uses these as its live atomic claim counters.
         let zeros = vec![0u32; PORTAL_DRAW_CAPACITY as usize];
         ctx.queue
             .write_buffer(&self.portal_stats_buf, 0, bytemuck::cast_slice(&zeros));
@@ -329,13 +324,13 @@ impl RenderPass for PortalCullPass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         if ctx.frame_num < 3 || ctx.frame_num % 120 == 0 {
             log::trace!(
-                "[PortalCull] frame={} draw_count={} chain_count={}",
+                "[PortalCull] frame={} draw_capacity={} chain_count={}",
                 ctx.frame_num,
-                self.draw_count,
+                self.draw_capacity,
                 self.chain_count,
             );
         }
-        if self.draw_count == 0 || self.chain_count == 0 {
+        if self.draw_capacity == 0 || self.chain_count == 0 {
             return Ok(());
         }
         let Some(batch): Option<helio_pass_gbuffer::ObjectBatchFrameData<'_>> = ctx.registry.get(helio_core::ResourceKey::new("object_batch")) else {
@@ -369,6 +364,7 @@ impl RenderPass for PortalCullPass {
             portal_chain_handles.buffer.clone(),
             portal_chain_portals.buffer.clone(),
             (*self.portal_compacted_chains_buf).clone(),
+            batch.draw_counts_gpu.clone(),
         ];
         if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -423,12 +419,16 @@ impl RenderPass for PortalCullPass {
                         binding: 11,
                         resource: portal_chain_portals.buffer.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 12,
+                        resource: batch.draw_counts_gpu.as_entire_binding(),
+                    },
                 ],
             }));
             self.bind_group_key = Some(key);
         }
 
-        let draw_workgroups = self.draw_count.min(PORTAL_DRAW_CAPACITY);
+        let draw_workgroups = self.draw_capacity;
         let chain_workgroups = self.chain_count;
 
         let mut cmds = ctx.graphics_cmds();
@@ -451,53 +451,6 @@ impl RenderPass for PortalCullPass {
             pass.dispatch_workgroups(draw_workgroups.div_ceil(64), 1, 1);
         }
 
-        // ── Diagnostic readback: every 60 frames, copy the per-group
-        // selected-instance totals off the GPU and log them on the next
-        // frame (after this encoder has been submitted). Tells us whether
-        // the cull is actually selecting anything, without touching the
-        // frame's real data flow.
-        if self.copy_pending {
-            self.copy_pending = false;
-            let completion = std::sync::Arc::new(std::sync::Mutex::new(None));
-            let callback_completion = std::sync::Arc::clone(&completion);
-            self.portal_stats_staging
-                .slice(..)
-                .map_async(wgpu::MapMode::Read, move |result| {
-                    *callback_completion.lock().unwrap() = Some(result);
-                });
-            ctx.device.poll(wgpu::PollType::wait_indefinitely());
-            let result = completion.lock().unwrap().take();
-            match result {
-                Some(Ok(())) => {
-                    let data = self
-                        .portal_stats_staging
-                        .slice(..)
-                        .get_mapped_range()
-                        .expect("portal stats mapped range");
-                    let mut counts = Vec::with_capacity(
-                        (self.draw_count as usize).min(PORTAL_DRAW_CAPACITY as usize),
-                    );
-                    for chunk in data.chunks_exact(4).take(self.draw_count as usize) {
-                        counts.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-                    }
-                    log::info!("[PortalCull] per-group selected-instance counts (across all chains): {counts:?}");
-                    drop(data);
-                    self.portal_stats_staging.unmap();
-                }
-                _ => log::warn!("[PortalCull] stats readback map failed"),
-            }
-        }
-        if ctx.frame_num % 60 == 0 {
-            let size = (PORTAL_DRAW_CAPACITY as u64) * 4;
-            cmds.copy_buffer_to_buffer(
-                &self.portal_stats_buf,
-                0,
-                &self.portal_stats_staging,
-                0,
-                size,
-            );
-            self.copy_pending = true;
-        }
         Ok(())
     }
 }

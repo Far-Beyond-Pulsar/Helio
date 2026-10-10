@@ -519,7 +519,7 @@ impl RenderPass for ShadowPass {
             self.bg_0_key = Some(key);
         }
         self.schedule_frame += 1;
-        self.has_glass = batch.shadow_transmissive_draw_count > 0;
+        self.has_glass = batch.readback_shadow_transmissive_draw_count > 0;
         let mut candidates = Vec::with_capacity(MAX_SHADOW_FACES);
         let fade_step = 1.0 / data.budget.fade_frames.max(1) as f32;
         for (slot, r) in residency.residents.iter().enumerate() {
@@ -619,28 +619,36 @@ impl RenderPass for ShadowPass {
                     pass.set_bind_group(0, bg, &[dynamic_offset]);
                     pass.set_vertex_buffer(0, vertices.buffer.slice(..));
                     pass.set_index_buffer(indices.buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    // With GPU counts, every list is bounded by its capacity
+                    // and drawn to this frame's live count, so a caster
+                    // spawned or despawned this frame is already (or no
+                    // longer) in it.
                     if is_static {
+                        let (max_draws, count) = batch.shadow_static_draws();
                         helio_pass_gbuffer::multi_draw_indexed_indirect(
                             &mut pass,
                             batch.shadow_static_indirect,
                             0,
-                            batch.shadow_static_draw_count,
-                            batch.shadow_static_count_slot(),
+                            max_draws,
+                            count,
                         );
                     } else {
+                        let (max_draws, count) = batch.shadow_movable_draws();
                         let count = if self.supports_multi_draw_count && !static_dirty {
+                            // `ShadowDirty`'s per-face count: the live count
+                            // when the face's movable casters changed, else 0.
                             Some(helio_pass_gbuffer::GpuDrawCount {
                                 buffer: &self.face_geom_count_buf,
                                 offset: face as u64 * 4,
                             })
                         } else {
-                            batch.shadow_movable_count_slot()
+                            count
                         };
                         helio_pass_gbuffer::multi_draw_indexed_indirect(
                             &mut pass,
                             batch.shadow_movable_indirect,
                             0,
-                            batch.shadow_movable_draw_count,
+                            max_draws,
                             count,
                         );
                     }
@@ -659,12 +667,14 @@ impl RenderPass for ShadowPass {
                             * FACE_BUF_STRIDE) as u32,
                         depth,
                         batch.shadow_transmissive_indirect,
-                        if r.flags & 16 == 0 {
-                            batch.shadow_transmissive_draw_count
+                        // Static layer: whether there is glass at all
+                        // follows the readback, like the rest of it.
+                        if r.flags & 16 == 0 && self.has_glass {
+                            batch.shadow_transmissive_draws().0
                         } else {
                             0
                         },
-                        batch.shadow_transmissive_count_slot(),
+                        batch.shadow_transmissive_draws().1,
                         &vertices.buffer,
                         &indices.buffer,
                         Some([tile.x, tile.y, tile.size]),
