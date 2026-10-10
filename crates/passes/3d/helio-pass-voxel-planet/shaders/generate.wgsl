@@ -1229,6 +1229,108 @@ fn patch_blocks(@builtin(global_invocation_id) id: vec3<u32>) {
     atomicStore(&block_state[slot + 1u], bitcast<i32>(evictions[at + 2u]));
     atomicStore(&block_state[slot + 2u], -0x3fffffff);
     atomicStore(&block_state[slot + 3u], 0);
+    air_blocks[evictions[at]] = vec4<i32>(0);
+}
+
+// Bits [a, b) of the 32-bit word holding bits off..off+32 of a 64-bit mask.
+fn mask_bits(a: i32, b: i32, off: i32) -> u32 {
+    let lo = clamp(a - off, 0, 32);
+    let hi = clamp(b - off, 0, 32);
+    if hi <= lo { return 0u; }
+    let width = u32(hi - lo);
+    return select((1u << width) - 1u, 0xffffffffu, width == 32u) << u32(lo);
+}
+
+// Air bricks (8 layers from base + 8j, j < 64) wholly inside [lo, hi).
+fn air_range(lo: i32, hi: i32, base: i32) -> vec2<u32> {
+    let a = clamp((lo - base + 7) >> 3, 0, 64);
+    let b = clamp((hi - base) >> 3, 0, 64);
+    return vec2<u32>(mask_bits(a, b, 0), mask_bits(a, b, 32));
+}
+
+// A column's air bricks from base: air spans, air bricks of brick spans and
+// the air above its top, inside the window it describes.
+fn column_air(c: Column, base: i32) -> vec2<u32> {
+    var m = vec2<u32>(0u);
+    var known = -0x7fffffff;
+    if (c.info & INFO_CLIP_BELOW) != 0u { known = c.lo; }
+    if (c.info & INFO_CLIP_ABOVE) == 0u { m |= air_range(c.top, base + 512, base); }
+    if (c.info & INFO_HEIGHTFIELD) != 0u { return m; }
+    let table = span_table(c);
+    let n = c.info & 31u;
+    for (var e = 0u; e < n; e++) {
+        let start = bitcast<i32>(pool[table + e * 2u]);
+        let entry = pool[table + e * 2u + 1u];
+        var end = c.top;
+        if e + 1u < n { end = bitcast<i32>(pool[table + (e + 1u) * 2u]); }
+        if end <= base || start >= base + 512 { continue; }
+        let kind = entry & 7u;
+        if kind == SPAN_AIR {
+            m |= air_range(max(start, known), end, base);
+        } else if kind == SPAN_BRICKS {
+            let s = Span(kind, start, end, table + (entry >> 3u));
+            let nb = u32(end - start) >> 3u;
+            for (var b = 0u; b < nb; b++) {
+                let k = start + i32(b) * 8;
+                if k + 8 <= base || k >= base + 512 || k < known { continue; }
+                if span_brick(c, s, b).x == 0u { m |= air_range(k, k + 8, base); }
+            }
+        }
+    }
+    return m;
+}
+
+var<workgroup> g_air: array<atomic<u32>, 2>;
+var<workgroup> g_air_base: atomic<i32>;
+var<workgroup> g_air_whole: atomic<u32>;
+
+// After publication: the air entry of each job's tier-1 block from its 16
+// columns (bricks air in all of them, over 512 layers ending just above
+// the lowest natural top). A missing column leaves the block no air.
+// Recomputed whenever a column of the block is generated (edits too).
+@compute @workgroup_size(64)
+fn air_blocks_build(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let index = job_index(wg);
+    if index >= frame.counts.x { return; }
+    let job = jobs[index];
+    if job_out[index].status != 0u { return; }
+    let level = job.key0 >> 27u;
+    let face = (job.key0 >> 24u) & 7u;
+    let bi = i32(job.key0 & 0xffffffu) >> 2u;
+    let bj = bitcast<i32>(job.key1) >> 2u;
+    if li == 0u {
+        atomicStore(&g_air[0], 0xffffffffu);
+        atomicStore(&g_air[1], 0xffffffffu);
+        atomicStore(&g_air_base, 0x7fffffff);
+        atomicStore(&g_air_whole, 1u);
+    }
+    workgroupBarrier();
+    var col: Column;
+    var have = false;
+    if li < 16u {
+        let c = vec2<i32>(bi * 4 + i32(li & 3u), bj * 4 + i32(li >> 2u));
+        let record = find_column(column_key0(face, level, c.x), bitcast<u32>(c.y));
+        if record != NONE {
+            col = records[record];
+            have = column_valid(col);
+        }
+        if have { atomicMin(&g_air_base, col.base); } else { atomicStore(&g_air_whole, 0u); }
+    }
+    workgroupBarrier();
+    let base = ((atomicLoad(&g_air_base) - 504) >> 3u) << 3u;
+    if have {
+        let m = column_air(col, base);
+        atomicAnd(&g_air[0], m.x);
+        atomicAnd(&g_air[1], m.y);
+    }
+    workgroupBarrier();
+    if li == 0u {
+        var e = vec4<i32>(0);
+        if atomicLoad(&g_air_whole) != 0u {
+            e = vec4<i32>(base, bitcast<i32>(atomicLoad(&g_air[0])), bitcast<i32>(atomicLoad(&g_air[1])), air_key(bi, bj));
+        }
+        air_blocks[block_slot(level, face, 1u, bi, bj)] = e;
+    }
 }
 
 @compute @workgroup_size(64)

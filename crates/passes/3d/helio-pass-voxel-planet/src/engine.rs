@@ -453,6 +453,7 @@ struct Pipelines {
     allocate: wgpu::ComputePipeline,
     fixup: wgpu::ComputePipeline,
     publish: wgpu::ComputePipeline,
+    air_blocks: wgpu::ComputePipeline,
     level_suffix: wgpu::ComputePipeline,
     recycle_layout: wgpu::BindGroupLayout,
     reclaim: wgpu::ComputePipeline,
@@ -496,6 +497,7 @@ impl Pipelines {
             storage(17, false),
             storage(18, false),
             storage(20, true),
+            storage(21, false),
         ]
         .into();
         let gen_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -519,6 +521,7 @@ impl Pipelines {
             storage(17, false),
             storage(18, false),
             storage(19, true),
+            storage(21, false),
         ];
         trace_entries.push(wgpu::BindGroupLayoutEntry {
             binding: 9,
@@ -662,6 +665,7 @@ impl Pipelines {
                 allocate: compute(&gen_pl, &gen_module, "allocate"),
                 fixup: compute(&gen_pl, &gen_module, "fixup"),
                 publish: compute(&gen_pl, &gen_module, "publish"),
+                air_blocks: compute(&gen_pl, &gen_module, "air_blocks_build"),
                 level_suffix: compute(&gen_pl, &gen_module, "level_suffix"),
                 reclaim: compute(&recycle_pl, &recycle_module, "reclaim"),
                 compact: compute(&recycle_pl, &recycle_module, "compact"),
@@ -716,6 +720,9 @@ struct Buffers {
     evictions: wgpu::Buffer,
     level_tops: wgpu::Buffer,
     block_state: wgpu::Buffer,
+    /// Air under the surface per tier-1 summary block (`air_blocks` in
+    /// common.wgsl), indexed like `block_state`.
+    air_blocks: wgpu::Buffer,
     /// Directional sky bound: accumulated and suffix tables.
     horizon_acc: wgpu::Buffer,
     horizon: wgpu::Buffer,
@@ -764,6 +771,7 @@ impl Buffers {
             u64::from(crate::residency::block_region()) * 6 * 24 * 16,
             st | wgpu::BufferUsages::COPY_SRC,
         );
+        let air_blocks = make("planet air blocks", u64::from(crate::residency::block_region()) * 6 * 24 * 16, st);
         let evictions = make("planet evictions", (u64::from(cap.max_evictions) * 3 + u64::from(cap.max_jobs) * 2) * 4, st);
         let horizon_acc = make("planet horizon accumulation", u64::from((HORIZON_SECTORS + HORIZON_GROUPS) * HORIZON_BUCKETS) * 4, st);
         let horizon = make(
@@ -838,6 +846,7 @@ impl Buffers {
             evictions,
             level_tops,
             block_state,
+            air_blocks,
             horizon_acc,
             horizon,
             live_blocks,
@@ -1104,6 +1113,7 @@ impl PlanetRenderer {
         })
         .collect();
         entries.push(wgpu::BindGroupEntry { binding: 20, resource: b.brushes.as_entire_binding() });
+        entries.push(wgpu::BindGroupEntry { binding: 21, resource: b.air_blocks.as_entire_binding() });
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("planet generation"),
             layout: &p.gen_layout,
@@ -1707,6 +1717,7 @@ impl PlanetRenderer {
                 scope!("admission::publication", {
                     dispatch!("admission::publication::publish", publish, groups);
                     dispatch!("admission::publication::level_suffix", level_suffix, [1, 1, 1]);
+                    dispatch!("admission::publication::air_blocks", air_blocks, groups);
                 });
             });
         }
@@ -1983,6 +1994,7 @@ impl PlanetRenderer {
                 wgpu::BindGroupEntry { binding: 17, resource: self.buffers.horizon_acc.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 18, resource: self.buffers.horizon.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 19, resource: self.buffers.live_blocks.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 21, resource: self.buffers.air_blocks.as_entire_binding() },
             ],
         }).clone();
         let render_group = self.render_group.get_or_create(&self.device, &wgpu::BindGroupDescriptor {
@@ -2041,6 +2053,7 @@ impl PlanetRenderer {
                 Self::dispatch(&mut pass, &self.pipelines.fixup, [1, 1, 1]);
                 Self::dispatch(&mut pass, &self.pipelines.publish, groups);
                 Self::dispatch(&mut pass, &self.pipelines.level_suffix, [1, 1, 1]);
+                Self::dispatch(&mut pass, &self.pipelines.air_blocks, groups);
             }
         }
         end_stage!("residency");

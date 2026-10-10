@@ -317,6 +317,42 @@ fn summary_block(level: u32, face: u32, ci: i32, cj: i32, k: i32) -> vec4<i32> {
     return vec4<i32>(0);
 }
 
+// The run of air layers around layer k shared by the 4x4 columns of
+// (ci, cj)'s tier-1 block (`air_blocks`): [x, y), or y <= x when k is not
+// in one.
+fn air_run(level: u32, face: u32, ci: i32, cj: i32, k: i32) -> vec2<i32> {
+    let bi = ci >> 2u;
+    let bj = cj >> 2u;
+    let e = air_blocks[block_slot(level, face, 1u, bi, bj)];
+    let j = (k - e.x) >> 3u;
+    if e.w != air_key(bi, bj) || j < 0 || j >= 64 { return vec2<i32>(0); }
+    let lo = bitcast<u32>(e.y);
+    let hi = bitcast<u32>(e.z);
+    let bit = select((lo >> u32(j)) & 1u, (hi >> u32(j - 32)) & 1u, j >= 32);
+    if bit == 0u { return vec2<i32>(0); }
+    // Up to the first non-air brick at or above j.
+    let nlo = ~lo;
+    let nhi = ~hi;
+    var up = 64;
+    if j < 32 {
+        let t = nlo & (0xffffffffu << u32(j));
+        if t != 0u { up = i32(firstTrailingBit(t)); } else if nhi != 0u { up = 32 + i32(firstTrailingBit(nhi)); }
+    } else {
+        let t = nhi & (0xffffffffu << u32(j - 32));
+        if t != 0u { up = 32 + i32(firstTrailingBit(t)); }
+    }
+    // Down to just above the last non-air brick below j.
+    var down = 0;
+    if j > 32 {
+        let t = nhi & ((1u << u32(j - 32)) - 1u);
+        if t != 0u { down = 32 + i32(firstLeadingBit(t)) + 1; } else if nlo != 0u { down = i32(firstLeadingBit(nlo)) + 1; }
+    } else {
+        let t = nlo & select((1u << u32(j)) - 1u, 0xffffffffu, j == 32);
+        if t != 0u { down = i32(firstLeadingBit(t)) + 1; }
+    }
+    return vec2<i32>(e.x + down * 8, e.x + up * 8);
+}
+
 // Whether traversal may use a level column, from its tier-1 summary block
 // and without a hash lookup: 0 no, 1 yes, 2 look it up. While a level
 // streams in, only complete 4x4-column blocks are used (partial ones fall
@@ -530,6 +566,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
         var k0 = 0;
         var k1 = 0x3fffffff >> lv;
         var above = skip.x > 0;
+        var air_wide = false;
         if !above && !column_knows(col, cur.k) {
             // Beyond a clipped window (the cursor moved vertically inside the
             // column): continue at the coarser level, whose window is larger.
@@ -605,6 +642,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 // box, however tall.
                 k0 = s.start;
                 k1 = s.end;
+                air_wide = true;
             } else if s.kind == SPAN_BRICKS {
                 let b = u32((cur.k - s.start) >> 3u);
                 let state = span_brick(col, s, b);
@@ -613,6 +651,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 }
                 k0 = s.start + i32(b) * 8;
                 k1 = k0 + 8;
+                air_wide = state.x == 0u;
                 if state.x == 2u {
                     // Exact cell DDA inside the mixed brick.
                     var ta = select(plane_t(fr, 0u, select(cur.i, cur.i + 1, fr.dir.x > 0) << lv), 3.0e38, fr.dir.x == 0);
@@ -685,6 +724,22 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                     normal = normal_code(2u, 1);
                 }
                 continue;
+            }
+        }
+        // In air under the surface, an eye ray that is not mostly vertical
+        // crosses the air its 4x4-column block shares (tunnels, digs) in one
+        // step: 21% fewer steps along a tunnel. Sun and sky rays (a level
+        // offset) start at a surface and leave it within a few cells, where
+        // the extra lookup cost more than it saved (skylight +12%).
+        if air_wide && lod_offset == 0.0 && abs(r.ol) < 0.8 {
+            let run = air_run(lv, cur.face, ci, cj, cur.k);
+            if run.y > run.x {
+                span = 32;
+                i0 = (ci >> 2u) * 32;
+                j0 = (cj >> 2u) * 32;
+                k0 = run.x;
+                k1 = run.y;
+                work_skips += 1u;
             }
         }
         // Exit the empty box with one boundary evaluation per family.

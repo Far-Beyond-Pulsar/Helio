@@ -122,6 +122,7 @@ fn relief_hit_respects_requested_trace_range() {
         (6, &refs, false, false),
         (14, &tops, false, false),
         (15, &blocks, false, false),
+        (21, &blocks, false, false),
         (16, &constants, true, false),
         (17, &out, false, true),
     ];

@@ -123,6 +123,17 @@ const MAX_PROBES: u32 = 64u;
 // Direct-mapped summary blocks, 4 words per entry: [bi, bj, max occupied top
 // (level cells), published columns].
 @group(0) @binding(15) var<storage, ACCESS> block_state: array<BLOCK_ENTRY>;
+// Air under the surface per tier-1 summary block (4x4 columns), at its
+// `block_slot`: (base layer, air bricks 0..31, 32..63, key). Bit j: the 8
+// layers from base + 8j are air in all 16 columns (`air_blocks_build`).
+// Rays in a tunnel or a dig cross four columns a step (`air_run`).
+@group(0) @binding(21) var<storage, ACCESS> air_blocks: array<vec4<i32>>;
+
+// Key of tier-1 block (bi, bj) in its air entry: the bits its slot drops,
+// and bit 30 (a cleared entry never matches).
+fn air_key(bi: i32, bj: i32) -> i32 {
+    return ((bi >> 7) & 0x7fff) | (((bj >> 7) & 0x7fff) << 15) | (1 << 30);
+}
 
 fn column_key0(face: u32, level: u32, ci: i32) -> u32 {
     return (bitcast<u32>(ci) & 0xffffffu) | (face << 24u) | (level << 27u);

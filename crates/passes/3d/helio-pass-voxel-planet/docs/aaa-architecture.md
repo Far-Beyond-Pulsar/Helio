@@ -190,6 +190,33 @@ every view (ground 1.41 -> 1.28 ms, tunnel 2.92 -> 2.52), skylight 12% on
 the ground. Sky rays two levels coarser (Teardown's mips, Lumen) were
 faster only in the tunnel (2.03 -> 1.67 ms) and 10-20% slower on open
 terrain (probing coarser levels): rejected.
+*Long rays and underground air (2026-10-10):* capping rays at 64 steps cut
+primary in proportion to the steps it removed (tunnel 16.4 -> 11.6 ms with
+21% of its rays capped; ground 3.45 -> 3.24 ms with 0.4%): long rays cost
+their own steps, not idle neighbours, so compacting them would recover
+little. In the tunnel a ray takes 10.5 air-span column boxes, 15.8 lane
+steps and 19.3 cells inside mixed bricks. Air blocks (per tier-1 summary
+block, a 64-bit mask of the 8-layer bricks that are air in all 16 columns,
+rebuilt after each publication; `air_blocks_build`, `air_run`) let an eye
+ray cross four columns of a tunnel's air a step: 21% fewer steps, exact
+(the CPU comparison is unchanged), primary 7% faster in the tunnel. Each
+such box costs the relocation solve a lane step avoids; sun and sky rays
+(which leave a surface within a few cells) do not use them (skylight was
+12% slower).
+*Where the traversal stands:* every step-saving structure measured here
+(summary tiers, the tile start's upper bound, bitmask bricks, coarser sky
+rays, air blocks) trades fewer steps for dearer ones and nets 0-10%. The
+step itself is the cost: about 700 lane-cycles of integer and logic work
+(column lookup, summary tiers, span and lane decoding, level transitions,
+relief) plus a fifth in cube-sphere geometry. The research tracers
+(64-trees and Aokana, Teardown, ESVO) spend 30-60 instructions a step: a
+64-bit node mask, a popcount and a linear integer DDA. *Decision:* keep span
+columns as the storage and generation format, and give traversal its own:
+per resident column a compact 64-tree of its occupancy, walked inside the
+column by a linear DDA in the column's own index frame (one ray transform
+per column; within a column's footprint the cube-sphere's curvature is far
+below a cell, and the hit is checked against the exact geometry). Column
+entry (lookup, summaries, transitions) stays as it is.
 
 ### 5. Shading
 
