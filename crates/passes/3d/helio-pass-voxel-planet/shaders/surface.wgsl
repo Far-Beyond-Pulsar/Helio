@@ -3,11 +3,6 @@
 @group(0) @binding(7) var<storage, ACCESS> hits: array<Hit>;
 @group(0) @binding(8) var<storage, ACCESS> surfaces: array<Surface>;
 
-fn interleaved_gradient(p: vec2<f32>, frame_index: f32) -> f32 {
-    let q = p + 5.588238 * (frame_index % 64.0);
-    return fract(52.9829189 * fract(dot(q, vec2<f32>(0.06711056, 0.00583715))));
-}
-
 @compute @workgroup_size(8, 8)
 fn primary(@builtin(global_invocation_id) id: vec3<u32>) {
     if any(id.xy >= vec2<u32>(frame.screen.xy)) { return; }
@@ -44,10 +39,6 @@ fn bound_cut_terrain_ray(r: Ray, t: f32) -> bool {
     if -rho * r.ol <= t { return false; }
     let k = 1.0 + frame.layer.w / rho;
     return 1.0 - r.ol * r.ol < k * k;
-}
-
-fn srgb(c: vec3<f32>) -> vec3<f32> {
-    return pow(c / 255.0, vec3<f32>(2.2));
 }
 
 fn palette(m: u32) -> vec3<f32> {

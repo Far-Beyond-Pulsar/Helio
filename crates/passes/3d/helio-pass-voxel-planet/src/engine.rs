@@ -295,7 +295,7 @@ fn uniform(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-/// `World` of world.wgsl: the grid mapping and coarse-level bounds.
+/// `World` of world.wgsl: the grid mapping.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct WorldGpu {
@@ -303,7 +303,6 @@ struct WorldGpu {
     grid: [i32; 4],
     /// domain scale (Q24), pad.
     scale: [u32; 4],
-    bounds: [[i32; 4]; 6],
     /// sphere domain constants (`Grid::sphere_constants`); w: columns store
     /// a surface word per cell.
     sphere: [u32; 4],
@@ -312,14 +311,12 @@ struct WorldGpu {
 impl WorldGpu {
     fn new(planet: &Planet) -> Self {
         let g = planet.grid();
-        let m = planet.field().render_bound_margins();
         Self {
             grid: [g.reference_cells(), g.layer_mm() as i32, g.cells(), g.level_offset() as i32],
             scale: {
                 let (inv, shift, layer_q16) = g.volume_constants();
                 [g.domain_scale(), inv, shift, layer_q16]
             },
-            bounds: std::array::from_fn(|i| std::array::from_fn(|j| m[i * 4 + j])),
             sphere: {
                 let mut sphere = g.sphere_constants();
                 sphere[3] = u32::from(planet.field().program().wgsl.contains("fn terrain_surface"));

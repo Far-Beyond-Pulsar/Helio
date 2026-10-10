@@ -195,11 +195,6 @@ pub trait TerrainField: Send + Sync + 'static {
     /// own top, plus two. Coarse levels bound the terrain with this, so it
     /// must be conservative; [`check_field`] samples it.
     fn bound_margins(&self) -> [i32; 24];
-    /// GPU display representations may require wider bounds; canonical CPU
-    /// queries and custom generators retain their original field contract.
-    fn render_bound_margins(&self) -> [i32; 24] {
-        self.bound_margins()
-    }
     /// Level cells below and above the heightfield top in which the cells of
     /// the column at domain point `p` may differ from the heightfield
     /// (`terrain_extent` in WGSL). `(0, 0)`: a pure heightfield column.

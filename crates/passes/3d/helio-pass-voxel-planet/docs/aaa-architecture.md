@@ -217,6 +217,14 @@ column by a linear DDA in the column's own index frame (one ray transform
 per column; within a column's footprint the cube-sphere's curvature is far
 below a cell, and the hit is checked against the exact geometry). Column
 entry (lookup, summaries, transitions) stays as it is.
+*Measured (hold mode, 1,600-3,600 settled frames a median, interleaved):*
+a column walk that modelled the ray once per column (linear lane
+crossings, exact shell crossings for floors and ceilings, a quadratic
+height for the layer, air crossed to the column's side in one step) ran
+the tunnel at 13.4-14.4 ms against 14.0-14.2 and the ground at 3.65 ms
+against 3.39-3.46: no better. The model's setup at every column entry and
+the vertical solves cost what the outer loop's prologue did. Reverted;
+per-column 64-trees inherit the same entry cost and are not pursued.
 
 ### 5. Shading
 

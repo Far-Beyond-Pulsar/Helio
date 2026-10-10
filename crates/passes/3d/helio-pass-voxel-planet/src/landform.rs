@@ -1242,7 +1242,6 @@ pub struct LandformField {
     constants: LandformConstants,
     volume: LandformVolume,
     bounds: [i32; 24],
-    render_bounds: [i32; 24],
     ridge_suffix: Option<[[i32; 4]; 66]>,
 }
 
@@ -1253,19 +1252,13 @@ impl LandformField {
         // In particular, do not saturate invalid huge amplitudes into new
         // terrain.
         let ridge_suffix = crate::ridge_envelope::bake_ridge_suffix(grid, &constants).ok();
-        let mut render_bounds = if ridge_suffix.is_some() {
-            crate::ridge_envelope::render_bounds(grid, &constants, bounds)
-        } else {
-            bounds
-        };
         // Overhangs raise a finer column's highest solid cell over its
         // heightfield top.
         for level in 0..24u32 {
             let rise = volume.rise_cells(level);
             bounds[level as usize] = bounds[level as usize].saturating_add(rise);
-            render_bounds[level as usize] = render_bounds[level as usize].saturating_add(rise);
         }
-        Self { bounds, render_bounds, ridge_suffix, constants, volume }
+        Self { bounds, ridge_suffix, constants, volume }
     }
     pub fn constants(&self) -> &LandformConstants {
         &self.constants
@@ -1293,9 +1286,6 @@ impl TerrainField for LandformField {
     }
     fn bound_margins(&self) -> [i32; 24] {
         self.bounds
-    }
-    fn render_bound_margins(&self) -> [i32; 24] {
-        self.render_bounds
     }
     fn extent(&self, p: IVec3, level: u32) -> (i32, i32) {
         self.volume.extent(p, level, self.seed())

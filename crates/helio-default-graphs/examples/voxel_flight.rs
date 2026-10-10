@@ -891,6 +891,13 @@ fn main() {
         while started.elapsed().as_secs_f64() < seconds {
             flight.draw("hold", e, f);
         }
+        // Median GPU time per stage over the held frames.
+        let held: Vec<&Sample> = flight.samples.iter().filter(|s| s.stage == "hold" && !s.terrain_gpu_ms.is_nan()).collect();
+        let stage = |k: &str| percentile(&held.iter().map(|s| s.stages.get(k).copied().unwrap_or(0.0)).collect::<Vec<_>>(), 0.5);
+        eprintln!(
+            "HOLD {view} n={} primary {:.3} shade {:.3} sun {:.3} sky {:.3}",
+            held.len(), stage("planet_primary"), stage("planet_shade"), stage("planet_sunlight"), stage("planet_skylight")
+        );
         return;
     }
     if let Ok(views) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS") {

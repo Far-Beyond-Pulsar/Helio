@@ -1,11 +1,10 @@
 // World constants and helpers shared by the engine and terrain programs:
-// the grid mapping, layer quantization, coarse-level bounds and material ids.
+// the grid mapping, layer quantization and material ids.
 const HEIGHT_ONE: i32 = 1000; // height units (mm) per metre
 
 struct World {
     grid: vec4<i32>,  // reference cells, layer thickness (mm), grid cells, level offset
     scale: vec4<u32>, // domain scale (Q24), volume inv, volume shift, half layer (Q16 domain units)
-    bounds: array<vec4<i32>, 6>, // per-level finer-surface excess (level cells)
     sphere: vec4<u32>, // sphere domain: 1 / reference (inv, shift), domain radius; w: surface words stored
 }
 
@@ -182,6 +181,3 @@ fn block_slope_of(t_x0: i32, t_x7: i32, t_y0: i32, t_y7: i32) -> i32 {
     return max(abs(t_x7 - t_x0), abs(t_y7 - t_y0)) * 8 / 7;
 }
 
-fn bound_margin(level: u32) -> i32 {
-    return world.bounds[level >> 2u][level & 3u];
-}

@@ -198,13 +198,6 @@ fn lane_word(c: Column, x: u32, y: u32) -> u32 {
     return pool[c.run * UNIT_WORDS + x + y * 8u];
 }
 
-// Height of the exact surface of column cell (x, y) over its natural top,
-// level cells (-1..1): the generator's surface below voxel precision, for
-// smooth shading and relief. Occupancy never reads it.
-fn column_surface_delta(c: Column, x: u32, y: u32) -> f32 {
-    return f32(bitcast<i32>(lane_word(c, x, y)) >> 15u) / 65536.0;
-}
-
 // Surface word of column cell (x, y) (`terrain_surface`); 0 without them.
 fn column_surface(c: Column, x: u32, y: u32) -> u32 {
     let lane = x + y * 8u;
@@ -450,16 +443,6 @@ fn latest_edit(list: u32, level: u32, c: vec3<i32>, p: vec3<i32>, ops: u32) -> u
 
 const OPS_REMOVE: u32 = 1u;
 const OPS_MATERIAL: u32 = 6u;
-
-// Brush material of a solid cell (0: the terrain's). The latest Add or
-// Paint containing it decides: a later Remove containing it would have
-// left air, and a Paint over air is always followed by an Add that filled
-// it again.
-fn edit_material(list: u32, level: u32, c: vec3<i32>, p: vec3<i32>) -> u32 {
-    let flags = latest_edit(list, level, c, p, OPS_MATERIAL);
-    if flags == NONE { return 0u; }
-    return (flags >> 8u) & 255u;
-}
 
 // Kind (0 air, 1 solid) the edits leave level cell `c` (half-cell centre)
 // of the column with domain point `p`, or NONE where none removes or adds

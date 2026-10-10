@@ -16,7 +16,6 @@ use wgpu::util::DeviceExt;
 struct World {
     grid: [i32; 4],
     scale: [u32; 4],
-    bounds: [[i32; 4]; 6],
     sphere: [u32; 4],
 }
 #[repr(C)]
@@ -288,7 +287,6 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
                 }
             }
         }
-        let bounds = field.render_bound_margins();
         let world = World {
             grid: [
                 grid.reference_cells(),
@@ -297,7 +295,6 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
                 grid.level_offset() as i32,
             ],
             scale: [grid.domain_scale(), 0, 0, 0],
-            bounds: std::array::from_fn(|i| std::array::from_fn(|j| bounds[i * 4 + j])),
             sphere: grid.sphere_constants(),
         };
         let input = gpu

@@ -114,7 +114,7 @@ impl<'a> ColumnView<'a> {
         self.lane_word(x, y) & 0x7fff
     }
     /// The exact surface's height over the natural top of cell (x, y), level
-    /// cells (`column_surface_delta`).
+    /// cells (the lane word's bits 15..32).
     pub fn surface_delta(&self, x: u32, y: u32) -> f64 {
         f64::from((self.lane_word(x, y) as i32) >> 15) / 65536.0
     }
