@@ -388,6 +388,10 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -
         s.push_str("fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
         s.push_str("fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32 { return heightfield_density(top, k); }\n");
     }
+    if !program.wgsl.contains("fn terrain_clearance") {
+        // No bound: every cell of the volume's extent is evaluated.
+        s.push_str("fn terrain_clearance(q: vec3<i32>, level: u32, step: f32) -> i32 { return 0; }\n");
+    }
     if !program.wgsl.contains("fn terrain_lean") {
         // No lean (`TerrainField::lean`).
         s.push_str("fn terrain_lean(level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
@@ -945,6 +949,8 @@ pub struct PlanetRenderer {
     lod_pressure: f64,
     /// Failed jobs counted at the last pressure step.
     pressure_failed_jobs: usize,
+    /// Whether an allocator readback has arrived (`Stats::free_units`).
+    allocator_read: bool,
     /// Job budget scale under scratch pressure (1 without).
     scratch_scale: f64,
     last_pressure_update: u64,
@@ -1072,6 +1078,7 @@ impl PlanetRenderer {
             last_recycle: 0,
             lod_pressure: 1.0,
             pressure_failed_jobs: 0,
+            allocator_read: false,
             scratch_scale: 1.0,
             last_pressure_update: 0,
             last_eye: None,
@@ -1496,6 +1503,7 @@ impl PlanetRenderer {
                     // Free runs of every size class plus unassigned pages.
                     self.stats.free_units = (0..10).map(|c| u64::from(word(c).max(0) as u32) << c).sum::<u64>()
                         + u64::from(word(30).max(0) as u32) * 512;
+                    self.allocator_read = true;
                 }
                 r.buffer.unmap();
                 r.stage = 0;
@@ -1550,16 +1558,19 @@ impl PlanetRenderer {
         let cap = &self.settings.capacity;
         let rs = &self.plan.stats;
         let records = (rs.resident_columns + rs.pending_columns) as f64 / f64::from(cap.records);
-        // `free_units` is 0 until the first allocator readback.
-        let pool = if self.stats.free_units == 0 { 0.0 } else { 1.0 - self.stats.free_units as f64 / f64::from(cap.pool_units) };
+        // Unknown until the first allocator readback; a full pool has no
+        // free unit (reading 0 as "not read yet" never raised pressure over
+        // a full pool, and its jobs failed forever).
+        let pool = if self.allocator_read { 1.0 - self.stats.free_units as f64 / f64::from(cap.pool_units) } else { 0.0 };
         // Edit data counts as pool: baked brick slots and edit block words
         // (a destroyed region's columns hold more of both).
         let edits = (f64::from(rs.baked_bricks) / f64::from(cap.baked_bricks.max(1))).max(f64::from(rs.edit_words) / f64::from(cap.edit_words.max(1)));
         let pool = pool.max(edits);
-        // No free page and jobs waiting to retry: the free units left belong
-        // to other size classes, so the pool is full for the columns wanted
-        // (counting units alone left a fragmented pool failing forever).
-        let starved = self.stats.free_pages == 0 && self.stats.free_units != 0 && self.stats.failed_jobs > self.pressure_failed_jobs;
+        // No free page and jobs waiting to retry: the free units left (if
+        // any) belong to other size classes, so the pool is full for the
+        // columns wanted (counting units alone left a fragmented pool failing
+        // forever).
+        let starved = self.allocator_read && self.stats.free_pages == 0 && self.stats.failed_jobs > self.pressure_failed_jobs;
         self.pressure_failed_jobs = self.stats.failed_jobs;
         // Only wanted columns count: removals a pressure step itself queues
         // must not raise it further. A still camera's backlog is loading,

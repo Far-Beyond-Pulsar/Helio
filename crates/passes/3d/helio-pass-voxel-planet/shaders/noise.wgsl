@@ -1,6 +1,10 @@
 // Bit-exact integer noise; mirror of src/noise.rs. Terrain programs build
 // on these so CPU and GPU fields agree to the bit.
 const NOISE_ONE: i32 = 65536; // noise unit (Q16)
+// Bound on how fast `noise` changes: Q16 units per lattice unit, plus
+// NOISE_ROUNDING (noise::NOISE_SLOPE, tested).
+const NOISE_SLOPE: f32 = 262144.0;
+const NOISE_ROUNDING: i32 = 16;
 
 fn hash3(x: i32, y: i32, z: i32, seed: u32) -> u32 {
     var v = (bitcast<u32>(x) * 0x8da6b343u) ^ (bitcast<u32>(y) * 0xd8163841u)

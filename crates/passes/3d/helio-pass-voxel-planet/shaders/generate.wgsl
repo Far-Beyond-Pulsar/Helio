@@ -428,31 +428,52 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     // within its extent around the heightfield top, evaluated in 3D. Only
     // the cells it changes make generated volume: a column whose cells all
     // keep the heightfield's kinds (most of a cave region's rock, ground too
-    // flat to lean) stays a heightfield column. Pass 1 finds the lane's
-    // changed cells; they and one more on each side are evaluated (the
-    // generated surface's relief reads the densities around it).
+    // flat to lean) stays a heightfield column. The scan finds the lane's
+    // changed cells as runs; they and one more cell on each side are
+    // evaluated (the generated surface's relief reads the densities around
+    // it). Under the band the surface may lean through, only caves change
+    // cells, and the scan steps over the rock they cannot reach
+    // (`terrain_clearance`): every cell down to the cave depth (1,200 at 0.1
+    // m) was evaluated, and a mountain's column cost 100 heightfield
+    // columns. The band's runs form one, as the whole band once did.
     let field_top = base_top >> level;
     let leaning = lean.x != 0 && extent.y > 0;
-    var changed_lo = 0x7fffffff;
-    var changed_hi = -0x7fffffff;
-    for (var k = field_top - extent.x; k < field_top + extent.y; k++) {
-        if (generated_density(column_point, face, i, j, k, level, field_top, height, leaning, lean.y, lean_node) > 0) != (k < field_top) {
-            changed_lo = min(changed_lo, k);
-            changed_hi = max(changed_hi, k);
+    let k_lo = field_top - extent.x;
+    let k_hi = field_top + extent.y;
+    let band_lo = select(field_top, field_top - extent.y, extent.y > 0);
+    let step = distance(vec3<f32>(volume_point(face, i, j, field_top + 1, level)), vec3<f32>(volume_point(face, i, j, field_top, level))) + 2.0;
+    var runs: array<vec2<i32>, 8>;
+    var n_runs = 0u;
+    var scan = k_lo;
+    loop {
+        if scan >= k_hi { break; }
+        if scan < band_lo {
+            let clear = terrain_clearance(volume_point(face, i, j, scan, level), level, step);
+            if clear > 0 {
+                scan = min(scan + clear + 1, band_lo);
+                continue;
+            }
         }
+        if (generated_density(column_point, face, i, j, scan, level, field_top, height, leaning, lean.y, lean_node) > 0) != (scan < field_top) {
+            if n_runs > 0u && (scan <= runs[n_runs - 1u].y + 8 || (scan >= band_lo && runs[n_runs - 1u].y > band_lo)) {
+                runs[n_runs - 1u].y = scan + 1;
+            } else if n_runs < 8u {
+                runs[n_runs] = vec2<i32>(scan, scan + 1);
+                n_runs += 1u;
+            } else {
+                runs[7].y = scan + 1;
+            }
+        }
+        scan += 1;
     }
-    let changed = changed_lo <= changed_hi;
-    let eval_lo = select(0, max(changed_lo - 1, field_top - extent.x), changed);
-    let eval_hi = select(-1, min(changed_hi + 1, field_top + extent.y - 1), changed);
+    let changed = n_runs > 0u;
+    // The highest evaluated cell.
+    let eval_hi = select(-1, min(runs[max(n_runs, 1u) - 1u].y, k_hi - 1), changed);
     if changed { atomicOr(&g_volume, VOLUME_TERRAIN); }
     // The terrain's candidates: the cells around each lane's top whose kind
-    // the heightfield sets, and the volume's evaluated cells.
-    var t_lo = min(top, field_top) - 1;
-    var t_hi = max(top, field_top) + 1;
-    if changed {
-        t_lo = min(t_lo, eval_lo - 1);
-        t_hi = max(t_hi, eval_hi + 2);
-    }
+    // the heightfield sets (and the volume's runs, below).
+    let t_lo = min(top, field_top) - 1;
+    let t_hi = max(top, field_top) + 1;
     let ch = vec2<i32>(center_half(i, level), center_half(j, level));
     let edit_counts = workgroupUniformLoad(&g_edit_counts);
     let n_brushes = edit_counts.x + edit_counts.y;
@@ -476,6 +497,10 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         // below.
         lane_bound = select(top, max(top, eval_hi + 1), changed);
         mark_candidate(vec2<i32>(t_lo, t_hi), window);
+        // The volume's evaluated cells and one more on each side.
+        for (var r = 0u; r < n_runs; r++) {
+            mark_candidate(vec2<i32>(max(runs[r].x - 1, k_lo) - 1, min(runs[r].y, k_hi - 1) + 2), window);
+        }
         if job.edits != 0u {
             // Baked bricks: each a candidate.
             for (var e = li; e < edit_counts.z; e += 64u) {
@@ -700,7 +725,11 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                 // Cells the volume leaves keep the heightfield's kinds (with
                 // relief, its ceil top cell).
                 var kind = terrain_kind(top, k);
-                if k >= eval_lo && k <= eval_hi {
+                var evaluated = false;
+                for (var r = 0u; r < n_runs; r++) {
+                    evaluated = evaluated || (k >= max(runs[r].x - 1, k_lo) && k <= min(runs[r].y, k_hi - 1));
+                }
+                if evaluated {
                     // Overhangs fold the exact surface: their lanes take every
                     // evaluated cell from the density. Elsewhere (caves) a cell
                     // the volume leaves as the heightfield has it keeps its kind.

@@ -147,6 +147,35 @@ fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> {
     return vec2<i32>(below, above);
 }
 
+// Level cells along a column's lane, from a cell at volume point `q`, in
+// which no cave can carve (`terrain_density`'s tunnels and caverns): a
+// tunnel needs both of its noises within the tunnel width, a cavern its
+// noise over the cavern threshold (at their widest and lowest, whatever
+// the depth's ramps), and no noise moves faster than NOISE_SLOPE per
+// lattice unit while the point moves `step` volume units per level cell
+// along the lane. 0: a cave may carve near this cell. Generation steps over
+// solid rock by it instead of evaluating every cell down to the cave depth
+// (a mountain's columns cost 100 heightfield columns each).
+fn terrain_clearance(q: vec3<i32>, level: u32, step: f32) -> i32 {
+    let v = terrain.volume;
+    let caves = landform_caves_at(level);
+    var clear = 1.0e9;
+    if caves.x {
+        let shift = u32(v[1].x);
+        let na = abs(noise(q, shift, landform_seed() ^ SEED_TUNNEL_A));
+        let nb = abs(noise(q, shift, landform_seed() ^ SEED_TUNNEL_B));
+        let excess = max(na, nb) - (v[1].y + 16) - NOISE_ROUNDING;
+        clear = min(clear, f32(excess) / (NOISE_SLOPE * step / exp2(f32(shift))));
+    }
+    if caves.y {
+        let shift = u32(v[1].z);
+        let n = noise(q, shift, landform_seed() ^ SEED_CAVERN);
+        let excess = (v[1].w - 2) - n - NOISE_ROUNDING;
+        clear = min(clear, f32(excess) / (NOISE_SLOPE * step / exp2(f32(shift))));
+    }
+    return i32(clamp(floor(clear), 0.0, 1.0e9));
+}
+
 // mm per noise unit at lattice shift s: 2^s * 12.5 mm / 2^17 (`density`).
 fn landform_noise_mm(excess: i32, shift: i32) -> i32 {
     return mul_shr_signed(excess, 25 << u32(shift), 18u);

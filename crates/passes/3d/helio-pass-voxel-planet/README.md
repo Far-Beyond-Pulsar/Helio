@@ -371,9 +371,16 @@ they are once its work is on the GPU. Steps:
    pool full) append their keys to a failure list that the CPU reads back
    and retries. Cells within the program's `terrain_extent` of the
    heightfield top are evaluated in 3D (the sign of `terrain_density` at the
-   seamless `volume_point`) in two passes: the first finds each lane's cells
-   that differ from the heightfield, then those and one more on each side are
-   evaluated. Only a column with such cells is generated volume, marked
+   seamless `volume_point`) in two passes: the first finds each lane's runs
+   of cells that differ from the heightfield, then those and one more on each
+   side are evaluated. Under the band the surface may lean through, only
+   caves change cells, and the first pass steps over the rock they cannot
+   reach (`terrain_clearance`: a tunnel needs both of its noises within the
+   tunnel width, a cavern its noise over its threshold, and no noise moves
+   faster than `noise::NOISE_SLOPE` per lattice unit), instead of evaluating
+   every cell down to the cave depth (1,200 at 0.1 m: a mountain's columns
+   cost 100 heightfield columns and loaded in 17 s; now 3x faster, and
+   exactly the cells the dense scan found). Only a column with such cells is generated volume, marked
    `INFO_GENERATED` (`INFO_TOPOLOGY` is only for edit cuts: a generated
    column keeps its natural surface, relief and materials); a column whose
    cells all keep the heightfield's kinds (most of a cave region's rock,
@@ -755,7 +762,9 @@ per pixel. Volumetric generators also
 define `terrain_extent` and `terrain_density` (and `TerrainField::extent`,
 `density`, `volume_bounds`), and leaning ones `terrain_lean` and
 `terrain_lean_offset` (`TerrainField::lean`, `lean_offset`; the engine passes
-the leaning height to `terrain_density` as `lean_height`). A density is the signed distance from the cell
+the leaning height to `terrain_density` as `lean_height`), and optionally
+`terrain_clearance` (cells a lane's scan may step over below the lean band;
+without it every cell of the extent is evaluated). A density is the signed distance from the cell
 centre to the surface (256 per level cell, positive inside solid; the cell is
 solid where it is positive): combine terms as constructive solid geometry on
 distances (intersection: minimum, union: maximum), and make every cut a
