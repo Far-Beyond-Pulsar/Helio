@@ -8,7 +8,6 @@ use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Planet, PlanetRecipe};
 use std::sync::Arc;
 
 const RELIEF: u32 = 0x10000000;
-const INLINE_RELIEF: u32 = 0x04000000;
 fn flat(shape: Shape, height: f64) -> Planet {
     Planet::new(PlanetRecipe {
         shape,
@@ -276,6 +275,7 @@ fn l1_to_l5_adjacent_paint_columns_preserve_authored_geometry() {
             shape: BrushShape::Cube,
             op: BrushOp::Paint,
             material: 13,
+            height: 0.0,
         })
         .unwrap();
         let planet = Arc::new(p);
@@ -422,7 +422,7 @@ fn l1_to_l5_zero_fraction_matches_legacy_whole_cell_hits() {
                 new.residency_buffers()[1],
                 columns
                     .iter()
-                    .map(|c| u64::from(c[4] + 3) * 64)
+                    .map(|c| u64::from(c[4] + 4) * 64)
                     .max()
                     .unwrap(),
             );
@@ -433,22 +433,11 @@ fn l1_to_l5_zero_fraction_matches_legacy_whole_cell_hits() {
                 assert_eq!(b.level, level);
                 assert_ne!(columns[index][3] & RELIEF, 0);
                 let cell = (b.j & 7) as usize * 8 + (b.i & 7) as usize;
-                if columns[index][3] & INLINE_RELIEF != 0 {
-                    // Inspect the base-layer remainder independently of the
-                    // shader decoder. Inline relief must also use a smaller
-                    // run than the Q16 representation: tops, surface words
-                    // and offsets (3 units, class 2) against 5 (class 3).
-                    let at = columns[index][4] as usize * 64 + cell;
-                    assert_eq!(u32::from(pool[at]) % (1 << level), 0);
-                    assert!((columns[index][3] >> 18) & 15 < 3);
-                } else {
-                    let at = columns[index][4] as usize * 64 + 64 + cell * 2;
-                    assert_eq!(
-                        u16::from_le_bytes(pool[at..at + 2].try_into().unwrap()),
-                        0,
-                        "fixture must use zero-fraction fast path"
-                    );
-                }
+                // The lane word's exact surface lies on the top cell's upper
+                // boundary: the whole-cell (zero-fraction) path.
+                let at = columns[index][4] as usize * 64 + cell * 4;
+                let word = u32::from_le_bytes(pool[at..at + 4].try_into().unwrap());
+                assert!(((word as i32) >> 15) >= 0, "fixture must use zero-fraction fast path");
                 assert_eq!(
                     (
                         a.status,

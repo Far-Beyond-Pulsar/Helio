@@ -24,7 +24,7 @@ pub use helio_pass_voxel_planet::terrain::material;
 use helio_pass_voxel_planet::{
     grid::Shape, terrain, Brush, BrushOp, BrushShape, Planet, PlanetRecipe, TerrainSource,
 };
-use helio_voxel_data::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditJournal};
+use helio_voxel_data::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditBase, VoxelEditJournal};
 use pulsar_scene_model::components::Transform;
 use pulsar_scenedb::{Entity, World};
 
@@ -78,6 +78,7 @@ pub fn planet_brush(edit: &VoxelBrushEdit) -> Brush {
             VoxelBrushOp::Paint => BrushOp::Paint,
         },
         material: edit.material,
+        height: edit.height,
     }
 }
 
@@ -192,11 +193,7 @@ pub fn terrain_world(world: &World, entity: Entity) -> Result<Arc<Planet>, Strin
             return Ok(Arc::clone(&cached.planet));
         }
     }
-    let mut planet = Planet::new(recipe.clone())?;
-    for edit in component.edits.iter() {
-        planet.apply(planet_brush(edit))?;
-    }
-    let planet = Arc::new(planet);
+    let planet = Arc::new(journal_planet(recipe.clone(), &component.edits)?);
     if worlds.len() >= 16 && !worlds.contains_key(&key) {
         worlds.clear();
     }
@@ -209,6 +206,61 @@ pub fn terrain_world(world: &World, entity: Entity) -> Result<Arc<Planet>, Strin
         },
     );
     Ok(planet)
+}
+
+/// Edits a level keeps listed (undoable) when it folds older ones into its
+/// journal's base ([`compact_journal`]).
+pub const LISTED_EDITS: usize = 4096;
+
+/// The world of `recipe` with a journal's edits: its base snapshot loaded,
+/// then the listed edits applied.
+pub fn journal_planet(recipe: PlanetRecipe, edits: &VoxelEditJournal) -> Result<Planet, String> {
+    journal_planet_to(recipe, edits, edits.len())
+}
+
+/// [`journal_planet`] with only the first `count` edits (not fewer than the
+/// base holds).
+fn journal_planet_to(recipe: PlanetRecipe, edits: &VoxelEditJournal, count: usize) -> Result<Planet, String> {
+    let mut planet = match edits.base() {
+        Some(base) => {
+            let planet = Planet::from_snapshot(recipe, &base.snapshot).map_err(|e| format!("voxel edits: {e}"))?;
+            if planet.edits().len() != base.brushes {
+                return Err(format!("voxel edits: the base holds {} edits, its snapshot {}", base.brushes, planet.edits().len()));
+            }
+            planet
+        }
+        None => Planet::new(recipe)?,
+    };
+    let start = edits.base_len();
+    for edit in edits.iter_from(start).take(count.saturating_sub(start)) {
+        planet.apply(planet_brush(edit))?;
+    }
+    Ok(planet)
+}
+
+/// A base for `edits` folding all but its latest `keep` edits into a
+/// snapshot of the world they left, or `None` when there is nothing more
+/// to fold. [`VoxelEditJournal::compact`] takes it.
+pub fn compact_journal(recipe: PlanetRecipe, edits: &VoxelEditJournal, keep: usize) -> Result<Option<VoxelEditBase>, String> {
+    let brushes = edits.len().saturating_sub(keep);
+    if brushes <= edits.base_len() {
+        return Ok(None);
+    }
+    let planet = journal_planet_to(recipe, edits, brushes)?;
+    let hash = edits.prefix_hash(brushes).expect("after the base");
+    Ok(Some(VoxelEditBase { brushes, hash, snapshot: planet.snapshot().into() }))
+}
+
+/// The terrains of `world` with more than [`LISTED_EDITS`] listed edits,
+/// with what compacting them needs ([`compact_journal`]): copied out, so a
+/// caller builds the bases without holding the scene.
+pub fn journals_to_compact(world: &World) -> Vec<(Entity, PlanetRecipe, VoxelEditJournal)> {
+    world
+        .query::<&VoxelTerrainComponent>()
+        .into_iter()
+        .filter(|(_, c)| c.edits.len() - c.edits.base_len() > LISTED_EDITS && is_generated(c))
+        .filter_map(|(entity, c)| Some((entity, entity_recipe(world, entity, c).ok()?, c.edits.clone())))
+        .collect()
 }
 
 /// Append edits to a terrain's journal after checking that each applies.
@@ -349,6 +401,7 @@ pub fn block_edit(planet: &Planet, p: DVec3, material: u32) -> VoxelBrushEdit {
             VoxelBrushOp::Add
         },
         material,
+        height: 0.0,
     }
 }
 
@@ -372,6 +425,7 @@ pub fn shape_edit(
             VoxelBrushOp::Add
         },
         material,
+        height: 0.0,
     })
 }
 
@@ -597,5 +651,55 @@ impl VoxelTerrainLayersComponent {
     fn set_layer_coverage(world: &mut World, entity: Entity, index: u32, coverage: f64) -> Result<(), String> {
         layer_mut(&mut layers_mut(world, entity)?.stack, index)?.coverage = coverage;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod journal_tests {
+    use super::*;
+
+    /// A level saved with its old edits folded into a base loads the same
+    /// world as every edit replayed, and keeps taking edits.
+    #[test]
+    fn compacted_journals_save_and_load_the_same_world() {
+        let recipe = PlanetRecipe { shape: Shape::Plane, plane_size_m: 512.0, ..PlanetRecipe::default() };
+        let ground = Planet::new(recipe.clone()).unwrap().surface_point(DVec3::ZERO, 0.0);
+        let edit = |n: usize| VoxelBrushEdit {
+            center: (ground + DVec3::new((n % 70) as f64 * 0.13 - 4.0, (n % 9) as f64 * 0.1 - 0.6, (n / 70) as f64 * 0.11 - 4.0)).to_array(),
+            radius: if n % 400 == 3 { 4.0 } else { 0.15 + (n % 4) as f64 * 0.1 },
+            shape: if n % 2 == 0 { VoxelBrushShape::Sphere } else { VoxelBrushShape::Cube },
+            op: [VoxelBrushOp::Remove, VoxelBrushOp::Add, VoxelBrushOp::Paint][n % 3],
+            material: 1 + (n % 9) as u32,
+            height: 0.0,
+        };
+        let full: VoxelEditJournal = (0..LISTED_EDITS + 900).map(edit).collect();
+        let replayed = journal_planet(recipe.clone(), &full).unwrap();
+
+        let mut saved = full.clone();
+        let base = compact_journal(recipe.clone(), &saved, LISTED_EDITS).unwrap().expect("old edits to fold");
+        assert_eq!(base.brushes, 900);
+        assert!(saved.compact(base));
+        assert_eq!(saved, full);
+        assert!(compact_journal(recipe.clone(), &saved, LISTED_EDITS).unwrap().is_none(), "nothing more to fold");
+        let json = serde_json::to_string(&saved).unwrap();
+        let mut loaded: VoxelEditJournal = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.listed().count(), LISTED_EDITS);
+
+        let world = journal_planet(recipe.clone(), &loaded).unwrap();
+        assert_eq!((world.edits().len(), world.edits().hash()), (replayed.edits().len(), replayed.edits().hash()));
+        let g = *world.grid();
+        let (cell, _) = g.locate(ground);
+        for di in -40..40 {
+            for dk in -60..20 {
+                let c = helio_pass_voxel_planet::Cell::new(cell.face, cell.i + di, cell.j + di / 2, cell.k + dk);
+                assert_eq!(world.material(c), replayed.material(c), "{c:?}");
+            }
+        }
+        // Edits continue on the loaded journal.
+        loaded.push(edit(7));
+        assert!(loaded.starts_with(&full));
+        let mut more = full.clone();
+        more.push(edit(7));
+        assert_eq!(journal_planet(recipe.clone(), &loaded).unwrap().edits().hash(), journal_planet(recipe, &more).unwrap().edits().hash());
     }
 }

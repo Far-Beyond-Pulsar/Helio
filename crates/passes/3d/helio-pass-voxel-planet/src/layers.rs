@@ -54,7 +54,14 @@ pub enum LayerKind {
     Basins,
     /// A constant height: `height_m` (a flat world is one plateau).
     Plateau,
+    /// Escarpments: inside regions of `scale_km` covering `coverage`, the
+    /// layers before it step into terraces `height_m` tall, flat treads
+    /// joined by cliffs over the last `ratio` of each step (0.1: sheer).
+    Cliffs,
 }
+
+/// Tallest cliff step (m): terraces are evaluated in 32-bit integers.
+pub const CLIFF_STEP_MAX_M: f64 = 1_000.0;
 
 /// Where a layer applies.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +138,7 @@ impl Layer {
             Craters => Self { scale_km: 40.0, octaves: 8, coverage: 0.3, persistence: 1.25, ratio: 0.2, ratio2: 0.3, ratio3: 0.15, ..base },
             Basins => Self { height_m: 1_200.0, scale_km: 900.0, coverage: 0.3, ..base },
             Plateau => Self { height_m: 400.0, ..base },
+            Cliffs => Self { height_m: 30.0, scale_km: 25.0, coverage: 0.35, ratio: 0.12, ..base },
         }
     }
 }
@@ -659,6 +667,16 @@ impl TerrainLayers {
                     layer.b = ((noise_quantile(1.0 - l.coverage.clamp(0.0, 1.0)) * f64::from(FINE_ONE)).round()) as i32;
                     octaves.push(Octave { shift: shift(metres), amplitude: ONE, seed: next_seed(), kind: tag | BASIN });
                 }
+                LayerKind::Cliffs => {
+                    // Whole layers tall, so treads lie on cell boundaries.
+                    let layer_mm = grid.layer_mm() as i32;
+                    let step = (units(l.height_m.abs().min(CLIFF_STEP_MAX_M)) / layer_mm).max(1) * layer_mm;
+                    let riser = (l.ratio.clamp(1.0 / 1024.0, 1.0) * 1024.0).round() as u32;
+                    layer.kind = StackLayer::CLIFFS | (riser << 16);
+                    layer.a = step;
+                    layer.b = ((noise_quantile(1.0 - l.coverage.clamp(0.0, 1.0)) * f64::from(FINE_ONE)).round()) as i32;
+                    octaves.push(Octave { shift: shift(metres), amplitude: ONE, seed: next_seed(), kind: tag | BASIN });
+                }
                 LayerKind::Plateau => {
                     layer.kind = StackLayer::PLATEAU;
                     layer.a = units(l.height_m).div_euclid(grid.layer_mm() as i32) * grid.layer_mm() as i32;
@@ -797,6 +815,58 @@ mod tests {
             eprintln!("{shape:?}: relief {lo}..{hi} mm, {fresh} samples on fresh ejecta, {mare} on basins");
             assert_eq!(planet.field().appearance(), crate::landform::lunar_appearance());
         }
+    }
+
+    /// Cliffs step the terrain into terraces: inside their regions most
+    /// heights sit on a tread (a whole step), the rises between them are
+    /// steep, and the field stays within its bounds on spheres and planes.
+    #[test]
+    fn cliffs_step_the_terrain_into_terraces_within_its_bounds() {
+        let mut stack = TerrainLayers::earth();
+        stack.layers.push(Layer { coverage: 1.0, ..Layer::new(LayerKind::Cliffs) });
+        for shape in [Shape::Sphere, Shape::Plane] {
+            let planet = planet(shape, 6_371_000.0, &stack);
+            check_field(&planet, 3_000).unwrap_or_else(|e| panic!("{shape:?}: {e}"));
+            let g = planet.grid();
+            let n = g.cells();
+            let face = if g.is_plane() { crate::grid::PLANE_FACE } else { 2 };
+            let step = (crate::terrain::HEIGHT_ONE as f64 * 30.0) as i32;
+            let (mut on_tread, mut samples, mut steep) = (0, 0, 0);
+            // Land columns across the face (the ocean floor is flat anyway).
+            for t in 0..40_000 {
+                let (i, j) = (((t * 7_919) % 199) * (n / 200), ((t * 104_729) % 197) * (n / 200) + t % 64);
+                let h = planet.field().height(g.domain_point(face, i, j, 0), g.level_offset());
+                if h <= 50 * crate::terrain::HEIGHT_ONE {
+                    continue;
+                }
+                let h1 = planet.field().height(g.domain_point(face, i + 1, j, 0), g.level_offset());
+                samples += 1;
+                on_tread += usize::from(h.rem_euclid(step) == 0);
+                steep += usize::from((h1 - h).abs() >= g.layer_mm() as i32 * 2);
+            }
+            eprintln!("{shape:?}: {on_tread}/{samples} land columns on a tread, {steep} steep");
+            assert!(samples > 500, "{shape:?}: {samples} land samples");
+            assert!(on_tread * 2 > samples, "{shape:?}: {on_tread}/{samples} on a tread");
+            assert!(steep > 0, "{shape:?}: no cliffs");
+        }
+    }
+
+    /// The terrace function: flat treads, a riser over the given share of
+    /// each step, continuous and monotonic, also below zero.
+    #[test]
+    fn terraces_are_flat_treads_and_monotonic_risers() {
+        use crate::landform::terrace;
+        let step = 30_000;
+        let mut last = terrace(-100_000, step, 123);
+        for h in (-100_000..100_000).step_by(37) {
+            let t = terrace(h, step, 123);
+            assert!(t >= last, "monotonic at {h}");
+            assert!((t - h).abs() < step, "within a step at {h}");
+            last = t;
+        }
+        assert_eq!(terrace(5_000, step, 123), 0, "a tread");
+        assert_eq!(terrace(-25_000, step, 123), -30_000, "a tread below zero");
+        assert_eq!(terrace(59_999, step, 123), 59_970, "the top of a riser");
     }
 
     /// No steps between neighbouring columns (the bowls and rims are

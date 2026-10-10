@@ -643,6 +643,16 @@ impl Flight {
             image::save_buffer(self.output.join(format!("{name}-steps.png")), &heat, size[0], size[1], image::ColorType::Rgba8).unwrap();
         }
         let mut stats = serde_json::Map::new();
+        // Divergence: the rays of an 8x8 tile run together, so a tile costs
+        // its longest ray's steps.
+        let (tiles_x, tiles_y) = (size[0].div_ceil(8), size[1].div_ceil(8));
+        let mut tile_max = vec![0u32; (tiles_x * tiles_y) as usize];
+        for (n, w) in work.iter().enumerate() {
+            let (x, y) = (n as u32 % size[0], n as u32 / size[0]);
+            let t = &mut tile_max[((y / 8) * tiles_x + x / 8) as usize];
+            *t = (*t).max(w[0]);
+        }
+        stats.insert("tile_max_steps".into(), serde_json::json!(tile_max.iter().map(|v| f64::from(*v)).sum::<f64>() / tile_max.len() as f64));
         for (index, name) in ["steps", "lookups", "block_skips", "locates"].iter().enumerate() {
             work.sort_by_key(|w| w[index]);
             let q = |p: f64| work[((work.len() - 1) as f64 * p) as usize][index];
@@ -1002,17 +1012,22 @@ fn main() {
     }
     if std::env::var_os("HELIO_VOXEL_FLIGHT_QUICK").is_some() {
         // Timing probe: short walk and an orbit view, then stage summaries.
+        // `HELIO_VOXEL_FLIGHT_QUICK=mountain` times the mountain views only.
+        let only_mountain = std::env::var("HELIO_VOXEL_FLIGHT_QUICK").as_deref() == Ok("mountain");
         let mut eye = ground;
-        for i in 0..120 {
+        for i in 0..if only_mountain { 0 } else { 120 } {
             let h = heading + (i as f64 * 0.01).sin() * 0.6;
             eye = flight.planet.surface_point(eye + tangent(eye, h).as_dvec3() * 0.05, 1.7);
             flight.draw("walk", eye, look(eye, h, -8.0));
         }
         let h = heading + (119.0f64 * 0.01).sin() * 0.6;
-        audits.push(flight.audit("walk_view", eye, look(eye, h, -8.0)));
-        flight.capture("walk_view");
+        let hovers: &[(&'static str, f64, f64)] = if only_mountain { &[] } else {
+            audits.push(flight.audit("walk_view", eye, look(eye, h, -8.0)));
+            flight.capture("walk_view");
+            &[("hover_330", 330.0, -41.0), ("hover_3k", 3000.0, -30.0), ("hover_55k", 55_000.0, -30.0)]
+        };
         // Steady low-altitude views (the ascent's heaviest bands).
-        for (name, alt, pitch) in [("hover_330", 330.0, -41.0), ("hover_3k", 3000.0, -30.0), ("hover_55k", 55_000.0, -30.0)] {
+        for &(name, alt, pitch) in hovers {
             let e = ground.normalize() * (ground.length() + alt);
             let f = look(e, heading, pitch);
             flight.settle(name, e, f);
@@ -1022,23 +1037,53 @@ fn main() {
             flight.capture(name);
             audits.push(flight.audit(name, e, f));
         }
-        let volume = volume_views(&flight.planet, ground);
+        let volume = if only_mountain { Vec::new() } else { volume_views(&flight.planet, ground) };
         eprintln!("QUICK volume views: {:?}", volume.iter().map(|v| v.0).collect::<Vec<_>>());
         for (name, e, f) in mountain(&flight.planet, heading).views.into_iter().chain(volume) {
-            flight.settle(name, e, f);
-            for _ in 0..30 {
+            // Loading and the settled view are timed apart.
+            let load: &'static str = Box::leak(format!("{name}_load").into_boxed_str());
+            if only_mountain {
+                // Work while the view loads.
+                for n in 0..40 {
+                    flight.draw(load, e, f);
+                    if n % 5 == 4 {
+                        if let Some(st) = flight.pass().renderer().map(|r| r.stats()) {
+                            eprintln!(
+                                "QUICK loading {name} frame {n}: jobs {} pending {} units {:.0} budget {:.0} us/unit {:.2} pressure {:.2} resident {}",
+                                st.jobs, st.pending_columns, st.units, st.unit_budget, st.us_per_unit, st.lod_pressure, st.resident_columns
+                            );
+                        }
+                    }
+                }
+                let mid: &'static str = Box::leak(format!("{name}_mid").into_boxed_str());
+                flight.capture(mid);
+                audits.push(flight.audit(mid, e, f));
+            }
+            flight.settle(load, e, f);
+            for n in 0..30 {
                 flight.draw(name, e, f);
+                if only_mountain && n % 5 == 0 {
+                    // Residency after settling: what keeps generating.
+                    if let Some(st) = flight.pass().renderer().map(|r| r.stats()) {
+                        eprintln!(
+                            "QUICK residency {name} frame {n}: jobs {} evictions {} pending {} failed {} clipped {} recycles {} pressure {:.2} free_units {} units {}",
+                            st.jobs, st.evictions, st.pending_columns, st.failed_jobs, st.clipped_columns, st.recycles, st.lod_pressure, st.free_units, st.resident_columns
+                        );
+                    }
+                }
             }
             flight.capture(name);
             audits.push(flight.audit(name, e, f));
         }
-        let orbit = ground.normalize() * (ground.length() + 300_000.0);
-        let orbit_look = look(orbit, heading, -65.0);
-        flight.settle("orbit_settle", orbit, orbit_look);
-        for _ in 0..30 {
-            flight.draw("orbit", orbit, orbit_look);
+        if !only_mountain {
+            let orbit = ground.normalize() * (ground.length() + 300_000.0);
+            let orbit_look = look(orbit, heading, -65.0);
+            flight.settle("orbit_settle", orbit, orbit_look);
+            for _ in 0..30 {
+                flight.draw("orbit", orbit, orbit_look);
+            }
+            flight.capture("orbit");
         }
-        flight.capture("orbit");
         let mut groups: BTreeMap<String, Vec<&Sample>> = BTreeMap::new();
         for s in &flight.samples {
             groups.entry(s.stage.clone()).or_default().push(s);
@@ -1055,6 +1100,10 @@ fn main() {
         }
         for a in &audits {
             eprintln!("QUICK audit {a}");
+        }
+        if only_mountain {
+            flight.write_csv();
+            return;
         }
         // Whole-graph pass costs averaged over a steady ground view.
         let mut totals: BTreeMap<&'static str, (f64, u32)> = BTreeMap::new();
@@ -1290,6 +1339,7 @@ fn main() {
             shape: if n % 3 == 0 { BrushShape::Cube } else { BrushShape::Sphere },
             op: if add { BrushOp::Add } else { BrushOp::Remove },
             material: if add { material::COBBLE } else { 0 },
+            height: 0.0,
         };
         let mut planet = (*flight.planet).clone();
         planet.apply(brush).unwrap();
@@ -1354,6 +1404,7 @@ fn main() {
             shape: BrushShape::Sphere,
             op: BrushOp::Remove,
             material: 0,
+            height: 0.0,
         })
         .unwrap();
     flight.planet = Arc::new(planet);
@@ -2055,7 +2106,7 @@ fn sculpt_stress(flight: &mut Flight, ground: DVec3, heading: f64) {
                 let surface = flight.planet.surface_point(point, 0.0);
                 let center = if op == BrushOp::Add { surface + up * radius } else { surface - up * radius * 0.3 };
                 planet
-                    .apply(Brush { center: center.to_array(), radius, shape, op, material: if op == BrushOp::Add { material::BRICK } else { 0 } })
+                    .apply(Brush { center: center.to_array(), radius, shape, op, material: if op == BrushOp::Add { material::BRICK } else { 0 }, height: 0.0 })
                     .unwrap();
                 stamp += 1;
             }

@@ -40,6 +40,18 @@ const LAYER_HILLS: u32 = 4u;
 const LAYER_CRATERS: u32 = 7u;
 const LAYER_BASINS: u32 = 8u;
 const LAYER_PLATEAU: u32 = 9u;
+const LAYER_CLIFFS: u32 = 10u;
+
+// `landform::terrace`: terraces of `step` height units, rising over the last
+// `riser_q10` / 1024 of each step.
+fn landform_terrace(h: i32, step: i32, riser_q10: i32) -> i32 {
+    var q = h / step;
+    if h % step < 0 { q -= 1; }
+    let f = h - q * step;
+    let riser = max((step * riser_q10) >> 10u, 1);
+    let t = (max(f - (step - riser), 0) << 10u) / riser;
+    return q * step + ((min(t, 1024) * step) >> 10u);
+}
 
 const SEED_CAVE_REGION: u32 = 0xA511E9B3u;
 const SEED_TUNNEL_A: u32 = 0x63D83595u;
@@ -133,6 +145,35 @@ fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> {
         below = max(below, above);
     }
     return vec2<i32>(below, above);
+}
+
+// Level cells along a column's lane, from a cell at volume point `q`, in
+// which no cave can carve (`terrain_density`'s tunnels and caverns): a
+// tunnel needs both of its noises within the tunnel width, a cavern its
+// noise over the cavern threshold (at their widest and lowest, whatever
+// the depth's ramps), and no noise moves faster than NOISE_SLOPE per
+// lattice unit while the point moves `step` volume units per level cell
+// along the lane. 0: a cave may carve near this cell. Generation steps over
+// solid rock by it instead of evaluating every cell down to the cave depth
+// (a mountain's columns cost 100 heightfield columns each).
+fn terrain_clearance(q: vec3<i32>, level: u32, step: f32) -> i32 {
+    let v = terrain.volume;
+    let caves = landform_caves_at(level);
+    var clear = 1.0e9;
+    if caves.x {
+        let shift = u32(v[1].x);
+        let na = abs(noise(q, shift, landform_seed() ^ SEED_TUNNEL_A));
+        let nb = abs(noise(q, shift, landform_seed() ^ SEED_TUNNEL_B));
+        let excess = max(na, nb) - (v[1].y + 16) - NOISE_ROUNDING;
+        clear = min(clear, f32(excess) / (NOISE_SLOPE * step / exp2(f32(shift))));
+    }
+    if caves.y {
+        let shift = u32(v[1].z);
+        let n = noise(q, shift, landform_seed() ^ SEED_CAVERN);
+        let excess = (v[1].w - 2) - n - NOISE_ROUNDING;
+        clear = min(clear, f32(excess) / (NOISE_SLOPE * step / exp2(f32(shift))));
+    }
+    return i32(clamp(floor(clear), 0.0, 1.0e9));
 }
 
 // mm per noise unit at lattice shift s: 2^s * 12.5 mm / 2^17 (`density`).
@@ -611,6 +652,12 @@ fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
             continue;
         } else if layer.kind == LAYER_PLATEAU {
             x = layer.a;
+        } else if (layer.kind & 0xffffu) == LAYER_CLIFFS {
+            // Escarpments: inside their regions, terraces of what lies below
+            // them in the stack.
+            let m = landform_masked(layer.mask, clamp((lf_value[l] - layer.b) * 4, 0, FINE_ONE), lw);
+            h += mul_fine(landform_terrace(h, layer.a, i32(layer.kind >> 16u)) - h, m);
+            continue;
         } else if layer.kind >= LAYER_HILLS && layer.kind <= LAYER_CRATERS {
             x = lf_value[l];
         }

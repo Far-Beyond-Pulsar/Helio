@@ -19,6 +19,9 @@ fn terrain_programs_are_bit_identical_to_cpu() {
     let mut deep = TerrainLayers::earth();
     deep.caves.depth_m = 900.0;
     let deep = deep.source(7);
+    let mut cliffs = TerrainLayers::earth();
+    cliffs.layers.push(helio_pass_voxel_planet::layers::Layer { coverage: 0.6, ..helio_pass_voxel_planet::layers::Layer::new(helio_pass_voxel_planet::layers::LayerKind::Cliffs) });
+    let cliffs = cliffs.source(7);
     for (shape, size, terrain) in [
         (Shape::Sphere, 0.1, TerrainSource::default()),
         (Shape::Sphere, 0.3, TerrainSource::default()),
@@ -35,6 +38,9 @@ fn terrain_programs_are_bit_identical_to_cpu() {
         (Shape::Sphere, 0.1, desert.clone()),
         (Shape::Plane, 0.3, desert),
         (Shape::Sphere, 0.1, deep),
+        (Shape::Sphere, 0.1, cliffs.clone()),
+        (Shape::Plane, 0.3, cliffs.clone()),
+        (Shape::InfinitePlane, 1.0, cliffs),
     ] {
         let planet = Planet::new(PlanetRecipe { shape, voxel_size_m: size, plane_size_m: 5_000.0, terrain: terrain.clone(), ..Default::default() }).unwrap();
         helio_pass_voxel_planet::engine::verify_field(&gpu.device, &gpu.queue, &planet, 20_000)
@@ -173,7 +179,7 @@ fn cave_view_matches_canonical_cpu_ray_casts() {
     let Some(gpu) = gpu() else { return };
     let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
     let (eye, forward) = find_cave(&planet).expect("a cave near the test site");
-    eprintln!("cave eye {} m below its column top", -planet.ground_height(eye));
+    eprintln!("cave eye {} m over the cave floor", planet.ground_height(eye));
     let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [320, 180]);
     eprintln!("compared {compared}, mismatched {mismatched}");
     assert!(compared > 1000);
@@ -234,7 +240,7 @@ fn overhang_view_matches_canonical_cpu_ray_casts() {
     stack.caves.enabled = false;
     let planet = Arc::new(Planet::new(PlanetRecipe { terrain: stack.source(7), ..Default::default() }).unwrap());
     let (eye, forward) = find_overhang(&planet).expect("an overhang near the test site");
-    eprintln!("overhang eye {} m off its column top", planet.ground_height(eye));
+    eprintln!("overhang eye {} m over the ground below", planet.ground_height(eye));
     let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [320, 180]);
     eprintln!("compared {compared}, mismatched {mismatched}");
     assert!(compared > 1000);
@@ -250,7 +256,7 @@ fn deep_cave_view_matches_canonical_cpu_ray_casts() {
     stack.caves.depth_m = 800.0;
     let planet = Arc::new(Planet::new(PlanetRecipe { terrain: stack.source(7), ..Default::default() }).unwrap());
     let (eye, forward) = find_cave(&planet).expect("a cave near the test site");
-    eprintln!("cave eye {} m below its column top", -planet.ground_height(eye));
+    eprintln!("cave eye {} m over the cave floor", planet.ground_height(eye));
     let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [320, 180]);
     eprintln!("compared {compared}, mismatched {mismatched}");
     assert!(compared > 1000);
@@ -347,10 +353,10 @@ fn edits_propagate_to_gpu_generation() {
     let side = up.any_orthonormal_vector();
     let ground = planet.surface_point(dir, 0.0) + side * 4.0;
     planet
-        .apply(Brush { center: ground.to_array(), radius: 2.5, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 })
+        .apply(Brush { center: ground.to_array(), radius: 2.5, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 })
         .unwrap();
     planet
-        .apply(Brush { center: (ground + side * 3.0 + up * 1.5).to_array(), radius: 0.8, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK })
+        .apply(Brush { center: (ground + side * 3.0 + up * 1.5).to_array(), radius: 0.8, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK, height: 0.0 })
         .unwrap();
     let planet = Arc::new(planet);
     let forward = (side - up * 0.6).normalize().as_vec3();
@@ -358,6 +364,93 @@ fn edits_propagate_to_gpu_generation() {
     eprintln!("compared {compared}, mismatched {mismatched}");
     assert!(compared > 1000);
     assert!(mismatched * 1000 <= compared, "{mismatched}/{compared}");
+}
+
+/// Flat-topped boxes (what Flatten stamps): a slab removed above a level
+/// and one filled below it, across a hillside, render exactly.
+#[test]
+fn box_brushes_render_exactly() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 1, 0.52, 0.48);
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let ground = planet.surface_point(dir, 0.0);
+    for n in 0..6 {
+        let at = ground + side * (f64::from(n) * 2.5);
+        planet.apply(Brush { center: (at + up * 1.5).to_array(), radius: 1.3, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0, height: 1.5 }).unwrap();
+        planet.apply(Brush { center: (at - up * 0.75).to_array(), radius: 1.3, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK, height: 0.75 }).unwrap();
+    }
+    let planet = Arc::new(planet);
+    let eye = ground + up * 4.0 - side * 5.0 + up.cross(side) * 3.0;
+    let forward = ((ground + side * 6.0) - eye).normalize().as_vec3();
+    let (compared, mismatched) = compare_near(&gpu, &planet, eye, forward, [320, 180]);
+    eprintln!("compared {compared}, mismatched {mismatched}");
+    assert!(compared > 1000);
+    assert_eq!(mismatched, 0);
+}
+
+/// Heavy sculpting (a spiral of over a thousand digs, as an editor stroke
+/// leaves) seen from rising altitudes: the pit shows at every height where
+/// it spans at least a few cells of the level drawing it, the columns over
+/// it all generate (no pending or loading rays), and the edit data stays
+/// small.
+#[test]
+fn heavy_sculpting_shows_from_altitude() {
+    let Some(gpu) = gpu() else { return };
+    let plain = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&plain, 1, 0.52, 0.48);
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let ahead = up.cross(side);
+    let ground = plain.surface_point(dir, 0.0);
+    let mut planet = plain.clone();
+    let mut digs = 0;
+    for n in 0..1_200 {
+        let a = f64::from(n) * 0.11;
+        let r = 2.0 + f64::from(n) * 0.032;
+        let at = ground + (side * a.cos() + ahead * a.sin()) * r;
+        let surface = planet.surface_point(at, 0.0);
+        planet.apply(Brush { center: (surface - up * 0.8).to_array(), radius: 2.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        digs += 1;
+    }
+    let (planet, plain) = (Arc::new(planet), Arc::new(plain));
+    eprintln!("{digs} digs, {} sealed", planet.edits().sealed_len());
+    let size = [256, 256];
+    let target = Target::new(&gpu, size);
+    let mut edited = renderer(&gpu, planet.clone(), size);
+    let mut untouched = renderer(&gpu, plain.clone(), size);
+    let down = (-up).as_vec3();
+    let mut report = Vec::new();
+    for height in [60.0, 300.0, 900.0, 2_500.0] {
+        let eye = ground + up * height;
+        let depth = |renderer: &mut helio_pass_voxel_planet::engine::PlanetRenderer, planet: &Arc<Planet>| {
+            let frame = frame(planet, eye);
+            settle(&gpu, &target, renderer, &frame, down);
+            let hits = hits(&gpu, renderer);
+            // The mean depth over the central 9x9 pixels (the pit's middle).
+            let mut sum = 0.0;
+            for y in 124..133 {
+                for x in 124..133 {
+                    sum += f64::from(hits[(y * size[0] + x) as usize].t);
+                }
+            }
+            sum / 81.0
+        };
+        let a = depth(&mut edited, &planet);
+        let b = depth(&mut untouched, &plain);
+        let stats = edited.stats();
+        eprintln!(
+            "height {height:>6} m: pit {:.2} m deep (level {}), pending {}, failed {}, edit words {}, baked {} of {}, pressure {:.2}",
+            a - b, stats.finest_level, stats.pending_columns, stats.failed_jobs, stats.edit_words, stats.baked_bricks, stats.baked_pool, stats.lod_pressure
+        );
+        report.push((height, a - b, stats));
+    }
+    for (height, pit, stats) in &report {
+        assert_eq!(stats.pending_columns, 0, "{height} m: columns left pending");
+        assert!(stats.edit_words < 1 << 20, "{height} m: {} edit words", stats.edit_words);
+        assert!(*pit > 0.5, "{height} m: the pit does not show ({pit:.2} m)");
+    }
 }
 
 /// Destruction to any depth: a 600 m shaft is far taller than a column's
@@ -375,7 +468,7 @@ fn a_deep_shaft_renders_exactly_at_any_depth() {
     let mut depth = -10.0;
     while depth < 600.0 {
         let center = ground - up * depth;
-        planet.apply(Brush { center: center.to_array(), radius: 2.0, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0 }).unwrap();
+        planet.apply(Brush { center: center.to_array(), radius: 2.0, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
         depth += 3.0;
     }
     let planet = Arc::new(planet);
@@ -396,47 +489,85 @@ fn a_deep_shaft_renders_exactly_at_any_depth() {
 }
 
 /// Tools ask the pass for the terrain hit under a view point (the editor's
-/// brush): the answer, a few frames later, lies within its cell size of the
-/// exact CPU hit along that pixel's ray, near and far; the sky has none.
+/// brush): the answer, a few frames later, is the cell drawn there. Drawn at
+/// level 0 it is the exact CPU hit and the air cell before it (where a
+/// build goes); coarser, it lies within its cell size of it. The sky has
+/// none.
 #[test]
 fn picks_report_the_terrain_hit_under_the_view() {
     use helio_pass_voxel_planet::engine::{PickRequest, SharedPicks};
     let Some(gpu) = gpu() else { return };
     let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
     let ground = planet.surface_point(land(&planet, 2, 0.47, 0.53), 0.0);
-    let eye = planet.surface_point(ground, 60.0);
-    let up = planet.grid().up(eye);
-    let forward = (up.any_orthonormal_vector() - up * 0.15).normalize().as_vec3();
     let size = [256, 144];
     let target = Target::new(&gpu, size);
-    let mut renderer = renderer(&gpu, planet.clone(), size);
-    let picks: SharedPicks = Default::default();
-    let mut frame = frame(&planet, eye);
-    frame.picks = Some(picks.clone());
-    let frames = settle(&gpu, &target, &mut renderer, &frame, forward);
-    let camera = target.camera(forward, up.as_vec3());
-    // Pixels from just below the horizon to the bottom, and one in the sky.
-    let pixels = [(128u32, 2u32), (128, 70), (40, 80), (200, 100), (128, 143)];
-    picks.lock().unwrap().requests.extend(pixels.iter().enumerate().map(|(n, &(x, y))| PickRequest {
-        id: n as u64,
-        uv: [(x as f32 + 0.5) / size[0] as f32, (y as f32 + 0.5) / size[1] as f32],
-    }));
-    for n in 0..4 {
-        target.render(&gpu, &mut renderer, &frame, forward, (frames + n) as u64);
-    }
-    let results = std::mem::take(&mut picks.lock().unwrap().results);
-    assert_eq!(results.len(), pixels.len(), "every request is answered");
-    for result in results {
-        let (x, y) = pixels[result.id as usize];
-        let dir = pixel_dir(&target, &camera, x, y);
-        let cpu = planet.raycast(eye, dir, 100_000.0);
-        eprintln!("pick {x},{y}: {:?} cpu {:?}", result.hit, cpu.map(|c| c.distance));
-        match (result.hit, cpu) {
-            (Some(hit), Some(cpu)) => assert!((hit.distance - cpu.distance).abs() <= hit.cell_m * 2.0 + 0.5, "pixel {x},{y}: {hit:?} vs {}", cpu.distance),
-            (None, None) => {}
-            (hit, cpu) => panic!("pixel {x},{y}: pick {hit:?}, cpu {cpu:?}"),
+    let mut exact = 0;
+    // From 60 m over the ground towards the horizon (coarse levels), and
+    // 2 m over it looking down (level 0).
+    for (height, pitch) in [(60.0, 0.15f64), (2.0, 2.0)] {
+        let eye = planet.surface_point(ground, height);
+        let up = planet.grid().up(eye);
+        let forward = (up.any_orthonormal_vector() - up * pitch).normalize().as_vec3();
+        let mut renderer = renderer(&gpu, planet.clone(), size);
+        let picks: SharedPicks = Default::default();
+        let mut frame = frame(&planet, eye);
+        frame.picks = Some(picks.clone());
+        let frames = settle(&gpu, &target, &mut renderer, &frame, forward);
+        let camera = target.camera(forward, up.as_vec3());
+        // Pixels from just below the horizon to the bottom, and one in the sky.
+        let pixels = [(128u32, 2u32), (128, 70), (40, 80), (200, 100), (128, 143)];
+        picks.lock().unwrap().requests.extend(pixels.iter().enumerate().map(|(n, &(x, y))| PickRequest {
+            id: n as u64,
+            uv: [(x as f32 + 0.5) / size[0] as f32, (y as f32 + 0.5) / size[1] as f32],
+        }));
+        for n in 0..4 {
+            target.render(&gpu, &mut renderer, &frame, forward, (frames + n) as u64);
+        }
+        let results = std::mem::take(&mut picks.lock().unwrap().results);
+        assert_eq!(results.len(), pixels.len(), "every request is answered");
+        for result in results {
+            let (x, y) = pixels[result.id as usize];
+            let dir = pixel_dir(&target, &camera, x, y);
+            let cpu = planet.raycast(eye, dir, 100_000.0);
+            eprintln!("pick {x},{y} from {height} m: {:?} cpu {:?}", result.hit, cpu.map(|c| c.distance));
+            match (result.hit, cpu) {
+                (Some(hit), Some(cpu)) => {
+                    let cell_m = planet.grid().level_size(hit.level);
+                    assert!((hit.distance - cpu.distance).abs() <= cell_m * 2.0 + 0.5, "pixel {x},{y}: {hit:?} vs {}", cpu.distance);
+                    let drawn = planet.drawn_hit(eye, dir, hit.distance, hit.cell, hit.level, hit.entered);
+                    if hit.level == 0 {
+                        exact += 1;
+                        assert_eq!((drawn.cell, drawn.previous), (cpu.cell, cpu.previous), "pixel {x},{y}");
+                    }
+                }
+                (None, None) => {}
+                (hit, cpu) => panic!("pixel {x},{y}: pick {hit:?}, cpu {cpu:?}"),
+            }
         }
     }
+    assert!(exact >= 3, "{exact} picks drawn at level 0");
+}
+
+/// Residency settles over a dig seen from above (the gate flight's crater
+/// view: a 60 m ball removed at the ground, the eye 150 m over it). Columns
+/// clipped to their window regenerate only when the eye nears a side they
+/// clip.
+#[test]
+fn residency_settles_over_a_dig_seen_from_above() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let ground = planet.surface_point(land(&planet, 2, 0.47, 0.53), 0.0);
+    let up = ground.normalize();
+    planet.apply(Brush { center: ground.to_array(), radius: 60.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    let planet = Arc::new(planet);
+    let eye = ground + up * 150.0 + up.any_orthonormal_vector() * 40.0;
+    let forward = (ground - up * 20.0 - eye).normalize().as_vec3();
+    let size = [320, 180];
+    let target = Target::new(&gpu, size);
+    let mut r = renderer(&gpu, planet.clone(), size);
+    let frames = settle(&gpu, &target, &mut r, &frame(&planet, eye), forward);
+    eprintln!("settled in {frames} frames: {:?}", r.stats());
+    assert!(r.settled(), "residency did not settle in {frames} frames: {:?}", r.stats());
 }
 
 /// Planet-scale brushes: a sphere of 3 km radius (64-bit containment; the
@@ -449,7 +580,7 @@ fn a_planet_scale_crater_renders_exactly_on_its_floor() {
     let dir = land(&planet, 5, 0.33, 0.52);
     let ground = planet.surface_point(dir, 0.0);
     let up = planet.grid().up(ground);
-    planet.apply(Brush { center: ground.to_array(), radius: 3_000.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+    planet.apply(Brush { center: ground.to_array(), radius: 3_000.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
     let planet = Arc::new(planet);
     let eye = ground - up * (3_000.0 - 1.7);
     assert!(!planet.solid(planet.grid().locate(eye).0), "the eye is in the crater");
@@ -473,7 +604,7 @@ fn a_hollowed_core_renders_exactly_from_inside() {
     let Some(gpu) = gpu() else { return };
     let recipe = PlanetRecipe { radius_m: 3_000.0, terrain: helio_pass_voxel_planet::layers::TerrainLayers::earth().heightfield().source(7), ..Default::default() };
     let mut planet = Planet::new(recipe).unwrap();
-    planet.apply(Brush { center: [0.0; 3], radius: 1_500.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+    planet.apply(Brush { center: [0.0; 3], radius: 1_500.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
     let up = DVec3::new(0.3, 0.9, 0.2).normalize();
     let eye = up * (1_500.0 - 1.7);
     assert!(!planet.solid(planet.grid().locate(eye).0), "the eye is in the hollow");
@@ -504,7 +635,7 @@ fn thousands_of_block_edits_render_exactly() {
     let ground = planet.surface_point(dir, 0.0);
     let block = |p: DVec3, op: BrushOp| {
         let (cell, _) = grid.locate(p);
-        Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material: if op == BrushOp::Add { material::BRICK } else { 0 } }
+        Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material: if op == BrushOp::Add { material::BRICK } else { 0 }, height: 0.0 }
     };
     let at = |x: i32, y: i32, z: i32| ground + side * (f64::from(x) * 0.1) + fwd * (f64::from(z) * 0.1 + 6.0) + up * (f64::from(y) * 0.1 + 0.55);
     let started = std::time::Instant::now();
@@ -543,6 +674,112 @@ fn thousands_of_block_edits_render_exactly() {
     assert_eq!(mismatched, 0);
 }
 
+/// Edits sealed under a running renderer: a crater and a mound too large to
+/// bake (the mound applied over the baked blocks it covers), blocks baked
+/// between them, then undo across seals. After each change the kept
+/// renderer matches canonical CPU ray casts exactly.
+#[test]
+fn sealed_edits_render_exactly_under_a_running_renderer() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 1, 0.52, 0.48);
+    let grid = *planet.grid();
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    let ground = planet.surface_point(dir, 0.0);
+    let block = |p: DVec3, op: BrushOp| {
+        let (cell, _) = grid.locate(p);
+        Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material: if op == BrushOp::Add { material::BRICK } else { 0 }, height: 0.0 }
+    };
+    let layer = |planet: &mut Planet, height: f64, every: i32| {
+        for x in -12i32..12 {
+            for z in -12..12 {
+                if (x + z).rem_euclid(every) == 0 {
+                    planet.apply(block(ground + side * (f64::from(x) * 0.1) + fwd * (f64::from(z) * 0.1) + up * height, BrushOp::Add)).unwrap();
+                }
+            }
+        }
+    };
+    let size = [320, 180];
+    let target = Target::new(&gpu, size);
+    let eye = ground + up * 9.0 - fwd * 7.0;
+    let forward = ((ground - up * 4.0) - eye).normalize().as_vec3();
+    let check = |planet: &Planet, kept: &mut Option<helio_pass_voxel_planet::engine::PlanetRenderer>| {
+        let planet = Arc::new(planet.clone());
+        let renderer = kept.get_or_insert_with(|| renderer(&gpu, planet.clone(), size));
+        let (compared, mismatched) = compare_view(&gpu, &target, renderer, &planet, eye, forward, size);
+        eprintln!("{} edits ({} large, {} recent): {mismatched}/{compared} mismatched", planet.edits().len(), planet.edits().large.len(), planet.edits().recent.len());
+        assert!(compared > 400);
+        assert_eq!(mismatched, 0);
+    };
+    let mut kept = None;
+    planet.apply(Brush { center: (ground - up).to_array(), radius: 6.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    layer(&mut planet, -5.0, 3);
+    check(&planet, &mut kept);
+    planet.apply(Brush { center: (ground - up * 5.5 + side * 2.5).to_array(), radius: 4.0, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
+    layer(&mut planet, -3.5, 2);
+    layer(&mut planet, -2.5, 2);
+    assert_eq!(planet.edits().large.len(), 2, "both large brushes sealed");
+    assert!(!planet.edits().baked.is_empty());
+    check(&planet, &mut kept);
+    // Undo across seals: their bricks and large brushes come back undone.
+    let sealed = planet.edits().sealed_len();
+    for _ in 0..300 {
+        planet.undo().unwrap();
+    }
+    assert!(planet.edits().sealed_len() < sealed);
+    check(&planet, &mut kept);
+}
+
+/// Destruction outgrowing the baked edit pool: walls of single blocks
+/// (each brick a mix, so each takes a pool slot) under a pool budget that
+/// starts at 64 slots. The pool grows, uniform bricks take none, and the
+/// view matches CPU ray casts exactly.
+#[test]
+fn the_baked_edit_pool_grows_with_destruction() {
+    use helio_pass_voxel_planet::engine::{PlanetRenderer, Settings};
+    use helio_pass_voxel_planet::residency::Capacity;
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 1, 0.52, 0.48);
+    let grid = *planet.grid();
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    let ground = planet.surface_point(dir, 0.0);
+    let block = |p: DVec3, op: BrushOp| {
+        let (cell, _) = grid.locate(p);
+        Brush { center: grid.cell_center(cell).to_array(), radius: grid.voxel_size() * 0.5, shape: BrushShape::Cube, op, material: if op == BrushOp::Add { material::BRICK } else { 0 }, height: 0.0 }
+    };
+    // A carved pit (uniform air bricks inside) with checkered walls.
+    planet.apply(Brush { center: (ground - up * 2.0).to_array(), radius: 2.4, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    for y in 0..40 {
+        for x in -30..30 {
+            for z in [-30, 29] {
+                if (x + y) % 2 == 0 {
+                    planet.apply(block(ground + side * (f64::from(x) * 0.1) + fwd * (f64::from(z) * 0.1) + up * (f64::from(y) * 0.1 + 0.55), BrushOp::Add)).unwrap();
+                    planet.apply(block(ground + fwd * (f64::from(x) * 0.1) + side * (f64::from(z) * 0.1) + up * (f64::from(y) * 0.1 + 0.55), BrushOp::Add)).unwrap();
+                }
+            }
+        }
+    }
+    let planet = Arc::new(planet);
+    assert!(planet.edits().sealed_len() > 4000);
+    let size = [320, 180];
+    let settings = Settings { capacity: Capacity { baked_bricks: 2048, ..Capacity::default() }, ..Settings::default() };
+    let mut renderer = PlanetRenderer::new(&gpu.device, &gpu.queue, planet.clone(), settings, size);
+    let target = Target::new(&gpu, size);
+    let eye = ground - fwd * 5.0 + up * 6.0 - side * 2.0;
+    let forward = ((ground + fwd * 1.0) - eye).normalize().as_vec3();
+    let (compared, mismatched) = compare_view(&gpu, &target, &mut renderer, &planet, eye, forward, size);
+    let stats = renderer.stats();
+    eprintln!("baked bricks {} in a pool of {}, {} edit words; {mismatched}/{compared} mismatched", stats.baked_bricks, stats.baked_pool, stats.edit_words);
+    assert!(stats.baked_pool > 64 && stats.baked_bricks > 64, "the pool grew");
+    assert!(compared > 400);
+    assert_eq!(mismatched, 0);
+}
+
 #[test]
 fn orbital_view_has_complete_coverage() {
     let Some(gpu) = gpu() else { return };
@@ -564,6 +801,172 @@ fn orbital_view_has_complete_coverage() {
     eprintln!("orbit settled in {frames} frames, statuses {counts:?}, {:?}", r.stats());
     assert_eq!(counts[2] + counts[3], 0);
     assert!(counts[1] > h.len() / 2);
+}
+
+/// The whole planet is destructible and always visible: from orbit, a
+/// planet with a ball 0.8 radii wide bitten out of it shows the bite pixel
+/// for pixel (hit or miss against the analytic shape wherever 20 km of
+/// relief either way, the terrain's own, cannot change the answer), every
+/// hit, the bite's inner wall included, is a cell solid at its level in the
+/// canonical world (a coarse cell grazed by a ray can lie hundreds of
+/// kilometres along it from the analytic wall), and a planet removed
+/// entirely shows only sky. Nothing stays loading.
+#[test]
+fn destroyed_worlds_render_from_orbit() {
+    let Some(gpu) = gpu() else { return };
+    let base = Planet::new(PlanetRecipe::default()).unwrap();
+    let r_planet = base.grid().radius();
+    let bite_centre = DVec3::X * r_planet * 0.9;
+    let bite_radius = r_planet * 0.8;
+    let mut bitten = base.clone();
+    bitten.apply(Brush { center: bite_centre.to_array(), radius: bite_radius, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    let mut gone = base.clone();
+    gone.apply(Brush { center: [0.0; 3], radius: r_planet * 1.1, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    let eye_dir = DVec3::new(0.95, 0.3, 0.15).normalize();
+    let eye = eye_dir * r_planet * 2.6;
+    let forward = (-eye_dir).as_vec3();
+    let size = [160, 90];
+    let target = Target::new(&gpu, size);
+    // The camera `Target::render` draws with.
+    let up = eye_dir.as_vec3();
+    let camera = target.camera(forward, if forward.dot(up).abs() > 0.99 { up.any_orthonormal_vector() } else { up });
+    // Where a ray first enters a planet of radius `r_planet + relief`, and
+    // whether the bite (its radius less the relief) holds that point and
+    // every one after it inside the planet.
+    let expected_at = |d: DVec3, bite: bool, relief: f64| -> bool {
+        let (r_planet, bite_radius) = (r_planet + relief, bite_radius - relief);
+        let b = eye.dot(d);
+        let disc = b * b - (eye.length_squared() - r_planet * r_planet);
+        if disc < 0.0 {
+            return false;
+        }
+        let (t0, t1) = (-b - disc.sqrt(), -b + disc.sqrt());
+        if !bite {
+            return true;
+        }
+        let o = eye - bite_centre;
+        let bb = o.dot(d);
+        let bd = bb * bb - (o.length_squared() - bite_radius * bite_radius);
+        if bd < 0.0 {
+            return true;
+        }
+        let (b0, b1) = (-bb - bd.sqrt(), -bb + bd.sqrt());
+        !(b0 <= t0 && b1 >= t1)
+    };
+    // Distance to the first solid point (the bite's inner wall where the
+    // ray enters the planet inside the bite), and whether it is that wall.
+    let first_hit = |d: DVec3| -> Option<(f64, bool)> {
+        let b = eye.dot(d);
+        let disc = b * b - (eye.length_squared() - r_planet * r_planet);
+        if disc < 0.0 {
+            return None;
+        }
+        let (t0, t1) = (-b - disc.sqrt(), -b + disc.sqrt());
+        let o = eye - bite_centre;
+        let bb = o.dot(d);
+        let bd = bb * bb - (o.length_squared() - bite_radius * bite_radius);
+        if bd < 0.0 {
+            return Some((t0, false));
+        }
+        let (b0, b1) = (-bb - bd.sqrt(), -bb + bd.sqrt());
+        if b0 <= t0 && t0 <= b1 {
+            return (b1 < t1).then_some((b1, true));
+        }
+        Some((t0, false))
+    };
+    // `None` where 20 km of relief either way changes the answer.
+    let expected = |d: DVec3, bite: bool| -> Option<bool> {
+        let (low, high) = (expected_at(d, bite, -20_000.0), expected_at(d, bite, 20_000.0));
+        (low == high).then_some(low)
+    };
+    for (name, planet, bite) in [("bitten", Arc::new(bitten), true), ("gone", Arc::new(gone), false)] {
+        let mut r = renderer(&gpu, planet.clone(), size);
+        settle(&gpu, &target, &mut r, &frame(&planet, eye), forward);
+        let h = hits(&gpu, &r);
+        let mut counts = [0usize; 4];
+        for hit in &h {
+            counts[hit.status as usize] += 1;
+        }
+        assert_eq!(counts[2] + counts[3], 0, "{name}: exhausted or loading rays {counts:?}");
+        if !bite {
+            assert_eq!(counts[1], 0, "{name}: terrain drawn where none is left");
+            continue;
+        }
+        let (mut compared, mut wrong, mut bitten_pixels) = (0usize, 0usize, 0usize);
+        for y in 0..size[1] {
+            for x in 0..size[0] {
+                let n = (y * size[0] + x) as usize;
+                let d = pixel_dir(&target, &camera, x, y);
+                let Some(want) = expected(d, true) else { continue };
+                compared += 1;
+                if want && matches!(first_hit(d), Some((_, true))) {
+                    bitten_pixels += 1;
+                }
+                let hit = h[n];
+                if hit.status == 1 && planet.sample_kind(hit.level, hit.face, hit.i, hit.j, hit.k).0 != 1 {
+                    wrong += 1;
+                    if wrong < 6 {
+                        eprintln!("{name}: pixel {x},{y}: gpu {hit:?} is not a solid cell of its level");
+                    }
+                }
+                if (h[n].status == 1) != want {
+                    wrong += 1;
+                    if wrong < 6 {
+                        eprintln!("{name}: pixel {x},{y}: gpu {:?} expected hit {want}", h[n]);
+                    }
+                }
+            }
+        }
+        eprintln!("{name}: {compared} pixels, {bitten_pixels} on the bite's wall, {wrong} wrong, statuses {counts:?}");
+        assert!(bitten_pixels > 200, "the bite is in view");
+        assert_eq!(wrong, 0, "{name}");
+    }
+}
+
+/// Inside a dig a drag from orbit leaves (a stroke of 2 km balls), rays
+/// cost what they cost over open ground at the same height: the dug air is
+/// crossed as boxes, no column near the eye is clipped at the old ground,
+/// and no column evaluates the air above its floor. In the band format the
+/// pit's columns held their whole carved height (primary 13 ms, generation
+/// 25x a column's cost in the editor).
+#[test]
+fn a_dig_from_orbit_costs_what_open_ground_costs() {
+    use helio_pass_voxel_planet::column_view::{info, ColumnView, SpanKind};
+    let Some(gpu) = gpu() else { return };
+    let open = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&open, 2, 0.47, 0.53);
+    let ground = open.surface_point(dir, 0.0);
+    let up = ground.normalize();
+    let side = up.any_orthonormal_vector();
+    let mut pit = open.clone();
+    for n in 0..40 {
+        let at = ground + side * (f64::from(n) * 600.0 - 12_000.0);
+        pit.apply(Brush { center: at.to_array(), radius: 2_000.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    }
+    let floor = pit.surface_point(dir, 0.0);
+    let size = [320, 180];
+    let target = Target::new(&gpu, size);
+    let forward = (side.as_vec3() * 0.087 - up.as_vec3()).normalize();
+    let mut p90 = Vec::new();
+    for (name, planet, eye) in [("open", Arc::new(open.clone()), open.surface_point(dir, 86.0)), ("pit", Arc::new(pit), floor + up * 86.0)] {
+        let mut r = renderer(&gpu, planet.clone(), size);
+        settle(&gpu, &target, &mut r, &frame(&planet, eye), forward);
+        let mut steps: Vec<u32> = hits(&gpu, &r).iter().map(|h| h.steps).collect();
+        steps.sort();
+        p90.push(steps[steps.len() * 9 / 10]);
+        let [records, pool, _] = r.residency_buffers();
+        let words = |b: &wgpu::Buffer| -> Vec<u32> { read_buffer(&gpu, b, b.size()).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect() };
+        let (rec, pool) = (words(records), words(pool));
+        let (mut clipped, mut bricks) = (0usize, 0usize);
+        for column in ColumnView::all(&rec, &pool).filter(|c| c.valid()) {
+            clipped += usize::from(column.info() & (info::CLIP_BELOW | info::CLIP_ABOVE) != 0);
+            bricks += usize::from(column.spans().iter().any(|s| s.kind == SpanKind::Bricks));
+        }
+        eprintln!("{name}: ray steps p90 {}, {clipped} clipped columns, {bricks} with bricks, {:?}", p90.last().unwrap(), r.stats());
+        assert_eq!(clipped, 0, "{name}");
+        assert!(bricks < 100, "{name}: {bricks} columns store bricks");
+    }
+    assert!(p90[1] <= p90[0] + 2, "steps per ray: open {} pit {}", p90[0], p90[1]);
 }
 
 /// The directional sky bound only ends rays that provably miss: every pixel
@@ -679,150 +1082,129 @@ fn sky_bound_is_conservative_while_moving() {
     assert_eq!(bad, 0);
 }
 
-/// Published column tops bound every occupied cell of the column, and a
-/// complete summary block's maximum bounds its columns' tops.
+/// Every resident column, decoded as the shaders read it, holds the
+/// canonical cells of its level (`Planet::column_kinds`) wherever its window
+/// describes them; its top is tight (no solid cell above it, some lane solid
+/// just below), and its natural tops are the generated tops at any depth:
+/// on open ground, and from inside a pit 100 m deep beside a tower, with a
+/// trail of small digs sealed into the edit store. Display relief and
+/// ridges are off, so every level is canonical.
 #[test]
-fn published_tops_bound_occupancy() {
+fn resident_columns_hold_the_canonical_cells() {
+    use helio_pass_voxel_planet::column_view::{info, ColumnView};
+    use helio_pass_voxel_planet::engine::{PlanetRenderer, Settings};
     let Some(gpu) = gpu() else { return };
-    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
-    let dir = land(&planet, 2, 0.47, 0.53);
-    let eye = planet.surface_point(dir, 1.7);
-    let up = eye.normalize();
-    let forward = (up.any_orthonormal_vector() - up * 0.2).normalize().as_vec3();
+    let open = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&open, 2, 0.47, 0.53);
+    let ground = open.surface_point(dir, 0.0);
+    let up = ground.normalize();
+    let side = up.any_orthonormal_vector();
+    let mut dug = open.clone();
+    dug.apply(Brush { center: (ground - up * 40.0).to_array(), radius: 60.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    dug.apply(Brush { center: (ground + side * 75.0 + up * 10.0).to_array(), radius: 4.0, shape: BrushShape::Cube, op: BrushOp::Add, material: 3, height: 15.0 }).unwrap();
+    for n in 0..100 {
+        let at = ground + side * (f64::from(n) * 0.4 - 90.0);
+        dug.apply(Brush { center: at.to_array(), radius: 0.6, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    }
+    assert!(dug.edits().sealed_len() > 0);
+    let eye_open = open.surface_point(dir, 1.7);
+    // A crater 6 km wide, the eye just over its floor 3 km down.
+    let mut crater = open.clone();
+    crater.apply(Brush { center: ground.to_array(), radius: 3_000.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    let crater_eye = ground - up * (3_000.0 - 1.7);
+    // A ball 0.8 radii wide bitten out of the planet, seen from orbit.
+    let r_planet = open.grid().radius();
+    let mut bitten = open.clone();
+    bitten.apply(Brush { center: (DVec3::X * r_planet * 0.9).to_array(), radius: r_planet * 0.8, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    let orbit_eye = DVec3::new(0.95, 0.3, 0.15).normalize() * r_planet * 2.6;
+    // Everything removed.
+    let mut gone = open.clone();
+    gone.apply(Brush { center: [0.0; 3], radius: r_planet * 1.1, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    let only = std::env::var("AUDIT_VIEW").ok();
+    let views = [("open ground", Arc::new(open), eye_open), ("pit", Arc::new(dug), ground - up * 90.0), ("crater", Arc::new(crater), crater_eye), ("bitten", Arc::new(bitten), orbit_eye), ("gone", Arc::new(gone), orbit_eye)];
+    let views: Vec<_> = views.into_iter().filter(|(name, _, _)| only.as_deref().is_none_or(|o| o == *name)).collect();
     let size = [320, 180];
     let target = Target::new(&gpu, size);
-    let mut r = renderer(&gpu, planet.clone(), size);
-    settle(&gpu, &target, &mut r, &frame(&planet, eye), forward);
-    let [records, pool, _blocks] = r.residency_buffers();
-    let words = |b: &wgpu::Buffer| -> Vec<u32> {
-        read_buffer(&gpu, b, b.size()).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
-    };
-    let rec = words(records);
-    let pool = words(pool);
-    let (mut columns, mut bad) = (0usize, 0usize);
-    let (mut volumetric, mut wrong_tops) = (0usize, 0usize);
-    // Programs with a surface word store it after the header and relief.
-    let surface_units = if planet.field().program().wgsl.contains("fn terrain_surface") { 1 } else { 0 };
-    for c in rec.chunks_exact(8) {
-        let info = c[3];
-        if info & 0xc000_0000 != 0x8000_0000 {
-            continue;
-        }
-        columns += 1;
-        let k_lo = c[2] as i32;
-        let n_band = (info & 511) as i32;
-        let gap = ((info >> 22) & 7) as i32;
-        let run = c[4];
-        let ext = info & 0x2000_0000 != 0;
-        // Wide fractional tops occupy two units after the column header;
-        // inline tops retain their authored-cell offset in each packed byte.
-        let relief = info & 0x1000_0000 != 0;
-        // Bit 26: inline fractional tops (generated volume, bit 12, is
-        // always wide).
-        let inline = info & 0x0400_0000 != 0;
-        let heightfield = info & 0x0200_0000 != 0;
-        // Then one unit of surface offsets.
-        let header = (if ext { 2 } else { 1 }) + (if relief && !inline { 2 } else { 0 }) + surface_units + 1;
-        if relief {
-            assert!(n_band < 32 || (n_band == 32 && gap > 0), "fractional tops overflow their packed byte range");
-        }
-        let published = (k_lo + n_band) * 8 - gap;
-        // Highest occupied cell from the brick masks.
-        let mut highest = i32::MIN;
-        if heightfield {
-            // Independently decode all 64 authored tops. These columns store
-            // solid-below-top occupancy exactly and have no bitmap payload.
-            let level = c[0] >> 27;
-            for cell in 0..64u32 {
-                let word = pool[(run * 16 + (cell >> 2)) as usize];
-                let offset = ((word >> ((cell & 3) * 8)) & 255) as i32;
-                let top_offset = if inline {
-                    (offset + (1i32 << level) - 1) >> level
-                } else {
-                    offset
-                };
-                highest = highest.max(k_lo * 8 + top_offset - 1);
+    for (name, planet, eye) in views {
+        let settings = Settings { coarse_relief: false, ridge_display: false, ..Default::default() };
+        let mut r = PlanetRenderer::new(&gpu.device, &gpu.queue, planet.clone(), settings, size);
+        let forward = (side.as_vec3() - up.as_vec3() * 0.3).normalize();
+        settle(&gpu, &target, &mut r, &frame(&planet, eye), forward);
+        let [records, pool, _blocks] = r.residency_buffers();
+        let words = |b: &wgpu::Buffer| -> Vec<u32> {
+            read_buffer(&gpu, b, b.size()).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
+        };
+        let rec = words(records);
+        let pool = words(pool);
+        let surface_words = planet.field().program().wgsl.contains("fn terrain_surface");
+        let (grid, field) = (planet.grid(), planet.field());
+        let (mut columns, mut audited, mut cells) = (0usize, 0usize, 0usize);
+        let (mut wrong, mut wrong_tops, mut loose) = (0usize, 0usize, 0usize);
+        for column in ColumnView::all(&rec, &pool).filter(|c| c.valid()) {
+            columns += 1;
+            if columns % 5 != 0 {
+                continue;
             }
-            assert_eq!(highest + 1, published, "packed authored top disagrees with published maximum");
-        } else {
-            // Generated volumetric columns publish their generated tops
-            // (material depth) counting down from the band top.
-            if info & 0x1000 != 0 {
-                volumetric += 1;
-                let (level, face) = (c[0] >> 27, ((c[0] >> 24) & 7) as u8);
-                let (ci, cj) = ((c[0] & 0xff_ffff) as i32, c[1] as i32);
-                for cell in 0..64u32 {
-                    let word = pool[(run * 16 + (cell >> 2)) as usize];
-                    let down = ((word >> ((cell & 3) * 8)) & 255) as i32;
-                    let (i, j) = (ci * 8 + (cell & 7) as i32, cj * 8 + (cell >> 3) as i32);
-                    let expected = terrain::generated_top(planet.grid(), planet.field(), face, i, j, level, planet.column_height(face, i, j, level));
-                    let got = (k_lo + n_band) * 8 - down;
-                    // With relief, the partial top cell is solid (cut at
-                    // the surface), whether the volume changed the surface
-                    // or not.
-                    let ceil = relief && got == expected + 1;
-                    if down < 255 && got != expected && !ceil {
+            audited += 1;
+            let (face, level, ci, cj) = column.key();
+            let clipped = column.info() & (info::CLIP_BELOW | info::CLIP_ABOVE) != 0;
+            // The cells around the top and, seven apart, far below it.
+            let top = column.top().max(-(1 << 26));
+            // Layers at or above the planet's centre (below it is no space).
+            let core = -((grid.radius() / grid.voxel_size()) as i32 >> level);
+            let ks: Vec<i32> = (top - 40..top + 24).chain((1..300).map(|s| top - 40 - s * 7)).filter(|&k| column.knows(k) && (grid.is_plane() || k >= core)).collect();
+            let mut solid_below_top = false;
+            for lane in 0..64u32 {
+                let (x, y) = (lane & 7, lane >> 3);
+                let (i, j) = (ci * 8 + x as i32, cj * 8 + y as i32);
+                if !clipped {
+                    let expected = terrain::generated_top(grid, field, face, i, j, level, planet.column_height(face, i, j, level));
+                    if column.natural_top(x, y) != expected {
                         wrong_tops += 1;
                         if wrong_tops < 6 {
-                            eprintln!("column key {:08x} {:08x} cell {cell}: generated top {} expected {expected}", c[0], c[1], (k_lo + n_band) * 8 - down);
+                            eprintln!("{name}: L{level} column ({ci}, {cj}) lane {lane}: natural top {} expected {expected}", column.natural_top(x, y));
                         }
                     }
                 }
-            }
-            for b in (0..n_band).rev() {
-                let (mixed, solid, rank) = if b < 32 {
-                    let bit = b as u32;
-                    ((c[5] >> bit) & 1 != 0, (c[6] >> bit) & 1 != 0, (c[5] & ((1u32 << bit) - 1)).count_ones())
-                } else {
-                    let e = ((run + 1) * 16) as usize;
-                    let (w, bit) = ((b >> 5) as usize, (b & 31) as u32);
-                    let mut rank = 0;
-                    for q in 0..w {
-                        rank += pool[e + q].count_ones();
+                let kinds = planet.column_kinds(level, face, i, j, &ks);
+                for (&k, kind) in ks.iter().zip(kinds) {
+                    cells += 1;
+                    if column.cell(x, y, k) != Some(kind == 1) {
+                        wrong += 1;
+                        if wrong < 10 {
+                            eprintln!("{name}: L{level} column ({ci}, {cj}) info {:08x} lane {lane} k {k}: gpu {:?} cpu {kind} (top {}, spans {:?})", column.info(), column.cell(x, y, k), column.top(), column.spans());
+                        }
                     }
-                    rank += (pool[e + w] & ((1u32 << bit) - 1)).count_ones();
-                    ((pool[e + w] >> bit) & 1 != 0, (pool[e + 8 + w] >> bit) & 1 != 0, rank)
-                };
-                if solid {
-                    highest = (k_lo + b) * 8 + 7;
-                    break;
                 }
-                if mixed {
-                    let unit = ((run + header + rank) * 16) as usize;
-                    let z = (0..8).rev().find(|z| pool[unit + 2 * z] | pool[unit + 2 * z + 1] != 0).unwrap_or(0) as i32;
-                    highest = (k_lo + b) * 8 + z;
-                    break;
+                if column.knows(column.top() - 1) && column.cell(x, y, column.top() - 1) == Some(true) {
+                    solid_below_top = true;
                 }
             }
-            }
-        if highest >= published {
-            bad += 1;
-            if bad < 6 {
-                eprintln!("column key {:08x} {:08x}: highest occupied {highest} published top {published} (k_lo {k_lo} band {n_band} gap {gap})", c[0], c[1]);
+            if !solid_below_top && column.info() & info::CLIP_ABOVE == 0 && column.top() > -(1 << 26) {
+                loose += 1;
             }
         }
+        eprintln!("{name}: {columns} columns, {audited} audited, {cells} cells: {wrong} wrong, {wrong_tops} natural tops wrong, {loose} loose tops");
+        assert!(columns > 1000);
+        assert_eq!(wrong, 0, "{name}");
+        assert_eq!(wrong_tops, 0, "{name}");
+        assert_eq!(loose, 0, "{name}");
     }
-    eprintln!("{columns} columns, {bad} with occupied cells above the published top");
-    eprintln!("{volumetric} volumetric columns, {wrong_tops} generated tops differing from the CPU");
-    assert!(columns > 1000);
-    assert_eq!(bad, 0);
-    assert_eq!(wrong_tops, 0);
 }
 
-/// Surface offsets reconstruct the generator's exact height below voxel
-/// precision: stored height plus offset is the field height to 1/128 of the
-/// stored height's precision, for the smooth shading normals and material
-/// height of natural ground. A base cell over a level-0 or relief top; a
-/// level cell over the whole-cell tops of columns without relief (here the
-/// columns a wide dig touches), whose surface once sank below its
-/// neighbours' (dark outlines around every edit).
+/// Lane words reconstruct the generator's exact height below voxel
+/// precision: a cell's natural top plus its exact surface over it is the
+/// field height to 1/65536 of a level cell, for relief, the smooth shading
+/// normals and the material height of natural ground, at every level and in
+/// the columns a wide dig touches (whose surface once sank below its
+/// neighbours': dark outlines around every edit).
 #[test]
-fn surface_offsets_reconstruct_the_field_height() {
+fn lane_words_reconstruct_the_field_height() {
     let Some(gpu) = gpu() else { return };
     let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
     let dir = land(&planet, 4, 0.37, 0.61);
     let ground = planet.surface_point(dir, 0.0);
-    planet.apply(Brush { center: (ground + (ground.normalize().any_orthonormal_vector()) * 60.0).to_array(), radius: 40.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+    planet.apply(Brush { center: (ground + (ground.normalize().any_orthonormal_vector()) * 60.0).to_array(), radius: 40.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
     let planet = Arc::new(planet);
     let eye = planet.surface_point(dir, 30.0);
     let up = eye.normalize();
@@ -838,45 +1220,29 @@ fn surface_offsets_reconstruct_the_field_height() {
         read_buffer(&gpu, b, b.size()).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
     };
     let (rec, pool) = (words(records), words(pool));
-    let surface_units = if planet.field().program().wgsl.contains("fn terrain_surface") { 1 } else { 0 };
     let layer = planet.grid().layer_mm() as f64;
-    let (mut lanes, mut whole, mut worst) = (0usize, 0usize, 0.0f64);
-    for c in rec.chunks_exact(8) {
-        let info = c[3];
-        // Valid columns other than generated volume whose tops fit their
-        // byte: level-0 tops, inline relief, and whole-cell tops (no relief).
-        let n_band = info & 511;
-        let fits = n_band < 32 || (n_band == 32 && (info >> 22) & 7 != 0);
-        if info & 0xc000_0000 != 0x8000_0000 || info & 0x1000 != 0 || !fits {
+    let (mut lanes, mut worst) = (0usize, 0.0f64);
+    use helio_pass_voxel_planet::column_view::{info, ColumnView};
+    for column in ColumnView::all(&rec, &pool).filter(|c| c.valid()) {
+        // Generated volume takes its surface from the density.
+        if column.info() & info::GENERATED != 0 {
             continue;
         }
-        let level = c[0] >> 27;
-        let relief = info & 0x1000_0000 != 0;
-        let inline = relief && info & 0x0400_0000 != 0;
-        if level != 0 && relief && !inline {
-            continue;
-        }
-        // Units of the stored height and the offset, in base cells.
-        let unit = if level == 0 || relief { 1.0 } else { f64::from(1u32 << level) };
-        let (face, ci, cj, k_lo, run) = (((c[0] >> 24) & 7) as u8, (c[0] & 0xff_ffff) as i32, c[1] as i32, c[2] as i32, c[4]);
-        let ext = info & 0x2000_0000 != 0;
-        let offsets = run + if ext { 2 } else { 1 } + surface_units;
+        let (face, level, ci, cj) = column.key();
+        let cell_mm = layer * f64::from(1u32 << level);
         for cell in 0..64u32 {
-            let byte = |unit: u32| ((pool[(unit * 16 + (cell >> 2)) as usize] >> ((cell & 3) * 8)) & 255) as i32;
-            // Stored height (base cells): the top byte above the band base,
-            // in base cells (inline relief, level 0) or level cells.
-            let stored = if unit == 1.0 { f64::from(((k_lo * 8) << level) + byte(run)) } else { f64::from(k_lo * 8 + byte(run)) * unit };
-            let offset = (byte(offsets) - 128) as f64 / 128.0 * unit;
-            let (i, j) = (ci * 8 + (cell & 7) as i32, cj * 8 + (cell >> 3) as i32);
-            let exact = planet.column_height(face, i, j, level) as f64 / layer;
-            worst = worst.max((stored + offset - exact).abs() / unit);
+            let (x, y) = (cell & 7, cell >> 3);
+            // The natural top plus the exact surface over it (level cells).
+            let stored = f64::from(column.natural_top(x, y)) + column.surface_delta(x, y);
+            let (i, j) = (ci * 8 + x as i32, cj * 8 + y as i32);
+            let exact = planet.column_height(face, i, j, level) as f64 / cell_mm;
+            worst = worst.max(stored - exact).max(exact - stored - 1.0 / 65536.0);
             lanes += 1;
-            whole += usize::from(unit > 1.0);
         }
     }
-    eprintln!("{lanes} lanes ({whole} over whole-cell tops), largest error {worst:.4} of a stored unit");
-    assert!(lanes > 10_000 && whole > 64);
-    assert!(worst <= 1.0 / 128.0 + 1e-9, "{worst}");
+    eprintln!("{lanes} lanes, largest error {worst:.5} level cells");
+    assert!(lanes > 10_000);
+    assert!(worst <= 1e-6, "{worst}");
 }
 
 /// Generated volume is stored only where the volume changes a cell: in cave

@@ -92,7 +92,7 @@ fn natural_material_at(edited: bool, natural_hit: bool, c: Column) -> bool {
 }
 
 fn natural_material_filter_allowed(edited: bool, c: Column) -> bool {
-    return !edited && (c.info & (INFO_TOPOLOGY | INFO_GENERATED)) == 0u && column_tops_fit(c);
+    return !edited && (c.info & (INFO_TOPOLOGY | INFO_GENERATED)) == 0u;
 }
 
 
@@ -194,15 +194,7 @@ fn occupied(face: u32, level: u32, i: i32, j: i32, k: i32, home: Column, hi: i32
         c = records[record];
         if !column_valid(c) { return false; }
     }
-    if (c.info & INFO_HEIGHTFIELD) != 0u {
-        return k < column_top(c, u32(i & 7), u32(j & 7));
-    }
-    let b = (k >> 3u) - c.k_lo;
-    if b < 0 { return true; }
-    if b >= i32(band_count(c)) { return false; }
-    let s = brick_state(c, u32(b));
-    if s.x == 2u { return brick_bit(s.y, u32(i & 7), u32(j & 7), u32(k & 7)); }
-    return s.x == 1u;
+    return column_cell(c, u32(i & 7), u32(j & 7), k) == 1u;
 }
 
 fn corner_ao(side1: bool, side2: bool, corner: bool) -> f32 {
@@ -222,18 +214,24 @@ const MATERIAL_SLOPE_LEVEL: u32 = 4u;
 const NO_HEIGHT: i32 = -2147483647 - 1;
 
 // The (up to) 2x2 resident columns of `level` covering cells [lo, hi].
+// The up to four columns a slope stencil reads: their records (NONE while
+// not resident), and per column its pool run, natural tops' base and
+// whether it has relief, loaded once.
 struct SlopeColumns {
     face: u32,
     level: u32,
     origin: vec2<i32>,
     records: vec4<u32>,
+    runs: vec4<u32>,
+    bases: vec4<i32>,
+    relief: vec4<u32>,
 }
 
 fn slope_record(face: u32, level: u32, ci: i32, cj: i32) -> u32 {
     let record = find_column(column_key0(face, level, ci), bitcast<u32>(cj));
     if record == NONE { return NONE; }
     let m = records[record];
-    if !column_valid(m) || !column_tops_known(m) { return NONE; }
+    if !column_valid(m) { return NONE; }
     return record;
 }
 
@@ -247,6 +245,14 @@ fn slope_columns(face: u32, level: u32, lo: vec2<i32>, hi: vec2<i32>) -> SlopeCo
     out.records.y = select(NONE, slope_record(face, level, far.x, out.origin.y), far.x != out.origin.x);
     out.records.z = select(NONE, slope_record(face, level, out.origin.x, far.y), far.y != out.origin.y);
     out.records.w = select(NONE, slope_record(face, level, far.x, far.y), any(far != out.origin));
+    for (var k = 0u; k < 4u; k++) {
+        if out.records[k] != NONE {
+            let m = records[out.records[k]];
+            out.runs[k] = m.run;
+            out.bases[k] = m.base;
+            out.relief[k] = m.info & INFO_RELIEF;
+        }
+    }
     return out;
 }
 
@@ -255,13 +261,13 @@ fn slope_columns(face: u32, level: u32, lo: vec2<i32>, hi: vec2<i32>) -> SlopeCo
 fn slope_height_q16(cols: SlopeColumns, mi: i32, mj: i32) -> i32 {
     let q = vec2<i32>(mi, mj) >> vec2<u32>(3u);
     let k = u32(q.x != cols.origin.x) + 2u * u32(q.y != cols.origin.y);
-    let record = cols.records[k];
-    if record == NONE { return NO_HEIGHT; }
-    let m = records[record];
-    let x = u32(mi & 7);
-    let y = u32(mj & 7);
-    let f = column_relief_fraction(m, x, y);
-    return column_top(m, x, y) * 65536 + select(0, i32(f) - 65536, f != 0u);
+    if cols.records[k] == NONE { return NO_HEIGHT; }
+    let word = pool[cols.runs[k] * UNIT_WORDS + u32(mi & 7) + u32(mj & 7) * 8u];
+    var h = (cols.bases[k] + i32(word & 0x7fffu)) * 65536;
+    // A relief column's top cell is cut at its base layer.
+    let share = relief_share(bitcast<i32>(word) >> 15u, cols.level);
+    if cols.relief[k] != 0u && share != 0u { h += i32(share) - 65536; }
+    return h;
 }
 
 // Slope at cell (mi, mj) in eighths of a cell per cell from central
@@ -354,12 +360,10 @@ fn ground_field(face: u32, s: u32, base: vec2<i32>, home: u32, home_column: vec2
         }
         let x = u32(cell.x & 7);
         let y = u32(cell.y & 7);
-        let f = column_relief_fraction(m, x, y);
-        let top = column_top(m, x, y);
-        // Height above the top cell's top (cells): the relief's cut plus the
-        // surface offset.
-        let below = select(0.0, f32(i32(f) - 65536) / 65536.0, f != 0u)
-            + column_surface_offset(m, x, y, s);
+        let word = lane_word(m, x, y);
+        let top = m.base + i32(word & 0x7fffu);
+        // The exact surface over the natural top (cells).
+        let below = f32(bitcast<i32>(word) >> 15u) / 65536.0;
         heights[n] = top * 65536 + i32(round(below * 65536.0));
         if n == 5 { height0 = (top << s) * world.grid.y + i32(round(below * mm_per_cell)); }
     }
@@ -520,11 +524,8 @@ fn removed_air_neighbour(h: Hit, c: Column, face: u32, level: u32, code: u32) ->
         neighbour = records[record];
     }
     if !column_valid(neighbour) || (neighbour.info & INFO_TOPOLOGY) == 0u { return false; }
-    // Air the heightfield had is not a cut. A deep dig's band outgrows the
-    // tops' byte: then the Remove brush covering the (now air) cell alone
-    // proves it (without it, every wall column of a deep pit showed grass).
-    if column_tops_known(neighbour)
-        && terrain_kind(column_top(neighbour, u32(ij.x & 7), u32(ij.y & 7)), h.k) == 0u { return false; }
+    // Air the heightfield had is not a cut.
+    if terrain_kind(column_top(neighbour, u32(ij.x & 7), u32(ij.y & 7)), h.k) == 0u { return false; }
     let centre = vec3<i32>(center_half(ij.x, level), center_half(ij.y, level), center_half(h.k, level));
     return latest_edit(neighbour.edits, level, centre, domain_point(face, ij.x, ij.y, level), OPS_REMOVE) != NONE;
 }
@@ -630,7 +631,7 @@ fn shade(@builtin(global_invocation_id) id: vec3<u32>) {
     // A still coarser resident column is streaming fallback, whose resolvable
     // walls must keep their actual face normal.
     let selected_level = level <= level_for(h.t * (1.0 + 0.5 * frame.lod.y));
-    let material_relief = (c.info & INFO_RELIEF) != 0u && column_tops_known(c);
+    let material_relief = (c.info & INFO_RELIEF) != 0u;
     var material_fraction = 0u;
     if material_relief { material_fraction = column_relief_fraction(c, x, y); }
     let coarse_w = detail_filter_weight(size / pixel);
@@ -895,7 +896,6 @@ struct SunSample {
 // to the resident surface, including its authored relief remainder, rather
 // than adding whole cells and overshooting the surface by that fraction.
 fn filtered_shadow_lift(c: Column, h: Hit, r: Ray) -> f32 {
-    if !column_tops_known(c) { return 0.0; }
     if !natural_surface_hit(h, c, column_top(c, u32(h.i & 7), u32(h.j & 7))) { return 0.0; }
     let level = (h.info >> 5u) & 31u;
     var fraction = 0u;

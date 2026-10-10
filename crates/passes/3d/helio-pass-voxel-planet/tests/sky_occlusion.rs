@@ -72,7 +72,7 @@ fn a_trench_floor_sees_less_sky_than_open_ground() {
     let mut z = -15.0;
     while z <= 15.0 {
         planet.apply(Brush { center: (ground + DVec3::new(0.0, -1.5, z)).to_array(), radius: 1.5,
-            shape: BrushShape::Cube, op: BrushOp::Remove, material: 0 }).unwrap();
+            shape: BrushShape::Cube, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
         z += 1.0;
     }
     let planet = Arc::new(planet);

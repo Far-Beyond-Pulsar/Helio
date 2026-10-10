@@ -43,7 +43,7 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
   open to the surface at entrances) and leans steep ground over into
   overhangs (a continuous deformation of the heightfield: nothing floats),
   and erosion octaves carve branching gullies down its slopes. Caves may
-  reach any depth (see clipped bands below).
+  reach any depth (see vertical windows below).
 - Destruction at any scale, up to the entire planet: digs of any depth,
   sphere brushes hundreds of kilometres wide, a hollowed core. Tens of
   thousands of edits stay exact and cheap; every regenerated column replays
@@ -62,7 +62,7 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
 | `src/terrain.rs` | Pluggable generators: `TerrainGenerator` -> `TerrainField` (CPU) + `TerrainProgram` (WGSL). Registry, material ids, `check_field`. |
 | `src/layers.rs` | The built-in generator `helio.terrain`: ordered layer stacks (`TerrainLayers`), presets (Earth, moon, flat), validation and compilation. |
 | `src/landform.rs`, `shaders/landform.wgsl` | The stack interpreter (CPU and WGSL): octaves, layer composition, craters, erosion, caves, overhangs and material styles. |
-| `src/edits.rs` | Brushes (sphere/cube, remove/add/paint), per-face integer resolution, the shared `EditLog` and its tile index. |
+| `src/edits.rs` | Brushes (sphere/cube, remove/add/paint), per-face integer resolution, the shared `EditLog` and its edit tree. |
 | `src/journal.rs` | Binary append-only edit journal (save/replay with recipe fingerprint and checksums). |
 | `src/planet.rs` | `PlanetRecipe` + `Planet`: canonical queries (`kind`, `material`, `solid`), exact ray casts, `surface_point`, `air_clearance`, `ground_height`. |
 | `src/windows.rs` | Level windows: which columns each clipmap level wants; runs on a worker and emits add/remove diffs. |
@@ -99,8 +99,9 @@ walk the exact grid.
   lattice** of 0.1 m (`REFERENCE_VOXEL`), and a world of 0.3 m voxels samples
   that lattice at its own cell centres.
 - **Levels**: level `L` cells are `2^L` base cells wide and tall. A **column**
-  is an 8x8 footprint of cells at one level (`BRICK = 8`), with its whole
-  occupied vertical extent; it is the unit of residency.
+  is an 8x8 footprint of cells at one level (`BRICK = 8`), the unit of
+  residency, with its vertical content as **spans** over a window around the
+  eye (see [Span columns](#span-columns)).
 - **Keys**: a column key packs `(face, level, ci)` into `key0` (24 bits of
   column index, 3 of face, 5 of level) and `cj` into `key1`. Column indices are
   never negative; decode them unsigned (2^24 columns cover a 0.1 m Earth face).
@@ -169,13 +170,12 @@ the CPU raycast what the GPU draws.
   height. This lookup is baked once per stack;
   canonical field queries and level 0 remain unchanged. Levels 1 and above
   retain fractional radial tops unless Add/Remove edits change their geometry.
-  Short low-level spans store exact base-layer tops in the existing byte header.
   Paint retains that relief. Slope lighting and the material height come from
   the stored exact surface (`ground_field`), never from tracing finer cells
   or running the generator per pixel.
 - Heights are relative to the datum (the planet radius or the plane's y = 0)
   and may be negative: lowland and ocean basins sit below it. Nothing in the
-  pipeline may clamp heights to the datum (see the band-top invariant below).
+  pipeline may clamp heights to the datum (see the tops invariant below).
 
 ### Edits
 
@@ -186,12 +186,36 @@ brushes override earlier ones. At level `L`, a brush smaller than half a level
 cell is omitted (smaller than the point sample).
 
 `EditLog` is ordered and shared between world copies: brushes live in
-`Arc` chunks of 1024, the spatial index is a sealed shared map of tiles plus
-recent entries, and every brush carries a prefix hash of the log up to it.
-Copying a world with 50k edits costs about 0.1 ms, and the renderer finds the
-common prefix of its synced log and the current one by binary search on
-prefix hashes (O(1) when unchanged). The finest index tile is one column (8
-cells), which keeps dense block edits (buildings) cheap to query.
+`Arc` chunks of 1024 and every brush carries a prefix hash of the log up to
+it, so the renderer finds the common prefix of its synced log and the
+current one by binary search on prefix hashes (O(1) when unchanged).
+
+**Edit tree.** The log's spatial index is, per face, an adaptive octree over
+base cells (`EditTree`) whose leaves keep, in order, only the brushes that
+can still change a cell inside them (the hierarchical edit culling of
+Dreams, with HashDAG's full nodes):
+
+- A Remove or Add holding a node's whole box replaces the brushes before it
+  there (but larger ones, which still apply at the levels too coarse for
+  it), and collapses the subtree under it.
+- A Remove or Paint inside a box an earlier, at least as large Remove
+  emptied, with no Add since, is left out: the dug surfaces under the air
+  of overlapping strokes leave the lists.
+- A leaf splits past 16 brushes, down to 16 cells or a 64th of its smallest
+  brush's radius (surfaces dragged over each other cannot split nodes
+  along a whole sphere).
+
+Containment is proven, not sampled: boxes in half cells, balls in an f64
+copy of the volume map (`Grid::volume_map`, within 16 units of the integer
+points) whose corners hold a box's cells in their hull, give or take the
+map's bound on bending. A query returns the leaves a box overlaps: a column
+or a cell gets the surfaces exposed there, however long the history. Four
+passes of a 2 km dig (400 brushes) leave about 20 brushes per column where
+the old tile index gave every column under it every brush over it (about
+110), filling the GPU's edit words until admission stopped. Columns with the
+same list share one edit block, and a job's predicted cost counts its
+brushes (`UNITS_PER_BRUSH`). Nodes are shared copy-on-write: copying a log
+copies roots. Inserting a 2 km ball into that dig costs about 2 ms.
 
 Edit cost does not grow with the brushes piled on one spot (sculpting):
 
@@ -207,17 +231,33 @@ Edit cost does not grow with the brushes piled on one spot (sculpting):
   column's brushes queried once, instead of a ray from the outer radius
   through the edit index cell by cell (426 ms at 2000 brushes before).
 
-**Natural surface of edited columns.** A column a brush touches keeps its
-natural per-cell tops: counted up from the band base, or, when a deep dig
-lowered the base more than a byte below them, down from the band top
-(`INFO_TOPS_DOWN`, as generated volume does). Before, a pit deeper than
-about 25 m lost them: its whole brush footprint showed contour ripples and
-a dark outline, and its walls grass streaks (the cut detection read
-garbage). Such columns keep no relief, so their surface offsets count level
-cells (`column_surface_offset`). In edited and generated columns the
-natural ground is the top cell, the risers of steps down to neighbours (air
-side above the neighbour's top) and ledge lips within two cells of the top;
-cave walls, ceilings and dug faces are not.
+**Lane words.** A column's header is one 32-bit word per cell (`lane_word`,
+four units): its natural top over the column base (15 bits) and the exact
+surface's height over that top in Q16 level cells, floored (17 bits,
+signed); then one unit of surface words, a byte per cell, read once per
+pixel. A relief column's top cell is cut at the base layer under the exact
+surface (`relief_share`): exact to the base layer at levels up to 16, where
+a level cell holds at most 65536 of them. Every height shading and
+traversal read is one load. Tops in bytes, 16 bits or inline with a
+base-cell remainder, wide Q16 relief fractions, surface words and surface
+offsets in base or level cells (3 to 6 units, three loads and their branches
+per height) were most of shading's cost: 28 heights a pixel for the smooth
+normal and the material slope. A 12-bit 1024ths split was tried first: it
+cut coarse relief up to 2^(level-10) layers under the surface (subsoil at
+level transitions) and whole level-17 cells over a surface in their lowest
+1024th.
+
+**Natural surface of edited columns.** Every column keeps its natural
+per-cell tops (the generated ground's, whatever edits did there) in its
+lane words, over a column base: material depth counts from them at any depth, so the
+floor of a dig 400 m deep is rock at every level. They used to be stored
+relative to the column's band and could not reach a deep floor: near the eye
+it read depth 0 and turned to grass, while coarse levels showed rock.
+Edited columns keep no relief; their exact surface still lies in their lane
+words (`column_surface_delta`). In edited and generated columns the natural
+ground is the top cell, the risers of steps down to neighbours (air side
+above the neighbour's top) and ledge lips within two cells of the top; cave
+walls, ceilings and dug faces are not.
 
 **Picks.** A tool asks the pass for the terrain hit under a view point
 (`PlanetFrame::picks`): the pass copies that pixel's primary hit to a small
@@ -232,6 +272,41 @@ Sculpting stress (`HELIO_VOXEL_FLIGHT_SCULPT=1`, three stamps a frame on one
 ring): brush CPU per frame 397 / 590 / 1704 ms -> 0.4 / 1.8 / 4.8 ms (dig r1,
 dig r4, build r1), terrain GPU 49 / 76 / 134 ms at 720p -> 13 / 16 / 21 ms at
 1440p.
+
+### Span columns
+
+A column's vertical content is an ordered list of spans
+([`docs/span-columns.md`](docs/span-columns.md)): everything below the first
+is solid, everything from the column's `top` up is air. Each span is
+
+| Kind | Meaning | Payload |
+|---|---|---|
+| `AIR` | every cell empty (dug out, a cave's hall) | none |
+| `SOLID` | every cell full | none |
+| `LANES` | each of the 64 lanes uniform over the span (a crater's wall) | 2 words |
+| `TOPS` | each lane solid below its own top (a dug floor) | 16 words |
+| `NATURAL` | each lane solid below its natural top (open ground) | none |
+| `BRICKS` | arbitrary occupancy (caves, sculpting) | mixed/solid bits per brick, one unit per mixed brick |
+
+A column that is only `NATURAL` (`INFO_HEIGHTFIELD`) stores no span table:
+open terrain costs what it did as a heightfield column.
+
+Generation evaluates cells only in **candidate intervals** where some
+lane's occupancy can change: around each lane's terrain top (and the
+volume the terrain program evaluates), where each brush's surface crosses
+each lane, and at each baked brick. Between them no lane changes state, so
+one exact evaluation per lane decides each gap (`AIR`, `SOLID` or `LANES`).
+Cost follows the surfaces in a column, not its height: the interior of a dig
+2 km wide evaluates its floor, not 4000 cells of air above it, and a wall
+however tall is two words. A column has at most 7 intervals after merging
+(the closest are merged), so at most 15 spans.
+
+Rays cross an `AIR` span as one box (the whole footprint, however tall) and
+a lane span (`LANES`, `TOPS`, `NATURAL`) lane by lane: the next event is
+leaving the lane, leaving the span or descending onto the lane's top, one
+solve however many cells the lane spans. Only mixed bricks of `BRICKS` spans
+run a cell DDA. `column_view::ColumnView` decodes records and pool words as
+the shaders read them, for tests and diagnostics.
 
 ### Planet
 
@@ -302,43 +377,44 @@ they are once its work is on the GPU. Steps:
 1. **Upload** of the patch: table writes, jobs, evictions, edit lists, block
    inits.
 2. **Generate** (`generate.wgsl`): per job, evaluate the terrain program for
-   the 8x8 columns, apply edits, find the occupied band (solid below, air
-   above, mixed bricks in between), allocate a brick run of the right size
-   class, write mixed bricks, publish the record, and raise the column's
-   summary-block tops and the level's top. Evicted runs return to free lists.
-   Failed jobs (scratch or pool full) append their keys to a failure list
-   that the CPU reads back and retries. Natural columns reconstruct exact
-   cell occupancy from their stored tops; Add/Remove columns and generated
-   volumetric columns keep arbitrary mixed-brick occupancy. Cells within the
-   program's `terrain_extent` of the heightfield top are evaluated in 3D
-   (the sign of `terrain_density` at the seamless `volume_point`) in two
-   passes: the first finds each lane's cells that differ from the
-   heightfield, the band loop evaluates those and one more on each side.
-   Only a column with such cells is generated volume: its band covers them
-   and it is marked `INFO_GENERATED` (`INFO_TOPOLOGY` is only for edit cuts:
-   a generated column keeps its natural surface, relief and materials).
-   A column whose cells all keep the heightfield's kinds (most of a cave
-   region's rock, ground too flat to lean) stays a heightfield column:
-   before, every column with an extent stored the band down to the cave
-   depth as bitmap bricks (now 44 % of them are generated at a cave and an
-   overhang site, `generated_volume_is_stored_only_where_cells_change`).
-   The column and its lean lattice nodes share one `generation_column` call
-   site (compilers inline every call). Densities are signed
-   distances to the field height itself (mm, passed to `terrain_density`),
-   not to the floor of the level's cell, so a coarse level folds the same
-   surface the base level does. Lanes the overhangs fold take every cell and
-   their relief from the density: the top cell's fraction is the zero
-   crossing between the highest solid cell's centre and the air cell above,
-   and a crossing in the upper half of that air cell makes it the solid
-   partial top cell, as in a heightfield. Elsewhere a cell the volume leaves
-   as the heightfield has it keeps the heightfield's kind and relief. Before,
-   lanes whose surface the volume changed lost their relief: overhang
-   regions (about a third of Earth's land) showed whole-cell ledges at every
-   coarse level, drawn as grey and brown patches that became grass on
-   approach.
-   Its header stores each cell's generated top (first air above the highest
-   generated solid cell, counted down from the band top; `INFO_GENERATED`),
-   so material depth counts from the real surface:
+   the 8x8 columns, find where any lane's occupancy can change, evaluate
+   cells only there, describe the column as spans (see
+   [Span columns](#span-columns)), allocate a run of the right size class,
+   publish the record, and raise the column's summary-block tops and the
+   level's top. Evicted runs return to free lists. Failed jobs (scratch or
+   pool full) append their keys to a failure list that the CPU reads back
+   and retries. Cells within the program's `terrain_extent` of the
+   heightfield top are evaluated in 3D (the sign of `terrain_density` at the
+   seamless `volume_point`) in two passes: the first finds each lane's runs
+   of cells that differ from the heightfield, then those and one more on each
+   side are evaluated. Under the band the surface may lean through, only
+   caves change cells, and the first pass steps over the rock they cannot
+   reach (`terrain_clearance`: a tunnel needs both of its noises within the
+   tunnel width, a cavern its noise over its threshold, and no noise moves
+   faster than `noise::NOISE_SLOPE` per lattice unit), instead of evaluating
+   every cell down to the cave depth (1,200 at 0.1 m: a mountain's columns
+   cost 100 heightfield columns and loaded in 17 s; now 3x faster, and
+   exactly the cells the dense scan found). Only a column with such cells is generated volume, marked
+   `INFO_GENERATED` (`INFO_TOPOLOGY` is only for edit cuts: a generated
+   column keeps its natural surface, relief and materials); a column whose
+   cells all keep the heightfield's kinds (most of a cave region's rock,
+   ground too flat to lean) stays a heightfield column
+   (`generated_volume_is_stored_only_where_cells_change`). The column and its
+   lean lattice nodes share one `generation_column` call site (compilers
+   inline every call). Densities are signed distances to the field height
+   itself (mm, passed to `terrain_density`), not to the floor of the level's
+   cell, so a coarse level folds the same surface the base level does. Lanes
+   the overhangs fold take every cell and their relief from the density: the
+   top cell's fraction is the zero crossing between the highest solid cell's
+   centre and the air cell above, and a crossing in the upper half of that
+   air cell makes it the solid partial top cell, as in a heightfield.
+   Elsewhere a cell the volume leaves as the heightfield has it keeps the
+   heightfield's kind and relief. Before, lanes whose surface the volume
+   changed lost their relief: overhang regions (about a third of Earth's
+   land) showed whole-cell ledges at every coarse level, drawn as grey and
+   brown patches that became grass on approach. The natural tops of a
+   generated column are its generated tops (first air above the highest
+   generated solid cell), so material depth counts from the real surface:
    overhang lips are turf, cave walls, floors and ceilings are rock. Side
    faces measure from the air-side cell's top (a cave wall lies far below
    it, a natural riser does not).
@@ -367,11 +443,12 @@ they are once its work is on the GPU. Steps:
   integer and mirrored; `engine::verify_field` and the GPU tests enforce it.
   Never introduce floats into a field.
 - **Tops bound occupancy, tightly.** Column tops, summary-block tops and level
-  tops must bound every solid cell and should be tight. The generator's band
+  tops must bound every solid cell and should be tight. The generator's column
   top once clamped to the datum (`max(top, 0)`): below sea level every column
   claimed ~30 m of air, rays stepped cell by cell through it (137 steps per
-  ray instead of 6) and columns stored empty bricks. Tops are allowed to be
-  loose only by the 3-bit `gap` (<= 7 cells).
+  ray instead of 6) and columns stored empty bricks. Generation publishes
+  the exact top (`resident_columns_hold_the_canonical_cells` finds a solid
+  cell just below every top).
 - **Demand stays inside capacity; nothing stalls at a limit.** Resident
   columns grow with the pixel count: at 1440p a ground view holds ~1.7M
   columns and 80% of the pool, the editor viewport ~2.8M (the record cap was
@@ -485,11 +562,9 @@ they are once its work is on the GPU. Steps:
   pixels down by the size their faces project to (`step_filter_weight`: a
   riser seen from above is a fraction of a voxel tall on screen).
 - **Smooth surface model.** Every column stores, per cell, the exact surface
-  below voxel precision: a surface offset (one byte, 1/128 of a base cell,
-  `column_surface_offset`) over its stored height (level-0 top or relief
-  base-cell top), from the generator's exact height or, at level 0, a
-  density surface's zero crossing; coarser density surfaces keep it in their
-  Q16 relief fractions. Occupancy, relief and materials never read it. The
+  below voxel precision in its lane word (Q16 level cells over the
+  natural top, `column_surface_delta`), from the generator's exact height or
+  a density surface's zero crossing. Occupancy never reads it. The
   smooth normal (`relief_field_gradient`) is its central differences one
   cell each way at the four cell centres around the pixel's base cell,
   interpolated bilinearly across cells and columns, at every level. The
@@ -556,25 +631,41 @@ they are once its work is on the GPU. Steps:
   threshold as they close, and the cover opens only in entrance zones
   (`caves_open_to_the_surface_only_at_entrances`,
   `caves_leave_no_floating_rock`).
-- **Clipped bands.** A column stores one band of at most `MAX_BAND` (256)
-  bricks, with solid ground below and air above. A taller one (a deep dig,
-  deep caves, a crater wall) keeps the 256 bricks around the eye's layer at
-  its level and is flagged clipped below and/or above (`INFO_CLIP_*`): rays
-  beyond a clipped side continue at the next coarser level, whose window
-  reaches twice as far (never refining into it), and summary and level tops
-  keep the unclipped top. Generation reports clipped columns with their
-  window centre (`STATUS_CLIPPED`); residency regenerates them when the eye
-  moves a quarter window vertically (`follow_clipped`). Columns used to be
-  left unpublished instead, so deep holes showed only at coarse levels.
+- **Vertical windows.** A column describes a window of 2048 of its level's
+  cells. Generation first measures the range of the column's candidates:
+  when they fit, the window covers them all wherever the eye is (open
+  ground, a dig, a crater wall: nothing clipped, nothing regenerated as the
+  eye climbs or descends); a taller column (a crater kilometres deep at a
+  fine level) describes the cells around the eye's layer within that range.
+  Spans past the window are not stored and the record is flagged clipped
+  below and/or above (`INFO_CLIP_*`): rays beyond a clipped side continue at
+  the next coarser level, whose window reaches twice as far (never refining
+  into it), and summary and level tops keep the unclipped bound. Generation
+  reports clipped columns with their window's bottom and clipped sides
+  (`clipped_sides`); residency regenerates one when the eye comes within a
+  quarter window of a side it clips (`follow_clipped`). Windows around the
+  eye's layer for every column left the ground of columns under a high eye
+  clipped below: descending from orbit, rays fell back level by level (50
+  ms of primary rays) and every level regenerated each time the eye moved a
+  quarter window. The coarsest level, the
+  coverage every ray falls back to, is never clipped: its columns describe
+  their whole radial line (a few dozen bricks), so a bite thousands of
+  kilometres deep shows from orbit instead of loading. A column begins at
+  the planet's centre, where its lane's volume points reach zero; below it
+  the line runs out through the antipode, and a gap reaching there was
+  classified by a cell on the other side of the planet (a planet removed
+  entirely still drew rock).
 - **Brushes.** Cubes are tested in each face's half-cell index space (a
   one-block cube is exactly one cell, aligned with the ground); spheres are
   balls in the seamless volume space (`Grid::volume_point`), round at any
   size and depth, the planet's centre included (a ball around the core
   resolves onto every face). Both use exact 64-bit squares, up to 2^29 half
   cells of radius. A face brush carries its horizontal culling extent and
-  the half-cell heights it can touch (band bounds). Jobs whose bands outgrow
-  the generation scratch are retried with a smaller job budget
-  (`scratch_retries`).
+  the half-cell heights it can touch. Generation finds where a brush's
+  surface crosses each lane (a box: its faces; a ball: an interval of the
+  lane, which is linear in volume space, solved in f32 with a margin for its
+  error) and evaluates cells only there. Jobs that outgrow the generation
+  scratch are retried with a smaller job budget (`scratch_retries`).
 
 ## Measuring
 
@@ -683,7 +774,9 @@ per pixel. Volumetric generators also
 define `terrain_extent` and `terrain_density` (and `TerrainField::extent`,
 `density`, `volume_bounds`), and leaning ones `terrain_lean` and
 `terrain_lean_offset` (`TerrainField::lean`, `lean_offset`; the engine passes
-the leaning height to `terrain_density` as `lean_height`). A density is the signed distance from the cell
+the leaning height to `terrain_density` as `lean_height`), and optionally
+`terrain_clearance` (cells a lane's scan may step over below the lean band;
+without it every cell of the extent is evaluated). A density is the signed distance from the cell
 centre to the surface (256 per level cell, positive inside solid; the cell is
 solid where it is positive): combine terms as constructive solid geometry on
 distances (intersection: minimum, union: maximum), and make every cut a
@@ -691,7 +784,8 @@ term (the built-in caves' region edge, depth floor and cavern cover are),
 so the field is a distance on both sides of every surface. Smooth surfaces
 interpolate it between cell centres (`densities_are_signed_distances_to_the_surface`
 holds the built-in field within 1.6 cells across every crossing). Keep the extent tight, since every cell in it is
-evaluated per job and the band holds at most 256 bricks. Return an empty
+evaluated per job and a column evaluates at most the 256 bricks of its
+window. Return an empty
 extent at levels that cannot show a feature (the stack resolves tunnels while
 their radius spans a cell, covered caverns while a cell fits in the cover):
 volumetric columns lose relief and filtered shading. Use only the integer noise

@@ -79,7 +79,9 @@ fn l1_to_l5_fractional_top_hits_respect_requested_trace_range() {
             let mut world = vec![0u8; 144];
             ints(&mut world, 0, &[1024, 100, 1024, 0]);
             let ci = (512 >> level) / 8;
-            let k_lo = ceil_top / 8 - 1;
+            // A heightfield column (no span table) with relief: natural
+            // tops 8 cells over its base, the exact top above them.
+            let base = ceil_top - 8;
             let mut record = vec![0u8; 32];
             ints(
                 &mut record,
@@ -87,18 +89,20 @@ fn l1_to_l5_fractional_top_hits_respect_requested_trace_range() {
                 &[
                     (ci | (2 << 24) | (level << 27)) as i32,
                     ci as i32,
-                    k_lo,
-                    0x90000001u32 as i32,
+                    base,
+                    0x92000000u32 as i32,
                     0,
+                    ceil_top,
                     0,
-                    1,
                     0,
                 ],
             );
-            let fraction = 1u32 << (16 - level);
-            let mut pool = vec![0u32; 64];
-            pool[..16].fill(0x08080808);
-            pool[16..48].fill(fraction | (fraction << 16));
+            // Lane words: natural tops 8 over the base, the exact surface one
+            // base layer over the top cell's floor (Q16 cells); no surface
+            // words.
+            let delta = (1i32 << (16 - level)) - 65536;
+            let mut pool = vec![0u32; 80];
+            pool[..64].fill(8 | ((delta as u32) << 15));
             let buffer = |label: &str, data: &[u8], uniform: bool| {
                 let b = gpu.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some(label),

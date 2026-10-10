@@ -7,8 +7,9 @@
 //!
 //! * a 16-byte header: magic `HVPJ`, format version, and a fingerprint of
 //!   the recipe (a journal never replays onto a different planet);
-//! * fixed 48-byte records, each a brush or an undo, carrying its sequence
-//!   number and a checksum.
+//! * fixed 56-byte records, each a brush or an undo, carrying its sequence
+//!   number and a checksum (version 1: 48 bytes, before boxes had a
+//!   height; still read).
 //!
 //! Records are only ever appended, so a writer can flush each edit as it
 //! happens (autosave, network replication). A crash mid-append leaves a
@@ -18,9 +19,20 @@ use crate::edits::{Brush, BrushOp, BrushShape};
 use crate::planet::{Planet, PlanetRecipe};
 
 const MAGIC: [u8; 4] = *b"HVPJ";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 pub const HEADER_BYTES: usize = 16;
-pub const RECORD_BYTES: usize = 48;
+pub const RECORD_BYTES: usize = 56;
+/// Version 1 records: no box height.
+pub const RECORD_BYTES_V1: usize = 48;
+
+/// Record size of journal format `version`.
+pub(crate) fn record_bytes(version: u16) -> Option<usize> {
+    match version {
+        1 => Some(RECORD_BYTES_V1),
+        2 => Some(RECORD_BYTES),
+        _ => None,
+    }
+}
 
 const KIND_BRUSH: u8 = 1;
 const KIND_UNDO: u8 = 2;
@@ -67,7 +79,7 @@ pub fn recipe_fingerprint(recipe: &PlanetRecipe) -> u64 {
     fnv64(recipe.to_json().as_bytes())
 }
 
-fn fnv64(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv64(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3))
 }
 
@@ -104,25 +116,30 @@ pub fn encode(seq: u32, entry: &Entry) -> [u8; RECORD_BYTES] {
                 out[8 + axis * 8..16 + axis * 8].copy_from_slice(&v.to_le_bytes());
             }
             out[32..40].copy_from_slice(&b.radius.to_le_bytes());
+            out[40..48].copy_from_slice(&b.height.to_le_bytes());
         }
         Entry::Undo => out[0] = KIND_UNDO,
     }
-    out[40..44].copy_from_slice(&seq.to_le_bytes());
-    let sum = fnv32(&out[..44]);
-    out[44..48].copy_from_slice(&sum.to_le_bytes());
+    out[48..52].copy_from_slice(&seq.to_le_bytes());
+    let sum = fnv32(&out[..52]);
+    out[52..56].copy_from_slice(&sum.to_le_bytes());
     out
 }
 
-fn decode(index: usize, r: &[u8]) -> Result<Entry, JournalError> {
+/// Decode record `index` of either format (by its size).
+pub(crate) fn decode(index: usize, r: &[u8]) -> Result<Entry, JournalError> {
     let corrupt = |reason| JournalError::Corrupt { index, reason };
     let u32_at = |at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
     let f64_at = |at: usize| f64::from_le_bytes(r[at..at + 8].try_into().unwrap());
-    if u32_at(44) != fnv32(&r[..44]) {
+    // Sequence and checksum close the record; version 2 adds the height.
+    let tail = r.len() - 8;
+    if u32_at(tail + 4) != fnv32(&r[..tail + 4]) {
         return Err(corrupt("checksum"));
     }
-    if u32_at(40) as usize != index {
+    if u32_at(tail) as usize != index {
         return Err(corrupt("sequence"));
     }
+    let height = if r.len() == RECORD_BYTES { f64_at(40) } else { 0.0 };
     match r[0] {
         KIND_UNDO => Ok(Entry::Undo),
         KIND_BRUSH => {
@@ -139,10 +156,10 @@ fn decode(index: usize, r: &[u8]) -> Result<Entry, JournalError> {
             };
             let center = [f64_at(8), f64_at(16), f64_at(24)];
             let radius = f64_at(32);
-            if !center.iter().all(|v| v.is_finite()) || !(radius.is_finite() && radius > 0.0) {
+            if !center.iter().all(|v| v.is_finite()) || !(radius.is_finite() && radius > 0.0) || !(height.is_finite() && height >= 0.0) {
                 return Err(corrupt("brush geometry"));
             }
-            Ok(Entry::Brush(Brush { center, radius, shape, op, material: u32_at(4) }))
+            Ok(Entry::Brush(Brush { center, radius, shape, op, material: u32_at(4), height }))
         }
         _ => Err(corrupt("record kind")),
     }
@@ -162,15 +179,15 @@ pub fn read(bytes: &[u8], recipe: &PlanetRecipe) -> Result<Contents, JournalErro
         return Err(JournalError::NotAJournal);
     }
     let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    if version != VERSION {
+    let Some(record) = record_bytes(version) else {
         return Err(JournalError::UnsupportedVersion(version));
-    }
+    };
     let journal = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
     let planet = recipe_fingerprint(recipe);
     if journal != planet {
         return Err(JournalError::RecipeMismatch { journal, planet });
     }
-    let records = bytes[HEADER_BYTES..].chunks_exact(RECORD_BYTES);
+    let records = bytes[HEADER_BYTES..].chunks_exact(record);
     let torn_bytes = records.remainder().len();
     let entries = records.enumerate().map(|(index, r)| decode(index, r)).collect::<Result<_, _>>()?;
     Ok(Contents { entries, torn_bytes })
@@ -214,16 +231,6 @@ impl Writer {
 }
 
 impl Planet {
-    /// Compact journal of the current edit state: one record per remaining
-    /// brush, in order (undone brushes are gone).
-    pub fn journal(&self) -> Vec<u8> {
-        let mut writer = Writer::new(self.recipe());
-        for brush in self.edits().brushes() {
-            writer.push(&Entry::Brush(*brush));
-        }
-        writer.into_bytes()
-    }
-
     /// Apply journal entries in order. On a rejected entry the planet keeps
     /// the entries before it.
     pub fn replay(&mut self, entries: &[Entry]) -> Result<(), JournalError> {
@@ -271,6 +278,7 @@ mod tests {
                 shape: if n % 3 == 0 { BrushShape::Cube } else { BrushShape::Sphere },
                 op: [BrushOp::Remove, BrushOp::Add, BrushOp::Paint][n as usize % 3],
                 material: n % 7,
+                height: 0.0,
             })
             .collect()
     }
@@ -288,11 +296,8 @@ mod tests {
             }
         }
         let b = Planet::from_journal(PlanetRecipe::default(), writer.bytes()).unwrap();
-        assert_eq!(a.edits().brushes().collect::<Vec<_>>(), b.edits().brushes().collect::<Vec<_>>());
-        // The compact journal holds the same remaining brushes.
-        let compact = Planet::from_journal(PlanetRecipe::default(), &a.journal()).unwrap();
-        assert_eq!(a.edits().brushes().collect::<Vec<_>>(), compact.edits().brushes().collect::<Vec<_>>());
-        assert_eq!(a.journal().len(), HEADER_BYTES + RECORD_BYTES * a.edits().len());
+        assert_eq!(a.edits().recent.brushes().collect::<Vec<_>>(), b.edits().recent.brushes().collect::<Vec<_>>());
+        assert_eq!((a.edits().len(), a.edits().hash()), (b.edits().len(), b.edits().hash()));
     }
 
     #[test]
@@ -338,6 +343,27 @@ mod tests {
         let other = PlanetRecipe { voxel_size_m: 0.3, ..PlanetRecipe::default() };
         assert!(matches!(read(&bytes, &other), Err(JournalError::RecipeMismatch { .. })));
         assert_eq!(read(b"not a journal at all", p.recipe()), Err(JournalError::NotAJournal));
+    }
+
+    /// A version 1 journal (48-byte records, no box height) still reads,
+    /// its boxes as cubes.
+    #[test]
+    fn version_1_journals_still_read() {
+        let p = planet();
+        let list = brushes(&p);
+        let mut bytes = header(p.recipe()).to_vec();
+        bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
+        for (seq, brush) in list.iter().enumerate() {
+            let v2 = encode(seq as u32, &Entry::Brush(*brush));
+            let mut v1 = [0u8; RECORD_BYTES_V1];
+            v1[..40].copy_from_slice(&v2[..40]);
+            v1[40..44].copy_from_slice(&(seq as u32).to_le_bytes());
+            let sum = fnv32(&v1[..44]);
+            v1[44..48].copy_from_slice(&sum.to_le_bytes());
+            bytes.extend_from_slice(&v1);
+        }
+        let contents = read(&bytes, p.recipe()).unwrap();
+        assert_eq!(contents.entries, list.iter().map(|b| Entry::Brush(*b)).collect::<Vec<_>>());
     }
 
     #[test]

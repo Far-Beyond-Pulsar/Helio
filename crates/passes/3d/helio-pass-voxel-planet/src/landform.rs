@@ -351,6 +351,7 @@ impl Octave {
 /// | craters | rim over depth (Q16) | share of fresh craters (Q16) |
 /// | basins | depth (height units) | mask threshold (Q24) |
 /// | plateau | height (height units, whole layers) | |
+/// | cliffs (riser share in 1/1024 in kind bits 16..) | step (height units, whole layers) | mask threshold (Q24) |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct StackLayer {
@@ -371,6 +372,23 @@ impl StackLayer {
     pub const CRATERS: u32 = 7;
     pub const BASINS: u32 = 8;
     pub const PLATEAU: u32 = 9;
+    pub const CLIFFS: u32 = 10;
+
+    /// The kind without its parameter bits.
+    pub fn base_kind(&self) -> u32 {
+        self.kind & 0xffff
+    }
+}
+
+/// Terraces of `step` height units: flat treads, rising over the last
+/// `riser_q10` / 1024 of each step. 32-bit integer arithmetic, as
+/// `landform_terrace` in WGSL (`step` at most 2^20, `riser_q10` at most 1024).
+pub fn terrace(h: i32, step: i32, riser_q10: i32) -> i32 {
+    let q = h.div_euclid(step);
+    let f = h - q * step;
+    let riser = ((step * riser_q10) >> 10).max(1);
+    let t = (((f - (step - riser)).max(0)) << 10) / riser;
+    q * step + ((t.min(1024) * step) >> 10)
 }
 
 /// Material styles (`LandformConstants::style[0]`).
@@ -462,6 +480,8 @@ impl LandformConstants {
             m[l] += match layer.kind {
                 StackLayer::CONTINENTS => f64::from(layer.a).abs() + f64::from(layer.b).abs(),
                 StackLayer::BASINS | StackLayer::PLATEAU => f64::from(layer.a).abs(),
+                // A terrace moves a height by less than a step.
+                _ if layer.base_kind() == StackLayer::CLIFFS => f64::from(layer.a).abs(),
                 _ => 0.0,
             };
         }
@@ -539,7 +559,11 @@ impl LandformConstants {
             // are at most 1.05 times a face-centre cell).
             let cell = crate::grid::REFERENCE_VOXEL / crate::grid::DOMAIN_UNIT;
             let half_diagonal = 2f64.powi(level as i32) * cell * ratio * std::f64::consts::SQRT_2 * 0.5 * 1.05;
-            let excess_mm = dropped + (lipschitz * (1.0 + warp) + unwarped) * half_diagonal;
+            // Terraces are not Lipschitz: a riser can rise a whole step
+            // inside a cell, and heights a step apart terrace up to two
+            // steps apart.
+            let terraces: f64 = layers.iter().filter(|l| l.base_kind() == StackLayer::CLIFFS).map(|l| 2.0 * f64::from(l.a)).sum();
+            let excess_mm = dropped + terraces + (lipschitz * (1.0 + warp) + unwarped) * half_diagonal;
             let cell_mm = f64::from(self.header[1]) * 2f64.powi(level as i32);
             out[level as usize] = ((excess_mm / cell_mm).ceil() as i64 + 2).clamp(2, 1 << 20) as i32;
         }
@@ -993,6 +1017,13 @@ pub fn height_parts(k: &LandformConstants, p: IVec3, level: u32) -> (i32, u32) {
             }
             StackLayer::PLATEAU => layer.a,
             StackLayer::HILLS | StackLayer::ROUGHNESS | StackLayer::EROSION | StackLayer::CRATERS => s.value[l],
+            _ if layer.base_kind() == StackLayer::CLIFFS => {
+                // Escarpments: inside their regions, terraces of what lies
+                // below them in the stack.
+                let m = masked(layer.mask, (s.value[l].wrapping_sub(layer.b).wrapping_mul(4)).clamp(0, FINE_ONE), land, wet);
+                h = h.wrapping_add(mul_fine(terrace(h, layer.a, (layer.kind >> 16) as i32).wrapping_sub(h), m));
+                continue;
+            }
             _ => 0,
         };
         h = h.wrapping_add(masked(layer.mask, x, land, wet));

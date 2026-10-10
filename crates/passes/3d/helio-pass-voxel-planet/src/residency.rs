@@ -12,10 +12,14 @@ use std::sync::mpsc;
 use crate::planet::Planet;
 use bytemuck::{Pod, Zeroable};
 use glam::DVec3;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 pub const NONE: u32 = u32::MAX;
 pub const TOMBSTONE: u32 = u32::MAX - 1;
+
+/// Flag of a baked brick stored in its edit block: every cell holds the
+/// edit in the low 16 bits (`baked_cell` in common.wgsl).
+pub const BAKED_UNIFORM: u32 = 0x8000_0000;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Capacity {
@@ -24,6 +28,13 @@ pub struct Capacity {
     pub pool_units: u32,
     pub scratch_units: u32,
     pub edit_words: u32,
+    /// Budget of baked brick slots (1 KB each) for resident columns'
+    /// baked edits; the GPU pool grows to it as needed. Uniform bricks
+    /// (the inside of carved or filled regions) take no slot.
+    pub baked_bricks: u32,
+    /// Budget of face brushes (48 bytes each) the resident columns'
+    /// blocks reference, shared; the GPU table grows to it as needed.
+    pub brushes: u32,
     pub max_jobs: u32,
     pub max_evictions: u32,
 }
@@ -44,6 +55,10 @@ impl Default for Capacity {
             // column holds ~150 bricks at level 0 (a heightfield column 2-4).
             scratch_units: 1 << 20,
             edit_words: 4 << 20,
+            // 128 MB.
+            baked_bricks: 131_072,
+            // 12 MB.
+            brushes: 262_144,
             max_jobs: 16_384,
             max_evictions: 262_144,
         }
@@ -64,13 +79,22 @@ pub struct Job {
 /// First key word of a level column: its (never negative) column index in
 /// 24 bits, the face and the level. 2^24 columns cover a 0.1 m Earth face
 /// (1.25e7 columns) and an infinite plane (2^24).
-/// Readback status of a column published with a band clipped to the window
-/// around the eye (`STATUS_CLIPPED` in generate.wgsl); its word is the
-/// window centre in level cells.
+/// Readback statuses of a column published clipped to its window
+/// (`STATUS_CLIPPED` in generate.wgsl): `STATUS_CLIPPED` + 0 below, + 1
+/// above, + 2 both; its word is the window's bottom in level cells.
 pub const STATUS_CLIPPED: u32 = 5;
-/// Level cells the eye may move vertically before a clipped band is
-/// regenerated: a quarter of its 256-brick window.
-const CLIP_SLACK: i64 = 256 * 8 / 4;
+/// The sides a readback status clips (below, above), if it is a clipped
+/// column's.
+pub fn clipped_sides(status: u32) -> Option<(bool, bool)> {
+    let sides = status.checked_sub(STATUS_CLIPPED).filter(|s| *s < 3)? + 1;
+    Some((sides & 1 != 0, sides & 2 != 0))
+}
+/// Level cells of a column's window (`2 * WINDOW_CELLS` in generate.wgsl).
+const WINDOW_LAYERS: i64 = 2048;
+/// Level cells a clipped side must stay away from the eye: a column is
+/// regenerated when the eye comes nearer (rays at its level reach a quarter
+/// window at most past the eye).
+const CLIP_SLACK: i64 = WINDOW_LAYERS / 4;
 
 pub fn key0(face: u8, level: u32, ci: i32) -> u32 {
     debug_assert!((0..1 << 24).contains(&ci), "column index {ci} outside 24 bits");
@@ -225,31 +249,46 @@ enum Planner {
     Worker(WindowWorker),
 }
 
-/// Power-of-two block allocator for edit-reference lists.
+/// Buddy allocator for edit blocks over the edit-reference buffer: blocks
+/// of power-of-two words, split on demand and merged with their free buddy
+/// on release, so blocks of every size keep fitting as columns come and go
+/// (per-size free lists that never merge fragmented the buffer until edit
+/// blocks stopped fitting and their columns waited forever).
 #[derive(Default)]
 struct EditHeap {
-    top: u32,
-    free: Vec<Vec<u32>>,
+    /// Free block bases by order (block of `1 << order` words).
+    free: Vec<FxHashSet<u32>>,
+    /// Words in allocated blocks.
+    live: u32,
 }
 
 impl EditHeap {
+    /// A block of at least `words` words within `capacity` (rounded down to
+    /// a power of two): (base, order).
     fn alloc(&mut self, words: u32, capacity: u32) -> Option<(u32, u32)> {
-        let class = words.max(1).next_power_of_two().trailing_zeros();
-        if self.free.len() <= class as usize {
-            self.free.resize(class as usize + 1, Vec::new());
+        if self.free.is_empty() {
+            let top = 31 - capacity.max(1).leading_zeros();
+            self.free = (0..=top).map(|_| FxHashSet::default()).collect();
+            self.free[top as usize].insert(0);
         }
-        if let Some(base) = self.free[class as usize].pop() {
-            return Some((base, class));
+        let order = words.max(1).next_power_of_two().trailing_zeros();
+        let from = (order as usize..self.free.len()).find(|&o| !self.free[o].is_empty())?;
+        let base = *self.free[from].iter().next().expect("non-empty");
+        self.free[from].remove(&base);
+        // Split down, freeing each upper half.
+        for o in (order as usize..from).rev() {
+            self.free[o].insert(base + (1 << o));
         }
-        let size = 1u32 << class;
-        (self.top + size <= capacity).then(|| {
-            let base = self.top;
-            self.top += size;
-            (base, class)
-        })
+        self.live += 1 << order;
+        Some((base, order))
     }
-    fn release(&mut self, block: (u32, u32)) {
-        self.free[block.1 as usize].push(block.0);
+    fn release(&mut self, (mut base, mut order): (u32, u32)) {
+        self.live -= 1 << order;
+        while (order as usize) + 1 < self.free.len() && self.free[order as usize].remove(&(base ^ (1 << order))) {
+            base &= !(1 << order);
+            order += 1;
+        }
+        self.free[order as usize].insert(base);
     }
 }
 
@@ -277,17 +316,22 @@ impl JobBudget {
 /// their volume cells): 0.70 us a heightfield column, 0.060 us a cell.
 pub const UNITS_PER_VOLUME_CELL: f64 = 0.085;
 
-/// Predicted GPU work of generating column `key`, in heightfield columns:
-/// one, plus the volume cells its lanes evaluate (the field's extent at the
-/// column's centre; `terrain_extent` in WGSL). A cave or overhang column at
-/// a fine level evaluates hundreds of cells a lane and costs tens of times a
-/// heightfield column: counting jobs alone let such runs take 100+ ms.
-pub fn job_units(planet: &Planet, key: u64) -> f64 {
+/// GPU generation work of one brush in a column's edit list (every lane
+/// sweeps it, every evaluated brick culls it), in heightfield columns.
+pub const UNITS_PER_BRUSH: f64 = 0.1;
+
+/// Predicted GPU work of generating column `key` with `brushes` in its edit
+/// list, in heightfield columns: one, plus the volume cells its lanes
+/// evaluate (the field's extent at the column's centre; `terrain_extent` in
+/// WGSL), plus its brushes. A cave or overhang column at a fine level
+/// evaluates hundreds of cells a lane and costs tens of times a heightfield
+/// column: counting jobs alone let such runs take 100+ ms.
+pub fn job_units(planet: &Planet, key: u64, brushes: usize) -> f64 {
     let (face, level, ci, cj) = unpack(key);
     let half = BRICK as i32 / 2;
     let p = planet.grid().domain_point(face, ci * BRICK as i32 + half, cj * BRICK as i32 + half, level);
     let (below, above) = planet.field().extent(p, level);
-    1.0 + f64::from(below.max(0) + above.max(0)) * UNITS_PER_VOLUME_CELL
+    1.0 + f64::from(below.max(0) + above.max(0)) * UNITS_PER_VOLUME_CELL + brushes as f64 * UNITS_PER_BRUSH
 }
 
 /// Work produced for one frame.
@@ -303,7 +347,14 @@ pub struct FrameWork {
     /// earlier value winning left an empty slot inside a probe run).
     pub table_writes: Vec<(u32, u32)>,
     pub edit_writes: Vec<(u32, Vec<u32>)>,
+    /// Baked bricks to upload into their slots, and the slots the pool
+    /// must hold (its high-water mark).
+    pub baked_writes: Vec<(u32, std::sync::Arc<crate::edit_store::Brick>)>,
+    pub baked_slots: u32,
+    /// Face brushes to upload into the shared table, and the slots the
+    /// table must hold.
     pub brush_writes: Vec<(u32, FaceBrush)>,
+    pub brush_slots: u32,
     /// Summary block table writes `(slot, bi, bj)`, each slot once with its
     /// final state; `bi = -1` releases a slot.
     pub block_inits: Vec<(u32, i32, i32)>,
@@ -404,6 +455,12 @@ pub struct Stats {
     pub reranked: usize,
     pub window_rebuild_ms: f64,
     pub edit_words: u32,
+    /// Baked brick slots in use and their budget; edit words' budget.
+    pub baked_bricks: u32,
+    pub baked_capacity: u32,
+    pub edit_capacity: u32,
+    /// Distinct face brushes the resident blocks reference.
+    pub brushes: u32,
     pub table_load: f32,
 }
 
@@ -426,16 +483,35 @@ pub struct Residency {
     delayed_records: Vec<u32>,
     levels: Vec<Level>,
     edits: EditHeap,
-    /// GPU face-brush index for each (brush id, face entry).
-    brush_gpu: Vec<Vec<u32>>,
-    synced: Vec<crate::edits::Brush>,
-    /// Prefix hashes of `synced` (see `EditLog::prefix_hash`).
-    synced_hash: Vec<u64>,
+    /// Free baked brick slots, the next unused one, and the slots each
+    /// column's edit block holds (by block base).
+    free_baked: Vec<u32>,
+    next_baked: u32,
+    block_baked: FxHashMap<u32, Vec<u32>>,
+    /// The shared brush table: each distinct face brush's slot and how many
+    /// blocks reference it, free slots, the next unused one, and the slots
+    /// each block references (by block base).
+    brush_slots: FxHashMap<[u32; 12], (u32, u32)>,
+    free_brushes: Vec<u32>,
     next_brush: u32,
+    block_brushes: FxHashMap<u32, Vec<[u32; 12]>>,
+    /// Blocks of brushes only, shared by every column with the same list:
+    /// the block and its columns by list (large count, then the brushes'
+    /// words), and each shared block's list.
+    shared_blocks: FxHashMap<Vec<u32>, ((u32, u32), u32)>,
+    block_signatures: FxHashMap<u32, Vec<u32>>,
+    /// The planet's edits as last synced: the baked state (`Edits::baked_state`)
+    /// and the recent brushes from history index `synced_start` (whose
+    /// prefix hash is `synced_start_hash`), each with the history hash after
+    /// it, to regenerate an undone one's footprint.
+    synced_baked: (usize, u64),
+    synced_start: usize,
+    synced_start_hash: u64,
+    synced: Vec<(crate::edits::Brush, u64)>,
     urgent: Vec<u64>,
-    /// Resident columns whose band is clipped to a window around the eye's
-    /// layer, with the window centre (level cells).
-    clipped: FxHashMap<u64, i32>,
+    /// Resident columns clipped to their window: its bottom and the sides
+    /// it clips (below, above).
+    clipped: FxHashMap<u64, (i32, bool, bool)>,
     pub stats: Stats,
     frame: u32,
     planner: Planner,
@@ -492,10 +568,19 @@ impl Residency {
             delayed_records: Vec::new(),
             levels,
             edits: EditHeap::default(),
-            brush_gpu: Vec::new(),
-            synced: Vec::new(),
-            synced_hash: Vec::new(),
+            free_baked: Vec::new(),
+            next_baked: 0,
+            block_baked: FxHashMap::default(),
+            brush_slots: FxHashMap::default(),
+            free_brushes: Vec::new(),
             next_brush: 0,
+            block_brushes: FxHashMap::default(),
+            shared_blocks: FxHashMap::default(),
+            block_signatures: FxHashMap::default(),
+            synced_baked: (0, 0),
+            synced_start: 0,
+            synced_start_hash: 0,
+            synced: Vec::new(),
             urgent: Vec::new(),
             clipped: FxHashMap::default(),
             stats: Stats::default(),
@@ -538,53 +623,63 @@ impl Residency {
 
     /// Sync the edit log: upload new face brushes and schedule regeneration
     /// of resident columns touched by new or undone brushes.
-    fn sync_edits(&mut self, planet: &Planet, work: &mut FrameWork) {
-        let log = planet.edits();
-        // Longest common prefix of the synced and current logs, found by
-        // prefix hash in O(log n); an unchanged log costs O(1) per frame.
-        let n = self.synced.len().min(log.len());
-        let same = |k: usize| k == 0 || self.synced_hash[k - 1] == log.prefix_hash((k - 1) as u32);
-        if n == self.synced.len() && n == log.len() && same(n) {
+    fn sync_edits(&mut self, planet: &Planet) {
+        let edits = planet.edits();
+        let (c0, c1) = (edits.sealed_len(), edits.len());
+        let (s0, s1) = (self.synced_start, self.synced_start + self.synced.len());
+        let synced_hash = |k: usize| if k == s0 { self.synced_start_hash } else { self.synced[k - s0 - 1].1 };
+        if edits.baked_state() == self.synced_baked && (s0, s1) == (c0, c1) && edits.hash() == synced_hash(s1) {
             return;
         }
-        let common = if same(n) {
-            n
-        } else {
-            let (mut lo, mut hi) = (0, n);
-            while lo < hi {
-                let mid = (lo + hi + 1) / 2;
-                if same(mid) {
-                    lo = mid;
-                } else {
-                    hi = mid - 1;
+        // Everything resident regenerates when the change cannot be told:
+        // another history, or one that moved on further than kept.
+        let mut refresh = false;
+        match edits.baked_changes_since(self.synced_baked) {
+            Some(columns) => {
+                for c in columns {
+                    let key = pack(key0(c.face, u32::from(c.level), c.ci), c.cj as u32);
+                    if self.residents.contains_key(key) {
+                        self.urgent.push(key);
+                    }
                 }
             }
-            lo
-        };
+            None => refresh = true,
+        }
+        // Recent brushes: the longest common prefix of the synced and current
+        // windows, by prefix hash in O(log n). Undone brushes and new ones
+        // regenerate their footprints; ones sealed since changed only baked
+        // columns (above).
+        let same = |k: usize| edits.prefix_hash(k) == Some(synced_hash(k));
+        let (lo, hi) = (s0.max(c0), s1.min(c1));
         let mut touched = Vec::new();
-        for id in common..self.synced.len() {
-            // Undone brushes: their old footprint must be regenerated.
-            if let Ok(faces) = self.synced[id].resolve(&self.grid) {
-                touched.extend(faces);
+        if !refresh && lo <= hi && same(lo) {
+            let (mut common, mut top) = (lo, hi);
+            while common < top {
+                let mid = (common + top + 1) / 2;
+                if same(mid) {
+                    common = mid;
+                } else {
+                    top = mid - 1;
+                }
             }
-        }
-        self.brush_gpu.truncate(common);
-        self.synced.truncate(common);
-        self.synced_hash.truncate(common);
-        for id in common..log.len() {
-            let resolved = log.resolved(id as u32);
-            let mut indices = Vec::new();
-            for fb in &resolved.faces {
-                let index = self.next_brush;
-                self.next_brush += 1;
-                work.brush_writes.push((index, *fb));
-                indices.push(index);
-                touched.push(*fb);
+            let undone = self.synced[common - s0..].iter().map(|(b, _)| *b);
+            let added = (common..c1).filter_map(|i| edits.brush(i));
+            for brush in undone.chain(added) {
+                if let Ok(faces) = brush.resolve(&self.grid) {
+                    touched.extend(faces);
+                }
             }
-            self.brush_gpu.push(indices);
-            self.synced.push(resolved.brush);
-            self.synced_hash.push(resolved.prefix);
+        } else {
+            refresh = true;
         }
+        if refresh {
+            let keys: Vec<u64> = self.residents.iter().map(|(key, _)| key).collect();
+            self.urgent.extend(keys);
+        }
+        self.synced_baked = edits.baked_state();
+        self.synced_start = c0;
+        self.synced_start_hash = edits.prefix_hash(c0).expect("the sealed prefix is kept");
+        self.synced = (c0..c1).filter_map(|i| Some((edits.brush(i)?, edits.prefix_hash(i + 1)?))).collect();
         // Large footprints scan the residents instead of their rectangles.
         let mut scans: Vec<(u8, u32, i64, i64, i64, i64)> = Vec::new();
         for fb in touched {
@@ -629,26 +724,159 @@ impl Residency {
         }
     }
 
-    fn edit_list(&mut self, planet: &Planet, key: u64, work: &mut FrameWork) -> Result<Option<(u32, u32)>, ()> {
+    /// A column's edit block (layout: `EditCounts` in common.wgsl): its
+    /// large and recent brushes' slots in the shared brush table and its
+    /// baked bricks' slots, or none when nothing edited it; and how many
+    /// brushes it lists. Fails when the edit words, brush slots or brick
+    /// slots are exhausted (the job waits). A brush covering many columns is
+    /// stored once, not in every block, and columns with the same brushes
+    /// and no baked bricks share one block (neighbouring columns under the
+    /// same leaves of the edit tree): a block per column filled the edit
+    /// buffer under a long dig, and admission stopped.
+    fn edit_list(&mut self, planet: &Planet, key: u64, work: &mut FrameWork) -> Result<(Option<(u32, u32)>, usize), ()> {
         let (face, level, ci, cj) = unpack(key);
         let span = i64::from(BRICK) << level;
         let i0 = i64::from(ci) * span;
         let j0 = i64::from(cj) * span;
-        let refs = planet.edits().query(face, i0, i0 + span - 1, j0, j0 + span - 1, level);
-        if refs.is_empty() {
-            return Ok(None);
+        let edits = planet.edits();
+        let brushes = |log: &crate::edits::EditLog| -> Vec<FaceBrush> {
+            log.query(face, [i0, i0 + span - 1], [j0, j0 + span - 1], crate::edits::ALL_LAYERS, level)
+                .into_iter()
+                .map(|(id, index)| log.resolved(id).faces[index as usize])
+                .collect()
+        };
+        let large = brushes(&edits.large);
+        let recent = brushes(&edits.recent);
+        let baked: Vec<(i32, std::sync::Arc<crate::edit_store::Brick>)> = edits
+            .baked
+            .column(&crate::edit_store::ColumnKey { face, level: level as u8, ci, cj })
+            .map(|column| column.to_vec())
+            .unwrap_or_default();
+        if large.is_empty() && recent.is_empty() && baked.is_empty() {
+            return Ok((None, 0));
         }
-        let mut words = Vec::with_capacity(refs.len() + 1);
-        words.push(refs.len() as u32);
-        for (id, index) in refs {
-            words.push(self.brush_gpu[id as usize][index as usize]);
+        let brushes = large.len() + recent.len();
+        let signature: Option<Vec<u32>> = baked.is_empty().then(|| {
+            let mut words = vec![large.len() as u32];
+            for fb in large.iter().chain(&recent) {
+                words.extend_from_slice(&bytemuck::cast::<FaceBrush, [u32; 12]>(*fb));
+            }
+            words
+        });
+        if let Some(shared) = signature.as_ref().and_then(|s| self.shared_blocks.get_mut(s)) {
+            shared.1 += 1;
+            return Ok((Some(shared.0), brushes));
         }
-        let block = self
-            .edits
-            .alloc(words.len() as u32, self.capacity.edit_words)
-            .ok_or(())?;
+        // A uniform brick is stored in its block (`BAKED_UNIFORM`), the
+        // others in pool slots.
+        let mut slots = Vec::with_capacity(baked.len());
+        for _ in baked.iter().filter(|(_, brick)| brick.uniform().is_none()) {
+            let slot = match self.free_baked.pop() {
+                Some(slot) => slot,
+                None if self.next_baked < self.capacity.baked_bricks => {
+                    self.next_baked += 1;
+                    self.next_baked - 1
+                }
+                None => {
+                    self.free_baked.extend(slots);
+                    return Err(());
+                }
+            };
+            slots.push(slot);
+        }
+        let mut words = Vec::with_capacity(3 + large.len() + recent.len() + baked.len() * 2);
+        words.extend([large.len() as u32, recent.len() as u32, baked.len() as u32]);
+        let mut keys = Vec::with_capacity(large.len() + recent.len());
+        for fb in large.iter().chain(&recent) {
+            let key: [u32; 12] = bytemuck::cast(*fb);
+            let Some(slot) = self.acquire_brush(key, fb, work) else {
+                self.free_baked.extend(slots);
+                for key in keys {
+                    self.release_brush(&key);
+                }
+                return Err(());
+            };
+            words.push(slot);
+            keys.push(key);
+        }
+        let mut pooled = slots.iter();
+        for (bk, brick) in baked {
+            match brick.uniform() {
+                Some(cell) => words.extend([bk as u32, BAKED_UNIFORM | u32::from(cell.0)]),
+                None => {
+                    let slot = *pooled.next().expect("a slot per pooled brick");
+                    words.extend([bk as u32, slot]);
+                    work.baked_writes.push((slot, brick));
+                }
+            }
+        }
+        work.baked_slots = work.baked_slots.max(self.next_baked);
+        let Some(block) = self.edits.alloc(words.len() as u32, self.capacity.edit_words) else {
+            self.free_baked.extend(slots);
+            for key in keys {
+                self.release_brush(&key);
+            }
+            return Err(());
+        };
         work.edit_writes.push((block.0, words));
-        Ok(Some(block))
+        work.brush_slots = work.brush_slots.max(self.next_brush);
+        self.block_baked.insert(block.0, slots);
+        self.block_brushes.insert(block.0, keys);
+        if let Some(signature) = signature {
+            self.block_signatures.insert(block.0, signature.clone());
+            self.shared_blocks.insert(signature, (block, 1));
+        }
+        Ok((Some(block), brushes))
+    }
+
+    /// A slot of the shared brush table holding `fb`, counted once more:
+    /// its existing slot, or a new one (uploaded this frame).
+    fn acquire_brush(&mut self, key: [u32; 12], fb: &FaceBrush, work: &mut FrameWork) -> Option<u32> {
+        if let Some((slot, refs)) = self.brush_slots.get_mut(&key) {
+            *refs += 1;
+            return Some(*slot);
+        }
+        let slot = match self.free_brushes.pop() {
+            Some(slot) => slot,
+            None if self.next_brush < self.capacity.brushes => {
+                self.next_brush += 1;
+                self.next_brush - 1
+            }
+            None => return None,
+        };
+        self.brush_slots.insert(key, (slot, 1));
+        work.brush_writes.push((slot, *fb));
+        Some(slot)
+    }
+
+    fn release_brush(&mut self, key: &[u32; 12]) {
+        if let Some((slot, refs)) = self.brush_slots.get_mut(key) {
+            *refs -= 1;
+            if *refs == 0 {
+                self.free_brushes.push(*slot);
+                self.brush_slots.remove(key);
+            }
+        }
+    }
+
+    /// Free an edit block, its baked brick slots and its brush references.
+    fn release_edits(&mut self, block: (u32, u32)) {
+        if let Some(signature) = self.block_signatures.get(&block.0) {
+            let shared = self.shared_blocks.get_mut(signature).expect("a listed block is shared");
+            shared.1 -= 1;
+            if shared.1 > 0 {
+                return;
+            }
+            let signature = self.block_signatures.remove(&block.0).expect("looked up above");
+            self.shared_blocks.remove(&signature);
+        }
+        self.edits.release(block);
+        if let Some(slots) = self.block_baked.remove(&block.0) {
+            self.free_baked.extend(slots);
+        }
+        for key in self.block_brushes.remove(&block.0).unwrap_or_default() {
+            self.release_brush(&key);
+        }
     }
 
     /// Reference every summary block of a column, or none when any tier's
@@ -717,7 +945,7 @@ impl Residency {
             work.evictions.push(res.record);
             self.delayed_records.push(res.record);
             if let Some(block) = res.edit_block {
-                self.edits.release(block);
+                self.release_edits(block);
             }
         }
     }
@@ -853,7 +1081,7 @@ impl Residency {
         // Records evicted last frame are safe to reuse now.
         let delayed = std::mem::take(&mut self.delayed_records);
         self.free_records.extend(delayed);
-        self.sync_edits(planet, &mut work);
+        self.sync_edits(planet);
         self.follow_clipped(eye);
         let t_edits = started.elapsed();
         // Ask the planner for new windows when the view changed, then apply
@@ -871,6 +1099,8 @@ impl Residency {
                 || (last.lod0 - lod0).abs() > lod0 * 0.01
                 || last.lod_dither != request.lod_dither
                 || last.outer_radius != request.outer_radius
+                // Edits move the terrain bounds that turn levels on.
+                || last.planet.as_ref().map(|p| p.edits().hash()) != request.planet.as_ref().map(|p| p.edits().hash())
         });
         // Coalesce: no new plan while the last one is outstanding or its
         // diffs are still being applied. The planner diffs against the last
@@ -919,17 +1149,17 @@ impl Residency {
                 continue;
             }
             let Some(res) = self.residents.get(key) else { continue };
-            let Ok(block) = self.edit_list(planet, key, &mut work) else {
+            let Ok((block, brushes)) = self.edit_list(planet, key, &mut work) else {
                 deferred_urgent.push(key);
                 continue;
             };
             // Still clipped, it is reported again with its new window.
             self.clipped.remove(&key);
             if let Some(old) = res.edit_block {
-                self.edits.release(old);
+                self.release_edits(old);
             }
             self.residents.get_mut(key).unwrap().edit_block = block;
-            work.units += job_units(planet, key);
+            work.units += job_units(planet, key, brushes);
             work.jobs.push(Job {
                 key0: key as u32,
                 key1: (key >> 32) as u32,
@@ -979,7 +1209,7 @@ impl Residency {
                 requeue(self);
                 break;
             };
-            let Ok(block) = self.edit_list(planet, key, &mut work) else {
+            let Ok((block, brushes)) = self.edit_list(planet, key, &mut work) else {
                 self.free_records.push(record);
                 requeue(self);
                 break;
@@ -992,7 +1222,7 @@ impl Residency {
             }
             let slot = self.residents.insert(key, Resident { record, slot: 0, edit_block: block, blocks });
             work.table_writes.push((slot, record));
-            work.units += job_units(planet, key);
+            work.units += job_units(planet, key, brushes);
             work.jobs.push(Job {
                 key0: key as u32,
                 key1: (key >> 32) as u32,
@@ -1022,7 +1252,11 @@ impl Residency {
         stats.finest_level = self.levels.iter().position(|l| l.active).unwrap_or(0) as u32;
         stats.jobs = work.jobs.len();
         stats.evictions = work.evictions.len();
-        stats.edit_words = self.edits.top;
+        stats.edit_words = self.edits.live;
+        stats.baked_bricks = self.next_baked - self.free_baked.len() as u32;
+        stats.baked_capacity = self.capacity.baked_bricks;
+        stats.edit_capacity = self.capacity.edit_words;
+        stats.brushes = self.brush_slots.len() as u32;
         stats.table_load = self.residents.load();
         self.stats = stats;
         work.finish(self.residents.table());
@@ -1054,16 +1288,16 @@ impl Residency {
     }
 
     /// Re-queue columns whose jobs could not complete (scratch/pool
-    /// pressure), and note columns published with a clipped band
-    /// ([`STATUS_CLIPPED`], with their window centre).
+    /// pressure), and note columns published clipped to their window
+    /// ([`clipped_sides`], with its bottom).
     pub fn requeue(&mut self, keys: impl IntoIterator<Item = (u64, u32, i32)>) {
         let mut count = 0;
         for (key, status, word) in keys {
             if !self.residents.contains_key(key) {
                 continue;
             }
-            if status == STATUS_CLIPPED {
-                self.clipped.insert(key, word);
+            if let Some((below, above)) = clipped_sides(status) {
+                self.clipped.insert(key, (word, below, above));
                 continue;
             }
             self.urgent.push(key);
@@ -1072,9 +1306,10 @@ impl Residency {
         self.stats.requeued += count;
     }
 
-    /// Clipped bands follow the eye vertically: a column whose window centre
-    /// is more than a quarter window from the eye's layer at its level is
-    /// regenerated around the current eye.
+    /// Clipped windows follow the eye vertically: a column is regenerated
+    /// when the eye's layer at its level comes within a quarter window of a
+    /// side it clips. An eye far above a column whose window holds its ground
+    /// (clipped below, deep under it) leaves it alone.
     fn follow_clipped(&mut self, eye: DVec3) {
         if self.clipped.is_empty() {
             return;
@@ -1084,7 +1319,11 @@ impl Residency {
         let stale: Vec<u64> = self
             .clipped
             .iter()
-            .filter(|(key, centre)| ((layer >> unpack(**key).1) - i64::from(**centre)).abs() > CLIP_SLACK)
+            .filter(|(key, (lo, below, above))| {
+                let e = layer >> unpack(**key).1;
+                let lo = i64::from(*lo);
+                (*below && e - lo < CLIP_SLACK) || (*above && lo + WINDOW_LAYERS - e < CLIP_SLACK)
+            })
             .map(|(key, _)| *key)
             .collect();
         for key in stale {
@@ -1310,6 +1549,47 @@ impl Drop for ResidencyWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_blocks_never_overlap_and_free_space_merges_back() {
+        const CAPACITY: u32 = 1 << 16;
+        let mut heap = EditHeap::default();
+        let mut seed = 0x2545_f491u64;
+        let mut next = move |n: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % u64::from(n)) as u32
+        };
+        let mut live: Vec<(u32, u32)> = Vec::new();
+        let mut owner = vec![false; CAPACITY as usize];
+        for round in 0..20_000 {
+            if live.is_empty() || next(3) != 0 {
+                // Edit blocks: a few words to a few hundred.
+                let words = 3 + next(if round % 50 == 0 { 2000 } else { 120 });
+                let Some(block) = heap.alloc(words, CAPACITY) else { continue };
+                let (base, order) = block;
+                assert!(base + (1 << order) <= CAPACITY && (1 << order) >= words);
+                for w in base..base + (1 << order) {
+                    assert!(!owner[w as usize], "word {w} allocated twice");
+                    owner[w as usize] = true;
+                }
+                live.push(block);
+            } else {
+                let block = live.swap_remove(next(live.len() as u32) as usize);
+                for w in block.0..block.0 + (1 << block.1) {
+                    owner[w as usize] = false;
+                }
+                heap.release(block);
+            }
+            assert_eq!(heap.live, live.iter().map(|b| 1 << b.1).sum::<u32>());
+        }
+        for block in live.drain(..) {
+            heap.release(block);
+        }
+        assert_eq!(heap.live, 0);
+        assert_eq!(heap.alloc(CAPACITY, CAPACITY), Some((0, 16)), "every block merged back");
+    }
     use crate::planet::PlanetRecipe;
 
     /// The GPU hash table holds exactly the residents, each found by linear
@@ -1441,12 +1721,12 @@ mod tests {
         for _ in 0..8 {
             let work = r.plan(&planet, eye, lod0, JobBudget { units: 500.0, jobs: 100_000 });
             assert!(!work.jobs.is_empty());
-            let issued: f64 = work.jobs.iter().map(|j| job_units(&planet, pack(j.key0, j.key1))).sum();
+            let issued: f64 = work.jobs.iter().map(|j| job_units(&planet, pack(j.key0, j.key1), 0)).sum();
             assert!((issued - work.units).abs() < 1e-6, "units are the jobs' units");
             // At most one job past the budget (the one that crossed it).
-            let last = job_units(&planet, pack(work.jobs.last().unwrap().key0, work.jobs.last().unwrap().key1));
+            let last = job_units(&planet, pack(work.jobs.last().unwrap().key0, work.jobs.last().unwrap().key1), 0);
             assert!(work.units < 500.0 + last, "{} units", work.units);
-            units.extend(work.jobs.iter().map(|j| job_units(&planet, pack(j.key0, j.key1))));
+            units.extend(work.jobs.iter().map(|j| job_units(&planet, pack(j.key0, j.key1), 0)));
         }
         assert!(units.iter().all(|&u| u >= 1.0), "a column costs at least a heightfield column");
         // The job cap holds whatever the units.

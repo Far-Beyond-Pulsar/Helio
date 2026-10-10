@@ -274,6 +274,7 @@ fn paint_preserves_unpainted_fractional_surface() {
             shape: BrushShape::Cube,
             op: BrushOp::Paint,
             material: 13,
+            height: 0.0,
         })
         .unwrap();
     let planet = Arc::new(planet);
@@ -396,8 +397,10 @@ impl TerrainGenerator for Steep {
         Ok(Arc::new(Steep))
     }
 }
+/// A column whose tops spread over hundreds of cells (a cliff 5 km tall in
+/// one column) keeps its relief: lane words hold tops 4095 cells apart.
 #[test]
-fn unsupported_tall_band_preserves_legacy_brick_occupancy() {
+fn steep_columns_keep_relief_at_any_spread() {
     static INIT: Once = Once::new();
     INIT.call_once(|| helio_pass_voxel_planet::terrain::register(Arc::new(Steep)).unwrap());
     let Some(gpu) = gpu() else {
@@ -431,21 +434,12 @@ fn unsupported_tall_band_preserves_legacy_brick_occupancy() {
     assert_eq!(c.status, 1);
     assert_eq!(c.level, 6, "fixture must exercise L6 steep column");
     let info = record_info(&gpu, &r, 4);
-    assert!(
-        (info & 511) > 32,
-        "fixture did not produce truncated byte tops: info={info:08x}"
-    );
-    assert_eq!(
-        info & 0x10000000,
-        0,
-        "unsupported byte tops advertised fractional relief"
-    );
+    assert_ne!(info & 0x10000000, 0, "a steep column lost its relief: info={info:08x}");
     let size = planet.grid().voxel_size() * f64::from(1u32 << c.level);
-    let expected = (5000.0 / size).floor() * size;
     let actual = eye.y - f64::from(c.t);
     assert!(
-        (actual - expected).abs() < 0.05,
-        "fallback lost legacy occupancy: actual={actual} expected={expected} {c:?}"
+        (actual - 5000.0).abs() <= size / 65536.0 + 0.02,
+        "the authored top: actual={actual} {c:?}"
     );
 }
 
@@ -495,8 +489,10 @@ impl TerrainGenerator for SteepBoundary {
         Ok(Arc::new(SteepBoundary))
     }
 }
+/// A top exactly on a level cell boundary, 256 cells over the column's
+/// lowest, keeps its relief and its height.
 #[test]
-fn exact_32_brick_boundary_does_not_advertise_truncated_top() {
+fn a_top_on_a_cell_boundary_keeps_its_height() {
     static INIT: Once = Once::new();
     INIT.call_once(|| helio_pass_voxel_planet::terrain::register(Arc::new(SteepBoundary)).unwrap());
     let Some(gpu) = gpu() else {
@@ -530,12 +526,10 @@ fn exact_32_brick_boundary_does_not_advertise_truncated_top() {
     assert_eq!(c.status, 1);
     assert_eq!(c.level, 6);
     let info = record_info(&gpu, &r, 4);
-    assert_eq!(info & 511, 32, "fixture must span exactly32bricks");
-    assert_eq!((info >> 22) & 7, 0, "top must lie on the256-cell boundary");
-    assert_eq!(info & 0x10000000, 0, "relative top256 cannot fit one byte");
+    assert_ne!(info & 0x10000000, 0, "relief kept: info={info:08x}");
     let actual = eye.y - f64::from(c.t);
     assert!(
         (actual - 1638.4).abs() < 0.05,
-        "legacy occupancy truncated: {actual} {c:?}"
+        "the authored top: {actual} {c:?}"
     );
 }

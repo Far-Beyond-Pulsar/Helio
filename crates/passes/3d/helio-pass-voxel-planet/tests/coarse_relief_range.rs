@@ -60,6 +60,8 @@ fn relief_hit_respects_requested_trace_range() {
     ints(&mut frame, 576, &[0, 0, 0, 4]);
     let mut world = vec![0u8; 144];
     ints(&mut world, 0, &[1024, 100, 1024, 0]);
+    // A heightfield column with relief, its natural tops one cell over its
+    // base (8), its window clipped below at layer 8.
     let mut record = vec![0u8; 32];
     ints(
         &mut record,
@@ -67,19 +69,19 @@ fn relief_hit_respects_requested_trace_range() {
         &[
             (1u32 | (2 << 24) | (6 << 27)) as i32,
             1,
-            1,
-            (0x90000000u32 | 1 | (1 << 9) | (7 << 22)) as i32,
+            8,
+            (0x92000000u32 | (1 << 9)) as i32,
             0,
-            1,
-            0,
+            9,
+            8,
             0,
         ],
     );
-    let mut pool = vec![0u32; 64];
-    pool[..16].fill(0x01010101);
-    pool[16..48].fill(0x64006400);
-    pool[48] = u32::MAX;
-    pool[49] = u32::MAX;
+    // Lane words: natural tops one cell over the base, the exact surface 25
+    // base layers (of 64) over the top cell's floor (Q16 cells); no surface
+    // words.
+    let mut pool = vec![0u32; 80];
+    pool[..64].fill(1 | (((25 * 1024 - 65536) as u32) << 15));
     let buffer = |label: &str, data: &[u8], uniform: bool| {
         let b = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),

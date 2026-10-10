@@ -79,13 +79,16 @@ fn mixed_brick_hits_respect_requested_trace_range() {
         let mut world = vec![0u8; 144];
         ints(&mut world, 0, &[1024, 100, 1024, 0]);
         let ci = (512 >> level) / 8;
+        // Natural tops over base layer 8: one cell (relief), or eight with
+        // a Remove box cutting them down to the occupied layer 8 (topology).
+        // Compact: a heightfield column (no span table). Otherwise one
+        // BRICKS span [8, 16) whose window is clipped below 8, its one mixed
+        // brick solid in layer 8.
+        let header_units = 5;
         let info = 0x80000000u32
-            | 1
-            | if compact { 0 } else { 1 << 9 }
-            | (7 << 22)
+            | if compact { 0x02000000 } else { 1 | (1 << 9) }
             | if relief { 0x10000000 } else { 0 }
-            | if topology { 0x08000000 } else { 0 }
-            | if compact { 0x02000000 } else { 0 };
+            | if topology { 0x08000000 } else { 0 };
         let mut record = vec![0u8; 32];
         ints(
             &mut record,
@@ -93,26 +96,28 @@ fn mixed_brick_hits_respect_requested_trace_range() {
             &[
                 (ci | (2 << 24) | (level << 27)) as i32,
                 ci as i32,
-                1,
+                8,
                 info as i32,
                 0,
-                1,
-                0,
+                9,
+                8,
                 if topology { 1 } else { 0 },
             ],
         );
-        // Tops, (relief fractions), surface offsets, then the mixed brick.
-        let mut pool = vec![0u32; 80];
-        pool[..16].fill(if topology { 0x08080808 } else { 0x01010101 });
-        let mixed_offset = if relief { 64 } else { 32 };
-        if compact {
-            // The mixed-mask stays set, but its virtual brick pointer has no
-            // allocated payload. A mistaken bitmap read cannot reproduce the
-            // original occupied layer; compact consumers must use its top.
-            pool.truncate(mixed_offset);
-        } else {
-            pool[mixed_offset] = u32::MAX;
-            pool[mixed_offset + 1] = u32::MAX;
+        let mut pool = vec![0u32; 128];
+        // Lane words: natural tops over the base (layer 8), the exact surface
+        // on them.
+        pool[..64].fill(if topology { 8 } else { 1 });
+        if !compact {
+            let table = header_units * 16;
+            pool[table] = 8;
+            pool[table + 1] = 5 | (2 << 3);
+            pool[table + 2] = (header_units + 1) as u32;
+            pool[table + 3] = 1;
+            pool[table + 4] = 0;
+            let brick = (header_units + 1) * 16;
+            pool[brick] = u32::MAX;
+            pool[brick + 1] = u32::MAX;
         }
         let mut brush = vec![0u8; 32];
         ints(&mut brush, 0, &[1088, 1088, 209, 0, 64, 64, 0, 0]); // Remove box, coarse z=9..15.

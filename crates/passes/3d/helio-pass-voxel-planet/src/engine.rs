@@ -45,9 +45,8 @@ pub struct PickRequest {
     pub uv: [f32; 2],
 }
 
-/// The answer to a [`PickRequest`]: the distance from the eye of the first
-/// terrain hit along that pixel's ray and the size of the cell that drew it
-/// (how far the exact surface can be from it), or `None` (sky, loading).
+/// The answer to a [`PickRequest`]: the first terrain hit along that
+/// pixel's ray as drawn, or `None` (sky, loading).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PickResult {
     pub id: u64,
@@ -56,8 +55,15 @@ pub struct PickResult {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PickHit {
+    /// From the eye along the pixel's ray.
     pub distance: f64,
-    pub cell_m: f64,
+    /// The level cell drawn there: at level 0 the exact voxel.
+    pub cell: crate::grid::Cell,
+    pub level: u32,
+    /// How the ray entered the cell: `2 axis + 1` stepping up axis (i, j,
+    /// k), `2 axis` stepping down it (`normal_code` in trace.wgsl); `None`
+    /// when it started inside. See [`crate::Planet::drawn_hit`].
+    pub entered: Option<u32>,
 }
 
 /// Pick requests and answers shared between a tool and the pass.
@@ -96,7 +102,9 @@ struct MaterialGpu {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
-    /// Level cells project to this many pixels where their range starts.
+    /// Level cells project to 1/lod_pixels pixels where their range ends
+    /// (twice that where it starts): larger is finer. Pool pressure divides
+    /// it (`PlanetStats::lod_pressure`). `HELIO_VOXEL_LOD_PIXELS` overrides.
     pub lod_pixels: f32,
     /// Relative width of the stochastic level transition.
     pub lod_dither: f32,
@@ -139,7 +147,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            lod_pixels: 1.0,
+            lod_pixels: std::env::var("HELIO_VOXEL_LOD_PIXELS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0),
             lod_dither: std::env::var("HELIO_VOXEL_LOD_DITHER").ok().and_then(|v| v.parse().ok()).unwrap_or(0.25),
             job_budget: 12_288,
             horizon: std::env::var_os("HELIO_VOXEL_NO_HORIZON").is_none(),
@@ -235,6 +243,13 @@ pub struct PlanetStats {
     pub us_per_unit: f64,
     pub unit_budget: f64,
     pub units: f64,
+    /// Edit data on the GPU: baked brick slots in use and the pool's slots,
+    /// and edit block words in use.
+    pub baked_bricks: u32,
+    pub baked_pool: u32,
+    pub edit_words: u32,
+    /// Distinct face brushes the resident columns reference.
+    pub brushes: u32,
 }
 
 /// Copy of the allocator counters and the failed jobs since the last copy.
@@ -326,6 +341,40 @@ fn terrain_bytes(program: &TerrainProgram) -> Vec<u8> {
     bytes
 }
 
+/// The pass's composed shaders as compiled for a world form and terrain
+/// program: generation, trace and gbuffer.
+pub fn shader_sources(plane: bool, program: &TerrainProgram) -> [(&'static str, String); 3] {
+    let view = include_str!("../shaders/view.wgsl");
+    [
+        ("planet generation", source("read_write", &[include_str!("../shaders/generate.wgsl")], plane, program)),
+        (
+            "planet trace",
+            source(
+                "read_write",
+                &[view, include_str!("../shaders/horizon.wgsl"), include_str!("../shaders/trace.wgsl"), include_str!("../shaders/surface.wgsl")],
+                plane,
+                program,
+            ),
+        ),
+        ("planet gbuffer", source("read", &[view, include_str!("../shaders/gbuffer.wgsl")], plane, program)),
+    ]
+}
+
+/// [`shader_sources`] for both world forms with the Earth terrain program
+/// (shader validation without a device).
+pub fn validation_sources() -> Vec<(String, String)> {
+    let grid = crate::grid::Grid::new(6_371_000.0, 0.1).expect("Earth grid");
+    let field = crate::layers::TerrainLayers::earth().field(&grid, 1).expect("Earth terrain");
+    let program = crate::terrain::TerrainField::program(&field);
+    [false, true]
+        .into_iter()
+        .flat_map(|plane| {
+            let form = if plane { "plane" } else { "sphere" };
+            shader_sources(plane, &program).map(|(label, source)| (format!("{label} ({form})"), source))
+        })
+        .collect()
+}
+
 /// Shader source: the noise library, world helpers and the terrain program,
 /// then the engine parts.
 fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -> String {
@@ -340,6 +389,10 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -
         // Heightfield programs: no volumetric terms (`TerrainField::extent`, `density`).
         s.push_str("fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
         s.push_str("fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32 { return heightfield_density(top, k); }\n");
+    }
+    if !program.wgsl.contains("fn terrain_clearance") {
+        // No bound: every cell of the volume's extent is evaluated.
+        s.push_str("fn terrain_clearance(q: vec3<i32>, level: u32, step: f32) -> i32 { return 0; }\n");
     }
     if !program.wgsl.contains("fn terrain_lean") {
         // No lean (`TerrainField::lean`).
@@ -442,6 +495,7 @@ impl Pipelines {
             uniform(16),
             storage(17, false),
             storage(18, false),
+            storage(20, true),
         ]
         .into();
         let gen_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -456,6 +510,7 @@ impl Pipelines {
             storage(4, false),
             storage(5, true),
             storage(6, true),
+            storage(20, true),
             storage(7, false),
             storage(8, false),
             storage(14, false),
@@ -500,18 +555,10 @@ impl Pipelines {
         // Composed from several files plus the terrain program in Rust, so it
         // goes through `module` as plain text (not hot reloadable).
         let module = |label: &str, src: String| helio_core::shader::module(device, label, &src);
-        let gen_module = module("planet generation", source("read_write", &[include_str!("../shaders/generate.wgsl")], plane, program));
-        let trace_src = [
-            include_str!("../shaders/view.wgsl"),
-            include_str!("../shaders/horizon.wgsl"),
-            include_str!("../shaders/trace.wgsl"),
-            include_str!("../shaders/surface.wgsl"),
-        ];
-        let trace_module = module("planet trace", source("read_write", &trace_src, plane, program));
-        let render_module = module(
-            "planet gbuffer",
-            source("read", &[include_str!("../shaders/view.wgsl"), include_str!("../shaders/gbuffer.wgsl")], plane, program),
-        );
+        let [(_, gen_src), (_, trace_src), (_, render_src)] = shader_sources(plane, program);
+        let gen_module = module("planet generation", gen_src);
+        let trace_module = module("planet trace", trace_src);
+        let render_module = module("planet gbuffer", render_src);
         let recycle_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("planet pool recycling"),
             entries: &[storage(0, false), storage(1, false), storage(2, true), storage(3, false), storage(4, false), storage(5, false)],
@@ -645,7 +692,14 @@ struct Buffers {
     table: wgpu::Buffer,
     records: wgpu::Buffer,
     pool: wgpu::Buffer,
+    /// Baked brick slots (`BAKED_BRICK_BYTES` each), grown to the
+    /// residency's high-water mark up to `Capacity::baked_bricks`.
+    baked: wgpu::Buffer,
+    baked_slots: u32,
+    /// The shared face brush table (`FACE_BRUSH_BYTES` each), grown to the
+    /// residency's high-water mark up to `Capacity::brushes`.
     brushes: wgpu::Buffer,
+    brush_slots: u32,
     edit_refs: wgpu::Buffer,
     jobs: wgpu::Buffer,
     job_out: wgpu::Buffer,
@@ -667,13 +721,14 @@ struct Buffers {
     horizon: wgpu::Buffer,
     /// Live tier-1 block slots (grows).
     live_blocks: wgpu::Buffer,
-    brush_capacity: u32,
     bytes: u64,
 }
 
-const JOB_OUT_BYTES: u64 = 104;
+const JOB_OUT_BYTES: u64 = 96;
 /// Bytes per face brush (`edits::FaceBrush`).
-const BRUSH_BYTES: u64 = std::mem::size_of::<crate::edits::FaceBrush>() as u64;
+const FACE_BRUSH_BYTES: u64 = std::mem::size_of::<crate::edits::FaceBrush>() as u64;
+/// Bytes per baked brick slot: 512 cells of 16 bits.
+const BAKED_BRICK_BYTES: u64 = crate::edit_store::BRICK_CELLS as u64 * 2;
 /// Must match `SECTORS` and `BUCKETS` in horizon.wgsl.
 const HORIZON_SECTORS: u32 = 256;
 const HORIZON_BUCKETS: u32 = 32;
@@ -717,8 +772,11 @@ impl Buffers {
             st | wgpu::BufferUsages::COPY_SRC,
         );
         let live_blocks = make("planet live summary blocks", 65_536 * 4, st);
-        let brush_capacity = 65_536;
-        let brushes = make("planet brushes", u64::from(brush_capacity) * BRUSH_BYTES, st | wgpu::BufferUsages::COPY_SRC);
+        // A thirtieth of the budget to start; it grows with destruction.
+        let baked_slots = (cap.baked_bricks / 32).max(64).min(cap.baked_bricks);
+        let baked = make("planet baked edits", u64::from(baked_slots) * BAKED_BRICK_BYTES, st | wgpu::BufferUsages::COPY_SRC);
+        let brush_slots = (cap.brushes / 64).max(256).min(cap.brushes.max(1));
+        let brushes = make("planet brushes", u64::from(brush_slots) * FACE_BRUSH_BYTES, st | wgpu::BufferUsages::COPY_SRC);
         let table_init = vec![NONE; 1 << cap.table_bits];
         bytes += (table_init.len() * 4) as u64;
         let table = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -762,7 +820,10 @@ impl Buffers {
             table,
             records,
             pool,
+            baked,
+            baked_slots,
             brushes,
+            brush_slots,
             edit_refs,
             jobs,
             job_out,
@@ -780,7 +841,6 @@ impl Buffers {
             horizon_acc,
             horizon,
             live_blocks,
-            brush_capacity,
             bytes,
         }
     }
@@ -891,6 +951,8 @@ pub struct PlanetRenderer {
     lod_pressure: f64,
     /// Failed jobs counted at the last pressure step.
     pressure_failed_jobs: usize,
+    /// Whether an allocator readback has arrived (`Stats::free_units`).
+    allocator_read: bool,
     /// Job budget scale under scratch pressure (1 without).
     scratch_scale: f64,
     last_pressure_update: u64,
@@ -1018,6 +1080,7 @@ impl PlanetRenderer {
             last_recycle: 0,
             lod_pressure: 1.0,
             pressure_failed_jobs: 0,
+            allocator_read: false,
             scratch_scale: 1.0,
             last_pressure_update: 0,
             last_eye: None,
@@ -1028,8 +1091,8 @@ impl PlanetRenderer {
     }
 
     fn gen_group(device: &wgpu::Device, p: &Pipelines, b: &Buffers) -> wgpu::BindGroup {
-        let entries: Vec<wgpu::BindGroupEntry> = [
-            &b.frame, &b.world, &b.table, &b.records, &b.pool, &b.brushes, &b.edit_refs, &b.jobs, &b.job_out,
+        let mut entries: Vec<wgpu::BindGroupEntry> = [
+            &b.frame, &b.world, &b.table, &b.records, &b.pool, &b.baked, &b.edit_refs, &b.jobs, &b.job_out,
             &b.scratch, &b.alloc, &b.free_runs, &b.free_pages, &b.evictions, &b.level_tops, &b.block_state, &b.terrain,
             &b.failures, &b.page_meta,
         ]
@@ -1040,6 +1103,7 @@ impl PlanetRenderer {
             resource: buffer.as_entire_binding(),
         })
         .collect();
+        entries.push(wgpu::BindGroupEntry { binding: 20, resource: b.brushes.as_entire_binding() });
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("planet generation"),
             layout: &p.gen_layout,
@@ -1265,11 +1329,18 @@ impl PlanetRenderer {
     /// Upload this frame's residency changes. Returns (table patches,
     /// summary block patches) appended after the eviction list.
     fn upload(&mut self, work: &FrameWork) -> (u32, u32) {
-        for (index, brush) in &work.brush_writes {
-            if *index >= self.buffers.brush_capacity {
-                self.grow_brushes(*index + 1);
-            }
-            self.queue.write_buffer(&self.buffers.brushes, u64::from(*index) * BRUSH_BYTES, bytemuck::bytes_of(brush));
+        if work.baked_slots > self.buffers.baked_slots {
+            self.grow_baked(work.baked_slots);
+        }
+        if work.brush_slots > self.buffers.brush_slots {
+            self.grow_brushes(work.brush_slots);
+        }
+        for (slot, brush) in &work.brush_writes {
+            self.queue.write_buffer(&self.buffers.brushes, u64::from(*slot) * FACE_BRUSH_BYTES, bytemuck::bytes_of(brush));
+        }
+        for (slot, brick) in &work.baked_writes {
+            let cells: Vec<u16> = brick.cells.iter().map(|c| c.0).collect();
+            self.queue.write_buffer(&self.buffers.baked, u64::from(*slot) * BAKED_BRICK_BYTES, bytemuck::cast_slice(&cells));
         }
         for (base, words) in &work.edit_writes {
             self.queue.write_buffer(&self.buffers.edit_refs, u64::from(*base) * 4, bytemuck::cast_slice(words));
@@ -1303,6 +1374,44 @@ impl PlanetRenderer {
         (work.table_writes.len() as u32, work.block_inits.len() as u32)
     }
 
+    /// Grow the baked brick pool to hold `needed` slots (doubling, within
+    /// the budget), keeping the bricks already uploaded.
+    fn grow_baked(&mut self, needed: u32) {
+        let slots = needed.next_power_of_two().max(self.buffers.baked_slots * 2).min(self.settings.capacity.baked_bricks.max(needed));
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("planet baked edits"),
+            size: u64::from(slots) * BAKED_BRICK_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(&self.buffers.baked, 0, &buffer, 0, u64::from(self.buffers.baked_slots) * BAKED_BRICK_BYTES);
+        self.queue.submit([encoder.finish()]);
+        self.buffers.bytes += u64::from(slots - self.buffers.baked_slots) * BAKED_BRICK_BYTES;
+        self.buffers.baked = buffer;
+        self.buffers.baked_slots = slots;
+        self.gen_group = Self::gen_group(&self.device, &self.pipelines, &self.buffers);
+    }
+
+    /// Grow the shared brush table to hold `needed` slots (doubling, within
+    /// the budget), keeping the brushes already uploaded.
+    fn grow_brushes(&mut self, needed: u32) {
+        let slots = needed.next_power_of_two().max(self.buffers.brush_slots * 2).min(self.settings.capacity.brushes.max(needed));
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("planet brushes"),
+            size: u64::from(slots) * FACE_BRUSH_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(&self.buffers.brushes, 0, &buffer, 0, u64::from(self.buffers.brush_slots) * FACE_BRUSH_BYTES);
+        self.queue.submit([encoder.finish()]);
+        self.buffers.bytes += u64::from(slots - self.buffers.brush_slots) * FACE_BRUSH_BYTES;
+        self.buffers.brushes = buffer;
+        self.buffers.brush_slots = slots;
+        self.gen_group = Self::gen_group(&self.device, &self.pipelines, &self.buffers);
+    }
+
     /// Copy the hits under this frame's pick requests for readback.
     fn copy_picks(slots: &mut [PickSlot], hits: &wgpu::Buffer, encoder: &mut CommandRecorder<'_>, picks: &SharedPicks, size: [u32; 2]) {
         let Some(slot) = slots.iter_mut().find(|slot| slot.stage == 0) else { return };
@@ -1327,7 +1436,6 @@ impl PlanetRenderer {
 
     /// Answer picks whose hits arrived; start mapping last frame's copies.
     fn poll_picks(&mut self) {
-        let voxel = self.planet.grid().voxel_size();
         for slot in &mut self.picks {
             if slot.stage == 2 && slot.state.load(Ordering::Acquire) {
                 let results: Vec<PickResult> = {
@@ -1337,10 +1445,16 @@ impl PlanetRenderer {
                         .enumerate()
                         .map(|(n, &id)| {
                             let at = n * HIT_BYTES as usize;
-                            let t = f32::from_le_bytes(data[at..at + 4].try_into().unwrap());
-                            let info = u32::from_le_bytes(data[at + 16..at + 20].try_into().unwrap());
-                            let hit = (info & 3 == 1 && t.is_finite() && t > 0.0)
-                                .then(|| PickHit { distance: f64::from(t), cell_m: voxel * f64::from(1u32 << ((info >> 5) & 31)) });
+                            let word = |n: usize| u32::from_le_bytes(data[at + 4 * n..at + 4 * n + 4].try_into().unwrap());
+                            let t = f32::from_bits(word(0));
+                            let info = word(4);
+                            let code = (info >> 10) & 7;
+                            let hit = (info & 3 == 1 && t.is_finite() && t > 0.0).then(|| PickHit {
+                                distance: f64::from(t),
+                                cell: crate::grid::Cell::new(((info >> 2) & 7) as u8, word(1) as i32, word(2) as i32, word(3) as i32),
+                                level: (info >> 5) & 31,
+                                entered: (code < 6).then_some(code),
+                            });
                             PickResult { id, hit }
                         })
                         .collect()
@@ -1367,23 +1481,6 @@ impl PlanetRenderer {
         }
     }
 
-    fn grow_brushes(&mut self, needed: u32) {
-        let capacity = needed.next_power_of_two().max(self.buffers.brush_capacity * 2);
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("planet brushes"),
-            size: u64::from(capacity) * BRUSH_BYTES,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(&self.buffers.brushes, 0, &buffer, 0, u64::from(self.buffers.brush_capacity) * BRUSH_BYTES);
-        self.queue.submit([encoder.finish()]);
-        self.buffers.bytes += u64::from(capacity - self.buffers.brush_capacity) * BRUSH_BYTES;
-        self.buffers.brushes = buffer;
-        self.buffers.brush_capacity = capacity;
-        self.gen_group = Self::gen_group(&self.device, &self.pipelines, &self.buffers);
-    }
-
     fn poll_readbacks(&mut self) {
         let _ = self.device.poll(wgpu::PollType::Poll);
         let mut failed = Vec::new();
@@ -1408,6 +1505,7 @@ impl PlanetRenderer {
                     // Free runs of every size class plus unassigned pages.
                     self.stats.free_units = (0..10).map(|c| u64::from(word(c).max(0) as u32) << c).sum::<u64>()
                         + u64::from(word(30).max(0) as u32) * 512;
+                    self.allocator_read = true;
                 }
                 r.buffer.unmap();
                 r.stage = 0;
@@ -1423,8 +1521,9 @@ impl PlanetRenderer {
             self.scratch_scale = (self.scratch_scale * 1.1).min(1.0);
         }
         self.stats.scratch_retries += scratch;
-        self.stats.failed_jobs += failed.iter().filter(|(_, s, _)| *s != crate::residency::STATUS_CLIPPED && *s != 2).count();
-        self.stats.clipped_columns += failed.iter().filter(|(_, s, _)| *s == crate::residency::STATUS_CLIPPED).count();
+        let clipped = |s: u32| crate::residency::clipped_sides(s).is_some();
+        self.stats.failed_jobs += failed.iter().filter(|(_, s, _)| !clipped(*s) && *s != 2).count();
+        self.stats.clipped_columns += failed.iter().filter(|(_, s, _)| clipped(*s)).count();
         self.failed.extend(failed);
         // Start mapping readbacks encoded in earlier frames.
         for r in &mut self.readbacks {
@@ -1461,12 +1560,19 @@ impl PlanetRenderer {
         let cap = &self.settings.capacity;
         let rs = &self.plan.stats;
         let records = (rs.resident_columns + rs.pending_columns) as f64 / f64::from(cap.records);
-        // `free_units` is 0 until the first allocator readback.
-        let pool = if self.stats.free_units == 0 { 0.0 } else { 1.0 - self.stats.free_units as f64 / f64::from(cap.pool_units) };
-        // No free page and jobs waiting to retry: the free units left belong
-        // to other size classes, so the pool is full for the columns wanted
-        // (counting units alone left a fragmented pool failing forever).
-        let starved = self.stats.free_pages == 0 && self.stats.free_units != 0 && self.stats.failed_jobs > self.pressure_failed_jobs;
+        // Unknown until the first allocator readback; a full pool has no
+        // free unit (reading 0 as "not read yet" never raised pressure over
+        // a full pool, and its jobs failed forever).
+        let pool = if self.allocator_read { 1.0 - self.stats.free_units as f64 / f64::from(cap.pool_units) } else { 0.0 };
+        // Edit data counts as pool: baked brick slots and edit block words
+        // (a destroyed region's columns hold more of both).
+        let edits = (f64::from(rs.baked_bricks) / f64::from(cap.baked_bricks.max(1))).max(f64::from(rs.edit_words) / f64::from(cap.edit_words.max(1)));
+        let pool = pool.max(edits);
+        // No free page and jobs waiting to retry: the free units left (if
+        // any) belong to other size classes, so the pool is full for the
+        // columns wanted (counting units alone left a fragmented pool failing
+        // forever).
+        let starved = self.allocator_read && self.stats.free_pages == 0 && self.stats.failed_jobs > self.pressure_failed_jobs;
         self.pressure_failed_jobs = self.stats.failed_jobs;
         // Only wanted columns count: removals a pressure step itself queues
         // must not raise it further. A still camera's backlog is loading,
@@ -1864,8 +1970,9 @@ impl PlanetRenderer {
                 wgpu::BindGroupEntry { binding: 2, resource: self.buffers.table.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: self.buffers.records.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: self.buffers.pool.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: self.buffers.brushes.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: self.buffers.baked.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: self.buffers.edit_refs.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 20, resource: self.buffers.brushes.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: self.screen.hits.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 8, resource: self.screen.surfaces.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.screen.sun_view) },
@@ -2055,6 +2162,10 @@ impl PlanetRenderer {
         self.stats.window_rebuild_ms = rs.window_rebuild_ms;
         self.stats.table_refused = rs.table_refused;
         self.stats.reranked = rs.reranked;
+        self.stats.baked_bricks = rs.baked_bricks;
+        self.stats.baked_pool = self.buffers.baked_slots;
+        self.stats.brushes = rs.brushes;
+        self.stats.edit_words = rs.edit_words;
         self.stats.lod0_distance = lod0;
         self.stats.pool_pages = self.settings.capacity.pool_units / 512;
         self.stats.logical_bytes = self.buffers.bytes + u64::from(size[0]) * u64::from(size[1]) * (32 + 16 + 8 + 4);

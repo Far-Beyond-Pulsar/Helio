@@ -615,6 +615,10 @@ pub enum VoxelLayerKind {
     Basins,
     /// A constant height (a flat world is one plateau).
     Plateau,
+    /// Escarpments: inside regions of Scale covering Coverage, the layers
+    /// before it step into terraces Height tall, joined by cliffs over the
+    /// last Ratio of each step.
+    Cliffs,
 }
 
 /// Where a terrain layer applies.

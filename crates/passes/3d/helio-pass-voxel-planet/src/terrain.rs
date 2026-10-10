@@ -43,7 +43,14 @@
 //! ```wgsl
 //! fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32>
 //! fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32
+//! fn terrain_clearance(q: vec3<i32>, level: u32, step: f32) -> i32 // optional
 //! ```
+//!
+//! `terrain_clearance` is a conservative count of level cells along a lane,
+//! from the cell at volume point `q` (the point moving `step` units per
+//! cell), in which the volume cannot change a cell below the heightfield's
+//! lean band (caves cannot carve there); generation steps over them. Without
+//! it every cell of the extent is evaluated.
 //!
 //! and, to lean its surface (overhangs that are a continuous deformation of
 //! the heightfield: nothing floats),

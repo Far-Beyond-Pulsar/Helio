@@ -383,8 +383,7 @@ const INFO_GENERATED:u32=0x1000u;
 const M_DIRT:u32=2u;
 const M_STONE:u32=3u;
 const M_DARK_STONE:u32=9u;
-struct Column {{ info:u32, fits:u32 }}
-fn column_tops_fit(c:Column)->bool {{return c.fits!=0u;}}
+struct Column {{ info:u32 }}
 {guards}
 var<private> material_coverage:f32=-1.0;
 var<private> material_coverage_ids:vec2<u32>=vec2<u32>(M_DARK_STONE,M_STONE);
@@ -404,10 +403,10 @@ fn palette(id:u32)->vec3<f32> {{
     let p=probes[id.x];
     material_coverage=rock_band_coverage(p.x,p.y,p.z,p.w);
     answers[id.x*2u]=vec4<f32>(filtered_rock_flecks(palette(M_STONE),0.75*select(palette(M_STONE), mix(palette(material_coverage_ids.x), palette(material_coverage_ids.y), max(material_coverage,0.0)), material_coverage>=0.0),0.75,M_STONE,1.0),material_coverage);
-    answers[id.x*2u+1u]=vec4<f32>(f32(natural_material_filter_allowed(false,Column(0u,1u))),
-        f32(natural_material_filter_allowed(true,Column(0u,1u))),
-        f32(natural_material_filter_allowed(false,Column(INFO_TOPOLOGY,1u))),
-        f32(natural_material_filter_allowed(false,Column(0u,0u))));
+    answers[id.x*2u+1u]=vec4<f32>(f32(natural_material_filter_allowed(false,Column(0u))),
+        f32(natural_material_filter_allowed(true,Column(0u))),
+        f32(natural_material_filter_allowed(false,Column(INFO_TOPOLOGY))),
+        f32(natural_material_filter_allowed(false,Column(INFO_GENERATED))));
 }}
 "#);
     let mut probes = Vec::<[f32;4]>::new();
@@ -445,7 +444,7 @@ fn palette(id:u32)->vec3<f32> {{
         let expected=integrated_stone_oracle(p[0] as f64,p[1] as f64,p[2] as f64,p[3] as f64,&cdf);
         let error=(answer[3] as f64-expected).abs();worst=worst.max(error);
         assert!(error<0.0015,"phase/span/noise {p:?}: {} vs {expected}, error {error}",answer[3]);
-        assert_eq!(answers[index*2+1],[1.,0.,0.,0.],"paint/topology/truncated guards");
+        assert_eq!(answers[index*2+1],[1.,0.,0.,0.],"paint/topology/generated volume guards");
         for channel in 0..3 {
             let light=[0.8,0.1,0.6][channel];let dark=[0.1,0.7,0.2][channel];let dirt=[0.2,0.3,0.4][channel];
             let colour=0.75*(0.875*(expected*light+(1.-expected)*dark)+0.125*dirt);

@@ -225,8 +225,9 @@ fn normal_code(axis: u32, step: i32) -> u32 {
     return axis * 2u + select(0u, 1u, step > 0);
 }
 
-// Per-ray work counters (diagnostics): loop steps, column lookups, block skips,
-// relocations.
+// Per-pixel work counters (diagnostics): loop steps, column lookups, block
+// skips, relocations, summed over every trace of the invocation (a primary
+// ray the sky bound cut traces again).
 var<private> work_steps: u32;
 var<private> work_lookups: u32;
 var<private> work_skips: u32;
@@ -371,22 +372,17 @@ fn relief_enter(r: Ray, height: f32, t: f32) -> f32 {
 
 fn level_contains_solid(c: Cursor, record: u32, r: Ray, t: f32) -> bool {
     let col = records[record];
-    if (col.info & INFO_RELIEF) != 0u && column_tops_known(col) {
-        let fraction = column_relief_fraction(col, u32(c.i & 7), u32(c.j & 7));
+    let x = u32(c.i & 7);
+    let y = u32(c.j & 7);
+    if !column_knows(col, c.k) { return false; }
+    if (col.info & INFO_RELIEF) != 0u {
+        let fraction = column_relief_fraction(col, x, y);
         // The relief surface cuts the top cell; below it, occupancy (caves).
-        if fraction != 0u && c.k >= column_top(col, u32(c.i & 7), u32(c.j & 7)) - 1 {
+        if fraction != 0u && c.k >= column_top(col, x, y) - 1 {
             return height_rel(r, t) <= relief_height(col, c.i, c.j, c.level, fraction);
         }
     }
-    if (col.info & INFO_HEIGHTFIELD) != 0u {
-        return c.k < column_top(col, u32(c.i & 7), u32(c.j & 7));
-    }
-    if c.k < col.k_lo * 8 { return true; }
-    let band = (c.k >> 3u) - col.k_lo;
-    if band >= i32(band_count(col)) { return false; }
-    let s = brick_state(col, u32(band));
-    if s.x == 2u { return brick_bit(s.y, u32(c.i & 7), u32(c.j & 7), u32(c.k & 7)); }
-    return s.x == 1u;
+    return column_cell(col, x, y, c.k) == 1u;
 }
 
 // Walk the ray from t_start to t_end. Level selection uses
@@ -426,14 +422,10 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
     var loaded = vec4<i32>(-1);
     var normal = 6u;
     let n_base = frame.layer_i.y - 1;
-    work_steps = 0u;
-    work_lookups = 0u;
-    work_skips = 0u;
-    work_locates = 0u;
     var last_t = -1.0;
     var stalls = 0u;
     for (var step = 0u; step < MAX_STEPS; step++) {
-        work_steps = step;
+        work_steps += 1u;
         if t > t_end { return make_hit(ST_MISS, t, cur, normal, NONE); }
         // Progress guard: near-tangent boundaries can round to zero advance
         // and alternate between two cells. Nudge forward and re-locate.
@@ -537,7 +529,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
         var k1 = 0x3fffffff >> lv;
         var above = skip.x > 0;
         if !above && !column_knows(col, cur.k) {
-            // Beyond a clipped band (the cursor moved vertically inside the
+            // Beyond a clipped window (the cursor moved vertically inside the
             // column): continue at the coarser level, whose window is larger.
             if cur.level + 1u >= u32(frame.layer_i.z) {
                 return make_hit(ST_LOADING, t, cur, normal, NONE);
@@ -550,10 +542,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
             continue;
         }
         if !above {
-            k0 = column_top_cell(col);
-            if cur.k < col.k_lo * 8 {
-                return make_hit(ST_HIT, t, cur, normal, record);
-            }
+            k0 = col.top;
             above = cur.k >= k0;
             if above && !summary_checked {
                 skip = summary_block(lv, cur.face, ci, cj, cur.k);
@@ -573,18 +562,19 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 work_skips += 1u;
             }
         } else {
+            let x = u32(cur.i & 7);
+            let y = u32(cur.j & 7);
             var fraction = 0u;
-            if (col.info & INFO_RELIEF) != 0u && column_tops_known(col) {
-                fraction = column_relief_fraction(col, u32(cur.i & 7), u32(cur.j & 7));
+            if (col.info & INFO_RELIEF) != 0u {
+                fraction = column_relief_fraction(col, x, y);
+                // A zero remainder has the same occupied layers as whole
+                // cells, so it needs no arbitrary-radius solve. Below the top
+                // cell the spans decide (generated caves keep their
+                // occupancy under a relief surface).
+                if fraction != 0u && cur.k < column_top(col, x, y) - 1 { fraction = 0u; }
             }
-            // A zero remainder has the same occupied layers as the original
-            // whole-cell brick path, so it needs no arbitrary-radius solve.
-            // Below the top cell the bricks decide (generated caves keep
-            // their occupancy under a relief surface).
-            if fraction != 0u && cur.k < column_top(col, u32(cur.i & 7), u32(cur.j & 7)) - 1 { fraction = 0u; }
             if fraction != 0u {
-                // Preserve the actual radial top of this angular cell. The
-                // branch precedes both solid and mixed brick hit paths.
+                // Preserve the actual radial top of this angular cell.
                 let surface = relief_height(col, cur.i, cur.j, lv, fraction);
                 if height_rel(r, t) <= surface { return make_hit(ST_HIT, t, cur, normal, record); }
                 let ta = select(plane_t(fr, 0u, select(cur.i, cur.i + 1, fr.dir.x > 0) << lv), 3.0e38, fr.dir.x == 0);
@@ -592,11 +582,11 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 let enter = relief_enter(r, surface, t);
                 if enter <= min(ta, tb) && enter < 3.0e38 {
                     if enter > t_end { return make_hit(ST_MISS, t_end, cur, normal, NONE); }
-                    // The solve can cross several radial cells inside this
-                    // column's band. Publish this angular cell's enclosing
-                    // solid layer, not the cursor from before the solve.
+                    // The solve can cross several radial cells. Publish this
+                    // angular cell's enclosing solid layer, not the cursor
+                    // from before the solve.
                     var entered = cur;
-                    entered.k = column_top(col, u32(cur.i & 7), u32(cur.j & 7)) - 1;
+                    entered.k = column_top(col, x, y) - 1;
                     return make_hit(ST_HIT, enter, entered, normal_code(2u, -1), record);
                 }
                 let next = max(min(ta, tb), t);
@@ -607,61 +597,90 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
                 else { cur.j += fr.dir.y; normal = normal_code(1u, fr.dir.y); }
                 continue;
             }
-            let kb = (cur.k >> 3u) - col.k_lo;
-            let s = brick_state(col, u32(kb));
-            if s.x == 1u {
-                return make_hit(ST_HIT, t, cur, normal, record);
-            }
-            k0 = (cur.k >> 3u) << 3u;
-            k1 = k0 + 8;
-            if s.x == 2u {
-                // Classify the current exact cell before solving its exit.
-                // Partial relief cells returned or continued above this path.
-                if (col.info & INFO_HEIGHTFIELD) != 0u
-                    && cur.k < column_top(col, u32(cur.i & 7), u32(cur.j & 7)) {
+            let s = span_at(col, cur.k);
+            if s.kind == SPAN_AIR {
+                // Air across the whole footprint (dug out, a cave's hall): one
+                // box, however tall.
+                k0 = s.start;
+                k1 = s.end;
+            } else if s.kind == SPAN_BRICKS {
+                let b = u32((cur.k - s.start) >> 3u);
+                let state = span_brick(col, s, b);
+                if state.x == 1u {
                     return make_hit(ST_HIT, t, cur, normal, record);
                 }
-                // Exact cell DDA inside the mixed brick.
-                var ta = select(plane_t(fr, 0u, select(cur.i, cur.i + 1, fr.dir.x > 0) << lv), 3.0e38, fr.dir.x == 0);
-                var tb = select(plane_t(fr, 1u, select(cur.j, cur.j + 1, fr.dir.y > 0) << lv), 3.0e38, fr.dir.y == 0);
-                var tr = radial_exit(r, cur.k << lv, (cur.k + 1) << lv, t);
-                loop {
-                    // The inner DDA can cross the requested endpoint before
-                    // returning to the outer traversal range check.
-                    if t > t_end { return make_hit(ST_MISS, t_end, cur, normal, NONE); }
-                    var cell_solid = false;
-                    if (col.info & INFO_HEIGHTFIELD) != 0u {
-                        cell_solid = cur.k < column_top(col, u32(cur.i & 7), u32(cur.j & 7));
-                    } else {
-                        cell_solid = brick_bit(s.y, u32(cur.i & 7), u32(cur.j & 7), u32(cur.k & 7));
+                k0 = s.start + i32(b) * 8;
+                k1 = k0 + 8;
+                if state.x == 2u {
+                    // Exact cell DDA inside the mixed brick.
+                    var ta = select(plane_t(fr, 0u, select(cur.i, cur.i + 1, fr.dir.x > 0) << lv), 3.0e38, fr.dir.x == 0);
+                    var tb = select(plane_t(fr, 1u, select(cur.j, cur.j + 1, fr.dir.y > 0) << lv), 3.0e38, fr.dir.y == 0);
+                    var tr = radial_exit(r, cur.k << lv, (cur.k + 1) << lv, t);
+                    loop {
+                        // The inner DDA can cross the requested endpoint before
+                        // returning to the outer traversal range check.
+                        if t > t_end { return make_hit(ST_MISS, t_end, cur, normal, NONE); }
+                        if brick_bit(state.y, u32(cur.i & 7), u32(cur.j & 7), u32(cur.k & 7)) {
+                            return make_hit(ST_HIT, t, cur, normal, record);
+                        }
+                        let t_next = max(min(ta, min(tb, tr.x)), t);
+                        if t_next >= 3.0e38 { return make_hit(ST_MISS, t, cur, normal, NONE); }
+                        t = t_next;
+                        var angular_crossing = false;
+                        if ta <= tb && ta <= tr.x {
+                            angular_crossing = true;
+                            cur.i += fr.dir.x;
+                            normal = normal_code(0u, fr.dir.x);
+                            ta = plane_t(fr, 0u, select(cur.i, cur.i + 1, fr.dir.x > 0) << lv);
+                        } else if tb <= tr.x {
+                            angular_crossing = true;
+                            cur.j += fr.dir.y;
+                            normal = normal_code(1u, fr.dir.y);
+                            tb = plane_t(fr, 1u, select(cur.j, cur.j + 1, fr.dir.y > 0) << lv);
+                        } else {
+                            let dk = i32(tr.y);
+                            cur.k += dk;
+                            normal = normal_code(2u, dk);
+                            tr = radial_exit(r, cur.k << lv, (cur.k + 1) << lv, t);
+                        }
+                        if (cur.i >> 3u) != ci || (cur.j >> 3u) != cj || cur.k < k0 || cur.k >= k1 { break; }
+                        // A relief cell's top is cut by its surface: reclassify
+                        // it before taking its enclosing cell as solid.
+                        if angular_crossing && (col.info & INFO_RELIEF) != 0u
+                            && column_relief_fraction(col, u32(cur.i & 7), u32(cur.j & 7)) != 0u { break; }
                     }
-                    if cell_solid { return make_hit(ST_HIT, t, cur, normal, record); }
-                    let t_next = max(min(ta, min(tb, tr.x)), t);
-                    if t_next >= 3.0e38 { return make_hit(ST_MISS, t, cur, normal, NONE); }
-                    t = t_next;
-                    var angular_crossing = false;
-                    if ta <= tb && ta <= tr.x {
-                        angular_crossing = true;
-                        cur.i += fr.dir.x;
-                        normal = normal_code(0u, fr.dir.x);
-                        ta = plane_t(fr, 0u, select(cur.i, cur.i + 1, fr.dir.x > 0) << lv);
-                    } else if tb <= tr.x {
-                        angular_crossing = true;
-                        cur.j += fr.dir.y;
-                        normal = normal_code(1u, fr.dir.y);
-                        tb = plane_t(fr, 1u, select(cur.j, cur.j + 1, fr.dir.y > 0) << lv);
-                    } else {
-                        let dk = i32(tr.y);
-                        cur.k += dk;
-                        normal = normal_code(2u, dk);
-                        tr = radial_exit(r, cur.k << lv, (cur.k + 1) << lv, t);
-                    }
-                    if (cur.i >> 3u) != ci || (cur.j >> 3u) != cj || cur.k < k0 || cur.k >= k1 { break; }
-                    // The zero-fraction shortcut applies to one angular cell,
-                    // not its whole column. Reclassify a partial neighbor
-                    // before interpreting its enclosing ceil voxel as solid.
-                    if angular_crossing && (col.info & INFO_RELIEF) != 0u && column_tops_known(col)
-                        && column_relief_fraction(col, u32(cur.i & 7), u32(cur.j & 7)) != 0u { break; }
+                    continue;
+                }
+            } else {
+                // A lane span: this lane is solid below its own top inside the
+                // span, air above it. The next event is leaving the lane,
+                // leaving the span, or descending onto the lane's top: a
+                // column of cells crossed in one solve, however tall (the air
+                // beside a pit's wall, over a dug floor).
+                let lane_top = span_lane_top(col, s, x, y);
+                if cur.k < lane_top { return make_hit(ST_HIT, t, cur, normal, record); }
+                let ta = select(plane_t(fr, 0u, select(cur.i, cur.i + 1, fr.dir.x > 0) << lv), 3.0e38, fr.dir.x == 0);
+                let tb = select(plane_t(fr, 1u, select(cur.j, cur.j + 1, fr.dir.y > 0) << lv), 3.0e38, fr.dir.y == 0);
+                let tr = radial_exit(r, lane_top << lv, s.end << lv, t);
+                let t_next = max(min(ta, min(tb, tr.x)), t);
+                if t_next >= 3.0e38 { return make_hit(ST_MISS, t, cur, normal, NONE); }
+                if t_next > t_end { return make_hit(ST_MISS, t_end, cur, normal, NONE); }
+                t = t_next;
+                if ta <= tb && ta <= tr.x {
+                    cur.i += fr.dir.x;
+                    normal = normal_code(0u, fr.dir.x);
+                    cur.k = (frame.layer_i.x + i32(floor(layer_coord(r, t)))) >> lv;
+                } else if tb <= tr.x {
+                    cur.j += fr.dir.y;
+                    normal = normal_code(1u, fr.dir.y);
+                    cur.k = (frame.layer_i.x + i32(floor(layer_coord(r, t)))) >> lv;
+                } else if tr.y < 0.0 {
+                    // Down through the lane's top (or the span's start).
+                    cur.k = lane_top - 1;
+                    normal = normal_code(2u, -1);
+                } else {
+                    cur.k = s.end;
+                    normal = normal_code(2u, 1);
                 }
                 continue;
             }

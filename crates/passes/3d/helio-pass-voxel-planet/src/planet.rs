@@ -1,15 +1,19 @@
 //! Canonical editable voxel world (a planet or a plane): recipe, exact cell
 //! queries and ray casts.
-use crate::edits::{apply, center_half, Brush, EditLog, FaceBrush};
+use crate::edit_store::{ColumnKey, EditStore, StoreUndo};
+use crate::edits::{apply, center_half, Brush, EditLog, FaceBrush, ALL_LAYERS};
 use crate::grid::{face_axes, Cell, Grid, Shape};
 use crate::terrain::{self, material, TerrainField, TerrainSource, HEIGHT_ONE};
 
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 pub const RECIPE_VERSION: u32 = 2;
 pub const EARTH_RADIUS: f64 = 6_371_000.0;
+/// Level cells [`Planet::edited_top`] walks down at most.
+pub const EDITED_TOP_REACH: i32 = 4096;
 
 /// Serialized authoring recipe: the world's form and its terrain generator.
 /// Edits are stored separately (see `journal`).
@@ -76,11 +80,165 @@ impl PlanetRecipe {
 }
 
 /// Result of an exact ray cast on the base grid.
-/// The base column a ray walk is in (`Planet::kind_in`).
+/// The level column a walk is in (`Planet::kind_at`): its field height and
+/// brushes, looked up once.
 struct RayColumn {
-    key: (u8, i32, i32),
+    key: (u8, i32, i32, u32),
     height: i32,
-    brushes: Vec<FaceBrush>,
+    large: Vec<FaceBrush>,
+    recent: Vec<FaceBrush>,
+}
+
+/// Brushes kept exact before the oldest are sealed. Recent brushes draw
+/// only at levels whose cells they span; sealed ones bake into cells whose
+/// coarser levels show accumulated sculpting from any height, so the window
+/// is short: a long recent window let a heavily dug area vanish from a few
+/// hundred metres up.
+pub const RECENT_BRUSHES: usize = 64;
+/// Brushes sealed at a time.
+const SEAL_BATCH: usize = 16;
+/// Largest brush baked into cells, radius in half base cells (32 cells):
+/// larger ones would bake millions of cells and stay analytic.
+pub const BAKE_RADIUS_HALF: u32 = 64;
+/// Seals kept undoable (the latest `UNDO_SEALS * SEAL_BATCH` sealed
+/// brushes undo without rebuilding the world).
+const UNDO_SEALS: usize = 128;
+/// Baked column changes kept for renderers to catch up with.
+const CHANGES_KEPT: usize = 256;
+
+/// A world's edits in three layers, applied to the terrain in this order
+/// (see `edit_store`):
+///
+/// 1. `large`: sealed brushes too large to bake, analytic;
+/// 2. `baked`: every other sealed brush, as baked cell edits (with coarser
+///    levels built from the base level, so accumulated small edits show at
+///    any distance);
+/// 3. `recent`: the latest brushes, exact.
+///
+/// Sealing keeps the order exact: a small brush bakes on top of the store;
+/// a large one is applied to the cells already baked (it came after them)
+/// and joins `large`, which is applied under the store. Every cell then
+/// reads `recent(baked(large(terrain)))`, the brushes in their order.
+///
+/// Memory is bounded by the edits' effect, not their count: sealed brushes
+/// leave only their baked cells (and large ones their analytic record), a
+/// hash of the history, and for the latest seals what they replaced, so
+/// they can be undone.
+#[derive(Clone, Default)]
+pub struct Edits {
+    pub large: EditLog,
+    pub baked: EditStore,
+    pub recent: EditLog,
+    /// History hash after each recent brush.
+    recent_hash: Vec<u64>,
+    /// Brushes sealed and the history hash after them: the baked state.
+    sealed_count: usize,
+    sealed_hash: u64,
+    undo_seals: VecDeque<SealUndo>,
+    changes: VecDeque<BakedChange>,
+}
+
+/// A seal and what it replaced, to undo it.
+#[derive(Clone)]
+struct SealUndo {
+    brushes: Vec<(Brush, u64)>,
+    store: StoreUndo,
+    /// The large brushes before the seal.
+    large: EditLog,
+    before: (usize, u64),
+}
+
+/// Baked columns a seal or its undo changed, between two baked states
+/// (sealed brush count, history hash).
+#[derive(Clone)]
+pub struct BakedChange {
+    pub before: (usize, u64),
+    pub after: (usize, u64),
+    pub columns: Arc<[ColumnKey]>,
+}
+
+impl Edits {
+    /// Brushes applied (every layer).
+    pub fn len(&self) -> usize {
+        self.sealed_count + self.recent_hash.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// Brushes sealed (the first `sealed_len` of the history).
+    pub fn sealed_len(&self) -> usize {
+        self.sealed_count
+    }
+    /// Brushes [`Planet::undo`] can still remove.
+    pub fn undoable(&self) -> usize {
+        self.recent_hash.len() + self.undo_seals.iter().map(|u| u.brushes.len()).sum::<usize>()
+    }
+    /// Hash of the whole history: equal hashes, equal edits.
+    pub fn hash(&self) -> u64 {
+        self.recent_hash.last().copied().unwrap_or(self.sealed_hash)
+    }
+    /// Hash of the first `n` brushes, for `n` from [`Self::sealed_len`] to
+    /// [`Self::len`] (only the sealed brushes' total is kept).
+    pub fn prefix_hash(&self, n: usize) -> Option<u64> {
+        match n.checked_sub(self.sealed_count)? {
+            0 => Some(self.sealed_hash),
+            r => self.recent_hash.get(r - 1).copied(),
+        }
+    }
+    /// Brush `index` of the history, while it is recent.
+    pub fn brush(&self, index: usize) -> Option<Brush> {
+        let r = index.checked_sub(self.sealed_count)?;
+        (r < self.recent.len()).then(|| self.recent.resolved(r as u32).brush)
+    }
+    /// The baked state: brushes sealed and the history hash after them.
+    /// The baked store is a function of it.
+    pub fn baked_state(&self) -> (usize, u64) {
+        (self.sealed_count, self.sealed_hash)
+    }
+    /// Baked columns changed since baked state `state`, or `None` when that
+    /// state is not in the kept changes (long ago, or another history).
+    pub fn baked_changes_since(&self, state: (usize, u64)) -> Option<Vec<ColumnKey>> {
+        if state == self.baked_state() {
+            return Some(Vec::new());
+        }
+        let start = self.changes.iter().rposition(|c| c.before == state)?;
+        Some(self.changes.range(start..).flat_map(|c| c.columns.iter().copied()).collect())
+    }
+    fn record(&mut self, brush: &Brush) {
+        self.recent_hash.push(crate::edits::brush_hash(self.hash(), brush));
+    }
+    fn changed(&mut self, before: (usize, u64), columns: impl Iterator<Item = ColumnKey>) {
+        let after = self.baked_state();
+        self.changes.push_back(BakedChange { before, after, columns: columns.collect() });
+        if self.changes.len() > CHANGES_KEPT {
+            self.changes.pop_front();
+        }
+    }
+    /// Edits from their layers (a snapshot): `large` and `baked` hold the
+    /// first `sealed.0` brushes of a history with hash `sealed.1`, `recent`
+    /// the rest. Nothing of it is undoable.
+    pub(crate) fn from_parts(grid: &Grid, large: &[Brush], baked: EditStore, sealed: (usize, u64), recent: &[Brush]) -> Result<Self, String> {
+        let mut edits = Edits {
+            large: Self::log(grid, large.iter().copied())?,
+            baked,
+            recent: Self::log(grid, recent.iter().copied())?,
+            sealed_count: sealed.0,
+            sealed_hash: sealed.1,
+            ..Default::default()
+        };
+        for brush in recent {
+            edits.record(brush);
+        }
+        Ok(edits)
+    }
+    /// A recent log holding `brushes`.
+    fn log(grid: &Grid, brushes: impl Iterator<Item = Brush>) -> Result<EditLog, String> {
+        let mut log = EditLog::default();
+        for brush in brushes {
+            log.push(grid, brush)?;
+        }
+        Ok(log)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -97,7 +255,7 @@ pub struct Planet {
     recipe: PlanetRecipe,
     grid: Grid,
     field: Arc<dyn TerrainField>,
-    edits: EditLog,
+    edits: Edits,
     revision: u64,
     /// Highest radius any add brush reaches.
     edit_top: f64,
@@ -140,7 +298,7 @@ impl Planet {
             recipe,
             grid,
             field,
-            edits: EditLog::default(),
+            edits: Edits::default(),
             revision: 0,
             edit_top: 0.0,
             edit_bottom: f64::INFINITY,
@@ -157,15 +315,32 @@ impl Planet {
     pub fn field(&self) -> &dyn TerrainField {
         &*self.field
     }
-    pub fn edits(&self) -> &EditLog {
+    pub fn edits(&self) -> &Edits {
         &self.edits
+    }
+    /// Conservative radial bounds of the edits: the top of every addition
+    /// and the bottom of every removal.
+    pub(crate) fn edit_bounds(&self) -> (f64, f64) {
+        (self.edit_top, self.edit_bottom)
+    }
+    /// Replace the edits (a loaded snapshot) with their bounds.
+    pub(crate) fn restore_edits(&mut self, edits: Edits, (top, bottom): (f64, f64)) {
+        self.edits = edits;
+        self.edit_top = top;
+        self.edit_bottom = bottom;
+        self.revision += 1;
     }
     /// Increments with every applied or undone edit.
     pub fn revision(&self) -> u64 {
         self.revision
     }
     pub fn apply(&mut self, brush: Brush) -> Result<u32, String> {
-        let id = self.edits.push(&self.grid, brush)?;
+        self.edits.recent.push(&self.grid, brush)?;
+        self.edits.record(&brush);
+        let id = (self.edits.len() - 1) as u32;
+        if self.edits.recent.len() > RECENT_BRUSHES {
+            self.seal(SEAL_BATCH)?;
+        }
         // A cube brush reaches sqrt(3) radii from its centre.
         let reach = brush.radius * 1.7321 + self.grid.voxel_size();
         let centre = self.grid.radial(DVec3::from_array(brush.center));
@@ -177,10 +352,71 @@ impl Planet {
         self.revision += 1;
         Ok(id)
     }
+    /// Undo the latest brush: a recent one, or one of the latest sealed ones
+    /// (its seal is undone first); `None` past them
+    /// ([`Edits::undoable`]).
     pub fn undo(&mut self) -> Option<Brush> {
-        let brush = self.edits.pop()?;
+        if self.edits.recent.is_empty() {
+            self.unseal()?;
+        }
+        let brush = self.edits.recent.pop(&self.grid)?;
+        self.edits.recent_hash.pop();
         self.revision += 1;
         Some(brush)
+    }
+
+    /// Seal the `n` oldest recent brushes (see [`Edits`]).
+    fn seal(&mut self, n: usize) -> Result<(), String> {
+        let brushes: Vec<Brush> = self.edits.recent.brushes().copied().collect();
+        let n = n.min(brushes.len());
+        let before = self.edits.baked_state();
+        let large = self.edits.large.clone();
+        let resolved: Vec<Vec<FaceBrush>> = brushes[..n].iter().map(|b| b.resolve(&self.grid)).collect::<Result<_, _>>()?;
+        let edits = &mut self.edits;
+        edits.baked.begin_record();
+        let mut changed = Vec::new();
+        for (brush, faces) in brushes[..n].iter().zip(&resolved) {
+            if faces.iter().all(|fb| fb.radius_half <= BAKE_RADIUS_HALF) {
+                for fb in faces {
+                    changed.extend(edits.baked.bake(&self.grid, fb, brush.op));
+                }
+            } else {
+                for fb in faces {
+                    changed.extend(edits.baked.apply_over(&self.grid, fb, brush.op));
+                }
+                edits.large.push(&self.grid, *brush).expect("resolved above");
+            }
+        }
+        edits.baked.rebuild_coarse(changed, self.grid.levels());
+        let store = edits.baked.end_record();
+        let hashes: Vec<u64> = edits.recent_hash.drain(..n).collect();
+        edits.sealed_count += n;
+        edits.sealed_hash = *hashes.last().unwrap_or(&edits.sealed_hash);
+        edits.recent = Edits::log(&self.grid, brushes[n..].iter().copied())?;
+        let columns: Vec<ColumnKey> = store.columns().collect();
+        edits.undo_seals.push_back(SealUndo { brushes: brushes[..n].iter().copied().zip(hashes).collect(), store, large, before });
+        if edits.undo_seals.len() > UNDO_SEALS {
+            edits.undo_seals.pop_front();
+        }
+        edits.changed(before, columns.into_iter());
+        Ok(())
+    }
+
+    /// Undo the latest seal: its bricks and large brushes go back, its
+    /// brushes become recent again.
+    fn unseal(&mut self) -> Option<()> {
+        let undo = self.edits.undo_seals.pop_back()?;
+        let edits = &mut self.edits;
+        let before = edits.baked_state();
+        let columns: Vec<ColumnKey> = undo.store.columns().collect();
+        edits.baked.restore(undo.store);
+        edits.large = undo.large;
+        let recent: Vec<Brush> = edits.recent.brushes().copied().collect();
+        edits.recent = Edits::log(&self.grid, undo.brushes.iter().map(|(b, _)| *b).chain(recent)).expect("brushes resolved when applied");
+        edits.recent_hash.splice(0..0, undo.brushes.iter().map(|(_, h)| *h));
+        (edits.sealed_count, edits.sealed_hash) = undo.before;
+        edits.changed(before, columns.into_iter());
+        Some(())
     }
     /// Conservative bound on terrain surface height above the datum (m).
     pub fn max_terrain_height(&self) -> f64 {
@@ -224,14 +460,13 @@ impl Planet {
     pub fn column_top(&self, face: u8, i: i32, j: i32, level: u32) -> i32 {
         terrain::top_cells(&self.grid, self.column_height(face, i, j, level), level)
     }
-    fn face_brushes(&self, face: u8, i: i32, j: i32, level: u32) -> Vec<FaceBrush> {
-        let lo_i = i64::from(i) << level;
-        let lo_j = i64::from(j) << level;
-        let span = (1i64 << level) - 1;
-        self.edits
-            .query(face, lo_i, lo_i + span, lo_j, lo_j + span, level)
+    /// The brushes of `log` that can change level cell `(i, j, k)` (`k`
+    /// `None`: any cell of the column), in order.
+    fn face_brushes(log: &EditLog, face: u8, i: i32, j: i32, k: Option<i32>, level: u32) -> Vec<FaceBrush> {
+        let range = |v: i32| [i64::from(v) << level, ((i64::from(v) + 1) << level) - 1];
+        log.query(face, range(i), range(j), k.map_or(ALL_LAYERS, range), level)
             .into_iter()
-            .map(|(id, index)| self.edits.resolved(id).faces[index as usize])
+            .map(|(id, index)| log.resolved(id).faces[index as usize])
             .collect()
     }
     /// Canonical `(kind, material)` of a level cell: kind 0 air, 1 solid.
@@ -240,26 +475,112 @@ impl Planet {
         let height = self.column_height(face, i, j, level);
         let kind = terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, height);
         let center = [center_half(i, level), center_half(j, level), center_half(k, level)];
-        apply(self.face_brushes(face, i, j, level).into_iter(), center, || self.grid.volume_point(face, i, j, k, level), kind, 0)
+        let point = || self.grid.volume_point(face, i, j, k, level);
+        let large = Self::face_brushes(&self.edits.large, face, i, j, Some(k), level);
+        let (kind, material) = apply(large.into_iter(), center, point, kind, 0);
+        let (kind, material) = self.edits.baked.cell(face, level, i, j, k).apply(kind, material);
+        apply(Self::face_brushes(&self.edits.recent, face, i, j, Some(k), level).into_iter(), center, point, kind, material)
     }
     /// [`Self::kind`] for cells walked by a ray: the column's top and
     /// brushes are looked up once per column, not per cell.
     fn kind_in(&self, column: &mut Option<RayColumn>, cell: Cell) -> u32 {
-        let key = (cell.face, cell.i, cell.j);
+        self.kind_at(column, 0, cell.face, cell.i, cell.j, cell.k)
+    }
+    /// Canonical kind of level cell `(i, j, k)` (as [`Self::sample_kind`]),
+    /// for walks: the column's height and brushes are looked up once per
+    /// column. The last edit that removes or adds at the cell decides its
+    /// kind (paint keeps it), so the field is sampled only where none does:
+    /// a walk down a dug pit or tunnel crosses carved cells without
+    /// evaluating the rock (and its caves) above them.
+    fn kind_at(&self, column: &mut Option<RayColumn>, level: u32, face: u8, i: i32, j: i32, k: i32) -> u32 {
+        let key = (face, i, j, level);
         if column.as_ref().is_none_or(|c| c.key != key) {
             *column = Some(RayColumn {
                 key,
-                height: self.column_height(cell.face, cell.i, cell.j, 0),
-                brushes: self.face_brushes(cell.face, cell.i, cell.j, 0),
+                height: self.column_height(face, i, j, level),
+                large: Self::face_brushes(&self.edits.large, face, i, j, None, level),
+                recent: Self::face_brushes(&self.edits.recent, face, i, j, None, level),
             });
         }
         let c = column.as_ref().expect("filled above");
-        let kind = terrain::generated_kind(&self.grid, &*self.field, cell.face, cell.i, cell.j, cell.k, 0, c.height);
-        if c.brushes.is_empty() {
+        let center = [center_half(i, level), center_half(j, level), center_half(k, level)];
+        let mut q = None;
+        let point = || self.grid.volume_point(face, i, j, k, level);
+        let mut decided = |brushes: &[FaceBrush]| {
+            brushes
+                .iter()
+                .rev()
+                .find(|b| b.op() < 2 && b.contains(center, || *q.get_or_insert_with(&point)))
+                .map(|b| b.op())
+        };
+        if let Some(kind) = decided(&c.recent) {
             return kind;
         }
-        let center = [center_half(cell.i, 0), center_half(cell.j, 0), center_half(cell.k, 0)];
-        apply(c.brushes.iter().copied(), center, || self.grid.volume_point(cell.face, cell.i, cell.j, cell.k, 0), kind, 0).0
+        match self.edits.baked.cell(face, level, i, j, k).state() {
+            1 => return 0,
+            crate::edit_store::CellEdit::SOLID => return 1,
+            _ => {}
+        }
+        if let Some(kind) = decided(&c.large) {
+            return kind;
+        }
+        terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, c.height)
+    }
+    /// Canonical kinds (0 air, 1 solid) of cells `ks` of level column
+    /// `(i, j)`, as [`Self::sample_kind`] gives them, the column's height
+    /// and brushes looked up once.
+    pub fn column_kinds(&self, level: u32, face: u8, i: i32, j: i32, ks: &[i32]) -> Vec<u32> {
+        let mut column = None;
+        ks.iter().map(|&k| self.kind_at(&mut column, level, face, i, j, k)).collect()
+    }
+    /// First air layer above the highest solid cell of level column
+    /// `(i, j)` with its edits (level cells), or `None` when no edit reaches
+    /// the column (its generated top stands).
+    ///
+    /// Walks down from the highest layer anything can be solid at (the
+    /// generated top, an Add brush's top, a baked solid cell) with a stride
+    /// growing with the distance walked (a step per 1/16 of it), refined to
+    /// the exact layer below the last air sample; a solid slab thinner than
+    /// the stride there can be stepped over, which only makes the answer
+    /// low. Removal reaching deeper than [`EDITED_TOP_REACH`] cells below
+    /// that start answers the lowest air walked.
+    pub fn edited_top(&self, face: u8, i: i32, j: i32, level: u32) -> Option<i32> {
+        let large = Self::face_brushes(&self.edits.large, face, i, j, None, level);
+        let recent = Self::face_brushes(&self.edits.recent, face, i, j, None, level);
+        let column_key = ColumnKey { face, level: level as u8, ci: i.div_euclid(crate::grid::BRICK), cj: j.div_euclid(crate::grid::BRICK) };
+        let baked = self.edits.baked.column(&column_key).is_some();
+        if large.is_empty() && recent.is_empty() && !baked {
+            return None;
+        }
+        let g = &self.grid;
+        let height = self.column_height(face, i, j, level);
+        let generated = terrain::generated_top(g, &*self.field, face, i, j, level, height);
+        let shift = level + 1;
+        let added = large.iter().chain(&recent).filter(|b| b.op() == 1).map(|b| (b.k_hi >> shift) + 1).max().unwrap_or(i32::MIN);
+        let baked_top = self.edits.baked.solid_top(face, level, i, j).unwrap_or(i32::MIN);
+        let start = generated.max(added).max(baked_top);
+        let floor = (((self.inner_radius() - g.radius()) / g.voxel_size()).floor() as i32) >> level;
+        let mut column = Some(RayColumn { key: (face, i, j, level), height, large, recent });
+        let mut solid = |k: i32| self.kind_at(&mut column, level, face, i, j, k) == 1;
+        let (mut air, mut k) = (start, start - 1);
+        while k >= floor && start - k <= EDITED_TOP_REACH {
+            if solid(k) {
+                // Air at `air`, solid at `k`: the topmost solid layer between.
+                let mut lo = k;
+                while air - lo > 1 {
+                    let mid = (air + lo) / 2;
+                    if solid(mid) {
+                        lo = mid;
+                    } else {
+                        air = mid;
+                    }
+                }
+                return Some(lo + 1);
+            }
+            air = k;
+            k -= 1 + (start - k) / 16;
+        }
+        Some(air)
     }
     /// Slope (eighths of a cell per cell) that classifies the materials of
     /// base column (i, j), whatever level draws it: central differences of
@@ -506,31 +827,55 @@ impl Planet {
     pub fn raycast(&self, origin: DVec3, direction: DVec3, max_distance: f64) -> Option<RayHit> {
         self.raycast_with(origin, direction, max_distance, |kind| kind == 1)
     }
+    /// The hit a renderer drew `distance` along a ray from `origin` (a GPU
+    /// pick: what the user aimed at). At level 0 it is exact: the drawn
+    /// voxel, and the air cell in front of the face the ray `entered`
+    /// (`engine::PickHit`). A coarser level drew a cell standing for many
+    /// voxels: the base cells either side of the drawn surface along the
+    /// ray.
+    pub fn drawn_hit(&self, origin: DVec3, direction: DVec3, distance: f64, cell: Cell, level: u32, entered: Option<u32>) -> RayHit {
+        let g = &self.grid;
+        let d = direction.normalize();
+        let at = origin + d * distance;
+        let half = d * g.voxel_size() * 0.5;
+        let (mut hit, mut previous) = (g.locate(at + half).0, g.locate(at - half).0);
+        if level == 0 {
+            hit = cell;
+            if let Some(code) = entered {
+                let step = if code & 1 == 1 { -1 } else { 1 };
+                let mut before = [cell.i, cell.j, cell.k];
+                before[(code >> 1) as usize] += step;
+                // Across a face edge the walk's neighbour is on another face.
+                if (0..2).all(|a| (0..g.cells()).contains(&before[a])) || g.is_plane() {
+                    previous = Cell::new(cell.face, before[0], before[1], before[2]);
+                }
+            }
+        }
+        RayHit { cell: hit, previous, distance, normal: -d }
+    }
     /// A point `clearance` metres above the solid surface over `p` (a
     /// direction or any point above the ground point on a planet; any point
     /// on a plane).
     ///
     /// Walks the base column under `p` down from the highest layer that can
-    /// be solid there (its generated top, or the top of an Add brush over
-    /// it), with the column's brushes queried once: a few cells, not a ray
-    /// from the world's outer radius through the edit index cell by cell.
+    /// be solid there (its generated top, the top of an Add brush over it or
+    /// of a baked solid cell), with the column's edits queried once: a few
+    /// cells, not a ray from the world's outer radius through the edit index
+    /// cell by cell.
     pub fn surface_point(&self, p: DVec3, clearance: f64) -> DVec3 {
         let g = &self.grid;
         let (cell, _) = g.locate(g.at_radial(p, g.radius()));
         let (face, i, j) = (cell.face, cell.i, cell.j);
-        let height = self.column_height(face, i, j, 0);
-        let brushes = self.face_brushes(face, i, j, 0);
-        let added = brushes.iter().filter(|b| b.op() == 1).map(|b| b.k_hi.div_euclid(2) + 1).max().unwrap_or(i32::MIN);
-        let mut k = terrain::generated_top(g, &*self.field, face, i, j, 0, height).max(added);
+        let mut column = None;
+        // Fills the column's height and brushes.
+        self.kind_in(&mut column, Cell::new(face, i, j, 0));
+        let c = column.as_ref().expect("filled above");
+        let added = c.large.iter().chain(&c.recent).filter(|b| b.op() == 1).map(|b| b.k_hi.div_euclid(2) + 1).max().unwrap_or(i32::MIN);
+        let baked = self.edits.baked.solid_top(face, 0, i, j).unwrap_or(i32::MIN);
+        let mut k = terrain::generated_top(g, &*self.field, face, i, j, 0, c.height).max(added).max(baked);
         let floor = ((self.inner_radius() - g.radius()) / g.voxel_size()).floor() as i32;
-        while k > floor {
-            let below = k - 1;
-            let kind = terrain::generated_kind(g, &*self.field, face, i, j, below, 0, height);
-            let center = [center_half(i, 0), center_half(j, 0), center_half(below, 0)];
-            if apply(brushes.iter().copied(), center, || g.volume_point(face, i, j, below, 0), kind, 0).0 == 1 {
-                break;
-            }
-            k = below;
+        while k > floor && self.kind_in(&mut column, Cell::new(face, i, j, k - 1)) != 1 {
+            k -= 1;
         }
         g.at_radial(p, g.layer_radius(f64::from(k)) + clearance)
     }
@@ -543,17 +888,107 @@ impl Planet {
         }
         let (cell, _) = self.grid.locate(eye);
         let top = self.column_top(cell.face, cell.i, cell.j, 0);
-        (f64::from(cell.k - top) * self.grid.voxel_size() - self.overhang_height()).max(0.0)
+        let ground = (f64::from(cell.k - top) * self.grid.voxel_size() - self.overhang_height()).max(0.0);
+        // Additions stand above the generated ground: a near plane a
+        // quarter of the height over it clipped a wall built beside the eye.
+        self.addition_clearance(eye, cell, ground)
     }
-    /// Height of `eye` above the generated ground directly below it (its
-    /// column's top along the local vertical; edits are not considered).
-    /// Unlike [`Self::air_clearance`] this is not a bound on the distance to
-    /// all terrain: it is the altitude a camera or vehicle moves by.
+    /// `limit`, or less where an addition (an Add brush or a baked solid
+    /// cell) may lie within `limit` of `eye`, conservatively.
+    fn addition_clearance(&self, eye: DVec3, cell: Cell, limit: f64) -> f64 {
+        let g = &self.grid;
+        if limit <= 0.0 || self.edit_top < g.radial(eye) - limit {
+            return limit;
+        }
+        let base = if g.is_plane() { g.voxel_size() } else { g.delta() * g.radius() * 0.7 };
+        let reach = (limit / base).ceil() as i64 + 1;
+        let (i, j) = (i64::from(cell.i), i64::from(cell.j));
+        let mut clearance = limit;
+        for log in [&self.edits.large, &self.edits.recent] {
+            for (id, index) in log.query(cell.face, [i - reach, i + reach], [j - reach, j + reach], ALL_LAYERS, 0) {
+                if log.resolved(id).faces[index as usize].op() != 1 {
+                    continue;
+                }
+                let brush = &log.resolved(id).brush;
+                // A box's farthest corner bounds it whatever its frame.
+                let extent = match brush.shape {
+                    crate::edits::BrushShape::Sphere => brush.radius,
+                    crate::edits::BrushShape::Cube => {
+                        let half_height = if brush.height > 0.0 { brush.height } else { brush.radius };
+                        (2.0 * brush.radius * brush.radius + half_height * half_height).sqrt()
+                    }
+                };
+                let distance = (eye.distance(DVec3::from_array(brush.center)) - extent).max(0.0);
+                clearance = clearance.min(distance);
+            }
+        }
+        // Baked additions: the highest solid cell of every store column in
+        // reach (base columns while few, else the coarsest level that keeps
+        // them few, whose cells are majorities of their children).
+        let mut level = 0;
+        while ((reach >> level) * 2 / 8 + 1).pow(2) > 1024 {
+            level += 1;
+        }
+        let columns = (reach >> level) / 8 + 1;
+        let (ci, cj) = (i64::from(cell.i >> level) / 8, i64::from(cell.j >> level) / 8);
+        let height = g.height(eye);
+        for a in ci - columns..=ci + columns {
+            for b in cj - columns..=cj + columns {
+                let key = ColumnKey { face: cell.face, level: level as u8, ci: a as i32, cj: b as i32 };
+                let Some(column) = self.edits.baked.column(&key) else { continue };
+                let Some(&(bk, _)) = column.last() else { continue };
+                let top = f64::from((bk + 1) * crate::grid::BRICK) * g.level_size(level);
+                clearance = clearance.min((height - top).max(0.0));
+            }
+        }
+        clearance
+    }
+    /// Height of `eye` above the ground directly below it, along the local
+    /// vertical: the generated ground's top over open terrain, and the floor
+    /// of the hollow below the eye in the air of a pit, tunnel or cave under
+    /// that top (negative when buried in solid rock). Unlike
+    /// [`Self::air_clearance`] this is not a bound on the distance to all
+    /// terrain: it is the altitude a camera or vehicle moves by.
+    ///
+    /// The hollow's floor is found by a walk down the column whose stride
+    /// grows with the distance walked (a step per 1/16 of it, so about a
+    /// hundred cells to 400 m), refined to the exact air-to-solid layer;
+    /// a solid slab thinner than the stride there can be stepped over.
     pub fn ground_height(&self, eye: DVec3) -> f64 {
-        let (cell, _) = self.grid.locate(eye);
+        const REACH: i32 = 4096;
+        let g = &self.grid;
+        let (cell, _) = g.locate(eye);
         // The generated top: overhang lips and cave mouths included.
-        let top = terrain::generated_top(&self.grid, &*self.field, cell.face, cell.i, cell.j, 0, self.column_height(cell.face, cell.i, cell.j, 0));
-        self.grid.height(eye) - f64::from(top) * self.grid.voxel_size()
+        let top = terrain::generated_top(g, &*self.field, cell.face, cell.i, cell.j, 0, self.column_height(cell.face, cell.i, cell.j, 0));
+        let height = g.height(eye);
+        if cell.k >= top {
+            return height - f64::from(top) * g.voxel_size();
+        }
+        let mut column = None;
+        let solid = |column: &mut Option<RayColumn>, k: i32| self.kind_in(column, Cell::new(cell.face, cell.i, cell.j, k)) == 1;
+        if solid(&mut column, cell.k) {
+            return height - f64::from(top) * g.voxel_size();
+        }
+        let floor = ((self.inner_radius() - g.radius()) / g.voxel_size()).floor() as i32;
+        let (mut air, mut k) = (cell.k, cell.k - 1);
+        while k > floor && cell.k - k <= REACH {
+            if solid(&mut column, k) {
+                // Air at `air`, solid at `k`: the topmost solid layer between.
+                let mut lo = k;
+                while air - lo > 1 {
+                    let mid = (air + lo) / 2;
+                    if solid(&mut column, mid) {
+                        lo = mid;
+                    } else {
+                        air = mid;
+                    }
+                }
+                return height - f64::from(lo + 1) * g.voxel_size();
+            }
+            air = k;
+            k -= 1 + (cell.k - k) / 16;
+        }
+        height - f64::from(air) * g.voxel_size()
     }
     /// Radial coordinate bounding the solid cells whose ground point lies
     /// within ground distance `radius` of the point below `eye`: generated
@@ -593,10 +1028,14 @@ impl Planet {
         }
         let margins = self.field.bound_margins();
         // Highest surface (metres above the datum) any column inside a
-        // level column can reach.
+        // level column can reach: its generated top, or where edits reach
+        // it, its edited top. A dig lowers the bound to its floor, so an eye
+        // inside it turns levels on by its height over that floor, not by
+        // the rock that was there; an addition raises it only where it is.
         let bound = |l: u32, a: i32, b: i32| {
             let margin = if l == 0 { 0 } else { margins[l as usize].min(4) };
-            f64::from(self.column_top(cell.face, a, b, l) + margin) * g.level_size(l)
+            let top = self.edited_top(cell.face, a, b, l).unwrap_or_else(|| self.column_top(cell.face, a, b, l));
+            f64::from(top + margin) * g.level_size(l)
         };
         let mut heap = std::collections::BinaryHeap::new();
         for a in ci - reach..=ci + reach {
@@ -615,8 +1054,7 @@ impl Planet {
                 heap.push((OrdF64(bound(l - 1, a * 2 + da, b * 2 + db)), l - 1, a * 2 + da, b * 2 + db));
             }
         };
-        let terrain = g.radius() + top + self.overhang_height() + g.voxel_size() * 4.0;
-        terrain.max(self.edit_top + g.voxel_size()).min(global)
+        (g.radius() + top + self.overhang_height() + g.voxel_size() * 4.0).min(global)
     }
 }
 
@@ -801,7 +1239,7 @@ mod tests {
             }
             // Oblique rays agree with a cell walk through a carved hole.
             let centre = p.surface_point(DVec3::new(50.0, 0.0, 60.0), -0.45);
-            p.apply(Brush { center: centre.to_array(), radius: 0.45, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+            p.apply(Brush { center: centre.to_array(), radius: 0.45, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
             let eye = centre + DVec3::new(0.3, 30.0, 0.0);
             let hit = p.raycast(eye, centre - eye, 100.0).expect("hit");
             assert!(p.solid(hit.cell));
@@ -823,6 +1261,85 @@ mod tests {
             let h = p.ground_height(eye);
             assert!((h - 2.0).abs() < 0.2, "{dir}: {h}");
         }
+    }
+
+
+    /// Level selection measures the eye's height over the terrain as
+    /// edited: inside a dig, over its floor; additions count only where
+    /// they are.
+    #[test]
+    fn local_bounds_follow_edits() {
+        let mut p = heightfield(PlanetRecipe::default());
+        let g = *p.grid();
+        let up = DVec3::new(0.2, 1.0, -0.1).normalize();
+        let ground = g.radial(p.surface_point(up, 0.0));
+        let untouched = p.local_outer_radius(g.at_radial(up, ground - 250.0), 30.0);
+        assert!(untouched > ground - 1.0, "rock over the eye: {} m", untouched - ground);
+        // A ball 400 m wide whose floor is 300 m below the ground.
+        let floor = ground - 300.0;
+        p.apply(Brush { center: g.at_radial(up, floor + 200.0).to_array(), radius: 200.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        let eye = g.at_radial(up, floor + 50.0);
+        // Within the bound's tolerance over flat ground (coarse cells and
+        // their margins where the split budget ends), far below the rock.
+        let bound = p.local_outer_radius(eye, 30.0);
+        assert!(bound > floor && bound < floor + 45.0, "the dig's floor bounds the eye's region: {} m over it", bound - floor);
+        // An addition far away leaves the bound; one in the region raises it.
+        let side = up.any_orthonormal_vector();
+        let far = p.surface_point((up + side * 0.01).normalize(), 0.0);
+        p.apply(Brush { center: (far + far.normalize() * 500.0).to_array(), radius: 600.0, shape: BrushShape::Sphere, op: BrushOp::Add, material: 3, height: 0.0 }).unwrap();
+        assert!((p.local_outer_radius(eye, 30.0) - bound).abs() < 1e-6);
+        p.apply(Brush { center: g.at_radial(up, floor + 20.0).to_array(), radius: 15.0, shape: BrushShape::Sphere, op: BrushOp::Add, material: 3, height: 0.0 }).unwrap();
+        let raised = p.local_outer_radius(eye, 30.0);
+        assert!(raised > floor + 34.0 && raised > bound && raised < floor + 90.0, "a hill in the dig: {} m over the floor", raised - floor);
+    }
+
+    /// The near plane's clearance sees what was built beside the eye.
+    #[test]
+    fn air_clearance_counts_additions() {
+        let mut p = heightfield(PlanetRecipe::default());
+        let g = *p.grid();
+        let up = DVec3::new(-0.3, 1.0, 0.4).normalize();
+        let eye = p.surface_point(up, 40.0);
+        assert!(p.air_clearance(eye) > 30.0);
+        let side = up.any_orthonormal_vector();
+        let wall = eye + side * 8.0;
+        p.apply(Brush { center: wall.to_array(), radius: 6.0, shape: BrushShape::Sphere, op: BrushOp::Add, material: 3, height: 0.0 }).unwrap();
+        let near = p.air_clearance(eye);
+        assert!(near <= 2.0 + 1e-9, "a ball 2 m away: {near} m");
+        // Sealed into the store, small additions still count.
+        let mut q = heightfield(PlanetRecipe::default());
+        for n in 0..(crate::planet::RECENT_BRUSHES + crate::planet::SEAL_BATCH) as i32 {
+            let at = wall + up * (f64::from(n) * 0.3 - 6.0);
+            q.apply(Brush { center: at.to_array(), radius: 0.3, shape: BrushShape::Cube, op: BrushOp::Add, material: 3, height: 0.0 }).unwrap();
+        }
+        assert!(q.edits().sealed_len() > 0);
+        let near = q.air_clearance(eye);
+        assert!(near <= 8.0, "a sealed column 8 m away: {near} m");
+        let _ = g;
+    }
+
+    /// In a dug pit the camera's altitude is its height above the pit's
+    /// floor, not a depth below the generated ground it no longer stands on.
+    #[test]
+    fn ground_height_in_a_pit_is_height_above_its_floor() {
+        let mut p = planet();
+        let g = *p.grid();
+        let up = DVec3::new(0.2, 1.0, -0.1).normalize();
+        let ground = p.surface_point(up, 0.0);
+        // A 30 m deep shaft 12 m wide, its floor flat.
+        let floor = g.radial(ground) - 30.0;
+        p.apply(Brush { center: g.at_radial(up, floor + 20.0).to_array(), radius: 6.0, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0, height: 20.0 }).unwrap();
+        for above in [0.5, 4.0, 25.0] {
+            let eye = g.at_radial(up, floor + above);
+            let h = p.ground_height(eye);
+            assert!((h - above).abs() <= g.voxel_size() * 1.01, "{above} m over the floor: {h}");
+        }
+        // Over open ground nearby and buried in rock it is as before.
+        let side = up.any_orthonormal_vector();
+        let open = p.surface_point((up + side * 0.001).normalize(), 3.0);
+        assert!((p.ground_height(open) - 3.0).abs() < 0.2);
+        let buried = p.surface_point((up + side * 0.001).normalize(), -5.0);
+        assert!(p.ground_height(buried) < -4.0);
     }
 
     #[test]
@@ -848,11 +1365,11 @@ mod tests {
         let (face, i, j) = (4u8, g.cells() / 3, g.cells() / 5);
         let top = p.column_top(face, i, j, 0);
         let centre = g.cell_center(Cell::new(face, i, j, top - 1));
-        p.apply(Brush { center: centre.to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+        p.apply(Brush { center: centre.to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
         assert!(!p.solid(Cell::new(face, i, j, top - 1)));
         assert!(!p.solid(Cell::new(face, i, j, top - 9)));
         assert!(p.solid(Cell::new(face, i, j, top - 12)));
-        p.apply(Brush { center: centre.to_array(), radius: 0.25, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK }).unwrap();
+        p.apply(Brush { center: centre.to_array(), radius: 0.25, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
         assert!(p.solid(Cell::new(face, i, j, top - 1)));
         assert_eq!(p.material(Cell::new(face, i, j, top - 1)), material::BRICK);
         assert!(p.undo().is_some());
@@ -866,7 +1383,7 @@ mod tests {
         let (face, i, j) = (2u8, g.cells() / 2 + 17, g.cells() / 2 - 40);
         let top = p.column_top(face, i, j, 0);
         let centre = g.cell_center(Cell::new(face, i, j, top - 5));
-        p.apply(Brush { center: centre.to_array(), radius: 0.45, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+        p.apply(Brush { center: centre.to_array(), radius: 0.45, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
         let up = centre.normalize();
         let eye = centre + up * 30.0 + up.any_orthonormal_vector() * 0.3;
         let hit = p.raycast(eye, centre - eye, 100.0).expect("hit");
@@ -874,6 +1391,142 @@ mod tests {
         assert!(!p.solid(hit.previous));
         let n = g.voxel_size();
         assert!(g.cell_center(hit.cell).distance(eye + (centre - eye).normalize() * hit.distance) < n * 1.8);
+    }
+
+    /// Level-0 cells read the same through the edit layers (large, baked,
+    /// recent, with brushes sealed many times) as every brush replayed in
+    /// order over the terrain.
+    #[test]
+    fn edit_layers_match_brushes_replayed_in_order() {
+        let mut p = heightfield(PlanetRecipe::default());
+        let g = *p.grid();
+        let (face, i0, j0) = (2u8, g.cells() / 2 + 8, g.cells() / 2 - 24);
+        let top = p.column_top(face, i0 + 20, j0 + 20, 0);
+        let mut seed = 0x9e37_79b9u64;
+        let mut next = move || {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) as f64 / (1u64 << 31) as f64
+        };
+        let ops = [BrushOp::Remove, BrushOp::Add, BrushOp::Paint];
+        let mut applied = Vec::new();
+        for n in 0..805 {
+            let cell = Cell::new(face, i0 + (next() * 40.0) as i32, j0 + (next() * 40.0) as i32, top - 16 + (next() * 24.0) as i32);
+            // Every 50th brush is too large to bake.
+            let radius = if n % 50 == 7 { 4.0 } else { 0.05 + next() * 0.6 };
+            let shape = if next() < 0.5 { BrushShape::Sphere } else { BrushShape::Cube };
+            // A third of the cubes are flat-topped boxes.
+            let height = if shape == BrushShape::Cube && next() < 0.33 { 0.05 + next() * 0.4 } else { 0.0 };
+            let brush = Brush { center: g.cell_center(cell).to_array(), radius, shape, op: ops[(next() * 3.0) as usize], material: 1 + (next() * 20.0) as u32, height };
+            p.apply(brush).unwrap();
+            applied.push(brush);
+        }
+        let edits = p.edits();
+        assert!(!edits.baked.is_empty() && !edits.large.is_empty() && edits.recent.len() <= RECENT_BRUSHES);
+        check_replay(&p, &applied, face, i0, j0, top);
+        // Undo past several seals: they come undone, exactly.
+        assert!(p.edits().undoable() >= 400, "{} undoable", p.edits().undoable());
+        for n in 0..400 {
+            p.undo().unwrap_or_else(|| panic!("undo {n} of 400: {} undoable, {} recent, {} sealed", p.edits().undoable(), p.edits().recent.len(), p.edits().sealed_len()));
+        }
+        applied.truncate(applied.len() - 400);
+        assert_eq!(p.edits().hash(), crate::edits::history_hash(&applied));
+        check_replay(&p, &applied, face, i0, j0, top);
+    }
+
+    /// Every level-0 cell of a 40x40x40 block reads what `applied` replayed
+    /// in order over the terrain gives.
+    fn check_replay(p: &Planet, applied: &[Brush], face: u8, i0: i32, j0: i32, top: i32) {
+        let g = *p.grid();
+        let faces: Vec<FaceBrush> = applied
+            .iter()
+            .flat_map(|b| b.resolve(&g).unwrap())
+            .filter(|fb| fb.face() == face)
+            .collect();
+        let mut edited = 0;
+        let mut column = None;
+        for i in i0..i0 + 40 {
+            for j in j0..j0 + 40 {
+                let height = p.column_height(face, i, j, 0);
+                for k in top - 24..top + 16 {
+                    let kind = terrain::generated_kind(&g, &*p.field, face, i, j, k, 0, height);
+                    let center = [center_half(i, 0), center_half(j, 0), center_half(k, 0)];
+                    let expected = apply(faces.iter().copied(), center, || g.volume_point(face, i, j, k, 0), kind, 0);
+                    assert_eq!(p.sample_kind(0, face, i, j, k), expected, "cell ({i}, {j}, {k})");
+                    assert_eq!(p.solid(Cell::new(face, i, j, k)), expected.0 == 1);
+                    // The walks' kind, decided by the last edit at the cell.
+                    assert_eq!(p.kind_in(&mut column, Cell::new(face, i, j, k)), expected.0, "walked cell ({i}, {j}, {k})");
+                    edited += usize::from(expected != (kind, 0));
+                }
+            }
+        }
+        assert!(edited > 1000, "{edited} cells edited");
+    }
+
+    /// The walks' kinds are the canonical ones at every level.
+    #[test]
+    fn column_kinds_match_sample_kind_at_every_level() {
+        let mut p = heightfield(PlanetRecipe::default());
+        let g = *p.grid();
+        let (face, i0, j0) = (2u8, g.cells() / 2 + 8, g.cells() / 2 - 24);
+        let top = p.column_top(face, i0, j0, 0);
+        let centre = g.cell_center(Cell::new(face, i0 + 20, j0 + 20, top - 6));
+        let up = centre.normalize();
+        p.apply(Brush { center: centre.to_array(), radius: 14.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        p.apply(Brush { center: (centre + up * 9.0).to_array(), radius: 3.0, shape: BrushShape::Cube, op: BrushOp::Add, material: 4, height: 6.0 }).unwrap();
+        for n in 0..90 {
+            let at = centre + up.any_orthonormal_vector() * (f64::from(n) * 0.3 - 13.0);
+            p.apply(Brush { center: at.to_array(), radius: 0.4, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        }
+        assert!(p.edits().sealed_len() > 0);
+        for level in 0..5u32 {
+            for (a, b) in [(0, 0), (20, 20), (28, 13), (40, 40)] {
+                let (i, j) = ((i0 + a) >> level, (j0 + b) >> level);
+                let ks: Vec<i32> = ((top >> level) - 300..(top >> level) + 60).collect();
+                let kinds = p.column_kinds(level, face, i, j, &ks);
+                for (k, kind) in ks.iter().zip(kinds) {
+                    assert_eq!(kind, p.sample_kind(level, face, i, j, *k).0, "level {level} cell ({i}, {j}, {k})");
+                }
+            }
+        }
+    }
+
+    /// Small edits sealed into the store show at coarser levels: a pit dug
+    /// with cell-sized brushes (each too small to draw beyond level 0) is
+    /// air at level 2 once sealed.
+    #[test]
+    fn sealed_small_edits_show_at_coarse_levels() {
+        let mut p = heightfield(PlanetRecipe::default());
+        let unedited = p.clone();
+        let g = *p.grid();
+        let (face, i0, j0) = (2u8, g.cells() / 2 + 16, g.cells() / 2 - 32);
+        let top = (i0..i0 + 16).flat_map(|i| (j0..j0 + 16).map(move |j| (i, j))).map(|(i, j)| p.column_top(face, i, j, 0)).min().unwrap();
+        // Level-2 layers fully inside [k_lo, top - 1).
+        let k_lo = top - 16;
+        for i in i0..i0 + 16 {
+            for j in j0..j0 + 16 {
+                for k in k_lo..top {
+                    let centre = g.cell_center(Cell::new(face, i, j, k));
+                    p.apply(Brush { center: centre.to_array(), radius: g.voxel_size() * 0.3, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+                }
+            }
+        }
+        assert!(p.edits().baked.brick_counts()[2] > 0);
+        // The last row of brushes (i0 + 12..) may still be recent.
+        let (ci, cj) = (i0 >> 2, j0 >> 2);
+        let mut checked = 0;
+        for i in ci..ci + 3 {
+            for j in cj..cj + 4 {
+                for k in (k_lo + 3) >> 2..top >> 2 {
+                    if (k << 2) < k_lo || (k << 2) + 3 >= top {
+                        continue;
+                    }
+                    assert_eq!(unedited.sample_kind(2, face, i, j, k).0, 1, "level-2 cell ({i}, {j}, {k}) before");
+                    assert_eq!(p.sample_kind(2, face, i, j, k).0, 0, "level-2 cell ({i}, {j}, {k})");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked >= 12 * 2, "{checked} cells checked");
     }
 }
 
@@ -906,14 +1559,14 @@ mod scaling {
             while stamp < target {
                 let angle = stamp as f64 * 0.6 / 6.0;
                 let p = ground + (side * angle.cos() + ahead * angle.sin()) * 6.0;
-                planet.apply(Brush { center: (p - up * 0.3).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+                planet.apply(Brush { center: (p - up * 0.3).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
                 stamp += 1;
             }
             let aim = (ground + side * 6.0 - eye).normalize();
             let clone = time(&mut || { std::hint::black_box(planet.clone()); });
             let mut copy = planet.clone();
             let apply = time(&mut || {
-                copy.apply(Brush { center: (ground - up * 0.3).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0 }).unwrap();
+                copy.apply(Brush { center: (ground - up * 0.3).to_array(), radius: 1.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
             });
             let raycast = time(&mut || { std::hint::black_box(planet.raycast(eye, aim, 200.0)); });
             let surface = time(&mut || { std::hint::black_box(planet.surface_point(ground + side * 6.0, 0.0)); });
@@ -935,7 +1588,7 @@ mod scaling {
             while planet.edits().len() < n {
                 let k = planet.edits().len() as f64;
                 let p = DVec3::new((k * 7.31) % 900.0 - 450.0, 2.0, (k * 3.17) % 900.0 - 450.0);
-                planet.apply(Brush { center: p.to_array(), radius: 0.05, shape: BrushShape::Cube, op: BrushOp::Add, material: 13 }).unwrap();
+                planet.apply(Brush { center: p.to_array(), radius: 0.05, shape: BrushShape::Cube, op: BrushOp::Add, material: 13, height: 0.0 }).unwrap();
             }
             let per_edit = appending.elapsed().as_secs_f64() * 1e6 / (n - before) as f64;
             let t = std::time::Instant::now();

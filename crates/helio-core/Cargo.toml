@@ -29,6 +29,9 @@ helio-mats = { workspace = true }
 helio-pass-hiz = { workspace = true }
 helio-pass-foliage-place = { workspace = true }
 helio-pass-sky = { workspace = true }
+helio-pass-volumetric-fog = { workspace = true }
+helio-default-graphs = { workspace = true }
+helio-pass-voxel-planet = { path = "../passes/3d/helio-pass-voxel-planet" }
 
 [features]
 default = ["profiling", "shader-hot-reload"]
