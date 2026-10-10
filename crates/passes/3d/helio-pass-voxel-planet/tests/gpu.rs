@@ -885,6 +885,53 @@ fn destroyed_worlds_render_from_orbit() {
     }
 }
 
+/// Inside a dig a drag from orbit leaves (a stroke of 2 km balls), rays
+/// cost what they cost over open ground at the same height: the dug air is
+/// crossed as boxes, no column near the eye is clipped at the old ground,
+/// and no column evaluates the air above its floor. In the band format the
+/// pit's columns held their whole carved height (primary 13 ms, generation
+/// 25x a column's cost in the editor).
+#[test]
+fn a_dig_from_orbit_costs_what_open_ground_costs() {
+    use helio_pass_voxel_planet::column_view::{info, ColumnView, SpanKind};
+    let Some(gpu) = gpu() else { return };
+    let open = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&open, 2, 0.47, 0.53);
+    let ground = open.surface_point(dir, 0.0);
+    let up = ground.normalize();
+    let side = up.any_orthonormal_vector();
+    let mut pit = open.clone();
+    for n in 0..40 {
+        let at = ground + side * (f64::from(n) * 600.0 - 12_000.0);
+        pit.apply(Brush { center: at.to_array(), radius: 2_000.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    }
+    let floor = pit.surface_point(dir, 0.0);
+    let size = [320, 180];
+    let target = Target::new(&gpu, size);
+    let forward = (side.as_vec3() * 0.087 - up.as_vec3()).normalize();
+    let mut p90 = Vec::new();
+    for (name, planet, eye) in [("open", Arc::new(open.clone()), open.surface_point(dir, 86.0)), ("pit", Arc::new(pit), floor + up * 86.0)] {
+        let mut r = renderer(&gpu, planet.clone(), size);
+        settle(&gpu, &target, &mut r, &frame(&planet, eye), forward);
+        let mut steps: Vec<u32> = hits(&gpu, &r).iter().map(|h| h.steps).collect();
+        steps.sort();
+        p90.push(steps[steps.len() * 9 / 10]);
+        let [records, pool, _] = r.residency_buffers();
+        let words = |b: &wgpu::Buffer| -> Vec<u32> { read_buffer(&gpu, b, b.size()).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect() };
+        let (rec, pool) = (words(records), words(pool));
+        let surface = planet.field().program().wgsl.contains("fn terrain_surface");
+        let (mut clipped, mut bricks) = (0usize, 0usize);
+        for column in ColumnView::all(&rec, &pool, surface).filter(|c| c.valid()) {
+            clipped += usize::from(column.info() & (info::CLIP_BELOW | info::CLIP_ABOVE) != 0);
+            bricks += usize::from(column.spans().iter().any(|s| s.kind == SpanKind::Bricks));
+        }
+        eprintln!("{name}: ray steps p90 {}, {clipped} clipped columns, {bricks} with bricks, {:?}", p90.last().unwrap(), r.stats());
+        assert_eq!(clipped, 0, "{name}");
+        assert!(bricks < 100, "{name}: {bricks} columns store bricks");
+    }
+    assert!(p90[1] <= p90[0] + 2, "steps per ray: open {} pit {}", p90[0], p90[1]);
+}
+
 /// The directional sky bound only ends rays that provably miss: every pixel
 /// matches a render without it, including views up at distant terrain.
 #[test]
