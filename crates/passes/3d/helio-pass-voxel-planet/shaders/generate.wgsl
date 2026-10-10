@@ -104,10 +104,12 @@ fn job_index(wg: vec3<u32>) -> u32 {
 }
 
 // Candidates: the window's bricks where some lane's occupancy can change,
-// the window's clipped sides and the highest candidate layer.
+// and the window's sides they pass.
 var<workgroup> g_cand: array<atomic<u32>, 8>;
 var<workgroup> g_cand_clip: atomic<u32>;
-var<workgroup> g_summary: atomic<i32>;
+// Above every solid cell of the column (each lane's brush sweep): its
+// summary top, and whether solid lies above the window at all.
+var<workgroup> g_bound: atomic<i32>;
 var<workgroup> g_plan: Plan;
 // Per merged interval: lane summary bits (some solid 1, some air 2, not
 // solid-below-air 4, tops not the natural ones 8, a top over a byte 16), the
@@ -285,7 +287,6 @@ fn column_window(level: u32) -> vec3<i32> {
 fn mark_candidate(iv: vec2<i32>, w: vec3<i32>) {
     let lo = max(iv.x, w.z);
     if iv.y <= lo { return; }
-    atomicMax(&g_summary, iv.y);
     if lo < w.x { atomicOr(&g_cand_clip, INFO_CLIP_BELOW); }
     if iv.y > w.y { atomicOr(&g_cand_clip, INFO_CLIP_ABOVE); }
     let a = (max(lo, w.x) - w.x) >> 3u;
@@ -322,7 +323,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         atomicStore(&g_keep[0], 0u);
         atomicStore(&g_keep[1], 0u);
         atomicStore(&g_cand_clip, 0u);
-        atomicStore(&g_summary, -0x7fffffff);
+        atomicStore(&g_bound, -0x7fffffff);
         atomicStore(&g_natural[0], 0x7fffffff);
         atomicStore(&g_natural[1], -0x7fffffff);
         atomicStore(&g_natural[2], -0x7fffffff);
@@ -426,6 +427,9 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     }
     let window = column_window(level);
     mark_candidate(vec2<i32>(t_lo, t_hi), window);
+    // The lane's highest solid layer + 1, from its ground (and the volume's
+    // evaluated cells), raised by baked bricks and the brushes below.
+    var lane_bound = select(top, max(top, eval_hi + 1), changed);
     let ch = vec2<i32>(center_half(i, level), center_half(j, level));
     let edit_counts = workgroupUniformLoad(&g_edit_counts);
     let n_brushes = edit_counts.x + edit_counts.y;
@@ -435,6 +439,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         for (var e = li; e < edit_counts.z; e += 64u) {
             let bk = bitcast<i32>(edit_refs[baked_base + e * 2u]);
             mark_candidate(vec2<i32>(bk * 8, bk * 8 + 8), window);
+            atomicMax(&g_bound, bk * 8 + 8);
             atomicOr(&g_volume, VOLUME_MATERIALS);
         }
         for (var e = li; e < n_brushes; e += 64u) {
@@ -524,12 +529,18 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         }
         if overflow {
             mark_candidate(vec2<i32>(lo_all - margin, hi_all + margin + 1), window);
+            lane_bound = max(lane_bound, hi_all + margin + 1);
+        } else {
+            lane_bound = -0x7fffffff;
+            for (var q = 0u; q < count; q++) { lane_bound = max(lane_bound, solid[q].y + margin + 1); }
+            if changed { lane_bound = max(lane_bound, eval_hi + 1); }
         }
         for (var q = 0u; q < count; q++) {
             if solid[q].x > -0x3fffffff { mark_candidate(vec2<i32>(solid[q].x - margin, solid[q].x + margin + 1), window); }
             mark_candidate(vec2<i32>(solid[q].y - margin, solid[q].y + margin + 1), window);
         }
     }
+    atomicMax(&g_bound, lane_bound);
     workgroupBarrier();
     // Lane 0 turns the candidate bricks into intervals (runs at most a brick
     // apart merged) and reserves the scratch.
@@ -565,11 +576,18 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
             for (var e = best + 1u; e + 1u < kept; e++) { runs[e] = runs[e + 1u]; }
             kept -= 1u;
         }
-        let clip = atomicLoad(&g_cand_clip);
+        var clip = atomicLoad(&g_cand_clip);
         let floor = window.z;
         let w_lo = window.x;
         let w_hi = window.y;
-        let summary = atomicLoad(&g_summary);
+        // Candidates above the window over air (a carved surface's old
+        // ground, crossings inside dug space) clip nothing: only solid
+        // there does. The summary top bounds the solid cells: a pit's
+        // columns clipped at the old ground once kept its air from being
+        // skipped, and rays crossed it column by column.
+        let bound = atomicLoad(&g_bound);
+        if bound <= w_hi { clip &= ~INFO_CLIP_ABOVE; }
+        let summary = bound;
         var eval = 0u;
         for (var e = 0u; e < 8u; e++) {
             if e < kept {
