@@ -375,20 +375,21 @@ pub fn validation_sources() -> Vec<(String, String)> {
         .collect()
 }
 
+/// The noise library with its wide region (`// wide:begin` .. `// wide:end`)
+/// replaced by `wide64.wgsl`. The markers are matched without their line
+/// ends: checkouts may convert them to CRLF.
+fn hardware_wide(noise: &str) -> String {
+    let (head, rest) = noise.split_once("// wide:begin").expect("noise.wgsl wide region");
+    let (_, tail) = rest.split_once("// wide:end").expect("noise.wgsl wide region end");
+    format!("{head}{}{tail}", include_str!("../shaders/wide64.wgsl"))
+}
+
 /// Shader source: the noise library, world helpers and the terrain program,
 /// then the engine parts. With `wide64` the noise library's wide products
 /// use hardware 64-bit integers (`wide64.wgsl`).
 fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram, wide64: bool) -> String {
     let noise = include_str!("../shaders/noise.wgsl");
-    let mut s = if wide64 {
-        let (head, rest) = noise.split_once("// wide:begin
-").expect("noise.wgsl wide region");
-        let (_, tail) = rest.split_once("// wide:end
-").expect("noise.wgsl wide region end");
-        format!("{head}{}{tail}", include_str!("../shaders/wide64.wgsl"))
-    } else {
-        String::from(noise)
-    };
+    let mut s = if wide64 { hardware_wide(noise) } else { String::from(noise) };
     s.push_str(include_str!("../shaders/world.wgsl"));
     s.push_str(&program.wgsl);
     if !program.wgsl.contains("fn terrain_surface") {
@@ -2749,5 +2750,17 @@ mod cost_tests {
         // A handful of units cannot raise it on their own.
         samples.push_back((8.0, 0.2));
         assert!(unit_cost(&samples).unwrap() < 0.01);
+    }
+}
+
+#[cfg(test)]
+mod wide_tests {
+    #[test]
+    fn hardware_wide_replaces_the_region_with_either_line_end() {
+        let noise = include_str!("../shaders/noise.wgsl");
+        for text in [noise.replace("\r\n", "\n"), noise.replace("\r\n", "\n").replace('\n', "\r\n")] {
+            let s = super::hardware_wide(&text);
+            assert!(s.contains("u64(a) * u64(b)") && !s.contains("mid_carry"));
+        }
     }
 }

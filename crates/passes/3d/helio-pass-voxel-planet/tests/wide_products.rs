@@ -12,8 +12,8 @@ fn hardware_wide_products_match_the_limb_versions() {
         return;
     }
     let noise = include_str!("../shaders/noise.wgsl");
-    let (_, rest) = noise.split_once("// wide:begin\n").unwrap();
-    let (limbs, _) = rest.split_once("// wide:end\n").unwrap();
+    let (_, rest) = noise.split_once("// wide:begin").unwrap();
+    let (limbs, _) = rest.split_once("// wide:end").unwrap();
     let hardware = include_str!("../shaders/wide64.wgsl").replace("fn mul_wide(", "fn hw_wide(").replace("fn mul_shr(", "fn hw_shr(");
     let source = format!(
         "{limbs}\n{hardware}\n
