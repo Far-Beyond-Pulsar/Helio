@@ -76,7 +76,7 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
     // lattice nodes at one interpreter call site.
     let gates = [
         "let display_base =",
-        "let requested_relief =",
+        "let relief =",
         "let display =",
         "let field = generation_column",
     ]
@@ -163,7 +163,7 @@ fn production_generation_retains_ridge_envelope_and_canonical_queries() {
             let at=vec2<i32>(i,j);
             {gates}
             answers[id.x*2u]=vec4<i32>(field_height(face,i,j,level),height,
-                i32(requested_relief),i32(display_base));
+                i32(relief),i32(display_base));
             let kind_in=select(1u,0u,op==1u);
             let edited=applied(p.chart.w,level,brush.center.xyz,vec3<i32>(0),kind_in);
             let untouched=applied(p.chart.w,level,brush.center.xyz+vec3<i32>(i32(brush.radius_half)*2+1,0,0),vec3<i32>(0),kind_in);

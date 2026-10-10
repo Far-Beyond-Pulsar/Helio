@@ -1,6 +1,7 @@
 # Span columns: a fully destructible planet, always visible
 
-Status: plan, 2026-10-09. Replaces the single-band column.
+Status: implemented 2026-10-09 (phases 0-5); the single-band column is
+gone. Measured in the editor harness: phase 6.
 
 ## Why
 

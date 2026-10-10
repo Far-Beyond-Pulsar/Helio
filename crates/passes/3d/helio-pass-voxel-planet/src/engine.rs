@@ -712,7 +712,7 @@ struct Buffers {
     bytes: u64,
 }
 
-const JOB_OUT_BYTES: u64 = 104;
+const JOB_OUT_BYTES: u64 = 96;
 /// Bytes per face brush (`edits::FaceBrush`).
 const FACE_BRUSH_BYTES: u64 = std::mem::size_of::<crate::edits::FaceBrush>() as u64;
 /// Bytes per baked brick slot: 512 cells of 16 bits.

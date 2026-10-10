@@ -23,7 +23,7 @@ fn filtered_riser_receiver_reaches_resident_top_without_overshooting() {
     // receiver arithmetic. No convenient global-f32 height reconstruction.
     let source = format!(r#"
 struct Frame {{ eye:vec4<f32>, layer:vec4<f32>, layer_i:vec4<i32> }}
-struct Column {{ top:i32, fraction:u32, info:u32, fits:u32 }}
+struct Column {{ top:i32, fraction:u32, info:u32 }}
 struct Hit {{ t:f32, i:i32, j:i32, k:i32, info:u32 }}
 struct Ray {{ eo:f32, ee:f32, ol:f32, el:f32 }}
 struct Probe {{ integers:vec4<i32>, values:vec4<f32> }}
@@ -32,12 +32,9 @@ const INFO_TOPOLOGY:u32=0x08000000u;
 var<private> frame:Frame;
 override PLANE:bool=false;
 fn is_plane()->bool {{ return PLANE; }}
-fn column_tops_fit(c:Column)->bool {{ return c.fits!=0u; }}
 fn column_top(c:Column,x:u32,y:u32)->i32 {{ return c.top; }}
 fn column_relief_fraction(c:Column,x:u32,y:u32)->u32 {{ return c.fraction; }}
 // Height-field receivers: every hit lies on the natural surface.
-fn column_tops_down(c:Column)->bool {{ return false; }}
-fn column_tops_known(c:Column)->bool {{ return column_tops_fit(c) || column_tops_down(c); }}
 fn natural_surface_hit(h:Hit,c:Column,top:i32)->bool {{ return (c.info&INFO_TOPOLOGY)==0u; }}
 {helpers}
 @group(0) @binding(0) var<storage,read> probes:array<Probe>;
@@ -49,7 +46,7 @@ fn natural_surface_hit(h:Hit,c:Column,top:i32)->bool {{ return (c.info&INFO_TOPO
     frame.layer=vec4<f32>(0.375,p.values.x,0.0,0.0);
     frame.layer_i=vec4<i32>(p.integers.x,0,0,0);
     let flags=bitcast<u32>(p.integers.w);
-    let c=Column(p.integers.z,u32(p.values.w),flags&0xfffffffeu,flags&1u);
+    let c=Column(p.integers.z,u32(p.values.w),flags);
     let h=Hit(0.0,0,0,p.integers.z-1,u32(p.integers.y)<<5u);
     // A radial ray offset at t=0 tests both the plane and stable sphere formula.
     let r=Ray(p.values.y,p.values.y*p.values.y,0.0,0.0);
@@ -78,12 +75,12 @@ fn natural_surface_hit(h:Hit,c:Column,top:i32)->bool {{ return (c.info&INFO_TOPO
                     for displacement in [-0.25f64,0.0,0.25] {
                         let hit=(target+displacement*f64::from(voxel)*f64::from(1<<level)) as f32;
                         let relief=if level==0 {0} else {0x10000000};
-                        probes.push(Probe {integers:[eye,level,top,relief|1],
+                        probes.push(Probe {integers:[eye,level,top,relief],
                             values:[voxel,hit,0.0,fraction as f32]});
                         expected.push((target,true));
                     }
-                    // Topology and truncated top headers must never move a receiver.
-                    for flags in [relief_flags(level)|0x08000000|1,relief_flags(level)] {
+                    // Topology (cut faces) must never move a receiver.
+                    for flags in [relief_flags(level)|0x08000000] {
                         probes.push(Probe {integers:[eye,level,top,flags],
                             values:[voxel,(target-0.25) as f32,0.0,fraction as f32]});
                         expected.push((target,false));

@@ -531,6 +531,13 @@ impl Planet {
         }
         terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, c.height)
     }
+    /// Canonical kinds (0 air, 1 solid) of cells `ks` of level column
+    /// `(i, j)`, as [`Self::sample_kind`] gives them, the column's height
+    /// and brushes looked up once.
+    pub fn column_kinds(&self, level: u32, face: u8, i: i32, j: i32, ks: &[i32]) -> Vec<u32> {
+        let mut column = None;
+        ks.iter().map(|&k| self.kind_at(&mut column, level, face, i, j, k)).collect()
+    }
     /// First air layer above the highest solid cell of level column
     /// `(i, j)` with its edits (level cells), or `None` when no edit reaches
     /// the column (its generated top stands).
@@ -1544,6 +1551,34 @@ mod tests {
             }
         }
         assert!(edited > 1000, "{edited} cells edited");
+    }
+
+    /// The walks' kinds are the canonical ones at every level.
+    #[test]
+    fn column_kinds_match_sample_kind_at_every_level() {
+        let mut p = heightfield(PlanetRecipe::default());
+        let g = *p.grid();
+        let (face, i0, j0) = (2u8, g.cells() / 2 + 8, g.cells() / 2 - 24);
+        let top = p.column_top(face, i0, j0, 0);
+        let centre = g.cell_center(Cell::new(face, i0 + 20, j0 + 20, top - 6));
+        let up = centre.normalize();
+        p.apply(Brush { center: centre.to_array(), radius: 14.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        p.apply(Brush { center: (centre + up * 9.0).to_array(), radius: 3.0, shape: BrushShape::Cube, op: BrushOp::Add, material: 4, height: 6.0 }).unwrap();
+        for n in 0..90 {
+            let at = centre + up.any_orthonormal_vector() * (f64::from(n) * 0.3 - 13.0);
+            p.apply(Brush { center: at.to_array(), radius: 0.4, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        }
+        assert!(p.edits().sealed_len() > 0);
+        for level in 0..5u32 {
+            for (a, b) in [(0, 0), (20, 20), (28, 13), (40, 40)] {
+                let (i, j) = ((i0 + a) >> level, (j0 + b) >> level);
+                let ks: Vec<i32> = ((top >> level) - 300..(top >> level) + 60).collect();
+                let kinds = p.column_kinds(level, face, i, j, &ks);
+                for (k, kind) in ks.iter().zip(kinds) {
+                    assert_eq!(kind, p.sample_kind(level, face, i, j, *k).0, "level {level} cell ({i}, {j}, {k})");
+                }
+            }
+        }
     }
 
     /// Small edits sealed into the store show at coarser levels: a pit dug

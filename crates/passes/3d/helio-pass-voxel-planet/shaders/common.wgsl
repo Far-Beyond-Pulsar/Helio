@@ -51,14 +51,18 @@ struct MaterialGpu {
     links: vec4<u32>,               // lip, fleck, speck host (self: none), fleck share (Q16)
 }
 
+// A resident column: an 8x8 footprint of one level and its vertical
+// content as spans (docs/span-columns.md). Everything below the first span
+// is solid, everything from `top` up is air; a window clipped below or above
+// does not describe the cells past it (rays there use a coarser level).
 struct Column {
     key0: u32,   // column i | face << 24 | level << 27
     key1: u32,   // column j
-    k_lo: i32,   // lowest band brick layer (level bricks)
-    info: u32,   // n_band 0..9 | clip below 9 | clip above 10 | class 18..22 | top gap 22..25 | topology 27 | relief 28 | ext 29 | overflow 30 | valid 31
+    base: i32,   // natural tops' base (level cells)
+    info: u32,   // spans 0..5 | wide tops 5 | clip below 9 | clip above 10 | edit materials 11 | generated 12 | class 18..22 | heightfield 25 | relief inline 26 | topology 27 | relief 28 | overflow 30 | valid 31
     run: u32,    // first pool unit
-    mixed: u32,  // band bricks 0..32 that store an occupancy mask
-    solid: u32,  // band bricks 0..32 that are completely occupied
+    top: i32,    // first layer above every solid cell (level cells); clipped above: the window's top
+    lo: i32,     // clipped below: the lowest layer the column describes
     edits: u32,  // 1 + edit-ref list offset, or 0
 }
 
@@ -85,37 +89,27 @@ const NONE: u32 = 0xffffffffu;
 const TOMBSTONE: u32 = 0xfffffffeu;
 const INFO_VALID: u32 = 0x80000000u;
 const INFO_OVERFLOW: u32 = 0x40000000u;
-const INFO_EXT: u32 = 0x20000000u;
 const INFO_RELIEF: u32 = 0x10000000u;
 // Effective Add/Remove lists: base-field gradients cannot describe cut faces.
 const INFO_TOPOLOGY: u32 = 0x08000000u;
-// Low-level authored tops can share the existing byte header with their
-// fractional remainder. This changes storage only, not the traced surface.
+// Low-level authored tops share the natural tops' bytes with their
+// fractional remainder (base cells over the column base).
 const INFO_RELIEF_INLINE: u32 = 0x04000000u;
-// Natural columns are exactly solid below their stored per-cell tops.
-// Add/Remove columns retain arbitrary brick occupancy instead.
+// The column is exactly solid below its natural tops: no span table.
 const INFO_HEIGHTFIELD: u32 = 0x02000000u;
-// A band clipped to a window around the eye's layer (`generate.wgsl`) does
-// not describe its cells below (above) the band: rays there use a coarser
-// level instead of taking them as solid ground (air).
+// The column's window was clipped below (above): cells under `lo` (from
+// `top` up) are not described.
 const INFO_CLIP_BELOW: u32 = 0x200u;
 const INFO_CLIP_ABOVE: u32 = 0x400u;
 // The column's edit list holds Add or Paint brushes: shading looks up brush
 // materials only in such columns.
 const INFO_EDIT_MATERIALS: u32 = 0x800u;
-// Generated volume (caves, overhangs): arbitrary occupancy, and per-cell
-// tops that count down from the band top (the generated top: first air
-// above the highest generated solid cell), so a band of any height keeps
-// them. Its untouched surface is natural terrain; only INFO_TOPOLOGY (edit
-// cuts) marks a cut.
+// Generated volume (caves, overhangs): its natural tops are the generated
+// tops (first air above the highest generated solid cell); only
+// INFO_TOPOLOGY (edit cuts) marks a cut.
 const INFO_GENERATED: u32 = 0x1000u;
-// Per-cell tops count down from the band top: generated volume always, and
-// an edited column whose band outgrew counting up (a deep dig lowers the
-// band base hundreds of cells below its natural tops, which stay within a
-// byte of the band top). Without it such a column lost its natural surface:
-// its relief, ground normals, materials and cut detection read garbage
-// (contour ripples, a dark outline and grass streaks down deep pits).
-const INFO_TOPS_DOWN: u32 = 0x2000u;
+// Natural tops spread over more than a byte: 16 bits each.
+const INFO_TOPS_WIDE: u32 = 0x20u;
 const UNIT_WORDS: u32 = 16u;
 const MAX_PROBES: u32 = 64u;
 
@@ -172,37 +166,31 @@ fn column_valid(c: Column) -> bool {
     return (c.info & (INFO_VALID | INFO_OVERFLOW)) == INFO_VALID;
 }
 
-fn band_count(c: Column) -> u32 { return c.info & 511u; }
-
 // Whether a valid column describes its level cell layer `k`.
 fn column_knows(c: Column, k: i32) -> bool {
-    if (c.info & INFO_CLIP_BELOW) != 0u && k < c.k_lo * 8 { return false; }
-    if (c.info & INFO_CLIP_ABOVE) != 0u && k >= (c.k_lo + i32(band_count(c))) * 8 { return false; }
+    if (c.info & INFO_CLIP_BELOW) != 0u && k < c.lo { return false; }
+    if (c.info & INFO_CLIP_ABOVE) != 0u && k >= c.top { return false; }
     return true;
 }
 
-// Relative terrain tops occupy one byte. A 32-brick band fits only when
-// its highest occupied top is below the exact 256-cell upper boundary.
-fn column_tops_fit(c: Column) -> bool {
-    let count = band_count(c);
-    return count < 32u || (count == 32u && ((c.info >> 22u) & 7u) != 0u);
+// Header units: the natural tops (one unit of bytes, two of 16 bits), wide
+// relief fractions, the surface words when the program has them (one byte
+// per cell), the surface offsets (one byte per cell); then the span table
+// and its payloads, then the span bricks.
+fn tops_units(c: Column) -> u32 {
+    return select(1u, 2u, (c.info & INFO_TOPS_WIDE) != 0u);
 }
 
-// First empty layer above every occupied cell (level cells): the band top
-// less the empty layers of its top brick.
-fn column_top_cell(c: Column) -> i32 {
-    return (c.k_lo + i32(band_count(c))) * 8 - i32((c.info >> 22u) & 7u);
-}
-
-// Header units: the tops (and extension masks), wide relief fractions, the
-// surface words when the program has them (one byte per cell), then the
-// surface offsets (one byte per cell).
-fn header_units(c: Column) -> u32 {
-    return offset_unit(c) + 1u;
+fn surface_unit(c: Column) -> u32 {
+    return tops_units(c) + select(0u, 2u, info_relief_wide(c.info));
 }
 
 fn offset_unit(c: Column) -> u32 {
     return surface_unit(c) + select(0u, 1u, world.sphere.w != 0u);
+}
+
+fn header_units(c: Column) -> u32 {
+    return offset_unit(c) + 1u;
 }
 
 // Height of the exact surface of column cell (x, y) of `level` over its
@@ -220,11 +208,6 @@ fn column_surface_offset(c: Column, x: u32, y: u32, level: u32) -> f32 {
     return select(units, units / f32(1u << level), base_units);
 }
 
-fn surface_unit(c: Column) -> u32 {
-    return select(1u, 2u, (c.info & INFO_EXT) != 0u)
-        + select(0u, 2u, info_relief_wide(c.info));
-}
-
 // Surface word of column cell (x, y) (`terrain_surface`); 0 without them.
 fn column_surface(c: Column, x: u32, y: u32) -> u32 {
     if world.sphere.w == 0u { return 0u; }
@@ -233,49 +216,16 @@ fn column_surface(c: Column, x: u32, y: u32) -> u32 {
     return (word >> ((cell & 3u) * 8u)) & 0xffu;
 }
 
-// Brick state of band brick `b`: 0 air, 1 solid, 2 mixed. Also returns the
-// pool unit of a mixed brick.
-fn brick_state(c: Column, b: u32) -> vec2<u32> {
-    var mixed_bit = false;
-    var solid_bit = false;
-    var rank = 0u;
-    if b < 32u {
-        mixed_bit = ((c.mixed >> b) & 1u) != 0u;
-        solid_bit = ((c.solid >> b) & 1u) != 0u;
-        rank = countOneBits(c.mixed & ((1u << b) - 1u));
-    } else {
-        let ext = (c.run + 1u) * UNIT_WORDS;
-        let w = b >> 5u;
-        let bit = b & 31u;
-        mixed_bit = ((pool[ext + w] >> bit) & 1u) != 0u;
-        solid_bit = ((pool[ext + 8u + w] >> bit) & 1u) != 0u;
-        for (var i = 0u; i < w; i++) { rank += countOneBits(pool[ext + i]); }
-        rank += countOneBits(pool[ext + w] & ((1u << bit) - 1u));
-    }
-    if mixed_bit { return vec2<u32>(2u, c.run + header_units(c) + rank); }
-    return vec2<u32>(select(0u, 1u, solid_bit), 0u);
-}
-
 fn brick_bit(unit: u32, x: u32, y: u32, z: u32) -> bool {
     let bit = x + y * 8u + z * 64u;
     return ((pool[unit * UNIT_WORDS + (bit >> 5u)] >> (bit & 31u)) & 1u) != 0u;
-}
-
-fn column_tops_down(c: Column) -> bool {
-    return (c.info & (INFO_GENERATED | INFO_TOPS_DOWN)) != 0u;
 }
 
 fn column_generated(c: Column) -> bool {
     return (c.info & INFO_GENERATED) != 0u;
 }
 
-// Whether the column's per-cell tops describe its surface: they fit the
-// byte above the band base, or count down from the band top.
-fn column_tops_known(c: Column) -> bool {
-    return column_tops_fit(c) || column_tops_down(c);
-}
-
-// Relief fractions in two units after the header: every relief column but
+// Relief fractions in two units after the tops: every relief column but
 // an inline one.
 fn info_relief_wide(info: u32) -> bool {
     return (info & INFO_RELIEF) != 0u && (info & INFO_RELIEF_INLINE) == 0u;
@@ -285,25 +235,28 @@ fn column_relief_inline(c: Column) -> bool {
     return (c.info & INFO_RELIEF) != 0u && (c.info & INFO_RELIEF_INLINE) != 0u;
 }
 
-// Column-local surface top (first air layer above ground, level cells).
+// Natural surface top of column cell (x, y): first air layer above the
+// generated ground (level cells), whatever edits did there. Material depth,
+// relief and the smooth ground read it at any depth below it.
 fn column_top(c: Column, x: u32, y: u32) -> i32 {
     let cell = x + y * 8u;
+    if (c.info & INFO_TOPS_WIDE) != 0u {
+        let word = pool[c.run * UNIT_WORDS + (cell >> 1u)];
+        return c.base + i32((word >> ((cell & 1u) * 16u)) & 0xffffu);
+    }
     let word = pool[c.run * UNIT_WORDS + (cell >> 2u)];
     let offset = (word >> ((cell & 3u) * 8u)) & 255u;
-    if column_tops_down(c) {
-        return (c.k_lo + i32(band_count(c))) * 8 - i32(offset);
-    }
     if (c.info & INFO_RELIEF_INLINE) != 0u {
         let level = c.key0 >> 27u;
-        return c.k_lo * 8 + i32((offset + (1u << level) - 1u) >> level);
+        return c.base + i32((offset + (1u << level) - 1u) >> level);
     }
-    return c.k_lo * 8 + i32(offset);
+    return c.base + i32(offset);
 }
 
 // Zero denotes a top exactly on the upper coarse-cell boundary. Other
 // fractions reconstruct the authored base-layer top inside the last voxel.
 fn column_relief_fraction(c: Column, x: u32, y: u32) -> u32 {
-    if (c.info & INFO_RELIEF) == 0u || !column_tops_known(c) { return 0u; }
+    if (c.info & INFO_RELIEF) == 0u { return 0u; }
     let cell = x + y * 8u;
     if column_relief_inline(c) {
         let level = c.key0 >> 27u;
@@ -311,9 +264,105 @@ fn column_relief_fraction(c: Column, x: u32, y: u32) -> u32 {
         let offset = (word >> ((cell & 3u) * 8u)) & 255u;
         return (offset & ((1u << level) - 1u)) << (16u - level);
     }
-    let offset = select(1u, 2u, (c.info & INFO_EXT) != 0u);
-    let word = pool[(c.run + offset) * UNIT_WORDS + (cell >> 1u)];
+    let word = pool[(c.run + tops_units(c)) * UNIT_WORDS + (cell >> 1u)];
     return (word >> ((cell & 1u) * 16u)) & 65535u;
+}
+
+// Span kinds. AIR, SOLID, LANES, TOPS and NATURAL are lane spans: each lane
+// is solid below its own top inside the span (`span_lane_top`). BRICKS hold
+// arbitrary occupancy.
+const SPAN_AIR: u32 = 0u;
+const SPAN_SOLID: u32 = 1u;
+const SPAN_LANES: u32 = 2u;
+const SPAN_TOPS: u32 = 3u;
+const SPAN_NATURAL: u32 = 4u;
+const SPAN_BRICKS: u32 = 5u;
+const NO_LAYER: i32 = -0x7fffffff;
+
+// A span `[start, end)` of a column: its kind and its payload's first word.
+struct Span {
+    kind: u32,
+    start: i32,
+    end: i32,
+    payload: u32,
+}
+
+// The span table: (start, kind | payload word offset << 3) per span, from
+// the first word after the header.
+fn span_table(c: Column) -> u32 {
+    return (c.run + header_units(c)) * UNIT_WORDS;
+}
+
+// The span holding layer `k` (below the column's top): below the first
+// span everything is solid.
+fn span_at(c: Column, k: i32) -> Span {
+    var s = Span(SPAN_SOLID, NO_LAYER, c.top, 0u);
+    if (c.info & INFO_HEIGHTFIELD) != 0u {
+        s.kind = SPAN_NATURAL;
+        return s;
+    }
+    let table = span_table(c);
+    let n = c.info & 31u;
+    for (var e = 0u; e < n; e++) {
+        let start = bitcast<i32>(pool[table + e * 2u]);
+        if k < start {
+            s.end = start;
+            return s;
+        }
+        let entry = pool[table + e * 2u + 1u];
+        s = Span(entry & 7u, start, c.top, table + (entry >> 3u));
+    }
+    return s;
+}
+
+// Layer below which lane (x, y) of lane span `s` is solid: its start where
+// the lane is air throughout, its end where solid throughout.
+fn span_lane_top(c: Column, s: Span, x: u32, y: u32) -> i32 {
+    let cell = x + y * 8u;
+    switch s.kind {
+        case 1u: { return s.end; }
+        case 2u: {
+            let bit = (pool[s.payload + (cell >> 5u)] >> (cell & 31u)) & 1u;
+            return select(s.start, s.end, bit != 0u);
+        }
+        case 3u: {
+            let word = pool[s.payload + (cell >> 2u)];
+            return s.start + i32((word >> ((cell & 3u) * 8u)) & 255u);
+        }
+        case 4u: { return clamp(column_top(c, x, y), s.start, s.end); }
+        default: { return s.start; }
+    }
+}
+
+// Brick `b` (counted from the span's start) of a BRICKS span: 0 air, 1
+// solid, 2 mixed with its pool unit. Payload: the run-relative unit of the
+// span's first mixed brick, then mixed and solid bits per brick.
+fn span_brick(c: Column, s: Span, b: u32) -> vec2<u32> {
+    let words = ((u32(s.end - s.start) >> 3u) + 31u) >> 5u;
+    let w = b >> 5u;
+    let bit = b & 31u;
+    let mixed = pool[s.payload + 1u + w];
+    if ((mixed >> bit) & 1u) != 0u {
+        var rank = countOneBits(mixed & ((1u << bit) - 1u));
+        for (var q = 0u; q < w; q++) { rank += countOneBits(pool[s.payload + 1u + q]); }
+        return vec2<u32>(2u, c.run + pool[s.payload] + rank);
+    }
+    let solid = ((pool[s.payload + 1u + words + w] >> bit) & 1u) != 0u;
+    return vec2<u32>(select(0u, 1u, solid), 0u);
+}
+
+// Occupancy of level cell (x, y, k) of a valid column: 0 air, 1 solid, 2
+// not described (beyond a clipped window).
+fn column_cell(c: Column, x: u32, y: u32, k: i32) -> u32 {
+    if !column_knows(c, k) { return 2u; }
+    if k >= c.top { return 0u; }
+    let s = span_at(c, k);
+    if s.kind == SPAN_BRICKS {
+        let state = span_brick(c, s, u32((k - s.start) >> 3u));
+        if state.x == 2u { return select(0u, 1u, brick_bit(state.y, x, y, u32(k & 7))); }
+        return state.x;
+    }
+    return select(0u, 1u, k < span_lane_top(c, s, x, y));
 }
 
 fn center_half(i: i32, level: u32) -> i32 {
@@ -432,4 +481,27 @@ fn edit_material(list: u32, level: u32, c: vec3<i32>, p: vec3<i32>) -> u32 {
     let flags = latest_edit(list, level, c, p, OPS_MATERIAL);
     if flags == NONE { return 0u; }
     return (flags >> 8u) & 255u;
+}
+
+// Kind (0 air, 1 solid) the edits leave level cell `c` (half-cell centre)
+// of the column with domain point `p`, or NONE where none removes or adds
+// there: the latest Remove or Add containing it decides (paint keeps it).
+fn latest_geometry(list: u32, level: u32, c: vec3<i32>, p: vec3<i32>) -> u32 {
+    if list == 0u { return NONE; }
+    let n = edit_counts(list);
+    var q = vec3<i32>(0);
+    var q_ready = false;
+    for (var e = n.large + n.recent; e > n.large; e--) {
+        let b = edit_brush(list, e - 1u);
+        if edit_matches(b, level, c, p, 3u, &q, &q_ready) { return (b.flags >> 4u) & 3u; }
+    }
+    let shift = level + 1u;
+    let cell = baked_cell(list, n, c.x >> shift, c.y >> shift, c.z >> shift) & 3u;
+    if cell == BAKED_AIR { return 0u; }
+    if cell == BAKED_SOLID { return 1u; }
+    for (var e = n.large; e > 0u; e--) {
+        let b = edit_brush(list, e - 1u);
+        if edit_matches(b, level, c, p, 3u, &q, &q_ready) { return (b.flags >> 4u) & 3u; }
+    }
+    return NONE;
 }

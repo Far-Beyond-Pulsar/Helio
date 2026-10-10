@@ -765,6 +765,126 @@ fn orbital_view_has_complete_coverage() {
     assert!(counts[1] > h.len() / 2);
 }
 
+/// The whole planet is destructible and always visible: from orbit, a
+/// planet with a ball 0.8 radii wide bitten out of it shows the bite pixel
+/// for pixel (hit or miss against the analytic shape wherever 20 km of
+/// relief either way, the terrain's own, cannot change the answer), every
+/// hit, the bite's inner wall included, is a cell solid at its level in the
+/// canonical world (a coarse cell grazed by a ray can lie hundreds of
+/// kilometres along it from the analytic wall), and a planet removed
+/// entirely shows only sky. Nothing stays loading.
+#[test]
+fn destroyed_worlds_render_from_orbit() {
+    let Some(gpu) = gpu() else { return };
+    let base = Planet::new(PlanetRecipe::default()).unwrap();
+    let r_planet = base.grid().radius();
+    let bite_centre = DVec3::X * r_planet * 0.9;
+    let bite_radius = r_planet * 0.8;
+    let mut bitten = base.clone();
+    bitten.apply(Brush { center: bite_centre.to_array(), radius: bite_radius, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    let mut gone = base.clone();
+    gone.apply(Brush { center: [0.0; 3], radius: r_planet * 1.1, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    let eye_dir = DVec3::new(0.95, 0.3, 0.15).normalize();
+    let eye = eye_dir * r_planet * 2.6;
+    let forward = (-eye_dir).as_vec3();
+    let size = [160, 90];
+    let target = Target::new(&gpu, size);
+    // The camera `Target::render` draws with.
+    let up = eye_dir.as_vec3();
+    let camera = target.camera(forward, if forward.dot(up).abs() > 0.99 { up.any_orthonormal_vector() } else { up });
+    // Where a ray first enters a planet of radius `r_planet + relief`, and
+    // whether the bite (its radius less the relief) holds that point and
+    // every one after it inside the planet.
+    let expected_at = |d: DVec3, bite: bool, relief: f64| -> bool {
+        let (r_planet, bite_radius) = (r_planet + relief, bite_radius - relief);
+        let b = eye.dot(d);
+        let disc = b * b - (eye.length_squared() - r_planet * r_planet);
+        if disc < 0.0 {
+            return false;
+        }
+        let (t0, t1) = (-b - disc.sqrt(), -b + disc.sqrt());
+        if !bite {
+            return true;
+        }
+        let o = eye - bite_centre;
+        let bb = o.dot(d);
+        let bd = bb * bb - (o.length_squared() - bite_radius * bite_radius);
+        if bd < 0.0 {
+            return true;
+        }
+        let (b0, b1) = (-bb - bd.sqrt(), -bb + bd.sqrt());
+        !(b0 <= t0 && b1 >= t1)
+    };
+    // Distance to the first solid point (the bite's inner wall where the
+    // ray enters the planet inside the bite), and whether it is that wall.
+    let first_hit = |d: DVec3| -> Option<(f64, bool)> {
+        let b = eye.dot(d);
+        let disc = b * b - (eye.length_squared() - r_planet * r_planet);
+        if disc < 0.0 {
+            return None;
+        }
+        let (t0, t1) = (-b - disc.sqrt(), -b + disc.sqrt());
+        let o = eye - bite_centre;
+        let bb = o.dot(d);
+        let bd = bb * bb - (o.length_squared() - bite_radius * bite_radius);
+        if bd < 0.0 {
+            return Some((t0, false));
+        }
+        let (b0, b1) = (-bb - bd.sqrt(), -bb + bd.sqrt());
+        if b0 <= t0 && t0 <= b1 {
+            return (b1 < t1).then_some((b1, true));
+        }
+        Some((t0, false))
+    };
+    // `None` where 20 km of relief either way changes the answer.
+    let expected = |d: DVec3, bite: bool| -> Option<bool> {
+        let (low, high) = (expected_at(d, bite, -20_000.0), expected_at(d, bite, 20_000.0));
+        (low == high).then_some(low)
+    };
+    for (name, planet, bite) in [("bitten", Arc::new(bitten), true), ("gone", Arc::new(gone), false)] {
+        let mut r = renderer(&gpu, planet.clone(), size);
+        settle(&gpu, &target, &mut r, &frame(&planet, eye), forward);
+        let h = hits(&gpu, &r);
+        let mut counts = [0usize; 4];
+        for hit in &h {
+            counts[hit.status as usize] += 1;
+        }
+        assert_eq!(counts[2] + counts[3], 0, "{name}: exhausted or loading rays {counts:?}");
+        if !bite {
+            assert_eq!(counts[1], 0, "{name}: terrain drawn where none is left");
+            continue;
+        }
+        let (mut compared, mut wrong, mut bitten_pixels) = (0usize, 0usize, 0usize);
+        for y in 0..size[1] {
+            for x in 0..size[0] {
+                let n = (y * size[0] + x) as usize;
+                let d = pixel_dir(&target, &camera, x, y);
+                let Some(want) = expected(d, true) else { continue };
+                compared += 1;
+                if want && matches!(first_hit(d), Some((_, true))) {
+                    bitten_pixels += 1;
+                }
+                let hit = h[n];
+                if hit.status == 1 && planet.sample_kind(hit.level, hit.face, hit.i, hit.j, hit.k).0 != 1 {
+                    wrong += 1;
+                    if wrong < 6 {
+                        eprintln!("{name}: pixel {x},{y}: gpu {hit:?} is not a solid cell of its level");
+                    }
+                }
+                if (h[n].status == 1) != want {
+                    wrong += 1;
+                    if wrong < 6 {
+                        eprintln!("{name}: pixel {x},{y}: gpu {:?} expected hit {want}", h[n]);
+                    }
+                }
+            }
+        }
+        eprintln!("{name}: {compared} pixels, {bitten_pixels} on the bite's wall, {wrong} wrong, statuses {counts:?}");
+        assert!(bitten_pixels > 200, "the bite is in view");
+        assert_eq!(wrong, 0, "{name}");
+    }
+}
+
 /// The directional sky bound only ends rays that provably miss: every pixel
 /// matches a render without it, including views up at distant terrain.
 #[test]
@@ -878,134 +998,114 @@ fn sky_bound_is_conservative_while_moving() {
     assert_eq!(bad, 0);
 }
 
-/// Published column tops bound every occupied cell of the column, and a
-/// complete summary block's maximum bounds its columns' tops.
+/// Every resident column, decoded as the shaders read it, holds the
+/// canonical cells of its level (`Planet::column_kinds`) wherever its window
+/// describes them; its top is tight (no solid cell above it, some lane solid
+/// just below), and its natural tops are the generated tops at any depth:
+/// on open ground, and from inside a pit 100 m deep beside a tower, with a
+/// trail of small digs sealed into the edit store. Display relief and
+/// ridges are off, so every level is canonical.
 #[test]
-fn published_tops_bound_occupancy() {
+fn resident_columns_hold_the_canonical_cells() {
+    use helio_pass_voxel_planet::column_view::{info, ColumnView};
+    use helio_pass_voxel_planet::engine::{PlanetRenderer, Settings};
     let Some(gpu) = gpu() else { return };
-    let planet = Arc::new(Planet::new(PlanetRecipe::default()).unwrap());
-    let dir = land(&planet, 2, 0.47, 0.53);
-    let eye = planet.surface_point(dir, 1.7);
-    let up = eye.normalize();
-    let forward = (up.any_orthonormal_vector() - up * 0.2).normalize().as_vec3();
+    let open = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&open, 2, 0.47, 0.53);
+    let ground = open.surface_point(dir, 0.0);
+    let up = ground.normalize();
+    let side = up.any_orthonormal_vector();
+    let mut dug = open.clone();
+    dug.apply(Brush { center: (ground - up * 40.0).to_array(), radius: 60.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    dug.apply(Brush { center: (ground + side * 75.0 + up * 10.0).to_array(), radius: 4.0, shape: BrushShape::Cube, op: BrushOp::Add, material: 3, height: 15.0 }).unwrap();
+    for n in 0..100 {
+        let at = ground + side * (f64::from(n) * 0.4 - 90.0);
+        dug.apply(Brush { center: at.to_array(), radius: 0.6, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    }
+    assert!(dug.edits().sealed_len() > 0);
+    let eye_open = open.surface_point(dir, 1.7);
+    // A crater 6 km wide, the eye just over its floor 3 km down.
+    let mut crater = open.clone();
+    crater.apply(Brush { center: ground.to_array(), radius: 3_000.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    let crater_eye = ground - up * (3_000.0 - 1.7);
+    // A ball 0.8 radii wide bitten out of the planet, seen from orbit.
+    let r_planet = open.grid().radius();
+    let mut bitten = open.clone();
+    bitten.apply(Brush { center: (DVec3::X * r_planet * 0.9).to_array(), radius: r_planet * 0.8, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    let orbit_eye = DVec3::new(0.95, 0.3, 0.15).normalize() * r_planet * 2.6;
+    // Everything removed.
+    let mut gone = open.clone();
+    gone.apply(Brush { center: [0.0; 3], radius: r_planet * 1.1, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    let only = std::env::var("AUDIT_VIEW").ok();
+    let views = [("open ground", Arc::new(open), eye_open), ("pit", Arc::new(dug), ground - up * 90.0), ("crater", Arc::new(crater), crater_eye), ("bitten", Arc::new(bitten), orbit_eye), ("gone", Arc::new(gone), orbit_eye)];
+    let views: Vec<_> = views.into_iter().filter(|(name, _, _)| only.as_deref().is_none_or(|o| o == *name)).collect();
     let size = [320, 180];
     let target = Target::new(&gpu, size);
-    let mut r = renderer(&gpu, planet.clone(), size);
-    settle(&gpu, &target, &mut r, &frame(&planet, eye), forward);
-    let [records, pool, _blocks] = r.residency_buffers();
-    let words = |b: &wgpu::Buffer| -> Vec<u32> {
-        read_buffer(&gpu, b, b.size()).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
-    };
-    let rec = words(records);
-    let pool = words(pool);
-    let (mut columns, mut bad) = (0usize, 0usize);
-    let (mut volumetric, mut wrong_tops) = (0usize, 0usize);
-    // Programs with a surface word store it after the header and relief.
-    let surface_units = if planet.field().program().wgsl.contains("fn terrain_surface") { 1 } else { 0 };
-    for c in rec.chunks_exact(8) {
-        let info = c[3];
-        if info & 0xc000_0000 != 0x8000_0000 {
-            continue;
-        }
-        columns += 1;
-        let k_lo = c[2] as i32;
-        let n_band = (info & 511) as i32;
-        let gap = ((info >> 22) & 7) as i32;
-        let run = c[4];
-        let ext = info & 0x2000_0000 != 0;
-        // Wide fractional tops occupy two units after the column header;
-        // inline tops retain their authored-cell offset in each packed byte.
-        let relief = info & 0x1000_0000 != 0;
-        // Bit 26: inline fractional tops (generated volume, bit 12, is
-        // always wide).
-        let inline = info & 0x0400_0000 != 0;
-        let heightfield = info & 0x0200_0000 != 0;
-        // Then one unit of surface offsets.
-        let header = (if ext { 2 } else { 1 }) + (if relief && !inline { 2 } else { 0 }) + surface_units + 1;
-        if relief {
-            assert!(n_band < 32 || (n_band == 32 && gap > 0), "fractional tops overflow their packed byte range");
-        }
-        let published = (k_lo + n_band) * 8 - gap;
-        // Highest occupied cell from the brick masks.
-        let mut highest = i32::MIN;
-        if heightfield {
-            // Independently decode all 64 authored tops. These columns store
-            // solid-below-top occupancy exactly and have no bitmap payload.
-            let level = c[0] >> 27;
-            for cell in 0..64u32 {
-                let word = pool[(run * 16 + (cell >> 2)) as usize];
-                let offset = ((word >> ((cell & 3) * 8)) & 255) as i32;
-                let top_offset = if inline {
-                    (offset + (1i32 << level) - 1) >> level
-                } else {
-                    offset
-                };
-                highest = highest.max(k_lo * 8 + top_offset - 1);
+    for (name, planet, eye) in views {
+        let settings = Settings { coarse_relief: false, ridge_display: false, ..Default::default() };
+        let mut r = PlanetRenderer::new(&gpu.device, &gpu.queue, planet.clone(), settings, size);
+        let forward = (side.as_vec3() - up.as_vec3() * 0.3).normalize();
+        settle(&gpu, &target, &mut r, &frame(&planet, eye), forward);
+        let [records, pool, _blocks] = r.residency_buffers();
+        let words = |b: &wgpu::Buffer| -> Vec<u32> {
+            read_buffer(&gpu, b, b.size()).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
+        };
+        let rec = words(records);
+        let pool = words(pool);
+        let surface_words = planet.field().program().wgsl.contains("fn terrain_surface");
+        let (grid, field) = (planet.grid(), planet.field());
+        let (mut columns, mut audited, mut cells) = (0usize, 0usize, 0usize);
+        let (mut wrong, mut wrong_tops, mut loose) = (0usize, 0usize, 0usize);
+        for column in ColumnView::all(&rec, &pool, surface_words).filter(|c| c.valid()) {
+            columns += 1;
+            if columns % 5 != 0 {
+                continue;
             }
-            assert_eq!(highest + 1, published, "packed authored top disagrees with published maximum");
-        } else {
-            // Generated volumetric columns publish their generated tops
-            // (material depth) counting down from the band top.
-            if info & 0x1000 != 0 {
-                volumetric += 1;
-                let (level, face) = (c[0] >> 27, ((c[0] >> 24) & 7) as u8);
-                let (ci, cj) = ((c[0] & 0xff_ffff) as i32, c[1] as i32);
-                for cell in 0..64u32 {
-                    let word = pool[(run * 16 + (cell >> 2)) as usize];
-                    let down = ((word >> ((cell & 3) * 8)) & 255) as i32;
-                    let (i, j) = (ci * 8 + (cell & 7) as i32, cj * 8 + (cell >> 3) as i32);
-                    let expected = terrain::generated_top(planet.grid(), planet.field(), face, i, j, level, planet.column_height(face, i, j, level));
-                    let got = (k_lo + n_band) * 8 - down;
-                    // With relief, the partial top cell is solid (cut at
-                    // the surface), whether the volume changed the surface
-                    // or not.
-                    let ceil = relief && got == expected + 1;
-                    if down < 255 && got != expected && !ceil {
+            audited += 1;
+            let (face, level, ci, cj) = column.key();
+            let clipped = column.info() & (info::CLIP_BELOW | info::CLIP_ABOVE) != 0;
+            // The cells around the top and, seven apart, far below it.
+            let top = column.top().max(-(1 << 26));
+            // Layers at or above the planet's centre (below it is no space).
+            let core = -((grid.radius() / grid.voxel_size()) as i32 >> level);
+            let ks: Vec<i32> = (top - 40..top + 24).chain((1..300).map(|s| top - 40 - s * 7)).filter(|&k| column.knows(k) && (grid.is_plane() || k >= core)).collect();
+            let mut solid_below_top = false;
+            for lane in 0..64u32 {
+                let (x, y) = (lane & 7, lane >> 3);
+                let (i, j) = (ci * 8 + x as i32, cj * 8 + y as i32);
+                if !clipped {
+                    let expected = terrain::generated_top(grid, field, face, i, j, level, planet.column_height(face, i, j, level));
+                    if column.natural_top(x, y) != expected {
                         wrong_tops += 1;
                         if wrong_tops < 6 {
-                            eprintln!("column key {:08x} {:08x} cell {cell}: generated top {} expected {expected}", c[0], c[1], (k_lo + n_band) * 8 - down);
+                            eprintln!("{name}: L{level} column ({ci}, {cj}) lane {lane}: natural top {} expected {expected}", column.natural_top(x, y));
                         }
                     }
                 }
-            }
-            for b in (0..n_band).rev() {
-                let (mixed, solid, rank) = if b < 32 {
-                    let bit = b as u32;
-                    ((c[5] >> bit) & 1 != 0, (c[6] >> bit) & 1 != 0, (c[5] & ((1u32 << bit) - 1)).count_ones())
-                } else {
-                    let e = ((run + 1) * 16) as usize;
-                    let (w, bit) = ((b >> 5) as usize, (b & 31) as u32);
-                    let mut rank = 0;
-                    for q in 0..w {
-                        rank += pool[e + q].count_ones();
+                let kinds = planet.column_kinds(level, face, i, j, &ks);
+                for (&k, kind) in ks.iter().zip(kinds) {
+                    cells += 1;
+                    if column.cell(x, y, k) != Some(kind == 1) {
+                        wrong += 1;
+                        if wrong < 10 {
+                            eprintln!("{name}: L{level} column ({ci}, {cj}) info {:08x} lane {lane} k {k}: gpu {:?} cpu {kind} (top {}, spans {:?})", column.info(), column.cell(x, y, k), column.top(), column.spans());
+                        }
                     }
-                    rank += (pool[e + w] & ((1u32 << bit) - 1)).count_ones();
-                    ((pool[e + w] >> bit) & 1 != 0, (pool[e + 8 + w] >> bit) & 1 != 0, rank)
-                };
-                if solid {
-                    highest = (k_lo + b) * 8 + 7;
-                    break;
                 }
-                if mixed {
-                    let unit = ((run + header + rank) * 16) as usize;
-                    let z = (0..8).rev().find(|z| pool[unit + 2 * z] | pool[unit + 2 * z + 1] != 0).unwrap_or(0) as i32;
-                    highest = (k_lo + b) * 8 + z;
-                    break;
+                if column.knows(column.top() - 1) && column.cell(x, y, column.top() - 1) == Some(true) {
+                    solid_below_top = true;
                 }
             }
-            }
-        if highest >= published {
-            bad += 1;
-            if bad < 6 {
-                eprintln!("column key {:08x} {:08x}: highest occupied {highest} published top {published} (k_lo {k_lo} band {n_band} gap {gap})", c[0], c[1]);
+            if !solid_below_top && column.info() & info::CLIP_ABOVE == 0 && column.top() > -(1 << 26) {
+                loose += 1;
             }
         }
+        eprintln!("{name}: {columns} columns, {audited} audited, {cells} cells: {wrong} wrong, {wrong_tops} natural tops wrong, {loose} loose tops");
+        assert!(columns > 1000);
+        assert_eq!(wrong, 0, "{name}");
+        assert_eq!(wrong_tops, 0, "{name}");
+        assert_eq!(loose, 0, "{name}");
     }
-    eprintln!("{columns} columns, {bad} with occupied cells above the published top");
-    eprintln!("{volumetric} volumetric columns, {wrong_tops} generated tops differing from the CPU");
-    assert!(columns > 1000);
-    assert_eq!(bad, 0);
-    assert_eq!(wrong_tops, 0);
 }
 
 /// Surface offsets reconstruct the generator's exact height below voxel
@@ -1037,36 +1137,35 @@ fn surface_offsets_reconstruct_the_field_height() {
         read_buffer(&gpu, b, b.size()).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
     };
     let (rec, pool) = (words(records), words(pool));
-    let surface_units = if planet.field().program().wgsl.contains("fn terrain_surface") { 1 } else { 0 };
+    let surface_words = planet.field().program().wgsl.contains("fn terrain_surface");
     let layer = planet.grid().layer_mm() as f64;
     let (mut lanes, mut whole, mut worst) = (0usize, 0usize, 0.0f64);
-    for c in rec.chunks_exact(8) {
-        let info = c[3];
-        // Valid columns other than generated volume whose tops fit their
-        // byte: level-0 tops, inline relief, and whole-cell tops (no relief).
-        let n_band = info & 511;
-        let fits = n_band < 32 || (n_band == 32 && (info >> 22) & 7 != 0);
-        if info & 0xc000_0000 != 0x8000_0000 || info & 0x1000 != 0 || !fits {
+    use helio_pass_voxel_planet::column_view::{info, ColumnView};
+    for column in ColumnView::all(&rec, &pool, surface_words).filter(|c| c.valid()) {
+        // Columns other than generated volume: level-0 tops, inline relief,
+        // and whole-cell tops (no relief).
+        if column.info() & info::GENERATED != 0 {
             continue;
         }
-        let level = c[0] >> 27;
-        let relief = info & 0x1000_0000 != 0;
-        let inline = relief && info & 0x0400_0000 != 0;
+        let (face, level, ci, cj) = column.key();
+        let relief = column.info() & info::RELIEF != 0;
+        let inline = relief && column.info() & info::RELIEF_INLINE != 0;
         if level != 0 && relief && !inline {
             continue;
         }
         // Units of the stored height and the offset, in base cells.
         let unit = if level == 0 || relief { 1.0 } else { f64::from(1u32 << level) };
-        let (face, ci, cj, k_lo, run) = (((c[0] >> 24) & 7) as u8, (c[0] & 0xff_ffff) as i32, c[1] as i32, c[2] as i32, c[4]);
-        let ext = info & 0x2000_0000 != 0;
-        let offsets = run + if ext { 2 } else { 1 } + surface_units;
         for cell in 0..64u32 {
-            let byte = |unit: u32| ((pool[(unit * 16 + (cell >> 2)) as usize] >> ((cell & 3) * 8)) & 255) as i32;
-            // Stored height (base cells): the top byte above the band base,
-            // in base cells (inline relief, level 0) or level cells.
-            let stored = if unit == 1.0 { f64::from(((k_lo * 8) << level) + byte(run)) } else { f64::from(k_lo * 8 + byte(run)) * unit };
-            let offset = (byte(offsets) - 128) as f64 / 128.0 * unit;
-            let (i, j) = (ci * 8 + (cell & 7) as i32, cj * 8 + (cell >> 3) as i32);
+            let (x, y) = (cell & 7, cell >> 3);
+            // Stored height (base cells): the top over the column base, in
+            // base cells (inline relief) or level cells.
+            let stored = if inline {
+                f64::from((column.base() << level) + column.stored_top(x, y) as i32)
+            } else {
+                f64::from(column.natural_top(x, y)) * unit
+            };
+            let offset = (column.surface_offset(x, y) as i32 - 128) as f64 / 128.0 * unit;
+            let (i, j) = (ci * 8 + x as i32, cj * 8 + y as i32);
             let exact = planet.column_height(face, i, j, level) as f64 / layer;
             worst = worst.max((stored + offset - exact).abs() / unit);
             lanes += 1;

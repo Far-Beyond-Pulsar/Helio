@@ -1,4 +1,5 @@
-// GPU-driven column generation, run allocation and publication.
+// GPU-driven column generation, run allocation and publication (span
+// columns, docs/span-columns.md).
 // Order per frame: evict -> generate -> count -> refill -> allocate -> fixup -> publish.
 
 struct Job {
@@ -14,17 +15,22 @@ struct Job {
 
 struct JobOut {
     status: u32,   // 0 ok, 2 scratch full, 3 pool full, 4 skipped
-    k_lo: i32,
-    n_band: u32,
-    n_mixed: u32,
-    scratch: u32,
+    base: i32,     // natural tops' base (level cells)
+    info: u32,     // record info bits: span count and flags
+    n_mixed: u32,  // bricks copied to the pool (mixed bricks of BRICKS spans)
+    scratch: u32,  // first scratch unit
     size_class: u32,
     run: u32,
-    pad: u32,      // record info flags
-    top: i32,      // first air above every occupied cell, clipped or not
-    centre: i32,   // clipped bands: the eye layer the window is centred on
-    mixed: array<u32, 8>,
-    solid: array<u32, 8>,
+    units: u32,    // header and span area units, before the bricks
+    top: i32,      // first air layer above every solid cell (clipped above: the window top)
+    centre: i32,   // clipped windows: the eye layer the window is centred on
+    lo: i32,       // clipped below: the window bottom
+    summary: i32,  // bound of every solid cell, clipped or not (summary tops)
+    n_eval: u32,   // bricks evaluated (in scratch after the header area)
+    header: u32,   // header units
+    pad0: u32,
+    pad1: u32,
+    mixed: array<u32, 8>,  // evaluated bricks copied to the pool
 }
 
 const CLASSES: u32 = 10u;
@@ -34,7 +40,21 @@ const A_FAILS: u32 = 10u;
 const A_NEED: u32 = 16u;
 const A_PAGES: u32 = 30u;
 const A_SCRATCH: u32 = 31u;
-const MAX_BAND: u32 = 256u;
+// A column describes a window of 2 * WINDOW_CELLS level cells around the
+// eye's layer at most; rays past a clipped side use the coarser level,
+// whose window reaches twice as far, and the CPU regenerates the column
+// when the eye moves a quarter window vertically. Any depth stays
+// representable.
+const WINDOW_CELLS: i32 = 1024;
+// Scratch per job: the header area (at most six units), the evaluated
+// bricks (at most the window's 256), then the span area.
+const HEADER_UNITS_MAX: u32 = 6u;
+const SPAN_UNITS_MAX: u32 = 12u;
+// Candidate intervals gathered per column; more fall back to one interval
+// over all of them. At most MAX_INTERVALS remain after merging, so a
+// column has at most 15 spans.
+const RAW_INTERVALS: u32 = 128u;
+const MAX_INTERVALS: u32 = 7u;
 // Readback status of a published clipped column (with its window centre).
 const STATUS_CLIPPED: u32 = 5u;
 
@@ -55,15 +75,22 @@ struct PageMeta {
 }
 @group(0) @binding(18) var<storage, read_write> page_meta: array<PageMeta>;
 
-// A column's stored band: the highest top of its lanes, the brick range
-// kept (after clipping to MAX_BAND), the clip flags and the lowest natural
-// top of its lanes.
-struct Band {
-    hi_cell: i32,
-    k_lo: i32,
-    k_hi: i32,
+// What a column describes, decided once by lane 0: the merged candidate
+// intervals (level cells, whole bricks), the window and its clipping, the
+// bricks to evaluate and their scratch.
+struct Plan {
+    n: u32,
     clip: u32,
-    top_min: i32,
+    w_lo: i32,
+    w_hi: i32,
+    // The planet's centre (whole bricks below it): a lane's radial line
+    // ends there; below it the line runs out through the antipode.
+    floor: i32,
+    eval: u32,
+    base: u32,
+    centre: i32,
+    summary: i32,
+    iv: array<vec2<i32>, 8>,
 }
 
 fn class_offset(c: u32) -> u32 {
@@ -76,15 +103,29 @@ fn job_index(wg: vec3<u32>) -> u32 {
     return wg.x + wg.y * 32768u;
 }
 
-var<workgroup> g_band: array<atomic<i32>, 2>;
-// Lowest natural top of the column's lanes (whether tops fit counting down).
-var<workgroup> g_top_min: atomic<i32>;
-var<workgroup> g_words: array<atomic<u32>, 16>;
+// Candidate intervals: where some lane's occupancy can change.
+var<workgroup> g_terrain: array<atomic<i32>, 2>;
+var<workgroup> g_raw: array<vec2<i32>, 128>;
+var<workgroup> g_raw_count: atomic<u32>;
+var<workgroup> g_raw_bounds: array<atomic<i32>, 2>;
+// A batch of eight brushes' crossings over the column's lanes: lowest and
+// highest first cell inside, lowest and highest last cell inside, margin,
+// any lane crossing.
+var<workgroup> g_bnd: array<atomic<i32>, 48>;
+var<workgroup> g_plan: Plan;
+// Per merged interval: lane summary bits (some solid 1, some air 2, not
+// solid-below-air 4, tops not the natural ones 8, a top over a byte 16), the
+// highest solid layer + 1 and each lane's top over the interval's start.
+var<workgroup> g_iv_flags: array<atomic<u32>, 8>;
+var<workgroup> g_iv_top: array<atomic<i32>, 8>;
+var<workgroup> g_tops: array<atomic<u32>, 128>;
+// Solid lanes of each gap between intervals (two words per gap).
+var<workgroup> g_gap: array<atomic<u32>, 18>;
+// Natural tops: lowest, highest (level cells), highest base-cell top.
+var<workgroup> g_natural: array<atomic<i32>, 3>;
+var<workgroup> g_words: array<atomic<u32>, 32>;
 var<workgroup> g_masks: array<atomic<u32>, 16>;
 var<workgroup> g_any: array<atomic<u32>, 2>;
-var<workgroup> g_base: u32;
-// The column's band, reduced from the atomic bounds once (`Band`).
-var<workgroup> g_band_out: Band;
 var<workgroup> g_fraction: array<atomic<u32>, 32>;
 var<workgroup> g_topology_flags: u32;
 var<workgroup> g_volume: atomic<u32>;
@@ -158,6 +199,76 @@ fn cell_fraction(h: f32) -> u32 {
     return clamp(u32(h * 65536.0), 1u, 65535u);
 }
 
+// Where a brush's surface crosses one lane (the column of cells over
+// domain point `p`, half-cell centre `ch` across): the first and last
+// level cells inside it, and how far either may be off (cells).
+struct Crossing {
+    lo: i32,
+    hi: i32,
+    margin: i32,
+    hit: bool,
+}
+
+fn brush_crossings(b: FaceBrush, p: vec3<i32>, ch: vec2<i32>, level: u32) -> Crossing {
+    var out = Crossing(0, 0, 1, false);
+    let shift = level + 1u;
+    let half = 1 << level;
+    if ((b.flags >> 6u) & 3u) == 1u {
+        // A box: the lanes inside its footprint, between its faces (cell
+        // centres `(k << shift) + half` from k_lo to k_hi), exactly.
+        if any(vec2<u32>(abs(ch - b.center.xy)) > vec2<u32>(b.radius_half)) { return out; }
+        out.lo = -((half - b.k_lo) >> shift);
+        out.hi = (b.k_hi - half) >> shift;
+        out.hit = out.lo <= out.hi;
+        return out;
+    }
+    // A ball in volume space. A lane's volume points are linear in the
+    // layer (`volume_point_half`: the domain point scaled by a fixed ratio
+    // per half layer, or the height itself on a plane), so the ball holds
+    // one interval of it: solved in f32 around the lane's exact point at the
+    // ball's height, along the exact slope (a slope measured between two
+    // rounded points tens of cells apart was percents off, and moved a 3 km
+    // crater's floor 45 cells), with the error of the f32 integers and
+    // products (relative 2^-22) and of the volume points' rounding; near
+    // tangency the root moves by the square root of the discriminant's
+    // error. The interval only chooses the cells evaluated exactly.
+    let h0 = (b.k_lo >> 1u) + (b.k_hi >> 1u);
+    let q0 = volume_point_half(p, h0);
+    var v = vec3<f32>(0.0, f32(world.scale.w) / 65536.0, 0.0);
+    if !is_plane() { v = vec3<f32>(p) * (f32(world.scale.y) * exp2(-f32(world.scale.z) - 30.0)); }
+    let a = dot(v, v);
+    if a <= 0.0 { return out; }
+    let d = vec3<f32>(q0 - b.ball.xyz);
+    let r = f32(abs(b.ball.w));
+    let dl = length(d);
+    let bb = dot(d, v);
+    let c = (dl - r) * (dl + r);
+    let disc = bb * bb - a * c;
+    let e = (dl + r) * 4.8e-7 + 4.0;
+    let dd = a * 2.0 * (dl + r) * e;
+    if disc < -dd { return out; }
+    let sq = sqrt(max(disc, 0.0));
+    let root_err = select(dd / (2.0 * sq), sqrt(dd), sq * sq < dd);
+    let t_err = (root_err + e * sqrt(a)) / a;
+    // Cells relative to the cell holding h0, so f32 never holds the
+    // planet-scale height itself.
+    let k0 = h0 >> shift;
+    let rem = f32(h0 - (k0 << shift) - half);
+    let cell = f32(1 << shift);
+    out.lo = k0 + i32(floor((rem + (-bb - sq) / a) / cell + 0.5));
+    out.hi = k0 + i32(floor((rem + (-bb + sq) / a) / cell + 0.5));
+    out.margin = i32(ceil(t_err / cell)) + 2;
+    out.hit = true;
+    return out;
+}
+
+fn append_candidate(iv: vec2<i32>) {
+    atomicMin(&g_raw_bounds[0], iv.x);
+    atomicMax(&g_raw_bounds[1], iv.y);
+    let n = atomicAdd(&g_raw_count, 1u);
+    if n < RAW_INTERVALS { g_raw[n] = iv; }
+}
+
 @compute @workgroup_size(64)
 fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let index = job_index(wg);
@@ -184,29 +295,40 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         g_edit_counts = vec3<u32>(n.large, n.recent, n.baked);
         atomicStore(&g_keep[0], 0u);
         atomicStore(&g_keep[1], 0u);
-        atomicStore(&g_band[0], 0x7fffffff);
-        atomicStore(&g_band[1], -0x7fffffff);
-        atomicStore(&g_top_min, 0x7fffffff);
+        atomicStore(&g_terrain[0], 0x7fffffff);
+        atomicStore(&g_terrain[1], -0x7fffffff);
+        atomicStore(&g_raw_count, 0u);
+        atomicStore(&g_raw_bounds[0], 0x7fffffff);
+        atomicStore(&g_raw_bounds[1], -0x7fffffff);
+        atomicStore(&g_natural[0], 0x7fffffff);
+        atomicStore(&g_natural[1], -0x7fffffff);
+        atomicStore(&g_natural[2], -0x7fffffff);
         atomicStore(&g_any[0], 0u);
         atomicStore(&g_any[1], 0u);
         atomicStore(&g_volume, 0u);
     }
     if li < 16u {
         atomicStore(&g_words[li], 0u);
+        atomicStore(&g_words[li + 16u], 0u);
         atomicStore(&g_masks[li], 0u);
-    }
-    if li < 16u {
         atomicStore(&g_surface[li], 0u);
         atomicStore(&g_offset[li], 0u);
     }
+    if li < 18u { atomicStore(&g_gap[li], 0u); }
+    if li < 8u {
+        atomicStore(&g_iv_flags[li], 0u);
+        atomicStore(&g_iv_top[li], NO_LAYER);
+    }
+    atomicStore(&g_tops[li], 0u);
+    atomicStore(&g_tops[li + 64u], 0u);
     // This replaces the existing initialization barrier; the edit list is
     // scanned once per workgroup, with no extra terrain query or barrier.
     let topology_flags = workgroupUniformLoad(&g_topology_flags);
     // An edit changes occupancy, not the display field of untouched lanes.
-    // Mixed topology retains bitmap storage; continuous fractions require a
-    // heightfield, so only their metadata is disabled for topology brushes.
+    // Continuous fractions require a heightfield, so topology brushes turn
+    // them off.
     let display_base = (frame.hints.w & 8u) != 0u && level >= 1u;
-    let requested_relief = display_base && topology_flags == 0u;
+    let relief = display_base && topology_flags == 0u;
     // Bit 16: the display height keeps unresolved ridges' mean (off only
     // for audits against the canonical field).
     let display = display_base && (frame.hints.w & 16u) != 0u;
@@ -241,33 +363,21 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let base_top = div_floor(height, world.grid.y);
     let remainder = u32(base_top) & ((1u << level) - 1u);
     var top = base_top >> level;
-    if requested_relief && remainder != 0u { top += 1; }
+    if relief && remainder != 0u { top += 1; }
     var fraction = 0u;
-    if requested_relief && remainder != 0u {
+    if relief && remainder != 0u {
         // Shifts avoid overflowing a u32 product at planetary coarse levels.
         if level <= 16u { fraction = remainder << (16u - level); }
         else { fraction = max(remainder >> (level - 16u), 1u); }
     }
-    // The following band reduction barrier completes this clear before any
-    // lane writes its packed fraction.
-    if requested_relief && li < 32u { atomicStore(&g_fraction[li], 0u); }
-    // Everything below the band is solid ground, everything above is air.
-    // The band follows the terrain wherever it is: clamping its top to the
-    // datum (a sea-level leftover) made every column below datum claim the
-    // air up to height 0 as occupied (column tops, summary blocks and level
-    // tops), so rays stepped cell by cell through it (5-20x primary cost in
-    // lowland below datum) and each column stored the empty bricks.
-    atomicMin(&g_band[0], top - 1);
-    atomicMax(&g_band[1], top);
-    atomicMin(&g_top_min, top);
+    if relief && li < 32u { atomicStore(&g_fraction[li], 0u); }
     // Volumetric terrain (caves, overhangs): the program may change cells
     // within its extent around the heightfield top, evaluated in 3D. Only
     // the cells it changes make generated volume: a column whose cells all
     // keep the heightfield's kinds (most of a cave region's rock, ground too
-    // flat to lean) stays a heightfield column, with its band, relief and
-    // storage. Pass 1 finds the lane's changed cells; the band loop
-    // evaluates them and one more on each side (the generated surface's
-    // relief reads the densities around it).
+    // flat to lean) stays a heightfield column. Pass 1 finds the lane's
+    // changed cells; they and one more on each side are evaluated (the
+    // generated surface's relief reads the densities around it).
     let field_top = base_top >> level;
     let leaning = lean.x != 0 && extent.y > 0;
     var changed_lo = 0x7fffffff;
@@ -281,127 +391,184 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let changed = changed_lo <= changed_hi;
     let eval_lo = select(0, max(changed_lo - 1, field_top - extent.x), changed);
     let eval_hi = select(-1, min(changed_hi + 1, field_top + extent.y - 1), changed);
+    if changed { atomicOr(&g_volume, VOLUME_TERRAIN); }
+    // The terrain's candidates: the cells around each lane's top whose kind
+    // the heightfield sets, and the volume's evaluated cells.
+    var t_lo = min(top, field_top) - 1;
+    var t_hi = max(top, field_top) + 1;
     if changed {
-        atomicMin(&g_band[0], eval_lo - 1);
-        atomicMax(&g_band[1], eval_hi + 1);
-        atomicOr(&g_volume, VOLUME_TERRAIN);
+        t_lo = min(t_lo, eval_lo - 1);
+        t_hi = max(t_hi, eval_hi + 2);
     }
+    atomicMin(&g_terrain[0], t_lo);
+    atomicMax(&g_terrain[1], t_hi);
+    let ch = vec2<i32>(center_half(i, level), center_half(j, level));
+    let edit_counts = workgroupUniformLoad(&g_edit_counts);
+    let n_brushes = edit_counts.x + edit_counts.y;
     if job.edits != 0u {
-        let n = edit_counts(job.edits);
-        // Baked bricks may hold air below the terrain or solid above it.
-        let base = job.edits + 2u + n.large + n.recent;
-        for (var e = li; e < n.baked; e += 64u) {
-            let bk = bitcast<i32>(edit_refs[base + e * 2u]);
-            atomicMin(&g_band[0], bk * 8 - 1);
-            atomicMax(&g_band[1], bk * 8 + 9);
+        // Baked bricks: each a candidate.
+        let baked_base = job.edits + 2u + n_brushes;
+        for (var e = li; e < edit_counts.z; e += 64u) {
+            let bk = bitcast<i32>(edit_refs[baked_base + e * 2u]);
+            append_candidate(vec2<i32>(bk * 8, bk * 8 + 8));
             atomicOr(&g_volume, VOLUME_MATERIALS);
         }
-        for (var e = li; e < n.large + n.recent; e += 64u) {
+        for (var e = li; e < n_brushes; e += 64u) {
             let b = edit_brush(job.edits, e);
-            if b.radius_half < (1u << level) { continue; }
-            let shift = level + 1u;
-            let lo = b.k_lo >> shift;
-            let hi = (b.k_hi >> shift) + 1;
-            let op = (b.flags >> 4u) & 3u;
-            if op == 0u { atomicMin(&g_band[0], lo - 1); }
-            if op == 1u { atomicMax(&g_band[1], hi + 1); }
             // Shading reads brush materials only where some brush sets one.
-            if op != 0u { atomicOr(&g_volume, VOLUME_MATERIALS); }
+            if b.radius_half >= (1u << level) && ((b.flags >> 4u) & 3u) != 0u { atomicOr(&g_volume, VOLUME_MATERIALS); }
         }
+    }
+    // Brush surfaces, eight brushes per pass: every lane solves where it
+    // crosses each brush, and the column keeps, per brush, the range of the
+    // crossings from below and from above. Between them no lane changes
+    // state for that brush, however tall (a dig's carved air, a crater's
+    // wall).
+    for (var first = 0u; first < n_brushes; first += 8u) {
+        if li < 48u {
+            let f = li % 6u;
+            let init = select(select(0, -0x7fffffff, f == 1u || f == 3u), 0x7fffffff, f == 0u || f == 2u);
+            atomicStore(&g_bnd[li], init);
+        }
+        workgroupBarrier();
+        for (var s = 0u; s < 8u; s++) {
+            let e = first + s;
+            if e >= n_brushes { break; }
+            let b = edit_brush(job.edits, e);
+            if b.radius_half < (1u << level) || ((b.flags >> 4u) & 3u) == 2u { continue; }
+            let crossing = brush_crossings(b, column_point, ch, level);
+            if crossing.hit {
+                atomicMin(&g_bnd[s * 6u], crossing.lo);
+                atomicMax(&g_bnd[s * 6u + 1u], crossing.lo);
+                atomicMin(&g_bnd[s * 6u + 2u], crossing.hi);
+                atomicMax(&g_bnd[s * 6u + 3u], crossing.hi);
+                atomicMax(&g_bnd[s * 6u + 4u], crossing.margin);
+                atomicStore(&g_bnd[s * 6u + 5u], 1);
+            }
+        }
+        workgroupBarrier();
+        if li < 8u && atomicLoad(&g_bnd[li * 6u + 5u]) != 0 {
+            let m = atomicLoad(&g_bnd[li * 6u + 4u]);
+            append_candidate(vec2<i32>(atomicLoad(&g_bnd[li * 6u]) - m, atomicLoad(&g_bnd[li * 6u + 1u]) + m + 1));
+            append_candidate(vec2<i32>(atomicLoad(&g_bnd[li * 6u + 2u]) - m, atomicLoad(&g_bnd[li * 6u + 3u]) + m + 1));
+        }
+        workgroupBarrier();
     }
     workgroupBarrier();
-    // Lane 0 reduces the atomic bounds and broadcasts the band: the brick
-    // loop below holds barriers, and FXC rejects barriers under control flow
-    // that depends on per-lane atomic loads.
+    // Lane 0 merges the candidates into whole-brick intervals, clips them to
+    // the window around the eye's layer and reserves the scratch.
     let centre = frame.layer_i.x >> level;
     if li == 0u {
-        let lo_cell = atomicLoad(&g_band[0]);
-        let hi_cell = atomicLoad(&g_band[1]);
-        var k_lo = lo_cell >> 3u;
-        var k_hi = ((max(hi_cell, lo_cell + 1) - 1) >> 3u) + 1;
-        // A band taller than MAX_BAND bricks (deep digs, deep caves, cliffs)
-        // keeps the window of MAX_BAND bricks around the eye's layer at this
-        // level: rays beyond a clipped side use coarser levels, whose windows
-        // reach twice as far, and the CPU regenerates the column when the eye
-        // moves a quarter window vertically. Any depth stays representable.
-        var clip = 0u;
-        if k_hi - k_lo > i32(MAX_BAND) {
-            let lo = clamp((centre >> 3u) - i32(MAX_BAND / 2u), k_lo, k_hi - i32(MAX_BAND));
-            if lo > k_lo { clip |= INFO_CLIP_BELOW; }
-            if lo + i32(MAX_BAND) < k_hi { clip |= INFO_CLIP_ABOVE; }
-            k_lo = lo;
-            k_hi = lo + i32(MAX_BAND);
+        var plan: Plan;
+        let raw = atomicLoad(&g_raw_count);
+        var count = min(raw, RAW_INTERVALS);
+        if raw > RAW_INTERVALS {
+            g_raw[0] = vec2<i32>(atomicLoad(&g_raw_bounds[0]), atomicLoad(&g_raw_bounds[1]));
+            count = 1u;
         }
-        g_band_out = Band(hi_cell, k_lo, k_hi, clip, atomicLoad(&g_top_min));
-    }
-    let band = workgroupUniformLoad(&g_band_out);
-    let hi_cell = band.hi_cell;
-    let k_lo = band.k_lo;
-    let k_hi = band.k_hi;
-    let clip = band.clip;
-    let n_band = u32(k_hi - k_lo);
-    // An edited column whose natural tops no longer fit a byte above the band
-    // base (a deep dig) counts them down from the band top when they fit
-    // there (`INFO_TOPS_DOWN`).
-    let tops_down = topology_flags != 0u && n_band >= 32u && (clip & INFO_CLIP_ABOVE) == 0u
-        && k_hi * 8 - band.top_min <= 255;
-    let volume_bits = atomicLoad(&g_volume);
-    let volumetric = (volume_bits & VOLUME_TERRAIN) != 0u;
-    // Generated caves and overhangs keep the relief of the natural surface
-    // they leave intact (their tops count down from the band top, which a
-    // band of at most 32 bricks always fits).
-    let relief = requested_relief && n_band <= 32u && (volumetric || hi_cell - k_lo * 8 <= 255);
-    let heightfield = topology_flags == 0u && !volumetric && n_band <= 32u && hi_cell - k_lo * 8 <= 255;
-    if requested_relief && !relief { top = base_top >> level; }
-    // When the whole column fits in 255 authored layers, store its exact
-    // base-grid top in the existing byte instead of allocating two Q16 units.
-    // The bound includes the ceil top, so every lane is guaranteed to fit.
-    let inline_relief = relief && !volumetric && level <= 7u && hi_cell - k_lo * 8 <= i32(255u >> level);
-    let wide_relief = relief && !inline_relief;
-    let surface_words = world.sphere.w != 0u;
-    let scratch_surface = select(1u, 3u, wide_relief);
-    let scratch_offset = scratch_surface + select(0u, 1u, surface_words);
-    let scratch_header = scratch_offset + 1u;
-    if li == 0u {
-        let need = i32(scratch_header + n_band);
+        g_raw[count] = vec2<i32>(atomicLoad(&g_terrain[0]), atomicLoad(&g_terrain[1]));
+        count += 1u;
+        for (var e = 0u; e < count; e++) {
+            let iv = g_raw[e];
+            g_raw[e] = vec2<i32>((iv.x >> 3u) << 3u, ((iv.y + 7) >> 3u) << 3u);
+        }
+        // Insertion sort by start, then merge intervals that overlap or are
+        // at most a brick apart.
+        for (var e = 1u; e < count; e++) {
+            let iv = g_raw[e];
+            var m = e;
+            while m > 0u && g_raw[m - 1u].x > iv.x {
+                g_raw[m] = g_raw[m - 1u];
+                m -= 1u;
+            }
+            g_raw[m] = iv;
+        }
+        var n = 0u;
+        var summary = -0x7fffffff;
+        for (var e = 0u; e < count; e++) {
+            let iv = g_raw[e];
+            summary = max(summary, iv.y);
+            if n > 0u && iv.x <= g_raw[n - 1u].y + 8 {
+                g_raw[n - 1u].y = max(g_raw[n - 1u].y, iv.y);
+            } else {
+                g_raw[n] = iv;
+                n += 1u;
+            }
+        }
+        // The window around the eye's layer. The coarsest level is the
+        // coverage every ray falls back to: its columns describe their
+        // whole radial line (a few dozen bricks from the core up).
+        var w_lo = ((centre - WINDOW_CELLS) >> 3u) << 3u;
+        var w_hi = w_lo + 2 * WINDOW_CELLS;
+        if level + 1u >= u32(frame.layer_i.z) {
+            w_lo = -(1 << 29);
+            w_hi = 1 << 29;
+        }
+        // Volume points reach zero at the planet's centre: (1 + ratio) = 0,
+        // the ratio being h * scale.y >> scale.z in Q30 (half layers h).
+        var floor = NO_LAYER;
+        if !is_plane() {
+            let core_half = -i32(round(exp2(30.0 + f32(world.scale.z)) / f32(world.scale.y)));
+            floor = ((core_half >> (level + 1u)) >> 3u) << 3u;
+        }
+        var clip = 0u;
+        var kept = 0u;
+        for (var e = 0u; e < n; e++) {
+            var iv = g_raw[e];
+            if iv.y <= floor { continue; }
+            iv.x = max(iv.x, floor);
+            if iv.y <= w_lo { clip |= INFO_CLIP_BELOW; continue; }
+            if iv.x >= w_hi { clip |= INFO_CLIP_ABOVE; continue; }
+            if iv.x < w_lo { iv.x = w_lo; clip |= INFO_CLIP_BELOW; }
+            if iv.y > w_hi { iv.y = w_hi; clip |= INFO_CLIP_ABOVE; }
+            g_raw[kept] = iv;
+            kept += 1u;
+        }
+        // At most MAX_INTERVALS: close the smallest gaps.
+        while kept > MAX_INTERVALS {
+            var best = 0u;
+            for (var e = 1u; e + 1u < kept; e++) {
+                if g_raw[e + 1u].x - g_raw[e].y < g_raw[best + 1u].x - g_raw[best].y { best = e; }
+            }
+            g_raw[best].y = g_raw[best + 1u].y;
+            for (var e = best + 1u; e + 1u < kept; e++) { g_raw[e] = g_raw[e + 1u]; }
+            kept -= 1u;
+        }
+        var eval = 0u;
+        for (var e = 0u; e < 8u; e++) {
+            if e < kept {
+                plan.iv[e] = g_raw[e];
+                eval += u32(g_raw[e].y - g_raw[e].x) >> 3u;
+            } else {
+                plan.iv[e] = vec2<i32>(0);
+            }
+        }
+        plan.n = kept;
+        plan.floor = floor;
+        plan.clip = clip;
+        plan.w_lo = w_lo;
+        plan.w_hi = w_hi;
+        plan.eval = eval;
+        plan.centre = centre;
+        plan.summary = summary;
+        let need = i32(HEADER_UNITS_MAX + eval + SPAN_UNITS_MAX);
         let base = atomicAdd(&alloc[A_SCRATCH], need);
         if u32(base + need) * UNIT_WORDS > arrayLength(&scratch) {
-            g_base = NONE;
+            plan.base = NONE;
         } else {
-            g_base = u32(base);
+            plan.base = u32(base);
         }
+        g_plan = plan;
     }
-    let base = workgroupUniformLoad(&g_base);
-    if base == NONE {
+    var plan = workgroupUniformLoad(&g_plan);
+    if plan.base == NONE {
         if li == 0u { job_out[index].status = 2u; }
         return;
     }
-    // A volumetric column's fractions follow its generation (below).
-    if wide_relief && !volumetric { atomicOr(&g_fraction[li >> 1u], fraction << ((li & 1u) * 16u)); }
-    // Fractions and byte-packed tops share the existing publication barrier.
-    // Disabled metadata performs no fraction atomics or extra barriers.
-    var stored_top = select(top - k_lo * 8, base_top - ((k_lo * 8) << level), inline_relief);
-    if tops_down { stored_top = k_hi * 8 - top; }
-    atomicOr(&g_words[li >> 2u], u32(clamp(stored_top, 0, 255)) << ((li & 3u) * 8u));
-    if surface_words {
-        let word = u32(column.y) & 0xffu;
-        atomicOr(&g_surface[li >> 2u], word << ((li & 3u) * 8u));
-    }
-    workgroupBarrier();
-    if surface_words && li < 16u {
-        scratch[(base + scratch_surface) * UNIT_WORDS + li] = atomicLoad(&g_surface[li]);
-    }
-    if wide_relief && !volumetric && li < 32u {
-        scratch[(base + 1u) * UNIT_WORDS + li] = atomicLoad(&g_fraction[li]);
-    }
-    if li < 16u {
-        scratch[base * UNIT_WORDS + li] = atomicLoad(&g_words[li]);
-        atomicStore(&g_words[li], 0u);
-    }
-    workgroupBarrier();
+    let bricks_base = plan.base + HEADER_UNITS_MAX;
     // Generated top of a lane: first air above its highest solid cell before
-    // edits (overhang lips, cave openings).
-    var generated_top = k_lo * 8;
+    // edits (overhang lips, cave openings), from the evaluated cells.
+    var generated_top = NO_LAYER;
     // Caves or overhangs change this lane's top cell or the air above it:
     // its surface is no longer the relief surface.
     var surface_changed = false;
@@ -418,151 +585,218 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     // Lanes the overhangs fold take every evaluated cell, and their relief,
     // from the density.
     let dense_lane = leaning && changed;
-    let edit_counts = workgroupUniformLoad(&g_edit_counts);
-    let ch = vec2<i32>(center_half(i, level), center_half(j, level));
     // The column's footprint in half cells, for culling brushes per brick.
     let half_cell = 1 << (level + 1u);
     let foot_lo = vec2<i32>(ci, cj) * 8 * half_cell;
     let foot_hi = foot_lo + 8 * half_cell;
-    for (var b = 0u; b < n_band; b++) {
-        var kinds: array<u32, 8>;
-        for (var z = 0u; z < 8u; z++) {
-            let k = (k_lo + i32(b)) * 8 + i32(z);
-            // Cells the volume leaves keep the heightfield's kinds (with
-            // relief, its ceil top cell).
-            var kind = terrain_kind(top, k);
-            if k >= eval_lo && k <= eval_hi {
-                // Overhangs fold the exact surface: their lanes take every
-                // evaluated cell from the density. Elsewhere (caves) a cell
-                // the volume leaves as the heightfield has it keeps its kind.
-                let density = generated_density(column_point, face, i, j, k, level, field_top, height, leaning, lean.y, lean_node);
-                let dense = select(0u, 1u, density > 0);
-                if dense != terrain_kind(field_top, k) {
-                    kind = dense;
-                    if k >= top - 1 { surface_changed = true; }
-                } else if dense_lane {
-                    kind = dense;
-                }
-                if kind != 0u {
-                    top_solid = density;
-                    top_air = NO_DENSITY;
-                    top_fraction = 0u;
-                } else if top_solid != NO_DENSITY && top_air == NO_DENSITY {
-                    top_air = density;
-                    let t = select(0.5, volume_crossing(top_solid, density), top_solid > 0);
-                    surface_crossing = f32(k) - 0.5 + t;
-                    crossing_air = k;
-                    if requested_relief && t > 0.5 {
-                        // The surface rises into this cell: solid, cut there.
-                        kind = 1u;
-                        top_fraction = cell_fraction(t - 0.5);
-                    } else {
-                        top_fraction = cell_fraction(0.5 + t);
+    var gb = 0u;
+    for (var iv = 0u; iv < plan.n; iv++) {
+        let range = plan.iv[iv];
+        // The lane over the interval: its highest solid layer + 1, whether
+        // it has air, and whether it has solid above air.
+        var lane_top = range.x;
+        var lane_air = false;
+        var lane_layered = false;
+        for (var bk = range.x >> 3u; bk < (range.y >> 3u); bk++) {
+            var kinds: array<u32, 8>;
+            for (var z = 0u; z < 8u; z++) {
+                let k = bk * 8 + i32(z);
+                // Cells the volume leaves keep the heightfield's kinds (with
+                // relief, its ceil top cell).
+                var kind = terrain_kind(top, k);
+                if k >= eval_lo && k <= eval_hi {
+                    // Overhangs fold the exact surface: their lanes take every
+                    // evaluated cell from the density. Elsewhere (caves) a cell
+                    // the volume leaves as the heightfield has it keeps its kind.
+                    let density = generated_density(column_point, face, i, j, k, level, field_top, height, leaning, lean.y, lean_node);
+                    let dense = select(0u, 1u, density > 0);
+                    if dense != terrain_kind(field_top, k) {
+                        kind = dense;
+                        if k >= top - 1 { surface_changed = true; }
+                    } else if dense_lane {
+                        kind = dense;
                     }
-                }
-            }
-            if kind != 0u { generated_top = max(generated_top, k + 1); }
-            kinds[z] = kind;
-        }
-        // The edits in order: the large brushes, the baked cells, then the
-        // recent brushes. Brushes go in chunks of 64: each lane culls one
-        // against this brick's box, the kept ones are compacted in order and
-        // every lane applies them to its eight cells. Bricks no brush
-        // reaches cost one bounds test per brush, not per cell.
-        let brick_lo = ((k_lo + i32(b)) * 8) * half_cell;
-        let brick_hi = brick_lo + 8 * half_cell;
-        for (var part = 0u; part < 2u; part++) {
-            if part == 1u && edit_counts.z != 0u {
-                let n = EditCounts(edit_counts.x, edit_counts.y, edit_counts.z);
-                for (var z = 0u; z < 8u; z++) {
-                    let cell = baked_cell(job.edits, n, i, j, (k_lo + i32(b)) * 8 + i32(z)) & 3u;
-                    if cell == BAKED_AIR { kinds[z] = 0u; }
-                    else if cell == BAKED_SOLID { kinds[z] = 1u; }
-                }
-            }
-            let first = select(0u, edit_counts.x, part == 1u);
-            let end = select(edit_counts.x, edit_counts.x + edit_counts.y, part == 1u);
-            for (var start = first; start < end; start += 64u) {
-                let e = start + li;
-                var keep = false;
-                var brush: FaceBrush;
-                if e < end {
-                    brush = edit_brush(job.edits, e);
-                    let extent_half = brush.center.w + half_cell;
-                    keep = brush.radius_half >= (1u << level)
-                        && brush.k_hi + half_cell >= brick_lo && brush.k_lo - half_cell < brick_hi
-                        && brush.center.x + extent_half >= foot_lo.x && brush.center.x - extent_half < foot_hi.x
-                        && brush.center.y + extent_half >= foot_lo.y && brush.center.y - extent_half < foot_hi.y;
-                    if keep { atomicOr(&g_keep[li >> 5u], 1u << (li & 31u)); }
-                }
-                workgroupBarrier();
-                let m0 = atomicLoad(&g_keep[0]);
-                let m1 = atomicLoad(&g_keep[1]);
-                if keep {
-                    var rank = countOneBits(m0 & ((1u << (li & 31u)) - 1u));
-                    if li >= 32u { rank = countOneBits(m0) + countOneBits(m1 & ((1u << (li & 31u)) - 1u)); }
-                    g_list[rank] = brush;
-                }
-                workgroupBarrier();
-                // Every lane has read the ballot; the next chunk starts after the
-                // closing barrier.
-                if li == 0u {
-                    atomicStore(&g_keep[0], 0u);
-                    atomicStore(&g_keep[1], 0u);
-                }
-                let kept = countOneBits(m0) + countOneBits(m1);
-                for (var z = 0u; z < 8u && kept != 0u; z++) {
-                    let c = vec3<i32>(ch, center_half((k_lo + i32(b)) * 8 + i32(z), level));
-                    var q = vec3<i32>(0);
-                    var q_ready = false;
-                    for (var n = 0u; n < kept; n++) {
-                        let bb = g_list[n];
-                        if c.z < bb.k_lo || c.z > bb.k_hi { continue; }
-                        if !q_ready && ((bb.flags >> 6u) & 3u) == 0u {
-                            q = volume_point_half(column_point, c.z);
-                            q_ready = true;
+                    if kind != 0u {
+                        top_solid = density;
+                        top_air = NO_DENSITY;
+                        top_fraction = 0u;
+                    } else if top_solid != NO_DENSITY && top_air == NO_DENSITY {
+                        top_air = density;
+                        let t = select(0.5, volume_crossing(top_solid, density), top_solid > 0);
+                        surface_crossing = f32(k) - 0.5 + t;
+                        crossing_air = k;
+                        if relief && t > 0.5 {
+                            // The surface rises into this cell: solid, cut there.
+                            kind = 1u;
+                            top_fraction = cell_fraction(t - 0.5);
+                        } else {
+                            top_fraction = cell_fraction(0.5 + t);
                         }
-                        if !brush_contains(bb, c, q) { continue; }
-                        let op = (bb.flags >> 4u) & 3u;
-                        if op == 0u { kinds[z] = 0u; }
-                        else if op == 1u { kinds[z] = 1u; }
                     }
                 }
-                workgroupBarrier();
+                if kind != 0u { generated_top = max(generated_top, k + 1); }
+                kinds[z] = kind;
             }
-        }
-        for (var z = 0u; z < 8u; z++) {
-            if kinds[z] != 0u {
-                let bit = li + z * 64u;
-                atomicOr(&g_words[bit >> 5u], 1u << (bit & 31u));
+            // The edits in order: the large brushes, the baked cells, then the
+            // recent brushes. Brushes go in chunks of 64: each lane culls one
+            // against this brick's box, the kept ones are compacted in order and
+            // every lane applies them to its eight cells. Bricks no brush
+            // reaches cost one bounds test per brush, not per cell.
+            let brick_lo = (bk * 8) * half_cell;
+            let brick_hi = brick_lo + 8 * half_cell;
+            for (var part = 0u; part < 2u; part++) {
+                if part == 1u && edit_counts.z != 0u {
+                    let n = EditCounts(edit_counts.x, edit_counts.y, edit_counts.z);
+                    for (var z = 0u; z < 8u; z++) {
+                        let cell = baked_cell(job.edits, n, i, j, bk * 8 + i32(z)) & 3u;
+                        if cell == BAKED_AIR { kinds[z] = 0u; }
+                        else if cell == BAKED_SOLID { kinds[z] = 1u; }
+                    }
+                }
+                let first = select(0u, edit_counts.x, part == 1u);
+                let end = select(edit_counts.x, n_brushes, part == 1u);
+                for (var start = first; start < end; start += 64u) {
+                    let e = start + li;
+                    var keep = false;
+                    var brush: FaceBrush;
+                    if e < end {
+                        brush = edit_brush(job.edits, e);
+                        let extent_half = brush.center.w + half_cell;
+                        keep = brush.radius_half >= (1u << level)
+                            && brush.k_hi + half_cell >= brick_lo && brush.k_lo - half_cell < brick_hi
+                            && brush.center.x + extent_half >= foot_lo.x && brush.center.x - extent_half < foot_hi.x
+                            && brush.center.y + extent_half >= foot_lo.y && brush.center.y - extent_half < foot_hi.y;
+                        if keep { atomicOr(&g_keep[li >> 5u], 1u << (li & 31u)); }
+                    }
+                    workgroupBarrier();
+                    let m0 = atomicLoad(&g_keep[0]);
+                    let m1 = atomicLoad(&g_keep[1]);
+                    if keep {
+                        var rank = countOneBits(m0 & ((1u << (li & 31u)) - 1u));
+                        if li >= 32u { rank = countOneBits(m0) + countOneBits(m1 & ((1u << (li & 31u)) - 1u)); }
+                        g_list[rank] = brush;
+                    }
+                    workgroupBarrier();
+                    // Every lane has read the ballot; the next chunk starts after the
+                    // closing barrier.
+                    if li == 0u {
+                        atomicStore(&g_keep[0], 0u);
+                        atomicStore(&g_keep[1], 0u);
+                    }
+                    let kept = countOneBits(m0) + countOneBits(m1);
+                    for (var z = 0u; z < 8u && kept != 0u; z++) {
+                        let c = vec3<i32>(ch, center_half(bk * 8 + i32(z), level));
+                        var q = vec3<i32>(0);
+                        var q_ready = false;
+                        for (var n = 0u; n < kept; n++) {
+                            let bb = g_list[n];
+                            if c.z < bb.k_lo || c.z > bb.k_hi { continue; }
+                            if !q_ready && ((bb.flags >> 6u) & 3u) == 0u {
+                                q = volume_point_half(column_point, c.z);
+                                q_ready = true;
+                            }
+                            if !brush_contains(bb, c, q) { continue; }
+                            let op = (bb.flags >> 4u) & 3u;
+                            if op == 0u { kinds[z] = 0u; }
+                            else if op == 1u { kinds[z] = 1u; }
+                        }
+                    }
+                    workgroupBarrier();
+                }
             }
-        }
-        workgroupBarrier();
-        if li < 16u {
-            let w = atomicExchange(&g_words[li], 0u);
-            scratch[(base + scratch_header + b) * UNIT_WORDS + li] = w;
-            if w != 0u { atomicOr(&g_any[0], 1u); }
-            if w != 0xffffffffu { atomicOr(&g_any[1], 1u); }
-        }
-        workgroupBarrier();
-        // The cleared words gather the generated tops after the last brick
-        // (no extra barrier); they replace the header's heightfield tops.
-        if volumetric && b + 1u == n_band {
-            let down = u32(clamp(k_hi * 8 - generated_top, 0, 255));
-            atomicOr(&g_words[li >> 2u], down << ((li & 3u) * 8u));
-        }
-        if li == 0u {
-            let some = atomicExchange(&g_any[0], 0u) != 0u;
-            let holes = atomicExchange(&g_any[1], 0u) != 0u;
-            if some && holes {
-                atomicOr(&g_masks[b >> 5u], 1u << (b & 31u));
-            } else if some {
-                atomicOr(&g_masks[8u + (b >> 5u)], 1u << (b & 31u));
+            for (var z = 0u; z < 8u; z++) {
+                let k = bk * 8 + i32(z);
+                if kinds[z] != 0u {
+                    let bit = li + z * 64u;
+                    atomicOr(&g_words[bit >> 5u], 1u << (bit & 31u));
+                    if lane_air { lane_layered = true; }
+                    lane_top = k + 1;
+                } else {
+                    lane_air = true;
+                }
             }
+            workgroupBarrier();
+            if li < 16u {
+                let w = atomicExchange(&g_words[li], 0u);
+                scratch[(bricks_base + gb) * UNIT_WORDS + li] = w;
+                if w != 0u { atomicOr(&g_any[0], 1u); }
+                if w != 0xffffffffu { atomicOr(&g_any[1], 1u); }
+            }
+            workgroupBarrier();
+            if li == 0u {
+                let some = atomicExchange(&g_any[0], 0u) != 0u;
+                let holes = atomicExchange(&g_any[1], 0u) != 0u;
+                if some && holes {
+                    atomicOr(&g_masks[gb >> 5u], 1u << (gb & 31u));
+                } else if some {
+                    atomicOr(&g_masks[8u + (gb >> 5u)], 1u << (gb & 31u));
+                }
+            }
+            workgroupBarrier();
+            gb += 1u;
         }
-        workgroupBarrier();
+        // The interval over all lanes.
+        let natural_now = select(top, generated_top, changed && generated_top != NO_LAYER);
+        var flags = 0u;
+        if lane_top > range.x { flags |= 1u; }
+        if lane_air { flags |= 2u; }
+        if lane_layered { flags |= 4u; }
+        if lane_top != clamp(natural_now, range.x, range.y) { flags |= 8u; }
+        if lane_top - range.x > 255 { flags |= 16u; }
+        atomicOr(&g_iv_flags[iv], flags);
+        atomicMax(&g_iv_top[iv], lane_top);
+        atomicOr(&g_tops[iv * 16u + (li >> 2u)], u32(clamp(lane_top - range.x, 0, 255)) << ((li & 3u) * 8u));
     }
-    if volumetric && li < 16u { scratch[base * UNIT_WORDS + li] = atomicLoad(&g_words[li]); }
+    // Between intervals no lane changes state: each lane's kind at one cell
+    // of a gap is its kind throughout it.
+    for (var g = 0u; g <= plan.n; g++) {
+        var k = centre;
+        var empty = false;
+        if plan.n != 0u {
+            if g == 0u {
+                k = plan.iv[0].x - 1;
+                empty = plan.iv[0].x <= plan.floor || ((plan.clip & INFO_CLIP_BELOW) != 0u && plan.iv[0].x <= plan.w_lo);
+            } else {
+                k = plan.iv[g - 1u].y;
+                empty = g == plan.n && (plan.clip & INFO_CLIP_ABOVE) != 0u && k >= plan.w_hi;
+            }
+        }
+        if empty { continue; }
+        var kind = latest_geometry(job.edits, level, vec3<i32>(ch, center_half(k, level)), column_point);
+        if kind == NONE { kind = terrain_kind(top, k); }
+        if kind == 1u { atomicOr(&g_gap[g * 2u + (li >> 5u)], 1u << (li & 31u)); }
+    }
+    // The natural surface: generated tops, whatever the edits did.
+    let natural = select(top, generated_top, changed && generated_top != NO_LAYER);
+    atomicMin(&g_natural[0], natural);
+    atomicMax(&g_natural[1], natural);
+    atomicMax(&g_natural[2], base_top);
+    workgroupBarrier();
+    let volume_bits = atomicLoad(&g_volume);
+    let volumetric = (volume_bits & VOLUME_TERRAIN) != 0u;
+    // One cell under the lowest top: an inline top rounded up to its level
+    // cell stays above the base in base cells.
+    let natural_base = atomicLoad(&g_natural[0]) - 1;
+    // When the column's authored tops fit 255 base cells, store them in the
+    // tops' bytes instead of allocating two Q16 units.
+    let inline_relief = relief && !volumetric && level <= 7u
+        && atomicLoad(&g_natural[2]) - (natural_base << level) <= 255;
+    let wide_relief = relief && !inline_relief;
+    let tops_wide = !inline_relief && atomicLoad(&g_natural[1]) - natural_base > 255;
+    let surface_words = world.sphere.w != 0u;
+    let tops_units = select(1u, 2u, tops_wide);
+    let surface_unit = tops_units + select(0u, 2u, wide_relief);
+    let offset_unit = surface_unit + select(0u, 1u, surface_words);
+    let header_units = offset_unit + 1u;
+    if tops_wide {
+        atomicOr(&g_words[li >> 1u], u32(natural - natural_base) << ((li & 1u) * 16u));
+    } else {
+        let stored = select(natural - natural_base, base_top - (natural_base << level), inline_relief);
+        atomicOr(&g_words[li >> 2u], u32(clamp(stored, 0, 255)) << ((li & 3u) * 8u));
+    }
+    if surface_words {
+        atomicOr(&g_surface[li >> 2u], (u32(column.y) & 0xffu) << ((li & 3u) * 8u));
+    }
     // The density describes the lane's surface only when its last zero
     // crossing is at the generated top (that air cell, or the one below when
     // the surface rose into it): an undercut below an untouched top crossed
@@ -570,9 +804,9 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     // across overhang regions).
     let density_surface = (surface_changed || dense_lane) && top_air != NO_DENSITY
         && (crossing_air == generated_top || crossing_air + 1 == generated_top);
-    if wide_relief && volumetric {
-        if density_surface { fraction = top_fraction; }
-        atomicOr(&g_fraction[li >> 1u], fraction << ((li & 1u) * 16u));
+    if wide_relief {
+        let lane_fraction = select(fraction, top_fraction, volumetric && density_surface);
+        atomicOr(&g_fraction[li >> 1u], lane_fraction << ((li & 1u) * 16u));
     }
     // Surface offset: the exact surface's height over the stored one, from -1
     // to 1 units of its precision in 128ths (`column_surface_offset`): base
@@ -581,9 +815,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     // material height at every level); occupancy keeps the voxels' grid.
     // A density surface takes it from its zero crossing over its generated
     // top (level cells, as a level-0 or whole-cell top is stored); a relief
-    // fraction carries that precision itself. A column with deep caves
-    // outgrows relief: its density lanes kept whole-cell tops, a staircase
-    // whose steps lit as dark dashes across distant cave regions.
+    // fraction carries that precision itself.
     var offset = 128;
     if density_surface {
         if level == 0u || !relief {
@@ -598,41 +830,182 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     }
     atomicOr(&g_offset[li >> 2u], u32(clamp(offset, 0, 255)) << ((li & 3u) * 8u));
     workgroupBarrier();
-    if wide_relief && volumetric && li < 32u {
-        scratch[(base + 1u) * UNIT_WORDS + li] = atomicLoad(&g_fraction[li]);
+    if li < 32u && (tops_wide || li < 16u) {
+        scratch[plan.base * UNIT_WORDS + li] = atomicLoad(&g_words[li]);
     }
-    if li < 16u { scratch[(base + scratch_offset) * UNIT_WORDS + li] = atomicLoad(&g_offset[li]); }
+    if wide_relief && li < 32u {
+        scratch[(plan.base + tops_units) * UNIT_WORDS + li] = atomicLoad(&g_fraction[li]);
+    }
+    if surface_words && li < 16u {
+        scratch[(plan.base + surface_unit) * UNIT_WORDS + li] = atomicLoad(&g_surface[li]);
+    }
+    if li < 16u { scratch[(plan.base + offset_unit) * UNIT_WORDS + li] = atomicLoad(&g_offset[li]); }
     if li == 0u {
+        // The column's spans: gaps and intervals in order, uniform ones
+        // merged, the solid below the first implicit and the air above the
+        // top dropped.
+        var kinds: array<u32, 16>;
+        var starts: array<i32, 16>;
+        var ends: array<i32, 16>;
+        var refs: array<u32, 16>;
+        var count = 0u;
+        var clip = plan.clip;
+        let lo_bound = select(plan.floor, plan.w_lo, (clip & INFO_CLIP_BELOW) != 0u);
+        let hi_bound = select(0x7fffffff, plan.w_hi, (clip & INFO_CLIP_ABOVE) != 0u);
+        for (var g = 0u; g <= plan.n; g++) {
+            var g_lo = lo_bound;
+            if g > 0u { g_lo = plan.iv[g - 1u].y; }
+            var g_hi = hi_bound;
+            if g < plan.n { g_hi = plan.iv[g].x; }
+            if g_lo < g_hi {
+                let b0 = atomicLoad(&g_gap[g * 2u]);
+                let b1 = atomicLoad(&g_gap[g * 2u + 1u]);
+                var kind = SPAN_LANES;
+                if (b0 | b1) == 0u { kind = SPAN_AIR; }
+                if (b0 & b1) == 0xffffffffu { kind = SPAN_SOLID; }
+                let same = count > 0u && kinds[count - 1u] == kind
+                    && (kind != SPAN_LANES || (refs[count - 1u] >= 16u
+                        && atomicLoad(&g_gap[(refs[count - 1u] - 16u) * 2u]) == b0
+                        && atomicLoad(&g_gap[(refs[count - 1u] - 16u) * 2u + 1u]) == b1));
+                if same {
+                    ends[count - 1u] = g_hi;
+                } else {
+                    kinds[count] = kind;
+                    starts[count] = g_lo;
+                    ends[count] = g_hi;
+                    refs[count] = 16u + g;
+                    count += 1u;
+                }
+            }
+            if g < plan.n {
+                let f = atomicLoad(&g_iv_flags[g]);
+                var kind = SPAN_BRICKS;
+                if (f & 1u) == 0u { kind = SPAN_AIR; }
+                else if (f & 2u) == 0u { kind = SPAN_SOLID; }
+                else if (f & 12u) == 0u { kind = SPAN_NATURAL; }
+                else if (f & 20u) == 0u { kind = SPAN_TOPS; }
+                let range = plan.iv[g];
+                if count > 0u && kinds[count - 1u] == kind && (kind == SPAN_AIR || kind == SPAN_SOLID || kind == SPAN_NATURAL) {
+                    // Its top is the latest interval's.
+                    ends[count - 1u] = range.y;
+                    refs[count - 1u] = g;
+                } else {
+                    kinds[count] = kind;
+                    starts[count] = range.x;
+                    ends[count] = range.y;
+                    refs[count] = g;
+                    count += 1u;
+                }
+            }
+        }
+        // Air above everything (in theory always): a column whose last span
+        // is not air yet reaches up forever describes only its window.
+        if count > 0u && kinds[count - 1u] != SPAN_AIR && ends[count - 1u] == 0x7fffffff {
+            ends[count - 1u] = plan.w_hi;
+            clip |= INFO_CLIP_ABOVE;
+        }
+        var top_out = plan.w_hi;
+        if (clip & INFO_CLIP_ABOVE) == 0u {
+            while count > 0u && kinds[count - 1u] == SPAN_AIR { count -= 1u; }
+            top_out = NO_LAYER >> level;
+            if count > 0u {
+                let e = count - 1u;
+                top_out = ends[e];
+                if kinds[e] != SPAN_SOLID && kinds[e] != SPAN_LANES { top_out = atomicLoad(&g_iv_top[refs[e]]); }
+            } else if (clip & INFO_CLIP_BELOW) != 0u {
+                top_out = plan.w_lo;
+            }
+        }
+        // Solid below the first span is implicit.
+        var first = 0u;
+        while first < count && kinds[first] == SPAN_SOLID { first += 1u; }
+        let n_spans = count - first;
+        let heightfield = n_spans == 1u && kinds[first] == SPAN_NATURAL && clip == 0u && topology_flags == 0u;
+        // Payload sizes, then the span area and the bricks after it.
+        var words = 0u;
+        if !heightfield {
+            words = n_spans * 2u;
+            for (var e = first; e < count; e++) {
+                let nb = u32(ends[e] - starts[e]) >> 3u;
+                switch kinds[e] {
+                    case 2u: { words += 2u; }
+                    case 3u: { words += 16u; }
+                    case 5u: { words += 1u + 2u * ((nb + 31u) >> 5u); }
+                    default: {}
+                }
+            }
+        }
+        let span_units = (words + UNIT_WORDS - 1u) / UNIT_WORDS;
+        let table = (bricks_base + plan.eval) * UNIT_WORDS;
+        var copied = array<u32, 8>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
+        var mixed_before = 0u;
+        if !heightfield {
+            var payload = n_spans * 2u;
+            for (var e = first; e < count; e++) {
+                let slot = e - first;
+                scratch[table + slot * 2u] = bitcast<u32>(starts[e]);
+                let kind = kinds[e];
+                scratch[table + slot * 2u + 1u] = kind | select(0u, payload << 3u, kind == SPAN_LANES || kind == SPAN_TOPS || kind == SPAN_BRICKS);
+                if kind == SPAN_LANES {
+                    let g = refs[e] - 16u;
+                    scratch[table + payload] = atomicLoad(&g_gap[g * 2u]);
+                    scratch[table + payload + 1u] = atomicLoad(&g_gap[g * 2u + 1u]);
+                    payload += 2u;
+                } else if kind == SPAN_TOPS {
+                    for (var w = 0u; w < 16u; w++) { scratch[table + payload + w] = atomicLoad(&g_tops[refs[e] * 16u + w]); }
+                    payload += 16u;
+                } else if kind == SPAN_BRICKS {
+                    // The interval's bricks in scratch start after those of
+                    // the intervals below it.
+                    var gb0 = 0u;
+                    for (var q = 0u; q < refs[e]; q++) { gb0 += u32(plan.iv[q].y - plan.iv[q].x) >> 3u; }
+                    let nb = u32(ends[e] - starts[e]) >> 3u;
+                    let mask_words = (nb + 31u) >> 5u;
+                    scratch[table + payload] = header_units + span_units + mixed_before;
+                    for (var w = 0u; w < 2u * mask_words; w++) { scratch[table + payload + 1u + w] = 0u; }
+                    for (var b = 0u; b < nb; b++) {
+                        let g_bit = gb0 + b;
+                        let is_mixed = ((atomicLoad(&g_masks[g_bit >> 5u]) >> (g_bit & 31u)) & 1u) != 0u;
+                        let is_solid = ((atomicLoad(&g_masks[8u + (g_bit >> 5u)]) >> (g_bit & 31u)) & 1u) != 0u;
+                        if is_mixed {
+                            let at = table + payload + 1u + (b >> 5u);
+                            scratch[at] = scratch[at] | (1u << (b & 31u));
+                            copied[g_bit >> 5u] |= 1u << (g_bit & 31u);
+                            mixed_before += 1u;
+                        }
+                        if is_solid {
+                            let at = table + payload + 1u + mask_words + (b >> 5u);
+                            scratch[at] = scratch[at] | (1u << (b & 31u));
+                        }
+                    }
+                    payload += 1u + 2u * mask_words;
+                }
+            }
+        }
         var out: JobOut;
         out.status = 0u;
-        out.pad = select(0u, INFO_RELIEF, relief) | select(0u, INFO_RELIEF_INLINE, inline_relief)
+        out.base = natural_base;
+        out.info = select(n_spans, 0u, heightfield) | select(0u, INFO_TOPS_WIDE, tops_wide)
+            | select(0u, INFO_RELIEF, relief) | select(0u, INFO_RELIEF_INLINE, inline_relief)
             | select(0u, INFO_HEIGHTFIELD, heightfield) | topology_flags
-            // Generated caves and overhangs: arbitrary occupancy under a
-            // natural surface, tops counting down from the band top.
-            | select(0u, INFO_GENERATED, volumetric) | select(0u, INFO_TOPS_DOWN, tops_down) | clip
+            | select(0u, INFO_GENERATED, volumetric) | clip
             | select(0u, INFO_EDIT_MATERIALS, (volume_bits & VOLUME_MATERIALS) != 0u);
-        out.top = hi_cell;
+        out.n_mixed = mixed_before;
+        out.scratch = plan.base;
+        out.units = header_units + span_units;
+        out.top = top_out;
         out.centre = centre;
-        out.k_lo = k_lo;
-        out.n_band = n_band;
-        out.scratch = base;
-        var mixed = 0u;
-        for (var w = 0u; w < 8u; w++) {
-            out.mixed[w] = atomicLoad(&g_masks[w]);
-            out.solid[w] = atomicLoad(&g_masks[8u + w]);
-            mixed += countOneBits(out.mixed[w]);
-        }
-        // The scratch masks still certify exact summary tops. Natural
-        // columns need no duplicate occupancy payload in the resident pool.
-        out.n_mixed = select(mixed, 0u, heightfield);
+        out.lo = plan.w_lo;
+        out.summary = max(plan.summary, top_out);
+        out.n_eval = plan.eval;
+        out.header = header_units;
+        out.mixed = copied;
         job_out[index] = out;
     }
 }
 
 fn run_units(o: JobOut) -> u32 {
-    return select(1u, 2u, o.n_band > 32u)
-        + select(0u, 2u, info_relief_wide(o.pad))
-        + select(0u, 1u, world.sphere.w != 0u) + 1u + o.n_mixed;
+    return o.units + o.n_mixed;
 }
 
 fn class_of(units: u32) -> u32 {
@@ -775,32 +1148,16 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         }
         return;
     }
-    let ext = o.n_band > 32u;
-    let wide_relief = info_relief_wide(o.pad);
-    let surface_words = world.sphere.w != 0u;
-    let scratch_surface = select(1u, 3u, wide_relief);
-    let scratch_offset = scratch_surface + select(0u, 1u, surface_words);
-    let scratch_header = scratch_offset + 1u;
-    let plain_header = select(1u, 2u, ext);
-    let pool_surface = plain_header + select(0u, 2u, wide_relief);
-    let pool_offset = pool_surface + select(0u, 1u, surface_words);
-    let header = pool_offset + 1u;
-    if wide_relief && li < 32u {
-        pool[(o.run + plain_header) * UNIT_WORDS + li] = scratch[(o.scratch + 1u) * UNIT_WORDS + li];
+    // The header, then the span area (after the evaluated bricks in
+    // scratch), then the BRICKS spans' mixed bricks by rank.
+    for (var w = li; w < o.header * UNIT_WORDS; w += 64u) {
+        pool[o.run * UNIT_WORDS + w] = scratch[o.scratch * UNIT_WORDS + w];
     }
-    if surface_words && li < 16u {
-        pool[(o.run + pool_surface) * UNIT_WORDS + li] = scratch[(o.scratch + scratch_surface) * UNIT_WORDS + li];
+    let spans = o.units - o.header;
+    for (var w = li; w < spans * UNIT_WORDS; w += 64u) {
+        pool[(o.run + o.header) * UNIT_WORDS + w] = scratch[(o.scratch + HEADER_UNITS_MAX + o.n_eval) * UNIT_WORDS + w];
     }
-    if li < 16u {
-        pool[(o.run + pool_offset) * UNIT_WORDS + li] = scratch[(o.scratch + scratch_offset) * UNIT_WORDS + li];
-    }
-    if li < 16u {
-        pool[o.run * UNIT_WORDS + li] = scratch[o.scratch * UNIT_WORDS + li];
-        if ext {
-            pool[(o.run + 1u) * UNIT_WORDS + li] = select(o.solid[li - 8u], o.mixed[li], li < 8u);
-        }
-    }
-    let total = select(o.n_band * UNIT_WORDS, 0u, (o.pad & INFO_HEIGHTFIELD) != 0u);
+    let total = select(o.n_eval * UNIT_WORDS, 0u, o.n_mixed == 0u);
     for (var w = li; w < total; w += 64u) {
         let b = w / UNIT_WORDS;
         let bit = b & 31u;
@@ -808,8 +1165,8 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         if ((o.mixed[word] >> bit) & 1u) == 0u { continue; }
         var rank = countOneBits(o.mixed[word] & ((1u << bit) - 1u));
         for (var q = 0u; q < word; q++) { rank += countOneBits(o.mixed[q]); }
-        pool[(o.run + header + rank) * UNIT_WORDS + (w % UNIT_WORDS)] =
-            scratch[(o.scratch + scratch_header + b) * UNIT_WORDS + (w % UNIT_WORDS)];
+        pool[(o.run + o.units + rank) * UNIT_WORDS + (w % UNIT_WORDS)] =
+            scratch[(o.scratch + HEADER_UNITS_MAX + b) * UNIT_WORDS + (w % UNIT_WORDS)];
     }
     if li == 0u {
         let previous = records[job.record];
@@ -817,35 +1174,16 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         if (job.flags & 1u) != 0u && (previous.info & INFO_VALID) != 0u {
             free_run(previous);
         }
-        // Exact top: the highest occupied layer of the highest non-air band
-        // brick (mixed bricks are scanned by z layer, two words each).
-        let band_top = (o.k_lo + i32(o.n_band)) * 8;
-        var exact = o.k_lo * 8;
-        for (var b = i32(o.n_band) - 1; b >= 0; b--) {
-            let word = u32(b) >> 5u;
-            let bit = u32(b) & 31u;
-            if ((o.solid[word] >> bit) & 1u) != 0u {
-                exact = (o.k_lo + b + 1) * 8;
-                break;
-            }
-            if ((o.mixed[word] >> bit) & 1u) != 0u {
-                let base = (o.scratch + scratch_header + u32(b)) * UNIT_WORDS;
-                var z = 7;
-                while z > 0 && (scratch[base + 2u * u32(z)] | scratch[base + 2u * u32(z) + 1u]) == 0u { z -= 1; }
-                exact = (o.k_lo + b) * 8 + z + 1;
-                break;
-            }
-        }
-        // A band clipped above bounds its summaries with the unclipped top.
-        let clipped_above = (o.pad & INFO_CLIP_ABOVE) != 0u;
-        let gap = select(u32(clamp(band_top - exact, 0, 7)), 0u, clipped_above);
-        let top_cell = select(band_top - i32(gap), max(o.top, band_top), clipped_above);
+        let level = job.key0 >> 27u;
+        // A window clipped above bounds its summaries with every candidate.
+        let clipped_above = (o.info & INFO_CLIP_ABOVE) != 0u;
+        let top_cell = max(select(o.top, o.summary, clipped_above), -0x3fffffff >> level);
         let ci = i32(job.key0 & 0xffffffu);
         let cj = bitcast<i32>(job.key1);
         for (var tier = 1u; tier <= 3u; tier++) {
             let bi = ci >> (2u * tier);
             let bj = cj >> (2u * tier);
-            let slot = block_slot(job.key0 >> 27u, (job.key0 >> 24u) & 7u, tier, bi, bj) * 4u;
+            let slot = block_slot(level, (job.key0 >> 24u) & 7u, tier, bi, bj) * 4u;
             if atomicLoad(&block_state[slot]) == bi && atomicLoad(&block_state[slot + 1u]) == bj {
                 atomicMax(&block_state[slot + 2u], top_cell);
                 if !was_published { atomicAdd(&block_state[slot + 3u], 1); }
@@ -854,20 +1192,17 @@ fn publish(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index
         var c: Column;
         c.key0 = job.key0;
         c.key1 = job.key1;
-        c.k_lo = o.k_lo;
-        c.info = o.n_band | (o.size_class << 18u) | (gap << 22u) | select(0u, INFO_EXT, ext)
-            | (o.pad & (INFO_RELIEF | INFO_RELIEF_INLINE | INFO_HEIGHTFIELD | INFO_TOPOLOGY | INFO_GENERATED | INFO_TOPS_DOWN | INFO_CLIP_BELOW | INFO_CLIP_ABOVE
-                | INFO_EDIT_MATERIALS)) | INFO_VALID;
+        c.base = o.base;
+        c.info = o.info | (o.size_class << 18u) | INFO_VALID;
         c.run = o.run;
-        c.mixed = o.mixed[0];
-        c.solid = o.solid[0];
+        c.top = o.top;
+        c.lo = o.lo;
         c.edits = job.edits;
         records[job.record] = c;
-        let level = job.key0 >> 27u;
         atomicMax(&level_tops[level], top_cell << level);
         // Clipped columns are reported with their window centre, so the CPU
         // can regenerate them when the eye leaves the window.
-        if (o.pad & (INFO_CLIP_BELOW | INFO_CLIP_ABOVE)) != 0u {
+        if (o.info & (INFO_CLIP_BELOW | INFO_CLIP_ABOVE)) != 0u {
             let at = u32(atomicAdd(&alloc[A_FAILS], 1)) * 4u;
             if at + 3u < arrayLength(&failures) {
                 failures[at] = job.key0;

@@ -20,14 +20,13 @@ fn grazing_soil_lip_filters_radial_coverage_and_preserves_protected_faces() {
     assert!(surface.contains("ground_material(p, column_surface(c, x, y), ground.height, material_depth, slope, material_layer)"));
     let Some(gpu) = gpu() else { return };
     let source = format!(r#"
-        struct Column {{info:u32, fit:u32}}
+        struct Column {{info:u32}}
         struct Hit {{t:f32}}
         struct Probe {{lip_width:vec4<f32>, ray_flags:vec4<f32>, appearance:vec4<f32>}}
         const INFO_TOPOLOGY:u32=1u;
         const INFO_GENERATED:u32=2u;
         @group(0) @binding(0) var<storage,read> probes:array<Probe>;
         @group(0) @binding(1) var<storage,read_write> answers:array<vec4<f32>>;
-        fn column_tops_fit(c:Column)->bool {{return c.fit!=0u;}}
         fn hit_up(t:f32,d:vec3<f32>)->vec3<f32> {{return vec3<f32>(0.0,0.0,1.0);}}
         fn detail_filter_weight{detail}
         fn natural_material_filter_allowed{natural}
@@ -41,7 +40,7 @@ fn grazing_soil_lip_filters_radial_coverage_and_preserves_protected_faces() {
             let code=u32(p.lip_width.w);
             let flags=u32(p.ray_flags.w);
             let edited=(flags&1u)!=0u;
-            let c=Column(select(0u,INFO_TOPOLOGY,(flags&2u)!=0u),select(1u,0u,(flags&4u)!=0u));
+            let c=Column(select(0u,INFO_TOPOLOGY,(flags&2u)!=0u));
             let natural_material=natural_material_filter_allowed(edited,c);
             let d=p.ray_flags.xyz;
             let actual_normal=vec3<f32>(1.0,0.0,0.0);
@@ -69,7 +68,6 @@ fn grazing_soil_lip_filters_radial_coverage_and_preserves_protected_faces() {
         (0.8,0.27,20.0,0.0,1.0,true,0.0,0.0),
         (0.2,0.27,20.0,0.0,0.001,true,1.0,0.0),
         (0.2,0.27,20.0,0.0,0.001,true,2.0,0.0),
-        (0.2,0.27,20.0,0.0,0.001,true,4.0,0.0),
         (0.2,0.27,20.0,4.0,0.001,true,0.0,0.0),
         (0.2,0.27,20.0,6.0,0.001,true,0.0,0.0),
         (0.7,0.27,20.0,0.0,0.05,true,0.0,0.0),
@@ -150,7 +148,7 @@ fn grazing_soil_lip_filters_radial_coverage_and_preserves_protected_faces() {
     assert!((actual[0][0]-actual[1][0]).abs()<1e-6,"unresolved radial phase must converge");
     assert_eq!(actual[3][0],1.0,"lateral grazing must not erase a resolved radial lip");
     assert_eq!(actual[4][0],0.0);
-    for index in 7..=9 {assert_eq!(actual[index][0],1.0,"protected side{index}");}
+    for index in 7..=8 {assert_eq!(actual[index][0],1.0,"protected side{index}");}
 }
 
 #[test]

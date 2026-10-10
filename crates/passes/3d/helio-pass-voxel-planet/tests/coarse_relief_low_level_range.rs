@@ -79,7 +79,9 @@ fn l1_to_l5_fractional_top_hits_respect_requested_trace_range() {
             let mut world = vec![0u8; 144];
             ints(&mut world, 0, &[1024, 100, 1024, 0]);
             let ci = (512 >> level) / 8;
-            let k_lo = ceil_top / 8 - 1;
+            // A heightfield column (no span table) with relief: natural
+            // tops 8 cells over its base, the exact top above them.
+            let base = ceil_top - 8;
             let mut record = vec![0u8; 32];
             ints(
                 &mut record,
@@ -87,11 +89,11 @@ fn l1_to_l5_fractional_top_hits_respect_requested_trace_range() {
                 &[
                     (ci | (2 << 24) | (level << 27)) as i32,
                     ci as i32,
-                    k_lo,
-                    0x90000001u32 as i32,
+                    base,
+                    0x92000000u32 as i32,
                     0,
+                    ceil_top,
                     0,
-                    1,
                     0,
                 ],
             );
