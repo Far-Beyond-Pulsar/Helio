@@ -1044,10 +1044,19 @@ fn main() {
             let load: &'static str = Box::leak(format!("{name}_load").into_boxed_str());
             if only_mountain {
                 // Work while the view loads.
-                for _ in 0..40 {
+                for n in 0..40 {
                     flight.draw(load, e, f);
+                    if n % 5 == 4 {
+                        if let Some(st) = flight.pass().renderer().map(|r| r.stats()) {
+                            eprintln!(
+                                "QUICK loading {name} frame {n}: jobs {} pending {} units {:.0} budget {:.0} us/unit {:.2} pressure {:.2} resident {}",
+                                st.jobs, st.pending_columns, st.units, st.unit_budget, st.us_per_unit, st.lod_pressure, st.resident_columns
+                            );
+                        }
+                    }
                 }
                 let mid: &'static str = Box::leak(format!("{name}_mid").into_boxed_str());
+                flight.capture(mid);
                 audits.push(flight.audit(mid, e, f));
             }
             flight.settle(load, e, f);

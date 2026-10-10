@@ -148,6 +148,17 @@ Upper bound of a tile pre-pass: starting every ray at its tile's nearest
 hit of the previous frame saves 25-31% (slope 11.6 -> 8.0 ms, ground 3.6
 -> 2.7). Finer-level probes inside the dither band (a ray may step back to
 a finer level per column) cost about 8%.
+*Loading (2026-10-10):* a mountain view reached by teleport waits 15-19
+frames for its first plan, then generates 30-200 thousand columns at 4-5
+thousand a frame (1.2-1.8 us a unit, the 10 ms budget); 860-930 thousand
+stay resident. That count is the pool's capacity, not the LOD density:
+`lod_pixels` 1, 1.5 and 2 all settle there because pool pressure divides
+the level-0 range by 1.3, 2.0 and 2.8 (cells are 1-2 pixels across a
+level's range at 1; larger is finer). While loading, a ray hops to a
+coarser level about 10 times (missing columns) and looks up 8 columns
+instead of 3; summary skips need complete blocks, so the sky bound saves
+2 of 42 steps instead of 17 of 32 once settled. Walking and flying load
+only at the rings' edges (ground_load primary 3.9 ms vs 3.3 settled).
 
 ### 5. Shading
 

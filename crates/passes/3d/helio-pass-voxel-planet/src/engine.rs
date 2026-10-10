@@ -102,7 +102,9 @@ struct MaterialGpu {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
-    /// Level cells project to this many pixels where their range starts.
+    /// Level cells project to 1/lod_pixels pixels where their range ends
+    /// (twice that where it starts): larger is finer. Pool pressure divides
+    /// it (`PlanetStats::lod_pressure`). `HELIO_VOXEL_LOD_PIXELS` overrides.
     pub lod_pixels: f32,
     /// Relative width of the stochastic level transition.
     pub lod_dither: f32,
@@ -145,7 +147,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            lod_pixels: 1.0,
+            lod_pixels: std::env::var("HELIO_VOXEL_LOD_PIXELS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0),
             lod_dither: std::env::var("HELIO_VOXEL_LOD_DITHER").ok().and_then(|v| v.parse().ok()).unwrap_or(0.25),
             job_budget: 12_288,
             horizon: std::env::var_os("HELIO_VOXEL_NO_HORIZON").is_none(),
