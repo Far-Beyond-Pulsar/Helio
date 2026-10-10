@@ -269,6 +269,12 @@ unchanged. The generate kernel's binary 798 -> 388 KB, its cold compile
 21 -> 6.3 s. Loading (one QUICK run each, noisy): mountain_slope 282 -> 227
 frames, mountain_air 169 -> 168, tunnel 249 -> 318. Devices without the
 feature keep the limb path.
+*Rejected (2026-10-10): one albedo ramp per pixel.* The patch noise of
+`material_albedo` is material-independent, so it was hoisted and shared by
+the surface, speck host and fleck base colours (also skipped under material
+mixes and coverage). Hold medians: ground unchanged, mountain_slope shade
+2.31 -> 2.57 ms in all four runs. Many landform materials have no patches
+and returned before any noise; the shared ramp paid it for them.
 
 ### 6. Sunlight
 
