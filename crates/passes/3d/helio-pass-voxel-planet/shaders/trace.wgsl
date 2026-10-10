@@ -225,8 +225,9 @@ fn normal_code(axis: u32, step: i32) -> u32 {
     return axis * 2u + select(0u, 1u, step > 0);
 }
 
-// Per-ray work counters (diagnostics): loop steps, column lookups, block skips,
-// relocations.
+// Per-pixel work counters (diagnostics): loop steps, column lookups, block
+// skips, relocations, summed over every trace of the invocation (a primary
+// ray the sky bound cut traces again).
 var<private> work_steps: u32;
 var<private> work_lookups: u32;
 var<private> work_skips: u32;
@@ -421,14 +422,10 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
     var loaded = vec4<i32>(-1);
     var normal = 6u;
     let n_base = frame.layer_i.y - 1;
-    work_steps = 0u;
-    work_lookups = 0u;
-    work_skips = 0u;
-    work_locates = 0u;
     var last_t = -1.0;
     var stalls = 0u;
     for (var step = 0u; step < MAX_STEPS; step++) {
-        work_steps = step;
+        work_steps += 1u;
         if t > t_end { return make_hit(ST_MISS, t, cur, normal, NONE); }
         // Progress guard: near-tangent boundaries can round to zero advance
         // and alternate between two cells. Nudge forward and re-locate.

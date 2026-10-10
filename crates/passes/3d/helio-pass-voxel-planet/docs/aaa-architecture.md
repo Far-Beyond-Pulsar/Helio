@@ -126,6 +126,28 @@ bitmask traversal (2x on deep trees), visibility buffer then shading
 *Decision:* **add a tile pre-pass** (coarse levels and air spans only,
 min t per 8x8 tile) and **bitmask bricks** (1). Hits already form a
 visibility buffer.
+*Measured (2026-10-10, QUICK `mountain` mode, loading and settled frames
+timed apart):* the mountain views' 12-14 ms were mostly frames still
+loading. Settled: mountain_air 6.0 ms (15 steps a ray), mountain_slope 11.1
+ms (31 steps, 38 for a tile's slowest ray), ground 3.2 ms (11 steps).
+Loading: mountain_air 12.1 ms (44 steps, 8.4 column lookups a ray; sky rays
+take 30-40 steps while the view loads, none once settled: open).
+Every step costs about 700 lane-cycles even in a coherent straight-down
+view. The driver (`examples/shader_stats.rs`) reports `primary` at 64
+registers, no spills and a 74 KB binary (sunlight 154 KB): the loop
+inlines three column lookups, two occupancy tests and four exit
+computations. One probe for both transition directions and one box exit
+for every path (summary block, column above its top, air span or brick,
+lane, relief cut cell) made it 62 KB (sunlight 129 KB) but 3-14% slower (a
+16-byte spill, a layer solve every step): code size is not the cost
+(reverted). Not the cost either: Morton-ordered summary slots, folding the
+relief path into the lane path (no change each), ridge display. Cold
+pipeline compiles: generate 20 s, shade 4.5 s, sunlight and skylight 1.5 s
+each (a new terrain program in the editor waits on them).
+Upper bound of a tile pre-pass: starting every ray at its tile's nearest
+hit of the previous frame saves 25-31% (slope 11.6 -> 8.0 ms, ground 3.6
+-> 2.7). Finer-level probes inside the dither band (a ray may step back to
+a finer level per column) cost about 8%.
 
 ### 5. Shading
 

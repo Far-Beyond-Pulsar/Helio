@@ -2245,9 +2245,11 @@ dependencies = [
 name = "helio-pass-voxel-planet"
 version = "0.1.0"
 dependencies = [
+ "ash",
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
+ "naga",
  "pollster 0.4.0",
  "rustc-hash 2.1.3",
  "serde",
