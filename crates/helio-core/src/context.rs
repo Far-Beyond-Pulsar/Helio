@@ -759,6 +759,12 @@ pub struct PrepareContext<'a> {
     /// frames (`SceneInput::world_origin`). Passes that consume world-space
     /// data (SceneDB rows in world coordinates) subtract it.
     pub world_origin: Option<glam::DVec3>,
+
+    /// When `false`, Helio does not own the wgpu device: the host shares it
+    /// (and submits to it every frame), so passes must not `device.poll` it.
+    /// wgpu maintains the device on every `Queue::submit`, which already
+    /// delivers map callbacks.
+    pub owns_device: bool,
 }
 
 impl<'a> PrepareContext<'a> {

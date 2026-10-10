@@ -93,14 +93,14 @@ impl Renderer {
     }
 
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
-        // Drive wgpu's callback and deferred-destruction queues every frame.
-        // Embedders may share the device and set `owns_device = false`; in
-        // that mode we still must poll here or completed submissions and map
-        // callbacks can accumulate in the backend indefinitely.
         helio_core::cpu_scope!("Helio::Renderer::render");
-        {
-            // Takes wgpu's device-wide locks; can wait behind another thread's
-            // submit/present on the shared device.
+        // Drive wgpu's callback and deferred-destruction queues every frame
+        // when Helio owns the device. On a device shared with the host
+        // (`owns_device = false`) don't: polling takes wgpu's device-wide
+        // locks and waits behind the host's submits and presents, and wgpu
+        // already maintains the device on every `Queue::submit` (the host's
+        // and Helio's own), which delivers map callbacks and frees resources.
+        if self.owns_device {
             helio_core::cpu_scope!("Helio: device.poll");
             let _ = self.device.poll(wgpu::PollType::Poll);
         }

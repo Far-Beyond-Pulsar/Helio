@@ -92,7 +92,9 @@ fn synthetic_heightfield(wavelength_texels: f32, amplitude: f32) -> Vec<u16> {
     texels
 }
 
-fn grid_mesh() -> (Vec<[f32; 3]>, Vec<u32>) {
+/// The top-face grid `make_caustics_grid` builds: `w` = 0 marks a top-face
+/// vertex (the shader discards the rest).
+fn grid_mesh() -> (Vec<[f32; 4]>, Vec<u32>) {
     let n = DETAIL + 1;
     let mut verts = Vec::new();
     for j in 0..n {
@@ -100,6 +102,7 @@ fn grid_mesh() -> (Vec<[f32; 3]>, Vec<u32>) {
             verts.push([
                 i as f32 / DETAIL as f32 * 2.0 - 1.0,
                 j as f32 / DETAIL as f32 * 2.0 - 1.0,
+                0.0,
                 0.0,
             ]);
         }
@@ -116,13 +119,13 @@ fn grid_mesh() -> (Vec<[f32; 3]>, Vec<u32>) {
 }
 
 /// The `indoor_cathedral_water` pool, which is the case that looked empty.
-fn pool_volume(wave_amplitude: f32, caustics_intensity: f32) -> crate::GpuWaterVolume {
+fn pool_volume(wave_amplitude: f32, caustics_intensity: f32) -> helio_pass_water_sim::GpuWaterVolume {
     let sun = {
         let (x, y, z) = (0.5f32, 1.0f32, 0.5f32);
         let l = (x * x + y * y + z * z).sqrt();
         [x / l, y / l, z / l, 0.0]
     };
-    crate::GpuWaterVolume {
+    helio_pass_water_sim::GpuWaterVolume {
         bounds_min: [-6.0, 0.3, -6.0, 0.0],
         bounds_max: [6.0, 2.5, 6.0, 1.8],
         wave_params: [wave_amplitude, 0.75, 3.2, 0.22],
@@ -214,7 +217,11 @@ async fn project_caustics(wave_amplitude: f32, caustics_intensity: f32) -> Optio
         wgpu::util::TextureDataOrder::LayerMajor,
         bytemuck::cast_slice(&synthetic_heightfield(24.0, 0.6)),
     );
-    let sim_view = sim_tex.create_view(&Default::default());
+    // One layer per water volume, as `WaterSimPass` allocates it.
+    let sim_view = sim_tex.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         min_filter: wgpu::FilterMode::Linear,
         mag_filter: wgpu::FilterMode::Linear,
@@ -248,7 +255,7 @@ async fn project_caustics(wave_amplitude: f32, caustics_intensity: f32) -> Optio
                 visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
                     multisampled: false,
                 },
                 count: None,
@@ -297,10 +304,10 @@ async fn project_caustics(wave_amplitude: f32, caustics_intensity: f32) -> Optio
             module: &shader,
             entry_point: Some("vs_main"),
             buffers: &[Some(wgpu::VertexBufferLayout {
-                array_stride: 12,
+                array_stride: 16,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &[wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x3,
+                    format: wgpu::VertexFormat::Float32x4,
                     offset: 0,
                     shader_location: 0,
                 }],

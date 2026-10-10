@@ -586,7 +586,7 @@ impl VirtualGeometryPass {
         self.debug_stats
     }
 
-    fn poll_debug_readback(&mut self, device: &wgpu::Device) {
+    fn poll_debug_readback(&mut self, device: &wgpu::Device, poll_device: bool) {
         if matches!(self.debug_readback_state, DebugReadbackState::CopySubmitted) {
             let completion = std::sync::Arc::new(std::sync::Mutex::new(None));
             let callback_completion = std::sync::Arc::clone(&completion);
@@ -602,7 +602,10 @@ impl VirtualGeometryPass {
             return;
         };
 
-        let _ = device.poll(wgpu::PollType::Poll);
+        // A shared device is maintained by every `Queue::submit`.
+        if poll_device {
+            let _ = device.poll(wgpu::PollType::Poll);
+        }
         let result = completion.lock().unwrap().take();
         match result {
             Some(Ok(())) => {
@@ -753,7 +756,7 @@ impl RenderPass for VirtualGeometryPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.poll_debug_readback(ctx.device);
+        self.poll_debug_readback(ctx.device, ctx.owns_device);
 
         let Some(vg): Option<crate::VgFrameData<'_>> = ctx.registry.get(helio_core::ResourceKey::new("vg")) else {
             return Ok(());

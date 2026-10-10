@@ -208,8 +208,13 @@ impl RangeReadback {
         queue: &wgpu::Queue,
         scratch: &ScratchBuffers,
         kick_off_copy: bool,
+        poll_device: bool,
     ) {
-        device.poll(wgpu::PollType::Poll).ok();
+        // A shared device is maintained by every `Queue::submit` (see
+        // `PrepareContext::owns_device`), which delivers the map callbacks.
+        if poll_device {
+            device.poll(wgpu::PollType::Poll).ok();
+        }
 
         if self.gens.len() < GENERATIONS
             || self.gens.iter().any(|gen| gen.range_capacity() != self.range_capacity)

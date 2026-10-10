@@ -74,12 +74,42 @@ fn is_fragment(path: &Path, source: &str) -> bool {
         "helio-pass-hlfs/shaders/spatial.wgsl",
         "helio-pass-hlfs/shaders/temporal.wgsl",
         "helio-pass-transparent/shaders/transparent_base.wgsl",
+        // Assembled by `helio-pass-voxel-planet`'s `source()` from common.wgsl,
+        // view.wgsl and a terrain program generated in Rust; validated when
+        // the pass builds its pipelines.
+        "helio-pass-voxel-planet/shaders/gbuffer.wgsl",
+        "helio-pass-voxel-planet/shaders/generate.wgsl",
+        "helio-pass-voxel-planet/shaders/horizon.wgsl",
+        "helio-pass-voxel-planet/shaders/surface.wgsl",
     ];
     let normalized = path.to_string_lossy().replace('\\', "/");
     COMPOSED.iter().any(|suffix| normalized.ends_with(suffix))
         || !(source.contains("@vertex")
             || source.contains("@fragment")
             || source.contains("@compute"))
+}
+
+/// Assembles the shaders their passes build from more than one piece, the
+/// same way the pass does, so they are validated as the GPU sees them.
+fn compose(root: &Path, path: &Path, source: String) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    // `SceneJoin` and `EnvironmentJoin` prefix the shared join declarations.
+    const JOINS: &[&str] = &[
+        "helio-default-graphs/shaders/scene_join_meshes.wgsl",
+        "helio-default-graphs/shaders/scene_join_lights.wgsl",
+        "helio-default-graphs/shaders/environment_join.wgsl",
+    ];
+    if JOINS.iter().any(|suffix| normalized.ends_with(suffix)) {
+        let common = root.join("crates/helio-default-graphs/shaders/scene_join_common.wgsl");
+        let common = std::fs::read_to_string(common).expect("scene_join_common.wgsl");
+        return format!("{common}\n{source}");
+    }
+    // `helio_pass_volumetric_fog::shader_source` sizes the post-process row's
+    // tail from its Rust ABI; any length validates the same.
+    if normalized.ends_with("helio-pass-volumetric-fog/shaders/volumetric_fog.wgsl") {
+        return source.replace("__PP_TAIL_VEC4__", "1");
+    }
+    source
 }
 
 /// Maps a line number in resolved source back to the original file, so a
@@ -118,6 +148,7 @@ fn every_wgsl_shader_parses_and_validates() {
     for path in &shaders {
         let rel = path.strip_prefix(&root).unwrap_or(path);
         let source = std::fs::read_to_string(path).expect("shader should be readable");
+        let source = compose(&root, path, source);
 
         if is_fragment(path, &source) {
             skipped.push(rel.display().to_string());
@@ -160,9 +191,10 @@ fn every_wgsl_shader_parses_and_validates() {
 
     // Guard the skip heuristic: fragments are deliberate source modules and
     // composed shaders. If this trips, the source-module set has grown enough
-    // to require an explicit audit.
+    // to require an explicit audit. Last audited at 41: Radiant templates,
+    // shared prelude/common pieces, and the voxel planet's 11 source pieces.
     assert!(
-        skipped.len() <= 32,
+        skipped.len() <= 48,
         "{} shaders were skipped as fragments/composed modules, which is more than expected:\n{}",
         skipped.len(),
         skipped.join("\n")

@@ -428,6 +428,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
                     time: 0.0,
                     time_delta: 0.0,
                     world_origin: previous_origin,
+                    owns_device: true,
                 })
                 .unwrap();
                 let mut current = previous;
@@ -461,6 +462,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
                     time: 0.0,
                     time_delta: 0.0,
                     world_origin: next_origin,
+                    owns_device: true,
                 })
                 .unwrap();
                 let successive = (15..=17).contains(&case);
@@ -489,6 +491,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
                         time: 0.0,
                         time_delta: 0.0,
                         world_origin: Some(final_origin.into()),
+                        owns_device: true,
                     })
                     .unwrap();
                 }
@@ -534,6 +537,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
                         time: 0.0,
                         time_delta: 0.0,
                         world_origin: next_origin,
+                        owns_device: true,
                     })
                     .unwrap();
                 }
