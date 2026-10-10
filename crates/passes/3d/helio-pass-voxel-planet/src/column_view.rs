@@ -8,13 +8,11 @@ pub mod info {
     pub const OVERFLOW: u32 = 0x4000_0000;
     pub const RELIEF: u32 = 0x1000_0000;
     pub const TOPOLOGY: u32 = 0x0800_0000;
-    pub const RELIEF_INLINE: u32 = 0x0400_0000;
     pub const HEIGHTFIELD: u32 = 0x0200_0000;
     pub const CLIP_BELOW: u32 = 0x200;
     pub const CLIP_ABOVE: u32 = 0x400;
     pub const EDIT_MATERIALS: u32 = 0x800;
     pub const GENERATED: u32 = 0x1000;
-    pub const TOPS_WIDE: u32 = 0x20;
 }
 
 /// Span kinds (`SPAN_*` in `common.wgsl`).
@@ -53,23 +51,24 @@ pub struct Span {
 const UNIT_WORDS: usize = 16;
 const NO_LAYER: i32 = -0x7fff_ffff;
 
+/// Header units of every column (`HEADER_UNITS` in `common.wgsl`): one
+/// lane word per cell, then a surface byte per cell.
+pub const HEADER_UNITS: usize = 5;
+
 /// One resident column: its record (8 words) over the pool's words.
 pub struct ColumnView<'a> {
     record: &'a [u32],
     pool: &'a [u32],
-    /// The terrain program stores a surface word per cell.
-    surface_words: bool,
 }
 
 impl<'a> ColumnView<'a> {
-    /// The column of record `record` (8 words); `surface_words` when the
-    /// terrain program has `terrain_surface`.
-    pub fn new(record: &'a [u32], pool: &'a [u32], surface_words: bool) -> Self {
-        Self { record, pool, surface_words }
+    /// The column of record `record` (8 words).
+    pub fn new(record: &'a [u32], pool: &'a [u32]) -> Self {
+        Self { record, pool }
     }
     /// Every record of a records buffer (8 words each).
-    pub fn all(records: &'a [u32], pool: &'a [u32], surface_words: bool) -> impl Iterator<Item = ColumnView<'a>> + 'a {
-        records.chunks_exact(8).map(move |record| ColumnView::new(record, pool, surface_words))
+    pub fn all(records: &'a [u32], pool: &'a [u32]) -> impl Iterator<Item = ColumnView<'a>> + 'a {
+        records.chunks_exact(8).map(move |record| ColumnView::new(record, pool))
     }
     pub fn info(&self) -> u32 {
         self.record[3]
@@ -102,47 +101,32 @@ impl<'a> ColumnView<'a> {
     pub fn knows(&self, k: i32) -> bool {
         !(self.info() & info::CLIP_BELOW != 0 && k < self.lo() || self.info() & info::CLIP_ABOVE != 0 && k >= self.top())
     }
-    fn tops_units(&self) -> usize {
-        if self.info() & info::TOPS_WIDE != 0 { 2 } else { 1 }
-    }
-    fn relief_wide(&self) -> bool {
-        self.info() & info::RELIEF != 0 && self.info() & info::RELIEF_INLINE == 0
-    }
-    /// Header units (tops, relief fractions, surface words, offsets).
+    /// Header units: the lane words.
     pub fn header_units(&self) -> usize {
-        self.tops_units() + if self.relief_wide() { 2 } else { 0 } + usize::from(self.surface_words) + 1
+        HEADER_UNITS
     }
-    fn word(&self, unit: usize, word: usize) -> u32 {
-        self.pool[(self.run() + unit) * UNIT_WORDS + word]
+    /// The lane word of cell (x, y) (`lane_word`).
+    pub fn lane_word(&self, x: u32, y: u32) -> u32 {
+        self.pool[self.run() * UNIT_WORDS + (x + y * 8) as usize]
     }
-    /// The stored top of cell (x, y) over the base: level cells, or base
-    /// cells with inline relief.
+    /// The natural top of cell (x, y) over the base (level cells).
     pub fn stored_top(&self, x: u32, y: u32) -> u32 {
-        let cell = (x + y * 8) as usize;
-        if self.info() & info::TOPS_WIDE != 0 {
-            return (self.word(0, cell >> 1) >> ((cell & 1) * 16)) & 0xffff;
-        }
-        (self.word(0, cell >> 2) >> ((cell & 3) * 8)) & 255
+        self.lane_word(x, y) & 0x7fff
     }
-    /// The surface offset byte of cell (x, y) (`column_surface_offset`).
-    pub fn surface_offset(&self, x: u32, y: u32) -> u32 {
-        let cell = (x + y * 8) as usize;
-        let unit = self.header_units() - 1;
-        (self.word(unit, cell >> 2) >> ((cell & 3) * 8)) & 255
+    /// The exact surface's height over the natural top of cell (x, y), level
+    /// cells (`column_surface_delta`).
+    pub fn surface_delta(&self, x: u32, y: u32) -> f64 {
+        f64::from((self.lane_word(x, y) as i32) >> 15) / 65536.0
+    }
+    /// Surface word of cell (x, y) (`column_surface`).
+    pub fn surface_word(&self, x: u32, y: u32) -> u32 {
+        let lane = (x + y * 8) as usize;
+        (self.pool[(self.run() + 4) * UNIT_WORDS + lane / 4] >> ((lane % 4) * 8)) & 0xff
     }
     /// Natural surface top of cell (x, y): first air above the generated
     /// ground (level cells).
     pub fn natural_top(&self, x: u32, y: u32) -> i32 {
-        let cell = (x + y * 8) as usize;
-        if self.info() & info::TOPS_WIDE != 0 {
-            return self.base() + ((self.word(0, cell >> 1) >> ((cell & 1) * 16)) & 0xffff) as i32;
-        }
-        let offset = (self.word(0, cell >> 2) >> ((cell & 3) * 8)) & 255;
-        if self.info() & info::RELIEF_INLINE != 0 {
-            let level = self.key().1;
-            return self.base() + ((offset + (1 << level) - 1) >> level) as i32;
-        }
-        self.base() + offset as i32
+        self.base() + self.stored_top(x, y) as i32
     }
     /// The column's spans, the implicit solid below the first one excluded.
     pub fn spans(&self) -> Vec<Span> {

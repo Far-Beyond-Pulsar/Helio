@@ -643,6 +643,16 @@ impl Flight {
             image::save_buffer(self.output.join(format!("{name}-steps.png")), &heat, size[0], size[1], image::ColorType::Rgba8).unwrap();
         }
         let mut stats = serde_json::Map::new();
+        // Divergence: the rays of an 8x8 tile run together, so a tile costs
+        // its longest ray's steps.
+        let (tiles_x, tiles_y) = (size[0].div_ceil(8), size[1].div_ceil(8));
+        let mut tile_max = vec![0u32; (tiles_x * tiles_y) as usize];
+        for (n, w) in work.iter().enumerate() {
+            let (x, y) = (n as u32 % size[0], n as u32 / size[0]);
+            let t = &mut tile_max[((y / 8) * tiles_x + x / 8) as usize];
+            *t = (*t).max(w[0]);
+        }
+        stats.insert("tile_max_steps".into(), serde_json::json!(tile_max.iter().map(|v| f64::from(*v)).sum::<f64>() / tile_max.len() as f64));
         for (index, name) in ["steps", "lookups", "block_skips", "locates"].iter().enumerate() {
             work.sort_by_key(|w| w[index]);
             let q = |p: f64| work[((work.len() - 1) as f64 * p) as usize][index];

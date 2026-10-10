@@ -170,7 +170,6 @@ the CPU raycast what the GPU draws.
   height. This lookup is baked once per stack;
   canonical field queries and level 0 remain unchanged. Levels 1 and above
   retain fractional radial tops unless Add/Remove edits change their geometry.
-  Short low-level spans store exact base-layer tops in the existing byte header.
   Paint retains that relief. Slope lighting and the material height come from
   the stored exact surface (`ground_field`), never from tracing finer cells
   or running the generator per pixel.
@@ -232,15 +231,30 @@ Edit cost does not grow with the brushes piled on one spot (sculpting):
   column's brushes queried once, instead of a ray from the outer radius
   through the edit index cell by cell (426 ms at 2000 brushes before).
 
+**Lane words.** A column's header is one 32-bit word per cell (`lane_word`,
+four units): its natural top over the column base (15 bits) and the exact
+surface's height over that top in Q16 level cells, floored (17 bits,
+signed); then one unit of surface words, a byte per cell, read once per
+pixel. A relief column's top cell is cut at the base layer under the exact
+surface (`relief_share`): exact to the base layer at levels up to 16, where
+a level cell holds at most 65536 of them. Every height shading and
+traversal read is one load. Tops in bytes, 16 bits or inline with a
+base-cell remainder, wide Q16 relief fractions, surface words and surface
+offsets in base or level cells (3 to 6 units, three loads and their branches
+per height) were most of shading's cost: 28 heights a pixel for the smooth
+normal and the material slope. A 12-bit 1024ths split was tried first: it
+cut coarse relief up to 2^(level-10) layers under the surface (subsoil at
+level transitions) and whole level-17 cells over a surface in their lowest
+1024th.
+
 **Natural surface of edited columns.** Every column keeps its natural
 per-cell tops (the generated ground's, whatever edits did there) in its
-header, over a column base, in bytes or 16 bits when they spread further
-(`INFO_TOPS_WIDE`): material depth counts from them at any depth, so the
+lane words, over a column base: material depth counts from them at any depth, so the
 floor of a dig 400 m deep is rock at every level. They used to be stored
 relative to the column's band and could not reach a deep floor: near the eye
 it read depth 0 and turned to grass, while coarse levels showed rock.
-Edited columns keep no relief, so their surface offsets count level cells
-(`column_surface_offset`). In edited and generated columns the natural
+Edited columns keep no relief; their exact surface still lies in their lane
+words (`column_surface_delta`). In edited and generated columns the natural
 ground is the top cell, the risers of steps down to neighbours (air side
 above the neighbour's top) and ledge lips within two cells of the top; cave
 walls, ceilings and dug faces are not.
@@ -548,11 +562,9 @@ they are once its work is on the GPU. Steps:
   pixels down by the size their faces project to (`step_filter_weight`: a
   riser seen from above is a fraction of a voxel tall on screen).
 - **Smooth surface model.** Every column stores, per cell, the exact surface
-  below voxel precision: a surface offset (one byte, 1/128 of a base cell,
-  `column_surface_offset`) over its stored height (level-0 top or relief
-  base-cell top), from the generator's exact height or, at level 0, a
-  density surface's zero crossing; coarser density surfaces keep it in their
-  Q16 relief fractions. Occupancy, relief and materials never read it. The
+  below voxel precision in its lane word (Q16 level cells over the
+  natural top, `column_surface_delta`), from the generator's exact height or
+  a density surface's zero crossing. Occupancy never reads it. The
   smooth normal (`relief_field_gradient`) is its central differences one
   cell each way at the four cell centres around the pixel's base cell,
   interpolated bilinearly across cells and columns, at every level. The

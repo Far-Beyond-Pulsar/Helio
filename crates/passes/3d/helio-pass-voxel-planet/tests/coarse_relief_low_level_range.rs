@@ -97,10 +97,12 @@ fn l1_to_l5_fractional_top_hits_respect_requested_trace_range() {
                     0,
                 ],
             );
-            let fraction = 1u32 << (16 - level);
-            let mut pool = vec![0u32; 64];
-            pool[..16].fill(0x08080808);
-            pool[16..48].fill(fraction | (fraction << 16));
+            // Lane words: natural tops 8 over the base, the exact surface one
+            // base layer over the top cell's floor (Q16 cells); no surface
+            // words.
+            let delta = (1i32 << (16 - level)) - 65536;
+            let mut pool = vec![0u32; 80];
+            pool[..64].fill(8 | ((delta as u32) << 15));
             let buffer = |label: &str, data: &[u8], uniform: bool| {
                 let b = gpu.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some(label),

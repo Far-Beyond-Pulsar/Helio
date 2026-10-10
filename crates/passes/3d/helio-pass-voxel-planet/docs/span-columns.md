@@ -88,10 +88,10 @@ air.
 
 ### The natural surface is not a span
 
-Material depth, relief, surface offsets and the smooth normal belong to the
-natural (generated) surface, wherever the spans are. The header stores each
-lane's natural top relative to a column base (`i32`, bytes over it, 16-bit
-when a column's natural tops spread over 255 cells). Depth = natural top -
+Material depth, relief, the exact surface and the smooth normal belong to
+the natural (generated) surface, wherever the spans are. The header stores
+each lane's natural top relative to a column base in its lane word (with
+the exact surface over it; README "Lane words"). Depth = natural top -
 cell, exactly as the CPU computes it (`Planet::material`). The dig floor is
 rock at every level.
 

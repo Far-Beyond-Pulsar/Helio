@@ -48,7 +48,7 @@ const A_SCRATCH: u32 = 31u;
 const WINDOW_CELLS: i32 = 1024;
 // Scratch per job: the header area (at most six units), the evaluated
 // bricks (at most the window's 256), then the span area.
-const HEADER_UNITS_MAX: u32 = 6u;
+const HEADER_UNITS_MAX: u32 = 5u;
 const SPAN_UNITS_MAX: u32 = 16u;
 // Candidate bricks are marked in a mask over the window (256 bricks); its
 // runs become the intervals. At most MAX_INTERVALS remain after merging;
@@ -124,17 +124,17 @@ var<workgroup> g_iv_top: array<atomic<i32>, 8>;
 var<workgroup> g_tops: array<atomic<u32>, 128>;
 // Solid lanes of each gap between intervals (two words per gap).
 var<workgroup> g_gap: array<atomic<u32>, 18>;
-// Natural tops: lowest, highest (level cells), highest base-cell top.
-var<workgroup> g_natural: array<atomic<i32>, 3>;
+// The lowest natural top (level cells).
+var<workgroup> g_natural: array<atomic<i32>, 1>;
 var<workgroup> g_words: array<atomic<u32>, 32>;
 var<workgroup> g_masks: array<atomic<u32>, 16>;
 var<workgroup> g_any: array<atomic<u32>, 2>;
-var<workgroup> g_fraction: array<atomic<u32>, 32>;
 var<workgroup> g_topology_flags: u32;
 var<workgroup> g_volume: atomic<u32>;
+// The column's lane words (`lane_word` in common.wgsl).
+var<workgroup> g_lane: array<u32, 64>;
+// Surface words (`column_surface`), one byte per lane.
 var<workgroup> g_surface: array<atomic<u32>, 16>;
-// Surface offsets (`column_surface_offset`), one byte per lane.
-var<workgroup> g_offset: array<atomic<u32>, 16>;
 // Per-brick brush culling: one chunk of the column's edit list at a time,
 // kept brushes compacted in list order (ballot bits, then ranks).
 var<workgroup> g_keep: array<atomic<u32>, 2>;
@@ -193,13 +193,6 @@ fn generated_density(p: vec3<i32>, face: u32, i: i32, j: i32, k: i32, level: u32
     var lean_h = height;
     if leaning { lean_h = lean_height(p, i, j, k, level, height, spacing, node); }
     return terrain_density(p, volume_point(face, i, j, k, level), level, field_top, height, lean_h, k);
-}
-
-// Q16 fraction of a cell whose surface lies `h` cells above its bottom (0:
-// the whole cell).
-fn cell_fraction(h: f32) -> u32 {
-    if h >= 1.0 { return 0u; }
-    return clamp(u32(h * 65536.0), 1u, 65535u);
 }
 
 // Where a brush's surface crosses one lane (the column of cells over
@@ -353,8 +346,6 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         atomicStore(&g_range[0], 0x7fffffff);
         atomicStore(&g_range[1], -0x7fffffff);
         atomicStore(&g_natural[0], 0x7fffffff);
-        atomicStore(&g_natural[1], -0x7fffffff);
-        atomicStore(&g_natural[2], -0x7fffffff);
         atomicStore(&g_any[0], 0u);
         atomicStore(&g_any[1], 0u);
         atomicStore(&g_volume, 0u);
@@ -364,7 +355,6 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         atomicStore(&g_words[li + 16u], 0u);
         atomicStore(&g_masks[li], 0u);
         atomicStore(&g_surface[li], 0u);
-        atomicStore(&g_offset[li], 0u);
     }
     if li < 18u { atomicStore(&g_gap[li], 0u); }
     if li < 8u {
@@ -417,13 +407,6 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     let remainder = u32(base_top) & ((1u << level) - 1u);
     var top = base_top >> level;
     if relief && remainder != 0u { top += 1; }
-    var fraction = 0u;
-    if relief && remainder != 0u {
-        // Shifts avoid overflowing a u32 product at planetary coarse levels.
-        if level <= 16u { fraction = remainder << (16u - level); }
-        else { fraction = max(remainder >> (level - 16u), 1u); }
-    }
-    if relief && li < 32u { atomicStore(&g_fraction[li], 0u); }
     // Volumetric terrain (caves, overhangs): the program may change cells
     // within its extent around the heightfield top, evaluated in 3D. Only
     // the cells it changes make generated volume: a column whose cells all
@@ -697,9 +680,9 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     // volume and the air cell above it): the relief of a changed surface.
     var top_solid = NO_DENSITY;
     var top_air = NO_DENSITY;
-    var top_fraction = 0u;
-    // Height (level cells) of the generated surface: the densities' zero
-    // crossing between the highest solid cell's centre and the air above.
+    // The generated surface: the densities' zero crossing between the
+    // highest solid cell's centre and the air above, level cells over the
+    // bottom of that air cell (-0.5..0.5).
     var surface_crossing = 0.0;
     // The air cell of that crossing.
     var crossing_air = -0x7fffffff;
@@ -744,18 +727,15 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                     if kind != 0u {
                         top_solid = density;
                         top_air = NO_DENSITY;
-                        top_fraction = 0u;
                     } else if top_solid != NO_DENSITY && top_air == NO_DENSITY {
                         top_air = density;
                         let t = select(0.5, volume_crossing(top_solid, density), top_solid > 0);
-                        surface_crossing = f32(k) - 0.5 + t;
+                        surface_crossing = t - 0.5;
                         crossing_air = k;
                         if relief && t > 0.5 {
-                            // The surface rises into this cell: solid, cut there.
+                            // The surface rises into this cell: solid, cut there
+                            // (its lane word's relief).
                             kind = 1u;
-                            top_fraction = cell_fraction(t - 0.5);
-                        } else {
-                            top_fraction = cell_fraction(0.5 + t);
                         }
                     }
                 }
@@ -894,34 +874,11 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     // The natural surface: generated tops, whatever the edits did.
     let natural = select(top, generated_top, changed && generated_top != NO_LAYER);
     atomicMin(&g_natural[0], natural);
-    atomicMax(&g_natural[1], natural);
-    atomicMax(&g_natural[2], base_top);
     workgroupBarrier();
     let volume_bits = atomicLoad(&g_volume);
     let volumetric = (volume_bits & VOLUME_TERRAIN) != 0u;
-    // One cell under the lowest top: an inline top rounded up to its level
-    // cell stays above the base in base cells.
+    // One cell under the lowest top.
     let natural_base = atomicLoad(&g_natural[0]) - 1;
-    // When the column's authored tops fit 255 base cells, store them in the
-    // tops' bytes instead of allocating two Q16 units.
-    let inline_relief = relief && !volumetric && level <= 7u
-        && atomicLoad(&g_natural[2]) - (natural_base << level) <= 255;
-    let wide_relief = relief && !inline_relief;
-    let tops_wide = !inline_relief && atomicLoad(&g_natural[1]) - natural_base > 255;
-    let surface_words = world.sphere.w != 0u;
-    let tops_units = select(1u, 2u, tops_wide);
-    let surface_unit = tops_units + select(0u, 2u, wide_relief);
-    let offset_unit = surface_unit + select(0u, 1u, surface_words);
-    let header_units = offset_unit + 1u;
-    if tops_wide {
-        atomicOr(&g_words[li >> 1u], u32(natural - natural_base) << ((li & 1u) * 16u));
-    } else {
-        let stored = select(natural - natural_base, base_top - (natural_base << level), inline_relief);
-        atomicOr(&g_words[li >> 2u], u32(clamp(stored, 0, 255)) << ((li & 3u) * 8u));
-    }
-    if surface_words {
-        atomicOr(&g_surface[li >> 2u], (u32(column.y) & 0xffu) << ((li & 3u) * 8u));
-    }
     // The density describes the lane's surface only when its last zero
     // crossing is at the generated top (that air cell, or the one below when
     // the surface rose into it): an undercut below an untouched top crossed
@@ -929,42 +886,29 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
     // across overhang regions).
     let density_surface = (surface_changed || dense_lane) && top_air != NO_DENSITY
         && (crossing_air == generated_top || crossing_air + 1 == generated_top);
-    if wide_relief {
-        let lane_fraction = select(fraction, top_fraction, volumetric && density_surface);
-        atomicOr(&g_fraction[li >> 1u], lane_fraction << ((li & 1u) * 16u));
-    }
-    // Surface offset: the exact surface's height over the stored one, from -1
-    // to 1 units of its precision in 128ths (`column_surface_offset`): base
-    // cells over the relief's base-cell top or the level-0 top, level cells
-    // over a whole-cell top. Only shading reads it (smooth normals and
-    // material height at every level); occupancy keeps the voxels' grid.
-    // A density surface takes it from its zero crossing over its generated
-    // top (level cells, as a level-0 or whole-cell top is stored); a relief
-    // fraction carries that precision itself.
-    var offset = 128;
+    // The exact surface's height over the natural top, Q16 level cells,
+    // floored: the density's zero crossing, or the field's height (in
+    // integers: whole base layers at levels up to 16). A relief column's top
+    // cell is cut at its base layer (`relief_share`).
+    var delta = 0;
     if density_surface {
-        if level == 0u || !relief {
-            offset = 128 + i32(round((surface_crossing - f32(generated_top)) * 128.0));
-        }
+        delta = i32(floor((f32(crossing_air - natural) + surface_crossing) * 65536.0));
     } else {
-        let base_units = relief || level == 0u;
-        let stored = select(top << level, base_top, base_units);
-        let unit = select(world.grid.y << level, world.grid.y, base_units);
-        let above = clamp(height - stored * world.grid.y, -unit, unit);
-        offset = 128 + i32(floor(f32(above) * 128.0 / f32(unit)));
+        let cell_mm = world.grid.y << level;
+        let above = clamp(height - natural * cell_mm, -cell_mm, cell_mm);
+        if level <= 16u {
+            delta = div_floor(above << (16u - level), world.grid.y);
+        } else {
+            delta = div_floor(above, world.grid.y << (level - 16u));
+        }
     }
-    atomicOr(&g_offset[li >> 2u], u32(clamp(offset, 0, 255)) << ((li & 3u) * 8u));
+    // The lane word (`lane_word` in common.wgsl).
+    g_lane[li] = u32(clamp(natural - natural_base, 0, 0x7fff))
+        | (u32(clamp(delta, -65536, 65535)) << 15u);
+    atomicOr(&g_surface[li >> 2u], (u32(column.y) & 0xffu) << ((li & 3u) * 8u));
     workgroupBarrier();
-    if li < 32u && (tops_wide || li < 16u) {
-        scratch[plan.base * UNIT_WORDS + li] = atomicLoad(&g_words[li]);
-    }
-    if wide_relief && li < 32u {
-        scratch[(plan.base + tops_units) * UNIT_WORDS + li] = atomicLoad(&g_fraction[li]);
-    }
-    if surface_words && li < 16u {
-        scratch[(plan.base + surface_unit) * UNIT_WORDS + li] = atomicLoad(&g_surface[li]);
-    }
-    if li < 16u { scratch[(plan.base + offset_unit) * UNIT_WORDS + li] = atomicLoad(&g_offset[li]); }
+    scratch[plan.base * UNIT_WORDS + li] = g_lane[li];
+    if li < 16u { scratch[(plan.base + 4u) * UNIT_WORDS + li] = atomicLoad(&g_surface[li]); }
     if li == 0u {
         // The column's spans: gaps and intervals in order, uniform ones
         // merged, the solid below the first implicit and the air above the
@@ -1126,7 +1070,7 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
                     let gb0 = bricks_from[e];
                     let nb = u32(ends[e] - starts[e]) >> 3u;
                     let mask_words = (nb + 31u) >> 5u;
-                    scratch[table + payload] = header_units + span_units + mixed_before;
+                    scratch[table + payload] = HEADER_UNITS_MAX + span_units + mixed_before;
                     for (var w = 0u; w < 2u * mask_words; w++) { scratch[table + payload + 1u + w] = 0u; }
                     for (var b = 0u; b < nb; b++) {
                         let g_bit = gb0 + b;
@@ -1150,20 +1094,20 @@ fn generate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_inde
         var out: JobOut;
         out.status = 0u;
         out.base = natural_base;
-        out.info = select(n_spans, 0u, heightfield) | select(0u, INFO_TOPS_WIDE, tops_wide)
-            | select(0u, INFO_RELIEF, relief) | select(0u, INFO_RELIEF_INLINE, inline_relief)
+        out.info = select(n_spans, 0u, heightfield)
+            | select(0u, INFO_RELIEF, relief)
             | select(0u, INFO_HEIGHTFIELD, heightfield) | topology_flags
             | select(0u, INFO_GENERATED, volumetric) | clip
             | select(0u, INFO_EDIT_MATERIALS, (volume_bits & VOLUME_MATERIALS) != 0u);
         out.n_mixed = mixed_before;
         out.scratch = plan.base;
-        out.units = header_units + span_units;
+        out.units = HEADER_UNITS_MAX + span_units;
         out.top = top_out;
         out.pad2 = 0u;
         out.lo = plan.w_lo;
         out.summary = max(plan.summary, top_out);
         out.n_eval = plan.eval;
-        out.header = header_units;
+        out.header = HEADER_UNITS_MAX;
         out.mixed = copied;
         job_out[index] = out;
     }

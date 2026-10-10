@@ -59,7 +59,7 @@ struct Column {
     key0: u32,   // column i | face << 24 | level << 27
     key1: u32,   // column j
     base: i32,   // natural tops' base (level cells)
-    info: u32,   // spans 0..5 | wide tops 5 | clip below 9 | clip above 10 | edit materials 11 | generated 12 | class 18..22 | heightfield 25 | relief inline 26 | topology 27 | relief 28 | overflow 30 | valid 31
+    info: u32,   // spans 0..5 | clip below 9 | clip above 10 | edit materials 11 | generated 12 | class 18..22 | heightfield 25 | topology 27 | relief 28 | overflow 30 | valid 31
     run: u32,    // first pool unit
     top: i32,    // first layer above every solid cell (level cells); clipped above: the window's top
     lo: i32,     // clipped below: the lowest layer the column describes
@@ -92,9 +92,6 @@ const INFO_OVERFLOW: u32 = 0x40000000u;
 const INFO_RELIEF: u32 = 0x10000000u;
 // Effective Add/Remove lists: base-field gradients cannot describe cut faces.
 const INFO_TOPOLOGY: u32 = 0x08000000u;
-// Low-level authored tops share the natural tops' bytes with their
-// fractional remainder (base cells over the column base).
-const INFO_RELIEF_INLINE: u32 = 0x04000000u;
 // The column is exactly solid below its natural tops: no span table.
 const INFO_HEIGHTFIELD: u32 = 0x02000000u;
 // The column's window was clipped below (above): cells under `lo` (from
@@ -108,8 +105,6 @@ const INFO_EDIT_MATERIALS: u32 = 0x800u;
 // tops (first air above the highest generated solid cell); only
 // INFO_TOPOLOGY (edit cuts) marks a cut.
 const INFO_GENERATED: u32 = 0x1000u;
-// Natural tops spread over more than a byte: 16 bits each.
-const INFO_TOPS_WIDE: u32 = 0x20u;
 const UNIT_WORDS: u32 = 16u;
 const MAX_PROBES: u32 = 64u;
 
@@ -173,47 +168,36 @@ fn column_knows(c: Column, k: i32) -> bool {
     return true;
 }
 
-// Header units: the natural tops (one unit of bytes, two of 16 bits), wide
-// relief fractions, the surface words when the program has them (one byte
-// per cell), the surface offsets (one byte per cell); then the span table
-// and its payloads, then the span bricks.
-fn tops_units(c: Column) -> u32 {
-    return select(1u, 2u, (c.info & INFO_TOPS_WIDE) != 0u);
-}
-
-fn surface_unit(c: Column) -> u32 {
-    return tops_units(c) + select(0u, 2u, info_relief_wide(c.info));
-}
-
-fn offset_unit(c: Column) -> u32 {
-    return surface_unit(c) + select(0u, 1u, world.sphere.w != 0u);
-}
+// A column's header: one word per cell (`lane_word`), four units, and its
+// surface words (`column_surface`), one unit; then the span table and its
+// payloads, then the span bricks.
+const HEADER_UNITS: u32 = 5u;
 
 fn header_units(c: Column) -> u32 {
-    return offset_unit(c) + 1u;
+    return HEADER_UNITS;
 }
 
-// Height of the exact surface of column cell (x, y) of `level` over its
-// stored height, in level cells: the generator's surface below voxel
-// precision, for smooth shading. Occupancy never reads it. The byte holds
-// -1..1 units of the stored height's precision: a base cell over a relief or
-// level-0 top, a level cell over a whole-cell top (edited columns keep no
-// relief; base-cell units could not reach their surface, whose ground then
-// sank below its neighbours': dark column outlines around every edit).
-fn column_surface_offset(c: Column, x: u32, y: u32, level: u32) -> f32 {
-    let cell = x + y * 8u;
-    let word = pool[(c.run + offset_unit(c)) * UNIT_WORDS + (cell >> 2u)];
-    let units = (f32((word >> ((cell & 3u) * 8u)) & 0xffu) - 128.0) / 128.0;
-    let base_units = (c.info & INFO_RELIEF) != 0u || level == 0u;
-    return select(units, units / f32(1u << level), base_units);
+// The lane word of column cell (x, y): its natural top over the column base
+// (bits 0..15) and the exact surface's height over that top, Q16 level
+// cells (signed, floored, 15..32). Every height shading and traversal read
+// is one load: three loads and their branches per height (tops in bytes or
+// 16 bits or inline with a relief, wide relief fractions, surface offsets in
+// base or level cells) were most of shading's cost (28 heights a pixel).
+fn lane_word(c: Column, x: u32, y: u32) -> u32 {
+    return pool[c.run * UNIT_WORDS + x + y * 8u];
+}
+
+// Height of the exact surface of column cell (x, y) over its natural top,
+// level cells (-1..1): the generator's surface below voxel precision, for
+// smooth shading and relief. Occupancy never reads it.
+fn column_surface_delta(c: Column, x: u32, y: u32) -> f32 {
+    return f32(bitcast<i32>(lane_word(c, x, y)) >> 15u) / 65536.0;
 }
 
 // Surface word of column cell (x, y) (`terrain_surface`); 0 without them.
 fn column_surface(c: Column, x: u32, y: u32) -> u32 {
-    if world.sphere.w == 0u { return 0u; }
-    let cell = x + y * 8u;
-    let word = pool[(c.run + surface_unit(c)) * UNIT_WORDS + (cell >> 2u)];
-    return (word >> ((cell & 3u) * 8u)) & 0xffu;
+    let lane = x + y * 8u;
+    return (pool[(c.run + 4u) * UNIT_WORDS + (lane >> 2u)] >> ((lane & 3u) * 8u)) & 0xffu;
 }
 
 fn brick_bit(unit: u32, x: u32, y: u32, z: u32) -> bool {
@@ -225,47 +209,30 @@ fn column_generated(c: Column) -> bool {
     return (c.info & INFO_GENERATED) != 0u;
 }
 
-// Relief fractions in two units after the tops: every relief column but
-// an inline one.
-fn info_relief_wide(info: u32) -> bool {
-    return (info & INFO_RELIEF) != 0u && (info & INFO_RELIEF_INLINE) == 0u;
-}
-
-fn column_relief_inline(c: Column) -> bool {
-    return (c.info & INFO_RELIEF) != 0u && (c.info & INFO_RELIEF_INLINE) != 0u;
-}
-
 // Natural surface top of column cell (x, y): first air layer above the
 // generated ground (level cells), whatever edits did there. Material depth,
 // relief and the smooth ground read it at any depth below it.
 fn column_top(c: Column, x: u32, y: u32) -> i32 {
-    let cell = x + y * 8u;
-    if (c.info & INFO_TOPS_WIDE) != 0u {
-        let word = pool[c.run * UNIT_WORDS + (cell >> 1u)];
-        return c.base + i32((word >> ((cell & 1u) * 16u)) & 0xffffu);
-    }
-    let word = pool[c.run * UNIT_WORDS + (cell >> 2u)];
-    let offset = (word >> ((cell & 3u) * 8u)) & 255u;
-    if (c.info & INFO_RELIEF_INLINE) != 0u {
-        let level = c.key0 >> 27u;
-        return c.base + i32((offset + (1u << level) - 1u) >> level);
-    }
-    return c.base + i32(offset);
+    return c.base + i32(lane_word(c, x, y) & 0x7fffu);
 }
 
-// Zero denotes a top exactly on the upper coarse-cell boundary. Other
-// fractions reconstruct the authored base-layer top inside the last voxel.
+// A relief column's top cell is cut at the base layer under its exact
+// surface: the Q16 share of the cell below that layer, or zero for a whole
+// cell. Exact in base layers at levels up to 16; coarser, in Q16 cells.
 fn column_relief_fraction(c: Column, x: u32, y: u32) -> u32 {
     if (c.info & INFO_RELIEF) == 0u { return 0u; }
-    let cell = x + y * 8u;
-    if column_relief_inline(c) {
-        let level = c.key0 >> 27u;
-        let word = pool[c.run * UNIT_WORDS + (cell >> 2u)];
-        let offset = (word >> ((cell & 3u) * 8u)) & 255u;
-        return (offset & ((1u << level) - 1u)) << (16u - level);
-    }
-    let word = pool[(c.run + tops_units(c)) * UNIT_WORDS + (cell >> 1u)];
-    return (word >> ((cell & 1u) * 16u)) & 65535u;
+    return relief_share(bitcast<i32>(lane_word(c, x, y)) >> 15u, c.key0 >> 27u);
+}
+
+// The Q16 relief share of a top cell of `level` whose exact surface is
+// `delta` (Q16 cells) over its top (`column_relief_fraction`). A surface
+// within the cell's lowest Q16 step (levels over 16) keeps the thinnest
+// share: zero would be the whole cell.
+fn relief_share(delta: i32, level: u32) -> u32 {
+    let layer = 1 << (16u - min(level, 16u));
+    let share = (65536 + delta) & -layer;
+    if share >= 65536 { return 0u; }
+    return u32(max(share, 1));
 }
 
 // Span kinds. AIR, SOLID, LANES, TOPS and NATURAL are lane spans: each lane

@@ -398,7 +398,7 @@ impl TerrainGenerator for Steep {
     }
 }
 /// A column whose tops spread over hundreds of cells (a cliff 5 km tall in
-/// one column) keeps its relief: its natural tops take 16 bits each.
+/// one column) keeps its relief: lane words hold tops 4095 cells apart.
 #[test]
 fn steep_columns_keep_relief_at_any_spread() {
     static INIT: Once = Once::new();
@@ -435,7 +435,6 @@ fn steep_columns_keep_relief_at_any_spread() {
     assert_eq!(c.level, 6, "fixture must exercise L6 steep column");
     let info = record_info(&gpu, &r, 4);
     assert_ne!(info & 0x10000000, 0, "a steep column lost its relief: info={info:08x}");
-    assert_ne!(info & 0x20, 0, "tops spreading over a byte must be wide: info={info:08x}");
     let size = planet.grid().voxel_size() * f64::from(1u32 << c.level);
     let actual = eye.y - f64::from(c.t);
     assert!(

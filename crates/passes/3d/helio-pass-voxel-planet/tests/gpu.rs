@@ -957,9 +957,8 @@ fn a_dig_from_orbit_costs_what_open_ground_costs() {
         let [records, pool, _] = r.residency_buffers();
         let words = |b: &wgpu::Buffer| -> Vec<u32> { read_buffer(&gpu, b, b.size()).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect() };
         let (rec, pool) = (words(records), words(pool));
-        let surface = planet.field().program().wgsl.contains("fn terrain_surface");
         let (mut clipped, mut bricks) = (0usize, 0usize);
-        for column in ColumnView::all(&rec, &pool, surface).filter(|c| c.valid()) {
+        for column in ColumnView::all(&rec, &pool).filter(|c| c.valid()) {
             clipped += usize::from(column.info() & (info::CLIP_BELOW | info::CLIP_ABOVE) != 0);
             bricks += usize::from(column.spans().iter().any(|s| s.kind == SpanKind::Bricks));
         }
@@ -1141,7 +1140,7 @@ fn resident_columns_hold_the_canonical_cells() {
         let (grid, field) = (planet.grid(), planet.field());
         let (mut columns, mut audited, mut cells) = (0usize, 0usize, 0usize);
         let (mut wrong, mut wrong_tops, mut loose) = (0usize, 0usize, 0usize);
-        for column in ColumnView::all(&rec, &pool, surface_words).filter(|c| c.valid()) {
+        for column in ColumnView::all(&rec, &pool).filter(|c| c.valid()) {
             columns += 1;
             if columns % 5 != 0 {
                 continue;
@@ -1193,15 +1192,14 @@ fn resident_columns_hold_the_canonical_cells() {
     }
 }
 
-/// Surface offsets reconstruct the generator's exact height below voxel
-/// precision: stored height plus offset is the field height to 1/128 of the
-/// stored height's precision, for the smooth shading normals and material
-/// height of natural ground. A base cell over a level-0 or relief top; a
-/// level cell over the whole-cell tops of columns without relief (here the
-/// columns a wide dig touches), whose surface once sank below its
-/// neighbours' (dark outlines around every edit).
+/// Lane words reconstruct the generator's exact height below voxel
+/// precision: a cell's natural top plus its exact surface over it is the
+/// field height to 1/65536 of a level cell, for relief, the smooth shading
+/// normals and the material height of natural ground, at every level and in
+/// the columns a wide dig touches (whose surface once sank below its
+/// neighbours': dark outlines around every edit).
 #[test]
-fn surface_offsets_reconstruct_the_field_height() {
+fn lane_words_reconstruct_the_field_height() {
     let Some(gpu) = gpu() else { return };
     let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
     let dir = land(&planet, 4, 0.37, 0.61);
@@ -1222,44 +1220,29 @@ fn surface_offsets_reconstruct_the_field_height() {
         read_buffer(&gpu, b, b.size()).chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
     };
     let (rec, pool) = (words(records), words(pool));
-    let surface_words = planet.field().program().wgsl.contains("fn terrain_surface");
     let layer = planet.grid().layer_mm() as f64;
-    let (mut lanes, mut whole, mut worst) = (0usize, 0usize, 0.0f64);
+    let (mut lanes, mut worst) = (0usize, 0.0f64);
     use helio_pass_voxel_planet::column_view::{info, ColumnView};
-    for column in ColumnView::all(&rec, &pool, surface_words).filter(|c| c.valid()) {
-        // Columns other than generated volume: level-0 tops, inline relief,
-        // and whole-cell tops (no relief).
+    for column in ColumnView::all(&rec, &pool).filter(|c| c.valid()) {
+        // Generated volume takes its surface from the density.
         if column.info() & info::GENERATED != 0 {
             continue;
         }
         let (face, level, ci, cj) = column.key();
-        let relief = column.info() & info::RELIEF != 0;
-        let inline = relief && column.info() & info::RELIEF_INLINE != 0;
-        if level != 0 && relief && !inline {
-            continue;
-        }
-        // Units of the stored height and the offset, in base cells.
-        let unit = if level == 0 || relief { 1.0 } else { f64::from(1u32 << level) };
+        let cell_mm = layer * f64::from(1u32 << level);
         for cell in 0..64u32 {
             let (x, y) = (cell & 7, cell >> 3);
-            // Stored height (base cells): the top over the column base, in
-            // base cells (inline relief) or level cells.
-            let stored = if inline {
-                f64::from((column.base() << level) + column.stored_top(x, y) as i32)
-            } else {
-                f64::from(column.natural_top(x, y)) * unit
-            };
-            let offset = (column.surface_offset(x, y) as i32 - 128) as f64 / 128.0 * unit;
+            // The natural top plus the exact surface over it (level cells).
+            let stored = f64::from(column.natural_top(x, y)) + column.surface_delta(x, y);
             let (i, j) = (ci * 8 + x as i32, cj * 8 + y as i32);
-            let exact = planet.column_height(face, i, j, level) as f64 / layer;
-            worst = worst.max((stored + offset - exact).abs() / unit);
+            let exact = planet.column_height(face, i, j, level) as f64 / cell_mm;
+            worst = worst.max(stored - exact).max(exact - stored - 1.0 / 65536.0);
             lanes += 1;
-            whole += usize::from(unit > 1.0);
         }
     }
-    eprintln!("{lanes} lanes ({whole} over whole-cell tops), largest error {worst:.4} of a stored unit");
-    assert!(lanes > 10_000 && whole > 64);
-    assert!(worst <= 1.0 / 128.0 + 1e-9, "{worst}");
+    eprintln!("{lanes} lanes, largest error {worst:.5} level cells");
+    assert!(lanes > 10_000);
+    assert!(worst <= 1e-6, "{worst}");
 }
 
 /// Generated volume is stored only where the volume changes a cell: in cave

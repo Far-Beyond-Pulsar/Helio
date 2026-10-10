@@ -214,11 +214,17 @@ const MATERIAL_SLOPE_LEVEL: u32 = 4u;
 const NO_HEIGHT: i32 = -2147483647 - 1;
 
 // The (up to) 2x2 resident columns of `level` covering cells [lo, hi].
+// The up to four columns a slope stencil reads: their records (NONE while
+// not resident), and per column its pool run, natural tops' base and
+// whether it has relief, loaded once.
 struct SlopeColumns {
     face: u32,
     level: u32,
     origin: vec2<i32>,
     records: vec4<u32>,
+    runs: vec4<u32>,
+    bases: vec4<i32>,
+    relief: vec4<u32>,
 }
 
 fn slope_record(face: u32, level: u32, ci: i32, cj: i32) -> u32 {
@@ -239,6 +245,14 @@ fn slope_columns(face: u32, level: u32, lo: vec2<i32>, hi: vec2<i32>) -> SlopeCo
     out.records.y = select(NONE, slope_record(face, level, far.x, out.origin.y), far.x != out.origin.x);
     out.records.z = select(NONE, slope_record(face, level, out.origin.x, far.y), far.y != out.origin.y);
     out.records.w = select(NONE, slope_record(face, level, far.x, far.y), any(far != out.origin));
+    for (var k = 0u; k < 4u; k++) {
+        if out.records[k] != NONE {
+            let m = records[out.records[k]];
+            out.runs[k] = m.run;
+            out.bases[k] = m.base;
+            out.relief[k] = m.info & INFO_RELIEF;
+        }
+    }
     return out;
 }
 
@@ -247,13 +261,13 @@ fn slope_columns(face: u32, level: u32, lo: vec2<i32>, hi: vec2<i32>) -> SlopeCo
 fn slope_height_q16(cols: SlopeColumns, mi: i32, mj: i32) -> i32 {
     let q = vec2<i32>(mi, mj) >> vec2<u32>(3u);
     let k = u32(q.x != cols.origin.x) + 2u * u32(q.y != cols.origin.y);
-    let record = cols.records[k];
-    if record == NONE { return NO_HEIGHT; }
-    let m = records[record];
-    let x = u32(mi & 7);
-    let y = u32(mj & 7);
-    let f = column_relief_fraction(m, x, y);
-    return column_top(m, x, y) * 65536 + select(0, i32(f) - 65536, f != 0u);
+    if cols.records[k] == NONE { return NO_HEIGHT; }
+    let word = pool[cols.runs[k] * UNIT_WORDS + u32(mi & 7) + u32(mj & 7) * 8u];
+    var h = (cols.bases[k] + i32(word & 0x7fffu)) * 65536;
+    // A relief column's top cell is cut at its base layer.
+    let share = relief_share(bitcast<i32>(word) >> 15u, cols.level);
+    if cols.relief[k] != 0u && share != 0u { h += i32(share) - 65536; }
+    return h;
 }
 
 // Slope at cell (mi, mj) in eighths of a cell per cell from central
@@ -346,12 +360,10 @@ fn ground_field(face: u32, s: u32, base: vec2<i32>, home: u32, home_column: vec2
         }
         let x = u32(cell.x & 7);
         let y = u32(cell.y & 7);
-        let f = column_relief_fraction(m, x, y);
-        let top = column_top(m, x, y);
-        // Height above the top cell's top (cells): the relief's cut plus the
-        // surface offset.
-        let below = select(0.0, f32(i32(f) - 65536) / 65536.0, f != 0u)
-            + column_surface_offset(m, x, y, s);
+        let word = lane_word(m, x, y);
+        let top = m.base + i32(word & 0x7fffu);
+        // The exact surface over the natural top (cells).
+        let below = f32(bitcast<i32>(word) >> 15u) / 65536.0;
         heights[n] = top * 65536 + i32(round(below * 65536.0));
         if n == 5 { height0 = (top << s) * world.grid.y + i32(round(below * mm_per_cell)); }
     }

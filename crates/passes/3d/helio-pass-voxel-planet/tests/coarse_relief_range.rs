@@ -77,11 +77,11 @@ fn relief_hit_respects_requested_trace_range() {
             0,
         ],
     );
-    let mut pool = vec![0u32; 64];
-    pool[..16].fill(0x01010101);
-    pool[16..48].fill(0x64006400);
-    pool[48] = u32::MAX;
-    pool[49] = u32::MAX;
+    // Lane words: natural tops one cell over the base, the exact surface 25
+    // base layers (of 64) over the top cell's floor (Q16 cells); no surface
+    // words.
+    let mut pool = vec![0u32; 80];
+    pool[..64].fill(1 | (((25 * 1024 - 65536) as u32) << 15));
     let buffer = |label: &str, data: &[u8], uniform: bool| {
         let b = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),

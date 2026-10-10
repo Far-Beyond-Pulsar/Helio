@@ -84,7 +84,7 @@ fn mixed_brick_hits_respect_requested_trace_range() {
         // Compact: a heightfield column (no span table). Otherwise one
         // BRICKS span [8, 16) whose window is clipped below 8, its one mixed
         // brick solid in layer 8.
-        let header_units = 1 + if relief { 2 } else { 0 } + 1;
+        let header_units = 5;
         let info = 0x80000000u32
             | if compact { 0x02000000 } else { 1 | (1 << 9) }
             | if relief { 0x10000000 } else { 0 }
@@ -105,7 +105,9 @@ fn mixed_brick_hits_respect_requested_trace_range() {
             ],
         );
         let mut pool = vec![0u32; 128];
-        pool[..16].fill(if topology { 0x08080808 } else { 0x01010101 });
+        // Lane words: natural tops over the base (layer 8), the exact surface
+        // on them.
+        pool[..64].fill(if topology { 8 } else { 1 });
         if !compact {
             let table = header_units * 16;
             pool[table] = 8;

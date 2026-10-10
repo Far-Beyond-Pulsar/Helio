@@ -149,6 +149,16 @@ fraction and surface word) replacing the tops, relief, surface and offset
 units at about the same memory; shading and traversal read one load per
 lane. Then cache view-independent material inputs per lane if the material
 rules still dominate.
+*Done (2026-10-10):* lane words (15-bit natural top, Q16 exact surface,
+17 bits; surface words in their own byte unit, read once per pixel), five
+header units for every column. Shade at QUICK 1080p: ground_warm 4.26 ->
+3.62 ms, hover_330 4.38 -> 3.83, hover_55k 4.39 -> 3.36, orbit 4.25 ->
+3.35, moon_orbit 3.09 -> 2.39, plane_ground 3.56 -> 2.98; primary unchanged
+(traversal steps equal or lower). A 12-bit top with 1024ths of a cell was
+tried first and failed two tests: coarse relief floored up to 2^(level-10)
+layers under the surface (subsoil at level transitions) and a surface in a
+level-17 cell's lowest 1024th made the whole cell solid (hits past the sky
+bound). Material rules (1.6 ms) are next.
 
 ### 6. Sunlight
 
