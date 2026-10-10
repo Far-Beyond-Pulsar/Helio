@@ -165,7 +165,7 @@ fn look(eye: DVec3, heading: f64, pitch_deg: f64) -> Vec3 {
 
 impl Flight {
     fn new(output: &Path, size: [u32; 2], quality: helio_pass_tsr::TsrQuality, planet: Planet) -> Self {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).expect("GPU required");
         eprintln!("VOXEL_FLIGHT_ADAPTER {:?}", adapter.get_info());
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -712,6 +712,34 @@ fn highest_near(planet: &Planet, face: u8, fi: f64, fj: f64, span: f64) -> (DVec
 /// Views of generated volumetric terrain near `near`: inside a tunnel (an
 /// air pocket with walls within 8 m, below its column's heightfield top) and
 /// under an overhang (air below a solid cell above the heightfield top).
+/// A tunnel carved by 150 brushes (3-7 m balls) from the surface down and
+/// ahead: the eye inside it and a view along it.
+fn carve_tunnel(flight: &mut Flight, ground: DVec3, heading: f64) -> (DVec3, Vec3) {
+    let up = ground.normalize();
+    let ahead = tangent(ground, heading).as_dvec3();
+    let side = ahead.cross(up);
+    let mut planet = (*flight.planet).clone();
+    let mut rng = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        (rng >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let mut at = ground - up * 2.0;
+    let mut eye = at;
+    for n in 0..150 {
+        let radius = 3.0 + 4.0 * next();
+        planet.apply(Brush { center: at.to_array(), radius, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        if n == 20 {
+            eye = at;
+        }
+        at += ahead * 2.5 - up * 0.6 + side * ((next() - 0.5) * 2.0);
+    }
+    flight.planet = Arc::new(planet);
+    (eye, (ahead - up * 0.25).normalize().as_vec3())
+}
+
 fn volume_views(planet: &Planet, near: DVec3) -> Vec<(&'static str, DVec3, Vec3)> {
     use helio_pass_voxel_planet::Cell;
     let grid = *planet.grid();
@@ -844,6 +872,27 @@ fn main() {
     let dir = land_near(&flight.planet, 2, 0.47, 0.53, 20.0);
     let ground = flight.planet.surface_point(dir, 1.7);
     let heading = 0.6;
+    // `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|tunnel`: settle one view
+    // and keep drawing it (`HELIO_VOXEL_FLIGHT_HOLD_SECONDS`, 120), for a
+    // GPU profiler to trace steady frames.
+    if let Ok(view) = std::env::var("HELIO_VOXEL_FLIGHT_HOLD") {
+        let (e, f) = match view.as_str() {
+            "tunnel" => carve_tunnel(&mut flight, ground, heading),
+            "mountain_slope" => {
+                let (_, e, f) = mountain(&flight.planet, heading).views[1];
+                (e, f)
+            }
+            _ => (ground, look(ground, heading, -12.0)),
+        };
+        flight.settle("hold_load", e, f);
+        eprintln!("HOLD settled {view}");
+        let seconds: f64 = std::env::var("HELIO_VOXEL_FLIGHT_HOLD_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(120.0);
+        let started = Instant::now();
+        while started.elapsed().as_secs_f64() < seconds {
+            flight.draw("hold", e, f);
+        }
+        return;
+    }
     if let Ok(views) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS") {
         capture_views(&mut flight, &views, ground, heading);
         return;
@@ -1075,6 +1124,18 @@ fn main() {
             flight.capture(name);
             audits.push(flight.audit(name, e, f));
         }
+        // A tunnel carved by 150 brushes (3-7 m balls) from the surface down
+        // and ahead; the eye inside it looks along it. Curved walls are mixed
+        // bricks: the edit traversal's view.
+        {
+            let (eye, f) = carve_tunnel(&mut flight, ground, heading);
+            flight.settle("tunnel_load", eye, f);
+            for _ in 0..30 {
+                flight.draw("tunnel", eye, f);
+            }
+            flight.capture("tunnel");
+            audits.push(flight.audit("tunnel", eye, f));
+        }
         if !only_mountain {
             let orbit = ground.normalize() * (ground.length() + 300_000.0);
             let orbit_look = look(orbit, heading, -65.0);
@@ -1093,9 +1154,9 @@ fn main() {
             let terrain: Vec<f64> = list.iter().map(|s| s.terrain_gpu_ms).filter(|v| !v.is_nan()).collect();
             let stage = |k: &str| percentile(&list.iter().filter(|s| !s.terrain_gpu_ms.is_nan()).map(|s| s.stages.get(k).copied().unwrap_or(0.0)).collect::<Vec<_>>(), 0.5);
             eprintln!(
-                "QUICK {name:16} n={:4} sync p50 {:7.2} p95 {:7.2} terrain p50 {:6.2} p95 {:6.2} | primary {:6.2} shade {:5.2} sun {:6.2} residency {:5.2} horizon {:5.3}",
+                "QUICK {name:16} n={:4} sync p50 {:7.2} p95 {:7.2} terrain p50 {:6.2} p95 {:6.2} | primary {:6.2} shade {:5.2} sun {:6.2} residency {:5.2} horizon {:5.3} sky {:5.2}",
                 list.len(), percentile(&sync, 0.5), percentile(&sync, 0.95), percentile(&terrain, 0.5), percentile(&terrain, 0.95),
-                stage("planet_primary"), stage("planet_shade"), stage("planet_sunlight"), stage("planet_residency"), stage("planet_horizon")
+                stage("planet_primary"), stage("planet_shade"), stage("planet_sunlight"), stage("planet_residency"), stage("planet_horizon"), stage("planet_skylight")
             );
         }
         for a in &audits {

@@ -84,8 +84,10 @@ fn face_ray(face: u32, r: Ray) -> FaceRay {
 fn sincos_small(x: f32) -> vec2<f32> {
     if abs(x) < 0.3 {
         let x2 = x * x;
-        let s = x * (1.0 - x2 / 6.0 * (1.0 - x2 / 20.0 * (1.0 - x2 / 42.0 * (1.0 - x2 / 72.0))));
-        let c = 1.0 - x2 / 2.0 * (1.0 - x2 / 12.0 * (1.0 - x2 / 30.0 * (1.0 - x2 / 56.0)));
+        // Reciprocal constants: a division compiles to a full divide (the
+        // hottest lines of the traversal's profile).
+        let s = x * (1.0 - x2 * (1.0 / 6.0) * (1.0 - x2 * (1.0 / 20.0) * (1.0 - x2 * (1.0 / 42.0) * (1.0 - x2 * (1.0 / 72.0)))));
+        let c = 1.0 - x2 * 0.5 * (1.0 - x2 * (1.0 / 12.0) * (1.0 - x2 * (1.0 / 30.0) * (1.0 - x2 * (1.0 / 56.0))));
         return vec2<f32>(s, c);
     }
     return vec2<f32>(sin(x), cos(x));
@@ -95,7 +97,7 @@ fn atan_small(y: f32, x: f32) -> f32 {
     if x > 0.0 && abs(y) < 0.25 * x {
         let r = y / x;
         let r2 = r * r;
-        return r * (1.0 - r2 * (1.0 / 3.0 - r2 * (1.0 / 5.0 - r2 * (1.0 / 7.0 - r2 / 9.0))));
+        return r * (1.0 - r2 * (1.0 / 3.0 - r2 * (1.0 / 5.0 - r2 * (1.0 / 7.0 - r2 * (1.0 / 9.0)))));
     }
     return atan2(y, x);
 }
@@ -462,7 +464,7 @@ fn trace(r: Ray, t_start: f32, t_end: f32, lod_offset: f32, lod_scale: f32, dith
             // each column change level once instead of flickering between
             // two levels every frame while temporal history is rejected.
             // Neighbouring rays in one column agree, so warps stay coherent.
-            let hd = f32(hash3(key.x, key.y, key.z | (key.w << 3u), 0x2545f491u) & 1023u) / 1023.0;
+            let hd = f32(hash3(key.x, key.y, key.z | (key.w << 3u), 0x2545f491u) & 1023u) * (1.0 / 1023.0);
             let want = level_for((t + lod_offset) * lod_scale * (1.0 + dither * (hd - 0.5)));
             if want > cur.level {
                 let d = want - cur.level;

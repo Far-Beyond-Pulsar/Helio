@@ -162,6 +162,34 @@ only at the rings' edges (ground_load primary 3.9 ms vs 3.3 settled).
 A finer sky bound (1024 sectors, four buckets an octave instead of 256 and
 one) made rays take more steps (ground 11.2 -> 14.8, straight down 6.0 ->
 8.5) and cost 0.55 ms to build: rejected.
+*Interleaved A/B (2026-10-10, two runs each, noise about 10%):* a tunnel
+view (150 balls of 3-7 m from the surface, eye inside looking along it)
+costs 14.6-16.3 ms primary at 44 steps a ray: the edit views' cost. Bitmask
+bricks (the 64-tree layout inside mixed bricks: one 64-bit load per 4^3
+sub-block, empty ones crossed in one step) changed nothing for primary and
+made tunnel sunlight slower (3.5 vs 2.9 ms; each sub-block skip relocates
+the cursor): rejected. Doubling every box exit's geometry (plane, shell
+and relocation solves) adds about 20% (ground, mountains): geometry is a
+fifth of a step, not its bulk. One more dependent summary load per column
+entry adds about 8%.
+*Nsight Graphics GPU Trace (2026-10-10, tunnel view, real-time shader
+profiler):* primary issues at 56-68% of SM peak with the ALU (integer and
+logic) pipe the busiest (43-52%), FMA 27-33%, transcendentals 12-14%; L2
+and DRAM traffic about 2%; 25 of 32 lanes active; 20-24 warps a SM; a
+third of the time the SM holds no active warp (the tails of long rays).
+Its top stall reasons are "selected" and "not selected": the traversal is
+bound by the instructions it issues, not by memory. The per-line profile is
+flat: the plane solve's polynomial 4.6%, the loop head 2.4%, the sky bound's
+two `atan2` per pixel 3.6%, the column probe 3.5%, the span walk 1.4%; no
+line above 3%. What remains is fewer steps (3D empty space under the
+surface, the tile pre-pass) and the long-ray tail (compaction), not a hot
+spot. Sunlight and skylight kept 11 and 14 of 32 lanes busy: the pixels no
+representative serves traced inside each thread's pixel loop. They now go
+to a workgroup queue traced one per thread: sunlight 10-15% faster in
+every view (ground 1.41 -> 1.28 ms, tunnel 2.92 -> 2.52), skylight 12% on
+the ground. Sky rays two levels coarser (Teardown's mips, Lumen) were
+faster only in the tunnel (2.03 -> 1.67 ms) and 10-20% slower on open
+terrain (probing coarser levels): rejected.
 
 ### 5. Shading
 

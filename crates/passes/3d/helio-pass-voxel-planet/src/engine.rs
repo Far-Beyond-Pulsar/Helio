@@ -2026,14 +2026,14 @@ impl PlanetRenderer {
                     p.begin_pass(encoder, "planet_generate");
                 }
                 {
-                    let mut pass = encoder.begin_compute_pass(&Default::default());
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("planet generate"), timestamp_writes: None });
                     pass.set_bind_group(0, &self.gen_group, &[]);
                     Self::dispatch(&mut pass, &self.pipelines.generate, groups);
                 }
                 if let Some(p) = &mut self.profiler {
                     p.end_pass(encoder, "planet_generate");
                 }
-                let mut pass = encoder.begin_compute_pass(&Default::default());
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("planet publish"), timestamp_writes: None });
                 pass.set_bind_group(0, &self.gen_group, &[]);
                 Self::dispatch(&mut pass, &self.pipelines.count, [wg(jobs), 1, 1]);
                 Self::dispatch(&mut pass, &self.pipelines.refill, [1, 1, 1]);
@@ -2072,7 +2072,7 @@ impl PlanetRenderer {
         begin_stage!("horizon");
         {
             // Directional sky bound from this frame's summary blocks.
-            let mut pass = encoder.begin_compute_pass(&Default::default());
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("planet horizon"), timestamp_writes: None });
             pass.set_bind_group(0, &trace_group, &[]);
             pass.set_bind_group(1, camera_group, &[]);
             Self::dispatch(&mut pass, &self.pipelines.horizon_clear, [((HORIZON_SECTORS + HORIZON_GROUPS) * HORIZON_BUCKETS).div_ceil(64), 1, 1]);
@@ -2082,7 +2082,7 @@ impl PlanetRenderer {
         end_stage!("horizon");
         begin_stage!("primary");
         {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("planet primary"), timestamp_writes: None });
             pass.set_bind_group(0, &trace_group, &[]);
             pass.set_bind_group(1, camera_group, &[]);
             Self::dispatch(&mut pass, &self.pipelines.primary, groups);
@@ -2093,7 +2093,7 @@ impl PlanetRenderer {
         end_stage!("primary");
         begin_stage!("shade");
         {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("planet shade"), timestamp_writes: None });
             pass.set_bind_group(0, &trace_group, &[]);
             pass.set_bind_group(1, camera_group, &[]);
             Self::dispatch(&mut pass, &self.pipelines.shade, groups);
@@ -2102,7 +2102,7 @@ impl PlanetRenderer {
         if self.settings.sky_occlusion {
             begin_stage!("skylight");
             {
-                let mut pass = encoder.begin_compute_pass(&Default::default());
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("planet skylight"), timestamp_writes: None });
                 pass.set_bind_group(0, &trace_group, &[]);
                 pass.set_bind_group(1, camera_group, &[]);
                 Self::dispatch(&mut pass, &self.pipelines.skylight, [size[0].div_ceil(32), size[1].div_ceil(32), 1]);
@@ -2141,7 +2141,7 @@ impl PlanetRenderer {
         if frame.shadows {
             begin_stage!("sunlight");
             {
-                let mut pass = encoder.begin_compute_pass(&Default::default());
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("planet sunlight"), timestamp_writes: None });
                 pass.set_bind_group(0, &trace_group, &[]);
                 pass.set_bind_group(1, camera_group, &[]);
                 Self::dispatch(&mut pass, &self.pipelines.sunlight, [size[0].div_ceil(16), size[1].div_ceil(16), 1]);

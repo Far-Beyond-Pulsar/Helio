@@ -983,6 +983,15 @@ var<workgroup> rep_vis: array<f32, 64>;
 var<workgroup> rep_pos: array<vec4<f32>, 64>;
 var<workgroup> rep_nrm: array<vec3<f32>, 64>;
 var<workgroup> rep_filtered: array<f32, 64>;
+// Pixels no representative serves, traced together after the
+// representatives: one ray per thread, so a warp's lanes stay busy (traced
+// inside each thread's pixel loop, a few lanes traced while the rest of the
+// warp waited: 11 of 32 lanes active in sunlight, 14 in skylight).
+var<workgroup> fallback_count: atomic<u32>;
+var<workgroup> fallback_pixels: array<u32, 960>;
+
+fn pack_pixel(p: vec2<u32>) -> u32 { return p.x | (p.y << 16u); }
+fn unpack_pixel(v: u32) -> vec2<u32> { return vec2<u32>(v & 0xffffu, v >> 16u); }
 
 // Whether pixel sample `q` lies on the surface of representative `slot`, so
 // it can take that ray's visibility: same validity and, for surfaces, a
@@ -1019,6 +1028,7 @@ fn sunlight(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
     let f = u32(frame.screen.z);
     let own = lid.x + lid.y * 8u;
     let rep = min(origin + vec2<u32>(f & 1u, (f >> 1u) & 1u), max(screen, vec2<u32>(1u)) - 1u);
+    if own == 0u { atomicStore(&fallback_count, 0u); }
     var rv = 1.0;
     var rs: SunSample;
     rs.valid = false;
@@ -1031,31 +1041,40 @@ fn sunlight(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
     rep_nrm[own] = rs.normal;
     rep_filtered[own] = rs.filtered;
     workgroupBarrier();
-    if !inside { return; }
     let sun = normalize(frame.sun.xyz);
-    for (var q = 0u; q < 4u; q++) {
-        let p = origin + vec2<u32>(q & 1u, q >> 1u);
-        if any(p >= screen) { continue; }
-        var v = rv;
-        if any(p != rep) {
-            let qs = sun_sample(p);
-            // Own block first, then the side, vertical and diagonal
-            // neighbours towards this pixel's corner.
-            let side = vec2<i32>(select(-1, 1, (q & 1u) != 0u), select(-1, 1, (q >> 1u) != 0u));
-            var found = false;
-            for (var c = 0u; c < 4u; c++) {
-                let n = vec2<i32>(lid.xy) + vec2<i32>(select(0, side.x, (c & 1u) != 0u), select(0, side.y, (c & 2u) != 0u));
-                if any(n < vec2<i32>(0)) || any(n > vec2<i32>(7)) { continue; }
-                let slot = u32(n.x) + u32(n.y) * 8u;
-                if on_rep_surface(slot, qs) {
-                    v = rep_vis[slot];
-                    found = true;
-                    break;
+    if inside {
+        for (var q = 0u; q < 4u; q++) {
+            let p = origin + vec2<u32>(q & 1u, q >> 1u);
+            if any(p >= screen) { continue; }
+            var v = rv;
+            if any(p != rep) {
+                let qs = sun_sample(p);
+                // Own block first, then the side, vertical and diagonal
+                // neighbours towards this pixel's corner.
+                let side = vec2<i32>(select(-1, 1, (q & 1u) != 0u), select(-1, 1, (q >> 1u) != 0u));
+                var found = false;
+                for (var c = 0u; c < 4u; c++) {
+                    let n = vec2<i32>(lid.xy) + vec2<i32>(select(0, side.x, (c & 1u) != 0u), select(0, side.y, (c & 2u) != 0u));
+                    if any(n < vec2<i32>(0)) || any(n > vec2<i32>(7)) { continue; }
+                    let slot = u32(n.x) + u32(n.y) * 8u;
+                    if on_rep_surface(slot, qs) {
+                        v = rep_vis[slot];
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    fallback_pixels[atomicAdd(&fallback_count, 1u)] = pack_pixel(p);
+                    continue;
                 }
             }
-            if !found { v = sun_visibility(qs); }
+            textureStore(sun_out, vec2<i32>(p), vec4<f32>(v, sun));
         }
-        textureStore(sun_out, vec2<i32>(p), vec4<f32>(v, sun));
+    }
+    let fallbacks = workgroupUniformLoad(&fallback_count);
+    for (var i = own; i < fallbacks; i += 64u) {
+        let p = unpack_pixel(fallback_pixels[i]);
+        textureStore(sun_out, vec2<i32>(p), vec4<f32>(sun_visibility(sun_sample(p)), sun));
     }
 }
 
@@ -1145,6 +1164,7 @@ fn skylight(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
     let f = u32(frame.screen.z);
     let own = lid.x + lid.y * 8u;
     let rep = min(origin + vec2<u32>(f & 3u, (f >> 2u) & 3u), max(screen, vec2<u32>(1u)) - 1u);
+    if own == 0u { atomicStore(&fallback_count, 0u); }
     var rv = 1.0;
     var rs: SunSample;
     rs.valid = false;
@@ -1155,32 +1175,47 @@ fn skylight(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocat
     rep_vis[own] = rv;
     rep_pos[own] = vec4<f32>(rs.position, select(-1.0, rs.footprint, rs.valid && rs.level >= 0));
     workgroupBarrier();
-    if !inside || (frame.hints.w >> 8u) != 0u { return; }
-    for (var q = 0u; q < 16u; q++) {
-        let local = vec2<u32>(q & 3u, q >> 2u);
-        let p = origin + local;
-        if any(p >= screen) { continue; }
-        let index = pixel_index(p);
-        if (surfaces[index].flags & 3u) != ST_HIT { continue; }
-        var v = rv;
-        if any(p != rep) {
-            let qs = sun_sample(p);
-            let side = vec2<i32>(select(-1, 1, local.x >= 2u), select(-1, 1, local.y >= 2u));
-            var nearest = -1.0;
-            for (var c = 0u; c < 4u; c++) {
-                let n = vec2<i32>(lid.xy) + vec2<i32>(select(0, side.x, (c & 1u) != 0u), select(0, side.y, (c & 2u) != 0u));
-                if any(n < vec2<i32>(0)) || any(n > vec2<i32>(7)) { continue; }
-                let slot = u32(n.x) + u32(n.y) * 8u;
-                let d2 = rep_distance_squared(slot, qs);
-                if d2 >= 0.0 && (nearest < 0.0 || d2 < nearest) {
-                    nearest = d2;
-                    v = rep_vis[slot];
+    let shading = inside && (frame.hints.w >> 8u) == 0u;
+    if shading {
+        for (var q = 0u; q < 16u; q++) {
+            let local = vec2<u32>(q & 3u, q >> 2u);
+            let p = origin + local;
+            if any(p >= screen) { continue; }
+            let index = pixel_index(p);
+            if (surfaces[index].flags & 3u) != ST_HIT { continue; }
+            var v = rv;
+            if any(p != rep) {
+                let qs = sun_sample(p);
+                let side = vec2<i32>(select(-1, 1, local.x >= 2u), select(-1, 1, local.y >= 2u));
+                var nearest = -1.0;
+                for (var c = 0u; c < 4u; c++) {
+                    let n = vec2<i32>(lid.xy) + vec2<i32>(select(0, side.x, (c & 1u) != 0u), select(0, side.y, (c & 2u) != 0u));
+                    if any(n < vec2<i32>(0)) || any(n > vec2<i32>(7)) { continue; }
+                    let slot = u32(n.x) + u32(n.y) * 8u;
+                    let d2 = rep_distance_squared(slot, qs);
+                    if d2 >= 0.0 && (nearest < 0.0 || d2 < nearest) {
+                        nearest = d2;
+                        v = rep_vis[slot];
+                    }
+                }
+                if nearest < 0.0 {
+                    fallback_pixels[atomicAdd(&fallback_count, 1u)] = pack_pixel(p);
+                    continue;
                 }
             }
-            if nearest < 0.0 { v = sky_visibility(qs); }
+            apply_sky(index, v);
         }
-        let packed = surfaces[index].albedo_ao;
-        let ao = f32(packed >> 24u) / 255.0 * v;
-        surfaces[index].albedo_ao = (packed & 0x00ffffffu) | (u32(ao * 255.0 + 0.5) << 24u);
     }
+    let fallbacks = workgroupUniformLoad(&fallback_count);
+    for (var i = own; i < fallbacks; i += 64u) {
+        let p = unpack_pixel(fallback_pixels[i]);
+        apply_sky(pixel_index(p), sky_visibility(sun_sample(p)));
+    }
+}
+
+// Multiplies sky visibility `v` into pixel `index`'s ambient occlusion.
+fn apply_sky(index: u32, v: f32) {
+    let packed = surfaces[index].albedo_ao;
+    let ao = f32(packed >> 24u) / 255.0 * v;
+    surfaces[index].albedo_ao = (packed & 0x00ffffffu) | (u32(ao * 255.0 + 0.5) << 24u);
 }
