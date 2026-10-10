@@ -62,7 +62,7 @@ integration is documented in Pulsar-Native's `docs/voxel-system.md`.
 | `src/terrain.rs` | Pluggable generators: `TerrainGenerator` -> `TerrainField` (CPU) + `TerrainProgram` (WGSL). Registry, material ids, `check_field`. |
 | `src/layers.rs` | The built-in generator `helio.terrain`: ordered layer stacks (`TerrainLayers`), presets (Earth, moon, flat), validation and compilation. |
 | `src/landform.rs`, `shaders/landform.wgsl` | The stack interpreter (CPU and WGSL): octaves, layer composition, craters, erosion, caves, overhangs and material styles. |
-| `src/edits.rs` | Brushes (sphere/cube, remove/add/paint), per-face integer resolution, the shared `EditLog` and its tile index. |
+| `src/edits.rs` | Brushes (sphere/cube, remove/add/paint), per-face integer resolution, the shared `EditLog` and its edit tree. |
 | `src/journal.rs` | Binary append-only edit journal (save/replay with recipe fingerprint and checksums). |
 | `src/planet.rs` | `PlanetRecipe` + `Planet`: canonical queries (`kind`, `material`, `solid`), exact ray casts, `surface_point`, `air_clearance`, `ground_height`. |
 | `src/windows.rs` | Level windows: which columns each clipmap level wants; runs on a worker and emits add/remove diffs. |
@@ -187,12 +187,36 @@ brushes override earlier ones. At level `L`, a brush smaller than half a level
 cell is omitted (smaller than the point sample).
 
 `EditLog` is ordered and shared between world copies: brushes live in
-`Arc` chunks of 1024, the spatial index is a sealed shared map of tiles plus
-recent entries, and every brush carries a prefix hash of the log up to it.
-Copying a world with 50k edits costs about 0.1 ms, and the renderer finds the
-common prefix of its synced log and the current one by binary search on
-prefix hashes (O(1) when unchanged). The finest index tile is one column (8
-cells), which keeps dense block edits (buildings) cheap to query.
+`Arc` chunks of 1024 and every brush carries a prefix hash of the log up to
+it, so the renderer finds the common prefix of its synced log and the
+current one by binary search on prefix hashes (O(1) when unchanged).
+
+**Edit tree.** The log's spatial index is, per face, an adaptive octree over
+base cells (`EditTree`) whose leaves keep, in order, only the brushes that
+can still change a cell inside them (the hierarchical edit culling of
+Dreams, with HashDAG's full nodes):
+
+- A Remove or Add holding a node's whole box replaces the brushes before it
+  there (but larger ones, which still apply at the levels too coarse for
+  it), and collapses the subtree under it.
+- A Remove or Paint inside a box an earlier, at least as large Remove
+  emptied, with no Add since, is left out: the dug surfaces under the air
+  of overlapping strokes leave the lists.
+- A leaf splits past 16 brushes, down to 16 cells or a 64th of its smallest
+  brush's radius (surfaces dragged over each other cannot split nodes
+  along a whole sphere).
+
+Containment is proven, not sampled: boxes in half cells, balls in an f64
+copy of the volume map (`Grid::volume_map`, within 16 units of the integer
+points) whose corners hold a box's cells in their hull, give or take the
+map's bound on bending. A query returns the leaves a box overlaps: a column
+or a cell gets the surfaces exposed there, however long the history. Four
+passes of a 2 km dig (400 brushes) leave about 20 brushes per column where
+the old tile index gave every column under it every brush over it (about
+110), filling the GPU's edit words until admission stopped. Columns with the
+same list share one edit block, and a job's predicted cost counts its
+brushes (`UNITS_PER_BRUSH`). Nodes are shared copy-on-write: copying a log
+copies roots. Inserting a 2 km ball into that dig costs about 2 ms.
 
 Edit cost does not grow with the brushes piled on one spot (sculpting):
 

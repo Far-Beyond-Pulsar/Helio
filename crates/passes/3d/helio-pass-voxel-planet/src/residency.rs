@@ -307,17 +307,22 @@ impl JobBudget {
 /// their volume cells): 0.70 us a heightfield column, 0.060 us a cell.
 pub const UNITS_PER_VOLUME_CELL: f64 = 0.085;
 
-/// Predicted GPU work of generating column `key`, in heightfield columns:
-/// one, plus the volume cells its lanes evaluate (the field's extent at the
-/// column's centre; `terrain_extent` in WGSL). A cave or overhang column at
-/// a fine level evaluates hundreds of cells a lane and costs tens of times a
-/// heightfield column: counting jobs alone let such runs take 100+ ms.
-pub fn job_units(planet: &Planet, key: u64) -> f64 {
+/// GPU generation work of one brush in a column's edit list (every lane
+/// sweeps it, every evaluated brick culls it), in heightfield columns.
+pub const UNITS_PER_BRUSH: f64 = 0.1;
+
+/// Predicted GPU work of generating column `key` with `brushes` in its edit
+/// list, in heightfield columns: one, plus the volume cells its lanes
+/// evaluate (the field's extent at the column's centre; `terrain_extent` in
+/// WGSL), plus its brushes. A cave or overhang column at a fine level
+/// evaluates hundreds of cells a lane and costs tens of times a heightfield
+/// column: counting jobs alone let such runs take 100+ ms.
+pub fn job_units(planet: &Planet, key: u64, brushes: usize) -> f64 {
     let (face, level, ci, cj) = unpack(key);
     let half = BRICK as i32 / 2;
     let p = planet.grid().domain_point(face, ci * BRICK as i32 + half, cj * BRICK as i32 + half, level);
     let (below, above) = planet.field().extent(p, level);
-    1.0 + f64::from(below.max(0) + above.max(0)) * UNITS_PER_VOLUME_CELL
+    1.0 + f64::from(below.max(0) + above.max(0)) * UNITS_PER_VOLUME_CELL + brushes as f64 * UNITS_PER_BRUSH
 }
 
 /// Work produced for one frame.
@@ -481,6 +486,11 @@ pub struct Residency {
     free_brushes: Vec<u32>,
     next_brush: u32,
     block_brushes: FxHashMap<u32, Vec<[u32; 12]>>,
+    /// Blocks of brushes only, shared by every column with the same list:
+    /// the block and its columns by list (large count, then the brushes'
+    /// words), and each shared block's list.
+    shared_blocks: FxHashMap<Vec<u32>, ((u32, u32), u32)>,
+    block_signatures: FxHashMap<u32, Vec<u32>>,
     /// The planet's edits as last synced: the baked state (`Edits::baked_state`)
     /// and the recent brushes from history index `synced_start` (whose
     /// prefix hash is `synced_start_hash`), each with the history hash after
@@ -556,6 +566,8 @@ impl Residency {
             free_brushes: Vec::new(),
             next_brush: 0,
             block_brushes: FxHashMap::default(),
+            shared_blocks: FxHashMap::default(),
+            block_signatures: FxHashMap::default(),
             synced_baked: (0, 0),
             synced_start: 0,
             synced_start_hash: 0,
@@ -705,19 +717,21 @@ impl Residency {
 
     /// A column's edit block (layout: `EditCounts` in common.wgsl): its
     /// large and recent brushes' slots in the shared brush table and its
-    /// baked bricks' slots, or none when nothing edited it. Fails when the
-    /// edit words, brush slots or brick slots are exhausted (the job waits).
-    /// A brush covering many columns is stored once, not in every block:
-    /// inline brushes (12 words each) in every column of a heavily sculpted
-    /// area filled the edit buffer, and its columns stopped regenerating.
-    fn edit_list(&mut self, planet: &Planet, key: u64, work: &mut FrameWork) -> Result<Option<(u32, u32)>, ()> {
+    /// baked bricks' slots, or none when nothing edited it; and how many
+    /// brushes it lists. Fails when the edit words, brush slots or brick
+    /// slots are exhausted (the job waits). A brush covering many columns is
+    /// stored once, not in every block, and columns with the same brushes
+    /// and no baked bricks share one block (neighbouring columns under the
+    /// same leaves of the edit tree): a block per column filled the edit
+    /// buffer under a long dig, and admission stopped.
+    fn edit_list(&mut self, planet: &Planet, key: u64, work: &mut FrameWork) -> Result<(Option<(u32, u32)>, usize), ()> {
         let (face, level, ci, cj) = unpack(key);
         let span = i64::from(BRICK) << level;
         let i0 = i64::from(ci) * span;
         let j0 = i64::from(cj) * span;
         let edits = planet.edits();
         let brushes = |log: &crate::edits::EditLog| -> Vec<FaceBrush> {
-            log.query(face, i0, i0 + span - 1, j0, j0 + span - 1, level)
+            log.query(face, [i0, i0 + span - 1], [j0, j0 + span - 1], crate::edits::ALL_LAYERS, level)
                 .into_iter()
                 .map(|(id, index)| log.resolved(id).faces[index as usize])
                 .collect()
@@ -730,7 +744,19 @@ impl Residency {
             .map(|column| column.to_vec())
             .unwrap_or_default();
         if large.is_empty() && recent.is_empty() && baked.is_empty() {
-            return Ok(None);
+            return Ok((None, 0));
+        }
+        let brushes = large.len() + recent.len();
+        let signature: Option<Vec<u32>> = baked.is_empty().then(|| {
+            let mut words = vec![large.len() as u32];
+            for fb in large.iter().chain(&recent) {
+                words.extend_from_slice(&bytemuck::cast::<FaceBrush, [u32; 12]>(*fb));
+            }
+            words
+        });
+        if let Some(shared) = signature.as_ref().and_then(|s| self.shared_blocks.get_mut(s)) {
+            shared.1 += 1;
+            return Ok((Some(shared.0), brushes));
         }
         // A uniform brick is stored in its block (`BAKED_UNIFORM`), the
         // others in pool slots.
@@ -787,7 +813,11 @@ impl Residency {
         work.brush_slots = work.brush_slots.max(self.next_brush);
         self.block_baked.insert(block.0, slots);
         self.block_brushes.insert(block.0, keys);
-        Ok(Some(block))
+        if let Some(signature) = signature {
+            self.block_signatures.insert(block.0, signature.clone());
+            self.shared_blocks.insert(signature, (block, 1));
+        }
+        Ok((Some(block), brushes))
     }
 
     /// A slot of the shared brush table holding `fb`, counted once more:
@@ -822,6 +852,15 @@ impl Residency {
 
     /// Free an edit block, its baked brick slots and its brush references.
     fn release_edits(&mut self, block: (u32, u32)) {
+        if let Some(signature) = self.block_signatures.get(&block.0) {
+            let shared = self.shared_blocks.get_mut(signature).expect("a listed block is shared");
+            shared.1 -= 1;
+            if shared.1 > 0 {
+                return;
+            }
+            let signature = self.block_signatures.remove(&block.0).expect("looked up above");
+            self.shared_blocks.remove(&signature);
+        }
         self.edits.release(block);
         if let Some(slots) = self.block_baked.remove(&block.0) {
             self.free_baked.extend(slots);
@@ -1101,7 +1140,7 @@ impl Residency {
                 continue;
             }
             let Some(res) = self.residents.get(key) else { continue };
-            let Ok(block) = self.edit_list(planet, key, &mut work) else {
+            let Ok((block, brushes)) = self.edit_list(planet, key, &mut work) else {
                 deferred_urgent.push(key);
                 continue;
             };
@@ -1111,7 +1150,7 @@ impl Residency {
                 self.release_edits(old);
             }
             self.residents.get_mut(key).unwrap().edit_block = block;
-            work.units += job_units(planet, key);
+            work.units += job_units(planet, key, brushes);
             work.jobs.push(Job {
                 key0: key as u32,
                 key1: (key >> 32) as u32,
@@ -1161,7 +1200,7 @@ impl Residency {
                 requeue(self);
                 break;
             };
-            let Ok(block) = self.edit_list(planet, key, &mut work) else {
+            let Ok((block, brushes)) = self.edit_list(planet, key, &mut work) else {
                 self.free_records.push(record);
                 requeue(self);
                 break;
@@ -1174,7 +1213,7 @@ impl Residency {
             }
             let slot = self.residents.insert(key, Resident { record, slot: 0, edit_block: block, blocks });
             work.table_writes.push((slot, record));
-            work.units += job_units(planet, key);
+            work.units += job_units(planet, key, brushes);
             work.jobs.push(Job {
                 key0: key as u32,
                 key1: (key >> 32) as u32,
@@ -1668,12 +1707,12 @@ mod tests {
         for _ in 0..8 {
             let work = r.plan(&planet, eye, lod0, JobBudget { units: 500.0, jobs: 100_000 });
             assert!(!work.jobs.is_empty());
-            let issued: f64 = work.jobs.iter().map(|j| job_units(&planet, pack(j.key0, j.key1))).sum();
+            let issued: f64 = work.jobs.iter().map(|j| job_units(&planet, pack(j.key0, j.key1), 0)).sum();
             assert!((issued - work.units).abs() < 1e-6, "units are the jobs' units");
             // At most one job past the budget (the one that crossed it).
-            let last = job_units(&planet, pack(work.jobs.last().unwrap().key0, work.jobs.last().unwrap().key1));
+            let last = job_units(&planet, pack(work.jobs.last().unwrap().key0, work.jobs.last().unwrap().key1), 0);
             assert!(work.units < 500.0 + last, "{} units", work.units);
-            units.extend(work.jobs.iter().map(|j| job_units(&planet, pack(j.key0, j.key1))));
+            units.extend(work.jobs.iter().map(|j| job_units(&planet, pack(j.key0, j.key1), 0)));
         }
         assert!(units.iter().all(|&u| u >= 1.0), "a column costs at least a heightfield column");
         // The job cap holds whatever the units.

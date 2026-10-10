@@ -1,6 +1,6 @@
 # Span columns: a fully destructible planet, always visible
 
-Status: implemented 2026-10-09 (phases 0-5); the single-band column is
+Status: implemented 2026-10-09 (phases 0-5), edit history 2026-10-10 (below); the single-band column is
 gone. Measured in the editor harness: phase 6.
 
 ## Why
@@ -169,3 +169,40 @@ The cube-sphere grid and its exact walking, the bit-exact integer field and
 generator contract, layer stacks, the edit log, store, journal and
 snapshots, residency worker, window worker, hash table, summary blocks,
 horizon, picks, shading and appearance, and every Pulsar tool.
+
+## Edit history (after the first editor sessions)
+
+Span columns made a column's *content* independent of how deep edits go,
+but every column still received every brush whose footprint covered it. In
+an editor session of ~420 strokes of 0.3-2 km digs near a cube edge,
+columns under the dig listed hundreds of brushes: generation cost ~40x a
+column's usual (the adaptive budget fell to 60 units a frame), the GPU's
+edit words filled and admission stopped (80k columns pending for minutes),
+and sealing large brushes over baked bricks replayed every cell (seconds on
+the render thread). Production engines keep edit cost proportional to the
+surface left exposed, never to the history (Dreams' hierarchical edit
+culling with full/empty cells, HashDAG's full nodes, Space Engineers' edit
+octree; No Man's Sky replays its list and caps it at ~15k edits).
+
+Done:
+
+- **Edit tree** (`edits.rs`, README "Edit tree"): per-face octree whose
+  leaves keep only the brushes that can still change a cell in them;
+  containment proven with an f64 copy of the volume map and its movement
+  and bend bounds. ~20 brushes per column under 400 overlapping 2 km digs.
+- **Shared edit blocks** and **brush-aware job cost**.
+- **Sealing by bricks**: a large brush sealed over baked bricks fills or
+  skips whole bricks it holds or misses.
+- **Picks**: a stamp whose exact search misses lands at the renderer's hit.
+
+Next, in order:
+
+1. **3D level selection**: levels from the distance to the nearest
+   non-air span in 3D, not the column's highest solid (caverns, a
+   hollowed core), and ray feedback requesting refinement where rays end
+   on a level coarser than their footprint (GigaVoxels, Voxy).
+2. **Occupancy masks in bricks**: 4^3 64-bit masks and a 2^3 mask per
+   brick, so close sculpted rock skips empty space inside mixed bricks
+   instead of stepping cell by cell; a beam pre-pass over 8x8 tiles.
+3. **Asynchronous world updates**: the editor applies a stroke to the next
+   world snapshot on a worker and publishes it, never on the render thread.

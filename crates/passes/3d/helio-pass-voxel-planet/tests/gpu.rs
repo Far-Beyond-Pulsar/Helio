@@ -489,8 +489,10 @@ fn a_deep_shaft_renders_exactly_at_any_depth() {
 }
 
 /// Tools ask the pass for the terrain hit under a view point (the editor's
-/// brush): the answer, a few frames later, lies within its cell size of the
-/// exact CPU hit along that pixel's ray, near and far; the sky has none.
+/// brush): the answer, a few frames later, is the cell drawn there. Drawn at
+/// level 0 it is the exact CPU hit and the air cell before it (where a
+/// build goes); coarser, it lies within its cell size of it. The sky has
+/// none.
 #[test]
 fn picks_report_the_terrain_hit_under_the_view() {
     use helio_pass_voxel_planet::engine::{PickRequest, SharedPicks};
@@ -519,17 +521,27 @@ fn picks_report_the_terrain_hit_under_the_view() {
     }
     let results = std::mem::take(&mut picks.lock().unwrap().results);
     assert_eq!(results.len(), pixels.len(), "every request is answered");
+    let mut exact = 0;
     for result in results {
         let (x, y) = pixels[result.id as usize];
         let dir = pixel_dir(&target, &camera, x, y);
         let cpu = planet.raycast(eye, dir, 100_000.0);
         eprintln!("pick {x},{y}: {:?} cpu {:?}", result.hit, cpu.map(|c| c.distance));
         match (result.hit, cpu) {
-            (Some(hit), Some(cpu)) => assert!((hit.distance - cpu.distance).abs() <= hit.cell_m * 2.0 + 0.5, "pixel {x},{y}: {hit:?} vs {}", cpu.distance),
+            (Some(hit), Some(cpu)) => {
+                let cell_m = planet.grid().level_size(hit.level);
+                assert!((hit.distance - cpu.distance).abs() <= cell_m * 2.0 + 0.5, "pixel {x},{y}: {hit:?} vs {}", cpu.distance);
+                let drawn = planet.drawn_hit(eye, dir, hit.distance, hit.cell, hit.level, hit.entered);
+                if hit.level == 0 {
+                    exact += 1;
+                    assert_eq!((drawn.cell, drawn.previous), (cpu.cell, cpu.previous), "pixel {x},{y}");
+                }
+            }
             (None, None) => {}
             (hit, cpu) => panic!("pixel {x},{y}: pick {hit:?}, cpu {cpu:?}"),
         }
     }
+    assert!(exact >= 2, "{exact} picks drawn at level 0");
 }
 
 /// Planet-scale brushes: a sphere of 3 km radius (64-bit containment; the

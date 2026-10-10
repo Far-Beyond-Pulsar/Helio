@@ -364,6 +364,7 @@ impl EditStore {
         } else {
             self.shards.iter().flat_map(|s| s.keys().copied()).filter(in_range).collect()
         };
+        let map = grid.volume_map();
         let mut changed = Vec::new();
         for column in columns {
             let bricks: Vec<(i32, Arc<Brick>)> = self
@@ -372,7 +373,22 @@ impl EditStore {
                 .unwrap_or_default();
             for (bk, stored) in bricks {
                 let key = BrickKey { face, level: 0, bi: column.ci, bj: column.cj, bk };
+                // Whole bricks first: a large brush holds or misses most of
+                // the bricks in its rectangle (tested cell by cell, sealing
+                // a few large brushes over a sculpted area took seconds).
+                let whole = crate::edits::meets(fb, crate::edits::Cube::brick([key.bi.into(), key.bj.into(), bk.into()]), grid, &map);
+                if whole == crate::edits::Meets::Outside {
+                    continue;
+                }
                 let mut brick = (*stored).clone();
+                if whole == crate::edits::Meets::Contains {
+                    for cell in brick.cells.iter_mut() {
+                        *cell = cell.then(op, material);
+                    }
+                    self.set(key, Some(brick));
+                    changed.push(key);
+                    continue;
+                }
                 let mut any = false;
                 for z in 0..BRICK {
                     for y in 0..BRICK {

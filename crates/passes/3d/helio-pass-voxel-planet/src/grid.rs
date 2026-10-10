@@ -468,11 +468,123 @@ impl Grid {
         (((1u64 << (30 + shift)) / layers) as u32, shift, layer_q16)
     }
 
+    /// [`Self::volume_point`] in f64 at continuous cell positions, with
+    /// bounds on how it moves and bends ([`VolumeMap`]).
+    pub fn volume_map(&self) -> VolumeMap {
+        let scale = f64::from(self.domain_scale) / f64::from(1u32 << 24);
+        let (inv, shift, layer_q16) = self.volume_constants();
+        let layer = f64::from(layer_q16) / 65_536.0;
+        if self.is_plane() {
+            // Linear: two half cells per cell, scaled, four domain units each.
+            return VolumeMap {
+                bounds: VolumeBounds { across: 8.0 * scale, up: 2.0 * layer, layers: f64::INFINITY, bend: 0.0 },
+                plane: true,
+                scale,
+                origin: f64::from(self.origin_index()),
+                reference: 0.0,
+                cube_ratio: 0.0,
+                radius: 0.0,
+                height_ratio: 0.0,
+                layer,
+            };
+        }
+        let [cube_inv, cube_shift, radius, _] = self.sphere_constants();
+        let radius = f64::from(radius);
+        let reference = f64::from(self.reference_cells);
+        // Half reference cells a cell moves the cube coordinate (a fraction
+        // of the half face it spans).
+        let g = 2.0 * scale / reference;
+        let layers = 2f64.powi(30 + shift as i32) / (2.0 * f64::from(inv));
+        VolumeMap {
+            // `tan_quarter` rises at most 1.53 and bends at most 1.99 per half
+            // face; a direction moves at most as much as its unnormalized cube
+            // vector (one component is 1) and bends at most `1.99 + 3 * 1.53^2`
+            // times its square; the domain radius scales both. Up, points
+            // scale by `1 + h / 2R` per half layer, linearly. Bilinear
+            // interpolation is off by at most `s^2 / 8` per axis times the
+            // second derivative.
+            bounds: VolumeBounds {
+                across: 1.53 * g * radius * 1.01,
+                up: (radius + 2.0) / layers * 1.01,
+                layers,
+                bend: 2.0 * (1.99 + 3.0 * 1.53 * 1.53) * g * g * radius / 8.0 * 1.01,
+            },
+            plane: false,
+            scale,
+            origin: 0.0,
+            reference,
+            cube_ratio: f64::from(cube_inv) / 2f64.powi(30 + cube_shift as i32),
+            radius,
+            height_ratio: f64::from(inv) / 2f64.powi(30 + shift as i32),
+            layer,
+        }
+    }
+
     /// Seamless 3D domain point of the level cell `(face, i, j, k)`.
     pub fn volume_point(&self, face: u8, i: i32, j: i32, k: i32, level: u32) -> IVec3 {
         let (inv, shift, layer_q16) = self.volume_constants();
         volume_point(self.domain_point(face, i, j, level), self.is_plane(), k, level, inv, shift, layer_q16)
     }
+}
+
+/// [`Grid::volume_point`] in f64 at continuous base-cell positions (a
+/// cell's centre is its index plus one half): the same polynomials and
+/// constants without the integer truncations, within [`VOLUME_MAP_ERROR`]
+/// units of the integer points. Edit culling evaluates thousands per brush.
+#[derive(Clone, Copy, Debug)]
+pub struct VolumeMap {
+    pub bounds: VolumeBounds,
+    plane: bool,
+    scale: f64,
+    origin: f64,
+    reference: f64,
+    cube_ratio: f64,
+    radius: f64,
+    height_ratio: f64,
+    layer: f64,
+}
+
+/// Largest distance (volume units) between [`VolumeMap::point`] and
+/// [`Grid::volume_point`] at a cell centre at the datum, `1 + |k| / layers`
+/// times more at height `k` (tested): the cube coordinate's truncation,
+/// scaled with the point.
+pub const VOLUME_MAP_ERROR: f64 = 16.0;
+
+impl VolumeMap {
+    /// The volume point at base-cell position `p` (i, j, k) of `face`.
+    pub fn point(&self, face: u8, p: [f64; 3]) -> DVec3 {
+        // Half cells.
+        let h = 2.0 * p[2];
+        if self.plane {
+            let u = 4.0 * self.scale * (2.0 * (p[0] - self.origin));
+            let v = 4.0 * self.scale * (2.0 * (p[1] - self.origin));
+            return DVec3::new(u, h * self.layer, -v);
+        }
+        let [n, a, b] = face_axes(face);
+        let cube = n * self.reference + a * (2.0 * p[0] * self.scale - self.reference) + b * (2.0 * p[1] * self.scale - self.reference);
+        // `tan_quarter`: x - x (1 - x^2) (a + b x^2), odd.
+        const A: f64 = 230_426_967.0 / 1_073_741_824.0;
+        const B: f64 = 53_687_091.0 / 1_073_741_824.0;
+        let t = cube.to_array().map(|c| {
+            let x = (c.abs() * self.cube_ratio).min(1.0);
+            (x - x * (1.0 - x * x) * (A + B * x * x)).copysign(c)
+        });
+        let t = DVec3::from_array(t);
+        t / t.length() * self.radius * (1.0 + h * self.height_ratio)
+    }
+}
+
+/// Bounds on [`VolumeMap::point`], in volume units: it moves at most
+/// `across` per base cell across a face (i or j) and `up` per layer (k),
+/// `1 + |k| / layers` times more across at height `k`; over a box at most
+/// `s` cells across it lies within `bend * s^2` (times that lift) of the
+/// trilinear interpolation of the box's corners.
+#[derive(Clone, Copy, Debug)]
+pub struct VolumeBounds {
+    pub across: f64,
+    pub up: f64,
+    pub layers: f64,
+    pub bend: f64,
 }
 
 /// Approximately `(a * r) >> 24` with 16-bit limbs and only 32-bit integer
@@ -648,6 +760,52 @@ mod tests {
 
     fn earth() -> Grid {
         Grid::new(6_371_000.0, 0.1).unwrap()
+    }
+
+    /// The f64 volume map agrees with the integer volume points, moves
+    /// and bends within its bounds: edit culling proves with them that a
+    /// ball holds or misses every cell of a box.
+    #[test]
+    fn the_volume_map_follows_volume_points_within_its_bounds() {
+        let plane = Grid::plane(Shape::Plane, 4096.0, 0.1).unwrap();
+        for grid in [earth(), Grid::new(1_737_000.0, 0.5).unwrap(), plane] {
+            let map = grid.volume_map();
+            let VolumeBounds { across, up, layers, bend } = map.bounds;
+            let n = grid.cells();
+            let mut seed = 3u64;
+            let mut next = |m: i64| {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                ((seed >> 33) as i64).rem_euclid(m)
+            };
+            let (mut error, mut moved, mut bent) = (0.0f64, 0.0f64, 0.0f64);
+            for _ in 0..20_000 {
+                let face = if grid.is_plane() { PLANE_FACE } else { next(6) as u8 };
+                let (i, j, k) = (next(i64::from(n)) as i32, next(i64::from(n)) as i32, next(4_000_000) as i32 - 3_000_000);
+                let centre = |i: i32, j: i32, k: i32| [f64::from(i) + 0.5, f64::from(j) + 0.5, f64::from(k) + 0.5];
+                let off = map.point(face, centre(i, j, k)).distance(grid.volume_point(face, i, j, k, 0).as_dvec3());
+                error = error.max(off / (1.0 + f64::from(k.unsigned_abs()) / layers));
+                // Two positions up to `reach` cells apart, and the midpoint
+                // of an axis-aligned segment against its ends.
+                let reach = [1.0, 30.0, 1_000.0, 40_000.0][next(4) as usize];
+                let mut off = || (next(2_000_001) as f64 / 1e6 - 1.0) * reach;
+                let a = centre(i, j, k);
+                let b = [(a[0] + off()).clamp(0.0, f64::from(n)), (a[1] + off()).clamp(0.0, f64::from(n)), a[2] + off()];
+                let lift = 1.0 + a[2].abs().max(b[2].abs()) / layers;
+                let allowed = across * lift * ((b[0] - a[0]).abs() + (b[1] - a[1]).abs()) + up * (b[2] - a[2]).abs();
+                moved = moved.max(map.point(face, a).distance(map.point(face, b)) - allowed);
+                let axis = next(2) as usize;
+                let mut c = a;
+                c[axis] = b[axis];
+                let mut mid = a;
+                mid[axis] = (a[axis] + c[axis]) / 2.0;
+                let ends = (map.point(face, a) + map.point(face, c)) / 2.0;
+                let s = (c[axis] - a[axis]).abs();
+                bent = bent.max(map.point(face, mid).distance(ends) - bend * s * s * lift);
+            }
+            assert!(error <= VOLUME_MAP_ERROR, "the map is {error} units off the volume points");
+            assert!(moved <= 1e-3, "the map moved {moved} units past its bound");
+            assert!(bent <= 1e-3, "the map bent {bent} units past its bound");
+        }
     }
 
     #[test]

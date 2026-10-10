@@ -1,7 +1,7 @@
 //! Canonical editable voxel world (a planet or a plane): recipe, exact cell
 //! queries and ray casts.
 use crate::edit_store::{ColumnKey, EditStore, StoreUndo};
-use crate::edits::{apply, center_half, Brush, EditLog, FaceBrush};
+use crate::edits::{apply, center_half, Brush, EditLog, FaceBrush, ALL_LAYERS};
 use crate::grid::{face_axes, Cell, Grid, Shape};
 use crate::terrain::{self, material, TerrainField, TerrainSource, HEIGHT_ONE};
 
@@ -12,10 +12,6 @@ use std::sync::{Arc, Mutex};
 
 pub const RECIPE_VERSION: u32 = 2;
 pub const EARTH_RADIUS: f64 = 6_371_000.0;
-/// Base cells [`Planet::raycast_near`] walks exactly: a window around a
-/// renderer hit drawn with cells up to ~34 m (a 0.1 m grid), a millisecond
-/// or two.
-pub const EXACT_WALK_CELLS: f64 = 2048.0;
 /// Level cells [`Planet::edited_top`] walks down at most.
 pub const EDITED_TOP_REACH: i32 = 4096;
 
@@ -147,7 +143,8 @@ pub struct Edits {
 struct SealUndo {
     brushes: Vec<(Brush, u64)>,
     store: StoreUndo,
-    large_len: usize,
+    /// The large brushes before the seal.
+    large: EditLog,
     before: (usize, u64),
 }
 
@@ -362,7 +359,7 @@ impl Planet {
         if self.edits.recent.is_empty() {
             self.unseal()?;
         }
-        let brush = self.edits.recent.pop()?;
+        let brush = self.edits.recent.pop(&self.grid)?;
         self.edits.recent_hash.pop();
         self.revision += 1;
         Some(brush)
@@ -373,7 +370,7 @@ impl Planet {
         let brushes: Vec<Brush> = self.edits.recent.brushes().copied().collect();
         let n = n.min(brushes.len());
         let before = self.edits.baked_state();
-        let large_len = self.edits.large.len();
+        let large = self.edits.large.clone();
         let resolved: Vec<Vec<FaceBrush>> = brushes[..n].iter().map(|b| b.resolve(&self.grid)).collect::<Result<_, _>>()?;
         let edits = &mut self.edits;
         edits.baked.begin_record();
@@ -397,7 +394,7 @@ impl Planet {
         edits.sealed_hash = *hashes.last().unwrap_or(&edits.sealed_hash);
         edits.recent = Edits::log(&self.grid, brushes[n..].iter().copied())?;
         let columns: Vec<ColumnKey> = store.columns().collect();
-        edits.undo_seals.push_back(SealUndo { brushes: brushes[..n].iter().copied().zip(hashes).collect(), store, large_len, before });
+        edits.undo_seals.push_back(SealUndo { brushes: brushes[..n].iter().copied().zip(hashes).collect(), store, large, before });
         if edits.undo_seals.len() > UNDO_SEALS {
             edits.undo_seals.pop_front();
         }
@@ -413,9 +410,7 @@ impl Planet {
         let before = edits.baked_state();
         let columns: Vec<ColumnKey> = undo.store.columns().collect();
         edits.baked.restore(undo.store);
-        while edits.large.len() > undo.large_len {
-            edits.large.pop();
-        }
+        edits.large = undo.large;
         let recent: Vec<Brush> = edits.recent.brushes().copied().collect();
         edits.recent = Edits::log(&self.grid, undo.brushes.iter().map(|(b, _)| *b).chain(recent)).expect("brushes resolved when applied");
         edits.recent_hash.splice(0..0, undo.brushes.iter().map(|(_, h)| *h));
@@ -465,11 +460,11 @@ impl Planet {
     pub fn column_top(&self, face: u8, i: i32, j: i32, level: u32) -> i32 {
         terrain::top_cells(&self.grid, self.column_height(face, i, j, level), level)
     }
-    fn face_brushes(log: &EditLog, face: u8, i: i32, j: i32, level: u32) -> Vec<FaceBrush> {
-        let lo_i = i64::from(i) << level;
-        let lo_j = i64::from(j) << level;
-        let span = (1i64 << level) - 1;
-        log.query(face, lo_i, lo_i + span, lo_j, lo_j + span, level)
+    /// The brushes of `log` that can change level cell `(i, j, k)` (`k`
+    /// `None`: any cell of the column), in order.
+    fn face_brushes(log: &EditLog, face: u8, i: i32, j: i32, k: Option<i32>, level: u32) -> Vec<FaceBrush> {
+        let range = |v: i32| [i64::from(v) << level, ((i64::from(v) + 1) << level) - 1];
+        log.query(face, range(i), range(j), k.map_or(ALL_LAYERS, range), level)
             .into_iter()
             .map(|(id, index)| log.resolved(id).faces[index as usize])
             .collect()
@@ -481,10 +476,10 @@ impl Planet {
         let kind = terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, height);
         let center = [center_half(i, level), center_half(j, level), center_half(k, level)];
         let point = || self.grid.volume_point(face, i, j, k, level);
-        let large = Self::face_brushes(&self.edits.large, face, i, j, level);
+        let large = Self::face_brushes(&self.edits.large, face, i, j, Some(k), level);
         let (kind, material) = apply(large.into_iter(), center, point, kind, 0);
         let (kind, material) = self.edits.baked.cell(face, level, i, j, k).apply(kind, material);
-        apply(Self::face_brushes(&self.edits.recent, face, i, j, level).into_iter(), center, point, kind, material)
+        apply(Self::face_brushes(&self.edits.recent, face, i, j, Some(k), level).into_iter(), center, point, kind, material)
     }
     /// [`Self::kind`] for cells walked by a ray: the column's top and
     /// brushes are looked up once per column, not per cell.
@@ -503,8 +498,8 @@ impl Planet {
             *column = Some(RayColumn {
                 key,
                 height: self.column_height(face, i, j, level),
-                large: Self::face_brushes(&self.edits.large, face, i, j, level),
-                recent: Self::face_brushes(&self.edits.recent, face, i, j, level),
+                large: Self::face_brushes(&self.edits.large, face, i, j, None, level),
+                recent: Self::face_brushes(&self.edits.recent, face, i, j, None, level),
             });
         }
         let c = column.as_ref().expect("filled above");
@@ -550,8 +545,8 @@ impl Planet {
     /// low. Removal reaching deeper than [`EDITED_TOP_REACH`] cells below
     /// that start answers the lowest air walked.
     pub fn edited_top(&self, face: u8, i: i32, j: i32, level: u32) -> Option<i32> {
-        let large = Self::face_brushes(&self.edits.large, face, i, j, level);
-        let recent = Self::face_brushes(&self.edits.recent, face, i, j, level);
+        let large = Self::face_brushes(&self.edits.large, face, i, j, None, level);
+        let recent = Self::face_brushes(&self.edits.recent, face, i, j, None, level);
         let column_key = ColumnKey { face, level: level as u8, ci: i.div_euclid(crate::grid::BRICK), cj: j.div_euclid(crate::grid::BRICK) };
         let baked = self.edits.baked.column(&column_key).is_some();
         if large.is_empty() && recent.is_empty() && !baked {
@@ -832,75 +827,31 @@ impl Planet {
     pub fn raycast(&self, origin: DVec3, direction: DVec3, max_distance: f64) -> Option<RayHit> {
         self.raycast_with(origin, direction, max_distance, |kind| kind == 1)
     }
-    /// The first solid cell along the ray between distances `near` and
-    /// `far`, where a renderer drew the surface with `level` cells: found
-    /// coarse to fine, so the cost does not grow with how far the window
-    /// spans in base cells.
-    ///
-    /// A window of up to [`EXACT_WALK_CELLS`] base cells (every brush within
-    /// a few kilometres) is walked exactly. A longer one is marched at
-    /// `level` (half-cell steps), then narrowed to a few cells around the
-    /// first solid sample two levels finer at a time, until it is short
-    /// enough to walk. Coarse levels do not show brushes smaller than their
-    /// cells: where a finer level finds air in the narrowed window (rock
-    /// carved away), its march goes on to the window's end. Where none is
-    /// found, the coarser hit is returned: the surface drawn there.
-    /// From orbit a window spans kilometres: walked cell by cell it took
-    /// hundreds of milliseconds per brush stamp.
-    pub fn raycast_near(&self, origin: DVec3, direction: DVec3, near: f64, far: f64, level: u32) -> Option<RayHit> {
-        /// Samples one level's march may take before it settles for the
-        /// coarser hit.
-        const MARCH_SAMPLES: usize = 4096;
+    /// The hit a renderer drew `distance` along a ray from `origin` (a GPU
+    /// pick: what the user aimed at). At level 0 it is exact: the drawn
+    /// voxel, and the air cell in front of the face the ray `entered`
+    /// (`engine::PickHit`). A coarser level drew a cell standing for many
+    /// voxels: the base cells either side of the drawn surface along the
+    /// ray.
+    pub fn drawn_hit(&self, origin: DVec3, direction: DVec3, distance: f64, cell: Cell, level: u32, entered: Option<u32>) -> RayHit {
         let g = &self.grid;
         let d = direction.normalize();
-        let s = g.voxel_size();
-        let near = near.max(0.0);
-        let exact = |lo: f64, hi: f64| {
-            self.raycast(origin + d * lo, d, hi - lo).map(|mut hit| {
-                hit.distance += lo;
-                hit
-            })
-        };
-        // The kind of the level cell around the sample (a coarse cell can
-        // reach past the terrain's shell: the point alone does not decide).
-        let solid_at = |t: f64, l: u32| {
-            let c = g.locate(origin + d * t).0.at_level(l);
-            self.sample_kind(l, c.face, c.i, c.j, c.k).0 == 1
-        };
-        let march = |lo: f64, hi: f64, l: u32| {
-            let step = s * f64::from(1u32 << l) * 0.5;
-            let steps = (((hi - lo) / step).ceil() as usize).min(MARCH_SAMPLES);
-            (0..=steps).map(|n| (lo + step * n as f64).min(hi)).find(|&t| solid_at(t, l))
-        };
-        let short = |lo: f64, hi: f64| (hi - lo) / s <= EXACT_WALK_CELLS;
-        let (mut lo, mut hi) = (near, far);
-        let mut l = level.min(g.levels().saturating_sub(1));
-        let mut coarse: Option<f64> = None;
-        loop {
-            if l == 0 || short(lo, hi) {
-                if let Some(hit) = exact(lo, hi) {
-                    return Some(hit);
+        let at = origin + d * distance;
+        let half = d * g.voxel_size() * 0.5;
+        let (mut hit, mut previous) = (g.locate(at + half).0, g.locate(at - half).0);
+        if level == 0 {
+            hit = cell;
+            if let Some(code) = entered {
+                let step = if code & 1 == 1 { -1 } else { 1 };
+                let mut before = [cell.i, cell.j, cell.k];
+                before[(code >> 1) as usize] += step;
+                // Across a face edge the walk's neighbour is on another face.
+                if (0..2).all(|a| (0..g.cells()).contains(&before[a])) || g.is_plane() {
+                    previous = Cell::new(cell.face, before[0], before[1], before[2]);
                 }
-                // Carved past the coarse surface: on to the window's end.
-                if hi < far && short(hi, far) {
-                    if let Some(hit) = exact(hi, far) {
-                        return Some(hit);
-                    }
-                }
-                break;
             }
-            let found = march(lo, hi, l).or_else(|| if hi < far { march(hi, far, l) } else { None });
-            let Some(t) = found else { break };
-            let cell = s * f64::from(1u32 << l);
-            coarse = Some(t);
-            (lo, hi) = ((t - cell * 1.5).max(near), (t + cell).min(far));
-            l = l.saturating_sub(2);
         }
-        // The surface the coarser level drew.
-        let t = coarse?;
-        let (cell, _) = g.locate(origin + d * t);
-        let (previous, _) = g.locate(origin + d * (t - s));
-        Some(RayHit { cell, previous, distance: t, normal: -d })
+        RayHit { cell: hit, previous, distance, normal: -d }
     }
     /// A point `clearance` metres above the solid surface over `p` (a
     /// direction or any point above the ground point on a planet; any point
@@ -954,7 +905,7 @@ impl Planet {
         let (i, j) = (i64::from(cell.i), i64::from(cell.j));
         let mut clearance = limit;
         for log in [&self.edits.large, &self.edits.recent] {
-            for (id, index) in log.query(cell.face, i - reach, i + reach, j - reach, j + reach, 0) {
+            for (id, index) in log.query(cell.face, [i - reach, i + reach], [j - reach, j + reach], ALL_LAYERS, 0) {
                 if log.resolved(id).faces[index as usize].op() != 1 {
                     continue;
                 }
@@ -1312,48 +1263,6 @@ mod tests {
         }
     }
 
-    /// A window around a coarse renderer hit, searched coarse to fine:
-    /// the exact walk's hit wherever the levels agree, and a bounded cost
-    /// for a window kilometres long (a brush from orbit).
-    #[test]
-    fn raycast_near_finds_the_exact_hit_coarse_to_fine() {
-        let p = heightfield(PlanetRecipe::default());
-        let g = *p.grid();
-        let mut exact_matches = 0;
-        for (n, dir) in [DVec3::new(0.1, 1.0, 0.2), DVec3::new(0.9, 0.4, -0.3), DVec3::new(-0.2, -0.7, 0.8), DVec3::new(0.5, 0.5, 0.7)].into_iter().enumerate() {
-            let ground = p.surface_point(dir.normalize(), 0.0);
-            let up = ground.normalize();
-            let side = up.any_orthonormal_vector();
-            for (height, level) in [(30.0, 3u32), (2_000.0, 8), (300_000.0, 13)] {
-                let eye = ground + (up * 1.0 + side * 0.4 * (n as f64 + 1.0)).normalize() * height;
-                let d = (ground - eye).normalize();
-                let exact = p.raycast(eye, d, height * 2.0).expect("an exact hit");
-                let cell = g.voxel_size() * f64::from(1u32 << level);
-                let margin = cell * 3.0 + 1.0;
-                let started = std::time::Instant::now();
-                let hit = p.raycast_near(eye, d, exact.distance - margin, exact.distance + margin, level).expect("a hit near");
-                let ms = started.elapsed().as_secs_f64() * 1e3;
-                assert!(ms < 50.0, "{height} m: {ms:.1} ms");
-                assert!((hit.distance - exact.distance).abs() <= cell * 2.0, "{height} m: {} vs {}", hit.distance, exact.distance);
-                exact_matches += usize::from(hit.cell == exact.cell);
-            }
-        }
-        assert!(exact_matches >= 8, "{exact_matches} of 12 exact");
-
-        // A pit dug with a brush too small for the level that drew the view:
-        // the coarse surface is rock that is no longer there.
-        let mut p = p;
-        let ground = p.surface_point(DVec3::new(0.3, 1.0, 0.1).normalize(), 0.0);
-        let up = ground.normalize();
-        p.apply(Brush { center: (ground - up * 10.0).to_array(), radius: 30.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
-        let eye = ground + up * 20_000.0;
-        let exact = p.raycast(eye, -up, 30_000.0).expect("the pit's floor");
-        assert!(exact.distance > 20_030.0, "{}", exact.distance);
-        let level = 10;
-        let margin = g.voxel_size() * f64::from(1u32 << level) * 3.0 + 1.0;
-        let hit = p.raycast_near(eye, -up, 20_000.0 - margin, 20_000.0 + margin, level).expect("a hit near");
-        assert_eq!(hit.cell, exact.cell, "{} vs {}", hit.distance, exact.distance);
-    }
 
     /// Level selection measures the eye's height over the terrain as
     /// edited: inside a dig, over its floor; additions count only where

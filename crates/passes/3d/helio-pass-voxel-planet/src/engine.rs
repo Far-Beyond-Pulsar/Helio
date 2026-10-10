@@ -45,9 +45,8 @@ pub struct PickRequest {
     pub uv: [f32; 2],
 }
 
-/// The answer to a [`PickRequest`]: the distance from the eye of the first
-/// terrain hit along that pixel's ray and the size of the cell that drew it
-/// (how far the exact surface can be from it), or `None` (sky, loading).
+/// The answer to a [`PickRequest`]: the first terrain hit along that
+/// pixel's ray as drawn, or `None` (sky, loading).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PickResult {
     pub id: u64,
@@ -56,8 +55,15 @@ pub struct PickResult {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PickHit {
+    /// From the eye along the pixel's ray.
     pub distance: f64,
-    pub cell_m: f64,
+    /// The level cell drawn there: at level 0 the exact voxel.
+    pub cell: crate::grid::Cell,
+    pub level: u32,
+    /// How the ray entered the cell: `2 axis + 1` stepping up axis (i, j,
+    /// k), `2 axis` stepping down it (`normal_code` in trace.wgsl); `None`
+    /// when it started inside. See [`crate::Planet::drawn_hit`].
+    pub entered: Option<u32>,
 }
 
 /// Pick requests and answers shared between a tool and the pass.
@@ -1421,7 +1427,6 @@ impl PlanetRenderer {
 
     /// Answer picks whose hits arrived; start mapping last frame's copies.
     fn poll_picks(&mut self) {
-        let voxel = self.planet.grid().voxel_size();
         for slot in &mut self.picks {
             if slot.stage == 2 && slot.state.load(Ordering::Acquire) {
                 let results: Vec<PickResult> = {
@@ -1431,10 +1436,16 @@ impl PlanetRenderer {
                         .enumerate()
                         .map(|(n, &id)| {
                             let at = n * HIT_BYTES as usize;
-                            let t = f32::from_le_bytes(data[at..at + 4].try_into().unwrap());
-                            let info = u32::from_le_bytes(data[at + 16..at + 20].try_into().unwrap());
-                            let hit = (info & 3 == 1 && t.is_finite() && t > 0.0)
-                                .then(|| PickHit { distance: f64::from(t), cell_m: voxel * f64::from(1u32 << ((info >> 5) & 31)) });
+                            let word = |n: usize| u32::from_le_bytes(data[at + 4 * n..at + 4 * n + 4].try_into().unwrap());
+                            let t = f32::from_bits(word(0));
+                            let info = word(4);
+                            let code = (info >> 10) & 7;
+                            let hit = (info & 3 == 1 && t.is_finite() && t > 0.0).then(|| PickHit {
+                                distance: f64::from(t),
+                                cell: crate::grid::Cell::new(((info >> 2) & 7) as u8, word(1) as i32, word(2) as i32, word(3) as i32),
+                                level: (info >> 5) & 31,
+                                entered: (code < 6).then_some(code),
+                            });
                             PickResult { id, hit }
                         })
                         .collect()
