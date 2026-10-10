@@ -139,7 +139,7 @@ struct GpuPortalChainHandle {
 @group(0) @binding(4) var<storage, read> coordinate_spaces_prev: array<mat4x4<f32>>;
 // Written by helio-pass-portal-cull: shared compacted original instance
 // slots — group `g`'s draw call's `first_instance`/`instance_count` (from
-// `portal_indirect`) already point `@builtin(instance_index)` at exactly
+// `portal_indirect`) already point the draw slot at exactly
 // this group's region, so no per-draw offset math is needed here.
 @group(0) @binding(5) var<storage, read> portal_compacted_indices: array<u32>;
 @group(0) @binding(6) var<storage, read> portal_views: array<GpuPortalView>;
@@ -185,8 +185,10 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
     return unpack4x8snorm(packed).xyz;
 }
 
+// `instance_index` is per-instance vertex data, which every backend offsets by the
+// indirect draw's `first_instance` (`helio_pass_gbuffer::draw_slots`).
 @vertex
-fn vs_main(v: Vertex, @builtin(instance_index) instance_index: u32) -> VertexOutput {
+fn vs_main(v: Vertex, @location(15) instance_index: u32) -> VertexOutput {
     let slot_idx = portal_compacted_indices[instance_index];
     let chain_idx = portal_compacted_chains[instance_index];
     let inst = instance_data[slot_idx];

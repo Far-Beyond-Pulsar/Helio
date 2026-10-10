@@ -80,6 +80,7 @@ pub struct TransparentPass {
     pre_aa_target: bool,
     reactive_mask: bool,
     timing_query: Option<wgpu::QuerySet>,
+    draw_slots: helio_pass_gbuffer::DrawSlots,
 }
 
 impl TransparentPass {
@@ -275,6 +276,7 @@ impl TransparentPass {
             pre_aa_target: false,
             reactive_mask: false,
             timing_query: None,
+            draw_slots: Default::default(),
         }
     }
 
@@ -597,11 +599,22 @@ impl RenderPass for TransparentPass {
             }));
             self.fog_key = Some(fog_key);
         }
+        let slots = self
+            .draw_slots
+            .buffer(
+                &ctx.device,
+                helio_pass_gbuffer::DrawSlots::len_of(
+                    batch.instances.size(),
+                    helio_pass_gbuffer::draw_slots::INSTANCE_BYTES,
+                ),
+            )
+            .clone();
         let mut rp = ctx.render_cmds().unwrap();
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
         rp.set_bind_group(2, self.fog_group.as_ref().unwrap(), &[]);
         rp.set_vertex_buffer(0, vertices.slice(..));
+        rp.set_vertex_buffer(1, slots.slice(..));
         rp.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
 
         // One draw per transparent material segment (see `DrawSegments`).
@@ -718,7 +731,7 @@ impl TransparentPass {
                                 shader_location: 4,
                             },
                         ],
-                    })],
+                    }), Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module,

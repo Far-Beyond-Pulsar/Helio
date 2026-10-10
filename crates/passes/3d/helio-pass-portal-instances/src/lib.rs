@@ -51,6 +51,8 @@ struct ScreenSize {
 type PortalBindGroupKey = ([wgpu::Buffer; 8], wgpu::TextureView);
 
 pub struct PortalInstancePass {
+    /// The draw slots the vertex shader reads (see `helio_pass_gbuffer::DrawSlots`).
+    draw_slots: helio_pass_gbuffer::DrawSlots,
     material_binding: helio_mats::MaterialBindingConfig,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout_0: wgpu::BindGroupLayout,
@@ -169,7 +171,7 @@ impl PortalInstancePass {
                             shader_location: 4,
                         },
                     ],
-                })],
+                }), Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -256,6 +258,7 @@ impl PortalInstancePass {
         });
 
         Self {
+            draw_slots: Default::default(),
             material_binding,
             pipeline,
             bind_group_layout_0,
@@ -625,8 +628,17 @@ impl RenderPass for PortalInstancePass {
         let vertices = &vertices_handle.buffer;
         let indices = &indices_handle.buffer;
 
+        // The slot indexes `portal_compacted_indices`.
+        let slots = self
+            .draw_slots
+            .buffer(
+                &ctx.device,
+                helio_pass_gbuffer::DrawSlots::len_of(self.portal_compacted_indices_buf.size(), 4),
+            )
+            .clone();
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.set_vertex_buffer(1, slots.slice(..));
         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);

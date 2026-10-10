@@ -37,7 +37,9 @@ struct GpuInstanceData {
 fn vs_main(
     @location(0)             position:    vec3<f32>,
     @location(2)             _tex_coords: vec2<f32>,  // kept for vertex layout compatibility
-    @builtin(instance_index) slot:        u32,
+    // Per-instance vertex data, offset by the indirect draw's `first_instance`
+    // on every backend (`helio_pass_gbuffer::draw_slots`).
+    @location(15)            slot:        u32,
 ) -> @invariant @builtin(position) vec4<f32> {
     let inst      = instance_data[compacted_indices[slot]];
     let world_pos = inst.transform * vec4<f32>(position, 1.0);
