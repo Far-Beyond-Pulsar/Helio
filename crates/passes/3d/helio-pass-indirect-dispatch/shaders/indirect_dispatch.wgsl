@@ -14,7 +14,8 @@ struct Camera {
 
 struct CullUniforms {
     frustum_planes: array<vec4<f32>, 6>,
-    draw_count: u32,
+    // Rows `draw_calls` holds. The indirect dispatch covers the live groups.
+    draw_capacity: u32,
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
@@ -191,7 +192,7 @@ fn main(
     @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
     let idx = wg_id.x;
-    if idx >= cull.draw_count { return; }
+    if idx >= cull.draw_capacity { return; }
 
     let dc = draw_calls[idx];
 

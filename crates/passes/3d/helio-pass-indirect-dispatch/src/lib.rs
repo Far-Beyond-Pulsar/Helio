@@ -4,7 +4,10 @@
 //! 1. Tests each instance's bounding sphere against the 6 frustum planes
 //! 2. Compacts surviving instances into `compacted_indices`, per draw-call group
 //! 3. Writes each group's real visible instance count into its DrawIndexedIndirect
-//! 4. Is O(1) CPU cost — single compute dispatch regardless of scene size
+//! 4. Is O(1) CPU cost — single compute dispatch regardless of scene size,
+//!    sized on the GPU (one workgroup per live group, from
+//!    `ObjectBatchFrameData::group_dispatch`), so a group is culled the
+//!    frame it appears, not once the CPU reads its count back
 //!
 //! One workgroup (64 lanes) handles one draw-call group, cooperatively testing
 //! every instance in that group and packing survivors via workgroup-shared
@@ -22,7 +25,8 @@ pub use gpu_types::*;
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CullUniforms {
     frustum_planes: [[f32; 4]; 6], // 6 planes × 4 floats = 96 bytes
-    draw_count: u32,
+    /// Rows `draw_calls` holds; the dispatch itself covers the live groups.
+    draw_capacity: u32,
     _pad: [u32; 3],
 }
 
@@ -52,8 +56,6 @@ pub struct IndirectDispatchPass {
     bind_group: Option<wgpu::BindGroup>,
     /// Tuple of raw buffer pointers used as a staleness key.
     bind_group_key: Option<[wgpu::Buffer; 8]>,
-    /// Draw count uploaded in `prepare()`, used in `execute()`.
-    draw_count: u32,
 }
 
 impl IndirectDispatchPass {
@@ -201,7 +203,6 @@ impl IndirectDispatchPass {
             instance_capacity: MIN_CAPACITY,
             bind_group: None,
             bind_group_key: None,
-            draw_count: 0,
         }
     }
 
@@ -299,16 +300,16 @@ impl RenderPass for IndirectDispatchPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
-            self.draw_count = 0;
             return Ok(());
         };
-        self.draw_count = batch.draw_count;
-        self.ensure_capacity(ctx.device, batch.draw_count, batch.instance_count);
+        // Sized for every group the GPU can produce this frame: the live
+        // counts only exist on the GPU.
+        self.ensure_capacity(ctx.device, batch.group_capacity, batch.group_capacity);
 
         let planes = extract_frustum_planes(ctx.camera_data.view_proj);
         let uniforms = CullUniforms {
             frustum_planes: planes,
-            draw_count: batch.draw_count,
+            draw_capacity: batch.group_capacity,
             _pad: [0; 3],
         };
         ctx.queue
@@ -317,10 +318,6 @@ impl RenderPass for IndirectDispatchPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let draw_count = self.draw_count;
-        if draw_count == 0 {
-            return Ok(());
-        }
         let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
@@ -386,8 +383,9 @@ impl RenderPass for IndirectDispatchPass {
         }
 
         // O(1) CPU: one dispatch, GPU culls all draw calls in parallel. One
-        // workgroup per draw-call group — its 64 lanes cooperatively compact
-        // that group's surviving instances (see indirect_dispatch.wgsl).
+        // workgroup per live draw-call group, counted on the GPU this frame —
+        // its 64 lanes cooperatively compact that group's surviving instances
+        // (see indirect_dispatch.wgsl).
         let mut cmds = ctx.graphics_cmds();
         let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("IndirectDispatch"),
@@ -395,7 +393,7 @@ impl RenderPass for IndirectDispatchPass {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
-        pass.dispatch_workgroups(draw_count, 1, 1);
+        pass.dispatch_workgroups_indirect(batch.group_dispatch.buffer, batch.group_dispatch.offset);
         Ok(())
     }
 }

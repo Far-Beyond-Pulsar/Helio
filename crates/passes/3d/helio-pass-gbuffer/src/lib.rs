@@ -45,7 +45,7 @@ pub use coordinate_spaces_frame_data::CoordinateSpacesFrameData;
 pub use culled_batch_frame_data::CulledBatchFrameData;
 pub use draw_segments::{DrawSegment, DrawSegments, ShadingBucket};
 pub use indirect_draw::{multi_draw_indexed_indirect, GpuDrawCount, DRAW_INDEXED_INDIRECT_STRIDE};
-pub use object_batch_frame_data::ObjectBatchFrameData;
+pub use object_batch_frame_data::{IndirectDispatchArgs, ObjectBatchFrameData};
 use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey};
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{
@@ -652,8 +652,8 @@ impl RenderPass for GBufferPass {
         let Some(culled) = ctx.registry.get::<crate::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
             return Ok(());
         };
-        let draw_count = batch.draw_count;
-        if draw_count == 0 {
+        let (max_draws, draw_count) = batch.all_draws();
+        if max_draws == 0 {
             return Ok(());
         }
         let Some(material_textures) = ctx.registry.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures(), "GBuffer") else {
@@ -792,7 +792,7 @@ impl RenderPass for GBufferPass {
             };
             let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
             pass.set_pipeline(pipeline);
-            multi_draw_indexed_indirect(&mut pass, indirect, 0, draw_count, batch.all_draws_count_slot());
+            multi_draw_indexed_indirect(&mut pass, indirect, 0, max_draws, draw_count);
         } else {
             for (index, segment) in segments.in_bucket(crate::ShadingBucket::Opaque) {
                 let key = RadiantShaderKey {

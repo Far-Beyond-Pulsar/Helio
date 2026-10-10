@@ -41,10 +41,23 @@ pub struct ObjectBatchFrameData<'a> {
     /// indirect-draw ABI -- what `multi_draw_indexed_indirect` actually
     /// reads.
     pub indirect: &'a wgpu::Buffer,
-    /// Live draw-call group count this frame.
-    pub draw_count: u32,
-    /// Live instance count this frame (== `instances`'s valid prefix length).
-    pub instance_count: u32,
+    /// The most draw-call groups (and instances) the GPU can produce this
+    /// frame: `instances`, `draw_calls` and `indirect` hold this many. It
+    /// follows the SceneDB row count, so it is current; size per-group
+    /// buffers from it.
+    pub group_capacity: u32,
+    /// One workgroup per live draw-call group, written on the GPU this
+    /// frame, for `dispatch_workgroups_indirect`. Culling passes size their
+    /// dispatches from this, not from the read-back counts below. Capped at
+    /// 65535 groups.
+    pub group_dispatch: IndirectDispatchArgs<'a>,
+    /// Live draw-call group count, as read back two or more frames late.
+    /// Only for what can't use a GPU count: draws on devices without
+    /// `MULTI_DRAW_INDIRECT_COUNT` (see [`Self::all_draws`]) and CPU-side
+    /// heuristics.
+    pub readback_draw_count: u32,
+    /// Live instance count, read back as late as `readback_draw_count`.
+    pub readback_instance_count: u32,
     /// `(material_class, graph_hash, start, count)` ranges over `draw_calls`
     /// as read back, frames late -- `start`/`count` index `draw_calls`/
     /// `indirect` directly, not `instances`. Used to find the material keys
@@ -89,7 +102,25 @@ pub struct ObjectBatchFrameData<'a> {
     pub range_slot_capacity: u32,
 }
 
+/// Indirect compute dispatch arguments: three `u32`s at `offset` in `buffer`.
+#[derive(Clone, Copy)]
+pub struct IndirectDispatchArgs<'a> {
+    pub buffer: &'a wgpu::Buffer,
+    pub offset: u64,
+}
+
 impl<'a> ObjectBatchFrameData<'a> {
+    /// How to draw every group of a per-group indirect buffer (`indirect`,
+    /// or a culled copy of it): the most records to read and, where the
+    /// device supports it, the GPU's live count for this frame. Without a
+    /// GPU count the bound is the late read-back count.
+    pub fn all_draws(&self) -> (u32, Option<crate::GpuDrawCount<'a>>) {
+        match self.all_draws_count_slot() {
+            Some(count) => (self.group_capacity, Some(count)),
+            None => (self.readback_draw_count, None),
+        }
+    }
+
     fn draw_count_slot(&self, index: usize) -> Option<crate::GpuDrawCount<'a>> {
         self.draw_counts.map(|buffer| crate::GpuDrawCount {
             buffer,
