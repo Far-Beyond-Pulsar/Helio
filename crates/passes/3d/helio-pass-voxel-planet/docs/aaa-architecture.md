@@ -159,6 +159,9 @@ coarser level about 10 times (missing columns) and looks up 8 columns
 instead of 3; summary skips need complete blocks, so the sky bound saves
 2 of 42 steps instead of 17 of 32 once settled. Walking and flying load
 only at the rings' edges (ground_load primary 3.9 ms vs 3.3 settled).
+A finer sky bound (1024 sectors, four buckets an octave instead of 256 and
+one) made rays take more steps (ground 11.2 -> 14.8, straight down 6.0 ->
+8.5) and cost 0.55 ms to build: rejected.
 
 ### 5. Shading
 
