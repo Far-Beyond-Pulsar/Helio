@@ -340,10 +340,11 @@ fn terrain_bytes(program: &TerrainProgram) -> Vec<u8> {
 
 /// The pass's composed shaders as compiled for a world form and terrain
 /// program: generation, trace and gbuffer.
-pub fn shader_sources(plane: bool, program: &TerrainProgram) -> [(&'static str, String); 3] {
+/// `wide64`: the device has 64-bit integers (`wgpu::Features::SHADER_INT64`).
+pub fn shader_sources(plane: bool, program: &TerrainProgram, wide64: bool) -> [(&'static str, String); 3] {
     let view = include_str!("../shaders/view.wgsl");
     [
-        ("planet generation", source("read_write", &[include_str!("../shaders/generate.wgsl")], plane, program)),
+        ("planet generation", source("read_write", &[include_str!("../shaders/generate.wgsl")], plane, program, wide64)),
         (
             "planet trace",
             source(
@@ -351,31 +352,43 @@ pub fn shader_sources(plane: bool, program: &TerrainProgram) -> [(&'static str, 
                 &[view, include_str!("../shaders/horizon.wgsl"), include_str!("../shaders/trace.wgsl"), include_str!("../shaders/surface.wgsl")],
                 plane,
                 program,
+                wide64,
             ),
         ),
-        ("planet gbuffer", source("read", &[view, include_str!("../shaders/gbuffer.wgsl")], plane, program)),
+        ("planet gbuffer", source("read", &[view, include_str!("../shaders/gbuffer.wgsl")], plane, program, wide64)),
     ]
 }
 
-/// [`shader_sources`] for both world forms with the Earth terrain program
-/// (shader validation without a device).
+/// [`shader_sources`] for both world forms, with and without 64-bit
+/// integers, with the Earth terrain program (shader validation without a
+/// device).
 pub fn validation_sources() -> Vec<(String, String)> {
     let grid = crate::grid::Grid::new(6_371_000.0, 0.1).expect("Earth grid");
     let field = crate::layers::TerrainLayers::earth().field(&grid, 1).expect("Earth terrain");
     let program = crate::terrain::TerrainField::program(&field);
-    [false, true]
+    [(false, false), (true, false), (false, true), (true, true)]
         .into_iter()
-        .flat_map(|plane| {
-            let form = if plane { "plane" } else { "sphere" };
-            shader_sources(plane, &program).map(|(label, source)| (format!("{label} ({form})"), source))
+        .flat_map(|(plane, wide64)| {
+            let form = format!("{}{}", if plane { "plane" } else { "sphere" }, if wide64 { ", int64" } else { "" });
+            shader_sources(plane, &program, wide64).map(move |(label, source)| (format!("{label} ({form})"), source))
         })
         .collect()
 }
 
 /// Shader source: the noise library, world helpers and the terrain program,
-/// then the engine parts.
-fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram) -> String {
-    let mut s = String::from(include_str!("../shaders/noise.wgsl"));
+/// then the engine parts. With `wide64` the noise library's wide products
+/// use hardware 64-bit integers (`wide64.wgsl`).
+fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram, wide64: bool) -> String {
+    let noise = include_str!("../shaders/noise.wgsl");
+    let mut s = if wide64 {
+        let (head, rest) = noise.split_once("// wide:begin
+").expect("noise.wgsl wide region");
+        let (_, tail) = rest.split_once("// wide:end
+").expect("noise.wgsl wide region end");
+        format!("{head}{}{tail}", include_str!("../shaders/wide64.wgsl"))
+    } else {
+        String::from(noise)
+    };
     s.push_str(include_str!("../shaders/world.wgsl"));
     s.push_str(&program.wgsl);
     if !program.wgsl.contains("fn terrain_surface") {
@@ -555,7 +568,7 @@ impl Pipelines {
         // Composed from several files plus the terrain program in Rust, so it
         // goes through `module` as plain text (not hot reloadable).
         let module = |label: &str, src: String| helio_core::shader::module(device, label, &src);
-        let [(_, gen_src), (_, trace_src), (_, render_src)] = shader_sources(plane, program);
+        let [(_, gen_src), (_, trace_src), (_, render_src)] = shader_sources(plane, program, device.features().contains(wgpu::Features::SHADER_INT64));
         let gen_module = module("planet generation", gen_src);
         let trace_module = module("planet trace", trace_src);
         let render_module = module("planet gbuffer", render_src);
@@ -2509,7 +2522,7 @@ pub fn time_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet, e
     time_out[id.x] = height ^ i32(surface);
 }
 ";
-    let module = helio_core::shader::module(device, "terrain timing", &source("read", &[kernel], grid.is_plane(), &program));
+    let module = helio_core::shader::module(device, "terrain timing", &source("read", &[kernel], grid.is_plane(), &program, device.features().contains(wgpu::Features::SHADER_INT64)));
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("terrain timing"),
         layout: None,
@@ -2619,7 +2632,7 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
     let module = helio_core::shader::module(
         device,
         "terrain verification",
-        &source("read", &[kernel], grid.is_plane(), &program),
+        &source("read", &[kernel], grid.is_plane(), &program, device.features().contains(wgpu::Features::SHADER_INT64)),
     );
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("terrain verification"),

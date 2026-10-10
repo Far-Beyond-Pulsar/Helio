@@ -15,7 +15,9 @@ pub fn gpu() -> Option<Gpu> {
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
     let limits = adapter.limits();
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+        // 64-bit integers as the engine's devices request them
+        // (`helio::required_wgpu_features`): the hardware wide products.
+        required_features: adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::SHADER_INT64),
         required_limits: wgpu::Limits {
             max_buffer_size: limits.max_buffer_size.min(u32::MAX as u64),
             ..limits

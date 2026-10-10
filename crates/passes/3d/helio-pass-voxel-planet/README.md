@@ -128,6 +128,10 @@ the CPU raycast what the GPU draws.
   polynomial and normalizes them (Q30 Newton reciprocal square root, exact
   64-bit products); the eighth-cell unit keeps its rounding far below a
   layer of height on steep slopes.
+- 32x32 -> 64-bit products (`mul_wide`, `mul_shr`) are 16-bit limb
+  sequences in noise.wgsl between `// wide:begin` and `// wide:end`; on
+  devices with `SHADER_INT64` that region is replaced by wide64.wgsl's
+  native `u64` products, with the same bits (tests/wide_products.rs).
 - Every world is an ordered layer stack (`layers.rs`): Warp, Continents,
   Mountains, Hills, Roughness, Erosion, Craters, Basins, Plateau, each with
   a mask (everywhere, land, above deep sea), plus caves, overhangs and a

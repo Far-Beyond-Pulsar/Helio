@@ -258,6 +258,17 @@ tried first and failed two tests: coarse relief floored up to 2^(level-10)
 layers under the surface (subsoil at level transitions) and a surface in a
 level-17 cell's lowest 1024th made the whole cell solid (hits past the sky
 bound). Material rules (1.6 ms) are next.
+*Done (2026-10-10): hardware wide products.* Nsight showed the 32x32->64
+products (sphere point, fine noise) as 16-bit limb sequences. On devices
+with `SHADER_INT64` the limb region of noise.wgsl is replaced by
+wide64.wgsl (bit-identical: tests/wide_products.rs over 200k operands and
+the extremes). Hold medians at 1080p: shade ground 3.63/3.89 -> 3.23/3.24
+ms, tunnel 5.73/5.80 -> 5.01/4.99; QUICK shade mountain_air 2.99 -> 2.38,
+mountain_slope 2.63 -> 2.32, tunnel 5.63 -> 4.78; primary, sun and sky
+unchanged. The generate kernel's binary 798 -> 388 KB, its cold compile
+21 -> 6.3 s. Loading (one QUICK run each, noisy): mountain_slope 282 -> 227
+frames, mountain_air 169 -> 168, tunnel 249 -> 318. Devices without the
+feature keep the limb path.
 
 ### 6. Sunlight
 
