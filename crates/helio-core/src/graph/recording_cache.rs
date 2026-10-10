@@ -17,14 +17,17 @@
 //! record the same commands every frame only raises the hit rate; see
 //! [`RecordingCacheStats`] for which units miss and why.
 //!
-//! A unit is one pass outside a fused chain, without a render bundle, whose
+//! A unit is a pass outside a fused chain (with or without a prebuilt render
+//! bundle) or a whole fused chain, recorded as one render pass, when
 //! [`RenderPass::supports_recording_cache`](crate::RenderPass::supports_recording_cache)
-//! is true. Units whose command buffers cannot be reused (acceleration
-//! structures, surface textures, or a backend without support: anything but
-//! Vulkan and D3D12) go back to being recorded straight into wgpu. The cache
-//! is off while the finish breakdown is on. GPU timing is recorded into the
-//! streams like any other command: the profiler's query indices restart every
-//! frame, so a frame of the same shape writes the same timestamps.
+//! is true for each of its passes. It is recorded straight into wgpu instead
+//! when its command buffers cannot be reused (acceleration structures, surface
+//! textures), while it backs off after [`MISS_STREAK_LIMIT`] misses in a row,
+//! and always on a backend without support (anything but Vulkan and D3D12).
+//! The cache is off while the finish breakdown is on. GPU timing is recorded
+//! into the streams like any other command: the profiler's query indices
+//! restart every frame, so a frame of the same shape writes the same
+//! timestamps.
 //!
 //! Adapted from Tristan Poland's `codex/persistent-command-buffers` branch.
 
@@ -37,16 +40,28 @@ pub(crate) const MAX_VARIANTS: usize = 4;
 /// resources it holds (old render targets after a resize, replaced buffers).
 pub(crate) const EVICT_AFTER_FRAMES: u64 = 16;
 
+/// A unit that misses this many frames in a row is recorded straight into
+/// wgpu for [`BACKOFF_FRAMES`] frames before the cache tries it again: a miss
+/// costs more than recording directly, since the stream is compared, then
+/// replayed into an encoder that is finished on the render thread.
+pub(crate) const MISS_STREAK_LIMIT: u32 = 8;
+
+/// How long a unit that kept missing is recorded directly.
+pub(crate) const BACKOFF_FRAMES: u64 = 64;
+
+/// Why a unit is being recorded directly while it backs off.
+pub(crate) const BACKING_OFF: &str = "it missed 8 frames in a row; retried later";
+
 /// Why a backend cannot use the cache at all.
 pub(crate) const BACKEND_UNSUPPORTED: &str = "the backend cannot resubmit command buffers";
 
-/// Environment variable that switches the recording cache on (`1`, `on` or
-/// `true`); it is off by default while it is being brought up.
+/// Environment variable that switches the recording cache off (`0`, `off`
+/// or `false`); it is on by default.
 pub(crate) const RECORDING_CACHE_ENV: &str = "HELIO_RECORDING_CACHE";
 
 pub(crate) fn enabled_by_env() -> bool {
-    std::env::var(RECORDING_CACHE_ENV)
-        .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "on" | "true"))
+    !std::env::var(RECORDING_CACHE_ENV)
+        .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "0" | "off" | "false"))
 }
 
 /// One cached recording of a unit.
@@ -71,10 +86,142 @@ pub(crate) struct UnitCache {
     pub(crate) uncacheable: Option<&'static str>,
     pub(crate) hits: u64,
     pub(crate) misses: u64,
+    /// Frames recorded directly while backing off.
+    pub(crate) bypassed: u64,
     pub(crate) last_miss: Option<String>,
+    /// The unit's pass name, or its fused chain's label.
+    pub(crate) label: &'static str,
+    /// Consecutive misses (see [`MISS_STREAK_LIMIT`]).
+    miss_streak: u32,
+    /// Recorded directly until this frame.
+    backoff_until: u64,
+}
+
+/// What a unit submits this frame for one of its streams.
+pub(crate) enum UnitBuffer {
+    /// The cached recording with this variant index.
+    Cached(usize),
+    Once(wgpu::CommandBuffer),
+    /// Encoded reusable this frame, but not cached.
+    Uncached(wgpu::ReusableCommandBuffer),
+}
+
+/// A unit's command buffers for this frame; `None` for an empty stream.
+pub(crate) struct Resolved {
+    pub(crate) compute: Option<UnitBuffer>,
+    pub(crate) graphics: Option<UnitBuffer>,
+    /// Encoding showed the backend cannot resubmit command buffers at all.
+    pub(crate) backend_unsupported: bool,
 }
 
 impl UnitCache {
+    /// Resolves this frame's recording: resubmits the matching cached
+    /// variant, or encodes the streams and caches them as a new one.
+    pub(crate) fn resolve(
+        &mut self,
+        device: &wgpu::Device,
+        compute: Stream,
+        graphics: Stream,
+        frame: u64,
+    ) -> Resolved {
+        if let Some(variant) = self.find(&compute, &graphics) {
+            self.hits += 1;
+            self.miss_streak = 0;
+            let recording = &mut self.variants[variant];
+            recording.last_used = frame;
+            let has = (recording.compute.is_some(), recording.graphics.is_some());
+            self.recycle(compute, graphics);
+            return Resolved {
+                compute: has.0.then_some(UnitBuffer::Cached(variant)),
+                graphics: has.1.then_some(UnitBuffer::Cached(variant)),
+                backend_unsupported: false,
+            };
+        }
+        self.misses += 1;
+        self.last_miss = Some(self.describe_miss(&compute, &graphics));
+        self.miss_streak += 1;
+        if self.miss_streak >= MISS_STREAK_LIMIT {
+            self.miss_streak = 0;
+            self.backoff_until = frame + 1 + BACKOFF_FRAMES;
+            // Nothing suggests these recordings come back.
+            self.variants.clear();
+        }
+        let encoded_compute = encode_stream(device, &compute, "Helio Cached Compute Unit");
+        let encoded_graphics = encode_stream(device, &graphics, "Helio Cached Graphics Unit");
+        let once = [&encoded_compute, &encoded_graphics]
+            .into_iter()
+            .find_map(|encoded| match encoded {
+                Some(Encoded::Once(_, reason)) => Some(*reason),
+                _ => None,
+            });
+        if let Some(reason) = once {
+            // Submit this frame's encoding once; the graph records the unit
+            // straight into wgpu from now on.
+            let backend_unsupported = reason == BACKEND_UNSUPPORTED;
+            if !backend_unsupported {
+                self.uncacheable = Some(reason);
+            }
+            self.recycle(compute, graphics);
+            let once = |encoded: Option<Encoded>| {
+                encoded.map(|encoded| match encoded {
+                    Encoded::Once(buffer, _) => UnitBuffer::Once(buffer),
+                    Encoded::Reusable(buffer) => UnitBuffer::Uncached(buffer),
+                })
+            };
+            return Resolved {
+                compute: once(encoded_compute),
+                graphics: once(encoded_graphics),
+                backend_unsupported,
+            };
+        }
+        let reusable = |encoded: Option<Encoded>| match encoded {
+            Some(Encoded::Reusable(buffer)) => Some(buffer),
+            _ => None,
+        };
+        let compute_buffer = reusable(encoded_compute);
+        let graphics_buffer = reusable(encoded_graphics);
+        let has = (compute_buffer.is_some(), graphics_buffer.is_some());
+        let variant = self.insert(CachedRecording {
+            compute_cmds: compute,
+            graphics_cmds: graphics,
+            compute: compute_buffer,
+            graphics: graphics_buffer,
+            last_used: frame,
+        });
+        Resolved {
+            compute: has.0.then_some(UnitBuffer::Cached(variant)),
+            graphics: has.1.then_some(UnitBuffer::Cached(variant)),
+            backend_unsupported: false,
+        }
+    }
+
+    /// Whether the unit is recorded directly this frame because it kept
+    /// missing; counts the frame if so.
+    pub(crate) fn backing_off(&mut self, frame: u64) -> bool {
+        let backing_off = frame < self.backoff_until;
+        if backing_off {
+            self.bypassed += 1;
+        }
+        backing_off
+    }
+
+    /// Takes the scratch streams for recording this frame.
+    pub(crate) fn take_scratch(&mut self) -> (Stream, Stream) {
+        let mut compute = std::mem::take(&mut self.scratch_compute);
+        let mut graphics = std::mem::take(&mut self.scratch_graphics);
+        compute.clear();
+        graphics.clear();
+        (compute, graphics)
+    }
+
+    /// Keeps the streams' allocations for the next frame.
+    fn recycle(&mut self, mut compute: Stream, mut graphics: Stream) {
+        compute.clear();
+        graphics.clear();
+        self.scratch_compute = compute;
+        self.scratch_graphics = graphics;
+    }
+
     pub(crate) fn find(&self, compute: &[Cmd], graphics: &[Cmd]) -> Option<usize> {
         self.variants
             .iter()
@@ -134,13 +281,19 @@ pub struct RecordingCacheStats {
     /// Why it was not, when it was not.
     pub inactive_reason: Option<&'static str>,
     pub units: Vec<UnitCacheStats>,
+    /// Passes recorded straight into wgpu last frame, and why.
+    pub direct: Vec<(&'static str, &'static str)>,
 }
 
 #[derive(Clone, Debug)]
 pub struct UnitCacheStats {
+    /// The pass, or a fused chain's passes joined with `+`.
     pub pass: &'static str,
     pub hits: u64,
     pub misses: u64,
+    /// Frames it was recorded directly because it missed
+    /// `MISS_STREAK_LIMIT` (8) frames in a row.
+    pub bypassed: u64,
     pub cached_variants: usize,
     /// Set when the unit is recorded straight into wgpu instead.
     pub uncacheable: Option<&'static str>,
