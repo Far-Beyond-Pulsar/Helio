@@ -327,8 +327,34 @@ scatters into the table (`chunk_table.wgsl`):
 
 The descent's coarse share fell from 6.9% to 5.1%.
 
-Left for phase 2: crossfades between levels, residency by ray reach
-(caves), and face-edge neighbours.
+### Crossfades between levels
+
+A tile replaced by finer or coarser ones no longer pops: for 16 frames
+both levels are drawn and each pixel shows one, by a dither that moves
+each frame, so TSR blends them (`drawn.rs`). A fading tile's state in the
+chunk table holds its first frame; the trace works out the fade's progress
+q from its own frame, so a fade costs nothing while it runs. Incoming
+tiles show where the dither is under q, outgoing ones where it is not, so
+every point is shown once (a test checks this for every frame and dither
+over random cuts, with plans that land mid-fade). A pixel at a tile it
+does not show looks finer under the coarse side and coarser over the fine
+side; air in a finer tile is crossed in that tile's own frame (in the
+coarser frame its top rounded and rays stalled). A plan that changes a
+switch under way ends it at once, with every switch it overlaps.
+
+| Cruise (1080p), interleaved | without fades | with fades |
+|---|---|---|
+| fading tiles, mean | 0 | 2,450 (5% of drawn) |
+| hits / seeded rays | 0.998 | 0.998 |
+| primary p50 | 2.72, 2.85 ms | 2.98, 3.27 ms |
+| update CPU p50 | 1.92, 1.86 ms | 2.37, 2.59 ms |
+
+Settled views pay about 0.1 ms (mountain hold, fastest of four
+interleaved runs: 4.07 -> 4.18 ms; runs vary 4.1-5.3 ms with the GPU's
+clocks).
+
+Left for phase 2: residency by ray reach (caves) and face-edge
+neighbours.
 
 ## References
 

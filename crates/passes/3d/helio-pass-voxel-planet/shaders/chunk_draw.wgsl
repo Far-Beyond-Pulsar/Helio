@@ -30,7 +30,7 @@ struct DrawParams {
     eye_lo: vec4<f32>,
     sun: vec4<f32>,  // direction to the sun (xyz), camera near plane (w)
     debug: vec4<u32>, // x: colour by level
-    table: vec4<u32>, // x: chunk table slots - 1; y: base cells per face edge; z: boxes drawn from inside
+    table: vec4<u32>, // x: chunk table slots - 1; y: base cells per face edge; z: boxes drawn from inside; w: frame
 }
 
 // A chunk's frame, written when it is generated: M's columns and M^-1's
@@ -80,9 +80,10 @@ struct ChunkMeta {
 @group(0) @binding(7) var<uniform> palette: array<vec4<f32>, 32>;
 @group(0) @binding(8) var<storage, read> mid_materials: array<u32>;
 // Open addressing (`drawn.rs`): chunks, key (face | level << 8, cx, cy, cz)
-// then (slot, 0, 0, 0); the drawn cut's columns, key (.., COLUMN) then
-// (lo, hi, top, drawn): a drawn tile's layers [lo, hi), the top solid cell
-// under the column (exclusive). An empty entry's key x is -1.
+// then (slot, state, 0, 0); the drawn cut's columns, key (.., COLUMN) then
+// (lo, hi, top, state): a drawn tile's layers [lo, hi), the top solid cell
+// under the column (exclusive), and whether a pixel shows it (`choice`).
+// An empty entry's key x is -1.
 @group(0) @binding(10) var<storage, read> chunk_table: array<vec4<i32>>;
 @group(0) @binding(11) var<storage, read> chunk_keys: array<vec4<i32>>;
 // This frame's boxes: chunk slots, those holding the eye first.
@@ -273,6 +274,28 @@ fn pixel_ray(p: vec2<u32>, size: vec2<u32>) -> vec3<f32> {
     return normalize(far.xyz / far.w);
 }
 
+// What a pixel with dither `r` does at a tile of `state` (`drawn::choice`):
+// 1 shows it, 0 looks finer (an ancestor, or the coarse side of a switch
+// between levels this pixel does not show), 2 coarser (the fine side).
+// A fading tile's state holds its first frame: the fade's progress q (of
+// 1024) comes from this frame's.
+fn choice(state: i32, r: i32) -> i32 {
+    if state < 2 { return state; }
+    let f = state - 2;
+    let elapsed = (params.table.w - u32(f >> 2u)) & 0xfffffu;
+    let q = i32(min(elapsed * 1024u / FADE_FRAMESu, 1024u));
+    if (r < q) == ((f & 1) != 0) { return 1; }
+    return select(2, 0, (f & 2) != 0);
+}
+
+// A pixel's dither in [0, 1024) for switches between levels: interleaved
+// gradient noise moved each frame, so TSR blends the two levels.
+fn fade_dither(p: vec2<u32>) -> i32 {
+    let shift = 5.588238 * f32(params.table.w % 64u);
+    let q = vec2<f32>(p) + shift;
+    return i32(fract(52.9829189 * fract(0.06711056 * q.x + 0.00583715 * q.y)) * 1024.0);
+}
+
 // Cell `cell` of `level` (at `frac` within it) as a cell of `level + diff`:
 // coarser for diff > 0, finer for diff < 0.
 fn cell_at(cell: vec3<i32>, frac: vec3<f32>, diff: i32) -> vec3<i32> {
@@ -282,53 +305,67 @@ fn cell_at(cell: vec3<i32>, frac: vec3<f32>, diff: i32) -> vec3<i32> {
 }
 
 // What a ray meets at a cell: a drawn chunk (`slot`), or air to cross,
-// cells [lo, hi) of `level + diff`; `diff` LOST off the drawn cut.
+// cells [lo, hi) of `level` (LOST: off the drawn cut), in the frame of
+// chunk `frame` when it is finer than the ray's (else NONE).
 struct Place {
     slot: u32,
-    diff: i32,
+    level: i32,
     lo: vec3<i32>,
     hi: vec3<i32>,
+    frame: u32,
 }
 
 const LOST: i32 = 99;
 // A column entry's layer key (`drawn::COLUMN`).
 const COLUMN: i32 = -2147483647 - 1;
 
-// The place at cell `cell` of `level` (at `frac` within it) on `face`:
-// the drawn tile over its column (this level's, else a coarser one where
-// this level has no column, else a finer one under an ancestor's), then
-// the chunk at its layer, an empty layer, or the air over the tile, grown
-// to the coarsest column whose whole subtree lies under the cell.
-fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>) -> Place {
-    // Mostly the next chunk of the same level (only drawn chunks are in
-    // the table).
+// The place at cell `cell` of `level` (at `frac` within it) on `face`, for
+// a pixel of dither `r`: the tile it shows over the column (this level's,
+// else a coarser one where this level shows none, else a finer one under
+// an ancestor's), then the chunk at its layer, an empty layer, or the air
+// over the tile, grown to the coarsest column whose whole subtree lies
+// under the cell.
+fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32) -> Place {
+    // Mostly the next chunk of the same level.
     let same = find_entry(vec4<i32>(face | (level << 8), cell >> vec3<u32>(6u)));
-    if same != NONE { return Place(bitcast<u32>(chunk_table[same * 2u + 1u].x), 0, vec3<i32>(0), vec3<i32>(0)); }
-    let lost = Place(NONE, LOST, vec3<i32>(0), vec3<i32>(0));
+    if same != NONE {
+        let v = chunk_table[same * 2u + 1u];
+        if choice(v.y, r) == 1 { return Place(bitcast<u32>(v.x), level, vec3<i32>(0), vec3<i32>(0), NONE); }
+    }
+    let lost = Place(NONE, LOST, vec3<i32>(0), vec3<i32>(0), NONE);
     var diff = 0;
     var way = 0;
     var column = vec4<i32>(0);
+    var shown = false;
     for (var n = 0u; n < 16u; n++) {
         let c = cell_at(cell, frac, diff);
         let e = find_entry(vec4<i32>(face | ((level + diff) << 8), c.xy >> vec2<u32>(6u), COLUMN));
-        if e == NONE {
-            // Not in the cut here: coarser (a finer search found a hole).
+        var go = 2;
+        if e != NONE {
+            column = chunk_table[e * 2u + 1u];
+            go = choice(column.w, r);
+        }
+        if go == 1 {
+            shown = true;
+            break;
+        }
+        // Coarser; on the way up, past the ancestors of the hidden side of
+        // a switch across levels (a finer search found a hole: lost).
+        if go == 2 || (go == 0 && way > 0) {
             if way < 0 || level + diff >= 30 { return lost; }
             way = 1;
             diff += 1;
-            continue;
+        } else {
+            if way > 0 || diff <= -6 || level + diff <= 0 { return lost; }
+            way = -1;
+            diff -= 1;
         }
-        column = chunk_table[e * 2u + 1u];
-        if column.w == 1 { break; }
-        // An ancestor: finer.
-        if way > 0 || diff <= -6 || level + diff <= 0 { return lost; }
-        way = -1;
-        diff -= 1;
     }
-    if column.w != 1 { return lost; }
+    if !shown { return lost; }
     let c = cell_at(cell, frac, diff);
     let tile = c.xy >> vec2<u32>(6u);
     let layer = c.z >> 6u;
+    let tile_key = face | ((level + diff) << 8);
     if c.z >= column.z {
         var top = column.z;
         var at = tile;
@@ -343,14 +380,24 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>) -> Place {
             top = ptop;
             at = pc.xy >> vec2<u32>(6u);
         }
-        return Place(NONE, up, vec3<i32>(at * 64, top), vec3<i32>(at * 64 + 64, top + (1 << 20)));
+        // Finer than the ray's frame: crossed in the frame of the tile's top
+        // chunk (in coarser cells the top would round).
+        return Place(NONE, level + up, vec3<i32>(at * 64, top), vec3<i32>(at * 64 + 64, top + (1 << 20)), frame_of(up < 0, vec4<i32>(tile_key, tile, (column.z - 1) >> 6u)));
     }
     // Under the tile's chunks: solid, reached only through them.
     if layer < column.x { return lost; }
-    let s = find_entry(vec4<i32>(face | ((level + diff) << 8), tile, layer));
-    if s != NONE { return Place(bitcast<u32>(chunk_table[s * 2u + 1u].x), diff, vec3<i32>(0), vec3<i32>(0)); }
+    let s = find_entry(vec4<i32>(tile_key, tile, layer));
+    if s != NONE { return Place(bitcast<u32>(chunk_table[s * 2u + 1u].x), level + diff, vec3<i32>(0), vec3<i32>(0), NONE); }
     // An empty layer among them.
-    return Place(NONE, diff, vec3<i32>(tile * 64, layer * 64), vec3<i32>(tile * 64 + 64, layer * 64 + 64));
+    return Place(NONE, level + diff, vec3<i32>(tile * 64, layer * 64), vec3<i32>(tile * 64 + 64, layer * 64 + 64), frame_of(diff < 0, vec4<i32>(tile_key, tile, column.x)));
+}
+
+// Chunk `k`'s slot when `wanted` and drawn, else NONE.
+fn frame_of(wanted: bool, k: vec4<i32>) -> u32 {
+    if !wanted { return NONE; }
+    let e = find_entry(k);
+    if e == NONE { return NONE; }
+    return bitcast<u32>(chunk_table[e * 2u + 1u].x);
 }
 
 // Cell corner `a` of level `level + diff` in the cells of chunk `key` (of
@@ -396,6 +443,37 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     var cube_lo = vec3<i32>(0);
     var cube_hi = vec3<i32>(64);
     var real = true;
+    let r = fade_dither(id.xy);
+    // Both levels of a switch are drawn: a box of the one this pixel does
+    // not show starts the walk where the ray enters it.
+    let own = find_entry(key);
+    if own != NONE && choice(chunk_table[own * 2u + 1u].y, r) != 1 {
+        let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w);
+        let d = vec3<f32>(dot(frame.i0.xyz, dir), dot(frame.i1.xyz, dir), dot(frame.i2.xyz, dir));
+        let inv = 1.0 / select(d, vec3<f32>(1e-30), d == vec3<f32>(0.0));
+        let ta = (vec3<f32>(0.0, 0.0, frame.box.x) - o) * inv;
+        let tb = (vec3<f32>(64.0, 64.0, frame.box.y) - o) * inv;
+        let lo = min(ta, tb);
+        t_prev = max(max(lo.x, max(lo.y, lo.z)), t_prev);
+        let q = o + d * t_prev;
+        let local = clamp(vec3<i32>(floor(q)), vec3<i32>(0, 0, i32(frame.box.x)), vec3<i32>(63, 63, i32(frame.box.y) - 1));
+        let next = place_at(key.x & 7, key.x >> 8u, key.yzw * 64 + local, clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999)), r);
+        if next.slot != NONE {
+            frame = chunk_frame(next.slot);
+            key = chunk_keys[next.slot];
+        } else if next.level == LOST {
+            textureStore(out_exits, p, vec4<f32>(t_prev + 1e-4));
+            return;
+        } else {
+            if next.frame != NONE {
+                frame = chunk_frame(next.frame);
+                key = chunk_keys[next.frame];
+            }
+            cube_lo = to_frame(next.lo, next.level - (key.x >> 8u), key, true);
+            cube_hi = to_frame(next.hi, next.level - (key.x >> 8u), key, false);
+            real = false;
+        }
+    }
     // Grazing rays cross many chunks of a level before their hit.
     var chunk = 0u;
     for (; chunk < 128u; chunk++) {
@@ -462,7 +540,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
         var frac = clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999));
         let entry = select(0.999, 0.0, d[axis] > 0.0);
         if axis == 0u { frac.x = entry; } else if axis == 1u { frac.y = entry; } else { frac.z = entry; }
-        let next = place_at(key.x & 7, level, cell, frac);
+        let next = place_at(key.x & 7, level, cell, frac, r);
         if next.slot != NONE {
             frame = chunk_frame(next.slot);
             key = chunk_keys[next.slot];
@@ -470,13 +548,17 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
             cube_hi = vec3<i32>(64);
             real = true;
         } else {
-            if next.diff == LOST {
+            if next.level == LOST {
                 COUNT(10)
                 break;
             }
-            // Air, crossed in this frame.
-            cube_lo = to_frame(next.lo, next.diff, key, true);
-            cube_hi = to_frame(next.hi, next.diff, key, false);
+            // Air, crossed in this frame or the finer one given.
+            if next.frame != NONE {
+                frame = chunk_frame(next.frame);
+                key = chunk_keys[next.frame];
+            }
+            cube_lo = to_frame(next.lo, next.level - (key.x >> 8u), key, true);
+            cube_hi = to_frame(next.hi, next.level - (key.x >> 8u), key, false);
             real = false;
         }
     }

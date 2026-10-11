@@ -994,6 +994,9 @@ fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
     let png = std::env::var("HELIO_VOXEL_CHUNKS_PNG").ok();
     let mut pending = std::collections::VecDeque::new();
     let (mut times, mut update_ms, mut coarse, mut requests, mut resident) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), 0);
+    let mut fading = Vec::new();
+    let counting = std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some();
+    let mut counts = [0u64; 7];
     let (mut generate_ms, mut per_tile) = (Vec::new(), Vec::new());
     for n in 0..frames {
         let frame = start + n;
@@ -1023,6 +1026,14 @@ fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
             }
         }
         coarse.push(stats.coarse_share);
+        fading.push(stats.fading_tiles as f64);
+        // `HELIO_VOXEL_CHUNKS_COUNT`: the traces' counts over the flight.
+        if counting && n % 30 == 29 {
+            let c = world.take_counts();
+            for (sum, v) in counts.iter_mut().zip([c.seeded, c.hits, c.steps, c.boxes, c.missed, c.missed_boxes, c.lost]) {
+                *sum += u64::from(v);
+            }
+        }
         budgets.push(stats.budget as f64);
         for (p, v) in phases.iter_mut().zip(stats.cpu_ms) {
             *p += v / frames as f64;
@@ -1050,6 +1061,18 @@ fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
         }
     }
     let lagging = coarse.iter().filter(|&&c| c > 0.02).count();
+    eprintln!("CHUNKFLY {mode} fading tiles mean {:.0} max {:.0}", fading.iter().sum::<f64>() / fading.len().max(1) as f64, fading.iter().copied().fold(0.0, f64::max));
+    if counting {
+        let [seeded, hits, steps, boxes, missed, missed_boxes, lost] = counts.map(|v| v as f64);
+        eprintln!(
+            "CHUNKFLY {mode} counts: hits/seeded {:.3} steps/seeded {:.1} boxes/seeded {:.2}; missed/seeded {:.4}, {:.1} boxes each, lost {lost}",
+            hits / seeded.max(1.0),
+            steps / seeded.max(1.0),
+            boxes / seeded.max(1.0),
+            missed / seeded.max(1.0),
+            missed_boxes / missed.max(1.0)
+        );
+    }
     eprintln!("CHUNKFLY {mode} update cpu mean by phase (results, plan, evict, generate, drawn, table): {phases:.2?}");
     eprintln!(
         "CHUNKFLY {mode} summary: frames {frames} coarse mean {:.4} max {:.3} frames over 2% {lagging} | requests p50 {:.0} max {:.0} | primary p50 {:.3} p95 {:.3} | generate p50 {:.3} p95 {:.3} ms, {:.1} us a tile, budget p50 {:.0} | update cpu p50 {:.2} p95 {:.2} ms | resident {resident} chunks {:.1} MB",

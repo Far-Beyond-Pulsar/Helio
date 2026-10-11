@@ -321,6 +321,8 @@ pub struct UpdateStats {
     /// Tiles regenerated because their measured layers left their chunks.
     pub regenerated_tiles: usize,
     pub drawn_tiles: usize,
+    /// Drawn tiles fading in or out of a switch between levels.
+    pub fading_tiles: usize,
     pub drawn_chunks: usize,
     pub resident_chunks: usize,
     /// Drawn tiles in view coarser than wanted, as a share of the drawn
@@ -552,6 +554,7 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
                 ""
             },
         )
+        .replace("FADE_FRAMES", &drawn::FADE_FRAMES.to_string())
         .replace("COUNT(3)", &count(3))
         .replace("COUNT(8)", &count(8))
         .replace("COUNT(10)", &count(10))
@@ -1125,7 +1128,7 @@ impl ChunkWorld {
                     .collect()
             })
         };
-        self.drawn_set.update(&added, &removed, &self.changed_tiles, chunks_of);
+        self.drawn_set.update(&added, &removed, &self.changed_tiles, frame, chunks_of);
         self.changed_tiles.clear();
         lap(&mut stats, 4);
         // One upload of the changed entries, scattered on the GPU.
@@ -1140,6 +1143,7 @@ impl ChunkWorld {
         }
         lap(&mut stats, 5);
         stats.drawn_tiles = self.drawn_set.tile_count();
+        stats.fading_tiles = self.drawn_set.fading();
         self.last_generated = stats.generated_tiles;
         // Settled: a plan that saw every event wants nothing more.
         self.last_requests = self.plan.requests.iter().filter(|(k, _)| !self.tiles.contains_key(k)).count() + usize::from(unseen || !self.events.is_empty() || stats.generated_tiles > 0);
@@ -1300,7 +1304,7 @@ impl ChunkWorld {
                     pixel.get(1).copied().unwrap_or(u32::MAX),
                 ]
             },
-            table: [self.drawn_set.mask(), self.face_cells, self.boxes.0, 0],
+            table: [self.drawn_set.mask(), self.face_cells, self.boxes.0, frame as u32],
         };
         self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
