@@ -244,6 +244,40 @@ steps at about 700 lane-cycles, this one about 400. Next for primary: steps
 near surfaces (leaf-level distance, a per-column top in leaves), the start
 of each ray from the previous frame's hit chunk.
 
+## Phase 2a results (2026-10-11): streaming
+
+`src/chunks/residency.rs` (the planner, on its own thread),
+`src/chunks/drawn.rs` (the drawn set and chunk table, updated by what
+changed), `ChunkWorld::update`; the flight harness's
+`HELIO_VOXEL_CHUNKS_FLY=descent|cruise` (60 simulated frames a second,
+the spawn loaded first).
+
+- A refined tile stays drawn until all four children are generated, and
+  children are requested only once their parent's layers are measured (2
+  frames): a child's chunks then span only layers that can hold a surface
+  (~2 chunks a tile; estimates from unmeasured parents made 14, mostly
+  empty). A settled mountain loads in 6.2 s instead of 123.
+- Leaves live in blocks of 9 size classes with free stacks on the GPU;
+  evicted chunks return their blocks (`evict` pass); slots are recycled on
+  the CPU. Generation results come back without waiting (a readback ring).
+- Chunk frames are written once per slot (origin as a high and a low f32,
+  rebased to the eye on the GPU); a frame uploads only the list of drawn
+  slots (draw CPU 42 -> 1.6 ms). The drawn set and the chunk table change
+  by tiles (table 12 -> 0.7 ms a frame), the plan runs on a worker thread
+  (update CPU 40 -> 2 ms p50).
+- Tiles in view are generated first; the budget is GPU time (3 ms a frame
+  at 50 us a tile: ~55 tiles).
+
+| Flight (1080p) | coarse in view, mean | primary p50 | generation p50 | update CPU p50 |
+|---|---|---|---|---|
+| cruise, 300 m/s at 34 m | 6.5% | 2.5 ms | 2.7 ms | 2.0 ms |
+| descent, 400 km to 2 m in 12 s | 6.9% | 1.3 ms | 2.8 ms | 2.3 ms |
+
+`coarse` is the share of drawn tiles in view whose cells project larger
+than 1.5 px: detail still to arrive. Cruise at 300 m/s and 34 m needs about
+4,000 new tiles a second at the finest two levels; generation at 50 us a
+tile spends 3 ms a frame on it.
+
 ## References
 
 Laine and Karras, *Efficient Sparse Voxel Octrees* (2010); Crassin et al.,

@@ -20,13 +20,32 @@
 struct DrawParams {
     view_proj: mat4x4<f32>,
     inverse_view_proj: mat4x4<f32>,
+    // The eye, planet-centred, as a high and a low f32 part.
+    eye_hi: vec4<f32>,
+    eye_lo: vec4<f32>,
     sun: vec4<f32>,  // direction to the sun (xyz), camera near plane (w)
     debug: vec4<u32>, // x: colour by level
-    table: vec4<u32>, // x: chunk table slots - 1; y: base cells per face edge
+    table: vec4<u32>, // x: chunk table slots - 1; y: base cells per face edge; z: boxes drawn from inside
 }
 
-// A chunk as drawn: its frame relative to the eye. Local cell coordinates
-// c map to the world as O + M c; the eye is at local `o`.
+// A chunk's frame, written when it is generated: M's columns and M^-1's
+// rows (xyz), its origin planet-centred as a high and a low f32 part, and
+// its occupied layers [lo, hi), slot and flags (bit 0: the frame mirrors
+// x; bits 8..16: level).
+struct ChunkStatic {
+    m0: vec4<f32>,
+    m1: vec4<f32>,
+    m2: vec4<f32>,
+    i0: vec4<f32>,
+    i1: vec4<f32>,
+    i2: vec4<f32>,
+    origin_hi: vec4<f32>,
+    origin_lo: vec4<f32>,
+    box: vec4<f32>,
+}
+
+// A chunk as drawn: its frame relative to the eye (`chunk_frame`). Local
+// cell coordinates c map to the world as O + M c; the eye is at local `o`.
 struct ChunkDraw {
     m0: vec4<f32>, // M's columns (xyz) and O (w)
     m1: vec4<f32>,
@@ -34,9 +53,7 @@ struct ChunkDraw {
     i0: vec4<f32>, // M^-1's rows (xyz) and o (w)
     i1: vec4<f32>,
     i2: vec4<f32>,
-    // Lowest and one past the highest occupied layer, chunk slot, flags
-    // (bit 0: the frame mirrors x; bit 1: the box holds the eye; bits
-    // 8..16: level).
+    // As in `ChunkStatic`.
     box: vec4<f32>,
 }
 
@@ -45,11 +62,11 @@ struct ChunkMeta {
     root_full: vec2<u32>,
     z: vec2<i32>,
     leaves: u32,
-    status: u32,
+    block: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: DrawParams;
-@group(0) @binding(1) var<storage, read> instances: array<ChunkDraw>;
+@group(0) @binding(1) var<storage, read> statics: array<ChunkStatic>;
 @group(0) @binding(2) var<storage, read> chunk_meta: array<ChunkMeta>;
 @group(0) @binding(3) var<storage, read> mids: array<vec4<u32>>;
 @group(0) @binding(4) var<storage, read> mid_leaves: array<u32>;
@@ -61,8 +78,17 @@ struct ChunkMeta {
 // an empty entry's key x is -1.
 @group(0) @binding(10) var<storage, read> chunk_table: array<vec4<i32>>;
 @group(0) @binding(11) var<storage, read> chunk_keys: array<vec4<i32>>;
-// Each slot's index among this frame's drawn chunks (none: u32::MAX).
-@group(0) @binding(12) var<storage, read> slot_instance: array<u32>;
+// This frame's boxes: chunk slots, those holding the eye first.
+@group(0) @binding(12) var<storage, read> draw_list: array<u32>;
+
+// Chunk `slot`'s frame relative to the eye.
+fn chunk_frame(slot: u32) -> ChunkDraw {
+    let s = statics[slot];
+    let origin = (s.origin_hi.xyz - params.eye_hi.xyz) + (s.origin_lo.xyz - params.eye_lo.xyz);
+    let o = -vec3<f32>(dot(s.i0.xyz, origin), dot(s.i1.xyz, origin), dot(s.i2.xyz, origin));
+    return ChunkDraw(vec4<f32>(s.m0.xyz, origin.x), vec4<f32>(s.m1.xyz, origin.y), vec4<f32>(s.m2.xyz, origin.z),
+        vec4<f32>(s.i0.xyz, o.x), vec4<f32>(s.i1.xyz, o.y), vec4<f32>(s.i2.xyz, o.z), s.box);
+}
 COUNTERS
 
 const NONE: u32 = 0xffffffffu;
@@ -91,6 +117,7 @@ fn find_chunk(k: vec4<i32>) -> u32 {
 
 struct VOut {
     @builtin(position) position: vec4<f32>,
+    // The box's chunk slot.
     @location(0) @interpolate(flat) instance: u32,
     @location(1) world: vec3<f32>,
 }
@@ -111,18 +138,19 @@ const CORNERS = array<u32, 36>(
 
 @vertex
 fn seed_vertex(@builtin(vertex_index) v: u32, @builtin(instance_index) n: u32) -> VOut {
-    let c = instances[n];
+    let slot = draw_list[n];
+    let c = chunk_frame(slot);
     let corner = CORNERS[v];
     var x = f32(corner & 1u) * 64.0;
     // Mirroring x maps the box onto itself and reverses its winding: a
     // left-handed frame, or a box drawn from inside (its back faces).
-    let flags = bitcast<u32>(c.box.w);
-    if ((flags & 1u) != 0u) != ((flags & 2u) != 0u) { x = 64.0 - x; }
+    let mirrored = (bitcast<u32>(c.box.w) & 1u) != 0u;
+    if mirrored != (n < params.table.z) { x = 64.0 - x; }
     let local = vec3<f32>(x, f32((corner >> 1u) & 1u) * 64.0, select(c.box.x, c.box.y, (corner & 4u) != 0u));
     let world = vec3<f32>(c.m0.w, c.m1.w, c.m2.w) + c.m0.xyz * local.x + c.m1.xyz * local.y + c.m2.xyz * local.z;
     var out: VOut;
     out.position = params.view_proj * vec4<f32>(world, 1.0);
-    out.instance = n;
+    out.instance = slot;
     out.world = world;
     return out;
 }
@@ -250,8 +278,7 @@ fn neighbour(k: vec4<i32>, level: i32, cell: vec3<i32>, half: vec3<i32>) -> u32 
     if slot == NONE && level > 0 {
         slot = find_chunk(vec4<i32>(face | ((level - 1) << 8), ((cell << vec3<u32>(1u)) + half) >> vec3<u32>(6u)));
     }
-    if slot == NONE { return NONE; }
-    return slot_instance[slot];
+    return slot;
 }
 
 @compute @workgroup_size(8, 8)
@@ -278,7 +305,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     // The chunk whose frame the ray is in, and the chunk-sized cube it is
     // crossing in that frame's cells: the chunk itself, or space next to
     // it where no chunk is (air), crossed as an empty chunk of its level.
-    var frame = instances[box];
+    var frame = chunk_frame(box);
     var key = chunk_keys[bitcast<u32>(frame.box.z)];
     var cube = vec3<i32>(0);
     var real = true;
@@ -344,7 +371,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
         let half = vec3<i32>(fract(q) >= vec3<f32>(0.5));
         let next = neighbour(key, level, cell, half);
         if next != NONE {
-            frame = instances[next];
+            frame = chunk_frame(next);
             key = chunk_keys[bitcast<u32>(frame.box.z)];
             cube = vec3<i32>(0);
             real = true;

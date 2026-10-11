@@ -12,7 +12,10 @@
 // 2. `chunk_columns`: each column's 64 cells in a chunk as a 64-bit mask
 //    (bit z: layer `64 cz + z`), with volume terms and brushes, and the
 //    material of its highest solid cell.
-// 3. `chunk_build`: the chunk's 64-tree from its column masks.
+// 3. `chunk_build`: the chunk's 64-tree from its column masks, its leaves
+//    in a block of a size class (16 << class leaves) taken from that
+//    class's free blocks or the pool's end.
+// 4. `evict`: evicted chunks' blocks back to their class's free blocks.
 
 const TILE_COLUMNS: u32 = 4096u;
 // Height of a tile column past the face's edge.
@@ -50,10 +53,14 @@ struct ChunkMeta {
     root_full: vec2<u32>,
     // Lowest and one past the highest occupied layer of the chunk (cells).
     z: vec2<i32>,
-    // Leaves stored for the chunk (0: none).
+    // Leaves stored for the chunk (0: none) and their block (NONE: none).
     leaves: u32,
-    status: u32, // 1 built, 2 out of leaf storage
+    block: u32,
 }
+
+const NONE: u32 = 0xffffffffu;
+// Leaf block size classes: 16 << class leaves.
+const CLASSES: u32 = 9u;
 
 @group(0) @binding(1) var<uniform> world: World;
 @group(0) @binding(16) var<uniform> terrain: TerrainConstants;
@@ -68,7 +75,58 @@ struct ChunkMeta {
 @group(0) @binding(10) var<storage, read_write> mids: array<vec4<u32>>;
 @group(0) @binding(11) var<storage, read_write> mid_leaves: array<u32>;
 @group(0) @binding(12) var<storage, read_write> leaves: array<vec2<u32>>;
-@group(0) @binding(13) var<storage, read_write> leaf_alloc: array<atomic<u32>>;
+// The pool's end (leaves), an overflow flag, then each class's count of
+// free blocks.
+@group(0) @binding(13) var<storage, read_write> leaf_alloc: array<atomic<i32>>;
+// Each class's free blocks (first leaf), from `stack_base`.
+@group(0) @binding(20) var<storage, read_write> free_blocks: array<u32>;
+// Per chunk job: slot, occupied layers [lo, hi), flags (1 built, 2 empty,
+// 4 solid throughout, 8 out of leaf storage).
+@group(0) @binding(19) var<storage, read_write> job_results: array<vec4<i32>>;
+// Slots evicted this frame.
+@group(0) @binding(21) var<storage, read> evictions: array<u32>;
+
+fn class_of(n: u32) -> u32 {
+    var c = 0u;
+    while (16u << c) < n { c += 1u; }
+    return c;
+}
+
+// First entry of class `c`'s free blocks: room for every block of each
+// smaller class.
+fn stack_base(c: u32) -> u32 {
+    var b = 0u;
+    for (var k = 0u; k < c; k++) { b += arrayLength(&leaves) / (16u << k); }
+    return b;
+}
+
+// A block of `n` leaves (NONE: out of storage).
+fn allocate(n: u32) -> u32 {
+    let c = class_of(n);
+    let i = atomicSub(&leaf_alloc[2u + c], 1);
+    if i > 0 { return free_blocks[stack_base(c) + u32(i - 1)]; }
+    atomicAdd(&leaf_alloc[2u + c], 1);
+    let size = i32(16u << c);
+    let b = atomicAdd(&leaf_alloc[0], size);
+    if u32(b) + u32(size) > arrayLength(&leaves) {
+        atomicStore(&leaf_alloc[1], 1);
+        return NONE;
+    }
+    return u32(b);
+}
+
+@compute @workgroup_size(64)
+fn evict(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= arrayLength(&evictions) { return; }
+    let slot = evictions[id.x];
+    let m = chunk_meta[slot];
+    if m.block == NONE || m.leaves == 0u { return; }
+    let c = class_of(m.leaves);
+    let i = atomicAdd(&leaf_alloc[2u + c], 1);
+    free_blocks[stack_base(c) + u32(i)] = m.block;
+    chunk_meta[slot].block = NONE;
+    chunk_meta[slot].leaves = 0u;
+}
 // Scratch per chunk job: each column's material (`chunk_columns_main`).
 @group(0) @binding(14) var<storage, read_write> column_materials: array<u32>;
 // A material byte per stored leaf (four a word) and per mid node: what a
@@ -266,6 +324,7 @@ var<workgroup> w_full: array<atomic<u32>, 128>;
 var<workgroup> w_base: array<u32, 64>;
 var<workgroup> w_z: array<atomic<i32>, 2>;
 var<workgroup> w_total: u32;
+var<workgroup> w_block: u32;
 var<workgroup> w_mid_material: array<atomic<u32>, 64>;
 
 fn rank64(m: vec2<u32>, b: u32) -> u32 {
@@ -336,12 +395,9 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
             let full = vec2<u32>(atomicLoad(&w_full[m * 2u]), atomicLoad(&w_full[m * 2u + 1u]));
             total += countOneBits(occ.x & ~full.x) + countOneBits(occ.y & ~full.y);
         }
-        let base = atomicAdd(&leaf_alloc[0], total);
-        var status = 1u;
-        if base + total > arrayLength(&leaves) {
-            atomicStore(&leaf_alloc[1], 1u);
-            status = 2u;
-        }
+        var base = NONE;
+        if total > 0u { base = allocate(total); }
+        let overflow = total > 0u && base == NONE;
         var root_occ = vec2<u32>(0u);
         var root_full = vec2<u32>(0u);
         for (var m = 0u; m < 64u; m++) {
@@ -359,11 +415,25 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
                 if m < 32u { root_full.x |= bit; } else { root_full.y |= bit; }
             }
         }
-        w_total = select(total, 0u, status == 2u);
-        chunk_meta[job.slot] = ChunkMeta(root_occ, root_full, vec2<i32>(atomicLoad(&w_z[0]), atomicLoad(&w_z[1])), total, status);
+        w_total = select(total, 0u, overflow);
+        w_block = base;
+        let z = vec2<i32>(atomicLoad(&w_z[0]), atomicLoad(&w_z[1]));
+        chunk_meta[job.slot] = ChunkMeta(root_occ, root_full, z, select(total, 0u, overflow), select(base, NONE, overflow));
+        var flags = 1;
+        if root_occ.x == 0u && root_occ.y == 0u { flags |= 2; }
+        if root_full.x == 0xffffffffu && root_full.y == 0xffffffffu { flags |= 4; }
+        if overflow { flags |= 8; }
+        job_results[wg.x] = vec4<i32>(i32(job.slot), z.x, z.y, flags);
     }
     workgroupBarrier();
-    if workgroupUniformLoad(&w_total) == 0u { return; }
+    let total = workgroupUniformLoad(&w_total);
+    if total == 0u { return; }
+    // The block's material bytes from earlier owners, cleared.
+    let block = w_block;
+    for (var w = block / 4u + t; w < (block + (16u << class_of(total))) / 4u; w += 256u) {
+        atomicStore(&leaf_materials[w], 0u);
+    }
+    storageBarrier();
     for (var lz = 0u; lz < 16u; lz++) {
         let m = (lx >> 2u) + (ly >> 2u) * 4u + (lz >> 2u) * 16u;
         let l = (lx & 3u) + (ly & 3u) * 4u + (lz & 3u) * 16u;

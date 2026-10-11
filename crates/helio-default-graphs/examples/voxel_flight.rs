@@ -718,19 +718,61 @@ fn highest_near(planet: &Planet, face: u8, fi: f64, fj: f64, span: f64) -> (DVec
 /// then draw it for `HELIO_VOXEL_FLIGHT_HOLD_SECONDS` with pipelined
 /// frames and print the median primary time (`CHUNKHOLD`). With
 /// `HELIO_VOXEL_CHUNKS_PNG=<path>` the colour target is saved.
+/// Residency settings for chunk trees at the flight's resolution
+/// (`HELIO_VOXEL_LOD_PIXELS`, `HELIO_VOXEL_CHUNKS_BUDGET` tiles a frame).
+fn chunk_config(h: u32, budget: usize) -> helio_pass_voxel_planet::chunks::ResidencyConfig {
+    use helio_pass_voxel_planet::chunks::{residency::PlanConfig, ResidencyConfig};
+    let lod: f64 = std::env::var("HELIO_VOXEL_LOD_PIXELS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    let budget = std::env::var("HELIO_VOXEL_CHUNKS_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(budget);
+    ResidencyConfig {
+        plan: PlanConfig {
+            pixel_angle: 2.0 * std::f64::consts::FRAC_PI_8.tan() / f64::from(h),
+            lod_pixels: lod,
+            coarsen: 0.8,
+            max_distance: 400_000.0,
+            prefetch_seconds: 0.5,
+            keep_frames: 120,
+        },
+        tiles_per_frame: budget,
+        // `HELIO_VOXEL_CHUNKS_GENERATE_MS`: GPU generation a frame.
+        generate_ms: std::env::var("HELIO_VOXEL_CHUNKS_GENERATE_MS").ok().and_then(|v| v.parse().ok()),
+    }
+}
+
+/// Run chunk residency for a still eye until nothing is left to generate.
+fn chunk_settle(flight: &Flight, world: &mut helio_pass_voxel_planet::chunks::ChunkWorld, eye: DVec3, frame: &mut u64) -> f64 {
+    let config = chunk_config(flight.size[1], 512);
+    let started = Instant::now();
+    loop {
+        let mut encoder = flight.device.create_command_encoder(&Default::default());
+        let cpu = Instant::now();
+        let stats = world.update(&mut encoder, eye, DVec3::ZERO, None, *frame, &config);
+        if *frame % 50 == 0 || std::env::var_os("HELIO_VOXEL_CHUNKS_TRACE").is_some() {
+            eprintln!("CHUNKSETTLE {} cpu {:.1} ms {stats:?}", *frame, cpu.elapsed().as_secs_f64() * 1e3);
+        }
+        flight.queue.submit([encoder.finish()]);
+        world.submitted();
+        *frame += 1;
+        if world.settled() {
+            return started.elapsed().as_secs_f64();
+        }
+        if *frame % 8 == 0 {
+            let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+    }
+}
+
 fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
     use helio_pass_voxel_planet::chunks::{ChunkWorld, TIMING_RING};
     let [w, h] = flight.size;
-    let lod: f64 = std::env::var("HELIO_VOXEL_LOD_PIXELS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
     // Report this mode's errors (the run's validation scope is never popped
     // in hold mode).
     let mut internal = Some(flight.device.push_error_scope(wgpu::ErrorFilter::Internal));
     let mut scope = Some(flight.device.push_error_scope(wgpu::ErrorFilter::Validation));
     let mut world = ChunkWorld::new(&flight.device, &flight.queue, &flight.planet);
-    let pixel_angle = 2.0 * std::f64::consts::FRAC_PI_8.tan() / f64::from(h);
-    let stats = world.build(&flight.planet, eye, pixel_angle, lod, 400_000.0);
-    eprintln!("CHUNKS built {view}: {stats:?}");
-    eprintln!("CHUNKS early depth {} int64 {}", flight.device.features().contains(wgpu::Features::SHADER_EARLY_DEPTH_TEST), flight.device.features().contains(wgpu::Features::SHADER_INT64));
+    let mut frame = 0u64;
+    let seconds = chunk_settle(flight, &mut world, eye, &mut frame);
+    eprintln!("CHUNKS settled {view} in {seconds:.2} s ({frame} frames): {} chunks drawn, {:.1} MB", world.chunk_count(), world.resident_bytes() as f64 / 1048576.0);
     let up = up_for(eye);
     let forward = forward.normalize();
     let up = if forward.dot(up).abs() > 0.999 { up.any_orthonormal_vector() } else { up };
@@ -741,21 +783,24 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
     let mut pending = std::collections::VecDeque::new();
     let mut times = Vec::new();
     let mut seed_times = Vec::new();
-    let mut frame = 0u64;
+    let first = frame;
+    let mut draw_cpu = Vec::new();
     while started.elapsed().as_secs_f64() < seconds {
         let mut encoder = flight.device.create_command_encoder(&Default::default());
+        let cpu = Instant::now();
         world.draw(&mut encoder, frame, eye, camera.proj * camera.view, near, flight.sun, [w, h]);
+        draw_cpu.push(cpu.elapsed().as_secs_f64() * 1e3);
         pending.push_back((frame, flight.queue.submit([encoder.finish()])));
         if pending.len() as u64 >= TIMING_RING {
             let (n, submission) = pending.pop_front().unwrap();
             // The first frames compile and warm caches.
-            if let Some([ms, seed]) = world.draw_ms(n, submission).filter(|_| n >= 30) {
+            if let Some([ms, seed, _]) = world.draw_ms(n, submission).filter(|_| n >= first + 30) {
                 times.push(ms);
                 seed_times.push(seed);
             }
         }
         frame += 1;
-        if frame == 2 {
+        if frame == first + 2 {
             if let Some(error) = pollster::block_on(scope.take().unwrap().pop()) {
                 eprintln!("CHUNKS validation: {error}");
             }
@@ -764,6 +809,7 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
             }
         }
     }
+    eprintln!("CHUNKS draw cpu p50 {:.2} ms", percentile(&draw_cpu, 0.5));
     let (outside, inside) = world.drawn();
     if std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some() {
         world.take_counts();
@@ -781,14 +827,12 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
         );
     }
     eprintln!(
-        "CHUNKHOLD {view} n={} primary {:.3} p95 {:.3} seed {:.3} boxes {outside}+{inside} chunks {} MB {:.1} build {:.2} s",
+        "CHUNKHOLD {view} n={} primary {:.3} p95 {:.3} seed {:.3} boxes {outside}+{inside} chunks {}",
         times.len(),
         percentile(&times, 0.5),
         percentile(&times, 0.95),
         percentile(&seed_times, 0.5),
         world.chunk_count(),
-        stats.bytes as f64 / 1048576.0,
-        stats.seconds
     );
     // `HELIO_VOXEL_CHUNKS_PROBE=x,y;x,y`: each pixel's chunk hit against
     // the exact CPU raycast.
@@ -839,25 +883,152 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
         }
     }
     if let Ok(path) = std::env::var("HELIO_VOXEL_CHUNKS_PNG") {
-        let row = (w * 4).div_ceil(256) * 256;
-        let buffer = flight.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row) * u64::from(h), usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
-        let mut encoder = flight.device.create_command_encoder(&Default::default());
-        encoder.copy_texture_to_buffer(
-            world.targets().unwrap().colour.as_image_copy(),
-            wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        );
-        flight.queue.submit([encoder.finish()]);
-        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        flight.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
-        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
-        for y in 0..h {
-            let at = (y * row) as usize;
-            pixels.extend_from_slice(&data[at..at + (w * 4) as usize]);
-        }
-        image::save_buffer(&path, &pixels, w, h, image::ColorType::Rgba8).unwrap();
+        save_chunk_colour(flight, &world, &path);
     }
+}
+
+/// `HELIO_VOXEL_CHUNKS_FLY=descent|cruise`: chunk trees streamed along a
+/// path at 60 simulated frames a second (`HELIO_VOXEL_CHUNKS_BUDGET` tiles
+/// generated a frame): how far the drawn detail lags what is wanted
+/// (`coarse`, the share of drawn tiles coarser than 1.5x the target), the
+/// primary time and the CPU update time. `HELIO_VOXEL_CHUNKS_PNG=<prefix>`
+/// saves a frame each second.
+fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
+    use helio_pass_voxel_planet::chunks::{ChunkWorld, TIMING_RING};
+    let [w, h] = flight.size;
+    let config = chunk_config(h, 64);
+    let mut world = ChunkWorld::new(&flight.device, &flight.queue, &flight.planet);
+    let up = ground.normalize();
+    let mut budgets = Vec::new();
+    let mut phases = [0.0f64; 6];
+    let ahead = tangent(ground, heading).as_dvec3();
+    let seconds: f64 = std::env::var("HELIO_VOXEL_FLIGHT_HOLD_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(20.0);
+    // Eye and view direction at time t.
+    let path = |t: f64| -> (DVec3, Vec3) {
+        match mode {
+            "cruise" => {
+                // 300 m/s, 40 m over the ground.
+                let along = ground + ahead * (300.0 * t);
+                let eye = flight.planet.surface_point(along, 40.0);
+                (eye, (ahead - up * 0.15).normalize().as_vec3())
+            }
+            _ => {
+                // From 400 km down to 2 m, exponentially.
+                let altitude = 400_000.0 * (2.0f64 / 400_000.0).powf((t / seconds).min(1.0));
+                let point = ground + ahead * (altitude * 0.3);
+                let eye = flight.planet.surface_point(point, altitude.max(2.0));
+                (eye, (ahead - up * 0.6).normalize().as_vec3())
+            }
+        }
+    };
+    let dt = 1.0 / 60.0;
+    let frames = (seconds / dt) as u64;
+    // Loaded before the flight starts (a game loads its spawn first).
+    let mut start = 0u64;
+    let loaded = chunk_settle(flight, &mut world, path(0.0).0, &mut start);
+    eprintln!("CHUNKFLY {mode} loaded in {loaded:.2} s ({start} frames)");
+    let png = std::env::var("HELIO_VOXEL_CHUNKS_PNG").ok();
+    let mut pending = std::collections::VecDeque::new();
+    let (mut times, mut update_ms, mut coarse, mut requests, mut resident) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), 0);
+    let (mut generate_ms, mut per_tile, mut generated) = (Vec::new(), Vec::new(), Vec::new());
+    for n in 0..frames {
+        let frame = start + n;
+        let t = n as f64 * dt;
+        let (eye, forward) = path(t);
+        let velocity = (path(t + dt).0 - eye) / dt;
+        let up_dir = up_for(eye);
+        let view_up = if forward.dot(up_dir).abs() > 0.999 { up_dir.any_orthonormal_vector() } else { up_dir };
+        let near = (flight.planet.air_clearance(eye) * 0.25).clamp(0.05, 50_000.0) as f32;
+        let camera = Camera::perspective_look_at(Vec3::ZERO, forward, view_up, std::f32::consts::FRAC_PI_4, w as f32 / h as f32, near, 40_000_000.0);
+        let mut encoder = flight.device.create_command_encoder(&Default::default());
+        let cpu = Instant::now();
+        let view = helio_pass_voxel_planet::chunks::residency::View { forward: forward.as_dvec3(), cos_half: (std::f64::consts::FRAC_PI_8 * f64::from(w) / f64::from(h) * 1.1).cos() };
+        let stats = world.update(&mut encoder, eye, velocity, Some(view), frame, &config);
+        update_ms.push(cpu.elapsed().as_secs_f64() * 1e3);
+        world.draw(&mut encoder, frame, eye, camera.proj * camera.view, near, flight.sun, [w, h]);
+        pending.push_back((frame, flight.queue.submit([encoder.finish()])));
+        world.submitted();
+        coarse.push(stats.coarse_share);
+        generated.push(stats.generated_tiles);
+        budgets.push(stats.budget as f64);
+        for (p, v) in phases.iter_mut().zip(stats.cpu_ms) {
+            *p += v / frames as f64;
+        }
+        requests.push(stats.requests as f64);
+        resident = stats.resident_chunks;
+        if pending.len() as u64 >= TIMING_RING {
+            let (n, submission) = pending.pop_front().unwrap();
+            if let Some([ms, _, generate]) = world.draw_ms(n, submission) {
+                times.push(ms);
+                generate_ms.push(generate);
+                let tiles = generated[(n - start) as usize];
+                if tiles > 0 {
+                    per_tile.push(generate / tiles as f64);
+                }
+                world.record_generation(generate, tiles);
+            }
+        }
+        if n % 60 == 0 {
+            eprintln!(
+                "CHUNKFLY {mode} t {t:5.1} alt {:9.1} coarse {:.3} requests {:5} generated {:3} drawn {:6} resident {:6} evicted {:4} regen {} slots {} leaves {}",
+                flight.planet.air_clearance(eye),
+                stats.coarse_share,
+                stats.requests,
+                stats.generated_tiles,
+                stats.drawn_chunks,
+                stats.resident_chunks,
+                stats.evicted_tiles,
+                stats.regenerated_tiles,
+                stats.out_of_slots,
+                stats.out_of_leaves
+            );
+            if let Some(prefix) = &png {
+                let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+                save_chunk_colour(flight, &world, &format!("{prefix}_{mode}_{:03}.png", n / 60));
+            }
+        }
+    }
+    let lagging = coarse.iter().filter(|&&c| c > 0.02).count();
+    eprintln!("CHUNKFLY {mode} update cpu mean by phase (results, plan, evict, generate, drawn, table): {phases:.2?}");
+    eprintln!(
+        "CHUNKFLY {mode} summary: frames {frames} coarse mean {:.4} max {:.3} frames over 2% {lagging} | requests p50 {:.0} max {:.0} | primary p50 {:.3} p95 {:.3} | generate p50 {:.3} p95 {:.3} ms, {:.1} us a tile, budget p50 {:.0} | update cpu p50 {:.2} p95 {:.2} ms | resident {resident} chunks {:.1} MB",
+        coarse.iter().sum::<f64>() / coarse.len().max(1) as f64,
+        coarse.iter().copied().fold(0.0, f64::max),
+        percentile(&requests, 0.5),
+        requests.iter().copied().fold(0.0, f64::max),
+        percentile(&times, 0.5),
+        percentile(&times, 0.95),
+        percentile(&generate_ms, 0.5),
+        percentile(&generate_ms, 0.95),
+        percentile(&per_tile, 0.5) * 1e3,
+        percentile(&budgets, 0.5),
+        percentile(&update_ms, 0.5),
+        percentile(&update_ms, 0.95),
+        world.resident_bytes() as f64 / 1048576.0
+    );
+}
+
+/// The chunk draw's colour target as a PNG.
+fn save_chunk_colour(flight: &Flight, world: &helio_pass_voxel_planet::chunks::ChunkWorld, path: &str) {
+    let [w, h] = flight.size;
+    let row = (w * 4).div_ceil(256) * 256;
+    let buffer = flight.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row) * u64::from(h), usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+    let mut encoder = flight.device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        world.targets().unwrap().colour.as_image_copy(),
+        wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    flight.queue.submit([encoder.finish()]);
+    buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    flight.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+    let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        let at = (y * row) as usize;
+        pixels.extend_from_slice(&data[at..at + (w * 4) as usize]);
+    }
+    image::save_buffer(path, &pixels, w, h, image::ColorType::Rgba8).unwrap();
 }
 
 fn carve_tunnel(flight: &mut Flight, ground: DVec3, heading: f64) -> (DVec3, Vec3) {
@@ -1021,6 +1192,10 @@ fn main() {
     // `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|tunnel`: settle one view
     // and keep drawing it (`HELIO_VOXEL_FLIGHT_HOLD_SECONDS`, 120), for a
     // GPU profiler to trace steady frames.
+    if let Ok(mode) = std::env::var("HELIO_VOXEL_CHUNKS_FLY") {
+        chunk_fly(&flight, &mode, ground, heading);
+        return;
+    }
     if let Ok(view) = std::env::var("HELIO_VOXEL_FLIGHT_HOLD") {
         let (e, f) = match view.as_str() {
             "tunnel" => carve_tunnel(&mut flight, ground, heading),
