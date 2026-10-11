@@ -1,0 +1,194 @@
+# Chunk trees: the voxel terrain architecture
+
+Status: decided 2026-10-11; replaces span columns (`span-columns.md`) and
+the column tracer. `aaa-architecture.md` keeps the measurements that led
+here.
+
+## Goal
+
+Terrain made of voxels of 0.1 to 1.0 m, on planets, planes and infinite
+planes:
+
+- **No visible refinement.** Moving at any speed, from the ground to orbit,
+  the player never sees detail arrive, levels switch or coarse blocks
+  replaced by fine ones.
+- **Dig anything, anywhere.** Brushes from one voxel to the whole planet,
+  caves and overhangs. An edit shows the next frame. A dug region renders
+  and streams like untouched ground, however many edits made it.
+- **AAA look and speed.** Exact voxels near the eye, filtered appearance
+  where voxels shrink below a pixel, sun shadows, sky occlusion, AO.
+  Terrain under 6 ms GPU at 1440p on an RTX 3060.
+
+## Why the span-column design cannot get there
+
+Each problem below is structural; tuning inside the design measured 0-14%
+per attempt (`aaa-architecture.md`).
+
+1. **A step costs ~700 lane-cycles.** The research tracers spend 30-60
+   instructions a step. Ours walks the curved cube-sphere grid directly
+   (shell and plane solves every box exit), looks up a column per 8x8 cells
+   through a hash table, decodes spans, lane words, relief cuts and level
+   transitions, and only skips air vertically. Tunnels and overhangs cost
+   44 steps a ray.
+2. **Refinement is visible because detail is late or coarse.** Levels are
+   independent windows of procedural evaluation. The pool fills before
+   cells reach a pixel at every ring (`lod_pixels` is capacity-bound:
+   pressure moved level 0 in 1.3-2.8x), and moving generates rings that
+   arrive frames after they are needed. Nothing hides a switch: the coarse
+   surface is simply replaced.
+3. **Edits are history.** A dug column is regenerated from every brush that
+   touches it, at every level, every time it becomes resident. Cost grows
+   with the number of edits, not with what they left.
+4. **Shading recomputes the world.** Natural ground stores no material, so
+   every pixel runs the material rules, noise and slope stencils
+   (3-5 ms).
+
+## The design
+
+### 1. Data: a planet-wide octree of chunk trees
+
+- The world is the existing integer cube-sphere grid (`grid.rs`): face,
+  cell indices, level. Voxels stay upright everywhere and keep their exact
+  integer identity; collision, picks, saves and the CPU mirror address
+  them as today.
+- Space is divided into **chunks** of 64^3 voxels of one level (6.4 m at
+  0.1 m voxels). A level-L chunk has 8 children at level L-1: the chunks
+  form an octree over each cube face (planes: one face; infinite planes: a
+  root grid).
+- A chunk's contents are a **64-tree**: three levels of 4^3 nodes, each a
+  64-bit child mask plus the index of its first child (children packed,
+  addressed by popcount rank). Leaves are 4^3 voxels: a 64-bit occupancy
+  mask. Uniform nodes (all air or all solid) are a flag, not storage.
+- **Attributes per solid surface voxel** (solid with an air face): an 8-bit
+  material at the finest generated level; at coarser levels also an
+  averaged colour (RGB565) and normal (octahedral, 16 bits) of the voxels
+  it covers. Buried voxels keep only a material run per leaf, enough to
+  expose them when dug.
+- Budget at 1440p (90 degree view, voxels at most a pixel wide where each
+  level ends): level 0 reaches ~130 m, every level holds 2-4 M surface
+  voxels, ~20 levels hold 40-80 M. At 2-5 bytes a surface voxel (leaf masks
+  shared by ~16 surface voxels, a material byte, coarse attributes) that is
+  200-400 MB of a 12 GB card: the pool is never what sets the LOD.
+
+### 2. Generation: chunks produced once, on the GPU
+
+- A chunk job evaluates the existing terrain contract (`terrain_height`,
+  `terrain_density`, `terrain_extent`, `ground_material`,
+  `terrain_surface`): heights for its 64^2 columns, density only where the
+  interval bounds say a voxel can be mixed (caves, overhangs), as today.
+- The job writes the 64-tree directly, with materials evaluated once per
+  surface voxel (the rules no longer run per pixel) and, at coarse levels,
+  the averaged colour and the exact field normal (no staircase normals from
+  quantized heights).
+- The field's octave rules already keep a level within its parent's voxel
+  (erosion steered only by coarser octaves). Chunk generation keeps that
+  invariant and a test enforces it: a chunk's surface lies within one
+  parent voxel of its parent's surface.
+
+### 3. Edits: data is the truth once a chunk exists
+
+- An edit is a GPU pass over every resident chunk the brush touches, at
+  every level: fine chunks voxel-exact, coarse chunks by brush coverage per
+  voxel. Parents of edited chunks are re-derived by downsampling (edited
+  octants) and keep their generated values elsewhere. The edit shows the
+  next frame.
+- Edited finest-level chunks are read back asynchronously, compressed and
+  kept on the CPU and in the save. Evicting and reloading them costs a
+  copy, not a regeneration.
+- The brush log remains only for space no resident chunk covered when the
+  brush was made (planet-scale brushes): the edit BVH culls it at chunk
+  generation, as today. Brushes smaller than half a voxel of a level are
+  skipped at that level, which downsampled data already represents.
+- Cost follows the surface the edits leave: an edited chunk is a chunk.
+
+### 4. Residency and LOD: a screen-space cut of the octree
+
+- Each frame the CPU (on the residency worker) selects the octree cut whose
+  voxels project to at most one pixel (the `lod_pixels` target), with
+  hysteresis, the way Nanite and GigaVoxels select clusters and bricks.
+- Children replace a parent only when all of their non-empty siblings are
+  resident: no partial holes, no fallbacks inside a frame.
+- **Prefetch:** the cut is also computed for the eye 0.5-1 s ahead along its
+  velocity, and those chunks are requested first. Priority is the screen
+  error a missing chunk would cause, so fast flight streams what it is
+  about to need.
+- **Invisible switches:** a region changing level is drawn by both levels
+  for ~8 frames with complementary dither masks that move from one to the
+  other; TSR resolves them into a crossfade. Combined with sub-pixel voxels
+  at the switch, no transition is visible.
+
+### 5. Rendering: rasterized chunk boxes, rays only inside one chunk
+
+- **Culling:** a compute pass culls the cut against the frustum and the
+  previous frame's Hi-Z and writes an indirect draw list, front to back.
+- **Primary visibility:** each visible chunk draws its box, tight to its
+  occupied range. The fragment shader transforms the ray once into the
+  chunk's frame and walks the 64-tree with an integer DDA (64-bit masks,
+  popcount, ~30-60 instructions a step), the method of Teardown, Aokana and
+  sparse 64-tree tracers. It writes a visibility buffer (chunk, voxel,
+  face) and conservative depth (early-Z survives), so hidden boxes behind
+  a hit are rejected before they run. The hardware rasterizer does what the
+  sky bound, summary blocks, air blocks and the tile pre-pass tried to do.
+- **The chunk's frame is affine.** Within a chunk the cube-sphere mapping is
+  linear to far below a voxel: the deviation over a 64-voxel chunk is
+  512 x voxel / radius of a voxel, 1e-5 at level 0 on Earth. Levels where it would
+  pass 5% of a voxel (from about level 13 on Earth, where voxels are
+  already sub-pixel) use 32^3 or 16^3 chunks. Boxes overlap by one voxel so
+  neighbouring frames leave no cracks.
+- **Depth is shared.** The terrain writes the same depth buffer as Helio's
+  meshes, so props, characters and editor geometry compose with it.
+- **Shading** resolves the visibility buffer in compute: stored material and
+  attributes, per-voxel hash variation, filtered appearance from the stored
+  coarse colour and normal, AO from neighbour masks in the same tree. No
+  generator code runs per pixel.
+- **Sun and sky:** compute rays from the hit through the same chunk trees
+  (a per-level chunk table finds the chunk, the DDA walks it), climbing to
+  coarser levels with distance; temporal accumulation through TSR.
+
+### What survives and what goes
+
+Survives: the integer field, landform interpreter and terrain contract with
+its CPU mirror and bit-identity tests; the noise library (with hardware
+wide products); the cube-sphere grid; the edit log, BVH and journal (for
+unresident space and saves); the Pulsar component, tools and picks; TSR and
+the sky.
+
+Goes, once the new path passes its gates: span columns, lane words, column
+records and their hash table, summary blocks, air blocks, the sky bound and
+horizon pass, the column tracer and its fallbacks, relief fractions and
+surface bytes, the per-pixel material rules and slope stencils, content
+windows, the column residency planner.
+
+## Phases and gates
+
+Every phase is measured in hold mode against the current renderer on the
+same views (ground, mountain_slope, tunnel), at 1080p and 1440p, with
+interleaved runs. A phase that misses its gate stops the plan for review.
+
+1. **Chunk trees and primary visibility.** GPU generation of chunk trees
+   from the field (no edits, fixed cut by distance), raster boxes and the
+   chunk DDA, a plain shade. Gate: primary at most half of today's on
+   mountain_slope and tunnel, ground no slower; resident memory and
+   generation time per surface voxel reported.
+2. **Cut selection, streaming and transitions.** Screen-space cut,
+   prefetch, crossfades. Gates: no level switch with voxels over 1 px;
+   descent from orbit and fast flight with no visible refinement (frame
+   differences at transitions below the TSR noise floor); arrival settled
+   within 250 ms.
+3. **Edits on data.** GPU brush pass, downsampled parents, persisted
+   chunks, brush log for unresident space. Gates: edit visible next frame;
+   a 10,000-brush dig renders and streams at the cost of undug ground.
+4. **Appearance and lighting.** Stored materials, coarse attributes, AO,
+   sun and sky rays, look parity with today in the editor. Gate: terrain
+   under 6 ms at 1440p in every view; then Pulsar switches over and the old
+   path is deleted.
+
+## References
+
+Laine and Karras, *Efficient Sparse Voxel Octrees* (2010); Crassin et al.,
+*GigaVoxels* (2009); Careil, Billeter and Eisemann, *Interactive Editing of
+Large Sparse Voxel DAGs* (HashDAG, 2020); Fang et al., *Aokana: a GPU-driven
+voxel rendering framework for open world games* (2025); Teardown's renderer
+(Gustafsson, 2020-22); sparse 64-tree tracing (dubiousconst282, 2024);
+Karis, *Nanite* (2021) for the screen-space cut; *Filtered Appearance for
+Voxels* (HPG 2023); Distant Horizons for LOD crossfades.
