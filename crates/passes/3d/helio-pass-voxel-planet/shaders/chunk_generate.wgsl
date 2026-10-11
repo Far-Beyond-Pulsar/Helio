@@ -135,8 +135,11 @@ fn evict(@builtin(global_invocation_id) id: vec3<u32>) {
     chunk_meta[slot].leaves = 0u;
 }
 // Scratch per chunk job: each column's materials (`chunk_columns_main`):
-// its top cell's, the soil's and the rock's under it (bytes 0, 1, 2), and
-// the terrain's top layer relative to the chunk, + 128 (byte 3).
+// its top cell's (bit 7: a single-voxel speck), the soil's and the rock's
+// under it (bytes 0, 1, 2), and
+// the lowest of the terrain's tops around it (its own and its neighbours')
+// relative to the chunk, + 128 (byte 3): cells above it are a natural
+// riser's, surface.
 @group(0) @binding(14) var<storage, read_write> column_materials: array<u32>;
 // Two material bytes per stored leaf (two leaves a word) and per mid node:
 // the surface's, shown by its cells with air above, and the subsurface's
@@ -361,12 +364,12 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     // Edits in their order (`planet::Edits`): the large brushes, the baked
     // cells, the recent brushes.
     let ch = vec2<i32>(center_half(i, level), center_half(j, level));
+    let natural = mask;
     mask = apply_brushes(mask, job, 0u, job.large, p, ch, level, k0);
     mask = apply_baked(mask, job, wg.x, li);
     mask = apply_brushes(mask, job, job.large, job.brush_count, p, ch, level, k0);
     column_masks[at] = mask;
-    // Material of the highest solid cell (shading only, until materials
-    // are stored per surface voxel).
+    // Materials of the highest solid cell and under it.
     var material = M_AIR;
     let high = select(i32(firstLeadingBit(mask.x)), 32 + i32(firstLeadingBit(mask.y)), mask.y != 0u);
     if mask.x != 0u || mask.y != 0u {
@@ -376,10 +379,27 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
             tile_top(job.tile, min(i32(x) + 1, 63), i32(y), level),
             tile_top(job.tile, i32(x), max(i32(y) - 1, 0), level),
             tile_top(job.tile, i32(x), min(i32(y) + 1, 63), level));
-        let slope = max(abs(t.y - t.x), abs(t.w - t.z)) * 4;
-        let depth = max(top - 1 - k, 0) << level;
-        let terrain_material = ground_material(p, u32(column.y), height, depth, slope, k << level) & M_ID;
+        // The materials' slope (`Planet::material_slope`): the gradient over
+        // 64 base cells (in the tile), so a terrace step is not a steep
+        // slope (dirt along every contour); 8 per base layer a base cell.
+        let n = max(32 >> level, 1);
+        let xa = min(i32(x) + n, 63);
+        let xb = max(i32(x) - n, 0);
+        let ya = min(i32(y) + n, 63);
+        let yb = max(i32(y) - n, 0);
+        let gx = f32(tile_top(job.tile, xa, i32(y), level) - tile_top(job.tile, xb, i32(y), level)) / f32(max(xa - xb, 1));
+        let gy = f32(tile_top(job.tile, i32(x), ya, level) - tile_top(job.tile, i32(x), yb, level)) / f32(max(ya - yb, 1));
+        let slope = i32(round(max(abs(gx), abs(gy)) * 8.0));
+        // The terrain's own top (where its volume put it, under the height
+        // field's at caves and overhangs) is surface; a top edits moved
+        // lies as deep as it is under the terrain's.
+        let natural_high = select(i32(firstLeadingBit(natural.x)), 32 + i32(firstLeadingBit(natural.y)), natural.y != 0u);
+        let moved = natural.x == 0u && natural.y == 0u || natural_high != high;
+        let depth = select(0, max(top - 1 - k, 0) << level, moved);
+        let ground = ground_material(p, u32(column.y), height, depth, slope, k << level);
+        let terrain_material = ground & M_ID;
         let surface = edited_material(terrain_material, job, wg.x, li, p, ch, level, k, k0);
+        let speck = select(0u, 0x80u, (ground & M_SPECK) != 0u && surface == terrain_material);
         // Under it: soil a cell below the terrain's top, rock below the
         // soil depth; an edited top's material throughout.
         var soil = surface;
@@ -389,7 +409,8 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
             let deep = (terrain.header.z >> level) + 1;
             rock = ground_material(p, u32(column.y), height, deep << level, slope, (top - 1 - deep) << level) & M_ID;
         }
-        material = (surface & 0xffu) | ((soil & 0xffu) << 8u) | ((rock & 0xffu) << 16u) | (u32(clamp(top - k0 + 128, 0, 255)) << 24u);
+        let lowest = min(top, min(min(t.x, t.y), min(t.z, t.w)));
+        material = (surface & 0x7fu) | speck | ((soil & 0xffu) << 8u) | ((rock & 0xffu) << 16u) | (u32(clamp(lowest - k0 + 128, 0, 255)) << 24u);
     }
     column_materials[at] = material;
 }
@@ -402,13 +423,14 @@ fn tile_top(tile: u32, x: i32, y: i32, level: u32) -> i32 {
 // A leaf's two material bytes from its columns' materials
 // (`chunk_columns_main`): the surface, the top material of a column whose
 // top cell is in the leaf (`has_top`, `top`), else the subsurface's; the
-// subsurface, its first column's soil within the soil depth of the
-// terrain's top at the leaf's centre (layer `lz` of a chunk of `level`),
-// else its rock.
+// subsurface, by its first column at the leaf's centre (layer `lz` of a
+// chunk of `level`): above the lowest terrain top around it (a natural
+// riser) its surface, within the soil depth under it soil, else rock.
 fn leaf_materials_of(column: u32, top: u32, has_top: u32, lz: u32, level: u32) -> u32 {
     let below = (i32(column >> 24u) - 128) - 1 - i32(lz * 4u + 2u);
-    let sub = select((column >> 16u) & 0xffu, (column >> 8u) & 0xffu, (below << level) < terrain.header.z);
-    return select(sub, top & 0xffu, has_top != 0u) | (sub << 8u);
+    var sub = select((column >> 16u) & 0xffu, (column >> 8u) & 0xffu, (below << level) < terrain.header.z);
+    if below < 0 { sub = column & 0x7fu; }
+    return select(sub, top & 0x7fu, has_top != 0u) | (sub << 8u);
 }
 
 var<workgroup> w_occ: array<atomic<u32>, 128>;
@@ -444,10 +466,13 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     let ly = t >> 4u;
     // 16 leaves along z, built from this leaf column's 4x4 cell columns.
     var leaf: array<vec2<u32>, 16>;
-    // Each leaf's materials: its first column with cells in it's, and of
-    // a column whose top cell is in it (`topped`), for its surface.
+    // Each leaf's materials: its first column with cells in it's, and for
+    // its surface the most common top material of the columns whose top
+    // cell is in it (a majority vote of all but single-voxel specks, which
+    // a leaf of 4x4 columns would spread; `topped` where there are any).
     var leaf_material: array<u32, 16>;
     var leaf_top: array<u32, 16>;
+    var votes: array<u32, 16>;
     var topped = 0u;
     var z_lo = 64;
     var z_hi = 0;
@@ -461,9 +486,17 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         let high = select(i32(firstLeadingBit(m.x)), 32 + i32(firstLeadingBit(m.y)), m.y != 0u);
         z_hi = max(z_hi, 1 + high);
         let top_leaf = u32(high) >> 2u;
-        if (topped & (1u << top_leaf)) == 0u {
+        topped |= 1u << top_leaf;
+        if (column_material & 0x80u) != 0u {
+            // A speck: the surface only while nothing else votes.
+            if votes[top_leaf] == 0u { leaf_top[top_leaf] = column_material; }
+        } else if votes[top_leaf] == 0u {
             leaf_top[top_leaf] = column_material;
-            topped |= 1u << top_leaf;
+            votes[top_leaf] = 1u;
+        } else if (leaf_top[top_leaf] & 0x7fu) == (column_material & 0x7fu) {
+            votes[top_leaf] += 1u;
+        } else {
+            votes[top_leaf] -= 1u;
         }
         for (var lz = 0u; lz < 16u; lz++) {
             let nib = (select(m.x, m.y, lz >= 8u) >> ((lz & 7u) * 4u)) & 15u;
@@ -483,7 +516,9 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
             atomicOr(&w_occ[word], bit);
             atomicMax(&w_mid_material[m], leaf_materials_of(leaf_material[lz], leaf_top[lz], (topped >> lz) & 1u, lz, tile_jobs[job.tile].level));
         }
-        if leaf[lz].x == 0xffffffffu && leaf[lz].y == 0xffffffffu { atomicOr(&w_full[word], bit); }
+        // A full leaf is implicit (its mid's material) unless a column tops
+        // in it: then it is the surface and keeps its own materials.
+        if leaf[lz].x == 0xffffffffu && leaf[lz].y == 0xffffffffu && ((topped >> lz) & 1u) == 0u { atomicOr(&w_full[word], bit); }
     }
     workgroupBarrier();
     if t == 0u {

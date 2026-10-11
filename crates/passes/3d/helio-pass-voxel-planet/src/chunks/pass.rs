@@ -139,6 +139,9 @@ impl RenderPass for ChunkPass {
         let stats = world.update(encoder, frame.eye, velocity, Some(view), ctx.frame_num, &self.config);
         world.draw(encoder, ctx.frame_num, frame.eye, view_proj, prev_view_proj, near, frame.sun, [ctx.width, ctx.height]);
         world.publish(encoder, gbuffer, ctx.depth);
+        if let Some(picks) = &frame.picks {
+            world.copy_picks(encoder, picks);
+        }
         if let Ok(mut state) = self.state.lock() {
             state.stats = stats;
             state.settled = world.settled();

@@ -91,13 +91,37 @@ struct PickSlot {
 
 pub use crate::terrain::{MaterialAppearance, TerrainAppearance, MATERIALS};
 
-/// `MaterialGpu` of common.wgsl.
+/// `MaterialGpu` of common.wgsl (and chunk_draw.wgsl).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
-struct MaterialGpu {
+pub(crate) struct MaterialGpu {
     colour: [f32; 4],
     patches: [[f32; 4]; 3],
     links: [u32; 4],
+}
+
+/// The shading table of `appearance` (linear colours; sRGB is public, so
+/// convert once, not per pixel) and its detail weights.
+pub(crate) fn material_table(appearance: &TerrainAppearance) -> ([MaterialGpu; MATERIALS], [f32; 4]) {
+    let clean = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+    let linear = |c: [f32; 4]| [clean(c[0]).powf(2.2), clean(c[1]).powf(2.2), clean(c[2]).powf(2.2), clean(c[3])];
+    let materials = std::array::from_fn(|id| {
+        let m = &appearance.materials[id];
+        let link = |other: Option<u8>| other.filter(|&o| usize::from(o) < MATERIALS).map_or(id as u32, u32::from);
+        let rgb = |c: [f32; 3]| linear([c[0], c[1], c[2], 1.0]);
+        let mut patches = [[0.0; 4]; 3];
+        if let Some(p) = m.patches {
+            patches = p.map(rgb);
+            patches[0][3] = 1.0;
+        }
+        let (fleck, share) = m.fleck.map_or((None, 0.0), |(f, s)| (Some(f), clean(s)));
+        MaterialGpu {
+            colour: linear(m.colour),
+            patches,
+            links: [link(m.lip), link(fleck), link(m.speck_host), (share * 65_536.0) as u32],
+        }
+    });
+    (materials, appearance.detail.map(clean))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1236,27 +1260,8 @@ impl PlanetRenderer {
         let planet = &self.planet;
         let grid = planet.grid();
         let mut frame = FrameGpu::default();
-        // Appearance is public in sRGB; convert once per frame, not per pixel.
-        let clean = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
-        let linear = |c: [f32; 4]| [clean(c[0]).powf(2.2), clean(c[1]).powf(2.2), clean(c[2]).powf(2.2), clean(c[3])];
         let appearance = self.settings.appearance.unwrap_or_else(|| planet.field().appearance());
-        frame.materials = std::array::from_fn(|id| {
-            let m = &appearance.materials[id];
-            let link = |other: Option<u8>| other.filter(|&o| usize::from(o) < MATERIALS).map_or(id as u32, u32::from);
-            let rgb = |c: [f32; 3]| linear([c[0], c[1], c[2], 1.0]);
-            let mut patches = [[0.0; 4]; 3];
-            if let Some(p) = m.patches {
-                patches = p.map(rgb);
-                patches[0][3] = 1.0;
-            }
-            let (fleck, share) = m.fleck.map_or((None, 0.0), |(f, s)| (Some(f), clean(s)));
-            MaterialGpu {
-                colour: linear(m.colour),
-                patches,
-                links: [link(m.lip), link(fleck), link(m.speck_host), (share * 65_536.0) as u32],
-            }
-        });
-        frame.detail = appearance.detail.map(clean);
+        (frame.materials, frame.detail) = material_table(&appearance);
         frame.hints[3] = (if self.settings.coarse_relief { 8 } else { 0 }) | (if self.settings.ridge_display { 16 } else { 0 }) | (self.settings.debug_view << 8);
         for face in 0..6u8 {
             // A plane has one face; the others keep default frames.

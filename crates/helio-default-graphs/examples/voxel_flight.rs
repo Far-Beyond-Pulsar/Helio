@@ -91,6 +91,8 @@ struct Flight {
     sync_frames: bool,
     /// The chunk pass's state (`HELIO_VOXEL_CHUNKS_ENGINE`).
     chunk_state: Option<helio_pass_voxel_planet::chunks::pass::SharedChunkState>,
+    /// Pick requests drawn frames answer (`pick_probe`).
+    picks: Option<helio_pass_voxel_planet::engine::SharedPicks>,
 }
 
 /// Latest GPU graphics and memory clocks (MHz) from a streaming
@@ -283,6 +285,7 @@ impl Flight {
             last_frame_end: std::cell::Cell::new(None),
             sync_frames: std::env::var_os("HELIO_VOXEL_FLIGHT_SYNC").is_some(),
             chunk_state,
+            picks: None,
         }
     }
 
@@ -308,7 +311,7 @@ impl Flight {
     }
 
     fn draw_with_up(&mut self, stage: &str, eye: DVec3, forward: Vec3, view_up: Option<Vec3>) -> f64 {
-        *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: self.planet.clone(), sun: self.sun, shadows: self.shadows, picks: None });
+        *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: self.planet.clone(), sun: self.sun, shadows: self.shadows, picks: self.picks.clone() });
         self.renderer.set_world_origin(Some(eye));
         let up = up_for(eye);
         let forward = forward.normalize();
@@ -900,14 +903,15 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
             let cell = u32::from_le_bytes(v[4..].try_into().unwrap());
             let cpu = flight.planet.raycast(eye, dir, 200_000.0);
             eprintln!(
-                "PROBE {x},{y}: chunk t {:.2} slot {slot} {:?} cell ({},{},{}) axis {} | cpu {:?}",
+                "PROBE {x},{y}: chunk t {:.2} slot {slot} {:?} cell ({},{},{}) axis {} material {} | cpu {:?}",
                 if t > 0.0 { t } else { f32::NAN },
                 world.chunk_at(slot),
                 cell & 63,
                 (cell >> 6) & 63,
                 (cell >> 12) & 63,
                 (cell >> 18) & 7,
-                cpu.map(|h| (h.distance, h.cell))
+                cell >> 21,
+                cpu.map(|h| (h.distance, h.cell, flight.planet.material(h.cell)))
             );
             if let Some(h) = cpu {
                 eprintln!("  over the cpu hit: {:?}", world.chunks_over(h.cell.face, h.cell.i, h.cell.j));
@@ -1083,6 +1087,38 @@ fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3)
     let draw: Vec<f64> = timings.iter().map(|t| t.draw).collect();
     eprintln!("CHUNKENGINE {view} n={} chunk draw p50 {:.3} p95 {:.3}", draw.len(), percentile(&draw, 0.5), percentile(&draw, 0.95));
     flight.capture(&format!("chunks_{view}"));
+    pick_probe(flight, view, eye, forward);
+}
+
+/// `HELIO_VOXEL_PICKS=x,y;x,y` (output pixels): the renderer's picks there
+/// against the CPU raycast through the same pixel.
+fn pick_probe(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3) {
+    use helio_pass_voxel_planet::engine::{PickRequest, Picks};
+    let Ok(points) = std::env::var("HELIO_VOXEL_PICKS") else { return };
+    let [w, h] = flight.size;
+    let picks = std::sync::Arc::new(std::sync::Mutex::new(Picks::default()));
+    let pixels: Vec<[u32; 2]> = points.split(';').map(|p| p.split(',').map(|v| v.trim().parse().unwrap()).collect::<Vec<u32>>()).map(|v| [v[0], v[1]]).collect();
+    picks.lock().unwrap().requests = pixels.iter().enumerate().map(|(n, p)| PickRequest { id: n as u64, uv: [(p[0] as f32 + 0.5) / w as f32, (p[1] as f32 + 0.5) / h as f32] }).collect();
+    flight.picks = Some(picks.clone());
+    for _ in 0..12 {
+        flight.draw("pick", eye, forward);
+        let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    flight.picks = None;
+    let up = up_for(eye);
+    let forward = forward.normalize();
+    let up = if forward.dot(up).abs() > 0.999 { up.any_orthonormal_vector() } else { up };
+    let right = forward.cross(up).normalize();
+    let cam_up = right.cross(forward);
+    let tan = (std::f32::consts::FRAC_PI_4 * 0.5).tan();
+    let results = std::mem::take(&mut picks.lock().unwrap().results);
+    for (n, p) in pixels.iter().enumerate() {
+        let ndc = [(p[0] as f32 + 0.5) / w as f32 * 2.0 - 1.0, 1.0 - (p[1] as f32 + 0.5) / h as f32 * 2.0];
+        let dir = (forward + right * ndc[0] * tan * (w as f32 / h as f32) + cam_up * ndc[1] * tan).normalize().as_dvec3();
+        let cpu = flight.planet.raycast(eye, dir, 100_000.0);
+        let pick = results.iter().find(|r| r.id == n as u64).and_then(|r| r.hit);
+        eprintln!("PICK {view} {},{}: drawn {:?} | cpu {:?}", p[0], p[1], pick.map(|h| (h.distance, h.level, h.cell, h.entered)), cpu.map(|c| (c.distance, c.cell)));
+    }
 }
 
 /// `HELIO_VOXEL_CHUNKS_FLY=descent|cruise`: chunk trees streamed along a
@@ -1479,6 +1515,8 @@ fn main() {
             "HOLD {view} n={} primary {:.3} shade {:.3} sun {:.3} sky {:.3}",
             held.len(), stage("planet_primary"), stage("planet_shade"), stage("planet_sunlight"), stage("planet_skylight")
         );
+        flight.capture(&format!("hold_{view}"));
+        pick_probe(&mut flight, &view, e, f);
         return;
     }
     if let Ok(views) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS") {

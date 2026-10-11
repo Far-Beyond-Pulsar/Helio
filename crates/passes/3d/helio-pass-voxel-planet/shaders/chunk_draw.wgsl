@@ -33,6 +33,10 @@ struct DrawParams {
     sun: vec4<f32>,  // direction to the sun (xyz), camera near plane (w)
     debug: vec4<u32>, // x: colour by level
     table: vec4<u32>, // x: chunk table slots - 1; y: base cells per face edge; z: boxes drawn from inside; w: frame
+    // The eye in noise-domain units (`grid::DOMAIN_UNIT`, planet-centred):
+    // integer part, fraction.
+    eye_domain: vec4<i32>,
+    eye_domain_frac: vec4<f32>,
 }
 
 // A chunk's frame, written when it is generated: M's columns and M^-1's
@@ -79,7 +83,21 @@ struct ChunkMeta {
 @group(0) @binding(4) var<storage, read> mid_leaves: array<u32>;
 @group(0) @binding(5) var<storage, read> leaves: array<vec2<u32>>;
 @group(0) @binding(6) var<storage, read> leaf_materials: array<u32>;
-@group(0) @binding(7) var<uniform> palette: array<vec4<f32>, 32>;
+// Shading of the terrain's materials (`engine::material_table`).
+struct MaterialGpu {
+    colour: vec4<f32>,            // linear colour, roughness
+    patches: array<vec4<f32>, 3>, // linear dry/middle/lush patch colours; patches[0].w 1: varies
+    links: vec4<u32>,             // lip, fleck, speck host, fleck share
+}
+struct Materials {
+    m: array<MaterialGpu, 32>,
+    detail: vec4<f32>, // patch contrast, pigment contrast, edge darkening, step softness
+}
+@group(0) @binding(7) var<uniform> materials: Materials;
+
+fn palette(m: u32) -> vec4<f32> {
+    return materials.m[min(m, 31u)].colour;
+}
 @group(0) @binding(8) var<storage, read> mid_materials: array<u32>;
 // Open addressing (`drawn.rs`): chunks, key (face | level << 8, cx, cy, cz)
 // then (slot, state, 0, 0); the drawn cut's columns, key (.., COLUMN) then
@@ -727,7 +745,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     let axis_world = select(select(c.m2.xyz, c.m1.xyz, end.axis == 1u), c.m0.xyz, end.axis == 0u);
     let normal = normalize(axis_world) * select(-1.0, 1.0, end.sign == 1u);
     let light = 0.25 + 0.75 * max(dot(normal, params.sun.xyz), 0.0);
-    var colour = palette[min(end.material, 31u)].rgb;
+    var colour = palette(end.material).rgb;
     if params.debug.x != 0u {
         // Level colours.
         let level = (bitcast<u32>(c.box.w) >> 8u) & 31u;
@@ -758,6 +776,106 @@ fn resolve_depth(@builtin(position) pixel: vec4<f32>) -> @builtin(frag_depth) f3
 }
 
 @group(1) @binding(7) var hit_visibility: texture_2d<u32>;
+@group(1) @binding(14) var hit_normal: texture_2d<f32>;
+
+// ---- Appearance (the span renderer's surface shading, surface.wgsl) ----
+
+// Visibility of the voxel mosaic (each cell's own hue and brightness) for a
+// cell `projected` pixels wide: kept down to about half a pixel; TSR
+// averages what is smaller.
+fn mosaic_weight(projected: f32) -> f32 {
+    return smoothstep(0.35, 0.7, projected);
+}
+
+// Material `m`'s colour varied by its patches (409 m and 25.6 m), clumps
+// (6.4 m and 1.6 m, fading below a few pixels) and voxels (`blade`, by
+// `voxel`), at domain point `p` for a pixel `pixel` m wide
+// (`material_albedo` of surface.wgsl).
+fn material_albedo(m: u32, p: vec3<i32>, blade_hash: u32, pixel: f32, voxel: f32) -> vec3<f32> {
+    let material = materials.m[min(m, 31u)];
+    if material.patches[0].w <= 0.0 { return material.colour.rgb; }
+    let broad = f32(noise(p, 15u, 0x3c6ef372u)) / f32(NOISE_ONE);
+    let patches = f32(noise(p, 11u, 0xa54ff53au)) / f32(NOISE_ONE) * clamp((12.8 - pixel) / 6.4, 0.0, 1.0);
+    var clumps = 0.0;
+    if pixel < 3.2 {
+        clumps += 0.35 * f32(noise(p, 9u, 0x510e527fu)) / f32(NOISE_ONE) * clamp((3.2 - pixel) / 1.6, 0.0, 1.0);
+    }
+    if pixel < 0.8 {
+        clumps += 0.3 * f32(noise(p, 7u, 0x9b05688cu)) / f32(NOISE_ONE) * clamp((0.8 - pixel) / 0.4, 0.0, 1.0);
+    }
+    let blade = f32(blade_hash & 255u) / 255.0 - 0.5;
+    let t = clamp(0.52 + materials.detail.x * (0.7 * broad + 0.16 * patches + clumps) + materials.detail.y * blade * voxel, 0.0, 1.0);
+    return select(mix(material.patches[1].rgb, material.patches[2].rgb, t * 2.0 - 1.0), mix(material.patches[0].rgb, material.patches[1].rgb, t * 2.0), t < 0.5);
+}
+
+fn corner_ao(side1: bool, side2: bool, corner: bool) -> f32 {
+    if side1 && side2 { return 0.0; }
+    return 3.0 - f32(u32(side1) + u32(side2) + u32(corner));
+}
+
+// Whether cell `c` (in chunk `slot`'s cells, possibly past them: then in
+// the drawn chunk of its level there) is solid.
+fn solid_near(slot: u32, key: vec4<i32>, c: vec3<i32>) -> bool {
+    if all(c >= vec3<i32>(0)) && all(c <= vec3<i32>(63)) { return solid_at(slot, c); }
+    let at = key.yzw * 64 + c;
+    let e = find_entry(vec4<i32>(key.x, at >> vec3<u32>(6u)));
+    if e == NONE { return false; }
+    return solid_at(bitcast<u32>(chunk_table[e * 2u + 1u].x), at & vec3<i32>(63));
+}
+
+struct Look {
+    albedo: vec3<f32>,
+    ao: f32,
+}
+
+// The colour and occlusion of hit cell `cell` of chunk `slot` (its face:
+// `axis`, `sign` 1 the positive side) of `material`, at eye-relative
+// `position`, for a pixel `pixel_m` wide: the material's patches and the
+// cell's pigment, corner occlusion from the cells around the air in front
+// of the face, and its edges darkened while it spans several pixels. Each
+// fades as the cell shrinks towards a pixel (TSR averages the rest).
+fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, material: u32, position: vec3<f32>, pixel_m: f32) -> Look {
+    let c = chunk_frame(slot);
+    let key = chunk_keys[slot];
+    let projected = length(c.m0.xyz) / max(pixel_m, 1e-6);
+    let mosaic = mosaic_weight(projected);
+    // The cell centre's noise-domain point: the same pigment from every
+    // face of it.
+    let centre = vec3<f32>(c.m0.w, c.m1.w, c.m2.w) + mat3x3<f32>(c.m0.xyz, c.m1.xyz, c.m2.xyz) * (vec3<f32>(cell) + 0.5);
+    let p = params.eye_domain.xyz + vec3<i32>(floor(params.eye_domain_frac.xyz + centre / DOMAIN_UNIT));
+    let hv = hash3(p.x, p.y, p.z, 0x68bc21ebu);
+    let pigment = 1.0 + materials.detail.y * (mix(0.5, f32(hv & 255u) / 255.0, mosaic) - 0.5);
+    let albedo = material_albedo(material, p, hash3(p.x, p.y, p.z, 0x1b873593u), pixel_m, mosaic) * pigment;
+    // Occlusion: around the air cell in front of the face.
+    let ao_weight = smoothstep(0.75, 1.25, projected);
+    var ao = 1.0;
+    if ao_weight > 0.0 {
+        let out_dir = select(-1, 1, sign == 1u);
+        let along = vec3<i32>(select(0, out_dir, axis == 0u), select(0, out_dir, axis == 1u), select(0, out_dir, axis == 2u));
+        let du = vec3<i32>(select(1, 0, axis == 0u), select(0, 1, axis == 0u), 0);
+        let dv = vec3<i32>(0, select(0, 1, axis == 2u), select(1, 0, axis == 2u));
+        let f = cell + along;
+        let s0 = solid_near(slot, key, f - du);
+        let s1 = solid_near(slot, key, f + du);
+        let s2 = solid_near(slot, key, f - dv);
+        let s3 = solid_near(slot, key, f + dv);
+        let c00 = corner_ao(s0, s2, solid_near(slot, key, f - du - dv));
+        let c10 = corner_ao(s1, s2, solid_near(slot, key, f + du - dv));
+        let c01 = corner_ao(s0, s3, solid_near(slot, key, f - du + dv));
+        let c11 = corner_ao(s1, s3, solid_near(slot, key, f + du + dv));
+        // Where in the face the hit is.
+        let local = vec3<f32>(c.i0.w, c.i1.w, c.i2.w) + vec3<f32>(dot(c.i0.xyz, position), dot(c.i1.xyz, position), dot(c.i2.xyz, position));
+        let in_cell = clamp(local - vec3<f32>(cell), vec3<f32>(0.0), vec3<f32>(1.0));
+        let uv = vec2<f32>(dot(in_cell, vec3<f32>(du)), dot(in_cell, vec3<f32>(dv)));
+        let a = mix(mix(c00, c10, uv.x), mix(c01, c11, uv.x), uv.y) / 3.0;
+        ao = mix(1.0, mix(0.42, 1.0, a), ao_weight);
+        // Crisp voxel edges while a cell spans several pixels.
+        let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+        let fade = clamp((projected - 3.0) / 6.0, 0.0, 1.0);
+        ao *= 1.0 - materials.detail.z * fade * ao_weight * (1.0 - smoothstep(0.0, 0.12, edge));
+    }
+    return Look(albedo, ao);
+}
 
 // Helio's gbuffer (`engine::GBUFFER_FORMATS`).
 struct GOut {
@@ -785,13 +903,16 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     let axis = (v.y >> 18u) & 3u;
     let sign = (v.y >> 20u) & 1u;
     let material = min((v.y >> 21u) & 0xffu, 31u);
-    let axis_world = select(select(c.m2.xyz, c.m1.xyz, axis == 1u), c.m0.xyz, axis == 0u);
-    let normal = normalize(axis_world) * select(-1.0, 1.0, sign == 1u);
+    let normal = textureLoad(hit_normal, p, 0).xyz;
+    let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
+    // A pixel's width at the hit (m).
+    let pixel_m = t * length(pixel_ray(vec2<u32>(pixel.xy) + vec2<u32>(1u, 0u), size) - pixel_ray(vec2<u32>(pixel.xy), size));
+    let look = surface_look(v.x, cell, axis, sign, material, position, pixel_m);
     let f0 = 0.03;
     var out: GOut;
-    out.albedo = vec4<f32>(palette[material].rgb, 1.0);
+    out.albedo = vec4<f32>(look.albedo, 1.0);
     out.normal = vec4<f32>(normal, f0);
-    out.orm = vec4<f32>(1.0, clamp(palette[material].w, 0.04, 1.0), 0.0, f0);
+    out.orm = vec4<f32>(look.ao, clamp(palette(material).w, 0.04, 1.0), 0.0, f0);
     out.emissive = vec4<f32>(0.0, 0.0, 0.0, f0);
     // Terrain tag consumed by deferred lighting (skips screen-space AO).
     out.lightmap_uv = vec2<f32>(-1.0, -2.0);
@@ -814,13 +935,17 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
 // off their face; every hit then takes the sample of its block, or of a
 // neighbouring one, that walked within four of its cells; the others
 // (silhouettes) are listed and walk in a pass of their own, so a few of
-// them do not hold whole warps.
+// them do not hold whole warps. The samples also measure the slope's
+// normal (smooth: it serves the block).
 
 // Helio's directional visibility: x lit (0 or 1), yzw the sun it is for.
 @group(1) @binding(8) var out_sun: texture_storage_2d<rgba16float, write>;
-// Samples: lit, distance, 1 when it walked (it faced the sun).
-@group(1) @binding(9) var out_sun_samples: texture_storage_2d<rgba32float, write>;
-@group(1) @binding(10) var sun_samples: texture_2d<f32>;
+// The normal each hit is lit with (`Face::shading`), for the gbuffer.
+@group(1) @binding(13) var out_normal: texture_storage_2d<rgba16float, write>;
+// Samples: lit (bit 0), walked (it faced the sun, bit 1), a hit (bit 2);
+// its distance's bits; its slope's normal (`pack_unit`, 0: none).
+@group(1) @binding(9) var out_sun_samples: texture_storage_2d<rgba32uint, write>;
+@group(1) @binding(10) var sun_samples: texture_2d<u32>;
 // Hits no sample serves: their count and pixels (x | y << 16), and the
 // workgroups of their indirect dispatch (x, 1, 1).
 struct Fallbacks {
@@ -830,24 +955,99 @@ struct Fallbacks {
 @group(1) @binding(11) var<storage, read_write> fallbacks: Fallbacks;
 @group(1) @binding(12) var<storage, read_write> fallback_groups: array<atomic<u32>, 3>;
 
-// A hit's face: its unit normal, and the length of a cell across it.
+// A hit's face: its unit normal, the length of a cell across it; the
+// normal it is lit with, and how far (cells) its sun ray ignores what it
+// meets (natural steps: `shading`); the slope's normal there (zero: none).
 struct Face {
     normal: vec3<f32>,
     cell: f32,
+    shading: vec3<f32>,
+    skip: f32,
+    ground: vec3<f32>,
 }
 
-fn hit_face(v: vec2<u32>) -> Face {
+// The top of the column `d` cells from `cell` (chunk `slot`'s cells) within
+// four layers of `cell`'s, and whether there is one.
+fn column_top_near(slot: u32, key: vec4<i32>, cell: vec3<i32>, d: vec2<i32>) -> vec2<f32> {
+    var c = cell + vec3<i32>(d, 0);
+    if solid_near(slot, key, c + vec3<i32>(0, 0, 1)) {
+        for (var n = 0; n < 4; n++) {
+            c.z += 1;
+            if !solid_near(slot, key, c + vec3<i32>(0, 0, 1)) { return vec2<f32>(f32(c.z), 1.0); }
+        }
+        return vec2<f32>(0.0);
+    }
+    for (var n = 0; n < 5; n++) {
+        if solid_near(slot, key, c) { return vec2<f32>(f32(c.z), 1.0); }
+        c.z -= 1;
+    }
+    return vec2<f32>(0.0);
+}
+
+// The ground's normal at a natural step `cell` (chunk `slot`, frame `c`):
+// the slope of the column tops two cells away each way, in the world;
+// zero where they are not found.
+fn slope_normal(slot: u32, key: vec4<i32>, cell: vec3<i32>, c: ChunkDraw) -> vec3<f32> {
+    let x0 = column_top_near(slot, key, cell, vec2<i32>(-2, 0));
+    let x1 = column_top_near(slot, key, cell, vec2<i32>(2, 0));
+    let y0 = column_top_near(slot, key, cell, vec2<i32>(0, -2));
+    let y1 = column_top_near(slot, key, cell, vec2<i32>(0, 2));
+    let top = f32(cell.z);
+    // One-sided where a side has no top near.
+    let gx = select(select((x1.x - top) / 2.0, (top - x0.x) / 2.0, x0.y > 0.0), (x1.x - x0.x) / 4.0, x0.y > 0.0 && x1.y > 0.0);
+    let gy = select(select((y1.x - top) / 2.0, (top - y0.x) / 2.0, y0.y > 0.0), (y1.x - y0.x) / 4.0, y0.y > 0.0 && y1.y > 0.0);
+    if x0.y + x1.y == 0.0 || y0.y + y1.y == 0.0 { return vec3<f32>(0.0); }
+    // A cell-space normal to the world: by M's inverse transposed.
+    let n = -gx * c.i0.xyz - gy * c.i1.xyz + c.i2.xyz;
+    return normalize(n);
+}
+
+// Hit `v` at pixel `q` (distance `t`). A natural step (air above it) stands
+// for a smooth slope of steps: it is lit partly with the slope's normal
+// (`Materials::detail.w`, all of it as cells shrink under two pixels) and
+// its sun ray passes its own steps (the span renderer's step softness).
+// The slope's normal is `ground` when given (a nearby sample's), else
+// measured here.
+fn hit_face(v: vec2<u32>, q: vec2<u32>, size: vec2<u32>, t: f32, ground_hint: vec3<f32>) -> Face {
     let c = chunk_frame(v.x);
+    let key = chunk_keys[v.x];
     let axis = (v.y >> 18u) & 3u;
     let sign = (v.y >> 20u) & 1u;
     let axis_world = select(select(c.m2.xyz, c.m1.xyz, axis == 1u), c.m0.xyz, axis == 0u);
-    return Face(normalize(axis_world) * select(-1.0, 1.0, sign == 1u), length(axis_world));
+    let normal = normalize(axis_world) * select(-1.0, 1.0, sign == 1u);
+    let cell_m = length(axis_world);
+    var f = Face(normal, cell_m, normal, 0.0, vec3<f32>(0.0));
+    let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
+    if solid_near(v.x, key, cell + vec3<i32>(0, 0, 1)) { return f; }
+    let pixel_m = t * length(pixel_ray(q + vec2<u32>(1u, 0u), size) - pixel_ray(q, size));
+    let w = max(materials.detail.w, 1.0 - smoothstep(1.0, 2.0, cell_m / max(pixel_m, 1e-6)));
+    var ground = ground_hint;
+    if dot(ground, ground) == 0.0 { ground = slope_normal(v.x, key, cell, c); }
+    if w <= 0.0 || dot(ground, ground) == 0.0 { return f; }
+    f.ground = ground;
+    f.shading = normalize(mix(normal, ground, w));
+    f.skip = 2.0 * w;
+    return f;
+}
+
+// A unit vector in two snorm halves (octahedral) and back.
+fn pack_unit(n: vec3<f32>) -> u32 {
+    var p = n.xy / (abs(n.x) + abs(n.y) + abs(n.z));
+    if n.z < 0.0 { p = (1.0 - abs(p.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), p >= vec2<f32>(0.0)); }
+    return pack2x16snorm(p);
+}
+
+fn unpack_unit(u: u32) -> vec3<f32> {
+    let p = unpack2x16snorm(u);
+    var n = vec3<f32>(p, 1.0 - abs(p.x) - abs(p.y));
+    if n.z < 0.0 { n = vec3<f32>((1.0 - abs(n.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), n.xy >= vec2<f32>(0.0)), n.z); }
+    return normalize(n);
 }
 
 // Whether the hit at pixel `q` (distance `t`, face `f`) is in the sun.
 fn sun_walk(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face) -> f32 {
     let org = pixel_ray(q, size) * t + f.normal * (f.cell * 0.01);
-    let end = walk(Walk(slot, vec3<i32>(0), vec3<i32>(64), true), org, params.sun.xyz, 0.0, fade_dither(q), 96u, false, q);
+    let end = walk(Walk(slot, vec3<i32>(0), vec3<i32>(64), true), org, params.sun.xyz, f.skip * f.cell, fade_dither(q), 96u, false, q);
     return select(1.0, 0.0, end.hit);
 }
 
@@ -865,11 +1065,12 @@ fn shadow_sample(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= half.x || id.y >= half.y { return; }
     let q = sample_pixel(id.xy, size);
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
-    var sample = vec4<f32>(0.0);
+    var sample = vec4<u32>(0u);
     if v.x != NONE {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
-        let f = hit_face(v);
-        if dot(f.normal, params.sun.xyz) > 0.0 { sample = vec4<f32>(sun_walk(q, size, v.x, t, f), t, 1.0, 0.0); }
+        let f = hit_face(v, q, size, t, vec3<f32>(0.0));
+        sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
+        if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(sun_walk(q, size, v.x, t, f)); }
     }
     textureStore(out_sun_samples, vec2<i32>(id.xy), sample);
 }
@@ -885,27 +1086,31 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
         textureStore(out_sun, p, vec4<f32>(1.0, sun));
         return;
     }
-    let f = hit_face(v);
+    let t = textureLoad(hit_distance, p, 0).r;
+    // Its block's sample, then the nearer neighbours' (towards the pixel's
+    // side of its block): the first within four of its cells lends its
+    // slope's normal, the first of those that walked its sunlight.
+    let at_hit = pixel_ray(id.xy, size) * t;
+    let reach = 4.0 * length(chunk_frame(v.x).m0.xyz);
+    let half = vec2<i32>((size + 1u) / 2u);
+    let block = p / 2;
+    let toward = vec2<i32>(p & vec2<i32>(1)) * 2 - 1;
+    let blocks = array<vec2<i32>, 4>(block, block + vec2<i32>(toward.x, 0), block + vec2<i32>(0, toward.y), block + toward);
+    var ground = vec3<f32>(0.0);
+    var sampled = 0u;
+    for (var b = 0u; b < 4u; b++) {
+        let at = blocks[b];
+        if any(at < vec2<i32>(0)) || any(at >= half) { continue; }
+        let s = textureLoad(sun_samples, at, 0);
+        if (s.x & 4u) == 0u || distance(pixel_ray(sample_pixel(vec2<u32>(at), size), size) * bitcast<f32>(s.y), at_hit) > reach { continue; }
+        if dot(ground, ground) == 0.0 && s.z != 0u { ground = unpack_unit(s.z); }
+        if sampled == 0u && (s.x & 2u) != 0u { sampled = 2u | (s.x & 1u); }
+    }
+    let f = hit_face(v, id.xy, size, t, ground);
     var lit = 0.0;
-    if dot(f.normal, sun) > 0.0 {
-        let t = textureLoad(hit_distance, p, 0).r;
-        let at_hit = pixel_ray(id.xy, size) * t;
-        let half = vec2<i32>((size + 1u) / 2u);
-        let block = p / 2;
-        // Its block's sample, then the nearer neighbours' (towards the
-        // pixel's side of its block).
-        let toward = vec2<i32>(p & vec2<i32>(1)) * 2 - 1;
-        let blocks = array<vec2<i32>, 4>(block, block + vec2<i32>(toward.x, 0), block + vec2<i32>(0, toward.y), block + toward);
-        var found = false;
-        for (var b = 0u; b < 4u && !found; b++) {
-            let at = blocks[b];
-            if any(at < vec2<i32>(0)) || any(at >= half) { continue; }
-            let s = textureLoad(sun_samples, at, 0);
-            if s.z > 0.0 && distance(pixel_ray(sample_pixel(vec2<u32>(at), size), size) * s.y, at_hit) <= f.cell * 4.0 {
-                lit = s.x;
-                found = true;
-            }
-        }
+    if dot(f.shading, sun) > 0.0 {
+        let found = sampled != 0u;
+        lit = f32(sampled & 1u);
         if !found {
             let n = atomicAdd(&fallbacks.count, 1u);
             fallbacks.pixels[n] = id.x | (id.y << 16u);
@@ -919,9 +1124,10 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
 fn store_sun(p: vec2<i32>, v: vec2<u32>, f: Face, lit: f32) {
     let sun = params.sun.xyz;
     textureStore(out_sun, p, vec4<f32>(lit, sun));
+    textureStore(out_normal, p, vec4<f32>(f.shading, 0.0));
     if params.debug.x == 0u {
         let material = min((v.y >> 21u) & 0xffu, 31u);
-        textureStore(out_colour, p, vec4<f32>(palette[material].rgb * (0.25 + 0.75 * max(dot(f.normal, sun), 0.0) * lit), 1.0));
+        textureStore(out_colour, p, vec4<f32>(palette(material).rgb * (0.25 + 0.75 * max(dot(f.shading, sun), 0.0) * lit), 1.0));
     }
 }
 
@@ -933,6 +1139,7 @@ fn shadow_fallback(@builtin(global_invocation_id) id: vec3<u32>) {
     let q = vec2<u32>(packed & 0xffffu, packed >> 16u);
     let size = textureDimensions(hit_distance);
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
-    let f = hit_face(v);
-    store_sun(vec2<i32>(q), v, f, sun_walk(q, size, v.x, textureLoad(hit_distance, vec2<i32>(q), 0).r, f));
+    let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
+    let f = hit_face(v, q, size, t, vec3<f32>(0.0));
+    store_sun(vec2<i32>(q), v, f, sun_walk(q, size, v.x, t, f));
 }

@@ -34,7 +34,7 @@ const CHUNK_BATCH: usize = 2048;
 /// Chunk slots.
 pub const MAX_CHUNKS: usize = 131072;
 /// Leaves of every chunk together (8 bytes each).
-const LEAF_CAPACITY: u64 = 32 << 20;
+const LEAF_CAPACITY: u64 = 48 << 20;
 /// A brush buffer's content when there are none.
 const NO_BRUSH: [FaceBrush; 1] = [FaceBrush { flags: 0, radius_half: 0, k_lo: 0, k_hi: 0, center: [0; 4], ball: [0; 4] }];
 
@@ -113,8 +113,20 @@ struct DrawParams {
     sun: [f32; 4],
     /// x: colour by level (`HELIO_VOXEL_CHUNKS_LEVELS`).
     debug: [u32; 4],
-    /// Chunk table slots - 1, base cells per face edge.
+    /// Chunk table slots - 1, base cells per face edge, boxes holding the
+    /// eye, frame.
     table: [u32; 4],
+    /// The eye in noise-domain units: integer part, fraction.
+    eye_domain: [i32; 4],
+    eye_domain_frac: [f32; 4],
+}
+
+/// `Materials` of chunk_draw.wgsl.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ChunkMaterials {
+    materials: [crate::engine::MaterialGpu; crate::engine::MATERIALS],
+    detail: [f32; 4],
 }
 
 /// A tile of the quadtree: 64x64 columns of `level` on `face`.
@@ -389,6 +401,19 @@ const QUERIES: u32 = 8;
 /// `Reach`'s size: a count and 4095 keys.
 const REACH_BYTES: u64 = 16 * 4096;
 
+/// Picks a frame answers (more wait a frame).
+const MAX_PICKS: usize = 8;
+
+/// A frame's pick hits on their way back: per pick 256 bytes, its
+/// visibility (8) then distance (at 16).
+struct PickSlot {
+    buffer: wgpu::Buffer,
+    /// Request ids, the tool's picks, and the state as for `Reach`.
+    requests: Vec<u64>,
+    sink: Option<crate::engine::SharedPicks>,
+    state: ReachState,
+}
+
 /// A copy of `Reach` on its way back.
 struct ReachSlot {
     buffer: wgpu::Buffer,
@@ -505,7 +530,7 @@ pub struct ChunkWorld {
     leaf_materials: wgpu::Buffer,
     mid_materials: wgpu::Buffer,
     params: wgpu::Buffer,
-    palette: wgpu::Buffer,
+    materials: wgpu::Buffer,
     /// Chunk keys by slot, and the chunk table of the drawn chunks.
     chunk_keys: wgpu::Buffer,
     chunk_table: wgpu::Buffer,
@@ -525,6 +550,9 @@ pub struct ChunkWorld {
     /// slots, and the tiles whose whole volume is generated.
     reach: wgpu::Buffer,
     reach_slots: Vec<ReachSlot>,
+    pick_slots: Vec<PickSlot>,
+    /// Each slot's chunk key (`chunk_keys`, mirrored).
+    slot_keys: Vec<[i32; 4]>,
     deep: FxHashSet<TileKey>,
     reached: Vec<TileKey>,
     evict_pipeline: wgpu::ComputePipeline,
@@ -596,7 +624,9 @@ pub struct Targets {
     /// (Rgba16Float, Helio's `directional_visibility`), and its view.
     pub sun: wgpu::Texture,
     sun_view: wgpu::TextureView,
-    /// A sun sample a 2x2 block: lit, distance, walked (Rgba32Float).
+    /// The normal each hit is lit with (Rgba16Float).
+    normal: wgpu::Texture,
+    /// A sun sample a 2x2 block: flags, distance, slope (Rgba32Uint).
     sun_samples: wgpu::Texture,
     /// Hits no sample serves: count, pixels; their indirect workgroups.
     fallbacks: wgpu::Buffer,
@@ -633,13 +663,14 @@ impl Targets {
             exits: texture("chunk exits", wgpu::TextureFormat::R32Float, s | wgpu::TextureUsages::RENDER_ATTACHMENT),
             sun_view: view(&sun),
             sun,
+            normal: texture("chunk normal", wgpu::TextureFormat::Rgba16Float, s),
             sun_samples: device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("chunk sun samples"),
                 size: wgpu::Extent3d { width: size[0].div_ceil(2), height: size[1].div_ceil(2), depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba32Float,
+                format: wgpu::TextureFormat::Rgba32Uint,
                 usage: s,
                 view_formats: &[],
             }),
@@ -716,7 +747,8 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
     // `counted` (`WCOUNT`; shadow walks do not).
     let count = |n: u32| if counting { format!("atomicAdd(&counters[{n}], 1u);") } else { String::new() };
     let wcount = |n: u32| if counting { format!("if counted {{ atomicAdd(&counters[{n}], 1u); }}") } else { String::new() };
-    let draw = include_str!("../../shaders/chunk_draw.wgsl")
+    // The noise library (materials' patches), then the draw.
+    let draw = (format!("const DOMAIN_UNIT: f32 = {};\n", crate::grid::DOMAIN_UNIT) + include_str!("../../shaders/noise.wgsl") + include_str!("../../shaders/chunk_draw.wgsl"))
         .replace("COUNTERS", if counting { "@group(0) @binding(9) var<storage, read_write> counters: array<atomic<u32>, 256>;" } else { "" })
         .replace("WCOUNT(1)", &wcount(1))
         .replace("WCOUNT(3)", &wcount(3))
@@ -845,6 +877,7 @@ impl ChunkWorld {
             entries: &[
                 texture_entry(4, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::FRAGMENT),
                 texture_entry(7, wgpu::TextureSampleType::Uint, wgpu::ShaderStages::FRAGMENT),
+                texture_entry(14, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::FRAGMENT),
             ],
         });
         let layout = |second: &wgpu::BindGroupLayout| device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&draw_layout), Some(second)], immediate_size: 0 });
@@ -882,7 +915,7 @@ impl ChunkWorld {
         ];
         let shadow_sample_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk sun samples"),
-            entries: &[hits[0], hits[1], storage_texture(9, wgpu::TextureFormat::Rgba32Float)],
+            entries: &[hits[0], hits[1], storage_texture(9, wgpu::TextureFormat::Rgba32Uint)],
         });
         let shadow_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk shadow"),
@@ -891,15 +924,16 @@ impl ChunkWorld {
                 hits[1],
                 storage_texture(2, wgpu::TextureFormat::Rgba8Unorm),
                 storage_texture(8, wgpu::TextureFormat::Rgba16Float),
-                texture_entry(10, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::COMPUTE),
+                texture_entry(10, wgpu::TextureSampleType::Uint, wgpu::ShaderStages::COMPUTE),
                 storage(11, false, wgpu::ShaderStages::COMPUTE),
                 storage(12, false, wgpu::ShaderStages::COMPUTE),
+                storage_texture(13, wgpu::TextureFormat::Rgba16Float),
             ],
         });
         // The fallbacks' walks: their workgroups are the dispatch's.
         let shadow_fallback_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk shadow fallbacks"),
-            entries: &[hits[0], hits[1], storage_texture(2, wgpu::TextureFormat::Rgba8Unorm), storage_texture(8, wgpu::TextureFormat::Rgba16Float), storage(11, false, wgpu::ShaderStages::COMPUTE)],
+            entries: &[hits[0], hits[1], storage_texture(2, wgpu::TextureFormat::Rgba8Unorm), storage_texture(8, wgpu::TextureFormat::Rgba16Float), storage(11, false, wgpu::ShaderStages::COMPUTE), storage_texture(13, wgpu::TextureFormat::Rgba16Float)],
         });
         let compute = |label: &str, layout: &wgpu::PipelineLayout, entry: &str| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -949,10 +983,8 @@ impl ChunkWorld {
         let s = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
         let world = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk world"), contents: bytemuck::bytes_of(&WorldGpu::new(planet)), usage: wgpu::BufferUsages::UNIFORM });
         let terrain = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk terrain"), contents: &terrain_bytes(&program), usage: wgpu::BufferUsages::UNIFORM });
-        let appearance = planet.field().appearance();
-        // Linear colour and roughness.
-        let palette: Vec<[f32; 4]> = appearance.materials.iter().map(|m| [m.colour[0].powf(2.2), m.colour[1].powf(2.2), m.colour[2].powf(2.2), m.colour[3]]).collect();
-        let palette = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk palette"), contents: bytemuck::cast_slice(&palette), usage: wgpu::BufferUsages::UNIFORM });
+        let (materials, detail) = crate::engine::material_table(&planet.field().appearance());
+        let materials = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk materials"), contents: bytemuck::bytes_of(&ChunkMaterials { materials, detail }), usage: wgpu::BufferUsages::UNIFORM });
         let queries = device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| {
             (
                 device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("chunk draw"), ty: wgpu::QueryType::Timestamp, count: QUERIES * TIMING_RING as u32 }),
@@ -1006,7 +1038,7 @@ impl ChunkWorld {
             leaf_materials: buffer("chunk leaf materials", LEAF_CAPACITY * 2, s),
             mid_materials: buffer("chunk mid materials", (MAX_CHUNKS * 64 * 4) as u64, wgpu::BufferUsages::STORAGE),
             params: buffer("chunk draw params", std::mem::size_of::<DrawParams>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
-            palette,
+            materials,
             chunk_keys: buffer("chunk keys", (MAX_CHUNKS * 16) as u64, s),
             chunk_table,
 
@@ -1022,6 +1054,8 @@ impl ChunkWorld {
             reach_slots: (0..TIMING_RING).map(|_| ReachSlot { buffer: buffer("chunk reach read", REACH_BYTES, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST), state: ReachState::Free }).collect(),
             deep: FxHashSet::default(),
             reached: Vec::new(),
+            pick_slots: (0..3).map(|_| PickSlot { buffer: buffer("chunk picks", 256 * MAX_PICKS as u64, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST), requests: Vec::new(), sink: None, state: ReachState::Free }).collect(),
+            slot_keys: vec![[-1, 0, 0, 0]; MAX_CHUNKS],
             evict_pipeline,
             table_layout,
             table_pipeline,
@@ -1160,6 +1194,7 @@ impl ChunkWorld {
             self.queue.write_buffer(&self.statics, u64::from(slot) * std::mem::size_of::<ChunkStatic>() as u64, bytemuck::bytes_of(&record));
             chunks.push(Chunk { cz, slot, serial: self.serial, frame, z: None });
             self.queue.write_buffer(&self.chunk_keys, u64::from(slot) * 16, bytemuck::cast_slice(&chunk_key(key, cz)));
+            self.slot_keys[slot as usize] = chunk_key(key, cz);
             readback.chunks.push((key, cz, slot, self.serial));
         }
         stats.generated_chunks += chunks.len();
@@ -1529,7 +1564,87 @@ impl ChunkWorld {
 
     /// Start mapping the results the last update recorded (call after its
     /// submit).
+    /// Copy the last draw's hits under `picks`' requests (at most
+    /// `MAX_PICKS` a frame) for readback; [`Self::submitted`] answers them.
+    pub fn copy_picks(&mut self, encoder: &mut helio_core::CommandRecorder<'_>, picks: &crate::engine::SharedPicks) {
+        let Some(targets) = &self.targets else { return };
+        let Some(slot) = self.pick_slots.iter_mut().find(|s| matches!(s.state, ReachState::Free)) else { return };
+        let requests: Vec<crate::engine::PickRequest> = {
+            let Ok(mut shared) = picks.lock() else { return };
+            let n = shared.requests.len().min(MAX_PICKS);
+            shared.requests.drain(..n).collect()
+        };
+        if requests.is_empty() {
+            return;
+        }
+        let size = targets.size;
+        for (n, request) in requests.iter().enumerate() {
+            let x = ((request.uv[0].clamp(0.0, 1.0) * size[0] as f32) as u32).min(size[0].max(1) - 1);
+            let y = ((request.uv[1].clamp(0.0, 1.0) * size[1] as f32) as u32).min(size[1].max(1) - 1);
+            for (texture, at) in [(&targets.visibility, 0), (&targets.distance, 16)] {
+                encoder.copy_texture_to_buffer(
+                    wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
+                    wgpu::TexelCopyBufferInfo { buffer: &slot.buffer, layout: wgpu::TexelCopyBufferLayout { offset: 256 * n as u64 + at, bytes_per_row: None, rows_per_image: None } },
+                    wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                );
+            }
+        }
+        slot.requests = requests.iter().map(|r| r.id).collect();
+        slot.sink = Some(picks.clone());
+        slot.state = ReachState::Copied;
+    }
+
+    /// A pick's hit from its copied visibility and distance.
+    fn pick_hit(&self, words: &[u32]) -> Option<crate::engine::PickHit> {
+        let (slot, cell) = (words[0], words[1]);
+        let t = f32::from_bits(words[4]);
+        let key = *self.slot_keys.get(slot as usize)?;
+        if key[0] < 0 || !(t > 0.0) {
+            return None;
+        }
+        let local = [cell & 63, (cell >> 6) & 63, (cell >> 12) & 63].map(|c| c as i32);
+        let axis = (cell >> 18) & 3;
+        // Visibility's side: 1 when the ray stepped down the axis.
+        let down = (cell >> 20) & 1 == 1;
+        Some(crate::engine::PickHit {
+            distance: f64::from(t),
+            cell: crate::grid::Cell::new((key[0] & 0xff) as u8, key[1] * CHUNK + local[0], key[2] * CHUNK + local[1], key[3] * CHUNK + local[2]),
+            level: (key[0] >> 8) as u32,
+            entered: Some(2 * axis + u32::from(!down)),
+        })
+    }
+
     pub fn submitted(&mut self) {
+        // Picks: answer those mapped, map those just copied.
+        for n in 0..self.pick_slots.len() {
+            match &self.pick_slots[n].state {
+                ReachState::Copied => {
+                    let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let flag = ready.clone();
+                    self.pick_slots[n].buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                        if r.is_ok() {
+                            flag.store(true, std::sync::atomic::Ordering::Release);
+                        }
+                    });
+                    self.pick_slots[n].state = ReachState::Mapping(ready);
+                }
+                ReachState::Mapping(ready) if ready.load(std::sync::atomic::Ordering::Acquire) => {
+                    let results: Vec<crate::engine::PickResult> = {
+                        let data = self.pick_slots[n].buffer.slice(..).get_mapped_range().unwrap();
+                        let words: &[u32] = bytemuck::cast_slice(&data);
+                        self.pick_slots[n].requests.iter().enumerate().map(|(i, &id)| crate::engine::PickResult { id, hit: self.pick_hit(&words[i * 64..i * 64 + 5]) }).collect()
+                    };
+                    let slot = &mut self.pick_slots[n];
+                    slot.buffer.unmap();
+                    if let Some(Ok(mut shared)) = slot.sink.take().as_ref().map(|s| s.lock()) {
+                        shared.results.extend(results);
+                    }
+                    slot.requests.clear();
+                    slot.state = ReachState::Free;
+                }
+                _ => {}
+            }
+        }
         // Tiles rays reached under: map the copies just submitted, read
         // those mapped.
         for slot in &mut self.reach_slots {
@@ -1716,13 +1831,21 @@ impl ChunkWorld {
                 ]
             },
             table: [self.drawn_set.mask(), self.face_cells, self.boxes.0, frame as u32],
+            eye_domain: {
+                let d = (eye / crate::grid::DOMAIN_UNIT).floor();
+                [d.x as i32, d.y as i32, d.z as i32, 0]
+            },
+            eye_domain_frac: {
+                let d = eye / crate::grid::DOMAIN_UNIT;
+                (d - d.floor()).as_vec3().extend(0.0).to_array()
+            },
         };
         self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         self.queue.write_buffer(&self.reach, 0, &[0u8; 16]);
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk draw"),
             layout: &self.draw_layout,
-            entries: &[entry(0, &self.params), entry(1, &self.statics), entry(2, &self.chunk_meta), entry(3, &self.mids), entry(4, &self.mid_leaves), entry(5, &self.leaves), entry(6, &self.leaf_materials), entry(7, &self.palette), entry(8, &self.mid_materials), entry(9, &self.counters), entry(10, &self.chunk_table), entry(11, &self.chunk_keys), entry(12, &self.draw_list), entry(13, &self.reach)],
+            entries: &[entry(0, &self.params), entry(1, &self.statics), entry(2, &self.chunk_meta), entry(3, &self.mids), entry(4, &self.mid_leaves), entry(5, &self.leaves), entry(6, &self.leaf_materials), entry(7, &self.materials), entry(8, &self.mid_materials), entry(9, &self.counters), entry(10, &self.chunk_table), entry(11, &self.chunk_keys), entry(12, &self.draw_list), entry(13, &self.reach)],
         });
         self.last_group = Some(group.clone());
         let targets = self.targets.as_ref().unwrap();
@@ -1805,7 +1928,7 @@ impl ChunkWorld {
         }
         {
             // 4. Sun shadows: samples, then every hit.
-            let (distance, visibility, samples, colour) = (view(&targets.distance), view(&targets.visibility), view(&targets.sun_samples), view(&targets.colour));
+            let (distance, visibility, samples, colour, normal) = (view(&targets.distance), view(&targets.visibility), view(&targets.sun_samples), view(&targets.colour), view(&targets.normal));
             let sample_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk sun samples"),
                 layout: &self.shadow_sample_layout,
@@ -1814,12 +1937,12 @@ impl ChunkWorld {
             let shadow_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk shadow"),
                 layout: &self.shadow_layout,
-                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(2, &colour), view_entry(8, &targets.sun_view), view_entry(10, &samples), entry(11, &targets.fallbacks), entry(12, &targets.fallback_groups)],
+                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(2, &colour), view_entry(8, &targets.sun_view), view_entry(10, &samples), entry(11, &targets.fallbacks), entry(12, &targets.fallback_groups), view_entry(13, &normal)],
             });
             let fallback_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk shadow fallbacks"),
                 layout: &self.shadow_fallback_layout,
-                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(2, &colour), view_entry(8, &targets.sun_view), entry(11, &targets.fallbacks)],
+                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(2, &colour), view_entry(8, &targets.sun_view), entry(11, &targets.fallbacks), view_entry(13, &normal)],
             });
             // No fallbacks yet.
             self.queue.write_buffer(&targets.fallbacks, 0, bytemuck::cast_slice(&[0u32]));
@@ -1851,6 +1974,7 @@ impl ChunkWorld {
                 entries: &[
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&view(&targets.distance)) },
                     wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&view(&targets.visibility)) },
+                    wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(&view(&targets.normal)) },
                 ],
             });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1940,6 +2064,7 @@ impl ChunkWorld {
             entries: &[
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&view(&targets.distance)) },
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&view(&targets.visibility)) },
+                wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(&view(&targets.normal)) },
             ],
         });
 

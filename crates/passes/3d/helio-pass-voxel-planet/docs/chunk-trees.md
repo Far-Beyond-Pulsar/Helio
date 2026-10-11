@@ -458,9 +458,51 @@ rock; an edited top's material throughout). The hit checks the cell
 above, except through a top face (the ray came through that air). Leaf
 materials grow from one byte to two (64 voxels a leaf).
 
-Dug walls now show a grass rim, soil, then rock, and terrace risers taller
-than a cell show soil under their grass. Cost, fastest of three
+Dug walls now show a grass rim, soil, then rock. Cost, fastest of three
 interleaved: ground 1.86 -> 1.90 ms, mountain 4.13 -> 4.25 ms.
+
+## Phase 4c results (2026-10-11): the span renderer's look
+
+Side by side with the span renderer on the same views, picked pixels
+(the editor's `Picks`, which the chunk pass now answers) hit the same cells
+on both and on the CPU: the geometry was the same, the look was not.
+Ported from its surface shading:
+
+- Each voxel's pigment and the materials' patches, clumps and blades
+  (`material_albedo`, the same table: `engine::material_table`), sampled at
+  the cell centre's noise-domain point (the eye in domain units from the
+  CPU, plus the eye-relative offset).
+- Corner occlusion from the cells around the air in front of the face
+  (across chunk borders by the chunk table), and crisp edges while a cell
+  spans several pixels; both fade as cells shrink to a pixel.
+- Step softness: a natural step (air above) is lit with the slope's normal
+  (90%, `detail.w`; all of it under two pixels) and its sun ray passes its
+  own steps (two cells). The slope is measured from the column tops two
+  cells away each way, once per 2x2 block by the sun samples.
+
+Materials, against the CPU's (`Planet::material`) at probed voxels:
+
+- Natural risers keep the surface material (depth counts from the lowest
+  neighbouring top); a terrain top where its volume put it is surface; only
+  tops edits moved count depth under the terrain's.
+- The slope that picks materials is measured over 64 base cells, as the
+  CPU's; across neighbouring columns every terrace step was steep.
+- A leaf's surface material is the majority of the tops in it, single-voxel
+  specks aside.
+- A full leaf with a column topping in it is stored (it was implicit, with
+  its mid's material: the most of a 16^3 region, which drew dirt along
+  terrace contours and gravel streaks on snow). That stores more leaves:
+  the mountain holds 560 MB (402 before); leaf storage grows to 48 M
+  leaves (it overflowed at 32 M).
+
+| View (1080p hold) | primary | sun shadows |
+|---|---|---|
+| ground | 1.89 ms | 1.80 ms |
+| mountain slope | 4.60 ms | 2.87 ms |
+
+The span renderer spends 8.6 ms (ground) and 16.9 ms (mountain) on the
+same views. Over budget on the mountain (7.5 ms at 1080p): more hits face
+the sun with the slope's normal, so more sun rays walk.
 
 ## References
 
