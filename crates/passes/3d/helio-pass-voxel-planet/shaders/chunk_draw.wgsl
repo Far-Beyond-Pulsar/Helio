@@ -569,10 +569,11 @@ struct WalkEnd {
     material: u32,
 }
 
-// The walk of ray org + t dir (org eye-relative, dir unit) from t_start, for
+// The walk of ray org + t dir (org eye-relative, dir unit) from t_start to
+// t_end, for
 // a pixel of dither `r`, over at most `boxes` boxes (`counted`: in the
 // counting build's counters, as `pixel`).
-fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, r: i32, boxes: u32, counted: bool, pixel: vec2<u32>) -> WalkEnd {
+fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r: i32, boxes: u32, counted: bool, pixel: vec2<u32>) -> WalkEnd {
     var frame = chunk_frame(start.slot);
     var key = chunk_keys[start.slot];
     var cube_lo = start.lo;
@@ -600,7 +601,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, r: i32, boxes
             let lo = min(ta, tb);
             let hi = max(ta, tb);
             let t0 = max(max(lo.x, max(lo.y, lo.z)), t_prev);
-            let t1 = min(hi.x, min(hi.y, hi.z));
+            let t1 = min(min(hi.x, min(hi.y, hi.z)), t_end);
             if t1 > t0 {
                 let axis0 = select(select(2u, 1u, lo.y >= lo.z), 0u, lo.x >= lo.y && lo.x >= lo.z);
                 let h = trace_chunk(slot, o, d, t0, t1, axis0, vec2<i32>(i32(frame.box.x), i32(frame.box.y)), counted);
@@ -612,6 +613,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, r: i32, boxes
         // The cell just past the face the ray leaves the box by, in the
         // frame chunk's cells (exact integers far from the origin).
         t_prev = max(t_leave, t_prev);
+        if t_prev >= t_end { break; }
         let level = key.x >> 8u;
         let q = o + d * t_leave;
         let axis = select(select(2u, 1u, cube_far.y <= cube_far.z), 0u, cube_far.x <= cube_far.y && cube_far.x <= cube_far.z);
@@ -731,7 +733,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
             real = false;
         }
     }
-    let end = walk(Walk(bitcast<u32>(frame.box.z), cube_lo, cube_hi, real), vec3<f32>(0.0), dir, t_prev, r, 128u, true, id.xy);
+    let end = walk(Walk(bitcast<u32>(frame.box.z), cube_lo, cube_hi, real), vec3<f32>(0.0), dir, t_prev, 1e30, r, 128u, true, id.xy);
     if !end.hit {
         // Unresolved: the next round seeds the boxes beyond.
         textureStore(out_exits, p, vec4<f32>(end.t + 1e-4));
@@ -903,7 +905,8 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     let axis = (v.y >> 18u) & 3u;
     let sign = (v.y >> 20u) & 1u;
     let material = min((v.y >> 21u) & 0xffu, 31u);
-    let normal = textureLoad(hit_normal, p, 0).xyz;
+    let shading = textureLoad(hit_normal, p, 0);
+    let normal = shading.xyz;
     let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
     // A pixel's width at the hit (m).
     let pixel_m = t * length(pixel_ray(vec2<u32>(pixel.xy) + vec2<u32>(1u, 0u), size) - pixel_ray(vec2<u32>(pixel.xy), size));
@@ -912,7 +915,7 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     var out: GOut;
     out.albedo = vec4<f32>(look.albedo, 1.0);
     out.normal = vec4<f32>(normal, f0);
-    out.orm = vec4<f32>(look.ao, clamp(palette(material).w, 0.04, 1.0), 0.0, f0);
+    out.orm = vec4<f32>(look.ao * shading.w, clamp(palette(material).w, 0.04, 1.0), 0.0, f0);
     out.emissive = vec4<f32>(0.0, 0.0, 0.0, f0);
     // Terrain tag consumed by deferred lighting (skips screen-space AO).
     out.lightmap_uv = vec2<f32>(-1.0, -2.0);
@@ -940,7 +943,8 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
 
 // Helio's directional visibility: x lit (0 or 1), yzw the sun it is for.
 @group(1) @binding(8) var out_sun: texture_storage_2d<rgba16float, write>;
-// The normal each hit is lit with (`Face::shading`), for the gbuffer.
+// The normal each hit is lit with (`Face::shading`) and its sky visibility,
+// for the gbuffer.
 @group(1) @binding(13) var out_normal: texture_storage_2d<rgba16float, write>;
 // Samples: lit (bit 0), walked (it faced the sun, bit 1), a hit (bit 2);
 // its distance's bits; its slope's normal (`pack_unit`, 0: none).
@@ -1047,8 +1051,85 @@ fn unpack_unit(u: u32) -> vec3<f32> {
 // Whether the hit at pixel `q` (distance `t`, face `f`) is in the sun.
 fn sun_walk(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face) -> f32 {
     let org = pixel_ray(q, size) * t + f.normal * (f.cell * 0.01);
-    let end = walk(Walk(slot, vec3<i32>(0), vec3<i32>(64), true), org, params.sun.xyz, f.skip * f.cell, fade_dither(q), 96u, false, q);
+    let end = walk(Walk(slot, vec3<i32>(0), vec3<i32>(64), true), org, params.sun.xyz, f.skip * f.cell, 1e30, fade_dither(q), 96u, false, q);
     return select(1.0, 0.0, end.hit);
+}
+
+// Sky rays a sample casts a frame (one sample a 4x4 block), and how far
+// they reach (cells).
+const SKY_RAYS: u32 = 4u;
+const SKY_RANGE_CELLS: f32 = 48.0;
+
+// The share of the sky the hit at pixel `q` (distance `t`, face `f`, chunk
+// `slot`) sees: cosine-weighted rays about the planet's up, turned each
+// frame (TSR gathers them); an occluder near the range end shades less (no
+// edge at the range). A ceiling looks out sideways (the span renderer's
+// sky visibility).
+fn sky_visibility(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face) -> f32 {
+    let up = normalize(chunk_frame(slot).m2.xyz);
+    let ceiling = dot(f.normal, up) < -0.25;
+    let t1 = normalize(select(cross(up, vec3<f32>(0.0, 0.0, 1.0)), cross(up, vec3<f32>(1.0, 0.0, 0.0)), abs(up.z) > 0.9));
+    let t2 = cross(up, t1);
+    let range = SKY_RANGE_CELLS * f.cell;
+    let org = pixel_ray(q, size) * t + f.normal * (f.cell * 0.01);
+    let turn = f32(params.table.w % 64u) * 0.618034;
+    var open = 0.0;
+    var total = 0.0;
+    for (var i = 0u; i < SKY_RAYS; i++) {
+        let u = fract((f32(i) + 0.5) / f32(SKY_RAYS) + turn);
+        let phi = (f32(i) + turn * 7.0) * 2.39996323;
+        let around = t1 * cos(phi) + t2 * sin(phi);
+        var dir = normalize(around * sqrt(u) + up * sqrt(1.0 - u));
+        if ceiling { dir = normalize(around - up * 0.02); }
+        else if dot(dir, f.normal) <= 0.0 { continue; }
+        total += 1.0;
+        let end = walk(Walk(slot, vec3<i32>(0), vec3<i32>(64), true), org, dir, f.skip * f.cell, range, fade_dither(q), 24u, false, q);
+        open += select(1.0, smoothstep(0.5, 1.0, end.t / range), end.hit && end.t < range);
+    }
+    return select(1.0, open / total, total > 0.0);
+}
+
+// Sky visibility samples, one a 4x4 block: visibility, the sample's
+// distance (0: no hit).
+@group(1) @binding(15) var out_sky_samples: texture_storage_2d<rg32float, write>;
+@group(1) @binding(16) var sky_samples: texture_2d<f32>;
+
+// The pixel 4x4 block `b` samples this frame (16 frames visit them all).
+fn sky_pixel(b: vec2<u32>, size: vec2<u32>) -> vec2<u32> {
+    let turn = (params.table.w * 7u) & 15u;
+    return min(b * 4u + vec2<u32>(turn & 3u, turn >> 2u), size - 1u);
+}
+
+// One thread a 4x4 block: dispatch over a quarter of each side.
+@compute @workgroup_size(8, 8)
+fn sky_sample(@builtin(global_invocation_id) id: vec3<u32>) {
+    let size = textureDimensions(hit_distance);
+    let quarter = (size + 3u) / 4u;
+    if id.x >= quarter.x || id.y >= quarter.y { return; }
+    let q = sky_pixel(id.xy, size);
+    let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
+    var sample = vec2<f32>(1.0, 0.0);
+    if v.x != NONE {
+        let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
+        sample = vec2<f32>(sky_visibility(q, size, v.x, t, hit_face(v, q, size, t, vec3<f32>(0.0))), t);
+    }
+    textureStore(out_sky_samples, vec2<i32>(id.xy), vec4<f32>(sample, 0.0, 0.0));
+}
+
+// A hit's sky visibility (at `at_hit`, pixel `p`): its 4x4 block's sample
+// within `reach`, else the nearest such neighbour's, else its block's.
+fn sky_at(p: vec2<i32>, at_hit: vec3<f32>, reach: f32, size: vec2<u32>) -> f32 {
+    let quarter = vec2<i32>((size + 3u) / 4u);
+    let block = p / 4;
+    let toward = select(vec2<i32>(-1), vec2<i32>(1), (p & vec2<i32>(3)) >= vec2<i32>(2));
+    let blocks = array<vec2<i32>, 4>(block, block + vec2<i32>(toward.x, 0), block + vec2<i32>(0, toward.y), block + toward);
+    for (var b = 0u; b < 4u; b++) {
+        let at = blocks[b];
+        if any(at < vec2<i32>(0)) || any(at >= quarter) { continue; }
+        let s = textureLoad(sky_samples, at, 0).xy;
+        if s.y > 0.0 && distance(pixel_ray(sky_pixel(vec2<u32>(at), size), size) * s.y, at_hit) <= reach * 2.0 { return s.x; }
+    }
+    return textureLoad(sky_samples, block, 0).x;
 }
 
 // The pixel block `b` samples this frame.
@@ -1107,6 +1188,7 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
         if sampled == 0u && (s.x & 2u) != 0u { sampled = 2u | (s.x & 1u); }
     }
     let f = hit_face(v, id.xy, size, t, ground);
+    textureStore(out_normal, p, vec4<f32>(f.shading, sky_at(p, at_hit, reach, size)));
     var lit = 0.0;
     if dot(f.shading, sun) > 0.0 {
         let found = sampled != 0u;
@@ -1124,7 +1206,6 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
 fn store_sun(p: vec2<i32>, v: vec2<u32>, f: Face, lit: f32) {
     let sun = params.sun.xyz;
     textureStore(out_sun, p, vec4<f32>(lit, sun));
-    textureStore(out_normal, p, vec4<f32>(f.shading, 0.0));
     if params.debug.x == 0u {
         let material = min((v.y >> 21u) & 0xffu, 31u);
         textureStore(out_colour, p, vec4<f32>(palette(material).rgb * (0.25 + 0.75 * max(dot(f.shading, sun), 0.0) * lit), 1.0));

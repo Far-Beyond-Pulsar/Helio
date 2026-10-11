@@ -504,6 +504,23 @@ The span renderer spends 8.6 ms (ground) and 16.9 ms (mountain) on the
 same views. Over budget on the mountain (7.5 ms at 1080p): more hits face
 the sun with the slope's normal, so more sun rays walk.
 
+### Sky visibility
+
+Ambient light is occluded by the sky a hit sees: 4 cosine-weighted rays
+about the planet's up from one hit a 4x4 block (the hit and the rays
+turning each frame, so TSR gathers them), reaching 48 cells (an occluder
+near the end shades less), in a dispatch of their own; each hit takes the
+sample of its block or a neighbour's within reach, and the gbuffer's
+occlusion is the corner occlusion times it. Walks now end at a distance
+(sky rays had walked on past their range: 4.5 ms). Inside the natural cave
+view the walls take no sky light (the span renderer draws haze there: its
+rays find no terrain from inside that cave).
+
+| View (1080p hold) | primary | sun shadows and sky |
+|---|---|---|
+| ground | 1.89 ms | 2.12 ms |
+| mountain slope | 4.66 ms | 3.33 ms |
+
 ## References
 
 Laine and Karras, *Efficient Sparse Voxel Octrees* (2010); Crassin et al.,

@@ -503,6 +503,8 @@ pub struct ChunkWorld {
     trace: wgpu::ComputePipeline,
     shadow_sample_layout: wgpu::BindGroupLayout,
     shadow_sample: wgpu::ComputePipeline,
+    sky_sample_layout: wgpu::BindGroupLayout,
+    sky_sample: wgpu::ComputePipeline,
     shadow_layout: wgpu::BindGroupLayout,
     shadow: wgpu::ComputePipeline,
     shadow_fallback_layout: wgpu::BindGroupLayout,
@@ -628,6 +630,9 @@ pub struct Targets {
     normal: wgpu::Texture,
     /// A sun sample a 2x2 block: flags, distance, slope (Rgba32Uint).
     sun_samples: wgpu::Texture,
+    /// A sky visibility sample a 4x4 block: visibility, distance
+    /// (Rg32Float).
+    sky_samples: wgpu::Texture,
     /// Hits no sample serves: count, pixels; their indirect workgroups.
     fallbacks: wgpu::Buffer,
     fallback_groups: wgpu::Buffer,
@@ -671,6 +676,16 @@ impl Targets {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba32Uint,
+                usage: s,
+                view_formats: &[],
+            }),
+            sky_samples: device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("chunk sky samples"),
+                size: wgpu::Extent3d { width: size[0].div_ceil(4), height: size[1].div_ceil(4), depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rg32Float,
                 usage: s,
                 view_formats: &[],
             }),
@@ -928,7 +943,12 @@ impl ChunkWorld {
                 storage(11, false, wgpu::ShaderStages::COMPUTE),
                 storage(12, false, wgpu::ShaderStages::COMPUTE),
                 storage_texture(13, wgpu::TextureFormat::Rgba16Float),
+                texture_entry(16, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::COMPUTE),
             ],
+        });
+        let sky_sample_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunk sky samples"),
+            entries: &[hits[0], hits[1], storage_texture(15, wgpu::TextureFormat::Rg32Float)],
         });
         // The fallbacks' walks: their workgroups are the dispatch's.
         let shadow_fallback_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -946,6 +966,7 @@ impl ChunkWorld {
             })
         };
         let shadow_sample = compute("chunk sun samples", &layout(&shadow_sample_layout), "shadow_sample");
+        let sky_sample = compute("chunk sky samples", &layout(&sky_sample_layout), "sky_sample");
         let shadow = compute("chunk shadow", &layout(&shadow_layout), "shadow");
         let shadow_fallback = compute("chunk shadow fallbacks", &layout(&shadow_fallback_layout), "shadow_fallback");
         let publish = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1013,6 +1034,8 @@ impl ChunkWorld {
             trace,
             shadow_sample_layout,
             shadow_sample,
+            sky_sample_layout,
+            sky_sample,
             shadow_layout,
             shadow,
             shadow_fallback_layout,
@@ -1928,7 +1951,7 @@ impl ChunkWorld {
         }
         {
             // 4. Sun shadows: samples, then every hit.
-            let (distance, visibility, samples, colour, normal) = (view(&targets.distance), view(&targets.visibility), view(&targets.sun_samples), view(&targets.colour), view(&targets.normal));
+            let (distance, visibility, samples, colour, normal, sky) = (view(&targets.distance), view(&targets.visibility), view(&targets.sun_samples), view(&targets.colour), view(&targets.normal), view(&targets.sky_samples));
             let sample_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk sun samples"),
                 layout: &self.shadow_sample_layout,
@@ -1937,7 +1960,12 @@ impl ChunkWorld {
             let shadow_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk shadow"),
                 layout: &self.shadow_layout,
-                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(2, &colour), view_entry(8, &targets.sun_view), view_entry(10, &samples), entry(11, &targets.fallbacks), entry(12, &targets.fallback_groups), view_entry(13, &normal)],
+                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(2, &colour), view_entry(8, &targets.sun_view), view_entry(10, &samples), entry(11, &targets.fallbacks), entry(12, &targets.fallback_groups), view_entry(13, &normal), view_entry(16, &sky)],
+            });
+            let sky_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("chunk sky samples"),
+                layout: &self.sky_sample_layout,
+                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(15, &sky)],
             });
             let fallback_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk shadow fallbacks"),
@@ -1953,6 +1981,9 @@ impl ChunkWorld {
                 pass.set_bind_group(0, &group, &[]);
                 pass.set_bind_group(1, &sample_group, &[]);
                 pass.dispatch_workgroups(size[0].div_ceil(2).div_ceil(8), size[1].div_ceil(2).div_ceil(8), 1);
+                pass.set_pipeline(&self.sky_sample);
+                pass.set_bind_group(1, &sky_group, &[]);
+                pass.dispatch_workgroups(size[0].div_ceil(4).div_ceil(8), size[1].div_ceil(4).div_ceil(8), 1);
             }
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("chunk shadow"),
