@@ -6,7 +6,9 @@
 //! chunk is 64^3 cells of one level stored as a 64-tree. [`ChunkWorld::build`]
 //! selects the cut of the tile quadtree whose cells project to at most
 //! `lod_pixels` pixels and generates every chunk under it; [`ChunkWorld::draw`]
-//! draws the chunks' boxes, and each fragment walks one chunk's tree.
+//! rasterizes the chunks' boxes to seed each pixel with the nearest box its
+//! ray enters, then traces each pixel's ray through that chunk's tree in a
+//! compute pass (shaders/chunk_draw.wgsl).
 
 use crate::edits::FaceBrush;
 use crate::engine::{terrain_bytes, terrain_source, WorldGpu};
@@ -28,6 +30,8 @@ const CHUNK_BATCH: usize = 512;
 pub const MAX_CHUNKS: usize = 131072;
 /// Leaves of every chunk together (8 bytes each).
 const LEAF_CAPACITY: u64 = 32 << 20;
+/// Chunk table slots (at least twice the chunks).
+const TABLE_SLOTS: usize = 2 * MAX_CHUNKS;
 /// Draws whose timings can be pending at once.
 pub const TIMING_RING: u64 = 4;
 
@@ -75,10 +79,13 @@ struct ChunkDraw {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct DrawParams {
     view_proj: [[f32; 4]; 4],
+    inverse_view_proj: [[f32; 4]; 4],
     /// Direction to the sun, near plane.
     sun: [f32; 4],
     /// x: colour by level (`HELIO_VOXEL_CHUNKS_LEVELS`).
     debug: [u32; 4],
+    /// Chunk table slots - 1, base cells per face edge.
+    table: [u32; 4],
 }
 
 /// A tile of the quadtree: 64x64 columns of `level` on `face`.
@@ -178,8 +185,16 @@ pub struct ChunkWorld {
     chunk_columns: wgpu::ComputePipeline,
     chunk_build: wgpu::ComputePipeline,
     draw_layout: wgpu::BindGroupLayout,
-    outside: wgpu::RenderPipeline,
-    inside: wgpu::RenderPipeline,
+    trace_layout: wgpu::BindGroupLayout,
+    seed_layout: wgpu::BindGroupLayout,
+    resolve_layout: wgpu::BindGroupLayout,
+    seed_outside: wgpu::RenderPipeline,
+    seed_inside: wgpu::RenderPipeline,
+    trace: wgpu::ComputePipeline,
+    resolve: wgpu::RenderPipeline,
+    targets: Option<Targets>,
+    /// Rounds of seed and trace per draw.
+    rounds: u32,
     world: wgpu::Buffer,
     terrain: wgpu::Buffer,
     tile_jobs: wgpu::Buffer,
@@ -197,6 +212,14 @@ pub struct ChunkWorld {
     mid_materials: wgpu::Buffer,
     params: wgpu::Buffer,
     palette: wgpu::Buffer,
+    /// Chunk keys by slot, the chunk table and its slots - 1, and each
+    /// slot's index among the drawn chunks.
+    chunk_keys: wgpu::Buffer,
+    chunk_table: wgpu::Buffer,
+    table_mask: u32,
+    /// Base cells along a face edge.
+    face_cells: u32,
+    slot_instance: wgpu::Buffer,
     instances: wgpu::Buffer,
     /// Timestamps of the last `TIMING_RING` draws: queries, resolve
     /// buffer, one readback buffer per draw.
@@ -207,11 +230,57 @@ pub struct ChunkWorld {
     drawn: (u32, u32),
 }
 
-pub const COLOUR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-pub const VISIBILITY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Uint;
-pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-/// Distance from the eye to each pixel's hit.
-pub const DISTANCE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
+/// The draw's targets: the seed (each pixel's nearest box) and the trace's
+/// outputs.
+pub struct Targets {
+    pub size: [u32; 2],
+    seed: wgpu::Texture,
+    /// Box entries during the seed, then the hits' depth (Depth32Float).
+    pub depth: wgpu::Texture,
+    /// Chunk slot (u32::MAX: none) and cell, face (Rg32Uint).
+    pub visibility: wgpu::Texture,
+    /// Plain colour (Rgba8Unorm).
+    pub colour: wgpu::Texture,
+    /// Distance from the eye to the hit, 0 for none (R32Float).
+    pub distance: wgpu::Texture,
+    /// Where each ray left its last box without a hit (R32Float).
+    exits: wgpu::Texture,
+}
+
+const SEED_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+impl Targets {
+    fn new(device: &wgpu::Device, size: [u32; 2]) -> Self {
+        let texture = |label: &str, format: wgpu::TextureFormat, usage: wgpu::TextureUsages| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: usage | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            })
+        };
+        let a = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+        let s = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
+        Self {
+            size,
+            seed: texture("chunk seed", SEED_FORMAT, a),
+            depth: texture("chunk depth", DEPTH_FORMAT, a),
+            visibility: texture("chunk visibility", wgpu::TextureFormat::Rg32Uint, s),
+            colour: texture("chunk colour", wgpu::TextureFormat::Rgba8Unorm, s),
+            distance: texture("chunk distance", wgpu::TextureFormat::R32Float, s),
+            exits: texture("chunk exits", wgpu::TextureFormat::R32Float, s | wgpu::TextureUsages::RENDER_ATTACHMENT),
+        }
+    }
+}
+
+fn view(texture: &wgpu::Texture) -> wgpu::TextureView {
+    texture.create_view(&Default::default())
+}
 
 fn storage(binding: u32, read_only: bool, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
@@ -226,12 +295,21 @@ fn entry(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry { binding, resource: b.as_entire_binding() }
 }
 
-fn cleared(view: &wgpu::TextureView) -> wgpu::RenderPassColorAttachment<'_> {
-    wgpu::RenderPassColorAttachment {
-        view,
-        depth_slice: None,
-        resolve_target: None,
-        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+fn texture_entry(binding: u32, sample_type: wgpu::TextureSampleType, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Texture { sample_type, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+        count: None,
+    }
+}
+
+fn storage_texture(binding: u32, format: wgpu::TextureFormat) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format, view_dimension: wgpu::TextureViewDimension::D2 },
+        count: None,
     }
 }
 
@@ -254,7 +332,8 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
         .replace("COUNTERS", if counting { "@group(0) @binding(9) var<storage, read_write> counters: array<atomic<u32>, 4>;" } else { "" })
         .replace("COUNT(0)", &count(0))
         .replace("COUNT(1)", &count(1))
-        .replace("COUNT(2)", &count(2));
+        .replace("COUNT(2)", &count(2))
+        .replace("COUNT(3)", &count(3));
     [("chunk generation", terrain_source(plane, program, wide64) + include_str!("../shaders/chunk_generate.wgsl")), ("chunk draw", draw)]
 }
 
@@ -303,38 +382,87 @@ impl ChunkWorld {
         let chunk_build = compute("chunk_build_main");
 
         let draw_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("chunk draw"), source: wgpu::ShaderSource::Wgsl(draw_source.into()) });
-        let vf = wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT;
+        let all = wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE;
         let draw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk draw"),
-            entries: &[uniform(0, vf), storage(1, true, vf), storage(2, true, vf), storage(3, true, vf), storage(4, true, vf), storage(5, true, vf), storage(6, true, vf), uniform(7, vf), storage(8, true, vf), storage(9, false, wgpu::ShaderStages::FRAGMENT)],
+            entries: &[
+                uniform(0, all),
+                storage(1, true, all),
+                storage(2, true, all),
+                storage(3, true, all),
+                storage(4, true, all),
+                storage(5, true, all),
+                storage(6, true, all),
+                uniform(7, all),
+                storage(8, true, all),
+                storage(9, false, wgpu::ShaderStages::COMPUTE),
+                storage(10, true, all),
+                storage(11, true, all),
+                storage(12, true, all),
+            ],
         });
-        let draw_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&draw_layout)], immediate_size: 0 });
-        let render = |fragment: &str| {
+        let trace_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunk trace"),
+            entries: &[
+                texture_entry(0, wgpu::TextureSampleType::Uint, wgpu::ShaderStages::COMPUTE),
+                storage_texture(1, wgpu::TextureFormat::Rg32Uint),
+                storage_texture(2, wgpu::TextureFormat::Rgba8Unorm),
+                storage_texture(3, wgpu::TextureFormat::R32Float),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::ReadWrite, format: wgpu::TextureFormat::R32Float, view_dimension: wgpu::TextureViewDimension::D2 },
+                    count: None,
+                },
+            ],
+        });
+        let seed_layout_1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunk seed exits"),
+            entries: &[texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::FRAGMENT)],
+        });
+        let resolve_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunk depth resolve"),
+            entries: &[texture_entry(4, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::FRAGMENT)],
+        });
+        let layout = |second: &wgpu::BindGroupLayout| device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&draw_layout), Some(second)], immediate_size: 0 });
+        let seed_layout = layout(&seed_layout_1);
+        let depth = |compare: wgpu::CompareFunction| {
+            Some(wgpu::DepthStencilState { format: DEPTH_FORMAT, depth_write_enabled: Some(true), depth_compare: Some(compare), stencil: Default::default(), bias: Default::default() })
+        };
+        let seed = |fragment: &str| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(fragment),
-                layout: Some(&draw_pipeline_layout),
-                vertex: wgpu::VertexState { module: &draw_module, entry_point: Some("chunk_vertex"), compilation_options: Default::default(), buffers: &[] },
+                layout: Some(&seed_layout),
+                vertex: wgpu::VertexState { module: &draw_module, entry_point: Some("seed_vertex"), compilation_options: Default::default(), buffers: &[] },
                 primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), front_face: wgpu::FrontFace::Ccw, ..Default::default() },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(if std::env::var_os("HELIO_VOXEL_CHUNKS_NO_DEPTH_TEST").is_some() { wgpu::CompareFunction::Always } else { wgpu::CompareFunction::Less }),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
+                depth_stencil: depth(wgpu::CompareFunction::Less),
                 multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &draw_module,
-                    entry_point: Some(fragment),
-                    compilation_options: Default::default(),
-                    targets: &[Some(VISIBILITY_FORMAT.into()), Some(COLOUR_FORMAT.into()), Some(DISTANCE_FORMAT.into())],
-                }),
+                fragment: Some(wgpu::FragmentState { module: &draw_module, entry_point: Some(fragment), compilation_options: Default::default(), targets: &[Some(SEED_FORMAT.into())] }),
                 multiview_mask: None,
                 cache: None,
             })
         };
-        let outside = render("chunk_fragment");
-        let inside = render("chunk_fragment_inside");
+        let seed_outside = seed("seed_fragment");
+        let seed_inside = seed("seed_fragment_inside");
+        let trace = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("chunk trace"),
+            layout: Some(&layout(&trace_layout)),
+            module: &draw_module,
+            entry_point: Some("trace"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let resolve = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("chunk depth resolve"),
+            layout: Some(&layout(&resolve_layout)),
+            vertex: wgpu::VertexState { module: &draw_module, entry_point: Some("resolve_vertex"), compilation_options: Default::default(), buffers: &[] },
+            primitive: Default::default(),
+            depth_stencil: depth(wgpu::CompareFunction::Always),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState { module: &draw_module, entry_point: Some("resolve_depth"), compilation_options: Default::default(), targets: &[] }),
+            multiview_mask: None,
+            cache: None,
+        });
 
         let buffer = |label: &str, size: u64, usage: wgpu::BufferUsages| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
         let s = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
@@ -345,9 +473,9 @@ impl ChunkWorld {
         let palette = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk palette"), contents: bytemuck::cast_slice(&palette), usage: wgpu::BufferUsages::UNIFORM });
         let queries = device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| {
             (
-                device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("chunk draw"), ty: wgpu::QueryType::Timestamp, count: 2 * TIMING_RING as u32 }),
+                device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("chunk draw"), ty: wgpu::QueryType::Timestamp, count: 3 * TIMING_RING as u32 }),
                 buffer("chunk timestamps", u64::from(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT) * TIMING_RING, wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC),
-                (0..TIMING_RING).map(|_| buffer("chunk timestamps read", 16, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST)).collect(),
+                (0..TIMING_RING).map(|_| buffer("chunk timestamps read", 24, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST)).collect(),
             )
         });
         Self {
@@ -358,8 +486,15 @@ impl ChunkWorld {
             chunk_columns,
             chunk_build,
             draw_layout,
-            outside,
-            inside,
+            trace_layout,
+            seed_layout: seed_layout_1,
+            resolve_layout,
+            seed_outside,
+            seed_inside,
+            trace,
+            resolve,
+            targets: None,
+            rounds: std::env::var("HELIO_VOXEL_CHUNKS_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1),
             world,
             terrain,
             tile_jobs: buffer("chunk tile jobs", (TILE_BATCH * 16) as u64, s),
@@ -377,6 +512,11 @@ impl ChunkWorld {
             mid_materials: buffer("chunk mid materials", (MAX_CHUNKS * 64 * 4) as u64, wgpu::BufferUsages::STORAGE),
             params: buffer("chunk draw params", std::mem::size_of::<DrawParams>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
             palette,
+            chunk_keys: buffer("chunk keys", (MAX_CHUNKS * 16) as u64, s),
+            chunk_table: buffer("chunk table", (TABLE_SLOTS * 32) as u64, s),
+            table_mask: 0,
+            face_cells: planet.grid().cells() as u32,
+            slot_instance: buffer("chunk slot instances", (MAX_CHUNKS * 4) as u64, s),
             instances: buffer("chunk instances", (MAX_CHUNKS * std::mem::size_of::<ChunkDraw>()) as u64, s),
             queries,
             counters: buffer("chunk counters", 16, s | wgpu::BufferUsages::COPY_SRC),
@@ -509,9 +649,6 @@ impl ChunkWorld {
                     }
                     let near_eye = tile_distance(&grid, *tile, (range[0], range[1]), eye) < 4.0 * f64::from(CHUNK) * grid.level_size(tile.level);
                     let (mut lo, mut hi) = if near_eye { (range[0], range[1]) } else { (range[2], range[1]) };
-                    if std::env::var_os("HELIO_VOXEL_CHUNKS_DEEPER").is_some() {
-                        lo -= CHUNK;
-                    }
                     let shift = tile.level + 1;
                     let hspan = |c: i32| (i64::from(c * CHUNK) << shift, (i64::from(c * CHUNK + CHUNK) << shift) - 1);
                     let (si, sj) = (hspan(tile.cx), hspan(tile.cy));
@@ -597,6 +734,7 @@ impl ChunkWorld {
             c.z = (m.z[0], m.z[1]);
         }
         stats.chunks = self.chunks.len();
+        self.upload_table();
         stats.empty_chunks = generated - self.chunks.len();
         // Leaves with their material byte; per chunk its mid nodes (masks,
         // first leaf, material) and root.
@@ -620,26 +758,60 @@ impl ChunkWorld {
             .collect()
     }
 
+    /// The chunk table (open addressing, keys by slot) of the kept chunks.
+    fn upload_table(&mut self) {
+        let key = |c: &Chunk| [i32::from(c.tile.face) | ((c.tile.level as i32) << 8), c.tile.cx, c.tile.cy, c.cz];
+        let mut keys = vec![[0i32; 4]; MAX_CHUNKS];
+        for c in &self.chunks {
+            keys[c.slot as usize] = key(c);
+        }
+        let n = (2 * self.chunks.len()).next_power_of_two().clamp(64, TABLE_SLOTS);
+        let mask = n as u32 - 1;
+        let mut table = vec![[-1i32, 0, 0, 0]; 2 * n];
+        let hash = |k: [i32; 4]| {
+            let mut h = (k[0] as u32).wrapping_mul(0x9E37_79B1);
+            h = (h ^ k[1] as u32).wrapping_mul(0x85EB_CA77);
+            h = (h ^ k[2] as u32).wrapping_mul(0xC2B2_AE3D);
+            h = (h ^ k[3] as u32).wrapping_mul(0x27D4_EB2F);
+            h ^ (h >> 15)
+        };
+        for c in &self.chunks {
+            let k = key(c);
+            let mut i = hash(k) & mask;
+            while table[2 * i as usize][0] != -1 {
+                i = (i + 1) & mask;
+            }
+            table[2 * i as usize] = k;
+            table[2 * i as usize + 1] = [c.slot as i32, 0, 0, 0];
+        }
+        self.table_mask = mask;
+        self.queue.write_buffer(&self.chunk_keys, 0, bytemuck::cast_slice(&keys));
+        self.queue.write_buffer(&self.chunk_table, 0, bytemuck::cast_slice(&table));
+    }
+
     /// Chunks kept by the last [`Self::build`].
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
     }
 
-    /// Draw the chunks seen from `eye` (camera-relative `view_proj`) into
-    /// the visibility, colour and depth targets (cleared), timing the pass
-    /// as draw number `frame` ([`Self::draw_ms`]).
+    /// The targets of the last [`Self::draw`].
+    pub fn targets(&self) -> Option<&Targets> {
+        self.targets.as_ref()
+    }
+
+    /// Draw the chunks seen from `eye` (camera-relative `view_proj`) at
+    /// `size` pixels into [`Self::targets`], timing it as draw number
+    /// `frame` ([`Self::draw_ms`]).
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&mut self, encoder: &mut wgpu::CommandEncoder, frame: u64, eye: DVec3, view_proj: Mat4, near: f32, sun: Vec3, visibility: &wgpu::TextureView, colour: &wgpu::TextureView, distance: &wgpu::TextureView, depth: &wgpu::TextureView) {
+    pub fn draw(&mut self, encoder: &mut wgpu::CommandEncoder, frame: u64, eye: DVec3, view_proj: Mat4, near: f32, sun: Vec3, size: [u32; 2]) {
+        if self.targets.as_ref().is_none_or(|t| t.size != size) {
+            self.targets = Some(Targets::new(&self.device, size));
+        }
         // Frustum: a box is drawn unless all its corners lie outside one
         // clip plane.
         let mut outside = Vec::new();
         let mut inside = Vec::new();
-        // Diagnostics: draw only levels in `HELIO_VOXEL_CHUNKS_LEVEL_RANGE=lo,hi`.
-        let band: Vec<u32> = std::env::var("HELIO_VOXEL_CHUNKS_LEVEL_RANGE").ok().map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
         for c in &self.chunks {
-            if band.len() == 2 && (c.tile.level < band[0] || c.tile.level > band[1]) {
-                continue;
-            }
             let origin = c.frame.origin - eye;
             let o = c.frame.inv * (-origin);
             let (z0, z1) = (f64::from(c.z.0), f64::from(c.z.1));
@@ -659,13 +831,13 @@ impl ChunkWorld {
             // Inside: the eye (with the near plane around it) in the box.
             let margin = DVec3::new(c.frame.inv.x_axis.length(), c.frame.inv.y_axis.length(), c.frame.inv.z_axis.length()) * f64::from(near) * 2.0;
             let held = o.x > -margin.x && o.x < 64.0 + margin.x && o.y > -margin.y && o.y < 64.0 + margin.y && o.z > z0 - margin.z && o.z < z1 + margin.z;
-            let mirrored = (c.frame.m.determinant() < 0.0) != held;
+            let flags = u32::from(c.frame.m.determinant() < 0.0) | (u32::from(held) << 1) | (c.tile.level << 8);
             let m = c.frame.m.as_mat3();
             let inv = c.frame.inv.as_mat3();
             let draw = ChunkDraw {
                 m: [m.x_axis.extend(origin.x as f32).to_array(), m.y_axis.extend(origin.y as f32).to_array(), m.z_axis.extend(origin.z as f32).to_array()],
                 inv: [inv.row(0).extend(o.x as f32).to_array(), inv.row(1).extend(o.y as f32).to_array(), inv.row(2).extend(o.z as f32).to_array()],
-                bounds: [z0 as f32, z1 as f32, f32::from_bits(c.slot), f32::from_bits(u32::from(mirrored) | (c.tile.level << 8))],
+                bounds: [z0 as f32, z1 as f32, f32::from_bits(c.slot), f32::from_bits(flags)],
             };
             let distance = (origin + c.frame.m * DVec3::new(32.0, 32.0, (z0 + z1) / 2.0)).length();
             if held { inside.push(draw) } else { outside.push((distance, draw)) }
@@ -675,55 +847,139 @@ impl ChunkWorld {
         outside.sort_by(|a, b| a.0.total_cmp(&b.0));
         let n_inside = inside.len() as u32;
         let all: Vec<ChunkDraw> = inside.into_iter().chain(outside.into_iter().map(|(_, d)| d)).collect();
+        let mut slot_instance = vec![u32::MAX; MAX_CHUNKS];
+        for (n, d) in all.iter().enumerate() {
+            slot_instance[d.bounds[2].to_bits() as usize] = n as u32;
+        }
+        self.queue.write_buffer(&self.slot_instance, 0, bytemuck::cast_slice(&slot_instance));
         self.drawn = (n_inside, all.len() as u32);
         if !all.is_empty() {
             self.queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&all));
         }
         let params = DrawParams {
             view_proj: view_proj.to_cols_array_2d(),
+            inverse_view_proj: view_proj.inverse().to_cols_array_2d(),
             sun: sun.normalize().extend(near).to_array(),
             debug: [u32::from(std::env::var_os("HELIO_VOXEL_CHUNKS_LEVELS").is_some()), u32::from(std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some()), 0, 0],
+            table: [self.table_mask, self.face_cells, 0, 0],
         };
         self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk draw"),
             layout: &self.draw_layout,
-            entries: &[entry(0, &self.params), entry(1, &self.instances), entry(2, &self.chunk_meta), entry(3, &self.mids), entry(4, &self.mid_leaves), entry(5, &self.leaves), entry(6, &self.leaf_materials), entry(7, &self.palette), entry(8, &self.mid_materials), entry(9, &self.counters)],
+            entries: &[entry(0, &self.params), entry(1, &self.instances), entry(2, &self.chunk_meta), entry(3, &self.mids), entry(4, &self.mid_leaves), entry(5, &self.leaves), entry(6, &self.leaf_materials), entry(7, &self.palette), entry(8, &self.mid_materials), entry(9, &self.counters), entry(10, &self.chunk_table), entry(11, &self.chunk_keys), entry(12, &self.slot_instance)],
         });
+        let targets = self.targets.as_ref().unwrap();
         let ring = (frame % TIMING_RING) as u32;
-        let timestamp_writes = self.queries.as_ref().map(|(set, _, _)| wgpu::RenderPassTimestampWrites { query_set: set, beginning_of_pass_write_index: Some(2 * ring), end_of_pass_write_index: Some(2 * ring + 1) });
+        let (depth, seed, exits) = (view(&targets.depth), view(&targets.seed), view(&targets.exits));
+        // Every ray starts unresolved (0).
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("chunk exits clear"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &exits,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        let seed_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("chunk seed exits"),
+            layout: &self.seed_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&exits) }],
+        });
+        let trace_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("chunk trace"),
+            layout: &self.trace_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&seed) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view(&targets.visibility)) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&view(&targets.colour)) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&view(&targets.distance)) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&exits) },
+            ],
+        });
+        // Rounds of seed and trace: each resolves the rays that hit in
+        // their box; the rest are seeded beyond it.
+        let rounds = self.rounds;
+        for round in 0..rounds {
+            {
+                // 1. Seed: each pixel's nearest box (beyond its last exit).
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("chunk seed"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &seed,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: f64::from(u32::MAX), g: 0.0, b: 0.0, a: 0.0 }), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth,
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: self.queries.as_ref().filter(|_| round == 0).map(|(set, _, _)| wgpu::RenderPassTimestampWrites { query_set: set, beginning_of_pass_write_index: Some(3 * ring), end_of_pass_write_index: Some(3 * ring + 1) }),
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_bind_group(0, &group, &[]);
+                pass.set_bind_group(1, &seed_group, &[]);
+                // Boxes holding the eye only in the first round.
+                if self.drawn.0 > 0 && round == 0 {
+                    pass.set_pipeline(&self.seed_inside);
+                    pass.draw(0..36, 0..self.drawn.0);
+                }
+                if self.drawn.1 > self.drawn.0 {
+                    pass.set_pipeline(&self.seed_outside);
+                    pass.draw(0..36, self.drawn.0..self.drawn.1);
+                }
+            }
+            // 2. Trace each pixel's ray through its seed chunk.
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("chunk trace"),
+                timestamp_writes: self.queries.as_ref().filter(|_| round + 1 == rounds).map(|(set, _, _)| wgpu::ComputePassTimestampWrites { query_set: set, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(3 * ring + 2) }),
+            });
+            pass.set_pipeline(&self.trace);
+            pass.set_bind_group(0, &group, &[]);
+            pass.set_bind_group(1, &trace_group, &[]);
+            pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
+        }
         {
+            // 3. The hits' depth.
+            let resolve_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("chunk depth resolve"),
+                layout: &self.resolve_layout,
+                entries: &[wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&view(&targets.distance)) }],
+            });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("chunk primary"),
-                color_attachments: &[Some(cleared(visibility)), Some(cleared(colour)), Some(cleared(distance))],
+                label: Some("chunk depth resolve"),
+                color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: depth,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    view: &depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
-                timestamp_writes,
+                timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            pass.set_pipeline(&self.resolve);
             pass.set_bind_group(0, &group, &[]);
-            if self.drawn.0 > 0 {
-                pass.set_pipeline(&self.inside);
-                pass.draw(0..36, 0..self.drawn.0);
-            }
-            if self.drawn.1 > self.drawn.0 {
-                pass.set_pipeline(&self.outside);
-                pass.draw(0..36, self.drawn.0..self.drawn.1);
-            }
+            pass.set_bind_group(1, &resolve_group, &[]);
+            pass.draw(0..3, 0..1);
         }
         if let Some((set, resolve, read)) = &self.queries {
             // Resolve offsets are 256-byte aligned.
             let at = u64::from(ring) * u64::from(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT);
-            encoder.resolve_query_set(set, 2 * ring..2 * ring + 2, resolve, at);
-            encoder.copy_buffer_to_buffer(resolve, at, &read[ring as usize], 0, 16);
+            encoder.resolve_query_set(set, 3 * ring..3 * ring + 3, resolve, at);
+            encoder.copy_buffer_to_buffer(resolve, at, &read[ring as usize], 0, 24);
         }
     }
 
-    /// Fragments, tree steps and hits of the draws since the last call
+    /// Seeded pixels, tree steps and hits of the draws since the last call
     /// (with `HELIO_VOXEL_CHUNKS_COUNT`).
     pub fn take_counts(&self) -> [u32; 4] {
         let counts: Vec<[u32; 4]> = self.read(&self.counters, 1);
@@ -736,15 +992,17 @@ impl ChunkWorld {
         (self.drawn.1 - self.drawn.0, self.drawn.0)
     }
 
-    /// GPU milliseconds of draw `frame`, submitted as `submission` (waits
-    /// for it; read it before draw `frame + TIMING_RING` is recorded).
-    pub fn draw_ms(&self, frame: u64, submission: wgpu::SubmissionIndex) -> Option<f64> {
+    /// GPU milliseconds of draw `frame`, submitted as `submission`: in
+    /// all, and of the first seed (waits for it; read it before draw
+    /// `frame + TIMING_RING` is recorded).
+    pub fn draw_ms(&self, frame: u64, submission: wgpu::SubmissionIndex) -> Option<[f64; 2]> {
         let (_, _, ring) = self.queries.as_ref()?;
         let read = &ring[(frame % TIMING_RING) as usize];
         read.slice(..).map_async(wgpu::MapMode::Read, |_| {});
         self.device.poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None }).ok()?;
-        let t: [u64; 2] = bytemuck::cast_slice::<u8, u64>(&read.slice(..).get_mapped_range().ok()?).try_into().ok()?;
+        let t: [u64; 3] = bytemuck::cast_slice::<u8, u64>(&read.slice(..).get_mapped_range().ok()?).try_into().ok()?;
         read.unmap();
-        Some(t[1].saturating_sub(t[0]) as f64 * f64::from(self.queue.get_timestamp_period()) / 1.0e6)
+        let ms = |a: u64, b: u64| b.saturating_sub(a) as f64 * f64::from(self.queue.get_timestamp_period()) / 1.0e6;
+        Some([ms(t[0], t[2]), ms(t[0], t[1])])
     }
 }

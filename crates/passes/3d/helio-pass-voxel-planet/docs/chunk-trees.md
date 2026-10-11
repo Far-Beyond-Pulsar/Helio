@@ -211,8 +211,38 @@ RTX 3060, interleaved with the span-column renderer in the same binary:
 - Rejected: a box per 16x16-column group tight to its layers (16 boxes a
   chunk): ground 3.75 -> 4.59 ms, mountain 5.6 -> 7.0 (16x the triangles,
   and every group face a ray crosses starts another fragment).
-- Ground is the open gate: rays at grazing angles cross boxes in front of
-  their hit, and hidden far boxes still rasterize.
+- Ground was the open gate. Starting from the previous frame's exact
+  depth (perfect occlusion culling) changed nothing (3.7 vs 3.8 ms): hidden
+  boxes cost nothing. Letting each pixel run only the box holding its hit
+  cost 3.3-3.4 ms (fragment), the same rays traced in compute 1.5-2.0 ms:
+  fragment shaders run 2x2 quads, and every box edge on screen splits quads
+  between boxes.
+
+**Primary visibility, revised: seed by raster, trace in compute.** The
+boxes are rasterized only to seed each pixel with the nearest box its ray
+enters (a fragment writes the box's index; 0.2-0.3 ms). A compute pass
+traces each ray in its seed chunk and continues across chunk faces: the
+chunk beyond (`chunk_table`: same level, else coarser or finer), and space
+with no chunk (air) crossed as empty chunks of the level in the last
+chunk's frame. One round resolves every pixel with terrain (ground 90%,
+mountain_slope 61%, tunnel 100% of pixels; the rest is sky); rays crossing a
+cube face edge are left to a second round (the next face's neighbours are
+phase 2). Raster peeling instead of continuation (re-seeding beyond each
+miss) needed 4-8 rounds at 0.3+ ms each: rejected.
+
+| View | Span columns | Fragment walk | Seed + compute |
+|---|---|---|---|
+| ground | 3.41 ms | 4.30 ms | 3.5-3.9 ms |
+| mountain_slope | 12.57 ms | 5.74 ms | 4.6-5.4 ms |
+| tunnel | 13.78 ms | 4.61 ms | 4.3-4.5 ms |
+
+Rays cross 1.65 chunks on the ground (5.4 mountain, 4.4 tunnel) and take
+16.6 tree steps (39, 34.5): the walk inside chunks is the cost, about 560
+M rays/s on the ground. The 64-tree does not remove steps near grazing
+surfaces (cell steps through mixed leaves); the old tracer took 11-44
+steps at about 700 lane-cycles, this one about 400. Next for primary: steps
+near surfaces (leaf-level distance, a per-column top in leaves), the start
+of each ray from the previous frame's hit chunk.
 
 ## References
 

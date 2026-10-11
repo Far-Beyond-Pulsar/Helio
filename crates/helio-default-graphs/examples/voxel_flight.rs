@@ -719,28 +719,18 @@ fn highest_near(planet: &Planet, face: u8, fi: f64, fj: f64, span: f64) -> (DVec
 /// frames and print the median primary time (`CHUNKHOLD`). With
 /// `HELIO_VOXEL_CHUNKS_PNG=<path>` the colour target is saved.
 fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
-    use helio_pass_voxel_planet::chunks::{ChunkWorld, COLOUR_FORMAT, DEPTH_FORMAT, DISTANCE_FORMAT, TIMING_RING, VISIBILITY_FORMAT};
+    use helio_pass_voxel_planet::chunks::{ChunkWorld, TIMING_RING};
     let [w, h] = flight.size;
     let lod: f64 = std::env::var("HELIO_VOXEL_LOD_PIXELS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    // Report this mode's errors (the run's validation scope is never popped
+    // in hold mode).
+    let mut internal = Some(flight.device.push_error_scope(wgpu::ErrorFilter::Internal));
+    let mut scope = Some(flight.device.push_error_scope(wgpu::ErrorFilter::Validation));
     let mut world = ChunkWorld::new(&flight.device, &flight.queue, &flight.planet);
     let pixel_angle = 2.0 * std::f64::consts::FRAC_PI_8.tan() / f64::from(h);
     let stats = world.build(&flight.planet, eye, pixel_angle, lod, 400_000.0);
     eprintln!("CHUNKS built {view}: {stats:?}");
     eprintln!("CHUNKS early depth {} int64 {}", flight.device.features().contains(wgpu::Features::SHADER_EARLY_DEPTH_TEST), flight.device.features().contains(wgpu::Features::SHADER_INT64));
-    let texture = |format: wgpu::TextureFormat| {
-        flight.device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        })
-    };
-    let (visibility, colour, distance, depth) = (texture(VISIBILITY_FORMAT), texture(COLOUR_FORMAT), texture(DISTANCE_FORMAT), texture(DEPTH_FORMAT));
-    let views = (visibility.create_view(&Default::default()), colour.create_view(&Default::default()), distance.create_view(&Default::default()), depth.create_view(&Default::default()));
     let up = up_for(eye);
     let forward = forward.normalize();
     let up = if forward.dot(up).abs() > 0.999 { up.any_orthonormal_vector() } else { up };
@@ -750,35 +740,52 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
     let started = Instant::now();
     let mut pending = std::collections::VecDeque::new();
     let mut times = Vec::new();
+    let mut seed_times = Vec::new();
     let mut frame = 0u64;
     while started.elapsed().as_secs_f64() < seconds {
         let mut encoder = flight.device.create_command_encoder(&Default::default());
-        world.draw(&mut encoder, frame, eye, camera.proj * camera.view, near, flight.sun, &views.0, &views.1, &views.2, &views.3);
+        world.draw(&mut encoder, frame, eye, camera.proj * camera.view, near, flight.sun, [w, h]);
         pending.push_back((frame, flight.queue.submit([encoder.finish()])));
         if pending.len() as u64 >= TIMING_RING {
             let (n, submission) = pending.pop_front().unwrap();
             // The first frames compile and warm caches.
-            if let Some(ms) = world.draw_ms(n, submission).filter(|_| n >= 30) {
+            if let Some([ms, seed]) = world.draw_ms(n, submission).filter(|_| n >= 30) {
                 times.push(ms);
+                seed_times.push(seed);
             }
         }
         frame += 1;
+        if frame == 2 {
+            if let Some(error) = pollster::block_on(scope.take().unwrap().pop()) {
+                eprintln!("CHUNKS validation: {error}");
+            }
+            if let Some(error) = pollster::block_on(internal.take().unwrap().pop()) {
+                eprintln!("CHUNKS internal: {error}");
+            }
+        }
     }
     let (outside, inside) = world.drawn();
     if std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some() {
         world.take_counts();
         let mut encoder = flight.device.create_command_encoder(&Default::default());
-        world.draw(&mut encoder, frame, eye, camera.proj * camera.view, near, flight.sun, &views.0, &views.1, &views.2, &views.3);
+        world.draw(&mut encoder, frame, eye, camera.proj * camera.view, near, flight.sun, [w, h]);
         flight.queue.submit([encoder.finish()]);
-        let [fragments, steps, hits, _] = world.take_counts();
+        let [seeded, steps, hits, chunks] = world.take_counts();
         let pixels = f64::from(w * h);
-        eprintln!("CHUNKCOUNT {view}: fragments/px {:.2} steps/fragment {:.1} steps/px {:.1} hits/px {:.2}", f64::from(fragments) / pixels, f64::from(steps) / f64::from(fragments.max(1)), f64::from(steps) / pixels, f64::from(hits) / pixels);
+        eprintln!(
+            "CHUNKCOUNT {view}: seeded {:.2} hits {:.2} (of pixels) steps/seeded {:.1} chunks/seeded {:.2}",
+            f64::from(seeded) / pixels,
+            f64::from(hits) / pixels,
+            f64::from(steps) / f64::from(seeded.max(1)),
+            f64::from(chunks) / f64::from(seeded.max(1))
+        );
     }
     eprintln!(
-        "CHUNKHOLD {view} n={} primary {:.3} p95 {:.3} boxes {outside}+{inside} chunks {} MB {:.1} build {:.2} s",
+        "CHUNKHOLD {view} n={} primary {:.3} p95 {:.3} seed {:.3} boxes {outside}+{inside} chunks {} MB {:.1} build {:.2} s",
         times.len(),
         percentile(&times, 0.5),
         percentile(&times, 0.95),
+        percentile(&seed_times, 0.5),
         world.chunk_count(),
         stats.bytes as f64 / 1048576.0,
         stats.seconds
@@ -802,12 +809,14 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
             out.copy_from_slice(&data[..8]);
             out
         };
+        let targets = world.targets().unwrap();
+        let (visibility, distance) = (&targets.visibility, &targets.distance);
         let inverse = (camera.proj * camera.view).inverse();
         for probe in probes.split(';') {
             let xy: Vec<u32> = probe.split(',').filter_map(|v| v.trim().parse().ok()).collect();
             let (x, y) = (xy[0], xy[1]);
-            let v = read(&visibility, x, y);
-            let t = f32::from_le_bytes(read(&distance, x, y)[..4].try_into().unwrap());
+            let v = read(visibility, x, y);
+            let t = f32::from_le_bytes(read(distance, x, y)[..4].try_into().unwrap());
             let ndc = Vec3::new((x as f32 + 0.5) / w as f32 * 2.0 - 1.0, 1.0 - (y as f32 + 0.5) / h as f32 * 2.0, 0.5);
             let far = inverse * ndc.extend(1.0);
             let dir = (far.truncate() / far.w).normalize().as_dvec3();
@@ -834,7 +843,7 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
         let buffer = flight.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row) * u64::from(h), usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
         let mut encoder = flight.device.create_command_encoder(&Default::default());
         encoder.copy_texture_to_buffer(
-            colour.as_image_copy(),
+            world.targets().unwrap().colour.as_image_copy(),
             wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
