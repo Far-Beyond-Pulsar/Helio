@@ -159,6 +159,10 @@ impl DrawnSet {
         self.dirty.push(i);
     }
 
+    pub fn contains(&self, slot: u32) -> bool {
+        self.position[slot as usize] != NONE
+    }
+
     /// Changed entries as contiguous runs: first entry and its words.
     pub fn take_changes(&mut self) -> Vec<(u32, Vec<[i32; 4]>)> {
         let mut dirty = std::mem::take(&mut self.dirty);

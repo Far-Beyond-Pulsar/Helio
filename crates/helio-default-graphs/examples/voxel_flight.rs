@@ -89,6 +89,8 @@ struct Flight {
     /// Wait for every frame (HELIO_VOXEL_FLIGHT_SYNC): lets the GPU idle and
     /// downclock between frames, unlike a game's continuous submission.
     sync_frames: bool,
+    /// The chunk pass's state (`HELIO_VOXEL_CHUNKS_ENGINE`).
+    chunk_state: Option<helio_pass_voxel_planet::chunks::pass::SharedChunkState>,
 }
 
 /// Latest GPU graphics and memory clocks (MHz) from a streaming
@@ -218,11 +220,22 @@ impl Flight {
         scene.world.flush_gpu_mirror(&queue);
         let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
         let pass_source = source.clone();
-        let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| {
-            let mut pass = PlanetPass::new(pass_source.clone());
-            pass.set_profiling(true);
-            Box::new(pass)
-        });
+        // `HELIO_VOXEL_CHUNKS_ENGINE=1`: chunk trees draw the terrain
+        // (docs/chunk-trees.md) through the same graph.
+        let chunk_state: Option<helio_pass_voxel_planet::chunks::pass::SharedChunkState> =
+            std::env::var_os("HELIO_VOXEL_CHUNKS_ENGINE").is_some().then(Default::default);
+        let factory: VoxelPassFactory = match &chunk_state {
+            Some(state) => {
+                let state = state.clone();
+                let config = chunk_config(size[1], 256);
+                Arc::new(move |_, _, _, _| Box::new(helio_pass_voxel_planet::chunks::pass::ChunkPass::new(pass_source.clone(), state.clone(), config)))
+            }
+            None => Arc::new(move |_, _, _, _| {
+                let mut pass = PlanetPass::new(pass_source.clone());
+                pass.set_profiling(true);
+                Box::new(pass)
+            }),
+        };
         let mut config = RendererConfig::new(size[0], size[1], wgpu::TextureFormat::Rgba8Unorm).with_tsr_quality(quality);
         config.enable_foliage = false;
         let mut renderer = RendererBuilder::new(config, mirror)
@@ -269,6 +282,7 @@ impl Flight {
             in_flight: Default::default(),
             last_frame_end: std::cell::Cell::new(None),
             sync_frames: std::env::var_os("HELIO_VOXEL_FLIGHT_SYNC").is_some(),
+            chunk_state,
         }
     }
 
@@ -330,8 +344,9 @@ impl Flight {
             (now - self.last_frame_end.get().unwrap_or(start).min(start)).as_secs_f64() * 1000.0
         };
         self.last_frame_end.set(Some(now));
-        let frame_num = self.pass().renderer().map_or(0, |r| r.frame_number());
-        let stats = self.pass().stats().unwrap_or_default();
+        let planet_pass = self.renderer.find_pass_mut::<PlanetPass>();
+        let frame_num = planet_pass.as_ref().and_then(|p| p.renderer()).map_or(0, |r| r.frame_number());
+        let stats = planet_pass.and_then(|p| p.stats()).unwrap_or_default();
         let clocks = self.clocks.read();
         let row = format!(
             "{},{},{},{:.1},{:.1},{:.3},{},{},{},{},{:.4},{:.4},{:.4},{:.1},{},{}",
@@ -370,7 +385,8 @@ impl Flight {
 
     /// Attach completed GPU stage timings to their frame's sample.
     fn collect_timings(&mut self, blocking: bool) {
-        let result = self.pass().renderer_mut().and_then(|r| {
+        let Some(pass) = self.renderer.find_pass_mut::<PlanetPass>() else { return };
+        let result = pass.renderer_mut().and_then(|r| {
             if blocking {
                 let timings = r.stage_timings_blocking();
                 Some((r.frame_number(), timings))
@@ -746,7 +762,7 @@ fn chunk_settle(flight: &Flight, world: &mut helio_pass_voxel_planet::chunks::Ch
     loop {
         let mut encoder = flight.device.create_command_encoder(&Default::default());
         let cpu = Instant::now();
-        let stats = world.update(&mut encoder, eye, DVec3::ZERO, None, *frame, &config);
+        let stats = world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, DVec3::ZERO, None, *frame, &config);
         if *frame % 50 == 0 || std::env::var_os("HELIO_VOXEL_CHUNKS_TRACE").is_some() {
             eprintln!("CHUNKSETTLE {} cpu {:.1} ms {stats:?}", *frame, cpu.elapsed().as_secs_f64() * 1e3);
         }
@@ -763,7 +779,7 @@ fn chunk_settle(flight: &Flight, world: &mut helio_pass_voxel_planet::chunks::Ch
 }
 
 fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
-    use helio_pass_voxel_planet::chunks::{ChunkWorld, TIMING_RING};
+    use helio_pass_voxel_planet::chunks::ChunkWorld;
     let [w, h] = flight.size;
     // Report this mode's errors (the run's validation scope is never popped
     // in hold mode).
@@ -788,16 +804,18 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
     while started.elapsed().as_secs_f64() < seconds {
         let mut encoder = flight.device.create_command_encoder(&Default::default());
         let cpu = Instant::now();
-        world.draw(&mut encoder, frame, eye, camera.proj * camera.view, near, flight.sun, [w, h]);
+        world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun, [w, h]);
         draw_cpu.push(cpu.elapsed().as_secs_f64() * 1e3);
-        pending.push_back((frame, flight.queue.submit([encoder.finish()])));
-        if pending.len() as u64 >= TIMING_RING {
-            let (n, submission) = pending.pop_front().unwrap();
-            // The first frames compile and warm caches.
-            if let Some([ms, seed, _]) = world.draw_ms(n, submission).filter(|_| n >= first + 30) {
-                times.push(ms);
-                seed_times.push(seed);
-            }
+        pending.push_back(flight.queue.submit([encoder.finish()]));
+        world.submitted();
+        // Two frames in flight at most.
+        if pending.len() > 2 {
+            let _ = flight.device.poll(wgpu::PollType::Wait { submission_index: pending.pop_front(), timeout: None });
+        }
+        // The first frames compile and warm caches.
+        for t in world.take_timings().into_iter().filter(|t| t.frame >= first + 30) {
+            times.push(t.draw);
+            seed_times.push(t.seed);
         }
         frame += 1;
         if frame == first + 2 {
@@ -814,9 +832,17 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
     if std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some() {
         world.take_counts();
         let mut encoder = flight.device.create_command_encoder(&Default::default());
-        world.draw(&mut encoder, frame, eye, camera.proj * camera.view, near, flight.sun, [w, h]);
+        world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun, [w, h]);
         flight.queue.submit([encoder.finish()]);
         let [seeded, steps, hits, chunks] = world.take_counts();
+        if std::env::var_os("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL").is_some() {
+            let mut encoder = flight.device.create_command_encoder(&Default::default());
+            world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame + 1, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun, [w, h]);
+            flight.queue.submit([encoder.finish()]);
+            for (n, step) in world.pixel_trace().iter().enumerate() {
+                eprintln!("PIXELTRACE {n}: {step:?}");
+            }
+        }
         let pixels = f64::from(w * h);
         eprintln!(
             "CHUNKCOUNT {view}: seeded {:.2} hits {:.2} (of pixels) steps/seeded {:.1} chunks/seeded {:.2}",
@@ -887,6 +913,41 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
     }
 }
 
+/// A view drawn by the renderer with the chunk pass: settle, hold
+/// (`HELIO_VOXEL_FLIGHT_HOLD_SECONDS`), report the chunk draw's GPU time and
+/// save the final frame (`<out>/chunks_<view>.png`).
+fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3) {
+    let state = flight.chunk_state.clone().unwrap();
+    let started = Instant::now();
+    let mut frames = 0;
+    loop {
+        flight.draw("hold_load", eye, forward);
+        frames += 1;
+        let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+        std::thread::sleep(std::time::Duration::from_millis(6));
+        if frames > 10 && state.lock().unwrap().settled {
+            break;
+        }
+        if frames > 6000 {
+            eprintln!("CHUNKENGINE {view}: did not settle");
+            break;
+        }
+    }
+    eprintln!("CHUNKENGINE {view} settled in {:.2} s ({frames} frames): {:?}", started.elapsed().as_secs_f64(), state.lock().unwrap().stats);
+    state.lock().unwrap().timings.clear();
+    let seconds: f64 = std::env::var("HELIO_VOXEL_FLIGHT_HOLD_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0);
+    let held = Instant::now();
+    while held.elapsed().as_secs_f64() < seconds {
+        flight.draw("hold", eye, forward);
+    }
+    let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let timings = std::mem::take(&mut state.lock().unwrap().timings);
+    let draw: Vec<f64> = timings.iter().map(|t| t.draw).collect();
+    eprintln!("CHUNKENGINE {view} n={} chunk draw p50 {:.3} p95 {:.3}", draw.len(), percentile(&draw, 0.5), percentile(&draw, 0.95));
+    flight.capture(&format!("chunks_{view}"));
+}
+
 /// `HELIO_VOXEL_CHUNKS_FLY=descent|cruise`: chunk trees streamed along a
 /// path at 60 simulated frames a second (`HELIO_VOXEL_CHUNKS_BUDGET` tiles
 /// generated a frame): how far the drawn detail lags what is wanted
@@ -894,7 +955,7 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
 /// primary time and the CPU update time. `HELIO_VOXEL_CHUNKS_PNG=<prefix>`
 /// saves a frame each second.
 fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
-    use helio_pass_voxel_planet::chunks::{ChunkWorld, TIMING_RING};
+    use helio_pass_voxel_planet::chunks::ChunkWorld;
     let [w, h] = flight.size;
     let config = chunk_config(h, 64);
     let mut world = ChunkWorld::new(&flight.device, &flight.queue, &flight.planet);
@@ -930,7 +991,7 @@ fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
     let png = std::env::var("HELIO_VOXEL_CHUNKS_PNG").ok();
     let mut pending = std::collections::VecDeque::new();
     let (mut times, mut update_ms, mut coarse, mut requests, mut resident) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), 0);
-    let (mut generate_ms, mut per_tile, mut generated) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut generate_ms, mut per_tile) = (Vec::new(), Vec::new());
     for n in 0..frames {
         let frame = start + n;
         let t = n as f64 * dt;
@@ -943,31 +1004,28 @@ fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
         let mut encoder = flight.device.create_command_encoder(&Default::default());
         let cpu = Instant::now();
         let view = helio_pass_voxel_planet::chunks::residency::View { forward: forward.as_dvec3(), cos_half: (std::f64::consts::FRAC_PI_8 * f64::from(w) / f64::from(h) * 1.1).cos() };
-        let stats = world.update(&mut encoder, eye, velocity, Some(view), frame, &config);
+        let stats = world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, velocity, Some(view), frame, &config);
         update_ms.push(cpu.elapsed().as_secs_f64() * 1e3);
-        world.draw(&mut encoder, frame, eye, camera.proj * camera.view, near, flight.sun, [w, h]);
-        pending.push_back((frame, flight.queue.submit([encoder.finish()])));
+        world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun, [w, h]);
+        pending.push_back(flight.queue.submit([encoder.finish()]));
         world.submitted();
+        if pending.len() > 2 {
+            let _ = flight.device.poll(wgpu::PollType::Wait { submission_index: pending.pop_front(), timeout: None });
+        }
+        for t in world.take_timings() {
+            times.push(t.draw);
+            generate_ms.push(t.generate);
+            if t.tiles > 0 {
+                per_tile.push(t.generate / t.tiles as f64);
+            }
+        }
         coarse.push(stats.coarse_share);
-        generated.push(stats.generated_tiles);
         budgets.push(stats.budget as f64);
         for (p, v) in phases.iter_mut().zip(stats.cpu_ms) {
             *p += v / frames as f64;
         }
         requests.push(stats.requests as f64);
         resident = stats.resident_chunks;
-        if pending.len() as u64 >= TIMING_RING {
-            let (n, submission) = pending.pop_front().unwrap();
-            if let Some([ms, _, generate]) = world.draw_ms(n, submission) {
-                times.push(ms);
-                generate_ms.push(generate);
-                let tiles = generated[(n - start) as usize];
-                if tiles > 0 {
-                    per_tile.push(generate / tiles as f64);
-                }
-                world.record_generation(generate, tiles);
-            }
-        }
         if n % 60 == 0 {
             eprintln!(
                 "CHUNKFLY {mode} t {t:5.1} alt {:9.1} coarse {:.3} requests {:5} generated {:3} drawn {:6} resident {:6} evicted {:4} regen {} slots {} leaves {}",
@@ -1205,6 +1263,10 @@ fn main() {
             }
             _ => (ground, look(ground, heading, -12.0)),
         };
+        if flight.chunk_state.is_some() {
+            chunk_engine_hold(&mut flight, &view, e, f);
+            return;
+        }
         // `HELIO_VOXEL_CHUNKS=1`: the same view drawn from chunk trees
         // (docs/chunk-trees.md, phase 1).
         if std::env::var_os("HELIO_VOXEL_CHUNKS").is_some() {

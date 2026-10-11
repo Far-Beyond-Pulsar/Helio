@@ -259,7 +259,7 @@ struct Job {
 /// without waiting.
 pub struct Worker {
     jobs: std::sync::mpsc::Sender<Job>,
-    results: std::sync::mpsc::Receiver<Planned>,
+    results: std::sync::Mutex<std::sync::mpsc::Receiver<Planned>>,
     busy: bool,
     /// Events submitted so far.
     events_sent: u64,
@@ -293,7 +293,7 @@ impl Worker {
                 }
             })
             .expect("chunk residency thread");
-        Self { jobs, results, busy: false, events_sent: 0 }
+        Self { jobs, results: std::sync::Mutex::new(results), busy: false, events_sent: 0 }
     }
 
     /// Plan for this eye with these events unless a plan is under way
@@ -307,7 +307,7 @@ impl Worker {
 
     /// The finished plan, if any.
     pub fn poll(&mut self) -> Option<Planned> {
-        let planned = self.results.try_recv().ok()?;
+        let planned = self.results.get_mut().ok()?.try_recv().ok()?;
         self.busy = false;
         Some(planned)
     }

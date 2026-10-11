@@ -278,6 +278,34 @@ than 1.5 px: detail still to arrive. Cruise at 300 m/s and 34 m needs about
 4,000 new tiles a second at the finest two levels; generation at 50 us a
 tile spends 3 ms a frame on it.
 
+## Phase 2b results (2026-10-11): the chunk pass in the render graph
+
+`src/chunks/pass.rs` (`ChunkPass`): residency, primary visibility and
+Helio's gbuffer from the same frame source as the span-column pass, so
+Helio's lighting, sky and TSR apply unchanged. The harness's
+`HELIO_VOXEL_CHUNKS_ENGINE=1` installs it in place of `PlanetPass`.
+
+- Streamed views had sky holes where a ray left the drawn chunks: the
+  continuation now searches neighbours up to six levels coarser and three
+  finer, crosses empty air as cubes in the last chunk's frame that double
+  every four empty steps (at most 40), and follows up to 128 chunks. Solid
+  chunks are kept (they were dropped as "uniform" and left holes inside
+  slopes).
+- GPU times come back through a ring of timestamp slots without waiting.
+- `ChunkWorld` records through `helio_core::CommandRecorder`, so the pass
+  records on the graph's stream.
+
+| View | span columns | chunk trees, hold (1080p) | chunk pass in the graph (TSR) |
+|---|---|---|---|
+| ground | 3.41 ms | 1.89 ms | 1.6 ms |
+| mountain slope | 12.57 ms | 4.68 ms | 4.8 ms |
+| tunnel | 13.78 ms | 2.76 ms | |
+
+The mountain rose from 3.5 ms with the wider continuation: rays crossing
+the valley now finish instead of stopping at sky. Left for phase 2: a few
+wall fragments at level boundaries on the valley edge, crossfades between
+levels, residency by ray reach (caves), and face-edge neighbours.
+
 ## References
 
 Laine and Karras, *Efficient Sparse Voxel Octrees* (2010); Crassin et al.,

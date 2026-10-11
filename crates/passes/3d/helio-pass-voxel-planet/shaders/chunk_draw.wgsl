@@ -15,11 +15,14 @@
 //    continues in the chunk beyond the face it left by (`chunk_table`: the
 //    same level, else the coarser or finer one there). Output: visibility
 //    (chunk slot; cell, face), the hit's distance and a plain colour.
-// 3. Resolve (raster): the hits' exact depth, for meshes and later passes.
+// 3. Resolve (raster): the hits' exact depth, for meshes and later passes;
+//    or, in the render graph, publish: the hits into Helio's gbuffer.
 
 struct DrawParams {
     view_proj: mat4x4<f32>,
     inverse_view_proj: mat4x4<f32>,
+    // The last frame's view-projection, relative to this frame's eye.
+    prev_view_proj: mat4x4<f32>,
     // The eye, planet-centred, as a high and a low f32 part.
     eye_hi: vec4<f32>,
     eye_lo: vec4<f32>,
@@ -266,17 +269,20 @@ fn pixel_ray(p: vec2<u32>, size: vec2<u32>) -> vec3<f32> {
     return normalize(far.xyz / far.w);
 }
 
-// The drawn chunk holding cell `cell` of `level` next to chunk key `k`
-// (same face): that level's, else the coarser or the finer one.
-fn neighbour(k: vec4<i32>, level: i32, cell: vec3<i32>, half: vec3<i32>) -> u32 {
+// The drawn chunk holding cell `cell` of `level` (at `frac` within it)
+// next to chunk key `k` (same face): that level's, else a coarser one,
+// else a finer one. Neighbouring drawn tiles can be levels apart (a parent
+// stays drawn until all its children are generated).
+fn neighbour(k: vec4<i32>, level: i32, cell: vec3<i32>, frac: vec3<f32>) -> u32 {
     let face = k.x & 7;
-    let same = vec4<i32>(k.x, cell >> vec3<u32>(6u));
-    var slot = find_chunk(same);
-    if slot == NONE && level < 30 {
-        slot = find_chunk(vec4<i32>(face | ((level + 1) << 8), cell >> vec3<u32>(7u)));
+    var slot = find_chunk(vec4<i32>(k.x, cell >> vec3<u32>(6u)));
+    for (var up = 1; up <= 6 && slot == NONE && level + up <= 30; up++) {
+        slot = find_chunk(vec4<i32>(face | ((level + up) << 8), cell >> vec3<u32>(u32(6 + up))));
     }
-    if slot == NONE && level > 0 {
-        slot = find_chunk(vec4<i32>(face | ((level - 1) << 8), ((cell << vec3<u32>(1u)) + half) >> vec3<u32>(6u)));
+    for (var down = 1; down <= 3 && slot == NONE && level - down >= 0; down++) {
+        let sub = vec3<i32>(floor(frac * f32(1 << u32(down))));
+        let finer = (cell << vec3<u32>(u32(down))) + sub;
+        slot = find_chunk(vec4<i32>(face | ((level - down) << 8), finer >> vec3<u32>(6u)));
     }
     return slot;
 }
@@ -307,17 +313,25 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     // it where no chunk is (air), crossed as an empty chunk of its level.
     var frame = chunk_frame(box);
     var key = chunk_keys[bitcast<u32>(frame.box.z)];
+    // Empty space is crossed in cubes of a chunk of level `level + shift`
+    // (absolute index `cube` at that level), coarser after every few.
     var cube = vec3<i32>(0);
+    var shift = 0u;
     var real = true;
     var empty_steps = 0u;
-    for (var chunk = 0u; chunk < 32u; chunk++) {
+    // Grazing rays cross many chunks of a level before their hit.
+    for (var chunk = 0u; chunk < 128u; chunk++) {
         COUNT(3)
         let slot = bitcast<u32>(frame.box.z);
+        TRACE_PIXEL(chunk, slot, cube, real)
         let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w);
         let d = vec3<f32>(dot(frame.i0.xyz, dir), dot(frame.i1.xyz, dir), dot(frame.i2.xyz, dir));
         let inv = 1.0 / select(d, vec3<f32>(1e-30), d == vec3<f32>(0.0));
-        let ca = (vec3<f32>(cube * 64) - o) * inv;
-        let cb = (vec3<f32>(cube * 64 + 64) - o) * inv;
+        // The cube in the frame chunk's cells.
+        let cube_lo = select(cube * (64 << shift) - key.yzw * 64, vec3<i32>(0), real);
+        let cube_size = f32(64 << shift);
+        let ca = (vec3<f32>(cube_lo) - o) * inv;
+        let cb = (vec3<f32>(cube_lo) + cube_size - o) * inv;
         let cube_hi = max(ca, cb);
         let t_leave = min(cube_hi.x, min(cube_hi.y, cube_hi.z));
         if real {
@@ -335,7 +349,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
                     COUNT(2)
                     textureStore(out_exits, p, vec4<f32>(-1.0));
                     let sign = select(1u, 0u, d[h.axis] > 0.0);
-                    textureStore(out_visibility, p, vec4<u32>(slot, u32(h.cell.x) | (u32(h.cell.y) << 6u) | (u32(h.cell.z) << 12u) | (h.axis << 18u) | (sign << 20u), 0u, 0u));
+                    textureStore(out_visibility, p, vec4<u32>(slot, u32(h.cell.x) | (u32(h.cell.y) << 6u) | (u32(h.cell.z) << 12u) | (h.axis << 18u) | (sign << 20u) | (min(h.material, 255u) << 21u), 0u, 0u));
                     textureStore(out_distance, p, vec4<f32>(h.t, 0.0, 0.0, 0.0));
                     let axis_world = select(select(frame.m2.xyz, frame.m1.xyz, h.axis == 1u), frame.m0.xyz, h.axis == 0u);
                     let normal = normalize(axis_world) * select(-1.0, 1.0, sign == 1u);
@@ -359,8 +373,9 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
         let level = key.x >> 8u;
         let q = o + d * t_leave;
         let axis = select(select(2u, 1u, cube_hi.y <= cube_hi.z), 0u, cube_hi.x <= cube_hi.y && cube_hi.x <= cube_hi.z);
-        var local = clamp(vec3<i32>(floor(q)), cube * 64, cube * 64 + 63);
-        let step = select(cube * 64 - 1, cube * 64 + 64, d > vec3<f32>(0.0));
+        let span = 64 << shift;
+        var local = clamp(vec3<i32>(floor(q)), cube_lo, cube_lo + span - 1);
+        let step = select(cube_lo - 1, cube_lo + span, d > vec3<f32>(0.0));
         if axis == 0u { local.x = step.x; } else if axis == 1u { local.y = step.y; } else { local.z = step.z; }
         let cell = key.yzw * 64 + local;
         // Faces: tiles across an edge belong to the next face (the next
@@ -368,20 +383,25 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
         let tiles = (i32(params.table.y >> u32(level)) + 63) / 64;
         let tile = cell.xy >> vec2<u32>(6u);
         if any(tile < vec2<i32>(0)) || any(tile >= vec2<i32>(max(tiles, 1))) { break; }
-        let half = vec3<i32>(fract(q) >= vec3<f32>(0.5));
-        let next = neighbour(key, level, cell, half);
+        // Where in the next cell the ray enters: the side it crossed on
+        // the exit axis.
+        var frac = clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999));
+        let entry = select(0.999, 0.0, d[axis] > 0.0);
+        if axis == 0u { frac.x = entry; } else if axis == 1u { frac.y = entry; } else { frac.z = entry; }
+        let next = neighbour(key, level, cell, frac);
         if next != NONE {
             frame = chunk_frame(next);
             key = chunk_keys[bitcast<u32>(frame.box.z)];
-            cube = vec3<i32>(0);
+            shift = 0u;
             real = true;
             empty_steps = 0u;
         } else {
-            // No chunk there: empty space of this level, crossed in this
-            // frame (a few chunks: the affine frame holds far below a cell).
+            // No chunk there: empty space (air over lower ground), crossed
+            // in this frame in cubes that double every four.
             empty_steps += 1u;
-            if empty_steps > 6u { break; }
-            cube = (cell >> vec3<u32>(6u)) - key.yzw;
+            if empty_steps > 40u { break; }
+            if empty_steps % 4u == 0u && level + i32(shift) < 30 { shift += 1u; }
+            cube = cell >> vec3<u32>(6u + shift);
             real = false;
         }
     }
@@ -406,4 +426,55 @@ fn resolve_depth(@builtin(position) pixel: vec4<f32>) -> @builtin(frag_depth) f3
     let size = textureDimensions(hit_distance);
     let clip = params.view_proj * vec4<f32>(pixel_ray(vec2<u32>(pixel.xy), size) * t, 1.0);
     return clip.z / clip.w;
+}
+
+@group(1) @binding(7) var hit_visibility: texture_2d<u32>;
+
+// Helio's gbuffer (`engine::GBUFFER_FORMATS`).
+struct GOut {
+    @location(0) albedo: vec4<f32>,
+    @location(1) normal: vec4<f32>,
+    @location(2) orm: vec4<f32>,
+    @location(3) emissive: vec4<f32>,
+    @location(4) lightmap_uv: vec2<f32>,
+    @location(5) sss: vec4<f32>,
+    @location(6) extra: vec4<f32>,
+    @location(7) velocity: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
+}
+
+@fragment
+fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
+    let p = vec2<i32>(pixel.xy);
+    let v = textureLoad(hit_visibility, p, 0).xy;
+    if v.x == NONE { discard; }
+    let t = textureLoad(hit_distance, p, 0).r;
+    let size = textureDimensions(hit_distance);
+    let position = pixel_ray(vec2<u32>(pixel.xy), size) * t;
+    let clip = params.view_proj * vec4<f32>(position, 1.0);
+    let c = chunk_frame(v.x);
+    let axis = (v.y >> 18u) & 3u;
+    let sign = (v.y >> 20u) & 1u;
+    let material = min((v.y >> 21u) & 0xffu, 31u);
+    let axis_world = select(select(c.m2.xyz, c.m1.xyz, axis == 1u), c.m0.xyz, axis == 0u);
+    let normal = normalize(axis_world) * select(-1.0, 1.0, sign == 1u);
+    let f0 = 0.03;
+    var out: GOut;
+    out.albedo = vec4<f32>(palette[material].rgb, 1.0);
+    out.normal = vec4<f32>(normal, f0);
+    out.orm = vec4<f32>(1.0, clamp(palette[material].w, 0.04, 1.0), 0.0, f0);
+    out.emissive = vec4<f32>(0.0, 0.0, 0.0, f0);
+    // Terrain tag consumed by deferred lighting (skips screen-space AO).
+    out.lightmap_uv = vec2<f32>(-1.0, -2.0);
+    out.sss = vec4<f32>(0.0);
+    out.extra = vec4<f32>(0.0);
+    let previous = params.prev_view_proj * vec4<f32>(position, 1.0);
+    var velocity = vec2<f32>(0.0);
+    if previous.w > 0.0 {
+        let ndc = previous.xy / previous.w;
+        velocity = pixel.xy - (vec2<f32>(ndc.x, -ndc.y) * 0.5 + 0.5) * vec2<f32>(size);
+    }
+    out.velocity = vec4<f32>(velocity, 0.0, 0.0);
+    out.depth = clip.z / clip.w;
+    return out;
 }
