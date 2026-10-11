@@ -916,6 +916,118 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
     }
 }
 
+/// `HELIO_VOXEL_CHUNKS_DIG=n`: chunk trees following edits. Settle the
+/// view, then dig `n` balls (1.5 m) one a frame along a line across the
+/// view centre's hit (from the centre out), then undo them one a frame: what each edit generates
+/// again and costs, when it shows (the centre pixel's depth), and whether
+/// the undone frame matches the first. Saves `<out>/dig_{before,dug,undone}.png`.
+fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usize) {
+    use helio_pass_voxel_planet::chunks::ChunkWorld;
+    let [w, h] = flight.size;
+    let mut planet = (*flight.planet).clone();
+    let mut world = ChunkWorld::new(&flight.device, &flight.queue, &planet);
+    let mut frame = 0u64;
+    chunk_settle(flight, &mut world, eye, &mut frame);
+    let up = up_for(eye);
+    let forward = forward.normalize();
+    let near = (flight.planet.air_clearance(eye) * 0.25).clamp(0.05, 50_000.0) as f32;
+    let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, std::f32::consts::FRAC_PI_4, w as f32 / h as f32, near, 40_000_000.0);
+    let config = chunk_config(h, 512);
+    let out = std::path::PathBuf::from(std::env::args().nth(1).unwrap());
+    // One frame: follow the planet's edits, update, draw; GPU times and the
+    // tiles generated again.
+    let mut step = |world: &mut ChunkWorld, planet: &Planet, frame: &mut u64| {
+        assert!(world.sync_edits(planet), "edits follow");
+        let mut encoder = flight.device.create_command_encoder(&Default::default());
+        let stats = world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, DVec3::ZERO, None, *frame, &config);
+        world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), *frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun, [w, h]);
+        flight.queue.submit([encoder.finish()]);
+        world.submitted();
+        let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+        world.submitted();
+        *frame += 1;
+        stats
+    };
+    let depth_at = |world: &ChunkWorld, x: u32, y: u32| -> f32 {
+        let buffer = flight.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 256, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+        let mut encoder = flight.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &world.targets().unwrap().distance, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256), rows_per_image: Some(1) } },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        flight.queue.submit([encoder.finish()]);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        flight.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let data = buffer.slice(..).get_mapped_range().unwrap();
+        f32::from_le_bytes(data[..4].try_into().unwrap())
+    };
+    let centre_depth = |world: &ChunkWorld| depth_at(world, w / 2, h / 2);
+    // Down the centre column, the chunk hit against the exact CPU raycast
+    // of `planet`: the largest difference (m).
+    let worst = |world: &ChunkWorld, planet: &Planet| -> (f64, u32) {
+        let inverse = (camera.proj * camera.view).inverse();
+        let mut worst = (0.0f64, 0u32);
+        for y in (h / 2..h).step_by(12) {
+            let ndc = Vec3::new(0.5 / w as f32, 1.0 - (y as f32 + 0.5) / h as f32 * 2.0, 0.5);
+            let far = inverse * ndc.extend(1.0);
+            let dir = (far.truncate() / far.w).normalize().as_dvec3();
+            let gpu = f64::from(depth_at(world, w / 2, y));
+            let cpu = planet.raycast(eye, dir, 1000.0).map_or(0.0, |h| h.distance);
+            if (gpu - cpu).abs() > worst.0 {
+                worst = ((gpu - cpu).abs(), y);
+            }
+        }
+        worst
+    };
+    step(&mut world, &planet, &mut frame);
+    let before_path = out.join("dig_before.png");
+    save_chunk_colour(flight, &world, before_path.to_str().unwrap());
+    let before = centre_depth(&world);
+    let hit = planet.raycast(eye, forward.as_dvec3(), 1000.0).expect("the view centre hits ground");
+    let at = eye + forward.as_dvec3() * hit.distance;
+    let side = forward.as_dvec3().cross(up.as_dvec3()).normalize();
+    eprintln!("CHUNKDIG {view}: centre at {:.2} m, {count} balls across it", hit.distance);
+    let (mut tiles, mut gen_ms, mut shown) = (Vec::new(), Vec::new(), None);
+    for n in 0..count {
+        // From the centre outwards: the first are sealed into the baked
+        // store when there are more than the recent log keeps.
+        let offset = (n as f64 / 2.0).ceil() * if n % 2 == 0 { 0.6 } else { -0.6 };
+        planet.apply(Brush { center: (at + side * offset).to_array(), radius: 1.5, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        let stats = step(&mut world, &planet, &mut frame);
+        tiles.push(stats.generated_tiles as f64);
+        gen_ms.extend(world.take_timings().iter().map(|t| t.generate));
+        if shown.is_none() && (centre_depth(&world) - before).abs() > 0.05 {
+            shown = Some(n);
+        }
+    }
+    let (error, row) = worst(&world, &planet);
+    eprintln!("CHUNKDIG {view}: dug, centre column against the CPU raycast: worst {error:.2} m (row {row})");
+    let dug_path = out.join("dig_dug.png");
+    save_chunk_colour(flight, &world, dug_path.to_str().unwrap());
+    eprintln!(
+        "CHUNKDIG {view}: tiles generated again an edit p50 {:.0} max {:.0}, generation p50 {:.2} max {:.2} ms; centre deeper from edit {shown:?} (of {count})",
+        percentile(&tiles, 0.5),
+        tiles.iter().copied().fold(0.0, f64::max),
+        percentile(&gen_ms, 0.5),
+        gen_ms.iter().copied().fold(0.0, f64::max)
+    );
+    for _ in 0..count {
+        planet.undo().unwrap();
+        step(&mut world, &planet, &mut frame);
+    }
+    while !world.settled() {
+        step(&mut world, &planet, &mut frame);
+    }
+    step(&mut world, &planet, &mut frame);
+    let undone_path = out.join("dig_undone.png");
+    save_chunk_colour(flight, &world, undone_path.to_str().unwrap());
+    let a = image::open(&before_path).unwrap().to_rgba8();
+    let b = image::open(&undone_path).unwrap().to_rgba8();
+    let differ = a.pixels().zip(b.pixels()).filter(|(p, q)| p != q).count();
+    eprintln!("CHUNKDIG {view}: undone frame differs from the first in {differ} pixels; centre {:.2} m (was {before:.2})", centre_depth(&world));
+}
+
 /// A view drawn by the renderer with the chunk pass: settle, hold
 /// (`HELIO_VOXEL_FLIGHT_HOLD_SECONDS`), report the chunk draw's GPU time and
 /// save the final frame (`<out>/chunks_<view>.png`).
@@ -1306,6 +1418,10 @@ fn main() {
         };
         if flight.chunk_state.is_some() {
             chunk_engine_hold(&mut flight, &view, e, f);
+            return;
+        }
+        if let Some(count) = std::env::var("HELIO_VOXEL_CHUNKS_DIG").ok().and_then(|v| v.parse().ok()) {
+            chunk_dig(&flight, &view, e, f, count);
             return;
         }
         // `HELIO_VOXEL_CHUNKS=1`: the same view drawn from chunk trees

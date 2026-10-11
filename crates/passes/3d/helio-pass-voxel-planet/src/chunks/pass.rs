@@ -83,7 +83,8 @@ impl RenderPass for ChunkPass {
             return Ok(());
         };
         let recipe = crate::journal::recipe_fingerprint(frame.planet.recipe());
-        if self.built_for != Some(recipe) {
+        // Edits follow the planet; another recipe or history, a new world.
+        if self.built_for != Some(recipe) || self.world.as_mut().is_some_and(|w| !w.sync_edits(&frame.planet)) {
             self.world = Some(ChunkWorld::new(ctx.device, ctx.queue, &frame.planet));
             self.built_for = Some(recipe);
             self.last_eye = None;

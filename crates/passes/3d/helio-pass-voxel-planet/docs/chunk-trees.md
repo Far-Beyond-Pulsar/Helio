@@ -380,6 +380,42 @@ octaves finer than a level's cells (`landform_resolved`).
 Left for phase 2: residency by ray reach (caves); the terrain program's
 cost per column.
 
+## Phase 3a results (2026-10-11): edits
+
+Generation applies a world's edits in their order (`planet::Edits`): the
+large brushes (analytic), the baked cells (`edit_store`: sealed small
+brushes, coarser levels by majority), the recent brushes (analytic). It
+read only the analytic logs, so every sealed small brush vanished. A chunk
+job carries a table of the baked bricks under it (8x8 brick columns, 8
+layers; a column-generation workgroup is one brick column), and the top
+cell takes the material of the last brush or baked edit that added or
+painted it.
+
+The world follows a published planet's edits (`ChunkWorld::sync_edits`,
+the chunk pass every frame): brushes that came or went (a dig, an undo)
+generate the resident tiles under them again that frame, at every level
+they apply at; baked changes alone (a seal's coarser levels) within the
+generation budget. A tile is generated again in place, its old chunks
+drawn until the new ones replace them. The same holds when a readback
+finds a tile needs more layers (it used to leave the tile out until the
+planner asked for it again: a hole when digs came faster than readbacks).
+
+The harness's `HELIO_VOXEL_CHUNKS_DIG=n` digs n balls (1.5 m) one a frame
+across the ground view's centre, from the centre out, checks the centre
+column against the CPU raycast of the edited planet, and undoes them:
+
+| Digs | tiles again an edit, p50 (max) | generation an edit, p50 (max) | worst vs CPU raycast | undone vs first frame |
+|---|---|---|---|---|
+| 20 (recent) | 6 (9) | 0.45 (0.83) ms | 0.05 m | 0 pixels |
+| 100 (sealed, baked) | 7 (20) | 0.56 (1.23) ms | 0.00 m | 0 pixels |
+
+A dig shows the frame it is made. Recent balls differ from the exact CPU
+test by a cell at their rim (the generator's crossing solve, as in the span
+renderer); baked ones are exact.
+
+Left for phase 3: edits on chunk data in place (a tile generated again
+costs its terrain program, ~50 us), and planet-scale brushes' cost.
+
 ## References
 
 Laine and Karras, *Efficient Sparse Voxel Octrees* (2010); Crassin et al.,

@@ -234,8 +234,6 @@ impl Planner {
 pub enum Event {
     Generated(TileKey),
     Measured(TileKey, Ranges),
-    /// Its chunks are gone (their layers left them): generate it again.
-    Regenerate(TileKey),
 }
 
 /// A plan the worker made, and the tiles it evicted.
@@ -282,11 +280,6 @@ impl Worker {
                         match event {
                             Event::Generated(k) => planner.set_generated(k),
                             Event::Measured(k, r) => planner.set_ranges(k, r),
-                            Event::Regenerate(k) => {
-                                if let Some(t) = planner.tiles.get_mut(&k) {
-                                    t.generated = false;
-                                }
-                            }
                         }
                     }
                     let plan = planner.plan(&grid, job.eye, job.velocity, job.view, job.frame);

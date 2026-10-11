@@ -34,9 +34,11 @@ struct ChunkJob {
     slot: u32,  // chunk slot of the result
     brushes: u32, // first brush ref; count in `brush_count`
     brush_count: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
+    // Refs of the large log (they come first), then the recent log's.
+    large: u32,
+    // Its baked bricks: 8 per brick column (`baked_refs`), or NONE.
+    baked: u32,
+    _pad: u32,
 }
 
 struct FaceBrush {
@@ -85,6 +87,11 @@ const CLASSES: u32 = 9u;
 @group(0) @binding(19) var<storage, read_write> job_results: array<vec4<i32>>;
 // Slots evicted this frame.
 @group(0) @binding(21) var<storage, read> evictions: array<u32>;
+// Baked edits (`edit_store`) under the chunk jobs: per job with any, a
+// brick per brick column (8x8 of a chunk) and layer (8), NONE where none;
+// a brick's 512 cell edits two a word.
+@group(0) @binding(22) var<storage, read> baked_refs: array<u32>;
+@group(0) @binding(23) var<storage, read> baked_cells: array<u32>;
 
 fn class_of(n: u32) -> u32 {
     var c = 0u;
@@ -228,7 +235,82 @@ fn ball_cells(b: FaceBrush, p: vec3<i32>, level: u32) -> vec3<i32> {
     return vec3<i32>(k0 + i32(floor((rem + (-bb - sq) / a) / cell + 0.5)), k0 + i32(floor((rem + (-bb + sq) / a) / cell + 0.5)), 1);
 }
 
-// One thread per column, one workgroup per 8x8 columns: dispatch (64, chunks).
+// The level cells brush `b` covers in the column over domain point `p`
+// (half-cell centre `ch`): first, last, and whether any.
+fn brush_cells(b: FaceBrush, p: vec3<i32>, ch: vec2<i32>, level: u32) -> vec3<i32> {
+    if b.radius_half < (1u << level) { return vec3<i32>(0, -1, 0); }
+    if ((b.flags >> 6u) & 3u) == 1u {
+        if all(vec2<u32>(abs(ch - b.center.xy)) <= vec2<u32>(b.radius_half)) {
+            let shift = level + 1u;
+            let half = 1 << level;
+            return vec3<i32>(-((half - b.k_lo) >> shift), (b.k_hi - half) >> shift, 1);
+        }
+        return vec3<i32>(0, -1, 0);
+    }
+    return ball_cells(b, p, level);
+}
+
+// Brush refs [first, end) of `job` applied in order to a column's cells
+// from layer `k0`.
+fn apply_brushes(mask: vec2<u32>, job: ChunkJob, first: u32, end: u32, p: vec3<i32>, ch: vec2<i32>, level: u32, k0: i32) -> vec2<u32> {
+    var m = mask;
+    for (var e = first; e < end; e++) {
+        let b = brushes[brush_refs[job.brushes + e]];
+        // Ops: 0 remove, 1 add; paint changes no cell (`edits::BrushOp`).
+        let op = (b.flags >> 4u) & 3u;
+        if op >= 2u { continue; }
+        let cells = brush_cells(b, p, ch, level);
+        if cells.z == 0 || cells.x > cells.y { continue; }
+        m = set_bits(m, cells.x - k0, cells.y - k0 + 1, op == 1u);
+    }
+    return m;
+}
+
+// The baked edit of cell `z` of the job's column `li` in brick column
+// `column` (`edit_store::CellEdit`: state in bits 0..2, 1 air, 2 solid,
+// 3 paint; material in 8..16).
+fn baked_edit(job: ChunkJob, column: u32, li: u32, z: u32) -> u32 {
+    let b = baked_refs[job.baked + column * 8u + (z >> 3u)];
+    if b == NONE { return 0u; }
+    let n = (li & 7u) + 8u * ((li >> 3u) + 8u * (z & 7u));
+    return (baked_cells[b * 256u + (n >> 1u)] >> ((n & 1u) * 16u)) & 0xffffu;
+}
+
+fn apply_baked(mask: vec2<u32>, job: ChunkJob, column: u32, li: u32) -> vec2<u32> {
+    if job.baked == NONE { return mask; }
+    var m = mask;
+    for (var bz = 0u; bz < 8u; bz++) {
+        if baked_refs[job.baked + column * 8u + bz] == NONE { continue; }
+        for (var z = bz * 8u; z < bz * 8u + 8u; z++) {
+            let state = baked_edit(job, column, li, z) & 3u;
+            if state == 1u || state == 2u { m = set_bits(m, i32(z), i32(z) + 1, state == 2u); }
+        }
+    }
+    return m;
+}
+
+// Solid cell `k`'s material after the edits over the terrain's
+// `material`: the last brush that added or painted it, or its baked edit
+// (material 0: the terrain's).
+fn edited_material(material: u32, job: ChunkJob, column: u32, li: u32, p: vec3<i32>, ch: vec2<i32>, level: u32, k: i32, k0: i32) -> u32 {
+    var m = material;
+    for (var e = 0u; e <= job.brush_count; e++) {
+        if e == job.large && job.baked != NONE {
+            let edit = baked_edit(job, column, li, u32(k - k0));
+            if (edit & 3u) >= 2u && (edit >> 8u) != 0u { m = edit >> 8u; }
+        }
+        if e == job.brush_count { break; }
+        let b = brushes[brush_refs[job.brushes + e]];
+        let brush_material = (b.flags >> 8u) & 0xffu;
+        if ((b.flags >> 4u) & 3u) == 0u || brush_material == 0u { continue; }
+        let cells = brush_cells(b, p, ch, level);
+        if cells.z != 0 && k >= cells.x && k <= cells.y { m = brush_material; }
+    }
+    return m;
+}
+
+// One thread per column, one workgroup per 8x8 columns (a brick column):
+// dispatch (64, chunks).
 @compute @workgroup_size(64)
 fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let job = chunk_jobs[wg.y];
@@ -273,28 +355,12 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
             scan += 1;
         }
     }
-    // Brushes in edit order: balls by their crossing cells, boxes by their
-    // faces.
+    // Edits in their order (`planet::Edits`): the large brushes, the baked
+    // cells, the recent brushes.
     let ch = vec2<i32>(center_half(i, level), center_half(j, level));
-    for (var e = 0u; e < job.brush_count; e++) {
-        let b = brushes[brush_refs[job.brushes + e]];
-        if b.radius_half < (1u << level) { continue; }
-        let op = (b.flags >> 4u) & 3u;
-        if op >= 2u { continue; }
-        var cells = vec3<i32>(0, -1, 0);
-        if ((b.flags >> 6u) & 3u) == 1u {
-            if all(vec2<u32>(abs(ch - b.center.xy)) <= vec2<u32>(b.radius_half)) {
-                let shift = level + 1u;
-                let half = 1 << level;
-                cells = vec3<i32>(-((half - b.k_lo) >> shift), (b.k_hi - half) >> shift, 1);
-            }
-        } else {
-            cells = ball_cells(b, p, level);
-        }
-        if cells.z == 0 || cells.x > cells.y { continue; }
-        // Ops: 0 remove, 1 add (`edits::BrushOp`).
-        mask = set_bits(mask, cells.x - k0, cells.y - k0 + 1, op == 1u);
-    }
+    mask = apply_brushes(mask, job, 0u, job.large, p, ch, level, k0);
+    mask = apply_baked(mask, job, wg.x, li);
+    mask = apply_brushes(mask, job, job.large, job.brush_count, p, ch, level, k0);
     column_masks[at] = mask;
     // Material of the highest solid cell (shading only, until materials
     // are stored per surface voxel).
@@ -309,7 +375,7 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
             tile_top(job.tile, i32(x), min(i32(y) + 1, 63), level));
         let slope = max(abs(t.y - t.x), abs(t.w - t.z)) * 4;
         let depth = max(top - 1 - k, 0) << level;
-        material = ground_material(p, u32(column.y), height, depth, slope, k << level) & M_ID;
+        material = edited_material(ground_material(p, u32(column.y), height, depth, slope, k << level) & M_ID, job, wg.x, li, p, ch, level, k, k0);
     }
     column_materials[at] = material;
 }

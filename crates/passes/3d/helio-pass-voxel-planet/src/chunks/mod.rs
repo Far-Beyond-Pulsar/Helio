@@ -13,12 +13,14 @@ mod drawn;
 pub mod pass;
 pub mod residency;
 
+use crate::edit_store::{ColumnKey, EditStore};
 use crate::edits::FaceBrush;
 use crate::engine::{terrain_bytes, terrain_source, WorldGpu};
 use crate::grid::Grid;
-use crate::planet::Planet;
+use crate::planet::{Edits, Planet};
 use bytemuck::{Pod, Zeroable};
 use glam::{DMat3, DVec3, Mat4, Vec3};
+use rustc_hash::{FxHashMap, FxHashSet};
 use wgpu::util::DeviceExt;
 
 /// Cells along a chunk edge (and columns along a tile edge).
@@ -67,7 +69,11 @@ struct ChunkJob {
     slot: u32,
     brushes: u32,
     brush_count: u32,
-    _pad: [u32; 3],
+    /// Refs of the large log (first), then the recent log's.
+    large: u32,
+    /// Its baked bricks' table in `baked_refs`, or NONE.
+    baked: u32,
+    _pad: u32,
 }
 
 
@@ -211,6 +217,83 @@ fn frustum_planes(m: Mat4) -> [glam::Vec4; 5] {
     [r(3) + r(0), r(3) - r(0), r(3) + r(1), r(3) - r(1), r(3)].map(|p| p / p.truncate().length())
 }
 
+/// The analytic brushes of `edits` resolved per face: the large log's,
+/// then the recent log's; the count of large ones, and each recent brush's
+/// face count.
+fn analytic_faces(edits: &Edits) -> (Vec<FaceBrush>, usize, Vec<usize>) {
+    let mut faces: Vec<FaceBrush> = (0..edits.large.len() as u32).flat_map(|id| edits.large.resolved(id).faces.iter().copied()).collect();
+    let large = faces.len();
+    let mut counts = Vec::new();
+    for id in 0..edits.recent.len() as u32 {
+        let resolved = &edits.recent.resolved(id).faces;
+        faces.extend(resolved.iter().copied());
+        counts.push(resolved.len());
+    }
+    (faces, large, counts)
+}
+
+/// Which edits a world shows: brushes applied, the history's hash, the
+/// baked state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EditState {
+    len: usize,
+    hash: u64,
+    sealed: (usize, u64),
+}
+
+impl EditState {
+    fn of(edits: &Edits) -> Self {
+        Self { len: edits.len(), hash: edits.hash(), sealed: edits.baked_state() }
+    }
+}
+
+/// A frame's generation jobs and what they upload.
+#[derive(Default)]
+struct GenBatch {
+    tile_jobs: Vec<TileJob>,
+    chunk_jobs: Vec<ChunkJob>,
+    refs: Vec<u32>,
+    /// Baked brick tables (512 a job) and bricks (256 words each), each
+    /// brick once.
+    baked_refs: Vec<u32>,
+    baked_cells: Vec<u32>,
+    bricks: FxHashMap<usize, u32>,
+}
+
+impl GenBatch {
+    /// The table of `store`'s bricks under chunk `cz` of `tile`, or NONE.
+    fn baked_table(&mut self, store: &EditStore, tile: TileKey, cz: i32) -> u32 {
+        let mut table = [u32::MAX; 512];
+        let mut any = false;
+        for by in 0..8 {
+            for bx in 0..8 {
+                let key = ColumnKey { face: tile.face, level: tile.level as u8, ci: tile.cx * 8 + bx, cj: tile.cy * 8 + by };
+                let Some(column) = store.column(&key) else { continue };
+                for (bk, brick) in column.iter() {
+                    let bz = bk - cz * 8;
+                    if !(0..8).contains(&bz) {
+                        continue;
+                    }
+                    let cells = &mut self.baked_cells;
+                    let at = *self.bricks.entry(std::sync::Arc::as_ptr(brick) as usize).or_insert_with(|| {
+                        let n = (cells.len() / 256) as u32;
+                        cells.extend(brick.cells.chunks(2).map(|p| u32::from(p[0].0) | (u32::from(p[1].0) << 16)));
+                        n
+                    });
+                    table[((by * 8 + bx) * 8 + bz) as usize] = at;
+                    any = true;
+                }
+            }
+        }
+        if !any {
+            return u32::MAX;
+        }
+        let n = self.baked_refs.len() as u32;
+        self.baked_refs.extend_from_slice(&table);
+        n
+    }
+}
+
 /// A chunk's key in the chunk table: face and level, tile, layer.
 fn chunk_key(tile: TileKey, cz: i32) -> [i32; 4] {
     [i32::from(tile.face) | ((tile.level as i32) << 8), tile.cx, tile.cy, cz]
@@ -260,10 +343,12 @@ struct Chunk {
     z: Option<(i32, i32)>,
 }
 
-/// A tile's generated chunks and the layers they span.
+/// A tile's generated chunks, the layers they span, and its ranges (as
+/// requested, then measured).
 struct TileChunks {
     chunks: Vec<Chunk>,
     layers: (i32, i32),
+    ranges: residency::Ranges,
 }
 
 /// What the traces did (counting builds).
@@ -417,8 +502,20 @@ pub struct ChunkWorld {
     free_blocks: wgpu::Buffer,
     job_results: wgpu::Buffer,
     /// Brushes kept analytic (resolved per face) and their buffer.
+    /// Brushes kept analytic: `large_faces` of the large log, then the
+    /// recent log's (`recent_counts` faces a brush).
     faces: Vec<FaceBrush>,
+    large_faces: usize,
+    recent_counts: Vec<usize>,
     brushes: wgpu::Buffer,
+    /// The baked edits, and tiles that may hold their bricks.
+    baked: EditStore,
+    baked_tiles: FxHashSet<TileKey>,
+    edit_state: EditState,
+    /// Resident tiles to generate again: under brushes that came or went
+    /// (now), under baked edits that changed (within the budget).
+    urgent: FxHashSet<TileKey>,
+    stale: FxHashSet<TileKey>,
     grid: Grid,
     /// The planet's height range in base layers (the roots' estimate).
     height_layers: (i32, i32),
@@ -426,14 +523,14 @@ pub struct ChunkWorld {
     /// The latest finished plan, and events for the next.
     plan: residency::Plan,
     events: Vec<residency::Event>,
-    tiles: rustc_hash::FxHashMap<TileKey, TileChunks>,
+    tiles: FxHashMap<TileKey, TileChunks>,
     free_slots: Vec<u32>,
     serial: u64,
     readbacks: std::collections::VecDeque<Readback>,
     /// This frame's drawn chunks: tile and index in its chunks.
     drawn_set: drawn::DrawnSet,
     /// Tiles whose chunks changed since the drawn set last saw them.
-    changed_tiles: rustc_hash::FxHashSet<TileKey>,
+    changed_tiles: FxHashSet<TileKey>,
     /// Boxes of the last draw: drawn from inside, in all.
     boxes: (u32, u32),
     /// Results recorded by the last update, mapped once submitted.
@@ -600,6 +697,8 @@ impl ChunkWorld {
                 storage(19, false, c),
                 storage(20, false, c),
                 storage(21, true, c),
+                storage(22, true, c),
+                storage(23, true, c),
             ],
         });
         let gen_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&gen_layout)], immediate_size: 0 });
@@ -733,12 +832,7 @@ impl ChunkWorld {
         let buffer = |label: &str, size: u64, usage: wgpu::BufferUsages| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
         // Brushes kept analytic: the large ones, then the recent ones.
         let edits = planet.edits();
-        let mut faces: Vec<FaceBrush> = Vec::new();
-        for log in [&edits.large, &edits.recent] {
-            for id in 0..log.len() as u32 {
-                faces.extend(log.resolved(id).faces.iter().copied());
-            }
-        }
+        let (faces, large_faces, recent_counts) = analytic_faces(edits);
         let s = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
         let world = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk world"), contents: bytemuck::bytes_of(&WorldGpu::new(planet)), usage: wgpu::BufferUsages::UNIFORM });
         let terrain = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk terrain"), contents: &terrain_bytes(&program), usage: wgpu::BufferUsages::UNIFORM });
@@ -816,6 +910,13 @@ impl ChunkWorld {
                 usage: wgpu::BufferUsages::STORAGE,
             }),
             faces,
+            large_faces,
+            recent_counts,
+            baked: edits.baked.clone(),
+            baked_tiles: edits.baked.bricks().map(|(k, _)| TileKey { face: k.face, level: u32::from(k.level), cx: k.bi >> 3, cy: k.bj >> 3 }).collect(),
+            edit_state: EditState::of(edits),
+            urgent: FxHashSet::default(),
+            stale: FxHashSet::default(),
             grid: *planet.grid(),
             height_layers: (
                 (planet.min_terrain_height() / planet.grid().voxel_size()).floor() as i32 - 64,
@@ -855,7 +956,7 @@ impl ChunkWorld {
         out
     }
 
-    fn gen_group(&self, brush_refs: &wgpu::Buffer, evictions: &wgpu::Buffer) -> wgpu::BindGroup {
+    fn gen_group(&self, brush_refs: &wgpu::Buffer, evictions: &wgpu::Buffer, baked_refs: &wgpu::Buffer, baked_cells: &wgpu::Buffer) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk generation"),
             layout: &self.gen_layout,
@@ -880,8 +981,150 @@ impl ChunkWorld {
                 entry(19, &self.job_results),
                 entry(20, &self.free_blocks),
                 entry(21, evictions),
+                entry(22, baked_refs),
+                entry(23, baked_cells),
             ],
         })
+    }
+
+    /// Jobs generating `key` (with `ranges`) into `batch`; its old chunks,
+    /// if any, to `evictions`. False when the batch or the slots are full.
+    #[allow(clippy::too_many_arguments)]
+    fn queue_tile(&mut self, key: TileKey, ranges: residency::Ranges, eye_at: &Eye, batch: &mut GenBatch, readback: &mut Readback, evictions: &mut Vec<u32>, stats: &mut UpdateStats) -> bool {
+        let grid = self.grid;
+        let (lo, hi) = layers_needed(&grid, key, ranges, eye_at, &self.faces);
+        let layers = if hi > lo { (lo.div_euclid(CHUNK), (hi - 1).div_euclid(CHUNK)) } else { (0, -1) };
+        let count = (layers.1 - layers.0 + 1).max(0) as usize;
+        if batch.tile_jobs.len() >= TILE_BATCH || batch.chunk_jobs.len() + count > CHUNK_BATCH {
+            return false;
+        }
+        if self.free_slots.len() < count {
+            stats.out_of_slots = true;
+            return false;
+        }
+        let index = batch.tile_jobs.len() as u32;
+        batch.tile_jobs.push(TileJob { face: u32::from(key.face), level: key.level, cx: key.cx, cy: key.cy });
+        readback.tiles.push(key);
+        let shift = key.level + 1;
+        let span = |c: i32| (i64::from(c * CHUNK) << shift, (i64::from(c * CHUNK + CHUNK) << shift) - 1);
+        let baked = self.baked_tiles.contains(&key);
+        let mut chunks = Vec::new();
+        for cz in layers.0..=layers.1 {
+            let slot = self.free_slots.pop().unwrap();
+            self.serial += 1;
+            let first = batch.refs.len() as u32;
+            let mut large = 0;
+            for (b, fb) in self.faces.iter().enumerate() {
+                if brush_meets(fb, key.face, key.level, span(key.cx), span(key.cy), span(cz)) {
+                    batch.refs.push(b as u32);
+                    large += u32::from(b < self.large_faces);
+                }
+            }
+            let baked = if baked { batch.baked_table(&self.baked, key, cz) } else { u32::MAX };
+            batch.chunk_jobs.push(ChunkJob { tile: index, cz, slot, brushes: first, brush_count: batch.refs.len() as u32 - first, large, baked, _pad: 0 });
+            let frame = chunk_frame(&grid, key, cz);
+            let (m, inv) = (frame.m.as_mat3(), frame.inv.as_mat3());
+            let (origin_hi, origin_lo) = split(frame.origin);
+            let flags = u32::from(frame.m.determinant() < 0.0) | (key.level << 8);
+            let record = ChunkStatic {
+                m: [m.x_axis.extend(0.0).to_array(), m.y_axis.extend(0.0).to_array(), m.z_axis.extend(0.0).to_array()],
+                inv: [inv.row(0).extend(0.0).to_array(), inv.row(1).extend(0.0).to_array(), inv.row(2).extend(0.0).to_array()],
+                origin_hi,
+                origin_lo,
+                // Layers not read back yet: the whole chunk.
+                bounds: [0.0, 64.0, f32::from_bits(slot), f32::from_bits(flags)],
+            };
+            self.queue.write_buffer(&self.statics, u64::from(slot) * std::mem::size_of::<ChunkStatic>() as u64, bytemuck::bytes_of(&record));
+            chunks.push(Chunk { cz, slot, serial: self.serial, frame, z: None });
+            self.queue.write_buffer(&self.chunk_keys, u64::from(slot) * 16, bytemuck::cast_slice(&chunk_key(key, cz)));
+            readback.chunks.push((key, cz, slot, self.serial));
+        }
+        stats.generated_chunks += chunks.len();
+        if let Some(old) = self.tiles.insert(key, TileChunks { chunks, layers: (lo, hi), ranges }) {
+            evictions.extend(old.chunks.iter().map(|c| c.slot));
+        }
+        self.changed_tiles.insert(key);
+        self.events.push(residency::Event::Generated(key));
+        stats.generated_tiles += 1;
+        true
+    }
+
+    /// Follow `planet`'s edits (the recipe unchanged): resident tiles under
+    /// brushes that came or went are generated again in the next update;
+    /// under baked edits that changed (a seal's coarser levels), within the
+    /// budget. False when its edits do not follow these (another history):
+    /// build the world again.
+    pub fn sync_edits(&mut self, planet: &Planet) -> bool {
+        let edits = planet.edits();
+        let state = EditState::of(edits);
+        if state == self.edit_state {
+            return true;
+        }
+        let Some(columns) = edits.baked_changes_since(self.edit_state.sealed) else { return false };
+        let (faces, large_faces, recent_counts) = analytic_faces(edits);
+        // Brushes in one list and not the other.
+        let mut count: FxHashMap<[u32; 12], i32> = FxHashMap::default();
+        for fb in &self.faces {
+            *count.entry(bytemuck::cast(*fb)).or_default() -= 1;
+        }
+        for fb in &faces {
+            *count.entry(bytemuck::cast(*fb)).or_default() += 1;
+        }
+        // Recent brushes sealed into the baked store left the list, not the
+        // world (its coarser levels follow from the baked changes).
+        let sealed = state.sealed.0.saturating_sub(self.edit_state.sealed.0);
+        let sealed_faces: usize = self.recent_counts.iter().take(sealed).sum();
+        for fb in &self.faces[self.large_faces..self.large_faces + sealed_faces] {
+            if let Some(n) = count.get_mut(&bytemuck::cast::<FaceBrush, [u32; 12]>(*fb)) {
+                if *n < 0 {
+                    *n += 1;
+                }
+            }
+        }
+        for (words, n) in count {
+            if n != 0 {
+                self.mark_brush(&bytemuck::cast(words));
+            }
+        }
+        for column in columns {
+            let key = TileKey { face: column.face, level: u32::from(column.level), cx: column.ci >> 3, cy: column.cj >> 3 };
+            self.baked_tiles.insert(key);
+            if self.tiles.contains_key(&key) && !self.urgent.contains(&key) {
+                self.stale.insert(key);
+            }
+        }
+        self.brushes = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("chunk brushes"),
+            contents: bytemuck::cast_slice(if faces.is_empty() { &NO_BRUSH[..] } else { &faces }),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        self.faces = faces;
+        self.large_faces = large_faces;
+        self.recent_counts = recent_counts;
+        self.baked = edits.baked.clone();
+        self.edit_state = state;
+        true
+    }
+
+    /// Resident tiles brush `fb` can change, at every level it applies at.
+    fn mark_brush(&mut self, fb: &FaceBrush) {
+        let (ci, cj, w) = (i64::from(fb.center[0]), i64::from(fb.center[1]), i64::from(fb.center[3]));
+        for level in 0..self.grid.levels() {
+            if !fb.active(level) {
+                break;
+            }
+            // Half base cells to tiles of the level.
+            let tile = |half: i64| (half.div_euclid(2) >> level).div_euclid(i64::from(CHUNK)) as i32;
+            for cx in tile(ci - w)..=tile(ci + w) {
+                for cy in tile(cj - w)..=tile(cj + w) {
+                    let key = TileKey { face: fb.face(), level, cx, cy };
+                    if self.tiles.contains_key(&key) {
+                        self.stale.remove(&key);
+                        self.urgent.insert(key);
+                    }
+                }
+            }
+        }
     }
 
     /// One frame of residency for an eye at `eye` moving at `velocity`,
@@ -916,14 +1159,16 @@ impl ChunkWorld {
                     }
                     let ranges = residency::Ranges { volume: (w[0], w[1]), surface: (w[2], w[1]) };
                     self.events.push(residency::Event::Measured(*key, ranges));
-                    // Layers its chunks must hold beyond those generated:
-                    // generate the tile again.
+                    if let Some(t) = self.tiles.get_mut(key) {
+                        t.ranges = ranges;
+                    }
+                    // Layers its chunks must hold beyond those generated
+                    // (measured, or brushes since): generate the tile again
+                    // in place, its chunks drawn until then.
                     let need = layers_needed(&grid, *key, ranges, &eye_at, &self.faces);
                     if self.tiles.get(key).is_some_and(|t| need.0 < t.layers.0 || need.1 > t.layers.1) {
-                        let old = self.tiles.remove(key).unwrap();
-                        evictions.extend(old.chunks.iter().map(|c| c.slot));
-                        self.changed_tiles.insert(*key);
-                        self.events.push(residency::Event::Regenerate(*key));
+                        self.stale.remove(key);
+                        self.urgent.insert(*key);
                         stats.regenerated_tiles += 1;
                     }
                 }
@@ -978,10 +1223,9 @@ impl ChunkWorld {
         }
         lap(&mut stats, 2);
 
-        // 4. Generate the most wanted tiles.
-        let mut tile_jobs: Vec<TileJob> = Vec::new();
-        let mut chunk_jobs: Vec<ChunkJob> = Vec::new();
-        let mut refs: Vec<u32> = Vec::new();
+        // 4. Generate: tiles edits changed under (those brushes changed, all
+        // now; baked edits, within the budget), then the most wanted.
+        let mut batch = GenBatch::default();
         let mut readback = Readback {
             buffer: self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("chunk results"), size: 16, usage: wgpu::BufferUsages::MAP_READ, mapped_at_creation: false }),
             ready: Default::default(),
@@ -994,65 +1238,36 @@ impl ChunkWorld {
             _ => config.tiles_per_frame,
         };
         stats.budget = budget;
-        for (key, ranges) in plan.requests.iter() {
-            if tile_jobs.len() >= budget.min(TILE_BATCH) {
+        let edited: Vec<(TileKey, bool)> = self.urgent.drain().map(|k| (k, true)).chain(self.stale.iter().map(|k| (*k, false))).collect();
+        for (key, urgent) in edited {
+            if !urgent && batch.tile_jobs.len() >= budget.min(TILE_BATCH) {
+                break;
+            }
+            self.stale.remove(&key);
+            let Some(ranges) = self.tiles.get(&key).map(|t| t.ranges) else { continue };
+            if !self.queue_tile(key, ranges, &eye_at, &mut batch, &mut readback, &mut evictions, &mut stats) {
+                if urgent {
+                    self.urgent.insert(key);
+                } else {
+                    self.stale.insert(key);
+                }
+            }
+        }
+        let requests = std::mem::take(&mut self.plan.requests);
+        for (key, ranges) in &requests {
+            if batch.tile_jobs.len() >= budget.min(TILE_BATCH) {
                 break;
             }
             // Generated since that plan.
             if self.tiles.contains_key(key) {
                 continue;
             }
-            let (lo, hi) = layers_needed(&grid, *key, *ranges, &eye_at, &self.faces);
-            let layers = if hi > lo { (lo.div_euclid(CHUNK), (hi - 1).div_euclid(CHUNK)) } else { (0, -1) };
-            let count = (layers.1 - layers.0 + 1).max(0) as usize;
-            if chunk_jobs.len() + count > CHUNK_BATCH {
+            if !self.queue_tile(*key, *ranges, &eye_at, &mut batch, &mut readback, &mut evictions, &mut stats) {
                 break;
             }
-            if self.free_slots.len() < count {
-                stats.out_of_slots = true;
-                break;
-            }
-            let index = tile_jobs.len() as u32;
-            tile_jobs.push(TileJob { face: u32::from(key.face), level: key.level, cx: key.cx, cy: key.cy });
-            readback.tiles.push(*key);
-            let shift = key.level + 1;
-            let span = |c: i32| (i64::from(c * CHUNK) << shift, (i64::from(c * CHUNK + CHUNK) << shift) - 1);
-            let mut chunks = Vec::new();
-            for cz in layers.0..=layers.1 {
-                let slot = self.free_slots.pop().unwrap();
-                self.serial += 1;
-                let first = refs.len() as u32;
-                for (b, fb) in self.faces.iter().enumerate() {
-                    if brush_meets(fb, key.face, key.level, span(key.cx), span(key.cy), span(cz)) {
-                        refs.push(b as u32);
-                    }
-                }
-                chunk_jobs.push(ChunkJob { tile: index, cz, slot, brushes: first, brush_count: refs.len() as u32 - first, _pad: [0; 3] });
-                let frame = chunk_frame(&grid, *key, cz);
-                let (m, inv) = (frame.m.as_mat3(), frame.inv.as_mat3());
-                let (origin_hi, origin_lo) = split(frame.origin);
-                let flags = u32::from(frame.m.determinant() < 0.0) | (key.level << 8);
-                let record = ChunkStatic {
-                    m: [m.x_axis.extend(0.0).to_array(), m.y_axis.extend(0.0).to_array(), m.z_axis.extend(0.0).to_array()],
-                    inv: [inv.row(0).extend(0.0).to_array(), inv.row(1).extend(0.0).to_array(), inv.row(2).extend(0.0).to_array()],
-                    origin_hi,
-                    origin_lo,
-                    // Layers not read back yet: the whole chunk.
-                    bounds: [0.0, 64.0, f32::from_bits(slot), f32::from_bits(flags)],
-                };
-                self.queue.write_buffer(&self.statics, u64::from(slot) * std::mem::size_of::<ChunkStatic>() as u64, bytemuck::bytes_of(&record));
-                chunks.push(Chunk { cz, slot, serial: self.serial, frame, z: None });
-                self.queue.write_buffer(&self.chunk_keys, u64::from(slot) * 16, bytemuck::cast_slice(&chunk_key(*key, cz)));
-                readback.chunks.push((*key, cz, slot, self.serial));
-            }
-            stats.generated_chunks += chunks.len();
-            if let Some(old) = self.tiles.insert(*key, TileChunks { chunks, layers: (lo, hi) }) {
-                evictions.extend(old.chunks.iter().map(|c| c.slot));
-            }
-            self.changed_tiles.insert(*key);
-            self.events.push(residency::Event::Generated(*key));
-            stats.generated_tiles += 1;
         }
+        self.plan.requests = requests;
+        let GenBatch { tile_jobs, chunk_jobs, refs, baked_refs, baked_cells, .. } = batch;
 
         // GPU: blocks of evicted chunks back to their free lists, then the
         // tiles' columns, the chunks' columns and trees.
@@ -1066,7 +1281,17 @@ impl ChunkWorld {
             contents: bytemuck::cast_slice(if evictions.is_empty() { &[u32::MAX][..] } else { &evictions }),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        let group = self.gen_group(&refs_buffer, &evictions_buffer);
+        let baked_refs_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("chunk baked refs"),
+            contents: bytemuck::cast_slice(if baked_refs.is_empty() { &[u32::MAX][..] } else { &baked_refs }),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let baked_cells_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("chunk baked cells"),
+            contents: bytemuck::cast_slice(if baked_cells.is_empty() { &[0u32][..] } else { &baked_cells }),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let group = self.gen_group(&refs_buffer, &evictions_buffer, &baked_refs_buffer, &baked_cells_buffer);
         if !tile_jobs.is_empty() {
             self.queue.write_buffer(&self.tile_jobs, 0, bytemuck::cast_slice(&tile_jobs));
             let empty: Vec<[i32; 4]> = vec![[i32::MAX, i32::MIN + 1, i32::MAX, i32::MIN + 1]; tile_jobs.len()];
@@ -1222,7 +1447,7 @@ impl ChunkWorld {
 
     /// Whether nothing waits to be generated or read back.
     pub fn settled(&self) -> bool {
-        self.pending.is_none() && self.readbacks.is_empty() && self.last_requests == 0
+        self.pending.is_none() && self.readbacks.is_empty() && self.last_requests == 0 && self.urgent.is_empty() && self.stale.is_empty()
     }
 
     /// Tile, chunk layer and occupied layers of the drawn chunk in `slot`.
