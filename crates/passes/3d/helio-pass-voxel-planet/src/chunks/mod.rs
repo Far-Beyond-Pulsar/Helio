@@ -485,6 +485,26 @@ pub struct ResidencyConfig {
     pub generate_ms: Option<f64>,
 }
 
+impl Default for ResidencyConfig {
+    /// Cells of a pixel or less (a 45 degree view 1080 pixels tall), 400 km
+    /// out, half a second of prefetch, two seconds of keep; up to 256 tiles
+    /// and 3 ms of generation a frame.
+    fn default() -> Self {
+        Self {
+            plan: residency::PlanConfig {
+                pixel_angle: 2.0 * std::f64::consts::FRAC_PI_8.tan() / 1080.0,
+                lod_pixels: 1.0,
+                coarsen: 0.8,
+                max_distance: 400_000.0,
+                prefetch_seconds: 0.5,
+                keep_frames: 120,
+            },
+            tiles_per_frame: 256,
+            generate_ms: Some(3.0),
+        }
+    }
+}
+
 /// Chunk trees of one planet: resident chunks, their GPU storage and the
 /// draw.
 pub struct ChunkWorld {
@@ -1005,7 +1025,7 @@ impl ChunkWorld {
         let world = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk world"), contents: bytemuck::bytes_of(&WorldGpu::new(planet)), usage: wgpu::BufferUsages::UNIFORM });
         let terrain = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk terrain"), contents: &terrain_bytes(&program), usage: wgpu::BufferUsages::UNIFORM });
         let (materials, detail) = crate::engine::material_table(&planet.field().appearance());
-        let materials = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk materials"), contents: bytemuck::bytes_of(&ChunkMaterials { materials, detail }), usage: wgpu::BufferUsages::UNIFORM });
+        let materials = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk materials"), contents: bytemuck::bytes_of(&ChunkMaterials { materials, detail }), usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST });
         let queries = device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| {
             (
                 device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("chunk draw"), ty: wgpu::QueryType::Timestamp, count: QUERIES * TIMING_RING as u32 }),
@@ -1749,9 +1769,10 @@ impl ChunkWorld {
         self.deep.len()
     }
 
-    /// Whether nothing waits to be generated or read back.
+    /// Whether nothing waits to be generated or read back, and no switch
+    /// between levels is fading (fades move with drawn frames).
     pub fn settled(&self) -> bool {
-        self.pending.is_none() && self.readbacks.is_empty() && self.last_requests == 0 && self.urgent.is_empty() && self.stale.is_empty()
+        self.pending.is_none() && self.readbacks.is_empty() && self.last_requests == 0 && self.urgent.is_empty() && self.stale.is_empty() && self.drawn_set.fading() == 0
     }
 
     /// Tile, chunk layer and occupied layers of the drawn chunk in `slot`.
@@ -2077,6 +2098,12 @@ impl ChunkWorld {
     fn claim_timing(&mut self, frame: u64) {
         let ring = (frame % TIMING_RING) as usize;
         self.timing_now = self.timing_slots.get(ring).filter(|t| t.frame.is_none() && t.ready.is_none()).map(|_| ring);
+    }
+
+    /// Shade with `appearance` (the terrain's materials and detail).
+    pub fn set_appearance(&mut self, appearance: &crate::engine::TerrainAppearance) {
+        let (materials, detail) = crate::engine::material_table(appearance);
+        self.queue.write_buffer(&self.materials, 0, bytemuck::bytes_of(&ChunkMaterials { materials, detail }));
     }
 
     /// The last draw's sun visibility (Helio's `directional_visibility`).

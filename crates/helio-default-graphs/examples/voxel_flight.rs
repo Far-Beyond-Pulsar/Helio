@@ -89,8 +89,8 @@ struct Flight {
     /// Wait for every frame (HELIO_VOXEL_FLIGHT_SYNC): lets the GPU idle and
     /// downclock between frames, unlike a game's continuous submission.
     sync_frames: bool,
-    /// The chunk pass's state (`HELIO_VOXEL_CHUNKS_ENGINE`).
-    chunk_state: Option<helio_pass_voxel_planet::chunks::pass::SharedChunkState>,
+    /// The terrain is drawn by the chunk pass (`HELIO_VOXEL_CHUNKS_ENGINE`).
+    chunk_engine: bool,
     /// Pick requests drawn frames answer (`pick_probe`).
     picks: Option<helio_pass_voxel_planet::engine::SharedPicks>,
 }
@@ -224,15 +224,13 @@ impl Flight {
         let pass_source = source.clone();
         // `HELIO_VOXEL_CHUNKS_ENGINE=1`: chunk trees draw the terrain
         // (docs/chunk-trees.md) through the same graph.
-        let chunk_state: Option<helio_pass_voxel_planet::chunks::pass::SharedChunkState> =
-            std::env::var_os("HELIO_VOXEL_CHUNKS_ENGINE").is_some().then(Default::default);
-        let factory: VoxelPassFactory = match &chunk_state {
-            Some(state) => {
-                let state = state.clone();
+        let chunk_engine = std::env::var_os("HELIO_VOXEL_CHUNKS_ENGINE").is_some();
+        let factory: VoxelPassFactory = match chunk_engine {
+            true => {
                 let config = chunk_config(size[1], 256);
-                Arc::new(move |_, _, _, _| Box::new(helio_pass_voxel_planet::chunks::pass::ChunkPass::new(pass_source.clone(), state.clone(), config)))
+                Arc::new(move |_, _, _, _| Box::new(helio_pass_voxel_planet::chunks::pass::ChunkPass::with_config(pass_source.clone(), config)))
             }
-            None => Arc::new(move |_, _, _, _| {
+            false => Arc::new(move |_, _, _, _| {
                 let mut pass = PlanetPass::new(pass_source.clone());
                 pass.set_profiling(true);
                 Box::new(pass)
@@ -284,7 +282,7 @@ impl Flight {
             in_flight: Default::default(),
             last_frame_end: std::cell::Cell::new(None),
             sync_frames: std::env::var_os("HELIO_VOXEL_FLIGHT_SYNC").is_some(),
-            chunk_state,
+            chunk_engine,
             picks: None,
         }
     }
@@ -943,7 +941,7 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
     let out = std::path::PathBuf::from(std::env::args().nth(1).unwrap());
     // One frame: follow the planet's edits, update, draw; GPU times and the
     // tiles generated again.
-    let mut step = |world: &mut ChunkWorld, planet: &Planet, frame: &mut u64| {
+    let step = |world: &mut ChunkWorld, planet: &Planet, frame: &mut u64| {
         assert!(world.sync_edits(planet), "edits follow");
         let mut encoder = flight.device.create_command_encoder(&Default::default());
         let stats = world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, DVec3::ZERO, None, *frame, &config);
@@ -1058,7 +1056,7 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
 /// (`HELIO_VOXEL_FLIGHT_HOLD_SECONDS`), report the chunk draw's GPU time and
 /// save the final frame (`<out>/chunks_<view>.png`).
 fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3) {
-    let state = flight.chunk_state.clone().unwrap();
+    use helio_pass_voxel_planet::chunks::pass::ChunkPass;
     let started = Instant::now();
     let mut frames = 0;
     loop {
@@ -1066,7 +1064,7 @@ fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3)
         frames += 1;
         let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
         std::thread::sleep(std::time::Duration::from_millis(6));
-        if frames > 10 && state.lock().unwrap().settled {
+        if frames > 10 && flight.renderer.find_pass::<ChunkPass>().is_some_and(ChunkPass::settled) {
             break;
         }
         if frames > 6000 {
@@ -1074,8 +1072,9 @@ fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3)
             break;
         }
     }
-    eprintln!("CHUNKENGINE {view} settled in {:.2} s ({frames} frames): {:?}", started.elapsed().as_secs_f64(), state.lock().unwrap().stats);
-    state.lock().unwrap().timings.clear();
+    let pass = flight.renderer.find_pass_mut::<ChunkPass>().unwrap();
+    eprintln!("CHUNKENGINE {view} settled in {:.2} s ({frames} frames): {}", started.elapsed().as_secs_f64(), pass.diagnostics());
+    pass.take_timings();
     let seconds: f64 = std::env::var("HELIO_VOXEL_FLIGHT_HOLD_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0);
     let held = Instant::now();
     while held.elapsed().as_secs_f64() < seconds {
@@ -1083,7 +1082,7 @@ fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3)
     }
     let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
     std::thread::sleep(std::time::Duration::from_millis(50));
-    let timings = std::mem::take(&mut state.lock().unwrap().timings);
+    let timings = flight.renderer.find_pass_mut::<ChunkPass>().unwrap().take_timings();
     let draw: Vec<f64> = timings.iter().map(|t| t.draw).collect();
     eprintln!("CHUNKENGINE {view} n={} chunk draw p50 {:.3} p95 {:.3}", draw.len(), percentile(&draw, 0.5), percentile(&draw, 0.95));
     flight.capture(&format!("chunks_{view}"));
@@ -1487,7 +1486,7 @@ fn main() {
             }
             _ => (ground, look(ground, heading, -12.0)),
         };
-        if flight.chunk_state.is_some() {
+        if flight.chunk_engine {
             chunk_engine_hold(&mut flight, &view, e, f);
             return;
         }

@@ -1,53 +1,126 @@
-//! Chunk trees in Helio's render graph: residency, primary visibility and
-//! the gbuffer, from the same frame source as [`crate::engine::PlanetPass`].
-//! Lighting is Helio's deferred lighting, its sun shadowed by walks
-//! through the chunk trees (`directional_visibility`).
+//! Chunk trees in Helio's render graph: residency, primary visibility, sun
+//! and sky light, and the gbuffer, from a host's [`SharedPlanetFrame`].
+//! Lighting is Helio's deferred lighting, its sun shadowed by walks through
+//! the chunk trees (`directional_visibility`).
 
 use super::{residency, ChunkWorld, FrameTimings, ResidencyConfig, UpdateStats};
-use crate::engine::{PlanetFrame, SharedPlanetFrame};
+use crate::engine::{PlanetFrame, SharedPlanetFrame, TerrainAppearance};
 use glam::{DVec3, Mat4};
-use helio_core::{PassContext, PrepareContext, RenderPass};
 use helio_core::Result as HelioResult;
-use std::sync::{Arc, Mutex};
-
-/// What a [`ChunkPass`] reports to its host.
-#[derive(Default)]
-pub struct ChunkPassState {
-    pub stats: UpdateStats,
-    /// Frames whose GPU times came back, until the host takes them.
-    pub timings: Vec<FrameTimings>,
-    /// Nothing is left to generate for the current eye.
-    pub settled: bool,
-}
-
-pub type SharedChunkState = Arc<Mutex<ChunkPassState>>;
+use helio_core::{PassContext, PrepareContext, RenderPass};
 
 pub struct ChunkPass {
     source: SharedPlanetFrame,
-    state: SharedChunkState,
     config: ResidencyConfig,
+    /// The host's art settings (none: the terrain generator's).
+    appearance: Option<TerrainAppearance>,
     world: Option<ChunkWorld>,
     /// The planet the world was built for (recipe fingerprint).
     built_for: Option<u64>,
     shown: Option<PlanetFrame>,
     last_eye: Option<(DVec3, std::time::Instant)>,
-    /// The last frame's view-projection and eye.
-    last_view: Option<(Mat4, DVec3)>,
+    /// The last frame's eye.
+    last_view: Option<DVec3>,
+    stats: UpdateStats,
+    /// Frames whose GPU times came back, until taken.
+    timings: Vec<FrameTimings>,
 }
 
 impl ChunkPass {
-    /// A pass drawing the frames `source` gives, reporting to `state`.
-    pub fn new(source: SharedPlanetFrame, state: SharedChunkState, config: ResidencyConfig) -> Self {
-        Self { source, state, config, world: None, built_for: None, shown: None, last_eye: None, last_view: None }
+    /// A pass drawing the frames `source` gives.
+    pub fn new(source: SharedPlanetFrame) -> Self {
+        Self::with_config(source, ResidencyConfig::default())
+    }
+
+    /// With residency settings `config` (its pixel angle follows the
+    /// camera).
+    pub fn with_config(source: SharedPlanetFrame, config: ResidencyConfig) -> Self {
+        Self { source, config, appearance: None, world: None, built_for: None, shown: None, last_eye: None, last_view: None, stats: UpdateStats::default(), timings: Vec::new() }
+    }
+
+    /// The host's art settings; whether they changed.
+    pub fn set_appearance(&mut self, appearance: Option<TerrainAppearance>) -> bool {
+        if self.appearance == appearance {
+            return false;
+        }
+        self.appearance = appearance;
+        if let (Some(world), Some(frame)) = (&mut self.world, &self.shown) {
+            world.set_appearance(&appearance.unwrap_or_else(|| frame.planet.field().appearance()));
+        }
+        true
+    }
+
+    /// A host viewport should keep rendering until residency settles.
+    pub fn needs_frame(&self) -> bool {
+        let has_source = self.source.try_lock().map_or(true, |s| s.is_some());
+        has_source && self.world.as_ref().is_none_or(|w| !w.settled())
+    }
+
+    /// Whether nothing is left to generate for the current eye.
+    pub fn settled(&self) -> bool {
+        self.world.as_ref().is_some_and(ChunkWorld::settled)
+    }
+
+    /// The last frame's residency.
+    pub fn stats(&self) -> &UpdateStats {
+        &self.stats
+    }
+
+    /// GPU times of frames that came back since the last call.
+    pub fn take_timings(&mut self) -> Vec<FrameTimings> {
+        std::mem::take(&mut self.timings)
+    }
+
+    /// One line for a host's diagnostics.
+    pub fn diagnostics(&self) -> String {
+        let s = &self.stats;
+        let gpu = self.timings.last();
+        format!(
+            "chunks settled={} drawn_tiles={} drawn_chunks={} resident_chunks={} fading={} waiting={} generated={} regenerated={} deep={} budget={} coarse={:.3} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} generate_ms={:?}",
+            self.settled(),
+            s.drawn_tiles,
+            s.drawn_chunks,
+            s.resident_chunks,
+            s.fading_tiles,
+            s.requests,
+            s.generated_tiles,
+            s.regenerated_tiles,
+            s.deep_tiles,
+            s.budget,
+            s.coarse_share,
+            s.out_of_slots,
+            s.out_of_leaves,
+            s.cpu_ms,
+            gpu.map(|t| t.draw),
+            gpu.map(|t| t.shadow),
+            gpu.map(|t| t.generate),
+        )
     }
 }
 
 const READS: &[&str] = &["gbuffer", "gbuffer_lightmap_uv", "gbuffer_sss", "gbuffer_extra", "gbuffer_velocity"];
 const WRITES: &[&str] = &["gbuffer", "gbuffer_lightmap_uv", "gbuffer_sss", "gbuffer_extra", "gbuffer_velocity", "directional_visibility"];
 
+/// GPU times kept for a host that does not take them.
+const KEEP_TIMINGS: usize = 256;
+
 impl RenderPass for ChunkPass {
     fn name(&self) -> &'static str {
         "VoxelChunks"
+    }
+    fn inherit_persistent_state(&mut self, previous: &mut dyn RenderPass) -> bool {
+        let Some(previous) = previous.as_any_mut().downcast_mut::<Self>() else {
+            return false;
+        };
+        if !std::sync::Arc::ptr_eq(&self.source, &previous.source) {
+            return false;
+        }
+        self.world = previous.world.take();
+        self.built_for = previous.built_for.take();
+        self.shown = previous.shown.take();
+        // A graph rebuild must not revert the host's art settings.
+        self.appearance = previous.appearance;
+        self.world.is_some()
     }
     fn reads(&self) -> &'static [&'static str] {
         READS
@@ -72,10 +145,9 @@ impl RenderPass for ChunkPass {
         // The last frame was submitted: its results can be mapped.
         if let Some(world) = &mut self.world {
             world.submitted();
-            let timings = world.take_timings();
-            if let Ok(mut state) = self.state.lock() {
-                state.timings.extend(timings);
-            }
+            self.timings.extend(world.take_timings());
+            let excess = self.timings.len().saturating_sub(KEEP_TIMINGS);
+            self.timings.drain(..excess);
         }
         let frame = self.source.lock().map_err(|_| helio_core::Error::InvalidPassConfig("planet frame source poisoned".into()))?.clone();
         let Some(frame) = frame else {
@@ -85,7 +157,11 @@ impl RenderPass for ChunkPass {
         let recipe = crate::journal::recipe_fingerprint(frame.planet.recipe());
         // Edits follow the planet; another recipe or history, a new world.
         if self.built_for != Some(recipe) || self.world.as_mut().is_some_and(|w| !w.sync_edits(&frame.planet)) {
-            self.world = Some(ChunkWorld::new(ctx.device, ctx.queue, &frame.planet));
+            let mut world = ChunkWorld::new(ctx.device, ctx.queue, &frame.planet);
+            if let Some(appearance) = &self.appearance {
+                world.set_appearance(appearance);
+            }
+            self.world = Some(world);
             self.built_for = Some(recipe);
             self.last_eye = None;
             self.last_view = None;
@@ -115,10 +191,10 @@ impl RenderPass for ChunkPass {
         // to this one's.
         let prev = Mat4::from_cols_array(&camera.prev_view_proj);
         let prev_view_proj = match self.last_view {
-            Some((_, eye)) => prev * Mat4::from_translation((frame.eye - eye).as_vec3()),
+            Some(eye) => prev * Mat4::from_translation((frame.eye - eye).as_vec3()),
             None => view_proj,
         };
-        self.last_view = Some((view_proj, frame.eye));
+        self.last_view = Some(frame.eye);
         let now = std::time::Instant::now();
         let velocity = match self.last_eye {
             Some((eye, at)) => (frame.eye - eye) / now.duration_since(at).as_secs_f64().max(1e-3),
@@ -126,25 +202,22 @@ impl RenderPass for ChunkPass {
         };
         self.last_eye = Some((frame.eye, now));
         // In view: the cone around the camera's forward reaching the
-        // frustum's corners.
+        // frustum's corners. A pixel's angle sets the cut's detail.
         let tan_y = 1.0 / f64::from(proj.y_axis.y);
         let tan_x = 1.0 / f64::from(proj.x_axis.x);
         let view = residency::View {
             forward: glam::Vec3::from_slice(&camera.forward_far[..3]).as_dvec3().normalize(),
             cos_half: (tan_x * tan_x + tan_y * tan_y).sqrt().atan().cos(),
         };
+        self.config.plan.pixel_angle = 2.0 * tan_y / f64::from(ctx.height.max(1));
         let near = camera.position_near[3];
         let mut cmds = ctx.graphics_cmds();
         let encoder = &mut cmds;
-        let stats = world.update(encoder, frame.eye, velocity, Some(view), ctx.frame_num, &self.config);
+        self.stats = world.update(encoder, frame.eye, velocity, Some(view), ctx.frame_num, &self.config);
         world.draw(encoder, ctx.frame_num, frame.eye, view_proj, prev_view_proj, near, frame.sun, [ctx.width, ctx.height]);
         world.publish(encoder, gbuffer, ctx.depth);
         if let Some(picks) = &frame.picks {
             world.copy_picks(encoder, picks);
-        }
-        if let Ok(mut state) = self.state.lock() {
-            state.stats = stats;
-            state.settled = world.settled();
         }
         Ok(())
     }
