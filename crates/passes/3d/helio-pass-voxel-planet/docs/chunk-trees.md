@@ -447,6 +447,21 @@ own: scattered across the screen, they held whole warps (1.5 ms).
 | ground | 1.84 ms | 1.36 ms |
 | mountain slope | 4.10 ms | 1.85 ms |
 
+## Phase 4b results (2026-10-11): surface and subsurface materials
+
+A leaf held one material: its first column's top. Walls of a dig took the
+grass above them. A leaf now holds two: its surface material, shown by
+cells with air above (the top material of a column whose top cell is in
+the leaf), and its subsurface material, shown by the others (soil within
+the terrain's soil depth of its original top at the leaf's centre, else
+rock; an edited top's material throughout). The hit checks the cell
+above, except through a top face (the ray came through that air). Leaf
+materials grow from one byte to two (64 voxels a leaf).
+
+Dug walls now show a grass rim, soil, then rock, and terrace risers taller
+than a cell show soil under their grass. Cost, fastest of three
+interleaved: ground 1.86 -> 1.90 ms, mountain 4.13 -> 4.25 ms.
+
 ## References
 
 Laine and Karras, *Efficient Sparse Voxel Octrees* (2010); Crassin et al.,

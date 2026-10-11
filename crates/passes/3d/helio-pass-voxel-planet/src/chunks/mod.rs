@@ -1003,7 +1003,7 @@ impl ChunkWorld {
             leaves: buffer("chunk leaves", LEAF_CAPACITY * 8, wgpu::BufferUsages::STORAGE),
             leaf_alloc: buffer("chunk leaf allocator", 4 * (2 + LEAF_CLASSES as u64), s | wgpu::BufferUsages::COPY_SRC),
             column_materials: buffer("chunk column materials", CHUNK_BATCH as u64 * TILE_COLUMNS * 4, wgpu::BufferUsages::STORAGE),
-            leaf_materials: buffer("chunk leaf materials", LEAF_CAPACITY, s),
+            leaf_materials: buffer("chunk leaf materials", LEAF_CAPACITY * 2, s),
             mid_materials: buffer("chunk mid materials", (MAX_CHUNKS * 64 * 4) as u64, wgpu::BufferUsages::STORAGE),
             params: buffer("chunk draw params", std::mem::size_of::<DrawParams>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
             palette,
@@ -1639,13 +1639,13 @@ impl ChunkWorld {
         self.drawn_set.list.len()
     }
 
-    /// Bytes of the resident trees: leaves with their material byte, and
+    /// Bytes of the resident trees: leaves with their two material bytes, and
     /// per resident chunk its mid nodes (masks, first leaf, material) and
     /// root (reads the leaf allocator back).
     pub fn resident_bytes(&self) -> u64 {
         let alloc: Vec<[i32; 2]> = self.read(&self.leaf_alloc, 1);
         let chunks: usize = self.tiles.values().map(|t| t.chunks.len()).sum();
-        alloc[0][0].max(0) as u64 * 9 + chunks as u64 * (64 * 24 + 32)
+        alloc[0][0].max(0) as u64 * 10 + chunks as u64 * (64 * 24 + 32)
     }
 
     /// The targets of the last [`Self::draw`].

@@ -219,6 +219,28 @@ struct Hit {
     material: u32,
 }
 
+// Whether cell `c` of chunk `slot` is solid (outside the chunk: no).
+fn solid_at(slot: u32, c: vec3<i32>) -> bool {
+    if any(c < vec3<i32>(0)) || any(c > vec3<i32>(63)) { return false; }
+    let root = chunk_meta[slot];
+    let m = u32((c.x >> 4u) + ((c.y >> 4u) << 2u) + ((c.z >> 4u) << 4u));
+    if !bit64(root.root_occ, m) { return false; }
+    if bit64(root.root_full, m) { return true; }
+    let node = mids[slot * 64u + m];
+    let l = u32(((c.x >> 2u) & 3) + (((c.y >> 2u) & 3) << 2u) + (((c.z >> 2u) & 3) << 4u));
+    if !bit64(node.xy, l) { return false; }
+    if bit64(node.zw, l) { return true; }
+    let index = mid_leaves[slot * 64u + m] + rank64(node.xy & ~node.zw, l);
+    return bit64(leaves[index], u32((c.x & 3) + ((c.y & 3) << 2u) + ((c.z & 3) << 4u)));
+}
+
+// A hit cell's material from its leaf's (or mid's) two: the surface's with
+// air above it, the subsurface's under other cells. A ray entering by the
+// top face (`from_above`) came through that air.
+fn shown_material(pair: u32, slot: u32, c: vec3<i32>, from_above: bool) -> u32 {
+    return select((pair >> 8u) & 0xffu, pair & 0xffu, from_above || !solid_at(slot, c + vec3<i32>(0, 0, 1)));
+}
+
 // The first solid cell of chunk `slot` along o + t d from t0 to t1, entering
 // through face `axis`; cells [0, 64) across, layers z.
 fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u32, z: vec2<i32>, counted: bool) -> Hit {
@@ -239,7 +261,7 @@ fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u
         let m = u32((c.x >> 4u) + ((c.y >> 4u) << 2u) + ((c.z >> 4u) << 4u));
         var size = 16;
         if bit64(root.root_occ, m) {
-            if bit64(root.root_full, m) { return Hit(t, c, axis, true, mid_materials[slot * 64u + m]); }
+            if bit64(root.root_full, m) { return Hit(t, c, axis, true, shown_material(mid_materials[slot * 64u + m], slot, c, axis == 2u && !positive.z)); }
             if m != node_at {
                 node = mids[slot * 64u + m];
                 first_leaf = mid_leaves[slot * 64u + m];
@@ -248,7 +270,7 @@ fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u
             let l = u32(((c.x >> 2u) & 3) + (((c.y >> 2u) & 3) << 2u) + (((c.z >> 2u) & 3) << 4u));
             size = 4;
             if bit64(node.xy, l) {
-                if bit64(node.zw, l) { return Hit(t, c, axis, true, mid_materials[slot * 64u + m]); }
+                if bit64(node.zw, l) { return Hit(t, c, axis, true, shown_material(mid_materials[slot * 64u + m], slot, c, axis == 2u && !positive.z)); }
                 let index = first_leaf + rank64(node.xy & ~node.zw, l);
                 if index != leaf_at {
                     leaf = leaves[index];
@@ -256,7 +278,7 @@ fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u
                 }
                 size = 1;
                 if bit64(leaf, u32((c.x & 3) + ((c.y & 3) << 2u) + ((c.z & 3) << 4u))) {
-                    return Hit(t, c, axis, true, (leaf_materials[index >> 2u] >> ((index & 3u) * 8u)) & 0xffu);
+                    return Hit(t, c, axis, true, shown_material(leaf_materials[index >> 1u] >> ((index & 1u) * 16u), slot, c, axis == 2u && !positive.z));
                 }
             }
         }

@@ -134,10 +134,13 @@ fn evict(@builtin(global_invocation_id) id: vec3<u32>) {
     chunk_meta[slot].block = NONE;
     chunk_meta[slot].leaves = 0u;
 }
-// Scratch per chunk job: each column's material (`chunk_columns_main`).
+// Scratch per chunk job: each column's materials (`chunk_columns_main`):
+// its top cell's, the soil's and the rock's under it (bytes 0, 1, 2), and
+// the terrain's top layer relative to the chunk, + 128 (byte 3).
 @group(0) @binding(14) var<storage, read_write> column_materials: array<u32>;
-// A material byte per stored leaf (four a word) and per mid node: what a
-// hit in it shows until materials are stored per surface voxel.
+// Two material bytes per stored leaf (two leaves a word) and per mid node:
+// the surface's, shown by its cells with air above, and the subsurface's
+// (soil or rock by the leaf's depth), shown by the others.
 @group(0) @binding(15) var<storage, read_write> leaf_materials: array<atomic<u32>>;
 @group(0) @binding(17) var<storage, read_write> mid_materials: array<u32>;
 
@@ -375,7 +378,18 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
             tile_top(job.tile, i32(x), min(i32(y) + 1, 63), level));
         let slope = max(abs(t.y - t.x), abs(t.w - t.z)) * 4;
         let depth = max(top - 1 - k, 0) << level;
-        material = edited_material(ground_material(p, u32(column.y), height, depth, slope, k << level) & M_ID, job, wg.x, li, p, ch, level, k, k0);
+        let terrain_material = ground_material(p, u32(column.y), height, depth, slope, k << level) & M_ID;
+        let surface = edited_material(terrain_material, job, wg.x, li, p, ch, level, k, k0);
+        // Under it: soil a cell below the terrain's top, rock below the
+        // soil depth; an edited top's material throughout.
+        var soil = surface;
+        var rock = surface;
+        if surface == terrain_material {
+            soil = ground_material(p, u32(column.y), height, 1 << level, slope, (top - 2) << level) & M_ID;
+            let deep = (terrain.header.z >> level) + 1;
+            rock = ground_material(p, u32(column.y), height, deep << level, slope, (top - 1 - deep) << level) & M_ID;
+        }
+        material = (surface & 0xffu) | ((soil & 0xffu) << 8u) | ((rock & 0xffu) << 16u) | (u32(clamp(top - k0 + 128, 0, 255)) << 24u);
     }
     column_materials[at] = material;
 }
@@ -383,6 +397,18 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
 fn tile_top(tile: u32, x: i32, y: i32, level: u32) -> i32 {
     let h = tile_columns[tile * TILE_COLUMNS + u32(y) * 64u + u32(x)].x;
     return div_floor(select(h, 0, h == OUTSIDE), world.grid.y) >> level;
+}
+
+// A leaf's two material bytes from its columns' materials
+// (`chunk_columns_main`): the surface, the top material of a column whose
+// top cell is in the leaf (`has_top`, `top`), else the subsurface's; the
+// subsurface, its first column's soil within the soil depth of the
+// terrain's top at the leaf's centre (layer `lz` of a chunk of `level`),
+// else its rock.
+fn leaf_materials_of(column: u32, top: u32, has_top: u32, lz: u32, level: u32) -> u32 {
+    let below = (i32(column >> 24u) - 128) - 1 - i32(lz * 4u + 2u);
+    let sub = select((column >> 16u) & 0xffu, (column >> 8u) & 0xffu, (below << level) < terrain.header.z);
+    return select(sub, top & 0xffu, has_top != 0u) | (sub << 8u);
 }
 
 var<workgroup> w_occ: array<atomic<u32>, 128>;
@@ -418,9 +444,11 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     let ly = t >> 4u;
     // 16 leaves along z, built from this leaf column's 4x4 cell columns.
     var leaf: array<vec2<u32>, 16>;
-    // Each leaf's material: its highest column's (the first column with
-    // cells in it).
+    // Each leaf's materials: its first column with cells in it's, and of
+    // a column whose top cell is in it (`topped`), for its surface.
     var leaf_material: array<u32, 16>;
+    var leaf_top: array<u32, 16>;
+    var topped = 0u;
     var z_lo = 64;
     var z_hi = 0;
     for (var c = 0u; c < 16u; c++) {
@@ -430,7 +458,13 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         if m.x == 0u && m.y == 0u { continue; }
         let column_material = column_materials[wg.x * TILE_COLUMNS + cy * 64u + cx];
         z_lo = min(z_lo, select(i32(firstTrailingBit(m.x)), 32 + i32(firstTrailingBit(m.y)), m.x == 0u));
-        z_hi = max(z_hi, 1 + select(i32(firstLeadingBit(m.x)), 32 + i32(firstLeadingBit(m.y)), m.y != 0u));
+        let high = select(i32(firstLeadingBit(m.x)), 32 + i32(firstLeadingBit(m.y)), m.y != 0u);
+        z_hi = max(z_hi, 1 + high);
+        let top_leaf = u32(high) >> 2u;
+        if (topped & (1u << top_leaf)) == 0u {
+            leaf_top[top_leaf] = column_material;
+            topped |= 1u << top_leaf;
+        }
         for (var lz = 0u; lz < 16u; lz++) {
             let nib = (select(m.x, m.y, lz >= 8u) >> ((lz & 7u) * 4u)) & 15u;
             if nib != 0u && leaf_material[lz] == 0u { leaf_material[lz] = column_material; }
@@ -447,7 +481,7 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         let bit = 1u << (l & 31u);
         if leaf[lz].x != 0u || leaf[lz].y != 0u {
             atomicOr(&w_occ[word], bit);
-            atomicMax(&w_mid_material[m], leaf_material[lz]);
+            atomicMax(&w_mid_material[m], leaf_materials_of(leaf_material[lz], leaf_top[lz], (topped >> lz) & 1u, lz, tile_jobs[job.tile].level));
         }
         if leaf[lz].x == 0xffffffffu && leaf[lz].y == 0xffffffffu { atomicOr(&w_full[word], bit); }
     }
@@ -496,7 +530,7 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     if total == 0u { return; }
     // The block's material bytes from earlier owners, cleared.
     let block = w_block;
-    for (var w = block / 4u + t; w < (block + (16u << class_of(total))) / 4u; w += 256u) {
+    for (var w = block / 2u + t; w < (block + (16u << class_of(total))) / 2u; w += 256u) {
         atomicStore(&leaf_materials[w], 0u);
     }
     storageBarrier();
@@ -509,7 +543,7 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         if bit_at(mixed, l) {
             let index = w_base[m] + rank64(mixed, l);
             leaves[index] = leaf[lz];
-            atomicOr(&leaf_materials[index >> 2u], (leaf_material[lz] & 0xffu) << ((index & 3u) * 8u));
+            atomicOr(&leaf_materials[index >> 1u], leaf_materials_of(leaf_material[lz], leaf_top[lz], (topped >> lz) & 1u, lz, tile_jobs[job.tile].level) << ((index & 1u) * 16u));
         }
     }
 }
