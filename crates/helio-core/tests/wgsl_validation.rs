@@ -89,6 +89,8 @@ fn is_composed(path: &Path) -> bool {
         "helio-pass-voxel-planet/shaders/gbuffer.wgsl",
         "helio-pass-voxel-planet/shaders/trace.wgsl",
         "helio-pass-voxel-planet/shaders/view.wgsl",
+        "helio-pass-voxel-planet/shaders/chunk_generate.wgsl",
+        "helio-pass-voxel-planet/shaders/chunk_draw.wgsl",
     ];
     let normalized = path.to_string_lossy().replace('\\', "/");
     COMPOSED.iter().any(|suffix| normalized.ends_with(suffix))

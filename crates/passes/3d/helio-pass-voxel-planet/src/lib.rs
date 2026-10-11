@@ -7,6 +7,8 @@
 //! * [`edits`] — ordered brushes with exact integer containment.
 //! * [`planet`] — canonical queries, materials and exact ray casts.
 //! * `engine` — Helio GBuffer pass with GPU-driven clipmap residency.
+//! * `chunks` — chunk trees (docs/chunk-trees.md), the terrain's next
+//!   representation, built alongside until it replaces `engine`'s.
 pub mod column_index;
 pub mod column_view;
 pub mod edit_store;
@@ -24,6 +26,8 @@ pub mod terrain;
 pub mod windows;
 #[cfg(feature = "engine")]
 pub mod engine;
+#[cfg(feature = "engine")]
+pub mod chunks;
 
 pub use edits::{Brush, BrushOp, BrushShape};
 pub use grid::{Cell, Grid};

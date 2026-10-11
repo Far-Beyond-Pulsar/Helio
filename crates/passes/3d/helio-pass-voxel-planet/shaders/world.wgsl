@@ -70,6 +70,11 @@ fn mul_q24(a: u32, r: u32) -> u32 {
     return ((a1 * r1) << 8u) + ((a1 * r0 + a0 * r1) >> 8u) + ((a0 * r0) >> 24u);
 }
 
+// Centre of level cell `i` in half base cells.
+fn center_half(i: i32, level: u32) -> i32 {
+    return (i << (level + 1u)) + (1 << level);
+}
+
 // Level cell centre in half cells of the reference grid (grid independent).
 // Plane domain point in domain units (1.25 cm) relative to the world origin
 // (`grid::plane_domain_point`): scaled by magnitude, symmetric about it.

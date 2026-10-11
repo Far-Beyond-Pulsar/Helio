@@ -1,0 +1,379 @@
+// Chunk trees (docs/chunk-trees.md): generation.
+//
+// A tile is the 64x64 columns of one level under a stack of chunks; a chunk
+// is 64^3 cells of one level, stored as a 64-tree: a root over 4^3 mid
+// nodes of 16^3 cells, mid nodes over 4^3 leaves of 4^3 cells, leaves a
+// 64-bit occupancy mask. Bit `x + 4 y + 16 z` of a node or leaf mask is its
+// child or cell (x, y, z). Uniform children (all solid) are flagged in a
+// second mask and store nothing.
+//
+// 1. `tile_columns`: each column's height, surface word and volume extent,
+//    and the tile's range of layers that may hold a surface.
+// 2. `chunk_columns`: each column's 64 cells in a chunk as a 64-bit mask
+//    (bit z: layer `64 cz + z`), with volume terms and brushes, and the
+//    material of its highest solid cell.
+// 3. `chunk_build`: the chunk's 64-tree from its column masks.
+
+const TILE_COLUMNS: u32 = 4096u;
+// Height of a tile column past the face's edge.
+const OUTSIDE: i32 = -2147483647 - 1;
+
+struct TileJob {
+    face: u32,
+    level: u32,
+    cx: i32,
+    cy: i32,
+}
+
+struct ChunkJob {
+    tile: u32,  // index into tile_jobs
+    cz: i32,
+    slot: u32,  // chunk slot of the result
+    brushes: u32, // first brush ref; count in `brush_count`
+    brush_count: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+
+struct FaceBrush {
+    flags: u32,
+    radius_half: u32,
+    k_lo: i32,
+    k_hi: i32,
+    center: vec4<i32>,
+    ball: vec4<i32>,
+}
+
+struct ChunkMeta {
+    root_occ: vec2<u32>,
+    root_full: vec2<u32>,
+    // Lowest and one past the highest occupied layer of the chunk (cells).
+    z: vec2<i32>,
+    // Leaves stored for the chunk (0: none).
+    leaves: u32,
+    status: u32, // 1 built, 2 out of leaf storage
+}
+
+@group(0) @binding(1) var<uniform> world: World;
+@group(0) @binding(16) var<uniform> terrain: TerrainConstants;
+@group(0) @binding(2) var<storage, read> tile_jobs: array<TileJob>;
+@group(0) @binding(3) var<storage, read_write> tile_columns: array<vec4<i32>>;
+@group(0) @binding(4) var<storage, read_write> tile_ranges: array<atomic<i32>>;
+@group(0) @binding(5) var<storage, read> chunk_jobs: array<ChunkJob>;
+@group(0) @binding(6) var<storage, read_write> column_masks: array<vec2<u32>>;
+@group(0) @binding(7) var<storage, read> brushes: array<FaceBrush>;
+@group(0) @binding(8) var<storage, read> brush_refs: array<u32>;
+@group(0) @binding(9) var<storage, read_write> chunk_meta: array<ChunkMeta>;
+@group(0) @binding(10) var<storage, read_write> mids: array<vec4<u32>>;
+@group(0) @binding(11) var<storage, read_write> mid_leaves: array<u32>;
+@group(0) @binding(12) var<storage, read_write> leaves: array<vec2<u32>>;
+@group(0) @binding(13) var<storage, read_write> leaf_alloc: array<atomic<u32>>;
+// Scratch per chunk job: each column's material (`chunk_columns_main`).
+@group(0) @binding(14) var<storage, read_write> column_materials: array<u32>;
+// A material byte per stored leaf (four a word) and per mid node: what a
+// hit in it shows until materials are stored per surface voxel.
+@group(0) @binding(15) var<storage, read_write> leaf_materials: array<atomic<u32>>;
+@group(0) @binding(17) var<storage, read_write> mid_materials: array<u32>;
+
+var<workgroup> w_range: array<atomic<i32>, 4>;
+
+// One workgroup per 8x8 columns of a tile: dispatch (64, tiles).
+@compute @workgroup_size(64)
+fn tile_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = tile_jobs[wg.y];
+    let x = (wg.x & 7u) * 8u + (li & 7u);
+    let y = (wg.x >> 3u) * 8u + (li >> 3u);
+    let i = job.cx * 64 + i32(x);
+    let j = job.cy * 64 + i32(y);
+    if li == 0u {
+        atomicStore(&w_range[0], 0x7fffffff);
+        atomicStore(&w_range[1], -0x7fffffff);
+        atomicStore(&w_range[2], 0x7fffffff);
+        atomicStore(&w_range[3], -0x7fffffff);
+    }
+    workgroupBarrier();
+    // Tiles at a face's edge reach past it: those columns are empty.
+    let cells = world.grid.z >> job.level;
+    if i < cells && j < cells {
+        // Coarse levels keep the mean of the ridges they cannot resolve
+        // (the display field), so they sit where finer levels' terrain sits.
+        let field = generation_column(job.face, i, j, job.level, job.level >= 1u);
+        let extent = terrain_extent(domain_point(job.face, i, j, job.level), job.level);
+        let top = div_floor(field.x, world.grid.y) >> job.level;
+        tile_columns[wg.y * TILE_COLUMNS + y * 64u + x] = vec4<i32>(field.x, field.y, extent.x, extent.y);
+        // The cell under the top holds the surface; the volume may change
+        // cells across its extent. Ranges: the volume's, the surface's.
+        atomicMin(&w_range[0], top - 1 - extent.x);
+        atomicMax(&w_range[1], top + extent.y);
+        atomicMin(&w_range[2], top - 1);
+        atomicMax(&w_range[3], top);
+    } else {
+        tile_columns[wg.y * TILE_COLUMNS + y * 64u + x] = vec4<i32>(OUTSIDE, 0, 0, 0);
+    }
+    workgroupBarrier();
+    if li == 0u {
+        atomicMin(&tile_ranges[wg.y * 4u], atomicLoad(&w_range[0]));
+        atomicMax(&tile_ranges[wg.y * 4u + 1u], atomicLoad(&w_range[1]));
+        atomicMin(&tile_ranges[wg.y * 4u + 2u], atomicLoad(&w_range[2]));
+        atomicMax(&tile_ranges[wg.y * 4u + 3u], atomicLoad(&w_range[3]));
+    }
+}
+
+fn set_bits(m: vec2<u32>, lo: i32, hi: i32, on: bool) -> vec2<u32> {
+    // Bits [lo, hi) of a 64-bit mask set or cleared.
+    let a = clamp(lo, 0, 64);
+    let b = clamp(hi, 0, 64);
+    if a >= b { return m; }
+    var r = m;
+    let lo_a = u32(min(a, 32));
+    let lo_b = u32(min(b, 32));
+    if lo_b > lo_a {
+        let bits = select((1u << (lo_b - lo_a)) - 1u, 0xffffffffu, lo_b - lo_a == 32u) << lo_a;
+        r.x = select(r.x & ~bits, r.x | bits, on);
+    }
+    let hi_a = u32(max(a, 32) - 32);
+    let hi_b = u32(max(b, 32) - 32);
+    if hi_b > hi_a {
+        let bits = select((1u << (hi_b - hi_a)) - 1u, 0xffffffffu, hi_b - hi_a == 32u) << hi_a;
+        r.y = select(r.y & ~bits, r.y | bits, on);
+    }
+    return r;
+}
+
+fn bit_at(m: vec2<u32>, b: u32) -> bool {
+    return ((select(m.x, m.y, b >= 32u) >> (b & 31u)) & 1u) != 0u;
+}
+
+// Where a ball brush crosses the column over domain point `p` (half-cell
+// centre `ch`): its first and last level cells, from the same solve as the
+// span generator (`brush_crossings` in generate.wgsl).
+fn ball_cells(b: FaceBrush, p: vec3<i32>, level: u32) -> vec3<i32> {
+    let shift = level + 1u;
+    let half = 1 << level;
+    let h0 = (b.k_lo >> 1u) + (b.k_hi >> 1u);
+    let q0 = volume_point_half(p, h0);
+    var v = vec3<f32>(0.0, f32(world.scale.w) / 65536.0, 0.0);
+    if !is_plane() { v = vec3<f32>(p) * (f32(world.scale.y) * exp2(-f32(world.scale.z) - 30.0)); }
+    let a = dot(v, v);
+    if a <= 0.0 { return vec3<i32>(0, -1, 0); }
+    let d = vec3<f32>(q0 - b.ball.xyz);
+    let r = f32(abs(b.ball.w));
+    let bb = dot(d, v);
+    let c = (length(d) - r) * (length(d) + r);
+    let disc = bb * bb - a * c;
+    if disc < 0.0 { return vec3<i32>(0, -1, 0); }
+    let sq = sqrt(disc);
+    let k0 = h0 >> shift;
+    let rem = f32(h0 - (k0 << shift) - half);
+    let cell = f32(1 << shift);
+    return vec3<i32>(k0 + i32(floor((rem + (-bb - sq) / a) / cell + 0.5)), k0 + i32(floor((rem + (-bb + sq) / a) / cell + 0.5)), 1);
+}
+
+// One thread per column, one workgroup per 8x8 columns: dispatch (64, chunks).
+@compute @workgroup_size(64)
+fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = chunk_jobs[wg.y];
+    let tile = tile_jobs[job.tile];
+    let face = tile.face;
+    let level = tile.level;
+    let x = (wg.x & 7u) * 8u + (li & 7u);
+    let y = (wg.x >> 3u) * 8u + (li >> 3u);
+    let i = tile.cx * 64 + i32(x);
+    let j = tile.cy * 64 + i32(y);
+    let column = tile_columns[job.tile * TILE_COLUMNS + y * 64u + x];
+    let at = wg.y * TILE_COLUMNS + y * 64u + x;
+    if column.x == OUTSIDE {
+        column_masks[at] = vec2<u32>(0u);
+        column_materials[at] = M_AIR;
+        return;
+    }
+    let height = column.x;
+    let top = div_floor(height, world.grid.y) >> level;
+    let k0 = job.cz * 64;
+    var mask = set_bits(vec2<u32>(0u), 0, top - k0, true);
+    let p = domain_point(face, i, j, level);
+    if column.z > 0 || column.w > 0 {
+        // Volume terms: the cells the program changes within its extent,
+        // stepping over rock caves cannot reach (`terrain_clearance`).
+        let k_lo = max(top - column.z, k0);
+        let k_hi = min(top + column.w, k0 + 64);
+        let band_lo = select(top, top - column.w, column.w > 0);
+        let step = distance(vec3<f32>(volume_point(face, i, j, top + 1, level)), vec3<f32>(volume_point(face, i, j, top, level))) + 2.0;
+        var scan = k_lo;
+        loop {
+            if scan >= k_hi { break; }
+            if scan < band_lo {
+                let clear = terrain_clearance(volume_point(face, i, j, scan, level), level, step);
+                if clear > 0 {
+                    scan = min(scan + clear + 1, band_lo);
+                    continue;
+                }
+            }
+            let solid = terrain_density(p, volume_point(face, i, j, scan, level), level, top, height, height, scan) > 0;
+            mask = set_bits(mask, scan - k0, scan - k0 + 1, solid);
+            scan += 1;
+        }
+    }
+    // Brushes in edit order: balls by their crossing cells, boxes by their
+    // faces.
+    let ch = vec2<i32>(center_half(i, level), center_half(j, level));
+    for (var e = 0u; e < job.brush_count; e++) {
+        let b = brushes[brush_refs[job.brushes + e]];
+        if b.radius_half < (1u << level) { continue; }
+        let op = (b.flags >> 4u) & 3u;
+        if op >= 2u { continue; }
+        var cells = vec3<i32>(0, -1, 0);
+        if ((b.flags >> 6u) & 3u) == 1u {
+            if all(vec2<u32>(abs(ch - b.center.xy)) <= vec2<u32>(b.radius_half)) {
+                let shift = level + 1u;
+                let half = 1 << level;
+                cells = vec3<i32>(-((half - b.k_lo) >> shift), (b.k_hi - half) >> shift, 1);
+            }
+        } else {
+            cells = ball_cells(b, p, level);
+        }
+        if cells.z == 0 || cells.x > cells.y { continue; }
+        // Ops: 0 remove, 1 add (`edits::BrushOp`).
+        mask = set_bits(mask, cells.x - k0, cells.y - k0 + 1, op == 1u);
+    }
+    column_masks[at] = mask;
+    // Material of the highest solid cell (shading only, until materials
+    // are stored per surface voxel).
+    var material = M_AIR;
+    let high = select(i32(firstLeadingBit(mask.x)), 32 + i32(firstLeadingBit(mask.y)), mask.y != 0u);
+    if mask.x != 0u || mask.y != 0u {
+        let k = k0 + high;
+        let t = vec4<i32>(
+            tile_top(job.tile, max(i32(x) - 1, 0), i32(y), level),
+            tile_top(job.tile, min(i32(x) + 1, 63), i32(y), level),
+            tile_top(job.tile, i32(x), max(i32(y) - 1, 0), level),
+            tile_top(job.tile, i32(x), min(i32(y) + 1, 63), level));
+        let slope = max(abs(t.y - t.x), abs(t.w - t.z)) * 4;
+        let depth = max(top - 1 - k, 0) << level;
+        material = ground_material(p, u32(column.y), height, depth, slope, k << level) & M_ID;
+    }
+    column_materials[at] = material;
+}
+
+fn tile_top(tile: u32, x: i32, y: i32, level: u32) -> i32 {
+    let h = tile_columns[tile * TILE_COLUMNS + u32(y) * 64u + u32(x)].x;
+    return div_floor(select(h, 0, h == OUTSIDE), world.grid.y) >> level;
+}
+
+var<workgroup> w_occ: array<atomic<u32>, 128>;
+var<workgroup> w_full: array<atomic<u32>, 128>;
+var<workgroup> w_base: array<u32, 64>;
+var<workgroup> w_z: array<atomic<i32>, 2>;
+var<workgroup> w_total: u32;
+var<workgroup> w_mid_material: array<atomic<u32>, 64>;
+
+fn rank64(m: vec2<u32>, b: u32) -> u32 {
+    // Set bits of `m` below bit `b`.
+    if b < 32u { return countOneBits(m.x & ((1u << b) - 1u)); }
+    return countOneBits(m.x) + countOneBits(m.y & ((1u << (b - 32u)) - 1u));
+}
+
+// One workgroup per chunk: thread t builds the 16 leaves above leaf column
+// (t & 15, t >> 4) of the chunk.
+@compute @workgroup_size(256)
+fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t: u32) {
+    let job = chunk_jobs[wg.x];
+    if t < 128u {
+        atomicStore(&w_occ[t], 0u);
+        atomicStore(&w_full[t], 0u);
+    }
+    if t < 64u { atomicStore(&w_mid_material[t], 0u); }
+    if t == 0u {
+        atomicStore(&w_z[0], 64);
+        atomicStore(&w_z[1], 0);
+    }
+    workgroupBarrier();
+    let lx = t & 15u;
+    let ly = t >> 4u;
+    // 16 leaves along z, built from this leaf column's 4x4 cell columns.
+    var leaf: array<vec2<u32>, 16>;
+    // Each leaf's material: its highest column's (the first column with
+    // cells in it).
+    var leaf_material: array<u32, 16>;
+    var z_lo = 64;
+    var z_hi = 0;
+    for (var c = 0u; c < 16u; c++) {
+        let cx = lx * 4u + (c & 3u);
+        let cy = ly * 4u + (c >> 2u);
+        let m = column_masks[wg.x * TILE_COLUMNS + cy * 64u + cx];
+        if m.x == 0u && m.y == 0u { continue; }
+        let column_material = column_materials[wg.x * TILE_COLUMNS + cy * 64u + cx];
+        z_lo = min(z_lo, select(i32(firstTrailingBit(m.x)), 32 + i32(firstTrailingBit(m.y)), m.x == 0u));
+        z_hi = max(z_hi, 1 + select(i32(firstLeadingBit(m.x)), 32 + i32(firstLeadingBit(m.y)), m.y != 0u));
+        for (var lz = 0u; lz < 16u; lz++) {
+            let nib = (select(m.x, m.y, lz >= 8u) >> ((lz & 7u) * 4u)) & 15u;
+            if nib != 0u && leaf_material[lz] == 0u { leaf_material[lz] = column_material; }
+            leaf[lz].x |= ((nib & 1u) << c) | (((nib >> 1u) & 1u) << (c + 16u));
+            leaf[lz].y |= (((nib >> 2u) & 1u) << c) | (((nib >> 3u) & 1u) << (c + 16u));
+        }
+    }
+    atomicMin(&w_z[0], z_lo);
+    atomicMax(&w_z[1], z_hi);
+    for (var lz = 0u; lz < 16u; lz++) {
+        let m = (lx >> 2u) + (ly >> 2u) * 4u + (lz >> 2u) * 16u;
+        let l = (lx & 3u) + (ly & 3u) * 4u + (lz & 3u) * 16u;
+        let word = m * 2u + (l >> 5u);
+        let bit = 1u << (l & 31u);
+        if leaf[lz].x != 0u || leaf[lz].y != 0u {
+            atomicOr(&w_occ[word], bit);
+            atomicMax(&w_mid_material[m], leaf_material[lz]);
+        }
+        if leaf[lz].x == 0xffffffffu && leaf[lz].y == 0xffffffffu { atomicOr(&w_full[word], bit); }
+    }
+    workgroupBarrier();
+    if t == 0u {
+        // Mixed leaves per mid node, packed in mid order.
+        var total = 0u;
+        for (var m = 0u; m < 64u; m++) {
+            w_base[m] = total;
+            let occ = vec2<u32>(atomicLoad(&w_occ[m * 2u]), atomicLoad(&w_occ[m * 2u + 1u]));
+            let full = vec2<u32>(atomicLoad(&w_full[m * 2u]), atomicLoad(&w_full[m * 2u + 1u]));
+            total += countOneBits(occ.x & ~full.x) + countOneBits(occ.y & ~full.y);
+        }
+        let base = atomicAdd(&leaf_alloc[0], total);
+        var status = 1u;
+        if base + total > arrayLength(&leaves) {
+            atomicStore(&leaf_alloc[1], 1u);
+            status = 2u;
+        }
+        var root_occ = vec2<u32>(0u);
+        var root_full = vec2<u32>(0u);
+        for (var m = 0u; m < 64u; m++) {
+            w_base[m] += base;
+            let occ = vec2<u32>(atomicLoad(&w_occ[m * 2u]), atomicLoad(&w_occ[m * 2u + 1u]));
+            let full = vec2<u32>(atomicLoad(&w_full[m * 2u]), atomicLoad(&w_full[m * 2u + 1u]));
+            mids[job.slot * 64u + m] = vec4<u32>(occ, full);
+            mid_leaves[job.slot * 64u + m] = w_base[m];
+            mid_materials[job.slot * 64u + m] = atomicLoad(&w_mid_material[m]);
+            let bit = 1u << (m & 31u);
+            if occ.x != 0u || occ.y != 0u {
+                if m < 32u { root_occ.x |= bit; } else { root_occ.y |= bit; }
+            }
+            if full.x == 0xffffffffu && full.y == 0xffffffffu {
+                if m < 32u { root_full.x |= bit; } else { root_full.y |= bit; }
+            }
+        }
+        w_total = select(total, 0u, status == 2u);
+        chunk_meta[job.slot] = ChunkMeta(root_occ, root_full, vec2<i32>(atomicLoad(&w_z[0]), atomicLoad(&w_z[1])), total, status);
+    }
+    workgroupBarrier();
+    if workgroupUniformLoad(&w_total) == 0u { return; }
+    for (var lz = 0u; lz < 16u; lz++) {
+        let m = (lx >> 2u) + (ly >> 2u) * 4u + (lz >> 2u) * 16u;
+        let l = (lx & 3u) + (ly & 3u) * 4u + (lz & 3u) * 16u;
+        let occ = vec2<u32>(atomicLoad(&w_occ[m * 2u]), atomicLoad(&w_occ[m * 2u + 1u]));
+        let full = vec2<u32>(atomicLoad(&w_full[m * 2u]), atomicLoad(&w_full[m * 2u + 1u]));
+        let mixed = occ & ~full;
+        if bit_at(mixed, l) {
+            let index = w_base[m] + rank64(mixed, l);
+            leaves[index] = leaf[lz];
+            atomicOr(&leaf_materials[index >> 2u], (leaf_material[lz] & 0xffu) << ((index & 3u) * 8u));
+        }
+    }
+}

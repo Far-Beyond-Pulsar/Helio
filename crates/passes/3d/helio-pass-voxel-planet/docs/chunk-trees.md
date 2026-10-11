@@ -183,6 +183,37 @@ interleaved runs. A phase that misses its gate stops the plan for review.
    under 6 ms at 1440p in every view; then Pulsar switches over and the old
    path is deleted.
 
+## Phase 1 results (2026-10-11)
+
+`src/chunks.rs`, `shaders/chunk_generate.wgsl`, `shaders/chunk_draw.wgsl`;
+measured in the flight harness's hold mode (`HELIO_VOXEL_CHUNKS=1`), 1080p,
+RTX 3060, interleaved with the span-column renderer in the same binary:
+
+| View | Span columns | Chunk trees |
+|---|---|---|
+| ground | 3.41 ms | 4.30 ms |
+| mountain_slope | 12.57 ms | 5.74 ms |
+| tunnel | 13.78 ms | 4.61 ms |
+
+- The cut at 1 px holds ~4,100 tiles per level (a ring of
+  [D, 2D] where D = voxel / pixel angle, 3 pi (D / 64 voxels)^2 tiles), 12
+  levels in view, 58-63 k chunks, 180-215 MB (leaves 9 bytes, chunk nodes
+  1.6 KB). Generation of the whole cut takes 3.4-4 s on the GPU (tiles,
+  column masks and trees: ~6 ns a column).
+- Caves under the surface are content no eye ray reaches from above; the
+  whole cave band at every level overflowed 131 k chunks on a mountain.
+  Phase 1 generates it only within four chunks of the eye; phase 2's
+  residency follows visibility (rays request what they reach).
+- Depth: chunk boxes do not overlap, so a box's front face orders the hits
+  correctly; writing it instead of the hit's depth keeps early depth tests
+  (conservative depth writes did not keep them on this GPU). With the
+  depth test off the ground view costs 15.9 ms: early rejection works.
+- Rejected: a box per 16x16-column group tight to its layers (16 boxes a
+  chunk): ground 3.75 -> 4.59 ms, mountain 5.6 -> 7.0 (16x the triangles,
+  and every group face a ray crosses starts another fragment).
+- Ground is the open gate: rays at grazing angles cross boxes in front of
+  their hit, and hidden far boxes still rasterize.
+
 ## References
 
 Laine and Karras, *Efficient Sparse Voxel Octrees* (2010); Crassin et al.,

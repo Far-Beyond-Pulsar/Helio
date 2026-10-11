@@ -298,7 +298,7 @@ fn uniform(binding: u32) -> wgpu::BindGroupLayoutEntry {
 /// `World` of world.wgsl: the grid mapping.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-struct WorldGpu {
+pub(crate) struct WorldGpu {
     /// reference cells, layer thickness (mm), grid cells, level offset.
     grid: [i32; 4],
     /// domain scale (Q24), pad.
@@ -309,7 +309,7 @@ struct WorldGpu {
 }
 
 impl WorldGpu {
-    fn new(planet: &Planet) -> Self {
+    pub(crate) fn new(planet: &Planet) -> Self {
         let g = planet.grid();
         Self {
             grid: [g.reference_cells(), g.layer_mm() as i32, g.cells(), g.level_offset() as i32],
@@ -332,7 +332,7 @@ fn timestamps_supported(device: &wgpu::Device) -> bool {
 }
 
 /// Terrain constants padded to a whole uniform (16-byte multiple).
-fn terrain_bytes(program: &TerrainProgram) -> Vec<u8> {
+pub(crate) fn terrain_bytes(program: &TerrainProgram) -> Vec<u8> {
     let mut bytes = program.constants.clone();
     bytes.resize(bytes.len().max(16).next_multiple_of(16), 0);
     bytes
@@ -370,7 +370,10 @@ pub fn validation_sources() -> Vec<(String, String)> {
         .into_iter()
         .flat_map(|(plane, wide64)| {
             let form = format!("{}{}", if plane { "plane" } else { "sphere" }, if wide64 { ", int64" } else { "" });
-            shader_sources(plane, &program, wide64).map(move |(label, source)| (format!("{label} ({form})"), source))
+            shader_sources(plane, &program, wide64)
+                .into_iter()
+                .chain(crate::chunks::shader_sources(plane, &program, wide64, wide64))
+                .map(move |(label, source)| (format!("{label} ({form})"), source))
         })
         .collect()
 }
@@ -384,13 +387,17 @@ fn hardware_wide(noise: &str) -> String {
     format!("{head}{}{tail}", include_str!("../shaders/wide64.wgsl"))
 }
 
-/// Shader source: the noise library, world helpers and the terrain program,
-/// then the engine parts. With `wide64` the noise library's wide products
-/// use hardware 64-bit integers (`wide64.wgsl`).
-fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram, wide64: bool) -> String {
+/// The terrain half of every shader: the noise library, world helpers, the
+/// material state and the terrain program with defaults for the parts it
+/// leaves out, `generation_column` and the world shape. With `wide64` the
+/// noise library's wide products use hardware 64-bit integers
+/// (`wide64.wgsl`). The program reads the `world` and `terrain` uniforms,
+/// which the including module declares.
+pub(crate) fn terrain_source(plane: bool, program: &TerrainProgram, wide64: bool) -> String {
     let noise = include_str!("../shaders/noise.wgsl");
     let mut s = if wide64 { hardware_wide(noise) } else { String::from(noise) };
     s.push_str(include_str!("../shaders/world.wgsl"));
+    s.push_str(include_str!("../shaders/material_state.wgsl"));
     s.push_str(&program.wgsl);
     if !program.wgsl.contains("fn terrain_surface") {
         // No surface word: columns store none (`World::sphere.w`).
@@ -410,6 +417,23 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram, w
         s.push_str("fn terrain_lean(level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
         s.push_str("fn terrain_lean_offset(p: vec3<i32>, i: i32, j: i32, k: i32, level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
     }
+    // A column's height and surface word at one call site
+    // (`terrain_column`): compilers inline every call, and each copy of a
+    // large program is compile time.
+    if program.wgsl.contains("fn terrain_column") {
+        s.push_str("fn generation_column(face:u32,i:i32,j:i32,level:u32,display:bool)->vec2<i32> { return terrain_column(domain_point(face,i,j,level),level+u32(world.grid.w),display); }\n");
+    } else {
+        s.push_str("fn generation_column(face:u32,i:i32,j:i32,level:u32,display:bool)->vec2<i32> { let h = field_height(face,i,j,level); return vec2<i32>(h, i32(terrain_surface(domain_point(face,i,j,level),level+u32(world.grid.w),h))); }\n");
+    }
+    // World shape: 0 sphere, 1 plane.
+    s.push_str(&format!("const SHAPE: u32 = {};\nconst PLANE_FACE: u32 = 2u;\nfn is_plane() -> bool {{ return SHAPE == 1u; }}\n", if plane { "1u" } else { "0u" }));
+    s
+}
+
+/// Shader source: [`terrain_source`], then the residency structures and the
+/// engine parts.
+fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram, wide64: bool) -> String {
+    let mut s = terrain_source(plane, program, wide64);
     // Generation updates the summaries atomically; traversal reads plain values.
     // Traversal reads a summary block entry as one vector load.
     let generation = parts.iter().any(|p| p.contains("fn level_suffix"));
@@ -419,7 +443,6 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram, w
             .replace("ACCESS", access)
             .replace("LEVEL_TOP", level_top)
             .replace("BLOCK_ENTRY", block_entry)
-            .replace("SHAPE_ID", if plane { "1u" } else { "0u" })
             // Diagnostics: a different probe limit per salt misses every
             // driver shader cache, to measure cold pipeline compiles.
             .replace(
@@ -430,18 +453,6 @@ fn source(access: &str, parts: &[&str], plane: bool, program: &TerrainProgram, w
                     .map_or_else(|| "const MAX_PROBES: u32 = 64u;".to_string(), |salt| format!("const MAX_PROBES: u32 = {}u;", 64 + salt % 64)),
             ),
     );
-    // Generation evaluates a column's height and surface word at one call
-    // site (`terrain_column`): compilers inline every call, and each copy
-    // of a large program is compile time.
-    if program.wgsl.contains("fn terrain_column") {
-        if generation {
-            s.push_str("fn generation_column(face:u32,i:i32,j:i32,level:u32,display:bool)->vec2<i32> { return terrain_column(domain_point(face,i,j,level),level+u32(world.grid.w),display); }\n");
-        }
-    } else {
-        if generation {
-            s.push_str("fn generation_column(face:u32,i:i32,j:i32,level:u32,display:bool)->vec2<i32> { let h = field_height(face,i,j,level); return vec2<i32>(h, i32(terrain_surface(domain_point(face,i,j,level),level+u32(world.grid.w),h))); }\n");
-        }
-    }
     for part in parts {
         s.push_str(&part.replace("ACCESS", access));
     }

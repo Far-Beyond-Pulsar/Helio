@@ -714,6 +714,143 @@ fn highest_near(planet: &Planet, face: u8, fi: f64, fj: f64, span: f64) -> (DVec
 /// under an overhang (air below a solid cell above the heightfield top).
 /// A tunnel carved by 150 brushes (3-7 m balls) from the surface down and
 /// ahead: the eye inside it and a view along it.
+/// Hold `view` drawn from chunk trees: build the cut for the still eye,
+/// then draw it for `HELIO_VOXEL_FLIGHT_HOLD_SECONDS` with pipelined
+/// frames and print the median primary time (`CHUNKHOLD`). With
+/// `HELIO_VOXEL_CHUNKS_PNG=<path>` the colour target is saved.
+fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
+    use helio_pass_voxel_planet::chunks::{ChunkWorld, COLOUR_FORMAT, DEPTH_FORMAT, DISTANCE_FORMAT, TIMING_RING, VISIBILITY_FORMAT};
+    let [w, h] = flight.size;
+    let lod: f64 = std::env::var("HELIO_VOXEL_LOD_PIXELS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    let mut world = ChunkWorld::new(&flight.device, &flight.queue, &flight.planet);
+    let pixel_angle = 2.0 * std::f64::consts::FRAC_PI_8.tan() / f64::from(h);
+    let stats = world.build(&flight.planet, eye, pixel_angle, lod, 400_000.0);
+    eprintln!("CHUNKS built {view}: {stats:?}");
+    eprintln!("CHUNKS early depth {} int64 {}", flight.device.features().contains(wgpu::Features::SHADER_EARLY_DEPTH_TEST), flight.device.features().contains(wgpu::Features::SHADER_INT64));
+    let texture = |format: wgpu::TextureFormat| {
+        flight.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    };
+    let (visibility, colour, distance, depth) = (texture(VISIBILITY_FORMAT), texture(COLOUR_FORMAT), texture(DISTANCE_FORMAT), texture(DEPTH_FORMAT));
+    let views = (visibility.create_view(&Default::default()), colour.create_view(&Default::default()), distance.create_view(&Default::default()), depth.create_view(&Default::default()));
+    let up = up_for(eye);
+    let forward = forward.normalize();
+    let up = if forward.dot(up).abs() > 0.999 { up.any_orthonormal_vector() } else { up };
+    let near = (flight.planet.air_clearance(eye) * 0.25).clamp(0.05, 50_000.0) as f32;
+    let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, std::f32::consts::FRAC_PI_4, w as f32 / h as f32, near, 40_000_000.0);
+    let seconds: f64 = std::env::var("HELIO_VOXEL_FLIGHT_HOLD_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(120.0);
+    let started = Instant::now();
+    let mut pending = std::collections::VecDeque::new();
+    let mut times = Vec::new();
+    let mut frame = 0u64;
+    while started.elapsed().as_secs_f64() < seconds {
+        let mut encoder = flight.device.create_command_encoder(&Default::default());
+        world.draw(&mut encoder, frame, eye, camera.proj * camera.view, near, flight.sun, &views.0, &views.1, &views.2, &views.3);
+        pending.push_back((frame, flight.queue.submit([encoder.finish()])));
+        if pending.len() as u64 >= TIMING_RING {
+            let (n, submission) = pending.pop_front().unwrap();
+            // The first frames compile and warm caches.
+            if let Some(ms) = world.draw_ms(n, submission).filter(|_| n >= 30) {
+                times.push(ms);
+            }
+        }
+        frame += 1;
+    }
+    let (outside, inside) = world.drawn();
+    if std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some() {
+        world.take_counts();
+        let mut encoder = flight.device.create_command_encoder(&Default::default());
+        world.draw(&mut encoder, frame, eye, camera.proj * camera.view, near, flight.sun, &views.0, &views.1, &views.2, &views.3);
+        flight.queue.submit([encoder.finish()]);
+        let [fragments, steps, hits, _] = world.take_counts();
+        let pixels = f64::from(w * h);
+        eprintln!("CHUNKCOUNT {view}: fragments/px {:.2} steps/fragment {:.1} steps/px {:.1} hits/px {:.2}", f64::from(fragments) / pixels, f64::from(steps) / f64::from(fragments.max(1)), f64::from(steps) / pixels, f64::from(hits) / pixels);
+    }
+    eprintln!(
+        "CHUNKHOLD {view} n={} primary {:.3} p95 {:.3} boxes {outside}+{inside} chunks {} MB {:.1} build {:.2} s",
+        times.len(),
+        percentile(&times, 0.5),
+        percentile(&times, 0.95),
+        world.chunk_count(),
+        stats.bytes as f64 / 1048576.0,
+        stats.seconds
+    );
+    // `HELIO_VOXEL_CHUNKS_PROBE=x,y;x,y`: each pixel's chunk hit against
+    // the exact CPU raycast.
+    if let Ok(probes) = std::env::var("HELIO_VOXEL_CHUNKS_PROBE") {
+        let read = |texture: &wgpu::Texture, x: u32, y: u32| -> [u8; 8] {
+            let buffer = flight.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 256, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+            let mut encoder = flight.device.create_command_encoder(&Default::default());
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256), rows_per_image: Some(1) } },
+                wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            );
+            flight.queue.submit([encoder.finish()]);
+            buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+            flight.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let data = buffer.slice(..).get_mapped_range().unwrap();
+            let mut out = [0u8; 8];
+            out.copy_from_slice(&data[..8]);
+            out
+        };
+        let inverse = (camera.proj * camera.view).inverse();
+        for probe in probes.split(';') {
+            let xy: Vec<u32> = probe.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+            let (x, y) = (xy[0], xy[1]);
+            let v = read(&visibility, x, y);
+            let t = f32::from_le_bytes(read(&distance, x, y)[..4].try_into().unwrap());
+            let ndc = Vec3::new((x as f32 + 0.5) / w as f32 * 2.0 - 1.0, 1.0 - (y as f32 + 0.5) / h as f32 * 2.0, 0.5);
+            let far = inverse * ndc.extend(1.0);
+            let dir = (far.truncate() / far.w).normalize().as_dvec3();
+            let slot = u32::from_le_bytes(v[..4].try_into().unwrap());
+            let cell = u32::from_le_bytes(v[4..].try_into().unwrap());
+            let cpu = flight.planet.raycast(eye, dir, 200_000.0);
+            eprintln!(
+                "PROBE {x},{y}: chunk t {:.2} slot {slot} {:?} cell ({},{},{}) axis {} | cpu {:?}",
+                if t > 0.0 { t } else { f32::NAN },
+                world.chunk_at(slot),
+                cell & 63,
+                (cell >> 6) & 63,
+                (cell >> 12) & 63,
+                (cell >> 18) & 7,
+                cpu.map(|h| (h.distance, h.cell))
+            );
+            if let Some(h) = cpu {
+                eprintln!("  over the cpu hit: {:?}", world.chunks_over(h.cell.face, h.cell.i, h.cell.j));
+            }
+        }
+    }
+    if let Ok(path) = std::env::var("HELIO_VOXEL_CHUNKS_PNG") {
+        let row = (w * 4).div_ceil(256) * 256;
+        let buffer = flight.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row) * u64::from(h), usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+        let mut encoder = flight.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            colour.as_image_copy(),
+            wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        flight.queue.submit([encoder.finish()]);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        flight.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            let at = (y * row) as usize;
+            pixels.extend_from_slice(&data[at..at + (w * 4) as usize]);
+        }
+        image::save_buffer(&path, &pixels, w, h, image::ColorType::Rgba8).unwrap();
+    }
+}
+
 fn carve_tunnel(flight: &mut Flight, ground: DVec3, heading: f64) -> (DVec3, Vec3) {
     let up = ground.normalize();
     let ahead = tangent(ground, heading).as_dvec3();
@@ -884,6 +1021,12 @@ fn main() {
             }
             _ => (ground, look(ground, heading, -12.0)),
         };
+        // `HELIO_VOXEL_CHUNKS=1`: the same view drawn from chunk trees
+        // (docs/chunk-trees.md, phase 1).
+        if std::env::var_os("HELIO_VOXEL_CHUNKS").is_some() {
+            chunk_hold(&flight, &view, e, f);
+            return;
+        }
         flight.settle("hold_load", e, f);
         eprintln!("HOLD settled {view}");
         let seconds: f64 = std::env::var("HELIO_VOXEL_FLIGHT_HOLD_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(120.0);
