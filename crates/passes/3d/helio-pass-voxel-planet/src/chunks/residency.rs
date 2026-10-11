@@ -63,7 +63,7 @@ pub struct Tile {
 }
 
 /// Where the eye looks: tiles in view are generated first.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct View {
     pub forward: DVec3,
     /// Cosine of the half-angle of the cone around `forward` in view.
@@ -95,11 +95,11 @@ impl Planner {
     /// Roots: the coarsest level's tiles within `max_distance` of `eye`,
     /// with the planet's whole height range (`range`, base layers) as
     /// their estimate.
-    pub fn new(grid: &Grid, eye: DVec3, range: (i32, i32), config: PlanConfig) -> Self {
+    /// Roots: every tile of the coarsest level (whatever the eye's first
+    /// place, it can go anywhere).
+    pub fn new(grid: &Grid, range: (i32, i32), config: PlanConfig) -> Self {
         let level = grid.levels() - 1;
         let n = tiles_at(grid, level);
-        let s = f64::from(1u32 << level);
-        let w = f64::from(CHUNK) * s;
         let layers = ((range.0 >> level) - 1, (range.1 >> level) + 1);
         let ranges = Ranges { volume: layers, surface: layers };
         let mut roots = Vec::new();
@@ -108,12 +108,8 @@ impl Planner {
             for cx in 0..n {
                 for cy in 0..n {
                     let key = TileKey { face, level, cx, cy };
-                    let c = grid.position(face, [f64::from(cx) * w + w / 2.0, f64::from(cy) * w + w / 2.0, 0.0]);
-                    let corner = grid.position(face, [f64::from(cx) * w, f64::from(cy) * w, 0.0]);
-                    if (c - eye).length() - (corner - c).length() * 1.5 <= config.max_distance {
-                        roots.push(key);
-                        tiles.insert(key, Tile { ranges, exact: false, generated: false, refined: false, used: 0 });
-                    }
+                    roots.push(key);
+                    tiles.insert(key, Tile { ranges, exact: false, generated: false, refined: false, used: 0 });
                 }
             }
         }
@@ -151,19 +147,26 @@ impl Planner {
         let mut stack: Vec<TileKey> = self.roots.clone();
         while let Some(key) = stack.pop() {
             let Some(tile) = self.tiles.get(&key).copied() else { continue };
+            // Distance cut-off: tiles beyond `max_distance` are not drawn. A
+            // root out there ages out (`evict`); a finer tile stays for its
+            // parent's cut.
+            let beyond = tile_distance(grid, key, tile.ranges.volume, &eyes[0]) > self.config.max_distance;
             if !tile.generated {
-                wanted.push((f64::INFINITY, key));
+                if !beyond {
+                    wanted.push((f64::INFINITY, key));
+                }
+                continue;
+            }
+            if beyond {
+                if key.level + 1 < grid.levels() {
+                    self.tiles.get_mut(&key).unwrap().used = frame;
+                }
                 continue;
             }
             let error = self.error(grid, key, tile.ranges, &eyes);
             let seen = in_view(key, tile.ranges);
             // Tiles in view first.
             let priority = if seen { error * 1e6 } else { error };
-            // Distance cut-off: tiles beyond `max_distance` are not drawn.
-            if tile_distance(grid, key, tile.ranges.volume, &eyes[0]) > self.config.max_distance {
-                self.tiles.get_mut(&key).unwrap().used = frame;
-                continue;
-            }
             let finer = key.level > 0 && if tile.refined { error > self.config.coarsen } else { error > 1.0 };
             // Children wait for their parent's measured layers.
             let children = if finer && tile.exact { children(grid, key) } else { Vec::new() };
@@ -217,13 +220,20 @@ impl Planner {
         }
     }
 
-    /// Tiles not visited for `keep_frames` (never a root), removed.
+    /// Tiles not visited for `keep_frames`, removed (a root stays known,
+    /// ungenerated).
     pub fn evict(&mut self, frame: u64) -> Vec<TileKey> {
         let keep = self.config.keep_frames;
-        let roots = &self.roots;
-        let old: Vec<TileKey> = self.tiles.iter().filter(|(k, t)| t.used + keep < frame && !roots.contains(k)).map(|(k, _)| *k).collect();
+        let root = self.roots[0].level;
+        let old: Vec<TileKey> = self.tiles.iter().filter(|(k, t)| t.used + keep < frame && (k.level != root || t.generated)).map(|(k, _)| *k).collect();
         for k in &old {
-            self.tiles.remove(k);
+            if k.level == root {
+                let t = self.tiles.get_mut(k).unwrap();
+                t.generated = false;
+                t.refined = false;
+            } else {
+                self.tiles.remove(k);
+            }
         }
         old
     }
@@ -243,8 +253,17 @@ pub struct Planned {
     pub added: Vec<TileKey>,
     pub removed: Vec<TileKey>,
     pub evicted: Vec<TileKey>,
-    /// Of the job: events up to this number had reached the planner.
+    /// What the plan was made for.
+    pub made_for: PlannedFor,
+}
+
+/// What a plan was made for: events up to this number had reached the
+/// planner; the eye and the view.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlannedFor {
     pub events_seen: u64,
+    pub eye: DVec3,
+    pub view: Option<View>,
 }
 
 struct Job {
@@ -267,13 +286,13 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn spawn(grid: Grid, eye: DVec3, range: (i32, i32), config: PlanConfig) -> Self {
+    pub fn spawn(grid: Grid, range: (i32, i32), config: PlanConfig) -> Self {
         let (jobs, inbox) = std::sync::mpsc::channel::<Job>();
         let (outbox, results) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("chunk residency".into())
             .spawn(move || {
-                let mut planner = Planner::new(&grid, eye, range, config);
+                let mut planner = Planner::new(&grid, range, config);
                 let mut drawn: FxHashSet<TileKey> = FxHashSet::default();
                 while let Ok(job) = inbox.recv() {
                     for event in job.events {
@@ -288,7 +307,7 @@ impl Worker {
                     let added = plan.drawn.iter().filter(|k| !drawn.contains(k)).copied().collect();
                     let removed = drawn.iter().filter(|k| !now.contains(k)).copied().collect();
                     drawn = now;
-                    if outbox.send(Planned { plan, added, removed, evicted, events_seen: job.events_seen }).is_err() {
+                    if outbox.send(Planned { plan, added, removed, evicted, made_for: PlannedFor { events_seen: job.events_seen, eye: job.eye, view: job.view } }).is_err() {
                         break;
                     }
                 }
@@ -345,7 +364,7 @@ mod tests {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
         let eye = grid.position(2, [f64::from(grid.cells()) * 0.47, f64::from(grid.cells()) * 0.53, 20.0]);
         let config = PlanConfig { pixel_angle: 7.67e-4, lod_pixels: 1.0, coarsen: 0.8, max_distance: 400_000.0, prefetch_seconds: 0.5, keep_frames: 60 };
-        let planner = Planner::new(&grid, eye, (-100_000, 100_000), config);
+        let planner = Planner::new(&grid, (-100_000, 100_000), config);
         (grid, eye, planner)
     }
 
@@ -380,6 +399,29 @@ mod tests {
                 assert!(!drawn.contains(&p), "{k:?} under drawn {p:?}");
             }
         }
+    }
+
+    #[test]
+    fn roots_follow_the_eye_wherever_it_starts() {
+        let (grid, eye, mut planner) = setup();
+        let mut frame = 1;
+        // From the planet's centre nothing is within reach.
+        let plan = planner.plan(&grid, DVec3::ZERO, DVec3::ZERO, None, frame);
+        assert!(plan.requests.is_empty() && plan.drawn.is_empty());
+        // At the surface the roots near the eye are wanted.
+        let plan = settle(&grid, eye, &mut planner, &mut frame);
+        assert!(!plan.drawn.is_empty());
+        // Gone to the far side, they age out and can be generated again.
+        let far = -eye;
+        settle(&grid, far, &mut planner, &mut frame);
+        frame += planner.config().keep_frames + 1;
+        planner.plan(&grid, far, DVec3::ZERO, None, frame);
+        let evicted = planner.evict(frame);
+        let near_root = plan.drawn.iter().map(|k| { let mut k = *k; while k.level + 1 < grid.levels() { k = TileKey { level: k.level + 1, cx: k.cx >> 1, cy: k.cy >> 1, ..k }; } k }).next().unwrap();
+        assert!(evicted.contains(&near_root));
+        frame += 1;
+        let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
+        assert!(plan.requests.iter().any(|(k, _)| *k == near_root));
     }
 
     #[test]

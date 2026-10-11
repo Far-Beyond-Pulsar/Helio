@@ -618,8 +618,8 @@ pub struct ChunkWorld {
     /// Results recorded by the last update, mapped once submitted.
     pending: Option<Readback>,
     last_requests: usize,
-    /// Events the latest plan saw (none: no plan yet).
-    plan_current: Option<u64>,
+    /// What the latest plan was made for (none: no plan yet).
+    planned_for: Option<residency::PlannedFor>,
 
     /// Measured GPU milliseconds of generation per tile (moving average).
     ms_per_tile: Option<f64>,
@@ -1134,7 +1134,7 @@ impl ChunkWorld {
             boxes: (0, 0),
             pending: None,
             last_requests: 0,
-            plan_current: None,
+            planned_for: None,
 
             ms_per_tile: None,
             last_generated: 0,
@@ -1338,7 +1338,7 @@ impl ChunkWorld {
         let eye_at = Eye::new(&grid, eye);
         self.claim_timing(frame);
         let mut stats = UpdateStats::default();
-        let worker = self.worker.get_or_insert_with(|| residency::Worker::spawn(grid, eye, self.height_layers, config.plan));
+        let worker = self.worker.get_or_insert_with(|| residency::Worker::spawn(grid, self.height_layers, config.plan));
         let mut evictions: Vec<u32> = Vec::new();
 
         let mut clock = std::time::Instant::now();
@@ -1415,9 +1415,11 @@ impl ChunkWorld {
             evicted = planned.evicted;
             added = planned.added;
             removed = planned.removed;
-            self.plan_current = Some(planned.events_seen);
+            self.planned_for = Some(planned.made_for);
         }
-        let unseen = !self.events.is_empty() || self.plan_current != Some(worker.events_sent());
+        // Events the plan has not seen, or another eye or view (a camera
+        // that moved since): its requests are not yet known.
+        let unseen = !self.events.is_empty() || self.planned_for != Some(residency::PlannedFor { events_seen: worker.events_sent(), eye, view });
         worker.submit(eye, velocity, view, frame, &mut self.events);
         lap(&mut stats, 1);
         let plan = &self.plan;

@@ -56,6 +56,11 @@ impl ChunkPass {
         has_source && self.world.as_ref().is_none_or(|w| !w.settled())
     }
 
+    /// Whether a planet's chunks are held.
+    pub fn has_world(&self) -> bool {
+        self.world.is_some()
+    }
+
     /// Whether nothing is left to generate for the current eye.
     pub fn settled(&self) -> bool {
         self.world.as_ref().is_some_and(ChunkWorld::settled)
@@ -150,8 +155,11 @@ impl RenderPass for ChunkPass {
             self.timings.drain(..excess);
         }
         let frame = self.source.lock().map_err(|_| helio_core::Error::InvalidPassConfig("planet frame source poisoned".into()))?.clone();
+        // No planet: its chunks and storage go.
         let Some(frame) = frame else {
             self.shown = None;
+            self.world = None;
+            self.built_for = None;
             return Ok(());
         };
         let recipe = crate::journal::recipe_fingerprint(frame.planet.recipe());

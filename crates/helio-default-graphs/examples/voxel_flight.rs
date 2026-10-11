@@ -1476,6 +1476,12 @@ fn main() {
                     .expect("a cave within 9 km of the spawn");
                 (e, f)
             }
+            // `HELIO_VOXEL_FLIGHT_EYE=x,y,z,fx,fy,fz`: any eye (planet-centred)
+            // and view direction.
+            "eye" => {
+                let v: Vec<f64> = std::env::var("HELIO_VOXEL_FLIGHT_EYE").expect("HELIO_VOXEL_FLIGHT_EYE").split(',').map(|x| x.trim().parse().unwrap()).collect();
+                (DVec3::new(v[0], v[1], v[2]), DVec3::new(v[3], v[4], v[5]).normalize().as_vec3())
+            }
             // 40 m from the +Y face's edge, looking across it.
             "face_edge" => {
                 let grid = flight.planet.grid();
