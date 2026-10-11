@@ -291,7 +291,14 @@ pub struct FrameTimings {
     /// The update's eviction and generation, and the tiles it generated.
     pub generate: f64,
     pub tiles: usize,
+    /// Generation by kernel: eviction and tile columns, chunk columns,
+    /// chunk builds.
+    pub stages: [f64; 3],
 }
+
+/// Timestamps a frame writes: generation start, tile columns end, seed
+/// start and end, trace end, chunk columns end, chunk builds end.
+const QUERIES: u32 = 8;
 
 /// A frame's timestamps on their way back.
 struct TimingSlot {
@@ -741,12 +748,12 @@ impl ChunkWorld {
         let palette = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk palette"), contents: bytemuck::cast_slice(&palette), usage: wgpu::BufferUsages::UNIFORM });
         let queries = device.features().contains(wgpu::Features::TIMESTAMP_QUERY).then(|| {
             (
-                device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("chunk draw"), ty: wgpu::QueryType::Timestamp, count: 5 * TIMING_RING as u32 }),
+                device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("chunk draw"), ty: wgpu::QueryType::Timestamp, count: QUERIES * TIMING_RING as u32 }),
                 buffer("chunk timestamps", u64::from(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT) * TIMING_RING, wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC),
             )
         });
         let timing_slots = (0..if queries.is_some() { TIMING_RING } else { 0 })
-            .map(|_| TimingSlot { buffer: buffer("chunk timestamps read", 40, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST), frame: None, ready: None })
+            .map(|_| TimingSlot { buffer: buffer("chunk timestamps read", u64::from(QUERIES) * 8, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST), frame: None, ready: None })
             .collect();
         let drawn_set = drawn::DrawnSet::new(MAX_CHUNKS, TABLE_SLOTS, planet.grid().levels() - 1);
         let chunk_table = buffer("chunk table", (TABLE_SLOTS * 32) as u64, s);
@@ -1068,14 +1075,15 @@ impl ChunkWorld {
         if !chunk_jobs.is_empty() {
             self.queue.write_buffer(&self.chunk_jobs, 0, bytemuck::cast_slice(&chunk_jobs));
         }
+        // A pass per kernel, each timed (`QUERIES`).
+        let stamp = |begin: Option<u32>, end: u32| {
+            self.queries.as_ref().zip(self.timing_now).map(|((set, _), ring)| {
+                let ring = ring as u32;
+                wgpu::ComputePassTimestampWrites { query_set: set, beginning_of_pass_write_index: begin.map(|b| QUERIES * ring + b), end_of_pass_write_index: Some(QUERIES * ring + end) }
+            })
+        };
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("chunk generate"),
-                timestamp_writes: self.queries.as_ref().zip(self.timing_now).map(|((set, _), ring)| {
-                    let ring = ring as u32;
-                    wgpu::ComputePassTimestampWrites { query_set: set, beginning_of_pass_write_index: Some(5 * ring), end_of_pass_write_index: Some(5 * ring + 1) }
-                }),
-            });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk tile columns"), timestamp_writes: stamp(Some(0), 1) });
             pass.set_bind_group(0, &group, &[]);
             if !evictions.is_empty() {
                 pass.set_pipeline(&self.evict_pipeline);
@@ -1085,9 +1093,19 @@ impl ChunkWorld {
                 pass.set_pipeline(&self.tile_columns);
                 pass.dispatch_workgroups(64, tile_jobs.len() as u32, 1);
             }
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk columns"), timestamp_writes: stamp(None, 5) });
+            pass.set_bind_group(0, &group, &[]);
             if !chunk_jobs.is_empty() {
                 pass.set_pipeline(&self.chunk_columns);
                 pass.dispatch_workgroups(64, chunk_jobs.len() as u32, 1);
+            }
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk build"), timestamp_writes: stamp(None, 6) });
+            pass.set_bind_group(0, &group, &[]);
+            if !chunk_jobs.is_empty() {
                 pass.set_pipeline(&self.chunk_build);
                 pass.dispatch_workgroups(chunk_jobs.len() as u32, 1, 1);
             }
@@ -1168,7 +1186,8 @@ impl ChunkWorld {
                     let data = slot.buffer.slice(..).get_mapped_range().unwrap();
                     let t: &[u64] = bytemuck::cast_slice(&data);
                     let ms = |a: u64, b: u64| b.saturating_sub(a) as f64 * period;
-                    let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), generate: ms(t[0], t[1]), tiles };
+                    let stages = [ms(t[0], t[1]), ms(t[1], t[5]), ms(t[5], t[6])];
+                    let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), generate: ms(t[0], t[6]), tiles, stages };
                     if tiles >= 8 {
                         let per = timing.generate / tiles as f64;
                         self.ms_per_tile = Some(self.ms_per_tile.map_or(per, |old| old * 0.9 + per * 0.1));
@@ -1366,7 +1385,7 @@ impl ChunkWorld {
                         depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: timing.filter(|_| round == 0).map(|(set, _, ring)| wgpu::RenderPassTimestampWrites { query_set: set, beginning_of_pass_write_index: Some(5 * ring + 2), end_of_pass_write_index: Some(5 * ring + 3) }),
+                    timestamp_writes: timing.filter(|_| round == 0).map(|(set, _, ring)| wgpu::RenderPassTimestampWrites { query_set: set, beginning_of_pass_write_index: Some(QUERIES * ring + 2), end_of_pass_write_index: Some(QUERIES * ring + 3) }),
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
@@ -1385,7 +1404,7 @@ impl ChunkWorld {
             // 2. Trace each pixel's ray through its seed chunk.
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("chunk trace"),
-                timestamp_writes: timing.filter(|_| round + 1 == rounds).map(|(set, _, ring)| wgpu::ComputePassTimestampWrites { query_set: set, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(5 * ring + 4) }),
+                timestamp_writes: timing.filter(|_| round + 1 == rounds).map(|(set, _, ring)| wgpu::ComputePassTimestampWrites { query_set: set, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(QUERIES * ring + 4) }),
             });
             pass.set_pipeline(&self.trace);
             pass.set_bind_group(0, &group, &[]);
@@ -1422,9 +1441,9 @@ impl ChunkWorld {
         if let Some((set, resolve, ring)) = timing {
             // Resolve offsets are 256-byte aligned.
             let at = u64::from(ring) * u64::from(wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT);
-            encoder.resolve_query_set(set, 5 * ring..5 * ring + 5, resolve, at);
+            encoder.resolve_query_set(set, QUERIES * ring..QUERIES * ring + QUERIES, resolve, at);
             let slot = &mut self.timing_slots[ring as usize];
-            encoder.copy_buffer_to_buffer(resolve, at, &slot.buffer, 0, 40);
+            encoder.copy_buffer_to_buffer(resolve, at, &slot.buffer, 0, u64::from(QUERIES) * 8);
             slot.frame = Some((frame, self.last_generated));
             self.timing_now = None;
         }

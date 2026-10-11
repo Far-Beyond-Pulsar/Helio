@@ -367,7 +367,18 @@ probes on the next face match the exact CPU raycast (52.68 m), and the
 holds are unchanged (mountain 4.17 -> 4.19 ms, ground 1.83 -> 1.85,
 fastest of three interleaved).
 
-Left for phase 2: residency by ray reach (caves).
+### Where generation goes
+
+Generation is timed by kernel (`FrameTimings::stages`). In the cruise, a
+tile costs 47 us in tile columns (the terrain program, once per column:
+warp, erosion gradients, ridges), 1.9 us in chunk columns and 4 us in
+chunk builds. Streaming throughput is the terrain program's: the cruise at
+300 m/s, 34 m up keeps 5-7% of the drawn tiles in view coarser than
+wanted (the crossfades hide their switches). The program already skips
+octaves finer than a level's cells (`landform_resolved`).
+
+Left for phase 2: residency by ray reach (caves); the terrain program's
+cost per column.
 
 ## References
 

@@ -995,6 +995,8 @@ fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
     let mut pending = std::collections::VecDeque::new();
     let (mut times, mut update_ms, mut coarse, mut requests, mut resident) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), 0);
     let mut fading = Vec::new();
+    // Generation by kernel (us), and the tiles it made.
+    let (mut stage_us, mut stage_tiles) = ([0.0f64; 3], 0usize);
     let counting = std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some();
     let mut counts = [0u64; 7];
     let (mut generate_ms, mut per_tile) = (Vec::new(), Vec::new());
@@ -1023,6 +1025,10 @@ fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
             generate_ms.push(t.generate);
             if t.tiles > 0 {
                 per_tile.push(t.generate / t.tiles as f64);
+                for (sum, ms) in stage_us.iter_mut().zip(t.stages) {
+                    *sum += ms * 1e3;
+                }
+                stage_tiles += t.tiles;
             }
         }
         coarse.push(stats.coarse_share);
@@ -1061,6 +1067,7 @@ fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
         }
     }
     let lagging = coarse.iter().filter(|&&c| c > 0.02).count();
+    eprintln!("CHUNKFLY {mode} generation us a tile by kernel (tile columns, chunk columns, chunk build): {:.1?}", stage_us.map(|us| us / stage_tiles.max(1) as f64));
     eprintln!("CHUNKFLY {mode} fading tiles mean {:.0} max {:.0}", fading.iter().sum::<f64>() / fading.len().max(1) as f64, fading.iter().copied().fold(0.0, f64::max));
     if counting {
         let [seeded, hits, steps, boxes, missed, missed_boxes, lost] = counts.map(|v| v as f64);
