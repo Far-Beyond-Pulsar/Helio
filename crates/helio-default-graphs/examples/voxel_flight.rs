@@ -1273,7 +1273,7 @@ fn main() {
     let dir = land_near(&flight.planet, 2, 0.47, 0.53, 20.0);
     let ground = flight.planet.surface_point(dir, 1.7);
     let heading = 0.6;
-    // `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|tunnel`: settle one view
+    // `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|tunnel|face_edge`: settle one view
     // and keep drawing it (`HELIO_VOXEL_FLIGHT_HOLD_SECONDS`, 120), for a
     // GPU profiler to trace steady frames.
     if let Ok(mode) = std::env::var("HELIO_VOXEL_CHUNKS_FLY") {
@@ -1286,6 +1286,14 @@ fn main() {
             "mountain_slope" => {
                 let (_, e, f) = mountain(&flight.planet, heading).views[1];
                 (e, f)
+            }
+            // 40 m from the +Y face's edge, looking across it.
+            "face_edge" => {
+                let grid = flight.planet.grid();
+                let n = f64::from(grid.cells());
+                let eye = flight.planet.surface_point(grid.direction(2, n - 400.0, n * 0.5), 1.7);
+                let far = flight.planet.surface_point(grid.direction(2, n + 3000.0, n * 0.5), 0.0);
+                (eye, (far - eye).normalize().as_vec3())
             }
             _ => (ground, look(ground, heading, -12.0)),
         };

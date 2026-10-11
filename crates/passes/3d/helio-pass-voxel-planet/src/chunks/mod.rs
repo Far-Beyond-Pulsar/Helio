@@ -555,6 +555,7 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
             },
         )
         .replace("FADE_FRAMES", &drawn::FADE_FRAMES.to_string())
+        .replace("PLANE_WORLD", if plane { "true" } else { "false" })
         .replace("COUNT(3)", &count(3))
         .replace("COUNT(8)", &count(8))
         .replace("COUNT(10)", &count(10))

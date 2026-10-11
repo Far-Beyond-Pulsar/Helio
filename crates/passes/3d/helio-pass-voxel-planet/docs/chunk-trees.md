@@ -353,8 +353,21 @@ Settled views pay about 0.1 ms (mountain hold, fastest of four
 interleaved runs: 4.07 -> 4.18 ms; runs vary 4.1-5.3 ms with the GPU's
 clocks).
 
-Left for phase 2: residency by ray reach (caves) and face-edge
-neighbours.
+### Across cube faces
+
+A ray leaving a face continues on the face across the edge
+(`across_edge`): the faces are equal-angle, so across an edge an index
+runs on mirrored and along it cells meet exactly on the edge, an integer
+map from the face bases. Air on the new face is crossed in the frame of
+one of its chunks. Boxes stop at the face's edge (a coarse tile can reach
+past it, its columns there empty, and a ray crossing them skipped what lay
+across). Rays used to end at the edge: 40 m from it the terrain beyond was
+sky. The harness's `face_edge` view looks across the +Y face's edge; its
+probes on the next face match the exact CPU raycast (52.68 m), and the
+holds are unchanged (mountain 4.17 -> 4.19 ms, ground 1.83 -> 1.85,
+fastest of three interleaved).
+
+Left for phase 2: residency by ray reach (caves).
 
 ## References
 
