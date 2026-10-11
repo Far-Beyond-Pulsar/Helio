@@ -300,13 +300,12 @@ fn chunk_key(tile: TileKey, cz: i32) -> [i32; 4] {
 }
 
 /// Layers [lo, hi) whose chunks `tile` generates: the volume's whole
-/// extent within a few chunks of the eye (caves deep under the surface no
-/// eye ray reaches from farther: stand-in for residency by the rays'
-/// reach), else from the surface band up; widened by brushes that add
-/// above or remove below.
-fn layers_needed(grid: &Grid, tile: TileKey, ranges: residency::Ranges, eye: &Eye, faces: &[FaceBrush]) -> (i32, i32) {
+/// extent where rays reached under its surface band (`deep`: through cave
+/// mouths) or within a few chunks of the eye, else from the surface band
+/// up; widened by brushes that add above or remove below.
+fn layers_needed(grid: &Grid, tile: TileKey, ranges: residency::Ranges, eye: &Eye, faces: &[FaceBrush], deep: bool) -> (i32, i32) {
     let near_eye = tile_distance(grid, tile, ranges.volume, eye) < 4.0 * f64::from(CHUNK) * grid.level_size(tile.level);
-    let (mut lo, mut hi) = if near_eye { ranges.volume } else { (ranges.surface.0, ranges.volume.1) };
+    let (mut lo, mut hi) = if deep || near_eye { ranges.volume } else { (ranges.surface.0, ranges.volume.1) };
     let shift = tile.level + 1;
     let span = |c: i32| (i64::from(c * CHUNK) << shift, (i64::from(c * CHUNK + CHUNK) << shift) - 1);
     for fb in faces {
@@ -387,6 +386,22 @@ pub struct FrameTimings {
 /// end.
 const QUERIES: u32 = 8;
 
+/// `Reach`'s size: a count and 4095 keys.
+const REACH_BYTES: u64 = 16 * 4096;
+
+/// A copy of `Reach` on its way back.
+struct ReachSlot {
+    buffer: wgpu::Buffer,
+    state: ReachState,
+}
+
+enum ReachState {
+    Free,
+    /// Copied in a frame not yet submitted.
+    Copied,
+    Mapping(std::sync::Arc<std::sync::atomic::AtomicBool>),
+}
+
 /// A frame's timestamps on their way back.
 struct TimingSlot {
     buffer: wgpu::Buffer,
@@ -417,6 +432,9 @@ pub struct UpdateStats {
     pub drawn_tiles: usize,
     /// Drawn tiles fading in or out of a switch between levels.
     pub fading_tiles: usize,
+    /// Tiles rays first reached under the chunks of (cave mouths): their
+    /// whole volume generated.
+    pub deep_tiles: usize,
     pub drawn_chunks: usize,
     pub resident_chunks: usize,
     /// Drawn tiles in view coarser than wanted, as a share of the drawn
@@ -503,6 +521,12 @@ pub struct ChunkWorld {
     timings: Vec<FrameTimings>,
     /// Fragment, step and hit counts (`HELIO_VOXEL_CHUNKS_COUNT`).
     counters: wgpu::Buffer,
+    /// Tiles rays reached under the chunks of (`Reach`), its readback
+    /// slots, and the tiles whose whole volume is generated.
+    reach: wgpu::Buffer,
+    reach_slots: Vec<ReachSlot>,
+    deep: FxHashSet<TileKey>,
+    reached: Vec<TileKey>,
     evict_pipeline: wgpu::ComputePipeline,
     /// Chunk table changes scattered (`chunk_table.wgsl`).
     table_layout: wgpu::BindGroupLayout,
@@ -794,6 +818,7 @@ impl ChunkWorld {
                 storage(10, true, all),
                 storage(11, true, all),
                 storage(12, true, all),
+                storage(13, false, wgpu::ShaderStages::COMPUTE),
             ],
         });
         let trace_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -993,6 +1018,10 @@ impl ChunkWorld {
             timing_now: None,
             timings: Vec::new(),
             counters: buffer("chunk counters", 1024, s | wgpu::BufferUsages::COPY_SRC),
+            reach: buffer("chunk reach", REACH_BYTES, s | wgpu::BufferUsages::COPY_SRC),
+            reach_slots: (0..TIMING_RING).map(|_| ReachSlot { buffer: buffer("chunk reach read", REACH_BYTES, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST), state: ReachState::Free }).collect(),
+            deep: FxHashSet::default(),
+            reached: Vec::new(),
             evict_pipeline,
             table_layout,
             table_pipeline,
@@ -1086,7 +1115,7 @@ impl ChunkWorld {
     #[allow(clippy::too_many_arguments)]
     fn queue_tile(&mut self, key: TileKey, ranges: residency::Ranges, eye_at: &Eye, batch: &mut GenBatch, readback: &mut Readback, evictions: &mut Vec<u32>, stats: &mut UpdateStats) -> bool {
         let grid = self.grid;
-        let (lo, hi) = layers_needed(&grid, key, ranges, eye_at, &self.faces);
+        let (lo, hi) = layers_needed(&grid, key, ranges, eye_at, &self.faces, self.deep.contains(&key));
         let layers = if hi > lo { (lo.div_euclid(CHUNK), (hi - 1).div_euclid(CHUNK)) } else { (0, -1) };
         let count = (layers.1 - layers.0 + 1).max(0) as usize;
         if batch.tile_jobs.len() >= TILE_BATCH || batch.chunk_jobs.len() + count > CHUNK_BATCH {
@@ -1259,7 +1288,7 @@ impl ChunkWorld {
                     // Layers its chunks must hold beyond those generated
                     // (measured, or brushes since): generate the tile again
                     // in place, its chunks drawn until then.
-                    let need = layers_needed(&grid, *key, ranges, &eye_at, &self.faces);
+                    let need = layers_needed(&grid, *key, ranges, &eye_at, &self.faces, self.deep.contains(key));
                     if self.tiles.get(key).is_some_and(|t| need.0 < t.layers.0 || need.1 > t.layers.1) {
                         self.stale.remove(key);
                         self.urgent.insert(*key);
@@ -1290,6 +1319,14 @@ impl ChunkWorld {
             r.buffer.unmap();
         }
 
+        // Tiles rays reached under: their whole volume, generated again now.
+        for key in std::mem::take(&mut self.reached) {
+            if self.deep.insert(key) && self.tiles.contains_key(&key) {
+                self.stale.remove(&key);
+                self.urgent.insert(key);
+                stats.deep_tiles += 1;
+            }
+        }
         lap(&mut stats, 0);
         // 2. The latest plan (made on the worker from an eye a frame or
         // two old) and the next; 3. evict what it no longer needs.
@@ -1493,6 +1530,35 @@ impl ChunkWorld {
     /// Start mapping the results the last update recorded (call after its
     /// submit).
     pub fn submitted(&mut self) {
+        // Tiles rays reached under: map the copies just submitted, read
+        // those mapped.
+        for slot in &mut self.reach_slots {
+            match &slot.state {
+                ReachState::Copied => {
+                    let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let flag = ready.clone();
+                    slot.buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                        if r.is_ok() {
+                            flag.store(true, std::sync::atomic::Ordering::Release);
+                        }
+                    });
+                    slot.state = ReachState::Mapping(ready);
+                }
+                ReachState::Mapping(ready) if ready.load(std::sync::atomic::Ordering::Acquire) => {
+                    {
+                        let data = slot.buffer.slice(..).get_mapped_range().unwrap();
+                        let words: &[[i32; 4]] = bytemuck::cast_slice(&data);
+                        let count = (words[0][0] as u32 as usize).min(words.len() - 1);
+                        for k in &words[1..=count] {
+                            self.reached.push(TileKey { face: (k[0] & 0xff) as u8, level: (k[0] >> 8) as u32, cx: k[1], cy: k[2] });
+                        }
+                    }
+                    slot.buffer.unmap();
+                    slot.state = ReachState::Free;
+                }
+                _ => {}
+            }
+        }
         // Timestamps: map those just submitted, read those mapped.
         let period = f64::from(self.queue.get_timestamp_period()) / 1.0e6;
         for slot in &mut self.timing_slots {
@@ -1538,6 +1604,12 @@ impl ChunkWorld {
         }
     }
 
+
+    /// Tiles whose whole volume is generated because rays reached under
+    /// their surface band.
+    pub fn deep_tiles(&self) -> usize {
+        self.deep.len()
+    }
 
     /// Whether nothing waits to be generated or read back.
     pub fn settled(&self) -> bool {
@@ -1646,10 +1718,11 @@ impl ChunkWorld {
             table: [self.drawn_set.mask(), self.face_cells, self.boxes.0, frame as u32],
         };
         self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
+        self.queue.write_buffer(&self.reach, 0, &[0u8; 16]);
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk draw"),
             layout: &self.draw_layout,
-            entries: &[entry(0, &self.params), entry(1, &self.statics), entry(2, &self.chunk_meta), entry(3, &self.mids), entry(4, &self.mid_leaves), entry(5, &self.leaves), entry(6, &self.leaf_materials), entry(7, &self.palette), entry(8, &self.mid_materials), entry(9, &self.counters), entry(10, &self.chunk_table), entry(11, &self.chunk_keys), entry(12, &self.draw_list)],
+            entries: &[entry(0, &self.params), entry(1, &self.statics), entry(2, &self.chunk_meta), entry(3, &self.mids), entry(4, &self.mid_leaves), entry(5, &self.leaves), entry(6, &self.leaf_materials), entry(7, &self.palette), entry(8, &self.mid_materials), entry(9, &self.counters), entry(10, &self.chunk_table), entry(11, &self.chunk_keys), entry(12, &self.draw_list), entry(13, &self.reach)],
         });
         self.last_group = Some(group.clone());
         let targets = self.targets.as_ref().unwrap();
@@ -1796,6 +1869,12 @@ impl ChunkWorld {
             pass.set_bind_group(0, &group, &[]);
             pass.set_bind_group(1, &resolve_group, &[]);
             pass.draw(0..3, 0..1);
+        }
+        // The tiles reached under, back without waiting (a frame's copy
+        // when a slot is free).
+        if let Some(slot) = self.reach_slots.iter_mut().find(|s| matches!(s.state, ReachState::Free)) {
+            encoder.copy_buffer_to_buffer(&self.reach, 0, &slot.buffer, 0, REACH_BYTES);
+            slot.state = ReachState::Copied;
         }
         if let Some((set, resolve, ring)) = timing {
             // Resolve offsets are 256-byte aligned.

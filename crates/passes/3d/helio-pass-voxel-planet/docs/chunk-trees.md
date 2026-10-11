@@ -377,8 +377,18 @@ chunk builds. Streaming throughput is the terrain program's: the cruise at
 wanted (the crossfades hide their switches). The program already skips
 octaves finer than a level's cells (`landform_resolved`).
 
-Left for phase 2: residency by ray reach (caves); the terrain program's
-cost per column.
+Left for phase 2: the terrain program's cost per column.
+
+### Caves by the rays' reach
+
+A tile far from the eye generates its surface band and up; its caves
+show only through mouths in that band. A ray that goes on under a drawn
+tile's chunks (through a mouth) stops there, shown solid, and lists the
+tile (`Reach`, read back without waiting); the tile is marked deep and
+generated again at once with its whole volume. The harness's `cave` view
+(inside the natural cave nearest the spawn) finds 6 such tiles along the
+tunnel; with them generated its probes match the CPU raycast to the
+centimetre.
 
 ## Phase 3a results (2026-10-11): edits
 

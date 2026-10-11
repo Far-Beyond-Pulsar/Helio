@@ -983,7 +983,26 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
         }
         worst
     };
+    // Drawn frames find cave mouths: settle what they ask for.
+    for _ in 0..4 {
+        step(&mut world, &planet, &mut frame);
+    }
+    while !world.settled() {
+        step(&mut world, &planet, &mut frame);
+    }
     step(&mut world, &planet, &mut frame);
+    eprintln!("CHUNKDIG {view}: rays reached under {} tiles' surface bands", world.deep_tiles());
+    // `HELIO_VOXEL_CHUNKS_PROBE=x,y;x,y`: those pixels against the CPU raycast.
+    if let Ok(probes) = std::env::var("HELIO_VOXEL_CHUNKS_PROBE") {
+        let inverse = (camera.proj * camera.view).inverse();
+        for probe in probes.split(';') {
+            let xy: Vec<u32> = probe.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+            let ndc = Vec3::new((xy[0] as f32 + 0.5) / w as f32 * 2.0 - 1.0, 1.0 - (xy[1] as f32 + 0.5) / h as f32 * 2.0, 0.5);
+            let far = inverse * ndc.extend(1.0);
+            let dir = (far.truncate() / far.w).normalize().as_dvec3();
+            eprintln!("CHUNKDIG probe {},{}: chunks {:.2} m, cpu {:?}", xy[0], xy[1], depth_at(&world, xy[0], xy[1]), planet.raycast(eye, dir, 1000.0).map(|h| (h.distance, h.cell)));
+        }
+    }
     let before_path = out.join("dig_before.png");
     save_chunk_colour(flight, &world, before_path.to_str().unwrap());
     let before = centre_depth(&world);
@@ -1395,7 +1414,7 @@ fn main() {
     let dir = land_near(&flight.planet, 2, 0.47, 0.53, 20.0);
     let ground = flight.planet.surface_point(dir, 1.7);
     let heading = 0.6;
-    // `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|tunnel|face_edge`: settle one view
+    // `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|tunnel|face_edge|cave`: settle one view
     // and keep drawing it (`HELIO_VOXEL_FLIGHT_HOLD_SECONDS`, 120), for a
     // GPU profiler to trace steady frames.
     if let Ok(mode) = std::env::var("HELIO_VOXEL_CHUNKS_FLY") {
@@ -1407,6 +1426,19 @@ fn main() {
             "tunnel" => carve_tunnel(&mut flight, ground, heading),
             "mountain_slope" => {
                 let (_, e, f) = mountain(&flight.planet, heading).views[1];
+                (e, f)
+            }
+            // Inside the natural cave nearest the spawn (searched 3 km
+            // apart, cave regions are ~6 km), along it.
+            "cave" => {
+                let up = ground.normalize();
+                let ahead = tangent(ground, heading).as_dvec3();
+                let side = ahead.cross(up);
+                let (_, e, f) = (0..49)
+                    .map(|n| (n % 7 - 3, n / 7 - 3))
+                    .map(|(a, b)| flight.planet.surface_point(ground + ahead * (3000.0 * f64::from(a)) + side * (3000.0 * f64::from(b)), 0.0))
+                    .find_map(|near| volume_views(&flight.planet, near).into_iter().find(|v| v.0 == "cave_tunnel"))
+                    .expect("a cave within 9 km of the spawn");
                 (e, f)
             }
             // 40 m from the +Y face's edge, looking across it.

@@ -90,6 +90,14 @@ struct ChunkMeta {
 @group(0) @binding(11) var<storage, read> chunk_keys: array<vec4<i32>>;
 // This frame's boxes: chunk slots, those holding the eye first.
 @group(0) @binding(12) var<storage, read> draw_list: array<u32>;
+// Drawn tiles rays reached under the chunks of (through a cave mouth):
+// how many times, then the first ones' keys (face | level << 8, cx, cy),
+// for their whole volume to be generated.
+struct Reach {
+    count: atomic<u32>,
+    keys: array<vec4<i32>>,
+}
+@group(0) @binding(13) var<storage, read_write> reach: Reach;
 
 // Chunk `slot`'s frame relative to the eye.
 fn chunk_frame(slot: u32) -> ChunkDraw {
@@ -307,7 +315,8 @@ fn cell_at(cell: vec3<i32>, frac: vec3<f32>, diff: i32) -> vec3<i32> {
 }
 
 // What a ray meets at a cell: a drawn chunk (`slot`), or air to cross,
-// cells [lo, hi) of `level` (LOST: off the drawn cut), in the frame of
+// cells [lo, hi) of `level` (LOST: off the drawn cut; BELOW: under a drawn
+// tile's chunks, lo its tile and level, hi.x its face), in the frame of
 // chunk `frame` when it is finer than the ray's (else NONE).
 struct Place {
     slot: u32,
@@ -318,6 +327,7 @@ struct Place {
 }
 
 const LOST: i32 = 99;
+const BELOW: i32 = 98;
 // A column entry's layer key (`drawn::COLUMN`).
 const COLUMN: i32 = -2147483647 - 1;
 
@@ -455,8 +465,8 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
         if crossed && f == NONE { return lost; }
         return Place(NONE, level + up, vec3<i32>(at * 64, top), vec3<i32>(at * 64 + 64, top + (1 << 20)), f);
     }
-    // Under the tile's chunks: solid, reached only through them.
-    if layer < column.x { return lost; }
+    // Under the tile's chunks: reached through a cave mouth among them.
+    if layer < column.x { return Place(NONE, BELOW, vec3<i32>(tile, level + diff), vec3<i32>(face, 0, 0), NONE); }
     let s = find_entry(vec4<i32>(tile_key, tile, layer));
     if s != NONE { return Place(bitcast<u32>(chunk_table[s * 2u + 1u].x), level + diff, vec3<i32>(0), vec3<i32>(0), NONE); }
     // An empty layer among them.
@@ -598,6 +608,14 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, r: i32, boxes
                 WCOUNT(10)
                 break;
             }
+            if next.level == BELOW {
+                // Under a tile's chunks, which hold only its surface band:
+                // solid where the ray leaves this box, until the tile's
+                // whole volume (its caves) is generated.
+                let n = atomicAdd(&reach.count, 1u);
+                if n < arrayLength(&reach.keys) { reach.keys[n] = vec4<i32>(next.hi.x | (next.lo.z << 8u), next.lo.xy, 0); }
+                return WalkEnd(true, t_leave, slot, clamp(local, vec3<i32>(0), vec3<i32>(63)), axis, select(1u, 0u, d[axis] > 0.0), 0u);
+            }
             // Air, crossed in this frame or the finer one given.
             if next.frame != NONE {
                 frame = chunk_frame(next.frame);
@@ -660,7 +678,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
         if next.slot != NONE {
             frame = chunk_frame(next.slot);
             key = chunk_keys[next.slot];
-        } else if next.level == LOST {
+        } else if next.level == LOST || next.level == BELOW {
             textureStore(out_exits, p, vec4<f32>(t_prev + 1e-4));
             return;
         } else {
