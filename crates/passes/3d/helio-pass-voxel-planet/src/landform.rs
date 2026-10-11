@@ -93,8 +93,8 @@ impl LandformVolume {
         // Threshold above which `share` of the noise lies.
         let threshold = |share: f64| (noise_quantile(1.0 - share.clamp(0.0, 1.0)) * f64::from(ONE)).round() as i32;
         let layer = grid.layer_mm() as i32;
-        // Caves may reach any depth: bands taller than a column holds are
-        // clipped to a window around the eye (generate.wgsl).
+        // Caves may reach any depth: chunks are generated through a tile's
+        // whole volume where rays reach under its surface (`chunks`).
         let depth = mm(caves.depth_m);
         let mut flags = 0;
         if caves.enabled && depth > 0 && caves.tunnel_radius_m.max(caves.cavern_wavelength_m) > 0.0 {

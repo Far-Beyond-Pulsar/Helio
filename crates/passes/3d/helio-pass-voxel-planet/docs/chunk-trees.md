@@ -1,8 +1,8 @@
 # Chunk trees: the voxel terrain architecture
 
-Status: decided 2026-10-11; replaces span columns (`span-columns.md`) and
-the column tracer. `aaa-architecture.md` keeps the measurements that led
-here.
+Status: decided 2026-10-11; replaced span columns (`span-columns.md`) and
+the column tracer, which were removed once the chunk pass ran in Pulsar.
+`aaa-architecture.md` keeps the measurements that led here.
 
 ## Goal
 

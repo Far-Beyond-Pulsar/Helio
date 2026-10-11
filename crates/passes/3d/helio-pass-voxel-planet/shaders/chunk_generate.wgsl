@@ -64,8 +64,6 @@ const NONE: u32 = 0xffffffffu;
 // Leaf block size classes: 16 << class leaves.
 const CLASSES: u32 = 9u;
 
-@group(0) @binding(1) var<uniform> world: World;
-@group(0) @binding(16) var<uniform> terrain: TerrainConstants;
 @group(0) @binding(2) var<storage, read> tile_jobs: array<TileJob>;
 @group(0) @binding(3) var<storage, read_write> tile_columns: array<vec4<i32>>;
 @group(0) @binding(4) var<storage, read_write> tile_ranges: array<atomic<i32>>;
@@ -216,44 +214,68 @@ fn bit_at(m: vec2<u32>, b: u32) -> bool {
     return ((select(m.x, m.y, b >= 32u) >> (b & 31u)) & 1u) != 0u;
 }
 
-// Where a ball brush crosses the column over domain point `p` (half-cell
-// centre `ch`): its first and last level cells, from the same solve as the
-// span generator (`brush_crossings` in generate.wgsl).
-fn ball_cells(b: FaceBrush, p: vec3<i32>, level: u32) -> vec3<i32> {
+// Where brush `b` crosses the column over domain point `p` (half-cell
+// centre `ch`): its first and last level cells, how far either may be off
+// (cells; 0: exact), and whether it reaches the column at all. A box's
+// cells are exact. A ball in volume space holds one interval of the column
+// (its volume points are linear in the layer, `volume_point_half`): solved
+// in f32 around the column's exact point at the ball's height, along the
+// exact slope, with the error of the f32 integers and products (relative
+// 2^-22) and of the volume points' rounding; near tangency the root moves
+// by the square root of the discriminant's error. Cells within the margin
+// of either end are tested exactly (`brush_holds`).
+fn brush_cells(b: FaceBrush, p: vec3<i32>, ch: vec2<i32>, level: u32) -> vec4<i32> {
+    let none = vec4<i32>(0, -1, 0, 0);
+    if b.radius_half < (1u << level) { return none; }
     let shift = level + 1u;
     let half = 1 << level;
+    if ((b.flags >> 6u) & 3u) == 1u {
+        // A box: the columns inside its footprint, between its faces (cell
+        // centres `(k << shift) + half` from k_lo to k_hi).
+        if any(vec2<u32>(abs(ch - b.center.xy)) > vec2<u32>(b.radius_half)) { return none; }
+        return vec4<i32>(-((half - b.k_lo) >> shift), (b.k_hi - half) >> shift, 0, 1);
+    }
     let h0 = (b.k_lo >> 1u) + (b.k_hi >> 1u);
     let q0 = volume_point_half(p, h0);
     var v = vec3<f32>(0.0, f32(world.scale.w) / 65536.0, 0.0);
     if !is_plane() { v = vec3<f32>(p) * (f32(world.scale.y) * exp2(-f32(world.scale.z) - 30.0)); }
     let a = dot(v, v);
-    if a <= 0.0 { return vec3<i32>(0, -1, 0); }
+    if a <= 0.0 { return none; }
     let d = vec3<f32>(q0 - b.ball.xyz);
     let r = f32(abs(b.ball.w));
+    let dl = length(d);
     let bb = dot(d, v);
-    let c = (length(d) - r) * (length(d) + r);
+    let c = (dl - r) * (dl + r);
     let disc = bb * bb - a * c;
-    if disc < 0.0 { return vec3<i32>(0, -1, 0); }
-    let sq = sqrt(disc);
+    let e = (dl + r) * 4.8e-7 + 4.0;
+    let dd = a * 2.0 * (dl + r) * e;
+    if disc < -dd { return none; }
+    let sq = sqrt(max(disc, 0.0));
+    let root_err = select(dd / (2.0 * sq), sqrt(dd), sq * sq < dd);
+    let t_err = (root_err + e * sqrt(a)) / a;
+    // Cells relative to the cell holding h0, so f32 never holds the
+    // planet-scale height itself.
     let k0 = h0 >> shift;
     let rem = f32(h0 - (k0 << shift) - half);
     let cell = f32(1 << shift);
-    return vec3<i32>(k0 + i32(floor((rem + (-bb - sq) / a) / cell + 0.5)), k0 + i32(floor((rem + (-bb + sq) / a) / cell + 0.5)), 1);
+    let lo = k0 + i32(floor((rem + (-bb - sq) / a) / cell + 0.5));
+    let hi = k0 + i32(floor((rem + (-bb + sq) / a) / cell + 0.5));
+    return vec4<i32>(lo, hi, i32(ceil(t_err / cell)) + 2, 1);
 }
 
-// The level cells brush `b` covers in the column over domain point `p`
-// (half-cell centre `ch`): first, last, and whether any.
-fn brush_cells(b: FaceBrush, p: vec3<i32>, ch: vec2<i32>, level: u32) -> vec3<i32> {
-    if b.radius_half < (1u << level) { return vec3<i32>(0, -1, 0); }
-    if ((b.flags >> 6u) & 3u) == 1u {
-        if all(vec2<u32>(abs(ch - b.center.xy)) <= vec2<u32>(b.radius_half)) {
-            let shift = level + 1u;
-            let half = 1 << level;
-            return vec3<i32>(-((half - b.k_lo) >> shift), (b.k_hi - half) >> shift, 1);
-        }
-        return vec3<i32>(0, -1, 0);
-    }
-    return ball_cells(b, p, level);
+// Exact containment of level cell `k` of the column (`FaceBrush::contains`:
+// exact 64-bit squares), given its `brush_cells`.
+fn brush_holds(b: FaceBrush, p: vec3<i32>, cells: vec4<i32>, level: u32, k: i32) -> bool {
+    if cells.w == 0 || k < cells.x - cells.z || k > cells.y + cells.z { return false; }
+    if k > cells.x + cells.z && k < cells.y - cells.z { return true; }
+    if cells.z == 0 { return true; }
+    let q = volume_point_half(p, center_half(k, level));
+    let rr = u32(abs(b.ball.w));
+    let dq = vec3<u32>(abs(q - b.ball.xyz));
+    if any(dq > vec3<u32>(rr)) { return false; }
+    let sum = add_wide(add_wide(mul_wide(dq.x, dq.x), mul_wide(dq.y, dq.y)), mul_wide(dq.z, dq.z));
+    let r2 = mul_wide(rr, rr);
+    return sum.y < r2.y || (sum.y == r2.y && sum.x <= r2.x);
 }
 
 // Brush refs [first, end) of `job` applied in order to a column's cells
@@ -266,8 +288,20 @@ fn apply_brushes(mask: vec2<u32>, job: ChunkJob, first: u32, end: u32, p: vec3<i
         let op = (b.flags >> 4u) & 3u;
         if op >= 2u { continue; }
         let cells = brush_cells(b, p, ch, level);
-        if cells.z == 0 || cells.x > cells.y { continue; }
-        m = set_bits(m, cells.x - k0, cells.y - k0 + 1, op == 1u);
+        if cells.w == 0 || cells.x - cells.z > cells.y + cells.z { continue; }
+        // Cells surely inside at once, those near either end exactly.
+        let add = op == 1u;
+        if cells.z == 0 {
+            m = set_bits(m, cells.x - k0, cells.y - k0 + 1, add);
+        } else {
+            m = set_bits(m, cells.x + cells.z + 1 - k0, cells.y - cells.z - k0, add);
+            let edges = array<vec2<i32>, 2>(vec2<i32>(cells.x - cells.z, cells.x + cells.z), vec2<i32>(cells.y - cells.z, cells.y + cells.z));
+            for (var n = 0u; n < 2u; n++) {
+                for (var k = max(edges[n].x, k0); k <= min(edges[n].y, k0 + 63); k++) {
+                    if brush_holds(b, p, cells, level, k) { m = set_bits(m, k - k0, k - k0 + 1, add); }
+                }
+            }
+        }
     }
     return m;
 }
@@ -309,10 +343,38 @@ fn edited_material(material: u32, job: ChunkJob, column: u32, li: u32, p: vec3<i
         let b = brushes[brush_refs[job.brushes + e]];
         let brush_material = (b.flags >> 8u) & 0xffu;
         if ((b.flags >> 4u) & 3u) == 0u || brush_material == 0u { continue; }
-        let cells = brush_cells(b, p, ch, level);
-        if cells.z != 0 && k >= cells.x && k <= cells.y { m = brush_material; }
+        if brush_holds(b, p, brush_cells(b, p, ch, level), level, k) { m = brush_material; }
     }
     return m;
+}
+
+// The field's heights at the brick column's lean lattice nodes, and
+// whether some column of it leans (`terrain::lean_height`).
+var<workgroup> w_lean: array<i32, 64>;
+var<workgroup> w_leaning: atomic<u32>;
+
+// Bilinear height of the lean lattice at `xy` (Q8 level cells from node
+// (0, 0)), nodes 0..8 per axis (`terrain::lattice_bilinear`).
+fn lean_bilinear(xy: vec2<i32>, spacing: i32) -> i32 {
+    let step = spacing * 256;
+    let n = clamp(vec2<i32>(div_floor(xy.x, step), div_floor(xy.y, step)), vec2<i32>(0), vec2<i32>(6));
+    let f = clamp((xy - n * step) / spacing, vec2<i32>(0), vec2<i32>(256));
+    let h00 = w_lean[n.x + n.y * 8];
+    let h10 = w_lean[n.x + 1 + n.y * 8];
+    let h01 = w_lean[n.x + (n.y + 1) * 8];
+    let h11 = w_lean[n.x + 1 + (n.y + 1) * 8];
+    let a = h00 + (((h10 - h00) * f.x) >> 8u);
+    let b = h01 + (((h11 - h01) * f.x) >> 8u);
+    return a + (((b - a) * f.y) >> 8u);
+}
+
+// Height (mm) of the heightfield displaced by the program's lean under cell
+// `(i, j, k)` (`terrain::lean_height`); `node` is the lattice's first node.
+fn lean_height(p: vec3<i32>, i: i32, j: i32, k: i32, level: u32, height: i32, spacing: i32, node: vec2<i32>) -> i32 {
+    let o = terrain_lean_offset(p, i, j, k, level);
+    if o.x == 0 && o.y == 0 { return height; }
+    let xy = vec2<i32>(i, j) * 256 + 128 - node * spacing * 256;
+    return lean_bilinear(xy + o, spacing) + height - lean_bilinear(xy, spacing);
 }
 
 // One thread per column, one workgroup per 8x8 columns (a brick column):
@@ -329,6 +391,22 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     let j = tile.cy * 64 + i32(y);
     let column = tile_columns[job.tile * TILE_COLUMNS + y * 64u + x];
     let at = wg.y * TILE_COLUMNS + y * 64u + x;
+    // A leaning surface (overhangs) reads the field on a global lattice:
+    // nodes every `spacing` cells from `div_floor(8 ci - reach, spacing)`,
+    // shared by the brick column's lanes, each evaluating one.
+    let lean = terrain_lean(level);
+    let leaning = column.x != OUTSIDE && lean.x != 0 && column.w > 0;
+    let node = vec2<i32>(div_floor((i >> 3u) * 8 - lean.x, max(lean.y, 1)), div_floor((j >> 3u) * 8 - lean.x, max(lean.y, 1)));
+    if li == 0u { atomicStore(&w_leaning, 0u); }
+    workgroupBarrier();
+    if leaning { atomicStore(&w_leaning, 1u); }
+    workgroupBarrier();
+    if atomicLoad(&w_leaning) != 0u {
+        let last = (world.grid.z >> level) - 1;
+        let cell = vec2<i32>(clamp((node.x + i32(li & 7u)) * lean.y, 0, last), clamp((node.y + i32(li >> 3u)) * lean.y, 0, last));
+        w_lean[li] = generation_column(face, cell.x, cell.y, level, level >= 1u).x;
+    }
+    workgroupBarrier();
     if column.x == OUTSIDE {
         column_masks[at] = vec2<u32>(0u);
         column_materials[at] = M_AIR;
@@ -356,7 +434,9 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
                     continue;
                 }
             }
-            let solid = terrain_density(p, volume_point(face, i, j, scan, level), level, top, height, height, scan) > 0;
+            var lean_h = height;
+            if leaning { lean_h = lean_height(p, i, j, scan, level, height, lean.y, node); }
+            let solid = terrain_density(p, volume_point(face, i, j, scan, level), level, top, height, lean_h, scan) > 0;
             mask = set_bits(mask, scan - k0, scan - k0 + 1, solid);
             scan += 1;
         }

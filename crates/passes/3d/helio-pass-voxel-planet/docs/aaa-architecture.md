@@ -1,5 +1,9 @@
 # Voxel planet: architecture review against the AAA bar
 
+> Historical: the span-column renderer this describes was removed on
+> 2026-10-11, replaced by chunk trees ([`chunk-trees.md`](chunk-trees.md)).
+> Kept for the measurements and decisions behind that change.
+
 Status: review 2026-10-10; phases below in progress.
 
 ## Goals

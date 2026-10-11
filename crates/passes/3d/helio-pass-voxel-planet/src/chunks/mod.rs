@@ -311,25 +311,13 @@ fn chunk_key(tile: TileKey, cz: i32) -> [i32; 4] {
     [i32::from(tile.face) | ((tile.level as i32) << 8), tile.cx, tile.cy, cz]
 }
 
-/// Layers [lo, hi) whose chunks `tile` generates: the volume's whole
-/// extent where rays reached under its surface band (`deep`: through cave
-/// mouths) or within a few chunks of the eye, else from the surface band
-/// up; widened by brushes that add above or remove below.
-fn layers_needed(grid: &Grid, tile: TileKey, ranges: residency::Ranges, eye: &Eye, faces: &[FaceBrush], deep: bool) -> (i32, i32) {
+/// Layers [lo, hi) whose chunks `tile` generates (its `ranges` with its
+/// edits, [`ChunkWorld::with_edits`]): the volume's whole extent where rays
+/// reached under its surface band (`deep`: through cave mouths) or within a
+/// few chunks of the eye, else from the surface band up.
+fn layers_needed(grid: &Grid, tile: TileKey, ranges: residency::Ranges, eye: &Eye, deep: bool) -> (i32, i32) {
     let near_eye = tile_distance(grid, tile, ranges.volume, eye) < 4.0 * f64::from(CHUNK) * grid.level_size(tile.level);
-    let (mut lo, mut hi) = if deep || near_eye { ranges.volume } else { (ranges.surface.0, ranges.volume.1) };
-    let shift = tile.level + 1;
-    let span = |c: i32| (i64::from(c * CHUNK) << shift, (i64::from(c * CHUNK + CHUNK) << shift) - 1);
-    for fb in faces {
-        if brush_meets(fb, tile.face, tile.level, span(tile.cx), span(tile.cy), (i64::MIN / 4, i64::MAX / 4)) {
-            match fb.op() {
-                0 => lo = lo.min((fb.k_lo >> shift) - 1),
-                1 => hi = hi.max((fb.k_hi >> shift) + 1),
-                _ => {}
-            }
-        }
-    }
-    (lo, hi)
+    if deep || near_eye { ranges.volume } else { (ranges.surface.0, ranges.volume.1) }
 }
 
 /// Whether `fb` can touch cells of `level` with half-cell bounds `i`, `j`,
@@ -1187,12 +1175,45 @@ impl ChunkWorld {
         })
     }
 
+    /// `tile`'s field `ranges` widened by the layers its edits change: down
+    /// to what brushes remove, up to what they add, and over its baked
+    /// bricks. Residency measures a tile's distance by them (the floor of
+    /// a deep dig is near an eye down there) and generates their chunks.
+    fn with_edits(&self, tile: TileKey, ranges: residency::Ranges) -> residency::Ranges {
+        let shift = tile.level + 1;
+        let span = |c: i32| (i64::from(c * CHUNK) << shift, (i64::from(c * CHUNK + CHUNK) << shift) - 1);
+        let (mut lo, mut hi) = (i32::MAX, i32::MIN);
+        for fb in &self.faces {
+            if brush_meets(fb, tile.face, tile.level, span(tile.cx), span(tile.cy), (i64::MIN / 4, i64::MAX / 4)) {
+                match fb.op() {
+                    0 => lo = lo.min((fb.k_lo >> shift) - 1),
+                    1 => hi = hi.max((fb.k_hi >> shift) + 1),
+                    _ => {}
+                }
+            }
+        }
+        if self.baked_tiles.contains(&tile) {
+            for by in 0..8 {
+                for bx in 0..8 {
+                    let key = ColumnKey { face: tile.face, level: tile.level as u8, ci: tile.cx * 8 + bx, cj: tile.cy * 8 + by };
+                    for (bk, _) in self.baked.column(&key).into_iter().flat_map(|c| c.iter()) {
+                        lo = lo.min(bk * 8);
+                        hi = hi.max(bk * 8 + 8);
+                    }
+                }
+            }
+        }
+        let widen = |(a, b): (i32, i32)| (a.min(lo), b.max(hi));
+        residency::Ranges { volume: widen(ranges.volume), surface: widen(ranges.surface) }
+    }
+
     /// Jobs generating `key` (with `ranges`) into `batch`; its old chunks,
     /// if any, to `evictions`. False when the batch or the slots are full.
     #[allow(clippy::too_many_arguments)]
     fn queue_tile(&mut self, key: TileKey, ranges: residency::Ranges, eye_at: &Eye, batch: &mut GenBatch, readback: &mut Readback, evictions: &mut Vec<u32>, stats: &mut UpdateStats) -> bool {
         let grid = self.grid;
-        let (lo, hi) = layers_needed(&grid, key, ranges, eye_at, &self.faces, self.deep.contains(&key));
+        let ranges = self.with_edits(key, ranges);
+        let (lo, hi) = layers_needed(&grid, key, ranges, eye_at, self.deep.contains(&key));
         let layers = if hi > lo { (lo.div_euclid(CHUNK), (hi - 1).div_euclid(CHUNK)) } else { (0, -1) };
         let count = (layers.1 - layers.0 + 1).max(0) as usize;
         if batch.tile_jobs.len() >= TILE_BATCH || batch.chunk_jobs.len() + count > CHUNK_BATCH {
@@ -1338,7 +1359,9 @@ impl ChunkWorld {
         let eye_at = Eye::new(&grid, eye);
         self.claim_timing(frame);
         let mut stats = UpdateStats::default();
-        let worker = self.worker.get_or_insert_with(|| residency::Worker::spawn(grid, self.height_layers, config.plan));
+        if self.worker.is_none() {
+            self.worker = Some(residency::Worker::spawn(grid, self.height_layers, config.plan));
+        }
         let mut evictions: Vec<u32> = Vec::new();
 
         let mut clock = std::time::Instant::now();
@@ -1358,7 +1381,7 @@ impl ChunkWorld {
                     if w[0] > w[1] {
                         continue;
                     }
-                    let ranges = residency::Ranges { volume: (w[0], w[1]), surface: (w[2], w[1]) };
+                    let ranges = self.with_edits(*key, residency::Ranges { volume: (w[0], w[1]), surface: (w[2], w[1]) });
                     self.events.push(residency::Event::Measured(*key, ranges));
                     if let Some(t) = self.tiles.get_mut(key) {
                         t.ranges = ranges;
@@ -1366,7 +1389,7 @@ impl ChunkWorld {
                     // Layers its chunks must hold beyond those generated
                     // (measured, or brushes since): generate the tile again
                     // in place, its chunks drawn until then.
-                    let need = layers_needed(&grid, *key, ranges, &eye_at, &self.faces, self.deep.contains(key));
+                    let need = layers_needed(&grid, *key, ranges, &eye_at, self.deep.contains(key));
                     if self.tiles.get(key).is_some_and(|t| need.0 < t.layers.0 || need.1 > t.layers.1) {
                         self.stale.remove(key);
                         self.urgent.insert(*key);
@@ -1410,6 +1433,7 @@ impl ChunkWorld {
         // two old) and the next; 3. evict what it no longer needs.
         let mut evicted = Vec::new();
         let (mut added, mut removed) = (Vec::new(), Vec::new());
+        let worker = self.worker.as_mut().expect("spawned above");
         if let Some(planned) = worker.poll() {
             self.plan = planned.plan;
             evicted = planned.evicted;
@@ -1639,10 +1663,8 @@ impl ChunkWorld {
         slot.state = ReachState::Copied;
     }
 
-    /// A pick's hit from its copied visibility and distance.
-    fn pick_hit(&self, words: &[u32]) -> Option<crate::engine::PickHit> {
-        let (slot, cell) = (words[0], words[1]);
-        let t = f32::from_bits(words[4]);
+    /// The hit of a pixel's visibility (slot, cell) and distance.
+    fn pick_hit(&self, [slot, cell]: [u32; 2], t: f32) -> Option<crate::engine::PickHit> {
         let key = *self.slot_keys.get(slot as usize)?;
         if key[0] < 0 || !(t > 0.0) {
             return None;
@@ -1677,7 +1699,7 @@ impl ChunkWorld {
                     let results: Vec<crate::engine::PickResult> = {
                         let data = self.pick_slots[n].buffer.slice(..).get_mapped_range().unwrap();
                         let words: &[u32] = bytemuck::cast_slice(&data);
-                        self.pick_slots[n].requests.iter().enumerate().map(|(i, &id)| crate::engine::PickResult { id, hit: self.pick_hit(&words[i * 64..i * 64 + 5]) }).collect()
+                        self.pick_slots[n].requests.iter().enumerate().map(|(i, &id)| crate::engine::PickResult { id, hit: self.pick_hit([words[i * 64], words[i * 64 + 1]], f32::from_bits(words[i * 64 + 4])) }).collect()
                     };
                     let slot = &mut self.pick_slots[n];
                     slot.buffer.unmap();
@@ -1807,6 +1829,37 @@ impl ChunkWorld {
         let alloc: Vec<[i32; 2]> = self.read(&self.leaf_alloc, 1);
         let chunks: usize = self.tiles.values().map(|t| t.chunks.len()).sum();
         alloc[0][0].max(0) as u64 * 10 + chunks as u64 * (64 * 24 + 32)
+    }
+
+    /// Every pixel's hit in the last [`Self::draw`], row by row (waits for
+    /// the GPU: tests and diagnostics).
+    pub fn read_hits(&self) -> Vec<Option<crate::engine::PickHit>> {
+        let Some(targets) = &self.targets else { return Vec::new() };
+        let [w, h] = targets.size;
+        let rows = |bytes: u32| (w * bytes).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let read = |texture: &wgpu::Texture, bytes: u32| -> Vec<u8> {
+            let staging = self.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(rows(bytes) * h), usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            encoder.copy_texture_to_buffer(
+                texture.as_image_copy(),
+                wgpu::TexelCopyBufferInfo { buffer: &staging, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(rows(bytes)), rows_per_image: None } },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+            self.queue.submit([encoder.finish()]);
+            staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let out = staging.slice(..).get_mapped_range().unwrap().to_vec();
+            out
+        };
+        let (visibility, distance) = (read(&targets.visibility, 8), read(&targets.distance, 4));
+        let word = |data: &[u8], at: usize| u32::from_le_bytes(data[at..at + 4].try_into().unwrap());
+        (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let v = (y * rows(8) + x * 8) as usize;
+                self.pick_hit([word(&visibility, v), word(&visibility, v + 4)], f32::from_bits(word(&distance, (y * rows(4) + x * 4) as usize)))
+            })
+            .collect()
     }
 
     /// The targets of the last [`Self::draw`].

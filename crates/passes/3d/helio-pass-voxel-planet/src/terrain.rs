@@ -475,7 +475,7 @@ pub fn generated_kind(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j
 }
 
 /// Height (mm) of the heightfield displaced by the field's lean under cell
-/// `(i, j, k)` (`generate.wgsl` mirrors it): the field's height on the
+/// `(i, j, k)` (`chunk_generate.wgsl` mirrors it): the field's height on the
 /// level's lean lattice, interpolated bilinearly at the displaced point,
 /// plus the column's own detail off that lattice (`height` minus the
 /// lattice at the cell). Without displacement it is exactly `height`.
@@ -557,7 +557,7 @@ fn lattice_height(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i3
 
 /// Generated top of a column (level cells): the first air above its highest
 /// generated solid cell, edits excluded. Equals `top` outside the field's
-/// volumetric extent; material depth counts from it (`generate.wgsl`).
+/// volumetric extent; material depth counts from it.
 /// `height` is the column's field height (mm).
 pub fn generated_top(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i32, level: u32, height: i32) -> i32 {
     let top = top_cells(grid, height, level);

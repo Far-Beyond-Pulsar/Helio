@@ -1,5 +1,9 @@
 # Span columns: a fully destructible planet, always visible
 
+> Historical: the span-column renderer this describes was removed on
+> 2026-10-11, replaced by chunk trees ([`chunk-trees.md`](chunk-trees.md)).
+> Kept for the measurements and decisions behind that change.
+
 Status: implemented 2026-10-09 (phases 0-5), edit history 2026-10-10 (below); the single-band column is
 gone. Measured in the editor harness: phase 6.
 

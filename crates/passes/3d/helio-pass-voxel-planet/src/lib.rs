@@ -6,11 +6,10 @@
 //!   built-in one (ordered layer stacks, interpreted by [`landform`]).
 //! * [`edits`] — ordered brushes with exact integer containment.
 //! * [`planet`] — canonical queries, materials and exact ray casts.
-//! * `engine` — Helio GBuffer pass with GPU-driven clipmap residency.
-//! * `chunks` — chunk trees (docs/chunk-trees.md), the terrain's next
-//!   representation, built alongside until it replaces `engine`'s.
-pub mod column_index;
-pub mod column_view;
+//! * `chunks` — chunk trees (docs/chunk-trees.md): GPU residency, drawing
+//!   and lighting, and the Helio pass.
+//! * `engine` — what hosts share with the pass (frames, picks) and the
+//!   terrain half of the shaders, checked against the CPU field.
 pub mod edit_store;
 pub mod edits;
 pub mod snapshot;
@@ -20,10 +19,8 @@ pub mod landform;
 pub mod layers;
 pub mod noise;
 pub mod planet;
-pub mod residency;
 mod ridge_envelope;
 pub mod terrain;
-pub mod windows;
 #[cfg(feature = "engine")]
 pub mod engine;
 #[cfg(feature = "engine")]

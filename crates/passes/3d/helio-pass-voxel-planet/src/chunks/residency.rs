@@ -45,6 +45,8 @@ pub struct PlanConfig {
     pub lod_pixels: f64,
     /// Coarsen again only under this share of `lod_pixels`.
     pub coarsen: f64,
+    /// Planes: tiles farther than this are not drawn (spheres draw up to
+    /// the horizon).
     pub max_distance: f64,
     /// Also refine for where the eye will be this far ahead.
     pub prefetch_seconds: f64,
@@ -89,14 +91,15 @@ pub struct Planner {
     pub tiles: FxHashMap<TileKey, Tile>,
     roots: Vec<TileKey>,
     config: PlanConfig,
+    /// Spheres: the radius of the lowest ground, whose horizon hides what
+    /// lies beyond it (none when that ground reaches the centre).
+    occluder: Option<f64>,
 }
 
 impl Planner {
-    /// Roots: the coarsest level's tiles within `max_distance` of `eye`,
-    /// with the planet's whole height range (`range`, base layers) as
-    /// their estimate.
     /// Roots: every tile of the coarsest level (whatever the eye's first
-    /// place, it can go anywhere).
+    /// place, it can go anywhere), with the planet's whole height range
+    /// (`range`, base layers) as their estimate.
     pub fn new(grid: &Grid, range: (i32, i32), config: PlanConfig) -> Self {
         let level = grid.levels() - 1;
         let n = tiles_at(grid, level);
@@ -113,7 +116,26 @@ impl Planner {
                 }
             }
         }
-        Self { tiles, roots, config }
+        // A world whose lowest ground reaches its centre has no horizon.
+        let occluder = (!grid.is_plane()).then(|| grid.radius() + f64::from(range.0) * f64::from(grid.layer_mm()) * 1e-3).filter(|r| *r > 0.0);
+        Self { tiles, roots, config, occluder }
+    }
+
+    /// Whether `tile` cannot be seen from `eye`: below its horizon over the
+    /// lowest ground (spheres; an eye under that ground sees past it), or
+    /// past `max_distance` (planes). The test is conservative: the tile's
+    /// nearest point against the horizon distances of the eye and of the
+    /// tile's highest layer.
+    fn beyond(&self, grid: &Grid, key: TileKey, ranges: Ranges, eye: &Eye) -> bool {
+        let distance = tile_distance(grid, key, ranges.volume, eye);
+        let Some(r) = self.occluder else { return distance > self.config.max_distance };
+        let over = |radius: f64| (radius * radius - r * r).max(0.0).sqrt();
+        let e = eye.position.length();
+        if e <= r {
+            return false;
+        }
+        let top = grid.radius() + f64::from(ranges.volume.1) * grid.level_size(key.level);
+        distance > over(e) + over(top)
     }
 
     pub fn config(&self) -> &PlanConfig {
@@ -147,10 +169,9 @@ impl Planner {
         let mut stack: Vec<TileKey> = self.roots.clone();
         while let Some(key) = stack.pop() {
             let Some(tile) = self.tiles.get(&key).copied() else { continue };
-            // Distance cut-off: tiles beyond `max_distance` are not drawn. A
-            // root out there ages out (`evict`); a finer tile stays for its
-            // parent's cut.
-            let beyond = tile_distance(grid, key, tile.ranges.volume, &eyes[0]) > self.config.max_distance;
+            // Tiles that cannot be seen are not drawn. A root out there ages
+            // out (`evict`); a finer tile stays for its parent's cut.
+            let beyond = self.beyond(grid, key, tile.ranges, &eyes[0]);
             if !tile.generated {
                 if !beyond {
                     wanted.push((f64::INFINITY, key));
@@ -174,6 +195,11 @@ impl Planner {
             for &child in &children {
                 let entry = self.tiles.entry(child).or_insert(Tile { ranges: tile.ranges.child(), exact: false, generated: false, refined: false, used: frame });
                 entry.used = frame;
+                // Until measured, a child's ranges follow its parent's (an
+                // edit may have deepened them since).
+                if !entry.exact {
+                    entry.ranges = tile.ranges.child();
+                }
                 if !entry.generated {
                     ready = false;
                     wanted.push((priority, child));
@@ -401,27 +427,47 @@ mod tests {
         }
     }
 
+    /// The root over the eye's column.
+    fn root_of(grid: &Grid, mut k: TileKey) -> TileKey {
+        while k.level + 1 < grid.levels() {
+            k = TileKey { level: k.level + 1, cx: k.cx >> 1, cy: k.cy >> 1, ..k };
+        }
+        k
+    }
+
     #[test]
     fn roots_follow_the_eye_wherever_it_starts() {
         let (grid, eye, mut planner) = setup();
         let mut frame = 1;
-        // From the planet's centre nothing is within reach.
-        let plan = planner.plan(&grid, DVec3::ZERO, DVec3::ZERO, None, frame);
-        assert!(plan.requests.is_empty() && plan.drawn.is_empty());
-        // At the surface the roots near the eye are wanted.
-        let plan = settle(&grid, eye, &mut planner, &mut frame);
-        assert!(!plan.drawn.is_empty());
-        // Gone to the far side, they age out and can be generated again.
+        // From the far side of the planet the eye's ground is below the
+        // horizon: nothing of it is wanted.
         let far = -eye;
+        let plan = settle(&grid, far, &mut planner, &mut frame);
+        let here = settle(&grid, eye, &mut planner, &mut frame);
+        assert!(!here.drawn.is_empty());
+        let root = root_of(&grid, here.drawn[0]);
+        assert!(plan.drawn.iter().all(|k| root_of(&grid, *k) != root), "the far side drew the eye's ground");
+        // Gone to the far side again, the eye's roots age out and can be
+        // generated again.
         settle(&grid, far, &mut planner, &mut frame);
         frame += planner.config().keep_frames + 1;
         planner.plan(&grid, far, DVec3::ZERO, None, frame);
-        let evicted = planner.evict(frame);
-        let near_root = plan.drawn.iter().map(|k| { let mut k = *k; while k.level + 1 < grid.levels() { k = TileKey { level: k.level + 1, cx: k.cx >> 1, cy: k.cy >> 1, ..k }; } k }).next().unwrap();
-        assert!(evicted.contains(&near_root));
+        assert!(planner.evict(frame).contains(&root));
         frame += 1;
         let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
-        assert!(plan.requests.iter().any(|(k, _)| *k == near_root));
+        assert!(plan.requests.iter().any(|(k, _)| *k == root));
+    }
+
+    /// From orbit the whole visible disc is drawn: tiles 2,000 km away,
+    /// far past any fixed distance, are over the horizon.
+    #[test]
+    fn orbit_draws_up_to_the_horizon() {
+        let (grid, eye, mut planner) = setup();
+        let mut frame = 1;
+        let orbit = eye.normalize() * (grid.radius() + 300_000.0);
+        let plan = settle(&grid, orbit, &mut planner, &mut frame);
+        let farthest = plan.drawn.iter().map(|k| tile_distance(&grid, *k, planner.tiles[k].ranges.volume, &Eye::new(&grid, orbit))).fold(0.0, f64::max);
+        assert!(farthest > 1_500_000.0, "drawn to {farthest:.0} m");
     }
 
     #[test]

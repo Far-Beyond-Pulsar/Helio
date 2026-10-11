@@ -780,7 +780,7 @@ fn resolve_depth(@builtin(position) pixel: vec4<f32>) -> @builtin(frag_depth) f3
 @group(1) @binding(7) var hit_visibility: texture_2d<u32>;
 @group(1) @binding(14) var hit_normal: texture_2d<f32>;
 
-// ---- Appearance (the span renderer's surface shading, surface.wgsl) ----
+// ---- Appearance ----
 
 // Visibility of the voxel mosaic (each cell's own hue and brightness) for a
 // cell `projected` pixels wide: kept down to about half a pixel; TSR
@@ -791,8 +791,7 @@ fn mosaic_weight(projected: f32) -> f32 {
 
 // Material `m`'s colour varied by its patches (409 m and 25.6 m), clumps
 // (6.4 m and 1.6 m, fading below a few pixels) and voxels (`blade`, by
-// `voxel`), at domain point `p` for a pixel `pixel` m wide
-// (`material_albedo` of surface.wgsl).
+// `voxel`), at domain point `p` for a pixel `pixel` m wide.
 fn material_albedo(m: u32, p: vec3<i32>, blade_hash: u32, pixel: f32, voxel: f32) -> vec3<f32> {
     let material = materials.m[min(m, 31u)];
     if material.patches[0].w <= 0.0 { return material.colour.rgb; }
@@ -1009,7 +1008,7 @@ fn slope_normal(slot: u32, key: vec4<i32>, cell: vec3<i32>, c: ChunkDraw) -> vec
 // Hit `v` at pixel `q` (distance `t`). A natural step (air above it) stands
 // for a smooth slope of steps: it is lit partly with the slope's normal
 // (`Materials::detail.w`, all of it as cells shrink under two pixels) and
-// its sun ray passes its own steps (the span renderer's step softness).
+// its sun ray passes its own steps (step softness).
 // The slope's normal is `ground` when given (a nearby sample's), else
 // measured here.
 fn hit_face(v: vec2<u32>, q: vec2<u32>, size: vec2<u32>, t: f32, ground_hint: vec3<f32>) -> Face {
@@ -1063,8 +1062,7 @@ const SKY_RANGE_CELLS: f32 = 48.0;
 // The share of the sky the hit at pixel `q` (distance `t`, face `f`, chunk
 // `slot`) sees: cosine-weighted rays about the planet's up, turned each
 // frame (TSR gathers them); an occluder near the range end shades less (no
-// edge at the range). A ceiling looks out sideways (the span renderer's
-// sky visibility).
+// edge at the range). A ceiling looks out sideways.
 fn sky_visibility(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face) -> f32 {
     let up = normalize(chunk_frame(slot).m2.xyz);
     let ceiling = dot(f.normal, up) < -0.25;
