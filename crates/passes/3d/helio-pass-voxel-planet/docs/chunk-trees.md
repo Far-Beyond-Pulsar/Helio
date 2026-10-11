@@ -311,12 +311,24 @@ Helio's lighting, sky and TSR apply unchanged. The harness's
 
 Interleaved with the growing cubes: ground 1.88 -> 1.79 ms, mountain 4.40
 -> 4.06, tunnel 2.75 -> 2.71, cruise primary p50 2.69 -> 2.58; every probe
-now matches the exact CPU raycast. The columns cost the CPU 0.9 ms more a
-frame on average in the cruise (drawn set and table upload, mostly when a
-plan arrives); update p95 12 -> 14 ms.
+now matches the exact CPU raycast.
 
-Left for phase 2: the drawn set off the main thread, crossfades between
-levels, residency by ray reach (caves), and face-edge neighbours.
+A plan used to cost the main thread a pass over every drawn tile and a
+buffer write per run of changed table entries (update p95 14 ms in the
+cruise, a hitch per plan). The worker now sends what changed since its
+last plan, and the changed entries go up in one buffer that a compute pass
+scatters into the table (`chunk_table.wgsl`):
+
+| Flight (1080p) | drawn set, mean | table, mean | update CPU p50 | p95 |
+|---|---|---|---|---|
+| cruise, before | 2.35 ms | 1.10 ms | 2.05 ms | 14.4 ms |
+| cruise | 0.24 ms | 0.08 ms | 1.83 ms | 3.9 ms |
+| descent | 0.19 ms | 0.07 ms | 1.40 ms | 3.4 ms |
+
+The descent's coarse share fell from 6.9% to 5.1%.
+
+Left for phase 2: crossfades between levels, residency by ray reach
+(caves), and face-edge neighbours.
 
 ## References
 

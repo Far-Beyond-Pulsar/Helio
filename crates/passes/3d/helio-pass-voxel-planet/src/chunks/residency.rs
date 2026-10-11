@@ -17,7 +17,7 @@
 use super::{tile_distance, Eye, TileKey, CHUNK};
 use crate::grid::Grid;
 use glam::DVec3;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Layers (level cells, [lo, hi)) a tile's chunks may hold: the volume's
 /// whole extent (caves) and the band around the surface.
@@ -241,6 +241,9 @@ pub enum Event {
 /// A plan the worker made, and the tiles it evicted.
 pub struct Planned {
     pub plan: Plan,
+    /// Tiles drawn now and not by the last plan sent, and the reverse.
+    pub added: Vec<TileKey>,
+    pub removed: Vec<TileKey>,
     pub evicted: Vec<TileKey>,
     /// Of the job: events up to this number had reached the planner.
     pub events_seen: u64,
@@ -273,6 +276,7 @@ impl Worker {
             .name("chunk residency".into())
             .spawn(move || {
                 let mut planner = Planner::new(&grid, eye, range, config);
+                let mut drawn: FxHashSet<TileKey> = FxHashSet::default();
                 while let Ok(job) = inbox.recv() {
                     for event in job.events {
                         match event {
@@ -287,7 +291,11 @@ impl Worker {
                     }
                     let plan = planner.plan(&grid, job.eye, job.velocity, job.view, job.frame);
                     let evicted = planner.evict(job.frame);
-                    if outbox.send(Planned { plan, evicted, events_seen: job.events_seen }).is_err() {
+                    let now: FxHashSet<TileKey> = plan.drawn.iter().copied().collect();
+                    let added = plan.drawn.iter().filter(|k| !drawn.contains(k)).copied().collect();
+                    let removed = drawn.iter().filter(|k| !now.contains(k)).copied().collect();
+                    drawn = now;
+                    if outbox.send(Planned { plan, added, removed, evicted, events_seen: job.events_seen }).is_err() {
                         break;
                     }
                 }

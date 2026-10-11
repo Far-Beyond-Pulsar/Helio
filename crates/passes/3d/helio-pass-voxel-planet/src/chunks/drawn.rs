@@ -113,16 +113,22 @@ impl DrawnSet {
         &self.table
     }
 
-    /// Make `drawn` the drawn tiles: tiles that left or changed
-    /// (`changed`) drop their chunks; tiles that came or changed add those
-    /// `chunks_of` gives.
-    pub fn set_tiles(&mut self, drawn: &[TileKey], changed: &rustc_hash::FxHashSet<TileKey>, mut chunks_of: impl FnMut(TileKey) -> Vec<DrawnChunk>) {
-        let wanted: rustc_hash::FxHashSet<TileKey> = drawn.iter().copied().collect();
-        let leaving: Vec<TileKey> = self.tiles.keys().filter(|k| !wanted.contains(k) || changed.contains(k)).copied().collect();
-        for key in leaving {
-            self.drop_tile(key);
+    /// Tiles `removed` stop being drawn, drawn tiles that `changed` take
+    /// their chunks again, tiles `added` are drawn with those `chunks_of`
+    /// gives.
+    pub fn update(&mut self, added: &[TileKey], removed: &[TileKey], changed: &rustc_hash::FxHashSet<TileKey>, mut chunks_of: impl FnMut(TileKey) -> Vec<DrawnChunk>) {
+        for key in removed {
+            if self.tiles.contains_key(key) {
+                self.drop_tile(*key);
+            }
         }
-        for key in drawn {
+        for key in changed {
+            if self.tiles.contains_key(key) {
+                self.drop_tile(*key);
+                self.add_tile(*key, chunks_of(*key));
+            }
+        }
+        for key in added {
             if !self.tiles.contains_key(key) {
                 self.add_tile(*key, chunks_of(*key));
             }
@@ -130,16 +136,9 @@ impl DrawnSet {
         self.settle_columns();
     }
 
-    /// Between plans: the drawn tiles among `changed` take their chunks
-    /// again.
-    pub fn refresh(&mut self, changed: &rustc_hash::FxHashSet<TileKey>, mut chunks_of: impl FnMut(TileKey) -> Vec<DrawnChunk>) {
-        for key in changed {
-            if self.tiles.contains_key(key) {
-                self.drop_tile(*key);
-                self.add_tile(*key, chunks_of(*key));
-            }
-        }
-        self.settle_columns();
+    /// Tiles drawn.
+    pub fn tile_count(&self) -> usize {
+        self.tiles.len()
     }
 
     fn drop_tile(&mut self, key: TileKey) {
@@ -274,20 +273,13 @@ impl DrawnSet {
         self.position[slot as usize] != NONE
     }
 
-    /// Changed entries as contiguous runs: first entry and its words.
-    pub fn take_changes(&mut self) -> Vec<(u32, Vec<[i32; 4]>)> {
+    /// The entries changed since the last call, each as its index, key
+    /// and value (`chunk_table.wgsl`).
+    pub fn take_changes(&mut self) -> Vec<[i32; 4]> {
         let mut dirty = std::mem::take(&mut self.dirty);
         dirty.sort_unstable();
         dirty.dedup();
-        let mut runs: Vec<(u32, Vec<[i32; 4]>)> = Vec::new();
-        for i in dirty {
-            let entry = [self.table[2 * i as usize], self.table[2 * i as usize + 1]];
-            match runs.last_mut() {
-                Some((first, words)) if *first + (words.len() / 2) as u32 == i => words.extend(entry),
-                _ => runs.push((i, entry.to_vec())),
-            }
-        }
-        runs
+        dirty.into_iter().flat_map(|i| [[i as i32, 0, 0, 0], self.table[2 * i as usize], self.table[2 * i as usize + 1]]).collect()
     }
 
     /// Entry `key`'s value (as the GPU lookup finds it).
@@ -311,6 +303,11 @@ impl DrawnSet {
 mod tests {
     use super::*;
 
+    /// Tiles of `a` not in `b`.
+    fn diff(a: &[TileKey], b: &[TileKey]) -> Vec<TileKey> {
+        a.iter().filter(|k| !b.contains(k)).copied().collect()
+    }
+
     fn chunk(slot: u32, key: [i32; 4]) -> DrawnChunk {
         DrawnChunk { key, slot, origin: DVec3::ZERO, inv: DMat3::IDENTITY, centre: DVec3::ZERO, radius: 1.0, z: (0.0, 64.0) }
     }
@@ -328,10 +325,12 @@ mod tests {
             rng ^= rng << 17;
             rng
         };
+        let mut last: Vec<TileKey> = Vec::new();
         for round in 0..200 {
             let drawn: Vec<TileKey> = (0..300).filter(|_| next() % 2 == 0).map(tile).collect();
             let changed: rustc_hash::FxHashSet<TileKey> = drawn.iter().filter(|_| next() % 7 == 0).copied().collect();
-            set.set_tiles(&drawn, &changed, chunks);
+            set.update(&diff(&drawn, &last), &diff(&last, &drawn), &changed, chunks);
+            last = drawn.clone();
             set.take_changes();
             assert_eq!(set.list.len(), drawn.len() * 3, "round {round}");
             for k in &drawn {
@@ -361,6 +360,7 @@ mod tests {
             rng
         };
         let mut slot = 0u32;
+        let mut last: Vec<TileKey> = Vec::new();
         for round in 0..100 {
             // A random cut: refine each tile with probability 1/2.
             let mut drawn = Vec::new();
@@ -374,7 +374,7 @@ mod tests {
             }
             let layers: FxHashMap<TileKey, i32> = drawn.iter().map(|k| (*k, (next() % 5) as i32 + 1)).collect();
             let changed: rustc_hash::FxHashSet<TileKey> = drawn.iter().copied().collect();
-            set.set_tiles(&drawn, &changed, |k| {
+            set.update(&diff(&drawn, &last), &diff(&last, &drawn), &changed, |k| {
                 (0..layers[&k])
                     .map(|z| {
                         slot = (slot + 1) % (1 << 14);
@@ -382,6 +382,7 @@ mod tests {
                     })
                     .collect()
             });
+            last = drawn.clone();
             // Expected tops, finest first.
             let mut top: FxHashMap<TileKey, i32> = FxHashMap::default();
             for level in 0..=3u32 {

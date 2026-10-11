@@ -402,6 +402,9 @@ pub struct ChunkWorld {
     /// Fragment, step and hit counts (`HELIO_VOXEL_CHUNKS_COUNT`).
     counters: wgpu::Buffer,
     evict_pipeline: wgpu::ComputePipeline,
+    /// Chunk table changes scattered (`chunk_table.wgsl`).
+    table_layout: wgpu::BindGroupLayout,
+    table_pipeline: wgpu::ComputePipeline,
     free_blocks: wgpu::Buffer,
     job_results: wgpu::Buffer,
     /// Brushes kept analytic (resolved per face) and their buffer.
@@ -603,6 +606,16 @@ impl ChunkWorld {
         let chunk_columns = compute("chunk_columns_main");
         let chunk_build = compute("chunk_build_main");
         let evict_pipeline = compute("evict");
+        let table_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("chunk table"), source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/chunk_table.wgsl").into()) });
+        let table_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("chunk table"), entries: &[storage(0, true, c), storage(1, false, c)] });
+        let table_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("chunk table"),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&table_layout)], immediate_size: 0 })),
+            module: &table_module,
+            entry_point: Some("table_update"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         let draw_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("chunk draw"), source: wgpu::ShaderSource::Wgsl(draw_source.into()) });
         let all = wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE;
@@ -782,6 +795,8 @@ impl ChunkWorld {
             timings: Vec::new(),
             counters: buffer("chunk counters", 1024, s | wgpu::BufferUsages::COPY_SRC),
             evict_pipeline,
+            table_layout,
+            table_pipeline,
             free_blocks: buffer("chunk free blocks", free_block_entries() * 4, wgpu::BufferUsages::STORAGE),
             job_results: buffer("chunk job results", (CHUNK_BATCH * 16) as u64, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC),
             brushes: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -929,11 +944,12 @@ impl ChunkWorld {
         // 2. The latest plan (made on the worker from an eye a frame or
         // two old) and the next; 3. evict what it no longer needs.
         let mut evicted = Vec::new();
-        let mut new_plan = false;
+        let (mut added, mut removed) = (Vec::new(), Vec::new());
         if let Some(planned) = worker.poll() {
-            new_plan = true;
             self.plan = planned.plan;
             evicted = planned.evicted;
+            added = planned.added;
+            removed = planned.removed;
             self.plan_current = Some(planned.events_seen);
         }
         let unseen = !self.events.is_empty() || self.plan_current != Some(worker.events_sent());
@@ -1109,20 +1125,21 @@ impl ChunkWorld {
                     .collect()
             })
         };
-        // The whole drawn set when a plan arrived, else the tiles that
-        // changed.
-        if new_plan {
-            self.drawn_set.set_tiles(&self.plan.drawn, &self.changed_tiles, chunks_of);
-        } else {
-            self.drawn_set.refresh(&self.changed_tiles, chunks_of);
-        }
+        self.drawn_set.update(&added, &removed, &self.changed_tiles, chunks_of);
         self.changed_tiles.clear();
         lap(&mut stats, 4);
-        for (first, words) in self.drawn_set.take_changes() {
-            self.queue.write_buffer(&self.chunk_table, u64::from(first) * 32, bytemuck::cast_slice(&words));
+        // One upload of the changed entries, scattered on the GPU.
+        let changes = self.drawn_set.take_changes();
+        if !changes.is_empty() {
+            let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("chunk table changes"), contents: bytemuck::cast_slice(&changes), usage: wgpu::BufferUsages::STORAGE });
+            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("chunk table"), layout: &self.table_layout, entries: &[entry(0, &buffer), entry(1, &self.chunk_table)] });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk table"), timestamp_writes: None });
+            pass.set_pipeline(&self.table_pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups((changes.len() as u32 / 3).div_ceil(64), 1, 1);
         }
         lap(&mut stats, 5);
-        stats.drawn_tiles = self.plan.drawn.len();
+        stats.drawn_tiles = self.drawn_set.tile_count();
         self.last_generated = stats.generated_tiles;
         // Settled: a plan that saw every event wants nothing more.
         self.last_requests = self.plan.requests.iter().filter(|(k, _)| !self.tiles.contains_key(k)).count() + usize::from(unseen || !self.events.is_empty() || stats.generated_tiles > 0);
