@@ -1,7 +1,7 @@
 //! Chunk trees in Helio's render graph: residency, primary visibility and
 //! the gbuffer, from the same frame source as [`crate::engine::PlanetPass`].
-//! Lighting is Helio's deferred lighting until the terrain's own sun and
-//! sky rays move to chunk trees (docs/chunk-trees.md, phase 4).
+//! Lighting is Helio's deferred lighting, its sun shadowed by walks
+//! through the chunk trees (`directional_visibility`).
 
 use super::{residency, ChunkWorld, FrameTimings, ResidencyConfig, UpdateStats};
 use crate::engine::{PlanetFrame, SharedPlanetFrame};
@@ -43,7 +43,7 @@ impl ChunkPass {
 }
 
 const READS: &[&str] = &["gbuffer", "gbuffer_lightmap_uv", "gbuffer_sss", "gbuffer_extra", "gbuffer_velocity"];
-const WRITES: &[&str] = &["gbuffer", "gbuffer_lightmap_uv", "gbuffer_sss", "gbuffer_extra", "gbuffer_velocity"];
+const WRITES: &[&str] = &["gbuffer", "gbuffer_lightmap_uv", "gbuffer_sss", "gbuffer_extra", "gbuffer_velocity", "directional_visibility"];
 
 impl RenderPass for ChunkPass {
     fn name(&self) -> &'static str {
@@ -92,6 +92,11 @@ impl RenderPass for ChunkPass {
         }
         self.shown = Some(frame);
         Ok(())
+    }
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        if let Some(view) = self.world.as_ref().and_then(ChunkWorld::sun_view) {
+            frame.write_texture_binding("directional_visibility", view, self.name());
+        }
     }
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let (Some(world), Some(frame)) = (&mut self.world, self.shown.clone()) else { return Ok(()) };

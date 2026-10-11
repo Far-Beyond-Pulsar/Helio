@@ -416,6 +416,27 @@ renderer); baked ones are exact.
 Left for phase 3: edits on chunk data in place (a tile generated again
 costs its terrain program, ~50 us), and planet-scale brushes' cost.
 
+## Phase 4a results (2026-10-11): sun shadows
+
+The walk through the drawn cut is one function (`walk`) from any point;
+primary rays start it at the eye, sun rays at a hit, a hundredth of a cell
+off its face, in the hit's chunk. The result is Helio's
+`directional_visibility` (x lit, yzw the sun), which its deferred lighting
+applies to the sun, so the chunk pass needs no lighting of its own.
+
+A sun ray leaving the ground crosses the occupied layers cell by cell when
+the sun is low: one per pixel cost 3.2 ms (mountain) and 4.0 ms (ground).
+Now one ray samples each 2x2 block (its pixel moving each frame, so TSR
+gathers all four), every hit takes a sample of its block or a neighbouring
+one that walked within four of its cells, and the rest (silhouettes, a
+few thousand pixels) are listed and walk in an indirect dispatch of their
+own: scattered across the screen, they held whole warps (1.5 ms).
+
+| View (1080p hold) | primary | sun shadows |
+|---|---|---|
+| ground | 1.84 ms | 1.36 ms |
+| mountain slope | 4.10 ms | 1.85 ms |
+
 ## References
 
 Laine and Karras, *Efficient Sparse Voxel Octrees* (2010); Crassin et al.,

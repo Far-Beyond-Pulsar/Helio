@@ -370,9 +370,10 @@ pub struct TraceCounts {
 #[derive(Clone, Copy, Debug)]
 pub struct FrameTimings {
     pub frame: u64,
-    /// The draw in all (seeds, traces), its first seed.
+    /// The draw in all (seeds, traces), its first seed; then sun shadows.
     pub draw: f64,
     pub seed: f64,
+    pub shadow: f64,
     /// The update's eviction and generation, and the tiles it generated.
     pub generate: f64,
     pub tiles: usize,
@@ -382,7 +383,8 @@ pub struct FrameTimings {
 }
 
 /// Timestamps a frame writes: generation start, tile columns end, seed
-/// start and end, trace end, chunk columns end, chunk builds end.
+/// start and end, trace end, chunk columns end, chunk builds end, shadows
+/// end.
 const QUERIES: u32 = 8;
 
 /// A frame's timestamps on their way back.
@@ -456,6 +458,12 @@ pub struct ChunkWorld {
     seed_outside: wgpu::RenderPipeline,
     seed_inside: wgpu::RenderPipeline,
     trace: wgpu::ComputePipeline,
+    shadow_sample_layout: wgpu::BindGroupLayout,
+    shadow_sample: wgpu::ComputePipeline,
+    shadow_layout: wgpu::BindGroupLayout,
+    shadow: wgpu::ComputePipeline,
+    shadow_fallback_layout: wgpu::BindGroupLayout,
+    shadow_fallback: wgpu::ComputePipeline,
     resolve: wgpu::RenderPipeline,
     publish: wgpu::RenderPipeline,
     /// The last draw's bind group (its parameters and chunk storage).
@@ -560,6 +568,15 @@ pub struct Targets {
     pub distance: wgpu::Texture,
     /// Where each ray left its last box without a hit (R32Float).
     exits: wgpu::Texture,
+    /// Sun visibility at each hit, and the sun's direction
+    /// (Rgba16Float, Helio's `directional_visibility`), and its view.
+    pub sun: wgpu::Texture,
+    sun_view: wgpu::TextureView,
+    /// A sun sample a 2x2 block: lit, distance, walked (Rgba32Float).
+    sun_samples: wgpu::Texture,
+    /// Hits no sample serves: count, pixels; their indirect workgroups.
+    fallbacks: wgpu::Buffer,
+    fallback_groups: wgpu::Buffer,
 }
 
 const SEED_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
@@ -581,6 +598,7 @@ impl Targets {
         };
         let a = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
         let s = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
+        let sun = texture("chunk sun", wgpu::TextureFormat::Rgba16Float, s);
         Self {
             size,
             seed: texture("chunk seed", SEED_FORMAT, a),
@@ -589,6 +607,30 @@ impl Targets {
             colour: texture("chunk colour", wgpu::TextureFormat::Rgba8Unorm, s),
             distance: texture("chunk distance", wgpu::TextureFormat::R32Float, s),
             exits: texture("chunk exits", wgpu::TextureFormat::R32Float, s | wgpu::TextureUsages::RENDER_ATTACHMENT),
+            sun_view: view(&sun),
+            sun,
+            sun_samples: device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("chunk sun samples"),
+                size: wgpu::Extent3d { width: size[0].div_ceil(2), height: size[1].div_ceil(2), depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: s,
+                view_formats: &[],
+            }),
+            fallbacks: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("chunk sun fallbacks"),
+                size: 4 + 4 * u64::from(size[0]) * u64::from(size[1]),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            fallback_groups: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("chunk sun fallback workgroups"),
+                size: 12,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
         }
     }
 }
@@ -608,6 +650,10 @@ fn storage(binding: u32, read_only: bool, visibility: wgpu::ShaderStages) -> wgp
 
 fn entry(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry { binding, resource: b.as_entire_binding() }
+}
+
+fn view_entry(binding: u32, v: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::TextureView(v) }
 }
 
 fn texture_entry(binding: u32, sample_type: wgpu::TextureSampleType, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
@@ -642,28 +688,31 @@ fn uniform(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayou
 pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wide64: bool, counting: bool) -> [(&'static str, String); 2] {
     // Counters only in a counting build: side effects in a fragment shader
     // can turn early depth tests off.
+    // Primary rays count in the trace (`COUNT`), in their walks when
+    // `counted` (`WCOUNT`; shadow walks do not).
     let count = |n: u32| if counting { format!("atomicAdd(&counters[{n}], 1u);") } else { String::new() };
+    let wcount = |n: u32| if counting { format!("if counted {{ atomicAdd(&counters[{n}], 1u); }}") } else { String::new() };
     let draw = include_str!("../../shaders/chunk_draw.wgsl")
         .replace("COUNTERS", if counting { "@group(0) @binding(9) var<storage, read_write> counters: array<atomic<u32>, 256>;" } else { "" })
+        .replace("WCOUNT(1)", &wcount(1))
+        .replace("WCOUNT(3)", &wcount(3))
+        .replace("WCOUNT(8)", &wcount(8))
+        .replace("WCOUNT(10)", &wcount(10))
+        .replace("WCOUNT_BOXES", if counting { "if counted { atomicAdd(&counters[9], chunk); }" } else { "" })
         .replace("COUNT(0)", &count(0))
-        .replace("COUNT(1)", &count(1))
         .replace("COUNT(2)", &count(2))
         // Diagnostics (counting builds): the chunks one pixel's ray visits
         // (`HELIO_VOXEL_CHUNKS_DEBUG_PIXEL=x,y`), from counters[16].
         .replace(
             "TRACE_PIXEL(chunk, slot, cube_lo, real)",
             if counting {
-                "if all(id.xy == params.debug.zw) && chunk < 48u { atomicStore(&counters[16u + chunk * 5u], slot); atomicStore(&counters[17u + chunk * 5u], bitcast<u32>(cube_lo.x)); atomicStore(&counters[18u + chunk * 5u], bitcast<u32>(cube_lo.y)); atomicStore(&counters[19u + chunk * 5u], bitcast<u32>(cube_lo.z)); atomicStore(&counters[20u + chunk * 5u], u32(real) + 2u * u32(key.x >> 8u)); atomicStore(&counters[4], chunk + 1u); }"
+                "if counted && all(pixel == params.debug.zw) && chunk < 48u { atomicStore(&counters[16u + chunk * 5u], slot); atomicStore(&counters[17u + chunk * 5u], bitcast<u32>(cube_lo.x)); atomicStore(&counters[18u + chunk * 5u], bitcast<u32>(cube_lo.y)); atomicStore(&counters[19u + chunk * 5u], bitcast<u32>(cube_lo.z)); atomicStore(&counters[20u + chunk * 5u], u32(real) + 2u * u32(key.x >> 8u)); atomicStore(&counters[4], chunk + 1u); }"
             } else {
                 ""
             },
         )
         .replace("FADE_FRAMES", &drawn::FADE_FRAMES.to_string())
-        .replace("PLANE_WORLD", if plane { "true" } else { "false" })
-        .replace("COUNT(3)", &count(3))
-        .replace("COUNT(8)", &count(8))
-        .replace("COUNT(10)", &count(10))
-        .replace("COUNT_BOXES", if counting { "atomicAdd(&counters[9], chunk);" } else { "" });
+        .replace("PLANE_WORLD", if plane { "true" } else { "false" });
     [("chunk generation", terrain_source(plane, program, wide64) + include_str!("../../shaders/chunk_generate.wgsl")), ("chunk draw", draw)]
 }
 
@@ -801,6 +850,45 @@ impl ChunkWorld {
             compilation_options: Default::default(),
             cache: None,
         });
+        // Sun shadows: samples a 2x2 block, then every hit.
+        let hits = [
+            texture_entry(4, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::COMPUTE),
+            texture_entry(7, wgpu::TextureSampleType::Uint, wgpu::ShaderStages::COMPUTE),
+        ];
+        let shadow_sample_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunk sun samples"),
+            entries: &[hits[0], hits[1], storage_texture(9, wgpu::TextureFormat::Rgba32Float)],
+        });
+        let shadow_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunk shadow"),
+            entries: &[
+                hits[0],
+                hits[1],
+                storage_texture(2, wgpu::TextureFormat::Rgba8Unorm),
+                storage_texture(8, wgpu::TextureFormat::Rgba16Float),
+                texture_entry(10, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::COMPUTE),
+                storage(11, false, wgpu::ShaderStages::COMPUTE),
+                storage(12, false, wgpu::ShaderStages::COMPUTE),
+            ],
+        });
+        // The fallbacks' walks: their workgroups are the dispatch's.
+        let shadow_fallback_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunk shadow fallbacks"),
+            entries: &[hits[0], hits[1], storage_texture(2, wgpu::TextureFormat::Rgba8Unorm), storage_texture(8, wgpu::TextureFormat::Rgba16Float), storage(11, false, wgpu::ShaderStages::COMPUTE)],
+        });
+        let compute = |label: &str, layout: &wgpu::PipelineLayout, entry: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(label),
+                layout: Some(layout),
+                module: &draw_module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let shadow_sample = compute("chunk sun samples", &layout(&shadow_sample_layout), "shadow_sample");
+        let shadow = compute("chunk shadow", &layout(&shadow_layout), "shadow");
+        let shadow_fallback = compute("chunk shadow fallbacks", &layout(&shadow_fallback_layout), "shadow_fallback");
         let publish = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("chunk gbuffer"),
             layout: Some(&layout(&resolve_layout)),
@@ -866,6 +954,12 @@ impl ChunkWorld {
             seed_outside,
             seed_inside,
             trace,
+            shadow_sample_layout,
+            shadow_sample,
+            shadow_layout,
+            shadow,
+            shadow_fallback_layout,
+            shadow_fallback,
             resolve,
             publish,
             last_group: None,
@@ -1412,7 +1506,7 @@ impl ChunkWorld {
                     let t: &[u64] = bytemuck::cast_slice(&data);
                     let ms = |a: u64, b: u64| b.saturating_sub(a) as f64 * period;
                     let stages = [ms(t[0], t[1]), ms(t[1], t[5]), ms(t[5], t[6])];
-                    let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), generate: ms(t[0], t[6]), tiles, stages };
+                    let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), shadow: ms(t[4], t[7]), generate: ms(t[0], t[6]), tiles, stages };
                     if tiles >= 8 {
                         let per = timing.generate / tiles as f64;
                         self.ms_per_tile = Some(self.ms_per_tile.map_or(per, |old| old * 0.9 + per * 0.1));
@@ -1637,6 +1731,46 @@ impl ChunkWorld {
             pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
         }
         {
+            // 4. Sun shadows: samples, then every hit.
+            let (distance, visibility, samples, colour) = (view(&targets.distance), view(&targets.visibility), view(&targets.sun_samples), view(&targets.colour));
+            let sample_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("chunk sun samples"),
+                layout: &self.shadow_sample_layout,
+                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(9, &samples)],
+            });
+            let shadow_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("chunk shadow"),
+                layout: &self.shadow_layout,
+                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(2, &colour), view_entry(8, &targets.sun_view), view_entry(10, &samples), entry(11, &targets.fallbacks), entry(12, &targets.fallback_groups)],
+            });
+            let fallback_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("chunk shadow fallbacks"),
+                layout: &self.shadow_fallback_layout,
+                entries: &[view_entry(4, &distance), view_entry(7, &visibility), view_entry(2, &colour), view_entry(8, &targets.sun_view), entry(11, &targets.fallbacks)],
+            });
+            // No fallbacks yet.
+            self.queue.write_buffer(&targets.fallbacks, 0, bytemuck::cast_slice(&[0u32]));
+            self.queue.write_buffer(&targets.fallback_groups, 0, bytemuck::cast_slice(&[0u32, 1, 1]));
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk sun samples"), timestamp_writes: None });
+                pass.set_pipeline(&self.shadow_sample);
+                pass.set_bind_group(0, &group, &[]);
+                pass.set_bind_group(1, &sample_group, &[]);
+                pass.dispatch_workgroups(size[0].div_ceil(2).div_ceil(8), size[1].div_ceil(2).div_ceil(8), 1);
+            }
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("chunk shadow"),
+                timestamp_writes: timing.map(|(set, _, ring)| wgpu::ComputePassTimestampWrites { query_set: set, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(QUERIES * ring + 7) }),
+            });
+            pass.set_pipeline(&self.shadow);
+            pass.set_bind_group(0, &group, &[]);
+            pass.set_bind_group(1, &shadow_group, &[]);
+            pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
+            pass.set_pipeline(&self.shadow_fallback);
+            pass.set_bind_group(1, &fallback_group, &[]);
+            pass.dispatch_workgroups_indirect(&targets.fallback_groups, 0);
+        }
+        {
             // 3. The hits' depth.
             let resolve_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("chunk depth resolve"),
@@ -1709,6 +1843,11 @@ impl ChunkWorld {
     fn claim_timing(&mut self, frame: u64) {
         let ring = (frame % TIMING_RING) as usize;
         self.timing_now = self.timing_slots.get(ring).filter(|t| t.frame.is_none() && t.ready.is_none()).map(|_| ring);
+    }
+
+    /// The last draw's sun visibility (Helio's `directional_visibility`).
+    pub fn sun_view(&self) -> Option<&wgpu::TextureView> {
+        self.targets.as_ref().map(|t| &t.sun_view)
     }
 
     /// The last draw's hits into Helio's gbuffer (`engine::GBUFFER_FORMATS`)

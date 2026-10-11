@@ -799,6 +799,7 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
     let mut pending = std::collections::VecDeque::new();
     let mut times = Vec::new();
     let mut seed_times = Vec::new();
+    let mut shadow_times = Vec::new();
     let first = frame;
     let mut draw_cpu = Vec::new();
     while started.elapsed().as_secs_f64() < seconds {
@@ -816,6 +817,7 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
         for t in world.take_timings().into_iter().filter(|t| t.frame >= first + 30) {
             times.push(t.draw);
             seed_times.push(t.seed);
+            shadow_times.push(t.shadow);
         }
         frame += 1;
         if frame == first + 2 {
@@ -856,11 +858,12 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
         );
     }
     eprintln!(
-        "CHUNKHOLD {view} n={} primary {:.3} p95 {:.3} seed {:.3} boxes {outside}+{inside} chunks {}",
+        "CHUNKHOLD {view} n={} primary {:.3} p95 {:.3} seed {:.3} shadow {:.3} boxes {outside}+{inside} chunks {}",
         times.len(),
         percentile(&times, 0.5),
         percentile(&times, 0.95),
         percentile(&seed_times, 0.5),
+        percentile(&shadow_times, 0.5),
         world.chunk_count(),
     );
     // `HELIO_VOXEL_CHUNKS_PROBE=x,y;x,y`: each pixel's chunk hit against
