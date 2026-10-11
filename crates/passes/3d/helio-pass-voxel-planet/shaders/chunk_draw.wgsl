@@ -12,9 +12,11 @@
 //    nodes of 16^3 cells, their 4^3 leaves of 4^3 cells, a leaf's cells.
 //    An empty child is crossed in one step to its exit; a full child is a
 //    hit where the ray enters it. A ray leaving its chunk without a hit
-//    continues in the chunk beyond the face it left by (`chunk_table`: the
-//    same level, else the coarser or finer one there). Output: visibility
-//    (chunk slot; cell, face), the hit's distance and a plain colour.
+//    continues by the drawn cut (`chunk_table`): the drawn tile over the
+//    column it enters, its chunk there, or air: an empty layer, or the
+//    column over the tile's chunks, as coarse as the cut's tops allow.
+//    Output: visibility (chunk slot; cell, face), the hit's distance and a
+//    plain colour.
 // 3. Resolve (raster): the hits' exact depth, for meshes and later passes;
 //    or, in the render graph, publish: the hits into Helio's gbuffer.
 
@@ -77,8 +79,10 @@ struct ChunkMeta {
 @group(0) @binding(6) var<storage, read> leaf_materials: array<u32>;
 @group(0) @binding(7) var<uniform> palette: array<vec4<f32>, 32>;
 @group(0) @binding(8) var<storage, read> mid_materials: array<u32>;
-// Open addressing: key (face | level << 8, cx, cy, cz) then (slot, 0, 0, 0);
-// an empty entry's key x is -1.
+// Open addressing (`drawn.rs`): chunks, key (face | level << 8, cx, cy, cz)
+// then (slot, 0, 0, 0); the drawn cut's columns, key (.., COLUMN) then
+// (lo, hi, top, drawn): a drawn tile's layers [lo, hi), the top solid cell
+// under the column (exclusive). An empty entry's key x is -1.
 @group(0) @binding(10) var<storage, read> chunk_table: array<vec4<i32>>;
 @group(0) @binding(11) var<storage, read> chunk_keys: array<vec4<i32>>;
 // This frame's boxes: chunk slots, those holding the eye first.
@@ -104,13 +108,13 @@ fn key_hash(k: vec4<i32>) -> u32 {
     return h ^ (h >> 15u);
 }
 
-// The slot of chunk `k`, or NONE.
-fn find_chunk(k: vec4<i32>) -> u32 {
+// The entry of key `k`, or NONE.
+fn find_entry(k: vec4<i32>) -> u32 {
     var i = key_hash(k) & params.table.x;
     for (var probe = 0u; probe < 64u; probe++) {
         let e = chunk_table[i * 2u];
         if e.x == -1 { return NONE; }
-        if all(e == k) { return bitcast<u32>(chunk_table[i * 2u + 1u].x); }
+        if all(e == k) { return i; }
         i = (i + 1u) & params.table.x;
     }
     return NONE;
@@ -269,22 +273,99 @@ fn pixel_ray(p: vec2<u32>, size: vec2<u32>) -> vec3<f32> {
     return normalize(far.xyz / far.w);
 }
 
-// The drawn chunk holding cell `cell` of `level` (at `frac` within it)
-// next to chunk key `k` (same face): that level's, else a coarser one,
-// else a finer one. Neighbouring drawn tiles can be levels apart (a parent
-// stays drawn until all its children are generated).
-fn neighbour(k: vec4<i32>, level: i32, cell: vec3<i32>, frac: vec3<f32>) -> u32 {
-    let face = k.x & 7;
-    var slot = find_chunk(vec4<i32>(k.x, cell >> vec3<u32>(6u)));
-    for (var up = 1; up <= 6 && slot == NONE && level + up <= 30; up++) {
-        slot = find_chunk(vec4<i32>(face | ((level + up) << 8), cell >> vec3<u32>(u32(6 + up))));
+// Cell `cell` of `level` (at `frac` within it) as a cell of `level + diff`:
+// coarser for diff > 0, finer for diff < 0.
+fn cell_at(cell: vec3<i32>, frac: vec3<f32>, diff: i32) -> vec3<i32> {
+    if diff >= 0 { return cell >> vec3<u32>(u32(diff)); }
+    let n = u32(-diff);
+    return (cell << vec3<u32>(n)) + vec3<i32>(floor(frac * f32(1u << n)));
+}
+
+// What a ray meets at a cell: a drawn chunk (`slot`), or air to cross,
+// cells [lo, hi) of `level + diff`; `diff` LOST off the drawn cut.
+struct Place {
+    slot: u32,
+    diff: i32,
+    lo: vec3<i32>,
+    hi: vec3<i32>,
+}
+
+const LOST: i32 = 99;
+// A column entry's layer key (`drawn::COLUMN`).
+const COLUMN: i32 = -2147483647 - 1;
+
+// The place at cell `cell` of `level` (at `frac` within it) on `face`:
+// the drawn tile over its column (this level's, else a coarser one where
+// this level has no column, else a finer one under an ancestor's), then
+// the chunk at its layer, an empty layer, or the air over the tile, grown
+// to the coarsest column whose whole subtree lies under the cell.
+fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>) -> Place {
+    // Mostly the next chunk of the same level (only drawn chunks are in
+    // the table).
+    let same = find_entry(vec4<i32>(face | (level << 8), cell >> vec3<u32>(6u)));
+    if same != NONE { return Place(bitcast<u32>(chunk_table[same * 2u + 1u].x), 0, vec3<i32>(0), vec3<i32>(0)); }
+    let lost = Place(NONE, LOST, vec3<i32>(0), vec3<i32>(0));
+    var diff = 0;
+    var way = 0;
+    var column = vec4<i32>(0);
+    for (var n = 0u; n < 16u; n++) {
+        let c = cell_at(cell, frac, diff);
+        let e = find_entry(vec4<i32>(face | ((level + diff) << 8), c.xy >> vec2<u32>(6u), COLUMN));
+        if e == NONE {
+            // Not in the cut here: coarser (a finer search found a hole).
+            if way < 0 || level + diff >= 30 { return lost; }
+            way = 1;
+            diff += 1;
+            continue;
+        }
+        column = chunk_table[e * 2u + 1u];
+        if column.w == 1 { break; }
+        // An ancestor: finer.
+        if way > 0 || diff <= -6 || level + diff <= 0 { return lost; }
+        way = -1;
+        diff -= 1;
     }
-    for (var down = 1; down <= 3 && slot == NONE && level - down >= 0; down++) {
-        let sub = vec3<i32>(floor(frac * f32(1 << u32(down))));
-        let finer = (cell << vec3<u32>(u32(down))) + sub;
-        slot = find_chunk(vec4<i32>(face | ((level - down) << 8), finer >> vec3<u32>(6u)));
+    if column.w != 1 { return lost; }
+    let c = cell_at(cell, frac, diff);
+    let tile = c.xy >> vec2<u32>(6u);
+    let layer = c.z >> 6u;
+    if c.z >= column.z {
+        var top = column.z;
+        var at = tile;
+        var up = diff;
+        for (var n = 0u; n < 24u && level + up < 30; n++) {
+            let pc = cell_at(cell, frac, up + 1);
+            let pe = find_entry(vec4<i32>(face | ((level + up + 1) << 8), pc.xy >> vec2<u32>(6u), COLUMN));
+            if pe == NONE { break; }
+            let ptop = chunk_table[pe * 2u + 1u].z;
+            if pc.z < ptop { break; }
+            up += 1;
+            top = ptop;
+            at = pc.xy >> vec2<u32>(6u);
+        }
+        return Place(NONE, up, vec3<i32>(at * 64, top), vec3<i32>(at * 64 + 64, top + (1 << 20)));
     }
-    return slot;
+    // Under the tile's chunks: solid, reached only through them.
+    if layer < column.x { return lost; }
+    let s = find_entry(vec4<i32>(face | ((level + diff) << 8), tile, layer));
+    if s != NONE { return Place(bitcast<u32>(chunk_table[s * 2u + 1u].x), diff, vec3<i32>(0), vec3<i32>(0)); }
+    // An empty layer among them.
+    return Place(NONE, diff, vec3<i32>(tile * 64, layer * 64), vec3<i32>(tile * 64 + 64, layer * 64 + 64));
+}
+
+// Cell corner `a` of level `level + diff` in the cells of chunk `key` (of
+// `level`): exact on tile and layer bounds for diff >= -6, else rounded up
+// (`up`) or down; far coarse corners are clamped.
+fn to_frame(a: vec3<i32>, diff: i32, key: vec4<i32>, up: bool) -> vec3<i32> {
+    let origin = key.yzw * 64;
+    if diff < 0 {
+        let n = u32(-diff);
+        return ((a + select(0, (1 << n) - 1, up)) >> vec3<u32>(n)) - origin;
+    }
+    let n = vec3<u32>(u32(diff));
+    let base = origin >> n;
+    let limit = 1 << u32(max(28 - diff, 0));
+    return (clamp(a - base, vec3<i32>(-limit), vec3<i32>(limit)) << n) - (origin - (base << n));
 }
 
 @compute @workgroup_size(8, 8)
@@ -308,32 +389,26 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     COUNT(0)
     let dir = pixel_ray(id.xy, size);
     var t_prev = max(exit, params.sun.w);
-    // The chunk whose frame the ray is in, and the chunk-sized cube it is
-    // crossing in that frame's cells: the chunk itself, or space next to
-    // it where no chunk is (air), crossed as an empty chunk of its level.
+    // The chunk whose frame the ray is in (its last), and the box it is
+    // crossing in that frame's cells: the chunk itself, or air.
     var frame = chunk_frame(box);
     var key = chunk_keys[bitcast<u32>(frame.box.z)];
-    // Empty space is crossed in cubes of a chunk of level `level + shift`
-    // (absolute index `cube` at that level), coarser after every few.
-    var cube = vec3<i32>(0);
-    var shift = 0u;
+    var cube_lo = vec3<i32>(0);
+    var cube_hi = vec3<i32>(64);
     var real = true;
-    var empty_steps = 0u;
     // Grazing rays cross many chunks of a level before their hit.
-    for (var chunk = 0u; chunk < 128u; chunk++) {
+    var chunk = 0u;
+    for (; chunk < 128u; chunk++) {
         COUNT(3)
         let slot = bitcast<u32>(frame.box.z);
-        TRACE_PIXEL(chunk, slot, cube, real)
+        TRACE_PIXEL(chunk, slot, cube_lo, real)
         let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w);
         let d = vec3<f32>(dot(frame.i0.xyz, dir), dot(frame.i1.xyz, dir), dot(frame.i2.xyz, dir));
         let inv = 1.0 / select(d, vec3<f32>(1e-30), d == vec3<f32>(0.0));
-        // The cube in the frame chunk's cells.
-        let cube_lo = select(cube * (64 << shift) - key.yzw * 64, vec3<i32>(0), real);
-        let cube_size = f32(64 << shift);
         let ca = (vec3<f32>(cube_lo) - o) * inv;
-        let cb = (vec3<f32>(cube_lo) + cube_size - o) * inv;
-        let cube_hi = max(ca, cb);
-        let t_leave = min(cube_hi.x, min(cube_hi.y, cube_hi.z));
+        let cb = (vec3<f32>(cube_hi) - o) * inv;
+        let cube_far = max(ca, cb);
+        let t_leave = min(cube_far.x, min(cube_far.y, cube_far.z));
         if real {
             // The walk over the chunk's occupied layers.
             let ta = (vec3<f32>(0.0, 0.0, frame.box.x) - o) * inv;
@@ -367,15 +442,14 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
                 }
             }
         }
-        // The cell just past the face the ray leaves the cube by, in the
+        // The cell just past the face the ray leaves the box by, in the
         // frame chunk's cells (exact integers far from the origin).
         t_prev = max(t_leave, t_prev);
         let level = key.x >> 8u;
         let q = o + d * t_leave;
-        let axis = select(select(2u, 1u, cube_hi.y <= cube_hi.z), 0u, cube_hi.x <= cube_hi.y && cube_hi.x <= cube_hi.z);
-        let span = 64 << shift;
-        var local = clamp(vec3<i32>(floor(q)), cube_lo, cube_lo + span - 1);
-        let step = select(cube_lo - 1, cube_lo + span, d > vec3<f32>(0.0));
+        let axis = select(select(2u, 1u, cube_far.y <= cube_far.z), 0u, cube_far.x <= cube_far.y && cube_far.x <= cube_far.z);
+        var local = clamp(vec3<i32>(floor(q)), cube_lo, cube_hi - 1);
+        let step = select(cube_lo - 1, cube_hi, d > vec3<f32>(0.0));
         if axis == 0u { local.x = step.x; } else if axis == 1u { local.y = step.y; } else { local.z = step.z; }
         let cell = key.yzw * 64 + local;
         // Faces: tiles across an edge belong to the next face (the next
@@ -388,24 +462,27 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
         var frac = clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999));
         let entry = select(0.999, 0.0, d[axis] > 0.0);
         if axis == 0u { frac.x = entry; } else if axis == 1u { frac.y = entry; } else { frac.z = entry; }
-        let next = neighbour(key, level, cell, frac);
-        if next != NONE {
-            frame = chunk_frame(next);
-            key = chunk_keys[bitcast<u32>(frame.box.z)];
-            shift = 0u;
+        let next = place_at(key.x & 7, level, cell, frac);
+        if next.slot != NONE {
+            frame = chunk_frame(next.slot);
+            key = chunk_keys[next.slot];
+            cube_lo = vec3<i32>(0);
+            cube_hi = vec3<i32>(64);
             real = true;
-            empty_steps = 0u;
         } else {
-            // No chunk there: empty space (air over lower ground), crossed
-            // in this frame in cubes that double every four.
-            empty_steps += 1u;
-            if empty_steps > 40u { break; }
-            if empty_steps % 4u == 0u && level + i32(shift) < 30 { shift += 1u; }
-            cube = cell >> vec3<u32>(6u + shift);
+            if next.diff == LOST {
+                COUNT(10)
+                break;
+            }
+            // Air, crossed in this frame.
+            cube_lo = to_frame(next.lo, next.diff, key, true);
+            cube_hi = to_frame(next.hi, next.diff, key, false);
             real = false;
         }
     }
     // Unresolved: the next round seeds the boxes beyond.
+    COUNT(8)
+    COUNT_BOXES
     textureStore(out_exits, p, vec4<f32>(t_prev + 1e-4));
 }
 

@@ -285,25 +285,37 @@ Helio's gbuffer from the same frame source as the span-column pass, so
 Helio's lighting, sky and TSR apply unchanged. The harness's
 `HELIO_VOXEL_CHUNKS_ENGINE=1` installs it in place of `PlanetPass`.
 
-- Streamed views had sky holes where a ray left the drawn chunks: the
-  continuation now searches neighbours up to six levels coarser and three
-  finer, crosses empty air as cubes in the last chunk's frame that double
-  every four empty steps (at most 40), and follows up to 128 chunks. Solid
-  chunks are kept (they were dropped as "uniform" and left holes inside
-  slopes).
+- A ray that leaves its chunk walks the drawn cut. The chunk table also
+  holds each drawn tile's column (its chunk layers) and, for it and every
+  ancestor, the top solid cell under it: a max pyramid over the cut. At
+  the cell past the face it left by, the ray finds the drawn tile over
+  that column (the same level, coarser where the level has none, finer
+  under an ancestor), then the chunk at its layer, an empty layer, or the
+  air over the tile, grown to the coarsest column whose top lies below the
+  ray; air is crossed in one step. Solid chunks are kept (dropped as
+  "uniform" they left holes inside slopes).
+- This replaced cubes of air that grew blindly every few steps: they
+  jumped over drawn finer chunks inside them, so rays hit the side of a
+  tile beyond the surface (grey slabs at the valley edge, ~5 m behind the
+  exact hit). Tops in whole layers made poor bounds (rays that miss
+  crossed 117 boxes); in cells, 27.
 - GPU times come back through a ring of timestamp slots without waiting.
 - `ChunkWorld` records through `helio_core::CommandRecorder`, so the pass
   records on the graph's stream.
 
 | View | span columns | chunk trees, hold (1080p) | chunk pass in the graph (TSR) |
 |---|---|---|---|
-| ground | 3.41 ms | 1.89 ms | 1.6 ms |
-| mountain slope | 12.57 ms | 4.68 ms | 4.8 ms |
-| tunnel | 13.78 ms | 2.76 ms | |
+| ground | 3.41 ms | 1.79 ms | 1.9 ms |
+| mountain slope | 12.57 ms | 4.06 ms | 4.8 ms |
+| tunnel | 13.78 ms | 2.71 ms | |
 
-The mountain rose from 3.5 ms with the wider continuation: rays crossing
-the valley now finish instead of stopping at sky. Left for phase 2: a few
-wall fragments at level boundaries on the valley edge, crossfades between
+Interleaved with the growing cubes: ground 1.88 -> 1.79 ms, mountain 4.40
+-> 4.06, tunnel 2.75 -> 2.71, cruise primary p50 2.69 -> 2.58; every probe
+now matches the exact CPU raycast. The columns cost the CPU 0.9 ms more a
+frame on average in the cruise (drawn set and table upload, mostly when a
+plan arrives); update p95 12 -> 14 ms.
+
+Left for phase 2: the drawn set off the main thread, crossfades between
 levels, residency by ray reach (caves), and face-edge neighbours.
 
 ## References

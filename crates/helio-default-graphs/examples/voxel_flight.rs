@@ -834,7 +834,7 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
         let mut encoder = flight.device.create_command_encoder(&Default::default());
         world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun, [w, h]);
         flight.queue.submit([encoder.finish()]);
-        let [seeded, steps, hits, chunks] = world.take_counts();
+        let counts = world.take_counts();
         if std::env::var_os("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL").is_some() {
             let mut encoder = flight.device.create_command_encoder(&Default::default());
             world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame + 1, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun, [w, h]);
@@ -845,11 +845,14 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
         }
         let pixels = f64::from(w * h);
         eprintln!(
-            "CHUNKCOUNT {view}: seeded {:.2} hits {:.2} (of pixels) steps/seeded {:.1} chunks/seeded {:.2}",
-            f64::from(seeded) / pixels,
-            f64::from(hits) / pixels,
-            f64::from(steps) / f64::from(seeded.max(1)),
-            f64::from(chunks) / f64::from(seeded.max(1))
+            "CHUNKCOUNT {view}: seeded {:.2} hits {:.2} (of pixels) steps/seeded {:.1} boxes/seeded {:.2}; missed {:.4} of pixels, {:.1} boxes each, {} lost",
+            f64::from(counts.seeded) / pixels,
+            f64::from(counts.hits) / pixels,
+            f64::from(counts.steps) / f64::from(counts.seeded.max(1)),
+            f64::from(counts.boxes) / f64::from(counts.seeded.max(1)),
+            f64::from(counts.missed) / pixels,
+            f64::from(counts.missed_boxes) / f64::from(counts.missed.max(1)),
+            counts.lost
         );
     }
     eprintln!(

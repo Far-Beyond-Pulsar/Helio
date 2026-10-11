@@ -45,8 +45,8 @@ fn free_block_entries() -> u64 {
     (0..LEAF_CLASSES).map(|c| LEAF_CAPACITY / (16 << c)).sum()
 }
 
-/// Chunk table slots (at least twice the chunks).
-const TABLE_SLOTS: usize = 2 * MAX_CHUNKS;
+/// Chunk table entries: the drawn chunks and the drawn cut's columns.
+const TABLE_SLOTS: usize = 4 * MAX_CHUNKS;
 /// Draws whose timings can be pending at once.
 pub const TIMING_RING: u64 = 4;
 
@@ -264,6 +264,21 @@ struct Chunk {
 struct TileChunks {
     chunks: Vec<Chunk>,
     layers: (i32, i32),
+}
+
+/// What the traces did (counting builds).
+#[derive(Clone, Copy, Debug)]
+pub struct TraceCounts {
+    /// Pixels traced, tree steps, hits, boxes crossed.
+    pub seeded: u32,
+    pub steps: u32,
+    pub hits: u32,
+    pub boxes: u32,
+    /// Rays that ended without a hit, the boxes they crossed, and those
+    /// that left the drawn cut.
+    pub missed: u32,
+    pub missed_boxes: u32,
+    pub lost: u32,
 }
 
 /// A frame's GPU time (milliseconds).
@@ -527,14 +542,17 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
         // Diagnostics (counting builds): the chunks one pixel's ray visits
         // (`HELIO_VOXEL_CHUNKS_DEBUG_PIXEL=x,y`), from counters[16].
         .replace(
-            "TRACE_PIXEL(chunk, slot, cube, real)",
+            "TRACE_PIXEL(chunk, slot, cube_lo, real)",
             if counting {
-                "if all(id.xy == params.debug.zw) && chunk < 48u { atomicStore(&counters[16u + chunk * 5u], slot); atomicStore(&counters[17u + chunk * 5u], bitcast<u32>(cube.x)); atomicStore(&counters[18u + chunk * 5u], bitcast<u32>(cube.y)); atomicStore(&counters[19u + chunk * 5u], bitcast<u32>(cube.z)); atomicStore(&counters[20u + chunk * 5u], u32(real) + 2u * u32(key.x >> 8u)); atomicStore(&counters[4], chunk + 1u); }"
+                "if all(id.xy == params.debug.zw) && chunk < 48u { atomicStore(&counters[16u + chunk * 5u], slot); atomicStore(&counters[17u + chunk * 5u], bitcast<u32>(cube_lo.x)); atomicStore(&counters[18u + chunk * 5u], bitcast<u32>(cube_lo.y)); atomicStore(&counters[19u + chunk * 5u], bitcast<u32>(cube_lo.z)); atomicStore(&counters[20u + chunk * 5u], u32(real) + 2u * u32(key.x >> 8u)); atomicStore(&counters[4], chunk + 1u); }"
             } else {
                 ""
             },
         )
-        .replace("COUNT(3)", &count(3));
+        .replace("COUNT(3)", &count(3))
+        .replace("COUNT(8)", &count(8))
+        .replace("COUNT(10)", &count(10))
+        .replace("COUNT_BOXES", if counting { "atomicAdd(&counters[9], chunk);" } else { "" });
     [("chunk generation", terrain_source(plane, program, wide64) + include_str!("../../shaders/chunk_generate.wgsl")), ("chunk draw", draw)]
 }
 
@@ -713,7 +731,7 @@ impl ChunkWorld {
         let timing_slots = (0..if queries.is_some() { TIMING_RING } else { 0 })
             .map(|_| TimingSlot { buffer: buffer("chunk timestamps read", 40, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST), frame: None, ready: None })
             .collect();
-        let drawn_set = drawn::DrawnSet::new(MAX_CHUNKS, TABLE_SLOTS);
+        let drawn_set = drawn::DrawnSet::new(MAX_CHUNKS, TABLE_SLOTS, planet.grid().levels() - 1);
         let chunk_table = buffer("chunk table", (TABLE_SLOTS * 32) as u64, s);
         queue.write_buffer(&chunk_table, 0, bytemuck::cast_slice(drawn_set.table()));
         Self {
@@ -1390,16 +1408,17 @@ impl ChunkWorld {
         }
     }
 
-    /// Seeded pixels, tree steps and hits of the draws since the last call
-    /// (with `HELIO_VOXEL_CHUNKS_COUNT`).
-    pub fn take_counts(&self) -> [u32; 4] {
-        let counts: Vec<[u32; 4]> = self.read(&self.counters, 1);
+    /// The traces' counts since the last call (with
+    /// `HELIO_VOXEL_CHUNKS_COUNT`).
+    pub fn take_counts(&self) -> TraceCounts {
+        let words: Vec<[u32; 4]> = self.read(&self.counters, 3);
         self.queue.write_buffer(&self.counters, 0, &[0u8; 1024]);
-        counts[0]
+        TraceCounts { seeded: words[0][0], steps: words[0][1], hits: words[0][2], boxes: words[0][3], missed: words[2][0], missed_boxes: words[2][1], lost: words[2][2] }
     }
 
-    /// The chunks the debug pixel's ray visited (counting builds): slot,
-    /// cube, real, level; and their key and drawn state.
+    /// The boxes the debug pixel's ray crossed (counting builds): the frame
+    /// chunk's slot, the box's low corner in its cells, whether it is that
+    /// chunk, its level; and its key and layer.
     pub fn pixel_trace(&self) -> Vec<(u32, [i32; 3], bool, u32, Option<(TileKey, i32)>)> {
         let words: Vec<[u32; 4]> = self.read(&self.counters, 64);
         let flat: Vec<u32> = words.iter().flatten().copied().collect();
