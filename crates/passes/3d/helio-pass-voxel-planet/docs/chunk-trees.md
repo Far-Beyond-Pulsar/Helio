@@ -521,6 +521,34 @@ rays find no terrain from inside that cave).
 | ground | 1.89 ms | 2.12 ms |
 | mountain slope | 4.66 ms | 3.33 ms |
 
+## Where the mountain's time goes (2026-10-11)
+
+After the span path was removed, the mountain view is the one over budget
+(1080p hold: primary 4.3 ms, sun and sky 3.3 ms, against 6 ms in all).
+An Nsight GPU trace with the shader profiler (WGPU_BACKEND=vulkan, the
+attach otherwise waits on D3D12) splits it as primary 56 %, sun and sky
+samples 25 %, shadow resolve and fallbacks 19 %, seed 2 %:
+
+- Primary: about 55 % of its samples are the in-chunk DDA (bit tests, the
+  cell step, mid and leaf loads), 8 % chunk-table lookups. A step to the
+  neighbouring cell no longer goes back through `floor(o + d t)` (ground
+  -3 %, mountain -1 %, shadows -3 %); a same-leaf fast path that skipped
+  the root and mid tests was slower on the mountain (divergence) and was
+  dropped.
+- Sun samples and fallbacks: a third of their samples are hash lookups
+  (`find_entry`, memory latency: the 16 MB table is a quarter full, so
+  probe runs are short and the misses are the cost) and 15 % the climb
+  through ancestor columns when a sun ray leaves the terrain.
+- The step heatmap (`HELIO_VOXEL_CHUNKS_COUNT=1 HELIO_VOXEL_CHUNKS_HEAT=1`)
+  is hot on silhouettes and ridges, where rays skim pixel-sized cells.
+- Work per ray does not depend on cell size: at `lod_pixels` 1, 1.5 and 2
+  a seeded ray takes 40 steps through 5.6 chunk boxes, though the cut
+  holds 85, 41 and 30 thousand chunks. Coarser cells save memory and
+  shadow time (3.3 -> 2.5 ms at 1.5), not primary time. Primary falls
+  only with fewer boxes a ray enters without a hit: a chunk on a slope
+  is boxed by its whole occupied layer range, much taller than its
+  surface.
+
 ## References
 
 Laine and Karras, *Efficient Sparse Voxel Octrees* (2010); Crassin et al.,

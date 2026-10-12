@@ -256,6 +256,7 @@ cargo run -p helio-default-graphs --release --example voxel_flight -- OUT [W H [
 | `HELIO_VOXEL_CHUNKS_DIG=<n>` | Digs `n` balls across the held view and undoes them: generation per edit, when it shows, and whether the undone frame matches. |
 | `HELIO_VOXEL_CHUNKS_FLY=descent\|cruise` | Streams from 400 km down to 2 m, or at 300 m/s 40 m over the ground: detail lag (`coarse`), primary and CPU update times. |
 | `HELIO_VOXEL_CHUNKS_PROBE=x,y;...`, `HELIO_VOXEL_PICKS=x,y;...` | Pixels' drawn hits (or picks) against CPU ray casts. |
+| `HELIO_VOXEL_CHUNKS_COUNT=1` (with `HELIO_VOXEL_CHUNKS_HEAT=1`, `HELIO_VOXEL_CHUNKS_PNG=<path>`) | A counting build: steps, boxes and hits per pixel (`CHUNKCOUNT`); with `HEAT` the colour target shows each pixel's primary steps (red to 64, yellow to 128, white to 192). |
 | `HELIO_VOXEL_CHUNKS_BUDGET`, `HELIO_VOXEL_CHUNKS_GENERATE_MS`, `HELIO_VOXEL_LOD_PIXELS` | Tiles a frame, GPU generation a frame, cells per pixel of the cut. |
 
 Measuring pitfalls: the GPU's clock drops whenever it idles (synchronous

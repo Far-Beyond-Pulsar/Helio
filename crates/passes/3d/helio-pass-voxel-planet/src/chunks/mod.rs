@@ -111,7 +111,8 @@ struct DrawParams {
     eye_lo: [f32; 4],
     /// Direction to the sun, near plane.
     sun: [f32; 4],
-    /// x: colour by level (`HELIO_VOXEL_CHUNKS_LEVELS`).
+    /// x: colour by level (1, `HELIO_VOXEL_CHUNKS_LEVELS`) or by primary
+    /// steps (2, `HELIO_VOXEL_CHUNKS_HEAT`, counting builds).
     debug: [u32; 4],
     /// Chunk table slots - 1, base cells per face edge, boxes holding the
     /// eye, frame.
@@ -769,7 +770,7 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
     // Primary rays count in the trace (`COUNT`), in their walks when
     // `counted` (`WCOUNT`; shadow walks do not).
     let count = |n: u32| if counting { format!("atomicAdd(&counters[{n}], 1u);") } else { String::new() };
-    let wcount = |n: u32| if counting { format!("if counted {{ atomicAdd(&counters[{n}], 1u); }}") } else { String::new() };
+    let wcount = |n: u32| if counting { format!("if counted {{ atomicAdd(&counters[{n}], 1u); heat += u32({n} == 1); }}") } else { String::new() };
     // The noise library (materials' patches), then the draw.
     let draw = (format!("const DOMAIN_UNIT: f32 = {};\n", crate::grid::DOMAIN_UNIT) + include_str!("../../shaders/noise.wgsl") + include_str!("../../shaders/chunk_draw.wgsl"))
         .replace("COUNTERS", if counting { "@group(0) @binding(9) var<storage, read_write> counters: array<atomic<u32>, 256>;" } else { "" })
@@ -1923,7 +1924,7 @@ impl ChunkWorld {
             debug: {
                 let pixel: Vec<u32> = std::env::var("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL").ok().map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
                 [
-                    u32::from(std::env::var_os("HELIO_VOXEL_CHUNKS_LEVELS").is_some()),
+                    if std::env::var_os("HELIO_VOXEL_CHUNKS_HEAT").is_some() { 2 } else { u32::from(std::env::var_os("HELIO_VOXEL_CHUNKS_LEVELS").is_some()) },
                     u32::from(std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some()),
                     pixel.first().copied().unwrap_or(u32::MAX),
                     pixel.get(1).copied().unwrap_or(u32::MAX),

@@ -126,6 +126,9 @@ fn chunk_frame(slot: u32) -> ChunkDraw {
         vec4<f32>(s.i0.xyz, o.x), vec4<f32>(s.i1.xyz, o.y), vec4<f32>(s.i2.xyz, o.z), s.box);
 }
 COUNTERS
+// Steps this invocation's primary walk took (counting builds; the step
+// heatmap, `params.debug.x == 2`).
+var<private> heat: u32;
 
 const NONE: u32 = 0xffffffffu;
 
@@ -264,6 +267,7 @@ fn shown_material(pair: u32, slot: u32, c: vec3<i32>, from_above: bool) -> u32 {
 fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u32, z: vec2<i32>, counted: bool) -> Hit {
     let root = chunk_meta[slot];
     let inv = 1.0 / select(d, vec3<f32>(1e-30), d == vec3<f32>(0.0));
+    let o_inv = o * inv;
     let positive = d > vec3<f32>(0.0);
     var t = t0;
     var axis = axis0;
@@ -303,15 +307,17 @@ fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u
         // Leave the empty cube of `size` cells holding c.
         let b = c & vec3<i32>(~(size - 1));
         let bound = vec3<f32>(b) + select(vec3<f32>(0.0), vec3<f32>(f32(size)), positive);
-        let tt = (bound - o) * inv;
+        let tt = fma(bound, inv, -o_inv);
         let tn = min(tt.x, min(tt.y, tt.z));
         if tn >= t1 { break; }
         axis = select(select(2u, 1u, tt.y <= tt.z), 0u, tt.x <= tt.y && tt.x <= tt.z);
         t = max(tn, t);
-        var next = clamp(vec3<i32>(floor(o + d * t)), b, b + vec3<i32>(size - 1));
+        // A cell steps to its neighbour; a cube lands where the ray leaves it.
+        if size != 1 {
+            c = clamp(vec3<i32>(floor(o + d * t)), b, b + vec3<i32>(size - 1));
+        }
         let step = select(b - vec3<i32>(1), b + vec3<i32>(size), positive);
-        if axis == 0u { next.x = step.x; } else if axis == 1u { next.y = step.y; } else { next.z = step.z; }
-        c = next;
+        if axis == 0u { c.x = step.x; } else if axis == 1u { c.y = step.y; } else { c.z = step.z; }
         if any(c < vec3<i32>(0, 0, z.x)) || any(c > vec3<i32>(63, 63, z.y - 1)) { break; }
     }
     return Hit(t1, c, axis, false, 0u);
@@ -748,7 +754,11 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     let normal = normalize(axis_world) * select(-1.0, 1.0, end.sign == 1u);
     let light = 0.25 + 0.75 * max(dot(normal, params.sun.xyz), 0.0);
     var colour = palette(end.material).rgb;
-    if params.debug.x != 0u {
+    if params.debug.x == 2u {
+        // Steps: red to 64, yellow to 128, white to 192.
+        let h = f32(heat) / 64.0;
+        colour = clamp(vec3<f32>(h, h - 1.0, h - 2.0), vec3<f32>(0.0), vec3<f32>(1.0)) / light;
+    } else if params.debug.x == 1u {
         // Level colours.
         let level = (bitcast<u32>(c.box.w) >> 8u) & 31u;
         let colours = array<vec3<f32>, 8>(vec3<f32>(0.9, 0.2, 0.2), vec3<f32>(0.9, 0.6, 0.1), vec3<f32>(0.8, 0.9, 0.1), vec3<f32>(0.2, 0.8, 0.2),
