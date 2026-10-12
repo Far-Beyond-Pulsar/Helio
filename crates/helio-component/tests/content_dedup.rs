@@ -15,7 +15,7 @@
 #![cfg(feature = "gpu")]
 
 use helio::PackedVertex;
-use helio_component::components::{MeshAssetPath, StaticMeshComponent};
+use helio_component::components::{MeshAssetPath, MeshGeometryKey, StaticMeshComponent};
 use pulsar_scenedb::gpu::{
     EngineGpuContext, GpuMirrorHandle, RegionClassConfig, SceneGpuConfig, SceneGpuStore,
 };
@@ -123,7 +123,7 @@ fn spawn_with_asset(world: &mut World, asset: &str, _vert_count: usize) -> Entit
     world.insert(
         e,
         StaticMeshComponent {
-            mesh_asset: MeshAssetPath::new(asset),
+            mesh_asset: MeshAssetPath::new(asset), geometry_key: MeshGeometryKey::for_path(&MeshAssetPath::new(asset)),
             vertices: upload.vertices,
             indices: upload.indices,
             bounds_local: [0.0, 0.0, 0.0, 0.5],

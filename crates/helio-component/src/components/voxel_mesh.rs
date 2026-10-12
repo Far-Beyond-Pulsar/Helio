@@ -26,7 +26,7 @@
 use pulsar_scenedb::gpu::GpuMirrorHandle;
 
 use super::{
-    MeshAssetPath, ObjectMovability, StaticMeshComponent, StaticMeshMaterialSlot,
+    MeshAssetPath, MeshGeometryKey, ObjectMovability, StaticMeshComponent, StaticMeshMaterialSlot,
     StaticMeshMaterialSlots, VoxelComponent,
 };
 use crate::mesh_cache::{ImportedSurfaceMaterial, MeshSection};
@@ -364,6 +364,7 @@ pub fn write_voxel_mesh_rows(
         .collect();
     let generated = StaticMeshComponent {
         mesh_asset: MeshAssetPath::generated(mesh.id),
+        geometry_key: MeshGeometryKey(mesh.id),
         material_slots: StaticMeshMaterialSlots { slots },
         movability: ObjectMovability::Movable,
         vertices: mesh.vertices.clone(),

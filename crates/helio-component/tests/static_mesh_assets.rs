@@ -1,11 +1,12 @@
 //! Asset behavior of `StaticMeshComponent` (Pulsar-Native#1035 acceptance,
-//! #1081): missing and corrupt assets, reload by reassigning the path,
-//! rapid replacement, shared asset reuse, and a property-only edit that
-//! neither reloads the asset nor re-uploads the geometry.
+//! #1081, SceneDB#84): missing and corrupt assets, rapid replacement while
+//! loads are in flight, shared asset reuse, a property-only edit that
+//! neither reloads the asset nor re-uploads the geometry, and reload when
+//! the file changes.
 //!
-//! A mesh asset is loaded synchronously inside the write that names it
-//! (the boundary decoder, or the `mesh_asset` property hook), so there is
-//! no in-flight load to cancel, outlive its component or complete stale.
+//! A component names its mesh by `AssetId`; the world loads it on a worker
+//! thread and binds the geometry (`World::pump_assets`). Nothing is read
+//! from disk inside a write.
 //!
 //! One test, because the project path the loader resolves against is a
 //! process global. Needs a GPU adapter for the upload checks (lavapipe
@@ -13,10 +14,13 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
-use helio_component::components::{ObjectMovability, StaticMeshComponent};
+use helio_component::components::{
+    mesh_source_for_file, ObjectMovability, StaticMeshComponent, MESH_ASSET_KIND,
+};
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
-use pulsar_scenedb::World;
+use pulsar_scenedb::{AssetState, World};
 
 fn primitive(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -54,6 +58,22 @@ fn vertex_count(world: &World, entity: pulsar_scenedb::Entity) -> usize {
         .len()
 }
 
+fn resolve(world: &mut World) {
+    assert!(
+        world.resolve_assets_blocking(Duration::from_secs(30)),
+        "mesh assets did not load"
+    );
+}
+
+/// The geometry the mesh at `path` loads to, through a world of its own.
+fn loaded(path: &str) -> StaticMeshComponent {
+    let mut world = World::new();
+    let entity = world.spawn();
+    world.insert(entity, StaticMeshComponent::for_mesh_asset(path));
+    resolve(&mut world);
+    world.get::<StaticMeshComponent>(entity).unwrap().clone()
+}
+
 #[test]
 fn mesh_assets_load_replace_and_survive_bad_input() {
     let project = tempfile::tempdir().unwrap();
@@ -66,18 +86,37 @@ fn mesh_assets_load_replace_and_survive_bad_input() {
     engine_state::EngineContext::new().set_global();
     engine_state::set_project_path(project.path().display().to_string());
 
-    let cube = StaticMeshComponent::for_mesh_asset("meshes/cube.fbx");
-    let sphere = StaticMeshComponent::for_mesh_asset("meshes/sphere.fbx");
+    // Naming a mesh reads nothing: the value carries the asset id only.
+    let unbound = StaticMeshComponent::for_mesh_asset("meshes/cube.fbx");
+    assert!(!unbound.mesh.is_zero());
+    assert!(unbound.vertices.is_empty());
+    assert_eq!(
+        unbound.mesh.source().map(|(kind, _)| kind),
+        Some(MESH_ASSET_KIND)
+    );
+
+    let cube = loaded("meshes/cube.fbx");
+    let sphere = loaded("meshes/sphere.fbx");
+    let torus = loaded("meshes/torus.fbx");
     assert!(!cube.vertices.is_empty() && !sphere.vertices.is_empty());
     assert_ne!(
         cube.vertices.len(),
         sphere.vertices.len(),
         "distinct fixtures"
     );
+    assert_ne!(cube.bounds_local, [0.0, 0.0, 0.0, 0.5]);
 
     // ── Missing and corrupt assets: an empty, invisible mesh, no panic ────
     for path in ["meshes/missing.fbx", "meshes/corrupt.fbx"] {
-        let mesh = StaticMeshComponent::for_mesh_asset(path);
+        let mut world = World::new();
+        let entity = world.spawn();
+        world.insert(entity, StaticMeshComponent::for_mesh_asset(path));
+        resolve(&mut world);
+        let mesh = world.get::<StaticMeshComponent>(entity).unwrap();
+        assert!(
+            matches!(world.asset_state(mesh.mesh), AssetState::Failed(_)),
+            "{path}"
+        );
         assert!(
             mesh.vertices.is_empty() && mesh.indices.is_empty(),
             "{path}"
@@ -96,6 +135,7 @@ fn mesh_assets_load_replace_and_survive_bad_input() {
         .expect("a bad asset is not a decode error");
         let decoded = decoded.downcast::<StaticMeshComponent>().unwrap();
         assert_eq!(decoded.mesh_asset.as_str(), path);
+        assert_eq!(decoded.mesh, mesh.mesh);
         assert!(decoded.vertices.is_empty());
     }
 
@@ -121,12 +161,13 @@ fn mesh_assets_load_replace_and_survive_bad_input() {
             .map(|ctx| world.flush_gpu_mirror(ctx.queue()).unwrap())
     };
 
-    // ── Rapid replacement: the last write wins ────────────────────────────
+    // ── Rapid replacement: the last write wins, whatever is in flight ─────
     let entity = world.spawn();
     world.insert(
         entity,
         StaticMeshComponent::for_mesh_asset("meshes/cube.fbx"),
     );
+    world.pump_assets();
     for path in [
         "meshes/sphere.fbx",
         "meshes/missing.fbx",
@@ -134,7 +175,9 @@ fn mesh_assets_load_replace_and_survive_bad_input() {
         "meshes/sphere.fbx",
     ] {
         set_mesh_asset(&mut world, entity, path);
+        world.pump_assets();
     }
+    resolve(&mut world);
     assert_eq!(vertex_count(&world, entity), sphere.vertices.len());
     assert_eq!(
         bytes(&world.get::<StaticMeshComponent>(entity).unwrap().vertices),
@@ -148,6 +191,7 @@ fn mesh_assets_load_replace_and_survive_bad_input() {
         other,
         StaticMeshComponent::for_mesh_asset("meshes/sphere.fbx"),
     );
+    resolve(&mut world);
     flush(&world);
     if let Some(store) = &store {
         let handle =
@@ -169,6 +213,7 @@ fn mesh_assets_load_replace_and_survive_bad_input() {
         Box::new(ObjectMovability::Movable),
     )
     .unwrap();
+    assert!(!world.asset_work_pending(), "the edit asked for no load");
     assert_eq!(
         vertex_count(&world, entity),
         sphere.vertices.len(),
@@ -183,13 +228,22 @@ fn mesh_assets_load_replace_and_survive_bad_input() {
         );
     }
 
-    // ── Reload: the file changes, the path is assigned again ──────────────
+    // ── Reload: the file changes, every component showing it follows ──────
     std::fs::copy(primitive("SM_Torus.fbx"), meshes.join("sphere.fbx")).unwrap();
-    set_mesh_asset(&mut world, entity, "meshes/sphere.fbx");
-    let torus = StaticMeshComponent::for_mesh_asset("meshes/torus.fbx");
-    assert_eq!(
-        bytes(&world.get::<StaticMeshComponent>(entity).unwrap().vertices),
-        bytes(&torus.vertices),
-        "reassigning the path loads the file's new content"
-    );
+    let source = mesh_source_for_file(&meshes.join("sphere.fbx"));
+    assert_eq!(world.asset_source_changed(&source), 1);
+    resolve(&mut world);
+    for e in [entity, other] {
+        assert_eq!(
+            bytes(&world.get::<StaticMeshComponent>(e).unwrap().vertices),
+            bytes(&torus.vertices),
+            "a changed file is loaded again and rebound"
+        );
+    }
+    flush(&world);
+    if let Some(store) = &store {
+        let handle =
+            |e: pulsar_scenedb::Entity| StaticMeshComponent::vertices_gpu_handle(store, e.index());
+        assert_eq!(handle(entity), handle(other), "still one allocation");
+    }
 }
