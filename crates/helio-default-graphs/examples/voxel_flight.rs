@@ -41,6 +41,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// Side of the cells the engine frames' world origin snaps to (Pulsar's
+/// `WORLD_ORIGIN_CELL`).
+const ORIGIN_CELL: f64 = 1024.0;
+
 const FRAMES_IN_FLIGHT: usize = 2;
 
 struct Flight {
@@ -194,13 +198,19 @@ impl Flight {
     fn draw(&mut self, eye: DVec3, forward: Vec3) -> (f64, f64) {
         let started = Instant::now();
         *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: self.planet.clone(), sun: self.sun, shadows: self.shadows, picks: self.picks.clone() });
-        self.renderer.set_world_origin(Some(eye));
+        // As a host's camera-relative frames: the origin stays on a cell
+        // corner while the camera moves within the cell, off the origin.
+        let origin = (eye / ORIGIN_CELL).round() * ORIGIN_CELL;
+        self.renderer.set_world_origin(Some(origin));
         let up = up_for(eye);
         let forward = forward.normalize();
         let up = if forward.dot(up).abs() > 0.999 { up.any_orthonormal_vector() } else { up };
         let near = (self.planet.air_clearance(eye) * 0.25).clamp(0.05, 50_000.0) as f32;
         let aspect = self.size[0] as f32 / self.size[1] as f32;
-        let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, std::f32::consts::FRAC_PI_4, aspect, near, 40_000_000.0);
+        let mut camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, std::f32::consts::FRAC_PI_4, aspect, near, 40_000_000.0);
+        let local = eye - origin;
+        camera.position = local.as_vec3();
+        camera.view = (camera.view.as_dmat4() * glam::DMat4::from_translation(-local)).as_mat4();
         self.renderer.render(&camera, &self.target.create_view(&Default::default())).unwrap();
         let recorded = Instant::now();
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
