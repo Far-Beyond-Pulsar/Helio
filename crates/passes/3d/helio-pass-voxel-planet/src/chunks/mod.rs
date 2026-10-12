@@ -918,11 +918,13 @@ fn uniform(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayou
 /// with `walk` (`sun_walk`, `sky_visibility`), and with `walk_fine`
 /// (`..._fine`: the kernels for hits finer than the exact levels).
 fn walk_templates(source: &str) -> String {
+    // Past a marker's line (checkouts may end lines with \r\n).
+    let past_line = |text: &str, at: usize| text[at..].find('\n').map_or(text.len(), |n| at + n + 1);
     let mut out = String::with_capacity(source.len() * 2);
     let mut rest = source;
-    while let Some(start) = rest.find("// WALK {\n") {
-        let end = rest[start..].find("// } WALK\n").expect("closed walk template") + start;
-        let body = &rest[start + "// WALK {\n".len()..end];
+    while let Some(start) = rest.find("// WALK {") {
+        let end = rest[start..].find("// } WALK").expect("closed walk template") + start;
+        let body = &rest[past_line(rest, start)..end];
         out.push_str(&rest[..start]);
         out.push_str(body);
         out.push_str(
@@ -931,7 +933,7 @@ fn walk_templates(source: &str) -> String {
                 .replace("fn sun_walk(", "fn sun_walk_fine(")
                 .replace("fn sky_visibility(", "fn sky_visibility_fine("),
         );
-        rest = &rest[end + "// } WALK\n".len()..];
+        rest = &rest[past_line(rest, end)..];
     }
     out.push_str(rest);
     out
@@ -2589,5 +2591,23 @@ impl ChunkWorld {
     /// Frames whose GPU times came back since the last call.
     pub fn take_timings(&mut self) -> Vec<FrameTimings> {
         std::mem::take(&mut self.timings)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::walk_templates;
+
+    /// Both walks come out of the templates whatever ends the lines (a
+    /// checkout's \r\n lost the fine ones).
+    #[test]
+    fn walk_templates_expand_with_any_line_ends() {
+        for end in ["\n", "\r\n"] {
+            let source = ["head", "// WALK {", "fn sun_walk() { walk(Walk(0)); }", "// } WALK", "tail", ""].join(end);
+            let out = walk_templates(&source);
+            assert!(out.contains("fn sun_walk() { walk(Walk(0)); }"), "{out:?}");
+            assert!(out.contains("fn sun_walk_fine() { walk_fine(Walk(0)); }"), "{out:?}");
+            assert!(!out.contains("WALK {") && out.starts_with("head") && out.trim_end().ends_with("tail"), "{out:?}");
+        }
     }
 }
