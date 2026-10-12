@@ -27,7 +27,6 @@
 //! changed entries are uploaded.
 
 use super::TileKey;
-use glam::{DMat3, DVec3};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 /// A drawn chunk, as the draw and the chunk table need it.
@@ -35,11 +34,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 pub struct DrawnChunk {
     pub key: [i32; 4],
     pub slot: u32,
-    pub origin: DVec3,
-    pub inv: DMat3,
-    /// Bounding sphere centre (planet-centred) and radius.
-    pub centre: DVec3,
-    pub radius: f64,
+    /// Occupied layers [lo, hi) (the whole chunk until read back).
     pub z: (f64, f64),
 }
 
@@ -138,6 +133,8 @@ pub struct DrawnSet {
     mask: u32,
     /// Entries changed since the last upload.
     dirty: Vec<u32>,
+    /// Bumped whenever `list` changes (its slots are uploaded then).
+    version: u64,
 }
 
 impl DrawnSet {
@@ -157,11 +154,17 @@ impl DrawnSet {
             table: vec![EMPTY; 2 * entries],
             mask: entries as u32 - 1,
             dirty: Vec::new(),
+            version: 0,
         }
     }
 
     pub fn mask(&self) -> u32 {
         self.mask
+    }
+
+    /// Changes whenever the drawn chunks do.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     /// The whole table (its first upload).
@@ -361,6 +364,7 @@ impl DrawnSet {
     }
 
     fn insert(&mut self, c: DrawnChunk, state: i32) {
+        self.version += 1;
         self.position[c.slot as usize] = self.list.len() as u32;
         self.put(c.key, [c.slot as i32, state, 0, 0]);
         self.list.push(c);
@@ -371,6 +375,7 @@ impl DrawnSet {
         if at == NONE {
             return;
         }
+        self.version += 1;
         let c = self.list.swap_remove(at as usize);
         self.position[slot as usize] = NONE;
         if let Some(moved) = self.list.get(at as usize) {
@@ -516,7 +521,7 @@ mod tests {
     }
 
     fn chunk(slot: u32, key: [i32; 4]) -> DrawnChunk {
-        DrawnChunk { key, slot, origin: DVec3::ZERO, inv: DMat3::IDENTITY, centre: DVec3::ZERO, radius: 1.0, z: (0.0, 64.0) }
+        DrawnChunk { key, slot, z: (0.0, 64.0) }
     }
 
     #[test]

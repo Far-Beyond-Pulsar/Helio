@@ -600,6 +600,17 @@ Sun and sky on the ground fell 7 %, but the tunnel's walks and the
 mountain's primary rose 3-4 % even where it never applied (the walk's
 code and registers grew).
 
+## Culling on the GPU (2026-10-12)
+
+The CPU culled every drawn chunk each frame (bounding sphere against the
+frustum, the eye in its box, a distance bucket): 2.2 ms of the draw's
+2.8 ms CPU on the mountain (85 k chunks). Three compute passes now build
+the seed's list (`cull_bin`, `cull_offsets`, `cull_scatter`): bins by
+distance with those holding the eye first, offsets, and two indirect
+draws. The CPU uploads the drawn slots only when they change. Draw CPU
+p50 2.8 -> 0.32 ms (mountain), 0.35 ms (ground); boxes and GPU times
+unchanged.
+
 ## References
 
 Laine and Karras, *Efficient Sparse Voxel Octrees* (2010); Crassin et al.,

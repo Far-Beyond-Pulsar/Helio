@@ -34,6 +34,9 @@ const CHUNK_BATCH: usize = 2048;
 /// Chunk slots.
 pub const MAX_CHUNKS: usize = 131072;
 
+/// `Cull` of chunk_draw.wgsl: two counts, then 65 bins' counts and cursors.
+const CULL_BYTES: u64 = 4 * (2 + 2 * 65);
+
 /// Metres over the highest possible solid cell where rays may end: far
 /// above the f32 error of the ceiling test.
 const CEILING_MARGIN: f64 = 16.0;
@@ -234,12 +237,6 @@ fn loaded(view: &wgpu::TextureView) -> Option<wgpu::RenderPassColorAttachment<'_
     Some(wgpu::RenderPassColorAttachment { view, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })
 }
 
-/// The frustum's planes from a view-projection (inside: dot >= 0).
-fn frustum_planes(m: Mat4) -> [glam::Vec4; 5] {
-    let r = |i: usize| m.row(i);
-    [r(3) + r(0), r(3) - r(0), r(3) + r(1), r(3) - r(1), r(3)].map(|p| p / p.truncate().length())
-}
-
 /// The analytic brushes of `edits` resolved per face: the large log's,
 /// then the recent log's; the count of large ones, and each recent brush's
 /// face count.
@@ -348,7 +345,6 @@ struct Chunk {
     slot: u32,
     /// Generation it belongs to (matches its readback).
     serial: u64,
-    frame: Frame,
     /// Occupied layers, once read back.
     z: Option<(i32, i32)>,
 }
@@ -519,6 +515,12 @@ pub struct ChunkWorld {
     resolve_layout: wgpu::BindGroupLayout,
     seed_outside: wgpu::RenderPipeline,
     seed_inside: wgpu::RenderPipeline,
+    /// The draw list built on the GPU (`cull_bin`, `cull_offsets`,
+    /// `cull_scatter`).
+    cull_layout: [wgpu::BindGroupLayout; 2],
+    cull_bin: wgpu::ComputePipeline,
+    cull_offsets: wgpu::ComputePipeline,
+    cull_scatter: wgpu::ComputePipeline,
     trace: wgpu::ComputePipeline,
     shadow_sample_layout: wgpu::BindGroupLayout,
     shadow_sample: wgpu::ComputePipeline,
@@ -559,6 +561,12 @@ pub struct ChunkWorld {
     face_cells: u32,
     statics: wgpu::Buffer,
     draw_list: wgpu::Buffer,
+    /// The drawn chunks' slots (uploaded when they change), the cull's
+    /// counts (`Cull`), each drawn chunk's bin, and the seed's indirect draws.
+    drawn_slots: wgpu::Buffer,
+    cull_state: wgpu::Buffer,
+    cull_bins: wgpu::Buffer,
+    seed_args: wgpu::Buffer,
     /// GPU timestamps of the frames, read back without waiting.
     queries: Option<(wgpu::QuerySet, wgpu::Buffer)>,
     timing_slots: Vec<TimingSlot>,
@@ -615,8 +623,8 @@ pub struct ChunkWorld {
     drawn_set: drawn::DrawnSet,
     /// Tiles whose chunks changed since the drawn set last saw them.
     changed_tiles: FxHashSet<TileKey>,
-    /// Boxes of the last draw: drawn from inside, in all.
-    boxes: (u32, u32),
+    /// The drawn set's version whose slots `drawn_slots` holds.
+    slots_version: Option<u64>,
     /// Results recorded by the last update, mapped once submitted.
     pending: Option<Readback>,
     last_requests: usize,
@@ -907,8 +915,31 @@ impl ChunkWorld {
         });
         let seed_layout_1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk seed exits"),
-            entries: &[texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::FRAGMENT)],
+            entries: &[texture_entry(5, wgpu::TextureSampleType::Float { filterable: false }, wgpu::ShaderStages::FRAGMENT), storage(22, true, wgpu::ShaderStages::VERTEX)],
         });
+        // The cull writes the draw list the draw layout reads: its own layouts.
+        let cull_layout = [
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("chunk cull frames"),
+                entries: &[uniform(0, c), storage(1, true, c), storage(2, true, c)],
+            }),
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("chunk cull"),
+                entries: &[storage(17, true, c), storage(18, false, c), storage(19, false, c), storage(20, false, c), storage(21, false, c)],
+            }),
+        ];
+        let cull_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("chunk cull"), bind_group_layouts: &[Some(&cull_layout[0]), Some(&cull_layout[1])], immediate_size: 0 });
+        let cull = |entry: &str| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&cull_pipeline_layout),
+                module: &draw_module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        };
+        let (cull_bin, cull_offsets, cull_scatter) = (cull("cull_bin"), cull("cull_offsets"), cull("cull_scatter"));
         let resolve_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("chunk depth resolve"),
             entries: &[
@@ -922,11 +953,11 @@ impl ChunkWorld {
         let depth = |compare: wgpu::CompareFunction| {
             Some(wgpu::DepthStencilState { format: DEPTH_FORMAT, depth_write_enabled: Some(true), depth_compare: Some(compare), stencil: Default::default(), bias: Default::default() })
         };
-        let seed = |fragment: &str| {
+        let seed = |vertex: &str, fragment: &str| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(fragment),
                 layout: Some(&seed_layout),
-                vertex: wgpu::VertexState { module: &draw_module, entry_point: Some("seed_vertex"), compilation_options: Default::default(), buffers: &[] },
+                vertex: wgpu::VertexState { module: &draw_module, entry_point: Some(vertex), compilation_options: Default::default(), buffers: &[] },
                 primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), front_face: wgpu::FrontFace::Ccw, ..Default::default() },
                 depth_stencil: depth(wgpu::CompareFunction::Less),
                 multisample: Default::default(),
@@ -935,8 +966,8 @@ impl ChunkWorld {
                 cache: None,
             })
         };
-        let seed_outside = seed("seed_fragment");
-        let seed_inside = seed("seed_fragment_inside");
+        let seed_outside = seed("seed_vertex", "seed_fragment");
+        let seed_inside = seed("seed_vertex_inside", "seed_fragment_inside");
         let trace = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("chunk trace"),
             layout: Some(&layout(&trace_layout)),
@@ -1053,6 +1084,10 @@ impl ChunkWorld {
             resolve_layout,
             seed_outside,
             seed_inside,
+            cull_layout,
+            cull_bin,
+            cull_offsets,
+            cull_scatter,
             trace,
             shadow_sample_layout,
             shadow_sample,
@@ -1090,6 +1125,10 @@ impl ChunkWorld {
             face_cells: planet.grid().cells() as u32,
             statics: buffer("chunk statics", (MAX_CHUNKS * std::mem::size_of::<ChunkStatic>()) as u64, s),
             draw_list: buffer("chunk draw list", (MAX_CHUNKS * 4) as u64, s),
+            drawn_slots: buffer("chunk drawn slots", (MAX_CHUNKS * 4) as u64, s),
+            cull_state: buffer("chunk cull", CULL_BYTES, s | wgpu::BufferUsages::COPY_SRC),
+            cull_bins: buffer("chunk cull bins", (MAX_CHUNKS * 4) as u64, s),
+            seed_args: buffer("chunk seed draws", 32, s | wgpu::BufferUsages::INDIRECT),
             queries,
             timing_slots,
             timing_now: None,
@@ -1134,7 +1173,7 @@ impl ChunkWorld {
             readbacks: std::collections::VecDeque::new(),
             drawn_set,
             changed_tiles: Default::default(),
-            boxes: (0, 0),
+            slots_version: None,
             pending: None,
             last_requests: 0,
             planned_for: None,
@@ -1271,7 +1310,7 @@ impl ChunkWorld {
                 bounds: [0.0, 64.0, f32::from_bits(slot), f32::from_bits(flags)],
             };
             self.queue.write_buffer(&self.statics, u64::from(slot) * std::mem::size_of::<ChunkStatic>() as u64, bytemuck::bytes_of(&record));
-            chunks.push(Chunk { cz, slot, serial: self.serial, frame, z: None });
+            chunks.push(Chunk { cz, slot, serial: self.serial, z: None });
             self.queue.write_buffer(&self.chunk_keys, u64::from(slot) * 16, bytemuck::cast_slice(&chunk_key(key, cz)));
             self.slot_keys[slot as usize] = chunk_key(key, cz);
             readback.chunks.push((key, cz, slot, self.serial));
@@ -1609,16 +1648,7 @@ impl ChunkWorld {
                     .iter()
                     .map(|c| {
                         let z = c.z.map_or((0.0, 64.0), |(a, b)| (f64::from(a), f64::from(b)));
-                        let half = DVec3::new(32.0, 32.0, (z.1 - z.0) / 2.0);
-                        drawn::DrawnChunk {
-                            key: chunk_key(key, c.cz),
-                            slot: c.slot,
-                            origin: c.frame.origin,
-                            inv: c.frame.inv,
-                            centre: c.frame.origin + c.frame.m * DVec3::new(32.0, 32.0, (z.0 + z.1) / 2.0),
-                            radius: (c.frame.m * half).length().max((c.frame.m * DVec3::new(32.0, -32.0, half.z)).length()),
-                            z,
-                        }
+                        drawn::DrawnChunk { key: chunk_key(key, c.cz), slot: c.slot, z }
                     })
                     .collect()
             })
@@ -1894,40 +1924,17 @@ impl ChunkWorld {
         if self.timing_now.is_none() {
             self.claim_timing(frame);
         }
-        // Boxes in view (a bounding sphere against the frustum's planes),
-        // those holding the eye first, the others roughly front to back
-        // (buckets of distance: early depth tests reject boxes behind
-        // nearer hits).
-        let planes = frustum_planes(view_proj);
-        let mut inside = Vec::new();
-        let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); 64];
-        for c in &self.drawn_set.list {
-            let (z0, z1) = c.z;
-            let centre = c.centre - eye;
-            let radius = c.radius;
-            let centre32 = centre.as_vec3();
-            if planes.iter().any(|p| p.truncate().dot(centre32) + p.w < -(radius as f32)) {
-                continue;
+        // The drawn chunks' slots, when they changed; the GPU culls them
+        // (`cull_bin`) into the seed's draw list.
+        let drawn = self.drawn_set.list.len() as u32;
+        if self.slots_version != Some(self.drawn_set.version()) {
+            let slots: Vec<u32> = self.drawn_set.list.iter().map(|c| c.slot).collect();
+            if !slots.is_empty() {
+                self.queue.write_buffer(&self.drawn_slots, 0, bytemuck::cast_slice(&slots));
             }
-            let distance = centre.length();
-            if distance < radius * 1.01 + f64::from(near) * 4.0 {
-                // The eye (with the near plane around it) in the box?
-                let o = c.inv * (eye - c.origin);
-                let margin = DVec3::new(c.inv.x_axis.length(), c.inv.y_axis.length(), c.inv.z_axis.length()) * f64::from(near) * 2.0;
-                if o.x > -margin.x && o.x < 64.0 + margin.x && o.y > -margin.y && o.y < 64.0 + margin.y && o.z > z0 - margin.z && o.z < z1 + margin.z {
-                    inside.push(c.slot);
-                    continue;
-                }
-            }
-            let bucket = ((distance.max(1.0).log2() * 2.0) as usize).min(63);
-            buckets[bucket].push(c.slot);
+            self.slots_version = Some(self.drawn_set.version());
         }
-        let n_inside = inside.len() as u32;
-        let list: Vec<u32> = inside.into_iter().chain(buckets.into_iter().flatten()).collect();
-        self.boxes = (n_inside, list.len() as u32);
-        if !list.is_empty() {
-            self.queue.write_buffer(&self.draw_list, 0, bytemuck::cast_slice(&list));
-        }
+        self.queue.write_buffer(&self.cull_state, 0, &[0u8; CULL_BYTES as usize]);
         let (eye_hi, eye_lo) = split(eye);
         let params = DrawParams {
             view_proj: view_proj.to_cols_array_2d(),
@@ -1945,7 +1952,7 @@ impl ChunkWorld {
                     pixel.get(1).copied().unwrap_or(u32::MAX),
                 ]
             },
-            table: [self.drawn_set.mask(), self.face_cells, self.boxes.0, frame as u32],
+            table: [self.drawn_set.mask(), self.face_cells, drawn, frame as u32],
             eye_domain: {
                 let d = (eye / crate::grid::DOMAIN_UNIT).floor();
                 [d.x as i32, d.y as i32, d.z as i32, 0]
@@ -1988,8 +1995,30 @@ impl ChunkWorld {
         let seed_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk seed exits"),
             layout: &self.seed_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&exits) }],
+            entries: &[wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&exits) }, entry(22, &self.cull_state)],
         });
+        {
+            // 0. The draw list: the drawn chunks in view, binned, ordered.
+            let frames = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("chunk cull frames"),
+                layout: &self.cull_layout[0],
+                entries: &[entry(0, &self.params), entry(1, &self.statics), entry(2, &self.chunk_meta)],
+            });
+            let lists = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("chunk cull"),
+                layout: &self.cull_layout[1],
+                entries: &[entry(17, &self.drawn_slots), entry(18, &self.cull_state), entry(19, &self.cull_bins), entry(20, &self.draw_list), entry(21, &self.seed_args)],
+            });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk cull"), timestamp_writes: None });
+            pass.set_bind_group(0, &frames, &[]);
+            pass.set_bind_group(1, &lists, &[]);
+            pass.set_pipeline(&self.cull_bin);
+            pass.dispatch_workgroups(drawn.div_ceil(64), 1, 1);
+            pass.set_pipeline(&self.cull_offsets);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(&self.cull_scatter);
+            pass.dispatch_workgroups(drawn.div_ceil(64), 1, 1);
+        }
         let trace_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk trace"),
             layout: &self.trace_layout,
@@ -2027,14 +2056,12 @@ impl ChunkWorld {
                 pass.set_bind_group(0, &group, &[]);
                 pass.set_bind_group(1, &seed_group, &[]);
                 // Boxes holding the eye only in the first round.
-                if self.boxes.0 > 0 && round == 0 {
+                if round == 0 {
                     pass.set_pipeline(&self.seed_inside);
-                    pass.draw(0..36, 0..self.boxes.0);
+                    pass.draw_indirect(&self.seed_args, 0);
                 }
-                if self.boxes.1 > self.boxes.0 {
-                    pass.set_pipeline(&self.seed_outside);
-                    pass.draw(0..36, self.boxes.0..self.boxes.1);
-                }
+                pass.set_pipeline(&self.seed_outside);
+                pass.draw_indirect(&self.seed_args, 16);
             }
             // 2. Trace each pixel's ray through its seed chunk.
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -2164,9 +2191,11 @@ impl ChunkWorld {
             .collect()
     }
 
-    /// Boxes drawn by the last [`Self::draw`]: from outside, from inside.
+    /// Boxes drawn by the last [`Self::draw`]: from outside, from inside
+    /// (reads the cull back: diagnostics).
     pub fn drawn(&self) -> (u32, u32) {
-        (self.boxes.1 - self.boxes.0, self.boxes.0)
+        let counts: Vec<u32> = self.read(&self.cull_state, 2);
+        (counts[1] - counts[0], counts[0])
     }
 
     /// This frame's timestamp slot, when it is free again (its last

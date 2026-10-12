@@ -32,7 +32,7 @@ struct DrawParams {
     eye_lo: vec4<f32>,
     sun: vec4<f32>,  // direction to the sun (xyz), camera near plane (w)
     debug: vec4<u32>, // x: colour by level
-    table: vec4<u32>, // x: chunk table slots - 1; y: base cells per face edge; z: boxes drawn from inside; w: frame
+    table: vec4<u32>, // x: chunk table slots - 1; y: base cells per face edge; z: drawn chunks; w: frame
     // The eye in noise-domain units (`grid::DOMAIN_UNIT`, planet-centred):
     // integer part, fraction.
     eye_domain: vec4<i32>,
@@ -159,6 +159,94 @@ fn find_entry(k: vec4<i32>) -> u32 {
     return NONE;
 }
 
+// ---- 0. Cull ----
+// The drawn chunks in view, built into the seed's draw list on the GPU:
+// those holding the eye first (drawn by their back faces), the others in
+// buckets of distance, nearest first (early depth tests reject boxes
+// behind nearer hits), and the two indirect draws.
+
+struct Cull {
+    // Boxes holding the eye, boxes in view.
+    inside: atomic<u32>,
+    total: atomic<u32>,
+    // Per bin (0: holding the eye, then distance buckets): its boxes, then
+    // the next free place in the list.
+    bins: array<atomic<u32>, 65>,
+    cursor: array<atomic<u32>, 65>,
+}
+
+// The drawn chunks' slots (`params.table.z` of them).
+@group(1) @binding(17) var<storage, read> drawn_slots: array<u32>;
+@group(1) @binding(18) var<storage, read_write> cull: Cull;
+// Each drawn chunk's bin (NONE: out of view).
+@group(1) @binding(19) var<storage, read_write> cull_bins: array<u32>;
+@group(1) @binding(20) var<storage, read_write> draw_out: array<u32>;
+// The seed's indirect draws: boxes holding the eye, then the others.
+@group(1) @binding(21) var<storage, read_write> seed_args: array<u32, 8>;
+
+// Bin of drawn chunk `id.x`: the frustum against its bounding sphere (the
+// box under its tilted top), the eye (with the near plane around it) in
+// its box, else its distance.
+@compute @workgroup_size(64)
+fn cull_bin(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= params.table.z { return; }
+    let slot = drawn_slots[id.x];
+    let c = chunk_frame(slot);
+    let top = chunk_meta[slot].top;
+    let z0 = c.box.x;
+    let z1 = clamp(top.z + max(top.x, 0.0) * 64.0 + max(top.y, 0.0) * 64.0, c.box.y, 64.0);
+    let m = mat3x3<f32>(c.m0.xyz, c.m1.xyz, c.m2.xyz);
+    let centre = vec3<f32>(c.m0.w, c.m1.w, c.m2.w) + m * vec3<f32>(32.0, 32.0, (z0 + z1) * 0.5);
+    let half_z = (z1 - z0) * 0.5;
+    let radius = max(length(m * vec3<f32>(32.0, 32.0, half_z)), length(m * vec3<f32>(32.0, -32.0, half_z)));
+    let vp = params.view_proj;
+    let r0 = vec4<f32>(vp[0].x, vp[1].x, vp[2].x, vp[3].x);
+    let r1 = vec4<f32>(vp[0].y, vp[1].y, vp[2].y, vp[3].y);
+    let r3 = vec4<f32>(vp[0].w, vp[1].w, vp[2].w, vp[3].w);
+    let planes = array<vec4<f32>, 5>(r3 + r0, r3 - r0, r3 + r1, r3 - r1, r3);
+    var bin = NONE;
+    var seen = true;
+    for (var i = 0u; i < 5u; i++) {
+        let p = planes[i] / length(planes[i].xyz);
+        if dot(p.xyz, centre) + p.w < -radius { seen = false; }
+    }
+    if seen {
+        let distance = length(centre);
+        bin = 1u + min(63u, u32(log2(max(distance, 1.0)) * 2.0));
+        let near = params.sun.w;
+        if distance < radius * 1.01 + near * 4.0 {
+            let o = vec3<f32>(c.i0.w, c.i1.w, c.i2.w);
+            let margin = vec3<f32>(length(c.i0.xyz), length(c.i1.xyz), length(c.i2.xyz)) * near * 2.0;
+            if all(o > vec3<f32>(-margin.x, -margin.y, z0 - margin.z)) && all(o < vec3<f32>(64.0 + margin.x, 64.0 + margin.y, z1 + margin.z)) { bin = 0u; }
+        }
+        atomicAdd(&cull.bins[bin], 1u);
+    }
+    cull_bins[id.x] = bin;
+}
+
+// Each bin's place in the list, and the seed's draws.
+@compute @workgroup_size(1)
+fn cull_offsets() {
+    var at = 0u;
+    for (var b = 0u; b < 65u; b++) {
+        let n = atomicLoad(&cull.bins[b]);
+        atomicStore(&cull.cursor[b], at);
+        at += n;
+    }
+    let inside = atomicLoad(&cull.bins[0]);
+    atomicStore(&cull.inside, inside);
+    atomicStore(&cull.total, at);
+    seed_args = array<u32, 8>(36u, inside, 0u, 0u, 36u, at - inside, 0u, 0u);
+}
+
+@compute @workgroup_size(64)
+fn cull_scatter(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= params.table.z { return; }
+    let bin = cull_bins[id.x];
+    if bin == NONE { return; }
+    draw_out[atomicAdd(&cull.cursor[bin], 1u)] = drawn_slots[id.x];
+}
+
 // ---- 1. Seed ----
 
 struct VOut {
@@ -182,16 +270,30 @@ const CORNERS = array<u32, 36>(
     4u, 5u, 7u, 4u, 7u, 6u,
 );
 
+// The boxes holding the eye (`Cull::inside`), first in the draw list.
+@group(1) @binding(22) var<storage, read> culled: array<u32>;
+
+// Boxes the eye is outside of, after those holding it.
 @vertex
 fn seed_vertex(@builtin(vertex_index) v: u32, @builtin(instance_index) n: u32) -> VOut {
-    let slot = draw_list[n];
+    return seed_box(draw_list[culled[0] + n], v, false);
+}
+
+// Boxes holding the eye.
+@vertex
+fn seed_vertex_inside(@builtin(vertex_index) v: u32, @builtin(instance_index) n: u32) -> VOut {
+    return seed_box(draw_list[n], v, true);
+}
+
+// Corner `v` of chunk `slot`'s box (its back faces when `inside`).
+fn seed_box(slot: u32, v: u32, inside: bool) -> VOut {
     let c = chunk_frame(slot);
     let corner = CORNERS[v];
     var x = f32(corner & 1u) * 64.0;
     // Mirroring x maps the box onto itself and reverses its winding: a
     // left-handed frame, or a box drawn from inside (its back faces).
     let mirrored = (bitcast<u32>(c.box.w) & 1u) != 0u;
-    if mirrored != (n < params.table.z) { x = 64.0 - x; }
+    if mirrored != inside { x = 64.0 - x; }
     // The box's top lies on its chunk's plane over the solid cells (never
     // below its bottom): raising a corner keeps the faces over the cells.
     let y = f32((corner >> 1u) & 1u) * 64.0;
