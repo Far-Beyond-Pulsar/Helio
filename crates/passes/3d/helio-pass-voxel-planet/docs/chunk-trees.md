@@ -633,6 +633,11 @@ units of 2^-24 and stays bit-identical between CPU and GPU.
 | before | 47.3 us | 56.1 us | 50 | 6.6 % (10.6 %) |
 | after | 37.2 us | 46.7 us | 60 | 4.5 % (7.2 %) |
 
+Measured and dropped: hashing a lattice cell's eight corners from three
+products (a corner's are its neighbour's plus the multiplier), bit-identical:
+tile columns 36.7 -> 36.5 us a tile, within noise (the compiler already
+shares them).
+
 ## Solid gaps (2026-10-12)
 
 A tile's chunks held one range of layers: rock under the lowest, air in
