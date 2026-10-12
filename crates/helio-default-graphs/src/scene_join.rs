@@ -103,6 +103,25 @@ struct Uniforms {
     rows: u32,
     second: u32,
     _pad: [u32; 2],
+    /// The frame's world origin as an f32 pair (`origin_hi + origin_lo`),
+    /// subtracted from positions in camera-relative frames; zero otherwise.
+    origin_hi: [f32; 4],
+    origin_lo: [f32; 4],
+}
+
+/// `origin` as an f32 hi/lo pair, so positions near it subtract to their
+/// offset from it without the f32 rounding of either. Zero for none.
+fn origin_pair(origin: Option<glam::DVec3>) -> ([f32; 4], [f32; 4]) {
+    let origin = origin.unwrap_or(glam::DVec3::ZERO);
+    let hi = origin.as_vec3();
+    let lo = (origin - hi.as_dvec3()).as_vec3();
+    (hi.extend(0.0).to_array(), lo.extend(0.0).to_array())
+}
+
+/// The bits of `origin`, for an input signature: a moved origin moves
+/// every output position.
+fn origin_bits(origin: Option<glam::DVec3>) -> [u64; 3] {
+    origin.map_or([u64::MAX; 3], |o| [o.x.to_bits(), o.y.to_bits(), o.z.to_bits()])
 }
 
 /// A buffer the join owns and publishes.
@@ -320,6 +339,8 @@ impl SceneDerivation for SceneJoin {
         let sections = self.input(inputs, keys.mesh_sections, MESH_SECTION_ROW_BYTES);
         let sources = self.input(inputs, keys.light_sources, LIGHT_SOURCE_ROW_BYTES);
         let mut recorded = false;
+        let (origin_hi, origin_lo) = origin_pair(ctx.world_origin);
+        let [ox, oy, oz] = origin_bits(ctx.world_origin);
 
         // ── Meshes ──────────────────────────────────────────────────────
         let instance_rows = section_handles.map_or(0, |h| rows_of(h, HANDLE_ROW_BYTES));
@@ -338,7 +359,10 @@ impl SceneDerivation for SceneJoin {
             section_handles,
             sections,
         ];
-        let mesh_signature = signature(&mesh_inputs, &[self.objects.epoch, self.materials.epoch]);
+        let mesh_signature = signature(
+            &mesh_inputs,
+            &[self.objects.epoch, self.materials.epoch, ox, oy, oz],
+        );
         if grew || self.last_mesh_inputs != Some(mesh_signature) {
             self.last_mesh_inputs = Some(mesh_signature);
             encoder.clear_buffer(&self.objects.buffer, 0, None);
@@ -367,6 +391,8 @@ impl SceneDerivation for SceneJoin {
                         rows: instance_rows,
                         second: self.objects.rows,
                         _pad: [0; 2],
+                        origin_hi,
+                        origin_lo,
                     }),
                 );
                 let layout = self.mesh_pipeline.get_bind_group_layout(0);
@@ -413,6 +439,9 @@ impl SceneDerivation for SceneJoin {
                 self.lights.epoch,
                 self.billboard_rows.epoch,
                 u64::from(self.billboards),
+                ox,
+                oy,
+                oz,
             ],
         );
         if grew || self.last_light_inputs != Some(light_signature) {
@@ -431,6 +460,8 @@ impl SceneDerivation for SceneJoin {
                         rows: light_rows.min(self.lights.rows),
                         second: u32::from(self.billboards),
                         _pad: [0; 2],
+                        origin_hi,
+                        origin_lo,
                     }),
                 );
                 let layout = self.light_pipeline.get_bind_group_layout(0);
