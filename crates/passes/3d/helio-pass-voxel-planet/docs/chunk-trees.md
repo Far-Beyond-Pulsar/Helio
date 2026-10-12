@@ -691,8 +691,8 @@ half sunk:
 
 | r | before: frames, worst frame GPU / CPU | after: frames, worst frame GPU / CPU | tiles | vs CPU raycast |
 |---|---|---|---|---|
-| 1.5 m (dig) | 10, 0.6 / 0.5 ms | 11, 0.7 / 0.4 ms | 9 | 0.03 m |
-| 50 m | 9, 19 / 28 ms | 16, 3.3 / 5.0 ms | 418 | 0.05 m |
+| 1.5 m (dig) | 11, 0.65 / 0.51 ms | 11, 0.66 / 0.41 ms | 9 | 0.03 m |
+| 50 m | 8, 18.6 / 18.4 ms | 16, 3.3 / 5.0 ms | 418 | 0.05 m |
 | 500 m | never (out of slots) | 238 (3.6 s), 5.0 / 8.2 ms | 7 845 | 0.03 m |
 
 Undoing each matches the first frame's hits exactly. Small digs still show
