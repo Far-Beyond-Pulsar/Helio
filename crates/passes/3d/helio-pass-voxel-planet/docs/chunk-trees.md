@@ -638,6 +638,17 @@ products (a corner's are its neighbour's plus the multiplier), bit-identical:
 tile columns 36.7 -> 36.5 us a tile, within noise (the compiler already
 shares them).
 
+Where the remaining 36 us go (cruise, variants with a part removed): the
+erosion octaves 12 us, the gradients that steer them 6 us, the rest
+(warp, ridges, hills) 18 us. Within erosion, its trig 2.7 us, normalising
+the slope 0.7 us, hashing nothing. Two exact changes, bit-identical CPU
+and GPU, take tile columns to 33.4 us: a corner's offset along the slope
+is the cell's one dot product less a step per axis (not three wide
+products per corner), and a run of erosion octaves steers by one steering
+gradient (it reads only continents and mountains). Measured and dropped:
+gradients only for the octaves before the last erosion octave a level
+resolves (erosion reaches the finest levels in view, no gain).
+
 ## Solid gaps (2026-10-12)
 
 A tile's chunks held one range of layers: rock under the lowest, air in
