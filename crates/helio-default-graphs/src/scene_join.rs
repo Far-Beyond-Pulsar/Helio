@@ -111,7 +111,7 @@ struct Uniforms {
 
 /// `origin` as an f32 hi/lo pair, so positions near it subtract to their
 /// offset from it without the f32 rounding of either. Zero for none.
-fn origin_pair(origin: Option<glam::DVec3>) -> ([f32; 4], [f32; 4]) {
+pub(crate) fn origin_pair(origin: Option<glam::DVec3>) -> ([f32; 4], [f32; 4]) {
     let origin = origin.unwrap_or(glam::DVec3::ZERO);
     let hi = origin.as_vec3();
     let lo = (origin - hi.as_dvec3()).as_vec3();
@@ -120,7 +120,7 @@ fn origin_pair(origin: Option<glam::DVec3>) -> ([f32; 4], [f32; 4]) {
 
 /// The bits of `origin`, for an input signature: a moved origin moves
 /// every output position.
-fn origin_bits(origin: Option<glam::DVec3>) -> [u64; 3] {
+pub(crate) fn origin_bits(origin: Option<glam::DVec3>) -> [u64; 3] {
     origin.map_or([u64::MAX; 3], |o| [o.x.to_bits(), o.y.to_bits(), o.z.to_bits()])
 }
 

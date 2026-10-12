@@ -141,7 +141,7 @@ fn pool_volume(wave_amplitude: f32, caustics_intensity: f32) -> helio_pass_water
         ssr_params: [1.0, 64.0, 0.05, 0.02],
         sim_dynamics: [1.2, 0.985, 1.0, 0.0],
         wind_params: [0.0, 0.0, 0.0, 0.0],
-        _pad6: [0.0; 4],
+        world_phase: [0.0; 4],
     }
 }
 

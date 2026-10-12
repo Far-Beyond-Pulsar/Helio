@@ -40,6 +40,12 @@ pub const MAX_SIM_VOLUMES: u32 = 8;
 /// drive this pass's dispatch/draw bounds.
 pub const MAX_WATER_HITBOXES: u32 = 32;
 pub(crate) const CASCADE_PATCH_SIZES: [f32; 3] = [30.0, 90.0, 270.0];
+/// The distance, in metres, after which every cascade's tiling repeats (the
+/// largest patch, a multiple of the others). A camera-relative frame writes
+/// each water volume's world phase, the frame's world origin modulo this, in
+/// the row's last vec4 (`world_phase`, `xy` = X and Z), so the waves stay
+/// fixed in the world when the origin moves.
+pub const WATER_WORLD_PERIOD: f64 = 270.0;
 /// One simulation step, in seconds of the renderer's frame clock: the
 /// simulation steps at a fixed 120 Hz, so a 60 Hz frame takes two steps and
 /// a frame whose clock did not advance (a paused game, a viewport whose
@@ -388,6 +394,11 @@ pub struct WaterSimPass {
     /// still holds the same body displaces from where it was then, so a
     /// body that stops moving stops displacing water.
     pub(crate) hitbox_prev_buf: wgpu::Buffer,
+    /// The world origin the hitbox rows are relative to this frame, and how
+    /// far it moved since `hitbox_prev_buf` was captured (`xyz`), which the
+    /// shader subtracts from those rows.
+    pub(crate) hitbox_origin: [f64; 3],
+    pub(crate) hitbox_prev_shift: [f64; 3],
 
     pub(crate) pending_drops: std::collections::VecDeque<simulation::DropUniform>,
     pub(crate) drop_staged: bool,
@@ -558,6 +569,7 @@ impl WaterSimPass {
         self.front_per_layer.iter_mut().for_each(|front| *front = true);
         // Bodies already in the water push it once as it starts.
         encoder.clear_buffer(&self.hitbox_prev_buf, 0, None);
+        self.hitbox_prev_shift = [0.0; 3];
     }
 
     pub fn resize_internal(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -725,6 +737,15 @@ impl RenderPass for WaterSimPass {
             ctx.write_buffer(&self.normal_bufs[ci], 0, bytemuck::bytes_of(&delta));
         }
 
+        // Hitbox rows of a camera-relative frame are relative to its world
+        // origin; the previous rows are relative to the one they were
+        // captured at.
+        let origin = ctx.world_origin.map_or([0.0; 3], |origin| origin.to_array());
+        for axis in 0..3 {
+            self.hitbox_prev_shift[axis] += origin[axis] - self.hitbox_origin[axis];
+        }
+        self.hitbox_origin = origin;
+
         // Fixed capacity, not a live count: `"water_hitboxes"` is a SceneDB
         // buffer read directly by `execute()`/the hitbox shader (see
         // `MAX_WATER_HITBOXES`'s doc) -- no per-frame CPU scan of the World
@@ -735,6 +756,12 @@ impl RenderPass for WaterSimPass {
             bytemuck::bytes_of(&simulation::HitboxCountUniform {
                 count: MAX_WATER_HITBOXES,
                 _pad: [0; 3],
+                previous_shift: [
+                    self.hitbox_prev_shift[0] as f32,
+                    self.hitbox_prev_shift[1] as f32,
+                    self.hitbox_prev_shift[2] as f32,
+                    0.0,
+                ],
             }),
         );
 
@@ -884,6 +911,7 @@ impl RenderPass for WaterSimPass {
                     0,
                     size,
                 );
+                self.hitbox_prev_shift = [0.0; 3];
             }
         }
 

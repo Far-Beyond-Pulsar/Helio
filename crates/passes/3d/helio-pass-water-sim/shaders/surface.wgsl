@@ -42,7 +42,7 @@ struct WaterVolume {
     ssr_params:            vec4f,  // x = enable, y = max_steps, z = step_size, w = thickness
     sim_dynamics:          vec4f,
     wind_params:           vec4f,
-    _pad:                  vec4f,
+    world_phase:           vec4f,  // xy = the frame's world origin XZ mod 270 m (GpuWaterVolume::world_phase)
 }
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
@@ -110,12 +110,21 @@ fn sample_cascade_normal_ba(cascade: u32, uv: vec2f, vol_index: u32) -> vec2f {
     return textureSampleLevel(water_sim, water_samp, uv, sim_layer(vol_index, cascade), 0.0).ba;
 }
 
+/// Where `world_xz` (in the frame's space) falls in the cascades' world
+/// tiling: offset by the volume's world phase, which every patch size
+/// divides, so the waves stay put in the world when a camera-relative
+/// frame's origin moves.
+fn water_tiling_xz(world_xz: vec2f, vol_index: u32) -> vec2f {
+    return world_xz + volumes[vol_index].world_phase.xy;
+}
+
 /// Weighted sum of all cascade heights at a world XZ position.
 /// Each cascade tiles: uv = fract(world_xz / patch_size).
 fn water_cascade_height_sum(world_xz: vec2f, vol_index: u32) -> f32 {
+    let tiling_xz = water_tiling_xz(world_xz, vol_index);
     var sum = 0.0;
     for (var i = 0u; i < 3u; i++) {
-        let uv = fract(world_xz / CASCADE_PATCH_SIZES[i]);
+        let uv = fract(tiling_xz / CASCADE_PATCH_SIZES[i]);
         sum += sample_cascade_height(i, uv, vol_index) * CASCADE_AMPLITUDE_WEIGHTS[i];
     }
     return sum;
@@ -125,9 +134,10 @@ fn water_cascade_height_sum(world_xz: vec2f, vol_index: u32) -> f32 {
 /// per-cascade slopes (reconstructed from the stored normal) weighted by
 /// each cascade's amplitude fraction, then normalizing.
 fn water_total_normal(world_xz: vec2f, vol: WaterVolume, vol_index: u32) -> vec3f {
+    let tiling_xz = water_tiling_xz(world_xz, vol_index);
     var total_slope = vec2f(0.0);
     for (var i = 0u; i < 3u; i++) {
-        let uv = fract(world_xz / CASCADE_PATCH_SIZES[i]);
+        let uv = fract(tiling_xz / CASCADE_PATCH_SIZES[i]);
         let ba = sample_cascade_normal_ba(i, uv, vol_index);
         let ny = sqrt(max(1.0 - dot(ba, ba), 1e-6));
         let amp = water_wave_amplitude(vol) * CASCADE_AMPLITUDE_WEIGHTS[i];
@@ -303,9 +313,11 @@ fn water_foam(path: f32, world_xz: vec2f, normal: vec3f, vol: WaterVolume) -> f3
     let t   = cameras[0].jitter_frame.z * 0.016;
 
     // Two layers scrolling against each other, so the band churns rather than
-    // sitting still as a uniform ring.
-    let n = value_noise(world_xz * 0.35 + vec2f( t * 0.20, -t * 0.13)) * 0.65
-          + value_noise(world_xz * 1.10 + vec2f(-t * 0.31,  t * 0.17)) * 0.35;
+    // sitting still as a uniform ring. In the waves' tiling space, so the
+    // pattern follows the world rather than a camera-relative frame's origin.
+    let tiling_xz = world_xz + vol.world_phase.xy;
+    let n = value_noise(tiling_xz * 0.35 + vec2f( t * 0.20, -t * 0.13)) * 0.65
+          + value_noise(tiling_xz * 1.10 + vec2f(-t * 0.31,  t * 0.17)) * 0.35;
 
     // Contact foam. The band scales with wave size — a bigger swell washes
     // further up the shore — and the noise makes its edge irregular.

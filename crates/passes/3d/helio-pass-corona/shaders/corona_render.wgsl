@@ -12,6 +12,7 @@ struct GpuCoronaUniforms {
     sort_j:          u32,
     sort_lo:         u32,
     sort_n:          u32,
+    origin_shift:    vec4<f32>,
 }
 
 struct Particle {
