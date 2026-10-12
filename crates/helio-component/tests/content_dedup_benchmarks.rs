@@ -17,7 +17,7 @@
 #![cfg(feature = "gpu")]
 
 use helio::PackedVertex;
-use helio_component::components::{MeshAssetPath, StaticMeshComponent};
+use helio_component::components::{MeshAssetPath, MeshGeometryKey, StaticMeshComponent};
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, RegionClassConfig, SceneGpuConfig, SceneGpuStore};
 use pulsar_scenedb::World;
 use std::sync::{Arc, Once};
@@ -78,7 +78,7 @@ fn bm3_bulk_hydrate_10k_entities_one_shared_asset() {
         let upload = helio_component::subsystems::load_mesh_upload(&root.join("bm3_asset.mesh")).expect("load bench mesh");
         world.insert(
             e,
-            StaticMeshComponent { mesh_asset: MeshAssetPath::new("bm3_asset.mesh"), vertices: upload.vertices, indices: upload.indices, bounds_local: [0.0, 0.0, 0.0, 0.5], ..Default::default() },
+            StaticMeshComponent { mesh_asset: MeshAssetPath::new("bm3_asset.mesh"), geometry_key: MeshGeometryKey::for_path(&MeshAssetPath::new("bm3_asset.mesh")), vertices: upload.vertices, indices: upload.indices, bounds_local: [0.0, 0.0, 0.0, 0.5], ..Default::default() },
         );
     }
     let elapsed = start.elapsed();

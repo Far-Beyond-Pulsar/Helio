@@ -10,8 +10,9 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::asset_component::AssetComponentRegistration;
-use crate::mesh_cache::{MeshMaterialSlot, MeshSection};
+use crate::mesh_cache::{MeshAssetUpload, MeshMaterialSlot, MeshSection};
 use crate::subsystems::{load_mesh_asset_upload, resolve_asset_path};
+use pulsar_scenedb::{AssetId, AssetPayload, AssetView};
 
 pulsar_reflection::inventory::submit! {
     AssetComponentRegistration {
@@ -78,25 +79,16 @@ impl MeshAssetPath {
 /// Prefix of [`MeshAssetPath::generated`] paths.
 const GENERATED_MESH_PREFIX: &str = "generated-mesh:";
 
-/// SceneDB's content-identity seam (Pulsar-Native#632/#659): lets
-/// `vertices`/`indices` intern their GPU-resident geometry by content
-/// instead of allocating one private copy per entity — see those fields'
-/// `#[gpu(content_id = "mesh_asset")]` attribute and
-/// `pulsar_scenedb::handle_ledger::ContentAddressed`'s own doc for the
-/// mechanism this drives. Resolution: an empty path is
-/// `HandleId::ZERO` (no asset, opts out of interning, matches every other
-/// zero-value convention in this codebase); otherwise resolves the
-/// project-relative path exactly like `decode_static_mesh_component`
-/// already does and defers to `mesh_cache::content_id_for_path` (native
-/// `.mesh` v2: a header read; anything else: a canonical-path + mtime/size
-/// memoized hash — see that fn's own doc for why this converges path
-/// aliases onto one id and mints a new one on a real edit). No project path
-/// available, or the file can't be read at all, ALSO falls back to
-/// `HandleId::ZERO` — a dangling/unresolvable reference behaves like "no
-/// asset" for interning purposes rather than panicking or erroring; the
-/// existing hydrate-time tolerance for a missing mesh already covers the
-/// user-visible side of this (empty `vertices`/`indices`). A
-/// [`MeshAssetPath::generated`] path carries its id itself.
+/// The content identity of the file a path names (Pulsar-Native#632/#659),
+/// what [`MeshGeometryKey::for_path`] keys geometry by. Resolution: an empty
+/// path is `HandleId::ZERO` (no asset); otherwise resolves the
+/// project-relative path and defers to `mesh_cache::content_id_for_path`
+/// (native `.mesh` v2: a header read; anything else: a canonical-path +
+/// mtime/size memoized hash — see that fn's own doc for why this converges
+/// path aliases onto one id and mints a new one on a real edit). No project
+/// path available, or the file can't be read at all, ALSO falls back to
+/// `HandleId::ZERO`. A [`MeshAssetPath::generated`] path carries its id
+/// itself.
 impl pulsar_scenedb::handle_ledger::ContentAddressed for MeshAssetPath {
     fn content_id(&self) -> pulsar_scenedb::handle_ledger::HandleId {
         use pulsar_scenedb::handle_ledger::HandleId;
@@ -117,6 +109,162 @@ impl pulsar_scenedb::handle_ledger::ContentAddressed for MeshAssetPath {
             .map(HandleId)
             .unwrap_or(HandleId::ZERO)
     }
+}
+
+// ── Mesh assets (SceneDB#84) ──────────────────────────────────────────────────
+
+/// Which loaded geometry a [`StaticMeshComponent`]'s `vertices`/`indices`
+/// hold: the content id SceneDB interns their GPU copy under. Zero until the
+/// component's mesh asset is bound (an empty, private GPU row), then the id
+/// of the content that was loaded, so components showing the same content
+/// share one GPU copy and a re-import that changed the file is a new id.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct MeshGeometryKey(pub u128);
+
+impl MeshGeometryKey {
+    /// No geometry bound.
+    pub const NONE: Self = Self(0);
+
+    /// The key of the geometry `path` names as its file is now (or, for a
+    /// [`MeshAssetPath::generated`] path, the id it carries): for geometry
+    /// a caller fills in itself rather than through the mesh asset.
+    pub fn for_path(path: &MeshAssetPath) -> Self {
+        use pulsar_scenedb::handle_ledger::ContentAddressed;
+        Self(path.content_id().0)
+    }
+}
+
+impl pulsar_scenedb::handle_ledger::ContentAddressed for MeshGeometryKey {
+    fn content_id(&self) -> pulsar_scenedb::handle_ledger::HandleId {
+        pulsar_scenedb::handle_ledger::HandleId(self.0)
+    }
+}
+
+/// The SceneDB asset kind of mesh files. A mesh asset's source is its
+/// file's absolute path.
+pub const MESH_ASSET_KIND: &str = "mesh";
+
+/// A loaded mesh asset: what every component showing it is bound to.
+pub struct LoadedMesh {
+    pub upload: MeshAssetUpload,
+    /// Local-space bounding sphere of `upload`'s vertices.
+    pub bounds_local: [f32; 4],
+    /// The content id the file was read as (0 when it has none).
+    pub content_id: u128,
+}
+
+/// Registers the mesh asset kind with SceneDB: its loader, and how a
+/// [`StaticMeshComponent`] takes in a loaded mesh. Idempotent; done on the
+/// first [`mesh_asset_id`].
+pub fn register_mesh_assets() {
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    REGISTER.call_once(|| {
+        pulsar_scenedb::register_loader(MESH_ASSET_KIND, load_mesh_asset);
+        pulsar_scenedb::register_binding::<StaticMeshComponent>(MESH_ASSET_KIND, bind_mesh_asset);
+    });
+}
+
+/// The asset id of the mesh `mesh_asset` names, declared so the world can
+/// load it. [`AssetId::ZERO`] for no mesh, a generated mesh (never loaded
+/// from disk), or when there is no project to resolve the path against.
+pub fn mesh_asset_id(mesh_asset: &MeshAssetPath) -> AssetId {
+    let path = mesh_asset.as_str().trim();
+    if path.is_empty() || mesh_asset.generated_content_id().is_some() {
+        return AssetId::ZERO;
+    }
+    let Some(project_root) = engine_state::get_project_path() else {
+        tracing::warn!(
+            "StaticMeshComponent: no project path available, cannot resolve mesh_asset '{path}'"
+        );
+        return AssetId::ZERO;
+    };
+    register_mesh_assets();
+    AssetId::declare(MESH_ASSET_KIND, &mesh_source(&project_root, path))
+}
+
+/// The source string (absolute path) the mesh asset at the project-relative
+/// `path` is declared under. A file event's path maps to the same string.
+pub fn mesh_source(project_root: &str, path: &str) -> String {
+    let abs = resolve_asset_path(std::path::Path::new(project_root), path);
+    mesh_source_for_file(&abs)
+}
+
+/// The source string of the mesh file at `abs`.
+pub fn mesh_source_for_file(abs: &std::path::Path) -> String {
+    std::fs::canonicalize(abs)
+        .unwrap_or_else(|_| abs.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The mesh kind's loader: runs on a SceneDB worker thread.
+fn load_mesh_asset(source: &str) -> Result<AssetPayload, String> {
+    let path = std::path::Path::new(source);
+    let upload =
+        load_mesh_asset_upload(path).ok_or_else(|| format!("could not load mesh '{source}'"))?;
+    tracing::info!(
+        "StaticMeshComponent: loaded '{}' ({} vertices, {} indices, {} material sections)",
+        source,
+        upload.geometry.vertices.len(),
+        upload.geometry.indices.len(),
+        upload.sections.len()
+    );
+    Ok(std::sync::Arc::new(LoadedMesh {
+        bounds_local: local_bounding_sphere(&upload.geometry.vertices),
+        content_id: crate::mesh_cache::content_id_for_path(path).unwrap_or(0),
+        upload,
+    }))
+}
+
+/// How a [`StaticMeshComponent`] takes in its loaded (or failed) mesh.
+fn bind_mesh_asset(component: &mut StaticMeshComponent, view: &AssetView) {
+    if view.id != component.mesh {
+        return;
+    }
+    let Some(mesh) = view.payload::<LoadedMesh>() else {
+        tracing::warn!(
+            "StaticMeshComponent: mesh '{}' is unavailable ({:?})",
+            component.mesh_asset,
+            view.state
+        );
+        clear_mesh_geometry(component);
+        return;
+    };
+    component.bounds_local = mesh.bounds_local;
+    component.vertices = mesh.upload.geometry.vertices.clone();
+    component.indices = mesh.upload.geometry.indices.clone();
+    component.material_slots =
+        reconcile_material_slots(&component.material_slots, &mesh.upload.material_slots);
+    apply_legacy_material_override(component);
+    component.mesh_sections = mesh.upload.sections.clone();
+    component.material_slot_metadata = mesh.upload.material_slots.clone();
+    component.geometry_key = MeshGeometryKey(if mesh.content_id != 0 {
+        mesh.content_id
+    } else {
+        // No content id from the file: this load of this asset.
+        (view.id.0 ^ u128::from(view.version).rotate_left(64)).max(1)
+    });
+}
+
+/// The "no mesh" geometry: what a component without a loadable mesh shows.
+fn clear_mesh_geometry(component: &mut StaticMeshComponent) {
+    component.bounds_local = [0.0, 0.0, 0.0, 0.5];
+    component.vertices.clear();
+    component.indices.clear();
+    component.mesh_sections.clear();
+    component.material_slot_metadata.clear();
+    component.geometry_key = MeshGeometryKey::NONE;
+}
+
+/// Points `component` at the mesh asset its `mesh_asset` names. The world
+/// loads it off the write path and binds the geometry when it is ready; a
+/// component naming no loadable mesh shows none.
+fn attach_mesh_asset(component: &mut StaticMeshComponent) {
+    let id = mesh_asset_id(&component.mesh_asset);
+    if id.is_zero() && component.mesh_asset.generated_content_id().is_none() {
+        clear_mesh_geometry(component);
+    }
+    component.mesh = id;
 }
 
 impl std::fmt::Display for MeshAssetPath {
@@ -827,36 +975,41 @@ pub struct StaticMeshComponent {
     #[serde(default)]
     pub movability: super::ObjectMovability,
 
+    /// The mesh asset `mesh_asset` names, as the world resolves it
+    /// (SceneDB#84): set from `mesh_asset` when a value is decoded or
+    /// `mesh_asset` is written, never authored or saved. The world loads it
+    /// off the write path and binds its geometry into the fields below.
+    #[serde(skip)]
+    pub mesh: AssetId,
+
+    /// Which loaded geometry `vertices`/`indices` hold, the id their GPU copy
+    /// is interned under (see [`MeshGeometryKey`]). Set by the binding.
+    #[serde(skip)]
+    pub geometry_key: MeshGeometryKey,
+
     /// The mesh's actual vertex/index data -- not an indirect handle into a
     /// separate asset registry, the payload itself (per the governing rule:
     /// "it doesn't hold an int32 that points to the mesh, it holds the
-    /// mesh"). Populated once, at hydrate time, by
-    /// `decode_static_mesh_component` (or `property_written` when
-    /// `mesh_asset` changes) -- never authored directly. Never
-    /// round-tripped through JSON: mesh geometry lives in
-    /// the asset file `mesh_asset` already names, re-derived at hydrate
-    /// time, not duplicated into every saved scene.
+    /// mesh"). Written by the mesh asset's binding when the world has loaded
+    /// `mesh` -- never authored directly. Never round-tripped through JSON:
+    /// mesh geometry lives in the asset file `mesh_asset` names, not
+    /// duplicated into every saved scene.
     ///
-    /// `content_id = "mesh_asset"` (Pulsar-Native#632/#659): SceneDB routes
+    /// `content_id = "geometry_key"` (Pulsar-Native#632/#659): SceneDB routes
     /// this field's GPU allocation through its content-id-interned pool
     /// instead of one private allocation per entity -- ten components
-    /// naming the same `mesh_asset` upload and store the geometry ONCE,
-    /// freed automatically when the last reference despawns/removes. This
-    /// is the ENTIRE consumer-side change the dedup feature asks for: the
-    /// attribute plus `MeshAssetPath`'s `ContentAddressed` impl above.
-    /// Nothing else about this struct, its hydrate, or any renderer call
-    /// site changes -- `..._gpu_handle` accessors keep their exact
-    /// signature and now transparently resolve to a range shared with every
-    /// other entity referencing the same asset.
-    #[gpu(buffer = "builtin_mesh_vertex", mirror = Once, content_id = "mesh_asset")]
+    /// showing the same loaded mesh store the geometry ONCE, freed
+    /// automatically when the last reference despawns/removes.
+    /// `..._gpu_handle` accessors resolve to the shared range.
+    #[gpu(buffer = "builtin_mesh_vertex", mirror = Once, content_id = "geometry_key")]
     #[serde(skip)]
     pub vertices: Vec<PackedVertex>,
     /// See [`Self::vertices`] -- same rules, the index half of the same
-    /// upload, interned under the SAME `mesh_asset` content id (a separate
+    /// upload, interned under the SAME `geometry_key` content id (a separate
     /// pool from `vertices`' own -- see `gpu::interned_pool`'s module doc
     /// on why sharing an id across two pools needs no coordination between
     /// them).
-    #[gpu(buffer = "builtin_mesh_index", mirror = Once, content_id = "mesh_asset")]
+    #[gpu(buffer = "builtin_mesh_index", mirror = Once, content_id = "geometry_key")]
     #[serde(skip)]
     pub indices: Vec<u32>,
 
@@ -870,8 +1023,7 @@ pub struct StaticMeshComponent {
     pub mesh_sections: Vec<MeshSection>,
 
     /// Local-space bounding sphere (xyz = center, w = radius) computed once
-    /// from `vertices`' actual positions at hydrate time -- see
-    /// `decode_static_mesh_component`. Uploaded with the derived draw rows
+    /// from `vertices`' actual positions when the mesh asset loads. Uploaded with the derived draw rows
     /// ([`super::StaticMeshDraw`]); the renderer's scene join transforms it
     /// by the owner's transform for culling. Not derived from
     /// `transform.scale` -- a thin mesh at scale 1.0 and a cube at scale 1.0
@@ -889,62 +1041,6 @@ impl ScenePropsProjector for StaticMeshComponent {
     fn apply_scene_props(props: &mut HashMap<String, Value>, _component_data: Option<&Value>) {
         props.remove("mesh_asset");
     }
-}
-
-/// Load `mesh_asset`'s vertex/index data and local bounding sphere from
-/// disk, or the "no mesh" defaults ([`local_bounding_sphere`]'s own empty
-/// fallback) if the path is empty, unresolvable, or fails to load.
-///
-/// Shared by [`decode_static_mesh_component`] (first attach) and
-/// [`static_mesh_property_written`] (a live `mesh_asset` edit made
-/// *after* attach, via the properties panel) -- both need the exact same
-/// disk-load behavior, just triggered at different times. Resolves the
-/// project-relative path via `engine_state::get_project_path()` -- a
-/// global, context-free accessor, since neither caller's fixed signature
-/// (`&Value` / `&mut Self, Option<&str>`) carries a project root.
-fn load_mesh_geometry(mesh_asset: &str) -> ([f32; 4], crate::mesh_cache::MeshAssetUpload) {
-    let mesh_asset = mesh_asset.trim();
-    // Baseline fallback for "no mesh assigned" / "failed to load" -- matches
-    // the safety-net minimum the old transform-scale heuristic used
-    // (`scale.length().max(0.2) * 0.5`), overwritten below on a real load.
-    let mut bounds_local = [0.0, 0.0, 0.0, 0.5];
-    let mut upload = crate::mesh_cache::MeshAssetUpload::default();
-
-    if !mesh_asset.is_empty() {
-        match engine_state::get_project_path() {
-            Some(project_root) => {
-                let abs_path = resolve_asset_path(std::path::Path::new(&project_root), mesh_asset);
-                match load_mesh_asset_upload(&abs_path) {
-                    Some(loaded) => {
-                        tracing::info!(
-                            "StaticMeshComponent: loaded '{}' ({} vertices, {} indices, {} material sections)",
-                            abs_path.display(),
-                            loaded.geometry.vertices.len(),
-                            loaded.geometry.indices.len(),
-                            loaded.sections.len()
-                        );
-                        bounds_local = local_bounding_sphere(&loaded.geometry.vertices);
-                        upload = loaded;
-                    }
-                    None => {
-                        tracing::warn!(
-                            "StaticMeshComponent: failed to load mesh '{}' ({})",
-                            mesh_asset,
-                            abs_path.display()
-                        );
-                    }
-                }
-            }
-            None => {
-                tracing::warn!(
-                    "StaticMeshComponent: no project path available, cannot resolve mesh_asset '{}'",
-                    mesh_asset
-                );
-            }
-        }
-    }
-
-    (bounds_local, upload)
 }
 
 fn reconcile_material_slots(
@@ -997,56 +1093,37 @@ fn apply_legacy_material_override(component: &mut StaticMeshComponent) {
     }
 }
 
-/// Load `component.mesh_asset`'s vertex/index data, sections and material
-/// slots into the component's own fields. Shared by [`decode_static_mesh_component`]
-/// (a value entering from a file or tool) and [`static_mesh_property_written`]
-/// (a live edit that changed `mesh_asset`).
-///
-/// A missing or unloadable `mesh_asset` is not a failure: the component keeps
-/// empty `vertices`/`indices` (a real, if invisible, mesh), the same as an
-/// object with no mesh assigned.
-fn load_mesh_asset_into(component: &mut StaticMeshComponent) {
-    let (bounds_local, upload) = load_mesh_geometry(component.mesh_asset.as_str());
-    component.bounds_local = bounds_local;
-    component.vertices = upload.geometry.vertices;
-    component.indices = upload.geometry.indices;
-    component.material_slots =
-        reconcile_material_slots(&component.material_slots, &upload.material_slots);
-    apply_legacy_material_override(component);
-    component.mesh_sections = upload.sections;
-    component.material_slot_metadata = upload.material_slots;
-}
-
 impl StaticMeshComponent {
-    /// A component showing the mesh asset at the project-relative `path`,
-    /// its geometry loaded, as decoding `{"mesh_asset": path}` would give.
+    /// A component showing the mesh asset at the project-relative `path`, as
+    /// decoding `{"mesh_asset": path}` would give. Its geometry is bound once
+    /// it is in a world and the world has loaded the mesh.
     pub fn for_mesh_asset(path: &str) -> Self {
         let mut component = Self {
             mesh_asset: MeshAssetPath::new(path),
             ..Default::default()
         };
-        load_mesh_asset_into(&mut component);
+        attach_mesh_asset(&mut component);
         component
     }
 }
 
 /// `StaticMeshComponent`'s JSON boundary decoder (Pulsar-Native#561 Phase
 /// D). The serialized form references its mesh by `mesh_asset`; decoding
-/// loads that asset's data once, here, so the value that enters the world is
-/// complete. Its `#[gpu]` pools are then written by SceneDB's normal insert.
+/// points the value at that mesh asset, which the world loads and binds
+/// (SceneDB#84). Nothing is read from disk here.
 fn decode_static_mesh_component(data: &serde_json::Value) -> Result<StaticMeshComponent, String> {
     let mut component: StaticMeshComponent = pulsar_world_registry::decode_json(data)?;
-    load_mesh_asset_into(&mut component);
+    attach_mesh_asset(&mut component);
     Ok(component)
 }
 
 /// `property_written` hook: a reflected write that changed `mesh_asset`
-/// (the properties panel's mesh picker, a script) loads the newly named
-/// asset under the same write guard, so SceneDB commits the new path and its
-/// geometry together. Writes to any other property load nothing.
+/// (the properties panel's mesh picker, a script) points the component at
+/// the newly named mesh asset; the world loads and binds it. Writes to any
+/// other property change nothing here.
 fn static_mesh_property_written(component: &mut StaticMeshComponent, property: Option<&str>) {
     if matches!(property, None | Some("mesh_asset")) {
-        load_mesh_asset_into(component);
+        attach_mesh_asset(component);
     }
 }
 
