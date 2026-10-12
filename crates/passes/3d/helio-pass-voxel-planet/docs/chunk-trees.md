@@ -567,6 +567,14 @@ pixel of `tests/chunks.rs`).
 
 A mountain ray takes 17.6 steps through 2.4 boxes (was 40 through 5.6).
 
+A plane can rise past its chunk's cube (columns full to its top next to a
+steep slope), into the space of the chunk above: there its top face can be
+nearer than that chunk's box, and the ray seeded in the lower chunk skips
+the upper one's cells (holes in the editor, through TSR's jittered rays;
+the tests' unjittered views did not meet one). Such a chunk keeps the flat
+top of its occupied layers, so boxes never overlap. Mountain primary is
+then 2.83 ms (2.55 with the overlapping tops), ground 1.41 ms.
+
 ### The ceiling
 
 Sun rays that met nothing walked up to 96 boxes of air. Over the highest

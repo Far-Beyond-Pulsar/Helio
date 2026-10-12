@@ -691,8 +691,12 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         w_block = base;
         let z = vec2<i32>(atomicLoad(&w_z[0]), atomicLoad(&w_z[1]));
         // A sixty-fourth of a cell over the tops: rays rasterized against
-        // it and walked in f32 meet it where they meet the cells.
-        let top = vec4<f32>(w_slope, f32(atomicLoad(&w_lift)) / 256.0 + 1.0 / 64.0, 0.0);
+        // it and walked in f32 meet it where they meet the cells. A plane
+        // rising past the chunk's cube anywhere would reach into the chunk
+        // above, whose cells a ray seeded here would skip: the box's top is
+        // then the occupied layers' (boxes never overlap).
+        var top = vec4<f32>(w_slope, f32(atomicLoad(&w_lift)) / 256.0 + 1.0 / 64.0, 0.0);
+        if top.z + max(top.x, 0.0) * 64.0 + max(top.y, 0.0) * 64.0 > 64.0 { top = vec4<f32>(0.0, 0.0, f32(z.y), 0.0); }
         chunk_meta[job.slot] = ChunkMeta(root_occ, root_full, z, select(total, 0u, overflow), select(base, NONE, overflow), top);
         var flags = 1;
         if root_occ.x == 0u && root_occ.y == 0u { flags |= 2; }
