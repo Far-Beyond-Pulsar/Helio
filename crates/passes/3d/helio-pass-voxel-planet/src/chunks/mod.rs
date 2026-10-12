@@ -98,9 +98,6 @@ struct ChunkStatic {
     bounds: [f32; 4],
 }
 
-/// Offset of `ChunkStatic::bounds`.
-const STATIC_BOUNDS: u64 = 128;
-
 /// A planet-centred position as a high and a low f32 part.
 fn split(v: DVec3) -> ([f32; 4], [f32; 4]) {
     let hi = v.as_vec3();
@@ -161,28 +158,55 @@ struct Frame {
 }
 
 /// The affine frame of chunk `cz` over `tile`: the grid mapping's central
-/// differences across the chunk, about its centre. Within a chunk it is
-/// linear to `512 x voxel / radius` of a cell (docs/chunk-trees.md).
-fn chunk_frame(grid: &Grid, tile: TileKey, cz: i32) -> Frame {
+/// differences across the chunk, about its middle column at height `z`
+/// (cells in the chunk: its columns' mean top, its ground). Across a chunk
+/// the sphere curves `512 x cell / radius` of a cell from it (0.5 at the
+/// coarsest level on Earth, where tiles span 600 km), and columns, which
+/// meet at the planet's centre, lean `32 x cell / radius` a cell from it
+/// per cell of height: about the ground neighbours agree to a twentieth of
+/// a cell, about a 64-cell chunk's middle they parted by cells where the
+/// ground lay far below it (docs/chunk-trees.md).
+fn chunk_frame(grid: &Grid, tile: TileKey, cz: i32, z: f64) -> Frame {
     let s = f64::from(1u32 << tile.level);
     let half = f64::from(CHUNK / 2) * s;
-    let centre = [f64::from(tile.cx * CHUNK) * s + half, f64::from(tile.cy * CHUNK) * s + half, f64::from(cz * CHUNK) * s + half];
+    let centre = [f64::from(tile.cx * CHUNK) * s + half, f64::from(tile.cy * CHUNK) * s + half, (f64::from(cz * CHUNK) + z) * s];
     let at = |d: [f64; 3]| grid.position(tile.face, [centre[0] + d[0], centre[1] + d[1], centre[2] + d[2]]);
     let n = f64::from(CHUNK);
     let u = (at([half, 0.0, 0.0]) - at([-half, 0.0, 0.0])) / n;
     let v = (at([0.0, half, 0.0]) - at([0.0, -half, 0.0])) / n;
     let w = (at([0.0, 0.0, half]) - at([0.0, 0.0, -half])) / n;
     let m = DMat3::from_cols(u, v, w);
-    Frame { origin: at([0.0; 3]) - m * DVec3::splat(n / 2.0), m, inv: m.inverse() }
+    Frame { origin: at([0.0; 3]) - m * DVec3::new(n / 2.0, n / 2.0, z), m, inv: m.inverse() }
+}
+
+/// Chunk `cz` of `tile` in `slot` as drawing reads it, with occupied layers
+/// `z` and its frame made about height `about` (cells in the chunk).
+fn chunk_static(grid: &Grid, tile: TileKey, cz: i32, slot: u32, z: (f32, f32), about: f32) -> ChunkStatic {
+    let frame = chunk_frame(grid, tile, cz, f64::from(about));
+    let (m, inv) = (frame.m.as_mat3(), frame.inv.as_mat3());
+    let (origin_hi, origin_lo) = split(frame.origin);
+    let flags = u32::from(frame.m.determinant() < 0.0) | (tile.level << 8);
+    ChunkStatic {
+        m: [m.x_axis.extend(0.0).to_array(), m.y_axis.extend(0.0).to_array(), m.z_axis.extend(0.0).to_array()],
+        inv: [inv.row(0).extend(0.0).to_array(), inv.row(1).extend(0.0).to_array(), inv.row(2).extend(0.0).to_array()],
+        origin_hi,
+        origin_lo,
+        bounds: [z.0, z.1, f32::from_bits(slot), f32::from_bits(flags)],
+    }
 }
 
 /// An eye and, on each face over whose half-space it is, its continuous
 /// index coordinates and the grid's axes there (metres per index step):
-/// planning measures tiles in that linear frame (the inverse mapping costs
-/// two arctangents a call; LOD needs no more than the frame's accuracy).
+/// planning measures tiles near it in that linear frame (the inverse
+/// mapping costs two arctangents a call; LOD needs no more than the frame's
+/// accuracy), farther ones from their centres.
 pub struct Eye {
     pub position: DVec3,
     faces: [Option<([f64; 3], [DVec3; 3])>; 6],
+    /// Metres across the face the linear frame holds (a sphere curves
+    /// d^2 / 2R from it: 1 % at R / 64; seen from orbit a face spans
+    /// thousands of kilometres).
+    reach: f64,
 }
 
 impl Eye {
@@ -201,25 +225,38 @@ impl Eye {
                 faces[face as usize] = Some((c, [axis(0), axis(1), axis(2)]));
             }
         }
-        Self { position, faces }
+        Self { position, faces, reach: if grid.is_plane() { f64::INFINITY } else { grid.radius() / 64.0 } }
     }
 
     /// From the eye to the nearest point of the tile's columns between
     /// layers `range` (level cells), in the eye's linear frame of the
-    /// tile's face; `None` when the eye is not over that face.
+    /// tile's face; `None` when the eye is not over that face or the tile
+    /// lies beyond the frame's reach.
     fn offset(&self, tile: TileKey, range: (i32, i32)) -> Option<DVec3> {
         let (e, axes) = self.faces[tile.face as usize]?;
         let s = f64::from(1u32 << tile.level);
         let (i0, j0) = (f64::from(tile.cx * CHUNK) * s, f64::from(tile.cy * CHUNK) * s);
         let w = f64::from(CHUNK) * s;
         let d = [e[0].clamp(i0, i0 + w) - e[0], e[1].clamp(j0, j0 + w) - e[1], e[2].clamp(f64::from(range.0) * s, f64::from(range.1) * s) - e[2]];
-        Some(axes[0] * d[0] + axes[1] * d[1] + axes[2] * d[2])
+        let across = axes[0] * d[0] + axes[1] * d[1];
+        (across.length() <= self.reach).then(|| across + axes[2] * d[2])
+    }
+
+    /// From the eye towards the tile's columns between layers `range`:
+    /// [`Self::offset`] near it, else to their centre.
+    fn toward(&self, grid: &Grid, tile: TileKey, range: (i32, i32)) -> DVec3 {
+        self.offset(tile, range).unwrap_or_else(|| {
+            let s = f64::from(1u32 << tile.level);
+            let middle = (f64::from(tile.cx * CHUNK) + f64::from(CHUNK) / 2.0) * s;
+            let across = (f64::from(tile.cy * CHUNK) + f64::from(CHUNK) / 2.0) * s;
+            grid.position(tile.face, [middle, across, f64::from(range.0 + range.1) * s / 2.0]) - self.position
+        })
     }
 }
 
 /// Distance from `eye` to the tile's columns between layers `range` (level
-/// cells): to the nearest point when the eye is over the tile's face, else
-/// to its centre less its half-diagonal.
+/// cells): to the nearest point when the eye is over the tile's face and
+/// near it ([`Eye::offset`]), else to its centre less its half-diagonal.
 fn tile_distance(grid: &Grid, tile: TileKey, range: (i32, i32), eye: &Eye) -> f64 {
     if let Some(offset) = eye.offset(tile, range) {
         return offset.length();
@@ -477,6 +514,12 @@ pub struct UpdateStats {
     /// Drawn tiles in view coarser than wanted, as a share of the drawn
     /// tiles in view.
     pub coarse_share: f64,
+    /// [`residency::Plan::worst_px`] of the latest plan.
+    pub worst_px: f64,
+    /// Level switches in view a plan that arrived this frame made, and
+    /// [`residency::Plan::switch_px`].
+    pub switches: usize,
+    pub switch_px: f64,
     /// Tiles this frame could generate.
     pub budget: usize,
     /// CPU milliseconds: results, plan, eviction, generation, drawn set,
@@ -1478,18 +1521,8 @@ impl ChunkWorld {
             }
             let baked = if baked { batch.baked_table(&self.baked, key, cz) } else { u32::MAX };
             batch.chunk_jobs.push(ChunkJob { tile: index, cz, slot, brushes: first, brush_count: batch.refs.len() as u32 - first, large, baked, _pad: 0 });
-            let frame = chunk_frame(&grid, key, cz);
-            let (m, inv) = (frame.m.as_mat3(), frame.inv.as_mat3());
-            let (origin_hi, origin_lo) = split(frame.origin);
-            let flags = u32::from(frame.m.determinant() < 0.0) | (key.level << 8);
-            let record = ChunkStatic {
-                m: [m.x_axis.extend(0.0).to_array(), m.y_axis.extend(0.0).to_array(), m.z_axis.extend(0.0).to_array()],
-                inv: [inv.row(0).extend(0.0).to_array(), inv.row(1).extend(0.0).to_array(), inv.row(2).extend(0.0).to_array()],
-                origin_hi,
-                origin_lo,
-                // Layers not read back yet: the whole chunk.
-                bounds: [0.0, 64.0, f32::from_bits(slot), f32::from_bits(flags)],
-            };
+            // Layers not read back yet: the whole chunk.
+            let record = chunk_static(&grid, key, cz, slot, (0.0, 64.0), 32.0);
             self.queue.write_buffer(&self.statics, u64::from(slot) * std::mem::size_of::<ChunkStatic>() as u64, bytemuck::bytes_of(&record));
             chunks.push(Chunk { cz, slot, serial: self.serial, z: None });
             self.queue.write_buffer(&self.chunk_keys, u64::from(slot) * 16, bytemuck::cast_slice(&chunk_key(key, cz)));
@@ -1649,7 +1682,12 @@ impl ChunkWorld {
                     } else {
                         let c = &mut tile.chunks[i];
                         c.z = Some((w[1], w[2]));
-                        self.queue.write_buffer(&self.statics, u64::from(c.slot) * std::mem::size_of::<ChunkStatic>() as u64 + STATIC_BOUNDS, bytemuck::cast_slice(&[w[1] as f32, w[2] as f32]));
+                        // Its frame about its columns' mean top (its ground),
+                        // else its occupied layers.
+                        let surface = (w[3] as u32) >> 16;
+                        let about = if surface == 0xffff { (w[1] + w[2]) as f32 * 0.5 } else { surface as f32 / 4.0 };
+                        let record = chunk_static(&self.grid, key, c.cz, c.slot, (w[1] as f32, w[2] as f32), about);
+                        self.queue.write_buffer(&self.statics, u64::from(c.slot) * std::mem::size_of::<ChunkStatic>() as u64, bytemuck::bytes_of(&record));
                     }
                 }
             }
@@ -1672,6 +1710,8 @@ impl ChunkWorld {
         let worker = self.worker.as_mut().expect("spawned above");
         if let Some(planned) = worker.poll() {
             self.plan = planned.plan;
+            stats.switches = self.plan.switches;
+            stats.switch_px = self.plan.switch_px;
             evicted = planned.evicted;
             added = planned.added;
             removed = planned.removed;
@@ -1685,6 +1725,7 @@ impl ChunkWorld {
         let plan = &self.plan;
         stats.requests = plan.waiting;
         stats.coarse_share = plan.coarse_share;
+        stats.worst_px = plan.worst_px;
         for key in evicted {
             if let Some(old) = self.tiles.remove(&key) {
                 evictions.extend(old.chunks.iter().map(|c| c.slot));

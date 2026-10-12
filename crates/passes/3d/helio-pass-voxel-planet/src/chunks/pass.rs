@@ -24,6 +24,8 @@ pub struct ChunkPass {
     stats: UpdateStats,
     /// Frames whose GPU times came back, until taken.
     timings: Vec<FrameTimings>,
+    /// The last frame's CPU milliseconds: prepare, execute.
+    cpu_ms: [f64; 2],
 }
 
 impl ChunkPass {
@@ -35,7 +37,7 @@ impl ChunkPass {
     /// With residency settings `config` (its pixel angle follows the
     /// camera).
     pub fn with_config(source: SharedPlanetFrame, config: ResidencyConfig) -> Self {
-        Self { source, config, appearance: None, world: None, built_for: None, shown: None, last_eye: None, last_view: None, stats: UpdateStats::default(), timings: Vec::new() }
+        Self { source, config, appearance: None, world: None, built_for: None, shown: None, last_eye: None, last_view: None, stats: UpdateStats::default(), timings: Vec::new(), cpu_ms: [0.0; 2] }
     }
 
     /// The host's art settings; whether they changed.
@@ -71,6 +73,12 @@ impl ChunkPass {
         &self.stats
     }
 
+    /// The last frame's CPU milliseconds in the pass: prepare (edits,
+    /// results), execute (residency, draw).
+    pub fn cpu_ms(&self) -> [f64; 2] {
+        self.cpu_ms
+    }
+
     /// GPU times of frames that came back since the last call.
     pub fn take_timings(&mut self) -> Vec<FrameTimings> {
         std::mem::take(&mut self.timings)
@@ -81,7 +89,7 @@ impl ChunkPass {
         let s = &self.stats;
         let gpu = self.timings.last();
         format!(
-            "chunks settled={} drawn_tiles={} drawn_chunks={} resident_chunks={} fading={} waiting={} generated={} regenerated={} deep={} budget={} coarse={:.3} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} generate_ms={:?}",
+            "chunks settled={} drawn_tiles={} drawn_chunks={} resident_chunks={} fading={} waiting={} generated={} regenerated={} deep={} budget={} coarse={:.3} worst_px={:.2} switch_px={:.2} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} generate_ms={:?}",
             self.settled(),
             s.drawn_tiles,
             s.drawn_chunks,
@@ -93,6 +101,8 @@ impl ChunkPass {
             s.deep_tiles,
             s.budget,
             s.coarse_share,
+            s.worst_px,
+            s.switch_px,
             s.out_of_slots,
             s.out_of_leaves,
             s.cpu_ms,
@@ -147,6 +157,26 @@ impl RenderPass for ChunkPass {
         None
     }
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        let started = std::time::Instant::now();
+        let result = self.prepare_frame(ctx);
+        self.cpu_ms[0] = started.elapsed().as_secs_f64() * 1e3;
+        result
+    }
+    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
+        if let Some(view) = self.world.as_ref().and_then(ChunkWorld::sun_view) {
+            frame.write_texture_binding("directional_visibility", view, self.name());
+        }
+    }
+    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        let started = std::time::Instant::now();
+        let result = self.execute_frame(ctx);
+        self.cpu_ms[1] = started.elapsed().as_secs_f64() * 1e3;
+        result
+    }
+}
+
+impl ChunkPass {
+    fn prepare_frame(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // The last frame was submitted: its results can be mapped.
         if let Some(world) = &mut self.world {
             world.submitted();
@@ -177,12 +207,8 @@ impl RenderPass for ChunkPass {
         self.shown = Some(frame);
         Ok(())
     }
-    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
-        if let Some(view) = self.world.as_ref().and_then(ChunkWorld::sun_view) {
-            frame.write_texture_binding("directional_visibility", view, self.name());
-        }
-    }
-    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+
+    fn execute_frame(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let (Some(world), Some(frame)) = (&mut self.world, self.shown.clone()) else { return Ok(()) };
         let missing = |name: &str| helio_core::Error::ResourceNotFound(name.into());
         let g = ctx.registry.get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer")).ok_or_else(|| missing("gbuffer"))?;

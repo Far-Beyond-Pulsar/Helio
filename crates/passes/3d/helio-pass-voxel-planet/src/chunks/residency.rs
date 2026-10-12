@@ -73,6 +73,8 @@ pub struct Tile {
     /// Its children were drawn in its place last time it was visited.
     pub refined: bool,
     pub used: u64,
+    /// The plan that last drew it (frame + 1; 0: never).
+    pub drawn: u64,
 }
 
 /// Where the eye looks: tiles in view are generated first.
@@ -96,6 +98,14 @@ pub struct Plan {
     /// Drawn tiles whose cells project larger than wanted, as a share of
     /// the drawn tiles (the refinement still to come).
     pub coarse_share: f64,
+    /// Pixels the largest cell of a drawn tile in view spans from the eye
+    /// (above the finest level).
+    pub worst_px: f64,
+    /// Tiles in view this plan switches between levels, and the pixels the
+    /// largest cell of those spans from the eye (the coarser side of each
+    /// switch): a switch shows when that is well over a pixel.
+    pub switches: usize,
+    pub switch_px: f64,
 }
 
 pub struct Planner {
@@ -105,6 +115,8 @@ pub struct Planner {
     /// Spheres: the radius of the lowest ground, whose horizon hides what
     /// lies beyond it (none when that ground reaches the centre).
     occluder: Option<f64>,
+    /// The last plan's frame + 1 (0: none yet).
+    last_plan: u64,
 }
 
 impl Planner {
@@ -123,13 +135,13 @@ impl Planner {
                 for cy in 0..n {
                     let key = TileKey { face, level, cx, cy };
                     roots.push(key);
-                    tiles.insert(key, Tile { ranges, exact: false, generated: false, refined: false, used: 0 });
+                    tiles.insert(key, Tile { ranges, exact: false, generated: false, refined: false, used: 0, drawn: 0 });
                 }
             }
         }
         // A world whose lowest ground reaches its centre has no horizon.
         let occluder = (!grid.is_plane()).then(|| grid.radius() + f64::from(range.0) * f64::from(grid.layer_mm()) * 1e-3).filter(|r| *r > 0.0);
-        Self { tiles, roots, config, occluder }
+        Self { tiles, roots, config, occluder, last_plan: 0 }
     }
 
     /// Whether `tile` cannot be seen from `eye`: below its horizon over the
@@ -168,7 +180,7 @@ impl Planner {
         // a tile's extent: anything beside it is near it).
         let in_view = |key: TileKey, ranges: Ranges| -> bool {
             let Some(v) = view else { return true };
-            let Some(offset) = eyes[0].offset(key, ranges.extent()) else { return true };
+            let offset = eyes[0].toward(grid, key, ranges.extent());
             let length = offset.length();
             let size = grid.level_size(key.level) * f64::from(CHUNK) * 1.5;
             length < size || offset.dot(v.forward) > v.cos_half * length - size
@@ -181,8 +193,10 @@ impl Planner {
         while let Some(key) = stack.pop() {
             let Some(tile) = self.tiles.get(&key).copied() else { continue };
             // Tiles that cannot be seen are not drawn. A root out there ages
-            // out (`evict`); a finer tile stays for its parent's cut.
-            let beyond = self.beyond(grid, key, tile.ranges, &eyes[0]);
+            // out (`evict`); a finer tile stays for its parent's cut. Tiles
+            // the prefetch eye sees are ready when they come over the
+            // horizon (a climb), not drawn coarse for a moment.
+            let beyond = self.beyond(grid, key, tile.ranges, &eyes[0]) && self.beyond(grid, key, tile.ranges, &eyes[1]);
             if !tile.generated {
                 if !beyond {
                     wanted.push((f64::INFINITY, key));
@@ -204,7 +218,7 @@ impl Planner {
             let children = if finer && tile.exact { children(grid, key) } else { Vec::new() };
             let mut ready = finer && tile.exact;
             for &child in &children {
-                let entry = self.tiles.entry(child).or_insert(Tile { ranges: tile.ranges.child(), exact: false, generated: false, refined: false, used: frame });
+                let entry = self.tiles.entry(child).or_insert(Tile { ranges: tile.ranges.child(), exact: false, generated: false, refined: false, used: frame, drawn: 0 });
                 entry.used = frame;
                 // Until measured, a child's ranges follow its parent's (an
                 // edit may have deepened them since).
@@ -216,12 +230,25 @@ impl Planner {
                     wanted.push((priority, child));
                 }
             }
+            // Pixels a cell spans from the eye now (not the prefetch eye).
+            let px = || self.error(grid, key, tile.ranges, &eyes[..1]);
+            // A switch shows where the last plan drew the side it leaves
+            // (not where the tile came over the horizon).
+            let shown = |k: &TileKey| self.last_plan != 0 && self.tiles.get(k).is_some_and(|t| t.drawn == self.last_plan);
+            if seen && tile.refined != ready && if ready { shown(&key) } else { self::children(grid, key).iter().any(shown) } {
+                plan.switches += 1;
+                plan.switch_px = plan.switch_px.max(px());
+            }
+            if seen && !ready && key.level > 0 {
+                plan.worst_px = plan.worst_px.max(px());
+            }
             let t = self.tiles.get_mut(&key).unwrap();
             t.used = frame;
             t.refined = ready;
             if ready {
                 stack.extend(children);
             } else {
+                t.drawn = frame + 1;
                 plan.drawn.push(key);
                 if seen {
                     drawn_in_view += 1;
@@ -240,6 +267,7 @@ impl Planner {
         wanted.sort_by(|a, b| b.0.total_cmp(&a.0));
         plan.requests = wanted.into_iter().map(|w| (w.1, self.tiles[&w.1].ranges)).collect();
         plan.coarse_share = coarse as f64 / drawn_in_view.max(1) as f64;
+        self.last_plan = frame + 1;
         plan
     }
 

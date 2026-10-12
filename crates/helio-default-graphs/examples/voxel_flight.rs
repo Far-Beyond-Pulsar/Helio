@@ -14,6 +14,9 @@
 //!   `HELIO_VOXEL_CHUNKS_DIG=n` the view is dug and undone, with
 //!   `HELIO_VOXEL_CHUNKS_BLAST=r` blasted by one ball `r` m across.
 //! * `HELIO_VOXEL_CHUNKS_FLY=descent|cruise` streams along a path.
+//! * `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit` flies through the
+//!   renderer in real time, every frame recorded (`stress_<mode>.csv`),
+//!   samples saved with settled references to compare.
 //!
 //! World: `HELIO_VOXEL_FLIGHT_VOXEL` (0.1 m), `_SEED` (7), `_PRESET`
 //! (earth|moon|desert), `_HEIGHTFIELD`, `_NO_CAVES`, `_NO_OVERHANGS`,
@@ -186,8 +189,10 @@ impl Flight {
     }
 
     /// Draw a frame from `eye` along `forward`, blocking only on the frame
-    /// `FRAMES_IN_FLIGHT` behind it (a game loop keeps the GPU fed).
-    fn draw(&mut self, eye: DVec3, forward: Vec3) {
+    /// `FRAMES_IN_FLIGHT` behind it (a game loop keeps the GPU fed): the
+    /// milliseconds recording it took and those waiting.
+    fn draw(&mut self, eye: DVec3, forward: Vec3) -> (f64, f64) {
+        let started = Instant::now();
         *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: self.planet.clone(), sun: self.sun, shadows: self.shadows, picks: self.picks.clone() });
         self.renderer.set_world_origin(Some(eye));
         let up = up_for(eye);
@@ -197,6 +202,7 @@ impl Flight {
         let aspect = self.size[0] as f32 / self.size[1] as f32;
         let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, std::f32::consts::FRAC_PI_4, aspect, near, 40_000_000.0);
         self.renderer.render(&camera, &self.target.create_view(&Default::default())).unwrap();
+        let recorded = Instant::now();
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = done.clone();
         self.queue.on_submitted_work_done(move || flag.store(true, std::sync::atomic::Ordering::Release));
@@ -208,6 +214,7 @@ impl Flight {
                 std::thread::sleep(std::time::Duration::from_micros(50));
             }
         }
+        ((recorded - started).as_secs_f64() * 1e3, recorded.elapsed().as_secs_f64() * 1e3)
     }
 
     /// The last frame as `<out>/<name>.png`.
@@ -686,6 +693,158 @@ fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3)
     pick_probe(flight, view, eye, forward);
 }
 
+/// `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit`: a flight
+/// through the renderer in real time (the path follows the wall clock, as a
+/// game's camera does: a slow frame moves it further), from 2 m to 400 km
+/// or back in `HELIO_VOXEL_FLIGHT_HOLD_SECONDS` (20), at 300 m/s 40 m over
+/// the ground, or in orbit (`HELIO_VOXEL_STRESS_ALTITUDE` m, 400 km) at
+/// 7.7 km/s looking down towards the horizon. Every frame goes to `<out>/stress_<mode>.csv` (time, altitude,
+/// frame interval, the chunk pass's coarse share, worst cell and level
+/// switch pixels, waiting tiles, generation, update CPU by phase). Every
+/// `HELIO_VOXEL_STRESS_SAMPLE` seconds (1) the frame is saved; after the
+/// flight each sample's view is settled and held until TSR converges and
+/// saved twice, 30 frames apart (`stress_<mode>_<n>.png`, `_ref.png`,
+/// `_ref2.png`: the second pair is the noise floor of a comparison).
+fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
+    let seconds: f64 = std::env::var("HELIO_VOXEL_FLIGHT_HOLD_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(20.0);
+    let sample: f64 = std::env::var("HELIO_VOXEL_STRESS_SAMPLE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    let up = ground.normalize();
+    let ahead = tangent(ground, heading).as_dvec3();
+    let planet = flight.planet.clone();
+    let radius = planet.grid().radius();
+    let path = |t: f64| -> (DVec3, Vec3) {
+        let u = (t / seconds).clamp(0.0, 1.0);
+        if mode == "cruise" {
+            let eye = planet.surface_point(ground + ahead * (300.0 * t), 40.0);
+            return (eye, (ahead - up * 0.15).normalize().as_vec3());
+        }
+        if mode == "orbit" {
+            let altitude: f64 = std::env::var("HELIO_VOXEL_STRESS_ALTITUDE").ok().and_then(|v| v.parse().ok()).unwrap_or(400_000.0);
+            // Around the planet along a great circle through the spawn.
+            let angle = 7_700.0 * t / (radius + altitude);
+            let position = (up * angle.cos() + ahead * angle.sin()) * (radius + altitude);
+            let (local_up, local_ahead) = (position.normalize(), ahead * angle.cos() - up * angle.sin());
+            return (position, (local_ahead - local_up * 0.8).normalize().as_vec3());
+        }
+        // Exponentially between 2 m and 400 km.
+        let altitude = 2.0 * 200_000.0f64.powf(if mode == "ascent" { u } else { 1.0 - u });
+        let eye = planet.surface_point(ground + ahead * (altitude * 0.3), altitude);
+        (eye, (ahead - up * 0.6).normalize().as_vec3())
+    };
+    // Settle a view and hold it until TSR converges.
+    let settle = |flight: &mut Flight, eye: DVec3, forward: Vec3| {
+        let started = Instant::now();
+        let mut frames = 0;
+        while frames < 10 || !flight.renderer.find_pass::<ChunkPass>().is_some_and(ChunkPass::settled) {
+            flight.draw(eye, forward);
+            frames += 1;
+            if frames > 6000 {
+                eprintln!("CHUNKSTRESS {mode}: a view did not settle");
+                break;
+            }
+        }
+        for _ in 0..90 {
+            flight.draw(eye, forward);
+        }
+        started.elapsed().as_secs_f64()
+    };
+    let (eye, forward) = path(0.0);
+    eprintln!("CHUNKSTRESS {mode}: loaded in {:.2} s", settle(flight, eye, forward));
+    flight.renderer.find_pass_mut::<ChunkPass>().unwrap().take_timings();
+    let mut csv = String::from("t,altitude_m,interval_ms,captured,coarse,worst_px,switches,switch_px,waiting,generated,fading,update_cpu_ms,results_ms,plan_ms,evict_ms,generate_ms,drawn_ms,table_ms,record_ms,wait_ms,pass_prepare_ms,pass_execute_ms
+");
+    let (mut intervals, mut coarse, mut worst, mut switch_px) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut draw_ms, mut generate_ms) = (Vec::new(), Vec::new());
+    let mut samples = Vec::new();
+    let mut slow = Vec::new();
+    let started = Instant::now();
+    let mut last = started;
+    let mut captured = false;
+    loop {
+        let t = started.elapsed().as_secs_f64();
+        if t > seconds {
+            break;
+        }
+        let (eye, forward) = path(t);
+        let (record_ms, wait_ms) = flight.draw(eye, forward);
+        let now = Instant::now();
+        let interval = (now - last).as_secs_f64() * 1e3;
+        last = now;
+        let altitude = eye.length() - radius;
+        // A slow frame: the renderer's CPU by pass.
+        if record_ms > 40.0 {
+            let snapshot = flight.renderer.timing_snapshot();
+            let mut passes: Vec<(&str, f32)> = snapshot.passes.iter().filter_map(|p| Some((p.name, p.cpu_ms?))).collect();
+            passes.sort_by(|a, b| b.1.total_cmp(&a.1));
+            passes.truncate(4);
+            eprintln!("CHUNKSTRESS {mode}: recording {record_ms:.1} ms at t {t:.2} s: graph cpu {:?} ms, passes {passes:?}", snapshot.total_cpu_ms);
+        }
+        let pass = flight.renderer.find_pass_mut::<ChunkPass>().unwrap();
+        let s = *pass.stats();
+        let pass_cpu = pass.cpu_ms();
+        for timing in pass.take_timings() {
+            draw_ms.push(timing.draw);
+            generate_ms.push(timing.generate);
+        }
+        csv += &format!("{t:.4},{altitude:.2},{interval:.2},{},{:.4},{:.3},{},{:.3},{},{},{},{:.2},{},{record_ms:.2},{wait_ms:.2},{:.2},{:.2}
+", u8::from(captured), s.coarse_share, s.worst_px, s.switches, s.switch_px, s.requests, s.generated_tiles, s.fading_tiles, s.cpu_ms.iter().sum::<f64>(), s.cpu_ms.map(|v| format!("{v:.2}")).join(","), pass_cpu[0], pass_cpu[1]);
+        // A frame after a capture waited for its readback.
+        if !captured {
+            intervals.push(interval);
+            slow.push((interval, t, altitude));
+        }
+        coarse.push(s.coarse_share);
+        worst.push(s.worst_px);
+        if s.switches > 0 {
+            switch_px.push(s.switch_px);
+        }
+        captured = t >= samples.len() as f64 * sample;
+        if captured {
+            flight.capture(&format!("stress_{mode}_{:02}", samples.len()));
+            samples.push((eye, forward));
+        }
+    }
+    std::fs::write(flight.output.join(format!("stress_{mode}.csv")), csv).unwrap();
+    slow.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let max = |v: &[f64]| v.iter().copied().fold(0.0, f64::max);
+    let over = |v: &[f64], x: f64| v.iter().filter(|&&p| p > x).count();
+    eprintln!(
+        "CHUNKSTRESS {mode}: frames {} | interval p50 {:.1} p95 {:.1} p99 {:.1} max {:.1} ms, over 33 ms {} | gpu draw p50 {:.2} max {:.2}, generate p50 {:.2} max {:.2} ms | coarse mean {:.4} max {:.3} | worst px p50 {:.2} p95 {:.2} max {:.2} | switches in {} frames, px p50 {:.2} p95 {:.2} max {:.2}, over 1.5 px {}, over 3 px {}",
+        intervals.len(),
+        percentile(&intervals, 0.5),
+        percentile(&intervals, 0.95),
+        percentile(&intervals, 0.99),
+        max(&intervals),
+        over(&intervals, 33.3),
+        percentile(&draw_ms, 0.5),
+        max(&draw_ms),
+        percentile(&generate_ms, 0.5),
+        max(&generate_ms),
+        coarse.iter().sum::<f64>() / coarse.len().max(1) as f64,
+        max(&coarse),
+        percentile(&worst, 0.5),
+        percentile(&worst, 0.95),
+        max(&worst),
+        switch_px.len(),
+        percentile(&switch_px, 0.5),
+        percentile(&switch_px, 0.95),
+        max(&switch_px),
+        over(&switch_px, 1.5),
+        over(&switch_px, 3.0),
+    );
+    for (interval, t, altitude) in slow.iter().take(5) {
+        eprintln!("CHUNKSTRESS {mode}: slow frame {interval:.1} ms at t {t:.2} s, altitude {altitude:.0} m");
+    }
+    for (n, (eye, forward)) in samples.iter().enumerate() {
+        settle(flight, *eye, *forward);
+        flight.capture(&format!("stress_{mode}_{n:02}_ref"));
+        for _ in 0..30 {
+            flight.draw(*eye, *forward);
+        }
+        flight.capture(&format!("stress_{mode}_{n:02}_ref2"));
+    }
+}
+
 /// `HELIO_VOXEL_PICKS=x,y;x,y` (output pixels): the renderer's picks there
 /// against the CPU raycast through the same pixel.
 fn pick_probe(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3) {
@@ -1028,6 +1187,10 @@ fn main() {
     let heading = 0.6;
     if let Ok(mode) = std::env::var("HELIO_VOXEL_CHUNKS_FLY") {
         chunk_fly(&flight, &mode, ground, heading);
+        return;
+    }
+    if let Ok(mode) = std::env::var("HELIO_VOXEL_FLIGHT_STRESS") {
+        chunk_stress(&mut flight, &mode, ground, heading);
         return;
     }
     if let Ok(view) = std::env::var("HELIO_VOXEL_FLIGHT_HOLD") {

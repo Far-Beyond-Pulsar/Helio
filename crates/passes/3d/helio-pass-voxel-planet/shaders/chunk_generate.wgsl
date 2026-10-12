@@ -702,6 +702,11 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         if root_occ.x == 0u && root_occ.y == 0u { flags |= 2; }
         if root_full.x == 0xffffffffu && root_full.y == 0xffffffffu { flags |= 4; }
         if overflow { flags |= 8; }
+        // The columns' mean top (quarter cells; 0xffff: none), which the
+        // chunk's frame is made about.
+        let columns = atomicLoad(&w_fit[0]);
+        let surface = select(0xffffu, u32(clamp(round(f32(atomicLoad(&w_fit[3])) / f32(max(columns, 1)) * 4.0), 0.0, 256.0)), columns > 0);
+        flags |= i32(surface << 16u);
         job_results[wg.x] = vec4<i32>(i32(job.slot), z.x, z.y, flags);
     }
     workgroupBarrier();
