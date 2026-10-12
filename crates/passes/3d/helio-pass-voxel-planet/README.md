@@ -146,7 +146,9 @@ A planet's `Edits` hold every brush in three layers, applied in order:
 batches; memory follows what the edits left, not how many there were, and the
 latest seals stay undoable. A history hash identifies every state, so a
 `ChunkWorld` syncs by difference: changed brushes regenerate the tiles they
-touch now, changed baked columns regenerate as budget allows, and an
+touch first (drawn ones, nearest first, within the frame's budget: a small
+dig shows the frame it is made, a blast's far and hidden tiles follow over
+the next frames), changed baked columns regenerate as budget allows, and an
 unrelated history rebuilds the world.
 
 The `EditLog` keeps an adaptive octree per face whose leaves list, in order,
@@ -174,7 +176,9 @@ phase's measurements. In short, a frame of `ChunkPass`:
    a tile's cells would project larger than `lod_pixels` from the eye (or
    from where it will be in `prefetch_seconds`), and sends the drawn set's
    changes and the most wanted tiles. The render thread generates tiles
-   within a measured GPU budget (`generate_ms`): tile columns (field height,
+   within a GPU budget (`generate_ms`, against the measured cost of a tile's
+   columns and of a chunk, so a tall edited tile costs its chunks): tile
+   columns (field height,
    surface word, volume extent), then each chunk's columns as 64-bit masks
    (volume terms, lean, large brushes, baked cells, recent brushes,
    materials), then the chunk's 64-tree into the leaf pool. Results come
@@ -254,6 +258,7 @@ cargo run -p helio-default-graphs --release --example voxel_flight -- OUT [W H [
 | `HELIO_VOXEL_FLIGHT_HOLD=<view>` | Settles `ground`, `mountain_slope`, `tunnel`, `face_edge`, `cave` or `eye` (`HELIO_VOXEL_FLIGHT_EYE=x,y,z,fx,fy,fz`) and holds it: `CHUNKHOLD` prints the primary, seed and shadow GPU times. |
 | `HELIO_VOXEL_CHUNKS_ENGINE=1` | The held view drawn by the renderer's `ChunkPass` (`CHUNKENGINE`), as a host draws it; saves `chunks_<view>.png`. |
 | `HELIO_VOXEL_CHUNKS_DIG=<n>` | Digs `n` balls across the held view and undoes them: generation per edit, when it shows, and whether the undone frame matches. |
+| `HELIO_VOXEL_CHUNKS_BLAST=<r>` (with `_DIG`) | One ball `r` m across, half sunk beyond the view centre, then undone: frames to settle, tiles, the worst frame's GPU and CPU, against the CPU raycast. |
 | `HELIO_VOXEL_CHUNKS_FLY=descent\|cruise` | Streams from 400 km down to 2 m, or at 300 m/s 40 m over the ground: detail lag (`coarse`), primary and CPU update times. |
 | `HELIO_VOXEL_CHUNKS_PROBE=x,y;...`, `HELIO_VOXEL_PICKS=x,y;...` | Pixels' drawn hits (or picks) against CPU ray casts. |
 | `HELIO_VOXEL_CHUNKS_COUNT=1` (with `HELIO_VOXEL_CHUNKS_HEAT=1`, `HELIO_VOXEL_CHUNKS_PNG=<path>`) | A counting build: steps, boxes and hits per pixel (`CHUNKCOUNT`); with `HEAT` the colour target shows each pixel's primary steps (red to 64, yellow to 128, white to 192). |

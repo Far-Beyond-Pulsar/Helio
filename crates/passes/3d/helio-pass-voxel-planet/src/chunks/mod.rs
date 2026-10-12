@@ -441,8 +441,9 @@ enum ReachState {
 /// A frame's timestamps on their way back.
 struct TimingSlot {
     buffer: wgpu::Buffer,
-    /// Frame and tiles written, once resolved; mapping when `ready` is set.
-    frame: Option<(u64, usize)>,
+    /// Frame, tiles and chunks written, once resolved; mapping when
+    /// `ready` is set.
+    frame: Option<(u64, usize, usize)>,
     ready: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
@@ -618,8 +619,11 @@ pub struct ChunkWorld {
     baked_tiles: FxHashSet<TileKey>,
     edit_state: EditState,
     /// Resident tiles to generate again: under brushes that came or went
-    /// (now), under baked edits that changed (within the budget).
+    /// (first, nearest first), under baked edits that changed.
     urgent: FxHashSet<TileKey>,
+    /// Urgent tiles' distances from the eye when first ranked (an edit
+    /// settles in moments).
+    urgent_distance: FxHashMap<TileKey, f64>,
     stale: FxHashSet<TileKey>,
     grid: Grid,
     /// Height over the datum above which nothing is solid (terrain,
@@ -647,10 +651,26 @@ pub struct ChunkWorld {
     /// What the latest plan was made for (none: no plan yet).
     planned_for: Option<residency::PlannedFor>,
 
-    /// Measured GPU milliseconds of generation per tile (moving average).
-    ms_per_tile: Option<f64>,
-    /// Tiles the last update generated.
-    last_generated: usize,
+    /// GPU cost of generation: measured (moving averages) from
+    /// [`GenCost::PRIOR`].
+    cost: GenCost,
+    /// Tiles and chunks the last update generated.
+    last_generated: (usize, usize),
+}
+
+/// What generation costs on the GPU: milliseconds of a tile's columns and
+/// of a chunk's columns and tree, and chunks a tile.
+#[derive(Clone, Copy, Debug)]
+struct GenCost {
+    tile: f64,
+    chunk: f64,
+    chunks_per_tile: f64,
+}
+
+impl GenCost {
+    /// Before the first measured frame: an RTX 3060's (a 300 m/s cruise and
+    /// a 50 m blast).
+    const PRIOR: Self = Self { tile: 0.035, chunk: 0.007, chunks_per_tile: 1.7 };
 }
 
 /// The draw's targets: the seed (each pixel's nearest box) and the trace's
@@ -1173,6 +1193,7 @@ impl ChunkWorld {
             baked_tiles: edits.baked.bricks().map(|(k, _)| TileKey { face: k.face, level: u32::from(k.level), cx: k.bi >> 3, cy: k.bj >> 3 }).collect(),
             edit_state: EditState::of(edits),
             urgent: FxHashSet::default(),
+            urgent_distance: FxHashMap::default(),
             stale: FxHashSet::default(),
             grid: *planet.grid(),
             ceiling: planet.outer_radius() - planet.grid().radius() + CEILING_MARGIN,
@@ -1194,8 +1215,8 @@ impl ChunkWorld {
             last_requests: 0,
             planned_for: None,
 
-            ms_per_tile: None,
-            last_generated: 0,
+            cost: GenCost::PRIOR,
+            last_generated: (0, 0),
         }
     }
 
@@ -1682,22 +1703,34 @@ impl ChunkWorld {
             tiles: Vec::new(),
             chunks: Vec::new(),
         };
-        // Tiles a frame: the time budget over the measured cost of a tile.
-        let budget = match (config.generate_ms, self.ms_per_tile) {
-            (Some(ms), Some(per)) => ((ms / per) as usize).clamp(8, config.tiles_per_frame),
-            _ => config.tiles_per_frame,
+        // The frame's generation: `tiles_per_frame` tiles at most and, with a
+        // time budget, the measured cost of their columns and chunks within
+        // it (eight tiles at least): a tall edited tile costs its chunks.
+        let cost = config.generate_ms.map(|ms| (ms, self.cost));
+        let most = config.tiles_per_frame.min(TILE_BATCH);
+        stats.budget = cost.map_or(most, |(ms, c)| ((ms / (c.tile + c.chunk * c.chunks_per_tile)) as usize).clamp(8, most));
+        let full = |batch: &GenBatch| {
+            let tiles = batch.tile_jobs.len();
+            tiles >= most || cost.is_some_and(|(ms, c)| tiles >= 8 && tiles as f64 * c.tile + batch.chunk_jobs.len() as f64 * c.chunk >= ms)
         };
-        stats.budget = budget;
-        let edited: Vec<(TileKey, bool)> = self.urgent.drain().map(|k| (k, true)).chain(self.stale.iter().map(|k| (*k, false))).collect();
+        // Tiles edits changed: drawn ones first, nearest first, within the
+        // frame's budget (a blast's farther and hidden tiles follow over the
+        // next frames, drawn as they were until then). Then stale tiles.
+        let mut edited: Vec<(TileKey, bool, f64)> = Vec::with_capacity(self.urgent.len());
+        for k in self.urgent.drain() {
+            let tiles = &self.tiles;
+            let distance = *self.urgent_distance.entry(k).or_insert_with(|| tiles.get(&k).map_or(f64::INFINITY, |t| tile_distance(&grid, k, t.ranges.extent(), &eye_at)));
+            edited.push((k, !self.drawn_set.holds(k), distance));
+        }
+        edited.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)));
+        let edited: Vec<(TileKey, bool)> = edited.into_iter().map(|(k, ..)| (k, true)).chain(self.stale.iter().map(|k| (*k, false))).collect();
         for (key, urgent) in edited {
-            if !urgent && batch.tile_jobs.len() >= budget.min(TILE_BATCH) {
+            if full(&batch) || batch.chunk_jobs.len() >= CHUNK_BATCH || stats.out_of_slots {
+                if urgent {
+                    self.urgent.insert(key);
+                    continue;
+                }
                 break;
-            }
-            // Edited tiles past a full batch wait for the next frame (their
-            // layers cost CPU field samples).
-            if urgent && (stats.out_of_slots || batch.tile_jobs.len() >= TILE_BATCH || batch.chunk_jobs.len() >= CHUNK_BATCH) {
-                self.urgent.insert(key);
-                continue;
             }
             self.stale.remove(&key);
             let Some(ranges) = self.tiles.get(&key).map(|t| t.ranges) else { continue };
@@ -1709,9 +1742,11 @@ impl ChunkWorld {
                 }
             }
         }
+        let urgent = &self.urgent;
+        self.urgent_distance.retain(|k, _| urgent.contains(k));
         let requests = std::mem::take(&mut self.plan.requests);
         for (key, ranges) in &requests {
-            if batch.tile_jobs.len() >= budget.min(TILE_BATCH) {
+            if full(&batch) {
                 break;
             }
             // Generated since that plan.
@@ -1840,7 +1875,7 @@ impl ChunkWorld {
         lap(&mut stats, 5);
         stats.drawn_tiles = self.drawn_set.tile_count();
         stats.fading_tiles = self.drawn_set.fading();
-        self.last_generated = stats.generated_tiles;
+        self.last_generated = (stats.generated_tiles, stats.generated_chunks);
         // Settled: a plan that saw every event wants nothing more.
         self.last_requests = self.plan.requests.iter().filter(|(k, _)| !self.tiles.contains_key(k)).count() + usize::from(unseen || !self.events.is_empty() || stats.generated_tiles > 0);
         stats.drawn_chunks = self.drawn_set.list.len();
@@ -1965,7 +2000,7 @@ impl ChunkWorld {
                 if !ready.load(std::sync::atomic::Ordering::Acquire) {
                     continue;
                 }
-                let (frame, tiles) = slot.frame.take().unwrap();
+                let (frame, tiles, chunks) = slot.frame.take().unwrap();
                 {
                     let data = slot.buffer.slice(..).get_mapped_range().unwrap();
                     let t: &[u64] = bytemuck::cast_slice(&data);
@@ -1973,8 +2008,10 @@ impl ChunkWorld {
                     let stages = [ms(t[0], t[1]), ms(t[1], t[5]), ms(t[5], t[6])];
                     let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), shadow: ms(t[4], t[7]), generate: ms(t[0], t[6]), tiles, stages };
                     if tiles >= 8 {
-                        let per = timing.generate / tiles as f64;
-                        self.ms_per_tile = Some(self.ms_per_tile.map_or(per, |old| old * 0.9 + per * 0.1));
+                        let now = GenCost { tile: stages[0] / tiles as f64, chunk: (stages[1] + stages[2]) / chunks.max(1) as f64, chunks_per_tile: chunks as f64 / tiles as f64 };
+                        let mix = |old: f64, new: f64| old * 0.9 + new * 0.1;
+                        let c = self.cost;
+                        self.cost = GenCost { tile: mix(c.tile, now.tile), chunk: mix(c.chunk, now.chunk), chunks_per_tile: mix(c.chunks_per_tile, now.chunks_per_tile) };
                     }
                     self.timings.push(timing);
                 }
@@ -2332,7 +2369,7 @@ impl ChunkWorld {
             encoder.resolve_query_set(set, QUERIES * ring..QUERIES * ring + QUERIES, resolve, at);
             let slot = &mut self.timing_slots[ring as usize];
             encoder.copy_buffer_to_buffer(resolve, at, &slot.buffer, 0, u64::from(QUERIES) * 8);
-            slot.frame = Some((frame, self.last_generated));
+            slot.frame = Some((frame, self.last_generated.0, self.last_generated.1));
             self.timing_now = None;
         }
     }

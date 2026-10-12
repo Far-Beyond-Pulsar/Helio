@@ -663,6 +663,43 @@ The core's 6 mismatches are rays grazing a step's corner: on a world
 this small, a chunk's affine frame bends off the curved grid by up to
 2 mm.
 
+## Blasts (2026-10-12)
+
+A brush that came or went regenerated every resident tile under it, at
+every level, the frame it came (up to 512 tiles), and a ball gave every
+tile under it the ball's whole height in chunk layers. A 500 m ball
+under the ground view (half sunk, the eye on its rim) asked for 750 m of
+layers in each tile, ran out of chunk slots (131 068) and never settled,
+115 m off the CPU raycast, with 40-70 ms of CPU a frame computing the
+layers of tiles that could not fit.
+
+- A ball's chunks hold the heights of its sphere's caps over each tile:
+  along a direction at angle t from its centre the lower cap lies at
+  d cos t - sqrt(r^2 - d^2 sin^2 t) and rises with t, the upper falls, so
+  the tile's nearest and farthest angles (in the brushes' domain space,
+  where a tile's edges are great circles) bound them.
+- What fills a region between bands comes from the brushes over the tile
+  (the last that adds or removes there) and the field outside its volume,
+  not from CPU field samples.
+- Edited tiles go drawn first, nearest first, within the frame's budget.
+  The budget is milliseconds against a measured cost per tile's columns
+  (35 us) and per chunk (7 us), from an RTX 3060's prior: a tile edited
+  into 40 chunks costs 300 us, not the 47 us of a streamed one.
+
+Ground view, 3 ms of generation a frame (as the editor), ball r m across,
+half sunk:
+
+| r | before: frames, worst frame GPU / CPU | after: frames, worst frame GPU / CPU | tiles | vs CPU raycast |
+|---|---|---|---|---|
+| 1.5 m (dig) | 10, 0.6 / 0.5 ms | 11, 0.7 / 0.4 ms | 9 | 0.03 m |
+| 50 m | 9, 19 / 28 ms | 16, 3.3 / 5.0 ms | 418 | 0.05 m |
+| 500 m | never (out of slots) | 238 (3.6 s), 5.0 / 8.2 ms | 7 845 | 0.03 m |
+
+Undoing each matches the first frame's hits exactly. Small digs still show
+the frame they are made (20 and 100 digs: the first). A big blast's
+regeneration is mostly its tiles' terrain program; applying edits to
+resident chunk data in place would remove it.
+
 ## References
 
 Laine and Karras, *Efficient Sparse Voxel Octrees* (2010); Crassin et al.,

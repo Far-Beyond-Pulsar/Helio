@@ -578,7 +578,9 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
             let started = Instant::now();
             loop {
                 let stats = step(world, planet, frame);
-                let gen: f64 = world.take_timings().iter().map(|t| t.generate).sum();
+                let timings = world.take_timings();
+                let gen: f64 = timings.iter().map(|t| t.generate).sum();
+                let stages = timings.iter().fold([0.0; 3], |s, t| [s[0] + t.stages[0], s[1] + t.stages[1], s[2] + t.stages[2]]);
                 frames += 1;
                 tiles += stats.generated_tiles;
                 most = most.max(stats.generated_tiles);
@@ -586,7 +588,7 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
                 gen_sum += gen;
                 cpu_max = cpu_max.max(stats.cpu_ms.iter().sum::<f64>());
                 if std::env::var_os("HELIO_VOXEL_CHUNKS_TRACE").is_some() {
-                    eprintln!("CHUNKBLAST frame {frames}: tiles {} regen {} requests {} gen {gen:.2} ms cpu {:?} drawn {} resident {} slots {}", stats.generated_tiles, stats.regenerated_tiles, stats.requests, stats.cpu_ms.map(|v| (v * 100.0).round() / 100.0), stats.drawn_chunks, stats.resident_chunks, stats.out_of_slots);
+                    eprintln!("CHUNKBLAST frame {frames}: tiles {} chunks {} regen {} requests {} gen {gen:.2} ms {stages:.2?} cpu {:?} drawn {} resident {} slots {}", stats.generated_tiles, stats.generated_chunks, stats.regenerated_tiles, stats.requests, stats.cpu_ms.map(|v| (v * 100.0).round() / 100.0), stats.drawn_chunks, stats.resident_chunks, stats.out_of_slots);
                 }
                 if world.settled() || frames >= 600 {
                     break;

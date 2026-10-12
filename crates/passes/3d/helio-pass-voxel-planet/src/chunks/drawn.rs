@@ -301,6 +301,11 @@ impl DrawnSet {
         self.fades.get(&key).map_or(1, |f| 2 + (((f.start & START_MASK) as i32) << 2) + i32::from(f.incoming) + 2 * i32::from(f.coarse))
     }
 
+    /// Whether `tile` is drawn.
+    pub fn holds(&self, tile: TileKey) -> bool {
+        self.tiles.contains_key(&tile)
+    }
+
     /// Tiles drawn.
     pub fn tile_count(&self) -> usize {
         self.tiles.len()
