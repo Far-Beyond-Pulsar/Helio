@@ -476,12 +476,13 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
 /// view, then dig `n` balls (1.5 m) one a frame along a line across the
 /// view centre's hit (from the centre out), then undo them one a frame: what each edit generates
 /// again and costs, when it shows (the centre pixel's depth), and whether
-/// the undone frame matches the first. Saves `<out>/dig_{before,dug,undone}.png`.
+/// the undone frame's hits match the first's. Saves
+/// `<out>/dig_{before,dug,undone}.png`.
 fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usize) {
     use helio_pass_voxel_planet::chunks::ChunkWorld;
     let [w, h] = flight.size;
     let mut planet = (*flight.planet).clone();
-    let mut world = ChunkWorld::new(&flight.device, &flight.queue, &planet);
+    let mut world = ChunkWorld::new(&flight.device, &flight.queue, &flight.planet);
     let mut frame = 0u64;
     chunk_settle(flight, &mut world, eye, &mut frame);
     let up = up_for(eye);
@@ -493,7 +494,7 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
     // One frame: follow the planet's edits, update, draw; GPU times and the
     // tiles generated again.
     let step = |world: &mut ChunkWorld, planet: &Planet, frame: &mut u64| {
-        assert!(world.sync_edits(planet), "edits follow");
+        assert!(world.sync_edits(&Arc::new(planet.clone())), "edits follow");
         let mut encoder = flight.device.create_command_encoder(&Default::default());
         let stats = world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, DVec3::ZERO, None, *frame, &config);
         world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), *frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun, [w, h]);
@@ -558,6 +559,7 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
     }
     let before_path = out.join("dig_before.png");
     save_chunk_colour(flight, &world, before_path.to_str().unwrap());
+    let before_hits = world.read_hits();
     let before = centre_depth(&world);
     let hit = planet.raycast(eye, forward.as_dvec3(), 1000.0).expect("the view centre hits ground");
     let at = eye + forward.as_dvec3() * hit.distance;
@@ -597,10 +599,9 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
     step(&mut world, &planet, &mut frame);
     let undone_path = out.join("dig_undone.png");
     save_chunk_colour(flight, &world, undone_path.to_str().unwrap());
-    let a = image::open(&before_path).unwrap().to_rgba8();
-    let b = image::open(&undone_path).unwrap().to_rgba8();
-    let differ = a.pixels().zip(b.pixels()).filter(|(p, q)| p != q).count();
-    eprintln!("CHUNKDIG {view}: undone frame differs from the first in {differ} pixels; centre {:.2} m (was {before:.2})", centre_depth(&world));
+    // The hits, not the colours (sun samples turn each frame).
+    let differ = before_hits.iter().zip(world.read_hits()).filter(|(a, b)| a.map(|h| (h.cell, h.level)) != b.map(|h| (h.cell, h.level))).count();
+    eprintln!("CHUNKDIG {view}: undone frame's hits differ from the first's in {differ} pixels; centre {:.2} m (was {before:.2})", centre_depth(&world));
 }
 
 /// A view drawn by the renderer with the chunk pass: settle, hold

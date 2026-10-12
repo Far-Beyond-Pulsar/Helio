@@ -633,6 +633,36 @@ units of 2^-24 and stays bit-identical between CPU and GPU.
 | before | 47.3 us | 56.1 us | 50 | 6.6 % (10.6 %) |
 | after | 37.2 us | 46.7 us | 60 | 4.5 % (7.2 %) |
 
+## Solid gaps (2026-10-12)
+
+A tile's chunks held one range of layers: rock under the lowest, air in
+any layer without a chunk. A hall dug under the ground needed a chunk for
+every layer of rock between it and the surface, and a hollowed core
+(kilometres of rock over air) ran out of chunk slots.
+
+A tile's chunks now hold bands: the field's surface band, each brush's
+(a ball's from the radii its sphere spans, not from its centre) and its
+baked bricks', merged when fewer than two chunks apart. A region between
+bands, or under them, holds no surface, so it is all rock or all air
+across the tile, and one cell of the planet tells which. The widest
+region of rock between bands is the tile's solid gap; air under its bands
+is a hollow. Both go into the chunk table as one extra entry per tile
+(`drawn::GAP`), written only for edited tiles. A walk entering the gap
+ends with a hit on the face it crossed; under a hollow it crosses air
+down to the chunks below. Other regions keep their chunks (a second gap
+of rock, or a region within the field's caves, whose surfaces are not
+known on the CPU). Residency measures a tile's distance by its field
+volume and its edits' bands (`Ranges::extent`).
+
+| Dig | chunks settled | hits compared (mismatched) |
+|---|---|---|
+| Hall 40 m across, 300 m down | 2 110 | exact |
+| Hollowed core of a 3 km world | 6 715 (ran out of slots before) | 8 295 (6) |
+
+The core's 6 mismatches are rays grazing a step's corner: on a world
+this small, a chunk's affine frame bends off the curved grid by up to
+2 mm.
+
 ## References
 
 Laine and Karras, *Efficient Sparse Voxel Octrees* (2010); Crassin et al.,

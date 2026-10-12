@@ -42,6 +42,30 @@ const NONE: u32 = u32::MAX;
 const EMPTY: [i32; 4] = [-1, 0, 0, 0];
 /// A column entry's layer key.
 pub const COLUMN: i32 = i32::MIN;
+/// A gap entry's layer key.
+pub const GAP: i32 = i32::MIN + 1;
+
+/// What a drawn tile holds where it has no chunks: chunk layers [lo, hi)
+/// of solid rock between its chunks (none: lo >= hi), and whether it is
+/// air, not rock, under its lowest chunk (a hollow). Elsewhere a missing
+/// layer among its chunks is air and under them is rock.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Gap {
+    pub solid: (i32, i32),
+    pub below_air: bool,
+}
+
+/// A tile as drawn: its chunks and its gap.
+pub struct TileDraw {
+    pub chunks: Vec<DrawnChunk>,
+    pub gap: Gap,
+}
+
+impl From<Vec<DrawnChunk>> for TileDraw {
+    fn from(chunks: Vec<DrawnChunk>) -> Self {
+        Self { chunks, gap: Gap::default() }
+    }
+}
 
 /// Frames a switch between levels fades over.
 pub const FADE_FRAMES: u64 = 16;
@@ -100,6 +124,10 @@ fn column_key(tile: TileKey) -> [i32; 4] {
     [i32::from(tile.face) | ((tile.level as i32) << 8), tile.cx, tile.cy, COLUMN]
 }
 
+fn gap_key(tile: TileKey) -> [i32; 4] {
+    [i32::from(tile.face) | ((tile.level as i32) << 8), tile.cx, tile.cy, GAP]
+}
+
 fn parent(tile: TileKey) -> TileKey {
     TileKey { face: tile.face, level: tile.level + 1, cx: tile.cx >> 1, cy: tile.cy >> 1 }
 }
@@ -120,6 +148,8 @@ pub struct DrawnSet {
     tiles: FxHashMap<TileKey, Vec<u32>>,
     /// Drawn tiles' chunk layers [lo, hi) and top cell.
     layers: FxHashMap<TileKey, (i32, i32, i32)>,
+    /// Drawn tiles with a gap entry.
+    gaps: FxHashSet<TileKey>,
     /// The table's columns: the drawn tiles' and their ancestors'.
     columns: FxHashMap<TileKey, Column>,
     /// Columns whose subtree changed, to settle by level.
@@ -147,6 +177,7 @@ impl DrawnSet {
             position: vec![NONE; slots],
             tiles: FxHashMap::default(),
             layers: FxHashMap::default(),
+            gaps: FxHashSet::default(),
             columns: FxHashMap::default(),
             touched: Vec::new(),
             fades: FxHashMap::default(),
@@ -176,7 +207,7 @@ impl DrawnSet {
     /// `changed` take their chunks again, tiles `added` are drawn with
     /// those `chunks_of` gives. A tile replaced by finer or coarser ones
     /// fades out as they fade in.
-    pub fn update(&mut self, added: &[TileKey], removed: &[TileKey], changed: &rustc_hash::FxHashSet<TileKey>, frame: u64, mut chunks_of: impl FnMut(TileKey) -> Vec<DrawnChunk>) {
+    pub fn update<D: Into<TileDraw>>(&mut self, added: &[TileKey], removed: &[TileKey], changed: &rustc_hash::FxHashSet<TileKey>, frame: u64, mut chunks_of: impl FnMut(TileKey) -> D) {
         let ended: Vec<TileKey> = self.fades.iter().filter(|(_, f)| frame >= f.start + FADE_FRAMES).map(|(k, _)| *k).collect();
         for key in ended {
             self.end_fade(key);
@@ -208,7 +239,7 @@ impl DrawnSet {
         for key in changed {
             if self.tiles.contains_key(key) {
                 self.drop_tile(*key);
-                self.add_tile(*key, chunks_of(*key));
+                self.add_tile(*key, chunks_of(*key).into());
             }
         }
         for &key in &came {
@@ -216,7 +247,7 @@ impl DrawnSet {
             if coarse || self.ancestors(key).any(|a| gone.contains(&a)) {
                 self.fades.insert(key, Fade { start: frame, incoming: true, coarse });
             }
-            self.add_tile(key, chunks_of(key));
+            self.add_tile(key, chunks_of(key).into());
         }
         self.settle_columns();
     }
@@ -285,10 +316,18 @@ impl DrawnSet {
             self.remove(slot);
         }
         self.layers.remove(&key);
+        if self.gaps.remove(&key) {
+            self.take(gap_key(key));
+        }
         self.touched.push(key);
     }
 
-    fn add_tile(&mut self, key: TileKey, chunks: Vec<DrawnChunk>) {
+    fn add_tile(&mut self, key: TileKey, draw: TileDraw) {
+        let TileDraw { chunks, gap } = draw;
+        if gap.below_air || gap.solid.0 < gap.solid.1 {
+            self.put(gap_key(key), [gap.solid.0, gap.solid.1, i32::from(gap.below_air), 0]);
+            self.gaps.insert(key);
+        }
         let lo = chunks.iter().map(|c| c.key[3]).min();
         let hi = chunks.iter().map(|c| c.key[3] + 1).max();
         let top = chunks.iter().map(|c| c.key[3] * 64 + c.z.1.ceil() as i32).max().unwrap_or(NO_TOP);
@@ -593,7 +632,7 @@ mod tests {
                         slot = (slot + 1) % (1 << 14);
                         chunk(slot, [1 | ((k.level as i32) << 8), k.cx, k.cy, z])
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
             });
             last = drawn.clone();
             // Expected tops, finest first.

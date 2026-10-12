@@ -19,13 +19,18 @@ use crate::grid::Grid;
 use glam::DVec3;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-/// Layers (level cells, [lo, hi)) a tile's chunks may hold: the volume's
-/// whole extent (caves) and the band around the surface.
+/// Layers (level cells, [lo, hi)) a tile's chunks may hold: the field's
+/// volume (caves) and the band around its surface; and the layers its
+/// edits change (`NO_EDITS`: none), which only its extent includes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ranges {
     pub volume: (i32, i32),
     pub surface: (i32, i32),
+    pub edits: (i32, i32),
 }
+
+/// `Ranges::edits` of a tile without edits.
+pub const NO_EDITS: (i32, i32) = (i32::MAX, i32::MIN);
 
 impl Ranges {
     /// A child's ranges from its parent's: the same heights in cells half
@@ -33,7 +38,13 @@ impl Ranges {
     /// parent's cell of the parent's surface).
     fn child(self) -> Self {
         let half = |(lo, hi): (i32, i32)| (lo.saturating_mul(2) - 2, hi.saturating_mul(2) + 2);
-        Self { volume: half(self.volume), surface: half(self.surface) }
+        Self { volume: half(self.volume), surface: half(self.surface), edits: if self.edits.0 > self.edits.1 { NO_EDITS } else { half(self.edits) } }
+    }
+
+    /// Every layer the tile may hold something in: its volume and its
+    /// edits (how far it is from an eye).
+    pub fn extent(self) -> (i32, i32) {
+        (self.volume.0.min(self.edits.0), self.volume.1.max(self.edits.1))
     }
 }
 
@@ -104,7 +115,7 @@ impl Planner {
         let level = grid.levels() - 1;
         let n = tiles_at(grid, level);
         let layers = ((range.0 >> level) - 1, (range.1 >> level) + 1);
-        let ranges = Ranges { volume: layers, surface: layers };
+        let ranges = Ranges { volume: layers, surface: layers, edits: NO_EDITS };
         let mut roots = Vec::new();
         let mut tiles = FxHashMap::default();
         for &face in grid.faces() {
@@ -127,14 +138,14 @@ impl Planner {
     /// nearest point against the horizon distances of the eye and of the
     /// tile's highest layer.
     fn beyond(&self, grid: &Grid, key: TileKey, ranges: Ranges, eye: &Eye) -> bool {
-        let distance = tile_distance(grid, key, ranges.volume, eye);
+        let distance = tile_distance(grid, key, ranges.extent(), eye);
         let Some(r) = self.occluder else { return distance > self.config.max_distance };
         let over = |radius: f64| (radius * radius - r * r).max(0.0).sqrt();
         let e = eye.position.length();
         if e <= r {
             return false;
         }
-        let top = grid.radius() + f64::from(ranges.volume.1) * grid.level_size(key.level);
+        let top = grid.radius() + f64::from(ranges.extent().1) * grid.level_size(key.level);
         distance > over(e) + over(top)
     }
 
@@ -145,7 +156,7 @@ impl Planner {
     /// Cells of `tile` project this many times `lod_pixels` from the
     /// nearest of `eyes`.
     fn error(&self, grid: &Grid, key: TileKey, ranges: Ranges, eyes: &[Eye]) -> f64 {
-        let distance = eyes.iter().map(|e| tile_distance(grid, key, ranges.volume, e)).fold(f64::INFINITY, f64::min);
+        let distance = eyes.iter().map(|e| tile_distance(grid, key, ranges.extent(), e)).fold(f64::INFINITY, f64::min);
         grid.level_size(key.level) / distance.max(1e-3) / (self.config.pixel_angle * self.config.lod_pixels)
     }
 
@@ -157,7 +168,7 @@ impl Planner {
         // a tile's extent: anything beside it is near it).
         let in_view = |key: TileKey, ranges: Ranges| -> bool {
             let Some(v) = view else { return true };
-            let Some(offset) = eyes[0].offset(key, ranges.volume) else { return true };
+            let Some(offset) = eyes[0].offset(key, ranges.extent()) else { return true };
             let length = offset.length();
             let size = grid.level_size(key.level) * f64::from(CHUNK) * 1.5;
             length < size || offset.dot(v.forward) > v.cos_half * length - size
@@ -466,7 +477,7 @@ mod tests {
         let mut frame = 1;
         let orbit = eye.normalize() * (grid.radius() + 300_000.0);
         let plan = settle(&grid, orbit, &mut planner, &mut frame);
-        let farthest = plan.drawn.iter().map(|k| tile_distance(&grid, *k, planner.tiles[k].ranges.volume, &Eye::new(&grid, orbit))).fold(0.0, f64::max);
+        let farthest = plan.drawn.iter().map(|k| tile_distance(&grid, *k, planner.tiles[k].ranges.extent(), &Eye::new(&grid, orbit))).fold(0.0, f64::max);
         assert!(farthest > 1_500_000.0, "drawn to {farthest:.0} m");
     }
 

@@ -279,6 +279,8 @@ unit tests, `tests/chunks.rs`, `tests/wide_products.rs`) and
 - Edits: brushes, flat-topped boxes, a 600 m shaft at its bottom and half
   way up, a 3 km crater's floor, 18 000 block edits, and sealed edits with
   undo under a running world.
+- Solid gaps: a hall dug 300 m under the ground and a world's hollowed core,
+  seen from inside, with no chunks in the rock over them.
 - Coverage from orbit; picks report the drawn hit.
 - Residency: the planner (roots wherever the eye starts, parents drawn
   until all children exist, eviction), the drawn set and its fades.
@@ -328,8 +330,5 @@ extent, height bounds) and `FaceBrush::contains` in `edits.rs`, and
 ## Known limits and open work
 
 - Generation's cost is mostly the terrain program per column.
-- A drawn column holds one range of chunk layers: solid below its lowest
-  chunk, air where a layer has none. A hollowed core (air under a wall,
-  kilometres of rock above it) keeps a chunk per layer of that rock and
-  runs out of slots (`a_hollowed_core_renders_exactly_from_inside` is
-  ignored until columns can mark solid gaps).
+- A tile marks one solid gap between its chunks; a second gap of rock
+  keeps a chunk per layer.
