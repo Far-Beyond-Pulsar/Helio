@@ -616,6 +616,23 @@ draws. The CPU uploads the drawn slots only when they change. Draw CPU
 p50 2.8 -> 0.32 ms (mountain), 0.35 ms (ground); boxes and GPU times
 unchanged.
 
+## The terrain program's multiplies (2026-10-12)
+
+A 300 m/s cruise at 34 m falls behind (6.6 % of the tiles in view coarser
+than wanted with the editor's 3 ms of generation a frame). Nsight on the
+tile columns kernel: integer-multiply bound (math pipe throttle), a
+quarter of it `mul_fine`, the Q24 product in 12-bit limbs (four multiplies
+and shifts), then hashing (13 %), gradient selection (12 %) and erosion's
+gradient lattice (13 %). `mul_fine` is now the exact product
+(`mul_shr_signed(a, b, 24)` on both sides: one wide multiply with hardware
+64-bit integers, exact limbs without); the field moves by at most two
+units of 2^-24 and stays bit-identical between CPU and GPU.
+
+| Cruise, 1080p | tile columns a tile | generation a tile | tiles a frame (3 ms) | coarse in view, mean (max) |
+|---|---|---|---|---|
+| before | 47.3 us | 56.1 us | 50 | 6.6 % (10.6 %) |
+| after | 37.2 us | 46.7 us | 60 | 4.5 % (7.2 %) |
+
 ## References
 
 Laine and Karras, *Efficient Sparse Voxel Octrees* (2010); Crassin et al.,

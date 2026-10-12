@@ -95,7 +95,7 @@ two must return equal integers for every input. That is the contract that lets
 the CPU ray cast what the GPU draws.
 
 - All arithmetic is wrapping integer maths on the shared noise library.
-  `noise_fine` / `mul_fine` (Q24 with 12-bit limbs) exist because Q16 noise at
+  `noise_fine` / `mul_fine` (Q24, exact wide products) exist because Q16 noise at
   continent wavelengths is constant over metres and steps by one unit; scaled
   by kilometres of relief that became long straight terraces.
 - The noise domain is a sphere at the planet's radius (planes: the

@@ -115,16 +115,12 @@ pub fn scale(n: i32, amplitude: i32) -> i32 {
 /// Unit of the fine noise (Q24, `FINE_ONE` in WGSL).
 pub const FINE_ONE: i32 = 1 << 24;
 
-/// `a * b / 2^24` rounded toward zero, for `|a| < 2^28` and `|b| <= 2^24`,
-/// in 32-bit arithmetic (12-bit limbs; within two units of exact).
+/// `a * b / 2^24` rounded toward zero, for `|a| < 2^28` and `|b| <= 2^24`:
+/// the exact product (`mul_fine` in WGSL: one wide multiply on GPUs with
+/// 64-bit integers).
 #[inline]
 pub fn mul_fine(a: i32, b: i32) -> i32 {
-    let negative = (a < 0) != (b < 0);
-    let (a, b) = (a.unsigned_abs(), b.unsigned_abs());
-    let (ah, al) = (a >> 12, a & 0xfff);
-    let (bh, bl) = (b >> 12, b & 0xfff);
-    let m = (ah * bh + ((ah * bl + al * bh + ((al * bl) >> 12)) >> 12)) as i32;
-    if negative { -m } else { m }
+    mul_shr_signed(a, b, 24)
 }
 
 #[inline]

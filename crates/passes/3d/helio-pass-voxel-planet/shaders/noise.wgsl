@@ -83,17 +83,10 @@ fn rem_floor(a: i32, b: i32) -> i32 {
 // Fine noise (Q24); mirror of `noise_fine` in src/noise.rs.
 const FINE_ONE: i32 = 16777216;
 
-// a * b / 2^24 rounded toward zero, |a| < 2^28, |b| <= 2^24 (12-bit limbs).
+// a * b / 2^24 rounded toward zero, |a| < 2^28, |b| <= 2^24: the exact
+// product (one wide multiply with hardware 64-bit integers).
 fn mul_fine(a: i32, b: i32) -> i32 {
-    let negative = (a < 0) != (b < 0);
-    let ua = u32(abs(a));
-    let ub = u32(abs(b));
-    let ah = ua >> 12u;
-    let al = ua & 0xfffu;
-    let bh = ub >> 12u;
-    let bl = ub & 0xfffu;
-    let m = i32(ah * bh + ((ah * bl + al * bh + ((al * bl) >> 12u)) >> 12u));
-    return select(m, -m, negative);
+    return mul_shr_signed(a, b, 24u);
 }
 
 fn fade_q24(t: i32) -> i32 {
