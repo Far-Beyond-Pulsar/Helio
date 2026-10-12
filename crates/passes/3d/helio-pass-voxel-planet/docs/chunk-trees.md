@@ -475,10 +475,15 @@ Ported from its surface shading:
 - Corner occlusion from the cells around the air in front of the face
   (across chunk borders by the chunk table), and crisp edges while a cell
   spans several pixels; both fade as cells shrink to a pixel.
-- Step softness: a natural step (air above) is lit with the slope's normal
-  (90%, `detail.w`; all of it under two pixels) and its sun ray passes its
-  own steps (two cells). The slope is measured from the column tops two
-  cells away each way, once per 2x2 block by the sun samples.
+- Step softness: a natural step (air above) is lit partly with the
+  slope's normal (`detail.w`, 0 by default: voxels lit by their own faces)
+  and its sun ray passes its own steps (two cells). The slope is measured
+  from the column tops two cells away each way, once per 2x2 block by the
+  sun samples. It never depends on a voxel's size on screen: cells span a
+  pixel to half one across every level of the cut, and a size-dependent
+  light banded by level (2026-10-12: 90 % of the slope's normal, all of it
+  under two pixels, read as smooth ground with a voxel texture in some
+  bands and terraces in others).
 
 Materials, against the CPU's (`Planet::material`) at probed voxels:
 

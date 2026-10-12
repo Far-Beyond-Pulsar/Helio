@@ -1145,13 +1145,15 @@ fn slope_normal(slot: u32, key: vec4<i32>, cell: vec3<i32>, c: ChunkDraw) -> vec
     return normalize(n);
 }
 
-// Hit `v` at pixel `q` (distance `t`). A natural step (air above it) stands
-// for a smooth slope of steps: it is lit partly with the slope's normal
-// (`Materials::detail.w`, all of it as cells shrink under two pixels) and
-// its sun ray passes its own steps (step softness).
+// Hit `v`. Voxels are lit by their own faces (a
+// slope reads as its steps, each shadowing the next); a natural step (air
+// above it) is lit partly with the slope's normal, `Materials::detail.w`
+// (step softness), its sun ray passing its own steps. Never by the voxel's
+// size on screen: cells span a pixel to half one across every level of
+// the cut, so a size-dependent light bands by level.
 // The slope's normal is `ground` when given (a nearby sample's), else
 // measured here.
-fn hit_face(v: vec2<u32>, q: vec2<u32>, size: vec2<u32>, t: f32, ground_hint: vec3<f32>) -> Face {
+fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>) -> Face {
     let c = chunk_frame(v.x);
     let key = chunk_keys[v.x];
     let axis = (v.y >> 18u) & 3u;
@@ -1162,8 +1164,7 @@ fn hit_face(v: vec2<u32>, q: vec2<u32>, size: vec2<u32>, t: f32, ground_hint: ve
     var f = Face(normal, cell_m, normal, 0.0, vec3<f32>(0.0));
     let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
     if solid_near(v.x, key, cell + vec3<i32>(0, 0, 1)) { return f; }
-    let pixel_m = t * length(pixel_ray(q + vec2<u32>(1u, 0u), size) - pixel_ray(q, size));
-    let w = max(materials.detail.w, 1.0 - smoothstep(1.0, 2.0, cell_m / max(pixel_m, 1e-6)));
+    let w = materials.detail.w;
     var ground = ground_hint;
     if dot(ground, ground) == 0.0 { ground = slope_normal(v.x, key, cell, c); }
     if w <= 0.0 || dot(ground, ground) == 0.0 { return f; }
@@ -1249,7 +1250,7 @@ fn sky_sample(@builtin(global_invocation_id) id: vec3<u32>) {
     var sample = vec2<f32>(1.0, 0.0);
     if v.x != NONE {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
-        sample = vec2<f32>(sky_visibility(q, size, v.x, t, hit_face(v, q, size, t, vec3<f32>(0.0))), t);
+        sample = vec2<f32>(sky_visibility(q, size, v.x, t, hit_face(v, vec3<f32>(0.0))), t);
     }
     textureStore(out_sky_samples, vec2<i32>(id.xy), vec4<f32>(sample, 0.0, 0.0));
 }
@@ -1287,7 +1288,7 @@ fn shadow_sample(@builtin(global_invocation_id) id: vec3<u32>) {
     var sample = vec4<u32>(0u);
     if v.x != NONE {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
-        let f = hit_face(v, q, size, t, vec3<f32>(0.0));
+        let f = hit_face(v, vec3<f32>(0.0));
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
         if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(sun_walk(q, size, v.x, t, f)); }
     }
@@ -1325,7 +1326,7 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
         if dot(ground, ground) == 0.0 && s.z != 0u { ground = unpack_unit(s.z); }
         if sampled == 0u && (s.x & 2u) != 0u { sampled = 2u | (s.x & 1u); }
     }
-    let f = hit_face(v, id.xy, size, t, ground);
+    let f = hit_face(v, ground);
     textureStore(out_normal, p, vec4<f32>(f.shading, sky_at(p, at_hit, reach, size)));
     var lit = 0.0;
     if dot(f.shading, sun) > 0.0 {
@@ -1359,6 +1360,6 @@ fn shadow_fallback(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(hit_distance);
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
     let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
-    let f = hit_face(v, q, size, t, vec3<f32>(0.0));
+    let f = hit_face(v, vec3<f32>(0.0));
     store_sun(vec2<i32>(q), v, f, sun_walk(q, size, v.x, t, f));
 }
