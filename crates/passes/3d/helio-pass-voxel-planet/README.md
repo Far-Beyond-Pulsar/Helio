@@ -327,8 +327,7 @@ extent, height bounds) and `FaceBrush::contains` in `edits.rs`, and
 
 ## Known limits and open work
 
-- Mountain views are over budget (about 8 ms primary plus lighting at
-  1080p); generation's cost is mostly the terrain program per column.
+- Generation's cost is mostly the terrain program per column.
 - A drawn column holds one range of chunk layers: solid below its lowest
   chunk, air where a layer has none. A hollowed core (air under a wall,
   kilometres of rock above it) keeps a chunk per layer of that rock and

@@ -567,6 +567,24 @@ pixel of `tests/chunks.rs`).
 
 A mountain ray takes 17.6 steps through 2.4 boxes (was 40 through 5.6).
 
+### The ceiling
+
+Sun rays that met nothing walked up to 96 boxes of air. Over the highest
+possible solid cell (`Planet::outer_radius` and 16 m) and rising, a ray
+can meet nothing more: its squared radius `q0 + 2 b t + t^2` only grows
+once `b + t > 0` (a plane's height once it climbs), so the walk ends
+there; a primary ray ending so is sky at once instead of a seed round
+later. The eye's squared radius less the ceiling's comes from f64.
+
+| View (1080p hold) | sun and sky before | after |
+|---|---|---|
+| ground | 2.02 ms | 1.68 ms |
+| mountain slope | 3.10 ms | 2.51 ms |
+| tunnel | 1.43 ms | 1.44 ms |
+
+With the tilted tops, the mountain view's terrain is 5.0 ms (2.50 primary,
+2.51 sun and sky), the ground's 3.0 ms.
+
 ## References
 
 Laine and Karras, *Efficient Sparse Voxel Octrees* (2010); Crassin et al.,

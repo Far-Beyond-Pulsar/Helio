@@ -33,6 +33,10 @@ const TILE_BATCH: usize = 512;
 const CHUNK_BATCH: usize = 2048;
 /// Chunk slots.
 pub const MAX_CHUNKS: usize = 131072;
+
+/// Metres over the highest possible solid cell where rays may end: far
+/// above the f32 error of the ceiling test.
+const CEILING_MARGIN: f64 = 16.0;
 /// Leaves of every chunk together (8 bytes each).
 const LEAF_CAPACITY: u64 = 48 << 20;
 /// A brush buffer's content when there are none.
@@ -120,6 +124,12 @@ struct DrawParams {
     /// The eye in noise-domain units: integer part, fraction.
     eye_domain: [i32; 4],
     eye_domain_frac: [f32; 4],
+    /// Up at the eye (xyz) and the eye's distance from the planet's
+    /// centre (w); a plane's up is +y.
+    up: [f32; 4],
+    /// x: the eye's squared radius less the ceiling's (a plane: its height
+    /// over the ceiling), from f64.
+    ceiling: [f32; 4],
 }
 
 /// `Materials` of chunk_draw.wgsl.
@@ -588,6 +598,9 @@ pub struct ChunkWorld {
     urgent: FxHashSet<TileKey>,
     stale: FxHashSet<TileKey>,
     grid: Grid,
+    /// Height over the datum above which nothing is solid (terrain,
+    /// overhangs, edits), with a margin: rays rising past it end.
+    ceiling: f64,
     /// The planet's height range in base layers (the roots' estimate).
     height_layers: (i32, i32),
     worker: Option<residency::Worker>,
@@ -1107,6 +1120,7 @@ impl ChunkWorld {
             urgent: FxHashSet::default(),
             stale: FxHashSet::default(),
             grid: *planet.grid(),
+            ceiling: planet.outer_radius() - planet.grid().radius() + CEILING_MARGIN,
             height_layers: (
                 (planet.min_terrain_height() / planet.grid().voxel_size()).floor() as i32 - 64,
                 (planet.max_terrain_height() / planet.grid().voxel_size()).ceil() as i32 + 64,
@@ -1326,6 +1340,7 @@ impl ChunkWorld {
         self.recent_counts = recent_counts;
         self.baked = edits.baked.clone();
         self.edit_state = state;
+        self.ceiling = planet.outer_radius() - planet.grid().radius() + CEILING_MARGIN;
         true
     }
 
@@ -1938,6 +1953,11 @@ impl ChunkWorld {
             eye_domain_frac: {
                 let d = eye / crate::grid::DOMAIN_UNIT;
                 (d - d.floor()).as_vec3().extend(0.0).to_array()
+            },
+            up: if self.grid.is_plane() { [0.0, 1.0, 0.0, 0.0] } else { eye.normalize_or_zero().as_vec3().extend(eye.length() as f32).to_array() },
+            ceiling: {
+                let c = self.grid.radius() + self.ceiling;
+                [if self.grid.is_plane() { (eye.y - self.ceiling) as f32 } else { (eye.length_squared() - c * c) as f32 }, 0.0, 0.0, 0.0]
             },
         };
         self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));

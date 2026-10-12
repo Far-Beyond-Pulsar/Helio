@@ -37,6 +37,11 @@ struct DrawParams {
     // integer part, fraction.
     eye_domain: vec4<i32>,
     eye_domain_frac: vec4<f32>,
+    // Up at the eye (xyz; a plane's +y) and the eye's radius (w).
+    up: vec4<f32>,
+    // x: the eye's squared radius less the ceiling's, over which nothing
+    // is solid (a plane: the eye's height over it).
+    ceiling: vec4<f32>,
 }
 
 // A chunk's frame, written when it is generated: M's columns and M^-1's
@@ -586,6 +591,15 @@ struct WalkEnd {
 // a pixel of dither `r`, over at most `boxes` boxes (`counted`: in the
 // counting build's counters, as `pixel`).
 fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r: i32, boxes: u32, counted: bool, pixel: vec2<u32>) -> WalkEnd {
+    // Over the ceiling and rising, a ray meets nothing more (the squared
+    // radius q0 + 2 b t + t^2 only grows once b + t > 0; a plane's height
+    // q0 + b t once b > 0): it ends there, t -1.
+    var q0 = params.ceiling.x + 2.0 * params.up.w * dot(params.up.xyz, org) + dot(org, org);
+    var b = params.up.w * dot(params.up.xyz, dir) + dot(org, dir);
+    if PLANE_WORLD {
+        q0 = params.ceiling.x + org.y;
+        b = dir.y;
+    }
     var frame = chunk_frame(start.slot);
     var key = chunk_keys[start.slot];
     var cube_lo = start.lo;
@@ -594,6 +608,8 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
     var t_prev = t_start;
     var chunk = 0u;
     for (; chunk < boxes; chunk++) {
+        let over = select(b + t_prev > 0.0 && q0 + t_prev * (2.0 * b + t_prev) > 0.0, b > 0.0 && q0 + b * t_prev > 0.0, PLANE_WORLD);
+        if over { return WalkEnd(false, -1.0, NONE, vec3<i32>(0), 0u, 0u, 0u); }
         WCOUNT(3)
         let slot = bitcast<u32>(frame.box.z);
         TRACE_PIXEL(chunk, slot, cube_lo, real)
@@ -752,8 +768,9 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let end = walk(Walk(bitcast<u32>(frame.box.z), cube_lo, cube_hi, real), vec3<f32>(0.0), dir, t_prev, 1e30, r, 128u, true, id.xy);
     if !end.hit {
-        // Unresolved: the next round seeds the boxes beyond.
-        textureStore(out_exits, p, vec4<f32>(end.t + 1e-4));
+        // Unresolved: the next round seeds the boxes beyond (none past
+        // the ceiling: the sky).
+        textureStore(out_exits, p, vec4<f32>(select(end.t + 1e-4, -1.0, end.t < 0.0)));
         return;
     }
     COUNT(2)
