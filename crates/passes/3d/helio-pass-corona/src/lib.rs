@@ -54,7 +54,7 @@ const _CELL_SIZE: u32 = ATLAS_SIZE / ATLAS_CELLS; // 32
 
 // ── CPU structs ──────────────────────────────────────────────────────────────
 
-/// Matches GpuCoronaUniforms in corona.wgsl (8 × u32/f32 = 32 bytes).
+/// Matches GpuCoronaUniforms in corona.wgsl (12 × u32/f32 = 48 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CoronaUniforms {
@@ -67,6 +67,10 @@ struct CoronaUniforms {
     sort_j: u32,
     sort_lo: u32,
     sort_n: u32,
+    /// How far the frame's world origin moved since the live particles were
+    /// last simulated (`xyz`). Particles keep positions across frames in
+    /// the frame's space, so the simulation subtracts it to stay put.
+    origin_shift: [f32; 4],
 }
 
 /// One entry in sort_steps_buf (16 bytes). Pre-built at prepare() time.
@@ -140,6 +144,9 @@ pub struct CoronaPass {
     // ── Bind groups (rebuilt when camera, particle or emitter buffer changes) ─
     compute_bg: Option<wgpu::BindGroup>,
     render_bg: Option<wgpu::BindGroup>,
+    /// The particle slots `vs_main` indexes `compact_buf` with
+    /// (`helio_pass_gbuffer::draw_slots`).
+    draw_slots: wgpu::Buffer,
     bg_key: Option<[wgpu::Buffer; 3]>, // (particle_buf, emitter_buf, camera_buf)
 
     // ── State ────────────────────────────────────────────────────────────────
@@ -147,6 +154,12 @@ pub struct CoronaPass {
     emitter_count: u32,
     #[allow(dead_code)]
     max_sort_steps: u32, // capacity of sort_steps_buf in step count
+    /// The world origin the live particles' positions are relative to (zero
+    /// for world space), and how far the frame's origin moved from it that
+    /// no simulation step has applied yet. Moves accumulate while the pass
+    /// is idle (no emitters) so a particle never misses one.
+    particles_origin: glam::DVec3,
+    pending_shift: glam::DVec3,
 
     // Sort dispatches by particle range. Empty: the ranges are allocated on
     // the GPU (see the module doc), so the CPU has none to build them from.
@@ -230,6 +243,9 @@ impl CoronaPass {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
+        let draw_slots = helio_pass_gbuffer::DrawSlots::default()
+            .buffer(device, DEFAULT_MAX_PARTICLES as u32)
+            .clone();
 
         let emitter_alive_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Corona Emitter Alive"),
@@ -381,7 +397,7 @@ impl CoronaPass {
                 module: &render_shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[],
+                buffers: &[Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &render_shader,
@@ -493,10 +509,13 @@ impl CoronaPass {
             particle_sampler,
             compute_bg,
             render_bg,
+            draw_slots,
             bg_key,
             max_particles: DEFAULT_MAX_PARTICLES,
             emitter_count: 0,
             max_sort_steps,
+            particles_origin: glam::DVec3::ZERO,
+            pending_shift: glam::DVec3::ZERO,
             sort_steps: Vec::new(),
             depth_sort_enabled: false,
         }
@@ -858,6 +877,10 @@ impl RenderPass for CoronaPass {
             });
         self.max_particles = DEFAULT_MAX_PARTICLES;
 
+        let origin = ctx.world_origin.unwrap_or(glam::DVec3::ZERO);
+        self.pending_shift += origin - self.particles_origin;
+        self.particles_origin = origin;
+
         let uniforms = CoronaUniforms {
             // The host-driven frame clock: particles freeze with it.
             delta_time: ctx.time_delta,
@@ -868,6 +891,7 @@ impl RenderPass for CoronaPass {
             sort_j: 0,
             sort_lo: 0,
             sort_n: 0,
+            origin_shift: self.pending_shift.as_vec3().extend(0.0).to_array(),
         };
         ctx.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
         Ok(())
@@ -1007,6 +1031,8 @@ impl RenderPass for CoronaPass {
             p.set_bind_group(0, compute_bg, &[]);
             p.dispatch_workgroups_indirect(&self.pool_dispatch_buf, 0);
         }
+        // The simulation above moved every live particle by the shift.
+        self.pending_shift = glam::DVec3::ZERO;
 
         // ── Pass 2: Emit ─────────────────────────────────────────────────────
         {
@@ -1133,6 +1159,7 @@ impl RenderPass for CoronaPass {
         let mut rp = ctx.render_cmds().unwrap();
         rp.set_pipeline(&self.render_pipeline);
         rp.set_bind_group(0, render_bg, &[]);
+        rp.set_vertex_buffer(0, self.draw_slots.slice(..));
 
         // One draw_indirect per emitter — each draws only its alive, sorted particles.
         let stride = std::mem::size_of::<crate::GpuCoronaDrawIndirect>() as u64;

@@ -38,6 +38,9 @@ struct GpuCoronaUniforms {
     sort_j:          u32,
     sort_lo:         u32,
     sort_n:          u32,
+    // How far the frame's world origin moved since the last simulation
+    // step (xyz); live particles subtract it to stay where they were.
+    origin_shift:    vec4<f32>,
 }
 
 struct Particle {
@@ -227,9 +230,10 @@ fn cs_simulate(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
 
-    let px = p.pos_and_alive.x + p.velocity.x * uniforms.delta_time;
-    let py = p.pos_and_alive.y + p.velocity.y * uniforms.delta_time;
-    let pz = p.pos_and_alive.z + p.velocity.z * uniforms.delta_time;
+    let shift = uniforms.origin_shift.xyz;
+    let px = p.pos_and_alive.x - shift.x + p.velocity.x * uniforms.delta_time;
+    let py = p.pos_and_alive.y - shift.y + p.velocity.y * uniforms.delta_time;
+    let pz = p.pos_and_alive.z - shift.z + p.velocity.z * uniforms.delta_time;
     p.pos_and_alive = vec4<f32>(px, py, pz, 1.0);
 
     let em        = emitters[e];

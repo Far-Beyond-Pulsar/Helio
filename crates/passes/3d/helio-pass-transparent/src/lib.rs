@@ -80,6 +80,7 @@ pub struct TransparentPass {
     pre_aa_target: bool,
     reactive_mask: bool,
     timing_query: Option<wgpu::QuerySet>,
+    draw_slots: helio_pass_gbuffer::DrawSlots,
 }
 
 impl TransparentPass {
@@ -275,6 +276,7 @@ impl TransparentPass {
             pre_aa_target: false,
             reactive_mask: false,
             timing_query: None,
+            draw_slots: Default::default(),
         }
     }
 
@@ -459,13 +461,12 @@ impl RenderPass for TransparentPass {
         let Some(culled) = ctx.registry.get::<helio_pass_occlusion_cull::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
             return Ok(());
         };
-        let draw_count = batch.draw_count;
-        log::trace!(
-            "[TransparentPass] execute: draw_count={}, transparent_ranges={:?}",
-            draw_count,
-            batch.transparent_ranges
-        );
-        if draw_count == 0 || batch.transparent_ranges.is_empty() {
+        let segments = culled.segments;
+        if segments
+            .in_bucket(helio_pass_gbuffer::ShadingBucket::Transparent)
+            .next()
+            .is_none()
+        {
             return Ok(());
         }
 
@@ -598,33 +599,34 @@ impl RenderPass for TransparentPass {
             }));
             self.fog_key = Some(fog_key);
         }
-        let indirect = culled.indirect;
+        let slots = self
+            .draw_slots
+            .buffer(
+                &ctx.device,
+                helio_pass_gbuffer::DrawSlots::len_of(
+                    batch.instances.size(),
+                    helio_pass_gbuffer::draw_slots::INSTANCE_BYTES,
+                ),
+            )
+            .clone();
         let mut rp = ctx.render_cmds().unwrap();
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
         rp.set_bind_group(2, self.fog_group.as_ref().unwrap(), &[]);
         rp.set_vertex_buffer(0, vertices.slice(..));
+        rp.set_vertex_buffer(1, slots.slice(..));
         rp.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
 
-        let ranges = batch.transparent_ranges;
-        for (range, &(class, graph_hash, start, count)) in ranges.iter().enumerate() {
-            if count == 0 {
-                continue;
-            }
+        // One draw per transparent material segment (see `DrawSegments`).
+        for (index, segment) in segments.in_bucket(helio_pass_gbuffer::ShadingBucket::Transparent) {
             let key = RadiantShaderKey {
-                template_id: class,
-                graph_hash,
+                template_id: segment.material_class,
+                graph_hash: segment.graph_hash,
                 feature_flags: 0,
             };
             let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
             rp.set_pipeline(pipeline);
-            helio_pass_gbuffer::multi_draw_indexed_indirect(
-                &mut rp,
-                indirect,
-                start,
-                count,
-                batch.transparent_range_count_slot(range),
-            );
+            segments.draw(&mut rp, index);
         }
         Ok(())
     }
@@ -729,7 +731,7 @@ impl TransparentPass {
                                 shader_location: 4,
                             },
                         ],
-                    })],
+                    }), Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module,

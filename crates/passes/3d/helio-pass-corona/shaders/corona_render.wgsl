@@ -12,6 +12,7 @@ struct GpuCoronaUniforms {
     sort_j:          u32,
     sort_lo:         u32,
     sort_n:          u32,
+    origin_shift:    vec4<f32>,
 }
 
 struct Particle {
@@ -79,8 +80,10 @@ fn quad_uv(idx: u32) -> vec2<f32> {
     return uvs[idx];
 }
 
+// `ii` is per-instance vertex data, which every backend offsets by the
+// indirect draw's `first_instance` (`helio_pass_gbuffer::draw_slots`).
 @vertex
-fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
+fn vs_main(@builtin(vertex_index) vi: u32, @location(15) ii: u32) -> VOut {
     let pidx = compact_buf[ii];
     let p = particles[pidx];
 

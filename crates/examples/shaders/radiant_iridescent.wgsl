@@ -119,8 +119,10 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
     return unpack4x8snorm(packed).xyz;
 }
 
+// `slot` is per-instance vertex data, which every backend offsets by the
+// indirect draw's `first_instance` (`helio_pass_gbuffer::draw_slots`).
 @vertex
-fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
+fn vs_main(v: Vertex, @location(15) slot: u32) -> VertexOutput {
     let inst       = instance_data[slot];
     let world_pos  = inst.transform * vec4<f32>(v.position, 1.0);
     let normal_mat = mat3x3<f32>(inst.normal_mat_0.xyz, inst.normal_mat_1.xyz, inst.normal_mat_2.xyz);

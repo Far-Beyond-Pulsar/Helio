@@ -104,7 +104,7 @@ impl RenderGraph {
             let aliases = &builders[w.pass_index].published_aliases;
             for (j, builder) in builders.iter().enumerate() {
                 for d in builder.declarations() {
-                    // Reading a `write_group` name (e.g. "gbuffer") reads
+                    // Reading a `write_group` name (e.g. the G-buffer group) reads
                     // every member texture of that group.
                     let reads_group = self
                         .resource_groups

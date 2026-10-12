@@ -38,13 +38,11 @@ struct GpuShadowMatrix {
 }
 
 struct ShadowDirtyUniforms {
-    /// Number of active draw calls in shadow_movable_indirect.
-    movable_draw_count: u32,
     /// Number of active shadow faces (= shadow_count from SceneResources).
     face_count: u32,
-    /// Set to 1 on the frame when movable_draw_count changes — dirties all faces.
-    force_dirty_all: u32,
-    _pad: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 // ── Bindings ──────────────────────────────────────────────────────────────────
@@ -56,7 +54,7 @@ struct ShadowDirtyUniforms {
 /// Per-face dirty flag (0 = clean, 1 = dirty). Also used as clear-draw count by ShadowPass.
 @group(0) @binding(4) var<storage, read_write>    face_dirty:     array<atomic<u32>>;
 /// Per-face geometry draw count written to drive multi_draw_indexed_indirect_count.
-/// 0 = clean face (no draws), movable_draw_count = dirty face (draw all movable casters).
+/// 0 = clean face (no draws), movable_count() = dirty face (draw all movable casters).
 @group(0) @binding(5) var<storage, read_write>    face_geom_count: array<atomic<u32>>;
 @group(0) @binding(6) var<uniform>                uniforms:       ShadowDirtyUniforms;
 /// Per-caster flags written by ShadowMatrixPass when a light matrix changes.
@@ -64,6 +62,14 @@ struct ShadowDirtyUniforms {
 
 struct Previous { bounds:vec4f, hash:vec4u }
 @group(0) @binding(8) var<storage,read> spaces:array<mat4x4f>;
+/// Object Batch's GPU counts, written this frame (`ObjectBatchFrameData::
+/// draw_counts_gpu`); word 2 is the movable shadow-caster count.
+@group(0) @binding(9) var<storage,read> batch_counts:array<u32>;
+/// The movable count the last dispatch saw. Only invocation 0 touches it.
+@group(0) @binding(10) var<storage,read_write> last_movable_count:array<u32>;
+
+/// Live draw calls in `movable_draws` this frame.
+fn movable_count()->u32 { return batch_counts[2]; }
 
 // ── Frustum helpers (Gribb-Hartmann) ─────────────────────────────────────────
 
@@ -113,20 +119,24 @@ fn hash_matrix(m:mat4x4f,h:u32)->u32 {
 }
 fn dirty(face:u32) {
     atomicStore(&face_dirty[face],1u);
-    atomicStore(&face_geom_count[face],uniforms.movable_draw_count);
+    atomicStore(&face_geom_count[face],movable_count());
 }
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid:vec3u) {
     let tid=gid.x;let count=min(uniforms.face_count,arrayLength(&shadow_mats));
     if tid==0u {
+        // A caster added or removed shifts every later draw's slot, and a
+        // removed one's silhouette must be erased: dirty every face.
+        let force_dirty_all=movable_count()!=last_movable_count[0];
+        last_movable_count[0]=movable_count();
         for(var caster=0u;caster<(count+5u)/6u;caster++) {
             let moved=atomicExchange(&light_dirty[caster],0u)!=0u;
-            if moved || uniforms.force_dirty_all!=0u {
+            if moved || force_dirty_all {
                 for(var f=caster*6u;f<min(caster*6u+6u,count);f++){dirty(f);}
             }
         }
     }
-    if tid>=min(uniforms.movable_draw_count,arrayLength(&movable_draws)) || tid>=arrayLength(&prev_positions) {return;}
+    if tid>=min(movable_count(),arrayLength(&movable_draws)) || tid>=arrayLength(&prev_positions) {return;}
     let draw=movable_draws[tid];var hash=draw.instance_count^draw.index_count^draw.first_instance;
     var lo=vec3f(3e38);var hi=vec3f(-3e38);
     for(var i=0u;i<draw.instance_count;i++) {
@@ -148,7 +158,7 @@ fn main(@builtin(global_invocation_id) gid:vec3u) {
     for(var f=0u;f<count;f++) {
         if shadow_mats[f].atlas.z==0.0 {continue;}
         let planes=extract_frustum_planes(shadow_mats[f].mat);
-        if uniforms.force_dirty_all!=0u || sphere_vs_frustum(bounds.xyz,bounds.w,planes)
+        if sphere_vs_frustum(bounds.xyz,bounds.w,planes)
             || sphere_vs_frustum(previous.bounds.xyz,previous.bounds.w,planes) {dirty(f);}
     }
 }

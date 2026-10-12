@@ -578,6 +578,11 @@ fn cs_group_write_sentinel() {
 /// every group-count-indexed stage below (`cs_build_draw_calls`, `cs_range_
 /// local_scan`, `cs_range_write`) -- same technique as `cs_prepare`, just
 /// keyed off `group_count` instead of the gather's live-object count.
+///
+/// Words 3..6 are a second dispatch size, one workgroup per group, for the
+/// culling passes downstream (`ObjectBatchFrameData::group_dispatch`), so
+/// they cull exactly this frame's groups without a CPU readback. Capped at
+/// WebGPU's 65535 workgroups per dimension.
 @group(0) @binding(0) var<storage, read> group_count_pg: array<u32>;
 @group(0) @binding(1) var<storage, read_write> dispatch_args_groups: array<u32>;
 
@@ -586,6 +591,9 @@ fn cs_prepare_groups() {
     dispatch_args_groups[0] = max((group_count_pg[0] + WG - 1u) / WG, 1u);
     dispatch_args_groups[1] = 1u;
     dispatch_args_groups[2] = 1u;
+    dispatch_args_groups[3] = min(group_count_pg[0], 65535u);
+    dispatch_args_groups[4] = 1u;
+    dispatch_args_groups[5] = 1u;
 }
 
 // ── Stage 6: cs_build_draw_calls ────────────────────────────────────────────

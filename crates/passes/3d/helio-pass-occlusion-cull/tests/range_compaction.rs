@@ -49,13 +49,52 @@ fn read_u32(device: &wgpu::Device, queue: &wgpu::Queue, source: &wgpu::Buffer) -
     result
 }
 
-#[test]
-fn compacts_surviving_indirect_draws_and_writes_per_range_count() {
+fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
+    }
+}
+
+/// One indirect record: `instance_count` 0 or 1, tagged by `first_instance`.
+fn record(alive: bool, tag: u32) -> [u32; 5] {
+    [3, alive as u32, 0, 0, tag]
+}
+
+/// A range of `material_class` (graph hash 0) over `count` records at `start`.
+fn range(material_class: u32, start: u32, count: u32) -> [u32; 5] {
+    [material_class, 0, 0, start, count]
+}
+
+/// An opaque segment of `material_class` (graph hash 0).
+fn segment(material_class: u32, first: u32, capacity: u32) -> [u32; 8] {
+    [material_class, 0, 0, 0, first, capacity, 0, 0]
+}
+
+struct Output {
+    compacted: Vec<u32>,
+    draw_counts: Vec<u32>,
+    segment_indirect: Vec<u32>,
+    segment_counts: Vec<u32>,
+}
+
+impl Output {
+    /// `first_instance` tags of `segment_indirect[first..first + len]`,
+    /// sorted (order within a segment has no meaning).
+    fn segment_tags(&self, first: u32, len: u32) -> Vec<u32> {
+        let mut tags: Vec<u32> = (first..first + len)
+            .map(|i| self.segment_indirect[i as usize * 5 + 4])
+            .collect();
+        tags.sort_unstable();
+        tags
+    }
+}
+
+/// Runs `compact_ranges.wgsl` over opaque `ranges` of `records`, with the
+/// given segment table.
+fn compact(records: &[[u32; 5]], ranges: &[[u32; 5]], segments: &[[u32; 8]]) -> Option<Output> {
     pollster::block_on(async {
-        let Some((device, queue)) = support::request_test_device("GPU Range Compaction").await else {
-            eprintln!("skipping range compaction test: no GPU adapter available");
-            return;
-        };
+        let (device, queue) = support::request_test_device("GPU Range Compaction").await?;
 
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Range compaction test BGL"),
@@ -77,6 +116,9 @@ fn compacts_surviving_indirect_draws_and_writes_per_range_count() {
                     },
                     count: None,
                 },
+                storage_entry(8, true),
+                storage_entry(9, false),
+                storage_entry(10, false),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -86,9 +128,7 @@ fn compacts_surviving_indirect_draws_and_writes_per_range_count() {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Range compaction test shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/compact_ranges.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/compact_ranges.wgsl").into()),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Range compaction test pipeline"),
@@ -99,35 +139,31 @@ fn compacts_surviving_indirect_draws_and_writes_per_range_count() {
             cache: None,
         });
 
+        let rw = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST;
+        let commands: Vec<u32> = records.iter().flatten().copied().collect();
         let source = make_buffer(
             &device,
             "Compaction source indirect",
-            4 * 20,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            commands.len() as u64 * 4,
+            rw,
         );
-        let compacted = make_buffer(
-            &device,
-            "Compaction output indirect",
-            4 * 20,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-        );
-        let range_counts = make_buffer(
-            &device,
-            "Compaction range counts",
-            16,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        );
-        let ranges = make_buffer(
+        let compacted = make_buffer(&device, "Compaction output indirect", source.size(), rw);
+        let range_counts = make_buffer(&device, "Compaction range counts", 16, rw);
+        let range_words: Vec<u32> = ranges.iter().flatten().copied().collect();
+        let range_table = make_buffer(
             &device,
             "Compaction range tables",
-            20,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            range_words.len() as u64 * 4,
+            rw,
         );
+        let slots = ranges.len() as u32;
         let draw_counts = make_buffer(
             &device,
             "Compaction draw counts",
-            16 * 4,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            (4 + 3 * slots as u64) * 4,
+            rw,
         );
         let params = make_buffer(
             &device,
@@ -135,37 +171,62 @@ fn compacts_surviving_indirect_draws_and_writes_per_range_count() {
             3 * 256,
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
-        let commands: [u32; 20] = [
-            3, 1, 0, 0, 10,
-            3, 0, 0, 0, 11,
-            3, 1, 0, 0, 12,
-            3, 0, 0, 0, 13,
-        ];
+        let segment_words: Vec<u32> = segments.iter().flatten().copied().collect();
+        let segment_table = make_buffer(
+            &device,
+            "Segment table",
+            (segment_words.len().max(8) * 4) as u64,
+            rw,
+        );
+        let segment_records: u32 = segments.iter().map(|s| s[4] + s[5]).max().unwrap_or(1);
+        let segment_indirect =
+            make_buffer(&device, "Segment indirect", segment_records as u64 * 20, rw);
+        let segment_counts = make_buffer(
+            &device,
+            "Segment counts",
+            (segments.len().max(4) * 4) as u64,
+            rw,
+        );
+
         queue.write_buffer(&source, 0, bytemuck::cast_slice(&commands));
-        queue.write_buffer(&range_counts, 0, bytemuck::cast_slice(&[1u32, 0, 0, 1]));
-        queue.write_buffer(&ranges, 0, bytemuck::cast_slice(&[0u32, 0, 0, 0, 4]));
+        queue.write_buffer(
+            &range_counts,
+            0,
+            bytemuck::cast_slice(&[slots, 0, 0, slots]),
+        );
+        queue.write_buffer(&range_table, 0, bytemuck::cast_slice(&range_words));
+        if !segment_words.is_empty() {
+            queue.write_buffer(&segment_table, 0, bytemuck::cast_slice(&segment_words));
+        }
         for bucket in 0..3u32 {
-            queue.write_buffer(&params, bucket as u64 * 256, bytemuck::cast_slice(&[4u32, bucket]));
+            queue.write_buffer(
+                &params,
+                bucket as u64 * 256,
+                bytemuck::cast_slice(&[slots, bucket, segments.len() as u32, 0]),
+            );
         }
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Range compaction test BG"),
             layout: &layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: source.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: compacted.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: range_counts.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: ranges.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: ranges.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: ranges.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 6, resource: draw_counts.as_entire_binding() },
+                entry(0, &source),
+                entry(1, &compacted),
+                entry(2, &range_counts),
+                entry(3, &range_table),
+                entry(4, &range_table),
+                entry(5, &range_table),
+                entry(6, &draw_counts),
                 wgpu::BindGroupEntry {
                     binding: 7,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: &params,
                         offset: 0,
-                        size: std::num::NonZeroU64::new(8),
+                        size: std::num::NonZeroU64::new(16),
                     }),
                 },
+                entry(8, &segment_table),
+                entry(9, &segment_indirect),
+                entry(10, &segment_counts),
             ],
         });
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
@@ -175,21 +236,135 @@ fn compacts_surviving_indirect_draws_and_writes_per_range_count() {
             pass.set_pipeline(&pipeline);
             for bucket in 0..3u32 {
                 pass.set_bind_group(0, &bg, &[bucket * 256]);
-                pass.dispatch_workgroups(1, 1, 1);
+                // Only opaque ranges exist; the other buckets return at once.
+                pass.dispatch_workgroups(if bucket == 0 { slots } else { 1 }, 1, 1);
             }
         }
         queue.submit([encoder.finish()]);
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
 
-        let args = read_u32(&device, &queue, &compacted);
-        assert_eq!(args[1], 1);
-        assert_eq!(args[6], 1);
-        assert_eq!(args[11], 0);
-        assert_eq!(args[16], 0);
-        let mut first_instances = [args[4], args[9]];
-        first_instances.sort_unstable();
-        assert_eq!(first_instances, [10, 12], "surviving args are packed at range head");
-        let counts = read_u32(&device, &queue, &draw_counts);
-        assert_eq!(counts[4], 2);
-    });
+        Some(Output {
+            compacted: read_u32(&device, &queue, &compacted),
+            draw_counts: read_u32(&device, &queue, &draw_counts),
+            segment_indirect: read_u32(&device, &queue, &segment_indirect),
+            segment_counts: read_u32(&device, &queue, &segment_counts),
+        })
+    })
+}
+
+#[test]
+fn compacts_surviving_indirect_draws_and_writes_per_range_count() {
+    let records = [
+        record(true, 10),
+        record(false, 11),
+        record(true, 12),
+        record(false, 13),
+    ];
+    let Some(out) = compact(&records, &[range(0, 0, 4)], &[]) else {
+        eprintln!("skipping range compaction test: no GPU adapter available");
+        return;
+    };
+    let args = &out.compacted;
+    assert_eq!(args[1], 1);
+    assert_eq!(args[6], 1);
+    assert_eq!(args[11], 0);
+    assert_eq!(args[16], 0);
+    let mut first_instances = [args[4], args[9]];
+    first_instances.sort_unstable();
+    assert_eq!(
+        first_instances,
+        [10, 12],
+        "surviving args are packed at range head"
+    );
+    assert_eq!(out.draw_counts[4], 2);
+    assert_eq!(
+        out.segment_counts[0], 0,
+        "no segment table: nothing is appended"
+    );
+}
+
+/// Every range's survivors land in their material key's segment at the
+/// segment's fixed offset, whatever this frame's range layout is: ranges that
+/// share a key append to one segment, and a key the table does not know yet is
+/// skipped rather than drawn under another key's pipeline.
+#[test]
+fn survivors_land_in_their_key_segment_at_its_fixed_offset() {
+    let records = [
+        // Range 0, class 7: two of three survive.
+        record(true, 70),
+        record(false, 71),
+        record(true, 72),
+        // Range 1, class 3: one survives.
+        record(true, 30),
+        // Range 2, class 7 again (the sort interleaves keys by mesh).
+        record(true, 73),
+        // Range 3, class 9: not in the table yet.
+        record(true, 90),
+    ];
+    let ranges = [
+        range(7, 0, 3),
+        range(3, 3, 1),
+        range(7, 4, 1),
+        range(9, 5, 1),
+    ];
+    // Table order differs from range order on purpose.
+    let segments = [segment(3, 0, 64), segment(7, 64, 64)];
+    let Some(out) = compact(&records, &ranges, &segments) else {
+        eprintln!("skipping segment test: no GPU adapter available");
+        return;
+    };
+
+    assert_eq!(out.segment_counts[0], 1, "class 3 segment count");
+    assert_eq!(
+        out.segment_counts[1], 3,
+        "class 7 gathers both of its ranges"
+    );
+    assert_eq!(out.segment_tags(0, 1), [30]);
+    assert_eq!(out.segment_tags(64, 3), [70, 72, 73]);
+    for segment_first in [0u32, 64] {
+        let len = if segment_first == 0 { 1 } else { 3 };
+        for i in segment_first..segment_first + len {
+            assert_eq!(
+                out.segment_indirect[i as usize * 5 + 1],
+                1,
+                "copied records stay alive"
+            );
+        }
+    }
+    // Everything past each count stays empty: class 9 went nowhere.
+    let written: Vec<u32> = (0..128u32)
+        .filter(|&i| out.segment_indirect[i as usize * 5 + 1] != 0)
+        .map(|i| out.segment_indirect[i as usize * 5 + 4])
+        .collect();
+    assert!(
+        !written.contains(&90),
+        "an unknown key is skipped: {written:?}"
+    );
+    assert_eq!(written.len(), 4);
+    // In-place compaction and per-range counts are unchanged.
+    assert_eq!(&out.draw_counts[4..8], &[2, 1, 1, 1]);
+}
+
+/// Survivors beyond a segment's capacity are dropped instead of spilling
+/// into the next segment; the count still reports them, and draws read at
+/// most `capacity` records.
+#[test]
+fn a_full_segment_never_spills_into_the_next() {
+    let records: Vec<[u32; 5]> = (0..5).map(|i| record(true, 100 + i)).collect();
+    let segments = [segment(1, 0, 2), segment(2, 2, 64)];
+    let Some(out) = compact(&records, &[range(1, 0, 5)], &segments) else {
+        eprintln!("skipping segment overflow test: no GPU adapter available");
+        return;
+    };
+    assert_eq!(out.segment_counts[0], 5);
+    assert_eq!(out.segment_counts[1], 0);
+    for i in 2..66usize {
+        assert_eq!(
+            out.segment_indirect[i * 5 + 1],
+            0,
+            "record {i} of the next segment"
+        );
+    }
+    let kept = out.segment_tags(0, 2);
+    assert!(kept.iter().all(|tag| (100..105).contains(tag)), "{kept:?}");
 }

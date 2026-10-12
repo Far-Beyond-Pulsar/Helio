@@ -43,6 +43,8 @@ struct ForwardLitGlobals {
 }
 
 pub struct ForwardLitPass {
+    /// The draw slots the vertex shader reads (see `helio_pass_gbuffer::DrawSlots`).
+    draw_slots: helio_pass_gbuffer::DrawSlots,
     material_binding: helio_mats::MaterialBindingConfig,
     pipelines: HashMap<RadiantShaderKey, wgpu::RenderPipeline>,
     shader_cache: RadiantShaderCache,
@@ -71,8 +73,8 @@ pub struct ForwardLitPass {
     bind_group_1_version: Option<(u64,u64)>,
     globals_buf: wgpu::Buffer,
     surface_format: wgpu::TextureFormat,
-    /// When true, renders from `material_class_ranges` (all opaque draws)
-    /// instead of `forward_material_class_ranges` (only FLAG_FORWARD_SHADING).
+    /// When true, renders the opaque draw segments (all opaque draws)
+    /// instead of the forward ones (only FLAG_FORWARD_SHADING).
     pub render_all_opaque: bool,
 }
 
@@ -217,6 +219,7 @@ impl ForwardLitPass {
         };
 
         Self {
+            draw_slots: Default::default(),
             material_binding,
             pipelines: HashMap::new(),
             shader_cache: RadiantShaderCache::new(),
@@ -317,7 +320,7 @@ impl ForwardLitPass {
                                 shader_location: 4,
                             },
                         ],
-                    })],
+                    }), Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module,
@@ -476,9 +479,8 @@ impl RenderPass for ForwardLitPass {
         let Some(culled) = ctx.registry.get::<helio_pass_gbuffer::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
             return Ok(());
         };
-        let draw_count = batch.draw_count;
-
-        if draw_count == 0 {
+        let (max_draws, draw_count) = batch.all_draws();
+        if max_draws == 0 {
             return Ok(());
         }
         let Some(material_textures) = ctx.registry.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures(), "ForwardLit") else {
@@ -629,18 +631,32 @@ impl RenderPass for ForwardLitPass {
         }
 
         let indirect = culled.indirect;
+        // The slot indexes `compacted_indices`.
+        let slots = self
+            .draw_slots
+            .buffer(
+                &ctx.device,
+                helio_pass_gbuffer::DrawSlots::len_of(culled.compacted_indices.size(), 4),
+            )
+            .clone();
         let mut pass = ctx.render_cmds().unwrap();
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.set_vertex_buffer(1, slots.slice(..));
         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
 
-        let ranges = if self.render_all_opaque {
-            batch.opaque_ranges
+        // One draw per material segment of the bucket this pass renders (see
+        // `DrawSegments`).
+        let segments = culled.segments;
+        let bucket = if self.render_all_opaque {
+            helio_pass_gbuffer::ShadingBucket::Opaque
         } else {
-            batch.forward_ranges
+            helio_pass_gbuffer::ShadingBucket::Forward
         };
-        if ranges.is_empty() {
+        if segments.is_empty() {
+            // No material key read back yet (the first frames): draw every
+            // group with the default pipeline.
             let key = RadiantShaderKey {
                 template_id: 0,
                 graph_hash: 0,
@@ -653,17 +669,14 @@ impl RenderPass for ForwardLitPass {
                 &mut pass,
                 indirect,
                 0,
+                max_draws,
                 draw_count,
-                batch.all_draws_count_slot(),
             );
         } else {
-            for (range, &(class, graph_hash, start, count)) in ranges.iter().enumerate() {
-                if count == 0 {
-                    continue;
-                }
+            for (index, segment) in segments.in_bucket(bucket) {
                 let mut key = RadiantShaderKey {
-                    template_id: class,
-                    graph_hash,
+                    template_id: segment.material_class,
+                    graph_hash: segment.graph_hash,
                     feature_flags: 0,
                 };
                 if self.render_all_opaque {
@@ -676,14 +689,7 @@ impl RenderPass for ForwardLitPass {
                     self.render_all_opaque,
                 );
                 pass.set_pipeline(pipeline);
-                let gpu_count = if self.render_all_opaque {
-                    batch.opaque_range_count_slot(range)
-                } else {
-                    batch.forward_range_count_slot(range)
-                };
-                helio_pass_gbuffer::multi_draw_indexed_indirect(
-                    &mut pass, indirect, start, count, gpu_count,
-                );
+                segments.draw(&mut pass, index);
             }
         }
         Ok(())

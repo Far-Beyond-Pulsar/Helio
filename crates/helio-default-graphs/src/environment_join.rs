@@ -172,6 +172,8 @@ const SUN: u32 = 128;
 const WATER_WIND: u32 = 256;
 const HITBOX: u32 = 512;
 const SPRITE: u32 = 1024;
+/// Positions relative to the frame's world origin (`environment_join.wgsl`).
+const RELATIVE: u32 = 2048;
 const NO_GATE_WORD: u32 = u32::MAX;
 
 /// Where the frontend's rows live.
@@ -282,6 +284,27 @@ struct Uniforms {
     /// Particles the emitter ranges are allocated from (`EMITTER` tables).
     pool: u32,
     _pad: [u32; 3],
+    /// The frame's world origin as an f32 pair, which `RELATIVE` tables
+    /// subtract from positions.
+    origin_hi: [f32; 4],
+    origin_lo: [f32; 4],
+    /// [`water_phase`] of the origin, for `RELATIVE` water rows.
+    water_phase: [f32; 4],
+}
+
+/// Where a frame with this world origin sits in the water's world tiling
+/// (`GpuWaterVolume::world_phase`): its X and Z modulo
+/// [`helio_pass_water_sim::WATER_WORLD_PERIOD`], taken in f64 so it is
+/// exact however far the origin is.
+fn water_phase(origin: Option<glam::DVec3>) -> [f32; 4] {
+    let origin = origin.unwrap_or(glam::DVec3::ZERO);
+    let period = helio_pass_water_sim::WATER_WORLD_PERIOD;
+    [
+        origin.x.rem_euclid(period) as f32,
+        origin.z.rem_euclid(period) as f32,
+        0.0,
+        0.0,
+    ]
 }
 
 /// What one pass buffer is made from.
@@ -367,6 +390,11 @@ impl Spec {
 
     fn reads_mesh_bounds(&self) -> bool {
         self.flags & HITBOX != 0
+    }
+
+    /// Whether this table's positions follow the frame's world origin.
+    fn relative(&self) -> bool {
+        self.flags & RELATIVE != 0
     }
 
     fn reads_transforms(&self) -> bool {
@@ -507,7 +535,7 @@ impl EnvironmentJoin {
                 WATER_VOLUMES_KEY,
                 Source::WaterVolumes,
                 64,
-                volume | SURFACE | SUN,
+                volume | SURFACE | SUN | RELATIVE,
             )
             .packed(MAX_WATER_VOLUMES)
             .over(
@@ -590,7 +618,7 @@ impl EnvironmentJoin {
                 DECALS_KEY,
                 Source::Decals,
                 32,
-                GATE_HIDDEN | DECAL,
+                GATE_HIDDEN | DECAL | RELATIVE,
             )
             .packed(MAX_DECALS),
             // The pass reads a fixed number of rows; each placed emitter
@@ -600,7 +628,7 @@ impl EnvironmentJoin {
                 CORONA_EMITTERS_KEY,
                 Source::CoronaEmitters,
                 60,
-                GATE_HIDDEN | EMITTER,
+                GATE_HIDDEN | EMITTER | RELATIVE,
             )
             .packed(MAX_CORONA_EMITTERS)
             .gated_on(CORONA_COUNT_WORD),
@@ -611,7 +639,7 @@ impl EnvironmentJoin {
                 WATER_HITBOXES_KEY,
                 Source::WaterHitboxes,
                 20,
-                HITBOX,
+                HITBOX | RELATIVE,
             )
             .packed(MAX_WATER_HITBOXES)
             .gated_on(WATER_HITBOX_GATE_WORD),
@@ -717,6 +745,11 @@ impl SceneDerivation for EnvironmentJoin {
             .map(|source| self.input(inputs, source.key(&keys), source.row_bytes()))
             .collect();
         let mut recorded = false;
+        let (origin_hi, origin_lo) = crate::scene_join::origin_pair(ctx.world_origin);
+        let water_phase = water_phase(ctx.world_origin);
+        let origin_key = crate::scene_join::origin_bits(ctx.world_origin)
+            .iter()
+            .fold(0u64, |key, bits| key.rotate_left(21) ^ bits);
         for table in &mut self.tables {
             let spec = &table.spec;
             let source_row_bytes = spec.source.row_bytes();
@@ -756,7 +789,15 @@ impl SceneDerivation for EnvironmentJoin {
                     .iter()
                     .map(|(layer, _)| sources[layer.source as usize]),
             );
-            let inputs_now = signature(&table_inputs, table.epoch);
+            // A moved origin moves every position a relative table holds.
+            let relative =
+                table.spec.relative() || table.layers.iter().any(|(layer, _)| layer.relative());
+            let extra = if relative {
+                table.epoch ^ origin_key.rotate_left(1)
+            } else {
+                table.epoch
+            };
+            let inputs_now = signature(&table_inputs, extra);
             if !grew && table.last_inputs == Some(inputs_now) {
                 continue;
             }
@@ -799,6 +840,9 @@ impl SceneDerivation for EnvironmentJoin {
                         gate_word: spec.gate_word,
                         pool: CORONA_POOL_PARTICLES,
                         _pad: [0; 3],
+                        origin_hi,
+                        origin_lo,
+                        water_phase,
                     }),
                 );
                 let (pipeline, workgroups) = match spec.capacity {

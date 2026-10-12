@@ -46,10 +46,8 @@ const WORKGROUP_SIZE: u32 = 64;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CullUniforms {
-    instance_count: u32,
     max_draws_per_face: u32,
-    _pad0: u32,
-    _pad1: u32,
+    _pad: [u32; 3],
 }
 
 // ── Pass struct ───────────────────────────────────────────────────────────────
@@ -71,7 +69,7 @@ pub struct ShadowCullPass {
 
     /// Lazy bind group, rebuilt when scene buffer pointers change.
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<[wgpu::Buffer; 5]>,
+    bind_group_key: Option<[wgpu::Buffer; 6]>,
 }
 
 impl ShadowCullPass {
@@ -202,6 +200,17 @@ impl ShadowCullPass {
                     },
                     count: None,
                 },
+                // 8: Object Batch's GPU counts (movable caster count at word 2)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -253,14 +262,10 @@ impl RenderPass for ShadowCullPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let instance_count = ctx.registry
-            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch"))
-            .map(|b| b.shadow_movable_draw_count).unwrap_or(0);
+        // The movable caster count is read on the GPU (binding 8).
         let u = CullUniforms {
-            instance_count,
             max_draws_per_face: MAX_DRAWS_PER_FACE,
-            _pad0: 0,
-            _pad1: 0,
+            _pad: [0; 3],
         };
         ctx.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
@@ -271,7 +276,9 @@ impl RenderPass for ShadowCullPass {
         let Some(batch) = ctx.registry.get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new("object_batch")) else {
             return Ok(());
         };
-        let movable_count = batch.shadow_movable_draw_count;
+        // Every movable draw the batch can produce this frame; threads past
+        // the live count (read on the GPU) return at once.
+        let draw_capacity = batch.group_capacity;
         let Some(shadow_data) = ctx.registry.get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(helio_core::resource_keys::shadow_matrices()) else {
             return Ok(());
         };
@@ -280,7 +287,7 @@ impl RenderPass for ShadowCullPass {
         };
         let face_count = shadow_data.shadow_count;
 
-        if face_count == 0 || movable_count == 0 {
+        if face_count == 0 || draw_capacity == 0 {
             return Ok(());
         }
 
@@ -299,6 +306,7 @@ impl RenderPass for ShadowCullPass {
             batch.shadow_movable_indirect.clone(),
             (*self.face_dirty_buf).clone(),
             coord_data.coordinate_spaces.clone(),
+            batch.draw_counts_gpu.clone(),
         ];
 
         if self.bind_group_key.as_ref() != Some(&key) {
@@ -338,6 +346,10 @@ impl RenderPass for ShadowCullPass {
                         binding: 7,
                         resource: coord_data.coordinate_spaces.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: batch.draw_counts_gpu.as_entire_binding(),
+                    },
                 ],
             }));
             self.bind_group_key = Some(key);
@@ -345,7 +357,7 @@ impl RenderPass for ShadowCullPass {
 
         let bg = self.bind_group.as_ref().unwrap();
 
-        let wg = movable_count.div_ceil(WORKGROUP_SIZE);
+        let wg = draw_capacity.div_ceil(WORKGROUP_SIZE);
         let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("ShadowCull"),
             timestamp_writes: None,

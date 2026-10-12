@@ -43,7 +43,8 @@ struct Camera {
 
 struct CullUniforms {
     frustum_planes:     array<vec4<f32>, 6>,
-    draw_count:         u32,
+    // Draw groups dispatched; the live count is `live_draw_count()`.
+    draw_capacity:      u32,
     chain_count:        u32,
     // How many (instance, chain) survivor slots are reserved per draw
     // group — NOT per chain. See module doc.
@@ -136,9 +137,17 @@ struct DrawIndexedIndirect {
 // (cross-workgroup) atomic, since every chain that touches group `g`
 // contributes to the same counter concurrently. Zeroed by the CPU every
 // frame before dispatch; `finalize` reads the settled value once `select`
-// has fully completed, then this doubles as the diagnostic readback
-// (per-group selected-instance totals) the old per-portal version had.
+// has fully completed.
 @group(0) @binding(8) var<storage, read_write> portal_stats: array<atomic<u32>>;
+// Object Batch's GPU counts, written this frame; word 0 is the live draw
+// group count (`ObjectBatchFrameData::draw_counts_gpu`). The dispatch covers
+// every group the batch can produce, up to `draw_capacity`.
+@group(0) @binding(12) var<storage, read> batch_counts: array<u32>;
+
+/// Live draw groups this frame, within the dispatched range.
+fn live_draw_count() -> u32 {
+    return min(batch_counts[0], cull.draw_capacity);
+}
 
 /// Mirrors `libhelio::INSTANCE_FLAG_ALWAYS_VISIBLE`.
 const INSTANCE_FLAG_ALWAYS_VISIBLE: u32 = 4u;
@@ -158,7 +167,7 @@ fn select(
 ) {
     let draw_idx = wg_id.x;
     let chain_idx = wg_id.y;
-    let is_active = draw_idx < cull.draw_count && chain_idx < cull.chain_count;
+    let is_active = draw_idx < live_draw_count() && chain_idx < cull.chain_count;
 
     // Every invocation must reach the barrier below regardless of
     // `is_active` — see indirect_dispatch.wgsl for why (FXC
@@ -249,7 +258,13 @@ fn select(
 @compute @workgroup_size(64)
 fn finalize(@builtin(global_invocation_id) gid: vec3<u32>) {
     let draw_idx = gid.x;
-    if draw_idx >= cull.draw_count {
+    if draw_idx >= cull.draw_capacity {
+        return;
+    }
+    // A group past this frame's live count (one just despawned) draws
+    // nothing, rather than its last frame's survivors.
+    if draw_idx >= live_draw_count() {
+        portal_indirect[draw_idx] = DrawIndexedIndirect(0u, 0u, 0u, 0, 0u);
         return;
     }
     let dc = draw_calls[draw_idx];

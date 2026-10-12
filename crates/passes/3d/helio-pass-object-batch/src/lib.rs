@@ -29,6 +29,9 @@ pub use gpu_types::*;
 
 const WG: u32 = 256;
 const SORT_BITS: usize = 32;
+/// Byte offset of the one-workgroup-per-group dispatch size in
+/// `dispatch_args_groups` (see `cs_prepare_groups`).
+const GROUP_DISPATCH_OFFSET: u64 = 12;
 /// Below this many rows, scratch buffers still allocate at this floor --
 /// avoids reallocating on every single insert/remove around a tiny live
 /// count, matching `GrowableBuffer`'s own "small initial capacity" idiom
@@ -320,7 +323,8 @@ impl ScratchBuffers {
             ),
             group_count: create_storage_buffer(device, "ObjBatch GroupCount", 16),
             group_starts: create_storage_buffer(device, "ObjBatch GroupStarts", (n + 1) * 4),
-            dispatch_args_groups: create_dual_buffer(device, "ObjBatch DispatchArgsGroups", 12),
+            // Two dispatch sizes: `cs_prepare_groups` documents both.
+            dispatch_args_groups: create_dual_buffer(device, "ObjBatch DispatchArgsGroups", 24),
             group_material_class: create_storage_buffer(device, "ObjBatch GroupClass", n * 4),
             group_graph_hash_lo: create_storage_buffer(device, "ObjBatch GroupHashLo", n * 4),
             group_graph_hash_hi: create_storage_buffer(device, "ObjBatch GroupHashHi", n * 4),
@@ -1266,9 +1270,9 @@ impl ObjectBatchPass {
         &self.scratch.forward_ranges
     }
 
-    /// Last-completed-frame's opaque/transparent/forward range tables --
-    /// one frame of latency behind the GPU work that produced them (see
-    /// `readback` module doc). Empty until the first successful readback.
+    /// The last harvested opaque/transparent/forward range tables, two or
+    /// more frames behind the GPU work that produced them (see the `readback`
+    /// module doc). Empty until the first successful readback.
     pub fn opaque_ranges(&self) -> &[RangeTuple] {
         self.readback.opaque()
     }
@@ -1342,7 +1346,7 @@ impl ObjectBatchPass {
     /// `RenderGraph` (pair with [`Self::run_once_for_testing`]).
     pub fn poll_readback_for_testing(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         self.readback
-            .poll_and_kick_off(device, queue, &self.scratch, true);
+            .poll_and_kick_off(device, queue, &self.scratch, true, true);
     }
 }
 
@@ -1381,8 +1385,13 @@ impl RenderPass for ObjectBatchPass {
                 aabbs: &self.scratch.aabbs_out,
                 draw_calls: &self.draw_calls_out,
                 indirect: &self.indirect_out,
-                draw_count,
-                instance_count: self.instance_count(),
+                readback_draw_count: draw_count,
+                readback_instance_count: self.instance_count(),
+                group_capacity: self.scratch_capacity,
+                group_dispatch: helio_pass_gbuffer::IndirectDispatchArgs {
+                    buffer: &self.scratch.dispatch_args_groups,
+                    offset: GROUP_DISPATCH_OFFSET,
+                },
                 opaque_ranges: self.opaque_ranges(),
                 transparent_ranges: self.transparent_ranges(),
                 forward_ranges: self.forward_ranges(),
@@ -1392,11 +1401,11 @@ impl RenderPass for ObjectBatchPass {
                 range_counts_gpu: &self.scratch.range_count,
                 draw_counts_gpu: self.draw_counts.as_ref().expect("draw-count buffer"),
                 shadow_static_indirect: &self.scratch.shadow_static_indirect,
-                shadow_static_draw_count,
+                readback_shadow_static_draw_count: shadow_static_draw_count,
                 shadow_movable_indirect: &self.scratch.shadow_movable_indirect,
-                shadow_movable_draw_count,
+                readback_shadow_movable_draw_count: shadow_movable_draw_count,
                 shadow_transmissive_indirect: &self.scratch.shadow_transmissive_indirect,
-                shadow_transmissive_draw_count: self.readback.shadow_transmissive(),
+                readback_shadow_transmissive_draw_count: self.readback.shadow_transmissive(),
                 shadow_static_generation: self.shadow_static_generation(),
                 draw_counts: self
                     .supports_multi_draw_count
@@ -1405,18 +1414,19 @@ impl RenderPass for ObjectBatchPass {
             })
         };
         frame.write(helio_core::ResourceKey::new("object_batch"), data, "ObjectBatch");
-        // Culling and the GBuffer draw from these read-back counts, so they --
-        // not the SceneDB upload -- decide when the scene starts (or stops)
-        // reaching depth.
+        // Culling and drawing follow this frame's GPU counts, but a few
+        // fallbacks still follow these read-back ones (Hi-Z warm-up, draws
+        // without `MULTI_DRAW_INDIRECT_COUNT`), so depth can also change when
+        // they do.
         helio_core::resource_keys::fold_depth_draw_signature(
             frame,
             (u64::from(draw_count) << 32) | u64::from(self.instance_count()),
             "ObjectBatch",
         );
         // `[static, movable, transmissive]` shadow-caster counts, written on
-        // the GPU this frame (unlike the `*_draw_count` fields above, which
-        // trail by the readback latency). Lets shadow consumers skip an atlas
-        // that holds no casters.
+        // the GPU this frame (unlike the `readback_shadow_*` fields above,
+        // which trail by the readback latency). Lets shadow consumers skip an
+        // atlas that holds no casters.
         let counts: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.scratch.shadow_counts) };
         frame.write_buffer(helio_core::ResourceKey::new("shadow_caster_counts"), counts, "ObjectBatch");
     }
@@ -1500,7 +1510,13 @@ impl RenderPass for ObjectBatchPass {
         }
 
         self.readback
-            .poll_and_kick_off(ctx.device, ctx.queue, &self.scratch, !self.skip_this_frame);
+            .poll_and_kick_off(
+                ctx.device,
+                ctx.queue,
+                &self.scratch,
+                !self.skip_this_frame,
+                ctx.owns_device,
+            );
         Ok(())
     }
 
@@ -1540,6 +1556,10 @@ mod tests {
     #[test]
     fn output_struct_sizes_match_wgsl() {
         assert_eq!(INSTANCE_BYTES, 208);
+        assert_eq!(
+            helio_pass_gbuffer::draw_slots::INSTANCE_BYTES,
+            std::mem::size_of::<GpuInstanceData>() as u64
+        );
         assert_eq!(AABB_BYTES, 32);
         assert_eq!(DRAW_CALL_BYTES, 20);
         assert_eq!(RANGE_BYTES, 20);

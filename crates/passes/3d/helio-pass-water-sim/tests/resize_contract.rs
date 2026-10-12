@@ -1,5 +1,9 @@
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
-use helio_core::{GpuScene, PassContext, RenderGraph, RenderPass, Result as HelioResult};
+use bytemuck::Zeroable;
+use helio_core::{
+    GpuCameraUniforms, PassContext, RenderGraph, RenderPass, ResourceKey, Result as HelioResult,
+    SceneInput,
+};
 use helio_pass_water_sim::WaterSimPass;
 use std::sync::Arc;
 
@@ -28,9 +32,9 @@ impl RenderPass for PreAaProducer {
         color_only_descriptor(
             "Pre-AA Producer",
             resources
-                .pre_aa
-                .read(self.name())
+                .read_texture_view(ResourceKey::new("pre_aa"), self.name())
                 .expect("pre_aa is routed"),
+            storage,
         )
     }
 
@@ -58,8 +62,7 @@ impl RenderPass for PreAaDepthConsumer {
         storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let pre_aa = resources
-            .pre_aa
-            .read(self.name())
+            .read_texture_view(ResourceKey::new("pre_aa"), self.name())
             .expect("pre_aa is published");
         let color_attachments = storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
             view: pre_aa,
@@ -115,13 +118,8 @@ fn cached_water_output_is_reacquired_after_graph_resize() {
 
         let device = Arc::new(device);
         let queue = Arc::new(queue);
-        let scene = GpuScene::new(Arc::clone(&device), Arc::clone(&queue));
-        let camera = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Water Resize Contract Camera"),
-            size: 256,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let scene = TestSceneInput::new(Arc::clone(&device), Arc::clone(&queue));
+        let camera = scene.camera.clone();
         let mut graph = RenderGraph::new(&device, &queue);
         graph.add_pass(Box::new(PreAaProducer));
         graph.add_pass(Box::new(WaterSimPass::new(
@@ -156,6 +154,7 @@ fn cached_water_output_is_reacquired_after_graph_resize() {
 fn color_only_descriptor<'a>(
     label: &'static str,
     view: &'a wgpu::TextureView,
+    storage: &'a mut helio_core::RenderFrameStorage,
 ) -> Option<wgpu::RenderPassDescriptor<'a>> {
     let color_attachments = storage.retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
         view,
@@ -233,3 +232,57 @@ async fn request_test_adapter(instance: &wgpu::Instance) -> Option<wgpu::Adapter
 }
 
 
+
+/// The camera and empty scene buffers the graph needs, without a renderer.
+struct TestSceneInput {
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+    camera: wgpu::Buffer,
+    camera_data: GpuCameraUniforms,
+}
+
+impl TestSceneInput {
+    fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
+        // Two rows: shaders declare `cameras: array<Camera, 2>`.
+        let camera = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Water Resize Contract Camera"),
+            size: 2 * std::mem::size_of::<GpuCameraUniforms>() as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            device,
+            queue,
+            camera,
+            camera_data: GpuCameraUniforms::zeroed(),
+        }
+    }
+}
+
+impl SceneInput for TestSceneInput {
+    fn device(&self) -> &Arc<wgpu::Device> {
+        &self.device
+    }
+    fn queue(&self) -> &Arc<wgpu::Queue> {
+        &self.queue
+    }
+    fn frame_count(&self) -> u64 {
+        0
+    }
+    fn camera(&self) -> &wgpu::Buffer {
+        &self.camera
+    }
+    fn camera_data(&self) -> &GpuCameraUniforms {
+        &self.camera_data
+    }
+    fn camera_generation(&self) -> u64 {
+        0
+    }
+    fn scene_buffers(&self) -> &helio_core::SceneBufferProjection {
+        static EMPTY: std::sync::OnceLock<helio_core::SceneBufferProjection> =
+            std::sync::OnceLock::new();
+        EMPTY.get_or_init(helio_core::SceneBufferProjection::empty)
+    }
+}

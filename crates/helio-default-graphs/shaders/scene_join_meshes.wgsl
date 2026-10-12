@@ -62,6 +62,9 @@ struct MeshJoinUniforms {
     output_rows: u32,
     _pad0: u32,
     _pad1: u32,
+    // The frame's world origin (hi + lo), zero outside camera-relative frames.
+    origin_hi: vec4<f32>,
+    origin_lo: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: MeshJoinUniforms;
@@ -139,7 +142,11 @@ fn cs_join_meshes(@builtin(global_invocation_id) gid: vec3<u32>) {
     let t = transforms[owner];
     let rotation = object_rotation(t);
     let scale = object_scale(t);
-    let position = object_position(t);
+    // Relative to the frame's world origin, in two steps: an object near the
+    // camera is near the origin, so `object - hi` is exact, and what remains
+    // is small. At Earth radius one f32 step is 0.5 m; a world-space model
+    // matrix would snap every vertex to it.
+    let position = relative_position(object_position(t), u.origin_hi.xyz, u.origin_lo.xyz);
     let c0 = rotation[0] * scale.x;
     let c1 = rotation[1] * scale.y;
     let c2 = rotation[2] * scale.z;

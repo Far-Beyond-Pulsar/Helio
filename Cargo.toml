@@ -81,8 +81,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 helio-core = { path = "crates/helio-core" }
 helio-mats = { path = "crates/helio-mats" }
 helio-bake-types = { path = "crates/helio-bake-types" }
-pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "685b1b0aa212b64912549efd583c93480bea027f", features = ["gpu"] }
-pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "685b1b0aa212b64912549efd583c93480bea027f" }
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "17cf443305de8ee7294f38be5bdf7c8d13ffeeb3", features = ["gpu"] }
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "17cf443305de8ee7294f38be5bdf7c8d13ffeeb3" }
 # Must stay pinned to the exact rev pulsar_scenedb's own Cargo.toml pins --
 # a different rev is a different SourceId and thus a second,
 # type-incompatible copy of this crate in the build (see helio-wasm's
@@ -135,3 +135,18 @@ microfont = "3.7.8"
 tiny_http = "0.12"
 ratatui = "0.29"
 crossterm = "0.28"
+
+# wgpu 30.0.1 with reusable command buffers (Helio#330 part 5): the upstream
+# v30.0.1 tag plus one patch, on Far-Beyond-Pulsar/wgpu. Every crate of the
+# wgpu workspace is patched together so naga and wgpu-types stay one version.
+# Pulsar-Native's root manifest carries the same section.
+[patch.crates-io]
+naga = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "helio/v30.0.1-reusable-command-buffers" }
+wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "helio/v30.0.1-reusable-command-buffers" }
+wgpu-core = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "helio/v30.0.1-reusable-command-buffers" }
+wgpu-core-deps-apple = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "helio/v30.0.1-reusable-command-buffers" }
+wgpu-core-deps-emscripten = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "helio/v30.0.1-reusable-command-buffers" }
+wgpu-core-deps-windows-linux-android = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "helio/v30.0.1-reusable-command-buffers" }
+wgpu-hal = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "helio/v30.0.1-reusable-command-buffers" }
+wgpu-naga-bridge = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "helio/v30.0.1-reusable-command-buffers" }
+wgpu-types = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "helio/v30.0.1-reusable-command-buffers" }

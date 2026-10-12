@@ -254,6 +254,20 @@ impl Profiler {
         }
     }
 
+    /// [`Self::begin_gpu_pass`] on a pass's command stream.
+    pub(crate) fn begin_gpu_pass_cmds(&mut self, cmds: &mut crate::cmd::CommandRecorder<'_>, name: &'static str) {
+        if self.enabled {
+            self.gpu.begin_pass(cmds, name);
+        }
+    }
+
+    /// [`Self::end_gpu_pass`] on a pass's command stream.
+    pub(crate) fn end_gpu_pass_cmds(&mut self, cmds: &mut crate::cmd::CommandRecorder<'_>, name: &'static str) {
+        if self.enabled {
+            self.gpu.end_pass(cmds, name);
+        }
+    }
+
     /// Resolve GPU timestamp queries to buffer (call after submitting command buffer)
     pub fn resolve_gpu_queries(&mut self, encoder: &mut wgpu::CommandEncoder, frame_index: u64) {
         if self.enabled {
@@ -311,20 +325,6 @@ impl Profiler {
         duration: std::time::Duration,
     ) {
         self.cpu.record_external(name, duration);
-    }
-
-    /// Fold GPU samples from a worker-local profiler into this graph profiler.
-    /// The worker query set is intentionally separate because wgpu query sets
-    /// and encoders are not safely shared while recording on scoped threads.
-    pub(crate) fn merge_external_gpu_timings(&mut self, samples: &[GpuTimestamp]) {
-        self.gpu.merge_external_timings(samples);
-    }
-
-    /// True once this profiler has completed at least one asynchronous GPU
-    /// readback. Used by externally-owned devices to retain worker profilers
-    /// until the host's poll cadence has delivered their mappings.
-    pub(crate) fn has_completed_gpu_timings(&self) -> bool {
-        self.gpu.last_completed_frame().is_some()
     }
 
     pub(crate) const fn gpu_timing_supported(&self) -> bool {

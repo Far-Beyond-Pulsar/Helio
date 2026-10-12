@@ -48,6 +48,8 @@ pub struct VirtualGeometryPass {
     pub(crate) work_item_buf: wgpu::Buffer,
     pub(crate) indirect_buf: wgpu::Buffer,
     pub(crate) draw_metadata_buf: wgpu::Buffer,
+    /// The draw slots the vertex shaders index `draw_metadata` with.
+    pub(crate) draw_slots: helio_pass_gbuffer::DrawSlots,
     pub(crate) draw_count_buf: wgpu::Buffer,
     pub(crate) debug_readback_buf: wgpu::Buffer,
     debug_readback_state: DebugReadbackState,
@@ -407,7 +409,7 @@ impl VirtualGeometryPass {
                     shader_location: 4,
                 },
             ],
-        })];
+        }), Some(helio_pass_gbuffer::DRAW_SLOT_LAYOUT)];
         let gbuffer_targets = &[
             Some(wgpu::ColorTargetState {
                 format: wgpu::TextureFormat::Rgba8Unorm,
@@ -559,6 +561,7 @@ impl VirtualGeometryPass {
             work_item_buf,
             indirect_buf,
             draw_metadata_buf,
+            draw_slots: Default::default(),
             draw_count_buf,
             debug_readback_buf,
             debug_readback_state: DebugReadbackState::Idle,
@@ -586,7 +589,7 @@ impl VirtualGeometryPass {
         self.debug_stats
     }
 
-    fn poll_debug_readback(&mut self, device: &wgpu::Device) {
+    fn poll_debug_readback(&mut self, device: &wgpu::Device, poll_device: bool) {
         if matches!(self.debug_readback_state, DebugReadbackState::CopySubmitted) {
             let completion = std::sync::Arc::new(std::sync::Mutex::new(None));
             let callback_completion = std::sync::Arc::clone(&completion);
@@ -602,7 +605,10 @@ impl VirtualGeometryPass {
             return;
         };
 
-        let _ = device.poll(wgpu::PollType::Poll);
+        // A shared device is maintained by every `Queue::submit`.
+        if poll_device {
+            let _ = device.poll(wgpu::PollType::Poll);
+        }
         let result = completion.lock().unwrap().take();
         match result {
             Some(Ok(())) => {
@@ -753,7 +759,7 @@ impl RenderPass for VirtualGeometryPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.poll_debug_readback(ctx.device);
+        self.poll_debug_readback(ctx.device, ctx.owns_device);
 
         let Some(vg): Option<crate::VgFrameData<'_>> = ctx.registry.get(helio_core::ResourceKey::new("vg")) else {
             return Ok(());
@@ -1191,6 +1197,16 @@ impl RenderPass for VirtualGeometryPass {
             self.cull_bind_group_hiz_key = Some(hiz_key);
         }
 
+        let slots = self
+            .draw_slots
+            .buffer(
+                ctx.device,
+                helio_pass_gbuffer::DrawSlots::len_of(
+                    self.draw_metadata_buf.size(),
+                    std::mem::size_of::<crate::GpuVgDraw>() as u64,
+                ),
+            )
+            .clone();
         let Some(cull_bg) = self.cull_bind_group.as_ref() else {
             return Ok(());
         };
@@ -1279,6 +1295,7 @@ impl RenderPass for VirtualGeometryPass {
             rpass.set_bind_group(0, draw_bg0, &[]);
             rpass.set_bind_group(1, draw_bg1, &[]);
             rpass.set_vertex_buffer(0, vertices.slice(..));
+            rpass.set_vertex_buffer(1, slots.slice(..));
             rpass.set_index_buffer(
                 indices.slice(..),
                 wgpu::IndexFormat::Uint32,

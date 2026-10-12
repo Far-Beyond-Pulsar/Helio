@@ -70,6 +70,7 @@ impl<'a> SceneInputAdapter<'a> {
             &self.device,
             &self.queue,
             &mut self.buffers,
+            self.world_origin,
         ) {
             self.queue.submit(std::iter::once(commands));
         }

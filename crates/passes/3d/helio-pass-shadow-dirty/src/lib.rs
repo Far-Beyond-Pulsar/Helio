@@ -19,11 +19,8 @@ const WORKGROUP_SIZE: u32 = 64;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ShadowDirtyUniforms {
-    movable_draw_count: u32,
     face_count: u32,
-    /// 1 on the frame when `movable_draw_count` changes — forces all faces dirty.
-    force_dirty_all: u32,
-    _pad: u32,
+    _pad: [u32; 3],
 }
 
 // ── Pass struct ───────────────────────────────────────────────────────────────
@@ -36,11 +33,15 @@ pub struct ShadowDirtyPass {
     /// Uniform buffer holding per-frame parameters.
     uniform_buf: wgpu::Buffer,
 
-    /// Previous-frame world-space XYZ positions of each movable draw call's object.
-    /// Layout: `array<vec4f>` indexed by draw-call index (NOT instance index).
-    /// Sized to `MAX_SHADOW_FACES * 16` bytes; only the first `movable_draw_count`
+    /// Previous-frame bounds and hash of each movable draw call.
+    /// Layout: `array<Previous>` indexed by draw-call index (NOT instance index),
+    /// sized for every draw the batch can produce; only the first live-count
     /// entries are valid.
     prev_positions_buf: wgpu::Buffer,
+
+    /// The movable caster count the last dispatch saw (one `u32`, GPU-only):
+    /// a change dirties every face.
+    last_movable_count_buf: wgpu::Buffer,
 
     /// Per-face dirty flag: 0 = clean, 1 = dirty (atomic u32 array, MAX_SHADOW_FACES entries).
     /// Shared with `ShadowPass` — published via `Arc` so the shadow pass can bind it.
@@ -57,10 +58,7 @@ pub struct ShadowDirtyPass {
     /// Bind group (lazy; rebuilt whenever the `instances` or `shadow_mats` buffer
     /// pointer changes due to `GrowableBuffer` reallocation).
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<[wgpu::Buffer; 5]>,
-
-    /// `movable_draw_count` seen last frame; used to detect topology changes.
-    last_movable_draw_count: u32,
+    bind_group_key: Option<[wgpu::Buffer; 6]>,
 }
 
 impl ShadowDirtyPass {
@@ -171,6 +169,28 @@ impl ShadowDirtyPass {
                     },
                     count: None,
                 },
+                // 9: Object Batch's GPU counts (movable caster count at word 2)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // 10: the movable count the last dispatch saw
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -209,6 +229,15 @@ impl ShadowDirtyPass {
             mapped_at_creation: false,
         });
 
+        // Starts at u32::MAX, which no live count equals: the first dispatch
+        // dirties every face.
+        let last_movable_count_buf =
+            wgpu::util::DeviceExt::create_buffer_init(device, &wgpu::util::BufferInitDescriptor {
+                label: Some("ShadowDirty/LastMovableCount"),
+                contents: &u32::MAX.to_le_bytes(),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+
         // face_dirty: one atomic<u32> per shadow face. Cleared by the command
         // encoder before the compute dispatch, which provides ordering across
         // every workgroup (a shader workgroup barrier cannot do that).
@@ -236,12 +265,12 @@ impl ShadowDirtyPass {
             bgl,
             uniform_buf,
             prev_positions_buf,
+            last_movable_count_buf,
             face_dirty_buf,
             face_geom_count_buf,
             light_dirty_buf,
             bind_group: None,
             bind_group_key: None,
-            last_movable_draw_count: u32::MAX, // force force_dirty_all on first frame
         }
     }
 }
@@ -269,13 +298,6 @@ impl RenderPass for ShadowDirtyPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let movable_draw_count = ctx
-            .registry
-            .get::<helio_pass_gbuffer::ObjectBatchFrameData<'_>>(helio_core::ResourceKey::new(
-                "object_batch",
-            ))
-            .map(|b| b.shadow_movable_draw_count)
-            .unwrap_or(0);
         let face_count = ctx
             .registry
             .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
@@ -285,19 +307,11 @@ impl RenderPass for ShadowDirtyPass {
             .unwrap_or(0)
             .min(MAX_SHADOW_FACES as u32);
 
-        // Detect topology changes (objects added/removed from movable set).
-        let force_dirty_all = if movable_draw_count != self.last_movable_draw_count {
-            self.last_movable_draw_count = movable_draw_count;
-            1u32
-        } else {
-            0u32
-        };
-
+        // The movable caster count, and whether it changed, are GPU-only:
+        // see `last_movable_count_buf`.
         let u = ShadowDirtyUniforms {
-            movable_draw_count,
             face_count,
-            force_dirty_all,
-            _pad: 0,
+            _pad: [0; 3],
         };
         ctx.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
@@ -313,7 +327,9 @@ impl RenderPass for ShadowDirtyPass {
         else {
             return Ok(());
         };
-        let movable_draw_count = batch.shadow_movable_draw_count;
+        // Every movable draw the batch can produce this frame; the live count
+        // is read on the GPU.
+        let draw_capacity = batch.group_capacity;
         let Some(coords) = ctx
             .registry
             .get::<helio_pass_gbuffer::CoordinateSpacesFrameData<'_>>(
@@ -322,7 +338,7 @@ impl RenderPass for ShadowDirtyPass {
         else {
             return Ok(());
         };
-        let required = u64::from(movable_draw_count.max(1)) * 32;
+        let required = u64::from(draw_capacity.max(1)) * 32;
         if required > self.prev_positions_buf.size() {
             self.prev_positions_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Shadow draw history"),
@@ -356,6 +372,7 @@ impl RenderPass for ShadowDirtyPass {
                 .clone(),
             (*self.light_dirty_buf).clone(),
             coords.coordinate_spaces.clone(),
+            batch.draw_counts_gpu.clone(),
         ];
 
         if self.bind_group_key.as_ref() != Some(&key) {
@@ -403,6 +420,14 @@ impl RenderPass for ShadowDirtyPass {
                             binding: 7,
                             resource: self.light_dirty_buf.as_entire_binding(),
                         },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: batch.draw_counts_gpu.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: self.last_movable_count_buf.as_entire_binding(),
+                        },
                     ],
                 }),
             );
@@ -417,10 +442,11 @@ impl RenderPass for ShadowDirtyPass {
         let mut cmds = ctx.graphics_cmds();
         // Pending dirty bits survive until ShadowPass services their tile.
 
-        // Dispatch enough threads to cover all movable draw calls.
-        // Dispatch at least one thread so topology changes with an empty
-        // movable set still pass through the force-dirty path.
-        let thread_count = movable_draw_count.max(1);
+        // Dispatch enough threads to cover every movable draw the batch can
+        // produce; threads past this frame's live count return at once.
+        // At least one thread, so a change to an empty movable set still
+        // passes through the force-dirty path.
+        let thread_count = draw_capacity.max(1);
         let workgroups = thread_count.div_ceil(WORKGROUP_SIZE);
 
         let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {

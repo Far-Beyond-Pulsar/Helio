@@ -14,8 +14,8 @@ pub use builder::{
     PassBuildContext, PassGraphBuilderFn, RendererBuilder, SceneDbHandle,
 };
 pub use config::{
-    recommended_instance_flags, required_experimental_features, required_wgpu_features,
-    required_wgpu_limits, GiConfig,
+    ray_queries_usable, recommended_instance_flags, required_experimental_features,
+    required_wgpu_features, required_wgpu_limits, usable_adapter_features, GiConfig,
     PerfOverlayMode, RenderMode, RendererConfig,
 };
 pub use debug::{DebugBatch, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex};

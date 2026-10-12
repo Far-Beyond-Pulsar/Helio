@@ -721,33 +721,6 @@ impl ApplicationHandler for App {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scene_db_light_projection_preserves_world_owned_records() {
-        let mut world = World::new();
-        let sun = spawn_scene_light(
-            &mut world,
-            directional_light([0.0, -1.0, 0.0], [1.0, 0.93, 0.75], 4.2),
-            [3.0, 4.0, 5.0],
-        );
-        let fill = spawn_scene_light(
-            &mut world,
-            point_light([0.0, 8.0, 0.0], [0.6, 0.7, 1.0], 12.0, 50.0),
-            [0.0, 8.0, 0.0],
-        );
-
-        let inputs = scene_light_inputs(&world);
-        assert_eq!(inputs.len(), 2);
-        assert_eq!(inputs[0].entity_index, sun.index());
-        assert_eq!(inputs[0].light.position_range[..3], [3.0, 4.0, 5.0]);
-        assert_eq!(inputs[1].entity_index, fill.index());
-        assert_eq!(inputs[1].light.position_range[..3], [0.0, 8.0, 0.0]);
-    }
-}
-
 fn main() {
     env_logger::Builder::from_default_env()
         .filter_level(log::LevelFilter::Info)

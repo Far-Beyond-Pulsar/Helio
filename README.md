@@ -158,7 +158,7 @@ There are three tiers, and they share one cost model. The overwhelming majority 
 
 A material is a plain struct. Its base color, emissive, and packed roughness/metallic/IOR/tint values are the ordinary PBR inputs, the texture fields are bindless indices, the `flags` field drives the first tier, `material_class` selects a template (zero being the built-in shader), and `class_params` is four free floats that whatever template is active can interpret however it likes.
 
-Helio uses bindless `BindingArray` material textures when the device supports the required features, and falls back to `Expanded` bindings otherwise. See [bindless rendering](docs/bindless_rendering.md) for the capability contract, bind group lifetime rules, and the current material dispatch boundary.
+Bindless `BindingArray` material textures are the default wherever the device supports the required features; `Expanded` bindings are the fallback on other adapters and on the web. Each material's draws are drawn from a fixed per-material segment that the GPU fills in the same frame, so a material never draws with another's pipeline while the scene changes. See [bindless rendering](docs/bindless_rendering.md) for the capability contract, bind group lifetime rules, and how material dispatch works.
 
 ```rust
 GpuMaterial {

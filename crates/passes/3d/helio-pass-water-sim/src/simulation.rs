@@ -30,4 +30,7 @@ pub(crate) struct DeltaUniform {
 pub(crate) struct HitboxCountUniform {
     pub count: u32,
     pub _pad: [u32; 3],
+    /// How far the world origin moved since the previous hitbox rows were
+    /// captured (`xyz`, `hitbox.frag.wgsl`).
+    pub previous_shift: [f32; 4],
 }

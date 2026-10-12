@@ -392,6 +392,7 @@ pub mod actor;
 pub mod asset_types;
 pub mod camera;
 pub mod cmd;
+pub(crate) mod cmd_ir;
 pub mod context;
 pub mod entity;
 pub mod error;
@@ -472,7 +473,7 @@ pub use graph::{
     BindingOverrideBuilder, DebugPassInfo, DebugResourceInfo, FinishSegment, FrameDebugData,
     GraphTimelineData, GraphTimelinePass, PipelineFormatCache, PipelineFormatKey,
     PipelineFormatSet, PipelineHandle, PipelineRecipeBuilder, PipelineRegistry, RenderGraph,
-    PassIdentity, SwapPlan, SwapPolicy,
+    PassIdentity, RecordingCacheStats, SwapPlan, SwapPolicy, UnitCacheStats,
 };
 pub use profiling::{
     FocusedTiming, FocusedTimingGroup, FocusedTimingReport, GpuTimingAvailability, Profiler,

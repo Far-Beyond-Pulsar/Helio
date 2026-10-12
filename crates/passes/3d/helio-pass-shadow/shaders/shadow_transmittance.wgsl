@@ -77,7 +77,9 @@ struct VsOut {
 @vertex
 fn vs_main(
     @location(0)             position: vec3<f32>,
-    @builtin(instance_index) slot:     u32,
+    // Per-instance vertex data, offset by the indirect draw's `first_instance`
+    // on every backend (`helio_pass_gbuffer::draw_slots`).
+    @location(15)            slot:     u32,
 ) -> VsOut {
     let inst  = instances[slot];
     let space = coordinate_spaces[(inst.flags >> 8u) & 0xFFu];

@@ -33,6 +33,8 @@ use wgpu::util::DeviceExt;
 pub mod components;
 mod coordinate_spaces_frame_data;
 mod culled_batch_frame_data;
+mod draw_segments;
+pub mod draw_slots;
 mod indirect_draw;
 mod object_batch_frame_data;
 pub use components::{
@@ -42,8 +44,10 @@ pub use components::{
 };
 pub use coordinate_spaces_frame_data::CoordinateSpacesFrameData;
 pub use culled_batch_frame_data::CulledBatchFrameData;
+pub use draw_segments::{DrawSegment, DrawSegments, ShadingBucket};
+pub use draw_slots::{DrawSlots, DRAW_SLOT_LAYOUT, DRAW_SLOT_LOCATION};
 pub use indirect_draw::{multi_draw_indexed_indirect, GpuDrawCount, DRAW_INDEXED_INDIRECT_STRIDE};
-pub use object_batch_frame_data::ObjectBatchFrameData;
+pub use object_batch_frame_data::{IndirectDispatchArgs, ObjectBatchFrameData};
 use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey};
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{
@@ -77,6 +81,8 @@ pub struct GBufferGlobals {
 // ── Pass struct ───────────────────────────────────────────────────────────────
 
 pub struct GBufferPass {
+    /// The draw slots the vertex shader reads (see [`DrawSlots`]).
+    draw_slots: DrawSlots,
     timing_query: Option<wgpu::QuerySet>,
     material_binding: helio_mats::MaterialBindingConfig,
     pipelines: HashMap<RadiantShaderKey, wgpu::RenderPipeline>,
@@ -275,6 +281,7 @@ impl GBufferPass {
         });
 
         Self {
+            draw_slots: DrawSlots::default(),
             timing_query: None,
             material_binding,
             pipelines: HashMap::new(),
@@ -650,8 +657,8 @@ impl RenderPass for GBufferPass {
         let Some(culled) = ctx.registry.get::<crate::CulledBatchFrameData<'_>>(helio_core::ResourceKey::new("culled_batch")) else {
             return Ok(());
         };
-        let draw_count = batch.draw_count;
-        if draw_count == 0 {
+        let (max_draws, draw_count) = batch.all_draws();
+        if max_draws == 0 {
             return Ok(());
         }
         let Some(material_textures) = ctx.registry.read::<helio_mats::MaterialTextureBindings<'_>>(helio_core::resource_keys::material_textures(), "GBuffer") else {
@@ -767,20 +774,28 @@ impl RenderPass for GBufferPass {
         }
 
         let indirect = culled.indirect;
+        // The slot indexes `compacted_indices`.
+        let slots = self
+            .draw_slots
+            .buffer(&ctx.device, DrawSlots::len_of(culled.compacted_indices.size(), 4))
+            .clone();
 
         let mut pass = ctx.render_cmds().unwrap();
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.set_vertex_buffer(1, slots.slice(..));
         pass.set_index_buffer(
             indices.slice(..),
             wgpu::IndexFormat::Uint32,
         );
 
-        let ranges = batch.opaque_ranges;
-        if ranges.is_empty() {
-            // Fallback: no ranges (e.g. legacy mode without material_class data).
-            // Use the default PBR pipeline and draw everything in one batch.
+        // One draw per material segment, at its fixed offset with this
+        // frame's GPU count (see `DrawSegments`).
+        let segments = culled.segments;
+        if segments.is_empty() {
+            // No material key read back yet (the first frames): draw every
+            // group with the default PBR pipeline.
             let key = RadiantShaderKey {
                 template_id: 0,
                 graph_hash: 0,
@@ -788,26 +803,17 @@ impl RenderPass for GBufferPass {
             };
             let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
             pass.set_pipeline(pipeline);
-            multi_draw_indexed_indirect(&mut pass, indirect, 0, draw_count, batch.all_draws_count_slot());
+            multi_draw_indexed_indirect(&mut pass, indirect, 0, max_draws, draw_count);
         } else {
-            for (range, &(class, graph_hash, start, count)) in ranges.iter().enumerate() {
-                if count == 0 {
-                    continue;
-                }
+            for (index, segment) in segments.in_bucket(crate::ShadingBucket::Opaque) {
                 let key = RadiantShaderKey {
-                    template_id: class,
-                    graph_hash,
+                    template_id: segment.material_class,
+                    graph_hash: segment.graph_hash,
                     feature_flags: 0,
                 };
                 let pipeline = self.get_or_create_pipeline(&ctx.device, key, "");
                 pass.set_pipeline(pipeline);
-                multi_draw_indexed_indirect(
-                    &mut pass,
-                    indirect,
-                    start,
-                    count,
-                    batch.opaque_range_count_slot(range),
-                );
+                segments.draw(&mut pass, index);
             }
         }
         Ok(())
@@ -1005,7 +1011,7 @@ impl GBufferPass {
                                 shader_location: 4,
                             },
                         ],
-                    })],
+                    }), Some(crate::DRAW_SLOT_LAYOUT)],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module,

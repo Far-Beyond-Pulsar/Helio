@@ -2,12 +2,17 @@
 
 Helio's material texture binding mode is selected once from the device's
 capabilities by `MaterialBindingConfig::from_capabilities` in `helio-mats`.
-`BindingArray` is the preferred mode and is selected when both
-`TEXTURE_BINDING_ARRAY` and
-`SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING` are available.
-Otherwise Helio uses `Expanded`, which exposes separate texture and sampler
-bindings. Web builds always use `Expanded`. Texture counts are clamped to the
-device's per-stage and per-bind-group limits in either mode.
+
+- **`BindingArray` is the default.** It is selected whenever the adapter
+  supports both `TEXTURE_BINDING_ARRAY` and
+  `SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING`;
+  `required_wgpu_features` requests them whenever the adapter has them.
+  Materials index one descriptor-indexed texture table (up to 256 textures).
+- **`Expanded` is the fallback**, with separate texture and sampler bindings,
+  on adapters without both features and on web builds.
+
+Texture counts are clamped to the device's per-stage and per-bind-group
+limits in either mode.
 
 Material texture indices and object/material data are read from shared tables;
 mesh vertex and index data are shared pools. A mode change is not a runtime
@@ -30,21 +35,80 @@ generation alongside the group and rebuild only when one of those bindings
 changes. Do not use a per-frame dirty flag for bindings whose resources have
 stable lifetimes.
 
-## Current material dispatch boundary
+## Material dispatch: per-material draw segments (Helio#330)
 
-Object Batch builds GPU-side draw and material-range tables. The GBuffer,
-ForwardLit, Transparent, and Shadow passes currently consume CPU-visible
-range metadata to choose the material-class/graph-hash pipeline and the
-indirect range. The bounded asynchronous readback in Object Batch exists for
-that dispatch contract; it is not a readback of per-object instance data.
-Therefore bindless texture lookup does not yet mean GPU-only material-class
-dispatch, and material ranges can still cause pipeline switches.
+Object Batch sorts draw groups by material key (`material_class`, graph hash)
+and builds the range tables on the GPU. A draw pass needs a pipeline per key
+and a CPU-side offset to draw from, but the CPU only sees the range tables
+through Object Batch's asynchronous readback, two or more frames late.
+Drawing a late range table against the current buffers drew some groups with
+a neighbouring material's pipeline whenever the layout shifted.
 
-Removing that readback requires changing the dispatch contract across those
-passes. A viable design must keep compatible material shader behavior while
-letting the GPU provide per-class draw counts (or dispatch through a shared
-shader); changing only the range readback would leave the passes without the
-CPU values they currently need to select pipelines and issue indirect draws.
+Passes now draw per-material segments instead
+(`helio_pass_gbuffer::DrawSegments`, built by `OcclusionCullPass`):
+
+- The CPU keeps a table of every material key seen in the range tables, per
+  shading bucket (opaque, transparent, forward). Each key owns a fixed region
+  of a segment indirect buffer, twice its observed group count rounded up to a
+  power of two, at least 64 records. Keys unseen for 300 frames are dropped.
+  The table changes, and is uploaded, only when a key appears, disappears or
+  outgrows its region.
+- Range compaction appends each range's surviving draws to its key's region
+  and counts them, on the GPU in the same frame. Ranges sharing a key (the sort
+  interleaves them by mesh) append to the same region.
+- GBuffer, Transparent and ForwardLit draw each segment of their bucket with
+  its key's pipeline, at its fixed offset, with the GPU count capped at the
+  region's capacity.
+
+So the readback only decides which keys have regions: a key seen for the
+first time is skipped until it has one, and survivors past a region's
+capacity are skipped until it grows. A draw is never made with another key's
+pipeline. Before any key has been read back, the passes draw every group with
+the default pipeline. Because the table rarely changes, the recorded draw
+commands stay the same frame to frame and the recording cache keeps hitting.
+
+Shadow, DepthPrepass and PortalInstances draw every group with one pipeline
+and don't use ranges.
+
+Culling doesn't wait for the readback either. Object Batch writes, on the
+GPU, a dispatch size of one workgroup per live draw group
+(`ObjectBatchFrameData::group_dispatch`), and the frustum and occlusion culls
+dispatch indirectly from it. Their buffers are sized from `group_capacity`,
+which follows the SceneDB row count on the CPU. Draws over every group read
+the GPU count with `group_capacity` as the bound. So an object spawned or
+despawned between frames is culled and drawn, or gone, in the very next
+frame (`crates/examples/tests/objects_cull_same_frame.rs`).
+
+The shadow and portal passes work the same way, reading the live counts
+Object Batch writes to `draw_counts_gpu` each frame (word 0 the group count,
+words 1 to 3 the static, movable and transmissive shadow-caster counts):
+
+- `ShadowDirty` covers every movable draw the batch can produce and reads the
+  live movable count on the GPU. It keeps the count it last saw in a GPU
+  buffer and dirties every shadow face when it changes, so a movable caster
+  spawned or despawned between frames casts, or stops casting, its shadow in
+  the very next frame (`crates/examples/tests/movable_shadows_same_frame.rs`).
+- The shadow atlas draws read the GPU counts, bounded by `group_capacity`.
+- `PortalCull` dispatches every group up to its 512-group limit, culls those
+  below the live count, and zeroes the records past it, so a despawned
+  group's portal copies are not drawn from stale records. `PortalInstance`
+  draws with the GPU count.
+
+Object Batch's read-back counts, which trail the GPU by the same frames, are
+still used where there is no GPU count or the CPU has to decide:
+
+- draws on devices without `MULTI_DRAW_INDIRECT_COUNT` (and on WebGPU), which
+  need a CPU bound and use the read-back count, so new groups appear there
+  once it catches up;
+- Hi-Z warm-up, which keeps occlusion testing off until the readback
+  confirms that real instances have been drawn into depth;
+- the static shadow layer. The shadow pass caches it per face and re-renders
+  a face, within a per-frame budget the CPU schedules, when its light changes
+  or when the static (or transmissive) caster count read back changes
+  (`shadow_static_generation`). A static object placed or removed therefore
+  updates the static layer a couple of frames late. SceneDB's change signal
+  can't stand in for it, since it also changes whenever a movable object
+  moves, which would invalidate the static cache every frame.
 
 ## GPU-driven draw encoding (Helio #306)
 
@@ -61,14 +125,6 @@ the CPU records a fixed three indirect compute dispatches. The count-capable
 path skips culled draw slots. The no-count fallback receives packed records
 with zeroed tails, and WebGPU continues to use individual indirect calls.
 
-The CPU still reads material-range metadata asynchronously to select the
-matching material pipeline. Removing that readback requires a stable
-material-class catalog or an uber-shader dispatch model across GBuffer,
-ForwardLit, Transparent, and Shadow. Until that dispatch contract is in
-place, a current-frame GPU range table cannot safely replace the one-frame
-delayed pipeline metadata.
-
-Object Batch now assigns range-table slots with a GPU prefix scan instead of
+Object Batch assigns range-table slots with a GPU prefix scan instead of
 atomic allocation. Opaque, transparent, and forward ranges are packed in
-sorted order, giving a stable mapping for each table while the readback is
-still in use.
+sorted order.

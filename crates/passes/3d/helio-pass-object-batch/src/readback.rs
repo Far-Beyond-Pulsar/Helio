@@ -1,22 +1,30 @@
 //! Small, bounded, async CPU readback of the GPU-computed range tables and
 //! draw/shadow counts.
 //!
-//! `helio-pass-gbuffer` (and `helio-pass-shadow`/`helio-pass-transparent`/
-//! `helio-pass-forward-lit`) select a PSO per `(material_class, graph_hash)`
-//! range and issue one `multi_draw_indexed_indirect(indirect, start * 20,
-//! count)` call per range -- `start`/`count` must be plain `u32`s the CPU
-//! holds before recording that draw call, not something read from a GPU
-//! buffer at submit time. Every OTHER byte this pipeline produces
+//! Draw passes pick a pipeline per `(material_class, graph_hash)`, so the
+//! CPU has to know which material keys exist. This table tells
+//! `helio-pass-occlusion-cull` which keys to give a draw segment (see
+//! `helio_pass_gbuffer::DrawSegments`); the draws themselves use the GPU's
+//! current tables, so the range `start`/`count` read back here are never used
+//! as draw offsets. Every OTHER byte this pipeline produces
 //! (`instances`/`aabbs`/`draw_calls`/the shadow-partitioned indirect lists)
 //! is read by later passes entirely on the GPU with zero CPU involvement --
 //! only this one small, already-bounded table (`#ranges <= #groups <=
 //! #objects`, and a real scene's distinct material combinations stay far
-//! below even that) ever needs to reach the CPU, and it does so the same
-//! way any GPU-driven renderer reads back a bounded indirect-count/range
-//! table: an async, non-blocking `map_async`, read whenever its callback
-//! has actually fired (never stalling the frame to wait for it), trailing
-//! whatever the GPU actually produced by however many frames the GPU
-//! happens to be behind -- typically one.
+//! below even that) and the counts reach the CPU, through an async,
+//! non-blocking `map_async`, read whenever its callback has actually fired
+//! (never stalling the frame to wait for it). The copy made in frame N's
+//! `prepare()` holds frame N-1's results and is harvested in frame N+1's, so
+//! the CPU's view trails the GPU by two frames or more.
+//!
+//! The counts don't size the main view's culling: the frustum and occlusion
+//! culls dispatch one workgroup per live group from a size the GPU writes the
+//! same frame (`ObjectBatchFrameData::group_dispatch`), and draws read the GPU
+//! count; the shadow and portal passes read the GPU counts too. The read-back
+//! counts remain for what has no GPU count or is a CPU decision: Hi-Z warm-up,
+//! the shadow pass's static-layer cache invalidation
+//! (`shadow_static_generation`), and draws on devices without
+//! `MULTI_DRAW_INDIRECT_COUNT`.
 //!
 //! This is emphatically NOT a readback of per-instance data: `instances`/
 //! `aabbs` (the only per-object-sized buffers) never touch the CPU.
@@ -200,8 +208,13 @@ impl RangeReadback {
         queue: &wgpu::Queue,
         scratch: &ScratchBuffers,
         kick_off_copy: bool,
+        poll_device: bool,
     ) {
-        device.poll(wgpu::PollType::Poll).ok();
+        // A shared device is maintained by every `Queue::submit` (see
+        // `PrepareContext::owns_device`), which delivers the map callbacks.
+        if poll_device {
+            device.poll(wgpu::PollType::Poll).ok();
+        }
 
         if self.gens.len() < GENERATIONS
             || self.gens.iter().any(|gen| gen.range_capacity() != self.range_capacity)

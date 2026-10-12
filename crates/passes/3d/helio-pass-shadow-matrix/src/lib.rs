@@ -550,6 +550,7 @@ impl RenderPass for ShadowMatrixPass {
         self.frame += 1;
         Ok(())
     }
+
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let mut cmds = ctx.graphics_cmds();
         if self.rows == 0 {

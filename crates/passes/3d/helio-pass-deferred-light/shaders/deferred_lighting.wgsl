@@ -117,7 +117,7 @@ struct GpuWaterVolume {
     _pad3: vec4<f32>,
     _pad4: vec4<f32>,
     _pad5: vec4<f32>,
-    _pad6: vec4<f32>,
+    world_phase: vec4<f32>,  // xy = the frame's world origin XZ mod 270 m
 }
 
 /// Per-cascade shadow configuration (16 bytes, matches libhelio::CascadeConfig)
@@ -1471,8 +1471,11 @@ fn water_caustics_light(world_pos: vec3<f32>) -> vec3<f32> {
     if world_pos.y >= vol.bounds_max.w || vol.caustics_params.x <= 0.5 {
         return vec3<f32>(0.0);
     }
-    // Sampled at the world XZ position, `caustics_params.z` metres a tile.
-    let caustics_uv = world_pos.xz / vol.caustics_params.z;
+    // Sampled at the world XZ position, `caustics_params.z` metres a tile;
+    // in a camera-relative frame, offset by the volume's world phase so the
+    // pattern stays put while the origin does (exactly so for tile sizes
+    // that divide 270 m).
+    let caustics_uv = (world_pos.xz + vol.world_phase.xy) / vol.caustics_params.z;
     let caustic_value = textureSampleLevel(water_caustics, caustics_sampler, caustics_uv, 0.0).r;
     return vec3<f32>(0.7, 0.9, 1.0) * caustic_value * vol.caustics_params.y;
 }

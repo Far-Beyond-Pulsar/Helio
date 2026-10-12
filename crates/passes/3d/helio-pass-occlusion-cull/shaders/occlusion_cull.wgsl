@@ -29,7 +29,8 @@ struct Camera {
 struct CullParams {
     screen_width:       u32,
     screen_height:      u32,
-    draw_count:         u32,
+    // Rows `draw_calls` holds. The indirect dispatch covers the live groups.
+    draw_capacity:      u32,
     hiz_mip_count:      u32,
     // Baked PVS grid (helio-bake, published as `baked_pvs`); 0 = none.
     pvs_available:      u32,
@@ -311,7 +312,7 @@ fn main(
     @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
     let idx = wg_id.x;
-    let active_draw = idx < params.draw_count;
+    let active_draw = idx < params.draw_capacity;
     var visible_count = 0u;
 
     // Cooperatively Hi-Z-test only the instances that already survived
