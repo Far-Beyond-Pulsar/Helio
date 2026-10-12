@@ -56,12 +56,12 @@ struct World {
 
 impl World {
     fn new(gpu: &Gpu, planet: &Planet) -> Self {
-        Self { chunks: ChunkWorld::new(&gpu.device, &gpu.queue, &std::sync::Arc::new(planet.clone())), frame: 0 }
+        Self { chunks: ChunkWorld::new(&gpu.device, &gpu.queue, planet), frame: 0 }
     }
 
     /// The planet's edits now (a new world for a history it cannot follow).
     fn sync(&mut self, gpu: &Gpu, planet: &Planet) {
-        if !self.chunks.sync_edits(&std::sync::Arc::new(planet.clone())) {
+        if !self.chunks.sync_edits(planet) {
             *self = Self::new(gpu, planet);
         }
     }

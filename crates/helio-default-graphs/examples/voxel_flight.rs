@@ -11,7 +11,8 @@
 //!   `ChunkWorld` alone (`CHUNKHOLD`: its GPU stages), or with
 //!   `HELIO_VOXEL_CHUNKS_ENGINE=1` by the renderer's chunk pass
 //!   (`CHUNKENGINE`: the frame as a host draws it). With
-//!   `HELIO_VOXEL_CHUNKS_DIG=n` the view is dug and undone.
+//!   `HELIO_VOXEL_CHUNKS_DIG=n` the view is dug and undone, with
+//!   `HELIO_VOXEL_CHUNKS_BLAST=r` blasted by one ball `r` m across.
 //! * `HELIO_VOXEL_CHUNKS_FLY=descent|cruise` streams along a path.
 //!
 //! World: `HELIO_VOXEL_FLIGHT_VOXEL` (0.1 m), `_SEED` (7), `_PRESET`
@@ -477,8 +478,10 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
 /// view centre's hit (from the centre out), then undo them one a frame: what each edit generates
 /// again and costs, when it shows (the centre pixel's depth), and whether
 /// the undone frame's hits match the first's. Saves
-/// `<out>/dig_{before,dug,undone}.png`.
-fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usize) {
+/// `<out>/dig_{before,dug,undone}.png`. With a `blast` radius (m), one ball
+/// of it instead, half sunk just beyond the view centre: the frames until
+/// the world follows it and their costs.
+fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usize, blast: Option<f64>) {
     use helio_pass_voxel_planet::chunks::ChunkWorld;
     let [w, h] = flight.size;
     let mut planet = (*flight.planet).clone();
@@ -494,7 +497,7 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
     // One frame: follow the planet's edits, update, draw; GPU times and the
     // tiles generated again.
     let step = |world: &mut ChunkWorld, planet: &Planet, frame: &mut u64| {
-        assert!(world.sync_edits(&Arc::new(planet.clone())), "edits follow");
+        assert!(world.sync_edits(planet), "edits follow");
         let mut encoder = flight.device.create_command_encoder(&Default::default());
         let stats = world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, DVec3::ZERO, None, *frame, &config);
         world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), *frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun, [w, h]);
@@ -522,15 +525,15 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
     let centre_depth = |world: &ChunkWorld| depth_at(world, w / 2, h / 2);
     // Down the centre column, the chunk hit against the exact CPU raycast
     // of `planet`: the largest difference (m).
-    let worst = |world: &ChunkWorld, planet: &Planet| -> (f64, u32) {
+    let worst = |world: &ChunkWorld, planet: &Planet, rows: std::ops::Range<u32>| -> (f64, u32) {
         let inverse = (camera.proj * camera.view).inverse();
         let mut worst = (0.0f64, 0u32);
-        for y in (h / 2..h).step_by(12) {
+        for y in rows.step_by(12) {
             let ndc = Vec3::new(0.5 / w as f32, 1.0 - (y as f32 + 0.5) / h as f32 * 2.0, 0.5);
             let far = inverse * ndc.extend(1.0);
             let dir = (far.truncate() / far.w).normalize().as_dvec3();
             let gpu = f64::from(depth_at(world, w / 2, y));
-            let cpu = planet.raycast(eye, dir, 1000.0).map_or(0.0, |h| h.distance);
+            let cpu = planet.raycast(eye, dir, blast.map_or(1000.0, |r| (r * 4.0).max(1000.0))).map_or(0.0, |h| h.distance);
             if (gpu - cpu).abs() > worst.0 {
                 worst = ((gpu - cpu).abs(), y);
             }
@@ -565,6 +568,47 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
     let at = eye + forward.as_dvec3() * hit.distance;
     let side = forward.as_dvec3().cross(up.as_dvec3()).normalize();
     eprintln!("CHUNKDIG {view}: centre at {:.2} m, {count} balls across it", hit.distance);
+    if let Some(radius) = blast {
+        let up = up.as_dvec3();
+        let ahead = (forward.as_dvec3() - up * forward.as_dvec3().dot(up)).normalize();
+        planet.apply(Brush { center: (at + ahead * radius - up * (radius * 0.5)).to_array(), radius, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        // Frames until the world follows it: tiles, GPU generation, CPU.
+        let follow = |world: &mut ChunkWorld, planet: &Planet, frame: &mut u64, what: &str| {
+            let (mut frames, mut tiles, mut most, mut gen_max, mut cpu_max, mut gen_sum) = (0, 0, 0, 0.0f64, 0.0f64, 0.0);
+            let started = Instant::now();
+            loop {
+                let stats = step(world, planet, frame);
+                let gen: f64 = world.take_timings().iter().map(|t| t.generate).sum();
+                frames += 1;
+                tiles += stats.generated_tiles;
+                most = most.max(stats.generated_tiles);
+                gen_max = gen_max.max(gen);
+                gen_sum += gen;
+                cpu_max = cpu_max.max(stats.cpu_ms.iter().sum::<f64>());
+                if std::env::var_os("HELIO_VOXEL_CHUNKS_TRACE").is_some() {
+                    eprintln!("CHUNKBLAST frame {frames}: tiles {} regen {} requests {} gen {gen:.2} ms cpu {:?} drawn {} resident {} slots {}", stats.generated_tiles, stats.regenerated_tiles, stats.requests, stats.cpu_ms.map(|v| (v * 100.0).round() / 100.0), stats.drawn_chunks, stats.resident_chunks, stats.out_of_slots);
+                }
+                if world.settled() || frames >= 600 {
+                    break;
+                }
+            }
+            eprintln!(
+                "CHUNKBLAST {view} {what}: r {radius:.0} m, {frames} frames ({:.2} s) to settle, tiles {tiles} (most a frame {most}), generation {gen_sum:.1} ms (most a frame {gen_max:.2}), update cpu most a frame {cpu_max:.2} ms",
+                started.elapsed().as_secs_f64()
+            );
+        };
+        follow(&mut world, &planet, &mut frame, "blasted");
+        step(&mut world, &planet, &mut frame);
+        let (error, row) = worst(&world, &planet, 0..h);
+        eprintln!("CHUNKBLAST {view}: centre column against the CPU raycast: worst {error:.2} m (row {row})");
+        save_chunk_colour(flight, &world, out.join("blast.png").to_str().unwrap());
+        planet.undo().unwrap();
+        follow(&mut world, &planet, &mut frame, "undone");
+        step(&mut world, &planet, &mut frame);
+        let differ = before_hits.iter().zip(world.read_hits()).filter(|(a, b)| a.map(|h| (h.cell, h.level)) != b.map(|h| (h.cell, h.level))).count();
+        eprintln!("CHUNKBLAST {view}: undone frame's hits differ from the first's in {differ} pixels");
+        return;
+    }
     let (mut tiles, mut gen_ms, mut shown) = (Vec::new(), Vec::new(), None);
     for n in 0..count {
         // From the centre outwards: the first are sealed into the baked
@@ -578,7 +622,7 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
             shown = Some(n);
         }
     }
-    let (error, row) = worst(&world, &planet);
+    let (error, row) = worst(&world, &planet, h / 2..h);
     eprintln!("CHUNKDIG {view}: dug, centre column against the CPU raycast: worst {error:.2} m (row {row})");
     let dug_path = out.join("dig_dug.png");
     save_chunk_colour(flight, &world, dug_path.to_str().unwrap());
@@ -1023,7 +1067,7 @@ fn main() {
         if std::env::var_os("HELIO_VOXEL_CHUNKS_ENGINE").is_some() {
             chunk_engine_hold(&mut flight, &view, e, f);
         } else if let Some(count) = std::env::var("HELIO_VOXEL_CHUNKS_DIG").ok().and_then(|v| v.parse().ok()) {
-            chunk_dig(&flight, &view, e, f, count);
+            chunk_dig(&flight, &view, e, f, count, std::env::var("HELIO_VOXEL_CHUNKS_BLAST").ok().and_then(|v| v.parse().ok()));
         } else {
             chunk_hold(&flight, &view, e, f);
         }

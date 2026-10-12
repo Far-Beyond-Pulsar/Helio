@@ -14,7 +14,7 @@ pub mod pass;
 pub mod residency;
 
 use crate::edit_store::{ColumnKey, EditStore};
-use crate::edits::FaceBrush;
+use crate::edits::{center_half, FaceBrush};
 use crate::engine::{terrain_bytes, terrain_source, WorldGpu};
 use crate::grid::Grid;
 use crate::planet::{Edits, Planet};
@@ -622,9 +622,6 @@ pub struct ChunkWorld {
     urgent: FxHashSet<TileKey>,
     stale: FxHashSet<TileKey>,
     grid: Grid,
-    /// The planet whose edits the world shows: what lies in a tile's
-    /// regions without surfaces (`ChunkWorld::layers`).
-    planet: std::sync::Arc<Planet>,
     /// Height over the datum above which nothing is solid (terrain,
     /// overhangs, edits), with a margin: rays rising past it end.
     ceiling: f64,
@@ -837,7 +834,7 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
 }
 
 impl ChunkWorld {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, planet: &std::sync::Arc<Planet>) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet) -> Self {
         let program = planet.field().program();
         let wide64 = device.features().contains(wgpu::Features::SHADER_INT64);
         let [(_, gen_source), (_, draw_source)] = shader_sources(planet.grid().is_plane(), &program, wide64, std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some());
@@ -1178,7 +1175,6 @@ impl ChunkWorld {
             urgent: FxHashSet::default(),
             stale: FxHashSet::default(),
             grid: *planet.grid(),
-            planet: planet.clone(),
             ceiling: planet.outer_radius() - planet.grid().radius() + CEILING_MARGIN,
             height_layers: (
                 (planet.min_terrain_height() / planet.grid().voxel_size()).floor() as i32 - 64,
@@ -1250,7 +1246,7 @@ impl ChunkWorld {
     }
 
     /// `tile`'s field `ranges` with the layers its edits change: the bands
-    /// of the brushes that add or remove over it ([`Self::surface_band`]),
+    /// of the brushes that add or remove over it ([`Self::surface_bands`]),
     /// and its baked bricks.
     /// Residency measures a tile's distance by them (the floor of a deep dig
     /// is near an eye down there).
@@ -1260,9 +1256,10 @@ impl ChunkWorld {
         let (mut lo, mut hi) = (i32::MAX, i32::MIN);
         for fb in &self.faces {
             if fb.op() <= 1 && brush_meets(fb, tile.face, tile.level, span(tile.cx), span(tile.cy), (i64::MIN / 4, i64::MAX / 4)) {
-                let band = self.surface_band(fb, tile.level);
-                lo = lo.min(band.0);
-                hi = hi.max(band.1);
+                for band in self.surface_bands(fb, tile).into_iter().filter(|b| b.1 > b.0) {
+                    lo = lo.min(band.0);
+                    hi = hi.max(band.1);
+                }
             }
         }
         if self.baked_tiles.contains(&tile) {
@@ -1279,27 +1276,62 @@ impl ChunkWorld {
         residency::Ranges { edits: if lo > hi { residency::NO_EDITS } else { (lo, hi) }, ..ranges }
     }
 
-    /// Layers [lo, hi) of `level` where brush `fb`'s surface can be, with a
-    /// cell of margin: its heights, except that a ball holding a sphere's
-    /// centre carves down to the centre but its sphere lies no lower than
-    /// its radius less the centre's offset (the air inside holds nothing).
-    fn surface_band(&self, fb: &FaceBrush, level: u32) -> (i32, i32) {
+    /// Layers [lo, hi) of `tile`'s level where brush `fb`'s surface can be
+    /// over the tile, with a cell of margin (none: lo >= hi). A brush's
+    /// heights; a ball's, the heights of its sphere's lower and upper caps
+    /// over the tile (one band where the tile reaches the sphere's
+    /// silhouette; the air inside holds nothing). Along a direction at
+    /// angle t from the ball's centre (d from the planet's, radius r) the
+    /// caps lie at d cos t -+ sqrt(r^2 - d^2 sin^2 t): the lower rises with
+    /// t, the upper falls, so the tile's nearest and farthest angles bound
+    /// them.
+    fn surface_bands(&self, fb: &FaceBrush, tile: TileKey) -> [(i32, i32); 2] {
         let grid = &self.grid;
-        let mut k_lo = fb.k_lo;
-        if fb.shape() == crate::edits::SHAPE_BALL && !grid.is_plane() {
-            let units = f64::from(grid.sphere_constants()[2]) / grid.radius();
-            let centre = glam::IVec3::from_slice(&fb.ball[..3]).as_dvec3().length();
-            let low = (centre - f64::from(fb.ball[3].unsigned_abs())).abs() / units;
-            k_lo = k_lo.max((((low - grid.radius()) / grid.voxel_size() - 2.0) * 2.0).clamp(-2.0e9, 2.0e9) as i32);
+        let shift = tile.level + 1;
+        let band = |k_lo: i32, k_hi: i32| ((k_lo.max(fb.k_lo) >> shift) - 1, (k_hi.min(fb.k_hi) >> shift) + 2);
+        const NO_BAND: (i32, i32) = (0, 0);
+        if fb.shape() != crate::edits::SHAPE_BALL || grid.is_plane() {
+            return [band(fb.k_lo, fb.k_hi), NO_BAND];
         }
-        let shift = level + 1;
-        ((k_lo >> shift) - 1, (fb.k_hi >> shift) + 2)
+        let units = f64::from(grid.sphere_constants()[2]) / grid.radius();
+        let centre = glam::IVec3::from_slice(&fb.ball[..3]).as_dvec3() / units;
+        let (d, r) = (centre.length(), f64::from(fb.ball[3].unsigned_abs()) / units);
+        // The tile's directions in the brushes' (domain) space: its middle,
+        // and the angle to its farthest corner cell (its edges are great
+        // circles) and two base cells more.
+        let size = CHUNK << tile.level;
+        let (i0, j0) = (tile.cx * size, tile.cy * size);
+        let towards = |i: i32, j: i32| grid.domain_point(tile.face, i, j, 0).as_dvec3().normalize();
+        let middle = towards(i0 + size / 2, j0 + size / 2);
+        let spread = [(0, 0), (1, 0), (0, 1), (1, 1)]
+            .iter()
+            .map(|&(a, b)| middle.angle_between(towards(i0 + a * (size - 1), j0 + b * (size - 1))))
+            .fold(0.0, f64::max)
+            * 1.01
+            + 2.0 * grid.voxel_size() / grid.radius();
+        let t = if d > 0.0 { middle.angle_between(centre / d) } else { 0.0 };
+        let (near, far) = ((t - spread).max(0.0), (t + spread).min(std::f64::consts::PI));
+        // Half base cells of a radius, two cells of margin.
+        let k = |radius: f64, margin: f64| (((radius - grid.radius()) / grid.voxel_size() + margin) * 2.0).clamp(-2.0e9, 2.0e9) as i32;
+        let cap = |t: f64, sign: f64| d * t.cos() + sign * (r * r - (d * t.sin()).powi(2)).max(0.0).sqrt();
+        if d <= r {
+            // The planet's centre is inside: the upper cap alone.
+            return [band(k(cap(far, 1.0), -2.0), k(cap(near, 1.0), 2.0)), NO_BAND];
+        }
+        let silhouette = (r / d).asin();
+        if near >= silhouette {
+            return [NO_BAND; 2];
+        }
+        if far >= silhouette {
+            return [band(k(cap(near, -1.0), -2.0), k(cap(near, 1.0), 2.0)), NO_BAND];
+        }
+        [band(k(cap(near, -1.0), -2.0), k(cap(far, -1.0), 2.0)), band(k(cap(far, 1.0), -2.0), k(cap(near, 1.0), 2.0))]
     }
 
     /// The chunk layers `tile` generates and what lies where it has none.
     /// Its chunks hold every surface: the field's band
-    /// ([`layers_needed`]), each brush's (a ball's: the radii its sphere
-    /// spans; a box's: its height) and its baked bricks', in bands two
+    /// ([`layers_needed`]), each brush's over it
+    /// ([`Self::surface_bands`]) and its baked bricks', in bands two
     /// chunks apart or more. A region between bands, or under them, holds
     /// no surface, so it is all rock or all air across the tile: one cell
     /// of the planet tells which. Rock between bands is a solid gap (one;
@@ -1314,9 +1346,15 @@ impl ChunkWorld {
         if hi > lo {
             bands.push((lo, hi));
         }
+        // The brushes that add or remove over the tile, in order.
+        let mut shapes = Vec::new();
         for fb in &self.faces {
             if fb.op() <= 1 && brush_meets(fb, tile.face, tile.level, span(tile.cx), span(tile.cy), (i64::MIN / 4, i64::MAX / 4)) {
-                bands.push(self.surface_band(fb, tile.level));
+                let before = bands.len();
+                bands.extend(self.surface_bands(fb, tile).into_iter().filter(|b| b.1 > b.0));
+                if bands.len() > before {
+                    shapes.push(fb);
+                }
             }
         }
         if self.baked_tiles.contains(&tile) {
@@ -1341,16 +1379,24 @@ impl ChunkWorld {
                 _ => merged.push((a, b)),
             }
         }
-        // What fills the regions without surfaces: a cell at the tile's
-        // centre, in the middle of the region (base cells).
-        let solid = |z: i32| {
-            let centre = |c: i32| ((c * CHUNK + CHUNK / 2) << tile.level) + (1 << tile.level) / 2;
-            self.planet.solid(crate::grid::Cell::new(tile.face, centre(tile.cx), centre(tile.cy), z << tile.level))
-        };
         // Only regions clear of the field's volume (its caves may lie under
         // the surface band) hold no surface; a gap within it keeps its
         // chunks, and under the chunks stays rock reached through mouths.
         let volume = (ranges.volume.0.div_euclid(CHUNK), (ranges.volume.1 - 1).div_euclid(CHUNK));
+        // What fills a region without surfaces: at a cell of it under the
+        // tile's centre, the last brush that adds or removes there, else the
+        // field (rock under its volume, air over it). Baked edits lie in
+        // bands of their own.
+        let solid = |z: i32| {
+            let (i, j) = (tile.cx * CHUNK + CHUNK / 2, tile.cy * CHUNK + CHUNK / 2);
+            let centre = [center_half(i, tile.level), center_half(j, tile.level), center_half(z, tile.level)];
+            let mut point = None;
+            shapes
+                .iter()
+                .rev()
+                .find(|b| b.contains(centre, || *point.get_or_insert_with(|| grid.volume_point(tile.face, i, j, z, tile.level))))
+                .map_or(z < ranges.volume.0, |b| b.op() == 1)
+        };
         let clear = |a: i32, b: i32| b <= volume.0 || a > volume.1;
         let mut gap = drawn::Gap::default();
         if let Some(&(first, _)) = merged.first().filter(|_| edited) {
@@ -1444,8 +1490,7 @@ impl ChunkWorld {
     /// under baked edits that changed (a seal's coarser levels), within the
     /// budget. False when its edits do not follow these (another history):
     /// build the world again.
-    pub fn sync_edits(&mut self, planet: &std::sync::Arc<Planet>) -> bool {
-        self.planet = planet.clone();
+    pub fn sync_edits(&mut self, planet: &Planet) -> bool {
         let edits = planet.edits();
         let state = EditState::of(edits);
         if state == self.edit_state {
@@ -1647,6 +1692,12 @@ impl ChunkWorld {
         for (key, urgent) in edited {
             if !urgent && batch.tile_jobs.len() >= budget.min(TILE_BATCH) {
                 break;
+            }
+            // Edited tiles past a full batch wait for the next frame (their
+            // layers cost CPU field samples).
+            if urgent && (stats.out_of_slots || batch.tile_jobs.len() >= TILE_BATCH || batch.chunk_jobs.len() >= CHUNK_BATCH) {
+                self.urgent.insert(key);
+                continue;
             }
             self.stale.remove(&key);
             let Some(ranges) = self.tiles.get(&key).map(|t| t.ranges) else { continue };
