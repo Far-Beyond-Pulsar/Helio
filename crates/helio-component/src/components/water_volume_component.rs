@@ -289,7 +289,7 @@ impl WaterVolumeComponent {
                 self.wind_strength,
                 if self.use_global_wind { 0.0 } else { 1.0 },
             ],
-            _pad6: [0.0; 4],
+            world_phase: [0.0; 4],
         }
     }
 }

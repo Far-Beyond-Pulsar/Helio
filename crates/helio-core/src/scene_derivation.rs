@@ -24,6 +24,10 @@ pub struct SceneDerivationContext<'a> {
     pub device: &'a Arc<wgpu::Device>,
     pub queue: &'a Arc<wgpu::Queue>,
     pub inputs: &'a SceneBufferProjection,
+    /// The frame's world origin in camera-relative frames
+    /// (`SceneInput::world_origin`). A derivation that outputs world-space
+    /// positions subtracts it, as every pass consuming world-space data does.
+    pub world_origin: Option<glam::DVec3>,
 }
 
 /// The buffers a derivation publishes this frame, and whether it recorded
@@ -59,6 +63,7 @@ pub fn run_scene_derivations(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
     projection: &mut SceneBufferProjection,
+    world_origin: Option<glam::DVec3>,
 ) -> Option<wgpu::CommandBuffer> {
     if derivations.is_empty() {
         return None;
@@ -73,6 +78,7 @@ pub fn run_scene_derivations(
                 device,
                 queue,
                 inputs: projection,
+                world_origin,
             },
             &mut encoder,
         );

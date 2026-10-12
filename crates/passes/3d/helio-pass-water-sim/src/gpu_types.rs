@@ -32,7 +32,7 @@ use bytemuck::{Pod, Zeroable};
 /// 12 ssr_params              → (enable, max_steps, step_size, thickness)
 /// 13 sim_dynamics            → (spring, damping, wave_scale, _)
 /// 14 wind_params             → (dir_x, dir_z, strength, own_wind)
-/// 15 _pad6                   → reserved
+/// 15 world_phase             → (x, z, _, _)  [world origin mod WATER_WORLD_PERIOD]
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuWaterVolume {
@@ -89,7 +89,12 @@ pub struct GpuWaterVolume {
     /// when the volume opts out of the level's global wind, which the
     /// environment join otherwise writes over the first three.
     pub wind_params: [f32; 4],
-    pub _pad6: [f32; 4],
+    /// Where the row's frame sits in the waves' world tiling: the frame's
+    /// world origin modulo [`crate::WATER_WORLD_PERIOD`] (`x`, `z`), zero
+    /// for a world-space frame. The environment join writes it for
+    /// camera-relative frames; hosts that write rows themselves leave it
+    /// zero.
+    pub world_phase: [f32; 4],
 }
 
 impl GpuWaterVolume {
@@ -116,7 +121,7 @@ impl GpuWaterVolume {
             // wave_spring=1.2, wave_damping=0.985 — fluid, not jelly
             sim_dynamics: [1.2, 0.985, 1.0, 0.0],
             wind_params: [0.0; 4],
-            _pad6: [0.0; 4],
+            world_phase: [0.0; 4],
         }
     }
 
@@ -140,7 +145,7 @@ impl GpuWaterVolume {
             // wave_spring=1.0, wave_damping=0.980 — still water settles fast
             sim_dynamics: [1.0, 0.980, 1.0, 0.0],
             wind_params: [0.0; 4],
-            _pad6: [0.0; 4],
+            world_phase: [0.0; 4],
         }
     }
 }

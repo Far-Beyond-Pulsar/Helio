@@ -27,6 +27,9 @@ struct LightJoinUniforms {
     billboards: u32,
     _pad0: u32,
     _pad1: u32,
+    // The frame's world origin (hi + lo), zero outside camera-relative frames.
+    origin_hi: vec4<f32>,
+    origin_lo: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: LightJoinUniforms;
@@ -66,11 +69,13 @@ fn cs_join_lights(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let t = transforms[index];
+    // World space: the billboard pass subtracts the origin itself.
     let position = object_position(t);
+    let relative = relative_position(position, u.origin_hi.xyz, u.origin_lo.xyz);
     let direction = object_rotation(t) * vec3<f32>(0.0, -1.0, 0.0);
-    light.position_range[0] = position.x;
-    light.position_range[1] = position.y;
-    light.position_range[2] = position.z;
+    light.position_range[0] = relative.x;
+    light.position_range[1] = relative.y;
+    light.position_range[2] = relative.z;
     light.direction_outer[0] = direction.x;
     light.direction_outer[1] = direction.y;
     light.direction_outer[2] = direction.z;

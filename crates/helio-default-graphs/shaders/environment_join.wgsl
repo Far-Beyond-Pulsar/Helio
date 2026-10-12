@@ -43,6 +43,12 @@ struct JoinUniforms {
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
+    // The frame's world origin (hi + lo); see `RELATIVE`.
+    origin_hi: vec4<f32>,
+    origin_lo: vec4<f32>,
+    // The world origin's X and Z modulo the water's world period (`xy`),
+    // which `RELATIVE` water rows carry as their world phase.
+    water_phase: vec4<f32>,
 }
 
 const SPATIAL: u32 = 1u;
@@ -56,11 +62,18 @@ const SUN: u32 = 128u;
 const WATER_WIND: u32 = 256u;
 const HITBOX: u32 = 512u;
 const SPRITE: u32 = 1024u;
+// Positions relative to the frame's world origin, for passes that draw in
+// the frame's space (Pulsar-Native#1127). Tables whose pass adds or
+// subtracts the origin itself (fog, post-process volumes, atmospheres)
+// stay in world space.
+const RELATIVE: u32 = 2048u;
 // `helio_pass_water_sim::GpuWaterVolume`: `sun_direction` and `wind_params`
 // (`w`: the volume opts out of the global wind).
 const WATER_SUN_WORD: u32 = 44u;
 const WATER_WIND_WORD: u32 = 56u;
 const WATER_OWN_WIND_WORD: u32 = 59u;
+// `GpuWaterVolume::world_phase`.
+const WATER_PHASE_WORD: u32 = 60u;
 // `environment_join.rs`'s `WATER_WIND_STRENGTH_PER_SPEED`.
 const WATER_WIND_PER_SPEED: f32 = 0.5;
 // `scene_lights` rows (`helio_pass_forward_lit::GpuLight`): 32 words.
@@ -162,6 +175,15 @@ fn write_layer(row: u32, output: u32) {
     rows_out[output + 7u] = sources[source + 1u];
 }
 
+/// The owner's position as this table places rows: relative to the world
+/// origin for a `RELATIVE` table, in world space otherwise.
+fn placed_position(t: ObjectTransform) -> vec3<f32> {
+    if (u.flags & RELATIVE) != 0u {
+        return relative_position(object_position(t), u.origin_hi.xyz, u.origin_lo.xyz);
+    }
+    return object_position(t);
+}
+
 /// A decal's world-to-decal transform (`mat4x4`, column-major, words 0..15
 /// of the output row): world space into the owner-placed box, whose full
 /// local extent is the source size, so the box spans -1..1 on each axis.
@@ -171,7 +193,7 @@ fn write_decal_transform(row: u32, output: u32) {
     let t = transforms[owners[row].owner_index];
     let r = object_rotation(t);
     let half = source_size(row) * object_scale(t) * 0.5;
-    let center = object_position(t);
+    let center = placed_position(t);
     for (var i = 0u; i < 3u; i++) {
         let axis = r[i] / half[i];
         for (var j = 0u; j < 3u; j++) {
@@ -189,7 +211,7 @@ fn write_emitter_transform(row: u32, output: u32) {
     let t = transforms[owners[row].owner_index];
     let r = object_rotation(t);
     let scale = object_scale(t);
-    let center = object_position(t);
+    let center = placed_position(t);
     for (var i = 0u; i < 3u; i++) {
         let axis = r[i] * scale[i];
         for (var j = 0u; j < 3u; j++) {
@@ -290,7 +312,7 @@ fn body_bounds(row: u32) -> BodyBounds {
     let t = transforms[body.owner_index];
     let r = object_rotation(t);
     let scale = object_scale(t);
-    let position = object_position(t);
+    let position = placed_position(t);
     let largest_scale = max(abs(scale.x), max(abs(scale.y), abs(scale.z)));
     var lo = vec3<f32>(3.0e38);
     var hi = vec3<f32>(-3.0e38);
@@ -379,7 +401,7 @@ fn write_row(row: u32, slot: u32) {
         let half = abs(source_size(row) * scale) * 0.5;
         let r = object_rotation(t);
         let extent = abs(r[0]) * half.x + abs(r[1]) * half.y + abs(r[2]) * half.z;
-        let center = object_position(t);
+        let center = placed_position(t);
         let lo = center - extent;
         let hi = center + extent;
         var w = 0.0;
@@ -418,6 +440,17 @@ fn write_row(row: u32, slot: u32) {
     }
     if (u.flags & SUN) != 0u {
         write_sun(output);
+    }
+    if (u.flags & SURFACE) != 0u {
+        // Zero in world space, where positions are already world positions.
+        var phase = vec2<f32>(0.0);
+        if (u.flags & RELATIVE) != 0u {
+            phase = u.water_phase.xy;
+        }
+        rows_out[output + WATER_PHASE_WORD] = bitcast<u32>(phase.x);
+        rows_out[output + WATER_PHASE_WORD + 1u] = bitcast<u32>(phase.y);
+        rows_out[output + WATER_PHASE_WORD + 2u] = 0u;
+        rows_out[output + WATER_PHASE_WORD + 3u] = 0u;
     }
     if (u.flags & SPRITE) != 0u {
         write_sprite_placement(row, output);

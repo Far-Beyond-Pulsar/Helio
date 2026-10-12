@@ -876,6 +876,8 @@ impl WaterSimPass {
                 }),
             hitbox_count_buf,
             hitbox_prev_buf,
+            hitbox_origin: [0.0; 3],
+            hitbox_prev_shift: [0.0; 3],
             pending_drops: std::collections::VecDeque::new(),
             drop_staged: false,
             static_box_vbuf,

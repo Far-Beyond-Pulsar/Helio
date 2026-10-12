@@ -137,6 +137,18 @@ fn run(
     scene: &Scene,
     generation: u64,
 ) -> SceneBufferProjection {
+    run_at(join, device, queue, scene, generation, None)
+}
+
+/// [`run`] in a frame with `world_origin`.
+fn run_at(
+    join: &mut SceneJoin,
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    scene: &Scene,
+    generation: u64,
+    world_origin: Option<glam::DVec3>,
+) -> SceneBufferProjection {
     let mut projection = scene.projection(device, queue, generation);
     let mut encoder = device.create_command_encoder(&Default::default());
     let output = join.derive(
@@ -144,6 +156,7 @@ fn run(
             device,
             queue,
             inputs: &projection,
+            world_origin,
         },
         &mut encoder,
     );
@@ -434,6 +447,80 @@ fn placed_instances_are_joined_with_their_owner_and_nothing_else_is() {
     );
 }
 
+/// In a camera-relative frame, positions come out relative to the world
+/// origin, exactly: at Earth radius an f32 world position steps by 0.5 m,
+/// so a world-space model matrix would snap every vertex to that grid
+/// (Pulsar-Native#1127). The billboard pass subtracts the origin itself, so
+/// a light's billboard stays in world space.
+#[test]
+fn camera_relative_frames_get_positions_relative_to_the_world_origin() {
+    let Some((device, queue)) = device() else {
+        eprintln!("skipping: no GPU adapter available");
+        return;
+    };
+    let mut scene = base_scene();
+    // 6_371_002.5 is an f32 (0.5 m steps up there); the origin is not.
+    let far = Transform {
+        position: [1.0, 6_371_002.5, 3.0],
+        rotation: [30.0, 45.0, 10.0],
+        scale: [2.0, 1.0, 0.5],
+    };
+    scene.put(
+        KEYS.transforms,
+        &[
+            far,
+            Transform::zeroed_row(),
+            Transform::zeroed_row(),
+            Transform::zeroed_row(),
+        ],
+    );
+    let origin = glam::DVec3::new(0.75, 6_371_000.125, -2.0);
+    let mut join = SceneJoin::new(&device, KEYS, true);
+    let out = run_at(&mut join, &device, &queue, &scene, 1, Some(origin));
+
+    // The exact offset: what f64 arithmetic gives, to the f32 rounding of a
+    // small number, where a world-space position would be 0.5 m out.
+    let offset = (glam::Vec3::from_array(far.position).as_dvec3() - origin).as_vec3();
+    assert_eq!(offset, glam::Vec3::new(0.25, 2.375, 5.0));
+    let objects: Vec<helio_pass_gbuffer::StaticObjectComponent> = read(
+        &device,
+        &queue,
+        &out.get(BufferKey::of("static_objects")).unwrap().buffer,
+    );
+    let model = glam::Mat4::from_cols_array_2d(&objects[0].transform);
+    assert_eq!(model.w_axis.truncate(), offset, "model translation");
+    let relative = Transform {
+        position: offset.to_array(),
+        ..far
+    };
+    let center = model_of(&relative).transform_point3(glam::Vec3::new(0.5, 0.0, 0.0));
+    assert!(close(&objects[0].bounds[..3], &center.to_array()), "bounds centre");
+
+    let lights: Vec<helio::GpuLight> = read(
+        &device,
+        &queue,
+        &out.get(BufferKey::of("scene_lights")).unwrap().buffer,
+    );
+    assert_eq!(&lights[2].position_range[..3], &offset.to_array(), "light position");
+    let billboards: Vec<[f32; 12]> = read(
+        &device,
+        &queue,
+        &out.get(BufferKey::of("billboard_instances")).unwrap().buffer,
+    );
+    assert_eq!(&billboards[2][..3], &far.position, "the billboard stays in world space");
+
+    // A moved origin moves every position, though no input row changed.
+    let moved = origin + glam::DVec3::new(0.0, 1.0, 0.0);
+    let out = run_at(&mut join, &device, &queue, &scene, 1, Some(moved));
+    let objects: Vec<helio_pass_gbuffer::StaticObjectComponent> = read(
+        &device,
+        &queue,
+        &out.get(BufferKey::of("static_objects")).unwrap().buffer,
+    );
+    let model = glam::Mat4::from_cols_array_2d(&objects[0].transform);
+    assert_eq!(model.w_axis.y, offset.y - 1.0);
+}
+
 #[test]
 fn hiding_the_owner_a_stale_generation_or_a_disabled_light_removes_the_rows() {
     let Some((device, queue)) = device() else {
@@ -515,6 +602,7 @@ fn unchanged_inputs_record_nothing_and_keep_the_outputs() {
                 device: &device,
                 queue: &queue,
                 inputs: &projection,
+                world_origin: None,
             },
             &mut encoder,
         );

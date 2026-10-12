@@ -7,6 +7,8 @@ description = "Default render graph builders for Helio — depends on all pass c
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+# The scene join's world origin (`SceneDerivationContext::world_origin`).
+glam = { workspace = true }
 helio = { path = "../helio" }
 helio-core = { workspace = true }
 pulsar_scenedb = { workspace = true }

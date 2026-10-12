@@ -40,7 +40,7 @@ struct WaterVolume {
     ssr_params:            vec4f,
     sim_dynamics:          vec4f,
     wind_params:           vec4f,
-    _pad:                  vec4f,
+    world_phase:           vec4f,
 }
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;

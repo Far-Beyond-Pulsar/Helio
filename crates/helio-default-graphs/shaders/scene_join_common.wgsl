@@ -44,6 +44,12 @@ fn object_position(t: ObjectTransform) -> vec3<f32> {
     return vec3<f32>(t.position[0], t.position[1], t.position[2]);
 }
 
+/// `position` relative to the world origin `hi + lo` (an f32 pair of the
+/// f64 origin). Subtracting `hi` first is exact for positions near it.
+fn relative_position(position: vec3<f32>, hi: vec3<f32>, lo: vec3<f32>) -> vec3<f32> {
+    return (position - hi) - lo;
+}
+
 fn object_scale(t: ObjectTransform) -> vec3<f32> {
     return vec3<f32>(t.scale[0], t.scale[1], t.scale[2]);
 }

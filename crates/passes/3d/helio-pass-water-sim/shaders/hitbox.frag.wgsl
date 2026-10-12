@@ -40,17 +40,22 @@ struct HitboxUniforms {
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
+    /// How far a camera-relative frame's world origin moved since
+    /// `previous` was captured (xyz): its bounds are relative to the old one.
+    previous_shift: vec4<f32>,
 }
 @group(0) @binding(2) var<uniform> u: HitboxUniforms;
 
 @group(0) @binding(3) var<storage, read> hitboxes: array<GpuWaterHitbox>;
 @group(0) @binding(4) var<storage, read> previous: array<GpuWaterHitbox>;
 
-/// `GpuWaterVolume` (16 vec4s); only the bounds are read here.
+/// `GpuWaterVolume` (16 vec4s); only the bounds and world phase are read
+/// here.
 struct WaterVolume {
     bounds_min: vec4<f32>,
     bounds_max: vec4<f32>,  // w = rest height of the surface
-    _rest: array<vec4<f32>, 14>,
+    _rest: array<vec4<f32>, 13>,
+    world_phase: vec4<f32>, // xy = the frame's world origin XZ mod 270 m
 }
 @group(0) @binding(5) var<storage, read> volumes: array<WaterVolume>;
 
@@ -71,8 +76,10 @@ fn volume_in_box(box_min: vec3<f32>, box_max: vec3<f32>, uv: vec2<f32>, softness
     let box_half    = (box_max - box_min) * 0.5;
     let rest_y      = vol.bounds_max.w;
 
-    // The world XZ this texel stands for, in the tile nearest the box.
-    let tile = uv * PATCH_SIZE;
+    // The world XZ this texel stands for, in the tile nearest the box. The
+    // waves tile the world, so in a camera-relative frame the texel's
+    // tiling is offset by the volume's world phase (as in `surface.wgsl`).
+    let tile = uv * PATCH_SIZE - vol.world_phase.xy;
     let world_xz = tile + PATCH_SIZE * round((box_center.xz - tile) / PATCH_SIZE);
     if any(world_xz < vol.bounds_min.xz) || any(world_xz > vol.bounds_max.xz) {
         return 0.0;
@@ -119,8 +126,8 @@ fn fs_main(
         var old_max = hb.old_max.xyz;
         let last = previous[i];
         if last.params.z == hb.params.z && last.params.y != 0.0 {
-            old_min = last.new_min.xyz;
-            old_max = last.new_max.xyz;
+            old_min = last.new_min.xyz - u.previous_shift.xyz;
+            old_max = last.new_max.xyz - u.previous_shift.xyz;
         }
 
         // Water rises where the box *was* (old position)

@@ -62,7 +62,7 @@ struct WaterVolume {
     ssr_params:            vec4<f32>,
     sim_dynamics:          vec4<f32>,  // x = spring, y = damping, z = wave scale
     wind_params:           vec4<f32>,  // xy = direction (XZ), z = strength
-    _pad:                  vec4<f32>,
+    world_phase:           vec4<f32>,
 }
 @group(0) @binding(3) var<storage, read> volumes: array<WaterVolume>;
 
