@@ -42,6 +42,10 @@ struct DrawParams {
     // x: the eye's squared radius less the ceiling's, over which nothing
     // is solid (a plane: the eye's height over it).
     ceiling: vec4<f32>,
+    // The planet's radius and voxel (m), the first level walked in the
+    // grid's own cells (`exact_level`), the eye's squared radius less the
+    // planet's (from f64).
+    planet: vec4<f32>,
 }
 
 // A chunk's frame, written when it is generated: M's columns and M^-1's
@@ -193,12 +197,14 @@ fn cull_bin(@builtin(global_invocation_id) id: vec3<u32>) {
     let slot = drawn_slots[id.x];
     let c = chunk_frame(slot);
     let top = chunk_meta[slot].top;
-    let z0 = c.box.x;
-    let z1 = clamp(top.z + max(top.x, 0.0) * 64.0 + max(top.y, 0.0) * 64.0, c.box.y, 64.0);
+    let grow = statics[slot].m0.w;
+    let z0 = c.box.x - grow;
+    let z1 = select(clamp(top.z + max(top.x, 0.0) * 64.0 + max(top.y, 0.0) * 64.0, c.box.y, 64.0), c.box.y + grow, grow > 0.0);
     let m = mat3x3<f32>(c.m0.xyz, c.m1.xyz, c.m2.xyz);
     let centre = vec3<f32>(c.m0.w, c.m1.w, c.m2.w) + m * vec3<f32>(32.0, 32.0, (z0 + z1) * 0.5);
     let half_z = (z1 - z0) * 0.5;
-    let radius = max(length(m * vec3<f32>(32.0, 32.0, half_z)), length(m * vec3<f32>(32.0, -32.0, half_z)));
+    let half = 32.0 + grow;
+    let radius = max(length(m * vec3<f32>(half, half, half_z)), length(m * vec3<f32>(half, -half, half_z)));
     let vp = params.view_proj;
     let r0 = vec4<f32>(vp[0].x, vp[1].x, vp[2].x, vp[3].x);
     let r1 = vec4<f32>(vp[0].y, vp[1].y, vp[2].y, vp[3].y);
@@ -217,7 +223,7 @@ fn cull_bin(@builtin(global_invocation_id) id: vec3<u32>) {
         if distance < radius * 1.01 + near * 4.0 {
             let o = vec3<f32>(c.i0.w, c.i1.w, c.i2.w);
             let margin = vec3<f32>(length(c.i0.xyz), length(c.i1.xyz), length(c.i2.xyz)) * near * 2.0;
-            if all(o > vec3<f32>(-margin.x, -margin.y, z0 - margin.z)) && all(o < vec3<f32>(64.0 + margin.x, 64.0 + margin.y, z1 + margin.z)) { bin = 0u; }
+            if all(o > vec3<f32>(-grow - margin.x, -grow - margin.y, z0 - margin.z)) && all(o < vec3<f32>(64.0 + grow + margin.x, 64.0 + grow + margin.y, z1 + margin.z)) { bin = 0u; }
         }
         atomicAdd(&cull.bins[bin], 1u);
     }
@@ -289,16 +295,20 @@ fn seed_vertex_inside(@builtin(vertex_index) v: u32, @builtin(instance_index) n:
 fn seed_box(slot: u32, v: u32, inside: bool) -> VOut {
     let c = chunk_frame(slot);
     let corner = CORNERS[v];
-    var x = f32(corner & 1u) * 64.0;
+    // An exact chunk's cells reach past its frame's box by `grow` cells:
+    // its box holds them, flat over them.
+    let grow = statics[slot].m0.w;
+    var x = f32(corner & 1u) * (64.0 + 2.0 * grow) - grow;
     // Mirroring x maps the box onto itself and reverses its winding: a
     // left-handed frame, or a box drawn from inside (its back faces).
     let mirrored = (bitcast<u32>(c.box.w) & 1u) != 0u;
     if mirrored != inside { x = 64.0 - x; }
     // The box's top lies on its chunk's plane over the solid cells (never
     // below its bottom): raising a corner keeps the faces over the cells.
-    let y = f32((corner >> 1u) & 1u) * 64.0;
+    let y = f32((corner >> 1u) & 1u) * (64.0 + 2.0 * grow) - grow;
     let top = chunk_meta[slot].top;
-    let local = vec3<f32>(x, y, select(c.box.x, max(c.box.x, top.z + top.x * x + top.y * y), (corner & 4u) != 0u));
+    let plane = select(max(c.box.x, top.z + top.x * x + top.y * y), c.box.y + grow, grow > 0.0);
+    let local = vec3<f32>(x, y, select(c.box.x - grow, plane, (corner & 4u) != 0u));
     let world = vec3<f32>(c.m0.w, c.m1.w, c.m2.w) + c.m0.xyz * local.x + c.m1.xyz * local.y + c.m2.xyz * local.z;
     var out: VOut;
     out.position = params.view_proj * vec4<f32>(world, 1.0);
@@ -351,6 +361,8 @@ struct Hit {
     axis: u32,
     hit: bool,
     material: u32,
+    // Whether the ray moved up the axis it entered by.
+    positive: bool,
 }
 
 // Whether cell `c` of chunk `slot` is solid (outside the chunk: no).
@@ -396,7 +408,7 @@ fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u
         let m = u32((c.x >> 4u) + ((c.y >> 4u) << 2u) + ((c.z >> 4u) << 4u));
         var size = 16;
         if bit64(root.root_occ, m) {
-            if bit64(root.root_full, m) { return Hit(t, c, axis, true, shown_material(mid_materials[slot * 64u + m], slot, c, axis == 2u && !positive.z)); }
+            if bit64(root.root_full, m) { return Hit(t, c, axis, true, shown_material(mid_materials[slot * 64u + m], slot, c, axis == 2u && !positive.z), positive[axis]); }
             if m != node_at {
                 node = mids[slot * 64u + m];
                 first_leaf = mid_leaves[slot * 64u + m];
@@ -405,7 +417,7 @@ fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u
             let l = u32(((c.x >> 2u) & 3) + (((c.y >> 2u) & 3) << 2u) + (((c.z >> 2u) & 3) << 4u));
             size = 4;
             if bit64(node.xy, l) {
-                if bit64(node.zw, l) { return Hit(t, c, axis, true, shown_material(mid_materials[slot * 64u + m], slot, c, axis == 2u && !positive.z)); }
+                if bit64(node.zw, l) { return Hit(t, c, axis, true, shown_material(mid_materials[slot * 64u + m], slot, c, axis == 2u && !positive.z), positive[axis]); }
                 let index = first_leaf + rank64(node.xy & ~node.zw, l);
                 if index != leaf_at {
                     leaf = leaves[index];
@@ -413,7 +425,7 @@ fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u
                 }
                 size = 1;
                 if bit64(leaf, u32((c.x & 3) + ((c.y & 3) << 2u) + ((c.z & 3) << 4u))) {
-                    return Hit(t, c, axis, true, shown_material(leaf_materials[index >> 1u] >> ((index & 1u) * 16u), slot, c, axis == 2u && !positive.z));
+                    return Hit(t, c, axis, true, shown_material(leaf_materials[index >> 1u] >> ((index & 1u) * 16u), slot, c, axis == 2u && !positive.z), positive[axis]);
                 }
             }
         }
@@ -433,7 +445,281 @@ fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u
         if axis == 0u { c.x = step.x; } else if axis == 1u { c.y = step.y; } else { c.z = step.z; }
         if any(c < vec3<i32>(0, 0, z.x)) || any(c > vec3<i32>(63, 63, z.y - 1)) { break; }
     }
-    return Hit(t1, c, axis, false, 0u);
+    return Hit(t1, c, axis, false, 0u, false);
+}
+
+// ---- Exact cells ----
+// Chunks and air of level `params.planet.z` and coarser are walked in the
+// grid's own cells, not in an affine frame: on a face, cells of constant i
+// or j lie between planes through the planet's centre (equal angles), and
+// layers between spheres about it, so a ray meets their sides exactly, at
+// the root of a linear function of t (a plane) or a quadratic (a sphere).
+// Across a chunk an affine frame strays from the sphere by 512 x cell /
+// radius of a cell: half a cell at an Earth's coarsest level, whose tiles
+// span 600 km (facets, cracks between tiles, haze by the facets' heights).
+// Finer levels keep their frames: exact there to under a hundredth of a
+// cell, and precise where planet-centred f32 positions are not.
+
+const QUARTER_PI: f32 = 0.78539816;
+
+// A ray planet-centred: origin p, unit direction d, dot(p, d) and
+// |p|^2 - R^2 (the eye's from f64, moved to the origin).
+struct ExactRay {
+    p: vec3<f32>,
+    d: vec3<f32>,
+    b: f32,
+    c: f32,
+}
+
+// The ray org + t dir (eye-relative).
+fn exact_ray(org: vec3<f32>, dir: vec3<f32>) -> ExactRay {
+    let e = params.up.xyz * params.up.w;
+    return ExactRay(e + org, dir, dot(e, dir) + dot(org, dir), params.planet.w + 2.0 * dot(e, org) + dot(org, org));
+}
+
+// Whether boxes of `level` are walked in the grid's own cells.
+fn exact_level(level: i32) -> bool {
+    return !PLANE_WORLD && level >= i32(params.planet.z);
+}
+
+// The angle a cell of `level` spans across a face.
+fn cell_angle(level: i32) -> f32 {
+    return 1.5707964 / f32(params.table.y) * f32(1u << u32(level));
+}
+
+// A ray's first stretch in a box of cells from a time on: [t0, t1], and
+// the sides it enters and leaves by (2 x axis, + 1 on the high side; 6:
+// none, or out of the face's side of the centre).
+struct Span {
+    t0: f32,
+    t1: f32,
+    enter: u32,
+    leave: u32,
+}
+
+// `s` where g0 + t g1 >= 0 (side `code`).
+fn half_line(s: Span, g0: f32, g1: f32, code: u32) -> Span {
+    var o = s;
+    if g1 > 0.0 {
+        let t = -g0 / g1;
+        if t > o.t0 {
+            o.t0 = t;
+            o.enter = code;
+        }
+    } else if g1 < 0.0 {
+        let t = -g0 / g1;
+        if t < o.t1 {
+            o.t1 = t;
+            o.leave = code;
+        }
+    } else if g0 < 0.0 {
+        o.t1 = o.t0 - 1.0;
+    }
+    return o;
+}
+
+// Where the ray meets the sphere of layer bound `k` of `level` (radius R
+// + k cells): the roots of t^2 + 2 b t + c, (smaller, larger), or none
+// (x > y: missed, or no sphere).
+fn shell_roots(ray: ExactRay, level: i32, k: i32) -> vec2<f32> {
+    let h = f32(k) * params.planet.y * f32(1u << u32(level));
+    if params.planet.x + h <= 0.0 { return vec2<f32>(1.0, -1.0); }
+    let c = ray.c - h * (2.0 * params.planet.x + h);
+    let disc = ray.b * ray.b - c;
+    if disc < 0.0 { return vec2<f32>(1.0, -1.0); }
+    // Stable: q and c / q.
+    let q = -ray.b - select(-1.0, 1.0, ray.b >= 0.0) * sqrt(disc);
+    if q == 0.0 { return vec2<f32>(0.0); }
+    return vec2<f32>(min(q, c / q), max(q, c / q));
+}
+
+// The ray's first stretch from `after` in cells [lo, hi) of `level` on
+// `face` (the face's indices).
+fn box_span(ray: ExactRay, face: i32, level: i32, lo: vec3<i32>, hi: vec3<i32>, after: f32) -> Span {
+    var s = Span(after, 3.0e38, 6u, 6u);
+    let n = vec3<f32>(FACE_N[face]);
+    let np = dot(n, ray.p);
+    let nd = dot(n, ray.d);
+    // On the face's side of the centre (its cells' angles hold there).
+    s = half_line(s, np, nd, 6u);
+    let delta = cell_angle(level);
+    for (var axis = 0; axis < 2; axis++) {
+        let a = vec3<f32>(select(FACE_B[face], FACE_A[face], axis == 0));
+        let ap = dot(a, ray.p);
+        let ad = dot(a, ray.d);
+        let tl = tan(f32(lo[axis]) * delta - QUARTER_PI);
+        let th = tan(f32(hi[axis]) * delta - QUARTER_PI);
+        // Index >= lo: ap - tl np >= 0; < hi: th np - ap > 0.
+        s = half_line(s, ap - tl * np, ad - tl * nd, u32(2 * axis));
+        s = half_line(s, th * np - ap, th * nd - ad, u32(2 * axis + 1));
+    }
+    // Under the high sphere.
+    let outer = shell_roots(ray, level, hi.z);
+    if outer.x > outer.y {
+        s.t1 = s.t0 - 1.0;
+        return s;
+    }
+    if outer.x > s.t0 {
+        s.t0 = outer.x;
+        s.enter = 5u;
+    }
+    if outer.y < s.t1 {
+        s.t1 = outer.y;
+        s.leave = 5u;
+    }
+    // Over the low one: the first stretch out of it.
+    let inner = shell_roots(ray, level, lo.z);
+    if inner.x <= inner.y && inner.y > s.t0 && inner.x < s.t1 {
+        if inner.x > s.t0 {
+            s.t1 = inner.x;
+            s.leave = 4u;
+        } else {
+            s.t0 = inner.y;
+            s.enter = 4u;
+        }
+    }
+    return s;
+}
+
+// When and by which side a ray inside cells [lo, hi) of `level` on `face`
+// at time `t` leaves them (`box_span`'s t1 and leave): only the sides
+// ahead of it. Along a ray a face's index moves one way (u = a.p / n.p has
+// a derivative of constant sign); its height falls until the ray's
+// closest approach, then rises.
+fn box_exit(ray: ExactRay, face: i32, level: i32, lo: vec3<i32>, hi: vec3<i32>, t: f32) -> Span {
+    var s = Span(t, 3.0e38, 6u, 6u);
+    let n = vec3<f32>(FACE_N[face]);
+    let np = dot(n, ray.p);
+    let nd = dot(n, ray.d);
+    s = half_line(s, np, nd, 6u);
+    let delta = cell_angle(level);
+    for (var axis = 0; axis < 2; axis++) {
+        let a = vec3<f32>(select(FACE_B[face], FACE_A[face], axis == 0));
+        let ap = dot(a, ray.p);
+        let ad = dot(a, ray.d);
+        if ad * np - ap * nd > 0.0 {
+            let th = tan(f32(hi[axis]) * delta - QUARTER_PI);
+            s = half_line(s, th * np - ap, th * nd - ad, u32(2 * axis + 1));
+        } else {
+            let tl = tan(f32(lo[axis]) * delta - QUARTER_PI);
+            s = half_line(s, ap - tl * np, ad - tl * nd, u32(2 * axis));
+        }
+    }
+    if ray.b + t < 0.0 {
+        let inner = shell_roots(ray, level, lo.z);
+        if inner.x <= inner.y && inner.x > t && inner.x < s.t1 {
+            s.t1 = inner.x;
+            s.leave = 4u;
+        }
+    }
+    let outer = shell_roots(ray, level, hi.z);
+    if outer.x <= outer.y && outer.y < s.t1 {
+        s.t1 = outer.y;
+        s.leave = 5u;
+    }
+    return s;
+}
+
+// The ray's cell coordinates of `level` on `face` (continuous) at time t.
+fn exact_cell(ray: ExactRay, face: i32, level: i32, t: f32) -> vec3<f32> {
+    let q = ray.p + ray.d * t;
+    let n = dot(vec3<f32>(FACE_N[face]), q);
+    let delta = cell_angle(level);
+    let i = (atan2(dot(vec3<f32>(FACE_A[face]), q), n) + QUARTER_PI) / delta;
+    let j = (atan2(dot(vec3<f32>(FACE_B[face]), q), n) + QUARTER_PI) / delta;
+    // Height over the datum from |q|^2 - R^2 (precise near it).
+    let e = ray.c + t * (2.0 * ray.b + t);
+    let k = e / (length(q) + params.planet.x) / (params.planet.y * f32(1u << u32(level)));
+    return vec3<f32>(i, j, k);
+}
+
+// `trace_chunk` in the grid's own cells: chunk `slot`, cells `origin` +
+// [0, 64) of `level` on `face`, from t0 to t1, entering through face
+// `axis0` (up it: `positive0`).
+fn trace_exact(slot: u32, ray: ExactRay, face: i32, level: i32, origin: vec3<i32>, t0: f32, t1: f32, axis0: u32, positive0: bool, z: vec2<i32>, counted: bool) -> Hit {
+    let root = chunk_meta[slot];
+    var t = t0;
+    var axis = axis0;
+    var positive = positive0;
+    var c = clamp(vec3<i32>(floor(exact_cell(ray, face, level, t))) - origin, vec3<i32>(0, 0, z.x), vec3<i32>(63, 63, z.y - 1));
+    var node_at = NONE;
+    var node = vec4<u32>(0u);
+    var first_leaf = 0u;
+    var leaf_at = NONE;
+    var leaf = vec2<u32>(0u);
+    for (var n = 0u; n < 512u; n++) {
+        WCOUNT(1)
+        let m = u32((c.x >> 4u) + ((c.y >> 4u) << 2u) + ((c.z >> 4u) << 4u));
+        var size = 16;
+        if bit64(root.root_occ, m) {
+            if bit64(root.root_full, m) { return Hit(t, c, axis, true, shown_material(mid_materials[slot * 64u + m], slot, c, axis == 2u && !positive), positive); }
+            if m != node_at {
+                node = mids[slot * 64u + m];
+                first_leaf = mid_leaves[slot * 64u + m];
+                node_at = m;
+            }
+            let l = u32(((c.x >> 2u) & 3) + (((c.y >> 2u) & 3) << 2u) + (((c.z >> 2u) & 3) << 4u));
+            size = 4;
+            if bit64(node.xy, l) {
+                if bit64(node.zw, l) { return Hit(t, c, axis, true, shown_material(mid_materials[slot * 64u + m], slot, c, axis == 2u && !positive), positive); }
+                let index = first_leaf + rank64(node.xy & ~node.zw, l);
+                if index != leaf_at {
+                    leaf = leaves[index];
+                    leaf_at = index;
+                }
+                size = 1;
+                if bit64(leaf, u32((c.x & 3) + ((c.y & 3) << 2u) + ((c.z & 3) << 4u))) {
+                    return Hit(t, c, axis, true, shown_material(leaf_materials[index >> 1u] >> ((index & 1u) * 16u), slot, c, axis == 2u && !positive), positive);
+                }
+            }
+        }
+        // Leave the empty cube of `size` cells holding c.
+        let b = c & vec3<i32>(~(size - 1));
+        let s = box_exit(ray, face, level, origin + b, origin + b + vec3<i32>(size), t);
+        if s.t1 >= t1 || s.leave >= 6u { break; }
+        axis = s.leave >> 1u;
+        positive = (s.leave & 1u) == 1u;
+        t = max(s.t1, t);
+        if size != 1 {
+            c = clamp(vec3<i32>(floor(exact_cell(ray, face, level, t))) - origin, b, b + vec3<i32>(size - 1));
+        }
+        let step = select(b - vec3<i32>(1), b + vec3<i32>(size), vec3<bool>(positive));
+        if axis == 0u { c.x = step.x; } else if axis == 1u { c.y = step.y; } else { c.z = step.z; }
+        if any(c < vec3<i32>(0, 0, z.x)) || any(c > vec3<i32>(63, 63, z.y - 1)) { break; }
+    }
+    return Hit(t1, c, axis, false, 0u, false);
+}
+
+// The frame shading reads at cell `cell` of chunk `slot`: the chunk's, or
+// at an exact level the grid's own axes at the cell's centre (its
+// mapping's derivatives there), eye-relative.
+fn cell_frame(slot: u32, cell: vec3<i32>) -> ChunkDraw {
+    let c = chunk_frame(slot);
+    let key = chunk_keys[slot];
+    let level = key.x >> 8u;
+    if !exact_level(level) { return c; }
+    let face = key.x & 7;
+    let g = vec3<f32>(key.yzw * 64 + cell) + 0.5;
+    let delta = cell_angle(level);
+    let u = tan(g.x * delta - QUARTER_PI);
+    let v = tan(g.y * delta - QUARTER_PI);
+    let a = vec3<f32>(FACE_A[face]);
+    let b = vec3<f32>(FACE_B[face]);
+    let w = vec3<f32>(FACE_N[face]) + a * u + b * v;
+    let len = length(w);
+    let dir = w / len;
+    let size = params.planet.y * f32(1u << u32(level));
+    let radius = params.planet.x + g.z * size;
+    let mx = (a - dir * dot(dir, a)) * (radius * (1.0 + u * u) * delta / len);
+    let my = (b - dir * dot(dir, b)) * (radius * (1.0 + v * v) * delta / len);
+    let mz = dir * size;
+    let origin = dir * radius - params.up.xyz * params.up.w - (mx * (f32(cell.x) + 0.5) + my * (f32(cell.y) + 0.5) + mz * (f32(cell.z) + 0.5));
+    // M^-1's rows: cross products over the determinant.
+    let det = dot(mx, cross(my, mz));
+    let i0 = cross(my, mz) / det;
+    let i1 = cross(mz, mx) / det;
+    let i2 = cross(mx, my) / det;
+    return ChunkDraw(vec4<f32>(mx, origin.x), vec4<f32>(my, origin.y), vec4<f32>(mz, origin.z), vec4<f32>(i0, -dot(i0, origin)), vec4<f32>(i1, -dot(i1, origin)), vec4<f32>(i2, -dot(i2, origin)), c.box);
 }
 
 // The eye ray through pixel `p` (camera-relative, unit length).
@@ -633,7 +919,7 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
         // Finer than the ray's frame: crossed in the frame of the tile's top
         // chunk (in coarser cells the top would round).
         let f = frame_of(up < 0 || crossed, vec4<i32>(tile_key, tile, (column.z - 1) >> 6u));
-        if crossed && f == NONE { return lost; }
+        if crossed && f == NONE && !exact_level(level + up) { return lost; }
         return Place(NONE, level + up, vec3<i32>(at * 64, top), vec3<i32>(at * 64 + 64, top + (1 << 20)), f);
     }
     if layer < column.x {
@@ -641,7 +927,7 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
         // rock, reached through a cave mouth among them.
         if gap_of(tile_key, tile).z == 0 { return Place(NONE, BELOW, vec3<i32>(tile, level + diff), vec3<i32>(face, 0, 0), NONE); }
         let f = frame_of(diff < 0 || crossed, vec4<i32>(tile_key, tile, column.x));
-        if crossed && f == NONE { return lost; }
+        if crossed && f == NONE && !exact_level(level + diff) { return lost; }
         return Place(NONE, level + diff, vec3<i32>(tile * 64, column.x * 64 - (1 << 20)), vec3<i32>(tile * 64 + 64, column.x * 64), f);
     }
     let s = find_entry(vec4<i32>(tile_key, tile, layer));
@@ -650,7 +936,7 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
     let g = gap_of(tile_key, tile);
     if layer >= g.x && layer < g.y { return Place(NONE, ROCK, vec3<i32>(0), vec3<i32>(0), NONE); }
     let f = frame_of(diff < 0 || crossed, vec4<i32>(tile_key, tile, column.x));
-    if crossed && f == NONE { return lost; }
+    if crossed && f == NONE && !exact_level(level + diff) { return lost; }
     return Place(NONE, level + diff, vec3<i32>(tile * 64, layer * 64), vec3<i32>(tile * 64 + 64, layer * 64 + 64), f);
 }
 
@@ -711,7 +997,8 @@ struct WalkEnd {
 // The walk of ray org + t dir (org eye-relative, dir unit) from t_start to
 // t_end, for
 // a pixel of dither `r`, over at most `boxes` boxes (`counted`: in the
-// counting build's counters, as `pixel`).
+// counting build's counters, as `pixel`). A box of an exact level (a chunk
+// or air) is crossed in the grid's own cells, a finer one in its frame.
 fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r: i32, boxes: u32, counted: bool, pixel: vec2<u32>) -> WalkEnd {
     // Over the ceiling and rising, a ray meets nothing more (the squared
     // radius q0 + 2 b t + t^2 only grows once b + t > 0; a plane's height
@@ -728,61 +1015,149 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
     var cube_hi = start.hi;
     var real = start.real;
     var t_prev = t_start;
+    // The box's chunk (in air, the last), and packed as in the visibility
+    // buffer the cell of it the ray last left and the side it crossed into
+    // the box by: what it meets under a tile's chunks or in rock is shown
+    // there.
+    var slot = start.slot;
+    var last = (2u << 18u) | (1u << 20u);
+    // A box of an exact level: its face and level in key.x, its cells (the
+    // face's) in cube_lo and cube_hi. Such a walk starts where the ray
+    // enters its seed box (an exact chunk's raster box reaches past its
+    // cells, over its neighbours'): the drawn cut there.
+    var exact = exact_level(key.x >> 8u);
+    var place = exact;
+    if exact {
+        let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w) + vec3<f32>(dot(frame.i0.xyz, org), dot(frame.i1.xyz, org), dot(frame.i2.xyz, org));
+        let d = vec3<f32>(dot(frame.i0.xyz, dir), dot(frame.i1.xyz, dir), dot(frame.i2.xyz, dir));
+        let inv = 1.0 / select(d, vec3<f32>(1e-30), d == vec3<f32>(0.0));
+        let grow = statics[start.slot].m0.w;
+        let ta = (vec3<f32>(-grow, -grow, frame.box.x - grow) - o) * inv;
+        let tb = (vec3<f32>(64.0 + grow, 64.0 + grow, frame.box.y + grow) - o) * inv;
+        let near = min(ta, tb);
+        t_prev = max(max(near.x, max(near.y, near.z)), t_prev);
+        cube_lo += key.yzw * 64;
+        cube_hi += key.yzw * 64;
+    }
     var chunk = 0u;
     for (; chunk < boxes; chunk++) {
         let over = select(b + t_prev > 0.0 && q0 + t_prev * (2.0 * b + t_prev) > 0.0, b > 0.0 && q0 + b * t_prev > 0.0, PLANE_WORLD);
         if over { return WalkEnd(false, -1.0, NONE, vec3<i32>(0), 0u, 0u, 0u); }
         WCOUNT(3)
-        let slot = bitcast<u32>(frame.box.z);
-        TRACE_PIXEL(chunk, slot, cube_lo, real)
-        // The ray in the frame chunk's cells.
-        let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w) + vec3<f32>(dot(frame.i0.xyz, org), dot(frame.i1.xyz, org), dot(frame.i2.xyz, org));
-        let d = vec3<f32>(dot(frame.i0.xyz, dir), dot(frame.i1.xyz, dir), dot(frame.i2.xyz, dir));
-        let inv = 1.0 / select(d, vec3<f32>(1e-30), d == vec3<f32>(0.0));
-        if real { cube_hi = clip_to_face(vec3<i32>(64), key); }
-        let ca = (vec3<f32>(cube_lo) - o) * inv;
-        let cb = (vec3<f32>(cube_hi) - o) * inv;
-        let cube_far = max(ca, cb);
-        let t_leave = min(cube_far.x, min(cube_far.y, cube_far.z));
-        if real {
-            // The walk over the chunk's occupied layers.
-            let ta = (vec3<f32>(0.0, 0.0, frame.box.x) - o) * inv;
-            let tb = (vec3<f32>(f32(cube_hi.x), f32(cube_hi.y), frame.box.y) - o) * inv;
-            let lo = min(ta, tb);
-            let hi = max(ta, tb);
-            var t0 = max(max(lo.x, max(lo.y, lo.z)), t_prev);
-            var t1 = min(min(hi.x, min(hi.y, hi.z)), t_end);
-            // Only under the chunk's plane over its solid cells.
-            let top = chunk_meta[slot].top;
-            let s0 = o.z - top.x * o.x - top.y * o.y - top.z;
-            let ds = d.z - top.x * d.x - top.y * d.y;
-            if ds > 0.0 { t1 = min(t1, -s0 / ds); } else if ds < 0.0 { t0 = max(t0, -s0 / ds); } else if s0 > 0.0 { t1 = t0; }
-            if t1 > t0 {
-                let axis0 = select(select(2u, 1u, lo.y >= lo.z), 0u, lo.x >= lo.y && lo.x >= lo.z);
-                let h = trace_chunk(slot, o, d, t0, t1, axis0, vec2<i32>(i32(frame.box.x), i32(frame.box.y)), counted);
-                if h.hit {
-                    return WalkEnd(true, h.t, slot, h.cell, h.axis, select(1u, 0u, d[h.axis] > 0.0), h.material);
+        // Where the ray goes next: the face, level, cell and where in it.
+        var face = key.x & 7;
+        let level = key.x >> 8u;
+        var cell = vec3<i32>(0);
+        var frac = vec3<f32>(0.0);
+        if exact {
+            let ray = exact_ray(org, dir);
+            // A coarse tile can reach past its face's edge: its columns
+            // there are empty.
+            let hi = vec3<i32>(min(cube_hi.xy, vec2<i32>(i32(params.table.y >> u32(level)))), cube_hi.z);
+            if place {
+                place = false;
+                let q = exact_cell(ray, face, level, t_prev);
+                cell = vec3<i32>(floor(q));
+                frac = clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999));
+                let c = clamp(cell - cube_lo, vec3<i32>(0), vec3<i32>(63));
+                last = u32(c.x) | (u32(c.y) << 6u) | (u32(c.z) << 12u) | (2u << 18u) | (1u << 20u);
+            } else {
+                if real {
+                    // The walk over the chunk's occupied layers, entering
+                    // by their side, else by the one it crossed into the
+                    // chunk by.
+                    let z = vec2<i32>(statics[slot].box.xy);
+                    let occupied = box_span(ray, face, level, vec3<i32>(cube_lo.xy, cube_lo.z + z.x), vec3<i32>(hi.xy, cube_lo.z + z.y), t_prev);
+                    let t1 = min(occupied.t1, t_end);
+                    if t1 > occupied.t0 {
+                        let entered = occupied.enter < 6u;
+                        let axis0 = select((last >> 18u) & 3u, occupied.enter >> 1u, entered);
+                        let positive0 = select(((last >> 20u) & 1u) == 0u, (occupied.enter & 1u) == 0u, entered);
+                        let h = trace_exact(slot, ray, face, level, cube_lo, occupied.t0, t1, axis0, positive0, z, counted);
+                        if h.hit {
+                            return WalkEnd(true, h.t, slot, h.cell, h.axis, select(1u, 0u, h.positive), h.material);
+                        }
+                    }
+                }
+                let span = box_span(ray, face, level, cube_lo, hi, t_prev);
+                if span.leave >= 6u { break; }
+                let t_leave = max(span.t1, t_prev);
+                t_prev = t_leave;
+                if t_prev >= t_end { break; }
+                // The cell just past the side it leaves by.
+                let axis = span.leave >> 1u;
+                let positive = (span.leave & 1u) == 1u;
+                let q = exact_cell(ray, face, level, t_leave);
+                cell = clamp(vec3<i32>(floor(q)), cube_lo, hi - 1);
+                var c = vec3<i32>(vec3<u32>(last, last >> 6u, last >> 12u) & vec3<u32>(63u));
+                if real { c = clamp(cell - cube_lo, vec3<i32>(0), vec3<i32>(63)); }
+                last = u32(c.x) | (u32(c.y) << 6u) | (u32(c.z) << 12u) | (axis << 18u) | (select(1u, 0u, positive) << 20u);
+                frac = clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999));
+                let side = select(cube_lo - 1, hi, vec3<bool>(positive));
+                let entry = select(0.999, 0.0, positive);
+                if axis == 0u {
+                    cell.x = side.x;
+                    frac.x = entry;
+                } else if axis == 1u {
+                    cell.y = side.y;
+                    frac.y = entry;
+                } else {
+                    cell.z = side.z;
+                    frac.z = entry;
                 }
             }
+        } else {
+            slot = bitcast<u32>(frame.box.z);
+            TRACE_PIXEL(chunk, slot, cube_lo, real)
+            // The ray in the frame chunk's cells.
+            let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w) + vec3<f32>(dot(frame.i0.xyz, org), dot(frame.i1.xyz, org), dot(frame.i2.xyz, org));
+            let d = vec3<f32>(dot(frame.i0.xyz, dir), dot(frame.i1.xyz, dir), dot(frame.i2.xyz, dir));
+            let inv = 1.0 / select(d, vec3<f32>(1e-30), d == vec3<f32>(0.0));
+            if real { cube_hi = clip_to_face(vec3<i32>(64), key); }
+            let ca = (vec3<f32>(cube_lo) - o) * inv;
+            let cb = (vec3<f32>(cube_hi) - o) * inv;
+            let cube_far = max(ca, cb);
+            let t_leave = min(cube_far.x, min(cube_far.y, cube_far.z));
+            if real {
+                // The walk over the chunk's occupied layers.
+                let ta = (vec3<f32>(0.0, 0.0, frame.box.x) - o) * inv;
+                let tb = (vec3<f32>(f32(cube_hi.x), f32(cube_hi.y), frame.box.y) - o) * inv;
+                let lo = min(ta, tb);
+                let hi = max(ta, tb);
+                var t0 = max(max(lo.x, max(lo.y, lo.z)), t_prev);
+                var t1 = min(min(hi.x, min(hi.y, hi.z)), t_end);
+                // Only under the chunk's plane over its solid cells.
+                let top = chunk_meta[slot].top;
+                let s0 = o.z - top.x * o.x - top.y * o.y - top.z;
+                let ds = d.z - top.x * d.x - top.y * d.y;
+                if ds > 0.0 { t1 = min(t1, -s0 / ds); } else if ds < 0.0 { t0 = max(t0, -s0 / ds); } else if s0 > 0.0 { t1 = t0; }
+                if t1 > t0 {
+                    let axis0 = select(select(2u, 1u, lo.y >= lo.z), 0u, lo.x >= lo.y && lo.x >= lo.z);
+                    let h = trace_chunk(slot, o, d, t0, t1, axis0, vec2<i32>(i32(frame.box.x), i32(frame.box.y)), counted);
+                    if h.hit {
+                        return WalkEnd(true, h.t, slot, h.cell, h.axis, select(1u, 0u, h.positive), h.material);
+                    }
+                }
+            }
+            // The cell just past the face the ray leaves the box by, in the
+            // frame chunk's cells (exact integers far from the origin).
+            t_prev = max(t_leave, t_prev);
+            if t_prev >= t_end { break; }
+            let q = o + d * t_leave;
+            let axis = select(select(2u, 1u, cube_far.y <= cube_far.z), 0u, cube_far.x <= cube_far.y && cube_far.x <= cube_far.z);
+            var local = clamp(vec3<i32>(floor(q)), cube_lo, cube_hi - 1);
+            let c = clamp(local, vec3<i32>(0), vec3<i32>(63));
+            last = u32(c.x) | (u32(c.y) << 6u) | (u32(c.z) << 12u) | (axis << 18u) | (select(1u, 0u, d[axis] > 0.0) << 20u);
+            let step = select(cube_lo - 1, cube_hi, d > vec3<f32>(0.0));
+            if axis == 0u { local.x = step.x; } else if axis == 1u { local.y = step.y; } else { local.z = step.z; }
+            cell = key.yzw * 64 + local;
+            // Where in the next cell the ray enters: the side it crossed on
+            // the exit axis.
+            frac = clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999));
+            let entry = select(0.999, 0.0, d[axis] > 0.0);
+            if axis == 0u { frac.x = entry; } else if axis == 1u { frac.y = entry; } else { frac.z = entry; }
         }
-        // The cell just past the face the ray leaves the box by, in the
-        // frame chunk's cells (exact integers far from the origin).
-        t_prev = max(t_leave, t_prev);
-        if t_prev >= t_end { break; }
-        let level = key.x >> 8u;
-        let q = o + d * t_leave;
-        let axis = select(select(2u, 1u, cube_far.y <= cube_far.z), 0u, cube_far.x <= cube_far.y && cube_far.x <= cube_far.z);
-        var local = clamp(vec3<i32>(floor(q)), cube_lo, cube_hi - 1);
-        let step = select(cube_lo - 1, cube_hi, d > vec3<f32>(0.0));
-        if axis == 0u { local.x = step.x; } else if axis == 1u { local.y = step.y; } else { local.z = step.z; }
-        var cell = key.yzw * 64 + local;
-        // Where in the next cell the ray enters: the side it crossed on
-        // the exit axis.
-        var frac = clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999));
-        let entry = select(0.999, 0.0, d[axis] > 0.0);
-        if axis == 0u { frac.x = entry; } else if axis == 1u { frac.y = entry; } else { frac.z = entry; }
         // Past a face's edge: the face across it (a plane's edge ends it).
-        var face = key.x & 7;
         let n = i32(params.table.y >> u32(level));
         let crossed = any(cell.xy < vec2<i32>(0)) || any(cell.xy >= vec2<i32>(n));
         if crossed {
@@ -793,13 +1168,21 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
             cell = across.cell;
             frac = across.frac;
         }
-        let next = place_at(face, level, cell, frac, r, crossed);
+        // Air crossed in a frame needs one on the face it crossed to.
+        let next = place_at(face, level, cell, frac, r, crossed && !exact);
         if next.slot != NONE {
-            frame = chunk_frame(next.slot);
+            slot = next.slot;
             key = chunk_keys[next.slot];
-            cube_lo = vec3<i32>(0);
-            cube_hi = vec3<i32>(64);
             real = true;
+            exact = exact_level(key.x >> 8u);
+            if exact {
+                cube_lo = key.yzw * 64;
+                cube_hi = cube_lo + vec3<i32>(64);
+            } else {
+                frame = chunk_frame(next.slot);
+                cube_lo = vec3<i32>(0);
+                cube_hi = vec3<i32>(64);
+            }
         } else {
             if next.level == LOST {
                 WCOUNT(10)
@@ -814,23 +1197,32 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
                     let n = atomicAdd(&reach.count, 1u);
                     if n < arrayLength(&reach.keys) { reach.keys[n] = vec4<i32>(next.hi.x | (next.lo.z << 8u), next.lo.xy, 0); }
                 }
-                return WalkEnd(true, t_leave, slot, clamp(local, vec3<i32>(0), vec3<i32>(63)), axis, select(1u, 0u, d[axis] > 0.0), 0u);
+                return WalkEnd(true, t_prev, slot, vec3<i32>(vec3<u32>(last, last >> 6u, last >> 12u) & vec3<u32>(63u)), (last >> 18u) & 3u, (last >> 20u) & 1u, 0u);
             }
-            // Air, crossed in this frame or the finer one given.
-            if next.frame != NONE {
-                frame = chunk_frame(next.frame);
-                key = chunk_keys[next.frame];
-            }
-            cube_lo = to_frame(next.lo, next.level - (key.x >> 8u), key, true);
-            cube_hi = clip_to_face(to_frame(next.hi, next.level - (key.x >> 8u), key, false), key);
             real = false;
+            // Air of an exact level, or without a frame where the ray's is
+            // not one (exact, or on another face): in the grid's own cells.
+            if (exact_level(next.level) || (next.frame == NONE && (exact || crossed))) {
+                exact = true;
+                key = vec4<i32>(face | (next.level << 8u), 0, 0, 0);
+                cube_lo = next.lo;
+                cube_hi = next.hi;
+            } else {
+                // Crossed in this frame or the finer one given.
+                exact = false;
+                if next.frame != NONE {
+                    frame = chunk_frame(next.frame);
+                    key = chunk_keys[next.frame];
+                }
+                cube_lo = to_frame(next.lo, next.level - (key.x >> 8u), key, true);
+                cube_hi = clip_to_face(to_frame(next.hi, next.level - (key.x >> 8u), key, false), key);
+            }
         }
     }
     WCOUNT(8)
     WCOUNT_BOXES
     return WalkEnd(false, t_prev, NONE, vec3<i32>(0), 0u, 0u, 0u);
 }
-
 
 @compute @workgroup_size(8, 8)
 fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -864,7 +1256,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     // Both levels of a switch are drawn: a box of the one this pixel does
     // not show starts the walk where the ray enters it.
     let own = find_entry(key);
-    if own != NONE && choice(chunk_table[own * 2u + 1u].y, r) != 1 {
+    if own != NONE && choice(chunk_table[own * 2u + 1u].y, r) != 1 && !exact_level(key.x >> 8u) {
         let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w);
         let d = vec3<f32>(dot(frame.i0.xyz, dir), dot(frame.i1.xyz, dir), dot(frame.i2.xyz, dir));
         let inv = 1.0 / select(d, vec3<f32>(1e-30), d == vec3<f32>(0.0));
@@ -902,7 +1294,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(out_exits, p, vec4<f32>(-1.0));
     textureStore(out_visibility, p, vec4<u32>(end.slot, u32(end.cell.x) | (u32(end.cell.y) << 6u) | (u32(end.cell.z) << 12u) | (end.axis << 18u) | (end.sign << 20u) | (min(end.material, 255u) << 21u), 0u, 0u));
     textureStore(out_distance, p, vec4<f32>(end.t, 0.0, 0.0, 0.0));
-    let c = chunk_frame(end.slot);
+    let c = cell_frame(end.slot, end.cell);
     let axis_world = select(select(c.m2.xyz, c.m1.xyz, end.axis == 1u), c.m0.xyz, end.axis == 0u);
     let normal = normalize(axis_world) * select(-1.0, 1.0, end.sign == 1u);
     let light = 0.25 + 0.75 * max(dot(normal, params.sun.xyz), 0.0);
@@ -999,7 +1391,7 @@ struct Look {
 // of the face, and its edges darkened while it spans several pixels. Each
 // fades as the cell shrinks towards a pixel (TSR averages the rest).
 fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, material: u32, position: vec3<f32>, pixel_m: f32) -> Look {
-    let c = chunk_frame(slot);
+    let c = cell_frame(slot, cell);
     let key = chunk_keys[slot];
     let projected = length(c.m0.xyz) / max(pixel_m, 1e-6);
     let mosaic = mosaic_weight(projected);
@@ -1177,7 +1569,8 @@ fn slope_normal(slot: u32, key: vec4<i32>, cell: vec3<i32>, c: ChunkDraw) -> vec
 // The slope's normal is `ground` when given (a nearby sample's), else
 // measured here.
 fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>) -> Face {
-    let c = chunk_frame(v.x);
+    let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
+    let c = cell_frame(v.x, cell);
     let key = chunk_keys[v.x];
     let axis = (v.y >> 18u) & 3u;
     let sign = (v.y >> 20u) & 1u;
@@ -1185,7 +1578,6 @@ fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>) -> Face {
     let normal = normalize(axis_world) * select(-1.0, 1.0, sign == 1u);
     let cell_m = length(axis_world);
     var f = Face(normal, cell_m, normal, 0.0, vec3<f32>(0.0));
-    let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
     if solid_near(v.x, key, cell + vec3<i32>(0, 0, 1)) { return f; }
     let w = materials.detail.w;
     var ground = ground_hint;
@@ -1211,6 +1603,137 @@ fn unpack_unit(u: u32) -> vec3<f32> {
     return normalize(n);
 }
 
+
+// Sky rays a sample casts a frame (one sample a 4x4 block), and how far
+// they reach (cells).
+const SKY_RAYS: u32 = 4u;
+const SKY_RANGE_CELLS: f32 = 48.0;
+
+// `walk` crossing every box in a frame, as at levels finer than the exact
+// ones: the walk of the kernels for hits there (sun and sky samples),
+// whose rays an exact box's code would cost registers. Coarse air on
+// their way strays from the grid by up to 512 x cell / radius of its cells.
+fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r: i32, boxes: u32, counted: bool, pixel: vec2<u32>) -> WalkEnd {
+    // Over the ceiling and rising, a ray meets nothing more (the squared
+    // radius q0 + 2 b t + t^2 only grows once b + t > 0; a plane's height
+    // q0 + b t once b > 0): it ends there, t -1.
+    var q0 = params.ceiling.x + 2.0 * params.up.w * dot(params.up.xyz, org) + dot(org, org);
+    var b = params.up.w * dot(params.up.xyz, dir) + dot(org, dir);
+    if PLANE_WORLD {
+        q0 = params.ceiling.x + org.y;
+        b = dir.y;
+    }
+    var frame = chunk_frame(start.slot);
+    var key = chunk_keys[start.slot];
+    var cube_lo = start.lo;
+    var cube_hi = start.hi;
+    var real = start.real;
+    var t_prev = t_start;
+    var chunk = 0u;
+    for (; chunk < boxes; chunk++) {
+        let over = select(b + t_prev > 0.0 && q0 + t_prev * (2.0 * b + t_prev) > 0.0, b > 0.0 && q0 + b * t_prev > 0.0, PLANE_WORLD);
+        if over { return WalkEnd(false, -1.0, NONE, vec3<i32>(0), 0u, 0u, 0u); }
+        WCOUNT(3)
+        let slot = bitcast<u32>(frame.box.z);
+        TRACE_PIXEL(chunk, slot, cube_lo, real)
+        // The ray in the frame chunk's cells.
+        let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w) + vec3<f32>(dot(frame.i0.xyz, org), dot(frame.i1.xyz, org), dot(frame.i2.xyz, org));
+        let d = vec3<f32>(dot(frame.i0.xyz, dir), dot(frame.i1.xyz, dir), dot(frame.i2.xyz, dir));
+        let inv = 1.0 / select(d, vec3<f32>(1e-30), d == vec3<f32>(0.0));
+        if real { cube_hi = clip_to_face(vec3<i32>(64), key); }
+        let ca = (vec3<f32>(cube_lo) - o) * inv;
+        let cb = (vec3<f32>(cube_hi) - o) * inv;
+        let cube_far = max(ca, cb);
+        let t_leave = min(cube_far.x, min(cube_far.y, cube_far.z));
+        if real {
+            // The walk over the chunk's occupied layers.
+            let ta = (vec3<f32>(0.0, 0.0, frame.box.x) - o) * inv;
+            let tb = (vec3<f32>(f32(cube_hi.x), f32(cube_hi.y), frame.box.y) - o) * inv;
+            let lo = min(ta, tb);
+            let hi = max(ta, tb);
+            var t0 = max(max(lo.x, max(lo.y, lo.z)), t_prev);
+            var t1 = min(min(hi.x, min(hi.y, hi.z)), t_end);
+            // Only under the chunk's plane over its solid cells.
+            let top = chunk_meta[slot].top;
+            let s0 = o.z - top.x * o.x - top.y * o.y - top.z;
+            let ds = d.z - top.x * d.x - top.y * d.y;
+            if ds > 0.0 { t1 = min(t1, -s0 / ds); } else if ds < 0.0 { t0 = max(t0, -s0 / ds); } else if s0 > 0.0 { t1 = t0; }
+            if t1 > t0 {
+                let axis0 = select(select(2u, 1u, lo.y >= lo.z), 0u, lo.x >= lo.y && lo.x >= lo.z);
+                let h = trace_chunk(slot, o, d, t0, t1, axis0, vec2<i32>(i32(frame.box.x), i32(frame.box.y)), counted);
+                if h.hit {
+                    return WalkEnd(true, h.t, slot, h.cell, h.axis, select(1u, 0u, h.positive), h.material);
+                }
+            }
+        }
+        // The cell just past the face the ray leaves the box by, in the
+        // frame chunk's cells (exact integers far from the origin).
+        t_prev = max(t_leave, t_prev);
+        if t_prev >= t_end { break; }
+        let level = key.x >> 8u;
+        let q = o + d * t_leave;
+        let axis = select(select(2u, 1u, cube_far.y <= cube_far.z), 0u, cube_far.x <= cube_far.y && cube_far.x <= cube_far.z);
+        var local = clamp(vec3<i32>(floor(q)), cube_lo, cube_hi - 1);
+        let step = select(cube_lo - 1, cube_hi, d > vec3<f32>(0.0));
+        if axis == 0u { local.x = step.x; } else if axis == 1u { local.y = step.y; } else { local.z = step.z; }
+        var cell = key.yzw * 64 + local;
+        // Where in the next cell the ray enters: the side it crossed on
+        // the exit axis.
+        var frac = clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999));
+        let entry = select(0.999, 0.0, d[axis] > 0.0);
+        if axis == 0u { frac.x = entry; } else if axis == 1u { frac.y = entry; } else { frac.z = entry; }
+        // Past a face's edge: the face across it (a plane's edge ends it).
+        var face = key.x & 7;
+        let n = i32(params.table.y >> u32(level));
+        let crossed = any(cell.xy < vec2<i32>(0)) || any(cell.xy >= vec2<i32>(n));
+        if crossed {
+            if PLANE_WORLD { break; }
+            let across = across_edge(face, cell, frac, n);
+            if !across.ok { break; }
+            face = across.face;
+            cell = across.cell;
+            frac = across.frac;
+        }
+        let next = place_at(face, level, cell, frac, r, crossed);
+        if next.slot != NONE {
+            frame = chunk_frame(next.slot);
+            key = chunk_keys[next.slot];
+            cube_lo = vec3<i32>(0);
+            cube_hi = vec3<i32>(64);
+            real = true;
+        } else {
+            if next.level == LOST {
+                WCOUNT(10)
+                break;
+            }
+            if next.level == BELOW || next.level == ROCK {
+                // Under a tile's chunks, which hold only its surface band:
+                // solid where the ray leaves this box, until the tile's
+                // whole volume (its caves) is generated. Rock between its
+                // chunks is solid as it is.
+                if next.level == BELOW {
+                    let n = atomicAdd(&reach.count, 1u);
+                    if n < arrayLength(&reach.keys) { reach.keys[n] = vec4<i32>(next.hi.x | (next.lo.z << 8u), next.lo.xy, 0); }
+                }
+                return WalkEnd(true, t_leave, slot, clamp(local, vec3<i32>(0), vec3<i32>(63)), axis, select(1u, 0u, d[axis] > 0.0), 0u);
+            }
+            // Air, crossed in this frame or the finer one given.
+            if next.frame != NONE {
+                frame = chunk_frame(next.frame);
+                key = chunk_keys[next.frame];
+            }
+            cube_lo = to_frame(next.lo, next.level - (key.x >> 8u), key, true);
+            cube_hi = clip_to_face(to_frame(next.hi, next.level - (key.x >> 8u), key, false), key);
+            real = false;
+        }
+    }
+    WCOUNT(8)
+    WCOUNT_BOXES
+    return WalkEnd(false, t_prev, NONE, vec3<i32>(0), 0u, 0u, 0u);
+}
+
+
+// WALK {
 // Whether the hit at pixel `q` (distance `t`, face `f`) is in the sun.
 fn sun_walk(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face) -> f32 {
     let org = pixel_ray(q, size) * t + f.normal * (f.cell * 0.01);
@@ -1218,17 +1741,13 @@ fn sun_walk(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face) -> f32 {
     return select(1.0, 0.0, end.hit);
 }
 
-// Sky rays a sample casts a frame (one sample a 4x4 block), and how far
-// they reach (cells).
-const SKY_RAYS: u32 = 4u;
-const SKY_RANGE_CELLS: f32 = 48.0;
-
 // The share of the sky the hit at pixel `q` (distance `t`, face `f`, chunk
 // `slot`) sees: cosine-weighted rays about the planet's up, turned each
 // frame (TSR gathers them); an occluder near the range end shades less (no
 // edge at the range). A ceiling looks out sideways.
 fn sky_visibility(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face) -> f32 {
-    let up = normalize(chunk_frame(slot).m2.xyz);
+    let at = pixel_ray(q, size) * t;
+    let up = select(normalize(params.up.xyz * params.up.w + at), vec3<f32>(0.0, 1.0, 0.0), PLANE_WORLD);
     let ceiling = dot(f.normal, up) < -0.25;
     let t1 = normalize(select(cross(up, vec3<f32>(0.0, 0.0, 1.0)), cross(up, vec3<f32>(1.0, 0.0, 0.0)), abs(up.z) > 0.9));
     let t2 = cross(up, t1);
@@ -1250,6 +1769,7 @@ fn sky_visibility(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face) -> 
     }
     return select(1.0, open / total, total > 0.0);
 }
+// } WALK
 
 // Sky visibility samples, one a 4x4 block: visibility, the sample's
 // distance (0: no hit).
@@ -1272,6 +1792,24 @@ fn sky_sample(@builtin(global_invocation_id) id: vec3<u32>) {
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
     var sample = vec2<f32>(1.0, 0.0);
     if v.x != NONE {
+        if exact_level(chunk_keys[v.x].x >> 8u) { return; }
+        let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
+        sample = vec2<f32>(sky_visibility_fine(q, size, v.x, t, hit_face(v, vec3<f32>(0.0))), t);
+    }
+    textureStore(out_sky_samples, vec2<i32>(id.xy), vec4<f32>(sample, 0.0, 0.0));
+}
+
+// `sky_sample` for the hits of exact levels (after it).
+@compute @workgroup_size(8, 8)
+fn sky_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
+    let size = textureDimensions(hit_distance);
+    let quarter = (size + 3u) / 4u;
+    if id.x >= quarter.x || id.y >= quarter.y { return; }
+    let q = sky_pixel(id.xy, size);
+    let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
+    if v.x == NONE || !exact_level(chunk_keys[v.x].x >> 8u) { return; }
+    var sample = vec2<f32>(1.0, 0.0);
+    {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
         sample = vec2<f32>(sky_visibility(q, size, v.x, t, hit_face(v, vec3<f32>(0.0))), t);
     }
@@ -1310,6 +1848,26 @@ fn shadow_sample(@builtin(global_invocation_id) id: vec3<u32>) {
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
     var sample = vec4<u32>(0u);
     if v.x != NONE {
+        if exact_level(chunk_keys[v.x].x >> 8u) { return; }
+        let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
+        let f = hit_face(v, vec3<f32>(0.0));
+        sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
+        if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(sun_walk_fine(q, size, v.x, t, f)); }
+    }
+    textureStore(out_sun_samples, vec2<i32>(id.xy), sample);
+}
+
+// `shadow_sample` for the hits of exact levels (after it).
+@compute @workgroup_size(8, 8)
+fn shadow_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
+    let size = textureDimensions(hit_distance);
+    let half = (size + 1u) / 2u;
+    if id.x >= half.x || id.y >= half.y { return; }
+    let q = sample_pixel(id.xy, size);
+    let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
+    if v.x == NONE || !exact_level(chunk_keys[v.x].x >> 8u) { return; }
+    var sample = vec4<u32>(0u);
+    {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
         let f = hit_face(v, vec3<f32>(0.0));
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);

@@ -206,9 +206,13 @@ phase's measurements. In short, a frame of `ChunkPass`:
 - **CPU/GPU bit identity.** Terrain programs, noise, the lean lattice and
   edit containment are integer and mirrored; `engine::verify_field` and
   `tests/chunks.rs` enforce it. Never introduce floats into a field.
-- **Camera-relative frames.** The host's world origin is the eye; chunk
-  frames are affine maps rebased on the GPU from f64 origins, so every GPU
-  position is small at any planet size.
+- **Camera-relative frames, exact coarse cells.** The host's world origin
+  is the eye; chunk frames are affine maps rebased on the GPU from f64
+  origins, so every GPU position is small at any planet size. From the
+  level where a frame would stray a twentieth of a cell from the sphere
+  (`chunks::exact_level`, 13 on Earth) rays walk the grid's own cells
+  (planes through the centre, spheres about it): no facets or cracks from
+  orbit.
 - **Every coarsest tile is a root.** Residency does not depend on where
   the eye started. A sphere's tiles below the eye's horizon over its
   lowest ground are not wanted (from orbit the whole visible disc is

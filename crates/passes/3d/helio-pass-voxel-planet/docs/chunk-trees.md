@@ -129,12 +129,12 @@ per attempt (`aaa-architecture.md`).
   face) and conservative depth (early-Z survives), so hidden boxes behind
   a hit are rejected before they run. The hardware rasterizer does what the
   sky bound, summary blocks, air blocks and the tile pre-pass tried to do.
-- **The chunk's frame is affine.** Within a chunk the cube-sphere mapping is
-  linear to far below a voxel: the deviation over a 64-voxel chunk is
-  512 x voxel / radius of a voxel, 1e-5 at level 0 on Earth. Levels where it would
-  pass 5% of a voxel (from about level 13 on Earth, where voxels are
-  already sub-pixel) use 32^3 or 16^3 chunks. Boxes overlap by one voxel so
-  neighbouring frames leave no cracks.
+- **The chunk's frame is affine, up to the exact levels.** Within a chunk
+  the cube-sphere mapping is linear to far below a voxel: the deviation
+  over a 64-voxel chunk is 512 x voxel / radius of a voxel, 1e-5 at level
+  0 on Earth. From the level where it passes a twentieth of a cell (13 on
+  Earth, 820 m cells; see "Exact cells") chunks and air are walked in the
+  grid's own cells instead.
 - **Depth is shared.** The terrain writes the same depth buffer as Helio's
   meshes, so props, characters and editor geometry compose with it.
 - **Shading** resolves the visibility buffer in compute: stored material and
@@ -704,6 +704,48 @@ Undoing each matches the first frame's hits exactly. Small digs still show
 the frame they are made (20 and 100 digs: the first). A big blast's
 regeneration is mostly its tiles' terrain program; applying edits to
 resident chunk data in place would remove it.
+
+## Exact cells (2026-10-12)
+
+Seen from orbit the planet was a patchwork: cracks along every coarse
+tile, each tile a flat facet (lit and hazed by its own height), and much
+of the disc missing.
+
+- The planner measured tiles in the eye's linear frame of its face, which
+  a sphere leaves by thousands of kilometres across a face: far tiles
+  looked beyond the horizon. The frame now holds R / 64 around the eye.
+- A chunk's frame was linearized about its middle, up to 32 cells over its
+  ground; columns meet at the planet's centre, so at the coarsest level
+  neighbouring tiles parted by cells. Frames are now made about the
+  columns' mean top (read back with the chunk).
+- At the coarsest level a frame still strays half a cell from the sphere
+  across a tile 600 km wide (512 x cell / radius). From level 13 on
+  (`chunks::exact_level`: a twentieth of a cell, and f32 planet-centred
+  positions precise to a fiftieth) chunks and air are walked in the
+  grid's own cells: on a face a cell's sides are planes through the
+  planet's centre and spheres about it, so a ray's stretch in a box of
+  cells is four half-lines and two quadratics (`box_span`; leaving one,
+  only the sides ahead: `box_exit`). Rays are watertight across tiles and
+  faces, shading reads the grid's own axes at the hit (`cell_frame`), and
+  an exact chunk's raster box grows by how far its cells reach past its
+  frame's (measured on the CPU), the walk placing itself where the ray
+  enters it.
+
+The exact code costs every walk compiled with it registers: the kernels
+for hits finer than the exact levels (sun and sky samples) keep the frame
+walk (`walk_fine`); `_far` kernels take the exact hits; primary rays walk
+both.
+
+| 1080p hold | primary (ms) | sun + sky (ms) |
+|---|---|---|
+| ground, frames only | 1.41 | 1.95 |
+| ground, exact levels | 1.48 | 2.06 |
+| mountain, frames only | 2.85 | 2.53 |
+| mountain, exact levels | 3.10 | 2.78 |
+
+Measured on the way: one walk for both modes (+28 % sun and sky: its
+registers), one traversal for both (primary +16 %), the walk as a template
+compiled without exact levels (as slow as with them: the dead code stayed).
 
 ## References
 

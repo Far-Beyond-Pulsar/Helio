@@ -130,6 +130,10 @@ struct DrawParams {
     /// x: the eye's squared radius less the ceiling's (a plane: its height
     /// over the ceiling), from f64.
     ceiling: [f32; 4],
+    /// The planet's radius and voxel (m), its first exact level
+    /// ([`exact_level`]), the eye's squared radius less the planet's (from
+    /// f64).
+    planet: [f32; 4],
 }
 
 /// `Materials` of chunk_draw.wgsl.
@@ -179,15 +183,56 @@ fn chunk_frame(grid: &Grid, tile: TileKey, cz: i32, z: f64) -> Frame {
     Frame { origin: at([0.0; 3]) - m * DVec3::new(n / 2.0, n / 2.0, z), m, inv: m.inverse() }
 }
 
+/// The first level drawing walks in the grid's own cells (chunk_draw.wgsl
+/// `exact_level`), not in chunks' affine frames: where a frame strays from
+/// the sphere by a twentieth of a cell across a chunk (512 x cell /
+/// radius: a height and a slope a cell's haze and light show), and
+/// planet-centred f32 positions err by under a fiftieth of one. Level 13
+/// on an Earth at 0.1 m voxels (820 m cells), level 2 on a 3 km world.
+/// None on a plane.
+fn exact_level(grid: &Grid) -> u32 {
+    if grid.is_plane() {
+        return u32::MAX;
+    }
+    (0..grid.levels())
+        .find(|&level| {
+            let cell = grid.level_size(level);
+            512.0 * cell / grid.radius() >= 0.05 && cell >= 50.0 * grid.radius() * f64::from(f32::EPSILON)
+        })
+        .unwrap_or(grid.levels())
+}
+
+/// Cells an exact chunk's own cells reach past its frame's box (its raster
+/// box grows by them): the grid's points over its occupied layers in its
+/// frame, beyond the box, and half a cell.
+fn reach_past(grid: &Grid, tile: TileKey, cz: i32, frame: &Frame, z: (f32, f32)) -> f32 {
+    let s = f64::from(1u32 << tile.level);
+    let mut excess = 0.0f64;
+    for a in 0..=8 {
+        for b in 0..=8 {
+            for k in [z.0, z.1] {
+                let local = DVec3::new(f64::from(a * 8), f64::from(b * 8), f64::from(k));
+                let at = grid.position(tile.face, [(f64::from(tile.cx * CHUNK) + local.x) * s, (f64::from(tile.cy * CHUNK) + local.y) * s, (f64::from(cz * CHUNK) + local.z) * s]);
+                let f = frame.inv * (at - frame.origin);
+                excess = excess.max(-f.x).max(f.x - 64.0).max(-f.y).max(f.y - 64.0).max(f64::from(z.0) - f.z).max(f.z - f64::from(z.1));
+            }
+        }
+    }
+    (excess + 0.5) as f32
+}
+
 /// Chunk `cz` of `tile` in `slot` as drawing reads it, with occupied layers
-/// `z` and its frame made about height `about` (cells in the chunk).
-fn chunk_static(grid: &Grid, tile: TileKey, cz: i32, slot: u32, z: (f32, f32), about: f32) -> ChunkStatic {
+/// `z` and its frame made about height `about` (cells in the chunk); at an
+/// exact level (from `exact`) how far its cells reach past the frame's box
+/// (m.x_axis.w).
+fn chunk_static(grid: &Grid, tile: TileKey, cz: i32, slot: u32, z: (f32, f32), about: f32, exact: u32) -> ChunkStatic {
     let frame = chunk_frame(grid, tile, cz, f64::from(about));
     let (m, inv) = (frame.m.as_mat3(), frame.inv.as_mat3());
     let (origin_hi, origin_lo) = split(frame.origin);
     let flags = u32::from(frame.m.determinant() < 0.0) | (tile.level << 8);
+    let grow = if tile.level >= exact { reach_past(grid, tile, cz, &frame, z) } else { 0.0 };
     ChunkStatic {
-        m: [m.x_axis.extend(0.0).to_array(), m.y_axis.extend(0.0).to_array(), m.z_axis.extend(0.0).to_array()],
+        m: [m.x_axis.extend(grow).to_array(), m.y_axis.extend(0.0).to_array(), m.z_axis.extend(0.0).to_array()],
         inv: [inv.row(0).extend(0.0).to_array(), inv.row(1).extend(0.0).to_array(), inv.row(2).extend(0.0).to_array()],
         origin_hi,
         origin_lo,
@@ -584,6 +629,9 @@ pub struct ChunkWorld {
     trace: wgpu::ComputePipeline,
     shadow_sample_layout: wgpu::BindGroupLayout,
     shadow_sample: wgpu::ComputePipeline,
+    /// `shadow_sample` and `sky_sample` for hits of exact levels.
+    shadow_sample_far: wgpu::ComputePipeline,
+    sky_sample_far: wgpu::ComputePipeline,
     sky_sample_layout: wgpu::BindGroupLayout,
     sky_sample: wgpu::ComputePipeline,
     shadow_layout: wgpu::BindGroupLayout,
@@ -619,6 +667,8 @@ pub struct ChunkWorld {
     chunk_table: wgpu::Buffer,
     /// Base cells along a face edge.
     face_cells: u32,
+    /// [`exact_level`].
+    exact_level: u32,
     statics: wgpu::Buffer,
     draw_list: wgpu::Buffer,
     /// The drawn chunks' slots (uploaded when they change), the cull's
@@ -864,6 +914,29 @@ fn uniform(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayou
 
 /// The chunk shaders as compiled for a world form and terrain program:
 /// generation, then drawing (with diagnostic counters when `counting`).
+/// The draw shader's walk templates (`// WALK {` .. `// } WALK`) twice:
+/// with `walk` (`sun_walk`, `sky_visibility`), and with `walk_fine`
+/// (`..._fine`: the kernels for hits finer than the exact levels).
+fn walk_templates(source: &str) -> String {
+    let mut out = String::with_capacity(source.len() * 2);
+    let mut rest = source;
+    while let Some(start) = rest.find("// WALK {\n") {
+        let end = rest[start..].find("// } WALK\n").expect("closed walk template") + start;
+        let body = &rest[start + "// WALK {\n".len()..end];
+        out.push_str(&rest[..start]);
+        out.push_str(body);
+        out.push_str(
+            &body
+                .replace("walk(Walk(", "walk_fine(Walk(")
+                .replace("fn sun_walk(", "fn sun_walk_fine(")
+                .replace("fn sky_visibility(", "fn sky_visibility_fine("),
+        );
+        rest = &rest[end + "// } WALK\n".len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
 pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wide64: bool, counting: bool) -> [(&'static str, String); 2] {
     // Counters only in a counting build: side effects in a fragment shader
     // can turn early depth tests off.
@@ -872,7 +945,7 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
     let count = |n: u32| if counting { format!("atomicAdd(&counters[{n}], 1u);") } else { String::new() };
     let wcount = |n: u32| if counting { format!("if counted {{ atomicAdd(&counters[{n}], 1u); heat += u32({n} == 1); }}") } else { String::new() };
     // The noise library (materials' patches), then the draw.
-    let draw = (format!("const DOMAIN_UNIT: f32 = {};\n", crate::grid::DOMAIN_UNIT) + include_str!("../../shaders/noise.wgsl") + include_str!("../../shaders/chunk_draw.wgsl"))
+    let draw = (format!("const DOMAIN_UNIT: f32 = {};\n", crate::grid::DOMAIN_UNIT) + include_str!("../../shaders/noise.wgsl") + &walk_templates(include_str!("../../shaders/chunk_draw.wgsl")))
         .replace("COUNTERS", if counting { "@group(0) @binding(9) var<storage, read_write> counters: array<atomic<u32>, 256>;" } else { "" })
         .replace("WCOUNT(1)", &wcount(1))
         .replace("WCOUNT(3)", &wcount(3))
@@ -1099,6 +1172,8 @@ impl ChunkWorld {
         };
         let shadow_sample = compute("chunk sun samples", &layout(&shadow_sample_layout), "shadow_sample");
         let sky_sample = compute("chunk sky samples", &layout(&sky_sample_layout), "sky_sample");
+        let shadow_sample_far = compute("chunk far sun samples", &layout(&shadow_sample_layout), "shadow_sample_far");
+        let sky_sample_far = compute("chunk far sky samples", &layout(&sky_sample_layout), "sky_sample_far");
         let shadow = compute("chunk shadow", &layout(&shadow_layout), "shadow");
         let shadow_fallback = compute("chunk shadow fallbacks", &layout(&shadow_fallback_layout), "shadow_fallback");
         let publish = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1170,6 +1245,8 @@ impl ChunkWorld {
             trace,
             shadow_sample_layout,
             shadow_sample,
+            shadow_sample_far,
+            sky_sample_far,
             sky_sample_layout,
             sky_sample,
             shadow_layout,
@@ -1202,6 +1279,7 @@ impl ChunkWorld {
             chunk_table,
 
             face_cells: planet.grid().cells() as u32,
+            exact_level: exact_level(planet.grid()),
             statics: buffer("chunk statics", (MAX_CHUNKS * std::mem::size_of::<ChunkStatic>()) as u64, s),
             draw_list: buffer("chunk draw list", (MAX_CHUNKS * 4) as u64, s),
             drawn_slots: buffer("chunk drawn slots", (MAX_CHUNKS * 4) as u64, s),
@@ -1522,7 +1600,7 @@ impl ChunkWorld {
             let baked = if baked { batch.baked_table(&self.baked, key, cz) } else { u32::MAX };
             batch.chunk_jobs.push(ChunkJob { tile: index, cz, slot, brushes: first, brush_count: batch.refs.len() as u32 - first, large, baked, _pad: 0 });
             // Layers not read back yet: the whole chunk.
-            let record = chunk_static(&grid, key, cz, slot, (0.0, 64.0), 32.0);
+            let record = chunk_static(&grid, key, cz, slot, (0.0, 64.0), 32.0, self.exact_level);
             self.queue.write_buffer(&self.statics, u64::from(slot) * std::mem::size_of::<ChunkStatic>() as u64, bytemuck::bytes_of(&record));
             chunks.push(Chunk { cz, slot, serial: self.serial, z: None });
             self.queue.write_buffer(&self.chunk_keys, u64::from(slot) * 16, bytemuck::cast_slice(&chunk_key(key, cz)));
@@ -1686,7 +1764,7 @@ impl ChunkWorld {
                         // else its occupied layers.
                         let surface = (w[3] as u32) >> 16;
                         let about = if surface == 0xffff { (w[1] + w[2]) as f32 * 0.5 } else { surface as f32 / 4.0 };
-                        let record = chunk_static(&self.grid, key, c.cz, c.slot, (w[1] as f32, w[2] as f32), about);
+                        let record = chunk_static(&self.grid, key, c.cz, c.slot, (w[1] as f32, w[2] as f32), about, self.exact_level);
                         self.queue.write_buffer(&self.statics, u64::from(c.slot) * std::mem::size_of::<ChunkStatic>() as u64, bytemuck::bytes_of(&record));
                     }
                 }
@@ -2215,6 +2293,12 @@ impl ChunkWorld {
                 let c = self.grid.radius() + self.ceiling;
                 [if self.grid.is_plane() { (eye.y - self.ceiling) as f32 } else { (eye.length_squared() - c * c) as f32 }, 0.0, 0.0, 0.0]
             },
+            planet: [
+                self.grid.radius() as f32,
+                self.grid.voxel_size() as f32,
+                self.exact_level.min(99) as f32,
+                (eye.length_squared() - self.grid.radius() * self.grid.radius()) as f32,
+            ],
         };
         self.queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         self.queue.write_buffer(&self.reach, 0, &[0u8; 16]);
@@ -2350,13 +2434,17 @@ impl ChunkWorld {
             self.queue.write_buffer(&targets.fallback_groups, 0, bytemuck::cast_slice(&[0u32, 1, 1]));
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk sun samples"), timestamp_writes: None });
-                pass.set_pipeline(&self.shadow_sample);
                 pass.set_bind_group(0, &group, &[]);
                 pass.set_bind_group(1, &sample_group, &[]);
-                pass.dispatch_workgroups(size[0].div_ceil(2).div_ceil(8), size[1].div_ceil(2).div_ceil(8), 1);
-                pass.set_pipeline(&self.sky_sample);
+                for pipeline in [&self.shadow_sample, &self.shadow_sample_far] {
+                    pass.set_pipeline(pipeline);
+                    pass.dispatch_workgroups(size[0].div_ceil(2).div_ceil(8), size[1].div_ceil(2).div_ceil(8), 1);
+                }
                 pass.set_bind_group(1, &sky_group, &[]);
-                pass.dispatch_workgroups(size[0].div_ceil(4).div_ceil(8), size[1].div_ceil(4).div_ceil(8), 1);
+                for pipeline in [&self.sky_sample, &self.sky_sample_far] {
+                    pass.set_pipeline(pipeline);
+                    pass.dispatch_workgroups(size[0].div_ceil(4).div_ceil(8), size[1].div_ceil(4).div_ceil(8), 1);
+                }
             }
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("chunk shadow"),
