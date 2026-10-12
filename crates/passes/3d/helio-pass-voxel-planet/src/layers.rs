@@ -719,7 +719,7 @@ impl TerrainLayers {
             shape: [display, 16, 0, i32::from(grid.is_plane())],
             style: [style, id(&self.surface), id(&self.soil), id(&self.rock)],
             stack: [self.layers.iter().filter(|l| l.enabled).count() as i32, erosion_sum.max(1), grid.sphere_constants()[2] as i32, warps],
-            materials: [self.rules.len() as i32, id(&self.rock), 0, 0],
+            materials: [self.rules.len() as i32, id(&self.rock), octaves.iter().filter(|o| o.class() == EROSION).map(|o| o.shift as i32).max().unwrap_or(-1), 0],
             layers,
             octaves: table,
             rules,

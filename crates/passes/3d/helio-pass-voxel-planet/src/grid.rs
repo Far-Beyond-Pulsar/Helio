@@ -267,15 +267,6 @@ impl Grid {
             p.normalize_or(DVec3::Y) * radial
         }
     }
-    /// Distance along the datum between the ground points below `a` and
-    /// `b`: great-circle distance on a sphere, horizontal on a plane.
-    pub fn ground_distance(&self, a: DVec3, b: DVec3) -> f64 {
-        if self.is_plane() {
-            DVec3::new(a.x - b.x, 0.0, a.z - b.z).length()
-        } else {
-            a.angle_between(b) * self.radius
-        }
-    }
     /// Base cells along one face edge.
     pub fn cells(&self) -> i32 {
         self.cells
@@ -342,10 +333,6 @@ impl Grid {
             return a * ((index[0] - c) * s) + b * ((index[1] - c) * s) + n * (index[2] * s);
         }
         self.direction(face, index[0], index[1]) * self.layer_radius(index[2])
-    }
-    /// Point on the datum below continuous index coordinates `(i, j)`.
-    pub fn ground_point(&self, face: u8, i: f64, j: f64) -> DVec3 {
-        self.position(face, [i, j, 0.0])
     }
     pub fn cell_center(&self, cell: Cell) -> DVec3 {
         self.position(

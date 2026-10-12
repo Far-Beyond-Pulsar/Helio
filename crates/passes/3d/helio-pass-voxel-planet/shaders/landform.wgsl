@@ -13,7 +13,7 @@ struct TerrainConstants {
     shape: vec4<i32>,  // ridge display layer + 1, steep slope (cells), ridge display flag, plane (+Y up)
     style: vec4<i32>,  // material style, Layered surface / soil / rock ids
     stack: vec4<i32>,  // layer count, erosion amplitude sum, domain radius, warp octaves
-    materials: vec4<i32>, // rules style: rule count, fallback material
+    materials: vec4<i32>, // rules style: rule count, fallback material; coarsest erosion octave's shift (-1: none)
     layers: array<StackLayer, 8>,
     octaves: array<LandformOctave, 64>,
     rules: array<MaterialRule, 16>,
@@ -529,12 +529,9 @@ fn landform_ridge(l: u32, o: LandformOctave, nd: vec4<i32>, tracked: bool, gain:
 // (`terrain_column`). Three inlined copies took 22 s to compile.
 fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
     let count = min(u32(max(terrain.header.x, 0)), 64u);
-    // Erosion follows the larger terrain's slope (`height_parts`).
-    var erosion = false;
-    for (var index = LANDFORM_WARP; index < count; index++) {
-        let o = terrain.octaves[index];
-        if (o.kind & 0xffu) == LF_EROSION && landform_resolved(o, level) { erosion = true; }
-    }
+    // Erosion follows the larger terrain's slope (`height_parts`), where its
+    // coarsest octave is resolved (`landform_resolved`).
+    let erosion = terrain.materials.z >= i32(level) + 5;
     var warp = vec3<i32>(0);
     var jx = vec3<i32>(0);
     var jy = vec3<i32>(0);

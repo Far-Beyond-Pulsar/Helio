@@ -681,14 +681,33 @@ fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3)
     pass.take_timings();
     let seconds: f64 = std::env::var("HELIO_VOXEL_FLIGHT_HOLD_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0);
     let held = Instant::now();
+    // The graph's GPU time by pass, over the hold.
+    let mut passes: std::collections::BTreeMap<&'static str, (f64, u32)> = Default::default();
+    let mut graph = Vec::new();
+    let mut seen = 0;
     while held.elapsed().as_secs_f64() < seconds {
         flight.draw(eye, forward);
+        let snapshot = flight.renderer.timing_snapshot();
+        if snapshot.generation != seen {
+            seen = snapshot.generation;
+            graph.extend(snapshot.total_gpu_ms.map(f64::from));
+            for p in &snapshot.passes {
+                if let Some(ms) = p.gpu_ms {
+                    let entry = passes.entry(p.name).or_default();
+                    entry.0 += f64::from(ms);
+                    entry.1 += 1;
+                }
+            }
+        }
     }
     let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
     std::thread::sleep(std::time::Duration::from_millis(50));
     let timings = flight.renderer.find_pass_mut::<ChunkPass>().unwrap().take_timings();
     let draw: Vec<f64> = timings.iter().map(|t| t.draw).collect();
     eprintln!("CHUNKENGINE {view} n={} chunk draw p50 {:.3} p95 {:.3}", draw.len(), percentile(&draw, 0.5), percentile(&draw, 0.95));
+    let mut by_pass: Vec<(&str, f64)> = passes.iter().map(|(name, (sum, n))| (*name, sum / f64::from((*n).max(1)))).collect();
+    by_pass.sort_by(|a, b| b.1.total_cmp(&a.1));
+    eprintln!("CHUNKENGINE {view} graph gpu p50 {:.2} ms; by pass: {}", percentile(&graph, 0.5), by_pass.iter().filter(|p| p.1 >= 0.05).map(|(n, ms)| format!("{n} {ms:.2}")).collect::<Vec<_>>().join(", "));
     flight.capture(&format!("chunks_{view}"));
     pick_probe(flight, view, eye, forward);
 }

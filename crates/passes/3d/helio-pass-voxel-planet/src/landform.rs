@@ -436,7 +436,9 @@ pub struct LandformConstants {
     /// layer count, sum of the erosion amplitudes (height units), domain
     /// radius (0 on planes), warp octaves (0 or 6).
     pub stack: [i32; 4],
-    /// Rules style: rule count, fallback material, pad.
+    /// Rules style: rule count, fallback material; the coarsest erosion
+    /// octave's shift (-1: none: erosion is resolved up to its level less
+    /// `RESOLVED_SHIFT`), pad.
     pub materials: [i32; 4],
     pub layers: [StackLayer; LAYERS],
     pub octaves: [Octave; OCTAVES],
@@ -906,7 +908,7 @@ pub fn surface(k: &LandformConstants, p: IVec3, level: u32) -> u32 {
 pub fn height_parts(k: &LandformConstants, p: IVec3, level: u32) -> (i32, u32) {
     // Erosion follows the slope of the larger terrain: when one of its
     // octaves is resolved here, the large octaves carry their gradients.
-    let erosion = k.table().iter().any(|o| o.class() == EROSION && resolved(o, level));
+    let erosion = k.materials[2] >= (level + RESOLVED_SHIFT) as i32;
     // The warp, masks, ridges and hills scale up to kilometres, so they use
     // the fine (Q24) noise: 16-bit noise is constant over metres at these
     // wavelengths and its steps, multiplied by the relief, would cut
