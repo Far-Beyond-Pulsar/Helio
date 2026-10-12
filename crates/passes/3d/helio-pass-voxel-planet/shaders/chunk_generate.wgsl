@@ -58,6 +58,9 @@ struct ChunkMeta {
     // Leaves stored for the chunk (0: none) and their block (NONE: none).
     leaves: u32,
     block: u32,
+    // A plane over every solid cell, z = top.z + top.x x + top.y y (cells):
+    // a chunk on a slope is far lower than its occupied layers' box.
+    top: vec4<f32>,
 }
 
 const NONE: u32 = 0xffffffffu;
@@ -520,6 +523,11 @@ var<workgroup> w_z: array<atomic<i32>, 2>;
 var<workgroup> w_total: u32;
 var<workgroup> w_block: u32;
 var<workgroup> w_mid_material: array<atomic<u32>, 64>;
+// The column tops' least-squares sums (n, x, y, z, xx, xy, yy, xz, yz),
+// the fitted slope, and the plane's height over it (1/256 cells).
+var<workgroup> w_fit: array<atomic<i32>, 9>;
+var<workgroup> w_slope: vec2<f32>;
+var<workgroup> w_lift: atomic<i32>;
 
 fn rank64(m: vec2<u32>, b: u32) -> u32 {
     // Set bits of `m` below bit `b`.
@@ -537,9 +545,11 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         atomicStore(&w_full[t], 0u);
     }
     if t < 64u { atomicStore(&w_mid_material[t], 0u); }
+    if t < 9u { atomicStore(&w_fit[t], 0); }
     if t == 0u {
         atomicStore(&w_z[0], 64);
         atomicStore(&w_z[1], 0);
+        atomicStore(&w_lift, -2147483647);
     }
     workgroupBarrier();
     let lx = t & 15u;
@@ -556,6 +566,9 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     var topped = 0u;
     var z_lo = 64;
     var z_hi = 0;
+    // Each column's top (one past its highest solid cell; 0: none).
+    var tops: array<i32, 16>;
+    var fit: array<i32, 9>;
     for (var c = 0u; c < 16u; c++) {
         let cx = lx * 4u + (c & 3u);
         let cy = ly * 4u + (c >> 2u);
@@ -565,6 +578,19 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         z_lo = min(z_lo, select(i32(firstTrailingBit(m.x)), 32 + i32(firstTrailingBit(m.y)), m.x == 0u));
         let high = select(i32(firstLeadingBit(m.x)), 32 + i32(firstLeadingBit(m.y)), m.y != 0u);
         z_hi = max(z_hi, 1 + high);
+        tops[c] = 1 + high;
+        let x = i32(cx);
+        let y = i32(cy);
+        let z = 1 + high;
+        fit[0] += 1;
+        fit[1] += x;
+        fit[2] += y;
+        fit[3] += z;
+        fit[4] += x * x;
+        fit[5] += x * y;
+        fit[6] += y * y;
+        fit[7] += x * z;
+        fit[8] += y * z;
         let top_leaf = u32(high) >> 2u;
         topped |= 1u << top_leaf;
         if (column_material & 0x80u) != 0u {
@@ -587,6 +613,7 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     }
     atomicMin(&w_z[0], z_lo);
     atomicMax(&w_z[1], z_hi);
+    for (var k = 0u; k < 9u; k++) { atomicAdd(&w_fit[k], fit[k]); }
     for (var lz = 0u; lz < 16u; lz++) {
         let m = (lx >> 2u) + (ly >> 2u) * 4u + (lz >> 2u) * 16u;
         let l = (lx & 3u) + (ly & 3u) * 4u + (lz & 3u) * 16u;
@@ -600,6 +627,36 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         // in it: then it is the surface and keeps its own materials.
         if leaf[lz].x == 0xffffffffu && leaf[lz].y == 0xffffffffu && ((topped >> lz) & 1u) == 0u { atomicOr(&w_full[word], bit); }
     }
+    workgroupBarrier();
+    // The tops' plane: its slope by least squares, then lifted over every
+    // column's top across the column's whole footprint.
+    if t == 0u {
+        var slope = vec2<f32>(0.0);
+        let n = f32(atomicLoad(&w_fit[0]));
+        if n >= 3.0 {
+            let mean = vec3<f32>(f32(atomicLoad(&w_fit[1])), f32(atomicLoad(&w_fit[2])), f32(atomicLoad(&w_fit[3]))) / n;
+            let sxx = f32(atomicLoad(&w_fit[4])) / n - mean.x * mean.x;
+            let sxy = f32(atomicLoad(&w_fit[5])) / n - mean.x * mean.y;
+            let syy = f32(atomicLoad(&w_fit[6])) / n - mean.y * mean.y;
+            let sxz = f32(atomicLoad(&w_fit[7])) / n - mean.x * mean.z;
+            let syz = f32(atomicLoad(&w_fit[8])) / n - mean.y * mean.z;
+            let det = sxx * syy - sxy * sxy;
+            if det > 1e-3 {
+                slope = clamp(vec2<f32>(sxz * syy - syz * sxy, syz * sxx - sxz * sxy) / det, vec2<f32>(-8.0), vec2<f32>(8.0));
+            }
+        }
+        w_slope = slope;
+    }
+    workgroupBarrier();
+    let slope = w_slope;
+    var lift = -2147483647;
+    for (var c = 0u; c < 16u; c++) {
+        if tops[c] == 0 { continue; }
+        // The plane's lowest point over the column.
+        let low = vec2<f32>(f32(lx * 4u + (c & 3u)), f32(ly * 4u + (c >> 2u))) + select(vec2<f32>(0.0), vec2<f32>(1.0), slope < vec2<f32>(0.0));
+        lift = max(lift, i32(ceil((f32(tops[c]) - dot(slope, low)) * 256.0)));
+    }
+    atomicMax(&w_lift, lift);
     workgroupBarrier();
     if t == 0u {
         // Mixed leaves per mid node, packed in mid order.
@@ -633,7 +690,10 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         w_total = select(total, 0u, overflow);
         w_block = base;
         let z = vec2<i32>(atomicLoad(&w_z[0]), atomicLoad(&w_z[1]));
-        chunk_meta[job.slot] = ChunkMeta(root_occ, root_full, z, select(total, 0u, overflow), select(base, NONE, overflow));
+        // A sixty-fourth of a cell over the tops: rays rasterized against
+        // it and walked in f32 meet it where they meet the cells.
+        let top = vec4<f32>(w_slope, f32(atomicLoad(&w_lift)) / 256.0 + 1.0 / 64.0, 0.0);
+        chunk_meta[job.slot] = ChunkMeta(root_occ, root_full, z, select(total, 0u, overflow), select(base, NONE, overflow), top);
         var flags = 1;
         if root_occ.x == 0u && root_occ.y == 0u { flags |= 2; }
         if root_full.x == 0xffffffffu && root_full.y == 0xffffffffu { flags |= 4; }

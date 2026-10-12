@@ -1061,7 +1061,7 @@ impl ChunkWorld {
             tile_ranges: buffer("chunk tile ranges", (TILE_BATCH * 16) as u64, s | wgpu::BufferUsages::COPY_SRC),
             chunk_jobs: buffer("chunk jobs", (CHUNK_BATCH * 32) as u64, s),
             column_masks: buffer("chunk column masks", CHUNK_BATCH as u64 * TILE_COLUMNS * 8, wgpu::BufferUsages::STORAGE),
-            chunk_meta: buffer("chunk meta", (MAX_CHUNKS * 32) as u64, s | wgpu::BufferUsages::COPY_SRC),
+            chunk_meta: buffer("chunk meta", (MAX_CHUNKS * 48) as u64, s | wgpu::BufferUsages::COPY_SRC),
             mids: buffer("chunk mids", (MAX_CHUNKS * 64 * 16) as u64, wgpu::BufferUsages::STORAGE),
             mid_leaves: buffer("chunk mid leaves", (MAX_CHUNKS * 64 * 4) as u64, wgpu::BufferUsages::STORAGE),
             leaves: buffer("chunk leaves", LEAF_CAPACITY * 8, wgpu::BufferUsages::STORAGE),
@@ -1829,7 +1829,7 @@ impl ChunkWorld {
     pub fn resident_bytes(&self) -> u64 {
         let alloc: Vec<[i32; 2]> = self.read(&self.leaf_alloc, 1);
         let chunks: usize = self.tiles.values().map(|t| t.chunks.len()).sum();
-        alloc[0][0].max(0) as u64 * 10 + chunks as u64 * (64 * 24 + 32)
+        alloc[0][0].max(0) as u64 * 10 + chunks as u64 * (64 * 24 + 48)
     }
 
     /// Every pixel's hit in the last [`Self::draw`], row by row (waits for

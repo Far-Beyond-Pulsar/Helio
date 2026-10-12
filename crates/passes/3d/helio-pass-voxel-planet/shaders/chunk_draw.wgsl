@@ -74,6 +74,8 @@ struct ChunkMeta {
     z: vec2<i32>,
     leaves: u32,
     block: u32,
+    // A plane over every solid cell: z = top.z + top.x x + top.y y.
+    top: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> params: DrawParams;
@@ -185,7 +187,11 @@ fn seed_vertex(@builtin(vertex_index) v: u32, @builtin(instance_index) n: u32) -
     // left-handed frame, or a box drawn from inside (its back faces).
     let mirrored = (bitcast<u32>(c.box.w) & 1u) != 0u;
     if mirrored != (n < params.table.z) { x = 64.0 - x; }
-    let local = vec3<f32>(x, f32((corner >> 1u) & 1u) * 64.0, select(c.box.x, c.box.y, (corner & 4u) != 0u));
+    // The box's top lies on its chunk's plane over the solid cells (never
+    // below its bottom): raising a corner keeps the faces over the cells.
+    let y = f32((corner >> 1u) & 1u) * 64.0;
+    let top = chunk_meta[slot].top;
+    let local = vec3<f32>(x, y, select(c.box.x, max(c.box.x, top.z + top.x * x + top.y * y), (corner & 4u) != 0u));
     let world = vec3<f32>(c.m0.w, c.m1.w, c.m2.w) + c.m0.xyz * local.x + c.m1.xyz * local.y + c.m2.xyz * local.z;
     var out: VOut;
     out.position = params.view_proj * vec4<f32>(world, 1.0);
@@ -606,8 +612,13 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
             let tb = (vec3<f32>(f32(cube_hi.x), f32(cube_hi.y), frame.box.y) - o) * inv;
             let lo = min(ta, tb);
             let hi = max(ta, tb);
-            let t0 = max(max(lo.x, max(lo.y, lo.z)), t_prev);
-            let t1 = min(min(hi.x, min(hi.y, hi.z)), t_end);
+            var t0 = max(max(lo.x, max(lo.y, lo.z)), t_prev);
+            var t1 = min(min(hi.x, min(hi.y, hi.z)), t_end);
+            // Only under the chunk's plane over its solid cells.
+            let top = chunk_meta[slot].top;
+            let s0 = o.z - top.x * o.x - top.y * o.y - top.z;
+            let ds = d.z - top.x * d.x - top.y * d.y;
+            if ds > 0.0 { t1 = min(t1, -s0 / ds); } else if ds < 0.0 { t0 = max(t0, -s0 / ds); } else if s0 > 0.0 { t1 = t0; }
             if t1 > t0 {
                 let axis0 = select(select(2u, 1u, lo.y >= lo.z), 0u, lo.x >= lo.y && lo.x >= lo.z);
                 let h = trace_chunk(slot, o, d, t0, t1, axis0, vec2<i32>(i32(frame.box.x), i32(frame.box.y)), counted);

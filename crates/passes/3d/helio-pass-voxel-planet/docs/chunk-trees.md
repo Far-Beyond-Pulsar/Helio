@@ -549,6 +549,24 @@ samples 25 %, shadow resolve and fallbacks 19 %, seed 2 %:
   is boxed by its whole occupied layer range, much taller than its
   surface.
 
+### Tilted chunk tops
+
+Generation fits a plane to each chunk's column tops (least squares, then
+lifted over every top across its column's footprint, plus a sixty-fourth
+of a cell) and stores it with the chunk (`ChunkMeta::top`). The seed
+raster draws the box with its top corners on that plane, so a ray passing
+over a slope's chunks is seeded at the chunk it hits; a walk crosses a
+chunk only while under its plane. Exact hits are unchanged (every compared
+pixel of `tests/chunks.rs`).
+
+| View (1080p hold) | primary before | after | sun and sky before | after |
+|---|---|---|---|---|
+| ground | 1.86 ms | 1.39 ms | 2.09 ms | 2.05 ms |
+| mountain slope | 4.28 ms | 2.55 ms | 3.27 ms | 3.10 ms |
+| tunnel | 2.86 ms | 2.66 ms | 1.45 ms | 1.44 ms |
+
+A mountain ray takes 17.6 steps through 2.4 boxes (was 40 through 5.6).
+
 ## References
 
 Laine and Karras, *Efficient Sparse Voxel Octrees* (2010); Crassin et al.,
