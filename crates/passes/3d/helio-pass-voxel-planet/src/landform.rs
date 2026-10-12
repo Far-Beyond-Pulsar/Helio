@@ -661,14 +661,18 @@ fn erosion_octave(saturation: i32, o: &Octave, p: IVec3, g: IVec3, up: IVec3) ->
     let s = o.shift;
     let c = IVec3::new(p.x >> s, p.y >> s, p.z >> s);
     let mask = (1i32 << s) - 1;
-    let w = [p.x, p.y, p.z].map(|v| fade(if s >= 16 { (v & mask) >> (s - 16) } else { (v & mask) << (16 - s) }));
+    let f = [p.x, p.y, p.z].map(|v| if s >= 16 { (v & mask) >> (s - 16) } else { (v & mask) << (16 - s) });
+    let w = f.map(fade);
+    // Offset along tn, in Q16 lattice spacings: from the cell's first corner,
+    // less one step of tn (Q16) for each axis a corner is past it.
+    let along0 = mul_shr_signed(f[0], tn.x, 30) + mul_shr_signed(f[1], tn.y, 30) + mul_shr_signed(f[2], tn.z, 30);
+    let step = IVec3::new(tn.x >> 14, tn.y >> 14, tn.z >> 14);
     let mut cos = [0i32; 8];
     let mut sin = [0i32; 8];
     for index in 0..8usize {
-        let corner = c + IVec3::new((index & 1) as i32, ((index >> 1) & 1) as i32, (index >> 2) as i32);
-        // Offset from the corner along tn, in Q16 lattice spacings.
-        let d = p - IVec3::new(corner.x << s, corner.y << s, corner.z << s);
-        let along = mul_shr_signed(d.x, tn.x, s + 14) + mul_shr_signed(d.y, tn.y, s + 14) + mul_shr_signed(d.z, tn.z, s + 14);
+        let k = IVec3::new((index & 1) as i32, ((index >> 1) & 1) as i32, (index >> 2) as i32);
+        let corner = c + k;
+        let along = along0 - (k * step).element_sum();
         let phase = along * STRIPES + (hash3(corner.x, corner.y, corner.z, o.seed) & 0xffff) as i32;
         // Gully profile pi/2 |cos(phase / 2)| - 1: V-shaped valleys between
         // rounded ridges, zero mean (levels that omit it keep their height)
@@ -950,9 +954,15 @@ pub fn height_parts(k: &LandformConstants, p: IVec3, level: u32) -> (i32, u32) {
     let mut eroded = 0i32;
     let mut deroded = IVec3::ZERO;
     let mut ejecta = 0u32;
+    // Steering reads only continents and mountains, which erosion octaves
+    // leave alone: a run of erosion octaves shares one.
+    let mut steer = None;
     for o in k.table() {
         if !resolved(o, level) {
             continue;
+        }
+        if o.class() != EROSION {
+            steer = None;
         }
         let l = o.layer();
         match o.class() {
@@ -985,7 +995,7 @@ pub fn height_parts(k: &LandformConstants, p: IVec3, level: u32) -> (i32, u32) {
             }
             HILLS => s.value[l] = s.value[l].wrapping_add(mul_fine(o.amplitude, noise_fine(q, o.shift, o.seed))),
             EROSION => {
-                let g = unwarp(steering(k, &s)) + deroded;
+                let g = *steer.get_or_insert_with(|| unwarp(steering(k, &s))) + deroded;
                 let (e, de) = erosion_octave(k.layers[l].a, o, p, g, up);
                 s.value[l] = s.value[l].wrapping_add(e);
                 eroded = eroded.wrapping_add(e);

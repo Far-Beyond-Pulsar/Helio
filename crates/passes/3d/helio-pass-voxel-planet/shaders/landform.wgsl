@@ -395,13 +395,16 @@ fn landform_erosion(saturation_slope: i32, o: LandformOctave, p: vec3<i32>, g: v
     let s = o.shift;
     let c = p >> vec3<u32>(s);
     let mask = (1 << s) - 1;
-    let w = vec3<i32>(fade(landform_lattice_q16(p.x, mask, s)), fade(landform_lattice_q16(p.y, mask, s)), fade(landform_lattice_q16(p.z, mask, s)));
+    let f = vec3<i32>(landform_lattice_q16(p.x, mask, s), landform_lattice_q16(p.y, mask, s), landform_lattice_q16(p.z, mask, s));
+    let w = vec3<i32>(fade(f.x), fade(f.y), fade(f.z));
+    let along0 = mul_shr_signed(f.x, tn.x, 30u) + mul_shr_signed(f.y, tn.y, 30u) + mul_shr_signed(f.z, tn.z, 30u);
+    let step = tn >> vec3<u32>(14u);
     var cosv: array<i32, 8>;
     var sinv: array<i32, 8>;
     for (var index = 0; index < 8; index++) {
-        let corner = c + vec3<i32>(index & 1, (index >> 1u) & 1, index >> 2u);
-        let d = p - (corner << vec3<u32>(s));
-        let along = mul_shr_signed(d.x, tn.x, s + 14u) + mul_shr_signed(d.y, tn.y, s + 14u) + mul_shr_signed(d.z, tn.z, s + 14u);
+        let k = vec3<i32>(index & 1, (index >> 1u) & 1, index >> 2u);
+        let corner = c + k;
+        let along = along0 - dot(k, step);
         let phase = along * LANDFORM_STRIPES + i32(hash3(corner.x, corner.y, corner.z, o.seed) & 0xffffu);
         cosv[index] = mul16(abs(sin_turns((phase >> 1u) + 16384)), 102944) - NOISE_ONE;
         sinv[index] = sin_turns(phase);
@@ -567,10 +570,15 @@ fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
     if terrain.shape.x > 0 { display_tag = (u32(terrain.shape.x - 1) << 8u) | LF_RIDGE; }
     var ridge_gain = FINE_ONE;
     var ridge_row = 0u;
+    // Steering reads only continents and mountains, which erosion octaves
+    // leave alone: a run of erosion octaves shares one.
+    var steer = vec3<i32>(0);
+    var steered = false;
     for (var index = LANDFORM_WARP; index < count; index++) {
         let o = terrain.octaves[index];
         let l = (o.kind >> 8u) & 7u;
         let kind = o.kind & 0xffu;
+        if kind != LF_EROSION { steered = false; }
         var gain = FINE_ONE;
         var gradient = erosion;
         if RIDGE_DISPLAY_GENERATION && display && o.kind == display_tag {
@@ -610,13 +618,16 @@ fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
                 lf_value[l] += nd.x;
             }
         } else if kind == LF_EROSION {
-            let gq = landform_steering();
-            // (I + J)^T: column j gathers every warp axis' dependence on p_j.
-            let gp = gq + vec3<i32>(
-                mul_fine(gq.x, jx.x) + mul_fine(gq.y, jy.x) + mul_fine(gq.z, jz.x),
-                mul_fine(gq.x, jx.y) + mul_fine(gq.y, jy.y) + mul_fine(gq.z, jz.y),
-                mul_fine(gq.x, jx.z) + mul_fine(gq.y, jy.z) + mul_fine(gq.z, jz.z));
-            let e = landform_erosion(terrain.layers[l].a, o, p, gp + deroded, up);
+            if !steered {
+                let gq = landform_steering();
+                // (I + J)^T: column j gathers every warp axis' dependence on p_j.
+                steer = gq + vec3<i32>(
+                    mul_fine(gq.x, jx.x) + mul_fine(gq.y, jy.x) + mul_fine(gq.z, jz.x),
+                    mul_fine(gq.x, jx.y) + mul_fine(gq.y, jy.y) + mul_fine(gq.z, jz.y),
+                    mul_fine(gq.x, jx.z) + mul_fine(gq.y, jy.z) + mul_fine(gq.z, jz.z));
+                steered = true;
+            }
+            let e = landform_erosion(terrain.layers[l].a, o, p, steer + deroded, up);
             lf_value[l] += e.x;
             eroded += e.x;
             deroded += e.yzw;
