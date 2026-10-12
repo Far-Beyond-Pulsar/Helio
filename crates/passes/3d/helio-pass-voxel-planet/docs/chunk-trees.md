@@ -585,6 +585,13 @@ later. The eye's squared radius less the ceiling's comes from f64.
 With the tilted tops, the mountain view's terrain is 5.0 ms (2.50 primary,
 2.51 sun and sky), the ground's 3.0 ms.
 
+Measured and dropped: letting a walk start its next lookup at the level
+of the air it just crossed (air over a column's top is air at that
+level), which skips the climb from the finest level after each air box.
+Sun and sky on the ground fell 7 %, but the tunnel's walks and the
+mountain's primary rose 3-4 % even where it never applied (the walk's
+code and registers grew).
+
 ## References
 
 Laine and Karras, *Efficient Sparse Voxel Octrees* (2010); Crassin et al.,
