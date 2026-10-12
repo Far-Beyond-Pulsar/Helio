@@ -230,9 +230,10 @@ impl ChunkPass {
         };
         self.last_view = Some(frame.eye);
         let now = std::time::Instant::now();
-        let velocity = match self.last_eye {
-            Some((eye, at)) => (frame.eye - eye) / now.duration_since(at).as_secs_f64().max(1e-3),
-            None => DVec3::ZERO,
+        let interval = self.last_eye.map(|(_, at)| now.duration_since(at).as_secs_f64().max(1e-3));
+        let velocity = match (self.last_eye, interval) {
+            (Some((eye, _)), Some(dt)) => (frame.eye - eye) / dt,
+            _ => DVec3::ZERO,
         };
         self.last_eye = Some((frame.eye, now));
         // In view: the cone around the camera's forward reaching the
@@ -247,7 +248,11 @@ impl ChunkPass {
         let near = camera.position_near[3];
         let mut cmds = ctx.graphics_cmds();
         let encoder = &mut cmds;
-        self.stats = world.update(encoder, frame.eye, velocity, Some(view), ctx.frame_num, &self.config);
+        // Generation keeps its pace per second at any frame rate: a frame
+        // slower than a 60th of a second generates for longer, up to twice.
+        let mut config = self.config;
+        config.generate_ms = config.generate_ms.map(|ms| ms * interval.map_or(1.0, |dt| (dt * 60.0).clamp(1.0, 2.0)));
+        self.stats = world.update(encoder, frame.eye, velocity, Some(view), ctx.frame_num, &config);
         world.draw(encoder, ctx.frame_num, frame.eye, view_proj, prev_view_proj, near, frame.sun, [ctx.width, ctx.height]);
         world.publish(encoder, gbuffer, ctx.depth);
         if let Some(picks) = &frame.picks {

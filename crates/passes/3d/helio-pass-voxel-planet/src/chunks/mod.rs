@@ -580,8 +580,9 @@ pub struct ResidencyConfig {
     pub plan: residency::PlanConfig,
     /// Tiles generated per frame at most.
     pub tiles_per_frame: usize,
-    /// GPU milliseconds of generation a frame (measured per tile from the
-    /// frames' timestamps).
+    /// GPU milliseconds of generation a frame at 60 frames a second
+    /// (against the measured cost of tiles and chunks); `ChunkPass` gives a
+    /// slower frame proportionally more, up to twice.
     pub generate_ms: Option<f64>,
 }
 
