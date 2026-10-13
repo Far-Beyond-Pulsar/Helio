@@ -117,7 +117,11 @@ fn terrain_lean(level: u32) -> vec2<i32> {
 // Horizontal offset (Q8 level cells) of the heightfield under cell
 // `(i, j, k)` (`LandformVolume::lean_offset`).
 fn terrain_lean_offset(p: vec3<i32>, i: i32, j: i32, k: i32, level: u32) -> vec2<i32> {
-    let a = landform_overhang_amplitude(p, level);
+    return terrain_lean_offset_with(landform_overhang_amplitude(p, level), i, j, k, level);
+}
+
+// `terrain_lean_offset` with its column's overhang amplitude `a` given.
+fn terrain_lean_offset_with(a: i32, i: i32, j: i32, k: i32, level: u32) -> vec2<i32> {
     if a == 0 { return vec2<i32>(0); }
     let v = terrain.volume;
     let half = (1 << level) >> 1u;
@@ -181,13 +185,38 @@ fn landform_noise_mm(excess: i32, shift: i32) -> i32 {
     return mul_shr_signed(excess, 25 << u32(shift), 18u);
 }
 
+// What the volume reads of a column alone, whatever the cell: its overhang
+// amplitude and its caves' region and entrance ramps.
+struct ColumnVolume {
+    overhang: i32,
+    region: i32,
+    entrance: i32,
+}
+
+fn column_volume(p: vec3<i32>, level: u32) -> ColumnVolume {
+    let v = terrain.volume;
+    let caves = landform_caves_at(level);
+    var c = ColumnVolume(landform_overhang_amplitude(p, level), 0, 0);
+    if caves.x || caves.y {
+        c.region = landform_noise_ramp(noise(p, u32(v[0].y), landform_seed() ^ SEED_CAVE_REGION), v[0].z);
+        c.entrance = landform_noise_ramp(noise(p, u32(v[4].x), landform_seed() ^ SEED_CAVE_ENTRANCE), v[4].y);
+    }
+    return c;
+}
+
 // Signed distance of a cell to the surface, CSG of the surface, overhangs
 // and caves (`LandformVolume::density`); `height` is the column's field
 // height (mm), the surface the volume folds, and `lean_height` the height
 // under the cell's lean offset (`terrain::lean_height`).
 fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32 {
+    return terrain_density_with(column_volume(p, level), q, level, top, height, lean_height, k);
+}
+
+// `terrain_density` with its column's `column_volume` given (a column's
+// cells evaluate it once).
+fn terrain_density_with(column: ColumnVolume, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32 {
     let v = terrain.volume;
-    let a = landform_overhang_amplitude(p, level);
+    let a = column.overhang;
     let caves = landform_caves_at(level);
     if a == 0 && !caves.x && !caves.y { return heightfield_density(top, k); }
     let layer = v[3].w;
@@ -206,8 +235,8 @@ fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32
         let depth = -d;
         // Caves fade in over a region's edge and close towards the rock cover
         // and the cave depth; at an entrance tunnels open to the surface.
-        let region = landform_noise_ramp(noise(p, u32(v[0].y), landform_seed() ^ SEED_CAVE_REGION), v[0].z);
-        let entrance = landform_noise_ramp(noise(p, u32(v[4].x), landform_seed() ^ SEED_CAVE_ENTRANCE), v[4].y);
+        let region = column.region;
+        let entrance = column.entrance;
         let cover = v[3].z;
         var walls = 0x7fffffff;
         var carved = false;

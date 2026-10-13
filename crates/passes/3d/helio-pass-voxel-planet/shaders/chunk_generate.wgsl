@@ -364,9 +364,10 @@ fn lean_bilinear(xy: vec2<i32>, spacing: i32) -> i32 {
 }
 
 // Height (mm) of the heightfield displaced by the program's lean under cell
-// `(i, j, k)` (`terrain::lean_height`); `node` is the lattice's first node.
-fn lean_height(p: vec3<i32>, i: i32, j: i32, k: i32, level: u32, height: i32, spacing: i32, node: vec2<i32>) -> i32 {
-    let o = terrain_lean_offset(p, i, j, k, level);
+// `(i, j, k)` (`terrain::lean_height`) of a column with overhang amplitude
+// `a`; `node` is the lattice's first node.
+fn lean_height(a: i32, i: i32, j: i32, k: i32, level: u32, height: i32, spacing: i32, node: vec2<i32>) -> i32 {
+    let o = terrain_lean_offset_with(a, i, j, k, level);
     if o.x == 0 && o.y == 0 { return height; }
     let xy = vec2<i32>(i, j) * 256 + 128 - node * spacing * 256;
     return lean_bilinear(xy + o, spacing) + height - lean_bilinear(xy, spacing);
@@ -399,7 +400,15 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     if atomicLoad(&w_leaning) != 0u {
         let last = (world.grid.z >> level) - 1;
         let cell = vec2<i32>(clamp((node.x + i32(li & 7u)) * lean.y, 0, last), clamp((node.y + i32(li >> 3u)) * lean.y, 0, last));
-        w_lean[li] = generation_column(face, cell.x, cell.y, level, level >= 1u).x;
+        // A node over the tile is its column's height, already evaluated
+        // (`tile_columns_main`, the same arguments): only the halo past the
+        // tile's edges runs the program again.
+        let local = cell - vec2<i32>(tile.cx, tile.cy) * 64;
+        if all(local >= vec2<i32>(0)) && all(local < vec2<i32>(64)) {
+            w_lean[li] = tile_columns[job.tile * TILE_COLUMNS + u32(local.y) * 64u + u32(local.x)].x;
+        } else {
+            w_lean[li] = generation_column(face, cell.x, cell.y, level, level >= 1u).x;
+        }
     }
     workgroupBarrier();
     if column.x == OUTSIDE {
@@ -418,6 +427,8 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
         let k_lo = max(top - column.z, k0);
         let k_hi = min(top + column.w, k0 + 64);
         let band_lo = select(top, top - column.w, column.w > 0);
+        // The column's own volume terms, once for all its cells.
+        let volume = column_volume(p, level);
         let step = distance(vec3<f32>(volume_point(face, i, j, top + 1, level)), vec3<f32>(volume_point(face, i, j, top, level))) + 2.0;
         var scan = k_lo;
         loop {
@@ -430,8 +441,8 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
                 }
             }
             var lean_h = height;
-            if leaning { lean_h = lean_height(p, i, j, scan, level, height, lean.y, node); }
-            let solid = terrain_density(p, volume_point(face, i, j, scan, level), level, top, height, lean_h, scan) > 0;
+            if leaning { lean_h = lean_height(volume.overhang, i, j, scan, level, height, lean.y, node); }
+            let solid = terrain_density_with(volume, volume_point(face, i, j, scan, level), level, top, height, lean_h, scan) > 0;
             mask = set_bits(mask, scan - k0, scan - k0 + 1, solid);
             scan += 1;
         }

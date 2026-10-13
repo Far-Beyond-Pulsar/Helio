@@ -859,6 +859,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let mut traced = false;
     let mut dug = false;
     let mut next_dig = 1.0;
+    let mut generated_tiles = 0usize;
     loop {
         let t = started.elapsed().as_secs_f64();
         if t > seconds {
@@ -920,6 +921,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
             draw_ms.push(timing.draw);
             generate_ms.push(timing.generate);
         }
+        generated_tiles += s.generated_tiles;
         csv += &format!("{t:.4},{altitude:.2},{interval:.2},{},{:.4},{:.3},{},{:.3},{},{},{},{:.2},{},{record_ms:.2},{wait_ms:.2},{:.2},{:.2}
 ", u8::from(captured), s.coarse_share, s.worst_px, s.switches, s.switch_px, s.requests, s.generated_tiles, s.fading_tiles, s.cpu_ms.iter().sum::<f64>(), s.cpu_ms.map(|v| format!("{v:.2}")).join(","), pass_cpu[0], pass_cpu[1]);
         // A frame after a capture waited for its readback.
@@ -988,6 +990,9 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         over(&switch_px, 1.5),
         over(&switch_px, 3.0),
     );
+    // GPU generation per tile over the flight (its timings lag a few frames).
+    let generation: f64 = generate_ms.iter().sum();
+    eprintln!("CHUNKSTRESS {mode}: generation {generation:.1} ms GPU for {generated_tiles} tiles, {:.1} us a tile", generation * 1e3 / generated_tiles.max(1) as f64);
     for (interval, t, altitude) in slow.iter().take(5) {
         eprintln!("CHUNKSTRESS {mode}: slow frame {interval:.1} ms at t {t:.2} s, altitude {altitude:.0} m");
     }
