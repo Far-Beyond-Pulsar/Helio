@@ -14,7 +14,7 @@
 //!   `HELIO_VOXEL_CHUNKS_DIG=n` the view is dug and undone, with
 //!   `HELIO_VOXEL_CHUNKS_BLAST=r` blasted by one ball `r` m across.
 //! * `HELIO_VOXEL_CHUNKS_FLY=descent|cruise` streams along a path.
-//! * `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig` flies through the
+//! * `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo` flies through the
 //!   renderer in real time, every frame recorded (`stress_<mode>.csv`),
 //!   samples saved with settled references to compare.
 //!
@@ -740,7 +740,7 @@ fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3)
     pick_probe(flight, view, eye, forward);
 }
 
-/// `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig`: a flight
+/// `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo`: a flight
 /// through the renderer in real time (the path follows the wall clock, as a
 /// game's camera does: a slow frame moves it further), from 2 m to 400 km
 /// or back in `HELIO_VOXEL_FLIGHT_HOLD_SECONDS` (20), at 300 m/s 40 m over
@@ -770,6 +770,14 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
             // where the view's centre meets it a second in.
             return (planet.surface_point(ground, 6.0), (ahead - up * 0.5).normalize().as_vec3());
         }
+        if mode == "yoyo" {
+            // Up and down between 2 and 50 km every `HELIO_VOXEL_STRESS_PERIOD`
+            // seconds (3) looking steeply down (an editor camera flown up
+            // and down: switches across many levels while others fade).
+            let period: f64 = std::env::var("HELIO_VOXEL_STRESS_PERIOD").ok().and_then(|v| v.parse().ok()).unwrap_or(3.0);
+            let altitude = 2_000.0 * 25f64.powf(0.5 - 0.5 * (std::f64::consts::TAU * t / period).cos());
+            return (planet.surface_point(ground + ahead * (300.0 * t), altitude), (ahead - up * 2.0).normalize().as_vec3());
+        }
         if mode == "jump" {
             // 40 m over the ground, then at once `HELIO_VOXEL_STRESS_ALTITUDE`
             // (30 km) over it looking down (an editor camera's jump: one
@@ -782,8 +790,10 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         }
         if mode == "orbit" {
             let altitude: f64 = std::env::var("HELIO_VOXEL_STRESS_ALTITUDE").ok().and_then(|v| v.parse().ok()).unwrap_or(400_000.0);
-            // Around the planet along a great circle through the spawn.
-            let angle = 7_700.0 * t / (radius + altitude);
+            // Around the planet along a great circle through the spawn, at
+            // `HELIO_VOXEL_STRESS_SPEED` m/s (7 700).
+            let speed: f64 = std::env::var("HELIO_VOXEL_STRESS_SPEED").ok().and_then(|v| v.parse().ok()).unwrap_or(7_700.0);
+            let angle = speed * t / (radius + altitude);
             let position = (up * angle.cos() + ahead * angle.sin()) * (radius + altitude);
             let (local_up, local_ahead) = (position.normalize(), ahead * angle.cos() - up * angle.sin());
             return (position, (local_ahead - local_up * 0.8).normalize().as_vec3());

@@ -111,13 +111,6 @@ fn choice(state: i32, r: i32, frame: u64) -> i32 {
     }
 }
 
-/// One of `a` and `b` holds the other.
-fn overlaps(a: TileKey, b: TileKey) -> bool {
-    let (big, small) = if a.level >= b.level { (a, b) } else { (b, a) };
-    let d = big.level - small.level;
-    a.face == b.face && small.cx >> d == big.cx && small.cy >> d == big.cy
-}
-
 /// No solid cell: a column's top.
 const NO_TOP: i32 = -(1 << 26);
 
@@ -127,6 +120,14 @@ fn column_key(tile: TileKey) -> [i32; 4] {
 
 fn gap_key(tile: TileKey) -> [i32; 4] {
     [i32::from(tile.face) | ((tile.level as i32) << 8), tile.cx, tile.cy, GAP]
+}
+
+/// The four tiles under `tile` (none at the finest level).
+fn children(tile: TileKey) -> Vec<TileKey> {
+    if tile.level == 0 {
+        return Vec::new();
+    }
+    [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().map(|(a, b)| TileKey { face: tile.face, level: tile.level - 1, cx: tile.cx * 2 + a, cy: tile.cy * 2 + b }).collect()
 }
 
 fn parent(tile: TileKey) -> TileKey {
@@ -157,6 +158,10 @@ pub struct DrawnSet {
     touched: Vec<TileKey>,
     /// Drawn tiles fading in or out.
     fades: FxHashMap<TileKey, Fade>,
+    /// Fading tiles strictly under each tile (only tiles with any): a
+    /// switch finds the fades under it by descending where they are, not by
+    /// scanning them all (a camera flown up and down fades 20 000 tiles).
+    fade_below: FxHashMap<TileKey, u32>,
     /// The coarsest level.
     top_level: u32,
     /// Entries: key then value.
@@ -182,6 +187,7 @@ impl DrawnSet {
             columns: FxHashMap::default(),
             touched: Vec::new(),
             fades: FxHashMap::default(),
+            fade_below: FxHashMap::default(),
             top_level,
             table: vec![EMPTY; 2 * entries],
             mask: entries as u32 - 1,
@@ -216,11 +222,9 @@ impl DrawnSet {
         // A switch the plan changes again, or whose tiles change, ends at
         // once (with every switch it overlaps).
         if !self.fades.is_empty() {
-            let fades: FxHashSet<TileKey> = self.fades.keys().copied().collect();
-            let above = self.ancestors_of(&fades);
             let touching: Vec<TileKey> = added.iter().chain(removed).chain(changed.iter().filter(|k| self.fades.contains_key(k))).copied().collect();
             for key in touching {
-                self.snap(key, &above);
+                self.snap(key);
             }
         }
         let gone: FxHashSet<TileKey> = removed.iter().filter(|k| self.tiles.contains_key(k)).copied().collect();
@@ -231,7 +235,7 @@ impl DrawnSet {
             // Finer tiles came under it, or a coarser one over it.
             let coarse = came_above.contains(&key);
             if coarse || self.ancestors(key).any(|a| came.contains(&a)) {
-                self.fades.insert(key, Fade { start: frame, incoming: false, coarse });
+                self.start_fade(key, Fade { start: frame, incoming: false, coarse });
                 self.touched.push(key);
             } else {
                 self.drop_tile(key);
@@ -246,7 +250,7 @@ impl DrawnSet {
         for &key in &came {
             let coarse = gone_above.contains(&key);
             if coarse || self.ancestors(key).any(|a| gone.contains(&a)) {
-                self.fades.insert(key, Fade { start: frame, incoming: true, coarse });
+                self.start_fade(key, Fade { start: frame, incoming: true, coarse });
             }
             self.add_tile(key, chunks_of(key).into());
         }
@@ -254,23 +258,54 @@ impl DrawnSet {
     }
 
     /// The fade of `key` ends: an outgoing tile leaves.
+    fn start_fade(&mut self, key: TileKey, fade: Fade) {
+        if self.fades.insert(key, fade).is_none() {
+            for a in self.ancestors(key) {
+                *self.fade_below.entry(a).or_default() += 1;
+            }
+        }
+    }
+
+    /// `key`'s fade, gone from the fades and the counts over it.
+    fn take_fade(&mut self, key: TileKey) -> Option<Fade> {
+        let fade = self.fades.remove(&key)?;
+        for a in self.ancestors(key) {
+            if let Some(n) = self.fade_below.get_mut(&a) {
+                *n -= 1;
+                if *n == 0 {
+                    self.fade_below.remove(&a);
+                }
+            }
+        }
+        Some(fade)
+    }
+
     fn end_fade(&mut self, key: TileKey) {
-        if self.fades.remove(&key).is_some_and(|f| !f.incoming) {
+        if self.take_fade(key).is_some_and(|f| !f.incoming) {
             self.drop_tile(key);
         } else {
             self.touched.push(key);
         }
     }
 
-    /// End the fades overlapping `key` now, and those overlapping them
-    /// (`above`: the fading tiles' ancestors, or more).
-    fn snap(&mut self, key: TileKey, above: &FxHashSet<TileKey>) {
+    /// End the fades overlapping `key` now, and those overlapping them.
+    fn snap(&mut self, key: TileKey) {
         let mut work = vec![key];
         while let Some(t) = work.pop() {
-            // It or its ancestors; its descendants (rarely any).
+            // It or its ancestors; its descendants, where there are fades.
             let mut hit: Vec<TileKey> = std::iter::once(t).chain(self.ancestors(t)).filter(|k| self.fades.contains_key(k)).collect();
-            if above.contains(&t) {
-                hit.extend(self.fades.keys().filter(|k| k.level < t.level && overlaps(**k, t)));
+            if self.fade_below.contains_key(&t) {
+                let mut down = vec![t];
+                while let Some(d) = down.pop() {
+                    for c in children(d) {
+                        if self.fades.contains_key(&c) {
+                            hit.push(c);
+                        }
+                        if self.fade_below.contains_key(&c) {
+                            down.push(c);
+                        }
+                    }
+                }
             }
             for k in hit {
                 self.end_fade(k);
