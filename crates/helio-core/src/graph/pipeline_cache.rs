@@ -610,7 +610,8 @@ impl PipelineFormatCache {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("tmp");
+        // Per-process temp name: several game instances may share one cache file.
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
         std::fs::write(&tmp, data)?;
         std::fs::rename(tmp, path)
     }

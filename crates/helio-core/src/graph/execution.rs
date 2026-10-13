@@ -2274,6 +2274,12 @@ impl RenderGraph {
                 .update_snapshot(self.frame_count, self.passes.iter().map(|pass| pass.name()));
         }
 
+        // Once the first pipelines have been built, save the driver cache so
+        // other processes (and the next run) skip compiling them. No-op unless
+        // persistence was enabled.
+        if self.frame_count == 300 {
+            let _ = self.pipeline_cache.persist();
+        }
         self.frame_count += 1;
         self.resize_pending = false;
 

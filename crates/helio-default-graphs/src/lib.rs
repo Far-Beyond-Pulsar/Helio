@@ -112,6 +112,11 @@ fn new_graph(
         RenderGraph::new_with_external_device(device, queue)
     };
     graph.with_xr_mode(config.enable_xr);
+    // The host (e.g. the editor launching several game copies) names a shared
+    // file so the driver pipeline cache is compiled once, not per process.
+    if let Some(path) = std::env::var_os("PULSAR_PIPELINE_CACHE") {
+        graph.enable_pipeline_cache_persistence(path);
+    }
     graph
 }
 
