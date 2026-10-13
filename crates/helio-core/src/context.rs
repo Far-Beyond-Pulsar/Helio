@@ -325,6 +325,11 @@ impl<'a> PassContext<'a> {
         self.profiler.gpu_frame_ms()
     }
 
+    /// The graph's CPU milliseconds recording the last frame timed.
+    pub fn last_frame_cpu_ms(&self) -> Option<f32> {
+        self.profiler.timing_snapshot().total_cpu_ms
+    }
+
     /// Whether GPU scope timestamps can be recorded on this graph.
     pub fn gpu_scopes_enabled(&self) -> bool {
         self.profiler.is_enabled() && self.profiler.gpu_timing_supported()

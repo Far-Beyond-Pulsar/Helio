@@ -22,6 +22,8 @@ pub struct ChunkPass {
     stats: UpdateStats,
     /// Frames whose GPU times came back, until taken.
     timings: Vec<FrameTimings>,
+    /// Generation's milliseconds last frame (`ResidencyConfig::frame_ms`).
+    budget_ms: Option<f64>,
     /// The last frame's CPU milliseconds: prepare, execute.
     cpu_ms: [f64; 2],
 }
@@ -35,7 +37,7 @@ impl ChunkPass {
     /// With residency settings `config` (its pixel angle follows the
     /// camera).
     pub fn with_config(source: SharedPlanetFrame, config: ResidencyConfig) -> Self {
-        Self { source, config, appearance: None, world: None, built_for: None, shown: None, last_eye: None, stats: UpdateStats::default(), timings: Vec::new(), cpu_ms: [0.0; 2] }
+        Self { source, config, appearance: None, world: None, built_for: None, shown: None, last_eye: None, stats: UpdateStats::default(), timings: Vec::new(), budget_ms: None, cpu_ms: [0.0; 2] }
     }
 
     /// The host's art settings; whether they changed.
@@ -254,11 +256,19 @@ impl ChunkPass {
         // slower than a 60th of a second generates for longer, up to twice.
         let mut config = self.config;
         config.generate_ms = config.generate_ms.map(|ms| ms * interval.map_or(1.0, |dt| (dt * 60.0).clamp(1.0, 2.0)));
-        // It grows into what the last measured frame left of `frame_ms`
-        // (its own generation then counted in), up to four times that.
-        if let (Some(base), Some(frame_ms), Some(gpu)) = (config.generate_ms, config.frame_ms, ctx.last_frame_gpu_ms()) {
-            let generated = self.timings.last().map_or(0.0, |t| t.generate);
-            config.generate_ms = Some((generated + (frame_ms - f64::from(gpu)) * 0.8).clamp(base, 4.0 * base));
+        // It grows into what the last measured frame left of `frame_ms` on
+        // the GPU and the CPU (its own generation counted in), by half a
+        // millisecond a frame at most (measurements lag), up to three times
+        // that; it falls at once.
+        if let (Some(base), Some(frame_ms)) = (config.generate_ms, config.frame_ms) {
+            let busy = match (ctx.last_frame_gpu_ms(), ctx.last_frame_cpu_ms()) {
+                (Some(g), Some(c)) => Some(f64::from(g.max(c))),
+                (g, c) => g.or(c).map(f64::from),
+            };
+            let room = busy.map_or(base, |busy| (self.timings.last().map_or(0.0, |t| t.generate) + (frame_ms - busy) * 0.8).clamp(base, 3.0 * base));
+            let budget = room.min(self.budget_ms.unwrap_or(base) + 0.5);
+            self.budget_ms = Some(budget);
+            config.generate_ms = Some(budget);
         }
         self.stats = world.update(encoder, frame.eye, velocity, Some(view), ctx.frame_num, &config);
         world.draw(encoder, ctx.frame_num, frame.eye, view_proj, prev_view_proj, near, frame.sun, [ctx.width, ctx.height]);
