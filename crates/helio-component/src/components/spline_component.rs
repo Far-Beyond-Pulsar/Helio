@@ -264,30 +264,35 @@ impl SplineComponent {
     }
 
     // Open uniform B-spline with clamped end knots, degree capped at cubic.
+    // Knots are computed, not stored, and the span is found directly, so a
+    // sample costs the same whatever the point count (Pulsar-Native#995:
+    // the knot vector and span scan made sampling quadratic in points).
     fn de_boor(&self, t: f32) -> Vec3 {
         let n = self.points.len();
         let degree = 3.min(n - 1);
-        let knots: Vec<f32> = (0..n + degree + 1)
-            .map(|i| {
-                if i <= degree {
-                    0.
-                } else if i >= n {
-                    1.
-                } else {
-                    (i - degree) as f32 / (n - degree) as f32
-                }
-            })
-            .collect();
-        let span = (degree..n).find(|&k| t < knots[k + 1]).unwrap_or(n - 1);
-        let mut d: Vec<Vec3> = (0..=degree)
-            .map(|j| self.position((span - degree + j) as isize))
-            .collect();
+        let interior = (n - degree) as f32;
+        let knot = |i: usize| -> f32 {
+            if i <= degree {
+                0.
+            } else if i >= n {
+                1.
+            } else {
+                (i - degree) as f32 / interior
+            }
+        };
+        // The span k with knot(k) <= t < knot(k + 1), clamped to the last
+        // one at t = 1.
+        let span = (degree + (t * interior) as usize).min(n - 1);
+        let mut d = [Vec3::ZERO; 4];
+        for (j, slot) in d.iter_mut().enumerate().take(degree + 1) {
+            *slot = self.position((span - degree + j) as isize);
+        }
         for r in 1..=degree {
             for j in (r..=degree).rev() {
                 let i = span - degree + j;
-                let denominator = knots[i + degree - r + 1] - knots[i];
+                let denominator = knot(i + degree - r + 1) - knot(i);
                 let alpha = if denominator > 0. {
-                    (t - knots[i]) / denominator
+                    (t - knot(i)) / denominator
                 } else {
                     0.
                 };
@@ -457,36 +462,51 @@ const TANGENT_COLOR: [f32; 4] = [0.35, 0.85, 1.0, 0.8];
 /// editor overlay: the sampled curve, plus control points, control polygon
 /// and tangent handles on selected splines.
 pub fn spline_debug_lines(world: &pulsar_scenedb::World) -> Vec<helio::DebugVertex> {
-    use pulsar_scene_model::attachments;
     let mut lines = Vec::new();
-    // Each enabled spline instance, drawn with its owner object's transform.
-    for (_, owner, spline) in attachments::enabled_components::<SplineComponent>(world) {
-        if world
-            .get::<pulsar_scene_model::Visibility>(owner)
-            .is_some_and(|v| !v.visible)
-        {
-            continue;
+    for (_, owner, spline) in pulsar_scene_model::attachments::enabled_components::<SplineComponent>(world) {
+        if let Some((model, selected)) = owner_view(world, owner, &spline) {
+            append_spline_lines(&mut lines, &spline, model, selected);
         }
-        let Some(transform) = world.get::<pulsar_scene_model::Transform>(owner) else {
-            continue;
-        };
-        if !spline.is_valid() {
-            continue;
-        }
-        let model = glam::Mat4::from_scale_rotation_translation(
-            Vec3::from_array(transform.scale),
-            glam::Quat::from_euler(
-                glam::EulerRot::YXZ,
-                transform.rotation[1].to_radians(),
-                transform.rotation[0].to_radians(),
-                transform.rotation[2].to_radians(),
-            ),
-            Vec3::from_array(transform.position),
-        );
-        let selected = world.get::<pulsar_scene_model::Selected>(owner).is_some();
-        append_spline_lines(&mut lines, spline, model, selected);
     }
     lines
+}
+
+/// How `owner` shows its spline: its model matrix and whether it is
+/// selected, or `None` when the curve is hidden, ownerless or invalid.
+fn owner_view(
+    world: &pulsar_scenedb::World,
+    owner: pulsar_scenedb::Entity,
+    spline: &SplineComponent,
+) -> Option<(glam::Mat4, bool)> {
+    if world
+        .get::<pulsar_scene_model::Visibility>(owner)
+        .is_some_and(|v| !v.visible)
+        || !spline.is_valid()
+    {
+        return None;
+    }
+    let transform = world.get::<pulsar_scene_model::Transform>(owner)?;
+    let model = glam::Mat4::from_scale_rotation_translation(
+        Vec3::from_array(transform.scale),
+        glam::Quat::from_euler(
+            glam::EulerRot::YXZ,
+            transform.rotation[1].to_radians(),
+            transform.rotation[0].to_radians(),
+            transform.rotation[2].to_radians(),
+        ),
+        Vec3::from_array(transform.position),
+    );
+    let selected = world.get::<pulsar_scene_model::Selected>(owner).is_some();
+    Some((model, selected))
+}
+
+/// One spline instance's cached lines.
+struct CachedSpline {
+    owner: pulsar_scenedb::Entity,
+    /// The curve sampled in local space; `None` once its points changed.
+    samples: Option<Vec<[f32; 3]>>,
+    /// Its world-space lines; `None` once it or its owner changed.
+    lines: Option<Vec<helio::DebugVertex>>,
 }
 
 /// The editor's spline lines, rebuilt only when what they show changed.
@@ -494,11 +514,13 @@ pub fn spline_debug_lines(world: &pulsar_scenedb::World) -> Vec<helio::DebugVert
 /// Reads SceneDB's change journal (its own cursors, so no other reader is
 /// affected) for spline values, attachment state, and the transforms,
 /// visibility and selection of spline owners. Edits to anything else do not
-/// rebuild the lines.
+/// rebuild the lines. Each curve keeps its samples and lines: moving an
+/// owner re-transforms that curve's samples without evaluating it, and
+/// other curves are copied as they are (Pulsar-Native#995).
 pub struct SplineLines {
     cursors: Vec<pulsar_scenedb::ChangeCursor>,
-    /// Spline instances and their owners at the last build.
-    watched: std::collections::HashSet<pulsar_scenedb::Entity>,
+    /// Each enabled spline instance at the last build.
+    cache: std::collections::HashMap<pulsar_scenedb::Entity, CachedSpline>,
     /// The world revision at the last poll; a smaller one means the world
     /// was replaced, and the cursors with it.
     revision: u64,
@@ -517,7 +539,7 @@ impl SplineLines {
                 world.open_change_cursor::<Visibility>(),
                 world.open_change_cursor::<Selected>(),
             ],
-            watched: Default::default(),
+            cache: Default::default(),
             revision: world.revision(),
             built: false,
             scratch: Vec::new(),
@@ -530,42 +552,100 @@ impl SplineLines {
             *self = Self::new(world);
         }
         self.revision = world.revision();
-        let mut dirty = !self.built;
+        // Curves whose points changed, owners that moved (or were shown,
+        // hidden, selected), and whether the set of curves changed.
+        let mut curves = std::collections::HashSet::new();
+        let mut owners = std::collections::HashSet::new();
+        let mut structure = !self.built;
         for (index, cursor) in self.cursors.iter_mut().enumerate() {
             self.scratch.clear();
             if world.read_changes(cursor, &mut self.scratch)
                 == pulsar_scenedb::ChangeRead::Overflowed
             {
-                dirty = true;
+                structure = true;
             }
-            // Any spline change counts; other kinds count on a watched entity
-            // or on a spline instance (one newly attached or re-enabled).
-            dirty |= self.scratch.iter().any(|change| {
-                index == 0
-                    || self.watched.contains(&change.entity)
-                    || world.get::<SplineComponent>(change.entity).is_some()
-            });
+            for change in &self.scratch {
+                match index {
+                    0 => {
+                        curves.insert(change.entity);
+                    }
+                    // Attached, detached, enabled or disabled.
+                    1 => {
+                        if self.cache.contains_key(&change.entity)
+                            || world.get::<SplineComponent>(change.entity).is_some()
+                        {
+                            structure = true;
+                        }
+                    }
+                    _ => {
+                        if self.cache.values().any(|c| c.owner == change.entity) {
+                            owners.insert(change.entity);
+                        } else if world.get::<SplineComponent>(change.entity).is_some() {
+                            structure = true;
+                        }
+                    }
+                }
+            }
         }
-        if !dirty {
+        if !structure && curves.is_empty() && owners.is_empty() {
             return None;
         }
         self.built = true;
-        self.watched.clear();
-        for (instance, _) in world.query::<&SplineComponent>() {
-            self.watched.insert(instance);
-            if let Some(owner) =
-                world.get::<pulsar_scene_model::attachments::ComponentOwner>(instance)
-            {
-                self.watched.insert(owner.entity());
+        if structure {
+            self.cache.clear();
+        }
+        for (instance, cached) in &mut self.cache {
+            if curves.contains(instance) {
+                cached.samples = None;
+                cached.lines = None;
+            } else if owners.contains(&cached.owner) {
+                cached.lines = None;
             }
         }
-        Some(spline_debug_lines(world))
+        let mut lines = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (instance, owner, spline) in
+            pulsar_scene_model::attachments::enabled_components::<SplineComponent>(world)
+        {
+            seen.insert(instance);
+            let cached = self.cache.entry(instance).or_insert(CachedSpline {
+                owner,
+                samples: None,
+                lines: None,
+            });
+            if cached.owner != owner {
+                cached.owner = owner;
+                cached.lines = None;
+            }
+            if cached.lines.is_none() {
+                let samples = cached.samples.get_or_insert_with(|| spline.samples());
+                let mut built = Vec::new();
+                if let Some((model, selected)) = owner_view(world, owner, &spline) {
+                    append_sampled_lines(&mut built, &spline, samples, model, selected);
+                }
+                cached.lines = Some(built);
+            }
+            lines.extend_from_slice(cached.lines.as_deref().unwrap_or_default());
+        }
+        self.cache.retain(|instance, _| seen.contains(instance));
+        Some(lines)
     }
 }
 
 fn append_spline_lines(
     lines: &mut Vec<helio::DebugVertex>,
     spline: &SplineComponent,
+    model: glam::Mat4,
+    selected: bool,
+) {
+    append_sampled_lines(lines, spline, &spline.samples(), model, selected);
+}
+
+/// `spline`'s lines, from its local-space `samples`.
+fn append_sampled_lines(
+    lines: &mut Vec<helio::DebugVertex>,
+    spline: &SplineComponent,
+    samples: &[[f32; 3]],
     model: glam::Mat4,
     selected: bool,
 ) {
@@ -584,7 +664,7 @@ fn append_spline_lines(
     } else {
         CURVE_COLOR
     };
-    let samples: Vec<Vec3> = spline.samples().into_iter().map(world_point).collect();
+    let samples: Vec<Vec3> = samples.iter().copied().map(world_point).collect();
     for pair in samples.windows(2) {
         segment(pair[0], pair[1], curve_color);
     }
@@ -739,6 +819,102 @@ mod tests {
         assert!(selected.len() > plain.len());
     }
 
+    /// The B-spline evaluation `de_boor` replaced (a knot vector and a span
+    /// scan per sample), kept to check the new one against.
+    fn reference_de_boor(spline: &SplineComponent, t: f32) -> Vec3 {
+        let n = spline.points.len();
+        let degree = 3.min(n - 1);
+        let knots: Vec<f32> = (0..n + degree + 1)
+            .map(|i| {
+                if i <= degree {
+                    0.
+                } else if i >= n {
+                    1.
+                } else {
+                    (i - degree) as f32 / (n - degree) as f32
+                }
+            })
+            .collect();
+        let span = (degree..n).find(|&k| t < knots[k + 1]).unwrap_or(n - 1);
+        let mut d: Vec<Vec3> = (0..=degree)
+            .map(|j| spline.position((span - degree + j) as isize))
+            .collect();
+        for r in 1..=degree {
+            for j in (r..=degree).rev() {
+                let i = span - degree + j;
+                let denominator = knots[i + degree - r + 1] - knots[i];
+                let alpha = if denominator > 0. {
+                    (t - knots[i]) / denominator
+                } else {
+                    0.
+                };
+                d[j] = d[j - 1].lerp(d[j], alpha);
+            }
+        }
+        d[degree]
+    }
+
+    #[test]
+    fn open_bsplines_evaluate_as_before() {
+        for points in [2, 3, 4, 5, 9, 64] {
+            let spline = long_bspline(points);
+            for i in 0..=1000 {
+                let t = i as f32 / 1000.0;
+                let new = Vec3::from_array(spline.evaluate(t));
+                let old = reference_de_boor(&spline, t);
+                assert!(
+                    new.distance(old) < 1e-4,
+                    "{points} points, t = {t}: {new} vs {old}"
+                );
+            }
+        }
+    }
+
+    /// A long open B-spline (the costliest kind to sample) per scene, for
+    /// measuring what dragging its owner costs (Pulsar-Native#995).
+    fn long_bspline(points: usize) -> SplineComponent {
+        let mut d = SplineComponent::default();
+        d.algorithm = CurveAlgorithm::BSpline;
+        d.resolution = 128;
+        d.points = (0..points)
+            .map(|i| SplinePoint::new([i as f32, (i as f32 * 0.3).sin() * 4.0, 0.0]))
+            .collect();
+        d
+    }
+
+    #[test]
+    #[ignore = "perf report: cargo test -p helio_component --lib drag_cost -- --ignored --nocapture"]
+    fn drag_cost_report() {
+        use pulsar_scene_model::{world_ext::SceneWorldExt, SpawnObject, Transform};
+        for &(splines, points) in &[(1usize, 64usize), (1, 256), (8, 256)] {
+            let mut world = pulsar_scenedb::World::new();
+            let mut owners = Vec::new();
+            for i in 0..splines {
+                let owner = world.spawn_object(SpawnObject::new(format!("s{i}"))).unwrap();
+                pulsar_world_registry::attach_value(&mut world, owner, long_bspline(points)).unwrap();
+                owners.push(owner);
+            }
+            let mut lines = SplineLines::new(&world);
+            lines.poll(&world).unwrap();
+            let frames = 20;
+            let start = std::time::Instant::now();
+            for frame in 0..frames {
+                world.get_mut::<Transform>(owners[0]).unwrap().position = [frame as f32, 0.0, 0.0];
+                lines.poll(&world).expect("the owner moved");
+            }
+            let poll = start.elapsed() / frames;
+            let spline = long_bspline(points);
+            let start = std::time::Instant::now();
+            let length = spline.total_length_m();
+            let samples = spline.samples().len();
+            let panel = start.elapsed();
+            eprintln!(
+                "{splines} spline(s) x {points} points: poll per drag frame {poll:?}; \
+                 samples() + total_length_m() {panel:?} ({samples} samples, {length:.1} m)"
+            );
+        }
+    }
+
     #[test]
     fn spline_lines_rebuild_only_when_a_spline_or_its_owner_changes() {
         use pulsar_scene_model::{world_ext::SceneWorldExt, SpawnObject, Transform, Visibility};
@@ -746,7 +922,24 @@ mod tests {
         let curve = world.spawn_object(SpawnObject::new("curve")).unwrap();
         let bystander = world.spawn_object(SpawnObject::new("bystander")).unwrap();
         let spline = pulsar_world_registry::attach_value(&mut world, curve, line()).unwrap();
-        let mut lines = SplineLines::new(&world);
+        // A second curve that never changes: its cached lines are reused.
+        let still = world.spawn_object(SpawnObject::new("still")).unwrap();
+        pulsar_world_registry::attach_value(&mut world, still, long_bspline(9)).unwrap();
+        let mut inner = SplineLines::new(&world);
+        // Every rebuild matches building the lines from scratch.
+        let mut lines = Checked(&mut inner);
+        struct Checked<'a>(&'a mut SplineLines);
+        impl Checked<'_> {
+            fn poll(&mut self, world: &pulsar_scenedb::World) -> Option<Vec<helio::DebugVertex>> {
+                let lines = self.0.poll(world)?;
+                let fresh = spline_debug_lines(world);
+                let key = |l: &[helio::DebugVertex]| {
+                    l.iter().map(|v| (v.position, v.color)).collect::<Vec<_>>()
+                };
+                assert_eq!(key(&lines), key(&fresh), "cached lines match a full rebuild");
+                Some(lines)
+            }
+        }
 
         let first = lines.poll(&world).expect("the first poll builds");
         assert!(!first.is_empty());
@@ -757,17 +950,19 @@ mod tests {
 
         world.get_mut::<Transform>(curve).unwrap().position = [5.0, 0.0, 0.0];
         let moved = lines.poll(&world).expect("the owner moved");
-        assert_ne!(moved[0].position, first[0].position);
+        assert!(moved != first, "the owner moved");
 
         world.get_mut::<SplineComponent>(spline).unwrap().points[1].position = [0.0, 0.0, 9.0];
         assert!(lines.poll(&world).is_some(), "the curve changed");
 
+        let shown = spline_debug_lines(&world).len();
         world.get_mut::<Visibility>(curve).unwrap().visible = false;
-        assert_eq!(lines.poll(&world).map(|l| l.len()), Some(0), "hidden");
+        let hidden = lines.poll(&world).expect("hidden").len();
+        assert!(hidden < shown, "the hidden curve's lines are gone");
         world.get_mut::<Visibility>(curve).unwrap().visible = true;
-        assert!(lines.poll(&world).is_some_and(|l| !l.is_empty()));
+        assert_eq!(lines.poll(&world).map(|l| l.len()), Some(shown), "shown again");
 
         pulsar_scene_model::attachments::set_enabled(&mut world, spline, false);
-        assert_eq!(lines.poll(&world).map(|l| l.len()), Some(0), "disabled");
+        assert_eq!(lines.poll(&world).map(|l| l.len()), Some(hidden), "disabled");
     }
 }
