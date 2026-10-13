@@ -69,6 +69,9 @@ pub struct Tile {
     pub ranges: Ranges,
     /// Ranges measured on the GPU (else estimated from the parent's).
     pub exact: bool,
+    /// Levels under the nearest ancestor whose ranges were measured (0:
+    /// measured, or a root): an estimate's margin doubles at each.
+    pub guess: u8,
     pub generated: bool,
     /// Its children were drawn in its place last time it was visited.
     pub refined: bool,
@@ -135,7 +138,7 @@ impl Planner {
                 for cy in 0..n {
                     let key = TileKey { face, level, cx, cy };
                     roots.push(key);
-                    tiles.insert(key, Tile { ranges, exact: false, generated: false, refined: false, used: 0, drawn: 0 });
+                    tiles.insert(key, Tile { ranges, exact: false, guess: 0, generated: false, refined: false, used: 0, drawn: 0 });
                 }
             }
         }
@@ -218,20 +221,58 @@ impl Planner {
             // Tiles in view first.
             let priority = if seen { error * 1e6 } else { error };
             let finer = key.level > 0 && if tile.refined { error > self.config.coarsen } else { error > 1.0 };
-            // Children wait for their parent's measured layers.
-            let children = if finer && tile.exact { children(grid, key) } else { Vec::new() };
-            let mut ready = finer && tile.exact;
+            // Children wait for their parent's measured layers, unless it is
+            // far too coarse (an eye that dropped from orbit) and a measured
+            // ancestor is near: then they come with ranges estimated from it
+            // (a readback deepens them).
+            let deep = error >= DEEP_REFINE;
+            let guess = if tile.exact { 0 } else { tile.guess };
+            let children = if finer && (tile.exact || deep && guess < GUESS_LEVELS) { children(grid, key) } else { Vec::new() };
+            let mut ready = !children.is_empty();
             for &child in &children {
-                let entry = self.tiles.entry(child).or_insert(Tile { ranges: tile.ranges.child(), exact: false, generated: false, refined: false, used: frame, drawn: 0 });
+                let entry = self.tiles.entry(child).or_insert(Tile { ranges: tile.ranges.child(), exact: false, guess: guess + 1, generated: false, refined: false, used: frame, drawn: 0 });
                 entry.used = frame;
                 // Until measured, a child's ranges follow its parent's (an
                 // edit may have deepened them since).
                 if !entry.exact {
                     entry.ranges = tile.ranges.child();
+                    entry.guess = guess + 1;
                 }
                 if !entry.generated {
                     ready = false;
                     wanted.push((priority, child));
+                }
+            }
+            // Far too coarse: the tiles under the eye down to the level it
+            // wants are wanted now (each level's four, along the child
+            // nearest it, up to `GUESS_LEVELS` under a measured tile), so
+            // the cut refines through them as they come, not a measured
+            // level at a time.
+            if !children.is_empty() && deep {
+                let mut at = key;
+                let mut ranges = tile.ranges;
+                let mut g = guess;
+                loop {
+                    ranges = ranges.child();
+                    g += 1;
+                    let near = |k: &TileKey| tile_distance(grid, *k, ranges.extent(), &eyes[0]);
+                    let Some(next) = self::children(grid, at).into_iter().min_by(|a, b| near(a).total_cmp(&near(b))) else { break };
+                    // Measured since: its own ranges.
+                    if let Some(t) = self.tiles.get(&next).filter(|t| t.exact) {
+                        ranges = t.ranges;
+                        g = 0;
+                    }
+                    if next.level == 0 || g >= GUESS_LEVELS || self.error(grid, next, ranges, &eyes) <= 1.0 {
+                        break;
+                    }
+                    for c in self::children(grid, next) {
+                        let entry = self.tiles.entry(c).or_insert(Tile { ranges: ranges.child(), exact: false, guess: g + 1, generated: false, refined: false, used: frame, drawn: 0 });
+                        entry.used = frame;
+                        if !entry.generated {
+                            wanted.push((priority, c));
+                        }
+                    }
+                    at = next;
                 }
             }
             // Pixels a cell spans from the eye now (not the prefetch eye).
@@ -295,6 +336,7 @@ impl Planner {
         if let Some(t) = self.tiles.get_mut(&key) {
             t.ranges = ranges;
             t.exact = true;
+            t.guess = 0;
         }
     }
 
@@ -423,6 +465,15 @@ impl Worker {
 
 /// Requests a plan lists at most (more than a frame generates).
 pub const MAX_REQUESTS: usize = 2048;
+
+/// Cells this many times `lod_pixels` across are far too coarse: their
+/// children and the tiles under the eye are wanted before measurements.
+const DEEP_REFINE: f64 = 4.0;
+
+/// Levels under a measured tile whose ranges may be estimated: a margin of
+/// two of its cells is eight cells three levels down (deeper, chunk layers
+/// would balloon).
+const GUESS_LEVELS: u8 = 3;
 
 /// Tiles along a face edge at `level`.
 pub fn tiles_at(grid: &Grid, level: u32) -> i32 {

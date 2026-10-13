@@ -14,7 +14,7 @@
 //!   `HELIO_VOXEL_CHUNKS_DIG=n` the view is dug and undone, with
 //!   `HELIO_VOXEL_CHUNKS_BLAST=r` blasted by one ball `r` m across.
 //! * `HELIO_VOXEL_CHUNKS_FLY=descent|cruise` streams along a path.
-//! * `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo` flies through the
+//! * `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo|dive` flies through the
 //!   renderer in real time, every frame recorded (`stress_<mode>.csv`),
 //!   samples saved with settled references to compare.
 //!
@@ -740,7 +740,7 @@ fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3)
     pick_probe(flight, view, eye, forward);
 }
 
-/// `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo`: a flight
+/// `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo|dive`: a flight
 /// through the renderer in real time (the path follows the wall clock, as a
 /// game's camera does: a slow frame moves it further), from 2 m to 400 km
 /// or back in `HELIO_VOXEL_FLIGHT_HOLD_SECONDS` (20), at 300 m/s 40 m over
@@ -769,6 +769,18 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
             // 6 m over the ground looking ahead and down; a ball is dug
             // where the view's centre meets it a second in.
             return (planet.surface_point(ground, 6.0), (ahead - up * 0.5).normalize().as_vec3());
+        }
+        if mode == "dive" {
+            // Straight down from `HELIO_VOXEL_STRESS_ALTITUDE` m (15 000 km,
+            // the whole planet in view) to `HELIO_VOXEL_STRESS_LOW` m (20 km)
+            // in half a second, a second in, then hovering (an editor camera
+            // dropped from orbit).
+            let top: f64 = std::env::var("HELIO_VOXEL_STRESS_ALTITUDE").ok().and_then(|v| v.parse().ok()).unwrap_or(15_000_000.0);
+            let u = ((t - 1.0) / 0.5).clamp(0.0, 1.0);
+            let low: f64 = std::env::var("HELIO_VOXEL_STRESS_LOW").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000.0);
+            let altitude = top * (low / top).powf(u);
+            let down = (ahead * 0.02 - up).normalize();
+            return (planet.surface_point(ground, altitude), down.as_vec3());
         }
         if mode == "yoyo" {
             // Up and down between 2 and 50 km every `HELIO_VOXEL_STRESS_PERIOD`
