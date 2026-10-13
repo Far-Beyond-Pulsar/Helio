@@ -11,7 +11,9 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("production key selection"),
             source: wgpu::ShaderSource::Wgsl(
-                pipelines::shader_source_for_sampler("grid", true).into(),
+                helio_core::shader::resolve(&pipelines::shader_source_for_sampler("grid", true))
+                    .into_owned()
+                    .into(),
             ),
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {

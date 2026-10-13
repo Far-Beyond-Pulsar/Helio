@@ -18,7 +18,7 @@ fn check_packing(@builtin(global_invocation_id) id: vec3<u32>) {
 "#].concat();
         let module = f.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Packed HDR numeric validation"),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
+            source: wgpu::ShaderSource::Wgsl(helio_core::shader::resolve(&source).into_owned().into()),
         });
         let pipeline = f
             .device

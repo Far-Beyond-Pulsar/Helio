@@ -56,7 +56,7 @@ fn production_shadow_shaders_validate() {
                 .unwrap(),
         );
     }
-    validate("HLFS raster fallback", &source);
+    validate("HLFS raster fallback", &helio_core::shader::resolve(&source));
 }
 
 #[test]
