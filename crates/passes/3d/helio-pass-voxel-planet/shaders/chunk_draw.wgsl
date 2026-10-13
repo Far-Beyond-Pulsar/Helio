@@ -82,7 +82,7 @@ struct ChunkMeta {
     root_full: vec2<u32>,
     z: vec2<i32>,
     leaves: u32,
-    block: u32,
+    pages: u32,
     // A plane over every solid cell: z = top.z + top.x x + top.y y.
     top: vec4<f32>,
 }
@@ -94,6 +94,15 @@ struct ChunkMeta {
 @group(0) @binding(4) var<storage, read> mid_leaves: array<u32>;
 @group(0) @binding(5) var<storage, read> leaves: array<vec2<u32>>;
 @group(0) @binding(6) var<storage, read> leaf_materials: array<u32>;
+// Each slot's leaf pages (`LEAF_PAGES`, `chunk_generate.wgsl`): a chunk's
+// leaves in mid order, 64 to a page.
+@group(0) @binding(14) var<storage, read> leaf_pages: array<u32>;
+const LEAF_PAGES: u32 = 64u;
+
+// Leaf `index` of chunk `slot` (in its mids' order) in the leaf storage.
+fn leaf_at_page(slot: u32, index: u32) -> u32 {
+    return (leaf_pages[slot * LEAF_PAGES + (index >> 6u)] << 6u) | (index & 63u);
+}
 // Shading of the terrain's materials (`engine::material_table`).
 struct MaterialGpu {
     colour: vec4<f32>,            // linear colour, roughness
@@ -384,7 +393,7 @@ fn solid_at(slot: u32, c: vec3<i32>) -> bool {
     if !bit64(node.xy, l) { return false; }
     if bit64(node.zw, l) { return true; }
     let index = mid_leaves[slot * 64u + m] + rank64(node.xy & ~node.zw, l);
-    return bit64(leaves[index], u32((c.x & 3) + ((c.y & 3) << 2u) + ((c.z & 3) << 4u)));
+    return bit64(leaves[leaf_at_page(slot, index)], u32((c.x & 3) + ((c.y & 3) << 2u) + ((c.z & 3) << 4u)));
 }
 
 // A hit cell's material from its leaf's (or mid's) two: the surface's with
@@ -422,6 +431,7 @@ fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u
     var node = vec4<u32>(0u);
     var first_leaf = 0u;
     var leaf_at = NONE;
+    var stored = 0u;
     var leaf = vec2<u32>(0u);
     for (var n = 0u; n < 512u; n++) {
         WCOUNT(1)
@@ -440,12 +450,13 @@ fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u
                 if bit64(node.zw, l) { return Hit(t, c, axis, true, shown_material(mid_materials[slot * 64u + m], slot, c, axis == 2u && !positive.z), positive[axis]); }
                 let index = first_leaf + rank64(node.xy & ~node.zw, l);
                 if index != leaf_at {
-                    leaf = leaves[index];
+                    stored = leaf_at_page(slot, index);
+                    leaf = leaves[stored];
                     leaf_at = index;
                 }
                 size = 1;
                 if bit64(leaf, u32((c.x & 3) + ((c.y & 3) << 2u) + ((c.z & 3) << 4u))) {
-                    return Hit(t, c, axis, true, shown_material(leaf_materials[index >> 1u] >> ((index & 1u) * 16u), slot, c, axis == 2u && !positive.z), positive[axis]);
+                    return Hit(t, c, axis, true, shown_material(leaf_materials[stored >> 1u] >> ((stored & 1u) * 16u), slot, c, axis == 2u && !positive.z), positive[axis]);
                 }
             }
         }
@@ -666,6 +677,7 @@ fn trace_exact(slot: u32, ray: ExactRay, face: i32, level: i32, origin: vec3<i32
     var node = vec4<u32>(0u);
     var first_leaf = 0u;
     var leaf_at = NONE;
+    var stored = 0u;
     var leaf = vec2<u32>(0u);
     for (var n = 0u; n < 512u; n++) {
         WCOUNT(1)
@@ -684,12 +696,13 @@ fn trace_exact(slot: u32, ray: ExactRay, face: i32, level: i32, origin: vec3<i32
                 if bit64(node.zw, l) { return Hit(t, c, axis, true, shown_material(mid_materials[slot * 64u + m], slot, c, axis == 2u && !positive), positive); }
                 let index = first_leaf + rank64(node.xy & ~node.zw, l);
                 if index != leaf_at {
-                    leaf = leaves[index];
+                    stored = leaf_at_page(slot, index);
+                    leaf = leaves[stored];
                     leaf_at = index;
                 }
                 size = 1;
                 if bit64(leaf, u32((c.x & 3) + ((c.y & 3) << 2u) + ((c.z & 3) << 4u))) {
-                    return Hit(t, c, axis, true, shown_material(leaf_materials[index >> 1u] >> ((index & 1u) * 16u), slot, c, axis == 2u && !positive), positive);
+                    return Hit(t, c, axis, true, shown_material(leaf_materials[stored >> 1u] >> ((stored & 1u) * 16u), slot, c, axis == 2u && !positive), positive);
                 }
             }
         }

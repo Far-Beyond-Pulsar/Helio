@@ -40,19 +40,14 @@ const CULL_BYTES: u64 = 4 * (2 + 2 * 65);
 /// Metres over the highest possible solid cell where rays may end: far
 /// above the f32 error of the ceiling test.
 const CEILING_MARGIN: f64 = 16.0;
-/// Leaves of every chunk together (8 bytes each).
+/// Leaves of every chunk together (8 bytes each), in pages of 64
+/// (`chunk_generate.wgsl`), up to `LEAF_PAGES` a chunk.
 const LEAF_CAPACITY: u64 = 48 << 20;
+const LEAF_PAGE: u64 = 64;
+const LEAF_PAGES: u64 = 64;
 /// A brush buffer's content when there are none.
 const NO_BRUSH: [FaceBrush; 1] = [FaceBrush { flags: 0, radius_half: 0, k_lo: 0, k_hi: 0, center: [0; 4], ball: [0; 4] }];
 
-/// Leaf block size classes (16 << class leaves).
-const LEAF_CLASSES: u32 = 9;
-
-/// Entries of the free block stacks: room for every block of each class
-/// (`stack_base` in chunk_generate.wgsl).
-fn free_block_entries() -> u64 {
-    (0..LEAF_CLASSES).map(|c| LEAF_CAPACITY / (16 << c)).sum()
-}
 
 /// Chunk table entries: the drawn chunks and the drawn cut's columns.
 const TABLE_SLOTS: usize = 4 * MAX_CHUNKS;
@@ -706,7 +701,10 @@ pub struct ChunkWorld {
     /// Chunk table changes scattered (`chunk_table.wgsl`).
     table_layout: wgpu::BindGroupLayout,
     table_pipeline: wgpu::ComputePipeline,
-    free_blocks: wgpu::Buffer,
+    /// The free leaf pages (a stack, `leaf_alloc` its count) and each
+    /// slot's pages.
+    free_pages: wgpu::Buffer,
+    leaf_pages: wgpu::Buffer,
     job_results: wgpu::Buffer,
     /// Brushes kept analytic (resolved per face) and their buffer.
     /// Brushes kept analytic: `large_faces` of the large log, then the
@@ -1026,6 +1024,7 @@ impl ChunkWorld {
                 storage(21, true, c),
                 storage(22, true, c),
                 storage(23, true, c),
+                storage(24, false, c),
             ],
         });
         let gen_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&gen_layout)], immediate_size: 0 });
@@ -1073,6 +1072,7 @@ impl ChunkWorld {
                 storage(11, true, all),
                 storage(12, true, all),
                 storage(13, false, wgpu::ShaderStages::COMPUTE),
+                storage(14, true, all),
             ],
         });
         let trace_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1283,7 +1283,12 @@ impl ChunkWorld {
             mids: buffer("chunk mids", (MAX_CHUNKS * 64 * 16) as u64, wgpu::BufferUsages::STORAGE),
             mid_leaves: buffer("chunk mid leaves", (MAX_CHUNKS * 64 * 4) as u64, wgpu::BufferUsages::STORAGE),
             leaves: buffer("chunk leaves", LEAF_CAPACITY * 8, wgpu::BufferUsages::STORAGE),
-            leaf_alloc: buffer("chunk leaf allocator", 4 * (2 + LEAF_CLASSES as u64), s | wgpu::BufferUsages::COPY_SRC),
+            // Every page free: the stack's count, no overflow.
+            leaf_alloc: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("chunk leaf allocator"),
+                contents: bytemuck::cast_slice(&[(LEAF_CAPACITY / LEAF_PAGE) as i32, 0]),
+                usage: s | wgpu::BufferUsages::COPY_SRC,
+            }),
             column_materials: buffer("chunk column materials", CHUNK_BATCH as u64 * TILE_COLUMNS * 4, wgpu::BufferUsages::STORAGE),
             leaf_materials: buffer("chunk leaf materials", LEAF_CAPACITY * 2, s),
             mid_materials: buffer("chunk mid materials", (MAX_CHUNKS * 64 * 4) as u64, wgpu::BufferUsages::STORAGE),
@@ -1314,7 +1319,12 @@ impl ChunkWorld {
             evict_pipeline,
             table_layout,
             table_pipeline,
-            free_blocks: buffer("chunk free blocks", free_block_entries() * 4, wgpu::BufferUsages::STORAGE),
+            free_pages: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("chunk free pages"),
+                contents: bytemuck::cast_slice(&(0..(LEAF_CAPACITY / LEAF_PAGE) as u32).collect::<Vec<u32>>()),
+                usage: wgpu::BufferUsages::STORAGE,
+            }),
+            leaf_pages: buffer("chunk leaf pages", MAX_CHUNKS as u64 * LEAF_PAGES * 4, wgpu::BufferUsages::STORAGE),
             job_results: buffer("chunk job results", (CHUNK_BATCH * 16) as u64, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC),
             brushes: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("chunk brushes"),
@@ -1394,8 +1404,9 @@ impl ChunkWorld {
                 entry(15, &self.leaf_materials),
                 entry(17, &self.mid_materials),
                 entry(19, &self.job_results),
-                entry(20, &self.free_blocks),
+                entry(20, &self.free_pages),
                 entry(21, evictions),
+                entry(24, &self.leaf_pages),
                 entry(22, baked_refs),
                 entry(23, baked_cells),
             ],
@@ -2242,7 +2253,8 @@ impl ChunkWorld {
     pub fn resident_bytes(&self) -> u64 {
         let alloc: Vec<[i32; 2]> = self.read(&self.leaf_alloc, 1);
         let chunks: usize = self.tiles.values().map(|t| t.chunks.len()).sum();
-        alloc[0][0].max(0) as u64 * 10 + chunks as u64 * (64 * 24 + 48)
+        let leaves = (LEAF_CAPACITY / LEAF_PAGE).saturating_sub(alloc[0][0].max(0) as u64) * LEAF_PAGE;
+        leaves * 10 + chunks as u64 * (64 * 24 + 48 + LEAF_PAGES * 4)
     }
 
     /// Every pixel's hit in the last [`Self::draw`], row by row (waits for
@@ -2346,7 +2358,7 @@ impl ChunkWorld {
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk draw"),
             layout: &self.draw_layout,
-            entries: &[entry(0, &self.params), entry(1, &self.statics), entry(2, &self.chunk_meta), entry(3, &self.mids), entry(4, &self.mid_leaves), entry(5, &self.leaves), entry(6, &self.leaf_materials), entry(7, &self.materials), entry(8, &self.mid_materials), entry(9, &self.counters), entry(10, &self.chunk_table), entry(11, &self.chunk_keys), entry(12, &self.draw_list), entry(13, &self.reach)],
+            entries: &[entry(0, &self.params), entry(1, &self.statics), entry(2, &self.chunk_meta), entry(3, &self.mids), entry(4, &self.mid_leaves), entry(5, &self.leaves), entry(6, &self.leaf_materials), entry(7, &self.materials), entry(8, &self.mid_materials), entry(9, &self.counters), entry(10, &self.chunk_table), entry(11, &self.chunk_keys), entry(12, &self.draw_list), entry(13, &self.reach), entry(14, &self.leaf_pages)],
         });
         self.last_group = Some(group.clone());
         let targets = self.targets.as_ref().unwrap();

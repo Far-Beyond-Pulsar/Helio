@@ -57,15 +57,17 @@ struct ChunkMeta {
     z: vec2<i32>,
     // Leaves stored for the chunk (0: none) and their block (NONE: none).
     leaves: u32,
-    block: u32,
+    pages: u32,
     // A plane over every solid cell, z = top.z + top.x x + top.y y (cells):
     // a chunk on a slope is far lower than its occupied layers' box.
     top: vec4<f32>,
 }
 
 const NONE: u32 = 0xffffffffu;
-// Leaf block size classes: 16 << class leaves.
-const CLASSES: u32 = 9u;
+// Leaves are stored in pages of 64, a chunk's up to `LEAF_PAGES` of them
+// in `leaf_pages`: every page serves any chunk, so freed storage is never
+// stranded in a size it no longer fits.
+const LEAF_PAGES: u32 = 64u;
 
 @group(0) @binding(2) var<storage, read> tile_jobs: array<TileJob>;
 @group(0) @binding(3) var<storage, read_write> tile_columns: array<vec4<i32>>;
@@ -78,11 +80,12 @@ const CLASSES: u32 = 9u;
 @group(0) @binding(10) var<storage, read_write> mids: array<vec4<u32>>;
 @group(0) @binding(11) var<storage, read_write> mid_leaves: array<u32>;
 @group(0) @binding(12) var<storage, read_write> leaves: array<vec2<u32>>;
-// The pool's end (leaves), an overflow flag, then each class's count of
-// free blocks.
+// Free pages (a count of `free_pages`), an overflow flag.
 @group(0) @binding(13) var<storage, read_write> leaf_alloc: array<atomic<i32>>;
-// Each class's free blocks (first leaf), from `stack_base`.
-@group(0) @binding(20) var<storage, read_write> free_blocks: array<u32>;
+// The free pages' indices, a stack.
+@group(0) @binding(20) var<storage, read_write> free_pages: array<u32>;
+// Each slot's pages (`LEAF_PAGES` a slot).
+@group(0) @binding(24) var<storage, read_write> leaf_pages: array<u32>;
 // Per chunk job: slot, occupied layers [lo, hi), flags (1 built, 2 empty,
 // 4 solid throughout, 8 out of leaf storage).
 @group(0) @binding(19) var<storage, read_write> job_results: array<vec4<i32>>;
@@ -94,45 +97,34 @@ const CLASSES: u32 = 9u;
 @group(0) @binding(22) var<storage, read> baked_refs: array<u32>;
 @group(0) @binding(23) var<storage, read> baked_cells: array<u32>;
 
-fn class_of(n: u32) -> u32 {
-    var c = 0u;
-    while (16u << c) < n { c += 1u; }
-    return c;
-}
-
-// First entry of class `c`'s free blocks: room for every block of each
-// smaller class.
-fn stack_base(c: u32) -> u32 {
-    var b = 0u;
-    for (var k = 0u; k < c; k++) { b += arrayLength(&leaves) / (16u << k); }
-    return b;
-}
-
-// A block of `n` leaves (NONE: out of storage).
-fn allocate(n: u32) -> u32 {
-    let c = class_of(n);
-    let i = atomicSub(&leaf_alloc[2u + c], 1);
-    if i > 0 { return free_blocks[stack_base(c) + u32(i - 1)]; }
-    atomicAdd(&leaf_alloc[2u + c], 1);
-    let size = i32(16u << c);
-    let b = atomicAdd(&leaf_alloc[0], size);
-    if u32(b) + u32(size) > arrayLength(&leaves) {
-        atomicStore(&leaf_alloc[1], 1);
-        return NONE;
+// `n` pages off the free stack: the first's place in it (NONE: fewer are
+// free; the overflow flag is set).
+fn take_pages(n: u32) -> u32 {
+    var free = atomicLoad(&leaf_alloc[0]);
+    // Each failed exchange is another chunk's take: at most a batch of them.
+    for (var tries = 0u; tries < 4096u; tries++) {
+        if free < i32(n) { break; }
+        let r = atomicCompareExchangeWeak(&leaf_alloc[0], free, free - i32(n));
+        if r.exchanged { return u32(free - i32(n)); }
+        free = r.old_value;
     }
-    return u32(b);
+    atomicStore(&leaf_alloc[1], 1);
+    return NONE;
 }
 
+// Evicted slots' pages back on the free stack (a dispatch of its own: no
+// page is taken meanwhile).
 @compute @workgroup_size(64)
 fn evict(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= arrayLength(&evictions) { return; }
     let slot = evictions[id.x];
-    let m = chunk_meta[slot];
-    if m.block == NONE || m.leaves == 0u { return; }
-    let c = class_of(m.leaves);
-    let i = atomicAdd(&leaf_alloc[2u + c], 1);
-    free_blocks[stack_base(c) + u32(i)] = m.block;
-    chunk_meta[slot].block = NONE;
+    let n = chunk_meta[slot].pages;
+    if n == 0u { return; }
+    let at = u32(atomicAdd(&leaf_alloc[0], i32(n)));
+    for (var p = 0u; p < n; p++) {
+        free_pages[at + p] = leaf_pages[slot * LEAF_PAGES + p];
+    }
+    chunk_meta[slot].pages = 0u;
     chunk_meta[slot].leaves = 0u;
 }
 // Scratch per chunk job: each column's materials (`chunk_columns_main`):
@@ -521,7 +513,9 @@ var<workgroup> w_full: array<atomic<u32>, 128>;
 var<workgroup> w_base: array<u32, 64>;
 var<workgroup> w_z: array<atomic<i32>, 2>;
 var<workgroup> w_total: u32;
-var<workgroup> w_block: u32;
+// The chunk's pages (`leaf_pages`), and how many.
+var<workgroup> w_pages: array<u32, 64>;
+var<workgroup> w_page_count: u32;
 var<workgroup> w_mid_material: array<atomic<u32>, 64>;
 // The column tops' least-squares sums (n, x, y, z, xx, xy, yy, xz, yz),
 // the fitted slope, and the plane's height over it (1/256 cells).
@@ -667,13 +661,17 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
             let full = vec2<u32>(atomicLoad(&w_full[m * 2u]), atomicLoad(&w_full[m * 2u + 1u]));
             total += countOneBits(occ.x & ~full.x) + countOneBits(occ.y & ~full.y);
         }
-        var base = NONE;
-        if total > 0u { base = allocate(total); }
-        let overflow = total > 0u && base == NONE;
+        let pages = (total + 63u) >> 6u;
+        var first = 0u;
+        if pages > 0u { first = take_pages(pages); }
+        let overflow = first == NONE;
+        for (var p = 0u; p < pages && !overflow; p++) {
+            w_pages[p] = free_pages[first + p];
+            leaf_pages[job.slot * LEAF_PAGES + p] = w_pages[p];
+        }
         var root_occ = vec2<u32>(0u);
         var root_full = vec2<u32>(0u);
         for (var m = 0u; m < 64u; m++) {
-            w_base[m] += base;
             let occ = vec2<u32>(atomicLoad(&w_occ[m * 2u]), atomicLoad(&w_occ[m * 2u + 1u]));
             let full = vec2<u32>(atomicLoad(&w_full[m * 2u]), atomicLoad(&w_full[m * 2u + 1u]));
             mids[job.slot * 64u + m] = vec4<u32>(occ, full);
@@ -688,7 +686,7 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
             }
         }
         w_total = select(total, 0u, overflow);
-        w_block = base;
+        w_page_count = select(pages, 0u, overflow);
         let z = vec2<i32>(atomicLoad(&w_z[0]), atomicLoad(&w_z[1]));
         // A sixty-fourth of a cell over the tops: rays rasterized against
         // it and walked in f32 meet it where they meet the cells. A plane
@@ -697,7 +695,7 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         // then the occupied layers' (boxes never overlap).
         var top = vec4<f32>(w_slope, f32(atomicLoad(&w_lift)) / 256.0 + 1.0 / 64.0, 0.0);
         if top.z + max(top.x, 0.0) * 64.0 + max(top.y, 0.0) * 64.0 > 64.0 { top = vec4<f32>(0.0, 0.0, f32(z.y), 0.0); }
-        chunk_meta[job.slot] = ChunkMeta(root_occ, root_full, z, select(total, 0u, overflow), select(base, NONE, overflow), top);
+        chunk_meta[job.slot] = ChunkMeta(root_occ, root_full, z, select(total, 0u, overflow), select(pages, 0u, overflow), top);
         var flags = 1;
         if root_occ.x == 0u && root_occ.y == 0u { flags |= 2; }
         if root_full.x == 0xffffffffu && root_full.y == 0xffffffffu { flags |= 4; }
@@ -712,10 +710,11 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     workgroupBarrier();
     let total = workgroupUniformLoad(&w_total);
     if total == 0u { return; }
-    // The block's material bytes from earlier owners, cleared.
-    let block = w_block;
-    for (var w = block / 2u + t; w < (block + (16u << class_of(total))) / 2u; w += 256u) {
-        atomicStore(&leaf_materials[w], 0u);
+    // The pages' material bytes from earlier owners, cleared (32 words a
+    // page).
+    let pages = w_page_count;
+    for (var w = t; w < pages * 32u; w += 256u) {
+        atomicStore(&leaf_materials[w_pages[w >> 5u] * 32u + (w & 31u)], 0u);
     }
     storageBarrier();
     for (var lz = 0u; lz < 16u; lz++) {
@@ -725,7 +724,8 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         let full = vec2<u32>(atomicLoad(&w_full[m * 2u]), atomicLoad(&w_full[m * 2u + 1u]));
         let mixed = occ & ~full;
         if bit_at(mixed, l) {
-            let index = w_base[m] + rank64(mixed, l);
+            let order = w_base[m] + rank64(mixed, l);
+            let index = (w_pages[order >> 6u] << 6u) | (order & 63u);
             leaves[index] = leaf[lz];
             atomicOr(&leaf_materials[index >> 1u], leaf_materials_of(leaf_material[lz], leaf_top[lz], (topped >> lz) & 1u, lz, tile_jobs[job.tile].level) << ((index & 1u) * 16u));
         }
