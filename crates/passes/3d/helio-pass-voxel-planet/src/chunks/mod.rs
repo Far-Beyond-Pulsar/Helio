@@ -1683,24 +1683,41 @@ impl ChunkWorld {
         true
     }
 
-    /// Resident tiles brush `fb` can change, at every level it applies at.
+    /// Resident tiles brush `fb` can change, at every level it applies at:
+    /// the tiles under its footprint, or (a footprint of more tiles than
+    /// are resident: a planet-scale brush) the resident tiles in it.
     fn mark_brush(&mut self, fb: &FaceBrush) {
         let (ci, cj, w) = (i64::from(fb.center[0]), i64::from(fb.center[1]), i64::from(fb.center[3]));
-        for level in 0..self.grid.levels() {
-            if !fb.active(level) {
-                break;
-            }
-            // Half base cells to tiles of the level.
-            let tile = |half: i64| (half.div_euclid(2) >> level).div_euclid(i64::from(CHUNK)) as i32;
-            for cx in tile(ci - w)..=tile(ci + w) {
-                for cy in tile(cj - w)..=tile(cj + w) {
-                    let key = TileKey { face: fb.face(), level, cx, cy };
-                    if self.tiles.contains_key(&key) {
-                        self.stale.remove(&key);
-                        self.urgent.insert(key);
+        // Half base cells to tiles of a level.
+        let tile = |half: i64, level: u32| (half.div_euclid(2) >> level).div_euclid(i64::from(CHUNK)) as i32;
+        let span = |level: u32| (tile(ci - w, level)..=tile(ci + w, level), tile(cj - w, level)..=tile(cj + w, level));
+        let levels = (0..self.grid.levels()).take_while(|&l| fb.active(l)).count() as u32;
+        let footprint: u64 = (0..levels).map(|l| {
+            let (x, y) = span(l);
+            (x.end() - x.start() + 1) as u64 * (y.end() - y.start() + 1) as u64
+        }).sum();
+        let mut marked = Vec::new();
+        if footprint > self.tiles.len() as u64 {
+            marked.extend(self.tiles.keys().filter(|k| {
+                let (x, y) = span(k.level);
+                k.face == fb.face() && k.level < levels && x.contains(&k.cx) && y.contains(&k.cy)
+            }));
+        } else {
+            for level in 0..levels {
+                let (xs, ys) = span(level);
+                for cx in xs {
+                    for cy in ys.clone() {
+                        let key = TileKey { face: fb.face(), level, cx, cy };
+                        if self.tiles.contains_key(&key) {
+                            marked.push(key);
+                        }
                     }
                 }
             }
+        }
+        for key in marked {
+            self.stale.remove(&key);
+            self.urgent.insert(key);
         }
     }
 
