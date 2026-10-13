@@ -692,6 +692,11 @@ pub struct ChunkWorld {
     /// slots, and the tiles whose whole volume is generated.
     reach: wgpu::Buffer,
     reach_slots: Vec<ReachSlot>,
+    /// Whether this world polls the device for its readbacks: not on a
+    /// host's shared device (`PrepareContext::owns_device`), where polling
+    /// waits behind the host's submits and presents (wgpu maintains the
+    /// device on every submit, which delivers the map callbacks).
+    polls_device: bool,
     pick_slots: Vec<PickSlot>,
     /// Each slot's chunk key (`chunk_keys`, mirrored).
     slot_keys: Vec<[i32; 4]>,
@@ -1311,6 +1316,7 @@ impl ChunkWorld {
             timings: Vec::new(),
             counters: buffer("chunk counters", 1024, s | wgpu::BufferUsages::COPY_SRC),
             reach: buffer("chunk reach", REACH_BYTES, s | wgpu::BufferUsages::COPY_SRC),
+            polls_device: true,
             reach_slots: (0..TIMING_RING).map(|_| ReachSlot { buffer: buffer("chunk reach read", REACH_BYTES, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST), state: ReachState::Free }).collect(),
             deep: FxHashSet::default(),
             reached: Vec::new(),
@@ -1761,7 +1767,9 @@ impl ChunkWorld {
             clock = std::time::Instant::now();
         };
         // 1. Finished generation results: measured layers and occupancy.
-        let _ = self.device.poll(wgpu::PollType::Poll);
+        if self.polls_device {
+            let _ = self.device.poll(wgpu::PollType::Poll);
+        }
         while self.readbacks.front().is_some_and(|r| r.ready.load(std::sync::atomic::Ordering::Acquire)) {
             let r = self.readbacks.pop_front().unwrap();
             {
@@ -2199,7 +2207,9 @@ impl ChunkWorld {
                 slot.ready = Some(ready);
             }
         }
-        let _ = self.device.poll(wgpu::PollType::Poll);
+        if self.polls_device {
+            let _ = self.device.poll(wgpu::PollType::Poll);
+        }
         if let Some(r) = self.pending.take() {
             let ready = r.ready.clone();
             r.buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
@@ -2240,6 +2250,12 @@ impl ChunkWorld {
             .collect();
         out.sort_by_key(|c| (c.0.level, c.1));
         out
+    }
+
+    /// Whether to poll the device for readbacks (false on a host's
+    /// shared device).
+    pub fn set_polls_device(&mut self, polls: bool) {
+        self.polls_device = polls;
     }
 
     /// Chunks drawn by the last [`Self::update`].

@@ -184,6 +184,7 @@ impl ChunkPass {
     fn prepare_frame(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // The last frame was submitted: its results can be mapped.
         if let Some(world) = &mut self.world {
+            world.set_polls_device(ctx.owns_device);
             world.submitted();
             self.timings.extend(world.take_timings());
             let excess = self.timings.len().saturating_sub(KEEP_TIMINGS);
@@ -201,6 +202,7 @@ impl ChunkPass {
         // Edits follow the planet; another recipe or history, a new world.
         if self.built_for != Some(recipe) || self.world.as_mut().is_some_and(|w| !w.sync_edits(&frame.planet)) {
             let mut world = ChunkWorld::new(ctx.device, ctx.queue, &frame.planet);
+            world.set_polls_device(ctx.owns_device);
             if let Some(appearance) = &self.appearance {
                 world.set_appearance(appearance);
             }
