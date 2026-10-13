@@ -394,6 +394,7 @@ pub mod camera;
 pub mod cmd;
 pub(crate) mod cmd_ir;
 pub mod context;
+pub mod depth;
 pub mod entity;
 pub mod error;
 pub mod frame_demands;

@@ -340,7 +340,7 @@ impl DebugPass {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -440,7 +440,7 @@ impl DebugPass {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -838,13 +838,9 @@ impl DebugDrawPass {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: -1,
-                    slope_scale: -1.0,
-                    clamp: -1.0,
-                },
+                bias: helio_core::depth::bias_toward_camera(1, 1.0, 1.0),
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,

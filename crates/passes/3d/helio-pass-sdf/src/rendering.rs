@@ -312,7 +312,7 @@ impl SdfPass {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                depth_compare: Some(helio_core::depth::NEARER),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -864,7 +864,7 @@ impl RenderPass for SdfPass {
             let depth_load_op = if self.preserve_framebuffer {
                 wgpu::LoadOp::Load
             } else {
-                wgpu::LoadOp::Clear(1.0)
+                wgpu::LoadOp::Clear(helio_core::depth::CLEAR)
             };
 
             let desc = wgpu::RenderPassDescriptor {

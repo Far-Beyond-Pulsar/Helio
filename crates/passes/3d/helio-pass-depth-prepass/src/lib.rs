@@ -113,7 +113,7 @@ impl DepthPrepassPass {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: depth_format,
                 depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                depth_compare: Some(helio_core::depth::NEARER),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -161,7 +161,7 @@ impl RenderPass for DepthPrepassPass {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: wgpu::LoadOp::Clear(helio_core::depth::CLEAR),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,

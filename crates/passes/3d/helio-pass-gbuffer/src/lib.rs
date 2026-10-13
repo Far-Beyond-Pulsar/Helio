@@ -563,7 +563,7 @@ impl RenderPass for GBufferPass {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: wgpu::LoadOp::Clear(helio_core::depth::CLEAR),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -1068,7 +1068,7 @@ impl GBufferPass {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    depth_compare: Some(helio_core::depth::NEARER_EQUAL),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),

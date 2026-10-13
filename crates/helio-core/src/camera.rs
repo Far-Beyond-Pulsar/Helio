@@ -24,7 +24,9 @@ pub struct GpuCameraUniforms {
     pub inv_view_proj: [f32; 16],
     /// Camera world position (xyz) + near plane (w)
     pub position_near: [f32; 4],
-    /// Camera forward direction (xyz) + far plane (w)
+    /// Camera forward direction (xyz) + effect range (w). The projection has
+    /// no far plane (see [`crate::depth`]); `w` only bounds distance-limited
+    /// effects such as froxel fog.
     pub forward_far: [f32; 4],
     /// Projection translation in NDC (xy), frame index (z), view identity (w,
     /// stored as u32 bits rather than numerically converted to float).
@@ -87,7 +89,7 @@ mod tests {
         let eye = Vec3::new(43.0, 11.0, 78.0);
         for target in [Vec3::new(0.0, 24.0, 0.0), Vec3::new(90.0, -8.0, 110.0)] {
             let view = glam::camera::rh::view::look_at_mat4(eye, target, Vec3::Y);
-            let proj = glam::camera::rh::proj::directx::perspective(0.85, 16.0 / 9.0, 0.1, 350.0);
+            let proj = crate::depth::perspective(0.85, 16.0 / 9.0, 0.1);
             let camera = GpuCameraUniforms::new(view, proj, eye, 0.1, 350.0, 0, [0.0; 2], proj * view);
             let forward = Vec3::from_slice(&camera.forward_far);
             assert!(forward.distance((target - eye).normalize()) < 1e-5);

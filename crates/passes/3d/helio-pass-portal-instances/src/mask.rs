@@ -5,7 +5,7 @@
 //! 1. Stamp each active portal's real opening quad into `portal_mask`,
 //!    depth-tested (read-only) against the real scene so occluded portals
 //!    correctly stay unmasked.
-//! 2. Reset the real depth buffer to the far plane wherever that mask
+//! 2. Reset the real depth buffer to its clear value wherever that mask
 //!    landed, so the duplicate-content pass's own depth test self-occludes
 //!    correctly among the many duplicated copies instead of comparing
 //!    against unrelated nearby real geometry.
@@ -117,7 +117,7 @@ impl PortalMaskPass {
                 // fragments always win, the same as any other opaque
                 // geometry.
                 depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
                 stencil: wgpu::StencilState::default(),
                 // The quad is meant to be flush with the portal's real
                 // surrounding surface (so content lines up exactly with no
@@ -129,11 +129,7 @@ impl PortalMaskPass {
                 // leaves them unmasked — a visible gap between the portal's
                 // content and the real scene around it. Push the quad
                 // slightly toward the camera so it reliably wins.
-                bias: wgpu::DepthBiasState {
-                    constant: -2,
-                    slope_scale: 0.0,
-                    clamp: 0.0,
-                },
+                bias: helio_core::depth::bias_toward_camera(2, 0.0, 0.0),
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,

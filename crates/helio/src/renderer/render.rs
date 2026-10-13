@@ -763,7 +763,7 @@ impl Renderer {
                 (Some(template), _) => {
                     let mut cam = template.clone();
                     cam.view = pose.view_matrix();
-                    cam.proj = pose.projection(near_far.0, near_far.1);
+                    cam.proj = pose.projection(near_far.0);
                     cam.position = pose.eye_position;
                     cam.near = near_far.0;
                     cam.far = near_far.1;

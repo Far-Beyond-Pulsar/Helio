@@ -17,7 +17,16 @@ pub struct Camera {
 }
 
 impl Camera {
+    /// A camera from its own matrices.
+    ///
+    /// `proj` must follow the engine depth convention — reversed Z, see
+    /// `helio_core::depth` — or every depth test in the frame is backwards.
+    /// `far` is the range of distance-limited effects (fog), not a clip plane.
     pub fn from_matrices(view: Mat4, proj: Mat4, position: Vec3, near: f32, far: f32) -> Self {
+        debug_assert!(
+            helio_core::depth::is_reversed(&proj),
+            "camera projection must be reversed-Z; build it with helio_core::depth::perspective"
+        );
         Self {
             view,
             proj,
@@ -29,6 +38,8 @@ impl Camera {
         }
     }
 
+    /// A perspective camera on the engine projection: reversed Z, no far
+    /// plane. `far` only bounds distance-limited effects.
     pub fn perspective_look_at(
         position: Vec3,
         target: Vec3,
@@ -40,7 +51,7 @@ impl Camera {
     ) -> Self {
         Self::from_matrices(
             glam::camera::rh::view::look_at_mat4(position, target, up),
-            glam::camera::rh::proj::directx::perspective(fov_y_radians, aspect, near, far),
+            helio_core::depth::perspective(fov_y_radians, aspect, near),
             position,
             near,
             far,

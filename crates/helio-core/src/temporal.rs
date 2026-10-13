@@ -44,7 +44,7 @@ mod tests {
     use glam::{Mat4, Vec3, Vec4};
     #[test]
     fn origin_changes_preserve_previous_projection_without_inventing_motion() {
-        let projection = Mat4::perspective_rh(1.0, 16.0 / 9.0, 0.1, 30_000_000.0);
+        let projection = crate::depth::perspective(1.0, 16.0 / 9.0, 0.1);
         for shift in [
             glam::DVec3::ZERO,
             glam::DVec3::new(1024.0, -1024.0, 0.0),
@@ -74,7 +74,7 @@ mod tests {
     fn ray_offsets_match_the_engines_jittered_projection() {
         for size in [[960, 540], [1280, 720], [513, 701]] {
             let projection =
-                Mat4::perspective_rh(1.0, size[0] as f32 / size[1] as f32, 0.1, 10000.0);
+                crate::depth::perspective(1.0, size[0] as f32 / size[1] as f32, 0.1);
             for frame in [0, 1, 2, 63, 127, 10000] {
                 let j = r1_r2_jitter(frame);
                 let ndc = [j[0] * 2.0 / size[0] as f32, j[1] * 2.0 / size[1] as f32];
