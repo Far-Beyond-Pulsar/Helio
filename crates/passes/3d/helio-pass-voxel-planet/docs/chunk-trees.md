@@ -649,6 +649,26 @@ gradient (it reads only continents and mountains). Measured and dropped:
 gradients only for the octaves before the last erosion octave a level
 resolves (erosion reaches the finest levels in view, no gain).
 
+## Sun shadows' cost (2026-10-12)
+
+At 1440p (TSR 0.75) in the editor, sun shadows and sky light take 3.8-4.8
+ms of the terrain's 7-8.4 ms over the ground (sun 32 degrees up), the draw
+2.6 ms. In the flight harness (same pixels, `_SUN_ELEVATION=32`), the
+mountain slope: shadow 4.1 ms; without the full-resolution fallbacks 0.9
+ms less, without the sky samples 0.4 ms less; sun rays cut at 256 cells
+2.1 ms (half the time is the rays' far part). A sun ray crosses about ten
+boxes and eight tree steps; each box costs its placement's table lookups
+(the chunk at the ray's level, the column search down to the drawn tile,
+the climb up the tops for air, the frame).
+
+- Placement over an ancestor's whole subtree is air at once (no search down
+  to the drawn tile and climb back up): mountain shadow 4.16 -> 4.00 ms.
+- Measured and dropped: cone-traced sun rays (every resident chunk in the
+  table, ancestors marked; a ray at distance t takes chunks with cells up to
+  t times the sun's 0.54 degrees, in chunks and in air): the same boxes per
+  ray (2.66 vs 2.64 a pixel) and no faster, even with a cone 20 times wider.
+  The cut near a hit is about as coarse as the cone allows there.
+
 ## Solid gaps (2026-10-12)
 
 A tile's chunks held one range of layers: rock under the lowest, air in

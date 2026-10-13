@@ -20,7 +20,9 @@
 //!
 //! World: `HELIO_VOXEL_FLIGHT_VOXEL` (0.1 m), `_SEED` (7), `_PRESET`
 //! (earth|moon|desert), `_HEIGHTFIELD`, `_NO_CAVES`, `_NO_OVERHANGS`,
-//! `_GRAIN=scale_m,octaves,ratio`, `_SUN=x,y,z`, `_NO_SUN`,
+//! `_GRAIN=scale_m,octaves,ratio`, `_SUN=x,y,z`, `_SUN_ELEVATION=deg` (the
+//! terrain's sun that high over each view's horizon toward `_SUN`'s azimuth;
+//! the scene light keeps `_SUN`), `_NO_SUN`,
 //! `_LOOK=exposure,contrast,saturation`, `_DEBUG=<mode>`.
 //!
 //! Frames are pipelined like a game loop (at most `FRAMES_IN_FLIGHT` ahead
@@ -56,6 +58,8 @@ struct Flight {
     target: wgpu::Texture,
     size: [u32; 2],
     sun: Vec3,
+    /// Degrees over the eye's horizon (`HELIO_VOXEL_FLIGHT_SUN_ELEVATION`).
+    sun_elevation: Option<f32>,
     shadows: bool,
     output: PathBuf,
     /// Pipelined frames not yet known complete.
@@ -85,6 +89,16 @@ fn look(eye: DVec3, heading: f64, pitch_deg: f64) -> Vec3 {
 }
 
 impl Flight {
+    /// The sun for an eye at `eye`: `HELIO_VOXEL_FLIGHT_SUN_ELEVATION`
+    /// degrees over its horizon toward `sun`'s azimuth, else `sun`.
+    fn sun_at(&self, eye: DVec3) -> Vec3 {
+        let Some(elevation) = self.sun_elevation else { return self.sun };
+        let up = up_for(eye);
+        let level = (self.sun - up * self.sun.dot(up)).try_normalize().unwrap_or_else(|| up.any_orthonormal_vector());
+        let e = elevation.to_radians();
+        (level * e.cos() + up * e.sin()).normalize()
+    }
+
     fn new(output: &Path, size: [u32; 2], quality: helio_pass_tsr::TsrQuality, planet: Planet) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).expect("GPU required");
@@ -188,6 +202,7 @@ impl Flight {
             target,
             size,
             sun: sun_dir,
+            sun_elevation: std::env::var("HELIO_VOXEL_FLIGHT_SUN_ELEVATION").ok().and_then(|v| v.parse().ok()),
             shadows: std::env::var_os("HELIO_VOXEL_FLIGHT_NO_SUN").is_none(),
             output: output.to_path_buf(),
             in_flight: Default::default(),
@@ -200,7 +215,7 @@ impl Flight {
     /// milliseconds recording it took and those waiting.
     fn draw(&mut self, eye: DVec3, forward: Vec3) -> (f64, f64) {
         let started = Instant::now();
-        *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: self.planet.clone(), sun: self.sun, shadows: self.shadows, picks: self.picks.clone() });
+        *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: self.planet.clone(), sun: self.sun_at(eye), shadows: self.shadows, picks: self.picks.clone() });
         // As a host's camera-relative frames: the origin stays on a cell
         // corner while the camera moves within the cell, off the origin.
         let origin = (eye / ORIGIN_CELL).round() * ORIGIN_CELL;
@@ -378,7 +393,7 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
     while started.elapsed().as_secs_f64() < seconds {
         let mut encoder = flight.device.create_command_encoder(&Default::default());
         let cpu = Instant::now();
-        world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun, [w, h]);
+        world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun_at(eye), [w, h]);
         draw_cpu.push(cpu.elapsed().as_secs_f64() * 1e3);
         pending.push_back(flight.queue.submit([encoder.finish()]));
         world.submitted();
@@ -407,12 +422,12 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
     if std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some() {
         world.take_counts();
         let mut encoder = flight.device.create_command_encoder(&Default::default());
-        world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun, [w, h]);
+        world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun_at(eye), [w, h]);
         flight.queue.submit([encoder.finish()]);
         let counts = world.take_counts();
         if std::env::var_os("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL").is_some() {
             let mut encoder = flight.device.create_command_encoder(&Default::default());
-            world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame + 1, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun, [w, h]);
+            world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame + 1, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun_at(eye), [w, h]);
             flight.queue.submit([encoder.finish()]);
             for (n, step) in world.pixel_trace().iter().enumerate() {
                 eprintln!("PIXELTRACE {n}: {step:?}");
@@ -520,7 +535,7 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
         assert!(world.sync_edits(planet), "edits follow");
         let mut encoder = flight.device.create_command_encoder(&Default::default());
         let stats = world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, DVec3::ZERO, None, *frame, &config);
-        world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), *frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun, [w, h]);
+        world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), *frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun_at(eye), [w, h]);
         flight.queue.submit([encoder.finish()]);
         world.submitted();
         let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
@@ -971,7 +986,7 @@ fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
         let view = helio_pass_voxel_planet::chunks::residency::View { forward: forward.as_dvec3(), cos_half: (std::f64::consts::FRAC_PI_8 * f64::from(w) / f64::from(h) * 1.1).cos() };
         let stats = world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, velocity, Some(view), frame, &config);
         update_ms.push(cpu.elapsed().as_secs_f64() * 1e3);
-        world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun, [w, h]);
+        world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun_at(eye), [w, h]);
         pending.push_back(flight.queue.submit([encoder.finish()]));
         world.submitted();
         if pending.len() > 2 {

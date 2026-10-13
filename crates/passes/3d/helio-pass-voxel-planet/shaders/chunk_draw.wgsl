@@ -880,6 +880,11 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
         if e != NONE {
             column = chunk_table[e * 2u + 1u];
             go = choice(column.w, r);
+            // Over an ancestor's whole subtree: air whichever tile shows
+            // under it (no search down and climb back up).
+            if column.w == 0 && c.z >= column.z {
+                go = 1;
+            }
         }
         if go == 1 {
             shown = true;
