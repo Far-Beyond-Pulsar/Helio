@@ -384,7 +384,20 @@ fn solid_at(slot: u32, c: vec3<i32>) -> bool {
 // air above it, the subsurface's under other cells. A ray entering by the
 // top face (`from_above`) came through that air.
 fn shown_material(pair: u32, slot: u32, c: vec3<i32>, from_above: bool) -> u32 {
-    return select((pair >> 8u) & 0xffu, pair & 0xffu, from_above || !solid_at(slot, c + vec3<i32>(0, 0, 1)));
+    return select((pair >> 8u) & 0xffu, pair & 0xffu, from_above || !solid_over(slot, c));
+}
+
+// Whether the cell over cell `c` of chunk `slot` is solid: in the chunk;
+// over its top layer, in the chunk over it (its tile's next layer), else
+// rock in its tile's solid gap. (Counting a top layer's cells as under air
+// drew the surface's material along every chunk layer a dug wall crosses.)
+fn solid_over(slot: u32, c: vec3<i32>) -> bool {
+    if c.z < 63 { return solid_at(slot, c + vec3<i32>(0, 0, 1)); }
+    let key = chunk_keys[slot];
+    let e = find_entry(vec4<i32>(key.xyz, key.w + 1));
+    if e != NONE { return solid_at(bitcast<u32>(chunk_table[e * 2u + 1u].x), vec3<i32>(c.xy, 0)); }
+    let g = gap_of(key.x, key.yz);
+    return key.w + 1 >= g.x && key.w + 1 < g.y;
 }
 
 // The first solid cell of chunk `slot` along o + t d from t0 to t1, entering
