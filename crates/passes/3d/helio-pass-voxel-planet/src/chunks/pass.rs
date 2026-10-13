@@ -254,6 +254,12 @@ impl ChunkPass {
         // slower than a 60th of a second generates for longer, up to twice.
         let mut config = self.config;
         config.generate_ms = config.generate_ms.map(|ms| ms * interval.map_or(1.0, |dt| (dt * 60.0).clamp(1.0, 2.0)));
+        // It grows into what the last measured frame left of `frame_ms`
+        // (its own generation then counted in), up to four times that.
+        if let (Some(base), Some(frame_ms), Some(gpu)) = (config.generate_ms, config.frame_ms, ctx.last_frame_gpu_ms()) {
+            let generated = self.timings.last().map_or(0.0, |t| t.generate);
+            config.generate_ms = Some((generated + (frame_ms - f64::from(gpu)) * 0.8).clamp(base, 4.0 * base));
+        }
         self.stats = world.update(encoder, frame.eye, velocity, Some(view), ctx.frame_num, &config);
         world.draw(encoder, ctx.frame_num, frame.eye, view_proj, prev_view_proj, near, frame.sun, [ctx.width, ctx.height]);
         world.publish(encoder, gbuffer, ctx.depth);

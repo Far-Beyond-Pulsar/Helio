@@ -249,7 +249,6 @@ pub struct PassContext<'a> {
     pub scene_buffers: &'a SceneBufferProjection,
 
     /// Profiler (automatic - injected by RenderGraph).
-    #[allow(dead_code)]
     pub(crate) profiler: &'a mut Profiler,
 
     /// Current frame number (starts at 0).
@@ -319,6 +318,13 @@ pub struct PassContext<'a> {
 }
 
 impl<'a> PassContext<'a> {
+    /// The graph's GPU milliseconds in the last frame measured (a few
+    /// frames back), when the profiler times it: a pass streaming work in
+    /// can size it to what the frame leaves.
+    pub fn last_frame_gpu_ms(&self) -> Option<f32> {
+        self.profiler.gpu_frame_ms()
+    }
+
     /// Whether GPU scope timestamps can be recorded on this graph.
     pub fn gpu_scopes_enabled(&self) -> bool {
         self.profiler.is_enabled() && self.profiler.gpu_timing_supported()

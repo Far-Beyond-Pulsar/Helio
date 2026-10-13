@@ -157,6 +157,7 @@ impl Flight {
         // milliseconds a frame unless the environment sets them.
         let mut config = chunk_config(size[1], 256);
         config.generate_ms = config.generate_ms.or(helio_pass_voxel_planet::chunks::ResidencyConfig::default().generate_ms);
+        config.frame_ms = config.frame_ms.or(helio_pass_voxel_planet::chunks::ResidencyConfig::default().frame_ms);
         let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| Box::new(ChunkPass::with_config(pass_source.clone(), config)));
         let mut config = RendererConfig::new(size[0], size[1], wgpu::TextureFormat::Rgba8Unorm).with_tsr_quality(quality);
         config.enable_foliage = false;
@@ -336,6 +337,9 @@ fn chunk_config(h: u32, budget: usize) -> helio_pass_voxel_planet::chunks::Resid
         tiles_per_frame: budget,
         // `HELIO_VOXEL_CHUNKS_GENERATE_MS`: GPU generation a frame.
         generate_ms: std::env::var("HELIO_VOXEL_CHUNKS_GENERATE_MS").ok().and_then(|v| v.parse().ok()),
+        // `HELIO_VOXEL_CHUNKS_FRAME_MS`: the frame's GPU milliseconds
+        // generation may grow into (the renderer pass only).
+        frame_ms: std::env::var("HELIO_VOXEL_CHUNKS_FRAME_MS").ok().and_then(|v| v.parse().ok()),
     }
 }
 

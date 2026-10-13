@@ -584,6 +584,10 @@ pub struct ResidencyConfig {
     /// (against the measured cost of tiles and chunks); `ChunkPass` gives a
     /// slower frame proportionally more, up to twice.
     pub generate_ms: Option<f64>,
+    /// GPU milliseconds a frame may take: `ChunkPass` lets generation grow
+    /// into what the last measured frame left of them, up to four times
+    /// `generate_ms` (tiles wait only while the frame is full).
+    pub frame_ms: Option<f64>,
 }
 
 impl Default for ResidencyConfig {
@@ -602,6 +606,7 @@ impl Default for ResidencyConfig {
             },
             tiles_per_frame: 256,
             generate_ms: Some(3.0),
+            frame_ms: Some(16.0),
         }
     }
 }
