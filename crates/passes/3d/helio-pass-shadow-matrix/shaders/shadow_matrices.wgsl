@@ -179,19 +179,21 @@ fn compute_directional_cascades(light_idx: u32, direction: vec3f) {
     let dir = normalize(direction);
     let up = select(vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.0, 1.0), abs(dot(dir, vec3f(0.0, 1.0, 0.0))) > 0.99);
 
-    // Unproject 8 NDC corners to world space
+    // Unproject 8 NDC corners to world space: near plane first (reversed
+    // depth 1), then the far end (depth 0, infinitely far).
     let ndc = array<vec4f, 8>(
-        vec4f(-1.0, -1.0, 0.0, 1.0), vec4f(1.0, -1.0, 0.0, 1.0),
-        vec4f(-1.0,  1.0, 0.0, 1.0), vec4f(1.0,  1.0, 0.0, 1.0),
         vec4f(-1.0, -1.0, 1.0, 1.0), vec4f(1.0, -1.0, 1.0, 1.0),
         vec4f(-1.0,  1.0, 1.0, 1.0), vec4f(1.0,  1.0, 1.0, 1.0),
+        vec4f(-1.0, -1.0, 0.0, 1.0), vec4f(1.0, -1.0, 0.0, 1.0),
+        vec4f(-1.0,  1.0, 0.0, 1.0), vec4f(1.0,  1.0, 0.0, 1.0),
     );
 
     // Near corners are finite. Far corners are only needed out to the last
     // split: walk each corner ray (the homogeneous far point minus the eye,
-    // exact for any w) to that distance. Dividing by w gave inf/NaN when a
-    // tiny near/far ratio put the far plane at f32 infinity. Slices are the
-    // same as before whenever the far plane is finite and beyond the splits.
+    // exact for any w) to that distance. The camera projection has no far
+    // plane, so its far corners are points at infinity (w == 0) and dividing
+    // by w would give inf/NaN. A finite far plane inside the last split, from
+    // a caller's own projection, is still honoured.
     let eye = cameras[0].position_near.xyz;
     var world: array<vec3f, 8>;
     for (var i = 0u; i < 8u; i++) {

@@ -40,10 +40,6 @@ struct DofUniforms {
 @group(0) @binding(2) var depth_tex: texture_depth_2d;
 @group(0) @binding(3) var coc_tex: texture_storage_2d<r32float, write>;
 
-fn linearize_depth(raw: f32) -> f32 {
-    return -cameras[0].proj[3][2] / (raw * 2.0 - 1.0 + cameras[0].proj[2][2]);
-}
-
 fn compute_coc(linear_depth: f32) -> f32 {
     let focal_dist = dof.dof_focal_distance;
     let focal_region = dof.dof_focal_region;
@@ -69,7 +65,7 @@ fn cs_coc_prepass(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Sample depth at full resolution (top-left of 2x2 quad)
     let raw_depth = textureLoad(depth_tex, vec2<i32>(i32(px), i32(py)), 0);
-    let linear_depth = linearize_depth(raw_depth);
+    let linear_depth = helio_view_depth(cameras[0].proj, raw_depth);
     let coc = compute_coc(linear_depth);
 
     textureStore(coc_tex, vec2<i32>(gid.xy), vec4<f32>(coc, 0.0, 0.0, 0.0));

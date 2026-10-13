@@ -90,7 +90,7 @@ fn fs_composite(in: VOut) -> @location(0) vec4<f32> {
     let raw_depth = textureLoad(scene_depth, depth_pixel, 0);
     // Slices are planes of constant view depth: convert the buffer value, do
     // not use radial distance.
-    let view_depth = helio_view_depth(raw_depth, cameras[0].position_near.w, cameras[0].forward_far.w);
+    let view_depth = helio_view_depth(cameras[0].proj, raw_depth);
     // Integration stores each slice's cumulative value at its far face, not
     // its centre; offset by half a texel for texel-centre sampling.
     let slice = clamp(

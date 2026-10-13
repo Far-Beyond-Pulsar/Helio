@@ -160,9 +160,9 @@ fn god_rays(uv: vec2f, vol: WaterVolume) -> f32 {
     for (var i = 0; i < GOD_RAY_SAMPLES; i++) {
         pos += delta;
         if any(pos < vec2f(0.0)) || any(pos > vec2f(1.0)) { break; }
-        // Unoccluded (far) samples carry light; geometry blocks it.
+        // Unoccluded (sky) samples carry light; geometry blocks it.
         let d = textureSampleLevel(depth_texture, depth_samp, pos, 0);
-        accum += step(0.9995, d) * decay;
+        accum += select(0.0, 1.0, helio_is_sky(d)) * decay;
         decay *= 0.96;
     }
 
@@ -235,7 +235,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     var dist: f32;
     var ray_dir: vec3f;
     var lit = scene;
-    if depth >= 1.0 {
+    if helio_is_sky(depth) {
         // Nothing there: the ray runs until the medium has fully absorbed it.
         ray_dir = normalize(helio_world_from_depth(cameras[0].view_proj_inv, uv_g, 0.5) - cam_pos);
         dist    = far;

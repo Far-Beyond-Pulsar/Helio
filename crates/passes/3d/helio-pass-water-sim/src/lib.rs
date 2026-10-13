@@ -659,7 +659,7 @@ impl RenderPass for WaterSimPass {
             "water_caustics",
             // Min-reduced depth pyramid, marched for water reflections. Built
             // by HiZBuildPass from `depth` alone, so it is available here.
-            "hiz_min",
+            "hiz_nearest",
         ]
     }
     fn writes(&self) -> &'static [&'static str] {
@@ -701,7 +701,7 @@ impl RenderPass for WaterSimPass {
         let volumes = ctx.scene_buffers.get(BufferKey::of("water_volumes"));
         self.volume_liveness.update(ctx.device, ctx.queue, volumes);
         if volumes.is_some_and(|handle| self.volume_liveness.maybe_live(handle)) {
-            demands.demand("hiz_min");
+            demands.demand("hiz_nearest");
         }
     }
 
@@ -1288,11 +1288,11 @@ impl RenderPass for WaterSimPass {
                     .unwrap_or(&self.gbuffer_fallback_view);
                 let depth_view = ctx.depth;
 
-                let hiz_min_view = match ctx.resource_pool.get_view("hiz_min") {
+                let hiz_nearest_view = match ctx.resource_pool.get_view("hiz_nearest") {
                     Some(v) => v.clone(),
                     None => {
                         return Err(helio_core::Error::InvalidPassConfig(
-                            "WaterSim reflections require hiz_min; HiZBuildPass must run \
+                            "WaterSim reflections require hiz_nearest; HiZBuildPass must run \
                              before WaterSim in the graph"
                                 .to_string(),
                         ))
@@ -1359,7 +1359,7 @@ impl RenderPass for WaterSimPass {
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 11,
-                                    resource: wgpu::BindingResource::TextureView(&hiz_min_view),
+                                    resource: wgpu::BindingResource::TextureView(&hiz_nearest_view),
                                 },
                             ],
                         })

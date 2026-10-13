@@ -558,9 +558,9 @@ mod tests {
     /// fail at shader-compile time in a browser. Pin the coupling here.
     #[test]
     fn webgpu_fixup_rewrites_every_binding_array_in_the_real_shader() {
-        let src = include_str!("../shaders/decal_collect.wgsl");
+        let src = helio_core::shader::resolve(include_str!("../shaders/decal_collect.wgsl"));
         let fixed = helio_mats::apply_webgpu_decal_bindings(
-            src,
+            &src,
             helio_mats::MAX_MATERIAL_TEXTURES.min(16),
         );
 
@@ -580,8 +580,8 @@ mod tests {
 
     #[test]
     fn collect_shader_translates_portable_depth_to_gles() {
-        let src = include_str!("../shaders/decal_collect.wgsl");
-        let src = helio_mats::apply_webgpu_decal_bindings(src, 1);
+        let src = helio_core::shader::resolve(include_str!("../shaders/decal_collect.wgsl"));
+        let src = helio_mats::apply_webgpu_decal_bindings(&src, 1);
         let module = naga::front::wgsl::parse_str(&src)
             .expect("Decal Collect WGSL must parse after baseline binding expansion");
         let info = naga::valid::Validator::new(

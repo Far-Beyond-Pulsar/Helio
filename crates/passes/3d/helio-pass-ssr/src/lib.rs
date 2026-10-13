@@ -2,7 +2,7 @@
 //!
 //! A single compute dispatch with two execution paths:
 //!
-//! **Default path** (no RT): Deterministic Hi-Z ray march against the `hiz_min`
+//! **Default path** (no RT): Deterministic Hi-Z ray march against the `hiz_nearest`
 //! pyramid. One mirror ray per pixel, stable frame to frame. This is the
 //! original SSR behaviour.
 //!
@@ -110,9 +110,9 @@ impl SsrPass {
             entries: &[buffer_uniform_entry(0)],
         });
 
-        // Binds `hiz_min`, not `hiz`: the shared pyramid is max-reduced for
-        // occlusion culling, and a ray march needs min-depth. Both are built by
-        // HiZBuildPass. See the header comment in ssr_trace.wgsl.
+        // Binds `hiz_nearest`, not `hiz`: the shared pyramid is farthest-reduced
+        // for occlusion culling, and a ray march needs nearest depth. Both are
+        // built by HiZBuildPass. See the header comment in ssr_trace.wgsl.
         let bgl_1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("SSR BGL1"),
             entries: &[
@@ -120,7 +120,7 @@ impl SsrPass {
                 texture_float_entry(1),
                 texture_depth_entry(2),
                 texture_float_entry(3),
-                texture_unfiltered_entry(4), // hiz_min (R32Float, not filterable)
+                texture_unfiltered_entry(4), // hiz_nearest (R32Float, not filterable)
                 sampler_entry(5),
                 storage_entry(6),
             ],
@@ -176,10 +176,11 @@ impl SsrPass {
         let rt_pipeline = use_rt.then(|| {
             // The shared resolver hoists ray-query directives ahead of the
             // prelude, keeping RT and raster G-buffer conventions identical.
-            let rt_shader = helio_core::shader::module(
+            let rt_shader = helio_core::shader::module_with(
                 device,
                 "SSR RT Trace Shader",
                 helio_core::include_wgsl!("../shaders/ssr_trace_rt.wgsl"),
+                &[helio_pass_hiz::HIZ_SNIPPET],
             );
 
             let rt_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -233,7 +234,7 @@ impl RenderPass for SsrPass {
         _ctx: &helio_core::PrepareContext,
         demands: &mut helio_core::FrameDemands,
     ) {
-        demands.demand("hiz_min");
+        demands.demand("hiz_nearest");
     }
 
     fn name(&self) -> &'static str {
@@ -244,7 +245,7 @@ impl RenderPass for SsrPass {
         &[
             "gbuffer",
             "depth",
-            "hiz_min",
+            "hiz_nearest",
             "pre_aa",
             "render_environment",
             "ray_transmission",
@@ -295,7 +296,7 @@ impl RenderPass for SsrPass {
                 Some(v) => v,
                 None => return Ok(()),
             };
-        let hiz_min_view = match ctx.resource_pool.get_view("hiz_min") {
+        let hiz_nearest_view = match ctx.resource_pool.get_view("hiz_nearest") {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -310,7 +311,7 @@ impl RenderPass for SsrPass {
             gbuffer.views[2].clone(),
             depth_view.clone(),
             pre_aa_view.clone(),
-            hiz_min_view.clone(),
+            hiz_nearest_view.clone(),
             ssr_trace.clone(),
         ];
 
@@ -326,7 +327,7 @@ impl RenderPass for SsrPass {
                         resource: wgpu::BindingResource::TextureView(depth_view),
                     },
                     texture_view_entry(3, pre_aa_view),
-                    texture_view_entry(4, hiz_min_view),
+                    texture_view_entry(4, hiz_nearest_view),
                     wgpu::BindGroupEntry {
                         binding: 5,
                         resource: wgpu::BindingResource::Sampler(&self.linear_sampler),

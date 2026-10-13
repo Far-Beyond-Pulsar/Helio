@@ -1,3 +1,4 @@
+//!use helio_prelude
 //!use pbr_eval
 //!use atmosphere
 
@@ -19,17 +20,6 @@
 const ENABLE_LIGHTING: bool = true;
 const ENABLE_SHADOWS: bool = true;
 const MAX_SHADOW_LIGHTS: u32 = 42u;
-
-struct Camera {
-    view:           mat4x4<f32>,
-    proj:           mat4x4<f32>,
-    view_proj:      mat4x4<f32>,
-    view_proj_inv:  mat4x4<f32>,
-    position_near:  vec4<f32>,
-    forward_far:    vec4<f32>,
-    jitter_frame:   vec4<f32>,
-    prev_view_proj: mat4x4<f32>,
-}
 
 struct Globals {
     frame:             u32,
@@ -1094,9 +1084,9 @@ fn sample_rc_specular(
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let pix = vec2<i32>(i32(in.clip_pos.x), i32(in.clip_pos.y));
 
-    // ── Depth guard: sky areas (depth=1) are already in the target → discard ──
+    // ── Depth guard: sky areas are already in the target → discard ──
     let depth = textureLoad(gbuf_depth, pix, 0);
-    if depth >= 1.0 { discard; }
+    if helio_is_sky(depth) { discard; }
 
     // ── Read G-buffer ─────────────────────────────────────────────────────────
     let albedo_a  = textureLoad(gbuf_albedo,   pix, 0);
@@ -1386,7 +1376,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
     let pix = vec2<i32>(i32(in.clip_pos.x), i32(in.clip_pos.y));
     let depth = textureLoad(gbuf_depth, pix, 0);
-    if depth >= 1.0 { discard; }
+    if helio_is_sky(depth) { discard; }
 
     let ssr_hit = textureLoad(ssr_tex, pix, 0);
     if globals.debug_mode == 30u {
@@ -1548,7 +1538,7 @@ fn contact_visibility(light:GpuLight,position:vec3f,normal:vec3f)->f32 {
         let ndc=clip.xyz/clip.w;let uv=vec2f(ndc.x*0.5+0.5,0.5-ndc.y*0.5);
         if any(uv<=vec2f(0)) || any(uv>=vec2f(1)) {break;}
         let depth=textureLoad(gbuf_depth,vec2i(uv*vec2f(dims)),0);
-        if depth>=1.0 {continue;}
+        if helio_is_sky(depth) {continue;}
         let h=cameras[0].view_proj_inv*vec4f(ndc.xy,depth,1);
         let hit=h.xyz/h.w;
         let delta=length(p-cameras[0].position_near.xyz)-length(hit-cameras[0].position_near.xyz);

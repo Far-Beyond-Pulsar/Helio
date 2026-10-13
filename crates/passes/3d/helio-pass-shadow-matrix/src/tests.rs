@@ -520,7 +520,7 @@ fn gpu_tile_sampling_fades_and_honors_author_policy() {
 fn gpu_ranking_prefers_the_lights_nearest_the_camera() {
     let mut gpu = Gpu::new(320, 64);
     let view = glam::Mat4::look_at_rh(glam::Vec3::ZERO, glam::Vec3::NEG_Z, glam::Vec3::Y);
-    let projection = glam::Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 200.0);
+    let projection = helio_core::depth::perspective(60f32.to_radians(), 1.0, 0.1);
     let view_proj = projection * view;
     gpu.params.view_proj = view_proj.to_cols_array();
     gpu.params.inv_view_proj = view_proj.inverse().to_cols_array();

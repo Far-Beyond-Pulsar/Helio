@@ -173,7 +173,7 @@ fn screen_occluded(light: GpuLight, position: vec3<f32>, normal: vec3<f32>) -> b
     var ray_length=max_distance;
     if light.light_type!=0u { ray_length=min(ray_length,length(light.position_range.xyz-origin)); }
     if ray_length<0.025 || dot(normal,inc.direction)<=0.0 { return false; }
-    // Traverse current-frame minimum depths from large cells down to pixels.
+    // Traverse current-frame nearest depths from large cells down to pixels.
     // NDC is linear along a projected segment, including perspective cameras.
     let clip0=cameras[0].view_proj*vec4<f32>(origin,1.0);
     let clip1=cameras[0].view_proj*vec4<f32>(origin+inc.direction*ray_length,1.0);
@@ -193,14 +193,16 @@ fn screen_occluded(light: GpuLight, position: vec3<f32>, normal: vec3<f32>) -> b
         let point=start+delta*t;
         if any(point<vec2<f32>(0.0)) || any(point>=screen) { break; }
         let z=mix(ndc0.z,ndc1.z,t);
-        if z<0.0 || z>=1.0 { break; }
+        // Reversed depth: at or past infinity (0), or before the near plane (1).
+        if z<=0.0 || z>1.0 { break; }
         let cell_size=f32(TILE_SIZE)*exp2(f32(level));
         let cell=floor(point/cell_size);
         let boundary=(cell+select(vec2<f32>(0.0),vec2<f32>(1.0),delta>=vec2<f32>(0.0)))*cell_size;
         let exits=select(vec2<f32>(1e20),(boundary-point)/select(vec2<f32>(1.0),delta,abs(delta)>vec2<f32>(1e-6)),abs(delta)>vec2<f32>(1e-6));
         let cell_end=min(1.0,t+max(min(exits.x,exits.y),0.0));
-        let minimum=textureLoad(screen_depth_bounds,vec2<i32>(cell),level).r;
-        if max(z,mix(ndc0.z,ndc1.z,cell_end))<=minimum {
+        let nearest=textureLoad(screen_depth_bounds,vec2<i32>(cell),level).r;
+        // The segment's farthest point is still in front of the cell's nearest surface.
+        if !helio_depth_is_nearer(nearest,helio_depth_farthest(z,mix(ndc0.z,ndc1.z,cell_end))) {
             t=cell_end+0.001/span; level=min(level+1,top); continue;
         }
         if level>0 { level-=1; continue; }
@@ -209,7 +211,7 @@ fn screen_occluded(light: GpuLight, position: vec3<f32>, normal: vec3<f32>) -> b
         let pixel_exits=select(vec2<f32>(1e20),(pixel_boundary-point)/select(vec2<f32>(1.0),delta,abs(delta)>vec2<f32>(1e-6)),abs(delta)>vec2<f32>(1e-6));
         let pixel_end=min(1.0,t+max(min(pixel_exits.x,pixel_exits.y),0.0));
         let depth=textureLoad(gbuf_depth,p,0);
-        if depth<1.0 {
+        if !helio_is_sky(depth) {
             let surface=world_position(vec2<f32>(p)+0.5,depth);
             let ray_start=world_position(point,z);
             let ray_end=world_position(start+delta*pixel_end,mix(ndc0.z,ndc1.z,pixel_end));

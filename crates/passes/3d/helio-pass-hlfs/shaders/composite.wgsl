@@ -15,7 +15,7 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 fn fs_main(@builtin(position) fragment: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel=vec2<i32>(fragment.xy);
     let depth=textureLoad(gbuf_depth,pixel,0);
-    if depth>=1.0 { return textureLoad(pre_aa_texture,pixel,0); }
+    if helio_is_sky(depth) { return textureLoad(pre_aa_texture,pixel,0); }
     let s=surface_at(vec2<u32>(pixel));
     var key=INVALID_LIGHT;
     if USE_TILE_PRESAMPLING && globals.light_count<=65535u { key=tile_proposals[0].key_light; }

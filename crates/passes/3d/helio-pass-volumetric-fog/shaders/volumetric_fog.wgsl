@@ -714,12 +714,12 @@ fn medium_transmittance(frame_p: vec3<f32>, dir: vec3<f32>, distance: f32) -> f3
 
 // ── Froxel <-> world ────────────────────────────────────────────────────────
 
-/// World-space ray through an NDC point: the unprojected far-plane point
-/// minus the eye, in homogeneous form. Unlike dividing by w, this stays exact
-/// when the far plane is at f32 infinity (w == 0, a tiny near/far ratio) and
-/// cannot disagree with the depth reconstruction the rest of the engine does.
+/// World-space ray through an NDC point: the unprojected point at infinity
+/// (reversed depth 0) minus the eye, in homogeneous form. Dividing by its
+/// w == 0 would give NaN; this stays exact and cannot disagree with the depth
+/// reconstruction the rest of the engine does.
 fn pixel_ray(ndc: vec2<f32>) -> vec3<f32> {
-    let p_far = cameras[0].view_proj_inv * vec4<f32>(ndc, 1.0, 1.0);
+    let p_far = cameras[0].view_proj_inv * vec4<f32>(ndc, 0.0, 1.0);
     return normalize(p_far.xyz - p_far.w * cameras[0].position_near.xyz);
 }
 

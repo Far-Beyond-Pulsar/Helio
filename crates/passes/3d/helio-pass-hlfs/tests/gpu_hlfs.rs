@@ -630,7 +630,7 @@ fn screen_contacts_follow_current_depth_and_clear_after_motion() {
                         } else {
                             0.0
                         };
-                        (3.0 - z - 0.1) / 9.9
+                        ortho_depth(3.0 - z)
                     })
                 })
                 .collect();
@@ -663,7 +663,7 @@ fn screen_contacts_follow_current_depth_and_clear_after_motion() {
                 region(&contact) < region(&unshadowed) * 0.8,
                 "current-depth contact shadow missing"
             );
-            f.depth_values(&vec![(3.0 - 0.1) / 9.9; 129 * 65]);
+            f.depth_values(&vec![ortho_depth(3.0); 129 * 65]);
             f.frame();
             assert!(
                 region(&f.read()) > region(&unshadowed) * 0.95,
@@ -683,7 +683,7 @@ fn screen_contacts_follow_current_depth_and_clear_after_motion() {
                         "reduced-resolution contact shadow missing"
                     );
                 }
-                f.depth_values(&vec![(3.0 - 0.1) / 9.9; 129 * 65]);
+                f.depth_values(&vec![ortho_depth(3.0); 129 * 65]);
                 f.frame();
                 assert!(
                     region(&f.read()) > region(&unshadowed) * 0.95,
@@ -715,8 +715,8 @@ fn half_resolution_keeps_isolated_one_pixel_geometry_lit() {
             }
             f.lights(vec![point([0.0, 0.0, 2.0], [1.0; 3], 8.0)]);
             let index = 20 * 65 + 21;
-            let mut depths = vec![1.0; 65 * 49];
-            depths[index] = (3.0 - 0.1) / 9.9;
+            let mut depths = vec![helio_core::depth::CLEAR; 65 * 49];
+            depths[index] = ortho_depth(3.0);
             f.depth_values(&depths);
             f.config(HlfsConfig {
                 debug_mode: HlfsDebugMode::Reference,
@@ -961,7 +961,7 @@ fn reduced_resolution_tracks_camera_motion() {
                     debug_mode: HlfsDebugMode::Reference,
                     ..Default::default()
                 });
-                let proj = Mat4::orthographic_rh(-2.0, 2.0, -2.0, 2.0, 0.1, 10.0);
+                let proj = helio_core::depth::orthographic(-2.0, 2.0, -2.0, 2.0, 0.1, 10.0);
                 let mut previous =
                     proj * Mat4::look_at_rh(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, Vec3::Y);
                 let mut worst_mean = 0.0f32;

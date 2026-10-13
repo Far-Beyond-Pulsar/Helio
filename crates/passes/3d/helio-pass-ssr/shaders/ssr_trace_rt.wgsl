@@ -1,5 +1,7 @@
-// Hybrid SSR uses the same camera, depth and signed normal contract as raster SSR.
+// Hybrid SSR uses the same camera, depth and signed normal contract as raster
+// SSR, and the same shared Hi-Z march.
 //!use helio_prelude
+//!use helio_hiz
 enable wgpu_ray_query;
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
@@ -8,7 +10,7 @@ enable wgpu_ray_query;
 @group(1) @binding(1) var gbuf_orm:             texture_2d<f32>;
 @group(1) @binding(2) var gbuf_depth:           texture_depth_2d;
 @group(1) @binding(3) var scene_color:          texture_2d<f32>;
-@group(1) @binding(4) var hiz_min:              texture_2d<f32>;
+@group(1) @binding(4) var hiz_nearest:          texture_2d<f32>;
 @group(1) @binding(5) var linear_sampler:       sampler;
 @group(1) @binding(6) var ssr_output:           texture_storage_2d<rgba16float, write>;
 
@@ -22,39 +24,6 @@ const MAX_RAY_DIST:  f32 = 100.0;
 const THICKNESS:     f32 = 0.02;
 const NORMAL_OFFSET: f32 = 0.002;
 const FADE_START:    f32 = 0.6;
-
-fn linearize_depth(d_01: f32) -> f32 {
-    return helio_view_depth(d_01, cameras[0].position_near.w, cameras[0].forward_far.w);
-}
-
-fn level_size(level: i32) -> vec2<f32> {
-    return vec2<f32>(max(vec2<u32>(1u), textureDimensions(hiz_min) >> vec2<u32>(u32(level))));
-}
-
-fn cell_of(uv: vec2<f32>, size: vec2<f32>) -> vec2<f32> {
-    return floor(uv * size);
-}
-
-fn min_depth(cell: vec2<f32>, level: i32) -> f32 {
-    return textureLoad(hiz_min, vec2<i32>(cell), level).r;
-}
-
-fn at_depth(o: vec3<f32>, d: vec3<f32>, z: f32) -> vec3<f32> {
-    return o + d * ((z - o.z) / d.z);
-}
-
-fn exit_cell(
-    o: vec3<f32>,
-    d: vec3<f32>,
-    cell: vec2<f32>,
-    size: vec2<f32>,
-    cross_step: vec2<f32>,
-    cross_offset: vec2<f32>,
-) -> vec3<f32> {
-    let boundary = (cell + cross_step) / size + cross_offset;
-    let delta = (boundary - o.xy) / d.xy;
-    return o + d * min(delta.x, delta.y);
-}
 
 // Transmission query contract: nearest opaque endpoint, then tint only the
 // segment before it. Candidate traversal order is unspecified, so accumulating
@@ -112,9 +81,9 @@ fn projected_hit_color(hit: vec4<f32>, direction: vec3<f32>) -> vec4<f32> {
     if any(uv<vec2<f32>(0.0)) || any(uv>=vec2<f32>(1.0)) { return vec4<f32>(0.0); }
     let px=vec2<i32>(uv*vec2<f32>(textureDimensions(gbuf_depth)));
     let depth=textureLoad(gbuf_depth,px,0);
-    if depth>=1.0 { return vec4<f32>(0.0); }
+    if helio_is_sky(depth) { return vec4<f32>(0.0); }
     let hit_z=-(cameras[0].view*vec4<f32>(hit.xyz,1.0)).z;
-    let visible_z=linearize_depth(depth);
+    let visible_z=helio_view_depth(cameras[0].proj,depth);
     if abs(hit_z-visible_z)>max(0.02,0.005*hit_z) { return vec4<f32>(0.0); }
     let normal=helio_gbuffer_normal(textureLoad(gbuf_normal,px,0).xyz);
     if dot(normal,-direction)<=0.0 { return vec4<f32>(0.0); }
@@ -162,7 +131,7 @@ fn cs_rt(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
     let depth_01 = textureLoad(gbuf_depth, source_px, 0);
 
-    if depth_01 >= 1.0 {
+    if helio_is_sky(depth_01) {
         textureStore(ssr_output, px, vec4<f32>(0.0));
         return;
     }
@@ -204,70 +173,24 @@ fn cs_rt(@builtin(global_invocation_id) gid: vec3<u32>) {
     let clip1 = cameras[0].proj * vec4<f32>(end_view, 1.0);
     let p0 = vec3<f32>(helio_ndc_to_uv(clip0.xy / clip0.w), clip0.z / clip0.w);
     let p1 = vec3<f32>(helio_ndc_to_uv(clip1.xy / clip1.w), clip1.z / clip1.w);
-    var d = p1 - p0;
-
-    if abs(d.x) < 1e-7 && abs(d.y) < 1e-7 {
-        textureStore(ssr_output, px, vec4<f32>(0.0));
-        return;
-    }
-    d.x = select(d.x, 1e-7, abs(d.x) < 1e-7);
-    d.y = select(d.y, 1e-7, abs(d.y) < 1e-7);
-
-    let cross_step = vec2<f32>(select(0.0, 1.0, d.x >= 0.0), select(0.0, 1.0, d.y >= 0.0));
-    let cross_offset = (cross_step * 2.0 - 1.0) * 1e-6;
+    let d = p1 - p0;
 
     // ── Hi-Z traversal ──────────────────────────────────────────────────────
-    var level = START_LEVEL;
-    let max_level = min(MAX_LEVEL, i32(textureNumLevels(hiz_min)) - 1);
-    var tr = p0;
-    {
-        let size = level_size(level);
-        tr = exit_cell(p0, d, cell_of(p0.xy, size), size, cross_step, cross_offset);
-    }
-
-    var iter = 0u;
-    var hiz_hit = false;
-
-    while level >= 0 && iter < MAX_ITER {
-        iter += 1u;
-        if any(tr.xy < vec2<f32>(0.0)) || any(tr.xy > vec2<f32>(1.0)) { break; }
-        if tr.z > 1.0 { break; }
-
-        let size = level_size(level);
-        let old_cell = cell_of(tr.xy, size);
-        let tile_min = min_depth(old_cell, level);
-
-        var next = tr;
-        let in_front = tr.z < tile_min;
-        if in_front && d.z > 0.0 {
-            next = at_depth(p0, d, tile_min);
-        }
-
-        let new_cell = cell_of(next.xy, size);
-        let skip_tile = in_front && d.z <= 0.0;
-
-        if skip_tile || any(new_cell != old_cell) {
-            next = exit_cell(tr, d, old_cell, size, cross_step, cross_offset);
-            level = min(max_level, level + 1);
-        } else {
-            level -= 1;
-            if level < 0 { hiz_hit = true; }
-        }
-        tr = next;
-    }
+    let march = helio_hiz_march(hiz_nearest, p0, p1, START_LEVEL, MAX_LEVEL, MAX_ITER);
+    let tr = march.pos;
 
     // Prefer reliable screen hits in opaque scenes. Hardware fallback reuses
     // screen radiance only after checking the projected hit depth.
     var final_color=vec3<f32>(0.0);
     var final_confidence=0.0;
-    if hiz_hit {
+    if march.hit {
         let hit_uv=tr.xy;
         // The trace target is half resolution; depth and normals are full
         // resolution. Validate the hit against the same screen coordinate.
         let hit_px=clamp(vec2<i32>(hit_uv*vec2<f32>(source_dims)),
             vec2<i32>(0),vec2<i32>(source_dims)-vec2<i32>(1));
-        let ray_z=linearize_depth(tr.z);
-        let scene_z=linearize_depth(textureLoad(gbuf_depth,hit_px,0));
+        let ray_z=helio_view_depth(cameras[0].proj,tr.z);
+        let scene_z=helio_view_depth(cameras[0].proj,textureLoad(gbuf_depth,hit_px,0));
         if abs(ray_z-scene_z)<=max(0.02,scene_z*THICKNESS) {
             let n_hit=helio_gbuffer_normal(textureLoad(gbuf_normal,hit_px,0).xyz);
             let border=min(min(hit_uv.x,1.0-hit_uv.x),min(hit_uv.y,1.0-hit_uv.y));

@@ -23,7 +23,7 @@ fn spatial(@builtin(global_invocation_id) id: vec3<u32>,
     workgroupBarrier();
     if any(id.xy>=globals.sample_size) { return; }
     let pixel=sample_pixel(id.xy,globals.frame);
-    if textureLoad(gbuf_depth,vec2<i32>(pixel),0)>=1.0 {
+    if helio_is_sky(textureLoad(gbuf_depth,vec2<i32>(pixel),0)) {
         textureStore(spatial_lighting,vec2<i32>(id.xy),vec4<u32>(0u)); return;
     }
     let s=surface_at(pixel);

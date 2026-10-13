@@ -9,13 +9,16 @@
 // visible range sits above 0.9, which accepted the first on-screen sample as a
 // hit. Two implementations of a subtle algorithm is one too many.
 //
-// The pyramid MUST be min-reduced (`hiz_min`). The shared `hiz` resource is
-// max-reduced for occlusion culling — conservative farthest — and marching that
-// makes rays tunnel straight through geometry.
+// The pyramid MUST be nearest-reduced (`hiz_nearest`). The shared `hiz`
+// resource is farthest-reduced for occlusion culling, and marching that makes
+// rays tunnel straight through geometry.
 //
 // NDC depth is *linear in screen space* (projective z/w), so a ray is a straight
 // line in (uv, depth01) space. Nothing in the loop needs perspective correction
-// or linearization, which is what makes the cell-skipping valid.
+// or linearization, which is what makes the cell-skipping valid. That holds for
+// the engine's reversed depth too; only which way is "farther" changes, and
+// that goes through the prelude's depth helpers — callers must also opt into
+// `helio_prelude`.
 //
 // The texture is a parameter rather than a binding: group and binding stay the
 // caller's business, same principle as the rest of the prelude.
@@ -24,7 +27,7 @@
 struct HelioHizHit {
     /// Hit position as (uv.xy, depth01). Only meaningful when `hit` is true.
     pos: vec3<f32>,
-    /// False when the ray left the screen, exceeded the depth range, or ran out
+    /// False when the ray left the screen, passed infinity, or ran out
     /// of iterations. Callers must treat a miss as "no reflection", never as a
     /// hit at the last position.
     hit: bool,
@@ -55,7 +58,7 @@ fn helio_hiz_exit_cell(
     return o + d * min(delta.x, delta.y);
 }
 
-/// March a ray through the min-depth pyramid.
+/// March a ray through the nearest-depth pyramid.
 ///
 /// `p0` and `p1` are the ray's start and end in (uv, depth01) — project them
 /// with the caller's own view/projection before calling. `start_level` is the
@@ -100,20 +103,23 @@ fn helio_hiz_march(
     while level >= 0 && iter < max_iter {
         iter += 1u;
         if any(ray.xy < vec2<f32>(0.0)) || any(ray.xy > vec2<f32>(1.0)) { break; }
-        if ray.z > 1.0 { break; }
+        // Past infinity (depth 0): nothing left to hit.
+        if ray.z < 0.0 { break; }
 
         let size = helio_hiz_level_size(hiz, level);
         let old_cell = helio_hiz_cell(ray.xy, size);
-        let tile_min = textureLoad(hiz, vec2<i32>(old_cell), level).r;
+        let tile_nearest = textureLoad(hiz, vec2<i32>(old_cell), level).r;
 
+        // Receding means the ray's depth moves toward the far value.
+        let receding = helio_depth_is_nearer(p0.z, p1.z);
         var next = ray;
-        let in_front = ray.z < tile_min;
-        if in_front && d.z > 0.0 {
-            next = helio_hiz_at_depth(p0, d, tile_min);
+        let in_front = helio_depth_is_nearer(ray.z, tile_nearest);
+        if in_front && receding {
+            next = helio_hiz_at_depth(p0, d, tile_nearest);
         }
 
         let new_cell = helio_hiz_cell(next.xy, size);
-        let skip_tile = in_front && d.z <= 0.0;
+        let skip_tile = in_front && !receding;
 
         if skip_tile || any(new_cell != old_cell) {
             next = helio_hiz_exit_cell(ray, d, old_cell, size, cross_step, cross_offset);

@@ -1,17 +1,23 @@
+//!use helio_prelude
 // Hi-Z pyramid builder. Downsamples depth 2x2 -> 1.
 //
 // Two entry points, two reductions, one file — because the *policy* (sizes, mip
 // counts, dispatch) is identical and only the reduction operator differs:
 //
-//   main_max — farthest depth in the footprint. Conservative for occlusion
-//              culling: "is this tile definitely covered?" (OcclusionCullPass,
-//              VirtualGeometryPass).
-//   main_min — nearest depth in the footprint. Conservative for ray marching:
-//              "could a ray hit anything in this tile?" (SsrPass).
+//   main_farthest — farthest depth in the footprint. Conservative for
+//                   occlusion culling: "is this tile definitely covered?"
+//                   (OcclusionCullPass, VirtualGeometryPass).
+//   main_nearest  — nearest depth in the footprint. Conservative for ray
+//                   marching: "could a ray hit anything in this tile?"
+//                   (SsrPass).
 //
-// The two are not interchangeable. Marching a max-reduced pyramid makes rays
-// tunnel through geometry, because coarse levels claim the nearest surface is
-// farther away than it is.
+// The two are not interchangeable. Marching a farthest-reduced pyramid makes
+// rays tunnel through geometry, because coarse levels claim the nearest
+// surface is farther away than it is.
+//
+// Named by meaning rather than min/max: under the engine's reversed depth
+// (helio_core::depth) the farthest depth is the smallest value, and which
+// operator that is belongs to the prelude, not to this pass.
 
 struct HiZUniforms {
     src_size: vec2<u32>,
@@ -36,17 +42,17 @@ fn gather(dst_coord: vec2<u32>) -> vec4<f32> {
 }
 
 @compute @workgroup_size(8, 8)
-fn main_max(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn main_farthest(@builtin(global_invocation_id) gid: vec3<u32>) {
     if any(gid.xy >= params.dst_size) { return; }
     let s = gather(gid.xy);
-    let m = max(max(s.x, s.y), max(s.z, s.w));
+    let m = helio_depth_farthest(helio_depth_farthest(s.x, s.y), helio_depth_farthest(s.z, s.w));
     textureStore(dst_tex, vec2<i32>(gid.xy), vec4<f32>(m, 0.0, 0.0, 1.0));
 }
 
 @compute @workgroup_size(8, 8)
-fn main_min(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn main_nearest(@builtin(global_invocation_id) gid: vec3<u32>) {
     if any(gid.xy >= params.dst_size) { return; }
     let s = gather(gid.xy);
-    let m = min(min(s.x, s.y), min(s.z, s.w));
+    let m = helio_depth_nearest(helio_depth_nearest(s.x, s.y), helio_depth_nearest(s.z, s.w));
     textureStore(dst_tex, vec2<i32>(gid.xy), vec4<f32>(m, 0.0, 0.0, 1.0));
 }

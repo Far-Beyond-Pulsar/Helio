@@ -474,7 +474,7 @@ impl WaterSimPass {
                     },
                     count: None,
                 },
-                // hiz_min — R32Float with a mip chain, read via textureLoad, so
+                // hiz_nearest — R32Float with a mip chain, read via textureLoad, so
                 // it is unfilterable and needs no sampler.
                 wgpu::BindGroupLayoutEntry {
                     binding: 11,
@@ -828,7 +828,7 @@ impl WaterSimPass {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),

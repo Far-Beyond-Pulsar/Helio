@@ -2,6 +2,7 @@
 //!
 //! Compares current depth buffer with previous frame's snapshot to detect
 //! when passes overwrite each other's pixels.
+//!use helio_prelude
 
 struct DepthCompareParams {
     screen_width: u32,
@@ -29,7 +30,7 @@ fn analyze_pass_overdraw(@builtin(global_invocation_id) gid: vec3<u32>) {
     let depth_after = textureLoad(depth_current, coord, 0);
 
     // If depth changed and current is valid, this pass overwrote a previous pass
-    if abs(depth_after - depth_before) > 0.0001 && depth_after < 1.0 {
+    if abs(depth_after - depth_before) > 0.0001 && !helio_is_sky(depth_after) {
         let pixel_idx = coord.y * params.screen_width + coord.x;
         atomicAdd(&pass_overdraw[pixel_idx], 1u);
     }

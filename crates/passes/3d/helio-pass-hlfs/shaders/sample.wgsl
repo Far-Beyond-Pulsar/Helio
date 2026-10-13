@@ -159,7 +159,7 @@ fn sample_lights(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgro
         }
         var result=Lighting(vec3<f32>(0.0),vec3<f32>(0.0));
         var confidence=1.0;
-        if textureLoad(gbuf_depth,vec2<i32>(pixel),0)<1.0 && globals.light_count>0u {
+        if !helio_is_sky(textureLoad(gbuf_depth,vec2<i32>(pixel),0)) && globals.light_count>0u {
             let s=surface_at(pixel);
             let pixel_sample_count=select(globals.sample_count,4u,USE_TILE_PRESAMPLING && s.roughness<0.2);
             let tile=(pixel.y/TILE_SIZE)*div_ceil(globals.screen_size,TILE_SIZE).x+pixel.x/TILE_SIZE;
@@ -465,7 +465,7 @@ fn sample_small(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgrou
         }
     }
     var result=Lighting(vec3<f32>(0.0),vec3<f32>(0.0));
-    if textureLoad(gbuf_depth,vec2<i32>(pixel),0)<1.0 {
+    if !helio_is_sky(textureLoad(gbuf_depth,vec2<i32>(pixel),0)) {
         let s=surface_at(pixel);
         for(var k=0u;k<live_light_count();k++) {
             let id=live_light(k);

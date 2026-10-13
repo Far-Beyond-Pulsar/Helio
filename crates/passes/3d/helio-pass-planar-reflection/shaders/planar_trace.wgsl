@@ -42,7 +42,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims);
 
     let depth_01 = textureLoad(gbuf_depth, px, 0);
-    if depth_01 >= 1.0 {
+    if helio_is_sky(depth_01) {
         textureStore(planar_output, px, vec4<f32>(0.0)); return;
     }
 
@@ -121,10 +121,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Bounds check per component.
         if su < 0.0 || su > 1.0 { break; }
         if sv < 0.0 || sv > 1.0 { break; }
-        if sd > 1.0 { break; }
+        // Past infinity (depth 0).
+        if sd < 0.0 { break; }
 
         let scene_d = textureLoad(gbuf_depth, vec2<i32>(i32(su * fdims.x), i32(sv * fdims.y)), 0);
-        if sd <= scene_d {
+        if !helio_depth_is_nearer(scene_d, sd) {
             hu = su;
             hv = sv;
             hit = true;

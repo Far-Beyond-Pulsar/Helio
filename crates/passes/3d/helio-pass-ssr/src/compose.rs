@@ -271,7 +271,7 @@ mod tests {
                         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                             view: &depth,
                             depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(if background { 1. } else { 0.5 }),
+                                load: wgpu::LoadOp::Clear(if background { helio_core::depth::CLEAR } else { 0.5 }),
                                 store: wgpu::StoreOp::Store,
                             }),
                             stencil_ops: None,

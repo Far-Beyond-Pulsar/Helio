@@ -887,7 +887,7 @@ fn apply_grain(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
 //   dof_aperture_shape > 0 → DOF_MODE_BOKEH with floor(shape) blades
 
 fn dof_coc(depth: f32) -> f32 {
-    let linear_depth = -cameras[0].proj[3][2] / (depth * 2.0 - 1.0 + cameras[0].proj[2][2]);
+    let linear_depth = helio_view_depth(cameras[0].proj, depth);
     let focal_dist = postprocess.dof_focal_distance;
     let focal_region = postprocess.dof_focal_region;
     let near_blur = max(focal_dist - focal_region - linear_depth, 0.0) / max(postprocess.dof_near_transition, 0.001);
