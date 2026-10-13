@@ -1378,6 +1378,23 @@ fn mosaic_weight(projected: f32) -> f32 {
     return smoothstep(0.35, 0.7, projected);
 }
 
+// How far a cell of chunk key `key` spanning `projected` pixels is coarser
+// than its cut wants (0 to 1): the cut keeps every level but the finest at
+// a pixel a cell or less, so a larger one is a tile still refining (an eye
+// dropped from orbit, a slow frame's generation). It reads as the ground it
+// stands for, not as the box it is: lit by the slope, without its own
+// pigment, edges or corner shading. Finest cells keep their voxel look at
+// any size.
+fn under_refined(key: vec4<i32>, projected: f32) -> f32 {
+    if (key.x >> 8u) == 0 { return 0.0; }
+    return smoothstep(1.5, 4.0, projected);
+}
+
+// A pixel's width (m) at distance `t` along pixel `q`'s ray.
+fn pixel_width(q: vec2<u32>, size: vec2<u32>, t: f32) -> f32 {
+    return t * length(pixel_ray(q + vec2<u32>(1u, 0u), size) - pixel_ray(q, size));
+}
+
 // Material `m`'s colour varied by its patches (409 m and 25.6 m), clumps
 // (6.4 m and 1.6 m, fading below a few pixels) and voxels (`blade`, by
 // `voxel`), at domain point `p` for a pixel `pixel` m wide.
@@ -1428,7 +1445,8 @@ fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, material: u32,
     let c = cell_frame(slot, cell);
     let key = chunk_keys[slot];
     let projected = length(c.m0.xyz) / max(pixel_m, 1e-6);
-    let mosaic = mosaic_weight(projected);
+    let smooth_ground = 1.0 - under_refined(key, projected);
+    let mosaic = mosaic_weight(projected) * smooth_ground;
     // The cell centre's noise-domain point: the same pigment from every
     // face of it.
     let centre = vec3<f32>(c.m0.w, c.m1.w, c.m2.w) + mat3x3<f32>(c.m0.xyz, c.m1.xyz, c.m2.xyz) * (vec3<f32>(cell) + 0.5);
@@ -1437,7 +1455,7 @@ fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, material: u32,
     let pigment = 1.0 + materials.detail.y * (mix(0.5, f32(hv & 255u) / 255.0, mosaic) - 0.5);
     let albedo = material_albedo(material, p, hash3(p.x, p.y, p.z, 0x1b873593u), pixel_m, mosaic) * pigment;
     // Occlusion: around the air cell in front of the face.
-    let ao_weight = smoothstep(0.75, 1.25, projected);
+    let ao_weight = smoothstep(0.75, 1.25, projected) * smooth_ground;
     var ao = 1.0;
     if ao_weight > 0.0 {
         let out_dir = select(-1, 1, sign == 1u);
@@ -1497,7 +1515,7 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     let normal = shading.xyz;
     let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
     // A pixel's width at the hit (m).
-    let pixel_m = t * length(pixel_ray(vec2<u32>(pixel.xy) + vec2<u32>(1u, 0u), size) - pixel_ray(vec2<u32>(pixel.xy), size));
+    let pixel_m = pixel_width(vec2<u32>(pixel.xy), size, t);
     let look = surface_look(v.x, cell, axis, sign, material, position, pixel_m);
     let f0 = 0.03;
     var out: GOut;
@@ -1594,15 +1612,16 @@ fn slope_normal(slot: u32, key: vec4<i32>, cell: vec3<i32>, c: ChunkDraw) -> vec
     return normalize(n);
 }
 
-// Hit `v`. Voxels are lit by their own faces (a
-// slope reads as its steps, each shadowing the next); a natural step (air
+// Hit `v` (pixels `pixel_m` wide there). Voxels are lit by their own faces
+// (a slope reads as its steps, each shadowing the next); a natural step (air
 // above it) is lit partly with the slope's normal, `Materials::detail.w`
-// (step softness), its sun ray passing its own steps. Never by the voxel's
-// size on screen: cells span a pixel to half one across every level of
-// the cut, so a size-dependent light bands by level.
+// (step softness), its sun ray passing its own steps. Not by the voxel's
+// size on screen while the cut holds it to a pixel or less (a size-dependent
+// light would band by level); a cell larger than its cut wants
+// (`under_refined`) is lit by the slope's normal, whatever its face.
 // The slope's normal is `ground` when given (a nearby sample's), else
 // measured here.
-fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>) -> Face {
+fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, pixel_m: f32) -> Face {
     let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
     let c = cell_frame(v.x, cell);
     let key = chunk_keys[v.x];
@@ -1612,8 +1631,10 @@ fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>) -> Face {
     let normal = normalize(axis_world) * select(-1.0, 1.0, sign == 1u);
     let cell_m = length(axis_world);
     var f = Face(normal, cell_m, normal, 0.0, vec3<f32>(0.0));
-    if solid_near(v.x, key, cell + vec3<i32>(0, 0, 1)) { return f; }
-    let w = materials.detail.w;
+    let coarse = under_refined(key, length(c.m0.xyz) / max(pixel_m, 1e-6));
+    let step = !solid_near(v.x, key, cell + vec3<i32>(0, 0, 1));
+    if !step && coarse == 0.0 { return f; }
+    let w = max(select(0.0, materials.detail.w, step), coarse);
     var ground = ground_hint;
     if dot(ground, ground) == 0.0 { ground = slope_normal(v.x, key, cell, c); }
     if w <= 0.0 || dot(ground, ground) == 0.0 { return f; }
@@ -1830,7 +1851,7 @@ fn sky_sample(@builtin(global_invocation_id) id: vec3<u32>) {
     if v.x != NONE {
         if exact_level(chunk_keys[v.x].x >> 8u) { return; }
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
-        sample = vec2<f32>(sky_visibility_fine(q, size, v.x, t, hit_face(v, vec3<f32>(0.0))), t);
+        sample = vec2<f32>(sky_visibility_fine(q, size, v.x, t, hit_face(v, vec3<f32>(0.0), pixel_width(q, size, t))), t);
     }
     textureStore(out_sky_samples, vec2<i32>(id.xy), vec4<f32>(sample, 0.0, 0.0));
 }
@@ -1847,7 +1868,7 @@ fn sky_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
     var sample = vec2<f32>(1.0, 0.0);
     {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
-        sample = vec2<f32>(sky_visibility(q, size, v.x, t, hit_face(v, vec3<f32>(0.0))), t);
+        sample = vec2<f32>(sky_visibility(q, size, v.x, t, hit_face(v, vec3<f32>(0.0), pixel_width(q, size, t))), t);
     }
     textureStore(out_sky_samples, vec2<i32>(id.xy), vec4<f32>(sample, 0.0, 0.0));
 }
@@ -1886,7 +1907,7 @@ fn shadow_sample(@builtin(global_invocation_id) id: vec3<u32>) {
     if v.x != NONE {
         if exact_level(chunk_keys[v.x].x >> 8u) { return; }
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
-        let f = hit_face(v, vec3<f32>(0.0));
+        let f = hit_face(v, vec3<f32>(0.0), pixel_width(q, size, t));
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
         if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(sun_walk_fine(q, size, v.x, t, f)); }
     }
@@ -1905,7 +1926,7 @@ fn shadow_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
     var sample = vec4<u32>(0u);
     {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
-        let f = hit_face(v, vec3<f32>(0.0));
+        let f = hit_face(v, vec3<f32>(0.0), pixel_width(q, size, t));
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
         if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(sun_walk(q, size, v.x, t, f)); }
     }
@@ -1943,7 +1964,7 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
         if dot(ground, ground) == 0.0 && s.z != 0u { ground = unpack_unit(s.z); }
         if sampled == 0u && (s.x & 2u) != 0u { sampled = 2u | (s.x & 1u); }
     }
-    let f = hit_face(v, ground);
+    let f = hit_face(v, ground, pixel_width(id.xy, size, t));
     textureStore(out_normal, p, vec4<f32>(f.shading, sky_at(p, at_hit, reach, size)));
     var lit = 0.0;
     if dot(f.shading, sun) > 0.0 {
@@ -1977,6 +1998,6 @@ fn shadow_fallback(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(hit_distance);
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
     let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
-    let f = hit_face(v, vec3<f32>(0.0));
+    let f = hit_face(v, vec3<f32>(0.0), pixel_width(q, size, t));
     store_sun(vec2<i32>(q), v, f, sun_walk(q, size, v.x, t, f));
 }
