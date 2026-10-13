@@ -14,7 +14,7 @@
 //!   `HELIO_VOXEL_CHUNKS_DIG=n` the view is dug and undone, with
 //!   `HELIO_VOXEL_CHUNKS_BLAST=r` blasted by one ball `r` m across.
 //! * `HELIO_VOXEL_CHUNKS_FLY=descent|cruise` streams along a path.
-//! * `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump` flies through the
+//! * `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig` flies through the
 //!   renderer in real time, every frame recorded (`stress_<mode>.csv`),
 //!   samples saved with settled references to compare.
 //!
@@ -740,7 +740,7 @@ fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3)
     pick_probe(flight, view, eye, forward);
 }
 
-/// `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump`: a flight
+/// `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig`: a flight
 /// through the renderer in real time (the path follows the wall clock, as a
 /// game's camera does: a slow frame moves it further), from 2 m to 400 km
 /// or back in `HELIO_VOXEL_FLIGHT_HOLD_SECONDS` (20), at 300 m/s 40 m over
@@ -764,6 +764,11 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         if mode == "cruise" {
             let eye = planet.surface_point(ground + ahead * (300.0 * t), 40.0);
             return (eye, (ahead - up * 0.15).normalize().as_vec3());
+        }
+        if mode == "dig" {
+            // 6 m over the ground looking ahead and down; a ball is dug
+            // where the view's centre meets it a second in.
+            return (planet.surface_point(ground, 6.0), (ahead - up * 0.5).normalize().as_vec3());
         }
         if mode == "jump" {
             // 40 m over the ground, then at once `HELIO_VOXEL_STRESS_ALTITUDE`
@@ -818,12 +823,25 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let mut last = started;
     let mut captured = false;
     let mut traced = false;
+    let mut dug = false;
     loop {
         let t = started.elapsed().as_secs_f64();
         if t > seconds {
             break;
         }
         let (eye, forward) = path(t);
+        // `dig`: one ball, `HELIO_VOXEL_STRESS_DIG` m across (12), close to
+        // the camera.
+        if mode == "dig" && t >= 1.0 && !dug {
+            dug = true;
+            let radius: f64 = std::env::var("HELIO_VOXEL_STRESS_DIG").ok().and_then(|v| v.parse().ok()).unwrap_or(12.0);
+            let hit = flight.planet.raycast(eye, forward.as_dvec3(), 1000.0).expect("the view centre hits ground");
+            let at = eye + forward.as_dvec3() * hit.distance;
+            let mut planet = (*flight.planet).clone();
+            planet.apply(Brush { center: at.to_array(), radius, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+            flight.planet = Arc::new(planet);
+            eprintln!("CHUNKSTRESS dig: ball {radius} m at {:.1} m from the eye, t {t:.3} s", hit.distance);
+        }
         let (record_ms, wait_ms) = flight.draw(eye, forward);
         let now = Instant::now();
         let interval = (now - last).as_secs_f64() * 1e3;
@@ -857,15 +875,18 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
             if let Some(world) = pass.world() {
                 // `HELIO_VOXEL_CHUNKS_DEBUG_PIXEL`: that pixel's boxes (read
                 // before the counts, which clear them).
-                let trace = if t > 1.0 && !traced && std::env::var_os("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL").is_some() { world.pixel_trace() } else { Vec::new() };
+                // `_DEBUG_PIXEL_AT=seconds` (1.0): when the pixel is traced.
+                let at: f64 = std::env::var("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+                let trace = if t > at && !traced && std::env::var_os("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL").is_some() { world.pixel_trace() } else { Vec::new() };
                 let c = world.take_counts();
                 if c.missed + c.lost > 0 {
                     eprintln!("CHUNKSTRESS {mode}: t {t:.3} s missed {} ({} boxes each) lost {}", c.missed, c.missed_boxes / c.missed.max(1), c.lost);
-                    if !trace.is_empty() {
-                        traced = true;
-                        for (n, step) in trace.iter().enumerate() {
-                            eprintln!("PIXELTRACE {n}: {step:?}");
-                        }
+                }
+                if !trace.is_empty() {
+                    traced = true;
+                    eprintln!("PIXELTRACE at t {t:.3} s");
+                    for (n, step) in trace.iter().enumerate() {
+                        eprintln!("PIXELTRACE {n}: {step:?}");
                     }
                 }
             }

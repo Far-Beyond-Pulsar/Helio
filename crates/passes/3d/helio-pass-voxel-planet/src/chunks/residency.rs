@@ -283,6 +283,13 @@ impl Planner {
         }
     }
 
+    /// `key`'s chunks are out of date until it is generated again.
+    pub fn set_stale(&mut self, key: TileKey) {
+        if let Some(t) = self.tiles.get_mut(&key) {
+            t.generated = false;
+        }
+    }
+
     /// Ranges measured on the GPU for `key`.
     pub fn set_ranges(&mut self, key: TileKey, ranges: Ranges) {
         if let Some(t) = self.tiles.get_mut(&key) {
@@ -315,6 +322,10 @@ impl Planner {
 pub enum Event {
     Generated(TileKey),
     Measured(TileKey, Ranges),
+    /// Edited and not generated again yet: its chunks hold what was there
+    /// before. It is not drawn (its nearest generated ancestor is) until
+    /// it is `Generated` again.
+    Stale(TileKey),
 }
 
 /// A plan the worker made, and the tiles it evicted.
@@ -370,6 +381,7 @@ impl Worker {
                         match event {
                             Event::Generated(k) => planner.set_generated(k),
                             Event::Measured(k, r) => planner.set_ranges(k, r),
+                            Event::Stale(k) => planner.set_stale(k),
                         }
                     }
                     let plan = planner.plan(&grid, job.eye, job.velocity, job.view, job.frame);

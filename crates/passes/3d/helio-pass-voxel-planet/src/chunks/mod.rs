@@ -713,8 +713,11 @@ pub struct ChunkWorld {
     baked_tiles: FxHashSet<TileKey>,
     edit_state: EditState,
     /// Resident tiles to generate again: under brushes that came or went
-    /// (first, nearest first), under baked edits that changed.
+    /// (first, coarsest first), under baked edits that changed.
     urgent: FxHashSet<TileKey>,
+    /// Urgent tiles the planner hides until they are generated again
+    /// (`residency::Event::Stale`).
+    hidden: FxHashSet<TileKey>,
     /// Urgent tiles' distances from the eye when first ranked (an edit
     /// settles in moments).
     urgent_distance: FxHashMap<TileKey, f64>,
@@ -1317,6 +1320,7 @@ impl ChunkWorld {
             baked_tiles: edits.baked.bricks().map(|(k, _)| TileKey { face: k.face, level: u32::from(k.level), cx: k.bi >> 3, cy: k.bj >> 3 }).collect(),
             edit_state: EditState::of(edits),
             urgent: FxHashSet::default(),
+            hidden: FxHashSet::default(),
             urgent_distance: FxHashMap::default(),
             stale: FxHashSet::default(),
             grid: *planet.grid(),
@@ -1615,6 +1619,7 @@ impl ChunkWorld {
             evictions.extend(old.chunks.iter().map(|c| c.slot));
         }
         self.changed_tiles.insert(key);
+        self.hidden.remove(&key);
         self.events.push(residency::Event::Generated(key));
         stats.generated_tiles += 1;
         true
@@ -1811,6 +1816,7 @@ impl ChunkWorld {
             if let Some(old) = self.tiles.remove(&key) {
                 evictions.extend(old.chunks.iter().map(|c| c.slot));
             }
+            self.hidden.remove(&key);
             self.changed_tiles.insert(key);
             stats.evicted_tiles += 1;
         }
@@ -1835,16 +1841,18 @@ impl ChunkWorld {
             let tiles = batch.tile_jobs.len();
             tiles >= most || cost.is_some_and(|(ms, c)| tiles >= 8 && tiles as f64 * c.tile + batch.chunk_jobs.len() as f64 * c.chunk >= ms)
         };
-        // Tiles edits changed: drawn ones first, nearest first, within the
-        // frame's budget (a blast's farther and hidden tiles follow over the
-        // next frames, drawn as they were until then). Then stale tiles.
+        // Tiles edits changed: coarsest first, then drawn ones, nearest
+        // first, within the frame's budget. A blast shows at once in coarse
+        // tiles; those left for later frames are hidden meanwhile (their
+        // nearest generated ancestor drawn in their place) and refine as
+        // they come. Then stale tiles.
         let mut edited: Vec<(TileKey, bool, f64)> = Vec::with_capacity(self.urgent.len());
         for k in self.urgent.drain() {
             let tiles = &self.tiles;
             let distance = *self.urgent_distance.entry(k).or_insert_with(|| tiles.get(&k).map_or(f64::INFINITY, |t| tile_distance(&grid, k, t.ranges.extent(), &eye_at)));
             edited.push((k, !self.drawn_set.holds(k), distance));
         }
-        edited.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)));
+        edited.sort_unstable_by(|a, b| b.0.level.cmp(&a.0.level).then(a.1.cmp(&b.1)).then(a.2.total_cmp(&b.2)));
         let edited: Vec<(TileKey, bool)> = edited.into_iter().map(|(k, ..)| (k, true)).chain(self.stale.iter().map(|k| (*k, false))).collect();
         for (key, urgent) in edited {
             if full(&batch) || batch.chunk_jobs.len() >= CHUNK_BATCH || stats.out_of_slots {
@@ -1862,6 +1870,11 @@ impl ChunkWorld {
                 } else {
                     self.stale.insert(key);
                 }
+            }
+        }
+        for &key in &self.urgent {
+            if self.hidden.insert(key) {
+                self.events.push(residency::Event::Stale(key));
             }
         }
         let urgent = &self.urgent;
