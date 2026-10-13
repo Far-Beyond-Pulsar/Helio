@@ -14,7 +14,7 @@
 //!   `HELIO_VOXEL_CHUNKS_DIG=n` the view is dug and undone, with
 //!   `HELIO_VOXEL_CHUNKS_BLAST=r` blasted by one ball `r` m across.
 //! * `HELIO_VOXEL_CHUNKS_FLY=descent|cruise` streams along a path.
-//! * `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit` flies through the
+//! * `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump` flies through the
 //!   renderer in real time, every frame recorded (`stress_<mode>.csv`),
 //!   samples saved with settled references to compare.
 //!
@@ -740,7 +740,7 @@ fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3)
     pick_probe(flight, view, eye, forward);
 }
 
-/// `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit`: a flight
+/// `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump`: a flight
 /// through the renderer in real time (the path follows the wall clock, as a
 /// game's camera does: a slow frame moves it further), from 2 m to 400 km
 /// or back in `HELIO_VOXEL_FLIGHT_HOLD_SECONDS` (20), at 300 m/s 40 m over
@@ -764,6 +764,16 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         if mode == "cruise" {
             let eye = planet.surface_point(ground + ahead * (300.0 * t), 40.0);
             return (eye, (ahead - up * 0.15).normalize().as_vec3());
+        }
+        if mode == "jump" {
+            // 40 m over the ground, then at once `HELIO_VOXEL_STRESS_ALTITUDE`
+            // (30 km) over it looking down (an editor camera's jump: one
+            // switch across many levels).
+            if t < 1.0 {
+                return (planet.surface_point(ground, 40.0), (ahead - up * 0.15).normalize().as_vec3());
+            }
+            let altitude: f64 = std::env::var("HELIO_VOXEL_STRESS_ALTITUDE").ok().and_then(|v| v.parse().ok()).unwrap_or(30_000.0);
+            return (planet.surface_point(ground, altitude), (ahead - up * 3.0).normalize().as_vec3());
         }
         if mode == "orbit" {
             let altitude: f64 = std::env::var("HELIO_VOXEL_STRESS_ALTITUDE").ok().and_then(|v| v.parse().ok()).unwrap_or(400_000.0);
@@ -807,6 +817,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let started = Instant::now();
     let mut last = started;
     let mut captured = false;
+    let mut traced = false;
     loop {
         let t = started.elapsed().as_secs_f64();
         if t > seconds {
@@ -839,6 +850,25 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         if !captured {
             intervals.push(interval);
             slow.push((interval, t, altitude));
+        }
+        // Counting builds: each frame's rays that left the cut or the box
+        // budget (missed) and placements that found nothing (lost).
+        if std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some() {
+            if let Some(world) = pass.world() {
+                // `HELIO_VOXEL_CHUNKS_DEBUG_PIXEL`: that pixel's boxes (read
+                // before the counts, which clear them).
+                let trace = if t > 1.0 && !traced && std::env::var_os("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL").is_some() { world.pixel_trace() } else { Vec::new() };
+                let c = world.take_counts();
+                if c.missed + c.lost > 0 {
+                    eprintln!("CHUNKSTRESS {mode}: t {t:.3} s missed {} ({} boxes each) lost {}", c.missed, c.missed_boxes / c.missed.max(1), c.lost);
+                    if !trace.is_empty() {
+                        traced = true;
+                        for (n, step) in trace.iter().enumerate() {
+                            eprintln!("PIXELTRACE {n}: {step:?}");
+                        }
+                    }
+                }
+            }
         }
         coarse.push(s.coarse_share);
         worst.push(s.worst_px);

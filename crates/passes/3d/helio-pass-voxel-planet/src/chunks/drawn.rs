@@ -70,6 +70,7 @@ impl From<Vec<DrawnChunk>> for TileDraw {
 /// Frames a switch between levels fades over.
 pub const FADE_FRAMES: u64 = 16;
 
+
 /// A column of the drawn cut: its own chunk layers when drawn, the top of
 /// its subtree's, its state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -554,6 +555,108 @@ mod tests {
                         }
                     }
                     assert!(shown.iter().flatten().all(|&n| n == 1), "round {round} frame {frame} r {r}: {shown:?}");
+                }
+            }
+        }
+    }
+
+    /// The draw's search for the tile a pixel of dither `r` shows over
+    /// finest-level tile `(x, y)`, from a ray at `level` (`place_at`'s
+    /// column search: coarser while a column says so, finer while it says
+    /// so; down through undrawn ancestors only, it turns up once).
+    fn search(set: &DrawnSet, x: i32, y: i32, level: u32, r: i32, frame: u64) -> Option<TileKey> {
+        let mut diff = 0i32;
+        let mut way = 0;
+        let (mut turned, mut through_ancestors) = (false, true);
+        for _ in 0..24 {
+            let lv = (level as i32 + diff) as u32;
+            let k = TileKey { face: 0, level: lv, cx: x >> lv, cy: y >> lv };
+            let state = set.find(column_key(k)).map(|c| c[3]);
+            let go = state.map_or(2, |s| choice(s, r, frame));
+            if go == 1 {
+                return Some(k);
+            }
+            if go == 2 || (go == 0 && way > 0) {
+                if way < 0 {
+                    if turned || !through_ancestors {
+                        return None;
+                    }
+                    turned = true;
+                    diff = 0;
+                }
+                if level as i32 + diff >= set.top_level as i32 {
+                    return None;
+                }
+                way = 1;
+                diff += 1;
+            } else {
+                if way > 0 || lv == 0 {
+                    return None;
+                }
+                through_ancestors &= state == Some(0);
+                way = -1;
+                diff -= 1;
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn every_ray_finds_the_tile_it_shows_through_jumps() {
+        // Cuts of a level 8 root whose depth follows an eye that jumps:
+        // tiles within `reach` (in finest tiles) of `eye` refine to `finest`.
+        let top = 8u32;
+        let cut = |eye: (i32, i32), finest: u32| -> Vec<TileKey> {
+            let mut drawn = Vec::new();
+            let mut open = vec![TileKey { face: 0, level: top, cx: 0, cy: 0 }];
+            while let Some(k) = open.pop() {
+                let n = 1i32 << k.level;
+                let (x0, y0) = (k.cx * n, k.cy * n);
+                let dx = (eye.0 - (x0 + n / 2)).abs().saturating_sub(n / 2);
+                let dy = (eye.1 - (y0 + n / 2)).abs().saturating_sub(n / 2);
+                let want = finest.max(((dx.max(dy) as f64 / 4.0).max(1.0).log2()) as u32);
+                if k.level > want {
+                    open.extend([(0, 0), (1, 0), (0, 1), (1, 1)].map(|(a, b)| TileKey { face: 0, level: k.level - 1, cx: k.cx * 2 + a, cy: k.cy * 2 + b }));
+                } else {
+                    drawn.push(k);
+                }
+            }
+            drawn
+        };
+        let mut rng = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let mut set = DrawnSet::new(1 << 16, 1 << 16, top);
+        let mut slot = 0u32;
+        let mut last: Vec<TileKey> = Vec::new();
+        let mut frame = 0;
+        let side = 1i32 << top;
+        for round in 0..60 {
+            // Mostly small moves; now and then a jump (finest level 0 to 5).
+            let eye = ((next() % side as u64) as i32, (next() % side as u64) as i32);
+            let finest = if next() % 4 == 0 { (next() % 6) as u32 } else { 0 };
+            let drawn = cut(eye, finest);
+            set.update(&diff(&drawn, &last), &diff(&last, &drawn), &Default::default(), frame, |k| {
+                slot = (slot + 1) % (1 << 16);
+                vec![chunk(slot, [i32::from(k.face) | ((k.level as i32) << 8), k.cx, k.cy, 0])]
+            });
+            last = drawn;
+            for _ in 0..(1 + next() % 6) {
+                frame += 1;
+                set.update(&[], &[], &Default::default(), frame, |_| Vec::new());
+                for r in [0, 300, 700, 1023] {
+                    for _ in 0..400 {
+                        let (x, y) = ((next() % side as u64) as i32, (next() % side as u64) as i32);
+                        let shown: Vec<TileKey> = set.tiles.keys().filter(|k| k.cx == x >> k.level && k.cy == y >> k.level && choice(set.find(column_key(**k)).unwrap()[3], r, frame) == 1).copied().collect();
+                        assert_eq!(shown.len(), 1, "round {round}: {shown:?}");
+                        for level in 0..=top {
+                            assert_eq!(search(&set, x, y, level, r, frame), Some(shown[0]), "round {round} frame {frame} r {r} at ({x}, {y}) from level {level}");
+                        }
+                    }
                 }
             }
         }

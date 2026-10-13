@@ -63,6 +63,11 @@ impl ChunkPass {
         self.world.is_some()
     }
 
+    /// The planet's chunks, for diagnostics (trace counts, a pixel's trace).
+    pub fn world(&self) -> Option<&ChunkWorld> {
+        self.world.as_ref()
+    }
+
     /// Whether nothing is left to generate for the current eye.
     pub fn settled(&self) -> bool {
         self.world.as_ref().is_some_and(ChunkWorld::settled)
