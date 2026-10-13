@@ -73,7 +73,7 @@ pub struct Tile {
     /// Its children were drawn in its place last time it was visited.
     pub refined: bool,
     pub used: u64,
-    /// The plan that last drew it (frame + 1; 0: never).
+    /// The plan that last drew it on screen (frame + 1; 0: never).
     pub drawn: u64,
 }
 
@@ -196,7 +196,8 @@ impl Planner {
             // out (`evict`); a finer tile stays for its parent's cut. Tiles
             // the prefetch eye sees are ready when they come over the
             // horizon (a climb), not drawn coarse for a moment.
-            let beyond = self.beyond(grid, key, tile.ranges, &eyes[0]) && self.beyond(grid, key, tile.ranges, &eyes[1]);
+            let hidden = self.beyond(grid, key, tile.ranges, &eyes[0]);
+            let beyond = hidden && self.beyond(grid, key, tile.ranges, &eyes[1]);
             if !tile.generated {
                 if !beyond {
                     wanted.push((f64::INFINITY, key));
@@ -211,6 +212,9 @@ impl Planner {
             }
             let error = self.error(grid, key, tile.ranges, &eyes);
             let seen = in_view(key, tile.ranges);
+            // On screen now: in view and over the eye's horizon (a tile only
+            // the prefetch eye sees is drawn, unseen, until it is).
+            let shows = seen && !hidden;
             // Tiles in view first.
             let priority = if seen { error * 1e6 } else { error };
             let finer = key.level > 0 && if tile.refined { error > self.config.coarsen } else { error > 1.0 };
@@ -235,11 +239,11 @@ impl Planner {
             // A switch shows where the last plan drew the side it leaves
             // (not where the tile came over the horizon).
             let shown = |k: &TileKey| self.last_plan != 0 && self.tiles.get(k).is_some_and(|t| t.drawn == self.last_plan);
-            if seen && tile.refined != ready && if ready { shown(&key) } else { self::children(grid, key).iter().any(shown) } {
+            if shows && tile.refined != ready && if ready { shown(&key) } else { self::children(grid, key).iter().any(shown) } {
                 plan.switches += 1;
                 plan.switch_px = plan.switch_px.max(px());
             }
-            if seen && !ready && key.level > 0 {
+            if shows && !ready && key.level > 0 {
                 plan.worst_px = plan.worst_px.max(px());
             }
             let t = self.tiles.get_mut(&key).unwrap();
@@ -248,9 +252,11 @@ impl Planner {
             if ready {
                 stack.extend(children);
             } else {
-                t.drawn = frame + 1;
+                if shows {
+                    t.drawn = frame + 1;
+                }
                 plan.drawn.push(key);
-                if seen {
+                if shows {
                     drawn_in_view += 1;
                     // The finest level cannot be finer.
                     if error > 1.5 && key.level > 0 {

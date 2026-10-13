@@ -139,7 +139,10 @@ impl Flight {
         scene.world.flush_gpu_mirror(&queue);
         let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
         let pass_source = source.clone();
-        let config = chunk_config(size[1], 256);
+        // The renderer's pass generates as a host's does: the engine's
+        // milliseconds a frame unless the environment sets them.
+        let mut config = chunk_config(size[1], 256);
+        config.generate_ms = config.generate_ms.or(helio_pass_voxel_planet::chunks::ResidencyConfig::default().generate_ms);
         let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| Box::new(ChunkPass::with_config(pass_source.clone(), config)));
         let mut config = RendererConfig::new(size[0], size[1], wgpu::TextureFormat::Rgba8Unorm).with_tsr_quality(quality);
         config.enable_foliage = false;
