@@ -1141,8 +1141,8 @@ impl ChunkWorld {
                 layout: Some(&seed_layout),
                 vertex: wgpu::VertexState { module: &draw_module, entry_point: Some(vertex), compilation_options: Default::default(), buffers: &[] },
                 primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), front_face: wgpu::FrontFace::Ccw, ..Default::default() },
-                // Reversed depth (`seed_box`): the nearest box is the greatest.
-                depth_stencil: depth(wgpu::CompareFunction::Greater),
+                // The nearest box wins (`seed_box`).
+                depth_stencil: depth(helio_core::depth::NEARER),
                 multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState { module: &draw_module, entry_point: Some(fragment), compilation_options: Default::default(), targets: &[Some(SEED_FORMAT.into())] }),
                 multiview_mask: None,
@@ -1212,7 +1212,7 @@ impl ChunkWorld {
             layout: Some(&layout(&resolve_layout)),
             vertex: wgpu::VertexState { module: &draw_module, entry_point: Some("resolve_vertex"), compilation_options: Default::default(), buffers: &[] },
             primitive: Default::default(),
-            depth_stencil: depth(wgpu::CompareFunction::Less),
+            depth_stencil: depth(helio_core::depth::NEARER),
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &draw_module,
@@ -2448,7 +2448,7 @@ impl ChunkWorld {
                     })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &depth,
-                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }),
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(helio_core::depth::CLEAR), store: wgpu::StoreOp::Store }),
                         stencil_ops: None,
                     }),
                     timestamp_writes: timing.filter(|_| round == 0).map(|(set, _, ring)| wgpu::RenderPassTimestampWrites { query_set: set, beginning_of_pass_write_index: Some(QUERIES * ring + 2), end_of_pass_write_index: Some(QUERIES * ring + 3) }),

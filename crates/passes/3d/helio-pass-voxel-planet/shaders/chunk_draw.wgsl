@@ -320,14 +320,10 @@ fn seed_box(slot: u32, v: u32, inside: bool) -> VOut {
     let local = vec3<f32>(x, y, select(c.box.x - grow, plane, (corner & 4u) != 0u));
     let world = vec3<f32>(c.m0.w, c.m1.w, c.m2.w) + c.m0.xyz * local.x + c.m1.xyz * local.y + c.m2.xyz * local.z;
     var out: VOut;
+    // The camera's reversed depth, near / w (w: the view depth): precise to
+    // a few parts in 10^8 of the distance anywhere, so boxes 100 m apart do
+    // not tie 10 km away and seed a pixel with the farther box.
     out.position = params.view_proj * vec4<f32>(world, 1.0);
-    // Reversed depth, near / w (w: the view depth): precise to a few parts
-    // in 10^8 of the distance anywhere. The camera's own depth spends its
-    // precision near the eye (distance^2 / near 2^-24: boxes 100 m apart
-    // tie 10 km away), and a pixel seeded the farther box, entered by its
-    // side under the nearer one's cells. The near plane clips as the
-    // camera's does.
-    out.position.z = params.sun.w;
     out.instance = slot;
     out.world = world;
     return out;

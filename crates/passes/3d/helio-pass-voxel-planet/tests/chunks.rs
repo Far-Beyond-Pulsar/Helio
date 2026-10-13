@@ -30,7 +30,7 @@ impl View {
         let up = planet.grid().up(self.eye).as_vec3();
         let up = if self.forward.dot(up).abs() > 0.99 { up.any_orthonormal_vector() } else { up };
         let view = glam::camera::rh::view::look_to_mat4(Vec3::ZERO, self.forward, up);
-        let proj = glam::camera::rh::proj::directx::perspective(FOV_Y, self.size[0] as f32 / self.size[1] as f32, self.near, 40_000_000.0);
+        let proj = helio_core::depth::perspective(FOV_Y, self.size[0] as f32 / self.size[1] as f32, self.near);
         proj * view
     }
     /// The ray through pixel (x, y)'s centre.
@@ -404,10 +404,10 @@ fn a_planet_scale_dig_renders_exactly() {
 
 /// The floor of a ball dug from the surface, seen from its centre across
 /// it: every pixel's ray enters its nearest box. Far boxes lie metres apart
-/// in depth, where a camera's own depth (precise to distance^2 / near
-/// 2^-24) cannot tell them apart: a ray seeded in the farther box entered
-/// it by its side, under the nearer one's cells (the seed's depth is
-/// reversed). A 2 mm near plane: 1.5 km away, ties 70 m deep.
+/// in depth, where a standard (not reversed) depth, precise to
+/// distance^2 / near 2^-24, cannot tell them apart: a ray seeded in the
+/// farther box entered it by its side, under the nearer one's cells. A 2 mm
+/// near plane: 1.5 km away, ties 70 m deep.
 #[test]
 fn a_dug_floor_seen_from_afar_shows_its_nearest_cells() {
     let Some(gpu) = gpu() else { return };
