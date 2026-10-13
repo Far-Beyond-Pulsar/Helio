@@ -106,11 +106,10 @@ pub struct FoliageCullUniforms {
 
     /// Zero on frame 0 and whenever the Hi-Z view is not routed.
     ///
-    /// **This is not optional.** An untouched depth texture reads back as 0.0, and this
-    /// engine's near-is-0.0 convention would read that as "everything is behind the
-    /// occluder", culling the entire world for that frame — and again after every resize
-    /// rebuilds the graph. `vg_cull.wgsl` carries the identical guard for the identical
-    /// reason.
+    /// **This is not optional.** Until a pyramid is built from real depth its texels are
+    /// whatever the graph's texture pool left there, and testing against them can cull
+    /// the entire world for that frame — and again after every resize rebuilds the
+    /// graph. `vg_cull.wgsl` carries the identical guard for the identical reason.
     pub hiz_valid: u32,
 
     /// Blades per cull cluster — [`crate::FoliageQuality::cluster_granularity`].

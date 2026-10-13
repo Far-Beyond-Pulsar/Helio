@@ -11,19 +11,12 @@
 //! Uses TEMPORAL Hi-Z: the pyramid was built from the PREVIOUS frame's depth,
 //! so the OcclusionCullPass runs BEFORE DepthPrepass each frame.
 //! Frame 0 is skipped entirely (no pyramid yet).
+//!use helio_prelude
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Bind group 0
 // ──────────────────────────────────────────────────────────────────────────────
 
-struct Camera {
-    view:          mat4x4<f32>,   // bytes  0 – 63
-    proj:          mat4x4<f32>,   // bytes 64 – 127
-    view_proj:     mat4x4<f32>,   // bytes 128 – 191
-    inv_view_proj: mat4x4<f32>,   // bytes 192 – 255
-    position_near: vec4<f32>,     // bytes 256 – 271
-    direction_far: vec4<f32>,     // bytes 272 – 287
-}
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 
 struct CullParams {
@@ -126,16 +119,6 @@ var<workgroup> wg_counter: atomic<u32>;
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Project NDC xy to texture UV.
-/// wgpu NDC: x∈[-1,+1] left→right, y∈[-1,+1] bottom→top.
-/// UV:       u∈[0,1]   left→right, v∈[0,1]   top→bottom.
-fn ndc_to_uv(ndc_xy: vec2<f32>) -> vec2<f32> {
-    return vec2<f32>(
-        ndc_xy.x *  0.5 + 0.5,
-        ndc_xy.y * -0.5 + 0.5,
-    );
-}
-
 /// Estimate screen-space radius (in pixels) of a sphere.
 /// proj[1][1] = cot(fovY/2) = 2n/h for a standard perspective matrix.
 fn screen_radius_px(world_radius: f32, clip_w: f32) -> f32 {
@@ -157,15 +140,15 @@ fn sphere_near_depth(center: vec3<f32>, radius: f32) -> f32 {
     let to_center = center - cam_pos;
     let dist_sq = dot(to_center, to_center);
     if dist_sq <= radius * radius {
-        // Camera inside sphere — near depth is 0 (on the near plane)
-        return 0.0;
+        // Camera inside sphere — near depth is the near plane (reversed: 1)
+        return 1.0;
     }
     let dir = to_center * (1.0 / sqrt(dist_sq));
     let near_ws = center - dir * radius;
     let near_clip = cameras[0].view_proj * vec4<f32>(near_ws, 1.0);
     // Protect against near_clip.w <= 0 (shouldn't happen since camera is outside)
     if near_clip.w <= 0.0 {
-        return 0.0;
+        return 1.0;
     }
     return clamp(near_clip.z / near_clip.w, 0.0, 1.0);
 }
@@ -192,7 +175,7 @@ fn instance_hiz_occluded(inst: GpuInstanceData, center: vec3<f32>) -> bool {
         abs(radius * cameras[0].proj[1][1] / clip.w),
     );
     let ndc = clip.xyz / clip.w;
-    let uv = ndc_to_uv(ndc.xy);
+    let uv = helio_ndc_to_uv(ndc.xy);
 
     if ndc.x + ndc_r < -1.0 || ndc.x - ndc_r > 1.0 ||
        ndc.y + ndc_r < -1.0 || ndc.y - ndc_r > 1.0 {
@@ -211,10 +194,9 @@ fn instance_hiz_occluded(inst: GpuInstanceData, center: vec3<f32>) -> bool {
     let hiz_01 = textureSampleLevel(hiz_tex, hiz_samp, vec2<f32>(uv_11.x, uv_00.y), f32(mip)).r;
     let hiz_10 = textureSampleLevel(hiz_tex, hiz_samp, vec2<f32>(uv_00.x, uv_11.y), f32(mip)).r;
     let hiz_11 = textureSampleLevel(hiz_tex, hiz_samp, uv_11, f32(mip)).r;
-    let hiz_depth = max(max(hiz_00, hiz_01), max(hiz_10, hiz_11));
+    let hiz_depth = helio_depth_farthest(helio_depth_farthest(hiz_00, hiz_01), helio_depth_farthest(hiz_10, hiz_11));
 
-    let depth_bias = 1.0 / 65536.0;
-    return near_z > hiz_depth + depth_bias;
+    return helio_hiz_occludes(hiz_depth, near_z);
 }
 
 /// Largest cell block an instance's bounds may cover before the PVS test is

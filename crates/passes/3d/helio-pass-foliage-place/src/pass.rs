@@ -930,9 +930,9 @@ impl RenderPass for FoliagePlacePass {
 
         let max_dim = ctx.width.max(ctx.height).max(1);
         let hiz_mip_count = (u32::BITS - max_dim.leading_zeros()).max(1);
-        // Frame 0 has no pyramid, and an untouched depth texture reads back as 0.0, which
-        // the near-is-0.0 convention would treat as "everything is occluded". Same guard
-        // as `vg_cull.wgsl`, and the same reason.
+        // Frame 0 has no pyramid: its texels are not depth anything drew, and testing
+        // against them can cull everything. Same guard as `vg_cull.wgsl`, and the same
+        // reason.
         let hiz_valid = (ctx.frame_num > 0 && ctx.registry.contains("hiz")) as u32;
 
         ctx.write_buffer(

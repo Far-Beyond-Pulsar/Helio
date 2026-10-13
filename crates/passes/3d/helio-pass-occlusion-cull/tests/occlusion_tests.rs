@@ -19,9 +19,9 @@ fn hiz_mip_dim(base_dim: u32, mip: u32) -> u32 {
 }
 
 /// Returns true when the object is occluded by the Hi-Z surface.
-/// (depth convention: larger value = farther from camera)
+/// (reversed depth convention: larger value = nearer the camera)
 fn is_occluded(object_nearest_depth: f32, hiz_sample: f32) -> bool {
-    object_nearest_depth > hiz_sample
+    object_nearest_depth < hiz_sample
 }
 
 /// Returns the 8 AABB corners in all combinations of (min/max) per axis.
@@ -199,30 +199,30 @@ fn select_mip_non_power_of_two_3x3() {
 
 #[test]
 fn not_occluded_when_object_is_closer() {
-    // object at 0.2, Hi-Z at 0.8 → visible (0.2 is NOT > 0.8)
-    assert!(!is_occluded(0.2, 0.8));
+    // object at 0.8, Hi-Z at 0.2 → visible (0.8 is NOT < 0.2)
+    assert!(!is_occluded(0.8, 0.2));
 }
 
 #[test]
 fn occluded_when_object_is_behind_surface() {
-    // object at 0.9, Hi-Z at 0.3 → occluded (0.9 > 0.3)
-    assert!(is_occluded(0.9, 0.3));
+    // object at 0.3, Hi-Z at 0.9 → occluded (0.3 < 0.9)
+    assert!(is_occluded(0.3, 0.9));
 }
 
 #[test]
 fn not_occluded_at_equal_boundary() {
-    // object_depth == hiz_sample: NOT strictly greater → visible
+    // object_depth == hiz_sample: NOT strictly farther → visible
     assert!(!is_occluded(0.5, 0.5));
 }
 
 #[test]
 fn not_occluded_very_close_object() {
-    assert!(!is_occluded(0.0, 1.0));
+    assert!(!is_occluded(1.0, 0.0));
 }
 
 #[test]
 fn occluded_object_just_behind_surface() {
-    assert!(is_occluded(0.501, 0.5));
+    assert!(is_occluded(0.499, 0.5));
 }
 
 // ── Hi-Z pyramid level dimensions ────────────────────────────────────────────
