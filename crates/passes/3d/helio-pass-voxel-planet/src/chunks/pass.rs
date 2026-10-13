@@ -19,8 +19,6 @@ pub struct ChunkPass {
     built_for: Option<u64>,
     shown: Option<PlanetFrame>,
     last_eye: Option<(DVec3, std::time::Instant)>,
-    /// The last frame's eye and camera position in its frame.
-    last_view: Option<(DVec3, Vec3)>,
     stats: UpdateStats,
     /// Frames whose GPU times came back, until taken.
     timings: Vec<FrameTimings>,
@@ -37,7 +35,7 @@ impl ChunkPass {
     /// With residency settings `config` (its pixel angle follows the
     /// camera).
     pub fn with_config(source: SharedPlanetFrame, config: ResidencyConfig) -> Self {
-        Self { source, config, appearance: None, world: None, built_for: None, shown: None, last_eye: None, last_view: None, stats: UpdateStats::default(), timings: Vec::new(), cpu_ms: [0.0; 2] }
+        Self { source, config, appearance: None, world: None, built_for: None, shown: None, last_eye: None, stats: UpdateStats::default(), timings: Vec::new(), cpu_ms: [0.0; 2] }
     }
 
     /// The host's art settings; whether they changed.
@@ -207,7 +205,6 @@ impl ChunkPass {
             self.world = Some(world);
             self.built_for = Some(recipe);
             self.last_eye = None;
-            self.last_view = None;
         }
         self.shown = Some(frame);
         Ok(())
@@ -231,13 +228,9 @@ impl ChunkPass {
         let at = Vec3::from_slice(&camera.position_near[..3]);
         let view_proj = Mat4::from_cols_array(&camera.view_proj) * Mat4::from_translation(at);
         let proj = Mat4::from_cols_array(&camera.proj);
-        // The last frame's, in its own frame, moved to this one's eye.
-        let prev = Mat4::from_cols_array(&camera.prev_view_proj);
-        let prev_view_proj = match self.last_view {
-            Some((eye, last_at)) => prev * Mat4::from_translation(last_at) * Mat4::from_translation((frame.eye - eye).as_vec3()),
-            None => view_proj,
-        };
-        self.last_view = Some((frame.eye, at));
+        // The last frame's, which the renderer keeps in this frame's
+        // coordinates (rebased when the origin moves), the same way.
+        let prev_view_proj = Mat4::from_cols_array(&camera.prev_view_proj) * Mat4::from_translation(at);
         let now = std::time::Instant::now();
         let interval = self.last_eye.map(|(_, at)| now.duration_since(at).as_secs_f64().max(1e-3));
         let velocity = match (self.last_eye, interval) {
