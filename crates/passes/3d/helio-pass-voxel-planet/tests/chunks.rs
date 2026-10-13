@@ -18,17 +18,19 @@ struct View {
     eye: DVec3,
     forward: Vec3,
     size: [u32; 2],
+    /// The near plane (m).
+    near: f32,
 }
 
 impl View {
     fn new(eye: DVec3, forward: Vec3, size: [u32; 2]) -> Self {
-        Self { eye, forward: forward.normalize(), size }
+        Self { eye, forward: forward.normalize(), size, near: 0.05 }
     }
     fn view_proj(&self, planet: &Planet) -> Mat4 {
         let up = planet.grid().up(self.eye).as_vec3();
         let up = if self.forward.dot(up).abs() > 0.99 { up.any_orthonormal_vector() } else { up };
         let view = glam::camera::rh::view::look_to_mat4(Vec3::ZERO, self.forward, up);
-        let proj = glam::camera::rh::proj::directx::perspective(FOV_Y, self.size[0] as f32 / self.size[1] as f32, 0.05, 40_000_000.0);
+        let proj = glam::camera::rh::proj::directx::perspective(FOV_Y, self.size[0] as f32 / self.size[1] as f32, self.near, 40_000_000.0);
         proj * view
     }
     /// The ray through pixel (x, y)'s centre.
@@ -75,7 +77,7 @@ impl World {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let mut recorder = helio_core::CommandRecorder::from_encoder(&mut encoder);
         let stats = self.chunks.update(&mut recorder, view.eye, DVec3::ZERO, Some(cone), self.frame, &view.config());
-        self.chunks.draw(&mut recorder, self.frame, view.eye, view_proj, view_proj, 0.05, Vec3::new(0.3, 0.8, 0.4).normalize(), view.size);
+        self.chunks.draw(&mut recorder, self.frame, view.eye, view_proj, view_proj, view.near, Vec3::new(0.3, 0.8, 0.4).normalize(), view.size);
         if let Some(picks) = picks {
             self.chunks.copy_picks(&mut recorder, picks);
         }
@@ -375,6 +377,78 @@ fn brushes_render_exactly() {
     planet.apply(Brush { center: ground.to_array(), radius: 2.5, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
     planet.apply(Brush { center: (ground + side * 3.0 + up * 1.5).to_array(), radius: 0.8, shape: BrushShape::Cube, op: BrushOp::Add, material: material::BRICK, height: 0.0 }).unwrap();
     matches_exactly(&gpu, &planet, View::new(eye, (side - up * 0.6).normalize().as_vec3(), [320, 180]), 1000);
+}
+
+/// The floor of a ball 10 km across, dug from the surface: from a few metres
+/// over it, looking across it.
+#[test]
+fn a_planet_scale_dig_renders_exactly() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 2, 0.47, 0.52);
+    let ground = planet.surface_point(dir, 0.0);
+    let up = ground.normalize();
+    planet.apply(Brush { center: ground.to_array(), radius: 10_000.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    let side = up.any_orthonormal_vector();
+    for (off, height, pitch) in [(0.0, 3.0, -0.5), (2_500.0, 4.0, -0.4), (6_000.0, 3.0, -0.3)] {
+        let floor = ground - up * 10_000.0 + side * off;
+        let floor = planet.surface_point(floor + up * 9_000.0, 0.0);
+        let eye = floor + up * height;
+        let view = View::new(eye, (up.cross(side) + up * pitch).normalize().as_vec3(), [320, 180]);
+        let (compared, mismatched) = compare(&gpu, &mut World::new(&gpu, &planet), &planet, &view);
+        eprintln!("off {off}: {mismatched}/{compared}");
+        assert!(compared > 1000, "{compared} pixels compared");
+        assert_eq!(mismatched, 0, "off {off}");
+    }
+}
+
+/// The floor of a ball dug from the surface, seen from its centre across
+/// it: every pixel's ray enters its nearest box. Far boxes lie metres apart
+/// in depth, where a camera's own depth (precise to distance^2 / near
+/// 2^-24) cannot tell them apart: a ray seeded in the farther box entered
+/// it by its side, under the nearer one's cells (the seed's depth is
+/// reversed). A 2 mm near plane: 1.5 km away, ties 70 m deep.
+#[test]
+fn a_dug_floor_seen_from_afar_shows_its_nearest_cells() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&planet, 2, 0.47, 0.52);
+    let ground = planet.surface_point(dir, 0.0);
+    let up = ground.normalize();
+    let radius = 1_500.0;
+    planet.apply(Brush { center: ground.to_array(), radius, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+    let side = up.any_orthonormal_vector();
+    let view = View { near: 0.002, ..View::new(ground + up * 6.0, (side - up * 0.5).normalize().as_vec3(), [480, 270]) };
+    let hits = World::new(&gpu, &planet).settle(&gpu, &planet, &view);
+    let view_proj = view.view_proj(&planet);
+    let (mut compared, mut beyond) = (0, 0);
+    for y in (0..view.size[1]).step_by(12) {
+        for x in (0..view.size[0]).step_by(12) {
+            let dir = view.pixel_dir(view_proj, x, y);
+            let Some(cpu) = planet.raycast(view.eye, dir, 4.0 * radius) else { continue };
+            // The ball's wall and floor, well under the natural ground: at
+            // the rim the ground left over the ball thins to slivers a
+            // coarse cell does not hold.
+            let at = view.eye + dir * cpu.distance;
+            let under = planet.column_top(cpu.cell.face, cpu.cell.i, cpu.cell.j, 0) - cpu.cell.k;
+            if ((at - ground).length() - radius).abs() > 1.0 || f64::from(under) * planet.grid().voxel_size() < 30.0 {
+                continue;
+            }
+            let Some(drawn) = hits[(y * view.size[0] + x) as usize] else { continue };
+            compared += 1;
+            // A level's cells sit within a cell or so of the exact ground.
+            let cell = planet.grid().voxel_size() * f64::from(1u32 << drawn.level);
+            if (drawn.distance - cpu.distance).abs() > 3.0 * cell + 0.5 {
+                beyond += 1;
+                if beyond < 8 {
+                    eprintln!("pixel {x},{y}: drawn {:.2} m at level {} entered {:?}, cpu {:.2} m", drawn.distance, drawn.level, drawn.entered, cpu.distance);
+                }
+            }
+        }
+    }
+    eprintln!("compared {compared}, {beyond} beyond three cells");
+    assert!(compared > 500, "{compared} compared");
+    assert_eq!(beyond, 0);
 }
 
 /// Flat-topped boxes (what Flatten stamps): a slab removed above a level

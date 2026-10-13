@@ -312,6 +312,13 @@ fn seed_box(slot: u32, v: u32, inside: bool) -> VOut {
     let world = vec3<f32>(c.m0.w, c.m1.w, c.m2.w) + c.m0.xyz * local.x + c.m1.xyz * local.y + c.m2.xyz * local.z;
     var out: VOut;
     out.position = params.view_proj * vec4<f32>(world, 1.0);
+    // Reversed depth, near / w (w: the view depth): precise to a few parts
+    // in 10^8 of the distance anywhere. The camera's own depth spends its
+    // precision near the eye (distance^2 / near 2^-24: boxes 100 m apart
+    // tie 10 km away), and a pixel seeded the farther box, entered by its
+    // side under the nearer one's cells. The near plane clips as the
+    // camera's does.
+    out.position.z = params.sun.w;
     out.instance = slot;
     out.world = world;
     return out;
@@ -332,10 +339,10 @@ struct SeedInside {
 }
 
 // Boxes holding the eye, drawn first by their back faces: entered at the
-// eye, nearer than any other box.
+// eye, nearer than any other box (the reversed depth's nearest).
 @fragment
 fn seed_fragment_inside(in: VOut) -> SeedInside {
-    return SeedInside(in.instance, 0.0);
+    return SeedInside(in.instance, 1.0);
 }
 
 // ---- 2. Trace ----
@@ -1165,6 +1172,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
                 let s0 = o.z - top.x * o.x - top.y * o.y - top.z;
                 let ds = d.z - top.x * d.x - top.y * d.y;
                 if ds > 0.0 { t1 = min(t1, -s0 / ds); } else if ds < 0.0 { t0 = max(t0, -s0 / ds); } else if s0 > 0.0 { t1 = t0; }
+                TRACE_BOX(chunk, t0, t1, frame.box, t_prev)
                 if t1 > t0 {
                     let axis0 = select(select(2u, 1u, lo.y >= lo.z), 0u, lo.x >= lo.y && lo.x >= lo.z);
                     let h = trace_chunk(slot, o, d, t0, t1, axis0, vec2<i32>(i32(frame.box.x), i32(frame.box.y)), counted);
@@ -1220,6 +1228,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
         } else {
             if next.level == LOST {
                 WCOUNT(10)
+                LOST_PIXEL
                 break;
             }
             if next.level == BELOW || next.level == ROCK {
@@ -1347,7 +1356,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(out_colour, p, vec4<f32>(colour * light, 1.0));
 }
 
-// ---- 3. Resolve ----
+// ---- 3. Publish ----
 
 @group(1) @binding(4) var hit_distance: texture_2d<f32>;
 
@@ -1355,15 +1364,6 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
 fn resolve_vertex(@builtin(vertex_index) v: u32) -> @builtin(position) vec4<f32> {
     let p = vec2<f32>(f32((v << 1u) & 2u), f32(v & 2u));
     return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
-}
-
-@fragment
-fn resolve_depth(@builtin(position) pixel: vec4<f32>) -> @builtin(frag_depth) f32 {
-    let t = textureLoad(hit_distance, vec2<i32>(pixel.xy), 0).r;
-    if t <= 0.0 { discard; }
-    let size = textureDimensions(hit_distance);
-    let clip = params.view_proj * vec4<f32>(pixel_ray(vec2<u32>(pixel.xy), size) * t, 1.0);
-    return clip.z / clip.w;
 }
 
 @group(1) @binding(7) var hit_visibility: texture_2d<u32>;
@@ -1692,6 +1692,7 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
             let s0 = o.z - top.x * o.x - top.y * o.y - top.z;
             let ds = d.z - top.x * d.x - top.y * d.y;
             if ds > 0.0 { t1 = min(t1, -s0 / ds); } else if ds < 0.0 { t0 = max(t0, -s0 / ds); } else if s0 > 0.0 { t1 = t0; }
+            TRACE_BOX(chunk, t0, t1, frame.box, t_prev)
             if t1 > t0 {
                 let axis0 = select(select(2u, 1u, lo.y >= lo.z), 0u, lo.x >= lo.y && lo.x >= lo.z);
                 let h = trace_chunk(slot, o, d, t0, t1, axis0, vec2<i32>(i32(frame.box.x), i32(frame.box.y)), counted);
@@ -1738,6 +1739,7 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
         } else {
             if next.level == LOST {
                 WCOUNT(10)
+                LOST_PIXEL
                 break;
             }
             if next.level == BELOW || next.level == ROCK {

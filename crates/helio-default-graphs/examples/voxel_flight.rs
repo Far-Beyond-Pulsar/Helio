@@ -14,7 +14,7 @@
 //!   `HELIO_VOXEL_CHUNKS_DIG=n` the view is dug and undone, with
 //!   `HELIO_VOXEL_CHUNKS_BLAST=r` blasted by one ball `r` m across.
 //! * `HELIO_VOXEL_CHUNKS_FLY=descent|cruise` streams along a path.
-//! * `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo|dive` flies through the
+//! * `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo|dive|glide` flies through the
 //!   renderer in real time, every frame recorded (`stress_<mode>.csv`),
 //!   samples saved with settled references to compare.
 //!
@@ -744,7 +744,7 @@ fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3)
     pick_probe(flight, view, eye, forward);
 }
 
-/// `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo|dive`: a flight
+/// `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo|dive|glide`: a flight
 /// through the renderer in real time (the path follows the wall clock, as a
 /// game's camera does: a slow frame moves it further), from 2 m to 400 km
 /// or back in `HELIO_VOXEL_FLIGHT_HOLD_SECONDS` (20), at 300 m/s 40 m over
@@ -773,6 +773,14 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
             // 6 m over the ground looking ahead and down; a ball is dug
             // where the view's centre meets it a second in.
             return (planet.surface_point(ground, 6.0), (ahead - up * 0.5).normalize().as_vec3());
+        }
+        if mode == "glide" {
+            // Down from 300 km to 30 km over the flight, looking toward the
+            // horizon and drifting ahead (an editor camera eased down over
+            // the planet's curve).
+            let altitude = 300_000.0 * 0.1f64.powf(u);
+            let eye = planet.surface_point(ground + ahead * (altitude * 0.05 * t), altitude);
+            return (eye, (ahead - up * 0.35).normalize().as_vec3());
         }
         if mode == "dive" {
             // Straight down from `HELIO_VOXEL_STRESS_ALTITUDE` m (15 000 km,
@@ -850,6 +858,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let mut captured = false;
     let mut traced = false;
     let mut dug = false;
+    let mut next_dig = 1.0;
     loop {
         let t = started.elapsed().as_secs_f64();
         if t > seconds {
@@ -857,16 +866,39 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         }
         let (eye, forward) = path(t);
         // `dig`: one ball, `HELIO_VOXEL_STRESS_DIG` m across (12), close to
-        // the camera.
-        if mode == "dig" && t >= 1.0 && !dug {
+        // the camera. `HELIO_VOXEL_STRESS_DIG_EVERY=s` (any mode): a ball at
+        // the view's centre every `s` seconds (an editor's brush clicked
+        // from high up).
+        let every: Option<f64> = std::env::var("HELIO_VOXEL_STRESS_DIG_EVERY").ok().and_then(|v| v.parse().ok());
+        let due = match every {
+            Some(_) => t >= next_dig,
+            None => mode == "dig" && t >= 1.0 && !dug,
+        };
+        if due {
             dug = true;
+            next_dig = t + every.unwrap_or(0.0);
             let radius: f64 = std::env::var("HELIO_VOXEL_STRESS_DIG").ok().and_then(|v| v.parse().ok()).unwrap_or(12.0);
-            let hit = flight.planet.raycast(eye, forward.as_dvec3(), 1000.0).expect("the view centre hits ground");
-            let at = eye + forward.as_dvec3() * hit.distance;
+            // Close up, the ground the view's centre meets; from high up
+            // (a CPU raycast there takes seconds), the sphere's, snapped
+            // to the ground.
+            let dir = forward.as_dvec3();
+            let at = if every.is_none() {
+                eye + dir * flight.planet.raycast(eye, dir, 1000.0).expect("the view centre hits ground").distance
+            } else {
+                let b = eye.dot(dir);
+                let r = flight.planet.grid().radius();
+                let disc = b * b - (eye.length_squared() - r * r);
+                if disc < 0.0 {
+                    eprintln!("CHUNKSTRESS dig: the view centre misses the planet at t {t:.3} s");
+                    continue;
+                }
+                flight.planet.surface_point(eye + dir * (-b - disc.sqrt()), 0.0)
+            };
+            let hit_distance = (at - eye).length();
             let mut planet = (*flight.planet).clone();
             planet.apply(Brush { center: at.to_array(), radius, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
             flight.planet = Arc::new(planet);
-            eprintln!("CHUNKSTRESS dig: ball {radius} m at {:.1} m from the eye, t {t:.3} s", hit.distance);
+            eprintln!("CHUNKSTRESS dig: ball {radius} m at {hit_distance:.1} m from the eye, t {t:.3} s");
         }
         let (record_ms, wait_ms) = flight.draw(eye, forward);
         let now = Instant::now();
@@ -906,7 +938,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
                 let trace = if t > at && !traced && std::env::var_os("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL").is_some() { world.pixel_trace() } else { Vec::new() };
                 let c = world.take_counts();
                 if c.missed + c.lost > 0 {
-                    eprintln!("CHUNKSTRESS {mode}: t {t:.3} s missed {} ({} boxes each) lost {}", c.missed, c.missed_boxes / c.missed.max(1), c.lost);
+                    eprintln!("CHUNKSTRESS {mode}: t {t:.3} s missed {} ({} boxes each) lost {} (last at {:?})", c.missed, c.missed_boxes / c.missed.max(1), c.lost, c.lost_pixel);
                 }
                 if !trace.is_empty() {
                     traced = true;
@@ -967,6 +999,10 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         }
         flight.capture(&format!("stress_{mode}_{n:02}_ref2"));
     }
+    // `HELIO_VOXEL_PICKS`: the last sample's view, settled, against the CPU.
+    if let Some(&(eye, forward)) = samples.last() {
+        pick_probe(flight, mode, eye, forward);
+    }
 }
 
 /// `HELIO_VOXEL_PICKS=x,y;x,y` (output pixels): the renderer's picks there
@@ -997,6 +1033,9 @@ fn pick_probe(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3) {
         let cpu = flight.planet.raycast(eye, dir, 100_000.0);
         let pick = results.iter().find(|r| r.id == n as u64).and_then(|r| r.hit);
         eprintln!("PICK {view} {},{}: drawn {:?} | cpu {:?}", p[0], p[1], pick.map(|h| (h.distance, h.level, h.cell, h.entered)), cpu.map(|c| (c.distance, c.cell)));
+        if let (Some(c), Some(world)) = (cpu, flight.renderer.find_pass::<ChunkPass>().and_then(ChunkPass::world)) {
+            eprintln!("PICK {view} {},{}: chunks over the cpu cell {:?}", p[0], p[1], world.chunks_over(c.cell.face, c.cell.i, c.cell.j));
+        }
     }
 }
 

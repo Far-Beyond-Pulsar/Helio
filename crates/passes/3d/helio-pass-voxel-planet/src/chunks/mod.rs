@@ -468,6 +468,8 @@ pub struct TraceCounts {
     pub missed: u32,
     pub missed_boxes: u32,
     pub lost: u32,
+    /// A lost ray's pixel, the last one (none: 0, 0 never written).
+    pub lost_pixel: (u32, u32),
 }
 
 /// A frame's GPU time (milliseconds).
@@ -645,7 +647,6 @@ pub struct ChunkWorld {
     shadow: wgpu::ComputePipeline,
     shadow_fallback_layout: wgpu::BindGroupLayout,
     shadow_fallback: wgpu::ComputePipeline,
-    resolve: wgpu::RenderPipeline,
     publish: wgpu::RenderPipeline,
     /// The last draw's bind group (its parameters and chunk storage).
     last_group: Option<wgpu::BindGroup>,
@@ -781,7 +782,7 @@ impl GenCost {
 pub struct Targets {
     pub size: [u32; 2],
     seed: wgpu::Texture,
-    /// Box entries during the seed, then the hits' depth (Depth32Float).
+    /// The seed's box entries (Depth32Float, reversed: `seed_box`).
     pub depth: wgpu::Texture,
     /// Chunk slot (u32::MAX: none) and cell, face (Rg32Uint).
     pub visibility: wgpu::Texture,
@@ -963,6 +964,8 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
         .replace("WCOUNT(3)", &wcount(3))
         .replace("WCOUNT(8)", &wcount(8))
         .replace("WCOUNT(10)", &wcount(10))
+        // The last lost ray's pixel (counters[14]).
+        .replace("LOST_PIXEL", if counting { "if counted { atomicStore(&counters[14], pixel.x | (pixel.y << 16u)); }" } else { "" })
         .replace("WCOUNT_BOXES", if counting { "if counted { atomicAdd(&counters[9], chunk); }" } else { "" })
         .replace("COUNT(0)", &count(0))
         .replace("COUNT(2)", &count(2))
@@ -971,7 +974,17 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
         .replace(
             "TRACE_PIXEL(chunk, slot, cube_lo, real)",
             if counting {
-                "if counted && all(pixel == params.debug.zw) && chunk < 48u { atomicStore(&counters[16u + chunk * 5u], slot); atomicStore(&counters[17u + chunk * 5u], bitcast<u32>(cube_lo.x)); atomicStore(&counters[18u + chunk * 5u], bitcast<u32>(cube_lo.y)); atomicStore(&counters[19u + chunk * 5u], bitcast<u32>(cube_lo.z)); atomicStore(&counters[20u + chunk * 5u], u32(real) + 2u * u32(key.x >> 8u)); atomicStore(&counters[4], chunk + 1u); }"
+                "if counted && all(pixel == params.debug.zw) && chunk < 24u { atomicStore(&counters[16u + chunk * 5u], slot); atomicStore(&counters[17u + chunk * 5u], bitcast<u32>(cube_lo.x)); atomicStore(&counters[18u + chunk * 5u], bitcast<u32>(cube_lo.y)); atomicStore(&counters[19u + chunk * 5u], bitcast<u32>(cube_lo.z)); atomicStore(&counters[20u + chunk * 5u], u32(real) + 2u * u32(key.x >> 8u)); atomicStore(&counters[4], chunk + 1u); }"
+            } else {
+                ""
+            },
+        )
+        // Each real box's chunk walk: t0, t1, occupied layers, t_prev
+        // (from counters[136]).
+        .replace(
+            "TRACE_BOX(chunk, t0, t1, frame.box, t_prev)",
+            if counting {
+                "if counted && all(pixel == params.debug.zw) && chunk < 24u { atomicStore(&counters[136u + chunk * 5u], bitcast<u32>(t0)); atomicStore(&counters[137u + chunk * 5u], bitcast<u32>(t1)); atomicStore(&counters[138u + chunk * 5u], bitcast<u32>(frame.box.x)); atomicStore(&counters[139u + chunk * 5u], bitcast<u32>(frame.box.y)); atomicStore(&counters[140u + chunk * 5u], bitcast<u32>(t_prev)); }"
             } else {
                 ""
             },
@@ -1123,7 +1136,8 @@ impl ChunkWorld {
                 layout: Some(&seed_layout),
                 vertex: wgpu::VertexState { module: &draw_module, entry_point: Some(vertex), compilation_options: Default::default(), buffers: &[] },
                 primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), front_face: wgpu::FrontFace::Ccw, ..Default::default() },
-                depth_stencil: depth(wgpu::CompareFunction::Less),
+                // Reversed depth (`seed_box`): the nearest box is the greatest.
+                depth_stencil: depth(wgpu::CompareFunction::Greater),
                 multisample: Default::default(),
                 fragment: Some(wgpu::FragmentState { module: &draw_module, entry_point: Some(fragment), compilation_options: Default::default(), targets: &[Some(SEED_FORMAT.into())] }),
                 multiview_mask: None,
@@ -1204,17 +1218,6 @@ impl ChunkWorld {
             multiview_mask: None,
             cache: None,
         });
-        let resolve = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("chunk depth resolve"),
-            layout: Some(&layout(&resolve_layout)),
-            vertex: wgpu::VertexState { module: &draw_module, entry_point: Some("resolve_vertex"), compilation_options: Default::default(), buffers: &[] },
-            primitive: Default::default(),
-            depth_stencil: depth(wgpu::CompareFunction::Always),
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState { module: &draw_module, entry_point: Some("resolve_depth"), compilation_options: Default::default(), targets: &[] }),
-            multiview_mask: None,
-            cache: None,
-        });
 
         let buffer = |label: &str, size: u64, usage: wgpu::BufferUsages| device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage, mapped_at_creation: false });
         // Brushes kept analytic: the large ones, then the recent ones.
@@ -1265,7 +1268,6 @@ impl ChunkWorld {
             shadow,
             shadow_fallback_layout,
             shadow_fallback,
-            resolve,
             publish,
             last_group: None,
             targets: None,
@@ -2418,7 +2420,7 @@ impl ChunkWorld {
                     })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &depth,
-                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }),
                         stencil_ops: None,
                     }),
                     timestamp_writes: timing.filter(|_| round == 0).map(|(set, _, ring)| wgpu::RenderPassTimestampWrites { query_set: set, beginning_of_pass_write_index: Some(QUERIES * ring + 2), end_of_pass_write_index: Some(QUERIES * ring + 3) }),
@@ -2497,34 +2499,6 @@ impl ChunkWorld {
             pass.set_bind_group(1, &fallback_group, &[]);
             pass.dispatch_workgroups_indirect(&targets.fallback_groups, 0);
         }
-        {
-            // 3. The hits' depth.
-            let resolve_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("chunk depth resolve"),
-                layout: &self.resolve_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&view(&targets.distance)) },
-                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&view(&targets.visibility)) },
-                    wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(&view(&targets.normal)) },
-                ],
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("chunk depth resolve"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.resolve);
-            pass.set_bind_group(0, &group, &[]);
-            pass.set_bind_group(1, &resolve_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
         // The tiles reached under, back without waiting (a frame's copy
         // when a slot is free).
         if let Some(slot) = self.reach_slots.iter_mut().find(|s| matches!(s.state, ReachState::Free)) {
@@ -2545,9 +2519,9 @@ impl ChunkWorld {
     /// The traces' counts since the last call (with
     /// `HELIO_VOXEL_CHUNKS_COUNT`).
     pub fn take_counts(&self) -> TraceCounts {
-        let words: Vec<[u32; 4]> = self.read(&self.counters, 3);
+        let words: Vec<[u32; 4]> = self.read(&self.counters, 4);
         self.queue.write_buffer(&self.counters, 0, &[0u8; 1024]);
-        TraceCounts { seeded: words[0][0], steps: words[0][1], hits: words[0][2], boxes: words[0][3], missed: words[2][0], missed_boxes: words[2][1], lost: words[2][2] }
+        TraceCounts { seeded: words[0][0], steps: words[0][1], hits: words[0][2], boxes: words[0][3], missed: words[2][0], missed_boxes: words[2][1], lost: words[2][2], lost_pixel: (words[3][2] & 0xffff, words[3][2] >> 16) }
     }
 
     /// The boxes the debug pixel's ray crossed (counting builds): the frame
@@ -2557,7 +2531,7 @@ impl ChunkWorld {
         let words: Vec<[u32; 4]> = self.read(&self.counters, 64);
         let flat: Vec<u32> = words.iter().flatten().copied().collect();
         let n = flat[4] as usize;
-        (0..n.min(48))
+        (0..n.min(24))
             .map(|c| {
                 let w = &flat[16 + c * 5..21 + c * 5];
                 let slot = w[0];
@@ -2565,6 +2539,15 @@ impl ChunkWorld {
                 (slot, [w[1] as i32, w[2] as i32, w[3] as i32], w[4] & 1 != 0, w[4] >> 1, owner)
             })
             .collect()
+    }
+
+    /// Per box of [`Self::pixel_trace`], its chunk walk when it is a chunk:
+    /// t0, t1, the occupied layers and the walk's t on entering the box.
+    pub fn pixel_trace_walks(&self) -> Vec<[f32; 5]> {
+        let words: Vec<[u32; 4]> = self.read(&self.counters, 64);
+        let flat: Vec<u32> = words.iter().flatten().copied().collect();
+        let n = (flat[4] as usize).min(24);
+        (0..n).map(|c| std::array::from_fn(|k| f32::from_bits(flat[136 + c * 5 + k]))).collect()
     }
 
     /// Boxes drawn by the last [`Self::draw`]: from outside, from inside
