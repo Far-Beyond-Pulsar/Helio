@@ -104,7 +104,7 @@ impl StaticMeshDraw {
                     graph_hash_lo: material.graph_hash as u32,
                     graph_hash_hi: (material.graph_hash >> 32) as u32,
                     _pad: [0; 3],
-                    material: surface_material(&material.surface),
+                    material: surface_material(&material.surface, material.graph_texture_slots),
                 }
             })
             .collect();
@@ -153,7 +153,10 @@ pulsar_scenedb::pulsar_reflection::inventory::submit! {
 
 /// A surface as a material row: the scalar PBR values, no textures.
 /// `alpha < 1` selects the blended, transparent-only path (glass).
-fn surface_material(surface: &ImportedSurfaceMaterial) -> helio::GpuMaterial {
+fn surface_material(
+    surface: &ImportedSurfaceMaterial,
+    graph_texture_slots: [u32; 5],
+) -> helio::GpuMaterial {
     let alpha = surface.alpha.clamp(0.0, 1.0);
     let missing = helio::GpuMaterial::NO_TEXTURE;
     let mut flags = 0;
@@ -174,11 +177,11 @@ fn surface_material(surface: &ImportedSurfaceMaterial) -> helio::GpuMaterial {
             surface.emissive_intensity,
         ],
         roughness_metallic: [surface.roughness, surface.metallic, 1.5, 0.5],
-        tex_base_color: missing,
-        tex_normal: missing,
-        tex_roughness: missing,
-        tex_emissive: missing,
-        tex_occlusion: missing,
+        tex_base_color: graph_texture_slots[0],
+        tex_normal: graph_texture_slots[1],
+        tex_roughness: graph_texture_slots[2],
+        tex_emissive: graph_texture_slots[3],
+        tex_occlusion: graph_texture_slots[4],
         workflow: 0,
         flags,
         material_class: 0,
@@ -193,6 +196,8 @@ pub struct ResolvedSlotMaterial {
     pub surface: ImportedSurfaceMaterial,
     pub material_class: u32,
     pub graph_hash: u64,
+    /// Scene-local texture slots for this graph's local texture ordinals.
+    pub graph_texture_slots: [u32; 5],
 }
 
 /// Resolve one slot's material outside a world (tools such as thumbnails
