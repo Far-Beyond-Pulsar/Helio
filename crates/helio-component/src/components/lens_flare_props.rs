@@ -64,28 +64,15 @@ pub struct LensFlareProps {
     pub streak_intensity: f32,
     #[property(min = 0.0, max = 0.05, step = 0.001, category = "Lens Flare")]
     pub dispersion: f32,
-    #[property(min = 0.7, max = 32.0, step = 0.1, category = "Lens Flare")]
-    pub aperture_f_number: f32,
-    #[property(min = 8.0, max = 600.0, step = 1.0, category = "Lens Flare")]
-    pub focal_length_mm: f32,
-    #[property(min = 4.0, max = 70.0, step = 0.1, category = "Lens Flare")]
-    pub sensor_width_mm: f32,
     /// Natural cos^4 falloff of the light reaching the sensor.
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Lens Flare")]
     pub vignette: f32,
-    /// Diffraction spikes from the iris blades.
+    /// Diffraction spikes from the iris blades (the camera lens sets their count).
     #[property(min = 0.0, max = 4.0, step = 0.01, category = "Lens Flare")]
     pub starburst_intensity: f32,
     /// Spike length as a fraction of the image width.
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Lens Flare")]
     pub starburst_length: f32,
-    /// Iris blade count (0 = circular). Shapes the pupil, ghost disks and
-    /// starburst: n spikes for an even count, 2n for an odd count.
-    #[property(min = 0.0, max = 16.0, step = 1.0, category = "Lens Flare")]
-    pub aperture_blades: u32,
-    /// Iris rotation in degrees.
-    #[property(min = -180.0, max = 180.0, step = 1.0, category = "Lens Flare")]
-    pub aperture_rotation_degrees: f32,
     /// Anti-reflection coating tint of ghosts (0 = neutral grey).
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Lens Flare")]
     pub coating_strength: f32,
@@ -135,14 +122,9 @@ impl Default for LensFlareProps {
             glare_intensity: value.glare_intensity,
             streak_intensity: value.streak_intensity,
             dispersion: value.dispersion,
-            aperture_f_number: value.aperture_f_number,
-            focal_length_mm: value.focal_length_mm,
-            sensor_width_mm: value.sensor_width_mm,
             vignette: value.vignette,
             starburst_intensity: value.starburst_intensity,
             starburst_length: value.starburst_length,
-            aperture_blades: value.aperture_blades,
-            aperture_rotation_degrees: value.aperture_rotation.to_degrees(),
             coating_strength: value.coating_strength,
             ghost_rim: value.ghost_rim,
             dirt_intensity: value.dirt_intensity,
@@ -175,14 +157,9 @@ impl LensFlareProps {
             glare_intensity: self.glare_intensity,
             streak_intensity: self.streak_intensity,
             dispersion: self.dispersion,
-            aperture_f_number: self.aperture_f_number,
-            focal_length_mm: self.focal_length_mm,
-            sensor_width_mm: self.sensor_width_mm,
             vignette: self.vignette,
             starburst_intensity: self.starburst_intensity,
             starburst_length: self.starburst_length,
-            aperture_blades: self.aperture_blades.min(16),
-            aperture_rotation: self.aperture_rotation_degrees.to_radians(),
             coating_strength: self.coating_strength,
             ghost_rim: self.ghost_rim,
             dirt_intensity: self.dirt_intensity,

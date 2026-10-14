@@ -14,7 +14,6 @@ use helio_pass_corona::CoronaPass;
 use helio_pass_debug_overlay::{DebugOverlayPass, DebugOverlayState};
 use helio_pass_decal::DecalPass;
 use helio_pass_deferred_light::DeferredLightPass;
-use helio_pass_dof::DofPass;
 use helio_pass_flare::LensFlarePass;
 use helio_pass_foliage_gbuffer::FoliageGBufferPass;
 use helio_pass_foliage_place::FoliagePlacePass;
@@ -25,6 +24,7 @@ use helio_pass_gbuffer::GBufferPass;
 use helio_pass_hiz::HiZBuildPass;
 use helio_pass_hlfs::HlfsPass;
 use helio_pass_indirect_dispatch::IndirectDispatchPass;
+use helio_pass_lens::{LensPass, LENS_COLOR};
 use helio_pass_light_cull::LightCullPass;
 use helio_pass_object_batch::ObjectBatchPass;
 use helio_pass_occlusion_cull::OcclusionCullPass;
@@ -198,9 +198,9 @@ fn default_swap_policy() -> helio_core::SwapPolicy {
         .independent::<FogCompositePass>()
         .independent::<TsrPass>()
         .independent::<FxaaPass>()
+        .independent::<LensPass>()
         .independent::<LensFlarePass>()
         .independent::<PostProcessPass>()
-        .independent::<DofPass>()
         .group_types(&[
             name::<ShadowMatrixPass>(),
             name::<ShadowDirtyPass>(),
@@ -837,14 +837,15 @@ enum SceneAa {
 /// PP settings (camera baseline + volumes) -> medium integration
 ///   -> medium composite at each opaque surface's depth (fogged_hdr)
 ///   -> transparency, each fragment fogged at its own depth
-///   -> AA -> lens response from the reconstructed image
-///   -> PostProcessPass: meter, bloom, lens, exposure, grade, tone map once
+///   -> AA -> lens (focus field, defocus) -> lens flare from the lens image
+///   -> PostProcessPass: meter, bloom, flare, exposure, grade, tone map once
 /// ```
 ///
 /// Shafts exist only where a medium scatters light, so they reach exposure,
-/// bloom and lens extraction as ordinary radiance. The lens reads the AA
-/// output so reprojection never sees screen-space optics, and PP applies it
-/// after metering so flare cannot feed back into exposure.
+/// bloom and flare extraction as ordinary radiance. The lens reads the AA
+/// output so reprojection never sees screen-space optics, defocus acts on
+/// scene-linear radiance before anything is metered or tone mapped, and PP
+/// applies the flare after metering so it cannot feed back into exposure.
 fn add_scene_linear_chain(
     graph: &mut RenderGraph,
     device: &Arc<wgpu::Device>,
@@ -877,10 +878,11 @@ fn add_scene_linear_chain(
         }
         SceneAa::None => FOGGED_HDR,
     };
+    graph.add_pass(Box::new(LensPass::new(device, width, height).with_color_input(resolved)));
     graph.add_pass(Box::new(
-        LensFlarePass::new_hdr(device, width, height).with_color_input(resolved),
+        LensFlarePass::new_hdr(device, width, height).with_color_input(LENS_COLOR),
     ));
-    resolved
+    LENS_COLOR
 }
 
 fn build_default_graph_internal(
@@ -1017,7 +1019,7 @@ fn build_default_graph_internal(
     let resolved =
         add_scene_linear_chain(&mut graph, device, FOGGED_HDR_FORMAT, Some(transparent), aa, iw, ih);
 
-    let mut pp = PostProcessPass::new_with_user_effects(
+    let pp = PostProcessPass::new_with_user_effects(
         device,
         queue,
         config.width,
@@ -1026,19 +1028,7 @@ fn build_default_graph_internal(
         user_effects,
     )
     .with_color_input(resolved);
-    // Enable pre_dof output so the DofPass can read the post-processed image.
-    pp.set_output_to_pre_dof(true);
     graph.add_pass(Box::new(pp));
-
-    // Cinematic bokeh DOF — runs after the main uber-shader, reads "pre_dof"
-    // (written by PostProcessPass) and writes the final output to ctx.target.
-    graph.add_pass(Box::new(DofPass::new(
-        device,
-        queue,
-        config.width,
-        config.height,
-        config.surface_format,
-    )));
 
     add_final_passes(
         &mut graph,

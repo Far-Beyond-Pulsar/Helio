@@ -68,14 +68,17 @@ const ACTIVE_MEDIA_HEADER_BYTES: u64 = (32 + 64 * 3) * 4;
 /// Stride of a `"scene_lights"` row (the shader's full 128-byte `GpuLight`).
 const LIGHT_ROW_BYTES: u64 = 128;
 // FogVolume's WGSL opaque prefix/suffix must agree with the PP row ABI.
-const _: () = assert!(helio_pass_postprocess::GpuPostProcessUniforms::FOG_BLOCK_OFFSET == 304);
+const _: () = assert!(helio_pass_postprocess::GpuPostProcessUniforms::FOG_BLOCK_OFFSET % 16 == 0);
 
-/// Assemble the legacy PP row stride from its Rust ABI while retaining the
-/// fixed fog block offset. PP can append unrelated lens settings safely.
+/// Assemble the legacy PP row layout from its Rust ABI: the opaque words
+/// before and after the fog block follow wherever PP places it.
 pub fn shader_source() -> String {
-    let tail =
-        (std::mem::size_of::<helio_pass_postprocess::GpuPostProcessUniforms>() - 304 - 64) / 16;
-    include_str!("../shaders/volumetric_fog.wgsl").replace("__PP_TAIL_VEC4__", &tail.to_string())
+    use helio_pass_postprocess::GpuPostProcessUniforms as Uniforms;
+    let head = Uniforms::FOG_BLOCK_OFFSET / 16;
+    let tail = (std::mem::size_of::<Uniforms>() as u64 - Uniforms::FOG_BLOCK_OFFSET - Uniforms::FOG_BLOCK_SIZE) / 16;
+    include_str!("../shaders/volumetric_fog.wgsl")
+        .replace("__PP_HEAD_VEC4__", &head.to_string())
+        .replace("__PP_TAIL_VEC4__", &tail.to_string())
 }
 
 /// Preserve approximately square screen tiles, bounded by the tier's budget.
@@ -1057,7 +1060,7 @@ impl RenderPass for VolumetricFogPass {
         if let Some(postprocess_buf) = postprocess_buf {
             cmds.copy_buffer_to_buffer(
                 postprocess_buf,
-                304,
+                helio_pass_postprocess::GpuPostProcessUniforms::FOG_BLOCK_OFFSET,
                 &self.fog_uniform_buf,
                 0,
                 64,

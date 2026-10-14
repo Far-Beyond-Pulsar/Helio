@@ -77,10 +77,10 @@ pub const GLOBAL_FOG_SOURCE_ROW_BYTES: u64 = 16 * 4;
 /// `LocalFogSourceRow`: local size vec4, medium (16), edge fade vec4.
 pub const LOCAL_FOG_SOURCE_ROW_BYTES: u64 = 24 * 4;
 /// `PostProcessVolumeSourceRow`: local size vec4, then the pass row after
-/// its bounds (156 words).
-pub const POST_PROCESS_VOLUME_SOURCE_ROW_BYTES: u64 = 160 * 4;
+/// its bounds (140 words).
+pub const POST_PROCESS_VOLUME_SOURCE_ROW_BYTES: u64 = 144 * 4;
 /// `CameraPostProcessSourceRow`: the `CameraPostProcessComponent` pass row.
-pub const CAMERA_POST_PROCESS_SOURCE_ROW_BYTES: u64 = 152 * 4;
+pub const CAMERA_POST_PROCESS_SOURCE_ROW_BYTES: u64 = 136 * 4;
 /// `WaterVolumeSourceRow`: local size (`w`: surface height above the
 /// owner), then the water volume row after its bounds (56 words).
 pub const WATER_VOLUME_SOURCE_ROW_BYTES: u64 = 60 * 4;
@@ -520,14 +520,14 @@ impl EnvironmentJoin {
                 "Environment Join Post-Process Volumes",
                 POST_PROCESS_VOLUMES_KEY,
                 Source::PostProcessVolumes,
-                164,
+                148,
                 volume,
             ),
             Spec::new(
                 "Environment Join Camera Post-Process",
                 CAMERA_POST_PROCESS_KEY,
                 Source::CameraPostProcess,
-                152,
+                136,
                 0,
             ),
             // Each placed volume takes the scene's sun, and the level's

@@ -54,7 +54,7 @@ helio-pass-volumetric-fog = { workspace = true }
 helio-pass-transparent = { path = "../passes/3d/helio-pass-transparent" }
 helio-pass-virtual-geometry = { path = "../passes/3d/helio-pass-virtual-geometry" }
 helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
-helio-pass-dof = { path = "../passes/3d/helio-pass-dof" }
+helio-pass-lens = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }

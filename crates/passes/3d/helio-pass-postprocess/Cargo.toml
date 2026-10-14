@@ -2,7 +2,7 @@
 name = "helio-pass-postprocess"
 version = "0.1.0"
 edition = "2021"
-description = "Helio render pass: GPU-native post-processing pipeline (bloom, tonemap, color grading, vignette, CA, grain, DOF, motion blur)"
+description = "Helio render pass: GPU-native post-processing pipeline (bloom, tonemap, color grading, vignette, CA, grain, motion blur)"
 license = "MIT OR Apache-2.0"
 
 [dependencies]

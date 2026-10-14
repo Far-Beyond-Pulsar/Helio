@@ -67,11 +67,10 @@ Publish:
 The consumer owns placement before bloom/exposure/optics. This crate does not
 change PP shaders, central renderer code, or default graphs.
 
-Legacy PP camera fog is copied from offset 304 when available. The first enabled
-`FogComponent` overrides that baseline. Bounded PP volumes still inject spatial
-media. Their row tail is generated from `GpuPostProcessUniforms` size, supporting
-the 464-to-528-byte PP change and 528-to-592-byte volume change without moving
-the fog block. Native media need no PP buffer at all. Legacy authored distance
+Legacy PP camera fog is copied from `GpuPostProcessUniforms::FOG_BLOCK_OFFSET` when
+available. The first enabled `FogComponent` overrides that baseline. Bounded PP
+volumes still inject spatial media. Their row's opaque head and tail are generated
+from the `GpuPostProcessUniforms` layout, so the fog block can move with PP changes. Native media need no PP buffer at all. Legacy authored distance
 gates remain adapter behavior; native medium data has no such gates.
 
 ## Lighting, performance, and limits

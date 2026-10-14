@@ -21,8 +21,14 @@ Lens settings are part of the shared post-process settings, not the light:
 | `PostProcessVolumeComponent` (editor) | `helio_pass_postprocess::PostProcessVolumeComponent` | Overrides by priority, weight and inward boundary fade, per override bit |
 
 `PostProcessVolumeBlendPass` resolves both on the GPU into the
-`postprocess_uniforms` buffer. This pass reads the 64-byte lens block at byte
-464 (`GpuLensResponse`); the prefix is opaque here.
+`postprocess_uniforms` buffer. This pass reads the 96-byte lens block at byte
+432 (`GpuLensResponse`); the prefix is opaque here.
+
+The camera's optics are not post-process settings. F-number, focal length,
+sensor width and the iris (blades, rotation) come from the view's lens
+(`helio_pass_lens::LensComponent`) through the `lens_resolved` buffer the lens
+pass publishes, with a neutral 50 mm f/2.8, 36 mm, six-blade camera when the
+graph has no lens pass.
 
 | Field | Meaning |
 | --- | --- |
@@ -33,7 +39,6 @@ Lens settings are part of the shared post-process settings, not the light:
 | `ghost_count`, `ghost_intensity` | Reflected ghost images (≤4 economical, ≤8 high) |
 | `halo_intensity`, `glare_intensity`, `streak_intensity` | Ring, veiling glare around sources, horizontal streaks |
 | `dispersion` | Wavelength-dependent offset of R and B |
-| `aperture_f_number`, `focal_length_mm`, `sensor_width_mm` | Camera optics shared with depth of field |
 | `vignette` | Natural cos⁴ falloff applied to the extracted light |
 
 ## Optical model
@@ -75,12 +80,14 @@ energy than a real multi-coated lens would scatter.
 ## Graph contract
 
 ```text
-FogCompositePass -> Transparent -> TSR/FXAA -> LensFlarePass -> PostProcessPass
+FogCompositePass -> Transparent -> TSR/FXAA -> LensPass -> LensFlarePass -> PostProcessPass
                                    (tsr_color | fxaa_color | fogged_hdr)
 ```
 
-- Reads `postprocess_uniforms` (≥528 bytes, UNIFORM) and the configured HDR
-  input (`with_color_input`; default `fogged_hdr`, falling back to `pre_aa`).
+- Reads `postprocess_uniforms` (≥528 bytes, UNIFORM), the optional
+  `lens_resolved` optics (a `ResolvedLens` storage buffer) and the configured
+  HDR input (`with_color_input`; the default graphs pass the lens pass's
+  `lens_color`).
 - Writes `lens_output`: Rgba16Float at a quarter of the input resolution.
 - Records on the graphics encoder after its producers. The compute encoder is
   submitted before graphics and would sample the previous frame.
@@ -114,6 +121,6 @@ changes smoothness, not brightness.
 
 `cargo test -p helio-pass-flare` runs the production WGSL on a GPU (an adapter
 is required; tests fail rather than skip): ABI offsets against the real
-`GpuPostProcessUniforms`, disabled/unbound clearing, threshold rejection,
+`GpuPostProcessUniforms`, optics taken from the resolved lens, disabled/unbound clearing, threshold rejection,
 glare energy bound and aperture normalization, ghost reflection across the
 optical axis, and anamorphic streak shape.

@@ -1,4 +1,4 @@
-// Must match the CPU-side GpuPostProcessUniforms layout (464 bytes).
+// Must match the CPU-side GpuPostProcessUniforms layout (432 bytes).
 // Only the fields used by the LUT builder are declared; the rest are
 // accounted for as padding to keep offsets correct.
 struct GpuPostProcessUniforms {
@@ -45,26 +45,18 @@ struct GpuPostProcessUniforms {
     grain_response:         f32,
     grain_size:             f32,
     grain_enabled:          u32,
-    dof_focal_distance:     f32,
-    dof_focal_region:       f32,
-    dof_near_transition:    f32,
-    dof_far_transition:     f32,
-    dof_scale:              f32,
-    dof_max_bokeh_size:     f32,
-    dof_enabled:            u32,
-    _pad12:                 f32,
     motion_blur_amount:     f32,
     motion_blur_max:        f32,
     motion_blur_enabled:    u32,
     _pad13:                 f32,
     blend_weight_bloom:        f32,
-    blend_weight_dof:          f32,
     blend_weight_motion_blur:  f32,
     blend_weight_vignette:     f32,
     blend_weight_ca:           f32,
     blend_weight_grain:        f32,
     blend_weight_exposure:     f32,
     _pad14:                    f32,
+    _pad15:                    f32,
     fog_enabled:               u32,
     fog_mode:                  u32,
     fog_density:               f32,

@@ -87,7 +87,6 @@ impl Default for HdrOutputMode {
 #[category("Vignette", category_color = "#7C6FD1")]
 #[category("Chromatic Aberration", category_color = "#7C6FD1")]
 #[category("Film Grain", category_color = "#7C6FD1")]
-#[category("Depth of Field", category_color = "#3AA0FF")]
 #[category("Motion Blur", category_color = "#3AA0FF")]
 #[category("Blend Weights", category_color = "#8F8F8F")]
 #[category("HDR Output", category_color = "#D18F6F")]
@@ -172,8 +171,6 @@ pub struct PostProcessOverrides {
     #[property(category = "Overrides")]
     pub override_film_grain: bool,
     #[property(category = "Overrides")]
-    pub override_depth_of_field: bool,
-    #[property(category = "Overrides")]
     pub override_motion_blur: bool,
     #[property(category = "Overrides")]
     pub override_hdr_output: bool,
@@ -194,7 +191,6 @@ impl Default for PostProcessOverrides {
             override_vignette: true,
             override_chromatic_aberration: true,
             override_film_grain: true,
-            override_depth_of_field: true,
             override_motion_blur: true,
             override_hdr_output: true,
             override_volumetric_fog: true,
@@ -206,7 +202,7 @@ impl Default for PostProcessOverrides {
 impl PostProcessOverrides {
     pub fn mask(&self) -> [u32; 4] {
         use helio_pass_postprocess::PostProcessProperty as P;
-        let groups: [(bool, &[usize]); 12] = [
+        let groups: [(bool, &[usize]); 11] = [
             (
                 self.override_exposure,
                 &[
@@ -293,20 +289,6 @@ impl PostProcessOverrides {
                 ],
             ),
             (
-                self.override_depth_of_field,
-                &[
-                    P::DOF_FOCAL_DISTANCE,
-                    P::DOF_FOCAL_REGION,
-                    P::DOF_APERTURE_SHAPE,
-                    P::DOF_APERTURE_ROTATION,
-                    P::DOF_NEAR_TRANSITION,
-                    P::DOF_FAR_TRANSITION,
-                    P::DOF_MAX_BOKEH_SIZE,
-                    P::DOF_SENSOR_DIAGONAL,
-                    P::BLEND_WEIGHT_DOF,
-                ],
-            ),
-            (
                 self.override_motion_blur,
                 &[
                     P::MOTION_BLUR_AMOUNT,
@@ -349,14 +331,9 @@ impl PostProcessOverrides {
                     P::LENS_GLARE_INTENSITY,
                     P::LENS_STREAK_INTENSITY,
                     P::LENS_DISPERSION,
-                    P::LENS_APERTURE_F_NUMBER,
-                    P::LENS_FOCAL_LENGTH_MM,
-                    P::LENS_SENSOR_WIDTH_MM,
                     P::LENS_VIGNETTE,
                     P::LENS_STARBURST_INTENSITY,
                     P::LENS_STARBURST_LENGTH,
-                    P::LENS_APERTURE_BLADES,
-                    P::LENS_APERTURE_ROTATION,
                     P::LENS_COATING_STRENGTH,
                     P::LENS_GHOST_RIM,
                     P::LENS_DIRT_INTENSITY,
@@ -389,7 +366,6 @@ impl PostProcessOverrides {
 #[category("Vignette", category_color = "#7C6FD1")]
 #[category("Chromatic Aberration", category_color = "#7C6FD1")]
 #[category("Film Grain", category_color = "#7C6FD1")]
-#[category("Depth of Field", category_color = "#3AA0FF")]
 #[category("Motion Blur", category_color = "#3AA0FF")]
 #[category("Blend Weights", category_color = "#8F8F8F")]
 #[category("HDR Output", category_color = "#D18F6F")]
@@ -486,31 +462,6 @@ pub struct PostProcessSettingsProps {
     #[property(min = 0.1, max = 10.0, step = 0.05, category = "Film Grain")]
     pub grain_size: f32,
 
-    // ── Depth of Field ──────────────────────────────────────────────────
-    #[property(category = "Depth of Field")]
-    pub dof_enabled: bool,
-    #[property(min = 0.0, max = 10000.0, step = 1.0, category = "Depth of Field")]
-    pub dof_focal_distance: f32,
-    #[property(min = 0.0, max = 5000.0, step = 1.0, category = "Depth of Field")]
-    pub dof_focal_region: f32,
-    #[property(min = 0.0, max = 5000.0, step = 1.0, category = "Depth of Field")]
-    pub dof_near_transition: f32,
-    #[property(min = 0.0, max = 5000.0, step = 1.0, category = "Depth of Field")]
-    pub dof_far_transition: f32,
-    #[property(min = 0.0, max = 10.0, step = 0.05, category = "Depth of Field")]
-    pub dof_scale: f32,
-    #[property(min = 0.0, max = 100.0, step = 0.5, category = "Depth of Field")]
-    pub dof_max_bokeh_size: f32,
-    // `u32` isn't `Reflectable` (only `i32`/`i64`/`u64` are) -- `i32`,
-    // clamped non-negative when building the descriptor, same fix as
-    // `WaterVolumeComponent::ssr_steps`.
-    #[property(min = 3, max = 16, category = "Depth of Field")]
-    pub dof_aperture_blades: i32,
-    #[property(min = -180.0, max = 180.0, step = 1.0, category = "Depth of Field")]
-    pub dof_aperture_rotation: f32,
-    #[property(min = 1.0, max = 100.0, step = 0.1, category = "Depth of Field")]
-    pub dof_sensor_diagonal: f32,
-
     // ── Motion Blur ─────────────────────────────────────────────────────
     #[property(category = "Motion Blur")]
     pub motion_blur_enabled: bool,
@@ -525,8 +476,6 @@ pub struct PostProcessSettingsProps {
     // curve without touching the others.
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Blend Weights")]
     pub blend_weight_bloom: f32,
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Blend Weights")]
-    pub blend_weight_dof: f32,
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Blend Weights")]
     pub blend_weight_motion_blur: f32,
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Blend Weights")]
@@ -631,21 +580,10 @@ impl Default for PostProcessSettingsProps {
             grain_intensity: 0.0,
             grain_response: 1.0,
             grain_size: 1.0,
-            dof_enabled: false,
-            dof_focal_distance: 100.0,
-            dof_focal_region: 50.0,
-            dof_near_transition: 100.0,
-            dof_far_transition: 100.0,
-            dof_scale: 1.0,
-            dof_max_bokeh_size: 10.0,
-            dof_aperture_blades: 5,
-            dof_aperture_rotation: 0.0,
-            dof_sensor_diagonal: 43.3,
             motion_blur_enabled: false,
             motion_blur_amount: 0.0,
             motion_blur_max: 64.0,
             blend_weight_bloom: 1.0,
-            blend_weight_dof: 1.0,
             blend_weight_motion_blur: 1.0,
             blend_weight_vignette: 1.0,
             blend_weight_ca: 1.0,
@@ -725,21 +663,10 @@ impl PostProcessSettingsProps {
             grain_response: self.grain_response,
             grain_size: self.grain_size,
             grain_enabled: self.grain_enabled,
-            dof_focal_distance: self.dof_focal_distance,
-            dof_focal_region: self.dof_focal_region,
-            dof_near_transition: self.dof_near_transition,
-            dof_far_transition: self.dof_far_transition,
-            dof_scale: self.dof_scale,
-            dof_max_bokeh_size: self.dof_max_bokeh_size,
-            dof_aperture_blades: self.dof_aperture_blades.max(0) as u32,
-            dof_aperture_rotation: self.dof_aperture_rotation,
-            dof_sensor_diagonal: self.dof_sensor_diagonal,
-            dof_enabled: self.dof_enabled,
             motion_blur_amount: self.motion_blur_amount,
             motion_blur_max: self.motion_blur_max,
             motion_blur_enabled: self.motion_blur_enabled,
             blend_weight_bloom: self.blend_weight_bloom,
-            blend_weight_dof: self.blend_weight_dof,
             blend_weight_motion_blur: self.blend_weight_motion_blur,
             blend_weight_vignette: self.blend_weight_vignette,
             blend_weight_ca: self.blend_weight_ca,

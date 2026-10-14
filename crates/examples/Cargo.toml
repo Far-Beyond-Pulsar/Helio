@@ -224,10 +224,6 @@ path = "two_million_dynamic.rs"
 
 
 [[bin]]
-name = "dof_demo"
-path = "dof_demo.rs"
-
-[[bin]]
 name = "lens_flare_demo"
 path = "lens_flare_demo.rs"
 
@@ -271,6 +267,7 @@ helio-pass-billboard = { workspace = true }
 helio-pass-decal = { path = "../passes/3d/helio-pass-decal" }
 helio-pass-debug-overlay = { path = "../passes/3d/helio-pass-debug-overlay" }
 helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }
+helio-pass-lens = { path = "../passes/3d/helio-pass-lens" }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
 helio-pass-transparent = { path = "../passes/3d/helio-pass-transparent" }
 helio-pass-volumetric-fog = { path = "../passes/3d/helio-pass-volumetric-fog" }
