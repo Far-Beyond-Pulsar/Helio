@@ -702,6 +702,9 @@ pub struct ChunkWorld {
     /// waits behind the host's submits and presents (wgpu maintains the
     /// device on every submit, which delivers the map callbacks).
     polls_device: bool,
+    /// Whether draws write the plain colour target (a world drawn alone:
+    /// tests, harnesses); a host's gbuffer takes the published surface.
+    plain_colour: bool,
     pick_slots: Vec<PickSlot>,
     /// Each slot's chunk key (`chunk_keys`, mirrored).
     slot_keys: Vec<[i32; 4]>,
@@ -1380,6 +1383,7 @@ impl ChunkWorld {
             counters: buffer("chunk counters", 1024, s | wgpu::BufferUsages::COPY_SRC),
             reach: buffer("chunk reach", REACH_BYTES, s | wgpu::BufferUsages::COPY_SRC),
             polls_device: true,
+            plain_colour: true,
             reach_slots: (0..TIMING_RING).map(|_| ReachSlot { buffer: buffer("chunk reach read", REACH_BYTES, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST), state: ReachState::Free }).collect(),
             deep: FxHashSet::default(),
             reached: Vec::new(),
@@ -2332,6 +2336,11 @@ impl ChunkWorld {
         self.polls_device = polls;
     }
 
+    /// Whether draws write the plain colour target ([`Targets::colour`]).
+    pub fn set_plain_colour(&mut self, on: bool) {
+        self.plain_colour = on;
+    }
+
     /// Chunks drawn by the last [`Self::update`].
     pub fn chunk_count(&self) -> usize {
         self.drawn_set.list.len()
@@ -2416,11 +2425,11 @@ impl ChunkWorld {
             debug: {
                 let pixel: Vec<u32> = std::env::var("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL").ok().map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
                 [
-                    if std::env::var_os("HELIO_VOXEL_CHUNKS_HEAT").is_some() {
+                    (if std::env::var_os("HELIO_VOXEL_CHUNKS_HEAT").is_some() {
                         2
                     } else {
                         std::env::var("HELIO_VOXEL_CHUNKS_LEVELS").map_or(0, |v| if v == "half" { 3 } else { 1 })
-                    },
+                    }) | (u32::from(self.plain_colour) << 8),
                     u32::from(std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some()),
                     pixel.first().copied().unwrap_or(u32::MAX),
                     pixel.get(1).copied().unwrap_or(u32::MAX),

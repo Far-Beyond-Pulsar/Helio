@@ -147,7 +147,7 @@ fn chunk_frame(slot: u32) -> ChunkDraw {
 }
 COUNTERS
 // Steps this invocation's primary walk took (counting builds; the step
-// heatmap, `params.debug.x == 2`).
+// heatmap, debug mode 2).
 var<private> heat: u32;
 
 const NONE: u32 = 0xffffffffu;
@@ -1292,7 +1292,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     if exit == 0.0 {
         textureStore(out_visibility, p, vec4<u32>(0xffffffffu, 0u, 0u, 0u));
         textureStore(out_distance, p, vec4<f32>(0.0));
-        textureStore(out_colour, p, vec4<f32>(0.0));
+        if plain_colour() { textureStore(out_colour, p, vec4<f32>(0.0)); }
     }
     var box = textureLoad(seed, p, 0).x;
     // No box left: the sky.
@@ -1352,16 +1352,17 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(out_exits, p, vec4<f32>(-1.0));
     textureStore(out_visibility, p, vec4<u32>(end.slot, u32(end.cell.x) | (u32(end.cell.y) << 6u) | (u32(end.cell.z) << 12u) | (end.axis << 18u) | (end.sign << 20u) | (min(end.material, 255u) << 21u), 0u, 0u));
     textureStore(out_distance, p, vec4<f32>(end.t, 0.0, 0.0, 0.0));
+    if !plain_colour() { return; }
     let c = cell_frame(end.slot, end.cell);
     let axis_world = select(select(c.m2.xyz, c.m1.xyz, end.axis == 1u), c.m0.xyz, end.axis == 0u);
     let normal = normalize(axis_world) * select(-1.0, 1.0, end.sign == 1u);
     let light = 0.25 + 0.75 * max(dot(normal, params.sun.xyz), 0.0);
     var colour = palette(end.material).rgb;
-    if params.debug.x == 2u {
+    if debug_mode() == 2u {
         // Steps: red to 64, yellow to 128, white to 192.
         let h = f32(heat) / 64.0;
         colour = clamp(vec3<f32>(h, h - 1.0, h - 2.0), vec3<f32>(0.0), vec3<f32>(1.0)) / light;
-    } else if params.debug.x == 1u {
+    } else if debug_mode() == 1u {
         colour = level_colour((bitcast<u32>(c.box.w) >> 8u) & 31u);
     }
     textureStore(out_colour, p, vec4<f32>(colour * light, 1.0));
@@ -1496,7 +1497,20 @@ fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, material: u32,
     return Look(albedo, ao);
 }
 
-// A level's colour (`HELIO_VOXEL_CHUNKS_LEVELS`, `params.debug.x` 1 or 3).
+// The debug mode (`params.debug.x` & 0xff): 1 levels, 2 the steps' heat,
+// 3 levels on the left half.
+fn debug_mode() -> u32 {
+    return params.debug.x & 0xffu;
+}
+
+// Whether the walks write the plain colour target (bit 8 of
+// `params.debug.x`: a world drawn alone; a host's gbuffer takes the
+// published surface instead).
+fn plain_colour() -> bool {
+    return (params.debug.x & 0x100u) != 0u;
+}
+
+// A level's colour (`HELIO_VOXEL_CHUNKS_LEVELS`, debug modes 1 and 3).
 fn level_colour(level: u32) -> vec3<f32> {
     let colours = array<vec3<f32>, 8>(vec3<f32>(0.9, 0.2, 0.2), vec3<f32>(0.9, 0.6, 0.1), vec3<f32>(0.8, 0.9, 0.1), vec3<f32>(0.2, 0.8, 0.2),
         vec3<f32>(0.1, 0.8, 0.8), vec3<f32>(0.2, 0.3, 0.9), vec3<f32>(0.6, 0.2, 0.9), vec3<f32>(0.9, 0.2, 0.7));
@@ -1540,7 +1554,7 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     out.albedo = vec4<f32>(look.albedo, 1.0);
     // Level colours (`HELIO_VOXEL_CHUNKS_LEVELS`; `=half`: the left half,
     // beside the shaded right).
-    if params.debug.x == 1u || (params.debug.x == 3u && p.x < i32(size.x / 2u)) { out.albedo = vec4<f32>(level_colour(u32(chunk_keys[v.x].x >> 8u) & 31u), 1.0); }
+    if debug_mode() == 1u || (debug_mode() == 3u && p.x < i32(size.x / 2u)) { out.albedo = vec4<f32>(level_colour(u32(chunk_keys[v.x].x >> 8u) & 31u), 1.0); }
     out.normal = vec4<f32>(normal, f0);
     out.orm = vec4<f32>(look.ao * shading.w, clamp(palette(material).w, 0.04, 1.0), 0.0, f0);
     out.emissive = vec4<f32>(0.0, 0.0, 0.0, f0);
@@ -2055,7 +2069,7 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
 fn store_sun(p: vec2<i32>, v: vec2<u32>, f: Face, lit: f32) {
     let sun = params.sun.xyz;
     textureStore(out_sun, p, vec4<f32>(lit, sun));
-    if params.debug.x == 0u {
+    if plain_colour() && debug_mode() == 0u {
         let material = min((v.y >> 21u) & 0xffu, 31u);
         textureStore(out_colour, p, vec4<f32>(palette(material).rgb * (0.25 + 0.75 * max(dot(f.shading, sun), 0.0) * lit), 1.0));
     }
