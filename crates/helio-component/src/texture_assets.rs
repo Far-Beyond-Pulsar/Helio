@@ -145,20 +145,26 @@ pub fn texture_asset_id(path: &str) -> AssetId {
 
 /// The texture kind's loader: runs on a SceneDB worker thread.
 fn load_texture_asset(source: &str) -> Result<AssetPayload, String> {
+    Ok(Arc::new(decode_image_file(std::path::Path::new(source))?))
+}
+
+/// Read and decode the image file at `path`.
+pub(crate) fn decode_image_file(path: &std::path::Path) -> Result<LoadedTexture, String> {
+    let shown = path.display();
     let bytes =
-        std::fs::read(source).map_err(|error| format!("could not read '{source}': {error}"))?;
+        std::fs::read(path).map_err(|error| format!("could not read '{shown}': {error}"))?;
     let decoded = image::load_from_memory(&bytes)
-        .map_err(|error| format!("could not decode '{source}': {error}"))?
+        .map_err(|error| format!("could not decode '{shown}': {error}"))?
         .to_rgba8();
     let (width, height) = decoded.dimensions();
     if width == 0 || height == 0 {
-        return Err(format!("'{source}' has empty dimensions"));
+        return Err(format!("'{shown}' has empty dimensions"));
     }
-    Ok(Arc::new(LoadedTexture {
+    Ok(LoadedTexture {
         width,
         height,
         rgba: decoded.into_raw(),
-    }))
+    })
 }
 
 /// Bind the asset `view` into `bound` when it is the image `path` names: the
@@ -227,7 +233,10 @@ fn resident() -> &'static std::sync::Mutex<Residency> {
     RESIDENT.get_or_init(Default::default)
 }
 
-fn resident_slot(
+/// The slot `image` (content `version` of the texture `id`) holds in
+/// `mirror`'s texture store, uploading it when the store does not hold that
+/// version yet.
+pub(crate) fn resident_slot(
     id: AssetId,
     version: u64,
     image: &LoadedTexture,
