@@ -22,7 +22,8 @@ pub struct GpuLensResponse {
     pub glare_intensity: f32,
     pub streak_intensity: f32,
     pub dispersion: f32,
-    pub vignette: f32,
+    /// Reserved: natural falloff is the lens's (`ResolvedLens::natural_vignette`).
+    pub reserved_vignette: f32,
     pub starburst_intensity: f32,
     pub starburst_length: f32,
     pub coating_strength: f32,

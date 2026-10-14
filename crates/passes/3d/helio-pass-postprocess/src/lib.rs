@@ -9,7 +9,7 @@
 //!   2. `cs_bloom_down_extract` — extract brights from HDR → bloom mip 0 (compute)
 //!   3. `cs_bloom_down`         — 2x downsample mip chain, 4 passes (compute)
 //!   3b. `cs_bloom_upsample`    — progressive upsample-and-add, mip 3 → mip 0 (compute)
-//!   4. `fs_uber`               — exposure, bloom + lens composite, grade, tonemap, vignette, CA, grain (render)
+//!   4. `fs_uber`               — exposure, bloom + lens composite, grade, tonemap, vignette, grain (render)
 //!
 //! Bind groups:
 //!   Main BGLs (group 0): uniforms, samplers, hdr/depth, bloom, noise, custom, volumes, blend output
@@ -75,7 +75,7 @@ const _: () = assert!(MAX_PP_VOLUMES == 64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UserEffectPosition {
     PreBlend = 0,    // before exposure / bloom / color grade
-    PostTonemap = 1, // after tonemap, before vignette / CA / grain
+    PostTonemap = 1, // after tonemap, before vignette / grain
     PostGrain = 2,   // after grain, before motion blur
     Final = 3,       // after all built-in effects
 }

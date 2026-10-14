@@ -85,7 +85,6 @@ impl Default for HdrOutputMode {
 #[category("White Balance", category_color = "#2FA88A")]
 #[category("Tonemap", category_color = "#2FA88A")]
 #[category("Vignette", category_color = "#7C6FD1")]
-#[category("Chromatic Aberration", category_color = "#7C6FD1")]
 #[category("Film Grain", category_color = "#7C6FD1")]
 #[category("Motion Blur", category_color = "#3AA0FF")]
 #[category("Blend Weights", category_color = "#8F8F8F")]
@@ -167,8 +166,6 @@ pub struct PostProcessOverrides {
     #[property(category = "Overrides")]
     pub override_vignette: bool,
     #[property(category = "Overrides")]
-    pub override_chromatic_aberration: bool,
-    #[property(category = "Overrides")]
     pub override_film_grain: bool,
     #[property(category = "Overrides")]
     pub override_motion_blur: bool,
@@ -189,7 +186,6 @@ impl Default for PostProcessOverrides {
             override_color_grading: true,
             override_tonemap: true,
             override_vignette: true,
-            override_chromatic_aberration: true,
             override_film_grain: true,
             override_motion_blur: true,
             override_hdr_output: true,
@@ -202,7 +198,7 @@ impl Default for PostProcessOverrides {
 impl PostProcessOverrides {
     pub fn mask(&self) -> [u32; 4] {
         use helio_pass_postprocess::PostProcessProperty as P;
-        let groups: [(bool, &[usize]); 11] = [
+        let groups: [(bool, &[usize]); 10] = [
             (
                 self.override_exposure,
                 &[
@@ -270,15 +266,6 @@ impl PostProcessOverrides {
                 ],
             ),
             (
-                self.override_chromatic_aberration,
-                &[
-                    P::CA_INTENSITY,
-                    P::CA_START_OFFSET,
-                    P::CA_ENABLED,
-                    P::BLEND_WEIGHT_CA,
-                ],
-            ),
-            (
                 self.override_film_grain,
                 &[
                     P::GRAIN_INTENSITY,
@@ -331,7 +318,6 @@ impl PostProcessOverrides {
                     P::LENS_GLARE_INTENSITY,
                     P::LENS_STREAK_INTENSITY,
                     P::LENS_DISPERSION,
-                    P::LENS_VIGNETTE,
                     P::LENS_STARBURST_INTENSITY,
                     P::LENS_STARBURST_LENGTH,
                     P::LENS_COATING_STRENGTH,
@@ -364,7 +350,6 @@ impl PostProcessOverrides {
 #[category("White Balance", category_color = "#2FA88A")]
 #[category("Tonemap", category_color = "#2FA88A")]
 #[category("Vignette", category_color = "#7C6FD1")]
-#[category("Chromatic Aberration", category_color = "#7C6FD1")]
 #[category("Film Grain", category_color = "#7C6FD1")]
 #[category("Motion Blur", category_color = "#3AA0FF")]
 #[category("Blend Weights", category_color = "#8F8F8F")]
@@ -444,14 +429,6 @@ pub struct PostProcessSettingsProps {
     #[property(category = "Vignette")]
     pub vignette_color: [f32; 3],
 
-    // ── Chromatic Aberration ────────────────────────────────────────────
-    #[property(category = "Chromatic Aberration")]
-    pub ca_enabled: bool,
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Chromatic Aberration")]
-    pub ca_intensity: f32,
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Chromatic Aberration")]
-    pub ca_start_offset: f32,
-
     // ── Film Grain ──────────────────────────────────────────────────────
     #[property(category = "Film Grain")]
     pub grain_enabled: bool,
@@ -480,8 +457,6 @@ pub struct PostProcessSettingsProps {
     pub blend_weight_motion_blur: f32,
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Blend Weights")]
     pub blend_weight_vignette: f32,
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Blend Weights")]
-    pub blend_weight_ca: f32,
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Blend Weights")]
     pub blend_weight_grain: f32,
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Blend Weights")]
@@ -573,9 +548,6 @@ impl Default for PostProcessSettingsProps {
             vignette_smoothness: 0.5,
             vignette_roundness: 0.5,
             vignette_color: [0.0, 0.0, 0.0],
-            ca_enabled: false,
-            ca_intensity: 0.0,
-            ca_start_offset: 0.0,
             grain_enabled: false,
             grain_intensity: 0.0,
             grain_response: 1.0,
@@ -586,7 +558,6 @@ impl Default for PostProcessSettingsProps {
             blend_weight_bloom: 1.0,
             blend_weight_motion_blur: 1.0,
             blend_weight_vignette: 1.0,
-            blend_weight_ca: 1.0,
             blend_weight_grain: 1.0,
             blend_weight_exposure: 1.0,
             hdr_output_mode: HdrOutputMode::Ldr,
@@ -656,9 +627,6 @@ impl PostProcessSettingsProps {
             vignette_roundness: self.vignette_roundness,
             vignette_color: self.vignette_color,
             vignette_enabled: self.vignette_enabled,
-            ca_intensity: self.ca_intensity,
-            ca_start_offset: self.ca_start_offset,
-            ca_enabled: self.ca_enabled,
             grain_intensity: self.grain_intensity,
             grain_response: self.grain_response,
             grain_size: self.grain_size,
@@ -669,7 +637,6 @@ impl PostProcessSettingsProps {
             blend_weight_bloom: self.blend_weight_bloom,
             blend_weight_motion_blur: self.blend_weight_motion_blur,
             blend_weight_vignette: self.blend_weight_vignette,
-            blend_weight_ca: self.blend_weight_ca,
             blend_weight_grain: self.blend_weight_grain,
             blend_weight_exposure: self.blend_weight_exposure,
             hdr_output_mode: match self.hdr_output_mode {

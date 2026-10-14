@@ -29,10 +29,9 @@
 //   5. Tonemapping
 //   INJECTION_POINT_1  — user effects (post-tonemap)
 //   6. Vignette
-//   7. Chromatic aberration
-//   8. Film grain
+//   7. Film grain
 //   INJECTION_POINT_2  — user effects (post-grain)
-//   9. Motion blur
+//   8. Motion blur
 //   INJECTION_POINT_3  — user effects (final)
 
 // ── Constants ───────────────────────────────────────────────────────────────────
@@ -85,10 +84,11 @@ struct GpuPostProcessUniforms {
     _pad_vignette:          f32,
     vignette_color:         vec3<f32>,
     vignette_enabled:       u32,
-    ca_intensity:           f32,
-    ca_start_offset:        f32,
-    ca_enabled:             u32,
-    _pad11:                 f32,
+    // Reserved: was post-process chromatic aberration (now the lens's).
+    _reserved_ca0:          f32,
+    _reserved_ca1:          f32,
+    _reserved_ca2:          f32,
+    _reserved_ca3:          f32,
     grain_intensity:        f32,
     grain_response:         f32,
     grain_size:             f32,
@@ -100,7 +100,7 @@ struct GpuPostProcessUniforms {
     blend_weight_bloom:        f32,
     blend_weight_motion_blur:  f32,
     blend_weight_vignette:     f32,
-    blend_weight_ca:           f32,
+    _pad_bw_ca:                f32,
     blend_weight_grain:        f32,
     blend_weight_exposure:     f32,
     _pad14:                    f32,
@@ -153,7 +153,7 @@ struct GpuPostProcessUniforms {
     lens_glare_intensity: f32,     // 468
     lens_streak_intensity: f32,    // 472
     lens_dispersion: f32,          // 476
-    lens_vignette: f32,            // 480
+    _reserved_lens_vignette: f32,  // 480
     lens_starburst_intensity: f32, // 484
     lens_starburst_length: f32,    // 488
     lens_coating_strength: f32,    // 492
@@ -314,67 +314,62 @@ fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: 
     if overridden(mask, 25u) { r.vignette_roundness = base.vignette_roundness + (vol.vignette_roundness - base.vignette_roundness) * t; }
     if overridden(mask, 26u) { r.vignette_color = base.vignette_color + (vol.vignette_color - base.vignette_color) * t; }
     if overridden(mask, 27u) { r.vignette_enabled = select(base.vignette_enabled, vol.vignette_enabled, t >= 0.5); }
-    if overridden(mask, 28u) { r.ca_intensity = base.ca_intensity + (vol.ca_intensity - base.ca_intensity) * t; }
-    if overridden(mask, 29u) { r.ca_start_offset = base.ca_start_offset + (vol.ca_start_offset - base.ca_start_offset) * t; }
-    if overridden(mask, 30u) { r.ca_enabled = select(base.ca_enabled, vol.ca_enabled, t >= 0.5); }
-    if overridden(mask, 31u) { r.grain_intensity = base.grain_intensity + (vol.grain_intensity - base.grain_intensity) * t; }
-    if overridden(mask, 32u) { r.grain_response = base.grain_response + (vol.grain_response - base.grain_response) * t; }
-    if overridden(mask, 33u) { r.grain_size = base.grain_size + (vol.grain_size - base.grain_size) * t; }
-    if overridden(mask, 34u) { r.grain_enabled = select(base.grain_enabled, vol.grain_enabled, t >= 0.5); }
-    if overridden(mask, 35u) { r.motion_blur_amount = base.motion_blur_amount + (vol.motion_blur_amount - base.motion_blur_amount) * t; }
-    if overridden(mask, 36u) { r.motion_blur_max = base.motion_blur_max + (vol.motion_blur_max - base.motion_blur_max) * t; }
-    if overridden(mask, 37u) { r.motion_blur_enabled = select(base.motion_blur_enabled, vol.motion_blur_enabled, t >= 0.5); }
-    if overridden(mask, 38u) { r.blend_weight_bloom = base.blend_weight_bloom + (vol.blend_weight_bloom - base.blend_weight_bloom) * t; }
-    if overridden(mask, 39u) { r.blend_weight_motion_blur = base.blend_weight_motion_blur + (vol.blend_weight_motion_blur - base.blend_weight_motion_blur) * t; }
-    if overridden(mask, 40u) { r.blend_weight_vignette = base.blend_weight_vignette + (vol.blend_weight_vignette - base.blend_weight_vignette) * t; }
-    if overridden(mask, 41u) { r.blend_weight_ca = base.blend_weight_ca + (vol.blend_weight_ca - base.blend_weight_ca) * t; }
-    if overridden(mask, 42u) { r.blend_weight_grain = base.blend_weight_grain + (vol.blend_weight_grain - base.blend_weight_grain) * t; }
-    if overridden(mask, 43u) { r.blend_weight_exposure = base.blend_weight_exposure + (vol.blend_weight_exposure - base.blend_weight_exposure) * t; }
-    if overridden(mask, 44u) { r.fog_enabled = select(base.fog_enabled, vol.fog_enabled, t >= 0.5); }
-    if overridden(mask, 45u) { r.fog_mode = select(base.fog_mode, vol.fog_mode, t >= 0.5); }
-    if overridden(mask, 46u) { r.fog_density = base.fog_density + (vol.fog_density - base.fog_density) * t; }
-    if overridden(mask, 47u) { r.fog_height_falloff = base.fog_height_falloff + (vol.fog_height_falloff - base.fog_height_falloff) * t; }
-    if overridden(mask, 48u) { r.fog_start_distance = base.fog_start_distance + (vol.fog_start_distance - base.fog_start_distance) * t; }
-    if overridden(mask, 49u) { r.fog_max_distance = base.fog_max_distance + (vol.fog_max_distance - base.fog_max_distance) * t; }
-    if overridden(mask, 50u) { r.fog_height = base.fog_height + (vol.fog_height - base.fog_height) * t; }
-    if overridden(mask, 51u) { r.fog_scattering_anisotropy = base.fog_scattering_anisotropy + (vol.fog_scattering_anisotropy - base.fog_scattering_anisotropy) * t; }
-    if overridden(mask, 52u) { r.fog_color = base.fog_color + (vol.fog_color - base.fog_color) * t; }
-    if overridden(mask, 53u) { r.fog_emissive = base.fog_emissive + (vol.fog_emissive - base.fog_emissive) * t; }
-    if overridden(mask, 54u) { r.hdr_output_mode = select(base.hdr_output_mode, vol.hdr_output_mode, t >= 0.5); }
-    if overridden(mask, 55u) { r.hdr_max_nits = base.hdr_max_nits + (vol.hdr_max_nits - base.hdr_max_nits) * t; }
-    if overridden(mask, 56u) { r.hdr_ui_brightness = base.hdr_ui_brightness + (vol.hdr_ui_brightness - base.hdr_ui_brightness) * t; }
-    if overridden(mask, 57u) { r.lift_color = base.lift_color + (vol.lift_color - base.lift_color) * t; }
-    if overridden(mask, 58u) { r.gamma_color = base.gamma_color + (vol.gamma_color - base.gamma_color) * t; }
-    if overridden(mask, 59u) { r.gain_color = base.gain_color + (vol.gain_color - base.gain_color) * t; }
-    if overridden(mask, 60u) { r.shadows_max = base.shadows_max + (vol.shadows_max - base.shadows_max) * t; }
-    if overridden(mask, 61u) { r.highlights_min = base.highlights_min + (vol.highlights_min - base.highlights_min) * t; }
-    if overridden(mask, 62u) { r.shadow_highlight_balance = base.shadow_highlight_balance + (vol.shadow_highlight_balance - base.shadow_highlight_balance) * t; }
-    if overridden(mask, 63u) { r.hue_shift = base.hue_shift + (vol.hue_shift - base.hue_shift) * t; }
-    if overridden(mask, 64u) { r.lut_generation = select(base.lut_generation, vol.lut_generation, t >= 0.5); }
-    if overridden(mask, 65u) { r.lut_intensity = base.lut_intensity + (vol.lut_intensity - base.lut_intensity) * t; }
-    if overridden(mask, 66u) { r.lut_platform = select(base.lut_platform, vol.lut_platform, t >= 0.5); }
-    if overridden(mask, 67u) { r.lens_enabled = select(base.lens_enabled, vol.lens_enabled, t >= 0.5); }
-    if overridden(mask, 68u) { r.lens_quality = select(base.lens_quality, vol.lens_quality, t >= 0.5); }
-    if overridden(mask, 69u) { r.lens_profile = select(base.lens_profile, vol.lens_profile, t >= 0.5); }
-    if overridden(mask, 70u) { r.lens_ghost_count = select(base.lens_ghost_count, vol.lens_ghost_count, t >= 0.5); }
-    if overridden(mask, 71u) { r.lens_intensity = base.lens_intensity + (vol.lens_intensity - base.lens_intensity) * t; }
-    if overridden(mask, 72u) { r.lens_threshold = base.lens_threshold + (vol.lens_threshold - base.lens_threshold) * t; }
-    if overridden(mask, 73u) { r.lens_soft_knee = base.lens_soft_knee + (vol.lens_soft_knee - base.lens_soft_knee) * t; }
-    if overridden(mask, 74u) { r.lens_ghost_intensity = base.lens_ghost_intensity + (vol.lens_ghost_intensity - base.lens_ghost_intensity) * t; }
-    if overridden(mask, 75u) { r.lens_halo_intensity = base.lens_halo_intensity + (vol.lens_halo_intensity - base.lens_halo_intensity) * t; }
-    if overridden(mask, 76u) { r.lens_glare_intensity = base.lens_glare_intensity + (vol.lens_glare_intensity - base.lens_glare_intensity) * t; }
-    if overridden(mask, 77u) { r.lens_streak_intensity = base.lens_streak_intensity + (vol.lens_streak_intensity - base.lens_streak_intensity) * t; }
-    if overridden(mask, 78u) { r.lens_dispersion = base.lens_dispersion + (vol.lens_dispersion - base.lens_dispersion) * t; }
-    if overridden(mask, 79u) { r.lens_vignette = base.lens_vignette + (vol.lens_vignette - base.lens_vignette) * t; }
-    if overridden(mask, 80u) { r.lens_starburst_intensity = base.lens_starburst_intensity + (vol.lens_starburst_intensity - base.lens_starburst_intensity) * t; }
-    if overridden(mask, 81u) { r.lens_starburst_length = base.lens_starburst_length + (vol.lens_starburst_length - base.lens_starburst_length) * t; }
-    if overridden(mask, 82u) { r.lens_coating_strength = base.lens_coating_strength + (vol.lens_coating_strength - base.lens_coating_strength) * t; }
-    if overridden(mask, 83u) { r.lens_ghost_rim = base.lens_ghost_rim + (vol.lens_ghost_rim - base.lens_ghost_rim) * t; }
-    if overridden(mask, 84u) { r.lens_dirt_intensity = base.lens_dirt_intensity + (vol.lens_dirt_intensity - base.lens_dirt_intensity) * t; }
-    if overridden(mask, 85u) { r.lens_light_sources = select(base.lens_light_sources, vol.lens_light_sources, t >= 0.5); }
-    if overridden(mask, 86u) { r.lens_light_intensity = base.lens_light_intensity + (vol.lens_light_intensity - base.lens_light_intensity) * t; }
-    if overridden(mask, 87u) { r.lens_field_margin = base.lens_field_margin + (vol.lens_field_margin - base.lens_field_margin) * t; }
-    if overridden(mask, 88u) { r.lens_response_time = base.lens_response_time + (vol.lens_response_time - base.lens_response_time) * t; }
+    if overridden(mask, 28u) { r.grain_intensity = base.grain_intensity + (vol.grain_intensity - base.grain_intensity) * t; }
+    if overridden(mask, 29u) { r.grain_response = base.grain_response + (vol.grain_response - base.grain_response) * t; }
+    if overridden(mask, 30u) { r.grain_size = base.grain_size + (vol.grain_size - base.grain_size) * t; }
+    if overridden(mask, 31u) { r.grain_enabled = select(base.grain_enabled, vol.grain_enabled, t >= 0.5); }
+    if overridden(mask, 32u) { r.motion_blur_amount = base.motion_blur_amount + (vol.motion_blur_amount - base.motion_blur_amount) * t; }
+    if overridden(mask, 33u) { r.motion_blur_max = base.motion_blur_max + (vol.motion_blur_max - base.motion_blur_max) * t; }
+    if overridden(mask, 34u) { r.motion_blur_enabled = select(base.motion_blur_enabled, vol.motion_blur_enabled, t >= 0.5); }
+    if overridden(mask, 35u) { r.blend_weight_bloom = base.blend_weight_bloom + (vol.blend_weight_bloom - base.blend_weight_bloom) * t; }
+    if overridden(mask, 36u) { r.blend_weight_motion_blur = base.blend_weight_motion_blur + (vol.blend_weight_motion_blur - base.blend_weight_motion_blur) * t; }
+    if overridden(mask, 37u) { r.blend_weight_vignette = base.blend_weight_vignette + (vol.blend_weight_vignette - base.blend_weight_vignette) * t; }
+    if overridden(mask, 38u) { r.blend_weight_grain = base.blend_weight_grain + (vol.blend_weight_grain - base.blend_weight_grain) * t; }
+    if overridden(mask, 39u) { r.blend_weight_exposure = base.blend_weight_exposure + (vol.blend_weight_exposure - base.blend_weight_exposure) * t; }
+    if overridden(mask, 40u) { r.fog_enabled = select(base.fog_enabled, vol.fog_enabled, t >= 0.5); }
+    if overridden(mask, 41u) { r.fog_mode = select(base.fog_mode, vol.fog_mode, t >= 0.5); }
+    if overridden(mask, 42u) { r.fog_density = base.fog_density + (vol.fog_density - base.fog_density) * t; }
+    if overridden(mask, 43u) { r.fog_height_falloff = base.fog_height_falloff + (vol.fog_height_falloff - base.fog_height_falloff) * t; }
+    if overridden(mask, 44u) { r.fog_start_distance = base.fog_start_distance + (vol.fog_start_distance - base.fog_start_distance) * t; }
+    if overridden(mask, 45u) { r.fog_max_distance = base.fog_max_distance + (vol.fog_max_distance - base.fog_max_distance) * t; }
+    if overridden(mask, 46u) { r.fog_height = base.fog_height + (vol.fog_height - base.fog_height) * t; }
+    if overridden(mask, 47u) { r.fog_scattering_anisotropy = base.fog_scattering_anisotropy + (vol.fog_scattering_anisotropy - base.fog_scattering_anisotropy) * t; }
+    if overridden(mask, 48u) { r.fog_color = base.fog_color + (vol.fog_color - base.fog_color) * t; }
+    if overridden(mask, 49u) { r.fog_emissive = base.fog_emissive + (vol.fog_emissive - base.fog_emissive) * t; }
+    if overridden(mask, 50u) { r.hdr_output_mode = select(base.hdr_output_mode, vol.hdr_output_mode, t >= 0.5); }
+    if overridden(mask, 51u) { r.hdr_max_nits = base.hdr_max_nits + (vol.hdr_max_nits - base.hdr_max_nits) * t; }
+    if overridden(mask, 52u) { r.hdr_ui_brightness = base.hdr_ui_brightness + (vol.hdr_ui_brightness - base.hdr_ui_brightness) * t; }
+    if overridden(mask, 53u) { r.lift_color = base.lift_color + (vol.lift_color - base.lift_color) * t; }
+    if overridden(mask, 54u) { r.gamma_color = base.gamma_color + (vol.gamma_color - base.gamma_color) * t; }
+    if overridden(mask, 55u) { r.gain_color = base.gain_color + (vol.gain_color - base.gain_color) * t; }
+    if overridden(mask, 56u) { r.shadows_max = base.shadows_max + (vol.shadows_max - base.shadows_max) * t; }
+    if overridden(mask, 57u) { r.highlights_min = base.highlights_min + (vol.highlights_min - base.highlights_min) * t; }
+    if overridden(mask, 58u) { r.shadow_highlight_balance = base.shadow_highlight_balance + (vol.shadow_highlight_balance - base.shadow_highlight_balance) * t; }
+    if overridden(mask, 59u) { r.hue_shift = base.hue_shift + (vol.hue_shift - base.hue_shift) * t; }
+    if overridden(mask, 60u) { r.lut_generation = select(base.lut_generation, vol.lut_generation, t >= 0.5); }
+    if overridden(mask, 61u) { r.lut_intensity = base.lut_intensity + (vol.lut_intensity - base.lut_intensity) * t; }
+    if overridden(mask, 62u) { r.lut_platform = select(base.lut_platform, vol.lut_platform, t >= 0.5); }
+    if overridden(mask, 63u) { r.lens_enabled = select(base.lens_enabled, vol.lens_enabled, t >= 0.5); }
+    if overridden(mask, 64u) { r.lens_quality = select(base.lens_quality, vol.lens_quality, t >= 0.5); }
+    if overridden(mask, 65u) { r.lens_profile = select(base.lens_profile, vol.lens_profile, t >= 0.5); }
+    if overridden(mask, 66u) { r.lens_ghost_count = select(base.lens_ghost_count, vol.lens_ghost_count, t >= 0.5); }
+    if overridden(mask, 67u) { r.lens_intensity = base.lens_intensity + (vol.lens_intensity - base.lens_intensity) * t; }
+    if overridden(mask, 68u) { r.lens_threshold = base.lens_threshold + (vol.lens_threshold - base.lens_threshold) * t; }
+    if overridden(mask, 69u) { r.lens_soft_knee = base.lens_soft_knee + (vol.lens_soft_knee - base.lens_soft_knee) * t; }
+    if overridden(mask, 70u) { r.lens_ghost_intensity = base.lens_ghost_intensity + (vol.lens_ghost_intensity - base.lens_ghost_intensity) * t; }
+    if overridden(mask, 71u) { r.lens_halo_intensity = base.lens_halo_intensity + (vol.lens_halo_intensity - base.lens_halo_intensity) * t; }
+    if overridden(mask, 72u) { r.lens_glare_intensity = base.lens_glare_intensity + (vol.lens_glare_intensity - base.lens_glare_intensity) * t; }
+    if overridden(mask, 73u) { r.lens_streak_intensity = base.lens_streak_intensity + (vol.lens_streak_intensity - base.lens_streak_intensity) * t; }
+    if overridden(mask, 74u) { r.lens_dispersion = base.lens_dispersion + (vol.lens_dispersion - base.lens_dispersion) * t; }
+    if overridden(mask, 75u) { r.lens_starburst_intensity = base.lens_starburst_intensity + (vol.lens_starburst_intensity - base.lens_starburst_intensity) * t; }
+    if overridden(mask, 76u) { r.lens_starburst_length = base.lens_starburst_length + (vol.lens_starburst_length - base.lens_starburst_length) * t; }
+    if overridden(mask, 77u) { r.lens_coating_strength = base.lens_coating_strength + (vol.lens_coating_strength - base.lens_coating_strength) * t; }
+    if overridden(mask, 78u) { r.lens_ghost_rim = base.lens_ghost_rim + (vol.lens_ghost_rim - base.lens_ghost_rim) * t; }
+    if overridden(mask, 79u) { r.lens_dirt_intensity = base.lens_dirt_intensity + (vol.lens_dirt_intensity - base.lens_dirt_intensity) * t; }
+    if overridden(mask, 80u) { r.lens_light_sources = select(base.lens_light_sources, vol.lens_light_sources, t >= 0.5); }
+    if overridden(mask, 81u) { r.lens_light_intensity = base.lens_light_intensity + (vol.lens_light_intensity - base.lens_light_intensity) * t; }
+    if overridden(mask, 82u) { r.lens_field_margin = base.lens_field_margin + (vol.lens_field_margin - base.lens_field_margin) * t; }
+    if overridden(mask, 83u) { r.lens_response_time = base.lens_response_time + (vol.lens_response_time - base.lens_response_time) * t; }
     return r;
 }
 fn volume_weight(pos: vec3<f32>, v: GpuPostProcessVolume) -> f32 {
@@ -818,22 +813,6 @@ fn apply_vignette(color: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     return mix(postprocess.vignette_color, color, vignette);
 }
 
-// ── Chromatic aberration ───────────────────────────────────────────────────────
-
-fn apply_ca(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
-    if postprocess.ca_enabled == 0u { return color; }
-    let center = uv - 0.5;
-    let dist = length(center);
-    let offset = max(dist - postprocess.ca_start_offset, 0.0) * postprocess.ca_intensity;
-    let dir = normalize(center);
-    let r_uv = uv + dir * offset * (1.0 / dims);
-    let b_uv = uv - dir * offset * (1.0 / dims);
-    let r = textureSampleLevel(hdr_input, linear_samp, r_uv, 0.0).r;
-    let g = color.g;
-    let b = textureSampleLevel(hdr_input, linear_samp, b_uv, 0.0).b;
-    return vec3<f32>(r, g, b);
-}
-
 // ── Film grain ─────────────────────────────────────────────────────────────────
 
 fn hash(p: vec2<f32>) -> f32 {
@@ -951,20 +930,17 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     // 6. Vignette
     color = apply_vignette(color, uv);
 
-    // 7. Chromatic aberration
-    color = apply_ca(color, uv, dims);
-
-    // 8. Film grain
+    // 7. Film grain
     color = apply_grain(color, uv, dims);
 
     //%P2
 
-    // 9. Motion blur
+    // 8. Motion blur
     color = apply_motion_blur(color, uv, dims);
 
     //%P3
 
-    // 10. HDR display encoding
+    // 9. HDR display encoding
     //
     // Scene values are in arbitrary linear units. The uniform fields
     // hdr_max_nits and hdr_ui_brightness map them to cd/m²:

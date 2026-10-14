@@ -115,7 +115,7 @@ mod tests {
         let mut settings = crate::PostProcessSettings::default();
         settings.lens_flare.enabled = true;
         settings.lens_flare.ghost_count = 7;
-        settings.lens_flare.vignette = 0.25;
+        settings.lens_flare.field_margin = 0.25;
         settings.fog_density = 0.125;
         let gpu = settings.to_gpu();
         let camera = CameraPostProcessComponent::new(3, &settings);

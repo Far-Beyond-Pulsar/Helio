@@ -148,9 +148,19 @@ fn resolver_matches_the_rust_blender_property_by_property() {
     // the reference every property is compared against.
     let reference = resolve_mask(PostProcessProperty::NONE).0;
 
+    // The bytes of the removed chromatic aberration and lens vignette stay
+    // reserved: no property may write them.
+    use std::mem::{offset_of as off, size_of as sz};
+    let reserved = [
+        off!(GpuPostProcessUniforms, reserved_ca)..off!(GpuPostProcessUniforms, reserved_ca) + sz::<[f32; 4]>(),
+        off!(GpuPostProcessUniforms, reserved_lens_vignette)..off!(GpuPostProcessUniforms, reserved_lens_vignette) + 4,
+    ];
     for property in 0..PostProcessProperty::COUNT {
         let (gpu, cpu) = resolve(property);
         assert_eq!(gpu, cpu, "property {property}: the resolver and the Rust blender disagree");
+        for range in &reserved {
+            assert_eq!(gpu[range.clone()], reference[range.clone()], "property {property} wrote a reserved word");
+        }
         // The medium's density and range only show once its block is enabled.
         let gated = [PostProcessProperty::FOG_DENSITY, PostProcessProperty::FOG_MAX_DISTANCE];
         if !gated.contains(&property) {
@@ -160,7 +170,7 @@ fn resolver_matches_the_rust_blender_property_by_property() {
 
     // Named properties land on their fields: only those bytes change.
     use std::mem::{offset_of, size_of};
-    let fields: [(usize, usize, usize); 9] = [
+    let fields: [(usize, usize, usize); 8] = [
         (PostProcessProperty::BLOOM_TINT, offset_of!(GpuPostProcessUniforms, bloom_tint), 12),
         (PostProcessProperty::MOTION_BLUR_ENABLED, offset_of!(GpuPostProcessUniforms, motion_blur_enabled), 4),
         (PostProcessProperty::BLEND_WEIGHT_EXPOSURE, offset_of!(GpuPostProcessUniforms, blend_weight_exposure), 4),
@@ -168,7 +178,6 @@ fn resolver_matches_the_rust_blender_property_by_property() {
         (PostProcessProperty::GAIN_COLOR, offset_of!(GpuPostProcessUniforms, gain_color), 12),
         (PostProcessProperty::LUT_PLATFORM, offset_of!(GpuPostProcessUniforms, lut_platform), 4),
         (PostProcessProperty::LENS_ENABLED, offset_of!(GpuPostProcessUniforms, lens_enabled), 4),
-        (PostProcessProperty::LENS_VIGNETTE, offset_of!(GpuPostProcessUniforms, lens_vignette), 4),
         (PostProcessProperty::LENS_RESPONSE_TIME, offset_of!(GpuPostProcessUniforms, lens_response_time), 4),
     ];
     for (property, offset, len) in fields {

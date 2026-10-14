@@ -68,7 +68,7 @@ const ACTIVE_MEDIA_HEADER_BYTES: u64 = (32 + 64 * 3) * 4;
 /// Stride of a `"scene_lights"` row (the shader's full 128-byte `GpuLight`).
 const LIGHT_ROW_BYTES: u64 = 128;
 // FogVolume's WGSL opaque prefix/suffix must agree with the PP row ABI.
-const _: () = assert!(helio_pass_postprocess::GpuPostProcessUniforms::FOG_BLOCK_OFFSET % 16 == 0);
+const _: () = assert!(helio_pass_postprocess::GpuPostProcessUniforms::FOG_BLOCK_OFFSET.is_multiple_of(16));
 
 /// Assemble the legacy PP row layout from its Rust ABI: the opaque words
 /// before and after the fog block follow wherever PP places it.

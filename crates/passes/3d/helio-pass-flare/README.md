@@ -30,6 +30,11 @@ sensor width and the iris (blades, rotation) come from the view's lens
 pass publishes, with a neutral 50 mm f/2.8, 36 mm, six-blade camera when the
 graph has no lens pass.
 
+Natural `cos⁴` falloff is the lens's too (a `NATURAL_VIGNETTE` element, published as
+`ResolvedLens::natural_vignette`): the lens applies it to the image this pass
+reads, and this pass applies the same amount to analytic light sources, which
+are not in that image. There is no separate flare vignette setting.
+
 | Field | Meaning |
 | --- | --- |
 | `enabled`, `intensity` | Master switch and linear gain (0–16) |
@@ -39,14 +44,14 @@ graph has no lens pass.
 | `ghost_count`, `ghost_intensity` | Reflected ghost images (≤4 economical, ≤8 high) |
 | `halo_intensity`, `glare_intensity`, `streak_intensity` | Ring, veiling glare around sources, horizontal streaks |
 | `dispersion` | Wavelength-dependent offset of R and B |
-| `vignette` | Natural cos⁴ falloff applied to the extracted light |
 
 ## Optical model
 
 1. **Extract** (`cs_extract`): a 4×4 box reduction of the scene-linear input to
    quarter resolution. Every input texel participates, so sub-pixel peaks
    survive. The threshold/knee selects bright light without tone mapping;
-   cos⁴ field falloff uses the actual sensor and focal length.
+   the lens pass has already applied natural cos⁴ falloff to its image (the
+   `NATURAL_VIGNETTE` element), so the extraction does not apply it again.
 2. **Pyramid** (`cs_downsample`): four 2×2 mean reductions of the extracted
    light. Every level carries the same mean radiance, so sampling a coarser
    level prefilters without changing energy.

@@ -1,6 +1,8 @@
-//! Physically based screen-space lens: a focus field over the sensor and the
-//! thin-lens defocus it implies, in scene-linear radiance. See README.md for
-//! the optical model and the `lens_color` / `lens_resolved` graph contract.
+//! Physically based screen-space lens: a focus field over the sensor, the
+//! thin-lens defocus it implies, a ray map (projection, distortion, spectral
+//! lateral chromatic aberration) and a transmission (vignetting, filters), in
+//! scene-linear radiance. See README.md for the optical model and the
+//! `lens_color` / `lens_resolved` graph contract.
 
 use helio_core::graph::ResourceBuilder;
 use helio_core::{
@@ -11,10 +13,16 @@ mod components;
 pub use components::*;
 mod gpu_types;
 pub use gpu_types::*;
+pub mod ray_map;
 
 /// Scene-linear image after the lens, at the size of the pass's input.
 pub const LENS_COLOR: &str = "lens_color";
 pub const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// Optional registry entry: a `D2Array` view of [`APERTURE_SHAPE_FORMAT`] iris
+/// shapes for `pupil::TEXTURE_LAYER`. Without it one white layer is bound.
+pub const APERTURE_SHAPES: &str = "lens_aperture_shapes";
+/// Format of aperture shape textures: coverage in red.
+pub const APERTURE_SHAPE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 
 /// Tile edge of the circle-of-confusion extent grid; equals `TILE` in the WGSL.
 const TILE: u32 = 16;
@@ -88,9 +96,11 @@ pub struct LensInputs<'a> {
     pub depth: Option<&'a wgpu::TextureView>,
     pub lenses: Option<&'a wgpu::Buffer>,
     pub elements: Option<&'a wgpu::Buffer>,
+    /// Iris shape array, see [`APERTURE_SHAPES`].
+    pub aperture_shapes: Option<&'a wgpu::TextureView>,
 }
 
-type BindingKey = ([Option<wgpu::TextureView>; 2], [Option<wgpu::Buffer>; 3]);
+type BindingKey = ([Option<wgpu::TextureView>; 3], [Option<wgpu::Buffer>; 3]);
 
 // Stages in recording order; `args` holds one indirect triple per stage after
 // the resolve.
@@ -150,6 +160,56 @@ fn texture(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+fn texture_array(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: COMPUTE,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2Array,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+/// A `D2Array` view of iris shapes for [`LensInputs::aperture_shapes`]:
+/// `layers` are `size` x `size` coverage images (row-major, 0..255, the
+/// square around the pupil circle, y down), one array layer each.
+pub fn aperture_shape_array(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    size: u32,
+    layers: &[&[u8]],
+) -> wgpu::TextureView {
+    use wgpu::util::DeviceExt;
+    let data: Vec<u8> = layers.iter().flat_map(|layer| layer.iter().copied()).collect();
+    device
+        .create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("Lens aperture shapes"),
+                size: wgpu::Extent3d {
+                    width: size.max(1),
+                    height: size.max(1),
+                    depth_or_array_layers: layers.len().max(1) as u32,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: APERTURE_SHAPE_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &data,
+        )
+        .create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        })
+}
+
 fn storage_texture(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -194,6 +254,10 @@ pub struct LensPass {
     fallback_lenses: wgpu::Buffer,
     fallback_elements: wgpu::Buffer,
     fallback_depth: wgpu::TextureView,
+    /// One white layer: the aperture array when the host supplies none.
+    fallback_shapes: wgpu::Texture,
+    fallback_shapes_view: wgpu::TextureView,
+    fallback_shapes_ready: bool,
     targets: Targets,
     bindings: Option<(BindingKey, Vec<wgpu::BindGroup>)>,
 }
@@ -229,7 +293,7 @@ impl LensPass {
         // (lens.wgsl); one texture is never read and written in one stage.
         let stages = [
             stage("cs_resolve", "Lens resolve", &[
-                storage(0, true), storage(2, true), texture(3, false), texture(4, false),
+                storage(0, true), storage(1, true), storage(2, true), texture(3, false), texture(4, false),
                 storage(5, false), storage(6, false), storage(7, false), uniform(8),
             ]),
             stage("cs_coc", "Lens circles of confusion", &[
@@ -244,11 +308,12 @@ impl LensPass {
                 texture(4, false), texture(10, false), storage_texture(13), storage_texture(14),
             ]),
             stage("cs_gather", "Lens gather", &[
-                storage(6, false), storage(12, false), texture(15, false), texture(16, false),
-                storage_texture(17), storage_texture(18),
+                storage(1, true), storage(6, false), storage(12, false), texture(15, false),
+                texture(16, false), storage_texture(17), storage_texture(18), sampler(22),
+                texture_array(23),
             ]),
             stage("cs_composite", "Lens composite", &[
-                texture(4, false), storage(6, false), texture(10, false), texture(19, true),
+                storage(1, true), texture(4, false), storage(6, false), texture(10, false), texture(19, true),
                 texture(20, true), storage_texture(21), sampler(22),
             ]),
         ];
@@ -262,6 +327,16 @@ impl LensPass {
                 mapped_at_creation: false,
             })
         };
+        let fallback_shapes = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Lens neutral aperture shape"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: APERTURE_SHAPE_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
         Self {
             input_key: "fogged_hdr",
             stages,
@@ -312,6 +387,12 @@ impl LensPass {
                     view_formats: &[],
                 })
                 .create_view(&Default::default()),
+            fallback_shapes_view: fallback_shapes.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            }),
+            fallback_shapes,
+            fallback_shapes_ready: false,
             targets: Targets::new(device, width, height),
             bindings: None,
         }
@@ -369,14 +450,39 @@ impl LensPass {
             return;
         };
         self.resize(device, input.texture().width(), input.texture().height());
+        if !self.fallback_shapes_ready {
+            // The neutral aperture layer is plain white; a texture cannot be
+            // created filled without a queue, so the first frame clears it.
+            let view = self.fallback_shapes.create_view(&Default::default());
+            let attachments = [Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                    store: wgpu::StoreOp::Store,
+                },
+            })];
+            let pass = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Lens neutral aperture"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            drop(pass);
+            self.fallback_shapes_ready = true;
+        }
         let camera = scene.camera.unwrap_or(&self.fallback_camera);
         let depth = scene.depth.unwrap_or(&self.fallback_depth);
+        let shapes = scene.aperture_shapes.unwrap_or(&self.fallback_shapes_view);
         let lenses = scene.lenses.unwrap_or(&self.fallback_lenses);
         let elements = scene.elements.unwrap_or(&self.fallback_elements);
         // Bind groups are cached per GPU handle; comparing handles, not
         // pointers, is safe across TSR's rotating outputs and resize.
         let key: BindingKey = (
-            [Some(input.clone()), Some(depth.clone())],
+            [Some(input.clone()), Some(depth.clone()), Some(shapes.clone())],
             [Some(lenses.clone()), Some(elements.clone()), Some(camera.clone())],
         );
         if self.bindings.as_ref().map(|(k, _)| k) != Some(&key) {
@@ -384,6 +490,7 @@ impl LensPass {
             let groups = [
                 (RESOLVE, vec![
                     entry(0, lenses.as_entire_binding()),
+                    entry(1, elements.as_entire_binding()),
                     entry(2, camera.as_entire_binding()),
                     entry(3, wgpu::BindingResource::TextureView(depth)),
                     entry(4, wgpu::BindingResource::TextureView(input)),
@@ -416,14 +523,18 @@ impl LensPass {
                     entry(14, wgpu::BindingResource::TextureView(&t.half_coc)),
                 ]),
                 (GATHER, vec![
+                    entry(1, elements.as_entire_binding()),
                     entry(6, self.resolved.as_entire_binding()),
                     entry(12, t.tile_dilated.as_entire_binding()),
                     entry(15, wgpu::BindingResource::TextureView(&t.half_color)),
                     entry(16, wgpu::BindingResource::TextureView(&t.half_coc)),
                     entry(17, wgpu::BindingResource::TextureView(&t.far)),
                     entry(18, wgpu::BindingResource::TextureView(&t.near)),
+                    entry(22, wgpu::BindingResource::Sampler(&self.sampler)),
+                    entry(23, wgpu::BindingResource::TextureView(shapes)),
                 ]),
                 (COMPOSITE, vec![
+                    entry(1, elements.as_entire_binding()),
                     entry(4, wgpu::BindingResource::TextureView(input)),
                     entry(6, self.resolved.as_entire_binding()),
                     entry(10, wgpu::BindingResource::TextureView(&t.coc)),
@@ -457,13 +568,13 @@ impl LensPass {
         }
         // Every later dispatch is GPU-sized: zero groups while the view has no
         // enabled lens, except the composite, which copies the image through.
-        for stage in COC..STAGES {
+        for (stage, (spec, group)) in self.stages.iter().zip(groups).enumerate().skip(COC) {
             let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(self.stages[stage].label),
+                label: Some(spec.label),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.stages[stage].pipeline);
-            pass.set_bind_group(0, &groups[stage], &[]);
+            pass.set_pipeline(&spec.pipeline);
+            pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups_indirect(&self.args, 12 * (stage as u64 - 1));
         }
     }
@@ -505,6 +616,7 @@ impl RenderPass for LensPass {
         let scene = LensInputs {
             camera: Some(ctx.camera),
             depth: Some(ctx.depth),
+            aperture_shapes: ctx.registry.get::<&wgpu::TextureView>(ResourceKey::new(APERTURE_SHAPES)),
             lenses: ctx
                 .scene_buffers
                 .get(helio_core::BufferKey::of("camera_lenses"))

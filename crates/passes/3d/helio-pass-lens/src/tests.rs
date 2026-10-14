@@ -57,7 +57,7 @@ impl Scene {
     /// A fine two-tone checker: every pixel differs from its neighbours, so
     /// any blur shows.
     fn checker(x: u32, y: u32) -> [f32; 3] {
-        let v = if (x + y) % 2 == 0 { 0.2 } else { 2.0 };
+        let v = if (x + y).is_multiple_of(2) { 0.2 } else { 2.0 };
         [v, v * 0.5, v * 2.0]
     }
 }
@@ -67,6 +67,8 @@ struct Rig {
     queue: wgpu::Queue,
     pass: LensPass,
     camera: wgpu::Buffer,
+    /// Aperture shape array handed to the pass; none binds the neutral layer.
+    shapes: Option<wgpu::TextureView>,
     _serial: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -122,7 +124,7 @@ impl Rig {
             usage: wgpu::BufferUsages::STORAGE,
         });
         let pass = LensPass::new(&device, SIZE, SIZE);
-        Self { device, queue, pass, camera, _serial: serial }
+        Self { device, queue, pass, camera, shapes: None, _serial: serial }
     }
 
     fn color_view(&self, scene: &Scene) -> wgpu::TextureView {
@@ -257,13 +259,16 @@ impl Rig {
                 depth: Some(&depth),
                 lenses: lenses.as_ref(),
                 elements: elements.as_ref(),
+                aperture_shapes: self.shapes.as_ref(),
             },
         );
         self.queue.submit([encoder.finish()]);
         let output = self.read_texture(&self.pass.targets.output);
         let coc = self
             .read_texture(&self.pass.targets.coc)
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|t| [f16_to_f32(t[0]), f16_to_f32(t[1]), f16_to_f32(t[2]), f16_to_f32(t[3])])
             .collect();
         Frame { output, coc }
@@ -310,7 +315,9 @@ fn component_rows_have_the_wgsl_strides() {
     assert_eq!(std::mem::offset_of!(LensElementComponent, feather), 16);
     assert_eq!(std::mem::offset_of!(LensElementComponent, params), 32);
     assert_eq!(std::mem::offset_of!(LensElementComponent, region), 96);
-    assert_eq!(std::mem::size_of::<ResolvedLens>(), 64);
+    assert_eq!(std::mem::size_of::<ResolvedLens>(), 80);
+    assert_eq!(std::mem::offset_of!(ResolvedLens, natural_vignette), 20);
+    assert_eq!(std::mem::offset_of!(ResolvedLens, required_overscan), 68);
     // A zero row is inert: never enabled, no element kind.
     let zero: LensComponent = bytemuck::Zeroable::zeroed();
     assert_eq!(zero.enabled, 0);
@@ -473,6 +480,7 @@ fn depth_rendered_below_image_resolution_keeps_foreground_focus() {
             depth: Some(&depth),
             lenses: Some(&lenses),
             elements: None,
+            aperture_shapes: None,
         },
     );
     rig.queue.submit([encoder.finish()]);
@@ -718,7 +726,8 @@ fn every_region_kind_covers_what_it_describes() {
     let triangle = [[-0.2, -0.2], [0.3, -0.1], [0.0, 0.3]];
     let reversed = [[0.0, 0.3], [0.3, -0.1], [-0.2, -0.2]];
     // (region, a pixel inside, a pixel outside)
-    let cases: [(LensRegion, (u32, u32), (u32, u32)); 7] = [
+    type Case<'a> = (LensRegion<'a>, (u32, u32), (u32, u32));
+    let cases: [Case; 7] = [
         (LensRegion::FullFrame, (64, 64), (5, 5)),
         (LensRegion::HalfPlane { angle: 0.0, offset: 0.0 }, (100, 64), (20, 64)),
         (
@@ -835,3 +844,482 @@ fn seam_darkening_dims_the_diopter_edge() {
     assert_eq!(frame.coc(10, 64)[3], 1.0);
     assert!(frame.pixel(63, 64)[0] < 0.6 && frame.pixel(10, 64)[0] > 0.99);
 }
+
+// ── Pupil function ───────────────────────────────────────────────────────────
+//
+// The gather averages the taps it lands on, so a lone point source is a
+// handful of lucky taps. These tests measure the pupil through large,
+// averaged quantities instead: the 10-90% width of a blurred edge (the
+// pupil's projected width), the image of a small bright blob binned by
+// radius, and the energy of the whole frame.
+
+/// A lens whose circle of confusion is 28 px across, for a plane at infinity.
+fn bokeh_lens() -> LensComponent {
+    let mut lens = lens();
+    lens.focal_length_mm = 100.0;
+    lens.f_number = 1.4;
+    lens.focus_distance_m = 1.0;
+    lens.max_coc_px = 64.0;
+    lens.quality = 1;
+    // A circle unless a test says otherwise.
+    lens.aperture_blades = 0;
+    lens.element_count = 1;
+    lens
+}
+
+fn infinity() -> impl Fn(u32, u32) -> f32 {
+    |_, _| f32::INFINITY
+}
+
+/// Bright (1.0) before `at` along x (a vertical edge) or y, dark after.
+fn edge_scene(vertical: bool, at: u32) -> Scene {
+    Scene::new(
+        |x, y| {
+            let t = if vertical { x } else { y };
+            [if t < at { 1.0 } else { 0.0 }; 3]
+        },
+        infinity(),
+    )
+}
+
+/// The 10-90% transition width in pixels of a blurred bright-to-dark edge,
+/// from the profile averaged over `along` the edge.
+fn edge_width(frame: &Frame, vertical: bool, along: std::ops::Range<u32>) -> f32 {
+    edge_width_between(frame, vertical, along, 0.1, 0.9)
+}
+
+/// The width between two levels of the same profile.
+fn edge_width_between(
+    frame: &Frame,
+    vertical: bool,
+    along: std::ops::Range<u32>,
+    low: f32,
+    high: f32,
+) -> f32 {
+    let profile: Vec<f32> = (0..SIZE)
+        .map(|t| {
+            let sum: f32 = along
+                .clone()
+                .map(|s| if vertical { frame.pixel(t, s)[1] } else { frame.pixel(s, t)[1] })
+                .sum();
+            sum / along.len() as f32
+        })
+        .collect();
+    let cross = |level: f32| -> f32 {
+        let i = profile.iter().position(|&v| v < level).expect("edge never falls below the level");
+        let (a, b) = (profile[i - 1], profile[i]);
+        (i - 1) as f32 + (a - level) / (a - b)
+    };
+    cross(low) - cross(high)
+}
+
+/// Widths of the middle of the transition (30-70%) of a vertical (x) and a
+/// horizontal (y) edge, averaged over the whole frame. The middle slope is
+/// the pupil's chord through its centre, which a polygon's tails hide.
+fn core_widths(rig: &mut Rig, lens: LensComponent, elements: &[LensElementComponent]) -> (f32, f32) {
+    let mut width = |vertical: bool| {
+        let frame = rig.record(&edge_scene(vertical, 64), Some(&[lens]), (!elements.is_empty()).then_some(elements));
+        edge_width_between(&frame, vertical, 8..120, 0.3, 0.7)
+    };
+    (width(true), width(false))
+}
+
+/// Widths of a vertical (x) and a horizontal (y) edge through the centre.
+fn edge_widths(rig: &mut Rig, lens: LensComponent, elements: &[LensElementComponent]) -> (f32, f32) {
+    let mut width = |vertical: bool| {
+        let frame = rig.record(&edge_scene(vertical, 64), Some(&[lens]), (!elements.is_empty()).then_some(elements));
+        edge_width(&frame, vertical, 52..76)
+    };
+    (width(true), width(false))
+}
+
+#[test]
+fn blades_make_the_bokeh_polygonal() {
+    let mut rig = Rig::new();
+    let mut lens = bokeh_lens();
+    lens.element_count = 0;
+    // A hexagon with a vertex on +x has a chord of 1.73 R through its centre
+    // along x and 2 R along y (a wider chord is a steeper edge, a narrower
+    // transition); turned a twelfth of a turn the two swap. A circle is the same both ways.
+    lens.aperture_blades = 0;
+    let (cx, cy) = core_widths(&mut rig, lens, &[]);
+    assert!((cx / cy - 1.0).abs() < 0.05, "circle {cx} x {cy}");
+    lens.aperture_blades = 6;
+    let (hx, hy) = core_widths(&mut rig, lens, &[]);
+    lens.aperture_rotation = std::f32::consts::PI / 6.0;
+    let (rx, ry) = core_widths(&mut rig, lens, &[]);
+    println!("circle {cx} x {cy}; hexagon {hx} x {hy}; turned {rx} x {ry}");
+    assert!(hx / hy > 1.04, "vertex-on-x hexagon {hx} x {hy}");
+    assert!(ry / rx > 1.02, "turned hexagon {rx} x {ry}");
+    // The circumscribed circle bounds the polygon.
+    assert!(hx < cx * 1.05 && hy < cx * 0.95, "hexagon {hx} x {hy} within the circle {cx}");
+    // Fewer blades are less round: a triangle with a vertex on +x has chords of 1.15 R
+    // along x and 1.5 R along y.
+    lens.aperture_rotation = 0.0;
+    lens.aperture_blades = 3;
+    let (tx, ty) = core_widths(&mut rig, lens, &[]);
+    println!("triangle {tx} x {ty}");
+    assert!(tx / ty > 1.1, "triangle {tx} x {ty}");
+
+    // Curved blades relax the hexagon back to a circle.
+    lens.aperture_blades = 0;
+    lens.element_count = 1;
+    let round = LensElementComponent::pupil(LensRegion::FullFrame).with_iris(6, 1.0, 0.0);
+    let (ex, ey) = core_widths(&mut rig, lens, &[round]);
+    assert!((ex / ey - 1.0).abs() < 0.05, "curvature 1: {ex} x {ey}");
+    // Wide open is round (the f-number is far below the straight limit).
+    let blades = LensElementComponent::pupil(LensRegion::FullFrame)
+        .with_iris(6, 0.0, 0.0)
+        .with_f_number_rounding(8.0);
+    let (wx, wy) = core_widths(&mut rig, lens, &[blades]);
+    assert!((wx / wy - 1.0).abs() < 0.05, "wide open {wx} x {wy}");
+    // With the straight limit at f/1 the same lens is stopped down: polygonal.
+    let stopped = blades.with_f_number_rounding(1.0);
+    let (sx, sy) = core_widths(&mut rig, lens, &[stopped]);
+    println!("stopped down {sx} x {sy}");
+    assert!(sx / sy > 1.05, "stopped down {sx} x {sy}");
+}
+
+#[test]
+fn anamorphic_squeeze_ovals_the_bokeh() {
+    let mut rig = Rig::new();
+    let lens = bokeh_lens();
+    for squeeze in [1.33, 1.8, 2.0] {
+        let element = LensElementComponent::pupil(LensRegion::FullFrame).with_anamorphic(squeeze);
+        let (width, height) = edge_widths(&mut rig, lens, &[element]);
+        let ratio = height / width;
+        println!("squeeze {squeeze}: {width} x {height}");
+        assert!(
+            (ratio / squeeze - 1.0).abs() < 0.1,
+            "squeeze {squeeze}: {width} x {height} ({ratio})"
+        );
+    }
+}
+
+/// Radial and tangential widths at the middle of the right edge region: x is
+/// radial on the row through the centre, y is tangential.
+fn radial_and_tangential(rig: &mut Rig, lens: LensComponent, elements: &[LensElementComponent]) -> (f32, f32) {
+    let radial = {
+        let frame = rig.record(&edge_scene(true, 108), Some(&[lens]), (!elements.is_empty()).then_some(elements));
+        edge_width(&frame, true, 56..72)
+    };
+    let tangential = {
+        let frame = rig.record(&edge_scene(false, 64), Some(&[lens]), (!elements.is_empty()).then_some(elements));
+        edge_width(&frame, false, 100..116)
+    };
+    (radial, tangential)
+}
+
+#[test]
+fn cats_eye_clips_the_bokeh_radially_off_axis_only() {
+    let mut rig = Rig::new();
+    let lens = bokeh_lens();
+    let element = LensElementComponent::pupil(LensRegion::FullFrame).with_cats_eye(1.5, 1.0);
+    // On the axis the second circle sits on the first: round.
+    let (x, y) = edge_widths(&mut rig, lens, &[element]);
+    println!("on axis {x} x {y}");
+    assert!((x / y - 1.0).abs() < 0.07, "on axis {x} x {y}");
+    // Off to the side x is radial: its width shrinks, the tangential one
+    // does not.
+    let (radial, tangential) = radial_and_tangential(&mut rig, lens, &[element]);
+    println!("off axis: radial {radial}, tangential {tangential}");
+    assert!(radial < 0.85 * tangential, "off axis: radial {radial}, tangential {tangential}");
+    // Without the element the same place is round.
+    let (radial, tangential) = radial_and_tangential(&mut rig, lens, &[]);
+    assert!((radial / tangential - 1.0).abs() < 0.08, "control: {radial} x {tangential}");
+}
+
+#[test]
+fn swirl_stretches_the_bokeh_tangentially_toward_the_edges() {
+    let mut rig = Rig::new();
+    let lens = bokeh_lens();
+    let element = LensElementComponent::pupil(LensRegion::FullFrame).with_swirl(2.0);
+    let (radial, tangential) = radial_and_tangential(&mut rig, lens, &[element]);
+    println!("swirl: radial {radial}, tangential {tangential}");
+    assert!(radial < 0.8 * tangential, "swirl: radial {radial}, tangential {tangential}");
+    // And the centre is untouched.
+    let (cx, cy) = edge_widths(&mut rig, lens, &[element]);
+    assert!((cx / cy - 1.0).abs() < 0.07, "centre {cx} x {cy}");
+}
+
+/// A bright 8 x 8 blob at the centre of a dark frame `depth` metres away;
+/// the dark rest is at infinity.
+fn blob_scene(depth: f32) -> Scene {
+    let blob = |x: u32, y: u32| (60..68).contains(&x) && (60..68).contains(&y);
+    Scene::new(
+        |x, y| if blob(x, y) { [100.0; 3] } else { [0.0; 3] },
+        move |x, y| if blob(x, y) { depth } else { f32::INFINITY },
+    )
+}
+
+/// Mean of a channel over pixels whose distance from the frame centre is in
+/// `[r0, r1)`.
+fn ring_mean(frame: &Frame, channel: usize, r0: f32, r1: f32) -> f32 {
+    let (mut sum, mut count) = (0.0, 0.0);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let r = ((x as f32 + 0.5 - 64.0).powi(2) + (y as f32 + 0.5 - 64.0).powi(2)).sqrt();
+            if r >= r0 && r < r1 {
+                sum += frame.pixel(x, y)[channel];
+                count += 1.0;
+            }
+        }
+    }
+    sum / count
+}
+
+#[test]
+fn spherical_aberration_trades_light_between_rim_and_centre() {
+    let mut rig = Rig::new();
+    let lens = bokeh_lens();
+    // A blob 8 px square, either behind the focus (infinity) or in front
+    // of it (0.5 m: the same 28 px circle, negative).
+    let far = blob_scene(f32::INFINITY);
+    let near = blob_scene(0.5);
+    let rim_and_centre = |rig: &mut Rig, scene: &Scene, amount: f32, asymmetry: f32| {
+        let element = LensElementComponent::pupil(LensRegion::FullFrame)
+            .with_spherical_aberration(amount, asymmetry);
+        let frame = rig.record(scene, Some(&[lens]), Some(&[element]));
+        assert!(frame.coc(64, 64)[0].abs() > 25.0, "test geometry: circle {}", frame.coc(64, 64)[0]);
+        let centre = ring_mean(&frame, 1, 0.0, 3.0);
+        let rim = ring_mean(&frame, 1, 10.5, 13.0);
+        println!("sa {amount} asym {asymmetry}: rim {rim}, centre {centre}");
+        (rim, centre)
+    };
+    // The control: no aberration, a flat disc (rim and centre alike).
+    let (rim, centre) = rim_and_centre(&mut rig, &far, 0.0, 0.0);
+    assert!(rim > 0.1 && centre > 0.1 && (rim / centre - 1.0).abs() < 0.6, "flat: rim {rim}, centre {centre}");
+    // Soap bubble: a bright rim.
+    let (rim, centre) = rim_and_centre(&mut rig, &far, 1.0, 0.0);
+    assert!(rim > 2.5 * centre, "soap bubble: rim {rim}, centre {centre}");
+    // Soft: weighted to the centre.
+    let (rim, centre) = rim_and_centre(&mut rig, &far, -1.0, 0.0);
+    assert!(centre > 2.5 * rim, "soft: rim {rim}, centre {centre}");
+    // Fully asymmetric: the profile flips between front and back focus.
+    let (rim_far, centre_far) = rim_and_centre(&mut rig, &far, 1.0, 1.0);
+    let (rim_near, centre_near) = rim_and_centre(&mut rig, &near, 1.0, 1.0);
+    assert!(rim_far > 2.5 * centre_far, "behind the focus: rim {rim_far}, centre {centre_far}");
+    assert!(centre_near > 2.5 * rim_near, "in front of the focus: rim {rim_near}, centre {centre_near}");
+    // Without asymmetry the front matches the back.
+    let (rim_near, centre_near) = rim_and_centre(&mut rig, &near, 1.0, 0.0);
+    assert!(rim_near > 2.5 * centre_near, "symmetric, in front: rim {rim_near}, centre {centre_near}");
+}
+
+#[test]
+fn apodization_and_onion_rings_shape_the_profile() {
+    let mut rig = Rig::new();
+    let lens = bokeh_lens();
+    let far = blob_scene(f32::INFINITY);
+    let apodized = LensElementComponent::pupil(LensRegion::FullFrame).with_apodization(0.35);
+    let frame = rig.record(&far, Some(&[lens]), Some(&[apodized]));
+    let flat = rig.record(&far, Some(&[lens]), Some(&[LensElementComponent::pupil(LensRegion::FullFrame)]));
+    let (rim, centre) = (ring_mean(&frame, 1, 10.5, 13.0), ring_mean(&frame, 1, 0.0, 3.0));
+    println!("apodized: rim {rim}, centre {centre}");
+    assert!(centre > 3.0 * rim, "apodized: rim {rim}, centre {centre}");
+    // The edge fades out smoothly instead of ending.
+    let soft_edge = ring_mean(&frame, 1, 12.0, 14.0) / ring_mean(&frame, 1, 0.0, 3.0);
+    let hard_edge = ring_mean(&flat, 1, 12.0, 14.0) / ring_mean(&flat, 1, 0.0, 3.0);
+    assert!(soft_edge < 0.5 * hard_edge, "edge {soft_edge} vs {hard_edge}");
+
+    // Concentric ripples: the brightness alternates with radius.
+    let onion = LensElementComponent::pupil(LensRegion::FullFrame).with_onion_rings(0.9, 1.0);
+    let frame = rig.record(&far, Some(&[lens]), Some(&[onion]));
+    // cos(2 pi rho) peaks at the centre and the rim and troughs at half the
+    // radius (7 px); the blob smears it by its own 4 px.
+    let peak = ring_mean(&frame, 1, 0.0, 3.0);
+    let trough = ring_mean(&frame, 1, 6.0, 8.0);
+    println!("onion: peak {peak}, trough {trough}");
+    assert!(peak > 1.5 * trough, "onion rings: peak {peak}, trough {trough}");
+}
+
+#[test]
+fn central_obstruction_leaves_a_dark_hole() {
+    let mut rig = Rig::new();
+    let lens = bokeh_lens();
+    let far = blob_scene(f32::INFINITY);
+    let open = LensElementComponent::pupil(LensRegion::FullFrame);
+    let control = rig.record(&far, Some(&[lens]), Some(&[open]));
+    let donut = LensElementComponent::pupil(LensRegion::FullFrame).with_central_obstruction(0.6);
+    let frame = rig.record(&far, Some(&[lens]), Some(&[donut]));
+    let (centre, ring) = (ring_mean(&frame, 1, 0.0, 3.0), ring_mean(&frame, 1, 9.5, 13.0));
+    let flat_centre = ring_mean(&control, 1, 0.0, 3.0);
+    println!("donut: centre {centre}, ring {ring}, open centre {flat_centre}");
+    assert!(flat_centre > 0.3, "control centre {flat_centre}");
+    assert!(centre < 0.1 * ring, "donut: centre {centre}, ring {ring}");
+    assert!(centre < 0.2 * flat_centre, "donut centre {centre} vs flat {flat_centre}");
+}
+
+#[test]
+fn longitudinal_chromatic_aberration_fringes_by_depth() {
+    let mut rig = Rig::new();
+    let lens = bokeh_lens();
+    // Red and blue focus farther than green: foregrounds fringe purple,
+    // backgrounds green.
+    let ca = LensElementComponent::longitudinal_ca(-0.6, 0.0, -0.6, LensRegion::FullFrame);
+    let fringe = |rig: &mut Rig, depth: f32, band: (f32, f32), element: LensElementComponent| {
+        let frame = rig.record(&blob_scene(depth), Some(&[lens]), Some(&[element]));
+        // The outer edge of the larger channels' discs, beyond the smaller
+        // ones (the green circle is 14 px in radius, red and blue 8.5 more
+        // in front and 8.5 less behind; the blob adds 4).
+        [0, 1, 2].map(|c| ring_mean(&frame, c, band.0, band.1))
+    };
+    let near = fringe(&mut rig, 0.5, (20.0, 24.0), ca);
+    println!("foreground fringe {near:?}");
+    assert!(
+        near[0] > 3.0 * near[1] && near[2] > 3.0 * near[1] && near[0] > 0.02,
+        "foreground fringe r {} g {} b {}",
+        near[0], near[1], near[2]
+    );
+    let far = fringe(&mut rig, f32::INFINITY, (16.0, 18.0), ca);
+    println!("background fringe {far:?}");
+    assert!(
+        far[1] > 3.0 * far[0] && far[1] > 3.0 * far[2] && far[1] > 0.02,
+        "background fringe r {} g {} b {}",
+        far[0], far[1], far[2]
+    );
+    // No shift, no fringe.
+    let none = LensElementComponent::longitudinal_ca(0.0, 0.0, 0.0, LensRegion::FullFrame);
+    let flat = fringe(&mut rig, 0.5, (20.0, 24.0), none);
+    assert!(flat.iter().all(|&c| c < 0.02), "neutral: {flat:?}");
+    // Region limited: outside it the channels agree.
+    let left = LensElementComponent::longitudinal_ca(
+        -0.6, 0.0, -0.6, LensRegion::HalfPlane { angle: std::f32::consts::PI, offset: 0.3 },
+    );
+    let outside = fringe(&mut rig, 0.5, (20.0, 24.0), left);
+    assert!(outside.iter().all(|&c| c < 0.02), "outside the region: {outside:?}");
+}
+
+#[test]
+fn a_texture_replaces_the_iris() {
+    let mut rig = Rig::new();
+    let lens = bokeh_lens();
+    // Layer 0: open. Layer 1: a vertical bar a fifth of the width.
+    const N: usize = 32;
+    let open = vec![255u8; N * N];
+    let bar: Vec<u8> = (0..N * N).map(|i| if (13..19).contains(&(i % N)) { 255 } else { 0 }).collect();
+    rig.shapes = Some(aperture_shape_array(&rig.device, &rig.queue, N as u32, &[&open, &bar]));
+    let measure = |rig: &mut Rig, layer: u32, amount: f32| {
+        let element = LensElementComponent::pupil(LensRegion::FullFrame)
+            .with_aperture_texture(layer, amount);
+        edge_widths(rig, lens, &[element])
+    };
+    let (x, y) = measure(&mut rig, 0, 1.0);
+    assert!((x / y - 1.0).abs() < 0.07, "open layer {x} x {y}");
+    let (x, y) = measure(&mut rig, 1, 1.0);
+    println!("bar layer {x} x {y}");
+    assert!(y / x > 2.0, "bar layer {x} x {y}");
+    // Half strength sits between the polygon and the texture.
+    let (hx, hy) = measure(&mut rig, 1, 0.5);
+    assert!(hy / hx > 1.05 && hy / hx < y / x, "half strength {hx} x {hy}");
+    // No texture bound: the neutral layer is open.
+    rig.shapes = None;
+    let (x, y) = measure(&mut rig, 1, 1.0);
+    assert!((x / y - 1.0).abs() < 0.07, "neutral layer {x} x {y}");
+}
+
+#[test]
+fn pupil_elements_are_region_limited() {
+    let mut rig = Rig::new();
+    let lens = bokeh_lens();
+    // Anamorphic only in the right of the frame.
+    let right = LensElementComponent::pupil(LensRegion::HalfPlane { angle: 0.0, offset: 0.1 })
+        .with_anamorphic(2.0);
+    let covered = rig.record(&edge_scene(true, 100), Some(&[lens]), Some(&[right]));
+    let uncovered = rig.record(&edge_scene(true, 28), Some(&[lens]), Some(&[right]));
+    let covered_x = edge_width(&covered, true, 56..72);
+    let uncovered_x = edge_width(&uncovered, true, 56..72);
+    println!("covered {covered_x}, uncovered {uncovered_x}");
+    assert!((covered_x / uncovered_x - 0.5).abs() < 0.07, "covered {covered_x}, uncovered {uncovered_x}");
+}
+
+#[test]
+fn the_pupil_variants_preserve_energy() {
+    let mut rig = Rig::new();
+    // The phase-1 scene: patches on a dim floor, one plane far behind the
+    // focus (a uniform circle of about six pixels).
+    let scene = Scene::new(
+        |x, y| match (x, y) {
+            (48..80, 48..80) => [8.0, 6.0, 4.0],
+            (20..28, 90..98) => [3.0, 3.0, 12.0],
+            _ => [0.05, 0.06, 0.07],
+        },
+        infinity(),
+    );
+    let mut lens = lens();
+    lens.focal_length_mm = 50.0;
+    lens.f_number = 1.4;
+    lens.focus_distance_m = 1.0;
+    lens.element_count = 1;
+    let pupil = || LensElementComponent::pupil(LensRegion::FullFrame);
+    let everything = pupil()
+        .with_iris(7, 0.3, 0.2)
+        .with_anamorphic(1.5)
+        .with_cats_eye(0.8, 1.0)
+        .with_swirl(1.0)
+        .with_spherical_aberration(0.6, 0.5)
+        .with_apodization(0.7)
+        .with_central_obstruction(0.3);
+    let chromatic = LensElementComponent::longitudinal_ca(-0.4, 0.0, -0.4, LensRegion::FullFrame);
+    let variants: Vec<(&str, u32, LensElementComponent)> = vec![
+        ("circle", 0, pupil()),
+        ("hexagon", 6, pupil()),
+        ("triangle", 3, pupil().with_iris(3, 0.0, 0.3)),
+        ("curved blades", 8, pupil().with_iris(8, 0.5, 0.0)),
+        ("anamorphic", 0, pupil().with_anamorphic(2.0)),
+        ("cat's eye", 0, pupil().with_cats_eye(1.2, 1.0)),
+        ("swirl", 0, pupil().with_swirl(2.0)),
+        ("soap bubble", 0, pupil().with_spherical_aberration(1.0, 0.0)),
+        ("soft", 0, pupil().with_spherical_aberration(-1.0, 0.0)),
+        ("asymmetric", 0, pupil().with_spherical_aberration(1.0, 1.0)),
+        ("onion", 0, pupil().with_onion_rings(0.8, 4.0)),
+        ("apodized", 0, pupil().with_apodization(0.4)),
+        ("donut", 0, pupil().with_central_obstruction(0.6)),
+        ("everything", 7, everything),
+        ("chromatic", 0, chromatic),
+    ];
+    for quality in [0, 1] {
+        lens.quality = quality;
+        for (name, blades, element) in &variants {
+            lens.aperture_blades = *blades;
+            let frame = rig.record(&scene, Some(&[lens]), Some(&[*element]));
+            for channel in 0..3 {
+                let sum = |pixel: &dyn Fn(u32, u32) -> f32| -> f32 {
+                    (0..SIZE).flat_map(|y| (0..SIZE).map(move |x| (x, y))).map(|(x, y)| pixel(x, y)).sum()
+                };
+                let before = sum(&|x, y| scene.color[(y * SIZE + x) as usize][channel]);
+                let after = sum(&|x, y| frame.pixel(x, y)[channel]);
+                println!("{name} q{quality} c{channel}: {:.4}", after / before);
+                assert!(
+                    (after / before - 1.0).abs() < 0.03,
+                    "{name}, quality {quality}, channel {channel}: energy {before} -> {after}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn pupil_element_builders_fill_the_documented_slots() {
+    let e = LensElementComponent::pupil(LensRegion::FullFrame)
+        .with_iris(5, 0.25, 0.5)
+        .with_f_number_rounding(8.0)
+        .with_aperture_texture(3, 0.75)
+        .with_anamorphic(1.8)
+        .with_cats_eye(0.6, 1.2)
+        .with_swirl(0.4)
+        .with_spherical_aberration(-0.5, 1.0)
+        .with_onion_rings(0.3, 5.0)
+        .with_apodization(0.5)
+        .with_central_obstruction(0.4);
+    assert_eq!(e.kind, element_kind::PUPIL);
+    assert_eq!(
+        e.params,
+        [5.0, 0.25, 0.5, 8.0, 3.0, 0.75, 1.8, 0.6, 1.2, 0.4, -0.5, 0.3, 5.0, 0.5, 0.4, 1.0]
+    );
+    let inherits = LensElementComponent::pupil(LensRegion::FullFrame);
+    assert!(inherits.params[pupil::BLADES] < 0.0 && inherits.params[pupil::SQUEEZE] == 1.0);
+    let ca = LensElementComponent::longitudinal_ca(-0.1, 0.0, -0.2, LensRegion::FullFrame);
+    assert_eq!((ca.kind, ca.params[..3].to_vec()), (element_kind::LONGITUDINAL_CA, vec![-0.1, 0.0, -0.2]));
+}
+
+mod optics;

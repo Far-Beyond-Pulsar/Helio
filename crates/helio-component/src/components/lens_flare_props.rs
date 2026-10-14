@@ -64,9 +64,6 @@ pub struct LensFlareProps {
     pub streak_intensity: f32,
     #[property(min = 0.0, max = 0.05, step = 0.001, category = "Lens Flare")]
     pub dispersion: f32,
-    /// Natural cos^4 falloff of the light reaching the sensor.
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Lens Flare")]
-    pub vignette: f32,
     /// Diffraction spikes from the iris blades (the camera lens sets their count).
     #[property(min = 0.0, max = 4.0, step = 0.01, category = "Lens Flare")]
     pub starburst_intensity: f32,
@@ -122,7 +119,6 @@ impl Default for LensFlareProps {
             glare_intensity: value.glare_intensity,
             streak_intensity: value.streak_intensity,
             dispersion: value.dispersion,
-            vignette: value.vignette,
             starburst_intensity: value.starburst_intensity,
             starburst_length: value.starburst_length,
             coating_strength: value.coating_strength,
@@ -157,7 +153,6 @@ impl LensFlareProps {
             glare_intensity: self.glare_intensity,
             streak_intensity: self.streak_intensity,
             dispersion: self.dispersion,
-            vignette: self.vignette,
             starburst_intensity: self.starburst_intensity,
             starburst_length: self.starburst_length,
             coating_strength: self.coating_strength,

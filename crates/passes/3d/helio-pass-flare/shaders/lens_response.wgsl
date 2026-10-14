@@ -33,7 +33,7 @@ struct Lens {
     glare_intensity: f32,
     streak_intensity: f32,
     dispersion: f32,
-    vignette: f32,
+    reserved_vignette: f32,
     starburst_intensity: f32,
     starburst_length: f32,
     coating_strength: f32,
@@ -121,6 +121,8 @@ struct LensOptics {
     sensor_width_mm: f32,
     aperture_blades: u32,
     aperture_rotation: f32,
+    // Amount of natural cos^4 falloff the lens already applied to the image.
+    natural_vignette: f32,
 }
 @group(1) @binding(9) var<storage, read> optics: LensOptics;
 
@@ -265,13 +267,16 @@ fn extract(c: vec3<f32>) -> vec3<f32> {
     return c * (contribution / max(y, 1e-6));
 }
 
-// cos^4 natural falloff at the sensor for image position `uv`.
+// cos^4 natural falloff at the sensor for image position `uv`, as the lens
+// applies it to the image (`natural_vignette` is the lens's amount; 0 without
+// one). The extracted image already carries it, so only analytic sources,
+// which are not in the image, take it here.
 fn field_falloff(uv: vec2<f32>, aspect: f32) -> f32 {
     let focal = bounded(optics.focal_length_mm, 8.0, 600.0, 50.0);
     let sensor = bounded(optics.sensor_width_mm, 4.0, 70.0, 36.0);
     let field = (uv - 0.5) * vec2(sensor, sensor / aspect) / focal;
     let cos_squared = 1.0 / (1.0 + dot(field, field));
-    return mix(1.0, cos_squared * cos_squared, bounded(pp.lens.vignette, 0.0, 1.0, 0.0));
+    return mix(1.0, cos_squared * cos_squared, bounded(optics.natural_vignette, 0.0, 1.0, 0.0));
 }
 
 @compute @workgroup_size(8, 8)
@@ -292,9 +297,7 @@ fn cs_extract(@builtin(global_invocation_id) id: vec3<u32>) {
             }
         }
     }
-    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(size);
-    let falloff = field_falloff(uv, f32(input_size.x) / f32(input_size.y));
-    textureStore(destination, vec2<i32>(id.xy), vec4(color * (falloff / max(count, 1.0)), 0.0));
+    textureStore(destination, vec2<i32>(id.xy), vec4(color / max(count, 1.0), 0.0));
 }
 
 // ── Analytic sources ─────────────────────────────────────────────────────────
