@@ -338,6 +338,10 @@ fn chunk_config(h: u32, budget: usize) -> helio_pass_voxel_planet::chunks::Resid
             max_distance: 400_000.0,
             prefetch_seconds: 0.5,
             keep_frames: 120,
+            // `HELIO_VOXEL_MOTION_FLOW`: pixels a frame of motion per extra
+            // pixel a cell may cover (16; 0: none), up to three.
+            motion_flow: std::env::var("HELIO_VOXEL_MOTION_FLOW").ok().and_then(|v| v.parse().ok()).unwrap_or(16.0),
+            motion_max: 3.0,
         },
         tiles_per_frame: budget,
         // `HELIO_VOXEL_CHUNKS_GENERATE_MS`: GPU generation a frame.
@@ -927,6 +931,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
 ");
     let (mut intervals, mut coarse, mut worst, mut switch_px) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let (mut draw_ms, mut generate_ms) = (Vec::new(), Vec::new());
+    let mut worst_wanted = Vec::new();
     let mut samples = Vec::new();
     let mut slow = Vec::new();
     let started = Instant::now();
@@ -937,13 +942,20 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let mut dug = false;
     let mut next_dig = 1.0;
     let mut generated_tiles = 0usize;
+    let (mut shown_tiles, mut unseen_evicted) = (0usize, 0usize);
     // GPU generation by kernel: evictions and tile columns, chunk columns,
     // chunk builds.
     let mut stage_ms = [0.0f64; 3];
     // `HELIO_VOXEL_STRESS_FPS=n`: frames paced at n a second, as a host's
     // display paces them (unpaced, the harness runs faster than an editor
     // and so generates more a second).
-    let pace = std::env::var("HELIO_VOXEL_STRESS_FPS").ok().and_then(|v| v.parse::<f64>().ok()).map(|fps| std::time::Duration::from_secs_f64(1.0 / fps));
+    let fps = std::env::var("HELIO_VOXEL_STRESS_FPS").ok().and_then(|v| v.parse::<f64>().ok());
+    let pace = fps.map(|fps| std::time::Duration::from_secs_f64(1.0 / fps));
+    // `HELIO_VOXEL_STRESS_STEP`: the flight advances a frame's time (of
+    // `HELIO_VOXEL_STRESS_FPS`, else 60) each frame, however long frames
+    // take: runs see the same eyes, and differ only by what was generated.
+    let step = std::env::var_os("HELIO_VOXEL_STRESS_STEP").is_some().then(|| 1.0 / fps.unwrap_or(60.0));
+    let mut stepped = 0u32;
     let mut frame_start = Instant::now();
     loop {
         if let Some(pace) = pace {
@@ -954,7 +966,8 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
             }
             frame_start = Instant::now();
         }
-        let t = started.elapsed().as_secs_f64();
+        let t = step.map_or_else(|| started.elapsed().as_secs_f64(), |dt| f64::from(stepped) * dt);
+        stepped += 1;
         if t > seconds {
             break;
         }
@@ -1018,6 +1031,8 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
             }
         }
         generated_tiles += s.generated_tiles;
+        shown_tiles += s.shown_tiles;
+        unseen_evicted += s.evicted_unseen;
         csv += &format!("{t:.4},{altitude:.2},{interval:.2},{},{:.4},{:.3},{},{:.3},{},{},{},{:.2},{},{record_ms:.2},{wait_ms:.2},{:.2},{:.2}
 ", u8::from(captured), s.coarse_share, s.worst_px, s.switches, s.switch_px, s.requests, s.generated_tiles, s.fading_tiles, s.cpu_ms.iter().sum::<f64>(), s.cpu_ms.map(|v| format!("{v:.2}")).join(","), pass_cpu[0], pass_cpu[1]);
         // A frame after a capture waited for its readback.
@@ -1089,6 +1104,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         }
         coarse.push(s.coarse_share);
         worst.push(s.worst_px);
+        worst_wanted.push(s.worst_wanted);
         if s.switches > 0 {
             switch_px.push(s.switch_px);
         }
@@ -1129,6 +1145,13 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     // GPU generation per tile over the flight (its timings lag a few frames).
     let generation: f64 = generate_ms.iter().sum();
     let per_tile = |ms: f64| ms * 1e3 / generated_tiles.max(1) as f64;
+    eprintln!("CHUNKSTRESS {mode}: of {generated_tiles} generated tiles {shown_tiles} were drawn, {unseen_evicted} evicted never drawn");
+    eprintln!(
+        "CHUNKSTRESS {mode}: worst over its motion allowance p50 {:.2} p95 {:.2} max {:.2}",
+        percentile(&worst_wanted, 0.5),
+        percentile(&worst_wanted, 0.95),
+        worst_wanted.iter().copied().fold(0.0, f64::max)
+    );
     eprintln!(
         "CHUNKSTRESS {mode}: generation {generation:.1} ms GPU for {generated_tiles} tiles, {:.1} us a tile (tile columns {:.1}, chunk columns {:.1}, chunk builds {:.1})",
         per_tile(generation),

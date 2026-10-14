@@ -4,7 +4,11 @@
 //! A tile is refined while its cells would project larger than
 //! `lod_pixels` pixels from the eye or from where the eye will be
 //! `prefetch_seconds` ahead (and stays refined until they fall under
-//! `coarsen` of that); out of view, `offscreen_pixels` times that. A refined tile keeps being drawn until all four of
+//! `coarsen` of that); out of view, `offscreen_pixels` times that; where
+//! the eye's motion sweeps the image, up to `motion_max` times that (the
+//! picture moves too fast there for finer cells to show, and a moving eye
+//! would otherwise want a screenful of new tiles every halving of its
+//! height). A refined tile keeps being drawn until all four of
 //! its children are generated, so nothing is ever missing: detail arrives
 //! as whole tiles replacing their parent. Children are requested once
 //! their parent's layers are measured (their chunks then span only the
@@ -70,7 +74,15 @@ pub struct PlanConfig {
     /// Also refine for where the eye will be this far ahead.
     pub prefetch_seconds: f64,
     pub keep_frames: u64,
+    /// Where the eye's motion sweeps a tile's image by `flow` pixels a
+    /// frame, its cells may cover `1 + flow / motion_flow` times
+    /// `lod_pixels`, at most `motion_max` (0: no motion allowance).
+    pub motion_flow: f64,
+    pub motion_max: f64,
 }
+
+/// The frame time motion allowances assume (60 frames a second).
+const MOTION_FRAME_SECONDS: f64 = 1.0 / 60.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Tile {
@@ -110,8 +122,10 @@ pub struct Plan {
     /// the drawn tiles (the refinement still to come).
     pub coarse_share: f64,
     /// Pixels the largest cell of a drawn tile in view spans from the eye
-    /// (above the finest level).
+    /// (above the finest level), and the largest of those over its motion
+    /// allowance (`PlanConfig::motion_flow`; 1: as wanted).
     pub worst_px: f64,
+    pub worst_wanted: f64,
     /// That tile (diagnostics): whether its layers are measured, levels
     /// its ranges are guessed under a measured tile, and its children
     /// asked for and generated.
@@ -197,6 +211,20 @@ impl Planner {
         grid.level_size(key.level) / distance.max(1e-3) / (self.config.pixel_angle * self.config.lod_pixels)
     }
 
+    /// How many times `lod_pixels` the cells of `key` may cover where the
+    /// eye's motion (`velocity`) sweeps its image: its offset's motion
+    /// across the line of sight, in pixels a frame.
+    fn motion_allowance(&self, grid: &Grid, key: TileKey, ranges: Ranges, eye: &Eye, velocity: DVec3) -> f64 {
+        if self.config.motion_flow <= 0.0 {
+            return 1.0;
+        }
+        let offset = eye.toward(grid, key, ranges.extent());
+        let distance = offset.length().max(1e-3);
+        let across = velocity - offset * (velocity.dot(offset) / (distance * distance));
+        let flow = across.length() / distance * MOTION_FRAME_SECONDS / self.config.pixel_angle;
+        (1.0 + flow / self.config.motion_flow).min(self.config.motion_max.max(1.0))
+    }
+
     /// Visit the quadtree from the roots for an eye at `eye` moving at
     /// `velocity`.
     pub fn plan(&mut self, grid: &Grid, eye: DVec3, velocity: DVec3, view: Option<View>, frame: u64) -> Plan {
@@ -246,14 +274,17 @@ impl Planner {
             // On screen now: in view and over the eye's horizon (a tile only
             // the prefetch eye sees is drawn, unseen, until it is).
             let shows = seen && !hidden;
-            // Pixels a cell spans from the eye now (not the prefetch eye).
+            // Pixels a cell spans from the eye now (not the prefetch eye),
+            // and over what the eye's motion allows there.
             let now = self.error(grid, key, tile.ranges, &eyes[..1]);
+            let motion = self.motion_allowance(grid, key, tile.ranges, &eyes[0], velocity);
             // Tiles in view first, by what they need now: the prefetch
             // eye's wants (a burst as the eye starts moving) come after
             // what is coarse on screen.
-            let priority = if seen { now * 1e6 } else { now };
-            // Out of the guarded view, coarser cells will do.
-            let wanted_error = if seen || cone(key, tile.ranges, guarded) { error } else { error / self.config.offscreen_pixels };
+            let priority = if seen { now / motion * 1e6 } else { now / motion };
+            // Out of the guarded view, coarser cells will do; and where the
+            // motion sweeps the image.
+            let wanted_error = if seen || cone(key, tile.ranges, guarded) { error } else { error / self.config.offscreen_pixels } / motion;
             let finer = key.level > 0 && if tile.refined { wanted_error > self.config.coarsen } else { wanted_error > 1.0 };
             // Children wait for their parent's measured layers, unless it is
             // far too coarse (an eye that dropped from orbit) and a measured
@@ -316,6 +347,9 @@ impl Planner {
             if shows && tile.refined != ready && if ready { shown(&key) } else { self::children(grid, key).iter().any(shown) } {
                 plan.switches += 1;
                 plan.switch_px = plan.switch_px.max(now);
+            }
+            if shows && !ready && key.level > 0 {
+                plan.worst_wanted = plan.worst_wanted.max(now / motion);
             }
             if shows && !ready && key.level > 0 && now > plan.worst_px {
                 plan.worst_px = now;
@@ -531,7 +565,7 @@ mod tests {
     fn setup() -> (Grid, DVec3, Planner) {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
         let eye = grid.position(2, [f64::from(grid.cells()) * 0.47, f64::from(grid.cells()) * 0.53, 20.0]);
-        let config = PlanConfig { pixel_angle: 7.67e-4, lod_pixels: 1.0, offscreen_pixels: 2.0, view_guard: 0.35, coarsen: 0.8, max_distance: 400_000.0, prefetch_seconds: 0.5, keep_frames: 60 };
+        let config = PlanConfig { pixel_angle: 7.67e-4, lod_pixels: 1.0, offscreen_pixels: 2.0, view_guard: 0.35, coarsen: 0.8, max_distance: 400_000.0, prefetch_seconds: 0.5, keep_frames: 60, motion_flow: 0.0, motion_max: 1.0 };
         let planner = Planner::new(&grid, (-100_000, 100_000), config);
         (grid, eye, planner)
     }
@@ -706,7 +740,7 @@ mod tests {
         let forward = (up.any_orthonormal_vector() - up * 0.3).normalize();
         let view = View { forward, cos_half: 0.4f64.cos() };
         let cut = |offscreen: f64| {
-            let config = PlanConfig { pixel_angle: 7.67e-4, lod_pixels: 1.0, offscreen_pixels: offscreen, view_guard: 0.35, coarsen: 0.8, max_distance: 400_000.0, prefetch_seconds: 0.5, keep_frames: 60 };
+            let config = PlanConfig { pixel_angle: 7.67e-4, lod_pixels: 1.0, offscreen_pixels: offscreen, view_guard: 0.35, coarsen: 0.8, max_distance: 400_000.0, prefetch_seconds: 0.5, keep_frames: 60, motion_flow: 0.0, motion_max: 1.0 };
             let mut planner = Planner::new(&grid, (-100_000, 100_000), config);
             let mut frame = 0;
             loop {
@@ -725,6 +759,37 @@ mod tests {
         assert_eq!(biased.coarse_share, 0.0);
         assert!(biased.worst_px <= full.worst_px + 1e-9, "{} > {}", biased.worst_px, full.worst_px);
         assert!(biased.drawn.len() * 2 < full.drawn.len(), "{} of {}", biased.drawn.len(), full.drawn.len());
+    }
+
+    /// Where a fast eye's motion sweeps the image, cells may be coarser:
+    /// the settled cut is smaller, and as fine as wanted everywhere.
+    #[test]
+    fn a_fast_eye_needs_fewer_tiles_where_its_motion_sweeps_the_image() {
+        let (grid, eye, _) = setup();
+        let up = eye.normalize();
+        let forward = (up.any_orthonormal_vector() - up * 0.6).normalize();
+        let view = View { forward, cos_half: 0.6f64.cos() };
+        // Falling at 300 m/s from about a kilometre.
+        let velocity = -up * 300.0;
+        let cut = |motion_flow: f64| {
+            let config = PlanConfig { pixel_angle: 7.67e-4, lod_pixels: 1.0, offscreen_pixels: 2.0, view_guard: 0.35, coarsen: 0.8, max_distance: 400_000.0, prefetch_seconds: 0.0, keep_frames: 60, motion_flow, motion_max: 3.0 };
+            let mut planner = Planner::new(&grid, (-100_000, 100_000), config);
+            let mut frame = 0;
+            loop {
+                frame += 1;
+                let plan = planner.plan(&grid, eye, velocity, Some(view), frame);
+                if plan.requests.is_empty() {
+                    return plan;
+                }
+                for (k, ranges) in plan.requests {
+                    planner.set_generated(k);
+                    planner.set_ranges(k, ranges);
+                }
+            }
+        };
+        let (still, moving) = (cut(0.0), cut(16.0));
+        assert!(moving.worst_wanted <= 1.0 + 1e-9, "{}", moving.worst_wanted);
+        assert!(moving.drawn.len() * 10 < still.drawn.len() * 9, "{} of {}", moving.drawn.len(), still.drawn.len());
     }
 
     #[test]

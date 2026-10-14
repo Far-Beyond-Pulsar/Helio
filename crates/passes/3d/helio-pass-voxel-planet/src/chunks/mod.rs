@@ -432,6 +432,9 @@ struct TileChunks {
     chunks: Vec<Chunk>,
     layers: Layers,
     ranges: residency::Ranges,
+    /// Whether the tile was ever drawn (diagnostics: tiles evicted unseen
+    /// were generated for nothing).
+    shown: bool,
 }
 
 /// A tile's chunk layers (bands, inclusive) and what lies where it has
@@ -550,6 +553,10 @@ pub struct UpdateStats {
     pub generated_tiles: usize,
     pub generated_chunks: usize,
     pub evicted_tiles: usize,
+    /// Evicted tiles that were never drawn, and generated tiles drawn for
+    /// the first time (diagnostics: what generation was for).
+    pub evicted_unseen: usize,
+    pub shown_tiles: usize,
     /// Tiles regenerated because their measured layers left their chunks.
     pub regenerated_tiles: usize,
     pub drawn_tiles: usize,
@@ -567,8 +574,10 @@ pub struct UpdateStats {
     /// milliseconds on it.
     pub plan_age: u64,
     pub plan_ms: f64,
-    /// [`residency::Plan::worst_px`] of the latest plan, and its tile.
+    /// [`residency::Plan::worst_px`] of the latest plan, and its tile;
+    /// [`residency::Plan::worst_wanted`].
     pub worst_px: f64,
+    pub worst_wanted: f64,
     pub worst: Option<residency::Worst>,
     /// Level switches in view a plan that arrived this frame made, and
     /// [`residency::Plan::switch_px`].
@@ -602,7 +611,8 @@ pub struct ResidencyConfig {
 
 impl Default for ResidencyConfig {
     /// Cells of a pixel or less in view (two out of it, past a 20 degree
-    /// guard; a 45 degree view 1080 pixels tall), 400 km
+    /// guard; up to three where the eye's motion sweeps the image 32
+    /// pixels a frame; a 45 degree view 1080 pixels tall), 400 km
     /// out, half a second of prefetch, two seconds of keep; up to 256 tiles
     /// and 3 ms of generation a frame.
     fn default() -> Self {
@@ -616,6 +626,8 @@ impl Default for ResidencyConfig {
                 max_distance: 400_000.0,
                 prefetch_seconds: 0.5,
                 keep_frames: 120,
+                motion_flow: 16.0,
+                motion_max: 3.0,
             },
             tiles_per_frame: 256,
             generate_ms: Some(3.0),
@@ -1744,7 +1756,10 @@ impl ChunkWorld {
             readback.chunks.push((key, cz, slot, self.serial));
         }
         stats.generated_chunks += chunks.len();
-        if let Some(old) = self.tiles.insert(key, TileChunks { chunks, layers, ranges }) {
+        let shown = self.drawn_set.holds(key);
+        let old = self.tiles.insert(key, TileChunks { chunks, layers, ranges, shown });
+        stats.shown_tiles += usize::from(shown && !old.as_ref().is_some_and(|o| o.shown));
+        if let Some(old) = old {
             evictions.extend(old.chunks.iter().map(|c| c.slot));
         }
         self.changed_tiles.insert(key);
@@ -1963,10 +1978,12 @@ impl ChunkWorld {
         stats.requests = plan.waiting;
         stats.coarse_share = plan.coarse_share;
         stats.worst_px = plan.worst_px;
+        stats.worst_wanted = plan.worst_wanted;
         stats.worst = plan.worst;
         for key in evicted {
             if let Some(old) = self.tiles.remove(&key) {
                 evictions.extend(old.chunks.iter().map(|c| c.slot));
+                stats.evicted_unseen += usize::from(!old.shown);
             }
             self.hidden.remove(&key);
             self.changed_tiles.insert(key);
@@ -2165,6 +2182,12 @@ impl ChunkWorld {
             )
         };
         self.drawn_set.update(&added, &removed, &self.changed_tiles, frame, chunks_of);
+        for key in &added {
+            if let Some(tile) = self.tiles.get_mut(key) {
+                stats.shown_tiles += usize::from(!tile.shown);
+                tile.shown = true;
+            }
+        }
         self.changed_tiles.clear();
         lap(&mut stats, 4);
         // One upload of the changed entries, scattered on the GPU.
