@@ -1362,11 +1362,7 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
         let h = f32(heat) / 64.0;
         colour = clamp(vec3<f32>(h, h - 1.0, h - 2.0), vec3<f32>(0.0), vec3<f32>(1.0)) / light;
     } else if params.debug.x == 1u {
-        // Level colours.
-        let level = (bitcast<u32>(c.box.w) >> 8u) & 31u;
-        let colours = array<vec3<f32>, 8>(vec3<f32>(0.9, 0.2, 0.2), vec3<f32>(0.9, 0.6, 0.1), vec3<f32>(0.8, 0.9, 0.1), vec3<f32>(0.2, 0.8, 0.2),
-            vec3<f32>(0.1, 0.8, 0.8), vec3<f32>(0.2, 0.3, 0.9), vec3<f32>(0.6, 0.2, 0.9), vec3<f32>(0.9, 0.2, 0.7));
-        colour = colours[level & 7u];
+        colour = level_colour((bitcast<u32>(c.box.w) >> 8u) & 31u);
     }
     textureStore(out_colour, p, vec4<f32>(colour * light, 1.0));
 }
@@ -1500,6 +1496,13 @@ fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, material: u32,
     return Look(albedo, ao);
 }
 
+// A level's colour (`HELIO_VOXEL_CHUNKS_LEVELS`, `params.debug.x` 1 or 3).
+fn level_colour(level: u32) -> vec3<f32> {
+    let colours = array<vec3<f32>, 8>(vec3<f32>(0.9, 0.2, 0.2), vec3<f32>(0.9, 0.6, 0.1), vec3<f32>(0.8, 0.9, 0.1), vec3<f32>(0.2, 0.8, 0.2),
+        vec3<f32>(0.1, 0.8, 0.8), vec3<f32>(0.2, 0.3, 0.9), vec3<f32>(0.6, 0.2, 0.9), vec3<f32>(0.9, 0.2, 0.7));
+    return colours[level & 7u];
+}
+
 // Helio's gbuffer (`engine::GBUFFER_FORMATS`).
 struct GOut {
     @location(0) albedo: vec4<f32>,
@@ -1535,6 +1538,9 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     let f0 = 0.03;
     var out: GOut;
     out.albedo = vec4<f32>(look.albedo, 1.0);
+    // Level colours (`HELIO_VOXEL_CHUNKS_LEVELS`; `=half`: the left half,
+    // beside the shaded right).
+    if params.debug.x == 1u || (params.debug.x == 3u && p.x < i32(size.x / 2u)) { out.albedo = vec4<f32>(level_colour(u32(chunk_keys[v.x].x >> 8u) & 31u), 1.0); }
     out.normal = vec4<f32>(normal, f0);
     out.orm = vec4<f32>(look.ao * shading.w, clamp(palette(material).w, 0.04, 1.0), 0.0, f0);
     out.emissive = vec4<f32>(0.0, 0.0, 0.0, f0);
@@ -1624,7 +1630,10 @@ fn slope_normal(slot: u32, key: vec4<i32>, cell: vec3<i32>, c: ChunkDraw) -> vec
     if x0.y + x1.y == 0.0 || y0.y + y1.y == 0.0 { return vec3<f32>(0.0); }
     // A cell-space normal to the world: by M's inverse transposed.
     let n = -gx * c.i0.xyz - gy * c.i1.xyz + c.i2.xyz;
-    return normalize(n);
+    // Zero (not NaN) where it cannot be normalised.
+    let l = dot(n, n);
+    if !(l > 1e-12) { return vec3<f32>(0.0); }
+    return n * inverseSqrt(l);
 }
 
 // Hit `v` (pixels `pixel_m` wide there). Voxels a few pixels wide are lit
@@ -1655,9 +1664,13 @@ fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, pixel_m: f32) -> Face {
     let w = max(select(0.0, materials.detail.w, step), coarse);
     var ground = ground_hint;
     if dot(ground, ground) == 0.0 { ground = slope_normal(v.x, key, cell, c); }
-    if w <= 0.0 || dot(ground, ground) == 0.0 { return f; }
+    // A unit normal (written so NaN fails it), else the face's own.
+    if w <= 0.0 || !(abs(dot(ground, ground) - 1.0) < 0.01) { return f; }
+    let shading = mix(normal, ground, w);
+    let l = dot(shading, shading);
+    if !(l > 1e-6) { return f; }
     f.ground = ground;
-    f.shading = normalize(mix(normal, ground, w));
+    f.shading = shading * inverseSqrt(l);
     f.skip = 2.0 * w;
     return f;
 }

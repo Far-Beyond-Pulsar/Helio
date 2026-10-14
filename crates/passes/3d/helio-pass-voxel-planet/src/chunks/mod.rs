@@ -2357,7 +2357,11 @@ impl ChunkWorld {
             debug: {
                 let pixel: Vec<u32> = std::env::var("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL").ok().map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
                 [
-                    if std::env::var_os("HELIO_VOXEL_CHUNKS_HEAT").is_some() { 2 } else { u32::from(std::env::var_os("HELIO_VOXEL_CHUNKS_LEVELS").is_some()) },
+                    if std::env::var_os("HELIO_VOXEL_CHUNKS_HEAT").is_some() {
+                        2
+                    } else {
+                        std::env::var("HELIO_VOXEL_CHUNKS_LEVELS").map_or(0, |v| if v == "half" { 3 } else { 1 })
+                    },
                     u32::from(std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some()),
                     pixel.first().copied().unwrap_or(u32::MAX),
                     pixel.get(1).copied().unwrap_or(u32::MAX),
