@@ -477,9 +477,11 @@ pub struct FrameTimings {
     pub draw: f64,
     pub seed: f64,
     pub shadow: f64,
-    /// The update's eviction and generation, and the tiles it generated.
+    /// The update's eviction and generation, and the tiles and chunks it
+    /// generated.
     pub generate: f64,
     pub tiles: usize,
+    pub chunks: usize,
     /// Generation by kernel: eviction and tile columns, chunk columns,
     /// chunk builds.
     pub stages: [f64; 3],
@@ -2266,7 +2268,7 @@ impl ChunkWorld {
                     let t: &[u64] = bytemuck::cast_slice(&data);
                     let ms = |a: u64, b: u64| b.saturating_sub(a) as f64 * period;
                     let stages = [ms(t[0], t[1]), ms(t[1], t[5]), ms(t[5], t[6])];
-                    let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), shadow: ms(t[4], t[7]), generate: ms(t[0], t[6]), tiles, stages };
+                    let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), shadow: ms(t[4], t[7]), generate: ms(t[0], t[6]), tiles, chunks, stages };
                     if tiles > 0 {
                         self.cost.tiles.add(tiles as f64, stages[0]);
                         self.cost.chunks.add(chunks as f64, stages[1] + stages[2]);
@@ -2747,6 +2749,13 @@ impl ChunkWorld {
     /// Frames whose GPU times came back since the last call.
     pub fn take_timings(&mut self) -> Vec<FrameTimings> {
         std::mem::take(&mut self.timings)
+    }
+
+    /// Every resident tile generated again (benchmarks: the same work
+    /// each time), drawn as it is meanwhile.
+    pub fn regenerate_all(&mut self) {
+        let keys: Vec<TileKey> = self.tiles.keys().copied().collect();
+        self.stale.extend(keys);
     }
 }
 

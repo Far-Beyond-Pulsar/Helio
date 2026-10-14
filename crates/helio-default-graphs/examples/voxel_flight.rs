@@ -13,6 +13,8 @@
 //!   (`CHUNKENGINE`: the frame as a host draws it). With
 //!   `HELIO_VOXEL_CHUNKS_DIG=n` the view is dug and undone, with
 //!   `HELIO_VOXEL_CHUNKS_BLAST=r` blasted by one ball `r` m across.
+//!   `HELIO_VOXEL_GEN_BENCH=rounds` then generates its tiles again that many
+//!   times (`GENBENCH`: the GPU's generation time by kernel).
 //! * `HELIO_VOXEL_CHUNKS_FLY=descent|cruise` streams along a path.
 //! * `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo|dive|glide` flies through the
 //!   renderer in real time, every frame recorded (`stress_<mode>.csv`),
@@ -400,6 +402,48 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
     let up = if forward.dot(up).abs() > 0.999 { up.any_orthonormal_vector() } else { up };
     let near = (flight.planet.air_clearance(eye) * 0.25).clamp(0.05, 50_000.0) as f32;
     let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, std::f32::consts::FRAC_PI_4, w as f32 / h as f32, near, 40_000_000.0);
+    // `HELIO_VOXEL_GEN_BENCH=rounds`: the settled view's tiles generated
+    // again that many times in full batches (each frame drawn, as the
+    // timestamps ride on draws), the GPU's time by kernel a tile and a
+    // chunk: the same work every run, to A/B generation.
+    if let Some(rounds) = std::env::var("HELIO_VOXEL_GEN_BENCH").ok().and_then(|v| v.parse::<u32>().ok()) {
+        let config = chunk_config(h, 512);
+        let view_cone = view_cone(flight, forward);
+        let mut step = |world: &mut ChunkWorld, frame: &mut u64| {
+            let mut encoder = flight.device.create_command_encoder(&Default::default());
+            world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, DVec3::ZERO, Some(view_cone), *frame, &config);
+            world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), *frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun_at(eye), [w, h]);
+            flight.queue.submit([encoder.finish()]);
+            world.submitted();
+            let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+            *frame += 1;
+        };
+        for _ in 0..8 {
+            step(&mut world, &mut frame);
+        }
+        world.take_timings();
+        for _ in 0..rounds {
+            world.regenerate_all();
+            let mut quiet = 0;
+            while quiet < 6 {
+                step(&mut world, &mut frame);
+                quiet = if world.settled() { quiet + 1 } else { 0 };
+            }
+            let t = world.take_timings();
+            let tiles: usize = t.iter().map(|f| f.tiles).sum();
+            let chunks: usize = t.iter().map(|f| f.chunks).sum();
+            let stage = |k: usize| t.iter().map(|f| f.stages[k]).sum::<f64>();
+            let (a, b, c) = (stage(0), stage(1), stage(2));
+            eprintln!(
+                "GENBENCH {view}: {tiles} tiles {chunks} chunks in {} frames: tile columns {:.2} us/tile, chunk columns {:.2} us/chunk, chunk builds {:.2} us/chunk, all {:.2} us/tile",
+                t.len(),
+                a * 1e3 / tiles as f64,
+                b * 1e3 / chunks as f64,
+                c * 1e3 / chunks as f64,
+                (a + b + c) * 1e3 / tiles as f64
+            );
+        }
+    }
     let seconds: f64 = std::env::var("HELIO_VOXEL_FLIGHT_HOLD_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(120.0);
     let started = Instant::now();
     let mut pending = std::collections::VecDeque::new();
