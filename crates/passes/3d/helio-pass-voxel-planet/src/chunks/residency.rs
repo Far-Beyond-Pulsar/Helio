@@ -112,11 +112,25 @@ pub struct Plan {
     /// Pixels the largest cell of a drawn tile in view spans from the eye
     /// (above the finest level).
     pub worst_px: f64,
+    /// That tile (diagnostics): whether its layers are measured, levels
+    /// its ranges are guessed under a measured tile, and its children
+    /// asked for and generated.
+    pub worst: Option<Worst>,
     /// Tiles in view this plan switches between levels, and the pixels the
     /// largest cell of those spans from the eye (the coarser side of each
     /// switch): a switch shows when that is well over a pixel.
     pub switches: usize,
     pub switch_px: f64,
+}
+
+/// The coarsest tile in view (`Plan::worst`).
+#[derive(Clone, Copy, Debug)]
+pub struct Worst {
+    pub key: TileKey,
+    pub exact: bool,
+    pub guess: u8,
+    pub children: usize,
+    pub generated: usize,
 }
 
 pub struct Planner {
@@ -303,8 +317,10 @@ impl Planner {
                 plan.switches += 1;
                 plan.switch_px = plan.switch_px.max(now);
             }
-            if shows && !ready && key.level > 0 {
-                plan.worst_px = plan.worst_px.max(now);
+            if shows && !ready && key.level > 0 && now > plan.worst_px {
+                plan.worst_px = now;
+                let generated = children.iter().filter(|c| self.tiles.get(c).is_some_and(|t| t.generated)).count();
+                plan.worst = Some(Worst { key, exact: tile.exact, guess: tile.guess, children: children.len(), generated });
             }
             let t = self.tiles.get_mut(&key).unwrap();
             t.used = frame;

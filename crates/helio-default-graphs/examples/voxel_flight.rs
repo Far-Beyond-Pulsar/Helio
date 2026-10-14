@@ -892,7 +892,20 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     // GPU generation by kernel: evictions and tile columns, chunk columns,
     // chunk builds.
     let mut stage_ms = [0.0f64; 3];
+    // `HELIO_VOXEL_STRESS_FPS=n`: frames paced at n a second, as a host's
+    // display paces them (unpaced, the harness runs faster than an editor
+    // and so generates more a second).
+    let pace = std::env::var("HELIO_VOXEL_STRESS_FPS").ok().and_then(|v| v.parse::<f64>().ok()).map(|fps| std::time::Duration::from_secs_f64(1.0 / fps));
+    let mut frame_start = Instant::now();
     loop {
+        if let Some(pace) = pace {
+            let due = frame_start + pace;
+            let now = Instant::now();
+            if now < due {
+                std::thread::sleep(due - now);
+            }
+            frame_start = Instant::now();
+        }
         let t = started.elapsed().as_secs_f64();
         if t > seconds {
             break;
@@ -1446,6 +1459,15 @@ fn main() {
         return;
     }
     if let Ok(mode) = std::env::var("HELIO_VOXEL_FLIGHT_STRESS") {
+        // `HELIO_VOXEL_STRESS_AT=x,y,z`: the flight over the ground in that
+        // direction from the planet's centre (a Pulsar level's spawn).
+        let ground = match std::env::var("HELIO_VOXEL_STRESS_AT") {
+            Ok(at) => {
+                let v: Vec<f64> = at.split(',').map(|x| x.trim().parse().unwrap()).collect();
+                flight.planet.surface_point(DVec3::new(v[0], v[1], v[2]).normalize(), 1.7)
+            }
+            Err(_) => ground,
+        };
         chunk_stress(&mut flight, &mode, ground, heading);
         return;
     }

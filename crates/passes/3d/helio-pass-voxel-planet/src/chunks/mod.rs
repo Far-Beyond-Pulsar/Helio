@@ -558,8 +558,9 @@ pub struct UpdateStats {
     /// Drawn tiles in view coarser than wanted, as a share of the drawn
     /// tiles in view.
     pub coarse_share: f64,
-    /// [`residency::Plan::worst_px`] of the latest plan.
+    /// [`residency::Plan::worst_px`] of the latest plan, and its tile.
     pub worst_px: f64,
+    pub worst: Option<residency::Worst>,
     /// Level switches in view a plan that arrived this frame made, and
     /// [`residency::Plan::switch_px`].
     pub switches: usize,
@@ -1923,6 +1924,7 @@ impl ChunkWorld {
         stats.requests = plan.waiting;
         stats.coarse_share = plan.coarse_share;
         stats.worst_px = plan.worst_px;
+        stats.worst = plan.worst;
         for key in evicted {
             if let Some(old) = self.tiles.remove(&key) {
                 evictions.extend(old.chunks.iter().map(|c| c.slot));

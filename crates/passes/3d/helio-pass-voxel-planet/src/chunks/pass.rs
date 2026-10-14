@@ -94,7 +94,7 @@ impl ChunkPass {
         let s = &self.stats;
         let gpu = self.timings.last();
         format!(
-            "chunks settled={} drawn_tiles={} drawn_chunks={} resident_chunks={} fading={} waiting={} generated={} regenerated={} deep={} budget={} coarse={:.3} worst_px={:.2} switch_px={:.2} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} generate_ms={:?}",
+            "chunks settled={} drawn_tiles={} drawn_chunks={} resident_chunks={} fading={} waiting={} generated={} regenerated={} deep={} budget={} coarse={:.3} worst_px={:.2} worst={} switch_px={:.2} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} generate_ms={:?}",
             self.settled(),
             s.drawn_tiles,
             s.drawn_chunks,
@@ -107,6 +107,7 @@ impl ChunkPass {
             s.budget,
             s.coarse_share,
             s.worst_px,
+            s.worst.map_or("-".to_string(), |w| format!("{}/{}/{}/{}/exact{}/guess{}/kids{}of{}", w.key.face, w.key.level, w.key.cx, w.key.cy, u8::from(w.exact), w.guess, w.generated, w.children)),
             s.switch_px,
             s.out_of_slots,
             s.out_of_leaves,
