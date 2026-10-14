@@ -346,14 +346,25 @@ fn chunk_config(h: u32, budget: usize) -> helio_pass_voxel_planet::chunks::Resid
     }
 }
 
-/// Run chunk residency for a still eye until nothing is left to generate.
-fn chunk_settle(flight: &Flight, world: &mut helio_pass_voxel_planet::chunks::ChunkWorld, eye: DVec3, frame: &mut u64) -> f64 {
+/// The cone a 45 degree view of the flight's aspect sees around `forward`
+/// (the residency's `View`, as the renderer's pass builds it).
+fn view_cone(flight: &Flight, forward: Vec3) -> helio_pass_voxel_planet::chunks::residency::View {
+    let [w, h] = flight.size;
+    let tan_y = std::f64::consts::FRAC_PI_8.tan();
+    let tan_x = tan_y * f64::from(w) / f64::from(h);
+    helio_pass_voxel_planet::chunks::residency::View { forward: forward.normalize().as_dvec3(), cos_half: (tan_x * tan_x + tan_y * tan_y).sqrt().atan().cos() }
+}
+
+/// Run chunk residency for a still eye looking along `forward` until
+/// nothing is left to generate.
+fn chunk_settle(flight: &Flight, world: &mut helio_pass_voxel_planet::chunks::ChunkWorld, eye: DVec3, forward: Vec3, frame: &mut u64) -> f64 {
     let config = chunk_config(flight.size[1], 512);
+    let view = view_cone(flight, forward);
     let started = Instant::now();
     loop {
         let mut encoder = flight.device.create_command_encoder(&Default::default());
         let cpu = Instant::now();
-        let stats = world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, DVec3::ZERO, None, *frame, &config);
+        let stats = world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, DVec3::ZERO, Some(view), *frame, &config);
         if *frame % 50 == 0 || std::env::var_os("HELIO_VOXEL_CHUNKS_TRACE").is_some() {
             eprintln!("CHUNKSETTLE {} cpu {:.1} ms {stats:?}", *frame, cpu.elapsed().as_secs_f64() * 1e3);
         }
@@ -382,7 +393,7 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
     let mut scope = Some(flight.device.push_error_scope(wgpu::ErrorFilter::Validation));
     let mut world = ChunkWorld::new(&flight.device, &flight.queue, &flight.planet);
     let mut frame = 0u64;
-    let seconds = chunk_settle(flight, &mut world, eye, &mut frame);
+    let seconds = chunk_settle(flight, &mut world, eye, forward, &mut frame);
     eprintln!("CHUNKS settled {view} in {seconds:.2} s ({frame} frames): {} chunks drawn, {:.1} MB", world.chunk_count(), world.resident_bytes() as f64 / 1048576.0);
     let up = up_for(eye);
     let forward = forward.normalize();
@@ -529,7 +540,7 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
     let mut planet = (*flight.planet).clone();
     let mut world = ChunkWorld::new(&flight.device, &flight.queue, &flight.planet);
     let mut frame = 0u64;
-    chunk_settle(flight, &mut world, eye, &mut frame);
+    chunk_settle(flight, &mut world, eye, forward, &mut frame);
     let up = up_for(eye);
     let forward = forward.normalize();
     let near = (flight.planet.air_clearance(eye) * 0.25).clamp(0.05, 50_000.0) as f32;
@@ -541,7 +552,7 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
     let step = |world: &mut ChunkWorld, planet: &Planet, frame: &mut u64| {
         assert!(world.sync_edits(planet), "edits follow");
         let mut encoder = flight.device.create_command_encoder(&Default::default());
-        let stats = world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, DVec3::ZERO, None, *frame, &config);
+        let stats = world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, DVec3::ZERO, Some(view_cone(flight, forward)), *frame, &config);
         world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), *frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun_at(eye), [w, h]);
         flight.queue.submit([encoder.finish()]);
         world.submitted();
@@ -1153,7 +1164,7 @@ fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
     let frames = (seconds / dt) as u64;
     // Loaded before the flight starts (a game loads its spawn first).
     let mut start = 0u64;
-    let loaded = chunk_settle(flight, &mut world, path(0.0).0, &mut start);
+    let loaded = chunk_settle(flight, &mut world, path(0.0).0, path(0.0).1, &mut start);
     eprintln!("CHUNKFLY {mode} loaded in {loaded:.2} s ({start} frames)");
     let png = std::env::var("HELIO_VOXEL_CHUNKS_PNG").ok();
     let mut pending = std::collections::VecDeque::new();
