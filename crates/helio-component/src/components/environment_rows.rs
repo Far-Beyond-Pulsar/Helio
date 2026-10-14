@@ -488,47 +488,24 @@ derived_row!(
     particle_emitter_clear
 );
 // A decal's image is registered in the scene's texture store as its row is
-// derived, so the row carries its bindless slot.
+// derived, so the row carries its bindless slot. The world loaded the image
+// (a texture asset) and bound it into the decal; nothing reads the file here.
 fn decal_dispatch(mirror: &GpuMirrorHandle, row: u32, data: *const (), is_new_insert: bool) {
     // SAFETY: SceneDB reaches this only through `DecalComponent`'s own
     // `ComponentId`, with a pointer to a live value.
     let decal = unsafe { &*(data as *const DecalComponent) };
-    let albedo_slot = decal_texture_slot(&decal.albedo_texture, mirror);
+    let albedo_slot = crate::texture_assets::texture_slot(
+        &decal.albedo_image,
+        &decal.albedo_texture,
+        mirror,
+        "decal",
+    );
     pulsar_scenedb::gpu::write_derived_row(
         mirror,
         row,
         &DecalSourceRow::of(decal, albedo_slot),
         is_new_insert,
     );
-}
-
-/// The texture store slot of the image at `path` (project-relative or
-/// absolute), or `u32::MAX` (the tint alone) for none or one that does not
-/// load.
-fn decal_texture_slot(path: &str, mirror: &GpuMirrorHandle) -> u32 {
-    asset_texture_slot("decal", path, mirror)
-}
-
-/// The scene texture store slot of the image at `path` (project-relative,
-/// or absolute), registering it; `u32::MAX` for none or one that does not
-/// load (`what` names the user in the warning).
-fn asset_texture_slot(what: &str, path: &str, mirror: &GpuMirrorHandle) -> u32 {
-    if path.is_empty() {
-        return u32::MAX;
-    }
-    let mut resolved = std::path::PathBuf::from(path);
-    if resolved.is_relative() {
-        if let Some(root) = engine_state::get_project_path() {
-            resolved = std::path::Path::new(&root).join(path);
-        }
-    }
-    match crate::material_textures::register_graph_texture(&resolved, mirror) {
-        Ok(slot) => slot,
-        Err(error) => {
-            tracing::warn!("{what} texture '{}': {error}", resolved.display());
-            u32::MAX
-        }
-    }
 }
 
 // A sprite's image is registered in the scene's texture store as its row is
@@ -538,7 +515,7 @@ fn sprite_dispatch(mirror: &GpuMirrorHandle, row: u32, data: *const (), is_new_i
     // `ComponentId`, with a pointer to a live value.
     let sprite = unsafe { &*(data as *const SpriteComponent) };
     let slot = if sprite.enabled {
-        asset_texture_slot("sprite", &sprite.texture, mirror)
+        crate::texture_assets::texture_slot(&sprite.image, &sprite.texture, mirror, "sprite")
     } else {
         u32::MAX
     };
