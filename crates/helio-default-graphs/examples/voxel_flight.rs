@@ -834,9 +834,19 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let settle = |flight: &mut Flight, eye: DVec3, forward: Vec3| {
         let started = Instant::now();
         let mut frames = 0;
+        let mut last = Instant::now();
         while frames < 10 || !flight.renderer.find_pass::<ChunkPass>().is_some_and(ChunkPass::settled) {
             flight.draw(eye, forward);
             frames += 1;
+            // Load progress: the frame's interval, the pass's CPU stages
+            // (results, plan, evict, generate, drawn set, table) and work.
+            if frames % 50 == 0 {
+                if let Some(pass) = flight.renderer.find_pass::<ChunkPass>() {
+                    let s = pass.stats();
+                    eprintln!("CHUNKLOAD {mode}: frame {frames} at {:.1} s, interval {:.1} ms, pass cpu {:?} ms, stages {:?} ms, waiting {} generated {} drawn {}", started.elapsed().as_secs_f64(), last.elapsed().as_secs_f64() * 1e3, pass.cpu_ms().map(|v| (v * 100.0).round() / 100.0), s.cpu_ms.map(|v| (v * 100.0).round() / 100.0), s.requests, s.generated_tiles, s.drawn_tiles);
+                }
+            }
+            last = Instant::now();
             if frames > 6000 {
                 eprintln!("CHUNKSTRESS {mode}: a view did not settle: {:?}", flight.renderer.find_pass::<ChunkPass>().map(ChunkPass::stats));
                 break;

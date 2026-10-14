@@ -771,18 +771,71 @@ pub struct ChunkWorld {
 }
 
 /// What generation costs on the GPU: milliseconds of a tile's columns and
-/// of a chunk's columns and tree, and chunks a tile.
+/// of a chunk's columns and tree on average, chunks a tile, and the lines
+/// through each frame's batch (a batch costs a fixed part, then each tile
+/// and chunk: the averages of the small batches a flight makes hold mostly
+/// that fixed part, and would budget a few times too few tiles).
 #[derive(Clone, Copy, Debug)]
 struct GenCost {
     tile: f64,
     chunk: f64,
     chunks_per_tile: f64,
+    tiles: CostLine,
+    chunks: CostLine,
 }
 
 impl GenCost {
     /// Before the first measured frame: an RTX 3060's (a 300 m/s cruise and
     /// a 50 m blast).
-    const PRIOR: Self = Self { tile: 0.035, chunk: 0.007, chunks_per_tile: 1.7 };
+    const PRIOR: Self = Self { tile: 0.035, chunk: 0.007, chunks_per_tile: 1.7, tiles: CostLine::EMPTY, chunks: CostLine::EMPTY };
+
+    /// A batch's fixed milliseconds, then a tile's and a chunk's: the lines'
+    /// once their batches spread enough, else the averages.
+    fn model(&self) -> (f64, f64, f64) {
+        let (fixed_t, tile) = self.tiles.fit().unwrap_or((0.0, self.tile));
+        let (fixed_c, chunk) = self.chunks.fit().unwrap_or((0.0, self.chunk));
+        (fixed_t + fixed_c, tile, chunk)
+    }
+}
+
+/// A least-squares line through (items, milliseconds) samples, recent ones
+/// weighing more: what a batch costs, fixed and per item.
+#[derive(Clone, Copy, Debug)]
+struct CostLine {
+    w: f64,
+    x: f64,
+    y: f64,
+    xx: f64,
+    xy: f64,
+}
+
+impl CostLine {
+    const EMPTY: Self = Self { w: 0.0, x: 0.0, y: 0.0, xx: 0.0, xy: 0.0 };
+
+    fn add(&mut self, x: f64, y: f64) {
+        const KEEP: f64 = 0.98;
+        *self = Self { w: self.w * KEEP + 1.0, x: self.x * KEEP + x, y: self.y * KEEP + y, xx: self.xx * KEEP + x * x, xy: self.xy * KEEP + x * y };
+    }
+
+    /// Fixed and per-item milliseconds, once enough batches of spread
+    /// sizes were seen (a line through a size alone is anything).
+    fn fit(&self) -> Option<(f64, f64)> {
+        if self.w < 8.0 {
+            return None;
+        }
+        let (mx, my) = (self.x / self.w, self.y / self.w);
+        let var = self.xx / self.w - mx * mx;
+        if var < (0.25 * mx).powi(2).max(4.0) {
+            return None;
+        }
+        let per = (self.xy / self.w - mx * my) / var;
+        let fixed = my - per * mx;
+        // A fixed part under zero: the plain average, per item.
+        if per <= 0.0 || fixed < 0.0 {
+            return (mx > 0.0).then(|| (0.0, my / mx));
+        }
+        Some((fixed, per))
+    }
 }
 
 /// The draw's targets: the seed (each pixel's nearest box) and the trace's
@@ -1888,12 +1941,13 @@ impl ChunkWorld {
         // The frame's generation: `tiles_per_frame` tiles at most and, with a
         // time budget, the measured cost of their columns and chunks within
         // it (eight tiles at least): a tall edited tile costs its chunks.
-        let cost = config.generate_ms.map(|ms| (ms, self.cost));
+        let cpt = self.cost.chunks_per_tile;
+        let cost = config.generate_ms.map(|ms| (ms, self.cost.model()));
         let most = config.tiles_per_frame.min(TILE_BATCH);
-        stats.budget = cost.map_or(most, |(ms, c)| ((ms / (c.tile + c.chunk * c.chunks_per_tile)) as usize).clamp(8, most));
+        stats.budget = cost.map_or(most, |(ms, (fixed, tile, chunk))| (((ms - fixed).max(0.0) / (tile + chunk * cpt)) as usize).clamp(8, most));
         let full = |batch: &GenBatch| {
             let tiles = batch.tile_jobs.len();
-            tiles >= most || cost.is_some_and(|(ms, c)| tiles >= 8 && tiles as f64 * c.tile + batch.chunk_jobs.len() as f64 * c.chunk >= ms)
+            tiles >= most || cost.is_some_and(|(ms, (fixed, tile, chunk))| tiles >= 8 && fixed + tiles as f64 * tile + batch.chunk_jobs.len() as f64 * chunk >= ms)
         };
         // Tiles edits changed: coarsest first, then drawn ones, nearest
         // first, within the frame's budget. A blast shows at once in coarse
@@ -2196,11 +2250,16 @@ impl ChunkWorld {
                     let ms = |a: u64, b: u64| b.saturating_sub(a) as f64 * period;
                     let stages = [ms(t[0], t[1]), ms(t[1], t[5]), ms(t[5], t[6])];
                     let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), shadow: ms(t[4], t[7]), generate: ms(t[0], t[6]), tiles, stages };
+                    if tiles > 0 {
+                        self.cost.tiles.add(tiles as f64, stages[0]);
+                        self.cost.chunks.add(chunks as f64, stages[1] + stages[2]);
+                    }
                     if tiles >= 8 {
-                        let now = GenCost { tile: stages[0] / tiles as f64, chunk: (stages[1] + stages[2]) / chunks.max(1) as f64, chunks_per_tile: chunks as f64 / tiles as f64 };
                         let mix = |old: f64, new: f64| old * 0.9 + new * 0.1;
-                        let c = self.cost;
-                        self.cost = GenCost { tile: mix(c.tile, now.tile), chunk: mix(c.chunk, now.chunk), chunks_per_tile: mix(c.chunks_per_tile, now.chunks_per_tile) };
+                        let c = &mut self.cost;
+                        c.tile = mix(c.tile, stages[0] / tiles as f64);
+                        c.chunk = mix(c.chunk, (stages[1] + stages[2]) / chunks.max(1) as f64);
+                        c.chunks_per_tile = mix(c.chunks_per_tile, chunks as f64 / tiles as f64);
                     }
                     self.timings.push(timing);
                 }
@@ -2671,10 +2730,33 @@ impl ChunkWorld {
 
 #[cfg(test)]
 mod tests {
-    use super::walk_templates;
+    use super::{walk_templates, CostLine, GenCost};
 
     /// Both walks come out of the templates whatever ends the lines (a
     /// checkout's \r\n lost the fine ones).
+    /// A batch's fixed part apart from its tiles': batches of spread sizes
+    /// find both; batches of one size find neither (no line).
+    #[test]
+    fn generation_cost_separates_a_batch_from_its_tiles() {
+        let mut line = CostLine::EMPTY;
+        for n in 0..200 {
+            let tiles = 8 + (n * 37) % 120;
+            line.add(tiles as f64, 0.2 + 0.01 * tiles as f64);
+        }
+        let (fixed, per) = line.fit().unwrap();
+        assert!((fixed - 0.2).abs() < 1e-6 && (per - 0.01).abs() < 1e-8, "{fixed} {per}");
+        let mut same = CostLine::EMPTY;
+        for _ in 0..50 {
+            same.add(14.0, 0.34);
+        }
+        assert!(same.fit().is_none());
+        // Its budget: a 3 ms frame holds 280 such tiles, not the 75 their
+        // small batches' average (0.04 ms) would allow.
+        let cost = GenCost { tiles: line, chunks: CostLine::EMPTY, chunk: 0.0, ..GenCost::PRIOR };
+        let (fixed, tile, _) = cost.model();
+        assert_eq!(((3.0 - fixed) / tile).round(), 280.0);
+    }
+
     #[test]
     fn walk_templates_expand_with_any_line_ends() {
         for end in ["\n", "\r\n"] {
