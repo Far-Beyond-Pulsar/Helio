@@ -834,7 +834,7 @@ mod tests {
             let (mut on_tread, mut samples, mut steep) = (0, 0, 0);
             // Land columns across the face (the ocean floor is flat anyway).
             for t in 0..40_000 {
-                let (i, j) = (((t * 7_919) % 199) * (n / 200), ((t * 104_729) % 197) * (n / 200) + t % 64);
+                let (i, j) = (((t * 7_919) % 199) * (n / 200), (t.wrapping_mul(104_729) % 197) * (n / 200) + t % 64);
                 let h = planet.field().height(g.domain_point(face, i, j, 0), g.level_offset());
                 if h <= 50 * crate::terrain::HEIGHT_ONE {
                     continue;

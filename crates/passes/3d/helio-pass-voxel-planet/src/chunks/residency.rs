@@ -8,8 +8,11 @@
 //! its children are generated, so nothing is ever missing: detail arrives
 //! as whole tiles replacing their parent. Children are requested once
 //! their parent's layers are measured (their chunks then span only the
-//! layers that can hold a surface), most wanted first. Tiles no frame has
-//! visited for `keep_frames` are evicted.
+//! layers that can hold a surface), most wanted first. The cut covers the
+//! whole world: roots are always resident, and tiles the eye cannot see
+//! are drawn as they are, not refined (rays graze the horizon, and the
+//! plan lags a climbing eye). Other tiles no frame has visited for
+//! `keep_frames` are evicted.
 //!
 //! Pure CPU logic over tile keys and layer ranges, run on a [`Worker`]
 //! thread; the GPU work lives in `chunks`.
@@ -195,22 +198,25 @@ impl Planner {
         let mut stack: Vec<TileKey> = self.roots.clone();
         while let Some(key) = stack.pop() {
             let Some(tile) = self.tiles.get(&key).copied() else { continue };
-            // Tiles that cannot be seen are not drawn. A root out there ages
-            // out (`evict`); a finer tile stays for its parent's cut. Tiles
-            // the prefetch eye sees are ready when they come over the
+            // The cut covers the whole world, whatever the eye sees: a ray
+            // grazing the horizon crosses the air over tiles beyond it, and
+            // the plan lags an eye that climbs. Roots are always resident
+            // (only a root can be ungenerated here: children are visited
+            // once all four are generated).
+            if !tile.generated {
+                wanted.push((f64::INFINITY, key));
+                continue;
+            }
+            // Tiles that cannot be seen are drawn as they are, not refined.
+            // Tiles the prefetch eye sees are ready when they come over the
             // horizon (a climb), not drawn coarse for a moment.
             let hidden = self.beyond(grid, key, tile.ranges, &eyes[0]);
             let beyond = hidden && self.beyond(grid, key, tile.ranges, &eyes[1]);
-            if !tile.generated {
-                if !beyond {
-                    wanted.push((f64::INFINITY, key));
-                }
-                continue;
-            }
             if beyond {
-                if key.level + 1 < grid.levels() {
-                    self.tiles.get_mut(&key).unwrap().used = frame;
-                }
+                let t = self.tiles.get_mut(&key).unwrap();
+                t.used = frame;
+                t.refined = false;
+                plan.drawn.push(key);
                 continue;
             }
             let error = self.error(grid, key, tile.ranges, &eyes);
@@ -340,20 +346,14 @@ impl Planner {
         }
     }
 
-    /// Tiles not visited for `keep_frames`, removed (a root stays known,
-    /// ungenerated).
+    /// Tiles not visited for `keep_frames`, removed (roots never are: the
+    /// cut always covers the world).
     pub fn evict(&mut self, frame: u64) -> Vec<TileKey> {
         let keep = self.config.keep_frames;
         let root = self.roots[0].level;
-        let old: Vec<TileKey> = self.tiles.iter().filter(|(k, t)| t.used + keep < frame && (k.level != root || t.generated)).map(|(k, _)| *k).collect();
+        let old: Vec<TileKey> = self.tiles.iter().filter(|(k, t)| t.used + keep < frame && k.level != root).map(|(k, _)| *k).collect();
         for k in &old {
-            if k.level == root {
-                let t = self.tiles.get_mut(k).unwrap();
-                t.generated = false;
-                t.refined = false;
-            } else {
-                self.tiles.remove(k);
-            }
+            self.tiles.remove(k);
         }
         old
     }
@@ -543,27 +543,68 @@ mod tests {
         k
     }
 
+    /// Every root's region is covered by drawn tiles, none under another,
+    /// whatever the eye sees: rays graze the horizon and the plan lags an
+    /// eye that climbs.
+    fn assert_covers_the_world(grid: &Grid, planner: &Planner, plan: &Plan) {
+        let drawn: std::collections::HashSet<TileKey> = plan.drawn.iter().copied().collect();
+        let mut covered = FxHashSet::default();
+        for k in &plan.drawn {
+            covered.insert(root_of(grid, *k));
+            let mut p = *k;
+            while p.level + 1 < grid.levels() {
+                p = TileKey { face: p.face, level: p.level + 1, cx: p.cx >> 1, cy: p.cy >> 1 };
+                assert!(!drawn.contains(&p), "{k:?} under drawn {p:?}");
+            }
+        }
+        for r in &planner.roots {
+            assert!(covered.contains(r), "nothing drawn over {r:?}");
+        }
+        // A refined tile has all four children drawn or refined.
+        for k in &plan.drawn {
+            if k.level + 1 < grid.levels() {
+                let parent = TileKey { face: k.face, level: k.level + 1, cx: k.cx >> 1, cy: k.cy >> 1 };
+                for c in children(grid, parent) {
+                    assert!(drawn.contains(&c) || planner.tiles.get(&c).is_some_and(|t| t.refined), "{c:?} beside drawn {k:?} is missing");
+                }
+            }
+        }
+    }
+
     #[test]
-    fn roots_follow_the_eye_wherever_it_starts() {
+    fn the_cut_covers_the_world_wherever_the_eye_goes() {
         let (grid, eye, mut planner) = setup();
         let mut frame = 1;
         // From the far side of the planet the eye's ground is below the
-        // horizon: nothing of it is wanted.
+        // horizon: drawn as its root, not refined.
         let far = -eye;
         let plan = settle(&grid, far, &mut planner, &mut frame);
+        assert_covers_the_world(&grid, &planner, &plan);
         let here = settle(&grid, eye, &mut planner, &mut frame);
-        assert!(!here.drawn.is_empty());
-        let root = root_of(&grid, here.drawn[0]);
-        assert!(plan.drawn.iter().all(|k| root_of(&grid, *k) != root), "the far side drew the eye's ground");
-        // Gone to the far side again, the eye's roots age out and can be
-        // generated again.
+        assert_covers_the_world(&grid, &planner, &here);
+        let root = root_of(&grid, *here.drawn.iter().find(|k| k.level == 0).unwrap());
+        assert!(plan.drawn.contains(&root), "the far side refined the eye's ground");
+        // Gone to the far side again, the eye's fine tiles age out; roots
+        // never do.
         settle(&grid, far, &mut planner, &mut frame);
         frame += planner.config().keep_frames + 1;
-        planner.plan(&grid, far, DVec3::ZERO, None, frame);
-        assert!(planner.evict(frame).contains(&root));
+        let plan = planner.plan(&grid, far, DVec3::ZERO, None, frame);
+        let evicted = planner.evict(frame);
+        assert!(!evicted.is_empty() && evicted.iter().all(|k| k.level + 1 < grid.levels()));
+        assert!(plan.requests.is_empty());
+        assert_covers_the_world(&grid, &planner, &plan);
+    }
+
+    /// A climb faster than the plan: from the ground straight to orbit in
+    /// one plan, the cut still covers everything the new eye sees.
+    #[test]
+    fn a_sudden_climb_leaves_no_hole() {
+        let (grid, eye, mut planner) = setup();
+        let mut frame = 0;
+        settle(&grid, eye, &mut planner, &mut frame);
         frame += 1;
-        let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
-        assert!(plan.requests.iter().any(|(k, _)| *k == root));
+        let plan = planner.plan(&grid, eye.normalize() * (grid.radius() + 400_000.0), DVec3::ZERO, None, frame);
+        assert_covers_the_world(&grid, &planner, &plan);
     }
 
     /// From orbit the whole visible disc is drawn: tiles 2,000 km away,
@@ -591,7 +632,7 @@ mod tests {
         }
         frame += 1;
         let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
-        let parent = plan.drawn.iter().copied().find(|k| plan.requests.iter().any(|(r, _)| r.level + 1 == k.level && r.cx >> 1 == k.cx && r.cy >> 1 == k.cy)).unwrap();
+        let parent = plan.drawn.iter().copied().find(|k| plan.requests.iter().any(|(r, _)| r.face == k.face && r.level + 1 == k.level && r.cx >> 1 == k.cx && r.cy >> 1 == k.cy)).unwrap();
         let kids = children(&grid, parent);
         // Three of four children generated: the parent is still drawn.
         for k in &kids[..3] {
