@@ -1472,8 +1472,12 @@ fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, material: u32,
     let hv = hash3(p.x, p.y, p.z, 0x68bc21ebu);
     let pigment = 1.0 + materials.detail.y * (mix(0.5, f32(hv & 255u) / 255.0, mosaic) - 0.5);
     let albedo = material_albedo(material, p, hash3(p.x, p.y, p.z, 0x1b873593u), pixel_m, mosaic) * pigment;
-    // Occlusion: around the air cell in front of the face.
-    let ao_weight = smoothstep(0.75, 1.25, projected) * smooth_ground;
+    // Occlusion: around the air cell in front of the face, where voxels
+    // (not cells: the same at every level, as `hit_face`'s slope) are a
+    // few pixels wide; under that the sky samples hold the occlusion and
+    // the eight lookups would only add sub-pixel noise.
+    let voxel_px = params.planet.y / max(pixel_m, 1e-6);
+    let ao_weight = smoothstep(1.0, 3.0, voxel_px) * smoothstep(0.75, 1.25, projected) * smooth_ground;
     var ao = 1.0;
     if ao_weight > 0.0 {
         let out_dir = select(-1, 1, sign == 1u);
