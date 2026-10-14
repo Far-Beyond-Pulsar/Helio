@@ -12,9 +12,10 @@
 //! position, its roll (rotation about Z) turns it and its X and Y scale
 //! scale it; the owner's Z position and the other rotations do not apply.
 //!
-//! The image is a project-relative asset path, registered in the scene's
-//! texture store as the row is derived (as decals do), so the row carries
-//! its bindless slot. An image that is a sheet of equal frames (`atlas_columns`
+//! The image is a project-relative asset path. The world loads it as a
+//! texture asset ([`crate::texture_assets`]) and binds it into `image`; the
+//! row registers that image in the scene's texture store as it is derived
+//! (as decals do), so it carries its bindless slot. An image that is a sheet of equal frames (`atlas_columns`
 //! by `atlas_rows`) shows the frame `atlas_frame`, counted row by row from
 //! the top left.
 //!
@@ -59,6 +60,9 @@ pub struct SpriteComponent {
     /// The sheet frame to show, row by row from the top left.
     #[property(min = 0, max = 65535, category = "Sprite")]
     pub atlas_frame: i32,
+    /// The image `texture` names, as the world loaded it. Never authored.
+    #[serde(skip)]
+    pub image: crate::texture_assets::BoundTexture,
 }
 
 impl Default for SpriteComponent {
@@ -73,6 +77,7 @@ impl Default for SpriteComponent {
             atlas_columns: 1,
             atlas_rows: 1,
             atlas_frame: 0,
+            image: Default::default(),
         }
     }
 }
@@ -112,6 +117,30 @@ impl SpriteComponent {
 
 #[register_world_component]
 impl SpriteComponent {}
+
+/// The world counts the image `texture` names as a reference of the sprite,
+/// whatever wrote the value, and binds it when it loads.
+fn collect_sprite_handles(
+    value: *const (),
+    out: &mut Vec<pulsar_scenedb::handle_ledger::HandleId>,
+) {
+    // SAFETY: SceneDB reaches this only through `SpriteComponent`'s own
+    // `ComponentId`, with a pointer to a live value.
+    let sprite = unsafe { &*(value as *const SpriteComponent) };
+    crate::texture_assets::collect_texture(&sprite.texture, out);
+}
+
+pulsar_scenedb::pulsar_reflection::inventory::submit! {
+    pulsar_scenedb::handle_ledger::HandleLedgerRegistration {
+        component_id: pulsar_scenedb::component_id::<SpriteComponent>,
+        collect_from_value: collect_sprite_handles,
+    }
+}
+
+/// How a sprite takes in its loaded (or failed) image.
+pub(crate) fn bind_sprite_texture(sprite: &mut SpriteComponent, view: &pulsar_scenedb::AssetView) {
+    crate::texture_assets::bind_texture(&mut sprite.image, &sprite.texture, view, "sprite");
+}
 
 #[cfg(test)]
 mod tests {

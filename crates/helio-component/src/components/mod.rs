@@ -46,3 +46,16 @@ pub use environment_rows::*;
 pub use voxel_component::*;
 pub use water_volume_component::*;
 pub use wind_component::*;
+
+/// How the components that show an image take in a loaded texture asset
+/// (registered with the texture kind, [`crate::texture_assets`]).
+pub(crate) fn register_texture_bindings() {
+    pulsar_scenedb::register_binding::<SpriteComponent>(
+        crate::texture_assets::TEXTURE_ASSET_KIND,
+        sprite_component::bind_sprite_texture,
+    );
+    pulsar_scenedb::register_binding::<DecalComponent>(
+        crate::texture_assets::TEXTURE_ASSET_KIND,
+        decal_component::bind_decal_texture,
+    );
+}
