@@ -19,7 +19,7 @@
 //!   samples saved with settled references to compare.
 //!
 //! World: `HELIO_VOXEL_FLIGHT_VOXEL` (0.1 m), `_SEED` (7), `_PRESET`
-//! (earth|moon|desert), `_HEIGHTFIELD`, `_NO_CAVES`, `_NO_OVERHANGS`,
+//! (earth|moon|desert) or `_LAYERS=<json>` (a layer stack), `_HEIGHTFIELD`, `_NO_CAVES`, `_NO_OVERHANGS`,
 //! `_GRAIN=scale_m,octaves,ratio`, `_SUN=x,y,z`, `_SUN_ELEVATION=deg` (the
 //! terrain's sun that high over each view's horizon toward `_SUN`'s azimuth;
 //! the scene light keeps `_SUN`), `_NO_SUN`,
@@ -1411,6 +1411,12 @@ fn main() {
         Ok("desert") => helio_pass_voxel_planet::layers::TerrainLayers::desert(),
         Ok("earth") | Err(_) => helio_pass_voxel_planet::layers::TerrainLayers::earth(),
         Ok(other) => panic!("unknown preset {other}"),
+    };
+    // HELIO_VOXEL_FLIGHT_LAYERS=<json>: a layer stack of its own (a Pulsar
+    // level's `VoxelTerrainLayersComponent` data), for its views.
+    let stack = match std::env::var("HELIO_VOXEL_FLIGHT_LAYERS") {
+        Ok(path) => serde_json::from_str(&std::fs::read_to_string(&path).expect("layers file")).expect("a layer stack"),
+        Err(_) => stack,
     };
     // HELIO_VOXEL_FLIGHT_GRAIN=scale_m,octaves,ratio: an extra roughness
     // layer (A/B for ground grain).
