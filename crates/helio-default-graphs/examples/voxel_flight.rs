@@ -434,10 +434,14 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
             let chunks: usize = t.iter().map(|f| f.chunks).sum();
             let stage = |k: usize| t.iter().map(|f| f.stages[k]).sum::<f64>();
             let (a, b, c) = (stage(0), stage(1), stage(2));
+            let part = |k: usize| t.iter().map(|f| f.tile_stages[k]).sum::<f64>() * 1e3 / tiles as f64;
             eprintln!(
-                "GENBENCH {view}: {tiles} tiles {chunks} chunks in {} frames: tile columns {:.2} us/tile, chunk columns {:.2} us/chunk, chunk builds {:.2} us/chunk, all {:.2} us/tile",
+                "GENBENCH {view}: {tiles} tiles {chunks} chunks in {} frames: tiles {:.2} us/tile (nodes {:.2}, columns {:.2}, halos {:.2}), chunk columns {:.2} us/chunk, chunk builds {:.2} us/chunk, all {:.2} us/tile",
                 t.len(),
                 a * 1e3 / tiles as f64,
+                part(0),
+                part(1),
+                part(2),
                 b * 1e3 / chunks as f64,
                 c * 1e3 / chunks as f64,
                 (a + b + c) * 1e3 / tiles as f64

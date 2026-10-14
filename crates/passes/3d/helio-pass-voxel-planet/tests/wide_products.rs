@@ -14,7 +14,7 @@ fn hardware_wide_products_match_the_limb_versions() {
     let noise = include_str!("../shaders/noise.wgsl");
     let (_, rest) = noise.split_once("// wide:begin").unwrap();
     let (limbs, _) = rest.split_once("// wide:end").unwrap();
-    let hardware = include_str!("../shaders/wide64.wgsl").replace("fn mul_wide(", "fn hw_wide(").replace("fn mul_shr(", "fn hw_shr(");
+    let hardware = include_str!("../shaders/wide64.wgsl").replace("fn mul_wide(", "fn hw_wide(").replace("fn mul_shr(", "fn hw_shr(").replace("fn mul_shr_signed(", "fn hw_signed(");
     let source = format!(
         "{limbs}\n{hardware}\n
         @group(0) @binding(0) var<storage, read> inputs: array<vec4<u32>>;
@@ -24,6 +24,9 @@ fn hardware_wide_products_match_the_limb_versions() {
             let v = inputs[id.x];
             if any(mul_wide(v.x, v.y) != hw_wide(v.x, v.y)) {{ atomicAdd(&mismatches[0], 1u); }}
             if mul_shr(v.x, v.y, v.z) != hw_shr(v.x, v.y, v.z) {{ atomicAdd(&mismatches[1], 1u); }}
+            let signed = mul_shr_signed(bitcast<i32>(v.x), bitcast<i32>(v.y), v.z);
+            if signed != hw_signed(bitcast<i32>(v.x), bitcast<i32>(v.y), v.z) {{ atomicAdd(&mismatches[2], 1u); }}
+            if signed != bitcast<i32>(v.w) {{ atomicAdd(&mismatches[3], 1u); }}
         }}"
     );
     let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -44,6 +47,10 @@ fn hardware_wide_products_match_the_limb_versions() {
             inputs.push([a, b, s, 0]);
         }
     }
+    // The CPU's signed product (`noise::mul_shr_signed`), in the low word.
+    for v in &mut inputs {
+        v[3] = helio_pass_voxel_planet::noise::mul_shr_signed(v[0] as i32, v[1] as i32, v[2]) as u32;
+    }
     let input = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: None,
         contents: bytemuck::cast_slice(&inputs),
@@ -51,7 +58,7 @@ fn hardware_wide_products_match_the_limb_versions() {
     });
     let output = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: None,
-        contents: &[0u8; 8],
+        contents: &[0u8; 16],
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
     });
     let pipeline = gpu.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -78,8 +85,7 @@ fn hardware_wide_products_match_the_limb_versions() {
         pass.dispatch_workgroups((inputs.len() as u32).div_ceil(64), 1, 1);
     }
     gpu.queue.submit([encoder.finish()]);
-    let bytes = read_buffer(&gpu, &output, 8);
-    let wide = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
-    let shifted = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-    assert_eq!((wide, shifted), (0, 0), "mul_wide and mul_shr mismatches over {} inputs", inputs.len());
+    let bytes = read_buffer(&gpu, &output, 16);
+    let count = |k: usize| u32::from_le_bytes(bytes[4 * k..4 * k + 4].try_into().unwrap());
+    assert_eq!((count(0), count(1), count(2), count(3)), (0, 0, 0, 0), "mul_wide, mul_shr, mul_shr_signed (hardware, CPU) mismatches over {} inputs", inputs.len());
 }

@@ -83,7 +83,7 @@ fn rem_floor(a: i32, b: i32) -> i32 {
 // Fine noise (Q24); mirror of `noise_fine` in src/noise.rs.
 const FINE_ONE: i32 = 16777216;
 
-// a * b / 2^24 rounded toward zero, |a| < 2^28, |b| <= 2^24: the exact
+// a * b / 2^24 rounded to nearest, |a| < 2^28, |b| <= 2^24: the exact
 // product (one wide multiply with hardware 64-bit integers).
 fn mul_fine(a: i32, b: i32) -> i32 {
     return mul_shr_signed(a, b, 24u);
@@ -225,6 +225,25 @@ fn mul_shr(a: u32, b: u32, s: u32) -> u32 {
     if s >= 32u { return hi >> (s - 32u); }
     return (lo >> s) | (hi << (32u - s));
 }
+
+// a b / 2^s rounded to nearest (halves up) of the exact signed 64-bit
+// product (`noise::mul_shr_signed`): the unsigned product less each
+// negative operand's correction in the high word, plus 2^(s - 1).
+fn mul_shr_signed(a: i32, b: i32, s: u32) -> i32 {
+    let p = mul_wide(bitcast<u32>(a), bitcast<u32>(b));
+    var hi = p.y - select(0u, bitcast<u32>(b), a < 0) - select(0u, bitcast<u32>(a), b < 0);
+    var lo = p.x;
+    if s == 0u { return bitcast<i32>(lo); }
+    if s <= 32u {
+        let l = lo + (1u << (s - 1u));
+        hi += select(0u, 1u, l < lo);
+        lo = l;
+    } else {
+        hi += 1u << (s - 33u);
+    }
+    if s >= 32u { return bitcast<i32>(hi) >> (s - 32u); }
+    return bitcast<i32>((lo >> s) | (hi << (32u - s)));
+}
 // wide:end
 
 fn add_wide(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> {
@@ -240,12 +259,6 @@ fn rsqrt_wide(d: u32) -> u32 {
         y = mul_shr(y, 3u * Q30 - dy2, 31u);
     }
     return y;
-}
-
-// sign(a b) floor(|a| |b| / 2^s) (`noise::mul_shr_signed`).
-fn mul_shr_signed(a: i32, b: i32, s: u32) -> i32 {
-    let m = i32(mul_shr(u32(abs(a)), u32(abs(b)), s));
-    return select(m, -m, (a < 0) != (b < 0));
 }
 
 // v / |v| in Q30 (`noise::unit_q30`).

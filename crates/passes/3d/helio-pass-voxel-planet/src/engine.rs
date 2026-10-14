@@ -175,11 +175,12 @@ fn hardware_wide(noise: &str) -> String {
 
 /// The terrain half of every shader: the noise library, world helpers, the
 /// material state and the terrain program with defaults for the parts it
-/// leaves out, `generation_column` and the world shape. With `wide64` the
+/// leaves out, the column functions ([`column_source`]; `generation`: the
+/// generation module's) and the world shape. With `wide64` the
 /// noise library's wide products use hardware 64-bit integers
 /// (`wide64.wgsl`). The program reads the `world` and `terrain` uniforms,
 /// declared here (group 0, bindings 1 and 16).
-pub(crate) fn terrain_source(plane: bool, program: &TerrainProgram, wide64: bool) -> String {
+pub(crate) fn terrain_source(plane: bool, program: &TerrainProgram, wide64: bool, generation: bool) -> String {
     let noise = include_str!("../shaders/noise.wgsl");
     let mut s = if wide64 { hardware_wide(noise) } else { String::from(noise) };
     s.push_str(include_str!("../shaders/world.wgsl"));
@@ -203,19 +204,180 @@ pub(crate) fn terrain_source(plane: bool, program: &TerrainProgram, wide64: bool
         s.push_str("fn terrain_lean(level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
         s.push_str("fn terrain_lean_offset(p: vec3<i32>, i: i32, j: i32, k: i32, level: u32) -> vec2<i32> { return vec2<i32>(0); }\n");
     }
-    // A column's height and surface word at one call site
-    // (`terrain_column`): compilers inline every call, and each copy of a
-    // large program is compile time.
-    if program.wgsl.contains("fn terrain_column") {
-        s.push_str("fn generation_column(face:u32,i:i32,j:i32,level:u32,display:bool)->vec2<i32> { return terrain_column(domain_point(face,i,j,level),level+u32(world.grid.w),display); }\n");
-    } else {
-        s.push_str("fn generation_column(face:u32,i:i32,j:i32,level:u32,display:bool)->vec2<i32> { let h = field_height(face,i,j,level); return vec2<i32>(h, i32(terrain_surface(domain_point(face,i,j,level),level+u32(world.grid.w),h))); }\n");
-    }
+    s.push_str(&column_source(program, generation));
     s.push_str("@group(0) @binding(1) var<uniform> world: World;
 @group(0) @binding(16) var<uniform> terrain: TerrainConstants;
 ");
     // World shape: 0 sphere, 1 plane.
     s.push_str(&format!("const SHAPE: u32 = {};\nconst PLANE_FACE: u32 = 2u;\nfn is_plane() -> bool {{ return SHAPE == 1u; }}\n", if plane { "1u" } else { "0u" }));
+    s
+}
+
+/// Words of a node of `program`'s two-rate field (`TERRAIN_NODE_WORDS`;
+/// 0: it has none).
+pub(crate) fn node_words(program: &TerrainProgram) -> u32 {
+    program.wgsl.split("const TERRAIN_NODE_WORDS: u32 = ").nth(1).and_then(|r| r.split('u').next()).and_then(|n| n.trim().parse().ok()).unwrap_or(0)
+}
+
+/// Columns between a two-rate field's nodes (`landform::NODE_COLUMNS`), and
+/// nodes along a tile's side in the tile node buffer: the tile's 5 and a
+/// ring past them (columns within 16 of the tile read them too).
+pub(crate) const NODE_COLUMNS: i32 = 16;
+pub(crate) const TILE_NODES: u32 = 7;
+
+/// Point-mode scratch nodes after a batch's tile nodes in `tile_nodes`: one
+/// per lane of `tile_halo_main`'s `HALO_GROUPS` workgroups.
+pub(crate) const HALO_GROUPS: u32 = 128;
+pub(crate) const NODE_SCRATCH: u32 = HALO_GROUPS * 64;
+
+/// The column functions, each one call site of the program (compilers
+/// inline every call, and each copy of a large program is compile time):
+/// `field_height(face, i, j, level)` and `generation_column(face, i, j,
+/// level, display)` (height, surface word); with `generation`,
+/// `generation_tile_column(tile, ..)` for a column of a batch's tile,
+/// `generation_halo_column(tile, .., scratch)` for one near it and
+/// `generation_tile_nodes` (`tile_nodes_main`).
+///
+/// A two-rate program (`terrain_node`, `docs/two-rate-field.md`) reads its
+/// macro octaves through `generation_node_word(slot)`: the bilinear blend
+/// of the column's four nodes, `floor(sum w_c v_c / 256)` with the high
+/// and low bytes summed apart (`landform::lerp4`). Generation reads a
+/// batch's tiles' nodes from `tile_nodes`; a column out of its tile's
+/// ring evaluates its four into function arrays and leaves the blend in a
+/// scratch node. Module-scope arrays would not do: WGSL clears every
+/// private variable an entry point can reach at each invocation, and the
+/// hot kernels would clear them for nothing.
+fn column_source(program: &TerrainProgram, generation: bool) -> String {
+    let words = node_words(program);
+    let mut s = String::new();
+    if words == 0 {
+        s.push_str(if program.wgsl.contains("fn terrain_column") {
+            "fn generation_column(face:u32,i:i32,j:i32,level:u32,display:bool)->vec2<i32> { return terrain_column(domain_point(face,i,j,level),level+u32(world.grid.w),display); }\n"
+        } else {
+            "fn generation_column(face:u32,i:i32,j:i32,level:u32,display:bool)->vec2<i32> { let h = field_height(face,i,j,level); return vec2<i32>(h, i32(terrain_surface(domain_point(face,i,j,level),level+u32(world.grid.w),h))); }\n"
+        });
+        s.push_str("fn field_height(face: u32, i: i32, j: i32, level: u32) -> i32 { return terrain_height(domain_point(face, i, j, level), level + u32(world.grid.w)); }\n");
+        if generation {
+            s.push_str("fn generation_tile_column(tile: u32, face: u32, i: i32, j: i32, level: u32, display: bool) -> vec2<i32> { return generation_column(face, i, j, level, display); }\n");
+            s.push_str("fn generation_halo_column(tile: u32, face: u32, i: i32, j: i32, level: u32, display: bool, scratch: u32) -> vec2<i32> { return generation_column(face, i, j, level, display); }\n");
+            s.push_str("fn generation_tile_nodes(tile: u32, face: u32, ci: i32, cj: i32, level: u32, lane: u32) {}\n");
+        }
+        return s;
+    }
+    s.push_str(&format!(
+        "const NODE_COLUMNS: i32 = {NODE_COLUMNS};
+const TILE_NODES: u32 = {TILE_NODES}u;
+
+// Bilinear weights (sum 256) of a column `d` columns past its first node.
+fn gen_node_weights(d: vec2<i32>) -> vec4<i32> {{
+    let u = vec2<i32>(NODE_COLUMNS) - d;
+    return vec4<i32>(u.x * u.y, d.x * u.y, u.x * d.y, d.x * d.y);
+}}
+"
+    ));
+    // The four nodes evaluated and summed in `hi`/`lo` (then `blend`).
+    let point = "    let first = vec2<i32>(i, j) & vec2<i32>(~(NODE_COLUMNS - 1));
+    let w = gen_node_weights(vec2<i32>(i, j) - first);
+    var hi: array<i32, TERRAIN_NODE_WORDS>;
+    var lo: array<i32, TERRAIN_NODE_WORDS>;
+    for (var c = 0u; c < 4u; c++) {
+        let node = first + vec2<i32>(i32(c & 1u), i32(c >> 1u)) * NODE_COLUMNS;
+        terrain_node(domain_point(face, node.x, node.y, level), level + u32(world.grid.w));
+        for (var slot = 0u; slot < TERRAIN_NODE_WORDS; slot++) {
+            let v = terrain_node_word(slot);
+            hi[slot] += (v >> 8u) * w[c];
+            lo[slot] += (v & 255) * w[c];
+        }
+    }
+";
+    if !generation {
+        s.push_str(&format!(
+            "// A column's blended node words (`gen_point_nodes`).
+var<private> gen_node: array<i32, TERRAIN_NODE_WORDS>;
+
+fn generation_node_word(slot: u32) -> i32 {{
+    return gen_node[slot];
+}}
+
+fn gen_point_nodes(face: u32, i: i32, j: i32, level: u32) {{
+{point}    for (var slot = 0u; slot < TERRAIN_NODE_WORDS; slot++) {{ gen_node[slot] = hi[slot] + (lo[slot] >> 8u); }}
+}}
+
+fn generation_column(face: u32, i: i32, j: i32, level: u32, display: bool) -> vec2<i32> {{
+    if terrain_has_nodes(level + u32(world.grid.w)) {{ gen_point_nodes(face, i, j, level); }}
+    return terrain_column_nodes(domain_point(face, i, j, level), level + u32(world.grid.w), display);
+}}
+
+fn field_height(face: u32, i: i32, j: i32, level: u32) -> i32 {{
+    return generation_column(face, i, j, level, false).x;
+}}
+"
+        ));
+        return s;
+    }
+    let batch = crate::chunks::TILE_BATCH as u32 * TILE_NODES * TILE_NODES;
+    s.push_str(&format!(
+        "@group(0) @binding(25) var<storage, read_write> tile_nodes: array<i32>;
+// The first scratch node (`NODE_SCRATCH` of them).
+const NODE_SCRATCH_AT: u32 = {batch}u;
+// The column's first node's first word in `tile_nodes`, and its weights.
+var<private> gen_node_at: u32 = 0u;
+var<private> gen_node_w: vec4<i32> = vec4<i32>(0);
+
+fn generation_node_word(slot: u32) -> i32 {{
+    let s = TERRAIN_NODE_WORDS;
+    let a = gen_node_at + slot;
+    let v = vec4<i32>(tile_nodes[a], tile_nodes[a + s], tile_nodes[a + TILE_NODES * s], tile_nodes[a + (TILE_NODES + 1u) * s]);
+    let hi = (v >> vec4<u32>(8u)) * gen_node_w;
+    let lo = (v & vec4<i32>(255)) * gen_node_w;
+    return hi.x + hi.y + hi.z + hi.w + ((lo.x + lo.y + lo.z + lo.w) >> 8u);
+}}
+
+// The column's nodes from tile `tile`'s, when there: its first node within
+// the tile's ring.
+fn gen_tile_nodes(tile: u32, i: i32, j: i32) -> bool {{
+    let job = tile_jobs[tile];
+    let first = vec2<i32>(i, j) & vec2<i32>(~(NODE_COLUMNS - 1));
+    let n = (first - vec2<i32>(job.cx, job.cy) * 64) / NODE_COLUMNS + 1;
+    if any(n < vec2<i32>(0)) || any(n >= vec2<i32>(i32(TILE_NODES) - 1)) {{ return false; }}
+    gen_node_at = (tile * TILE_NODES * TILE_NODES + u32(n.y) * TILE_NODES + u32(n.x)) * TERRAIN_NODE_WORDS;
+    gen_node_w = gen_node_weights(vec2<i32>(i, j) - first);
+    return true;
+}}
+
+// The column's four nodes evaluated, their blend in scratch node `scratch`.
+fn gen_point_nodes(face: u32, i: i32, j: i32, level: u32, scratch: u32) {{
+{point}    let at = (NODE_SCRATCH_AT + scratch) * TERRAIN_NODE_WORDS;
+    for (var slot = 0u; slot < TERRAIN_NODE_WORDS; slot++) {{ tile_nodes[at + slot] = hi[slot] + (lo[slot] >> 8u); }}
+    gen_node_at = at;
+    gen_node_w = vec4<i32>(256, 0, 0, 0);
+}}
+
+// A column of tile `tile` (within its ring).
+fn generation_tile_column(tile: u32, face: u32, i: i32, j: i32, level: u32, display: bool) -> vec2<i32> {{
+    if terrain_has_nodes(level + u32(world.grid.w)) {{ _ = gen_tile_nodes(tile, i, j); }}
+    return terrain_column_nodes(domain_point(face, i, j, level), level + u32(world.grid.w), display);
+}}
+
+// A column near tile `tile`: its nodes from the tile's when there, else
+// its own four (scratch node `scratch`, one per lane).
+fn generation_halo_column(tile: u32, face: u32, i: i32, j: i32, level: u32, display: bool, scratch: u32) -> vec2<i32> {{
+    if terrain_has_nodes(level + u32(world.grid.w)) && !gen_tile_nodes(tile, i, j) {{ gen_point_nodes(face, i, j, level, scratch); }}
+    return terrain_column_nodes(domain_point(face, i, j, level), level + u32(world.grid.w), display);
+}}
+
+// Lane `lane`'s node of tile `tile` (cell `(ci, cj)` of `level`): the
+// tile's 7x7, from one node spacing before its first column.
+fn generation_tile_nodes(tile: u32, face: u32, ci: i32, cj: i32, level: u32, lane: u32) {{
+    if lane >= TILE_NODES * TILE_NODES || !terrain_has_nodes(level + u32(world.grid.w)) {{ return; }}
+    let n = vec2<i32>(i32(lane % TILE_NODES), i32(lane / TILE_NODES));
+    let at = vec2<i32>(ci, cj) * 64 + (n - 1) * NODE_COLUMNS;
+    terrain_node(domain_point(face, at.x, at.y, level), level + u32(world.grid.w));
+    let base = (tile * TILE_NODES * TILE_NODES + lane) * TERRAIN_NODE_WORDS;
+    for (var slot = 0u; slot < TERRAIN_NODE_WORDS; slot++) {{ tile_nodes[base + slot] = terrain_node_word(slot); }}
+}}
+"
+    ));
     s
 }
 
@@ -241,7 +403,7 @@ pub fn time_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet, e
     time_out[id.x] = height ^ i32(surface);
 }
 ";
-    let module = helio_core::shader::module(device, "terrain timing", &(terrain_source(grid.is_plane(), &program, device.features().contains(wgpu::Features::SHADER_INT64)) + kernel));
+    let module = helio_core::shader::module(device, "terrain timing", &(terrain_source(grid.is_plane(), &program, device.features().contains(wgpu::Features::SHADER_INT64), false) + kernel));
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("terrain timing"),
         layout: None,
@@ -355,7 +517,7 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
     let module = helio_core::shader::module(
         device,
         "terrain verification",
-        &(terrain_source(grid.is_plane(), &program, device.features().contains(wgpu::Features::SHADER_INT64)) + kernel),
+        &(terrain_source(grid.is_plane(), &program, device.features().contains(wgpu::Features::SHADER_INT64), false) + kernel),
     );
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("terrain verification"),
@@ -412,7 +574,8 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
     for ((a, e), g) in inputs.iter().zip(&extra).zip(gpu) {
         let level = a.w as u32;
         let p = grid.domain_point(a.x as u8, a.y, a.z, level);
-        let height = field.height(p, level + grid.level_offset());
+        let column = crate::terrain::Column { face: a.x as u8, i: a.y, j: a.z, level };
+        let height = field.height(column);
         let top = crate::terrain::top_cells(&grid, height, level);
         let (below, above) = field.extent(p, level);
         let k = top - below - 1 + e.w.rem_euclid((below + above + 2).max(1));
@@ -420,7 +583,7 @@ pub fn verify_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet,
         let density = field.density(p, q, level, top, height, height.wrapping_add(e.z & 8191).wrapping_sub(4096), k);
         let lean = field.lean(level);
         let offset = field.lean_offset(p, a.y, a.z, k, level);
-        let surface = field.surface(p, level + grid.level_offset(), height) & 0xff;
+        let surface = field.surface(column, height) & 0xff;
         let cpu = [
             height,
             field.ground_material(p, surface, e.x, e.y, e.z, e.w) as i32,

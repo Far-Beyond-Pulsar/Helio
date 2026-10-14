@@ -28,7 +28,7 @@ pub const CHUNK: i32 = 64;
 const TILE_COLUMNS: u64 = 4096;
 /// Tiles generated per dispatch (their columns are scratch until their
 /// chunks are built).
-const TILE_BATCH: usize = 512;
+pub(crate) const TILE_BATCH: usize = 512;
 /// Chunks generated per dispatch (column masks are scratch).
 const CHUNK_BATCH: usize = 2048;
 /// Chunk slots.
@@ -485,12 +485,15 @@ pub struct FrameTimings {
     /// Generation by kernel: eviction and tile columns, chunk columns,
     /// chunk builds.
     pub stages: [f64; 3],
+    /// The first stage's parts: eviction and the tiles' nodes, their
+    /// columns, their halos.
+    pub tile_stages: [f64; 3],
 }
 
-/// Timestamps a frame writes: generation start, tile columns end, seed
-/// start and end, trace end, chunk columns end, chunk builds end, shadows
-/// end.
-const QUERIES: u32 = 8;
+/// Timestamps a frame writes: generation start, tile halos end, seed start
+/// and end, trace end, chunk columns end, chunk builds end, shadows end,
+/// tile nodes end, tile columns end.
+const QUERIES: u32 = 10;
 
 /// `Reach`'s size: a count and 4095 keys.
 const REACH_BYTES: u64 = 16 * 4096;
@@ -627,7 +630,9 @@ pub struct ChunkWorld {
     device: wgpu::Device,
     queue: wgpu::Queue,
     gen_layout: wgpu::BindGroupLayout,
+    tile_nodes: wgpu::ComputePipeline,
     tile_columns: wgpu::ComputePipeline,
+    tile_halo: wgpu::ComputePipeline,
     chunk_columns: wgpu::ComputePipeline,
     chunk_build: wgpu::ComputePipeline,
     draw_layout: wgpu::BindGroupLayout,
@@ -664,6 +669,10 @@ pub struct ChunkWorld {
     terrain: wgpu::Buffer,
     tile_jobs: wgpu::Buffer,
     tile_data: wgpu::Buffer,
+    // The batch's tiles' two-rate nodes (`engine::TILE_NODES`^2 a tile).
+    tile_node_data: wgpu::Buffer,
+    // Lean lattice heights past each tile's edges (`HALO_SIDE`^2 a tile).
+    tile_halo_data: wgpu::Buffer,
     tile_ranges: wgpu::Buffer,
     chunk_jobs: wgpu::Buffer,
     column_masks: wgpu::Buffer,
@@ -1070,7 +1079,7 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
         )
         .replace("FADE_FRAMES", &drawn::FADE_FRAMES.to_string())
         .replace("PLANE_WORLD", if plane { "true" } else { "false" });
-    [("chunk generation", terrain_source(plane, program, wide64) + include_str!("../../shaders/chunk_generate.wgsl")), ("chunk draw", draw)]
+    [("chunk generation", terrain_source(plane, program, wide64, true) + &format!("const HALO_GROUPS: u32 = {}u;\n", crate::engine::HALO_GROUPS) + include_str!("../../shaders/chunk_generate.wgsl")), ("chunk draw", draw)]
 }
 
 impl ChunkWorld {
@@ -1106,6 +1115,8 @@ impl ChunkWorld {
                 storage(22, true, c),
                 storage(23, true, c),
                 storage(24, false, c),
+                storage(25, false, c),
+                storage(26, false, c),
             ],
         });
         let gen_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&gen_layout)], immediate_size: 0 });
@@ -1119,7 +1130,9 @@ impl ChunkWorld {
                 cache: None,
             })
         };
+        let tile_nodes = compute("tile_nodes_main");
         let tile_columns = compute("tile_columns_main");
+        let tile_halo = compute("tile_halo_main");
         let chunk_columns = compute("chunk_columns_main");
         let chunk_build = compute("chunk_build_main");
         let evict_pipeline = compute("evict");
@@ -1325,7 +1338,9 @@ impl ChunkWorld {
             device: device.clone(),
             queue: queue.clone(),
             gen_layout,
+            tile_nodes,
             tile_columns,
+            tile_halo,
             chunk_columns,
             chunk_build,
             draw_layout,
@@ -1357,7 +1372,16 @@ impl ChunkWorld {
             terrain,
             tile_jobs: buffer("chunk tile jobs", (TILE_BATCH * 16) as u64, s),
             tile_data: buffer("chunk tile columns", TILE_BATCH as u64 * TILE_COLUMNS * 16, wgpu::BufferUsages::STORAGE),
-            tile_ranges: buffer("chunk tile ranges", (TILE_BATCH * 16) as u64, s | wgpu::BufferUsages::COPY_SRC),
+            // The tiles' nodes, the scratch nodes, and the 8 a column's
+            // node words read past the last.
+            tile_node_data: buffer(
+                "chunk tile nodes",
+                (TILE_BATCH as u64 * u64::from(crate::engine::TILE_NODES.pow(2)) + u64::from(crate::engine::NODE_SCRATCH) + 8) * u64::from(crate::engine::node_words(&program).max(1)) * 4,
+                wgpu::BufferUsages::STORAGE,
+            ),
+            tile_halo_data: buffer("chunk tile halo", TILE_BATCH as u64 * 40 * 40 * 4, wgpu::BufferUsages::STORAGE),
+            // Four words a tile, then the batch's tile count.
+            tile_ranges: buffer("chunk tile ranges", (TILE_BATCH * 16 + 4) as u64, s | wgpu::BufferUsages::COPY_SRC),
             chunk_jobs: buffer("chunk jobs", (CHUNK_BATCH * 32) as u64, s),
             column_masks: buffer("chunk column masks", CHUNK_BATCH as u64 * TILE_COLUMNS * 8, wgpu::BufferUsages::STORAGE),
             chunk_meta: buffer("chunk meta", (MAX_CHUNKS * 48) as u64, s | wgpu::BufferUsages::COPY_SRC),
@@ -1474,6 +1498,8 @@ impl ChunkWorld {
                 entry(16, &self.terrain),
                 entry(2, &self.tile_jobs),
                 entry(3, &self.tile_data),
+                entry(25, &self.tile_node_data),
+                entry(26, &self.tile_halo_data),
                 entry(4, &self.tile_ranges),
                 entry(5, &self.chunk_jobs),
                 entry(6, &self.column_masks),
@@ -2049,6 +2075,7 @@ impl ChunkWorld {
             self.queue.write_buffer(&self.tile_jobs, 0, bytemuck::cast_slice(&tile_jobs));
             let empty: Vec<[i32; 4]> = vec![[i32::MAX, i32::MIN + 1, i32::MAX, i32::MIN + 1]; tile_jobs.len()];
             self.queue.write_buffer(&self.tile_ranges, 0, bytemuck::cast_slice(&empty));
+            self.queue.write_buffer(&self.tile_ranges, (TILE_BATCH * 16) as u64, bytemuck::bytes_of(&(tile_jobs.len() as i32)));
         }
         if !chunk_jobs.is_empty() {
             self.queue.write_buffer(&self.chunk_jobs, 0, bytemuck::cast_slice(&chunk_jobs));
@@ -2061,15 +2088,31 @@ impl ChunkWorld {
             })
         };
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk tile columns"), timestamp_writes: stamp(Some(0), 1) });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk tile nodes"), timestamp_writes: stamp(Some(0), 8) });
             pass.set_bind_group(0, &group, &[]);
             if !evictions.is_empty() {
                 pass.set_pipeline(&self.evict_pipeline);
                 pass.dispatch_workgroups((evictions.len() as u32).div_ceil(64), 1, 1);
             }
             if !tile_jobs.is_empty() {
+                pass.set_pipeline(&self.tile_nodes);
+                pass.dispatch_workgroups(tile_jobs.len() as u32, 1, 1);
+            }
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk tile columns"), timestamp_writes: stamp(None, 9) });
+            pass.set_bind_group(0, &group, &[]);
+            if !tile_jobs.is_empty() {
                 pass.set_pipeline(&self.tile_columns);
                 pass.dispatch_workgroups(64, tile_jobs.len() as u32, 1);
+            }
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("chunk tile halos"), timestamp_writes: stamp(None, 1) });
+            pass.set_bind_group(0, &group, &[]);
+            if !tile_jobs.is_empty() {
+                pass.set_pipeline(&self.tile_halo);
+                pass.dispatch_workgroups((tile_jobs.len() as u32).min(crate::engine::HALO_GROUPS), 1, 1);
             }
         }
         {
@@ -2268,7 +2311,8 @@ impl ChunkWorld {
                     let t: &[u64] = bytemuck::cast_slice(&data);
                     let ms = |a: u64, b: u64| b.saturating_sub(a) as f64 * period;
                     let stages = [ms(t[0], t[1]), ms(t[1], t[5]), ms(t[5], t[6])];
-                    let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), shadow: ms(t[4], t[7]), generate: ms(t[0], t[6]), tiles, chunks, stages };
+                    let tile_stages = [ms(t[0], t[8]), ms(t[8], t[9]), ms(t[9], t[1])];
+                    let timing = FrameTimings { frame, draw: ms(t[2], t[4]), seed: ms(t[2], t[3]), shadow: ms(t[4], t[7]), generate: ms(t[0], t[6]), tiles, chunks, stages, tile_stages };
                     if tiles > 0 {
                         self.cost.tiles.add(tiles as f64, stages[0]);
                         self.cost.chunks.add(chunks as f64, stages[1] + stages[2]);

@@ -446,8 +446,7 @@ impl Planet {
                 return h;
             }
         }
-        let p = self.grid.domain_point(face, i, j, level);
-        let h = self.field.height(p, level + self.grid.level_offset());
+        let h = self.field.height(crate::terrain::Column { face, i, j, level });
         if let Ok(mut cache) = self.heights.lock() {
             if cache.len() > 1 << 20 {
                 cache.clear();
@@ -619,7 +618,6 @@ impl Planet {
             _ if material != 0 => material,
             _ => {
                 let slope = self.material_slope(cell.face, cell.i, cell.j);
-                let p = self.grid.domain_point(cell.face, cell.i, cell.j, 0);
                 // Materials vary in 3D (`shade` samples the cell's volume
                 // point): a cliff's voxels are not one column's colour.
                 let q = self.grid.volume_point(cell.face, cell.i, cell.j, cell.k, 0);
@@ -628,7 +626,7 @@ impl Planet {
                 // rock around caves lie below it.
                 let generated = terrain::generated_top(&self.grid, &*self.field, cell.face, cell.i, cell.j, 0, top_height);
                 let depth = (generated - 1 - cell.k).max(0);
-                let surface = self.field.surface(p, self.grid.level_offset(), top_height) & 0xff;
+                let surface = self.field.surface(crate::terrain::Column { face: cell.face, i: cell.i, j: cell.j, level: 0 }, top_height) & 0xff;
                 self.field.ground_material(q, surface, top_height, depth, slope, cell.k) & material::ID
             }
         }

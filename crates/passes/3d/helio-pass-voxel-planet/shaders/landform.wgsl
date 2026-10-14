@@ -22,6 +22,11 @@ struct TerrainConstants {
     // and cavern shapes, overhangs, sizes (tunnel radius, cavern, cover, layer
     // mm), entrances (shift, threshold, tunnel and cavern tapers mm).
     volume: array<vec4<i32>, 5>,
+    // Per-level column programs (`landform::LandformPlan`): each level's
+    // first op and count (`first | count << 16`), node words in use, ops.
+    plan_lists: array<vec4<u32>, 8>,
+    plan_nodes: array<vec4<u32>, 8>,
+    plan_ops: array<vec4<u32>, 232>,
 }
 
 // Octave kinds (`landform::CONTINENT` ...).
@@ -569,25 +574,180 @@ fn landform_ridge(l: u32, o: LandformOctave, nd: vec4<i32>, tracked: bool, gain:
     }
 }
 
+// ---- Two-rate field (`landform::MACRO_GAP`, docs/two-rate-field.md) ----
+// Octaves MACRO_GAP shifts or more above a column's level (erosion and
+// craters excepted) are evaluated at nodes (the columns of the level whose
+// indices are multiples of 16) and interpolated; a column evaluates the
+// finer ones. The engine places and interpolates the nodes
+// (`terrain_node`, `generation_node_word`). A node's words
+// (`landform::Node`): value[8] 0, region[8] 8, dvalue[8] 16 (x3),
+// dregion[8] 40 (x3), the macro ridges' noise and gradient[10] 64 (x4),
+// the macro warp 104 (x3), its Jacobian rows 107 (3 x3).
+const MACRO_GAP: u32 = 15u;
+const MACRO_RIDGES: u32 = 10u;
+const TERRAIN_NODE_WORDS: u32 = 116u;
+// The node being evaluated (`terrain_node`).
+var<private> lf_macro: array<i32, 116>;
+
+fn landform_macro_class(o: LandformOctave, level: u32) -> bool {
+    let kind = o.kind & 0xffu;
+    return o.shift >= level + MACRO_GAP && kind != LF_EROSION && kind != LF_CRATER;
+}
+
+// Per-level column programs (`landform::LandformPlan`, `OP_*`, `NODE_*`).
+const PLAN_LEVELS: u32 = 32u;
+const OP_INDEX: u32 = 63u;
+const OP_MACRO: u32 = 64u;
+const OP_DISPLAY: u32 = 128u;
+const OP_DISPLAY_ONLY: u32 = 256u;
+const OP_REGION_DONE: u32 = 512u;
+const OP_RANK_SHIFT: u32 = 10u;
+const OP_STEER: u32 = 16384u;
+const NODE_REGION_SHIFT: u32 = 8u;
+const NODE_DVALUE_SHIFT: u32 = 16u;
+const NODE_WARP: u32 = 0x1000000u;
+const NODE_ANY: u32 = 0x80000000u;
+
+// `level`'s first op and op count.
+fn landform_plan_list(level: u32) -> vec2<u32> {
+    let l = min(level, PLAN_LEVELS - 1u);
+    let e = terrain.plan_lists[l >> 2u][l & 3u];
+    return vec2<u32>(e & 0xffffu, e >> 16u);
+}
+
+// The node words `level`'s columns read (0: no nodes).
+fn landform_plan_nodes(level: u32) -> u32 {
+    let l = min(level, PLAN_LEVELS - 1u);
+    return terrain.plan_nodes[l >> 2u][l & 3u];
+}
+
+fn landform_plan_op(n: u32) -> u32 {
+    return (terrain.plan_ops[n >> 3u][(n >> 1u) & 3u] >> ((n & 1u) * 16u)) & 0xffffu;
+}
+
+// Whether any octave of `level` is a macro one (`landform::has_macro`).
+fn landform_has_macro(level: u32) -> bool {
+    return (landform_plan_nodes(level) & NODE_ANY) != 0u;
+}
+
+fn landform_macro_add3(slot: u32, v: vec3<i32>) {
+    lf_macro[slot] += v.x;
+    lf_macro[slot + 1u] += v.y;
+    lf_macro[slot + 2u] += v.z;
+}
+
+// A column's interpolated node words `slot..slot + 3`.
+fn landform_macro3(slot: u32) -> vec3<i32> {
+    return vec3<i32>(generation_node_word(slot), generation_node_word(slot + 1u), generation_node_word(slot + 2u));
+}
+
+// The node at domain point `node` of `level` into `lf_macro`
+// (`landform::macro_node`): the whole warp places the octaves, its macro
+// octaves' part is carried.
+fn landform_macro_node(node: vec3<i32>, level: u32, erosion: bool) {
+    for (var slot = 0u; slot < TERRAIN_NODE_WORDS; slot++) { lf_macro[slot] = 0; }
+    var warp = vec3<i32>(0);
+    let warps = min(u32(max(terrain.stack.w, 0)), LANDFORM_WARP);
+    for (var index = 0u; index < warps; index++) {
+        let o = terrain.octaves[index];
+        let nd = landform_noise(node, o, erosion);
+        let n = mul_fine(o.amplitude, nd.x);
+        let axis = min(o.kind - LF_WARP, 2u);
+        warp[axis] += n;
+        if o.shift >= level + MACRO_GAP {
+            lf_macro[104u + axis] += n;
+            if erosion {
+                let m = mul_fine3(nd.yzw, o.amplitude);
+                var jac = vec3<i32>(0);
+                if o.shift <= 24u { jac = m << vec3<u32>(24u - o.shift); } else { jac = m >> vec3<u32>(o.shift - 24u); }
+                landform_macro_add3(107u + axis * 3u, jac);
+            }
+        }
+    }
+    let q = node + warp;
+    var ridges = 0u;
+    let count = min(u32(max(terrain.header.x, 0)), 64u);
+    for (var index = LANDFORM_WARP; index < count; index++) {
+        let o = terrain.octaves[index];
+        if !landform_resolved(o, level) || !landform_macro_class(o, level) { continue; }
+        let l = (o.kind >> 8u) & 7u;
+        let kind = o.kind & 0xffu;
+        if kind <= LF_REGION {
+            let nd = landform_noise(q, o, erosion);
+            let v = mul_fine(nd.x, o.amplitude << 8u);
+            let dv = mul_fine3(landform_per_span3(nd.yzw, o.shift), o.amplitude << 8u);
+            if kind == LF_CONTINENT {
+                lf_macro[l] += v;
+                landform_macro_add3(16u + l * 3u, dv);
+            } else {
+                lf_macro[8u + l] += v;
+                landform_macro_add3(40u + l * 3u, dv);
+            }
+        } else if kind == LF_RIDGE {
+            if ridges < MACRO_RIDGES {
+                let nd = landform_noise(q, o, erosion);
+                let at = 64u + ridges * 4u;
+                lf_macro[at] = nd.x;
+                lf_macro[at + 1u] = nd.y;
+                lf_macro[at + 2u] = nd.z;
+                lf_macro[at + 3u] = nd.w;
+            }
+            ridges += 1u;
+        } else if kind == LF_HILLS {
+            lf_macro[l] += mul_fine(o.amplitude, noise_fine(q, o.shift, o.seed));
+        } else if kind == LF_BASIN {
+            lf_macro[l] += noise_fine(node, o.shift, o.seed);
+        } else {
+            lf_macro[l] += scale_q16(noise(node, o.shift, o.seed), o.amplitude);
+        }
+    }
+}
+
+// Whether columns of `level` read nodes (`landform::has_macro`).
+fn terrain_has_nodes(level: u32) -> bool {
+    return landform_has_macro(level);
+}
+
+// The node at domain point `p` of `level`; its words by `terrain_node_word`.
+fn terrain_node(p: vec3<i32>, level: u32) {
+    landform_macro_node(p, level, terrain.materials.z >= i32(level) + 5);
+}
+
+fn terrain_node_word(slot: u32) -> i32 {
+    return lf_macro[slot];
+}
+
 // Height and surface word (`height_parts`). The false mode preserves the
 // canonical operation order. Only generation compiles the display
 // capability; climate, shade and verify_field stay exact.
 //
 // Compilers inline every call: each octave reaches one fine-noise site and
 // one ridge site, and generation evaluates this once per column
-// (`terrain_column`). Three inlined copies took 22 s to compile.
-fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
-    let count = min(u32(max(terrain.header.x, 0)), 64u);
+// (`terrain_column_nodes`). Three inlined copies took 22 s to compile.
+// The level's program (`landform_plan_list`) runs its ops; levels with
+// nodes read the words in use (`landform_plan_nodes`) of the column's
+// blend (`generation_node_word`).
+fn landform_column(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
     // Erosion follows the larger terrain's slope (`height_parts`), where its
     // coarsest octave is resolved (`landform_resolved`).
     let erosion = terrain.materials.z >= i32(level) + 5;
+    let nodes = landform_plan_nodes(level);
     var warp = vec3<i32>(0);
     var jx = vec3<i32>(0);
     var jy = vec3<i32>(0);
     var jz = vec3<i32>(0);
+    if (nodes & NODE_WARP) != 0u {
+        warp = landform_macro3(104u);
+        if erosion {
+            jx = landform_macro3(107u);
+            jy = landform_macro3(110u);
+            jz = landform_macro3(113u);
+        }
+    }
     let warps = min(u32(max(terrain.stack.w, 0)), LANDFORM_WARP);
     for (var index = 0u; index < warps; index++) {
         let o = terrain.octaves[index];
+        if nodes != 0u && o.shift >= level + MACRO_GAP { continue; }
         let nd = landform_noise(p, o, erosion);
         let n = mul_fine(o.amplitude, nd.x);
         var jac = vec3<i32>(0);
@@ -601,6 +761,8 @@ fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
     let q = p + warp;
     var up = vec3<i32>(0, 1073741824, 0);
     if terrain.shape.w == 0 { up = unit_q30(p); }
+    // The macro octaves' sums come first; their ridges join the chains in
+    // table order below.
     for (var l = 0u; l < 8u; l++) {
         lf_value[l] = 0;
         lf_region[l] = 0;
@@ -608,37 +770,45 @@ fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
         lf_dvalue[l] = vec3<i32>(0);
         lf_dregion[l] = vec3<i32>(0);
         lf_dweight[l] = vec3<i32>(0);
+        if ((nodes >> l) & 1u) != 0u { lf_value[l] = generation_node_word(l); }
+        if erosion && ((nodes >> (NODE_DVALUE_SHIFT + l)) & 1u) != 0u { lf_dvalue[l] = landform_macro3(16u + l * 3u); }
+        if ((nodes >> (NODE_REGION_SHIFT + l)) & 1u) != 0u {
+            lf_region[l] = generation_node_word(8u + l);
+            if erosion { lf_dregion[l] = landform_macro3(40u + l * 3u); }
+        }
     }
     var eroded = 0;
     var deroded = vec3<i32>(0);
     var ejecta = 0;
-    var display_tag = 0xffffffffu;
-    if terrain.shape.x > 0 { display_tag = (u32(terrain.shape.x - 1) << 8u) | LF_RIDGE; }
     var ridge_gain = FINE_ONE;
     var ridge_row = 0u;
-    // Steering reads only continents and mountains, which erosion octaves
-    // leave alone: a run of erosion octaves shares one.
+    // Steering reads only continents and mountains (`OP_STEER` ops change
+    // them): the erosion octaves between share one.
     var steer = vec3<i32>(0);
     var steered = false;
-    // Each layer's octaves past its last region octave: its region is
-    // whole there (a mountain range's mask is known before its ridges).
-    var region_done = array<u32, 8>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
-    for (var index = LANDFORM_WARP; index < count; index++) {
-        let o = terrain.octaves[index];
-        if (o.kind & 0xffu) == LF_REGION { region_done[(o.kind >> 8u) & 7u] = index + 1u; }
-    }
-    for (var index = LANDFORM_WARP; index < count; index++) {
-        let o = terrain.octaves[index];
+    let plan = landform_plan_list(level);
+    for (var n = 0u; n < plan.y; n++) {
+        let op = landform_plan_op(plan.x + n);
+        let o = terrain.octaves[op & OP_INDEX];
         let l = (o.kind >> 8u) & 7u;
         let kind = o.kind & 0xffu;
-        if kind != LF_EROSION { steered = false; }
+        let shown = RIDGE_DISPLAY_GENERATION && display && (op & OP_DISPLAY) != 0u;
+        if (op & OP_DISPLAY_ONLY) != 0u && !shown { continue; }
+        if (op & OP_STEER) != 0u { steered = false; }
+        // A macro ridge's noise comes from the nodes.
+        let from_macro = (op & OP_MACRO) != 0u;
+        var macro_nd = vec4<i32>(0);
+        if from_macro {
+            let at = 64u + ((op >> OP_RANK_SHIFT) & 15u) * 4u;
+            macro_nd = vec4<i32>(generation_node_word(at), generation_node_word(at + 1u), generation_node_word(at + 2u), generation_node_word(at + 3u));
+        }
         // Outside a mountain range (its mask and the mask's slope zero:
         // m <= 0) its ridges change neither the height nor the steering:
         // the layer's value only ever reaches them times the mask.
-        if kind == LF_RIDGE && index >= region_done[l] && terrain.layers[l].kind == LAYER_MOUNTAINS && (lf_region[l] - (terrain.layers[l].a << 8u)) * 3 <= 0 { continue; }
+        if kind == LF_RIDGE && (op & OP_REGION_DONE) != 0u && terrain.layers[l].kind == LAYER_MOUNTAINS && (lf_region[l] - (terrain.layers[l].a << 8u)) * 3 <= 0 { continue; }
         var gain = FINE_ONE;
         var gradient = erosion;
-        if RIDGE_DISPLAY_GENERATION && display && o.kind == display_tag {
+        if shown {
             // Expand B[k](w)=(1-s)*F[k](w)+s*(A[k]*v+B[k+1](next(w))).
             // Repeated lattice shifts may have several partial octaves.
             var partial = ridge_gain;
@@ -657,12 +827,12 @@ fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
             // fully supported ridges carry gradients.
             gain = ridge_gain;
             gradient = erosion && ridge_gain == FINE_ONE;
-        } else if !landform_resolved(o, level) {
-            continue;
         }
         if kind <= LF_HILLS || kind == LF_BASIN {
-            // The octave's one fine-noise evaluation (basins: unwarped).
-            let nd = landform_noise(select(q, p, kind == LF_BASIN), o, gradient && kind <= LF_RIDGE);
+            // The octave's one fine-noise evaluation (basins: unwarped), or
+            // a macro ridge's from the nodes.
+            var nd = macro_nd;
+            if !from_macro { nd = landform_noise(select(q, p, kind == LF_BASIN), o, gradient && kind <= LF_RIDGE); }
             if kind == LF_RIDGE {
                 landform_ridge(l, o, nd, gradient, gain);
             } else if kind <= LF_REGION {
@@ -739,25 +909,22 @@ fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
     return vec2<i32>(h, surface);
 }
 
-fn terrain_height(p: vec3<i32>, level: u32) -> i32 {
-    return terrain_parts_mode(p, level, false).x;
-}
-
 // Surface word of the last height evaluated in this invocation: generation
 // asks for it right after the column's height.
 var<private> landform_surface: i32 = 0;
 var<private> landform_surface_at: vec4<i32> = vec4<i32>(0x7fffffff);
 
-// Surface word (`landform::surface`), by material style.
+// Surface word (`landform::surface`), by material style: the column's at
+// `p`, evaluated just before (`field_height`).
 fn terrain_surface(p: vec3<i32>, level: u32, height: i32) -> u32 {
-    if any(landform_surface_at != vec4<i32>(p, i32(level))) { _ = terrain_height(p, level); }
+    if any(landform_surface_at != vec4<i32>(p, i32(level))) { return 0u; }
     return u32(landform_surface);
 }
 
-// Height and surface word of a column being generated (`display`: its
-// coarse ridges keep their envelope).
-fn terrain_column(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
-    return terrain_parts_mode(p, level, display && terrain.shape.z != 0);
+// Height and surface word of the column at `p` (`landform::column_parts`;
+// `display`: its coarse ridges keep their envelope).
+fn terrain_column_nodes(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
+    return landform_column(p, level, display && terrain.shape.z != 0);
 }
 
 fn landform_moisture(p: vec3<i32>) -> i32 {

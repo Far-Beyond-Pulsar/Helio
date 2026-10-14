@@ -781,7 +781,7 @@ mod tests {
         let grid = Grid::plane(Shape::Plane, 1024.0, 0.1).unwrap();
         let stack = TerrainLayers { soil_depth_m: 0.5, surface: "Sand".into(), rock: "dark_stone".into(), ..TerrainLayers::flat_at(2.34) };
         let field = LayersGenerator.build(&grid, 0, &serde_json::to_string(&stack).unwrap()).unwrap();
-        assert_eq!(field.height(IVec3::ZERO, 0), 2_300);
+        assert_eq!(field.height(crate::terrain::Column { face: crate::grid::PLANE_FACE, i: 0, j: 0, level: 0 }), 2_300);
         assert_eq!(field.height_range(), (2_300, 2_300));
         assert_eq!(field.bound_margins(), [2; 24]);
         assert_eq!(field.ground_material(IVec3::ZERO, 0, 2_300, 0, 0, 22), material::SAND);
@@ -803,9 +803,9 @@ mod tests {
             let (mut lo, mut hi, mut fresh, mut mare) = (i32::MAX, i32::MIN, 0, 0);
             for t in 0..4_000 {
                 let face = if g.is_plane() { crate::grid::PLANE_FACE } else { 2 };
-                let p = g.domain_point(face, n / 4 + t * 3, n / 2, 0);
-                let h = planet.field().height(p, g.level_offset());
-                let s = planet.field().surface(p, g.level_offset(), h);
+                let column = crate::terrain::Column { face, i: n / 4 + t * 3, j: n / 2, level: 0 };
+                let h = planet.field().height(column);
+                let s = planet.field().surface(column, h);
                 lo = lo.min(h);
                 hi = hi.max(h);
                 fresh += usize::from(s & 0x7f > 0);
@@ -835,11 +835,11 @@ mod tests {
             // Land columns across the face (the ocean floor is flat anyway).
             for t in 0..40_000 {
                 let (i, j) = (((t * 7_919) % 199) * (n / 200), (t.wrapping_mul(104_729) % 197) * (n / 200) + t % 64);
-                let h = planet.field().height(g.domain_point(face, i, j, 0), g.level_offset());
+                let h = planet.field().height(crate::terrain::Column { face: face, i: i, j: j, level: 0 });
                 if h <= 50 * crate::terrain::HEIGHT_ONE {
                     continue;
                 }
-                let h1 = planet.field().height(g.domain_point(face, i + 1, j, 0), g.level_offset());
+                let h1 = planet.field().height(crate::terrain::Column { face: face, i: i + 1, j: j, level: 0 });
                 samples += 1;
                 on_tread += usize::from(h.rem_euclid(step) == 0);
                 steep += usize::from((h1 - h).abs() >= g.layer_mm() as i32 * 2);
@@ -879,7 +879,7 @@ mod tests {
         let mut worst = 0;
         for t in 0..20_000 {
             let (i, j) = (n / 5 + t * 131, n / 3 + t * 17);
-            let h = |d: i32| planet.field().height(g.domain_point(2, i + d, j, 0), g.level_offset());
+            let h = |d: i32| planet.field().height(crate::terrain::Column { face: 2, i: i + d, j: j, level: 0 });
             worst = worst.max((h(0) - 2 * h(1) + h(2)).abs());
         }
         assert!(worst < 100, "worst second difference {worst} mm");

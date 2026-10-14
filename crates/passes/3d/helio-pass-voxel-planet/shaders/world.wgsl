@@ -159,12 +159,6 @@ fn volume_point_half(p: vec3<i32>, h: i32) -> vec3<i32> {
     return p + vec3<i32>(volume_component(p.x, ratio), volume_component(p.y, ratio), volume_component(p.z, ratio));
 }
 
-// Surface height of a level column: the terrain program at the column's
-// footprint in reference cells.
-fn field_height(face: u32, i: i32, j: i32, level: u32) -> i32 {
-    return terrain_height(domain_point(face, i, j, level), level + u32(world.grid.w));
-}
-
 fn top_cells(height: i32, level: u32) -> i32 {
     return div_floor(height, world.grid.y) >> level;
 }

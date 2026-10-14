@@ -115,7 +115,7 @@ pub fn scale(n: i32, amplitude: i32) -> i32 {
 /// Unit of the fine noise (Q24, `FINE_ONE` in WGSL).
 pub const FINE_ONE: i32 = 1 << 24;
 
-/// `a * b / 2^24` rounded toward zero, for `|a| < 2^28` and `|b| <= 2^24`:
+/// `a * b / 2^24` rounded to nearest, for `|a| < 2^28` and `|b| <= 2^24`:
 /// the exact product (`mul_fine` in WGSL: one wide multiply on GPUs with
 /// 64-bit integers).
 #[inline]
@@ -254,11 +254,14 @@ fn rsqrt_wide(d: u32) -> u32 {
     y
 }
 
-/// `sign(a b) floor(|a| |b| / 2^s)` of the exact 64-bit product.
+/// `a b / 2^s` rounded to nearest (halves up) of the exact signed 64-bit
+/// product, wrapping (the caller keeps it within 32 bits): one wide
+/// multiply, an add and a shift on GPUs with 64-bit integers. Rounding
+/// toward zero needed sign handling, a fifth of the field's GPU time;
+/// rounding down biased sums of products.
 #[inline]
 pub fn mul_shr_signed(a: i32, b: i32, s: u32) -> i32 {
-    let m = mul_shr(a.unsigned_abs(), b.unsigned_abs(), s) as i32;
-    if (a < 0) != (b < 0) { -m } else { m }
+    ((i64::from(a) * i64::from(b)).wrapping_add(((1u64 << s) >> 1) as i64) >> s) as i32
 }
 
 /// `v / |v|` in Q30 to within a few units (zero for zero), for any `v`:

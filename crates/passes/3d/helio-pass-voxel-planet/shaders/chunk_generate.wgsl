@@ -142,6 +142,14 @@ fn evict(@builtin(global_invocation_id) id: vec3<u32>) {
 
 var<workgroup> w_range: array<atomic<i32>, 4>;
 
+// A two-rate field's nodes of each tile (`generation_tile_nodes`), before
+// `tile_columns_main`: dispatch (tiles). Then `tile_halo_main`.
+@compute @workgroup_size(64)
+fn tile_nodes_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = tile_jobs[wg.x];
+    generation_tile_nodes(wg.x, job.face, job.cx, job.cy, job.level, li);
+}
+
 // One workgroup per 8x8 columns of a tile: dispatch (64, tiles).
 @compute @workgroup_size(64)
 fn tile_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
@@ -162,7 +170,7 @@ fn tile_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoca
     if i < cells && j < cells {
         // Coarse levels keep the mean of the ridges they cannot resolve
         // (the display field), so they sit where finer levels' terrain sits.
-        let field = generation_column(job.face, i, j, job.level, job.level >= 1u);
+        let field = generation_tile_column(wg.y, job.face, i, j, job.level, job.level >= 1u);
         let extent = terrain_extent(domain_point(job.face, i, j, job.level), job.level);
         let top = div_floor(field.x, world.grid.y) >> job.level;
         tile_columns[wg.y * TILE_COLUMNS + y * 64u + x] = vec4<i32>(field.x, field.y, extent.x, extent.y);
@@ -373,6 +381,55 @@ fn lean_height(a: i32, i: i32, j: i32, k: i32, level: u32, height: i32, spacing:
     return lean_bilinear(xy + o, spacing) + height - lean_bilinear(xy, spacing);
 }
 
+// The field's heights at the lean lattice nodes past each tile's edges
+// that its brick columns read (`chunk_columns_main`): a square of nodes
+// from `halo_first`, at most HALO_SIDE a side (spacing >= 2: 56 / 2 + 8).
+// Evaluated once a tile (`tile_halo_main`), not once a chunk.
+const HALO_SIDE: u32 = 40u;
+@group(0) @binding(26) var<storage, read_write> tile_halo: array<i32>;
+
+fn halo_first(tile: TileJob, lean: vec2<i32>) -> vec2<i32> {
+    return vec2<i32>(div_floor(tile.cx * 64 - lean.x, lean.y), div_floor(tile.cy * 64 - lean.x, lean.y));
+}
+
+var<workgroup> w_halo_leaning: atomic<u32>;
+var<workgroup> w_halo_flag: u32;
+var<workgroup> w_halo_tiles: u32;
+
+// Tiles `wg.x`, `wg.x + HALO_GROUPS`, ..: the halo of each with a leaning
+// column. The batch's tile count is `tile_ranges`' last word.
+@compute @workgroup_size(64)
+fn tile_halo_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    if li == 0u { w_halo_tiles = u32(atomicLoad(&tile_ranges[arrayLength(&tile_ranges) - 1u])); }
+    let tiles = workgroupUniformLoad(&w_halo_tiles);
+    for (var t = wg.x; t < tiles; t += HALO_GROUPS) {
+        let job = tile_jobs[t];
+        let lean = terrain_lean(job.level);
+        if li == 0u { atomicStore(&w_halo_leaning, 0u); }
+        workgroupBarrier();
+        if lean.x != 0 {
+            for (var c = li; c < TILE_COLUMNS; c += 64u) {
+                let column = tile_columns[t * TILE_COLUMNS + c];
+                if column.x != OUTSIDE && column.w > 0 { atomicStore(&w_halo_leaning, 1u); }
+            }
+        }
+        workgroupBarrier();
+        if li == 0u { w_halo_flag = atomicLoad(&w_halo_leaning); }
+        if workgroupUniformLoad(&w_halo_flag) == 0u { continue; }
+        let first = halo_first(job, lean);
+        let side = vec2<i32>(div_floor(job.cx * 64 + 56 - lean.x, lean.y), div_floor(job.cy * 64 + 56 - lean.x, lean.y)) + 8 - first;
+        let last = (world.grid.z >> job.level) - 1;
+        for (var k = i32(li); k < side.x * side.y; k += 64) {
+            let n = first + vec2<i32>(k % side.x, k / side.x);
+            let cell = clamp(n * lean.y, vec2<i32>(0), vec2<i32>(last));
+            let local = cell - vec2<i32>(job.cx, job.cy) * 64;
+            if all(local >= vec2<i32>(0)) && all(local < vec2<i32>(64)) { continue; }
+            let at = t * HALO_SIDE * HALO_SIDE + u32(n.y - first.y) * HALO_SIDE + u32(n.x - first.x);
+            tile_halo[at] = generation_halo_column(t, job.face, cell.x, cell.y, job.level, job.level >= 1u, wg.x * 64u + li).x;
+        }
+    }
+}
+
 // One thread per column, one workgroup per 8x8 columns (a brick column):
 // dispatch (64, chunks).
 @compute @workgroup_size(64)
@@ -389,7 +446,7 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     let at = wg.y * TILE_COLUMNS + y * 64u + x;
     // A leaning surface (overhangs) reads the field on a global lattice:
     // nodes every `spacing` cells from `div_floor(8 ci - reach, spacing)`,
-    // shared by the brick column's lanes, each evaluating one.
+    // shared by the brick column's lanes, each reading one.
     let lean = terrain_lean(level);
     let leaning = column.x != OUTSIDE && lean.x != 0 && column.w > 0;
     let node = vec2<i32>(div_floor((i >> 3u) * 8 - lean.x, max(lean.y, 1)), div_floor((j >> 3u) * 8 - lean.x, max(lean.y, 1)));
@@ -400,14 +457,14 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     if atomicLoad(&w_leaning) != 0u {
         let last = (world.grid.z >> level) - 1;
         let cell = vec2<i32>(clamp((node.x + i32(li & 7u)) * lean.y, 0, last), clamp((node.y + i32(li >> 3u)) * lean.y, 0, last));
-        // A node over the tile is its column's height, already evaluated
-        // (`tile_columns_main`, the same arguments): only the halo past the
-        // tile's edges runs the program again.
+        // A node over the tile is its column's height (`tile_columns_main`,
+        // the same arguments); past the tile's edges, the tile's halo.
         let local = cell - vec2<i32>(tile.cx, tile.cy) * 64;
         if all(local >= vec2<i32>(0)) && all(local < vec2<i32>(64)) {
             w_lean[li] = tile_columns[job.tile * TILE_COLUMNS + u32(local.y) * 64u + u32(local.x)].x;
         } else {
-            w_lean[li] = generation_column(face, cell.x, cell.y, level, level >= 1u).x;
+            let n = node + vec2<i32>(i32(li & 7u), i32(li >> 3u)) - halo_first(tile, lean);
+            w_lean[li] = tile_halo[job.tile * HALO_SIDE * HALO_SIDE + u32(n.y) * HALO_SIDE + u32(n.x)];
         }
     }
     workgroupBarrier();
