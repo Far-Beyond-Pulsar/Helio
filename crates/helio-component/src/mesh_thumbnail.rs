@@ -11,7 +11,7 @@ use std::path::Path;
 
 use glam::{Vec2, Vec3};
 
-use crate::components::{resolve_slot_material, StaticMeshMaterialSlot};
+use crate::components::{StaticMeshMaterialSlot, resolve_slot_material};
 
 const SIZE: u32 = 128;
 const BACKGROUND: [u8; 4] = [0, 0, 0, 255];
@@ -62,7 +62,11 @@ pub fn render_mesh_thumbnail(path: &Path) -> Option<image::RgbaImage> {
         .map(|v| {
             let world = Vec3::from_array(v.position);
             let rel = world - center;
-            (Vec2::new(rel.dot(right), rel.dot(up)), rel.dot(to_camera), world)
+            (
+                Vec2::new(rel.dot(right), rel.dot(up)),
+                rel.dot(to_camera),
+                world,
+            )
         })
         .collect();
     let (mut min, mut max) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
@@ -159,21 +163,36 @@ pub fn render_mesh_thumbnail(path: &Path) -> Option<image::RgbaImage> {
 mod tests {
     use super::*;
     use crate::mesh_cache::{
-        encode_asset, ImportedSurfaceMaterial, MeshAssetUpload, MeshMaterialSlot, MeshSection,
+        ImportedSurfaceMaterial, MeshAssetUpload, MeshMaterialSlot, MeshSection, encode_asset,
     };
     use helio::{MeshUpload, PackedVertex};
 
     #[test]
     fn a_mesh_thumbnail_shows_the_section_colour() {
-        let vertex = |x, y| PackedVertex::from_components([x, y, 0.0], [0.0, 0.0, 1.0], [0.0; 2], [1.0, 0.0, 0.0], 1.0);
+        let vertex = |x, y| {
+            PackedVertex::from_components(
+                [x, y, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0; 2],
+                [1.0, 0.0, 0.0],
+                1.0,
+            )
+        };
         let asset = MeshAssetUpload {
             geometry: MeshUpload {
                 vertices: vec![vertex(-1.0, -1.0), vertex(1.0, -1.0), vertex(0.0, 1.0)],
                 indices: vec![0, 1, 2],
             },
-            sections: vec![MeshSection { first_index: 0, index_count: 3, material_slot: 0 }],
+            sections: vec![MeshSection {
+                first_index: 0,
+                index_count: 3,
+                material_slot: 0,
+            }],
             material_slots: vec![MeshMaterialSlot {
-                surface: ImportedSurfaceMaterial { base_color: [1.0, 0.0, 0.0, 1.0], ..Default::default() },
+                surface: ImportedSurfaceMaterial {
+                    base_color: [1.0, 0.0, 0.0, 1.0],
+                    ..Default::default()
+                },
                 ..Default::default()
             }],
         };
@@ -183,7 +202,10 @@ mod tests {
         std::fs::write(&path, encode_asset(&asset, 1)).unwrap();
         let image = render_mesh_thumbnail(&path).expect("renders");
         let centre = image.get_pixel(SIZE / 2, SIZE / 2).0;
-        assert!(centre[0] > 60 && centre[1] == 0 && centre[2] == 0, "{centre:?}");
+        assert!(
+            centre[0] > 60 && centre[1] == 0 && centre[2] == 0,
+            "{centre:?}"
+        );
         assert_eq!(image.get_pixel(0, 0).0, BACKGROUND);
         let _ = std::fs::remove_dir_all(&dir);
     }

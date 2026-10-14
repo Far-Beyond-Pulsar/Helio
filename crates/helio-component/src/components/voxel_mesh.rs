@@ -31,7 +31,7 @@ use super::{
 };
 use crate::mesh_cache::{ImportedSurfaceMaterial, MeshSection};
 use helio::PackedVertex;
-use helio_voxel_data::{VoxelChunkKey, VOXEL_CHUNK_EDGE, VOXEL_CHUNK_SAMPLES};
+use helio_voxel_data::{VOXEL_CHUNK_EDGE, VOXEL_CHUNK_SAMPLES, VoxelChunkKey};
 
 pub use helio_voxel_data::VOXEL_MESH_RENDERER;
 
@@ -165,7 +165,9 @@ pub fn greedy_mesh_chunk(
     for quad in &quads {
         fnv(
             &mut id,
-            &[quad.face, quad.slot, quad.layer, quad.u[0], quad.u[1], quad.v[0], quad.v[1]],
+            &[
+                quad.face, quad.slot, quad.layer, quad.u[0], quad.u[1], quad.v[0], quad.v[1],
+            ],
         );
     }
     VoxelChunkMesh { quads, id }
@@ -249,10 +251,7 @@ impl VoxelMeshGeometry {
                         geometry.vertices.push(PackedVertex::from_components(
                             position,
                             normal,
-                            [
-                                f32::from(u) + base[ua],
-                                f32::from(v) + base[va],
-                            ],
+                            [f32::from(u) + base[ua], f32::from(v) + base[va]],
                             tangent,
                             sign,
                         ));
@@ -483,20 +482,31 @@ mod tests {
         let one = VoxelMeshGeometry::assemble([(key(0), &a), (key(1), &b)], 1.0);
         let swapped = VoxelMeshGeometry::assemble([(key(1), &b), (key(0), &a)], 1.0);
         assert_eq!(one.id, swapped.id);
-        assert_ne!(one.id, VoxelMeshGeometry::assemble([(key(0), &a), (key(1), &a)], 1.0).id);
-        assert_ne!(one.id, VoxelMeshGeometry::assemble([(key(0), &a), (key(1), &b)], 2.0).id);
+        assert_ne!(
+            one.id,
+            VoxelMeshGeometry::assemble([(key(0), &a), (key(1), &a)], 1.0).id
+        );
+        assert_ne!(
+            one.id,
+            VoxelMeshGeometry::assemble([(key(0), &a), (key(1), &b)], 2.0).id
+        );
         assert_eq!(one.id >> 64, CONTENT_TAG >> 64);
         // The rows name it by that id: it interns like an asset's geometry.
         use pulsar_scenedb::handle_ledger::{ContentAddressed, HandleId};
         let path = MeshAssetPath::generated(one.id);
         assert_eq!(path.generated_content_id(), Some(one.id));
         assert_eq!(path.content_id(), HandleId(one.id));
-        assert_eq!(MeshAssetPath::new("meshes/a.mesh").generated_content_id(), None);
+        assert_eq!(
+            MeshAssetPath::new("meshes/a.mesh").generated_content_id(),
+            None
+        );
     }
 
     #[test]
     fn material_ids_get_distinct_surfaces() {
-        let colors: Vec<_> = (0..8).map(|id| voxel_material_surface(id).base_color).collect();
+        let colors: Vec<_> = (0..8)
+            .map(|id| voxel_material_surface(id).base_color)
+            .collect();
         for (i, a) in colors.iter().enumerate() {
             for b in &colors[i + 1..] {
                 assert_ne!(a, b);

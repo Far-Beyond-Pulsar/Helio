@@ -185,8 +185,10 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        assert!(bytemuck::bytes_of(&disabled.to_row())
-            .iter()
-            .all(|byte| *byte == 0));
+        assert!(
+            bytemuck::bytes_of(&disabled.to_row())
+                .iter()
+                .all(|byte| *byte == 0)
+        );
     }
 }

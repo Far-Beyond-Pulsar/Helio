@@ -9,7 +9,7 @@
 
 use engine_class_derive::{engine_class, register_world_component};
 use glam::Vec3;
-use pulsar_reflection::{pulsar_type, ReflectError, ReflectResult, Reflectable};
+use pulsar_reflection::{ReflectError, ReflectResult, Reflectable, pulsar_type};
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub const SPLINE_CLASS_NAME: &str = "SplineComponent";
@@ -463,7 +463,9 @@ const TANGENT_COLOR: [f32; 4] = [0.35, 0.85, 1.0, 0.8];
 /// and tangent handles on selected splines.
 pub fn spline_debug_lines(world: &pulsar_scenedb::World) -> Vec<helio::DebugVertex> {
     let mut lines = Vec::new();
-    for (_, owner, spline) in pulsar_scene_model::attachments::enabled_components::<SplineComponent>(world) {
+    for (_, owner, spline) in
+        pulsar_scene_model::attachments::enabled_components::<SplineComponent>(world)
+    {
         if let Some((model, selected)) = owner_view(world, owner, &spline) {
             append_spline_lines(&mut lines, &spline, model, selected);
         }
@@ -530,7 +532,7 @@ pub struct SplineLines {
 
 impl SplineLines {
     pub fn new(world: &pulsar_scenedb::World) -> Self {
-        use pulsar_scene_model::{attachments::ComponentOwner, Selected, Transform, Visibility};
+        use pulsar_scene_model::{Selected, Transform, Visibility, attachments::ComponentOwner};
         Self {
             cursors: vec![
                 world.open_change_cursor::<SplineComponent>(),
@@ -885,13 +887,16 @@ mod tests {
     #[test]
     #[ignore = "perf report: cargo test -p helio_component --lib drag_cost -- --ignored --nocapture"]
     fn drag_cost_report() {
-        use pulsar_scene_model::{world_ext::SceneWorldExt, SpawnObject, Transform};
+        use pulsar_scene_model::{SpawnObject, Transform, world_ext::SceneWorldExt};
         for &(splines, points) in &[(1usize, 64usize), (1, 256), (8, 256)] {
             let mut world = pulsar_scenedb::World::new();
             let mut owners = Vec::new();
             for i in 0..splines {
-                let owner = world.spawn_object(SpawnObject::new(format!("s{i}"))).unwrap();
-                pulsar_world_registry::attach_value(&mut world, owner, long_bspline(points)).unwrap();
+                let owner = world
+                    .spawn_object(SpawnObject::new(format!("s{i}")))
+                    .unwrap();
+                pulsar_world_registry::attach_value(&mut world, owner, long_bspline(points))
+                    .unwrap();
                 owners.push(owner);
             }
             let mut lines = SplineLines::new(&world);
@@ -917,7 +922,7 @@ mod tests {
 
     #[test]
     fn spline_lines_rebuild_only_when_a_spline_or_its_owner_changes() {
-        use pulsar_scene_model::{world_ext::SceneWorldExt, SpawnObject, Transform, Visibility};
+        use pulsar_scene_model::{SpawnObject, Transform, Visibility, world_ext::SceneWorldExt};
         let mut world = pulsar_scenedb::World::new();
         let curve = world.spawn_object(SpawnObject::new("curve")).unwrap();
         let bystander = world.spawn_object(SpawnObject::new("bystander")).unwrap();
@@ -936,7 +941,11 @@ mod tests {
                 let key = |l: &[helio::DebugVertex]| {
                     l.iter().map(|v| (v.position, v.color)).collect::<Vec<_>>()
                 };
-                assert_eq!(key(&lines), key(&fresh), "cached lines match a full rebuild");
+                assert_eq!(
+                    key(&lines),
+                    key(&fresh),
+                    "cached lines match a full rebuild"
+                );
                 Some(lines)
             }
         }
@@ -960,9 +969,17 @@ mod tests {
         let hidden = lines.poll(&world).expect("hidden").len();
         assert!(hidden < shown, "the hidden curve's lines are gone");
         world.get_mut::<Visibility>(curve).unwrap().visible = true;
-        assert_eq!(lines.poll(&world).map(|l| l.len()), Some(shown), "shown again");
+        assert_eq!(
+            lines.poll(&world).map(|l| l.len()),
+            Some(shown),
+            "shown again"
+        );
 
         pulsar_scene_model::attachments::set_enabled(&mut world, spline, false);
-        assert_eq!(lines.poll(&world).map(|l| l.len()), Some(hidden), "disabled");
+        assert_eq!(
+            lines.poll(&world).map(|l| l.len()),
+            Some(hidden),
+            "disabled"
+        );
     }
 }

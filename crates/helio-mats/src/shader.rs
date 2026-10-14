@@ -86,7 +86,189 @@ pub fn apply_webgpu_material_bindings(src: &str, max_textures: usize) -> String 
                 &format!("scene_sampler_{index}"),
             );
     }
-    source
+    lower_graph_texture_samples(&source, max_textures)
+}
+
+/// Graph WGSL indexes the scene texture table through `GpuMaterial` fields.
+/// Baseline WebGPU replaces that table with fixed bindings, so lower each
+/// graph sampling expression to a switch over those bindings.
+fn lower_graph_texture_samples(source: &str, max_textures: usize) -> String {
+    const GRAPH_FIELDS: [&str; 5] = [
+        "tex_base_color",
+        "tex_normal",
+        "tex_roughness",
+        "tex_emissive",
+        "tex_occlusion",
+    ];
+
+    let mut rewritten = String::with_capacity(source.len());
+    let mut helpers = std::collections::BTreeSet::new();
+    let mut cursor = 0;
+    while cursor < source.len() {
+        let next = ["textureSample(", "textureSampleLevel(", "textureSampleGrad("]
+            .into_iter()
+            .filter_map(|name| source[cursor..].find(name).map(|offset| (cursor + offset, name)))
+            .min_by_key(|(offset, _)| *offset);
+        let Some((start, name)) = next else {
+            rewritten.push_str(&source[cursor..]);
+            break;
+        };
+        let Some((end, args)) = call_arguments(source, start + name.len() - 1) else {
+            rewritten.push_str(&source[cursor..]);
+            break;
+        };
+        let parts = split_wgsl_arguments(args);
+        let texture_field = parts
+            .first()
+            .map(|texture| strip_outer_parentheses(texture))
+            .and_then(|texture| texture.strip_prefix("scene_textures[material."))
+            .and_then(|field| field.strip_suffix(']'));
+        let sampler_field = parts
+            .get(1)
+            .map(|sampler| strip_outer_parentheses(sampler))
+            .and_then(|sampler| sampler.strip_prefix("scene_samplers[material."))
+            .and_then(|field| field.strip_suffix(']'));
+        let variant = match name {
+            "textureSample(" if parts.len() == 3 => Some(("pulsar_graph_sample", 1)),
+            "textureSampleLevel(" if parts.len() == 4 => Some(("pulsar_graph_sample_level", 2)),
+            "textureSampleGrad(" if parts.len() == 5 => Some(("pulsar_graph_sample_grad", 3)),
+            _ => None,
+        };
+        if let (Some(texture_field), Some(sampler_field), Some((helper, helper_index))) =
+            (texture_field, sampler_field, variant)
+        {
+            if texture_field == sampler_field
+                && GRAPH_FIELDS.contains(&texture_field)
+                && max_textures > 0
+            {
+                rewritten.push_str(&source[cursor..start]);
+                let mut call = format!("{helper}(material.{texture_field}, {}", parts[2]);
+                for arg in parts.iter().skip(3) {
+                    call.push_str(", ");
+                    call.push_str(arg);
+                }
+                call.push(')');
+                rewritten.push_str(&call);
+                helpers.insert(helper_index);
+            } else {
+                rewritten.push_str(&source[cursor..end]);
+            }
+        } else {
+            rewritten.push_str(&source[cursor..end]);
+        }
+        cursor = end;
+    }
+
+    if helpers.is_empty() {
+        return rewritten;
+    }
+    let mut generated = String::new();
+    for helper in helpers {
+        generated.push_str(&graph_sample_helper(helper, max_textures));
+    }
+    if let Some(position) = rewritten.find("fn radiant_eval_surface") {
+        rewritten.insert_str(position, &generated);
+    } else {
+        rewritten.push_str(&generated);
+    }
+    rewritten
+}
+
+fn call_arguments(source: &str, open: usize) -> Option<(usize, &str)> {
+    let bytes = source.as_bytes();
+    let mut depth = 0usize;
+    for (offset, byte) in bytes.iter().enumerate().skip(open) {
+        match *byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some((offset + 1, &source[open + 1..offset]));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_wgsl_arguments(args: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (index, byte) in args.bytes().enumerate() {
+        match byte {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                parts.push(args[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(args[start..].trim());
+    parts
+}
+
+fn strip_outer_parentheses(mut expression: &str) -> &str {
+    expression = expression.trim();
+    while expression.starts_with('(') && expression.ends_with(')') {
+        let mut depth = 0usize;
+        let closes_at_end = expression.bytes().enumerate().all(|(index, byte)| {
+            match byte {
+                b'(' => depth += 1,
+                b')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 && index + 1 < expression.len() {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+            true
+        });
+        if !closes_at_end {
+            break;
+        }
+        expression = expression[1..expression.len() - 1].trim();
+    }
+    expression
+}
+
+fn graph_sample_helper(kind: usize, max_textures: usize) -> String {
+    let (name, params, sample) = match kind {
+        1 => (
+            "pulsar_graph_sample",
+            "slot: u32, uv: vec2<f32>",
+            "textureSampleGrad(TEXTURE, SAMPLER, uv, dx, dy)",
+        ),
+        2 => (
+            "pulsar_graph_sample_level",
+            "slot: u32, uv: vec2<f32>, level: f32",
+            "textureSampleLevel(TEXTURE, SAMPLER, uv, level)",
+        ),
+        _ => (
+            "pulsar_graph_sample_grad",
+            "slot: u32, uv: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>",
+            "textureSampleGrad(TEXTURE, SAMPLER, uv, dx, dy)",
+        ),
+    };
+    let mut helper = format!("fn {name}({params}) -> vec4<f32> {{\n");
+    if kind == 1 {
+        helper.push_str("    let dx = dpdx(uv);\n    let dy = dpdy(uv);\n");
+    }
+    helper.push_str("    switch slot {\n");
+    for index in 0..max_textures {
+        helper.push_str(&format!(
+            "        case {index}u: {{ return {}; }}\n",
+            sample
+                .replace("TEXTURE", &format!("scene_texture_{index}"))
+                .replace("SAMPLER", &format!("scene_sampler_{index}"))
+        ));
+    }
+    helper.push_str("        default: { return vec4<f32>(1.0); }\n    }\n}\n");
+    helper
 }
 
 /// Replace the decal pass's scene binding arrays with baseline-WebGPU bindings.
@@ -158,6 +340,30 @@ fn sample_texture(slot: MaterialTextureSlot, uv: vec2<f32>, fallback: vec4<f32>)
         assert!(fixed.contains("@binding(5) var scene_sampler_1"));
         assert!(fixed.contains("case 1u:"));
         assert!(fixed.contains("textureSampleLevel"));
+    }
+
+    #[test]
+    fn lowers_graph_material_indices_for_expanded_bindings() {
+        let source = r#"
+@group(1) @binding(2) var scene_textures: binding_array<texture_2d<f32>, 2>;
+@group(1) @binding(3) var scene_samplers: binding_array<sampler, 2>;
+fn graph(material: GpuMaterial, uv: vec2<f32>) -> vec4<f32> {
+    let a = textureSample((scene_textures[material.tex_base_color]), scene_samplers[material.tex_base_color], uv);
+    let b = textureSampleLevel(scene_textures[material.tex_normal], scene_samplers[material.tex_normal], uv, 2.0);
+    let c = textureSampleGrad(scene_textures[material.tex_roughness], scene_samplers[material.tex_roughness], uv, vec2<f32>(1.0), vec2<f32>(1.0));
+    return a + b + c;
+}
+"#;
+        let fixed = apply_webgpu_material_bindings(source, 2);
+
+        assert!(!fixed.contains("binding_array"));
+        assert!(!fixed.contains("scene_textures[material."));
+        assert!(!fixed.contains("scene_samplers[material."));
+        assert!(fixed.contains("pulsar_graph_sample(material.tex_base_color, uv)"));
+        assert!(fixed.contains("let dx = dpdx(uv);"));
+        assert!(fixed.contains("textureSampleGrad(scene_texture_0, scene_sampler_0, uv, dx, dy)"));
+        assert!(fixed.contains("pulsar_graph_sample_level(material.tex_normal, uv, 2.0)"));
+        assert!(fixed.contains("pulsar_graph_sample_grad(material.tex_roughness, uv, vec2<f32>(1.0), vec2<f32>(1.0))"));
     }
 
     #[test]

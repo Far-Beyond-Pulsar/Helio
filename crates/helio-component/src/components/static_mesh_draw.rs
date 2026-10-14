@@ -25,7 +25,7 @@ use pulsar_scenedb::gpu::GpuMirrorHandle;
 use pulsar_scenedb_derive::SceneStore;
 
 use super::{StaticMeshComponent, StaticMeshMaterialSlot};
-use crate::material_assets::{resolve_material, slot_material_id, LoadedMaterial};
+use crate::material_assets::{LoadedMaterial, resolve_material, slot_material_id};
 use crate::mesh_cache::{ImportedSurfaceMaterial, MeshSection};
 
 /// Pool of every instance's [`MeshSectionDraw`]s; its handle table is
@@ -151,14 +151,13 @@ pulsar_scenedb::pulsar_reflection::inventory::submit! {
     }
 }
 
-/// A surface as a material row: the scalar PBR values, no textures.
+/// A surface as a material row: scalar PBR values plus any graph texture slots.
 /// `alpha < 1` selects the blended, transparent-only path (glass).
 fn surface_material(
     surface: &ImportedSurfaceMaterial,
     graph_texture_slots: [u32; 5],
 ) -> helio::GpuMaterial {
     let alpha = surface.alpha.clamp(0.0, 1.0);
-    let missing = helio::GpuMaterial::NO_TEXTURE;
     let mut flags = 0;
     if alpha < 1.0 {
         flags |= helio_mats::FLAG_ALPHA_BLEND | helio_mats::FLAG_TRANSPARENT_ONLY;

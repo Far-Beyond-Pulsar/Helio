@@ -3,16 +3,17 @@
 //! placed by the graph's environment join with the owner's transform; camera
 //! settings reuse PostProcessSettingsProps.
 
-use engine_class_derive::{engine_class, register_world_component};
-use helio_pass_postprocess::{HdrOutputMode as HelioHdrOutputMode, TonemapOperator as HelioTonemapOperator};
 use super::lens_flare_props::LensFlareProps;
+use engine_class_derive::{engine_class, register_world_component};
 use helio_pass_postprocess::{
     ExposureMode as HelioExposureMode, FogMode as HelioFogMode, PostProcessSettings,
     PostProcessVolumeDescriptor,
 };
+use helio_pass_postprocess::{
+    HdrOutputMode as HelioHdrOutputMode, TonemapOperator as HelioTonemapOperator,
+};
 use pulsar_reflection::Reflectable;
 use serde::{Deserialize, Serialize};
-
 
 pub const POST_PROCESS_VOLUME_CLASS_NAME: &str = "PostProcessVolumeComponent";
 
@@ -126,7 +127,6 @@ pub struct PostProcessVolumeComponent {
     #[sub_props]
     #[serde(flatten)]
     pub settings: PostProcessSettingsProps,
-
 }
 
 impl Default for PostProcessVolumeComponent {
@@ -207,59 +207,165 @@ impl PostProcessOverrides {
     pub fn mask(&self) -> [u32; 4] {
         use helio_pass_postprocess::PostProcessProperty as P;
         let groups: [(bool, &[usize]); 12] = [
-            (self.override_exposure, &[
-                P::EXPOSURE_MODE, P::EXPOSURE_COMPENSATION, P::EXPOSURE_MIN, P::EXPOSURE_MAX,
-                P::EXPOSURE_SPEED_UP, P::EXPOSURE_SPEED_DOWN, P::BLEND_WEIGHT_EXPOSURE,
-            ]),
-            (self.override_bloom, &[
-                P::BLOOM_INTENSITY, P::BLOOM_THRESHOLD, P::BLOOM_KNEE, P::BLOOM_RADIUS,
-                P::BLOOM_TINT, P::BLOOM_ENABLED, P::BLEND_WEIGHT_BLOOM,
-            ]),
-            (self.override_color_grading, &[
-                P::COLOR_SATURATION, P::COLOR_CONTRAST, P::COLOR_GAMMA, P::COLOR_GAIN,
-                P::COLOR_OFFSET, P::WHITE_TEMP, P::WHITE_TINT, P::WHITE_BALANCE_ENABLED,
-                P::LIFT_COLOR, P::GAMMA_COLOR, P::GAIN_COLOR, P::SHADOWS_MAX,
-                P::HIGHLIGHTS_MIN, P::SHADOW_HIGHLIGHT_BALANCE, P::HUE_SHIFT,
-                P::LUT_GENERATION, P::LUT_INTENSITY, P::LUT_PLATFORM,
-            ]),
-            (self.override_tonemap, &[P::TONEMAP_OPERATOR, P::TONEMAP_EXPOSURE, P::TONEMAP_WHITE_POINT]),
-            (self.override_vignette, &[
-                P::VIGNETTE_INTENSITY, P::VIGNETTE_SMOOTHNESS, P::VIGNETTE_ROUNDNESS,
-                P::VIGNETTE_COLOR, P::VIGNETTE_ENABLED, P::BLEND_WEIGHT_VIGNETTE,
-            ]),
-            (self.override_chromatic_aberration, &[
-                P::CA_INTENSITY, P::CA_START_OFFSET, P::CA_ENABLED, P::BLEND_WEIGHT_CA,
-            ]),
-            (self.override_film_grain, &[
-                P::GRAIN_INTENSITY, P::GRAIN_RESPONSE, P::GRAIN_SIZE, P::GRAIN_ENABLED,
-                P::BLEND_WEIGHT_GRAIN,
-            ]),
-            (self.override_depth_of_field, &[
-                P::DOF_FOCAL_DISTANCE, P::DOF_FOCAL_REGION, P::DOF_APERTURE_SHAPE,
-                P::DOF_APERTURE_ROTATION, P::DOF_NEAR_TRANSITION, P::DOF_FAR_TRANSITION,
-                P::DOF_MAX_BOKEH_SIZE, P::DOF_SENSOR_DIAGONAL, P::BLEND_WEIGHT_DOF,
-            ]),
-            (self.override_motion_blur, &[
-                P::MOTION_BLUR_AMOUNT, P::MOTION_BLUR_MAX, P::MOTION_BLUR_ENABLED,
-                P::BLEND_WEIGHT_MOTION_BLUR,
-            ]),
-            (self.override_hdr_output, &[P::HDR_OUTPUT_MODE, P::HDR_MAX_NITS, P::HDR_UI_BRIGHTNESS]),
-            (self.override_volumetric_fog, &[
-                P::FOG_ENABLED, P::FOG_MODE, P::FOG_DENSITY, P::FOG_HEIGHT_FALLOFF,
-                P::FOG_START_DISTANCE, P::FOG_MAX_DISTANCE, P::FOG_HEIGHT,
-                P::FOG_SCATTERING_ANISOTROPY, P::FOG_COLOR, P::FOG_EMISSIVE,
-            ]),
-            (self.override_lens_flare, &[
-                P::LENS_ENABLED, P::LENS_QUALITY, P::LENS_PROFILE, P::LENS_GHOST_COUNT,
-                P::LENS_INTENSITY, P::LENS_THRESHOLD, P::LENS_SOFT_KNEE, P::LENS_GHOST_INTENSITY,
-                P::LENS_HALO_INTENSITY, P::LENS_GLARE_INTENSITY, P::LENS_STREAK_INTENSITY,
-                P::LENS_DISPERSION, P::LENS_APERTURE_F_NUMBER, P::LENS_FOCAL_LENGTH_MM,
-                P::LENS_SENSOR_WIDTH_MM, P::LENS_VIGNETTE, P::LENS_STARBURST_INTENSITY,
-                P::LENS_STARBURST_LENGTH, P::LENS_APERTURE_BLADES, P::LENS_APERTURE_ROTATION,
-                P::LENS_COATING_STRENGTH, P::LENS_GHOST_RIM, P::LENS_DIRT_INTENSITY,
-                P::LENS_LIGHT_SOURCES, P::LENS_LIGHT_INTENSITY, P::LENS_FIELD_MARGIN,
-                P::LENS_RESPONSE_TIME,
-            ]),
+            (
+                self.override_exposure,
+                &[
+                    P::EXPOSURE_MODE,
+                    P::EXPOSURE_COMPENSATION,
+                    P::EXPOSURE_MIN,
+                    P::EXPOSURE_MAX,
+                    P::EXPOSURE_SPEED_UP,
+                    P::EXPOSURE_SPEED_DOWN,
+                    P::BLEND_WEIGHT_EXPOSURE,
+                ],
+            ),
+            (
+                self.override_bloom,
+                &[
+                    P::BLOOM_INTENSITY,
+                    P::BLOOM_THRESHOLD,
+                    P::BLOOM_KNEE,
+                    P::BLOOM_RADIUS,
+                    P::BLOOM_TINT,
+                    P::BLOOM_ENABLED,
+                    P::BLEND_WEIGHT_BLOOM,
+                ],
+            ),
+            (
+                self.override_color_grading,
+                &[
+                    P::COLOR_SATURATION,
+                    P::COLOR_CONTRAST,
+                    P::COLOR_GAMMA,
+                    P::COLOR_GAIN,
+                    P::COLOR_OFFSET,
+                    P::WHITE_TEMP,
+                    P::WHITE_TINT,
+                    P::WHITE_BALANCE_ENABLED,
+                    P::LIFT_COLOR,
+                    P::GAMMA_COLOR,
+                    P::GAIN_COLOR,
+                    P::SHADOWS_MAX,
+                    P::HIGHLIGHTS_MIN,
+                    P::SHADOW_HIGHLIGHT_BALANCE,
+                    P::HUE_SHIFT,
+                    P::LUT_GENERATION,
+                    P::LUT_INTENSITY,
+                    P::LUT_PLATFORM,
+                ],
+            ),
+            (
+                self.override_tonemap,
+                &[
+                    P::TONEMAP_OPERATOR,
+                    P::TONEMAP_EXPOSURE,
+                    P::TONEMAP_WHITE_POINT,
+                ],
+            ),
+            (
+                self.override_vignette,
+                &[
+                    P::VIGNETTE_INTENSITY,
+                    P::VIGNETTE_SMOOTHNESS,
+                    P::VIGNETTE_ROUNDNESS,
+                    P::VIGNETTE_COLOR,
+                    P::VIGNETTE_ENABLED,
+                    P::BLEND_WEIGHT_VIGNETTE,
+                ],
+            ),
+            (
+                self.override_chromatic_aberration,
+                &[
+                    P::CA_INTENSITY,
+                    P::CA_START_OFFSET,
+                    P::CA_ENABLED,
+                    P::BLEND_WEIGHT_CA,
+                ],
+            ),
+            (
+                self.override_film_grain,
+                &[
+                    P::GRAIN_INTENSITY,
+                    P::GRAIN_RESPONSE,
+                    P::GRAIN_SIZE,
+                    P::GRAIN_ENABLED,
+                    P::BLEND_WEIGHT_GRAIN,
+                ],
+            ),
+            (
+                self.override_depth_of_field,
+                &[
+                    P::DOF_FOCAL_DISTANCE,
+                    P::DOF_FOCAL_REGION,
+                    P::DOF_APERTURE_SHAPE,
+                    P::DOF_APERTURE_ROTATION,
+                    P::DOF_NEAR_TRANSITION,
+                    P::DOF_FAR_TRANSITION,
+                    P::DOF_MAX_BOKEH_SIZE,
+                    P::DOF_SENSOR_DIAGONAL,
+                    P::BLEND_WEIGHT_DOF,
+                ],
+            ),
+            (
+                self.override_motion_blur,
+                &[
+                    P::MOTION_BLUR_AMOUNT,
+                    P::MOTION_BLUR_MAX,
+                    P::MOTION_BLUR_ENABLED,
+                    P::BLEND_WEIGHT_MOTION_BLUR,
+                ],
+            ),
+            (
+                self.override_hdr_output,
+                &[P::HDR_OUTPUT_MODE, P::HDR_MAX_NITS, P::HDR_UI_BRIGHTNESS],
+            ),
+            (
+                self.override_volumetric_fog,
+                &[
+                    P::FOG_ENABLED,
+                    P::FOG_MODE,
+                    P::FOG_DENSITY,
+                    P::FOG_HEIGHT_FALLOFF,
+                    P::FOG_START_DISTANCE,
+                    P::FOG_MAX_DISTANCE,
+                    P::FOG_HEIGHT,
+                    P::FOG_SCATTERING_ANISOTROPY,
+                    P::FOG_COLOR,
+                    P::FOG_EMISSIVE,
+                ],
+            ),
+            (
+                self.override_lens_flare,
+                &[
+                    P::LENS_ENABLED,
+                    P::LENS_QUALITY,
+                    P::LENS_PROFILE,
+                    P::LENS_GHOST_COUNT,
+                    P::LENS_INTENSITY,
+                    P::LENS_THRESHOLD,
+                    P::LENS_SOFT_KNEE,
+                    P::LENS_GHOST_INTENSITY,
+                    P::LENS_HALO_INTENSITY,
+                    P::LENS_GLARE_INTENSITY,
+                    P::LENS_STREAK_INTENSITY,
+                    P::LENS_DISPERSION,
+                    P::LENS_APERTURE_F_NUMBER,
+                    P::LENS_FOCAL_LENGTH_MM,
+                    P::LENS_SENSOR_WIDTH_MM,
+                    P::LENS_VIGNETTE,
+                    P::LENS_STARBURST_INTENSITY,
+                    P::LENS_STARBURST_LENGTH,
+                    P::LENS_APERTURE_BLADES,
+                    P::LENS_APERTURE_ROTATION,
+                    P::LENS_COATING_STRENGTH,
+                    P::LENS_GHOST_RIM,
+                    P::LENS_DIRT_INTENSITY,
+                    P::LENS_LIGHT_SOURCES,
+                    P::LENS_LIGHT_INTENSITY,
+                    P::LENS_FIELD_MARGIN,
+                    P::LENS_RESPONSE_TIME,
+                ],
+            ),
         ];
         let mut mask = P::NONE;
         for (enabled, properties) in groups {

@@ -102,5 +102,4 @@ impl WindFoliageProps {
             self.turbulence_scale = v as f32;
         }
     }
-
 }

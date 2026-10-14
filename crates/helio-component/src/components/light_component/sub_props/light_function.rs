@@ -52,5 +52,4 @@ impl LightFunctionProps {
             self.light_function_disabled_brightness = v as f32;
         }
     }
-
 }

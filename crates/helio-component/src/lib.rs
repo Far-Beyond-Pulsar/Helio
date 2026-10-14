@@ -9,11 +9,11 @@ pub mod graph_preview;
 pub mod material_assets;
 pub mod material_graph;
 pub mod material_textures;
-pub mod texture_assets;
 pub mod mesh_cache;
 pub mod mesh_thumbnail;
 mod motion_gate;
 mod static_move_watch;
+pub mod texture_assets;
 pub use static_move_watch::StaticMoveWatch;
 pub mod subsystems;
 

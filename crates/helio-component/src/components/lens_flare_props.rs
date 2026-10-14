@@ -4,9 +4,9 @@
 //! baseline and PP volumes), never on lights. Every bright thing in frame
 //! produces a response in proportion to its scene-linear radiance.
 use engine_class_derive::engine_class;
+use helio_pass_postprocess::LensFlareSettings;
 use pulsar_reflection::Reflectable;
 use serde::{Deserialize, Serialize};
-use helio_pass_postprocess::LensFlareSettings;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Reflectable)]
 pub enum LensQuality {
@@ -116,8 +116,16 @@ impl Default for LensFlareProps {
         let value = LensFlareSettings::default();
         Self {
             enabled: value.enabled,
-            quality: if value.quality == 1 { LensQuality::High } else { LensQuality::Economical },
-            profile: if value.profile == 1 { LensProfile::Anamorphic } else { LensProfile::Spherical },
+            quality: if value.quality == 1 {
+                LensQuality::High
+            } else {
+                LensQuality::Economical
+            },
+            profile: if value.profile == 1 {
+                LensProfile::Anamorphic
+            } else {
+                LensProfile::Spherical
+            },
             ghost_count: value.ghost_count,
             intensity: value.intensity,
             threshold: value.threshold,

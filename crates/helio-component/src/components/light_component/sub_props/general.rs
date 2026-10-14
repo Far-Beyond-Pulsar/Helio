@@ -1,7 +1,7 @@
 use engine_class_derive::engine_class;
 use serde_json::Value;
 
-use super::super::{light_type_to_gpu_u32, LightType};
+use super::super::{LightType, light_type_to_gpu_u32};
 use crate::components::ObjectMovability;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]

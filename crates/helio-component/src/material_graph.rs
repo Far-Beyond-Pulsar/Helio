@@ -63,7 +63,9 @@ pub fn compile_material_graph(
     }
     for asset in &assets {
         if !texture_bindings.contains_key(asset) {
-            return Err(format!("Texture asset '{asset}' has no material texture binding"));
+            return Err(format!(
+                "Texture asset '{asset}' has no material texture binding"
+            ));
         }
     }
     let mut graph = graph.clone();
@@ -131,7 +133,10 @@ fn adapt_graph_wgsl(generated: &str) -> Result<String, String> {
         .map(|offset| entry + offset)
         .ok_or_else(|| "malformed PSGC fragment entry point".to_string())?;
     let replacement = "fn pulsar_material_graph(material: GpuMaterial, input: VertexOutput) -> PulsarGraphOutput {\n    let frag_coord = input.clip_position;\n    let uv = input.tex_coords;\n    let normal = input.world_normal;\n    let world_pos = input.world_position;";
-    source = source.replace("pulsar_material_graph(input)", "pulsar_material_graph(material, input)");
+    source = source.replace(
+        "pulsar_material_graph(input)",
+        "pulsar_material_graph(material, input)",
+    );
     source.replace_range(entry..=open, replacement);
 
     let body = r#"let graph_surface = pulsar_material_graph(material, input);

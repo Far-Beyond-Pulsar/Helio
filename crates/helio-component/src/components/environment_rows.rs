@@ -32,8 +32,9 @@ use pulsar_scenedb::gpu::GpuMirrorHandle;
 use pulsar_scenedb_derive::SceneStore;
 
 use super::{
-    AtmosphereComponent, CameraPostProcessComponent, DecalComponent, FoliageComponent, GlobalFogComponent, LocalFogVolumeComponent,
-    ParticleEmitterComponent, PostProcessVolumeComponent, SpriteComponent, WaterVolumeComponent, WindComponent,
+    AtmosphereComponent, CameraPostProcessComponent, DecalComponent, FoliageComponent,
+    GlobalFogComponent, LocalFogVolumeComponent, ParticleEmitterComponent,
+    PostProcessVolumeComponent, SpriteComponent, WaterVolumeComponent, WindComponent,
 };
 
 pub const GLOBAL_FOG_SOURCES_BUFFER: &str = "global_fog_sources";
@@ -697,8 +698,15 @@ mod tests {
             bytemuck::bytes_of(&row),
             bytemuck::bytes_of(&atmosphere.to_row())
         );
-        assert_eq!(&row.center[..3], &[0.0; 3], "the join adds the owner's position");
-        assert_eq!(row.center[3].to_bits(), helio_pass_sky::atmosphere::placement::CENTER);
+        assert_eq!(
+            &row.center[..3],
+            &[0.0; 3],
+            "the join adds the owner's position"
+        );
+        assert_eq!(
+            row.center[3].to_bits(),
+            helio_pass_sky::atmosphere::placement::CENTER
+        );
     }
 
     #[test]

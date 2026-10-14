@@ -18,8 +18,10 @@
 
 use helio::PackedVertex;
 use helio_component::components::{MeshAssetPath, MeshGeometryKey, StaticMeshComponent};
-use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, RegionClassConfig, SceneGpuConfig, SceneGpuStore};
 use pulsar_scenedb::World;
+use pulsar_scenedb::gpu::{
+    EngineGpuContext, GpuMirrorHandle, RegionClassConfig, SceneGpuConfig, SceneGpuStore,
+};
 use std::sync::{Arc, Once};
 use std::time::Instant;
 
@@ -55,41 +57,81 @@ fn project_root() -> std::path::PathBuf {
 fn bm3_bulk_hydrate_10k_entities_one_shared_asset() {
     let root = project_root();
     let mesh = helio::MeshUpload {
-        vertices: vec![PackedVertex { position: [1.0, 2.0, 3.0], ..Default::default() }; 24],
+        vertices: vec![
+            PackedVertex {
+                position: [1.0, 2.0, 3.0],
+                ..Default::default()
+            };
+            24
+        ],
         indices: (0..36u32).collect(),
     };
     let id = helio_component::mesh_cache::content_id_for_bytes(&mesh);
-    std::fs::write(root.join("bm3_asset.mesh"), helio_component::mesh_cache::encode(&mesh, id)).unwrap();
+    std::fs::write(
+        root.join("bm3_asset.mesh"),
+        helio_component::mesh_cache::encode(&mesh, id),
+    )
+    .unwrap();
 
     let ctx = test_context();
     let mut store = SceneGpuStore::new(
         &ctx,
-        SceneGpuConfig { classes: vec![RegionClassConfig { capacity: 64, max_resident_cells: 1 }], tombstone_headroom: 8, max_cells_metadata: 16 },
+        SceneGpuConfig {
+            classes: vec![RegionClassConfig {
+                capacity: 64,
+                max_resident_cells: 1,
+            }],
+            tombstone_headroom: 8,
+            max_cells_metadata: 16,
+        },
     );
     StaticMeshComponent::register_gpu_columns_growable(&mut store, 16_384, ctx.device());
     let store = Arc::new(store);
     let mut world = World::new();
-    world.attach_gpu_mirror(GpuMirrorHandle::new(Arc::clone(&store), Arc::clone(ctx.queue())));
+    world.attach_gpu_mirror(GpuMirrorHandle::new(
+        Arc::clone(&store),
+        Arc::clone(ctx.queue()),
+    ));
 
     const N: usize = 10_000;
     let start = Instant::now();
     for _ in 0..N {
         let e = world.spawn();
-        let upload = helio_component::subsystems::load_mesh_upload(&root.join("bm3_asset.mesh")).expect("load bench mesh");
+        let upload = helio_component::subsystems::load_mesh_upload(&root.join("bm3_asset.mesh"))
+            .expect("load bench mesh");
         world.insert(
             e,
-            StaticMeshComponent { mesh_asset: MeshAssetPath::new("bm3_asset.mesh"), geometry_key: MeshGeometryKey::for_path(&MeshAssetPath::new("bm3_asset.mesh")), vertices: upload.vertices, indices: upload.indices, bounds_local: [0.0, 0.0, 0.0, 0.5], ..Default::default() },
+            StaticMeshComponent {
+                mesh_asset: MeshAssetPath::new("bm3_asset.mesh"),
+                geometry_key: MeshGeometryKey::for_path(&MeshAssetPath::new("bm3_asset.mesh")),
+                vertices: upload.vertices,
+                indices: upload.indices,
+                bounds_local: [0.0, 0.0, 0.0, 0.5],
+                ..Default::default()
+            },
         );
     }
     let elapsed = start.elapsed();
-    eprintln!("BM3: hydrated+inserted {N} entities sharing 1 asset in {elapsed:?} ({:.1} us/entity)", elapsed.as_micros() as f64 / N as f64);
+    eprintln!(
+        "BM3: hydrated+inserted {N} entities sharing 1 asset in {elapsed:?} ({:.1} us/entity)",
+        elapsed.as_micros() as f64 / N as f64
+    );
 
     let vpool = store
-        .interned_var_len_pool::<PackedVertex>(pulsar_scenedb::gpu::BufferKey::of("builtin_mesh_vertex"))
+        .interned_var_len_pool::<PackedVertex>(pulsar_scenedb::gpu::BufferKey::of(
+            "builtin_mesh_vertex",
+        ))
         .unwrap();
     let audit = vpool.audit();
-    assert_eq!(audit.len(), 1, "10k entities sharing one asset must collapse to exactly 1 interned GPU allocation");
-    assert_eq!(audit[0].1, N as u64, "refcount must equal every entity that referenced it");
+    assert_eq!(
+        audit.len(),
+        1,
+        "10k entities sharing one asset must collapse to exactly 1 interned GPU allocation"
+    );
+    assert_eq!(
+        audit[0].1, N as u64,
+        "refcount must equal every entity that referenced it"
+    );
 }
 
 /// BM4: memoized content-id lookup vs. a cold hash. The FIRST

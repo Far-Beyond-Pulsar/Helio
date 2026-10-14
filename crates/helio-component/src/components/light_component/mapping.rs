@@ -49,8 +49,13 @@ impl super::LightComponentGpuMirror {
             shadow_index: self.shadows.cast_shadows.0,
             light_type: self.general.light_type.0,
             inner_angle: self.attenuation.inner_cone_angle.0,
-            _pad: GpuLight::shadow_policy_bits(self.shadows.shadow_priority.0, self.shadows.shadow_max_resolution.0,
-                self.shadows.cast_static_shadows.0 != 0, self.shadows.cast_dynamic_shadows.0 != 0, self.shadows.cast_contact_shadows.0 != 0),
+            _pad: GpuLight::shadow_policy_bits(
+                self.shadows.shadow_priority.0,
+                self.shadows.shadow_max_resolution.0,
+                self.shadows.cast_static_shadows.0 != 0,
+                self.shadows.cast_dynamic_shadows.0 != 0,
+                self.shadows.cast_contact_shadows.0 != 0,
+            ),
             god_rays_enabled: self.volumetrics.affects_volumetric_fog.0,
             // Density belongs to the medium. Preserve the legacy inscattering
             // gain by multiplying it into the new per-light scattering gain.
@@ -67,7 +72,11 @@ impl super::LightComponentGpuMirror {
 }
 
 fn nonnegative(value: f32) -> f32 {
-    if value.is_finite() { value.max(0.0) } else { 0.0 }
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Point/spot shaders consume candela; directional shaders consume lux.
@@ -80,8 +89,7 @@ fn nonnegative(value: f32) -> f32 {
 /// distance/emitter area would be needed to convert those physically.
 fn physical_intensity(value: f32, units: u32, kind: u32, outer_cos: f32) -> f32 {
     let value = nonnegative(value);
-    if units != super::IntensityUnits::Lumens as u32
-        || kind == helio::LightType::Directional as u32
+    if units != super::IntensityUnits::Lumens as u32 || kind == helio::LightType::Directional as u32
     {
         return value;
     }
@@ -110,13 +118,12 @@ impl LightComponent {
         }
         light
     }
-
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::LightType;
+    use super::*;
     use helio::LightType as HelioLightType;
     use pulsar_world_registry::GpuMirrored;
 
@@ -144,7 +151,11 @@ mod tests {
 
         light.intensity.intensity_units = super::super::IntensityUnits::Candelas;
         let gpu = light.to_gpu_mirror().to_helio_gpu_light();
-        assert_eq!(gpu.color_intensity, [0.25, 0.5, 0.75, 42.0], "candela pass through");
+        assert_eq!(
+            gpu.color_intensity,
+            [0.25, 0.5, 0.75, 42.0],
+            "candela pass through"
+        );
     }
 
     #[test]
