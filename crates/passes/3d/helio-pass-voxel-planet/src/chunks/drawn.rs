@@ -342,6 +342,13 @@ impl DrawnSet {
         self.tiles.contains_key(&tile)
     }
 
+    /// `tile`'s drawn state (diagnostics): drawn, its column's state (1
+    /// drawn, 0 an ancestor, else fading) and its fade (start, incoming,
+    /// coarse side).
+    pub fn describe(&self, tile: TileKey) -> (bool, Option<i32>, Option<(u64, bool, bool)>) {
+        (self.tiles.contains_key(&tile), self.columns.get(&tile).map(|c| c.state), self.fades.get(&tile).map(|f| (f.start, f.incoming, f.coarse)))
+    }
+
     /// Tiles drawn.
     pub fn tile_count(&self) -> usize {
         self.tiles.len()

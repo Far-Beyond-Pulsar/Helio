@@ -883,6 +883,13 @@ fn across_edge(face: i32, cell: vec3<i32>, frac: vec3<f32>, n: i32) -> Across {
     return out;
 }
 
+// No place for a ray at a cell: off the drawn cut, for reason `site` (counted
+// by reason in counting builds, `TraceCounts::lost_sites`).
+fn lost_at(site: u32) -> Place {
+    LOST_SITE
+    return Place(NONE, LOST, vec3<i32>(0), vec3<i32>(0), NONE);
+}
+
 // The place at cell `cell` of `level` (at `frac` within it) on `face`, for
 // a pixel of dither `r`: the tile it shows over the column (this level's,
 // else a coarser one where this level shows none, else a finer one under
@@ -897,7 +904,6 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
         let v = chunk_table[same * 2u + 1u];
         if choice(v.y, r) == 1 { return Place(bitcast<u32>(v.x), level, vec3<i32>(0), vec3<i32>(0), NONE); }
     }
-    let lost = Place(NONE, LOST, vec3<i32>(0), vec3<i32>(0), NONE);
     var diff = 0;
     var way = 0;
     var turned = false;
@@ -930,23 +936,23 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
                 // Down through undrawn ancestors only, to the fine side of a
                 // switch that shows coarser: the tile shown is over where
                 // the search began (a tile refined, then coarsened past).
-                if turned || !through_ancestors { return lost; }
+                if turned || !through_ancestors { return lost_at(0u); }
                 turned = true;
                 diff = 0;
             }
-            if level + diff >= 30 { return lost; }
+            if level + diff >= 30 { LOST_WHERE return lost_at(1u); }
             way = 1;
             diff += 1;
         } else {
             // As deep as the tile shown (old fine tiles under an eye that
             // jumped up, a switch across many levels).
-            if way > 0 || level + diff <= 0 { return lost; }
+            if way > 0 || level + diff <= 0 { return lost_at(2u); }
             through_ancestors = through_ancestors && column.w == 0;
             way = -1;
             diff -= 1;
         }
     }
-    if !shown { return lost; }
+    if !shown { return lost_at(3u); }
     let c = cell_at(cell, frac, diff);
     let tile = c.xy >> vec2<u32>(6u);
     let layer = c.z >> 6u;
@@ -969,7 +975,7 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
         // chunk (in coarser cells the top would round; more than six levels
         // finer, a tile is under one of them: without a frame, lost).
         let f = frame_of(up < 0 || crossed, vec4<i32>(tile_key, tile, (column.z - 1) >> 6u));
-        if (crossed || up < -6) && f == NONE && !exact_level(level + up) { return lost; }
+        if (crossed || up < -6) && f == NONE && !exact_level(level + up) { return lost_at(4u); }
         return Place(NONE, level + up, vec3<i32>(at * 64, top), vec3<i32>(at * 64 + 64, top + (1 << 20)), f);
     }
     if layer < column.x {
@@ -977,7 +983,7 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
         // rock, reached through a cave mouth among them.
         if gap_of(tile_key, tile).z == 0 { return Place(NONE, BELOW, vec3<i32>(tile, level + diff), vec3<i32>(face, 0, 0), NONE); }
         let f = frame_of(diff < 0 || crossed, vec4<i32>(tile_key, tile, column.x));
-        if (crossed || diff < -6) && f == NONE && !exact_level(level + diff) { return lost; }
+        if (crossed || diff < -6) && f == NONE && !exact_level(level + diff) { return lost_at(5u); }
         return Place(NONE, level + diff, vec3<i32>(tile * 64, column.x * 64 - (1 << 20)), vec3<i32>(tile * 64 + 64, column.x * 64), f);
     }
     let s = find_entry(vec4<i32>(tile_key, tile, layer));
@@ -986,7 +992,7 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
     let g = gap_of(tile_key, tile);
     if layer >= g.x && layer < g.y { return Place(NONE, ROCK, vec3<i32>(0), vec3<i32>(0), NONE); }
     let f = frame_of(diff < 0 || crossed, vec4<i32>(tile_key, tile, column.x));
-    if (crossed || diff < -6) && f == NONE && !exact_level(level + diff) { return lost; }
+    if (crossed || diff < -6) && f == NONE && !exact_level(level + diff) { return lost_at(6u); }
     return Place(NONE, level + diff, vec3<i32>(tile * 64, layer * 64), vec3<i32>(tile * 64 + 64, layer * 64 + 64), f);
 }
 

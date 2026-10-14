@@ -835,7 +835,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
             flight.draw(eye, forward);
             frames += 1;
             if frames > 6000 {
-                eprintln!("CHUNKSTRESS {mode}: a view did not settle");
+                eprintln!("CHUNKSTRESS {mode}: a view did not settle: {:?}", flight.renderer.find_pass::<ChunkPass>().map(ChunkPass::stats));
                 break;
             }
         }
@@ -847,6 +847,10 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let (eye, forward) = path(0.0);
     eprintln!("CHUNKSTRESS {mode}: loaded in {:.2} s", settle(flight, eye, forward));
     flight.renderer.find_pass_mut::<ChunkPass>().unwrap().take_timings();
+    // Counting builds: the flight's rays only, not the load's.
+    if let Some(world) = flight.renderer.find_pass::<ChunkPass>().and_then(ChunkPass::world) {
+        world.take_counts();
+    }
     let mut csv = String::from("t,altitude_m,interval_ms,captured,coarse,worst_px,switches,switch_px,waiting,generated,fading,update_cpu_ms,results_ms,plan_ms,evict_ms,generate_ms,drawn_ms,table_ms,record_ms,wait_ms,pass_prepare_ms,pass_execute_ms
 ");
     let (mut intervals, mut coarse, mut worst, mut switch_px) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -857,9 +861,13 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let mut last = started;
     let mut captured = false;
     let mut traced = false;
+    let mut lost_diagnosed = false;
     let mut dug = false;
     let mut next_dig = 1.0;
     let mut generated_tiles = 0usize;
+    // GPU generation by kernel: evictions and tile columns, chunk columns,
+    // chunk builds.
+    let mut stage_ms = [0.0f64; 3];
     loop {
         let t = started.elapsed().as_secs_f64();
         if t > seconds {
@@ -920,6 +928,9 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         for timing in pass.take_timings() {
             draw_ms.push(timing.draw);
             generate_ms.push(timing.generate);
+            for (total, ms) in stage_ms.iter_mut().zip(timing.stages) {
+                *total += ms;
+            }
         }
         generated_tiles += s.generated_tiles;
         csv += &format!("{t:.4},{altitude:.2},{interval:.2},{},{:.4},{:.3},{},{:.3},{},{},{},{:.2},{},{record_ms:.2},{wait_ms:.2},{:.2},{:.2}
@@ -938,9 +949,49 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
                 // `_DEBUG_PIXEL_AT=seconds` (1.0): when the pixel is traced.
                 let at: f64 = std::env::var("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
                 let trace = if t > at && !traced && std::env::var_os("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL").is_some() { world.pixel_trace() } else { Vec::new() };
+                let lost_where = world.lost_where();
                 let c = world.take_counts();
                 if c.missed + c.lost > 0 {
-                    eprintln!("CHUNKSTRESS {mode}: t {t:.3} s missed {} ({} boxes each) lost {} (last at {:?})", c.missed, c.missed_boxes / c.missed.max(1), c.lost, c.lost_pixel);
+                    eprintln!("CHUNKSTRESS {mode}: t {t:.3} s missed {} ({} boxes each) lost {} (last at {:?}, places lost by reason {:?})", c.missed, c.missed_boxes / c.missed.max(1), c.lost, c.lost_pixel, c.lost_sites);
+                }
+                // The first frame losing many rays: what is resident and
+                // drawn over the ground its last lost pixel looks at.
+                if c.lost > 20000 && !lost_diagnosed {
+                    lost_diagnosed = true;
+                    // Where the search began, and the tiles over it.
+                    let (face, level, cell) = lost_where;
+                    eprintln!("LOSTDIAG search from face {face} level {level} cell {cell:?}");
+                    for l in level..flight.planet.grid().levels() {
+                        let key = helio_pass_voxel_planet::chunks::TileKey { face, level: l, cx: (cell[0] >> (l - level)) >> 6, cy: (cell[1] >> (l - level)) >> 6 };
+                        eprintln!("LOSTDIAG   search level {l} tile {},{}: drawn set {:?}", key.cx, key.cy, world.describe_drawn(key));
+                    }
+                    let [w, h] = flight.size;
+                    let up = up_for(eye);
+                    let f = forward.normalize();
+                    let up = if f.dot(up).abs() > 0.999 { up.any_orthonormal_vector() } else { up };
+                    let right = f.cross(up).normalize();
+                    let cam_up = right.cross(f);
+                    let tan = (std::f32::consts::FRAC_PI_4 * 0.5).tan();
+                    let (px, py) = c.lost_pixel;
+                    let ndc = [(px as f32 + 0.5) / w as f32 * 2.0 - 1.0, 1.0 - (py as f32 + 0.5) / h as f32 * 2.0];
+                    let dir = (f + right * ndc[0] * tan * (w as f32 / h as f32) + cam_up * ndc[1] * tan).normalize().as_dvec3();
+                    match flight.planet.raycast(eye, dir, 6.0e6) {
+                        Some(hit) => {
+                            eprintln!("LOSTDIAG t {t:.3} altitude {altitude:.0} pixel {px},{py}: ground at {:.0} m, cell {:?}", hit.distance, hit.cell);
+                            for (key, cz, z, drawn) in world.chunks_over(hit.cell.face, hit.cell.i, hit.cell.j) {
+                                eprintln!("LOSTDIAG   level {} tile {},{} cz {cz} occupied {z:?} drawn {drawn}", key.level, key.cx, key.cy);
+                            }
+                            // The tiles over it at every level, in the drawn set.
+                            for level in 0..flight.planet.grid().levels() {
+                                let key = helio_pass_voxel_planet::chunks::TileKey { face: hit.cell.face, level, cx: (hit.cell.i >> level) >> 6, cy: (hit.cell.j >> level) >> 6 };
+                                let state = world.describe_drawn(key);
+                                if state != (false, None, None) {
+                                    eprintln!("LOSTDIAG   level {level}: drawn set {state:?}");
+                                }
+                            }
+                        }
+                        None => eprintln!("LOSTDIAG t {t:.3} pixel {px},{py}: the CPU ray meets no ground"),
+                    }
                 }
                 if !trace.is_empty() {
                     traced = true;
@@ -992,7 +1043,14 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     );
     // GPU generation per tile over the flight (its timings lag a few frames).
     let generation: f64 = generate_ms.iter().sum();
-    eprintln!("CHUNKSTRESS {mode}: generation {generation:.1} ms GPU for {generated_tiles} tiles, {:.1} us a tile", generation * 1e3 / generated_tiles.max(1) as f64);
+    let per_tile = |ms: f64| ms * 1e3 / generated_tiles.max(1) as f64;
+    eprintln!(
+        "CHUNKSTRESS {mode}: generation {generation:.1} ms GPU for {generated_tiles} tiles, {:.1} us a tile (tile columns {:.1}, chunk columns {:.1}, chunk builds {:.1})",
+        per_tile(generation),
+        per_tile(stage_ms[0]),
+        per_tile(stage_ms[1]),
+        per_tile(stage_ms[2])
+    );
     for (interval, t, altitude) in slow.iter().take(5) {
         eprintln!("CHUNKSTRESS {mode}: slow frame {interval:.1} ms at t {t:.2} s, altitude {altitude:.0} m");
     }

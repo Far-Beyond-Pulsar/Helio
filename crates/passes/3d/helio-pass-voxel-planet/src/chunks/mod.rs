@@ -465,6 +465,8 @@ pub struct TraceCounts {
     pub lost: u32,
     /// A lost ray's pixel, the last one (none: 0, 0 never written).
     pub lost_pixel: (u32, u32),
+    /// Places found lost (any walk, shadows' too), by `lost_at`'s reason.
+    pub lost_sites: [u32; 7],
 }
 
 /// A frame's GPU time (milliseconds).
@@ -967,6 +969,11 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
         .replace("WCOUNT(3)", &wcount(3))
         .replace("WCOUNT(8)", &wcount(8))
         .replace("WCOUNT(10)", &wcount(10))
+        // Lost places by reason (`lost_at`: counters 5, 6, 7, 11, 12, 13, 15).
+        .replace("LOST_SITE", if counting { "atomicAdd(&counters[array<u32, 7>(5u, 6u, 7u, 11u, 12u, 13u, 15u)[site]], 1u);" } else { "" })
+        // Where the last search past the top began: face | level << 8,
+        // cell (counters[200..204]).
+        .replace("LOST_WHERE", if counting { "atomicStore(&counters[200], u32(face | (level << 8u))); atomicStore(&counters[201], bitcast<u32>(cell.x)); atomicStore(&counters[202], bitcast<u32>(cell.y)); atomicStore(&counters[203], bitcast<u32>(cell.z));" } else { "" })
         // The last lost ray's pixel (counters[14]).
         .replace("LOST_PIXEL", if counting { "if counted { atomicStore(&counters[14], pixel.x | (pixel.y << 16u)); }" } else { "" })
         .replace("WCOUNT_BOXES", if counting { "if counted { atomicAdd(&counters[9], chunk); }" } else { "" })
@@ -2252,6 +2259,11 @@ impl ChunkWorld {
         out
     }
 
+    /// `tile`'s drawn state (diagnostics, `DrawnSet::describe`).
+    pub fn describe_drawn(&self, tile: TileKey) -> (bool, Option<i32>, Option<(u64, bool, bool)>) {
+        self.drawn_set.describe(tile)
+    }
+
     /// Whether to poll the device for readbacks (false on a host's
     /// shared device).
     pub fn set_polls_device(&mut self, polls: bool) {
@@ -2549,7 +2561,7 @@ impl ChunkWorld {
     pub fn take_counts(&self) -> TraceCounts {
         let words: Vec<[u32; 4]> = self.read(&self.counters, 4);
         self.queue.write_buffer(&self.counters, 0, &[0u8; 1024]);
-        TraceCounts { seeded: words[0][0], steps: words[0][1], hits: words[0][2], boxes: words[0][3], missed: words[2][0], missed_boxes: words[2][1], lost: words[2][2], lost_pixel: (words[3][2] & 0xffff, words[3][2] >> 16) }
+        TraceCounts { seeded: words[0][0], steps: words[0][1], hits: words[0][2], boxes: words[0][3], missed: words[2][0], missed_boxes: words[2][1], lost: words[2][2], lost_pixel: (words[3][2] & 0xffff, words[3][2] >> 16), lost_sites: [words[1][1], words[1][2], words[1][3], words[2][3], words[3][0], words[3][1], words[3][3]] }
     }
 
     /// The boxes the debug pixel's ray crossed (counting builds): the frame
@@ -2567,6 +2579,14 @@ impl ChunkWorld {
                 (slot, [w[1] as i32, w[2] as i32, w[3] as i32], w[4] & 1 != 0, w[4] >> 1, owner)
             })
             .collect()
+    }
+
+    /// Where the last search past the top began (counting builds): face,
+    /// level and cell. Read before `take_counts` (which clears it).
+    pub fn lost_where(&self) -> (u8, u32, [i32; 3]) {
+        let words: Vec<[u32; 4]> = self.read(&self.counters, 64);
+        let w = words[50];
+        ((w[0] & 0xff) as u8, w[0] >> 8, [w[1] as i32, w[2] as i32, w[3] as i32])
     }
 
     /// Per box of [`Self::pixel_trace`], its chunk walk when it is a chunk:
