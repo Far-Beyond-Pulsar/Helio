@@ -425,6 +425,11 @@ impl Curve<'_> {
         if time == self.times[n - 1] && self.interpolation == Interpolation::CubicSpline {
             return Some((self.key(n - 1).to_vec(), self.tangent(n - 1, true).to_vec()));
         }
+        // Linear and step curves at exactly the last key: no key lies after
+        // it to interpolate towards.
+        if time == self.times[n - 1] {
+            return Some((self.key(n - 1).to_vec(), vec![0.0; self.stride]));
+        }
         let next = self.times.partition_point(|t| *t <= time);
         let (a, b) = (next - 1, next);
         let span = (self.times[b] - self.times[a]).max(1e-9);
@@ -783,10 +788,16 @@ mod tests {
         assert_eq!(linear.sample(-1.0).unwrap(), vec![0.0; 3]);
         assert_eq!(linear.sample(0.5).unwrap(), vec![1.0, 2.0, 3.0]);
         assert_eq!(linear.sample(2.0).unwrap(), vec![2.0, 4.0, 6.0]);
+        assert_eq!(
+            linear.sample(1.0).unwrap(),
+            vec![2.0, 4.0, 6.0],
+            "exactly at the last key"
+        );
         let step = Curve {
             interpolation: Interpolation::Step,
             ..linear
         };
         assert_eq!(step.sample(0.9).unwrap(), vec![0.0; 3]);
+        assert_eq!(step.sample(1.0).unwrap(), vec![2.0, 4.0, 6.0]);
     }
 }
