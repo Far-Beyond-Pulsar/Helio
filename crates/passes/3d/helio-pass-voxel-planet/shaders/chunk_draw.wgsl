@@ -1627,15 +1627,17 @@ fn slope_normal(slot: u32, key: vec4<i32>, cell: vec3<i32>, c: ChunkDraw) -> vec
     return normalize(n);
 }
 
-// Hit `v` (pixels `pixel_m` wide there). Voxels are lit by their own faces
-// (a slope reads as its steps, each shadowing the next); a natural step (air
-// above it) is lit partly with the slope's normal, `Materials::detail.w`
-// (step softness), its sun ray passing its own steps. Not by the voxel's
-// size on screen while the cut holds it to a pixel or less (a size-dependent
-// light would band by level); a cell larger than its cut wants
-// (`under_refined`) is lit by the slope's normal, whatever its face.
-// The slope's normal is `ground` when given (a nearby sample's), else
-// measured here.
+// Hit `v` (pixels `pixel_m` wide there). Voxels a few pixels wide are lit
+// by their own faces (a slope reads as its steps, each shadowing the next);
+// a natural step (air above it) is lit partly with the slope's normal,
+// `Materials::detail.w` (step softness), its sun ray passing its own steps.
+// Voxels of a pixel or less are lit by the slope's normal, at every level:
+// the weight follows the voxel's size on screen, not the cell's, so it is
+// the same on both sides of a switch between levels, and a coarse level's
+// steps (each a cell tall, their shadows long under a low sun) never show
+// as stripes. A cell larger than its cut wants (`under_refined`) is lit by
+// the slope's normal too. The slope's normal is `ground` when given (a
+// nearby sample's), else measured here.
 fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, pixel_m: f32) -> Face {
     let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
     let c = cell_frame(v.x, cell);
@@ -1646,7 +1648,8 @@ fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, pixel_m: f32) -> Face {
     let normal = normalize(axis_world) * select(-1.0, 1.0, sign == 1u);
     let cell_m = length(axis_world);
     var f = Face(normal, cell_m, normal, 0.0, vec3<f32>(0.0));
-    let coarse = under_refined(key, length(c.m0.xyz) / max(pixel_m, 1e-6));
+    let small = 1.0 - smoothstep(1.0, 3.0, params.planet.y / max(pixel_m, 1e-6));
+    let coarse = max(under_refined(key, length(c.m0.xyz) / max(pixel_m, 1e-6)), small);
     let step = !solid_near(v.x, key, cell + vec3<i32>(0, 0, 1));
     if !step && coarse == 0.0 { return f; }
     let w = max(select(0.0, materials.detail.w, step), coarse);
@@ -1805,11 +1808,20 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
 }
 
 
+// Where a ray from hit face `f` along `dir` starts: past the cell steps
+// a slope-lit face stands among (`Face::skip`), until it has risen a cell
+// off the slope (12 cells at most: a grazing ray).
+fn skip_along(f: Face, dir: vec3<f32>) -> f32 {
+    if f.skip == 0.0 { return 0.0; }
+    let rise = dot(dir, f.ground);
+    return f.skip * f.cell * clamp(0.75 / max(rise, 1e-3), 1.0, 12.0);
+}
+
 // WALK {
 // Whether the hit at pixel `q` (distance `t`, face `f`) is in the sun.
 fn sun_walk(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face) -> f32 {
     let org = pixel_ray(q, size) * t + f.normal * (f.cell * 0.01);
-    let end = walk(Walk(slot, vec3<i32>(0), vec3<i32>(64), true), org, params.sun.xyz, f.skip * f.cell, 1e30, fade_dither(q), 96u, false, q);
+    let end = walk(Walk(slot, vec3<i32>(0), vec3<i32>(64), true), org, params.sun.xyz, skip_along(f, params.sun.xyz), 1e30, fade_dither(q), 96u, false, q);
     return select(1.0, 0.0, end.hit);
 }
 
@@ -1836,7 +1848,7 @@ fn sky_visibility(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32, f: Face) -> 
         if ceiling { dir = normalize(around - up * 0.02); }
         else if dot(dir, f.normal) <= 0.0 { continue; }
         total += 1.0;
-        let end = walk(Walk(slot, vec3<i32>(0), vec3<i32>(64), true), org, dir, f.skip * f.cell, range, fade_dither(q), 24u, false, q);
+        let end = walk(Walk(slot, vec3<i32>(0), vec3<i32>(64), true), org, dir, skip_along(f, dir), range, fade_dither(q), 24u, false, q);
         open += select(1.0, smoothstep(0.5, 1.0, end.t / range), end.hit && end.t < range);
     }
     return select(1.0, open / total, total > 0.0);
