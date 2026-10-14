@@ -1636,6 +1636,33 @@ fn slope_normal(slot: u32, key: vec4<i32>, cell: vec3<i32>, c: ChunkDraw) -> vec
     return n * inverseSqrt(l);
 }
 
+// The ground's normal at pixel `q` (hit at distance `t`) from the hits two
+// pixels each way: on each axis the side nearer in distance (not across a
+// silhouette), facing the eye; zero where an axis has no hit near. Over
+// cells of a pixel or less it spans more than a cell: the slope, not the
+// steps.
+fn screen_ground(q: vec2<u32>, size: vec2<u32>, t: f32) -> vec3<f32> {
+    let p = pixel_ray(q, size) * t;
+    var d = array<vec3<f32>, 2>(vec3<f32>(0.0), vec3<f32>(0.0));
+    for (var axis = 0u; axis < 2u; axis++) {
+        var best = 1e30;
+        for (var side = -1; side <= 1; side += 2) {
+            var at = vec2<i32>(q);
+            at[axis] += 2 * side;
+            if any(at < vec2<i32>(0)) || any(at >= vec2<i32>(size)) { continue; }
+            let tn = textureLoad(hit_distance, at, 0).r;
+            if tn <= 0.0 || abs(tn - t) >= best { continue; }
+            best = abs(tn - t);
+            d[axis] = (pixel_ray(vec2<u32>(at), size) * tn - p) * f32(side);
+        }
+        if best > 0.25 * t { return vec3<f32>(0.0); }
+    }
+    let n = cross(d[0], d[1]);
+    let l = dot(n, n);
+    if !(l > 1e-20) { return vec3<f32>(0.0); }
+    return n * inverseSqrt(l) * select(1.0, -1.0, dot(n, p) > 0.0);
+}
+
 // Hit `v` (pixels `pixel_m` wide there). Voxels a few pixels wide are lit
 // by their own faces (a slope reads as its steps, each shadowing the next);
 // a natural step (air above it) is lit partly with the slope's normal,
@@ -1647,7 +1674,8 @@ fn slope_normal(slot: u32, key: vec4<i32>, cell: vec3<i32>, c: ChunkDraw) -> vec
 // as stripes. A cell larger than its cut wants (`under_refined`) is lit by
 // the slope's normal too. The slope's normal is `ground` when given (a
 // nearby sample's), else measured here.
-fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, pixel_m: f32) -> Face {
+fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, q: vec2<u32>, size: vec2<u32>, t: f32) -> Face {
+    let pixel_m = pixel_width(q, size, t);
     let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
     let c = cell_frame(v.x, cell);
     let key = chunk_keys[v.x];
@@ -1662,7 +1690,10 @@ fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, pixel_m: f32) -> Face {
     let step = !solid_near(v.x, key, cell + vec3<i32>(0, 0, 1));
     if !step && coarse == 0.0 { return f; }
     let w = max(select(0.0, materials.detail.w, step), coarse);
+    // Cells of a pixel or less: the slope the hits around make (a few
+    // loads); larger ones measure their column tops (`slope_normal`).
     var ground = ground_hint;
+    if dot(ground, ground) == 0.0 && length(c.m0.xyz) <= 1.5 * pixel_m { ground = screen_ground(q, size, t); }
     if dot(ground, ground) == 0.0 { ground = slope_normal(v.x, key, cell, c); }
     // A unit normal (written so NaN fails it), else the face's own.
     if w <= 0.0 || !(abs(dot(ground, ground) - 1.0) < 0.01) { return f; }
@@ -1891,7 +1922,7 @@ fn sky_sample(@builtin(global_invocation_id) id: vec3<u32>) {
     if v.x != NONE {
         if exact_level(chunk_keys[v.x].x >> 8u) { return; }
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
-        sample = vec2<f32>(sky_visibility_fine(q, size, v.x, t, hit_face(v, vec3<f32>(0.0), pixel_width(q, size, t))), t);
+        sample = vec2<f32>(sky_visibility_fine(q, size, v.x, t, hit_face(v, vec3<f32>(0.0), q, size, t)), t);
     }
     textureStore(out_sky_samples, vec2<i32>(id.xy), vec4<f32>(sample, 0.0, 0.0));
 }
@@ -1908,7 +1939,7 @@ fn sky_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
     var sample = vec2<f32>(1.0, 0.0);
     {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
-        sample = vec2<f32>(sky_visibility(q, size, v.x, t, hit_face(v, vec3<f32>(0.0), pixel_width(q, size, t))), t);
+        sample = vec2<f32>(sky_visibility(q, size, v.x, t, hit_face(v, vec3<f32>(0.0), q, size, t)), t);
     }
     textureStore(out_sky_samples, vec2<i32>(id.xy), vec4<f32>(sample, 0.0, 0.0));
 }
@@ -1947,7 +1978,7 @@ fn shadow_sample(@builtin(global_invocation_id) id: vec3<u32>) {
     if v.x != NONE {
         if exact_level(chunk_keys[v.x].x >> 8u) { return; }
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
-        let f = hit_face(v, vec3<f32>(0.0), pixel_width(q, size, t));
+        let f = hit_face(v, vec3<f32>(0.0), q, size, t);
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
         if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(sun_walk_fine(q, size, v.x, t, f)); }
     }
@@ -1966,7 +1997,7 @@ fn shadow_sample_far(@builtin(global_invocation_id) id: vec3<u32>) {
     var sample = vec4<u32>(0u);
     {
         let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
-        let f = hit_face(v, vec3<f32>(0.0), pixel_width(q, size, t));
+        let f = hit_face(v, vec3<f32>(0.0), q, size, t);
         sample = vec4<u32>(4u, bitcast<u32>(t), select(0u, pack_unit(f.ground), dot(f.ground, f.ground) > 0.0), 0u);
         if dot(f.shading, params.sun.xyz) > 0.0 { sample.x |= 2u | u32(sun_walk(q, size, v.x, t, f)); }
     }
@@ -1986,10 +2017,11 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let t = textureLoad(hit_distance, p, 0).r;
     // Its block's sample, then the nearer neighbours' (towards the pixel's
-    // side of its block): the first within four of its cells lends its
+    // side of its block): the first within four of its cells (or eight
+    // pixels' widths: cells under a pixel, a grazing slope) lends its
     // slope's normal, the first of those that walked its sunlight.
     let at_hit = pixel_ray(id.xy, size) * t;
-    let reach = 4.0 * length(chunk_frame(v.x).m0.xyz);
+    let reach = max(4.0 * length(chunk_frame(v.x).m0.xyz), 8.0 * pixel_width(id.xy, size, t));
     let half = vec2<i32>((size + 1u) / 2u);
     let block = p / 2;
     let toward = vec2<i32>(p & vec2<i32>(1)) * 2 - 1;
@@ -2004,7 +2036,7 @@ fn shadow(@builtin(global_invocation_id) id: vec3<u32>) {
         if dot(ground, ground) == 0.0 && s.z != 0u { ground = unpack_unit(s.z); }
         if sampled == 0u && (s.x & 2u) != 0u { sampled = 2u | (s.x & 1u); }
     }
-    let f = hit_face(v, ground, pixel_width(id.xy, size, t));
+    let f = hit_face(v, ground, id.xy, size, t);
     textureStore(out_normal, p, vec4<f32>(f.shading, sky_at(p, at_hit, reach, size)));
     var lit = 0.0;
     if dot(f.shading, sun) > 0.0 {
@@ -2038,6 +2070,6 @@ fn shadow_fallback(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(hit_distance);
     let v = textureLoad(hit_visibility, vec2<i32>(q), 0).xy;
     let t = textureLoad(hit_distance, vec2<i32>(q), 0).r;
-    let f = hit_face(v, vec3<f32>(0.0), pixel_width(q, size, t));
+    let f = hit_face(v, vec3<f32>(0.0), q, size, t);
     store_sun(vec2<i32>(q), v, f, sun_walk(q, size, v.x, t, f));
 }
