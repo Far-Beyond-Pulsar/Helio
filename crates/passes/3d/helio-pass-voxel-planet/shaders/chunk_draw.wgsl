@@ -372,6 +372,7 @@ struct Hit {
     cell: vec3<i32>,
     axis: u32,
     hit: bool,
+    // The hit cell's material pair (`shown_material` picks one).
     material: u32,
     // Whether the ray moved up the axis it entered by.
     positive: bool,
@@ -392,9 +393,12 @@ fn solid_at(slot: u32, c: vec3<i32>) -> bool {
     return bit64(leaves[leaf_at_page(slot, index)], u32((c.x & 3) + ((c.y & 3) << 2u) + ((c.z & 3) << 4u)));
 }
 
-// A hit cell's material from its leaf's (or mid's) two: the surface's with
-// air above it, the subsurface's under other cells. A ray entering by the
-// top face (`from_above`) came through that air.
+// A hit cell's material from its leaf's (or mid's) two (`pair`: what a
+// walk's hit carries): the surface's with air above it, the subsurface's
+// under other cells. A ray entering by the top face (`from_above`) came
+// through that air. Resolved once a ray has hit, not in the walk: its
+// lookups in the chunk over (`solid_over`) inside the walk's loop cost the
+// loop registers (+45% on a mountain's primary rays).
 fn shown_material(pair: u32, slot: u32, c: vec3<i32>, from_above: bool) -> u32 {
     return select((pair >> 8u) & 0xffu, pair & 0xffu, from_above || !solid_over(slot, c));
 }
@@ -434,7 +438,7 @@ fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u
         let m = u32((c.x >> 4u) + ((c.y >> 4u) << 2u) + ((c.z >> 4u) << 4u));
         var size = 16;
         if bit64(root.root_occ, m) {
-            if bit64(root.root_full, m) { return Hit(t, c, axis, true, shown_material(mid_materials[slot * 64u + m], slot, c, axis == 2u && !positive.z), positive[axis]); }
+            if bit64(root.root_full, m) { return Hit(t, c, axis, true, mid_materials[slot * 64u + m], positive[axis]); }
             if m != node_at {
                 node = mids[slot * 64u + m];
                 first_leaf = mid_leaves[slot * 64u + m];
@@ -443,7 +447,7 @@ fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u
             let l = u32(((c.x >> 2u) & 3) + (((c.y >> 2u) & 3) << 2u) + (((c.z >> 2u) & 3) << 4u));
             size = 4;
             if bit64(node.xy, l) {
-                if bit64(node.zw, l) { return Hit(t, c, axis, true, shown_material(mid_materials[slot * 64u + m], slot, c, axis == 2u && !positive.z), positive[axis]); }
+                if bit64(node.zw, l) { return Hit(t, c, axis, true, mid_materials[slot * 64u + m], positive[axis]); }
                 let index = first_leaf + rank64(node.xy & ~node.zw, l);
                 if index != leaf_at {
                     stored = leaf_at_page(slot, index);
@@ -452,7 +456,7 @@ fn trace_chunk(slot: u32, o: vec3<f32>, d: vec3<f32>, t0: f32, t1: f32, axis0: u
                 }
                 size = 1;
                 if bit64(leaf, u32((c.x & 3) + ((c.y & 3) << 2u) + ((c.z & 3) << 4u))) {
-                    return Hit(t, c, axis, true, shown_material(leaf_materials[stored >> 1u] >> ((stored & 1u) * 16u), slot, c, axis == 2u && !positive.z), positive[axis]);
+                    return Hit(t, c, axis, true, leaf_materials[stored >> 1u] >> ((stored & 1u) * 16u), positive[axis]);
                 }
             }
         }
@@ -680,7 +684,7 @@ fn trace_exact(slot: u32, ray: ExactRay, face: i32, level: i32, origin: vec3<i32
         let m = u32((c.x >> 4u) + ((c.y >> 4u) << 2u) + ((c.z >> 4u) << 4u));
         var size = 16;
         if bit64(root.root_occ, m) {
-            if bit64(root.root_full, m) { return Hit(t, c, axis, true, shown_material(mid_materials[slot * 64u + m], slot, c, axis == 2u && !positive), positive); }
+            if bit64(root.root_full, m) { return Hit(t, c, axis, true, mid_materials[slot * 64u + m], positive); }
             if m != node_at {
                 node = mids[slot * 64u + m];
                 first_leaf = mid_leaves[slot * 64u + m];
@@ -689,7 +693,7 @@ fn trace_exact(slot: u32, ray: ExactRay, face: i32, level: i32, origin: vec3<i32
             let l = u32(((c.x >> 2u) & 3) + (((c.y >> 2u) & 3) << 2u) + (((c.z >> 2u) & 3) << 4u));
             size = 4;
             if bit64(node.xy, l) {
-                if bit64(node.zw, l) { return Hit(t, c, axis, true, shown_material(mid_materials[slot * 64u + m], slot, c, axis == 2u && !positive), positive); }
+                if bit64(node.zw, l) { return Hit(t, c, axis, true, mid_materials[slot * 64u + m], positive); }
                 let index = first_leaf + rank64(node.xy & ~node.zw, l);
                 if index != leaf_at {
                     stored = leaf_at_page(slot, index);
@@ -698,7 +702,7 @@ fn trace_exact(slot: u32, ray: ExactRay, face: i32, level: i32, origin: vec3<i32
                 }
                 size = 1;
                 if bit64(leaf, u32((c.x & 3) + ((c.y & 3) << 2u) + ((c.z & 3) << 4u))) {
-                    return Hit(t, c, axis, true, shown_material(leaf_materials[stored >> 1u] >> ((stored & 1u) * 16u), slot, c, axis == 2u && !positive), positive);
+                    return Hit(t, c, axis, true, leaf_materials[stored >> 1u] >> ((stored & 1u) * 16u), positive);
                 }
             }
         }
@@ -1047,6 +1051,7 @@ struct WalkEnd {
     cell: vec3<i32>,
     axis: u32,
     sign: u32,
+    // The hit's material pair (`Hit::material`).
     material: u32,
 }
 
@@ -1350,14 +1355,15 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     COUNT(2)
     textureStore(out_exits, p, vec4<f32>(-1.0));
-    textureStore(out_visibility, p, vec4<u32>(end.slot, u32(end.cell.x) | (u32(end.cell.y) << 6u) | (u32(end.cell.z) << 12u) | (end.axis << 18u) | (end.sign << 20u) | (min(end.material, 255u) << 21u), 0u, 0u));
+    let material = shown_material(end.material, end.slot, end.cell, end.axis == 2u && end.sign == 1u);
+    textureStore(out_visibility, p, vec4<u32>(end.slot, u32(end.cell.x) | (u32(end.cell.y) << 6u) | (u32(end.cell.z) << 12u) | (end.axis << 18u) | (end.sign << 20u) | (min(material, 255u) << 21u), 0u, 0u));
     textureStore(out_distance, p, vec4<f32>(end.t, 0.0, 0.0, 0.0));
     if !plain_colour() { return; }
     let c = cell_frame(end.slot, end.cell);
     let axis_world = select(select(c.m2.xyz, c.m1.xyz, end.axis == 1u), c.m0.xyz, end.axis == 0u);
     let normal = normalize(axis_world) * select(-1.0, 1.0, end.sign == 1u);
     let light = 0.25 + 0.75 * max(dot(normal, params.sun.xyz), 0.0);
-    var colour = palette(end.material).rgb;
+    var colour = palette(material).rgb;
     if debug_mode() == 2u {
         // Steps: red to 64, yellow to 128, white to 192.
         let h = f32(heat) / 64.0;
