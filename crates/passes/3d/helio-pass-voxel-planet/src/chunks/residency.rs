@@ -232,8 +232,12 @@ impl Planner {
             // On screen now: in view and over the eye's horizon (a tile only
             // the prefetch eye sees is drawn, unseen, until it is).
             let shows = seen && !hidden;
-            // Tiles in view first.
-            let priority = if seen { error * 1e6 } else { error };
+            // Pixels a cell spans from the eye now (not the prefetch eye).
+            let now = self.error(grid, key, tile.ranges, &eyes[..1]);
+            // Tiles in view first, by what they need now: the prefetch
+            // eye's wants (a burst as the eye starts moving) come after
+            // what is coarse on screen.
+            let priority = if seen { now * 1e6 } else { now };
             // Out of the guarded view, coarser cells will do.
             let wanted_error = if seen || cone(key, tile.ranges, guarded) { error } else { error / self.config.offscreen_pixels };
             let finer = key.level > 0 && if tile.refined { wanted_error > self.config.coarsen } else { wanted_error > 1.0 };
@@ -291,17 +295,16 @@ impl Planner {
                     at = next;
                 }
             }
-            // Pixels a cell spans from the eye now (not the prefetch eye).
-            let px = || self.error(grid, key, tile.ranges, &eyes[..1]);
+
             // A switch shows where the last plan drew the side it leaves
             // (not where the tile came over the horizon).
             let shown = |k: &TileKey| self.last_plan != 0 && self.tiles.get(k).is_some_and(|t| t.drawn == self.last_plan);
             if shows && tile.refined != ready && if ready { shown(&key) } else { self::children(grid, key).iter().any(shown) } {
                 plan.switches += 1;
-                plan.switch_px = plan.switch_px.max(px());
+                plan.switch_px = plan.switch_px.max(now);
             }
             if shows && !ready && key.level > 0 {
-                plan.worst_px = plan.worst_px.max(px());
+                plan.worst_px = plan.worst_px.max(now);
             }
             let t = self.tiles.get_mut(&key).unwrap();
             t.used = frame;
