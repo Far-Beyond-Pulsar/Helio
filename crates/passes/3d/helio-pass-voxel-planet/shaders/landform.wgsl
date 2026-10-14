@@ -620,11 +620,22 @@ fn terrain_parts_mode(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
     // leave alone: a run of erosion octaves shares one.
     var steer = vec3<i32>(0);
     var steered = false;
+    // Each layer's octaves past its last region octave: its region is
+    // whole there (a mountain range's mask is known before its ridges).
+    var region_done = array<u32, 8>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
+    for (var index = LANDFORM_WARP; index < count; index++) {
+        let o = terrain.octaves[index];
+        if (o.kind & 0xffu) == LF_REGION { region_done[(o.kind >> 8u) & 7u] = index + 1u; }
+    }
     for (var index = LANDFORM_WARP; index < count; index++) {
         let o = terrain.octaves[index];
         let l = (o.kind >> 8u) & 7u;
         let kind = o.kind & 0xffu;
         if kind != LF_EROSION { steered = false; }
+        // Outside a mountain range (its mask and the mask's slope zero:
+        // m <= 0) its ridges change neither the height nor the steering:
+        // the layer's value only ever reaches them times the mask.
+        if kind == LF_RIDGE && index >= region_done[l] && terrain.layers[l].kind == LAYER_MOUNTAINS && (lf_region[l] - (terrain.layers[l].a << 8u)) * 3 <= 0 { continue; }
         var gain = FINE_ONE;
         var gradient = erosion;
         if RIDGE_DISPLAY_GENERATION && display && o.kind == display_tag {

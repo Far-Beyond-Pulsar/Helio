@@ -429,7 +429,10 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
         let band_lo = select(top, top - column.w, column.w > 0);
         // The column's own volume terms, once for all its cells.
         let volume = column_volume(p, level);
-        let step = distance(vec3<f32>(volume_point(face, i, j, top + 1, level)), vec3<f32>(volume_point(face, i, j, top, level))) + 2.0;
+        // A cell's volume point from the column's domain point (`p`, the
+        // sphere mapping once a column, not once a cell).
+        let half = 1 << level;
+        let step = distance(vec3<f32>(volume_point_half(p, ((top + 1) << (level + 1u)) + half)), vec3<f32>(volume_point_half(p, (top << (level + 1u)) + half))) + 2.0;
         // Cells no cave can carve (under the rock cover, past the cave
         // depth) keep the surface's bits, set above, out of the lean's band:
         // the scan steps to the next cell either may change.
@@ -446,7 +449,7 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
                 continue;
             }
             if scan < band_lo {
-                let clear = terrain_clearance(volume_point(face, i, j, scan, level), level, step);
+                let clear = terrain_clearance(volume_point_half(p, (scan << (level + 1u)) + half), level, step);
                 if clear > 0 {
                     scan = min(scan + clear + 1, band_lo);
                     continue;
@@ -454,7 +457,7 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
             }
             var lean_h = height;
             if leaning { lean_h = lean_height(volume.overhang, i, j, scan, level, height, lean.y, node); }
-            let solid = terrain_density_with(volume, volume_point(face, i, j, scan, level), level, top, height, lean_h, scan) > 0;
+            let solid = terrain_density_with(volume, volume_point_half(p, (scan << (level + 1u)) + half), level, top, height, lean_h, scan) > 0;
             mask = set_bits(mask, scan - k0, scan - k0 + 1, solid);
             scan += 1;
         }
