@@ -44,7 +44,9 @@ impl ObjectMovability {
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|m| m.name().eq_ignore_ascii_case(name))
+        Self::ALL
+            .into_iter()
+            .find(|m| m.name().eq_ignore_ascii_case(name))
     }
 
     /// Whether its transform is promised never to change.
@@ -114,11 +116,15 @@ mod tests {
 
     #[test]
     fn reads_names_and_indices() {
-        let by_name: ObjectMovability = serde_json::from_value(serde_json::json!("Movable")).unwrap();
+        let by_name: ObjectMovability =
+            serde_json::from_value(serde_json::json!("Movable")).unwrap();
         let by_index: ObjectMovability = serde_json::from_value(serde_json::json!(3)).unwrap();
         assert_eq!(by_name, ObjectMovability::Movable);
         assert_eq!(by_index, ObjectMovability::Dynamic);
-        assert_eq!(serde_json::to_value(ObjectMovability::Static).unwrap(), "Static");
+        assert_eq!(
+            serde_json::to_value(ObjectMovability::Static).unwrap(),
+            "Static"
+        );
     }
 
     #[test]

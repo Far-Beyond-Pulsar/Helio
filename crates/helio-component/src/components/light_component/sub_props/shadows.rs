@@ -13,11 +13,7 @@ use serde_json::Value;
 /// live light's score, so it cannot be computed per entity at upload time.
 /// This function only encodes the request.
 pub fn cast_shadows_to_shadow_request(cast_shadows: bool) -> u32 {
-    if cast_shadows {
-        0
-    } else {
-        u32::MAX
-    }
+    if cast_shadows { 0 } else { u32::MAX }
 }
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
@@ -102,8 +98,12 @@ impl ShadowLightProps {
         if let Some(v) = obj.get("cast_contact_shadows").and_then(|v| v.as_bool()) {
             self.cast_contact_shadows = v;
         }
-        if let Some(v) = obj.get("shadow_priority").and_then(Value::as_f64) { self.shadow_priority = v as f32; }
-        if let Some(v) = obj.get("shadow_max_resolution").and_then(Value::as_u64) { self.shadow_max_resolution = v.min(2048).max(128) as u32; }
+        if let Some(v) = obj.get("shadow_priority").and_then(Value::as_f64) {
+            self.shadow_priority = v as f32;
+        }
+        if let Some(v) = obj.get("shadow_max_resolution").and_then(Value::as_u64) {
+            self.shadow_max_resolution = v.min(2048).max(128) as u32;
+        }
         if let Some(v) = obj.get("shadow_bias").and_then(|v| v.as_f64()) {
             self.shadow_bias = v as f32;
         }
@@ -131,4 +131,6 @@ impl ShadowLightProps {
     }
 }
 
-pub fn shadow_bool(value: bool) -> u32 { u32::from(value) }
+pub fn shadow_bool(value: bool) -> u32 {
+    u32::from(value)
+}

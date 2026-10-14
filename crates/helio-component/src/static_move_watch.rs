@@ -136,7 +136,10 @@ mod tests {
             nudge(&mut world, movable);
         }
         nudge(&mut world, fixed);
-        assert!(watch.poll(&world).is_empty(), "overflowed: nothing attributed");
+        assert!(
+            watch.poll(&world).is_empty(),
+            "overflowed: nothing attributed"
+        );
 
         nudge(&mut world, fixed);
         assert_eq!(watch.poll(&world), vec![fixed]);
@@ -152,7 +155,10 @@ mod tests {
 
         let mut replacement = World::new();
         let fixed = object(&mut replacement, Movability::Static);
-        assert!(watch.poll(&replacement).is_empty(), "rebinds to the new world");
+        assert!(
+            watch.poll(&replacement).is_empty(),
+            "rebinds to the new world"
+        );
         nudge(&mut replacement, fixed);
         assert_eq!(watch.poll(&replacement), vec![fixed]);
     }

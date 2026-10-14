@@ -86,5 +86,4 @@ impl RenderingFoliageProps {
             self.metallic = v as f32;
         }
     }
-
 }

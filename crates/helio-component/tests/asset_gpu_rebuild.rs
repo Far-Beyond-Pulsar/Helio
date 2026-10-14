@@ -10,10 +10,10 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use helio_component::components::{SpriteComponent, StaticMeshComponent};
+use pulsar_scenedb::World;
 use pulsar_scenedb::gpu::{
     EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore, TextureStore,
 };
-use pulsar_scenedb::World;
 
 fn context() -> Option<EngineGpuContext> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());

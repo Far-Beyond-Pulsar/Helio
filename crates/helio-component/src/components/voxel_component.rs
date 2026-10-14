@@ -7,7 +7,7 @@
 
 use engine_class_derive::{component_events, engine_class};
 use helio_voxel_data::{
-    VoxelEditJournal, VoxelStoredPayload, VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION,
+    VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION, VoxelEditJournal, VoxelStoredPayload,
 };
 pub use helio_voxel_data::{VoxelPayloadKey, VoxelPayloadStore};
 use pulsar_scene_model::components::Transform;
@@ -589,7 +589,17 @@ pub enum VoxelTerrainMaterial {
 }
 
 /// What a terrain layer adds (`helio_pass_voxel_planet::layers::LayerKind`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, pulsar_reflection::Reflectable)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    pulsar_reflection::Reflectable,
+)]
 pub enum VoxelLayerKind {
     /// Rolling relief, bent by the warp (hills, highlands).
     #[default]
@@ -618,7 +628,17 @@ pub enum VoxelLayerKind {
 }
 
 /// Where a terrain layer applies.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, pulsar_reflection::Reflectable)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    pulsar_reflection::Reflectable,
+)]
 pub enum VoxelLayerMask {
     #[default]
     Everywhere,
@@ -629,7 +649,17 @@ pub enum VoxelLayerMask {
 }
 
 /// How generated cells get their materials.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, pulsar_reflection::Reflectable)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    pulsar_reflection::Reflectable,
+)]
 pub enum VoxelMaterialStyle {
     /// Meadows, dry lands, rock, strata and snow above the snowline.
     #[default]
@@ -722,16 +752,25 @@ impl PartialEq for VoxelMaterialRule {
 impl VoxelMaterialRule {
     /// `material` everywhere (narrow it with the fields).
     pub fn new(material: VoxelTerrainMaterial) -> Self {
-        Self { material, ..Self::default() }
+        Self {
+            material,
+            ..Self::default()
+        }
     }
 }
 
-fn serialize_material_rule_json(value: &VoxelMaterialRule) -> pulsar_reflection::ReflectResult<serde_json::Value> {
-    serde_json::to_value(value).map_err(|e| pulsar_reflection::ReflectError::SerializationFailed(e.to_string()))
+fn serialize_material_rule_json(
+    value: &VoxelMaterialRule,
+) -> pulsar_reflection::ReflectResult<serde_json::Value> {
+    serde_json::to_value(value)
+        .map_err(|e| pulsar_reflection::ReflectError::SerializationFailed(e.to_string()))
 }
 
-fn deserialize_material_rule_json(value: serde_json::Value) -> pulsar_reflection::ReflectResult<VoxelMaterialRule> {
-    serde_json::from_value(value).map_err(|e| pulsar_reflection::ReflectError::DeserializationFailed(e.to_string()))
+fn deserialize_material_rule_json(
+    value: serde_json::Value,
+) -> pulsar_reflection::ReflectResult<VoxelMaterialRule> {
+    serde_json::from_value(value)
+        .map_err(|e| pulsar_reflection::ReflectError::DeserializationFailed(e.to_string()))
 }
 
 #[pulsar_reflection::pulsar_type(
@@ -816,16 +855,25 @@ impl VoxelTerrainLayer {
             .and_then(serde_json::from_value::<LayerKind>)
             .and_then(|kind| serde_json::to_value(Layer::new(kind)))
             .and_then(serde_json::from_value)
-            .unwrap_or(Self { kind, ..Self::default() })
+            .unwrap_or(Self {
+                kind,
+                ..Self::default()
+            })
     }
 }
 
-fn serialize_terrain_layer_json(value: &VoxelTerrainLayer) -> pulsar_reflection::ReflectResult<serde_json::Value> {
-    serde_json::to_value(value).map_err(|e| pulsar_reflection::ReflectError::SerializationFailed(e.to_string()))
+fn serialize_terrain_layer_json(
+    value: &VoxelTerrainLayer,
+) -> pulsar_reflection::ReflectResult<serde_json::Value> {
+    serde_json::to_value(value)
+        .map_err(|e| pulsar_reflection::ReflectError::SerializationFailed(e.to_string()))
 }
 
-fn deserialize_terrain_layer_json(value: serde_json::Value) -> pulsar_reflection::ReflectResult<VoxelTerrainLayer> {
-    serde_json::from_value(value).map_err(|e| pulsar_reflection::ReflectError::DeserializationFailed(e.to_string()))
+fn deserialize_terrain_layer_json(
+    value: serde_json::Value,
+) -> pulsar_reflection::ReflectResult<VoxelTerrainLayer> {
+    serde_json::from_value(value)
+        .map_err(|e| pulsar_reflection::ReflectError::DeserializationFailed(e.to_string()))
 }
 
 #[pulsar_reflection::pulsar_type(
@@ -844,30 +892,90 @@ pub struct VoxelCaves {
     #[property(category = "Caves")]
     pub enabled: bool,
     /// Deepest cave cell below the local surface.
-    #[property(min = 0.0, max = 170.0, step = 1.0, category = "Caves", label = "Depth (m)")]
+    #[property(
+        min = 0.0,
+        max = 170.0,
+        step = 1.0,
+        category = "Caves",
+        label = "Depth (m)"
+    )]
     pub depth_m: f64,
     /// Rough share of the land inside cave regions.
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Regions (share)")]
+    #[property(
+        min = 0.0,
+        max = 1.0,
+        step = 0.01,
+        category = "Caves",
+        label = "Regions (share)"
+    )]
     pub share: f64,
-    #[property(min = 0.1, max = 500.0, step = 0.1, category = "Caves", label = "Region size (km)")]
+    #[property(
+        min = 0.1,
+        max = 500.0,
+        step = 0.1,
+        category = "Caves",
+        label = "Region size (km)"
+    )]
     pub region_km: f64,
-    #[property(min = 0.0, max = 20.0, step = 0.1, category = "Caves", label = "Tunnel radius (m)")]
+    #[property(
+        min = 0.0,
+        max = 20.0,
+        step = 0.1,
+        category = "Caves",
+        label = "Tunnel radius (m)"
+    )]
     pub tunnel_radius_m: f64,
-    #[property(min = 4.0, max = 2000.0, step = 1.0, category = "Caves", label = "Tunnel winding (m)")]
+    #[property(
+        min = 4.0,
+        max = 2000.0,
+        step = 1.0,
+        category = "Caves",
+        label = "Tunnel winding (m)"
+    )]
     pub tunnel_wavelength_m: f64,
-    #[property(min = 8.0, max = 4000.0, step = 1.0, category = "Caves", label = "Cavern size (m)")]
+    #[property(
+        min = 8.0,
+        max = 4000.0,
+        step = 1.0,
+        category = "Caves",
+        label = "Cavern size (m)"
+    )]
     pub cavern_wavelength_m: f64,
     /// Rough share of the cave volume opened as caverns.
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Caverns (share)")]
+    #[property(
+        min = 0.0,
+        max = 1.0,
+        step = 0.01,
+        category = "Caves",
+        label = "Caverns (share)"
+    )]
     pub cavern_share: f64,
     /// Rock kept over every cave: tunnels and caverns close towards it
     /// instead of breaking the surface, except at entrances.
-    #[property(min = 0.0, max = 100.0, step = 0.5, category = "Caves", label = "Cover (m)")]
+    #[property(
+        min = 0.0,
+        max = 100.0,
+        step = 0.5,
+        category = "Caves",
+        label = "Cover (m)"
+    )]
     pub cover_m: f64,
     /// Rough share of a cave region where tunnels open to the surface.
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Entrances (share)")]
+    #[property(
+        min = 0.0,
+        max = 1.0,
+        step = 0.01,
+        category = "Caves",
+        label = "Entrances (share)"
+    )]
     pub entrance_share: f64,
-    #[property(min = 4.0, max = 2000.0, step = 1.0, category = "Caves", label = "Entrance spacing (m)")]
+    #[property(
+        min = 4.0,
+        max = 2000.0,
+        step = 1.0,
+        category = "Caves",
+        label = "Entrance spacing (m)"
+    )]
     pub entrance_spacing_m: f64,
 }
 
@@ -899,20 +1007,50 @@ pub struct VoxelOverhangs {
     #[property(category = "Overhangs")]
     pub enabled: bool,
     /// Largest horizontal lean of the ground.
-    #[property(min = 0.0, max = 20.0, step = 0.5, category = "Overhangs", label = "Height (m)")]
+    #[property(
+        min = 0.0,
+        max = 20.0,
+        step = 0.5,
+        category = "Overhangs",
+        label = "Height (m)"
+    )]
     pub height_m: f64,
     /// Vertical wavelength of the lean (ledge spacing).
-    #[property(min = 2.0, max = 500.0, step = 1.0, category = "Overhangs", label = "Ledge spacing (m)")]
+    #[property(
+        min = 2.0,
+        max = 500.0,
+        step = 1.0,
+        category = "Overhangs",
+        label = "Ledge spacing (m)"
+    )]
     pub wavelength_m: f64,
-    #[property(min = 0.1, max = 500.0, step = 0.1, category = "Overhangs", label = "Region size (km)")]
+    #[property(
+        min = 0.1,
+        max = 500.0,
+        step = 0.1,
+        category = "Overhangs",
+        label = "Region size (km)"
+    )]
     pub region_km: f64,
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Overhangs", label = "Regions (share)")]
+    #[property(
+        min = 0.0,
+        max = 1.0,
+        step = 0.01,
+        category = "Overhangs",
+        label = "Regions (share)"
+    )]
     pub share: f64,
 }
 
 impl Default for VoxelOverhangs {
     fn default() -> Self {
-        Self { enabled: true, height_m: 6.0, wavelength_m: 6.0, region_km: 3.0, share: 0.3 }
+        Self {
+            enabled: true,
+            height_m: 6.0,
+            wavelength_m: 6.0,
+            region_km: 3.0,
+            share: 0.3,
+        }
     }
 }
 
@@ -962,12 +1100,18 @@ impl PartialEq for VoxelTerrainStack {
     }
 }
 
-fn serialize_terrain_stack_json(value: &VoxelTerrainStack) -> pulsar_reflection::ReflectResult<serde_json::Value> {
-    serde_json::to_value(value).map_err(|e| pulsar_reflection::ReflectError::SerializationFailed(e.to_string()))
+fn serialize_terrain_stack_json(
+    value: &VoxelTerrainStack,
+) -> pulsar_reflection::ReflectResult<serde_json::Value> {
+    serde_json::to_value(value)
+        .map_err(|e| pulsar_reflection::ReflectError::SerializationFailed(e.to_string()))
 }
 
-fn deserialize_terrain_stack_json(value: serde_json::Value) -> pulsar_reflection::ReflectResult<VoxelTerrainStack> {
-    serde_json::from_value(value).map_err(|e| pulsar_reflection::ReflectError::DeserializationFailed(e.to_string()))
+fn deserialize_terrain_stack_json(
+    value: serde_json::Value,
+) -> pulsar_reflection::ReflectResult<VoxelTerrainStack> {
+    serde_json::from_value(value)
+        .map_err(|e| pulsar_reflection::ReflectError::DeserializationFailed(e.to_string()))
 }
 
 /// Registered for reflection; its editor (`voxel_stack_editor`) is
@@ -1003,16 +1147,24 @@ impl Default for VoxelTerrainLayersComponent {
 
 impl VoxelTerrainLayersComponent {
     pub fn earth() -> Self {
-        Self { stack: VoxelTerrainStack::earth() }
+        Self {
+            stack: VoxelTerrainStack::earth(),
+        }
     }
     pub fn moon() -> Self {
-        Self { stack: VoxelTerrainStack::moon() }
+        Self {
+            stack: VoxelTerrainStack::moon(),
+        }
     }
     pub fn desert() -> Self {
-        Self { stack: VoxelTerrainStack::desert() }
+        Self {
+            stack: VoxelTerrainStack::desert(),
+        }
     }
     pub fn flat(height_m: f64) -> Self {
-        Self { stack: VoxelTerrainStack::flat(height_m) }
+        Self {
+            stack: VoxelTerrainStack::flat(height_m),
+        }
     }
 }
 
@@ -1039,10 +1191,16 @@ impl VoxelTerrainStack {
             layers: vec![
                 VoxelTerrainLayer::new(Warp),
                 VoxelTerrainLayer::new(Continents),
-                VoxelTerrainLayer { mask: VoxelLayerMask::Land, ..VoxelTerrainLayer::new(Mountains) },
+                VoxelTerrainLayer {
+                    mask: VoxelLayerMask::Land,
+                    ..VoxelTerrainLayer::new(Mountains)
+                },
                 VoxelTerrainLayer::new(Erosion),
                 Self::earth_hills(),
-                VoxelTerrainLayer { mask: VoxelLayerMask::AboveDeepSea, ..VoxelTerrainLayer::new(Roughness) },
+                VoxelTerrainLayer {
+                    mask: VoxelLayerMask::AboveDeepSea,
+                    ..VoxelTerrainLayer::new(Roughness)
+                },
             ],
             caves: VoxelCaves::default(),
             overhangs: VoxelOverhangs::default(),
@@ -1058,7 +1216,12 @@ impl VoxelTerrainStack {
 
     /// Earth's hills: 140 m over 9 km down to knolls a kilometre across.
     fn earth_hills() -> VoxelTerrainLayer {
-        VoxelTerrainLayer { mask: VoxelLayerMask::AboveDeepSea, octaves: 5, persistence: 0.6, ..VoxelTerrainLayer::new(VoxelLayerKind::Hills) }
+        VoxelTerrainLayer {
+            mask: VoxelLayerMask::AboveDeepSea,
+            octaves: 5,
+            persistence: 0.6,
+            ..VoxelTerrainLayer::new(VoxelLayerKind::Hills)
+        }
     }
 
     /// Dunes and mesas with materials from rules: sand on gentle ground,
@@ -1067,23 +1230,55 @@ impl VoxelTerrainStack {
     pub fn desert() -> Self {
         use VoxelTerrainMaterial as M;
         let mut earth = Self::earth();
-        earth.layers.retain(|l| l.kind != VoxelLayerKind::Continents);
+        earth
+            .layers
+            .retain(|l| l.kind != VoxelLayerKind::Continents);
         // The desert's hills stay gentle under its dunes.
-        for l in earth.layers.iter_mut().filter(|l| l.kind == VoxelLayerKind::Hills) {
-            *l = VoxelTerrainLayer { mask: l.mask, ..VoxelTerrainLayer::new(VoxelLayerKind::Hills) };
+        for l in earth
+            .layers
+            .iter_mut()
+            .filter(|l| l.kind == VoxelLayerKind::Hills)
+        {
+            *l = VoxelTerrainLayer {
+                mask: l.mask,
+                ..VoxelTerrainLayer::new(VoxelLayerKind::Hills)
+            };
         }
         for l in &mut earth.layers {
             l.mask = VoxelLayerMask::Everywhere;
         }
-        earth.layers.insert(1, VoxelTerrainLayer::new(VoxelLayerKind::Plateau));
+        earth
+            .layers
+            .insert(1, VoxelTerrainLayer::new(VoxelLayerKind::Plateau));
         Self {
             materials: VoxelMaterialStyle::Rules,
             rules: vec![
-                VoxelMaterialRule { max_depth_m: 0.3, max_erosion: -0.4, min_slope: 0.2, ..VoxelMaterialRule::new(M::Gravel) },
-                VoxelMaterialRule { max_depth_m: 1.5, max_slope: 0.6, ..VoxelMaterialRule::new(M::Sand) },
-                VoxelMaterialRule { max_depth_m: 0.0, speck_share: 0.06, ..VoxelMaterialRule::new(M::DarkStone) },
-                VoxelMaterialRule { patch_km: 0.05, patch_share: 0.15, ..VoxelMaterialRule::new(M::Stone) },
-                VoxelMaterialRule { band_m: 2.5, odd_bands: true, ..VoxelMaterialRule::new(M::Clay) },
+                VoxelMaterialRule {
+                    max_depth_m: 0.3,
+                    max_erosion: -0.4,
+                    min_slope: 0.2,
+                    ..VoxelMaterialRule::new(M::Gravel)
+                },
+                VoxelMaterialRule {
+                    max_depth_m: 1.5,
+                    max_slope: 0.6,
+                    ..VoxelMaterialRule::new(M::Sand)
+                },
+                VoxelMaterialRule {
+                    max_depth_m: 0.0,
+                    speck_share: 0.06,
+                    ..VoxelMaterialRule::new(M::DarkStone)
+                },
+                VoxelMaterialRule {
+                    patch_km: 0.05,
+                    patch_share: 0.15,
+                    ..VoxelMaterialRule::new(M::Stone)
+                },
+                VoxelMaterialRule {
+                    band_m: 2.5,
+                    odd_bands: true,
+                    ..VoxelMaterialRule::new(M::Clay)
+                },
             ],
             rock: M::Sandstone,
             snowline_m: 1.0e5,
@@ -1096,8 +1291,18 @@ impl VoxelTerrainStack {
         use VoxelLayerKind::*;
         Self {
             layers: vec![
-                VoxelTerrainLayer { height_m: 1_500.0, scale_km: 250.0, octaves: 3, ..VoxelTerrainLayer::new(Hills) },
-                VoxelTerrainLayer { height_m: 1_200.0, scale_km: 900.0, coverage: 0.3, ..VoxelTerrainLayer::new(Basins) },
+                VoxelTerrainLayer {
+                    height_m: 1_500.0,
+                    scale_km: 250.0,
+                    octaves: 3,
+                    ..VoxelTerrainLayer::new(Hills)
+                },
+                VoxelTerrainLayer {
+                    height_m: 1_200.0,
+                    scale_km: 900.0,
+                    coverage: 0.3,
+                    ..VoxelTerrainLayer::new(Basins)
+                },
                 VoxelTerrainLayer {
                     scale_km: 40.0,
                     octaves: 10,
@@ -1109,8 +1314,14 @@ impl VoxelTerrainStack {
                     ..VoxelTerrainLayer::new(Craters)
                 },
             ],
-            caves: VoxelCaves { enabled: false, ..VoxelCaves::default() },
-            overhangs: VoxelOverhangs { enabled: false, ..VoxelOverhangs::default() },
+            caves: VoxelCaves {
+                enabled: false,
+                ..VoxelCaves::default()
+            },
+            overhangs: VoxelOverhangs {
+                enabled: false,
+                ..VoxelOverhangs::default()
+            },
             materials: VoxelMaterialStyle::Lunar,
             soil_depth_m: 4.0,
             ..Self::earth()
@@ -1120,9 +1331,18 @@ impl VoxelTerrainStack {
     /// Level ground at `height_m`: grass over a metre of dirt over stone.
     pub fn flat(height_m: f64) -> Self {
         Self {
-            layers: vec![VoxelTerrainLayer { height_m, ..VoxelTerrainLayer::new(VoxelLayerKind::Plateau) }],
-            caves: VoxelCaves { enabled: false, ..VoxelCaves::default() },
-            overhangs: VoxelOverhangs { enabled: false, ..VoxelOverhangs::default() },
+            layers: vec![VoxelTerrainLayer {
+                height_m,
+                ..VoxelTerrainLayer::new(VoxelLayerKind::Plateau)
+            }],
+            caves: VoxelCaves {
+                enabled: false,
+                ..VoxelCaves::default()
+            },
+            overhangs: VoxelOverhangs {
+                enabled: false,
+                ..VoxelOverhangs::default()
+            },
             materials: VoxelMaterialStyle::Layered,
             soil_depth_m: 1.0,
             ..Self::earth()
@@ -1473,17 +1693,21 @@ mod tests {
         let store = component.payload_store();
         let state = store.read().unwrap();
         assert_eq!(state.1.len(), 8);
-        assert!(state
-            .1
-            .values()
-            .all(|bytes| bytes.len() == 512 && bytes.iter().all(|&slot| slot == 1)));
+        assert!(
+            state
+                .1
+                .values()
+                .all(|bytes| bytes.len() == 512 && bytes.iter().all(|&slot| slot == 1))
+        );
         drop(state);
         let serialized = serde_json::to_value(&component).unwrap();
         assert!(serialized.get("payloads").is_none());
-        assert!(!component
-            .get_properties()
-            .iter()
-            .any(|property| property.name == "payloads"));
+        assert!(
+            !component
+                .get_properties()
+                .iter()
+                .any(|property| property.name == "payloads")
+        );
     }
 
     #[test]
@@ -1505,10 +1729,12 @@ mod tests {
     fn terrain_component_runtime_payloads_are_empty_hidden_and_not_serialized() {
         let component = VoxelTerrainComponent::default();
         assert_runtime_storage(&component, &component.payloads);
-        assert!(!component
-            .get_properties()
-            .iter()
-            .any(|property| property.name == "payloads"));
+        assert!(
+            !component
+                .get_properties()
+                .iter()
+                .any(|property| property.name == "payloads")
+        );
     }
 
     #[test]

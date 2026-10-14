@@ -1,8 +1,6 @@
 //! Static mesh component for mesh asset assignment.
 
-use engine_class_derive::{
-    engine_class, register_scene_props_applier, register_world_component,
-};
+use engine_class_derive::{engine_class, register_scene_props_applier, register_world_component};
 use helio::PackedVertex;
 use pulsar_reflection::{ReflectError, ScenePropsProjector};
 use serde::{Deserialize, Serialize};
@@ -785,7 +783,8 @@ impl StaticMeshMaterialSlotsEditor {
         }
         self.set_slot_material(key, relative.clone(), window, cx);
         if let Some(row) = self.rows.get(key.1) {
-            row.picker.update(cx, |picker, _| picker.set_selected_path(relative));
+            row.picker
+                .update(cx, |picker, _| picker.set_selected_path(relative));
         }
     }
 
@@ -887,14 +886,18 @@ impl gpui::Render for StaticMeshMaterialSlotsEditor {
                         )
                         .content(move |_window, _cx| picker.clone()),
                     )
-                    .child(Button::new(format!(
+                    .child(
+                        Button::new(format!(
                             "create-material-{}-{}-{index}",
                             self.id_prefix, self.prop_name
                         ))
                         .label("Create")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.create_material_asset(row_key, window, cx);
-                        }))),
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.create_material_asset(row_key, window, cx);
+                            },
+                        )),
+                    ),
             );
         }
         rows

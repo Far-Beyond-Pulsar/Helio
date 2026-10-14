@@ -1,8 +1,8 @@
 //! A render view's post-process baseline. It reaches the post-process
 //! resolve as its derived row ([`super::environment_rows`]) through the
 //! graph's environment join.
-use engine_class_derive::{engine_class, register_world_component};
 use super::PostProcessSettingsProps;
+use engine_class_derive::{engine_class, register_world_component};
 
 pub const CAMERA_POST_PROCESS_CLASS_NAME: &str = "CameraPostProcessComponent";
 
@@ -22,7 +22,11 @@ pub struct CameraPostProcessComponent {
 
 impl Default for CameraPostProcessComponent {
     fn default() -> Self {
-        Self { enabled: true, view_id: 0, settings: PostProcessSettingsProps::default() }
+        Self {
+            enabled: true,
+            view_id: 0,
+            settings: PostProcessSettingsProps::default(),
+        }
     }
 }
 

@@ -52,6 +52,13 @@ pub struct GraphMaterial {
     pub reads_time: bool,
 }
 
+/// Slot-independent compiled source plus the scene-local residency slots it
+/// uses. The source is shared by every scene; only this row projection varies.
+struct CompiledGraph {
+    hash: u64,
+    snippet: String,
+}
+
 /// The materials a mesh's slots are bound to, as the world loaded them, each
 /// with its content version. Never authored or saved.
 #[derive(Clone, Default)]
@@ -357,6 +364,7 @@ pub fn resolve_material(
         }),
         material_class: helio_mats::MATERIAL_CLASS_DEFAULT,
         graph_hash: 0,
+        graph_texture_slots: [helio::GpuMaterial::NO_TEXTURE; 5],
     };
     let Some(slot) = slot else {
         return imported();
@@ -366,6 +374,7 @@ pub fn resolve_material(
             surface,
             material_class: helio_mats::MATERIAL_CLASS_DEFAULT,
             graph_hash: 0,
+            graph_texture_slots: [helio::GpuMaterial::NO_TEXTURE; 5],
         };
     }
     match bound {
@@ -373,16 +382,18 @@ pub fn resolve_material(
             surface: *surface,
             material_class: helio_mats::MATERIAL_CLASS_DEFAULT,
             graph_hash: 0,
+            graph_texture_slots: [helio::GpuMaterial::NO_TEXTURE; 5],
         },
         Some((id, version, LoadedMaterial::Graph(graph))) => {
             let Some(mirror) = mirror else {
                 return imported();
             };
             match compiled_graph(id, version, graph, mirror) {
-                Ok(hash) => ResolvedSlotMaterial {
+                Ok((hash, graph_texture_slots)) => ResolvedSlotMaterial {
                     surface: slot.imported_surface,
                     material_class: helio_mats::MATERIAL_CLASS_CUSTOM,
                     graph_hash: hash,
+                    graph_texture_slots,
                 },
                 Err(error) => {
                     tracing::warn!(%error, "could not compile a material graph; using the imported material");
@@ -394,47 +405,64 @@ pub fn resolve_material(
     }
 }
 
-/// Compiled graph sources (hash and WGSL), by material, content version and
-/// the texture slots they were compiled against (which differ per scene).
-type CompiledGraphs = HashMap<(AssetId, u64, Vec<u32>), Result<(u64, String), String>>;
+/// Compiled graph sources (hash and WGSL), by material and content version.
+/// Texture residency belongs to each material row, not the shader identity.
+type CompiledGraphs = HashMap<(AssetId, u64), Result<CompiledGraph, String>>;
 
 fn compiled_graphs() -> &'static Mutex<CompiledGraphs> {
     static COMPILED: OnceLock<Mutex<CompiledGraphs>> = OnceLock::new();
     COMPILED.get_or_init(Default::default)
 }
 
-/// Register `graph`'s textures in `mirror`'s texture store, compile it
-/// against their slots (once per content version and slots) and register
-/// the source with the renderer (every time: its registry is bounded).
-/// Returns its graph hash.
+/// Register `graph`'s textures in `mirror`'s store, compile its slot-independent
+/// source once per content version, and return the scene-local slots that the
+/// material row binds. Register the source on every use because the renderer's
+/// graph registry is bounded.
 fn compiled_graph(
     id: AssetId,
     version: u64,
     graph: &GraphMaterial,
     mirror: &pulsar_scenedb::gpu::GpuMirrorHandle,
-) -> Result<u64, String> {
-    let mut bindings = HashMap::new();
-    let mut slots = Vec::with_capacity(graph.textures.len());
+) -> Result<(u64, [u32; 5]), String> {
+    let assets = crate::material_graph::texture_assets(&graph.graph)?;
+    if assets.len() > crate::material_graph::GRAPH_TEXTURE_FIELDS.len() {
+        return Err(format!(
+            "material graphs support at most {} sampled textures",
+            crate::material_graph::GRAPH_TEXTURE_FIELDS.len()
+        ));
+    }
+    let bindings: HashMap<_, _> = assets
+        .iter()
+        .enumerate()
+        .map(|(ordinal, asset)| (asset.clone(), ordinal as u32))
+        .collect();
+    let mut slots = [helio::GpuMaterial::NO_TEXTURE; 5];
     for (asset, texture, image) in &graph.textures {
         // A texture's GPU copy follows the material's version: the material
         // reloads when one of its textures changes.
         let slot = crate::texture_assets::resident_slot(*texture, version, image, mirror)
             .map_err(|error| format!("texture '{asset}': {error}"))?;
-        bindings.insert(asset.clone(), slot);
-        slots.push(slot);
+        let ordinal = *bindings
+            .get(asset)
+            .ok_or_else(|| format!("texture '{asset}' is not sampled by the graph"))?
+            as usize;
+        slots[ordinal] = slot;
     }
     let mut compiled = compiled_graphs()
         .lock()
         .map_err(|_| "compiled graph cache poisoned".to_string())?;
-    let result = compiled.entry((id, version, slots)).or_insert_with(|| {
+    let result = compiled.entry((id, version)).or_insert_with(|| {
         crate::material_graph::compile_material_graph(&graph.graph, &bindings).map(|snippet| {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             snippet.hash(&mut hasher);
-            (hasher.finish().max(1), snippet)
+            CompiledGraph {
+                hash: hasher.finish().max(1),
+                snippet,
+            }
         })
     });
-    let (hash, snippet) = result.clone()?;
-    helio_mats::register_graph_source(hash, snippet);
-    Ok(hash)
+    let compiled = result.as_ref().map_err(Clone::clone)?;
+    helio_mats::register_graph_source(compiled.hash, compiled.snippet.clone());
+    Ok((compiled.hash, slots))
 }

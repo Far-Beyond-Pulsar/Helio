@@ -9,11 +9,16 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
-use gpui::{prelude::*, px, AnyElement, App, Entity, SharedString, Subscription, WeakEntity, Window};
-use pulsar_reflection::{BoundPropertyEditor, EngineClass, PropertyEditorArgs, PropertyEditorFactory, PropertyMetadata, PropertyWriteBack};
+use gpui::{
+    AnyElement, App, Entity, SharedString, Subscription, WeakEntity, Window, prelude::*, px,
+};
+use pulsar_reflection::{
+    BoundPropertyEditor, EngineClass, PropertyEditorArgs, PropertyEditorFactory, PropertyMetadata,
+    PropertyWriteBack,
+};
 use ui::button::{Button, ButtonVariants as _};
 use ui::dropdown::{Dropdown, DropdownEvent, DropdownState};
-use ui::{h_flex, v_flex, ActiveTheme as _, IconName, Sizable as _};
+use ui::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 
 use super::{VoxelLayerKind, VoxelMaterialRule, VoxelTerrainLayer, VoxelTerrainStack};
 
@@ -52,15 +57,19 @@ impl FieldRows {
         let put = Arc::new(put);
         let mut editors = Vec::new();
         for (index, prop) in props.iter().enumerate() {
-            let Some(factory) = editor_factory(prop.type_info.type_id) else { continue };
+            let Some(factory) = editor_factory(prop.type_info.type_id) else {
+                continue;
+            };
             let current = (prop.getter)(value);
             let write_back: PropertyWriteBack = {
                 let (props, get, put) = (props.clone(), get.clone(), put.clone());
-                Arc::new(move |new: Box<dyn Any + Send>, window: &mut Window, cx: &mut App| {
-                    let Some(mut value) = get() else { return };
-                    (props[index].setter)(&mut value, new);
-                    put(value, window, cx);
-                })
+                Arc::new(
+                    move |new: Box<dyn Any + Send>, window: &mut Window, cx: &mut App| {
+                        let Some(mut value) = get() else { return };
+                        (props[index].setter)(&mut value, new);
+                        put(value, window, cx);
+                    },
+                )
             };
             let args = PropertyEditorArgs {
                 id_prefix: id,
@@ -73,16 +82,26 @@ impl FieldRows {
             };
             editors.push((index, factory(&args, window, cx)));
         }
-        let refresh: Arc<dyn Fn(&[(usize, BoundPropertyEditor)], &mut Window, &mut App) + Send + Sync> = {
+        let refresh: Arc<
+            dyn Fn(&[(usize, BoundPropertyEditor)], &mut Window, &mut App) + Send + Sync,
+        > = {
             let props = props.clone();
-            Arc::new(move |editors: &[(usize, BoundPropertyEditor)], window: &mut Window, cx: &mut App| {
-                let Some(value) = get() else { return };
-                for (index, editor) in editors {
-                    (editor.set_value)((props[*index].getter)(&value).as_ref(), window, cx);
-                }
-            })
+            Arc::new(
+                move |editors: &[(usize, BoundPropertyEditor)],
+                      window: &mut Window,
+                      cx: &mut App| {
+                    let Some(value) = get() else { return };
+                    for (index, editor) in editors {
+                        (editor.set_value)((props[*index].getter)(&value).as_ref(), window, cx);
+                    }
+                },
+            )
         };
-        Self { props, editors, refresh }
+        Self {
+            props,
+            editors,
+            refresh,
+        }
     }
 
     fn refresh(&self, window: &mut Window, cx: &mut App) {
@@ -91,7 +110,9 @@ impl FieldRows {
 
     fn views(&self) -> impl Iterator<Item = AnyElement> + '_ {
         let _ = &self.props;
-        self.editors.iter().map(|(_, editor)| editor.view.clone().into_any_element())
+        self.editors
+            .iter()
+            .map(|(_, editor)| editor.view.clone().into_any_element())
     }
 }
 
@@ -140,23 +161,66 @@ pub struct VoxelTerrainStackEditor {
 }
 
 impl VoxelTerrainStackEditor {
-    fn new(args: &PropertyEditorArgs<'_>, window: &mut Window, cx: &mut gpui::Context<Self>) -> Self {
-        let value = args.current_value.downcast_ref::<VoxelTerrainStack>().cloned().unwrap_or_default();
-        let id = format!("stack-{}-{}-{}", args.id_prefix, args.class_name, args.prop_name);
+    fn new(
+        args: &PropertyEditorArgs<'_>,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> Self {
+        let value = args
+            .current_value
+            .downcast_ref::<VoxelTerrainStack>()
+            .cloned()
+            .unwrap_or_default();
+        let id = format!(
+            "stack-{}-{}-{}",
+            args.id_prefix, args.class_name, args.prop_name
+        );
         let current = Arc::new(Mutex::new(value.clone()));
         let write_back = args.write_back.clone();
-        let names: Vec<SharedString> = VoxelTerrainStack::PRESETS.iter().map(|n| SharedString::from(*n)).collect();
+        let names: Vec<SharedString> = VoxelTerrainStack::PRESETS
+            .iter()
+            .map(|n| SharedString::from(*n))
+            .collect();
         let presets = cx.new(|cx| DropdownState::new(names, None, window, cx));
-        let subs = vec![cx.subscribe_in(&presets, window, |this: &mut Self, _, event: &DropdownEvent<Vec<SharedString>>, window, cx| {
-            let DropdownEvent::Confirm(Some(name)) = event else { return };
-            if let Some(stack) = VoxelTerrainStack::preset(name) {
-                this.write(stack, window, cx);
-            }
-            this.presets.update(cx, |state, cx| state.set_selected_index(None, window, cx));
-        })];
+        let subs = vec![cx.subscribe_in(
+            &presets,
+            window,
+            |this: &mut Self, _, event: &DropdownEvent<Vec<SharedString>>, window, cx| {
+                let DropdownEvent::Confirm(Some(name)) = event else {
+                    return;
+                };
+                if let Some(stack) = VoxelTerrainStack::preset(name) {
+                    this.write(stack, window, cx);
+                }
+                this.presets
+                    .update(cx, |state, cx| state.set_selected_index(None, window, cx));
+            },
+        )];
         let this = cx.weak_entity();
-        let materials = Self::rows(&id, "materials", &this, &current, &write_back, |s| Some(s.clone()), |s, v| replace(s, v), &value, window, cx);
-        let caves = Self::rows(&id, "caves", &this, &current, &write_back, |s| Some(s.caves.clone()), |s, v| replace(&mut s.caves, v), &value.caves, window, cx);
+        let materials = Self::rows(
+            &id,
+            "materials",
+            &this,
+            &current,
+            &write_back,
+            |s| Some(s.clone()),
+            |s, v| replace(s, v),
+            &value,
+            window,
+            cx,
+        );
+        let caves = Self::rows(
+            &id,
+            "caves",
+            &this,
+            &current,
+            &write_back,
+            |s| Some(s.caves.clone()),
+            |s, v| replace(&mut s.caves, v),
+            &value.caves,
+            window,
+            cx,
+        );
         let overhangs = Self::rows(
             &id,
             "overhangs",
@@ -278,13 +342,22 @@ impl VoxelTerrainStackEditor {
 
     fn refresh(&mut self, window: &mut Window, cx: &mut App) {
         self.sync_lists(window, cx);
-        for rows in [&self.materials, &self.caves, &self.overhangs].into_iter().chain(&self.layers).chain(&self.rules) {
+        for rows in [&self.materials, &self.caves, &self.overhangs]
+            .into_iter()
+            .chain(&self.layers)
+            .chain(&self.rules)
+        {
             rows.refresh(window, cx);
         }
     }
 
     /// Replace the whole stack (a preset, a list edit) and write it back.
-    fn write(&mut self, stack: VoxelTerrainStack, window: &mut Window, cx: &mut gpui::Context<Self>) {
+    fn write(
+        &mut self,
+        stack: VoxelTerrainStack,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
         if let Ok(mut current) = self.current.lock() {
             *current = stack.clone();
         }
@@ -293,18 +366,35 @@ impl VoxelTerrainStackEditor {
         cx.notify();
     }
 
-    fn edit_list(&mut self, list: List, edit: ListEdit, window: &mut Window, cx: &mut gpui::Context<Self>) {
+    fn edit_list(
+        &mut self,
+        list: List,
+        edit: ListEdit,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
         let mut stack = self.current.lock().map(|s| s.clone()).unwrap_or_default();
         match list {
-            List::Layers => apply_list_edit(&mut stack.layers, edit, || VoxelTerrainLayer::new(VoxelLayerKind::Hills)),
+            List::Layers => apply_list_edit(&mut stack.layers, edit, || {
+                VoxelTerrainLayer::new(VoxelLayerKind::Hills)
+            }),
             List::Rules => apply_list_edit(&mut stack.rules, edit, VoxelMaterialRule::default),
         }
         self.write(stack, window, cx);
     }
 
     /// Accept a value that changed elsewhere (undo, a blueprint, a preset).
-    fn set_value(&mut self, value: &VoxelTerrainStack, window: &mut Window, cx: &mut gpui::Context<Self>) {
-        let changed = self.current.lock().map(|current| *current != *value).unwrap_or(true);
+    fn set_value(
+        &mut self,
+        value: &VoxelTerrainStack,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let changed = self
+            .current
+            .lock()
+            .map(|current| *current != *value)
+            .unwrap_or(true);
         if !changed {
             return;
         }
@@ -316,26 +406,46 @@ impl VoxelTerrainStackEditor {
     }
 
     fn heading(title: &str, cx: &App) -> AnyElement {
-        gpui::div().pt_2().text_sm().text_color(cx.theme().foreground).child(title.to_string()).into_any_element()
+        gpui::div()
+            .pt_2()
+            .text_sm()
+            .text_color(cx.theme().foreground)
+            .child(title.to_string())
+            .into_any_element()
     }
 
-    fn list_items(&self, list: List, titles: Vec<String>, cx: &mut gpui::Context<Self>) -> Vec<AnyElement> {
+    fn list_items(
+        &self,
+        list: List,
+        titles: Vec<String>,
+        cx: &mut gpui::Context<Self>,
+    ) -> Vec<AnyElement> {
         let rows = match list {
             List::Layers => &self.layers,
             List::Rules => &self.rules,
         };
-        let tag = if list == List::Layers { "layer" } else { "rule" };
+        let tag = if list == List::Layers {
+            "layer"
+        } else {
+            "rule"
+        };
         rows.iter()
             .zip(titles)
             .enumerate()
             .map(|(i, (rows, title))| {
-                let button = |name: &str, icon: IconName, tooltip: &str, edit: ListEdit, cx: &mut gpui::Context<Self>| {
+                let button = |name: &str,
+                              icon: IconName,
+                              tooltip: &str,
+                              edit: ListEdit,
+                              cx: &mut gpui::Context<Self>| {
                     Button::new(SharedString::from(format!("{}-{tag}{i}-{name}", self.id)))
                         .icon(icon)
                         .xsmall()
                         .ghost()
                         .tooltip(tooltip.to_string())
-                        .on_click(cx.listener(move |this, _, window, cx| this.edit_list(list, edit, window, cx)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.edit_list(list, edit, window, cx)
+                        }))
                 };
                 v_flex()
                     .w_full()
@@ -352,9 +462,27 @@ impl VoxelTerrainStackEditor {
                             .child(
                                 h_flex()
                                     .gap_1()
-                                    .child(button("up", IconName::ArrowUp, "Move up", ListEdit::Up(i), cx))
-                                    .child(button("down", IconName::ArrowDown, "Move down", ListEdit::Down(i), cx))
-                                    .child(button("remove", IconName::Trash, "Remove", ListEdit::Remove(i), cx)),
+                                    .child(button(
+                                        "up",
+                                        IconName::ArrowUp,
+                                        "Move up",
+                                        ListEdit::Up(i),
+                                        cx,
+                                    ))
+                                    .child(button(
+                                        "down",
+                                        IconName::ArrowDown,
+                                        "Move down",
+                                        ListEdit::Down(i),
+                                        cx,
+                                    ))
+                                    .child(button(
+                                        "remove",
+                                        IconName::Trash,
+                                        "Remove",
+                                        ListEdit::Remove(i),
+                                        cx,
+                                    )),
                             ),
                     )
                     .children(rows.views())
@@ -364,13 +492,19 @@ impl VoxelTerrainStackEditor {
     }
 
     fn add_button(&self, list: List, label: &str, cx: &mut gpui::Context<Self>) -> AnyElement {
-        let tag = if list == List::Layers { "layer" } else { "rule" };
+        let tag = if list == List::Layers {
+            "layer"
+        } else {
+            "rule"
+        };
         Button::new(SharedString::from(format!("{}-add-{tag}", self.id)))
             .icon(IconName::Plus)
             .label(label.to_string())
             .xsmall()
             .ghost()
-            .on_click(cx.listener(move |this, _, window, cx| this.edit_list(list, ListEdit::Add, window, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.edit_list(list, ListEdit::Add, window, cx)
+            }))
             .into_any_element()
     }
 }
@@ -399,13 +533,22 @@ pub fn set_layer(layer: &mut VoxelTerrainLayer, edited: VoxelTerrainLayer) -> bo
         *layer = edited;
         return false;
     }
-    *layer = VoxelTerrainLayer { enabled: edited.enabled, mask: edited.mask, ..VoxelTerrainLayer::new(edited.kind) };
+    *layer = VoxelTerrainLayer {
+        enabled: edited.enabled,
+        mask: edited.mask,
+        ..VoxelTerrainLayer::new(edited.kind)
+    };
     true
 }
 
 /// A layer's or rule's title: its position and kind or material.
 fn layer_title(index: usize, layer: &VoxelTerrainLayer) -> String {
-    format!("{}. {:?}{}", index + 1, layer.kind, if layer.enabled { "" } else { " (off)" })
+    format!(
+        "{}. {:?}{}",
+        index + 1,
+        layer.kind,
+        if layer.enabled { "" } else { " (off)" }
+    )
 }
 
 fn rule_title(index: usize, rule: &VoxelMaterialRule) -> String {
@@ -413,21 +556,41 @@ fn rule_title(index: usize, rule: &VoxelMaterialRule) -> String {
 }
 
 impl gpui::Render for VoxelTerrainStackEditor {
-    fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+    fn render(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
         let value = self.current.lock().map(|s| s.clone()).unwrap_or_default();
-        let layer_titles = value.layers.iter().enumerate().map(|(i, l)| layer_title(i, l)).collect();
-        let rule_titles = value.rules.iter().enumerate().map(|(i, r)| rule_title(i, r)).collect();
+        let layer_titles = value
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(i, l)| layer_title(i, l))
+            .collect();
+        let rule_titles = value
+            .rules
+            .iter()
+            .enumerate()
+            .map(|(i, r)| rule_title(i, r))
+            .collect();
         let layers = self.list_items(List::Layers, layer_titles, cx);
         let rules = self.list_items(List::Rules, rule_titles, cx);
         let error = validation_error(&value).map(|error| {
-            gpui::div().text_sm().text_color(cx.theme().danger).child(format!("Not generated: {error}"))
+            gpui::div()
+                .text_sm()
+                .text_color(cx.theme().danger)
+                .child(format!("Not generated: {error}"))
         });
         v_flex()
             .w_full()
             .gap_1()
             .child(pulsar_reflection::prims::editor_row(
                 &self.label,
-                Dropdown::new(&self.presets).xsmall().w(px(140.0)).placeholder("Apply preset"),
+                Dropdown::new(&self.presets)
+                    .xsmall()
+                    .w(px(140.0))
+                    .placeholder("Apply preset"),
                 cx,
             ))
             .children(error)
@@ -446,11 +609,18 @@ impl gpui::Render for VoxelTerrainStackEditor {
     }
 }
 
-fn voxel_terrain_stack_editor(args: &PropertyEditorArgs<'_>, window: &mut Window, cx: &mut App) -> BoundPropertyEditor {
+fn voxel_terrain_stack_editor(
+    args: &PropertyEditorArgs<'_>,
+    window: &mut Window,
+    cx: &mut App,
+) -> BoundPropertyEditor {
     let entity = cx.new(|cx| VoxelTerrainStackEditor::new(args, window, cx));
-    BoundPropertyEditor::new(entity, |editor: &mut VoxelTerrainStackEditor, value: &VoxelTerrainStack, window, cx| {
-        editor.set_value(value, window, cx)
-    })
+    BoundPropertyEditor::new(
+        entity,
+        |editor: &mut VoxelTerrainStackEditor, value: &VoxelTerrainStack, window, cx| {
+            editor.set_value(value, window, cx)
+        },
+    )
 }
 
 pulsar_reflection::inventory::submit! {
@@ -469,7 +639,11 @@ mod tests {
         assert_eq!(validation_error(&VoxelTerrainStack::earth()), None);
         let mut stack = VoxelTerrainStack::earth();
         stack.layers.swap(0, 1);
-        assert!(validation_error(&stack).is_some_and(|e| e.contains("Warp")), "{:?}", validation_error(&stack));
+        assert!(
+            validation_error(&stack).is_some_and(|e| e.contains("Warp")),
+            "{:?}",
+            validation_error(&stack)
+        );
     }
 
     #[test]

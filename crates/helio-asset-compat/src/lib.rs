@@ -11,6 +11,7 @@ mod light_converter;
 mod lut;
 mod material_converter;
 mod mesh_converter;
+mod rig_converter;
 mod scene_converter;
 mod texture_loader;
 
@@ -26,6 +27,10 @@ pub use material_converter::{
     upload_scene_materials,
 };
 pub use mesh_converter::{convert_primitive, convert_vertex};
+pub use rig_converter::{
+    ImportedBone, ImportedClip, ImportedJoint, ImportedKey, ImportedRig, ImportedTrack, RigSection,
+    RigVertex, extract_rig,
+};
 pub use scene_converter::{
     ConvertedMesh, ConvertedMeshSection, ConvertedScene, ConvertedSectionedMesh, convert_scene,
 };

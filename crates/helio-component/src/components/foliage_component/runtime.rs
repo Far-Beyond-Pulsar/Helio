@@ -1,14 +1,14 @@
 //! Foliage reaches the foliage passes through its derived source row
 //! (`environment_rows::FoliageSourceRow`), built from the mappings here.
 
-use engine_class_derive::{register_world_component};
+use engine_class_derive::register_world_component;
 
 use super::FoliageComponent;
 
 pub(crate) fn gpu_type(
     component: &FoliageComponent,
 ) -> helio_pass_foliage_place::components::FoliageTypeComponent {
-    use helio_pass_foliage_place::{pack_kind_and_flags, FoliageKind};
+    use helio_pass_foliage_place::{FoliageKind, pack_kind_and_flags};
 
     let flags = u32::from(component.rendering.two_sided)
         * helio_pass_foliage_place::FOLIAGE_FLAG_TWO_SIDED
