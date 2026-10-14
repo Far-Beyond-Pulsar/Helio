@@ -322,6 +322,26 @@ pub fn option_values_from_hashmap(
     vals
 }
 
+/// Deserialize importer settings saved in an import database record.
+pub fn option_values_from_json(
+    json: &serde_json::Value,
+) -> Option<HashMap<String, Box<dyn Any + Send>>> {
+    serde_json::from_value::<helio_asset_compat::OptionValues>(json.clone())
+        .ok()
+        .map(|values| hashmap_from_option_values(&values))
+}
+
+/// Serialize importer settings for storage in an import database record.
+pub fn option_values_to_json(map: &HashMap<String, Box<dyn Any + Send>>) -> serde_json::Value {
+    let mut json = serde_json::Map::new();
+    for (key, value) in map {
+        if let Ok(value) = RUNTIME_TYPE_REGISTRY.serialize_json_for_any(value.as_ref()) {
+            json.insert(key.clone(), value);
+        }
+    }
+    serde_json::Value::Object(json)
+}
+
 /// Native asset path for an imported source model: `<dest_dir>/<stem>.mesh`
 /// (e.g. dropping `foo.fbx` into `dir` → `dir/foo.mesh`).
 pub fn native_mesh_path(dest_dir: &Path, source: &Path) -> PathBuf {
@@ -786,24 +806,6 @@ pub fn import_model_to_native(
     let content_id = content_id_for_bytes(&upload.geometry);
     std::fs::write(native, encode_asset(&upload, content_id))
         .map_err(|e| format!("failed to write native mesh {}: {e}", native.display()))?;
-
-    // Persist chosen options for reimport / configurator pre-fill (#409).
-    if let Some(root) = engine_state::get_project_path() {
-        let root = Path::new(&root);
-        let key = engine_fs::import_options::asset_key(root, native);
-        let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if let Some(schema) = helio_asset_compat::options_schema_for_extension(ext) {
-            let mut json_map = serde_json::Map::new();
-            for field in &schema.fields {
-                if let Some(val) = values.get(&field.key) {
-                    if let Ok(json) = RUNTIME_TYPE_REGISTRY.serialize_json_for_any(val.as_ref()) {
-                        json_map.insert(field.key.clone(), json);
-                    }
-                }
-            }
-            let _ = engine_fs::import_options::set(root, &key, serde_json::Value::Object(json_map));
-        }
-    }
 
     // Placed meshes naming this asset reload it (the level editor subscribes).
     pulsar_events::publish_asset_updated(
