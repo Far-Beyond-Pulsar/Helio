@@ -408,6 +408,10 @@ pub struct Planned {
     pub evicted: Vec<TileKey>,
     /// What the plan was made for.
     pub made_for: PlannedFor,
+    /// The frame whose eye it was made for, and the worker's milliseconds
+    /// on it (plan and eviction).
+    pub frame: u64,
+    pub ms: f64,
 }
 
 /// What a plan was made for: events up to this number had reached the
@@ -455,13 +459,14 @@ impl Worker {
                             Event::Stale(k) => planner.set_stale(k),
                         }
                     }
+                    let started = std::time::Instant::now();
                     let plan = planner.plan(&grid, job.eye, job.velocity, job.view, job.frame);
                     let evicted = planner.evict(job.frame);
                     let now: FxHashSet<TileKey> = plan.drawn.iter().copied().collect();
                     let added = plan.drawn.iter().filter(|k| !drawn.contains(k)).copied().collect();
                     let removed = drawn.iter().filter(|k| !now.contains(k)).copied().collect();
                     drawn = now;
-                    if outbox.send(Planned { plan, added, removed, evicted, made_for: PlannedFor { events_seen: job.events_seen, eye: job.eye, view: job.view } }).is_err() {
+                    if outbox.send(Planned { plan, added, removed, evicted, made_for: PlannedFor { events_seen: job.events_seen, eye: job.eye, view: job.view }, frame: job.frame, ms: started.elapsed().as_secs_f64() * 1e3 }).is_err() {
                         break;
                     }
                 }

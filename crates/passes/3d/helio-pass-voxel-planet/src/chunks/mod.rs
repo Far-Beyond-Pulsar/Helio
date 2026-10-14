@@ -558,6 +558,10 @@ pub struct UpdateStats {
     /// Drawn tiles in view coarser than wanted, as a share of the drawn
     /// tiles in view.
     pub coarse_share: f64,
+    /// Frames since the eye the plan in use was made for, and the worker's
+    /// milliseconds on it.
+    pub plan_age: u64,
+    pub plan_ms: f64,
     /// [`residency::Plan::worst_px`] of the latest plan, and its tile.
     pub worst_px: f64,
     pub worst: Option<residency::Worst>,
@@ -766,6 +770,9 @@ pub struct ChunkWorld {
     last_requests: usize,
     /// What the latest plan was made for (none: no plan yet).
     planned_for: Option<residency::PlannedFor>,
+    /// The frame the current plan was made for and the worker's
+    /// milliseconds on it.
+    plan_made: (u64, f64),
 
     /// GPU cost of generation: measured (moving averages) from
     /// [`GenCost::PRIOR`].
@@ -1434,6 +1441,7 @@ impl ChunkWorld {
             pending: None,
             last_requests: 0,
             planned_for: None,
+            plan_made: (0, 0.0),
 
             cost: GenCost::PRIOR,
             last_generated: (0, 0),
@@ -1914,7 +1922,10 @@ impl ChunkWorld {
             added = planned.added;
             removed = planned.removed;
             self.planned_for = Some(planned.made_for);
+            self.plan_made = (planned.frame, planned.ms);
         }
+        stats.plan_age = frame.saturating_sub(self.plan_made.0);
+        stats.plan_ms = self.plan_made.1;
         // Events the plan has not seen, or another eye or view (a camera
         // that moved since): its requests are not yet known.
         let unseen = !self.events.is_empty() || self.planned_for != Some(residency::PlannedFor { events_seen: worker.events_sent(), eye, view });
