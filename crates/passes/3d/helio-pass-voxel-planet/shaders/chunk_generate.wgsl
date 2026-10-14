@@ -430,9 +430,21 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
         // The column's own volume terms, once for all its cells.
         let volume = column_volume(p, level);
         let step = distance(vec3<f32>(volume_point(face, i, j, top + 1, level)), vec3<f32>(volume_point(face, i, j, top, level))) + 2.0;
+        // Cells no cave can carve (under the rock cover, past the cave
+        // depth) keep the surface's bits, set above, out of the lean's band:
+        // the scan steps to the next cell either may change.
+        let caves = cave_window(volume, height, level);
         var scan = k_lo;
         loop {
             if scan >= k_hi { break; }
+            if (scan < caves.x || scan > caves.y) && scan < band_lo {
+                scan = min(select(k_hi, caves.x, scan < caves.x), band_lo);
+                continue;
+            }
+            if (scan < caves.x || scan > caves.y) && column.w == 0 {
+                scan = select(k_hi, caves.x, scan < caves.x);
+                continue;
+            }
             if scan < band_lo {
                 let clear = terrain_clearance(volume_point(face, i, j, scan, level), level, step);
                 if clear > 0 {

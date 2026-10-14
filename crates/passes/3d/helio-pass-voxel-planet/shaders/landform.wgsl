@@ -204,6 +204,23 @@ fn column_volume(p: vec3<i32>, level: u32) -> ColumnVolume {
     return c;
 }
 
+// Cells [lo, hi] of a column (field height `height` mm, volume `c`) a cave
+// may carve: in a cave region, between the rock cover and the cave depth
+// (any depth over that at a tunnel entrance), where both depth ramps of
+// `terrain_density` can open (lo > hi: none). Elsewhere a cell is solid as
+// the surface and overhangs make it.
+fn cave_window(c: ColumnVolume, height: i32, level: u32) -> vec2<i32> {
+    let v = terrain.volume;
+    let caves = landform_caves_at(level);
+    if !(caves.x || caves.y) || c.region == 0 { return vec2<i32>(1, 0); }
+    let cell = v[3].w << level;
+    // A cell's depth is height - (k cell + cell / 2).
+    let lo = -div_floor(v[0].w + cell / 2 - height, cell);
+    var hi = div_floor(height - v[3].z - cell / 2, cell);
+    if caves.x && c.entrance > 0 { hi = 0x3fffffff; }
+    return vec2<i32>(lo, hi);
+}
+
 // Signed distance of a cell to the surface, CSG of the surface, overhangs
 // and caves (`LandformVolume::density`); `height` is the column's field
 // height (mm), the surface the volume folds, and `lean_height` the height
