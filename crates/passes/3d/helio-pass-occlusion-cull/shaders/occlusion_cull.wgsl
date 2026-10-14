@@ -49,7 +49,7 @@ struct CullParams {
 }
 @group(0) @binding(1) var<uniform> params: CullParams;
 
-// GpuInstanceData: 208 bytes, must match libhelio/src/instance.rs exactly.
+// GpuInstanceData: 224 bytes, must match libhelio/src/instance.rs exactly.
 struct GpuInstanceData {
     model_col0:      vec4<f32>,  //   0 – 15
     model_col1:      vec4<f32>,  //  16 – 31
@@ -67,6 +67,10 @@ struct GpuInstanceData {
     material_id:     u32,        // 196
     flags:           u32,        // 200
     _pad:            u32,        // 204
+    skin_vertex_offset: u32,
+    bone_palette_offset: u32,
+    bone_palette_count: u32,
+    _skin_pad: u32,
 }
 @group(0) @binding(2) var<storage, read> instances: array<GpuInstanceData>;
 

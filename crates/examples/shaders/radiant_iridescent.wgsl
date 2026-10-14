@@ -76,6 +76,10 @@ struct GpuInstanceData {
     material_id:    u32,
     flags:          u32,
     lightmap_index: u32,
+    skin_vertex_offset: u32,
+    bone_palette_offset: u32,
+    bone_palette_count: u32,
+    _skin_pad: u32,
 }
 
 struct LightmapAtlasRegion {

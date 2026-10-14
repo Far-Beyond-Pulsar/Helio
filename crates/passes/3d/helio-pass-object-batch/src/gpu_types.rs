@@ -97,7 +97,7 @@ pub const fn coordinate_space(flags: u32) -> u32 {
     (flags & INSTANCE_COORDINATE_SPACE_MASK) >> INSTANCE_COORDINATE_SPACE_SHIFT
 }
 
-/// Per-instance data for GPU-driven rendering. 208 bytes.
+/// Per-instance data for GPU-driven rendering. 224 bytes.
 ///
 /// Uploaded once when instances change (dirty tracking), then read-only on GPU.
 /// The vertex shader uses `instance_index` to look up this data from a storage buffer.
@@ -137,6 +137,13 @@ pub struct GpuInstanceData {
     pub flags: u32,
     /// Index into the lightmap atlas regions buffer (0xFFFFFFFF = no lightmap)
     pub lightmap_index: u32,
+    /// Base vertex in the skeletal four-influence stream (zero for rigid meshes).
+    pub skin_vertex_offset: u32,
+    /// Base matrix in the shared skeletal palette pool.
+    pub bone_palette_offset: u32,
+    /// Number of matrices available to this instance.
+    pub bone_palette_count: u32,
+    pub _skin_pad: u32,
 }
 
 /// Per-instance AABB in world space for GPU culling. 32 bytes.

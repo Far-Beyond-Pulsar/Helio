@@ -153,7 +153,7 @@ pulsar_scenedb::pulsar_reflection::inventory::submit! {
 
 /// A surface as a material row: scalar PBR values plus any graph texture slots.
 /// `alpha < 1` selects the blended, transparent-only path (glass).
-fn surface_material(
+pub(crate) fn surface_material(
     surface: &ImportedSurfaceMaterial,
     graph_texture_slots: [u32; 5],
 ) -> helio::GpuMaterial {

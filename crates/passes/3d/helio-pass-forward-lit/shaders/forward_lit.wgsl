@@ -82,6 +82,10 @@ struct GpuInstanceData {
     material_id:  u32,
     flags:        u32,
     lightmap_index: u32,
+    skin_vertex_offset: u32,
+    bone_palette_offset: u32,
+    bone_palette_count: u32,
+    _skin_pad: u32,
 }
 
 struct GpuLight {
@@ -151,6 +155,9 @@ struct Transform {
 // `.range`/`.outer_angle` (the `.w` components) are real light properties,
 // not positional data, and still come from `lights` as before.
 @group(0) @binding(8) var<storage, read>    transforms: array<Transform>;
+struct SkinVertex { joints: vec4<u32>, weights: vec4<f32> }
+@group(0) @binding(9) var<storage, read> skin_vertices: array<SkinVertex>;
+@group(0) @binding(10) var<storage, read> bone_palette: array<mat4x4<f32>>;
 
 @group(1) @binding(0) var<storage, read>    materials:         array<GpuMaterial>;
 @group(1) @binding(1) var<storage, read>    material_textures: array<MaterialTextureData>;
@@ -182,9 +189,30 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
 // `slot` is per-instance vertex data, which every backend offsets by the
 // indirect draw's `first_instance` (`helio_pass_gbuffer::draw_slots`).
 @vertex
-fn vs_main(v: Vertex, @location(15) slot: u32) -> VertexOutput {
+fn vs_main(v: Vertex, @location(15) slot: u32, @builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     let inst       = instance_data[compacted_indices[slot]];
-    let world_pos  = inst.transform * vec4<f32>(v.position, 1.0);
+    var local_position = v.position;
+    var local_normal = decode_snorm8x4(v.normal);
+    var local_tangent = decode_snorm8x4(v.tangent);
+    if inst.bone_palette_count > 0u {
+        let skin = skin_vertices[vertex_index + inst.skin_vertex_offset];
+        var blended = mat4x4<f32>(vec4f(0.0), vec4f(0.0), vec4f(0.0), vec4f(0.0));
+        var total = 0.0;
+        for (var i = 0u; i < 4u; i = i + 1u) {
+            if skin.weights[i] > 0.0 && skin.joints[i] < inst.bone_palette_count {
+                blended += bone_palette[inst.bone_palette_offset + skin.joints[i]] * skin.weights[i];
+                total += skin.weights[i];
+            }
+        }
+        if total > 0.00001 {
+            blended = blended * (1.0 / total);
+            local_position = (blended * vec4f(v.position, 1.0)).xyz;
+            let skin_normal = mat3x3<f32>(blended[0].xyz, blended[1].xyz, blended[2].xyz);
+            local_normal = normalize(skin_normal * local_normal);
+            local_tangent = normalize(skin_normal * local_tangent);
+        }
+    }
+    let world_pos  = inst.transform * vec4<f32>(local_position, 1.0);
 
     let normal_mat = mat3x3<f32>(
         inst.normal_mat_0.xyz,
@@ -201,8 +229,8 @@ fn vs_main(v: Vertex, @location(15) slot: u32) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position  = cameras[0].proj * (cameras[0].view * world_pos);
     out.world_position = world_pos.xyz;
-    out.world_normal   = normalize(normal_mat  * decode_snorm8x4(v.normal));
-    out.world_tangent  = normalize(model_mat3  * decode_snorm8x4(v.tangent));
+    out.world_normal   = normalize(normal_mat  * local_normal);
+    out.world_tangent  = normalize(model_mat3  * local_tangent);
     out.bitangent_sign = v.bitangent_sign;
     out.tex_coords     = v.tex_coords;
     out.material_id    = inst.material_id;

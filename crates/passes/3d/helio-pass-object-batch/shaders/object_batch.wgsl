@@ -128,6 +128,10 @@ struct StaticObjectRow {
     graph_hash_lo: u32,
     graph_hash_hi: u32,
     flags: u32,
+    skin_vertex_offset: u32,
+    bone_palette_offset: u32,
+    bone_palette_count: u32,
+    _skin_pad: u32,
 }
 @group(0) @binding(1) var<storage, read> static_objects: array<StaticObjectRow>;
 
@@ -388,6 +392,10 @@ struct GpuInstanceDataOut {
     material_id: u32,
     flags: u32,
     lightmap_index: u32,
+    skin_vertex_offset: u32,
+    bone_palette_offset: u32,
+    bone_palette_count: u32,
+    _skin_pad: u32,
 }
 // Layout mirrors `GpuAabb` in indirect_dispatch.wgsl (32 bytes: min, pad, max, pad).
 struct GpuInstanceAabbOut {
@@ -428,6 +436,10 @@ fn cs_final_gather(@builtin(global_invocation_id) gid: vec3<u32>) {
         row.material_slot,
         row.flags,
         0xFFFFFFFFu,
+        row.skin_vertex_offset,
+        row.bone_palette_offset,
+        row.bone_palette_count,
+        0u,
     );
     // Conservative world AABB: the bounding sphere's box.
     let r = row.bounds[3];

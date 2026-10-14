@@ -16,7 +16,8 @@ pub struct DepthPrepassPass {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<[wgpu::Buffer; 3]>,
+    bind_group_key: Option<[wgpu::Buffer; 5]>,
+    fallback_skeletal_storage: wgpu::Buffer,
 }
 
 impl DepthPrepassPass {
@@ -55,6 +56,26 @@ impl DepthPrepassPass {
                 // surviving instance slots written by IndirectDispatchPass.
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -122,12 +143,20 @@ impl DepthPrepassPass {
             cache: None,
         });
 
+        let fallback_skeletal_storage = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Empty skeletal storage"),
+            size: 64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             draw_slots: Default::default(),
             pipeline,
             bind_group_layout,
             bind_group: None,
             bind_group_key: None,
+            fallback_skeletal_storage,
         }
     }
 }
@@ -200,12 +229,18 @@ impl RenderPass for DepthPrepassPass {
                     "DepthPrepass requires builtin_mesh_index".to_string(),
                 )
             })?;
+        let skin = ctx.scene_buffers.get(BufferKey::of("skeletal_skin_vertices"));
+        let palette = ctx.scene_buffers.get(BufferKey::of("skeletal_bone_palette"));
+        let skin_buffer = skin.map(|h| &h.buffer).unwrap_or(&self.fallback_skeletal_storage);
+        let palette_buffer = palette.map(|h| &h.buffer).unwrap_or(&self.fallback_skeletal_storage);
 
         // Extract before the mutable encoder borrow.
         let key = [
             ctx.camera.clone(),
             batch.instances.clone(),
             culled.compacted_indices.clone(),
+            skin_buffer.clone(),
+            palette_buffer.clone(),
         ];
         if self.bind_group_key.as_ref() != Some(&key) {
             log::debug!("DepthPrepass: rebuilding bind group (buffers changed)");
@@ -224,6 +259,14 @@ impl RenderPass for DepthPrepassPass {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: culled.compacted_indices.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: skin_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: palette_buffer.as_entire_binding(),
                     },
                 ],
             }));

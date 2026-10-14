@@ -42,7 +42,7 @@ struct VgObjectData {
     lod_meshlet_counts:   array<u32, 8>,
 }
 
-/// Mirrors GpuInstanceData (Rust, 208 bytes).
+/// Mirrors GpuInstanceData (Rust, 224 bytes).
 struct InstanceData {
     transform:    mat4x4<f32>,
     normal_mat_0: vec4<f32>,
@@ -54,6 +54,10 @@ struct InstanceData {
     material_id:  u32,
     flags:        u32,
     _pad:         u32,
+    skin_vertex_offset: u32,
+    bone_palette_offset: u32,
+    bone_palette_count: u32,
+    _skin_pad: u32,
 }
 
 struct InstanceCullData {
@@ -151,6 +155,13 @@ fn cull_meshlet(meshlet_index: u32, instance_index: u32, lod_level: u32) {
 
     let m = meshlets[meshlet_index];
     let inst = instances[instance_index];
+    // Skeletal meshes use the shared indexed-vertex skin stream and bone
+    // palette, while VG meshlets index a repacked triangle stream. Until VG
+    // carries a per-corner source-vertex remap, do not publish them here;
+    // the regular skinned GBuffer path renders these instances instead.
+    if inst.bone_palette_count > 0u {
+        return;
+    }
     let inst_cull = instance_cull[instance_index];
     if inst_cull.valid_transform == 0u {
         return;

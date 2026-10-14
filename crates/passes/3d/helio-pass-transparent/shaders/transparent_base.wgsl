@@ -67,12 +67,19 @@ struct GpuInstanceData {
     material_id:   u32,
     flags:         u32,
     lightmap_index: u32,
+    skin_vertex_offset: u32,
+    bone_palette_offset: u32,
+    bone_palette_count: u32,
+    _skin_pad: u32,
 }
 
 // ── Bindings ────────────────────────────────────────────────────────
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform>          globals:       Globals;
 @group(0) @binding(2) var<storage, read>    instance_data: array<GpuInstanceData>;
+struct SkinVertex { joints: vec4<u32>, weights: vec4<f32> }
+@group(0) @binding(3) var<storage, read> skin_vertices: array<SkinVertex>;
+@group(0) @binding(4) var<storage, read> bone_palette: array<mat4x4<f32>>;
 
 @group(1) @binding(0) var<storage, read>    materials:         array<GpuMaterial>;
 @group(1) @binding(1) var<storage, read>    material_textures: array<MaterialTextureData>;
@@ -100,14 +107,32 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
 }
 
 @vertex
-fn vs_main(vertex: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
+fn vs_main(vertex: Vertex, @builtin(instance_index) slot: u32, @builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     let inst       = instance_data[slot];
-    let world_pos  = inst.model * vec4<f32>(vertex.position, 1.0);
+    var local_position = vertex.position;
+    var local_normal = decode_snorm8x4(vertex.normal);
+    if inst.bone_palette_count > 0u {
+        let skin = skin_vertices[vertex_index + inst.skin_vertex_offset];
+        var blended = mat4x4<f32>(vec4f(0.0), vec4f(0.0), vec4f(0.0), vec4f(0.0));
+        var total = 0.0;
+        for (var i = 0u; i < 4u; i = i + 1u) {
+            if skin.weights[i] > 0.0 && skin.joints[i] < inst.bone_palette_count {
+                blended += bone_palette[inst.bone_palette_offset + skin.joints[i]] * skin.weights[i];
+                total += skin.weights[i];
+            }
+        }
+        if total > 0.00001 {
+            blended = blended * (1.0 / total);
+            local_position = (blended * vec4f(vertex.position, 1.0)).xyz;
+            local_normal = normalize(mat3x3<f32>(blended[0].xyz, blended[1].xyz, blended[2].xyz) * local_normal);
+        }
+    }
+    let world_pos  = inst.model * vec4<f32>(local_position, 1.0);
     let normal_mat = mat3x3<f32>(inst.normal_mat[0].xyz, inst.normal_mat[1].xyz, inst.normal_mat[2].xyz);
     var out: VertexOutput;
     out.clip_position  = cameras[0].proj * (cameras[0].view * world_pos);
     out.world_position = world_pos.xyz;
-    out.world_normal   = normalize(normal_mat * decode_snorm8x4(vertex.normal));
+    out.world_normal   = normalize(normal_mat * local_normal);
     out.tex_coords     = vertex.tex_coords;
     out.material_id    = inst.material_id;
     return out;

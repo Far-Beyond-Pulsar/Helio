@@ -25,6 +25,10 @@ struct GpuInstanceData {
     material_id:  u32,
     flags:        u32,
     _pad:         u32,
+    skin_vertex_offset: u32,
+    bone_palette_offset: u32,
+    bone_palette_count: u32,
+    _skin_pad: u32,
 }
 
 struct FaceIndex {
@@ -68,6 +72,9 @@ struct TransmitParams {
 @group(1) @binding(2) var<uniform>       params:        TransmitParams;
 
 @group(0) @binding(4) var<storage,read> dirty:array<u32>;
+struct SkinVertex { joints: vec4<u32>, weights: vec4<f32> }
+@group(0) @binding(5) var<storage, read> skin_vertices: array<SkinVertex>;
+@group(0) @binding(6) var<storage, read> bone_palette: array<mat4x4<f32>>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -77,13 +84,27 @@ struct VsOut {
 @vertex
 fn vs_main(
     @location(0)             position: vec3<f32>,
+    @builtin(vertex_index)    vertex_index: u32,
     // Per-instance vertex data, offset by the indirect draw's `first_instance`
     // on every backend (`helio_pass_gbuffer::draw_slots`).
     @location(15)            slot:     u32,
 ) -> VsOut {
     let inst  = instances[slot];
+    var local_position = position;
+    if inst.bone_palette_count > 0u {
+        let skin = skin_vertices[vertex_index + inst.skin_vertex_offset];
+        var blended = mat4x4<f32>(vec4f(0.0), vec4f(0.0), vec4f(0.0), vec4f(0.0));
+        var total = 0.0;
+        for (var i = 0u; i < 4u; i = i + 1u) {
+            if skin.weights[i] > 0.0 && skin.joints[i] < inst.bone_palette_count {
+                blended += bone_palette[inst.bone_palette_offset + skin.joints[i]] * skin.weights[i];
+                total += skin.weights[i];
+            }
+        }
+        if total > 0.00001 { local_position = (blended * (1.0 / total) * vec4f(position, 1.0)).xyz; }
+    }
     let space = coordinate_spaces[(inst.flags >> 8u) & 0xFFu];
-    let world = space * (inst.transform * vec4<f32>(position, 1.0));
+    let world = space * (inst.transform * vec4<f32>(local_position, 1.0));
     var out: VsOut;
     out.pos = shadow_matrices[face.value].mat * world;
     if face._pad0 != 0u && dirty[face.value]==0u {out.pos=vec4f(2,2,2,1);}

@@ -503,4 +503,3 @@ fn unpack_snorm4x8(packed: u32) -> [f32; 4] {
         bytes[3] as i8 as f32 / 127.0,
     ]
 }
-

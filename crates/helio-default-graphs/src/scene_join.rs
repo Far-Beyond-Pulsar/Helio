@@ -60,7 +60,7 @@ pub const MESH_SECTION_ROW_BYTES: u64 = 128;
 /// A `GpuLight` in light space, bit 31 of its `_pad` word carrying `enabled`.
 pub const LIGHT_SOURCE_ROW_BYTES: u64 = 128;
 
-const OBJECT_ROW_BYTES: u64 = 236;
+const OBJECT_ROW_BYTES: u64 = 252;
 const MATERIAL_ROW_BYTES: u64 = 96;
 const LIGHT_ROW_BYTES: u64 = 128;
 const BILLBOARD_ROW_BYTES: u64 = 48;
@@ -86,6 +86,9 @@ pub struct SceneJoinKeys {
     pub mesh_flags: BufferKey,
     /// Mesh instances' section ranges (handle table of `mesh_sections`).
     pub section_handles: BufferKey,
+    /// Optional per-instance four-influence skin stream and bone palette ranges.
+    pub skin_handles: BufferKey,
+    pub palette_handles: BufferKey,
     /// The section pool; one output object row per pool slot.
     pub mesh_sections: BufferKey,
     /// Light instances' light-space rows, keyed by the instance entity.
@@ -336,6 +339,8 @@ impl SceneDerivation for SceneJoin {
         let mesh_bounds = self.input(inputs, keys.mesh_bounds, MESH_BOUNDS_ROW_BYTES);
         let mesh_flags = self.input(inputs, keys.mesh_flags, MESH_FLAGS_ROW_BYTES);
         let section_handles = self.input(inputs, keys.section_handles, HANDLE_ROW_BYTES);
+        let skin_handles = self.input(inputs, keys.skin_handles, HANDLE_ROW_BYTES);
+        let palette_handles = self.input(inputs, keys.palette_handles, HANDLE_ROW_BYTES);
         let sections = self.input(inputs, keys.mesh_sections, MESH_SECTION_ROW_BYTES);
         let sources = self.input(inputs, keys.light_sources, LIGHT_SOURCE_ROW_BYTES);
         let mut recorded = false;
@@ -357,6 +362,8 @@ impl SceneDerivation for SceneJoin {
             mesh_bounds,
             mesh_flags,
             section_handles,
+            skin_handles,
+            palette_handles,
             sections,
         ];
         let mesh_signature = signature(
@@ -410,9 +417,11 @@ impl SceneDerivation for SceneJoin {
                         entry(7, mesh_bounds.map_or(&self.empty, |h| &h.buffer)),
                         entry(8, mesh_flags.map_or(&self.empty, |h| &h.buffer)),
                         entry(9, &section_handles.buffer),
-                        entry(10, &sections.buffer),
-                        entry(11, &self.objects.buffer),
-                        entry(12, &self.materials.buffer),
+                        entry(10, skin_handles.map_or(&self.empty, |h| &h.buffer)),
+                        entry(11, palette_handles.map_or(&self.empty, |h| &h.buffer)),
+                        entry(12, &sections.buffer),
+                        entry(13, &self.objects.buffer),
+                        entry(14, &self.materials.buffer),
                     ],
                 });
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

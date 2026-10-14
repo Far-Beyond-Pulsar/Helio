@@ -17,7 +17,7 @@
 
 /// Bytes per `GpuInstanceData` (helio-pass-object-batch), for passes whose
 /// slot indexes the instance buffer itself.
-pub const INSTANCE_BYTES: u64 = 208;
+pub const INSTANCE_BYTES: u64 = 224;
 
 /// The vertex location every GPU-driven vertex shader reads its slot from.
 pub const DRAW_SLOT_LOCATION: u32 = 15;

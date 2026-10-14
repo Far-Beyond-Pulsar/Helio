@@ -103,7 +103,7 @@ struct MaterialTextureData {
     params:             vec4<f32>,
 }
 
-/// Must match GpuInstanceData in libhelio exactly (208 bytes).
+/// Must match GpuInstanceData in libhelio exactly (224 bytes).
 struct GpuInstanceData {
     transform:      mat4x4<f32>,
     normal_mat_0:   vec4<f32>,
@@ -115,6 +115,10 @@ struct GpuInstanceData {
     material_id:    u32,
     flags:          u32,
     lightmap_index: u32,
+    skin_vertex_offset: u32,
+    bone_palette_offset: u32,
+    bone_palette_count: u32,
+    _skin_pad: u32,
 }
 
 /// Must match libhelio::GpuPortalView (144 bytes).
@@ -153,6 +157,9 @@ struct GpuPortalChainHandle {
 // per-stage world-space clip below.
 @group(0) @binding(9) var portal_mask: texture_2d<u32>;
 @group(0) @binding(10) var<storage, read> portal_chain_portals: array<u32>;
+struct SkinVertex { joints: vec4<u32>, weights: vec4<f32> }
+@group(0) @binding(11) var<storage, read> skin_vertices: array<SkinVertex>;
+@group(0) @binding(12) var<storage, read> bone_palette: array<mat4x4<f32>>;
 
 @group(1) @binding(0) var<storage, read>    materials:          array<GpuMaterial>;
 @group(1) @binding(1) var<storage, read>    material_textures:  array<MaterialTextureData>;
@@ -188,7 +195,7 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
 // `instance_index` is per-instance vertex data, which every backend offsets by the
 // indirect draw's `first_instance` (`helio_pass_gbuffer::draw_slots`).
 @vertex
-fn vs_main(v: Vertex, @location(15) instance_index: u32) -> VertexOutput {
+fn vs_main(v: Vertex, @location(15) instance_index: u32, @builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     let slot_idx = portal_compacted_indices[instance_index];
     let chain_idx = portal_compacted_chains[instance_index];
     let inst = instance_data[slot_idx];
@@ -203,8 +210,31 @@ fn vs_main(v: Vertex, @location(15) instance_index: u32) -> VertexOutput {
     let own_space      = coordinate_spaces[own_space_id];
     let own_space_prev = coordinate_spaces_prev[own_space_id];
 
-    var pos      = own_space * (inst.transform * vec4<f32>(v.position, 1.0));
-    var pos_prev = own_space_prev * (inst.prev_model * vec4<f32>(v.position, 1.0));
+    var local_position = v.position;
+    var previous_local_position = v.position;
+    var local_normal = decode_snorm8x4(v.normal);
+    if inst.bone_palette_count > 0u {
+        let skin = skin_vertices[vertex_index + inst.skin_vertex_offset];
+        var current_blended = mat4x4<f32>(vec4f(0.0), vec4f(0.0), vec4f(0.0), vec4f(0.0));
+        var previous_blended = mat4x4<f32>(vec4f(0.0), vec4f(0.0), vec4f(0.0), vec4f(0.0));
+        var total = 0.0;
+        for (var i = 0u; i < 4u; i = i + 1u) {
+            if skin.weights[i] > 0.0 && skin.joints[i] < inst.bone_palette_count {
+                current_blended += bone_palette[inst.bone_palette_offset + skin.joints[i]] * skin.weights[i];
+                previous_blended += bone_palette[inst.bone_palette_offset + inst.bone_palette_count + skin.joints[i]] * skin.weights[i];
+                total += skin.weights[i];
+            }
+        }
+        if total > 0.00001 {
+            current_blended = current_blended * (1.0 / total);
+            previous_blended = previous_blended * (1.0 / total);
+            local_position = (current_blended * vec4f(v.position, 1.0)).xyz;
+            previous_local_position = (previous_blended * vec4f(v.position, 1.0)).xyz;
+            local_normal = normalize(mat3x3<f32>(current_blended[0].xyz, current_blended[1].xyz, current_blended[2].xyz) * local_normal);
+        }
+    }
+    var pos      = own_space * (inst.transform * vec4<f32>(local_position, 1.0));
+    var pos_prev = own_space_prev * (inst.prev_model * vec4<f32>(previous_local_position, 1.0));
     let pre_portal_position = pos.xyz;
     var space_rot = mat3x3<f32>(own_space[0].xyz, own_space[1].xyz, own_space[2].xyz);
 
@@ -239,7 +269,7 @@ fn vs_main(v: Vertex, @location(15) instance_index: u32) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position      = cameras[0].view_proj * world_pos;
     out.world_position     = world_pos.xyz;
-    out.world_normal       = normalize(normal_mat * decode_snorm8x4(v.normal));
+    out.world_normal       = normalize(normal_mat * local_normal);
     out.world_tangent      = normalize(model_mat3 * decode_snorm8x4(v.tangent));
     out.bitangent_sign     = v.bitangent_sign;
     out.tex_coords         = v.tex_coords;

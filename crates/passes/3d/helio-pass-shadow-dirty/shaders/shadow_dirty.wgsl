@@ -6,7 +6,7 @@ const MOVE_EPSILON: f32 = 0.0001;
 
 // ── Structs ───────────────────────────────────────────────────────────────────
 
-/// Must match GpuInstanceData in libhelio/src/instance.rs (208 bytes).
+/// Must match GpuInstanceData in libhelio/src/instance.rs (224 bytes).
 /// We only need the transform and bounds, so we read partial data.
 struct GpuInstance {
     transform:    mat4x4f,  // model matrix, 64 bytes
@@ -19,6 +19,10 @@ struct GpuInstance {
     material_id:  u32,
     flags:        u32,
     lightmap_index: u32,
+    skin_vertex_offset: u32,
+    bone_palette_offset: u32,
+    bone_palette_count: u32,
+    _skin_pad: u32,
 }
 
 /// Matches wgpu DrawIndexedIndirect layout (20 bytes).
