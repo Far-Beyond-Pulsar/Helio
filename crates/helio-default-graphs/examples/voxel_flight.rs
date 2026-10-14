@@ -329,6 +329,9 @@ fn chunk_config(h: u32, budget: usize) -> helio_pass_voxel_planet::chunks::Resid
         plan: PlanConfig {
             pixel_angle: 2.0 * std::f64::consts::FRAC_PI_8.tan() / f64::from(h),
             lod_pixels: lod,
+            // `HELIO_VOXEL_OFFSCREEN_PIXELS`: out of view (2).
+            offscreen_pixels: std::env::var("HELIO_VOXEL_OFFSCREEN_PIXELS").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0),
+            view_guard: 0.35,
             coarsen: 0.8,
             max_distance: 400_000.0,
             prefetch_seconds: 0.5,

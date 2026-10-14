@@ -591,7 +591,8 @@ pub struct ResidencyConfig {
 }
 
 impl Default for ResidencyConfig {
-    /// Cells of a pixel or less (a 45 degree view 1080 pixels tall), 400 km
+    /// Cells of a pixel or less in view (two out of it, past a 20 degree
+    /// guard; a 45 degree view 1080 pixels tall), 400 km
     /// out, half a second of prefetch, two seconds of keep; up to 256 tiles
     /// and 3 ms of generation a frame.
     fn default() -> Self {
@@ -599,6 +600,8 @@ impl Default for ResidencyConfig {
             plan: residency::PlanConfig {
                 pixel_angle: 2.0 * std::f64::consts::FRAC_PI_8.tan() / 1080.0,
                 lod_pixels: 1.0,
+                offscreen_pixels: 2.0,
+                view_guard: 0.35,
                 coarsen: 0.8,
                 max_distance: 400_000.0,
                 prefetch_seconds: 0.5,

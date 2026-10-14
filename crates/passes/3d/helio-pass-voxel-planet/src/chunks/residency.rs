@@ -4,7 +4,7 @@
 //! A tile is refined while its cells would project larger than
 //! `lod_pixels` pixels from the eye or from where the eye will be
 //! `prefetch_seconds` ahead (and stays refined until they fall under
-//! `coarsen` of that). A refined tile keeps being drawn until all four of
+//! `coarsen` of that); out of view, `offscreen_pixels` times that. A refined tile keeps being drawn until all four of
 //! its children are generated, so nothing is ever missing: detail arrives
 //! as whole tiles replacing their parent. Children are requested once
 //! their parent's layers are measured (their chunks then span only the
@@ -57,6 +57,11 @@ pub struct PlanConfig {
     pub pixel_angle: f64,
     /// Refine while a cell would cover more pixels than this.
     pub lod_pixels: f64,
+    /// Out of view (past the view cone widened by `view_guard` radians),
+    /// cells may cover this many times `lod_pixels`: a level coarser at 2,
+    /// a quarter of the tiles there. A turn brings them in a level away.
+    pub offscreen_pixels: f64,
+    pub view_guard: f64,
     /// Coarsen again only under this share of `lod_pixels`.
     pub coarsen: f64,
     /// Planes: tiles farther than this are not drawn (spheres draw up to
@@ -183,14 +188,17 @@ impl Planner {
     pub fn plan(&mut self, grid: &Grid, eye: DVec3, velocity: DVec3, view: Option<View>, frame: u64) -> Plan {
         let eyes = [Eye::new(grid, eye), Eye::new(grid, eye + velocity * self.config.prefetch_seconds)];
         // In view: the tile's nearest point within the cone (generous for
-        // a tile's extent: anything beside it is near it).
-        let in_view = |key: TileKey, ranges: Ranges| -> bool {
+        // a tile's extent: anything beside it is near it); near it: within
+        // the cone widened by the guard.
+        let cone = |key: TileKey, ranges: Ranges, cos_half: f64| -> bool {
             let Some(v) = view else { return true };
             let offset = eyes[0].toward(grid, key, ranges.extent());
             let length = offset.length();
             let size = grid.level_size(key.level) * f64::from(CHUNK) * 1.5;
-            length < size || offset.dot(v.forward) > v.cos_half * length - size
+            length < size || offset.dot(v.forward) > cos_half * length - size
         };
+        let guarded = view.map_or(-1.0, |v| (v.cos_half.clamp(-1.0, 1.0).acos() + self.config.view_guard).min(std::f64::consts::PI).cos());
+        let in_view = |key: TileKey, ranges: Ranges| cone(key, ranges, view.map_or(-1.0, |v| v.cos_half));
         let mut drawn_in_view = 0usize;
         let mut plan = Plan::default();
         let mut wanted: Vec<(f64, TileKey)> = Vec::new();
@@ -226,12 +234,14 @@ impl Planner {
             let shows = seen && !hidden;
             // Tiles in view first.
             let priority = if seen { error * 1e6 } else { error };
-            let finer = key.level > 0 && if tile.refined { error > self.config.coarsen } else { error > 1.0 };
+            // Out of the guarded view, coarser cells will do.
+            let wanted_error = if seen || cone(key, tile.ranges, guarded) { error } else { error / self.config.offscreen_pixels };
+            let finer = key.level > 0 && if tile.refined { wanted_error > self.config.coarsen } else { wanted_error > 1.0 };
             // Children wait for their parent's measured layers, unless it is
             // far too coarse (an eye that dropped from orbit) and a measured
             // ancestor is near: then they come with ranges estimated from it
             // (a readback deepens them).
-            let deep = error >= DEEP_REFINE;
+            let deep = wanted_error >= DEEP_REFINE;
             let guess = if tile.exact { 0 } else { tile.guess };
             let children = if finer && (tile.exact || deep && guess < GUESS_LEVELS) { children(grid, key) } else { Vec::new() };
             let mut ready = !children.is_empty();
@@ -497,7 +507,7 @@ mod tests {
     fn setup() -> (Grid, DVec3, Planner) {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
         let eye = grid.position(2, [f64::from(grid.cells()) * 0.47, f64::from(grid.cells()) * 0.53, 20.0]);
-        let config = PlanConfig { pixel_angle: 7.67e-4, lod_pixels: 1.0, coarsen: 0.8, max_distance: 400_000.0, prefetch_seconds: 0.5, keep_frames: 60 };
+        let config = PlanConfig { pixel_angle: 7.67e-4, lod_pixels: 1.0, offscreen_pixels: 2.0, view_guard: 0.35, coarsen: 0.8, max_distance: 400_000.0, prefetch_seconds: 0.5, keep_frames: 60 };
         let planner = Planner::new(&grid, (-100_000, 100_000), config);
         (grid, eye, planner)
     }
@@ -661,6 +671,36 @@ mod tests {
         planner.plan(&grid, far, DVec3::ZERO, None, frame);
         let evicted = planner.evict(frame);
         assert!(evicted.iter().filter(|k| k.level == 0).count() == fine);
+    }
+
+    /// Out of view, a level coarser: the in-view cut is as fine, the whole
+    /// cut much smaller.
+    #[test]
+    fn out_of_view_tiles_are_a_level_coarser() {
+        let (grid, eye, _) = setup();
+        let up = eye.normalize();
+        let forward = (up.any_orthonormal_vector() - up * 0.3).normalize();
+        let view = View { forward, cos_half: 0.4f64.cos() };
+        let cut = |offscreen: f64| {
+            let config = PlanConfig { pixel_angle: 7.67e-4, lod_pixels: 1.0, offscreen_pixels: offscreen, view_guard: 0.35, coarsen: 0.8, max_distance: 400_000.0, prefetch_seconds: 0.5, keep_frames: 60 };
+            let mut planner = Planner::new(&grid, (-100_000, 100_000), config);
+            let mut frame = 0;
+            loop {
+                frame += 1;
+                let plan = planner.plan(&grid, eye, DVec3::ZERO, Some(view), frame);
+                if plan.requests.is_empty() {
+                    return plan;
+                }
+                for (k, ranges) in plan.requests {
+                    planner.set_generated(k);
+                    planner.set_ranges(k, ranges);
+                }
+            }
+        };
+        let (full, biased) = (cut(1.0), cut(2.0));
+        assert_eq!(biased.coarse_share, 0.0);
+        assert!(biased.worst_px <= full.worst_px + 1e-9, "{} > {}", biased.worst_px, full.worst_px);
+        assert!(biased.drawn.len() * 2 < full.drawn.len(), "{} of {}", biased.drawn.len(), full.drawn.len());
     }
 
     #[test]
