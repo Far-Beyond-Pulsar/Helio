@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use helio_component::components::{DecalComponent, SpriteComponent};
 use helio_component::texture_assets::{
-    texture_asset_id, texture_asset_id_of, texture_source_for_file, LoadedTexture,
+    LoadedTexture, texture_asset_id, texture_asset_id_of, texture_source_for_file,
 };
 use pulsar_scenedb::{AssetState, Entity, World};
 

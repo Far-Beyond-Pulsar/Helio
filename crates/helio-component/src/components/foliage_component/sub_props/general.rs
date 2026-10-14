@@ -36,5 +36,4 @@ impl GeneralFoliageProps {
             self.density_layer = v;
         }
     }
-
 }

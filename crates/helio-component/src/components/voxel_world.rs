@@ -22,7 +22,7 @@ use glam::DVec3;
 /// Terrain material ids (`material::GRASS`, ...) and their names.
 pub use helio_pass_voxel_planet::terrain::material;
 use helio_pass_voxel_planet::{
-    grid::Shape, terrain, Brush, BrushOp, BrushShape, Planet, PlanetRecipe, TerrainSource,
+    Brush, BrushOp, BrushShape, Planet, PlanetRecipe, TerrainSource, grid::Shape, terrain,
 };
 use helio_voxel_data::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditJournal};
 use pulsar_scene_model::components::Transform;
@@ -37,7 +37,10 @@ use super::{
 /// `id` in the built-in appearance, for editor palettes.
 pub fn material_colour(id: u32) -> [f32; 3] {
     let table = helio_pass_voxel_planet::terrain::TerrainAppearance::default();
-    let colour = table.materials.get(id as usize).map_or([0.5; 4], |m| m.colour);
+    let colour = table
+        .materials
+        .get(id as usize)
+        .map_or([0.5; 4], |m| m.colour);
     [colour[0], colour[1], colour[2]]
 }
 
@@ -315,7 +318,9 @@ fn affected_block_centres(
                         helio_pass_voxel_planet::edits::center_half(j, 0),
                         helio_pass_voxel_planet::edits::center_half(k, 0),
                     ];
-                    if !face_brush.contains(sample, || grid.volume_point(face_brush.face(), i, j, k, 0)) {
+                    if !face_brush
+                        .contains(sample, || grid.volume_point(face_brush.face(), i, j, k, 0))
+                    {
                         continue;
                     }
                     let position = grid.position(
@@ -517,18 +522,31 @@ fn layers_instance(world: &World, entity: Entity) -> Result<Entity, String> {
         return Ok(entity);
     }
     let owner = pulsar_scene_model::attachments::owner_of(world, entity).unwrap_or(entity);
-    pulsar_world_registry::instances::resolve_instance(world, owner, "VoxelTerrainLayersComponent", 0)
-        .ok_or_else(|| "the object has no terrain layers".into())
+    pulsar_world_registry::instances::resolve_instance(
+        world,
+        owner,
+        "VoxelTerrainLayersComponent",
+        0,
+    )
+    .ok_or_else(|| "the object has no terrain layers".into())
 }
 
-fn layers_mut(world: &mut World, entity: Entity) -> Result<pulsar_scenedb::Mut<'_, VoxelTerrainLayersComponent>, String> {
+fn layers_mut(
+    world: &mut World,
+    entity: Entity,
+) -> Result<pulsar_scenedb::Mut<'_, VoxelTerrainLayersComponent>, String> {
     let instance = layers_instance(world, entity)?;
-    world.get_mut::<VoxelTerrainLayersComponent>(instance).ok_or_else(|| "the object has no terrain layers".into())
+    world
+        .get_mut::<VoxelTerrainLayersComponent>(instance)
+        .ok_or_else(|| "the object has no terrain layers".into())
 }
 
 fn layer_mut(stack: &mut VoxelTerrainStack, index: u32) -> Result<&mut VoxelTerrainLayer, String> {
     let count = stack.layers.len();
-    stack.layers.get_mut(index as usize).ok_or_else(|| format!("layer {index} out of {count}"))
+    stack
+        .layers
+        .get_mut(index as usize)
+        .ok_or_else(|| format!("layer {index} out of {count}"))
 }
 
 // Scripting surface of the layer stack: a game shapes (or randomizes) its
@@ -539,8 +557,12 @@ impl VoxelTerrainLayersComponent {
     /// (`VoxelTerrainStack::PRESETS`).
     #[world_method(category = "Voxel")]
     fn use_preset(world: &mut World, entity: Entity, name: String) -> Result<(), String> {
-        let preset = VoxelTerrainStack::preset(&name)
-            .ok_or_else(|| format!("unknown terrain preset {name:?} ({})", VoxelTerrainStack::PRESETS.join(", ")))?;
+        let preset = VoxelTerrainStack::preset(&name).ok_or_else(|| {
+            format!(
+                "unknown terrain preset {name:?} ({})",
+                VoxelTerrainStack::PRESETS.join(", ")
+            )
+        })?;
         layers_mut(world, entity)?.stack = preset;
         Ok(())
     }
@@ -549,7 +571,9 @@ impl VoxelTerrainLayersComponent {
     #[world_method(pure, category = "Voxel")]
     fn layer_count(world: &World, entity: Entity) -> Result<u32, String> {
         let instance = layers_instance(world, entity)?;
-        let stack = world.get::<VoxelTerrainLayersComponent>(instance).ok_or("the object has no terrain layers")?;
+        let stack = world
+            .get::<VoxelTerrainLayersComponent>(instance)
+            .ok_or("the object has no terrain layers")?;
         Ok(stack.stack.layers.len() as u32)
     }
 
@@ -573,28 +597,48 @@ impl VoxelTerrainLayersComponent {
     }
 
     #[world_method(category = "Voxel")]
-    fn set_layer_enabled(world: &mut World, entity: Entity, index: u32, enabled: bool) -> Result<(), String> {
+    fn set_layer_enabled(
+        world: &mut World,
+        entity: Entity,
+        index: u32,
+        enabled: bool,
+    ) -> Result<(), String> {
         layer_mut(&mut layers_mut(world, entity)?.stack, index)?.enabled = enabled;
         Ok(())
     }
 
     /// The layer's main height in metres (amplitude, depth or plateau height).
     #[world_method(category = "Voxel")]
-    fn set_layer_height(world: &mut World, entity: Entity, index: u32, height_m: f64) -> Result<(), String> {
+    fn set_layer_height(
+        world: &mut World,
+        entity: Entity,
+        index: u32,
+        height_m: f64,
+    ) -> Result<(), String> {
         layer_mut(&mut layers_mut(world, entity)?.stack, index)?.height_m = height_m;
         Ok(())
     }
 
     /// The layer's scale in kilometres (first wavelength or largest feature).
     #[world_method(category = "Voxel")]
-    fn set_layer_scale(world: &mut World, entity: Entity, index: u32, scale_km: f64) -> Result<(), String> {
+    fn set_layer_scale(
+        world: &mut World,
+        entity: Entity,
+        index: u32,
+        scale_km: f64,
+    ) -> Result<(), String> {
         layer_mut(&mut layers_mut(world, entity)?.stack, index)?.scale_km = scale_km;
         Ok(())
     }
 
     /// The share of the surface the layer covers (regions, basins, craters).
     #[world_method(category = "Voxel")]
-    fn set_layer_coverage(world: &mut World, entity: Entity, index: u32, coverage: f64) -> Result<(), String> {
+    fn set_layer_coverage(
+        world: &mut World,
+        entity: Entity,
+        index: u32,
+        coverage: f64,
+    ) -> Result<(), String> {
         layer_mut(&mut layers_mut(world, entity)?.stack, index)?.coverage = coverage;
         Ok(())
     }

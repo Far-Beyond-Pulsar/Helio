@@ -86,7 +86,11 @@ impl LightSourceRow {
     pub fn of(light: &LightComponent) -> Self {
         let mut row: Self = bytemuck::cast(light.to_gpu_mirror().to_helio_gpu_light());
         row.enabled = (row.enabled & !LIGHT_SOURCE_ENABLED_BIT)
-            | if light.general.enabled { LIGHT_SOURCE_ENABLED_BIT } else { 0 };
+            | if light.general.enabled {
+                LIGHT_SOURCE_ENABLED_BIT
+            } else {
+                0
+            };
         row
     }
 }
@@ -129,12 +133,22 @@ mod tests {
         let mut light = LightComponent::default();
         light.general.enabled = true;
         let row = LightSourceRow::of(&light);
-        assert_eq!(row.enabled & LIGHT_SOURCE_ENABLED_BIT, LIGHT_SOURCE_ENABLED_BIT);
+        assert_eq!(
+            row.enabled & LIGHT_SOURCE_ENABLED_BIT,
+            LIGHT_SOURCE_ENABLED_BIT
+        );
         let mut expected = light.to_gpu_mirror().to_helio_gpu_light();
-        assert_eq!(expected._pad & LIGHT_SOURCE_ENABLED_BIT, 0, "policy bits leave bit 31 free");
+        assert_eq!(
+            expected._pad & LIGHT_SOURCE_ENABLED_BIT,
+            0,
+            "policy bits leave bit 31 free"
+        );
         expected._pad |= LIGHT_SOURCE_ENABLED_BIT;
         assert_eq!(bytemuck::bytes_of(&row), bytemuck::bytes_of(&expected));
         light.general.enabled = false;
-        assert_eq!(LightSourceRow::of(&light).enabled & LIGHT_SOURCE_ENABLED_BIT, 0);
+        assert_eq!(
+            LightSourceRow::of(&light).enabled & LIGHT_SOURCE_ENABLED_BIT,
+            0
+        );
     }
 }

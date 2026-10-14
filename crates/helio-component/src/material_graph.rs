@@ -47,15 +47,25 @@ fn is_texture_sample(kind: &str) -> bool {
     )
 }
 
-/// Bind asset properties before code generation. Replacing paths in generated
-/// source corrupts overlapping filenames and paths that resemble WGSL names.
+/// Bind graph textures through `GpuMaterial` fields before code generation.
+/// The map values are graph-local texture ordinals, not scene texture slots,
+/// so the compiled source and its pipeline key stay independent of residency.
 pub fn compile_material_graph(
     graph: &psgc::GraphDescription,
     texture_bindings: &std::collections::HashMap<String, u32>,
 ) -> Result<String, String> {
-    for asset in texture_assets(graph)? {
-        if !texture_bindings.contains_key(&asset) {
-            return Err(format!("Texture asset '{asset}' has no scene binding"));
+    let assets = texture_assets(graph)?;
+    if assets.len() > GRAPH_TEXTURE_FIELDS.len() {
+        return Err(format!(
+            "material graphs support at most {} sampled textures",
+            GRAPH_TEXTURE_FIELDS.len()
+        ));
+    }
+    for asset in &assets {
+        if !texture_bindings.contains_key(asset) {
+            return Err(format!(
+                "Texture asset '{asset}' has no material texture binding"
+            ));
         }
     }
     let mut graph = graph.clone();
@@ -68,10 +78,15 @@ pub fn compile_material_graph(
             .get("texture")
             .and_then(serde_json::Value::as_str)
         {
-            if let Some(slot) = texture_bindings.get(asset) {
+            if let Some(ordinal) = texture_bindings.get(asset) {
+                let Some(field) = GRAPH_TEXTURE_FIELDS.get(*ordinal as usize) else {
+                    return Err(format!(
+                        "texture asset '{asset}' has unsupported graph-local texture ordinal {ordinal}"
+                    ));
+                };
                 node.properties.insert(
                     "texture".into(),
-                    serde_json::Value::String(format!("scene_textures[{slot}u]")),
+                    serde_json::Value::String(format!("scene_textures[material.{field}]")),
                 );
             }
         }
@@ -80,6 +95,16 @@ pub fn compile_material_graph(
         .map_err(|error| format!("shader graph compile failed: {error}"))?;
     adapt_graph_wgsl(&generated)
 }
+
+/// The material row's existing texture fields provide scene-local indirection
+/// for a graph's sampled textures.
+pub const GRAPH_TEXTURE_FIELDS: [&str; 5] = [
+    "tex_base_color",
+    "tex_normal",
+    "tex_roughness",
+    "tex_emissive",
+    "tex_occlusion",
+];
 
 fn adapt_graph_wgsl(generated: &str) -> Result<String, String> {
     let mut source = generated.to_string();
@@ -107,10 +132,14 @@ fn adapt_graph_wgsl(generated: &str) -> Result<String, String> {
         .find('{')
         .map(|offset| entry + offset)
         .ok_or_else(|| "malformed PSGC fragment entry point".to_string())?;
-    let replacement = "fn pulsar_material_graph(input: VertexOutput) -> PulsarGraphOutput {\n    let frag_coord = input.clip_position;\n    let uv = input.tex_coords;\n    let normal = input.world_normal;\n    let world_pos = input.world_position;";
+    let replacement = "fn pulsar_material_graph(material: GpuMaterial, input: VertexOutput) -> PulsarGraphOutput {\n    let frag_coord = input.clip_position;\n    let uv = input.tex_coords;\n    let normal = input.world_normal;\n    let world_pos = input.world_position;";
+    source = source.replace(
+        "pulsar_material_graph(input)",
+        "pulsar_material_graph(material, input)",
+    );
     source.replace_range(entry..=open, replacement);
 
-    let body = r#"let graph_surface = pulsar_material_graph(input);
+    let body = r#"let graph_surface = pulsar_material_graph(material, input);
 albedo = graph_surface.base_color;
 // Preserve the connected RGBA color's alpha. The separate opacity input
 // modulates coverage and defaults to 1 when it is not connected.

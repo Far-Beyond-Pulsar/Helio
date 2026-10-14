@@ -1,9 +1,9 @@
 //! Physical media authoring. The authored values reach the volumetric fog
 //! pass through their derived rows ([`super::environment_rows`]) and the
 //! graph's environment join; nothing here writes pass rows.
+use super::FogMode;
 use engine_class_derive::{engine_class, register_world_component};
 use helio_pass_volumetric_fog::GlobalFogComponent as GlobalMedium;
-use super::FogMode;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Medium", category_color = "#D18F6F")]
@@ -32,9 +32,15 @@ pub struct MediumProps {
 impl Default for MediumProps {
     fn default() -> Self {
         let value = GlobalMedium::default();
-        Self { mode: FogMode::Uniform, extinction: value.extinction, albedo: value.albedo,
-            emission: value.emission, anisotropy: value.anisotropy,
-            height_falloff: value.height_falloff, height: value.height }
+        Self {
+            mode: FogMode::Uniform,
+            extinction: value.extinction,
+            albedo: value.albedo,
+            emission: value.emission,
+            anisotropy: value.anisotropy,
+            height_falloff: value.height_falloff,
+            height: value.height,
+        }
     }
 }
 
@@ -42,9 +48,17 @@ impl MediumProps {
     pub fn to_medium(&self) -> GlobalMedium {
         GlobalMedium {
             enabled: 1,
-            mode: match self.mode { FogMode::Uniform => 0, FogMode::HeightBased => 1, FogMode::Smoke => 2 },
-            extinction: self.extinction, albedo: self.albedo, emission: self.emission,
-            anisotropy: self.anisotropy, height_falloff: self.height_falloff, height: self.height,
+            mode: match self.mode {
+                FogMode::Uniform => 0,
+                FogMode::HeightBased => 1,
+                FogMode::Smoke => 2,
+            },
+            extinction: self.extinction,
+            albedo: self.albedo,
+            emission: self.emission,
+            anisotropy: self.anisotropy,
+            height_falloff: self.height_falloff,
+            height: self.height,
             ..Default::default()
         }
     }
@@ -63,7 +77,12 @@ pub struct GlobalFogComponent {
 }
 
 impl Default for GlobalFogComponent {
-    fn default() -> Self { Self { enabled: true, medium: MediumProps::default() } }
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            medium: MediumProps::default(),
+        }
+    }
 }
 
 #[engine_class(category = "Rendering", clone, debug, serialize, deserialize)]
@@ -86,7 +105,14 @@ pub struct LocalFogVolumeComponent {
 }
 
 impl Default for LocalFogVolumeComponent {
-    fn default() -> Self { Self { enabled: true, size: [10.0; 3], edge_fade: 0.0, medium: MediumProps::default() } }
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            size: [10.0; 3],
+            edge_fade: 0.0,
+            medium: MediumProps::default(),
+        }
+    }
 }
 
 #[register_world_component]
