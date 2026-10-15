@@ -12,6 +12,10 @@ use std::sync::Arc;
 /// `MAX_SHADOW_FACES` in `helio-pass-shadow`.
 const MAX_SHADOW_FACES: usize = helio_pass_shadow_matrix::MAX_SHADOW_FACES as usize;
 
+/// Regions of `face_geom_count_buf`, each `MAX_SHADOW_FACES` `u32`s: the
+/// movable, static and transmissive caster counts, in that order.
+pub const FACE_GEOM_COUNT_REGIONS: usize = 3;
+
 const WORKGROUP_SIZE: u32 = 64;
 
 // ── Uniforms ──────────────────────────────────────────────────────────────────
@@ -47,9 +51,10 @@ pub struct ShadowDirtyPass {
     /// Shared with `ShadowPass` — published via `Arc` so the shadow pass can bind it.
     pub face_dirty_buf: Arc<wgpu::Buffer>,
 
-    /// Per-face geometry draw count (atomic u32 array, MAX_SHADOW_FACES entries).
-    /// ShadowPass uses this as the `count_buffer` argument to
-    /// `multi_draw_indexed_indirect_count` for movable geometry draws.
+    /// Per-face geometry draw counts (atomic u32 array, [`FACE_GEOM_COUNT_REGIONS`]
+    /// regions of MAX_SHADOW_FACES entries: movable, static, transmissive).
+    /// ShadowPass uses these as the `count_buffer` argument to
+    /// `multi_draw_indexed_indirect_count`: 0 for a clean face.
     pub face_geom_count_buf: Arc<wgpu::Buffer>,
 
     /// Per-caster flags written by ShadowMatrixPass when a light matrix changes.
@@ -250,10 +255,11 @@ impl ShadowDirtyPass {
             mapped_at_creation: false,
         }));
 
-        // face_geom_count: one u32 per shadow face.  Written by this shader, read by ShadowPass.
+        // face_geom_count: one u32 per shadow face in each of the movable,
+        // static and transmissive regions. Written by this shader, read by ShadowPass.
         let face_geom_count_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ShadowDirty/FaceGeomCount"),
-            size: (MAX_SHADOW_FACES * 4) as u64,
+            size: (FACE_GEOM_COUNT_REGIONS * MAX_SHADOW_FACES * 4) as u64,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::INDIRECT
                 | wgpu::BufferUsages::COPY_DST,
