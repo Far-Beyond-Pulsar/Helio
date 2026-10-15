@@ -1302,7 +1302,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             if light.light_type == 0u && dot(voxel_visibility.yzw, voxel_visibility.yzw) > 0.5 {
                 let light_direction = -normalize(light.direction_outer.xyz);
                 if dot(normalize(voxel_visibility.yzw), light_direction) > 0.99999 {
-                    if voxel_visibility.x < 0.0 { return vec4<f32>(4.0, 0.0, 2.6, 1.0); }
                     sf *= clamp(voxel_visibility.x, 0.0, 1.0);
                 }
             }

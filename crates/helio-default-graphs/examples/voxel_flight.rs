@@ -24,7 +24,7 @@
 //! (earth|moon|desert) or `_LAYERS=<json>` (a layer stack), `_HEIGHTFIELD`, `_NO_CAVES`, `_NO_OVERHANGS`,
 //! `_GRAIN=scale_m,octaves,ratio`, `_SUN=x,y,z`, `_SUN_ELEVATION=deg` (the
 //! terrain's sun that high over each view's horizon toward `_SUN`'s azimuth;
-//! the scene light keeps `_SUN`), `_NO_SUN`,
+//! the scene light keeps `_SUN`),
 //! `_LOOK=exposure,contrast,saturation`, `_DEBUG=<mode>`.
 //!
 //! Frames are pipelined like a game loop (at most `FRAMES_IN_FLIGHT` ahead
@@ -62,7 +62,6 @@ struct Flight {
     sun: Vec3,
     /// Degrees over the eye's horizon (`HELIO_VOXEL_FLIGHT_SUN_ELEVATION`).
     sun_elevation: Option<f32>,
-    shadows: bool,
     output: PathBuf,
     /// Pipelined frames not yet known complete.
     in_flight: std::collections::VecDeque<Arc<std::sync::atomic::AtomicBool>>,
@@ -211,7 +210,6 @@ impl Flight {
             size,
             sun: sun_dir,
             sun_elevation: std::env::var("HELIO_VOXEL_FLIGHT_SUN_ELEVATION").ok().and_then(|v| v.parse().ok()),
-            shadows: std::env::var_os("HELIO_VOXEL_FLIGHT_NO_SUN").is_none(),
             output: output.to_path_buf(),
             in_flight: Default::default(),
             picks: None,
@@ -223,7 +221,7 @@ impl Flight {
     /// milliseconds recording it took and those waiting.
     fn draw(&mut self, eye: DVec3, forward: Vec3) -> (f64, f64) {
         let started = Instant::now();
-        *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: self.planet.clone(), sun: self.sun_at(eye), shadows: self.shadows, picks: self.picks.clone() });
+        *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: self.planet.clone(), sun: self.sun_at(eye), picks: self.picks.clone() });
         // As a host's camera-relative frames: the origin stays on a cell
         // corner while the camera moves within the cell, off the origin.
         let origin = (eye / ORIGIN_CELL).round() * ORIGIN_CELL;

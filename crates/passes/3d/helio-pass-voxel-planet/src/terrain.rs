@@ -607,15 +607,6 @@ pub fn generated_top(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j:
         .map_or(top - below, |k| k + 1)
 }
 
-/// Ground slope of a cell in its 8x8 column block, in eighths of a cell per
-/// cell: the larger top difference across the block along either axis.
-/// Smooth and level-invariant, unlike neighbour steps of stepped terrain.
-pub fn block_slope(top: impl Fn(i32, i32) -> i32, x: i32, y: i32) -> i32 {
-    let si = (top(7, y) - top(0, y)).abs();
-    let sj = (top(x, 7) - top(x, 0)).abs();
-    si.max(sj) * 8 / 7
-}
-
 /// Check a world's field against its declared bounds at `samples` random
 /// columns: every height inside [`TerrainField::height_range`], and every
 /// finer column top within [`TerrainField::bound_margins`] of the coarser

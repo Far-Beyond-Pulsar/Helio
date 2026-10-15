@@ -50,7 +50,7 @@ it. The Pulsar editor integration is documented in Pulsar-Native's
 | `src/edits.rs` | Brushes (sphere/cube, remove/add/paint), per-face integer resolution (`FaceBrush`), the ordered `EditLog` and its spatial index. |
 | `src/edit_store.rs` | Baked edits: what sealed brushes did to each cell, in sparse 8³ bricks with majority-built coarser levels. |
 | `src/planet.rs` | `PlanetRecipe` + `Planet`: canonical queries (`kind`, `material`, `solid`), exact ray casts, `surface_point`, `air_clearance`, `ground_height`; `Edits` (large, baked and recent brushes, sealing, undo). |
-| `src/journal.rs`, `src/snapshot.rs` | Saving edits: an append-only brush journal, and snapshots of what the edits left. |
+| `src/record.rs`, `src/snapshot.rs` | Saving edits: snapshots of what the edits left (large and recent brushes as records, baked bricks), and recipe fingerprints. Hosts keep the brush journal itself (`helio_voxel_data::VoxelEditJournal`). |
 | `src/chunks/mod.rs` | `ChunkWorld`: chunk generation jobs, GPU storage (slots, leaf pool, materials), edit sync, the draw (seed raster, trace, sun and sky light, gbuffer publish), picks, timings. |
 | `src/chunks/residency.rs` | The planner (on a worker thread): which tiles are drawn, generated next and evicted for a moving eye. |
 | `src/chunks/drawn.rs` | The drawn cut: drawn chunks, column tops and level fades, uploaded as the changes of each frame. |
@@ -320,7 +320,7 @@ its output (saved edits record it). Add a test calling
 `engine::verify_field` for every shape and `terrain::check_field`.
 
 **Materials.** Drawing knows a material only through its
-`MaterialAppearance` (16 per world): colour and roughness, optional
+`MaterialAppearance` (32 per world): colour and roughness, optional
 world-space patch colours, a lip material, flecks and the host a speck
 blends into. No material id is special to the renderer. A stack picks
 materials by style, or by up to 16 ordered `MaterialRule`s (height, slope,

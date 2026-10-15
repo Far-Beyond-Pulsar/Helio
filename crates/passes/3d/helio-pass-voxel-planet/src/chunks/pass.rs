@@ -202,7 +202,7 @@ impl ChunkPass {
             self.built_for = None;
             return Ok(());
         };
-        let recipe = crate::journal::recipe_fingerprint(frame.planet.recipe());
+        let recipe = crate::record::recipe_fingerprint(frame.planet.recipe());
         // Edits follow the planet; another recipe or history, a new world.
         if self.built_for != Some(recipe) || self.world.as_mut().is_some_and(|w| !w.sync_edits(&frame.planet)) {
             let mut world = ChunkWorld::new(ctx.device, ctx.queue, &frame.planet);

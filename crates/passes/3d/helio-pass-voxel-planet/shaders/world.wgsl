@@ -174,9 +174,4 @@ fn terrain_kind(top: i32, k: i32) -> u32 {
     return select(0u, 1u, k < top);
 }
 
-// Ground slope in the 8x8 column block, eighths of a cell per cell
-// (`terrain::block_slope`).
-fn block_slope_of(t_x0: i32, t_x7: i32, t_y0: i32, t_y7: i32) -> i32 {
-    return max(abs(t_x7 - t_x0), abs(t_y7 - t_y0)) * 8 / 7;
-}
 

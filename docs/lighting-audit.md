@@ -5,7 +5,14 @@ Target: AAA look for procedural voxel planets (Earth-like, airless moons, desert
 RTX 3060, 1440p output with TSR (internal ~1.6-2.2 Mpx), terrain GPU <= 6 ms.
 
 Cost figures are estimates for that target, not measurements. Paths are relative to the Helio repo
-unless prefixed `Pulsar:`.
+unless prefixed `Pulsar:`. Line references are as of the audit and have since drifted.
+
+**Status (2026-10-15).** Done: #1 (per-surface sky irradiance table, `atmosphere_sky_table`),
+#8 (grading in log space and after the tone map, Bradford white balance), the metering half of #3
+(64-bin histogram without sky or space; no EV100, physical camera or pre-exposure yet) and the
+world-description half of #2 (`VoxelTerrainComponent::air` derives the sky, `None` is airless; the
+planet frame and sun disk without air are not done). Open: #4, #5, #6, #7, #9, #10 and the rest of
+#2 and #3.
 
 ---
 

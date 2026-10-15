@@ -112,7 +112,7 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         // A host's first eye can be anywhere (an editor camera starts at the
         // planet's centre): nothing to stream there.
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        *source.lock().unwrap() = Some(PlanetFrame { eye: glam::DVec3::new(8.0, 6.0, 12.0), planet: planet.clone(), sun: up, shadows: true, picks: None });
+        *source.lock().unwrap() = Some(PlanetFrame { eye: glam::DVec3::new(8.0, 6.0, 12.0), planet: planet.clone(), sun: up, picks: None });
         for _ in 0..600 {
             renderer.render(&camera, &view).unwrap();
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
@@ -125,7 +125,7 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         // Moved to the surface, it streams the planet around the eye until
         // settled: the plan for the old eye does not settle the new one
         // (hosts stop rendering once settled).
-        *source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun: up, shadows: true, picks: None });
+        *source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun: up, picks: None });
         let mut frames = 0;
         let started = std::time::Instant::now();
         loop {
@@ -170,7 +170,7 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         assert!(observed.lock().unwrap().contains(&[config.internal_width(), config.internal_height()]));
 
         // A resize rebuilds the graph; downstream passes see the new size.
-        *source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun: up, shadows: true, picks: None });
+        *source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun: up, picks: None });
         renderer.set_render_size(320, 180);
         let resized = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("final consumer resize"),
@@ -338,7 +338,7 @@ fn editor_overlays_stay_in_world_space_in_camera_relative_frames() {
     let ground = planet.surface_point(glam::DVec3::new(0.2, 1.0, 0.3), 0.0);
     let up = ground.normalize();
     let forward = up.any_orthonormal_vector().as_vec3();
-    *editor.source.lock().unwrap() = Some(PlanetFrame { eye: ground, planet: planet.clone(), sun: up.as_vec3(), shadows: true, picks: None });
+    *editor.source.lock().unwrap() = Some(PlanetFrame { eye: ground, planet: planet.clone(), sun: up.as_vec3(), picks: None });
     let validation = editor.device.push_error_scope(wgpu::ErrorFilter::Validation);
     // An editor camera held against the ground: a few centimetres of
     // clearance, the smallest near plane and a planetary far plane.
@@ -594,7 +594,7 @@ fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
         ..Default::default()
     }).unwrap());
     let eye = glam::DVec3::Y * 20.0;
-    *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun: Vec3::Y, shadows: false, picks: None });
+    *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun: Vec3::Y, picks: None });
     editor.renderer.set_world_origin(Some(eye));
     let camera = Camera::perspective_look_at(Vec3::ZERO, -Vec3::Y, Vec3::Z,
         std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 1000.0);
@@ -656,7 +656,7 @@ fn terrain_under_an_atmosphere_is_lit_at_every_height() {
     editor.set_sky(sun, Some(helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], radius)));
     for height in [2.0, 25.0, 300.0, 20_000.0] {
         let eye = planet.surface_point(dir, height);
-        *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun, shadows: true, picks: None });
+        *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun, picks: None });
         editor.renderer.set_world_origin(Some(eye));
         let forward = (up.any_orthonormal_vector() - up * 0.2).normalize().as_vec3();
         let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up.as_vec3(), std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.05, 40_000_000.0);

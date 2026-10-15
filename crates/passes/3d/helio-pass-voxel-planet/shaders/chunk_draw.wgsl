@@ -1232,7 +1232,6 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
                 let s0 = o.z - top.x * o.x - top.y * o.y - top.z;
                 let ds = d.z - top.x * d.x - top.y * d.y;
                 if ds > 0.0 { t1 = min(t1, -s0 / ds); } else if ds < 0.0 { t0 = max(t0, -s0 / ds); } else if s0 > 0.0 { t1 = t0; }
-                TRACE_BOX(chunk, t0, t1, frame.box, t_prev)
                 if t1 > t0 {
                     let axis0 = select(select(2u, 1u, lo.y >= lo.z), 0u, lo.x >= lo.y && lo.x >= lo.z);
                     let h = trace_chunk(slot, o, d, t0, t1, axis0, vec2<i32>(i32(frame.box.x), i32(frame.box.y)), counted);
@@ -1859,7 +1858,6 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
             let s0 = o.z - top.x * o.x - top.y * o.y - top.z;
             let ds = d.z - top.x * d.x - top.y * d.y;
             if ds > 0.0 { t1 = min(t1, -s0 / ds); } else if ds < 0.0 { t0 = max(t0, -s0 / ds); } else if s0 > 0.0 { t1 = t0; }
-            TRACE_BOX(chunk, t0, t1, frame.box, t_prev)
             if t1 > t0 {
                 let axis0 = select(select(2u, 1u, lo.y >= lo.z), 0u, lo.x >= lo.y && lo.x >= lo.z);
                 let h = trace_chunk(slot, o, d, t0, t1, axis0, vec2<i32>(i32(frame.box.x), i32(frame.box.y)), counted);

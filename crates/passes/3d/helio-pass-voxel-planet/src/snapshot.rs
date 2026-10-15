@@ -1,29 +1,29 @@
 //! Edit snapshots: a planet's edits as their layers, loaded without
 //! replaying the brushes that made them.
 //!
-//! A brush journal (`journal`) grows with every stroke and replays them all
-//! on load. A snapshot stores what the strokes left instead (see
+//! A host's brush journal grows with every stroke and replays them all on
+//! load. A snapshot stores what the strokes left instead (see
 //! `planet::Edits`): the large analytic brushes, the baked bricks of every
 //! level, the recent brushes, and the history's length and hash, so a
-//! journal's tail after the brushes a snapshot covers can be applied on top
-//! (`covers`). Little-endian:
+//! journal's tail after the brushes a snapshot covers can be applied on top.
+//! Little-endian:
 //!
 //! * a 16-byte header: magic `HVPS`, format version, and a fingerprint of
 //!   the grid (form, radius, voxel size). Baked edits do not depend on the
 //!   terrain under them, so a snapshot loads onto any terrain of that grid
 //!   (a generator update keeps a world's edits), never onto another grid;
 //! * brush count, history hash, sealed brush count and hash, edit bounds;
-//! * the large brushes, then the recent ones, as journal records;
+//! * the large brushes, then the recent ones, as brush records (`record`);
 //! * the baked bricks: key, then runs of equal cells;
 //! * a checksum of everything before it.
 use crate::edit_store::{Brick, BrickKey, CellEdit, EditStore, BRICK_CELLS};
 use crate::edits::Brush;
-use crate::journal::{self, Entry};
+use crate::record;
 use crate::grid::Grid;
 use crate::planet::{Edits, Planet, PlanetRecipe};
 
 const MAGIC: [u8; 4] = *b"HVPS";
-/// Version 2: journal records with the box height (version 1 still reads).
+/// Version 2: brush records with the box height (version 1 still reads).
 const VERSION: u16 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,9 +58,9 @@ impl std::error::Error for SnapshotError {}
 /// The history a snapshot holds: its brush count and hash (see
 /// [`crate::edits::history_hash`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Covers {
-    pub brushes: usize,
-    pub hash: u64,
+struct Covers {
+    brushes: usize,
+    hash: u64,
 }
 
 struct Reader<'a> {
@@ -98,10 +98,7 @@ impl<'a> Reader<'a> {
         let n = self.u32()? as usize;
         let record = self.record;
         (0..n)
-            .map(|index| match journal::decode(index, self.take(record)?) {
-                Ok(Entry::Brush(brush)) => Ok(brush),
-                _ => Err(SnapshotError::Corrupt("brush record")),
-            })
+            .map(|index| record::decode(index, self.take(record)?).map_err(|_| SnapshotError::Corrupt("brush record")))
             .collect()
     }
 }
@@ -113,7 +110,7 @@ pub fn grid_fingerprint(grid: &Grid) -> u64 {
     for v in [grid.radius().to_bits(), grid.voxel_size().to_bits(), grid.cells() as u64] {
         bytes.extend_from_slice(&v.to_le_bytes());
     }
-    journal::fnv64(&bytes)
+    record::fnv64(&bytes)
 }
 
 /// Header and checksum checks; the reader starts after the header.
@@ -122,7 +119,7 @@ fn open<'a>(bytes: &'a [u8], grid: &Grid) -> Result<Reader<'a>, SnapshotError> {
         return Err(SnapshotError::NotASnapshot);
     }
     let version = u16::from_le_bytes([bytes[4], bytes[5]]);
-    let Some(record) = (version <= VERSION).then(|| journal::record_bytes(version)).flatten() else {
+    let Some(record) = (version <= VERSION).then(|| record::record_bytes(version)).flatten() else {
         return Err(SnapshotError::UnsupportedVersion(version));
     };
     let snapshot = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
@@ -131,16 +128,10 @@ fn open<'a>(bytes: &'a [u8], grid: &Grid) -> Result<Reader<'a>, SnapshotError> {
         return Err(SnapshotError::GridMismatch { snapshot, planet });
     }
     let (body, sum) = bytes.split_at(bytes.len() - 8);
-    if u64::from_le_bytes(sum.try_into().unwrap()) != journal::fnv64(body) {
+    if u64::from_le_bytes(sum.try_into().unwrap()) != record::fnv64(body) {
         return Err(SnapshotError::Corrupt("checksum"));
     }
     Ok(Reader { bytes: body, at: 16, record })
-}
-
-/// The history a snapshot written for `grid` holds, without loading it.
-pub fn covers(bytes: &[u8], grid: &Grid) -> Result<Covers, SnapshotError> {
-    let mut r = open(bytes, grid)?;
-    Ok(Covers { brushes: r.u64()? as usize, hash: r.u64()? })
 }
 
 impl Planet {
@@ -159,7 +150,7 @@ impl Planet {
         for log in [&edits.large, &edits.recent] {
             out.extend_from_slice(&(log.len() as u32).to_le_bytes());
             for (index, brush) in log.brushes().enumerate() {
-                out.extend_from_slice(&journal::encode(index as u32, &Entry::Brush(*brush)));
+                out.extend_from_slice(&record::encode(index as u32, brush));
             }
         }
         let mut bricks: Vec<_> = edits.baked.bricks().collect();
@@ -178,7 +169,7 @@ impl Planet {
                 out.extend_from_slice(&value.to_le_bytes());
             }
         }
-        let sum = journal::fnv64(&out);
+        let sum = record::fnv64(&out);
         out.extend_from_slice(&sum.to_le_bytes());
         out
     }
@@ -257,7 +248,7 @@ mod tests {
     fn snapshots_load_identical_edits_and_take_further_brushes() {
         let (a, applied) = edited();
         let bytes = a.snapshot();
-        assert_eq!(covers(&bytes, a.grid()).unwrap(), Covers { brushes: applied.len(), hash: crate::edits::history_hash(applied.iter()) });
+        assert_eq!((a.edits().len(), a.edits().hash()), (applied.len(), crate::edits::history_hash(applied.iter())));
         let mut b = Planet::from_snapshot(PlanetRecipe::default(), &bytes).unwrap();
         assert_eq!((b.edits().len(), b.edits().hash()), (a.edits().len(), a.edits().hash()));
         assert_eq!(b.edits().baked.brick_counts(), a.edits().baked.brick_counts());
@@ -289,6 +280,6 @@ mod tests {
         let other = PlanetRecipe { voxel_size_m: 0.3, ..PlanetRecipe::default() };
         assert!(matches!(Planet::from_snapshot(other, &bytes), Err(SnapshotError::GridMismatch { .. })));
         assert!(Planet::from_snapshot(PlanetRecipe::default(), &bytes[..bytes.len() - 3]).is_err());
-        assert_eq!(covers(b"nope", p.grid()), Err(SnapshotError::NotASnapshot));
+        assert!(matches!(Planet::from_snapshot(PlanetRecipe::default(), b"nope"), Err(SnapshotError::NotASnapshot)));
     }
 }

@@ -63,7 +63,8 @@ impl CellEdit {
     }
 
     /// This edit followed by `later` (composition of baked edits).
-    pub fn then_edit(self, later: Self) -> Self {
+    #[cfg(test)]
+    fn then_edit(self, later: Self) -> Self {
         match later.state() {
             0 => self,
             1 => Self::AIR,
@@ -132,12 +133,6 @@ impl Brick {
     }
     pub fn is_unchanged(&self) -> bool {
         self.cells.iter().all(|c| c.is_unchanged())
-    }
-    /// The edit every cell holds, if they all hold the same (the inside of
-    /// a carved or filled region).
-    pub fn uniform(&self) -> Option<CellEdit> {
-        let first = self.cells[0];
-        self.cells.iter().all(|c| *c == first).then_some(first)
     }
 }
 

@@ -1081,16 +1081,6 @@ pub fn shader_sources(plane: bool, program: &crate::terrain::TerrainProgram, wid
                 ""
             },
         )
-        // Each real box's chunk walk: t0, t1, occupied layers, t_prev
-        // (from counters[136]).
-        .replace(
-            "TRACE_BOX(chunk, t0, t1, frame.box, t_prev)",
-            if counting {
-                "if counted && all(pixel == params.debug.zw) && chunk < 24u { atomicStore(&counters[136u + chunk * 5u], bitcast<u32>(t0)); atomicStore(&counters[137u + chunk * 5u], bitcast<u32>(t1)); atomicStore(&counters[138u + chunk * 5u], bitcast<u32>(frame.box.x)); atomicStore(&counters[139u + chunk * 5u], bitcast<u32>(frame.box.y)); atomicStore(&counters[140u + chunk * 5u], bitcast<u32>(t_prev)); }"
-            } else {
-                ""
-            },
-        )
         .replace("FADE_FRAMES", &drawn::FADE_FRAMES.to_string())
         .replace("PLANE_WORLD", if plane { "true" } else { "false" });
     [("chunk generation", terrain_source(plane, program, wide64, true) + &format!("const HALO_GROUPS: u32 = {}u;\n", crate::engine::HALO_GROUPS) + include_str!("../../shaders/chunk_generate.wgsl")), ("chunk draw", draw)]
@@ -2750,15 +2740,6 @@ impl ChunkWorld {
         let words: Vec<[u32; 4]> = self.read(&self.counters, 64);
         let w = words[50];
         ((w[0] & 0xff) as u8, w[0] >> 8, [w[1] as i32, w[2] as i32, w[3] as i32])
-    }
-
-    /// Per box of [`Self::pixel_trace`], its chunk walk when it is a chunk:
-    /// t0, t1, the occupied layers and the walk's t on entering the box.
-    pub fn pixel_trace_walks(&self) -> Vec<[f32; 5]> {
-        let words: Vec<[u32; 4]> = self.read(&self.counters, 64);
-        let flat: Vec<u32> = words.iter().flatten().copied().collect();
-        let n = (flat[4] as usize).min(24);
-        (0..n).map(|c| std::array::from_fn(|k| f32::from_bits(flat[136 + c * 5 + k]))).collect()
     }
 
     /// Boxes drawn by the last [`Self::draw`]: from outside, from inside

@@ -28,7 +28,6 @@ pub struct PlanetFrame {
     pub planet: Arc<Planet>,
     /// Direction towards the sun (planet-centred frame).
     pub sun: Vec3,
-    pub shadows: bool,
     /// Where tools ask for the terrain hit under points of the view.
     pub picks: Option<SharedPicks>,
 }
@@ -379,77 +378,6 @@ fn generation_tile_nodes(tile: u32, face: u32, ci: i32, cj: i32, level: u32, lan
 "
     ));
     s
-}
-
-/// Diagnostics: GPU time (ns) per column of the terrain program's height and
-/// surface word, over a `side` x `side` patch of level-0 columns around
-/// `eye`'s cell, dispatched `repeats` times in one submission.
-pub fn time_field(device: &wgpu::Device, queue: &wgpu::Queue, planet: &Planet, eye: glam::DVec3, side: u32, repeats: u32) -> f64 {
-    let grid = *planet.grid();
-    let program = planet.field().program();
-    let (cell, _) = grid.locate(eye);
-    let kernel = "
-@group(0) @binding(20) var<storage, read> time_in: array<vec4<i32>>;
-@group(0) @binding(22) var<storage, read_write> time_out: array<i32>;
-@compute @workgroup_size(64) fn time_field(@builtin(global_invocation_id) id: vec3<u32>) {
-    let a = time_in[0];
-    let side = u32(a.w);
-    if id.x >= side * side { return; }
-    let i = a.y + i32(id.x % side);
-    let j = a.z + i32(id.x / side);
-    let p = domain_point(u32(a.x), i, j, 0u);
-    let height = field_height(u32(a.x), i, j, 0u);
-    let surface = terrain_surface(p, u32(world.grid.w), height);
-    time_out[id.x] = height ^ i32(surface);
-}
-";
-    let module = helio_core::shader::module(device, "terrain timing", &(terrain_source(grid.is_plane(), &program, device.features().contains(wgpu::Features::SHADER_INT64), false) + kernel));
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("terrain timing"),
-        layout: None,
-        module: &module,
-        entry_point: Some("time_field"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-    let init = |label, contents: &[u8], usage| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage });
-    let world = init("time world", bytemuck::bytes_of(&WorldGpu::new(planet)), wgpu::BufferUsages::UNIFORM);
-    let terrain = init("time terrain", &terrain_bytes(&program), wgpu::BufferUsages::UNIFORM);
-    let half = side as i32 / 2;
-    let input = IVec4::new(i32::from(cell.face), cell.i - half, cell.j - half, side as i32);
-    let ins = init("time input", bytemuck::bytes_of(&input), wgpu::BufferUsages::STORAGE);
-    let out = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("time out"),
-        size: u64::from(side * side) * 4,
-        usage: wgpu::BufferUsages::STORAGE,
-        mapped_at_creation: false,
-    });
-    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("terrain timing"),
-        layout: &pipeline.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry { binding: 1, resource: world.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 16, resource: terrain.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 20, resource: ins.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 22, resource: out.as_entire_binding() },
-        ],
-    });
-    let run = |count: u32| {
-        let mut encoder = device.create_command_encoder(&Default::default());
-        for _ in 0..count {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &group, &[]);
-            pass.dispatch_workgroups((side * side).div_ceil(64), 1, 1);
-        }
-        let started = std::time::Instant::now();
-        queue.submit([encoder.finish()]);
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        started.elapsed().as_secs_f64()
-    };
-    run(2); // warm up (compile, clocks)
-    let seconds = run(repeats);
-    seconds * 1e9 / (f64::from(side * side) * f64::from(repeats))
 }
 
 /// Compare a world's terrain program on the GPU with its CPU field at

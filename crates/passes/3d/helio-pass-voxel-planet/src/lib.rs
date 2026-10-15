@@ -14,7 +14,7 @@ pub mod edit_store;
 pub mod edits;
 pub mod snapshot;
 pub mod grid;
-pub mod journal;
+pub mod record;
 pub mod landform;
 pub mod layers;
 pub mod noise;

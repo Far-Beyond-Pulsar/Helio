@@ -12,8 +12,6 @@ use std::sync::{Arc, Mutex};
 
 pub const RECIPE_VERSION: u32 = 2;
 pub const EARTH_RADIUS: f64 = 6_371_000.0;
-/// Level cells [`Planet::edited_top`] walks down at most.
-pub const EDITED_TOP_REACH: i32 = 4096;
 
 /// Serialized authoring recipe: the world's form and its terrain generator.
 /// Edits are stored separately (see `journal`).
@@ -63,16 +61,6 @@ impl PlanetRecipe {
         }
         // 0 means "no terrain yet".
         h.max(1)
-    }
-    pub fn from_json(json: &str) -> Result<Self, String> {
-        if json.trim().is_empty() {
-            return Ok(Self::default());
-        }
-        let recipe: Self = serde_json::from_str(json).map_err(|e| e.to_string())?;
-        if recipe.version != RECIPE_VERSION {
-            return Err(format!("unsupported planet recipe version {}", recipe.version));
-        }
-        Ok(recipe)
     }
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("recipe serializes")
@@ -525,62 +513,6 @@ impl Planet {
         }
         terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, c.height)
     }
-    /// Canonical kinds (0 air, 1 solid) of cells `ks` of level column
-    /// `(i, j)`, as [`Self::sample_kind`] gives them, the column's height
-    /// and brushes looked up once.
-    pub fn column_kinds(&self, level: u32, face: u8, i: i32, j: i32, ks: &[i32]) -> Vec<u32> {
-        let mut column = None;
-        ks.iter().map(|&k| self.kind_at(&mut column, level, face, i, j, k)).collect()
-    }
-    /// First air layer above the highest solid cell of level column
-    /// `(i, j)` with its edits (level cells), or `None` when no edit reaches
-    /// the column (its generated top stands).
-    ///
-    /// Walks down from the highest layer anything can be solid at (the
-    /// generated top, an Add brush's top, a baked solid cell) with a stride
-    /// growing with the distance walked (a step per 1/16 of it), refined to
-    /// the exact layer below the last air sample; a solid slab thinner than
-    /// the stride there can be stepped over, which only makes the answer
-    /// low. Removal reaching deeper than [`EDITED_TOP_REACH`] cells below
-    /// that start answers the lowest air walked.
-    pub fn edited_top(&self, face: u8, i: i32, j: i32, level: u32) -> Option<i32> {
-        let large = Self::face_brushes(&self.edits.large, face, i, j, None, level);
-        let recent = Self::face_brushes(&self.edits.recent, face, i, j, None, level);
-        let column_key = ColumnKey { face, level: level as u8, ci: i.div_euclid(crate::grid::BRICK), cj: j.div_euclid(crate::grid::BRICK) };
-        let baked = self.edits.baked.column(&column_key).is_some();
-        if large.is_empty() && recent.is_empty() && !baked {
-            return None;
-        }
-        let g = &self.grid;
-        let height = self.column_height(face, i, j, level);
-        let generated = terrain::generated_top(g, &*self.field, face, i, j, level, height);
-        let shift = level + 1;
-        let added = large.iter().chain(&recent).filter(|b| b.op() == 1).map(|b| (b.k_hi >> shift) + 1).max().unwrap_or(i32::MIN);
-        let baked_top = self.edits.baked.solid_top(face, level, i, j).unwrap_or(i32::MIN);
-        let start = generated.max(added).max(baked_top);
-        let floor = (((self.inner_radius() - g.radius()) / g.voxel_size()).floor() as i32) >> level;
-        let mut column = Some(RayColumn { key: (face, i, j, level), height, large, recent });
-        let mut solid = |k: i32| self.kind_at(&mut column, level, face, i, j, k) == 1;
-        let (mut air, mut k) = (start, start - 1);
-        while k >= floor && start - k <= EDITED_TOP_REACH {
-            if solid(k) {
-                // Air at `air`, solid at `k`: the topmost solid layer between.
-                let mut lo = k;
-                while air - lo > 1 {
-                    let mid = (air + lo) / 2;
-                    if solid(mid) {
-                        lo = mid;
-                    } else {
-                        air = mid;
-                    }
-                }
-                return Some(lo + 1);
-            }
-            air = k;
-            k -= 1 + (start - k) / 16;
-        }
-        Some(air)
-    }
     /// Slope (eighths of a cell per cell) that classifies the materials of
     /// base column (i, j), whatever level draws it: central differences of
     /// level-4 heights two cells (3.2 m) each way, in base layers (as the
@@ -988,87 +920,6 @@ impl Planet {
         }
         height - f64::from(air) * g.voxel_size()
     }
-    /// Radial coordinate bounding the solid cells whose ground point lies
-    /// within ground distance `radius` of the point below `eye`: generated
-    /// terrain from column tops plus a margin, additions from the edit top.
-    /// Never above [`Self::outer_radius`], which it falls back to where the
-    /// region leaves the face.
-    ///
-    /// For level selection only, where an optimistic answer just means a
-    /// coarser level draws that terrain: the margin is the field's certified
-    /// one capped at 4 cells (sampled rises are at most 2 cells at every
-    /// level, certified margins 13-28).
-    ///
-    /// Branch and bound: the region starts as a few coarse columns, and the
-    /// column with the highest bound is split into its four children until
-    /// that column is fine (level 3) or the split budget is spent.
-    pub fn local_outer_radius(&self, eye: DVec3, radius: f64) -> f64 {
-        const FINEST: u32 = 3;
-        const SPLITS: usize = 192;
-        let g = &self.grid;
-        let global = self.outer_radius();
-        // Smallest ground width of a base cell (equal-angle cube cells
-        // shrink to 1/sqrt(2) of the centre width towards face edges).
-        let base = if g.is_plane() { g.voxel_size() } else { g.delta() * g.radius() * 0.7 };
-        // Coarsest level still resolving the region in a few cells. Field
-        // queries exist at any level, beyond the world's resident ones (a
-        // small plane has few): the region stays a few columns wide.
-        let mut level = 0;
-        while level + 1 < 24 && base * f64::from(1u32 << (level + 1)) * 3.0 < radius {
-            level += 1;
-        }
-        let reach = (radius / (base * f64::from(1u32 << level))).ceil() as i32 + 1;
-        let (cell, _) = g.locate(eye);
-        let (ci, cj) = (cell.i >> level, cell.j >> level);
-        let inside = |c: i32| c - reach >= 0 && ((i64::from(c + reach) + 1) << level) <= i64::from(g.cells());
-        if !inside(ci) || !inside(cj) {
-            return global;
-        }
-        let margins = self.field.bound_margins();
-        // Highest surface (metres above the datum) any column inside a
-        // level column can reach: its generated top, or where edits reach
-        // it, its edited top. A dig lowers the bound to its floor, so an eye
-        // inside it turns levels on by its height over that floor, not by
-        // the rock that was there; an addition raises it only where it is.
-        let bound = |l: u32, a: i32, b: i32| {
-            let margin = if l == 0 { 0 } else { margins[l as usize].min(4) };
-            let top = self.edited_top(cell.face, a, b, l).unwrap_or_else(|| self.column_top(cell.face, a, b, l));
-            f64::from(top + margin) * g.level_size(l)
-        };
-        let mut heap = std::collections::BinaryHeap::new();
-        for a in ci - reach..=ci + reach {
-            for b in cj - reach..=cj + reach {
-                heap.push((OrdF64(bound(level, a, b)), level, a, b));
-            }
-        }
-        let mut splits = 0;
-        let top = loop {
-            let (OrdF64(top), l, a, b) = heap.pop().expect("region has columns");
-            if l <= FINEST || splits == SPLITS {
-                break top;
-            }
-            splits += 1;
-            for (da, db) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                heap.push((OrdF64(bound(l - 1, a * 2 + da, b * 2 + db)), l - 1, a * 2 + da, b * 2 + db));
-            }
-        };
-        (g.radius() + top + self.overhang_height() + g.voxel_size() * 4.0).min(global)
-    }
-}
-
-/// Totally ordered f64 for heaps.
-#[derive(Clone, Copy, PartialEq)]
-struct OrdF64(f64);
-impl Eq for OrdF64 {}
-impl PartialOrd for OrdF64 {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for OrdF64 {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.total_cmp(&other.0)
-    }
 }
 
 #[cfg(test)]
@@ -1089,107 +940,6 @@ mod tests {
 
     /// Diagnostic: surface material shares of a mountain flank as each
     /// level draws it (shading's coarse-cell rule), against level 0.
-    #[test]
-    #[ignore]
-    fn material_shares_by_level() {
-        use crate::terrain::{block_slope, material};
-        let p = planet();
-        let g = *p.grid();
-        // Highest level-10 column near the harness spawn.
-        let n = g.cells() >> 10;
-        let mut best = (0, 0, i32::MIN);
-        for a in 0..96 {
-            for b in 0..96 {
-                let u = (0.47 + 0.15 * (f64::from(a) / 95.0 * 2.0 - 1.0)).clamp(0.0, 0.999);
-                let v = (0.53 + 0.15 * (f64::from(b) / 95.0 * 2.0 - 1.0)).clamp(0.0, 0.999);
-                let (i, j) = ((u * f64::from(n)) as i32, (v * f64::from(n)) as i32);
-                let h = p.column_top(2, i, j, 10);
-                if h > best.2 {
-                    best = (i, j, h);
-                }
-            }
-        }
-        let (ci, cj) = ((best.0 << 10) + 512, (best.1 << 10) + 512);
-        let mut state = 0x1234_5678u64;
-        let mut rand = move || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            (state >> 11) as f64 / (1u64 << 53) as f64
-        };
-        let class = |m: u32| match m & material::ID {
-            material::STONE | material::DARK_STONE => 0,
-            material::GRASS => 1,
-            material::SNOW => 2,
-            _ => 3,
-        };
-        let top_material = |level: u32, a: i32, b: i32, slope_at: Option<(i32, i32)>, point: Option<(i32, i32)>| {
-            let top = p.column_top(2, a, b, level);
-            let slope = match slope_at {
-                Some((i, j)) => block_slope(|x, y| p.column_top(2, (i & !7) + x, (j & !7) + y, 0), i & 7, j & 7),
-                None => block_slope(|x, y| p.column_top(2, (a & !7) + x, (b & !7) + y, level), a & 7, b & 7),
-            };
-            let q = match point {
-                Some((i, j)) => g.domain_point(2, i, j, 0),
-                None => g.domain_point(2, a, b, level),
-            };
-            p.field().ground_material(q, 0, (top << level) * g.layer_mm() as i32, 0, slope, (top - 1) << level)
-        };
-        let samples = 6000;
-        let span = 40_000.0 / (g.delta() * g.radius());
-        let points: Vec<(i32, i32)> = (0..samples)
-            .map(|_| (ci + ((rand() - 0.5) * span) as i32, cj + ((rand() - 0.5) * span) as i32))
-            .collect();
-        eprintln!("rock grass snow other (fractions) over a 40 km square around the summit");
-        for level in 0..10u32 {
-            let mut shares = [[0usize; 4]; 4];
-            for &(i, j) in &points {
-                let (a, b) = (i >> level, j >> level);
-                shares[0][class(top_material(level, a, b, None, None))] += 1;
-                shares[1][class(top_material(level, a, b, Some((i, j)), None))] += 1;
-                shares[2][class(top_material(level, a, b, None, Some((i, j))))] += 1;
-                shares[3][class(top_material(level, a, b, Some((i, j)), Some((i, j))))] += 1;
-            }
-            let f = |s: [usize; 4]| format!("{:.3} {:.3} {:.3} {:.3}", s[0] as f64 / samples as f64, s[1] as f64 / samples as f64, s[2] as f64 / samples as f64, s[3] as f64 / samples as f64);
-            eprintln!("L{level}: as-is {} | fine slope {} | fine point {} | both {}", f(shares[0]), f(shares[1]), f(shares[2]), f(shares[3]));
-        }
-    }
-
-    /// The local terrain bound holds for every base column sampled in the
-    /// region, and is far below the planet's peak over lowland.
-    #[test]
-    fn local_outer_radius_bounds_the_terrain_around_the_eye() {
-        let p = planet();
-        let g = *p.grid();
-        let mut state = 0x9e37_79b9_7f4a_7c15u64;
-        let mut rand = move || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            (state >> 11) as f64 / (1u64 << 53) as f64
-        };
-        let mut below_peak = 0;
-        for n in 0..24 {
-            let dir = DVec3::new(rand() - 0.5, rand() - 0.5, rand() - 0.5).normalize();
-            let radius = [150.0, 600.0, 2_500.0, 20_000.0][n % 4];
-            let eye = p.surface_point(dir, 500.0);
-            let bound = p.local_outer_radius(eye, radius);
-            assert!(bound <= p.outer_radius());
-            below_peak += usize::from(bound < p.outer_radius() - 500.0);
-            let up = eye.normalize();
-            let east = up.cross(DVec3::Y).try_normalize().unwrap_or(DVec3::X);
-            let north = up.cross(east);
-            for _ in 0..400 {
-                let (a, r) = (rand() * std::f64::consts::TAU, radius * rand().sqrt());
-                let ground = (up * g.radius() + (east * a.cos() + north * a.sin()) * r).normalize();
-                let (cell, _) = g.locate(ground * g.radius());
-                let top = g.radius() + f64::from(p.column_top(cell.face, cell.i, cell.j, 0)) * g.voxel_size();
-                assert!(top <= bound, "{dir} r {radius}: column top {top} above bound {bound}");
-            }
-        }
-        assert!(below_peak >= 12, "the bound should be local ({below_peak}/24 below the peak)");
-    }
-
     #[test]
     fn ground_height_is_altitude_above_the_column_below() {
         let p = heightfield(PlanetRecipe::default());
@@ -1265,33 +1015,6 @@ mod tests {
     /// Level selection measures the eye's height over the terrain as
     /// edited: inside a dig, over its floor; additions count only where
     /// they are.
-    #[test]
-    fn local_bounds_follow_edits() {
-        let mut p = heightfield(PlanetRecipe::default());
-        let g = *p.grid();
-        let up = DVec3::new(0.2, 1.0, -0.1).normalize();
-        let ground = g.radial(p.surface_point(up, 0.0));
-        let untouched = p.local_outer_radius(g.at_radial(up, ground - 250.0), 30.0);
-        assert!(untouched > ground - 1.0, "rock over the eye: {} m", untouched - ground);
-        // A ball 400 m wide whose floor is 300 m below the ground.
-        let floor = ground - 300.0;
-        p.apply(Brush { center: g.at_radial(up, floor + 200.0).to_array(), radius: 200.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
-        let eye = g.at_radial(up, floor + 50.0);
-        // Within the bound's tolerance over flat ground (coarse cells and
-        // their margins where the split budget ends), far below the rock.
-        let bound = p.local_outer_radius(eye, 30.0);
-        assert!(bound > floor && bound < floor + 45.0, "the dig's floor bounds the eye's region: {} m over it", bound - floor);
-        // An addition far away leaves the bound; one in the region raises it.
-        let side = up.any_orthonormal_vector();
-        let far = p.surface_point((up + side * 0.01).normalize(), 0.0);
-        p.apply(Brush { center: (far + far.normalize() * 500.0).to_array(), radius: 600.0, shape: BrushShape::Sphere, op: BrushOp::Add, material: 3, height: 0.0 }).unwrap();
-        assert!((p.local_outer_radius(eye, 30.0) - bound).abs() < 1e-6);
-        p.apply(Brush { center: g.at_radial(up, floor + 20.0).to_array(), radius: 15.0, shape: BrushShape::Sphere, op: BrushOp::Add, material: 3, height: 0.0 }).unwrap();
-        let raised = p.local_outer_radius(eye, 30.0);
-        assert!(raised > floor + 34.0 && raised > bound && raised < floor + 90.0, "a hill in the dig: {} m over the floor", raised - floor);
-    }
-
-    /// The near plane's clearance sees what was built beside the eye.
     #[test]
     fn air_clearance_counts_additions() {
         let mut p = heightfield(PlanetRecipe::default());
@@ -1461,36 +1184,6 @@ mod tests {
     }
 
     /// The walks' kinds are the canonical ones at every level.
-    #[test]
-    fn column_kinds_match_sample_kind_at_every_level() {
-        let mut p = heightfield(PlanetRecipe::default());
-        let g = *p.grid();
-        let (face, i0, j0) = (2u8, g.cells() / 2 + 8, g.cells() / 2 - 24);
-        let top = p.column_top(face, i0, j0, 0);
-        let centre = g.cell_center(Cell::new(face, i0 + 20, j0 + 20, top - 6));
-        let up = centre.normalize();
-        p.apply(Brush { center: centre.to_array(), radius: 14.0, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
-        p.apply(Brush { center: (centre + up * 9.0).to_array(), radius: 3.0, shape: BrushShape::Cube, op: BrushOp::Add, material: 4, height: 6.0 }).unwrap();
-        for n in 0..90 {
-            let at = centre + up.any_orthonormal_vector() * (f64::from(n) * 0.3 - 13.0);
-            p.apply(Brush { center: at.to_array(), radius: 0.4, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
-        }
-        assert!(p.edits().sealed_len() > 0);
-        for level in 0..5u32 {
-            for (a, b) in [(0, 0), (20, 20), (28, 13), (40, 40)] {
-                let (i, j) = ((i0 + a) >> level, (j0 + b) >> level);
-                let ks: Vec<i32> = ((top >> level) - 300..(top >> level) + 60).collect();
-                let kinds = p.column_kinds(level, face, i, j, &ks);
-                for (k, kind) in ks.iter().zip(kinds) {
-                    assert_eq!(kind, p.sample_kind(level, face, i, j, *k).0, "level {level} cell ({i}, {j}, {k})");
-                }
-            }
-        }
-    }
-
-    /// Small edits sealed into the store show at coarser levels: a pit dug
-    /// with cell-sized brushes (each too small to draw beyond level 0) is
-    /// air at level 2 once sealed.
     #[test]
     fn sealed_small_edits_show_at_coarse_levels() {
         let mut p = heightfield(PlanetRecipe::default());

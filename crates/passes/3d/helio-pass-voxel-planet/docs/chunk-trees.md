@@ -1,8 +1,13 @@
 # Chunk trees: the voxel terrain architecture
 
-Status: decided 2026-10-11; replaced span columns (`span-columns.md`) and
-the column tracer, which were removed once the chunk pass ran in Pulsar.
-`aaa-architecture.md` keeps the measurements that led here.
+Status: built. Decided 2026-10-11, replacing span columns and the column
+tracer, which were removed once the chunk pass ran in Pulsar. "The design"
+below is the plan as decided; the dated results after it record what was
+built and measured, and where it differs: boxes are culled by distance
+bins on the GPU (no Hi-Z), leaves store a material and the heightfield's
+slope (no compressed colour or normal), edits regenerate the tiles they
+touch from the brush log (no edit pass over resident chunks, no readback),
+and the edit log's index is a per-face octree.
 
 ## Goal
 
@@ -22,7 +27,7 @@ planes:
 ## Why the span-column design cannot get there
 
 Each problem below is structural; tuning inside the design measured 0-14%
-per attempt (`aaa-architecture.md`).
+per attempt.
 
 1. **A step costs ~700 lane-cycles.** The research tracers spend 30-60
    instructions a step. Ours walks the curved cube-sphere grid directly
@@ -149,7 +154,7 @@ per attempt (`aaa-architecture.md`).
 
 Survives: the integer field, landform interpreter and terrain contract with
 its CPU mirror and bit-identity tests; the noise library (with hardware
-wide products); the cube-sphere grid; the edit log, BVH and journal (for
+wide products); the cube-sphere grid; the edit log and its index (for
 unresident space and saves); the Pulsar component, tools and picks; TSR and
 the sky.
 
@@ -185,8 +190,8 @@ interleaved runs. A phase that misses its gate stops the plan for review.
 
 ## Phase 1 results (2026-10-11)
 
-`src/chunks.rs`, `shaders/chunk_generate.wgsl`, `shaders/chunk_draw.wgsl`;
-measured in the flight harness's hold mode (`HELIO_VOXEL_CHUNKS=1`), 1080p,
+`src/chunks/mod.rs` (then `src/chunks.rs`), `shaders/chunk_generate.wgsl`,
+`shaders/chunk_draw.wgsl`; measured in the flight harness's hold mode, 1080p,
 RTX 3060, interleaved with the span-column renderer in the same binary:
 
 | View | Span columns | Chunk trees |
@@ -283,7 +288,8 @@ tile spends 3 ms a frame on it.
 `src/chunks/pass.rs` (`ChunkPass`): residency, primary visibility and
 Helio's gbuffer from the same frame source as the span-column pass, so
 Helio's lighting, sky and TSR apply unchanged. The harness's
-`HELIO_VOXEL_CHUNKS_ENGINE=1` installs it in place of `PlanetPass`.
+`HELIO_VOXEL_CHUNKS_ENGINE=1` installs it in place of the span-column pass
+(since removed).
 
 - A ray that leaves its chunk walks the drawn cut. The chunk table also
   holds each drawn tile's column (its chunk layers) and, for it and every

@@ -292,7 +292,9 @@ impl Grid {
     pub fn layer_mm(&self) -> u32 {
         self.layer_mm
     }
-    pub fn tangential_size(&self) -> f64 {
+    /// A base cell's width at a face centre (tests: the authored size).
+    #[cfg(test)]
+    fn tangential_size(&self) -> f64 {
         self.delta() * self.radius
     }
     pub fn reference_cells(&self) -> i32 {
@@ -380,8 +382,9 @@ impl Grid {
     }
     /// Neighbour across one cell face; `axis` 0/1 are the tangential index
     /// axes and 2 is radial. Crossing a cube edge resolves the neighbour's
-    /// own face and indices through its centre point.
-    pub fn neighbour(&self, cell: Cell, axis: usize, step: i32) -> Cell {
+    /// own face and indices through its centre point (tests: seams).
+    #[cfg(test)]
+    fn neighbour(&self, cell: Cell, axis: usize, step: i32) -> Cell {
         let mut next = cell;
         match axis {
             0 => next.i += step,
@@ -677,66 +680,6 @@ pub fn plane_domain_point(origin: i32, scale: u32, i: i32, j: i32, level: u32) -
     IVec3::new(scaled(i), 0, -scaled(j))
 }
 
-/// Camera-relative description of one face's boundary families, computed in
-/// `f64` and consumed in `f32` by the GPU and by precision tests.
-///
-/// For the α family (planes containing `b`), a plane at angle `α_c + δ` has
-/// normal `m cos δ - q sin δ`; the camera lies on the δ = 0 plane at distance
-/// `rho` from the plane axis. The β family is identical with `a` and `b`
-/// exchanged.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct FaceFrame {
-    pub m: [DVec3; 2],
-    pub q: [DVec3; 2],
-    pub rho: [f64; 2],
-    /// Camera base-cell index on each tangential axis (may be outside the face).
-    pub index: [i64; 2],
-    /// Fraction of the camera inside that index, in [0, 1).
-    pub fraction: [f64; 2],
-    pub valid: bool,
-}
-
-impl Grid {
-    pub fn face_frame(&self, face: u8, eye: DVec3) -> FaceFrame {
-        let [n, a, b] = face_axes(face);
-        let mut frame = FaceFrame::default();
-        if self.is_plane() {
-            // Cell planes are parallel: `m` is their normal and the camera
-            // index and fraction come straight from its coordinates.
-            let c = self.face_coords(PLANE_FACE, eye).unwrap_or([0.0; 3]);
-            for (axis, u) in [a, b].into_iter().enumerate() {
-                frame.m[axis] = u;
-                frame.q[axis] = n;
-                let whole = c[axis].floor();
-                frame.index[axis] = whole as i64;
-                frame.fraction[axis] = c[axis] - whole;
-            }
-            frame.valid = face == PLANE_FACE;
-            return frame;
-        }
-        for (axis, u) in [a, b].into_iter().enumerate() {
-            // Angle of the eye around axis `w`, measured in the (u, n) plane.
-            let pu = eye.dot(u);
-            let pn = eye.dot(n);
-            let rho = (pu * pu + pn * pn).sqrt();
-            let angle = pu.atan2(pn);
-            let (s, c) = angle.sin_cos();
-            frame.m[axis] = u * c - n * s;
-            frame.q[axis] = u * s + n * c;
-            frame.rho[axis] = rho;
-            let index = self.index_of_angle(angle);
-            let whole = index.floor();
-            frame.index[axis] = whole as i64;
-            frame.fraction[axis] = index - whole;
-        }
-        // Extended coordinates stay meaningful for any eye that is not on the
-        // opposite side of the planet; GPU traversal only uses a face frame
-        // after locating a point in that face.
-        frame.valid = eye.dot(n) > -0.5 * eye.length();
-        frame
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -947,28 +890,5 @@ mod tests {
         let b = coarse.locate(p).0;
         let d = fine.domain_point(a.face, a.i, a.j, 0) - coarse.domain_point(b.face, b.i, b.j, 0);
         assert!(d.abs().max_element() <= 8, "{d}");
-    }
-
-    #[test]
-    fn plane_face_frame_reproduces_camera_indices() {
-        let grid = Grid::plane(Shape::InfinitePlane, 0.0, 0.1).unwrap();
-        let eye = grid.position(PLANE_FACE, [12_345.25, 67_890.75, 18.5]);
-        let frame = grid.face_frame(PLANE_FACE, eye);
-        assert_eq!(frame.index, [12_345, 67_890]);
-        assert!((frame.fraction[0] - 0.25).abs() < 1e-3);
-        assert!((frame.fraction[1] - 0.75).abs() < 1e-3);
-        assert!(frame.valid);
-    }
-
-    #[test]
-    fn face_frame_reproduces_camera_indices() {
-        let grid = earth();
-        let eye = grid.position(4, [12_345.25, 67_890.75, 18.5]);
-        let frame = grid.face_frame(4, eye);
-        assert_eq!(frame.index, [12_345, 67_890]);
-        assert!((frame.fraction[0] - 0.25).abs() < 1e-6);
-        assert!((frame.fraction[1] - 0.75).abs() < 1e-6);
-        assert!(frame.m[0].dot(eye).abs() < 1e-6);
-        assert!(frame.m[1].dot(eye).abs() < 1e-6);
     }
 }
