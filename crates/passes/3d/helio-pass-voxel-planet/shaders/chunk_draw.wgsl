@@ -419,6 +419,20 @@ fn leaf_ground(slot: u32, c: vec3<i32>, f: ChunkDraw) -> vec3<f32> {
     return n * inverseSqrt(length2);
 }
 
+// The material pair of the stored leaf holding cell `c` of chunk `slot`
+// (NONE: the leaf is empty, full or past the chunk).
+fn stored_leaf_pair(slot: u32, c: vec3<i32>) -> u32 {
+    if any(c < vec3<i32>(0)) || any(c > vec3<i32>(63)) { return NONE; }
+    let root = chunk_meta[slot];
+    let m = u32((c.x >> 4u) + ((c.y >> 4u) << 2u) + ((c.z >> 4u) << 4u));
+    if !bit64(root.root_occ, m) || bit64(root.root_full, m) { return NONE; }
+    let node = mids[slot * 64u + m];
+    let l = u32(((c.x >> 2u) & 3) + (((c.y >> 2u) & 3) << 2u) + (((c.z >> 2u) & 3) << 4u));
+    if !bit64(node.xy, l) || bit64(node.zw, l) { return NONE; }
+    let index = leaf_at_page(slot, mid_leaves[slot * 64u + m] + rank64(node.xy & ~node.zw, l));
+    return (leaf_materials[index >> 1u] >> ((index & 1u) * 16u)) & 0xffffu;
+}
+
 // A hit cell's material from its leaf's (or mid's) two (`pair`: what a
 // walk's hit carries): the surface's with air above it, the subsurface's
 // under other cells. A ray entering by the top face (`from_above`) came
@@ -1485,10 +1499,28 @@ struct Look {
 // cell's pigment, corner occlusion from the cells around the air in front
 // of the face, and its edges darkened while it spans several pixels. Each
 // fades as the cell shrinks towards a pixel (TSR averages the rest).
-fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, material: u32, position: vec3<f32>, pixel_m: f32) -> Look {
+fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, hit_material: u32, position: vec3<f32>, pixel_m: f32, pixel: vec2<u32>) -> Look {
     let c = cell_frame(slot, cell);
     let key = chunk_keys[slot];
     let projected = length(c.m0.xyz) / max(pixel_m, 1e-6);
+    // Material boundaries filtered where cells are a pixel or less: a
+    // leaf's one surface material (its 4x4 columns' vote) would show as
+    // blocks of four pixels. A top face takes the surface material at a
+    // point jittered up to a leaf's width each frame, of the stored leaf
+    // there (TSR averages the frames into a filtered boundary).
+    var material = hit_material;
+    let filtered = 1.0 - smoothstep(1.0, 3.0, projected);
+    if filtered > 0.0 && axis == 2u && sign == 1u {
+        let r = vec2<f32>(f32(fade_dither(pixel)), f32(fade_dither(pixel + vec2<u32>(37u, 11u)))) / 1024.0;
+        let local = vec3<f32>(c.i0.w, c.i1.w, c.i2.w) + vec3<f32>(dot(c.i0.xyz, position), dot(c.i1.xyz, position), dot(c.i2.xyz, position));
+        let at = vec2<i32>(floor(local.xy + (r - 0.5) * 4.0 * filtered));
+        // A top cell there (solid under air): its leaf holds a surface.
+        let there = vec3<i32>(at, cell.z);
+        if any((at >> vec2<u32>(2u)) != (cell.xy >> vec2<u32>(2u))) && solid_at(slot, there) && !solid_at(slot, there + vec3<i32>(0, 0, 1)) {
+            let pair = stored_leaf_pair(slot, there);
+            if pair != NONE && (pair & 0xffu) != 0u { material = min(pair & 0xffu, 31u); }
+        }
+    }
     let smooth_ground = 1.0 - under_refined(key, projected);
     let mosaic = mosaic_weight(projected) * smooth_ground;
     // The cell centre's noise-domain point: the same pigment from every
@@ -1584,7 +1616,7 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     let cell = vec3<i32>(vec3<u32>(v.y, v.y >> 6u, v.y >> 12u) & vec3<u32>(63u));
     // A pixel's width at the hit (m).
     let pixel_m = pixel_width(vec2<u32>(pixel.xy), size, t);
-    let look = surface_look(v.x, cell, axis, sign, material, position, pixel_m);
+    let look = surface_look(v.x, cell, axis, sign, material, position, pixel_m, vec2<u32>(pixel.xy));
     let f0 = 0.03;
     var out: GOut;
     out.albedo = vec4<f32>(look.albedo, 1.0);
