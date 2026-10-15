@@ -7,8 +7,11 @@
 //! metres; the terrain entity sits at the origin.
 //!
 //! Scripts (blueprints) call the world methods on
-//! [`VoxelTerrainComponent`]: `get_block`, `set_block`, `fill_sphere`,
-//! `fill_cube`, `raycast_distance` and `voxel_size`. Material ids are the
+//! [`VoxelTerrainComponent`]: blocks (`get_block`, `set_block`,
+//! `fill_sphere`, `fill_cube`, `raycast_distance`), and every setting of
+//! the world, read and written: `world_shape`, `planet_radius`,
+//! `plane_size`, `voxel_size`, `seed`, `air`, `air_density`, `air_tint_*`,
+//! `air_haze`, `is_editable` and their `set_*`. Material ids are the
 //! engine terrain materials (`helio_pass_voxel_planet::terrain::material`);
 //! 0 is air. They shape the built-in generator's layer stack through
 //! [`VoxelTerrainLayersComponent`]: `use_preset`, `add_layer`,
@@ -29,7 +32,7 @@ use pulsar_scene_model::components::Transform;
 use pulsar_scenedb::{Entity, World};
 
 use super::{
-    BlockData, BlockMaterialChange, VoxelLayerKind, VoxelTerrainComponent, VoxelTerrainLayer,
+    BlockData, BlockMaterialChange, VoxelAir, VoxelLayerKind, VoxelTerrainComponent, VoxelTerrainLayer,
     VoxelTerrainLayersComponent, VoxelTerrainStack, VoxelWorldShape,
 };
 
@@ -152,9 +155,10 @@ struct CachedWorld {
     planet: Arc<Planet>,
 }
 
-/// Worlds by terrain entity. A newer journal that only appends edits
-/// extends the cached world.
-static WORLDS: Mutex<Option<HashMap<u64, CachedWorld>>> = Mutex::new(None);
+/// Worlds by scene and terrain entity (scenes live side by side: the
+/// editor's and a play session's, or tests'). A newer journal that only
+/// appends edits extends the cached world.
+static WORLDS: Mutex<Option<HashMap<(usize, u64), CachedWorld>>> = Mutex::new(None);
 
 /// The CPU world of a terrain instance entity: its generated terrain with
 /// every journal edit applied.
@@ -174,7 +178,9 @@ pub fn terrain_world(world: &World, entity: Entity) -> Result<Arc<Planet>, Strin
     let recipe = entity_recipe(world, entity, component)?;
     let mut worlds = WORLDS.lock().unwrap_or_else(|e| e.into_inner());
     let worlds = worlds.get_or_insert_with(HashMap::new);
-    let key = entity.bits();
+    // A scene's address names it while it lives; a later scene at the same
+    // address only finds a world whose recipe and edits match its own.
+    let key = (world as *const World as usize, entity.bits());
     if let Some(cached) = worlds.get_mut(&key) {
         if cached.recipe == recipe && component.edits.starts_with(&cached.edits) {
             let start = cached.edits.len();
@@ -561,6 +567,179 @@ impl VoxelTerrainComponent {
     #[world_method(pure, category = "Voxel")]
     fn voxel_size(world: &World, entity: Entity) -> Result<f64, String> {
         Ok(terrain_world(world, entity)?.grid().voxel_size())
+    }
+}
+
+/// The terrain instance `entity` names: the instance itself, or the first
+/// terrain instance of its owner object.
+fn terrain_instance(world: &World, entity: Entity) -> Result<Entity, String> {
+    if world.get::<VoxelTerrainComponent>(entity).is_some() {
+        return Ok(entity);
+    }
+    let owner = pulsar_scene_model::attachments::owner_of(world, entity).unwrap_or(entity);
+    pulsar_world_registry::instances::resolve_instance(world, owner, "VoxelTerrainComponent", 0)
+        .ok_or_else(|| "the object has no voxel terrain".into())
+}
+
+fn terrain(world: &World, entity: Entity) -> Result<&VoxelTerrainComponent, String> {
+    let instance = terrain_instance(world, entity)?;
+    world.get::<VoxelTerrainComponent>(instance).ok_or_else(|| "the object has no voxel terrain".into())
+}
+
+fn terrain_mut(world: &mut World, entity: Entity) -> Result<pulsar_scenedb::Mut<'_, VoxelTerrainComponent>, String> {
+    let instance = terrain_instance(world, entity)?;
+    world.get_mut::<VoxelTerrainComponent>(instance).ok_or_else(|| "the object has no voxel terrain".into())
+}
+
+fn positive(value: f64, what: &str) -> Result<f64, String> {
+    if value.is_finite() && value > 0.0 { Ok(value) } else { Err(format!("{what} must be positive and finite")) }
+}
+
+fn non_negative(value: f64, what: &str) -> Result<f32, String> {
+    if value.is_finite() && value >= 0.0 { Ok(value as f32) } else { Err(format!("{what} must be zero or more")) }
+}
+
+// Every setting of the world, for scripts (a game's random worlds): the
+// world rebuilds from the new settings, and its sky follows its air.
+#[pulsar_scenedb::component_methods]
+impl VoxelTerrainComponent {
+    /// The world's shape: "sphere", "plane" or "infinite_plane".
+    #[world_method(pure, category = "Voxel|World")]
+    fn world_shape(world: &World, entity: Entity) -> Result<String, String> {
+        Ok(match terrain(world, entity)?.shape {
+            VoxelWorldShape::Sphere => "sphere",
+            VoxelWorldShape::Plane => "plane",
+            VoxelWorldShape::InfinitePlane => "infinite_plane",
+        }
+        .into())
+    }
+
+    #[world_method(category = "Voxel|World")]
+    fn set_world_shape(world: &mut World, entity: Entity, shape: String) -> Result<(), String> {
+        let shape = match shape.to_ascii_lowercase().as_str() {
+            "sphere" | "planet" => VoxelWorldShape::Sphere,
+            "plane" => VoxelWorldShape::Plane,
+            "infinite_plane" | "infinite" => VoxelWorldShape::InfinitePlane,
+            other => return Err(format!("unknown world shape {other:?} (sphere, plane, infinite_plane)")),
+        };
+        terrain_mut(world, entity)?.shape = shape;
+        Ok(())
+    }
+
+    /// A sphere's radius in metres.
+    #[world_method(pure, category = "Voxel|World")]
+    fn planet_radius(world: &World, entity: Entity) -> Result<f64, String> {
+        Ok(terrain(world, entity)?.planet_radius)
+    }
+
+    #[world_method(category = "Voxel|World")]
+    fn set_planet_radius(world: &mut World, entity: Entity, radius_m: f64) -> Result<(), String> {
+        terrain_mut(world, entity)?.planet_radius = positive(radius_m, "a planet's radius")?;
+        Ok(())
+    }
+
+    /// A finite plane's edge in metres.
+    #[world_method(pure, category = "Voxel|World")]
+    fn plane_size(world: &World, entity: Entity) -> Result<f64, String> {
+        Ok(terrain(world, entity)?.plane_size)
+    }
+
+    #[world_method(category = "Voxel|World")]
+    fn set_plane_size(world: &mut World, entity: Entity, size_m: f64) -> Result<(), String> {
+        terrain_mut(world, entity)?.plane_size = positive(size_m, "a plane's size")?;
+        Ok(())
+    }
+
+    /// A base voxel's edge in metres, as authored (0.1 to 1).
+    #[world_method(category = "Voxel|World")]
+    fn set_voxel_size(world: &mut World, entity: Entity, size_m: f64) -> Result<(), String> {
+        terrain_mut(world, entity)?.voxel_size = positive(size_m, "a voxel's size")?.clamp(0.1, 1.0);
+        Ok(())
+    }
+
+    /// The generator's seed.
+    #[world_method(pure, category = "Voxel|Generation")]
+    fn seed(world: &World, entity: Entity) -> Result<i64, String> {
+        Ok(terrain(world, entity)?.seed as i64)
+    }
+
+    #[world_method(category = "Voxel|Generation")]
+    fn set_seed(world: &mut World, entity: Entity, seed: i64) -> Result<(), String> {
+        terrain_mut(world, entity)?.seed = seed as u64;
+        Ok(())
+    }
+
+    /// The world's air: "custom" (the authored sky), "none", "earthlike",
+    /// "thin" or "dense".
+    #[world_method(pure, category = "Voxel|Environment")]
+    fn air(world: &World, entity: Entity) -> Result<String, String> {
+        Ok(terrain(world, entity)?.air.name().into())
+    }
+
+    #[world_method(category = "Voxel|Environment")]
+    fn set_air(world: &mut World, entity: Entity, air: String) -> Result<(), String> {
+        let air = VoxelAir::from_name(&air).ok_or_else(|| format!("unknown air {air:?} ({})", VoxelAir::NAMES.join(", ")))?;
+        terrain_mut(world, entity)?.air = air;
+        Ok(())
+    }
+
+    /// How much air (1: the preset's).
+    #[world_method(pure, category = "Voxel|Environment")]
+    fn air_density(world: &World, entity: Entity) -> Result<f64, String> {
+        Ok(f64::from(terrain(world, entity)?.air_density))
+    }
+
+    #[world_method(category = "Voxel|Environment")]
+    fn set_air_density(world: &mut World, entity: Entity, density: f64) -> Result<(), String> {
+        terrain_mut(world, entity)?.air_density = non_negative(density, "air density")?;
+        Ok(())
+    }
+
+    /// The sky's tint (each channel times the preset's).
+    #[world_method(category = "Voxel|Environment")]
+    fn set_air_tint(world: &mut World, entity: Entity, red: f64, green: f64, blue: f64) -> Result<(), String> {
+        let tint = [non_negative(red, "a tint")?, non_negative(green, "a tint")?, non_negative(blue, "a tint")?];
+        terrain_mut(world, entity)?.air_tint = tint;
+        Ok(())
+    }
+
+    #[world_method(pure, category = "Voxel|Environment")]
+    fn air_tint_red(world: &World, entity: Entity) -> Result<f64, String> {
+        Ok(f64::from(terrain(world, entity)?.air_tint[0]))
+    }
+
+    #[world_method(pure, category = "Voxel|Environment")]
+    fn air_tint_green(world: &World, entity: Entity) -> Result<f64, String> {
+        Ok(f64::from(terrain(world, entity)?.air_tint[1]))
+    }
+
+    #[world_method(pure, category = "Voxel|Environment")]
+    fn air_tint_blue(world: &World, entity: Entity) -> Result<f64, String> {
+        Ok(f64::from(terrain(world, entity)?.air_tint[2]))
+    }
+
+    /// Haze and dust (1: the preset's).
+    #[world_method(pure, category = "Voxel|Environment")]
+    fn air_haze(world: &World, entity: Entity) -> Result<f64, String> {
+        Ok(f64::from(terrain(world, entity)?.air_haze))
+    }
+
+    #[world_method(category = "Voxel|Environment")]
+    fn set_air_haze(world: &mut World, entity: Entity, haze: f64) -> Result<(), String> {
+        terrain_mut(world, entity)?.air_haze = non_negative(haze, "haze")?;
+        Ok(())
+    }
+
+    /// Whether the world can be dug and built.
+    #[world_method(pure, category = "Voxel|Editing")]
+    fn is_editable(world: &World, entity: Entity) -> Result<bool, String> {
+        Ok(terrain(world, entity)?.editable)
+    }
+
+    #[world_method(category = "Voxel|Editing")]
+    fn set_editable(world: &mut World, entity: Entity, editable: bool) -> Result<(), String> {
+        terrain_mut(world, entity)?.editable = editable;
+        Ok(())
     }
 }
 
