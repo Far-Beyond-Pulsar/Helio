@@ -325,7 +325,8 @@ fn highest_near(planet: &Planet, face: u8, fi: f64, fj: f64, span: f64) -> (DVec
 }
 
 /// Residency settings for chunk trees at the flight's resolution
-/// (`HELIO_VOXEL_LOD_PIXELS`, `HELIO_VOXEL_CHUNKS_BUDGET` tiles a frame).
+/// (`HELIO_VOXEL_LOD_PIXELS`, `HELIO_VOXEL_CHUNKS_BUDGET` footprints a
+/// frame).
 fn chunk_config(h: u32, budget: usize) -> helio_pass_voxel_planet::chunks::ResidencyConfig {
     use helio_pass_voxel_planet::chunks::{residency::PlanConfig, ResidencyConfig};
     let lod: f64 = std::env::var("HELIO_VOXEL_LOD_PIXELS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
@@ -337,16 +338,22 @@ fn chunk_config(h: u32, budget: usize) -> helio_pass_voxel_planet::chunks::Resid
             // `HELIO_VOXEL_OFFSCREEN_PIXELS`: out of view (2).
             offscreen_pixels: std::env::var("HELIO_VOXEL_OFFSCREEN_PIXELS").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0),
             view_guard: 0.35,
+            // `HELIO_VOXEL_UNSEEN_PIXELS`: where no ray met a node lately (2;
+            // 1: rays decide nothing).
+            unseen_pixels: std::env::var("HELIO_VOXEL_UNSEEN_PIXELS").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0),
+            seen_frames: 90,
             coarsen: 0.8,
             max_distance: 400_000.0,
             prefetch_seconds: 0.5,
             keep_frames: 120,
             // `HELIO_VOXEL_MOTION_FLOW`: pixels a frame of motion per extra
-            // pixel a cell may cover (16; 0: none), up to three.
+            // pixel a cell may cover (16; 0: none), up to
+            // `HELIO_VOXEL_MOTION_MAX` (3).
             motion_flow: std::env::var("HELIO_VOXEL_MOTION_FLOW").ok().and_then(|v| v.parse().ok()).unwrap_or(16.0),
-            motion_max: 3.0,
+            motion_max: std::env::var("HELIO_VOXEL_MOTION_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(3.0),
+            near_cells: 2.0,
         },
-        tiles_per_frame: budget,
+        footprints_per_frame: budget,
         // `HELIO_VOXEL_CHUNKS_GENERATE_MS`: GPU generation a frame.
         generate_ms: std::env::var("HELIO_VOXEL_CHUNKS_GENERATE_MS").ok().and_then(|v| v.parse().ok()),
         // `HELIO_VOXEL_CHUNKS_FRAME_MS`: the frame's GPU milliseconds
@@ -656,7 +663,6 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
         step(&mut world, &planet, &mut frame);
     }
     step(&mut world, &planet, &mut frame);
-    eprintln!("CHUNKDIG {view}: rays reached under {} tiles' surface bands", world.deep_tiles());
     // `HELIO_VOXEL_CHUNKS_PROBE=x,y;x,y`: those pixels against the CPU raycast.
     if let Ok(probes) = std::env::var("HELIO_VOXEL_CHUNKS_PROBE") {
         let inverse = (camera.proj * camera.view).inverse();
@@ -690,13 +696,13 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
                 let gen: f64 = timings.iter().map(|t| t.generate).sum();
                 let stages = timings.iter().fold([0.0; 3], |s, t| [s[0] + t.stages[0], s[1] + t.stages[1], s[2] + t.stages[2]]);
                 frames += 1;
-                tiles += stats.generated_tiles;
-                most = most.max(stats.generated_tiles);
+                tiles += stats.generated_chunks;
+                most = most.max(stats.generated_chunks);
                 gen_max = gen_max.max(gen);
                 gen_sum += gen;
                 cpu_max = cpu_max.max(stats.cpu_ms.iter().sum::<f64>());
                 if std::env::var_os("HELIO_VOXEL_CHUNKS_TRACE").is_some() {
-                    eprintln!("CHUNKBLAST frame {frames}: tiles {} chunks {} regen {} requests {} gen {gen:.2} ms {stages:.2?} cpu {:?} drawn {} resident {} slots {}", stats.generated_tiles, stats.generated_chunks, stats.regenerated_tiles, stats.requests, stats.cpu_ms.map(|v| (v * 100.0).round() / 100.0), stats.drawn_chunks, stats.resident_chunks, stats.out_of_slots);
+                    eprintln!("CHUNKBLAST frame {frames}: footprints {} chunks {} requests {} gen {gen:.2} ms {stages:.2?} cpu {:?} drawn {} resident {} slots {}", stats.generated_footprints, stats.generated_chunks, stats.requests, stats.cpu_ms.map(|v| (v * 100.0).round() / 100.0), stats.drawn_chunks, stats.resident_chunks, stats.out_of_slots);
                 }
                 if world.settled() || frames >= 600 {
                     break;
@@ -726,7 +732,7 @@ fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usiz
         let offset = (n as f64 / 2.0).ceil() * if n % 2 == 0 { 0.6 } else { -0.6 };
         planet.apply(Brush { center: (at + side * offset).to_array(), radius: 1.5, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
         let stats = step(&mut world, &planet, &mut frame);
-        tiles.push(stats.generated_tiles as f64);
+        tiles.push(stats.generated_chunks as f64);
         gen_ms.extend(world.take_timings().iter().map(|t| t.generate));
         if shown.is_none() && (centre_depth(&world) - before).abs() > 0.05 {
             shown = Some(n);
@@ -909,7 +915,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
             if frames % 50 == 0 {
                 if let Some(pass) = flight.renderer.find_pass::<ChunkPass>() {
                     let s = pass.stats();
-                    eprintln!("CHUNKLOAD {mode}: frame {frames} at {:.1} s, interval {:.1} ms, pass cpu {:?} ms, stages {:?} ms, waiting {} generated {} drawn {}", started.elapsed().as_secs_f64(), last.elapsed().as_secs_f64() * 1e3, pass.cpu_ms().map(|v| (v * 100.0).round() / 100.0), s.cpu_ms.map(|v| (v * 100.0).round() / 100.0), s.requests, s.generated_tiles, s.drawn_tiles);
+                    eprintln!("CHUNKLOAD {mode}: frame {frames} at {:.1} s, interval {:.1} ms, pass cpu {:?} ms, stages {:?} ms, waiting {} generated {} drawn {}", started.elapsed().as_secs_f64(), last.elapsed().as_secs_f64() * 1e3, pass.cpu_ms().map(|v| (v * 100.0).round() / 100.0), s.cpu_ms.map(|v| (v * 100.0).round() / 100.0), s.requests, s.generated_chunks, s.drawn_nodes);
                 }
             }
             last = Instant::now();
@@ -944,8 +950,9 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let mut lost_diagnosed = false;
     let mut dug = false;
     let mut next_dig = 1.0;
-    let mut generated_tiles = 0usize;
-    let (mut shown_tiles, mut unseen_evicted) = (0usize, 0usize);
+    let mut generated_chunks = 0usize;
+    let (mut computed_footprints, mut cached_footprints) = (0usize, 0usize);
+    let (mut shown_chunks, mut unseen_evicted) = (0usize, 0usize);
     // GPU generation by kernel: evictions and tile columns, chunk columns,
     // chunk builds.
     let mut stage_ms = [0.0f64; 3];
@@ -1033,11 +1040,13 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
                 *total += ms;
             }
         }
-        generated_tiles += s.generated_tiles;
-        shown_tiles += s.shown_tiles;
+        generated_chunks += s.generated_chunks;
+        computed_footprints += s.generated_footprints;
+        cached_footprints += s.cached_footprints;
+        shown_chunks += s.shown_chunks;
         unseen_evicted += s.evicted_unseen;
         csv += &format!("{t:.4},{altitude:.2},{interval:.2},{},{:.4},{:.3},{},{:.3},{},{},{},{:.2},{},{record_ms:.2},{wait_ms:.2},{:.2},{:.2}
-", u8::from(captured), s.coarse_share, s.worst_px, s.switches, s.switch_px, s.requests, s.generated_tiles, s.fading_tiles, s.cpu_ms.iter().sum::<f64>(), s.cpu_ms.map(|v| format!("{v:.2}")).join(","), pass_cpu[0], pass_cpu[1]);
+", u8::from(captured), s.coarse_share, s.worst_px, s.switches, s.switch_px, s.requests, s.generated_chunks, s.fading_nodes, s.cpu_ms.iter().sum::<f64>(), s.cpu_ms.map(|v| format!("{v:.2}")).join(","), pass_cpu[0], pass_cpu[1]);
         // A frame after a capture waited for its readback.
         if !captured {
             intervals.push(interval);
@@ -1065,8 +1074,8 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
                     let (face, level, cell) = lost_where;
                     eprintln!("LOSTDIAG search from face {face} level {level} cell {cell:?}");
                     for l in level..flight.planet.grid().levels() {
-                        let key = helio_pass_voxel_planet::chunks::TileKey { face, level: l, cx: (cell[0] >> (l - level)) >> 6, cy: (cell[1] >> (l - level)) >> 6 };
-                        eprintln!("LOSTDIAG   search level {l} tile {},{}: drawn set {:?}", key.cx, key.cy, world.describe_drawn(key));
+                        let key = helio_pass_voxel_planet::chunks::NodeKey { face, level: l, cx: (cell[0] >> (l - level)) >> 6, cy: (cell[1] >> (l - level)) >> 6, cz: (cell[2] >> (l - level)) >> 6 };
+                        eprintln!("LOSTDIAG   search level {l} node {},{},{}: drawn set {:?}", key.cx, key.cy, key.cz, world.describe_drawn(key));
                     }
                     let [w, h] = flight.size;
                     let up = up_for(eye);
@@ -1081,12 +1090,12 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
                     match flight.planet.raycast(eye, dir, 6.0e6) {
                         Some(hit) => {
                             eprintln!("LOSTDIAG t {t:.3} altitude {altitude:.0} pixel {px},{py}: ground at {:.0} m, cell {:?}", hit.distance, hit.cell);
-                            for (key, cz, z, drawn) in world.chunks_over(hit.cell.face, hit.cell.i, hit.cell.j) {
-                                eprintln!("LOSTDIAG   level {} tile {},{} cz {cz} occupied {z:?} drawn {drawn}", key.level, key.cx, key.cy);
+                            for (key, z, drawn) in world.chunks_over(hit.cell.face, hit.cell.i, hit.cell.j) {
+                                eprintln!("LOSTDIAG   level {} node {},{},{} occupied {z:?} drawn {drawn}", key.level, key.cx, key.cy, key.cz);
                             }
-                            // The tiles over it at every level, in the drawn set.
+                            // The nodes over it at every level, in the drawn set.
                             for level in 0..flight.planet.grid().levels() {
-                                let key = helio_pass_voxel_planet::chunks::TileKey { face: hit.cell.face, level, cx: (hit.cell.i >> level) >> 6, cy: (hit.cell.j >> level) >> 6 };
+                                let key = helio_pass_voxel_planet::chunks::NodeKey { face: hit.cell.face, level, cx: (hit.cell.i >> level) >> 6, cy: (hit.cell.j >> level) >> 6, cz: (hit.cell.k >> level) >> 6 };
                                 let state = world.describe_drawn(key);
                                 if state != (false, None, None) {
                                     eprintln!("LOSTDIAG   level {level}: drawn set {state:?}");
@@ -1147,8 +1156,8 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     );
     // GPU generation per tile over the flight (its timings lag a few frames).
     let generation: f64 = generate_ms.iter().sum();
-    let per_tile = |ms: f64| ms * 1e3 / generated_tiles.max(1) as f64;
-    eprintln!("CHUNKSTRESS {mode}: of {generated_tiles} generated tiles {shown_tiles} were drawn, {unseen_evicted} evicted never drawn");
+    let per_chunk = |ms: f64| ms * 1e3 / generated_chunks.max(1) as f64;
+    eprintln!("CHUNKSTRESS {mode}: of {generated_chunks} generated chunks {shown_chunks} were drawn, {unseen_evicted} evicted never drawn; footprints computed {computed_footprints}, read from the pool {cached_footprints}");
     eprintln!(
         "CHUNKSTRESS {mode}: worst over its motion allowance p50 {:.2} p95 {:.2} max {:.2}",
         percentile(&worst_wanted, 0.5),
@@ -1156,11 +1165,11 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         worst_wanted.iter().copied().fold(0.0, f64::max)
     );
     eprintln!(
-        "CHUNKSTRESS {mode}: generation {generation:.1} ms GPU for {generated_tiles} tiles, {:.1} us a tile (tile columns {:.1}, chunk columns {:.1}, chunk builds {:.1})",
-        per_tile(generation),
-        per_tile(stage_ms[0]),
-        per_tile(stage_ms[1]),
-        per_tile(stage_ms[2])
+        "CHUNKSTRESS {mode}: generation {generation:.1} ms GPU for {generated_chunks} chunks, {:.1} us a chunk (footprint columns {:.1}, chunk columns {:.1}, chunk builds {:.1})",
+        per_chunk(generation),
+        per_chunk(stage_ms[0]),
+        per_chunk(stage_ms[1]),
+        per_chunk(stage_ms[2])
     );
     for (interval, t, altitude) in slow.iter().take(5) {
         eprintln!("CHUNKSTRESS {mode}: slow frame {interval:.1} ms at t {t:.2} s, altitude {altitude:.0} m");
@@ -1173,10 +1182,59 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         }
         flight.capture(&format!("stress_{mode}_{n:02}_ref2"));
     }
+    refinement_gate(&flight.output, mode, samples.len());
     // `HELIO_VOXEL_PICKS`: the last sample's view, settled, against the CPU.
     if let Some(&(eye, forward)) = samples.last() {
         pick_probe(flight, mode, eye, forward);
     }
+}
+
+/// Pixels a block of the refinement gate averages (a side).
+const GATE_BLOCK: u32 = 8;
+/// A block may differ from the settled view by this share of its
+/// luminance (at least `GATE_FLOOR` of 255) past what two settled captures
+/// differ by there.
+const GATE_MARGIN: f64 = 0.1;
+const GATE_FLOOR: f64 = 2.0;
+
+/// The refinement gate: how much of each flight sample differs from its
+/// settled view, beyond TSR's noise floor. Frames are compared as 8x8
+/// block means of luminance, so a moving frame's softer detail (TSR
+/// history, sub-pixel motion) does not count and what refinement changes
+/// (shapes, colours, coarse blocks, missing ground) does. A block counts
+/// where its difference from `_ref` exceeds its `_ref` to `_ref2`
+/// difference by a tenth of its luminance (`GATE_MARGIN`; dusk and bright
+/// views alike). Prints `CHUNKGATE` per sample and the
+/// flight's mean and worst share: the pass/fail number of "no visible
+/// refinement" (0 is perfect).
+fn refinement_gate(output: &std::path::Path, mode: &str, samples: usize) {
+    let blocks = |name: &str| -> Option<(u32, u32, Vec<f64>)> {
+        let image = image::open(output.join(format!("{name}.png"))).ok()?.to_rgba8();
+        let (w, h) = (image.width() / GATE_BLOCK, image.height() / GATE_BLOCK);
+        let mut sums = vec![0.0; (w * h) as usize];
+        for (x, y, p) in image.enumerate_pixels() {
+            let (bx, by) = (x / GATE_BLOCK, y / GATE_BLOCK);
+            if bx < w && by < h {
+                sums[(by * w + bx) as usize] += 0.2126 * f64::from(p[0]) + 0.7152 * f64::from(p[1]) + 0.0722 * f64::from(p[2]);
+            }
+        }
+        let n = f64::from(GATE_BLOCK * GATE_BLOCK);
+        Some((w, h, sums.into_iter().map(|s| s / n).collect()))
+    };
+    let mut shares = Vec::new();
+    for n in 0..samples {
+        let (Some(flown), Some(settled), Some(again)) = (blocks(&format!("stress_{mode}_{n:02}")), blocks(&format!("stress_{mode}_{n:02}_ref")), blocks(&format!("stress_{mode}_{n:02}_ref2"))) else {
+            eprintln!("CHUNKGATE {mode}: sample {n} has no captures");
+            continue;
+        };
+        let differ = flown.2.iter().zip(&settled.2).zip(&again.2).filter(|((f, s), a)| (*f - *s).abs() > (*a - *s).abs() + (*s * GATE_MARGIN).max(GATE_FLOOR)).count();
+        let share = differ as f64 / flown.2.len().max(1) as f64;
+        eprintln!("CHUNKGATE {mode}: sample {n:02} differs {:.4} ({differ} of {} blocks)", share, flown.2.len());
+        shares.push(share);
+    }
+    // The first sample is the loaded view, settled before the flight.
+    let flown = if shares.len() > 1 { &shares[1..] } else { &shares[..] };
+    eprintln!("CHUNKGATE {mode}: mean {:.4} worst {:.4} over {} samples", flown.iter().sum::<f64>() / flown.len().max(1) as f64, flown.iter().copied().fold(0.0, f64::max), flown.len());
 }
 
 /// `HELIO_VOXEL_PICKS=x,y;x,y` (output pixels): the renderer's picks there
@@ -1294,7 +1352,7 @@ fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
             }
         }
         coarse.push(stats.coarse_share);
-        fading.push(stats.fading_tiles as f64);
+        fading.push(stats.fading_nodes as f64);
         // `HELIO_VOXEL_CHUNKS_COUNT`: the traces' counts over the flight.
         if counting && n % 30 == 29 {
             let c = world.take_counts();
@@ -1310,15 +1368,15 @@ fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
         resident = stats.resident_chunks;
         if n % 60 == 0 {
             eprintln!(
-                "CHUNKFLY {mode} t {t:5.1} alt {:9.1} coarse {:.3} requests {:5} generated {:3} drawn {:6} resident {:6} evicted {:4} regen {} slots {} leaves {}",
+                "CHUNKFLY {mode} t {t:5.1} alt {:9.1} coarse {:.3} requests {:5} generated {:3} drawn {:6} resident {:6} evicted {:4} seen {} slots {} leaves {}",
                 flight.planet.air_clearance(eye),
                 stats.coarse_share,
                 stats.requests,
-                stats.generated_tiles,
+                stats.generated_chunks,
                 stats.drawn_chunks,
                 stats.resident_chunks,
-                stats.evicted_tiles,
-                stats.regenerated_tiles,
+                stats.evicted_chunks,
+                stats.seen,
                 stats.out_of_slots,
                 stats.out_of_leaves
             );
@@ -1478,6 +1536,13 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let output = PathBuf::from(args.get(1).expect("OUTPUT directory"));
     std::fs::create_dir_all(&output).unwrap();
+    // `HELIO_VOXEL_FLIGHT_GATE=<mode>:<samples>`: only the refinement gate,
+    // over a stress flight's captures already in OUTPUT.
+    if let Ok(gate) = std::env::var("HELIO_VOXEL_FLIGHT_GATE") {
+        let (mode, samples) = gate.split_once(':').expect("HELIO_VOXEL_FLIGHT_GATE=<mode>:<samples>");
+        refinement_gate(&output, mode, samples.parse().expect("a sample count"));
+        return;
+    }
     let size = [
         args.get(2).map_or(1280, |s| s.parse().unwrap()),
         args.get(3).map_or(720, |s| s.parse().unwrap()),

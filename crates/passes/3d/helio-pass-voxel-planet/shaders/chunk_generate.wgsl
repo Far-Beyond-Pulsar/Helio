@@ -8,7 +8,8 @@
 // second mask and store nothing.
 //
 // 1. `tile_columns`: each column's height, surface word and volume extent,
-//    and the tile's range of layers that may hold a surface.
+//    and the footprint's range of layers that may hold a surface, into its
+//    slot of the footprint pool (only for footprints not already there).
 // 2. `chunk_columns`: each column's 64 cells in a chunk as a 64-bit mask
 //    (bit z: layer `64 cz + z`), with volume terms and brushes, and the
 //    material of its highest solid cell.
@@ -21,11 +22,20 @@ const TILE_COLUMNS: u32 = 4096u;
 // Height of a tile column past the face's edge.
 const OUTSIDE: i32 = -2147483647 - 1;
 
+// A footprint of the batch: the ones whose columns it computes come first
+// (`tile_ranges`' count), then those already in the pool.
 struct TileJob {
     face: u32,
     level: u32,
     cx: i32,
     cy: i32,
+    // Its place in the footprint pool (`tile_columns`, `tile_halo`): kept
+    // across frames, so a footprint's columns are computed once while
+    // resident, whichever of its nodes are generated when.
+    slot: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 struct ChunkJob {
@@ -183,7 +193,7 @@ fn tile_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoca
         let field = generation_tile_column(wg.y, job.face, i, j, job.level, job.level >= 1u);
         let extent = terrain_extent(domain_point(job.face, i, j, job.level), job.level);
         let top = div_floor(field.x, world.grid.y) >> job.level;
-        tile_columns[wg.y * TILE_COLUMNS + y * 64u + x] = vec4<i32>(field.x, field.y, extent.x, extent.y);
+        tile_columns[job.slot * TILE_COLUMNS + y * 64u + x] = vec4<i32>(field.x, field.y, extent.x, extent.y);
         // The cell under the top holds the surface; the volume may change
         // cells across its extent. Ranges: the volume's, the surface's.
         atomicMin(&w_range[0], top - 1 - extent.x);
@@ -191,7 +201,7 @@ fn tile_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoca
         atomicMin(&w_range[2], top - 1);
         atomicMax(&w_range[3], top);
     } else {
-        tile_columns[wg.y * TILE_COLUMNS + y * 64u + x] = vec4<i32>(OUTSIDE, 0, 0, 0);
+        tile_columns[job.slot * TILE_COLUMNS + y * 64u + x] = vec4<i32>(OUTSIDE, 0, 0, 0);
     }
     workgroupBarrier();
     if li == 0u {
@@ -419,7 +429,7 @@ fn tile_halo_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocatio
         workgroupBarrier();
         if lean.x != 0 {
             for (var c = li; c < TILE_COLUMNS; c += 64u) {
-                let column = tile_columns[t * TILE_COLUMNS + c];
+                let column = tile_columns[job.slot * TILE_COLUMNS + c];
                 if column.x != OUTSIDE && column.w > 0 { atomicStore(&w_halo_leaning, 1u); }
             }
         }
@@ -434,7 +444,7 @@ fn tile_halo_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocatio
             let cell = clamp(n * lean.y, vec2<i32>(0), vec2<i32>(last));
             let local = cell - vec2<i32>(job.cx, job.cy) * 64;
             if all(local >= vec2<i32>(0)) && all(local < vec2<i32>(64)) { continue; }
-            let at = t * HALO_SIDE * HALO_SIDE + u32(n.y - first.y) * HALO_SIDE + u32(n.x - first.x);
+            let at = job.slot * HALO_SIDE * HALO_SIDE + u32(n.y - first.y) * HALO_SIDE + u32(n.x - first.x);
             tile_halo[at] = generation_halo_column(t, job.face, cell.x, cell.y, job.level, job.level >= 1u, wg.x * 64u + li).x;
         }
     }
@@ -452,7 +462,7 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     let y = (wg.x >> 3u) * 8u + (li >> 3u);
     let i = tile.cx * 64 + i32(x);
     let j = tile.cy * 64 + i32(y);
-    let column = tile_columns[job.tile * TILE_COLUMNS + y * 64u + x];
+    let column = tile_columns[tile.slot * TILE_COLUMNS + y * 64u + x];
     let at = wg.y * TILE_COLUMNS + y * 64u + x;
     // A leaning surface (overhangs) reads the field on a global lattice:
     // nodes every `spacing` cells from `div_floor(8 ci - reach, spacing)`,
@@ -471,10 +481,10 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
         // the same arguments); past the tile's edges, the tile's halo.
         let local = cell - vec2<i32>(tile.cx, tile.cy) * 64;
         if all(local >= vec2<i32>(0)) && all(local < vec2<i32>(64)) {
-            w_lean[li] = tile_columns[job.tile * TILE_COLUMNS + u32(local.y) * 64u + u32(local.x)].x;
+            w_lean[li] = tile_columns[tile.slot * TILE_COLUMNS + u32(local.y) * 64u + u32(local.x)].x;
         } else {
             let n = node + vec2<i32>(i32(li & 7u), i32(li >> 3u)) - halo_first(tile, lean);
-            w_lean[li] = tile_halo[job.tile * HALO_SIDE * HALO_SIDE + u32(n.y) * HALO_SIDE + u32(n.x)];
+            w_lean[li] = tile_halo[tile.slot * HALO_SIDE * HALO_SIDE + u32(n.y) * HALO_SIDE + u32(n.x)];
         }
     }
     workgroupBarrier();
@@ -543,10 +553,10 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     if mask.x != 0u || mask.y != 0u {
         let k = k0 + high;
         let t = vec4<i32>(
-            tile_top(job.tile, max(i32(x) - 1, 0), i32(y), level),
-            tile_top(job.tile, min(i32(x) + 1, 63), i32(y), level),
-            tile_top(job.tile, i32(x), max(i32(y) - 1, 0), level),
-            tile_top(job.tile, i32(x), min(i32(y) + 1, 63), level));
+            tile_top(tile.slot, max(i32(x) - 1, 0), i32(y), level),
+            tile_top(tile.slot, min(i32(x) + 1, 63), i32(y), level),
+            tile_top(tile.slot, i32(x), max(i32(y) - 1, 0), level),
+            tile_top(tile.slot, i32(x), min(i32(y) + 1, 63), level));
         // The materials' slope (`Planet::material_slope`): the gradient over
         // 64 base cells (in the tile), so a terrace step is not a steep
         // slope (dirt along every contour); 8 per base layer a base cell.
@@ -555,8 +565,8 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
         let xb = max(i32(x) - n, 0);
         let ya = min(i32(y) + n, 63);
         let yb = max(i32(y) - n, 0);
-        let gx = f32(tile_top(job.tile, xa, i32(y), level) - tile_top(job.tile, xb, i32(y), level)) / f32(max(xa - xb, 1));
-        let gy = f32(tile_top(job.tile, i32(x), ya, level) - tile_top(job.tile, i32(x), yb, level)) / f32(max(ya - yb, 1));
+        let gx = f32(tile_top(tile.slot, xa, i32(y), level) - tile_top(tile.slot, xb, i32(y), level)) / f32(max(xa - xb, 1));
+        let gy = f32(tile_top(tile.slot, i32(x), ya, level) - tile_top(tile.slot, i32(x), yb, level)) / f32(max(ya - yb, 1));
         let slope = i32(round(max(abs(gx), abs(gy)) * 8.0));
         // The terrain's own top (where its volume put it, under the height
         // field's at caves and overhangs) is surface; a top edits moved
@@ -583,8 +593,9 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     column_materials[at] = material;
 }
 
-fn tile_top(tile: u32, x: i32, y: i32, level: u32) -> i32 {
-    let h = tile_columns[tile * TILE_COLUMNS + u32(y) * 64u + u32(x)].x;
+// The top (level cells) of column (x, y) of the footprint in pool slot `slot`.
+fn tile_top(slot: u32, x: i32, y: i32, level: u32) -> i32 {
+    let h = tile_columns[slot * TILE_COLUMNS + u32(y) * 64u + u32(x)].x;
     return div_floor(select(h, 0, h == OUTSIDE), world.grid.y) >> level;
 }
 
@@ -709,7 +720,7 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     let base = job.cz * 64;
     var natural = true;
     for (var c = 0u; c < 16u; c++) {
-        let height = tile_columns[job.tile * TILE_COLUMNS + (ly * 4u + (c >> 2u)) * 64u + lx * 4u + (c & 3u)].x;
+        let height = tile_columns[tile.slot * TILE_COLUMNS + (ly * 4u + (c >> 2u)) * 64u + lx * 4u + (c & 3u)].x;
         if height == OUTSIDE { natural = false; break; }
         let hf = clamp((div_floor(height, world.grid.y) >> tile.level) - base, 0, 64);
         if tops[c] != hf && !(hf == 64 && tops[c] == 64) { natural = false; }
@@ -725,10 +736,10 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
         for (var r = 0u; r < 4u; r++) {
             let row = i32(ly * 4u + r);
             let col = i32(lx * 4u + r);
-            let hx0 = tile_columns[job.tile * TILE_COLUMNS + u32(row) * 64u + u32(x0)].x;
-            let hx1 = tile_columns[job.tile * TILE_COLUMNS + u32(row) * 64u + u32(x1)].x;
-            let hy0 = tile_columns[job.tile * TILE_COLUMNS + u32(y0) * 64u + u32(col)].x;
-            let hy1 = tile_columns[job.tile * TILE_COLUMNS + u32(y1) * 64u + u32(col)].x;
+            let hx0 = tile_columns[tile.slot * TILE_COLUMNS + u32(row) * 64u + u32(x0)].x;
+            let hx1 = tile_columns[tile.slot * TILE_COLUMNS + u32(row) * 64u + u32(x1)].x;
+            let hy0 = tile_columns[tile.slot * TILE_COLUMNS + u32(y0) * 64u + u32(col)].x;
+            let hy1 = tile_columns[tile.slot * TILE_COLUMNS + u32(y1) * 64u + u32(col)].x;
             if hx0 == OUTSIDE || hx1 == OUTSIDE || hy0 == OUTSIDE || hy1 == OUTSIDE { valid = false; }
             g += vec2<f32>(f32(hx1 - hx0) / f32(x1 - x0), f32(hy1 - hy0) / f32(y1 - y0));
         }

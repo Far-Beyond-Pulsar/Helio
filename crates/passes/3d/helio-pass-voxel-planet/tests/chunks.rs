@@ -44,7 +44,7 @@ impl View {
         2.0 * f64::from((FOV_Y * 0.5).tan()) / f64::from(self.size[1])
     }
     fn config(&self) -> ResidencyConfig {
-        let mut config = ResidencyConfig { tiles_per_frame: 512, generate_ms: None, ..Default::default() };
+        let mut config = ResidencyConfig { footprints_per_frame: 512, generate_ms: None, ..Default::default() };
         config.plan.pixel_angle = self.pixel_angle();
         config
     }

@@ -1,0 +1,230 @@
+# Chunk octree: 3D residency, drawing and refinement
+
+Status: decided 2026-10-15, replacing the tile quadtree of `chunk-trees.md`
+(phase 2). The chunk format (64³ cells as a 64-tree), generation kernels,
+the in-chunk walk, exact cells, lighting and edits' integer maths stay.
+
+## Why
+
+The terrain is volumetric (caves, overhangs, whole-planet destruction), but
+residency was a quadtree of 64×64-column tiles with a stack of chunk layers
+each:
+
+- A tile refined its whole stack as one: a cliff, a cave 800 m down or a
+  dug shaft refined with the surface above it, and an eye in a cave refined
+  the ground far over its head.
+- A tile held one surface band. Layers under it were assumed rock (`BELOW`)
+  until a ray reached them, then the whole volume was generated: caves
+  popped open. One solid gap per tile (`Gap`); a second kept a chunk per
+  layer. Floating rock, hollow worlds or stacked caves did not fit.
+- Refinement was by distance only, all around the eye: occluded ground and
+  ground behind the camera cost nearly what visible ground did (one level
+  coarser), and tiles were evicted 2 s after their last visit, so turning
+  back generated them again.
+
+## The structure
+
+- A **node** is a chunk: `(face, level, cx, cy, cz)`, 64³ cells of its
+  level. Its 8 children are `(level - 1, 2cx + a, 2cy + b, 2cz + c)` (cells
+  halve in all three axes, so layers nest).
+- A **footprint** `(face, level, cx, cy)` is the 64×64 columns over a stack
+  of nodes. It stays the unit of column generation (heights, surface words,
+  volume extent: `tile_columns_main`) and of classification: its measured
+  ranges and its edits decide what each node in it is.
+- **Roots** are every node of the coarsest level from the planet's centre
+  (or a plane's lowest layer) to the ceiling.
+- A node is one of:
+  - **Mixed**: may hold a surface; generated into a slot.
+  - **Empty** or **Solid**: uniform from its footprint's ranges and edits;
+    drawn without data (air to cross, rock to hit).
+  - **Buried**: within the field's volume (caves may lie there) but under
+    the surface band and away from the eye; drawn as rock until a ray hits
+    it, then generated (it was the `BELOW` path of a whole tile).
+
+## Residency: a cut of the octree
+
+The planner (worker thread) visits the octree from the roots each plan:
+
+- A Mixed node is refined while its cells project larger than `lod_pixels`
+  from the eye or the prefetch eye (3D distance to its band's box), with
+  the `coarsen` hysteresis, motion allowance and the horizon test as
+  before. Empty, Solid and Buried nodes are never refined.
+- **A band switches as one.** A node's band is its footprint's contiguous
+  Mixed layers; every test (distance, view, rays, horizon, readiness) is
+  the band's, so the surface band of a footprint is at one level, as a
+  tile's column was. A coarse cell's ground, rounded, may lie one level
+  finer under the node above or below it: nodes of one band refined apart
+  left the surface between them (holes through a fade's dither, seen in
+  descents). Separate bands (caves, digs) still switch apart.
+- **Rays decide where detail goes.** The trace samples one pixel an 8×8
+  block each frame (jittered over 64 frames) and reports the node at the
+  level its hit wants (cells of a pixel, two levels of margin). The
+  planner marks that node and its ancestors seen. A node not seen within
+  `seen_frames` refines only to `unseen_pixels` times `lod_pixels`
+  (occluded ground, ground behind the camera): a level coarser. Hits on
+  Buried nodes request their generation.
+- A refined node is drawn as its children once every Mixed child is
+  generated; until then it is drawn itself. Children are classified from
+  the parent footprint's measured ranges, widened by a parent cell (as
+  child ranges were); a footprint measured later reclassifies its nodes.
+- **Eviction is by pressure, least recently visited first.** Generated
+  nodes stay resident until chunk slots or leaf pages run short; then the
+  nodes the plan has not visited the longest go. Revisits cost nothing.
+
+## Drawing: one table entry per node of the cut
+
+The GPU chunk table holds, for every node of the cut and every ancestor of
+one, `(face | level << 8, cx, cy, cz) -> (slot, state, kind, content)`:
+
+- `state` as before (`choice`): shown, look finer, or fading with its
+  start frame.
+- `kind`: mixed, empty, solid, buried.
+- `content`: the node's occupied box in its own cells (6 bytes): a mixed
+  chunk's occupied layers over its whole footprint; an ancestor's, the
+  union of its children's, rounded out. It generalizes the old column tops
+  (a max pyramid of heights) to 3D.
+
+`place_at` finds the node holding a point (coarser while none, finer
+through refined ancestors), then:
+
+- a shown Mixed node: its slot;
+- Solid or Buried: a hit where the ray enters (Buried reports itself);
+- Empty, or outside an ancestor's content box: air, grown to the largest
+  slab of the coarsest ancestor whose content box the point is outside of
+  (above, below or beside it), so rays cross open air and dug halls in a
+  few steps as they did over column tops.
+
+## Generation
+
+A frame's batch groups the wanted nodes by footprint, then a chunk job per
+node. A footprint's columns (heights, surface words, volume extents) and
+lean halos stay on the GPU in a **footprint pool** (2048 slots, 70 KB each,
+reused least recently first, never one the batch uses): they depend only on
+the terrain, so a footprint is computed once while it stays in use,
+whichever of its nodes are generated when, edits included. The batch
+lists the footprints it computes first (the column kernels run over them;
+their two-rate nodes are per-batch scratch), then those it reads from the
+pool. Results read back as before: computed footprints' ranges (reclassify
+their nodes), chunk occupancy (empty chunks free their slot).
+
+Edits mark the nodes their bands cross at every level: drawn and visited
+ones regenerate (urgent, as before); cached ones not in the cut are
+evicted (they regenerate if wanted again).
+
+## What goes
+
+`Gap`, `BELOW`/`ROCK` via gaps, the `Reach` buffer and deep tiles,
+`layers_needed`'s surface band, tile-level `Layers`/bands and their
+regeneration on measurement, `COLUMN`/`GAP` table entries, column tops,
+age eviction of generated tiles, the tile quadtree planner and its tests.
+
+## Gates
+
+Measured with `voxel_flight`'s stress flights in the editor's world
+(`HELIO_VOXEL_FLIGHT_SEED=75 HELIO_VOXEL_STRESS_AT=0,1,0
+HELIO_VOXEL_FLIGHT_SUN_ELEVATION=32`, 2560×1440, real time) and the
+refinement gate (`CHUNKGATE`: 8×8 blocks of a flown frame that differ from
+the settled view past two settled captures' noise):
+
+- the gate's mean and worst share fall in cruise, descent and glide;
+- level switches over 3 px fall;
+- `mountain_slope` hold primary and sun/sky times within noise of the
+  quadtree's (the walk's loop must not grow);
+- `tests/chunks.rs` passes; no lost rays (`HELIO_VOXEL_CHUNKS_COUNT`).
+
+## Results (2026-10-15)
+
+Built as designed, with the invariants below found on the way. `tests/chunks.rs`
+(19 GPU tests: ground, face edges, caves, deep caves, overhangs, planes,
+brushes, a 600 m shaft, a 3 km crater, a hollowed core, an underground hall,
+18 000 block edits, sealed edits, orbit coverage, picks) match CPU ray casts
+exactly; the graph tests pass.
+
+### Invariants: a node answers for its descendants
+
+A coarse node's own cells are a band-limited sample; classifying it by them
+alone hid what finer levels hold, and the cut never refined to it:
+
+- **Rounding.** Coarse cells round their tops down: ground 10 m over the
+  datum lies in layer -1 from level 16 to 5 and in layer 0 at level 4. The
+  field's band is widened by `DESCENT` (2) cells, and a Mixed node whose
+  chunk comes back empty is still refined (drawn as air).
+- **Caves.** `terrain_extent` is empty where a level cannot show a cave.
+  The Buried band reaches `TerrainField::volume_bounds` under the surface at
+  every level.
+- **Small edits.** A brush under half a cell is inactive at a level, and
+  coarse baked bricks are built by majority (a 4 m shaft vanishes at 6.4 m
+  cells). Brushes classify at any size; `BrickIndex` marks every brick's
+  node and all its ancestors.
+- **Buried nodes never hold a parent back.** They are rock until generated:
+  only those holding the eye (`near_cells`) or met by rays are generated.
+  A four-chunk radius generated hundreds of invisible chunks a level.
+- **Only Mixed children gate a switch.** A refined node that drew a
+  missing child as air flashed holes through the fade's dither.
+- **Rays only keep nodes from refining.** Coarsening a refined node no ray
+  met oscillated at occlusion edges: its coarser cells poked out, were met,
+  and refined it again. Ray reports are not structural events: they come
+  every frame, and counting them kept the world from settling.
+- **Settled waits for the rays to sweep the view.** A block's report
+  samples one of its 64 pixels a frame, so a plan settled before 64 frames
+  of reports since the last change may yet refine where a pixel not
+  sampled meets a node its distance does not ask for (seen: a still view
+  settled at frame 59, then asked for 8 chunks). Hosts render about 64
+  frames past the last change before going idle.
+- **The lookup** climbs past bare ancestors over the hidden fine side of a
+  switch, and looks above an ancestor it climbed to for a coarser node
+  fading in (only while something fades: sun and sky walks call it
+  constantly).
+
+### Measured against the tile quadtree
+
+Editor world (seed 75, pole, 32 degree sun), 2560x1440, fixed-step flights
+(`HELIO_VOXEL_STRESS_STEP=1`: every run sees the same eyes), interleaved;
+`mountain_slope` hold at 1920x1080:
+
+| | quadtree | octree |
+|---|---|---|
+| Descent gate mean / worst | 0.03 / 0.13 % | 0.03 / 0.08 % |
+| Cruise gate mean / worst | 0.99 / 3.77 % | 1.02 / 4.02 % |
+| Glide gate | 0 | 0 |
+| Cruise frame interval p50 | 19.0 ms | 21.3 ms |
+| Cruise generation | 89 k tiles, 3.13 s GPU | 128 k chunks, 3.31 s GPU |
+| Hold primary | 2.85 ms | 2.84 ms |
+| Hold sun and sky | 1.58 ms | 1.72 ms |
+
+Visible refinement is at parity in all three flights; the structure is now
+volumetric (caves, shafts and halls refine where the eye is; no gap or band
+limits; eviction by pressure). It costs 0.14 ms of sun and sky (the
+lookup's probes) and about 0.8 ms of update CPU (classification per node).
+Rays saved little in these flights: open terrain is visible, and refined
+nodes stay refined. Per chunk, a footprint's columns are recomputed for
+each batch that wants one of its nodes (16-20 us of a chunk's 26).
+
+### The footprint pool (2026-10-15)
+
+Fixed-step flights against the octree before it (interleaved):
+
+| | before | pool |
+|---|---|---|
+| Cruise: us a chunk (footprint columns) | 27.1 (18.1) | 21.8 (13.1) |
+| Descent | 30.0 (21.7) | 21.9 (14.3) |
+| Glide | 26.6 (19.8) | 18.7 (12.5) |
+| Cruise gate mean | 1.06 % | 0.98 % |
+
+About a fifth of the footprints a flight wants come from the pool: most are
+new ground. The rest of a footprint's cost is its first computation.
+
+An intermittent corrupt capture (a sample in a few fixed-step descents
+whose 4x8-pixel tiles, scattered over up to half the frame, show the
+background's haze) is not the octree's: main's chunk trees show it too
+(1 in 7 descents against 1 in 6). Deferred lighting read those tiles'
+depth as sky after the voxel publish wrote it: a race in the engine's
+frame, not in residency. The gate's outliers above 5% are that.
+
+### Next
+
+- Occlusion-limited refinement where it pays (valleys, caves, cities).
+- A footprint's first computation: progressive (parent-seeded) synthesis.
+- The update's CPU: classification is per node on the worker, but the
+  render thread still scans brushes per chunk (`queue_footprint`); index
+  them.

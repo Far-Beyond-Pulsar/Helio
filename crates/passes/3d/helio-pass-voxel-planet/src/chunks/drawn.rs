@@ -1,86 +1,140 @@
-//! The drawn chunks and their GPU chunk table, kept up to date by the
-//! tiles that change: a frame costs what changed, not what is resident.
+//! The drawn cut of the chunk octree and its GPU chunk table, kept up to
+//! date by the nodes that change: a frame costs what changed, not what is
+//! resident (`docs/chunk-octree.md`).
 //!
-//! The table holds the drawn chunks (key `(face | level << 8, cx, cy, cz)`,
-//! value `(slot, state, 0, 0)`) and the columns of the drawn cut (key
-//! `(face | level << 8, cx, cy, COLUMN)`, value `(lo, hi, top, state)`):
-//! a drawn tile's chunk layers [lo, hi), and for it and every ancestor the
-//! top of its subtree's solid cells (`top`, in that level's cells, rounded
-//! up): a max pyramid over the cut. Above `top` a column is air, so a ray
-//! crosses it in one step; under a column the drawn tiles cover every point
-//! once.
+//! The table holds an entry for every drawn node and every ancestor of
+//! one, key `(face | level << 8, cx, cy, cz)`, value `(slot, state, kind |
+//! lo << 8, hi)`: the node's chunk slot (-1: none), whether a pixel shows
+//! it (`choice`), what it holds (`KIND_*`; an ancestor's is its drawn
+//! self's if it is drawn too, else `KIND_ANCESTOR`) and its content: the
+//! box of its cells anything non-empty may occupy, `x | y << 7 | z << 14`
+//! for its low and high corners ([lo, hi); lo > hi: nothing). A drawn
+//! Mixed chunk's content is its occupied layers over its footprint, a
+//! Solid or Buried node's its whole box, an ancestor's the union of its
+//! children's (rounded out to its cells). Empty nodes have no entry: a
+//! refined ancestor whose child has none is air there.
 //!
-//! A switch between levels fades: for `FADE_FRAMES` both levels are drawn
+//! A switch between levels fades: for `FADE_FRAMES` both sides are drawn
 //! and each pixel shows one, by a dither `r` in [0, 1024) that moves each
-//! frame (TSR blends them). A tile's `state` says which (`choice`): 1
-//! drawn, 0 an ancestor; else fading since frame `start`,
-//! `2 + (start << 2) + incoming + 2 coarse` (start modulo 2^20): an
-//! incoming tile shows where r < q, an outgoing one where r >= q, with q
-//! rising from 0 to 1024 over the fade, so each point is shown once; where
-//! a tile does not show, the other level does (finer under the coarse
-//! side, coarser over the fine side). The state holds for the whole fade:
-//! the draw works out q from its frame.
+//! frame (TSR blends them). A node's `state` says which (`choice`): 1
+//! drawn, 0 an ancestor; else fading since frame `start`, `2 + (start <<
+//! 2) + incoming + 2 coarse` (start modulo 2^20): an incoming node shows
+//! where r < q, an outgoing one where r >= q, with q rising from 0 to 1024
+//! over the fade, so each point is shown once; where a node does not show,
+//! the other level does (finer under the coarse side, coarser over the
+//! fine side).
 //!
 //! The table is open addressing with linear probing over a fixed power of
 //! two of entries (an empty key's x is -1), mirrored on the CPU; deletion
 //! shifts the probe run back, so lookups never meet a tombstone. Only
 //! changed entries are uploaded.
 
-use super::TileKey;
+use super::classify::{Kind, NodeKey};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-/// A drawn chunk, as the draw and the chunk table need it.
+/// A drawn chunk, as the cull and the seed need it.
 #[derive(Clone, Copy, Debug)]
 pub struct DrawnChunk {
-    pub key: [i32; 4],
     pub slot: u32,
-    /// Occupied layers [lo, hi) (the whole chunk until read back).
+}
+
+/// A drawn node's chunk: its slot and occupied layers [lo, hi) (the whole
+/// chunk until read back).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NodeChunk {
+    pub slot: u32,
     pub z: (f64, f64),
 }
 
 const NONE: u32 = u32::MAX;
 const EMPTY: [i32; 4] = [-1, 0, 0, 0];
-/// A column entry's layer key.
-pub const COLUMN: i32 = i32::MIN;
-/// A gap entry's layer key.
-pub const GAP: i32 = i32::MIN + 1;
 
-/// What a drawn tile holds where it has no chunks: chunk layers [lo, hi)
-/// of solid rock between its chunks (none: lo >= hi), and whether it is
-/// air, not rock, under its lowest chunk (a hollow). Elsewhere a missing
-/// layer among its chunks is air and under them is rock.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Gap {
-    pub solid: (i32, i32),
-    pub below_air: bool,
-}
-
-/// A tile as drawn: its chunks and its gap.
-pub struct TileDraw {
-    pub chunks: Vec<DrawnChunk>,
-    pub gap: Gap,
-}
-
-impl From<Vec<DrawnChunk>> for TileDraw {
-    fn from(chunks: Vec<DrawnChunk>) -> Self {
-        Self { chunks, gap: Gap::default() }
-    }
-}
+/// `KIND_*`: a table entry's kind (`chunk_draw.wgsl`).
+pub const KIND_MIXED: i32 = 0;
+pub const KIND_SOLID: i32 = 1;
+pub const KIND_BURIED: i32 = 2;
+pub const KIND_ANCESTOR: i32 = 3;
 
 /// Frames a switch between levels fades over.
 pub const FADE_FRAMES: u64 = 16;
 
-
-/// A column of the drawn cut: its own chunk layers when drawn, the top of
-/// its subtree's, its state.
+/// A box of a node's cells, [lo, hi) per axis; lo > hi on x when empty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Column {
-    drawn: Option<(i32, i32)>,
-    top: i32,
-    state: i32,
+struct Content {
+    lo: [i32; 3],
+    hi: [i32; 3],
 }
 
-/// A tile fading in or out from frame `start`, on the coarse side of its
+impl Content {
+    const NOTHING: Self = Self { lo: [64; 3], hi: [0; 3] };
+    const FULL: Self = Self { lo: [0; 3], hi: [64; 3] };
+
+    fn is_empty(&self) -> bool {
+        (0..3).any(|a| self.lo[a] >= self.hi[a])
+    }
+
+    fn union(self, o: Self) -> Self {
+        if o.is_empty() {
+            return self;
+        }
+        if self.is_empty() {
+            return o;
+        }
+        Self { lo: [0, 1, 2].map(|a| self.lo[a].min(o.lo[a])), hi: [0, 1, 2].map(|a| self.hi[a].max(o.hi[a])) }
+    }
+
+    /// A child's content (child `n`: bit 0 x, 1 y, 2 z) in its parent's
+    /// cells, rounded out.
+    fn in_parent(self, n: usize) -> Self {
+        if self.is_empty() {
+            return Self::NOTHING;
+        }
+        let at = [(n & 1) as i32, ((n >> 1) & 1) as i32, ((n >> 2) & 1) as i32];
+        Self { lo: [0, 1, 2].map(|a| at[a] * 32 + self.lo[a].div_euclid(2)), hi: [0, 1, 2].map(|a| at[a] * 32 + (self.hi[a] + 1).div_euclid(2)) }
+    }
+
+    fn packed(&self) -> (i32, i32) {
+        let pack = |c: [i32; 3]| c[0] | (c[1] << 7) | (c[2] << 14);
+        if self.is_empty() {
+            return (pack(Self::NOTHING.lo), pack(Self::NOTHING.hi));
+        }
+        (pack(self.lo), pack(self.hi))
+    }
+}
+
+/// A node of the cut, drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Drawn {
+    kind: Kind,
+    chunk: Option<NodeChunk>,
+}
+
+impl Drawn {
+    fn content(&self) -> Content {
+        match (self.kind, self.chunk) {
+            (Kind::Mixed, Some(c)) => Content { lo: [0, 0, c.z.0.floor() as i32], hi: [64, 64, c.z.1.ceil() as i32] },
+            (Kind::Mixed, None) | (Kind::Empty, _) => Content::NOTHING,
+            (Kind::Solid | Kind::Buried, _) => Content::FULL,
+        }
+    }
+
+    fn kind_code(&self) -> i32 {
+        match self.kind {
+            Kind::Mixed | Kind::Empty => KIND_MIXED,
+            Kind::Solid => KIND_SOLID,
+            Kind::Buried => KIND_BURIED,
+        }
+    }
+}
+
+/// An entry of the table: a drawn node or an ancestor of one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Entry {
+    content: Content,
+    value: [i32; 4],
+}
+
+/// A node fading in or out from frame `start`, on the coarse side of its
 /// switch or the fine side.
 #[derive(Clone, Copy, Debug)]
 struct Fade {
@@ -92,7 +146,7 @@ struct Fade {
 /// Fade starts are kept modulo this.
 const START_MASK: u64 = (1 << 20) - 1;
 
-/// What a pixel with dither `r` does at a tile of `state` at `frame`: 1
+/// What a pixel with dither `r` does at a node of `state` at `frame`: 1
 /// shows it, 0 looks finer, 2 coarser (`chunk_draw.wgsl`'s `choice`).
 #[cfg(test)]
 fn choice(state: i32, r: i32, frame: u64) -> i32 {
@@ -111,29 +165,6 @@ fn choice(state: i32, r: i32, frame: u64) -> i32 {
     }
 }
 
-/// No solid cell: a column's top.
-const NO_TOP: i32 = -(1 << 26);
-
-fn column_key(tile: TileKey) -> [i32; 4] {
-    [i32::from(tile.face) | ((tile.level as i32) << 8), tile.cx, tile.cy, COLUMN]
-}
-
-fn gap_key(tile: TileKey) -> [i32; 4] {
-    [i32::from(tile.face) | ((tile.level as i32) << 8), tile.cx, tile.cy, GAP]
-}
-
-/// The four tiles under `tile` (none at the finest level).
-fn children(tile: TileKey) -> Vec<TileKey> {
-    if tile.level == 0 {
-        return Vec::new();
-    }
-    [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().map(|(a, b)| TileKey { face: tile.face, level: tile.level - 1, cx: tile.cx * 2 + a, cy: tile.cy * 2 + b }).collect()
-}
-
-fn parent(tile: TileKey) -> TileKey {
-    TileKey { face: tile.face, level: tile.level + 1, cx: tile.cx >> 1, cy: tile.cy >> 1 }
-}
-
 pub fn key_hash(k: [i32; 4]) -> u32 {
     let mut h = (k[0] as u32).wrapping_mul(0x9E37_79B1);
     h = (h ^ k[1] as u32).wrapping_mul(0x85EB_CA77);
@@ -142,26 +173,24 @@ pub fn key_hash(k: [i32; 4]) -> u32 {
     h ^ (h >> 15)
 }
 
+/// The eight possible children of `key` (whether or not on its face).
+fn children(key: NodeKey) -> impl Iterator<Item = (usize, NodeKey)> {
+    (0..8usize).filter(move |_| key.level > 0).map(move |n| (n, NodeKey { face: key.face, level: key.level - 1, cx: key.cx * 2 + (n & 1) as i32, cy: key.cy * 2 + ((n >> 1) & 1) as i32, cz: key.cz * 2 + (n >> 2) as i32 }))
+}
+
 pub struct DrawnSet {
+    /// Drawn chunks with a slot (the cull's list).
     pub list: Vec<DrawnChunk>,
     /// Index in `list` by slot.
     position: Vec<u32>,
-    /// Drawn tiles and their slots.
-    tiles: FxHashMap<TileKey, Vec<u32>>,
-    /// Drawn tiles' chunk layers [lo, hi) and top cell.
-    layers: FxHashMap<TileKey, (i32, i32, i32)>,
-    /// Drawn tiles with a gap entry.
-    gaps: FxHashSet<TileKey>,
-    /// The table's columns: the drawn tiles' and their ancestors'.
-    columns: FxHashMap<TileKey, Column>,
-    /// Columns whose subtree changed, to settle by level.
-    touched: Vec<TileKey>,
-    /// Drawn tiles fading in or out.
-    fades: FxHashMap<TileKey, Fade>,
-    /// Fading tiles strictly under each tile (only tiles with any): a
-    /// switch finds the fades under it by descending where they are, not by
-    /// scanning them all (a camera flown up and down fades 20 000 tiles).
-    fade_below: FxHashMap<TileKey, u32>,
+    drawn: FxHashMap<NodeKey, Drawn>,
+    /// The table's entries: drawn nodes and their ancestors.
+    entries: FxHashMap<NodeKey, Entry>,
+    /// Entries whose subtree changed, to settle by level.
+    touched: Vec<NodeKey>,
+    fades: FxHashMap<NodeKey, Fade>,
+    /// Fading nodes strictly under each node (only nodes with any).
+    fade_below: FxHashMap<NodeKey, u32>,
     /// The coarsest level.
     top_level: u32,
     /// Entries: key then value.
@@ -174,17 +203,15 @@ pub struct DrawnSet {
 }
 
 impl DrawnSet {
-    /// `slots` chunk slots, a table of `entries` (a power of two), tiles up
+    /// `slots` chunk slots, a table of `entries` (a power of two), nodes up
     /// to `top_level`.
     pub fn new(slots: usize, entries: usize, top_level: u32) -> Self {
         assert!(entries.is_power_of_two());
         Self {
             list: Vec::new(),
             position: vec![NONE; slots],
-            tiles: FxHashMap::default(),
-            layers: FxHashMap::default(),
-            gaps: FxHashSet::default(),
-            columns: FxHashMap::default(),
+            drawn: FxHashMap::default(),
+            entries: FxHashMap::default(),
             touched: Vec::new(),
             fades: FxHashMap::default(),
             fade_below: FxHashMap::default(),
@@ -210,55 +237,63 @@ impl DrawnSet {
         &self.table
     }
 
-    /// At `frame`: tiles `removed` stop being drawn, drawn tiles that
-    /// `changed` take their chunks again, tiles `added` are drawn with
-    /// those `chunks_of` gives. A tile replaced by finer or coarser ones
-    /// fades out as they fade in.
-    pub fn update<D: Into<TileDraw>>(&mut self, added: &[TileKey], removed: &[TileKey], changed: &rustc_hash::FxHashSet<TileKey>, frame: u64, mut chunks_of: impl FnMut(TileKey) -> D) {
-        let ended: Vec<TileKey> = self.fades.iter().filter(|(_, f)| frame >= f.start + FADE_FRAMES).map(|(k, _)| *k).collect();
+    /// At `frame`: nodes `removed` stop being drawn, drawn nodes that
+    /// `changed` take their chunks again, nodes `added` are drawn as their
+    /// kind with the chunk `chunk_of` gives. A node replaced by finer or
+    /// coarser ones fades out as they fade in.
+    pub fn update(&mut self, added: &[(NodeKey, Kind)], removed: &[NodeKey], changed: &FxHashSet<NodeKey>, frame: u64, mut chunk_of: impl FnMut(NodeKey) -> Option<NodeChunk>) {
+        let ended: Vec<NodeKey> = self.fades.iter().filter(|(_, f)| frame >= f.start + FADE_FRAMES).map(|(k, _)| *k).collect();
         for key in ended {
             self.end_fade(key);
         }
-        // A switch the plan changes again, or whose tiles change, ends at
+        // A switch the plan changes again, or whose nodes change, ends at
         // once (with every switch it overlaps).
         if !self.fades.is_empty() {
-            let touching: Vec<TileKey> = added.iter().chain(removed).chain(changed.iter().filter(|k| self.fades.contains_key(k))).copied().collect();
+            let touching: Vec<NodeKey> = added.iter().map(|a| a.0).chain(removed.iter().copied()).chain(changed.iter().filter(|k| self.fades.contains_key(k)).copied()).collect();
             for key in touching {
                 self.snap(key);
             }
         }
-        let gone: FxHashSet<TileKey> = removed.iter().filter(|k| self.tiles.contains_key(k)).copied().collect();
-        let came: FxHashSet<TileKey> = added.iter().filter(|k| !self.tiles.contains_key(k)).copied().collect();
-        let gone_above = self.ancestors_of(&gone);
-        let came_above = self.ancestors_of(&came);
+        let gone: FxHashSet<NodeKey> = removed.iter().filter(|k| self.drawn.contains_key(k)).copied().collect();
+        // A node drawn as something else is removed, then added.
+        let came: FxHashMap<NodeKey, Kind> = added.iter().copied().collect();
+        let gone_above = self.ancestors_of(gone.iter().copied());
+        let came_above = self.ancestors_of(came.keys().copied().filter(|k| !gone.contains(k)));
         for &key in &gone {
-            // Finer tiles came under it, or a coarser one over it.
+            if came.contains_key(&key) {
+                self.drop_node(key);
+                continue;
+            }
+            // Finer nodes came under it, or a coarser one over it.
             let coarse = came_above.contains(&key);
-            if coarse || self.ancestors(key).any(|a| came.contains(&a)) {
+            if coarse || self.ancestors(key).any(|a| came.contains_key(&a)) {
                 self.start_fade(key, Fade { start: frame, incoming: false, coarse });
                 self.touched.push(key);
             } else {
-                self.drop_tile(key);
+                self.drop_node(key);
             }
         }
         for key in changed {
-            if self.tiles.contains_key(key) {
-                self.drop_tile(*key);
-                self.add_tile(*key, chunks_of(*key).into());
+            if let Some(d) = self.drawn.get(key).copied() {
+                self.drop_node(*key);
+                self.add_node(*key, Drawn { kind: d.kind, chunk: chunk_of(*key) });
             }
         }
-        for &key in &came {
+        for (&key, &kind) in &came {
+            if self.drawn.contains_key(&key) {
+                continue;
+            }
             let coarse = gone_above.contains(&key);
-            if coarse || self.ancestors(key).any(|a| gone.contains(&a)) {
+            if !gone.contains(&key) && (coarse || self.ancestors(key).any(|a| gone.contains(&a))) {
                 self.start_fade(key, Fade { start: frame, incoming: true, coarse });
             }
-            self.add_tile(key, chunks_of(key).into());
+            let chunk = if kind == Kind::Mixed { chunk_of(key) } else { None };
+            self.add_node(key, Drawn { kind, chunk });
         }
-        self.settle_columns();
+        self.settle_entries();
     }
 
-    /// The fade of `key` ends: an outgoing tile leaves.
-    fn start_fade(&mut self, key: TileKey, fade: Fade) {
+    fn start_fade(&mut self, key: NodeKey, fade: Fade) {
         if self.fades.insert(key, fade).is_none() {
             for a in self.ancestors(key) {
                 *self.fade_below.entry(a).or_default() += 1;
@@ -266,8 +301,7 @@ impl DrawnSet {
         }
     }
 
-    /// `key`'s fade, gone from the fades and the counts over it.
-    fn take_fade(&mut self, key: TileKey) -> Option<Fade> {
+    fn take_fade(&mut self, key: NodeKey) -> Option<Fade> {
         let fade = self.fades.remove(&key)?;
         for a in self.ancestors(key) {
             if let Some(n) = self.fade_below.get_mut(&a) {
@@ -280,24 +314,24 @@ impl DrawnSet {
         Some(fade)
     }
 
-    fn end_fade(&mut self, key: TileKey) {
+    /// The fade of `key` ends: an outgoing node leaves.
+    fn end_fade(&mut self, key: NodeKey) {
         if self.take_fade(key).is_some_and(|f| !f.incoming) {
-            self.drop_tile(key);
+            self.drop_node(key);
         } else {
             self.touched.push(key);
         }
     }
 
     /// End the fades overlapping `key` now, and those overlapping them.
-    fn snap(&mut self, key: TileKey) {
+    fn snap(&mut self, key: NodeKey) {
         let mut work = vec![key];
         while let Some(t) = work.pop() {
-            // It or its ancestors; its descendants, where there are fades.
-            let mut hit: Vec<TileKey> = std::iter::once(t).chain(self.ancestors(t)).filter(|k| self.fades.contains_key(k)).collect();
+            let mut hit: Vec<NodeKey> = std::iter::once(t).chain(self.ancestors(t)).filter(|k| self.fades.contains_key(k)).collect();
             if self.fade_below.contains_key(&t) {
                 let mut down = vec![t];
                 while let Some(d) = down.pop() {
-                    for c in children(d) {
+                    for (_, c) in children(d) {
                         if self.fades.contains_key(&c) {
                             hit.push(c);
                         }
@@ -314,15 +348,15 @@ impl DrawnSet {
         }
     }
 
-    fn ancestors(&self, key: TileKey) -> impl Iterator<Item = TileKey> + use<> {
+    fn ancestors(&self, key: NodeKey) -> impl Iterator<Item = NodeKey> + use<> {
         let top = self.top_level;
-        std::iter::successors(Some(key), move |k| (k.level < top).then(|| parent(*k))).skip(1)
+        std::iter::successors(Some(key), move |k| (k.level < top).then(|| k.parent())).skip(1)
     }
 
-    /// Every strict ancestor of `tiles`.
-    fn ancestors_of(&self, tiles: &FxHashSet<TileKey>) -> FxHashSet<TileKey> {
+    /// Every strict ancestor of `nodes`.
+    fn ancestors_of(&self, nodes: impl Iterator<Item = NodeKey>) -> FxHashSet<NodeKey> {
         let mut out = FxHashSet::default();
-        for &key in tiles {
+        for key in nodes {
             for a in self.ancestors(key) {
                 if !out.insert(a) {
                     break;
@@ -332,129 +366,108 @@ impl DrawnSet {
         out
     }
 
-    /// A drawn tile's state.
-    fn state_of(&self, key: TileKey) -> i32 {
+    fn state_of(&self, key: NodeKey) -> i32 {
         self.fades.get(&key).map_or(1, |f| 2 + (((f.start & START_MASK) as i32) << 2) + i32::from(f.incoming) + 2 * i32::from(f.coarse))
     }
 
-    /// Whether `tile` is drawn.
-    pub fn holds(&self, tile: TileKey) -> bool {
-        self.tiles.contains_key(&tile)
+    /// Whether `node` is drawn.
+    pub fn holds(&self, node: NodeKey) -> bool {
+        self.drawn.contains_key(&node)
     }
 
-    /// `tile`'s drawn state (diagnostics): drawn, its column's state (1
+    /// Whether `node` is drawn or an ancestor of a drawn node.
+    pub fn in_cut(&self, node: NodeKey) -> bool {
+        self.entries.contains_key(&node)
+    }
+
+    /// Drawn Solid and Buried nodes.
+    pub fn uniform_nodes(&self) -> impl Iterator<Item = NodeKey> + '_ {
+        self.drawn.iter().filter(|(_, d)| d.kind != Kind::Mixed).map(|(k, _)| *k)
+    }
+
+    /// What `node` is drawn as.
+    pub fn kind(&self, node: NodeKey) -> Option<Kind> {
+        self.drawn.get(&node).map(|d| d.kind)
+    }
+
+    /// `node`'s drawn state (diagnostics): drawn, its entry's state (1
     /// drawn, 0 an ancestor, else fading) and its fade (start, incoming,
     /// coarse side).
-    pub fn describe(&self, tile: TileKey) -> (bool, Option<i32>, Option<(u64, bool, bool)>) {
-        (self.tiles.contains_key(&tile), self.columns.get(&tile).map(|c| c.state), self.fades.get(&tile).map(|f| (f.start, f.incoming, f.coarse)))
+    pub fn describe(&self, node: NodeKey) -> (bool, Option<i32>, Option<(u64, bool, bool)>) {
+        (self.drawn.contains_key(&node), self.entries.get(&node).map(|e| e.value[1]), self.fades.get(&node).map(|f| (f.start, f.incoming, f.coarse)))
     }
 
-    /// Tiles drawn.
-    pub fn tile_count(&self) -> usize {
-        self.tiles.len()
+    /// Nodes drawn.
+    pub fn node_count(&self) -> usize {
+        self.drawn.len()
     }
 
-    /// Drawn tiles fading in or out.
+    /// Drawn nodes fading in or out.
     pub fn fading(&self) -> usize {
         self.fades.len()
     }
 
-    fn drop_tile(&mut self, key: TileKey) {
-        for slot in self.tiles.remove(&key).unwrap() {
-            self.remove(slot);
+    fn drop_node(&mut self, key: NodeKey) {
+        if let Some(d) = self.drawn.remove(&key) {
+            if let Some(c) = d.chunk {
+                self.remove(c.slot);
+            }
+            self.touched.push(key);
         }
-        self.layers.remove(&key);
-        if self.gaps.remove(&key) {
-            self.take(gap_key(key));
+    }
+
+    fn add_node(&mut self, key: NodeKey, drawn: Drawn) {
+        if let Some(c) = drawn.chunk {
+            self.version += 1;
+            self.position[c.slot as usize] = self.list.len() as u32;
+            self.list.push(DrawnChunk { slot: c.slot });
         }
+        self.drawn.insert(key, drawn);
         self.touched.push(key);
     }
 
-    fn add_tile(&mut self, key: TileKey, draw: TileDraw) {
-        let TileDraw { chunks, gap } = draw;
-        if gap.below_air || gap.solid.0 < gap.solid.1 {
-            self.put(gap_key(key), [gap.solid.0, gap.solid.1, i32::from(gap.below_air), 0]);
-            self.gaps.insert(key);
-        }
-        let lo = chunks.iter().map(|c| c.key[3]).min();
-        let hi = chunks.iter().map(|c| c.key[3] + 1).max();
-        let top = chunks.iter().map(|c| c.key[3] * 64 + c.z.1.ceil() as i32).max().unwrap_or(NO_TOP);
-        // No chunks: air (all its layers were empty).
-        let (lo, hi) = lo.zip(hi).unwrap_or((NO_TOP >> 6, NO_TOP >> 6));
-        let layers = (lo, hi, top);
-        let slots = chunks.iter().map(|c| c.slot).collect();
-        let state = self.state_of(key);
-        for c in chunks {
-            self.insert(c, state);
-        }
-        self.tiles.insert(key, slots);
-        self.layers.insert(key, layers);
-        self.touched.push(key);
-    }
-
-    /// Recompute the touched columns, finest first, and their ancestors
-    /// while they change; a column with nothing drawn in it leaves.
-    fn settle_columns(&mut self) {
-        let mut by_level: Vec<rustc_hash::FxHashSet<TileKey>> = vec![Default::default(); self.top_level as usize + 1];
+    /// Recompute the touched entries, finest first, and their ancestors
+    /// while they change; an entry with nothing drawn under it leaves.
+    fn settle_entries(&mut self) {
+        let mut by_level: Vec<FxHashSet<NodeKey>> = vec![Default::default(); self.top_level as usize + 1];
         for key in std::mem::take(&mut self.touched) {
             by_level[key.level as usize].insert(key);
         }
         for level in 0..by_level.len() {
             for key in std::mem::take(&mut by_level[level]) {
-                let old = self.columns.get(&key).copied();
-                let drawn = self.layers.get(&key).copied();
-                // The children's tops in this level's layers (rounded up).
-                let below = if level == 0 {
-                    None
-                } else {
-                    [(0, 0), (1, 0), (0, 1), (1, 1)]
-                        .into_iter()
-                        .filter_map(|(a, b)| self.columns.get(&TileKey { face: key.face, level: key.level - 1, cx: key.cx * 2 + a, cy: key.cy * 2 + b }))
-                        .map(|c| (c.top + 1) >> 1)
-                        .max()
-                };
+                let old = self.entries.get(&key).copied();
+                let drawn = self.drawn.get(&key).copied();
+                let below = children(key).filter_map(|(n, c)| self.entries.get(&c).map(|e| e.content.in_parent(n))).reduce(Content::union);
                 let new = match (drawn, below) {
                     (None, None) => None,
-                    (d, b) => Some(Column {
-                        drawn: d.map(|d| (d.0, d.1)),
-                        top: d.map(|d| d.2).into_iter().chain(b).max().unwrap(),
-                        state: if d.is_some() { self.state_of(key) } else { 0 },
-                    }),
+                    (d, b) => {
+                        let content = d.map_or(Content::NOTHING, |d| d.content()).union(b.unwrap_or(Content::NOTHING));
+                        let (lo, hi) = content.packed();
+                        let value = match d {
+                            Some(d) => [d.chunk.map_or(-1, |c| c.slot as i32), self.state_of(key), d.kind_code() | (lo << 8), hi],
+                            None => [-1, 0, KIND_ANCESTOR | (lo << 8), hi],
+                        };
+                        Some(Entry { content, value })
+                    }
                 };
                 if new == old {
                     continue;
                 }
                 match new {
-                    Some(c) => {
-                        self.columns.insert(key, c);
-                        let (lo, hi) = c.drawn.unwrap_or((0, 0));
-                        self.put(column_key(key), [lo, hi, c.top, c.state]);
-                        // Its chunks carry its state.
-                        if c.drawn.is_some() && old.is_none_or(|o| o.state != c.state) {
-                            for i in 0..self.tiles[&key].len() {
-                                let slot = self.tiles[&key][i];
-                                let chunk = self.list[self.position[slot as usize] as usize].key;
-                                self.put(chunk, [slot as i32, c.state, 0, 0]);
-                            }
-                        }
+                    Some(e) => {
+                        self.entries.insert(key, e);
+                        self.put(key.table_key(), e.value);
                     }
                     None => {
-                        self.columns.remove(&key);
-                        self.take(column_key(key));
+                        self.entries.remove(&key);
+                        self.take(key.table_key());
                     }
                 }
                 if key.level < self.top_level {
-                    by_level[level + 1].insert(parent(key));
+                    by_level[level + 1].insert(key.parent());
                 }
             }
         }
-    }
-
-    fn insert(&mut self, c: DrawnChunk, state: i32) {
-        self.version += 1;
-        self.position[c.slot as usize] = self.list.len() as u32;
-        self.put(c.key, [c.slot as i32, state, 0, 0]);
-        self.list.push(c);
     }
 
     fn remove(&mut self, slot: u32) {
@@ -463,12 +476,11 @@ impl DrawnSet {
             return;
         }
         self.version += 1;
-        let c = self.list.swap_remove(at as usize);
+        self.list.swap_remove(at as usize);
         self.position[slot as usize] = NONE;
         if let Some(moved) = self.list.get(at as usize) {
             self.position[moved.slot as usize] = at;
         }
-        self.take(c.key);
     }
 
     /// Set entry `key`'s value, adding the entry if absent.
@@ -544,159 +556,121 @@ impl DrawnSet {
 mod tests {
     use super::*;
 
-    /// Random cuts of one level-3 tile, a new one every few frames: at every
-    /// frame, for every dither, the tiles shown cover each level-0 column
-    /// once, and each one's chunks carry its state.
-    #[test]
-    fn fades_show_every_column_once() {
-        let mut set = DrawnSet::new(1 << 14, 1 << 12, 3);
-        let mut rng = 0x2545_F491_4F6C_DD1Du64;
-        let mut next = move || {
-            rng ^= rng << 13;
-            rng ^= rng >> 7;
-            rng ^= rng << 17;
-            rng
-        };
-        let root = TileKey { face: 0, level: 3, cx: 0, cy: 0 };
-        let mut last: Vec<TileKey> = Vec::new();
-        let mut slot = 0u32;
-        let mut frame = 0;
-        for round in 0..300 {
-            let mut drawn = Vec::new();
-            let mut open = vec![root];
-            while let Some(k) = open.pop() {
-                if k.level > 0 && next() % 3 != 0 {
-                    open.extend([(0, 0), (1, 0), (0, 1), (1, 1)].map(|(a, b)| TileKey { face: 0, level: k.level - 1, cx: k.cx * 2 + a, cy: k.cy * 2 + b }));
-                } else {
-                    drawn.push(k);
-                }
-            }
-            set.update(&diff(&drawn, &last), &diff(&last, &drawn), &Default::default(), frame, |k| {
-                slot = (slot + 1) % (1 << 14);
-                vec![chunk(slot, [i32::from(k.face) | ((k.level as i32) << 8), k.cx, k.cy, 0])]
-            });
-            last = drawn;
-            for _ in 0..(next() % 20) {
-                frame += 1;
-                set.update(&[], &[], &Default::default(), frame, |_| Vec::new());
-                for r in [0, 1, 255, 511, 512, 900, 1023] {
-                    let mut shown = [[0u8; 8]; 8];
-                    for (k, _) in &set.tiles {
-                        let state = set.find(column_key(*k)).unwrap()[3];
-                        for &s in &set.tiles[k] {
-                            let c = set.list[set.position[s as usize] as usize].key;
-                            assert_eq!(set.find(c).unwrap()[1], state, "round {round}");
-                        }
-                        if choice(state, r, frame) == 1 {
-                            let n = 1 << k.level;
-                            for x in 0..n {
-                                for y in 0..n {
-                                    shown[(k.cx * n + x) as usize][(k.cy * n + y) as usize] += 1;
-                                }
-                            }
-                        }
-                    }
-                    assert!(shown.iter().flatten().all(|&n| n == 1), "round {round} frame {frame} r {r}: {shown:?}");
-                }
-            }
+    fn rng(mut state: u64) -> impl FnMut() -> u64 {
+        move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
         }
     }
 
-    /// The draw's search for the tile a pixel of dither `r` shows over
-    /// finest-level tile `(x, y)`, from a ray at `level` (`place_at`'s
-    /// column search: coarser while a column says so, finer while it says
-    /// so; down through undrawn ancestors only, it turns up once).
-    fn search(set: &DrawnSet, x: i32, y: i32, level: u32, r: i32, frame: u64) -> Option<TileKey> {
-        let mut diff = 0i32;
-        let mut way = 0;
-        let (mut turned, mut through_ancestors) = (false, true);
-        for _ in 0..24 {
-            let lv = (level as i32 + diff) as u32;
-            let k = TileKey { face: 0, level: lv, cx: x >> lv, cy: y >> lv };
-            let state = set.find(column_key(k)).map(|c| c[3]);
-            let go = state.map_or(2, |s| choice(s, r, frame));
-            if go == 1 {
-                return Some(k);
+    fn node(level: u32, cx: i32, cy: i32, cz: i32) -> NodeKey {
+        NodeKey { face: 0, level, cx, cy, cz }
+    }
+
+    /// A random cut of a level-`top` root: refined with probability 2/3
+    /// each, a third of leaves Empty (not drawn), the rest Mixed.
+    fn random_cut(top: u32, next: &mut impl FnMut() -> u64) -> Vec<(NodeKey, Kind)> {
+        let mut drawn = Vec::new();
+        let mut open = vec![node(top, 0, 0, 0)];
+        while let Some(k) = open.pop() {
+            if k.level > 0 && next() % 3 != 0 {
+                open.extend(children(k).map(|c| c.1));
+            } else if next() % 3 != 0 {
+                drawn.push((k, if next() % 4 == 0 { Kind::Solid } else { Kind::Mixed }));
             }
-            if go == 2 || (go == 0 && way > 0) {
-                if way < 0 {
-                    if turned || !through_ancestors {
-                        return None;
+        }
+        drawn
+    }
+
+    fn diff(a: &[(NodeKey, Kind)], b: &[(NodeKey, Kind)]) -> (Vec<(NodeKey, Kind)>, Vec<NodeKey>) {
+        (a.iter().filter(|x| !b.contains(x)).copied().collect(), b.iter().filter(|x| !a.contains(x)).map(|x| x.0).collect())
+    }
+
+    /// The shown node over level-0 cell `p` for dither `r`, searched as the
+    /// draw does: coarser while no entry says otherwise, finer through
+    /// ancestors; a refined node without an entry for the child: air.
+    fn search(set: &DrawnSet, p: [i32; 3], from: u32, r: i32, frame: u64) -> Option<Option<NodeKey>> {
+        let at = |l: u32| node(l, p[0] >> l, p[1] >> l, p[2] >> l);
+        let state = |l: u32| set.find(at(l).table_key()).map(|v| v[1]);
+        let mut level = from;
+        // Up to an entry.
+        while state(level).is_none() {
+            if level >= set.top_level {
+                return Some(None);
+            }
+            level += 1;
+        }
+        // An ancestor found climbing: a coarser node fading in over it may
+        // show here (its finer side has no node over this point).
+        if state(level) == Some(0) {
+            for l in level + 1..=set.top_level {
+                match state(l) {
+                    Some(0) => continue,
+                    Some(s) => {
+                        if choice(s, r, frame) == 1 {
+                            return Some(Some(at(l)));
+                        }
+                        break;
                     }
-                    turned = true;
-                    diff = 0;
+                    None => break,
                 }
-                if level as i32 + diff >= set.top_level as i32 {
-                    return None;
+            }
+        }
+        // Up past ancestors (over the hidden fine side of a switch), down
+        // through them; a missing node below is air.
+        let mut way = 0;
+        for _ in 0..64 {
+            let Some(s) = state(level) else { return if way < 0 { Some(None) } else { None } };
+            let go = if s == 0 && way > 0 { 2 } else { choice(s, r, frame) };
+            match go {
+                1 => return Some(Some(at(level))),
+                0 if level > 0 && way <= 0 => {
+                    way = -1;
+                    level -= 1;
                 }
-                way = 1;
-                diff += 1;
-            } else {
-                if way > 0 || lv == 0 {
-                    return None;
+                2 if level < set.top_level && way >= 0 => {
+                    way = 1;
+                    level += 1;
                 }
-                through_ancestors &= state == Some(0);
-                way = -1;
-                diff -= 1;
+                _ => return None,
             }
         }
         None
     }
 
+    /// Random cuts of a level-3 root, a new one every few frames: at every
+    /// frame, for every dither and starting level, the search finds the one
+    /// node shown over each finest cell (none where it is Empty), and each
+    /// drawn node's entry carries its state.
     #[test]
-    fn every_ray_finds_the_tile_it_shows_through_jumps() {
-        // Cuts of a level 8 root whose depth follows an eye that jumps:
-        // tiles within `reach` (in finest tiles) of `eye` refine to `finest`.
-        let top = 8u32;
-        let cut = |eye: (i32, i32), finest: u32| -> Vec<TileKey> {
-            let mut drawn = Vec::new();
-            let mut open = vec![TileKey { face: 0, level: top, cx: 0, cy: 0 }];
-            while let Some(k) = open.pop() {
-                let n = 1i32 << k.level;
-                let (x0, y0) = (k.cx * n, k.cy * n);
-                let dx = (eye.0 - (x0 + n / 2)).abs().saturating_sub(n / 2);
-                let dy = (eye.1 - (y0 + n / 2)).abs().saturating_sub(n / 2);
-                let want = finest.max(((dx.max(dy) as f64 / 4.0).max(1.0).log2()) as u32);
-                if k.level > want {
-                    open.extend([(0, 0), (1, 0), (0, 1), (1, 1)].map(|(a, b)| TileKey { face: 0, level: k.level - 1, cx: k.cx * 2 + a, cy: k.cy * 2 + b }));
-                } else {
-                    drawn.push(k);
-                }
-            }
-            drawn
-        };
-        let mut rng = 0x9E37_79B9_7F4A_7C15u64;
-        let mut next = move || {
-            rng ^= rng << 13;
-            rng ^= rng >> 7;
-            rng ^= rng << 17;
-            rng
-        };
-        let mut set = DrawnSet::new(1 << 16, 1 << 16, top);
+    fn fades_show_every_cell_once() {
+        let mut next = rng(0x2545_F491_4F6C_DD1D);
+        let mut set = DrawnSet::new(1 << 14, 1 << 14, 3);
+        let mut last: Vec<(NodeKey, Kind)> = Vec::new();
         let mut slot = 0u32;
-        let mut last: Vec<TileKey> = Vec::new();
         let mut frame = 0;
-        let side = 1i32 << top;
-        for round in 0..60 {
-            // Mostly small moves; now and then a jump (finest level 0 to 5).
-            let eye = ((next() % side as u64) as i32, (next() % side as u64) as i32);
-            let finest = if next() % 4 == 0 { (next() % 6) as u32 } else { 0 };
-            let drawn = cut(eye, finest);
-            set.update(&diff(&drawn, &last), &diff(&last, &drawn), &Default::default(), frame, |k| {
-                slot = (slot + 1) % (1 << 16);
-                vec![chunk(slot, [i32::from(k.face) | ((k.level as i32) << 8), k.cx, k.cy, 0])]
+        for round in 0..200 {
+            let drawn = random_cut(3, &mut next);
+            let (added, removed) = diff(&drawn, &last);
+            set.update(&added, &removed, &Default::default(), frame, |_| {
+                slot = (slot + 1) % (1 << 14);
+                Some(NodeChunk { slot, z: (0.0, 64.0) })
             });
             last = drawn;
-            for _ in 0..(1 + next() % 6) {
+            for _ in 0..(next() % 20) {
                 frame += 1;
-                set.update(&[], &[], &Default::default(), frame, |_| Vec::new());
-                for r in [0, 300, 700, 1023] {
-                    for _ in 0..400 {
-                        let (x, y) = ((next() % side as u64) as i32, (next() % side as u64) as i32);
-                        let shown: Vec<TileKey> = set.tiles.keys().filter(|k| k.cx == x >> k.level && k.cy == y >> k.level && choice(set.find(column_key(**k)).unwrap()[3], r, frame) == 1).copied().collect();
-                        assert_eq!(shown.len(), 1, "round {round}: {shown:?}");
-                        for level in 0..=top {
-                            assert_eq!(search(&set, x, y, level, r, frame), Some(shown[0]), "round {round} frame {frame} r {r} at ({x}, {y}) from level {level}");
+                set.update(&[], &[], &Default::default(), frame, |_| None);
+                for r in [0, 1, 511, 512, 1023] {
+                    for _ in 0..40 {
+                        let p = [(next() % 8) as i32, (next() % 8) as i32, (next() % 8) as i32];
+                        // Nodes shown over p by their state.
+                        let shown: Vec<NodeKey> = set.drawn.keys().filter(|k| (0..3).all(|a| [p[0], p[1], p[2]][a] >> k.level == [k.cx, k.cy, k.cz][a]) && choice(set.find(k.table_key()).unwrap()[1], r, frame) == 1).copied().collect();
+                        assert!(shown.len() <= 1, "round {round}: {shown:?}");
+                        for from in 0..=3 {
+                            let chain: Vec<_> = (0..=3u32).map(|l| { let k = node(l, p[0] >> l, p[1] >> l, p[2] >> l); (l, set.find(k.table_key()).map(|v| (v[1], choice(v[1], r, frame))), set.fades.get(&k).map(|f| (f.start, f.incoming, f.coarse)), set.drawn.get(&k).map(|d| d.kind)) }).collect();
+                            assert_eq!(search(&set, p, from, r, frame), Some(shown.first().copied()), "round {round} frame {frame} r {r} at {p:?} from {from}: {chain:?}");
                         }
                     }
                 }
@@ -704,115 +678,76 @@ mod tests {
         }
     }
 
-    /// Tiles of `a` not in `b`.
-    fn diff(a: &[TileKey], b: &[TileKey]) -> Vec<TileKey> {
-        a.iter().filter(|k| !b.contains(k)).copied().collect()
-    }
-
-    fn chunk(slot: u32, key: [i32; 4]) -> DrawnChunk {
-        DrawnChunk { key, slot, z: (0.0, 64.0) }
-    }
-
+    /// Every entry's content is the union of what is drawn under it.
     #[test]
-    fn the_table_finds_every_drawn_chunk_after_tiles_come_and_go() {
-        // A small table so probe runs collide and wrap.
-        let mut set = DrawnSet::new(4096, 1024, 0);
-        let tile = |n: i32| TileKey { face: 2, level: 0, cx: n, cy: n / 3 };
-        let chunks = |k: TileKey| -> Vec<DrawnChunk> { (0..3).map(|z| chunk((k.cx * 3 + z) as u32, [2, k.cx, k.cy, z])).collect() };
-        let mut rng = 0x2545_F491_4F6C_DD1Du64;
-        let mut next = move || {
-            rng ^= rng << 13;
-            rng ^= rng >> 7;
-            rng ^= rng << 17;
-            rng
-        };
-        let mut last: Vec<TileKey> = Vec::new();
-        for round in 0..200 {
-            let drawn: Vec<TileKey> = (0..300).filter(|_| next() % 2 == 0).map(tile).collect();
-            let changed: rustc_hash::FxHashSet<TileKey> = drawn.iter().filter(|_| next() % 7 == 0).copied().collect();
-            set.update(&diff(&drawn, &last), &diff(&last, &drawn), &changed, round, chunks);
+    fn ancestors_hold_the_content_of_their_subtrees() {
+        let mut next = rng(0x9E37_79B9_7F4A_7C15);
+        let mut set = DrawnSet::new(1 << 14, 1 << 14, 3);
+        let mut last: Vec<(NodeKey, Kind)> = Vec::new();
+        let mut slot = 0u32;
+        for round in 0..100 {
+            let drawn = random_cut(3, &mut next);
+            let (added, removed) = diff(&drawn, &last);
+            let layers: FxHashMap<NodeKey, (f64, f64)> = drawn.iter().map(|d| (d.0, ((next() % 30) as f64, 34.0 + (next() % 30) as f64))).collect();
+            // Frames FADE_FRAMES apart: no fade under way.
+            set.update(&added, &removed, &drawn.iter().map(|d| d.0).collect(), round * FADE_FRAMES, |k| {
+                slot = (slot + 1) % (1 << 14);
+                Some(NodeChunk { slot, z: layers[&k] })
+            });
+            set.update(&[], &[], &Default::default(), (round + 1) * FADE_FRAMES, |_| None);
             last = drawn.clone();
-            set.take_changes();
-            assert_eq!(set.list.len(), drawn.len() * 3, "round {round}");
-            for k in &drawn {
-                for c in chunks(*k) {
-                    assert_eq!(set.find(c.key), Some([c.slot as i32, 1, 0, 0]), "round {round}");
-                    assert_eq!(set.list[set.position[c.slot as usize] as usize].slot, c.slot);
+            // The expected content of every node over the cut, in level-0 cells.
+            for (key, e) in &set.entries {
+                let scale = 1 << key.level;
+                let mut want: Option<([i32; 3], [i32; 3])> = None;
+                for (k, kind) in &drawn {
+                    let mut p = *k;
+                    while p.level < key.level {
+                        p = p.parent();
+                    }
+                    if p != *key {
+                        continue;
+                    }
+                    let s = 1 << k.level;
+                    let z = if *kind == Kind::Mixed { (layers[k].0 as i32, layers[k].1 as i32) } else { (0, 64) };
+                    let lo = [k.cx * 64 * s, k.cy * 64 * s, k.cz * 64 * s + z.0 * s];
+                    let hi = [k.cx * 64 * s + 64 * s, k.cy * 64 * s + 64 * s, k.cz * 64 * s + z.1 * s];
+                    want = Some(want.map_or((lo, hi), |(a, b)| ([0, 1, 2].map(|i| a[i].min(lo[i])), [0, 1, 2].map(|i| b[i].max(hi[i])))));
                 }
-            }
-            for n in 0..300 {
-                if !drawn.contains(&tile(n)) {
-                    assert_eq!(set.find([2, n, n / 3, 0]), None);
+                let (lo, hi) = want.expect("an entry has something drawn under it");
+                let origin = [key.cx * 64 * scale, key.cy * 64 * scale, key.cz * 64 * scale];
+                for a in 0..3 {
+                    // Rounded out to the node's cells, never inside.
+                    assert!(origin[a] + e.content.lo[a] * scale <= lo[a] && origin[a] + e.content.hi[a] * scale >= hi[a], "round {round} {key:?} axis {a}: {:?} vs {lo:?}..{hi:?}", e.content);
+                    assert!(lo[a] - (origin[a] + e.content.lo[a] * scale) < scale * 2 && origin[a] + e.content.hi[a] * scale - hi[a] < scale * 2, "round {round} {key:?} axis {a}: loose");
                 }
             }
         }
     }
 
     #[test]
-    fn columns_hold_each_subtree_top_and_leave_with_it() {
-        // Tiles of levels 0..3 in one level-3 column; a tile's chunks are
-        // layers [0, n) for a random n.
-        let mut set = DrawnSet::new(1 << 14, 1 << 12, 3);
-        let mut rng = 0x9E37_79B9_7F4A_7C15u64;
-        let mut next = move || {
-            rng ^= rng << 13;
-            rng ^= rng >> 7;
-            rng ^= rng << 17;
-            rng
-        };
-        let mut slot = 0u32;
-        let mut last: Vec<TileKey> = Vec::new();
-        for round in 0..100 {
-            // A random cut: refine each tile with probability 1/2.
-            let mut drawn = Vec::new();
-            let mut open = vec![TileKey { face: 1, level: 3, cx: 0, cy: 0 }];
-            while let Some(k) = open.pop() {
-                if k.level > 0 && next() % 2 == 0 {
-                    open.extend([(0, 0), (1, 0), (0, 1), (1, 1)].map(|(a, b)| TileKey { face: 1, level: k.level - 1, cx: k.cx * 2 + a, cy: k.cy * 2 + b }));
-                } else {
-                    drawn.push(k);
-                }
-            }
-            let layers: FxHashMap<TileKey, i32> = drawn.iter().map(|k| (*k, (next() % 5) as i32 + 1)).collect();
-            let changed: rustc_hash::FxHashSet<TileKey> = drawn.iter().copied().collect();
-            // Frames FADE_FRAMES apart: no fade under way.
-            set.update(&diff(&drawn, &last), &diff(&last, &drawn), &changed, round * FADE_FRAMES, |k| {
-                (0..layers[&k])
-                    .map(|z| {
-                        slot = (slot + 1) % (1 << 14);
-                        chunk(slot, [1 | ((k.level as i32) << 8), k.cx, k.cy, z])
-                    })
-                    .collect::<Vec<_>>()
-            });
+    fn the_table_finds_every_drawn_chunk_after_nodes_come_and_go() {
+        // A small table so probe runs collide and wrap.
+        let mut set = DrawnSet::new(4096, 1024, 0);
+        let mut next = rng(0x2545_F491_4F6C_DD1D);
+        let at = |n: i32| node(0, n, n / 3, n % 5);
+        let mut last: Vec<(NodeKey, Kind)> = Vec::new();
+        for round in 0..200 {
+            let drawn: Vec<(NodeKey, Kind)> = (0..300).filter(|_| next() % 2 == 0).map(|n| (at(n), Kind::Mixed)).collect();
+            let changed: FxHashSet<NodeKey> = drawn.iter().filter(|_| next() % 7 == 0).map(|d| d.0).collect();
+            let (added, removed) = diff(&drawn, &last);
+            set.update(&added, &removed, &changed, round, |k| Some(NodeChunk { slot: k.cx as u32, z: (0.0, 64.0) }));
             last = drawn.clone();
-            // Expected tops, finest first.
-            let mut top: FxHashMap<TileKey, i32> = FxHashMap::default();
-            for level in 0..=3u32 {
-                for k in drawn.iter().filter(|k| k.level == level) {
-                    top.insert(*k, layers[k] * 64);
-                }
-                let at: Vec<(TileKey, i32)> = top.iter().filter(|(k, _)| k.level == level).map(|(k, t)| (*k, *t)).collect();
-                for (k, t) in at {
-                    if level < 3 {
-                        let p = parent(k);
-                        let up = (t + 1) >> 1;
-                        top.entry(p).and_modify(|v| *v = (*v).max(up)).or_insert(up);
-                    }
+            set.take_changes();
+            assert_eq!(set.list.len(), drawn.len(), "round {round}");
+            for (k, _) in &drawn {
+                assert_eq!(set.find(k.table_key()).map(|v| (v[0], v[1])), Some((k.cx, 1)), "round {round}");
+            }
+            for n in 0..300 {
+                if !drawn.iter().any(|d| d.0 == at(n)) {
+                    assert_eq!(set.find(at(n).table_key()), None);
                 }
             }
-            set.update(&[], &[], &Default::default(), (round + 1) * FADE_FRAMES - 1, |_| Vec::new());
-            set.update(&[], &[], &Default::default(), (round + 1) * FADE_FRAMES, |_| Vec::new());
-            for (k, t) in &top {
-                let entry = set.find(column_key(*k)).unwrap_or_else(|| panic!("round {round}: {k:?} missing"));
-                let drawn_here = layers.contains_key(k);
-                assert_eq!(entry[2], *t, "round {round}: {k:?}");
-                assert_eq!(entry[3], i32::from(drawn_here), "round {round}: {k:?}");
-                if drawn_here {
-                    assert_eq!((entry[0], entry[1]), (0, layers[k]));
-                }
-            }
-            // No column outside the cut's subtrees.
-            assert_eq!(set.columns.len(), top.len(), "round {round}");
         }
     }
 }
