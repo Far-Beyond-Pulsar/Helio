@@ -14,6 +14,14 @@ pub const MAP_SPECTRAL: u32 = 2;
 /// [`ResolvedLens::map_flags`]: some element attenuates light (vignetting,
 /// filters, T-stop loss).
 pub const MAP_TRANSMISSION: u32 = 4;
+/// [`ResolvedLens::map_flags`]: a `PRESCRIPTION` element names a layer of the
+/// bank, so ray map, transmission, pupil and focus consult the baked tables.
+pub const MAP_PRESCRIPTION: u32 = 8;
+
+/// [`ResolvedLens::aberration_flags`]: some in-focus aberration, filter or
+/// contaminant element is present, so the composite writes the sensor image
+/// to an intermediate and the pyramid and `cs_ab_apply` stages run.
+pub const AB_ACTIVE: u32 = 1;
 
 /// The view's lens after row matching, autofocus and sanitising, as
 /// `cs_resolve` writes it. With no enabled row for the view it holds the
@@ -64,9 +72,12 @@ pub struct ResolvedLens {
     /// Wavelength samples of the composite: 1 without lateral chromatic
     /// aberration, else 3, 7 or 16 by `quality`.
     pub spectral_samples: u32,
+    /// [`AB_ACTIVE`]. Appended in phase 4; every earlier offset is unchanged.
+    pub aberration_flags: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<ResolvedLens>() == 80);
+const _: () = assert!(std::mem::size_of::<ResolvedLens>() == 84);
+const _: () = assert!(std::mem::offset_of!(ResolvedLens, aberration_flags) == 80);
 const _: () = assert!(std::mem::offset_of!(ResolvedLens, aperture_rotation) == 16);
 const _: () = assert!(std::mem::offset_of!(ResolvedLens, natural_vignette) == 20);
 const _: () = assert!(std::mem::offset_of!(ResolvedLens, enabled) == 24);
@@ -97,6 +108,7 @@ impl Default for ResolvedLens {
             required_overscan: 1.0,
             map_flags: 0,
             spectral_samples: 1,
+            aberration_flags: 0,
         }
     }
 }

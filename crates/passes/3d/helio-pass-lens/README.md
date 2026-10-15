@@ -6,14 +6,15 @@ bloomed or tone mapped. It models the **focus field**, the **thin-lens
 defocus** it implies, the **pupil function** (what that defocus looks like)
 with longitudinal chromatic aberration, the **ray map** (projection,
 distortion, spectral lateral chromatic aberration) and the **transmission**
-(vignetting, filters, T-stop). The old depth of field (`helio-pass-dof`) ran on the tone
+(vignetting, filters, T-stop), then the **in-focus aberrations, diffusion
+filters, stars, halation and contaminants** of the sensor image. The old depth of field (`helio-pass-dof`) ran on the tone
 mapped image and had no optics behind it; it is gone, and so are its
 post-process settings.
 
 ## The model
 
 A lens is an ordered stack of optical elements. The stack reduces, per pixel,
-to four quantities:
+to four quantities, followed by a post stage on the sensor image:
 
 | Quantity | Now |
 | --- | --- |
@@ -21,6 +22,7 @@ to four quantities:
 | Focus field `s(uv)` | resolved: base focus, tilt, field curvature, diopters, per-channel focus shift |
 | Pupil function | `pupil_shape` and `pupil_profile`: iris, squeeze, cat's eye, swirl, aberration, apodization, obstruction |
 | Transmission | natural cos⁴, optical and mechanical vignetting, ND / graduated ND / colour filters, T-stop loss, diopter seam darkening |
+| Sensor-image aberrations and filters | field-dependent PSFs (glow, coma, astigmatism, corner softness), diffusion (Pro-Mist, Black Pro-Mist, Glimmerglass, fog), stars, halation, water drops, smear, dirt |
 
 Later phases add element kinds (prescription LUTs, more aberrations) to the
 same element table; the shader dispatches on `LensElementComponent::kind`.
@@ -228,6 +230,74 @@ applied to the composite:
 `t_stop` is carried on the lens and applied only when a `T_STOP_LOSS` element
 asks for it, so existing lenses keep their exposure.
 
+### In-focus aberrations, filters and contaminants
+
+Elements 24..37 act on the **sensor image** (after the defocus, the ray map and
+the transmission), in the `cs_ab_down` / `cs_ab_apply` stages. They are placed
+last because their point spreads live in sensor coordinates (the field
+position of a pixel is its position on the sensor) and because a point spread
+convolves a defocused image exactly as it does a sharp one. The one deviation
+from optical order is that a front filter would scatter light *before* the
+lens's vignetting; here the scatter spreads light already vignetted, a
+difference confined to the smooth field falloff.
+
+Without such an element nothing changes: the composite writes `lens_color`
+directly and the two stages dispatch zero groups (`aberration_flags`,
+`ResolvedLens`). With one, the composite writes an intermediate (`composed`),
+`cs_ab_down` builds a pyramid of it (like the flare pass's: level 0 is half
+the image, each next a stride-2 4x4 box of the one before, so every level has
+the image's mean radiance), and `cs_ab_apply` writes `lens_color`.
+
+A **scatterer** moves a share `f` of every source's light over a kernel that
+sums to 1. As a gather, the pixel loses `f` of its own light and collects
+`f * sum(kernel * source)`, so the frame's mean radiance is unchanged (to the
+frame edge, which clamps). The shares of all elements add and are scaled
+together if they would exceed one. A Gaussian of standard deviation `s` pixels
+is read from the pyramid level whose texels are about `1.6 s` wide, from four
+taps. Kernels are in image-height units, so they scale with the frame.
+
+| Kind (`element_kind`) | `params` (slot: meaning) | Effect |
+| --- | --- | --- |
+| `SPHERICAL_GLOW` 24 | 0 `AMOUNT`, 1 `REFERENCE_F_NUMBER` (2.8), 2 `EXPONENT` k (2), 3 `RADIUS` (0.012), 4 `TAIL` (0.55) | Soft-focus halo; share `AMOUNT (N_ref / N)^k` |
+| `COMA` 25 | 0 `AMOUNT` share at the corner, 1 `LENGTH` at the corner, 2 `EXPONENT` of the field radius in the share (1), 3 `SHAPE` taper (2) | Comet tail along the radius, away from the axis; share `AMOUNT r^e`, length `LENGTH r` |
+| `ASTIGMATISM` 26 | 0 `AMOUNT` (signed sigma at the corner, image heights), 1 `EXPONENT` (2), 2 `MINOR_RATIO` | Elliptical Gaussian PSF aligned with the radius: `+` long axis radial, `-` tangential; long sigma `abs(AMOUNT) r^e` |
+| `CORNER_SOFTNESS` 27 | 0 `SIGMA` at the corner, 1 `EXPONENT` (2), 2 `START` radius | Isotropic blur `SIGMA ((r - START) / (1 - START))^e` (MTF falloff) |
+| `DIFFUSION` 28 | 0 `STRENGTH`, 1 `RADIUS` (0.01), 2 `TAIL` (0.5) | Four Gaussians, sigma `RADIUS 2^j`, weights `TAIL^j` |
+| `PRO_MIST` 29 | as `DIFFUSION`, radius 0.012, tail 0.65 | Wide halo; lifts the far shadows |
+| `BLACK_PRO_MIST` 30 | as `DIFFUSION`, radius 0.012, tail 0.3 | Same share, halo stays near the highlight |
+| `GLIMMERGLASS` 31 | as `DIFFUSION`, radius 0.004, tail 0.35; 3 `GLINT` contrast (0.8) | Small halo times `1 + GLINT (2h - 1)`, `h` a per-pixel hash (mean 1) |
+| `STAR_FILTER` 32 | 0 `POINTS` 2..16 (4), 1 `ROTATION`, 2 `LENGTH` (0.2), 3 `INTENSITY`, 4 `FALLOFF` (1) | `POINTS` spikes at `ROTATION + 2 pi k / POINTS`, density `d^-FALLOFF`, 20 taps each from 2 px to the length |
+| `HALATION` 33 | 0 `STRENGTH`, 1 `RADIUS` (0.02), 2..4 `TINT` rgb (1, 0.35, 0.08), 5 `TAIL` (0.5) | Channel `c` scatters `STRENGTH TINT[c]` of its light into two lobes (`RADIUS`, `2 RADIUS`); each channel conserves its own energy, so the halo is red-orange and the core loses a little green and blue |
+| `WATER_DROPS` 34 | 0 `REFRACTION` (image heights at a unit normal), 1 `NORMAL_LAYER`, 2 `DEFOCUS` (sigma, image heights) | In the region (the footprint) the image is read at `-REFRACTION n`, `n` from the red and green of the mask layer, and defocused |
+| `SMEAR` 35 | 0 `STRENGTH`, 1 `LENGTH` (0.03), 2 `ANGLE` | Gaussian line (sigma `LENGTH`) along `ANGLE` |
+| `FOG` 36 | as `DIFFUSION`, radius 0.03, tail 0.8 | Use a mask region for patchy breath fog |
+| `DIRT` 37 | 0 `STRENGTH`, 1 `RADIUS` (0.02), 2 `LOSS`, 3 `TAIL` (0.5) | Diffusion where covered, and `LOSS` of the light absorbed there |
+
+A slot given as `(x)` takes that default when it is 0 or less. The region
+weight multiplies the share (or the sigma, for the Gaussian PSFs): it is read at
+the destination pixel, so a region that cuts through a bright source scatters
+only as much as lands inside it, and energy is conserved for regions that do
+not (full frame, or wherever the source's neighbourhood lies wholly inside or
+outside).
+
+Coma's tail length varies with the destination pixel; the gather normalises per
+destination, not per source, so its energy is conserved to the slow variation of
+the length (a fraction of a per cent in the test). Astigmatism and corner
+softness are blurs that replace the sharp pixel (the scatterers then act on
+that base); they conserve energy to the same degree.
+
+**Masks.** A `MASK` region reads channel `CHANNEL` of layer `LAYER` of the
+optional `lens_masks` array (`MASKS`; RGBA8, built with `mask_array`) as its
+coverage, bilinear, at `(uv - 0.5) / SCALE + 0.5 - OFFSET`, optionally tiling
+(`mask` slots in `components.rs`); the feather does not apply. Without an array
+bound a 1x1 transparent layer is, so a mask region covers nothing. The array is
+read with `textureLoad`, so every stage that evaluates a region binds it
+(`cs_resolve`, `cs_coc`, `cs_gather`, `cs_composite`, `cs_ab_apply`).
+`water_drop_mask(size, drops, radius, seed)` generates a deterministic layer of
+spherical-cap drops (red/green normal `n * 0.5 + 0.5`, blue height, alpha
+footprint); use alpha as the footprint of a `WATER_DROPS` element on the same
+layer.
+
 ### Seams
 
 A diopter sits in front of the lens, out of focus, so its edge is soft: the
@@ -246,8 +316,9 @@ for each, blended by the weight.
 Regions live in image-height units centred on the frame, `q = (uv - 0.5) *
 (aspect, 1)`, y down: full frame, half-plane `{angle, offset}`, ellipse
 `{centre, radii, rotation}`, convex polygon of up to 8 vertices (either
-winding), radial band `{r0, r1, centre}`. A mask-texture kind is reserved and
-covers nothing yet. `LensRegion` builds the rows.
+winding), radial band `{r0, r1, centre}`. A mask-texture channel
+(see Masks above) covers nothing until a mask array is bound. `LensRegion`
+builds the rows.
 
 ## Settings
 
@@ -302,7 +373,15 @@ one workgroup and a copy, with no CPU readback.
    take the far layer, the near layer goes over both; with a ray map this runs
    at the position the map says, once per wavelength sample and prism copy, and
    the spectral weights and the transmission are applied. A lens with no map
-   elements copies texel for texel; a disabled lens copies the input.
+   elements copies texel for texel; a disabled lens copies the input. With an
+   aberration element the result goes to the `composed` intermediate instead
+   of `lens_color`.
+7. `cs_ab_down` (one dispatch per pyramid level, at most 8, level 0 half the
+   image) and `cs_ab_apply`: only for a lens with an aberration, filter or
+   contaminant element (`aberration_flags`); both are zero-sized otherwise. See
+   "In-focus aberrations, filters and contaminants". They follow the composite
+   so the point spreads act in sensor coordinates on the defocused, mapped,
+   vignetted image.
 
 ## Graph contract
 
@@ -316,9 +395,10 @@ FogCompositePass -> Transparent -> TSR/FXAA -> LensPass -> LensFlarePass -> Post
   resolution while colour is at output resolution after TSR upscaling.
 - Writes `lens_color`: Rgba16Float, scene-linear, the size of its input.
   `LensFlarePass` and `PostProcessPass` read it.
-- Publishes `lens_resolved`: a storage buffer holding one `ResolvedLens` (80
+- Publishes `lens_resolved`: a storage buffer holding one `ResolvedLens` (84
   bytes: the optics, `natural_vignette`, `required_overscan`, `map_flags`,
-  `spectral_samples`). It
+  `spectral_samples`, then `aberration_flags`, appended in phase 4 behind the
+  fields other passes read). It
   holds the neutral 50 mm f/2.8, 36 mm, six-blade lens when the view has none, so
   consumers always have optics. `LensFlarePass` takes f-number, focal length,
   sensor width and the iris, and the natural falloff for analytic sources,
@@ -334,8 +414,29 @@ FogCompositePass -> Transparent -> TSR/FXAA -> LensPass -> LensFlarePass -> Post
   (`APERTURE_SHAPES`): a `D2Array` view of R8Unorm iris shapes, see
   `aperture_shape_array`. Without it one white 1x1 layer is bound, so the
   binding is always valid.
+- Reads the optional registry entry `lens_masks` (`MASKS`): a `D2Array` view of
+  RGBA8 layers, see `mask_array`. Without it a transparent 1x1 layer is bound.
 
 ## Limits
+
+- The aberration stage runs after the ray map and the transmission, on the
+  sensor image; a filter that physically sits in front of the lens scatters
+  light the vignetting would already have dimmed. Its pyramid is built from
+  the whole frame, so the frame's edge clamps: a source near the edge loses the
+  part of its kernel that leaves the frame, and the edge texels are repeated
+  into the kernels of pixels inside it (negligible against a dark border).
+- A region on a scatterer weights the destination pixel, so energy is conserved
+  only for regions that do not cut through the sources (full frame, or a source
+  wholly in or out). Overlapping scatterers add their shares; a total above 98%
+  is scaled together.
+- Gaussian kernels are taken from a box pyramid with four bilinear taps, which
+  is a few per cent off a true Gaussian and shows faint blockiness for the
+  widest lobes. A star's spikes widen with distance (their taps read coarser
+  levels), a cone of a few degrees; coma and astigmatism are gathers with a
+  kernel set at the destination, conserving energy only to its slow variation.
+- Water drops refract the sensor image with no depth: the lookup is a pure
+  displacement, drops do not occlude or reflect, and the defocus inside them is
+  a Gaussian, not a thin-lens circle.
 
 - Screen-space: nothing outside the frame or behind opaque geometry contributes,
   so occluded background is reconstructed from its surroundings.
@@ -377,7 +478,8 @@ FogCompositePass -> Transparent -> TSR/FXAA -> LensPass -> LensFlarePass -> Post
 - Seam handling keeps the strongest two focus configurations per pixel; a
   junction of three seams approximates.
 - Elements address rows by index range; the authoring layer that places element
-  rows is not part of this pass.
+  rows is not part of this pass. The phase 4 kinds (24..37) are not yet exposed
+  by the editor-side component.
 
 ## Validation
 
@@ -406,6 +508,24 @@ split diopter (both halves in focus, the seam width against the aperture),
 stacked three-way and nested diopters, every region kind, tilt and field
 curvature, autofocus and its easing, depth below image resolution, and the
 component ABI.
+
+Phase 4 (`src/tests/aberration.rs`): a lens without such an element leaves the
+image bit for bit and dispatches none of the new stages (and a zero-strength
+element reproduces the image exactly); every scatterer (diffusion, Pro-Mist,
+Black Pro-Mist, Glimmerglass, fog, glow, 4, 6 and 8 point stars, halation,
+smear, dirt, coma, and a stack of four) keeps each channel's mean radiance
+within 3% (measured under 1.5%); a star of 2, 4, 6 and 8 points makes that many
+peaks in the angular energy histogram, at the rotation asked for; coma's centroid
+moves outward along the radius at three field positions and not on the axis;
+astigmatism's ellipse is radial for a positive amount and tangential for a
+negative one; corner softness leaves the axis untouched; the glow follows
+`(N_ref / N)^2`; smear spreads along its angle; Black Pro-Mist lifts far
+shadows less than Pro-Mist at the same share; halation is red-dominant, tinted
+as asked and per-channel conserving; dirt absorbs its loss; a `MASK` region
+restricts an element to the white half (bit-exact elsewhere, inverted likewise,
+nothing without a mask array); the water-drop generator is deterministic; a
+drop displaces content opposite its normal inside its footprint, by the
+expected amount, and leaves the rest of the frame bit-exact.
 
 The pupil tests measure the averaged result, not single taps (a lone point
 source in a defocused plane is a few lucky taps, so its disc is noise): the

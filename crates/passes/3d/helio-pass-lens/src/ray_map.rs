@@ -33,7 +33,7 @@ pub fn spectral_sample_count(quality: u32) -> usize {
 }
 
 /// Response of the red, green and blue channels at `lambda` nanometres.
-fn sensor_weights(lambda: f32) -> [f32; 3] {
+pub(crate) fn sensor_weights(lambda: f32) -> [f32; 3] {
     let lobe = |center: f32, width: f32| {
         let x = (lambda - center) / width;
         (-0.5 * x * x).exp()

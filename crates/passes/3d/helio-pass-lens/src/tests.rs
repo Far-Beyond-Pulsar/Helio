@@ -69,6 +69,10 @@ struct Rig {
     camera: wgpu::Buffer,
     /// Aperture shape array handed to the pass; none binds the neutral layer.
     shapes: Option<wgpu::TextureView>,
+    /// Mask array handed to the pass; none binds the transparent layer.
+    masks: Option<wgpu::TextureView>,
+    /// Prescription bank handed to the pass; none binds an empty one.
+    prescriptions: Option<PrescriptionBank>,
     _serial: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -95,6 +99,11 @@ fn bytes<T: bytemuck::Pod>(rows: &[T]) -> &[u8] {
 
 impl Rig {
     fn new() -> Self {
+        Self::with_user(None)
+    }
+
+    /// A rig whose lens shader has the USER hooks `snippet` defines.
+    fn with_user(snippet: Option<&str>) -> Self {
         let serial = GPU_SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
         let (device, queue) = pollster::block_on(async {
             let instance = wgpu::Instance::new(
@@ -123,8 +132,8 @@ impl Rig {
             contents: bytes(&[camera, camera]),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        let pass = LensPass::new(&device, SIZE, SIZE);
-        Self { device, queue, pass, camera, shapes: None, _serial: serial }
+        let pass = LensPass::new_with_user(&device, SIZE, SIZE, snippet);
+        Self { device, queue, pass, camera, shapes: None, masks: None, prescriptions: None, _serial: serial }
     }
 
     fn color_view(&self, scene: &Scene) -> wgpu::TextureView {
@@ -260,6 +269,8 @@ impl Rig {
                 lenses: lenses.as_ref(),
                 elements: elements.as_ref(),
                 aperture_shapes: self.shapes.as_ref(),
+                masks: self.masks.as_ref(),
+                prescriptions: self.prescriptions.as_ref().map(PrescriptionBank::buffer),
             },
         );
         self.queue.submit([encoder.finish()]);
@@ -315,7 +326,8 @@ fn component_rows_have_the_wgsl_strides() {
     assert_eq!(std::mem::offset_of!(LensElementComponent, feather), 16);
     assert_eq!(std::mem::offset_of!(LensElementComponent, params), 32);
     assert_eq!(std::mem::offset_of!(LensElementComponent, region), 96);
-    assert_eq!(std::mem::size_of::<ResolvedLens>(), 80);
+    assert_eq!(std::mem::size_of::<ResolvedLens>(), 84);
+    assert_eq!(std::mem::offset_of!(ResolvedLens, aberration_flags), 80);
     assert_eq!(std::mem::offset_of!(ResolvedLens, natural_vignette), 20);
     assert_eq!(std::mem::offset_of!(ResolvedLens, required_overscan), 68);
     // A zero row is inert: never enabled, no element kind.
@@ -481,6 +493,8 @@ fn depth_rendered_below_image_resolution_keeps_foreground_focus() {
             lenses: Some(&lenses),
             elements: None,
             aperture_shapes: None,
+            masks: None,
+            prescriptions: None,
         },
     );
     rig.queue.submit([encoder.finish()]);
@@ -1323,3 +1337,5 @@ fn pupil_element_builders_fill_the_documented_slots() {
 }
 
 mod optics;
+mod aberration;
+mod prescription;

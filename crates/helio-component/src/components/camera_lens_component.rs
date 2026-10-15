@@ -30,8 +30,8 @@ use std::sync::Mutex;
 
 use engine_class_derive::{engine_class, register_world_component};
 use helio_pass_lens::{
-    element_kind, region_kind, LensComponent, LensElementComponent, LensRegion, FOCUS_AUTO_POINT,
-    FOCUS_MANUAL, MAX_LENS_ELEMENTS,
+    element_kind, LensComponent, LensElementComponent, LensRegion, ProjectionModel,
+    FOCUS_AUTO_POINT, FOCUS_MANUAL, MAX_LENS_ELEMENTS,
 };
 use pulsar_reflection::{ReflectError, ReflectResult, Reflectable, pulsar_type};
 use pulsar_scenedb::gpu::{GpuMirrorHandle, SceneGpuStore};
@@ -157,11 +157,14 @@ lens_enum! {
 lens_enum! {
     /// Gather quality of the defocus.
     LensGatherQuality {
-        /// 24 taps.
+        /// 24 taps, 3 spectral samples.
         #[default]
         Economical,
-        /// 56 taps.
+        /// 56 taps, 7 spectral samples.
         High,
+        /// 56 taps and 16 spectral samples for lateral chromatic aberration
+        /// and underwater dispersion.
+        Ultra,
     }
 }
 
@@ -182,6 +185,114 @@ lens_enum! {
         /// Longitudinal chromatic aberration inside the region: a focus
         /// shift in dioptres per colour channel.
         LongitudinalCa,
+        /// Ray map: how the sensor records the angle of each ray
+        /// (equidistant, fisheye, Panini, ...).
+        Projection,
+        /// Ray map: Brown-Conrady (OpenCV) radial and tangential distortion.
+        BrownConrady,
+        /// Ray map: division-model distortion.
+        Division,
+        /// Ray map: anamorphic "mumps" distortion, separate x and y radial
+        /// coefficients.
+        AnamorphicDistortion,
+        /// Ray map: anamorphic squeeze / desqueeze of the field of view.
+        AnamorphicSqueeze,
+        /// Ray map: lens shift (optical centre offset).
+        Shift,
+        /// Ray map: keystone / perspective correction.
+        Keystone,
+        /// Ray map: focus breathing (magnification follows the focus).
+        FocusBreathing,
+        /// Ray map: weighted displaced / rotated copies of the image
+        /// (multi-image prism, kaleidoscope).
+        Prism,
+        /// Ray map: spectral lateral chromatic aberration.
+        LateralCa,
+        /// Ray map: underwater flat port.
+        FlatPort,
+        /// Ray map: underwater dome port.
+        DomePort,
+        /// Transmission: natural cos^4 falloff.
+        NaturalVignette,
+        /// Transmission: optical (cat's eye) vignetting by the lens barrel.
+        OpticalVignette,
+        /// Transmission: mechanical vignetting by a hood or matte box.
+        MechanicalVignette,
+        /// Transmission: neutral density.
+        NdFilter,
+        /// Transmission: graduated neutral density.
+        GraduatedNd,
+        /// Transmission: colour filter.
+        ColorFilter,
+        /// Transmission: light lost between the f-number and the T-stop.
+        TStopLoss,
+        /// Sensor image: spherical-aberration glow.
+        SphericalGlow,
+        /// Sensor image: coma, a tail pointing away from the axis.
+        Coma,
+        /// Sensor image: astigmatism, an elliptical point spread.
+        Astigmatism,
+        /// Sensor image: corner softness (MTF falloff).
+        CornerSoftness,
+        /// Sensor image: generic diffusion filter.
+        Diffusion,
+        /// Sensor image: Pro-Mist (wide halo, lifted shadows).
+        ProMist,
+        /// Sensor image: Black Pro-Mist (halo close to highlights).
+        BlackProMist,
+        /// Sensor image: Glimmerglass (small halo with fine glints).
+        Glimmerglass,
+        /// Sensor image: star / cross-screen filter.
+        StarFilter,
+        /// Sensor image: film halation, a red-orange highlight halo.
+        Halation,
+        /// Sensor image: water drops refracting the image (give it a mask
+        /// region).
+        WaterDrops,
+        /// Sensor image: smear / Vaseline, directional diffusion.
+        Smear,
+        /// Sensor image: fog / breath, diffusion that follows a mask region.
+        Fog,
+        /// Sensor image: dirt, local diffusion with a slight loss.
+        Dirt,
+    }
+}
+
+lens_enum! {
+    /// How the sensor records the angle theta of each ray.
+    LensProjectionModel {
+        /// `r = tan(theta)`: the identity.
+        #[default]
+        Rectilinear,
+        /// `r = theta`.
+        Equidistant,
+        /// `r = 2 sin(theta / 2)`.
+        Equisolid,
+        /// `r = sin(theta)`.
+        Orthographic,
+        /// `r = 2 tan(theta / 2)`.
+        Stereographic,
+        /// Kannala-Brandt polynomial in theta.
+        KannalaBrandt,
+        /// Panini (distance and vertical compression).
+        Panini,
+        /// Horizontal equidistant, vertical rectilinear.
+        Cylindrical,
+    }
+}
+
+impl LensProjectionModel {
+    fn to_pass(self) -> ProjectionModel {
+        match self {
+            Self::Rectilinear => ProjectionModel::Rectilinear,
+            Self::Equidistant => ProjectionModel::Equidistant,
+            Self::Equisolid => ProjectionModel::Equisolid,
+            Self::Orthographic => ProjectionModel::Orthographic,
+            Self::Stereographic => ProjectionModel::Stereographic,
+            Self::KannalaBrandt => ProjectionModel::KannalaBrandt,
+            Self::Panini => ProjectionModel::Panini,
+            Self::Cylindrical => ProjectionModel::Cylindrical,
+        }
     }
 }
 
@@ -201,137 +312,521 @@ lens_enum! {
         Polygon,
         /// The ring between an inner and an outer radius.
         RadialBand,
+        /// One channel of a layer of the mask array (water-drop footprints,
+        /// dirt, fog): covers where the texel is bright.
+        Mask,
     }
 }
 
 /// One optical element of a lens stack. Only the fields of its kind and
 /// region shape are read.
+///
+/// The element is a flat set of clearly named fields rather than a
+/// sub-struct per kind: the inspector shows registered scalar, bool and enum
+/// fields (and a `Vec` of this one registered struct), not nested structs.
+/// Fields group into categories by kind (Diopter, Pupil, Distortion,
+/// Diffusion ...), each documented with its unit, and the `kind` selects which
+/// group is read. Kinds that share a quantity share a field (the diffusion
+/// family one strength, radius and tail; the tints one colour). Zero in a
+/// "(0: default)" field takes the pass's default for the kind.
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
+#[category("General", category_color = "#3AA0FF")]
+#[category("Region", category_color = "#E07050")]
+#[category("Diopter", category_color = "#E0B040")]
+#[category("Sweet Spot", category_color = "#E0B040")]
+#[category("Pupil", category_color = "#50C878")]
+#[category("Aperture Texture", category_color = "#50C878")]
+#[category("Longitudinal CA", category_color = "#C080E0")]
+#[category("Projection", category_color = "#3AA0FF")]
+#[category("Distortion", category_color = "#E0B040")]
+#[category("Image Geometry", category_color = "#50C878")]
+#[category("Prism", category_color = "#C080E0")]
+#[category("Lateral CA", category_color = "#E07050")]
+#[category("Underwater Port", category_color = "#3AA0FF")]
+#[category("Vignetting", category_color = "#E0B040")]
+#[category("Filters", category_color = "#50C878")]
+#[category("Aberrations", category_color = "#C080E0")]
+#[category("Diffusion", category_color = "#E07050")]
+#[category("Star Filter", category_color = "#3AA0FF")]
+#[category("Halation", category_color = "#E0B040")]
+#[category("Contaminants", category_color = "#50C878")]
+#[category("Mask Region", category_color = "#C080E0")]
 #[serde(default)]
 pub struct LensElementProps {
     /// A disabled element stays in the stack but does nothing.
-    #[property]
+    #[property(category = "General")]
     pub enabled: bool,
-    #[property]
+    /// What the element does; only the fields of its kind group are read.
+    #[property(category = "General")]
     pub kind: LensElementKind,
-    /// Diopter: added optical power in dioptres. Positive power focuses
-    /// nearer: `1/s' = 1/s + D`.
-    #[property(min = -8.0, max = 8.0, step = 0.05)]
-    pub power_dpt: f32,
-    /// Diopter: how dark the seam is at its centre (0..1).
-    #[property(min = 0.0, max = 1.0, step = 0.01)]
-    pub seam_darkening: f32,
-    /// Diopter: distance of the filter in front of the lens in metres; it
-    /// sets how soft the seam is (0: 0.08 m).
-    #[property(min = 0.0, max = 1.0, step = 0.005)]
-    pub mount_distance_m: f32,
-    /// Pupil: use the lens's own iris (blades and rotation) for the shape.
-    #[property]
-    pub inherit_iris: bool,
-    /// Pupil: iris blades (0: circle, 3..16) and how curved their edges are
-    /// (0 straight, 1 a circle); rotation in degrees.
-    #[property(min = 0.0, max = 16.0, step = 1.0)]
-    pub blades: u32,
-    #[property(min = 0.0, max = 1.0, step = 0.01)]
-    pub blade_curvature: f32,
-    #[property(min = -180.0, max = 180.0, step = 1.0)]
-    pub iris_rotation_deg: f32,
-    /// Pupil: f-number at and above which the blades are as curved as the
-    /// curvature says; wide open the iris is round (0: off).
-    #[property(min = 0.0, max = 32.0, step = 0.1)]
-    pub round_until_f_number: f32,
-    /// Pupil: anamorphic squeeze (1.33, 1.5, 1.8, 2.0): bokeh this many
-    /// times taller than wide.
-    #[property(min = 1.0, max = 3.0, step = 0.01)]
-    pub squeeze: f32,
-    /// Pupil: cat's eye strength (optical vignetting toward the corners)
-    /// and the barrel radius clipping it (0: 1).
-    #[property(min = 0.0, max = 2.0, step = 0.01)]
-    pub cats_eye: f32,
-    #[property(min = 0.0, max = 2.0, step = 0.01)]
-    pub barrel_radius: f32,
-    /// Pupil: swirl, a tangential stretch growing with the field radius.
-    #[property(min = -2.0, max = 2.0, step = 0.01)]
-    pub swirl: f32,
-    /// Pupil: spherical aberration (positive: bright rim; negative: soft
-    /// centre-weighted) and how far it flips in front of the focus (0..1).
-    #[property(min = -1.0, max = 1.0, step = 0.01)]
-    pub spherical: f32,
-    #[property(min = 0.0, max = 1.0, step = 0.01)]
-    pub spherical_asymmetry: f32,
-    /// Pupil: onion-ring ripple amplitude and ripples across the radius.
-    #[property(min = 0.0, max = 1.0, step = 0.01)]
-    pub onion_amplitude: f32,
-    #[property(min = 0.0, max = 32.0, step = 0.5)]
-    pub onion_rings: f32,
-    /// Pupil: Gaussian apodization, in pupil radii (0: off).
-    #[property(min = 0.0, max = 2.0, step = 0.01)]
-    pub apodization: f32,
-    /// Pupil: central obstruction in pupil radii (mirror-lens donut).
-    #[property(min = 0.0, max = 0.95, step = 0.01)]
-    pub obstruction: f32,
-    /// Longitudinal chromatic aberration: focus shift per channel in
-    /// dioptres (negative red and blue: purple foreground fringes, green
-    /// background ones).
-    #[property(min = -2.0, max = 2.0, step = 0.005)]
-    pub red_shift_dpt: f32,
-    #[property(min = -2.0, max = 2.0, step = 0.005)]
-    pub green_shift_dpt: f32,
-    #[property(min = -2.0, max = 2.0, step = 0.005)]
-    pub blue_shift_dpt: f32,
-    /// Sweet spot: extra defocus outside the region, in pixels.
-    #[property(min = 0.0, max = 64.0, step = 0.5)]
-    pub extra_blur_px: f32,
-    #[property]
+    /// The region's soft edge is derived from the aperture (a diopter
+    /// seam narrows as the lens stops down) unless this is off.
+    #[property(category = "Region")]
+    pub auto_feather: bool,
+    /// Soft edge width in image heights when `auto_feather` is off.
+    #[property(min = 0.0, max = 1.0, step = 0.002, category = "Region")]
+    pub feather: f32,
+    /// Where on the frame the element acts.
+    #[property(category = "Region")]
     pub shape: LensRegionShape,
     /// Half-plane: direction of the covered side in degrees (0: the right
     /// half; 90: the bottom half). Ellipse: its rotation.
-    #[property(min = -180.0, max = 180.0, step = 0.5)]
+    #[property(min = -180.0, max = 180.0, step = 0.5, category = "Region")]
     pub angle_deg: f32,
     /// Half-plane: line offset from the centre in image heights.
-    #[property(min = -1.0, max = 1.0, step = 0.005)]
+    #[property(min = -1.0, max = 1.0, step = 0.005, category = "Region")]
     pub offset: f32,
-    /// Ellipse and radial band: centre in image heights.
-    #[property(min = -1.0, max = 1.0, step = 0.005)]
+    /// Ellipse and radial band: centre x in image heights.
+    #[property(min = -1.0, max = 1.0, step = 0.005, category = "Region")]
     pub center_x: f32,
-    #[property(min = -1.0, max = 1.0, step = 0.005)]
+    /// Ellipse and radial band: centre y in image heights.
+    #[property(min = -1.0, max = 1.0, step = 0.005, category = "Region")]
     pub center_y: f32,
-    /// Ellipse: radii in image heights.
-    #[property(min = 0.0, max = 2.0, step = 0.005)]
+    /// Ellipse: x radius in image heights.
+    #[property(min = 0.0, max = 2.0, step = 0.005, category = "Region")]
     pub radius_x: f32,
-    #[property(min = 0.0, max = 2.0, step = 0.005)]
+    /// Ellipse: y radius in image heights.
+    #[property(min = 0.0, max = 2.0, step = 0.005, category = "Region")]
     pub radius_y: f32,
-    /// Radial band: inner and outer radius in image heights.
-    #[property(min = 0.0, max = 2.0, step = 0.005)]
+    /// Radial band: inner radius in image heights.
+    #[property(min = 0.0, max = 2.0, step = 0.005, category = "Region")]
     pub inner_radius: f32,
-    #[property(min = 0.0, max = 2.0, step = 0.005)]
+    /// Radial band: outer radius in image heights.
+    #[property(min = 0.0, max = 2.0, step = 0.005, category = "Region")]
     pub outer_radius: f32,
     /// Polygon: 3 or 4 vertices (the pass takes up to 8).
-    #[property(min = 3.0, max = 4.0, step = 1.0)]
+    #[property(min = 3.0, max = 4.0, step = 1.0, category = "Region")]
     pub polygon_vertices: u32,
-    #[property(min = -2.0, max = 2.0, step = 0.005)]
+    /// Polygon: vertex 0 x in image heights.
+    #[property(min = -2.0, max = 2.0, step = 0.005, category = "Region")]
     pub p0_x: f32,
-    #[property(min = -2.0, max = 2.0, step = 0.005)]
+    /// Polygon: vertex 0 y in image heights (y down).
+    #[property(min = -2.0, max = 2.0, step = 0.005, category = "Region")]
     pub p0_y: f32,
-    #[property(min = -2.0, max = 2.0, step = 0.005)]
+    /// Polygon: vertex 1 x in image heights.
+    #[property(min = -2.0, max = 2.0, step = 0.005, category = "Region")]
     pub p1_x: f32,
-    #[property(min = -2.0, max = 2.0, step = 0.005)]
+    /// Polygon: vertex 1 y in image heights (y down).
+    #[property(min = -2.0, max = 2.0, step = 0.005, category = "Region")]
     pub p1_y: f32,
-    #[property(min = -2.0, max = 2.0, step = 0.005)]
+    /// Polygon: vertex 2 x in image heights.
+    #[property(min = -2.0, max = 2.0, step = 0.005, category = "Region")]
     pub p2_x: f32,
-    #[property(min = -2.0, max = 2.0, step = 0.005)]
+    /// Polygon: vertex 2 y in image heights (y down).
+    #[property(min = -2.0, max = 2.0, step = 0.005, category = "Region")]
     pub p2_y: f32,
-    #[property(min = -2.0, max = 2.0, step = 0.005)]
+    /// Polygon: vertex 3 x in image heights.
+    #[property(min = -2.0, max = 2.0, step = 0.005, category = "Region")]
     pub p3_x: f32,
-    #[property(min = -2.0, max = 2.0, step = 0.005)]
+    /// Polygon: vertex 3 y in image heights (y down).
+    #[property(min = -2.0, max = 2.0, step = 0.005, category = "Region")]
     pub p3_y: f32,
-    /// The region's soft edge is derived from the aperture (a diopter
-    /// seam narrows as the lens stops down) unless this is off.
-    #[property]
-    pub auto_feather: bool,
-    /// Soft edge width in image heights when `auto_feather` is off.
-    #[property(min = 0.0, max = 1.0, step = 0.002)]
-    pub feather: f32,
+    /// Mask region: layer of the mask array.
+    #[property(min = 0.0, max = 63.0, step = 1.0, category = "Mask Region")]
+    pub mask_layer: u32,
+    /// Mask region: channel of the layer (0 red, 1 green, 2 blue, 3 alpha).
+    #[property(min = 0.0, max = 3.0, step = 1.0, category = "Mask Region")]
+    pub mask_channel: u32,
+    /// Mask region: cover where the texel is dark instead of bright.
+    #[property(category = "Mask Region")]
+    pub mask_invert: bool,
+    /// Mask region: magnification of the mask about the frame centre (1: the frame).
+    #[property(min = 0.05, max = 16.0, step = 0.01, category = "Mask Region")]
+    pub mask_scale: f32,
+    /// Mask region: horizontal shift of the mask in frame widths (unit-square uv).
+    #[property(min = -1.0, max = 1.0, step = 0.005, category = "Mask Region")]
+    pub mask_offset_u: f32,
+    /// Mask region: vertical shift of the mask in frame heights (unit-square uv).
+    #[property(min = -1.0, max = 1.0, step = 0.005, category = "Mask Region")]
+    pub mask_offset_v: f32,
+    /// Mask region: repeat the mask outside the frame-sized tile; off covers nothing there.
+    #[property(category = "Mask Region")]
+    pub mask_tile: bool,
+    /// Diopter: added optical power in dioptres. Positive power focuses
+    /// nearer: `1/s' = 1/s + D`.
+    #[property(min = -8.0, max = 8.0, step = 0.05, category = "Diopter")]
+    pub power_dpt: f32,
+    /// Diopter: how dark the seam is at its centre (0..1).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Diopter")]
+    pub seam_darkening: f32,
+    /// Diopter: distance of the filter in front of the lens in metres; it
+    /// sets how soft the seam is (0: 0.08 m).
+    #[property(min = 0.0, max = 1.0, step = 0.005, category = "Diopter")]
+    pub mount_distance_m: f32,
+    /// Sweet spot: extra defocus outside the region, in pixels.
+    #[property(min = 0.0, max = 64.0, step = 0.5, category = "Sweet Spot")]
+    pub extra_blur_px: f32,
+    /// Pupil: use the lens's own iris (blades and rotation) for the shape.
+    #[property(category = "Pupil")]
+    pub inherit_iris: bool,
+    /// Pupil: iris blades (0: circle, 3..16).
+    #[property(min = 0.0, max = 16.0, step = 1.0, category = "Pupil")]
+    pub blades: u32,
+    /// Pupil: how curved the blade edges are (0 straight, 1 a circle).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Pupil")]
+    pub blade_curvature: f32,
+    /// Pupil: iris rotation in degrees.
+    #[property(min = -180.0, max = 180.0, step = 1.0, category = "Pupil")]
+    pub iris_rotation_deg: f32,
+    /// Pupil: f-number at and above which the blades are as curved as the
+    /// curvature says; wide open the iris is round (0: off).
+    #[property(min = 0.0, max = 32.0, step = 0.1, category = "Pupil")]
+    pub round_until_f_number: f32,
+    /// Anamorphic squeeze ratio (1.33, 1.5, 1.8, 2.0). Pupil: bokeh this many
+    /// times taller than wide. Anamorphic squeeze element: this many times
+    /// more field of view horizontally.
+    #[property(min = 1.0, max = 3.0, step = 0.01, category = "Pupil")]
+    pub squeeze: f32,
+    /// Cat's eye strength (optical vignetting toward the corners). Pupil
+    /// and optical vignette elements; give both the same numbers.
+    #[property(min = 0.0, max = 2.0, step = 0.01, category = "Pupil")]
+    pub cats_eye: f32,
+    /// Radius of the barrel clipping the cat's eye, relative to the iris
+    /// (0: 1). Pupil and optical vignette elements.
+    #[property(min = 0.0, max = 2.0, step = 0.01, category = "Pupil")]
+    pub barrel_radius: f32,
+    /// Pupil: swirl, a tangential stretch growing with the field radius.
+    #[property(min = -2.0, max = 2.0, step = 0.01, category = "Pupil")]
+    pub swirl: f32,
+    /// Pupil: spherical aberration (positive: bright rim; negative: soft
+    /// centre-weighted).
+    #[property(min = -1.0, max = 1.0, step = 0.01, category = "Pupil")]
+    pub spherical: f32,
+    /// Pupil: how far the spherical aberration flips in front of the focus (0..1).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Pupil")]
+    pub spherical_asymmetry: f32,
+    /// Pupil: onion-ring ripple amplitude.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Pupil")]
+    pub onion_amplitude: f32,
+    /// Pupil: onion-ring ripples across the radius (0: 6).
+    #[property(min = 0.0, max = 32.0, step = 0.5, category = "Pupil")]
+    pub onion_rings: f32,
+    /// Pupil: Gaussian apodization, in pupil radii (0: off).
+    #[property(min = 0.0, max = 2.0, step = 0.01, category = "Pupil")]
+    pub apodization: f32,
+    /// Pupil: central obstruction in pupil radii (mirror-lens donut).
+    #[property(min = 0.0, max = 0.95, step = 0.01, category = "Pupil")]
+    pub obstruction: f32,
+    /// Pupil: layer of the aperture texture array used as the iris shape.
+    #[property(min = 0.0, max = 63.0, step = 1.0, category = "Aperture Texture")]
+    pub aperture_texture_layer: u32,
+    /// Pupil: how far the aperture texture replaces the polygon (0 ignores it).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Aperture Texture")]
+    pub aperture_texture_amount: f32,
+    /// Longitudinal CA: red focus shift in dioptres (negative red and blue:
+    /// purple foreground fringes, green background ones).
+    #[property(min = -2.0, max = 2.0, step = 0.005, category = "Longitudinal CA")]
+    pub red_shift_dpt: f32,
+    /// Longitudinal CA: green focus shift in dioptres.
+    #[property(min = -2.0, max = 2.0, step = 0.005, category = "Longitudinal CA")]
+    pub green_shift_dpt: f32,
+    /// Longitudinal CA: blue focus shift in dioptres.
+    #[property(min = -2.0, max = 2.0, step = 0.005, category = "Longitudinal CA")]
+    pub blue_shift_dpt: f32,
+    /// Projection: how the sensor records the angle of each ray.
+    #[property(category = "Projection")]
+    pub projection_model: LensProjectionModel,
+    /// Projection (Kannala-Brandt): coefficient k1 in `r = theta + k1 theta^3 + k2 theta^5 + k3 theta^7 + k4 theta^9` (theta in radians).
+    #[property(min = -2.0, max = 2.0, step = 0.001, category = "Projection")]
+    pub kb_k1: f32,
+    /// Projection (Kannala-Brandt): coefficient k2 in `r = theta + k1 theta^3 + k2 theta^5 + k3 theta^7 + k4 theta^9` (theta in radians).
+    #[property(min = -2.0, max = 2.0, step = 0.001, category = "Projection")]
+    pub kb_k2: f32,
+    /// Projection (Kannala-Brandt): coefficient k3 in `r = theta + k1 theta^3 + k2 theta^5 + k3 theta^7 + k4 theta^9` (theta in radians).
+    #[property(min = -2.0, max = 2.0, step = 0.001, category = "Projection")]
+    pub kb_k3: f32,
+    /// Projection (Kannala-Brandt): coefficient k4 in `r = theta + k1 theta^3 + k2 theta^5 + k3 theta^7 + k4 theta^9` (theta in radians).
+    #[property(min = -2.0, max = 2.0, step = 0.001, category = "Projection")]
+    pub kb_k4: f32,
+    /// Projection (Panini): distance d (0: rectilinear, 1: classic Panini).
+    #[property(min = 0.0, max = 2.0, step = 0.01, category = "Projection")]
+    pub panini_distance: f32,
+    /// Projection (Panini): vertical compression s (0 none, 1 classic).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Projection")]
+    pub panini_compression: f32,
+    /// Brown-Conrady: radial numerator coefficient k1 (unitless; negative k1 barrel, positive pincushion).
+    #[property(min = -2.0, max = 2.0, step = 0.001, category = "Distortion")]
+    pub bc_k1: f32,
+    /// Brown-Conrady: radial numerator coefficient k2 (unitless; negative k1 barrel, positive pincushion).
+    #[property(min = -2.0, max = 2.0, step = 0.001, category = "Distortion")]
+    pub bc_k2: f32,
+    /// Brown-Conrady: radial numerator coefficient k3 (unitless; negative k1 barrel, positive pincushion).
+    #[property(min = -2.0, max = 2.0, step = 0.001, category = "Distortion")]
+    pub bc_k3: f32,
+    /// Brown-Conrady: radial denominator coefficient k4 (unitless).
+    #[property(min = -2.0, max = 2.0, step = 0.001, category = "Distortion")]
+    pub bc_k4: f32,
+    /// Brown-Conrady: radial denominator coefficient k5 (unitless).
+    #[property(min = -2.0, max = 2.0, step = 0.001, category = "Distortion")]
+    pub bc_k5: f32,
+    /// Brown-Conrady: radial denominator coefficient k6 (unitless).
+    #[property(min = -2.0, max = 2.0, step = 0.001, category = "Distortion")]
+    pub bc_k6: f32,
+    /// Brown-Conrady: tangential coefficient p1 (unitless).
+    #[property(min = -0.5, max = 0.5, step = 0.001, category = "Distortion")]
+    pub bc_p1: f32,
+    /// Brown-Conrady: tangential coefficient p2 (unitless).
+    #[property(min = -0.5, max = 0.5, step = 0.001, category = "Distortion")]
+    pub bc_p2: f32,
+    /// Division model: coefficient l1 on r^2 (unitless; negative is barrel).
+    #[property(min = -2.0, max = 2.0, step = 0.001, category = "Distortion")]
+    pub division_l1: f32,
+    /// Division model: coefficient l2 on r^4 (unitless).
+    #[property(min = -2.0, max = 2.0, step = 0.001, category = "Distortion")]
+    pub division_l2: f32,
+    /// Anamorphic distortion: x coefficient on r^2 (unitless; barrel in one
+    /// axis and pincushion in the other is the anamorphic mumps).
+    #[property(min = -2.0, max = 2.0, step = 0.001, category = "Distortion")]
+    pub mumps_kx1: f32,
+    /// Anamorphic distortion: x coefficient on r^4 (unitless).
+    #[property(min = -2.0, max = 2.0, step = 0.001, category = "Distortion")]
+    pub mumps_kx2: f32,
+    /// Anamorphic distortion: y coefficient on r^2 (unitless).
+    #[property(min = -2.0, max = 2.0, step = 0.001, category = "Distortion")]
+    pub mumps_ky1: f32,
+    /// Anamorphic distortion: y coefficient on r^4 (unitless).
+    #[property(min = -2.0, max = 2.0, step = 0.001, category = "Distortion")]
+    pub mumps_ky2: f32,
+    /// Shift: optical centre offset x in image heights.
+    #[property(min = -1.0, max = 1.0, step = 0.005, category = "Image Geometry")]
+    pub shift_x: f32,
+    /// Shift: optical centre offset y in image heights (y down).
+    #[property(min = -1.0, max = 1.0, step = 0.005, category = "Image Geometry")]
+    pub shift_y: f32,
+    /// Keystone: horizontal perspective coefficient (about tan of the tilt).
+    #[property(min = -1.0, max = 1.0, step = 0.005, category = "Image Geometry")]
+    pub keystone_x: f32,
+    /// Keystone: vertical perspective coefficient (about tan of the tilt).
+    #[property(min = -1.0, max = 1.0, step = 0.005, category = "Image Geometry")]
+    pub keystone_y: f32,
+    /// Focus breathing: magnification change per dioptre of focus (negative:
+    /// focusing closer narrows the view).
+    #[property(min = -1.0, max = 1.0, step = 0.005, category = "Image Geometry")]
+    pub breathing_per_dpt: f32,
+    /// Focus breathing: focus in dioptres where the magnification is 1 (0: infinity).
+    #[property(min = 0.0, max = 10.0, step = 0.01, category = "Image Geometry")]
+    pub breathing_reference_dpt: f32,
+    /// Prism: number of image copies (2..8).
+    #[property(min = 2.0, max = 8.0, step = 1.0, category = "Prism")]
+    pub prism_count: u32,
+    /// Prism: copy spacing along the line, or ring radius, in image heights.
+    #[property(min = 0.0, max = 1.0, step = 0.001, category = "Prism")]
+    pub prism_offset: f32,
+    /// Prism: direction of the line, or angle of the first ring copy, in degrees.
+    #[property(min = -180.0, max = 180.0, step = 1.0, category = "Prism")]
+    pub prism_angle_deg: f32,
+    /// Prism: place the copies around a ring instead of along a line.
+    #[property(category = "Prism")]
+    pub prism_ring: bool,
+    /// Prism: rotation of each copy over the one before, in degrees (kaleidoscope).
+    #[property(min = -180.0, max = 180.0, step = 0.5, category = "Prism")]
+    pub prism_spin_deg: f32,
+    /// Prism: weight ratio between successive copies (0: all equal).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Prism")]
+    pub prism_falloff: f32,
+    /// Lateral CA: linear magnification change across the spectrum (unitless;
+    /// positive puts red outward and blue inward).
+    #[property(min = -0.1, max = 0.1, step = 0.0005, category = "Lateral CA")]
+    pub lateral_ca_d1: f32,
+    /// Lateral CA: quadratic magnification change across the spectrum (unitless).
+    #[property(min = -0.1, max = 0.1, step = 0.0005, category = "Lateral CA")]
+    pub lateral_ca_d2: f32,
+    /// Flat and dome port: refractive index of water (0: 1.333).
+    #[property(min = 0.0, max = 2.0, step = 0.001, category = "Underwater Port")]
+    pub port_index: f32,
+    /// Flat and dome port: index change across the spectrum (blue higher;
+    /// water is about 0.006).
+    #[property(min = -0.05, max = 0.05, step = 0.0005, category = "Underwater Port")]
+    pub port_dispersion: f32,
+    /// Dome port: dome radius in metres.
+    #[property(min = 0.01, max = 1.0, step = 0.005, category = "Underwater Port")]
+    pub dome_radius_m: f32,
+    /// Dome port: entrance pupil offset from the dome centre in metres
+    /// (positive toward the glass).
+    #[property(min = -0.5, max = 0.5, step = 0.001, category = "Underwater Port")]
+    pub dome_pupil_offset_m: f32,
+    /// Dome port: scale of the virtual image's field curvature (0 off, 1 physical).
+    #[property(min = 0.0, max = 2.0, step = 0.01, category = "Underwater Port")]
+    pub dome_curvature: f32,
+    /// Natural vignette: amount of cos^4 falloff (0..1).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Vignetting")]
+    pub natural_vignette_amount: f32,
+    /// Optical vignette: f-number at which the barrel radius holds (0: the
+    /// current one).
+    #[property(min = 0.0, max = 32.0, step = 0.1, category = "Vignetting")]
+    pub vignette_reference_f_number: f32,
+    /// Mechanical vignette: a rectangular matte box instead of a circular hood.
+    #[property(category = "Vignetting")]
+    pub hood_rectangular: bool,
+    /// Mechanical vignette: hood radius or matte-box half width in image heights.
+    #[property(min = 0.0, max = 3.0, step = 0.005, category = "Vignetting")]
+    pub hood_size_x: f32,
+    /// Mechanical vignette: matte-box half height in image heights.
+    #[property(min = 0.0, max = 3.0, step = 0.005, category = "Vignetting")]
+    pub hood_size_y: f32,
+    /// Mechanical vignette: soft edge width in image heights.
+    #[property(min = 0.0, max = 1.0, step = 0.005, category = "Vignetting")]
+    pub hood_feather: f32,
+    /// Mechanical vignette: matte-box rotation in degrees.
+    #[property(min = -180.0, max = 180.0, step = 1.0, category = "Vignetting")]
+    pub hood_rotation_deg: f32,
+    /// Neutral density: stops of light removed.
+    #[property(min = 0.0, max = 16.0, step = 0.1, category = "Filters")]
+    pub nd_stops: f32,
+    /// Graduated ND: stops of density on the dark side.
+    #[property(min = 0.0, max = 16.0, step = 0.1, category = "Filters")]
+    pub grad_nd_stops: f32,
+    /// Graduated ND: direction pointing to the dark side in degrees (-90: top
+    /// dark, 90: bottom dark).
+    #[property(min = -180.0, max = 180.0, step = 1.0, category = "Filters")]
+    pub grad_nd_angle_deg: f32,
+    /// Graduated ND: position of the transition line in image heights.
+    #[property(min = -1.0, max = 1.0, step = 0.005, category = "Filters")]
+    pub grad_nd_offset: f32,
+    /// Graduated ND: transition width in image heights (hard 0.01, soft 0.5).
+    #[property(min = 0.0, max = 1.0, step = 0.005, category = "Filters")]
+    pub grad_nd_softness: f32,
+    /// Colour filter: linear red transmittance. Graduated ND: red transmittance
+    /// at full density (1: neutral).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Filters")]
+    pub tint_r: f32,
+    /// Colour filter: linear green transmittance. Graduated ND: green tint.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Filters")]
+    pub tint_g: f32,
+    /// Colour filter: linear blue transmittance. Graduated ND: blue tint.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Filters")]
+    pub tint_b: f32,
+    /// Colour filter: how far the transmittance applies (0..1).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Filters")]
+    pub color_filter_amount: f32,
+    /// T-stop loss: amount of the (f-number / T-stop)^2 light loss (0..1).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Filters")]
+    pub t_stop_loss_amount: f32,
+    /// Spherical glow: share of the light scattered into the halo at the
+    /// reference f-number (0..1).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Aberrations")]
+    pub glow_amount: f32,
+    /// Spherical glow: f-number at which the amount holds (0: 2.8).
+    #[property(min = 0.0, max = 32.0, step = 0.1, category = "Aberrations")]
+    pub glow_reference_f_number: f32,
+    /// Spherical glow: falloff exponent k of 1/N^k when stopping down (0: 2).
+    #[property(min = 0.0, max = 8.0, step = 0.1, category = "Aberrations")]
+    pub glow_exponent: f32,
+    /// Spherical glow: radius of the first lobe in image heights (0: 0.012).
+    #[property(min = 0.0, max = 0.5, step = 0.001, category = "Aberrations")]
+    pub glow_radius: f32,
+    /// Spherical glow: weight of the wider lobes (0: 0.55).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Aberrations")]
+    pub glow_tail: f32,
+    /// Coma: share of the light in the tail at the frame corner (0..1).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Aberrations")]
+    pub coma_amount: f32,
+    /// Coma: tail length at the corner in image heights.
+    #[property(min = 0.0, max = 0.5, step = 0.001, category = "Aberrations")]
+    pub coma_length: f32,
+    /// Coma: power of the field radius in the share (0: 1).
+    #[property(min = 0.0, max = 8.0, step = 0.1, category = "Aberrations")]
+    pub coma_exponent: f32,
+    /// Coma: taper power of the tail's density (0: 2).
+    #[property(min = 0.0, max = 8.0, step = 0.1, category = "Aberrations")]
+    pub coma_shape: f32,
+    /// Astigmatism: long-axis blur at the corner in image heights (positive
+    /// elongates points along the radius, negative across it).
+    #[property(min = -0.2, max = 0.2, step = 0.001, category = "Aberrations")]
+    pub astigmatism_amount: f32,
+    /// Astigmatism: power of the field radius (0: 2).
+    #[property(min = 0.0, max = 8.0, step = 0.1, category = "Aberrations")]
+    pub astigmatism_exponent: f32,
+    /// Astigmatism: short axis over long axis (0..1).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Aberrations")]
+    pub astigmatism_minor_ratio: f32,
+    /// Corner softness: blur standard deviation at the corner in image heights.
+    #[property(min = 0.0, max = 0.2, step = 0.0005, category = "Aberrations")]
+    pub corner_softness_sigma: f32,
+    /// Corner softness: power of the field radius (0: 2).
+    #[property(min = 0.0, max = 8.0, step = 0.1, category = "Aberrations")]
+    pub corner_softness_exponent: f32,
+    /// Corner softness: field radius where the blur begins (0..1, 1 is the corner).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Aberrations")]
+    pub corner_softness_start: f32,
+    /// Diffusion, Pro-Mist, Black Pro-Mist, Glimmerglass, Fog: share of the
+    /// light scattered into the halo (0..1).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Diffusion")]
+    pub diffusion_strength: f32,
+    /// Diffusion family: first lobe's standard deviation in image heights
+    /// (0: the kind's default).
+    #[property(min = 0.0, max = 0.5, step = 0.001, category = "Diffusion")]
+    pub diffusion_radius: f32,
+    /// Diffusion family: weight ratio of successive lobes (small stays near
+    /// the highlight, large reaches far; 0: the kind's default).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Diffusion")]
+    pub diffusion_tail: f32,
+    /// Glimmerglass: contrast of the glints (0: 0.8).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Diffusion")]
+    pub glint_contrast: f32,
+    /// Star filter: number of spikes (2..16).
+    #[property(min = 2.0, max = 16.0, step = 1.0, category = "Star Filter")]
+    pub star_points: u32,
+    /// Star filter: rotation of the first spike in degrees (y down).
+    #[property(min = -180.0, max = 180.0, step = 1.0, category = "Star Filter")]
+    pub star_rotation_deg: f32,
+    /// Star filter: spike length in image heights.
+    #[property(min = 0.0, max = 1.0, step = 0.005, category = "Star Filter")]
+    pub star_length: f32,
+    /// Star filter: share of the light in the spikes (0..1).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Star Filter")]
+    pub star_intensity: f32,
+    /// Star filter: fade exponent along a spike.
+    #[property(min = 0.0, max = 8.0, step = 0.1, category = "Star Filter")]
+    pub star_falloff: f32,
+    /// Halation: share of the light scattered into the halo (0..1).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Halation")]
+    pub halation_strength: f32,
+    /// Halation: first lobe's standard deviation in image heights (0: 0.02).
+    #[property(min = 0.0, max = 0.5, step = 0.001, category = "Halation")]
+    pub halation_radius: f32,
+    /// Halation: red scatter weight (all three 0: 1, 0.35, 0.08).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Halation")]
+    pub halation_tint_r: f32,
+    /// Halation: green scatter weight.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Halation")]
+    pub halation_tint_g: f32,
+    /// Halation: blue scatter weight.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Halation")]
+    pub halation_tint_b: f32,
+    /// Halation: weight of the second, wider lobe (0: 0.5).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Halation")]
+    pub halation_tail: f32,
+    /// Water drops: displacement at a unit normal in image heights.
+    #[property(min = 0.0, max = 0.5, step = 0.001, category = "Contaminants")]
+    pub drops_refraction: f32,
+    /// Water drops: layer of the mask array holding the drop normals.
+    #[property(min = 0.0, max = 63.0, step = 1.0, category = "Contaminants")]
+    pub drops_normal_layer: u32,
+    /// Water drops: standard deviation of the local defocus in image heights.
+    #[property(min = 0.0, max = 0.2, step = 0.0005, category = "Contaminants")]
+    pub drops_defocus: f32,
+    /// Smear: share of the light spread along the direction (0..1).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Contaminants")]
+    pub smear_strength: f32,
+    /// Smear: standard deviation along the direction in image heights (0: 0.03).
+    #[property(min = 0.0, max = 0.5, step = 0.001, category = "Contaminants")]
+    pub smear_length: f32,
+    /// Smear: direction in degrees (y down).
+    #[property(min = -180.0, max = 180.0, step = 1.0, category = "Contaminants")]
+    pub smear_angle_deg: f32,
+    /// Dirt: share of the light scattered where the region covers (0..1).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Contaminants")]
+    pub dirt_strength: f32,
+    /// Dirt: first lobe's standard deviation in image heights (0: 0.02).
+    #[property(min = 0.0, max = 0.5, step = 0.001, category = "Contaminants")]
+    pub dirt_radius: f32,
+    /// Dirt: light absorbed under full coverage (0..1).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Contaminants")]
+    pub dirt_loss: f32,
+    /// Dirt: weight ratio of successive lobes (0: 0.5).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Contaminants")]
+    pub dirt_tail: f32,
 }
 
 impl Default for LensElementProps {
@@ -339,10 +834,8 @@ impl Default for LensElementProps {
         Self {
             enabled: true,
             kind: LensElementKind::Diopter,
-            power_dpt: 1.0,
-            seam_darkening: 0.0,
-            mount_distance_m: 0.0,
-            extra_blur_px: 12.0,
+            auto_feather: true,
+            feather: 0.02,
             shape: LensRegionShape::HalfPlane,
             angle_deg: 0.0,
             offset: 0.0,
@@ -361,8 +854,17 @@ impl Default for LensElementProps {
             p2_y: 0.3,
             p3_x: 0.0,
             p3_y: 0.0,
-            auto_feather: true,
-            feather: 0.02,
+            mask_layer: 0,
+            mask_channel: 3,
+            mask_invert: false,
+            mask_scale: 1.0,
+            mask_offset_u: 0.0,
+            mask_offset_v: 0.0,
+            mask_tile: false,
+            power_dpt: 1.0,
+            seam_darkening: 0.0,
+            mount_distance_m: 0.0,
+            extra_blur_px: 12.0,
             inherit_iris: true,
             blades: 0,
             blade_curvature: 0.0,
@@ -378,9 +880,108 @@ impl Default for LensElementProps {
             onion_rings: 0.0,
             apodization: 0.0,
             obstruction: 0.0,
+            aperture_texture_layer: 0,
+            aperture_texture_amount: 0.0,
             red_shift_dpt: 0.0,
             green_shift_dpt: 0.0,
             blue_shift_dpt: 0.0,
+            projection_model: LensProjectionModel::Rectilinear,
+            kb_k1: 0.0,
+            kb_k2: 0.0,
+            kb_k3: 0.0,
+            kb_k4: 0.0,
+            panini_distance: 1.0,
+            panini_compression: 1.0,
+            bc_k1: 0.0,
+            bc_k2: 0.0,
+            bc_k3: 0.0,
+            bc_k4: 0.0,
+            bc_k5: 0.0,
+            bc_k6: 0.0,
+            bc_p1: 0.0,
+            bc_p2: 0.0,
+            division_l1: 0.0,
+            division_l2: 0.0,
+            mumps_kx1: 0.0,
+            mumps_kx2: 0.0,
+            mumps_ky1: 0.0,
+            mumps_ky2: 0.0,
+            shift_x: 0.0,
+            shift_y: 0.0,
+            keystone_x: 0.0,
+            keystone_y: 0.0,
+            breathing_per_dpt: 0.0,
+            breathing_reference_dpt: 0.0,
+            prism_count: 3,
+            prism_offset: 0.02,
+            prism_angle_deg: 0.0,
+            prism_ring: false,
+            prism_spin_deg: 0.0,
+            prism_falloff: 0.0,
+            lateral_ca_d1: 0.0,
+            lateral_ca_d2: 0.0,
+            port_index: 1.333,
+            port_dispersion: 0.006,
+            dome_radius_m: 0.1,
+            dome_pupil_offset_m: 0.0,
+            dome_curvature: 1.0,
+            natural_vignette_amount: 1.0,
+            vignette_reference_f_number: 0.0,
+            hood_rectangular: false,
+            hood_size_x: 0.6,
+            hood_size_y: 0.4,
+            hood_feather: 0.1,
+            hood_rotation_deg: 0.0,
+            nd_stops: 1.0,
+            grad_nd_stops: 2.0,
+            grad_nd_angle_deg: -90.0,
+            grad_nd_offset: 0.0,
+            grad_nd_softness: 0.25,
+            tint_r: 1.0,
+            tint_g: 1.0,
+            tint_b: 1.0,
+            color_filter_amount: 1.0,
+            t_stop_loss_amount: 1.0,
+            glow_amount: 0.3,
+            glow_reference_f_number: 0.0,
+            glow_exponent: 0.0,
+            glow_radius: 0.0,
+            glow_tail: 0.0,
+            coma_amount: 0.3,
+            coma_length: 0.05,
+            coma_exponent: 0.0,
+            coma_shape: 0.0,
+            astigmatism_amount: 0.01,
+            astigmatism_exponent: 0.0,
+            astigmatism_minor_ratio: 0.0,
+            corner_softness_sigma: 0.01,
+            corner_softness_exponent: 0.0,
+            corner_softness_start: 0.3,
+            diffusion_strength: 0.25,
+            diffusion_radius: 0.0,
+            diffusion_tail: 0.0,
+            glint_contrast: 0.0,
+            star_points: 4,
+            star_rotation_deg: 0.0,
+            star_length: 0.2,
+            star_intensity: 0.2,
+            star_falloff: 1.0,
+            halation_strength: 0.4,
+            halation_radius: 0.0,
+            halation_tint_r: 0.0,
+            halation_tint_g: 0.0,
+            halation_tint_b: 0.0,
+            halation_tail: 0.0,
+            drops_refraction: 0.02,
+            drops_normal_layer: 0,
+            drops_defocus: 0.005,
+            smear_strength: 0.3,
+            smear_length: 0.0,
+            smear_angle_deg: 0.0,
+            dirt_strength: 0.3,
+            dirt_radius: 0.0,
+            dirt_loss: 0.1,
+            dirt_tail: 0.0,
         }
     }
 }
@@ -423,6 +1024,13 @@ impl LensElementProps {
                 (props.inner_radius, props.outer_radius) = (inner, outer);
                 (props.center_x, props.center_y) = (center[0], center[1]);
             }
+            PresetRegion::Mask { layer, channel } => {
+                props.shape = LensRegionShape::Mask;
+                (props.mask_layer, props.mask_channel) = (layer, channel);
+            }
+        }
+        if let Some(tune) = element.tune {
+            tune(&mut props);
         }
         props
     }
@@ -462,6 +1070,11 @@ impl LensElementProps {
                 r1: self.outer_radius,
                 center: [self.center_x, self.center_y],
             },
+            LensRegionShape::Mask => LensRegion::MaskChannel {
+                layer: self.mask_layer,
+                channel: self.mask_channel.min(3),
+                invert: self.mask_invert,
+            },
         };
         let mut row = match self.kind {
             LensElementKind::Diopter => {
@@ -477,6 +1090,10 @@ impl LensElementProps {
             }
             LensElementKind::Pupil => {
                 let mut row = LensElementComponent::pupil(region);
+                row = row.with_aperture_texture(
+                    self.aperture_texture_layer,
+                    self.aperture_texture_amount,
+                );
                 if !self.inherit_iris {
                     row = row.with_iris(
                         self.blades,
@@ -499,12 +1116,234 @@ impl LensElementProps {
                 self.blue_shift_dpt,
                 region,
             ),
+            LensElementKind::Projection => {
+                let mut row = LensElementComponent::projection(self.projection_model.to_pass(), region);
+                match self.projection_model {
+                    LensProjectionModel::KannalaBrandt => {
+                        row = row.with_kannala_brandt([self.kb_k1, self.kb_k2, self.kb_k3, self.kb_k4]);
+                    }
+                    LensProjectionModel::Panini => {
+                        row = row.with_panini(self.panini_distance, self.panini_compression);
+                    }
+                    _ => {}
+                }
+                row
+            }
+            LensElementKind::BrownConrady => LensElementComponent::brown_conrady(
+                [self.bc_k1, self.bc_k2, self.bc_k3, self.bc_k4, self.bc_k5, self.bc_k6],
+                [self.bc_p1, self.bc_p2],
+                region,
+            ),
+            LensElementKind::Division => {
+                LensElementComponent::division(self.division_l1, self.division_l2, region)
+            }
+            LensElementKind::AnamorphicDistortion => LensElementComponent::anamorphic_distortion(
+                [self.mumps_kx1, self.mumps_kx2],
+                [self.mumps_ky1, self.mumps_ky2],
+                region,
+            ),
+            LensElementKind::AnamorphicSqueeze => {
+                LensElementComponent::anamorphic_squeeze(self.squeeze.max(0.1), region)
+            }
+            LensElementKind::Shift => LensElementComponent::shift(self.shift_x, self.shift_y, region),
+            LensElementKind::Keystone => {
+                LensElementComponent::keystone(self.keystone_x, self.keystone_y, region)
+            }
+            LensElementKind::FocusBreathing => {
+                let mut row = LensElementComponent::focus_breathing(self.breathing_per_dpt, region);
+                row.params[helio_pass_lens::breathing::REFERENCE_DIOPTRES] =
+                    self.breathing_reference_dpt;
+                row
+            }
+            LensElementKind::Prism => {
+                let mut row = LensElementComponent::prism(
+                    self.prism_count.clamp(2, 8),
+                    self.prism_offset,
+                    self.prism_angle_deg.to_radians(),
+                    region,
+                )
+                .with_prism_spin(self.prism_spin_deg.to_radians())
+                .with_prism_falloff(self.prism_falloff);
+                if self.prism_ring {
+                    row = row.with_prism_ring();
+                }
+                row
+            }
+            LensElementKind::LateralCa => {
+                LensElementComponent::lateral_ca(self.lateral_ca_d1, self.lateral_ca_d2, region)
+            }
+            LensElementKind::FlatPort => {
+                LensElementComponent::flat_port(self.port_index, self.port_dispersion, region)
+            }
+            LensElementKind::DomePort => {
+                use helio_pass_lens::dome_port;
+                let mut row = LensElementComponent::dome_port(
+                    self.dome_radius_m,
+                    self.dome_pupil_offset_m,
+                    region,
+                );
+                row.params[dome_port::INDEX] = self.port_index;
+                row.params[dome_port::DISPERSION] = self.port_dispersion;
+                row.params[dome_port::CURVATURE] = self.dome_curvature;
+                row
+            }
+            LensElementKind::NaturalVignette => {
+                LensElementComponent::natural_vignette(self.natural_vignette_amount, region)
+            }
+            LensElementKind::OpticalVignette => LensElementComponent::optical_vignette(
+                self.cats_eye,
+                self.barrel_radius,
+                self.vignette_reference_f_number,
+                region,
+            ),
+            LensElementKind::MechanicalVignette => {
+                if self.hood_rectangular {
+                    LensElementComponent::matte_box(
+                        [self.hood_size_x, self.hood_size_y],
+                        self.hood_rotation_deg.to_radians(),
+                        self.hood_feather,
+                        region,
+                    )
+                } else {
+                    LensElementComponent::circular_hood(self.hood_size_x, self.hood_feather, region)
+                }
+            }
+            LensElementKind::NdFilter => LensElementComponent::nd_filter(self.nd_stops, region),
+            LensElementKind::GraduatedNd => LensElementComponent::graduated_nd(
+                self.grad_nd_stops,
+                self.grad_nd_angle_deg.to_radians(),
+                self.grad_nd_offset,
+                self.grad_nd_softness,
+                [self.tint_r, self.tint_g, self.tint_b],
+                region,
+            ),
+            LensElementKind::ColorFilter => LensElementComponent::color_filter(
+                [self.tint_r, self.tint_g, self.tint_b],
+                self.color_filter_amount,
+                region,
+            ),
+            LensElementKind::TStopLoss => {
+                LensElementComponent::t_stop_loss(self.t_stop_loss_amount, region)
+            }
+            LensElementKind::SphericalGlow => {
+                use helio_pass_lens::glow;
+                let mut row = LensElementComponent::spherical_glow(
+                    self.glow_amount,
+                    self.glow_reference_f_number,
+                    self.glow_exponent,
+                    self.glow_radius,
+                    region,
+                );
+                row.params[glow::TAIL] = self.glow_tail;
+                row
+            }
+            LensElementKind::Coma => {
+                use helio_pass_lens::coma;
+                let mut row = LensElementComponent::coma(self.coma_amount, self.coma_length, region);
+                row.params[coma::EXPONENT] = self.coma_exponent;
+                row.params[coma::SHAPE] = self.coma_shape;
+                row
+            }
+            LensElementKind::Astigmatism => {
+                use helio_pass_lens::astigmatism;
+                let mut row = LensElementComponent::astigmatism(
+                    self.astigmatism_amount,
+                    self.astigmatism_minor_ratio,
+                    region,
+                );
+                row.params[astigmatism::EXPONENT] = self.astigmatism_exponent;
+                row
+            }
+            LensElementKind::CornerSoftness => {
+                use helio_pass_lens::corner_softness;
+                let mut row = LensElementComponent::corner_softness(
+                    self.corner_softness_sigma,
+                    self.corner_softness_start,
+                    region,
+                );
+                row.params[corner_softness::EXPONENT] = self.corner_softness_exponent;
+                row
+            }
+            LensElementKind::Diffusion
+            | LensElementKind::ProMist
+            | LensElementKind::BlackProMist
+            | LensElementKind::Glimmerglass
+            | LensElementKind::Fog => {
+                let (strength, radius) = (self.diffusion_strength, self.diffusion_radius);
+                let mut row = match self.kind {
+                    LensElementKind::ProMist => LensElementComponent::pro_mist(strength, region),
+                    LensElementKind::BlackProMist => {
+                        LensElementComponent::black_pro_mist(strength, region)
+                    }
+                    LensElementKind::Glimmerglass => {
+                        LensElementComponent::glimmerglass(strength, region)
+                    }
+                    LensElementKind::Fog => LensElementComponent::fog(strength, region),
+                    _ => LensElementComponent::diffusion(strength, radius, region),
+                };
+                row.params[helio_pass_lens::diffusion::RADIUS] = radius;
+                row = row.with_diffusion_tail(self.diffusion_tail);
+                if self.kind == LensElementKind::Glimmerglass {
+                    row = row.with_glint(self.glint_contrast);
+                }
+                row
+            }
+            LensElementKind::StarFilter => {
+                let mut row = LensElementComponent::star_filter(
+                    self.star_points,
+                    self.star_rotation_deg.to_radians(),
+                    self.star_length,
+                    self.star_intensity,
+                    region,
+                );
+                row.params[helio_pass_lens::star::FALLOFF] = self.star_falloff;
+                row
+            }
+            LensElementKind::Halation => {
+                use helio_pass_lens::halation;
+                let mut row = LensElementComponent::halation(
+                    self.halation_strength,
+                    self.halation_radius,
+                    region,
+                )
+                .with_halation_tint([self.halation_tint_r, self.halation_tint_g, self.halation_tint_b]);
+                row.params[halation::TAIL] = self.halation_tail;
+                row
+            }
+            LensElementKind::WaterDrops => LensElementComponent::water_drops(
+                self.drops_refraction,
+                self.drops_normal_layer,
+                self.drops_defocus,
+                region,
+            ),
+            LensElementKind::Smear => LensElementComponent::smear(
+                self.smear_strength,
+                self.smear_length,
+                self.smear_angle_deg.to_radians(),
+                region,
+            ),
+            LensElementKind::Dirt => {
+                use helio_pass_lens::dirt;
+                let mut row = LensElementComponent::dirt(
+                    self.dirt_strength,
+                    self.dirt_radius,
+                    self.dirt_loss,
+                    region,
+                );
+                row.params[dirt::TAIL] = self.dirt_tail;
+                row
+            }
         };
-        if !self.auto_feather {
+        if self.shape == LensRegionShape::Mask {
+            row = row.with_mask_transform(
+                self.mask_scale,
+                [self.mask_offset_u, self.mask_offset_v],
+                self.mask_tile,
+            );
+        } else if !self.auto_feather {
             row = row.with_feather(self.feather.max(0.0));
         }
         debug_assert!(row.kind != element_kind::NONE);
-        debug_assert!(row.region_kind != region_kind::MASK);
         row
     }
 }
@@ -537,6 +1376,16 @@ lens_enum! {
         SplitDiopter3Way,
         TiltShiftMiniature,
         LensbabySweetSpot,
+        Anamorphic2x,
+        VintageHeliosSwirl,
+        Fisheye8mm,
+        UnderwaterFlatPort,
+        ProMistQuarter,
+        BlackProMistEighth,
+        RainyLens,
+        StarFilter6pt,
+        FilmHalation,
+        GradNd3Stop,
     }
 }
 
@@ -557,11 +1406,14 @@ pub enum PresetRegion {
     HalfPlane { angle_deg: f32, offset: f32 },
     Ellipse { center: [f32; 2], radii: [f32; 2], rotation_deg: f32 },
     RadialBand { inner: f32, outer: f32, center: [f32; 2] },
+    /// One channel (0 red .. 3 alpha) of a layer of the mask array.
+    Mask { layer: u32, channel: u32 },
 }
 
 /// One element of a preset: `amount` is dioptres for a diopter and pixels
-/// of extra defocus for a sweet spot.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// of extra defocus for a sweet spot; `tune` sets any other field of the
+/// element (every kind added since is configured there).
+#[derive(Clone, Copy, Debug)]
 pub struct PresetElement {
     pub kind: LensElementKind,
     pub region: PresetRegion,
@@ -569,10 +1421,11 @@ pub struct PresetElement {
     /// `None`: derived from the aperture.
     pub feather: Option<f32>,
     pub seam_darkening: f32,
+    pub tune: Option<fn(&mut LensElementProps)>,
 }
 
 /// A named lens setup as data.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub struct LensPresetData {
     pub preset: LensPreset,
     pub name: &'static str,
@@ -594,8 +1447,28 @@ const fn diopter(power_dpt: f32, region: PresetRegion) -> PresetElement {
         amount: power_dpt,
         feather: None,
         seam_darkening: 0.15,
+        tune: None,
     }
 }
+
+/// A preset element of any kind over the whole frame (or `region`), with its
+/// fields set by `tune`.
+const fn tuned(
+    kind: LensElementKind,
+    region: PresetRegion,
+    tune: fn(&mut LensElementProps),
+) -> PresetElement {
+    PresetElement {
+        kind,
+        region,
+        amount: 0.0,
+        feather: None,
+        seam_darkening: 0.0,
+        tune: Some(tune),
+    }
+}
+
+const FULL: PresetRegion = PresetRegion::FullFrame;
 
 /// The named presets. A split diopter adds `D` dioptres where it covers:
 /// a lens focused at `s` then focuses at `s'` with `1/s' = 1/s + D`, so
@@ -698,7 +1571,205 @@ pub const LENS_PRESETS: &[LensPresetData] = &[
             amount: 14.0,
             feather: Some(0.14),
             seam_darkening: 0.0,
+            tune: None,
         }],
+    },
+    // 2x anamorphic: bokeh twice as tall as wide, mumps (barrel across,
+    // pincushion down) and the squeeze's doubled horizontal view.
+    LensPresetData {
+        preset: LensPreset::Anamorphic2x,
+        name: "Anamorphic 2x (oval bokeh, mumps, squeeze)",
+        focal_length_mm: 50.0,
+        f_number: 2.8,
+        aperture_blades: 0,
+        tilt_deg: 0.0,
+        tilt_axis_deg: 0.0,
+        field_curvature_dpt: 0.0,
+        focus_distance_m: None,
+        elements: &[
+            tuned(LensElementKind::Pupil, FULL, |p| {
+                p.inherit_iris = true;
+                p.squeeze = 2.0;
+                p.cats_eye = 0.35;
+                p.barrel_radius = 1.0;
+            }),
+            tuned(LensElementKind::AnamorphicDistortion, FULL, |p| {
+                p.mumps_kx1 = -0.04;
+                p.mumps_ky1 = 0.03;
+            }),
+            tuned(LensElementKind::AnamorphicSqueeze, FULL, |p| p.squeeze = 2.0),
+        ],
+    },
+    // A swirly, soft-cornered vintage portrait lens.
+    LensPresetData {
+        preset: LensPreset::VintageHeliosSwirl,
+        name: "Vintage Helios swirl",
+        focal_length_mm: 58.0,
+        f_number: 2.0,
+        aperture_blades: 8,
+        tilt_deg: 0.0,
+        tilt_axis_deg: 0.0,
+        field_curvature_dpt: 0.0,
+        focus_distance_m: None,
+        elements: &[
+            tuned(LensElementKind::Pupil, FULL, |p| {
+                p.swirl = 0.8;
+                p.cats_eye = 0.6;
+                p.barrel_radius = 1.0;
+                p.spherical = 0.25;
+            }),
+            tuned(LensElementKind::OpticalVignette, FULL, |p| {
+                p.cats_eye = 0.6;
+                p.barrel_radius = 1.0;
+            }),
+            tuned(LensElementKind::CornerSoftness, FULL, |p| {
+                p.corner_softness_sigma = 0.006;
+                p.corner_softness_start = 0.4;
+            }),
+            tuned(LensElementKind::SphericalGlow, FULL, |p| p.glow_amount = 0.15),
+        ],
+    },
+    LensPresetData {
+        preset: LensPreset::Fisheye8mm,
+        name: "8mm fisheye",
+        focal_length_mm: 8.0,
+        f_number: 5.6,
+        aperture_blades: 6,
+        tilt_deg: 0.0,
+        tilt_axis_deg: 0.0,
+        field_curvature_dpt: 0.0,
+        focus_distance_m: None,
+        elements: &[
+            tuned(LensElementKind::Projection, FULL, |p| {
+                p.projection_model = LensProjectionModel::Equidistant
+            }),
+            tuned(LensElementKind::NaturalVignette, FULL, |p| p.natural_vignette_amount = 0.6),
+            tuned(LensElementKind::LateralCa, FULL, |p| p.lateral_ca_d1 = 0.004),
+        ],
+    },
+    // Behind a flat port the view narrows by the water's index and colours
+    // split; water tints the light blue-green and scatters a little.
+    LensPresetData {
+        preset: LensPreset::UnderwaterFlatPort,
+        name: "Underwater flat port",
+        focal_length_mm: 24.0,
+        f_number: 4.0,
+        aperture_blades: 7,
+        tilt_deg: 0.0,
+        tilt_axis_deg: 0.0,
+        field_curvature_dpt: 0.0,
+        focus_distance_m: None,
+        elements: &[
+            tuned(LensElementKind::FlatPort, FULL, |p| {
+                p.port_index = 1.333;
+                p.port_dispersion = 0.006;
+            }),
+            tuned(LensElementKind::ColorFilter, FULL, |p| {
+                (p.tint_r, p.tint_g, p.tint_b) = (0.45, 0.85, 1.0);
+                p.color_filter_amount = 0.5;
+            }),
+            tuned(LensElementKind::Diffusion, FULL, |p| p.diffusion_strength = 0.1),
+        ],
+    },
+    LensPresetData {
+        preset: LensPreset::ProMistQuarter,
+        name: "Pro-Mist 1/4",
+        focal_length_mm: 50.0,
+        f_number: 2.8,
+        aperture_blades: 6,
+        tilt_deg: 0.0,
+        tilt_axis_deg: 0.0,
+        field_curvature_dpt: 0.0,
+        focus_distance_m: None,
+        elements: &[tuned(LensElementKind::ProMist, FULL, |p| p.diffusion_strength = 0.25)],
+    },
+    LensPresetData {
+        preset: LensPreset::BlackProMistEighth,
+        name: "Black Pro-Mist 1/8",
+        focal_length_mm: 50.0,
+        f_number: 2.8,
+        aperture_blades: 6,
+        tilt_deg: 0.0,
+        tilt_axis_deg: 0.0,
+        field_curvature_dpt: 0.0,
+        focus_distance_m: None,
+        elements: &[tuned(LensElementKind::BlackProMist, FULL, |p| {
+            p.diffusion_strength = 0.125
+        })],
+    },
+    // Drops on the front glass, their footprint in the alpha of mask layer 0
+    // (and their normals in its red and green), under a faint diffusion.
+    LensPresetData {
+        preset: LensPreset::RainyLens,
+        name: "Rainy lens",
+        focal_length_mm: 35.0,
+        f_number: 2.8,
+        aperture_blades: 6,
+        tilt_deg: 0.0,
+        tilt_axis_deg: 0.0,
+        field_curvature_dpt: 0.0,
+        focus_distance_m: None,
+        elements: &[
+            tuned(
+                LensElementKind::WaterDrops,
+                PresetRegion::Mask { layer: 0, channel: 3 },
+                |p| {
+                    p.drops_refraction = 0.03;
+                    p.drops_normal_layer = 0;
+                    p.drops_defocus = 0.004;
+                },
+            ),
+            tuned(LensElementKind::Diffusion, FULL, |p| p.diffusion_strength = 0.08),
+        ],
+    },
+    LensPresetData {
+        preset: LensPreset::StarFilter6pt,
+        name: "Star filter 6pt",
+        focal_length_mm: 50.0,
+        f_number: 4.0,
+        aperture_blades: 6,
+        tilt_deg: 0.0,
+        tilt_axis_deg: 0.0,
+        field_curvature_dpt: 0.0,
+        focus_distance_m: None,
+        elements: &[tuned(LensElementKind::StarFilter, FULL, |p| {
+            p.star_points = 6;
+            p.star_length = 0.2;
+            p.star_intensity = 0.2;
+        })],
+    },
+    LensPresetData {
+        preset: LensPreset::FilmHalation,
+        name: "Film halation",
+        focal_length_mm: 50.0,
+        f_number: 2.8,
+        aperture_blades: 6,
+        tilt_deg: 0.0,
+        tilt_axis_deg: 0.0,
+        field_curvature_dpt: 0.0,
+        focus_distance_m: None,
+        elements: &[tuned(LensElementKind::Halation, FULL, |p| {
+            p.halation_strength = 0.4;
+            p.halation_radius = 0.025;
+        })],
+    },
+    // Three stops of density over the top of the frame, softly blended.
+    LensPresetData {
+        preset: LensPreset::GradNd3Stop,
+        name: "Grad ND 3-stop",
+        focal_length_mm: 24.0,
+        f_number: 8.0,
+        aperture_blades: 6,
+        tilt_deg: 0.0,
+        tilt_axis_deg: 0.0,
+        field_curvature_dpt: 0.0,
+        focus_distance_m: Some(100.0),
+        elements: &[tuned(LensElementKind::GraduatedNd, FULL, |p| {
+            p.grad_nd_stops = 3.0;
+            p.grad_nd_angle_deg = -90.0;
+            p.grad_nd_offset = 0.05;
+            p.grad_nd_softness = 0.3;
+        })],
     },
 ];
 
@@ -855,6 +1926,7 @@ impl CameraLensComponent {
         row.quality = match lens.quality {
             LensGatherQuality::Economical => 0,
             LensGatherQuality::High => 1,
+            LensGatherQuality::Ultra => 2,
         };
         row.focal_length_mm = lens.focal_length_mm.max(1.0);
         row.f_number = lens.f_number.max(0.5);
@@ -1006,6 +2078,7 @@ pulsar_scenedb::pulsar_reflection::inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use helio_pass_lens::region_kind;
     use pulsar_reflection::EngineClass;
 
     #[test]
@@ -1163,6 +2236,11 @@ mod tests {
             assert_eq!(row.element_count as usize, data.elements.len(), "{}", data.name);
             for element in &elements[..data.elements.len()] {
                 assert_ne!(element.kind, element_kind::NONE, "{}", data.name);
+                assert!(
+                    element.params.iter().chain(&element.region).all(|v| v.is_finite()),
+                    "{}",
+                    data.name
+                );
             }
         }
         let names: Vec<_> = LENS_PRESETS.iter().map(|p| p.name).collect();
@@ -1175,6 +2253,16 @@ mod tests {
                 "3-way split diopter",
                 "Tilt-shift miniature",
                 "Lensbaby sweet spot",
+                "Anamorphic 2x (oval bokeh, mumps, squeeze)",
+                "Vintage Helios swirl",
+                "8mm fisheye",
+                "Underwater flat port",
+                "Pro-Mist 1/4",
+                "Black Pro-Mist 1/8",
+                "Rainy lens",
+                "Star filter 6pt",
+                "Film halation",
+                "Grad ND 3-stop",
             ]
         );
     }
@@ -1291,6 +2379,412 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "f_number": 4.0 })).unwrap();
         assert_eq!(sparse.f_number, 4.0);
         assert_eq!(sparse.focal_length_mm, 50.0);
+    }
+
+    /// The row of one element of `kind` with its fields set by `set`, over
+    /// the whole frame.
+    fn row_of(kind: LensElementKind, set: impl FnOnce(&mut LensElementProps)) -> LensElementComponent {
+        let mut props = LensElementProps { kind, shape: LensRegionShape::FullFrame, ..Default::default() };
+        set(&mut props);
+        let mut lens = CameraLensComponent::default();
+        lens.elements = vec![props];
+        let (row, elements) = lens.to_rows(0);
+        assert_eq!(row.element_count, 1);
+        elements[0]
+    }
+
+    #[test]
+    fn every_element_kind_maps_to_its_pass_kind_id_in_order() {
+        use element_kind as k;
+        let expected = [
+            k::DIOPTER, k::SWEET_SPOT, k::PUPIL, k::LONGITUDINAL_CA, k::PROJECTION,
+            k::BROWN_CONRADY, k::DIVISION, k::ANAMORPHIC_DISTORTION, k::ANAMORPHIC_SQUEEZE,
+            k::SHIFT, k::KEYSTONE, k::FOCUS_BREATHING, k::PRISM, k::LATERAL_CA, k::FLAT_PORT,
+            k::DOME_PORT, k::NATURAL_VIGNETTE, k::OPTICAL_VIGNETTE, k::MECHANICAL_VIGNETTE,
+            k::ND_FILTER, k::GRADUATED_ND, k::COLOR_FILTER, k::T_STOP_LOSS, k::SPHERICAL_GLOW,
+            k::COMA, k::ASTIGMATISM, k::CORNER_SOFTNESS, k::DIFFUSION, k::PRO_MIST,
+            k::BLACK_PRO_MIST, k::GLIMMERGLASS, k::STAR_FILTER, k::HALATION, k::WATER_DROPS,
+            k::SMEAR, k::FOG, k::DIRT,
+        ];
+        assert_eq!(LensElementKind::ALL.len(), expected.len());
+        for (kind, id) in LensElementKind::ALL.iter().zip(expected) {
+            let row = row_of(*kind, |_| {});
+            assert_eq!(row.kind, id, "{kind:?}");
+            assert_eq!(row.region_kind, region_kind::FULL_FRAME, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn ray_map_kinds_carry_their_fields_to_the_right_slots() {
+        use helio_pass_lens::{
+            anamorphic_distortion as ad, brown_conrady as bc, dome_port as dp, division as dv,
+            keystone as ks, lateral_ca as lca, prism, projection,
+        };
+        let r = row_of(LensElementKind::Projection, |p| p.projection_model = LensProjectionModel::Stereographic);
+        assert_eq!(r.params[projection::MODEL], ProjectionModel::Stereographic as u32 as f32);
+        let r = row_of(LensElementKind::Projection, |p| {
+            p.projection_model = LensProjectionModel::KannalaBrandt;
+            (p.kb_k1, p.kb_k2, p.kb_k3, p.kb_k4) = (0.1, 0.2, 0.3, 0.4);
+        });
+        assert_eq!(r.params[projection::MODEL], ProjectionModel::KannalaBrandt as u32 as f32);
+        assert_eq!(&r.params[projection::K1..projection::K1 + 4], &[0.1, 0.2, 0.3, 0.4]);
+        let r = row_of(LensElementKind::Projection, |p| {
+            p.projection_model = LensProjectionModel::Panini;
+            (p.panini_distance, p.panini_compression) = (0.7, 0.4);
+        });
+        assert_eq!((r.params[projection::PANINI_D], r.params[projection::PANINI_S]), (0.7, 0.4));
+        for (i, model) in LensProjectionModel::ALL.iter().enumerate() {
+            let r = row_of(LensElementKind::Projection, |p| p.projection_model = *model);
+            assert_eq!(r.params[projection::MODEL], i as f32, "{model:?}");
+        }
+
+        let r = row_of(LensElementKind::BrownConrady, |p| {
+            (p.bc_k1, p.bc_k2, p.bc_k3) = (0.01, 0.02, 0.03);
+            (p.bc_k4, p.bc_k5, p.bc_k6) = (0.04, 0.05, 0.06);
+            (p.bc_p1, p.bc_p2) = (0.07, 0.08);
+        });
+        assert_eq!(&r.params[bc::K1..=bc::P2], &[0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08]);
+        let r = row_of(LensElementKind::Division, |p| (p.division_l1, p.division_l2) = (-0.2, 0.1));
+        assert_eq!((r.params[dv::L1], r.params[dv::L2]), (-0.2, 0.1));
+        let r = row_of(LensElementKind::AnamorphicDistortion, |p| {
+            (p.mumps_kx1, p.mumps_kx2, p.mumps_ky1, p.mumps_ky2) = (0.1, 0.2, 0.3, 0.4);
+        });
+        assert_eq!(
+            (r.params[ad::KX1], r.params[ad::KX2], r.params[ad::KY1], r.params[ad::KY2]),
+            (0.1, 0.2, 0.3, 0.4)
+        );
+        let r = row_of(LensElementKind::AnamorphicSqueeze, |p| p.squeeze = 1.8);
+        assert_eq!(r.params[0], 1.8);
+        let r = row_of(LensElementKind::Shift, |p| (p.shift_x, p.shift_y) = (0.1, -0.2));
+        assert_eq!(&r.params[..2], &[0.1, -0.2]);
+        let r = row_of(LensElementKind::Keystone, |p| (p.keystone_x, p.keystone_y) = (0.05, -0.1));
+        assert_eq!((r.params[ks::KX], r.params[ks::KY]), (0.05, -0.1));
+        let r = row_of(LensElementKind::FocusBreathing, |p| {
+            (p.breathing_per_dpt, p.breathing_reference_dpt) = (-0.04, 0.2);
+        });
+        assert_eq!((r.params[0], r.params[1]), (-0.04, 0.2));
+
+        let r = row_of(LensElementKind::Prism, |p| {
+            p.prism_count = 5;
+            p.prism_offset = 0.03;
+            p.prism_angle_deg = 90.0;
+            p.prism_ring = true;
+            p.prism_spin_deg = 180.0;
+            p.prism_falloff = 0.5;
+        });
+        assert_eq!((r.params[prism::COUNT], r.params[prism::OFFSET]), (5.0, 0.03));
+        assert!((r.params[prism::ANGLE] - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+        assert_eq!(r.params[prism::RING], 1.0);
+        assert!((r.params[prism::SPIN] - std::f32::consts::PI).abs() < 1e-6);
+        assert_eq!(r.params[prism::FALLOFF], 0.5);
+        let r = row_of(LensElementKind::Prism, |p| p.prism_count = 99);
+        assert_eq!(r.params[prism::COUNT], 8.0, "clamped to the pass's 2..=8");
+        assert_eq!(r.params[prism::RING], 0.0);
+
+        let r = row_of(LensElementKind::LateralCa, |p| (p.lateral_ca_d1, p.lateral_ca_d2) = (0.01, -0.02));
+        assert_eq!((r.params[lca::D1], r.params[lca::D2]), (0.01, -0.02));
+        let r = row_of(LensElementKind::FlatPort, |p| (p.port_index, p.port_dispersion) = (1.5, 0.01));
+        assert_eq!((r.params[0], r.params[1]), (1.5, 0.01));
+        let r = row_of(LensElementKind::DomePort, |p| {
+            p.dome_radius_m = 0.2;
+            p.dome_pupil_offset_m = 0.03;
+            p.port_index = 1.34;
+            p.port_dispersion = 0.007;
+            p.dome_curvature = 0.5;
+        });
+        assert_eq!(
+            (r.params[dp::RADIUS], r.params[dp::PUPIL_OFFSET], r.params[dp::INDEX]),
+            (0.2, 0.03, 1.34)
+        );
+        assert_eq!((r.params[dp::DISPERSION], r.params[dp::CURVATURE]), (0.007, 0.5));
+    }
+
+    #[test]
+    fn transmission_kinds_carry_their_fields_to_the_right_slots() {
+        use helio_pass_lens::{graduated_nd as gnd, mechanical_vignette as mv, optical_vignette as ov};
+        let r = row_of(LensElementKind::NaturalVignette, |p| p.natural_vignette_amount = 0.4);
+        assert_eq!(r.params[0], 0.4);
+        let r = row_of(LensElementKind::OpticalVignette, |p| {
+            (p.cats_eye, p.barrel_radius, p.vignette_reference_f_number) = (0.5, 0.9, 2.0);
+        });
+        assert_eq!(
+            (r.params[ov::CATS_EYE], r.params[ov::BARREL_RADIUS], r.params[ov::REFERENCE_F_NUMBER]),
+            (0.5, 0.9, 2.0)
+        );
+        let r = row_of(LensElementKind::MechanicalVignette, |p| {
+            (p.hood_size_x, p.hood_feather) = (0.7, 0.05);
+        });
+        assert_eq!(r.params[mv::SHAPE], 0.0, "circular");
+        assert_eq!((r.params[mv::SIZE_X], r.params[mv::FEATHER]), (0.7, 0.05));
+        let r = row_of(LensElementKind::MechanicalVignette, |p| {
+            p.hood_rectangular = true;
+            (p.hood_size_x, p.hood_size_y, p.hood_feather) = (0.8, 0.45, 0.02);
+            p.hood_rotation_deg = 90.0;
+        });
+        assert_eq!(r.params[mv::SHAPE], 1.0, "matte box");
+        assert_eq!((r.params[mv::SIZE_X], r.params[mv::SIZE_Y], r.params[mv::FEATHER]), (0.8, 0.45, 0.02));
+        assert!((r.params[mv::ROTATION] - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+        let r = row_of(LensElementKind::NdFilter, |p| p.nd_stops = 3.0);
+        assert_eq!(r.params[0], 3.0);
+        let r = row_of(LensElementKind::GraduatedNd, |p| {
+            p.grad_nd_stops = 2.0;
+            p.grad_nd_angle_deg = 180.0;
+            p.grad_nd_offset = 0.1;
+            p.grad_nd_softness = 0.4;
+            (p.tint_r, p.tint_g, p.tint_b) = (1.0, 0.8, 0.6);
+        });
+        assert_eq!((r.params[gnd::STOPS], r.params[gnd::OFFSET], r.params[gnd::SOFTNESS]), (2.0, 0.1, 0.4));
+        assert!((r.params[gnd::ANGLE] - std::f32::consts::PI).abs() < 1e-6);
+        assert_eq!(&r.params[gnd::TINT..gnd::TINT + 3], &[1.0, 0.8, 0.6]);
+        let r = row_of(LensElementKind::ColorFilter, |p| {
+            (p.tint_r, p.tint_g, p.tint_b, p.color_filter_amount) = (0.9, 0.5, 0.2, 0.75);
+        });
+        assert_eq!(&r.params[..4], &[0.9, 0.5, 0.2, 0.75]);
+        let r = row_of(LensElementKind::TStopLoss, |p| p.t_stop_loss_amount = 0.6);
+        assert_eq!(r.params[0], 0.6);
+    }
+
+    #[test]
+    fn sensor_image_kinds_carry_their_fields_to_the_right_slots() {
+        use helio_pass_lens::{
+            astigmatism as astig, coma, corner_softness as cs, dirt, diffusion as df, glow,
+            halation, smear, star, water_drops as wd,
+        };
+        let r = row_of(LensElementKind::SphericalGlow, |p| {
+            p.glow_amount = 0.2;
+            p.glow_reference_f_number = 2.0;
+            p.glow_exponent = 3.0;
+            p.glow_radius = 0.02;
+            p.glow_tail = 0.4;
+        });
+        assert_eq!(
+            [r.params[glow::AMOUNT], r.params[glow::REFERENCE_F_NUMBER], r.params[glow::EXPONENT],
+             r.params[glow::RADIUS], r.params[glow::TAIL]],
+            [0.2, 2.0, 3.0, 0.02, 0.4]
+        );
+        let r = row_of(LensElementKind::Coma, |p| {
+            (p.coma_amount, p.coma_length, p.coma_exponent, p.coma_shape) = (0.5, 0.1, 2.0, 3.0);
+        });
+        assert_eq!(
+            [r.params[coma::AMOUNT], r.params[coma::LENGTH], r.params[coma::EXPONENT], r.params[coma::SHAPE]],
+            [0.5, 0.1, 2.0, 3.0]
+        );
+        let r = row_of(LensElementKind::Astigmatism, |p| {
+            (p.astigmatism_amount, p.astigmatism_exponent, p.astigmatism_minor_ratio) = (-0.02, 3.0, 0.3);
+        });
+        assert_eq!(
+            [r.params[astig::AMOUNT], r.params[astig::EXPONENT], r.params[astig::MINOR_RATIO]],
+            [-0.02, 3.0, 0.3]
+        );
+        let r = row_of(LensElementKind::CornerSoftness, |p| {
+            (p.corner_softness_sigma, p.corner_softness_exponent, p.corner_softness_start) = (0.03, 1.5, 0.5);
+        });
+        assert_eq!([r.params[cs::SIGMA], r.params[cs::EXPONENT], r.params[cs::START]], [0.03, 1.5, 0.5]);
+
+        for kind in [
+            LensElementKind::Diffusion,
+            LensElementKind::ProMist,
+            LensElementKind::BlackProMist,
+            LensElementKind::Glimmerglass,
+            LensElementKind::Fog,
+        ] {
+            let r = row_of(kind, |p| {
+                (p.diffusion_strength, p.diffusion_radius, p.diffusion_tail, p.glint_contrast) =
+                    (0.3, 0.04, 0.6, 0.9);
+            });
+            assert_eq!(
+                [r.params[df::STRENGTH], r.params[df::RADIUS], r.params[df::TAIL]],
+                [0.3, 0.04, 0.6],
+                "{kind:?}"
+            );
+            let glint = if kind == LensElementKind::Glimmerglass { 0.9 } else { 0.0 };
+            assert_eq!(r.params[df::GLINT], glint, "{kind:?}: glint only on Glimmerglass");
+        }
+
+        let r = row_of(LensElementKind::StarFilter, |p| {
+            p.star_points = 6;
+            p.star_rotation_deg = 180.0;
+            (p.star_length, p.star_intensity, p.star_falloff) = (0.3, 0.25, 2.0);
+        });
+        assert_eq!((r.params[star::POINTS], r.params[star::LENGTH]), (6.0, 0.3));
+        assert!((r.params[star::ROTATION] - std::f32::consts::PI).abs() < 1e-6);
+        assert_eq!((r.params[star::INTENSITY], r.params[star::FALLOFF]), (0.25, 2.0));
+        let r = row_of(LensElementKind::Halation, |p| {
+            (p.halation_strength, p.halation_radius, p.halation_tail) = (0.5, 0.03, 0.7);
+            (p.halation_tint_r, p.halation_tint_g, p.halation_tint_b) = (1.0, 0.2, 0.1);
+        });
+        assert_eq!((r.params[halation::STRENGTH], r.params[halation::RADIUS], r.params[halation::TAIL]), (0.5, 0.03, 0.7));
+        assert_eq!(&r.params[halation::TINT..halation::TINT + 3], &[1.0, 0.2, 0.1]);
+
+        let r = row_of(LensElementKind::WaterDrops, |p| {
+            (p.drops_refraction, p.drops_normal_layer, p.drops_defocus) = (0.04, 2, 0.006);
+        });
+        assert_eq!(
+            (r.params[wd::REFRACTION], r.params[wd::NORMAL_LAYER], r.params[wd::DEFOCUS]),
+            (0.04, 2.0, 0.006)
+        );
+        let r = row_of(LensElementKind::Smear, |p| {
+            (p.smear_strength, p.smear_length, p.smear_angle_deg) = (0.4, 0.05, 90.0);
+        });
+        assert_eq!((r.params[smear::STRENGTH], r.params[smear::LENGTH]), (0.4, 0.05));
+        assert!((r.params[smear::ANGLE] - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+        let r = row_of(LensElementKind::Dirt, |p| {
+            (p.dirt_strength, p.dirt_radius, p.dirt_loss, p.dirt_tail) = (0.35, 0.04, 0.2, 0.6);
+        });
+        assert_eq!(
+            [r.params[dirt::STRENGTH], r.params[dirt::RADIUS], r.params[dirt::LOSS], r.params[dirt::TAIL]],
+            [0.35, 0.04, 0.2, 0.6]
+        );
+    }
+
+    #[test]
+    fn the_mask_region_and_aperture_texture_reach_their_slots() {
+        use helio_pass_lens::{mask, pupil};
+        let mut props = LensElementProps {
+            kind: LensElementKind::Dirt,
+            shape: LensRegionShape::Mask,
+            mask_layer: 3,
+            mask_channel: 1,
+            mask_invert: true,
+            mask_scale: 2.0,
+            mask_offset_u: 0.25,
+            mask_offset_v: -0.5,
+            mask_tile: true,
+            auto_feather: false,
+            ..LensElementProps::default()
+        };
+        let mut lens = CameraLensComponent::default();
+        lens.elements = vec![props.clone()];
+        let e = lens.to_rows(0).1[0];
+        assert_eq!(e.region_kind, region_kind::MASK);
+        let m = &e.region;
+        assert_eq!((m[mask::LAYER], m[mask::CHANNEL], m[mask::INVERT]), (3.0, 1.0, 1.0));
+        assert_eq!((m[mask::SCALE], m[mask::OFFSET], m[mask::OFFSET + 1], m[mask::TILE]), (2.0, 0.25, -0.5, 1.0));
+        // A channel past alpha is clamped; a non-mask region leaves the slots alone.
+        props.mask_channel = 9;
+        lens.elements = vec![props.clone()];
+        assert_eq!(lens.to_rows(0).1[0].region[mask::CHANNEL], 3.0);
+        props.shape = LensRegionShape::FullFrame;
+        lens.elements = vec![props];
+        assert_eq!(lens.to_rows(0).1[0].region_kind, region_kind::FULL_FRAME);
+
+        let r = row_of(LensElementKind::Pupil, |p| {
+            p.aperture_texture_layer = 4;
+            p.aperture_texture_amount = 0.75;
+        });
+        assert_eq!((r.params[pupil::TEXTURE_LAYER], r.params[pupil::TEXTURE_AMOUNT]), (4.0, 0.75));
+    }
+
+    #[test]
+    fn ultra_quality_selects_sixteen_spectral_samples() {
+        let mut lens = CameraLensComponent::default();
+        for (quality, value) in [
+            (LensGatherQuality::Economical, 0),
+            (LensGatherQuality::High, 1),
+            (LensGatherQuality::Ultra, 2),
+        ] {
+            lens.quality = quality;
+            assert_eq!(lens.to_rows(0).0.quality, value);
+        }
+    }
+
+    #[test]
+    fn new_presets_describe_the_features_they_are_named_for() {
+        let rows = |preset: LensPreset| {
+            let mut lens = CameraLensComponent::default();
+            lens.preset = preset;
+            lens.to_rows(0)
+        };
+        let kinds = |preset: LensPreset| -> Vec<u32> {
+            let (row, e) = rows(preset);
+            e[..row.element_count as usize].iter().map(|e| e.kind).collect()
+        };
+        use element_kind as k;
+        assert_eq!(kinds(LensPreset::Anamorphic2x), [k::PUPIL, k::ANAMORPHIC_DISTORTION, k::ANAMORPHIC_SQUEEZE]);
+        let (_, e) = rows(LensPreset::Anamorphic2x);
+        assert_eq!(e[0].params[helio_pass_lens::pupil::SQUEEZE], 2.0);
+        assert_eq!(e[2].params[0], 2.0);
+        assert_eq!(kinds(LensPreset::Fisheye8mm)[0], k::PROJECTION);
+        assert_eq!(rows(LensPreset::Fisheye8mm).0.focal_length_mm, 8.0);
+        assert_eq!(kinds(LensPreset::UnderwaterFlatPort)[0], k::FLAT_PORT);
+        assert_eq!(kinds(LensPreset::ProMistQuarter), [k::PRO_MIST]);
+        assert_eq!(rows(LensPreset::ProMistQuarter).1[0].params[0], 0.25);
+        assert_eq!(kinds(LensPreset::BlackProMistEighth), [k::BLACK_PRO_MIST]);
+        assert_eq!(rows(LensPreset::BlackProMistEighth).1[0].params[0], 0.125);
+        let (_, rain) = rows(LensPreset::RainyLens);
+        assert_eq!((rain[0].kind, rain[0].region_kind), (k::WATER_DROPS, region_kind::MASK));
+        assert_eq!(rows(LensPreset::StarFilter6pt).1[0].params[helio_pass_lens::star::POINTS], 6.0);
+        assert_eq!(kinds(LensPreset::FilmHalation), [k::HALATION]);
+        let (grad, e) = rows(LensPreset::GradNd3Stop);
+        assert_eq!((e[0].kind, e[0].params[0]), (k::GRADUATED_ND, 3.0));
+        assert_eq!(grad.element_count, 1);
+        // Baking a new preset copies the tuned elements into the fields.
+        let mut lens = CameraLensComponent::default();
+        assert!(lens.bake_preset(LensPreset::Anamorphic2x));
+        assert_eq!(lens.elements.len(), 3);
+        assert_eq!(lens.elements[0].squeeze, 2.0);
+    }
+
+    #[test]
+    fn every_kind_and_shape_round_trips_through_json_by_name_and_index() {
+        for (i, kind) in LensElementKind::ALL.iter().enumerate() {
+            let props = LensElementProps { kind: *kind, ..Default::default() };
+            let back: LensElementProps =
+                serde_json::from_value(serde_json::to_value(&props).unwrap()).unwrap();
+            assert_eq!(back.kind, *kind);
+            let by_index: LensElementKind = serde_json::from_value(serde_json::json!(i)).unwrap();
+            assert_eq!(by_index, *kind);
+        }
+        // The first four indices are the ones saved before the new kinds existed.
+        assert_eq!(LensElementKind::ALL[3], LensElementKind::LongitudinalCa);
+        assert_eq!(LensRegionShape::ALL[4], LensRegionShape::RadialBand);
+        assert_eq!(LensRegionShape::ALL[5], LensRegionShape::Mask);
+    }
+
+    #[test]
+    fn a_level_saved_before_the_new_kinds_still_loads_and_renders_the_same() {
+        let old = serde_json::json!({
+            "preset": "Custom",
+            "quality": 1,
+            "f_number": 4.0,
+            "elements": [
+                { "kind": "Diopter", "power_dpt": 1.5, "shape": "HalfPlane", "angle_deg": 90.0 },
+                { "kind": 2, "squeeze": 1.8, "shape": 0, "blades": 9, "inherit_iris": false },
+                { "kind": "SweetSpot", "shape": "Ellipse", "extra_blur_px": 20.0 },
+                { "kind": "LongitudinalCa", "red_shift_dpt": -0.1 }
+            ]
+        });
+        let lens: CameraLensComponent = serde_json::from_value(old).unwrap();
+        assert_eq!(lens.quality, LensGatherQuality::High);
+        assert_eq!(lens.elements.len(), 4);
+        let (row, e) = lens.to_rows(0);
+        assert_eq!(row.element_count, 4);
+        assert_eq!(e[0].kind, element_kind::DIOPTER);
+        assert_eq!(e[0].params[0], 1.5);
+        assert_eq!(e[1].kind, element_kind::PUPIL);
+        assert_eq!(e[1].params[helio_pass_lens::pupil::SQUEEZE], 1.8);
+        assert_eq!(e[1].params[helio_pass_lens::pupil::TEXTURE_AMOUNT], 0.0);
+        assert_eq!(e[2].kind, element_kind::SWEET_SPOT);
+        assert_eq!(e[3].params[0], -0.1);
+        // New fields took their defaults, so the element equals one built fresh.
+        assert_eq!(lens.elements[0].mask_scale, 1.0);
+        assert_eq!(lens.elements[0].diffusion_strength, LensElementProps::default().diffusion_strength);
+    }
+
+    #[test]
+    fn the_new_fields_are_reflected_with_categories() {
+        let props = LensElementProps::default();
+        let fields = props.get_properties();
+        let find = |name: &str| fields.iter().find(|f| f.name == name).unwrap_or_else(|| panic!("{name} reflected"));
+        for name in [
+            "projection_model", "bc_k1", "mumps_kx1", "prism_count", "port_index", "grad_nd_stops",
+            "glow_amount", "diffusion_strength", "star_points", "halation_strength",
+            "drops_refraction", "dirt_loss", "mask_layer", "aperture_texture_amount",
+        ] {
+            find(name);
+        }
+        assert_eq!(find("bc_k1").category, Some("Distortion"));
+        assert_eq!(find("diffusion_strength").category, Some("Diffusion"));
     }
 
     #[test]

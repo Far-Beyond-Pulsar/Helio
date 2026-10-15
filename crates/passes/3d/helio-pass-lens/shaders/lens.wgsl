@@ -27,7 +27,11 @@
 //   cs_dilate     widen each tile's extent by the circles that reach it
 //   cs_prefilter  half-resolution colour and circles, near class winning
 //   cs_gather     near/far layers by scatter-as-gather
-//   cs_composite  sharp, far and near layers back to full resolution
+//   cs_composite  sharp, far and near layers back to full resolution, through
+//                 the ray map and the transmission
+//   cs_ab_down    (only with aberration elements) pyramid of the sensor image
+//   cs_ab_apply   (same) in-focus aberration PSFs, diffusion, stars, halation,
+//                 contaminants; see "Aberrations, filters and contaminants"
 //
 // Circles of confusion are diameters in input pixels; negative is in front
 // of the focal surface (near field), positive behind it.
@@ -94,6 +98,7 @@ struct Resolved {
     required_overscan: f32,
     map_flags: u32,
     spectral_samples: u32,
+    aberration_flags: u32,
 }
 
 // Persistent between frames: the autofocus position in dioptres.
@@ -119,7 +124,7 @@ struct Frame {
 @group(0) @binding(4) var scene_color: texture_2d<f32>;
 @group(0) @binding(5) var<storage, read_write> state: State;
 @group(0) @binding(6) var<storage, read_write> resolved: Resolved;
-@group(0) @binding(7) var<storage, read_write> args: array<u32, 18>;
+@group(0) @binding(7) var<storage, read_write> args: array<u32, 45>;
 @group(0) @binding(8) var<uniform> frame: Frame;
 @group(0) @binding(9) var coc_out: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(10) var coc_in: texture_2d<f32>;
@@ -138,6 +143,35 @@ struct Frame {
 // Custom iris shapes, one per layer, coverage in .r over the square that
 // inscribes the pupil circle. A 1x1 white layer when the host has none.
 @group(0) @binding(23) var aperture_shapes: texture_2d_array<f32>;
+// Mask layers (RGBA8) for MASK regions and the normals of water drops; a 1x1
+// transparent layer when the host has none, so a mask covers nothing.
+@group(0) @binding(24) var lens_masks: texture_2d_array<f32>;
+// The sensor image while an aberration element is present (written by the
+// composite, read by the aberration stage), and the aberration pyramid:
+// `pyr_src` one level (or the composed image) to `pyr_dst` the next, `pyr_all`
+// every level for sampling.
+@group(0) @binding(25) var composed_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(26) var pyr_src: texture_2d<f32>;
+@group(0) @binding(27) var pyr_dst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(28) var composed_in: texture_2d<f32>;
+@group(0) @binding(29) var pyr_all: texture_2d<f32>;
+// Baked lens prescriptions (prescriptions.rs): a directory, then per lens a
+// header and tables of f32 bits. Four zero words when the host has none.
+@group(0) @binding(30) var<storage, read> bank: array<u32>;
+
+// ── User element hooks ───────────────────────────────────────────────────────
+//
+// USER elements call these. The block below is the stock no-op version; a host
+// snippet (`LensPass::new_with_user`) replaces everything between the markers,
+// the way PostProcessPass splices its user effects. With `USER_ENABLED` false
+// the elements are not even scanned for.
+
+// %%USER_BEGIN
+const USER_ENABLED: bool = false;
+fn user_ray_map(uv: vec2<f32>, params: array<f32, 16>, t: f32) -> vec2<f32> { return uv; }
+fn user_transmission(uv: vec2<f32>, params: array<f32, 16>) -> vec3<f32> { return vec3(1.0); }
+fn user_focus(uv: vec2<f32>, params: array<f32, 16>, s: f32) -> f32 { return s; }
+// %%USER_END
 
 const PI: f32 = 3.141592653589793;
 const GOLDEN_ANGLE: f32 = 2.399963229728653;
@@ -182,11 +216,64 @@ const ELEMENT_ND_FILTER: u32 = 20u;
 const ELEMENT_GRADUATED_ND: u32 = 21u;
 const ELEMENT_COLOR_FILTER: u32 = 22u;
 const ELEMENT_T_STOP_LOSS: u32 = 23u;
+// Aberration, filter and contaminant elements are SPHERICAL_GLOW..=DIRT.
+const ELEMENT_SPHERICAL_GLOW: u32 = 24u;
+const ELEMENT_COMA: u32 = 25u;
+const ELEMENT_ASTIGMATISM: u32 = 26u;
+const ELEMENT_CORNER_SOFTNESS: u32 = 27u;
+const ELEMENT_DIFFUSION: u32 = 28u;
+const ELEMENT_PRO_MIST: u32 = 29u;
+const ELEMENT_BLACK_PRO_MIST: u32 = 30u;
+const ELEMENT_GLIMMERGLASS: u32 = 31u;
+const ELEMENT_STAR_FILTER: u32 = 32u;
+const ELEMENT_HALATION: u32 = 33u;
+const ELEMENT_WATER_DROPS: u32 = 34u;
+const ELEMENT_SMEAR: u32 = 35u;
+const ELEMENT_FOG: u32 = 36u;
+const ELEMENT_DIRT: u32 = 37u;
+const ELEMENT_PRESCRIPTION: u32 = 38u;
+const ELEMENT_USER: u32 = 39u;
+
+// `LensElementComponent::flags` of a USER element (components.rs `user`).
+const UF_MAP: u32 = 1u;
+const UF_TRANSMISSION: u32 = 2u;
+const UF_FOCUS: u32 = 4u;
+const UF_SPECTRAL: u32 = 8u;
 
 // `Resolved::map_flags` (gpu_types.rs).
 const MAP_REMAP: u32 = 1u;
 const MAP_SPECTRAL: u32 = 2u;
 const MAP_TRANSMISSION: u32 = 4u;
+const MAP_PRESCRIPTION: u32 = 8u;
+
+// Prescription bank header words (prescriptions.rs `word`) and flags.
+const H_EFL: u32 = 0u;
+const H_F_MIN: u32 = 1u;
+const H_HALF_DIAGONAL: u32 = 2u;
+const H_FLAGS: u32 = 3u;
+const H_RAY_FIELDS: u32 = 4u;
+const H_RAY_WAVES: u32 = 5u;
+const H_RAY_WAVELENGTHS: u32 = 6u;
+const H_RAY_TAN: u32 = 7u;
+const H_VIG_FIELDS: u32 = 8u;
+const H_VIG_F_NUMBERS: u32 = 9u;
+const H_VIG_F_NUMBER_LIST: u32 = 10u;
+const H_VIG_DATA: u32 = 11u;
+const H_FP_RESOLUTION: u32 = 12u;
+const H_FP_FIELDS: u32 = 13u;
+const H_FP_FIELD_LIST: u32 = 14u;
+const H_FP_DATA: u32 = 15u;
+const H_FP_F_NUMBER: u32 = 16u;
+const H_FOCUS_RED: u32 = 17u;
+const H_AN_FIELDS: u32 = 20u;
+const H_AN_DATA: u32 = 21u;
+const AN_STRIDE: u32 = 6u;
+const RX_CHROMATIC: u32 = 1u;
+const RX_PSF: u32 = 2u;
+// `Resolved::aberration_flags`.
+const AB_ACTIVE: u32 = 1u;
+// Levels of the aberration pyramid at most (lib.rs `PYRAMID_LEVELS`).
+const PYRAMID_LEVELS: u32 = 8u;
 
 // Spectral sampling: wavelengths 400..700 nm in equal bins, each with a
 // position t = (lambda - 550) / 150 and per-channel sensor weights that sum
@@ -235,6 +322,11 @@ const ARGS_DILATE: u32 = 2u;
 const ARGS_PREFILTER: u32 = 3u;
 const ARGS_GATHER: u32 = 4u;
 const ARGS_COMPOSITE: u32 = 5u;
+// The pyramid's levels follow, then the filters' apply stage.
+const ARGS_DOWN: u32 = 6u;
+const ARGS_APPLY: u32 = 14u;
+
+const REGION_MASK: u32 = 5u;
 
 fn finite(x: f32) -> bool {
     return (bitcast<u32>(x) & 0x7f800000u) != 0x7f800000u;
@@ -331,6 +423,7 @@ fn cs_resolve(@builtin(local_invocation_index) lid: u32) {
     workgroupBarrier();
 
     let size = textureDimensions(scene_color);
+    mask_aspect = f32(size.x) / f32(size.y);
     if lid == 0u {
         resolve_lens(row, found, autofocus, size);
     }
@@ -355,6 +448,17 @@ fn cs_resolve(@builtin(local_invocation_index) lid: u32) {
     write_args(ARGS_GATHER, ceil_div(half_size, 8u), found);
     // Always: a disabled lens copies the image through.
     write_args(ARGS_COMPOSITE, ceil_div(size, 8u), true);
+
+    // The aberration stage runs only for a lens with such an element: one
+    // dispatch per pyramid level (the first is half the image, each next
+    // half of that, down to one texel), then the filters.
+    let ab_on = found && (resolved.aberration_flags & AB_ACTIVE) != 0u;
+    let levels = min(PYRAMID_LEVELS, 32u - countLeadingZeros(max(half_size.x, half_size.y)));
+    for (var k = 0u; k < PYRAMID_LEVELS; k++) {
+        let level_size = max(half_size >> vec2(k), vec2(1u));
+        write_args(ARGS_DOWN + k, ceil_div(level_size, 8u), ab_on && k < levels);
+    }
+    write_args(ARGS_APPLY, ceil_div(size, 8u), ab_on);
 }
 
 /// Thread 0 of `cs_resolve`: sanitises the row, runs the autofocus easing and
@@ -388,6 +492,7 @@ fn resolve_lens(row: LensRow, found: bool, autofocus: bool, size: vec2<u32>) {
     out.required_overscan = 1.0;
     out.map_flags = 0u;
     out.spectral_samples = 1u;
+    out.aberration_flags = 0u;
     if found {
         out.f_number = bounded(row.f_number, 0.7, 32.0, 2.8);
         out.focal_length_mm = bounded(row.focal_length_mm, 8.0, 600.0, 50.0);
@@ -408,6 +513,22 @@ fn resolve_lens(row: LensRow, found: bool, autofocus: bool, size: vec2<u32>) {
         out.tilt_axis = bounded(row.tilt_axis, -100.0, 100.0, 0.0);
         out.element_first = row.element_first;
         out.element_count = min(row.element_count, MAX_ELEMENTS);
+    }
+
+    // A prescription over the whole frame is the view's lens: its effective
+    // focal length, and no wider an aperture than it was baked at.
+    var full_frame_lens = NO_ROW;
+    for (var i = 0u; i < out.element_count; i++) {
+        let e = elements[out.element_first + i];
+        if e.kind == ELEMENT_PRESCRIPTION && e.region_kind == REGION_FULL_FRAME && rx_header(e) != NO_ROW {
+            full_frame_lens = rx_header(e);
+            break;
+        }
+    }
+    if full_frame_lens != NO_ROW {
+        out.focal_length_mm = bounded(bank_f(full_frame_lens + H_EFL), 8.0, 600.0, out.focal_length_mm);
+        out.f_number = clamp(out.f_number, max(bank_f(full_frame_lens + H_F_MIN), 0.7), 32.0);
+        out.t_stop = max(out.t_stop, out.f_number);
     }
 
     // Focus in dioptres: manual follows the row; autofocus eases toward the
@@ -451,6 +572,38 @@ fn resolve_lens(row: LensRow, found: bool, autofocus: bool, size: vec2<u32>) {
         }
         if e.kind == ELEMENT_NATURAL_VIGNETTE {
             natural = max(natural, bounded(e.params[0], 0.0, 1.0, 0.0));
+        }
+        if e.kind >= ELEMENT_SPHERICAL_GLOW && e.kind <= ELEMENT_DIRT {
+            out.aberration_flags |= AB_ACTIVE;
+        }
+        if e.kind == ELEMENT_PRESCRIPTION {
+            let h = rx_header(e);
+            if h != NO_ROW {
+                // The bake has a ray map and a transmission of its own, and
+                // the first covering prescription alone acts.
+                out.map_flags |= MAP_REMAP | MAP_TRANSMISSION | MAP_PRESCRIPTION;
+                if (bank[h + H_FLAGS] & RX_CHROMATIC) != 0u {
+                    out.map_flags |= MAP_SPECTRAL;
+                }
+                if (bank[h + H_FLAGS] & RX_PSF) != 0u && e.params[1] > 0.0 {
+                    out.aberration_flags |= AB_ACTIVE;
+                }
+                // The bake's cos^4 reaches analytic flare sources as well.
+                if h == full_frame_lens {
+                    natural = 1.0;
+                }
+            }
+        }
+        if USER_ENABLED && e.kind == ELEMENT_USER {
+            if (e.flags & UF_MAP) != 0u {
+                out.map_flags |= MAP_REMAP;
+                if (e.flags & UF_SPECTRAL) != 0u {
+                    out.map_flags |= MAP_SPECTRAL;
+                }
+            }
+            if (e.flags & UF_TRANSMISSION) != 0u {
+                out.map_flags |= MAP_TRANSMISSION;
+            }
         }
     }
     out.natural_vignette = natural;
@@ -535,9 +688,62 @@ fn feather_width(e: ElementRow) -> f32 {
     return (aperture_m / mount_m) * (focal_m / (resolved.sensor_height_mm * 1.0e-3));
 }
 
+// Aspect ratio of the image the entry point works on: a MASK region maps the
+// image-height position `q` back to the unit square. Every entry point that
+// can evaluate a region sets it first.
+var<private> mask_aspect: f32 = 1.0;
+
+/// The mask layer `layer` at the unit-square position `uv`, bilinear with
+/// clamped edges (the array is read with `textureLoad`, so no sampler is
+/// bound in the stages that evaluate regions).
+fn mask_texel(layer: i32, uv: vec2<f32>) -> vec4<f32> {
+    let dims = textureDimensions(lens_masks);
+    let last = vec2<i32>(dims) - 1;
+    let pos = uv * vec2<f32>(dims) - 0.5;
+    let base = floor(pos);
+    let f = pos - base;
+    let p = vec2<i32>(base);
+    let a = textureLoad(lens_masks, clamp(p, vec2(0), last), layer, 0);
+    let b = textureLoad(lens_masks, clamp(p + vec2(1, 0), vec2(0), last), layer, 0);
+    let c = textureLoad(lens_masks, clamp(p + vec2(0, 1), vec2(0), last), layer, 0);
+    let d = textureLoad(lens_masks, clamp(p + vec2(1, 1), vec2(0), last), layer, 0);
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+/// Which layer of the mask array an element's region reads.
+fn mask_layer(e: ElementRow) -> i32 {
+    let layers = f32(textureNumLayers(lens_masks) - 1u);
+    return i32(clamp(bounded(e.region[0], 0.0, 4096.0, 0.0), 0.0, layers));
+}
+
+/// The unit-square position a MASK region reads for the image-height
+/// position `q`: magnified, shifted and optionally repeated.
+fn mask_uv(e: ElementRow, q: vec2<f32>) -> vec2<f32> {
+    let scale = select(1.0, bounded(e.region[3], 0.01, 100.0, 1.0), e.region[3] > 0.0);
+    let uv = q / vec2(mask_aspect, 1.0) / scale + 0.5 - vec2(e.region[4], e.region[5]);
+    return select(uv, fract(uv), e.region[6] > 0.5);
+}
+
+/// Coverage of a MASK region at `q`: the chosen channel at the mapped
+/// position, inverted on request; nothing outside a non-tiling mask.
+fn mask_weight(e: ElementRow, q: vec2<f32>) -> f32 {
+    let uv = mask_uv(e, q);
+    if e.region[6] <= 0.5 && (any(uv < vec2(0.0)) || any(uv > vec2(1.0))) {
+        return 0.0;
+    }
+    let texel = mask_texel(mask_layer(e), uv);
+    let channel = u32(bounded(e.region[1], 0.0, 3.0, 0.0) + 0.5);
+    var v = texel.r;
+    if channel == 1u { v = texel.g; }
+    if channel == 2u { v = texel.b; }
+    if channel == 3u { v = texel.a; }
+    return select(v, 1.0 - v, e.region[2] > 0.5);
+}
+
 /// Coverage of the region at `q`: 1 inside, 0 outside, smooth across the
-/// feather.
+/// feather. A mask is its own coverage.
 fn region_weight(e: ElementRow, q: vec2<f32>) -> f32 {
+    if e.region_kind == REGION_MASK { return mask_weight(e, q); }
     let t = clamp(0.5 - region_distance(e, q) / max(feather_width(e), 1.0e-5), 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
 }
@@ -569,9 +775,20 @@ fn focus_field(uv: vec2<f32>, size: vec2<f32>) -> FocusSample {
     let plane_distance = select(MAX_DISTANCE, ca * resolved.focus_distance_m / tilt, tilt > 0.05 * ca);
     let corner = length(size) * 0.5;
     let r = length((uv - 0.5) * size) / corner;
-    var inverse = 1.0 / plane_distance + resolved.field_curvature * r * r;
-
     let q = (uv - 0.5) * vec2(size.x / size.y, 1.0);
+    // A covering prescription brings its own field curvature, replacing the
+    // lens row's.
+    var rx: PrismSel;
+    rx.index = NO_ROW;
+    rx.weight = 0.0;
+    let ctx = make_ctx(resolved, vec2<u32>(size));
+    if (resolved.map_flags & MAP_PRESCRIPTION) != 0u {
+        rx = find_prescription(q, ctx);
+    }
+    var curvature = resolved.field_curvature;
+    if rx.weight > 0.0 { curvature *= 1.0 - rx.weight; }
+    var inverse = 1.0 / plane_distance + curvature * r * r;
+
     var strongest = 1.0;
     var seam_power = 0.0;
     var seam_covered = false;
@@ -603,6 +820,12 @@ fn focus_field(uv: vec2<f32>, size: vec2<f32>) -> FocusSample {
             let image_radius = max(e.params[0], 1.0e-3) * n / (n - 1.0);
             let secant = sqrt(1.0 + dot(direction, direction));
             inverse += region_weight(e, q) * bounded(e.params[4], 0.0, 4.0, 0.0) * (secant - 1.0) / image_radius;
+        } else if e.kind == ELEMENT_PRESCRIPTION && i == rx.index {
+            let h = rx_header(e);
+            inverse += rx.weight * rx_analysis(h, rx_radius(h, q, ctx)).curvature;
+        } else if USER_ENABLED && e.kind == ELEMENT_USER && (e.flags & UF_FOCUS) != 0u {
+            // The user's focus, in dioptres, given the focus so far.
+            inverse = mix(inverse, user_focus(uv, e.params, inverse), region_weight(e, q));
         }
     }
     var out: FocusSample;
@@ -645,6 +868,7 @@ fn limited(coc: f32, extra: f32) -> f32 {
 fn cs_coc(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(coc_out);
     if any(id.xy >= size) { return; }
+    mask_aspect = f32(size.x) / f32(size.y);
     let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(size);
     let s2 = scene_distance(id.xy, size);
     let field = focus_field(uv, vec2<f32>(size));
@@ -830,6 +1054,13 @@ struct Pupil {
     shifts: vec3<f32>,
     // False for a plain circle: no shape evaluation, no normalisation.
     shaped: bool,
+    // A covering prescription's footprint masks: its header (NO_ROW with
+    // none), the lower of the two fields blended and the blend, and the share
+    // of the baked stop the current f-number leaves.
+    fp_header: u32,
+    fp_field: u32,
+    fp_blend: f32,
+    fp_scale: f32,
     area: f32,
     mean_far: f32,
     mean_near: f32,
@@ -859,9 +1090,19 @@ fn resolve_pupil(uv: vec2<f32>, size: vec2<f32>) -> Pupil {
     pp.area = 1.0;
     pp.mean_far = 1.0;
     pp.mean_near = 1.0;
+    pp.fp_header = NO_ROW;
+    pp.fp_field = 0u;
+    pp.fp_blend = 0.0;
+    pp.fp_scale = 1.0;
     var shifts = vec3(0.0);
 
     let q = (uv - 0.5) * vec2(size.x / size.y, 1.0);
+    var rx: PrismSel;
+    rx.index = NO_ROW;
+    rx.weight = 0.0;
+    if (resolved.map_flags & MAP_PRESCRIPTION) != 0u {
+        rx = find_prescription(q, make_ctx(resolved, vec2<u32>(size)));
+    }
     for (var i = 0u; i < resolved.element_count; i++) {
         let e = elements[resolved.element_first + i];
         if e.kind == ELEMENT_PUPIL {
@@ -895,7 +1136,8 @@ fn resolve_pupil(uv: vec2<f32>, size: vec2<f32>) -> Pupil {
             pp.apodization = select(0.0, bounded(p[P_APODIZATION], 0.1, 4.0, 0.0), p[P_APODIZATION] > 0.0);
             pp.obstruction = bounded(p[P_OBSTRUCTION], 0.0, 0.95, 0.0);
         } else if e.kind == ELEMENT_LONGITUDINAL_CA {
-            let w = region_weight(e, q);
+            var w = region_weight(e, q);
+            if rx.weight > 0.0 { w *= 1.0 - rx.weight; }
             if w > 0.0 {
                 let d = vec3(
                     bounded(e.params[0], -8.0, 8.0, 0.0),
@@ -906,14 +1148,36 @@ fn resolve_pupil(uv: vec2<f32>, size: vec2<f32>) -> Pupil {
             }
         }
     }
+    let offset = (uv - 0.5) * size;
+    let reach = length(offset);
+    if rx.index != NO_ROW {
+        let e = elements[resolved.element_first + rx.index];
+        let h = rx_header(e);
+        shifts += rx.weight * vec3(
+            bank_f(h + H_FOCUS_RED),
+            bank_f(h + H_FOCUS_RED + 1u),
+            bank_f(h + H_FOCUS_RED + 2u),
+        );
+        if rx.weight >= 0.5 {
+            // The baked footprint is the cat's eye; the iris, swirl, squeeze
+            // and the profile settings still apply on top of it.
+            pp.cats_eye = 0.0;
+            pp.barrel = 1.0;
+            pp.fp_header = h;
+            let r = reach / size.x * resolved.sensor_width_mm / bank_f(h + H_HALF_DIAGONAL);
+            let n = bank[h + H_FP_FIELDS];
+            let b = rx_bracket(bank[h + H_FP_FIELD_LIST], n, r);
+            pp.fp_field = u32(b.x);
+            pp.fp_blend = b.y;
+            pp.fp_scale = min(bank_f(h + H_FP_F_NUMBER) / resolved.f_number, 1.0);
+        }
+    }
     // Green is the channel the focus field was resolved for.
     pp.shifts = shifts - vec3(shifts.y);
     pp.shaped = pp.blades >= 3u || pp.squeeze > 1.0001 || pp.cats_eye > 0.0 || pp.swirl != 0.0
         || pp.spherical != 0.0 || pp.onion > 0.0 || pp.apodization > 0.0
-        || pp.obstruction > 0.0 || pp.texture_amount > 0.0;
+        || pp.obstruction > 0.0 || pp.texture_amount > 0.0 || pp.fp_header != NO_ROW;
 
-    let offset = (uv - 0.5) * size;
-    let reach = length(offset);
     pp.field_r = reach / (0.5 * length(size));
     pp.radial = select(vec2(1.0, 0.0), offset / max(reach, 1.0e-6), reach > 1.0e-4);
     return pp;
@@ -966,6 +1230,17 @@ fn pupil_shape(p: vec2<f32>, rs: f32, pp: Pupil) -> vec2<f32> {
         let rho_barrel = length(u - centre) / pp.barrel;
         shape = min(shape, clamp((1.0 - rho_barrel) * rs + 0.5, 0.0, 1.0));
         rho = max(rho, rho_barrel);
+    }
+    if pp.fp_header != NO_ROW {
+        // The baked cat's eye: the stop's coverage at this field, in the
+        // stop's frame (+x toward the corner), scaled by the share of the
+        // baked stop the iris is open to.
+        let stop = vec2(dot(u, pp.radial), dot(u, tangent)) * pp.fp_scale;
+        var covered = rx_mask(pp.fp_header, pp.fp_field, stop);
+        if pp.fp_blend > 0.0 {
+            covered = mix(covered, rx_mask(pp.fp_header, pp.fp_field + 1u, stop), pp.fp_blend);
+        }
+        shape *= covered;
     }
     if pp.obstruction > 0.0 {
         shape *= clamp((ru - pp.obstruction) * rs + 0.5, 0.0, 1.0);
@@ -1033,6 +1308,7 @@ fn interleaved_noise(p: vec2<f32>) -> f32 {
 fn cs_gather(@builtin(global_invocation_id) id: vec3<u32>) {
     let half_size = textureDimensions(half_color);
     if any(id.xy >= half_size) { return; }
+    mask_aspect = f32(half_size.x) / f32(half_size.y);
     let tiles = ceil_div(half_size * 2u, TILE);
     let tile = tile_dilated[min(id.y * 2u / TILE, tiles.y - 1u) * tiles.x + min(id.x * 2u / TILE, tiles.x - 1u)];
     let center = textureLoad(half_color, id.xy, 0).rgb;
@@ -1176,6 +1452,11 @@ struct MapCtx {
     focus_dpt: f32,
     first: u32,
     count: u32,
+    // The image's width over its height, the lens's focal length, and the
+    // resolved `map_flags`: prescriptions and USER elements need all three.
+    aspect: f32,
+    focal_mm: f32,
+    flags: u32,
 }
 
 fn make_ctx(r: Resolved, size: vec2<u32>) -> MapCtx {
@@ -1185,7 +1466,190 @@ fn make_ctx(r: Resolved, size: vec2<u32>) -> MapCtx {
     c.focus_dpt = 1.0 / max(r.focus_distance_m, 1.0e-3);
     c.first = r.element_first;
     c.count = r.element_count;
+    c.aspect = f32(size.x) / f32(size.y);
+    c.focal_mm = r.focal_length_mm;
+    c.flags = r.map_flags;
     return c;
+}
+
+// ── Baked prescriptions ──────────────────────────────────────────────────────
+//
+// A PRESCRIPTION element names a layer of the bank. Its tables are indexed by
+// the normalised sensor radius r (sensor distance from the axis over the half
+// diagonal the lens was baked for, 1 at the baked corner) and are rotationally
+// symmetric, so the sensor position's azimuth only carries the direction.
+
+fn bank_f(i: u32) -> f32 {
+    return bitcast<f32>(bank[i]);
+}
+
+/// Offset of the header of the layer an element names, NO_ROW if the bank has
+/// no such layer (a missing bank holds none).
+fn rx_header(e: ElementRow) -> u32 {
+    let layer = u32(bounded(e.params[0], 0.0, 4096.0, 0.0) + 0.5);
+    if layer >= bank[0] { return NO_ROW; }
+    return bank[1u + layer];
+}
+
+/// Normalised sensor radius of the sensor position `q` (image-height units).
+fn rx_radius(h: u32, q: vec2<f32>, ctx: MapCtx) -> f32 {
+    return length(q) * ctx.scale * ctx.focal_mm / bank_f(h + H_HALF_DIAGONAL);
+}
+
+/// Where `x` falls between the ascending entries `list[0..n]` (at word `at`):
+/// the lower index and the fraction to the next, clamped to the ends.
+fn rx_bracket(at: u32, n: u32, x: f32) -> vec2<f32> {
+    var lower = 0u;
+    for (var k = 1u; k + 1u < n; k++) {
+        if bank_f(at + k) <= x { lower = k; }
+    }
+    if n < 2u { return vec2(0.0); }
+    let a = bank_f(at + lower);
+    let b = bank_f(at + lower + 1u);
+    return vec2(f32(lower), clamp((x - a) / max(b - a, 1.0e-6), 0.0, 1.0));
+}
+
+/// `tan(theta)` of the scene ray the sensor radius `r` looks at, for the
+/// wavelength position `t` (-1 blue .. 1 red): linear in the field, beyond the
+/// baked corner continued with its slope, and linear between wavelengths.
+fn rx_tan(h: u32, r: f32, t: f32) -> f32 {
+    let nf = bank[h + H_RAY_FIELDS];
+    let waves = bank[h + H_RAY_WAVES];
+    let table = bank[h + H_RAY_TAN];
+    let p = max(r, 0.0) * f32(nf - 1u);
+    let i0 = min(u32(floor(p)), nf - 2u);
+    let f = p - f32(i0);
+    let w = rx_bracket(bank[h + H_RAY_WAVELENGTHS], waves, 550.0 + 150.0 * t);
+    let k0 = u32(w.x);
+    let a = table + k0 * nf + i0;
+    var tan_theta = mix(bank_f(a), bank_f(a + 1u), f);
+    if w.y > 0.0 {
+        let b = a + nf;
+        tan_theta = mix(tan_theta, mix(bank_f(b), bank_f(b + 1u), f), w.y);
+    }
+    return tan_theta;
+}
+
+/// Relative illumination at the sensor radius `r` for the f-number `n`: linear
+/// in the field and in log2 of the f-number, clamped to the baked ranges.
+fn rx_vignette(h: u32, r: f32, n: f32) -> f32 {
+    let nf = bank[h + H_VIG_FIELDS];
+    let nn = bank[h + H_VIG_F_NUMBERS];
+    let table = bank[h + H_VIG_DATA];
+    let p = clamp(r, 0.0, 1.0) * f32(nf - 1u);
+    let i0 = min(u32(floor(p)), nf - 2u);
+    let f = p - f32(i0);
+    let numbers = bank[h + H_VIG_F_NUMBER_LIST];
+    var lower = 0u;
+    for (var k = 1u; k + 1u < nn; k++) {
+        if bank_f(numbers + k) <= n { lower = k; }
+    }
+    let a = table + lower * nf + i0;
+    var v = mix(bank_f(a), bank_f(a + 1u), f);
+    if nn > 1u {
+        let n0 = log2(bank_f(numbers + lower));
+        let n1 = log2(bank_f(numbers + lower + 1u));
+        let wt = clamp((log2(max(n, 0.7)) - n0) / max(n1 - n0, 1.0e-4), 0.0, 1.0);
+        let b = a + nf;
+        v = mix(v, mix(bank_f(b), bank_f(b + 1u), f), wt);
+    }
+    return v;
+}
+
+struct RxAnalysis {
+    // Field curvature as extra focus dioptres (axis zero).
+    curvature: f32,
+    // Gaussian sigma (mm) of the core along and across the radius.
+    sigma_r: f32,
+    sigma_t: f32,
+    // Signed share of the light in the coma tail (positive: outward) and its
+    // length in mm.
+    share: f32,
+    length: f32,
+}
+
+/// Field curvature and point spread at the sensor radius `r`, interpolated
+/// between the analysis fields (whose radii are the first word of a record).
+fn rx_analysis(h: u32, r: f32) -> RxAnalysis {
+    let n = bank[h + H_AN_FIELDS];
+    let at = bank[h + H_AN_DATA];
+    var lower = 0u;
+    for (var k = 1u; k + 1u < n; k++) {
+        if bank_f(at + k * AN_STRIDE) <= r { lower = k; }
+    }
+    let a = at + lower * AN_STRIDE;
+    var t = 0.0;
+    var b = a;
+    if n > 1u {
+        b = a + AN_STRIDE;
+        t = clamp((r - bank_f(a)) / max(bank_f(b) - bank_f(a), 1.0e-6), 0.0, 1.0);
+    }
+    var out: RxAnalysis;
+    out.curvature = mix(bank_f(a + 1u), bank_f(b + 1u), t);
+    out.sigma_r = mix(bank_f(a + 2u), bank_f(b + 2u), t);
+    out.sigma_t = mix(bank_f(a + 3u), bank_f(b + 3u), t);
+    out.share = mix(bank_f(a + 4u), bank_f(b + 4u), t);
+    out.length = mix(bank_f(a + 5u), bank_f(b + 5u), t);
+    return out;
+}
+
+/// Coverage of footprint mask `field` at the stop position `p` (the unit disk,
+/// +x toward the corner): bilinear, nothing outside the mask.
+fn rx_mask(h: u32, field: u32, p: vec2<f32>) -> f32 {
+    let res = bank[h + H_FP_RESOLUTION];
+    let table = bank[h + H_FP_DATA] + field * res * res;
+    let pos = (p * 0.5 + 0.5) * f32(res) - 0.5;
+    let base = floor(pos);
+    let f = pos - base;
+    let i = vec2<i32>(base);
+    var v = vec4(0.0);
+    for (var k = 0u; k < 4u; k++) {
+        let c = i + vec2(i32(k & 1u), i32(k >> 1u));
+        if all(c >= vec2(0)) && all(c < vec2(i32(res))) {
+            v[k] = bank_f(table + u32(c.y) * res + u32(c.x));
+        }
+    }
+    return mix(mix(v.x, v.y, f.x), mix(v.z, v.w, f.x), f.y);
+}
+
+/// The first PRESCRIPTION element (index within the lens's stack) whose
+/// region covers the sensor position `q`, with its coverage; NO_ROW with none.
+/// Only that element acts at the position, and what it replaces is scaled by
+/// `1 - weight` (components.rs `prescription`).
+fn find_prescription(q: vec2<f32>, ctx: MapCtx) -> PrismSel {
+    var sel: PrismSel;
+    sel.index = NO_ROW;
+    sel.weight = 0.0;
+    if (ctx.flags & MAP_PRESCRIPTION) == 0u { return sel; }
+    for (var i = 0u; i < ctx.count; i++) {
+        let e = elements[ctx.first + i];
+        if e.kind == ELEMENT_PRESCRIPTION && rx_header(e) != NO_ROW {
+            let w = region_weight(e, q);
+            if w > 0.0 {
+                sel.index = i;
+                sel.weight = w;
+                return sel;
+            }
+        }
+    }
+    return sel;
+}
+
+/// Ray-map elements a covering prescription replaces: the projection and the
+/// distortions, and the parametric lateral chromatic aberration.
+fn rx_replaces_map(kind: u32) -> bool {
+    return (kind >= ELEMENT_PROJECTION && kind <= ELEMENT_ANAMORPHIC_DISTORTION) || kind == ELEMENT_LATERAL_CA;
+}
+
+/// The prescription's map for the sensor point `x` (focal-length units).
+fn rx_map(e: ElementRow, x: vec2<f32>, t: f32, ctx: MapCtx) -> vec2<f32> {
+    let h = rx_header(e);
+    let len = length(x);
+    if len < 1.0e-6 {
+        return x * (ctx.focal_mm / bank_f(h + H_EFL));
+    }
+    let r = len * ctx.focal_mm / bank_f(h + H_HALF_DIAGONAL);
+    return x * (rx_tan(h, r, t) / len);
 }
 
 fn spectral_sample_count(quality: u32) -> u32 {
@@ -1446,8 +1910,28 @@ fn find_prism(q: vec2<f32>, ctx: MapCtx) -> PrismSel {
 /// returned; `NO_COPY` skips prisms.
 fn ray_map(q: vec2<f32>, t: f32, prism: u32, copy: u32, ctx: MapCtx) -> vec2<f32> {
     var x = q * ctx.scale;
+    // Where a prescription covers, its map replaces the parametric lens maps.
+    let rx = find_prescription(q, ctx);
     for (var i = 0u; i < ctx.count; i++) {
         let e = elements[ctx.first + i];
+        if e.kind == ELEMENT_PRESCRIPTION {
+            if i == rx.index {
+                x = mix(x, rx_map(e, x, t, ctx), rx.weight);
+            }
+            continue;
+        }
+        if e.kind == ELEMENT_USER {
+            if USER_ENABLED && (e.flags & UF_MAP) != 0u {
+                let w = region_weight(e, q);
+                if w > 0.0 {
+                    // The point the stack has reached, as a unit-square uv.
+                    let uv = x / ctx.scale / vec2(ctx.aspect, 1.0) + 0.5;
+                    let seen = (user_ray_map(uv, e.params, t) - 0.5) * vec2(ctx.aspect, 1.0) * ctx.scale;
+                    x = mix(x, seen, w);
+                }
+            }
+            continue;
+        }
         if e.kind < ELEMENT_PROJECTION || e.kind > ELEMENT_DOME_PORT { continue; }
         if e.kind == ELEMENT_PRISM {
             if i == prism && copy != NO_COPY {
@@ -1455,7 +1939,8 @@ fn ray_map(q: vec2<f32>, t: f32, prism: u32, copy: u32, ctx: MapCtx) -> vec2<f32
             }
             continue;
         }
-        let w = region_weight(e, q);
+        var w = region_weight(e, q);
+        if rx.weight > 0.0 && rx_replaces_map(e.kind) { w *= 1.0 - rx.weight; }
         if w <= 0.0 { continue; }
         x = mix(x, map_element(e, x, t, ctx), w);
     }
@@ -1541,12 +2026,31 @@ fn transmission(q: vec2<f32>, ctx: MapCtx, size: vec2<u32>) -> vec3<f32> {
     // 1 at the corner, as in the pupil's field position.
     let field_r = length(q) / (0.5 * sqrt(1.0 + aspect * aspect));
     var t = vec3(1.0);
+    // The baked relative illumination (cos^4 and the stop's clipping) replaces
+    // the natural and optical vignetting where a prescription covers.
+    let rx = find_prescription(q, ctx);
     for (var i = 0u; i < ctx.count; i++) {
         let e = elements[ctx.first + i];
-        if e.kind < ELEMENT_NATURAL_VIGNETTE || e.kind > ELEMENT_T_STOP_LOSS { continue; }
-        let w = region_weight(e, q);
+        if (e.kind < ELEMENT_NATURAL_VIGNETTE || e.kind > ELEMENT_T_STOP_LOSS)
+            && e.kind != ELEMENT_PRESCRIPTION && e.kind != ELEMENT_USER { continue; }
+        var w = region_weight(e, q);
+        if rx.weight > 0.0 && (e.kind == ELEMENT_NATURAL_VIGNETTE || e.kind == ELEMENT_OPTICAL_VIGNETTE) {
+            w *= 1.0 - rx.weight;
+        }
         if w <= 0.0 { continue; }
         switch e.kind {
+            case ELEMENT_PRESCRIPTION: {
+                if i == rx.index {
+                    let h = rx_header(e);
+                    t *= mix(1.0, rx_vignette(h, rx_radius(h, q, ctx), resolved.f_number), w);
+                }
+            }
+            case ELEMENT_USER: {
+                if USER_ENABLED && (e.flags & UF_TRANSMISSION) != 0u {
+                    let uv = q / vec2(ctx.aspect, 1.0) + 0.5;
+                    t *= mix(vec3(1.0), user_transmission(uv, e.params), w);
+                }
+            }
             case ELEMENT_NATURAL_VIGNETTE: {
                 let natural = mix(1.0, cos_squared * cos_squared, bounded(e.params[0], 0.0, 1.0, 0.0));
                 t *= mix(1.0, natural, w);
@@ -1713,6 +2217,7 @@ fn mapped_color(q: vec2<f32>, ctx: MapCtx, size: vec2<u32>) -> vec3<f32> {
 fn cs_composite(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(color_out);
     if any(id.xy >= size) { return; }
+    mask_aspect = f32(size.x) / f32(size.y);
     let c = textureLoad(scene_color, id.xy, 0);
     // No enabled lens for this view: the image passes through untouched.
     if resolved.enabled == 0u {
@@ -1735,5 +2240,404 @@ fn cs_composite(@builtin(global_invocation_id) id: vec3<u32>) {
     if (resolved.map_flags & MAP_TRANSMISSION) != 0u {
         rgb *= transmission(q, ctx, size);
     }
-    textureStore(color_out, id.xy, vec4(rgb, c.a));
+    // With aberration elements the aberration stage finishes the frame from
+    // this sensor image; otherwise it is the output.
+    if (resolved.aberration_flags & AB_ACTIVE) != 0u {
+        textureStore(composed_out, id.xy, vec4(rgb, c.a));
+    } else {
+        textureStore(color_out, id.xy, vec4(rgb, c.a));
+    }
+}
+
+// ── Aberrations, filters and contaminants ────────────────────────────────────
+//
+// Everything here acts on the sensor image `cs_composite` produced (the
+// defocus, the ray map and the transmission are already in it), so the point
+// spreads are in sensor coordinates and the field position of a pixel is its
+// position on the sensor. In-focus PSFs and the scatter of filters and dirt
+// convolve a defocused image the same way as a sharp one.
+//
+// Stages (only dispatched while an element asks, `AB_ACTIVE`):
+//
+//   cs_ab_down   a pyramid of the sensor image, level 0 half its size, each
+//                level a stride-2 4x4 box of the one before, so every level has
+//                the image's mean radiance
+//   cs_ab_apply  per pixel: the field-dependent Gaussian PSFs (astigmatism,
+//                corner softness) and the drops' refraction replace the sharp
+//                pixel; then every scattering element takes a share of that
+//                light out and adds its gather from the pyramid
+//
+// A scatterer spreads a share f of each source's light over a kernel that sums
+// to 1. As a gather: the destination loses f of its own light and collects
+// f * sum(kernel * source) from the sources whose kernel reaches it, so the sum
+// over the frame is unchanged (up to the frame's edge, which clamps). Shares of
+// all elements add (and are scaled together if they would exceed one), so a
+// stack conserves energy too. Wide kernels read coarser pyramid levels: a
+// Gaussian of standard deviation `s` pixels is taken from the level whose
+// texels are about as wide.
+
+fn ab_hash(p: vec2<u32>) -> f32 {
+    var h = p.x * 0x27d4eb2du ^ p.y * 0x165667b1u;
+    h ^= h >> 15u;
+    h *= 0x85ebca6bu;
+    h ^= h >> 13u;
+    h *= 0xc2b2ae35u;
+    h ^= h >> 16u;
+    return f32(h >> 8u) / 16777216.0;
+}
+
+@compute @workgroup_size(8, 8)
+fn cs_ab_down(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dst = textureDimensions(pyr_dst);
+    if any(id.xy >= dst) { return; }
+    let texel = 1.0 / vec2<f32>(textureDimensions(pyr_src));
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dst);
+    // Four bilinear taps a source texel off the centre: two texels each side,
+    // a 4x4 box.
+    var sum = vec3(0.0);
+    for (var k = 0u; k < 4u; k++) {
+        let d = vec2(select(-1.0, 1.0, (k & 1u) != 0u), select(-1.0, 1.0, (k & 2u) != 0u));
+        sum += textureSampleLevel(pyr_src, linear_samp, uv + d * texel, 0.0).rgb;
+    }
+    textureStore(pyr_dst, id.xy, vec4(sum * 0.25, 1.0));
+}
+
+/// The sensor image blurred to level `lod`: 0 is the image itself, 1 the first
+/// pyramid level, and so on (trilinear between them).
+fn ab_blur_at(uv: vec2<f32>, lod: f32) -> vec3<f32> {
+    let l = max(lod, 0.0);
+    if l < 1.0 {
+        let sharp = textureSampleLevel(composed_in, linear_samp, uv, 0.0).rgb;
+        if l <= 0.0 { return sharp; }
+        return mix(sharp, textureSampleLevel(pyr_all, linear_samp, uv, 0.0).rgb, l);
+    }
+    let top = f32(textureNumLevels(pyr_all) - 1u);
+    return textureSampleLevel(pyr_all, linear_samp, uv, min(l - 1.0, top)).rgb;
+}
+
+/// Pyramid level whose texels are `footprint` full-resolution pixels wide.
+fn ab_lod(footprint: f32) -> f32 {
+    return max(log2(max(footprint, 1.0)), 0.0);
+}
+
+/// The image blurred by a Gaussian of standard deviation `sigma` pixels,
+/// from four taps of the level that fits.
+fn ab_gauss_at(uv: vec2<f32>, sigma: f32, size: vec2<f32>) -> vec3<f32> {
+    let lod = ab_lod(1.6 * sigma);
+    let o = 0.35 * max(sigma, 0.5) / size;
+    var sum = vec3(0.0);
+    for (var k = 0u; k < 4u; k++) {
+        let d = vec2(select(-1.0, 1.0, (k & 1u) != 0u), select(-1.0, 1.0, (k & 2u) != 0u));
+        sum += ab_blur_at(uv + d * o, lod);
+    }
+    return sum * 0.25;
+}
+
+/// Four Gaussians of standard deviations `radius * 2^j` and weights
+/// `tail^j`, normalised: a halo with a tail.
+fn ab_halo(uv: vec2<f32>, size: vec2<f32>, radius: f32, tail: f32) -> vec3<f32> {
+    let ratio = clamp(tail, 0.02, 0.98);
+    var sum = vec3(0.0);
+    var total = 0.0;
+    var weight = 1.0;
+    for (var j = 0u; j < 4u; j++) {
+        sum += weight * ab_gauss_at(uv, radius * exp2(f32(j)), size);
+        total += weight;
+        weight *= ratio;
+    }
+    return sum / total;
+}
+
+/// Light that a spike of length `length_px` along `dir` (a unit vector in
+/// pixels) carries to this pixel: taps geometrically spaced from 2 pixels to
+/// the length, each weighted by the spike's density `d^-falloff` over the
+/// segment it stands for; the weights sum to 1. A source `d` pixels back along
+/// `dir` is where the pixel looks.
+fn ab_spike(uv: vec2<f32>, size: vec2<f32>, dir: vec2<f32>, length_px: f32, falloff: f32) -> vec3<f32> {
+    let steps = 20u;
+    let start = 2.0;
+    if length_px <= start { return ab_blur_at(uv, 0.0); }
+    let growth = pow(length_px / start, 1.0 / f32(steps));
+    var sum = vec3(0.0);
+    var total = 0.0;
+    var near = start;
+    for (var i = 0u; i < steps; i++) {
+        let far = near * growth;
+        let mid = sqrt(near * far);
+        let weight = (far - near) * pow(mid, -falloff);
+        sum += weight * ab_blur_at(uv - dir * mid / size, ab_lod(far - near));
+        total += weight;
+        near = far;
+    }
+    return sum / total;
+}
+
+/// A Gaussian of standard deviation `sigma` pixels along `dir`, thin across.
+fn ab_line(uv: vec2<f32>, size: vec2<f32>, dir: vec2<f32>, sigma: f32) -> vec3<f32> {
+    let taps = 17;
+    let reach = 2.5 * sigma;
+    let spacing = reach / 8.0;
+    var sum = vec3(0.0);
+    var total = 0.0;
+    for (var i = 0; i < taps; i++) {
+        let s = f32(i - 8) * spacing;
+        let weight = exp(-0.5 * (s / sigma) * (s / sigma));
+        sum += weight * ab_blur_at(uv + dir * s / size, ab_lod(spacing));
+        total += weight;
+    }
+    return sum / total;
+}
+
+/// An elliptical Gaussian with standard deviations `sigma_r` along `radial`
+/// and `sigma_t` across it, from 24 Vogel taps.
+fn ab_ellipse(uv: vec2<f32>, size: vec2<f32>, radial: vec2<f32>, sigma_r: f32, sigma_t: f32) -> vec3<f32> {
+    let tangent = vec2(-radial.y, radial.x);
+    let extent = 2.4;
+    let widest = max(sigma_r, sigma_t);
+    let lod = ab_lod(0.3 * widest + 0.5 * sqrt(sigma_r * sigma_t));
+    var sum = vec3(0.0);
+    var total = 0.0;
+    for (var i = 0u; i < 24u; i++) {
+        let r = sqrt((f32(i) + 0.5) / 24.0) * extent;
+        let a = f32(i) * GOLDEN_ANGLE;
+        let u = vec2(cos(a), sin(a)) * r;
+        let weight = exp(-0.5 * r * r);
+        let offset = radial * (u.x * sigma_r) + tangent * (u.y * sigma_t);
+        sum += weight * ab_blur_at(uv + offset / size, lod);
+        total += weight;
+    }
+    return sum / total;
+}
+
+/// Coma's share of the light reaching this pixel: the tail of every source
+/// behind it along the radius, `taper`-shaped, of length `length_px`, each
+/// source contributing the share its own field position scatters.
+fn ab_coma(
+    uv: vec2<f32>,
+    size: vec2<f32>,
+    radial: vec2<f32>,
+    length_px: f32,
+    amount: f32,
+    exponent: f32,
+    taper: f32,
+) -> vec3<f32> {
+    let steps = 16u;
+    let reach_px = max(length_px, 1.0);
+    let segment = reach_px / f32(steps);
+    let diag = 0.5 * length(size);
+    var sum = vec3(0.0);
+    var total = 0.0;
+    for (var i = 0u; i < steps; i++) {
+        let t = (f32(i) + 0.5) / f32(steps);
+        let tap = uv - radial * (t * reach_px) / size;
+        let weight = pow(1.0 - t, taper);
+        let field = length((tap - 0.5) * size) / diag;
+        let share = amount * pow(field, exponent);
+        sum += weight * share * ab_blur_at(tap, ab_lod(segment));
+        total += weight;
+    }
+    return sum / total;
+}
+
+/// The light a tail of length `length_px` along `dir` (a unit vector in
+/// pixels, pointing from the destination back toward the sources) carries to
+/// this pixel, density `(1 - t)^taper` over the tail: the shape of `ab_coma`
+/// with a share that is the same all along it. The weights sum to 1.
+fn ab_tail(uv: vec2<f32>, size: vec2<f32>, dir: vec2<f32>, length_px: f32, taper: f32) -> vec3<f32> {
+    let steps = 16u;
+    let reach_px = max(length_px, 1.0);
+    let segment = reach_px / f32(steps);
+    var sum = vec3(0.0);
+    var total = 0.0;
+    for (var i = 0u; i < steps; i++) {
+        let t = (f32(i) + 0.5) / f32(steps);
+        let weight = pow(1.0 - t, taper);
+        sum += weight * ab_blur_at(uv - dir * (t * reach_px) / size, ab_lod(segment));
+        total += weight;
+    }
+    return sum / total;
+}
+
+@compute @workgroup_size(8, 8)
+fn cs_ab_apply(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(color_out);
+    if any(id.xy >= dims) { return; }
+    let size = vec2<f32>(dims);
+    mask_aspect = size.x / size.y;
+    let c = textureLoad(composed_in, id.xy, 0);
+    let uv = (vec2<f32>(id.xy) + 0.5) / size;
+    let q = (uv - 0.5) * vec2(mask_aspect, 1.0);
+    let offset = (uv - 0.5) * size;
+    let reach = length(offset);
+    // 1 at the corner, as everywhere else.
+    let field_r = reach / (0.5 * length(size));
+    let radial = select(vec2(1.0, 0.0), offset / max(reach, 1.0e-6), reach > 1.0e-4);
+    let height = size.y;
+    let first = resolved.element_first;
+    let count = resolved.element_count;
+
+    // A covering prescription's own point spread replaces the parametric
+    // astigmatism, corner softness and coma: the bake's spot at this field's
+    // best focus, its core a Gaussian ellipse and its coma a tail.
+    var rx = find_prescription(q, make_ctx(resolved, dims));
+    var rx_psf: RxAnalysis;
+    var rx_amount = 0.0;
+    if rx.index != NO_ROW {
+        let e = elements[first + rx.index];
+        let h = rx_header(e);
+        if (bank[h + H_FLAGS] & RX_PSF) != 0u {
+            rx_amount = max(e.params[1], 0.0) * rx.weight;
+            let r = reach / size.x * resolved.sensor_width_mm / bank_f(h + H_HALF_DIAGONAL);
+            rx_psf = rx_analysis(h, r);
+        }
+    }
+    let px_per_mm = size.x / resolved.sensor_width_mm;
+
+    // The field-dependent Gaussian point spreads add in variance.
+    var variance_r = (rx_psf.sigma_r * px_per_mm * rx_amount) * (rx_psf.sigma_r * px_per_mm * rx_amount);
+    var variance_t = (rx_psf.sigma_t * px_per_mm * rx_amount) * (rx_psf.sigma_t * px_per_mm * rx_amount);
+    for (var i = 0u; i < count; i++) {
+        let e = elements[first + i];
+        if e.kind != ELEMENT_ASTIGMATISM && e.kind != ELEMENT_CORNER_SOFTNESS { continue; }
+        var w = region_weight(e, q);
+        if rx.weight > 0.0 { w *= 1.0 - rx.weight; }
+        if w <= 0.0 { continue; }
+        if e.kind == ELEMENT_ASTIGMATISM {
+            let amount = bounded(e.params[0], -1.0, 1.0, 0.0);
+            let exponent = select(2.0, bounded(e.params[1], 0.0, 8.0, 2.0), e.params[1] > 0.0);
+            let major = abs(amount) * height * pow(field_r, exponent) * w;
+            let minor = major * bounded(e.params[2], 0.0, 1.0, 0.0);
+            variance_r += select(minor * minor, major * major, amount >= 0.0);
+            variance_t += select(major * major, minor * minor, amount >= 0.0);
+        } else {
+            let start = bounded(e.params[2], 0.0, 0.99, 0.0);
+            let exponent = select(2.0, bounded(e.params[1], 0.0, 8.0, 2.0), e.params[1] > 0.0);
+            let across = clamp((field_r - start) / (1.0 - start), 0.0, 1.0);
+            let sigma = bounded(e.params[0], 0.0, 1.0, 0.0) * height * pow(across, exponent) * w;
+            variance_r += sigma * sigma;
+            variance_t += sigma * sigma;
+        }
+    }
+    var base = c.rgb;
+    let sigma_r = sqrt(variance_r);
+    let sigma_t = sqrt(variance_t);
+    if max(sigma_r, sigma_t) > 0.2 {
+        base = ab_ellipse(uv, size, radial, sigma_r, sigma_t);
+    }
+
+    // `scattered` is the share of each channel's light the elements take out
+    // of the core, `added` what they put back elsewhere.
+    var scattered = vec3(0.0);
+    var added = vec3(0.0);
+    var transmitted = 1.0;
+    for (var i = 0u; i < count; i++) {
+        let e = elements[first + i];
+        if e.kind < ELEMENT_SPHERICAL_GLOW || e.kind > ELEMENT_DIRT { continue; }
+        var w = region_weight(e, q);
+        if rx.weight > 0.0 && e.kind == ELEMENT_COMA { w *= 1.0 - rx.weight; }
+        if w <= 0.0 { continue; }
+        let p = e.params;
+        switch e.kind {
+            case ELEMENT_SPHERICAL_GLOW: {
+                let reference = select(2.8, bounded(p[1], 0.7, 64.0, 2.8), p[1] > 0.0);
+                let exponent = select(2.0, bounded(p[2], 0.0, 8.0, 2.0), p[2] > 0.0);
+                let share = clamp(bounded(p[0], 0.0, 1.0, 0.0) * pow(reference / resolved.f_number, exponent), 0.0, 0.9) * w;
+                let radius = select(0.012, bounded(p[3], 0.0, 1.0, 0.012), p[3] > 0.0) * height;
+                let tail = select(0.55, p[4], p[4] > 0.0);
+                scattered += vec3(share);
+                added += share * ab_halo(uv, size, radius, tail);
+            }
+            case ELEMENT_COMA: {
+                let amount = bounded(p[0], 0.0, 1.0, 0.0);
+                let exponent = select(1.0, bounded(p[2], 0.0, 8.0, 1.0), p[2] > 0.0);
+                let taper = select(2.0, bounded(p[3], 0.0, 16.0, 2.0), p[3] > 0.0);
+                let length_px = bounded(p[1], 0.0, 1.0, 0.0) * height * field_r;
+                scattered += vec3(amount * pow(field_r, exponent) * w);
+                added += w * ab_coma(uv, size, radial, length_px, amount, exponent, taper);
+            }
+            case ELEMENT_DIFFUSION, ELEMENT_PRO_MIST, ELEMENT_BLACK_PRO_MIST, ELEMENT_GLIMMERGLASS, ELEMENT_FOG: {
+                var radius = 0.01;
+                var tail = 0.5;
+                if e.kind == ELEMENT_PRO_MIST { radius = 0.012; tail = 0.65; }
+                if e.kind == ELEMENT_BLACK_PRO_MIST { radius = 0.012; tail = 0.3; }
+                if e.kind == ELEMENT_GLIMMERGLASS { radius = 0.004; tail = 0.35; }
+                if e.kind == ELEMENT_FOG { radius = 0.03; tail = 0.8; }
+                radius = select(radius, bounded(p[1], 0.0, 1.0, radius), p[1] > 0.0) * height;
+                tail = select(tail, p[2], p[2] > 0.0);
+                let share = bounded(p[0], 0.0, 1.0, 0.0) * w;
+                var halo = ab_halo(uv, size, radius, tail);
+                if e.kind == ELEMENT_GLIMMERGLASS {
+                    // Fine glints: the scattered light twinkles around its mean.
+                    let contrast = select(0.8, clamp(p[3], 0.0, 1.0), p[3] > 0.0);
+                    halo *= 1.0 + contrast * (2.0 * ab_hash(id.xy) - 1.0);
+                }
+                scattered += vec3(share);
+                added += share * halo;
+            }
+            case ELEMENT_STAR_FILTER: {
+                let points = select(4u, u32(clamp(bounded(p[0], 2.0, 16.0, 4.0) + 0.5, 2.0, 16.0)), p[0] > 0.0);
+                let rotation = bounded(p[1], -100.0, 100.0, 0.0);
+                let length_px = select(0.2, bounded(p[2], 0.0, 2.0, 0.2), p[2] > 0.0) * height;
+                let falloff = select(1.0, bounded(p[4], 0.0, 4.0, 1.0), p[4] > 0.0);
+                let share = bounded(p[3], 0.0, 1.0, 0.0) * w;
+                var spikes = vec3(0.0);
+                for (var k = 0u; k < points; k++) {
+                    let a = rotation + 2.0 * PI * f32(k) / f32(points);
+                    spikes += ab_spike(uv, size, vec2(cos(a), sin(a)), length_px, falloff);
+                }
+                scattered += vec3(share);
+                added += share * spikes / f32(points);
+            }
+            case ELEMENT_HALATION: {
+                var tint = clamp(vec3(p[2], p[3], p[4]), vec3(0.0), vec3(1.0));
+                if !any(tint > vec3(0.0)) { tint = vec3(1.0, 0.35, 0.08); }
+                let radius = select(0.02, bounded(p[1], 0.0, 1.0, 0.02), p[1] > 0.0) * height;
+                let tail = select(0.5, clamp(p[5], 0.0, 1.0), p[5] > 0.0);
+                let share = bounded(p[0], 0.0, 1.0, 0.0) * w * tint;
+                let halo = (ab_gauss_at(uv, radius, size) + tail * ab_gauss_at(uv, 2.0 * radius, size)) / (1.0 + tail);
+                scattered += share;
+                added += share * halo;
+            }
+            case ELEMENT_WATER_DROPS: {
+                // Each drop is a lens: it shows the image displaced against its
+                // surface normal, and defocused, being much nearer than the focus.
+                let layers = f32(textureNumLayers(lens_masks) - 1u);
+                let layer = i32(clamp(bounded(p[1], 0.0, 4096.0, 0.0), 0.0, layers));
+                let coords = select(uv, mask_uv(e, q), e.region_kind == REGION_MASK);
+                let normal = mask_texel(layer, coords).rg * 2.0 - 1.0;
+                let shift = -normal * bounded(p[0], -1.0, 1.0, 0.0) / vec2(mask_aspect, 1.0);
+                let seen = ab_gauss_at(uv + shift, bounded(p[2], 0.0, 1.0, 0.0) * height, size);
+                base = mix(base, seen, w);
+            }
+            case ELEMENT_SMEAR: {
+                let share = bounded(p[0], 0.0, 1.0, 0.0) * w;
+                let sigma = max(select(0.03, bounded(p[1], 0.0, 1.0, 0.03), p[1] > 0.0) * height, 1.0);
+                let a = bounded(p[2], -100.0, 100.0, 0.0);
+                scattered += vec3(share);
+                added += share * ab_line(uv, size, vec2(cos(a), sin(a)), sigma);
+            }
+            case ELEMENT_DIRT: {
+                let share = bounded(p[0], 0.0, 1.0, 0.0) * w;
+                let radius = select(0.02, bounded(p[1], 0.0, 1.0, 0.02), p[1] > 0.0) * height;
+                let tail = select(0.5, p[3], p[3] > 0.0);
+                scattered += vec3(share);
+                added += share * ab_halo(uv, size, radius, tail);
+                transmitted *= 1.0 - bounded(p[2], 0.0, 1.0, 0.0) * w;
+            }
+            default: {}
+        }
+    }
+    // The prescription's coma: a tail along the radius, outward for a
+    // positive centroid shift.
+    if rx_amount > 0.0 && rx_psf.share != 0.0 {
+        let share = abs(rx_psf.share) * rx_amount;
+        let tail = ab_tail(uv, size, radial * sign(rx_psf.share), rx_psf.length * px_per_mm, 2.0);
+        scattered += vec3(share);
+        added += share * tail;
+    }
+    // Shares that add to more than the light there is are scaled together.
+    let most = max(scattered.r, max(scattered.g, scattered.b));
+    let scale = min(1.0, 0.98 / max(most, 1.0e-6));
+    let rgb = (base * (vec3(1.0) - scattered * scale) + added * scale) * transmitted;
+    textureStore(color_out, id.xy, vec4(radiance(rgb), c.a));
 }

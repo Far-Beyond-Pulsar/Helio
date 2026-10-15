@@ -96,6 +96,113 @@ pub mod element_kind {
     /// Light lost between the f-number and the T-stop: scales by
     /// `(f_number / t_stop)^2`; `params[0]` is the amount (0..1).
     pub const T_STOP_LOSS: u32 = 23;
+    /// Spherical-aberration glow: a share of the light scattered into a soft
+    /// halo that grows as the lens opens up: [`super::glow`].
+    pub const SPHERICAL_GLOW: u32 = 24;
+    /// Coma: a comet tail pointing away from the axis: [`super::coma`].
+    pub const COMA: u32 = 25;
+    /// Astigmatism: an elliptical PSF, radial or tangential, growing with the
+    /// field radius: [`super::astigmatism`].
+    pub const ASTIGMATISM: u32 = 26;
+    /// Corner softness (MTF falloff): an isotropic blur growing with the
+    /// field radius: [`super::corner_softness`].
+    pub const CORNER_SOFTNESS: u32 = 27;
+    /// Generic diffusion filter: [`super::diffusion`].
+    pub const DIFFUSION: u32 = 28;
+    /// Pro-Mist: a wide, heavy-tailed halo that lifts shadows
+    /// ([`super::diffusion`], tail defaulting to 0.65).
+    pub const PRO_MIST: u32 = 29;
+    /// Black Pro-Mist: the same strength with a short tail, so far shadows
+    /// stay dark ([`super::diffusion`], tail defaulting to 0.3).
+    pub const BLACK_PRO_MIST: u32 = 30;
+    /// Glimmerglass: a small halo with fine glints
+    /// ([`super::diffusion`], glint contrast in [`super::diffusion::GLINT`]).
+    pub const GLIMMERGLASS: u32 = 31;
+    /// Star / cross-screen filter: [`super::star`].
+    pub const STAR_FILTER: u32 = 32;
+    /// Film halation, a red-orange halo around highlights:
+    /// [`super::halation`].
+    pub const HALATION: u32 = 33;
+    /// Water drops refracting the image through a normal map:
+    /// [`super::water_drops`].
+    pub const WATER_DROPS: u32 = 34;
+    /// Smear / Vaseline: directional diffusion: [`super::smear`].
+    pub const SMEAR: u32 = 35;
+    /// Fog / breath: spatially varying diffusion (give it a mask region):
+    /// [`super::diffusion`] (tail defaulting to 0.8).
+    pub const FOG: u32 = 36;
+    /// Dirt: local diffusion with a slight transmission loss:
+    /// [`super::dirt`].
+    pub const DIRT: u32 = 37;
+    /// A baked real lens ([`crate::PrescriptionBank`] layer
+    /// `params[0]`) driving, inside its region, the ray map, the transmission,
+    /// the pupil, the focus field and the in-focus point spread from the
+    /// bake instead of their parametric equivalents: [`super::prescription`].
+    pub const PRESCRIPTION: u32 = 38;
+    /// A user-written element, compiled into the lens shader from the WGSL
+    /// snippet given to [`crate::LensPass::new_with_user`]; inert without one.
+    /// `flags` selects which hooks run, see [`super::user`].
+    pub const USER: u32 = 39;
+}
+
+/// `params` slots of an [`element_kind::PRESCRIPTION`] element.
+///
+/// Within the element's region (weight `w`), the baked lens replaces:
+///
+/// * the **ray map**: [`element_kind::PROJECTION`], [`element_kind::BROWN_CONRADY`],
+///   [`element_kind::DIVISION`], [`element_kind::ANAMORPHIC_DISTORTION`] and
+///   [`element_kind::LATERAL_CA`] elements act with weight `1 - w`;
+/// * the **natural and optical vignetting**: [`element_kind::NATURAL_VIGNETTE`]
+///   and [`element_kind::OPTICAL_VIGNETTE`] act with weight `1 - w` (the bake's
+///   transmission is `cos^4` of the traced chief ray times the share of the
+///   stop the apertures leave);
+/// * the **cat's eye**: the `CATS_EYE` and `BARREL_RADIUS` of a covering
+///   [`element_kind::PUPIL`] element are ignored where `w >= 0.5` (the iris
+///   blades, swirl, squeeze and the profile settings still apply on top of the
+///   baked footprint);
+/// * the **longitudinal chromatic aberration**: [`element_kind::LONGITUDINAL_CA`]
+///   elements act with weight `1 - w`, and the lens row's `field_curvature` is
+///   scaled by `1 - w` (the bake's field curvature takes its place);
+/// * the **astigmatism, corner softness and coma**: such elements act with weight
+///   `1 - w` (the bake's point spread at each field's best focus takes their
+///   place).
+///
+/// Everything else stays: mechanical vignetting, filters, `T_STOP_LOSS`, the
+/// ports, diopters, prisms, spherical glow, diffusion... The first
+/// `PRESCRIPTION` element that covers a pixel acts there. When the element's
+/// region is the full frame it also sets the view's focal length to the bake's
+/// effective focal length and keeps its f-number at or above the baked one.
+pub mod prescription {
+    /// Layer of the [`crate::PrescriptionBank`].
+    pub const LAYER: usize = 0;
+    /// Scale of the in-focus point spread (core blur and coma tail): 1 is the
+    /// bake, 0 leaves it out. A zeroed row therefore applies none.
+    pub const PSF_AMOUNT: usize = 1;
+}
+
+/// `flags` of an [`element_kind::USER`] element: which hooks of the snippet
+/// run for it. `params` are handed to them untouched.
+///
+/// The snippet defines any of (WGSL, `params` is the element's 16 floats):
+///
+/// ```wgsl
+/// // Where the sensor point `uv` (unit square, y down; the point the stack has
+/// // reached) looks on the rendered image. `t`: wavelength position, -1 blue .. 1 red.
+/// fn user_ray_map(uv: vec2<f32>, params: array<f32, 16>, t: f32) -> vec2<f32>
+/// // Light reaching `uv`, per channel.
+/// fn user_transmission(uv: vec2<f32>, params: array<f32, 16>) -> vec3<f32>
+/// // The focus in dioptres at `uv` given `s`, the dioptres so far.
+/// fn user_focus(uv: vec2<f32>, params: array<f32, 16>, s: f32) -> f32
+/// ```
+pub mod user {
+    /// Runs `user_ray_map` in the ray map.
+    pub const MAP: u32 = 1;
+    /// Runs `user_transmission`.
+    pub const TRANSMISSION: u32 = 2;
+    /// Runs `user_focus` in the focus field.
+    pub const FOCUS: u32 = 4;
+    /// `user_ray_map` depends on `t`: the composite samples wavelengths.
+    pub const SPECTRAL: u32 = 8;
 }
 
 /// `params` slots of an [`element_kind::PROJECTION`] element.
@@ -349,6 +456,162 @@ pub mod pupil {
     pub const SA_ASYMMETRY: usize = 15;
 }
 
+/// `params` slots of an [`element_kind::SPHERICAL_GLOW`] element. Spherical
+/// aberration, uncorrected at wide apertures, scatters a share of the light
+/// into a soft halo around everything; stopping down cuts it as
+/// `(REFERENCE_F_NUMBER / N)^EXPONENT`. Energy conserving: the share leaves
+/// the core and arrives in the halo.
+pub mod glow {
+    /// Scattered share at `REFERENCE_F_NUMBER` (0..1).
+    pub const AMOUNT: usize = 0;
+    /// F-number at which `AMOUNT` holds (<= 0: 2.8).
+    pub const REFERENCE_F_NUMBER: usize = 1;
+    /// Falloff exponent `k` of `1 / N^k` (<= 0: 2).
+    pub const EXPONENT: usize = 2;
+    /// Radius of the halo's first lobe in image heights (<= 0: 0.012).
+    pub const RADIUS: usize = 3;
+    /// Weight of the wider lobes, 0..1 (<= 0: 0.55).
+    pub const TAIL: usize = 4;
+}
+
+/// `params` slots of an [`element_kind::COMA`] element. Every point source
+/// drags a tail along the radius away from the axis: a share
+/// `AMOUNT * r^EXPONENT` of its light is spread along a length
+/// `LENGTH * r`, `r` the field radius (1 at the corner), densest at the
+/// source and tapering to a point.
+pub mod coma {
+    /// Scattered share at the frame corner (0..1).
+    pub const AMOUNT: usize = 0;
+    /// Tail length at the corner, image heights.
+    pub const LENGTH: usize = 1;
+    /// Power of the field radius in the share (<= 0: 1).
+    pub const EXPONENT: usize = 2;
+    /// Taper power of the tail's density `(1 - t)^SHAPE` (<= 0: 2).
+    pub const SHAPE: usize = 3;
+}
+
+/// `params` slots of an [`element_kind::ASTIGMATISM`] element. The point
+/// spread is a Gaussian ellipse aligned with the radius: the long axis has
+/// the standard deviation `|AMOUNT| * r^EXPONENT` image heights, the short
+/// one `MINOR_RATIO` times that. Positive `AMOUNT` elongates the point along
+/// the radius, negative across it (tangentially).
+pub mod astigmatism {
+    pub const AMOUNT: usize = 0;
+    /// Power of the field radius (<= 0: 2).
+    pub const EXPONENT: usize = 1;
+    /// Short axis over long axis, 0..1.
+    pub const MINOR_RATIO: usize = 2;
+}
+
+/// `params` slots of an [`element_kind::CORNER_SOFTNESS`] element: a round
+/// Gaussian of standard deviation
+/// `SIGMA * ((r - START) / (1 - START))^EXPONENT` image heights, so the
+/// sharpness (MTF) falls off toward the corners.
+pub mod corner_softness {
+    /// Standard deviation at the corner, image heights.
+    pub const SIGMA: usize = 0;
+    /// Power of the field radius (<= 0: 2).
+    pub const EXPONENT: usize = 1;
+    /// Field radius where the blur begins, 0..1.
+    pub const START: usize = 2;
+}
+
+/// `params` slots shared by the diffusion filters
+/// ([`element_kind::DIFFUSION`], [`element_kind::PRO_MIST`],
+/// [`element_kind::BLACK_PRO_MIST`], [`element_kind::GLIMMERGLASS`],
+/// [`element_kind::FOG`]). A share `STRENGTH` of the light is scattered into
+/// a sum of four Gaussians (radii `RADIUS * 2^j`, weights `TAIL^j`
+/// normalised) and taken out of the core: the frame's energy never changes.
+/// The kinds differ in the defaults of `RADIUS` and `TAIL` (a slot <= 0 takes
+/// the kind's default).
+pub mod diffusion {
+    /// Scattered share, 0..1.
+    pub const STRENGTH: usize = 0;
+    /// First lobe's standard deviation, image heights.
+    pub const RADIUS: usize = 1;
+    /// Weight ratio of successive lobes, 0..1: small keeps the halo near the
+    /// highlight (Black Pro-Mist), large reaches far (Pro-Mist, fog).
+    pub const TAIL: usize = 2;
+    /// Glimmerglass: contrast of the glints, 0..1 (<= 0: 0.8). The scattered
+    /// light is multiplied per pixel by `1 + GLINT * (2 h - 1)`, `h` a
+    /// deterministic hash, mean 1.
+    pub const GLINT: usize = 3;
+}
+
+/// `params` slots of an [`element_kind::STAR_FILTER`] element: `POINTS`
+/// spikes (a cross-screen filter has 4, a six-point star 6), each a line of
+/// light of the given `LENGTH` fading as `1 / d^FALLOFF`; `INTENSITY` of the
+/// frame's light goes into the spikes, so the energy is conserved.
+pub mod star {
+    /// Number of spikes, 2..=16 (<= 0: 4). Spike `k` points at
+    /// `ROTATION + 2 pi k / POINTS`.
+    pub const POINTS: usize = 0;
+    /// Rotation of the first spike in radians (y down).
+    pub const ROTATION: usize = 1;
+    /// Spike length, image heights (<= 0: 0.2).
+    pub const LENGTH: usize = 2;
+    /// Share of the light in the spikes, 0..1.
+    pub const INTENSITY: usize = 3;
+    /// Fade exponent along a spike (<= 0: 1).
+    pub const FALLOFF: usize = 4;
+}
+
+/// `params` slots of an [`element_kind::HALATION`] element. Light that
+/// passes the film and reflects off its backing re-exposes the emulsion
+/// around highlights, mostly in the red layer: channel `c` scatters the share
+/// `STRENGTH * TINT[c]` of its light into a two-lobe halo. Each channel
+/// conserves its own energy.
+pub mod halation {
+    pub const STRENGTH: usize = 0;
+    /// First lobe's standard deviation, image heights (<= 0: 0.02).
+    pub const RADIUS: usize = 1;
+    /// Per-channel scatter weight, slots 2..5, 0..1 (all <= 0: 1, 0.35, 0.08).
+    pub const TINT: usize = 2;
+    /// Weight of the second, twice as wide lobe, 0..1 (<= 0: 0.5).
+    pub const TAIL: usize = 5;
+}
+
+/// `params` slots of an [`element_kind::WATER_DROPS`] element. Inside the
+/// region (the drops' footprint, normally a mask channel) the image is looked
+/// up at a position displaced by `-REFRACTION` times the normal of layer
+/// `NORMAL_LAYER` of the mask array (red and green hold `n * 0.5 + 0.5`, as
+/// [`crate::water_drop_mask`] writes them; a drop inverts the image), and blurred by
+/// `DEFOCUS`, the drop being much nearer than the focus.
+pub mod water_drops {
+    /// Displacement at a unit normal, image heights.
+    pub const REFRACTION: usize = 0;
+    /// Layer of the mask array holding the normals.
+    pub const NORMAL_LAYER: usize = 1;
+    /// Standard deviation of the local defocus, image heights.
+    pub const DEFOCUS: usize = 2;
+}
+
+/// `params` slots of an [`element_kind::SMEAR`] element: a share `STRENGTH`
+/// of the light is spread along the direction `ANGLE` in a Gaussian of
+/// standard deviation `LENGTH` (a lens smeared with grease), conserving
+/// energy.
+pub mod smear {
+    pub const STRENGTH: usize = 0;
+    /// Standard deviation along the direction, image heights (<= 0: 0.03).
+    pub const LENGTH: usize = 1;
+    /// Direction in radians (y down).
+    pub const ANGLE: usize = 2;
+}
+
+/// `params` slots of an [`element_kind::DIRT`] element: where the region
+/// covers, a share `STRENGTH * coverage` of the light is scattered
+/// (diffusion lobes of `RADIUS`, `TAIL`) and `LOSS * coverage` of the light
+/// is absorbed.
+pub mod dirt {
+    pub const STRENGTH: usize = 0;
+    /// First lobe's standard deviation, image heights (<= 0: 0.02).
+    pub const RADIUS: usize = 1;
+    /// Light absorbed under full coverage, 0..1.
+    pub const LOSS: usize = 2;
+    /// Weight ratio of successive lobes, 0..1 (<= 0: 0.5).
+    pub const TAIL: usize = 3;
+}
+
 /// Region kinds (`LensElementComponent::region_kind`). Regions live in
 /// image-height units centred on the frame: `q = (uv - 0.5) * (aspect, 1)`,
 /// y down.
@@ -364,8 +627,28 @@ pub mod region_kind {
     pub const POLYGON: u32 = 3;
     /// Annulus `r0 <= |q - c| <= r1`. `region = [r0, r1, cx, cy]`.
     pub const RADIAL_BAND: u32 = 4;
-    /// Reserved for a mask-texture channel; covers nothing yet.
+    /// One channel of a layer of the mask array ([`crate::MASKS`]), covering
+    /// the frame: the coverage is the texel value, bilinear (no feather
+    /// applies). With no mask array bound it covers nothing. `region`:
+    /// see [`mask`].
     pub const MASK: u32 = 5;
+}
+
+/// `region` slots of a [`region_kind::MASK`] region. The mask is looked up at
+/// `(uv - 0.5) / SCALE + 0.5 - OFFSET` (`uv` the unit square of the frame).
+pub mod mask {
+    /// Layer of the mask array.
+    pub const LAYER: usize = 0;
+    /// Channel: 0 red, 1 green, 2 blue, 3 alpha.
+    pub const CHANNEL: usize = 1;
+    /// 1 covers where the texel is 0 instead.
+    pub const INVERT: usize = 2;
+    /// Magnification of the mask about the frame centre (<= 0: 1).
+    pub const SCALE: usize = 3;
+    /// Shift of the mask in unit-square uv (slots 4 and 5).
+    pub const OFFSET: usize = 4;
+    /// 1 repeats the mask outside the frame-sized tile; 0 covers nothing there.
+    pub const TILE: usize = 6;
 }
 
 /// A camera's lens. One row per view; see the module doc.
@@ -525,7 +808,13 @@ pub enum LensRegion<'a> {
     /// Convex, 3 to 8 vertices.
     Polygon(&'a [[f32; 2]]),
     RadialBand { r0: f32, r1: f32, center: [f32; 2] },
+    /// Channel 0 (red) of layer 0 of the mask array; see
+    /// [`LensRegion::MaskChannel`].
     Mask,
+    /// One channel (0 red .. 3 alpha) of a layer of the mask array, covering
+    /// where it is bright (`invert`: dark). Refine the mapping with
+    /// [`LensElementComponent::with_mask_transform`].
+    MaskChannel { layer: u32, channel: u32, invert: bool },
 }
 
 impl LensElementComponent {
@@ -557,8 +846,198 @@ impl LensElementComponent {
                 set(region_kind::RADIAL_BAND, &[r0, r1, center[0], center[1]])
             }
             LensRegion::Mask => set(region_kind::MASK, &[]),
+            LensRegion::MaskChannel { layer, channel, invert } => set(
+                region_kind::MASK,
+                &[layer as f32, channel as f32, if invert { 1.0 } else { 0.0 }],
+            ),
         }
         row
+    }
+
+    /// A baked lens: `layer` of the [`crate::PrescriptionBank`], point spread
+    /// at full strength. See [`prescription`] for what it replaces.
+    pub fn prescription(layer: u32, region: LensRegion<'_>) -> Self {
+        let mut params = [0.0; 16];
+        params[prescription::LAYER] = layer as f32;
+        params[prescription::PSF_AMOUNT] = 1.0;
+        Self::with_region(element_kind::PRESCRIPTION, params, region)
+    }
+
+    /// Scales a prescription's in-focus point spread (0 off).
+    pub fn with_psf_amount(mut self, amount: f32) -> Self {
+        self.params[prescription::PSF_AMOUNT] = amount;
+        self
+    }
+
+    /// A user element running the hooks selected by `hooks` ([`user`]) with
+    /// `params`; without a snippet it does nothing.
+    pub fn user(hooks: u32, params: [f32; 16], region: LensRegion<'_>) -> Self {
+        let mut row = Self::with_region(element_kind::USER, params, region);
+        row.flags = hooks;
+        row
+    }
+
+    /// Maps a mask region: magnified by `scale` about the frame centre,
+    /// shifted by `offset` (unit-square uv), repeating outside the frame when
+    /// `tile`.
+    pub fn with_mask_transform(mut self, scale: f32, offset: [f32; 2], tile: bool) -> Self {
+        self.region[mask::SCALE] = scale;
+        self.region[mask::OFFSET] = offset[0];
+        self.region[mask::OFFSET + 1] = offset[1];
+        self.region[mask::TILE] = if tile { 1.0 } else { 0.0 };
+        self
+    }
+
+    /// Spherical-aberration glow: `amount` scattered at f-number
+    /// `reference_f_number`, scaling as `1 / N^exponent`; `radius` in image
+    /// heights.
+    pub fn spherical_glow(
+        amount: f32,
+        reference_f_number: f32,
+        exponent: f32,
+        radius: f32,
+        region: LensRegion<'_>,
+    ) -> Self {
+        let mut params = [0.0; 16];
+        params[glow::AMOUNT] = amount;
+        params[glow::REFERENCE_F_NUMBER] = reference_f_number;
+        params[glow::EXPONENT] = exponent;
+        params[glow::RADIUS] = radius;
+        Self::with_region(element_kind::SPHERICAL_GLOW, params, region)
+    }
+
+    /// Coma: `amount` of the light at the corner in a tail `length` image
+    /// heights long there, both growing with the field radius.
+    pub fn coma(amount: f32, length: f32, region: LensRegion<'_>) -> Self {
+        let mut params = [0.0; 16];
+        params[coma::AMOUNT] = amount;
+        params[coma::LENGTH] = length;
+        Self::with_region(element_kind::COMA, params, region)
+    }
+
+    /// Astigmatism: positive `amount` elongates points along the radius,
+    /// negative across it; see [`astigmatism`].
+    pub fn astigmatism(amount: f32, minor_ratio: f32, region: LensRegion<'_>) -> Self {
+        let mut params = [0.0; 16];
+        params[astigmatism::AMOUNT] = amount;
+        params[astigmatism::MINOR_RATIO] = minor_ratio;
+        Self::with_region(element_kind::ASTIGMATISM, params, region)
+    }
+
+    /// Corner softness: a blur of `sigma` image heights at the corner.
+    pub fn corner_softness(sigma: f32, start: f32, region: LensRegion<'_>) -> Self {
+        let mut params = [0.0; 16];
+        params[corner_softness::SIGMA] = sigma;
+        params[corner_softness::START] = start;
+        Self::with_region(element_kind::CORNER_SOFTNESS, params, region)
+    }
+
+    fn diffusion_kind(kind: u32, strength: f32, radius: f32, region: LensRegion<'_>) -> Self {
+        let mut params = [0.0; 16];
+        params[diffusion::STRENGTH] = strength;
+        params[diffusion::RADIUS] = radius;
+        Self::with_region(kind, params, region)
+    }
+
+    /// A generic diffusion filter scattering `strength` of the light into a
+    /// halo of `radius` image heights (<= 0: 0.01).
+    pub fn diffusion(strength: f32, radius: f32, region: LensRegion<'_>) -> Self {
+        Self::diffusion_kind(element_kind::DIFFUSION, strength, radius, region)
+    }
+
+    /// A Pro-Mist filter: a wide halo that lifts the shadows.
+    pub fn pro_mist(strength: f32, region: LensRegion<'_>) -> Self {
+        Self::diffusion_kind(element_kind::PRO_MIST, strength, 0.0, region)
+    }
+
+    /// A Black Pro-Mist filter: the same strength, a halo that stays close
+    /// to the highlights.
+    pub fn black_pro_mist(strength: f32, region: LensRegion<'_>) -> Self {
+        Self::diffusion_kind(element_kind::BLACK_PRO_MIST, strength, 0.0, region)
+    }
+
+    /// A Glimmerglass filter: a small halo with fine glints.
+    pub fn glimmerglass(strength: f32, region: LensRegion<'_>) -> Self {
+        Self::diffusion_kind(element_kind::GLIMMERGLASS, strength, 0.0, region)
+    }
+
+    /// Fog / breath: wide diffusion that follows a mask region.
+    pub fn fog(strength: f32, region: LensRegion<'_>) -> Self {
+        Self::diffusion_kind(element_kind::FOG, strength, 0.0, region)
+    }
+
+    /// Sets the weight ratio of a diffusion filter's successive lobes (diffusion kinds only).
+    pub fn with_diffusion_tail(mut self, tail: f32) -> Self {
+        self.params[diffusion::TAIL] = tail;
+        self
+    }
+
+    /// Sets the contrast of a Glimmerglass's glints.
+    pub fn with_glint(mut self, contrast: f32) -> Self {
+        self.params[diffusion::GLINT] = contrast;
+        self
+    }
+
+    /// A star filter of `points` spikes `length` image heights long taking
+    /// `intensity` of the light, the first at `rotation` radians.
+    pub fn star_filter(points: u32, rotation: f32, length: f32, intensity: f32, region: LensRegion<'_>) -> Self {
+        let mut params = [0.0; 16];
+        params[star::POINTS] = points as f32;
+        params[star::ROTATION] = rotation;
+        params[star::LENGTH] = length;
+        params[star::INTENSITY] = intensity;
+        Self::with_region(element_kind::STAR_FILTER, params, region)
+    }
+
+    /// Film halation: `strength` of the red channel's light in a halo of
+    /// `radius` image heights, with the default red-orange tint.
+    pub fn halation(strength: f32, radius: f32, region: LensRegion<'_>) -> Self {
+        let mut params = [0.0; 16];
+        params[halation::STRENGTH] = strength;
+        params[halation::RADIUS] = radius;
+        Self::with_region(element_kind::HALATION, params, region)
+    }
+
+    /// Sets a halation's per-channel scatter weights.
+    pub fn with_halation_tint(mut self, tint: [f32; 3]) -> Self {
+        self.params[halation::TINT..halation::TINT + 3].copy_from_slice(&tint);
+        self
+    }
+
+    /// Water drops: the image is refracted by up to `refraction` image
+    /// heights through the normals of mask layer `normal_layer`, and
+    /// defocused by `defocus` image heights, inside `region`.
+    pub fn water_drops(
+        refraction: f32,
+        normal_layer: u32,
+        defocus: f32,
+        region: LensRegion<'_>,
+    ) -> Self {
+        let mut params = [0.0; 16];
+        params[water_drops::REFRACTION] = refraction;
+        params[water_drops::NORMAL_LAYER] = normal_layer as f32;
+        params[water_drops::DEFOCUS] = defocus;
+        Self::with_region(element_kind::WATER_DROPS, params, region)
+    }
+
+    /// Smear: `strength` of the light spread `length` image heights (standard
+    /// deviation) along `angle`.
+    pub fn smear(strength: f32, length: f32, angle: f32, region: LensRegion<'_>) -> Self {
+        let mut params = [0.0; 16];
+        params[smear::STRENGTH] = strength;
+        params[smear::LENGTH] = length;
+        params[smear::ANGLE] = angle;
+        Self::with_region(element_kind::SMEAR, params, region)
+    }
+
+    /// Dirt: where `region` covers, `strength` of the light scatters (halo of
+    /// `radius` image heights) and `loss` of it is absorbed.
+    pub fn dirt(strength: f32, radius: f32, loss: f32, region: LensRegion<'_>) -> Self {
+        let mut params = [0.0; 16];
+        params[dirt::STRENGTH] = strength;
+        params[dirt::RADIUS] = radius;
+        params[dirt::LOSS] = loss;
+        Self::with_region(element_kind::DIRT, params, region)
     }
 
     /// A split diopter adding `power_dpt` dioptres inside `region`.

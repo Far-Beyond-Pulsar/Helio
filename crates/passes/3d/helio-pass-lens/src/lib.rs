@@ -14,6 +14,10 @@ pub use components::*;
 mod gpu_types;
 pub use gpu_types::*;
 pub mod ray_map;
+mod masks;
+pub use masks::*;
+mod prescriptions;
+pub use prescriptions::*;
 
 /// Scene-linear image after the lens, at the size of the pass's input.
 pub const LENS_COLOR: &str = "lens_color";
@@ -23,11 +27,72 @@ pub const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const APERTURE_SHAPES: &str = "lens_aperture_shapes";
 /// Format of aperture shape textures: coverage in red.
 pub const APERTURE_SHAPE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+/// Optional registry entry: a `D2Array` view of [`MASK_FORMAT`] layers for
+/// `region_kind::MASK` regions and the normals of water drops, see
+/// [`mask_array`]. Without it one transparent black 1x1 layer is bound, so a
+/// mask region covers nothing.
+pub const MASKS: &str = "lens_masks";
+/// Format of mask textures: four channels, normals or coverage.
+pub const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// Tile edge of the circle-of-confusion extent grid; equals `TILE` in the WGSL.
 const TILE: u32 = 16;
+/// Most levels of the aberration stage's pyramid (the first is half the
+/// image); equals `PYRAMID_LEVELS` in the WGSL.
+const PYRAMID_LEVELS: u32 = 8;
+
+/// Levels the pyramid of a `width` x `height` image has: halving to one texel,
+/// at most [`PYRAMID_LEVELS`]; the WGSL computes the same.
+fn pyramid_levels(width: u32, height: u32) -> u32 {
+    let half = width.div_ceil(2).max(height.div_ceil(2)).max(1);
+    (32 - half.leading_zeros()).min(PYRAMID_LEVELS)
+}
 
 const COMPUTE: wgpu::ShaderStages = wgpu::ShaderStages::COMPUTE;
+/// Binding of the prescription bank in the stages that consult it (resolve,
+/// circles of confusion, gather, composite, aberration); equals `bank` in the WGSL.
+const BANK_BINDING: u32 = 30;
+
+/// Markers around the default no-op `USER` hooks in `lens.wgsl`; a host
+/// snippet replaces what lies between them.
+const USER_BEGIN: &str = "// %%USER_BEGIN";
+const USER_END: &str = "// %%USER_END";
+/// The hooks a snippet may define, with the stand-in used for any it omits.
+const USER_HOOKS: [(&str, &str); 3] = [
+    (
+        "user_ray_map",
+        "fn user_ray_map(uv: vec2<f32>, params: array<f32, 16>, t: f32) -> vec2<f32> { return uv; }",
+    ),
+    (
+        "user_transmission",
+        "fn user_transmission(uv: vec2<f32>, params: array<f32, 16>) -> vec3<f32> { return vec3(1.0); }",
+    ),
+    (
+        "user_focus",
+        "fn user_focus(uv: vec2<f32>, params: array<f32, 16>, s: f32) -> f32 { return s; }",
+    ),
+];
+
+/// `lens.wgsl` with its default `USER` hooks replaced by `snippet`, plus the
+/// default of every hook the snippet leaves undefined.
+fn lens_source_with_user(snippet: &str) -> String {
+    let base = helio_core::shader::source_text(
+        "Screen-space lens",
+        helio_core::include_wgsl!("../shaders/lens.wgsl"),
+    );
+    let begin = base.find(USER_BEGIN).expect("lens.wgsl lost its user hook markers");
+    let end = base.find(USER_END).expect("lens.wgsl lost its user hook markers");
+    let mut hooks = String::from("const USER_ENABLED: bool = true;\n");
+    hooks.push_str(snippet);
+    hooks.push('\n');
+    for (name, fallback) in USER_HOOKS {
+        if !snippet.contains(&format!("fn {name}")) {
+            hooks.push_str(fallback);
+            hooks.push('\n');
+        }
+    }
+    format!("{}{}\n{}", &base[..begin], hooks, &base[end..])
+}
 
 fn image(device: &wgpu::Device, width: u32, height: u32, label: &str) -> wgpu::TextureView {
     device
@@ -59,12 +124,39 @@ struct Targets {
     output: wgpu::TextureView,
     tile_raw: wgpu::Buffer,
     tile_dilated: wgpu::Buffer,
+    /// The sensor image (defocus, ray map, transmission) while an aberration
+    /// element is present; `output` is then written by `cs_ab_apply`.
+    composed: wgpu::TextureView,
+    /// Box-filtered pyramid of `composed`: level 0 is half its size.
+    pyramid: wgpu::TextureView,
+    /// One single-level view per pyramid level, for the downsample.
+    pyramid_levels: Vec<wgpu::TextureView>,
 }
 
 impl Targets {
     fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
         let (width, height) = (width.max(1), height.max(1));
         let (half_w, half_h) = (width.div_ceil(2), height.div_ceil(2));
+        let levels = pyramid_levels(width, height);
+        let pyramid_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Lens aberration pyramid"),
+            size: wgpu::Extent3d { width: half_w, height: half_h, depth_or_array_layers: 1 },
+            mip_level_count: levels,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: OUTPUT_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        let pyramid_levels = (0..levels)
+            .map(|level| {
+                pyramid_texture.create_view(&wgpu::TextureViewDescriptor {
+                    base_mip_level: level,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
         let tiles = u64::from(width.div_ceil(TILE)) * u64::from(height.div_ceil(TILE));
         let tile_buffer = |label| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -84,6 +176,9 @@ impl Targets {
             output: image(device, width, height, "Lens colour"),
             tile_raw: tile_buffer("Lens tile extents"),
             tile_dilated: tile_buffer("Lens dilated tile extents"),
+            composed: image(device, width, height, "Lens composed sensor image"),
+            pyramid: pyramid_texture.create_view(&Default::default()),
+            pyramid_levels,
         }
     }
 }
@@ -98,12 +193,18 @@ pub struct LensInputs<'a> {
     pub elements: Option<&'a wgpu::Buffer>,
     /// Iris shape array, see [`APERTURE_SHAPES`].
     pub aperture_shapes: Option<&'a wgpu::TextureView>,
+    /// Mask array, see [`MASKS`].
+    pub masks: Option<&'a wgpu::TextureView>,
+    /// Baked lens prescriptions, see [`PRESCRIPTIONS`] and
+    /// [`PrescriptionBank::buffer`].
+    pub prescriptions: Option<&'a wgpu::Buffer>,
 }
 
-type BindingKey = ([Option<wgpu::TextureView>; 3], [Option<wgpu::Buffer>; 3]);
+type BindingKey = ([Option<wgpu::TextureView>; 4], [Option<wgpu::Buffer>; 4]);
 
 // Stages in recording order; `args` holds one indirect triple per stage after
-// the resolve.
+// the resolve. The aberration stage follows the composite: `DOWN` runs once
+// per pyramid level (its triples are `ARGS_DOWN + level`), then `APPLY`.
 const RESOLVE: usize = 0;
 const COC: usize = 1;
 const TILES: usize = 2;
@@ -111,8 +212,13 @@ const DILATE: usize = 3;
 const PREFILTER: usize = 4;
 const GATHER: usize = 5;
 const COMPOSITE: usize = 6;
-const STAGES: usize = 7;
-const ARGS_SIZE: u64 = 18 * 4;
+const DOWN: usize = 7;
+const APPLY: usize = 8;
+const STAGES: usize = 9;
+/// Triples before the pyramid's (resolve has none): the six sized stages.
+const ARGS_DOWN: u64 = 6;
+const ARGS_APPLY: u64 = ARGS_DOWN + PYRAMID_LEVELS as u64;
+const ARGS_SIZE: u64 = (ARGS_APPLY + 1) * 12;
 
 struct Stage {
     entry: &'static str,
@@ -253,22 +359,42 @@ pub struct LensPass {
     fallback_camera: wgpu::Buffer,
     fallback_lenses: wgpu::Buffer,
     fallback_elements: wgpu::Buffer,
+    /// A bank of no lenses: the prescription binding when the host has none.
+    fallback_prescriptions: wgpu::Buffer,
     fallback_depth: wgpu::TextureView,
     /// One white layer: the aperture array when the host supplies none.
     fallback_shapes: wgpu::Texture,
     fallback_shapes_view: wgpu::TextureView,
     fallback_shapes_ready: bool,
+    /// One transparent black layer: the mask array when the host supplies none.
+    fallback_masks_view: wgpu::TextureView,
     targets: Targets,
     bindings: Option<(BindingKey, Vec<wgpu::BindGroup>)>,
 }
 
 impl LensPass {
     pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
-        let shader = helio_core::shader::module(
-            device,
-            "Screen-space lens",
-            helio_core::include_wgsl!("../shaders/lens.wgsl"),
-        );
+        Self::new_with_user(device, width, height, None)
+    }
+
+    /// Like [`Self::new`], with a WGSL snippet implementing
+    /// [`element_kind::USER`] elements compiled into the lens shader (as
+    /// `PostProcessPass::new_with_user_effects` does for its effects). The
+    /// snippet may define `user_ray_map`, `user_transmission` and `user_focus`
+    /// (see [`user`]); a hook it omits is the identity. Without a snippet
+    /// `USER` elements are ignored entirely: they set no stage flags and the
+    /// shader is the stock one.
+    pub fn new_with_user(device: &wgpu::Device, width: u32, height: u32, user_wgsl: Option<&str>) -> Self {
+        let shader = match user_wgsl {
+            None => helio_core::shader::module(
+                device,
+                "Screen-space lens",
+                helio_core::include_wgsl!("../shaders/lens.wgsl"),
+            ),
+            Some(snippet) => {
+                helio_core::shader::module(device, "Screen-space lens", lens_source_with_user(snippet).as_str())
+            }
+        };
         let stage = |entry_point: &'static str, label: &'static str, entries: &[wgpu::BindGroupLayoutEntry]| {
             let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some(label),
@@ -294,11 +420,12 @@ impl LensPass {
         let stages = [
             stage("cs_resolve", "Lens resolve", &[
                 storage(0, true), storage(1, true), storage(2, true), texture(3, false), texture(4, false),
-                storage(5, false), storage(6, false), storage(7, false), uniform(8),
+                storage(5, false), storage(6, false), storage(7, false), uniform(8), texture_array(24),
+                storage(BANK_BINDING, true),
             ]),
             stage("cs_coc", "Lens circles of confusion", &[
                 storage(1, true), storage(2, true), texture(3, false), storage(6, false),
-                storage_texture(9),
+                storage_texture(9), texture_array(24), storage(BANK_BINDING, true),
             ]),
             stage("cs_tiles", "Lens tile extents", &[texture(10, false), storage(11, false)]),
             stage("cs_dilate", "Lens tile dilation", &[
@@ -310,15 +437,23 @@ impl LensPass {
             stage("cs_gather", "Lens gather", &[
                 storage(1, true), storage(6, false), storage(12, false), texture(15, false),
                 texture(16, false), storage_texture(17), storage_texture(18), sampler(22),
-                texture_array(23),
+                texture_array(23), texture_array(24), storage(BANK_BINDING, true),
             ]),
             stage("cs_composite", "Lens composite", &[
                 storage(1, true), texture(4, false), storage(6, false), texture(10, false), texture(19, true),
-                texture(20, true), storage_texture(21), sampler(22),
+                texture(20, true), storage_texture(21), sampler(22), texture_array(24), storage_texture(25),
+                storage(BANK_BINDING, true),
+            ]),
+            stage("cs_ab_down", "Lens aberration pyramid", &[
+                texture(26, true), storage_texture(27), sampler(22),
+            ]),
+            stage("cs_ab_apply", "Lens aberration filters", &[
+                storage(1, true), storage(6, false), storage_texture(21), sampler(22),
+                texture_array(24), texture(28, true), texture(29, true), storage(BANK_BINDING, true),
             ]),
         ];
         debug_assert_eq!(stages[RESOLVE].entry, "cs_resolve");
-        debug_assert_eq!(stages[COMPOSITE].entry, "cs_composite");
+        debug_assert_eq!(stages[APPLY].entry, "cs_ab_apply");
         let buffer = |label, size, usage| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -344,6 +479,7 @@ impl LensPass {
                 label: Some("Lens sampler"),
                 mag_filter: wgpu::FilterMode::Linear,
                 min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Linear,
                 ..Default::default()
             }),
             args: buffer(
@@ -375,6 +511,7 @@ impl LensPass {
                 std::mem::size_of::<LensElementComponent>() as u64,
                 wgpu::BufferUsages::STORAGE,
             ),
+            fallback_prescriptions: buffer("Lens no prescriptions", 16, wgpu::BufferUsages::STORAGE),
             fallback_depth: device
                 .create_texture(&wgpu::TextureDescriptor {
                     label: Some("Lens neutral depth"),
@@ -393,6 +530,21 @@ impl LensPass {
             }),
             fallback_shapes,
             fallback_shapes_ready: false,
+            fallback_masks_view: device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Lens neutral mask"),
+                    size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: MASK_FORMAT,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    ..Default::default()
+                }),
             targets: Targets::new(device, width, height),
             bindings: None,
         }
@@ -477,13 +629,15 @@ impl LensPass {
         let camera = scene.camera.unwrap_or(&self.fallback_camera);
         let depth = scene.depth.unwrap_or(&self.fallback_depth);
         let shapes = scene.aperture_shapes.unwrap_or(&self.fallback_shapes_view);
+        let masks = scene.masks.unwrap_or(&self.fallback_masks_view);
         let lenses = scene.lenses.unwrap_or(&self.fallback_lenses);
         let elements = scene.elements.unwrap_or(&self.fallback_elements);
+        let bank = scene.prescriptions.unwrap_or(&self.fallback_prescriptions);
         // Bind groups are cached per GPU handle; comparing handles, not
         // pointers, is safe across TSR's rotating outputs and resize.
         let key: BindingKey = (
-            [Some(input.clone()), Some(depth.clone()), Some(shapes.clone())],
-            [Some(lenses.clone()), Some(elements.clone()), Some(camera.clone())],
+            [Some(input.clone()), Some(depth.clone()), Some(shapes.clone()), Some(masks.clone())],
+            [Some(lenses.clone()), Some(elements.clone()), Some(camera.clone()), Some(bank.clone())],
         );
         if self.bindings.as_ref().map(|(k, _)| k) != Some(&key) {
             let t = &self.targets;
@@ -498,6 +652,8 @@ impl LensPass {
                     entry(6, self.resolved.as_entire_binding()),
                     entry(7, self.args.as_entire_binding()),
                     entry(8, self.frame.as_entire_binding()),
+                    entry(24, wgpu::BindingResource::TextureView(masks)),
+                    entry(BANK_BINDING, bank.as_entire_binding()),
                 ]),
                 (COC, vec![
                     entry(1, elements.as_entire_binding()),
@@ -505,6 +661,8 @@ impl LensPass {
                     entry(3, wgpu::BindingResource::TextureView(depth)),
                     entry(6, self.resolved.as_entire_binding()),
                     entry(9, wgpu::BindingResource::TextureView(&t.coc)),
+                    entry(24, wgpu::BindingResource::TextureView(masks)),
+                    entry(BANK_BINDING, bank.as_entire_binding()),
                 ]),
                 (TILES, vec![
                     entry(10, wgpu::BindingResource::TextureView(&t.coc)),
@@ -532,6 +690,8 @@ impl LensPass {
                     entry(18, wgpu::BindingResource::TextureView(&t.near)),
                     entry(22, wgpu::BindingResource::Sampler(&self.sampler)),
                     entry(23, wgpu::BindingResource::TextureView(shapes)),
+                    entry(24, wgpu::BindingResource::TextureView(masks)),
+                    entry(BANK_BINDING, bank.as_entire_binding()),
                 ]),
                 (COMPOSITE, vec![
                     entry(1, elements.as_entire_binding()),
@@ -542,10 +702,35 @@ impl LensPass {
                     entry(20, wgpu::BindingResource::TextureView(&t.near)),
                     entry(21, wgpu::BindingResource::TextureView(&t.output)),
                     entry(22, wgpu::BindingResource::Sampler(&self.sampler)),
+                    entry(24, wgpu::BindingResource::TextureView(masks)),
+                    entry(25, wgpu::BindingResource::TextureView(&t.composed)),
+                    entry(BANK_BINDING, bank.as_entire_binding()),
                 ]),
             ];
+            // The pyramid: level 0 reads the composed image, level k level k-1.
+            let down = t.pyramid_levels.iter().enumerate().map(|(level, dst)| {
+                let src = if level == 0 { &t.composed } else { &t.pyramid_levels[level - 1] };
+                (DOWN, vec![
+                    entry(26, wgpu::BindingResource::TextureView(src)),
+                    entry(27, wgpu::BindingResource::TextureView(dst)),
+                    entry(22, wgpu::BindingResource::Sampler(&self.sampler)),
+                ])
+            });
+            let apply = (APPLY, vec![
+                entry(1, elements.as_entire_binding()),
+                entry(6, self.resolved.as_entire_binding()),
+                entry(21, wgpu::BindingResource::TextureView(&t.output)),
+                entry(22, wgpu::BindingResource::Sampler(&self.sampler)),
+                entry(24, wgpu::BindingResource::TextureView(masks)),
+                entry(28, wgpu::BindingResource::TextureView(&t.composed)),
+                entry(29, wgpu::BindingResource::TextureView(&t.pyramid)),
+                entry(BANK_BINDING, bank.as_entire_binding()),
+            ]);
+            // Order: the seven main stages, the pyramid levels, then the apply.
             let groups = groups
                 .into_iter()
+                .chain(down)
+                .chain(std::iter::once(apply))
                 .map(|(stage, entries)| {
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some(self.stages[stage].label),
@@ -568,15 +753,28 @@ impl LensPass {
         }
         // Every later dispatch is GPU-sized: zero groups while the view has no
         // enabled lens, except the composite, which copies the image through.
-        for (stage, (spec, group)) in self.stages.iter().zip(groups).enumerate().skip(COC) {
-            let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some(spec.label),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&spec.pipeline);
-            pass.set_bind_group(0, group, &[]);
-            pass.dispatch_workgroups_indirect(&self.args, 12 * (stage as u64 - 1));
+        for (stage, group) in groups.iter().enumerate().take(COMPOSITE + 1).skip(COC) {
+            self.dispatch(cmds, stage, group, stage as u64 - 1);
         }
+        // The aberration stage: zero groups unless an element asks for it.
+        let levels = self.targets.pyramid_levels.len();
+        for level in 0..levels {
+            self.dispatch(cmds, DOWN, &groups[DOWN + level], ARGS_DOWN + level as u64);
+        }
+        self.dispatch(cmds, APPLY, &groups[DOWN + levels], ARGS_APPLY);
+    }
+
+    /// One GPU-sized dispatch: the workgroup counts are the `slot`th triple of
+    /// the indirect arguments.
+    fn dispatch(&self, cmds: &mut CommandRecorder<'_>, stage: usize, group: &wgpu::BindGroup, slot: u64) {
+        let spec = &self.stages[stage];
+        let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(spec.label),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&spec.pipeline);
+        pass.set_bind_group(0, group, &[]);
+        pass.dispatch_workgroups_indirect(&self.args, 12 * slot);
     }
 }
 
@@ -617,6 +815,8 @@ impl RenderPass for LensPass {
             camera: Some(ctx.camera),
             depth: Some(ctx.depth),
             aperture_shapes: ctx.registry.get::<&wgpu::TextureView>(ResourceKey::new(APERTURE_SHAPES)),
+            masks: ctx.registry.get::<&wgpu::TextureView>(ResourceKey::new(MASKS)),
+            prescriptions: ctx.registry.get::<&wgpu::Buffer>(ResourceKey::new(PRESCRIPTIONS)),
             lenses: ctx
                 .scene_buffers
                 .get(helio_core::BufferKey::of("camera_lenses"))
