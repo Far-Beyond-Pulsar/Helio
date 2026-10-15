@@ -49,13 +49,23 @@ fn requested(l:GpuLight)->bool {
     return select(l.shadow_index!=NONE,(l._pad&4u)!=0u,(l._pad&8u)!=0u);
 }
 fn plane_outside(p:vec4f,c:vec3f,r:f32)->bool { return dot(p,vec4f(c,1.0)) < -r*length(p.xyz); }
+// Shadow lights are chosen for a view slightly wider than the screen, so a light
+// that is about to turn into view already has its map when it arrives.
+const VIEW_MARGIN:f32=1.6;
 fn visible(l:GpuLight)->bool {
     let m=transpose(params.view_proj);
     let c=l.position_range.xyz;
     let r=max(l.position_range.w,0.0);
-    return !(plane_outside(m[3]+m[0],c,r)||plane_outside(m[3]-m[0],c,r)
-        ||plane_outside(m[3]+m[1],c,r)||plane_outside(m[3]-m[1],c,r)
+    return !(plane_outside(m[3]*VIEW_MARGIN+m[0],c,r)||plane_outside(m[3]*VIEW_MARGIN-m[0],c,r)
+        ||plane_outside(m[3]*VIEW_MARGIN+m[1],c,r)||plane_outside(m[3]*VIEW_MARGIN-m[1],c,r)
         ||plane_outside(m[2],c,r)||plane_outside(m[3]-m[2],c,r));
+}
+var<workgroup> frustum_corners:array<vec3f,8>;
+fn receiver_corner(c:u32)->vec3f {
+    let clip=vec4f(select(-VIEW_MARGIN,VIEW_MARGIN,(c&1u)!=0u),select(-VIEW_MARGIN,VIEW_MARGIN,(c&2u)!=0u),select(0.0,1.0,(c&4u)!=0u),1.0);
+    let h=params.inv_view_proj*clip;
+    let far=params.camera.xyz+normalize(h.xyz-h.w*params.camera.xyz)*params.camera.w;
+    return select(far,h.xyz/h.w,abs(h.w)>1e-6);
 }
 fn point_mask(pos:vec3f)->u32 {
     // Conservative SAT: reject a cube-face pyramid only when a plane
@@ -74,11 +84,7 @@ fn point_mask(pos:vec3f)->u32 {
         for(var p=0u;p<5u;p++) {
             var maximum=-3.0e38;
             for(var c=0u;c<8u;c++) {
-                let clip=vec4f(select(-1.0,1.0,(c&1u)!=0u),select(-1.0,1.0,(c&2u)!=0u),select(0.0,1.0,(c&4u)!=0u),1.0);
-                let h=params.inv_view_proj*clip;
-                let far=params.camera.xyz+normalize(h.xyz-h.w*params.camera.xyz)*params.camera.w;
-                let world=select(far,h.xyz/h.w,abs(h.w)>1e-6);
-                maximum=max(maximum,dot(planes[p],world-pos));
+                maximum=max(maximum,dot(planes[p],frustum_corners[c]-pos));
             }
             if maximum < -0.001 { keep=false; }
         }
@@ -87,13 +93,20 @@ fn point_mask(pos:vec3f)->u32 {
     return mask;
 }
 @compute @workgroup_size(64)
-fn score_lights(@builtin(global_invocation_id) gid:vec3u) {
+fn score_lights(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lid:u32) {
+    // The receiver frustum is the same for every light: unproject its corners once per workgroup.
+    if lid<8u { frustum_corners[lid]=receiver_corner(lid); }
+    workgroupBarrier();
     let i=gid.x;
     if i>=min(params.rows,arrayLength(&lights)) { return; }
     candidates[i]=Candidate(0u,0u,0u,0.0);
     let l=lights[i];
     if !(l.color_intensity.w>0.0)||!requested(l)||(l._pad&48u)==48u { return; }
-    if l.light_type!=0u&&!visible(l) { return; }
+    let incumbent=(l._pad&8u)!=0u && l.shadow_index!=NONE && l.shadow_index/6u<params.capacity;
+    // An incumbent that left the (widened) view keeps its tiles at the lowest priority
+    // while the pool has room, instead of being dropped and re-rendered on return.
+    var offscreen=false;
+    if l.light_type!=0u&&!visible(l) { if !incumbent { return; } offscreen=true; }
     let distance=length(l.position_range.xyz-params.camera.xyz);
     let fade=select(1.0-smoothstep(params.camera.w*0.8,params.camera.w,max(0.0,distance-l.position_range.w)),1.0,l.light_type==0u);
     if fade<=0.0 { return; }
@@ -104,7 +117,6 @@ fn score_lights(@builtin(global_invocation_id) gid:vec3u) {
     let coverage=select(clamp(radius*radius,0.000001,1.0),1.0,l.light_type==0u);
     let priority=select(1.0,f32((l._pad>>8u)&255u)/16.0,((l._pad>>8u)&255u)!=0u);
     var score=coverage*fade*priority;
-    let incumbent=(l._pad&8u)!=0u && l.shadow_index!=NONE;
     score*=select(1.0,1.0+params.tuning.z,incumbent);
     let max_log=(l._pad>>16u)&15u;
     let limit=min(u32(params.tuning.y),select(2048u,1u<<max_log,max_log!=0u));
@@ -112,14 +124,22 @@ fn score_lights(@builtin(global_invocation_id) gid:vec3u) {
     var res=128u;
     for(var t=0u;t<4u;t++) { if f32(res)<pixels && res*2u<=limit { res*=2u; } }
     // Schmitt thresholds around the incumbent tier prevent camera jitter from resizing.
-    if incumbent && l.shadow_index/6u<params.capacity {
+    if incumbent {
         let old=committed.slots[l.shadow_index/6u].resolution;
         if old>=128u && old<=limit && pixels<=f32(old)*(1.0+params.tuning.z) && pixels>=f32(old/2u)*(1.0-params.tuning.z) {res=old;}
     }
     var mask=1u;
     if l.light_type==0u { mask=15u; }
     if l.light_type==1u { mask=point_mask(l.position_range.xyz); }
-    if mask==0u { return; }
+    if mask==0u { if !incumbent { return; } offscreen=true; }
+    if offscreen {
+        let held=committed.slots[l.shadow_index/6u];
+        mask=0u;
+        for(var f=0u;f<6u;f++){ if held.tiles[f].z!=0u { mask|=1u<<f; } }
+        if mask==0u { return; }
+        res=held.resolution;
+        score*=0.001;
+    }
     candidates[i]=Candidate(bitcast<u32>(score),res,mask,fade);
 }
 var<workgroup> histogram:array<atomic<u32>,256>;
@@ -175,45 +195,85 @@ fn select_lights(@builtin(local_invocation_index) lid:u32) {
     }
     if lid==255u {proposed.header=vec4u(min(slot,params.capacity),params.nonce,0u,0u);}
 }
-var<private> occupied:array<u32,4096>;
-var<private> selected:array<u32,256>;
-fn mark(tile:vec4u) {
-    let cells=params.atlas_size/128u;
-    for(var y=tile.y/128u;y<(tile.y+tile.z)/128u;y++) {
-        for(var x=tile.x/128u;x<(tile.x+tile.z)/128u;x++) {occupied[y*cells+x]=1u;}
-    }
+// Tile packing runs as one 256-thread workgroup. The priority sort, the
+// resident carry-over and the slot lookups are all parallel (one thread per
+// slot or per selected light); only the rare allocation of a *new* tile is
+// serial, and that runs over an atlas occupancy bitmap held in workgroup
+// memory (one bit per 128px cell) instead of a scanned 4096-word array.
+var<workgroup> sel_owner:array<u32,256>;
+var<workgroup> sel_key:array<u32,256>;
+var<workgroup> sorted_owner:array<u32,256>;
+var<workgroup> slot_found:array<u32,256>;
+var<workgroup> need_faces:array<u32,256>;
+var<workgroup> s_owner:array<u32,256>;
+var<workgroup> s_fade:array<u32,256>;
+var<workgroup> s_score:array<f32,256>;
+var<workgroup> s_tiled:array<u32,256>;
+var<workgroup> s_missing:array<u32,256>;
+var<workgroup> occ:array<atomic<u32>,128>; // two words per cell row, bit = cell column
+var<workgroup> sel_count:u32;
+var<workgroup> victims:array<u32,256>; // retire-able residents, lowest score first
+var<workgroup> victim_count:u32;
+fn span_mask(x:u32,w:u32)->u32 {
+    return select(0xffffffffu,(1u<<w)-1u,w<32u)<<(x&31u);
+}
+fn mark_tile(tile:vec4u) {
+    if tile.z==0u { return; }
+    let x0=tile.x/128u; let y0=tile.y/128u; let w=max(tile.z/128u,1u);
+    if x0+w>64u||y0+w>64u||(x0&31u)+w>32u { return; }
+    let m=span_mask(x0,w);
+    for(var dy=0u;dy<w;dy++) { atomicOr(&occ[(y0+dy)*2u+(x0>>5u)],m); }
 }
 fn allocate_tile(wanted:u32)->vec4u {
-    let cells=params.atlas_size/128u;
+    let cells=min(params.atlas_size/128u,64u);
     var size=min(wanted,params.atlas_size);
     for(var tier=0u;tier<5u;tier++) {
         let step=max(size/128u,1u);
-        for(var y=0u;y+step<=cells;y+=step) { for(var x=0u;x+step<=cells;x+=step) {
-            var free=true;
-            for(var dy=0u;dy<step;dy++){for(var dx=0u;dx<step;dx++){if occupied[(y+dy)*cells+x+dx]!=0u {free=false;}}}
-            if free {let tile=vec4u(x*128u,y*128u,size,0u);mark(tile);return tile;}
-        }}
+        if step<=32u {
+            let m=span_mask(0u,step);
+            for(var y=0u;y+step<=cells;y+=step) {
+                // Rows y..y+step OR'd once, then each aligned column is one bit test.
+                var lo=0u;var hi=0u;
+                for(var dy=0u;dy<step;dy++){lo|=atomicLoad(&occ[(y+dy)*2u]);hi|=atomicLoad(&occ[(y+dy)*2u+1u]);}
+                for(var x=0u;x+step<=cells;x+=step) {
+                    let word=select(lo,hi,x>=32u);
+                    if (word&(m<<(x&31u)))==0u {
+                        let tile=vec4u(x*128u,y*128u,size,0u);mark_tile(tile);return tile;
+                    }
+                }
+            }
+        }
         if size<=128u {break;} size/=2u;
     }
     return vec4u(0u);
 }
-@compute @workgroup_size(1)
-fn pack_tiles() {
-    let count=proposed.header.x;
-    for(var s=0u;s<count;s++){selected[s]=proposed.slots[s].owner;}
-    // Stable deterministic priority order, bounded by the resident capacity.
-    for(var i=1u;i<count;i++){let owner=selected[i];var j=i;
-        for(var k=0u;k<256u;k++){if j==0u{break;}let prev=selected[j-1u];
-            let a=candidates[owner-1u].key;let b=candidates[prev-1u].key;
-            if a<b||(a==b&&owner>prev){break;}selected[j]=prev;j--;}
-        selected[j]=owner;
-    }
+@compute @workgroup_size(256)
+fn pack_tiles(@builtin(local_invocation_index) t:u32) {
+    let cap=params.capacity;
     var empty:Resident;
-    for(var s=params.capacity;s<256u;s++){proposed.slots[s]=empty;}
-    for(var s=0u;s<params.capacity;s++) {
-        var r=committed.slots[s];var keep=false;
+    if t==0u { sel_count=proposed.header.x; }
+    if t<128u { atomicStore(&occ[t],0u); }
+    workgroupBarrier();
+    let count=sel_count;
+    var my_owner=0u;var my_key=0u;
+    if t<count { my_owner=proposed.slots[t].owner; my_key=candidates[my_owner-1u].key; }
+    sel_owner[t]=my_owner;sel_key[t]=my_key;
+    workgroupBarrier();
+    // Stable priority order: higher key first, lower owner first on ties.
+    if t<count {
+        var rank=0u;
+        for(var j=0u;j<count;j++) {
+            let kj=sel_key[j];
+            if kj>my_key||(kj==my_key&&sel_owner[j]<my_owner) {rank++;}
+        }
+        sorted_owner[rank]=my_owner;
+    }
+    // Carry each resident slot over: one thread per slot.
+    var r=empty;
+    if t<cap {
+        r=committed.slots[t];var keep=false;
         if r.owner!=0u && r.fade_target==0u && r.strength<=0.0 {r=empty;}
-        for(var i=0u;i<count;i++){if r.owner!=0u&&selected[i]==r.owner {keep=true;}}
+        for(var i=0u;i<count;i++){if r.owner!=0u&&sel_owner[i]==r.owner {keep=true;}}
         r.fade_target=0u;
         if r.owner>0u&&r.owner<=params.rows&&keep {
             let c=candidates[r.owner-1u];r.score=bitcast<f32>(c.key);r.flags=lights[r.owner-1u]._pad;
@@ -227,39 +287,75 @@ fn pack_tiles() {
         if keep && r.owner>0u && r.owner<=params.rows {
             for(var f=0u;f<6u;f++) {if (candidates[r.owner-1u].mask&(1u<<f))==0u {r.tiles[f]=vec4u(0u);}}
         }
-        proposed.slots[s]=r;
-        if r.owner!=0u {for(var f=0u;f<6u;f++){mark(r.tiles[f]);}}
     }
-    for(var i=0u;i<count;i++) {
-        let owner=selected[i];var slot=NONE;var found=false;
-        for(var s=0u;s<params.capacity;s++) {
-            if proposed.slots[s].owner==owner {slot=s;found=true;break;}
-            if slot==NONE&&proposed.slots[s].owner==0u {slot=s;}
+    proposed.slots[t]=r;
+    var missing=0u;var tiled=0u;
+    if r.owner!=0u {
+        for(var f=0u;f<6u;f++){
+            mark_tile(r.tiles[f]);
+            if r.tiles[f].z==0u {missing|=1u<<f;} else {tiled=1u;}
         }
-        if slot==NONE {continue;}
-        let c=candidates[owner-1u];let l=lights[owner-1u];
-        if !found {proposed.slots[slot]=empty;proposed.slots[slot].owner=owner;
-            proposed.slots[slot].kind=l.light_type;proposed.slots[slot].flags=l._pad;
-            proposed.slots[slot].fade_target=u32(c.fade*65535.0);proposed.slots[slot].resolution=c.resolution;
-            proposed.slots[slot].score=bitcast<f32>(c.key);}
-        for(var f=0u;f<6u;f++) {
-            if (c.mask&(1u<<f))!=0u && proposed.slots[slot].tiles[f].z==0u {
-                proposed.slots[slot].tiles[f]=allocate_tile(proposed.slots[slot].resolution);
-                if proposed.slots[slot].tiles[f].z==0u {
-                    // Physical memory pressure can happen before the logical pool fills.
-                    // Retire a lower-priority tile owner, retaining its map during fade.
-                    var victim=NONE;var worst=bitcast<f32>(c.key);
-                    for(var v=0u;v<params.capacity;v++) {
-                        let r=proposed.slots[v];var has_tile=false;
-                        for(var k=0u;k<6u;k++){has_tile=has_tile||r.tiles[k].z!=0u;}
-                        if r.owner!=0u && r.fade_target!=0u && has_tile && r.score<worst {victim=v;worst=r.score;}
-                    }
-                    if victim!=NONE {proposed.slots[victim].fade_target=0u;}
+    }
+    s_owner[t]=r.owner;s_fade[t]=r.fade_target;s_score[t]=r.score;s_tiled[t]=tiled;s_missing[t]=missing;
+    workgroupBarrier();storageBarrier();
+    // Which slot (if any) already holds each selected light, and which faces it still needs.
+    if t<count {
+        let owner=sorted_owner[t];var slot=NONE;
+        for(var s=0u;s<cap;s++){if s_owner[s]==owner {slot=s;break;}}
+        slot_found[t]=slot;
+        let mask=candidates[owner-1u].mask&63u;
+        need_faces[t]=select(mask,mask&s_missing[slot],slot!=NONE);
+    }
+    if t<cap && s_owner[t]!=0u && s_fade[t]!=0u && s_tiled[t]!=0u {
+        var rank=0u;
+        for(var j=0u;j<cap;j++) {
+            if s_owner[j]!=0u && s_fade[j]!=0u && s_tiled[j]!=0u && (s_score[j]<s_score[t]||(s_score[j]==s_score[t]&&j<t)) {rank++;}
+        }
+        victims[rank]=t;
+    }
+    workgroupBarrier();
+    // Serial: only lights with a new slot or a missing tile get here.
+    if t==0u {
+        var next_free=0u;var vp=0u;var full=false;
+        var nv=0u;
+        for(var s=0u;s<cap;s++){if s_owner[s]!=0u && s_fade[s]!=0u && s_tiled[s]!=0u {nv++;}}
+        for(var i=0u;i<count;i++) {
+            var slot=slot_found[i];let found=slot!=NONE;
+            if found && need_faces[i]==0u {continue;}
+            let owner=sorted_owner[i];
+            if !found {
+                while next_free<cap && s_owner[next_free]!=0u {next_free++;}
+                if next_free>=cap {continue;}
+                slot=next_free;next_free++;
+            }
+            let c=candidates[owner-1u];
+            if !found {
+                let l=lights[owner-1u];
+                proposed.slots[slot]=empty;proposed.slots[slot].owner=owner;
+                proposed.slots[slot].kind=l.light_type;proposed.slots[slot].flags=l._pad;
+                proposed.slots[slot].fade_target=u32(c.fade*65535.0);proposed.slots[slot].resolution=c.resolution;
+                proposed.slots[slot].score=bitcast<f32>(c.key);
+                s_owner[slot]=owner;s_fade[slot]=proposed.slots[slot].fade_target;s_score[slot]=proposed.slots[slot].score;s_tiled[slot]=0u;
+            }
+            let resolution=proposed.slots[slot].resolution;
+            for(var f=0u;f<6u;f++) {
+                if (need_faces[i]&(1u<<f))==0u {continue;}
+                var tile=vec4u(0u);
+                if !full { tile=allocate_tile(resolution); if tile.z==0u {full=true;} }
+                if tile.z!=0u { proposed.slots[slot].tiles[f]=tile; s_tiled[slot]=1u; continue; }
+                // Atlas is full (any free 128px cell would have fit): retire the
+                // lowest-priority resident that ranks below this light, keeping its
+                // map while it fades. Residents are walked lowest score first, so
+                // this is a pointer step, not a scan.
+                while vp<nv && s_fade[victims[vp]]==0u {vp++;}
+                if vp<nv && s_score[victims[vp]]<bitcast<f32>(c.key) {
+                    let victim=victims[vp];vp++;
+                    proposed.slots[victim].fade_target=0u;s_fade[victim]=0u;
                 }
             }
         }
+        proposed.header.y=params.nonce;
     }
-    proposed.header.y=params.nonce;
 }
 @compute @workgroup_size(64)
 fn commit_lights(@builtin(global_invocation_id) gid:vec3u) {
