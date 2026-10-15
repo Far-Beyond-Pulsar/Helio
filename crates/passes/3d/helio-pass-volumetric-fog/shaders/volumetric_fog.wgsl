@@ -25,7 +25,7 @@
 //     one shadow tap per froxel enough. Without it this would need many more.
 
 // ── Fog config ──────────────────────────────────────────────────────────────
-// Byte-identical to GpuFogUniforms (64 bytes at PP offset 304).
+// Byte-identical to GpuFogUniforms (64 bytes at the PP fog block).
 // The legacy block supplies a compatibility medium and the resolved view range.
 
 struct FogUniforms {
@@ -125,7 +125,7 @@ const NO_SHADOW: u32 = 4294967295u;
 @group(0) @binding(9) var                scatter_out:     texture_storage_3d<rgba16float, write>;
 
 // SceneDB PP row. Only its fog block is interpreted; shader_source() derives
-// the opaque tail from the current Rust PP ABI (including appended lens data).
+// the opaque head and tail from the current Rust PP ABI.
 struct FogVolume {
     bounds_min: vec4<f32>,
     bounds_max: vec4<f32>,
@@ -134,7 +134,7 @@ struct FogVolume {
     blend_weight: f32,
     unbound: u32,
     _pad: vec4<f32>,
-    before_fog: array<vec4<u32>, 19>,
+    before_fog: array<vec4<u32>, __PP_HEAD_VEC4__>,
     medium: FogUniforms,
     after_fog: array<vec4<u32>, __PP_TAIL_VEC4__>,
 }

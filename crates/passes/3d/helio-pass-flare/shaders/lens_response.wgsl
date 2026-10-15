@@ -18,7 +18,7 @@
 // texel units the image path extracts, so a light carries the same ghost
 // energy whichever path renders it.
 
-// The PP prefix stays opaque: 29 * 16 = 464 bytes. Binding starts at zero,
+// The PP prefix stays opaque: 27 * 16 = 432 bytes. Binding starts at zero,
 // avoiding min_uniform_buffer_offset_alignment restrictions on the lens tail.
 struct Lens {
     enabled: u32,
@@ -33,14 +33,9 @@ struct Lens {
     glare_intensity: f32,
     streak_intensity: f32,
     dispersion: f32,
-    aperture_f_number: f32,
-    focal_length_mm: f32,
-    sensor_width_mm: f32,
-    vignette: f32,
+    reserved_vignette: f32,
     starburst_intensity: f32,
     starburst_length: f32,
-    aperture_blades: u32,
-    aperture_rotation: f32,
     coating_strength: f32,
     ghost_rim: f32,
     dirt_intensity: f32,
@@ -49,10 +44,10 @@ struct Lens {
     field_margin: f32,
     response_time: f32,
     _pad0: f32,
-    _pad1: vec4<f32>,
+    _pad1: f32,
 }
 struct PostProcess {
-    prefix: array<vec4<u32>, 29>,
+    prefix: array<vec4<u32>, 27>,
     lens: Lens,
 }
 
@@ -118,6 +113,18 @@ struct LensSources {
 @group(1) @binding(6) var<storage, read_write> sources: LensSources;
 @group(1) @binding(7) var dirt_tex: texture_2d<f32>;
 @group(1) @binding(8) var dirt_samp: sampler;
+// The camera's optics, resolved by the lens pass: the leading fields of
+// `helio_pass_lens::ResolvedLens`. Optics are not part of the PP lens block.
+struct LensOptics {
+    f_number: f32,
+    focal_length_mm: f32,
+    sensor_width_mm: f32,
+    aperture_blades: u32,
+    aperture_rotation: f32,
+    // Amount of natural cos^4 falloff the lens already applied to the image.
+    natural_vignette: f32,
+}
+@group(1) @binding(9) var<storage, read> optics: LensOptics;
 
 const PI: f32 = 3.141592653589793;
 const HALF_MAX: f32 = 65504.0;
@@ -180,7 +187,7 @@ fn lens_active() -> bool {
 // ── Iris ─────────────────────────────────────────────────────────────────────
 
 fn blades() -> u32 {
-    let n = pp.lens.aperture_blades;
+    let n = optics.aperture_blades;
     return select(clamp(n, 3u, 16u), 0u, n == 0u);
 }
 /// Radial extent of the iris polygon along `angle` (circumradius 1).
@@ -188,7 +195,7 @@ fn iris_extent(angle: f32) -> f32 {
     let n = blades();
     if n == 0u { return 1.0; }
     let sector_angle = 2.0 * PI / f32(n);
-    let a = angle - bounded(pp.lens.aperture_rotation, -100.0, 100.0, 0.0);
+    let a = angle - bounded(optics.aperture_rotation, -100.0, 100.0, 0.0);
     let sector = a - floor(a / sector_angle) * sector_angle - 0.5 * sector_angle;
     return cos(0.5 * sector_angle) / cos(sector);
 }
@@ -260,13 +267,16 @@ fn extract(c: vec3<f32>) -> vec3<f32> {
     return c * (contribution / max(y, 1e-6));
 }
 
-// cos^4 natural falloff at the sensor for image position `uv`.
+// cos^4 natural falloff at the sensor for image position `uv`, as the lens
+// applies it to the image (`natural_vignette` is the lens's amount; 0 without
+// one). The extracted image already carries it, so only analytic sources,
+// which are not in the image, take it here.
 fn field_falloff(uv: vec2<f32>, aspect: f32) -> f32 {
-    let focal = bounded(pp.lens.focal_length_mm, 8.0, 600.0, 50.0);
-    let sensor = bounded(pp.lens.sensor_width_mm, 4.0, 70.0, 36.0);
+    let focal = bounded(optics.focal_length_mm, 8.0, 600.0, 50.0);
+    let sensor = bounded(optics.sensor_width_mm, 4.0, 70.0, 36.0);
     let field = (uv - 0.5) * vec2(sensor, sensor / aspect) / focal;
     let cos_squared = 1.0 / (1.0 + dot(field, field));
-    return mix(1.0, cos_squared * cos_squared, bounded(pp.lens.vignette, 0.0, 1.0, 0.0));
+    return mix(1.0, cos_squared * cos_squared, bounded(optics.natural_vignette, 0.0, 1.0, 0.0));
 }
 
 @compute @workgroup_size(8, 8)
@@ -287,9 +297,7 @@ fn cs_extract(@builtin(global_invocation_id) id: vec3<u32>) {
             }
         }
     }
-    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(size);
-    let falloff = field_falloff(uv, f32(input_size.x) / f32(input_size.y));
-    textureStore(destination, vec2<i32>(id.xy), vec4(color * (falloff / max(count, 1.0)), 0.0));
+    textureStore(destination, vec2<i32>(id.xy), vec4(color / max(count, 1.0), 0.0));
 }
 
 // ── Analytic sources ─────────────────────────────────────────────────────────
@@ -478,9 +486,9 @@ fn cs_response(@builtin(global_invocation_id) id: vec3<u32>) {
     // Offsets are authored in UV-x units; scale y so shapes stay round.
     let metric = vec2(1.0, aspect);
     let squeeze = select(vec2(1.0), vec2(2.0, 0.5), anamorphic);
-    let f_number = bounded(pp.lens.aperture_f_number, 0.7, 32.0, 2.8);
-    let focal = bounded(pp.lens.focal_length_mm, 8.0, 600.0, 50.0);
-    let sensor = bounded(pp.lens.sensor_width_mm, 4.0, 70.0, 36.0);
+    let f_number = bounded(optics.f_number, 0.7, 32.0, 2.8);
+    let focal = bounded(optics.focal_length_mm, 8.0, 600.0, 50.0);
+    let sensor = bounded(optics.sensor_width_mm, 4.0, 70.0, 36.0);
     let field_scale = clamp((sensor / 36.0) * (50.0 / focal), 0.35, 2.0);
     let dispersion = bounded(pp.lens.dispersion, 0.0, 0.05, 0.0);
     // Airy first-zero scale at 550nm plus a compact surface-scatter surrogate.
@@ -615,7 +623,7 @@ fn cs_response(@builtin(global_invocation_id) id: vec3<u32>) {
         let length_uv = bounded(pp.lens.starburst_length, 0.0, 1.0, 0.25) * field_scale;
         let spike_taps = select(10u, 20u, high);
         let lod = footprint_lod(length_uv / f32(spike_taps), width);
-        let rotation = bounded(pp.lens.aperture_rotation, -100.0, 100.0, 0.0);
+        let rotation = bounded(optics.aperture_rotation, -100.0, 100.0, 0.0);
         var burst = vec3(0.0);
         var weight_sum = 0.0;
         for (var l = 0u; l < lines; l++) {

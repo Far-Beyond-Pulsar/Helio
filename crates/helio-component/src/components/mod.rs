@@ -1,4 +1,5 @@
 mod atmosphere_component;
+mod camera_lens_component;
 mod camera_post_process_component;
 mod decal_component;
 mod environment_rows;
@@ -21,12 +22,14 @@ mod voxel_component;
 mod voxel_component_runtime;
 pub mod voxel_generator_editor;
 pub mod voxel_mesh;
+pub mod reflected_list;
 pub mod voxel_stack_editor;
 pub mod voxel_world;
 mod water_volume_component;
 mod wind_component;
 
 pub use atmosphere_component::*;
+pub use camera_lens_component::*;
 pub use camera_post_process_component::*;
 pub use decal_component::*;
 pub use environment_rows::*;

@@ -18,8 +18,8 @@
 //! |---|---|---|
 //! | [`GlobalFogSourceRow`] | 16: the medium | `helio_pass_volumetric_fog::GlobalFogComponent` (16) |
 //! | [`LocalFogSourceRow`] | 4 size + 20: medium, edge fade | `LocalFogVolumeComponent` (8 bounds + 20) |
-//! | [`PostProcessVolumeSourceRow`] | 4 size + 156: the row after its bounds | `helio_pass_postprocess::PostProcessVolumeComponent` (8 bounds + 156) |
-//! | [`CameraPostProcessSourceRow`] | 152: the row | `helio_pass_postprocess::CameraPostProcessComponent` (152) |
+//! | [`PostProcessVolumeSourceRow`] | 4 size + 140: the row after its bounds | `helio_pass_postprocess::PostProcessVolumeComponent` (8 bounds + 140) |
+//! | [`CameraPostProcessSourceRow`] | 136: the row | `helio_pass_postprocess::CameraPostProcessComponent` (136) |
 //! | [`WaterVolumeSourceRow`] | 4 size + 56: the row after its bounds | `helio_pass_water_sim::WaterVolumeComponent` (8 bounds + 56), packed into its leading rows |
 //! | [`FoliageSourceRow`] | 24 type + 4 layer + 12 wind | `helio_pass_foliage_place`'s `FoliageTypeComponent` (24), `FoliageLayerComponent` (8) and `FoliageWindComponent` (12), each packed |
 //! | [`AtmosphereSourceRow`] | 4 centre + 16 media + 4 ground + 4 shell: the row, its centre in the owner's space | `helio_pass_sky::AtmosphereComponent` (28) |
@@ -231,8 +231,6 @@ pub struct PostProcessVolumeSourceRow {
     pub settings: [u32; 116],
     #[gpu]
     pub lens: [f32; 16],
-    #[gpu]
-    pub lens_ext: [f32; 16],
 }
 
 /// A camera's post-process baseline (`CameraPostProcessComponent` pass row,
@@ -248,8 +246,6 @@ pub struct CameraPostProcessSourceRow {
     pub settings: [u32; 116],
     #[gpu]
     pub lens: [f32; 16],
-    #[gpu]
-    pub lens_ext: [f32; 16],
 }
 
 /// A water volume: its local size (`xyz`, full extent before the owner's
@@ -579,8 +575,8 @@ mod tests {
     fn rows_have_the_documented_word_counts() {
         assert_eq!(std::mem::size_of::<GlobalFogSourceRow>(), 16 * 4);
         assert_eq!(std::mem::size_of::<LocalFogSourceRow>(), 24 * 4);
-        assert_eq!(std::mem::size_of::<PostProcessVolumeSourceRow>(), 160 * 4);
-        assert_eq!(std::mem::size_of::<CameraPostProcessSourceRow>(), 152 * 4);
+        assert_eq!(std::mem::size_of::<PostProcessVolumeSourceRow>(), 144 * 4);
+        assert_eq!(std::mem::size_of::<CameraPostProcessSourceRow>(), 136 * 4);
         assert_eq!(std::mem::size_of::<WaterVolumeSourceRow>(), 60 * 4);
         assert_eq!(std::mem::size_of::<FoliageSourceRow>(), 40 * 4);
         assert_eq!(std::mem::size_of::<AtmosphereSourceRow>(), 28 * 4);
@@ -626,11 +622,11 @@ mod tests {
         );
         assert_eq!(
             std::mem::size_of::<helio_pass_postprocess::PostProcessVolumeComponent>(),
-            164 * 4
+            148 * 4
         );
         assert_eq!(
             std::mem::size_of::<helio_pass_postprocess::CameraPostProcessComponent>(),
-            152 * 4
+            136 * 4
         );
     }
 

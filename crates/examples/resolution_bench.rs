@@ -44,8 +44,9 @@
 //! `--global-fog` adds a uniform global fog medium, and `--pp-fog` enables
 //! the camera post-process fog block; both give every scene a medium.
 //!
-//! `--dof` enables depth of field through the camera's post-process settings,
-//! `--bloom` bloom and `--auto-exposure` auto exposure (they can be combined).
+//! `--lens` gives the camera a lens focused 6 m out (defocus through
+//! `helio-pass-lens`), `--bloom` enables bloom and `--auto-exposure` auto
+//! exposure through the camera's post-process settings (they can be combined).
 //!
 //! `--billboards` places a billboard (editor light icon) over every point light.
 //!
@@ -108,7 +109,7 @@ struct Args {
     pulsar_columns: bool,
     billboards: bool,
     movability: String,
-    dof: bool,
+    lens: bool,
     bloom: bool,
     auto_exposure: bool,
     global_fog: bool,
@@ -134,7 +135,7 @@ fn parse_args() -> Args {
         pulsar_columns: false,
         billboards: false,
         movability: "static".into(),
-        dof: false,
+        lens: false,
         bloom: false,
         auto_exposure: false,
         global_fog: false,
@@ -153,7 +154,7 @@ fn parse_args() -> Args {
             "--no-ray-query" => Some(&mut args.no_ray_query),
             "--pulsar-columns" => Some(&mut args.pulsar_columns),
             "--billboards" => Some(&mut args.billboards),
-            "--dof" => Some(&mut args.dof),
+            "--lens" => Some(&mut args.lens),
             "--bloom" => Some(&mut args.bloom),
             "--auto-exposure" => Some(&mut args.auto_exposure),
             "--global-fog" => Some(&mut args.global_fog),
@@ -466,15 +467,15 @@ fn run(
     if args.global_fog {
         spawn_global_fog(&mut scene_db.world, GlobalFogComponent::default());
     }
-    if args.dof || args.bloom || args.auto_exposure || args.pp_fog {
-        // Camera-baseline post-process settings. Depth of field is focused a
-        // few metres out so near and far both blur.
+    if args.lens {
+        // Focused a few metres out so near and far both blur.
+        let mut lens = helio_pass_lens::LensComponent::new(0);
+        lens.focus_distance_m = 6.0;
+        set_camera_lens(&mut scene_db.world, lens);
+    }
+    if args.bloom || args.auto_exposure || args.pp_fog {
+        // Camera-baseline post-process settings.
         let mut settings = helio_pass_postprocess::PostProcessSettings::default();
-        if args.dof {
-            settings.dof_enabled = true;
-            settings.dof_focal_distance = 6.0;
-            settings.dof_focal_region = 1.5;
-        }
         settings.bloom_enabled = args.bloom;
         if args.auto_exposure {
             settings.exposure_mode = helio_pass_postprocess::ExposureMode::Auto;

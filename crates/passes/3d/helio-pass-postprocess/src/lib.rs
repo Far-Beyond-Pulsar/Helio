@@ -9,7 +9,7 @@
 //!   2. `cs_bloom_down_extract` — extract brights from HDR → bloom mip 0 (compute)
 //!   3. `cs_bloom_down`         — 2x downsample mip chain, 4 passes (compute)
 //!   3b. `cs_bloom_upsample`    — progressive upsample-and-add, mip 3 → mip 0 (compute)
-//!   4. `fs_uber`               — exposure, bloom + lens composite, grade, tonemap, vignette, CA, grain (render)
+//!   4. `fs_uber`               — exposure, bloom + lens composite, grade, tonemap, vignette, grain (render)
 //!
 //! Bind groups:
 //!   Main BGLs (group 0): uniforms, samplers, hdr/depth, bloom, noise, custom, volumes, blend output
@@ -32,8 +32,7 @@ pub use gpu_types::*;
 
 mod volume_blend;
 pub use volume_blend::{
-    PostProcessVolumeBlendPass, AUTO_EXPOSURE_MAYBE_ACTIVE, BLOOM_MAYBE_ACTIVE, DOF_MAYBE_ACTIVE,
-    FOG_SETTINGS_MAYBE_ACTIVE,
+    PostProcessVolumeBlendPass, AUTO_EXPOSURE_MAYBE_ACTIVE, BLOOM_MAYBE_ACTIVE, FOG_SETTINGS_MAYBE_ACTIVE,
 };
 
 mod fog_composite;
@@ -42,6 +41,8 @@ pub use fog_composite::{FogCompositePass, FOGGED_HDR, FOGGED_HDR_FORMAT};
 mod lut_builder;
 pub use lut_builder::LutBuilder;
 
+#[cfg(test)]
+mod abi_tests;
 #[cfg(test)]
 mod exposure_tests;
 
@@ -74,8 +75,8 @@ const _: () = assert!(MAX_PP_VOLUMES == 64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UserEffectPosition {
     PreBlend = 0,    // before exposure / bloom / color grade
-    PostTonemap = 1, // after tonemap, before vignette / CA / grain
-    PostGrain = 2,   // after grain, before DoF / motion blur
+    PostTonemap = 1, // after tonemap, before vignette / grain
+    PostGrain = 2,   // after grain, before motion blur
     Final = 3,       // after all built-in effects
 }
 
@@ -174,13 +175,6 @@ pub struct PostProcessPass {
     user_effect_entries: Vec<UserEffectEntry>,
     // Cached built shader source to avoid rebuilding identical configs.
     cached_shader_source: Option<String>,
-
-    // ── DOF passthrough (when DofPass follows in the graph) ────────────────
-    /// When true, the uber-shader renders to an internal "pre_dof" texture
-    /// instead of ctx.target, and the DOF step is skipped (handled by DofPass).
-    output_to_pre_dof: bool,
-    pre_dof_tex: Option<wgpu::Texture>,
-    pre_dof_view: Option<wgpu::TextureView>,
 }
 
 impl PostProcessPass {
@@ -776,9 +770,6 @@ impl PostProcessPass {
             user_effect_entries: initial_entries,
             cached_shader_source: Some(initial_src),
             uber_pl: render_pl,
-            output_to_pre_dof: false,
-            pre_dof_tex: None,
-            pre_dof_view: None,
         }
     }
 
@@ -890,18 +881,6 @@ impl PostProcessPass {
     }
 
     // ── Public API ───────────────────────────────────────────────────────────
-
-    /// Enable output to an internal "pre_dof" texture instead of ctx.target.
-    /// When active, the uber-shader skips the inline DOF step (which is then
-    /// handled by the separate DofPass). This is used by default graphs that
-    /// include the cinematic bokeh DOF pass.
-    pub fn set_output_to_pre_dof(&mut self, enable: bool) {
-        self.output_to_pre_dof = enable;
-        if !enable {
-            self.pre_dof_tex = None;
-            self.pre_dof_view = None;
-        }
-    }
 
     /// Gate bloom compute dispatches on/off.
     /// Call each frame from the renderer when the blended bloom settings are known.
@@ -1200,19 +1179,6 @@ impl PostProcessPass {
         )
     }
 
-    fn ensure_pre_dof_target(&mut self, device: &wgpu::Device) {
-        if !self.output_to_pre_dof || self.pre_dof_view.is_some() { return; }
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("PostProcess Pre-DOF"),
-            size: wgpu::Extent3d { width: self.width.max(1), height: self.height.max(1), depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
-            format: self.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        self.pre_dof_view = Some(texture.create_view(&Default::default()));
-        self.pre_dof_tex = Some(texture);
-    }
 }
 
 impl RenderPass for PostProcessPass {
@@ -1220,12 +1186,9 @@ impl RenderPass for PostProcessPass {
         "PostProcess"
     }
 
-    fn writes(&self) -> &'static [&'static str] {
-        if self.output_to_pre_dof { &["pre_dof"] } else { &[] }
-    }
-
     fn reads(&self) -> &'static [&'static str] {
         match self.color_input {
+            "lens_color" => &["lens_color", "postprocess_uniforms", "lens_output", "color_grading_lut"],
             "fxaa_color" => &["fxaa_color", "postprocess_uniforms", "lens_output", "color_grading_lut"],
             "tsr_color" => &["tsr_color", "postprocess_uniforms", "lens_output", "color_grading_lut"],
             "fogged_hdr" => &["fogged_hdr", "postprocess_uniforms", "lens_output", "color_grading_lut"],
@@ -1264,10 +1227,6 @@ impl RenderPass for PostProcessPass {
         self.height = height;
         self.resize_analysis(device, width, height);
         self.exposure_history = false;
-
-        // Recreated at the new size by the next prepare().
-        self.pre_dof_tex = None;
-        self.pre_dof_view = None;
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
@@ -1276,13 +1235,6 @@ impl RenderPass for PostProcessPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         self.execute_frame(ctx)
-    }
-
-    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
-        if let Some(view) = &self.pre_dof_view {
-            let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(view) };
-            frame.write(helio_core::ResourceKey::new("pre_dof"), view, "PostProcess");
-        }
     }
 }
 
@@ -1318,32 +1270,6 @@ impl PostProcessPass {
     }
 
     fn prepare_frame(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // The pre_dof target must exist from the first frame, not only after a
-        // resize: without it the uber pass draws to the surface and DofPass
-        // falls back to raw pre_aa, overwriting the whole post-processed image.
-        if self.output_to_pre_dof && self.pre_dof_view.is_none() {
-            let tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("PostProcess Pre-DOF"),
-                size: wgpu::Extent3d {
-                    width: self.width.max(1),
-                    height: self.height.max(1),
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: self.format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-            self.pre_dof_view = Some(tex.create_view(&wgpu::TextureViewDescriptor::default()));
-            self.pre_dof_tex = Some(tex);
-        } else if !self.output_to_pre_dof {
-            self.pre_dof_tex = None;
-            self.pre_dof_view = None;
-        }
-
         // Adaptation inputs for cs_exposure_adapt: frame time and whether the
         // adapted value is valid history (otherwise the first meter snaps).
         let adaptation = [ctx.delta_time.max(0.0), if self.exposure_history { 1.0 } else { 0.0 }];
@@ -1568,18 +1494,7 @@ impl PostProcessPass {
             }
         }
 
-        // 3. Uber render pass (optionally to pre_dof texture when DofPass follows).
-        // When no settings source can enable DOF this frame, DofPass would
-        // only copy pre_dof to the target, so render the target directly.
-        let dof_maybe_active = ctx
-            .registry
-            .get::<bool>(helio_core::ResourceKey::new(DOF_MAYBE_ACTIVE))
-            .unwrap_or(true);
-        let target = if self.output_to_pre_dof && dof_maybe_active {
-            self.pre_dof_view.as_ref().unwrap_or(ctx.target)
-        } else {
-            ctx.target
-        };
+        // 3. Uber render pass to the final target.
         if let Some(query) = &self.uber_timing_query {
             cmds.write_timestamp(query, 0);
         }
@@ -1590,7 +1505,7 @@ impl PostProcessPass {
             let mut pass = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("PostProcess Uber"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
+                    view: ctx.target,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {

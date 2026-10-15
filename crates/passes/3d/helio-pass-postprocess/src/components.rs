@@ -39,50 +39,40 @@ pub struct PostProcessVolumeComponent {
     pub override_mask_2: u32,
     #[gpu]
     pub override_mask_3: u32,
-    /// `crate::GpuPostProcessUniforms`'s raw bytes, split at the lens block:
+    /// `crate::GpuPostProcessUniforms`'s raw bytes, split at byte 464:
     /// reflection registers `[u32; 116]` and `[f32; 16]` but no 132-word
-    /// array. `settings` is bytes 0..464 (everything before the lens block);
-    /// `lens` is the 64-byte lens tail as raw bits, not numeric floats. The
-    /// packed derive needs `pulsar_scenedb::Pod` per field, which
-    /// `GpuPostProcessUniforms` lacks; `bytemuck::cast` between the outer
-    /// structs only needs equal size -- see `layout_matches_gpu_abi`.
+    /// array. `settings` is bytes 0..464 (including the first eight words of
+    /// the lens block); `lens` is the remaining 64 bytes as raw bits, not
+    /// numeric floats. The packed derive needs `pulsar_scenedb::Pod` per
+    /// field, which `GpuPostProcessUniforms` lacks; `bytemuck::cast` between
+    /// the outer structs only needs equal size -- see `layout_matches_gpu_abi`.
     #[gpu]
     pub settings: [u32; 116],
     #[gpu]
     pub lens: [f32; 16],
-    /// Lens extension block (bytes 528..592), raw bits like `lens`.
-    #[gpu]
-    pub lens_ext: [f32; 16],
 }
+/// Byte offset where `GpuPostProcessUniforms` is split into the row's
+/// `settings` and `lens` arrays.
+const SPLIT: usize = std::mem::size_of::<[u32; 116]>();
 const _: () = assert!(
-    std::mem::size_of::<[u32; 116]>() as u64 == crate::GpuPostProcessUniforms::LENS_BLOCK_OFFSET
-);
-const _: () = assert!(
-    std::mem::size_of::<[u32; 116]>() + 2 * std::mem::size_of::<[f32; 16]>()
-        == std::mem::size_of::<crate::GpuPostProcessUniforms>()
+    SPLIT + std::mem::size_of::<[f32; 16]>() == std::mem::size_of::<crate::GpuPostProcessUniforms>()
 );
 
-/// Split `GpuPostProcessUniforms` into the reflection-supported row parts:
-/// bytes 0..464, the lens block 464..528 and the lens extension 528..592.
-fn split_settings(settings: &crate::GpuPostProcessUniforms) -> ([u32; 116], [f32; 16], [f32; 16]) {
+/// Split `GpuPostProcessUniforms` into the reflection-supported row parts.
+fn split_settings(settings: &crate::GpuPostProcessUniforms) -> ([u32; 116], [f32; 16]) {
     let bytes = bytemuck::bytes_of(settings);
-    let split = crate::GpuPostProcessUniforms::LENS_BLOCK_OFFSET as usize;
     let mut head = [0u32; 116];
     let mut lens = [0f32; 16];
-    let mut lens_ext = [0f32; 16];
-    bytemuck::bytes_of_mut(&mut head).copy_from_slice(&bytes[..split]);
-    bytemuck::bytes_of_mut(&mut lens).copy_from_slice(&bytes[split..split + 64]);
-    bytemuck::bytes_of_mut(&mut lens_ext).copy_from_slice(&bytes[split + 64..]);
-    (head, lens, lens_ext)
+    bytemuck::bytes_of_mut(&mut head).copy_from_slice(&bytes[..SPLIT]);
+    bytemuck::bytes_of_mut(&mut lens).copy_from_slice(&bytes[SPLIT..]);
+    (head, lens)
 }
 
-fn join_settings(head: &[u32; 116], lens: &[f32; 16], lens_ext: &[f32; 16]) -> crate::GpuPostProcessUniforms {
+fn join_settings(head: &[u32; 116], lens: &[f32; 16]) -> crate::GpuPostProcessUniforms {
     let mut settings: crate::GpuPostProcessUniforms = bytemuck::Zeroable::zeroed();
     let bytes = bytemuck::bytes_of_mut(&mut settings);
-    let split = crate::GpuPostProcessUniforms::LENS_BLOCK_OFFSET as usize;
-    bytes[..split].copy_from_slice(bytemuck::bytes_of(head));
-    bytes[split..split + 64].copy_from_slice(bytemuck::bytes_of(lens));
-    bytes[split + 64..].copy_from_slice(bytemuck::bytes_of(lens_ext));
+    bytes[..SPLIT].copy_from_slice(bytemuck::bytes_of(head));
+    bytes[SPLIT..].copy_from_slice(bytemuck::bytes_of(lens));
     settings
 }
 
@@ -125,7 +115,7 @@ mod tests {
         let mut settings = crate::PostProcessSettings::default();
         settings.lens_flare.enabled = true;
         settings.lens_flare.ghost_count = 7;
-        settings.lens_flare.vignette = 0.25;
+        settings.lens_flare.field_margin = 0.25;
         settings.fog_density = 0.125;
         let gpu = settings.to_gpu();
         let camera = CameraPostProcessComponent::new(3, &settings);
@@ -197,22 +187,20 @@ pub struct CameraPostProcessComponent {
     pub settings: [u32; 116],
     #[gpu]
     pub lens: [f32; 16],
-    #[gpu]
-    pub lens_ext: [f32; 16],
 }
 impl CameraPostProcessComponent {
     pub fn new(view_id: u32, settings: &crate::PostProcessSettings) -> Self {
         Self::from_gpu(view_id, &settings.to_gpu())
     }
     pub fn from_gpu(view_id: u32, settings: &crate::GpuPostProcessUniforms) -> Self {
-        let (settings, lens, lens_ext) = split_settings(settings);
-        Self { view_id, enabled: 1, _pad0: 0, _pad1: 0, settings, lens, lens_ext }
+        let (settings, lens) = split_settings(settings);
+        Self { view_id, enabled: 1, _pad0: 0, _pad1: 0, settings, lens }
     }
     pub fn settings(&self) -> crate::GpuPostProcessUniforms {
-        join_settings(&self.settings, &self.lens, &self.lens_ext)
+        join_settings(&self.settings, &self.lens)
     }
 }
-const _: () = assert!(std::mem::size_of::<CameraPostProcessComponent>() == 608);
+const _: () = assert!(std::mem::size_of::<CameraPostProcessComponent>() == 544);
 const _: () = assert!(std::mem::offset_of!(CameraPostProcessComponent, settings) == 16);
 
 pulsar_reflection::inventory::submit! {
