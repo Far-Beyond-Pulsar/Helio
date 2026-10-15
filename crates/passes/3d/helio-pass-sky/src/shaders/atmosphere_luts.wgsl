@@ -36,6 +36,7 @@ struct Resolve {
 @group(1) @binding(4) var sky_view_out: texture_storage_2d<rgba16float, write>;
 @group(1) @binding(5) var sky_view_lut: texture_2d<f32>;
 @group(1) @binding(6) var aerial_out: texture_storage_3d<rgba16float, write>;
+@group(1) @binding(7) var<storage, read_write> sky_table_out: array<vec4<f32>>;
 
 const LIGHT_ROW_VEC4S: u32 = 8u;
 
@@ -281,5 +282,66 @@ fn irradiance_kernel(@builtin(local_invocation_index) li: u32) {
         var sum = vec3<f32>(0.0);
         for (var t = 0u; t < 64u; t++) { sum += partial[t][c]; }
         frame.irradiance[c] = vec4<f32>(sum * weight * band[c] * frame.sun_illuminance.rgb, 0.0);
+    }
+}
+
+// The sky's irradiance table (`AtmosphereFrame::sky_table`): one workgroup
+// per entry (altitude, sun cosine), its 64 lanes two directions each of a
+// Fibonacci sphere: the sky (single and multiple scattering) and the lit
+// ground below the horizon, through the air, for a unit sun; projected
+// on L2 harmonics, cosine-convolved, divided by pi. It depends on the
+// medium alone.
+var<workgroup> table_partial: array<array<vec3<f32>, 6>, 64>;
+
+@compute @workgroup_size(64)
+fn sky_table_kernel(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let entry = wg.x;
+    let p = frame.params;
+    let ir = entry / SKY_TABLE_MU;
+    let im = entry % SKY_TABLE_MU;
+    let height = pow(f32(ir) / f32(SKY_TABLE_R - 1u), 2.0);
+    let r = p.bottom_radius + max(height * (p.top_radius - p.bottom_radius), 0.01);
+    let mu_s = SKY_TABLE_MU_LO + (1.0 - SKY_TABLE_MU_LO) * f32(im) / f32(SKY_TABLE_MU - 1u);
+    let sun = vec3<f32>(sqrt(max(1.0 - mu_s * mu_s, 0.0)), mu_s, 0.0);
+    let o = vec3<f32>(0.0, r, 0.0);
+    let total = 128u;
+    var sh = array<vec3<f32>, 6>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+    if atmosphere_active() {
+        for (var k = 0u; k < 2u; k++) {
+            let n = li * 2u + k;
+            let zc = 1.0 - (f32(n) + 0.5) * 2.0 / f32(total);
+            let a = f32(n) * 2.39996323;
+            let q = sqrt(max(1.0 - zc * zc, 0.0));
+            // y is up: the sphere's axis.
+            let d = vec3<f32>(q * cos(a), zc, q * sin(a));
+            let segment = atmosphere_segment(p, o, d, true);
+            var l = vec3<f32>(0.0);
+            if segment.y > segment.x {
+                let sc = atmosphere_integrate(p, sun, transmittance_lut, multi_scattering_lut, lut_sampler, o, d, segment.x, segment.y, 12.0, true);
+                l = sc.radiance;
+                if segment.z > 0.5 {
+                    let x = o + d * segment.y;
+                    let g = normalize(x);
+                    let mu = dot(g, sun);
+                    l += sc.transmittance * sun_transmittance(p.bottom_radius, mu) * max(mu, 0.0) * p.ground_albedo / ATMOSPHERE_PI;
+                }
+            }
+            sh[0] += l * 0.282095;
+            sh[1] += l * 0.488603 * d.y;
+            sh[2] += l * 0.488603 * d.x;
+            sh[3] += l * 1.092548 * d.x * d.y;
+            sh[4] += l * 0.315392 * (3.0 * d.z * d.z - 1.0);
+            sh[5] += l * 0.546274 * (d.x * d.x - d.y * d.y);
+        }
+    }
+    table_partial[li] = sh;
+    workgroupBarrier();
+    if li != 0u { return; }
+    let weight = 4.0 * ATMOSPHERE_PI / f32(total);
+    let band = array<f32, 6>(1.0, 2.0 / 3.0, 2.0 / 3.0, 0.25, 0.25, 0.25);
+    for (var c = 0u; c < 6u; c++) {
+        var sum = vec3<f32>(0.0);
+        for (var t = 0u; t < 64u; t++) { sum += table_partial[t][c]; }
+        sky_table_out[entry * SKY_TABLE_COEFFS + c] = vec4<f32>(sum * weight * band[c], 0.0);
     }
 }

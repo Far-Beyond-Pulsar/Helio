@@ -40,8 +40,21 @@ struct AtmosphereFrame {
     params: AtmosphereParams,
     // Diffuse sky irradiance / pi as L2 spherical harmonics (rgb): a
     // Lambertian surface of albedo a with normal n receives a * E(n).
+    // Seen from the eye; surfaces take their own sky from the sky table
+    // (`atmosphere_sky_table`).
     irradiance: array<vec4<f32>, 9>,
 }
+
+// The sky's irradiance / pi (unit sun) on a surface anywhere in the
+// atmosphere (`sky_table_kernel`, published as `atmosphere_sky_table`): per
+// altitude (SKY_TABLE_R rows, by the square root of the height) and sun
+// cosine (SKY_TABLE_MU columns, SKY_TABLE_MU_LO to 1), the six L2
+// harmonics symmetric about the sun's vertical plane, in the local frame
+// (y up, x towards the sun), SKY_TABLE_COEFFS vec4s an entry.
+const SKY_TABLE_R: u32 = 16u;
+const SKY_TABLE_MU: u32 = 24u;
+const SKY_TABLE_MU_LO: f32 = -0.4;
+const SKY_TABLE_COEFFS: u32 = 6u;
 
 const ATMOSPHERE_PI: f32 = 3.14159265358979;
 const TRANSMITTANCE_SIZE: vec2<f32> = vec2<f32>(256.0, 64.0);

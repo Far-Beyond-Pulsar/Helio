@@ -43,6 +43,14 @@ pub const ATMOSPHERE_AERIAL: &str = "atmosphere_aerial";
 /// storage: consumers already at the per-stage storage-buffer limit (the
 /// deferred lighting pass) bind it as a uniform.
 pub const ATMOSPHERE_FRAME_BYTES: u64 = 320;
+/// Graph key of the sky's irradiance table (`SKY_TABLE_*` in
+/// `atmosphere_common.wgsl`): the sky over a surface anywhere in the air,
+/// by its altitude and sun angle. Usable as a uniform.
+pub const ATMOSPHERE_SKY_TABLE: &str = "atmosphere_sky_table";
+/// Entries of the sky table: 16 altitudes by 24 sun cosines, six vec4s
+/// each.
+const SKY_TABLE_ENTRIES: u64 = 16 * 24;
+pub const ATMOSPHERE_SKY_TABLE_BYTES: u64 = SKY_TABLE_ENTRIES * 6 * 16;
 
 /// Marker opting a shader into the shared atmosphere WGSL.
 pub const ATMOSPHERE_MARKER: &str = "//!use atmosphere";
@@ -261,6 +269,7 @@ pub struct AtmospherePass {
     multi_scattering: wgpu::TextureView,
     sky_view: wgpu::TextureView,
     aerial: wgpu::TextureView,
+    sky_table: wgpu::Buffer,
     rows: helio_core::SceneBufferLiveness,
     active: bool,
     /// `HELIO_ATMOSPHERE_TRACE=1`: the resolved frame's head (planet, sun,
@@ -301,6 +310,12 @@ impl AtmospherePass {
         let multi_scattering = multi.clone();
         let sky_view = lut(device, "Atmosphere sky view", [SKY_VIEW[0], SKY_VIEW[1], 1], wgpu::TextureDimension::D2);
         let aerial = lut(device, "Atmosphere aerial perspective", [AERIAL; 3], wgpu::TextureDimension::D3);
+        let sky_table = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Atmosphere sky table"),
+            size: ATMOSPHERE_SKY_TABLE_BYTES,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
         let pipeline = |layout: Option<&wgpu::BindGroupLayout>, entry: &str| {
             let groups: Vec<Option<&wgpu::BindGroupLayout>> = match layout {
                 Some(layout) => vec![Some(&shared_layout), Some(layout)],
@@ -368,6 +383,15 @@ impl AtmospherePass {
                 [AERIAL.div_ceil(8), AERIAL.div_ceil(8), 1],
             ),
             kernel("irradiance_kernel", &[(sampled_texture(5, compute, d2), view(&sky_view))], [1, 1, 1]),
+            kernel(
+                "sky_table_kernel",
+                &[
+                    (sampled_texture(1, compute, d2), view(&transmittance)),
+                    (sampled_texture(3, compute, d2), view(&multi)),
+                    (buffer_entry(7, compute, storage(false)), sky_table.as_entire_binding()),
+                ],
+                [SKY_TABLE_ENTRIES as u32, 1, 1],
+            ),
         ];
         let resolve = pipeline(None, "resolve");
         let frame = device.create_buffer(&wgpu::BufferDescriptor {
@@ -412,6 +436,7 @@ impl AtmospherePass {
             multi_scattering,
             sky_view,
             aerial,
+            sky_table,
             rows: helio_core::SceneBufferLiveness::with_row_predicate(|row| {
                 // `enabled` is the last word.
                 row.len() >= 112 && row[108..112].iter().any(|&b| b != 0)
@@ -435,7 +460,7 @@ impl RenderPass for AtmospherePass {
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &[ATMOSPHERE_FRAME, ATMOSPHERE_TRANSMITTANCE, ATMOSPHERE_MULTI_SCATTERING, ATMOSPHERE_SKY_VIEW, ATMOSPHERE_AERIAL]
+        &[ATMOSPHERE_FRAME, ATMOSPHERE_SKY_TABLE, ATMOSPHERE_TRANSMITTANCE, ATMOSPHERE_MULTI_SCATTERING, ATMOSPHERE_SKY_VIEW, ATMOSPHERE_AERIAL]
     }
 
     fn declare_resources(&self, _builder: &mut ResourceBuilder) {}
@@ -531,6 +556,8 @@ impl RenderPass for AtmospherePass {
         // Pass-owned resources, handed over for the frame.
         let buffer: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.frame) };
         frame.write_buffer(ResourceKey::new(ATMOSPHERE_FRAME), buffer, "Atmosphere");
+        let table: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.sky_table) };
+        frame.write_buffer(ResourceKey::new(ATMOSPHERE_SKY_TABLE), table, "Atmosphere");
         for (key, view) in [
             (ATMOSPHERE_TRANSMITTANCE, &self.transmittance),
             (ATMOSPHERE_MULTI_SCATTERING, &self.multi_scattering),
