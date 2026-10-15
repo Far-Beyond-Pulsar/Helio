@@ -71,5 +71,4 @@ impl ColorLightProps {
             self.use_physical_light_color = v;
         }
     }
-
 }

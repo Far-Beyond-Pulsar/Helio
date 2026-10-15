@@ -86,7 +86,7 @@ struct MaterialTextureData {
     params:             vec4<f32>,  // x=normal_scale, y=occlusion_strength, z=alpha_cutoff
 }
 
-/// Per-instance data (208 bytes). Must match `GpuInstanceData` in libhelio.
+/// Per-instance data (224 bytes). Must match `GpuInstanceData` in libhelio.
 struct GpuInstanceData {
     transform:      mat4x4<f32>,  // offset   0  (64 bytes)
     normal_mat_0:   vec4<f32>,    // offset  64  — row 0 of inv-transpose 3×3
@@ -98,6 +98,15 @@ struct GpuInstanceData {
     material_id:    u32,          // offset 196
     flags:          u32,          // offset 200
     lightmap_index: u32,          // offset 204 — index into lightmap_atlas_regions, 0xFFFFFFFF = no lightmap
+    skin_vertex_offset: u32,
+    bone_palette_offset: u32,
+    bone_palette_count: u32,
+    _skin_pad: u32,
+}
+
+struct SkinVertex {
+    joints: vec4<u32>,
+    weights: vec4<f32>,
 }
 
 /// Lightmap atlas region for a mesh (32 bytes).
@@ -129,6 +138,8 @@ struct LightmapAtlasRegion {
 // slot here and moving the whole space with a single matrix write.
 @group(0) @binding(5) var<storage, read>    coordinate_spaces:      array<mat4x4<f32>>;
 @group(0) @binding(6) var<storage, read>    coordinate_spaces_prev: array<mat4x4<f32>>;
+@group(0) @binding(7) var<storage, read>    skin_vertices: array<SkinVertex>;
+@group(0) @binding(8) var<storage, read>    bone_palette: array<mat4x4<f32>>;
 
 @group(1) @binding(0) var<storage, read>    materials:          array<GpuMaterial>;
 @group(1) @binding(1) var<storage, read>    material_textures:  array<MaterialTextureData>;
@@ -163,8 +174,32 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
 // `slot` is per-instance vertex data, which every backend offsets by the
 // indirect draw's `first_instance` (`helio_pass_gbuffer::draw_slots`).
 @vertex
-fn vs_main(v: Vertex, @location(15) slot: u32) -> VertexOutput {
+fn vs_main(v: Vertex, @location(15) slot: u32, @builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     let inst       = instance_data[compacted_indices[slot]];
+    var local_position = v.position;
+    var local_normal = decode_snorm8x4(v.normal);
+    var local_tangent = decode_snorm8x4(v.tangent);
+    if inst.bone_palette_count > 0u {
+        let skin = skin_vertices[vertex_index + inst.skin_vertex_offset];
+        var blended = mat4x4<f32>(
+            vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0));
+        var total_weight = 0.0;
+        for (var influence = 0u; influence < 4u; influence = influence + 1u) {
+            let weight = skin.weights[influence];
+            let joint = skin.joints[influence];
+            if weight > 0.0 && joint < inst.bone_palette_count {
+                blended += bone_palette[inst.bone_palette_offset + joint] * weight;
+                total_weight += weight;
+            }
+        }
+        if total_weight > 0.00001 {
+            blended = blended * (1.0 / total_weight);
+            local_position = (blended * vec4<f32>(v.position, 1.0)).xyz;
+            let skin_normal = mat3x3<f32>(blended[0].xyz, blended[1].xyz, blended[2].xyz);
+            local_normal = normalize(skin_normal * local_normal);
+            local_tangent = normalize(skin_normal * local_tangent);
+        }
+    }
 
     // Coordinate space: world space (slot 0, identity) for the overwhelming
     // common case, or wherever a sublevel/portal has placed this instance.
@@ -174,7 +209,7 @@ fn vs_main(v: Vertex, @location(15) slot: u32) -> VertexOutput {
     let space_prev = coordinate_spaces_prev[space_id];
     let space_rot  = mat3x3<f32>(space[0].xyz, space[1].xyz, space[2].xyz);
 
-    let world_pos  = space * (inst.transform * vec4<f32>(v.position, 1.0));
+    let world_pos  = space * (inst.transform * vec4<f32>(local_position, 1.0));
 
     // Normals transform by the inverse-transpose (stored in normal_mat), then
     // by the coordinate space's rotation. Coordinate spaces are always rigid
@@ -197,7 +232,25 @@ fn vs_main(v: Vertex, @location(15) slot: u32) -> VertexOutput {
     // Previous-frame clip position for velocity buffer. Uses the coordinate
     // space's own previous-frame transform so a moving sublevel/portal still
     // produces correct motion vectors instead of a false one-frame pop.
-    let prev_world  = space_prev * (inst.prev_model * vec4<f32>(v.position, 1.0));
+    var prev_local_position = v.position;
+    if inst.bone_palette_count > 0u {
+        let skin = skin_vertices[vertex_index + inst.skin_vertex_offset];
+        var prev_blended = mat4x4<f32>(
+            vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0));
+        var prev_total_weight = 0.0;
+        for (var influence = 0u; influence < 4u; influence = influence + 1u) {
+            let weight = skin.weights[influence];
+            let joint = skin.joints[influence];
+            if weight > 0.0 && joint < inst.bone_palette_count {
+                prev_blended += bone_palette[inst.bone_palette_offset + inst.bone_palette_count + joint] * weight;
+                prev_total_weight += weight;
+            }
+        }
+        if prev_total_weight > 0.00001 {
+            prev_local_position = (prev_blended * (1.0 / prev_total_weight) * vec4<f32>(v.position, 1.0)).xyz;
+        }
+    }
+    let prev_world  = space_prev * (inst.prev_model * vec4<f32>(prev_local_position, 1.0));
     let prev_clip   = cameras[0].prev_view_proj * prev_world;
 
     var out: VertexOutput;
@@ -206,8 +259,8 @@ fn vs_main(v: Vertex, @location(15) slot: u32) -> VertexOutput {
     // The depth prepass and forward/transparent variants must match this order.
     out.clip_position      = cameras[0].proj * (cameras[0].view * world_pos);
     out.world_position     = world_pos.xyz;
-    out.world_normal       = normalize(normal_mat  * decode_snorm8x4(v.normal));
-    out.world_tangent      = normalize(model_mat3  * decode_snorm8x4(v.tangent));
+    out.world_normal       = normalize(normal_mat  * local_normal);
+    out.world_tangent      = normalize(model_mat3  * local_tangent);
     out.bitangent_sign     = v.bitangent_sign;
     out.tex_coords         = v.tex_coords;
     out.material_id        = inst.material_id;

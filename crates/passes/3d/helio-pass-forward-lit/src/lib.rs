@@ -68,6 +68,8 @@ pub struct ForwardLitPass {
         Option<wgpu::Buffer>,
         usize,
         usize,
+        wgpu::Buffer,
+        wgpu::Buffer,
     )>,
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_1_version: Option<(u64,u64)>,
@@ -181,6 +183,8 @@ impl ForwardLitPass {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry { binding: 9, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                    wgpu::BindGroupLayoutEntry { binding: 10, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 ],
             });
 
@@ -523,6 +527,8 @@ impl RenderPass for ForwardLitPass {
         // real buffer's address, so it still forces a rebind the moment a
         // real Transform buffer shows up.
         let transforms_ptr = 0;
+        let skin_buffer = ctx.scene_buffers.get(BufferKey::of("skeletal_skin_vertices")).map(|h| h.buffer.clone()).unwrap_or_else(|| batch.instances.clone());
+        let palette_buffer = ctx.scene_buffers.get(BufferKey::of("skeletal_bone_palette")).map(|h| h.buffer.clone()).unwrap_or_else(|| batch.instances.clone());
 
         let cluster = ctx.registry.get::<helio_pass_light_cull::ClusterLightGrid<'_>>(helio_core::ResourceKey::new("cluster_light_grid"));
 
@@ -535,6 +541,8 @@ impl RenderPass for ForwardLitPass {
             cluster.map(|c| c.tile_light_counts.clone()),
             light_entity_indices_ptr,
             transforms_ptr,
+            skin_buffer.clone(),
+            palette_buffer.clone(),
         );
         if self.bind_group_0_key.as_ref() != Some(&bg0_key) {
             let cluster_ref = ctx.registry.get::<helio_pass_light_cull::ClusterLightGrid<'_>>(helio_core::ResourceKey::new("cluster_light_grid"));
@@ -595,6 +603,8 @@ impl RenderPass for ForwardLitPass {
                         binding: 8,
                         resource: transforms.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry { binding: 9, resource: skin_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 10, resource: palette_buffer.as_entire_binding() },
                 ],
             }));
             self.bind_group_0_key = Some(bg0_key);

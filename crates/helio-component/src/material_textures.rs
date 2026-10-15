@@ -60,9 +60,30 @@ pub fn register_graph_texture(
     if let Some(old) = cache.remove(&key) {
         let _ = store.unregister(old.slot);
     }
+    let slot = upload_rgba(&mut store, mirror, width, height, decoded.as_raw())?;
+    cache.insert(
+        key,
+        CachedTexture {
+            owner: Arc::downgrade(&texture_store),
+            fingerprint,
+            slot,
+        },
+    );
+    Ok(slot)
+}
+
+/// Upload an sRGB RGBA8 image of `width` by `height` into `store` (the
+/// texture store of `mirror`'s scene) and return its slot.
+pub(crate) fn upload_rgba(
+    store: &mut TextureStore,
+    mirror: &GpuMirrorHandle,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Result<u32, String> {
     let device = mirror.store().device_arc();
     let descriptor = wgpu::TextureDescriptor {
-        label: Some("Blueprint Material Texture"),
+        label: Some("Scene Texture"),
         size: wgpu::Extent3d {
             width,
             height,
@@ -75,16 +96,7 @@ pub fn register_graph_texture(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     };
-    let slot = store
-        .register(&device, mirror.queue(), &descriptor, decoded.as_raw())
-        .map_err(|error| format!("could not register texture in SceneDB: {error:?}"))?;
-    cache.insert(
-        key,
-        CachedTexture {
-            owner: Arc::downgrade(&texture_store),
-            fingerprint,
-            slot,
-        },
-    );
-    Ok(slot)
+    store
+        .register(&device, mirror.queue(), &descriptor, rgba)
+        .map_err(|error| format!("could not register texture in SceneDB: {error:?}"))
 }

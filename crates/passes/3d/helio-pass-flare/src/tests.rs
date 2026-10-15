@@ -87,7 +87,7 @@ fn uniforms(device: &wgpu::Device, lens: LensFlareSettings) -> wgpu::Buffer {
     })
 }
 
-/// Only the named component contributes; linear extraction; no vignette.
+/// Only the named component contributes; linear extraction.
 fn isolated(component: &str) -> LensFlareSettings {
     let mut lens = LensFlareSettings {
         enabled: true,
@@ -99,7 +99,6 @@ fn isolated(component: &str) -> LensFlareSettings {
         glare_intensity: 0.0,
         streak_intensity: 0.0,
         dispersion: 0.0,
-        vignette: 0.0,
         starburst_intensity: 0.0,
         coating_strength: 0.0,
         ghost_rim: 0.0,
@@ -175,6 +174,15 @@ fn run_with(
         .collect()
 }
 
+/// The camera's optics, as the lens pass resolves them.
+fn optics(device: &wgpu::Device, lens: ResolvedLens) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("lens test optics"),
+        contents: bytemuck::bytes_of(&lens),
+        usage: wgpu::BufferUsages::STORAGE,
+    })
+}
+
 fn luminance(c: &[f32; 3]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 }
@@ -210,14 +218,15 @@ fn gpu_lens_block_matches_the_resolved_postprocess_abi() {
         std::mem::offset_of!(GpuPostProcessUniforms, lens_enabled)
     );
     assert_eq!(POSTPROCESS_BINDING_SIZE as usize, std::mem::size_of::<GpuPostProcessUniforms>());
-    let lens = LensFlareSettings { ghost_count: 6, dispersion: 0.02, vignette: 0.5, ..isolated("glare") };
+    let lens = LensFlareSettings { ghost_count: 6, dispersion: 0.02, ..isolated("glare") };
     let gpu = PostProcessSettings { lens_flare: lens, ..Default::default() }.to_gpu();
     let bytes = bytemuck::bytes_of(&gpu);
     let block: GpuLensResponse = bytemuck::pod_read_unaligned(
         &bytes[LENS_BLOCK_OFFSET as usize..(LENS_BLOCK_OFFSET + LENS_BLOCK_SIZE) as usize],
     );
     assert_eq!((block.enabled, block.ghost_count), (1, 6));
-    assert_eq!((block.dispersion, block.vignette), (0.02, 0.5));
+    assert_eq!(block.dispersion, 0.02);
+    assert_eq!(block.reserved_vignette, 0.0);
 }
 
 #[test]
@@ -265,9 +274,13 @@ fn glare_is_energy_bounded_centered_and_aperture_normalized() {
     let (mean, _) = moments(&response);
     assert!((mean[0] - 16.0).abs() < 1.0 && (mean[1] - 16.0).abs() < 1.0, "off-centre glare {mean:?}");
 
-    // Aperture changes the kernel's shape, not the scattered energy.
-    let stopped_down = LensFlareSettings { aperture_f_number: 16.0, ..isolated("glare") };
-    let narrow = run(&device, &queue, &mut pass, Some(&input), Some(&uniforms(&device, stopped_down)));
+    // Aperture changes the kernel's shape, not the scattered energy. The
+    // f-number comes from the camera's lens, not the post-process block.
+    let stopped_down = optics(&device, ResolvedLens { f_number: 16.0, ..Default::default() });
+    let narrow = run_with(
+        &device, &queue, &mut pass, Some(&input), Some(&uniforms(&device, isolated("glare"))),
+        OpticsInputs { lens: Some(&stopped_down), ..Default::default() },
+    );
     let ratio = total(&narrow) / total(&response);
     assert!((ratio - 1.0).abs() < 0.1, "aperture changed exposure by {ratio}");
 }
@@ -311,8 +324,11 @@ fn starburst_spikes_are_perpendicular_to_the_iris_blades() {
     let input = image(&device, &queue, &[(64, 64, 4000.0)]);
     // Six blades at zero rotation: spikes at 30, 90 and 150 degrees, so
     // vertical carries a spike and horizontal lies between two.
-    let lens = LensFlareSettings { aperture_blades: 6, aperture_rotation: 0.0, ..isolated("starburst") };
-    let response = run(&device, &queue, &mut pass, Some(&input), Some(&uniforms(&device, lens)));
+    let hexagon = optics(&device, ResolvedLens { aperture_blades: 6, aperture_rotation: 0.0, ..Default::default() });
+    let response = run_with(
+        &device, &queue, &mut pass, Some(&input), Some(&uniforms(&device, isolated("starburst"))),
+        OpticsInputs { lens: Some(&hexagon), ..Default::default() },
+    );
     let at = |x: u32, y: u32| luminance(&response[(y * OUT + x) as usize]);
     let vertical = at(16, 16 - 6) + at(16, 16 + 6);
     let horizontal = at(16 - 6, 16) + at(16 + 6, 16);
@@ -526,4 +542,60 @@ fn sky_history_reprojects_as_directions() {
     let reference = settle(0.1);
     let (a, b) = (total(&extreme), total(&reference));
     assert!(b > 0.0 && (a / b - 1.0).abs() < 0.01, "settled sky response {a} vs {b}");
+}
+
+#[test]
+fn optics_come_from_the_resolved_lens() {
+    let (device, queue, _serial) = gpu();
+    let mut pass = LensFlarePass::new_hdr(&device, SIZE, SIZE);
+    let input = image(&device, &queue, &[(64, 64, 400.0)]);
+    let pp = uniforms(&device, isolated("glare"));
+    // Without a lens pass the neutral 50 mm f/2.8 camera applies.
+    let default = run(&device, &queue, &mut pass, Some(&input), Some(&pp));
+    let neutral = optics(&device, ResolvedLens::default());
+    let explicit = run_with(
+        &device, &queue, &mut pass, Some(&input), Some(&pp),
+        OpticsInputs { lens: Some(&neutral), ..Default::default() },
+    );
+    assert_eq!(default, explicit);
+    // Stopping down widens the diffraction part of the glare kernel.
+    let stopped_down = optics(&device, ResolvedLens { f_number: 32.0, ..Default::default() });
+    let wide = run_with(
+        &device, &queue, &mut pass, Some(&input), Some(&pp),
+        OpticsInputs { lens: Some(&stopped_down), ..Default::default() },
+    );
+    let (_, narrow_variance) = moments(&default);
+    let (_, wide_variance) = moments(&wide);
+    assert!(wide_variance[0] > 1.5 * narrow_variance[0], "{wide_variance:?} vs {narrow_variance:?}");
+}
+
+#[test]
+fn analytic_lights_take_the_lenss_natural_falloff_and_the_image_does_not() {
+    let (device, queue, _serial) = gpu();
+    let mut pass = LensFlarePass::new_hdr(&device, SIZE, SIZE);
+    let camera = camera_buffer(&device);
+    let half_width = (std::f32::consts::FRAC_PI_8).tan() * 5.0;
+    let lights = light_buffer(&device, [1.15 * half_width, 0.0, -5.0], 2000.0);
+    let black = image(&device, &queue, &[]);
+    let lit = |natural: f32, input: &wgpu::TextureView, lights: Option<&wgpu::Buffer>| {
+        let lens = optics(&device, ResolvedLens { natural_vignette: natural, ..Default::default() });
+        let optics = OpticsInputs { camera: Some(&camera), lights, lens: Some(&lens), ..Default::default() };
+        let mut pass = LensFlarePass::new_hdr(&device, SIZE, SIZE);
+        let pp = uniforms(&device, isolated("lights"));
+        total(&run_with(&device, &queue, &mut pass, Some(input), Some(&pp), optics))
+    };
+    // An off-frame light is not in the image the lens vignetted, so the
+    // flare applies the lens's falloff to it: a corner source dims.
+    let (without, with) = (lit(0.0, &black, Some(&lights)), lit(1.0, &black, Some(&lights)));
+    assert!(without > 0.0 && with < 0.98 * without, "analytic source {without} -> {with}");
+    // The image path takes the image as it is: it already has the falloff.
+    let mut glare = |natural: f32| {
+        let lens = optics(&device, ResolvedLens { natural_vignette: natural, ..Default::default() });
+        let input = image(&device, &queue, &[(8, 8, 400.0)]);
+        let pp = uniforms(&device, isolated("glare"));
+        let optics = OpticsInputs { lens: Some(&lens), ..Default::default() };
+        total(&run_with(&device, &queue, &mut pass, Some(&input), Some(&pp), optics))
+    };
+    let (a, b) = (glare(0.0), glare(1.0));
+    assert!(a > 0.0 && (a / b - 1.0).abs() < 1.0e-4, "image path changed with the lens's falloff: {a} vs {b}");
 }

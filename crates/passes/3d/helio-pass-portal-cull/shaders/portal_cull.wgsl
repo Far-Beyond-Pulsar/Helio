@@ -53,7 +53,7 @@ struct CullUniforms {
 }
 @group(0) @binding(1) var<uniform> cull: CullUniforms;
 
-// Must match GpuInstanceData in libhelio exactly (208 bytes).
+// Must match GpuInstanceData in libhelio exactly (224 bytes).
 struct GpuInstance {
     model_0:      vec4<f32>,
     model_1:      vec4<f32>,
@@ -71,6 +71,10 @@ struct GpuInstance {
     material_id:  u32,
     flags:        u32,
     _pad:         u32,
+    skin_vertex_offset: u32,
+    bone_palette_offset: u32,
+    bone_palette_count: u32,
+    _skin_pad: u32,
 }
 @group(0) @binding(2) var<storage, read> instances: array<GpuInstance>;
 

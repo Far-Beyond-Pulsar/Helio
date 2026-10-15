@@ -106,9 +106,10 @@ fn compose(root: &Path, path: &Path, source: String) -> String {
         return format!("{common}\n{source}");
     }
     // `helio_pass_volumetric_fog::shader_source` sizes the post-process row's
-    // tail from its Rust ABI; any length validates the same.
+    // words around its fog block from its Rust ABI; any lengths validate the
+    // same.
     if normalized.ends_with("helio-pass-volumetric-fog/shaders/volumetric_fog.wgsl") {
-        return source.replace("__PP_TAIL_VEC4__", "1");
+        return source.replace("__PP_HEAD_VEC4__", "1").replace("__PP_TAIL_VEC4__", "1");
     }
     source
 }

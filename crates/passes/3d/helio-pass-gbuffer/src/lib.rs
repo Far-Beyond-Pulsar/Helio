@@ -99,7 +99,7 @@ pub struct GBufferPass {
     bind_group_layout_1: wgpu::BindGroupLayout,
     /// Group 0: camera + globals + instance_data. Rebuilt when buffer pointers change.
     bind_group_0: Option<wgpu::BindGroup>,
-    bind_group_0_key: Option<[wgpu::Buffer; 5]>,
+    bind_group_0_key: Option<[wgpu::Buffer; 7]>,
     /// Group 1: materials + material_textures + bindless texture arrays.
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_1_version: Option<(u64,u64)>,
@@ -129,6 +129,8 @@ pub struct GBufferPass {
     /// pass's own `MaterialTextureData` struct size (gbuffer.wgsl) -- a
     /// generic Renderer has no business knowing it.
     fallback_material_textures: wgpu::Buffer,
+    /// Zeroed sentinel storage for scenes without skeletal assets.
+    fallback_skeletal_storage: wgpu::Buffer,
     /// CPU-side projection input staged by the generic graph interface and
     /// uploaded during `prepare()` with the current frame queue.
     pending_coordinate_spaces: Option<Vec<glam::Mat4>>,
@@ -232,6 +234,28 @@ impl GBufferPass {
                         },
                         count: None,
                     },
+                    // binding 7: four joint indices + weights per vertex.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // binding 8: shared skinning palette as column-major mat4 rows.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -250,6 +274,13 @@ impl GBufferPass {
         let lightmap_atlas_regions_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Lightmap Atlas Regions"),
             size: 32, // One empty region sentinel; recreated when real data loads.
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let fallback_skeletal_storage = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Empty skeletal storage"),
+            size: 64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -303,6 +334,7 @@ impl GBufferPass {
             coordinate_spaces,
             coordinate_spaces_prev,
             fallback_material_textures,
+            fallback_skeletal_storage,
             pending_coordinate_spaces: None,
         }
     }
@@ -687,12 +719,22 @@ impl RenderPass for GBufferPass {
         let coordinate_spaces_prev_buf = coord_spaces
             .map(|c| c.coordinate_spaces_prev)
             .unwrap_or(ctx.camera);
+        let skin_handle = ctx.scene_buffers.get(BufferKey::of("skeletal_skin_vertices"));
+        let palette_handle = ctx.scene_buffers.get(BufferKey::of("skeletal_bone_palette"));
+        let skin_buf = skin_handle
+            .map(|handle| &handle.buffer)
+            .unwrap_or(&self.fallback_skeletal_storage);
+        let palette_buf = palette_handle
+            .map(|handle| &handle.buffer)
+            .unwrap_or(&self.fallback_skeletal_storage);
         let key = [
             ctx.camera.clone(),
             batch.instances.clone(),
             culled.compacted_indices.clone(),
             coordinate_spaces_buf.clone(),
             coordinate_spaces_prev_buf.clone(),
+            skin_buf.clone(),
+            palette_buf.clone(),
         ];
         if self.bind_group_0_key.as_ref() != Some(&key) {
             log::debug!("GBuffer: rebuilding bind group 0 (buffers changed)");
@@ -727,6 +769,14 @@ impl RenderPass for GBufferPass {
                     wgpu::BindGroupEntry {
                         binding: 6,
                         resource: coordinate_spaces_prev_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: skin_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: palette_buf.as_entire_binding(),
                     },
                 ],
             }));

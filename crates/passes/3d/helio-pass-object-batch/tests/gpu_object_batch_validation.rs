@@ -101,6 +101,10 @@ fn make_row(
         } else {
             0
         },
+        skin_vertex_offset: 0,
+        bone_palette_offset: 0,
+        bone_palette_count: 0,
+        _skin_pad: 0,
     }
 }
 
@@ -121,6 +125,10 @@ fn dead_row() -> StaticObjectComponent {
         graph_hash_lo: 0,
         graph_hash_hi: 0,
         flags: 0,
+        skin_vertex_offset: 0,
+        bone_palette_offset: 0,
+        bone_palette_count: 0,
+        _skin_pad: 0,
     }
 }
 
@@ -301,9 +309,9 @@ async fn run_gpu(rows: &[StaticObjectComponent], materials: &[TestMaterial]) -> 
         (shadow_counts[0], shadow_counts[1], shadow_counts[2]);
 
     let instances_bytes = read_buf(pass.instances_buffer(), "instances readback");
-    // GpuInstanceDataOut: model(64)+normal_mat(48)+bounds(16)+prev_model(64)=192 bytes before mesh_id/material_id/flags/lightmap_index.
+    // GpuInstanceDataOut: 192-byte transform payload, 4 base words and 4 skin words.
     let mut instances = Vec::new();
-    let stride = 208usize;
+    let stride = 224usize;
     let live_count = rows.iter().filter(|r| r.mesh_generation != 0).count();
     for i in 0..live_count {
         let base = i * stride;
@@ -790,12 +798,12 @@ fn instance_prev_transform_is_last_frames_transform() {
             pass.run_once_for_testing(&device, &queue, &static_objects, &materials, 1);
             let staging = device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
-                size: 208,
+                size: 224,
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
             let mut encoder = device.create_command_encoder(&Default::default());
-            encoder.copy_buffer_to_buffer(pass.instances_buffer(), 0, &staging, 0, 208);
+            encoder.copy_buffer_to_buffer(pass.instances_buffer(), 0, &staging, 0, 224);
             queue.submit([encoder.finish()]);
             staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();

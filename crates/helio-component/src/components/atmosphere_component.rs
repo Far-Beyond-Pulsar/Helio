@@ -7,8 +7,8 @@
 //! authored value; the environment join places it as the sky pass's
 //! `helio_pass_sky::AtmosphereComponent` row in `"atmospheres"`.
 use engine_class_derive::{engine_class, register_world_component};
-use helio_pass_sky::atmosphere::placement;
 use helio_pass_sky::AtmosphereComponent as AtmosphereRow;
+use helio_pass_sky::atmosphere::placement;
 use pulsar_reflection::Reflectable;
 use serde::{Deserialize, Serialize};
 
@@ -226,9 +226,15 @@ mod tests {
         };
         let row = component.to_row();
         assert_eq!(row.placement, placement::CENTER);
-        assert_eq!(row.center, [0.0; 3], "local: the join adds the owner's position");
+        assert_eq!(
+            row.center, [0.0; 3],
+            "local: the join adds the owner's position"
+        );
         assert_eq!((row.bottom_radius, row.top_radius), (1737.0, 1777.0));
-        let disabled = AtmosphereComponent { enabled: false, ..component };
+        let disabled = AtmosphereComponent {
+            enabled: false,
+            ..component
+        };
         assert_eq!(disabled.to_row().enabled, 0);
     }
 }

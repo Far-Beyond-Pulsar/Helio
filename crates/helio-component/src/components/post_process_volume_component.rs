@@ -3,16 +3,17 @@
 //! placed by the graph's environment join with the owner's transform; camera
 //! settings reuse PostProcessSettingsProps.
 
-use engine_class_derive::{engine_class, register_world_component};
-use helio_pass_postprocess::{HdrOutputMode as HelioHdrOutputMode, TonemapOperator as HelioTonemapOperator};
 use super::lens_flare_props::LensFlareProps;
+use engine_class_derive::{engine_class, register_world_component};
 use helio_pass_postprocess::{
     ExposureMode as HelioExposureMode, FogMode as HelioFogMode, PostProcessSettings,
     PostProcessVolumeDescriptor,
 };
+use helio_pass_postprocess::{
+    HdrOutputMode as HelioHdrOutputMode, TonemapOperator as HelioTonemapOperator,
+};
 use pulsar_reflection::Reflectable;
 use serde::{Deserialize, Serialize};
-
 
 pub const POST_PROCESS_VOLUME_CLASS_NAME: &str = "PostProcessVolumeComponent";
 
@@ -84,9 +85,7 @@ impl Default for HdrOutputMode {
 #[category("White Balance", category_color = "#2FA88A")]
 #[category("Tonemap", category_color = "#2FA88A")]
 #[category("Vignette", category_color = "#7C6FD1")]
-#[category("Chromatic Aberration", category_color = "#7C6FD1")]
 #[category("Film Grain", category_color = "#7C6FD1")]
-#[category("Depth of Field", category_color = "#3AA0FF")]
 #[category("Motion Blur", category_color = "#3AA0FF")]
 #[category("Blend Weights", category_color = "#8F8F8F")]
 #[category("HDR Output", category_color = "#D18F6F")]
@@ -126,7 +125,6 @@ pub struct PostProcessVolumeComponent {
     #[sub_props]
     #[serde(flatten)]
     pub settings: PostProcessSettingsProps,
-
 }
 
 impl Default for PostProcessVolumeComponent {
@@ -168,11 +166,7 @@ pub struct PostProcessOverrides {
     #[property(category = "Overrides")]
     pub override_vignette: bool,
     #[property(category = "Overrides")]
-    pub override_chromatic_aberration: bool,
-    #[property(category = "Overrides")]
     pub override_film_grain: bool,
-    #[property(category = "Overrides")]
-    pub override_depth_of_field: bool,
     #[property(category = "Overrides")]
     pub override_motion_blur: bool,
     #[property(category = "Overrides")]
@@ -192,9 +186,7 @@ impl Default for PostProcessOverrides {
             override_color_grading: true,
             override_tonemap: true,
             override_vignette: true,
-            override_chromatic_aberration: true,
             override_film_grain: true,
-            override_depth_of_field: true,
             override_motion_blur: true,
             override_hdr_output: true,
             override_volumetric_fog: true,
@@ -206,60 +198,137 @@ impl Default for PostProcessOverrides {
 impl PostProcessOverrides {
     pub fn mask(&self) -> [u32; 4] {
         use helio_pass_postprocess::PostProcessProperty as P;
-        let groups: [(bool, &[usize]); 12] = [
-            (self.override_exposure, &[
-                P::EXPOSURE_MODE, P::EXPOSURE_COMPENSATION, P::EXPOSURE_MIN, P::EXPOSURE_MAX,
-                P::EXPOSURE_SPEED_UP, P::EXPOSURE_SPEED_DOWN, P::BLEND_WEIGHT_EXPOSURE,
-            ]),
-            (self.override_bloom, &[
-                P::BLOOM_INTENSITY, P::BLOOM_THRESHOLD, P::BLOOM_KNEE, P::BLOOM_RADIUS,
-                P::BLOOM_TINT, P::BLOOM_ENABLED, P::BLEND_WEIGHT_BLOOM,
-            ]),
-            (self.override_color_grading, &[
-                P::COLOR_SATURATION, P::COLOR_CONTRAST, P::COLOR_GAMMA, P::COLOR_GAIN,
-                P::COLOR_OFFSET, P::WHITE_TEMP, P::WHITE_TINT, P::WHITE_BALANCE_ENABLED,
-                P::LIFT_COLOR, P::GAMMA_COLOR, P::GAIN_COLOR, P::SHADOWS_MAX,
-                P::HIGHLIGHTS_MIN, P::SHADOW_HIGHLIGHT_BALANCE, P::HUE_SHIFT,
-                P::LUT_GENERATION, P::LUT_INTENSITY, P::LUT_PLATFORM,
-            ]),
-            (self.override_tonemap, &[P::TONEMAP_OPERATOR, P::TONEMAP_EXPOSURE, P::TONEMAP_WHITE_POINT]),
-            (self.override_vignette, &[
-                P::VIGNETTE_INTENSITY, P::VIGNETTE_SMOOTHNESS, P::VIGNETTE_ROUNDNESS,
-                P::VIGNETTE_COLOR, P::VIGNETTE_ENABLED, P::BLEND_WEIGHT_VIGNETTE,
-            ]),
-            (self.override_chromatic_aberration, &[
-                P::CA_INTENSITY, P::CA_START_OFFSET, P::CA_ENABLED, P::BLEND_WEIGHT_CA,
-            ]),
-            (self.override_film_grain, &[
-                P::GRAIN_INTENSITY, P::GRAIN_RESPONSE, P::GRAIN_SIZE, P::GRAIN_ENABLED,
-                P::BLEND_WEIGHT_GRAIN,
-            ]),
-            (self.override_depth_of_field, &[
-                P::DOF_FOCAL_DISTANCE, P::DOF_FOCAL_REGION, P::DOF_APERTURE_SHAPE,
-                P::DOF_APERTURE_ROTATION, P::DOF_NEAR_TRANSITION, P::DOF_FAR_TRANSITION,
-                P::DOF_MAX_BOKEH_SIZE, P::DOF_SENSOR_DIAGONAL, P::BLEND_WEIGHT_DOF,
-            ]),
-            (self.override_motion_blur, &[
-                P::MOTION_BLUR_AMOUNT, P::MOTION_BLUR_MAX, P::MOTION_BLUR_ENABLED,
-                P::BLEND_WEIGHT_MOTION_BLUR,
-            ]),
-            (self.override_hdr_output, &[P::HDR_OUTPUT_MODE, P::HDR_MAX_NITS, P::HDR_UI_BRIGHTNESS]),
-            (self.override_volumetric_fog, &[
-                P::FOG_ENABLED, P::FOG_MODE, P::FOG_DENSITY, P::FOG_HEIGHT_FALLOFF,
-                P::FOG_START_DISTANCE, P::FOG_MAX_DISTANCE, P::FOG_HEIGHT,
-                P::FOG_SCATTERING_ANISOTROPY, P::FOG_COLOR, P::FOG_EMISSIVE,
-            ]),
-            (self.override_lens_flare, &[
-                P::LENS_ENABLED, P::LENS_QUALITY, P::LENS_PROFILE, P::LENS_GHOST_COUNT,
-                P::LENS_INTENSITY, P::LENS_THRESHOLD, P::LENS_SOFT_KNEE, P::LENS_GHOST_INTENSITY,
-                P::LENS_HALO_INTENSITY, P::LENS_GLARE_INTENSITY, P::LENS_STREAK_INTENSITY,
-                P::LENS_DISPERSION, P::LENS_APERTURE_F_NUMBER, P::LENS_FOCAL_LENGTH_MM,
-                P::LENS_SENSOR_WIDTH_MM, P::LENS_VIGNETTE, P::LENS_STARBURST_INTENSITY,
-                P::LENS_STARBURST_LENGTH, P::LENS_APERTURE_BLADES, P::LENS_APERTURE_ROTATION,
-                P::LENS_COATING_STRENGTH, P::LENS_GHOST_RIM, P::LENS_DIRT_INTENSITY,
-                P::LENS_LIGHT_SOURCES, P::LENS_LIGHT_INTENSITY, P::LENS_FIELD_MARGIN,
-                P::LENS_RESPONSE_TIME,
-            ]),
+        let groups: [(bool, &[usize]); 10] = [
+            (
+                self.override_exposure,
+                &[
+                    P::EXPOSURE_MODE,
+                    P::EXPOSURE_COMPENSATION,
+                    P::EXPOSURE_MIN,
+                    P::EXPOSURE_MAX,
+                    P::EXPOSURE_SPEED_UP,
+                    P::EXPOSURE_SPEED_DOWN,
+                    P::BLEND_WEIGHT_EXPOSURE,
+                ],
+            ),
+            (
+                self.override_bloom,
+                &[
+                    P::BLOOM_INTENSITY,
+                    P::BLOOM_THRESHOLD,
+                    P::BLOOM_KNEE,
+                    P::BLOOM_RADIUS,
+                    P::BLOOM_TINT,
+                    P::BLOOM_ENABLED,
+                    P::BLEND_WEIGHT_BLOOM,
+                ],
+            ),
+            (
+                self.override_color_grading,
+                &[
+                    P::COLOR_SATURATION,
+                    P::COLOR_CONTRAST,
+                    P::COLOR_GAMMA,
+                    P::COLOR_GAIN,
+                    P::COLOR_OFFSET,
+                    P::WHITE_TEMP,
+                    P::WHITE_TINT,
+                    P::WHITE_BALANCE_ENABLED,
+                    P::LIFT_COLOR,
+                    P::GAMMA_COLOR,
+                    P::GAIN_COLOR,
+                    P::SHADOWS_MAX,
+                    P::HIGHLIGHTS_MIN,
+                    P::SHADOW_HIGHLIGHT_BALANCE,
+                    P::HUE_SHIFT,
+                    P::LUT_GENERATION,
+                    P::LUT_INTENSITY,
+                    P::LUT_PLATFORM,
+                ],
+            ),
+            (
+                self.override_tonemap,
+                &[
+                    P::TONEMAP_OPERATOR,
+                    P::TONEMAP_EXPOSURE,
+                    P::TONEMAP_WHITE_POINT,
+                ],
+            ),
+            (
+                self.override_vignette,
+                &[
+                    P::VIGNETTE_INTENSITY,
+                    P::VIGNETTE_SMOOTHNESS,
+                    P::VIGNETTE_ROUNDNESS,
+                    P::VIGNETTE_COLOR,
+                    P::VIGNETTE_ENABLED,
+                    P::BLEND_WEIGHT_VIGNETTE,
+                ],
+            ),
+            (
+                self.override_film_grain,
+                &[
+                    P::GRAIN_INTENSITY,
+                    P::GRAIN_RESPONSE,
+                    P::GRAIN_SIZE,
+                    P::GRAIN_ENABLED,
+                    P::BLEND_WEIGHT_GRAIN,
+                ],
+            ),
+            (
+                self.override_motion_blur,
+                &[
+                    P::MOTION_BLUR_AMOUNT,
+                    P::MOTION_BLUR_MAX,
+                    P::MOTION_BLUR_ENABLED,
+                    P::BLEND_WEIGHT_MOTION_BLUR,
+                ],
+            ),
+            (
+                self.override_hdr_output,
+                &[P::HDR_OUTPUT_MODE, P::HDR_MAX_NITS, P::HDR_UI_BRIGHTNESS],
+            ),
+            (
+                self.override_volumetric_fog,
+                &[
+                    P::FOG_ENABLED,
+                    P::FOG_MODE,
+                    P::FOG_DENSITY,
+                    P::FOG_HEIGHT_FALLOFF,
+                    P::FOG_START_DISTANCE,
+                    P::FOG_MAX_DISTANCE,
+                    P::FOG_HEIGHT,
+                    P::FOG_SCATTERING_ANISOTROPY,
+                    P::FOG_COLOR,
+                    P::FOG_EMISSIVE,
+                ],
+            ),
+            (
+                self.override_lens_flare,
+                &[
+                    P::LENS_ENABLED,
+                    P::LENS_QUALITY,
+                    P::LENS_PROFILE,
+                    P::LENS_GHOST_COUNT,
+                    P::LENS_INTENSITY,
+                    P::LENS_THRESHOLD,
+                    P::LENS_SOFT_KNEE,
+                    P::LENS_GHOST_INTENSITY,
+                    P::LENS_HALO_INTENSITY,
+                    P::LENS_GLARE_INTENSITY,
+                    P::LENS_STREAK_INTENSITY,
+                    P::LENS_DISPERSION,
+                    P::LENS_STARBURST_INTENSITY,
+                    P::LENS_STARBURST_LENGTH,
+                    P::LENS_COATING_STRENGTH,
+                    P::LENS_GHOST_RIM,
+                    P::LENS_DIRT_INTENSITY,
+                    P::LENS_LIGHT_SOURCES,
+                    P::LENS_LIGHT_INTENSITY,
+                    P::LENS_FIELD_MARGIN,
+                    P::LENS_RESPONSE_TIME,
+                ],
+            ),
         ];
         let mut mask = P::NONE;
         for (enabled, properties) in groups {
@@ -281,9 +350,7 @@ impl PostProcessOverrides {
 #[category("White Balance", category_color = "#2FA88A")]
 #[category("Tonemap", category_color = "#2FA88A")]
 #[category("Vignette", category_color = "#7C6FD1")]
-#[category("Chromatic Aberration", category_color = "#7C6FD1")]
 #[category("Film Grain", category_color = "#7C6FD1")]
-#[category("Depth of Field", category_color = "#3AA0FF")]
 #[category("Motion Blur", category_color = "#3AA0FF")]
 #[category("Blend Weights", category_color = "#8F8F8F")]
 #[category("HDR Output", category_color = "#D18F6F")]
@@ -362,14 +429,6 @@ pub struct PostProcessSettingsProps {
     #[property(category = "Vignette")]
     pub vignette_color: [f32; 3],
 
-    // ── Chromatic Aberration ────────────────────────────────────────────
-    #[property(category = "Chromatic Aberration")]
-    pub ca_enabled: bool,
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Chromatic Aberration")]
-    pub ca_intensity: f32,
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Chromatic Aberration")]
-    pub ca_start_offset: f32,
-
     // ── Film Grain ──────────────────────────────────────────────────────
     #[property(category = "Film Grain")]
     pub grain_enabled: bool,
@@ -379,31 +438,6 @@ pub struct PostProcessSettingsProps {
     pub grain_response: f32,
     #[property(min = 0.1, max = 10.0, step = 0.05, category = "Film Grain")]
     pub grain_size: f32,
-
-    // ── Depth of Field ──────────────────────────────────────────────────
-    #[property(category = "Depth of Field")]
-    pub dof_enabled: bool,
-    #[property(min = 0.0, max = 10000.0, step = 1.0, category = "Depth of Field")]
-    pub dof_focal_distance: f32,
-    #[property(min = 0.0, max = 5000.0, step = 1.0, category = "Depth of Field")]
-    pub dof_focal_region: f32,
-    #[property(min = 0.0, max = 5000.0, step = 1.0, category = "Depth of Field")]
-    pub dof_near_transition: f32,
-    #[property(min = 0.0, max = 5000.0, step = 1.0, category = "Depth of Field")]
-    pub dof_far_transition: f32,
-    #[property(min = 0.0, max = 10.0, step = 0.05, category = "Depth of Field")]
-    pub dof_scale: f32,
-    #[property(min = 0.0, max = 100.0, step = 0.5, category = "Depth of Field")]
-    pub dof_max_bokeh_size: f32,
-    // `u32` isn't `Reflectable` (only `i32`/`i64`/`u64` are) -- `i32`,
-    // clamped non-negative when building the descriptor, same fix as
-    // `WaterVolumeComponent::ssr_steps`.
-    #[property(min = 3, max = 16, category = "Depth of Field")]
-    pub dof_aperture_blades: i32,
-    #[property(min = -180.0, max = 180.0, step = 1.0, category = "Depth of Field")]
-    pub dof_aperture_rotation: f32,
-    #[property(min = 1.0, max = 100.0, step = 0.1, category = "Depth of Field")]
-    pub dof_sensor_diagonal: f32,
 
     // ── Motion Blur ─────────────────────────────────────────────────────
     #[property(category = "Motion Blur")]
@@ -420,13 +454,9 @@ pub struct PostProcessSettingsProps {
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Blend Weights")]
     pub blend_weight_bloom: f32,
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Blend Weights")]
-    pub blend_weight_dof: f32,
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Blend Weights")]
     pub blend_weight_motion_blur: f32,
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Blend Weights")]
     pub blend_weight_vignette: f32,
-    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Blend Weights")]
-    pub blend_weight_ca: f32,
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Blend Weights")]
     pub blend_weight_grain: f32,
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Blend Weights")]
@@ -518,31 +548,16 @@ impl Default for PostProcessSettingsProps {
             vignette_smoothness: 0.5,
             vignette_roundness: 0.5,
             vignette_color: [0.0, 0.0, 0.0],
-            ca_enabled: false,
-            ca_intensity: 0.0,
-            ca_start_offset: 0.0,
             grain_enabled: false,
             grain_intensity: 0.0,
             grain_response: 1.0,
             grain_size: 1.0,
-            dof_enabled: false,
-            dof_focal_distance: 100.0,
-            dof_focal_region: 50.0,
-            dof_near_transition: 100.0,
-            dof_far_transition: 100.0,
-            dof_scale: 1.0,
-            dof_max_bokeh_size: 10.0,
-            dof_aperture_blades: 5,
-            dof_aperture_rotation: 0.0,
-            dof_sensor_diagonal: 43.3,
             motion_blur_enabled: false,
             motion_blur_amount: 0.0,
             motion_blur_max: 64.0,
             blend_weight_bloom: 1.0,
-            blend_weight_dof: 1.0,
             blend_weight_motion_blur: 1.0,
             blend_weight_vignette: 1.0,
-            blend_weight_ca: 1.0,
             blend_weight_grain: 1.0,
             blend_weight_exposure: 1.0,
             hdr_output_mode: HdrOutputMode::Ldr,
@@ -612,31 +627,16 @@ impl PostProcessSettingsProps {
             vignette_roundness: self.vignette_roundness,
             vignette_color: self.vignette_color,
             vignette_enabled: self.vignette_enabled,
-            ca_intensity: self.ca_intensity,
-            ca_start_offset: self.ca_start_offset,
-            ca_enabled: self.ca_enabled,
             grain_intensity: self.grain_intensity,
             grain_response: self.grain_response,
             grain_size: self.grain_size,
             grain_enabled: self.grain_enabled,
-            dof_focal_distance: self.dof_focal_distance,
-            dof_focal_region: self.dof_focal_region,
-            dof_near_transition: self.dof_near_transition,
-            dof_far_transition: self.dof_far_transition,
-            dof_scale: self.dof_scale,
-            dof_max_bokeh_size: self.dof_max_bokeh_size,
-            dof_aperture_blades: self.dof_aperture_blades.max(0) as u32,
-            dof_aperture_rotation: self.dof_aperture_rotation,
-            dof_sensor_diagonal: self.dof_sensor_diagonal,
-            dof_enabled: self.dof_enabled,
             motion_blur_amount: self.motion_blur_amount,
             motion_blur_max: self.motion_blur_max,
             motion_blur_enabled: self.motion_blur_enabled,
             blend_weight_bloom: self.blend_weight_bloom,
-            blend_weight_dof: self.blend_weight_dof,
             blend_weight_motion_blur: self.blend_weight_motion_blur,
             blend_weight_vignette: self.blend_weight_vignette,
-            blend_weight_ca: self.blend_weight_ca,
             blend_weight_grain: self.blend_weight_grain,
             blend_weight_exposure: self.blend_weight_exposure,
             hdr_output_mode: match self.hdr_output_mode {

@@ -82,6 +82,10 @@ pub struct DecalComponent {
     pub blend: DecalBlend,
     #[property(category = "Decal")]
     pub layers: DecalLayers,
+    /// The image `albedo_texture` names, as the world loaded it (a texture
+    /// asset, [`crate::texture_assets`]). Never authored.
+    #[serde(skip)]
+    pub albedo_image: crate::texture_assets::BoundTexture,
 }
 
 impl Default for DecalComponent {
@@ -94,6 +98,7 @@ impl Default for DecalComponent {
             albedo_texture: String::new(),
             blend: DecalBlend::AlphaBlend,
             layers: DecalLayers::Albedo,
+            albedo_image: Default::default(),
         }
     }
 }
@@ -145,6 +150,32 @@ impl DecalComponent {
 
 #[register_world_component]
 impl DecalComponent {}
+
+/// The world counts the image `albedo_texture` names as a reference of the
+/// decal, whatever wrote the value, and binds it when it loads.
+fn collect_decal_handles(value: *const (), out: &mut Vec<pulsar_scenedb::handle_ledger::HandleId>) {
+    // SAFETY: SceneDB reaches this only through `DecalComponent`'s own
+    // `ComponentId`, with a pointer to a live value.
+    let decal = unsafe { &*(value as *const DecalComponent) };
+    crate::texture_assets::collect_texture(&decal.albedo_texture, out);
+}
+
+pulsar_scenedb::pulsar_reflection::inventory::submit! {
+    pulsar_scenedb::handle_ledger::HandleLedgerRegistration {
+        component_id: pulsar_scenedb::component_id::<DecalComponent>,
+        collect_from_value: collect_decal_handles,
+    }
+}
+
+/// How a decal takes in its loaded (or failed) albedo image.
+pub(crate) fn bind_decal_texture(decal: &mut DecalComponent, view: &pulsar_scenedb::AssetView) {
+    crate::texture_assets::bind_texture(
+        &mut decal.albedo_image,
+        &decal.albedo_texture,
+        view,
+        "decal",
+    );
+}
 
 /// The decal's script methods (beside its property accessors, such as
 /// `DecalComponent::set_opacity`).

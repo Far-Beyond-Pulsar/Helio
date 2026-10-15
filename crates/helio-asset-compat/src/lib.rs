@@ -11,23 +11,28 @@ mod light_converter;
 mod lut;
 mod material_converter;
 mod mesh_converter;
+mod rig_converter;
 mod scene_converter;
 mod texture_loader;
 
 use std::io::Cursor;
 use std::path::PathBuf;
 
-pub use camera_converter::{CameraData, extract_camera_data};
+pub use camera_converter::{extract_camera_data, CameraData};
 pub use ies::{IesError, IesProfile};
 pub use light_converter::convert_light;
 pub use lut::{CubeLut, LutError};
 pub use material_converter::{
-    ConvertedMaterial, ConvertedMaterialTextures, ConvertedTextureRef, convert_material,
-    upload_scene_materials,
+    convert_material, upload_scene_materials, ConvertedMaterial, ConvertedMaterialTextures,
+    ConvertedTextureRef,
 };
 pub use mesh_converter::{convert_primitive, convert_vertex};
+pub use rig_converter::{
+    extract_rig, ImportedBone, ImportedClip, ImportedInterpolation, ImportedJoint, ImportedKey,
+    ImportedLod, ImportedRig, ImportedTrack, RigSection, RigVertex,
+};
 pub use scene_converter::{
-    ConvertedMesh, ConvertedMeshSection, ConvertedScene, ConvertedSectionedMesh, convert_scene,
+    convert_scene, ConvertedMesh, ConvertedMeshSection, ConvertedScene, ConvertedSectionedMesh,
 };
 
 use std::path::Path;
@@ -304,7 +309,7 @@ pub enum AssetError {
 
 #[cfg(test)]
 mod configurator_tests {
-    use super::{LoadConfig, OptionValue, OptionValues, options_schema_for_extension};
+    use super::{options_schema_for_extension, LoadConfig, OptionValue, OptionValues};
     use solid_rs::configurator::keys;
 
     #[test]

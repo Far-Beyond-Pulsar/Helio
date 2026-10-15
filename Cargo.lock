@@ -1047,6 +1047,7 @@ dependencies = [
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
  "helio-pass-hlfs",
+ "helio-pass-lens",
  "helio-pass-light-cull",
  "helio-pass-object-batch",
  "helio-pass-perf-overlay",
@@ -1624,11 +1625,11 @@ dependencies = [
  "helio-core",
  "helio-mats",
  "helio-pass-billboard",
+ "helio-pass-buffer-view",
  "helio-pass-corona",
  "helio-pass-debug-overlay",
  "helio-pass-decal",
  "helio-pass-deferred-light",
- "helio-pass-dof",
  "helio-pass-flare",
  "helio-pass-foliage-gbuffer",
  "helio-pass-foliage-place",
@@ -1638,6 +1639,7 @@ dependencies = [
  "helio-pass-hiz",
  "helio-pass-hlfs",
  "helio-pass-indirect-dispatch",
+ "helio-pass-lens",
  "helio-pass-light-cull",
  "helio-pass-object-batch",
  "helio-pass-occlusion-cull",
@@ -1671,6 +1673,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-lens-optics"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "helio-mats"
 version = "0.1.0"
 dependencies = [
@@ -1689,6 +1700,14 @@ dependencies = [
  "pulsar_reflection",
  "pulsar_scenedb",
  "pulsar_scenedb_derive",
+ "wgpu",
+]
+
+[[package]]
+name = "helio-pass-buffer-view"
+version = "0.1.0"
+dependencies = [
+ "helio-core",
  "wgpu",
 ]
 
@@ -1768,21 +1787,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-pass-dof"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "wgpu",
-]
-
-[[package]]
 name = "helio-pass-flare"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
+ "helio-pass-lens",
  "helio-pass-postprocess",
  "helio-pass-shadow-matrix",
  "pollster 0.4.0",
@@ -1901,6 +1912,21 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "helio-pass-gbuffer",
+ "wgpu",
+]
+
+[[package]]
+name = "helio-pass-lens"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.33.5",
+ "helio-core",
+ "helio-lens-optics",
+ "pollster 0.4.0",
+ "pulsar_reflection",
+ "pulsar_scenedb",
+ "pulsar_scenedb_derive",
  "wgpu",
 ]
 
@@ -3989,7 +4015,7 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=17cf443305de8ee7294f38be5bdf7c8d13ffeeb3#17cf443305de8ee7294f38be5bdf7c8d13ffeeb3"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=77f74e30819826421bb00fdba1812f1a0fc1e11c#77f74e30819826421bb00fdba1812f1a0fc1e11c"
 dependencies = [
  "ahash",
  "profiling 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/Pulsar-Profiling?rev=12424a5f75166332f9f1d2741281f6fc4847b44d)",
@@ -4005,7 +4031,7 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb_derive"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=17cf443305de8ee7294f38be5bdf7c8d13ffeeb3#17cf443305de8ee7294f38be5bdf7c8d13ffeeb3"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=77f74e30819826421bb00fdba1812f1a0fc1e11c#77f74e30819826421bb00fdba1812f1a0fc1e11c"
 dependencies = [
  "proc-macro2",
  "pulsar_reflection_codegen",

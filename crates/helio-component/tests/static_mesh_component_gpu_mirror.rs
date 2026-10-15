@@ -16,10 +16,10 @@
 
 use helio::PackedVertex;
 use helio_component::components::{MeshAssetPath, MeshGeometryKey, StaticMeshComponent};
+use pulsar_scenedb::World;
 use pulsar_scenedb::gpu::{
     EngineGpuContext, GpuMirrorHandle, RegionClassConfig, SceneGpuConfig, SceneGpuStore,
 };
-use pulsar_scenedb::World;
 use std::sync::Arc;
 
 fn test_context() -> EngineGpuContext {
@@ -94,7 +94,10 @@ fn vertices_and_indices_land_in_their_shared_gpu_pools_through_world_insert() {
     world.insert(
         entity,
         StaticMeshComponent {
-            mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Cube.fbx"), geometry_key: MeshGeometryKey::for_path(&MeshAssetPath::new("meshes/primitives/SM_Cube.fbx")),
+            mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Cube.fbx"),
+            geometry_key: MeshGeometryKey::for_path(&MeshAssetPath::new(
+                "meshes/primitives/SM_Cube.fbx",
+            )),
             vertices: vec![v(1.0), v(2.0), v(3.0)],
             indices: vec![0, 1, 2],
             bounds_local: [0.0, 0.0, 0.0, 0.5],
@@ -170,7 +173,10 @@ fn re_insert_with_different_length_data_still_round_trips_through_world() {
     world.insert(
         entity,
         StaticMeshComponent {
-            mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Cube.fbx"), geometry_key: MeshGeometryKey::for_path(&MeshAssetPath::new("meshes/primitives/SM_Cube.fbx")),
+            mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Cube.fbx"),
+            geometry_key: MeshGeometryKey::for_path(&MeshAssetPath::new(
+                "meshes/primitives/SM_Cube.fbx",
+            )),
             vertices: vec![v(1.0), v(2.0), v(3.0), v(4.0)],
             indices: (0..6).collect(),
             bounds_local: [0.0, 0.0, 0.0, 0.5],
@@ -188,7 +194,10 @@ fn re_insert_with_different_length_data_still_round_trips_through_world() {
     world.insert(
         entity,
         StaticMeshComponent {
-            mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Sphere.fbx"), geometry_key: MeshGeometryKey::for_path(&MeshAssetPath::new("meshes/primitives/SM_Sphere.fbx")),
+            mesh_asset: MeshAssetPath::new("meshes/primitives/SM_Sphere.fbx"),
+            geometry_key: MeshGeometryKey::for_path(&MeshAssetPath::new(
+                "meshes/primitives/SM_Sphere.fbx",
+            )),
             vertices: vec![v(9.0)],
             indices: vec![0],
             bounds_local: [0.0, 0.0, 0.0, 0.5],

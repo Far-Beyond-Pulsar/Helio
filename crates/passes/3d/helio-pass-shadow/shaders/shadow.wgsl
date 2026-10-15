@@ -11,7 +11,7 @@ struct ShadowFace { mat:mat4x4f, atlas:vec4f, policy:vec4u }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-// Per-instance world transform.  Must match GpuInstanceData in libhelio (208 bytes).
+// Per-instance world transform.  Must match GpuInstanceData in libhelio (224 bytes).
 struct GpuInstanceData {
     transform:    mat4x4<f32>,   // offset   0
     normal_mat_0: vec4<f32>,     // offset  64  (unused in shadow pass)
@@ -23,6 +23,10 @@ struct GpuInstanceData {
     material_id:  u32,           // offset 196
     flags:        u32,           // offset 200
     _pad:         u32,           // offset 204
+    skin_vertex_offset: u32,
+    bone_palette_offset: u32,
+    bone_palette_count: u32,
+    _skin_pad: u32,
 }
 
 // Which shadow atlas face is being rendered this pass.
@@ -49,20 +53,37 @@ struct FaceIndex {
 @group(0) @binding(3) var<storage, read> coordinate_spaces: array<mat4x4<f32>>;
 
 @group(0) @binding(4) var<storage, read> face_dirty: array<u32>;
+struct SkinVertex { joints: vec4<u32>, weights: vec4<f32> }
+@group(0) @binding(5) var<storage, read> skin_vertices: array<SkinVertex>;
+@group(0) @binding(6) var<storage, read> bone_palette: array<mat4x4<f32>>;
 
 // ── Vertex stage ──────────────────────────────────────────────────────────────
 
 @vertex
 fn vs_main(
     @location(0)             position: vec3<f32>,
+    @builtin(vertex_index)    vertex_index: u32,
     // Per-instance vertex data, offset by the indirect draw's `first_instance`
     // on every backend (`helio_pass_gbuffer::draw_slots`).
     @location(15)            slot:     u32,
 ) -> @builtin(position) vec4<f32> {
     if face._pad0 != 0u && face_dirty[face.value] == 0u { return vec4f(2,2,2,1); }
     let inst  = instances[slot];
+    var local_position = position;
+    if inst.bone_palette_count > 0u {
+        let skin = skin_vertices[vertex_index + inst.skin_vertex_offset];
+        var blended = mat4x4<f32>(vec4f(0.0), vec4f(0.0), vec4f(0.0), vec4f(0.0));
+        var total = 0.0;
+        for (var i = 0u; i < 4u; i = i + 1u) {
+            if skin.weights[i] > 0.0 && skin.joints[i] < inst.bone_palette_count {
+                blended += bone_palette[inst.bone_palette_offset + skin.joints[i]] * skin.weights[i];
+                total += skin.weights[i];
+            }
+        }
+        if total > 0.00001 { local_position = (blended * (1.0 / total) * vec4f(position, 1.0)).xyz; }
+    }
     let space = coordinate_spaces[(inst.flags >> 8u) & 0xFFu];
-    let world = space * (inst.transform * vec4<f32>(position, 1.0));
+    let world = space * (inst.transform * vec4<f32>(local_position, 1.0));
     return shadow_matrices[face.value].mat * world;
 }
 

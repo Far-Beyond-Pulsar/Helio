@@ -18,8 +18,8 @@
 //! |---|---|---|
 //! | [`GlobalFogSourceRow`] | 16: the medium | `helio_pass_volumetric_fog::GlobalFogComponent` (16) |
 //! | [`LocalFogSourceRow`] | 4 size + 20: medium, edge fade | `LocalFogVolumeComponent` (8 bounds + 20) |
-//! | [`PostProcessVolumeSourceRow`] | 4 size + 156: the row after its bounds | `helio_pass_postprocess::PostProcessVolumeComponent` (8 bounds + 156) |
-//! | [`CameraPostProcessSourceRow`] | 152: the row | `helio_pass_postprocess::CameraPostProcessComponent` (152) |
+//! | [`PostProcessVolumeSourceRow`] | 4 size + 140: the row after its bounds | `helio_pass_postprocess::PostProcessVolumeComponent` (8 bounds + 140) |
+//! | [`CameraPostProcessSourceRow`] | 136: the row | `helio_pass_postprocess::CameraPostProcessComponent` (136) |
 //! | [`WaterVolumeSourceRow`] | 4 size + 56: the row after its bounds | `helio_pass_water_sim::WaterVolumeComponent` (8 bounds + 56), packed into its leading rows |
 //! | [`FoliageSourceRow`] | 24 type + 4 layer + 12 wind | `helio_pass_foliage_place`'s `FoliageTypeComponent` (24), `FoliageLayerComponent` (8) and `FoliageWindComponent` (12), each packed |
 //! | [`AtmosphereSourceRow`] | 4 centre + 16 media + 4 ground + 4 shell: the row, its centre in the owner's space | `helio_pass_sky::AtmosphereComponent` (28) |
@@ -32,8 +32,9 @@ use pulsar_scenedb::gpu::GpuMirrorHandle;
 use pulsar_scenedb_derive::SceneStore;
 
 use super::{
-    AtmosphereComponent, CameraPostProcessComponent, DecalComponent, FoliageComponent, GlobalFogComponent, LocalFogVolumeComponent,
-    ParticleEmitterComponent, PostProcessVolumeComponent, SpriteComponent, WaterVolumeComponent, WindComponent,
+    AtmosphereComponent, CameraPostProcessComponent, DecalComponent, FoliageComponent,
+    GlobalFogComponent, LocalFogVolumeComponent, ParticleEmitterComponent,
+    PostProcessVolumeComponent, SpriteComponent, WaterVolumeComponent, WindComponent,
 };
 
 pub const GLOBAL_FOG_SOURCES_BUFFER: &str = "global_fog_sources";
@@ -230,8 +231,6 @@ pub struct PostProcessVolumeSourceRow {
     pub settings: [u32; 116],
     #[gpu]
     pub lens: [f32; 16],
-    #[gpu]
-    pub lens_ext: [f32; 16],
 }
 
 /// A camera's post-process baseline (`CameraPostProcessComponent` pass row,
@@ -247,8 +246,6 @@ pub struct CameraPostProcessSourceRow {
     pub settings: [u32; 116],
     #[gpu]
     pub lens: [f32; 16],
-    #[gpu]
-    pub lens_ext: [f32; 16],
 }
 
 /// A water volume: its local size (`xyz`, full extent before the owner's
@@ -488,47 +485,24 @@ derived_row!(
     particle_emitter_clear
 );
 // A decal's image is registered in the scene's texture store as its row is
-// derived, so the row carries its bindless slot.
+// derived, so the row carries its bindless slot. The world loaded the image
+// (a texture asset) and bound it into the decal; nothing reads the file here.
 fn decal_dispatch(mirror: &GpuMirrorHandle, row: u32, data: *const (), is_new_insert: bool) {
     // SAFETY: SceneDB reaches this only through `DecalComponent`'s own
     // `ComponentId`, with a pointer to a live value.
     let decal = unsafe { &*(data as *const DecalComponent) };
-    let albedo_slot = decal_texture_slot(&decal.albedo_texture, mirror);
+    let albedo_slot = crate::texture_assets::texture_slot(
+        &decal.albedo_image,
+        &decal.albedo_texture,
+        mirror,
+        "decal",
+    );
     pulsar_scenedb::gpu::write_derived_row(
         mirror,
         row,
         &DecalSourceRow::of(decal, albedo_slot),
         is_new_insert,
     );
-}
-
-/// The texture store slot of the image at `path` (project-relative or
-/// absolute), or `u32::MAX` (the tint alone) for none or one that does not
-/// load.
-fn decal_texture_slot(path: &str, mirror: &GpuMirrorHandle) -> u32 {
-    asset_texture_slot("decal", path, mirror)
-}
-
-/// The scene texture store slot of the image at `path` (project-relative,
-/// or absolute), registering it; `u32::MAX` for none or one that does not
-/// load (`what` names the user in the warning).
-fn asset_texture_slot(what: &str, path: &str, mirror: &GpuMirrorHandle) -> u32 {
-    if path.is_empty() {
-        return u32::MAX;
-    }
-    let mut resolved = std::path::PathBuf::from(path);
-    if resolved.is_relative() {
-        if let Some(root) = engine_state::get_project_path() {
-            resolved = std::path::Path::new(&root).join(path);
-        }
-    }
-    match crate::material_textures::register_graph_texture(&resolved, mirror) {
-        Ok(slot) => slot,
-        Err(error) => {
-            tracing::warn!("{what} texture '{}': {error}", resolved.display());
-            u32::MAX
-        }
-    }
 }
 
 // A sprite's image is registered in the scene's texture store as its row is
@@ -538,7 +512,7 @@ fn sprite_dispatch(mirror: &GpuMirrorHandle, row: u32, data: *const (), is_new_i
     // `ComponentId`, with a pointer to a live value.
     let sprite = unsafe { &*(data as *const SpriteComponent) };
     let slot = if sprite.enabled {
-        asset_texture_slot("sprite", &sprite.texture, mirror)
+        crate::texture_assets::texture_slot(&sprite.image, &sprite.texture, mirror, "sprite")
     } else {
         u32::MAX
     };
@@ -601,8 +575,8 @@ mod tests {
     fn rows_have_the_documented_word_counts() {
         assert_eq!(std::mem::size_of::<GlobalFogSourceRow>(), 16 * 4);
         assert_eq!(std::mem::size_of::<LocalFogSourceRow>(), 24 * 4);
-        assert_eq!(std::mem::size_of::<PostProcessVolumeSourceRow>(), 160 * 4);
-        assert_eq!(std::mem::size_of::<CameraPostProcessSourceRow>(), 152 * 4);
+        assert_eq!(std::mem::size_of::<PostProcessVolumeSourceRow>(), 144 * 4);
+        assert_eq!(std::mem::size_of::<CameraPostProcessSourceRow>(), 136 * 4);
         assert_eq!(std::mem::size_of::<WaterVolumeSourceRow>(), 60 * 4);
         assert_eq!(std::mem::size_of::<FoliageSourceRow>(), 40 * 4);
         assert_eq!(std::mem::size_of::<AtmosphereSourceRow>(), 28 * 4);
@@ -648,11 +622,11 @@ mod tests {
         );
         assert_eq!(
             std::mem::size_of::<helio_pass_postprocess::PostProcessVolumeComponent>(),
-            164 * 4
+            148 * 4
         );
         assert_eq!(
             std::mem::size_of::<helio_pass_postprocess::CameraPostProcessComponent>(),
-            152 * 4
+            136 * 4
         );
     }
 
@@ -720,8 +694,15 @@ mod tests {
             bytemuck::bytes_of(&row),
             bytemuck::bytes_of(&atmosphere.to_row())
         );
-        assert_eq!(&row.center[..3], &[0.0; 3], "the join adds the owner's position");
-        assert_eq!(row.center[3].to_bits(), helio_pass_sky::atmosphere::placement::CENTER);
+        assert_eq!(
+            &row.center[..3],
+            &[0.0; 3],
+            "the join adds the owner's position"
+        );
+        assert_eq!(
+            row.center[3].to_bits(),
+            helio_pass_sky::atmosphere::placement::CENTER
+        );
     }
 
     #[test]

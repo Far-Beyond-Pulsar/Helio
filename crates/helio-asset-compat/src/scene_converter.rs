@@ -155,6 +155,10 @@ pub struct ConvertedScene {
     /// Populated instead of `meshes` when [`crate::LoadConfig::merge_meshes`] is true.
     /// One section per unique material; all sections share one vertex buffer.
     pub sectioned_mesh: Option<ConvertedSectionedMesh>,
+    /// The skeleton, skin weights and animations, when the source has a skinned
+    /// mesh. The static `meshes` / `sectioned_mesh` above are produced as
+    /// before either way.
+    pub rig: Option<crate::ImportedRig>,
 }
 
 /// One material section of a sectioned (multi-material) merged mesh.
@@ -462,6 +466,7 @@ pub fn convert_scene(
             lights,
             cameras,
             sectioned_mesh: Some(sectioned),
+            rig: crate::extract_rig(scene, config),
         });
     }
 
@@ -484,6 +489,7 @@ pub fn convert_scene(
         lights,
         cameras,
         sectioned_mesh: None,
+        rig: crate::extract_rig(scene, config),
     })
 }
 
@@ -497,4 +503,3 @@ fn unpack_snorm4x8(packed: u32) -> [f32; 4] {
         bytes[3] as i8 as f32 / 127.0,
     ]
 }
-

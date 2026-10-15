@@ -81,8 +81,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 helio-core = { path = "crates/helio-core" }
 helio-mats = { path = "crates/helio-mats" }
 helio-bake-types = { path = "crates/helio-bake-types" }
-pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "17cf443305de8ee7294f38be5bdf7c8d13ffeeb3", features = ["gpu"] }
-pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "17cf443305de8ee7294f38be5bdf7c8d13ffeeb3" }
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "77f74e30819826421bb00fdba1812f1a0fc1e11c", features = ["gpu"] }
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "77f74e30819826421bb00fdba1812f1a0fc1e11c" }
 # Must stay pinned to the exact rev pulsar_scenedb's own Cargo.toml pins --
 # a different rev is a different SourceId and thus a second,
 # type-incompatible copy of this crate in the build (see helio-wasm's
@@ -109,7 +109,8 @@ helio-pass-decal = { path = "crates/passes/3d/helio-pass-decal" }
 helio-pass-sdf = { path = "crates/passes/3d/helio-pass-sdf" }
 helio-voxel-data = { path = "crates/helio-voxel-data" }
 helio-pass-fxaa = { path = "crates/passes/3d/helio-pass-fxaa" }
-helio-pass-dof = { path = "crates/passes/3d/helio-pass-dof" }
+helio-pass-buffer-view = { path = "crates/passes/3d/helio-pass-buffer-view" }
+helio-pass-lens = { path = "crates/passes/3d/helio-pass-lens" }
 helio-pass-sprite-batch = { path = "crates/passes/2d/helio-pass-sprite-batch" }
 helio-pass-sprite-cull = { path = "crates/passes/2d/helio-pass-sprite-cull" }
 helio-pass-sprite-simulate = { path = "crates/passes/2d/helio-pass-sprite-simulate" }

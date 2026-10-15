@@ -76,6 +76,8 @@ pub fn new_scene_db_with_gpu_mirror_and(
         device,
     );
     helio_pass_postprocess::CameraPostProcessComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    helio_pass_lens::LensComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    helio_pass_lens::LensElementComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
     helio_pass_volumetric_fog::GlobalFogComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
     helio_pass_volumetric_fog::LocalFogVolumeComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
     helio_pass_volumetric_fog::VolumetricFogSettingsComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
@@ -907,6 +909,16 @@ pub fn set_camera_postprocess(world: &mut World, view_id: u32, settings: &helio_
         .map(|(entity, _)| entity);
     let entity = existing.unwrap_or_else(|| world.spawn());
     world.insert(entity, CameraPostProcessComponent::new(view_id, settings));
+}
+
+/// Author one persistent lens row per view (the camera's optics and focus).
+pub fn set_camera_lens(world: &mut World, lens: helio_pass_lens::LensComponent) {
+    use helio_pass_lens::LensComponent;
+    let existing = world.query::<&LensComponent>()
+        .find(|(_, row)| row.view_id == lens.view_id)
+        .map(|(entity, _)| entity);
+    let entity = existing.unwrap_or_else(|| world.spawn());
+    world.insert(entity, lens);
 }
 
 // ── Participating media and light shafts (component API) ─────────────────────

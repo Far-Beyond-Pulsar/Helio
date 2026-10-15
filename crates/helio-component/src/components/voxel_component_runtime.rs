@@ -5,7 +5,10 @@
 
 use engine_class_derive::{register_component_runtime, register_world_component};
 
-use super::{TerrainEventsEventWriterExt as _, VoxelComponent, VoxelTerrainComponent, VoxelTerrainLayersComponent};
+use super::{
+    TerrainEventsEventWriterExt as _, VoxelComponent, VoxelTerrainComponent,
+    VoxelTerrainLayersComponent,
+};
 
 // Component callbacks borrow the authoritative terrain row from SceneDB.
 // The pending event list is transient transport state populated only after a
@@ -63,7 +66,11 @@ impl VoxelTerrainComponent {
         }
         flush_events!(pending_block_broken, block_broken, "block_broken");
         flush_events!(pending_block_placed, block_placed, "block_placed");
-        flush_events!(pending_block_material_changed, block_material_changed, "block_material_changed");
+        flush_events!(
+            pending_block_material_changed,
+            block_material_changed,
+            "block_material_changed"
+        );
     }
 }
 
@@ -76,4 +83,3 @@ impl VoxelTerrainComponent {}
 // Settings of the terrain on the same object, read when it is projected.
 #[register_world_component]
 impl VoxelTerrainLayersComponent {}
-

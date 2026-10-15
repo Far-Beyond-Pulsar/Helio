@@ -4,6 +4,8 @@
 
 use helio_core::graph::ResourceBuilder;
 use helio_core::{CommandRecorder, PassContext, RenderPass, ResourceKey, Result as HelioResult};
+use helio_pass_lens::{ResolvedLens, RESOLVED_KEY};
+use wgpu::util::DeviceExt;
 
 pub mod gpu_types;
 pub use gpu_types::*;
@@ -66,6 +68,8 @@ pub struct OpticsInputs<'a> {
     pub shadow_matrices: Option<&'a wgpu::Buffer>,
     pub shadow_atlas: Option<&'a wgpu::TextureView>,
     pub dirt: Option<&'a wgpu::TextureView>,
+    /// The camera's optics: the lens pass's `ResolvedLens`.
+    pub lens: Option<&'a wgpu::Buffer>,
 }
 
 type BindingKey = [Option<wgpu::TextureView>; 5];
@@ -104,9 +108,11 @@ pub struct LensFlarePass {
     fallback_camera: wgpu::Buffer,
     fallback_lights: wgpu::Buffer,
     fallback_matrices: wgpu::Buffer,
+    /// The neutral 50 mm f/2.8 lens, for graphs without a lens pass.
+    fallback_lens: wgpu::Buffer,
     fallback_depth: wgpu::TextureView,
     fallback_shadow: wgpu::TextureView,
-    bindings: Option<((BindingKey, [Option<wgpu::Buffer>; 4]), wgpu::BindGroup, Vec<wgpu::BindGroup>, wgpu::BindGroup, wgpu::BindGroup)>,
+    bindings: Option<((BindingKey, [Option<wgpu::Buffer>; 5]), wgpu::BindGroup, Vec<wgpu::BindGroup>, wgpu::BindGroup, wgpu::BindGroup)>,
 }
 
 impl LensFlarePass {
@@ -208,6 +214,7 @@ impl LensFlarePass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                storage(9, true),
             ],
         });
         let temporal_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -276,7 +283,7 @@ impl LensFlarePass {
         Self {
             input_key: "fogged_hdr",
             control: pipeline("cs_control", &[Some(&control_layout)]),
-            extract: pipeline("cs_extract", &[Some(&image_layout)]),
+            extract: pipeline("cs_extract", &[Some(&image_layout), Some(&optics_layout)]),
             downsample: pipeline("cs_downsample", &[Some(&image_layout)]),
             sources_pipeline: pipeline("cs_sources", &[Some(&image_layout), Some(&optics_layout)]),
             response: pipeline("cs_response", &[Some(&image_layout), Some(&optics_layout)]),
@@ -320,6 +327,11 @@ impl LensFlarePass {
             ),
             fallback_lights: buffer("Lens no lights", 128, wgpu::BufferUsages::STORAGE),
             fallback_matrices: buffer("Lens no shadow matrices", 96, wgpu::BufferUsages::STORAGE),
+            fallback_lens: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Lens neutral optics"),
+                contents: bytemuck::bytes_of(&ResolvedLens::default()),
+                usage: wgpu::BufferUsages::STORAGE,
+            }),
             fallback_depth: depth_texture("Lens neutral depth", false),
             fallback_shadow: depth_texture("Lens empty shadow atlas", true),
             bindings: None,
@@ -406,11 +418,12 @@ impl LensFlarePass {
         let depth = optics.depth.unwrap_or(&self.fallback_depth);
         let shadow = optics.shadow_atlas.unwrap_or(&self.fallback_shadow);
         let dirt = optics.dirt.unwrap_or(&self.dirt);
+        let lens = optics.lens.unwrap_or(&self.fallback_lens);
         // Bind groups are cached per GPU handle; comparing handles, not
         // pointers, is safe across TSR's rotating outputs and resize.
         let key = (
             [Some(input.clone()), Some(self.output.view.clone()), Some(depth.clone()), Some(shadow.clone()), Some(dirt.clone())],
-            [Some(pp.clone()), Some(camera.clone()), Some(lights.clone()), Some(matrices.clone())],
+            [Some(pp.clone()), Some(camera.clone()), Some(lights.clone()), Some(matrices.clone()), Some(lens.clone())],
         );
         if self.bindings.as_ref().map(|(k, ..)| k) != Some(&key) {
             let uniform = || wgpu::BindingResource::Buffer(wgpu::BufferBinding {
@@ -451,6 +464,7 @@ impl LensFlarePass {
                     wgpu::BindGroupEntry { binding: 6, resource: self.sources.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(dirt) },
                     wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.dirt_sampler) },
+                    wgpu::BindGroupEntry { binding: 9, resource: lens.as_entire_binding() },
                 ],
             });
             let temporal_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -500,7 +514,7 @@ impl LensFlarePass {
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bindings, &[]);
-            if step == response_step {
+            if step == 0 || step == response_step {
                 pass.set_bind_group(1, optics_group, &[]);
             }
             pass.dispatch_workgroups_indirect(&self.dispatch, offset);
@@ -617,6 +631,7 @@ impl RenderPass for LensFlarePass {
         builder.read("shadow_atlas");
         builder.read("shadow_matrices");
         builder.read(DIRT_KEY);
+        builder.read(RESOLVED_KEY);
         // A manually owned resource: this declaration tracks its dependency,
         // while publish routes the actual sampled view without a second texture.
         builder.write_buffer(OUTPUT_KEY);
@@ -655,6 +670,7 @@ impl RenderPass for LensFlarePass {
                 .map(|s| s.shadow_matrices),
             shadow_atlas: ctx.registry.get::<&wgpu::TextureView>(ResourceKey::new("shadow_atlas")),
             dirt: ctx.registry.get::<&wgpu::TextureView>(ResourceKey::new(DIRT_KEY)),
+            lens: ctx.registry.get::<&wgpu::Buffer>(ResourceKey::new(RESOLVED_KEY)),
         };
         // Must follow fog/TSR on the graphics encoder. The separate compute
         // encoder is submitted BEFORE graphics and would sample stale HDR.

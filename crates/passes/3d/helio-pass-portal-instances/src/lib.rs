@@ -48,7 +48,7 @@ struct ScreenSize {
     _pad1: f32,
 }
 
-type PortalBindGroupKey = ([wgpu::Buffer; 8], wgpu::TextureView);
+type PortalBindGroupKey = ([wgpu::Buffer; 10], wgpu::TextureView);
 
 pub struct PortalInstancePass {
     /// The draw slots the vertex shader reads (see `helio_pass_gbuffer::DrawSlots`).
@@ -117,6 +117,8 @@ impl PortalInstancePass {
                         count: None,
                     }, // portal_mask — written by helio-pass-portal-mask
                     storage_entry(10, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // chain portal IDs
+                    storage_entry(11, wgpu::ShaderStages::VERTEX, true), // skeletal skin stream
+                    storage_entry(12, wgpu::ShaderStages::VERTEX, true), // current + previous palettes
                 ],
             });
         let bind_group_layout_1 = helio_pass_gbuffer::create_material_bgl(device, material_binding);
@@ -516,6 +518,8 @@ impl RenderPass for PortalInstancePass {
                 portal_chain_portals.buffer.clone(),
                 (*self.portal_compacted_indices_buf).clone(),
                 (*self.portal_compacted_chains_buf).clone(),
+                ctx.scene_buffers.get(BufferKey::of("skeletal_skin_vertices")).map_or_else(|| batch.instances.clone(), |h| h.buffer.clone()),
+                ctx.scene_buffers.get(BufferKey::of("skeletal_bone_palette")).map_or_else(|| batch.instances.clone(), |h| h.buffer.clone()),
             ],
             portal_mask_view.clone(),
         );
@@ -568,6 +572,8 @@ impl RenderPass for PortalInstancePass {
                         binding: 10,
                         resource: portal_chain_portals.buffer.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry { binding: 11, resource: key.0[8].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 12, resource: key.0[9].as_entire_binding() },
                 ],
             }));
             self.bind_group_0_key = Some(key);

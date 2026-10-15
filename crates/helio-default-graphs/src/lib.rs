@@ -14,7 +14,6 @@ use helio_pass_corona::CoronaPass;
 use helio_pass_debug_overlay::{DebugOverlayPass, DebugOverlayState};
 use helio_pass_decal::DecalPass;
 use helio_pass_deferred_light::DeferredLightPass;
-use helio_pass_dof::DofPass;
 use helio_pass_flare::LensFlarePass;
 use helio_pass_foliage_gbuffer::FoliageGBufferPass;
 use helio_pass_foliage_place::FoliagePlacePass;
@@ -25,6 +24,7 @@ use helio_pass_gbuffer::GBufferPass;
 use helio_pass_hiz::HiZBuildPass;
 use helio_pass_hlfs::HlfsPass;
 use helio_pass_indirect_dispatch::IndirectDispatchPass;
+use helio_pass_lens::{LensPass, LENS_COLOR};
 use helio_pass_light_cull::LightCullPass;
 use helio_pass_object_batch::ObjectBatchPass;
 use helio_pass_occlusion_cull::OcclusionCullPass;
@@ -112,6 +112,11 @@ fn new_graph(
         RenderGraph::new_with_external_device(device, queue)
     };
     graph.with_xr_mode(config.enable_xr);
+    // The host (e.g. the editor launching several game copies) names a shared
+    // file so the driver pipeline cache is compiled once, not per process.
+    if let Some(path) = std::env::var_os("PULSAR_PIPELINE_CACHE") {
+        graph.enable_pipeline_cache_persistence(path);
+    }
     graph
 }
 
@@ -193,9 +198,9 @@ fn default_swap_policy() -> helio_core::SwapPolicy {
         .independent::<FogCompositePass>()
         .independent::<TsrPass>()
         .independent::<FxaaPass>()
+        .independent::<LensPass>()
         .independent::<LensFlarePass>()
         .independent::<PostProcessPass>()
-        .independent::<DofPass>()
         .group_types(&[
             name::<ShadowMatrixPass>(),
             name::<ShadowDirtyPass>(),
@@ -590,6 +595,13 @@ fn add_final_passes(
     debug_camera_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) {
+    // Depth / normal debug views replace the final image, under everything
+    // drawn over it; inert unless one is the debug mode.
+    graph.add_pass(Box::new(helio_pass_buffer_view::BufferViewPass::new(
+        device,
+        config.surface_format,
+    )));
+
     // Game content over the final image, under the editor's overlays.
     add_sprite_overlay_passes(graph, device, queue, config);
 
@@ -728,6 +740,67 @@ pub fn build_default_graph_with_user_effects_with_context(
     )
 }
 
+/// Build the deferred graph with a WGSL snippet implementing the lens pass's
+/// `USER` elements (`user_ray_map`, `user_transmission`, `user_focus`; see
+/// `helio_pass_lens::user`), and optionally user post-process effects.
+pub fn build_default_graph_with_lens_user_with_context(
+    ctx: PassBuildContext<'_>,
+    lens_user: &'static str,
+    user_effects: Option<&'static str>,
+) -> RenderGraph {
+    build_default_graph_internal_with_lens_user(
+        ctx.device,
+        ctx.queue,
+        ctx.camera_buffer,
+        ctx.config,
+        ctx.debug_state,
+        ctx.debug_camera_buffer,
+        ctx.cull_stats_buffer,
+        ctx.owns_device,
+        None,
+        user_effects,
+        Some(lens_user),
+        ctx.scene_db.clone(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+/// [`build_default_graph_with_lens_user_with_context`] for applications that
+/// construct graphs from an argument list.
+pub fn build_default_graph_with_lens_user(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    camera_buf: &wgpu::Buffer,
+    config: RendererConfig,
+    debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
+    debug_camera_buf: &wgpu::Buffer,
+    cull_stats_buf: &wgpu::Buffer,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    lens_user: &'static str,
+    user_effects: Option<&'static str>,
+    scene_db: helio::SceneDbHandle,
+) -> RenderGraph {
+    build_default_graph_internal_with_lens_user(
+        device,
+        queue,
+        camera_buf,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        true,
+        debug_overlay,
+        user_effects,
+        Some(lens_user),
+        scene_db,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
 pub fn build_default_graph(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
@@ -832,14 +905,15 @@ enum SceneAa {
 /// PP settings (camera baseline + volumes) -> medium integration
 ///   -> medium composite at each opaque surface's depth (fogged_hdr)
 ///   -> transparency, each fragment fogged at its own depth
-///   -> AA -> lens response from the reconstructed image
-///   -> PostProcessPass: meter, bloom, lens, exposure, grade, tone map once
+///   -> AA -> lens (focus field, defocus) -> lens flare from the lens image
+///   -> PostProcessPass: meter, bloom, flare, exposure, grade, tone map once
 /// ```
 ///
 /// Shafts exist only where a medium scatters light, so they reach exposure,
-/// bloom and lens extraction as ordinary radiance. The lens reads the AA
-/// output so reprojection never sees screen-space optics, and PP applies it
-/// after metering so flare cannot feed back into exposure.
+/// bloom and flare extraction as ordinary radiance. The lens reads the AA
+/// output so reprojection never sees screen-space optics, defocus acts on
+/// scene-linear radiance before anything is metered or tone mapped, and PP
+/// applies the flare after metering so it cannot feed back into exposure.
 fn add_scene_linear_chain(
     graph: &mut RenderGraph,
     device: &Arc<wgpu::Device>,
@@ -848,6 +922,7 @@ fn add_scene_linear_chain(
     aa: SceneAa,
     width: u32,
     height: u32,
+    lens_user: Option<&str>,
 ) -> &'static str {
     graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
     graph.add_pass(Box::new(VolumetricFogPass::new(device)));
@@ -872,10 +947,17 @@ fn add_scene_linear_chain(
         }
         SceneAa::None => FOGGED_HDR,
     };
+    // The bundled example lenses, a water-drop mask and a few iris shapes are
+    // the lens elements' registry entries (editors offer them by layer).
     graph.add_pass(Box::new(
-        LensFlarePass::new_hdr(device, width, height).with_color_input(resolved),
+        LensPass::new_with_user(device, width, height, lens_user)
+            .with_color_input(resolved)
+            .with_bundled_resources(),
     ));
-    resolved
+    graph.add_pass(Box::new(
+        LensFlarePass::new_hdr(device, width, height).with_color_input(LENS_COLOR),
+    ));
+    LENS_COLOR
 }
 
 fn build_default_graph_internal(
@@ -889,6 +971,44 @@ fn build_default_graph_internal(
     owns_device: bool,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
     user_effects: Option<&'static str>,
+    scene_db: helio::SceneDbHandle,
+    voxel_passes: Vec<VoxelPassFactory>,
+    final_passes: Vec<GraphPassFactory>,
+    lighting_passes: Vec<GraphPassFactory>,
+) -> RenderGraph {
+    build_default_graph_internal_with_lens_user(
+        device,
+        queue,
+        camera_buf,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        owns_device,
+        debug_overlay,
+        user_effects,
+        None,
+        scene_db,
+        voxel_passes,
+        final_passes,
+        lighting_passes,
+    )
+}
+
+/// [`build_default_graph_internal`] with a WGSL snippet for the lens pass's
+/// `USER` elements (`LensPass::new_with_user`).
+fn build_default_graph_internal_with_lens_user(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    camera_buf: &wgpu::Buffer,
+    config: RendererConfig,
+    debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
+    debug_camera_buf: &wgpu::Buffer,
+    cull_stats_buf: &wgpu::Buffer,
+    owns_device: bool,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    user_effects: Option<&'static str>,
+    lens_user: Option<&'static str>,
     scene_db: helio::SceneDbHandle,
     voxel_passes: Vec<VoxelPassFactory>,
     final_passes: Vec<GraphPassFactory>,
@@ -1010,9 +1130,9 @@ fn build_default_graph_internal(
     // resources at execute time, so no buffers are passed in here.
     let transparent = helio_pass_transparent::TransparentPass::new(device, FOGGED_HDR_FORMAT);
     let resolved =
-        add_scene_linear_chain(&mut graph, device, FOGGED_HDR_FORMAT, Some(transparent), aa, iw, ih);
+        add_scene_linear_chain(&mut graph, device, FOGGED_HDR_FORMAT, Some(transparent), aa, iw, ih, lens_user);
 
-    let mut pp = PostProcessPass::new_with_user_effects(
+    let pp = PostProcessPass::new_with_user_effects(
         device,
         queue,
         config.width,
@@ -1021,19 +1141,7 @@ fn build_default_graph_internal(
         user_effects,
     )
     .with_color_input(resolved);
-    // Enable pre_dof output so the DofPass can read the post-processed image.
-    pp.set_output_to_pre_dof(true);
     graph.add_pass(Box::new(pp));
-
-    // Cinematic bokeh DOF — runs after the main uber-shader, reads "pre_dof"
-    // (written by PostProcessPass) and writes the final output to ctx.target.
-    graph.add_pass(Box::new(DofPass::new(
-        device,
-        queue,
-        config.width,
-        config.height,
-        config.surface_format,
-    )));
 
     add_final_passes(
         &mut graph,
@@ -1053,9 +1161,10 @@ fn build_default_graph_internal(
 
     let overlay_owned = debug_overlay.map(Arc::clone);
     let effect_snippet = user_effects;
+    let lens_snippet = lens_user;
     let rebuilder: GraphRebuilder = Arc::new(
         move |device, queue, config, debug_state, camera_buf, debug_camera_buf, cull_stats_buf| {
-            build_default_graph_internal(
+            build_default_graph_internal_with_lens_user(
                 device,
                 queue,
                 camera_buf,
@@ -1066,6 +1175,7 @@ fn build_default_graph_internal(
                 owns_device,
                 overlay_owned.as_ref(),
                 effect_snippet,
+                lens_snippet,
                 scene_db.clone(),
                 voxel_passes.clone(),
                 final_passes.clone(),
@@ -1244,7 +1354,7 @@ fn build_fxaa_graph_internal(
         )),
         None => SceneAa::None,
     };
-    let resolved = add_scene_linear_chain(&mut graph, device, FOGGED_HDR_FORMAT, None, aa, iw, ih);
+    let resolved = add_scene_linear_chain(&mut graph, device, FOGGED_HDR_FORMAT, None, aa, iw, ih, None);
 
     graph.add_pass(Box::new(
         PostProcessPass::new_with_user_effects(
@@ -1378,7 +1488,7 @@ fn build_hlfs_graph_internal(
         None => SceneAa::None,
     };
     let resolved =
-        add_scene_linear_chain(&mut graph, device, lighting_format, Some(transparent), aa, iw, ih);
+        add_scene_linear_chain(&mut graph, device, lighting_format, Some(transparent), aa, iw, ih, None);
 
     graph.add_pass(Box::new(
         PostProcessPass::new_with_user_effects(
@@ -1605,7 +1715,7 @@ fn build_fxaa_hlfs_graph_internal(
     // before anti-aliasing and tonemapping, alongside the opaque lighting.
     let transparent = helio_pass_transparent::TransparentPass::new(device, lighting_format);
     let resolved = add_scene_linear_chain(
-        &mut graph, device, lighting_format, Some(transparent), SceneAa::Fxaa, w, h,
+        &mut graph, device, lighting_format, Some(transparent), SceneAa::Fxaa, w, h, None,
     );
 
     graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
@@ -1879,7 +1989,7 @@ fn build_forward_graph_internal(
     // resources at execute time, so no buffers are passed in here.
     let transparent = helio_pass_transparent::TransparentPass::new(device, FOGGED_HDR_FORMAT);
     let resolved = add_scene_linear_chain(
-        &mut graph, device, FOGGED_HDR_FORMAT, Some(transparent), SceneAa::Fxaa, iw, ih,
+        &mut graph, device, FOGGED_HDR_FORMAT, Some(transparent), SceneAa::Fxaa, iw, ih, None,
     );
 
     graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(

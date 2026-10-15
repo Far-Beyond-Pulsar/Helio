@@ -515,6 +515,10 @@ fn create_case_buffers(
             material_id: 0,
             flags: 0,
             lightmap_index: u32::MAX,
+            skin_vertex_offset: 0,
+            bone_palette_offset: 0,
+            bone_palette_count: 0,
+            _skin_pad: 0,
         };
         case.object_count as usize
     ];

@@ -17,6 +17,7 @@
 //! | `local_fog` | `"local_fog_media"` | as above; bounds = the owner-oriented box's world AABB |
 //! | `post_process_volumes` | `"post_process_volumes"` | as above; bounds as above |
 //! | `camera_post_process` | `"camera_postprocess"` | attached, enabled, owner current (visibility does not apply) |
+//! | `camera_lens` | `"camera_lenses"` | as above; the lens pass reads it, its element rows come straight from `"lens_elements"` |
 //! | `water_volumes` | `"water_volumes"`, packed into [`MAX_WATER_VOLUMES`] rows | as for volumes; the surface height follows the owner's Y; the sun is the scene's first directional light |
 //! | `foliage` | `"foliage_types"`, `"foliage_layers"`, `"foliage_wind"`, each packed | attached, enabled, owner current and visible, with a density |
 //! | `wind` | `"foliage_wind"`, over the foliage components' own wind; the wind of every placed `"water_volumes"` row that does not opt out | attached, enabled, owner current (visibility does not apply); a foliage component that opts out of the global wind takes precedence |
@@ -77,10 +78,12 @@ pub const GLOBAL_FOG_SOURCE_ROW_BYTES: u64 = 16 * 4;
 /// `LocalFogSourceRow`: local size vec4, medium (16), edge fade vec4.
 pub const LOCAL_FOG_SOURCE_ROW_BYTES: u64 = 24 * 4;
 /// `PostProcessVolumeSourceRow`: local size vec4, then the pass row after
-/// its bounds (156 words).
-pub const POST_PROCESS_VOLUME_SOURCE_ROW_BYTES: u64 = 160 * 4;
+/// its bounds (140 words).
+pub const POST_PROCESS_VOLUME_SOURCE_ROW_BYTES: u64 = 144 * 4;
 /// `CameraPostProcessSourceRow`: the `CameraPostProcessComponent` pass row.
-pub const CAMERA_POST_PROCESS_SOURCE_ROW_BYTES: u64 = 152 * 4;
+pub const CAMERA_POST_PROCESS_SOURCE_ROW_BYTES: u64 = 136 * 4;
+/// `CameraLensSourceRow`: the `helio_pass_lens::LensComponent` pass row.
+pub const CAMERA_LENS_SOURCE_ROW_BYTES: u64 = std::mem::size_of::<helio_pass_lens::LensComponent>() as u64;
 /// `WaterVolumeSourceRow`: local size (`w`: surface height above the
 /// owner), then the water volume row after its bounds (56 words).
 pub const WATER_VOLUME_SOURCE_ROW_BYTES: u64 = 60 * 4;
@@ -150,6 +153,7 @@ pub const GLOBAL_FOG_KEY: BufferKey = BufferKey::of("global_fog_media");
 pub const LOCAL_FOG_KEY: BufferKey = BufferKey::of("local_fog_media");
 pub const POST_PROCESS_VOLUMES_KEY: BufferKey = BufferKey::of("post_process_volumes");
 pub const CAMERA_POST_PROCESS_KEY: BufferKey = BufferKey::of("camera_postprocess");
+pub const CAMERA_LENSES_KEY: BufferKey = BufferKey::of("camera_lenses");
 pub const WATER_VOLUMES_KEY: BufferKey = BufferKey::of("water_volumes");
 pub const FOLIAGE_TYPES_KEY: BufferKey = BufferKey::of("foliage_types");
 pub const FOLIAGE_LAYERS_KEY: BufferKey = BufferKey::of("foliage_layers");
@@ -187,6 +191,8 @@ pub struct EnvironmentJoinKeys {
     pub local_fog: BufferKey,
     pub post_process_volumes: BufferKey,
     pub camera_post_process: BufferKey,
+    /// Camera lenses (their source rows).
+    pub camera_lens: BufferKey,
     pub water_volumes: BufferKey,
     pub foliage: BufferKey,
     pub atmospheres: BufferKey,
@@ -209,6 +215,7 @@ enum Source {
     LocalFog,
     PostProcessVolumes,
     CameraPostProcess,
+    CameraLens,
     WaterVolumes,
     Foliage,
     Atmospheres,
@@ -220,11 +227,12 @@ enum Source {
 }
 
 impl Source {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::GlobalFog,
         Self::LocalFog,
         Self::PostProcessVolumes,
         Self::CameraPostProcess,
+        Self::CameraLens,
         Self::WaterVolumes,
         Self::Foliage,
         Self::Atmospheres,
@@ -241,6 +249,7 @@ impl Source {
             Self::LocalFog => keys.local_fog,
             Self::PostProcessVolumes => keys.post_process_volumes,
             Self::CameraPostProcess => keys.camera_post_process,
+            Self::CameraLens => keys.camera_lens,
             Self::WaterVolumes => keys.water_volumes,
             Self::Foliage => keys.foliage,
             Self::Atmospheres => keys.atmospheres,
@@ -258,6 +267,7 @@ impl Source {
             Self::LocalFog => LOCAL_FOG_SOURCE_ROW_BYTES,
             Self::PostProcessVolumes => POST_PROCESS_VOLUME_SOURCE_ROW_BYTES,
             Self::CameraPostProcess => CAMERA_POST_PROCESS_SOURCE_ROW_BYTES,
+            Self::CameraLens => CAMERA_LENS_SOURCE_ROW_BYTES,
             Self::WaterVolumes => WATER_VOLUME_SOURCE_ROW_BYTES,
             Self::Foliage => FOLIAGE_SOURCE_ROW_BYTES,
             Self::Atmospheres => ATMOSPHERE_SOURCE_ROW_BYTES,
@@ -518,14 +528,23 @@ impl EnvironmentJoin {
                 "Environment Join Post-Process Volumes",
                 POST_PROCESS_VOLUMES_KEY,
                 Source::PostProcessVolumes,
-                164,
+                148,
                 volume,
             ),
             Spec::new(
                 "Environment Join Camera Post-Process",
                 CAMERA_POST_PROCESS_KEY,
                 Source::CameraPostProcess,
-                152,
+                136,
+                0,
+            ),
+            // The lens row is the pass row, bit for bit; the lens pass reads
+            // its elements from the host-registered `"lens_elements"`.
+            Spec::new(
+                "Environment Join Camera Lens",
+                CAMERA_LENSES_KEY,
+                Source::CameraLens,
+                (CAMERA_LENS_SOURCE_ROW_BYTES / 4) as u32,
                 0,
             ),
             // Each placed volume takes the scene's sun, and the level's

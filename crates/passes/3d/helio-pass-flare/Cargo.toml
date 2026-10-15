@@ -7,6 +7,8 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 helio-core = { workspace = true }
+# The camera optics the lens response is built from.
+helio-pass-lens = { workspace = true }
 # Shadow matrices for analytic lens-source visibility.
 helio-pass-shadow-matrix = { workspace = true }
 wgpu = { workspace = true }

@@ -33,6 +33,7 @@ const KEYS: EnvironmentJoinKeys = EnvironmentJoinKeys {
     local_fog: BufferKey::of("t_local_fog"),
     post_process_volumes: BufferKey::of("t_post_process_volumes"),
     camera_post_process: BufferKey::of("t_camera_post_process"),
+    camera_lens: BufferKey::of("t_camera_lens"),
     water_volumes: BufferKey::of("t_water_volumes"),
     foliage: BufferKey::of("t_foliage"),
     atmospheres: BufferKey::of("t_atmospheres"),

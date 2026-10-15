@@ -71,7 +71,7 @@ pub struct TransparentPass {
     /// across frames, so this can't be built once at construction time (see
     /// `bind_group_key`).
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<[wgpu::Buffer; 2]>,
+    bind_group_key: Option<[wgpu::Buffer; 4]>,
     bind_group_layout_1: wgpu::BindGroupLayout,
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_1_key: Option<(usize, usize, Option<wgpu::Buffer>, Option<wgpu::Buffer>, usize, usize)>,
@@ -125,6 +125,8 @@ impl TransparentPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
 
@@ -558,7 +560,9 @@ impl RenderPass for TransparentPass {
         // handles change -- `batch.instances` is a `GrowableBuffer` that can
         // reallocate across frames as the scene grows, so this can't be
         // built once at construction time (mirrors `bind_group_1`'s pattern).
-        let bg0_key = [ctx.camera.clone(), batch.instances.clone()];
+        let skin_buf = ctx.scene_buffers.get(BufferKey::of("skeletal_skin_vertices")).map(|h| h.buffer.clone()).unwrap_or_else(|| batch.instances.clone());
+        let palette_buf = ctx.scene_buffers.get(BufferKey::of("skeletal_bone_palette")).map(|h| h.buffer.clone()).unwrap_or_else(|| batch.instances.clone());
+        let bg0_key = [ctx.camera.clone(), batch.instances.clone(), skin_buf, palette_buf];
         if self.bind_group_key.as_ref() != Some(&bg0_key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Transparent BG 0"),
@@ -576,6 +580,8 @@ impl RenderPass for TransparentPass {
                         binding: 2,
                         resource: batch.instances.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry { binding: 3, resource: bg0_key[2].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: bg0_key[3].as_entire_binding() },
                 ],
             }));
             self.bind_group_key = Some(bg0_key);

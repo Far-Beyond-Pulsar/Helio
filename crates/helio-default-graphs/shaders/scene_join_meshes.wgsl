@@ -38,7 +38,7 @@ struct Section {
     material: Material,
 }
 
-/// `helio_pass_gbuffer::StaticObjectComponent` (236 bytes).
+/// `helio_pass_gbuffer::StaticObjectComponent` (252 bytes).
 struct StaticObjectRow {
     mesh_slot: u32,
     mesh_generation: u32,
@@ -55,6 +55,10 @@ struct StaticObjectRow {
     graph_hash_lo: u32,
     graph_hash_hi: u32,
     flags: u32,
+    skin_vertex_offset: u32,
+    bone_palette_offset: u32,
+    bone_palette_count: u32,
+    _skin_pad: u32,
 }
 
 struct MeshJoinUniforms {
@@ -77,9 +81,11 @@ struct MeshJoinUniforms {
 @group(0) @binding(7) var<storage, read> mesh_bounds: array<array<f32, 4>>;
 @group(0) @binding(8) var<storage, read> mesh_flags: array<u32>;
 @group(0) @binding(9) var<storage, read> section_handles: array<Handle>;
-@group(0) @binding(10) var<storage, read> sections: array<Section>;
-@group(0) @binding(11) var<storage, read_write> objects_out: array<StaticObjectRow>;
-@group(0) @binding(12) var<storage, read_write> materials_out: array<Material>;
+@group(0) @binding(10) var<storage, read> skin_handles: array<Handle>;
+@group(0) @binding(11) var<storage, read> palette_handles: array<Handle>;
+@group(0) @binding(12) var<storage, read> sections: array<Section>;
+@group(0) @binding(13) var<storage, read_write> objects_out: array<StaticObjectRow>;
+@group(0) @binding(14) var<storage, read_write> materials_out: array<Material>;
 
 /// The owner entity of instance `row` when the instance should draw, else
 /// `NO_OWNER`: attached and enabled, its recorded owner generation matches
@@ -129,6 +135,10 @@ fn cs_join_meshes(@builtin(global_invocation_id) gid: vec3<u32>) {
     let draws = section_handles[row];
     let vertices = vertex_handles[row];
     let indices = index_handles[row];
+    var skin = Handle(0u, 0u);
+    var palette = Handle(0u, 0u);
+    if row < arrayLength(&skin_handles) { skin = skin_handles[row]; }
+    if row < arrayLength(&palette_handles) { palette = palette_handles[row]; }
     if draws.count == 0u || vertices.count == 0u || indices.count == 0u {
         return;
     }
@@ -204,6 +214,10 @@ fn cs_join_meshes(@builtin(global_invocation_id) gid: vec3<u32>) {
             section.graph_hash_lo,
             section.graph_hash_hi,
             flags,
+            skin.offset - vertices.offset,
+            palette.offset,
+            palette.count / 2u,
+            0u,
         );
     }
 }

@@ -322,6 +322,26 @@ pub fn option_values_from_hashmap(
     vals
 }
 
+/// Deserialize importer settings saved in an import database record.
+pub fn option_values_from_json(
+    json: &serde_json::Value,
+) -> Option<HashMap<String, Box<dyn Any + Send>>> {
+    serde_json::from_value::<helio_asset_compat::OptionValues>(json.clone())
+        .ok()
+        .map(|values| hashmap_from_option_values(&values))
+}
+
+/// Serialize importer settings for storage in an import database record.
+pub fn option_values_to_json(map: &HashMap<String, Box<dyn Any + Send>>) -> serde_json::Value {
+    let mut json = serde_json::Map::new();
+    for (key, value) in map {
+        if let Ok(value) = RUNTIME_TYPE_REGISTRY.serialize_json_for_any(value.as_ref()) {
+            json.insert(key.clone(), value);
+        }
+    }
+    serde_json::Value::Object(json)
+}
+
 /// Native asset path for an imported source model: `<dest_dir>/<stem>.mesh`
 /// (e.g. dropping `foo.fbx` into `dir` → `dir/foo.mesh`).
 pub fn native_mesh_path(dest_dir: &Path, source: &Path) -> PathBuf {
@@ -642,14 +662,22 @@ pub(crate) fn mesh_asset_from_converted_scene(
             source_material: Some(index as u32),
             name: format!("Material {}", index + 1),
             material_asset: String::new(),
-            surface: scene.materials.get(index).map(|material| ImportedSurfaceMaterial {
-                base_color: material.gpu.base_color,
-                roughness: material.gpu.roughness_metallic[0],
-                metallic: material.gpu.roughness_metallic[1],
-                emissive: [material.gpu.emissive[0], material.gpu.emissive[1], material.gpu.emissive[2]],
-                emissive_intensity: material.gpu.emissive[3],
-                alpha: material.gpu.base_color[3],
-            }).unwrap_or_default(),
+            surface: scene
+                .materials
+                .get(index)
+                .map(|material| ImportedSurfaceMaterial {
+                    base_color: material.gpu.base_color,
+                    roughness: material.gpu.roughness_metallic[0],
+                    metallic: material.gpu.roughness_metallic[1],
+                    emissive: [
+                        material.gpu.emissive[0],
+                        material.gpu.emissive[1],
+                        material.gpu.emissive[2],
+                    ],
+                    emissive_intensity: material.gpu.emissive[3],
+                    alpha: material.gpu.base_color[3],
+                })
+                .unwrap_or_default(),
         })
         .collect();
 
@@ -772,38 +800,37 @@ pub fn import_model_to_native(
     native: &Path,
     values: &HashMap<String, Box<dyn Any + Send>>,
 ) -> Result<PathBuf, String> {
-    let mut ov = option_values_from_hashmap(values);
-    // A static mesh asset must retain source material boundaries. The loader
-    // normally returns one mesh per primitive; merged conversion bakes node
-    // transforms and emits a section table grouped by source material.
-    ov.set("merge_meshes", helio_asset_compat::OptionValue::Bool(true));
-    let scene = helio_asset_compat::load_scene_file_with_values(source, &ov)
-        .map_err(|e| format!("import conversion failed: {e}"))?;
+    write_static_mesh(load_model_scene(source, values)?, native)
+}
 
+/// Load `source` for import with `values`. A static mesh asset must retain
+/// source material boundaries, so conversion is always the merged, sectioned
+/// form; a rigged source also carries its [`helio_asset_compat::ImportedRig`].
+pub fn load_model_scene(
+    source: &Path,
+    values: &HashMap<String, Box<dyn Any + Send>>,
+) -> Result<helio_asset_compat::ConvertedScene, String> {
+    let mut ov = option_values_from_hashmap(values);
+    // The loader normally returns one mesh per primitive; merged conversion
+    // bakes node transforms and emits a section table grouped by source
+    // material.
+    ov.set("merge_meshes", helio_asset_compat::OptionValue::Bool(true));
+    helio_asset_compat::load_scene_file_with_values(source, &ov)
+        .map_err(|e| format!("import conversion failed: {e}"))
+}
+
+/// Write the static geometry of a converted scene as the native `.mesh` at
+/// `native` and announce it. Returns the written native path.
+pub fn write_static_mesh(
+    scene: helio_asset_compat::ConvertedScene,
+    native: &Path,
+) -> Result<PathBuf, String> {
     let mut upload = mesh_asset_from_converted_scene(scene)
         .ok_or_else(|| "model contained no sectioned mesh geometry".to_string())?;
     carry_over_default_materials(native, &mut upload);
     let content_id = content_id_for_bytes(&upload.geometry);
     std::fs::write(native, encode_asset(&upload, content_id))
         .map_err(|e| format!("failed to write native mesh {}: {e}", native.display()))?;
-
-    // Persist chosen options for reimport / configurator pre-fill (#409).
-    if let Some(root) = engine_state::get_project_path() {
-        let root = Path::new(&root);
-        let key = engine_fs::import_options::asset_key(root, native);
-        let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if let Some(schema) = helio_asset_compat::options_schema_for_extension(ext) {
-            let mut json_map = serde_json::Map::new();
-            for field in &schema.fields {
-                if let Some(val) = values.get(&field.key) {
-                    if let Ok(json) = RUNTIME_TYPE_REGISTRY.serialize_json_for_any(val.as_ref()) {
-                        json_map.insert(field.key.clone(), json);
-                    }
-                }
-            }
-            let _ = engine_fs::import_options::set(root, &key, serde_json::Value::Object(json_map));
-        }
-    }
 
     // Placed meshes naming this asset reload it (the level editor subscribes).
     pulsar_events::publish_asset_updated(
@@ -912,7 +939,10 @@ mod tests {
             move |event| record.lock().unwrap().push(event.path.clone()),
         );
         let native = import_model_to_native_default(&source, &dir).expect("the cube imports");
-        assert!(seen.lock().unwrap().contains(&Some(native.clone())), "{native:?}");
+        assert!(
+            seen.lock().unwrap().contains(&Some(native.clone())),
+            "{native:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -950,7 +980,11 @@ mod tests {
                 vertices: vec![PackedVertex::zeroed(); 3],
                 indices: vec![0, 1, 2],
             },
-            sections: vec![MeshSection { first_index: 0, index_count: 3, material_slot: 0 }],
+            sections: vec![MeshSection {
+                first_index: 0,
+                index_count: 3,
+                material_slot: 0,
+            }],
             material_slots: vec![MeshMaterialSlot::default()],
         };
         std::fs::write(&path, encode_asset(&asset, 7)).unwrap();

@@ -47,7 +47,7 @@ pub struct ShadowPass {
     // ── Dynamic shadow atlas (Movable objects only) ───────────────────────────
     face_views: Box<[wgpu::TextureView]>,
     bg_0: Option<wgpu::BindGroup>,
-    bg_0_key: Option<[wgpu::Buffer; 3]>,
+    bg_0_key: Option<[wgpu::Buffer; 5]>,
 
     // ── Static shadow atlas (Static/Stationary objects only) ─────────────────
     static_face_views: Box<[wgpu::TextureView]>,
@@ -179,6 +179,18 @@ impl ShadowPass {
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
                     count: None,
                 },
             ],
@@ -482,10 +494,14 @@ impl RenderPass for ShadowPass {
             return Ok(());
         };
         let desired = data.desired_matrices.unwrap_or(data.shadow_matrices);
+        let skin = ctx.scene_buffers.get(BufferKey::of("skeletal_skin_vertices"));
+        let palette = ctx.scene_buffers.get(BufferKey::of("skeletal_bone_palette"));
         let key = [
             desired.clone(),
             batch.instances.clone(),
             coords.coordinate_spaces.clone(),
+            skin.map_or_else(|| batch.instances.clone(), |h| h.buffer.clone()),
+            palette.map_or_else(|| batch.instances.clone(), |h| h.buffer.clone()),
         ];
         if self.bg_0_key.as_ref() != Some(&key) {
             self.bg_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -516,6 +532,8 @@ impl RenderPass for ShadowPass {
                         binding: 4,
                         resource: self.face_dirty_buf.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry { binding: 5, resource: key[3].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 6, resource: key[4].as_entire_binding() },
                 ],
             }));
             self.bg_0_key = Some(key);

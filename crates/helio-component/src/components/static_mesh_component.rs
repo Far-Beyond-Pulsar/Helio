@@ -1,8 +1,6 @@
 //! Static mesh component for mesh asset assignment.
 
-use engine_class_derive::{
-    engine_class, register_scene_props_applier, register_world_component,
-};
+use engine_class_derive::{engine_class, register_scene_props_applier, register_world_component};
 use helio::PackedVertex;
 use pulsar_reflection::{ReflectError, ScenePropsProjector};
 use serde::{Deserialize, Serialize};
@@ -785,7 +783,8 @@ impl StaticMeshMaterialSlotsEditor {
         }
         self.set_slot_material(key, relative.clone(), window, cx);
         if let Some(row) = self.rows.get(key.1) {
-            row.picker.update(cx, |picker, _| picker.set_selected_path(relative));
+            row.picker
+                .update(cx, |picker, _| picker.set_selected_path(relative));
         }
     }
 
@@ -887,14 +886,18 @@ impl gpui::Render for StaticMeshMaterialSlotsEditor {
                         )
                         .content(move |_window, _cx| picker.clone()),
                     )
-                    .child(Button::new(format!(
+                    .child(
+                        Button::new(format!(
                             "create-material-{}-{}-{index}",
                             self.id_prefix, self.prop_name
                         ))
                         .label("Create")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.create_material_asset(row_key, window, cx);
-                        }))),
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.create_material_asset(row_key, window, cx);
+                            },
+                        )),
+                    ),
             );
         }
         rows
@@ -947,6 +950,7 @@ type RegisteredStaticMeshMaterialSlots = StaticMeshMaterialSlots;
     deserialize,
     scene_store
 )]
+#[scene_store(collect_handles = crate::material_assets::collect_mesh_materials)]
 pub struct StaticMeshComponent {
     /// Relative asset path to the mesh file (e.g. "meshes/primitives/SM_Cube.fbx").
     ///
@@ -981,6 +985,13 @@ pub struct StaticMeshComponent {
     /// off the write path and binds its geometry into the fields below.
     #[serde(skip)]
     pub mesh: AssetId,
+
+    /// The materials the slots name (their own assignments or the mesh's
+    /// defaults), as the world loaded them (SceneDB#84). The handle
+    /// collector counts one reference per slot material; never authored or
+    /// saved.
+    #[serde(skip)]
+    pub materials: crate::material_assets::BoundMaterials,
 
     /// Which loaded geometry `vertices`/`indices` hold, the id their GPU copy
     /// is interned under (see [`MeshGeometryKey`]). Set by the binding.

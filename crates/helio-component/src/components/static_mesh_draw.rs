@@ -15,17 +15,17 @@
 //! rows on other entities; the renderer's scene join combines them on the
 //! GPU each frame they change.
 //!
-//! Material resolution lives here, with the component that names the
-//! material assets: an explicit surface override, a scalar surface asset, a
-//! compiled shader-graph folder (whose textures are registered in the
-//! mirror's texture store), or the mesh's imported surface.
+//! Each section's material is resolved from what the world bound into the
+//! component ([`crate::material_assets`]): an explicit surface override, a
+//! scalar surface asset, a compiled shader-graph folder (whose textures are
+//! registered in the mirror's texture store), or the mesh's imported surface
+//! while its material is not loaded. Nothing here reads a file.
 
 use pulsar_scenedb::gpu::GpuMirrorHandle;
 use pulsar_scenedb_derive::SceneStore;
 
-use super::{StaticMeshComponent, StaticMeshMaterialSlot, SurfaceMaterialAsset};
-use crate::material_graph::{compile_material_graph, texture_assets};
-use crate::material_textures::register_graph_texture;
+use super::{StaticMeshComponent, StaticMeshMaterialSlot};
+use crate::material_assets::{LoadedMaterial, resolve_material, slot_material_id};
 use crate::mesh_cache::{ImportedSurfaceMaterial, MeshSection};
 
 /// Pool of every instance's [`MeshSectionDraw`]s; its handle table is
@@ -68,10 +68,10 @@ pub struct StaticMeshDraw {
 }
 
 impl StaticMeshDraw {
-    /// The draw data for `mesh`, resolving each section's material.
-    /// `mirror` provides the texture store shader-graph materials register
-    /// their textures in; without one those materials fall back to the
-    /// imported surface.
+    /// The draw data for `mesh`, resolving each section's material from the
+    /// materials bound into it. `mirror` provides the texture store
+    /// shader-graph materials register their textures in; without one those
+    /// materials fall back to the imported surface.
     pub fn of(mesh: &StaticMeshComponent, mirror: Option<&GpuMirrorHandle>) -> Self {
         let sections: Vec<MeshSection> = if !mesh.mesh_sections.is_empty() {
             mesh.mesh_sections.clone()
@@ -87,12 +87,16 @@ impl StaticMeshDraw {
         let sections = sections
             .iter()
             .map(|section| {
-                let material = resolve_slot_material(
-                    mesh.material_slots
-                        .slots
-                        .get(section.material_slot as usize),
-                    mirror,
-                );
+                let slot = mesh
+                    .material_slots
+                    .slots
+                    .get(section.material_slot as usize);
+                let id = slot.map_or(pulsar_scenedb::AssetId::ZERO, slot_material_id);
+                let bound = mesh
+                    .materials
+                    .get(id)
+                    .map(|(version, material)| (id, version, material.as_ref()));
+                let material = resolve_material(slot, bound, mirror);
                 MeshSectionDraw {
                     first_index: section.first_index,
                     index_count: section.index_count,
@@ -100,7 +104,7 @@ impl StaticMeshDraw {
                     graph_hash_lo: material.graph_hash as u32,
                     graph_hash_hi: (material.graph_hash >> 32) as u32,
                     _pad: [0; 3],
-                    material: surface_material(&material.surface),
+                    material: surface_material(&material.surface, material.graph_texture_slots),
                 }
             })
             .collect();
@@ -147,11 +151,13 @@ pulsar_scenedb::pulsar_reflection::inventory::submit! {
     }
 }
 
-/// A surface as a material row: the scalar PBR values, no textures.
+/// A surface as a material row: scalar PBR values plus any graph texture slots.
 /// `alpha < 1` selects the blended, transparent-only path (glass).
-fn surface_material(surface: &ImportedSurfaceMaterial) -> helio::GpuMaterial {
+pub(crate) fn surface_material(
+    surface: &ImportedSurfaceMaterial,
+    graph_texture_slots: [u32; 5],
+) -> helio::GpuMaterial {
     let alpha = surface.alpha.clamp(0.0, 1.0);
-    let missing = helio::GpuMaterial::NO_TEXTURE;
     let mut flags = 0;
     if alpha < 1.0 {
         flags |= helio_mats::FLAG_ALPHA_BLEND | helio_mats::FLAG_TRANSPARENT_ONLY;
@@ -170,11 +176,11 @@ fn surface_material(surface: &ImportedSurfaceMaterial) -> helio::GpuMaterial {
             surface.emissive_intensity,
         ],
         roughness_metallic: [surface.roughness, surface.metallic, 1.5, 0.5],
-        tex_base_color: missing,
-        tex_normal: missing,
-        tex_roughness: missing,
-        tex_emissive: missing,
-        tex_occlusion: missing,
+        tex_base_color: graph_texture_slots[0],
+        tex_normal: graph_texture_slots[1],
+        tex_roughness: graph_texture_slots[2],
+        tex_emissive: graph_texture_slots[3],
+        tex_occlusion: graph_texture_slots[4],
         workflow: 0,
         flags,
         material_class: 0,
@@ -189,200 +195,48 @@ pub struct ResolvedSlotMaterial {
     pub surface: ImportedSurfaceMaterial,
     pub material_class: u32,
     pub graph_hash: u64,
+    /// Scene-local texture slots for this graph's local texture ordinals.
+    pub graph_texture_slots: [u32; 5],
 }
 
-/// Resolve one slot's material. An empty slot or one whose assignment
-/// cannot be loaded draws with the mesh's imported surface (with a warning
-/// for the latter).
+/// Resolve one slot's material outside a world (tools such as thumbnails
+/// and the asset viewer): its material file is loaded now, on the caller's
+/// thread. An empty slot or one whose assignment cannot be loaded draws
+/// with the mesh's imported surface (with a warning for the latter). In a
+/// world, the mesh's draw reads the materials the world bound instead.
 pub fn resolve_slot_material(
     slot: Option<&StaticMeshMaterialSlot>,
     mirror: Option<&GpuMirrorHandle>,
 ) -> ResolvedSlotMaterial {
-    let imported = || ResolvedSlotMaterial {
-        surface: slot.map_or_else(Default::default, |slot| {
-            slot.surface_override.unwrap_or(slot.imported_surface)
-        }),
-        material_class: helio_mats::MATERIAL_CLASS_DEFAULT,
-        graph_hash: 0,
-    };
-    let Some(slot) = slot else {
-        return imported();
-    };
-    if let Some(override_surface) = slot.surface_override {
-        return ResolvedSlotMaterial {
-            surface: override_surface,
-            material_class: helio_mats::MATERIAL_CLASS_DEFAULT,
-            graph_hash: 0,
-        };
-    }
-    // The slot's own assignment, else the mesh asset's default for it.
-    let material_asset = slot.effective_material_asset();
-    if material_asset.trim().is_empty() {
-        return imported();
-    }
-    let Some(project_root) = engine_state::get_project_path() else {
-        return imported();
-    };
-    let path = crate::subsystems::resolve_asset_path(
-        std::path::Path::new(&project_root),
-        material_asset,
-    );
-    let graph_file = if path.is_dir() {
-        Some(path.join("shader_graph_save.json"))
-    } else if path
-        .file_name()
-        .is_some_and(|name| name == "shader_graph_save.json")
-    {
-        Some(path.clone())
-    } else {
-        None
-    };
-    if let Some(graph_file) = graph_file.filter(|file| file.is_file()) {
-        let compiled = match mirror {
-            Some(mirror) => {
-                graph_material_source(&graph_file, std::path::Path::new(&project_root), mirror)
-            }
-            None => Err("no GPU mirror to register the graph's textures with".to_string()),
-        };
-        match compiled {
-            Ok((hash, source)) => {
-                helio_mats::register_graph_source(hash, source);
-                return ResolvedSlotMaterial {
-                    surface: slot.imported_surface,
-                    material_class: helio_mats::MATERIAL_CLASS_CUSTOM,
-                    graph_hash: hash,
-                };
-            }
+    let id = slot.map_or(pulsar_scenedb::AssetId::ZERO, slot_material_id);
+    let loaded = slot
+        .filter(|_| !id.is_zero())
+        .and_then(|slot| crate::material_assets::material_source(slot.effective_material_asset()))
+        .and_then(|source| match crate::material_assets::load_material(&source) {
+            Ok(material) => Some(material),
             Err(error) => {
-                tracing::warn!(path = %graph_file.display(), %error, "could not compile Blueprint material graph; using imported FBX material")
+                tracing::warn!(%source, %error, "static mesh material could not be loaded; using the imported material");
+                None
             }
-        }
-    }
-    let loaded = std::fs::read(&path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<SurfaceMaterialAsset>(&bytes).ok());
-    match loaded {
-        Some(material) if material.version == 1 => ResolvedSlotMaterial {
-            surface: ImportedSurfaceMaterial {
-                base_color: material.base_color,
-                roughness: material.roughness,
-                metallic: material.metallic,
-                emissive: material.emissive_color,
-                emissive_intensity: material.emissive_intensity,
-                alpha: material.alpha,
-            },
-            material_class: helio_mats::MATERIAL_CLASS_DEFAULT,
-            graph_hash: 0,
-        },
-        _ => {
-            tracing::warn!(
-                path = %path.display(),
-                "static mesh material asset could not be loaded; using the imported FBX material"
-            );
-            imported()
-        }
-    }
+        });
+    resolve_material(
+        slot,
+        loaded.as_ref().map(|material| (id, 0, material)),
+        mirror,
+    )
 }
 
-/// Whether `slot`'s material, as its mesh's draw last resolved it, is a
-/// shader graph that reads the frame clock (a `time` node), so the surface
-/// animates. Reads what deriving the draw compiled; loads, compiles and
-/// logs nothing.
-pub fn slot_reads_time(slot: &StaticMeshMaterialSlot) -> bool {
-    if slot.surface_override.is_some() {
-        return false;
-    }
-    let material_asset = slot.effective_material_asset();
-    if material_asset.trim().is_empty() {
-        return false;
-    }
-    let Some(project_root) = engine_state::get_project_path() else {
-        return false;
-    };
-    let path =
-        crate::subsystems::resolve_asset_path(std::path::Path::new(&project_root), material_asset);
-    let graph_file = if path.is_dir() {
-        path.join("shader_graph_save.json")
-    } else {
-        path
-    };
-    graph_material_cache()
-        .lock()
-        .ok()
-        .and_then(|cache| {
-            let (_, compiled) = cache.get(&graph_file)?;
-            let (_, source) = compiled.as_ref().ok()?;
-            Some(source.contains("radiant_graph_time()"))
-        })
-        .unwrap_or(false)
-}
-
-fn graph_material_cache() -> &'static std::sync::Mutex<
-    std::collections::HashMap<std::path::PathBuf, (u64, Result<(u64, String), String>)>,
-> {
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<
-            std::collections::HashMap<std::path::PathBuf, (u64, Result<(u64, String), String>)>,
-        >,
-    > = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-fn graph_material_source(
-    path: &std::path::Path,
-    project_root: &std::path::Path,
-    mirror: &GpuMirrorHandle,
-) -> Result<(u64, String), String> {
-    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-    use std::hash::{Hash, Hasher};
-    let mut fingerprint_hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut fingerprint_hasher);
-    let mut fingerprint = fingerprint_hasher.finish();
-    let result = (|| {
-        let text = std::str::from_utf8(&bytes).map_err(|error| error.to_string())?;
-        // Shader graph saves may carry a line comment before their JSON body.
-        let json_start = text
-            .find('{')
-            .ok_or_else(|| "shader graph JSON object is missing".to_string())?;
-        let document: serde_json::Value = serde_json::from_str(&text[json_start..])
-            .map_err(|error| format!("invalid shader graph JSON: {error}"))?;
-        let graph_value = document
-            .get("main_graph")
-            .ok_or_else(|| "shader graph asset has no main_graph".to_string())?;
-        let graph: psgc::GraphDescription = serde_json::from_value(graph_value.clone())
-            .map_err(|error| format!("invalid main_graph: {error}"))?;
-        let mut texture_bindings = std::collections::HashMap::new();
-        for asset in texture_assets(&graph)? {
-            let texture_path = if std::path::Path::new(&asset).is_absolute() {
-                std::path::PathBuf::from(&asset)
-            } else {
-                project_root.join(&asset)
-            };
-            let slot = register_graph_texture(&texture_path, mirror)
-                .map_err(|error| format!("texture '{}': {error}", texture_path.display()))?;
-            // Scene-local slots are part of the compiled shader identity.
-            asset.hash(&mut fingerprint_hasher);
-            slot.hash(&mut fingerprint_hasher);
-            texture_bindings.insert(asset, slot);
-        }
-        fingerprint = fingerprint_hasher.finish();
-        if let Ok(cache) = graph_material_cache().lock() {
-            if let Some((cached_fingerprint, cached_result)) = cache.get(path) {
-                if *cached_fingerprint == fingerprint {
-                    return cached_result.clone();
-                }
-            }
-        }
-        let snippet = compile_material_graph(&graph, &texture_bindings)?;
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        snippet.hash(&mut hasher);
-        let hash = hasher.finish().max(1);
-        Ok((hash, snippet))
-    })();
-    if let Ok(mut cache) = graph_material_cache().lock() {
-        cache.insert(path.to_path_buf(), (fingerprint, result.clone()));
-    }
-    result
+/// Whether any of `mesh`'s materials, as the world bound them, is a shader
+/// graph that reads the frame clock (a `time` node), so its surface
+/// animates. Loads, compiles and logs nothing.
+pub fn mesh_reads_time(mesh: &StaticMeshComponent) -> bool {
+    mesh.material_slots.slots.iter().any(|slot| {
+        mesh.materials
+            .get(slot_material_id(slot))
+            .is_some_and(|(_, material)| {
+                matches!(material.as_ref(), LoadedMaterial::Graph(graph) if graph.reads_time)
+            })
+    })
 }
 
 #[cfg(test)]

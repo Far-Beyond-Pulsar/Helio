@@ -277,6 +277,17 @@ pub struct StaticObjectComponent {
     /// See `helio_pass_object_batch::GpuInstanceData::flags`.
     #[gpu]
     pub flags: u32,
+    /// Base vertex in the parallel four-influence skin stream (zero for rigid meshes).
+    #[gpu]
+    pub skin_vertex_offset: u32,
+    /// Base joint matrix in the shared palette pool (zero for rigid meshes).
+    #[gpu]
+    pub bone_palette_offset: u32,
+    /// Number of valid joint matrices for this instance.
+    #[gpu]
+    pub bone_palette_count: u32,
+    #[gpu]
+    pub _skin_pad: u32,
 }
 
 impl StaticObjectComponent {
@@ -316,6 +327,10 @@ impl StaticObjectComponent {
             graph_hash_lo: graph_hash as u32,
             graph_hash_hi: (graph_hash >> 32) as u32,
             flags,
+            skin_vertex_offset: 0,
+            bone_palette_offset: 0,
+            bone_palette_count: 0,
+            _skin_pad: 0,
         }
     }
 

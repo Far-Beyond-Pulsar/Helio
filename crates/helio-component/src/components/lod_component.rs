@@ -1,7 +1,7 @@
 //! Level of Detail (LOD) component for performance optimization
 
 use engine_class_derive::{engine_class, register_world_component};
-use pulsar_reflection::{pulsar_type, ReflectError, ReflectResult};
+use pulsar_reflection::{ReflectError, ReflectResult, pulsar_type};
 
 /// LOD component for managing mesh detail based on distance
 ///

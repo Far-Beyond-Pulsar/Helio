@@ -38,6 +38,10 @@ struct GpuInstance {
     material_id:  u32,        // 196
     flags:        u32,        // 200
     _pad:         u32,        // 204
+    skin_vertex_offset: u32,
+    bone_palette_offset: u32,
+    bone_palette_count: u32,
+    _skin_pad: u32,
 }
 
 struct GpuDrawCall {

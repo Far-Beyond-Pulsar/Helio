@@ -123,7 +123,8 @@ fn spawn_with_asset(world: &mut World, asset: &str, _vert_count: usize) -> Entit
     world.insert(
         e,
         StaticMeshComponent {
-            mesh_asset: MeshAssetPath::new(asset), geometry_key: MeshGeometryKey::for_path(&MeshAssetPath::new(asset)),
+            mesh_asset: MeshAssetPath::new(asset),
+            geometry_key: MeshGeometryKey::for_path(&MeshAssetPath::new(asset)),
             vertices: upload.vertices,
             indices: upload.indices,
             bounds_local: [0.0, 0.0, 0.0, 0.5],

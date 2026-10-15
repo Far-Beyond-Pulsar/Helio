@@ -688,8 +688,10 @@ impl Renderer {
     }
 
     /// Replace the graph, keeping what the old one owned that a freshly
-    /// built graph cannot know about (a finished bake).
+    /// built graph cannot know about (a finished bake, the debug mode for
+    /// passes that only learn it through `set_debug_mode`).
     pub(crate) fn replace_graph(&mut self, mut graph: RenderGraph) {
+        graph.set_debug_mode(self.debug_mode);
         if let Some(pass) = graph
             .find_pass_mut::<helio_pass_radiance_cascades::RadianceCascadesPass>()
         {
