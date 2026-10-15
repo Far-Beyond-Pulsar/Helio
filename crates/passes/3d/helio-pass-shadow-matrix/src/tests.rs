@@ -557,3 +557,72 @@ fn gpu_ranking_prefers_the_lights_nearest_the_camera() {
     );
     no_overlap(&table, 2048);
 }
+
+/// A crowded scene facing the camera: thousands of point lights competing
+/// for 256 residents and a full atlas. The solve must stay tile-correct and
+/// cheap — it runs every few frames while the camera turns.
+#[test]
+fn gpu_residency_solve_stays_cheap_under_pressure() {
+    const ROWS: u32 = 4096;
+    let mut gpu = Gpu::new(ROWS, 256);
+    let view = glam::Mat4::look_at_rh(glam::Vec3::ZERO, glam::Vec3::NEG_Z, glam::Vec3::Y);
+    let projection = helio_core::depth::perspective(70f32.to_radians(), 16.0 / 9.0, 0.1);
+    let view_proj = projection * view;
+    gpu.params.view_proj = view_proj.to_cols_array();
+    gpu.params.inv_view_proj = view_proj.inverse().to_cols_array();
+    let mut rows = vec![[0u32; 32]; ROWS as usize];
+    for (i, row) in rows.iter_mut().enumerate() {
+        let (a, b) = ((i % 64) as f32, (i / 64) as f32);
+        *row = light(0., 6.0 + (i % 7) as f32, 1);
+        row[0] = ((a - 32.0) * 1.5).to_bits();
+        row[1] = ((b % 8.0) * 2.0 - 6.0).to_bits();
+        row[2] = (-6.0 - b * 0.9).to_bits();
+    }
+    let mut table = gpu.run(&rows, &ResidencyTable::default());
+    let start = std::time::Instant::now();
+    const SOLVES: u32 = 20;
+    for _ in 0..SOLVES {
+        table = gpu.run(&rows, &table);
+    }
+    let per_solve = start.elapsed() / SOLVES;
+    eprintln!("residency solve: {per_solve:?} per run (incl. submit + readback)");
+    assert!(table.residents.iter().filter(|r| r.owner > 0).count() >= 200);
+    no_overlap(&table, 2048);
+    assert!(
+        per_solve < std::time::Duration::from_millis(15),
+        "residency solve took {per_solve:?}"
+    );
+}
+
+
+/// A light that turns out of view keeps its map while the pool has room, so
+/// turning back does not re-render it and fade it in again.
+#[test]
+fn gpu_residency_keeps_lights_that_leave_the_view() {
+    let mut gpu = Gpu::new(8, 16);
+    let projection = helio_core::depth::perspective(60f32.to_radians(), 1.0, 0.1);
+    let look = |dir: glam::Vec3| {
+        let vp = projection * glam::Mat4::look_at_rh(glam::Vec3::ZERO, dir, glam::Vec3::Y);
+        (vp.to_cols_array(), vp.inverse().to_cols_array())
+    };
+    let (vp, inv) = look(glam::Vec3::NEG_Z);
+    gpu.params.view_proj = vp;
+    gpu.params.inv_view_proj = inv;
+    let mut rows = vec![[0u32; 32]; 8];
+    rows[0] = light(0., 3.0, 2);
+    rows[0][1] = 0f32.to_bits();
+    rows[0][2] = (-8f32).to_bits();
+    let table = gpu.run(&rows, &ResidencyTable::default());
+    let slot = table.residents.iter().position(|r| r.owner == 1).expect("visible light is resident");
+    // The light is now committed; the camera turns around.
+    rows[0][12] = slot as u32 * 6;
+    rows[0][15] = 1 | 4 | 8;
+    let (vp, inv) = look(glam::Vec3::Z);
+    gpu.params.view_proj = vp;
+    gpu.params.inv_view_proj = inv;
+    let after = gpu.run(&rows, &table);
+    assert!(
+        after.residents.iter().any(|r| r.owner == 1 && r.tiles.iter().any(|t| t.size > 0)),
+        "a light behind the camera keeps its tiles while capacity is free"
+    );
+}
