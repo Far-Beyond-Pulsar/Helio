@@ -18,6 +18,8 @@ mod masks;
 pub use masks::*;
 mod prescriptions;
 pub use prescriptions::*;
+mod bundled;
+pub use bundled::*;
 
 /// Scene-linear image after the lens, at the size of the pass's input.
 pub const LENS_COLOR: &str = "lens_color";
@@ -179,6 +181,35 @@ impl Targets {
             composed: image(device, width, height, "Lens composed sensor image"),
             pyramid: pyramid_texture.create_view(&Default::default()),
             pyramid_levels,
+        }
+    }
+}
+
+/// What [`LensPass::with_bundled_resources`] publishes, as it becomes ready.
+#[derive(Default)]
+struct Bundled {
+    bank: Option<PrescriptionBank>,
+    masks: Option<wgpu::TextureView>,
+    shapes: Option<wgpu::TextureView>,
+}
+
+impl Bundled {
+    fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if self.masks.is_none() {
+            let layers = bundled_mask_layers();
+            let layers: Vec<&[u8]> = layers.iter().map(Vec::as_slice).collect();
+            self.masks = Some(mask_array(device, queue, MASK_SIZE, &layers));
+        }
+        if self.shapes.is_none() {
+            let layers = bundled_aperture_layers();
+            let layers: Vec<&[u8]> = layers.iter().map(Vec::as_slice).collect();
+            self.shapes = Some(aperture_shape_array(device, queue, APERTURE_SHAPE_SIZE, &layers));
+        }
+        if self.bank.is_none() {
+            if let Some(bakes) = bundled_bakes_ready() {
+                let bakes: Vec<&helio_lens_optics::LensBake> = bakes.iter().collect();
+                self.bank = Some(PrescriptionBank::new(device, &bakes));
+            }
         }
     }
 }
@@ -369,6 +400,9 @@ pub struct LensPass {
     /// One transparent black layer: the mask array when the host supplies none.
     fallback_masks_view: wgpu::TextureView,
     targets: Targets,
+    /// The bundled bank, masks and iris shapes, published as the registry
+    /// entries when the host asked for them ([`Self::with_bundled_resources`]).
+    bundled: Option<Bundled>,
     bindings: Option<(BindingKey, Vec<wgpu::BindGroup>)>,
 }
 
@@ -546,8 +580,23 @@ impl LensPass {
                     ..Default::default()
                 }),
             targets: Targets::new(device, width, height),
+            bundled: None,
             bindings: None,
         }
+    }
+
+    /// Registers the bundled resources of [`crate::bundled`] as the pass's
+    /// optional registry entries: the example prescriptions
+    /// ([`PRESCRIPTIONS`], layers by [`BundledLens`]), a mask array with a
+    /// water-drop layer ([`MASKS`]) and the iris shapes of
+    /// [`BundledAperture`] ([`APERTURE_SHAPES`]). The lenses are traced on a
+    /// background thread and appear once done (a `PRESCRIPTION` element covers
+    /// nothing until then); the textures are made on the first frame.
+    /// Configure before graph construction.
+    pub fn with_bundled_resources(mut self) -> Self {
+        start_baking();
+        self.bundled = Some(Bundled::default());
+        self
     }
 
     /// Select a resolved HDR texture, e.g. the TSR output. Configure before graph
@@ -792,7 +841,28 @@ impl RenderPass for LensPass {
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let frame = [ctx.delta_time.max(0.0), 0.0, 0.0, 0.0];
         ctx.queue.write_buffer(&self.frame, 0, bytemuck::cast_slice(&frame));
+        if let Some(bundled) = &mut self.bundled {
+            bundled.update(ctx.device, ctx.queue);
+        }
         Ok(())
+    }
+    fn publish_frame_inputs<'a>(&self, _camera: &helio_core::GpuCameraUniforms, frame: &mut helio_core::ResourceRegistry<'a>) {
+        let Some(bundled) = &self.bundled else { return };
+        // SAFETY: the resources are owned by this pass, which the graph keeps
+        // alive for longer than the per-frame registry (as `publish` does for
+        // `lens_resolved`).
+        if let Some(bank) = &bundled.bank {
+            let buffer: &'a wgpu::Buffer = unsafe { std::mem::transmute(bank.buffer()) };
+            frame.write(ResourceKey::new(PRESCRIPTIONS), buffer, self.name());
+        }
+        if let Some(masks) = &bundled.masks {
+            let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(masks) };
+            frame.write(ResourceKey::new(MASKS), view, self.name());
+        }
+        if let Some(shapes) = &bundled.shapes {
+            let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(shapes) };
+            frame.write(ResourceKey::new(APERTURE_SHAPES), view, self.name());
+        }
     }
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.resize(device, width, height);

@@ -9,11 +9,23 @@
 //! line for line; the tests compare them on the GPU.
 
 use crate::components::*;
+use crate::prescriptions::{PrescriptionBank, PrescriptionRays};
 
 const MAX_ANGLE: f32 = 1.4835;
 const WATER_INDEX: f32 = 1.333;
-/// Largest overscan reported; the GPU caps it the same way.
+/// Largest overscan reported; the GPU caps it the same way. A camera applies
+/// at most [`APPLIED_OVERSCAN_CAP`] of it.
 pub const OVERSCAN_CAP: f32 = 16.0;
+/// Most a camera widens its field of view by for a lens ([`applied_overscan`]).
+/// Overscanning renders the same pixel count over a wider view, so the final
+/// frame has `1 / overscan` of the pixels per unit of angle at its centre: 2
+/// halves the effective resolution, which is as much as the picture keeps
+/// recognisable. A map that reaches further (an extreme fisheye) clamps to the
+/// edge of the widened image as it always did.
+pub const APPLIED_OVERSCAN_CAP: f32 = 2.0;
+/// Overscan below this factor is not applied (an identity map measures a few
+/// ulp above 1).
+const OVERSCAN_EPSILON: f32 = 1.0e-3;
 
 /// One wavelength sample: its position `t = (lambda - 550 nm) / 150 nm` and
 /// the weight of each colour channel.
@@ -80,6 +92,15 @@ fn dot(a: V2, b: V2) -> f32 {
 }
 fn mix(a: V2, b: V2, t: f32) -> V2 {
     [a[0] * (1.0 - t) + b[0] * t, a[1] * (1.0 - t) + b[1] * t]
+}
+/// The bank layer a `PRESCRIPTION` element names (`rx_header`).
+fn prescription_layer(e: &LensElementComponent) -> usize {
+    (bounded(e.params[0], 0.0, 4096.0, 0.0) + 0.5) as usize
+}
+/// Ray-map elements a covering prescription replaces (`rx_replaces_map`).
+fn replaced_by_prescription(kind: u32) -> bool {
+    (element_kind::PROJECTION..=element_kind::ANAMORPHIC_DISTORTION).contains(&kind)
+        || kind == element_kind::LATERAL_CA
 }
 fn port_index(n: f32) -> f32 {
     if n > 0.0 { n.clamp(1.05, 2.5) } else { WATER_INDEX }
@@ -225,6 +246,8 @@ pub struct RayMap {
     sensor_height_mm: f32,
     aspect: f32,
     f_number: f32,
+    /// The bank's ray maps by layer, with [`RayMap::with_bank`].
+    rays: Vec<PrescriptionRays>,
 }
 
 /// The first prism covering a position: its index in the stack and its
@@ -240,26 +263,76 @@ impl RayMap {
     /// The map of `lens` and its `elements` (the lens's own stack, in order,
     /// not the whole buffer) for an image of the given width over height.
     /// Focus breathing follows `lens.focus_distance_m`: an autofocusing lens
-    /// is resolved on the GPU only.
+    /// is resolved on the GPU only. `PRESCRIPTION` elements are inert, as on
+    /// the GPU without a bank; [`Self::with_bank`] brings theirs.
     pub fn new(lens: &LensComponent, elements: &[LensElementComponent], aspect: f32) -> Self {
-        let focal = bounded(lens.focal_length_mm, 8.0, 600.0, 50.0);
+        Self::build(lens, elements, aspect, &[])
+    }
+
+    /// [`Self::new`] with the baked lenses of `bank`, see [`Self::with_rays`].
+    pub fn with_bank(
+        lens: &LensComponent,
+        elements: &[LensElementComponent],
+        aspect: f32,
+        bank: &PrescriptionBank,
+    ) -> Self {
+        Self::build(lens, elements, aspect, bank.rays())
+    }
+
+    /// [`Self::new`] with the baked lenses `rays` (one per bank layer), so
+    /// `PRESCRIPTION` elements act as they do on the GPU: they replace the
+    /// parametric ray map where they cover, and a full-frame one sets the focal
+    /// length to the bake's. `USER` elements stay unknown to the CPU: their
+    /// WGSL runs on the GPU only, so a user ray map's reach is not part of the
+    /// result.
+    pub fn with_rays(
+        lens: &LensComponent,
+        elements: &[LensElementComponent],
+        aspect: f32,
+        rays: &[PrescriptionRays],
+    ) -> Self {
+        Self::build(lens, elements, aspect, rays)
+    }
+
+    fn build(
+        lens: &LensComponent,
+        elements: &[LensElementComponent],
+        aspect: f32,
+        rays: &[PrescriptionRays],
+    ) -> Self {
+        let mut focal = bounded(lens.focal_length_mm, 8.0, 600.0, 50.0);
         let sensor_width = bounded(lens.sensor_width_mm, 4.0, 70.0, 36.0);
         let sensor_height = if lens.sensor_height_mm > 0.0 {
             bounded(lens.sensor_height_mm, 3.0, 50.0, sensor_width * 2.0 / 3.0)
         } else {
             sensor_width * 2.0 / 3.0
         };
+        let count = (lens.element_count as usize).min(MAX_LENS_ELEMENTS as usize).min(elements.len());
+        let elements = &elements[..count];
+        let mut f_number = bounded(lens.f_number, 0.7, 32.0, 2.8);
+        let rays = rays.to_vec();
+        // A prescription over the whole frame is the view's lens: its
+        // effective focal length, and no wider an aperture than it was baked at.
+        let full_frame = elements.iter().find_map(|e| {
+            (e.kind == element_kind::PRESCRIPTION && e.region_kind == region_kind::FULL_FRAME)
+                .then(|| rays.get(prescription_layer(e)))
+                .flatten()
+        });
+        if let Some(lens_rays) = full_frame {
+            focal = bounded(lens_rays.efl_mm(), 8.0, 600.0, focal);
+            f_number = f_number.clamp(lens_rays.min_f_number().max(0.7), 32.0);
+        }
         let focal_m = focal * 1.0e-3;
         let focus = bounded(lens.focus_distance_m, 0.0, 1.0e6, 1.0e6).max(focal_m * 1.001);
-        let count = (lens.element_count as usize).min(MAX_LENS_ELEMENTS as usize).min(elements.len());
         Self {
-            elements: elements[..count].to_vec(),
+            elements: elements.to_vec(),
             scale: sensor_width / aspect / focal,
             focus_dpt: 1.0 / focus.clamp(focal_m * 1.001, 1.0e6),
             focal_length_mm: focal,
             sensor_height_mm: sensor_height,
             aspect,
-            f_number: bounded(lens.f_number, 0.7, 32.0, 2.8),
+            f_number,
+            rays,
         }
     }
 
@@ -410,11 +483,35 @@ impl RayMap {
         &self.elements[selection.index]
     }
 
+    /// The first `PRESCRIPTION` element (index in the stack) whose region
+    /// covers `q`, with its coverage (`find_prescription` in `lens.wgsl`).
+    fn find_prescription(&self, q: V2) -> Option<(usize, f32)> {
+        self.elements.iter().enumerate().find_map(|(index, e)| {
+            if e.kind != element_kind::PRESCRIPTION || self.rays.get(prescription_layer(e)).is_none() {
+                return None;
+            }
+            let weight = self.region_weight(e, q);
+            (weight > 0.0).then_some((index, weight))
+        })
+    }
+
     /// The scene position the sensor position `q` looks at for wavelength
     /// position `t`, through copy `copy` of the prism `prism` (if any).
     pub fn scene_position(&self, q: V2, t: f32, prism: Option<(usize, u32)>) -> V2 {
         let mut x = [q[0] * self.scale, q[1] * self.scale];
+        // Where a prescription covers, its map replaces the parametric lens maps.
+        let rx = self.find_prescription(q);
+        let rx_weight = rx.map_or(0.0, |(_, w)| w);
         for (i, e) in self.elements.iter().enumerate() {
+            if e.kind == element_kind::PRESCRIPTION {
+                if let Some((index, weight)) = rx {
+                    if index == i {
+                        let rays = &self.rays[prescription_layer(e)];
+                        x = mix(x, rays.map(x, t, self.focal_length_mm), weight);
+                    }
+                }
+                continue;
+            }
             if e.kind < element_kind::PROJECTION || e.kind > element_kind::DOME_PORT {
                 continue;
             }
@@ -426,7 +523,10 @@ impl RayMap {
                 }
                 continue;
             }
-            let w = self.region_weight(e, q);
+            let mut w = self.region_weight(e, q);
+            if rx_weight > 0.0 && replaced_by_prescription(e.kind) {
+                w *= 1.0 - rx_weight;
+            }
             if w <= 0.0 {
                 continue;
             }
@@ -570,4 +670,53 @@ pub fn circle_overlap(d: f32, b: f32) -> f32 {
 /// lens's stack (`lens.element_first ..`). See [`RayMap::required_overscan`].
 pub fn required_overscan(lens: &LensComponent, elements: &[LensElementComponent], aspect: f32) -> f32 {
     RayMap::new(lens, elements, aspect).required_overscan()
+}
+
+/// [`required_overscan`] with the baked lenses `rays` (one per bank layer, see
+/// [`PrescriptionBank::rays`] and [`crate::bundled_rays`]), so `PRESCRIPTION`
+/// elements count: the CPU twin of the GPU's `ResolvedLens::required_overscan`
+/// for everything but `USER` elements and mask regions, which only the GPU
+/// knows (a user ray map's reach is not measured here; document its overscan
+/// need and let its host widen the camera).
+pub fn required_overscan_with_rays(
+    lens: &LensComponent,
+    elements: &[LensElementComponent],
+    aspect: f32,
+    rays: &[PrescriptionRays],
+) -> f32 {
+    RayMap::with_rays(lens, elements, aspect, rays).required_overscan()
+}
+
+/// [`required_overscan_with_rays`] with the lenses of `bank`.
+pub fn required_overscan_with_bank(
+    lens: &LensComponent,
+    elements: &[LensElementComponent],
+    aspect: f32,
+    bank: &PrescriptionBank,
+) -> f32 {
+    required_overscan_with_rays(lens, elements, aspect, bank.rays())
+}
+
+/// The overscan a camera applies for this lens: the factor the field of view's
+/// tangent extent is widened by about the frame centre, and the value to write
+/// to [`LensComponent::overscan`] so the lens crops it back. It is the
+/// required overscan, 1 for a map that stays in the frame (or a lens that is
+/// off), at most [`APPLIED_OVERSCAN_CAP`]. The camera and the lens row must
+/// use the same value; compute it once from the authored lens. `rays` are the
+/// baked lenses `PRESCRIPTION` elements name (empty: they are inert).
+pub fn applied_overscan(
+    lens: &LensComponent,
+    elements: &[LensElementComponent],
+    aspect: f32,
+    rays: &[PrescriptionRays],
+) -> f32 {
+    if lens.enabled == 0 {
+        return 1.0;
+    }
+    let required = required_overscan_with_rays(lens, elements, aspect, rays);
+    if required.is_finite() && required > 1.0 + OVERSCAN_EPSILON {
+        required.min(APPLIED_OVERSCAN_CAP)
+    } else {
+        1.0
+    }
 }

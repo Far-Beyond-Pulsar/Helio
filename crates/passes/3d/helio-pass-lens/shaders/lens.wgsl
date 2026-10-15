@@ -792,8 +792,9 @@ struct FocusSample {
     transmission: f32,
 }
 
-/// The lens's focus field at a sensor position. Every element adds to the
-/// base focus in dioptres: 1/s' = 1/s + sum(D). A diopter's region is
+/// The lens's focus field at a sensor position, in dioptres. A diopter
+/// brings its authored distance into focus inside its region by adding the
+/// power that takes the focus there (1/s' = 1/s + D). A diopter's region is
 /// partial across its seam, where the pixel sees both its covered and
 /// uncovered focus: the two strongest configurations are kept.
 fn focus_field(uv: vec2<f32>, size: vec2<f32>) -> FocusSample {
@@ -823,6 +824,9 @@ fn focus_field(uv: vec2<f32>, size: vec2<f32>) -> FocusSample {
     if rx.weight > 0.0 { curvature *= 1.0 - rx.weight; }
     var inverse = 1.0 / plane_distance + curvature * r * r;
 
+    // The plane term of `inverse` a covering diopter replaces: the base focus
+    // plane, or the distance of the last diopter covering this pixel.
+    var plane_term = 1.0 / plane_distance;
     var strongest = 1.0;
     var seam_power = 0.0;
     var seam_covered = false;
@@ -832,12 +836,21 @@ fn focus_field(uv: vec2<f32>, size: vec2<f32>) -> FocusSample {
     for (var i = 0u; i < resolved.element_count; i++) {
         let e = elements[resolved.element_first + i];
         if e.kind == ELEMENT_DIOPTER {
+            // A diopter is authored by the distance it brings into focus: its
+            // power is whatever puts that distance in focus given the lens's
+            // current (autofocused, tilted) focus, so each covered pixel's blur
+            // still follows its own depth. A later diopter covering the same
+            // pixel replaces an earlier one, as a filter in front of it would.
+            let power = 1.0 / focus_distance(1.0 / max(e.params[0], 1.0e-3)) - plane_term;
             let w = region_weight(e, q);
             let covered = w >= 0.5;
-            if covered { inverse += e.params[0]; }
+            if covered {
+                inverse += power;
+                plane_term += power;
+            }
             if w > 0.0 && w < 1.0 && abs(w - 0.5) < strongest {
                 strongest = abs(w - 0.5);
-                seam_power = e.params[0];
+                seam_power = power;
                 seam_covered = covered;
                 seam_weight = w;
             }

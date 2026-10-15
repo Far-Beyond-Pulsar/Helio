@@ -357,6 +357,48 @@ fn the_overscan_of_a_prescription_is_the_baked_corner_reach() {
 }
 
 #[test]
+fn the_cpu_overscan_of_prescriptions_is_the_gpus() {
+    use crate::ray_map::{applied_overscan, required_overscan_with_bank, RayMap};
+    let mut rig = Rig::new();
+    install(&mut rig, &[thin_lens(), cooke_triplet(), double_gauss()]);
+    let bank = rig.prescriptions.take().unwrap();
+    let region = LensRegion::Ellipse { center: [0.0, 0.0], radii: [0.6, 0.45], rotation: 0.3 };
+    // Whole-frame lenses, one after the other; a lens over an ellipse with a
+    // parametric distortion under it; and a prescription replacing a projection.
+    let stacks: Vec<(f32, Vec<LensElementComponent>)> = vec![
+        (2.0, vec![LensElementComponent::prescription(0, LensRegion::FullFrame)]),
+        (5.0, vec![LensElementComponent::prescription(1, LensRegion::FullFrame)]),
+        (2.0, vec![LensElementComponent::prescription(2, LensRegion::FullFrame)]),
+        (2.0, vec![
+            LensElementComponent::division(-0.3, 0.0, LensRegion::FullFrame),
+            LensElementComponent::prescription(2, region),
+        ]),
+        (2.0, vec![
+            LensElementComponent::projection(ProjectionModel::Equidistant, LensRegion::FullFrame),
+            LensElementComponent::prescription(2, LensRegion::FullFrame),
+        ]),
+    ];
+    rig.prescriptions = Some(bank);
+    for (i, (f_number, stack)) in stacks.iter().enumerate() {
+        let lens = lens_with(stack.len(), *f_number);
+        let _ = record_with(&mut rig, &flat_white(), lens, stack);
+        let gpu = rig.resolved().required_overscan;
+        let bank = rig.prescriptions.as_ref().unwrap();
+        let cpu = required_overscan_with_bank(&lens, stack, 1.0, bank);
+        println!("stack {i}: GPU {gpu}, CPU {cpu}");
+        assert!((gpu - cpu).abs() < 2.0e-3, "stack {i}: GPU {gpu} vs CPU {cpu}");
+        // The bank's own and the free-standing rays agree, and the applied
+        // factor is the capped required one.
+        let from_rays = RayMap::with_rays(&lens, stack, 1.0, bank.rays()).required_overscan();
+        assert_eq!(from_rays, cpu);
+        assert_eq!(applied_overscan(&lens, stack, 1.0, bank.rays()), if cpu > 1.001 { cpu.min(2.0) } else { 1.0 });
+    }
+    // Without the bank the prescription is inert, as on the GPU.
+    let stack = [LensElementComponent::prescription(2, LensRegion::FullFrame)];
+    assert_eq!(crate::ray_map::required_overscan(&lens_with(1, 2.0), &stack, 1.0), 1.0);
+}
+
+#[test]
 fn a_full_frame_prescription_sets_the_focal_length_and_the_widest_aperture() {
     let mut rig = Rig::new();
     install(&mut rig, &[double_gauss()]);

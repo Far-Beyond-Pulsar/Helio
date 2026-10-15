@@ -36,6 +36,10 @@ wavelength). The bake's wavelength samples must ascend, `vignetting.f_numbers` m
 ascend, and analysis fields (`focus.field_r`, `psf.field_r`) must ascend from 0.
 Footprint orientation: the pass uses `+x` as the radial direction on screen.
 
+The three `data/*.json` examples are what the editor offers: `helio-pass-lens`
+bakes them once per process with the default `BakeConfig` (about 0.8 s optimized,
+2.1 s unoptimized, on a background thread) as its bundled prescription bank.
+
 ## Model
 
 * Units: millimetres, nanometres, radians. Optical axis is **+z**, light travels

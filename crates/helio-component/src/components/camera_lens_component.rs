@@ -25,13 +25,21 @@
 //!
 //! The lens is owned by the camera: no post-process volume blends it, and it
 //! is not gated by the owner's visibility.
+//!
+//! A lens whose ray map looks past the frame (a fisheye, a barrel distortion)
+//! needs the camera to render a wider view. [`camera_lens_view_overscan`] gives
+//! the host that factor for its frame camera (`helio::Camera::with_overscan`)
+//! and writes the same factor into the lens's `camera_lens_sources` row
+//! (`LensComponent::overscan`), so the pass crops the wider image back. The
+//! factor depends on the image aspect, which the host supplies per frame.
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use engine_class_derive::{engine_class, register_world_component};
 use helio_pass_lens::{
-    element_kind, LensComponent, LensElementComponent, LensRegion, ProjectionModel,
-    FOCUS_AUTO_POINT, FOCUS_MANUAL, MAX_LENS_ELEMENTS,
+    bundled_rays, element_kind, ray_map::applied_overscan, user, BundledLens, LensComponent,
+    LensElementComponent, LensRegion, ProjectionModel, FOCUS_AUTO_POINT, FOCUS_MANUAL,
+    MAX_LENS_ELEMENTS,
 };
 use pulsar_reflection::{ReflectError, ReflectResult, Reflectable, pulsar_type};
 use pulsar_scenedb::gpu::{GpuMirrorHandle, SceneGpuStore};
@@ -171,8 +179,8 @@ lens_enum! {
 lens_enum! {
     /// What an optical element does.
     LensElementKind {
-        /// Adds dioptres to the focus inside its region
-        /// (`1/s' = 1/s + D`): a split diopter filter.
+        /// Brings a distance into focus inside its region: a split diopter
+        /// filter whose power puts that distance in focus (`1/s' = 1/s + D`).
         #[default]
         Diopter,
         /// Lensbaby-style sweet spot: normal focus inside the region and
@@ -255,6 +263,45 @@ lens_enum! {
         Fog,
         /// Sensor image: dirt, local diffusion with a slight loss.
         Dirt,
+        /// A baked real lens (one of the bundled prescriptions): inside the
+        /// region its ray map, vignetting, bokeh shape, field curvature and
+        /// in-focus point spread come from tracing the lens instead of from
+        /// the parametric elements.
+        Prescription,
+        /// A user-written element: runs the hooks of the WGSL snippet the
+        /// project compiled into the lens shader. Inert without one.
+        User,
+    }
+}
+
+lens_enum! {
+    /// A lens of the bundled prescription bank
+    /// ([`helio_pass_lens::BundledLens`]); the order is the bank's layer order.
+    LensPrescriptionChoice {
+        /// Idealized thin lens, 50 mm f/2: the identity map with natural falloff.
+        ThinLens50F2,
+        /// Cooke triplet, 50 mm f/5.
+        CookeTriplet50F5,
+        /// Six-element double Gauss, 50 mm f/2: barrel distortion, lateral
+        /// colour, cat's-eye bokeh and coma.
+        #[default]
+        DoubleGauss50F2,
+    }
+}
+
+impl LensPrescriptionChoice {
+    /// The bundled lens this chooses.
+    pub fn bundled(self) -> BundledLens {
+        match self {
+            Self::ThinLens50F2 => BundledLens::ThinLens50F2,
+            Self::CookeTriplet50F5 => BundledLens::CookeTriplet50F5,
+            Self::DoubleGauss50F2 => BundledLens::DoubleGauss50F2,
+        }
+    }
+
+    /// Its layer of the bundled bank, for the element's `params[0]`.
+    pub fn layer(self) -> u32 {
+        self.bundled().layer()
     }
 }
 
@@ -351,6 +398,8 @@ lens_enum! {
 #[category("Halation", category_color = "#E0B040")]
 #[category("Contaminants", category_color = "#50C878")]
 #[category("Mask Region", category_color = "#C080E0")]
+#[category("Prescription", category_color = "#3AA0FF")]
+#[category("User Element", category_color = "#E07050")]
 #[serde(default)]
 pub struct LensElementProps {
     /// A disabled element stays in the stack but does nothing.
@@ -442,10 +491,11 @@ pub struct LensElementProps {
     /// Mask region: repeat the mask outside the frame-sized tile; off covers nothing there.
     #[property(category = "Mask Region")]
     pub mask_tile: bool,
-    /// Diopter: added optical power in dioptres. Positive power focuses
-    /// nearer: `1/s' = 1/s + D`.
-    #[property(min = -8.0, max = 8.0, step = 0.05, category = "Diopter")]
-    pub power_dpt: f32,
+    /// Diopter: distance in metres the region brings into focus; each pixel
+    /// there still blurs by its own depth. The filter's power follows the
+    /// lens's focus (`D = 1/focus - 1/s`), so focus pulls keep it sharp here.
+    #[property(min = 0.05, max = 1000.0, step = 0.05, label = "Sharp at (m)", category = "Diopter")]
+    pub focus_m: f32,
     /// Diopter: how dark the seam is at its centre (0..1).
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Diopter")]
     pub seam_darkening: f32,
@@ -827,6 +877,74 @@ pub struct LensElementProps {
     /// Dirt: weight ratio of successive lobes (0: 0.5).
     #[property(min = 0.0, max = 1.0, step = 0.01, category = "Contaminants")]
     pub dirt_tail: f32,
+    /// Prescription: the baked lens that drives the element's region.
+    #[property(category = "Prescription")]
+    pub prescription_lens: LensPrescriptionChoice,
+    /// Prescription: scale of the baked in-focus point spread (core blur and
+    /// coma tail): 1 is the bake, 0 leaves it out.
+    #[property(min = 0.0, max = 2.0, step = 0.01, category = "Prescription")]
+    pub psf_amount: f32,
+    /// User element: runs the snippet's `user_ray_map`.
+    #[property(category = "User Element")]
+    pub user_map: bool,
+    /// User element: runs the snippet's `user_transmission`.
+    #[property(category = "User Element")]
+    pub user_transmission: bool,
+    /// User element: runs the snippet's `user_focus`.
+    #[property(category = "User Element")]
+    pub user_focus: bool,
+    /// User element: `user_ray_map` depends on the wavelength, so the
+    /// composite samples the spectrum.
+    #[property(category = "User Element")]
+    pub user_spectral: bool,
+    /// User element: parameter 0, handed to the hooks as `params[0]`.
+    #[property(min = -1000.0, max = 1000.0, step = 0.01, category = "User Element")]
+    pub user_p0: f32,
+    /// User element: parameter 1, handed to the hooks as `params[1]`.
+    #[property(min = -1000.0, max = 1000.0, step = 0.01, category = "User Element")]
+    pub user_p1: f32,
+    /// User element: parameter 2, handed to the hooks as `params[2]`.
+    #[property(min = -1000.0, max = 1000.0, step = 0.01, category = "User Element")]
+    pub user_p2: f32,
+    /// User element: parameter 3, handed to the hooks as `params[3]`.
+    #[property(min = -1000.0, max = 1000.0, step = 0.01, category = "User Element")]
+    pub user_p3: f32,
+    /// User element: parameter 4, handed to the hooks as `params[4]`.
+    #[property(min = -1000.0, max = 1000.0, step = 0.01, category = "User Element")]
+    pub user_p4: f32,
+    /// User element: parameter 5, handed to the hooks as `params[5]`.
+    #[property(min = -1000.0, max = 1000.0, step = 0.01, category = "User Element")]
+    pub user_p5: f32,
+    /// User element: parameter 6, handed to the hooks as `params[6]`.
+    #[property(min = -1000.0, max = 1000.0, step = 0.01, category = "User Element")]
+    pub user_p6: f32,
+    /// User element: parameter 7, handed to the hooks as `params[7]`.
+    #[property(min = -1000.0, max = 1000.0, step = 0.01, category = "User Element")]
+    pub user_p7: f32,
+    /// User element: parameter 8, handed to the hooks as `params[8]`.
+    #[property(min = -1000.0, max = 1000.0, step = 0.01, category = "User Element")]
+    pub user_p8: f32,
+    /// User element: parameter 9, handed to the hooks as `params[9]`.
+    #[property(min = -1000.0, max = 1000.0, step = 0.01, category = "User Element")]
+    pub user_p9: f32,
+    /// User element: parameter 10, handed to the hooks as `params[10]`.
+    #[property(min = -1000.0, max = 1000.0, step = 0.01, category = "User Element")]
+    pub user_p10: f32,
+    /// User element: parameter 11, handed to the hooks as `params[11]`.
+    #[property(min = -1000.0, max = 1000.0, step = 0.01, category = "User Element")]
+    pub user_p11: f32,
+    /// User element: parameter 12, handed to the hooks as `params[12]`.
+    #[property(min = -1000.0, max = 1000.0, step = 0.01, category = "User Element")]
+    pub user_p12: f32,
+    /// User element: parameter 13, handed to the hooks as `params[13]`.
+    #[property(min = -1000.0, max = 1000.0, step = 0.01, category = "User Element")]
+    pub user_p13: f32,
+    /// User element: parameter 14, handed to the hooks as `params[14]`.
+    #[property(min = -1000.0, max = 1000.0, step = 0.01, category = "User Element")]
+    pub user_p14: f32,
+    /// User element: parameter 15, handed to the hooks as `params[15]`.
+    #[property(min = -1000.0, max = 1000.0, step = 0.01, category = "User Element")]
+    pub user_p15: f32,
 }
 
 impl Default for LensElementProps {
@@ -861,7 +979,7 @@ impl Default for LensElementProps {
             mask_offset_u: 0.0,
             mask_offset_v: 0.0,
             mask_tile: false,
-            power_dpt: 1.0,
+            focus_m: 1.0,
             seam_darkening: 0.0,
             mount_distance_m: 0.0,
             extra_blur_px: 12.0,
@@ -982,6 +1100,28 @@ impl Default for LensElementProps {
             dirt_radius: 0.0,
             dirt_loss: 0.1,
             dirt_tail: 0.0,
+            prescription_lens: LensPrescriptionChoice::DoubleGauss50F2,
+            psf_amount: 1.0,
+            user_map: false,
+            user_transmission: false,
+            user_focus: false,
+            user_spectral: false,
+            user_p0: 0.0,
+            user_p1: 0.0,
+            user_p2: 0.0,
+            user_p3: 0.0,
+            user_p4: 0.0,
+            user_p5: 0.0,
+            user_p6: 0.0,
+            user_p7: 0.0,
+            user_p8: 0.0,
+            user_p9: 0.0,
+            user_p10: 0.0,
+            user_p11: 0.0,
+            user_p12: 0.0,
+            user_p13: 0.0,
+            user_p14: 0.0,
+            user_p15: 0.0,
         }
     }
 }
@@ -991,7 +1131,7 @@ impl LensElementProps {
     pub fn from_preset(element: &PresetElement) -> Self {
         let mut props = Self {
             kind: element.kind,
-            power_dpt: if element.kind == LensElementKind::Diopter {
+            focus_m: if element.kind == LensElementKind::Diopter {
                 element.amount
             } else {
                 0.0
@@ -1033,6 +1173,15 @@ impl LensElementProps {
             tune(&mut props);
         }
         props
+    }
+
+    /// The 16 parameters of a user element, in order.
+    fn user_params(&self) -> [f32; 16] {
+        [
+            self.user_p0, self.user_p1, self.user_p2, self.user_p3, self.user_p4, self.user_p5,
+            self.user_p6, self.user_p7, self.user_p8, self.user_p9, self.user_p10, self.user_p11,
+            self.user_p12, self.user_p13, self.user_p14, self.user_p15,
+        ]
     }
 
     fn region(&self) -> ([[f32; 2]; 4], usize) {
@@ -1078,7 +1227,7 @@ impl LensElementProps {
         };
         let mut row = match self.kind {
             LensElementKind::Diopter => {
-                let mut row = LensElementComponent::diopter(self.power_dpt, region)
+                let mut row = LensElementComponent::diopter(self.focus_m, region)
                     .with_seam_darkening(self.seam_darkening);
                 if self.mount_distance_m > 0.0 {
                     row = row.with_mount_distance(self.mount_distance_m);
@@ -1333,6 +1482,22 @@ impl LensElementProps {
                 row.params[dirt::TAIL] = self.dirt_tail;
                 row
             }
+            LensElementKind::Prescription => {
+                LensElementComponent::prescription(self.prescription_lens.layer(), region)
+                    .with_psf_amount(self.psf_amount)
+            }
+            LensElementKind::User => {
+                let hooks = [
+                    (self.user_map, user::MAP),
+                    (self.user_transmission, user::TRANSMISSION),
+                    (self.user_focus, user::FOCUS),
+                    (self.user_spectral, user::SPECTRAL),
+                ]
+                .into_iter()
+                .filter(|(on, _)| *on)
+                .fold(0, |hooks, (_, bit)| hooks | bit);
+                LensElementComponent::user(hooks, self.user_params(), region)
+            }
         };
         if self.shape == LensRegionShape::Mask {
             row = row.with_mask_transform(
@@ -1367,7 +1532,7 @@ pub type RegisteredLensElementProps = LensElementProps;
 fn kind_fields(kind: LensElementKind) -> &'static [&'static str] {
     use LensElementKind as K;
     match kind {
-        K::Diopter => &["power_dpt", "seam_darkening", "mount_distance_m"],
+        K::Diopter => &["focus_m", "seam_darkening", "mount_distance_m"],
         K::SweetSpot => &["extra_blur_px"],
         K::Pupil => &[
             "inherit_iris",
@@ -1490,6 +1655,16 @@ fn kind_fields(kind: LensElementKind) -> &'static [&'static str] {
         K::WaterDrops => &["drops_refraction", "drops_normal_layer", "drops_defocus"],
         K::Smear => &["smear_strength", "smear_length", "smear_angle_deg"],
         K::Dirt => &["dirt_strength", "dirt_radius", "dirt_loss", "dirt_tail"],
+        K::Prescription => &["prescription_lens", "psf_amount"],
+        K::User => &[
+            "user_map",
+            "user_transmission",
+            "user_focus",
+            "user_spectral",
+            "user_p0", "user_p1", "user_p2", "user_p3", "user_p4", "user_p5",
+            "user_p6", "user_p7", "user_p8", "user_p9", "user_p10", "user_p11",
+            "user_p12", "user_p13", "user_p14", "user_p15",
+        ],
     }
 }
 
@@ -1573,6 +1748,7 @@ lens_enum! {
         StarFilter6pt,
         FilmHalation,
         GradNd3Stop,
+        DoubleGauss50mmF2Traced,
     }
 }
 
@@ -1597,9 +1773,9 @@ pub enum PresetRegion {
     Mask { layer: u32, channel: u32 },
 }
 
-/// One element of a preset: `amount` is dioptres for a diopter and pixels
-/// of extra defocus for a sweet spot; `tune` sets any other field of the
-/// element (every kind added since is configured there).
+/// One element of a preset: `amount` is the sharp distance in metres for a
+/// diopter and pixels of extra defocus for a sweet spot; `tune` sets any
+/// other field of the element (every kind added since is configured there).
 #[derive(Clone, Copy, Debug)]
 pub struct PresetElement {
     pub kind: LensElementKind,
@@ -1627,11 +1803,11 @@ pub struct LensPresetData {
     pub elements: &'static [PresetElement],
 }
 
-const fn diopter(power_dpt: f32, region: PresetRegion) -> PresetElement {
+const fn diopter(focus_m: f32, region: PresetRegion) -> PresetElement {
     PresetElement {
         kind: LensElementKind::Diopter,
         region,
-        amount: power_dpt,
+        amount: focus_m,
         feather: None,
         seam_darkening: 0.15,
         tune: None,
@@ -1657,9 +1833,9 @@ const fn tuned(
 
 const FULL: PresetRegion = PresetRegion::FullFrame;
 
-/// The named presets. A split diopter adds `D` dioptres where it covers:
-/// a lens focused at `s` then focuses at `s'` with `1/s' = 1/s + D`, so
-/// +1 D at a 3 m base focus brings that part of the frame to 0.75 m.
+/// The named presets. A split diopter names the distance its part of the
+/// frame is sharp at; the pass gives it the power `D = 1/s' - 1/s` that
+/// takes the lens's focus `s` there.
 pub const LENS_PRESETS: &[LensPresetData] = &[
     LensPresetData {
         preset: LensPreset::Standard50mmF2_8,
@@ -1697,7 +1873,7 @@ pub const LENS_PRESETS: &[LensPresetData] = &[
         field_curvature_dpt: 0.0,
         focus_distance_m: Some(4.0),
         elements: &[diopter(
-            1.5,
+            0.6,
             PresetRegion::HalfPlane { angle_deg: 0.0, offset: 0.0 },
         )],
     },
@@ -1714,11 +1890,11 @@ pub const LENS_PRESETS: &[LensPresetData] = &[
         focus_distance_m: Some(6.0),
         elements: &[
             diopter(
-                2.0,
+                0.5,
                 PresetRegion::HalfPlane { angle_deg: 180.0, offset: 0.3 },
             ),
             diopter(
-                0.75,
+                1.1,
                 PresetRegion::HalfPlane { angle_deg: 0.0, offset: 0.3 },
             ),
         ],
@@ -1958,6 +2134,24 @@ pub const LENS_PRESETS: &[LensPresetData] = &[
             p.grad_nd_softness = 0.3;
         })],
     },
+    // The bundled double Gauss over the whole frame: its barrel distortion,
+    // lateral colour, vignetting at the stop, cat's-eye bokeh, field curvature
+    // and point spread are traced, and its focal length is the lens's.
+    LensPresetData {
+        preset: LensPreset::DoubleGauss50mmF2Traced,
+        name: "Double Gauss 50mm f/2 (traced)",
+        focal_length_mm: 50.0,
+        f_number: 2.0,
+        aperture_blades: 9,
+        tilt_deg: 0.0,
+        tilt_axis_deg: 0.0,
+        field_curvature_dpt: 0.0,
+        focus_distance_m: None,
+        elements: &[tuned(LensElementKind::Prescription, FULL, |p| {
+            p.prescription_lens = LensPrescriptionChoice::DoubleGauss50F2;
+            p.psf_amount = 1.0;
+        })],
+    },
 ];
 
 /// A camera's lens (authored).
@@ -2183,12 +2377,16 @@ pulsar_reflection::inventory::submit! {
 }
 
 /// Where each lens's element block lives in `lens_elements`: blocks of
-/// [`LENS_ELEMENT_SLOTS`] rows from a free list, per GPU store.
+/// [`LENS_ELEMENT_SLOTS`] rows from a free list, per GPU store. It also holds
+/// what the lens's overscan was derived for, see [`camera_lens_view_overscan`].
 #[derive(Default)]
 struct ElementBlocks {
     next: u32,
     free: Vec<u32>,
     by_lens_row: HashMap<u32, u32>,
+    /// By lens row: the image aspect the row's overscan was last derived for,
+    /// and that overscan.
+    overscan: HashMap<u32, (f32, f32)>,
 }
 
 impl ElementBlocks {
@@ -2206,6 +2404,7 @@ impl ElementBlocks {
     }
 
     fn release(&mut self, lens_row: u32) -> Option<u32> {
+        self.overscan.remove(&lens_row);
         let block = self.by_lens_row.remove(&lens_row)?;
         self.free.push(block);
         Some(block)
@@ -2224,9 +2423,15 @@ fn camera_lens_dispatch(mirror: &GpuMirrorHandle, row: u32, data: *const (), is_
     // SAFETY: SceneDB reaches this only through `CameraLensComponent`'s own
     // `ComponentId`, with a pointer to a live value.
     let authored = unsafe { &*(data as *const CameraLensComponent) };
-    let block = with_blocks(mirror, |blocks| blocks.block_of(row));
+    let (block, aspect) = with_blocks(mirror, |blocks| {
+        let aspect = blocks.overscan.get(&row).map_or(DEFAULT_ASPECT, |(aspect, _)| *aspect);
+        (blocks.block_of(row), aspect)
+    });
     let first = block * LENS_ELEMENT_SLOTS as u32;
-    let (lens, elements) = authored.to_rows(first);
+    let (mut lens, elements) = authored.to_rows(first);
+    // The camera widens its view by this much; the row tells the pass.
+    lens.overscan = overscan_of(&lens, &elements, aspect);
+    with_blocks(mirror, |blocks| blocks.overscan.insert(row, (aspect, lens.overscan)));
     pulsar_scenedb::gpu::write_derived_row(
         mirror,
         row,
@@ -2236,6 +2441,68 @@ fn camera_lens_dispatch(mirror: &GpuMirrorHandle, row: u32, data: *const (), is_
     for (slot, element) in elements.iter().enumerate() {
         pulsar_scenedb::gpu::write_derived_row(mirror, first + slot as u32, element, is_new_insert);
     }
+}
+
+/// The image aspect a lens row is derived for until the host says another
+/// ([`camera_lens_view_overscan`]).
+const DEFAULT_ASPECT: f32 = 16.0 / 9.0;
+
+/// The overscan a camera applies for the lens `row` with its `elements` on an
+/// image of the given width over height. The bundled prescriptions' ray maps
+/// are traced on first use (a lens with a `Prescription` element waits for
+/// that once, in the background of the first frames if the renderer started
+/// them, else here).
+fn overscan_of(row: &LensComponent, elements: &[LensElementComponent], aspect: f32) -> f32 {
+    let count = (row.element_count as usize).min(elements.len());
+    let elements = &elements[..count];
+    let rays = if elements.iter().any(|e| e.kind == element_kind::PRESCRIPTION) {
+        bundled_rays()
+    } else {
+        &[]
+    };
+    applied_overscan(row, elements, aspect, rays)
+}
+
+/// The overscan the camera of render view `view_id` applies, for an image of
+/// the given width over height: the factor to widen the projection's tangent
+/// extent by (`helio::Camera::with_overscan`) so the view's lens, which maps
+/// beyond the frame (a fisheye, a barrel distortion), reads real pixels
+/// instead of the clamped edge. 1 for a view without an enabled lens, with a
+/// lens that stays inside the frame, or on a world with no GPU mirror.
+///
+/// It also gives the lens pass the same factor, in the lens's GPU row, so the
+/// pass crops the wider image back to the frame: call it once per frame,
+/// before the world's GPU mirror is flushed and the frame rendered, and use
+/// the result for that frame's camera. The overscan depends on the aspect
+/// (the lens's field of view follows the sensor width across the image), so
+/// the row is rewritten when the aspect changes. Renderers that share a view
+/// id and a world but not an aspect (an editor viewport and a play-in-editor
+/// window) take turns: each must call it right before its own frame.
+pub fn camera_lens_view_overscan(world: &pulsar_scenedb::World, view_id: u32, aspect: f32) -> f32 {
+    let Some(mirror) = world.gpu_mirror() else {
+        return 1.0;
+    };
+    // The pass reads the lowest enabled row of the view.
+    let Some((instance, _, lens)) = pulsar_scene_model::attachments::enabled_components::<CameraLensComponent>(world)
+        .filter(|(_, _, lens)| lens.enabled && lens.view_id == view_id)
+        .min_by_key(|(instance, _, _)| instance.index())
+    else {
+        return 1.0;
+    };
+    let aspect = if aspect.is_finite() && aspect > 0.0 { aspect } else { DEFAULT_ASPECT };
+    let row = instance.index();
+    let cached = |blocks: &mut ElementBlocks| blocks.overscan.get(&row).copied();
+    if let Some((cached_aspect, overscan)) = with_blocks(mirror, cached) {
+        if cached_aspect == aspect {
+            return overscan;
+        }
+    }
+    with_blocks(mirror, |blocks| {
+        let overscan = blocks.overscan.get(&row).map_or(1.0, |(_, overscan)| *overscan);
+        blocks.overscan.insert(row, (aspect, overscan));
+    });
+    camera_lens_dispatch(mirror, row, lens as *const CameraLensComponent as *const (), false);
+    with_blocks(mirror, cached).map_or(1.0, |(_, overscan)| overscan)
 }
 
 fn camera_lens_clear(mirror: &GpuMirrorHandle, row: u32) {
@@ -2450,27 +2717,24 @@ mod tests {
                 "Star filter 6pt",
                 "Film halation",
                 "Grad ND 3-stop",
+                "Double Gauss 50mm f/2 (traced)",
             ]
         );
     }
 
     #[test]
-    fn split_diopters_follow_the_thin_lens_focus_sum() {
-        // 1/s' = 1/s + D.
-        let focus = |s: f32, d: f32| 1.0 / (1.0 / s + d);
+    fn split_diopters_name_the_distance_they_bring_into_focus() {
         let two = LensPreset::SplitDiopter2Way.data().unwrap();
         assert_eq!(two.elements.len(), 1);
-        let near = focus(two.focus_distance_m.unwrap(), two.elements[0].amount);
-        assert!((near - 4.0 / (1.0 + 4.0 * 1.5)).abs() < 1e-5);
-        assert!(near < two.focus_distance_m.unwrap(), "positive power focuses nearer");
+        let near = two.elements[0].amount;
+        assert!(near < two.focus_distance_m.unwrap(), "the diopter half is the near one");
+        let lens = CameraLensComponent { preset: LensPreset::SplitDiopter2Way, ..Default::default() };
+        assert_eq!(lens.to_rows(0).1[0].params[0], near, "the row carries the distance");
 
         let three = LensPreset::SplitDiopter3Way.data().unwrap();
         assert_eq!(three.elements.len(), 2);
         let base = three.focus_distance_m.unwrap();
-        let (left, right) = (
-            focus(base, three.elements[0].amount),
-            focus(base, three.elements[1].amount),
-        );
+        let (left, right) = (three.elements[0].amount, three.elements[1].amount);
         assert!(left < right && right < base, "three distinct focus zones");
         // Left covers x < -0.3, right x > 0.3 (half planes at 180 and 0 deg).
         let angles: Vec<f32> = three
@@ -2591,7 +2855,7 @@ mod tests {
             k::ND_FILTER, k::GRADUATED_ND, k::COLOR_FILTER, k::T_STOP_LOSS, k::SPHERICAL_GLOW,
             k::COMA, k::ASTIGMATISM, k::CORNER_SOFTNESS, k::DIFFUSION, k::PRO_MIST,
             k::BLACK_PRO_MIST, k::GLIMMERGLASS, k::STAR_FILTER, k::HALATION, k::WATER_DROPS,
-            k::SMEAR, k::FOG, k::DIRT,
+            k::SMEAR, k::FOG, k::DIRT, k::PRESCRIPTION, k::USER,
         ];
         assert_eq!(LensElementKind::ALL.len(), expected.len());
         for (kind, id) in LensElementKind::ALL.iter().zip(expected) {
@@ -2935,7 +3199,7 @@ mod tests {
             "quality": 1,
             "f_number": 4.0,
             "elements": [
-                { "kind": "Diopter", "power_dpt": 1.5, "shape": "HalfPlane", "angle_deg": 90.0 },
+                { "kind": "Diopter", "focus_m": 1.5, "shape": "HalfPlane", "angle_deg": 90.0 },
                 { "kind": 2, "squeeze": 1.8, "shape": 0, "blades": 9, "inherit_iris": false },
                 { "kind": "SweetSpot", "shape": "Ellipse", "extra_blur_px": 20.0 },
                 { "kind": "LongitudinalCa", "red_shift_dpt": -0.1 }
@@ -2972,6 +3236,86 @@ mod tests {
         }
         assert_eq!(find("bc_k1").category, Some("Distortion"));
         assert_eq!(find("diffusion_strength").category, Some("Diffusion"));
+    }
+
+    #[test]
+    fn a_prescription_names_its_bundled_lens_layer_and_scales_its_point_spread() {
+        // The editor's choices are the bank's layers, in order.
+        assert_eq!(LensPrescriptionChoice::ALL.len(), BundledLens::ALL.len());
+        for (choice, lens) in LensPrescriptionChoice::ALL.iter().zip(BundledLens::ALL) {
+            assert_eq!(choice.bundled(), lens);
+            assert_eq!(format!("{choice:?}"), format!("{lens:?}"));
+            let row = row_of(LensElementKind::Prescription, |p| p.prescription_lens = *choice);
+            assert_eq!(row.kind, element_kind::PRESCRIPTION);
+            assert_eq!(row.params[helio_pass_lens::prescription::LAYER], lens.layer() as f32);
+        }
+        let row = row_of(LensElementKind::Prescription, |p| p.psf_amount = 0.4);
+        assert_eq!(row.params[helio_pass_lens::prescription::PSF_AMOUNT], 0.4);
+        // The default is the double Gauss at full strength, as the preset.
+        let row = row_of(LensElementKind::Prescription, |_| {});
+        assert_eq!(row.params[helio_pass_lens::prescription::LAYER], 2.0);
+        assert_eq!(row.params[helio_pass_lens::prescription::PSF_AMOUNT], 1.0);
+        // Over a region, like every element.
+        let row = row_of(LensElementKind::Prescription, |p| p.shape = LensRegionShape::Ellipse);
+        assert_eq!(row.region_kind, region_kind::ELLIPSE);
+    }
+
+    #[test]
+    fn a_user_element_carries_its_hooks_and_all_sixteen_parameters() {
+        let row = row_of(LensElementKind::User, |_| {});
+        assert_eq!((row.kind, row.flags), (element_kind::USER, 0), "no hook selected is inert");
+        let row = row_of(LensElementKind::User, |p| {
+            p.user_map = true;
+            p.user_focus = true;
+            p.user_p0 = 1.5;
+            p.user_p7 = -2.0;
+            p.user_p15 = 9.0;
+        });
+        assert_eq!(row.flags, user::MAP | user::FOCUS);
+        assert_eq!((row.params[0], row.params[7], row.params[15]), (1.5, -2.0, 9.0));
+        assert_eq!(row.params[1], 0.0);
+        let row = row_of(LensElementKind::User, |p| {
+            (p.user_map, p.user_transmission, p.user_focus, p.user_spectral) = (true, true, true, true)
+        });
+        assert_eq!(row.flags, user::MAP | user::TRANSMISSION | user::FOCUS | user::SPECTRAL);
+    }
+
+    #[test]
+    fn the_traced_preset_is_a_full_frame_prescription_of_the_double_gauss() {
+        let mut lens = CameraLensComponent::default();
+        lens.preset = LensPreset::DoubleGauss50mmF2Traced;
+        let (row, elements) = lens.to_rows(0);
+        assert_eq!((row.focal_length_mm, row.f_number, row.element_count), (50.0, 2.0, 1));
+        assert_eq!(elements[0].kind, element_kind::PRESCRIPTION);
+        assert_eq!(elements[0].region_kind, region_kind::FULL_FRAME);
+        assert_eq!(elements[0].params[helio_pass_lens::prescription::LAYER], 2.0);
+    }
+
+    #[test]
+    fn a_lens_that_maps_past_the_frame_asks_for_overscan_by_its_rows() {
+        let overscan = |preset: LensPreset, aspect: f32| {
+            let mut lens = CameraLensComponent::default();
+            lens.preset = preset;
+            let (row, elements) = lens.to_rows(0);
+            overscan_of(&row, &elements, aspect)
+        };
+        assert_eq!(overscan(LensPreset::Standard50mmF2_8, 16.0 / 9.0), 1.0);
+        assert_eq!(overscan(LensPreset::ProMistQuarter, 16.0 / 9.0), 1.0);
+        // An 8 mm equidistant fisheye reaches far past any frame: capped.
+        assert_eq!(overscan(LensPreset::Fisheye8mm, 1.5), helio_pass_lens::ray_map::APPLIED_OVERSCAN_CAP);
+        // The traced double Gauss has barrel distortion at the corners, and
+        // the reach follows the aspect (the sensor width spans the image, so
+        // a wider image has a narrower view and its corners angle less).
+        let square = overscan(LensPreset::DoubleGauss50mmF2Traced, 1.0);
+        let wide = overscan(LensPreset::DoubleGauss50mmF2Traced, 16.0 / 9.0);
+        assert!(square > 1.0 && wide > 1.0, "{square} {wide}");
+        assert!(wide < square, "a wider image has a narrower view: {wide} vs {square}");
+        // A disabled lens asks for none.
+        let mut lens = CameraLensComponent::default();
+        lens.preset = LensPreset::Fisheye8mm;
+        lens.enabled = false;
+        let (row, elements) = lens.to_rows(0);
+        assert_eq!(overscan_of(&row, &elements, 1.5), 1.0);
     }
 
     #[test]

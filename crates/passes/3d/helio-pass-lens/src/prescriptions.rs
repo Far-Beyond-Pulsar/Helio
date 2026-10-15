@@ -251,6 +251,7 @@ pub struct PrescriptionBank {
     buffer: wgpu::Buffer,
     efl_mm: Vec<f32>,
     f_min: Vec<f32>,
+    rays: Vec<PrescriptionRays>,
 }
 
 impl PrescriptionBank {
@@ -270,6 +271,7 @@ impl PrescriptionBank {
             buffer,
             efl_mm: (0..bakes.len()).map(|l| header(l, word::EFL)).collect(),
             f_min: (0..bakes.len()).map(|l| header(l, word::F_MIN)).collect(),
+            rays: (0..bakes.len()).map(|l| PrescriptionRays::from_words(&words, l)).collect(),
         }
     }
 
@@ -289,4 +291,108 @@ impl PrescriptionBank {
     /// The widest aperture `layer` was baked at: a full-frame element keeps the
     /// view's f-number at or above it.
     pub fn min_f_number(&self, layer: usize) -> f32 { self.f_min[layer] }
+
+    /// The CPU copy of the layers' ray maps, for [`crate::ray_map::RayMap::with_rays`].
+    pub fn rays(&self) -> &[PrescriptionRays] { &self.rays }
+}
+
+/// The ray map of one bank layer, kept on the CPU: what `lens.wgsl`'s `rx_map`
+/// reads, so [`crate::ray_map::RayMap`] can reach the same scene positions
+/// the shader does (chiefly for the overscan a camera renders).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrescriptionRays {
+    efl_mm: f32,
+    f_min: f32,
+    half_diagonal_mm: f32,
+    n_field: usize,
+    wavelengths_nm: Vec<f32>,
+    /// `tan_theta[wave * n_field + field]`.
+    tan_theta: Vec<f32>,
+}
+
+fn mix(a: f32, b: f32, t: f32) -> f32 {
+    a * (1.0 - t) + b * t
+}
+
+impl PrescriptionRays {
+    /// Reads layer `layer` of packed `words` (see [`pack`]).
+    fn from_words(words: &[u32], layer: usize) -> Self {
+        let h = words[1 + layer] as usize;
+        let f = |slot: usize| f32::from_bits(words[h + slot]);
+        let table = |slot: usize, len: usize| {
+            let at = words[h + slot] as usize;
+            words[at..at + len].iter().map(|&w| f32::from_bits(w)).collect::<Vec<_>>()
+        };
+        let n_field = words[h + word::RAY_FIELDS] as usize;
+        let n_wave = words[h + word::RAY_WAVES] as usize;
+        Self {
+            efl_mm: f(word::EFL),
+            f_min: f(word::F_MIN),
+            half_diagonal_mm: f(word::HALF_DIAGONAL),
+            n_field,
+            wavelengths_nm: table(word::RAY_WAVELENGTHS, n_wave),
+            tan_theta: table(word::RAY_TAN, n_wave * n_field),
+        }
+    }
+
+    /// Effective focal length (mm), see [`PrescriptionBank::efl_mm`].
+    pub fn efl_mm(&self) -> f32 { self.efl_mm }
+
+    /// The widest aperture the layer was baked at, see
+    /// [`PrescriptionBank::min_f_number`].
+    pub fn min_f_number(&self) -> f32 { self.f_min }
+
+    /// `rx_bracket`: the lower index and the fraction to the next entry of an
+    /// ascending list, clamped to the ends.
+    fn bracket(list: &[f32], x: f32) -> (usize, f32) {
+        let n = list.len();
+        let mut lower = 0;
+        for (k, &entry) in list.iter().enumerate().take(n.saturating_sub(1)).skip(1) {
+            if entry <= x {
+                lower = k;
+            }
+        }
+        if n < 2 {
+            return (0, 0.0);
+        }
+        (lower, ((x - list[lower]) / (list[lower + 1] - list[lower]).max(1.0e-6)).clamp(0.0, 1.0))
+    }
+
+    /// `rx_tan`: `tan(theta)` of the scene ray the normalised sensor radius `r`
+    /// looks at, for the wavelength position `t` (-1 blue .. 1 red); linear in
+    /// the field, continued with the corner's slope beyond it.
+    fn tan(&self, r: f32, t: f32) -> f32 {
+        let nf = self.n_field;
+        let p = r.max(0.0) * (nf - 1) as f32;
+        let i0 = (p.floor() as usize).min(nf - 2);
+        let f = p - i0 as f32;
+        let (k0, wf) = Self::bracket(&self.wavelengths_nm, 550.0 + 150.0 * t);
+        let row = |k: usize| {
+            let a = k * nf + i0;
+            mix(self.tan_theta[a], self.tan_theta[a + 1], f)
+        };
+        let mut tan_theta = row(k0);
+        if wf > 0.0 {
+            tan_theta = mix(tan_theta, row(k0 + 1), wf);
+        }
+        tan_theta
+    }
+
+    /// `rx_map`: the scene position, in focal-length units, the sensor point
+    /// `x` looks at when the view's focal length is `focal_mm`.
+    pub(crate) fn map(&self, x: [f32; 2], t: f32, focal_mm: f32) -> [f32; 2] {
+        let len = (x[0] * x[0] + x[1] * x[1]).sqrt();
+        if len < 1.0e-6 {
+            let k = focal_mm / self.efl_mm;
+            return [x[0] * k, x[1] * k];
+        }
+        let k = self.tan(len * focal_mm / self.half_diagonal_mm, t) / len;
+        [x[0] * k, x[1] * k]
+    }
+}
+
+/// The CPU ray maps of `bakes`, one per layer, as a bank of them would hold.
+pub fn pack_rays(bakes: &[&LensBake]) -> Vec<PrescriptionRays> {
+    let words = pack(bakes);
+    (0..bakes.len()).map(|layer| PrescriptionRays::from_words(&words, layer)).collect()
 }

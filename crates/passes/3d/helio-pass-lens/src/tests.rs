@@ -326,8 +326,10 @@ fn component_rows_have_the_wgsl_strides() {
     assert_eq!(std::mem::offset_of!(LensElementComponent, feather), 16);
     assert_eq!(std::mem::offset_of!(LensElementComponent, params), 32);
     assert_eq!(std::mem::offset_of!(LensElementComponent, region), 96);
-    assert_eq!(std::mem::size_of::<ResolvedLens>(), 84);
+    assert_eq!(std::mem::size_of::<ResolvedLens>(), 88);
     assert_eq!(std::mem::offset_of!(ResolvedLens, aberration_flags), 80);
+    assert_eq!(std::mem::offset_of!(ResolvedLens, overscan), 84);
+    assert_eq!(std::mem::offset_of!(LensComponent, overscan), 88);
     assert_eq!(std::mem::offset_of!(ResolvedLens, natural_vignette), 20);
     assert_eq!(std::mem::offset_of!(ResolvedLens, required_overscan), 68);
     // A zero row is inert: never enabled, no element kind.
@@ -589,9 +591,8 @@ fn split_diopter_focuses_each_half_and_the_seam_follows_the_aperture() {
     // carrying fine detail. The lens focuses 6 m; a diopter over the left
     // half brings the focus to 2 m there.
     let scene = Scene::new(Scene::checker, |x, _| if x < SIZE / 2 { 2.0 } else { 6.0 });
-    let power = 1.0 / 2.0 - 1.0 / 6.0;
     let diopter = LensElementComponent::diopter(
-        power,
+        2.0,
         LensRegion::HalfPlane { angle: std::f32::consts::PI, offset: 0.0 },
     )
     .with_mount_distance(0.5);
@@ -646,27 +647,76 @@ fn split_diopter_focuses_each_half_and_the_seam_follows_the_aperture() {
 }
 
 #[test]
+fn a_diopter_region_blurs_each_pixel_by_its_own_depth() {
+    let mut rig = Rig::new();
+    // Inside the diopter (the left half): rows at 2 m, 6 m and 0.8 m. The
+    // diopter brings 2 m into focus there, so only the 2 m rows are sharp and
+    // the others blur by how far each is from 2 m - nearer than 2 m in front,
+    // farther behind - not by a blur the region applies uniformly.
+    let depth = |_: u32, y: u32| match y * 3 / SIZE {
+        0 => 2.0,
+        1 => 6.0,
+        _ => 0.8,
+    };
+    let scene = Scene::new(Scene::checker, depth);
+    let diopter = LensElementComponent::diopter(
+        2.0,
+        LensRegion::HalfPlane { angle: std::f32::consts::PI, offset: 0.0 },
+    )
+    .with_feather(0.004);
+    let mut lens = lens();
+    lens.focal_length_mm = 85.0;
+    lens.f_number = 1.4;
+    lens.focus_distance_m = 6.0;
+    lens.element_count = 1;
+    lens.max_coc_px = 128.0;
+    let (x, rows) = (20, [20, 64, 108]);
+    let width = SIZE as f32;
+    let thin_lens = |s1: f32, s2: f32| {
+        let (f, a) = (85.0e-3, 85.0e-3 / 1.4);
+        a * (s2 - s1).abs() / s2 * f / (s1 - f) / 36.0e-3 * width * (s2 - s1).signum()
+    };
+    for focus in [6.0, 20.0, 1.2] {
+        // The region stays sharp at 2 m wherever the lens itself focuses.
+        lens.focus_distance_m = focus;
+        let frame = rig.record(&scene, Some(&[lens]), Some(&[diopter]));
+        let circles = rows.map(|y| frame.coc(x, y)[0]);
+        assert!(circles[0].abs() < 0.1, "focus {focus}: 2 m row circle {}", circles[0]);
+        for (y, s2) in [(1, 6.0), (2, 0.8)] {
+            let expected = thin_lens(2.0, s2);
+            assert!(
+                (circles[y] - expected).abs() < 0.02 * expected.abs().max(1.0),
+                "focus {focus}: row at {s2} m circle {} expected {expected}",
+                circles[y]
+            );
+        }
+        assert!(circles[1] > 0.0 && circles[2] < 0.0, "behind blurs far, in front near: {circles:?}");
+        // Outside the region the lens's own focus holds.
+        let outside = frame.coc(108, 64)[0];
+        assert!((outside - thin_lens(focus, 6.0)).abs() < 0.02 * thin_lens(focus, 6.0).abs().max(1.0));
+    }
+}
+
+#[test]
 fn diopters_stack_across_many_regions() {
     let mut rig = Rig::new();
-    // Three vertical thirds at 1.5, 3 and 9 m, each focused by the sum of the
-    // diopters covering it.
+    // Three vertical thirds at 1.5, 3 and 9 m; where both diopters cover, the
+    // later one (1.5 m) sets the focus.
     let scene = Scene::new(Scene::checker, |x, _| match x * 3 / SIZE {
         0 => 1.5,
         1 => 3.0,
         _ => 9.0,
     });
-    let to_3m = 1.0 / 3.0 - 1.0 / 9.0;
-    let to_1_5m = 1.0 / 1.5 - 1.0 / 3.0;
     let thirds = [
         // Covers x < 1/6 of the image height right of centre: left and middle.
         LensElementComponent::diopter(
-            to_3m,
+            3.0,
             LensRegion::HalfPlane { angle: std::f32::consts::PI, offset: -1.0 / 6.0 },
         )
         .with_feather(0.004),
         // Covers x < -1/6: the left third, which also has the first.
         LensElementComponent::diopter(
-            to_1_5m,
+            1.5,
             LensRegion::HalfPlane { angle: std::f32::consts::PI, offset: 1.0 / 6.0 },
         )
         .with_feather(0.004),
@@ -702,12 +752,12 @@ fn nested_regions_of_any_shape_focus_independently() {
     });
     let elements = [
         LensElementComponent::diopter(
-            1.0 / 3.0 - 1.0 / 9.0,
+            3.0,
             LensRegion::Ellipse { center: [0.0; 2], radii: [0.33, 0.33], rotation: 0.0 },
         )
         .with_feather(0.004),
         LensElementComponent::diopter(
-            1.0 / 1.5 - 1.0 / 3.0,
+            1.5,
             LensRegion::Polygon(&[[-0.15, -0.15], [0.15, -0.15], [0.15, 0.15], [-0.15, 0.15]]),
         )
         .with_feather(0.004),
@@ -844,7 +894,7 @@ fn seam_darkening_dims_the_diopter_edge() {
     let mut rig = Rig::new();
     let scene = Scene::new(|_, _| [1.0; 3], |x, _| if x < SIZE / 2 { 2.0 } else { 6.0 });
     let diopter = LensElementComponent::diopter(
-        1.0 / 2.0 - 1.0 / 6.0,
+        2.0,
         LensRegion::HalfPlane { angle: std::f32::consts::PI, offset: 0.0 },
     )
     .with_feather(0.1)
@@ -1339,3 +1389,5 @@ fn pupil_element_builders_fill_the_documented_slots() {
 mod optics;
 mod aberration;
 mod prescription;
+mod overscan;
+mod bundled;

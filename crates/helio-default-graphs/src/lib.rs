@@ -940,8 +940,12 @@ fn add_scene_linear_chain(
         }
         SceneAa::None => FOGGED_HDR,
     };
+    // The bundled example lenses, a water-drop mask and a few iris shapes are
+    // the lens elements' registry entries (editors offer them by layer).
     graph.add_pass(Box::new(
-        LensPass::new_with_user(device, width, height, lens_user).with_color_input(resolved),
+        LensPass::new_with_user(device, width, height, lens_user)
+            .with_color_input(resolved)
+            .with_bundled_resources(),
     ));
     graph.add_pass(Box::new(
         LensFlarePass::new_hdr(device, width, height).with_color_input(LENS_COLOR),

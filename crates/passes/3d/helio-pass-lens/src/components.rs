@@ -1047,10 +1047,13 @@ impl LensElementComponent {
         Self::with_region(element_kind::DIRT, params, region)
     }
 
-    /// A split diopter adding `power_dpt` dioptres inside `region`.
-    pub fn diopter(power_dpt: f32, region: LensRegion<'_>) -> Self {
+    /// A split diopter bringing `focus_m` metres into focus inside `region`.
+    /// The pass adds the power that takes the lens's current focus there
+    /// (`1/focus_m - 1/s`), so a focus pull or autofocus keeps the region
+    /// sharp at `focus_m` while every pixel still blurs by its own depth.
+    pub fn diopter(focus_m: f32, region: LensRegion<'_>) -> Self {
         let mut params = [0.0; 16];
-        params[0] = power_dpt;
+        params[0] = focus_m;
         Self::with_region(element_kind::DIOPTER, params, region)
     }
 

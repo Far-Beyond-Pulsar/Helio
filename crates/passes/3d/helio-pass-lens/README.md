@@ -42,9 +42,15 @@ Focus is carried in dioptres so elements add:
   `cos(a) s0 / (cos(a) + sin(a) (axis . d))`.
 - **Field curvature** (Petzval) adds `field_curvature * r^2` dioptres, `r` the
   distance from the centre, 1 at the corner.
-- **Diopter** elements add `params[0]` dioptres where their region covers the
-  pixel. Any number stack: two-way and three-way splits, nested regions, any
-  region shape. Where several cover a pixel their powers sum.
+- **Diopter** elements bring `params[0]` metres into focus where their region
+  covers the pixel. The filter's power is `D = 1/params[0] - 1/s`, taken
+  against this frame's focus `s` (after autofocus and tilt), so a focus pull
+  leaves the region sharp at its distance. It is a focus, not a blur: each
+  covered pixel's circle still comes from its own depth, so only geometry at
+  the diopter's distance is sharp there and nearer or farther geometry blurs
+  by the thin-lens amount. Any number stack: two-way and three-way splits,
+  nested regions, any region shape. Where several cover a pixel the last one
+  sets the focus, as the filter nearest the lens would.
 - **Sweet spot** elements (Lensbaby) leave focus normal inside their region and
   add `params[0]` pixels of defocus outside it, in quadrature with the thin-lens
   circle.
@@ -199,19 +205,60 @@ The map's reach beyond the frame is published as `ResolvedLens::
 required_overscan` (and by `ray_map::required_overscan` on the CPU, from the
 lens row and its elements): the factor, at least 1 and exactly 1 for a map that
 stays inside the frame, by which the scene extent at the frame's boundary
-exceeds the frame's half extent, over the spectrum's ends (`t = −1, 0, 1`) and
+exceeds the frame's half extent, over the spectrum's ends (`t = -1, 0, 1`) and
 every prism copy. It is sampled at 64 boundary points (16 per edge, corners
 included) and capped at 16; a map that folds back inside the frame can reach
 further than its boundary does.
 
-A camera consumes it by widening its field of view's *tangent extent* by this
-factor about the frame centre, rendering that, and handing the lens the wider
-image. The lens does not yet crop or rescale a wider image, so until a camera
-pads the clamp above applies. A CPU consumer (the camera is authored on the CPU)
-builds the lens's `LensComponent` and its `LensElementComponent` stack and calls
-`ray_map::required_overscan(&lens, &stack, aspect)`; it reads breathing from
-`focus_distance_m`, as only the GPU knows the autofocus position. A GPU consumer
-reads `lens_resolved` (a frame late).
+**What a camera does with it.** The camera widens its projection's *tangent
+extent* by the lens's applied overscan `R` about the frame centre
+(`helio::Camera::with_overscan(R)`, which scales the `x` and `y` rows of the
+projection by `1 / R`) and renders that. The pass is told `R` in the lens row
+(`LensComponent::overscan`, 0 reads as 1; the resolved value is
+`ResolvedLens::overscan`) and treats its input as the frame widened by `R`:
+
+- the composite looks the ray map's scene position `s` up at the image position
+  `s / (aspect, 1) / R + 0.5`, so the final framing is unchanged, the centre
+  stays on its pixel, and the corners read real pixels where they used to clamp;
+- everything the pass evaluates *in the scene* uses the frame's coordinates, not
+  the image's: element regions, the focus field and its field radius, the pupil
+  (cat's eye, baked footprints), the map's magnification for the circle of
+  confusion, a USER hook's `uv`, the autofocus point (a position in the frame)
+  and the circle of confusion's pixel size (the sensor is the frame's width, which
+  is `1 / R` of the image's);
+- the aberration stage and the transmission act on the sensor image, which is the
+  frame, and are unchanged.
+
+An overscanned image always takes the mapped path (`MAP_REMAP`), so `R > 1` with no
+ray-map element is a plain crop.
+
+**How much.** `ray_map::applied_overscan(lens, elements, aspect, rays)` is the
+required overscan, snapped to 1 below 1.001 and capped at
+`APPLIED_OVERSCAN_CAP` (2). It is the one number the camera widens by and the
+lens row carries, so compute it once from the authored lens (the editor-side
+`camera_lens_view_overscan` does, see "Overscan" in `.agents/LENS.md` at the repository root). It
+needs the lens's aspect: the lens's field of view follows the sensor width across
+the image, so a wider image has a narrower view and reaches less far. `rays` are
+the CPU ray maps of the bank layers the stack names (`PrescriptionBank::rays`,
+`bundled_rays`; empty: `PRESCRIPTION` elements are inert), so the CPU value
+equals the GPU's for everything but `USER` elements and mask regions, which only
+the GPU runs (a user ray map's reach is not part of the CPU value; if one reaches
+past the frame its host has to widen the camera itself, or accept the clamp).
+
+**Resolution against cost.** The camera renders the same pixel count over the
+wider view, so the final frame has `1 / R` of the pixels per unit of view angle
+at its centre (R = 1.2 loses 17%, 2 halves it). The alternative, scaling the
+render target by `R`, keeps the centre sharp but costs `R^2` in every pass and
+resizes every pass's targets whenever an authored lens changes, a hitch on each
+inspector edit. The cap of 2 bounds the loss at a half; a map that reaches further
+(an 8 mm fisheye reaches 16) still clamps at the widened image's edge, as it did
+at the frame's. Only lenses that look past the frame pay: a lens that stays
+inside has `R = 1` and the camera and image are untouched, bit for bit.
+
+Post-lens passes that draw in screen space (editor gizmos, debug lines, the
+flare pass's analytic sources and its depth test) still use the widened camera,
+so they sit where an unwidened camera would not put them; lens flare sources
+under overscan are approximate.
 
 ### Transmission
 
@@ -400,6 +447,28 @@ winding), radial band `{r0, r1, centre}`. A mask-texture channel
 (see Masks above) covers nothing until a mask array is bound. `LensRegion`
 builds the rows.
 
+### Bundled resources
+
+A host that authors no lens data of its own calls `LensPass::with_bundled_resources()`
+(the default graphs do) and gets, as the registry entries above:
+
+| Entry | Contents |
+| --- | --- |
+| `lens_prescriptions` | the three example lenses of `helio-lens-optics`, baked with the default `BakeConfig`, layers in `BundledLens` order: `ThinLens50F2` (0), `CookeTriplet50F5` (1), `DoubleGauss50F2` (2). Append new lenses, never reorder: levels store the layer |
+| `lens_masks` | one layer (`WATER_DROP_MASK_LAYER`, 0): 70 water drops of 0.8-3.5% of the width on 512 x 512, normals in red/green, footprint in alpha (`water_drop_mask`, seed 7), what the "Rainy lens" preset reads |
+| `lens_aperture_shapes` | `BundledAperture` layers on 128 x 128: `Star` (0), `Heart` (1), `Triangle` (2), for `pupil` `TEXTURE_LAYER` |
+
+The lenses are traced once per process on a background thread
+(`start_baking`, shared by every pass and by `bundled_rays`, the CPU ray maps the
+overscan needs) and the bank is uploaded when they are done, so renderer start is
+not held: until then a `PRESCRIPTION` element covers nothing. Bake time on the
+reference machine: about 0.8 s optimized, 2.1 s unoptimized (the root workspace
+builds `helio-lens-optics` optimized in dev). The masks and shapes are made on
+the first frame. The entries are published before the passes run
+(`publish_frame_inputs`), so the first frames after a bake finishes already see
+the bank. A host with its own data skips the call and registers its own under the
+same keys.
+
 ## Settings
 
 Two packed SceneDB components, read straight from GPU memory:
@@ -422,6 +491,7 @@ The lens is owned by the camera. Post-process volumes do not blend it.
 | `element_first`, `element_count` | The element rows |
 | `tilt_angle`, `tilt_axis`, `field_curvature` | Focus field |
 | `aperture_blades`, `aperture_rotation` | Iris: the base pupil polygon of the gather, and the flare's |
+| `overscan` | The factor the camera widened the field of view by (0 or 1: none, at most 2); see Overscan |
 
 Autofocus averages a grid of depth taps in dioptres, eases in dioptres at
 `af_speed`, and holds its last focus when the point sees only sky.
@@ -475,9 +545,9 @@ FogCompositePass -> Transparent -> TSR/FXAA -> LensPass -> LensFlarePass -> Post
   resolution while colour is at output resolution after TSR upscaling.
 - Writes `lens_color`: Rgba16Float, scene-linear, the size of its input.
   `LensFlarePass` and `PostProcessPass` read it.
-- Publishes `lens_resolved`: a storage buffer holding one `ResolvedLens` (84
+- Publishes `lens_resolved`: a storage buffer holding one `ResolvedLens` (88
   bytes: the optics, `natural_vignette`, `required_overscan`, `map_flags`,
-  `spectral_samples`, then `aberration_flags`, appended in phase 4 behind the
+  `spectral_samples`, then `aberration_flags` and `overscan`, appended behind the
   fields other passes read). It
   holds the neutral 50 mm f/2.8, 36 mm, six-blade lens when the view has none, so
   consumers always have optics. `LensFlarePass` takes f-number, focal length,
@@ -498,8 +568,9 @@ FogCompositePass -> Transparent -> TSR/FXAA -> LensPass -> LensFlarePass -> Post
   RGBA8 layers, see `mask_array`. Without it a transparent 1x1 layer is bound.
 - Reads the optional registry entry `lens_prescriptions` (`PRESCRIPTIONS`): the
   storage buffer of a `PrescriptionBank`. Without it a bank of no lenses is bound.
-- `ResolvedLens::map_flags` gains bit 8 (`MAP_PRESCRIPTION`); the struct layout is
-  unchanged (still 84 bytes).
+- `ResolvedLens::map_flags` gains bit 8 (`MAP_PRESCRIPTION`).
+- `LensPass::with_bundled_resources()` registers all three optional entries from
+  the host's side, see "Bundled resources".
 
 ## Limits
 
@@ -533,8 +604,9 @@ FogCompositePass -> Transparent -> TSR/FXAA -> LensPass -> LensFlarePass -> Post
   every other element is one map for all colours. Transmission is evaluated
   from the green wavelength's ray. Analytic flare sources take only the natural
   falloff.
-- Outside the rendered frame the map clamps to the edge pixel; the lens does
-  not yet take an overscanned image (see Overscan).
+- Outside the rendered image the map clamps to the edge pixel. A camera that
+  renders the overscan (see Overscan) leaves that to maps that reach further than
+  the cap of 2.
 - The pupil is evaluated at the gather pixel, not per source, and a `PUPIL`
   region switches at 50% coverage with no blend. Pupil shape detail is limited
   by the half-resolution gather: a disc under about eight pixels across reads
@@ -574,8 +646,8 @@ FogCompositePass -> Transparent -> TSR/FXAA -> LensPass -> LensFlarePass -> Post
   clamping the table (partial). The bake's effective focal length is the
   small-field `y / tan` of an infinity-focused bake; a bake focused closer carries
   the magnified equivalent. The vignetting table's f-numbers must ascend. The CPU
-  twin `ray_map::required_overscan` knows neither `PRESCRIPTION` nor `USER`
-  (the GPU's `lens_resolved` does).
+  twin `ray_map::required_overscan` knows `PRESCRIPTION` only with the bank's rays
+  (`required_overscan_with_rays`) and never `USER` (the GPU's `lens_resolved` does).
 - User elements: the hooks run per pixel per wavelength sample (the ray map), so
   an expensive `user_ray_map` multiplies with the sample count.
 
@@ -666,3 +738,23 @@ apodization, onion rings, the donut hole, purple foreground and green
 background fringes from longitudinal chromatic aberration, a texture aperture
 and the neutral layer, region limiting, and the frame energy of fifteen pupil
 variants at both quality tiers within 3%.
+
+Overscan (`src/tests/overscan.rs`, `src/tests/bundled.rs`, and the CPU/GPU case
+in `src/tests/prescription.rs`): an identity lens, a filter and a disabled lens
+apply none; a 35 mm equidistant fisheye asks for more than 1.05 and an 8 mm one
+is capped at 2 while its required overscan stays above it; the resolved lens
+carries the row's overscan, sanitised (0, below 1, NaN: 1; above the cap: 2); on a
+scene that is a linear function of the scene position, the overscanned fisheye
+matches the CPU twin's scene position at every pixel including the corners
+(within 4e-3), the same lens on an image that is only the frame reads clamped
+corners (error above 3e-2), a bare overscan is a crop to the frame, a bright
+feature at the frame centre keeps its pixel (within a tenth) with and without
+the overscan, the circle of confusion is `1 / R` of the plain image's, and an
+ellipse region sits in the frame, not the image; for the three bundled lenses and
+stacks mixing a division model, a projection and partial prescriptions the CPU
+`required_overscan_with_bank` equals the GPU's within 2e-3; the bundled lenses
+bake in layer order with a 50 mm focal length each and rays equal to the bank's,
+the iris shapes are distinct and inside the pupil, and the water-drop layer is
+deterministic. `helio::Camera::with_overscan` is tested in `camera.rs`: factor 1
+(and NaN) leave the projection bit for bit, a centre point stays on its pixel and
+the old frame's edge moves in by `1 / R`.
