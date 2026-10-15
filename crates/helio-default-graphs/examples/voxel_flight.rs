@@ -177,6 +177,11 @@ impl Flight {
             post.tonemap_exposure = at(0, 1.0);
             post.color_contrast = [at(1, 1.0); 3];
             post.color_saturation = [at(2, 1.0); 3];
+            // `HELIO_VOXEL_FLIGHT_AUTO_EXPOSURE`: metered exposure (the
+            // look's exposure its compensation).
+            if std::env::var_os("HELIO_VOXEL_FLIGHT_AUTO_EXPOSURE").is_some() {
+                post.exposure_mode = helio_pass_postprocess::ExposureMode::Auto;
+            }
             let camera = scene.world.spawn();
             scene.world.insert(camera, helio_pass_postprocess::CameraPostProcessComponent::new(0, &post));
             scene.world.flush_gpu_mirror(&queue);

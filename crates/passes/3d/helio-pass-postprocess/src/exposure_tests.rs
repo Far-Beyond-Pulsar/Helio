@@ -3,6 +3,24 @@ use super::{exposure_groups, PostProcessPass};
 #[test]
 #[ignore = "requires a GPU"]
 fn exposure_reduction_matches_cpu_for_multiple_groups_and_partial_edges() {
+    // `cs_exposure`'s bins: half an EV each from -16, 64 of them; the mean
+    // log2 of the samples between the 10th and 90th percentiles.
+    fn windowed_mean(logs: &[f64]) -> f32 {
+        let mut bins = [0.0f64; 64];
+        for l in logs {
+            bins[(((l + 16.0) / 0.5).clamp(0.0, 63.0)) as usize] += 1.0;
+        }
+        let total: f64 = bins.iter().sum();
+        let (low, high) = (total * 0.1, total * 0.9);
+        let (mut below, mut weight, mut sum) = (0.0, 0.0, 0.0);
+        for (b, n) in bins.iter().enumerate() {
+            let inside = ((below + n).min(high) - below.max(low)).max(0.0);
+            sum += inside * (-16.0 + (b as f64 + 0.5) * 0.5);
+            weight += inside;
+            below += n;
+        }
+        (sum / weight) as f32
+    }
     pollster::block_on(async {
         let instance = wgpu::Instance::new(
             wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
@@ -27,6 +45,16 @@ fn exposure_reduction_matches_cpu_for_multiple_groups_and_partial_edges() {
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -86,19 +114,29 @@ fn exposure_reduction_matches_cpu_for_multiple_groups_and_partial_edges() {
                 })
                 .collect();
             let expected = {
-                let mut sum = 0.0f64;
-                let mut count = 0usize;
+                let mut logs = Vec::new();
                 for y in (0..height).step_by(4) {
                     for x in (0..width).step_by(4) {
                         let i = ((y * width + x) * 4) as usize;
                         let rgb = [pixels[i] as f64, pixels[i + 1] as f64, pixels[i + 2] as f64];
                         let luminance = (0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]) / 255.0;
-                        sum += luminance.max(0.0001).log2();
-                        count += 1;
+                        logs.push(luminance.max(0.00001).log2());
                     }
                 }
-                (sum / count as f64) as f32
+                windowed_mean(&logs)
             };
+            // Geometry everywhere (reversed Z: sky is depth 0).
+            let depth = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Exposure reduction test depth"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let depth_view = depth.create_view(&Default::default());
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Exposure reduction test input"),
                 size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -122,7 +160,7 @@ fn exposure_reduction_matches_cpu_for_multiple_groups_and_partial_edges() {
             let (gx, gy) = exposure_groups(width, height);
             let partials = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Exposure reduction test partials"),
-                size: u64::from(gx) * u64::from(gy) * 8,
+                size: u64::from(gx) * u64::from(gy) * 64 * 4,
                 usage: wgpu::BufferUsages::STORAGE,
                 mapped_at_creation: false,
             });
@@ -143,11 +181,24 @@ fn exposure_reduction_matches_cpu_for_multiple_groups_and_partial_edges() {
                 layout: &layout,
                 entries: &[
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&texture.create_view(&Default::default())) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&depth_view) },
                     wgpu::BindGroupEntry { binding: 11, resource: output.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 15, resource: partials.as_entire_binding() },
                 ],
             });
             let mut encoder = device.create_command_encoder(&Default::default());
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.5), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
             for (pipeline, x, y) in [(&sample, gx, gy), (&reduce, 1, 1)] {
                 let mut pass = encoder.begin_compute_pass(&Default::default());
                 pass.set_pipeline(pipeline);

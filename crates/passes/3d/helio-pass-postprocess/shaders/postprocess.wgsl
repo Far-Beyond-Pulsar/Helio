@@ -513,10 +513,28 @@ fn cs_volume_blend(@builtin(local_invocation_index) lid: u32) {
     blend_output = result;
 }
 
-// ── cs_exposure: unique workgroup partials, then one final reduction ──────────
+// ── cs_exposure: metering histograms, then one windowed mean ─────────────────
+//
+// Every 4th pixel's log2 luminance into a 64-bin histogram (half an EV a bin,
+// -16 to +16) per workgroup; sky and space (nothing drawn: `helio_is_sky`)
+// are not metered: a planet on black is exposed for the planet. The
+// reduction sums the histograms and averages the bins between the 10th and
+// 90th percentiles, so a few specular glints or deep shadows do not swing
+// the exposure (UE's histogram metering).
+
+const EXPOSURE_BINS: u32 = 64u;
+const EXPOSURE_LOG_MIN: f32 = -16.0;
+const EXPOSURE_BIN_EV: f32 = 0.5;
+const EXPOSURE_LOW: f32 = 0.1;
+const EXPOSURE_HIGH: f32 = 0.9;
 
 var<workgroup> wg_sum:   array<f32, 256>;
 var<workgroup> wg_count: array<u32, 256>;
+var<workgroup> wg_hist:  array<atomic<u32>, 64>;
+
+fn exposure_bin(log_luminance: f32) -> u32 {
+    return u32(clamp((log_luminance - EXPOSURE_LOG_MIN) / EXPOSURE_BIN_EV, 0.0, f32(EXPOSURE_BINS - 1u)));
+}
 
 @compute @workgroup_size(16, 16)
 fn cs_exposure(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -524,34 +542,23 @@ fn cs_exposure(@builtin(global_invocation_id) gid: vec3<u32>,
                @builtin(workgroup_id) group: vec3<u32>) {
     let dims = textureDimensions(hdr_input);
     let stride = 4u;
-    var sum_log: f32 = 0.0;
-    var count: u32 = 0u;
+    let lidx = lid.y * 16u + lid.x;
+    if lidx < EXPOSURE_BINS { atomicStore(&wg_hist[lidx], 0u); }
+    workgroupBarrier();
     let pixel = gid.xy * stride;
     if all(pixel < dims) {
-        let col = textureLoad(hdr_input, vec2<i32>(pixel), 0).rgb;
-        sum_log = log2(max(luminance(col), 0.0001));
-        count = 1u;
-    }
-
-    let lidx = lid.y * 16u + lid.x;
-    wg_sum[lidx] = sum_log;
-    wg_count[lidx] = count;
-    workgroupBarrier();
-
-    var reduce_active = 128u;
-    loop {
-        if reduce_active == 0u { break; }
-        if lidx < reduce_active {
-            wg_sum[lidx] += wg_sum[lidx + reduce_active];
-            wg_count[lidx] += wg_count[lidx + reduce_active];
+        let depth_dims = textureDimensions(depth_input);
+        let at = min(pixel * depth_dims / dims, depth_dims - 1u);
+        if !helio_is_sky(textureLoad(depth_input, vec2<i32>(at), 0)) {
+            let col = textureLoad(hdr_input, vec2<i32>(pixel), 0).rgb;
+            atomicAdd(&wg_hist[exposure_bin(log2(max(luminance(col), 0.00001)))], 1u);
         }
-        workgroupBarrier();
-        reduce_active >>= 1u;
     }
-
-    if lidx == 0u {
+    workgroupBarrier();
+    if lidx < EXPOSURE_BINS {
         let groups_x = (dims.x + stride * 16u - 1u) / (stride * 16u);
-        exposure_partials[group.y * groups_x + group.x] = vec2<f32>(wg_sum[0], f32(wg_count[0]));
+        let at = (group.y * groups_x + group.x) * (EXPOSURE_BINS / 2u) + lidx / 2u;
+        exposure_partials[at][lidx & 1u] = f32(atomicLoad(&wg_hist[lidx]));
     }
 }
 
@@ -561,29 +568,37 @@ fn cs_exposure_reduce(@builtin(local_invocation_index) lid: u32) {
     let groups_x = (dims.x + 63u) / 64u;
     let groups_y = (dims.y + 63u) / 64u;
     let partial_count = groups_x * groups_y;
-    var sum_log = 0.0;
-    var count = 0u;
-    for (var index = lid; index < partial_count; index += 256u) {
-        let partial = exposure_partials[index];
-        sum_log += partial.x;
-        count += u32(partial.y);
+    // Bin `lid % 64` over a quarter of the workgroups' histograms.
+    let bin = lid % EXPOSURE_BINS;
+    var count = 0.0;
+    for (var g = lid / EXPOSURE_BINS; g < partial_count; g += 4u) {
+        count += exposure_partials[g * (EXPOSURE_BINS / 2u) + bin / 2u][bin & 1u];
     }
-    wg_sum[lid] = sum_log;
-    wg_count[lid] = count;
+    wg_sum[lid] = count;
     workgroupBarrier();
-    var reduce_active = 128u;
-    loop {
-        if reduce_active == 0u { break; }
-        if lid < reduce_active {
-            wg_sum[lid] += wg_sum[lid + reduce_active];
-            wg_count[lid] += wg_count[lid + reduce_active];
-        }
-        workgroupBarrier();
-        reduce_active >>= 1u;
+    if lid < EXPOSURE_BINS {
+        wg_sum[lid] = wg_sum[lid] + wg_sum[lid + 64u] + wg_sum[lid + 128u] + wg_sum[lid + 192u];
     }
-    if lid == 0u && wg_count[0] > 0u {
-        avg_luminance[0] = wg_sum[0] / f32(wg_count[0]);
+    workgroupBarrier();
+    if lid != 0u { return; }
+    var total = 0.0;
+    for (var b = 0u; b < EXPOSURE_BINS; b++) { total += wg_sum[b]; }
+    // Nothing metered (all sky): the exposure stays where it is.
+    if total < 1.0 { return; }
+    let low = total * EXPOSURE_LOW;
+    let high = total * EXPOSURE_HIGH;
+    var below = 0.0;
+    var weight = 0.0;
+    var sum_log = 0.0;
+    for (var b = 0u; b < EXPOSURE_BINS; b++) {
+        let n = wg_sum[b];
+        // The part of this bin's samples inside [low, high].
+        let inside = max(min(below + n, high) - max(below, low), 0.0);
+        sum_log += inside * (EXPOSURE_LOG_MIN + (f32(b) + 0.5) * EXPOSURE_BIN_EV);
+        weight += inside;
+        below += n;
     }
+    if weight > 0.0 { avg_luminance[0] = sum_log / weight; }
 }
 
 // ── cs_exposure_adapt: exponential eye adaptation in log2 luminance ──────────
@@ -799,41 +814,84 @@ fn sample_lut(c: vec3<f32>) -> vec3<f32> {
     return textureSampleLevel(lut_tex, linear_samp, uv, 0.0).rgb;
 }
 
+// The grading LUT (hue shift, lift/gamma/gain baked over [0, 1]) on
+// display-referred colour, after tone mapping: scene-linear HDR clamped
+// into it would clip every highlight before the tone curve.
 fn apply_lut_grade(color: vec3<f32>) -> vec3<f32> {
-    // Pre-LUT: hue shift
-    var c = hue_shift_rgb(color, postprocess.hue_shift);
-    // Sample LUT
-    let graded = sample_lut(c);
-    // Blend by intensity
-    c = mix(c, graded, postprocess.lut_intensity);
-    // Post-LUT: lift/gamma/gain
-    c = apply_lift_gamma_gain(c);
-    return c;
+    return mix(color, sample_lut(color), postprocess.lut_intensity);
 }
 
+// Scene-linear grading (without a LUT): gain, offset and gamma, contrast in
+// log2 around middle grey (it keeps 0.18 and spreads stops), saturation
+// around luminance (it keeps brightness).
 fn color_grade(color: vec3<f32>) -> vec3<f32> {
-    if postprocess.lut_platform > 0u {
-        return apply_lut_grade(color);
-    }
-    // Simple path (backward compatibility)
+    if postprocess.lut_platform > 0u { return color; }
     var c = color;
     c = c * postprocess.color_gain + postprocess.color_offset;
     c = pow(max(c, vec3<f32>(0.0)), postprocess.color_gamma);
-    c = c * postprocess.color_contrast;
-    c = c * postprocess.color_saturation;
-    return c;
+    c = 0.18 * pow(c / 0.18, postprocess.color_contrast);
+    c = mix(vec3<f32>(luminance(c)), c, postprocess.color_saturation);
+    return max(c, vec3<f32>(0.0));
 }
 
 // ── White balance ──────────────────────────────────────────────────────────────
 
+// Chromaticity of a blackbody of `t` kelvin (Kim et al. 2002, 1667 to
+// 25000 K).
+fn planckian_xy(t_in: f32) -> vec2<f32> {
+    let t = clamp(t_in, 1667.0, 25000.0);
+    let t2 = t * t;
+    let t3 = t2 * t;
+    var x: f32;
+    if t <= 4000.0 {
+        x = -0.2661239e9 / t3 - 0.2343589e6 / t2 + 0.8776956e3 / t + 0.179910;
+    } else {
+        x = -3.0258469e9 / t3 + 2.1070379e6 / t2 + 0.2226347e3 / t + 0.240390;
+    }
+    let x2 = x * x;
+    let x3 = x2 * x;
+    var y: f32;
+    if t <= 2222.0 {
+        y = -1.1063814 * x3 - 1.34811020 * x2 + 2.18555832 * x - 0.20219683;
+    } else if t <= 4000.0 {
+        y = -0.9549476 * x3 - 1.37418593 * x2 + 2.09137015 * x - 0.16748867;
+    } else {
+        y = 3.0817580 * x3 - 5.87338670 * x2 + 3.75112997 * x - 0.37001483;
+    }
+    return vec2<f32>(x, y);
+}
+
+// White balance: the light of `white_temp` K (tint along green-magenta)
+// adapted to the 6500 K white by Bradford's transform, in linear Rec.709:
+// a scene lit at 3200 K reads neutral at 3200; 6500 K changes nothing.
 fn white_balance(color: vec3<f32>) -> vec3<f32> {
     if postprocess.white_balance_enabled == 0u { return color; }
-    let temp = postprocess.white_temp * 0.0001;
-    let r = 1.0 / max(temp, 0.001);
-    let g = 1.0;
-    let b = temp;
-    let tint = postprocess.white_tint;
-    return color * vec3<f32>(r * (1.0 - tint), g, b * (1.0 + tint));
+    // Rows of the matrices.
+    let bradford = transpose(mat3x3<f32>(
+        vec3<f32>(0.8951, 0.2664, -0.1614),
+        vec3<f32>(-0.7502, 1.7135, 0.0367),
+        vec3<f32>(0.0389, -0.0685, 1.0296)));
+    let to_xyz = transpose(mat3x3<f32>(
+        vec3<f32>(0.4124, 0.3576, 0.1805),
+        vec3<f32>(0.2126, 0.7152, 0.0722),
+        vec3<f32>(0.0193, 0.1192, 0.9505)));
+    let bradford_inverse = transpose(mat3x3<f32>(
+        vec3<f32>(0.9869929, -0.1470543, 0.1599627),
+        vec3<f32>(0.4323053, 0.5183603, 0.0492912),
+        vec3<f32>(-0.0085287, 0.0400428, 0.9684867)));
+    let to_rgb = transpose(mat3x3<f32>(
+        vec3<f32>(3.2406, -1.5372, -0.4986),
+        vec3<f32>(-0.9689, 1.8758, 0.0415),
+        vec3<f32>(0.0557, -0.2040, 1.0570)));
+    let source = planckian_xy(postprocess.white_temp) + vec2<f32>(0.0, postprocess.white_tint * 0.02);
+    let white = planckian_xy(6500.0);
+    let gain = (bradford * xy_to_xyz(white)) / (bradford * xy_to_xyz(source));
+    return max(to_rgb * (bradford_inverse * (gain * (bradford * (to_xyz * color)))), vec3<f32>(0.0));
+}
+
+// XYZ (Y = 1) of chromaticity `xy`.
+fn xy_to_xyz(xy: vec2<f32>) -> vec3<f32> {
+    return vec3<f32>(xy.x / xy.y, 1.0, (1.0 - xy.x - xy.y) / xy.y);
 }
 
 // ── Vignette ───────────────────────────────────────────────────────────────────
@@ -1021,6 +1079,9 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
 
     // 5. Tonemapping
     color = apply_tonemap(color);
+
+    // 5b. The grading LUT, on display-referred colour.
+    if postprocess.lut_platform > 0u { color = apply_lut_grade(color); }
 
     //%P1
 
