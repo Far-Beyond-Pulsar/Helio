@@ -1362,6 +1362,193 @@ fn deserialize_lens_element_json(value: serde_json::Value) -> ReflectResult<Lens
 )]
 pub type RegisteredLensElementProps = LensElementProps;
 
+/// The kind fields [`LensElementProps::to_row`] reads for `kind` (before
+/// the per-field conditions in [`LensElementProps::reads`]).
+fn kind_fields(kind: LensElementKind) -> &'static [&'static str] {
+    use LensElementKind as K;
+    match kind {
+        K::Diopter => &["power_dpt", "seam_darkening", "mount_distance_m"],
+        K::SweetSpot => &["extra_blur_px"],
+        K::Pupil => &[
+            "inherit_iris",
+            "blades",
+            "blade_curvature",
+            "iris_rotation_deg",
+            "round_until_f_number",
+            "squeeze",
+            "cats_eye",
+            "barrel_radius",
+            "swirl",
+            "spherical",
+            "spherical_asymmetry",
+            "onion_amplitude",
+            "onion_rings",
+            "apodization",
+            "obstruction",
+            "aperture_texture_layer",
+            "aperture_texture_amount",
+        ],
+        K::LongitudinalCa => &["red_shift_dpt", "green_shift_dpt", "blue_shift_dpt"],
+        K::Projection => &[
+            "projection_model",
+            "kb_k1",
+            "kb_k2",
+            "kb_k3",
+            "kb_k4",
+            "panini_distance",
+            "panini_compression",
+        ],
+        K::BrownConrady => &[
+            "bc_k1", "bc_k2", "bc_k3", "bc_k4", "bc_k5", "bc_k6", "bc_p1", "bc_p2",
+        ],
+        K::Division => &["division_l1", "division_l2"],
+        K::AnamorphicDistortion => &["mumps_kx1", "mumps_kx2", "mumps_ky1", "mumps_ky2"],
+        K::AnamorphicSqueeze => &["squeeze"],
+        K::Shift => &["shift_x", "shift_y"],
+        K::Keystone => &["keystone_x", "keystone_y"],
+        K::FocusBreathing => &["breathing_per_dpt", "breathing_reference_dpt"],
+        K::Prism => &[
+            "prism_count",
+            "prism_offset",
+            "prism_angle_deg",
+            "prism_ring",
+            "prism_spin_deg",
+            "prism_falloff",
+        ],
+        K::LateralCa => &["lateral_ca_d1", "lateral_ca_d2"],
+        K::FlatPort => &["port_index", "port_dispersion"],
+        K::DomePort => &[
+            "dome_radius_m",
+            "dome_pupil_offset_m",
+            "port_index",
+            "port_dispersion",
+            "dome_curvature",
+        ],
+        K::NaturalVignette => &["natural_vignette_amount"],
+        K::OpticalVignette => &["cats_eye", "barrel_radius", "vignette_reference_f_number"],
+        K::MechanicalVignette => &[
+            "hood_rectangular",
+            "hood_size_x",
+            "hood_size_y",
+            "hood_feather",
+            "hood_rotation_deg",
+        ],
+        K::NdFilter => &["nd_stops"],
+        K::GraduatedNd => &[
+            "grad_nd_stops",
+            "grad_nd_angle_deg",
+            "grad_nd_offset",
+            "grad_nd_softness",
+            "tint_r",
+            "tint_g",
+            "tint_b",
+        ],
+        K::ColorFilter => &["tint_r", "tint_g", "tint_b", "color_filter_amount"],
+        K::TStopLoss => &["t_stop_loss_amount"],
+        K::SphericalGlow => &[
+            "glow_amount",
+            "glow_reference_f_number",
+            "glow_exponent",
+            "glow_radius",
+            "glow_tail",
+        ],
+        K::Coma => &["coma_amount", "coma_length", "coma_exponent", "coma_shape"],
+        K::Astigmatism => &[
+            "astigmatism_amount",
+            "astigmatism_exponent",
+            "astigmatism_minor_ratio",
+        ],
+        K::CornerSoftness => &[
+            "corner_softness_sigma",
+            "corner_softness_exponent",
+            "corner_softness_start",
+        ],
+        K::Diffusion | K::ProMist | K::BlackProMist | K::Fog => {
+            &["diffusion_strength", "diffusion_radius", "diffusion_tail"]
+        }
+        K::Glimmerglass => &[
+            "diffusion_strength",
+            "diffusion_radius",
+            "diffusion_tail",
+            "glint_contrast",
+        ],
+        K::StarFilter => &[
+            "star_points",
+            "star_rotation_deg",
+            "star_length",
+            "star_intensity",
+            "star_falloff",
+        ],
+        K::Halation => &[
+            "halation_strength",
+            "halation_radius",
+            "halation_tint_r",
+            "halation_tint_g",
+            "halation_tint_b",
+            "halation_tail",
+        ],
+        K::WaterDrops => &["drops_refraction", "drops_normal_layer", "drops_defocus"],
+        K::Smear => &["smear_strength", "smear_length", "smear_angle_deg"],
+        K::Dirt => &["dirt_strength", "dirt_radius", "dirt_loss", "dirt_tail"],
+    }
+}
+
+impl LensElementProps {
+    /// Whether [`Self::to_row`] reads the field `name` for this element's
+    /// kind, region shape and switches; the inspector shows only these.
+    pub fn reads(&self, name: &str) -> bool {
+        use LensRegionShape as S;
+        let shape = self.shape;
+        match name {
+            "enabled" | "kind" | "shape" => true,
+            "auto_feather" => shape != S::Mask,
+            "feather" => shape != S::Mask && !self.auto_feather,
+            "angle_deg" => matches!(shape, S::HalfPlane | S::Ellipse),
+            "offset" => shape == S::HalfPlane,
+            "center_x" | "center_y" => matches!(shape, S::Ellipse | S::RadialBand),
+            "radius_x" | "radius_y" => shape == S::Ellipse,
+            "inner_radius" | "outer_radius" => shape == S::RadialBand,
+            "polygon_vertices" | "p0_x" | "p0_y" | "p1_x" | "p1_y" | "p2_x" | "p2_y" => {
+                shape == S::Polygon
+            }
+            "p3_x" | "p3_y" => shape == S::Polygon && self.polygon_vertices >= 4,
+            _ if name.starts_with("mask_") => shape == S::Mask,
+            _ if !kind_fields(self.kind).contains(&name) => false,
+            "blades" | "blade_curvature" | "iris_rotation_deg" => !self.inherit_iris,
+            _ if name.starts_with("kb_") => {
+                self.projection_model == LensProjectionModel::KannalaBrandt
+            }
+            _ if name.starts_with("panini_") => {
+                self.projection_model == LensProjectionModel::Panini
+            }
+            "hood_size_y" | "hood_rotation_deg" => self.hood_rectangular,
+            _ => true,
+        }
+    }
+}
+
+impl super::reflected_list::ReflectedListItem for LensElementProps {
+    const CLASS_NAME: &'static str = "LensElementProps";
+    const NOUN: &'static str = "element";
+    const MAX_ITEMS: usize = LENS_ELEMENT_SLOTS;
+
+    fn title(&self, index: usize) -> String {
+        format!(
+            "{}. {:?} ({:?}){}",
+            index + 1,
+            self.kind,
+            self.shape,
+            if self.enabled { "" } else { " (off)" }
+        )
+    }
+
+    fn shows(&self, prop: &pulsar_reflection::PropertyMetadata) -> bool {
+        self.reads(prop.name)
+    }
+}
+
+crate::register_reflected_list_editor!(LensElementProps);
+
 lens_enum! {
     /// A named lens setup. `Custom` uses the fields below it; any other
     /// preset replaces the optics, tilt, curvature, iris and element stack
@@ -2797,5 +2984,87 @@ mod tests {
         assert_eq!(blocks.release(5000), Some(a));
         assert_eq!(blocks.release(5000), None);
         assert_eq!(blocks.block_of(77), a, "a freed block is reused");
+    }
+
+    /// Nudge one reflected scalar field; false for a field that isn't one.
+    fn nudge(props: &mut LensElementProps, prop: &pulsar_reflection::PropertyMetadata) -> bool {
+        use pulsar_reflection::EngineClass as _;
+        let current = (prop.getter)(&*props);
+        let new: Box<dyn std::any::Any + Send> = if let Some(v) = current.downcast_ref::<f32>() {
+            Box::new(v + 0.0371)
+        } else if let Some(v) = current.downcast_ref::<u32>() {
+            Box::new(v + 1)
+        } else if let Some(v) = current.downcast_ref::<bool>() {
+            Box::new(!v)
+        } else {
+            return false;
+        };
+        let _ = props.get_properties();
+        (prop.setter)(props, new);
+        true
+    }
+
+    #[test]
+    fn the_inspector_shows_exactly_the_fields_a_row_reads() {
+        use pulsar_reflection::EngineClass as _;
+        let props_meta = LensElementProps::default().get_properties();
+        let mut checked = 0;
+        for &kind in LensElementKind::ALL {
+            let models: &[LensProjectionModel] = if kind == LensElementKind::Projection {
+                LensProjectionModel::ALL
+            } else {
+                &[LensProjectionModel::Rectilinear]
+            };
+            for &shape in LensRegionShape::ALL {
+                for &model in models {
+                    for switches in 0..8u32 {
+                        let base = LensElementProps {
+                            kind,
+                            shape,
+                            projection_model: model,
+                            inherit_iris: switches & 1 != 0,
+                            hood_rectangular: switches & 2 != 0,
+                            auto_feather: switches & 4 != 0,
+                            polygon_vertices: 4,
+                            ..LensElementProps::default()
+                        };
+                        let row = bytemuck::bytes_of(&base.to_row()).to_vec();
+                        for prop in &props_meta {
+                            let mut edited = base.clone();
+                            let is_f32 = (prop.getter)(&base).downcast_ref::<f32>().is_some();
+                            if !nudge(&mut edited, prop) {
+                                continue;
+                            }
+                            let changed = bytemuck::bytes_of(&edited.to_row()) != row.as_slice();
+                            if !base.reads(prop.name) {
+                                assert!(
+                                    !changed,
+                                    "{kind:?}/{shape:?}/{model:?}: hidden `{}` changes the row",
+                                    prop.name
+                                );
+                            } else if is_f32 {
+                                assert!(
+                                    changed,
+                                    "{kind:?}/{shape:?}/{model:?}: shown `{}` is never read",
+                                    prop.name
+                                );
+                            }
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 10_000, "{checked}");
+    }
+
+    #[test]
+    fn element_lists_have_a_registered_editor() {
+        let id = std::any::TypeId::of::<Vec<LensElementProps>>();
+        assert!(
+            pulsar_reflection::inventory::iter::<pulsar_reflection::UiPropertyEditorHint>
+                .into_iter()
+                .any(|hint| hint.type_id == id)
+        );
     }
 }

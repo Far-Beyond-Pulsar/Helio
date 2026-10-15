@@ -1910,6 +1910,7 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-core",
+ "helio-lens-optics",
  "pollster 0.4.0",
  "pulsar_reflection",
  "pulsar_scenedb",

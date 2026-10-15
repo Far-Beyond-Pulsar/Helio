@@ -4,140 +4,20 @@
 //! The stack's layers and material rules are ordered lists (move up and
 //! down, remove, add); every field of a layer, a rule, the caves, the
 //! overhangs and the materials is edited by the editor registered for its
-//! type, through reflection ([`FieldRows`]).
+//! type, through reflection (the shared pieces in `reflected_list`).
 
-use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
     AnyElement, App, Entity, SharedString, Subscription, WeakEntity, Window, prelude::*, px,
 };
-use pulsar_reflection::{
-    BoundPropertyEditor, EngineClass, PropertyEditorArgs, PropertyEditorFactory, PropertyMetadata,
-    PropertyWriteBack,
-};
+use pulsar_reflection::{BoundPropertyEditor, EngineClass, PropertyEditorArgs, PropertyWriteBack};
 use ui::button::{Button, ButtonVariants as _};
 use ui::dropdown::{Dropdown, DropdownEvent, DropdownState};
-use ui::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use ui::{ActiveTheme as _, IconName, Sizable as _, v_flex};
 
+use super::reflected_list::{FieldRows, ListEdit, apply_list_edit, item_card};
 use super::{VoxelLayerKind, VoxelMaterialRule, VoxelTerrainLayer, VoxelTerrainStack};
-
-/// The editor registered for a property type, if any.
-fn editor_factory(type_id: std::any::TypeId) -> Option<PropertyEditorFactory> {
-    pulsar_reflection::inventory::iter::<pulsar_reflection::UiPropertyEditorHint>
-        .into_iter()
-        .find(|hint| hint.type_id == type_id)
-        // SAFETY: `erase_property_editor_fn_ptr` only accepts a
-        // `PropertyEditorFactory`, so every submitted pointer has that type
-        // (the same contract the inspector's registry relies on).
-        .map(|hint| unsafe { std::mem::transmute::<fn(), PropertyEditorFactory>(hint.fn_ptr) })
-}
-
-/// Editors for the reflected properties of one value (a layer, a rule, the
-/// caves...), each writing the whole value back through `put`. Properties
-/// without a registered editor (lists, nested structs) are skipped.
-struct FieldRows {
-    props: Arc<Vec<PropertyMetadata>>,
-    editors: Vec<(usize, BoundPropertyEditor)>,
-    /// Pushes the current value into every editor.
-    refresh: Arc<dyn Fn(&[(usize, BoundPropertyEditor)], &mut Window, &mut App) + Send + Sync>,
-}
-
-impl FieldRows {
-    fn new<T: EngineClass + Clone>(
-        value: &T,
-        id: &str,
-        get: impl Fn() -> Option<T> + Send + Sync + 'static,
-        put: impl Fn(T, &mut Window, &mut App) + Send + Sync + 'static,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self {
-        let props = Arc::new(value.get_properties());
-        let get = Arc::new(get);
-        let put = Arc::new(put);
-        let mut editors = Vec::new();
-        for (index, prop) in props.iter().enumerate() {
-            let Some(factory) = editor_factory(prop.type_info.type_id) else {
-                continue;
-            };
-            let current = (prop.getter)(value);
-            let write_back: PropertyWriteBack = {
-                let (props, get, put) = (props.clone(), get.clone(), put.clone());
-                Arc::new(
-                    move |new: Box<dyn Any + Send>, window: &mut Window, cx: &mut App| {
-                        let Some(mut value) = get() else { return };
-                        (props[index].setter)(&mut value, new);
-                        put(value, window, cx);
-                    },
-                )
-            };
-            let args = PropertyEditorArgs {
-                id_prefix: id,
-                class_name: "VoxelTerrainStack",
-                display_name: &prop.display_name,
-                prop_name: prop.name,
-                type_info: prop.type_info,
-                current_value: current.as_ref(),
-                write_back,
-            };
-            editors.push((index, factory(&args, window, cx)));
-        }
-        let refresh: Arc<
-            dyn Fn(&[(usize, BoundPropertyEditor)], &mut Window, &mut App) + Send + Sync,
-        > = {
-            let props = props.clone();
-            Arc::new(
-                move |editors: &[(usize, BoundPropertyEditor)],
-                      window: &mut Window,
-                      cx: &mut App| {
-                    let Some(value) = get() else { return };
-                    for (index, editor) in editors {
-                        (editor.set_value)((props[*index].getter)(&value).as_ref(), window, cx);
-                    }
-                },
-            )
-        };
-        Self {
-            props,
-            editors,
-            refresh,
-        }
-    }
-
-    fn refresh(&self, window: &mut Window, cx: &mut App) {
-        (self.refresh)(&self.editors, window, cx);
-    }
-
-    fn views(&self) -> impl Iterator<Item = AnyElement> + '_ {
-        let _ = &self.props;
-        self.editors
-            .iter()
-            .map(|(_, editor)| editor.view.clone().into_any_element())
-    }
-}
-
-/// Moves, removals and additions of a list item.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ListEdit {
-    Up(usize),
-    Down(usize),
-    Remove(usize),
-    Add,
-}
-
-/// Apply `edit` to `items` (out-of-range moves do nothing); `new` makes an
-/// added item.
-pub fn apply_list_edit<T>(items: &mut Vec<T>, edit: ListEdit, new: impl FnOnce() -> T) {
-    match edit {
-        ListEdit::Up(i) if i > 0 && i < items.len() => items.swap(i - 1, i),
-        ListEdit::Down(i) if i + 1 < items.len() => items.swap(i, i + 1),
-        ListEdit::Remove(i) if i < items.len() => {
-            items.remove(i);
-        }
-        ListEdit::Add => items.push(new()),
-        _ => {}
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum List {
@@ -274,6 +154,8 @@ impl VoxelTerrainStackEditor {
         FieldRows::new(
             value,
             &format!("{id}-{part}"),
+            "VoxelTerrainStack",
+            |_, _| true,
             move || read.lock().ok().and_then(|stack| get(&stack)),
             move |v, window, cx| {
                 let (stack, reshaped) = {
@@ -433,60 +315,14 @@ impl VoxelTerrainStackEditor {
             .zip(titles)
             .enumerate()
             .map(|(i, (rows, title))| {
-                let button = |name: &str,
-                              icon: IconName,
-                              tooltip: &str,
-                              edit: ListEdit,
-                              cx: &mut gpui::Context<Self>| {
-                    Button::new(SharedString::from(format!("{}-{tag}{i}-{name}", self.id)))
-                        .icon(icon)
-                        .xsmall()
-                        .ghost()
-                        .tooltip(tooltip.to_string())
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.edit_list(list, edit, window, cx)
-                        }))
-                };
-                v_flex()
-                    .w_full()
-                    .gap_1()
-                    .p_1()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_between()
-                            .child(gpui::div().text_sm().child(title))
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .child(button(
-                                        "up",
-                                        IconName::ArrowUp,
-                                        "Move up",
-                                        ListEdit::Up(i),
-                                        cx,
-                                    ))
-                                    .child(button(
-                                        "down",
-                                        IconName::ArrowDown,
-                                        "Move down",
-                                        ListEdit::Down(i),
-                                        cx,
-                                    ))
-                                    .child(button(
-                                        "remove",
-                                        IconName::Trash,
-                                        "Remove",
-                                        ListEdit::Remove(i),
-                                        cx,
-                                    )),
-                            ),
-                    )
-                    .children(rows.views())
-                    .into_any_element()
+                item_card(
+                    &format!("{}-{tag}", self.id),
+                    i,
+                    title,
+                    rows.views(),
+                    move |this: &mut Self, edit, window, cx| this.edit_list(list, edit, window, cx),
+                    cx,
+                )
             })
             .collect()
     }
@@ -644,22 +480,5 @@ mod tests {
             "{:?}",
             validation_error(&stack)
         );
-    }
-
-    #[test]
-    fn list_edits_move_remove_and_add() {
-        let mut items = vec![1, 2, 3];
-        apply_list_edit(&mut items, ListEdit::Up(1), || 0);
-        assert_eq!(items, [2, 1, 3]);
-        apply_list_edit(&mut items, ListEdit::Down(1), || 0);
-        assert_eq!(items, [2, 3, 1]);
-        apply_list_edit(&mut items, ListEdit::Up(0), || 0);
-        apply_list_edit(&mut items, ListEdit::Down(2), || 0);
-        assert_eq!(items, [2, 3, 1], "moves past the ends do nothing");
-        apply_list_edit(&mut items, ListEdit::Remove(0), || 0);
-        apply_list_edit(&mut items, ListEdit::Remove(9), || 0);
-        assert_eq!(items, [3, 1]);
-        apply_list_edit(&mut items, ListEdit::Add, || 7);
-        assert_eq!(items, [3, 1, 7]);
     }
 }

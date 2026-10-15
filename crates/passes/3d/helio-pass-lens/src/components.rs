@@ -717,12 +717,19 @@ pub struct LensComponent {
     /// Autofocus sampling radius in uv (<= 0: 0.02).
     #[gpu]
     pub af_radius: f32,
+    /// The overscan factor (>= 1; 0 reads as 1) the camera rendering this view
+    /// widened its field of view by: the image the pass is given shows
+    /// `overscan` times the frame's tangent extent about the frame centre, and
+    /// the pass maps it back to the frame. Author it with
+    /// [`crate::ray_map::applied_overscan`] from the lens and elements the
+    /// camera widened by; see the README.
     #[gpu]
-    pub _pad0: f32,
+    pub overscan: f32,
     #[gpu]
     pub _pad1: f32,
 }
 const _: () = assert!(std::mem::size_of::<LensComponent>() == 96);
+const _: () = assert!(std::mem::offset_of!(LensComponent, overscan) == 88);
 const _: () = assert!(std::mem::offset_of!(LensComponent, focal_length_mm) == 16);
 const _: () = assert!(std::mem::offset_of!(LensComponent, element_first) == 56);
 const _: () = assert!(std::mem::offset_of!(LensComponent, tilt_angle) == 64);
@@ -754,7 +761,7 @@ impl LensComponent {
             aperture_blades: 6,
             aperture_rotation: 0.0,
             af_radius: 0.0,
-            _pad0: 0.0,
+            overscan: 1.0,
             _pad1: 0.0,
         }
     }

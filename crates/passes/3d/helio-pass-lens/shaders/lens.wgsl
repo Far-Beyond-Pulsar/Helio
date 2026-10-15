@@ -59,7 +59,7 @@ struct LensRow {
     aperture_blades: u32,
     aperture_rotation: f32,
     af_radius: f32,
-    _pad0: f32,
+    overscan: f32,
     _pad1: f32,
 }
 
@@ -99,6 +99,7 @@ struct Resolved {
     map_flags: u32,
     spectral_samples: u32,
     aberration_flags: u32,
+    overscan: f32,
 }
 
 // Persistent between frames: the autofocus position in dioptres.
@@ -284,6 +285,8 @@ const WATER_INDEX: f32 = 1.333;
 // Largest rectilinear tangent a map may reach (about 85 degrees).
 const MAX_ANGLE: f32 = 1.4835;
 const OVERSCAN_CAP: f32 = 16.0;
+// Largest overscan a camera may have applied (ray_map.rs `APPLIED_OVERSCAN_CAP`).
+const APPLIED_OVERSCAN_CAP: f32 = 2.0;
 const OVERSCAN_SAMPLES: u32 = 64u;
 
 // Slots of a PUPIL element's params (components.rs `pupil`).
@@ -342,6 +345,26 @@ fn radiance(c: vec3<f32>) -> vec3<f32> {
 }
 fn ceil_div(a: vec2<u32>, b: u32) -> vec2<u32> {
     return (a + (b - 1u)) / b;
+}
+
+/// The overscan a lens row asks for: the factor its camera widened the field
+/// of view by, 1 for a row that has none (zero) or a bad value.
+fn row_overscan(row: LensRow) -> f32 {
+    return select(1.0, clamp(row.overscan, 1.0, APPLIED_OVERSCAN_CAP), finite(row.overscan));
+}
+
+/// A position of the rendered image (unit square) as the nominal frame's:
+/// the image shows `resolved.overscan` times the frame's extent about its
+/// centre, so uv 0.5 stays the centre and the frame is the middle
+/// `1 / overscan` of the image.
+fn frame_uv(uv: vec2<f32>) -> vec2<f32> {
+    return (uv - 0.5) * resolved.overscan + 0.5;
+}
+
+/// The inverse of `frame_uv`: where on the rendered image the nominal frame's
+/// position `uv` is.
+fn image_uv(uv: vec2<f32>) -> vec2<f32> {
+    return (uv - 0.5) / resolved.overscan + 0.5;
 }
 
 // ── Scene depth ──────────────────────────────────────────────────────────────
@@ -410,7 +433,9 @@ fn cs_resolve(@builtin(local_invocation_index) lid: u32) {
         let dsize = textureDimensions(scene_depth);
         let radius = select(DEFAULT_AF_RADIUS, row.af_radius, row.af_radius > 0.0);
         let offset = (vec2<f32>(f32(lid % 8u), f32(lid / 8u)) / 7.0 - 0.5) * 2.0 * radius;
-        let uv = clamp(vec2(row.af_u, row.af_v) + offset, vec2(0.0), vec2(1.0));
+        // The point is in the frame; the depth buffer holds the overscanned image.
+        let frame_point = clamp(vec2(row.af_u, row.af_v) + offset, vec2(0.0), vec2(1.0));
+        let uv = (frame_point - 0.5) / row_overscan(row) + 0.5;
         let px = min(vec2<u32>(uv * vec2<f32>(dsize)), dsize - 1u);
         let d = textureLoad(scene_depth, vec2<i32>(px), 0).r;
         if d < 1.0 {
@@ -493,6 +518,7 @@ fn resolve_lens(row: LensRow, found: bool, autofocus: bool, size: vec2<u32>) {
     out.map_flags = 0u;
     out.spectral_samples = 1u;
     out.aberration_flags = 0u;
+    out.overscan = 1.0;
     if found {
         out.f_number = bounded(row.f_number, 0.7, 32.0, 2.8);
         out.focal_length_mm = bounded(row.focal_length_mm, 8.0, 600.0, 50.0);
@@ -513,6 +539,7 @@ fn resolve_lens(row: LensRow, found: bool, autofocus: bool, size: vec2<u32>) {
         out.tilt_axis = bounded(row.tilt_axis, -100.0, 100.0, 0.0);
         out.element_first = row.element_first;
         out.element_count = min(row.element_count, MAX_ELEMENTS);
+        out.overscan = row_overscan(row);
     }
 
     // A prescription over the whole frame is the view's lens: its effective
@@ -607,6 +634,11 @@ fn resolve_lens(row: LensRow, found: bool, autofocus: bool, size: vec2<u32>) {
         }
     }
     out.natural_vignette = natural;
+    // An overscanned image reaches the frame only through the map, which
+    // crops it.
+    if out.overscan > 1.0 {
+        out.map_flags |= MAP_REMAP;
+    }
     if (out.map_flags & MAP_SPECTRAL) != 0u {
         out.map_flags |= MAP_REMAP;
         out.spectral_samples = spectral_sample_count(out.quality);
@@ -774,8 +806,10 @@ fn focus_field(uv: vec2<f32>, size: vec2<f32>) -> FocusSample {
     let tilt = ca + sa * (cos(resolved.tilt_axis) * direction.x + sin(resolved.tilt_axis) * direction.y);
     let plane_distance = select(MAX_DISTANCE, ca * resolved.focus_distance_m / tilt, tilt > 0.05 * ca);
     let corner = length(size) * 0.5;
-    let r = length((uv - 0.5) * size) / corner;
-    let q = (uv - 0.5) * vec2(size.x / size.y, 1.0);
+    // Field positions are the frame's: an overscanned image shows more than it.
+    let nominal = frame_uv(uv);
+    let r = length((nominal - 0.5) * size) / corner;
+    let q = (nominal - 0.5) * vec2(size.x / size.y, 1.0);
     // A covering prescription brings its own field curvature, replacing the
     // lens row's.
     var rx: PrismSel;
@@ -825,7 +859,7 @@ fn focus_field(uv: vec2<f32>, size: vec2<f32>) -> FocusSample {
             inverse += rx.weight * rx_analysis(h, rx_radius(h, q, ctx)).curvature;
         } else if USER_ENABLED && e.kind == ELEMENT_USER && (e.flags & UF_FOCUS) != 0u {
             // The user's focus, in dioptres, given the focus so far.
-            inverse = mix(inverse, user_focus(uv, e.params, inverse), region_weight(e, q));
+            inverse = mix(inverse, user_focus(nominal, e.params, inverse), region_weight(e, q));
         }
     }
     var out: FocusSample;
@@ -878,13 +912,15 @@ fn cs_coc(@builtin(global_invocation_id) id: vec3<u32>) {
     // circle is smaller by sqrt(det J) where the map zooms in.
     var magnification = 1.0;
     if (resolved.map_flags & MAP_REMAP) != 0u {
-        let q = (uv - 0.5) * vec2(f32(size.x) / f32(size.y), 1.0);
+        let q = (frame_uv(uv) - 0.5) * vec2(f32(size.x) / f32(size.y), 1.0);
         magnification = defocus_scale(q, make_ctx(resolved, size));
     }
-    let coc_a = limited(circle_of_confusion(focus_distance(field.inverse_a), s2, f32(size.x)) * magnification, field.extra * magnification);
+    // The sensor spans the frame, which is 1 / overscan of the image's width.
+    let frame_width = f32(size.x) / resolved.overscan;
+    let coc_a = limited(circle_of_confusion(focus_distance(field.inverse_a), s2, frame_width) * magnification, field.extra * magnification);
     var coc_b = coc_a;
     if field.omega > 0.0 {
-        coc_b = limited(circle_of_confusion(focus_distance(field.inverse_b), s2, f32(size.x)) * magnification, field.extra * magnification);
+        coc_b = limited(circle_of_confusion(focus_distance(field.inverse_b), s2, frame_width) * magnification, field.extra * magnification);
     }
     textureStore(coc_out, id.xy, vec4(coc_a, coc_b, field.omega, field.transmission));
 }
@@ -1096,7 +1132,7 @@ fn resolve_pupil(uv: vec2<f32>, size: vec2<f32>) -> Pupil {
     pp.fp_scale = 1.0;
     var shifts = vec3(0.0);
 
-    let q = (uv - 0.5) * vec2(size.x / size.y, 1.0);
+    let q = (frame_uv(uv) - 0.5) * vec2(size.x / size.y, 1.0);
     var rx: PrismSel;
     rx.index = NO_ROW;
     rx.weight = 0.0;
@@ -1148,7 +1184,9 @@ fn resolve_pupil(uv: vec2<f32>, size: vec2<f32>) -> Pupil {
             }
         }
     }
-    let offset = (uv - 0.5) * size;
+    // In pixels of the frame, as the lens sees the field: the frame is
+    // 1 / overscan of the image.
+    let offset = (frame_uv(uv) - 0.5) * size;
     let reach = length(offset);
     if rx.index != NO_ROW {
         let e = elements[resolved.element_first + rx.index];
@@ -1328,7 +1366,7 @@ fn cs_gather(@builtin(global_invocation_id) id: vec3<u32>) {
     // shift: dc = A f dD / (s1 - f), in half-resolution diameters.
     let focal_m = resolved.focal_length_mm * 1.0e-3;
     let per_dioptre = focal_m / resolved.f_number * focal_m / (resolved.sensor_width_mm * 1.0e-3)
-        * f32(half_size.x * 2u) / max(1.0 - focal_m / resolved.focus_distance_m, 0.05);
+        * f32(half_size.x * 2u) / resolved.overscan / max(1.0 - focal_m / resolved.focus_distance_m, 0.05);
     let chromatic = any(abs(pp.shifts) > vec3(1.0e-4));
     let colors = select(1u, 3u, chromatic);
     let lanes = seams * colors;
@@ -1441,9 +1479,12 @@ fn cs_gather(@builtin(global_invocation_id) id: vec3<u32>) {
 // region is tested at the sensor position and blends the element's map with
 // the identity, so elements limited to a region fade in across its feather.
 //
-// The map says where on the *rendered* image the sensor looks. Beyond the
-// rendered frame it clamps to the edge pixel; `required_overscan` says how
-// much further than the frame the map reaches, for a camera to render.
+// The map says where on the *nominal frame* the sensor looks, in image-height
+// units about the frame centre. The rendered image is the frame widened by
+// `resolved.overscan` (a camera renders that much more of the view, from
+// `required_overscan`; see `frame_uv` / `image_uv`), and `spectral_color`
+// converts the map's result to it. Beyond the rendered image the lookup clamps
+// to the edge pixel.
 
 struct MapCtx {
     // Focal-length units per image-height unit: sensor height / focal length.
@@ -2171,7 +2212,7 @@ fn spectral_color(
     var acc = vec3(0.0);
     for (var j = 0u; j < n; j++) {
         let s = ray_map(q, (*ts)[j], prism, copy, ctx);
-        acc += (*ws)[j] * defocused_at(s / vec2(aspect, 1.0) + 0.5);
+        acc += (*ws)[j] * defocused_at(image_uv(s / vec2(aspect, 1.0) + 0.5));
     }
     return acc;
 }

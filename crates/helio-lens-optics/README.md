@@ -22,6 +22,20 @@ let bake = LensBake::bake(&rx, &BakeConfig::default())?; // ~0.5 s release, offl
 let bytes = bake.ray_map.as_bytes();                  // &[u8], upload as a texture
 ```
 
+## Consumers
+
+`helio-pass-lens` uploads a `LensBake` with `PrescriptionBank::new` and drives the
+ray map (`RayMapLut.tan_theta`), the transmission (`VignettingLut`), the cat's-eye
+pupil (`PupilFootprints`), the focus field (`FocusData`: per-channel axial focus,
+field curvature) and the in-focus point spread (`PsfTable` at each field's best
+focus) from it; see its README for what each replaces. It reads from a bake:
+`ray_map.data` plane 0, the whole `vignetting` and `footprints`, `focus.*` and the
+`psf` records; the distortion plane is implied by `tan_theta` and the effective
+focal length (`y / (tan (1 + distortion))`, the small-field slope of the reference
+wavelength). The bake's wavelength samples must ascend, `vignetting.f_numbers` must
+ascend, and analysis fields (`focus.field_r`, `psf.field_r`) must ascend from 0.
+Footprint orientation: the pass uses `+x` as the radial direction on screen.
+
 ## Model
 
 * Units: millimetres, nanometres, radians. Optical axis is **+z**, light travels

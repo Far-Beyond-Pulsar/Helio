@@ -24,8 +24,9 @@ to four quantities, followed by a post stage on the sensor image:
 | Transmission | natural cos⁴, optical and mechanical vignetting, ND / graduated ND / colour filters, T-stop loss, diopter seam darkening |
 | Sensor-image aberrations and filters | field-dependent PSFs (glow, coma, astigmatism, corner softness), diffusion (Pro-Mist, Black Pro-Mist, Glimmerglass, fog), stars, halation, water drops, smear, dirt |
 
-Later phases add element kinds (prescription LUTs, more aberrations) to the
-same element table; the shader dispatches on `LensElementComponent::kind`.
+All of the above can instead come from a baked real lens (`PRESCRIPTION`, see
+"Baked prescriptions") and the host can add its own hooks (`USER`, see "User
+elements"); the shader dispatches on `LensElementComponent::kind`.
 
 ### Focus field
 
@@ -311,6 +312,85 @@ Across a seam a pixel sees both focus configurations. The two strongest are kept
 per pixel (`coc_a`, `coc_b`, weight, at most one half) and the gather runs once
 for each, blended by the weight.
 
+### Baked prescriptions
+
+`PRESCRIPTION` (38) puts a real lens, traced and baked on the CPU by
+`helio-lens-optics`, in the stack. It reduces the same per-pixel quantities as the
+parametric elements, from tables instead of formulas:
+
+| Quantity | From the bake | Replaces (weight `1 - w` where the prescription covers with weight `w`) |
+| --- | --- | --- |
+| Ray map | `RayMapLut.tan_theta`, per wavelength and field: the sensor radius `r` (mm over the baked half diagonal) looks along `tan theta(r, lambda)` in its own direction. Linear in the field (continued past the baked corner), linear between the bake's wavelengths, clamped beyond them. Distortion and lateral colour are both in it | `PROJECTION`, `BROWN_CONRADY`, `DIVISION`, `ANAMORPHIC_DISTORTION`, `LATERAL_CA` |
+| Transmission | `VignettingLut`: `cos^4` of the traced image-space chief ray times the share of the stop the clear apertures leave, linear in the field and in `log2(f-number)`, clamped to the baked range | `NATURAL_VIGNETTE`, `OPTICAL_VIGNETTE` |
+| Pupil | `PupilFootprints`: the stop's coverage at the field (two baked fields blended linearly), at the baked f-number. Stopped down to `N` it is sampled over the central `N0 / N` of the stop, which is exact (a ray is aimed at an absolute stop position). It multiplies the iris shape, so blades, squeeze and swirl still apply | the `CATS_EYE` and `BARREL_RADIUS` of a `PUPIL` element (ignored where `w >= 0.5`) |
+| Focus field | `FocusData.best_mm`: field curvature as extra dioptres (`-dz / f^2`, `f` the effective focal length, zero on the axis) | the lens row's `field_curvature` |
+| Longitudinal CA | `FocusData.axial_real_mm` weighted with the sensor response of each channel, as dioptres in the same units; the shader subtracts green, so only the differences matter | `LONGITUDINAL_CA` elements |
+| In-focus point spread | `PsfTable` at each field's own best focus (so its field curvature is not counted twice): a Gaussian ellipse of the radial and sagittal RMS (added in variance to the aberration stage's), and a coma tail from the centroid shift and the edge radius, with the tail's own variance taken out of the core | `ASTIGMATISM`, `CORNER_SOFTNESS`, `COMA` |
+
+Nothing else is replaced: mechanical vignetting, filters, `T_STOP_LOSS`, ports,
+diopters, prisms, `SPHERICAL_GLOW` and the diffusion elements stack on top of the
+bake. The **first** `PRESCRIPTION` whose region covers a pixel is the one that
+acts there; `1 - w` blends across its feather, so inside it nothing parametric is
+applied twice and outside it nothing changes.
+
+Parameters: `params[0]` is the layer of the `PrescriptionBank`; `params[1]` scales
+the point spread (1 the bake, 0 none; a zeroed row applies none).
+
+**Focal length.** A prescription whose region is the **full frame** is the view's
+lens: `cs_resolve` sets `focal_length_mm` to the bake's effective focal length and
+keeps `f_number` at or above the widest aperture the vignetting table was baked at
+(and `t_stop` at or above that), and sets `natural_vignette` to 1 for the flare
+pass (the bake's `cos^4` applies to its analytic sources too). The camera has to
+render the field of view of that focal length on the sensor (read it from
+`PrescriptionBank::efl_mm` or `lens_resolved`). A partial-frame prescription keeps
+the row's optics: the ray map is still the bake's tangent, so it is only
+consistent where the row's focal length matches.
+
+**Host API.** `PrescriptionBank::new(&device, &[&LensBake, ..])` uploads the bakes
+as one read-only storage buffer of 32-bit words (a directory, a header per lens,
+then the tables; not textures: every lens keeps its own table sizes). Layer `i` is
+`bakes[i]`. Register `bank.buffer()` under `PRESCRIPTIONS` (`"lens_prescriptions"`)
+in the graph's registry like `lens_masks`, or pass it as
+`LensInputs::prescriptions`; with none a bank of no lenses is bound and the
+element covers nothing. `bank.efl_mm(layer)` and `bank.min_f_number(layer)` give
+the numbers the full-frame rule applies.
+
+**Static and dynamic.** The bank is immutable (build a new one to change a lens).
+Baked in: the prescription, the focus distance the bake was focused at, the
+spectral samples, the f-number *table* of the vignetting (from the bake's
+`f_numbers`), the footprint f-number, the field grids. Dynamic per frame, no
+rebake: the f-number (vignetting interpolates its table; footprints scale), the
+focus distance and autofocus (the focus field adds the baked curvature and
+chromatic shifts to whatever focus is resolved; the bake's own focus is only that
+of its sensor position), the sensor size and quality (wavelength samples), and
+which pixels the region covers. The chromatic path (`MAP_SPECTRAL`) switches on
+only for a bake whose wavelengths disagree: an ideal lens costs no spectral
+samples.
+
+### User elements
+
+`USER` (39) runs WGSL the host compiles into the lens shader:
+`LensPass::new_with_user(device, w, h, Some(snippet))`, or
+`build_default_graph_with_lens_user[_with_context]` in `helio-default-graphs`
+(the lens counterpart of the post-process `user_effects`). The snippet replaces
+the stock no-op block of `lens.wgsl` (between the `%%USER_BEGIN` and `%%USER_END`
+markers) and may define any of:
+
+```wgsl
+fn user_ray_map(uv: vec2<f32>, params: array<f32, 16>, t: f32) -> vec2<f32>
+fn user_transmission(uv: vec2<f32>, params: array<f32, 16>) -> vec3<f32>
+fn user_focus(uv: vec2<f32>, params: array<f32, 16>, s: f32) -> f32
+```
+
+`uv` is the point in the unit square (y down); `params` the element's 16 floats;
+`t` the wavelength position (-1 blue .. 1 red); `s` the focus in dioptres so far,
+and `user_focus` returns the new one. A hook the snippet omits is the identity.
+The row's `flags` select the hooks that run (`user::MAP`, `TRANSMISSION`, `FOCUS`,
+and `SPECTRAL` when the map depends on `t`), the element's region blends each with
+its identity by the coverage, and the ray map hook acts in stack order on the point
+the stack has reached. Without a snippet the shader is the stock one and `USER`
+elements are not even scanned: no stage flag, no cost, bit-exact output.
+
 ### Regions
 
 Regions live in image-height units centred on the frame, `q = (uv - 0.5) *
@@ -416,6 +496,10 @@ FogCompositePass -> Transparent -> TSR/FXAA -> LensPass -> LensFlarePass -> Post
   binding is always valid.
 - Reads the optional registry entry `lens_masks` (`MASKS`): a `D2Array` view of
   RGBA8 layers, see `mask_array`. Without it a transparent 1x1 layer is bound.
+- Reads the optional registry entry `lens_prescriptions` (`PRESCRIPTIONS`): the
+  storage buffer of a `PrescriptionBank`. Without it a bank of no lenses is bound.
+- `ResolvedLens::map_flags` gains bit 8 (`MAP_PRESCRIPTION`); the struct layout is
+  unchanged (still 84 bytes).
 
 ## Limits
 
@@ -480,6 +564,20 @@ FogCompositePass -> Transparent -> TSR/FXAA -> LensPass -> LensFlarePass -> Post
 - Elements address rows by index range; the authoring layer that places element
   rows is not part of this pass. The phase 4 kinds (24..37) are not yet exposed
   by the editor-side component.
+- Prescriptions: rotationally symmetric lenses only (the bake's limit), so the
+  azimuth only turns the radial direction. The footprint is used with the same
+  orientation for sources in front of and behind the focus (a real cat's eye
+  flips with the sign of the defocus). The point spread is the bake's geometric
+  spot at its one f-number: the aperture dependence of spherical aberration
+  (`SPHERICAL_GLOW`) is not derived from it and stays a parametric element.
+  Opening wider than the baked f-number is clamped (full-frame) or extrapolated by
+  clamping the table (partial). The bake's effective focal length is the
+  small-field `y / tan` of an infinity-focused bake; a bake focused closer carries
+  the magnified equivalent. The vignetting table's f-numbers must ascend. The CPU
+  twin `ray_map::required_overscan` knows neither `PRESCRIPTION` nor `USER`
+  (the GPU's `lens_resolved` does).
+- User elements: the hooks run per pixel per wavelength sample (the ray map), so
+  an expensive `user_ray_map` multiplies with the sample count.
 
 ## Validation
 
@@ -526,6 +624,35 @@ restricts an element to the white half (bit-exact elsewhere, inverted likewise,
 nothing without a mask array); the water-drop generator is deterministic; a
 drop displaces content opposite its normal inside its footprint, by the
 expected amount, and leaves the rest of the frame bit-exact.
+
+Phase 5 (`src/tests/prescription.rs`, the three example lenses of
+`helio-lens-optics` baked in the tests): the bank's words (focal length, flags,
+tables, zero field curvature on the axis); the ideal thin lens is the identity map
+with no spectral path, no point spread, and its transmission is the bake's and the
+parametric `cos^4` alike; the double Gauss puts a point where the bake's chief ray
+says, per colour channel and weighted by the pass's spectral samples (0.08 px),
+and its red-blue split equals the baked lateral colour; the GPU's
+`required_overscan` equals the CPU reading of the bake's corner reach; a full-frame
+prescription sets the focal length and the widest aperture (a partial one does
+not); vignetting at f/2 is darker than at f/8 off axis and both match the table;
+the bokeh is round on the axis and radially narrower than tangentially off it,
+as the baked footprint is (control without it is round); a stack of the
+parametric equivalents before and after a prescription is bit-identical to the
+prescription alone, and with a half-plane prescription the left half is the
+prescription alone and the right half carries `cos^4` once; the Cooke triplet is
+held to its baked f-number and falloff; a made-up point spread on the ideal lens
+blurs along the radius by the baked RMS (and across it by the other), conserves
+light, leaves the axis alone, and a coma centroid shift moves the image outward
+(positive) or inward (negative) by about the baked shift; the parametric
+astigmatism, corner softness and coma give way to the baked spread bit for bit; a
+bound bank nobody names, a missing layer, a missing bank and `USER` elements in a
+lens built without a snippet leave the image, the stage flags and the dispatches
+unchanged; baked field curvature defocuses the corners of the focal plane by the circle the
+formula gives, and baked axial colour gives red, green and blue ordered circles
+(and equal ones when the shifts are zero);
+a `USER` ray map that flips `u` mirrors the image (also within a
+region), and the transmission and focus hooks run while an omitted hook is the
+identity.
 
 The pupil tests measure the averaged result, not single taps (a lone point
 source in a defocused plane is a few lucky taps, so its disc is noise): the

@@ -74,10 +74,16 @@ pub struct ResolvedLens {
     pub spectral_samples: u32,
     /// [`AB_ACTIVE`]. Appended in phase 4; every earlier offset is unchanged.
     pub aberration_flags: u32,
+    /// The overscan the view's camera applied (the lens row's `overscan`,
+    /// sanitised; 1 without a lens): the lens maps the frame into an image that
+    /// shows this many times its tangent extent. Appended with the overscan
+    /// support; every earlier offset is unchanged.
+    pub overscan: f32,
 }
 
-const _: () = assert!(std::mem::size_of::<ResolvedLens>() == 84);
+const _: () = assert!(std::mem::size_of::<ResolvedLens>() == 88);
 const _: () = assert!(std::mem::offset_of!(ResolvedLens, aberration_flags) == 80);
+const _: () = assert!(std::mem::offset_of!(ResolvedLens, overscan) == 84);
 const _: () = assert!(std::mem::offset_of!(ResolvedLens, aperture_rotation) == 16);
 const _: () = assert!(std::mem::offset_of!(ResolvedLens, natural_vignette) == 20);
 const _: () = assert!(std::mem::offset_of!(ResolvedLens, enabled) == 24);
@@ -109,6 +115,7 @@ impl Default for ResolvedLens {
             map_flags: 0,
             spectral_samples: 1,
             aberration_flags: 0,
+            overscan: 1.0,
         }
     }
 }

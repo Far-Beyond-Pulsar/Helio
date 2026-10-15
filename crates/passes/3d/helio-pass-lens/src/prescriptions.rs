@@ -126,7 +126,9 @@ fn psf_at(psf: &PsfTable, r: f32, dz: f32) -> [f32; 4] {
 /// twice.
 fn split_spot(rms_r: f32, rms_t: f32, centroid: f32, edge: f32) -> [f32; 4] {
     let length = edge.max(0.0);
-    let share = if length > 0.0 { (4.0 * centroid.abs() / length).min(0.9) } else { 0.0 };
+    // A spot of rounding-error size has no tail, whatever the ratio of its
+    // centroid to its edge.
+    let share = if length > PSF_EPSILON_MM { (4.0 * centroid.abs() / length).min(0.9) } else { 0.0 };
     let c = share * length / 4.0;
     let core = ((rms_r * rms_r - share * length * length / 6.0 + c * c) / (1.0 - share)).max(0.0).sqrt();
     [core, rms_t, share.copysign(centroid), length]
@@ -220,7 +222,7 @@ pub(crate) fn pack(bakes: &[&LensBake]) -> Vec<u32> {
         put(word::ANALYSIS_FIELDS, n_fields as u32);
 
         // Tables follow the headers; their offsets go back into the header.
-        let mut table = |words: &mut Vec<u32>, slot: usize, values: &[f32]| {
+        let table = |words: &mut Vec<u32>, slot: usize, values: &[f32]| {
             let at = words.len() as u32;
             words[header + slot] = at;
             push_f32(words, values.iter().copied());
