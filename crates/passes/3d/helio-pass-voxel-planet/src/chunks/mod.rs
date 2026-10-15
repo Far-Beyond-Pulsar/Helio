@@ -695,6 +695,8 @@ pub struct ChunkWorld {
     leaf_alloc: wgpu::Buffer,
     column_materials: wgpu::Buffer,
     leaf_materials: wgpu::Buffer,
+    // Each stored leaf's ground normal (two bytes, as `leaf_materials`).
+    leaf_normals: wgpu::Buffer,
     mid_materials: wgpu::Buffer,
     params: wgpu::Buffer,
     materials: wgpu::Buffer,
@@ -1129,6 +1131,7 @@ impl ChunkWorld {
                 storage(24, false, c),
                 storage(25, false, c),
                 storage(26, false, c),
+                storage(27, false, c),
             ],
         });
         let gen_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&gen_layout)], immediate_size: 0 });
@@ -1179,6 +1182,7 @@ impl ChunkWorld {
                 storage(12, true, all),
                 storage(13, false, wgpu::ShaderStages::COMPUTE),
                 storage(14, true, all),
+                storage(15, true, all),
             ],
         });
         let trace_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1408,6 +1412,7 @@ impl ChunkWorld {
             }),
             column_materials: buffer("chunk column materials", CHUNK_BATCH as u64 * TILE_COLUMNS * 4, wgpu::BufferUsages::STORAGE),
             leaf_materials: buffer("chunk leaf materials", LEAF_CAPACITY * 2, s),
+            leaf_normals: buffer("chunk leaf normals", LEAF_CAPACITY * 2, s),
             mid_materials: buffer("chunk mid materials", (MAX_CHUNKS * 64 * 4) as u64, wgpu::BufferUsages::STORAGE),
             params: buffer("chunk draw params", std::mem::size_of::<DrawParams>() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
             materials,
@@ -1524,6 +1529,7 @@ impl ChunkWorld {
                 entry(13, &self.leaf_alloc),
                 entry(14, &self.column_materials),
                 entry(15, &self.leaf_materials),
+                entry(27, &self.leaf_normals),
                 entry(17, &self.mid_materials),
                 entry(19, &self.job_results),
                 entry(20, &self.free_pages),
@@ -2543,7 +2549,7 @@ impl ChunkWorld {
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chunk draw"),
             layout: &self.draw_layout,
-            entries: &[entry(0, &self.params), entry(1, &self.statics), entry(2, &self.chunk_meta), entry(3, &self.mids), entry(4, &self.mid_leaves), entry(5, &self.leaves), entry(6, &self.leaf_materials), entry(7, &self.materials), entry(8, &self.mid_materials), entry(9, &self.counters), entry(10, &self.chunk_table), entry(11, &self.chunk_keys), entry(12, &self.draw_list), entry(13, &self.reach), entry(14, &self.leaf_pages)],
+            entries: &[entry(0, &self.params), entry(1, &self.statics), entry(2, &self.chunk_meta), entry(3, &self.mids), entry(4, &self.mid_leaves), entry(5, &self.leaves), entry(6, &self.leaf_materials), entry(7, &self.materials), entry(8, &self.mid_materials), entry(9, &self.counters), entry(10, &self.chunk_table), entry(11, &self.chunk_keys), entry(12, &self.draw_list), entry(13, &self.reach), entry(14, &self.leaf_pages), entry(15, &self.leaf_normals)],
         });
         self.last_group = Some(group.clone());
         let targets = self.targets.as_ref().unwrap();

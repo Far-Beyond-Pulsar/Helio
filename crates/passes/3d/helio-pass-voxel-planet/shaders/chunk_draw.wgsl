@@ -97,6 +97,9 @@ struct ChunkMeta {
 // Each slot's leaf pages (`LEAF_PAGES`, `chunk_generate.wgsl`): a chunk's
 // leaves in mid order, 64 to a page.
 @group(0) @binding(14) var<storage, read> leaf_pages: array<u32>;
+// Each stored leaf's ground normal (`chunk_build_main`): two slope bytes
+// (x | y << 8, by angle), 0 where none.
+@group(0) @binding(15) var<storage, read> leaf_normals: array<u32>;
 const LEAF_PAGES: u32 = 64u;
 
 // Leaf `index` of chunk `slot` (in its mids' order) in the leaf storage.
@@ -391,6 +394,29 @@ fn solid_at(slot: u32, c: vec3<i32>) -> bool {
     if bit64(node.zw, l) { return true; }
     let index = mid_leaves[slot * 64u + m] + rank64(node.xy & ~node.zw, l);
     return bit64(leaves[leaf_at_page(slot, index)], u32((c.x & 3) + ((c.y & 3) << 2u) + ((c.z & 3) << 4u)));
+}
+
+// The heightfield's normal stored with cell `c`'s leaf (chunk `slot`,
+// frame `f`), in the world: the exact slope where the leaf holds natural
+// tops; zero where none (an edit, an overhang, a cell under the surface).
+// Lit by it, cells of a pixel or less read as the ground they sample, not
+// as the terraces their whole-cell tops make on a gentle slope.
+fn leaf_ground(slot: u32, c: vec3<i32>, f: ChunkDraw) -> vec3<f32> {
+    if any(c < vec3<i32>(0)) || any(c > vec3<i32>(63)) { return vec3<f32>(0.0); }
+    let root = chunk_meta[slot];
+    let m = u32((c.x >> 4u) + ((c.y >> 4u) << 2u) + ((c.z >> 4u) << 4u));
+    if !bit64(root.root_occ, m) || bit64(root.root_full, m) { return vec3<f32>(0.0); }
+    let node = mids[slot * 64u + m];
+    let l = u32(((c.x >> 2u) & 3) + (((c.y >> 2u) & 3) << 2u) + (((c.z >> 2u) & 3) << 4u));
+    if !bit64(node.xy, l) || bit64(node.zw, l) { return vec3<f32>(0.0); }
+    let index = leaf_at_page(slot, mid_leaves[slot * 64u + m] + rank64(node.xy & ~node.zw, l));
+    let e = (leaf_normals[index >> 1u] >> ((index & 1u) * 16u)) & 0xffffu;
+    if e == 0u { return vec3<f32>(0.0); }
+    let g = tan((vec2<f32>(f32(e & 0xffu), f32(e >> 8u)) - 128.0) * (3.14159265 / 252.0));
+    let n = -g.x * f.i0.xyz - g.y * f.i1.xyz + f.i2.xyz;
+    let length2 = dot(n, n);
+    if !(length2 > 1e-12) { return vec3<f32>(0.0); }
+    return n * inverseSqrt(length2);
 }
 
 // A hit cell's material from its leaf's (or mid's) two (`pair`: what a
@@ -1714,9 +1740,11 @@ fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, q: vec2<u32>, size: vec2<u32>,
     let step = !solid_near(v.x, key, cell + vec3<i32>(0, 0, 1));
     if !step && coarse == 0.0 { return f; }
     let w = max(select(0.0, materials.detail.w, step), coarse);
-    // Cells of a pixel or less: the slope the hits around make (a few
-    // loads); larger ones measure their column tops (`slope_normal`).
+    // The heightfield's exact slope stored with the leaf; else, cells of a
+    // pixel or less: the slope the hits around make (a few loads); larger
+    // ones measure their column tops (`slope_normal`).
     var ground = ground_hint;
+    if dot(ground, ground) == 0.0 { ground = leaf_ground(v.x, cell, c); }
     if dot(ground, ground) == 0.0 && length(c.m0.xyz) <= 1.5 * pixel_m { ground = screen_ground(q, size, t); }
     if dot(ground, ground) == 0.0 { ground = slope_normal(v.x, key, cell, c); }
     // A unit normal (written so NaN fails it), else the face's own.

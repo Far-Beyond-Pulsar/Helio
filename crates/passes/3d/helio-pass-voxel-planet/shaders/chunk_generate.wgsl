@@ -139,6 +139,16 @@ fn evict(@builtin(global_invocation_id) id: vec3<u32>) {
 // (soil or rock by the leaf's depth), shown by the others.
 @group(0) @binding(15) var<storage, read_write> leaf_materials: array<atomic<u32>>;
 @group(0) @binding(17) var<storage, read_write> mid_materials: array<u32>;
+// Each stored leaf's ground normal (two leaves a word, as
+// `leaf_materials`; `encode_slope` x | y << 8): the heightfield's slope
+// over the leaf's columns from their exact heights, where the leaf holds
+// their natural tops (0: none: an edit or an overhang made them).
+@group(0) @binding(27) var<storage, read_write> leaf_normals: array<atomic<u32>>;
+
+// A slope (cells per cell) in a byte, by its angle: 2 to 254, 0 for none.
+fn encode_slope(g: f32) -> u32 {
+    return u32(i32(clamp(round(atan(g) * (252.0 / 3.14159265)), -126.0, 126.0)) + 128);
+}
 
 var<workgroup> w_range: array<atomic<i32>, 4>;
 
@@ -691,6 +701,42 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     atomicMin(&w_z[0], z_lo);
     atomicMax(&w_z[1], z_hi);
     for (var k = 0u; k < 9u; k++) { atomicAdd(&w_fit[k], fit[k]); }
+    // The heightfield's slope over this leaf column: its exact heights a
+    // column past each side (central differences, one-sided at the tile's
+    // edge), where every column's top here is the heightfield's.
+    let tile = tile_jobs[job.tile];
+    let cell_mm = f32(world.grid.y << tile.level);
+    let base = job.cz * 64;
+    var natural = true;
+    for (var c = 0u; c < 16u; c++) {
+        let height = tile_columns[job.tile * TILE_COLUMNS + (ly * 4u + (c >> 2u)) * 64u + lx * 4u + (c & 3u)].x;
+        if height == OUTSIDE { natural = false; break; }
+        let hf = clamp((div_floor(height, world.grid.y) >> tile.level) - base, 0, 64);
+        if tops[c] != hf && !(hf == 64 && tops[c] == 64) { natural = false; }
+    }
+    var ground = 0u;
+    if natural && topped != 0u {
+        let x0 = max(i32(lx * 4u) - 1, 0);
+        let x1 = min(i32(lx * 4u) + 4, 63);
+        let y0 = max(i32(ly * 4u) - 1, 0);
+        let y1 = min(i32(ly * 4u) + 4, 63);
+        var g = vec2<f32>(0.0);
+        var valid = true;
+        for (var r = 0u; r < 4u; r++) {
+            let row = i32(ly * 4u + r);
+            let col = i32(lx * 4u + r);
+            let hx0 = tile_columns[job.tile * TILE_COLUMNS + u32(row) * 64u + u32(x0)].x;
+            let hx1 = tile_columns[job.tile * TILE_COLUMNS + u32(row) * 64u + u32(x1)].x;
+            let hy0 = tile_columns[job.tile * TILE_COLUMNS + u32(y0) * 64u + u32(col)].x;
+            let hy1 = tile_columns[job.tile * TILE_COLUMNS + u32(y1) * 64u + u32(col)].x;
+            if hx0 == OUTSIDE || hx1 == OUTSIDE || hy0 == OUTSIDE || hy1 == OUTSIDE { valid = false; }
+            g += vec2<f32>(f32(hx1 - hx0) / f32(x1 - x0), f32(hy1 - hy0) / f32(y1 - y0));
+        }
+        if valid {
+            g = g / (4.0 * cell_mm);
+            ground = encode_slope(g.x) | (encode_slope(g.y) << 8u);
+        }
+    }
     for (var lz = 0u; lz < 16u; lz++) {
         let m = (lx >> 2u) + (ly >> 2u) * 4u + (lz >> 2u) * 16u;
         let l = (lx & 3u) + (ly & 3u) * 4u + (lz & 3u) * 16u;
@@ -798,6 +844,7 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
     let pages = w_page_count;
     for (var w = t; w < pages * 32u; w += 256u) {
         atomicStore(&leaf_materials[w_pages[w >> 5u] * 32u + (w & 31u)], 0u);
+        atomicStore(&leaf_normals[w_pages[w >> 5u] * 32u + (w & 31u)], 0u);
     }
     storageBarrier();
     for (var lz = 0u; lz < 16u; lz++) {
@@ -811,6 +858,9 @@ fn chunk_build_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
             let index = (w_pages[order >> 6u] << 6u) | (order & 63u);
             leaves[index] = leaf[lz];
             atomicOr(&leaf_materials[index >> 1u], leaf_materials_of(leaf_material[lz], leaf_top[lz], (topped >> lz) & 1u, lz, tile_jobs[job.tile].level) << ((index & 1u) * 16u));
+            if ((topped >> lz) & 1u) != 0u {
+                atomicOr(&leaf_normals[index >> 1u], ground << ((index & 1u) * 16u));
+            }
         }
     }
 }
