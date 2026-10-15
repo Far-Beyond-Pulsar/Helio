@@ -28,6 +28,7 @@ helio-pass-sprite-cull = { path = "../passes/2d/helio-pass-sprite-cull" }
 helio-pass-debug-overlay = { path = "../passes/3d/helio-pass-debug-overlay" }
 helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
 helio-pass-fxaa = { path = "../passes/3d/helio-pass-fxaa" }
+helio-pass-buffer-view = { path = "../passes/3d/helio-pass-buffer-view" }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 helio-pass-foliage-place = { path = "../passes/3d/helio-pass-foliage-place" }
 helio-pass-foliage-gbuffer = { path = "../passes/3d/helio-pass-foliage-gbuffer" }

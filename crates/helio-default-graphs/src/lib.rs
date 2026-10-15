@@ -595,6 +595,13 @@ fn add_final_passes(
     debug_camera_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) {
+    // Depth / normal debug views replace the final image, under everything
+    // drawn over it; inert unless one is the debug mode.
+    graph.add_pass(Box::new(helio_pass_buffer_view::BufferViewPass::new(
+        device,
+        config.surface_format,
+    )));
+
     // Game content over the final image, under the editor's overlays.
     add_sprite_overlay_passes(graph, device, queue, config);
 
