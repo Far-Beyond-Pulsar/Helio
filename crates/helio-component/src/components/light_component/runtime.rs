@@ -43,6 +43,25 @@ mod tests {
     }
 
     #[test]
+    fn decodes_lights_saved_before_newer_fields() {
+        // A sun saved before `shadows.shadow_priority` and
+        // `shadow_max_resolution` existed failed to load, so the scene had
+        // no sun and the sky and terrain rendered black.
+        let mut json = serde_json::to_value(LightComponent::default()).unwrap();
+        let shadows = json["shadows"].as_object_mut().unwrap();
+        shadows.remove("shadow_priority");
+        shadows.remove("shadow_max_resolution");
+        shadows.insert("shadow_bias".into(), serde_json::json!(0.25));
+        let decoded = decode_light_component(&json).unwrap();
+        assert_eq!(decoded.shadows.shadow_priority, LightComponent::default().shadows.shadow_priority);
+        assert_eq!(decoded.shadows.shadow_max_resolution, LightComponent::default().shadows.shadow_max_resolution);
+        assert_eq!(decoded.shadows.shadow_bias, 0.25);
+        // A whole sub-group missing loads too.
+        json.as_object_mut().unwrap().remove("volumetrics");
+        assert!(decode_light_component(&json).is_ok());
+    }
+
+    #[test]
     fn decodes_the_legacy_flat_shape() {
         // The shape that failed to hydrate in the 2026-10-04 editor log.
         let json = serde_json::json!({ "enabled": true, "intensity": 1002.0 });

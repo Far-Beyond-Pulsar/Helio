@@ -306,7 +306,7 @@ impl RenderPass for IndirectDispatchPass {
         // counts only exist on the GPU.
         self.ensure_capacity(ctx.device, batch.group_capacity, batch.group_capacity);
 
-        let planes = extract_frustum_planes(ctx.camera_data.view_proj);
+        let planes = helio_core::depth::frustum_planes(ctx.camera_data.view_proj);
         let uniforms = CullUniforms {
             frustum_planes: planes,
             draw_capacity: batch.group_capacity,
@@ -396,46 +396,4 @@ impl RenderPass for IndirectDispatchPass {
         pass.dispatch_workgroups_indirect(batch.group_dispatch.buffer, batch.group_dispatch.offset);
         Ok(())
     }
-}
-
-/// Extract 6 frustum planes from a view-projection matrix (Gribb/Hartmann method).
-///
-/// `vp` is a flat column-major `[f32; 16]` (from `glam::Mat4::to_cols_array()`).
-/// Returns **normalized** planes `(nx, ny, nz, d)` where a point P is *inside* the
-/// frustum when `dot(n.xyz, P) + d >= 0`.
-///
-/// Normalization is essential because the GPU shader tests `dot(n.xyz, P) + d >= -r`
-/// and if the normal is NOT unit-length, the sphere radius r is not comparable to
-/// the raw signed distance — leading to both false-positive and false-negative culling.
-///
-/// Uses wgpu/DirectX depth conventions where NDC z ∈ [0, 1].
-fn extract_frustum_planes(vp: [f32; 16]) -> [[f32; 4]; 6] {
-    // Extract matrix rows: vp[col*4 + row], so row r has elements [vp[r], vp[4+r], vp[8+r], vp[12+r]].
-    let row = |r: usize| -> [f32; 4] { [vp[r], vp[4 + r], vp[8 + r], vp[12 + r]] };
-    let r0 = row(0);
-    let r1 = row(1);
-    let r2 = row(2);
-    let r3 = row(3);
-    let add = |a: [f32; 4], b: [f32; 4]| -> [f32; 4] {
-        [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]]
-    };
-    let sub = |a: [f32; 4], b: [f32; 4]| -> [f32; 4] {
-        [a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]]
-    };
-    let normalize = |p: [f32; 4]| -> [f32; 4] {
-        let len = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
-        if len > 1e-10 {
-            [p[0] / len, p[1] / len, p[2] / len, p[3] / len]
-        } else {
-            p
-        }
-    };
-    [
-        normalize(add(r3, r0)), // left:   -w ≤  x  →  x + w ≥ 0
-        normalize(sub(r3, r0)), // right:   x ≤  w  → -x + w ≥ 0
-        normalize(add(r3, r1)), // bottom: -w ≤  y  →  y + w ≥ 0
-        normalize(sub(r3, r1)), // top:     y ≤  w  → -y + w ≥ 0
-        normalize(r2),          // near:    z ≥  0  (wgpu NDC z ∈ [0,1], not OpenGL's -w ≤ z)
-        normalize(sub(r3, r2)), // far:     z ≤  w  → -z + w ≥ 0
-    ]
 }

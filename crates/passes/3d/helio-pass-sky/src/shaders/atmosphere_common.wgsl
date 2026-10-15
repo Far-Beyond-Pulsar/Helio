@@ -40,8 +40,21 @@ struct AtmosphereFrame {
     params: AtmosphereParams,
     // Diffuse sky irradiance / pi as L2 spherical harmonics (rgb): a
     // Lambertian surface of albedo a with normal n receives a * E(n).
+    // Seen from the eye; surfaces take their own sky from the sky table
+    // (`atmosphere_sky_table`).
     irradiance: array<vec4<f32>, 9>,
 }
+
+// The sky's irradiance / pi (unit sun) on a surface anywhere in the
+// atmosphere (`sky_table_kernel`, published as `atmosphere_sky_table`): per
+// altitude (SKY_TABLE_R rows, by the square root of the height) and sun
+// cosine (SKY_TABLE_MU columns, SKY_TABLE_MU_LO to 1), the six L2
+// harmonics symmetric about the sun's vertical plane, in the local frame
+// (y up, x towards the sun), SKY_TABLE_COEFFS vec4s an entry.
+const SKY_TABLE_R: u32 = 16u;
+const SKY_TABLE_MU: u32 = 24u;
+const SKY_TABLE_MU_LO: f32 = -0.4;
+const SKY_TABLE_COEFFS: u32 = 6u;
 
 const ATMOSPHERE_PI: f32 = 3.14159265358979;
 const TRANSMITTANCE_SIZE: vec2<f32> = vec2<f32>(256.0, 64.0);
@@ -310,14 +323,9 @@ fn atmosphere_integrate(p: AtmosphereParams, sun: vec3<f32>, transmittance_lut: 
 // projection alone, never its position: a camera far from the world's origin
 // (absolute frames on a planet) loses every bit of a direction rebuilt as
 // `inv_view_proj * ndc - position`. World space, scaled to one unit of view
-// depth (its length times `atmosphere_view_depth` is a distance).
+// depth (its length times the prelude's `helio_view_depth` is a distance).
 fn atmosphere_view_ray(view: mat4x4<f32>, proj: mat4x4<f32>, ndc: vec2<f32>) -> vec3<f32> {
     let v = vec3<f32>((ndc.x + proj[2][0]) / proj[0][0], (ndc.y + proj[2][1]) / proj[1][1], -1.0);
     let rotation = mat3x3<f32>(view[0].xyz, view[1].xyz, view[2].xyz);
     return transpose(rotation) * v;
-}
-
-// View depth (distance along the view axis) of a depth-buffer value.
-fn atmosphere_view_depth(proj: mat4x4<f32>, depth: f32) -> f32 {
-    return proj[3][2] / (depth + proj[2][2]);
 }

@@ -12,8 +12,8 @@
 //!    for the full story.
 //!
 //! 2. **Reset** (`vs_reset`/`fs_reset`): a full-screen triangle that samples
-//!    the mask just stamped and, wherever it's non-zero, writes the *far*
-//!    plane into the real depth buffer. Without this, the portal-duplicate
+//!    the mask just stamped and, wherever it's non-zero, writes the depth
+//!    clear value (infinitely far) into the real depth buffer. Without this, the portal-duplicate
 //!    pass's own depth test would compare its (legitimately distant) content
 //!    against whatever real geometry happens to sit behind the opening —
 //!    which is exactly the bug that made the near portal render solid black
@@ -90,8 +90,8 @@ fn fs_stamp(input: StampOutput) -> @location(0) u32 {
 
 @group(0) @binding(0) var portal_mask: texture_2d<u32>;
 
-// Depth written wherever the mask is non-zero. Deliberately the *exact* far
-// value (matches GBufferPass's own depth clear, see helio-pass-gbuffer) —
+// Depth written wherever the mask is non-zero. Deliberately the *exact* clear
+// value (helio_core::depth::CLEAR, which GBufferPass clears to) —
 // not just "very far" — because deferred lighting distinguishes real geometry
 // from empty background by comparing against that same clear value. Content
 // inside the portal opening that isn't covered by any duplicated surface
@@ -100,9 +100,9 @@ fn fs_stamp(input: StampOutput) -> @location(0) u32 {
 // as a very-distant-but-technically-real surface with stale G-buffer data —
 // the latter previously showed up as a faint lit-looking rectangle over the
 // whole opening. Any real duplicate content still wins the instance pass's
-// LessEqual test against this, since legitimate scene depth is always
-// strictly less than the far plane's exact NDC depth.
-const RESET_DEPTH: f32 = 1.0;
+// GreaterEqual test against this: reversed depth is 0 only at infinity, so
+// legitimate scene depth is always strictly greater.
+const RESET_DEPTH: f32 = 0.0;
 
 @vertex
 fn vs_reset(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {

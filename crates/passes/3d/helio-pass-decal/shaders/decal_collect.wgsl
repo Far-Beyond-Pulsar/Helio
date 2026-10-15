@@ -1,10 +1,5 @@
 enable wgpu_binding_array;
-
-struct Camera {
-    view: mat4x4<f32>, proj: mat4x4<f32>, view_proj: mat4x4<f32>,
-    view_proj_inv: mat4x4<f32>, position_near: vec4<f32>,
-    forward_far: vec4<f32>, jitter_frame: vec4<f32>, prev_view_proj: mat4x4<f32>,
-}
+//!use helio_prelude
 
 struct GpuDecal {
     transform: mat4x4<f32>, color: vec4<f32>,
@@ -93,7 +88,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= u32(sz.x) || id.y >= u32(sz.y) { return; }
 
     let depth = textureLoad(scene_depth, pxl, 0).x;
-    if depth >= 1.0 { return; }
+    if helio_is_sky(depth) { return; }
 
     let uv_scr = vec2<f32>((f32(pxl.x)+0.5)/f32(sz.x), (f32(pxl.y)+0.5)/f32(sz.y));
     let ndc = vec4<f32>(uv_scr.x*2.0-1.0, 1.0-uv_scr.y*2.0, depth, 1.0);

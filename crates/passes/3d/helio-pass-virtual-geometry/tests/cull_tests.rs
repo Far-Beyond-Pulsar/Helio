@@ -50,8 +50,8 @@ const INITIAL_INSTANCES: u64 = 256;
 
 #[test]
 fn cull_shader_parses_and_validates() {
-    let source = include_str!("../shaders/vg_cull.wgsl");
-    let module = naga::front::wgsl::parse_str(source).expect("VG cull shader must parse");
+    let source = helio_core::shader::resolve(include_str!("../shaders/vg_cull.wgsl"));
+    let module = naga::front::wgsl::parse_str(&source).expect("VG cull shader must parse");
     let mut validator = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::all(),
@@ -308,10 +308,11 @@ fn cone_culling_is_disabled_at_the_apex_singularity() {
 
 #[test]
 fn conservative_hiz_uses_the_farthest_corner() {
-    let samples = [0.2_f32, 0.3, 0.9, 0.4];
-    let farthest = samples.into_iter().fold(0.0_f32, f32::max);
-    assert_eq!(farthest, 0.9);
-    assert!(!(0.8 > farthest), "a visible corner must prevent occlusion");
+    // Reversed depth: the farthest corner is the smallest value.
+    let samples = [0.8_f32, 0.7, 0.1, 0.6];
+    let farthest = samples.into_iter().fold(f32::INFINITY, f32::min);
+    assert_eq!(farthest, 0.1);
+    assert!(!(farthest > 0.2), "a visible corner must prevent occlusion");
 }
 
 // ── Frustum culling stub tests ────────────────────────────────────────────────

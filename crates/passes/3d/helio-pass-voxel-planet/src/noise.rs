@@ -70,6 +70,13 @@ pub fn lerp(a: i32, b: i32, w: i32) -> i32 {
 /// Gradient noise on a lattice of spacing `2^shift` domain units, with
 /// 16-bit fractions and output in about `[-ONE, ONE]`. Its gradient is at
 /// most about 5.3 `ONE` per lattice spacing.
+/// Bound on how fast [`noise`] changes: Q16 units per lattice unit
+/// (`2^shift` input units) between any two points, plus
+/// [`NOISE_ROUNDING`] (tested; the largest measured is about 2.8 units).
+/// Mirrored in WGSL.
+pub const NOISE_SLOPE: i32 = 4 * ONE;
+pub const NOISE_ROUNDING: i32 = 16;
+
 pub fn noise(p: IVec3, shift: u32, seed: u32) -> i32 {
     let mask = (1i32 << shift) - 1;
     let c = [p.x >> shift, p.y >> shift, p.z >> shift];
@@ -108,16 +115,12 @@ pub fn scale(n: i32, amplitude: i32) -> i32 {
 /// Unit of the fine noise (Q24, `FINE_ONE` in WGSL).
 pub const FINE_ONE: i32 = 1 << 24;
 
-/// `a * b / 2^24` rounded toward zero, for `|a| < 2^28` and `|b| <= 2^24`,
-/// in 32-bit arithmetic (12-bit limbs; within two units of exact).
+/// `a * b / 2^24` rounded to nearest, for `|a| < 2^28` and `|b| <= 2^24`:
+/// the exact product (`mul_fine` in WGSL: one wide multiply on GPUs with
+/// 64-bit integers).
 #[inline]
 pub fn mul_fine(a: i32, b: i32) -> i32 {
-    let negative = (a < 0) != (b < 0);
-    let (a, b) = (a.unsigned_abs(), b.unsigned_abs());
-    let (ah, al) = (a >> 12, a & 0xfff);
-    let (bh, bl) = (b >> 12, b & 0xfff);
-    let m = (ah * bh + ((ah * bl + al * bh + ((al * bl) >> 12)) >> 12)) as i32;
-    if negative { -m } else { m }
+    mul_shr_signed(a, b, 24)
 }
 
 #[inline]
@@ -251,11 +254,14 @@ fn rsqrt_wide(d: u32) -> u32 {
     y
 }
 
-/// `sign(a b) floor(|a| |b| / 2^s)` of the exact 64-bit product.
+/// `a b / 2^s` rounded to nearest (halves up) of the exact signed 64-bit
+/// product, wrapping (the caller keeps it within 32 bits): one wide
+/// multiply, an add and a shift on GPUs with 64-bit integers. Rounding
+/// toward zero needed sign handling, a fifth of the field's GPU time;
+/// rounding down biased sums of products.
 #[inline]
 pub fn mul_shr_signed(a: i32, b: i32, s: u32) -> i32 {
-    let m = mul_shr(a.unsigned_abs(), b.unsigned_abs(), s) as i32;
-    if (a < 0) != (b < 0) { -m } else { m }
+    ((i64::from(a) * i64::from(b)).wrapping_add(((1u64 << s) >> 1) as i64) >> s) as i32
 }
 
 /// `v / |v|` in Q30 to within a few units (zero for zero), for any `v`:
@@ -283,6 +289,31 @@ pub fn unit_q30(v: IVec3) -> IVec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No two points' noises differ by more than [`NOISE_SLOPE`] per
+    /// lattice unit between them (and a few units of rounding), at every
+    /// lattice size: generation skips cells a cave cannot reach with it.
+    /// The largest measured is about 2.8 units per lattice unit.
+    #[test]
+    fn noise_slope_is_bounded() {
+        let mut seed = 1u64;
+        let mut next = |m: i32| {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            ((seed >> 33) as i64).rem_euclid(i64::from(m)) as i32
+        };
+        for shift in [4u32, 8, 10, 14, 20] {
+            let mut worst = 0.0f64;
+            for _ in 0..400_000 {
+                let p = IVec3::new(next(1 << 24) - (1 << 23), next(1 << 24) - (1 << 23), next(1 << 24) - (1 << 23));
+                let r = [1, 4, 32, 256, 4096][next(5) as usize];
+                let d = IVec3::new(next(2 * r + 1) - r, next(2 * r + 1) - r, next(2 * r + 1) - r);
+                let (a, b) = (noise(p, shift, 7), noise(p + d, shift, 7));
+                let allowed = f64::from(NOISE_SLOPE) * d.as_dvec3().length() / f64::from(1u32 << shift) + f64::from(NOISE_ROUNDING);
+                worst = worst.max(f64::from((a - b).abs()) - allowed);
+            }
+            assert!(worst <= 0.0, "shift {shift}: {worst} units past the bound");
+        }
+    }
 
     #[test]
     fn noise_is_bounded_and_continuous_at_lattice_points() {

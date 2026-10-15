@@ -1,26 +1,19 @@
-//! Renderer-independent voxel chunk data, revisioned publication, and CPU workers.
+//! Renderer-independent voxel data: a voxel object's chunks (keys, 8^3
+//! material samples, revisioned publication, snapshots, the sample edit
+//! worker) and a voxel world's brush journal.
 //!
 //! The SceneDB component owns the canonical payload store. Renderers may read
 //! snapshots of that store, but no GPU resource or render pass is owned here.
 
-mod bounded_inbox;
 mod brush;
 mod chunk_codec;
 mod data_api;
 mod edit_worker;
 mod edits;
-mod generation;
-mod generation_worker;
+mod ids;
 mod source_data;
 
-pub use bounded_inbox::{
-    BoundedVoxelInbox, VoxelInboxBatch, VoxelInboxClose, VoxelInboxDrain, VoxelInboxDrainBudget,
-    VoxelInboxError, VoxelInboxInvalid, VoxelInboxLimits, VoxelPublicationFailure,
-    VoxelPublicationFailureReason, VoxelPublicationOutcome, VoxelPublicationStartError,
-    VoxelPublicationStatus, VoxelPublicationTicket, VoxelPublicationTicketState,
-    VoxelPublicationWorker,
-};
-pub use brush::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditJournal};
+pub use brush::{VoxelBrushEdit, VoxelBrushOp, VoxelBrushShape, VoxelEditBase, VoxelEditJournal};
 pub use chunk_codec::{VoxelChunkCodecError, VoxelMaterialChunk};
 pub use data_api::{
     VoxelBatchReceipt, VoxelPayloadKey, VoxelPayloadStore, VoxelSourceWriter, VoxelStoredPayload,
@@ -32,16 +25,9 @@ pub use edit_worker::{
     VOXEL_EDIT_PENDING_JOBS,
 };
 pub use edits::{VoxelEditError, VoxelSampleEdit};
-pub use generation::{
-    VoxelChunkGenerator, VoxelGeneratorDescriptor, VoxelGeneratorRegistry,
-    MAX_VOXEL_GENERATOR_ID_BYTES, MAX_VOXEL_GENERATOR_PARAMETERS_BYTES, VOXEL_TERRAIN_GENERATOR,
-    VOXEL_MESH_RENDERER, VOXEL_TERRAIN_GENERATOR_VERSION, VOXEL_TERRAIN_RENDERER,
-};
-pub use generation_worker::{
-    VoxelGenerationAdmissionError, VoxelGenerationClose, VoxelGenerationJob, VoxelGenerationLimits,
-    VoxelGenerationStatus, VoxelGenerationTicket, VoxelGenerationTicketState,
-    VoxelGenerationWorker, VOXEL_GENERATION_MAX_CHUNKS_PER_JOB,
-    VOXEL_GENERATION_MAX_PAYLOAD_BYTES_PER_JOB, VOXEL_GENERATION_PENDING_JOBS,
+pub use ids::{
+    VOXEL_MESH_RENDERER, VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION,
+    VOXEL_TERRAIN_RENDERER,
 };
 pub use source_data::{
     VoxelBatchRevision, VoxelChunkBatch, VoxelChunkKey, VoxelChunkOp, VoxelChunkPayload,

@@ -14,7 +14,7 @@
 use crate::grid::Grid;
 use crate::layers::{Caves, Overhangs};
 use crate::noise::{fade, hash3, lerp, mul16, mul_fine, mul_shr, mul_shr_signed, noise, noise_fine, noise_fine_grad, scale, sin_turns, unit_q30, FINE_ONE, ONE, Q30};
-use crate::terrain::{heightfield_density, TerrainAppearance, TerrainField, TerrainProgram, DENSITY_ONE, HEIGHT_ONE};
+use crate::terrain::{heightfield_density, Column, TerrainAppearance, TerrainField, TerrainProgram, DENSITY_ONE, HEIGHT_ONE};
 use bytemuck::{Pod, Zeroable};
 use glam::IVec3;
 use std::borrow::Cow;
@@ -93,8 +93,8 @@ impl LandformVolume {
         // Threshold above which `share` of the noise lies.
         let threshold = |share: f64| (noise_quantile(1.0 - share.clamp(0.0, 1.0)) * f64::from(ONE)).round() as i32;
         let layer = grid.layer_mm() as i32;
-        // Caves may reach any depth: bands taller than a column holds are
-        // clipped to a window around the eye (generate.wgsl).
+        // Caves may reach any depth: chunks are generated through a tile's
+        // whole volume where rays reach under its surface (`chunks`).
         let depth = mm(caves.depth_m);
         let mut flags = 0;
         if caves.enabled && depth > 0 && caves.tunnel_radius_m.max(caves.cavern_wavelength_m) > 0.0 {
@@ -351,6 +351,7 @@ impl Octave {
 /// | craters | rim over depth (Q16) | share of fresh craters (Q16) |
 /// | basins | depth (height units) | mask threshold (Q24) |
 /// | plateau | height (height units, whole layers) | |
+/// | cliffs (riser share in 1/1024 in kind bits 16..) | step (height units, whole layers) | mask threshold (Q24) |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct StackLayer {
@@ -371,6 +372,23 @@ impl StackLayer {
     pub const CRATERS: u32 = 7;
     pub const BASINS: u32 = 8;
     pub const PLATEAU: u32 = 9;
+    pub const CLIFFS: u32 = 10;
+
+    /// The kind without its parameter bits.
+    pub fn base_kind(&self) -> u32 {
+        self.kind & 0xffff
+    }
+}
+
+/// Terraces of `step` height units: flat treads, rising over the last
+/// `riser_q10` / 1024 of each step. 32-bit integer arithmetic, as
+/// `landform_terrace` in WGSL (`step` at most 2^20, `riser_q10` at most 1024).
+pub fn terrace(h: i32, step: i32, riser_q10: i32) -> i32 {
+    let q = h.div_euclid(step);
+    let f = h - q * step;
+    let riser = ((step * riser_q10) >> 10).max(1);
+    let t = (((f - (step - riser)).max(0)) << 10) / riser;
+    q * step + ((t.min(1024) * step) >> 10)
 }
 
 /// Material styles (`LandformConstants::style[0]`).
@@ -418,7 +436,9 @@ pub struct LandformConstants {
     /// layer count, sum of the erosion amplitudes (height units), domain
     /// radius (0 on planes), warp octaves (0 or 6).
     pub stack: [i32; 4],
-    /// Rules style: rule count, fallback material, pad.
+    /// Rules style: rule count, fallback material; the coarsest erosion
+    /// octave's shift (-1: none: erosion is resolved up to its level less
+    /// `RESOLVED_SHIFT`), pad.
     pub materials: [i32; 4],
     pub layers: [StackLayer; LAYERS],
     pub octaves: [Octave; OCTAVES],
@@ -462,6 +482,8 @@ impl LandformConstants {
             m[l] += match layer.kind {
                 StackLayer::CONTINENTS => f64::from(layer.a).abs() + f64::from(layer.b).abs(),
                 StackLayer::BASINS | StackLayer::PLATEAU => f64::from(layer.a).abs(),
+                // A terrace moves a height by less than a step.
+                _ if layer.base_kind() == StackLayer::CLIFFS => f64::from(layer.a).abs(),
                 _ => 0.0,
             };
         }
@@ -539,7 +561,11 @@ impl LandformConstants {
             // are at most 1.05 times a face-centre cell).
             let cell = crate::grid::REFERENCE_VOXEL / crate::grid::DOMAIN_UNIT;
             let half_diagonal = 2f64.powi(level as i32) * cell * ratio * std::f64::consts::SQRT_2 * 0.5 * 1.05;
-            let excess_mm = dropped + (lipschitz * (1.0 + warp) + unwarped) * half_diagonal;
+            // Terraces are not Lipschitz: a riser can rise a whole step
+            // inside a cell, and heights a step apart terrace up to two
+            // steps apart.
+            let terraces: f64 = layers.iter().filter(|l| l.base_kind() == StackLayer::CLIFFS).map(|l| 2.0 * f64::from(l.a)).sum();
+            let excess_mm = dropped + terraces + (lipschitz * (1.0 + warp) + unwarped) * half_diagonal;
             let cell_mm = f64::from(self.header[1]) * 2f64.powi(level as i32);
             out[level as usize] = ((excess_mm / cell_mm).ceil() as i64 + 2).clamp(2, 1 << 20) as i32;
         }
@@ -635,14 +661,18 @@ fn erosion_octave(saturation: i32, o: &Octave, p: IVec3, g: IVec3, up: IVec3) ->
     let s = o.shift;
     let c = IVec3::new(p.x >> s, p.y >> s, p.z >> s);
     let mask = (1i32 << s) - 1;
-    let w = [p.x, p.y, p.z].map(|v| fade(if s >= 16 { (v & mask) >> (s - 16) } else { (v & mask) << (16 - s) }));
+    let f = [p.x, p.y, p.z].map(|v| if s >= 16 { (v & mask) >> (s - 16) } else { (v & mask) << (16 - s) });
+    let w = f.map(fade);
+    // Offset along tn, in Q16 lattice spacings: from the cell's first corner,
+    // less one step of tn (Q16) for each axis a corner is past it.
+    let along0 = mul_shr_signed(f[0], tn.x, 30) + mul_shr_signed(f[1], tn.y, 30) + mul_shr_signed(f[2], tn.z, 30);
+    let step = IVec3::new(tn.x >> 14, tn.y >> 14, tn.z >> 14);
     let mut cos = [0i32; 8];
     let mut sin = [0i32; 8];
     for index in 0..8usize {
-        let corner = c + IVec3::new((index & 1) as i32, ((index >> 1) & 1) as i32, (index >> 2) as i32);
-        // Offset from the corner along tn, in Q16 lattice spacings.
-        let d = p - IVec3::new(corner.x << s, corner.y << s, corner.z << s);
-        let along = mul_shr_signed(d.x, tn.x, s + 14) + mul_shr_signed(d.y, tn.y, s + 14) + mul_shr_signed(d.z, tn.z, s + 14);
+        let k = IVec3::new((index & 1) as i32, ((index >> 1) & 1) as i32, (index >> 2) as i32);
+        let corner = c + k;
+        let along = along0 - (k * step).element_sum();
         let phase = along * STRIPES + (hash3(corner.x, corner.y, corner.z, o.seed) & 0xffff) as i32;
         // Gully profile pi/2 |cos(phase / 2)| - 1: V-shaped valleys between
         // rounded ridges, zero mean (levels that omit it keep their height)
@@ -878,11 +908,355 @@ pub fn surface(k: &LandformConstants, p: IVec3, level: u32) -> u32 {
     height_parts(k, p, level).1
 }
 
-/// [`height`] and [`surface`].
+/// Two-rate evaluation (`docs/two-rate-field.md`): octaves at least this
+/// many shifts above a column's level (wavelengths of 256 node spacings
+/// or more) are evaluated at nodes and interpolated, each column
+/// evaluating only the finer ones. The nodes are the columns of a level
+/// whose indices are multiples of `NODE_COLUMNS` (on their face: the face
+/// grid is linear in its indices, so a column's weights between its four
+/// nodes are exact), every column of a tile interpolating 5x5 of them.
+pub const MACRO_GAP: u32 = 15;
+/// Columns between nodes (16: a level cell's shift + 4).
+pub const NODE_COLUMNS: i32 = 16;
+/// Ridge octaves interpolated at most (each carries its noise and its
+/// gradient; later ones are a column's own).
+pub const MACRO_RIDGES: usize = 10;
+
+/// Whether `o` (resolved at `level`) is a macro octave. Erosion and craters
+/// never are: gully floors and crater rims are kinks interpolation would
+/// blunt. Ridges are, by their noise (their crests are made per column).
+#[inline]
+fn macro_class(o: &Octave, level: u32) -> bool {
+    o.shift >= level + MACRO_GAP && !matches!(o.class(), EROSION | CRATER)
+}
+
+/// What a node carries: the macro octaves' sums per layer (smooth), each
+/// macro ridge octave's noise and gradient (in table order), and the macro
+/// warp octaves' offset and Jacobian.
+#[derive(Clone, Copy)]
+struct Node {
+    value: [i32; LAYERS],
+    region: [i32; LAYERS],
+    dvalue: [IVec3; LAYERS],
+    dregion: [IVec3; LAYERS],
+    ridges: [(i32, IVec3); MACRO_RIDGES],
+    warp: IVec3,
+    jacobian: [IVec3; 3],
+}
+
+impl Node {
+    const ZERO: Self = Self {
+        value: [0; LAYERS],
+        region: [0; LAYERS],
+        dvalue: [IVec3::ZERO; LAYERS],
+        dregion: [IVec3::ZERO; LAYERS],
+        ridges: [(0, IVec3::ZERO); MACRO_RIDGES],
+        warp: IVec3::ZERO,
+        jacobian: [IVec3::ZERO; 3],
+    };
+}
+
+/// A warp octave's offset and Jacobian row at `p` (`erosion`: with the
+/// Jacobian).
+fn warp_octave(o: &Octave, p: IVec3, erosion: bool) -> (i32, IVec3) {
+    if !erosion {
+        return (mul_fine(o.amplitude, noise_fine(p, o.shift, o.seed)), IVec3::ZERO);
+    }
+    let (n, d) = noise_fine_grad(p, o.shift, o.seed);
+    let to_q24 = |v: i32| {
+        let m = mul_fine(v, o.amplitude);
+        if o.shift <= 24 { m << (24 - o.shift) } else { m >> (o.shift - 24) }
+    };
+    (mul_fine(o.amplitude, n), IVec3::new(to_q24(d.x), to_q24(d.y), to_q24(d.z)))
+}
+
+/// The warp octaves of a stack.
+fn warps(k: &LandformConstants) -> &[Octave] {
+    &k.octaves[..(k.stack[3].max(0) as usize).min(WARP_OCTAVES)]
+}
+
+/// Whether any octave of `level` is a macro one.
+fn has_macro(k: &LandformConstants, level: u32) -> bool {
+    warps(k).iter().any(|o| o.shift >= level + MACRO_GAP) || k.table().iter().any(|o| resolved(o, level) && macro_class(o, level))
+}
+
+/// Per-level column programs: the ops a column of each reference level
+/// runs, in table order, compiled once per stack, so that neither the CPU
+/// nor the GPU walks the whole table per column (on the GPU the walk and
+/// its checks were a sixth of a column's time). An op is its octave's index
+/// (`OP_INDEX` bits) and flags; `LandformPlan` packs them for the GPU.
+const OP_INDEX: u16 = 63;
+/// A macro ridge: its noise from the nodes (`Node::ridges[rank]`, the rank
+/// in the bits from `OP_RANK_SHIFT`).
+const OP_MACRO: u16 = 1 << 6;
+/// The display layer's ridge (generation's coarse levels keep the mean of
+/// those they cannot resolve; the CPU field has no display variant).
+const OP_DISPLAY: u16 = 1 << 7;
+/// An unresolved display ridge: only the display variant runs it.
+const OP_DISPLAY_ONLY: u16 = 1 << 8;
+/// Past its layer's last region octave: the layer's mask is whole.
+const OP_REGION_DONE: u16 = 1 << 9;
+const OP_RANK_SHIFT: u16 = 10;
+/// Changes what erosion steers by (continents and mountains): the next
+/// erosion octave recomputes its steering.
+const OP_STEER: u16 = 1 << 14;
+/// Reference levels with a program of their own; coarser ones run the last
+/// (no octave of the table is resolved finer than it).
+pub const PLAN_LEVELS: usize = 32;
+/// Ops of every level's program: at most each table octave once a level.
+pub const PLAN_OPS: usize = PLAN_LEVELS * (OCTAVES - WARP_OCTAVES);
+/// A level's node words in use: the value (bits 0..8), region (8..16) and
+/// value gradient (16..24) of each layer, the warp, and whether there are
+/// nodes at all.
+const NODE_REGION_SHIFT: u32 = 8;
+const NODE_DVALUE_SHIFT: u32 = 16;
+const NODE_WARP: u32 = 1 << 24;
+const NODE_ANY: u32 = 1 << 31;
+
+/// The ops of `level`'s columns (`two_rate`: macro octaves from nodes).
+fn level_ops(k: &LandformConstants, level: u32, two_rate: bool) -> Vec<u16> {
+    let mut region_done = [0usize; LAYERS];
+    for (n, o) in k.table().iter().enumerate() {
+        if o.class() == REGION {
+            region_done[o.layer()] = WARP_OCTAVES + n + 1;
+        }
+    }
+    let display_tag = if k.shape[0] > 0 { (((k.shape[0] - 1) as u32) << 8) | RIDGE } else { u32::MAX };
+    let mut ridges = 0;
+    let mut ops = Vec::new();
+    for (n, o) in k.table().iter().enumerate() {
+        let index = WARP_OCTAVES + n;
+        let res = resolved(o, level);
+        let display = o.kind == display_tag;
+        if !res && !display {
+            continue;
+        }
+        let mut op = index as u16;
+        if two_rate && res && macro_class(o, level) {
+            if o.class() != RIDGE {
+                continue;
+            }
+            ridges += 1;
+            if ridges <= MACRO_RIDGES {
+                op |= OP_MACRO | (((ridges - 1) as u16) << OP_RANK_SHIFT);
+            }
+        }
+        if display {
+            op |= OP_DISPLAY;
+            if !res {
+                op |= OP_DISPLAY_ONLY;
+            }
+        }
+        if index >= region_done[o.layer()] {
+            op |= OP_REGION_DONE;
+        }
+        let layer = k.layers[o.layer()].kind;
+        if o.class() != EROSION && (layer == StackLayer::CONTINENTS || layer == StackLayer::MOUNTAINS) {
+            op |= OP_STEER;
+        }
+        ops.push(op);
+    }
+    ops
+}
+
+/// The node words `level`'s columns read (`NODE_*`; 0: no nodes).
+fn level_nodes(k: &LandformConstants, level: u32) -> u32 {
+    if !has_macro(k, level) {
+        return 0;
+    }
+    let mut m = NODE_ANY;
+    if warps(k).iter().any(|o| o.shift >= level + MACRO_GAP) {
+        m |= NODE_WARP;
+    }
+    for o in k.table() {
+        if !resolved(o, level) || !macro_class(o, level) {
+            continue;
+        }
+        let l = o.layer() as u32;
+        match o.class() {
+            CONTINENT => m |= (1 << l) | (1 << (NODE_DVALUE_SHIFT + l)),
+            REGION => m |= 1 << (NODE_REGION_SHIFT + l),
+            RIDGE => {}
+            _ => m |= 1 << l,
+        }
+    }
+    m
+}
+
+/// Every level's column program (`TerrainConstants::plan_*`): per level
+/// its first op and op count (`first | count << 16`) and node words in
+/// use, then the ops, two a word (the first in the low half).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
+pub struct LandformPlan {
+    lists: [u32; PLAN_LEVELS],
+    nodes: [u32; PLAN_LEVELS],
+    ops: [u32; PLAN_OPS / 2],
+}
+
+impl LandformPlan {
+    pub fn new(k: &LandformConstants) -> Self {
+        let mut plan = Self::zeroed();
+        let mut at = 0usize;
+        for level in 0..PLAN_LEVELS {
+            let ops = level_ops(k, level as u32, true);
+            plan.lists[level] = at as u32 | (ops.len() as u32) << 16;
+            plan.nodes[level] = level_nodes(k, level as u32);
+            for op in ops {
+                plan.ops[at / 2] |= u32::from(op) << ((at & 1) * 16);
+                at += 1;
+            }
+        }
+        plan
+    }
+
+    /// The ops of reference level `level`'s columns.
+    fn ops(&self, level: u32) -> impl Iterator<Item = u16> + '_ {
+        let e = self.lists[(level as usize).min(PLAN_LEVELS - 1)];
+        let first = (e & 0xffff) as usize;
+        (first..first + (e >> 16) as usize).map(|n| (self.ops[n / 2] >> ((n & 1) * 16)) as u16)
+    }
+}
+
+/// The node at lattice point `node` (domain units) of `level`: the warp
+/// (all of it, to place the octaves; its macro octaves' part to carry),
+/// then the macro octaves at the warped node.
+fn macro_node(k: &LandformConstants, node: IVec3, level: u32, erosion: bool) -> Node {
+    let mut out = Node::ZERO;
+    let mut warp = [0i32; 3];
+    for o in warps(k) {
+        let axis = ((o.kind - WARP) as usize).min(2);
+        let (w, j) = warp_octave(o, node, erosion);
+        warp[axis] = warp[axis].wrapping_add(w);
+        if o.shift >= level + MACRO_GAP {
+            out.warp[axis] = out.warp[axis].wrapping_add(w);
+            out.jacobian[axis] += j;
+        }
+    }
+    let q = node + IVec3::from_array(warp);
+    let mut ridges = 0;
+    for o in k.table() {
+        if !resolved(o, level) || !macro_class(o, level) {
+            continue;
+        }
+        let l = o.layer();
+        match o.class() {
+            CONTINENT | REGION => {
+                let (n, d) = if erosion { noise_fine_grad(q, o.shift, o.seed) } else { (noise_fine(q, o.shift, o.seed), IVec3::ZERO) };
+                let v = mul_fine(n, o.amplitude << 8);
+                let dv = mul_fine3(per_span3(d, o.shift), o.amplitude << 8);
+                if o.class() == CONTINENT {
+                    out.value[l] = out.value[l].wrapping_add(v);
+                    out.dvalue[l] += dv;
+                } else {
+                    out.region[l] = out.region[l].wrapping_add(v);
+                    out.dregion[l] += dv;
+                }
+            }
+            RIDGE => {
+                if ridges < MACRO_RIDGES {
+                    out.ridges[ridges] = if erosion { noise_fine_grad(q, o.shift, o.seed) } else { (noise_fine(q, o.shift, o.seed), IVec3::ZERO) };
+                }
+                ridges += 1;
+            }
+            HILLS => out.value[l] = out.value[l].wrapping_add(mul_fine(o.amplitude, noise_fine(q, o.shift, o.seed))),
+            BASIN => out.value[l] = out.value[l].wrapping_add(noise_fine(node, o.shift, o.seed)),
+            _ => out.value[l] = out.value[l].wrapping_add(scale(noise(node, o.shift, o.seed), o.amplitude)),
+        }
+    }
+    out
+}
+
+/// The bilinear weights (sum 256) of a column `(di, dj)` columns past its
+/// first node: node `c` is `(c & 1, c >> 1)` node spacings further.
+fn node_weights(di: i32, dj: i32) -> [i32; 4] {
+    let (u, v) = (NODE_COLUMNS - di, NODE_COLUMNS - dj);
+    [u * v, di * v, u * dj, di * dj]
+}
+
+/// `floor(sum v_c w_c / 256)` (weights [`node_weights`]), wrapping: the high
+/// and low bytes summed apart, so a node's words can be added one node at a
+/// time (`landform.wgsl` does) and the result is exact.
+#[inline]
+fn lerp4(v: [i32; 4], w: [i32; 4]) -> i32 {
+    let (mut hi, mut lo) = (0i32, 0i32);
+    for c in 0..4 {
+        hi = hi.wrapping_add((v[c] >> 8).wrapping_mul(w[c]));
+        lo += (v[c] & 255) * w[c];
+    }
+    hi.wrapping_add(lo >> 8)
+}
+
+/// The four nodes around `column` (reference level `level`), interpolated
+/// bilinearly at it.
+fn macro_at(k: &LandformConstants, grid: &Grid, column: Column, level: u32, erosion: bool) -> Node {
+    let (a, b) = (column.i & !(NODE_COLUMNS - 1), column.j & !(NODE_COLUMNS - 1));
+    let w = node_weights(column.i - a, column.j - b);
+    let nodes: [Node; 4] = std::array::from_fn(|c| {
+        let (i, j) = (a + NODE_COLUMNS * (c & 1) as i32, b + NODE_COLUMNS * (c >> 1) as i32);
+        macro_node(k, grid.domain_point(column.face, i, j, column.level), level, erosion)
+    });
+    let bi = |v: [i32; 4]| lerp4(v, w);
+    let bi3 = |v: [IVec3; 4]| IVec3::new(bi(v.map(|x| x.x)), bi(v.map(|x| x.y)), bi(v.map(|x| x.z)));
+    let mut out = Node::ZERO;
+    for l in 0..LAYERS {
+        out.value[l] = bi(nodes.map(|n| n.value[l]));
+        out.region[l] = bi(nodes.map(|n| n.region[l]));
+        out.dvalue[l] = bi3(nodes.map(|n| n.dvalue[l]));
+        out.dregion[l] = bi3(nodes.map(|n| n.dregion[l]));
+    }
+    for r in 0..MACRO_RIDGES {
+        out.ridges[r] = (bi(nodes.map(|n| n.ridges[r].0)), bi3(nodes.map(|n| n.ridges[r].1)));
+    }
+    out.warp = bi3(nodes.map(|n| n.warp));
+    for axis in 0..3 {
+        out.jacobian[axis] = bi3(nodes.map(|n| n.jacobian[axis]));
+    }
+    out
+}
+
+/// The height and surface word of `column`: its macro octaves from its
+/// four nodes, the finer ones its own, by its level's program (the
+/// terrain's definition, mirrored by `landform.wgsl`).
+pub fn column_parts(k: &LandformConstants, plan: &LandformPlan, grid: &Grid, column: Column) -> (i32, u32) {
+    let level = column.level + grid.level_offset();
+    let p = grid.domain_point(column.face, column.i, column.j, column.level);
+    if has_macro(k, level) {
+        let erosion = k.materials[2] >= (level + RESOLVED_SHIFT) as i32;
+        parts(k, p, level, Some(&macro_at(k, grid, column, level, erosion)), plan.ops(level))
+    } else {
+        parts(k, p, level, None, plan.ops(level))
+    }
+}
+
+/// One ridge octave of noise `n` and gradient `d` into layer `l`'s chain.
+fn ridge_step(s: &mut Accumulators, l: usize, o: &Octave, n: i32, d: IVec3, erosion: bool) {
+    let r = (FINE_ONE - n.abs()).clamp(0, FINE_ONE - 1);
+    let rr = mul_fine(r, r);
+    let v = mul_fine(rr, s.weight[l]);
+    if erosion {
+        // The crest's sign flip is softened over |n| < 1/4.
+        let dr = mul_fine3(per_span3(-d, o.shift), (n * 4).clamp(-FINE_ONE, FINE_ONE));
+        let dv = mul_fine3(mul_fine3(dr, r) * 2, s.weight[l]) + mul_fine3(s.dweight[l], rr);
+        s.dweight[l] = mul_fine3(dv * 2, soft_inside(v * 2, FINE_ONE / 4, FINE_ONE - 1));
+        s.dvalue[l] += mul_fine3(dv, o.amplitude);
+    }
+    s.weight[l] = (v * 2).clamp(FINE_ONE / 4, FINE_ONE - 1);
+    s.value[l] = s.value[l].wrapping_add(mul_fine(o.amplitude, v));
+}
+
+/// [`height`] and [`surface`] of the point `p` with every octave evaluated
+/// there (the single-rate field; a column's is [`column_parts`]).
 pub fn height_parts(k: &LandformConstants, p: IVec3, level: u32) -> (i32, u32) {
+    parts(k, p, level, None, level_ops(k, level, false).into_iter())
+}
+
+/// The octaves of `ops` at `p` (reference level `level`), the macro ones
+/// from `m` when given (interpolated: [`macro_at`]).
+fn parts(k: &LandformConstants, p: IVec3, level: u32, m: Option<&Node>, ops: impl Iterator<Item = u16>) -> (i32, u32) {
     // Erosion follows the slope of the larger terrain: when one of its
     // octaves is resolved here, the large octaves carry their gradients.
-    let erosion = k.table().iter().any(|o| o.class() == EROSION && resolved(o, level));
+    let erosion = k.materials[2] >= (level + RESOLVED_SHIFT) as i32;
     // The warp, masks, ridges and hills scale up to kilometres, so they use
     // the fine (Q24) noise: 16-bit noise is constant over metres at these
     // wavelengths and its steps, multiplied by the relief, would cut
@@ -890,21 +1264,20 @@ pub fn height_parts(k: &LandformConstants, p: IVec3, level: u32) -> (i32, u32) {
     //
     // The warp is a coordinate transform, so every level evaluates it.
     // `jacobian[a]` is the gradient of warp axis `a` (Q24, dimensionless).
-    let mut warp = [0i32; 3];
-    let mut jacobian = [IVec3::ZERO; 3];
-    for o in &k.octaves[..(k.stack[3].max(0) as usize).min(WARP_OCTAVES)] {
-        let axis = ((o.kind - WARP) as usize).min(2);
-        if erosion {
-            let (n, d) = noise_fine_grad(p, o.shift, o.seed);
-            warp[axis] = warp[axis].wrapping_add(mul_fine(o.amplitude, n));
-            let to_q24 = |v: i32| {
-                let m = mul_fine(v, o.amplitude);
-                if o.shift <= 24 { m << (24 - o.shift) } else { m >> (o.shift - 24) }
-            };
-            jacobian[axis] += IVec3::new(to_q24(d.x), to_q24(d.y), to_q24(d.z));
-        } else {
-            warp[axis] = warp[axis].wrapping_add(mul_fine(o.amplitude, noise_fine(p, o.shift, o.seed)));
+    // The macro octaves interpolated from the node lattice (none: every
+    // octave the column's own).
+    let two_rate = m.is_some();
+    let m = m.copied().unwrap_or(Node::ZERO);
+    let mut warp = m.warp.to_array();
+    let mut jacobian = m.jacobian;
+    for o in warps(k) {
+        if two_rate && o.shift >= level + MACRO_GAP {
+            continue;
         }
+        let axis = ((o.kind - WARP) as usize).min(2);
+        let (w, j) = warp_octave(o, p, erosion);
+        warp[axis] = warp[axis].wrapping_add(w);
+        jacobian[axis] += j;
     }
     let q = p + IVec3::from_array(warp);
     // Gradients w.r.t. q map to p through (I + J)^T.
@@ -913,22 +1286,36 @@ pub fn height_parts(k: &LandformConstants, p: IVec3, level: u32) -> (i32, u32) {
         IVec3::new(column(0), column(1), column(2))
     };
     let up = if k.shape[3] != 0 { IVec3::new(0, Q30 as i32, 0) } else { unit_q30(p) };
+    // The macro octaves' sums come first; their ridges join the chains in
+    // table order below.
     let mut s = Accumulators {
-        value: [0; LAYERS],
-        region: [0; LAYERS],
+        value: m.value,
+        region: m.region,
         weight: [FINE_ONE - 1; LAYERS],
-        dvalue: [IVec3::ZERO; LAYERS],
-        dregion: [IVec3::ZERO; LAYERS],
+        dvalue: m.dvalue,
+        dregion: m.dregion,
         dweight: [IVec3::ZERO; LAYERS],
     };
     let mut eroded = 0i32;
     let mut deroded = IVec3::ZERO;
     let mut ejecta = 0u32;
-    for o in k.table() {
-        if !resolved(o, level) {
+    // Steering reads only continents and mountains (`OP_STEER` ops change
+    // them): the erosion octaves between share one.
+    let mut steer = None;
+    for op in ops {
+        if op & OP_DISPLAY_ONLY != 0 {
             continue;
         }
+        let o = &k.octaves[usize::from(op & OP_INDEX)];
+        if op & OP_STEER != 0 {
+            steer = None;
+        }
         let l = o.layer();
+        if op & OP_MACRO != 0 {
+            let (n, d) = m.ridges[usize::from((op >> OP_RANK_SHIFT) & 15)];
+            ridge_step(&mut s, l, o, n, d, erosion);
+            continue;
+        }
         match o.class() {
             CONTINENT | REGION => {
                 let (n, d) = if erosion { noise_fine_grad(q, o.shift, o.seed) } else { (noise_fine(q, o.shift, o.seed), IVec3::ZERO) };
@@ -944,22 +1331,11 @@ pub fn height_parts(k: &LandformConstants, p: IVec3, level: u32) -> (i32, u32) {
             }
             RIDGE => {
                 let (n, d) = if erosion { noise_fine_grad(q, o.shift, o.seed) } else { (noise_fine(q, o.shift, o.seed), IVec3::ZERO) };
-                let r = (FINE_ONE - n.abs()).clamp(0, FINE_ONE - 1);
-                let rr = mul_fine(r, r);
-                let v = mul_fine(rr, s.weight[l]);
-                if erosion {
-                    // The crest's sign flip is softened over |n| < 1/4.
-                    let dr = mul_fine3(per_span3(-d, o.shift), (n * 4).clamp(-FINE_ONE, FINE_ONE));
-                    let dv = mul_fine3(mul_fine3(dr, r) * 2, s.weight[l]) + mul_fine3(s.dweight[l], rr);
-                    s.dweight[l] = mul_fine3(dv * 2, soft_inside(v * 2, FINE_ONE / 4, FINE_ONE - 1));
-                    s.dvalue[l] += mul_fine3(dv, o.amplitude);
-                }
-                s.weight[l] = (v * 2).clamp(FINE_ONE / 4, FINE_ONE - 1);
-                s.value[l] = s.value[l].wrapping_add(mul_fine(o.amplitude, v));
+                ridge_step(&mut s, l, o, n, d, erosion);
             }
             HILLS => s.value[l] = s.value[l].wrapping_add(mul_fine(o.amplitude, noise_fine(q, o.shift, o.seed))),
             EROSION => {
-                let g = unwarp(steering(k, &s)) + deroded;
+                let g = *steer.get_or_insert_with(|| unwarp(steering(k, &s))) + deroded;
                 let (e, de) = erosion_octave(k.layers[l].a, o, p, g, up);
                 s.value[l] = s.value[l].wrapping_add(e);
                 eroded = eroded.wrapping_add(e);
@@ -993,6 +1369,13 @@ pub fn height_parts(k: &LandformConstants, p: IVec3, level: u32) -> (i32, u32) {
             }
             StackLayer::PLATEAU => layer.a,
             StackLayer::HILLS | StackLayer::ROUGHNESS | StackLayer::EROSION | StackLayer::CRATERS => s.value[l],
+            _ if layer.base_kind() == StackLayer::CLIFFS => {
+                // Escarpments: inside their regions, terraces of what lies
+                // below them in the stack.
+                let m = masked(layer.mask, (s.value[l].wrapping_sub(layer.b).wrapping_mul(4)).clamp(0, FINE_ONE), land, wet);
+                h = h.wrapping_add(mul_fine(terrace(h, layer.a, (layer.kind >> 16) as i32).wrapping_sub(h), m));
+                continue;
+            }
             _ => 0,
         };
         h = h.wrapping_add(masked(layer.mask, x, land, wet));
@@ -1208,11 +1591,12 @@ pub fn lunar_appearance() -> TerrainAppearance {
 
 /// A compiled terrain stack on one grid.
 pub struct LandformField {
+    grid: Grid,
     constants: LandformConstants,
     volume: LandformVolume,
     bounds: [i32; 24],
-    render_bounds: [i32; 24],
     ridge_suffix: Option<[[i32; 4]; 66]>,
+    plan: Box<LandformPlan>,
 }
 
 impl LandformField {
@@ -1222,19 +1606,14 @@ impl LandformField {
         // In particular, do not saturate invalid huge amplitudes into new
         // terrain.
         let ridge_suffix = crate::ridge_envelope::bake_ridge_suffix(grid, &constants).ok();
-        let mut render_bounds = if ridge_suffix.is_some() {
-            crate::ridge_envelope::render_bounds(grid, &constants, bounds)
-        } else {
-            bounds
-        };
         // Overhangs raise a finer column's highest solid cell over its
         // heightfield top.
         for level in 0..24u32 {
             let rise = volume.rise_cells(level);
             bounds[level as usize] = bounds[level as usize].saturating_add(rise);
-            render_bounds[level as usize] = render_bounds[level as usize].saturating_add(rise);
         }
-        Self { bounds, render_bounds, ridge_suffix, constants, volume }
+        let plan = Box::new(LandformPlan::new(&constants));
+        Self { grid: *grid, bounds, ridge_suffix, constants, volume, plan }
     }
     pub fn constants(&self) -> &LandformConstants {
         &self.constants
@@ -1248,23 +1627,20 @@ impl LandformField {
 }
 
 impl TerrainField for LandformField {
-    fn height(&self, p: IVec3, level: u32) -> i32 {
-        height(&self.constants, p, level)
+    fn height(&self, column: Column) -> i32 {
+        column_parts(&self.constants, &self.plan, &self.grid, column).0
     }
     fn ground_material(&self, p: IVec3, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
         ground_material(&self.constants, p, surface, top_height, depth, slope, layer)
     }
-    fn surface(&self, p: IVec3, level: u32, _height: i32) -> u32 {
-        surface(&self.constants, p, level)
+    fn surface(&self, column: Column, _height: i32) -> u32 {
+        column_parts(&self.constants, &self.plan, &self.grid, column).1
     }
     fn height_range(&self) -> (i32, i32) {
         self.constants.height_range()
     }
     fn bound_margins(&self) -> [i32; 24] {
         self.bounds
-    }
-    fn render_bound_margins(&self) -> [i32; 24] {
-        self.render_bounds
     }
     fn extent(&self, p: IVec3, level: u32) -> (i32, i32) {
         self.volume.extent(p, level, self.seed())
@@ -1291,6 +1667,7 @@ impl TerrainField for LandformField {
         let mut constants = bytemuck::bytes_of(&canonical).to_vec();
         constants.extend_from_slice(bytemuck::cast_slice(&self.ridge_suffix.unwrap_or([[0; 4]; 66])));
         constants.extend_from_slice(bytemuck::bytes_of(&self.volume));
+        constants.extend_from_slice(bytemuck::bytes_of(&*self.plan));
         TerrainProgram {
             key: Cow::Borrowed(DISPLAY_PROGRAM),
             wgsl: Cow::Borrowed(include_str!("../shaders/landform.wgsl")),
@@ -1302,6 +1679,38 @@ impl TerrainField for LandformField {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two-rate field against every octave at the column: within a
+    /// fraction of a level cell everywhere (wavelengths of 256 node
+    /// spacings interpolate to millimetres; ridge crests stay sharp, made
+    /// per column from interpolated noise).
+    #[test]
+    fn two_rate_field_stays_within_a_fraction_of_a_cell() {
+        let grid = Grid::new(6_371_000.0, 0.1).unwrap();
+        let k = crate::layers::TerrainLayers::earth().compile(&grid, 75).unwrap().0;
+        let plan = LandformPlan::new(&k);
+        let n = f64::from(grid.cells());
+        let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            (rng >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for level in 0..13u32 {
+            let cell = (HEIGHT_ONE as f64 * 0.1) * f64::from(1u32 << level);
+            let mut worst = 0.0f64;
+            for _ in 0..400 {
+                let (fi, fj) = (0.3 + 0.4 * next(), 0.3 + 0.4 * next());
+                let column = Column { face: 2, i: (fi * n) as i32 >> level, j: (fj * n) as i32 >> level, level };
+                let a = column_parts(&k, &plan, &grid, column).0;
+                let b = height_parts(&k, grid.domain_point(column.face, column.i, column.j, column.level), level + grid.level_offset()).0;
+                worst = worst.max(f64::from((a - b).abs()) / cell);
+            }
+            eprintln!("TWO_RATE level {level}: worst {worst:.4} cells");
+            assert!(worst < 0.25, "level {level}: {worst} cells");
+        }
+    }
     use crate::layers::TerrainLayers;
     use crate::terrain::{generated_kind, top_cells, TerrainField};
 
@@ -1345,7 +1754,7 @@ mod tests {
             let face = (next() % 6) as u8;
             let (i, j) = ((next() % grid.cells() as u64) as i32, (next() % grid.cells() as u64) as i32);
             let p = grid.domain_point(face, i, j, 0);
-            let height = v2.height(p, grid.level_offset());
+            let height = v2.height(crate::terrain::Column { face, i, j, level: 0 });
             let top = top_cells(&grid, height, 0);
             assert_eq!(v1.extent(p, 0), (0, 0));
             let (below, above) = v2.extent(p, 0);
@@ -1390,7 +1799,7 @@ mod tests {
             }
             regions += 1;
             entrances += usize::from(entrance > 0);
-            let height = field.height(p, grid.level_offset());
+            let height = field.height(crate::terrain::Column { face, i, j, level: 0 });
             let top = top_cells(&grid, height, 0);
             for k in top - cover_cells..top {
                 if generated_kind(&grid, &field, face, i, j, k, 0, height) == 0 {
@@ -1424,7 +1833,7 @@ mod tests {
             if region < ONE / 2 || entrance < ONE / 2 {
                 continue;
             }
-            let height = field.height(p, grid.level_offset());
+            let height = field.height(crate::terrain::Column { face, i, j, level: 0 });
             let top = top_cells(&grid, height, 0);
             if (top - 30..top).any(|k| generated_kind(&grid, &field, face, i, j, k, 0, height) == 0) {
                 break (face, i, j, top);
@@ -1458,7 +1867,7 @@ mod tests {
         for y in 0..N {
             for x in 0..N {
                 let (i, j) = (ci - N / 2 + x, cj - N / 2 + y);
-                let height = field.height(grid.domain_point(face, i, j, 0), grid.level_offset());
+                let height = field.height(crate::terrain::Column { face: face, i: i, j: j, level: 0 });
                 let column_top = top_cells(grid, height, 0);
                 for z in 0..k1 - k0 {
                     let k = k0 + z;
@@ -1526,7 +1935,7 @@ mod tests {
                 continue;
             }
             // Steep ground: over 45 degrees across a few metres.
-            let h = |di: i32, dj: i32| field.height(grid.domain_point(face, i + di, j + dj, 0), grid.level_offset());
+            let h = |di: i32, dj: i32| field.height(crate::terrain::Column { face: face, i: i + di, j: j + dj, level: 0 });
             let slope = (h(20, 0) - h(-20, 0)).abs().max((h(0, 20) - h(0, -20)).abs());
             if slope < 4000 {
                 continue;
@@ -1566,7 +1975,7 @@ mod tests {
             if below + above == 0 {
                 continue;
             }
-            let height = field.height(p, grid.level_offset());
+            let height = field.height(crate::terrain::Column { face, i, j, level: 0 });
             let top = top_cells(&grid, height, 0);
             let density = |k: i32| {
                 let lean = crate::terrain::lean_height(&grid, &field, face, i, j, k, 0, height);

@@ -5,6 +5,8 @@ use super::super::IntensityUnits;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Intensity", category_color = "#F59E0B")]
+// Fields added later load from levels saved before them.
+#[serde(default)]
 pub struct IntensityLightProps {
     #[property(min = 0.0, max = 200000.0, step = 10.0, category = "Intensity")]
     #[gpu]

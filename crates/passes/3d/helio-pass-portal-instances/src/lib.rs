@@ -230,9 +230,9 @@ impl PortalInstancePass {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 // `helio-pass-portal-mask` (run immediately before this pass)
-                // already reset depth to the far plane everywhere a portal's
+                // already reset depth to the clear value everywhere a portal's
                 // opening is actually visible on screen, and left real depth
-                // untouched everywhere else. So a normal LessEqual+write test
+                // untouched everywhere else. So a normal nearer-or-equal+write test
                 // here does the right thing on both sides of that boundary:
                 // duplicate content behind a visible opening self-occludes
                 // correctly (nearer copies win), while any pixel the mask
@@ -243,16 +243,12 @@ impl PortalInstancePass {
                 // pass (foliage, virtual geometry) occlude correctly against
                 // the illusion content instead of the stale real depth.
                 depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    // Small nudge so adjacent duplicate copies' coplanar
-                    // seams (e.g. two segments' floors meeting end to end)
-                    // don't z-fight.
-                    constant: -1,
-                    slope_scale: 0.0,
-                    clamp: 0.0,
-                },
+                // Small nudge so adjacent duplicate copies' coplanar seams
+                // (e.g. two segments' floors meeting end to end) don't
+                // z-fight.
+                bias: helio_core::depth::bias_toward_camera(1, 0.0, 0.0),
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,

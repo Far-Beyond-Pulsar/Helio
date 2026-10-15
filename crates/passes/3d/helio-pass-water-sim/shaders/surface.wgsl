@@ -56,7 +56,7 @@ struct WaterVolume {
 @group(0) @binding(8) var depth_texture:  texture_depth_2d;
 @group(0) @binding(9) var depth_sampler:  sampler;
 @group(0) @binding(10) var gbuffer_normal: texture_2d<f32>;
-@group(0) @binding(11) var hiz_min:        texture_2d<f32>;
+@group(0) @binding(11) var hiz_nearest:    texture_2d<f32>;
 
 const IOR_AIR: f32 = 1.0;
 
@@ -194,7 +194,7 @@ fn water_path_length(
     // Distance to the opaque scene behind the surface.
     var t_scene = max_path;
     let depth = textureSampleLevel(depth_texture, depth_sampler, screen_uv, 0);
-    if depth < 1.0 {
+    if !helio_is_sky(depth) {
         let scene_pos = helio_world_from_depth(cameras[0].view_proj_inv, screen_uv, depth);
         t_scene = distance(scene_pos, surface_pos);
     }
@@ -336,7 +336,7 @@ fn water_foam(path: f32, world_xz: vec2f, normal: vec3f, vol: WaterVolume) -> f3
 }
 
 // ── Screen-space reflection ──────────────────────────────────────────────────
-// Marches the shared `hiz_min` pyramid via `helio_hiz_march` — the same
+// Marches the shared `hiz_nearest` pyramid via `helio_hiz_march` — the same
 // traversal helio-pass-ssr uses, rather than a second implementation living
 // here (#147).
 //
@@ -360,7 +360,6 @@ fn trace_ssr(origin: vec3f, dir: vec3f, normal: vec3f, vol: WaterVolume) -> SsrR
     result.confidence = 0.0;
 
     let near = cameras[0].position_near.w;
-    let far  = cameras[0].forward_far.w;
 
     // Build the ray in view space so it can be clipped against the near plane
     // before projection — a ray crossing w = 0 projects to nonsense.
@@ -387,7 +386,7 @@ fn trace_ssr(origin: vec3f, dir: vec3f, normal: vec3f, vol: WaterVolume) -> SsrR
     let p1 = vec3f(helio_ndc_to_uv(clip1.xy / clip1.w), clip1.z / clip1.w);
 
     let march = helio_hiz_march(
-        hiz_min, p0, p1,
+        hiz_nearest, p0, p1,
         SSR_START_LEVEL, SSR_MAX_LEVEL,
         u32(clamp(vol.ssr_params.y, 8.0, 128.0)),
     );
@@ -400,9 +399,9 @@ fn trace_ssr(origin: vec3f, dir: vec3f, normal: vec3f, vol: WaterVolume) -> SsrR
     // Thickness: the pyramid says the ray reached this surface, but a hit far
     // behind it is the ray having tunnelled past a thin object.
     let thickness = max(vol.ssr_params.w, 1e-3);
-    let ray_z     = helio_view_depth(march.pos.z, near, far);
+    let ray_z     = helio_view_depth(cameras[0].proj, march.pos.z);
     let scene_z   = helio_view_depth(
-        textureSampleLevel(depth_texture, depth_sampler, hit_uv, 0), near, far);
+        cameras[0].proj, textureSampleLevel(depth_texture, depth_sampler, hit_uv, 0));
     if ray_z > scene_z * (1.0 + thickness) {
         return result;
     }
@@ -537,7 +536,7 @@ fn fs_above(in: VertexOutput) -> vec4f {
     // water surface — a rock breaking the waterline, a hull, a character — that
     // object is in front of the water and must not be dragged into it.
     let refr_depth = textureSampleLevel(depth_texture, depth_sampler, refract_uv, 0);
-    let refr_z     = helio_view_depth(refr_depth, cameras[0].position_near.w, cameras[0].forward_far.w);
+    let refr_z     = helio_view_depth(cameras[0].proj, refr_depth);
     var path        = path_direct;
     var scene_depth = refr_depth;
     if refr_z < view_z {
@@ -551,7 +550,7 @@ fn fs_above(in: VertexOutput) -> vec4f {
 
     // Caustics land on the submerged surface being looked at through the water,
     // so they are added before absorption attenuates the whole lot.
-    if scene_depth < 1.0 {
+    if !helio_is_sky(scene_depth) {
         let scene_pos = helio_world_from_depth(cameras[0].view_proj_inv, refract_uv, scene_depth);
         refracted += water_caustics(scene_pos, vol, refract_uv, vi);
     }

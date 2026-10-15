@@ -6,6 +6,8 @@ use crate::components::ObjectMovability;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("General", category_color = "#F4C542")]
+// Fields added later load from levels saved before them.
+#[serde(default)]
 pub struct GeneralLightProps {
     /// Uploaded as 0/1: a disabled light keeps its GPU row, marked absent,
     /// so its presence is data rather than whether a row exists.

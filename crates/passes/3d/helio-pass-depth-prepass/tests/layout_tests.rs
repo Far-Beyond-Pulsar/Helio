@@ -88,13 +88,12 @@ fn back_face_culling_enabled() {
     assert!(BACK_FACE_CULLING);
 }
 
-/// The depth compare function is `Less`.
+/// The depth test keeps the nearer fragment.
 #[test]
-fn depth_compare_function_is_less() {
-    // Meaning: a fragment passes if its depth < stored depth.
-    // `Less` is the standard function for forward depth writes.
-    const COMPARE_IS_LESS: bool = true;
-    assert!(COMPARE_IS_LESS);
+fn depth_compare_keeps_the_nearer_fragment() {
+    // Reversed Z: a nearer fragment has the *larger* depth, so the strict
+    // nearer test is `Greater`.
+    assert_eq!(helio_core::depth::NEARER, wgpu::CompareFunction::Greater);
 }
 
 /// Depth writes are enabled (not a read-only depth pass).

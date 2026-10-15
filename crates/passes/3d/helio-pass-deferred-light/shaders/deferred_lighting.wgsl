@@ -1,3 +1,4 @@
+//!use helio_prelude
 //!use pbr_eval
 //!use atmosphere
 
@@ -19,17 +20,6 @@
 const ENABLE_LIGHTING: bool = true;
 const ENABLE_SHADOWS: bool = true;
 const MAX_SHADOW_LIGHTS: u32 = 42u;
-
-struct Camera {
-    view:           mat4x4<f32>,
-    proj:           mat4x4<f32>,
-    view_proj:      mat4x4<f32>,
-    view_proj_inv:  mat4x4<f32>,
-    position_near:  vec4<f32>,
-    forward_far:    vec4<f32>,
-    jitter_frame:   vec4<f32>,
-    prev_view_proj: mat4x4<f32>,
-}
 
 struct Globals {
     frame:             u32,
@@ -160,6 +150,47 @@ struct ShadowCasterCounts {
 // between them and space, and the sky lights them; the air between them and
 // the eye is the atmosphere composite's.
 @group(0) @binding(9) var<uniform> atmosphere: AtmosphereFrame;
+// The sky over each surface (`AtmosphereFrame` docs, `SKY_TABLE_*`).
+@group(0) @binding(10) var<uniform> atmosphere_sky_table: array<vec4<f32>, 2304>;
+
+// The sky's irradiance / pi at a surface `from_camera` (km, relative to the
+// camera) with normal `n`: its own sky, by its altitude and sun angle, not
+// the eye's (`sky_table_kernel`). Above the atmosphere the planet's glow
+// falls with its solid angle.
+fn atmosphere_local_irradiance(from_camera: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    if atmosphere.planet.w < 0.5 { return vec3<f32>(0.0); }
+    let bottom = atmosphere.params.bottom_radius;
+    let top = atmosphere.params.top_radius;
+    let pos = from_camera - atmosphere.planet.xyz;
+    let r = max(length(pos), bottom);
+    let up = normalize(pos);
+    let sun = atmosphere.sun.xyz;
+    let mu_s = dot(up, sun);
+    var x = sun - up * mu_s;
+    if dot(x, x) < 1e-8 { x = cross(up, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(up.x) > 0.9)); }
+    x = normalize(x);
+    let z = cross(x, up);
+    let l = vec3<f32>(dot(n, x), dot(n, up), dot(n, z));
+    let height = clamp((r - bottom) / (top - bottom), 0.0, 1.0);
+    let fr = sqrt(height) * f32(SKY_TABLE_R - 1u);
+    let fm = clamp((mu_s - SKY_TABLE_MU_LO) / (1.0 - SKY_TABLE_MU_LO), 0.0, 1.0) * f32(SKY_TABLE_MU - 1u);
+    let r0 = min(u32(fr), SKY_TABLE_R - 2u);
+    let m0 = min(u32(fm), SKY_TABLE_MU - 2u);
+    let w = vec2<f32>(fr - f32(r0), fm - f32(m0));
+    let basis = array<f32, 6>(0.282095, 0.488603 * l.y, 0.488603 * l.x, 1.092548 * l.x * l.y, 0.315392 * (3.0 * l.z * l.z - 1.0), 0.546274 * (l.x * l.x - l.y * l.y));
+    var e = vec3<f32>(0.0);
+    for (var k = 0u; k < SKY_TABLE_COEFFS; k++) {
+        let a = (r0 * SKY_TABLE_MU + m0) * SKY_TABLE_COEFFS + k;
+        let b = a + SKY_TABLE_COEFFS;
+        let c = a + SKY_TABLE_MU * SKY_TABLE_COEFFS;
+        let d = c + SKY_TABLE_COEFFS;
+        let v = mix(mix(atmosphere_sky_table[a].rgb, atmosphere_sky_table[b].rgb, w.y), mix(atmosphere_sky_table[c].rgb, atmosphere_sky_table[d].rgb, w.y), w.x);
+        e += v * basis[k];
+    }
+    let above = length(pos) / top;
+    let falloff = select(1.0, 1.0 / (above * above), above > 1.0);
+    return max(e, vec3<f32>(0.0)) * atmosphere.sun_illuminance.rgb * falloff;
+}
 
 // min(dynamic, static) shadow comparison, skipping an atlas with no casters.
 fn compare_shadow_atlases(uv: vec2<f32>, layer: u32, depth_ref: f32) -> f32 {
@@ -1094,9 +1125,9 @@ fn sample_rc_specular(
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let pix = vec2<i32>(i32(in.clip_pos.x), i32(in.clip_pos.y));
 
-    // ── Depth guard: sky areas (depth=1) are already in the target → discard ──
+    // ── Depth guard: sky areas are already in the target → discard ──
     let depth = textureLoad(gbuf_depth, pix, 0);
-    if depth >= 1.0 { discard; }
+    if helio_is_sky(depth) { discard; }
 
     // ── Read G-buffer ─────────────────────────────────────────────────────────
     let albedo_a  = textureLoad(gbuf_albedo,   pix, 0);
@@ -1271,7 +1302,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             if light.light_type == 0u && dot(voxel_visibility.yzw, voxel_visibility.yzw) > 0.5 {
                 let light_direction = -normalize(light.direction_outer.xyz);
                 if dot(normalize(voxel_visibility.yzw), light_direction) > 0.99999 {
-                    if voxel_visibility.x < 0.0 { return vec4<f32>(4.0, 0.0, 2.6, 1.0); }
                     sf *= clamp(voxel_visibility.x, 0.0, 1.0);
                 }
             }
@@ -1328,11 +1358,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // When RC GI is active it replaces the hemisphere fallback with physically-
     // based global illumination.  When inactive the hemisphere ambient is used.
 
-    // With an atmosphere the sky itself is the ambient light: its radiance,
-    // ground included, cosine-convolved at the eye.
+    // With an atmosphere the sky itself is the ambient light: the sky over
+    // the surface (its altitude and sun angle), the lit ground below its
+    // horizon included, cosine-convolved.
     var hemi: vec3<f32>;
     if atmosphere.planet.w > 0.5 {
-        hemi = atmosphere_sky_irradiance(atmosphere, N) * albedo;
+        hemi = atmosphere_local_irradiance((world_pos - cameras[0].position_near.xyz) * 0.001, N) * albedo;
     } else {
         let sky_color    = globals.ambient_color.rgb * globals.ambient_intensity;
         let ground_color = sky_color * 0.15;
@@ -1386,7 +1417,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
     let pix = vec2<i32>(i32(in.clip_pos.x), i32(in.clip_pos.y));
     let depth = textureLoad(gbuf_depth, pix, 0);
-    if depth >= 1.0 { discard; }
+    if helio_is_sky(depth) { discard; }
 
     let ssr_hit = textureLoad(ssr_tex, pix, 0);
     if globals.debug_mode == 30u {
@@ -1548,7 +1579,7 @@ fn contact_visibility(light:GpuLight,position:vec3f,normal:vec3f)->f32 {
         let ndc=clip.xyz/clip.w;let uv=vec2f(ndc.x*0.5+0.5,0.5-ndc.y*0.5);
         if any(uv<=vec2f(0)) || any(uv>=vec2f(1)) {break;}
         let depth=textureLoad(gbuf_depth,vec2i(uv*vec2f(dims)),0);
-        if depth>=1.0 {continue;}
+        if helio_is_sky(depth) {continue;}
         let h=cameras[0].view_proj_inv*vec4f(ndc.xy,depth,1);
         let hit=h.xyz/h.w;
         let delta=length(p-cameras[0].position_near.xyz)-length(hit-cameras[0].position_near.xyz);

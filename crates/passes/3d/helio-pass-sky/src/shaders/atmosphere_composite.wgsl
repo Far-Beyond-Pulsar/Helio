@@ -1,3 +1,4 @@
+//!use helio_prelude
 //!use atmosphere
 // Atmosphere composite over the lit scene (`pre_aa`), blended as
 // dst * alpha + src: sky pixels (no geometry) are replaced by the sky and the
@@ -11,17 +12,6 @@
 // would spend their resolution on empty space around a thin shell (and the
 // volume would not reach the planet), so each pixel marches its own ray
 // through the shell instead.
-
-struct Camera {
-    view: mat4x4<f32>,
-    proj: mat4x4<f32>,
-    view_proj: mat4x4<f32>,
-    inv_view_proj: mat4x4<f32>,
-    position_near: vec4<f32>,
-    forward_far: vec4<f32>,
-    jitter_frame: vec4<f32>,
-    prev_view_proj: mat4x4<f32>,
-}
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<storage, read> frame: AtmosphereFrame;
@@ -88,7 +78,7 @@ fn fs_composite(in: VertexOut) -> @location(0) vec4<f32> {
     let eye = frame.eye.xyz;
     let r = length(eye);
     let in_space = r > frame.params.top_radius;
-    if depth >= 1.0 {
+    if helio_is_sky(depth) {
         var radiance: vec3<f32>;
         // The air between the eye and the sun's disk along `d`.
         var through = vec3<f32>(1.0);
@@ -113,7 +103,7 @@ fn fs_composite(in: VertexOut) -> @location(0) vec4<f32> {
         }
         return vec4<f32>(radiance, 0.0);
     }
-    let distance = length(ray) * atmosphere_view_depth(camera.proj, depth) * 0.001;
+    let distance = length(ray) * helio_view_depth(camera.proj, depth) * 0.001;
     if in_space {
         let air = march_from_space(eye, d, distance);
         return vec4<f32>(air.radiance * sun, dot(air.transmittance, vec3<f32>(1.0 / 3.0)));

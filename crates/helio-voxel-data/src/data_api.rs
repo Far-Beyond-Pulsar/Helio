@@ -125,10 +125,6 @@ impl VoxelSourceWriter {
         }
     }
 
-    pub fn formats(&self) -> &Arc<VoxelFormatRegistry> {
-        &self.formats
-    }
-
     /// Current live data revision for this component's chunk map.
     pub fn revision(&self) -> Result<u64, VoxelUpdateError> {
         self.store
@@ -145,25 +141,6 @@ impl VoxelSourceWriter {
         &self,
         batch: &VoxelChunkBatch<'_>,
     ) -> Result<VoxelBatchReceipt, VoxelUpdateError> {
-        self.publish_batch_inner(batch, None)
-    }
-
-    /// Publish an already-owned batch without copying payload bytes. Handles
-    /// correspond to Upsert operations in order and must own those exact
-    /// borrowed slices. Validation still runs before the SceneDB write lock.
-    pub fn publish_shared_batch(
-        &self,
-        batch: &VoxelChunkBatch<'_>,
-        payloads: &[Arc<[u8]>],
-    ) -> Result<VoxelBatchReceipt, VoxelUpdateError> {
-        self.publish_batch_inner(batch, Some(payloads))
-    }
-
-    fn publish_batch_inner(
-        &self,
-        batch: &VoxelChunkBatch<'_>,
-        payloads: Option<&[Arc<[u8]>]>,
-    ) -> Result<VoxelBatchReceipt, VoxelUpdateError> {
         if batch.terrain != self.terrain {
             return Err(VoxelUpdateError::WrongTerrain {
                 expected: self.terrain,
@@ -179,24 +156,6 @@ impl VoxelSourceWriter {
 
         let observed_revision = self.revision()?;
         batch.validate_with_formats(observed_revision, &self.formats)?;
-        if let Some(payloads) = payloads {
-            let mut handles = payloads.iter();
-            for op in batch.ops {
-                if let VoxelChunkOp::Upsert(update) = op {
-                    let Some(handle) = handles.next() else {
-                        return Err(VoxelUpdateError::PayloadHandleMismatch);
-                    };
-                    if !std::ptr::eq(handle.as_ptr(), update.payload.bytes.as_ptr())
-                        || handle.len() != update.payload.bytes.len()
-                    {
-                        return Err(VoxelUpdateError::PayloadHandleMismatch);
-                    }
-                }
-            }
-            if handles.next().is_some() {
-                return Err(VoxelUpdateError::PayloadHandleMismatch);
-            }
-        }
         if batch.ops.is_empty() {
             return Ok(VoxelBatchReceipt {
                 revision: observed_revision,
@@ -209,7 +168,6 @@ impl VoxelSourceWriter {
         // Prepare all owned bytes before entering the component-store write
         // boundary. The operation limit and total-byte limit were validated
         // above, so these allocations are bounded by the accepted batch.
-        let mut handles = payloads.map(|payloads| payloads.iter());
         let staged: Vec<_> = batch
             .ops
             .iter()
@@ -219,12 +177,7 @@ impl VoxelSourceWriter {
                     VoxelStoredPayload {
                         encoding: update.payload.encoding,
                         schema_version: update.payload.schema_version,
-                        bytes: match &mut handles {
-                            Some(handles) => {
-                                Arc::clone(handles.next().expect("validated shared payload count"))
-                            }
-                            None => Arc::<[u8]>::from(update.payload.bytes),
-                        },
+                        bytes: Arc::<[u8]>::from(update.payload.bytes),
                     },
                 )),
                 VoxelChunkOp::Delete { .. } => None,
@@ -304,58 +257,6 @@ impl VoxelSourceWriter {
         drop(state);
         chunks.sort_unstable_by_key(|(key, _)| *key);
         Ok(VoxelTerrainSnapshot { revision, chunks })
-    }
-
-    /// Replace this component's complete live chunk map from a caller-owned
-    /// snapshot. This is an in-memory import/replay primitive only: callers
-    /// choose their own serialization, durable storage, and scheduling policy.
-    /// The replacement is one validated revision transition and must run on a
-    /// worker/script thread for large snapshots.
-    pub fn replace_from_snapshot(
-        &self,
-        snapshot: &VoxelTerrainSnapshot,
-        domain: crate::VoxelDomain,
-    ) -> Result<VoxelBatchReceipt, VoxelUpdateError> {
-        let current = self.snapshot()?;
-        let mut ops = Vec::with_capacity(current.len().saturating_add(snapshot.len()));
-        for (key, _) in current.iter() {
-            if snapshot.get(key).is_none() {
-                ops.push(VoxelChunkOp::Delete { key });
-            }
-        }
-        for (key, payload) in snapshot.iter() {
-            ops.push(VoxelChunkOp::Upsert(crate::VoxelChunkUpdate {
-                key,
-                payload,
-            }));
-        }
-        let revision = current.revision();
-        let publish = if ops.is_empty() {
-            revision
-        } else {
-            revision
-                .checked_add(1)
-                .ok_or(VoxelUpdateError::NonSequentialRevision {
-                    expected_next: None,
-                    publish: revision,
-                })?
-        };
-        let batch = crate::VoxelChunkBatch {
-            terrain: self.terrain,
-            source: self.source,
-            revision: crate::VoxelBatchRevision {
-                expected: revision,
-                publish,
-            },
-            domain,
-            ops: &ops,
-        };
-        let payloads: Vec<_> = snapshot
-            .chunks
-            .iter()
-            .map(|(_, payload)| payload.bytes.clone())
-            .collect();
-        self.publish_shared_batch(&batch, &payloads)
     }
 }
 
@@ -507,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_and_import_preserve_registered_payload_format() {
+    fn snapshots_keep_registered_payload_formats() {
         let mut formats = VoxelFormatRegistry::default();
         formats
             .register(VoxelFormatDescriptor {
@@ -552,57 +453,6 @@ mod tests {
         assert_eq!((payload.encoding, payload.schema_version), (42, 2));
         assert_eq!(payload.as_ref(), &bytes);
         assert_eq!(snapshot.get_raw_material(key), None);
-
-        let target = VoxelSourceWriter::new_with_formats(
-            VoxelTerrainId(3),
-            VoxelSourceId(4),
-            Arc::new(RwLock::new((0, HashMap::new()))),
-            formats,
-        );
-        target
-            .replace_from_snapshot(&snapshot, VoxelDomain::Unbounded { max_lod: 8 })
-            .unwrap();
-        let imported = target.snapshot().unwrap();
-        assert_eq!(imported.get_payload(key), snapshot.get_payload(key));
-        assert!(Arc::ptr_eq(
-            &imported.get_payload(key).unwrap().bytes,
-            &snapshot.get_payload(key).unwrap().bytes,
-        ));
-    }
-
-    #[test]
-    fn shared_publication_rejects_a_different_payload_handle() {
-        let writer = VoxelSourceWriter::new(
-            VoxelTerrainId(1),
-            VoxelSourceId(2),
-            Arc::new(RwLock::new((0, HashMap::new()))),
-        );
-        let bytes: Arc<[u8]> = Arc::from([1u8]);
-        let other: Arc<[u8]> = Arc::from([1u8]);
-        let ops = [VoxelChunkOp::Upsert(VoxelChunkUpdate {
-            key: VoxelChunkKey::new(0, 0, 0, 0),
-            payload: VoxelChunkPayload {
-                encoding: VOXEL_CHUNK_ENCODING_RAW,
-                schema_version: VOXEL_CHUNK_SCHEMA_VERSION,
-                bytes: &bytes,
-            },
-        })];
-        assert_eq!(
-            writer.publish_shared_batch(
-                &batch(
-                    VoxelTerrainId(1),
-                    VoxelSourceId(2),
-                    VoxelBatchRevision {
-                        expected: 0,
-                        publish: 1,
-                    },
-                    &ops,
-                ),
-                &[other],
-            ),
-            Err(VoxelUpdateError::PayloadHandleMismatch)
-        );
-        assert_eq!(writer.revision().unwrap(), 0);
     }
 
     #[test]

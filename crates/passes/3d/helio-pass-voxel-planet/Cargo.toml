@@ -21,3 +21,6 @@ helio-core = { workspace = true, optional = true }
 
 [dev-dependencies]
 pollster = "0.4"
+# examples/shader_stats.rs: driver statistics of the compute pipelines.
+ash = "0.38"
+naga = { version = "30.0.1", features = ["wgsl-in", "spv-out"] }

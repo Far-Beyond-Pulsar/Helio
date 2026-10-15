@@ -191,7 +191,7 @@ fn reprojection_removes_both_jitters_without_removing_camera_motion() {
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
-        let source = include_str!("../shaders/tsr_main.wgsl");
+        let source = helio_core::shader::resolve(include_str!("../shaders/tsr_main.wgsl"));
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(format!("{source}\n\
@@ -313,7 +313,7 @@ fn depth_history_rejects_disocclusion_and_invalid_samples() {
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
-        let source = include_str!("../shaders/tsr_main.wgsl");
+        let source = helio_core::shader::resolve(include_str!("../shaders/tsr_main.wgsl"));
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(

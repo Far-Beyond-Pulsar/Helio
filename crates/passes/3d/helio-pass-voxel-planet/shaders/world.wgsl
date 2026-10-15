@@ -1,11 +1,10 @@
 // World constants and helpers shared by the engine and terrain programs:
-// the grid mapping, layer quantization, coarse-level bounds and material ids.
+// the grid mapping, layer quantization and material ids.
 const HEIGHT_ONE: i32 = 1000; // height units (mm) per metre
 
 struct World {
     grid: vec4<i32>,  // reference cells, layer thickness (mm), grid cells, level offset
     scale: vec4<u32>, // domain scale (Q24), volume inv, volume shift, half layer (Q16 domain units)
-    bounds: array<vec4<i32>, 6>, // per-level finer-surface excess (level cells)
     sphere: vec4<u32>, // sphere domain: 1 / reference (inv, shift), domain radius; w: surface words stored
 }
 
@@ -69,6 +68,11 @@ fn mul_q24(a: u32, r: u32) -> u32 {
     let r1 = r >> 16u;
     let r0 = r & 0xffffu;
     return ((a1 * r1) << 8u) + ((a1 * r0 + a0 * r1) >> 8u) + ((a0 * r0) >> 24u);
+}
+
+// Centre of level cell `i` in half base cells.
+fn center_half(i: i32, level: u32) -> i32 {
+    return (i << (level + 1u)) + (1 << level);
 }
 
 // Level cell centre in half cells of the reference grid (grid independent).
@@ -155,12 +159,6 @@ fn volume_point_half(p: vec3<i32>, h: i32) -> vec3<i32> {
     return p + vec3<i32>(volume_component(p.x, ratio), volume_component(p.y, ratio), volume_component(p.z, ratio));
 }
 
-// Surface height of a level column: the terrain program at the column's
-// footprint in reference cells.
-fn field_height(face: u32, i: i32, j: i32, level: u32) -> i32 {
-    return terrain_height(domain_point(face, i, j, level), level + u32(world.grid.w));
-}
-
 fn top_cells(height: i32, level: u32) -> i32 {
     return div_floor(height, world.grid.y) >> level;
 }
@@ -176,12 +174,4 @@ fn terrain_kind(top: i32, k: i32) -> u32 {
     return select(0u, 1u, k < top);
 }
 
-// Ground slope in the 8x8 column block, eighths of a cell per cell
-// (`terrain::block_slope`).
-fn block_slope_of(t_x0: i32, t_x7: i32, t_y0: i32, t_y7: i32) -> i32 {
-    return max(abs(t_x7 - t_x0), abs(t_y7 - t_y0)) * 8 / 7;
-}
 
-fn bound_margin(level: u32) -> i32 {
-    return world.bounds[level >> 2u][level & 3u];
-}

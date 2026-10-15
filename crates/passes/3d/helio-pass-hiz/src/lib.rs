@@ -10,8 +10,10 @@
 //!    rendering correct while disabling dynamic occlusion and SSR.
 //!
 //!  Phase 2 — Mip chain  (hiz_build.wgsl, ~log2(max_dim) dispatches)
-//!    Downsamples using MAX-reduction so each texel stores the farthest depth
-//!    in its 2x2 footprint — "conservative Hi-Z".
+//!    Downsamples so each texel stores the farthest depth in its 2x2
+//!    footprint — "conservative Hi-Z". Under the engine's reversed depth
+//!    (`helio_core::depth`) farthest is the *smallest* value; the shader
+//!    names its reductions by meaning, not by min/max.
 //!
 //! The finished pyramid is consumed NEXT FRAME by OcclusionCullPass (temporal
 //! approach: frame N-1 depth tests visibility of frame N geometry).
@@ -68,22 +70,23 @@ pub struct HiZBuildPass {
     depth_copy_supported: bool,
 
     // Safe fallback for downlevel adapters without depth texture/buffer copies.
-    // Both pyramids are filled with far depth, conservatively disabling dynamic
-    // occlusion and SSR instead of rejecting the entire renderer.
+    // Both pyramids are filled with far depth (the depth clear value),
+    // conservatively disabling dynamic occlusion and SSR instead of rejecting
+    // the entire renderer.
     fallback_pipeline: wgpu::ComputePipeline,
     fallback_bgl: wgpu::BindGroupLayout,
     fallback_bind_group: Option<wgpu::BindGroup>,
 
-    // ── Min pyramid ("hiz_min") ─────────────────────────────────────────────
-    // Same policy and same dimensions as the max chain above, opposite reduction.
-    // Shares this pass so pyramid sizing/mip-count/resize logic lives in exactly
-    // one place; a consumer that needs min-depth reads the resource rather than
-    // growing its own builder. Mip 0 is identical to the max chain's (a plain
-    // depth copy — min and max of one texel are the same); only levels 1+
-    // diverge.
-    min_mip_pipeline: wgpu::ComputePipeline,
-    min_mip_bind_groups: Vec<wgpu::BindGroup>,
-    min_mip_views: Vec<wgpu::TextureView>,
+    // ── Nearest pyramid ("hiz_nearest") ─────────────────────────────────────
+    // Same policy and same dimensions as the farthest chain above, opposite
+    // reduction. Shares this pass so pyramid sizing/mip-count/resize logic lives
+    // in exactly one place; a consumer that needs nearest depth reads the
+    // resource rather than growing its own builder. Mip 0 is identical to the
+    // farthest chain's (a plain depth copy — nearest and farthest of one texel
+    // are the same); only levels 1+ diverge.
+    nearest_mip_pipeline: wgpu::ComputePipeline,
+    nearest_mip_bind_groups: Vec<wgpu::BindGroup>,
+    nearest_mip_views: Vec<wgpu::TextureView>,
 
     // HiZ sampler (always owned by this pass)
     pub hiz_sampler: Arc<wgpu::Sampler>,
@@ -92,8 +95,8 @@ pub struct HiZBuildPass {
     width: u32,
     height: u32,
 
-    /// Which depth the max pyramid holds and which depth the next copy reads.
-    max_source: PyramidSource,
+    /// Which depth the farthest pyramid holds and which depth the next copy reads.
+    farthest_source: PyramidSource,
 }
 
 /// What a frame's depth was drawn from: everything the CPU knows that decides
@@ -108,7 +111,7 @@ struct DepthInputs {
     draw_signature: u64,
 }
 
-/// Reuse bookkeeping for the max pyramid.
+/// Reuse bookkeeping for the farthest pyramid.
 ///
 /// The pyramid is built from the depth texture as it stands when HiZBuild
 /// runs, which is ahead of this frame's geometry: it holds the PREVIOUS
@@ -211,17 +214,17 @@ impl HiZBuildPass {
             label: Some("HiZ Mip Pipeline"),
             layout: Some(&mip_pl),
             module: &mip_shader,
-            entry_point: Some("main_max"),
+            entry_point: Some("main_farthest"),
             compilation_options: Default::default(),
             cache: None,
         });
 
-        // Same module and layout as the max chain — only the reduction differs.
-        let min_mip_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("HiZ Min Mip Pipeline"),
+        // Same module and layout as the farthest chain — only the reduction differs.
+        let nearest_mip_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("HiZ Nearest Mip Pipeline"),
             layout: Some(&mip_pl),
             module: &mip_shader,
-            entry_point: Some("main_min"),
+            entry_point: Some("main_nearest"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -295,30 +298,30 @@ impl HiZBuildPass {
             fallback_pipeline,
             fallback_bgl,
             fallback_bind_group: None,
-            min_mip_pipeline,
-            min_mip_bind_groups: Vec::new(),
-            min_mip_views: Vec::new(),
+            nearest_mip_pipeline,
+            nearest_mip_bind_groups: Vec::new(),
+            nearest_mip_views: Vec::new(),
             hiz_sampler,
             mip_views: Vec::new(),
             width,
             height,
-            max_source: PyramidSource::default(),
+            farthest_source: PyramidSource::default(),
         }
     }
 
-    /// Builds the min-depth pyramid consumed by SsrPass after mip 0 is seeded.
+    /// Builds the nearest-depth pyramid consumed by SsrPass after mip 0 is seeded.
     ///
-    /// Assumes `min_mip_views` / `min_mip_bind_groups` are already populated.
-    fn build_min_pyramid(&mut self, cmds: &mut CommandRecorder<'_>) {
-        // Levels 1+ via MIN-reduction.
+    /// Assumes `nearest_mip_views` / `nearest_mip_bind_groups` are already populated.
+    fn build_nearest_pyramid(&mut self, cmds: &mut CommandRecorder<'_>) {
+        // Levels 1+ via nearest-reduction.
         {
             let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("HiZ Min MipChain"),
+                label: Some("HiZ Nearest MipChain"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.min_mip_pipeline);
+            pass.set_pipeline(&self.nearest_mip_pipeline);
             for (bg, &(wg_x, wg_y)) in self
-                .min_mip_bind_groups
+                .nearest_mip_bind_groups
                 .iter()
                 .zip(self.mip_dispatch_groups.iter())
             {
@@ -436,7 +439,7 @@ impl RenderPass for HiZBuildPass {
     fn writes(&self) -> &'static [&'static str] {
         &[
             "hiz",
-            "hiz_min",
+            "hiz_nearest",
             "hiz_sampler",
         ]
     }
@@ -452,7 +455,7 @@ impl RenderPass for HiZBuildPass {
         builder
             .with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_DST);
         builder.write_color_raw(
-            "hiz_min",
+            "hiz_nearest",
             wgpu::TextureFormat::R32Float,
             ResourceSize::MatchSurface,
         );
@@ -465,10 +468,10 @@ impl RenderPass for HiZBuildPass {
         // so they are rebuilt from the new graph-owned texture in execute().
         self.mip_views.clear();
         self.mip_bind_groups.clear();
-        self.min_mip_views.clear();
-        self.min_mip_bind_groups.clear();
+        self.nearest_mip_views.clear();
+        self.nearest_mip_bind_groups.clear();
         self.fallback_bind_group = None;
-        self.max_source.invalidate();
+        self.farthest_source.invalidate();
     }
 
     fn render_pass_descriptor<'a>(
@@ -493,7 +496,7 @@ impl RenderPass for HiZBuildPass {
                 self.height,
                 "HiZ Mip Uniform",
             );
-            self.max_source.invalidate();
+            self.farthest_source.invalidate();
         }
         Ok(())
     }
@@ -549,33 +552,33 @@ impl RenderPass for HiZBuildPass {
             self.mip_bind_groups = mip_bind_groups;
         }
 
-        // ── Lazy init: min pyramid views + bind groups ───────────────────────
-        if self.min_mip_views.is_empty() {
+        // ── Lazy init: nearest pyramid views + bind groups ───────────────────
+        if self.nearest_mip_views.is_empty() {
             let tex = ctx
                 .resource_pool
-                .get_texture("hiz_min")
-                .expect("HiZ texture 'hiz_min' must be declared as a graph resource");
+                .get_texture("hiz_nearest")
+                .expect("HiZ texture 'hiz_nearest' must be declared as a graph resource");
             let mip_count = mip_levels(self.width, self.height).min(MAX_MIP_LEVELS);
 
             let mut views = Vec::with_capacity(mip_count as usize);
             for mip in 0..mip_count {
                 views.push(tex.create_view(&wgpu::TextureViewDescriptor {
-                    label: Some("HiZ Min Mip View"),
+                    label: Some("HiZ Nearest Mip View"),
                     base_mip_level: mip,
                     mip_level_count: Some(1),
                     ..Default::default()
                 }));
             }
-            self.min_mip_views = views;
+            self.nearest_mip_views = views;
 
             let mut bgs = Vec::with_capacity((mip_count.saturating_sub(1)) as usize);
             for mip in 0..(mip_count.saturating_sub(1)) {
                 bgs.push(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("HiZ Min Mip BG"),
+                    label: Some("HiZ Nearest Mip BG"),
                     layout: &self.mip_bgl,
                     entries: &[
                         wgpu::BindGroupEntry {
-                            // Same dimensions as the max chain, so the same
+                            // Same dimensions as the farthest chain, so the same
                             // per-level src/dst sizes apply.
                             binding: 0,
                             resource: self.mip_uniforms[mip as usize].as_entire_binding(),
@@ -583,29 +586,29 @@ impl RenderPass for HiZBuildPass {
                         wgpu::BindGroupEntry {
                             binding: 1,
                             resource: wgpu::BindingResource::TextureView(
-                                &self.min_mip_views[mip as usize],
+                                &self.nearest_mip_views[mip as usize],
                             ),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
                             resource: wgpu::BindingResource::TextureView(
-                                &self.min_mip_views[(mip + 1) as usize],
+                                &self.nearest_mip_views[(mip + 1) as usize],
                             ),
                         },
                     ],
                 }));
             }
-            self.min_mip_bind_groups = bgs;
+            self.nearest_mip_bind_groups = bgs;
         }
 
         let hiz_texture = ctx
             .resource_pool
             .get_texture("hiz")
             .expect("HiZ texture 'hiz' must be declared as a graph resource");
-        let hiz_min_texture = ctx
+        let hiz_nearest_texture = ctx
             .resource_pool
-            .get_texture("hiz_min")
-            .expect("HiZ texture 'hiz_min' must be declared as a graph resource");
+            .get_texture("hiz_nearest")
+            .expect("HiZ texture 'hiz_nearest' must be declared as a graph resource");
         let copy_extent = wgpu::Extent3d {
             width: self.width.max(1),
             height: self.height.max(1),
@@ -618,12 +621,12 @@ impl RenderPass for HiZBuildPass {
         };
         let mut cmds = ctx.graphics_cmds();
 
-        // The min pyramid is optional: only SSR and WaterSim's reflections
+        // The nearest pyramid is optional: only SSR and WaterSim's reflections
         // read it, and they declare that before the frame executes. The depth
         // copy feeds both pyramids, so it is needed only when one of them is
         // rebuilt this frame.
-        let min_wanted = helio_core::is_demanded(ctx.registry, "hiz_min");
-        let max_rebuild = self.max_source.begin_frame(DepthInputs {
+        let nearest_wanted = helio_core::is_demanded(ctx.registry, "hiz_nearest");
+        let farthest_rebuild = self.farthest_source.begin_frame(DepthInputs {
             camera_generation: ctx.camera_generation,
             scene_signature: ctx.scene_buffers.content_signature(),
             draw_signature: ctx
@@ -632,7 +635,7 @@ impl RenderPass for HiZBuildPass {
                 .unwrap_or(0),
         });
 
-        if self.depth_copy_supported && (min_wanted || max_rebuild) {
+        if self.depth_copy_supported && (nearest_wanted || farthest_rebuild) {
             let depth_texture = ctx
                 .registry
                 .get::<&wgpu::Texture>(helio_core::ResourceKey::new("depth_texture"))
@@ -650,14 +653,14 @@ impl RenderPass for HiZBuildPass {
                 },
                 copy_extent,
             );
-            if min_wanted {
+            if nearest_wanted {
                 cmds.copy_buffer_to_texture(
                     wgpu::TexelCopyBufferInfo {
                         buffer: &self.depth_copy_buffer,
                         layout: copy_layout,
                     },
                     wgpu::TexelCopyTextureInfo {
-                        texture: hiz_min_texture,
+                        texture: hiz_nearest_texture,
                         mip_level: 0,
                         origin: wgpu::Origin3d::ZERO,
                         aspect: wgpu::TextureAspect::All,
@@ -679,7 +682,7 @@ impl RenderPass for HiZBuildPass {
                             wgpu::BindGroupEntry {
                                 binding: 1,
                                 resource: wgpu::BindingResource::TextureView(
-                                    &self.min_mip_views[0],
+                                    &self.nearest_mip_views[0],
                                 ),
                             },
                         ],
@@ -698,20 +701,20 @@ impl RenderPass for HiZBuildPass {
             );
         }
 
-        // ── Min pyramid: rebuilt every frame ─────────────────────────────────
-        // Deliberately outside the max pyramid's reuse early-out below. That optimization
-        // is sound for the max chain because its consumer (occlusion culling) is
+        // ── Nearest pyramid: rebuilt every frame ─────────────────────────────
+        // Deliberately outside the farthest pyramid's reuse early-out below. That optimization
+        // is sound for the farthest chain because its consumer (occlusion culling) is
         // temporal by design and tolerates a frame-stale pyramid. SSR is not: it
         // reflects the *current* frame, and a static camera does not imply static
         // depth — anything that moves while the camera holds still would otherwise
         // reflect a frozen pyramid.
-        if min_wanted {
-            self.build_min_pyramid(&mut cmds);
+        if nearest_wanted {
+            self.build_nearest_pyramid(&mut cmds);
         }
 
         // ── HiZ reuse: skip the rebuild while the pyramid already holds the
         // depth this frame would draw (see `PyramidSource`) ──────────────────
-        if !max_rebuild {
+        if !farthest_rebuild {
             return Ok(());
         }
 
@@ -731,7 +734,7 @@ impl RenderPass for HiZBuildPass {
             );
         }
 
-        // Phase 2: build the remaining mip levels via MAX-reduction
+        // Phase 2: build the remaining mip levels via farthest-reduction
         {
             let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("HiZ MipChain"),

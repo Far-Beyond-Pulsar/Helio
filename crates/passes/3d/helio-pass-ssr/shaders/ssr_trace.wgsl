@@ -1,11 +1,11 @@
 // ssr_trace.wgsl — Deterministic Hi-Z screen-space ray march.
 //
-// Marches the `hiz_min` pyramid built by HiZBuildPass. One mirror ray per
+// Marches the `hiz_nearest` pyramid built by HiZBuildPass. One mirror ray per
 // pixel, stable frame to frame — no temporal accumulation needed.
 //
-// The pyramid MUST be min-reduced. The shared `hiz` resource is max-reduced
-// for occlusion culling (conservative farthest); marching that makes rays
-// tunnel straight through geometry.
+// The pyramid MUST be nearest-reduced. The shared `hiz` resource is
+// farthest-reduced for occlusion culling; marching that makes rays tunnel
+// straight through geometry.
 //
 // NDC depth is *linear in screen space* (projective z/w), so the reflection
 // ray is a straight line in (uv, depth01) space. Nothing in the loop needs
@@ -24,7 +24,7 @@
 @group(1) @binding(1) var gbuf_orm:             texture_2d<f32>;
 @group(1) @binding(2) var gbuf_depth:           texture_depth_2d;
 @group(1) @binding(3) var scene_color:          texture_2d<f32>;
-@group(1) @binding(4) var hiz_min:              texture_2d<f32>;
+@group(1) @binding(4) var hiz_nearest:          texture_2d<f32>;
 @group(1) @binding(5) var linear_sampler:       sampler;
 @group(1) @binding(6) var ssr_output:           texture_storage_2d<rgba16float, write>;
 
@@ -35,10 +35,6 @@ const MAX_RAY_DIST:  f32 = 100.0;
 const THICKNESS:     f32 = 0.02;
 const NORMAL_OFFSET: f32 = 0.002;
 const FADE_START:    f32 = 0.6;
-
-fn linearize_depth(d_01: f32) -> f32 {
-    return helio_view_depth(d_01, cameras[0].position_near.w, cameras[0].forward_far.w);
-}
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -56,7 +52,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // ── G-buffer reads ──────────────────────────────────────────────────────
     let depth_01 = textureLoad(gbuf_depth, source_px, 0);
-    if depth_01 >= 1.0 {
+    if helio_is_sky(depth_01) {
         textureStore(ssr_output, px, vec4<f32>(0.0));
         return;
     }
@@ -101,7 +97,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let d = p1 - p0;
 
     // ── Hi-Z traversal ──────────────────────────────────────────────────────
-    let march = helio_hiz_march(hiz_min, p0, p1, START_LEVEL, MAX_LEVEL, MAX_ITER);
+    let march = helio_hiz_march(hiz_nearest, p0, p1, START_LEVEL, MAX_LEVEL, MAX_ITER);
     if !march.hit {
         textureStore(ssr_output, px, vec4<f32>(0.0));
         return;
@@ -110,9 +106,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let hit_uv = ray.xy;
 
     // ── Thickness validation ────────────────────────────────────────────────
-    let ray_depth = linearize_depth(ray.z);
-    let scene_depth = linearize_depth(
-        textureLoad(gbuf_depth, vec2<i32>(hit_uv * vec2<f32>(source_dims)), 0)
+    let ray_depth = helio_view_depth(cameras[0].proj, ray.z);
+    let scene_depth = helio_view_depth(
+        cameras[0].proj,
+        textureLoad(gbuf_depth, vec2<i32>(hit_uv * vec2<f32>(source_dims)), 0),
     );
     if ray_depth > scene_depth * (1.0 + THICKNESS) {
         textureStore(ssr_output, px, vec4<f32>(0.0));

@@ -50,7 +50,7 @@ fn temporal(@builtin(global_invocation_id) gid: vec3<u32>,
     let p=vec2<i32>(gid.xy);
     let full=sample_pixel(gid.xy,globals.frame);
     let depth=textureLoad(gbuf_depth,vec2<i32>(full),0);
-    if depth>=1.0 {
+    if helio_is_sky(depth) {
         textureStore(out_lighting,p,vec4<u32>(0u));
         textureStore(out_geometry,p,vec4<u32>(0u)); return;
     }
@@ -89,7 +89,7 @@ fn temporal(@builtin(global_invocation_id) gid: vec3<u32>,
                 let d=position_depth.w;
                 let n=neighborhood_normal[index];
                 let wp=position_depth.xyz;
-                if d>=1.0 || dot(n,normal)<0.9 || abs(dot(wp-position,normal))>max(0.02,abs(z)*0.01) { continue; }
+                if helio_is_sky(d) || dot(n,normal)<0.9 || abs(dot(wp-position,normal))>max(0.02,abs(z)*0.01) { continue; }
                 let cd=neighborhood_diffuse[index];
                 let cs=neighborhood_specular[index];
                 mean_d+=cd; squared_d+=cd*cd; count+=1.0;

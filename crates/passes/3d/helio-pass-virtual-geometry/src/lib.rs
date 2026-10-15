@@ -299,12 +299,11 @@ pub(crate) struct CullUniforms {
     pub work_item_count: u32,
     pub work_dispatch_width: u32,
     /// 0 on frame 0 (or right after a resize rebuilds the graph), when the Hi-Z
-    /// pyramid hasn't been built from any real depth yet — an untouched wgpu
-    /// texture reads back as 0.0, which this engine's non-reversed depth
-    /// convention (near = 0.0) means the shader's `near_z > hiz_depth` test
-    /// would otherwise treat as "everything is behind the (nonexistent)
-    /// occluder," incorrectly culling the entire visible scene for that frame.
-    /// Mirrors the equivalent frame-0 guard in `OcclusionCullPass`.
+    /// pyramid hasn't been built from any real depth yet — its texels are
+    /// whatever the graph's texture pool left there, and the shader's occlusion
+    /// test could treat them as an occluder in front of everything, culling the
+    /// entire visible scene for that frame. Mirrors the equivalent frame-0
+    /// guard in `OcclusionCullPass`.
     pub hiz_valid: u32,
     _pad1: u32,
     _pad2: u32,

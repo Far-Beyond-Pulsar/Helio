@@ -8,7 +8,8 @@ use helio::{
     RendererConfig,
 };
 use helio_default_graphs::{build_default_graph_external_with_lighting_passes, GraphPassFactory, VoxelPassFactory};
-use helio_pass_voxel_planet::engine::{PlanetFrame, PlanetPass, SharedPlanetFrame};
+use helio_pass_voxel_planet::chunks::pass::ChunkPass;
+use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
 use helio_pass_voxel_planet::{Planet, PlanetRecipe};
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 
@@ -34,7 +35,7 @@ impl helio_core::RenderPass for FinalResourceConsumer {
 }
 
 #[test]
-fn planet_pass_builds_settles_and_resizes_in_the_deferred_graph() {
+fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let Ok(adapter) = instance.request_adapter(&Default::default()).await else {
@@ -64,7 +65,7 @@ fn planet_pass_builds_settles_and_resizes_in_the_deferred_graph() {
 
         let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
         let pass_source = Arc::clone(&source);
-        let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| Box::new(PlanetPass::new(Arc::clone(&pass_source))));
+        let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| Box::new(ChunkPass::new(Arc::clone(&pass_source))));
         let mut config = RendererConfig::new(640, 360, wgpu::TextureFormat::Rgba8Unorm);
         config.enable_foliage = false;
         let observed = Arc::new(Mutex::new(Vec::new()));
@@ -106,34 +107,47 @@ fn planet_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let error = validation.pop().await;
         assert!(error.is_none(), "empty graph GPU validation: {error:?}");
-        assert!(renderer.find_pass::<PlanetPass>().unwrap().renderer().is_none());
+        assert!(!renderer.find_pass::<ChunkPass>().unwrap().has_world());
 
-        // With a frame it streams the planet around the eye until settled.
-        *source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun: up, shadows: true, picks: None });
+        // A host's first eye can be anywhere (an editor camera starts at the
+        // planet's centre): nothing to stream there.
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        // Frames before the pipelines finish compiling (on a worker) draw
-        // no terrain and do not count.
+        *source.lock().unwrap() = Some(PlanetFrame { eye: glam::DVec3::new(8.0, 6.0, 12.0), planet: planet.clone(), sun: up, picks: None });
+        for _ in 0..600 {
+            renderer.render(&camera, &view).unwrap();
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            if !renderer.find_pass::<ChunkPass>().unwrap().needs_frame() {
+                break;
+            }
+        }
+        assert!(!renderer.find_pass::<ChunkPass>().unwrap().needs_frame(), "the centre never settled");
+
+        // Moved to the surface, it streams the planet around the eye until
+        // settled: the plan for the old eye does not settle the new one
+        // (hosts stop rendering once settled).
+        *source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun: up, picks: None });
         let mut frames = 0;
         let started = std::time::Instant::now();
         loop {
             renderer.render(&camera, &view).unwrap();
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            let pass = renderer.find_pass::<PlanetPass>().unwrap();
-            if pass.renderer().is_some() {
+            let pass = renderer.find_pass::<ChunkPass>().unwrap();
+            if pass.has_world() {
                 frames += 1;
             }
-            assert!(started.elapsed().as_secs() < 300, "pipelines did not compile");
+            assert!(started.elapsed().as_secs() < 300, "residency did not settle");
             if !pass.needs_frame() || frames >= 600 {
                 break;
             }
         }
         let error = validation.pop().await;
         assert!(error.is_none(), "active graph GPU validation: {error:?}");
-        let stats = renderer.find_pass::<PlanetPass>().unwrap().stats().unwrap();
+        let pass = renderer.find_pass::<ChunkPass>().unwrap();
+        let stats = pass.stats();
         assert!(frames < 600, "residency still streaming after {frames} frames: {stats:?}");
-        assert!(stats.resident_columns > 1000, "{stats:?}");
-        assert_eq!(stats.pending_columns, 0);
-        eprintln!("VOXEL_GRAPH_SETTLED frames={frames} resident={}", stats.resident_columns);
+        assert!(stats.resident_chunks > 1000, "{stats:?}");
+        assert!(pass.settled());
+        eprintln!("VOXEL_GRAPH_SETTLED frames={frames} resident={}", stats.resident_chunks);
         // A still view stays settled: hosts render until it is (the editor
         // viewport goes idle only after its settling frames pass with no
         // request). Periodic counter readbacks used to request frames
@@ -141,22 +155,22 @@ fn planet_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         for still in 0..120 {
             renderer.render(&camera, &view).unwrap();
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            assert!(!renderer.find_pass::<PlanetPass>().unwrap().needs_frame(), "a settled still view asked for frame {still}");
+            assert!(!renderer.find_pass::<ChunkPass>().unwrap().needs_frame(), "a settled still view asked for frame {still}");
         }
 
-        // Removing the source drops the planet renderer.
+        // Removing the source drops the planet's chunks.
         *source.lock().unwrap() = None;
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         renderer.render(&camera, &view).unwrap();
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         assert!(validation.pop().await.is_none());
-        let pass = renderer.find_pass::<PlanetPass>().unwrap();
-        assert!(pass.renderer().is_none());
+        let pass = renderer.find_pass::<ChunkPass>().unwrap();
+        assert!(!pass.has_world());
         assert!(!pass.needs_frame());
         assert!(observed.lock().unwrap().contains(&[config.internal_width(), config.internal_height()]));
 
         // A resize rebuilds the graph; downstream passes see the new size.
-        *source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun: up, shadows: true, picks: None });
+        *source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun: up, picks: None });
         renderer.set_render_size(320, 180);
         let resized = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("final consumer resize"),
@@ -177,7 +191,7 @@ fn planet_pass_builds_settles_and_resizes_in_the_deferred_graph() {
             observed.lock().unwrap().last(),
             Some(&[resized_config.internal_width(), resized_config.internal_height()])
         );
-        assert!(renderer.find_pass::<PlanetPass>().unwrap().renderer().is_some());
+        assert!(renderer.find_pass::<ChunkPass>().unwrap().has_world());
     });
 }
 
@@ -219,7 +233,7 @@ fn editor(width: u32, height: u32) -> Option<Editor> {
     scene.world.attach_gpu_mirror(mirror.clone());
     let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
     let pass_source = Arc::clone(&source);
-    let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| Box::new(PlanetPass::new(Arc::clone(&pass_source))));
+    let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| Box::new(ChunkPass::new(Arc::clone(&pass_source))));
     let mut config = RendererConfig::new(width, height, wgpu::TextureFormat::Rgba8Unorm);
     config.enable_foliage = false;
     let mut renderer = RendererBuilder::new(config, mirror)
@@ -324,7 +338,7 @@ fn editor_overlays_stay_in_world_space_in_camera_relative_frames() {
     let ground = planet.surface_point(glam::DVec3::new(0.2, 1.0, 0.3), 0.0);
     let up = ground.normalize();
     let forward = up.any_orthonormal_vector().as_vec3();
-    *editor.source.lock().unwrap() = Some(PlanetFrame { eye: ground, planet: planet.clone(), sun: up.as_vec3(), shadows: true, picks: None });
+    *editor.source.lock().unwrap() = Some(PlanetFrame { eye: ground, planet: planet.clone(), sun: up.as_vec3(), picks: None });
     let validation = editor.device.push_error_scope(wgpu::ErrorFilter::Validation);
     // An editor camera held against the ground: a few centimetres of
     // clearance, the smallest near plane and a planetary far plane.
@@ -565,7 +579,7 @@ fn atmosphere_over_flat_ground_without_a_planet() {
 }
 
 /// Inspector edits get only one rendered frame before an idle viewport.
-/// Discarding colour history must show that edit without rebuilding columns.
+/// Discarding colour history must show that edit without rebuilding chunks.
 #[test]
 fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
     let Some(mut editor) = editor(128, 72) else { return };
@@ -580,7 +594,7 @@ fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
         ..Default::default()
     }).unwrap());
     let eye = glam::DVec3::Y * 20.0;
-    *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun: Vec3::Y, shadows: false, picks: None });
+    *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet, sun: Vec3::Y, picks: None });
     editor.renderer.set_world_origin(Some(eye));
     let camera = Camera::perspective_look_at(Vec3::ZERO, -Vec3::Y, Vec3::Z,
         std::f32::consts::FRAC_PI_4, 16.0/9.0, 0.05, 1000.0);
@@ -588,30 +602,28 @@ fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
     let mut frames = 0;
     while frames < 2000 && started.elapsed().as_secs() < 300 {
         editor.render(&camera);
-        match editor.renderer.find_pass::<PlanetPass>().unwrap().renderer() {
-            Some(r) if r.settled() => break,
-            Some(_) => frames += 1,
-            None => {}
-        }
+        let pass = editor.renderer.find_pass::<ChunkPass>().unwrap();
+        if pass.settled() { break; }
+        if pass.has_world() { frames += 1; }
     }
-    assert!(editor.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap().settled());
+    assert!(editor.renderer.find_pass::<ChunkPass>().unwrap().settled());
     for _ in 0..16 { editor.render(&camera); }
     let before = editor.rgba();
-    let columns = editor.renderer.find_pass::<PlanetPass>().unwrap().stats().unwrap().resident_columns;
+    let chunks = editor.renderer.find_pass::<ChunkPass>().unwrap().stats().resident_chunks;
     let mean = |pixels: &[[u8;4]], channel| pixels.iter().map(|p| f64::from(p[channel])).sum::<f64>() / pixels.len() as f64;
     let mut appearance = helio_pass_voxel_planet::engine::TerrainAppearance::default();
     appearance.materials[helio_pass_voxel_planet::terrain::material::GRASS as usize].patches = Some([[0.85, 0.03, 0.03]; 3]);
     appearance.detail = [0.0; 4];
-    assert!(editor.renderer.find_pass_mut::<PlanetPass>().unwrap().set_appearance(Some(appearance)));
+    assert!(editor.renderer.find_pass_mut::<ChunkPass>().unwrap().set_appearance(Some(appearance)));
     editor.renderer.find_pass_mut::<helio_pass_tsr::TsrPass>().unwrap().reset_history();
     editor.render(&camera);
     let after = editor.rgba();
     eprintln!("appearance before {:?}, after {:?}", [mean(&before,0),mean(&before,1)], [mean(&after,0),mean(&after,1)]);
     assert!(mean(&after, 0) > mean(&after, 1) + 20.0);
     assert!(mean(&after, 0) > mean(&before, 0) + 20.0);
-    assert_eq!(editor.renderer.find_pass::<PlanetPass>().unwrap().stats().unwrap().resident_columns, columns);
-    assert!(!editor.renderer.find_pass_mut::<PlanetPass>().unwrap().set_appearance(Some(appearance)));
-    assert!(editor.renderer.find_pass_mut::<PlanetPass>().unwrap().set_appearance(None));
+    assert_eq!(editor.renderer.find_pass::<ChunkPass>().unwrap().stats().resident_chunks, chunks);
+    assert!(!editor.renderer.find_pass_mut::<ChunkPass>().unwrap().set_appearance(Some(appearance)));
+    assert!(editor.renderer.find_pass_mut::<ChunkPass>().unwrap().set_appearance(None));
     editor.renderer.find_pass_mut::<helio_pass_tsr::TsrPass>().unwrap().reset_history();
     editor.render(&camera);
     let restored = editor.rgba();
@@ -644,14 +656,14 @@ fn terrain_under_an_atmosphere_is_lit_at_every_height() {
     editor.set_sky(sun, Some(helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], radius)));
     for height in [2.0, 25.0, 300.0, 20_000.0] {
         let eye = planet.surface_point(dir, height);
-        *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun, shadows: true, picks: None });
+        *editor.source.lock().unwrap() = Some(PlanetFrame { eye, planet: planet.clone(), sun, picks: None });
         editor.renderer.set_world_origin(Some(eye));
         let forward = (up.any_orthonormal_vector() - up * 0.2).normalize().as_vec3();
         let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up.as_vec3(), std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.05, 40_000_000.0);
         let started = std::time::Instant::now();
         loop {
             editor.render(&camera);
-            let settled = editor.renderer.find_pass::<PlanetPass>().unwrap().renderer().is_some_and(|r| r.settled());
+            let settled = editor.renderer.find_pass::<ChunkPass>().unwrap().settled();
             if settled || started.elapsed().as_secs() > 120 { break; }
         }
         for _ in 0..8 { editor.render(&camera); }

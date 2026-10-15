@@ -60,6 +60,9 @@ fn visible(l:GpuLight)->bool {
 fn point_mask(pos:vec3f)->u32 {
     // Conservative SAT: reject a cube-face pyramid only when a plane
     // separates all eight receiver-frustum vertices from that pyramid.
+    // The camera projection is reversed with no far plane, so the clip z = 0
+    // vertices are points at infinity (w = 0): walk their rays out to the
+    // max shadow distance, where receivers stop mattering.
     var dirs=array<vec3f,6>(vec3f(1,0,0),vec3f(-1,0,0),vec3f(0,1,0),vec3f(0,-1,0),vec3f(0,0,1),vec3f(0,0,-1));
     var mask=0u;
     for(var f=0u;f<6u;f++) {
@@ -73,7 +76,8 @@ fn point_mask(pos:vec3f)->u32 {
             for(var c=0u;c<8u;c++) {
                 let clip=vec4f(select(-1.0,1.0,(c&1u)!=0u),select(-1.0,1.0,(c&2u)!=0u),select(0.0,1.0,(c&4u)!=0u),1.0);
                 let h=params.inv_view_proj*clip;
-                let world=h.xyz/select(1e-6,h.w,abs(h.w)>1e-6);
+                let far=params.camera.xyz+normalize(h.xyz-h.w*params.camera.xyz)*params.camera.w;
+                let world=select(far,h.xyz/h.w,abs(h.w)>1e-6);
                 maximum=max(maximum,dot(planes[p],world-pos));
             }
             if maximum < -0.001 { keep=false; }

@@ -190,10 +190,7 @@ impl VoxelFormatRegistry {
         Ok(())
     }
 
-    pub fn validate_payload_envelope(
-        &self,
-        payload: VoxelChunkPayload<'_>,
-    ) -> Result<(), VoxelUpdateError> {
+    pub fn validate_payload(&self, payload: VoxelChunkPayload<'_>) -> Result<(), VoxelUpdateError> {
         let Some(descriptor) = self
             .descriptors
             .get(&(payload.encoding, payload.schema_version))
@@ -211,12 +208,6 @@ impl VoxelFormatRegistry {
         {
             return Err(VoxelUpdateError::InvalidPayloadLength(payload.bytes.len()));
         }
-        Ok(())
-    }
-
-    pub fn validate_payload(&self, payload: VoxelChunkPayload<'_>) -> Result<(), VoxelUpdateError> {
-        self.validate_payload_envelope(payload)?;
-        let descriptor = &self.descriptors[&(payload.encoding, payload.schema_version)];
         if !(descriptor.validate)(payload.bytes) {
             return Err(VoxelUpdateError::MalformedPayload(payload.encoding));
         }
@@ -267,25 +258,6 @@ impl<'a> VoxelChunkBatch<'a> {
         committed_revision: u64,
         formats: &VoxelFormatRegistry,
     ) -> Result<(), VoxelUpdateError> {
-        self.validate_with_formats_inner(committed_revision, formats, true)
-    }
-
-    /// Cheap admission check. Format-specific byte parsing is deferred to the
-    /// publication worker, where failures remain observable on its ticket.
-    pub fn validate_envelope_with_formats(
-        &self,
-        committed_revision: u64,
-        formats: &VoxelFormatRegistry,
-    ) -> Result<(), VoxelUpdateError> {
-        self.validate_with_formats_inner(committed_revision, formats, false)
-    }
-
-    fn validate_with_formats_inner(
-        &self,
-        committed_revision: u64,
-        formats: &VoxelFormatRegistry,
-        deep: bool,
-    ) -> Result<(), VoxelUpdateError> {
         if self.revision.expected != committed_revision {
             return Err(VoxelUpdateError::StaleRevision {
                 expected: self.revision.expected,
@@ -312,11 +284,7 @@ impl<'a> VoxelChunkBatch<'a> {
             let key = match op {
                 VoxelChunkOp::Upsert(update) => {
                     let payload = update.payload;
-                    if deep {
-                        formats.validate_payload(payload)?;
-                    } else {
-                        formats.validate_payload_envelope(payload)?;
-                    }
+                    formats.validate_payload(payload)?;
                     payload_bytes = payload_bytes
                         .checked_add(payload.bytes.len())
                         .ok_or(VoxelUpdateError::BatchPayloadTooLarge(usize::MAX))?;
@@ -369,7 +337,6 @@ pub enum VoxelUpdateError {
     UnsupportedSchema(u16),
     InvalidFormatDescriptor,
     MalformedPayload(VoxelFormatId),
-    PayloadHandleMismatch,
     InvalidPayloadLength(usize),
     BatchPayloadTooLarge(usize),
 }
@@ -627,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn envelope_admission_defers_format_parser() {
+    fn registered_formats_parse_their_payloads() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static PARSES: AtomicUsize = AtomicUsize::new(0);
         fn parse(bytes: &[u8]) -> bool {
@@ -654,11 +621,6 @@ mod tests {
                 bytes: &bytes,
             },
         })];
-        assert_eq!(
-            batch(&ops).validate_envelope_with_formats(4, &formats),
-            Ok(())
-        );
-        assert_eq!(PARSES.load(Ordering::SeqCst), 0);
         assert_eq!(batch(&ops).validate_with_formats(4, &formats), Ok(()));
         assert_eq!(PARSES.load(Ordering::SeqCst), 1);
     }

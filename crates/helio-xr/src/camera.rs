@@ -47,11 +47,10 @@ impl ViewPose {
         self.view_to_world_matrix().inverse()
     }
 
-    /// Projection matrix from the OpenXR FOV (right-handed, Z in [-1, 1] clip
-    /// space — the same convention as `glam::Mat4::perspective_rh` which Helio
-    /// uses elsewhere).
-    pub fn projection(&self, near: f32, far: f32) -> glam::Mat4 {
-        projection_from_fov(self.fov, near, far)
+    /// Projection matrix from the OpenXR FOV, on the engine depth convention
+    /// (reversed Z, no far plane — see `helio_core::depth`).
+    pub fn projection(&self, near: f32) -> glam::Mat4 {
+        projection_from_fov(self.fov, near)
     }
 }
 
@@ -78,7 +77,7 @@ pub fn xr_view_to_camera(
 
 fn pose_to_camera(pose: &ViewPose, near: f32, far: f32) -> GpuCameraUniforms {
     let view = pose.view_matrix();
-    let proj = pose.projection(near, far);
+    let proj = pose.projection(near);
     let view_proj = proj * view;
     GpuCameraUniforms::new(
         view,
@@ -93,8 +92,8 @@ fn pose_to_camera(pose: &ViewPose, near: f32, far: f32) -> GpuCameraUniforms {
 }
 
 /// Projection matrix from an OpenXR `Fovf` (the standard asymmetric frustum
-/// formula from the OpenXR spec).
-pub fn projection_from_fov(fov: openxr::Fovf, near: f32, far: f32) -> glam::Mat4 {
+/// formula from the OpenXR spec, on the engine's reversed infinite depth).
+pub fn projection_from_fov(fov: openxr::Fovf, near: f32) -> glam::Mat4 {
     let l = near * fov.angle_left.tan();
     let r = near * fov.angle_right.tan();
     let t = near * fov.angle_up.tan();
@@ -108,20 +107,14 @@ pub fn projection_from_fov(fov: openxr::Fovf, near: f32, far: f32) -> glam::Mat4
     // ── Depth convention ─────────────────────────────────────────────────────
     //
     // wgpu/WebGPU clip space is **zero-to-one** in Z, like D3D and Vulkan — not OpenGL's
-    // [-1, 1]. This previously used the OpenGL form:
+    // [-1, 1]. An earlier OpenGL form here mapped the near half of the frustum to negative
+    // Z, where it failed the clip test and vanished.
     //
-    //     m22 = -(far + near) / (far - near)
-    //     translate = -2 * far * near / (far - near)
-    //
-    // which maps the near half of the frustum to negative Z. Everything there fails the
-    // 0 <= z <= w clip test and is thrown away, so the world appears to be clipped far
-    // more aggressively than the near plane implies. The engine's own shader prelude calls
-    // this out as a bug it has been bitten by before.
-    //
-    // These match `glam::Mat4::perspective_rh` (the zero-to-one variant), which is what
-    // the flat camera path already uses — so both paths now agree.
-    let m22 = far / (near - far);
-    let depth_translate = (near * far) / (near - far);
+    // On top of that the engine depth is reversed with no far plane (`helio_core::depth`):
+    // clip z is the constant `near` and clip w is the view distance, so the near plane is
+    // depth 1 and infinity depth 0. This matches `helio_core::depth::perspective`, which
+    // the flat camera path uses — so both paths agree.
+    let depth_translate = near;
 
     // ── Layout ───────────────────────────────────────────────────────────────
     //
@@ -146,7 +139,7 @@ pub fn projection_from_fov(fov: openxr::Fovf, near: f32, far: f32) -> glam::Mat4
         // col 2
         m20,
         m21,
-        m22,
+        0.0,
         -1.0,
         // col 3
         0.0,
@@ -176,47 +169,45 @@ mod projection_tests {
     }
 
     #[test]
-    fn depth_maps_zero_to_one_not_minus_one_to_one() {
-        // The regression this exists for: the OpenGL [-1,1] form against wgpu's [0,1]
-        // clip space puts the near half of the frustum at negative Z, where it fails the
-        // clip test and vanishes. It presents as the near plane being far closer than it
-        // was configured to be, not as an error.
-        let (near, far) = (0.05_f32, 100.0_f32);
-        let m = projection_from_fov(fov(-0.8, 0.8, 0.8, -0.8), near, far);
+    fn depth_is_reversed_and_infinite() {
+        // The engine convention: the near plane is depth 1 and depth falls toward 0 with
+        // distance, never reaching it. An OpenGL [-1,1] form puts the near half of the
+        // frustum at negative Z, where it fails the clip test and vanishes.
+        let near = 0.05_f32;
+        let m = projection_from_fov(fov(-0.8, 0.8, 0.8, -0.8), near);
 
         // Looking down -Z, so the near plane sits at z = -near in view space.
         let at_near = ndc(m, glam::Vec3::new(0.0, 0.0, -near));
-        let at_far = ndc(m, glam::Vec3::new(0.0, 0.0, -far));
+        let at_planet = ndc(m, glam::Vec3::new(0.0, 0.0, -4.0e7));
 
         assert!(
-            at_near.z.abs() < 1.0e-4,
-            "near plane should map to 0, got {}",
+            (at_near.z - 1.0).abs() < 1.0e-4,
+            "near plane should map to 1, got {}",
             at_near.z
         );
         assert!(
-            (at_far.z - 1.0).abs() < 1.0e-3,
-            "far plane should map to 1, got {}",
-            at_far.z
+            at_planet.z > 0.0 && at_planet.z < 1.0e-8,
+            "planet-scale distance should approach 0, got {}",
+            at_planet.z
         );
 
-        // And the midpoint must be inside the volume, which the OpenGL form fails.
         let mid = ndc(m, glam::Vec3::new(0.0, 0.0, -1.0));
         assert!((0.0..=1.0).contains(&mid.z), "z {} outside [0,1]", mid.z);
     }
 
     #[test]
-    fn symmetric_fov_matches_glams_perspective() {
+    fn symmetric_fov_matches_the_engine_perspective() {
         // A symmetric OpenXR frustum is an ordinary perspective projection, so it must
         // agree with the function the flat camera path uses. This is what pins the
         // column-major layout: swapping the -1 and the depth translate shears the matrix,
         // and only a comparison against a known-good projection catches it.
-        let (near, far) = (0.1_f32, 50.0_f32);
+        let near = 0.1_f32;
         let half_v: f32 = 0.6;
         let half_h: f32 = 0.8;
 
-        let m = projection_from_fov(fov(-half_h, half_h, half_v, -half_v), near, far);
+        let m = projection_from_fov(fov(-half_h, half_h, half_v, -half_v), near);
         let aspect = half_h.tan() / half_v.tan();
-        let reference = glam::Mat4::perspective_rh(half_v * 2.0, aspect, near, far);
+        let reference = helio_core::depth::perspective(half_v * 2.0, aspect, near);
 
         for (a, b) in m
             .to_cols_array()
@@ -238,7 +229,7 @@ mod projection_tests {
         // i.e. left of the view axis. The view axis therefore projects to the **right** of
         // centre. Getting this backwards swaps the eyes' off-centre offsets, which fuses
         // to the wrong depth rather than failing visibly.
-        let m = projection_from_fov(fov(-1.0, 0.6, 0.8, -0.8), 0.05, 100.0);
+        let m = projection_from_fov(fov(-1.0, 0.6, 0.8, -0.8), 0.05);
         let centre = ndc(m, glam::Vec3::new(0.0, 0.0, -1.0));
         assert!(
             centre.x > 0.0,
@@ -247,7 +238,7 @@ mod projection_tests {
         );
 
         // And the mirrored frustum must be mirrored in NDC, by the same magnitude.
-        let mirrored = projection_from_fov(fov(-0.6, 1.0, 0.8, -0.8), 0.05, 100.0);
+        let mirrored = projection_from_fov(fov(-0.6, 1.0, 0.8, -0.8), 0.05);
         let mirrored_centre = ndc(mirrored, glam::Vec3::new(0.0, 0.0, -1.0));
         assert!((mirrored_centre.x + centre.x).abs() < 1.0e-5);
     }

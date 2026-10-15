@@ -16,6 +16,8 @@ use super::sub_props::{
 #[category("Light Function", category_color = "#22D3EE", default_collapsed = true)]
 #[category("Performance", category_color = "#FB7185", default_collapsed = true)]
 #[category("Advanced", category_color = "#9CA3AF", default_collapsed = true)]
+// Fields added later load from levels saved before them.
+#[serde(default)]
 pub struct LightComponent {
     #[sub_props]
     pub general: GeneralLightProps,

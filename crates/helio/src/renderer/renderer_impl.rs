@@ -868,7 +868,7 @@ mod camera_identity_tests {
         let mut moved = still.clone();
         moved.view = Mat4::from_translation(Vec3::X) * moved.view;
         let mut zoomed = still.clone();
-        zoomed.proj = Mat4::perspective_rh(0.5, 16.0 / 9.0, 0.1, 100.0);
+        zoomed.proj = helio_core::depth::perspective(0.5, 16.0 / 9.0, 0.1);
         assert!(CameraIdentity::of(&still) != CameraIdentity::of(&moved));
         assert!(CameraIdentity::of(&still) != CameraIdentity::of(&zoomed));
     }

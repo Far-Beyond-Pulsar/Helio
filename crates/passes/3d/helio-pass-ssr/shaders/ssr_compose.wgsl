@@ -12,7 +12,7 @@
 @fragment fn fs_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let p=vec2<i32>(position.xy);
     let d=textureLoad(depth,p,0);
-    if d>=1.0 { discard; }
+    if helio_is_sky(d) { discard; }
     let uv=position.xy/vec2<f32>(textureDimensions(depth));
     let reflection_dims=textureDimensions(reflection);
     let reflection_pos=uv*vec2<f32>(reflection_dims)-vec2<f32>(0.5);

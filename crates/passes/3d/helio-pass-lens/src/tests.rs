@@ -6,7 +6,14 @@ use wgpu::util::DeviceExt;
 
 const SIZE: u32 = 128;
 const NEAR: f32 = 0.1;
+/// The range of distance-limited effects (`forward_far.w`); not a clip plane.
 const FAR: f32 = 100.0;
+
+/// The depth-buffer value of a surface `distance` metres away (the engine's
+/// reversed depth with no far plane: `near / distance`, sky 0).
+fn raw_depth(distance: f32) -> f32 {
+    if distance.is_finite() { NEAR / distance } else { helio_core::depth::CLEAR }
+}
 const VIEW: u32 = 7;
 
 /// Tests create their own devices; creating several concurrently hangs some
@@ -115,7 +122,7 @@ impl Rig {
                 .expect("GPU adapter required for lens regressions");
             adapter.request_device(&Default::default()).await.unwrap()
         });
-        let projection = glam::camera::rh::proj::directx::perspective(0.8, 1.0, NEAR, FAR);
+        let projection = helio_core::depth::perspective(0.8, 1.0, NEAR);
         let camera = helio_core::GpuCameraUniforms::new(
             glam::Mat4::IDENTITY,
             projection,
@@ -163,13 +170,13 @@ impl Rig {
             .create_view(&Default::default())
     }
 
-    /// The raw depth-buffer values of a perspective projection with `NEAR`
-    /// and `FAR` (the pass reads them as plain floats).
+    /// The raw depth-buffer values of the engine projection (the pass reads
+    /// them as plain floats).
     fn depth_view(&self, scene: &Scene) -> wgpu::TextureView {
         let raw: Vec<f32> = scene
             .distance
             .iter()
-            .map(|&d| if d.is_finite() { FAR * (d - NEAR) / (d * (FAR - NEAR)) } else { 1.0 })
+            .map(|&d| raw_depth(d))
             .collect();
         self.device
             .create_texture_with_data(
@@ -453,8 +460,7 @@ fn depth_rendered_below_image_resolution_keeps_foreground_focus() {
     let color = rig.color_view(&scene);
     let raw: Vec<f32> = (0..32 * 32)
         .map(|i| {
-            let d: f32 = if (15..17).contains(&(i % 32)) { 1.0 } else { 9.0 };
-            FAR * (d - NEAR) / (d * (FAR - NEAR))
+            raw_depth(if (15..17).contains(&(i % 32)) { 1.0 } else { 9.0 })
         })
         .collect();
     let depth = rig

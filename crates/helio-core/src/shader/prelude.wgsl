@@ -26,7 +26,8 @@ struct Camera {
     view_proj_inv:  mat4x4<f32>,
     /// Camera world position (xyz) + near plane (w).
     position_near:  vec4<f32>,
-    /// Camera forward direction (xyz) + far plane (w).
+    /// Camera forward direction (xyz) + effect range (w) — not a clip plane,
+    /// the projection has none (see Depth below).
     forward_far:    vec4<f32>,
     /// TAA jitter (xy) + frame index (z) + padding (w).
     jitter_frame:   vec4<f32>,
@@ -52,23 +53,73 @@ fn helio_ndc_to_uv(ndc: vec2<f32>) -> vec2<f32> {
 }
 
 // ── Depth ───────────────────────────────────────────────────────────────────
-// The engine builds its projection with glam `Mat4::perspective_rh`, so NDC z is
-// [0,1] (near..far) — the wgpu/D3D convention, NOT OpenGL's [-1,1]. Depth-buffer
-// values therefore go into `view_proj_inv` as-is; remapping with `depth * 2 - 1`
-// is an OpenGL habit that silently skews every reconstructed position.
+// Reversed Z with an infinite far plane (helio_core::depth): the near plane is
+// depth 1, infinity is depth 0, the buffer clears to 0 and nearer surfaces win
+// with `greater`. NDC z is wgpu's [0,1], never OpenGL's [-1,1] — depth-buffer
+// values go into `view_proj_inv` as-is; `depth * 2 - 1` silently skews every
+// reconstructed position.
+//
+// Compare depths through these helpers rather than with a bare `<` or `max`:
+// which of two depths is nearer is the convention's business, not the pass's.
+//
+// `forward_far.w` is not a clip plane. It is the range of distance-limited
+// effects (froxels, fog); geometry beyond it still rasterizes.
+
+/// Smallest depth reconstruction treats as a surface. Sky (0) would unproject
+/// to w = 0; clamping to this puts it at a huge but finite distance along the
+/// same view ray instead (near / 1e-12 — tens of millions of km).
+const HELIO_DEPTH_MIN: f32 = 1e-12;
+
+/// Whether a depth-buffer sample is sky: nothing was drawn there.
+fn helio_is_sky(depth: f32) -> bool {
+    return depth <= 0.0;
+}
+
+/// Whether depth `a` is nearer the camera than depth `b`.
+fn helio_depth_is_nearer(a: f32, b: f32) -> bool {
+    return a > b;
+}
+
+/// The nearer of two depths.
+fn helio_depth_nearest(a: f32, b: f32) -> f32 {
+    return max(a, b);
+}
+
+/// The farther of two depths.
+fn helio_depth_farthest(a: f32, b: f32) -> f32 {
+    return min(a, b);
+}
+
+/// Relative margin of a Hi-Z occlusion test (see `helio_hiz_occludes`).
+const HELIO_HIZ_MARGIN: f32 = 1.0 / 65536.0;
+
+/// Whether an occluder whose farthest depth over a footprint is `farthest`
+/// hides a bound whose nearest point has depth `nearest`.
+///
+/// The margin is relative: reversed depth is `near / distance`, so a relative
+/// margin is the same fraction of distance at every range, where a fixed one
+/// would be kilometres wide at the horizon and nothing up close.
+fn helio_hiz_occludes(farthest: f32, nearest: f32) -> bool {
+    return helio_depth_is_nearer(farthest, nearest * (1.0 + HELIO_HIZ_MARGIN));
+}
 
 /// World position from a depth-buffer sample.
-/// `inv_view_proj` is `cameras[0].view_proj_inv`; `depth` is the raw [0,1] buffer value.
+/// `inv_view_proj` is `cameras[0].view_proj_inv`; `depth` is the raw buffer value.
+/// Sky comes back as a far point along its view ray, never as inf/NaN.
 fn helio_world_from_depth(inv_view_proj: mat4x4<f32>, uv: vec2<f32>, depth: f32) -> vec3<f32> {
-    let world = inv_view_proj * vec4<f32>(helio_uv_to_ndc(uv), depth, 1.0);
+    let world = inv_view_proj * vec4<f32>(helio_uv_to_ndc(uv), max(depth, HELIO_DEPTH_MIN), 1.0);
     return world.xyz / world.w;
 }
 
-/// Raw [0,1] depth to positive view-space distance (near..far).
+/// Raw depth to positive view-space depth (distance along the view axis).
 ///
-/// `near`/`far` are `cameras[0].position_near.w` / `cameras[0].forward_far.w`.
-fn helio_view_depth(depth: f32, near: f32, far: f32) -> f32 {
-    return near * far / (far - depth * (far - near));
+/// `proj` is `cameras[0].proj`. Inverts only the projection's own z and w
+/// rows, so it needs no near/far pair kept in sync with it and holds for
+/// perspective (finite or infinite) and orthographic projections, reversed or
+/// standard. Sky reads as a huge but finite distance.
+fn helio_view_depth(proj: mat4x4<f32>, depth: f32) -> f32 {
+    let d = max(depth, HELIO_DEPTH_MIN);
+    return (proj[3][2] - d * proj[3][3]) / (proj[2][2] - d * proj[2][3]);
 }
 
 // ── G-buffer ────────────────────────────────────────────────────────────────

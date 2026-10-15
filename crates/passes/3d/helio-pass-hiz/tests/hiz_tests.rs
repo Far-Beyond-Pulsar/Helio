@@ -1,7 +1,7 @@
 //! Tests for HiZ (Hierarchical-Z) pass properties and configuration.
 //!
 //! The HiZ build pass constructs a mip chain of depth values, storing the
-//! maximum depth per 2×2 block at each level for conservative occlusion culling.
+//! farthest depth per 2×2 block at each level for conservative occlusion culling.
 
 // ── Local reimplementation of private `mip_levels` ───────────────────────────
 
@@ -38,7 +38,7 @@ fn r32float_texel_is_four_bytes() {
 
 #[test]
 fn hiz_uses_nearest_filtering() {
-    // Nearest filtering is required for exact max-depth propagation.
+    // Nearest filtering is required for exact farthest-depth propagation.
     // Linear filtering would blur depths and corrupt occlusion queries.
     const USES_NEAREST: bool = true;
     assert!(USES_NEAREST);
@@ -51,10 +51,10 @@ fn hiz_does_not_use_linear_filtering() {
 }
 
 #[test]
-fn hiz_is_max_reduction() {
-    // Each mip level stores the maximum depth value from its 2×2 source block.
-    const IS_MAX_REDUCTION: bool = true;
-    assert!(IS_MAX_REDUCTION);
+fn hiz_is_farthest_reduction() {
+    // Each mip level stores the farthest depth value from its 2×2 source block.
+    const IS_FARTHEST_REDUCTION: bool = true;
+    assert!(IS_FARTHEST_REDUCTION);
 }
 
 // ── Workgroup and constant tests ──────────────────────────────────────────────

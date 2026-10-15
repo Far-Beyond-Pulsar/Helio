@@ -302,7 +302,7 @@ impl RenderPass for PortalCullPass {
         // reserved chain slot. The resolver/projection bridge publishes the
         // live count explicitly through `set_active_chain_count`.
         self.chain_count = self.active_chain_count.unwrap_or(0);
-        let planes = extract_frustum_planes(ctx.camera_data.view_proj);
+        let planes = helio_core::depth::frustum_planes(ctx.camera_data.view_proj);
 
         let uniforms = CullUniforms {
             frustum_planes: planes,
@@ -453,38 +453,4 @@ impl RenderPass for PortalCullPass {
 
         Ok(())
     }
-}
-
-/// Extract 6 frustum planes from a view-projection matrix (Gribb/Hartmann method).
-/// Identical to `helio-pass-indirect-dispatch`'s own copy — see there for the
-/// full derivation notes; duplicated per this codebase's established
-/// per-pass-duplication convention for small shared helpers.
-fn extract_frustum_planes(vp: [f32; 16]) -> [[f32; 4]; 6] {
-    let row = |r: usize| -> [f32; 4] { [vp[r], vp[4 + r], vp[8 + r], vp[12 + r]] };
-    let r0 = row(0);
-    let r1 = row(1);
-    let r2 = row(2);
-    let r3 = row(3);
-    let add = |a: [f32; 4], b: [f32; 4]| -> [f32; 4] {
-        [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]]
-    };
-    let sub = |a: [f32; 4], b: [f32; 4]| -> [f32; 4] {
-        [a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]]
-    };
-    let normalize = |p: [f32; 4]| -> [f32; 4] {
-        let len = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
-        if len > 1e-10 {
-            [p[0] / len, p[1] / len, p[2] / len, p[3] / len]
-        } else {
-            p
-        }
-    };
-    [
-        normalize(add(r3, r0)),
-        normalize(sub(r3, r0)),
-        normalize(add(r3, r1)),
-        normalize(sub(r3, r1)),
-        normalize(r2),
-        normalize(sub(r3, r2)),
-    ]
 }

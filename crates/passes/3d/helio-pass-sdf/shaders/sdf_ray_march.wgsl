@@ -383,12 +383,12 @@ fn fs_main(in: VsOutput) -> FsOutput {
 
     // Reconstruct ray from camera
     let ndc = vec2<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
-    let near_h = cameras[0].inv_view_proj * vec4<f32>(ndc, 0.0, 1.0);
-    let far_h = cameras[0].inv_view_proj * vec4<f32>(ndc, 1.0, 1.0);
-    let near_w = near_h.xyz / near_h.w;
-    let far_w = far_h.xyz / far_h.w;
-    let ray_dir = normalize(far_w - near_w);
+    // Reversed depth: NDC z = 0 is infinitely far, so its unprojection has
+    // w = 0. Taken homogeneously (minus w times the eye) it is the ray
+    // direction itself, with no division to blow up.
+    let far_h = cameras[0].inv_view_proj * vec4<f32>(ndc, 0.0, 1.0);
     let ray_origin = cameras[0].position_near.xyz;
+    let ray_dir = normalize(far_h.xyz - far_h.w * ray_origin);
 
     // ── Ray–AABB clip against the coarsest clip level ─────────────────────
     //

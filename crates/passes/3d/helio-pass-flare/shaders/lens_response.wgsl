@@ -343,7 +343,7 @@ fn depth_visibility(uv: vec2<f32>, radius: f32, light_depth: f32, aspect: f32) -
         let tap = uv + p;
         if any(tap < vec2(0.0)) || any(tap >= vec2(1.0)) { continue; }
         let depth = textureLoad(scene_depth, vec2<i32>(tap * dims), 0);
-        visible += select(0.0, 1.0, depth >= light_depth);
+        visible += select(0.0, 1.0, !helio_depth_is_nearer(depth, light_depth));
         taps += 1.0;
     }
     return select(1.0, visible / taps, taps > 0.0);
@@ -373,7 +373,8 @@ fn cs_sources(@builtin(local_invocation_index) lid: u32) {
         let light = lights[i];
         var to_light: vec3<f32>;
         var irradiance = intensity;
-        var light_depth = 1.0;
+        // A directional light is infinitely far: the depth clear value.
+        var light_depth = 0.0;
         if light.light_type == LIGHT_DIRECTIONAL {
             if dot(light.direction_outer.xyz, light.direction_outer.xyz) < 1e-12 { continue; }
             to_light = normalize(-light.direction_outer.xyz);
@@ -726,12 +727,12 @@ fn cs_temporal(@builtin(global_invocation_id) id: vec3<u32>) {
         let depth_dims = vec2<f32>(textureDimensions(scene_depth));
         let depth = textureLoad(scene_depth, vec2<i32>(min(uv * depth_dims, depth_dims - 1.0)), 0);
         let camera = cameras[0];
-        // Sky and other far-plane texels reproject as directions.
-        let world = camera.view_proj_inv * vec4(helio_uv_to_ndc(uv), min(depth, 1.0), 1.0);
+        // Sky texels reproject as directions.
+        let world = camera.view_proj_inv * vec4(helio_uv_to_ndc(uv), depth, 1.0);
         var point = vec4(world.xyz / world.w, 1.0);
-        // Homogeneous difference: exact as w -> 0 (a far plane at f32
-        // infinity when near/far is tiny), where dividing by w gives NaN.
-        if depth >= 1.0 { point = vec4(normalize(world.xyz - world.w * camera.position_near.xyz), 0.0); }
+        // Homogeneous difference: exact at sky's w == 0 (depth 0 is
+        // infinitely far), where dividing by w gives NaN.
+        if helio_is_sky(depth) { point = vec4(normalize(world.xyz - world.w * camera.position_near.xyz), 0.0); }
         let prev = camera.prev_view_proj * point;
         let prev_uv = helio_ndc_to_uv(prev.xy / prev.w);
         if prev.w > 1e-6 && all(prev_uv >= vec2(0.0)) && all(prev_uv <= vec2(1.0)) {

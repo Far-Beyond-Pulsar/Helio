@@ -774,7 +774,7 @@ impl FoliageGBufferPass {
                 // stochastic cross-fade is a discard, not a blend, so a surviving
                 // fragment is fully opaque and writing depth is correct.
                 depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),

@@ -188,6 +188,7 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
 "#;
 
 const FALLBACK_WGSL: &str = r#"
+//!use helio_prelude
 struct RCDynamic {
     world_min:   vec4<f32>,
     world_max:   vec4<f32>,
@@ -196,17 +197,6 @@ struct RCDynamic {
     _pad0:       u32,
     _pad1:       u32,
     sky_color:   vec4<f32>,
-}
-
-struct Camera {
-    view:           mat4x4<f32>,
-    proj:           mat4x4<f32>,
-    view_proj:      mat4x4<f32>,
-    view_proj_inv:  mat4x4<f32>,
-    position_near:  vec4<f32>,
-    forward_far:    vec4<f32>,
-    jitter_frame:   vec4<f32>,
-    prev_view_proj: mat4x4<f32>,
 }
 
 @group(0) @binding(0) var cascade_out:   texture_storage_2d<rgba16float, write>;
@@ -233,10 +223,6 @@ fn oct_decode(uv: vec2<f32>) -> vec3<f32> {
         n = vec3<f32>(f.x, 1.0 - l, f.y);
     }
     return normalize(n);
-}
-
-fn helio_ndc_to_uv(ndc: vec2<f32>) -> vec2<f32> {
-    return vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
 }
 
 @compute @workgroup_size(8, 8)
@@ -304,9 +290,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
         let scene_d = textureLoad(depth_tex, depth_coord, 0).x;
 
-        if scene_d >= 1.0 { continue; }
+        if helio_is_sky(scene_d) { continue; }
 
-        if d >= scene_d {
+        // The ray reached or passed behind the surface.
+        if !helio_depth_is_nearer(d, scene_d) {
             let scene_coord = min(
                 vec2<i32>(uv * scene_dims),
                 vec2<i32>(textureDimensions(scene_color)) - vec2<i32>(1),
@@ -1086,7 +1073,8 @@ mod tests {
 
     #[test]
     fn fallback_shader_translates_to_gles() {
-        let module = naga::front::wgsl::parse_str(FALLBACK_WGSL)
+        let source = helio_core::shader::resolve(FALLBACK_WGSL);
+        let module = naga::front::wgsl::parse_str(&source)
             .expect("Radiance Cascades fallback WGSL must parse");
         let info = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),

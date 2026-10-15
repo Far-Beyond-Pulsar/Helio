@@ -4,17 +4,7 @@
 // whole-object LOD decision. Stage two assigns one 64-lane workgroup to each
 // immutable meshlet span, so very large objects scale across the GPU instead of
 // serialising all their meshlets through one workgroup.
-
-struct Camera {
-    view:           mat4x4<f32>,
-    proj:           mat4x4<f32>,
-    view_proj:      mat4x4<f32>,
-    view_proj_inv:  mat4x4<f32>,
-    position_near:  vec4<f32>,
-    forward_far:    vec4<f32>,
-    jitter_frame:   vec4<f32>,
-    prev_view_proj: mat4x4<f32>,
-}
+//!use helio_prelude
 
 /// Mirrors GpuMeshletEntry (Rust, 64 bytes).
 struct MeshletEntry {
@@ -104,10 +94,9 @@ struct CullUniforms {
     work_item_count:       u32,
     work_dispatch_width:   u32,
     // 0 on frame 0 (or right after a resize rebuilds the graph): the Hi-Z
-    // pyramid hasn't been built from any real depth yet, so its texture reads
-    // back as 0.0 — which this engine's near=0.0 depth convention would
-    // otherwise read as "everything is behind the (nonexistent) occluder",
-    // culling the whole visible scene for that one frame.
+    // pyramid hasn't been built from any real depth yet, so its texels are not
+    // depth anything drew, and testing against them could cull the whole
+    // visible scene for that one frame.
     hiz_valid:             u32,
     _pad1:                 u32,
     _pad2:                 u32,
@@ -128,7 +117,7 @@ struct CullUniforms {
 @group(0) @binding(10) var<storage, read> instance_cull: array<InstanceCullData>;
 @group(0) @binding(11) var<storage, read> work_items: array<VgWorkItem>;
 
-var<workgroup> wg_planes: array<vec4<f32>, 6>;
+var<workgroup> wg_planes: array<vec4<f32>, 5>;
 var<workgroup> wg_first_meshlet: u32;
 var<workgroup> wg_meshlet_count: u32;
 var<workgroup> wg_instance_index: u32;
@@ -141,8 +130,7 @@ fn sphere_visible(center: vec3<f32>, radius: f32) -> bool {
         && (dot(wg_planes[1].xyz, center) + wg_planes[1].w >= -radius)
         && (dot(wg_planes[2].xyz, center) + wg_planes[2].w >= -radius)
         && (dot(wg_planes[3].xyz, center) + wg_planes[3].w >= -radius)
-        && (dot(wg_planes[4].xyz, center) + wg_planes[4].w >= -radius)
-        && (dot(wg_planes[5].xyz, center) + wg_planes[5].w >= -radius);
+        && (dot(wg_planes[4].xyz, center) + wg_planes[4].w >= -radius);
 }
 
 fn cull_meshlet(meshlet_index: u32, instance_index: u32, lod_level: u32) {
@@ -201,12 +189,11 @@ fn cull_meshlet(meshlet_index: u32, instance_index: u32, lod_level: u32) {
         }
     }
 
-    // Conservative max-depth Hi-Z test. Reject only when the complete
+    // Conservative farthest-depth Hi-Z test. Reject only when the complete
     // projected sphere is on-screen and all four footprint corners are behind
     // existing depth at the chosen mip. Skipped entirely on the frame the
-    // pyramid isn't valid yet (see CullUniforms.hiz_valid) — otherwise an
-    // untouched depth texture reads back as 0.0 and every meshlet looks
-    // occluded.
+    // pyramid isn't valid yet (see CullUniforms.hiz_valid) — its texels are
+    // not depth anything drew, and can make every meshlet look occluded.
     let cull_clip = cameras[0].view_proj * vec4<f32>(center_ws, 1.0);
     if cull_uni.hiz_valid != 0u && cull_clip.w > 0.0 {
         let cull_ndc = cull_clip.xyz / cull_clip.w;
@@ -223,7 +210,9 @@ fn cull_meshlet(meshlet_index: u32, instance_index: u32, lod_level: u32) {
 
             if all(uv_min >= vec2<f32>(0.0)) && all(uv_max <= vec2<f32>(1.0)) {
                 let dist_sq = dot(cam_to_center, cam_to_center);
-                var near_z = 0.0;
+                // Reversed depth: the near plane (1) unless the sphere is
+                // wholly in front of the eye.
+                var near_z = 1.0;
                 if dist_sq > world_radius * world_radius {
                     let direction = cam_to_center / sqrt(dist_sq);
                     let near_ws = center_ws - direction * world_radius;
@@ -254,8 +243,11 @@ fn cull_meshlet(meshlet_index: u32, instance_index: u32, lod_level: u32) {
                     f32(mip),
                 ).r;
                 let hiz_11 = textureSampleLevel(hiz_tex, hiz_samp, uv_max, f32(mip)).r;
-                let hiz_depth = max(max(hiz_00, hiz_01), max(hiz_10, hiz_11));
-                if near_z > hiz_depth + 1.0 / 65536.0 {
+                let hiz_depth = helio_depth_farthest(
+                    helio_depth_farthest(hiz_00, hiz_01),
+                    helio_depth_farthest(hiz_10, hiz_11),
+                );
+                if helio_hiz_occludes(hiz_depth, near_z) {
                     return;
                 }
             }
@@ -300,20 +292,22 @@ fn cull_meshlet(meshlet_index: u32, instance_index: u32, lod_level: u32) {
     );
 }
 
+/// Left, right, bottom, top and near planes (helio_core::depth::frustum_planes).
+/// There is no far plane: the camera projection has none, and the textbook one
+/// (row 2 alone) is `(0, 0, 0, near)` under it — normalizing that divides by
+/// zero and the NaN culls everything.
 fn publish_frustum_planes() {
     let vp = cameras[0].view_proj;
     let p0 = vec4<f32>(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]);
     let p1 = vec4<f32>(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0], vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]);
     let p2 = vec4<f32>(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1], vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]);
     let p3 = vec4<f32>(vp[0][3] - vp[0][1], vp[1][3] - vp[1][1], vp[2][3] - vp[2][1], vp[3][3] - vp[3][1]);
-    let p4 = vec4<f32>(vp[0][2], vp[1][2], vp[2][2], vp[3][2]);
-    let p5 = vec4<f32>(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2], vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]);
+    let p4 = vec4<f32>(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2], vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]);
     wg_planes[0] = p0 / length(p0.xyz);
     wg_planes[1] = p1 / length(p1.xyz);
     wg_planes[2] = p2 / length(p2.xyz);
     wg_planes[3] = p3 / length(p3.xyz);
     wg_planes[4] = p4 / length(p4.xyz);
-    wg_planes[5] = p5 / length(p5.xyz);
 }
 
 @compute @workgroup_size(64)

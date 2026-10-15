@@ -216,8 +216,7 @@ impl SceneInput for Scene {
     }
 }
 fn scene(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Scene {
-    #[allow(deprecated)]
-    let projection = glam::Mat4::perspective_rh(1.0, 16.0 / 9.0, 0.1, 100.0);
+    let projection = helio_core::depth::perspective(1.0, 16.0 / 9.0, 0.1);
     let mut data = GpuCameraUniforms::new(
         glam::Mat4::IDENTITY,
         projection,

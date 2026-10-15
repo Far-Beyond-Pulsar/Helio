@@ -1,4 +1,5 @@
 //! Compute shader to estimate per-pixel rendering cost.
+//!use helio_prelude
 //!
 //! Estimates GPU work per pixel based on:
 //! - Tile light counts (light loop iterations)
@@ -80,7 +81,7 @@ fn cs_compute_shader_cost(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Check if pixel is geometry or sky
     let depth = textureLoad(gbuffer_depth, vec2<u32>(px, py), 0).r;
-    if depth >= 1.0 {
+    if helio_is_sky(depth) {
         // Sky pixel - minimal cost (already rendered by sky pass)
         atomicStore(&pixel_cost[pixel_idx], 0u);
         return;

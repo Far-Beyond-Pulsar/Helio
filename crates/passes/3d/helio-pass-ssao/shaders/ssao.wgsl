@@ -78,8 +78,8 @@ fn fs_main(in: VertexOutput) -> @location(0) f32 {
     // Sample depth
     let depth = textureLoad(gbuf_depth, texel, 0);
     
-    // Skip sky pixels (depth = 1.0)
-    if depth >= 1.0 {
+    // Skip sky pixels
+    if helio_is_sky(depth) {
         return 1.0;
     }
     

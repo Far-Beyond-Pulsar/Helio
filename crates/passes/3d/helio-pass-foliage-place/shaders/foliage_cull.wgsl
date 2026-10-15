@@ -1,3 +1,4 @@
+//!use helio_prelude
 // Foliage tile cull, cluster cull + compaction, and indirect finalize — stages 2 and 3
 // of `FoliagePlacePass`.
 //
@@ -36,17 +37,6 @@ const TILE_STATE_EVICTING: u32 = 3u;
 // Mirrors the COUNTER_* constants in src/lib.rs.
 const COUNTER_VISIBLE_OVERFLOW: u32 = 4u;
 
-struct Camera {
-    view:           mat4x4<f32>,
-    proj:           mat4x4<f32>,
-    view_proj:      mat4x4<f32>,
-    view_proj_inv:  mat4x4<f32>,
-    position_near:  vec4<f32>,
-    forward_far:    vec4<f32>,
-    jitter_frame:   vec4<f32>,
-    prev_view_proj: mat4x4<f32>,
-}
-
 /// Mirrors `FoliageCullUniforms` (Rust, 64 bytes).
 struct FoliageCullUniforms {
     tile_count:             u32,
@@ -55,10 +45,9 @@ struct FoliageCullUniforms {
     hiz_mip_count:          u32,
 
     // 0 on frame 0 and right after a resize rebuilds the graph: the Hi-Z pyramid has not
-    // been built from any real depth yet, so its texture reads back as 0.0 — which this
-    // engine's near-is-0.0 convention would otherwise read as "everything is behind the
-    // (nonexistent) occluder", culling the entire world for that frame. Copied verbatim
-    // from `CullUniforms::hiz_valid` in vg_cull.wgsl, and it is load-bearing.
+    // been built from any real depth yet, so its texels hold whatever the graph's
+    // texture pool left there, and testing against them can cull the entire world for
+    // that frame. Copied verbatim from `CullUniforms::hiz_valid` in vg_cull.wgsl.
     hiz_valid:              u32,
     cluster_size:           u32,
     clusters_per_tile:      u32,
@@ -148,7 +137,7 @@ struct DrawIndirect {
 @group(0) @binding(9)  var hiz_tex: texture_2d<f32>;
 @group(0) @binding(10) var hiz_samp: sampler;
 
-var<workgroup> wg_planes: array<vec4<f32>, 6>;
+var<workgroup> wg_planes: array<vec4<f32>, 5>;
 
 // ── Shared helpers ──────────────────────────────────────────────────────────────
 
@@ -158,20 +147,22 @@ fn is_finite_f32(value: f32) -> bool {
     return (bitcast<u32>(value) & 0x7f800000u) != 0x7f800000u;
 }
 
+/// Left, right, bottom, top and near planes (helio_core::depth::frustum_planes).
+/// There is no far plane: the camera projection has none, and the textbook one
+/// (row 2 alone) is `(0, 0, 0, near)` under it — normalizing that divides by zero
+/// and the NaN culls everything.
 fn publish_frustum_planes() {
     let vp = cameras[0].view_proj;
     let p0 = vec4<f32>(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]);
     let p1 = vec4<f32>(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0], vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]);
     let p2 = vec4<f32>(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1], vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]);
     let p3 = vec4<f32>(vp[0][3] - vp[0][1], vp[1][3] - vp[1][1], vp[2][3] - vp[2][1], vp[3][3] - vp[3][1]);
-    let p4 = vec4<f32>(vp[0][2], vp[1][2], vp[2][2], vp[3][2]);
-    let p5 = vec4<f32>(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2], vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]);
+    let p4 = vec4<f32>(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2], vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]);
     wg_planes[0] = p0 / length(p0.xyz);
     wg_planes[1] = p1 / length(p1.xyz);
     wg_planes[2] = p2 / length(p2.xyz);
     wg_planes[3] = p3 / length(p3.xyz);
     wg_planes[4] = p4 / length(p4.xyz);
-    wg_planes[5] = p5 / length(p5.xyz);
 }
 
 fn sphere_visible(center: vec3<f32>, radius: f32) -> bool {
@@ -179,11 +170,10 @@ fn sphere_visible(center: vec3<f32>, radius: f32) -> bool {
         && (dot(wg_planes[1].xyz, center) + wg_planes[1].w >= -radius)
         && (dot(wg_planes[2].xyz, center) + wg_planes[2].w >= -radius)
         && (dot(wg_planes[3].xyz, center) + wg_planes[3].w >= -radius)
-        && (dot(wg_planes[4].xyz, center) + wg_planes[4].w >= -radius)
-        && (dot(wg_planes[5].xyz, center) + wg_planes[5].w >= -radius);
+        && (dot(wg_planes[4].xyz, center) + wg_planes[4].w >= -radius);
 }
 
-/// Conservative max-depth Hi-Z test, transcribed from `vg_cull.wgsl` (the block around
+/// Conservative farthest-depth Hi-Z test, transcribed from `vg_cull.wgsl` (the block around
 /// lines 199-252) including the `hiz_valid` frame-0 guard.
 ///
 /// Rejects only when the *complete* projected sphere is on screen and all four corners of
@@ -217,7 +207,8 @@ fn hiz_occluded(center_ws: vec3<f32>, world_radius: f32) -> bool {
 
     let cam_to_center = center_ws - cameras[0].position_near.xyz;
     let dist_sq = dot(cam_to_center, cam_to_center);
-    var near_z = 0.0;
+    // Reversed depth: the near plane (1) unless the sphere is wholly in front of the eye.
+    var near_z = 1.0;
     if dist_sq > world_radius * world_radius {
         let direction = cam_to_center / sqrt(dist_sq);
         let near_ws = center_ws - direction * world_radius;
@@ -234,8 +225,8 @@ fn hiz_occluded(center_ws: vec3<f32>, world_radius: f32) -> bool {
     let hiz_01 = textureSampleLevel(hiz_tex, hiz_samp, vec2<f32>(uv_max.x, uv_min.y), f32(mip)).r;
     let hiz_10 = textureSampleLevel(hiz_tex, hiz_samp, vec2<f32>(uv_min.x, uv_max.y), f32(mip)).r;
     let hiz_11 = textureSampleLevel(hiz_tex, hiz_samp, uv_max, f32(mip)).r;
-    let hiz_depth = max(max(hiz_00, hiz_01), max(hiz_10, hiz_11));
-    return near_z > hiz_depth + 1.0 / 65536.0;
+    let hiz_depth = helio_depth_farthest(helio_depth_farthest(hiz_00, hiz_01), helio_depth_farthest(hiz_10, hiz_11));
+    return helio_hiz_occludes(hiz_depth, near_z);
 }
 
 /// Transcription of `crate::select_blade_lod`.

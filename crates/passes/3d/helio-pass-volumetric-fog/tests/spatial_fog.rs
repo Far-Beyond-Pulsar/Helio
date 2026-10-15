@@ -88,10 +88,9 @@ fn scenedb_local_fog_is_visible_from_outside_and_tracks_edits_and_removal() {
             PostProcessVolumeComponent::from(descriptor.to_gpu()),
         );
         world.flush_gpu_mirror(&queue);
-        #[allow(deprecated)]
         let camera_data = helio_core::GpuCameraUniforms::new(
             glam::Mat4::IDENTITY,
-            glam::Mat4::perspective_rh(1.0, 1.0, 0.1, 100.0),
+            helio_core::depth::perspective(1.0, 1.0, 0.1),
             glam::Vec3::ZERO,
             0.1,
             100.0,

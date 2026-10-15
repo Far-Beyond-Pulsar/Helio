@@ -255,12 +255,15 @@ fn fine(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) l
     let p=lo+local.xy;
     if all(p<globals.screen_size) {
         let d=textureLoad(gbuf_depth,vec2<i32>(p),0);
-        if d<1.0 { atomicMin(&min_depth,bitcast<u32>(d)); atomicMax(&max_depth,bitcast<u32>(d)); }
+        if !helio_is_sky(d) { atomicMin(&min_depth,bitcast<u32>(d)); atomicMax(&max_depth,bitcast<u32>(d)); }
     }
     workgroupBarrier();
+    // Raw NDC depth interval of the tile's surfaces; empty (zlo > zhi) when it
+    // is all sky. The screen-space shadow march wants the nearest, which under
+    // reversed depth is the largest: zhi, and sky (0) for an empty tile.
     let zlo=bitcast<f32>(atomicLoad(&min_depth));
     let zhi=bitcast<f32>(atomicLoad(&max_depth));
-    if lane==0u { textureStore(depth_bounds,vec2<i32>(group.xy),vec4<f32>(zlo)); }
+    if lane==0u { textureStore(depth_bounds,vec2<i32>(group.xy),vec4<f32>(zhi)); }
     let ci=(lo.y/COARSE_TILE_SIZE)*div_ceil(globals.screen_size,COARSE_TILE_SIZE).x+lo.x/COARSE_TILE_SIZE;
     let coarse_count=coarse_grid[ci].count;
     let ti=group.y*div_ceil(globals.screen_size,TILE_SIZE).x+group.x;

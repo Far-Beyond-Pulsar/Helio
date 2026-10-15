@@ -1,68 +1,54 @@
-//! Full-engine voxel planet flight: movement sequences, frame timings,
-//! terrain GPU stages, residency/memory, arrival and edit latency, canonical
-//! CPU/GPU agreement audits and acceptance gates.
+//! Voxel planet terrain in Helio's renderer, drawn from chunk trees
+//! (docs/chunk-trees.md): held views with GPU timings, streaming flights,
+//! digging, picks and captures.
 //!
 //! cargo run -p helio-default-graphs --release --example voxel_flight -- OUTPUT [WIDTH HEIGHT [native|quality]]
 //!
-//! Frames are pipelined like a game loop (at most `FRAMES_IN_FLIGHT` ahead of
-//! the GPU); a frame's time is the interval between frame completions, and
-//! harness-only work (captures, readbacks, audits) is excluded from it. GPU
-//! stage timestamps arrive a frame or two later and are attached to the frame
-//! that produced them. Waiting for every frame instead lets the GPU idle and
-//! the driver lower its clocks, which inflates every GPU timing; `frames.csv`
-//! records the graphics and memory clocks per frame (via `nvidia-smi`).
+//! Modes (environment):
+//! * `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|tunnel|face_edge|cave|eye`
+//!   settles one view (`HELIO_VOXEL_FLIGHT_EYE=x,y,z,fx,fy,fz` for `eye`)
+//!   and holds it for `HELIO_VOXEL_FLIGHT_HOLD_SECONDS`: drawn by
+//!   `ChunkWorld` alone (`CHUNKHOLD`: its GPU stages), or with
+//!   `HELIO_VOXEL_CHUNKS_ENGINE=1` by the renderer's chunk pass
+//!   (`CHUNKENGINE`: the frame as a host draws it). With
+//!   `HELIO_VOXEL_CHUNKS_DIG=n` the view is dug and undone, with
+//!   `HELIO_VOXEL_CHUNKS_BLAST=r` blasted by one ball `r` m across.
+//!   `HELIO_VOXEL_GEN_BENCH=rounds` then generates its tiles again that many
+//!   times (`GENBENCH`: the GPU's generation time by kernel).
+//! * `HELIO_VOXEL_CHUNKS_FLY=descent|cruise` streams along a path.
+//! * `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo|dive|glide` flies through the
+//!   renderer in real time, every frame recorded (`stress_<mode>.csv`),
+//!   samples saved with settled references to compare.
 //!
-//! Environment:
-//! * `HELIO_VOXEL_FLIGHT_SYNC=1` waits for every frame (old behaviour).
-//! * `HELIO_VOXEL_FLIGHT_RECORD=1` saves every other movement frame (visual
-//!   review run; capture readback perturbs timings, so do not use it for gates).
-//! * `HELIO_VOXEL_FLIGHT_VOXEL=0.3` authored base voxel size (0.1..1.0).
-//! * `HELIO_VOXEL_FLIGHT_NO_SUN=1` disables traced terrain sunlight.
-//! * `HELIO_VOXEL_FLIGHT_QUICK=1` short timing probe with stage summaries.
-//! * `HELIO_VOXEL_FLIGHT_GROUND_ONLY=1` ground views and audits only.
-//! * `HELIO_VOXEL_FLIGHT_HEAT=1` saves traversal step heatmaps with audits.
-//! * `HELIO_VOXEL_FLIGHT_CPU_PROBE=1` per-pass CPU cost of a steady view.
-//! * `HELIO_VOXEL_FLIGHT_REVERSAL_AUDIT=1` audits two frames of the fast descent.
-//! * `HELIO_VOXEL_FLIGHT_DEBUG=<mode>` Helio debug view.
-//! * `HELIO_VOXEL_FLIGHT_HEIGHTFIELD=1` the Earth stack without caves and overhangs.
-//! * `HELIO_VOXEL_FLIGHT_SCULPT=1` sculpting stress (editor strokes, edits
-//!   piling up in one area): per-stroke frame, brush and generation cost.
+//! World: `HELIO_VOXEL_FLIGHT_VOXEL` (0.1 m), `_SEED` (7), `_PRESET`
+//! (earth|moon|desert) or `_LAYERS=<json>` (a layer stack), `_HEIGHTFIELD`, `_NO_CAVES`, `_NO_OVERHANGS`,
+//! `_GRAIN=scale_m,octaves,ratio`, `_SUN=x,y,z`, `_SUN_ELEVATION=deg` (the
+//! terrain's sun that high over each view's horizon toward `_SUN`'s azimuth;
+//! the scene light keeps `_SUN`),
+//! `_LOOK=exposure,contrast,saturation`, `_DEBUG=<mode>`.
 //!
-//! `gates.json` / `gates.md` evaluate the declared acceptance targets.
+//! Frames are pipelined like a game loop (at most `FRAMES_IN_FLIGHT` ahead
+//! of the GPU): waiting for every frame lets the driver lower its clocks,
+//! which inflates every GPU timing.
+
 use glam::{DVec3, Vec3};
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
     RendererBuilder, RendererConfig,
 };
 use helio_default_graphs::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
-use helio_pass_voxel_planet::engine::{PlanetFrame, PlanetPass, SharedPlanetFrame};
-use helio_pass_voxel_planet::{grid::Shape, terrain::material, Brush, BrushOp, BrushShape, Planet, PlanetRecipe};
+use helio_pass_voxel_planet::chunks::pass::ChunkPass;
+use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPicks, SharedPlanetFrame};
+use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Planet, PlanetRecipe};
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
-use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-const DT: f64 = 1.0 / 60.0;
+/// Side of the cells the engine frames' world origin snaps to (Pulsar's
+/// `WORLD_ORIGIN_CELL`).
+const ORIGIN_CELL: f64 = 1024.0;
 
-#[derive(Clone, Debug, Default)]
-struct Sample {
-    stage: String,
-    /// Frame time: the interval between consecutive frame completions when
-    /// pipelined, the synchronized render time otherwise.
-    sync_ms: f64,
-    submit_ms: f64,
-    /// NaN until the frame's GPU timestamps arrive.
-    terrain_gpu_ms: f64,
-    stages: BTreeMap<&'static str, f64>,
-    frame_num: u64,
-    /// Pre-formatted CSV columns after the timing columns.
-    row: String,
-    altitude: f64,
-}
-
-/// Frames the CPU may run ahead of the GPU in pipelined mode.
 const FRAMES_IN_FLIGHT: usize = 2;
 
 struct Flight {
@@ -73,79 +59,19 @@ struct Flight {
     planet: Arc<Planet>,
     target: wgpu::Texture,
     size: [u32; 2],
-    frame: u64,
-    csv: std::fs::File,
     sun: Vec3,
-    shadows: bool,
-    record: bool,
+    /// Degrees over the eye's horizon (`HELIO_VOXEL_FLIGHT_SUN_ELEVATION`).
+    sun_elevation: Option<f32>,
     output: PathBuf,
-    samples: Vec<Sample>,
-    clocks: GpuClocks,
     /// Pipelined frames not yet known complete.
     in_flight: std::collections::VecDeque<Arc<std::sync::atomic::AtomicBool>>,
-    /// End of the last frame; cleared by harness-only work (captures,
-    /// readbacks, audits) so it never counts toward the next frame time.
-    last_frame_end: std::cell::Cell<Option<Instant>>,
-    /// Wait for every frame (HELIO_VOXEL_FLIGHT_SYNC): lets the GPU idle and
-    /// downclock between frames, unlike a game's continuous submission.
-    sync_frames: bool,
+    /// Pick requests drawn frames answer (`pick_probe`).
+    picks: Option<SharedPicks>,
 }
 
-/// Latest GPU graphics and memory clocks (MHz) from a streaming
-/// `nvidia-smi` query; zero when unavailable. Drivers lower clocks while the
-/// GPU idles between synchronized frames, which scales every GPU timing, so
-/// frames record the clock they ran at.
-struct GpuClocks {
-    latest: Arc<std::sync::atomic::AtomicU64>,
-    _child: Option<std::process::Child>,
-}
-
-impl GpuClocks {
-    fn start() -> Self {
-        use std::io::BufRead;
-        let latest = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let child = std::process::Command::new("nvidia-smi")
-            .args(["--query-gpu=clocks.gr,clocks.mem", "--format=csv,noheader,nounits", "-lms", "20"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok();
-        let mut child = child;
-        if let Some(stdout) = child.as_mut().and_then(|c| c.stdout.take()) {
-            let latest = latest.clone();
-            std::thread::spawn(move || {
-                for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
-                    let mut parts = line.split(',').map(|p| p.trim().parse::<u64>().unwrap_or(0));
-                    let (gr, mem) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
-                    latest.store(gr | (mem << 32), std::sync::atomic::Ordering::Relaxed);
-                }
-            });
-        }
-        Self { latest, _child: child }
-    }
-    fn read(&self) -> (u64, u64) {
-        let v = self.latest.load(std::sync::atomic::Ordering::Relaxed);
-        (v & 0xffff_ffff, v >> 32)
-    }
-}
-
-impl Drop for GpuClocks {
-    fn drop(&mut self) {
-        if let Some(child) = &mut self._child {
-            let _ = child.kill();
-        }
-    }
-}
-
-/// Set while the flight renders a plane world (up is +Y there).
-static PLANE_WORLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
+/// The planet's up at `eye`.
 fn up_for(eye: DVec3) -> Vec3 {
-    if PLANE_WORLD.load(std::sync::atomic::Ordering::Relaxed) {
-        Vec3::Y
-    } else {
-        eye.normalize().as_vec3()
-    }
+    eye.normalize().as_vec3()
 }
 
 /// Horizontal heading at `eye` (0 = local east).
@@ -164,8 +90,18 @@ fn look(eye: DVec3, heading: f64, pitch_deg: f64) -> Vec3 {
 }
 
 impl Flight {
+    /// The sun for an eye at `eye`: `HELIO_VOXEL_FLIGHT_SUN_ELEVATION`
+    /// degrees over its horizon toward `sun`'s azimuth, else `sun`.
+    fn sun_at(&self, eye: DVec3) -> Vec3 {
+        let Some(elevation) = self.sun_elevation else { return self.sun };
+        let up = up_for(eye);
+        let level = (self.sun - up * self.sun.dot(up)).try_normalize().unwrap_or_else(|| up.any_orthonormal_vector());
+        let e = elevation.to_radians();
+        (level * e.cos() + up * e.sin()).normalize()
+    }
+
     fn new(output: &Path, size: [u32; 2], quality: helio_pass_tsr::TsrQuality, planet: Planet) -> Self {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).expect("GPU required");
         eprintln!("VOXEL_FLIGHT_ADAPTER {:?}", adapter.get_info());
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -218,11 +154,12 @@ impl Flight {
         scene.world.flush_gpu_mirror(&queue);
         let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
         let pass_source = source.clone();
-        let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| {
-            let mut pass = PlanetPass::new(pass_source.clone());
-            pass.set_profiling(true);
-            Box::new(pass)
-        });
+        // The renderer's pass generates as a host's does: the engine's
+        // milliseconds a frame unless the environment sets them.
+        let mut config = chunk_config(size[1], 256);
+        config.generate_ms = config.generate_ms.or(helio_pass_voxel_planet::chunks::ResidencyConfig::default().generate_ms);
+        config.frame_ms = config.frame_ms.or(helio_pass_voxel_planet::chunks::ResidencyConfig::default().frame_ms);
+        let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| Box::new(ChunkPass::with_config(pass_source.clone(), config)));
         let mut config = RendererConfig::new(size[0], size[1], wgpu::TextureFormat::Rgba8Unorm).with_tsr_quality(quality);
         config.enable_foliage = false;
         let mut renderer = RendererBuilder::new(config, mirror)
@@ -239,6 +176,11 @@ impl Flight {
             post.tonemap_exposure = at(0, 1.0);
             post.color_contrast = [at(1, 1.0); 3];
             post.color_saturation = [at(2, 1.0); 3];
+            // `HELIO_VOXEL_FLIGHT_AUTO_EXPOSURE`: metered exposure (the
+            // look's exposure its compensation).
+            if std::env::var_os("HELIO_VOXEL_FLIGHT_AUTO_EXPOSURE").is_some() {
+                post.exposure_mode = helio_pass_postprocess::ExposureMode::Auto;
+            }
             let camera = scene.world.spawn();
             scene.world.insert(camera, helio_pass_postprocess::CameraPostProcessComponent::new(0, &post));
             scene.world.flush_gpu_mirror(&queue);
@@ -248,32 +190,7 @@ impl Flight {
         if let Some(mode) = std::env::var("HELIO_VOXEL_FLIGHT_DEBUG").ok().and_then(|v| v.parse().ok()) {
             renderer.set_debug_mode(mode);
         }
-        let target = Self::make_target(&device, size);
-        let csv = std::fs::File::create(output.join("frames.csv")).unwrap();
-        Self {
-            device,
-            queue,
-            renderer,
-            source,
-            planet: Arc::new(planet),
-            target,
-            size,
-            frame: 0,
-            csv,
-            sun: sun_dir,
-            shadows: std::env::var_os("HELIO_VOXEL_FLIGHT_NO_SUN").is_none(),
-            record: std::env::var_os("HELIO_VOXEL_FLIGHT_RECORD").is_some(),
-            output: output.to_path_buf(),
-            samples: Vec::new(),
-            clocks: GpuClocks::start(),
-            in_flight: Default::default(),
-            last_frame_end: std::cell::Cell::new(None),
-            sync_frames: std::env::var_os("HELIO_VOXEL_FLIGHT_SYNC").is_some(),
-        }
-    }
-
-    fn make_target(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
-        device.create_texture(&wgpu::TextureDescriptor {
+        let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("flight output"),
             size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
             mip_level_count: 1,
@@ -282,229 +199,60 @@ impl Flight {
             format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
-        })
+        });
+        Self {
+            device,
+            queue,
+            renderer,
+            source,
+            planet: Arc::new(planet),
+            target,
+            size,
+            sun: sun_dir,
+            sun_elevation: std::env::var("HELIO_VOXEL_FLIGHT_SUN_ELEVATION").ok().and_then(|v| v.parse().ok()),
+            output: output.to_path_buf(),
+            in_flight: Default::default(),
+            picks: None,
+        }
     }
 
-    fn pass(&mut self) -> &mut PlanetPass {
-        self.renderer.find_pass_mut::<PlanetPass>().unwrap()
-    }
-
-    fn draw(&mut self, stage: &str, eye: DVec3, forward: Vec3) -> f64 {
-        self.draw_with_up(stage, eye, forward, None)
-    }
-
-    fn draw_with_up(&mut self, stage: &str, eye: DVec3, forward: Vec3, view_up: Option<Vec3>) -> f64 {
-        *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: self.planet.clone(), sun: self.sun, shadows: self.shadows, picks: None });
-        self.renderer.set_world_origin(Some(eye));
+    /// Draw a frame from `eye` along `forward`, blocking only on the frame
+    /// `FRAMES_IN_FLIGHT` behind it (a game loop keeps the GPU fed): the
+    /// milliseconds recording it took and those waiting.
+    fn draw(&mut self, eye: DVec3, forward: Vec3) -> (f64, f64) {
+        let started = Instant::now();
+        *self.source.lock().unwrap() = Some(PlanetFrame { eye, planet: self.planet.clone(), sun: self.sun_at(eye), picks: self.picks.clone() });
+        // As a host's camera-relative frames: the origin stays on a cell
+        // corner while the camera moves within the cell, off the origin.
+        let origin = (eye / ORIGIN_CELL).round() * ORIGIN_CELL;
+        self.renderer.set_world_origin(Some(origin));
         let up = up_for(eye);
         let forward = forward.normalize();
-        let up = view_up.unwrap_or_else(|| if forward.dot(up).abs() > 0.999 { up.any_orthonormal_vector() } else { up });
+        let up = if forward.dot(up).abs() > 0.999 { up.any_orthonormal_vector() } else { up };
         let near = (self.planet.air_clearance(eye) * 0.25).clamp(0.05, 50_000.0) as f32;
         let aspect = self.size[0] as f32 / self.size[1] as f32;
-        let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, std::f32::consts::FRAC_PI_4, aspect, near, 40_000_000.0);
-        let start = Instant::now();
+        let mut camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, std::f32::consts::FRAC_PI_4, aspect, near, 40_000_000.0);
+        let local = eye - origin;
+        camera.position = local.as_vec3();
+        camera.view = (camera.view.as_dmat4() * glam::DMat4::from_translation(-local)).as_mat4();
         self.renderer.render(&camera, &self.target.create_view(&Default::default())).unwrap();
-        let submit = start.elapsed().as_secs_f64() * 1000.0;
+        let recorded = Instant::now();
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = done.clone();
         self.queue.on_submitted_work_done(move || flag.store(true, std::sync::atomic::Ordering::Release));
         self.in_flight.push_back(done);
-        if self.sync_frames {
-            self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            self.in_flight.clear();
-        } else {
-            // Keep the GPU fed like a game loop: block only on the frame
-            // FRAMES_IN_FLIGHT behind this one.
-            while self.in_flight.len() > FRAMES_IN_FLIGHT {
-                let oldest = self.in_flight.pop_front().unwrap();
-                while !oldest.load(std::sync::atomic::Ordering::Acquire) {
-                    let _ = self.device.poll(wgpu::PollType::Poll);
-                    std::thread::sleep(std::time::Duration::from_micros(50));
-                }
+        while self.in_flight.len() > FRAMES_IN_FLIGHT {
+            let oldest = self.in_flight.pop_front().unwrap();
+            while !oldest.load(std::sync::atomic::Ordering::Acquire) {
+                let _ = self.device.poll(wgpu::PollType::Poll);
+                std::thread::sleep(std::time::Duration::from_micros(50));
             }
         }
-        let now = Instant::now();
-        let sync = if self.sync_frames {
-            (now - start).as_secs_f64() * 1000.0
-        } else {
-            (now - self.last_frame_end.get().unwrap_or(start).min(start)).as_secs_f64() * 1000.0
-        };
-        self.last_frame_end.set(Some(now));
-        let frame_num = self.pass().renderer().map_or(0, |r| r.frame_number());
-        let stats = self.pass().stats().unwrap_or_default();
-        let clocks = self.clocks.read();
-        let row = format!(
-            "{},{},{},{:.1},{:.1},{:.3},{},{},{},{},{:.4},{:.4},{:.4},{:.1},{},{}",
-            stats.resident_columns,
-            stats.pending_columns,
-            stats.jobs,
-            stats.units,
-            stats.unit_budget,
-            stats.us_per_unit,
-            stats.evictions,
-            stats.failed_jobs,
-            stats.active_levels,
-            stats.finest_level,
-            stats.plan_cpu_ms,
-            stats.upload_cpu_ms,
-            stats.encode_cpu_ms,
-            stats.logical_bytes as f64 / 1048576.0,
-            clocks.0,
-            clocks.1
-        );
-        let altitude = self.planet.grid().height(eye);
-        self.samples.push(Sample {
-            stage: stage.to_string(),
-            sync_ms: sync,
-            submit_ms: submit,
-            terrain_gpu_ms: f64::NAN,
-            stages: BTreeMap::new(),
-            frame_num,
-            row,
-            altitude,
-        });
-        self.collect_timings(self.sync_frames);
-        self.frame += 1;
-        sync
+        ((recorded - started).as_secs_f64() * 1e3, recorded.elapsed().as_secs_f64() * 1e3)
     }
 
-    /// Attach completed GPU stage timings to their frame's sample.
-    fn collect_timings(&mut self, blocking: bool) {
-        let result = self.pass().renderer_mut().and_then(|r| {
-            if blocking {
-                let timings = r.stage_timings_blocking();
-                Some((r.frame_number(), timings))
-            } else {
-                r.stage_timings_deferred()
-            }
-        });
-        let Some((frame, timings)) = result else { return };
-        if let Some(sample) = self.samples.iter_mut().rev().take(16).find(|s| s.frame_num == frame) {
-            if sample.terrain_gpu_ms.is_nan() {
-                let mut stages = BTreeMap::new();
-                for (name, ms) in timings {
-                    *stages.entry(name).or_insert(0.0) += ms;
-                }
-                // `planet_generate` is timed inside `planet_residency`.
-                sample.terrain_gpu_ms = stages.iter().filter(|(name, _)| **name != "planet_generate").map(|(_, ms)| ms).sum();
-                sample.stages = stages;
-            }
-        }
-    }
-
-    /// Write frames.csv (after the flight: GPU timings arrive late).
-    fn write_csv(&mut self) {
-        writeln!(self.csv, "frame,stage,altitude_m,sync_ms,cpu_submit_ms,gpu_wait_ms,terrain_gpu_ms,residency_ms,generate_ms,primary_ms,shade_ms,gbuffer_ms,sunlight_ms,resident,pending,jobs,units,unit_budget,us_per_unit,evictions,failed,active_levels,finest_level,plan_cpu_ms,upload_cpu_ms,encode_cpu_ms,logical_mib,gpu_clock_mhz,mem_clock_mhz").unwrap();
-        for (index, s) in self.samples.iter().enumerate() {
-            if s.terrain_gpu_ms.is_nan() {
-                continue;
-            }
-            let get = |n: &str| s.stages.get(n).copied().unwrap_or(0.0);
-            writeln!(
-                self.csv,
-                "{index},{},{:.3},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{}",
-                s.stage,
-                s.altitude,
-                s.sync_ms,
-                s.submit_ms,
-                s.sync_ms - s.submit_ms,
-                s.terrain_gpu_ms,
-                get("planet_residency"),
-                get("planet_generate"),
-                get("planet_primary"),
-                get("planet_shade"),
-                get("planet_gbuffer"),
-                get("planet_sunlight"),
-                s.row
-            )
-            .unwrap();
-        }
-        self.csv.flush().unwrap();
-    }
-
-    /// Draw until residency is complete; returns (frames, synchronized ms).
-    fn settle(&mut self, stage: &str, eye: DVec3, forward: Vec3) -> (usize, f64) {
-        let mut ms = 0.0;
-        // Frames before the pipelines finish compiling (on a worker) draw
-        // no terrain and do not count.
-        let mut frames = 0;
-        while frames < 3000 {
-            ms += self.draw(stage, eye, forward);
-            match self.pass().renderer() {
-                Some(r) if r.settled() => return (frames + 1, ms),
-                Some(_) => frames += 1,
-                None => {}
-            }
-        }
-        panic!("{stage}: residency did not settle: {:?}", self.pass().renderer().map(|r| r.stats()));
-    }
-
-    fn read(&self, buffer: &wgpu::Buffer) -> Vec<u8> {
-        self.read_range(buffer, 0, buffer.size())
-    }
-
-    /// Read `size` bytes at `offset` (both multiples of 4).
-    fn read_range(&self, buffer: &wgpu::Buffer, offset: u64, size: u64) -> Vec<u8> {
-        self.last_frame_end.set(None);
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(buffer, offset, &staging, 0, size);
-        self.queue.submit([encoder.finish()]);
-        staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let data = staging.slice(..).get_mapped_range().unwrap().to_vec();
-        data
-    }
-
-    /// Sun visibility per pixel (the planet pass's directional visibility).
-    fn read_sun(&self) -> Vec<f32> {
-        self.last_frame_end.set(None);
-        let r = self.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap();
-        let texture = r.sun_texture();
-        let (w, h) = (texture.width(), texture.height());
-        let row = (w * 8).div_ceil(256) * 256;
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: u64::from(row) * u64::from(h),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        encoder.copy_texture_to_buffer(
-            texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) },
-            },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        );
-        self.queue.submit([encoder.finish()]);
-        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
-        let f16 = |bits: u16| -> f32 {
-            let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
-            let exp = i32::from((bits >> 10) & 0x1f);
-            let frac = f32::from(bits & 0x3ff);
-            sign * if exp == 0 { frac * 2f32.powi(-24) } else { (1.0 + frac / 1024.0) * 2f32.powi(exp - 15) }
-        };
-        let mut out = Vec::with_capacity((w * h) as usize);
-        for y in 0..h {
-            for x in 0..w {
-                let at = (y * row + x * 8) as usize;
-                out.push(f16(u16::from_le_bytes([data[at], data[at + 1]])));
-            }
-        }
-        out
-    }
-
-    fn capture(&self, name: &str) -> Vec<u8> {
-        self.last_frame_end.set(None);
+    /// The last frame as `<out>/<name>.png`.
+    fn capture(&self, name: &str) {
         let row = (self.size[0] * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -527,129 +275,6 @@ impl Flight {
         let data = buffer.slice(..).get_mapped_range().unwrap();
         let pixels: Vec<u8> = data.chunks(row as usize).flat_map(|r| r[..self.size[0] as usize * 4].to_vec()).collect();
         image::save_buffer(self.output.join(format!("{name}.png")), &pixels, self.size[0], self.size[1], image::ColorType::Rgba8).unwrap();
-        pixels
-    }
-
-    /// Hit status counts plus CPU/GPU agreement for sampled primary rays that
-    /// land inside the level-0 range (internal render resolution).
-    fn audit(&mut self, name: &str, eye: DVec3, forward: Vec3) -> serde_json::Value {
-        // Exact pixel-centre rays: the audit frame is rendered without TAA jitter.
-        self.renderer.set_jitter_enabled(false);
-        self.draw("audit", eye, forward);
-        self.renderer.set_jitter_enabled(true);
-        let (hits, size, lod0) = {
-            let r = self.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap();
-            (self.read(r.hit_buffer()), r.screen_size(), r.stats().lod0_distance)
-        };
-        let sun_vis = self.read_sun();
-        let mut counts = [0usize; 4];
-        let up0 = up_for(eye);
-        let forward = forward.normalize();
-        let up = if forward.dot(up0).abs() > 0.999 { up0.any_orthonormal_vector() } else { up0 };
-        let right = forward.cross(up).normalize();
-        let cam_up = right.cross(forward);
-        let tan = (std::f32::consts::FRAC_PI_4 * 0.5).tan();
-        let aspect = size[0] as f32 / size[1] as f32;
-        let (mut compared, mut mismatched) = (0usize, 0usize);
-        let mut exact_mismatched = 0usize;
-        let (mut sun_compared, mut sun_mismatched) = (0usize, 0usize);
-        let mut sun_samples = Vec::new();
-        let mut samples = Vec::new();
-        let mut stuck = Vec::new();
-        for (index, hit) in hits.chunks_exact(32).take((size[0] * size[1]) as usize).enumerate() {
-            let w = |i: usize| u32::from_le_bytes(hit[i * 4..i * 4 + 4].try_into().unwrap());
-            let info = w(4);
-            counts[(info & 3) as usize] += 1;
-            if info & 3 == 2 && stuck.len() < 4 {
-                stuck.push(format!(
-                    "px {},{} t {} face {} level {} i {} j {} k {} normal {}",
-                    index as u32 % size[0], index as u32 / size[0], f32::from_bits(w(0)),
-                    (info >> 2) & 7, (info >> 5) & 31, w(1) as i32, w(2) as i32, w(3) as i32, (info >> 10) & 7
-                ));
-            }
-            let (x, y) = (index as u32 % size[0], index as u32 / size[0]);
-            if x % 7 != 3 || y % 7 != 3 || info & 3 != 1 || ((info >> 5) & 31) != 0 {
-                continue;
-            }
-            let ndc = [(x as f32 + 0.5) / size[0] as f32 * 2.0 - 1.0, 1.0 - (y as f32 + 0.5) / size[1] as f32 * 2.0];
-            let dir = (forward + right * ndc[0] * tan * aspect + cam_up * ndc[1] * tan).normalize().as_dvec3();
-            if let Some(cpu) = self.planet.raycast(eye, dir, lod0 * 0.6) {
-                compared += 1;
-                // Sunlight: an exact CPU shadow ray from the same surface point
-                // (sunlit faces only; the GPU marks back faces unlit).
-                if self.shadows && cpu.normal.dot(self.sun.as_dvec3()) > 0.05 {
-                    let point = eye + dir * cpu.distance + cpu.normal * (self.planet.grid().voxel_size() * 0.02);
-                    // Occluders within 200 m (near field; farther shadows are not audited).
-                    let lit = self.planet.raycast(point, self.sun.as_dvec3(), 200.0).is_none();
-                    let gpu = sun_vis[index];
-                    // TAA-rotated 2x2 sharing can legitimately borrow a neighbour's ray.
-                    if gpu >= 0.0 {
-                        sun_compared += 1;
-                        if lit != (gpu > 0.5) {
-                            sun_mismatched += 1;
-                            if sun_samples.len() < 6 {
-                                sun_samples.push(format!("px {x},{y} cell {:?} cpu lit {lit} gpu {gpu}", cpu.cell));
-                            }
-                        }
-                    }
-                }
-                let t = f64::from(f32::from_bits(w(0)));
-                let same = (info >> 2) & 7 == u32::from(cpu.cell.face)
-                    && w(1) as i32 == cpu.cell.i
-                    && w(2) as i32 == cpu.cell.j
-                    && w(3) as i32 == cpu.cell.k;
-                // Audit jitter is disabled. Keep the old distance-threshold
-                // diagnostic, but it is not an exact-cell acceptance gate.
-                exact_mismatched += usize::from(!same);
-                if !same && (t - cpu.distance).abs() > self.planet.grid().voxel_size() * 3.0 {
-                    mismatched += 1;
-                    if samples.len() < 4 {
-                        // Canonical kind of the GPU's cell: 1 means the CPU ray
-                        // passed a solid cell, 0 the GPU hit an air cell.
-                        let face = ((info >> 2) & 7) as u8;
-                        let kind = self.planet.kind(helio_pass_voxel_planet::Cell { face, i: w(1) as i32, j: w(2) as i32, k: w(3) as i32 });
-                        let (on_ray, _) = self.planet.grid().locate(eye + dir * (t + 0.001));
-                        samples.push(format!(
-                            "px {x},{y} gpu f{face} ({},{},{}) kind {kind} t {t:.3} ray cell ({},{},{}) kind {} cpu f{} ({},{},{}) t {:.3}",
-                            w(1) as i32, w(2) as i32, w(3) as i32, on_ray.i, on_ray.j, on_ray.k, self.planet.kind(on_ray),
-                            cpu.cell.face, cpu.cell.i, cpu.cell.j, cpu.cell.k, cpu.distance
-                        ));
-                    }
-                }
-            }
-        }
-        // Traversal work histogram from the diagnostic hit counters.
-        let mut work: Vec<[u32; 4]> = hits
-            .chunks_exact(32)
-            .take((size[0] * size[1]) as usize)
-            .map(|h| {
-                let u = u32::from_le_bytes(h[24..28].try_into().unwrap());
-                let v = u32::from_le_bytes(h[28..32].try_into().unwrap());
-                [u & 0xffff, u >> 16, v & 0xffff, v >> 16]
-            })
-            .collect();
-        if std::env::var_os("HELIO_VOXEL_FLIGHT_HEAT").is_some() {
-            // Step heatmap: black 0, red 16, yellow 32, white 64+ steps.
-            let heat: Vec<u8> = work
-                .iter()
-                .flat_map(|w| {
-                    let s = w[0] as f32;
-                    let r = (s / 16.0).min(1.0);
-                    let g = ((s - 16.0) / 16.0).clamp(0.0, 1.0);
-                    let b = ((s - 32.0) / 32.0).clamp(0.0, 1.0);
-                    [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, 255]
-                })
-                .collect();
-            image::save_buffer(self.output.join(format!("{name}-steps.png")), &heat, size[0], size[1], image::ColorType::Rgba8).unwrap();
-        }
-        let mut stats = serde_json::Map::new();
-        for (index, name) in ["steps", "lookups", "block_skips", "locates"].iter().enumerate() {
-            work.sort_by_key(|w| w[index]);
-            let q = |p: f64| work[((work.len() - 1) as f64 * p) as usize][index];
-            let mean = work.iter().map(|w| f64::from(w[index])).sum::<f64>() / work.len() as f64;
-            stats.insert((*name).into(), serde_json::json!({"mean": mean, "p50": q(0.5), "p95": q(0.95), "max": q(1.0)}));
-        }
-        serde_json::json!({"name": name, "mismatch_samples": samples, "stuck": stuck, "work": stats, "miss": counts[0], "hit": counts[1], "exhausted": counts[2], "loading": counts[3], "compared": compared, "mismatched": mismatched, "exact_mismatched": exact_mismatched, "sun_compared": sun_compared, "sun_mismatched": sun_mismatched, "sun_samples": sun_samples})
     }
 }
 
@@ -697,6 +322,1094 @@ fn highest_near(planet: &Planet, face: u8, fi: f64, fj: f64, span: f64) -> (DVec
         }
     }
     best
+}
+
+/// Residency settings for chunk trees at the flight's resolution
+/// (`HELIO_VOXEL_LOD_PIXELS`, `HELIO_VOXEL_CHUNKS_BUDGET` tiles a frame).
+fn chunk_config(h: u32, budget: usize) -> helio_pass_voxel_planet::chunks::ResidencyConfig {
+    use helio_pass_voxel_planet::chunks::{residency::PlanConfig, ResidencyConfig};
+    let lod: f64 = std::env::var("HELIO_VOXEL_LOD_PIXELS").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    let budget = std::env::var("HELIO_VOXEL_CHUNKS_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(budget);
+    ResidencyConfig {
+        plan: PlanConfig {
+            pixel_angle: 2.0 * std::f64::consts::FRAC_PI_8.tan() / f64::from(h),
+            lod_pixels: lod,
+            // `HELIO_VOXEL_OFFSCREEN_PIXELS`: out of view (2).
+            offscreen_pixels: std::env::var("HELIO_VOXEL_OFFSCREEN_PIXELS").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0),
+            view_guard: 0.35,
+            coarsen: 0.8,
+            max_distance: 400_000.0,
+            prefetch_seconds: 0.5,
+            keep_frames: 120,
+            // `HELIO_VOXEL_MOTION_FLOW`: pixels a frame of motion per extra
+            // pixel a cell may cover (16; 0: none), up to three.
+            motion_flow: std::env::var("HELIO_VOXEL_MOTION_FLOW").ok().and_then(|v| v.parse().ok()).unwrap_or(16.0),
+            motion_max: 3.0,
+        },
+        tiles_per_frame: budget,
+        // `HELIO_VOXEL_CHUNKS_GENERATE_MS`: GPU generation a frame.
+        generate_ms: std::env::var("HELIO_VOXEL_CHUNKS_GENERATE_MS").ok().and_then(|v| v.parse().ok()),
+        // `HELIO_VOXEL_CHUNKS_FRAME_MS`: the frame's GPU milliseconds
+        // generation may grow into (the renderer pass only).
+        frame_ms: std::env::var("HELIO_VOXEL_CHUNKS_FRAME_MS").ok().and_then(|v| v.parse().ok()),
+    }
+}
+
+/// The cone a 45 degree view of the flight's aspect sees around `forward`
+/// (the residency's `View`, as the renderer's pass builds it).
+fn view_cone(flight: &Flight, forward: Vec3) -> helio_pass_voxel_planet::chunks::residency::View {
+    let [w, h] = flight.size;
+    let tan_y = std::f64::consts::FRAC_PI_8.tan();
+    let tan_x = tan_y * f64::from(w) / f64::from(h);
+    helio_pass_voxel_planet::chunks::residency::View { forward: forward.normalize().as_dvec3(), cos_half: (tan_x * tan_x + tan_y * tan_y).sqrt().atan().cos() }
+}
+
+/// Run chunk residency for a still eye looking along `forward` until
+/// nothing is left to generate.
+fn chunk_settle(flight: &Flight, world: &mut helio_pass_voxel_planet::chunks::ChunkWorld, eye: DVec3, forward: Vec3, frame: &mut u64) -> f64 {
+    let config = chunk_config(flight.size[1], 512);
+    let view = view_cone(flight, forward);
+    let started = Instant::now();
+    loop {
+        let mut encoder = flight.device.create_command_encoder(&Default::default());
+        let cpu = Instant::now();
+        let stats = world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, DVec3::ZERO, Some(view), *frame, &config);
+        if *frame % 50 == 0 || std::env::var_os("HELIO_VOXEL_CHUNKS_TRACE").is_some() {
+            eprintln!("CHUNKSETTLE {} cpu {:.1} ms {stats:?}", *frame, cpu.elapsed().as_secs_f64() * 1e3);
+        }
+        flight.queue.submit([encoder.finish()]);
+        world.submitted();
+        *frame += 1;
+        if world.settled() {
+            return started.elapsed().as_secs_f64();
+        }
+        if *frame % 8 == 0 {
+            let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+    }
+}
+
+/// Hold `view` drawn from chunk trees: build the cut for the still eye,
+/// then draw it for `HELIO_VOXEL_FLIGHT_HOLD_SECONDS` with pipelined
+/// frames and print the median primary time (`CHUNKHOLD`). With
+/// `HELIO_VOXEL_CHUNKS_PNG=<path>` the colour target is saved.
+fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
+    use helio_pass_voxel_planet::chunks::ChunkWorld;
+    let [w, h] = flight.size;
+    // Report this mode's errors (the run's validation scope is never popped
+    // in hold mode).
+    let mut internal = Some(flight.device.push_error_scope(wgpu::ErrorFilter::Internal));
+    let mut scope = Some(flight.device.push_error_scope(wgpu::ErrorFilter::Validation));
+    let mut world = ChunkWorld::new(&flight.device, &flight.queue, &flight.planet);
+    let mut frame = 0u64;
+    let seconds = chunk_settle(flight, &mut world, eye, forward, &mut frame);
+    eprintln!("CHUNKS settled {view} in {seconds:.2} s ({frame} frames): {} chunks drawn, {:.1} MB", world.chunk_count(), world.resident_bytes() as f64 / 1048576.0);
+    let up = up_for(eye);
+    let forward = forward.normalize();
+    let up = if forward.dot(up).abs() > 0.999 { up.any_orthonormal_vector() } else { up };
+    let near = (flight.planet.air_clearance(eye) * 0.25).clamp(0.05, 50_000.0) as f32;
+    let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, std::f32::consts::FRAC_PI_4, w as f32 / h as f32, near, 40_000_000.0);
+    // `HELIO_VOXEL_GEN_BENCH=rounds`: the settled view's tiles generated
+    // again that many times in full batches (each frame drawn, as the
+    // timestamps ride on draws), the GPU's time by kernel a tile and a
+    // chunk: the same work every run, to A/B generation.
+    if let Some(rounds) = std::env::var("HELIO_VOXEL_GEN_BENCH").ok().and_then(|v| v.parse::<u32>().ok()) {
+        let config = chunk_config(h, 512);
+        let view_cone = view_cone(flight, forward);
+        let mut step = |world: &mut ChunkWorld, frame: &mut u64| {
+            let mut encoder = flight.device.create_command_encoder(&Default::default());
+            world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, DVec3::ZERO, Some(view_cone), *frame, &config);
+            world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), *frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun_at(eye), [w, h]);
+            flight.queue.submit([encoder.finish()]);
+            world.submitted();
+            let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+            *frame += 1;
+        };
+        for _ in 0..8 {
+            step(&mut world, &mut frame);
+        }
+        world.take_timings();
+        for _ in 0..rounds {
+            world.regenerate_all();
+            let mut quiet = 0;
+            while quiet < 6 {
+                step(&mut world, &mut frame);
+                quiet = if world.settled() { quiet + 1 } else { 0 };
+            }
+            let t = world.take_timings();
+            let tiles: usize = t.iter().map(|f| f.tiles).sum();
+            let chunks: usize = t.iter().map(|f| f.chunks).sum();
+            let stage = |k: usize| t.iter().map(|f| f.stages[k]).sum::<f64>();
+            let (a, b, c) = (stage(0), stage(1), stage(2));
+            let part = |k: usize| t.iter().map(|f| f.tile_stages[k]).sum::<f64>() * 1e3 / tiles as f64;
+            eprintln!(
+                "GENBENCH {view}: {tiles} tiles {chunks} chunks in {} frames: tiles {:.2} us/tile (nodes {:.2}, columns {:.2}, halos {:.2}), chunk columns {:.2} us/chunk, chunk builds {:.2} us/chunk, all {:.2} us/tile",
+                t.len(),
+                a * 1e3 / tiles as f64,
+                part(0),
+                part(1),
+                part(2),
+                b * 1e3 / chunks as f64,
+                c * 1e3 / chunks as f64,
+                (a + b + c) * 1e3 / tiles as f64
+            );
+        }
+    }
+    let seconds: f64 = std::env::var("HELIO_VOXEL_FLIGHT_HOLD_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(120.0);
+    let started = Instant::now();
+    let mut pending = std::collections::VecDeque::new();
+    let mut times = Vec::new();
+    let mut seed_times = Vec::new();
+    let mut shadow_times = Vec::new();
+    let first = frame;
+    let mut draw_cpu = Vec::new();
+    while started.elapsed().as_secs_f64() < seconds {
+        let mut encoder = flight.device.create_command_encoder(&Default::default());
+        let cpu = Instant::now();
+        world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun_at(eye), [w, h]);
+        draw_cpu.push(cpu.elapsed().as_secs_f64() * 1e3);
+        pending.push_back(flight.queue.submit([encoder.finish()]));
+        world.submitted();
+        // Two frames in flight at most.
+        if pending.len() > 2 {
+            let _ = flight.device.poll(wgpu::PollType::Wait { submission_index: pending.pop_front(), timeout: None });
+        }
+        // The first frames compile and warm caches.
+        for t in world.take_timings().into_iter().filter(|t| t.frame >= first + 30) {
+            times.push(t.draw);
+            seed_times.push(t.seed);
+            shadow_times.push(t.shadow);
+        }
+        frame += 1;
+        if frame == first + 2 {
+            if let Some(error) = pollster::block_on(scope.take().unwrap().pop()) {
+                eprintln!("CHUNKS validation: {error}");
+            }
+            if let Some(error) = pollster::block_on(internal.take().unwrap().pop()) {
+                eprintln!("CHUNKS internal: {error}");
+            }
+        }
+    }
+    eprintln!("CHUNKS draw cpu p50 {:.2} ms", percentile(&draw_cpu, 0.5));
+    let (outside, inside) = world.drawn();
+    if std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some() {
+        world.take_counts();
+        let mut encoder = flight.device.create_command_encoder(&Default::default());
+        world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun_at(eye), [w, h]);
+        flight.queue.submit([encoder.finish()]);
+        let counts = world.take_counts();
+        if std::env::var_os("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL").is_some() {
+            let mut encoder = flight.device.create_command_encoder(&Default::default());
+            world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame + 1, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun_at(eye), [w, h]);
+            flight.queue.submit([encoder.finish()]);
+            for (n, step) in world.pixel_trace().iter().enumerate() {
+                eprintln!("PIXELTRACE {n}: {step:?}");
+            }
+        }
+        let pixels = f64::from(w * h);
+        eprintln!(
+            "CHUNKCOUNT {view}: seeded {:.2} hits {:.2} (of pixels) steps/seeded {:.1} boxes/seeded {:.2}; missed {:.4} of pixels, {:.1} boxes each, {} lost",
+            f64::from(counts.seeded) / pixels,
+            f64::from(counts.hits) / pixels,
+            f64::from(counts.steps) / f64::from(counts.seeded.max(1)),
+            f64::from(counts.boxes) / f64::from(counts.seeded.max(1)),
+            f64::from(counts.missed) / pixels,
+            f64::from(counts.missed_boxes) / f64::from(counts.missed.max(1)),
+            counts.lost
+        );
+    }
+    eprintln!(
+        "CHUNKHOLD {view} n={} primary {:.3} p95 {:.3} seed {:.3} shadow {:.3} boxes {outside}+{inside} chunks {}",
+        times.len(),
+        percentile(&times, 0.5),
+        percentile(&times, 0.95),
+        percentile(&seed_times, 0.5),
+        percentile(&shadow_times, 0.5),
+        world.chunk_count(),
+    );
+    // `HELIO_VOXEL_CHUNKS_PROBE=x,y;x,y`: each pixel's chunk hit against
+    // the exact CPU raycast.
+    if let Ok(probes) = std::env::var("HELIO_VOXEL_CHUNKS_PROBE") {
+        let read = |texture: &wgpu::Texture, x: u32, y: u32| -> [u8; 8] {
+            let buffer = flight.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 256, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+            let mut encoder = flight.device.create_command_encoder(&Default::default());
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256), rows_per_image: Some(1) } },
+                wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            );
+            flight.queue.submit([encoder.finish()]);
+            buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+            flight.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let data = buffer.slice(..).get_mapped_range().unwrap();
+            let mut out = [0u8; 8];
+            out.copy_from_slice(&data[..8]);
+            out
+        };
+        let targets = world.targets().unwrap();
+        let (visibility, distance) = (&targets.visibility, &targets.distance);
+        let inverse = (camera.proj * camera.view).inverse();
+        for probe in probes.split(';') {
+            let xy: Vec<u32> = probe.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+            let (x, y) = (xy[0], xy[1]);
+            let v = read(visibility, x, y);
+            let t = f32::from_le_bytes(read(distance, x, y)[..4].try_into().unwrap());
+            let ndc = Vec3::new((x as f32 + 0.5) / w as f32 * 2.0 - 1.0, 1.0 - (y as f32 + 0.5) / h as f32 * 2.0, 0.5);
+            let far = inverse * ndc.extend(1.0);
+            let dir = (far.truncate() / far.w).normalize().as_dvec3();
+            let slot = u32::from_le_bytes(v[..4].try_into().unwrap());
+            let cell = u32::from_le_bytes(v[4..].try_into().unwrap());
+            let cpu = flight.planet.raycast(eye, dir, 200_000.0);
+            eprintln!(
+                "PROBE {x},{y}: chunk t {:.2} slot {slot} {:?} cell ({},{},{}) axis {} material {} | cpu {:?}",
+                if t > 0.0 { t } else { f32::NAN },
+                world.chunk_at(slot),
+                cell & 63,
+                (cell >> 6) & 63,
+                (cell >> 12) & 63,
+                (cell >> 18) & 7,
+                cell >> 21,
+                cpu.map(|h| (h.distance, h.cell, flight.planet.material(h.cell)))
+            );
+            if let Some(h) = cpu {
+                eprintln!("  over the cpu hit: {:?}", world.chunks_over(h.cell.face, h.cell.i, h.cell.j));
+            }
+        }
+    }
+    if let Ok(path) = std::env::var("HELIO_VOXEL_CHUNKS_PNG") {
+        save_chunk_colour(flight, &world, &path);
+    }
+}
+
+/// `HELIO_VOXEL_CHUNKS_DIG=n`: chunk trees following edits. Settle the
+/// view, then dig `n` balls (1.5 m) one a frame along a line across the
+/// view centre's hit (from the centre out), then undo them one a frame: what each edit generates
+/// again and costs, when it shows (the centre pixel's depth), and whether
+/// the undone frame's hits match the first's. Saves
+/// `<out>/dig_{before,dug,undone}.png`. With a `blast` radius (m), one ball
+/// of it instead, half sunk just beyond the view centre: the frames until
+/// the world follows it and their costs.
+fn chunk_dig(flight: &Flight, view: &str, eye: DVec3, forward: Vec3, count: usize, blast: Option<f64>) {
+    use helio_pass_voxel_planet::chunks::ChunkWorld;
+    let [w, h] = flight.size;
+    let mut planet = (*flight.planet).clone();
+    let mut world = ChunkWorld::new(&flight.device, &flight.queue, &flight.planet);
+    let mut frame = 0u64;
+    chunk_settle(flight, &mut world, eye, forward, &mut frame);
+    let up = up_for(eye);
+    let forward = forward.normalize();
+    let near = (flight.planet.air_clearance(eye) * 0.25).clamp(0.05, 50_000.0) as f32;
+    let camera = Camera::perspective_look_at(Vec3::ZERO, forward, up, std::f32::consts::FRAC_PI_4, w as f32 / h as f32, near, 40_000_000.0);
+    let config = chunk_config(h, 512);
+    let out = std::path::PathBuf::from(std::env::args().nth(1).unwrap());
+    // One frame: follow the planet's edits, update, draw; GPU times and the
+    // tiles generated again.
+    let step = |world: &mut ChunkWorld, planet: &Planet, frame: &mut u64| {
+        assert!(world.sync_edits(planet), "edits follow");
+        let mut encoder = flight.device.create_command_encoder(&Default::default());
+        let stats = world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, DVec3::ZERO, Some(view_cone(flight, forward)), *frame, &config);
+        world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), *frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun_at(eye), [w, h]);
+        flight.queue.submit([encoder.finish()]);
+        world.submitted();
+        let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+        world.submitted();
+        *frame += 1;
+        stats
+    };
+    let depth_at = |world: &ChunkWorld, x: u32, y: u32| -> f32 {
+        let buffer = flight.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 256, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+        let mut encoder = flight.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &world.targets().unwrap().distance, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256), rows_per_image: Some(1) } },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        flight.queue.submit([encoder.finish()]);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        flight.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let data = buffer.slice(..).get_mapped_range().unwrap();
+        f32::from_le_bytes(data[..4].try_into().unwrap())
+    };
+    let centre_depth = |world: &ChunkWorld| depth_at(world, w / 2, h / 2);
+    // Down the centre column, the chunk hit against the exact CPU raycast
+    // of `planet`: the largest difference (m).
+    let worst = |world: &ChunkWorld, planet: &Planet, rows: std::ops::Range<u32>| -> (f64, u32) {
+        let inverse = (camera.proj * camera.view).inverse();
+        let mut worst = (0.0f64, 0u32);
+        for y in rows.step_by(12) {
+            let ndc = Vec3::new(0.5 / w as f32, 1.0 - (y as f32 + 0.5) / h as f32 * 2.0, 0.5);
+            let far = inverse * ndc.extend(1.0);
+            let dir = (far.truncate() / far.w).normalize().as_dvec3();
+            let gpu = f64::from(depth_at(world, w / 2, y));
+            let cpu = planet.raycast(eye, dir, blast.map_or(1000.0, |r| (r * 4.0).max(1000.0))).map_or(0.0, |h| h.distance);
+            if (gpu - cpu).abs() > worst.0 {
+                worst = ((gpu - cpu).abs(), y);
+            }
+        }
+        worst
+    };
+    // Drawn frames find cave mouths: settle what they ask for.
+    for _ in 0..4 {
+        step(&mut world, &planet, &mut frame);
+    }
+    while !world.settled() {
+        step(&mut world, &planet, &mut frame);
+    }
+    step(&mut world, &planet, &mut frame);
+    eprintln!("CHUNKDIG {view}: rays reached under {} tiles' surface bands", world.deep_tiles());
+    // `HELIO_VOXEL_CHUNKS_PROBE=x,y;x,y`: those pixels against the CPU raycast.
+    if let Ok(probes) = std::env::var("HELIO_VOXEL_CHUNKS_PROBE") {
+        let inverse = (camera.proj * camera.view).inverse();
+        for probe in probes.split(';') {
+            let xy: Vec<u32> = probe.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+            let ndc = Vec3::new((xy[0] as f32 + 0.5) / w as f32 * 2.0 - 1.0, 1.0 - (xy[1] as f32 + 0.5) / h as f32 * 2.0, 0.5);
+            let far = inverse * ndc.extend(1.0);
+            let dir = (far.truncate() / far.w).normalize().as_dvec3();
+            eprintln!("CHUNKDIG probe {},{}: chunks {:.2} m, cpu {:?}", xy[0], xy[1], depth_at(&world, xy[0], xy[1]), planet.raycast(eye, dir, 1000.0).map(|h| (h.distance, h.cell)));
+        }
+    }
+    let before_path = out.join("dig_before.png");
+    save_chunk_colour(flight, &world, before_path.to_str().unwrap());
+    let before_hits = world.read_hits();
+    let before = centre_depth(&world);
+    let hit = planet.raycast(eye, forward.as_dvec3(), 1000.0).expect("the view centre hits ground");
+    let at = eye + forward.as_dvec3() * hit.distance;
+    let side = forward.as_dvec3().cross(up.as_dvec3()).normalize();
+    eprintln!("CHUNKDIG {view}: centre at {:.2} m, {count} balls across it", hit.distance);
+    if let Some(radius) = blast {
+        let up = up.as_dvec3();
+        let ahead = (forward.as_dvec3() - up * forward.as_dvec3().dot(up)).normalize();
+        planet.apply(Brush { center: (at + ahead * radius - up * (radius * 0.5)).to_array(), radius, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        // Frames until the world follows it: tiles, GPU generation, CPU.
+        let follow = |world: &mut ChunkWorld, planet: &Planet, frame: &mut u64, what: &str| {
+            let (mut frames, mut tiles, mut most, mut gen_max, mut cpu_max, mut gen_sum) = (0, 0, 0, 0.0f64, 0.0f64, 0.0);
+            let started = Instant::now();
+            loop {
+                let stats = step(world, planet, frame);
+                let timings = world.take_timings();
+                let gen: f64 = timings.iter().map(|t| t.generate).sum();
+                let stages = timings.iter().fold([0.0; 3], |s, t| [s[0] + t.stages[0], s[1] + t.stages[1], s[2] + t.stages[2]]);
+                frames += 1;
+                tiles += stats.generated_tiles;
+                most = most.max(stats.generated_tiles);
+                gen_max = gen_max.max(gen);
+                gen_sum += gen;
+                cpu_max = cpu_max.max(stats.cpu_ms.iter().sum::<f64>());
+                if std::env::var_os("HELIO_VOXEL_CHUNKS_TRACE").is_some() {
+                    eprintln!("CHUNKBLAST frame {frames}: tiles {} chunks {} regen {} requests {} gen {gen:.2} ms {stages:.2?} cpu {:?} drawn {} resident {} slots {}", stats.generated_tiles, stats.generated_chunks, stats.regenerated_tiles, stats.requests, stats.cpu_ms.map(|v| (v * 100.0).round() / 100.0), stats.drawn_chunks, stats.resident_chunks, stats.out_of_slots);
+                }
+                if world.settled() || frames >= 600 {
+                    break;
+                }
+            }
+            eprintln!(
+                "CHUNKBLAST {view} {what}: r {radius:.0} m, {frames} frames ({:.2} s) to settle, tiles {tiles} (most a frame {most}), generation {gen_sum:.1} ms (most a frame {gen_max:.2}), update cpu most a frame {cpu_max:.2} ms",
+                started.elapsed().as_secs_f64()
+            );
+        };
+        follow(&mut world, &planet, &mut frame, "blasted");
+        step(&mut world, &planet, &mut frame);
+        let (error, row) = worst(&world, &planet, 0..h);
+        eprintln!("CHUNKBLAST {view}: centre column against the CPU raycast: worst {error:.2} m (row {row})");
+        save_chunk_colour(flight, &world, out.join("blast.png").to_str().unwrap());
+        planet.undo().unwrap();
+        follow(&mut world, &planet, &mut frame, "undone");
+        step(&mut world, &planet, &mut frame);
+        let differ = before_hits.iter().zip(world.read_hits()).filter(|(a, b)| a.map(|h| (h.cell, h.level)) != b.map(|h| (h.cell, h.level))).count();
+        eprintln!("CHUNKBLAST {view}: undone frame's hits differ from the first's in {differ} pixels");
+        return;
+    }
+    let (mut tiles, mut gen_ms, mut shown) = (Vec::new(), Vec::new(), None);
+    for n in 0..count {
+        // From the centre outwards: the first are sealed into the baked
+        // store when there are more than the recent log keeps.
+        let offset = (n as f64 / 2.0).ceil() * if n % 2 == 0 { 0.6 } else { -0.6 };
+        planet.apply(Brush { center: (at + side * offset).to_array(), radius: 1.5, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        let stats = step(&mut world, &planet, &mut frame);
+        tiles.push(stats.generated_tiles as f64);
+        gen_ms.extend(world.take_timings().iter().map(|t| t.generate));
+        if shown.is_none() && (centre_depth(&world) - before).abs() > 0.05 {
+            shown = Some(n);
+        }
+    }
+    let (error, row) = worst(&world, &planet, h / 2..h);
+    eprintln!("CHUNKDIG {view}: dug, centre column against the CPU raycast: worst {error:.2} m (row {row})");
+    let dug_path = out.join("dig_dug.png");
+    save_chunk_colour(flight, &world, dug_path.to_str().unwrap());
+    eprintln!(
+        "CHUNKDIG {view}: tiles generated again an edit p50 {:.0} max {:.0}, generation p50 {:.2} max {:.2} ms; centre deeper from edit {shown:?} (of {count})",
+        percentile(&tiles, 0.5),
+        tiles.iter().copied().fold(0.0, f64::max),
+        percentile(&gen_ms, 0.5),
+        gen_ms.iter().copied().fold(0.0, f64::max)
+    );
+    for _ in 0..count {
+        planet.undo().unwrap();
+        step(&mut world, &planet, &mut frame);
+    }
+    while !world.settled() {
+        step(&mut world, &planet, &mut frame);
+    }
+    step(&mut world, &planet, &mut frame);
+    let undone_path = out.join("dig_undone.png");
+    save_chunk_colour(flight, &world, undone_path.to_str().unwrap());
+    // The hits, not the colours (sun samples turn each frame).
+    let differ = before_hits.iter().zip(world.read_hits()).filter(|(a, b)| a.map(|h| (h.cell, h.level)) != b.map(|h| (h.cell, h.level))).count();
+    eprintln!("CHUNKDIG {view}: undone frame's hits differ from the first's in {differ} pixels; centre {:.2} m (was {before:.2})", centre_depth(&world));
+}
+
+/// A view drawn by the renderer with the chunk pass: settle, hold
+/// (`HELIO_VOXEL_FLIGHT_HOLD_SECONDS`), report the chunk draw's GPU time and
+/// save the final frame (`<out>/chunks_<view>.png`).
+fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3) {
+    let started = Instant::now();
+    let mut frames = 0;
+    loop {
+        flight.draw(eye, forward);
+        frames += 1;
+        let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+        std::thread::sleep(std::time::Duration::from_millis(6));
+        if frames > 10 && flight.renderer.find_pass::<ChunkPass>().is_some_and(ChunkPass::settled) {
+            break;
+        }
+        if frames > 6000 {
+            eprintln!("CHUNKENGINE {view}: did not settle");
+            break;
+        }
+    }
+    let pass = flight.renderer.find_pass_mut::<ChunkPass>().unwrap();
+    eprintln!("CHUNKENGINE {view} settled in {:.2} s ({frames} frames): {}", started.elapsed().as_secs_f64(), pass.diagnostics());
+    pass.take_timings();
+    let seconds: f64 = std::env::var("HELIO_VOXEL_FLIGHT_HOLD_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(10.0);
+    let held = Instant::now();
+    // The graph's GPU time by pass, over the hold.
+    let mut passes: std::collections::BTreeMap<&'static str, (f64, u32)> = Default::default();
+    let mut graph = Vec::new();
+    let mut seen = 0;
+    while held.elapsed().as_secs_f64() < seconds {
+        flight.draw(eye, forward);
+        let snapshot = flight.renderer.timing_snapshot();
+        if snapshot.generation != seen {
+            seen = snapshot.generation;
+            graph.extend(snapshot.total_gpu_ms.map(f64::from));
+            for p in &snapshot.passes {
+                if let Some(ms) = p.gpu_ms {
+                    let entry = passes.entry(p.name).or_default();
+                    entry.0 += f64::from(ms);
+                    entry.1 += 1;
+                }
+            }
+        }
+    }
+    let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let timings = flight.renderer.find_pass_mut::<ChunkPass>().unwrap().take_timings();
+    let draw: Vec<f64> = timings.iter().map(|t| t.draw).collect();
+    eprintln!("CHUNKENGINE {view} n={} chunk draw p50 {:.3} p95 {:.3}", draw.len(), percentile(&draw, 0.5), percentile(&draw, 0.95));
+    let mut by_pass: Vec<(&str, f64)> = passes.iter().map(|(name, (sum, n))| (*name, sum / f64::from((*n).max(1)))).collect();
+    by_pass.sort_by(|a, b| b.1.total_cmp(&a.1));
+    eprintln!("CHUNKENGINE {view} graph gpu p50 {:.2} ms; by pass: {}", percentile(&graph, 0.5), by_pass.iter().filter(|p| p.1 >= 0.05).map(|(n, ms)| format!("{n} {ms:.2}")).collect::<Vec<_>>().join(", "));
+    flight.capture(&format!("chunks_{view}"));
+    pick_probe(flight, view, eye, forward);
+}
+
+/// `HELIO_VOXEL_FLIGHT_STRESS=ascent|descent|cruise|orbit|jump|dig|yoyo|dive|glide`: a flight
+/// through the renderer in real time (the path follows the wall clock, as a
+/// game's camera does: a slow frame moves it further), from 2 m to 400 km
+/// or back in `HELIO_VOXEL_FLIGHT_HOLD_SECONDS` (20), at 300 m/s 40 m over
+/// the ground, or in orbit (`HELIO_VOXEL_STRESS_ALTITUDE` m, 400 km) at
+/// 7.7 km/s looking down towards the horizon. Every frame goes to `<out>/stress_<mode>.csv` (time, altitude,
+/// frame interval, the chunk pass's coarse share, worst cell and level
+/// switch pixels, waiting tiles, generation, update CPU by phase). Every
+/// `HELIO_VOXEL_STRESS_SAMPLE` seconds (1) the frame is saved; after the
+/// flight each sample's view is settled and held until TSR converges and
+/// saved twice, 30 frames apart (`stress_<mode>_<n>.png`, `_ref.png`,
+/// `_ref2.png`: the second pair is the noise floor of a comparison).
+fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
+    let seconds: f64 = std::env::var("HELIO_VOXEL_FLIGHT_HOLD_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(20.0);
+    let sample: f64 = std::env::var("HELIO_VOXEL_STRESS_SAMPLE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+    let up = ground.normalize();
+    let ahead = tangent(ground, heading).as_dvec3();
+    let planet = flight.planet.clone();
+    let radius = planet.grid().radius();
+    let path = |t: f64| -> (DVec3, Vec3) {
+        let u = (t / seconds).clamp(0.0, 1.0);
+        if mode == "cruise" {
+            let eye = planet.surface_point(ground + ahead * (300.0 * t), 40.0);
+            return (eye, (ahead - up * 0.15).normalize().as_vec3());
+        }
+        if mode == "dig" {
+            // 6 m over the ground looking ahead and down; a ball is dug
+            // where the view's centre meets it a second in.
+            return (planet.surface_point(ground, 6.0), (ahead - up * 0.5).normalize().as_vec3());
+        }
+        if mode == "glide" {
+            // Down from 300 km to 30 km over the flight, looking toward the
+            // horizon and drifting ahead (an editor camera eased down over
+            // the planet's curve).
+            let altitude = 300_000.0 * 0.1f64.powf(u);
+            let eye = planet.surface_point(ground + ahead * (altitude * 0.05 * t), altitude);
+            return (eye, (ahead - up * 0.35).normalize().as_vec3());
+        }
+        if mode == "dive" {
+            // Straight down from `HELIO_VOXEL_STRESS_ALTITUDE` m (15 000 km,
+            // the whole planet in view) to `HELIO_VOXEL_STRESS_LOW` m (20 km)
+            // in half a second, a second in, then hovering (an editor camera
+            // dropped from orbit).
+            let top: f64 = std::env::var("HELIO_VOXEL_STRESS_ALTITUDE").ok().and_then(|v| v.parse().ok()).unwrap_or(15_000_000.0);
+            let u = ((t - 1.0) / 0.5).clamp(0.0, 1.0);
+            let low: f64 = std::env::var("HELIO_VOXEL_STRESS_LOW").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000.0);
+            let altitude = top * (low / top).powf(u);
+            let down = (ahead * 0.02 - up).normalize();
+            return (planet.surface_point(ground, altitude), down.as_vec3());
+        }
+        if mode == "yoyo" {
+            // Up and down between 2 and 50 km every `HELIO_VOXEL_STRESS_PERIOD`
+            // seconds (3) looking steeply down (an editor camera flown up
+            // and down: switches across many levels while others fade).
+            let period: f64 = std::env::var("HELIO_VOXEL_STRESS_PERIOD").ok().and_then(|v| v.parse().ok()).unwrap_or(3.0);
+            let altitude = 2_000.0 * 25f64.powf(0.5 - 0.5 * (std::f64::consts::TAU * t / period).cos());
+            return (planet.surface_point(ground + ahead * (300.0 * t), altitude), (ahead - up * 2.0).normalize().as_vec3());
+        }
+        if mode == "jump" {
+            // 40 m over the ground, then at once `HELIO_VOXEL_STRESS_ALTITUDE`
+            // (30 km) over it looking down (an editor camera's jump: one
+            // switch across many levels).
+            if t < 1.0 {
+                return (planet.surface_point(ground, 40.0), (ahead - up * 0.15).normalize().as_vec3());
+            }
+            let altitude: f64 = std::env::var("HELIO_VOXEL_STRESS_ALTITUDE").ok().and_then(|v| v.parse().ok()).unwrap_or(30_000.0);
+            return (planet.surface_point(ground, altitude), (ahead - up * 3.0).normalize().as_vec3());
+        }
+        if mode == "orbit" {
+            let altitude: f64 = std::env::var("HELIO_VOXEL_STRESS_ALTITUDE").ok().and_then(|v| v.parse().ok()).unwrap_or(400_000.0);
+            // Around the planet along a great circle through the spawn, at
+            // `HELIO_VOXEL_STRESS_SPEED` m/s (7 700).
+            let speed: f64 = std::env::var("HELIO_VOXEL_STRESS_SPEED").ok().and_then(|v| v.parse().ok()).unwrap_or(7_700.0);
+            let angle = speed * t / (radius + altitude);
+            let position = (up * angle.cos() + ahead * angle.sin()) * (radius + altitude);
+            let (local_up, local_ahead) = (position.normalize(), ahead * angle.cos() - up * angle.sin());
+            return (position, (local_ahead - local_up * 0.8).normalize().as_vec3());
+        }
+        // Exponentially between 2 m and 400 km.
+        let altitude = 2.0 * 200_000.0f64.powf(if mode == "ascent" { u } else { 1.0 - u });
+        let eye = planet.surface_point(ground + ahead * (altitude * 0.3), altitude);
+        (eye, (ahead - up * 0.6).normalize().as_vec3())
+    };
+    // Settle a view and hold it until TSR converges.
+    let settle = |flight: &mut Flight, eye: DVec3, forward: Vec3| {
+        let started = Instant::now();
+        let mut frames = 0;
+        let mut last = Instant::now();
+        while frames < 10 || !flight.renderer.find_pass::<ChunkPass>().is_some_and(ChunkPass::settled) {
+            flight.draw(eye, forward);
+            frames += 1;
+            // Load progress: the frame's interval, the pass's CPU stages
+            // (results, plan, evict, generate, drawn set, table) and work.
+            if frames % 50 == 0 {
+                if let Some(pass) = flight.renderer.find_pass::<ChunkPass>() {
+                    let s = pass.stats();
+                    eprintln!("CHUNKLOAD {mode}: frame {frames} at {:.1} s, interval {:.1} ms, pass cpu {:?} ms, stages {:?} ms, waiting {} generated {} drawn {}", started.elapsed().as_secs_f64(), last.elapsed().as_secs_f64() * 1e3, pass.cpu_ms().map(|v| (v * 100.0).round() / 100.0), s.cpu_ms.map(|v| (v * 100.0).round() / 100.0), s.requests, s.generated_tiles, s.drawn_tiles);
+                }
+            }
+            last = Instant::now();
+            if frames > 6000 {
+                eprintln!("CHUNKSTRESS {mode}: a view did not settle: {:?}", flight.renderer.find_pass::<ChunkPass>().map(ChunkPass::stats));
+                break;
+            }
+        }
+        for _ in 0..90 {
+            flight.draw(eye, forward);
+        }
+        started.elapsed().as_secs_f64()
+    };
+    let (eye, forward) = path(0.0);
+    eprintln!("CHUNKSTRESS {mode}: loaded in {:.2} s", settle(flight, eye, forward));
+    flight.renderer.find_pass_mut::<ChunkPass>().unwrap().take_timings();
+    // Counting builds: the flight's rays only, not the load's.
+    if let Some(world) = flight.renderer.find_pass::<ChunkPass>().and_then(ChunkPass::world) {
+        world.take_counts();
+    }
+    let mut csv = String::from("t,altitude_m,interval_ms,captured,coarse,worst_px,switches,switch_px,waiting,generated,fading,update_cpu_ms,results_ms,plan_ms,evict_ms,generate_ms,drawn_ms,table_ms,record_ms,wait_ms,pass_prepare_ms,pass_execute_ms
+");
+    let (mut intervals, mut coarse, mut worst, mut switch_px) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut draw_ms, mut generate_ms) = (Vec::new(), Vec::new());
+    let mut worst_wanted = Vec::new();
+    let mut samples = Vec::new();
+    let mut slow = Vec::new();
+    let started = Instant::now();
+    let mut last = started;
+    let mut captured = false;
+    let mut traced = false;
+    let mut lost_diagnosed = false;
+    let mut dug = false;
+    let mut next_dig = 1.0;
+    let mut generated_tiles = 0usize;
+    let (mut shown_tiles, mut unseen_evicted) = (0usize, 0usize);
+    // GPU generation by kernel: evictions and tile columns, chunk columns,
+    // chunk builds.
+    let mut stage_ms = [0.0f64; 3];
+    // `HELIO_VOXEL_STRESS_FPS=n`: frames paced at n a second, as a host's
+    // display paces them (unpaced, the harness runs faster than an editor
+    // and so generates more a second).
+    let fps = std::env::var("HELIO_VOXEL_STRESS_FPS").ok().and_then(|v| v.parse::<f64>().ok());
+    let pace = fps.map(|fps| std::time::Duration::from_secs_f64(1.0 / fps));
+    // `HELIO_VOXEL_STRESS_STEP`: the flight advances a frame's time (of
+    // `HELIO_VOXEL_STRESS_FPS`, else 60) each frame, however long frames
+    // take: runs see the same eyes, and differ only by what was generated.
+    let step = std::env::var_os("HELIO_VOXEL_STRESS_STEP").is_some().then(|| 1.0 / fps.unwrap_or(60.0));
+    let mut stepped = 0u32;
+    let mut frame_start = Instant::now();
+    loop {
+        if let Some(pace) = pace {
+            let due = frame_start + pace;
+            let now = Instant::now();
+            if now < due {
+                std::thread::sleep(due - now);
+            }
+            frame_start = Instant::now();
+        }
+        let t = step.map_or_else(|| started.elapsed().as_secs_f64(), |dt| f64::from(stepped) * dt);
+        stepped += 1;
+        if t > seconds {
+            break;
+        }
+        let (eye, forward) = path(t);
+        // `dig`: one ball, `HELIO_VOXEL_STRESS_DIG` m across (12), close to
+        // the camera. `HELIO_VOXEL_STRESS_DIG_EVERY=s` (any mode): a ball at
+        // the view's centre every `s` seconds (an editor's brush clicked
+        // from high up).
+        let every: Option<f64> = std::env::var("HELIO_VOXEL_STRESS_DIG_EVERY").ok().and_then(|v| v.parse().ok());
+        let due = match every {
+            Some(_) => t >= next_dig,
+            None => mode == "dig" && t >= 1.0 && !dug,
+        };
+        if due {
+            dug = true;
+            next_dig = t + every.unwrap_or(0.0);
+            let radius: f64 = std::env::var("HELIO_VOXEL_STRESS_DIG").ok().and_then(|v| v.parse().ok()).unwrap_or(12.0);
+            // Close up, the ground the view's centre meets; from high up
+            // (a CPU raycast there takes seconds), the sphere's, snapped
+            // to the ground.
+            let dir = forward.as_dvec3();
+            let at = if every.is_none() {
+                eye + dir * flight.planet.raycast(eye, dir, 1000.0).expect("the view centre hits ground").distance
+            } else {
+                let b = eye.dot(dir);
+                let r = flight.planet.grid().radius();
+                let disc = b * b - (eye.length_squared() - r * r);
+                if disc < 0.0 {
+                    eprintln!("CHUNKSTRESS dig: the view centre misses the planet at t {t:.3} s");
+                    continue;
+                }
+                flight.planet.surface_point(eye + dir * (-b - disc.sqrt()), 0.0)
+            };
+            let hit_distance = (at - eye).length();
+            let mut planet = (*flight.planet).clone();
+            planet.apply(Brush { center: at.to_array(), radius, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+            flight.planet = Arc::new(planet);
+            eprintln!("CHUNKSTRESS dig: ball {radius} m at {hit_distance:.1} m from the eye, t {t:.3} s");
+        }
+        let (record_ms, wait_ms) = flight.draw(eye, forward);
+        let now = Instant::now();
+        let interval = (now - last).as_secs_f64() * 1e3;
+        last = now;
+        let altitude = eye.length() - radius;
+        // A slow frame: the renderer's CPU by pass.
+        if record_ms > 40.0 {
+            let snapshot = flight.renderer.timing_snapshot();
+            let mut passes: Vec<(&str, f32)> = snapshot.passes.iter().filter_map(|p| Some((p.name, p.cpu_ms?))).collect();
+            passes.sort_by(|a, b| b.1.total_cmp(&a.1));
+            passes.truncate(4);
+            eprintln!("CHUNKSTRESS {mode}: recording {record_ms:.1} ms at t {t:.2} s: graph cpu {:?} ms, passes {passes:?}", snapshot.total_cpu_ms);
+        }
+        let pass = flight.renderer.find_pass_mut::<ChunkPass>().unwrap();
+        let s = *pass.stats();
+        let pass_cpu = pass.cpu_ms();
+        for timing in pass.take_timings() {
+            draw_ms.push(timing.draw);
+            generate_ms.push(timing.generate);
+            for (total, ms) in stage_ms.iter_mut().zip(timing.stages) {
+                *total += ms;
+            }
+        }
+        generated_tiles += s.generated_tiles;
+        shown_tiles += s.shown_tiles;
+        unseen_evicted += s.evicted_unseen;
+        csv += &format!("{t:.4},{altitude:.2},{interval:.2},{},{:.4},{:.3},{},{:.3},{},{},{},{:.2},{},{record_ms:.2},{wait_ms:.2},{:.2},{:.2}
+", u8::from(captured), s.coarse_share, s.worst_px, s.switches, s.switch_px, s.requests, s.generated_tiles, s.fading_tiles, s.cpu_ms.iter().sum::<f64>(), s.cpu_ms.map(|v| format!("{v:.2}")).join(","), pass_cpu[0], pass_cpu[1]);
+        // A frame after a capture waited for its readback.
+        if !captured {
+            intervals.push(interval);
+            slow.push((interval, t, altitude));
+        }
+        // Counting builds: each frame's rays that left the cut or the box
+        // budget (missed) and placements that found nothing (lost).
+        if std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some() {
+            if let Some(world) = pass.world() {
+                // `HELIO_VOXEL_CHUNKS_DEBUG_PIXEL`: that pixel's boxes (read
+                // before the counts, which clear them).
+                // `_DEBUG_PIXEL_AT=seconds` (1.0): when the pixel is traced.
+                let at: f64 = std::env::var("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+                let trace = if t > at && !traced && std::env::var_os("HELIO_VOXEL_CHUNKS_DEBUG_PIXEL").is_some() { world.pixel_trace() } else { Vec::new() };
+                let lost_where = world.lost_where();
+                let c = world.take_counts();
+                if c.missed + c.lost > 0 {
+                    eprintln!("CHUNKSTRESS {mode}: t {t:.3} s missed {} ({} boxes each) lost {} (last at {:?}, places lost by reason {:?})", c.missed, c.missed_boxes / c.missed.max(1), c.lost, c.lost_pixel, c.lost_sites);
+                }
+                // The first frame losing many rays: what is resident and
+                // drawn over the ground its last lost pixel looks at.
+                if c.lost > 20000 && !lost_diagnosed {
+                    lost_diagnosed = true;
+                    // Where the search began, and the tiles over it.
+                    let (face, level, cell) = lost_where;
+                    eprintln!("LOSTDIAG search from face {face} level {level} cell {cell:?}");
+                    for l in level..flight.planet.grid().levels() {
+                        let key = helio_pass_voxel_planet::chunks::TileKey { face, level: l, cx: (cell[0] >> (l - level)) >> 6, cy: (cell[1] >> (l - level)) >> 6 };
+                        eprintln!("LOSTDIAG   search level {l} tile {},{}: drawn set {:?}", key.cx, key.cy, world.describe_drawn(key));
+                    }
+                    let [w, h] = flight.size;
+                    let up = up_for(eye);
+                    let f = forward.normalize();
+                    let up = if f.dot(up).abs() > 0.999 { up.any_orthonormal_vector() } else { up };
+                    let right = f.cross(up).normalize();
+                    let cam_up = right.cross(f);
+                    let tan = (std::f32::consts::FRAC_PI_4 * 0.5).tan();
+                    let (px, py) = c.lost_pixel;
+                    let ndc = [(px as f32 + 0.5) / w as f32 * 2.0 - 1.0, 1.0 - (py as f32 + 0.5) / h as f32 * 2.0];
+                    let dir = (f + right * ndc[0] * tan * (w as f32 / h as f32) + cam_up * ndc[1] * tan).normalize().as_dvec3();
+                    match flight.planet.raycast(eye, dir, 6.0e6) {
+                        Some(hit) => {
+                            eprintln!("LOSTDIAG t {t:.3} altitude {altitude:.0} pixel {px},{py}: ground at {:.0} m, cell {:?}", hit.distance, hit.cell);
+                            for (key, cz, z, drawn) in world.chunks_over(hit.cell.face, hit.cell.i, hit.cell.j) {
+                                eprintln!("LOSTDIAG   level {} tile {},{} cz {cz} occupied {z:?} drawn {drawn}", key.level, key.cx, key.cy);
+                            }
+                            // The tiles over it at every level, in the drawn set.
+                            for level in 0..flight.planet.grid().levels() {
+                                let key = helio_pass_voxel_planet::chunks::TileKey { face: hit.cell.face, level, cx: (hit.cell.i >> level) >> 6, cy: (hit.cell.j >> level) >> 6 };
+                                let state = world.describe_drawn(key);
+                                if state != (false, None, None) {
+                                    eprintln!("LOSTDIAG   level {level}: drawn set {state:?}");
+                                }
+                            }
+                        }
+                        None => eprintln!("LOSTDIAG t {t:.3} pixel {px},{py}: the CPU ray meets no ground"),
+                    }
+                }
+                if !trace.is_empty() {
+                    traced = true;
+                    eprintln!("PIXELTRACE at t {t:.3} s");
+                    for (n, step) in trace.iter().enumerate() {
+                        eprintln!("PIXELTRACE {n}: {step:?}");
+                    }
+                }
+            }
+        }
+        coarse.push(s.coarse_share);
+        worst.push(s.worst_px);
+        worst_wanted.push(s.worst_wanted);
+        if s.switches > 0 {
+            switch_px.push(s.switch_px);
+        }
+        captured = t >= samples.len() as f64 * sample;
+        if captured {
+            flight.capture(&format!("stress_{mode}_{:02}", samples.len()));
+            samples.push((eye, forward));
+        }
+    }
+    std::fs::write(flight.output.join(format!("stress_{mode}.csv")), csv).unwrap();
+    slow.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let max = |v: &[f64]| v.iter().copied().fold(0.0, f64::max);
+    let over = |v: &[f64], x: f64| v.iter().filter(|&&p| p > x).count();
+    eprintln!(
+        "CHUNKSTRESS {mode}: frames {} | interval p50 {:.1} p95 {:.1} p99 {:.1} max {:.1} ms, over 33 ms {} | gpu draw p50 {:.2} max {:.2}, generate p50 {:.2} max {:.2} ms | coarse mean {:.4} max {:.3} | worst px p50 {:.2} p95 {:.2} max {:.2} | switches in {} frames, px p50 {:.2} p95 {:.2} max {:.2}, over 1.5 px {}, over 3 px {}",
+        intervals.len(),
+        percentile(&intervals, 0.5),
+        percentile(&intervals, 0.95),
+        percentile(&intervals, 0.99),
+        max(&intervals),
+        over(&intervals, 33.3),
+        percentile(&draw_ms, 0.5),
+        max(&draw_ms),
+        percentile(&generate_ms, 0.5),
+        max(&generate_ms),
+        coarse.iter().sum::<f64>() / coarse.len().max(1) as f64,
+        max(&coarse),
+        percentile(&worst, 0.5),
+        percentile(&worst, 0.95),
+        max(&worst),
+        switch_px.len(),
+        percentile(&switch_px, 0.5),
+        percentile(&switch_px, 0.95),
+        max(&switch_px),
+        over(&switch_px, 1.5),
+        over(&switch_px, 3.0),
+    );
+    // GPU generation per tile over the flight (its timings lag a few frames).
+    let generation: f64 = generate_ms.iter().sum();
+    let per_tile = |ms: f64| ms * 1e3 / generated_tiles.max(1) as f64;
+    eprintln!("CHUNKSTRESS {mode}: of {generated_tiles} generated tiles {shown_tiles} were drawn, {unseen_evicted} evicted never drawn");
+    eprintln!(
+        "CHUNKSTRESS {mode}: worst over its motion allowance p50 {:.2} p95 {:.2} max {:.2}",
+        percentile(&worst_wanted, 0.5),
+        percentile(&worst_wanted, 0.95),
+        worst_wanted.iter().copied().fold(0.0, f64::max)
+    );
+    eprintln!(
+        "CHUNKSTRESS {mode}: generation {generation:.1} ms GPU for {generated_tiles} tiles, {:.1} us a tile (tile columns {:.1}, chunk columns {:.1}, chunk builds {:.1})",
+        per_tile(generation),
+        per_tile(stage_ms[0]),
+        per_tile(stage_ms[1]),
+        per_tile(stage_ms[2])
+    );
+    for (interval, t, altitude) in slow.iter().take(5) {
+        eprintln!("CHUNKSTRESS {mode}: slow frame {interval:.1} ms at t {t:.2} s, altitude {altitude:.0} m");
+    }
+    for (n, (eye, forward)) in samples.iter().enumerate() {
+        settle(flight, *eye, *forward);
+        flight.capture(&format!("stress_{mode}_{n:02}_ref"));
+        for _ in 0..30 {
+            flight.draw(*eye, *forward);
+        }
+        flight.capture(&format!("stress_{mode}_{n:02}_ref2"));
+    }
+    // `HELIO_VOXEL_PICKS`: the last sample's view, settled, against the CPU.
+    if let Some(&(eye, forward)) = samples.last() {
+        pick_probe(flight, mode, eye, forward);
+    }
+}
+
+/// `HELIO_VOXEL_PICKS=x,y;x,y` (output pixels): the renderer's picks there
+/// against the CPU raycast through the same pixel.
+fn pick_probe(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3) {
+    use helio_pass_voxel_planet::engine::{PickRequest, Picks};
+    let Ok(points) = std::env::var("HELIO_VOXEL_PICKS") else { return };
+    let [w, h] = flight.size;
+    let picks = std::sync::Arc::new(std::sync::Mutex::new(Picks::default()));
+    let pixels: Vec<[u32; 2]> = points.split(';').map(|p| p.split(',').map(|v| v.trim().parse().unwrap()).collect::<Vec<u32>>()).map(|v| [v[0], v[1]]).collect();
+    picks.lock().unwrap().requests = pixels.iter().enumerate().map(|(n, p)| PickRequest { id: n as u64, uv: [(p[0] as f32 + 0.5) / w as f32, (p[1] as f32 + 0.5) / h as f32] }).collect();
+    flight.picks = Some(picks.clone());
+    for _ in 0..12 {
+        flight.draw(eye, forward);
+        let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    flight.picks = None;
+    let up = up_for(eye);
+    let forward = forward.normalize();
+    let up = if forward.dot(up).abs() > 0.999 { up.any_orthonormal_vector() } else { up };
+    let right = forward.cross(up).normalize();
+    let cam_up = right.cross(forward);
+    let tan = (std::f32::consts::FRAC_PI_4 * 0.5).tan();
+    let results = std::mem::take(&mut picks.lock().unwrap().results);
+    for (n, p) in pixels.iter().enumerate() {
+        let ndc = [(p[0] as f32 + 0.5) / w as f32 * 2.0 - 1.0, 1.0 - (p[1] as f32 + 0.5) / h as f32 * 2.0];
+        let dir = (forward + right * ndc[0] * tan * (w as f32 / h as f32) + cam_up * ndc[1] * tan).normalize().as_dvec3();
+        let cpu = flight.planet.raycast(eye, dir, 100_000.0);
+        let pick = results.iter().find(|r| r.id == n as u64).and_then(|r| r.hit);
+        eprintln!("PICK {view} {},{}: drawn {:?} | cpu {:?}", p[0], p[1], pick.map(|h| (h.distance, h.level, h.cell, h.entered)), cpu.map(|c| (c.distance, c.cell)));
+        if let (Some(c), Some(world)) = (cpu, flight.renderer.find_pass::<ChunkPass>().and_then(ChunkPass::world)) {
+            eprintln!("PICK {view} {},{}: chunks over the cpu cell {:?}", p[0], p[1], world.chunks_over(c.cell.face, c.cell.i, c.cell.j));
+        }
+    }
+}
+
+/// `HELIO_VOXEL_CHUNKS_FLY=descent|cruise`: chunk trees streamed along a
+/// path at 60 simulated frames a second (`HELIO_VOXEL_CHUNKS_BUDGET` tiles
+/// generated a frame): how far the drawn detail lags what is wanted
+/// (`coarse`, the share of drawn tiles coarser than 1.5x the target), the
+/// primary time and the CPU update time. `HELIO_VOXEL_CHUNKS_PNG=<prefix>`
+/// saves a frame each second.
+fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
+    use helio_pass_voxel_planet::chunks::ChunkWorld;
+    let [w, h] = flight.size;
+    let config = chunk_config(h, 64);
+    let mut world = ChunkWorld::new(&flight.device, &flight.queue, &flight.planet);
+    let up = ground.normalize();
+    let mut budgets = Vec::new();
+    let mut phases = [0.0f64; 6];
+    let ahead = tangent(ground, heading).as_dvec3();
+    let seconds: f64 = std::env::var("HELIO_VOXEL_FLIGHT_HOLD_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(20.0);
+    // Eye and view direction at time t.
+    let path = |t: f64| -> (DVec3, Vec3) {
+        match mode {
+            "cruise" => {
+                // 300 m/s, 40 m over the ground.
+                let along = ground + ahead * (300.0 * t);
+                let eye = flight.planet.surface_point(along, 40.0);
+                (eye, (ahead - up * 0.15).normalize().as_vec3())
+            }
+            _ => {
+                // From 400 km down to 2 m, exponentially.
+                let altitude = 400_000.0 * (2.0f64 / 400_000.0).powf((t / seconds).min(1.0));
+                let point = ground + ahead * (altitude * 0.3);
+                let eye = flight.planet.surface_point(point, altitude.max(2.0));
+                (eye, (ahead - up * 0.6).normalize().as_vec3())
+            }
+        }
+    };
+    let dt = 1.0 / 60.0;
+    let frames = (seconds / dt) as u64;
+    // Loaded before the flight starts (a game loads its spawn first).
+    let mut start = 0u64;
+    let loaded = chunk_settle(flight, &mut world, path(0.0).0, path(0.0).1, &mut start);
+    eprintln!("CHUNKFLY {mode} loaded in {loaded:.2} s ({start} frames)");
+    let png = std::env::var("HELIO_VOXEL_CHUNKS_PNG").ok();
+    let mut pending = std::collections::VecDeque::new();
+    let (mut times, mut update_ms, mut coarse, mut requests, mut resident) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), 0);
+    let mut fading = Vec::new();
+    // Generation by kernel (us), and the tiles it made.
+    let (mut stage_us, mut stage_tiles) = ([0.0f64; 3], 0usize);
+    let counting = std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some();
+    let mut counts = [0u64; 7];
+    let (mut generate_ms, mut per_tile) = (Vec::new(), Vec::new());
+    for n in 0..frames {
+        let frame = start + n;
+        let t = n as f64 * dt;
+        let (eye, forward) = path(t);
+        let velocity = (path(t + dt).0 - eye) / dt;
+        let up_dir = up_for(eye);
+        let view_up = if forward.dot(up_dir).abs() > 0.999 { up_dir.any_orthonormal_vector() } else { up_dir };
+        let near = (flight.planet.air_clearance(eye) * 0.25).clamp(0.05, 50_000.0) as f32;
+        let camera = Camera::perspective_look_at(Vec3::ZERO, forward, view_up, std::f32::consts::FRAC_PI_4, w as f32 / h as f32, near, 40_000_000.0);
+        let mut encoder = flight.device.create_command_encoder(&Default::default());
+        let cpu = Instant::now();
+        let view = helio_pass_voxel_planet::chunks::residency::View { forward: forward.as_dvec3(), cos_half: (std::f64::consts::FRAC_PI_8 * f64::from(w) / f64::from(h) * 1.1).cos() };
+        let stats = world.update(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), eye, velocity, Some(view), frame, &config);
+        update_ms.push(cpu.elapsed().as_secs_f64() * 1e3);
+        world.draw(&mut helio_core::CommandRecorder::from_encoder(&mut encoder), frame, eye, camera.proj * camera.view, camera.proj * camera.view, near, flight.sun_at(eye), [w, h]);
+        pending.push_back(flight.queue.submit([encoder.finish()]));
+        world.submitted();
+        if pending.len() > 2 {
+            let _ = flight.device.poll(wgpu::PollType::Wait { submission_index: pending.pop_front(), timeout: None });
+        }
+        for t in world.take_timings() {
+            times.push(t.draw);
+            generate_ms.push(t.generate);
+            if t.tiles > 0 {
+                per_tile.push(t.generate / t.tiles as f64);
+                for (sum, ms) in stage_us.iter_mut().zip(t.stages) {
+                    *sum += ms * 1e3;
+                }
+                stage_tiles += t.tiles;
+            }
+        }
+        coarse.push(stats.coarse_share);
+        fading.push(stats.fading_tiles as f64);
+        // `HELIO_VOXEL_CHUNKS_COUNT`: the traces' counts over the flight.
+        if counting && n % 30 == 29 {
+            let c = world.take_counts();
+            for (sum, v) in counts.iter_mut().zip([c.seeded, c.hits, c.steps, c.boxes, c.missed, c.missed_boxes, c.lost]) {
+                *sum += u64::from(v);
+            }
+        }
+        budgets.push(stats.budget as f64);
+        for (p, v) in phases.iter_mut().zip(stats.cpu_ms) {
+            *p += v / frames as f64;
+        }
+        requests.push(stats.requests as f64);
+        resident = stats.resident_chunks;
+        if n % 60 == 0 {
+            eprintln!(
+                "CHUNKFLY {mode} t {t:5.1} alt {:9.1} coarse {:.3} requests {:5} generated {:3} drawn {:6} resident {:6} evicted {:4} regen {} slots {} leaves {}",
+                flight.planet.air_clearance(eye),
+                stats.coarse_share,
+                stats.requests,
+                stats.generated_tiles,
+                stats.drawn_chunks,
+                stats.resident_chunks,
+                stats.evicted_tiles,
+                stats.regenerated_tiles,
+                stats.out_of_slots,
+                stats.out_of_leaves
+            );
+            if let Some(prefix) = &png {
+                let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+                save_chunk_colour(flight, &world, &format!("{prefix}_{mode}_{:03}.png", n / 60));
+            }
+        }
+    }
+    let lagging = coarse.iter().filter(|&&c| c > 0.02).count();
+    eprintln!("CHUNKFLY {mode} generation us a tile by kernel (tile columns, chunk columns, chunk build): {:.1?}", stage_us.map(|us| us / stage_tiles.max(1) as f64));
+    eprintln!("CHUNKFLY {mode} fading tiles mean {:.0} max {:.0}", fading.iter().sum::<f64>() / fading.len().max(1) as f64, fading.iter().copied().fold(0.0, f64::max));
+    if counting {
+        let [seeded, hits, steps, boxes, missed, missed_boxes, lost] = counts.map(|v| v as f64);
+        eprintln!(
+            "CHUNKFLY {mode} counts: hits/seeded {:.3} steps/seeded {:.1} boxes/seeded {:.2}; missed/seeded {:.4}, {:.1} boxes each, lost {lost}",
+            hits / seeded.max(1.0),
+            steps / seeded.max(1.0),
+            boxes / seeded.max(1.0),
+            missed / seeded.max(1.0),
+            missed_boxes / missed.max(1.0)
+        );
+    }
+    eprintln!("CHUNKFLY {mode} update cpu mean by phase (results, plan, evict, generate, drawn, table): {phases:.2?}");
+    eprintln!(
+        "CHUNKFLY {mode} summary: frames {frames} coarse mean {:.4} max {:.3} frames over 2% {lagging} | requests p50 {:.0} max {:.0} | primary p50 {:.3} p95 {:.3} | generate p50 {:.3} p95 {:.3} ms, {:.1} us a tile, budget p50 {:.0} | update cpu p50 {:.2} p95 {:.2} ms | resident {resident} chunks {:.1} MB",
+        coarse.iter().sum::<f64>() / coarse.len().max(1) as f64,
+        coarse.iter().copied().fold(0.0, f64::max),
+        percentile(&requests, 0.5),
+        requests.iter().copied().fold(0.0, f64::max),
+        percentile(&times, 0.5),
+        percentile(&times, 0.95),
+        percentile(&generate_ms, 0.5),
+        percentile(&generate_ms, 0.95),
+        percentile(&per_tile, 0.5) * 1e3,
+        percentile(&budgets, 0.5),
+        percentile(&update_ms, 0.5),
+        percentile(&update_ms, 0.95),
+        world.resident_bytes() as f64 / 1048576.0
+    );
+}
+
+/// The chunk draw's colour target as a PNG.
+fn save_chunk_colour(flight: &Flight, world: &helio_pass_voxel_planet::chunks::ChunkWorld, path: &str) {
+    let [w, h] = flight.size;
+    let row = (w * 4).div_ceil(256) * 256;
+    let buffer = flight.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: u64::from(row) * u64::from(h), usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+    let mut encoder = flight.device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        world.targets().unwrap().colour.as_image_copy(),
+        wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    flight.queue.submit([encoder.finish()]);
+    buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    flight.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+    let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        let at = (y * row) as usize;
+        pixels.extend_from_slice(&data[at..at + (w * 4) as usize]);
+    }
+    image::save_buffer(path, &pixels, w, h, image::ColorType::Rgba8).unwrap();
+}
+
+/// A tunnel carved by 150 brushes (3-7 m balls) from the surface down and
+/// ahead: the eye inside it and a view along it.
+fn carve_tunnel(flight: &mut Flight, ground: DVec3, heading: f64) -> (DVec3, Vec3) {
+    let up = ground.normalize();
+    let ahead = tangent(ground, heading).as_dvec3();
+    let side = ahead.cross(up);
+    let mut planet = (*flight.planet).clone();
+    let mut rng = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        (rng >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let mut at = ground - up * 2.0;
+    let mut eye = at;
+    for n in 0..150 {
+        let radius = 3.0 + 4.0 * next();
+        planet.apply(Brush { center: at.to_array(), radius, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 }).unwrap();
+        if n == 20 {
+            eye = at;
+        }
+        at += ahead * 2.5 - up * 0.6 + side * ((next() - 0.5) * 2.0);
+    }
+    flight.planet = Arc::new(planet);
+    (eye, (ahead - up * 0.25).normalize().as_vec3())
 }
 
 /// Views of generated volumetric terrain near `near`: inside a tunnel (an
@@ -749,37 +1462,16 @@ fn volume_views(planet: &Planet, near: DVec3) -> Vec<(&'static str, DVec3, Vec3)
     tunnel.into_iter().chain(overhang).collect()
 }
 
-/// The highest summit near the spawn and two views of it: 300 m above the/// ground 12 km away, and on its slope 1.5 km below the summit.
-struct Mountain {
-    peak: DVec3,
-    views: Vec<(&'static str, DVec3, Vec3)>,
-}
-
-fn mountain(planet: &Planet, heading: f64) -> Mountain {
+/// The highest summit near the spawn and two views of it: 300 m above the
+/// ground 12 km away, and on its slope 1.5 km below the summit.
+fn mountain(planet: &Planet, heading: f64) -> Vec<(&'static str, DVec3, Vec3)> {
     let (peak_dir, height) = highest_near(planet, 2, 0.47, 0.53, 0.15);
     eprintln!("VOXEL_FLIGHT mountain summit {height:.0} m");
     let peak = planet.surface_point(peak_dir, 0.0);
     let away = tangent(peak, heading + std::f64::consts::PI).as_dvec3();
     let air = planet.surface_point(peak + away * 12_000.0, 300.0);
     let slope = planet.surface_point(peak + away * 1_500.0, 1.7);
-    let views = [("mountain_air", air), ("mountain_slope", slope)]
-        .into_iter()
-        .map(|(name, eye)| (name, eye, (peak - eye).normalize().as_vec3()))
-        .collect();
-    Mountain { peak, views }
-}
-
-/// Horizontal direction from `eye` toward the summit.
-fn level_toward(range: &Mountain, eye: DVec3) -> DVec3 {
-    let toward = (range.peak - eye).normalize();
-    let up = eye.normalize();
-    (toward - up * toward.dot(up)).normalize()
-}
-
-fn record_frame(flight: &Flight, stage: &str, index: usize) {
-    if (flight.record && index % 2 == 0) || index % 150 == 0 {
-        flight.capture(&format!("{stage}-{index:04}"));
-    }
+    [("mountain_air", air), ("mountain_slope", slope)].into_iter().map(|(name, eye)| (name, eye, (peak - eye).normalize().as_vec3())).collect()
 }
 
 fn main() {
@@ -807,6 +1499,12 @@ fn main() {
         Ok("earth") | Err(_) => helio_pass_voxel_planet::layers::TerrainLayers::earth(),
         Ok(other) => panic!("unknown preset {other}"),
     };
+    // HELIO_VOXEL_FLIGHT_LAYERS=<json>: a layer stack of its own (a Pulsar
+    // level's `VoxelTerrainLayersComponent` data), for its views.
+    let stack = match std::env::var("HELIO_VOXEL_FLIGHT_LAYERS") {
+        Ok(path) => serde_json::from_str(&std::fs::read_to_string(&path).expect("layers file")).expect("a layer stack"),
+        Err(_) => stack,
+    };
     // HELIO_VOXEL_FLIGHT_GRAIN=scale_m,octaves,ratio: an extra roughness
     // layer (A/B for ground grain).
     let mut stack = stack;
@@ -825,1357 +1523,72 @@ fn main() {
     };
     let planet = Planet::new(PlanetRecipe { voxel_size_m: voxel, terrain, ..Default::default() }).unwrap();
     let mut flight = Flight::new(&output, size, quality, planet);
-    let validation = flight.device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut report = serde_json::Map::new();
-    let mut audits = Vec::new();
-    report.insert("config".into(), serde_json::json!({"size": size, "quality": format!("{quality:?}"), "voxel_m": flight.planet.grid().voxel_size(), "shadows": flight.shadows, "record": flight.record}));
 
     // Ground spawn on the +Y face.
     let dir = land_near(&flight.planet, 2, 0.47, 0.53, 20.0);
     let ground = flight.planet.surface_point(dir, 1.7);
     let heading = 0.6;
-    if let Ok(views) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS") {
-        capture_views(&mut flight, &views, ground, heading);
+    if let Ok(mode) = std::env::var("HELIO_VOXEL_CHUNKS_FLY") {
+        chunk_fly(&flight, &mode, ground, heading);
         return;
     }
-    if let Some(km) = std::env::var("HELIO_VOXEL_FLIGHT_LODCMP").ok().and_then(|v| v.parse::<f64>().ok()) {
-        lod_compare(&mut flight, km);
-        return;
-    }
-    let forward = look(ground, heading, -12.0);
-    let (frames, ms) = flight.settle("ground_load", ground, forward);
-    eprintln!("VOXEL_FLIGHT ground load {frames} frames {ms:.1} ms");
-    report.insert("cold_ground_load".into(), serde_json::json!({"frames": frames, "sync_ms": ms}));
-    for _ in 0..60 {
-        flight.draw("ground_warm", ground, forward);
-    }
-    if std::env::var_os("HELIO_VOXEL_FLIGHT_CPU_PROBE").is_some() {
-        // CPU cost of Renderer::render per pass over a steady view.
-        let mut totals: BTreeMap<&'static str, (f64, u32)> = BTreeMap::new();
-        let mut frame_cpu = Vec::new();
-        for _ in 0..240 {
-            flight.draw("cpu_probe", ground, forward);
-            let snap = flight.renderer.timing_snapshot();
-            if let Some(t) = snap.total_cpu_ms {
-                frame_cpu.push(f64::from(t));
+    if let Ok(mode) = std::env::var("HELIO_VOXEL_FLIGHT_STRESS") {
+        // `HELIO_VOXEL_STRESS_AT=x,y,z`: the flight over the ground in that
+        // direction from the planet's centre (a Pulsar level's spawn).
+        let ground = match std::env::var("HELIO_VOXEL_STRESS_AT") {
+            Ok(at) => {
+                let v: Vec<f64> = at.split(',').map(|x| x.trim().parse().unwrap()).collect();
+                flight.planet.surface_point(DVec3::new(v[0], v[1], v[2]).normalize(), 1.7)
             }
-            for pass in &snap.passes {
-                if let Some(ms) = pass.cpu_ms {
-                    let e = totals.entry(pass.name).or_insert((0.0, 0));
-                    e.0 += f64::from(ms);
-                    e.1 += 1;
-                }
-            }
-        }
-        let mut list: Vec<_> = totals.into_iter().map(|(n, (ms, c))| (ms / f64::from(c), n)).collect();
-        list.sort_by(|a, b| b.0.total_cmp(&a.0));
-        eprintln!("CPU total_cpu_ms p50 {:.3}", percentile(&frame_cpu, 0.5));
-        for (ms, name) in &list {
-            eprintln!("CPU pass {name:36} {ms:8.4} ms");
-        }
-        return;
-    }
-    flight.capture("ground");
-    audits.push(flight.audit("ground", ground, forward));
-    for (name, pitch, h) in [("ground_horizon", 0.0, heading + 1.3), ("ground_down", -45.0, heading + 2.5), ("ground_up", 15.0, heading - 1.0)] {
-        let f = look(ground, h, pitch);
-        flight.settle(name, ground, f);
-        for _ in 0..20 {
-            flight.draw(name, ground, f);
-        }
-        flight.capture(name);
-        audits.push(flight.audit(name, ground, f));
-    }
-
-    if let Some(deg) = std::env::var("HELIO_VOXEL_FLIGHT_TRIP").ok().and_then(|v| v.parse::<f64>().ok()) {
-        editor_trip(&mut flight, deg);
-        return;
-    }
-    if let Some(height) = std::env::var("HELIO_VOXEL_FLIGHT_CRUISE").ok().and_then(|v| v.parse::<f64>().ok()) {
-        cruise(&mut flight, height);
-        return;
-    }
-    if let Some(secs) = std::env::var("HELIO_VOXEL_FLIGHT_LONG").ok().and_then(|v| v.parse::<f64>().ok()) {
-        long_route(&mut flight, secs);
-        return;
-    }
-    if let Ok(log) = std::env::var("HELIO_VOXEL_FLIGHT_REPLAY") {
-        replay(&mut flight, Path::new(&log));
-        return;
-    }
-    if std::env::var_os("HELIO_VOXEL_FLIGHT_EDITOR_PATH").is_some() {
-        // An editor-style descent: 10 m/s scaled by height/20 m, from 300 km
-        // down to 300 m and then a level cruise, looking 25 degrees down.
-        // HELIO_VOXEL_FLIGHT_EDITOR_PATH=<deg> starts that far from the pole.
-        // Logs residency progress and captures views.
-        let out_deg: f64 = std::env::var("HELIO_VOXEL_FLIGHT_EDITOR_PATH").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        let start = DVec3::new(out_deg.to_radians().sin(), out_deg.to_radians().cos(), 0.0);
-        let mut eye = start * (flight.planet.grid().radius() + 300_000.0);
-        let dt = 1.0 / 120.0;
-        let forward = DVec3::X;
-        let mut t = 0.0;
-        let mut frame = 0usize;
-        while t < 45.0 {
-            // Height above the ground directly below (what the editor's
-            // speed should follow; air_clearance is only a conservative
-            // bound, ~0 anywhere below the highest possible terrain).
-            let clearance = eye.length() - flight.planet.surface_point(eye, 0.0).length();
-            let speed = 10.0 * (clearance / 20.0).clamp(1.0, 1.0e6);
-            let low = clearance < 300.0;
-            let up = eye.normalize();
-            let ahead = (forward - up * forward.dot(up)).normalize();
-            let dir = if low { ahead } else { (ahead - up).normalize() };
-            eye += dir * speed * dt;
-            let (cell, _) = flight.planet.grid().locate(eye);
-            if flight.planet.solid(cell) {
-                eye = flight.planet.surface_point(eye, 0.5);
-            }
-            let up = eye.normalize();
-            let look = ((forward - up * forward.dot(up)).normalize() - up * 0.47).normalize().as_vec3();
-            flight.draw("editor_path", eye, look);
-            if frame % 60 == 0 {
-                let stats = flight.pass().stats().unwrap_or_default();
-                let up = eye.normalize();
-                let from_pole = up.y.acos().to_degrees();
-                eprintln!(
-                    "PATH t {t:5.1}s height {:9.1} m from_pole {from_pole:5.2} deg speed {speed:8.1} m/s resident {} pending {} jobs {} finest {}",
-                    flight.planet.grid().height(eye),
-                    stats.resident_columns,
-                    stats.pending_columns,
-                    stats.jobs,
-                    stats.finest_level
-                );
-                if frame % 240 == 0 {
-                    flight.capture(&format!("path_{:03}", (t * 10.0) as u32));
-                }
-            }
-            t += dt;
-            frame += 1;
-        }
-        return;
-    }
-    if std::env::var_os("HELIO_VOXEL_FLIGHT_SKIM").is_some() {
-        // An editor camera held forward and down against the ground: it
-        // moves 10 m/s forward and 10 m/s down each 120 Hz frame and is
-        // lifted 0.5 m above the surface whenever it enters solid terrain.
-        // Editor mode draws the editor overlays (grid) like Pulsar's viewport.
-        flight.renderer.set_editor_mode(true);
-        let mut eye = ground;
-        let mut bad = 0;
-        for frame in 0..900 {
-            let up = up_for(eye).as_dvec3();
-            let ahead = tangent(eye, heading).as_dvec3();
-            eye += (ahead - up) * (10.0 / 120.0);
-            let (cell, _) = flight.planet.grid().locate(eye);
-            if flight.planet.solid(cell) {
-                eye = flight.planet.surface_point(eye, 0.5);
-            }
-            flight.draw("skim", eye, tangent(eye, heading));
-            if frame % 30 == 29 {
-                let pixels = flight.capture(&format!("skim_{frame:03}"));
-                let pink = pixels
-                    .chunks(4)
-                    .filter(|p| i32::from(p[0]) > i32::from(p[1]) + 40 && i32::from(p[0]) > i32::from(p[2]) + 30)
-                    .count() as f64
-                    / (pixels.len() / 4) as f64;
-                let clearance = flight.planet.air_clearance(eye);
-                eprintln!("SKIM frame {frame} clearance {clearance:.3} m pink {:.1}%", pink * 100.0);
-                bad += usize::from(pink > 0.01);
-            }
-        }
-        eprintln!("SKIM bad captures {bad}");
-        return;
-    }
-    if std::env::var_os("HELIO_VOXEL_FLIGHT_GROUND_ONLY").is_some() {
-        for a in &audits {
-            eprintln!("GROUND audit {a}");
-        }
-        flight.write_csv();
-        let error = pollster::block_on(validation.pop());
-        assert!(error.is_none(), "GPU validation: {error:?}");
-        return;
-    }
-    if std::env::var_os("HELIO_VOXEL_FLIGHT_SCULPT").is_some() {
-        sculpt_stress(&mut flight, ground, heading);
-        flight.write_csv();
-        return;
-    }
-    if std::env::var_os("HELIO_VOXEL_FLIGHT_QUICK").is_some() {
-        // Timing probe: short walk and an orbit view, then stage summaries.
-        let mut eye = ground;
-        for i in 0..120 {
-            let h = heading + (i as f64 * 0.01).sin() * 0.6;
-            eye = flight.planet.surface_point(eye + tangent(eye, h).as_dvec3() * 0.05, 1.7);
-            flight.draw("walk", eye, look(eye, h, -8.0));
-        }
-        let h = heading + (119.0f64 * 0.01).sin() * 0.6;
-        audits.push(flight.audit("walk_view", eye, look(eye, h, -8.0)));
-        flight.capture("walk_view");
-        // Steady low-altitude views (the ascent's heaviest bands).
-        for (name, alt, pitch) in [("hover_330", 330.0, -41.0), ("hover_3k", 3000.0, -30.0), ("hover_55k", 55_000.0, -30.0)] {
-            let e = ground.normalize() * (ground.length() + alt);
-            let f = look(e, heading, pitch);
-            flight.settle(name, e, f);
-            for _ in 0..30 {
-                flight.draw(name, e, f);
-            }
-            flight.capture(name);
-            audits.push(flight.audit(name, e, f));
-        }
-        let volume = volume_views(&flight.planet, ground);
-        eprintln!("QUICK volume views: {:?}", volume.iter().map(|v| v.0).collect::<Vec<_>>());
-        for (name, e, f) in mountain(&flight.planet, heading).views.into_iter().chain(volume) {
-            flight.settle(name, e, f);
-            for _ in 0..30 {
-                flight.draw(name, e, f);
-            }
-            flight.capture(name);
-            audits.push(flight.audit(name, e, f));
-        }
-        let orbit = ground.normalize() * (ground.length() + 300_000.0);
-        let orbit_look = look(orbit, heading, -65.0);
-        flight.settle("orbit_settle", orbit, orbit_look);
-        for _ in 0..30 {
-            flight.draw("orbit", orbit, orbit_look);
-        }
-        flight.capture("orbit");
-        let mut groups: BTreeMap<String, Vec<&Sample>> = BTreeMap::new();
-        for s in &flight.samples {
-            groups.entry(s.stage.clone()).or_default().push(s);
-        }
-        for (name, list) in &groups {
-            let sync: Vec<f64> = list.iter().map(|s| s.sync_ms).collect();
-            let terrain: Vec<f64> = list.iter().map(|s| s.terrain_gpu_ms).filter(|v| !v.is_nan()).collect();
-            let stage = |k: &str| percentile(&list.iter().filter(|s| !s.terrain_gpu_ms.is_nan()).map(|s| s.stages.get(k).copied().unwrap_or(0.0)).collect::<Vec<_>>(), 0.5);
-            eprintln!(
-                "QUICK {name:16} n={:4} sync p50 {:7.2} p95 {:7.2} terrain p50 {:6.2} p95 {:6.2} | primary {:6.2} shade {:5.2} sun {:6.2} residency {:5.2} horizon {:5.3}",
-                list.len(), percentile(&sync, 0.5), percentile(&sync, 0.95), percentile(&terrain, 0.5), percentile(&terrain, 0.95),
-                stage("planet_primary"), stage("planet_shade"), stage("planet_sunlight"), stage("planet_residency"), stage("planet_horizon")
-            );
-        }
-        for a in &audits {
-            eprintln!("QUICK audit {a}");
-        }
-        // Whole-graph pass costs averaged over a steady ground view.
-        let mut totals: BTreeMap<&'static str, (f64, u32)> = BTreeMap::new();
-        let forward = look(ground, heading, -12.0);
-        for _ in 0..60 {
-            flight.draw("graph_probe", ground, forward);
-            let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
-            for pass in &flight.renderer.timing_snapshot().passes {
-                if let Some(ms) = pass.gpu_ms {
-                    let e = totals.entry(pass.name).or_insert((0.0, 0));
-                    e.0 += f64::from(ms);
-                    e.1 += 1;
-                }
-            }
-        }
-        let mut list: Vec<_> = totals.into_iter().map(|(n, (ms, c))| (ms / f64::from(c), n)).collect();
-        list.sort_by(|a, b| b.0.total_cmp(&a.0));
-        for (ms, name) in list.iter().take(16) {
-            eprintln!("QUICK pass {name:32} {ms:7.3} ms");
-        }
-        eprintln!("QUICK graph total {:?}", flight.renderer.gpu_frame_ms());
-        // Plane worlds: a finite 4 km plane and an infinite plane.
-        PLANE_WORLD.store(true, std::sync::atomic::Ordering::Relaxed);
-        for (tag, shape) in [("plane", Shape::Plane), ("infinite", Shape::InfinitePlane)] {
-            flight.planet = Arc::new(Planet::new(PlanetRecipe { shape, plane_size_m: 4_096.0, ..Default::default() }).unwrap());
-            let ground = flight.planet.surface_point(DVec3::new(300.0, 0.0, -200.0), 1.7);
-            for (view, height, pitch) in [("ground", 0.0, -12.0), ("air", 300.0, -30.0)] {
-                let name: &'static str = Box::leak(format!("{tag}_{view}").into_boxed_str());
-                let e = ground + DVec3::Y * height;
-                let f = look(e, heading, pitch);
-                flight.settle(name, e, f);
-                for _ in 0..30 {
-                    flight.draw(name, e, f);
-                }
-                flight.capture(name);
-                if std::env::var_os("HELIO_VOXEL_FLIGHT_SUN_FRAMES").is_some() {
-                    // Raw sun visibility of consecutive frames (diagnostics).
-                    for n in 0..4 {
-                        flight.draw(name, e, f);
-                        let sun = flight.read_sun();
-                        let (w, h) = (flight.size[0], flight.size[1]);
-                        let img: Vec<u8> = sun.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0) as u8).collect();
-                        image::save_buffer(flight.output.join(format!("{name}-sun{n}.png")), &img, w, h, image::ColorType::L8).unwrap();
-                    }
-                }
-                audits.push(flight.audit(name, e, f));
-            }
-        }
-        PLANE_WORLD.store(false, std::sync::atomic::Ordering::Relaxed);
-        // A moon: another layer stack (craters, basins) with the lunar
-        // material table (the renderer's appearance defaults to it).
-        flight.planet = Arc::new(Planet::new(PlanetRecipe {
-            radius_m: 1_737_400.0,
-            terrain: helio_pass_voxel_planet::layers::TerrainLayers::moon().source(7),
-            ..Default::default()
-        }).unwrap());
-        let moon_dir = DVec3::new(0.31, 1.0, 0.17).normalize();
-        for (view, height, pitch) in [("moon_ground", 1.7, -12.0), ("moon_330", 330.0, -35.0), ("moon_5k", 5_000.0, -40.0), ("moon_orbit", 300_000.0, -70.0)] {
-            let e = flight.planet.surface_point(moon_dir, height);
-            let f = look(e, heading, pitch);
-            flight.settle(view, e, f);
-            for _ in 0..30 {
-                flight.draw(view, e, f);
-            }
-            flight.capture(view);
-            audits.push(flight.audit(view, e, f));
-        }
-        let mut groups: BTreeMap<String, Vec<&Sample>> = BTreeMap::new();
-        for s in &flight.samples {
-            if s.stage.starts_with("plane") || s.stage.starts_with("infinite") || s.stage.starts_with("moon") {
-                groups.entry(s.stage.clone()).or_default().push(s);
-            }
-        }
-        for (name, list) in &groups {
-            let terrain: Vec<f64> = list.iter().map(|s| s.terrain_gpu_ms).filter(|v| !v.is_nan()).collect();
-            let stage = |k: &str| percentile(&list.iter().filter(|s| !s.terrain_gpu_ms.is_nan()).map(|s| s.stages.get(k).copied().unwrap_or(0.0)).collect::<Vec<_>>(), 0.5);
-            eprintln!(
-                "QUICK {name:16} n={:4} terrain p50 {:6.2} p95 {:6.2} | primary {:6.2} shade {:5.2} sun {:6.2}",
-                list.len(), percentile(&terrain, 0.5), percentile(&terrain, 0.95),
-                stage("planet_primary"), stage("planet_shade"), stage("planet_sunlight")
-            );
-        }
-        for a in audits.iter().filter(|a| a["name"].as_str().is_some_and(|n| n.starts_with("plane") || n.starts_with("infinite") || n.starts_with("moon"))) {
-            eprintln!("QUICK audit {a}");
-        }
-        flight.write_csv();
-        let error = pollster::block_on(validation.pop());
-        assert!(error.is_none(), "GPU validation: {error:?}");
-        return;
-    }
-    // Walking, running and vehicle speed over terrain, following the surface.
-    let mut eye = ground;
-    for (stage, speed, count) in [("walk", 1.5, 360usize), ("run", 12.0, 360), ("vehicle", 60.0, 360)] {
-        for i in 0..count {
-            let h = heading + (i as f64 * 0.004).sin() * 0.6;
-            let step = tangent(eye, h).as_dvec3() * speed * DT;
-            eye = flight.planet.surface_point(eye + step, 1.7);
-            flight.draw(stage, eye, look(eye, h, -8.0));
-            record_frame(&flight, stage, i);
-        }
-    }
-    for i in 0..240 {
-        let h = heading + i as f64 / 240.0 * std::f64::consts::TAU;
-        flight.draw("rotate", eye, look(eye, h, -5.0));
-        record_frame(&flight, "rotate", i);
-    }
-    let base = eye;
-    let top = 300_000.0f64;
-    for i in 0..600 {
-        let t = i as f64 / 599.0;
-        let alt = 1.7 * (top / 1.7).powf(t);
-        let e = base.normalize() * (base.length() + alt - 1.7);
-        flight.draw("ascent", e, look(e, heading, -20.0 - 50.0 * t));
-        record_frame(&flight, "ascent", i);
-    }
-    let orbit = base.normalize() * (base.length() + top);
-    let orbit_look = look(orbit, heading, -65.0);
-    flight.settle("orbit_settle", orbit, orbit_look);
-    for _ in 0..60 {
-        flight.draw("orbit", orbit, orbit_look);
-    }
-    flight.capture("orbit");
-    audits.push(flight.audit("orbit", orbit, orbit_look));
-    let limb = look(orbit, heading, -8.0);
-    flight.settle("orbit_limb", orbit, limb);
-    flight.capture("orbit-limb");
-    for i in 0..600 {
-        let t = i as f64 / 599.0;
-        let alt = top * (1.7 / top).powf(t);
-        let e = base.normalize() * (base.length() + alt - 1.7);
-        flight.draw("descent", e, look(e, heading, -70.0 + 58.0 * t));
-        record_frame(&flight, "descent", i);
-    }
-    let arrive_look = look(base, heading, -12.0);
-    let at_stop = flight.capture("arrival-stop");
-    let (mut arrival_ms, mut arrival_frames, mut at_250) = (0.0, 0usize, None);
-    loop {
-        arrival_ms += flight.draw("arrival", base, arrive_look);
-        arrival_frames += 1;
-        if at_250.is_none() && arrival_ms >= 250.0 {
-            at_250 = Some(flight.capture("arrival-250ms"));
-        }
-        if flight.pass().renderer().is_some_and(|r| r.settled()) || arrival_frames > 3000 {
-            break;
-        }
-    }
-    for _ in 0..30 {
-        flight.draw("arrival_settled", base, arrive_look);
-    }
-    let settled = flight.capture("arrival-settled");
-    let diff = |a: &[u8], b: &[u8]| {
-        let changed = a
-            .chunks_exact(4)
-            .zip(b.chunks_exact(4))
-            .filter(|(p, q)| (0..3).any(|c| (i32::from(p[c]) - i32::from(q[c])).abs() > 24))
-            .count();
-        changed as f64 / (a.len() / 4) as f64
-    };
-    let at_250 = at_250.unwrap_or_else(|| settled.clone());
-    report.insert("arrival".into(), serde_json::json!({
-        "frames_to_settle": arrival_frames,
-        "sync_ms_to_settle": arrival_ms,
-        "changed_pixels_stop_vs_settled": diff(&at_stop, &settled),
-        "changed_pixels_250ms_vs_settled": diff(&at_250, &settled),
-    }));
-    audits.push(flight.audit("arrival", base, arrive_look));
-
-    let mut alt = 1.7f64;
-    let mut index = 0usize;
-    for (target, frames) in [(5_000.0, 90), (20.0, 90), (60_000.0, 120), (3.0, 120)] {
-        let start = alt;
-        for f in 0..frames {
-            let t = (f + 1) as f64 / frames as f64;
-            alt = start * (target / start).powf(t);
-            let e = base.normalize() * (base.length() + alt - 1.7);
-            flight.draw("reversal", e, look(e, heading + t, -30.0));
-            record_frame(&flight, "reversal", index);
-            if std::env::var_os("HELIO_VOXEL_FLIGHT_REVERSAL_AUDIT").is_some() && (index == 336 || index == 350) {
-                let a = flight.audit(&format!("reversal_{index}"), e, look(e, heading + t, -30.0));
-                eprintln!("REVERSAL audit alt {alt:.0} {a}");
-            }
-            index += 1;
-        }
-    }
-    let far_dir = land_near(&flight.planet, 4, 0.31, 0.62, 30.0);
-    let far = flight.planet.surface_point(far_dir, 1.7);
-    let far_look = look(far, 0.2, -10.0);
-    let (frames, ms) = flight.settle("teleport", far, far_look);
-    report.insert("teleport".into(), serde_json::json!({"frames_to_settle": frames, "sync_ms_to_settle": ms}));
-    flight.capture("teleport");
-    audits.push(flight.audit("teleport", far, far_look));
-
-    // Mountains: fly toward the highest summit near the spawn at 150 m/s,
-    // 300 m above the ground, then run up its slope.
-    let range = mountain(&flight.planet, heading);
-    let (_, air, air_look) = range.views[0];
-    flight.settle("mountain_settle", air, air_look);
-    flight.capture("mountain");
-    audits.push(flight.audit("mountain", air, air_look));
-    let mut eye = air;
-    for i in 0..360 {
-        let level = level_toward(&range, eye);
-        eye = flight.planet.surface_point(eye + level * 150.0 * DT, 300.0);
-        flight.draw("mountain_flight", eye, (range.peak - eye).normalize().as_vec3());
-        record_frame(&flight, "mountain_flight", i);
-    }
-    let (_, slope, slope_look) = range.views[1];
-    flight.settle("mountain_settle", slope, slope_look);
-    let mut eye = slope;
-    for i in 0..240 {
-        let level = level_toward(&range, eye);
-        eye = flight.planet.surface_point(eye + level * 6.0 * DT, 1.7);
-        let f = (level + eye.normalize() * 0.1).normalize().as_vec3();
-        flight.draw("mountain_walk", eye, f);
-        record_frame(&flight, "mountain_walk", i);
-    }
-    audits.push(flight.audit("mountain_walk", eye, (level_toward(&range, eye) + eye.normalize() * 0.1).normalize().as_vec3()));
-
-    // Destruction: one brush per frame at the aim point. Latency is measured
-    // until the GPU centre hit matches the canonical CPU ray cast.
-    let aim = look(base, heading, -25.0);
-    flight.settle("dig_prepare", base, aim);
-    // The probe compares the exact centre ray, so jitter is off while digging.
-    flight.renderer.set_jitter_enabled(false);
-    let mut latencies = Vec::new();
-    for n in 0..40 {
-        let Some(hit) = flight.planet.raycast(base, aim.as_dvec3(), 200.0) else { break };
-        let center = flight.planet.grid().cell_center(hit.cell);
-        let add = n % 5 == 4;
-        let brush = Brush {
-            center: (if add { center + base.normalize() * 1.0 } else { center }).to_array(),
-            radius: 0.4 + 0.1 * f64::from(n % 7),
-            shape: if n % 3 == 0 { BrushShape::Cube } else { BrushShape::Sphere },
-            op: if add { BrushOp::Add } else { BrushOp::Remove },
-            material: if add { material::COBBLE } else { 0 },
+            Err(_) => ground,
         };
-        let mut planet = (*flight.planet).clone();
-        planet.apply(brush).unwrap();
-        flight.planet = Arc::new(planet);
-        let expected = {
-            let r = flight.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap();
-            let size = r.screen_size();
-            let up0 = up_for(base);
-            let right = aim.cross(up0).normalize();
-            let cam_up = right.cross(aim);
-            let tan = (std::f32::consts::FRAC_PI_4 * 0.5).tan();
-            let aspect = size[0] as f32 / size[1] as f32;
-            let ndc = [
-                ((size[0] / 2) as f32 + 0.5) / size[0] as f32 * 2.0 - 1.0,
-                1.0 - ((size[1] / 2) as f32 + 0.5) / size[1] as f32 * 2.0,
-            ];
-            let dir = (aim + right * ndc[0] * tan * aspect + cam_up * ndc[1] * tan).normalize().as_dvec3();
-            flight.planet.raycast(base, dir, 200.0).map(|h| h.cell)
+        chunk_stress(&mut flight, &mode, ground, heading);
+        return;
+    }
+    if let Ok(view) = std::env::var("HELIO_VOXEL_FLIGHT_HOLD") {
+        let (e, f) = match view.as_str() {
+            "tunnel" => carve_tunnel(&mut flight, ground, heading),
+            "mountain_slope" => {
+                let (_, e, f) = mountain(&flight.planet, heading)[1];
+                (e, f)
+            }
+            // Inside the natural cave nearest the spawn (searched 3 km
+            // apart, cave regions are ~6 km), along it.
+            "cave" => {
+                let up = ground.normalize();
+                let ahead = tangent(ground, heading).as_dvec3();
+                let side = ahead.cross(up);
+                let (_, e, f) = (0..49)
+                    .map(|n| (n % 7 - 3, n / 7 - 3))
+                    .map(|(a, b)| flight.planet.surface_point(ground + ahead * (3000.0 * f64::from(a)) + side * (3000.0 * f64::from(b)), 0.0))
+                    .find_map(|near| volume_views(&flight.planet, near).into_iter().find(|v| v.0 == "cave_tunnel"))
+                    .expect("a cave within 9 km of the spawn");
+                (e, f)
+            }
+            // `HELIO_VOXEL_FLIGHT_EYE=x,y,z,fx,fy,fz`: any eye (planet-centred)
+            // and view direction.
+            "eye" => {
+                let v: Vec<f64> = std::env::var("HELIO_VOXEL_FLIGHT_EYE").expect("HELIO_VOXEL_FLIGHT_EYE").split(',').map(|x| x.trim().parse().unwrap()).collect();
+                (DVec3::new(v[0], v[1], v[2]), DVec3::new(v[3], v[4], v[5]).normalize().as_vec3())
+            }
+            // 40 m from the +Y face's edge, looking across it.
+            "face_edge" => {
+                let grid = flight.planet.grid();
+                let n = f64::from(grid.cells());
+                let eye = flight.planet.surface_point(grid.direction(2, n - 400.0, n * 0.5), 1.7);
+                let far = flight.planet.surface_point(grid.direction(2, n + 3000.0, n * 0.5), 0.0);
+                (eye, (far - eye).normalize().as_vec3())
+            }
+            _ => (ground, look(ground, heading, -12.0)),
         };
-        // Wall time from the edit to the first frame that shows it.
-        let edited = Instant::now();
-        let mut frames = 0;
-        loop {
-            flight.draw("dig", base, aim);
-            frames += 1;
-            let hit = {
-                let r = flight.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap();
-                let size = r.screen_size();
-                // Only the centre hit: a whole-buffer readback would dominate the latency.
-                let at = u64::from(size[1] / 2 * size[0] + size[0] / 2) * 32;
-                flight.read_range(r.hit_buffer(), at, 32)
-            };
-            let w = |i: usize| u32::from_le_bytes(hit[i * 4..i * 4 + 4].try_into().unwrap());
-            let got = (w(1) as i32, w(2) as i32, w(3) as i32);
-            let matched = expected.is_some_and(|c| (c.i, c.j, c.k) == got);
-            if matched || frames >= 30 {
-                latencies.push((frames, edited.elapsed().as_secs_f64() * 1000.0, matched));
-                break;
-            }
+        if std::env::var_os("HELIO_VOXEL_CHUNKS_ENGINE").is_some() {
+            chunk_engine_hold(&mut flight, &view, e, f);
+        } else if let Some(count) = std::env::var("HELIO_VOXEL_CHUNKS_DIG").ok().and_then(|v| v.parse().ok()) {
+            chunk_dig(&flight, &view, e, f, count, std::env::var("HELIO_VOXEL_CHUNKS_BLAST").ok().and_then(|v| v.parse().ok()));
+        } else {
+            chunk_hold(&flight, &view, e, f);
         }
+        return;
     }
-    flight.renderer.set_jitter_enabled(true);
-    // Let regeneration around the last edits finish before auditing.
-    flight.settle("dig_settle", base, aim);
-    flight.capture("dig");
-    audits.push(flight.audit("dig", base, aim));
-    let unmatched = latencies.iter().filter(|l| !l.2).count();
-    report.insert("edits".into(), serde_json::json!({
-        "count": latencies.len(),
-        "unmatched_after_30_frames": unmatched,
-        "max_frames": latencies.iter().map(|l| l.0).max(),
-        "max_ms": latencies.iter().map(|l| l.1).fold(0.0, f64::max),
-        "p95_ms": percentile(&latencies.iter().map(|l| l.1).collect::<Vec<_>>(), 0.95),
-    }));
-    // Large remote destruction from orbit (no tool distance limit).
-    let orbit_hit = flight.planet.raycast(orbit, -orbit.normalize(), f64::INFINITY).expect("orbital edit ray");
-    let mut planet = (*flight.planet).clone();
-    planet
-        .apply(Brush {
-            center: flight.planet.grid().cell_center(orbit_hit.cell).to_array(),
-            radius: 60.0,
-            shape: BrushShape::Sphere,
-            op: BrushOp::Remove,
-            material: 0,
-        })
-        .unwrap();
-    flight.planet = Arc::new(planet);
-    flight.settle("orbital_edit", orbit, orbit_look);
-    flight.capture("orbital-edit");
-    let crater_view = orbit.normalize() * (base.length() + 150.0) + tangent(orbit, heading + 3.0).as_dvec3() * 40.0;
-    let crater_look = (orbit.normalize() * (base.length() - 20.0) - crater_view).as_vec3();
-    flight.settle("crater", crater_view, crater_look);
-    for _ in 0..16 {
-        flight.draw("crater", crater_view, crater_look);
-    }
-    flight.capture("crater");
-
-    // Resize: the graph rebuild must retain residency.
-    let before = flight.pass().stats().unwrap().resident_columns;
-    flight.size = [size[0] + 64, size[1] + 36];
-    flight.target = Flight::make_target(&flight.device, flight.size);
-    flight.renderer.set_render_size(flight.size[0], flight.size[1]);
-    flight.draw("resize", base, arrive_look);
-    let after = flight.pass().stats().unwrap().resident_columns;
-    report.insert("resize".into(), serde_json::json!({"resident_before": before, "resident_after": after}));
-    flight.settle("resize", base, arrive_look);
-    flight.capture("resized");
-
-    // Authored base-grid replacement.
-    let mut grids = Vec::new();
-    for size_m in [0.3, 1.0] {
-        flight.planet = Arc::new(Planet::new(PlanetRecipe { voxel_size_m: size_m, ..Default::default() }).unwrap());
-        let e = flight.planet.surface_point(base.normalize(), 1.7);
-        let f = look(e, heading, -12.0);
-        let name = format!("grid_{size_m}");
-        let (frames, ms) = flight.settle(&name, e, f);
-        for _ in 0..16 {
-            flight.draw(&name, e, f);
-        }
-        flight.capture(&format!("grid-{size_m}m"));
-        audits.push(flight.audit(&name, e, f));
-        grids.push(serde_json::json!({"voxel_m": size_m, "frames": frames, "sync_ms": ms}));
-    }
-    report.insert("grid_replacement".into(), serde_json::Value::Array(grids));
-    let error = pollster::block_on(validation.pop());
-    assert!(error.is_none(), "GPU validation: {error:?}");
-
-    // Per-stage statistics and gates.
-    let stats = flight.pass().stats().unwrap();
-    let mut groups: BTreeMap<String, Vec<&Sample>> = BTreeMap::new();
-    for s in &flight.samples {
-        groups.entry(s.stage.clone()).or_default().push(s);
-    }
-    let mut stages = serde_json::Map::new();
-    for (name, list) in &groups {
-        let sync: Vec<f64> = list.iter().map(|s| s.sync_ms).collect();
-        let timed: Vec<&&Sample> = list.iter().filter(|s| !s.terrain_gpu_ms.is_nan()).collect();
-        let terrain: Vec<f64> = timed.iter().map(|s| s.terrain_gpu_ms).collect();
-        let mut stage_p95 = serde_json::Map::new();
-        for key in ["planet_residency", "planet_generate", "planet_primary", "planet_shade", "planet_skylight", "planet_gbuffer", "planet_sunlight"] {
-            let v: Vec<f64> = timed.iter().map(|s| s.stages.get(key).copied().unwrap_or(0.0)).collect();
-            stage_p95.insert(key.into(), serde_json::json!(percentile(&v, 0.95)));
-        }
-        stages.insert(
-            name.clone(),
-            serde_json::json!({
-                "frames": list.len(),
-                "timed_frames": timed.len(),
-                "sync_p50": percentile(&sync, 0.5), "sync_p95": percentile(&sync, 0.95), "sync_p99": percentile(&sync, 0.99), "sync_max": percentile(&sync, 1.0),
-                "terrain_gpu_p50": percentile(&terrain, 0.5), "terrain_gpu_p95": percentile(&terrain, 0.95), "terrain_gpu_max": percentile(&terrain, 1.0),
-                "terrain_stage_p95": stage_p95,
-            }),
-        );
-    }
-    report.insert("stages".into(), serde_json::Value::Object(stages));
-    report.insert("audits".into(), serde_json::Value::Array(audits.clone()));
-    report.insert(
-        "memory".into(),
-        serde_json::json!({"logical_mib": stats.logical_bytes as f64 / 1048576.0, "free_pool_pages": stats.free_pages, "pool_pages": stats.pool_pages}),
-    );
-    let gather = |names: &[&str], terrain: bool| -> Vec<f64> {
-        names
-            .iter()
-            .flat_map(|s| groups.get(*s).into_iter().flatten().map(|x| if terrain { x.terrain_gpu_ms } else { x.sync_ms }))
-            .filter(|v| !v.is_nan())
-            .collect()
-    };
-    let warm = gather(&["ground_warm", "orbit", "arrival_settled"], false);
-    let movement_names = ["walk", "run", "vehicle", "rotate", "ascent", "descent", "reversal", "mountain_flight", "mountain_walk"];
-    let moving = gather(&movement_names, false);
-    let mut terrain_names = movement_names.to_vec();
-    terrain_names.extend(["ground_warm", "orbit"]);
-    let terrain = gather(&terrain_names, true);
-    let bad_rays: u64 = audits.iter().map(|a| a["exhausted"].as_u64().unwrap() + a["loading"].as_u64().unwrap()).sum();
-    let mismatched: u64 = audits.iter().map(|a| a["mismatched"].as_u64().unwrap()).sum();
-    let exact_mismatched: u64 = audits.iter().map(|a| a["exact_mismatched"].as_u64().unwrap()).sum();
-    let compared: u64 = audits.iter().map(|a| a["compared"].as_u64().unwrap()).sum();
-    let edit_max = report["edits"]["max_ms"].as_f64().unwrap_or(f64::INFINITY);
-    let arrival = report["arrival"]["sync_ms_to_settle"].as_f64().unwrap();
-    report.insert(
-        "near_field_distance_threshold_disagreements".into(),
-        serde_json::json!({"compared": compared, "mismatched": mismatched, "threshold_base_voxels": 3}),
-    );
-    let gates = serde_json::json!([
-        {"gate": "warm full-graph sync p95 <= 16.67 ms", "value": percentile(&warm, 0.95), "pass": percentile(&warm, 0.95) <= 16.67},
-        {"gate": "movement sync p99 <= 25 ms", "value": percentile(&moving, 0.99), "pass": percentile(&moving, 0.99) <= 25.0},
-        {"gate": "terrain GPU p95 <= 5 ms (movement + warm)", "value": percentile(&terrain, 0.95), "pass": percentile(&terrain, 0.95) <= 5.0},
-        {"gate": "logical terrain GPU memory <= 1024 MiB", "value": stats.logical_bytes as f64 / 1048576.0, "pass": stats.logical_bytes <= 1 << 30},
-        {"gate": "arrival settles <= 250 ms after descent", "value": arrival, "pass": arrival <= 250.0},
-        {"gate": "visible local edit <= 100 ms", "value": edit_max, "pass": edit_max <= 100.0 && unmatched == 0},
-        {"gate": "no exhausted/loading rays in settled audits", "value": bad_rays, "pass": bad_rays == 0},
-        {"gate": "sampled near-field exact CPU/GPU cell agreement", "value": format!("{exact_mismatched}/{compared}"), "pass": compared > 0 && exact_mismatched == 0},
-        {"gate": "resize keeps residency", "value": report["resize"].clone(), "pass": after >= before / 2},
-    ]);
-    report.insert("gates".into(), gates.clone());
-    std::fs::write(output.join("gates.json"), serde_json::to_string_pretty(&serde_json::Value::Object(report)).unwrap()).unwrap();
-    let mut md = String::from("| Gate | Value | Pass |\n|---|---|---|\n");
-    for g in gates.as_array().unwrap() {
-        md.push_str(&format!(
-            "| {} | {} | {} |\n",
-            g["gate"].as_str().unwrap(),
-            g["value"],
-            if g["pass"].as_bool().unwrap() { "yes" } else { "**no**" }
-        ));
-    }
-    std::fs::write(output.join("gates.md"), &md).unwrap();
-    eprintln!("{md}");
-    flight.write_csv();
-    eprintln!("VOXEL_FLIGHT_COMPLETE frames={}", flight.frame);
-}
-
-/// Ray statuses of the last frame: (miss rays that must hit the planet,
-/// loading, exhausted, all rays). A miss is certain to be a hole when the
-/// ray passes below the deepest possible terrain.
-fn holes(flight: &Flight, eye: DVec3, forward: Vec3, mask: Option<&str>) -> (usize, usize, usize, usize) {
-    let (hits, size) = {
-        let r = flight.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap();
-        (flight.read(r.hit_buffer()), r.screen_size())
-    };
-    let up0 = up_for(eye);
-    let forward = forward.normalize();
-    let up = if forward.dot(up0).abs() > 0.999 { up0.any_orthonormal_vector() } else { up0 };
-    let right = forward.cross(up).normalize();
-    let cam_up = right.cross(forward);
-    let tan = (std::f32::consts::FRAC_PI_4 * 0.5).tan();
-    let aspect = size[0] as f32 / size[1] as f32;
-    let floor = flight.planet.grid().radius() - 12_000.0;
-    let (mut miss, mut loading, mut exhausted, mut total) = (0, 0, 0, 0);
-    // Hole mask: red misses, yellow loading, magenta exhausted, grey hits.
-    let mut image = vec![0u8; (size[0] * size[1] * 4) as usize];
-    for (index, hit) in hits.chunks_exact(32).take((size[0] * size[1]) as usize).enumerate() {
-        let status = u32::from_le_bytes(hit[16..20].try_into().unwrap()) & 3;
-        image[index * 4..index * 4 + 4].copy_from_slice(match status {
-            1 => &[90, 90, 90, 255],
-            2 => &[255, 0, 255, 255],
-            3 => &[255, 255, 0, 255],
-            _ => &[0, 0, 0, 255],
-        });
-        let info = u32::from_le_bytes(hit[16..20].try_into().unwrap());
-        total += 1;
-        match info & 3 {
-            2 => exhausted += 1,
-            3 => loading += 1,
-            0 => {
-                let (x, y) = (index as u32 % size[0], index as u32 / size[0]);
-                let ndc = [(x as f32 + 0.5) / size[0] as f32 * 2.0 - 1.0, 1.0 - (y as f32 + 0.5) / size[1] as f32 * 2.0];
-                let d = (forward + right * ndc[0] * tan * aspect + cam_up * ndc[1] * tan).normalize().as_dvec3();
-                // Closest approach of the ray to the planet centre.
-                let t = (-eye.dot(d)).max(0.0);
-                if (eye + d * t).length() < floor {
-                    miss += 1;
-                    image[index * 4..index * 4 + 4].copy_from_slice(&[255, 0, 0, 255]);
-                }
-            }
-            _ => {}
-        }
-    }
-    if let Some(name) = mask {
-        image::save_buffer(flight.output.join(format!("{name}.png")), &image, size[0], size[1], image::ColorType::Rgba8).unwrap();
-    }
-    (miss, loading, exhausted, total)
-}
-
-/// The editor trip of the user's recordings, at `deg` from the pole: climb
-/// from the ground to orbit, fly across in orbit, descend, cruise low.
-/// Editor speed is 10 m/s x height/20 m. HELIO_VOXEL_FLIGHT_PROBE=1 reads
-/// every frame's rays back and reports holes (slows the frames).
-fn editor_trip(flight: &mut Flight, deg: f64) {
-    let probe = std::env::var_os("HELIO_VOXEL_FLIGHT_PROBE").is_some();
-    // HELIO_VOXEL_FLIGHT_BLOCKY=1: log enlarged-block coverage (readbacks).
-    let measure_blocks = std::env::var_os("HELIO_VOXEL_FLIGHT_BLOCKY").is_some();
-    let capture_every: usize = std::env::var("HELIO_VOXEL_FLIGHT_TRIP_EVERY").ok().and_then(|v| v.parse().ok()).unwrap_or(120);
-    let no_horizon = std::env::var_os("HELIO_VOXEL_FLIGHT_NO_HORIZON").is_some();
-    let low_height: f64 = std::env::var("HELIO_VOXEL_FLIGHT_TRIP_LOW").ok().and_then(|v| v.parse().ok()).unwrap_or(30.0);
-    let audit_at: Vec<f64> = std::env::var("HELIO_VOXEL_FLIGHT_AUDIT_AT")
-        .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
-        .unwrap_or_default();
-    // HELIO_VOXEL_FLIGHT_TRIP_FROM=<km>: start on the flank of the nearest
-    // high summit, that far from it (rock, scree and snow instead of meadow).
-    let start = match std::env::var("HELIO_VOXEL_FLIGHT_TRIP_FROM").ok().and_then(|v| v.parse::<f64>().ok()) {
-        Some(km) => {
-            let range = mountain(&flight.planet, 0.0);
-            let away = tangent(range.peak, std::f64::consts::PI).as_dvec3();
-            (range.peak + away * km * 1000.0).normalize()
-        }
-        None => DVec3::new(deg.to_radians().sin(), deg.to_radians().cos(), 0.0),
-    };
-    let mut eye = flight.planet.surface_point(start, 1.7);
-    // HELIO_VOXEL_FLIGHT_TRIP_FPS: frames per second of flight (120; the
-    // editor runs near 60, which halves the streaming budget per metre).
-    let dt = 1.0 / std::env::var("HELIO_VOXEL_FLIGHT_TRIP_FPS").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(120.0);
-    let mut t = 0.0;
-    let mut frame = 0usize;
-    let (mut worst, mut worst_at) = (0.0f64, String::new());
-    // HELIO_VOXEL_FLIGHT_TRIP_CLIMB: climb seconds (14: ~9 km, 30: ~5000 km;
-    // height grows e^(t/2) at the editor's speed).
-    let climb: f64 = std::env::var("HELIO_VOXEL_FLIGHT_TRIP_CLIMB").ok().and_then(|v| v.parse().ok()).unwrap_or(14.0);
-    let phases: [(&str, f64); 5] = [("settle", 2.0), ("climb", climb), ("orbit", 10.0), ("descend", climb), ("low", 20.0)];
-    let mut phase_end = 0.0;
-    let mut previous_rings = String::new();
-    let trip_end: f64 = std::env::var("HELIO_VOXEL_FLIGHT_TRIP_END").ok().and_then(|v| v.parse().ok()).unwrap_or(f64::INFINITY);
-    for (name, duration) in phases {
-        phase_end += duration;
-        while t < phase_end && t < trip_end {
-            let up = eye.normalize();
-            let ahead = (DVec3::X - up * DVec3::X.dot(up)).try_normalize().unwrap_or(DVec3::Z);
-            let height = eye.length() - flight.planet.surface_point(eye, 0.0).length();
-            let speed = 10.0 * (height / 20.0).clamp(1.0, 1.0e6);
-            let (dir, look) = match name {
-                "settle" => (DVec3::ZERO, (ahead - up * 0.2).normalize()),
-                "climb" => (up, (ahead - up * 0.6).normalize()),
-                "orbit" => (ahead, (ahead - up * 1.2).normalize()),
-                "descend" => (-up, (ahead - up * 0.6).normalize()),
-                _ => {
-                    // Low flight: hold HELIO_VOXEL_FLIGHT_TRIP_LOW metres (30)
-                    // over the ground at the editor's speed.
-                    let hold = (low_height - height) * 0.5;
-                    ((ahead * speed + up * hold) / speed.max(1.0), (ahead - up * 0.25).normalize())
-                }
-            };
-            eye += dir * speed * dt;
-            let (cell, _) = flight.planet.grid().locate(eye);
-            if flight.planet.solid(cell) {
-                eye = flight.planet.surface_point(eye, 0.5);
-            }
-            let look = look.as_vec3();
-            if no_horizon {
-                if let Some(r) = flight.pass().renderer_mut() {
-                    r.settings_mut().horizon = false;
-                }
-            }
-            flight.draw(name, eye, look);
-            let submit = flight.samples.last().map_or(0.0, |s| s.submit_ms);
-            if submit > 25.0 {
-                // Where a slow frame's CPU time went.
-                let stats = flight.pass().stats().unwrap_or_default();
-                let snap = flight.renderer.timing_snapshot();
-                let mut passes: Vec<(f32, &str)> = snap.passes.iter().filter_map(|p| p.cpu_ms.map(|ms| (ms, p.name))).collect();
-                passes.sort_by(|a, b| b.0.total_cmp(&a.0));
-                eprintln!(
-                    "SLOW {name} t {t:.2} submit {submit:.1} total_cpu {:?} plan {:.2} upload {:.2} encode {:.2} top {:?}",
-                    snap.total_cpu_ms, stats.plan_cpu_ms, stats.upload_cpu_ms, stats.encode_cpu_ms, &passes[..passes.len().min(4)]
-                );
-            }
-            // HELIO_VOXEL_FLIGHT_AUDIT_AT="t1,t2,..": audit traversal work at
-            // those trip times (HELIO_VOXEL_FLIGHT_HEAT saves step heatmaps).
-            if audit_at.iter().any(|a| (t - a).abs() < dt * 0.5) {
-                flight.capture(&format!("audit_{name}_{:05}", (t * 100.0) as u32));
-                eprintln!("AUDIT t {t:.2} h {height:.0} {}", flight.audit(&format!("audit_{name}_{:05}", (t * 100.0) as u32), eye, look));
-            }
-            if probe {
-                let rings = {
-                    let planet = flight.planet.clone();
-                    let pass = flight.pass();
-                    let lod0 = pass.stats().map_or(0.0, |s| s.lod0_distance);
-                    pass.renderer().map(|r| {
-                        let cut = 100.0f64.max(0.75 * planet.air_clearance(eye));
-                        let (fallback, rings) = r.sky_rings(eye, lod0, cut);
-                        fallback
-                            .iter()
-                            .zip(&rings)
-                            .enumerate()
-                            .filter(|(_, (f, _))| **f > 0.0)
-                            .map(|(l, (f, r))| format!("L{l}:fb {f:.0} ring {r:.5}"))
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    })
-                };
-                let rings = rings.unwrap_or_default();
-                let (miss, loading, exhausted, total) = holes(flight, eye, look, None);
-                let bad = (miss + loading + exhausted) as f64 / total as f64;
-                if bad > worst {
-                    worst = bad;
-                    worst_at = format!("{name} t {t:.2} h {height:.0}");
-                }
-                if bad > 0.002 {
-                    let stats = flight.pass().stats().unwrap_or_default();
-                    eprintln!(
-                        "HOLES {name} t {t:6.2} h {height:9.0} miss {miss} loading {loading} exhausted {exhausted} ({:.2}%) resident {} pending {} levels {} finest {}",
-                        bad * 100.0, stats.resident_columns, stats.pending_columns, stats.active_levels, stats.finest_level
-                    );
-                    eprintln!("  rings now  {rings}
-  rings prev {previous_rings}");
-                    if bad > 0.001 {
-                        holes(flight, eye, look, Some(&format!("mask_{name}_{:05}", (t * 100.0) as u32)));
-                        flight.capture(&format!("hole_{name}_{:05}", (t * 100.0) as u32));
-                    }
-                }
-                previous_rings = rings;
-            } else if frame % 30 == 0 {
-                let stats = flight.pass().stats().unwrap_or_default();
-                let blocks = if measure_blocks {
-                    let (a, b, w) = blocky(flight);
-                    format!(" blocky>2px {:.2}% >4px {:.2}% widest {w:.1}", a * 100.0, b * 100.0)
-                } else {
-                    String::new()
-                };
-                eprintln!(
-                    "TRIP {name} t {t:6.2} h {height:9.0} speed {speed:9.0} resident {} pending {} jobs {} levels {} finest {} plan {:.2} upload {:.2}{blocks}",
-                    stats.resident_columns, stats.pending_columns, stats.jobs, stats.active_levels, stats.finest_level, stats.plan_cpu_ms, stats.upload_cpu_ms
-                );
-            }
-            // HELIO_VOXEL_FLIGHT_TRIP_EVERY=<frames>: capture cadence (120).
-            if frame % capture_every == 0 {
-                flight.capture(&format!("trip_{name}_{:05}", (t * 100.0) as u32));
-            }
-            t += dt;
-            frame += 1;
-        }
-    }
-    if probe {
-        eprintln!("HOLES worst {:.2}% at {worst_at}", worst * 100.0);
-    }
-    flight.write_csv();
-}
-
-/// Replays the full camera pose timeline of new Pulsar editor logs (old logs
-/// retain their altitude-only fallback). This is an offscreen reproduction,
-/// not native presentation timing.
-/// Replays the altitude timeline of a Pulsar editor session
-/// (`PULSAR_VOXEL_STATS=1` engine log) at 60 frames per second of log time,
-/// over one ground point (HELIO_VOXEL_FLIGHT_REPLAY_DEG from the pole, 30),
-/// looking 30 degrees down. HELIO_VOXEL_FLIGHT_REPLAY_FROM / _TO limit it
-/// to log times (seconds of the day, UTC).
-fn log_vector(line: &str, key: &str) -> Option<DVec3> {
-    let raw = line.split(key).nth(1)?.trim_start().strip_prefix('[')?.split(']').next()?;
-    let values: Vec<f64> = raw.split(',').map(str::trim).map(str::parse).collect::<Result<_, _>>().ok()?;
-    if values.len() != 3 || !values.iter().all(|v| v.is_finite()) { return None; }
-    Some(DVec3::new(values[0], values[1], values[2]))
-}
-
-fn replay(flight: &mut Flight, log: &Path) {
-    let text = std::fs::read_to_string(log).expect("replay log");
-    let mut points: Vec<(f64, f64, Option<DVec3>, Option<DVec3>, Option<DVec3>)> = Vec::new();
-    for line in text.lines().filter(|l| l.contains("VOXEL_STATS")) {
-        let Some(time) = line.get(11..26) else { continue };
-        let parts: Vec<f64> = time.split(':').filter_map(|v| v.parse().ok()).collect();
-        let Some(alt) = line.split("altitude=").nth(1).and_then(|v| v.split(' ').next()).and_then(|v| v.parse().ok()) else { continue };
-        if parts.len() != 3 {
-            continue;
-        }
-        let mut t = parts[0] * 3600.0 + parts[1] * 60.0 + parts[2];
-        if let Some(&(last, ..)) = points.last() {
-            if t < last - 43_200.0 {
-                t += 86_400.0;
-            }
-        }
-        points.push((t, alt, log_vector(line, "eye="), log_vector(line, "forward="), log_vector(line, "up=")));
-    }
-    assert!(points.len() >= 2, "replay needs at least two valid VOXEL_STATS samples");
-    eprintln!("REPLAY {} pose samples (legacy altitude samples use a fixed location)", points.iter().filter(|p| p.2.is_some()).count());
-    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok());
-    let from = env("HELIO_VOXEL_FLIGHT_REPLAY_FROM").unwrap_or(points[0].0);
-    let to = env("HELIO_VOXEL_FLIGHT_REPLAY_TO").unwrap_or(points.last().unwrap().0);
-    let deg = env("HELIO_VOXEL_FLIGHT_REPLAY_DEG").unwrap_or(30.0);
-    let start = DVec3::new(deg.to_radians().sin(), deg.to_radians().cos(), 0.0);
-    let ground = flight.planet.surface_point(start, 0.0);
-    let up = ground.normalize();
-    let ahead = (DVec3::X - up * DVec3::X.dot(up)).normalize();
-    let forward = (ahead - up * 0.6).normalize().as_vec3();
-    let altitude_at = |t: f64| {
-        let i = points.partition_point(|p| p.0 <= t).clamp(1, points.len() - 1);
-        let (a, b) = (points[i - 1], points[i]);
-        let f = ((t - a.0) / (b.0 - a.0).max(1e-6)).clamp(0.0, 1.0);
-        a.1 + (b.1 - a.1) * f
-    };
-    let mut t = from;
-    let mut frame = 0usize;
-    while t < to {
-        let i = points.partition_point(|p| p.0 <= t).clamp(1, points.len() - 1);
-        let (a, b) = (points[i - 1], points[i]);
-        let blend = ((t - a.0) / (b.0 - a.0).max(1e-6)).clamp(0.0, 1.0);
-        let lerp = |a: Option<DVec3>, b: Option<DVec3>| a.zip(b).map(|(a,b)| a.lerp(b, blend));
-        let eye = lerp(a.2, b.2).unwrap_or(ground + up * altitude_at(t).max(1.7));
-        let forward = lerp(a.3, b.3).and_then(DVec3::try_normalize).map_or(forward, |v| v.as_vec3());
-        let view_up = lerp(a.4, b.4).and_then(DVec3::try_normalize).map(|v| v.as_vec3());
-        flight.draw_with_up("replay", eye, forward, view_up);
-        if frame % 30 == 0 {
-            let stats = flight.pass().stats().unwrap_or_default();
-            let (a, b, w) = blocky(flight);
-            eprintln!(
-                "REPLAY t {t:9.2} h {:9.1} resident {} pending {} jobs {} levels {} finest {} plan {:.2} upload {:.2} blocky>2px {:.2}% >4px {:.2}% widest {w:.1}",
-                altitude_at(t), stats.resident_columns, stats.pending_columns, stats.jobs, stats.active_levels, stats.finest_level, stats.plan_cpu_ms, stats.upload_cpu_ms, a * 100.0, b * 100.0
-            );
-        }
-        if frame % 300 == 0 {
-            flight.capture(&format!("replay_{:07}", (t * 10.0) as u64));
-        }
-        t += 1.0 / 60.0;
-        frame += 1;
-    }
-    flight.capture("replay_end");
-}
-
-/// Level flight at `height` metres over the ground at the editor's speed
-/// (10 m/s x height / 20 m) for HELIO_VOXEL_FLIGHT_CRUISE_SECS (20), then a
-/// stop: logs how far residency lags while moving and how long it takes to
-/// converge afterwards.
-fn cruise(flight: &mut Flight, height: f64) {
-    let secs: f64 = std::env::var("HELIO_VOXEL_FLIGHT_CRUISE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(20.0);
-    let deg: f64 = std::env::var("HELIO_VOXEL_FLIGHT_REPLAY_DEG").ok().and_then(|v| v.parse().ok()).unwrap_or(30.0);
-    let start = DVec3::new(deg.to_radians().sin(), deg.to_radians().cos(), 0.0);
-    let r = flight.planet.surface_point(start, 0.0).length();
-    let mut eye = start * (r + height);
-    let speed = std::env::var("HELIO_VOXEL_FLIGHT_CRUISE_SPEED").ok()
-        .and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite() && *v > 0.0)
-        .unwrap_or(10.0 * (height / 20.0).max(1.0));
-    let capture_every = std::env::var("HELIO_VOXEL_FLIGHT_CRUISE_EVERY").ok()
-        .and_then(|v| v.parse::<usize>().ok()).filter(|v| *v > 0).unwrap_or(300);
-    let dt = 1.0 / 60.0;
-    let view = |eye: DVec3| {
-        let up = eye.normalize();
-        let ahead = (DVec3::X - up * DVec3::X.dot(up)).try_normalize().unwrap_or(DVec3::Z);
-        (up, ahead, (ahead - up * 0.6).normalize().as_vec3())
-    };
-    let (_, _, f) = view(eye);
-    flight.settle("cruise_settle", eye, f);
-    let mut t = 0.0;
-    let mut frame = 0usize;
-    let mut converged = None;
-    while t < secs + 30.0 {
-        let (_, ahead, f) = view(eye);
-        let moving = t < secs;
-        if moving {
-            eye += ahead * speed * dt;
-            let ground = flight.planet.surface_point(eye, 0.0).length();
-            eye = eye.normalize() * (ground + height);
-        }
-        let stage = if moving { "cruise" } else { "cruise_stop" };
-        flight.draw(stage, eye, f);
-        let stats = flight.pass().stats().unwrap_or_default();
-        if !moving && converged.is_none() && stats.pending_columns == 0 {
-            converged = Some(t - secs);
-        }
-        if frame % 30 == 0 {
-            let (a, b, w) = blocky(flight);
-            eprintln!(
-                "CRUISE {stage} t {t:6.2} speed {speed:6.0} resident {} pending {} jobs {} units {:.0} budget {:.0} us/unit {:.3} plan {:.2} upload {:.2} blocky>2px {:.2}% >4px {:.2}% widest {w:.1}",
-                stats.resident_columns, stats.pending_columns, stats.jobs, stats.units, stats.unit_budget, stats.us_per_unit, stats.plan_cpu_ms, stats.upload_cpu_ms, a * 100.0, b * 100.0
-            );
-        }
-        if frame % capture_every == 0 {
-            flight.capture(&format!("cruise_{:05}", (t * 100.0) as u32));
-        }
-        if moving && t + dt >= secs {
-            flight.capture("cruise-arrival");
-        }
-        if converged.is_some() && t > secs + 2.0 {
-            break;
-        }
-        t += dt;
-        frame += 1;
-    }
-    flight.capture("cruise_end");
-    flight.write_csv();
-    eprintln!("CRUISE converged {converged:?} s after stopping");
-}
-
-/// Sustained heavy travel (HELIO_VOXEL_FLIGHT_LONG=<seconds>): editor speed
-/// (10 m/s scaled by height over 20 m) times a boost, repeatedly diving from
-/// orbit-like heights to tens of metres and climbing again while turning,
-/// then a stop. Logs residency health (pool, table probe runs, queued
-/// diffs) and enlarged blocks, and when the stopped view refines.
-fn long_route(flight: &mut Flight, secs: f64) {
-    let dt = 1.0 / 60.0;
-    // (time fraction, height m, boost)
-    let plan: [(f64, f64, f64); 13] = [
-        (0.00, 40.0, 2.0), (0.10, 40.0, 3.0), (0.17, 3000.0, 2.0), (0.27, 3000.0, 2.0),
-        (0.33, 60.0, 3.0), (0.47, 60.0, 3.0), (0.53, 25_000.0, 2.0), (0.63, 25_000.0, 2.0),
-        (0.73, 30.0, 3.0), (0.80, 400.0, 3.0), (0.87, 30.0, 3.0), (0.93, 400.0, 3.0), (1.00, 30.0, 3.0),
-    ];
-    let at = |f: f64| {
-        let i = plan.iter().rposition(|p| p.0 <= f).unwrap().min(plan.len() - 2);
-        let (a, b) = (plan[i], plan[i + 1]);
-        let u = ((f - a.0) / (b.0 - a.0)).clamp(0.0, 1.0);
-        // Interpolate heights geometrically (climb rate follows height).
-        ((a.1.ln() + (b.1.ln() - a.1.ln()) * u).exp(), a.2 + (b.2 - a.2) * u)
-    };
-    let start = DVec3::new(0.5f64.sin(), 0.5f64.cos(), 0.0);
-    let ground = |flight: &Flight, p: DVec3| flight.planet.surface_point(p, 0.0).length();
-    let mut eye = start * (ground(flight, start) + plan[0].1);
-    let mut heading = DVec3::X;
-    let view = |eye: DVec3, heading: DVec3, t: f64| {
-        let up = eye.normalize();
-        let ahead = (heading - up * heading.dot(up)).try_normalize().unwrap_or(DVec3::Z);
-        let side = up.cross(ahead);
-        // Sweep the view left and right while flying.
-        let yaw = 0.6 * (t * 0.4).sin();
-        let look = (ahead * yaw.cos() + side * yaw.sin() - up * 0.5).normalize();
-        (up, ahead, look.as_vec3())
-    };
-    flight.settle("long_settle", eye, view(eye, heading, 0.0).2);
-    let mut t = 0.0;
-    let mut frame = 0usize;
-    let mut refined = None;
-    let log = |flight: &mut Flight, stage: &str, t: f64, height: f64, speed: f64| {
-        let stats = flight.pass().stats().unwrap_or_default();
-        let (longest, beyond, diffs) = flight.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap().residency_health();
-        let (a, b, w) = blocky(flight);
-        eprintln!(
-            "LONG {stage} t {t:6.1} h {height:8.0} v {speed:7.0} resident {} pending {} diffs {diffs} jobs {} units {:.0} budget {:.0} failed {} free_pages {}/{} free_units {:.0}% recycles {} lod_pressure {:.2} probe {longest} beyond64 {beyond} plan {:.2} late {} reranked {} blocky>2px {:.2}% >4px {:.2}% widest {w:.1}",
-            stats.resident_columns, stats.pending_columns, stats.jobs, stats.units, stats.unit_budget, stats.failed_jobs, stats.free_pages, stats.pool_pages, stats.free_units as f64 / (f64::from(stats.pool_pages) * 512.0) * 100.0, stats.recycles, stats.lod_pressure, stats.plan_cpu_ms, stats.late_plans, stats.reranked, a * 100.0, b * 100.0
-        );
-        b
-    };
-    while t < secs + 40.0 {
-        let moving = t < secs;
-        let (height, boost) = at((t / secs).min(1.0));
-        let clearance = eye.length() - ground(flight, eye);
-        let speed = if moving { boost * 10.0 * (clearance / 20.0).max(1.0) } else { 0.0 };
-        if moving {
-            let (up, ahead, _) = view(eye, heading, t);
-            // Turn slowly so new terrain keeps entering the view.
-            let turn = 0.25 * (t * 0.07).sin();
-            heading = (ahead + up.cross(ahead) * turn * dt).normalize();
-            eye += ahead * speed * dt;
-            // Follow the planned height at a bounded climb rate.
-            let target = ground(flight, eye) + height;
-            let r = eye.length();
-            let rate = (target - r).clamp(-2.0 * clearance.max(20.0), 2.0 * clearance.max(20.0));
-            eye = eye.normalize() * (r + rate * dt).max(ground(flight, eye) + 5.0);
-        }
-        let stage = if moving { "move" } else { "stop" };
-        let (_, _, f) = view(eye, heading, t.min(secs));
-        flight.draw(stage, eye, f);
-        if frame % if moving { 60 } else { 30 } == 0 {
-            let over4 = log(flight, stage, t, clearance, speed);
-            if !moving && refined.is_none() && over4 < 0.005 {
-                refined = Some(t - secs);
-            }
-        }
-        if frame % 600 == 0 {
-            flight.capture(&format!("long_{:05}", (t * 10.0) as u32));
-        }
-        if refined.is_some() && t > secs + 5.0 {
-            break;
-        }
-        t += dt;
-        frame += 1;
-    }
-    flight.capture("long_end");
-    eprintln!("LONG refined {refined:?} s after stopping");
-}
-
-/// Enlarged blocks on screen: the share of terrain pixels of the last frame
-/// drawn by a coarser-than-base level whose cell is wider than 2 and 4
-/// pixels (by design such cells are at most ~2 px; wider ones mean a finer
-/// level was not resident yet), and the widest.
-fn blocky(flight: &mut Flight) -> (f64, f64, f64) {
-    let (hits, size, voxel) = {
-        let r = flight.renderer.find_pass::<PlanetPass>().unwrap().renderer().unwrap();
-        (flight.read(r.hit_buffer()), r.screen_size(), flight.planet.grid().voxel_size())
-    };
-    let angle = 2.0 * (std::f64::consts::FRAC_PI_4 * 0.5).tan() / f64::from(size[1]);
-    let (mut terrain, mut over2, mut over4, mut widest) = (0usize, 0usize, 0usize, 0.0f64);
-    for hit in hits.chunks_exact(32).take((size[0] * size[1]) as usize) {
-        let w = |i: usize| u32::from_le_bytes(hit[i * 4..i * 4 + 4].try_into().unwrap());
-        let info = w(4);
-        if info & 3 != 1 {
-            continue;
-        }
-        let t = f64::from(f32::from_bits(w(0))).max(0.05);
-        let level = (info >> 5) & 31;
-        terrain += 1;
-        // Base cells are never enlarged (near the eye they are simply close).
-        if level == 0 {
-            continue;
-        }
-        let px = voxel * f64::from(1u32 << level) / (t * angle);
-        over2 += usize::from(px > 2.0);
-        over4 += usize::from(px > 4.0);
-        widest = widest.max(px);
-    }
-    let n = terrain.max(1) as f64;
-    (over2 as f64 / n, over4 as f64 / n, widest)
-}
-
-/// One fixed view over a mountain flank (`km` from the nearest summit),
-/// rendered with finer levels switched off progressively (`lod_pixels`
-/// 1, 2, 4, 8, 16: each doubling moves every level one step coarser):
-/// surface colours must not depend on the level that draws them.
-fn lod_compare(flight: &mut Flight, km: f64) {
-    // HELIO_VOXEL_FLIGHT_VIEWS_POLE: over the pole's hills instead (the
-    // Pulsar example), at lower heights.
-    let pole = std::env::var_os("HELIO_VOXEL_FLIGHT_VIEWS_POLE").is_some();
-    let ground = if pole {
-        DVec3::Y
-    } else {
-        let range = mountain(&flight.planet, 0.0);
-        let away = tangent(range.peak, std::f64::consts::PI).as_dvec3();
-        (range.peak + away * km * 1000.0).normalize()
-    };
-    let heights: &[f64] = if pole { &[60.0, 300.0] } else { &[300.0, 1500.0] };
-    for &height in heights {
-        let eye = flight.planet.surface_point(ground, height);
-        let up = eye.normalize();
-        let ahead = (DVec3::X - up * DVec3::X.dot(up)).normalize();
-        let forward = (ahead - up * 1.2).normalize().as_vec3();
-        for lod in [1.0f32, 0.5, 0.25, 0.125, 0.0625] {
-            if let Some(r) = flight.pass().renderer_mut() {
-                r.settings_mut().lod_pixels = lod;
-            }
-            let name = format!("lodcmp_{}m_{}", height as u32, (lod * 1000.0) as u32);
-            flight.settle(&name, eye, forward);
-            for _ in 0..20 {
-                flight.draw(&name, eye, forward);
-            }
-            let pixels = flight.capture(&name);
-            let (mut grey, mut green, mut n) = (0usize, 0usize, 0usize);
-            for p in pixels.chunks(4) {
-                let (r, g, b) = (i32::from(p[0]), i32::from(p[1]), i32::from(p[2]));
-                n += 1;
-                if g > r + 25 && g > b + 25 {
-                    green += 1;
-                } else if (r - g).abs() < 20 && (g - b).abs() < 20 && r < 230 {
-                    grey += 1;
-                }
-            }
-            let (a, b, w) = blocky(flight);
-            eprintln!(
-                "LODCMP h {height} lod_pixels {lod}: green {:.1}% grey {:.1}% | cells >2px {:.1}% >4px {:.1}% widest {w:.1}",
-                green as f64 * 100.0 / n as f64, grey as f64 * 100.0 / n as f64, a * 100.0, b * 100.0
-            );
-        }
-    }
-}
-
-/// Sculpting as the editor does it: stamps every 0.6 radius along a drag
-/// (`stroke_fill`), several per frame, in laps of a ring around the aim
-/// point, so edits pile up in one area as in a long session.
-/// The ground point of the column nearest `ground` (rings of 64 cells, up to
-/// 64 km) whose generated volume (caves, overhangs) reaches its surface.
-/// The nearest column (on a 64-cell lattice) whose generated volume extent
-/// (level cells below and above its top) passes `wanted`, 1.7 m above it.
-fn volume_region_ground(planet: &Planet, ground: DVec3, what: &str, wanted: impl Fn(u8, i32, i32, i32, i32) -> bool) -> DVec3 {
-    let grid = *planet.grid();
-    let (base, _) = grid.locate(ground);
-    for ring in 0..1000i32 {
-        for step in 0..(8 * ring).max(1) {
-            let side = step / (2 * ring).max(1);
-            let along = step % (2 * ring).max(1) - ring;
-            let (di, dj) = match side { 0 => (along, -ring), 1 => (ring, along), 2 => (-along, ring), _ => (-ring, -along) };
-            let (i, j) = (base.i + di * 64, base.j + dj * 64);
-            if !(0..grid.cells()).contains(&i) || !(0..grid.cells()).contains(&j) {
-                continue;
-            }
-            let (below, above) = planet.field().extent(grid.domain_point(base.face, i, j, 0), 0);
-            if wanted(base.face, i, j, below, above) {
-                let cell = helio_pass_voxel_planet::Cell::new(base.face, i, j, planet.column_top(base.face, i, j, 0));
-                eprintln!("VIEWS {what} region {} m away", grid.cell_center(cell).distance(ground).round());
-                return planet.surface_point(grid.cell_center(cell), 1.7);
-            }
-        }
-    }
-    ground
-}
-
-fn sculpt_stress(flight: &mut Flight, ground: DVec3, heading: f64) {
-    let up = ground.normalize();
-    let eye = ground + up * 8.0;
-    let forward = look(eye, heading, -40.0);
-    flight.settle("sculpt_prepare", eye, forward);
-    let target = flight.planet.raycast(eye, forward.as_dvec3(), 200.0).expect("aim at the ground").cell;
-    let target = flight.planet.grid().cell_center(target);
-    let side = tangent(target, heading).as_dvec3();
-    let ahead = up.cross(side);
-    let ring = 6.0;
-    let strokes = [
-        ("sculpt_dig_r1", 1.0, BrushShape::Sphere, BrushOp::Remove, 3usize, 240usize),
-        ("sculpt_dig_r4", 4.0, BrushShape::Sphere, BrushOp::Remove, 2, 120),
-        ("sculpt_build_r1", 1.0, BrushShape::Cube, BrushOp::Add, 3, 120),
-    ];
-    for (stage, radius, shape, op, per_frame, frames) in strokes {
-        let spacing = radius * 0.6;
-        let mut stamp = 0usize;
-        let (mut wall, mut apply) = (Vec::new(), Vec::new());
-        for _ in 0..frames {
-            let started = Instant::now();
-            let mut planet = (*flight.planet).clone();
-            for _ in 0..per_frame {
-                let angle = stamp as f64 * spacing / ring;
-                let point = target + (side * angle.cos() + ahead * angle.sin()) * ring;
-                let surface = flight.planet.surface_point(point, 0.0);
-                let center = if op == BrushOp::Add { surface + up * radius } else { surface - up * radius * 0.3 };
-                planet
-                    .apply(Brush { center: center.to_array(), radius, shape, op, material: if op == BrushOp::Add { material::BRICK } else { 0 } })
-                    .unwrap();
-                stamp += 1;
-            }
-            flight.planet = Arc::new(planet);
-            apply.push(started.elapsed().as_secs_f64() * 1000.0);
-            flight.draw(stage, eye, forward);
-            wall.push(started.elapsed().as_secs_f64() * 1000.0);
-        }
-        let settle_started = Instant::now();
-        let (settle_frames, _) = flight.settle(&format!("{stage}_settle"), eye, forward);
-        let settle_ms = settle_started.elapsed().as_secs_f64() * 1000.0;
-        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
-        let stats = flight.pass().stats().unwrap();
-        eprintln!(
-            "SCULPT {stage}: {} stamps (total edits {}), frame wall mean {:.2} p95 {:.2} ms, apply mean {:.3} ms, settle {settle_frames} frames {settle_ms:.0} ms, us/unit {:.2}",
-            stamp,
-            flight.planet.edits().len(),
-            mean(&wall),
-            percentile(&wall, 0.95),
-            mean(&apply),
-            stats.us_per_unit,
-        );
-    }
-    flight.capture("sculpt");
-}
-
-/// HELIO_VOXEL_FLIGHT_VIEWS="height:pitch,...": settles and captures views
-/// above the ground site (`view_<height>_<pitch>.png`), skipping the ground
-/// audits.
-fn capture_views(flight: &mut Flight, views: &str, ground: DVec3, heading: f64) {
-    // HELIO_VOXEL_FLIGHT_VIEWS_CAVES=1: from the nearest cave region
-    // (columns whose generated volume reaches the surface).
-    let mut ground = if std::env::var_os("HELIO_VOXEL_FLIGHT_VIEWS_CAVES").is_some() {
-        volume_region_ground(&flight.planet, ground, "cave", |_, _, _, below, _| below > 0)
-    } else {
-        ground
-    };
-    // HELIO_VOXEL_FLIGHT_VIEWS_OVERHANGS=1: from the nearest hillside (over
-    // 20 degrees across 4 m) of an overhang region at full strength (rock
-    // shelves, undercut ledges).
-    if std::env::var_os("HELIO_VOXEL_FLIGHT_VIEWS_OVERHANGS").is_some() {
-        let planet = flight.planet.clone();
-        ground = volume_region_ground(&flight.planet, ground, "overhang hillside", |face, i, j, _, above| {
-            let top = |di: i32, dj: i32| planet.column_top(face, i + di, j + dj, 0);
-            above >= 50 && (top(20, 0) - top(-20, 0)).abs().max((top(0, 20) - top(0, -20)).abs()) >= 15
-        });
-    }
-    // HELIO_VOXEL_FLIGHT_VIEWS_MOUNTAIN=<km>: on the flank of the nearest
-    // high summit, that far from it, looking at it.
-    let mut range = None;
-    // HELIO_VOXEL_FLIGHT_VIEWS_POLE=<bearing rad>: at the north pole (the
-    // Pulsar example's spawn), looking along that bearing (x towards z).
-    let mut pole_bearing = None;
-    if let Some(bearing) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS_POLE").ok().and_then(|v| v.parse::<f64>().ok()) {
-        ground = flight.planet.surface_point(DVec3::Y, 0.0);
-        pole_bearing = Some(bearing);
-    }
-    if let Some(km) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS_MOUNTAIN").ok().and_then(|v| v.parse::<f64>().ok()) {
-        let r = mountain(&flight.planet, heading);
-        let away = tangent(r.peak, heading + std::f64::consts::PI).as_dvec3();
-        ground = flight.planet.surface_point(r.peak + away * km * 1000.0, 0.0);
-        range = Some(r);
-    }
-    // HELIO_VOXEL_FLIGHT_VIEWS_AHEAD=<m>,<right m>: moves the ground site
-    // along the view heading (non-pole views), to visit what a view showed.
-    if let Ok(ahead) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS_AHEAD") {
-        let v: Vec<f64> = ahead.split(',').map(|x| x.trim().parse().unwrap()).collect();
-        let forward = tangent(ground, heading).as_dvec3();
-        let right = tangent(ground, heading - std::f64::consts::FRAC_PI_2).as_dvec3();
-        ground = flight.planet.surface_point(ground + forward * v[0] + right * v.get(1).copied().unwrap_or(0.0), 0.0);
-    }
-    // HELIO_VOXEL_FLIGHT_LOD_PIXELS=<f>: the renderer's lod_pixels (2: every
-    // level one step finer), to compare a view across levels.
-    if let Some(lod) = std::env::var("HELIO_VOXEL_FLIGHT_LOD_PIXELS").ok().and_then(|v| v.parse::<f32>().ok()) {
-        if let Some(r) = flight.pass().renderer_mut() {
-            r.settings_mut().lod_pixels = lod;
-        }
-    }
-    for view in views.split(',') {
-        let mut parts = view.split(':').map(|v| v.trim().parse::<f64>().unwrap());
-        let (height, pitch) = (parts.next().unwrap(), parts.next().unwrap_or(-20.0));
-        let eye = flight.planet.surface_point(ground, height);
-        let forward = match &range {
-            _ if pole_bearing.is_some() => {
-                let (b, p) = (pole_bearing.unwrap(), pitch.to_radians());
-                (DVec3::new(b.cos() * p.cos(), p.sin(), b.sin() * p.cos())).as_vec3().normalize()
-            }
-            Some(r) => {
-                let p = (pitch as f32).to_radians();
-                (level_toward(r, eye).as_vec3() * p.cos() + up_for(eye) * p.sin()).normalize()
-            }
-            None => look(eye, heading, pitch),
-        };
-        let name = format!("view_{height}_{}", -pitch);
-        eprintln!("VIEWS {name}: eye {:.1} m from the centre, ground {:.1} m above the datum", eye.length(), eye.length() - height - flight.planet.grid().radius());
-        flight.settle(&name, eye, forward);
-        // HELIO_VOXEL_FLIGHT_VIEWS_HOLD=<frames>: a still camera that long
-        // (an editor keeps rendering ~90 frames after the camera stops).
-        let hold = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS_HOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
-        for _ in 0..hold {
-            flight.draw(&name, eye, forward);
-        }
-        flight.capture(&name);
-        // HELIO_VOXEL_FLIGHT_VIEWS_FLY=<m/s>,<s>: then flies on along the view
-        // at that height above the ground, capturing every second (what an
-        // editor camera shows while refinement catches up).
-        if let Ok(fly) = std::env::var("HELIO_VOXEL_FLIGHT_VIEWS_FLY") {
-            let v: Vec<f64> = fly.split(',').map(|x| x.trim().parse().unwrap()).collect();
-            let up = eye.normalize();
-            let along = (forward.as_dvec3() - up * forward.as_dvec3().dot(up)).normalize();
-            let frames = (v[1] / DT) as usize;
-            for f in 1..=frames {
-                let site = flight.planet.surface_point(eye + along * v[0] * f as f64 * DT, 0.0);
-                let at = flight.planet.surface_point(site, height);
-                flight.draw(&name, at, forward);
-                if f % 60 == 0 {
-                    flight.capture(&format!("{name}_fly_{}", f / 60));
-                }
-            }
-        }
-    }
-    flight.write_csv();
+    eprintln!("set HELIO_VOXEL_FLIGHT_HOLD or HELIO_VOXEL_CHUNKS_FLY (see the module docs)");
 }

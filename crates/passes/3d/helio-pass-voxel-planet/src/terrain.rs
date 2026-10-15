@@ -38,12 +38,42 @@
 //! fn terrain_column(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> // (height, surface word)
 //! ```
 //!
+//! A program may instead evaluate its largest octaves at nodes and blend
+//! them (the two-rate field, `docs/two-rate-field.md`): the columns of a
+//! level whose indices are multiples of 16 on their face. A column reads
+//! the bilinear blend of its four nodes' words through the engine's
+//! `generation_node_word(slot)`, `floor(sum w_c v_c / 256)` with weights
+//! `(16 - di)(16 - dj)`, `di (16 - dj)`, `(16 - di) dj`, `di dj`, the high
+//! and low bytes of each word summed apart (so every word blends exactly,
+//! wrapping). Generation evaluates each tile's nodes once.
+//!
+//! ```wgsl
+//! const TERRAIN_NODE_WORDS: u32 = /* words a node carries */;
+//! fn terrain_has_nodes(level: u32) -> bool
+//! fn terrain_node(p: vec3<i32>, level: u32) // a node at domain point p
+//! fn terrain_node_word(slot: u32) -> i32 // of the node just evaluated
+//! fn terrain_column_nodes(p: vec3<i32>, level: u32, display: bool) -> vec2<i32>
+//! ```
+//!
+//! in place of `terrain_height` and `terrain_column`; the engine has the
+//! column's nodes ready when `terrain_has_nodes`.
+//!
+//! Its CPU field must blend the same way ([`TerrainField::height`] is by
+//! [`Column`] for this).
+//!
 //! and optionally, for volumetric terrain (caves, overhangs, arches),
 //!
 //! ```wgsl
 //! fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32>
 //! fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32
+//! fn terrain_clearance(q: vec3<i32>, level: u32, step: f32) -> i32 // optional
 //! ```
+//!
+//! `terrain_clearance` is a conservative count of level cells along a lane,
+//! from the cell at volume point `q` (the point moving `step` units per
+//! cell), in which the volume cannot change a cell below the heightfield's
+//! lean band (caves cannot carve there); generation steps over them. Without
+//! it every cell of the extent is evaluated.
 //!
 //! and, to lean its surface (overhangs that are a continuous deformation of
 //! the heightfield: nothing floats),
@@ -95,7 +125,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 /// Heights are integer millimetres above the datum (sea level).
 pub const HEIGHT_ONE: i32 = 1000;
 /// Largest `TerrainConstants` uniform a program may declare.
-pub const MAX_CONSTANT_BYTES: usize = 4096;
+pub const MAX_CONSTANT_BYTES: usize = 16384;
 
 /// Engine material ids (`M_*` in WGSL). A ground material may carry
 /// [`material::SPECK`].
@@ -161,12 +191,22 @@ pub struct TerrainProgram {
     pub constants: Vec<u8>,
 }
 
+/// A column of the world grid: its face, cell indices and level (grid
+/// levels; its footprint is `2^(level + level_offset)` reference cells).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Column {
+    pub face: u8,
+    pub i: i32,
+    pub j: i32,
+    pub level: u32,
+}
+
 /// Surface height and ground material of every column of one world grid.
 pub trait TerrainField: Send + Sync + 'static {
-    /// Surface height ([`HEIGHT_ONE`] units above the datum) of the column
-    /// centred at domain point `p` whose footprint is `2^level` reference
-    /// cells.
-    fn height(&self, p: IVec3, level: u32) -> i32;
+    /// Surface height ([`HEIGHT_ONE`] units above the datum) of `column`.
+    /// A field may share work between neighbouring columns of a level
+    /// (the two-rate field's nodes): it is a column's, not a point's.
+    fn height(&self, column: Column) -> i32;
     /// Material of a solid ground cell: `surface` is its column cell's
     /// surface word ([`Self::surface`]), `top_height` its column's top
     /// ([`HEIGHT_ONE`] units, a whole number of voxel layers), `depth` the
@@ -175,10 +215,10 @@ pub trait TerrainField: Send + Sync + 'static {
     /// per cell, and `layer` the cell's layer index (0 is the layer just
     /// above the datum).
     fn ground_material(&self, p: IVec3, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32;
-    /// Surface word (8 bits) of the column at `p` whose height is `height`
+    /// Surface word (8 bits) of `column`, whose height is `height`
     /// (`terrain_surface` in WGSL, stored per column cell at generation):
     /// inputs of the materials besides height. 0 when the program has none.
-    fn surface(&self, _p: IVec3, _level: u32, _height: i32) -> u32 {
+    fn surface(&self, _column: Column, _height: i32) -> u32 {
         0
     }
     /// Lowest and highest height any column can have at any level.
@@ -188,11 +228,6 @@ pub trait TerrainField: Send + Sync + 'static {
     /// own top, plus two. Coarse levels bound the terrain with this, so it
     /// must be conservative; [`check_field`] samples it.
     fn bound_margins(&self) -> [i32; 24];
-    /// GPU display representations may require wider bounds; canonical CPU
-    /// queries and custom generators retain their original field contract.
-    fn render_bound_margins(&self) -> [i32; 24] {
-        self.bound_margins()
-    }
     /// Level cells below and above the heightfield top in which the cells of
     /// the column at domain point `p` may differ from the heightfield
     /// (`terrain_extent` in WGSL). `(0, 0)`: a pure heightfield column.
@@ -327,10 +362,9 @@ impl Default for TerrainAppearance {
         materials[MARE as usize].patches = Some([unit([98, 98, 99]), unit([84, 84, 86]), unit([68, 68, 71])]);
         materials[BOULDER as usize].patches = Some([unit([130, 128, 123]), unit([112, 110, 106]), unit([90, 89, 86])]);
         materials[EJECTA as usize].speck_host = Some(REGOLITH as u8);
-        // Steps of natural ground are lit almost wholly with the slope: voxels
-        // read through their own colours (pigment, hue), not as dark contour
-        // lines along every riser.
-        Self { materials, detail: [0.3, 0.4, 0.08, 0.9] }
+        // Voxels a pixel wide or more are lit by their own faces: slopes read
+        // as their steps (no step softness).
+        Self { materials, detail: [0.3, 0.4, 0.08, 0.0] }
     }
 }
 
@@ -473,7 +507,7 @@ pub fn generated_kind(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j
 }
 
 /// Height (mm) of the heightfield displaced by the field's lean under cell
-/// `(i, j, k)` (`generate.wgsl` mirrors it): the field's height on the
+/// `(i, j, k)` (`chunk_generate.wgsl` mirrors it): the field's height on the
 /// level's lean lattice, interpolated bilinearly at the displaced point,
 /// plus the column's own detail off that lattice (`height` minus the
 /// lattice at the cell). Without displacement it is exactly `height`.
@@ -496,7 +530,7 @@ pub fn lean_height(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i
     let (node_i, node_j) = lattice_origin(i, j, reach, spacing);
     let node = |n: i32, m: i32| {
         let (ni, nj) = (((node_i + n) * spacing).clamp(0, last), ((node_j + m) * spacing).clamp(0, last));
-        lattice_height(grid, field, face, ni, nj, level)
+        lattice_height(field, face, ni, nj, level)
     };
     // Q8 cell positions overflow i32 at planet-scale indices. The GPU mirror
     // computes them in wrapping i32 and only the small difference from the
@@ -532,7 +566,7 @@ pub(crate) fn lattice_bilinear(x: i32, y: i32, spacing: i32, node: &dyn Fn(i32, 
 
 /// The field's height at lattice node cell `(i, j)` of `level`, cached per
 /// thread (ray casts through a leaning region query the same nodes).
-fn lattice_height(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i32, level: u32) -> i32 {
+fn lattice_height(field: &dyn TerrainField, face: u8, i: i32, j: i32, level: u32) -> i32 {
     use std::cell::RefCell;
     use std::collections::HashMap;
     thread_local! {
@@ -542,7 +576,7 @@ fn lattice_height(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i3
     if let Some(h) = CACHE.with(|c| c.borrow().get(&key).copied()) {
         return h;
     }
-    let h = field.height(grid.domain_point(face, i, j, level), level + grid.level_offset());
+    let h = field.height(Column { face, i, j, level });
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
         if c.len() > 1 << 16 {
@@ -555,7 +589,7 @@ fn lattice_height(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i3
 
 /// Generated top of a column (level cells): the first air above its highest
 /// generated solid cell, edits excluded. Equals `top` outside the field's
-/// volumetric extent; material depth counts from it (`generate.wgsl`).
+/// volumetric extent; material depth counts from it.
 /// `height` is the column's field height (mm).
 pub fn generated_top(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j: i32, level: u32, height: i32) -> i32 {
     let top = top_cells(grid, height, level);
@@ -571,15 +605,6 @@ pub fn generated_top(grid: &Grid, field: &dyn TerrainField, face: u8, i: i32, j:
             field.density(p, grid.volume_point(face, i, j, k, level), level, top, height, lean, k) > 0
         })
         .map_or(top - below, |k| k + 1)
-}
-
-/// Ground slope of a cell in its 8x8 column block, in eighths of a cell per
-/// cell: the larger top difference across the block along either axis.
-/// Smooth and level-invariant, unlike neighbour steps of stepped terrain.
-pub fn block_slope(top: impl Fn(i32, i32) -> i32, x: i32, y: i32) -> i32 {
-    let si = (top(7, y) - top(0, y)).abs();
-    let sj = (top(x, 7) - top(x, 0)).abs();
-    si.max(sj) * 8 / 7
 }
 
 /// Check a world's field against its declared bounds at `samples` random

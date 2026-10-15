@@ -383,12 +383,12 @@ fn scene_distance(px: vec2<u32>, size: vec2<u32>) -> f32 {
     } else {
         let b = vec2<i32>(floor(c - 0.5));
         d = textureLoad(scene_depth, clamp(b, vec2(0), last), 0).r;
-        d = min(d, textureLoad(scene_depth, clamp(b + vec2(1, 0), vec2(0), last), 0).r);
-        d = min(d, textureLoad(scene_depth, clamp(b + vec2(0, 1), vec2(0), last), 0).r);
-        d = min(d, textureLoad(scene_depth, clamp(b + vec2(1, 1), vec2(0), last), 0).r);
+        d = helio_depth_nearest(d, textureLoad(scene_depth, clamp(b + vec2(1, 0), vec2(0), last), 0).r);
+        d = helio_depth_nearest(d, textureLoad(scene_depth, clamp(b + vec2(0, 1), vec2(0), last), 0).r);
+        d = helio_depth_nearest(d, textureLoad(scene_depth, clamp(b + vec2(1, 1), vec2(0), last), 0).r);
     }
-    if !(d < 1.0) { return SKY_DISTANCE; }
-    return helio_view_depth(d, cameras[0].position_near.w, cameras[0].forward_far.w);
+    if helio_is_sky(d) { return SKY_DISTANCE; }
+    return helio_view_depth(cameras[0].proj, d);
 }
 
 // ── cs_resolve ───────────────────────────────────────────────────────────────
@@ -438,8 +438,8 @@ fn cs_resolve(@builtin(local_invocation_index) lid: u32) {
         let uv = (frame_point - 0.5) / row_overscan(row) + 0.5;
         let px = min(vec2<u32>(uv * vec2<f32>(dsize)), dsize - 1u);
         let d = textureLoad(scene_depth, vec2<i32>(px), 0).r;
-        if d < 1.0 {
-            inverse_distance = 1.0 / helio_view_depth(d, cameras[0].position_near.w, cameras[0].forward_far.w);
+        if !helio_is_sky(d) {
+            inverse_distance = 1.0 / helio_view_depth(cameras[0].proj, d);
             hit = 1.0;
         }
     }

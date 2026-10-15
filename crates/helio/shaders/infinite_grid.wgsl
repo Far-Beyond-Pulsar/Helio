@@ -62,12 +62,13 @@ fn grid_level(position: vec3<f32>, scale: f32, pixel_width: f32) -> f32 {
 
 @fragment
 fn fs_main(input: VertexOut) -> FragmentOut {
-    let near_clip = grid.inv_view_proj * vec4<f32>(input.ndc, 0.0, 1.0);
-    let far_clip = grid.inv_view_proj * vec4<f32>(input.ndc, 1.0, 1.0);
+    // Reversed depth: NDC z = 1 is the near plane, z = 0 is infinitely far.
+    let near_clip = grid.inv_view_proj * vec4<f32>(input.ndc, 1.0, 1.0);
+    let far_clip = grid.inv_view_proj * vec4<f32>(input.ndc, 0.0, 1.0);
     let near_world = near_clip.xyz / near_clip.w;
     // The far point in homogeneous form minus the eye is the view ray for
-    // any w, including w = 0 when a tiny near/far ratio puts the far plane
-    // at f32 infinity (dividing by w there gives NaN).
+    // any w, including the w = 0 of the point at infinity (dividing by w
+    // there gives NaN).
     let ray = normalize(far_clip.xyz - far_clip.w * grid.camera_position.xyz);
 
     // Ground plane is world y = 0. Discard rays that miss it or point away.

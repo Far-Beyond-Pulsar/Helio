@@ -337,7 +337,7 @@ fn starburst_spikes_are_perpendicular_to_the_iris_blades() {
 
 /// Camera at the origin looking down -Z, square aspect, 45 degree FOV.
 fn camera_buffer(device: &wgpu::Device) -> wgpu::Buffer {
-    let projection = glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, 1.0, 0.1, 100.0);
+    let projection = helio_core::depth::perspective(std::f32::consts::FRAC_PI_4, 1.0, 0.1);
     let camera = helio_core::GpuCameraUniforms::new(
         glam::Mat4::IDENTITY, projection, glam::Vec3::ZERO, 0.1, 100.0, 0, [0.0; 2], projection,
     );
@@ -445,8 +445,7 @@ fn source_history_follows_the_camera_instead_of_trailing() {
     // The same source seen from a camera that panned by 16 input pixels:
     // with reprojection the settled glare follows to the new position with no
     // residue at the old one.
-    let projection = glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, 1.0, 0.1, 100.0);
-    let pan = |x: f32| glam::Mat4::from_translation(glam::Vec3::new(x, 0.0, 0.0));
+    let projection = helio_core::depth::perspective(std::f32::consts::FRAC_PI_4, 1.0, 0.1);
     let camera_at = |view: glam::Mat4, prev: glam::Mat4| {
         let data = helio_core::GpuCameraUniforms::new(view, projection, glam::Vec3::ZERO, 0.1, 100.0, 0, [0.0; 2], prev);
         let bytes = [bytemuck::bytes_of(&data), bytemuck::bytes_of(&data)].concat();
@@ -460,12 +459,13 @@ fn source_history_follows_the_camera_instead_of_trailing() {
         let optics = OpticsInputs { camera: Some(&still), ..Default::default() };
         run_with(&device, &queue, &mut pass, Some(&before), Some(&lens), optics);
     }
-    // Depth is the near plane (fallback), so solve the pan that moves a
-    // near-plane point by 16 input pixels (0.25 NDC at 128 px).
-    let near_half_width = 0.1 * (std::f32::consts::FRAC_PI_8).tan();
-    let shift = -0.25 * near_half_width;
-    let moved = camera_at(pan(shift), projection);
-    // Translating the view by -x moves the scene left: 48 -> 32 input pixels.
+    // The fallback depth is the depth clear value, sky, so history reprojects
+    // as directions and only a rotation moves it. Solve the yaw that moves the
+    // source's direction by 16 input pixels (NDC -0.25 -> -0.5 at 128 px).
+    let half_width = (std::f32::consts::FRAC_PI_8).tan();
+    let yaw = (-0.25 * half_width).atan() - (-0.5 * half_width).atan();
+    let moved = camera_at(glam::Mat4::from_rotation_y(yaw), projection);
+    // Yawing the view this way moves the scene left: 48 -> 32 input pixels.
     let after = image(&device, &queue, &[(32, 64, 2000.0)]);
     let optics = OpticsInputs { camera: Some(&moved), ..Default::default() };
     let response = run_with(&device, &queue, &mut pass, Some(&after), Some(&lens), optics);
@@ -475,7 +475,7 @@ fn source_history_follows_the_camera_instead_of_trailing() {
     assert!((mean[0] - 8.0).abs() < 0.6, "response trailed: centroid {mean:?}");
 }
 
-/// Sky-only depth (the far plane) of any size.
+/// Sky-only depth (the depth clear value) of any size.
 fn far_depth(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("lens test far depth"),
@@ -494,7 +494,7 @@ fn far_depth(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
         color_attachments: &[],
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
             view: &view,
-            depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+            depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(helio_core::depth::CLEAR), store: wgpu::StoreOp::Store }),
             stencil_ops: None,
         }),
         timestamp_writes: None,
@@ -506,22 +506,22 @@ fn far_depth(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
 }
 
 #[test]
-fn sky_history_survives_a_far_plane_at_f32_infinity() {
-    // A planetary camera near the ground: near 5 cm, far 40 000 km. The ratio
-    // rounds far/(near - far) to -1, so the far plane unprojects to w = 0.
-    // Sky texels must still reproject as directions (not NaN, which the
-    // streaks then smear across whole rows).
+fn sky_history_reprojects_as_directions() {
+    // The camera projection has no far plane: sky is depth 0, which
+    // unprojects to w = 0. Sky texels must still reproject as directions
+    // (not NaN, which the streaks then smear across whole rows), whatever the
+    // near plane.
     let (device, queue, _serial) = gpu();
     let depth = far_depth(&device, &queue);
     let lens = uniforms(&device, LensFlareSettings { response_time: 0.06, ..isolated("glare") });
     let input = image(&device, &queue, &[(64, 64, 2000.0)]);
-    let settle = |near: f32, far: f32| {
-        let projection = glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, 1.0, near, far);
+    let settle = |near: f32| {
+        let projection = helio_core::depth::perspective(std::f32::consts::FRAC_PI_4, 1.0, near);
         // Off the origin, so a direction built from the wrong eye would show.
         let eye = glam::Vec3::new(3.0, 4.0, 5.0);
         let view = glam::Mat4::from_translation(-eye);
         let data = helio_core::GpuCameraUniforms::new(
-            view, projection, eye, near, far, 0, [0.0; 2], projection * view,
+            view, projection, eye, near, 4.0e7, 0, [0.0; 2], projection * view,
         );
         let bytes = [bytemuck::bytes_of(&data), bytemuck::bytes_of(&data)].concat();
         let camera = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -536,11 +536,10 @@ fn sky_history_survives_a_far_plane_at_f32_infinity() {
         }
         response
     };
-    let projection = glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, 1.0, 0.05, 4.0e7);
-    assert_eq!(projection.z_axis.z, -1.0, "test camera no longer puts the far plane at f32 infinity");
-    let extreme = settle(0.05, 4.0e7);
+    // A planetary camera near the ground: near 5 cm.
+    let extreme = settle(0.05);
     assert!(extreme.iter().flatten().all(|v| v.is_finite()), "non-finite lens response");
-    let reference = settle(0.1, 100.0);
+    let reference = settle(0.1);
     let (a, b) = (total(&extreme), total(&reference));
     assert!(b > 0.0 && (a / b - 1.0).abs() < 0.01, "settled sky response {a} vs {b}");
 }

@@ -1,6 +1,10 @@
 // Bit-exact integer noise; mirror of src/noise.rs. Terrain programs build
 // on these so CPU and GPU fields agree to the bit.
 const NOISE_ONE: i32 = 65536; // noise unit (Q16)
+// Bound on how fast `noise` changes: Q16 units per lattice unit, plus
+// NOISE_ROUNDING (noise::NOISE_SLOPE, tested).
+const NOISE_SLOPE: f32 = 262144.0;
+const NOISE_ROUNDING: i32 = 16;
 
 fn hash3(x: i32, y: i32, z: i32, seed: u32) -> u32 {
     var v = (bitcast<u32>(x) * 0x8da6b343u) ^ (bitcast<u32>(y) * 0xd8163841u)
@@ -79,17 +83,10 @@ fn rem_floor(a: i32, b: i32) -> i32 {
 // Fine noise (Q24); mirror of `noise_fine` in src/noise.rs.
 const FINE_ONE: i32 = 16777216;
 
-// a * b / 2^24 rounded toward zero, |a| < 2^28, |b| <= 2^24 (12-bit limbs).
+// a * b / 2^24 rounded to nearest, |a| < 2^28, |b| <= 2^24: the exact
+// product (one wide multiply with hardware 64-bit integers).
 fn mul_fine(a: i32, b: i32) -> i32 {
-    let negative = (a < 0) != (b < 0);
-    let ua = u32(abs(a));
-    let ub = u32(abs(b));
-    let ah = ua >> 12u;
-    let al = ua & 0xfffu;
-    let bh = ub >> 12u;
-    let bl = ub & 0xfffu;
-    let m = i32(ah * bh + ((ah * bl + al * bh + ((al * bl) >> 12u)) >> 12u));
-    return select(m, -m, negative);
+    return mul_shr_signed(a, b, 24u);
 }
 
 fn fade_q24(t: i32) -> i32 {
@@ -190,8 +187,12 @@ fn sin_turns(t: i32) -> i32 {
 // (mirror of the same functions in src/noise.rs).
 const Q30: u32 = 1073741824u;
 
-// `(a * b) >> s` of the exact 64-bit product, from 16-bit limbs
-// (`noise::mul_shr`). The caller keeps the result within 32 bits.
+// Wide products from 16-bit limbs, for devices without 64-bit integers.
+// The engine replaces the region between the markers with `wide64.wgsl`
+// (hardware 64-bit multiplies, the same bits) when the device has them:
+// the fixed-point domain mapping and noise run on these (a sixth of
+// shading's time emulated).
+// wide:begin
 // Exact 64-bit product of a and b as (low, high) words.
 fn mul_wide(a: u32, b: u32) -> vec2<u32> {
     let a1 = a >> 16u;
@@ -205,11 +206,8 @@ fn mul_wide(a: u32, b: u32) -> vec2<u32> {
     return vec2<u32>(lo, a1 * b1 + (mid >> 16u) + mid_carry + select(0u, 1u, lo < lo0));
 }
 
-fn add_wide(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> {
-    let lo = a.x + b.x;
-    return vec2<u32>(lo, a.y + b.y + select(0u, 1u, lo < a.x));
-}
-
+// `(a * b) >> s` of the exact 64-bit product (`noise::mul_shr`). The
+// caller keeps the result within 32 bits.
 fn mul_shr(a: u32, b: u32, s: u32) -> u32 {
     let a1 = a >> 16u;
     let a0 = a & 0xffffu;
@@ -228,6 +226,31 @@ fn mul_shr(a: u32, b: u32, s: u32) -> u32 {
     return (lo >> s) | (hi << (32u - s));
 }
 
+// a b / 2^s rounded to nearest (halves up) of the exact signed 64-bit
+// product (`noise::mul_shr_signed`): the unsigned product less each
+// negative operand's correction in the high word, plus 2^(s - 1).
+fn mul_shr_signed(a: i32, b: i32, s: u32) -> i32 {
+    let p = mul_wide(bitcast<u32>(a), bitcast<u32>(b));
+    var hi = p.y - select(0u, bitcast<u32>(b), a < 0) - select(0u, bitcast<u32>(a), b < 0);
+    var lo = p.x;
+    if s == 0u { return bitcast<i32>(lo); }
+    if s <= 32u {
+        let l = lo + (1u << (s - 1u));
+        hi += select(0u, 1u, l < lo);
+        lo = l;
+    } else {
+        hi += 1u << (s - 33u);
+    }
+    if s >= 32u { return bitcast<i32>(hi) >> (s - 32u); }
+    return bitcast<i32>((lo >> s) | (hi << (32u - s)));
+}
+// wide:end
+
+fn add_wide(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> {
+    let lo = a.x + b.x;
+    return vec2<u32>(lo, a.y + b.y + select(0u, 1u, lo < a.x));
+}
+
 // 1 / sqrt(d) in Q30 for d in [1, 4) (`noise::rsqrt_wide`).
 fn rsqrt_wide(d: u32) -> u32 {
     var y = 1342177280u - mul_shr(d, 204010946u, 30u);
@@ -236,12 +259,6 @@ fn rsqrt_wide(d: u32) -> u32 {
         y = mul_shr(y, 3u * Q30 - dy2, 31u);
     }
     return y;
-}
-
-// sign(a b) floor(|a| |b| / 2^s) (`noise::mul_shr_signed`).
-fn mul_shr_signed(a: i32, b: i32, s: u32) -> i32 {
-    let m = i32(mul_shr(u32(abs(a)), u32(abs(b)), s));
-    return select(m, -m, (a < 0) != (b < 0));
 }
 
 // v / |v| in Q30 (`noise::unit_q30`).

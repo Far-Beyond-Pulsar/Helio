@@ -106,7 +106,7 @@ impl PortalEditorOverlayPass {
                 // (same reasoning as helio-pass-portal-mask's stamp draw) —
                 // don't paint the indicator through a wall.
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(helio_core::depth::NEARER_EQUAL),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),

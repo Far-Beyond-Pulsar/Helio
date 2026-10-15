@@ -50,12 +50,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     }
     let d = texel(scene_depth, in.uv).r;
     // Sky (nothing written) is black.
-    if !(d < 1.0) { return vec4(0.0, 0.0, 0.0, 1.0); }
+    if helio_is_sky(d) { return vec4(0.0, 0.0, 0.0, 1.0); }
     let near = cameras[0].position_near.w;
     let far = cameras[0].forward_far.w;
-    let distance = helio_view_depth(d, near, far);
+    let distance = helio_view_depth(cameras[0].proj, d);
     // Logarithmic in distance so near and far detail both read: white at the
-    // near plane, black at the far plane.
+    // near plane, black at the effects' range (`forward_far.w`).
     let t = clamp(log(distance / near) / log(far / near), 0.0, 1.0);
     return vec4(vec3(1.0 - t), 1.0);
 }

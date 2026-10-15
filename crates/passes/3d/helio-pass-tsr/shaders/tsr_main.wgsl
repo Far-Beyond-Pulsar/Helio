@@ -1,3 +1,4 @@
+//!use helio_prelude
 // Temporal Super-Resolution (TSR) — compute-free fullscreen resolve
 //
 // Algorithm:
@@ -29,7 +30,10 @@ const MAX_HISTORY_BLEND_RATE:   f32 = 1.0;
 const LARGE_MOTION_THRESHOLD:   f32 = 0.01;  // UV-space velocity magnitude
 const DISOCCLUSION_THRESHOLD:   f32 = 0.05;  // normalised depth difference
 const SHIMMER_VAR_THRESHOLD:    f32 = 0.03;
-const EDGE_DEPTH_THRESHOLD:     f32 = 0.02;
+// Spread of view depth across the neighbourhood, relative to its nearest
+// tap. Linear rather than raw depth: a raw-depth spread means centimetres near
+// the camera and kilometres at the horizon.
+const EDGE_DEPTH_THRESHOLD:     f32 = 0.1;
 const CAS_SHARPNESS:            f32 = 0.45;
 // Manhattan distances in the 5x5 footprint are integers from 0 to 4.
 // Avoid evaluating the same exponential for every tap of every output pixel.
@@ -45,17 +49,7 @@ const NEIGHBOUR_WEIGHTS: array<f32, 5> = array<f32, 5>(
 @group(0) @binding(3) var linear_sampler: sampler;
 @group(0) @binding(4) var point_sampler:  sampler;
 
-struct CameraUniforms {
-    view:           mat4x4<f32>,
-    proj:           mat4x4<f32>,
-    view_proj:      mat4x4<f32>,
-    inv_view_proj:  mat4x4<f32>,
-    position_near:  vec4<f32>,
-    forward_far:    vec4<f32>,
-    jitter_frame:   vec4<f32>,
-    prev_view_proj: mat4x4<f32>,
-}
-@group(0) @binding(5) var<storage, read> cameras: array<CameraUniforms, 2>;
+@group(0) @binding(5) var<storage, read> cameras: array<Camera, 2>;
 
 struct TsrUniform {
     jitter_offset:  vec2<f32>, // sub-pixel jitter in [-0.5, 0.5)
@@ -152,7 +146,7 @@ struct Neighbourhood {
     aabb_max: vec3<f32>,
     avg:      vec3<f32>,
     variance: f32,      // luminance variance
-    depth_range: vec2<f32>, // min, max depth in neighbourhood
+    depth_range: vec2<f32>, // nearest, farthest view depth in neighbourhood
 }
 
 // Gather neighbourhood statistics in tonemapped YCoCg space.
@@ -188,7 +182,7 @@ fn gather_neighbourhood(
             l1      += w * q;
             l2      += w * q * q;
 
-            let d = textureLoad(depth, p, 0);
+            let d = helio_view_depth(cameras[0].proj, textureLoad(depth, p, 0));
             d_min = min(d_min, d);
             d_max = max(d_max, d);
         }
@@ -237,7 +231,7 @@ fn classify_pixel(
     }
 
     // Edge: large depth range in neighbourhood
-    if (n.depth_range.y - n.depth_range.x) > EDGE_DEPTH_THRESHOLD {
+    if (n.depth_range.y - n.depth_range.x) > EDGE_DEPTH_THRESHOLD * n.depth_range.x {
         flags |= CLASS_EDGE;
     }
 
@@ -358,13 +352,13 @@ fn apply_cas(rgb: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
 // jitter after reprojection. Keep clip W for behind-camera rejection.
 fn reproject_history(raster_uv: vec2<f32>, depth: f32) -> vec4<f32> {
     let ndc = raster_uv * vec2<f32>(2.0,-2.0) + vec2<f32>(-1.0,1.0);
-    let world_h = cameras[0].inv_view_proj * vec4<f32>(ndc,depth,1.0);
-    // Far-plane texels (sky) reproject as directions: the homogeneous point
-    // minus the eye, exact for any w including w = 0 (a far plane at f32
-    // infinity). Dividing by w there gave NaN, and its derivatives made the
-    // depth tolerance of every pixel next to the sky NaN (history rejected
-    // along silhouettes). Sky has no history depth.
-    let sky = depth >= 1.0;
+    let world_h = cameras[0].view_proj_inv * vec4<f32>(ndc,depth,1.0);
+    // Sky texels reproject as directions: the homogeneous point minus the
+    // eye, exact for any w including the w = 0 of depth 0 (infinity).
+    // Dividing by w there gave NaN, and its derivatives made the depth
+    // tolerance of every pixel next to the sky NaN (history rejected along
+    // silhouettes). Sky has no history depth.
+    let sky = helio_is_sky(depth);
     let point = select(vec4<f32>(world_h.xyz/world_h.w,1.0),
         vec4<f32>(world_h.xyz - world_h.w*cameras[0].position_near.xyz,0.0), sky);
     let prev_clip = cameras[0].prev_view_proj * point;
@@ -402,9 +396,9 @@ fn fs_main(in: VertexOutput) -> TsrOutput {
     let current_rgb = reconstruction.rgb;
     let depth_val = textureSample(depth_tex, point_sampler, cur_uv);
     let clip = vec4<f32>(cur_uv*vec2<f32>(2.0,-2.0)+vec2<f32>(-1.0,1.0),depth_val,1.0);
-    let world_h = cameras[0].inv_view_proj * clip;
+    let world_h = cameras[0].view_proj_inv * clip;
     let view_position = cameras[0].view * vec4<f32>(world_h.xyz/world_h.w,1.0);
-    let current_depth = select(max(-view_position.z,0.0),0.0,depth_val>=1.0);
+    let current_depth = select(max(-view_position.z,0.0),0.0,helio_is_sky(depth_val));
 
 
     // Full reactivity promises current-frame-only output. Bypass reprojection

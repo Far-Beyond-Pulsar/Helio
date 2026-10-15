@@ -1,10 +1,7 @@
-// Camera follows the renderer layout. GpuLight is the GPU-derived 64-byte
-// prefix of SceneDB's 128-byte light row; no other light fields are read here.
-struct Camera {
-    view: mat4x4<f32>, proj: mat4x4<f32>, view_proj: mat4x4<f32>,
-    view_proj_inv: mat4x4<f32>, position_near: vec4<f32>, forward_far: vec4<f32>,
-    jitter_frame: vec4<f32>, prev_view_proj: mat4x4<f32>,
-}
+//!use helio_prelude
+// Camera and the depth convention come from the prelude. GpuLight is the
+// GPU-derived 64-byte prefix of SceneDB's 128-byte light row; no other light
+// fields are read here.
 struct GpuLight {
     position_range: vec4<f32>, direction_outer: vec4<f32>, color_intensity: vec4<f32>,
     shadow_index: u32, light_type: u32, inner_angle: f32, _pad: u32,

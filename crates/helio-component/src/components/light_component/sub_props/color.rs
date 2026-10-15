@@ -3,6 +3,8 @@ use serde_json::Value;
 
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Color", category_color = "#FF8AAE")]
+// Fields added later load from levels saved before them.
+#[serde(default)]
 pub struct ColorLightProps {
     #[property(category = "Color")]
     #[gpu]

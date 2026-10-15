@@ -263,7 +263,7 @@ fn front_object_survives_behind_object_culled_always_visible_overrides() {
         let queue = Arc::new(queue);
 
         let view = Mat4::look_at_rh(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y);
-        let proj = Mat4::perspective_rh(60f32.to_radians(), WIDTH as f32 / HEIGHT as f32, 0.1, 1000.0);
+        let proj = helio_core::depth::perspective(60f32.to_radians(), WIDTH as f32 / HEIGHT as f32, 0.1);
         let view_proj = proj * view;
         let camera = helio_core::GpuCameraUniforms::new(
             view, proj, Vec3::ZERO, 0.1, 1000.0, 0, [0.0, 0.0], view_proj,

@@ -59,7 +59,8 @@ fn exposure_partial_buffer(device: &wgpu::Device, width: u32, height: u32) -> wg
     let (gx, gy) = exposure_groups(width, height);
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("PostProcess Exposure Partials"),
-        size: u64::from(gx) * u64::from(gy) * 8,
+        // A 64-bin histogram a workgroup (`cs_exposure`).
+        size: u64::from(gx) * u64::from(gy) * 64 * 4,
         usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     })
@@ -362,7 +363,8 @@ impl PostProcessPass {
                 uniform_entry(0, cfv),
                 storage_ro_entry(1, cfv),
                 sampled_tex_entry(2, cfv, false),
-                sampled_tex_entry(3, fv, true),
+                // Depth: metering skips sky and space (`cs_exposure`).
+                sampled_tex_entry(3, cfv, true),
                 sampler_entry(4, cfv, true),
                 sampler_entry(5, fv, false),
                 storage_buf_entry(11, cfv),

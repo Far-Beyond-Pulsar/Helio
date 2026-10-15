@@ -110,13 +110,6 @@ pub(crate) fn bake_ridge_suffix(
     Ok(packed)
 }
 
-/// Display and canonical suffixes share the interval from the sum of negative
-/// amplitudes to the sum of positive amplitudes. Filtering and mask contraction
-/// preserve it, so their difference needs only its width: the omitted absolute
-/// amplitude sum already included in the canonical bounds and quantization pad.
-pub(crate) fn render_bounds(_grid: &Grid, _k: &LandformConstants, bounds: [i32; 24]) -> [i32; 24] {
-    bounds
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,7 +259,6 @@ mod tests {
                 }
             }
             let canonical = k.bound_margins(&grid);
-            assert_eq!(render_bounds(&grid, &k, canonical), canonical);
             assert_eq!(canonical, k.bound_margins(&grid));
         }
         // Constants (2272) and the ridge suffix (1056).

@@ -10,7 +10,6 @@ use helio_voxel_data::{
     VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION, VoxelEditJournal, VoxelStoredPayload,
 };
 pub use helio_voxel_data::{VoxelPayloadKey, VoxelPayloadStore};
-use pulsar_scene_model::components::Transform;
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
@@ -25,9 +24,6 @@ use std::{
 /// Component clones create fresh stores; callers can explicitly clone the
 /// `Arc` when shared access is intended. Four opaque words allow collision-free
 /// chunk keys (for example signed XYZ bit patterns plus an LOD word).
-fn empty_payload_store() -> VoxelPayloadStore {
-    Arc::new(RwLock::new((0, HashMap::new())))
-}
 
 /// Typed payload for block lifecycle events. Coordinates are the exact
 /// world-space centre of the base cell; `material` is the material present
@@ -132,18 +128,6 @@ fn deserialize_generator_ref_json(
 )]
 #[allow(dead_code)]
 type RegisteredVoxelGeneratorRef = VoxelGeneratorRef;
-
-fn default_chunk_edge_voxels() -> u32 {
-    8
-}
-
-fn default_max_chunk_lod() -> u32 {
-    16
-}
-
-fn default_lod_scale() -> u32 {
-    2
-}
 
 fn filled_cube_payload_store(dimensions: [u32; 3], slot: u8) -> VoxelPayloadStore {
     let mut chunks = HashMap::new();
@@ -314,34 +298,92 @@ pub enum VoxelWorldShape {
     InfinitePlane,
 }
 
+/// The air of a voxel world (`VoxelTerrainComponent::air`): the sky the
+/// level shows, its light on the ground and the haze in the distance.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    pulsar_reflection::Reflectable,
+)]
+pub enum VoxelAir {
+    /// The entity's `AtmosphereComponent` as authored, every property.
+    #[default]
+    Custom,
+    /// No air (a moon, an asteroid): a black sky and only the sun's light.
+    None,
+    /// Earth's air: a blue sky.
+    Earthlike,
+    /// Thin dusty air (Mars): a pale butterscotch sky, blue sunsets.
+    Thin,
+    /// Thick hazy air (Titan): a deep, murky sky.
+    Dense,
+}
+
+impl VoxelAir {
+    /// Names of the presets, as scripts give them.
+    pub const NAMES: [&'static str; 5] = ["custom", "none", "earthlike", "thin", "dense"];
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "custom" => Self::Custom,
+            "none" => Self::None,
+            "earthlike" | "earth" => Self::Earthlike,
+            "thin" | "mars" => Self::Thin,
+            "dense" | "titan" => Self::Dense,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        Self::NAMES[self as usize]
+    }
+}
+
 fn default_planet_radius() -> f64 {
     6_371_000.0
+}
+
+fn default_air_scale() -> f32 {
+    1.0
+}
+
+fn default_air_tint() -> [f32; 3] {
+    [1.0; 3]
 }
 
 fn default_plane_size() -> f64 {
     4_096.0
 }
 
-/// The base component of every voxel world, whatever generates it.
+/// A voxel world: a planet, a plane or an endless plane, whatever generates
+/// it. Every property is the world's whole description, and every one is a
+/// blueprint method too (`world_shape`/`set_world_shape`, `air`/`set_air`,
+/// ...), so a game can build random worlds.
 ///
-/// It owns what all terrains share: the world's shape and size, the voxel
-/// size, which registered generator fills it (with a seed), the material
-/// palette, editability, and the world's edits (an ordered brush journal
-/// plus per-sample payload chunks). A generator's own settings live in its
-/// settings component on the same entity (for example
-/// [`VoxelTerrainLayersComponent`] for the built-in generator), or in the
-/// opaque `generator_parameters` for generators without one. `domain_mode`
-/// describes the chunk-key domain of live sample data.
+/// - **World**: shape and size, voxel size.
+/// - **Generation**: the registered generator, its seed; its own settings
+///   live in its settings component on the same entity (for the built-in
+///   generator, [`VoxelTerrainLayersComponent`]), or in
+///   `generator_parameters` for generators without one.
+/// - **Environment**: the world's air. A preset derives the entity's
+///   `AtmosphereComponent` (the level's sky); `Custom` keeps it as
+///   authored.
+/// - **Appearance**: the renderer's look of its materials.
+/// - **Editing**: whether it can be dug and built, and its edits: an
+///   ordered brush journal saved with the level.
 #[engine_class(category = "Voxel/Terrain", debug, serialize, deserialize)]
 #[category("World", category_color = "#6FA86F")]
 #[category("Generation", category_color = "#D1A73F")]
+#[category("Environment", category_color = "#6F9FD1")]
+#[category("Appearance", category_color = "#B07FD1")]
 #[category("Editing", category_color = "#D18F6F")]
 pub struct VoxelTerrainComponent {
-    /// Runtime-only live payloads and data revision. Not an inspector
-    /// property, serialized configuration, or GPU-mirrored field. Component
-    /// clones copy the index/revision and share immutable payload allocations.
-    #[serde(skip)]
-    payloads: VoxelPayloadStore,
     /// Runtime-only events committed by world methods and drained after the
     /// method releases its World borrow. Clones start with an empty outbox.
     #[serde(skip)]
@@ -400,47 +442,35 @@ pub struct VoxelTerrainComponent {
     #[serde(default)]
     pub generator_parameters: String,
 
+    /// The world's air: a preset, or `Custom` for the entity's
+    /// `AtmosphereComponent` as authored.
+    #[serde(default)]
+    #[property(category = "Environment")]
+    pub air: VoxelAir,
+    /// How much air (1: the preset's; 0: none). It scales every scattering
+    /// coefficient of the preset.
+    #[serde(default = "default_air_scale")]
+    #[property(min = 0.0, max = 10.0, step = 0.05, category = "Environment", label = "Air density")]
+    pub air_density: f32,
+    /// The sky's colour: the preset's molecular scattering per channel.
+    #[serde(default = "default_air_tint")]
+    #[property(category = "Environment", label = "Sky tint")]
+    pub air_tint: [f32; 3],
+    /// Haze and dust: the preset's aerosol scattering, times this.
+    #[serde(default = "default_air_scale")]
+    #[property(min = 0.0, max = 20.0, step = 0.05, category = "Environment", label = "Haze")]
+    pub air_haze: f32,
+
     /// Renderer appearance JSON, independent of generator data and edits.
     #[serde(default)]
-    #[property(category = "Editing", label = "Terrain appearance (JSON)")]
+    #[property(category = "Appearance", label = "Terrain appearance (JSON)")]
     pub appearance_parameters: String,
 
-    // The fields below describe the chunk domain of live sample data
-    // (`payload_store`). Streamed terrain derives its own layout and LOD, so
-    // they are serialized but not shown in the inspector.
-    /// Domain discriminant: 0 bounded, 1 unbounded.
-    pub domain_mode: u32,
-    /// Finite-domain minimum and maximum on each axis. Ignored for unbounded domains.
-    pub bounds_min_x: f64,
-    pub bounds_min_y: f64,
-    pub bounds_min_z: f64,
-    pub bounds_max_x: f64,
-    pub bounds_max_y: f64,
-    pub bounds_max_z: f64,
-    /// Number of base-resolution voxels covered by one chunk key on each
-    /// axis at LOD zero. The payload format can encode that region as samples,
-    /// a hierarchy, a compressed field, or another registered representation.
-    #[serde(default = "default_chunk_edge_voxels")]
-    pub chunk_edge_voxels: u32,
-    /// Highest chunk LOD accepted for this terrain source.
-    #[serde(default = "default_max_chunk_lod")]
-    pub max_chunk_lod: u32,
-    /// Spatial scale between adjacent chunk LODs. Two means each coarser
-    /// chunk covers twice the width of a finer chunk along each axis.
-    #[serde(default = "default_lod_scale")]
-    pub lod_scale: u32,
-    /// Stable renderer backend identifier. Empty selects the unique backend
-    /// that supports the generator.
-    #[serde(default)]
-    pub renderer_id: String,
-    /// Palette of IDs into Helio's existing SceneDB material records.
-    pub material_ids: Vec<u32>,
-    /// Whether external callers may submit canonical live edit/data batches.
+    /// Whether it can be dug and built (the sculpt tool, block methods).
     #[property(category = "Editing")]
     pub editable: bool,
-    /// Generator/configuration revision, separate from the runtime chunk-data
-    /// revision held with `payloads`. It is serialized with authored config
-    /// but omitted from the property editor.
+    /// Generator/configuration revision. It is serialized with authored
+    /// config but omitted from the property editor.
     pub source_revision: u64,
     /// Ordered shape edits (destruction and construction), saved with the
     /// level. Append through the sculpt tool or the scripting methods, which
@@ -452,7 +482,6 @@ pub struct VoxelTerrainComponent {
 impl Default for VoxelTerrainComponent {
     fn default() -> Self {
         Self {
-            payloads: empty_payload_store(),
             pending_block_broken: Vec::new(),
             pending_block_placed: Vec::new(),
             pending_block_material_changed: Vec::new(),
@@ -460,23 +489,15 @@ impl Default for VoxelTerrainComponent {
             shape: VoxelWorldShape::default(),
             planet_radius: default_planet_radius(),
             plane_size: default_plane_size(),
-            domain_mode: 1,
-            bounds_min_x: 0.0,
-            bounds_min_y: 0.0,
-            bounds_min_z: 0.0,
-            bounds_max_x: 0.0,
-            bounds_max_y: 0.0,
-            bounds_max_z: 0.0,
             voxel_size: 0.1,
-            chunk_edge_voxels: default_chunk_edge_voxels(),
-            max_chunk_lod: default_max_chunk_lod(),
-            lod_scale: default_lod_scale(),
-            renderer_id: String::new(),
             generator: VoxelGeneratorRef::default(),
             seed: 0,
             generator_parameters: String::new(),
+            air: VoxelAir::default(),
+            air_density: default_air_scale(),
+            air_tint: default_air_tint(),
+            air_haze: default_air_scale(),
             appearance_parameters: String::new(),
-            material_ids: vec![0],
             editable: true,
             source_revision: 0,
             edits: VoxelEditJournal::default(),
@@ -511,21 +532,12 @@ impl VoxelTerrainComponent {
         }
     }
 
-    /// Low-level live SceneDB data capability. Normal
-    /// producers should mutate through `VoxelSourceWriter` so validation and
-    /// revision checks are preserved; scripts should export via data snapshots.
-    /// This handle carries no persistence policy.
-    pub fn payload_store(&self) -> VoxelPayloadStore {
-        Arc::clone(&self.payloads)
-    }
 }
 
-// Clone keeps a value-preserving independent live chunk index for SceneDB
-// snapshots/transactions; immutable payload allocations remain shared.
+// Clone starts with an empty event outbox.
 impl Clone for VoxelTerrainComponent {
     fn clone(&self) -> Self {
         Self {
-            payloads: clone_payload_store(&self.payloads),
             pending_block_broken: Vec::new(),
             pending_block_placed: Vec::new(),
             pending_block_material_changed: Vec::new(),
@@ -533,23 +545,15 @@ impl Clone for VoxelTerrainComponent {
             shape: self.shape,
             planet_radius: self.planet_radius,
             plane_size: self.plane_size,
-            domain_mode: self.domain_mode,
-            bounds_min_x: self.bounds_min_x,
-            bounds_min_y: self.bounds_min_y,
-            bounds_min_z: self.bounds_min_z,
-            bounds_max_x: self.bounds_max_x,
-            bounds_max_y: self.bounds_max_y,
-            bounds_max_z: self.bounds_max_z,
             voxel_size: self.voxel_size,
-            chunk_edge_voxels: self.chunk_edge_voxels,
-            max_chunk_lod: self.max_chunk_lod,
-            lod_scale: self.lod_scale,
-            renderer_id: self.renderer_id.clone(),
             generator: self.generator.clone(),
             seed: self.seed,
             generator_parameters: self.generator_parameters.clone(),
+            air: self.air,
+            air_density: self.air_density,
+            air_tint: self.air_tint,
+            air_haze: self.air_haze,
             appearance_parameters: self.appearance_parameters.clone(),
-            material_ids: self.material_ids.clone(),
             editable: self.editable,
             source_revision: self.source_revision,
             edits: self.edits.clone(),
@@ -625,6 +629,10 @@ pub enum VoxelLayerKind {
     Basins,
     /// A constant height (a flat world is one plateau).
     Plateau,
+    /// Escarpments: inside regions of Scale covering Coverage, the layers
+    /// before it step into terraces Height tall, joined by cliffs over the
+    /// last Ratio of each step.
+    Cliffs,
 }
 
 /// Where a terrain layer applies.
@@ -1520,103 +1528,18 @@ fn edit_terrain_samples(
     if !component.enabled || !component.editable {
         return Err("voxel terrain is disabled or not editable".into());
     }
-    if super::voxel_world::is_generated(component) {
-        // Generated terrain keeps its edits in the journal: sample (x, y, z)
-        // is the block at ((x, y, z) + 0.5) voxels from the origin, and the
-        // slot is a terrain material id.
-        let planet = super::voxel_world::terrain_world(world, entity)?;
-        let voxel = planet.grid().voxel_size();
-        let edits = samples
-            .iter()
-            .map(|s| {
-                let p = glam::DVec3::new(s[0] as f64 + 0.5, s[1] as f64 + 0.5, s[2] as f64 + 0.5)
-                    * voxel;
-                super::voxel_world::block_edit(&planet, p, u32::from(material_slot))
-            })
-            .collect();
-        return super::voxel_world::append_edits(world, entity, edits);
-    }
-    if component.chunk_edge_voxels != 8 {
-        return Err("sample edits require the built-in 8-voxel chunk layout".into());
-    }
-    if component.domain_mode != 0 && component.domain_mode != 1 {
-        return Err("voxel terrain domain_mode must be bounded (0) or unbounded (1)".into());
-    }
-    if !component.voxel_size.is_finite() || component.voxel_size <= 0.0 || component.lod_scale == 0
-    {
-        return Err("voxel terrain requires a positive finite voxel size and LOD scale".into());
-    }
-    if component.material_ids.len() > usize::from(u8::MAX) {
-        return Err("voxel terrain material palette exceeds 255 IDs".into());
-    }
-    // The terrain instance's placement is its owner object's transform.
-    let transform = pulsar_scene_model::attachments::owner_component::<Transform>(world, entity)
-        .copied()
-        .unwrap_or_default();
-    let [sx, sy, sz] = transform.scale;
-    if transform
-        .rotation
+    // Sample (x, y, z) is the block at ((x, y, z) + 0.5) voxels from the
+    // origin, and the slot is a terrain material id: an edit in the journal.
+    let planet = super::voxel_world::terrain_world(world, entity)?;
+    let voxel = planet.grid().voxel_size();
+    let edits = samples
         .iter()
-        .any(|value| !value.is_finite() || value.abs() > 1.0e-5)
-        || !sx.is_finite()
-        || sx <= 0.0
-        || !sy.is_finite()
-        || !sz.is_finite()
-        || (sx - sy).abs() > 1.0e-5
-        || (sx - sz).abs() > 1.0e-5
-        || transform.position.iter().any(|value| !value.is_finite())
-    {
-        return Err(
-            "voxel terrain edits require an unrotated transform with finite positive uniform scale"
-                .into(),
-        );
-    }
-    let max_lod = u8::try_from(component.max_chunk_lod)
-        .map_err(|_| "max_chunk_lod must fit in a chunk key".to_string())?;
-    let domain = if component.domain_mode == 1 {
-        helio_voxel_data::VoxelDomain::Unbounded { max_lod }
-    } else {
-        let min = [
-            component.bounds_min_x,
-            component.bounds_min_y,
-            component.bounds_min_z,
-        ];
-        let max = [
-            component.bounds_max_x,
-            component.bounds_max_y,
-            component.bounds_max_z,
-        ];
-        if (0..3)
-            .any(|axis| !min[axis].is_finite() || !max[axis].is_finite() || min[axis] >= max[axis])
-        {
-            return Err("bounded terrain requires finite increasing bounds".into());
-        }
-        let chunk_size = component.voxel_size * f64::from(sx) * 8.0;
-        if !chunk_size.is_finite() || chunk_size <= 0.0 {
-            return Err("voxel_size must be finite and positive".into());
-        }
-        let chunk_min = std::array::from_fn(|axis| {
-            ((min[axis] - f64::from(transform.position[axis])) / chunk_size).floor() as i64
-        });
-        let chunk_max = std::array::from_fn(|axis| {
-            (((max[axis] - f64::from(transform.position[axis])) / chunk_size).ceil() as i64)
-                .saturating_sub(1)
-        });
-        helio_voxel_data::VoxelDomain::BoundedBase {
-            min: chunk_min,
-            max: chunk_max,
-            max_lod,
-            lod_scale: component.lod_scale,
-        }
-    };
-    publish_samples(
-        component.payload_store(),
-        helio_voxel_data::VoxelTerrainId(u128::from(entity.bits())),
-        samples,
-        material_slot,
-        &component.material_ids,
-        domain,
-    )
+        .map(|s| {
+            let p = glam::DVec3::new(s[0] as f64 + 0.5, s[1] as f64 + 0.5, s[2] as f64 + 0.5) * voxel;
+            super::voxel_world::block_edit(&planet, p, u32::from(material_slot))
+        })
+        .collect();
+    super::voxel_world::append_edits(world, entity, edits)
 }
 
 fn publish_samples(
@@ -1674,19 +1597,6 @@ mod tests {
     use super::*;
     use pulsar_reflection::EngineClass;
 
-    fn assert_runtime_storage<T>(component: &T, payloads: &VoxelPayloadStore)
-    where
-        T: EngineClass + serde::Serialize + for<'de> serde::Deserialize<'de>,
-    {
-        assert!(payloads.read().unwrap().1.is_empty());
-        let serialized = serde_json::to_value(component).unwrap();
-        assert!(serialized.get("payloads").is_none());
-
-        let restored: T = serde_json::from_value(serialized).unwrap();
-        let restored_json = serde_json::to_value(restored).unwrap();
-        assert!(restored_json.get("payloads").is_none());
-    }
-
     #[test]
     fn voxel_component_starts_as_eight_filled_chunks_hidden_from_serialization() {
         let component = VoxelComponent::default();
@@ -1726,34 +1636,48 @@ mod tests {
     }
 
     #[test]
-    fn terrain_component_runtime_payloads_are_empty_hidden_and_not_serialized() {
-        let component = VoxelTerrainComponent::default();
-        assert_runtime_storage(&component, &component.payloads);
-        assert!(
-            !component
-                .get_properties()
-                .iter()
-                .any(|property| property.name == "payloads")
-        );
+    fn older_terrains_load_and_drop_their_chunk_fields() {
+        // A level saved before the world description: chunk-domain fields,
+        // a renderer and a palette.
+        let mut value = serde_json::to_value(VoxelTerrainComponent::planet(1_737_400.0)).unwrap();
+        let object = value.as_object_mut().unwrap();
+        for field in ["air", "air_density", "air_tint", "air_haze"] {
+            object.remove(field);
+        }
+        object.insert("domain_mode".into(), 1.into());
+        object.insert("chunk_edge_voxels".into(), 8.into());
+        object.insert("max_chunk_lod".into(), 16.into());
+        object.insert("lod_scale".into(), 2.into());
+        object.insert("renderer_id".into(), "helio.voxel-terrain".into());
+        object.insert("material_ids".into(), serde_json::json!([0, 1]));
+        object.insert("bounds_max_x".into(), 64.0.into());
+        let restored: VoxelTerrainComponent = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.planet_radius, 1_737_400.0);
+        assert_eq!(restored.air, VoxelAir::Custom, "the authored sky stays");
+        assert_eq!((restored.air_density, restored.air_tint, restored.air_haze), (1.0, [1.0; 3], 1.0));
+        let saved = serde_json::to_value(&restored).unwrap();
+        for field in ["domain_mode", "chunk_edge_voxels", "max_chunk_lod", "lod_scale", "renderer_id", "material_ids", "bounds_max_x", "payloads"] {
+            assert!(saved.get(field).is_none(), "{field} is not saved");
+        }
+        let properties = restored.get_properties();
+        for field in ["air", "air_density", "air_tint", "air_haze", "shape", "planet_radius", "voxel_size", "seed", "editable"] {
+            assert!(properties.iter().any(|property| property.name == field), "{field} is a property");
+        }
     }
 
     #[test]
-    fn older_terrain_config_defaults_generator_version_and_chunk_layout() {
-        let mut value = serde_json::to_value(VoxelTerrainComponent::default()).unwrap();
-        value.as_object_mut().unwrap().remove("generator_version");
-        value.as_object_mut().unwrap().remove("chunk_edge_voxels");
-        value.as_object_mut().unwrap().remove("max_chunk_lod");
-        value.as_object_mut().unwrap().remove("lod_scale");
-        let restored: VoxelTerrainComponent = serde_json::from_value(value).unwrap();
-        assert_eq!(restored.generator.version, 0);
-        assert_eq!(restored.chunk_edge_voxels, 8);
-        assert_eq!(restored.max_chunk_lod, 16);
-        assert_eq!(restored.lod_scale, 2);
+    fn air_names_round_trip() {
+        for name in VoxelAir::NAMES {
+            assert_eq!(VoxelAir::from_name(name).unwrap().name(), name);
+        }
+        assert_eq!(VoxelAir::from_name("Mars"), Some(VoxelAir::Thin));
+        assert_eq!(VoxelAir::from_name("vacuum"), None);
     }
 
     #[test]
     fn cloned_component_preserves_live_state_without_aliasing_future_mutations() {
-        let original = VoxelTerrainComponent::default();
+        let original = VoxelComponent::default();
+        let chunks = original.payloads.read().unwrap().1.len();
         let payload: Arc<[u8]> = Arc::from([1, 2, 3]);
         original.payloads.write().unwrap().1.insert(
             [u64::MAX, 0, 42, 7],
@@ -1762,9 +1686,8 @@ mod tests {
         let clone = original.clone();
 
         assert!(!Arc::ptr_eq(&original.payloads, &clone.payloads));
-        assert_eq!(original.payloads.read().unwrap().1.len(), 1);
-        assert_eq!(clone.payloads.read().unwrap().1.len(), 1);
-        assert_eq!(clone.payloads.read().unwrap().0, 0);
+        assert_eq!(original.payloads.read().unwrap().1.len(), chunks + 1);
+        assert_eq!(clone.payloads.read().unwrap().1.len(), chunks + 1);
 
         clone
             .payloads
@@ -1772,7 +1695,7 @@ mod tests {
             .unwrap()
             .1
             .remove(&[u64::MAX, 0, 42, 7]);
-        assert_eq!(original.payloads.read().unwrap().1.len(), 1);
+        assert_eq!(original.payloads.read().unwrap().1.len(), chunks + 1);
 
         // Shared snapshots are explicit and retain immutable bytes cheaply.
         let shared_handle = Arc::clone(&original.payloads);

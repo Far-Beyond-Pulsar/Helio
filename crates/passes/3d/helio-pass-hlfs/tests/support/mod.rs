@@ -76,7 +76,7 @@ impl Fixture {
         scene.width = width;
         scene.height = height;
         let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 3.0), Vec3::ZERO, Vec3::Y);
-        let proj = Mat4::orthographic_rh(-2.0, 2.0, -2.0, 2.0, 0.1, 10.0);
+        let proj = helio_core::depth::orthographic(-2.0, 2.0, -2.0, 2.0, 0.1, 10.0);
         scene.camera.update(helio_core::GpuCameraUniforms::new(
             view,
             proj,
@@ -151,7 +151,7 @@ impl Fixture {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &depth,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear((3.0 - 0.1) / (10.0 - 0.1)),
+                        load: wgpu::LoadOp::Clear(ortho_depth(3.0)),
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -572,7 +572,7 @@ impl Fixture {
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(helio_core::depth::CLEAR), store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
                 ..Default::default()
@@ -686,7 +686,7 @@ impl Fixture {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
+                        load: wgpu::LoadOp::Clear(helio_core::depth::CLEAR),
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -726,6 +726,12 @@ impl helio_core::RenderPass for Timestamp {
         ctx.graphics_cmds().write_timestamp(&self.query, self.index);
         Ok(())
     }
+}
+
+/// Depth of a surface `distance` in front of the fixture's orthographic
+/// camera (near 0.1, far 10, reversed: the near plane is 1).
+pub fn ortho_depth(distance: f32) -> f32 {
+    (10.0 - distance) / (10.0 - 0.1)
 }
 
 pub fn point(
