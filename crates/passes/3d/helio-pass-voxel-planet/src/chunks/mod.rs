@@ -115,8 +115,8 @@ struct DrawParams {
     eye_lo: [f32; 4],
     /// Direction to the sun, near plane.
     sun: [f32; 4],
-    /// x: colour by level (1, `HELIO_VOXEL_CHUNKS_LEVELS`) or by primary
-    /// steps (2, `HELIO_VOXEL_CHUNKS_HEAT`, counting builds).
+    /// x: renderer debug mode in the low byte, followed by plain-colour and
+    /// environment-only voxel diagnostics in the high bits.
     debug: [u32; 4],
     /// Chunk table slots - 1, base cells per face edge, boxes holding the
     /// eye, frame.
@@ -774,6 +774,8 @@ impl Default for ResidencyConfig {
 pub struct ChunkWorld {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    uv_grid_view: wgpu::TextureView,
+    uv_grid_sampler: wgpu::Sampler,
     gen_layout: wgpu::BindGroupLayout,
     tile_nodes: wgpu::ComputePipeline,
     tile_columns: wgpu::ComputePipeline,
@@ -1178,6 +1180,58 @@ fn view_entry(binding: u32, v: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
     }
 }
 
+fn create_uv_grid(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::TextureView, wgpu::Sampler) {
+    const UV_GRID_BYTES: &[u8] = include_bytes!("../../../../../../assets/UV_Grid_Sm.jpg");
+    let decoded = image::load_from_memory(UV_GRID_BYTES)
+        .expect("embedded UV reference image is valid")
+        .to_rgba8();
+    let (width, height) = decoded.dimensions();
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("voxel UV reference image"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        decoded.as_raw(),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("voxel UV reference sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    });
+    (view, sampler)
+}
+
 fn texture_entry(
     binding: u32,
     sample_type: wgpu::TextureSampleType,
@@ -1271,7 +1325,7 @@ pub fn shader_sources(
     };
     let wcount = |n: u32| {
         let heat = format!(
-            "if counted && (debug_mode() == 2u || debug_mode() == 32u) {{ heat += u32({n} == 1); }}"
+            "if counted && (voxel_heat_debug() || debug_mode() == 32u) {{ heat += u32({n} == 1); }}"
         );
         if counting {
             format!("if counted {{ atomicAdd(&counters[{n}], 1u); }} {heat}")
@@ -1460,6 +1514,17 @@ impl ChunkWorld {
                     },
                     count: None,
                 },
+                texture_entry(
+                    23,
+                    wgpu::TextureSampleType::Float { filterable: true },
+                    wgpu::ShaderStages::COMPUTE,
+                ),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 24,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let seed_layout_1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1525,6 +1590,17 @@ impl ChunkWorld {
                     wgpu::TextureSampleType::Float { filterable: false },
                     wgpu::ShaderStages::FRAGMENT,
                 ),
+                texture_entry(
+                    23,
+                    wgpu::TextureSampleType::Float { filterable: true },
+                    wgpu::ShaderStages::FRAGMENT,
+                ),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 24,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let layout = |second: &wgpu::BindGroupLayout| {
@@ -1770,9 +1846,12 @@ impl ChunkWorld {
         let drawn_set = drawn::DrawnSet::new(MAX_CHUNKS, TABLE_SLOTS, planet.grid().levels() - 1);
         let chunk_table = buffer("chunk table", (TABLE_SLOTS * 32) as u64, s);
         queue.write_buffer(&chunk_table, 0, bytemuck::cast_slice(drawn_set.table()));
+        let (uv_grid_view, uv_grid_sampler) = create_uv_grid(device, queue);
         Self {
             device: device.clone(),
             queue: queue.clone(),
+            uv_grid_view,
+            uv_grid_sampler,
             gen_layout,
             tile_nodes,
             tile_columns,
@@ -3572,19 +3651,15 @@ impl ChunkWorld {
                     .ok()
                     .map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect())
                     .unwrap_or_default();
-                let debug_mode = if std::env::var_os("HELIO_VOXEL_CHUNKS_HEAT").is_some() {
-                    2
+                let local_debug = if std::env::var_os("HELIO_VOXEL_CHUNKS_HEAT").is_some() {
+                    0x200
                 } else if let Ok(levels) = std::env::var("HELIO_VOXEL_CHUNKS_LEVELS") {
-                    if levels == "half" {
-                        3
-                    } else {
-                        1
-                    }
+                    if levels == "half" { 0x800 } else { 0x400 }
                 } else {
-                    self.debug_mode
+                    0
                 };
                 [
-                    debug_mode | (u32::from(self.plain_colour) << 8),
+                    self.debug_mode | (u32::from(self.plain_colour) << 8) | local_debug,
                     u32::from(std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some()),
                     pixel.first().copied().unwrap_or(u32::MAX),
                     pixel.get(1).copied().unwrap_or(u32::MAX),
@@ -3753,6 +3828,11 @@ impl ChunkWorld {
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: wgpu::BindingResource::TextureView(&exits),
+                },
+                view_entry(23, &self.uv_grid_view),
+                wgpu::BindGroupEntry {
+                    binding: 24,
+                    resource: wgpu::BindingResource::Sampler(&self.uv_grid_sampler),
                 },
             ],
         });
@@ -4073,6 +4153,11 @@ impl ChunkWorld {
                 wgpu::BindGroupEntry {
                     binding: 14,
                     resource: wgpu::BindingResource::TextureView(&view(&targets.normal)),
+                },
+                view_entry(23, &self.uv_grid_view),
+                wgpu::BindGroupEntry {
+                    binding: 24,
+                    resource: wgpu::BindingResource::Sampler(&self.uv_grid_sampler),
                 },
             ],
         });

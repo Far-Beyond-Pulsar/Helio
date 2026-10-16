@@ -1189,7 +1189,7 @@ fn create_uv_grid(
     wgpu::BindGroupLayout,
     wgpu::BindGroup,
 ) {
-    const UV_GRID_BYTES: &[u8] = include_bytes!("../assets/UV_Grid_Sm.jpg");
+    const UV_GRID_BYTES: &[u8] = include_bytes!("../../../../../assets/UV_Grid_Sm.jpg");
     let decoded = image::load_from_memory(UV_GRID_BYTES)
         .expect("embedded UV reference image is valid")
         .to_rgba8();

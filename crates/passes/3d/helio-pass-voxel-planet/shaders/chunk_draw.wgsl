@@ -1409,11 +1409,14 @@ fn trace(@builtin(global_invocation_id) id: vec3<u32>) {
     let normal = normalize(axis_world) * select(-1.0, 1.0, end.sign == 1u);
     let light = 0.25 + 0.75 * max(dot(normal, params.sun.xyz), 0.0);
     var colour = palette(material).rgb;
-    if debug_mode() == 2u || debug_mode() == 32u {
+    if debug_mode() == 1u {
+        let uv = voxel_face_uv(c, end.cell, end.axis, dir * end.t);
+        colour = textureSampleLevel(uv_reference_texture, uv_reference_sampler, uv, 0.0).rgb / light;
+    } else if voxel_heat_debug() || debug_mode() == 32u {
         // Steps: red to 64, yellow to 128, white to 192.
         let h = f32(heat) / 64.0;
         colour = clamp(vec3<f32>(h, h - 1.0, h - 2.0), vec3<f32>(0.0), vec3<f32>(1.0)) / light;
-    } else if debug_mode() == 1u {
+    } else if voxel_levels_debug() {
         colour = level_colour((bitcast<u32>(c.box.w) >> 8u) & 31u);
     }
     textureStore(out_colour, p, vec4<f32>(colour * light, 1.0));
@@ -1431,6 +1434,8 @@ fn resolve_vertex(@builtin(vertex_index) v: u32) -> @builtin(position) vec4<f32>
 
 @group(1) @binding(7) var hit_visibility: texture_2d<u32>;
 @group(1) @binding(14) var hit_normal: texture_2d<f32>;
+@group(1) @binding(23) var uv_reference_texture: texture_2d<f32>;
+@group(1) @binding(24) var uv_reference_sampler: sampler;
 
 // ---- Appearance ----
 
@@ -1570,10 +1575,23 @@ fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, hit_material: 
     return Look(albedo, ao);
 }
 
-// The debug mode (`params.debug.x` & 0xff): 1 levels, 2 the steps' heat,
-// 3 levels on the left half, 32 the editor's voxel trace-cost view.
+// Renderer-wide debug mode (`params.debug.x` & 0xff): 32 is voxel trace cost.
+// High bits keep environment-only chunk diagnostics from colliding with
+// registered viewport modes such as UV visualization.
 fn debug_mode() -> u32 {
     return params.debug.x & 0xffu;
+}
+
+fn voxel_heat_debug() -> bool {
+    return (params.debug.x & 0x200u) != 0u;
+}
+
+fn voxel_levels_debug() -> bool {
+    return (params.debug.x & 0x400u) != 0u;
+}
+
+fn voxel_levels_half_debug() -> bool {
+    return (params.debug.x & 0x800u) != 0u;
 }
 
 // Whether the walks write the plain colour target (bit 8 of
@@ -1583,7 +1601,20 @@ fn plain_colour() -> bool {
     return (params.debug.x & 0x100u) != 0u;
 }
 
-// A level's colour (`HELIO_VOXEL_CHUNKS_LEVELS`, debug modes 1 and 3).
+fn voxel_face_uv(c: ChunkDraw, cell: vec3<i32>, axis: u32, position: vec3<f32>) -> vec2<f32> {
+    let frame_position = vec3<f32>(c.i0.w, c.i1.w, c.i2.w)
+        + vec3<f32>(dot(c.i0.xyz, position), dot(c.i1.xyz, position), dot(c.i2.xyz, position));
+    let in_cell = clamp(frame_position - vec3<f32>(cell), vec3<f32>(0.0), vec3<f32>(1.0));
+    if axis == 0u {
+        return in_cell.yz;
+    }
+    if axis == 1u {
+        return in_cell.xz;
+    }
+    return in_cell.xy;
+}
+
+// A level's colour (`HELIO_VOXEL_CHUNKS_LEVELS`, environment-only diagnostic).
 fn level_colour(level: u32) -> vec3<f32> {
     let colours = array<vec3<f32>, 8>(vec3<f32>(0.9, 0.2, 0.2), vec3<f32>(0.9, 0.6, 0.1), vec3<f32>(0.8, 0.9, 0.1), vec3<f32>(0.2, 0.8, 0.2),
         vec3<f32>(0.1, 0.8, 0.8), vec3<f32>(0.2, 0.3, 0.9), vec3<f32>(0.6, 0.2, 0.9), vec3<f32>(0.9, 0.2, 0.7));
@@ -1630,9 +1661,14 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
         let cost = clamp(vec3<f32>(h, h - 1.0, h - 2.0), vec3<f32>(0.0), vec3<f32>(1.0));
         out.albedo = vec4<f32>(cost, 1.0);
     }
-    // Level colours (`HELIO_VOXEL_CHUNKS_LEVELS`; `=half`: the left half,
-    // beside the shaded right).
-    if debug_mode() == 1u || (debug_mode() == 3u && p.x < i32(size.x / 2u)) { out.albedo = vec4<f32>(level_colour(u32(chunk_keys[v.x].x >> 8u) & 31u), 1.0); }
+    if debug_mode() == 1u {
+        let uv = voxel_face_uv(c, cell, axis, position);
+        out.albedo = vec4<f32>(textureSample(uv_reference_texture, uv_reference_sampler, uv).rgb, 1.0);
+    }
+    // Environment-only level diagnostics (`HELIO_VOXEL_CHUNKS_LEVELS`).
+    if voxel_levels_debug() && (!voxel_levels_half_debug() || p.x < i32(size.x / 2u)) {
+        out.albedo = vec4<f32>(level_colour(u32(chunk_keys[v.x].x >> 8u) & 31u), 1.0);
+    }
     out.normal = vec4<f32>(normal, f0);
     out.orm = vec4<f32>(look.ao * shading.w, clamp(palette(material).w, 0.04, 1.0), 0.0, f0);
     out.emissive = vec4<f32>(0.0, 0.0, 0.0, f0);
