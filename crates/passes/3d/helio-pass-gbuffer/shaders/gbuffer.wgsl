@@ -576,7 +576,7 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     out.lightmap_uv = input.lightmap_uv;
     out.sss = vec4<f32>(surface.subsurface_color, surface.subsurface_radius);
     out.extra = vec4<f32>(surface.roughness_aniso_x, surface.roughness_aniso_y,
-                          surface.aniso_rotation, bitcast<f32>(surface.flags));
+                          surface.aniso_rotation, f32(surface.flags));
     out.velocity = compute_velocity(input);
     return out;
 }
