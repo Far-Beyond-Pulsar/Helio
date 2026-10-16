@@ -378,7 +378,34 @@ fn generation_tile_nodes(tile: u32, face: u32, ci: i32, cj: i32, level: u32, lan
     let base = (tile * TILE_NODES * TILE_NODES + lane) * TERRAIN_NODE_WORDS;
     for (var slot = 0u; slot < TERRAIN_NODE_WORDS; slot++) {{ tile_nodes[base + slot] = terrain_node_word(slot); }}
 }}
-"
+
+// The material slope's height lattices (`tile_slopes_main`): ring `ring`
+// of nodes after the scratch ones, from node-aligned column `origin` of
+// `level` (`count`^2 of them, at most 5x5, in rows of TILE_NODES).
+const LATTICE_AT: u32 = NODE_SCRATCH_AT + {scratch}u;
+
+// Lane `lane`'s node of ring `ring`.
+fn generation_lattice_nodes(ring: u32, face: u32, origin: vec2<i32>, count: u32, level: u32, lane: u32) {{
+    let n = vec2<i32>(i32(lane % count), i32(lane / count));
+    if lane >= count * count || !terrain_has_nodes(level + u32(world.grid.w)) {{ return; }}
+    let at = origin + n * NODE_COLUMNS;
+    terrain_node(domain_point(face, at.x, at.y, level), level + u32(world.grid.w));
+    let base = (LATTICE_AT + ring * TILE_NODES * TILE_NODES + u32(n.y) * TILE_NODES + u32(n.x)) * TERRAIN_NODE_WORDS;
+    for (var slot = 0u; slot < TERRAIN_NODE_WORDS; slot++) {{ tile_nodes[base + slot] = terrain_node_word(slot); }}
+}}
+
+// A column of ring `ring`'s lattice (within 64 columns of `origin`).
+fn generation_lattice_column(ring: u32, origin: vec2<i32>, face: u32, i: i32, j: i32, level: u32, display: bool) -> vec2<i32> {{
+    if terrain_has_nodes(level + u32(world.grid.w)) {{
+        let first = vec2<i32>(i, j) & vec2<i32>(~(NODE_COLUMNS - 1));
+        let n = (first - origin) / NODE_COLUMNS;
+        gen_node_at = (LATTICE_AT + ring * TILE_NODES * TILE_NODES + u32(n.y) * TILE_NODES + u32(n.x)) * TERRAIN_NODE_WORDS;
+        gen_node_w = gen_node_weights(vec2<i32>(i, j) - first);
+    }}
+    return terrain_column_nodes(domain_point(face, i, j, level), level + u32(world.grid.w), display);
+}}
+",
+        scratch = NODE_SCRATCH
     ));
     s
 }

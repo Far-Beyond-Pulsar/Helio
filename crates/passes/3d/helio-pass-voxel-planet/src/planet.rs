@@ -515,8 +515,8 @@ impl Planet {
     }
     /// Slope (eighths of a cell per cell) that classifies the materials of
     /// base column (i, j), whatever level draws it: central differences of
-    /// level-4 heights two cells (3.2 m) each way, in base layers (as the
-    /// shader reads them from level-4 columns' relief).
+    /// level-4 heights two cells (3.2 m) each way, in base layers (as
+    /// `tile_slopes_main` in chunk_generate.wgsl evaluates them).
     ///
     /// Block slopes of level-4 cells are interpolated between their centres
     /// (in 32nds, truncated as the shader does).

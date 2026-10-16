@@ -80,9 +80,14 @@ struct TileJob {
     _pad: [u32; 3],
 }
 
-/// Footprints the pool holds by default: their columns and halos (70 KB
-/// each), within what the device binds.
+/// Footprints the pool holds by default: their columns, halos and material
+/// slopes (75 KB each), within what the device binds.
 const FOOTPRINT_POOL: usize = 2048;
+/// Material slope words a footprint (`SLOPE_STRIDE` of chunk_generate.wgsl:
+/// a level-3 footprint's 34x34 level-4 blocks).
+const SLOPE_STRIDE: u64 = 1156;
+/// Level-4 tops a footprint's slopes read, at most (`SLOPE_LATTICE`: 38x38).
+const SLOPE_LATTICE: u64 = 1444;
 
 /// Footprints whose columns (and lean halos) stay on the GPU across frames,
 /// so a footprint's columns are computed once while it stays in use,
@@ -751,6 +756,9 @@ pub struct ChunkWorld {
     tile_nodes: wgpu::ComputePipeline,
     tile_columns: wgpu::ComputePipeline,
     tile_halo: wgpu::ComputePipeline,
+    tile_slope_nodes: wgpu::ComputePipeline,
+    tile_slope_heights: wgpu::ComputePipeline,
+    tile_slopes: wgpu::ComputePipeline,
     chunk_columns: wgpu::ComputePipeline,
     chunk_build: wgpu::ComputePipeline,
     draw_layout: wgpu::BindGroupLayout,
@@ -791,6 +799,10 @@ pub struct ChunkWorld {
     tile_node_data: wgpu::Buffer,
     // Lean lattice heights past each tile's edges (`HALO_SIDE`^2 a tile).
     tile_halo_data: wgpu::Buffer,
+    // Each footprint's material slopes (`SLOPE_STRIDE` a footprint), and
+    // the batch's lattices of level-4 tops they come from.
+    tile_slope_data: wgpu::Buffer,
+    slope_lattice: wgpu::Buffer,
     tile_ranges: wgpu::Buffer,
     chunk_jobs: wgpu::Buffer,
     column_masks: wgpu::Buffer,
@@ -1267,6 +1279,8 @@ impl ChunkWorld {
                 storage(31, false, c),
                 storage(32, false, c),
                 storage(33, false, c),
+                storage(34, false, c),
+                storage(35, false, c),
             ],
         });
         let gen_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&gen_layout)], immediate_size: 0 });
@@ -1283,6 +1297,9 @@ impl ChunkWorld {
         let tile_nodes = compute("tile_nodes_main");
         let tile_columns = compute("tile_columns_main");
         let tile_halo = compute("tile_halo_main");
+        let tile_slope_nodes = compute("tile_slope_nodes_main");
+        let tile_slope_heights = compute("tile_slope_heights_main");
+        let tile_slopes = compute("tile_slopes_main");
         let chunk_columns = compute("chunk_columns_main");
         let chunk_build = compute("chunk_build_main");
         let evict_pipeline = compute("evict");
@@ -1513,6 +1530,9 @@ impl ChunkWorld {
             tile_nodes,
             tile_columns,
             tile_halo,
+            tile_slope_nodes,
+            tile_slope_heights,
+            tile_slopes,
             chunk_columns,
             chunk_build,
             draw_layout,
@@ -1544,14 +1564,16 @@ impl ChunkWorld {
             terrain,
             tile_jobs: buffer("chunk tile jobs", (TILE_BATCH * std::mem::size_of::<TileJob>()) as u64, s),
             tile_data: buffer("chunk footprint columns", pool_size as u64 * TILE_COLUMNS * 16, wgpu::BufferUsages::STORAGE),
-            // The tiles' nodes, the scratch nodes, and the 8 a column's
-            // node words read past the last.
+            // The tiles' nodes, the scratch nodes, the tiles' slope lattice
+            // rings, and the 8 a column's node words read past the last.
             tile_node_data: buffer(
                 "chunk tile nodes",
-                (TILE_BATCH as u64 * u64::from(crate::engine::TILE_NODES.pow(2)) + u64::from(crate::engine::NODE_SCRATCH) + 8) * u64::from(crate::engine::node_words(&program).max(1)) * 4,
+                (2 * TILE_BATCH as u64 * u64::from(crate::engine::TILE_NODES.pow(2)) + u64::from(crate::engine::NODE_SCRATCH) + 8) * u64::from(crate::engine::node_words(&program).max(1)) * 4,
                 wgpu::BufferUsages::STORAGE,
             ),
             tile_halo_data: buffer("chunk footprint halos", pool_size as u64 * 40 * 40 * 4, wgpu::BufferUsages::STORAGE),
+            tile_slope_data: buffer("chunk footprint slopes", pool_size as u64 * SLOPE_STRIDE * 4, wgpu::BufferUsages::STORAGE),
+            slope_lattice: buffer("chunk slope lattices", TILE_BATCH as u64 * SLOPE_LATTICE * 4, wgpu::BufferUsages::STORAGE),
             // Four words a tile, then the batch's tile count.
             tile_ranges: buffer("chunk tile ranges", (TILE_BATCH * 16 + 4) as u64, s | wgpu::BufferUsages::COPY_SRC),
             chunk_jobs: buffer("chunk jobs", (CHUNK_BATCH * 32) as u64, s),
@@ -1700,6 +1722,8 @@ impl ChunkWorld {
                 entry(3, &self.tile_data),
                 entry(25, &self.tile_node_data),
                 entry(26, &self.tile_halo_data),
+                entry(34, &self.tile_slope_data),
+                entry(35, &self.slope_lattice),
                 entry(4, &self.tile_ranges),
                 entry(5, &self.chunk_jobs),
                 entry(6, &self.column_masks),
@@ -2237,6 +2261,8 @@ impl ChunkWorld {
             if computed_count > 0 {
                 pass.set_pipeline(&self.tile_nodes);
                 pass.dispatch_workgroups(computed_count as u32, 1, 1);
+                pass.set_pipeline(&self.tile_slope_nodes);
+                pass.dispatch_workgroups(computed_count as u32, 1, 1);
             }
         }
         {
@@ -2245,6 +2271,10 @@ impl ChunkWorld {
             if computed_count > 0 {
                 pass.set_pipeline(&self.tile_columns);
                 pass.dispatch_workgroups(64, computed_count as u32, 1);
+                pass.set_pipeline(&self.tile_slope_heights);
+                pass.dispatch_workgroups((SLOPE_LATTICE as u32).div_ceil(64), computed_count as u32, 1);
+                pass.set_pipeline(&self.tile_slopes);
+                pass.dispatch_workgroups((SLOPE_STRIDE as u32).div_ceil(64), computed_count as u32, 1);
             }
         }
         {

@@ -126,6 +126,23 @@ const LEAF_PAGES: u32 = 64u;
 // Per slot: 1 when any of its leaf pages has a detail page (drawing skips
 // the lookup for the others).
 @group(0) @binding(33) var<storage, read_write> slot_details: array<u32>;
+// Each footprint's material slopes (`Planet::material_slope`), kept with
+// its columns in the pool: for levels up to MATERIAL_SLOPE_LEVEL - 1, the
+// block slopes of the level-4 cells its columns interpolate between, rows
+// of `slope_blocks(level)` from level-4 cell `slope_origin`.
+@group(0) @binding(34) var<storage, read_write> tile_slopes: array<i32>;
+const SLOPE_STRIDE: u32 = 1156u;
+const MATERIAL_SLOPE_LEVEL: u32 = 4u;
+
+// Level-4 block slopes a footprint of `level` keeps along a side.
+fn slope_blocks(level: u32) -> i32 {
+    return (4 << level) + 2;
+}
+
+// The first of them: level-4 cell (4 c << level) - 1 along each axis.
+fn slope_origin(job: TileJob) -> vec2<i32> {
+    return vec2<i32>((4 * job.cx) << job.level, (4 * job.cy) << job.level) - 1;
+}
 const DETAIL_WORDS: u32 = 1024u;
 
 // A detail page off the free stack (NONE: none free; the overflow flag is
@@ -202,6 +219,87 @@ fn encode_slope(g: f32) -> u32 {
 }
 
 var<workgroup> w_range: array<atomic<i32>, 4>;
+
+// The level-4 column tops (base layers) of each computed footprint's
+// lattice (`tile_slope_heights_main`): SLOPE_LATTICE a footprint of the
+// batch.
+@group(0) @binding(35) var<storage, read_write> slope_lattice: array<i32>;
+const SLOPE_LATTICE: u32 = 1444u;
+
+// A footprint's lattice: `side` level-4 columns a side from `first`, its
+// macro octaves from `nodes`^2 nodes from node-aligned `origin` (3x3 at
+// levels 0 and 1, up to 5x5 at level 3).
+struct SlopeLattice {
+    first: vec2<i32>,
+    origin: vec2<i32>,
+    side: i32,
+    nodes: u32,
+}
+
+fn slope_lattice_of(job: TileJob) -> SlopeLattice {
+    let side = slope_blocks(job.level) + 4;
+    let first = slope_origin(job) - 2;
+    let origin = first & vec2<i32>(~(NODE_COLUMNS - 1));
+    let reach = (((first + side - 1) & vec2<i32>(~(NODE_COLUMNS - 1))) - origin) / NODE_COLUMNS;
+    return SlopeLattice(first, origin, side, u32(max(reach.x, reach.y)) + 2u);
+}
+
+// The material slopes of each computed footprint below
+// MATERIAL_SLOPE_LEVEL (`Planet::material_slope`), in three dispatches:
+// the lattice's nodes (tiles), its level-4 heights two cells each way of
+// each block (23 x tiles, 64 a workgroup), then the block slopes (19 x
+// tiles).
+@compute @workgroup_size(64)
+fn tile_slope_nodes_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = tile_jobs[wg.x];
+    if job.level >= MATERIAL_SLOPE_LEVEL { return; }
+    let lattice = slope_lattice_of(job);
+    generation_lattice_nodes(wg.x, job.face, lattice.origin, lattice.nodes, MATERIAL_SLOPE_LEVEL, li);
+}
+
+@compute @workgroup_size(64)
+fn tile_slope_heights_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = tile_jobs[wg.y];
+    if job.level >= MATERIAL_SLOPE_LEVEL { return; }
+    let lattice = slope_lattice_of(job);
+    let n = i32(wg.x * 64u + li);
+    if n >= lattice.side * lattice.side { return; }
+    let c = lattice.first + vec2<i32>(n % lattice.side, n / lattice.side);
+    slope_lattice[wg.y * SLOPE_LATTICE + u32(n)] = div_floor(generation_lattice_column(wg.y, lattice.origin, job.face, c.x, c.y, MATERIAL_SLOPE_LEVEL, false).x, world.grid.y);
+}
+
+@compute @workgroup_size(64)
+fn tile_slopes_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = tile_jobs[wg.y];
+    if job.level >= MATERIAL_SLOPE_LEVEL { return; }
+    let blocks = slope_blocks(job.level);
+    let n = i32(wg.x * 64u + li);
+    if n >= blocks * blocks { return; }
+    let side = blocks + 4;
+    let at = wg.y * SLOPE_LATTICE;
+    let b = vec2<i32>(n % blocks, n / blocks) + 2;
+    let di = abs(slope_lattice[at + u32(b.y * side + b.x + 2)] - slope_lattice[at + u32(b.y * side + b.x - 2)]);
+    let dj = abs(slope_lattice[at + u32((b.y + 2) * side + b.x)] - slope_lattice[at + u32((b.y - 2) * side + b.x)]);
+    tile_slopes[job.slot * SLOPE_STRIDE + u32(n)] = (max(di, dj) << (16u - MATERIAL_SLOPE_LEVEL)) / 32768;
+}
+
+// The material slope of level column (i, j) of footprint `job` (below
+// MATERIAL_SLOPE_LEVEL): `Planet::material_slope` of the base column at
+// its centre, its blocks' slopes interpolated in 32nds.
+fn material_slope(job: TileJob, i: i32, j: i32) -> i32 {
+    let base = (vec2<i32>(i, j) << vec2<u32>(job.level)) + ((1 << job.level) >> 1u);
+    let r = base * 2 + 1 - 16;
+    let a = r >> vec2<u32>(5u);
+    let w = r - (a << vec2<u32>(5u));
+    let blocks = slope_blocks(job.level);
+    let b = a - slope_origin(job);
+    let at = job.slot * SLOPE_STRIDE + u32(b.y * blocks + b.x);
+    let s00 = tile_slopes[at];
+    let s10 = tile_slopes[at + 1u];
+    let s01 = tile_slopes[at + u32(blocks)];
+    let s11 = tile_slopes[at + u32(blocks) + 1u];
+    return ((32 - w.x) * (32 - w.y) * s00 + w.x * (32 - w.y) * s10 + (32 - w.x) * w.y * s01 + w.x * w.y * s11) >> 10u;
+}
 
 // A two-rate field's nodes of each tile (`generation_tile_nodes`), before
 // `tile_columns_main`: dispatch (tiles). Then `tile_halo_main`.
@@ -601,24 +699,34 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
             tile_top(tile.slot, min(i32(x) + 1, 63), i32(y), level),
             tile_top(tile.slot, i32(x), max(i32(y) - 1, 0), level),
             tile_top(tile.slot, i32(x), min(i32(y) + 1, 63), level));
-        // The materials' slope (`Planet::material_slope`): the gradient over
-        // 64 base cells (in the tile), so a terrace step is not a steep
-        // slope (dirt along every contour); 8 per base layer a base cell.
-        let n = max(32 >> level, 1);
-        let xa = min(i32(x) + n, 63);
-        let xb = max(i32(x) - n, 0);
-        let ya = min(i32(y) + n, 63);
-        let yb = max(i32(y) - n, 0);
-        let gx = f32(tile_top(tile.slot, xa, i32(y), level) - tile_top(tile.slot, xb, i32(y), level)) / f32(max(xa - xb, 1));
-        let gy = f32(tile_top(tile.slot, i32(x), ya, level) - tile_top(tile.slot, i32(x), yb, level)) / f32(max(ya - yb, 1));
-        let slope = i32(round(max(abs(gx), abs(gy)) * 8.0));
+        // The materials' slope: `Planet::material_slope` (one scale, level-4
+        // relief, whatever level draws it) below MATERIAL_SLOPE_LEVEL. A
+        // coarser column spans many base columns: the gradient over 64 base
+        // cells (in the tile; eighths of a cell per cell).
+        var slope = 0;
+        if level < MATERIAL_SLOPE_LEVEL {
+            slope = material_slope(tile, i, j);
+        } else {
+            let n = max(32 >> level, 1);
+            let xa = min(i32(x) + n, 63);
+            let xb = max(i32(x) - n, 0);
+            let ya = min(i32(y) + n, 63);
+            let yb = max(i32(y) - n, 0);
+            let gx = f32(tile_top(tile.slot, xa, i32(y), level) - tile_top(tile.slot, xb, i32(y), level)) / f32(max(xa - xb, 1));
+            let gy = f32(tile_top(tile.slot, i32(x), ya, level) - tile_top(tile.slot, i32(x), yb, level)) / f32(max(ya - yb, 1));
+            slope = i32(round(max(abs(gx), abs(gy)) * 8.0));
+        }
         // The terrain's own top (where its volume put it, under the height
         // field's at caves and overhangs) is surface; a top edits moved
         // lies as deep as it is under the terrain's.
         let natural_high = select(i32(firstLeadingBit(natural.x)), 32 + i32(firstLeadingBit(natural.y)), natural.y != 0u);
         let moved = natural.x == 0u && natural.y == 0u || natural_high != high;
         let depth = select(0, max(top - 1 - k, 0) << level, moved);
-        let ground = ground_material(p, u32(column.y), height, depth, slope, k << level);
+        // Each material at its own cell's volume point and with the
+        // surface word's byte, as `Planet::material` evaluates it.
+        let cell_half = 1 << level;
+        let surface_word = u32(column.y) & 0xffu;
+        let ground = ground_material(volume_point_half(p, (k << (level + 1u)) + cell_half), surface_word, height, depth, slope, k << level);
         let terrain_material = ground & M_ID;
         let surface = edited_material(terrain_material, job, wg.x, li, p, ch, level, k, k0);
         let speck = select(0u, 0x80u, (ground & M_SPECK) != 0u && surface == terrain_material);
@@ -627,9 +735,9 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
         var soil = surface;
         var rock = surface;
         if surface == terrain_material {
-            soil = ground_material(p, u32(column.y), height, 1 << level, slope, (top - 2) << level) & M_ID;
+            soil = ground_material(volume_point_half(p, ((top - 2) << (level + 1u)) + cell_half), surface_word, height, 1 << level, slope, (top - 2) << level) & M_ID;
             let deep = (terrain.header.z >> level) + 1;
-            rock = ground_material(p, u32(column.y), height, deep << level, slope, (top - 1 - deep) << level) & M_ID;
+            rock = ground_material(volume_point_half(p, ((top - 1 - deep) << (level + 1u)) + cell_half), surface_word, height, deep << level, slope, (top - 1 - deep) << level) & M_ID;
         }
         let lowest = min(top, min(min(t.x, t.y), min(t.z, t.w)));
         material = (surface & 0x7fu) | speck | ((soil & 0xffu) << 8u) | ((rock & 0xffu) << 16u) | (u32(clamp(lowest - k0 + 128, 0, 255)) << 24u);

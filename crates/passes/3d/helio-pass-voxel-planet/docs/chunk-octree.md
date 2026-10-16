@@ -307,8 +307,8 @@ Measured:
     (snow drawn as stone, dark stone as grass).
   - Drawn against the rule at the column's point (the leaf rule and the
     kernel's slope estimate together): 10.7 % of pixels, up to 22 % on
-    steep slopes and in pit walls. That much natural per-voxel leaves
-    would recover.
+    steep slopes and in pit walls.
+  - Fixed since: see [The material contract](#the-material-contract-2026-10-16).
 - Cost on natural ground (no detail pages), interleaved against the
   octree before it:
   - `mountain_slope` hold: primary rays 2.861 ms both (four rounds each).
@@ -317,14 +317,55 @@ Measured:
   - Cruise flight: chunk columns 5.6 to 5.5 us a chunk, chunk builds 2.8 to
     2.9, draw p50 3.79 to 3.80 ms; gate mean 1.00 to 1.03 %.
 
+### The material contract (2026-10-16)
+
+`Planet::material` is the canonical material of a base cell (picks, a dig's
+yield, gameplay). The generation kernel now evaluates `ground_material` with
+the same inputs for the cells it stands for:
+
+- **Point.** Each evaluation (a column's top cell, its soil and rock
+  samples) uses its cell's volume point, not the column's domain point.
+- **Slope.** `Planet::material_slope`: level-4 heights two cells each way,
+  block slopes interpolated in 32nds, one scale whatever level draws it.
+  For each computed footprint of levels 0 to 3, three dispatches evaluate
+  the level-4 heights its blocks read (10x10 at level 0, 38x38 at level
+  3): a ring of shared nodes for the macro octaves (3x3 to 5x5), the
+  heights 64 a workgroup, then the block slopes, kept with its columns in
+  the footprint pool (4.6 KB a slot).
+  A column of level L reads the base column at its centre. Coarser levels'
+  cells span many base columns and keep the gradient over 64 base cells in
+  their tile.
+- **Surface word.** Its byte, as the CPU masks it.
+
+Measured:
+
+- `uniform_leaves_draw_canonical_materials` (a gate): the top faces of
+  leaves whose 16 columns all top in them with one material draw
+  `Planet::material` exactly. 31710 pixels at three varied spots, none
+  wrong; 779 wrong with the kernel before.
+- The natural-cells report again, the same 906k pixels: 9.35 % wrong
+  (40.5 % before). By what decides the drawn material:
+  - Top faces of uniform leaves: 0 of 190908.
+  - Other cells under air (a leaf's surface vote over mixed columns, side
+    faces): 8.8 % of 627729.
+  - Cells under ground (pit walls: a leaf's one subsurface byte, by its
+    centre's depth): 33.5 % of 87379. The commonest: dirt drawn as dark
+    stone (soil a cell deep drawn as rock), gravel as stone.
+  That is the leaf rule alone, what natural per-voxel leaves would recover.
+- Cost, cruise flights interleaved against the commit before:
+  - Generation 19.8 to 20.5 us a chunk before, 22.4 to 22.8 after; the
+    footprint columns 11.5 to 11.7 before, 13.6 to 13.9 after (+2 us,
+    +10 % of generation).
+  - All of it is levels 1 to 3's lattices: with level 0's alone, 11.6.
+  - One workgroup a footprint, its lattice in workgroup memory, cost
+    15.8 us (a level-3 lattice is 23 heights a lane in series); spread
+    over workgroups, 13.6.
+  - `mountain_slope` hold: primary rays 2.866 to 2.863 ms (drawing is
+    unchanged).
+
 ### Next
 
-- The material contract: the kernel and `Planet::material` evaluate
-  `ground_material` at different points (and estimate slope differently),
-  so a pick, a dig's yield and the drawn colour disagree on 39 % of
-  mountain pixels. Choose one (the cell's volume point is the canonical)
-  and make the other match it bit for bit, then measure the leaf rule
-  alone.
-- Natural per-voxel materials in detail pages where leaves mix materials.
+- Natural per-voxel materials where leaves mix materials: dug walls (a
+  third of their pixels) first, then mixed surface leaves (9 %).
 - Occlusion-limited refinement where it pays (valleys, caves, cities).
 - A footprint's first computation: progressive (parent-seeded) synthesis.
